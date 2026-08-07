@@ -1,0 +1,18 @@
+[Unit]
+Description=kling - daemon de microVMs Firecracker
+Documentation=https://github.com/juan52878911/kindling
+After=network.target
+ConditionPathExists=/dev/kvm
+
+[Service]
+Type=simple
+# Necesita root: abre /dev/kvm, monta rootfs y lanza procesos firecracker.
+# KLING_SOCKET_USER cede el socket al usuario con el que entra el CLI por SSH,
+# para no tener que ejecutar todo el cliente con sudo.
+Environment=KLING_SOCKET_USER=juan
+ExecStart=/usr/local/bin/kling daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

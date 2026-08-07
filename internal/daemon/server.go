@@ -1,0 +1,260 @@
+// Package daemon expone el gestor de microVMs por HTTP sobre un socket Unix.
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/machine"
+)
+
+const Version = "0.1.0"
+
+type Server struct {
+	socket     string
+	bus        *events.Bus
+	mgr        *machine.Manager
+	root       string
+	fcBin      string
+	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
+}
+
+func New(socket, root, fcBin, socketUser string) (*Server, error) {
+	bus := events.New()
+	mgr, err := machine.NewManager(root, fcBin, bus)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser}, nil
+}
+
+func (s *Server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /info", s.handleInfo)
+	mux.HandleFunc("GET /machines", s.handleList)
+	mux.HandleFunc("POST /machines", s.handleRun)
+	mux.HandleFunc("GET /machines/{ref}", s.handleGet)
+	mux.HandleFunc("POST /machines/{ref}/freeze", s.handleFreeze)
+	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
+	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
+	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
+	mux.HandleFunc("GET /events", s.handleEvents)
+	return mux
+}
+
+// Listen sirve hasta que se cancele el contexto.
+func (s *Server) Listen(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(s.socket), 0o755); err != nil {
+		return err
+	}
+	// Un socket huérfano de una ejecución anterior impediría escuchar.
+	if err := os.Remove(s.socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	ln, err := net.Listen("unix", s.socket)
+	if err != nil {
+		return err
+	}
+	// 0660: el acceso al daemon equivale a root en este host.
+	if err := os.Chmod(s.socket, 0o660); err != nil {
+		return err
+	}
+	// El daemon necesita root por KVM, pero el CLI entra como usuario normal
+	// (por SSH, `kling dial-stdio`). Cedemos el socket a ese usuario en lugar de
+	// obligar a que todo el CLI vaya con sudo.
+	if uid, gid, ok := s.socketOwner(); ok {
+		if err := os.Chown(s.socket, uid, gid); err != nil {
+			log.Printf("aviso: no pude ceder el socket a uid %d: %v", uid, err)
+		} else {
+			log.Printf("socket cedido a uid %d gid %d", uid, gid)
+		}
+	}
+
+	srv := &http.Server{Handler: s.routes()}
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+		_ = os.Remove(s.socket)
+	}()
+
+	log.Printf("kling daemon %s escuchando en %s (root=%s)", Version, s.socket, s.root)
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// socketOwner resuelve a quién ceder el socket: al usuario indicado por
+// configuración o, si no lo hay, a quien haya invocado sudo.
+func (s *Server) socketOwner() (uid, gid int, ok bool) {
+	if s.socketUser != "" {
+		u, err := user.Lookup(s.socketUser)
+		if err != nil {
+			log.Printf("aviso: usuario %q desconocido: %v", s.socketUser, err)
+			return 0, 0, false
+		}
+		uid, _ = strconv.Atoi(u.Uid)
+		gid, _ = strconv.Atoi(u.Gid)
+		return uid, gid, uid != 0
+	}
+	u, err1 := strconv.Atoi(os.Getenv("SUDO_UID"))
+	g, err2 := strconv.Atoi(os.Getenv("SUDO_GID"))
+	if err1 != nil || err2 != nil || u == 0 {
+		return 0, 0, false
+	}
+	return u, g, true
+}
+
+// ── handlers ──────────────────────────────────────────────────────────────────
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func fail(w http.ResponseWriter, code int, err error) {
+	writeJSON(w, code, api.Error{Message: err.Error()})
+}
+
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	_, kvmErr := os.Stat("/dev/kvm")
+	info := api.Info{
+		Version:  Version,
+		Root:     s.root,
+		KVM:      kvmErr == nil,
+		Machines: s.mgr.Count(),
+	}
+	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
+		if line, _, _ := bytesCut(out, '\n'); len(line) > 0 {
+			info.Firecrack = string(line)
+		}
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func bytesCut(b []byte, sep byte) ([]byte, []byte, bool) {
+	for i, c := range b {
+		if c == sep {
+			return b[:i], b[i+1:], true
+		}
+	}
+	return b, nil, false
+}
+
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.mgr.List())
+}
+
+func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
+	mc, ok := s.mgr.Get(r.PathValue("ref"))
+	if !ok {
+		fail(w, http.StatusNotFound, errors.New("no existe esa máquina"))
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
+	var req api.RunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	mc, err := s.mgr.Run(r.Context(), req)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, mc)
+}
+
+func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
+	mc, err := s.mgr.Freeze(r.Context(), r.PathValue("ref"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
+	mc, err := s.mgr.Thaw(r.Context(), r.PathValue("ref"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	mc, err := s.mgr.Stop(r.PathValue("ref"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
+	if err := s.mgr.Remove(r.PathValue("ref")); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleEvents emite NDJSON: un evento por línea, vaciando el buffer en cada uno
+// para que el CLI los vea llegar en tiempo real.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		fail(w, http.StatusInternalServerError, errors.New("streaming no soportado"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ch, unsub := s.bus.Subscribe()
+	defer unsub()
+
+	enc := json.NewEncoder(w)
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			if enc.Encode(ev) != nil {
+				return
+			}
+			flusher.Flush()
+		case <-ping.C:
+			// Línea vacía como latido: detecta clientes muertos al otro lado del SSH.
+			if _, err := w.Write([]byte("\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}

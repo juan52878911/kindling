@@ -4,8 +4,72 @@ Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: co
 servidor MCP open source cualquiera y convertirlo automáticamente en un servicio que se
 levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
 
-> Estado: **fase 1 de 4**. El laboratorio arranca microVMs y el snapshot/restore está
-> medido y validado. El gateway todavía no existe.
+> Estado: **fase 2 de 5**. `kling` gestiona microVMs con interfaz tipo docker, local o
+> por SSH, con eventos en streaming. Falta la red y el gateway MCP.
+
+## kling
+
+```
+$ kling info
+endpoint:     ssh://juan@192.168.2.60
+daemon:       0.1.0
+KVM:          sí
+firecracker:  Firecracker v1.16.1
+
+$ kling run -name mcp-demo
+efad9e5f7003  mcp-demo  arrancada en frío en 54 ms
+
+$ kling freeze mcp-demo
+efad9e5f7003  warm  (754 ms, 256 MiB en disco)
+
+$ kling ps
+ID             NOMBRE     IMAGEN    ESTADO   CPU/MEM    EDAD   ÚLTIMA OP
+efad9e5f7003   mcp-demo   default   warm     1/256MiB   17s    freeze 754ms, 256MiB
+
+$ kling thaw mcp-demo
+efad9e5f7003  running  (22 ms)
+
+$ kling events
+23:52:20  machine.frozen   mcp-demo  congelada en 754 ms (256 MiB en disco)
+23:52:20  machine.thawed   mcp-demo  descongelada en 22 ms
+```
+
+El estado **`warm`** es lo que distingue a kindling de un runtime de contenedores: la
+máquina está congelada en disco, no consume CPU ni RAM, y despierta en decenas de
+milisegundos.
+
+### Conexión
+
+El mismo binario es CLI y daemon. `kling daemon` corre donde esté KVM; el CLI le habla
+por un socket Unix, local o a través de SSH:
+
+```sh
+export KLING_HOST=ssh://juan@192.168.2.60   # daemon remoto
+export KLING_HOST=/run/kling.sock           # daemon local
+```
+
+**El daemon nunca escucha en un puerto de red.** Controlar microVMs equivale a root en su
+host: puede montar discos y arrancar kernels arbitrarios. Exponerlo por TCP sería repetir
+el error que ha costado a Docker una década de servidores comprometidos. Para remoto se usa
+SSH con la misma técnica que `docker context`: en vez de exigir socat o nc en el destino,
+se invoca `kling dial-stdio`, que puentea la tubería SSH con el socket local.
+
+### Instalación
+
+```sh
+go build -o kling ./cmd/kling                                  # CLI para tu máquina
+GOOS=linux GOARCH=amd64 go build -o kling-linux ./cmd/kling    # daemon para el host KVM
+```
+
+En el host con KVM, tras copiar el binario a `/usr/local/bin/kling`:
+
+```sh
+sudo install -m644 packaging/kling.service /etc/systemd/system/
+sudo systemctl enable --now kling
+```
+
+`KLING_SOCKET_USER` en el unit cede el socket al usuario con el que entra el CLI por SSH,
+para no tener que ejecutar todo el cliente con sudo.
 
 ## Por qué microVMs y no contenedores
 
@@ -84,6 +148,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 ## Hoja de ruta
 
 - [x] **Fase 1** — Laboratorio: microVM que arranca, snapshot/restore medido
+- [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH
 - [ ] **Fase 2** — Red por TAP, y resolver que el estado de red no sobrevive al snapshot
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
 - [ ] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger

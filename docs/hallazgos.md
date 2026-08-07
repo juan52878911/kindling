@@ -68,3 +68,16 @@ echo FC_READY
 ```
 
 y arranca con `init=/fcinit.sh`.
+
+## Los 54 ms de `kling run` no son lo mismo que los 2.6 s del benchmark
+
+`kling run` reporta ~54 ms, pero eso es tiempo de **plano de control**: configurar la
+microVM por la API y aceptar `InstanceStart`. Firecracker devuelve en cuanto arranca la
+vCPU, y el invitado sigue booteando de forma asíncrona.
+
+Los 2.643 ms del benchmark miden otra cosa: hasta que el userspace del invitado está listo.
+
+Son dos métricas distintas y no hay que confundirlas. Para el gateway MCP la que importa es
+la segunda, porque una herramienta no sirve hasta que su proceso escucha. Es otra razón
+para que el flujo real sea arrancar una vez, congelar con el servidor ya escuchando, y
+restaurar: el `thaw` sí devuelve una máquina inmediatamente utilizable.
