@@ -1,0 +1,18 @@
+# Artefactos de microVM: pesados y reproducibles con scripts/30-fetch-artifacts.sh
+*.squashfs
+*.ext4
+vmlinux*
+bzImage*
+initramfs*
+
+# Snapshots (el fichero de memoria pesa lo que la RAM asignada)
+snap.file
+mem.file
+*.snap
+
+# Sockets y config generada
+*.sock
+bench-*.json
+
+# Sistema
+.DS_Store
