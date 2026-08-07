@@ -171,16 +171,38 @@ func cmdPS(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNOMBRE\tIMAGEN\tESTADO\tCPU/MEM\tEDAD\tÚLTIMA OP")
+	fmt.Fprintln(tw, "ID\tNOMBRE\tIMAGEN\tESTADO\tCPU/MEM\tDISCO\tEDAD\tÚLTIMA OP")
+	var totalDisk int64
 	for _, mc := range list {
 		if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
 			continue
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\n",
+		totalDisk += mc.DiskBytes
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\n",
 			mc.ID[:12], mc.Name, mc.Image, mc.State,
-			mc.VCPUs, mc.MemMiB, since(mc.CreatedAt), lastOp(mc))
+			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), since(mc.CreatedAt), lastOp(mc))
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if totalDisk > 0 {
+		fmt.Printf("\ndisco propio de las máquinas: %s (la imagen base se comparte)\n", human(totalDisk))
+	}
+	return nil
+}
+
+// human formatea bytes de forma compacta.
+func human(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1fG", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%dM", b>>20)
+	case b >= 1<<10:
+		return fmt.Sprintf("%dK", b>>10)
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
 }
 
 // lastOp resume el coste de la última transición: es el número que justifica

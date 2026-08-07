@@ -30,6 +30,11 @@ type Machine struct {
 	LastErr  string `json:"last_error,omitempty"`
 	SnapSize int64  `json:"snapshot_bytes,omitempty"`
 
+	// DiskBytes es la ocupación REAL en disco de esta máquina: bloques asignados,
+	// no tamaño lógico. Con overlays dispersos la diferencia es de dos órdenes de
+	// magnitud, así que el tamaño lógico no dice nada útil.
+	DiskBytes int64 `json:"disk_bytes,omitempty"`
+
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	FrozenAt  *time.Time `json:"frozen_at,omitempty"`

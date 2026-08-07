@@ -20,7 +20,15 @@ import (
 	"github.com/juan52878911/kindling/internal/fc"
 )
 
-const bootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+// La raíz se monta en SOLO LECTURA y el init es overlay-init, que superpone el
+// disco propio de cada máquina (/dev/vdb) sobre la imagen base compartida
+// (/dev/vda). Así N microVMs comparten una base de cientos de MB en vez de
+// copiarla N veces.
+const bootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init"
+
+// defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
+// disperso, el coste real en disco es solo lo que la microVM llegue a escribir.
+const defaultOverlayMiB = 512
 
 // Manager gestiona todas las microVMs del daemon.
 type Manager struct {
@@ -104,10 +112,29 @@ func (m *Manager) List() []*api.Machine {
 	out := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		c := *mc
+		c.DiskBytes = diskUsage(m.dir(mc.ID))
 		out = append(out, &c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// diskUsage suma bloques asignados, no tamaños lógicos: es la única cifra
+// honesta cuando los ficheros son dispersos.
+func diskUsage(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				total += st.Blocks * 512
+			}
+		}
+		return nil
+	})
+	return total
 }
 
 // Get resuelve por ID completo, prefijo de ID o nombre, como hace docker.
@@ -170,12 +197,12 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, err
 	}
 
-	// Sin capas: cada microVM necesita su propio rootfs escribible. --reflink=auto
-	// usa copia-al-escribir si el filesystem la soporta, y copia entera si no.
-	rootfs := filepath.Join(dir, "rootfs.ext4")
-	if out, err := exec.CommandContext(ctx, "cp", "--reflink=auto", src, rootfs).CombinedOutput(); err != nil {
+	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
+	// esta microVM es su overlay escribible, que nace prácticamente vacío.
+	overlay := filepath.Join(dir, "overlay.ext4")
+	if err := createOverlay(ctx, overlay, defaultOverlayMiB); err != nil {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("copiando rootfs: %v: %s", err, out)
+		return nil, err
 	}
 
 	mc := &api.Machine{
@@ -189,7 +216,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
 	start := time.Now()
-	if err := m.boot(ctx, mc, rootfs); err != nil {
+	if err := m.boot(ctx, mc, src, overlay); err != nil {
 		m.fail(mc, err)
 		return nil, err
 	}
@@ -207,8 +234,33 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	return &out, nil
 }
 
+// createOverlay crea el disco escribible de una microVM: un fichero disperso con
+// ext4 encima. Sin journal a propósito — es almacenamiento efímero y el journal
+// costaría varios MB de suelo en cada máquina sin aportar nada aquí.
+func createOverlay(ctx context.Context, path string, sizeMiB int) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(int64(sizeMiB) << 20); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+
+	// -E nodiscard evita que mke2fs escriba ceros y destruya la dispersión.
+	out, err := exec.CommandContext(ctx, "mkfs.ext4",
+		"-q", "-F", "-O", "^has_journal", "-E", "nodiscard", path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("formateando el overlay: %v: %s", err, out)
+	}
+	return nil
+}
+
 // boot lanza el proceso firecracker y configura la microVM por su API.
-func (m *Manager) boot(ctx context.Context, mc *api.Machine, rootfs string) error {
+//
+// Dos discos: la imagen base compartida en solo lectura y el overlay propio.
+func (m *Manager) boot(ctx context.Context, mc *api.Machine, base, overlay string) error {
 	sock := filepath.Join(m.dir(mc.ID), "fc.sock")
 	_ = os.Remove(sock)
 
@@ -225,7 +277,16 @@ func (m *Manager) boot(ctx context.Context, mc *api.Machine, rootfs string) erro
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs}); err != nil {
 		return err
 	}
-	if err := c.SetDrive(ctx, fc.Drive{DriveID: "rootfs", PathOnHost: rootfs, IsRootDevice: true}); err != nil {
+	// vda: base compartida. is_read_only es lo que hace segura la compartición.
+	if err := c.SetDrive(ctx, fc.Drive{
+		DriveID: "rootfs", PathOnHost: base, IsRootDevice: true, IsReadOnly: true,
+	}); err != nil {
+		return err
+	}
+	// vdb: capa escribible propia de esta microVM.
+	if err := c.SetDrive(ctx, fc.Drive{
+		DriveID: "overlay", PathOnHost: overlay, IsRootDevice: false, IsReadOnly: false,
+	}); err != nil {
 		return err
 	}
 	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: mc.VCPUs, MemSizeMiB: mc.MemMiB}); err != nil {

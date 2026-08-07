@@ -105,9 +105,23 @@ sostiene todo lo demás.
 
 ## Coste en disco
 
-Un snapshot son ~14 KB de estado más **un fichero de memoria del tamaño de la RAM asignada**.
-Diez herramientas a 256 MB son 2.5 GB en reposo. Se controla bajando la RAM por microVM y,
-más adelante, usando el backend UFFD en lugar de File para carga perezosa.
+La imagen base **no se copia**: se monta en solo lectura y la comparten todas las microVMs.
+Cada máquina solo tiene un overlay disperso propio, montado con overlayfs por
+`/sbin/overlay-init` dentro del invitado.
+
+| | |
+|---|---|
+| Imagen base, compartida | 386 MB, una sola vez |
+| Por máquina en marcha | **~8.5 MB** |
+| Por máquina en `warm` | +256 MB (el fichero de memoria del snapshot) |
+
+Antes de los overlays cada máquina copiaba los 800 MB enteros: tres máquinas costaban
+2.4 GB, ahora cuestan 386 MB + 25 MB.
+
+**El cuello de botella se ha movido:** ahora lo caro es el snapshot de memoria, que pesa
+tanto como la RAM asignada. Diez herramientas congeladas a 256 MB son 2.5 GB. Se ataca
+bajando la RAM por microVM y, más adelante, con el backend UFFD en lugar de File para
+carga perezosa.
 
 ## Arquitectura
 
@@ -144,6 +158,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 | `scripts/20-install-firecracker.sh` | Instala Firecracker y jailer desde la última release |
 | `scripts/30-fetch-artifacts.sh` | Descubre y descarga kernel + rootfs del CI |
 | `scripts/40-bench-boot.sh` | Mide arranque en frío, snapshot y restauración |
+| `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
 
 ## Hoja de ruta
 

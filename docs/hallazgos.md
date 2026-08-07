@@ -81,3 +81,31 @@ Son dos métricas distintas y no hay que confundirlas. Para el gateway MCP la qu
 la segunda, porque una herramienta no sirve hasta que su proceso escucha. Es otra razón
 para que el flujo real sea arrancar una vez, congelar con el servidor ya escuchando, y
 restaurar: el `thaw` sí devuelve una máquina inmediatamente utilizable.
+
+## El overlay: de 800 MB a 8.5 MB por máquina
+
+Firecracker no tiene capas como Docker, pero el kernel del CI trae `CONFIG_OVERLAY_FS=y`,
+así que la solución está dentro del invitado, no en el host:
+
+- `/dev/vda` = imagen base, **`is_read_only: true`**, compartida por todas las microVMs
+- `/dev/vdb` = overlay disperso propio de cada máquina
+- `init=/sbin/overlay-init` monta el overlayfs y hace `pivot_root` antes de ceder a systemd
+
+Detalles que importan al crear el overlay:
+
+- `-E nodiscard` en `mkfs.ext4`, o mke2fs escribe ceros y destruye la dispersión.
+- `-O ^has_journal`: el journal cuesta varios MB de suelo en **cada** máquina y no aporta
+  nada en almacenamiento efímero.
+
+Medido con tres máquinas en marcha: base compartida de 386 MB y 8.5 MB por máquina, frente
+a 800 MB por máquina antes.
+
+**El coste se movió, no desapareció.** Ahora lo caro es el fichero de memoria del snapshot,
+que pesa lo mismo que la RAM asignada (256 MB por máquina warm). Ese es el siguiente
+objetivo, y la vía es el backend UFFD en lugar de File.
+
+## `du` miente con ficheros dispersos
+
+`ls -lh` da el tamaño lógico; con overlays dispersos la diferencia con lo realmente
+asignado es de dos órdenes de magnitud. `kling ps` suma `st_blocks * 512`, que es la única
+cifra honesta.
