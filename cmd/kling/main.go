@@ -9,8 +9,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -18,6 +22,8 @@ import (
 
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/daemon"
+	"github.com/juan52878911/kindling/internal/gateway"
+	"github.com/juan52878911/kindling/internal/report"
 	"github.com/juan52878911/kindling/internal/transport"
 )
 
@@ -30,6 +36,7 @@ MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
       [-egress none|internet]                      salida de red (por defecto: none)
       [-ttl SEGUNDOS] [-cpu PCT]                   congelado automático y techo de CPU
+      [-service NOMBRE] [-label k=v]               agrupación por servicio MCP
   ps [-a]                                          lista las máquinas
   logs <ref> [-tail N]                             consola serie de la microVM
   freeze <ref>                                     congela en snapshot -> warm
@@ -46,8 +53,14 @@ SNAPSHOTS DORADOS
 
 OBSERVACIÓN
   topo                                             diagrama ASCII de todo
+  export [-o fichero.html]                         informe HTML autocontenido
   events                                           stream de eventos del daemon
   info                                             estado del daemon
+
+GATEWAY
+  gateway [-listen ADDR] [-idle DUR]               enruta llamadas MCP a microVMs
+                                                   bajo demanda y las congela al
+                                                   quedar ociosas
 
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  arranca el núcleo
@@ -72,6 +85,8 @@ func main() {
 	switch cmd {
 	case "daemon":
 		err = cmdDaemon(args)
+	case "gateway":
+		err = cmdGateway(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
 	case "run":
@@ -90,6 +105,8 @@ func main() {
 		err = cmdRmi(args)
 	case "topo":
 		err = cmdTopo(args)
+	case "export":
+		err = cmdExport(args)
 	case "events":
 		err = cmdEvents(args)
 	case "info":
@@ -146,6 +163,42 @@ func cmdDaemon(args []string) error {
 	return srv.Listen(ctx)
 }
 
+func cmdGateway(args []string) error {
+	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
+	host := hostFlag(fs)
+	listen := fs.String("listen", envOr("KLING_GATEWAY_LISTEN", "127.0.0.1:8080"), "dirección donde escuchar")
+	idle := fs.Duration("idle", 5*time.Minute, "tiempo sin peticiones antes de congelar una herramienta")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	c := api.NewClient(*host)
+	if _, err := c.Info(ctx); err != nil {
+		return fmt.Errorf("no alcanzo el daemon: %w", err)
+	}
+
+	gw := gateway.New(c, *idle)
+	go gw.Reap(ctx)
+
+	srv := &http.Server{Addr: *listen, Handler: gw.Handler()}
+	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
+
+	// El gateway escucha en red; el daemon no. Por defecto solo en loopback:
+	// abrirlo al mundo debe ser una decisión consciente.
+	fmt.Printf("gateway en http://%s\n", *listen)
+	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
+	fmt.Printf("  inventario:   http://%s/services\n", *listen)
+	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
 // ── máquinas ──────────────────────────────────────────────────────────────────
 
 func cmdRun(args []string) error {
@@ -159,6 +212,9 @@ func cmdRun(args []string) error {
 	egress := fs.String("egress", "none", "salida de red: none | internet (nunca alcanza redes privadas)")
 	ttl := fs.Int("ttl", 0, "segundos hasta congelarse sola (0 = nunca)")
 	cpu := fs.Int("cpu", 0, "techo de CPU en porcentaje de un core (0 = por defecto)")
+	service := fs.String("service", "", "servicio MCP al que pertenece (agrupa en topo y export)")
+	var labels labelFlag
+	fs.Var(&labels, "label", "etiqueta clave=valor (repetible)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -169,6 +225,7 @@ func cmdRun(args []string) error {
 	mc, err := api.NewClient(*host).Run(ctx, api.RunRequest{
 		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
 		Egress: *egress, TTLSeconds: *ttl, CPUPct: *cpu,
+		Labels: labels.merge(*service),
 	})
 	if err != nil {
 		return err
@@ -179,6 +236,87 @@ func cmdRun(args []string) error {
 		fmt.Printf("%s  %s  arrancada en frío en %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
 	}
 	return nil
+}
+
+// labelFlag acumula -label k=v repetidos.
+type labelFlag map[string]string
+
+func (l *labelFlag) String() string { return "" }
+
+func (l *labelFlag) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	if !ok || k == "" {
+		return fmt.Errorf("etiqueta inválida %q: usa clave=valor", v)
+	}
+	if *l == nil {
+		*l = labelFlag{}
+	}
+	(*l)[k] = val
+	return nil
+}
+
+// merge añade -service como la etiqueta convencional "service".
+func (l labelFlag) merge(service string) map[string]string {
+	if service == "" && len(l) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range l {
+		out[k] = v
+	}
+	if service != "" {
+		out[api.LabelService] = service
+	}
+	return out
+}
+
+func cmdExport(args []string) error {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	host := hostFlag(fs)
+	out := fs.String("o", "kindling.html", "fichero de salida")
+	open := fs.Bool("open", false, "abrirlo al terminar")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	c := api.NewClient(*host)
+	info, err := c.Info(ctx)
+	if err != nil {
+		return err
+	}
+	machines, err := c.List(ctx)
+	if err != nil {
+		return err
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+
+	// El HTML se construye aquí, en la máquina del CLI: el fichero acaba donde
+	// trabajas aunque el daemon esté al otro lado de un SSH.
+	doc := report.Render(info, report.Build(machines, snaps), c.Endpoint(), time.Now())
+	if err := os.WriteFile(*out, []byte(doc), 0o644); err != nil {
+		return err
+	}
+	abs, _ := filepath.Abs(*out)
+	fmt.Printf("%s  (%d máquinas, %d snapshots, %.0f KB)\n",
+		abs, len(machines), len(snaps), float64(len(doc))/1024)
+
+	if *open {
+		_ = exec.Command(openCmd(), abs).Start()
+	}
+	return nil
+}
+
+func openCmd() string {
+	if runtime.GOOS == "darwin" {
+		return "open"
+	}
+	return "xdg-open"
 }
 
 func cmdLogs(args []string) error {

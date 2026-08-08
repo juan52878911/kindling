@@ -51,6 +51,11 @@ type Machine struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 
+	// Labels agrupa máquinas. La clave "service" es convencional: identifica de
+	// qué servidor MCP es instancia esta microVM, y es por donde agrupan tanto
+	// `topo` como el HTML exportado.
+	Labels map[string]string `json:"labels,omitempty"`
+
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`
@@ -79,6 +84,8 @@ type RunRequest struct {
 
 	// CPUPct acota el uso de CPU (100 = un core completo).
 	CPUPct int `json:"cpu_pct,omitempty"`
+
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // Snapshot es una microVM congelada y reutilizable: el artefacto del que se
@@ -96,6 +103,10 @@ type Snapshot struct {
 	MemBytes  int64     `json:"mem_bytes"`  // ocupación real del fichero de memoria
 	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
 	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
+
+	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
+	// las reciben salvo que se sobrescriban.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // CommitRequest congela una máquina en marcha como snapshot reutilizable.

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Servidor MCP de ejemplo: sirve una respuesta JSON-RPC fija en :8080, que es
+# donde el gateway busca la herramienta.
+#
+# httpd viene del paquete busybox-extras: el busybox del minirootfs de Alpine NO
+# lo trae compilado, así que no basta con invocarlo por ruta.
+exec httpd -f -p 8080 -h /www

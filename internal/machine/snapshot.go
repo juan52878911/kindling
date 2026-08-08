@@ -99,7 +99,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
-		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB,
+		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
 	}
@@ -236,6 +236,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
+		// Las etiquetas del snapshot se heredan; las de la petición mandan.
+		Labels:    api.MergeLabels(snap.Labels, req.Labels),
 		CreatedAt: time.Now(),
 	}
 	m.mu.Lock()

@@ -320,3 +320,29 @@ recoge el barrido periódico.
 Comprobando si `stop` liberaba el namespace medí "1 antes, 1 después" y lo di por roto. En
 realidad la máquina que paré ya había liberado el suyo al fallar en el paso anterior, y el
 que contaba era el de otra máquina que seguía viva. El arreglo era correcto; el test, no.
+
+## Alpine no trae httpd en su busybox
+
+`/usr/sbin/httpd` no existe en el minirootfs, y tampoco basta con invocar `/bin/busybox
+httpd`: el applet **no está compilado**. Da `httpd: applet not found`, el init muere y el
+kernel entra en pánico con `Attempted to kill init!`.
+
+La solución es `apk add busybox-extras`. Vale como recordatorio general: en una microVM el
+`entrypoint` es PID 1, así que cualquier fallo suyo no es un error de arranque de un
+servicio, es un pánico del kernel.
+
+## El gateway debe esperar a que la herramienta escuche
+
+Que la microVM esté `running` no significa que el servidor MCP tenga el puerto abierto. Sin
+un sondeo de disponibilidad, la primera petición se come un "connection refused" que el
+cliente MCP interpreta como que la herramienta no existe.
+
+`waitReady` sondea el puerto hasta que acepta conexiones. Tras un thaw es casi instantáneo;
+en frío da margen al arranque del invitado.
+
+## Tras descongelar, la red tarda más que la CPU
+
+El `thaw` mide 29 ms, pero la primera petición HTTP tras despertar tarda ~218 ms. La
+diferencia no es la microVM: es el estado de red que no sobrevive al snapshot —el TAP se
+recrea y hay que rehacer ARP—. Sigue siendo aceptable, pero explica por qué el número de
+`thaw` y el de latencia de extremo a extremo no coinciden.

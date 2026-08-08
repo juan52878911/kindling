@@ -4,8 +4,9 @@ Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: co
 servidor MCP open source cualquiera y convertirlo automáticamente en un servicio que se
 levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
 
-> Estado: **fase 3 de 5**. `kling` gestiona microVMs con interfaz tipo docker, con red,
-> snapshots dorados, aislamiento y eventos en streaming. Falta el gateway MCP.
+> Estado: **fase 4 de 5**. `kling` gestiona microVMs con interfaz tipo docker, con red,
+> snapshots dorados, aislamiento, eventos y **gateway MCP funcionando**. Falta la conversión
+> automática de servidores MCP existentes.
 
 **El invitado se considera hostil**: no se sabe qué servidor MCP se va a alojar. Ver
 [SECURITY.md](SECURITY.md) para el modelo de amenaza, las barreras y —sobre todo— lo que
@@ -224,7 +225,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 2.5** — Endurecimiento: privilegios bajados, salida filtrada, límites de caudal
 - [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y vigilancia
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
-- [ ] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger
+- [x] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger por inactividad
 - [ ] **Fase 5** — Conversión automática de un MCP open source a microVM
 
 ## Notas de campo
@@ -341,4 +342,53 @@ RAM añadida:          113 MiB   (14 MiB por instancia)
 conectividad:         9/9
 VMM sin privilegios:  9/9
 cgroups activos:      9
+```
+
+## Gateway MCP
+
+Enruta llamadas a herramientas y las despierta bajo demanda. Corre **aparte del daemon**, a
+propósito: el daemon nunca escucha en red porque controlarlo equivale a root en su host. El
+gateway sí escucha, pero solo sabe despertar instancias de snapshots que ya existen.
+
+```sh
+kling gateway -listen 127.0.0.1:8080 -idle 5m
+curl http://127.0.0.1:8080/mcp/echo/       # la herramienta aparece sola
+curl http://127.0.0.1:8080/services        # inventario y qué está caliente
+```
+
+Medido de extremo a extremo con un servidor MCP real dentro de la microVM:
+
+| Camino | Latencia |
+|---|---|
+| En frío (instanciar del snapshot dorado) | **244 ms** |
+| Caliente | **9 ms** |
+| Tras congelarse por inactividad | **218 ms** (29 ms de thaw + red del invitado) |
+
+Al agotarse el tiempo de inactividad la herramienta **se congela, no se mata**: deja de
+costar CPU y RAM, y la siguiente llamada la trae de vuelta en milisegundos.
+
+### Envolver un servidor MCP
+
+```sh
+sudo ./scripts/80-mcp-image.sh mi-tool ./mi-servidor "nodejs npm"
+kling run -name tmpl -image mi-tool -service mi-tool
+kling commit tmpl mi-tool && kling stop tmpl
+```
+
+El directorio necesita un `entrypoint` ejecutable que escuche en el puerto 8080. Ver
+[examples/echo](examples/echo).
+
+## Informe HTML
+
+```sh
+kling export -o topologia.html      # se genera en TU máquina, no en el daemon
+```
+
+Autocontenido: sin CDN, sin fuentes remotas, sin peticiones al abrirlo — describe la
+topología de un homelab y no tiene por qué contársela a nadie. Agrupa por la etiqueta
+`service`, y en su defecto por el snapshot de origen, porque dos máquinas del mismo snapshot
+comparten memoria y pertenecen juntas aunque nadie las haya etiquetado.
+
+```sh
+kling run -from echo -service echo -label tier=prod
 ```

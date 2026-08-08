@@ -282,7 +282,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: time.Now(),
-		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
+		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
