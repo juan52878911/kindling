@@ -79,13 +79,15 @@ daemon:
 
 ## deploy — instala el daemon por SSH y lo reinicia
 deploy: daemon
+	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-amd64 $(TARGET):/tmp/$(BIN)
 	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
-		sudo systemctl daemon-reload && sudo systemctl enable --now $(BIN) && \
+		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
+		sudo systemctl restart $(BIN) && sudo systemctl try-restart $(BIN)-gateway && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
 
