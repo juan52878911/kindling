@@ -69,6 +69,11 @@ type Gateway struct {
 	routes    map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
 	agg       *aggregator              // endpoint virtual que reúne a todos
 	pool      *pool                    // instancias pre-calentadas por servicio
+
+	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
+	linkMu    sync.RWMutex
+	linkCache []*api.Link
+	linkAt    time.Time
 }
 
 type entry struct {
@@ -491,4 +496,35 @@ func newSessionID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// links devuelve los servidores externos registrados, cacheados brevemente: el
+// agregador los consulta en cada resolución de servicio.
+func (g *Gateway) links(ctx context.Context) []*api.Link {
+	g.linkMu.RLock()
+	if time.Since(g.linkAt) < 30*time.Second {
+		out := g.linkCache
+		g.linkMu.RUnlock()
+		return out
+	}
+	g.linkMu.RUnlock()
+
+	ls, err := g.client.Links(ctx)
+	if err != nil {
+		return nil
+	}
+	g.linkMu.Lock()
+	g.linkCache, g.linkAt = ls, time.Now()
+	g.linkMu.Unlock()
+	return ls
+}
+
+// linkFor busca el enlace que sirve a un servicio, o nil si lo sirve una microVM.
+func (g *Gateway) linkFor(ctx context.Context, service string) *api.Link {
+	for _, l := range g.links(ctx) {
+		if l.Service() == service || l.Name == service {
+			return l
+		}
+	}
+	return nil
 }

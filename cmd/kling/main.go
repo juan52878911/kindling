@@ -52,6 +52,10 @@ SERVICIOS MCP
                                                    guarda su catálogo
   mcp list [-v]                                    servicios y sus herramientas
   mcp refresh <servicio>                           vuelve a capturar el catálogo
+  mcp link <nombre> <url>                          enlaza un servidor MCP EXTERNO
+                                                   (p. ej. tu engram) sin meterlo
+                                                   en una microVM
+  mcp unlink <nombre>                              lo desenlaza
 
 SNAPSHOTS DORADOS
   commit <ref> <nombre>                            congela una máquina como
@@ -62,7 +66,7 @@ SNAPSHOTS DORADOS
 
 OBSERVACIÓN
   topo                                             diagrama ASCII de todo
-  export [-o fichero.html]                         informe HTML autocontenido
+  export [-o fichero.html] [-detail]               informe HTML autocontenido
   events                                           stream de eventos del daemon
   info                                             estado del daemon
 
@@ -369,6 +373,7 @@ func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	host := hostFlag(fs)
 	out := fs.String("o", "kindling.html", "fichero de salida")
+	detail := fs.Bool("detail", false, "añade por servicio: qué lo detona, si puede ejecutarse, a qué MCP pertenece y qué comparte")
 	open := fs.Bool("open", false, "abrirlo al terminar")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -393,7 +398,9 @@ func cmdExport(args []string) error {
 
 	// El HTML se construye aquí, en la máquina del CLI: el fichero acaba donde
 	// trabajas aunque el daemon esté al otro lado de un SSH.
-	doc := report.Render(info, report.Build(machines, snaps), c.Endpoint(), time.Now())
+	links, _ := c.Links(ctx) // un daemon antiguo puede no tenerlos: no es fatal
+	doc := report.RenderDetail(info, report.BuildWith(machines, snaps, links),
+		c.Endpoint(), time.Now(), *detail)
 	if err := os.WriteFile(*out, []byte(doc), 0o644); err != nil {
 		return err
 	}

@@ -20,7 +20,7 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 # activo, para no repetirlo en cada despliegue.
 HOST ?= $(shell $(BIN) config show 2>/dev/null | awk '/^contexto:/{print $$2}')
 
-.PHONY: all build install uninstall daemon bridge deploy test clean fmt
+.PHONY: all build install uninstall daemon bridge bridge-local deploy test clean fmt
 
 all: build
 
@@ -50,6 +50,19 @@ bridge:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 		-ldflags "$(LDFLAGS)" -o kling-bridge ./cmd/kling-bridge
 	@echo "kling-bridge  ($(VERSION))"
+
+## bridge-local — el mismo puente, para TU máquina.
+##
+## Sirve para exponer por HTTP un servidor MCP de stdio que ya tengas instalado
+## (engram, obsidian, lo que sea) y enlazarlo con `kling mcp link`, sin meterlo
+## en una microVM.
+bridge-local:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o kling-bridge-local ./cmd/kling-bridge
+	@echo "kling-bridge-local  ($(VERSION))"
+	@echo
+	@echo "Expón un MCP de stdio que tengas en local:"
+	@echo "  ./kling-bridge-local -listen 0.0.0.0:9100 -- engram mcp --tools=agent"
+	@echo "  kling mcp link engram http://<tu-ip>:9100/mcp"
 
 ## daemon — compila el binario del host con KVM (siempre linux/amd64)
 daemon:

@@ -44,19 +44,31 @@ func newCatalog(gw *Gateway, ttl time.Duration) *catalog {
 	}
 }
 
-// services devuelve los nombres de servicio disponibles, de los snapshots.
+// services devuelve los servicios disponibles: microVMs y servidores externos.
 func (c *catalog) services(ctx context.Context) ([]string, error) {
 	snaps, err := c.gw.client.Snapshots(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(snaps))
+	seen := map[string]bool{}
+	var out []string
 	for _, s := range snaps {
 		n := s.Name
 		if svc := s.Service(); svc != "" {
 			n = svc
 		}
-		out = append(out, n)
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	// Los servidores externos enlazados son servicios de pleno derecho: el
+	// modelo no tiene por qué saber cuáles corren en microVM y cuáles no.
+	for _, l := range c.gw.links(ctx) {
+		if n := l.Service(); !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
 	}
 	sort.Strings(out)
 	return out, nil
@@ -79,6 +91,23 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 		return t, nil
 	}
 	c.mu.Unlock()
+
+	if l := c.gw.linkFor(ctx, service); l != nil {
+		out := make([]Tool, 0, len(l.Tools))
+		for _, t := range l.Tools {
+			out = append(out, Tool{
+				Service: service, Name: t.Name,
+				Qualified:   service + "." + t.Name,
+				Description: t.Description,
+				Schema:      t.InputSchema,
+			})
+		}
+		c.mu.Lock()
+		c.tools[service] = out
+		c.fetched[service] = time.Now()
+		c.mu.Unlock()
+		return out, nil
+	}
 
 	if tools, ok := c.fromSnapshot(ctx, service); ok {
 		c.mu.Lock()
@@ -226,7 +255,13 @@ var rpcSeq atomic.Int64
 func nextRPCID() int64 { return rpcSeq.Add(1) }
 
 func mcpPost(ctx context.Context, base, sid, body string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/mcp", strings.NewReader(body))
+	return mcpPostAt(ctx, base+"/mcp", sid, body)
+}
+
+// mcpPostAt habla con una URL completa. Los enlaces externos la traen entera y
+// no hay por qué suponerles la ruta /mcp.
+func mcpPostAt(ctx context.Context, url, sid, body string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +273,11 @@ func mcpPost(ctx context.Context, base, sid, body string) (*http.Response, error
 }
 
 func mcpInit(ctx context.Context, base string) (string, error) {
-	resp, err := mcpPost(ctx, base, "",
+	return mcpInitAt(ctx, base+"/mcp")
+}
+
+func mcpInitAt(ctx context.Context, url string) (string, error) {
+	resp, err := mcpPostAt(ctx, url, "",
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling-gateway","version":"1"}}}`)
 	if err != nil {
 		return "", err
@@ -251,7 +290,11 @@ func mcpInit(ctx context.Context, base string) (string, error) {
 }
 
 func mcpCall(ctx context.Context, base, sid, body string) (json.RawMessage, error) {
-	resp, err := mcpPost(ctx, base, sid, body)
+	return mcpCallAt(ctx, base+"/mcp", sid, body)
+}
+
+func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, error) {
+	resp, err := mcpPostAt(ctx, url, sid, body)
 	if err != nil {
 		return nil, err
 	}

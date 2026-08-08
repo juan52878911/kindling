@@ -33,8 +33,12 @@ func cmdMCP(args []string) error {
 		return mcpList(rest)
 	case "refresh":
 		return mcpRefresh(rest)
+	case "link":
+		return mcpLink(rest)
+	case "unlink":
+		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa import, list o refresh", sub)
+		return fmt.Errorf("subcomando desconocido %q: usa import, list, refresh, link o unlink", sub)
 	}
 }
 
@@ -230,7 +234,14 @@ func mcpList(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Printf("\n%d herramienta(s) en %d servicio(s).\n", total, len(snaps))
+	links, _ := api.NewClient(hostOf(*host)).Links(ctx)
+	for _, l := range links {
+		total += len(l.Tools)
+		fmt.Printf("%-12s %-14d %-11s %-9s externo: %s\n",
+			l.Service(), len(l.Tools), since(l.CreatedAt)+" atrás", "—", l.URL)
+	}
+	fmt.Printf("\n%d herramienta(s) en %d servicio(s) (%d microVM, %d externo(s)).\n",
+		total, len(snaps)+len(links), len(snaps), len(links))
 
 	if *verbose {
 		for _, s := range snaps {
@@ -295,6 +306,88 @@ func mcpRefresh(args []string) error {
 	return nil
 }
 
+// mcpLink registra un servidor MCP EXTERNO en el agregador.
+//
+// No corre en una microVM: sigue viviendo donde su dueño lo tenga. Es la vía para
+// traer capacidades que no tiene sentido meter en una máquina efímera —memoria,
+// sobre todo—: un sitio donde todas las herramientas puedan guardar y leer, sin
+// que kindling implemente almacenamiento.
+func mcpLink(args []string) error {
+	fs := flag.NewFlagSet("mcp link", flag.ExitOnError)
+	host := hostFlag(fs)
+	desc := fs.String("description", "", "para qué sirve")
+	var labels labelFlag
+	fs.Var(&labels, "label", "etiqueta clave=valor (repetible)")
+	if err := fs.Parse(reorder(args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return fmt.Errorf("uso: kling mcp link <nombre> <url>\n" +
+			"  ej: kling mcp link engram http://192.168.2.3:9100/mcp")
+	}
+	name, url := fs.Arg(0), fs.Arg(1)
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+
+	fmt.Printf("Enlazando %q -> %s\n\n", name, url)
+
+	// Se introspecciona igual que a un servicio propio: el catálogo se guarda y
+	// a partir de ahí listar capacidades no toca el servidor externo.
+	fmt.Printf("  1/2  preguntando qué sabe hacer... ")
+	info, tools, err := introspect(ctx, strings.TrimSuffix(url, "/mcp"))
+	if err != nil {
+		// Puede que la URL ya sea el endpoint completo.
+		info, tools, err = introspectAt(ctx, url)
+		if err != nil {
+			fmt.Println("✗")
+			return fmt.Errorf("no pude hablar con %s: %w", url, err)
+		}
+	}
+	fmt.Printf("✓ %s · %d herramienta(s)\n", info, len(tools))
+
+	fmt.Printf("  2/2  registrando... ")
+	l, err := c.SetLink(ctx, &api.Link{
+		Name: name, URL: url, Description: *desc,
+		Labels: labels.merge(name), Tools: tools,
+	})
+	if err != nil {
+		fmt.Println("✗")
+		return err
+	}
+	fmt.Println("✓")
+
+	fmt.Printf("\n%q disponible en el agregador con %d herramienta(s):\n", l.Name, len(l.Tools))
+	for _, t := range l.Tools {
+		d := t.Description
+		if len(d) > 66 {
+			d = d[:65] + "…"
+		}
+		fmt.Printf("  %-28s %s\n", t.Name, d)
+	}
+	fmt.Printf("\nNo corre en una microVM: se enruta a donde ya vive.\n")
+	return nil
+}
+
+func mcpUnlink(args []string) error {
+	fs := flag.NewFlagSet("mcp unlink", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("uso: kling mcp unlink <nombre>")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	if err := api.NewClient(hostOf(*host)).RemoveLink(ctx, fs.Arg(0)); err != nil {
+		return err
+	}
+	fmt.Println(fs.Arg(0))
+	return nil
+}
+
 // ── utilidades ────────────────────────────────────────────────────────────────
 
 func waitPort(ctx context.Context, ip string, port int, timeout time.Duration) error {
@@ -316,11 +409,16 @@ func waitPort(ctx context.Context, ip string, port int, timeout time.Duration) e
 	return fmt.Errorf("el puerto %d no se abrió: %w", port, last)
 }
 
-// introspect hace el handshake MCP y devuelve el servidor y sus herramientas.
+// introspect hace el handshake MCP contra <base>/mcp.
 func introspect(ctx context.Context, base string) (string, []api.ToolSpec, error) {
+	return introspectAt(ctx, base+"/mcp")
+}
+
+// introspectAt lo hace contra una URL completa.
+func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, error) {
 	c := &http.Client{Timeout: 45 * time.Second}
 	post := func(sid, body string) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/mcp", strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 		if err != nil {
 			return nil, err
 		}

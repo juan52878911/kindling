@@ -74,3 +74,15 @@ tr:last-child td{border-bottom:none}
 .legend .k.other{border-color:var(--other);border-style:dashed}
 footer{color:var(--muted);font-size:.78rem;text-align:center;margin-top:2rem}
 `
+
+// cssDetail se añade cuando el informe incluye fichas por servicio.
+const cssDetail = `
+.detail{display:grid;grid-template-columns:auto 1fr;gap:.35rem 1rem;margin:0 0 1rem;
+        padding:.85rem 1rem;background:var(--bg);border:1px solid var(--line);border-radius:9px;font-size:.85rem}
+.detail dt{color:var(--muted);font-weight:600;white-space:nowrap}
+.detail dd{margin:0}
+.tools{font:.78rem ui-monospace,Menlo,monospace;color:var(--muted)}
+.run{font-weight:700}
+.run.yes{color:var(--running)} .run.no{color:#c0392b}
+.tag.ext{border-color:var(--accent);color:var(--accent)}
+`

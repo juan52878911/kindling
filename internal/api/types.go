@@ -128,6 +128,32 @@ type ToolSpec struct {
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 }
 
+// Link es un servidor MCP EXTERNO registrado en el agregador.
+//
+// No corre en una microVM: vive donde su dueño lo tenga —en el Mac, en otro
+// host, en un servicio remoto— y kindling solo lo enruta. Sirve para traer
+// capacidades que no tiene sentido meter en una máquina efímera, en particular
+// las de memoria: un servicio al que todas las herramientas puedan escribir y
+// del que puedan leer, sin que kindling tenga que implementar almacenamiento.
+type Link struct {
+	Name        string            `json:"name"`
+	URL         string            `json:"url"`
+	Description string            `json:"description,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Tools       []ToolSpec        `json:"tools,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+}
+
+// Service devuelve el nombre de servicio del enlace.
+func (l *Link) Service() string {
+	if l.Labels != nil {
+		if s := l.Labels[LabelService]; s != "" {
+			return s
+		}
+	}
+	return l.Name
+}
+
 // CatalogRequest adjunta el catálogo de capacidades a un snapshot.
 type CatalogRequest struct {
 	Tools []ToolSpec `json:"tools"`

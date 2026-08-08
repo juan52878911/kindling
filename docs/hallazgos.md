@@ -615,3 +615,23 @@ cualquier limpieza rutinaria.
 
 Es una distinción que conviene explicar antes de que alguien guarde algo importante ahí. Para
 datos duraderos haría falta montar un volumen del host dentro del invitado, que hoy no existe.
+
+## Descartado: filesystem compartido entre microVMs
+
+Firecracker solo expone dispositivos de bloque. Compartir un ext4 entre varias VMs lo
+corrompe, porque no es un filesystem de clúster. Las alternativas —NFS sobre la red del
+invitado, virtio-fs— exigen servidor en el host, cliente en la imagen, excepciones en el
+cortafuegos y un kernel con el soporte compilado.
+
+Mucha maquinaria para un problema que ya resuelve un servidor MCP. Se optó por enlazar uno
+externo: `kling mcp link`. El servicio de memoria vive donde su dueño quiera, kindling solo
+lo enruta, y aparece en el agregador como cualquier otro.
+
+De paso resuelve algo que el filesystem compartido no resolvía: el estado sobrevive a que
+kindling entero se reinstale.
+
+## El puente sirve fuera de las microVMs
+
+`kling-bridge` se escribió para convertir servidores MCP de stdio en HTTP dentro del
+invitado, pero no tiene nada específico de microVMs. Ejecutado en el portátil expone
+cualquier servidor stdio local —engram, obsidian— por HTTP, listo para enlazar.

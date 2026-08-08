@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/api"
 )
 
 // AggregatePath es el servicio virtual que reúne a todos los demás.
@@ -443,6 +445,13 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 			t.Qualified, trunc(before, 300), trunc(s, 300))
 	}
 
+	// Servidor externo enlazado: no hay microVM que despertar, se enruta y ya.
+	// Es la vía para traer un servicio de memoria propio sin que kindling tenga
+	// que implementar almacenamiento.
+	if l := a.gw.linkFor(ctx, t.Service); l != nil {
+		return a.callLink(ctx, s, l, t, args)
+	}
+
 	// Modo efímero: la acción se ejecuta en una microVM propia que muere después.
 	//
 	// Salvo que el servicio esté marcado como stateful: destruir su máquina se
@@ -664,4 +673,56 @@ func (a *aggregator) isStateful(ctx context.Context, service string) bool {
 	v = a.stateful[service]
 	a.snapMu.Unlock()
 	return v
+}
+
+// callLink enruta hacia un servidor MCP externo.
+//
+// Se mantiene una sesión por enlace y conversación, igual que con las microVMs:
+// un servicio de memoria necesita saber quién le habla para no mezclar contextos.
+func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *api.Link, t *Tool, args json.RawMessage) (any, *rpcFault) {
+	base := strings.TrimSuffix(l.URL, "/mcp")
+
+	lock := a.serviceLock(t.Service)
+	lock.Lock()
+	a.mu.Lock()
+	sid := s.backing[t.Service]
+	a.mu.Unlock()
+	if sid == "" {
+		newSid, err := mcpInitAt(ctx, l.URL)
+		if err != nil {
+			lock.Unlock()
+			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+		}
+		sid = newSid
+		a.mu.Lock()
+		s.backing[t.Service] = sid
+		a.mu.Unlock()
+	}
+	lock.Unlock()
+	_ = base
+
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	raw, err := mcpCallAt(ctx, l.URL, sid, fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+		nextRPCID(), t.Name, args))
+	if err != nil {
+		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+	}
+
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &rpcFault{-32000, "respuesta ilegible de " + t.Service}
+	}
+	if resp.Error != nil {
+		return nil, &rpcFault{resp.Error.Code, resp.Error.Message}
+	}
+	return json.RawMessage(resp.Result), nil
 }

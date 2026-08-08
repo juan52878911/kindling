@@ -146,6 +146,20 @@ func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
 	return l, c.do(ctx, http.MethodGet, "/snapshots", nil, &l)
 }
 
+func (c *Client) Links(ctx context.Context) ([]*Link, error) {
+	var l []*Link
+	return l, c.do(ctx, http.MethodGet, "/links", nil, &l)
+}
+
+func (c *Client) SetLink(ctx context.Context, l *Link) (*Link, error) {
+	var out Link
+	return &out, c.do(ctx, http.MethodPut, "/links", l, &out)
+}
+
+func (c *Client) RemoveLink(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/links/"+name, nil, nil)
+}
+
 func (c *Client) SetCatalog(ctx context.Context, name string, tools []ToolSpec) (*Snapshot, error) {
 	var s Snapshot
 	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/catalog", CatalogRequest{Tools: tools}, &s)

@@ -811,3 +811,47 @@ al volver:   "esto debe sobrevivir"        (thaw 18 ms)
 Congelar no es apagar: la instancia deja de existir como proceso —cero CPU, cero RAM— pero su
 estado sigue en disco y vuelve en milisegundos. El coste es el fichero de memoria: 151 MiB
 para este servicio mientras está congelado.
+
+## Traer tu propio servicio de memoria
+
+kindling no implementa almacenamiento compartido, y es deliberado: se probó la vía de montar
+un filesystem común entre microVMs y se descartó. Firecracker solo expone dispositivos de
+bloque, y un ext4 compartido entre varias VMs se corrompe; lo demás —NFS, virtio-fs— añade
+mucha maquinaria para algo que un servidor MCP ya resuelve.
+
+En su lugar, se enlaza un servidor MCP **externo**:
+
+```sh
+kling mcp link engram http://192.168.2.3:9100/mcp -description "memoria compartida"
+kling mcp unlink engram
+```
+
+No corre en una microVM: sigue viviendo donde ya estaba, y kindling solo lo enruta. Aparece
+en el agregador como un servicio más, así que cualquier herramienta —y el modelo— puede
+guardar y leer ahí.
+
+### Si tu servidor habla stdio
+
+El mismo puente que se usa dentro de las microVMs sirve en tu máquina:
+
+```sh
+make bridge-local
+./kling-bridge-local -listen 0.0.0.0:9100 -- engram mcp --tools=agent
+kling mcp link engram http://<tu-ip>:9100/mcp
+```
+
+## Informe con detalle
+
+```sh
+kling export -detail -o topologia.html
+```
+
+Añade una ficha por servicio con lo que no se ve en la tabla de instancias:
+
+| | |
+|---|---|
+| **Tipo** | microVM o externo |
+| **Ejecutable ahora** | y por qué: hay instancia viva, hay una congelada, se instanciará del snapshot, o falta algo |
+| **Qué lo detona** | cada llamada (efímero), la primera llamada (persistente), o nada (externo) |
+| **Qué comparten sus instancias** | la memoria del snapshot dorado y la imagen base |
+| **Servidor MCP** | de qué imagen o URL sale, y sus herramientas |

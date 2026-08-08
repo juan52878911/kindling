@@ -21,14 +21,84 @@ import (
 type Group struct {
 	Service   string
 	Snapshot  *api.Snapshot
+	Link      *api.Link // servicio externo: no corre aquí
 	Machines  []*api.Machine
 	RAMShared int64
+}
+
+// Kind describe de dónde sale un servicio.
+func (g Group) Kind() string {
+	switch {
+	case g.Link != nil:
+		return "externo"
+	case g.Snapshot != nil:
+		return "microVM"
+	default:
+		return "sin snapshot"
+	}
+}
+
+// Ephemeral indica si sus instancias mueren tras cada acción.
+func (g Group) Ephemeral() bool {
+	return g.Link == nil && g.Snapshot != nil && !g.Snapshot.Stateful()
+}
+
+// Trigger explica qué hace aparecer a una instancia de este servicio.
+func (g Group) Trigger() string {
+	switch {
+	case g.Link != nil:
+		return "no arranca nada: se enruta a " + g.Link.URL
+	case g.Snapshot == nil:
+		return "sin snapshot: no puede instanciarse"
+	case g.Snapshot.Stateful():
+		return "primera llamada a una de sus herramientas; se congela al quedar ociosa"
+	default:
+		return "cada llamada a una de sus herramientas; muere al terminar"
+	}
+}
+
+// Shares describe qué comparten sus instancias entre sí.
+func (g Group) Shares() string {
+	switch {
+	case g.Link != nil:
+		return "el proceso remoto y su estado"
+	case g.Snapshot == nil:
+		return "—"
+	default:
+		return human(g.Snapshot.MemBytes) + " de memoria del snapshot, y la imagen base"
+	}
+}
+
+// Runnable dice si el servicio puede atender una llamada ahora mismo.
+func (g Group) Runnable() (bool, string) {
+	switch {
+	case g.Link != nil:
+		return true, "enrutado a un servidor externo"
+	case g.Snapshot == nil:
+		return false, "no hay snapshot del que instanciar"
+	case len(g.Snapshot.Tools) == 0:
+		return false, "sin catálogo: reimporta con kling mcp import"
+	}
+	for _, m := range g.Machines {
+		if m.State == api.StateRunning {
+			return true, "ya hay una instancia en marcha"
+		}
+		if m.State == api.StateWarm {
+			return true, "instancia congelada: vuelve en milisegundos"
+		}
+	}
+	return true, "se instanciará del snapshot dorado"
 }
 
 // Build agrupa por la etiqueta "service" y, en su defecto, por el snapshot del
 // que salieron: dos máquinas del mismo snapshot comparten memoria, así que
 // pertenecen juntas aunque nadie las haya etiquetado.
 func Build(machines []*api.Machine, snaps []*api.Snapshot) []Group {
+	return BuildWith(machines, snaps, nil)
+}
+
+// BuildWith incluye además los servidores externos enlazados.
+func BuildWith(machines []*api.Machine, snaps []*api.Snapshot, links []*api.Link) []Group {
 	byName := map[string]*api.Snapshot{}
 	for _, s := range snaps {
 		byName[s.Name] = s
@@ -75,6 +145,17 @@ func Build(machines []*api.Machine, snaps []*api.Snapshot) []Group {
 		}
 	}
 
+	// Servidores externos: son servicios sin máquinas.
+	for _, l := range links {
+		k := l.Service()
+		if g, ok := idx[k]; ok {
+			g.Link = l
+			continue
+		}
+		idx[k] = &Group{Service: k, Link: l}
+		order = append(order, k)
+	}
+
 	out := make([]Group, 0, len(order))
 	for _, k := range order {
 		g := idx[k]
@@ -117,6 +198,12 @@ func age(t time.Time, now time.Time) string {
 
 // Render produce el HTML completo.
 func Render(info *api.Info, groups []Group, endpoint string, now time.Time) string {
+	return RenderDetail(info, groups, endpoint, now, false)
+}
+
+// RenderDetail añade, con detail=true, una ficha por servicio explicando qué lo
+// detona, si puede ejecutarse ahora, a qué MCP pertenece y qué comparte.
+func RenderDetail(info *api.Info, groups []Group, endpoint string, now time.Time, detail bool) string {
 	var b strings.Builder
 
 	var running, warm, other int
@@ -139,7 +226,11 @@ func Render(info *api.Info, groups []Group, endpoint string, now time.Time) stri
 	b.WriteString(`<!doctype html><html lang="es"><head><meta charset="utf-8">`)
 	b.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
 	b.WriteString(`<title>kindling — topología</title>`)
-	b.WriteString("<style>" + css + "</style></head><body>")
+	style := css
+	if detail {
+		style += cssDetail
+	}
+	b.WriteString("<style>" + style + "</style></head><body>")
 
 	// ── cabecera ──────────────────────────────────────────────────────────────
 	b.WriteString(`<header><h1>kindling</h1><p class="sub">`)
@@ -174,15 +265,32 @@ func Render(info *api.Info, groups []Group, endpoint string, now time.Time) stri
 	// ── grupos ────────────────────────────────────────────────────────────────
 	for _, g := range groups {
 		b.WriteString(`<section class="card"><h2>` + esc(g.Service))
-		if g.Snapshot != nil {
+		if g.Link != nil {
+			b.WriteString(`<span class="tag ext">externo</span>`)
+		} else if g.Snapshot != nil {
+			mode := "efímero"
+			if g.Snapshot.Stateful() {
+				mode = "persistente"
+			}
 			b.WriteString(`<span class="tag">snapshot ` + esc(g.Snapshot.Name) +
 				` · ` + human(g.Snapshot.MemBytes) + ` compartidos</span>`)
+			b.WriteString(`<span class="tag">` + mode + `</span>`)
 		}
 		b.WriteString(`</h2>`)
 
+		if detail {
+			b.WriteString(detailCard(g))
+		}
+
 		if len(g.Machines) == 0 {
-			b.WriteString(`<p class="empty">Sin instancias. Arranca una con <code>kling run -from ` +
-				esc(g.Snapshot.Name) + `</code></p></section>`)
+			if g.Link != nil {
+				b.WriteString(`<p class="empty">Servidor externo: no arranca ninguna máquina aquí.</p></section>`)
+			} else if g.Snapshot != nil {
+				b.WriteString(`<p class="empty">Sin instancias. Aparecerá sola en la primera llamada, o arráncala con <code>kling run -from ` +
+					esc(g.Snapshot.Name) + `</code></p></section>`)
+			} else {
+				b.WriteString(`<p class="empty">Sin snapshot ni instancias.</p></section>`)
+			}
 			continue
 		}
 
@@ -338,4 +446,53 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return string([]rune(s)[:n-1]) + "…"
+}
+
+// detailCard resume lo que no se ve en la tabla de instancias: de dónde sale el
+// servicio, qué lo despierta, si puede responder ahora y qué comparte.
+func detailCard(g Group) string {
+	var b strings.Builder
+	ok, why := g.Runnable()
+
+	mark, cls := "✓", "yes"
+	if !ok {
+		mark, cls = "✗", "no"
+	}
+
+	b.WriteString(`<dl class="detail">`)
+	row := func(k, v string) {
+		b.WriteString(`<dt>` + esc(k) + `</dt><dd>` + v + `</dd>`)
+	}
+	row("Tipo", esc(g.Kind()))
+	row("Ejecutable ahora", `<span class="run `+cls+`">`+mark+`</span> `+esc(why))
+	row("Qué lo detona", esc(g.Trigger()))
+	row("Qué comparten sus instancias", esc(g.Shares()))
+
+	// A qué MCP pertenece, y con qué herramientas.
+	switch {
+	case g.Link != nil:
+		row("Servidor MCP", esc(g.Link.URL)+names(g.Link.Tools))
+	case g.Snapshot != nil:
+		row("Servidor MCP", "imagen <code>"+esc(g.Snapshot.Image)+"</code>"+names(g.Snapshot.Tools))
+	}
+
+	if g.Link != nil && g.Link.Description != "" {
+		row("Para qué sirve", esc(g.Link.Description))
+	}
+	b.WriteString(`</dl>`)
+	return b.String()
+}
+
+// names lista los nombres de herramienta en compacto: es lo barato del catálogo.
+func names(tools []api.ToolSpec) string {
+	if len(tools) == 0 {
+		return ` <span class="muted">(sin catálogo)</span>`
+	}
+	ns := make([]string, 0, len(tools))
+	for _, t := range tools {
+		ns = append(ns, t.Name)
+	}
+	sort.Strings(ns)
+	return fmt.Sprintf(` — %d herramienta(s): <span class="tools">%s</span>`,
+		len(ns), esc(strings.Join(ns, ", ")))
 }

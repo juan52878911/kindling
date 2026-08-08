@@ -53,6 +53,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
 	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
+	mux.HandleFunc("GET /links", s.handleLinks)
+	mux.HandleFunc("PUT /links", s.handleSetLink)
+	mux.HandleFunc("DELETE /links/{name}", s.handleRemoveLink)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
@@ -287,6 +290,32 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.mgr.Snapshots())
+}
+
+func (s *Server) handleLinks(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.mgr.Links())
+}
+
+func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
+	var l api.Link
+	if err := json.NewDecoder(r.Body).Decode(&l); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.mgr.SetLink(&l)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleRemoveLink(w http.ResponseWriter, r *http.Request) {
+	if err := s.mgr.RemoveLink(r.PathValue("name")); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
