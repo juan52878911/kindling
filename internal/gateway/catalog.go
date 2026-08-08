@@ -61,7 +61,15 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// toolsOf devuelve las herramientas de un servicio, cacheadas.
+// toolsOf devuelve las herramientas de un servicio.
+//
+// Orden de preferencia, del más barato al más caro:
+//  1. caché en memoria
+//  2. catálogo guardado en el snapshot al importarlo  <- lo normal
+//  3. preguntárselo al servicio, lo que DESPIERTA su microVM
+//
+// El paso 2 es la razón de ser del catálogo persistido: listar capacidades no
+// debería costar arrancar máquinas.
 func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 	c.mu.Lock()
 	if at, ok := c.fetched[service]; ok && time.Since(at) < c.ttl {
@@ -70,6 +78,14 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 		return t, nil
 	}
 	c.mu.Unlock()
+
+	if tools, ok := c.fromSnapshot(ctx, service); ok {
+		c.mu.Lock()
+		c.tools[service] = tools
+		c.fetched[service] = time.Now()
+		c.mu.Unlock()
+		return tools, nil
+	}
 
 	tools, err := c.fetch(ctx, service)
 	if err != nil {
@@ -83,7 +99,37 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 	return tools, nil
 }
 
+// fromSnapshot lee el catálogo que se capturó al importar el servicio.
+func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, bool) {
+	snaps, err := c.gw.client.Snapshots(ctx)
+	if err != nil {
+		return nil, false
+	}
+	for _, s := range snaps {
+		if s.Service() != service && s.Name != service {
+			continue
+		}
+		if len(s.Tools) == 0 {
+			return nil, false // importado sin catálogo: habrá que preguntar
+		}
+		out := make([]Tool, 0, len(s.Tools))
+		for _, t := range s.Tools {
+			out = append(out, Tool{
+				Service: service, Name: t.Name,
+				Qualified:   service + "." + t.Name,
+				Description: t.Description,
+				Schema:      t.InputSchema,
+			})
+		}
+		return out, true
+	}
+	return nil, false
+}
+
 // fetch hace un initialize + tools/list contra el servicio real.
+//
+// Es el camino caro: despierta la microVM. Solo se usa si el snapshot no trae
+// catálogo, es decir, si el servicio no se importó con `kling mcp import`.
 func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	e, err := c.gw.ensure(ctx, service)
 	if err != nil {

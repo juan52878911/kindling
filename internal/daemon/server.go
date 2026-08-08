@@ -53,6 +53,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
+	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("GET /events", s.handleEvents)
@@ -272,6 +273,20 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.mgr.Snapshots())
+}
+
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	var req api.CatalogRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	snap, err := s.mgr.SetCatalog(r.PathValue("name"), req.Tools)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {

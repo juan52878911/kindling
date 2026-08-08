@@ -70,25 +70,51 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		return nil, err
 	}
 
+	ownOverlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
+
 	c := fc.New(sock)
 	if err := c.Pause(ctx); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
+	abort := func(err error) (*api.Snapshot, error) {
 		os.RemoveAll(dir)
+		_ = c.PatchDrive(ctx, "overlay", ownOverlay)
 		_ = c.Resume(ctx)
 		return nil, err
 	}
+
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
-	// memoria que acabamos de volcar.
+	// memoria que se va a volcar.
 	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always",
-		filepath.Join(m.dir(mc.ID), "overlay.ext4"), goldOverlay).CombinedOutput(); err != nil {
-		os.RemoveAll(dir)
-		_ = c.Resume(ctx)
-		return nil, fmt.Errorf("copiando el overlay: %v: %s", err, out)
+		ownOverlay, goldOverlay).CombinedOutput(); err != nil {
+		return abort(fmt.Errorf("copiando el overlay: %v: %s", err, out))
 	}
-	// La máquina origen sigue su vida: commit no la mata.
+	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
+	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
+	// "Permission denied".
+	if err := m.priv.Own(goldOverlay); err != nil {
+		return abort(err)
+	}
+
+	// CLAVE: se reapunta el disco a la copia dorada ANTES de volcar, para que el
+	// snapshot grabe esa ruta y no la de esta máquina.
+	//
+	// Sin esto, el snapshot queda atado al directorio de la plantilla: en cuanto
+	// se elimina la plantilla, restaurar falla con "No such file or directory"
+	// sobre un overlay que ya no existe. El snapshot dorado tiene que ser
+	// autocontenido, porque su razón de ser es sobrevivir a la máquina que lo creó.
+	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
+		return abort(fmt.Errorf("reapuntando el overlay a la copia dorada: %w", err))
+	}
+	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
+		return abort(err)
+	}
+	// Se devuelve el disco propio: la plantilla sigue viva y no debe escribir en
+	// el overlay dorado, que a partir de ahora es plantilla de otras instancias.
+	if err := c.PatchDrive(ctx, "overlay", ownOverlay); err != nil {
+		return nil, fmt.Errorf("devolviendo el overlay a la máquina: %w", err)
+	}
 	if err := c.Resume(ctx); err != nil {
 		return nil, err
 	}
@@ -163,6 +189,32 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// SetCatalog guarda las capacidades declaradas por el servidor MCP.
+//
+// Se captura una sola vez, al importar el servicio, y a partir de ahí el
+// inventario se sirve desde disco sin tocar ninguna microVM.
+func (m *Manager) SetCatalog(name string, tools []api.ToolSpec) (*api.Snapshot, error) {
+	snap, err := m.loadSnapshot(name)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	snap.Tools, snap.ToolsAt = tools, &now
+
+	b, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(m.snapDir(name), "meta.json"), b, 0o644); err != nil {
+		return nil, err
+	}
+	m.priv.EnsureReadable(m.snapDir(name))
+
+	m.bus.Publish(api.Event{Time: now, Type: api.EvCommitted, Name: name,
+		Message: fmt.Sprintf("catálogo actualizado: %d herramienta(s)", len(tools))})
+	return snap, nil
 }
 
 // RemoveSnapshot borra un snapshot dorado, salvo que tenga instancias vivas.

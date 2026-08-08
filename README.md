@@ -417,6 +417,72 @@ comparten memoria y pertenecen juntas aunque nadie las haya etiquetado.
 kling run -from echo -service echo -label tier=prod
 ```
 
+## Convertir cualquier servidor MCP en un servicio
+
+```sh
+sudo ./scripts/80-mcp-image.sh stdio filesystem \
+     -n "@modelcontextprotocol/server-filesystem" -- mcp-server-filesystem /data
+
+kling mcp import filesystem
+```
+
+`mcp import` hace el ciclo entero:
+
+```
+1/5  arrancando la plantilla...        ✓ 0aeee853 en 172.30.0.6
+2/5  esperando al servidor MCP...      ✓
+3/5  preguntando qué sabe hacer...     ✓ 14 herramienta(s)
+4/5  congelando como snapshot dorado...✓
+5/5  guardando el catálogo...          ✓
+```
+
+El paso 3 es **introspección**: se le pregunta al servidor qué sabe hacer una sola vez, y el
+paso 5 guarda ese catálogo junto al snapshot.
+
+**`-n` preinstala los paquetes npm en la imagen.** No es comodidad: las microVMs arrancan sin
+salida a internet, así que un `npx -y` en tiempo de ejecución fallaría al descargar.
+
+## El inventario no toca el servicio
+
+Sin catálogo persistido, preguntar "¿qué herramientas hay?" obliga a un `tools/list` contra
+cada servidor, y eso **despierta sus microVMs**. Una pregunta de inventario acabaría
+arrancando veinte máquinas.
+
+Con `mcp import`, el catálogo vive en disco junto al snapshot:
+
+```sh
+kling mcp list -v          # todas las herramientas, sin arrancar nada
+kling mcp refresh <svc>    # recapturar tras actualizar el servidor
+```
+
+Verificado: listar el inventario completo por el agregador deja el contador de máquinas
+en **0**.
+
+## Modo efímero: una microVM por acción
+
+```sh
+kling gateway -ephemeral
+```
+
+Cada llamada a herramienta recibe **su propia microVM**: se instancia del snapshot dorado,
+atiende la acción y se destruye. Nace, actúa y muere.
+
+Seis acciones seguidas:
+
+```
+1: 358ms  pid=305 llamadas_en_esta_sesion=1
+2: 418ms  pid=305 llamadas_en_esta_sesion=1
+...
+éxitos: 6/6   máquinas vivas: 0
+```
+
+`llamadas_en_esta_sesion=1` en todas: **ninguna acción ve lo que hizo la anterior**. El coste
+son ~350 ms por llamada, frente a los 9 ms del modo persistente.
+
+La contrapartida es que no hay estado entre llamadas. Las herramientas que lo necesitan
+—memoria, razonamiento por pasos— deben usar la ruta con sesión (`/mcp/<servicio>`), que
+mantiene el proceso vivo.
+
 ## Fase 5: cualquier servidor MCP, alojado bajo demanda
 
 La mayoría de servidores MCP open source solo hablan **stdio**: un proceso hijo persistente

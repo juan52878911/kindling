@@ -69,6 +69,10 @@ type Manager struct {
 	mu     sync.RWMutex
 	byID   map[string]*api.Machine
 	socket map[string]string // id -> ruta del socket de firecracker
+
+	// netCursor rota los índices de red en vez de reutilizar el menor libre.
+	// Ver allocNetIndex.
+	netCursor int
 }
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
@@ -91,6 +95,11 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
 	m.load()
+	for _, mc := range m.byID {
+		if mc.NetIndex > m.netCursor {
+			m.netCursor = mc.NetIndex
+		}
+	}
 	m.reconcile()
 	return m, nil
 }
@@ -209,20 +218,33 @@ func (m *Manager) Count() int {
 	return len(m.byID)
 }
 
-// allocNetIndex devuelve el menor índice de red libre, para reutilizar huecos en
-// vez de agotar el rango con máquinas que ya no existen.
+// netIndexSpace es el rango de /30 disponibles en 172.30.0.0/16.
+const netIndexSpace = 16000
+
+// allocNetIndex asigna el siguiente índice libre EN ROTACIÓN, no el menor.
+//
+// Reutilizar el índice más bajo parece más ordenado, pero con máquinas efímeras
+// —que nacen y mueren en cientos de milisegundos— significa que la siguiente
+// recibe la IP que acaba de liberar la anterior. El host conserva entradas de
+// conntrack de la conexión previa y la nueva microVM se come un "connection
+// reset by peer".
+//
+// Rotando, una IP tarda 16.000 máquinas en repetirse.
 func (m *Manager) allocNetIndex() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	used := make(map[int]bool, len(m.byID))
 	for _, mc := range m.byID {
 		used[mc.NetIndex] = true
 	}
-	for i := 1; ; i++ {
-		if !used[i] {
-			return i
+	for i := 0; i < netIndexSpace; i++ {
+		m.netCursor = m.netCursor%netIndexSpace + 1
+		if !used[m.netCursor] {
+			return m.netCursor
 		}
 	}
+	return 1 // rango agotado: MaxMachines lo impide mucho antes
 }
 
 // ── ciclo de vida ─────────────────────────────────────────────────────────────

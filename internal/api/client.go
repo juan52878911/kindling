@@ -140,6 +140,11 @@ func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
 	return l, c.do(ctx, http.MethodGet, "/snapshots", nil, &l)
 }
 
+func (c *Client) SetCatalog(ctx context.Context, name string, tools []ToolSpec) (*Snapshot, error) {
+	var s Snapshot
+	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/catalog", CatalogRequest{Tools: tools}, &s)
+}
+
 func (c *Client) RemoveSnapshot(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/snapshots/"+name, nil, nil)
 }

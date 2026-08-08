@@ -9,14 +9,18 @@
 #
 #   stdio — el servidor habla JSON-RPC por tuberías, que es el caso MAYORITARIO
 #   entre los servidores MCP open source:
-#     sudo ./80-mcp-image.sh stdio <nombre> [-p "paquetes"] [-d dir] -- <comando>
+#     sudo ./80-mcp-image.sh stdio <nombre> [-p "apk"] [-n "npm"] [-d dir] -- <comando>
+#
+#     -n PREINSTALA paquetes npm en la imagen. Es obligatorio, no una comodidad:
+#        las microVMs arrancan sin salida a internet, así que un `npx -y` en
+#        tiempo de ejecución fallaría al intentar descargar.
 #
 #     Se le añade kling-bridge, que lanza el servidor como hijo y expone su
 #     protocolo por HTTP. El servidor no se entera de nada.
 #
 # Ejemplos:
-#   sudo ./80-mcp-image.sh stdio files -p "nodejs npm" -- \
-#        npx -y @modelcontextprotocol/server-filesystem /data
+#   sudo ./80-mcp-image.sh stdio files -p "nodejs npm" \
+#        -n "@modelcontextprotocol/server-filesystem" -- mcp-server-filesystem /data
 #   sudo ./80-mcp-image.sh stdio eco -d ./examples/stdio-server-bin -- /opt/mcp/server
 #   sudo ./80-mcp-image.sh http legacy ./mi-servidor-http
 set -euo pipefail
@@ -33,7 +37,7 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 [ -f "$ROOT/images/$BASE.ext4" ] || {
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
-PKGS=""; EXTRA_DIR=""; CMD=()
+PKGS=""; NPM=""; EXTRA_DIR=""; CMD=()
 case "$MODE" in
   http)
     EXTRA_DIR="${1:?falta el directorio del servidor}"; shift
@@ -44,6 +48,7 @@ case "$MODE" in
     while [ $# -gt 0 ]; do
       case "$1" in
         -p) PKGS="$2"; shift 2 ;;
+        -n) NPM="$2"; shift 2 ;;
         -d) EXTRA_DIR="$2"; shift 2 ;;
         --) shift; CMD=("$@"); break ;;
         *)  echo "opción desconocida: $1" >&2; exit 1 ;;
@@ -52,7 +57,14 @@ case "$MODE" in
     [ ${#CMD[@]} -gt 0 ] || { echo "falta el comando tras --" >&2; exit 1; }
     [ -f "$BRIDGE" ] || { echo "no encuentro $BRIDGE (compílalo con: make bridge)" >&2; exit 1; }
     # El servidor puede tardar en instalarse; con stdio suele hacer falta sitio.
-    [ "$GROW" -eq 0 ] && GROW=256
+    # Node y sus dependencias piden bastante más que un binario suelto.
+    if [ "$GROW" -eq 0 ]; then
+      [ -n "$NPM" ] && GROW=768 || GROW=256
+    fi
+    # npm implica node: se añade si no se pidió explícitamente.
+    if [ -n "$NPM" ] && ! echo " $PKGS " | grep -q " nodejs "; then
+      PKGS="$PKGS nodejs npm"
+    fi
     ;;
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
@@ -78,6 +90,17 @@ if [ -n "$PKGS" ]; then
   cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
   mount --bind /proc "$mnt/proc" 2>/dev/null || true
   chroot "$mnt" /sbin/apk add --no-cache $PKGS
+  umount "$mnt/proc" 2>/dev/null || true
+fi
+
+if [ -n "$NPM" ]; then
+  echo "preinstalando npm: $NPM"
+  cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
+  mount --bind /proc "$mnt/proc" 2>/dev/null || true
+  # --omit=dev recorta lo que no hace falta en ejecución; el espacio dentro de la
+  # imagen es el que más pesa en el snapshot.
+  chroot "$mnt" /usr/bin/npm install -g --omit=dev --no-fund --no-audit $NPM
+  chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
 fi
 

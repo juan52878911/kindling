@@ -61,12 +61,13 @@ func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) 
 
 // Gateway mantiene una instancia caliente por servicio y enruta hacia ella.
 type Gateway struct {
-	client   *api.Client
-	idle     time.Duration
-	mu       sync.Mutex
-	services map[string]*entry        // servicio -> instancia "por defecto"
-	routes   map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
-	agg      *aggregator              // endpoint virtual que reúne a todos
+	client    *api.Client
+	idle      time.Duration
+	Ephemeral bool
+	mu        sync.Mutex
+	services  map[string]*entry        // servicio -> instancia "por defecto"
+	routes    map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
+	agg       *aggregator              // endpoint virtual que reúne a todos
 }
 
 type entry struct {
@@ -85,13 +86,13 @@ type sessionRoute struct {
 	lastUse   time.Time
 }
 
-func New(client *api.Client, idle time.Duration) *Gateway {
+func New(client *api.Client, idle time.Duration, ephemeral bool) *Gateway {
 	g := &Gateway{
-		client: client, idle: idle,
+		client: client, idle: idle, Ephemeral: ephemeral,
 		services: map[string]*entry{},
 		routes:   map[string]*sessionRoute{},
 	}
-	g.agg = newAggregator(g)
+	g.agg = newAggregator(g, ephemeral)
 	return g
 }
 

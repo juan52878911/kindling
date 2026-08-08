@@ -1,7 +1,10 @@
 // Package api define el contrato entre el CLI y el daemon.
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // State es el ciclo de vida de una microVM.
 //
@@ -107,6 +110,27 @@ type Snapshot struct {
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// Tools es el catálogo de capacidades, capturado UNA VEZ al importar el
+	// servicio y guardado junto al snapshot.
+	//
+	// Sin esto, responder "¿qué herramientas hay?" obligaría a despertar la
+	// microVM: una pregunta de inventario acabaría arrancando máquinas. Con el
+	// catálogo en disco, listar capacidades no toca el servicio.
+	Tools   []ToolSpec `json:"tools,omitempty"`
+	ToolsAt *time.Time `json:"tools_at,omitempty"`
+}
+
+// ToolSpec describe una herramienta tal y como la declaró su servidor MCP.
+type ToolSpec struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+}
+
+// CatalogRequest adjunta el catálogo de capacidades a un snapshot.
+type CatalogRequest struct {
+	Tools []ToolSpec `json:"tools"`
 }
 
 // CommitRequest congela una máquina en marcha como snapshot reutilizable.

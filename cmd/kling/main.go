@@ -45,6 +45,14 @@ MÁQUINAS
   stop <ref>                                       termina la máquina
   rm <ref>                                         elimina máquina y snapshot
 
+SERVICIOS MCP
+  mcp import <servicio> -image <img>               convierte un servidor MCP en
+                                                   servicio: arranca, pregunta
+                                                   qué sabe hacer, lo congela y
+                                                   guarda su catálogo
+  mcp list [-v]                                    servicios y sus herramientas
+  mcp refresh <servicio>                           vuelve a capturar el catálogo
+
 SNAPSHOTS DORADOS
   commit <ref> <nombre>                            congela una máquina como
                                                    snapshot reutilizable
@@ -70,9 +78,10 @@ CONECTAR CON TU AGENTE
   connect ... -install opencode|claude-code        escribe la configuración
 
 GATEWAY
-  gateway [-listen ADDR] [-idle DUR]               enruta llamadas MCP a microVMs
-                                                   bajo demanda y las congela al
-                                                   quedar ociosas
+  gateway [-listen ADDR] [-idle DUR] [-ephemeral]  enruta llamadas MCP a microVMs
+                                                   bajo demanda. Con -ephemeral,
+                                                   cada acción corre en su propia
+                                                   máquina, que muere al terminar
 
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  arranca el núcleo
@@ -114,6 +123,8 @@ func main() {
 		err = cmdGateway(args)
 	case "connect":
 		err = cmdConnect(args)
+	case "mcp":
+		err = cmdMCP(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
 	case "run":
@@ -220,6 +231,7 @@ func cmdGateway(args []string) error {
 	host := hostFlag(fs)
 	listen := fs.String("listen", "", "dónde escuchar (por defecto: gateway.listen, o 127.0.0.1:8080)")
 	idle := fs.Duration("idle", 0, "tiempo sin peticiones antes de congelar (por defecto: gateway.idle, o 5m)")
+	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -243,7 +255,7 @@ func cmdGateway(args []string) error {
 	}
 	listen, idle = &addr, &wait
 
-	gw := gateway.New(c, *idle)
+	gw := gateway.New(c, *idle, *ephemeral)
 	go gw.Reap(ctx)
 
 	srv := &http.Server{Addr: *listen, Handler: gw.Handler()}
@@ -255,6 +267,9 @@ func cmdGateway(args []string) error {
 	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
 	fmt.Printf("  inventario:   http://%s/services\n", *listen)
 	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+	if *ephemeral {
+		fmt.Printf("  modo:         EFÍMERO — cada acción en su propia microVM, destruida al terminar\n")
+	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err

@@ -36,8 +36,9 @@ const (
 
 // aggregator implementa un servidor MCP que enruta a los demás.
 type aggregator struct {
-	gw  *Gateway
-	cat *catalog
+	gw        *Gateway
+	cat       *catalog
+	ephemeral bool // una microVM por acción, que muere al terminar
 
 	mu       sync.Mutex
 	sessions map[string]*aggSession
@@ -53,8 +54,11 @@ type aggSession struct {
 	lastUse time.Time
 }
 
-func newAggregator(gw *Gateway) *aggregator {
-	return &aggregator{gw: gw, cat: newCatalog(gw, 10*time.Minute), sessions: map[string]*aggSession{}}
+func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
+	return &aggregator{
+		gw: gw, cat: newCatalog(gw, 10*time.Minute),
+		ephemeral: ephemeral, sessions: map[string]*aggSession{},
+	}
 }
 
 // handleAggregate atiende el endpoint virtual /mcp/_all.
@@ -138,9 +142,14 @@ func (a *aggregator) instructions(s *aggSession) string {
 	if s.mode == modeExpand {
 		return "Herramientas de varios servidores MCP, con nombres servicio.herramienta."
 	}
-	return "Acceso a varios servidores MCP sin cargar todas sus definiciones. " +
+	base := "Acceso a varios servidores MCP sin cargar todas sus definiciones. " +
 		"Empieza por find_tools con una descripción de lo que necesitas; usa describe_tool " +
 		"para ver los argumentos exactos antes de llamar; ejecuta con call_tool."
+	if a.ephemeral {
+		base += " Cada llamada corre en una máquina aislada que se destruye al terminar, " +
+			"así que las herramientas NO conservan estado entre llamadas."
+	}
+	return base
 }
 
 // ── modo proxy: cuatro meta-herramientas ──────────────────────────────────────
@@ -381,6 +390,11 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	t, fault := a.lookup(ctx, s, name)
 	if fault != nil {
 		return nil, fault
+	}
+
+	// Modo efímero: la acción se ejecuta en una microVM propia que muere después.
+	if a.ephemeral {
+		return a.callEphemeral(ctx, t, args)
 	}
 
 	e, err := a.gw.ensure(ctx, t.Service)

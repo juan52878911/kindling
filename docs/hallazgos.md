@@ -427,3 +427,39 @@ llamada siguiente falla con "sesión desconocida".
 
 Se resuelve reintentando con un `initialize` nuevo ante cualquier fallo, en vez de intentar
 predecir cuándo caducó.
+
+## El snapshot dorado dependía de que la plantilla siguiera existiendo
+
+Firecracker graba en el snapshot la ruta de cada disco. `commit` copiaba el overlay al
+directorio del snapshot, pero volcaba DESPUÉS: el snapshot quedaba con la ruta del overlay de
+la máquina plantilla.
+
+Mientras la plantilla existía no se notaba. En cuanto `mcp import` empezó a eliminarla al
+terminar, restaurar falló con `No such file or directory` sobre un overlay borrado.
+
+El arreglo es reapuntar el disco a la copia dorada **antes** de volcar, y devolverlo después:
+
+	pausar → copiar overlay → PATCH a la copia dorada → snapshot → PATCH de vuelta → reanudar
+
+Y ceder la copia al usuario sin privilegios, o el PATCH falla con "Permission denied": la
+crea el daemon como root, pero quien la abre es el VMM.
+
+Un snapshot dorado tiene que ser **autocontenido**; su razón de ser es sobrevivir a la máquina
+que lo creó.
+
+## Reutilizar la IP más baja rompe las máquinas efímeras
+
+`allocNetIndex` devolvía el menor índice libre. Con máquinas que viven cientos de
+milisegundos, la siguiente recibe la IP que acaba de liberar la anterior, y el host conserva
+entradas de conntrack de la conexión previa: la nueva microVM se come un `connection reset by
+peer`.
+
+El síntoma era inconfundible una vez visto: fallaba **una sí y una no**. Rotando los índices
+en vez de reutilizar el menor, una IP tarda 16.000 máquinas en repetirse. De 3/6 a 6/6.
+
+## Dos builds compitiendo por el lock de apk
+
+Un `apk add` huérfano de un build abortado por timeout retuvo el lock de la base de datos, y
+el relanzamiento chocó con él: `Unable to lock database: Resource temporarily unavailable`.
+Antes de reintentar una construcción hay que matar los procesos que quedaron y desmontar los
+loop devices, o los dos trabajos se estorban indefinidamente.
