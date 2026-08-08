@@ -18,6 +18,7 @@ import (
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
+	knet "github.com/juan52878911/kindling/internal/net"
 )
 
 const Version = "0.1.0"
@@ -31,9 +32,9 @@ type Server struct {
 	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
 }
 
-func New(socket, root, fcBin, socketUser string) (*Server, error) {
+func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	bus := events.New()
-	mgr, err := machine.NewManager(root, fcBin, bus)
+	mgr, err := machine.NewManager(root, fcBin, runAs, bus)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +95,15 @@ func (s *Server) Listen(ctx context.Context) error {
 		_ = os.Remove(s.socket)
 	}()
 
+	if err := knet.Available(); err != nil {
+		log.Printf("AVISO: red no disponible (%v): las microVMs arrancarán sin conectividad", err)
+	} else if err := knet.SetupHost(); err != nil {
+		log.Printf("AVISO: no pude instalar las reglas de barrera del host: %v", err)
+	}
+
+	if s.mgr.PrivWarning != "" {
+		log.Printf("AVISO DE SEGURIDAD: %s", s.mgr.PrivWarning)
+	}
 	log.Printf("kling daemon %s escuchando en %s (root=%s)", Version, s.socket, s.root)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

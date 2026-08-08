@@ -260,3 +260,28 @@ respondiendo, estabas midiendo el host.
 
 Medido: 0% de pérdida con la microVM viva, 100% con la microVM parada y el namespace
 intacto.
+
+## Endurecimiento: tres trampas que costaron un ciclo cada una
+
+**1. `setpriv --clear-groups` y `--groups` son mutuamente excluyentes.** Con `--groups` basta:
+fija la lista exacta de grupos suplementarios, que era el objetivo.
+
+**2. Nuestra propia red de enlace cae dentro del rango que bloqueamos.** `172.30.0.0/16` está
+dentro de `172.16.0.0/12`, así que la regla anti-red-privada descartaba las RESPUESTAS del
+invitado al host y rompía el acceso host→microVM. La solución es aceptar
+`ESTABLISHED,RELATED` **antes** de los DROP: no abre nada, porque una conexión que el
+invitado inicie hacia una red privada es `NEW` y sigue cayendo.
+
+**3. Tras cargar un snapshot no se pueden añadir dispositivos.** El `PUT /entropy` en la ruta
+de restauración fallaba con "not supported after starting the microVM". No hace falta: el
+virtio-rng ya viene dentro del snapshot porque la plantilla lo tenía al congelarse.
+
+## Bajar privilegios rompe lo que escribe Firecracker, no lo que lee
+
+Al pasar el VMM a un usuario sin privilegios, `commit` empezó a fallar con "Cannot perform
+open on the snapshot backing file: Permission denied". Quien escribe el snapshot es
+Firecracker, no el daemon: el directorio destino tiene que ser suyo ANTES de pedírselo.
+
+Regla general para este proyecto: **el daemon crea, el VMM escribe**. Todo lo que Firecracker
+vaya a escribir hay que cedérselo; todo lo que solo vaya a leer (imágenes base, snapshots
+dorados) se le deja en solo lectura.

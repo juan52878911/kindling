@@ -79,10 +79,28 @@ type BootSource struct {
 }
 
 type Drive struct {
-	DriveID      string `json:"drive_id"`
-	PathOnHost   string `json:"path_on_host"`
-	IsRootDevice bool   `json:"is_root_device"`
-	IsReadOnly   bool   `json:"is_read_only"`
+	DriveID      string       `json:"drive_id"`
+	PathOnHost   string       `json:"path_on_host"`
+	IsRootDevice bool         `json:"is_root_device"`
+	IsReadOnly   bool         `json:"is_read_only"`
+	RateLimiter  *RateLimiter `json:"rate_limiter,omitempty"`
+}
+
+// RateLimiter acota el caudal de un dispositivo. Sin esto, una sola microVM
+// hostil puede saturar el disco o la red del host y degradar a todas las demás.
+type RateLimiter struct {
+	Bandwidth *TokenBucket `json:"bandwidth,omitempty"`
+	Ops       *TokenBucket `json:"ops,omitempty"`
+}
+
+type TokenBucket struct {
+	Size       int64 `json:"size"`        // tokens por intervalo
+	RefillTime int64 `json:"refill_time"` // ms para rellenar
+}
+
+// Limit construye un limitador de caudal en bytes por segundo.
+func Limit(bytesPerSec int64) *RateLimiter {
+	return &RateLimiter{Bandwidth: &TokenBucket{Size: bytesPerSec, RefillTime: 1000}}
 }
 
 type MachineConfig struct {
@@ -91,9 +109,11 @@ type MachineConfig struct {
 }
 
 type NetworkInterface struct {
-	IfaceID     string `json:"iface_id"`
-	HostDevName string `json:"host_dev_name"`
-	GuestMAC    string `json:"guest_mac,omitempty"`
+	IfaceID     string       `json:"iface_id"`
+	HostDevName string       `json:"host_dev_name"`
+	GuestMAC    string       `json:"guest_mac,omitempty"`
+	RxLimiter   *RateLimiter `json:"rx_rate_limiter,omitempty"`
+	TxLimiter   *RateLimiter `json:"tx_rate_limiter,omitempty"`
 }
 
 func (c *Client) SetBootSource(ctx context.Context, b BootSource) error {
@@ -124,6 +144,17 @@ func (c *Client) PatchDrive(ctx context.Context, driveID, pathOnHost string) err
 		"drive_id":     driveID,
 		"path_on_host": pathOnHost,
 	})
+}
+
+// SetEntropy añade un virtio-rng al invitado.
+//
+// Es la contramedida al problema documentado por AWS: las instancias que
+// restauran del mismo snapshot CLONAN el estado del generador de aleatoriedad.
+// Con esto y con CONFIG_VMGENID en el kernel invitado, el kernel detecta que
+// viene de un snapshot y vuelve a sembrar su pool. Sin ello, dos herramientas
+// distintas podrían generar las mismas claves TLS.
+func (c *Client) SetEntropy(ctx context.Context) error {
+	return c.do(ctx, http.MethodPut, "/entropy", map[string]any{})
 }
 
 func (c *Client) Start(ctx context.Context) error {

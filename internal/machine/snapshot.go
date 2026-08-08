@@ -61,6 +61,13 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	memPath := filepath.Join(dir, "mem.file")
 	goldOverlay := filepath.Join(dir, "overlay.ext4")
 
+	// Quien escribe el snapshot es Firecracker, que corre sin privilegios: el
+	// directorio tiene que ser suyo antes de pedírselo.
+	if err := m.priv.Own(dir); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+
 	c := fc.New(sock)
 	if err := c.Pause(ctx); err != nil {
 		os.RemoveAll(dir)
@@ -94,6 +101,8 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
 	}
+	m.priv.EnsureReadable(dir)
+
 	b, _ := json.MarshalIndent(snap, "", "  ")
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), b, 0o644); err != nil {
 		return nil, err
@@ -138,6 +147,11 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 }
 
 func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
+	// El nombre llega de la URL. Sin validarlo, un "../../etc" saldría del
+	// directorio de datos: recorrido de rutas de manual.
+	if !validName.MatchString(name) {
+		return nil, fmt.Errorf("nombre de snapshot inválido: %q", name)
+	}
 	b, err := os.ReadFile(filepath.Join(m.snapDir(name), "meta.json"))
 	if err != nil {
 		return nil, fmt.Errorf("no existe el snapshot %q", name)
@@ -199,16 +213,26 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
 	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
+	egress, err := knet.ParseEgress(req.Egress)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	netcfg := knet.Plan(m.allocNetIndex(), id)
-	if err := netcfg.Setup(); err != nil {
+	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("montando la red: %w", err)
+	}
+	if err := m.priv.Own(dir, overlay); err != nil {
+		netcfg.Teardown()
+		os.RemoveAll(dir)
+		return nil, err
 	}
 
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
-		IP: netcfg.NSIP, NetIndex: netcfg.Index,
+		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		CreatedAt: time.Now(),
 	}
 	m.mu.Lock()
@@ -238,6 +262,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		m.fail(mc, err)
 		return nil, err
 	}
+	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
+	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
+	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al
+	// detectar que ha sido restaurado.
 	if err := c.PatchDrive(ctx, "overlay", overlay); err != nil {
 		m.fail(mc, fmt.Errorf("reapuntando el overlay: %w", err))
 		return nil, err

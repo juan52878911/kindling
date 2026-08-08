@@ -10,6 +10,10 @@ Type=simple
 # KLING_SOCKET_USER cede el socket al usuario con el que entra el CLI por SSH,
 # para no tener que ejecutar todo el cliente con sudo.
 Environment=KLING_SOCKET_USER=juan
+# Firecracker corre con este usuario sin privilegios, no como root. Créalo con:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin kindling
+#   usermod -aG kvm kindling
+Environment=KLING_RUN_AS=kindling
 ExecStart=/usr/local/bin/kling daemon
 Restart=on-failure
 RestartSec=2

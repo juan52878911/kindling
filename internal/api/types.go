@@ -46,6 +46,7 @@ type Machine struct {
 	// usan la misma dirección: la diferenciación vive en el host.
 	IP       string `json:"ip,omitempty"`
 	NetIndex int    `json:"net_index,omitempty"`
+	Egress   string `json:"egress,omitempty"`
 
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
@@ -63,6 +64,10 @@ type RunRequest struct {
 	From   string `json:"from,omitempty"`
 	VCPUs  int    `json:"vcpus,omitempty"`
 	MemMiB int    `json:"mem_mib,omitempty"`
+
+	// Egress: "none" (por defecto) o "internet". Nunca hay acceso a redes
+	// privadas: el código de dentro se considera hostil.
+	Egress string `json:"egress,omitempty"`
 }
 
 // Snapshot es una microVM congelada y reutilizable: el artefacto del que se

@@ -36,27 +36,44 @@ func bootArgs() string { return bootArgsBase + " " + knet.BootArg() }
 // disperso, el coste real en disco es solo lo que la microVM llegue a escribir.
 const defaultOverlayMiB = 512
 
+// Límites de seguridad. El código que corre dentro se considera hostil, así que
+// una sola microVM no debe poder degradar el host ni a las demás.
+const (
+	// MaxMachines evita que un cliente comprometido agote el host creando
+	// máquinas sin fin.
+	MaxMachines = 256
+
+	// Caudal máximo por dispositivo. Sin esto una microVM satura el disco o la
+	// red del host y tumba a todas las demás.
+	diskBytesPerSec = 128 << 20 // 128 MiB/s
+	netBytesPerSec  = 16 << 20  // 16 MiB/s
+)
+
 // Manager gestiona todas las microVMs del daemon.
 type Manager struct {
-	root   string // /var/lib/kindling
-	fcBin  string
-	bus    *events.Bus
-	mu     sync.RWMutex
-	byID   map[string]*api.Machine
-	socket map[string]string // id -> ruta del socket de firecracker
+	root        string // /var/lib/kindling
+	fcBin       string
+	priv        *Privileges
+	PrivWarning string
+	bus         *events.Bus
+	mu          sync.RWMutex
+	byID        map[string]*api.Machine
+	socket      map[string]string // id -> ruta del socket de firecracker
 }
 
-func NewManager(root, fcBin string, bus *events.Bus) (*Manager, error) {
+func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
 		}
 	}
+	priv, warn := resolvePrivileges(runAs)
 	m := &Manager{
-		root: root, fcBin: fcBin, bus: bus,
+		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
 		byID:   make(map[string]*api.Machine),
 		socket: make(map[string]string),
 	}
+	priv.EnsureReadable(filepath.Join(root, "images"))
 	m.load()
 	return m, nil
 }
@@ -220,6 +237,10 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		req.MemMiB = 256
 	}
 
+	if n := m.Count(); n >= MaxMachines {
+		return nil, fmt.Errorf("límite de %d máquinas alcanzado (hay %d)", MaxMachines, n)
+	}
+
 	src := m.imagePath(req.Image)
 	if _, err := os.Stat(src); err != nil {
 		return nil, fmt.Errorf("no encuentro la imagen %q en %s", req.Image, src)
@@ -255,12 +276,24 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
+	egress, err := knet.ParseEgress(req.Egress)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	netcfg := knet.Plan(m.allocNetIndex(), id)
-	if err := netcfg.Setup(); err != nil {
+	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("montando la red: %w", err)
 	}
-	mc.IP, mc.NetIndex = netcfg.NSIP, netcfg.Index
+	mc.IP, mc.NetIndex, mc.Egress = netcfg.NSIP, netcfg.Index, string(egress)
+
+	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.
+	if err := m.priv.Own(dir, overlay); err != nil {
+		netcfg.Teardown()
+		os.RemoveAll(dir)
+		return nil, err
+	}
 
 	start := time.Now()
 	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg)
@@ -333,12 +366,14 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "rootfs", PathOnHost: base, IsRootDevice: true, IsReadOnly: true,
+		RateLimiter: fc.Limit(diskBytesPerSec),
 	}); err != nil {
 		return pid, err
 	}
 	// vdb: capa escribible propia de esta microVM.
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "overlay", PathOnHost: overlay, IsRootDevice: false, IsReadOnly: false,
+		RateLimiter: fc.Limit(diskBytesPerSec),
 	}); err != nil {
 		return pid, err
 	}
@@ -347,9 +382,15 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		// para cualquier instancia.
 		if err := c.SetNetwork(ctx, fc.NetworkInterface{
 			IfaceID: "eth0", HostDevName: knet.TapName, GuestMAC: knet.GuestMAC,
+			RxLimiter: fc.Limit(netBytesPerSec), TxLimiter: fc.Limit(netBytesPerSec),
 		}); err != nil {
 			return pid, err
 		}
+	}
+	// virtio-rng: sin esto, las instancias de un mismo snapshot clonarían el
+	// estado del generador de aleatoriedad y podrían producir las mismas claves.
+	if err := c.SetEntropy(ctx); err != nil {
+		return pid, fmt.Errorf("añadiendo entropía: %w", err)
 	}
 	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memMiB}); err != nil {
 		return pid, err
@@ -370,9 +411,10 @@ func (m *Manager) spawn(id, sock string, n *knet.Net) (int, error) {
 		return 0, err
 	}
 	// Firecracker corre DENTRO del namespace de la microVM: es donde vive su tap0.
-	argv := []string{m.fcBin, "--api-sock", sock}
+	// Orden: primero el namespace (necesita privilegios), después soltarlos.
+	argv := m.priv.Wrap([]string{m.fcBin, "--api-sock", sock})
 	if n != nil {
-		argv = n.Wrap(m.fcBin, "--api-sock", sock)
+		argv = n.Wrap(argv[0], argv[1:]...)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout, cmd.Stderr = logf, logf
@@ -475,8 +517,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 	// El namespace pudo desaparecer con un reinicio del host; lo rehacemos con el
 	// mismo índice para que la máquina conserve su IP.
+	egress, _ := knet.ParseEgress(mc.Egress)
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
-	if err := netcfg.Setup(); err != nil {
+	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
 		return nil, fmt.Errorf("rehaciendo la red: %w", err)
 	}
 	pid, err := m.spawn(mc.ID, sock, netcfg)

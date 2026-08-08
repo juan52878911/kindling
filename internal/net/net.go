@@ -10,9 +10,9 @@
 // snapshot es idéntico para todas. Toda la diferenciación ocurre en el host, al
 // otro lado de un veth. Es el mismo enfoque que usa AWS Lambda.
 //
-//	         host                    │  netns kl-<id>        │  microVM
-//	  vh-<id> 172.30.a.b/30  ◄─veth─►│ vg-<id> 172.30.a.b+1  │
-//	                                 │ tap0    172.16.0.1/30 ├─ eth0 172.16.0.2
+//	       host                    │  netns kl-<id>        │  microVM
+//	vh-<id> 172.30.a.b/30  ◄─veth─►│ vg-<id> 172.30.a.b+1  │
+//	                               │ tap0    172.16.0.1/30 ├─ eth0 172.16.0.2
 package net
 
 import (
@@ -61,6 +61,11 @@ func run(args ...string) error {
 // quiet ejecuta ignorando el error; para limpiezas donde "no existe" es válido.
 func quiet(args ...string) { _ = exec.Command(args[0], args[1:]...).Run() }
 
+// exec_ok indica si un comando termina bien; se usa para comprobar reglas ya puestas.
+func exec_ok(args []string) bool {
+	return exec.Command(args[0], args[1:]...).Run() == nil
+}
+
 // Plan calcula el direccionamiento de una microVM a partir de su índice.
 // Cada máquina consume una /30: 16384 máquinas en 172.30.0.0/16.
 func Plan(index int, id string) *Net {
@@ -80,8 +85,12 @@ func Plan(index int, id string) *Net {
 	}
 }
 
-// Setup crea el namespace, el veth, el TAP y el NAT. Idempotente en lo posible.
-func (n *Net) Setup() error {
+// Setup crea el namespace, el veth, el TAP y las reglas de salida.
+//
+// owner es el UID que podrá abrir el TAP. Firecracker corre sin privilegios, y
+// abrir un tap ajeno exige CAP_NET_ADMIN: creándolo ya a su nombre, no le hace
+// falta ninguna capacidad.
+func (n *Net) Setup(egress Egress, owner int) error {
 	n.Teardown() // restos de una ejecución anterior
 
 	if err := run("ip", "netns", "add", n.NS); err != nil {
@@ -118,7 +127,11 @@ func (n *Net) Setup() error {
 	}
 
 	// TAP con nombre e IP fijos: idénticos en todos los namespaces
-	if err := ns("ip", "tuntap", "add", TapName, "mode", "tap"); err != nil {
+	tap := []string{"ip", "tuntap", "add", TapName, "mode", "tap"}
+	if owner > 0 {
+		tap = append(tap, "user", fmt.Sprintf("%d", owner))
+	}
+	if err := ns(tap...); err != nil {
 		return err
 	}
 	if err := ns("ip", "addr", "add", GuestGW+"/30", "dev", TapName); err != nil {
@@ -134,17 +147,13 @@ func (n *Net) Setup() error {
 		return err
 	}
 
-	// Salida del invitado enmascarada hacia el host.
-	if err := ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"); err != nil {
-		return err
-	}
 	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
 	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
 	if err := ns("iptables", "-t", "nat", "-A", "PREROUTING",
 		"-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP); err != nil {
 		return err
 	}
-	return nil
+	return n.applyEgress(egress)
 }
 
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,

@@ -28,6 +28,7 @@ USO
 
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
+      [-egress none|internet]                      salida de red (por defecto: none)
   ps [-a]                                          lista las máquinas
   freeze <ref>                                     congela en snapshot -> warm
   thaw <ref>                                       restaura desde snapshot (~ms)
@@ -127,11 +128,12 @@ func cmdDaemon(args []string) error {
 	root := fs.String("root", envOr("KLING_ROOT", "/var/lib/kindling"), "directorio de datos")
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "binario de firecracker")
 	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "usuario al que ceder el socket (para el CLI por SSH)")
+	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "usuario sin privilegios con el que corre Firecracker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	srv, err := daemon.New(*socket, *root, *fcBin, *sockUser)
+	srv, err := daemon.New(*socket, *root, *fcBin, *sockUser, *runAs)
 	if err != nil {
 		return err
 	}
@@ -150,6 +152,7 @@ func cmdRun(args []string) error {
 	from := fs.String("from", "", "instanciar desde un snapshot dorado (~ms, sin arranque en frío)")
 	cpus := fs.Int("cpus", 1, "vCPUs")
 	mem := fs.Int("mem", 256, "memoria en MiB")
+	egress := fs.String("egress", "none", "salida de red: none | internet (nunca alcanza redes privadas)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -158,7 +161,7 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	mc, err := api.NewClient(*host).Run(ctx, api.RunRequest{
-		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
+		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem, Egress: *egress,
 	})
 	if err != nil {
 		return err
@@ -266,16 +269,20 @@ func cmdPS(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNOMBRE\tIMAGEN\tESTADO\tCPU/MEM\tDISCO\tEDAD\tÚLTIMA OP")
+	fmt.Fprintln(tw, "ID\tNOMBRE\tIMAGEN\tESTADO\tCPU/MEM\tDISCO\tSALIDA\tEDAD\tÚLTIMA OP")
 	var totalDisk int64
 	for _, mc := range list {
 		if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
 			continue
 		}
 		totalDisk += mc.DiskBytes
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\n",
+		eg := mc.Egress
+		if eg == "" {
+			eg = "none"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\t%s\n",
 			mc.ID[:12], mc.Name, mc.Image, mc.State,
-			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), since(mc.CreatedAt), lastOp(mc))
+			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), eg, since(mc.CreatedAt), lastOp(mc))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -491,8 +498,12 @@ func cmdTopo(args []string) error {
 			default:
 				stopped++
 			}
-			fmt.Printf("   %s %s %-14s %-8s %-15s %6s  %s\n",
-				cont, mbranch, trunc(mc.Name, 14), mc.State, ip, human(mc.DiskBytes), lastOp(mc))
+			egMark := "⌀" // aislada
+			if mc.Egress == "internet" {
+				egMark = "→" // sale a internet (nunca a redes privadas)
+			}
+			fmt.Printf("   %s %s %-14s %-8s %-15s %s %6s  %s\n",
+				cont, mbranch, trunc(mc.Name, 14), mc.State, ip, egMark, human(mc.DiskBytes), lastOp(mc))
 		}
 		if len(list) == 0 {
 			fmt.Printf("   %s └── (sin instancias)\n", cont)
@@ -504,6 +515,7 @@ func cmdTopo(args []string) error {
 
 	fmt.Printf("\n  %d running · %d warm · %d parada(s)   disco: %s propio + %s compartido\n",
 		running, warm, stopped, human(diskOwn), human(diskShared))
+	fmt.Printf("  salida:  ⌀ aislada   → internet (las redes privadas están bloqueadas siempre)\n")
 	return nil
 }
 

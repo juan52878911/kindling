@@ -5,7 +5,11 @@ servidor MCP open source cualquiera y convertirlo automáticamente en un servici
 levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
 
 > Estado: **fase 3 de 5**. `kling` gestiona microVMs con interfaz tipo docker, con red,
-> snapshots dorados y eventos en streaming. Falta el gateway MCP.
+> snapshots dorados, aislamiento y eventos en streaming. Falta el gateway MCP.
+
+**El invitado se considera hostil**: no se sabe qué servidor MCP se va a alojar. Ver
+[SECURITY.md](SECURITY.md) para el modelo de amenaza, las barreras y —sobre todo— lo que
+todavía NO está resuelto.
 
 ## kling
 
@@ -214,6 +218,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH
 - [x] **Fase 1.6** — Overlays, snapshots dispersos y snapshots dorados con memoria compartida
 - [x] **Fase 2** — Red por TAP con un namespace por microVM
+- [x] **Fase 2.5** — Endurecimiento: privilegios bajados, salida filtrada, límites de caudal
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
 - [ ] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger
 - [ ] **Fase 5** — Conversión automática de un MCP open source a microVM
@@ -284,3 +289,25 @@ red dentro de la imagen. Desde el host cada máquina se alcanza por la IP de su 
 que hace DNAT hacia el invitado.
 
 Es el mismo enfoque que usa AWS Lambda, y por la misma razón.
+
+## Aislamiento
+
+El invitado es código de terceros: se asume hostil.
+
+| Barrera | Cómo |
+|---|---|
+| Daemon inalcanzable por red | Solo socket Unix; remoto exclusivamente por SSH |
+| VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo grupo `kvm` |
+| Sin acceso a la LAN | Salida `none` por defecto; con `internet` las redes privadas siguen bloqueadas |
+| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina; tope de 256 |
+| Claves no repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
+
+Verificado **desde dentro del invitado**, que es la única medición que vale:
+
+```
+RESULTADO 192.168.2.100: BLOQUEADO      (host Proxmox)
+RESULTADO 192.168.2.1:   BLOQUEADO      (router de casa)
+RESULTADO 10.10.10.1:    BLOQUEADO      (túnel WireGuard)
+RESULTADO 169.254.169.254: BLOQUEADO    (metadatos de cloud)
+RESULTADO 1.1.1.1:       ALCANZABLE
+```
