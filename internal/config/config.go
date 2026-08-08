@@ -50,6 +50,11 @@ type Defaults struct {
 type Gateway struct {
 	Listen string `json:"listen,omitempty"`
 	Idle   string `json:"idle,omitempty"`
+
+	// URL es la dirección por la que los AGENTES alcanzan el gateway, que no
+	// tiene por qué ser la de escucha: el gateway puede escuchar en 0.0.0.0 y
+	// los clientes llegar por la IP de la LAN.
+	URL string `json:"url,omitempty"`
 }
 
 // Path devuelve la ruta del fichero de configuración.
@@ -199,6 +204,8 @@ func (c *Config) Set(key, value string) error {
 			c.Gateway.Listen = value
 		case "idle":
 			c.Gateway.Idle = value
+		case "url":
+			c.Gateway.URL = value
 		default:
 			return fmt.Errorf("campo desconocido gateway.%s", field)
 		}
@@ -219,6 +226,7 @@ func (c *Config) Keys() [][2]string {
 		{"defaults.ttl_seconds", itoa(c.Defaults.TTL)},
 		{"gateway.listen", c.Gateway.Listen},
 		{"gateway.idle", c.Gateway.Idle},
+		{"gateway.url", c.Gateway.URL},
 	}
 }
 

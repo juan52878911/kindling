@@ -485,3 +485,44 @@ usarse estaba congelada, y despertarla cuesta milisegundos.
 |---|---|
 | Handshake MCP en frío, desde el Mac | **310 ms** |
 | Llamada a herramienta, en caliente | **9 ms** |
+
+## Conectarlo con tu agente de IA
+
+```sh
+kling connect                          # guía paso a paso
+kling connect eco                      # URL, estado y configuración
+kling connect eco -install opencode    # la escribe por ti
+kling connect eco -install claude-code
+```
+
+`connect` **comprueba el servicio de verdad** —hace un `initialize` MCP y lista las
+herramientas— antes de darte nada. Una configuración que parece correcta y no responde es
+peor que ninguna, porque el fallo aparece dentro del agente y ahí cuesta mucho más
+diagnosticarlo.
+
+```
+Servicio:  eco
+Endpoint:  http://192.168.2.60:8080/mcp/eco
+Estado:    ✓ kindling-echo v1.0.0 · 2 herramienta(s): echo, session_info
+```
+
+Con `-install` respalda el fichero antes de tocarlo (`.kling-backup`) y conserva el resto de
+la configuración. Para Claude Code usa `claude mcp add` si el CLI está disponible, que es la
+vía oficial, y solo escribe el JSON si no lo está.
+
+`gateway.url` es la dirección por la que los **agentes** alcanzan el gateway, que no tiene
+por qué ser la de escucha:
+
+```sh
+kling config set gateway.url http://192.168.2.60:8080
+```
+
+### Que sobreviva a los reinicios
+
+```sh
+sudo install -m644 packaging/kling-gateway.service /etc/systemd/system/
+sudo systemctl enable --now kling-gateway
+```
+
+El gateway **no corre como root**: solo habla con el daemon por su socket y hace de proxy.
+Toda la parte privilegiada se queda en `kling.service`.

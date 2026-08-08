@@ -1,0 +1,32 @@
+[Unit]
+Description=kling gateway — enruta llamadas MCP a microVMs bajo demanda
+Documentation=https://github.com/juan52878911/kindling
+After=network-online.target kling.service
+Wants=network-online.target
+Requires=kling.service
+
+[Service]
+Type=simple
+# NO necesita root: solo habla con el daemon por su socket Unix y hace de proxy
+# HTTP. Toda la parte privilegiada vive en kling.service.
+User=juan
+Group=juan
+
+# 0.0.0.0 para que los agentes de la LAN lleguen. Es una decisión consciente:
+# el gateway solo sabe despertar snapshots que ya existen, mientras que el daemon
+# —que equivale a root en este host— sigue sin escuchar en la red.
+# Restringe con firewall si la LAN no es de confianza.
+ExecStart=/usr/local/bin/kling gateway -listen 0.0.0.0:8080 -idle 5m
+
+Restart=on-failure
+RestartSec=3
+
+# Endurecimiento: el gateway no toca disco ni necesita privilegios.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

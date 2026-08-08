@@ -61,7 +61,7 @@ deploy: daemon
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-amd64 $(TARGET):/tmp/$(BIN)
-	scp -q packaging/$(BIN).service $(TARGET):/tmp/
+	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
 		sudo systemctl daemon-reload && sudo systemctl enable --now $(BIN) && \

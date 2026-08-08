@@ -58,6 +58,12 @@ OBSERVACIÓN
   events                                           stream de eventos del daemon
   info                                             estado del daemon
 
+CONECTAR CON TU AGENTE
+  connect                                          guía paso a paso
+  connect <servicio>                               URL y configuración
+  connect <servicio> -install opencode             la escribe por ti
+  connect <servicio> -install claude-code
+
 GATEWAY
   gateway [-listen ADDR] [-idle DUR]               enruta llamadas MCP a microVMs
                                                    bajo demanda y las congela al
@@ -101,6 +107,8 @@ func main() {
 		err = cmdDaemon(args)
 	case "gateway":
 		err = cmdGateway(args)
+	case "connect":
+		err = cmdConnect(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
 	case "run":
