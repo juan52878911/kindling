@@ -697,3 +697,52 @@ Dos mejoras salieron de ahí:
 
 Los snapshots dorados quedan fuera a propósito: su caché es lo que hace que N instancias
 compartan páginas, y tirarla saldría carísimo.
+
+## Las IP de los invitados no existen fuera del host
+
+`kling mcp import` sondeaba el puerto del invitado y hacía la introspección **desde el
+cliente**. Funciona si el CLI corre en el host del laboratorio; por SSH, no:
+
+```
+2/5  esperando al servidor MCP... ✗
+error: el puerto 8080 no se abrió: dial tcp 172.30.0.78:8080: i/o timeout
+```
+
+Ese `172.30.0.x` solo se enruta en la red del host. Desde el Mac no hay ruta ninguna, así
+que el sondeo agota los 45 segundos y culpa al servidor de no arrancar — cuando el servidor
+llevaba rato escuchando.
+
+El arreglo es un proxy en el daemon (`POST /machines/{ref}/guest`), que sí está en la red
+buena. El importador ya no dial­a nada: pide al daemon que espere el puerto (`probe_only`) y
+que reenvíe el handshake. Local y remoto se comportan igual, que era el punto.
+
+## El puente escondía la ruta correcta
+
+El gateway reenviaba a `/` la petición que llegaba a `/mcp/<servicio>`. Nunca dio problemas
+porque `kling-bridge` sirve en `/` **y** en `/mcp`. Pero un servidor Streamable HTTP nativo
+solo sirve en `/mcp`, y contestaba 404.
+
+El resto del gateway ya usaba `base+"/mcp"` — catálogo, agregador, efímeras. Solo el proxy
+directo iba por otro sitio. Ahora todos coinciden.
+
+## Accept no es opcional, y la respuesta puede venir en SSE
+
+Dos detalles de Streamable HTTP que el puente tapaba, porque es permisivo:
+
+- Un servidor estricto responde **406** si el `Accept` no ofrece `application/json` **y**
+  `text/event-stream`. La especificación exige mandar los dos.
+- La respuesta puede llegar envuelta en un evento SSE aunque solo haya un mensaje:
+
+  ```
+  event: message
+  data: {"result":{...},"jsonrpc":"2.0","id":2}
+  ```
+
+  Quien la lea tiene que aceptar las dos formas. Está resuelto en `api.MCPPayload`, que usan
+  el gateway, el importador y `kling connect`.
+
+## `systemctl enable --now` no reinicia lo que ya corre
+
+Desplegar el binario y ejecutar `enable --now` deja el proceso viejo en memoria: `--now`
+arranca la unidad si está parada, pero no reinicia una activa. Media hora persiguiendo un
+`404` de un endpoint que sí estaba compilado. El despliegue tiene que hacer `restart`.

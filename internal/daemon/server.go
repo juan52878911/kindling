@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -60,6 +63,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
+	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	return mux
 }
@@ -379,4 +383,110 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleGuest habla con el servidor que corre dentro de una microVM y devuelve
+// su respuesta tal cual.
+//
+// Existe porque las IP de los invitados solo son alcanzables desde el host: un
+// CLI conectado por SSH no tiene ruta hasta ellas, y sondearlas directamente se
+// queda colgado hasta agotar el plazo. El daemon sí está en la red buena.
+func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
+	var req api.GuestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	mc, ok := s.mgr.Get(r.PathValue("ref"))
+	if !ok {
+		fail(w, http.StatusNotFound, errors.New("no existe esa máquina"))
+		return
+	}
+	if mc.State != api.StateRunning || mc.IP == "" {
+		fail(w, http.StatusConflict, fmt.Errorf("la máquina está %s, no atiende llamadas", mc.State))
+		return
+	}
+
+	port := req.Port
+	if port == 0 {
+		port = 8080
+	}
+	path := req.Path
+	if path == "" {
+		path = "/mcp"
+	}
+	method := req.Method
+	if method == "" {
+		method = http.MethodPost
+	}
+	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
+
+	// Un servidor recién arrancado tarda en escuchar. Esperar aquí, y no en el
+	// cliente, mantiene el sondeo en la red que puede verlo.
+	if req.WaitMS > 0 {
+		if err := waitPort(r.Context(), addr, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
+			fail(w, http.StatusGatewayTimeout, err)
+			return
+		}
+	}
+
+	if req.ProbeOnly {
+		writeJSON(w, http.StatusOK, api.GuestResponse{Status: http.StatusOK})
+		return
+	}
+
+	greq, err := http.NewRequestWithContext(r.Context(), method,
+		"http://"+addr+path, strings.NewReader(req.Body))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	greq.Header.Set("Content-Type", "application/json")
+	greq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range req.Headers {
+		greq.Header.Set(k, v)
+	}
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(greq)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Un catálogo grande puede pesar; el límite evita que un invitado que se
+	// desmadre agote la memoria del daemon.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		fail(w, http.StatusBadGateway, err)
+		return
+	}
+
+	out := api.GuestResponse{Status: resp.StatusCode, Body: string(body),
+		Headers: map[string]string{}}
+	for _, h := range []string{"Mcp-Session-Id", "Content-Type"} {
+		if v := resp.Header.Get(h); v != "" {
+			out.Headers[h] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// waitPort espera a que algo escuche en addr, o se rinde al agotar el plazo.
+func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		last = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("nadie abrió %s: %w", addr, last)
 }

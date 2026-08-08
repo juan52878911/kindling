@@ -184,10 +184,13 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// La ruta que ve la herramienta no incluye el prefijo de enrutado.
+	// La ruta que ve la herramienta no incluye el prefijo de enrutado. Cuando no
+	// queda nada detrás del nombre del servicio, la petición va a /mcp: es donde
+	// sirve el protocolo un servidor Streamable HTTP nativo, y donde el puente
+	// escucha también. Mandarla a "/" solo funcionaba con puente.
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/mcp/"+service)
-	if r.URL.Path == "" {
-		r.URL.Path = "/"
+	if r.URL.Path == "" || r.URL.Path == "/" {
+		r.URL.Path = "/mcp"
 	}
 
 	// Sesión ya conocida: directo a su instancia, sin consultar al daemon.

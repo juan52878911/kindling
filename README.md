@@ -4,9 +4,10 @@ Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: co
 servidor MCP open source cualquiera y convertirlo automáticamente en un servicio que se
 levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
 
-> Estado: **fase 5 de 5** — el circuito completo funciona. `kling` gestiona microVMs con interfaz tipo docker, con red,
+> Estado: **completo** — el circuito completo funciona. `kling` gestiona microVMs con interfaz tipo docker, con red,
 > snapshots dorados, aislamiento, eventos, gateway MCP con sesiones y **puente
-> stdio→HTTP**: cualquier servidor MCP open source se aloja bajo demanda.
+> stdio→HTTP**: cualquier servidor MCP open source se aloja bajo demanda, hable
+> stdio o Streamable HTTP nativo.
 
 **El invitado se considera hostil**: no se sabe qué servidor MCP se va a alojar. Ver
 [SECURITY.md](SECURITY.md) para el modelo de amenaza, las barreras y —sobre todo— lo que
@@ -248,7 +249,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 2** — Red por TAP con un namespace por microVM
 - [x] **Fase 2.5** — Endurecimiento: privilegios bajados, salida filtrada, límites de caudal
 - [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y vigilancia
-- [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
+- [x] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP nativo, sin puente
 - [x] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger por inactividad
 - [x] **Fase 5** — Puente stdio→HTTP: cualquier servidor MCP se aloja bajo demanda
 
@@ -529,7 +530,33 @@ kling run -name files-tmpl -image files -service files
 kling commit files-tmpl files && kling stop files-tmpl
 ```
 
-Para servidores que ya hablan HTTP el modo es `http` y no hace falta puente.
+### Servidores que ya hablan HTTP
+
+Si el servidor habla **Streamable HTTP nativo** no hace falta puente: escucha él mismo y el
+gateway le habla directamente. El modo `http` acepta las mismas opciones:
+
+```sh
+sudo ./scripts/80-mcp-image.sh http everything -p "nodejs npm" \
+     -n "@modelcontextprotocol/server-everything" -- mcp-server-everything streamableHttp
+
+kling mcp import everything -image everything
+```
+
+Dos condiciones, y las dos las fija el entrypoint generado:
+
+- **escuchar en el puerto de `$PORT` (8080)**, que es donde mira el gateway dentro del invitado
+- **servir el protocolo en `/mcp`**, que es la ruta a la que llama
+
+Probado con `@modelcontextprotocol/server-everything`, el servidor de referencia del
+protocolo. La imagen no lleva `kling-bridge` por ninguna parte:
+
+```
+$ kling connect everything
+Estado:    ✓ mcp-servers/everything v2.0.0 · 12 herramienta(s): echo, get-sum, …
+
+$ call_tool everything.get-sum {"a":100,"b":23}
+The sum of 100 and 23 is 123.
+```
 
 ### Sesiones
 

@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -114,8 +113,7 @@ func mcpImport(args []string) error {
 
 	// 2. introspección
 	fmt.Printf("  2/5  esperando al servidor MCP... ")
-	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(8080))
-	if err := waitPort(ctx, mc.IP, 8080, *wait); err != nil {
+	if err := waitGuest(ctx, c, mc.ID, *wait); err != nil {
 		fmt.Println("✗")
 		fmt.Printf("\nEl servidor no abrió el puerto 8080. Mira qué pasó dentro:\n  kling logs %s\n", tmpl)
 		cleanup()
@@ -124,7 +122,7 @@ func mcpImport(args []string) error {
 	fmt.Println("✓")
 
 	fmt.Printf("  3/5  preguntando qué sabe hacer... ")
-	info, tools, err := introspect(ctx, base)
+	info, tools, err := introspectWith(guestPost(ctx, c, mc.ID))
 	if err != nil {
 		fmt.Println("✗")
 		cleanup()
@@ -288,12 +286,11 @@ func mcpRefresh(args []string) error {
 	}
 	defer func() { _ = c.Remove(context.WithoutCancel(ctx), mc.ID) }()
 
-	base := "http://" + net.JoinHostPort(mc.IP, "8080")
-	if err := waitPort(ctx, mc.IP, 8080, 30*time.Second); err != nil {
+	if err := waitGuest(ctx, c, mc.ID, 30*time.Second); err != nil {
 		fmt.Println("✗")
 		return err
 	}
-	_, tools, err := introspect(ctx, base)
+	_, tools, err := introspectWith(guestPost(ctx, c, mc.ID))
 	if err != nil {
 		fmt.Println("✗")
 		return err
@@ -336,7 +333,7 @@ func mcpLink(args []string) error {
 	// Se introspecciona igual que a un servicio propio: el catálogo se guarda y
 	// a partir de ahí listar capacidades no toca el servidor externo.
 	fmt.Printf("  1/2  preguntando qué sabe hacer... ")
-	info, tools, err := introspect(ctx, strings.TrimSuffix(url, "/mcp"))
+	info, tools, err := introspectAt(ctx, strings.TrimSuffix(url, "/mcp")+"/mcp")
 	if err != nil {
 		// Puede que la URL ya sea el endpoint completo.
 		info, tools, err = introspectAt(ctx, url)
@@ -390,50 +387,73 @@ func mcpUnlink(args []string) error {
 
 // ── utilidades ────────────────────────────────────────────────────────────────
 
-func waitPort(ctx context.Context, ip string, port int, timeout time.Duration) error {
-	addr := net.JoinHostPort(ip, strconv.Itoa(port))
-	deadline := time.Now().Add(timeout)
-	var last error
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		last = err
-		time.Sleep(200 * time.Millisecond)
-	}
-	return fmt.Errorf("el puerto %d no se abrió: %w", port, last)
+// waitGuest espera a que el servidor de dentro de la microVM abra su puerto.
+// La espera ocurre en el daemon: las IP de los invitados no son alcanzables
+// desde un CLI remoto, y sondearlas desde aquí falla siempre por SSH.
+func waitGuest(ctx context.Context, c *api.Client, ref string, timeout time.Duration) error {
+	_, err := c.Guest(ctx, ref, api.GuestRequest{
+		Port: 8080, WaitMS: int(timeout / time.Millisecond), ProbeOnly: true,
+	})
+	return err
 }
 
-// introspect hace el handshake MCP contra <base>/mcp.
-func introspect(ctx context.Context, base string) (string, []api.ToolSpec, error) {
-	return introspectAt(ctx, base+"/mcp")
-}
+// poster manda una petición MCP y devuelve el id de sesión que asignó el
+// servidor y su respuesta. Hay dos formas de llegar al servidor —directamente,
+// si es externo, o por el daemon, si vive dentro de una microVM— y la
+// introspección no necesita saber cuál es.
+type poster func(sid, body string) (string, []byte, error)
 
-// introspectAt lo hace contra una URL completa.
-func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, error) {
+// directPost habla con una URL alcanzable desde aquí: servidores enlazados.
+func directPost(ctx context.Context, url string) poster {
 	c := &http.Client{Timeout: 45 * time.Second}
-	post := func(sid, body string) (*http.Response, error) {
+	return func(sid, body string) (string, []byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 		if err != nil {
-			return nil, err
+			return "", nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", api.AcceptMCP)
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
-		return c.Do(req)
+		resp, err := c.Do(req)
+		if err != nil {
+			return "", nil, err
+		}
+		defer resp.Body.Close()
+		out, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		return resp.Header.Get("Mcp-Session-Id"), out, err
 	}
+}
 
-	resp, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
+// guestPost habla con el servidor de dentro de una microVM, pasando por el
+// daemon, que es quien tiene ruta hasta él.
+func guestPost(ctx context.Context, c *api.Client, ref string) poster {
+	return func(sid, body string) (string, []byte, error) {
+		req := api.GuestRequest{Port: 8080, Path: "/mcp", Body: body}
+		if sid != "" {
+			req.Headers = map[string]string{"Mcp-Session-Id": sid}
+		}
+		resp, err := c.Guest(ctx, ref, req)
+		if err != nil {
+			return "", nil, err
+		}
+		return resp.Headers["Mcp-Session-Id"], []byte(resp.Body), nil
+	}
+}
+
+// introspectAt hace el handshake MCP contra una URL alcanzable desde aquí.
+func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, error) {
+	return introspectWith(directPost(ctx, url))
+}
+
+// introspectWith hace el handshake sin saber por dónde viajan las peticiones.
+func introspectWith(post poster) (string, []api.ToolSpec, error) {
+	sid, raw, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
+		`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
 	if err != nil {
 		return "", nil, fmt.Errorf("initialize: %w", err)
 	}
-	sid := resp.Header.Get("Mcp-Session-Id")
 	var initRes struct {
 		Result struct {
 			ServerInfo struct {
@@ -442,8 +462,7 @@ func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, erro
 			} `json:"serverInfo"`
 		} `json:"result"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&initRes)
-	resp.Body.Close()
+	_ = json.Unmarshal(api.MCPPayload(raw), &initRes)
 
 	name := initRes.Result.ServerInfo.Name
 	if name == "" {
@@ -454,15 +473,12 @@ func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, erro
 
 	// Muchos servidores esperan la notificación `initialized` antes de responder
 	// a nada más. Es parte del handshake y omitirla deja a algunos colgados.
-	if r, err := post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`); err == nil {
-		r.Body.Close()
-	}
+	_, _, _ = post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 
-	tr, err := post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	_, raw, err = post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if err != nil {
 		return name, nil, fmt.Errorf("tools/list: %w", err)
 	}
-	defer tr.Body.Close()
 
 	var out struct {
 		Result struct {
@@ -472,7 +488,7 @@ func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, erro
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(tr.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(api.MCPPayload(raw), &out); err != nil {
 		return name, nil, fmt.Errorf("respuesta ilegible: %w", err)
 	}
 	if out.Error != nil {

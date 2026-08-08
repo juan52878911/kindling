@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/api"
 )
 
 // Tool es una herramienta de un servicio, tal como la describe su servidor MCP.
@@ -266,6 +268,7 @@ func mcpPostAt(ctx context.Context, url, sid, body string) (*http.Response, erro
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", api.AcceptMCP)
 	if sid != "" {
 		req.Header.Set(SessionHeader, sid)
 	}
@@ -306,5 +309,5 @@ func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, err
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return api.MCPPayload(buf.Bytes()), nil
 }

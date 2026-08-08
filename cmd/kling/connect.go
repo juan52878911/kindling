@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -144,6 +145,7 @@ func probeMCP(url string) (string, []string, error) {
 	post := func(sid, body string) (*http.Response, error) {
 		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", api.AcceptMCP)
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
@@ -167,7 +169,7 @@ func probeMCP(url string) (string, []string, error) {
 			} `json:"serverInfo"`
 		} `json:"result"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&init)
+	_ = json.Unmarshal(readMCP(resp), &init)
 	server := init.Result.ServerInfo.Name
 	if server == "" {
 		server = "servidor MCP"
@@ -189,7 +191,7 @@ func probeMCP(url string) (string, []string, error) {
 			} `json:"tools"`
 		} `json:"result"`
 	}
-	_ = json.NewDecoder(tr.Body).Decode(&tl)
+	_ = json.Unmarshal(readMCP(tr), &tl)
 	names := make([]string, 0, len(tl.Result.Tools))
 	for _, t := range tl.Result.Tools {
 		names = append(names, t.Name)
@@ -245,6 +247,7 @@ func catalogCost(url string) (int, int, error) {
 	post := func(sid, body string) (*http.Response, error) {
 		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", api.AcceptMCP)
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
@@ -268,7 +271,7 @@ func catalogCost(url string) (int, int, error) {
 			Tools []json.RawMessage `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.NewDecoder(tr.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(readMCP(tr), &out); err != nil {
 		return 0, 0, err
 	}
 	b, _ := json.Marshal(out.Result.Tools)
@@ -422,4 +425,14 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 	}
 	fmt.Printf("  kling connect %s -install opencode\n", first)
 	return nil
+}
+
+// readMCP lee el cuerpo de una respuesta MCP, que puede llegar como JSON suelto
+// o envuelto en un evento SSE según cómo hable el servidor.
+func readMCP(resp *http.Response) []byte {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil
+	}
+	return api.MCPPayload(b)
 }

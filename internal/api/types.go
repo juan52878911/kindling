@@ -197,3 +197,31 @@ type Info struct {
 type Error struct {
 	Message string `json:"message"`
 }
+
+// GuestRequest pide al daemon que hable con el servidor que corre DENTRO de una
+// microVM. El cliente no puede hacerlo por su cuenta: las IP de los invitados
+// solo existen en la red del host, así que con transporte SSH un sondeo directo
+// se queda esperando hasta agotar el plazo.
+type GuestRequest struct {
+	Port    int               `json:"port,omitempty"`   // 8080 si no se dice otra cosa
+	Path    string            `json:"path,omitempty"`   // /mcp si no se dice otra cosa
+	Method  string            `json:"method,omitempty"` // POST si no se dice otra cosa
+	Body    string            `json:"body,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// WaitMS espera a que el puerto abra antes de mandar nada. Un servidor recién
+	// arrancado tarda en escuchar, y sin esto la primera llamada falla siempre.
+	WaitMS int `json:"wait_ms,omitempty"`
+
+	// ProbeOnly se conforma con que el puerto abra: no manda ninguna petición.
+	// Sirve para separar "no arrancó" de "arrancó y contestó mal", que se
+	// diagnostican de forma muy distinta.
+	ProbeOnly bool `json:"probe_only,omitempty"`
+}
+
+// GuestResponse es lo que contestó el invitado, tal cual.
+type GuestResponse struct {
+	Status  int               `json:"status"`
+	Body    string            `json:"body"`
+	Headers map[string]string `json:"headers,omitempty"`
+}

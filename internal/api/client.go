@@ -197,3 +197,13 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	}
 	return nil
 }
+
+// Guest habla con el servidor que corre dentro de una microVM, pasando por el
+// daemon. Es la única vía que funciona igual en local y por SSH.
+func (c *Client) Guest(ctx context.Context, ref string, r GuestRequest) (*GuestResponse, error) {
+	var out GuestResponse
+	if err := c.do(ctx, "POST", "/machines/"+ref+"/guest", r, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

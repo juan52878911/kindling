@@ -3,9 +3,14 @@
 #
 # DOS MODOS, según cómo hable el servidor:
 #
-#   HTTP nativo — el servidor ya escucha en un puerto:
+#   HTTP nativo — el servidor ya habla Streamable HTTP y escucha él mismo.
+#   No lleva puente: el gateway le habla directamente.
+#     sudo ./80-mcp-image.sh http <nombre> [-p "apk"] [-n "npm"] [-d dir] -- <comando>
 #     sudo ./80-mcp-image.sh http <nombre> <directorio> [paquetes apk]
-#     El directorio necesita un `entrypoint` ejecutable que escuche en :8080.
+#
+#     El servidor debe escuchar en el puerto que le diga $PORT (8080) y servir
+#     el protocolo en /mcp, que es donde el gateway llama. La segunda forma
+#     espera un `entrypoint` ejecutable en el directorio.
 #
 #   stdio — el servidor habla JSON-RPC por tuberías, que es el caso MAYORITARIO
 #   entre los servidores MCP open source:
@@ -22,6 +27,8 @@
 #   sudo ./80-mcp-image.sh stdio files -p "nodejs npm" \
 #        -n "@modelcontextprotocol/server-filesystem" -- mcp-server-filesystem /data
 #   sudo ./80-mcp-image.sh stdio eco -d ./examples/stdio-server-bin -- /opt/mcp/server
+#   sudo ./80-mcp-image.sh http everything -p "nodejs npm" \
+#        -n "@modelcontextprotocol/server-everything" -- mcp-server-everything streamableHttp
 #   sudo ./80-mcp-image.sh http legacy ./mi-servidor-http
 set -euo pipefail
 
@@ -38,33 +45,43 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
 PKGS=""; NPM=""; EXTRA_DIR=""; CMD=()
+
+# Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
+parse_build_opts() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -p) PKGS="$2"; shift 2 ;;
+      -n) NPM="$2"; shift 2 ;;
+      -d) EXTRA_DIR="$2"; shift 2 ;;
+      --) shift; CMD=("$@"); break ;;
+      *)  echo "opción desconocida: $1" >&2; exit 1 ;;
+    esac
+  done
+  [ ${#CMD[@]} -gt 0 ] || { echo "falta el comando tras --" >&2; exit 1; }
+  # Node y sus dependencias piden bastante más sitio que un binario suelto.
+  if [ "$GROW" -eq 0 ]; then
+    [ -n "$NPM" ] && GROW=768 || GROW=256
+  fi
+  # npm implica node: se añade si no se pidió explícitamente.
+  if [ -n "$NPM" ] && ! echo " $PKGS " | grep -q " nodejs "; then
+    PKGS="$PKGS nodejs npm"
+  fi
+}
+
 case "$MODE" in
   http)
-    EXTRA_DIR="${1:?falta el directorio del servidor}"; shift
-    PKGS="${1:-}"
-    [ -x "$EXTRA_DIR/entrypoint" ] || { echo "falta $EXTRA_DIR/entrypoint ejecutable" >&2; exit 1; }
+    # Forma antigua: un directorio que ya trae su propio entrypoint.
+    if [ $# -gt 0 ] && [ -d "$1" ]; then
+      EXTRA_DIR="$1"; shift
+      PKGS="${1:-}"
+      [ -x "$EXTRA_DIR/entrypoint" ] || { echo "falta $EXTRA_DIR/entrypoint ejecutable" >&2; exit 1; }
+    else
+      parse_build_opts "$@"
+    fi
     ;;
   stdio)
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -p) PKGS="$2"; shift 2 ;;
-        -n) NPM="$2"; shift 2 ;;
-        -d) EXTRA_DIR="$2"; shift 2 ;;
-        --) shift; CMD=("$@"); break ;;
-        *)  echo "opción desconocida: $1" >&2; exit 1 ;;
-      esac
-    done
-    [ ${#CMD[@]} -gt 0 ] || { echo "falta el comando tras --" >&2; exit 1; }
+    parse_build_opts "$@"
     [ -f "$BRIDGE" ] || { echo "no encuentro $BRIDGE (compílalo con: make bridge)" >&2; exit 1; }
-    # El servidor puede tardar en instalarse; con stdio suele hacer falta sitio.
-    # Node y sus dependencias piden bastante más que un binario suelto.
-    if [ "$GROW" -eq 0 ]; then
-      [ -n "$NPM" ] && GROW=768 || GROW=256
-    fi
-    # npm implica node: se añade si no se pidió explícitamente.
-    if [ -n "$NPM" ] && ! echo " $PKGS " | grep -q " nodejs "; then
-      PKGS="$PKGS nodejs npm"
-    fi
     ;;
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
@@ -120,9 +137,26 @@ if [ "$MODE" = "stdio" ]; then
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
   } > "$mnt/entrypoint"
-  chmod +x "$mnt/entrypoint"
+elif [ ${#CMD[@]} -gt 0 ]; then
+  # HTTP nativo: no hay puente. El servidor escucha él mismo, y el gateway le
+  # habla igual que a cualquier otro: POST a /mcp del puerto 8080.
+  {
+    echo '#!/bin/sh'
+    echo '# Generado por 80-mcp-image.sh — servidor HTTP nativo, sin puente.'
+    echo '#'
+    echo '# El entrypoint es PID 1 y el kernel no le pasa PATH, así que hay que'
+    echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
+    echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    echo 'export HOME=/root'
+    echo '# 8080 es el puerto que busca el gateway dentro del invitado.'
+    echo 'export PORT=8080'
+    printf 'exec'
+    for a in "${CMD[@]}"; do printf ' %q' "$a"; done
+    echo
+  } > "$mnt/entrypoint"
 fi
 
+[ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }
 chmod +x "$mnt/entrypoint"
 umount "$mnt"
 chmod a+r "$DEST"
