@@ -9,6 +9,11 @@
 # gestor de servicios, ni journal, ni resolución de dependencias de arranque.
 set -e
 
+# El kernel arranca a PID 1 sin entorno. Sin PATH, cualquier programa invocado
+# por nombre —y no por ruta absoluta— falla con "executable file not found".
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root
+
 OVERLAY_DEV="${OVERLAY_DEV:-/dev/vdb}"
 
 mount -t proc     proc     /proc

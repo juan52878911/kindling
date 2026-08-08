@@ -111,6 +111,11 @@ if [ "$MODE" = "stdio" ]; then
   {
     echo '#!/bin/sh'
     echo '# Generado por 80-mcp-image.sh — envoltorio stdio -> Streamable HTTP.'
+    echo '#'
+    echo '# El entrypoint es PID 1 y el kernel no le pasa PATH, así que hay que'
+    echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
+    echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    echo 'export HOME=/root'
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo

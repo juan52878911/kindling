@@ -652,10 +652,43 @@ catálogo real y te lo dice:
 ```
 Coste en contexto, con tu catálogo actual:
   proxy    4 definiciones  ≈  299 tokens
-  expand   4 definiciones  ≈  170 tokens
-  → Con 4 herramientas te sale más barato -expand.
-    El modo proxy compensa a partir de ~8 herramientas.
+  expand  27 definiciones  ≈ 3326 tokens
+  → El modo proxy que estás usando ahorra 3026 tokens.
 ```
 
-El punto de cruce está en torno a 8 herramientas. Con 200, `proxy` ahorra decenas de miles
-de tokens en cada conversación.
+El punto de cruce está en torno a 8 herramientas. Con 27 el proxy ya ahorra **11 veces**; con
+200, decenas de miles de tokens en cada conversación.
+
+## Servidores MCP oficiales corriendo
+
+Los servidores oficiales de Anthropic, alojados como microVMs efímeras:
+
+```sh
+sudo ./scripts/80-mcp-image.sh stdio filesystem \
+     -n "@modelcontextprotocol/server-filesystem" -- mcp-server-filesystem /data
+kling mcp import filesystem
+```
+
+```
+SERVICIO     HERRAMIENTAS   CATÁLOGO    MEMORIA   INSTANCIAS
+filesystem   14             46s atrás   125M      0
+memory        9             2m atrás    122M      0
+```
+
+Uso real, a través del agregador y en microVMs de un solo uso:
+
+```
+filesystem.read_text_file  /data/prueba.txt   ->  "hola desde kindling"   (31 ms)
+memory.create_entities     kindling/proyecto  ->  entidad creada          (31 ms)
+```
+
+**31 ms por acción**, cada una en su propia máquina que muere al terminar.
+
+### Tres cosas que hay que saber al empaquetar un servidor de node
+
+- **`-n` preinstala el paquete npm.** Las microVMs arrancan sin salida a internet: un
+  `npx -y` fallaría al descargar.
+- **El `entrypoint` es PID 1 y el kernel no le da PATH.** Sin fijarlo, los binarios que
+  instala npm no se encuentran: `executable file not found in $PATH`.
+- **Los directorios que espera el servidor deben existir DENTRO de la imagen.** El
+  `server-filesystem` quiere `/data`; crearlo en el host no sirve de nada.

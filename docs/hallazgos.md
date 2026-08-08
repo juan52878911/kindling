@@ -492,3 +492,24 @@ De 350 ms a 19 ms, con 2 ms de ejecución real.
 `take()` no bloquea nunca: si el fondo está vacío devuelve nil y quien llama sigue por el
 camino lento. Esperar a que se pre-caliente una instancia convertiría un fondo vacío en
 latencia AÑADIDA sobre la que ya había, que es lo contrario de para lo que existe.
+
+## Empaquetar servidores MCP de node: tres tropiezos
+
+1. **`npx -y` no funciona dentro de una microVM.** Arrancan sin salida a internet, así que
+   descargar en tiempo de ejecución falla. Hay que preinstalar el paquete en la imagen (`-n`).
+2. **El `entrypoint` es PID 1 y el kernel no le pasa entorno.** Sin `PATH`, los binarios que
+   npm instala en `/usr/bin` no se resuelven: `exec: "mcp-server-memory": executable file not
+   found in $PATH`. Se fija en el propio entrypoint y en `minimal-init.sh`.
+3. **Los directorios que el servidor espera van DENTRO de la imagen.** `server-filesystem
+   /data` necesita `/data` en el invitado; crearlo en el host no sirve de nada, y el fallo
+   aparece como un error de JSON ilegible en la introspección, que despista bastante.
+
+## El ahorro de contexto, ya con catálogo real
+
+Con 27 herramientas de servidores oficiales:
+
+	proxy    4 definiciones  ≈  305 tokens
+	expand  27 definiciones  ≈ 3330 tokens
+
+11 veces menos. Con 4 herramientas el proxy salía más caro; el cruce estaba, como se
+calculó, en torno a 8.
