@@ -69,8 +69,8 @@ OBSERVACIÓN
 CONECTAR CON TU AGENTE
   connect                                          guía paso a paso
   connect -all                                     UNA entrada para todos los
-                                                   servicios, con 4 meta-
-                                                   herramientas en vez de N
+                                                   servicios: inventario en el
+                                                   handshake, esquemas a demanda
   connect -all -only eco,files                     solo esos servicios
   connect -all -expand                             catálogo completo (gasta más
                                                    contexto)

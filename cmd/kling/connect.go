@@ -68,7 +68,7 @@ func cmdConnect(args []string) error {
 		if *expand {
 			fmt.Println("Modo:      expand — el agente carga TODAS las definiciones")
 		} else {
-			fmt.Println("Modo:      proxy — 4 meta-herramientas; el agente busca lo que necesita")
+			fmt.Println("Modo:      proxy — inventario en el handshake + 3 meta-herramientas")
 		}
 		if info, tools, err := probeMCP(url); err != nil {
 			fmt.Printf("Estado:    ✗ %v\n\n", err)

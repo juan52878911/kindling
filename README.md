@@ -651,12 +651,12 @@ catálogo real y te lo dice:
 
 ```
 Coste en contexto, con tu catálogo actual:
-  proxy    4 definiciones  ≈  299 tokens
-  expand  27 definiciones  ≈ 3326 tokens
-  → El modo proxy que estás usando ahorra 3026 tokens.
+  proxy    3 definiciones  ≈  248 tokens
+  expand  28 definiciones  ≈ 4327 tokens
+  → El modo proxy que estás usando ahorra 4079 tokens.
 ```
 
-El punto de cruce está en torno a 8 herramientas. Con 27 el proxy ya ahorra **11 veces**; con
+El punto de cruce está en torno a 8 herramientas. Con 28 el proxy ahorra **17 veces**; con
 200, decenas de miles de tokens en cada conversación.
 
 ## Servidores MCP oficiales corriendo
