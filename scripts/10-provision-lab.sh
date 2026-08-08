@@ -44,7 +44,16 @@ qm create "$VMID" --name "$NAME" \
 
 qm resize "$VMID" scsi0 "$DISK"
 qm set "$VMID" --ciuser "$CIUSER" --sshkeys "$PUBKEY" --ipconfig0 "ip=$IP,gw=$GW"
+
+# El agente de invitado no es opcional en la práctica: sin él, Proxmox no puede
+# distinguir memoria en uso de caché de disco, y una VM que solo tiene 600 MB
+# ocupados aparece al 81% porque el invitado cacheó ficheros de snapshot.
+qm set "$VMID" --cicustom "" >/dev/null 2>&1 || true
 qm start "$VMID"
 
 echo "VM $VMID ($NAME) arrancando en ${IP%%/*}"
-echo "comprueba dentro:  ls -l /dev/kvm"
+echo
+echo "Dentro de la VM, instala el agente o el panel te mentirá sobre la memoria:"
+echo "  sudo apt-get install -y qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent"
+echo
+echo "comprueba también:  ls -l /dev/kvm"

@@ -675,3 +675,25 @@ Queda abierto: con 8 peticiones paralelas a un servicio PERSISTENTE, ~25% siguen
 tiempo de espera. El puente aguanta 16 en paralelo en 127 ms medido directamente, y los
 servicios efímeros van 8/8 en 785 ms, así que la causa está en el gateway y no se ha
 aislado. Para servicios persistentes, secuencial.
+
+## El 81% de memoria del panel era caché de disco
+
+El hipervisor mostraba la VM del laboratorio al 81% (3.26 de 4 GiB) tras una jornada de
+pruebas, con solo dos microVMs vivas. El desglose del invitado lo aclaraba: 2.9 GiB en
+`Cached` frente a 273 MiB en `AnonPages`.
+
+Se confirmó soltando la caché: bajó a 178 MiB, el uso real se quedó igual y las microVMs
+siguieron respondiendo. No había fuga — ni procesos firecracker huérfanos, ni namespaces, ni
+cgroups sueltos.
+
+Dos mejoras salieron de ahí:
+
+1. **`qemu-guest-agent`**. Sin agente, el hipervisor no puede preguntarle al invitado cuánta
+   memoria usa de verdad y cuenta todo lo que ha tocado. Instalarlo llevó el panel de
+   3.26 GiB a 961 MiB para el mismo estado.
+2. **Soltar la caché del fichero de memoria tras congelar**, con `posix_fadvise(DONTNEED)`.
+   Se escribe entero, se relee para perforarlo, y después no se toca hasta que alguien
+   descongele ESA máquina. Acumulación por ciclo: de ~150 MiB a ~54.
+
+Los snapshots dorados quedan fuera a propósito: su caché es lo que hace que N instancias
+compartan páginas, y tirarla saldría carísimo.

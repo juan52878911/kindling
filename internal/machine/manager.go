@@ -546,6 +546,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		log.Printf("aviso: no pude perforar %s: %v: %s", memPath, err, out)
 	}
 
+	// El fichero de memoria queda entero en caché tras escribirlo y releerlo para
+	// perforarlo, y no se volverá a tocar hasta que alguien descongele ESTA
+	// máquina. Se suelta: es la principal fuente de caché acumulada del host.
+	dropCache(memPath)
+
 	size := allocatedBytes(memPath) + allocatedBytes(snapPath)
 
 	m.mu.Lock()

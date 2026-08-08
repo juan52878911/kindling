@@ -887,3 +887,28 @@ El modelo pregunta en el idioma del usuario y las herramientas se describen en i
 Buscar "leer un fichero de texto" contra *"Read the complete contents of a file"* no casaba ni
 un término, así que `find_tools` devolvía cualquier cosa. Una tabla de sinónimos del dominio
 —leer/read, fichero/file, carpeta/directory…— lo arregla sin meter un motor de búsqueda.
+
+## Memoria: qué es real y qué es caché
+
+Tras muchos ciclos de congelar y descongelar, el hipervisor puede mostrar la VM del
+laboratorio al 80% de memoria. Casi todo es **caché de disco**, no uso real:
+
+```
+Cached:      2.9 GiB    ← lo que ves en el panel
+AnonPages:   273 MiB    ← memoria de procesos, lo real
+```
+
+Se comprueba soltándola: la caché baja de 3.098 a 178 MiB, el uso se queda en ~600 MiB y las
+microVMs siguen respondiendo. Es memoria reclamable; el kernel la suelta bajo presión.
+
+Dos cosas ayudan:
+
+- **`qemu-guest-agent` en la VM del laboratorio.** Sin él, el hipervisor no distingue uso de
+  caché y reporta todo lo que el invitado ha tocado. Con él, el panel pasó de 3.26 GiB a
+  961 MiB para el mismo estado real.
+- **kindling suelta la caché del fichero de memoria tras congelar.** Ese fichero se escribe
+  entero y se relee para perforarlo, y luego no se toca hasta que alguien descongele esa
+  máquina concreta. Bajó la acumulación de ~150 MiB a ~54 MiB por ciclo.
+
+Los snapshots **dorados** no se sueltan a propósito: ahí la caché es justo lo que permite que
+N instancias compartan páginas.
