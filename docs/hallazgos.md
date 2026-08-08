@@ -232,3 +232,31 @@ uno contabiliza como propias. **RSS no sirve para medir densidad**: hay que mira
 del sistema.
 
 Comparado con arrancar 10 en frío, que costaron +824 MiB: **12x de densidad**.
+
+## La red no sobrevive al snapshot: se resuelve con namespaces, no con parches
+
+Firecracker graba el `host_dev_name` de cada interfaz dentro del snapshot, y **no permite
+parchearlo** al restaurar (a diferencia de los discos, donde `PATCH /drives` sí funciona).
+Con N instancias de un snapshot dorado, las N reclaman el mismo TAP.
+
+La salida es invertir el problema: en vez de dar a cada microVM una red distinta, se les da
+a todas **la misma red dentro de su propio namespace**. `tap0`, `172.16.0.2` y la misma MAC
+en todas; lo que cambia es el namespace y el enlace veth hacia el host.
+
+Consecuencias prácticas:
+
+- Firecracker debe lanzarse **dentro** del namespace (`ip netns exec`), que es donde vive
+  su `tap0`.
+- El invitado se configura con el parámetro `ip=` del kernel, sin necesitar ninguna
+  herramienta de red en la imagen.
+- Cada namespace hace MASQUERADE hacia fuera y DNAT hacia dentro, así que desde el host
+  cada máquina tiene una IP distinta aunque todas usen la misma internamente.
+
+## Verificar que responde el invitado y no la interfaz del host
+
+Un ping a la IP del namespace puede contestarlo la propia interfaz veth, no la microVM. La
+prueba que discrimina es parar la máquina **dejando el namespace en pie**: si sigue
+respondiendo, estabas midiendo el host.
+
+Medido: 0% de pérdida con la microVM viva, 100% con la microVM parada y el namespace
+intacto.

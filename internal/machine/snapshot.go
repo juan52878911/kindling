@@ -13,6 +13,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/fc"
+	knet "github.com/juan52878911/kindling/internal/net"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -196,9 +197,18 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, fmt.Errorf("copiando el overlay dorado: %v: %s", err, out)
 	}
 
+	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
+	// al congelarse: es lo que permite que un solo snapshot sirva para N copias.
+	netcfg := knet.Plan(m.allocNetIndex(), id)
+	if err := netcfg.Setup(); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("montando la red: %w", err)
+	}
+
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
+		IP: netcfg.NSIP, NetIndex: netcfg.Index,
 		CreatedAt: time.Now(),
 	}
 	m.mu.Lock()
@@ -208,8 +218,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 
 	sock := filepath.Join(dir, "fc.sock")
 	_ = os.Remove(sock)
-	pid, err := m.spawn(id, sock)
+	pid, err := m.spawn(id, sock, netcfg)
 	if err != nil {
+		netcfg.Teardown()
 		m.fail(mc, err)
 		return nil, err
 	}

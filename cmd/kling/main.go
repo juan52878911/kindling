@@ -42,6 +42,7 @@ SNAPSHOTS DORADOS
   rmi <nombre>                                     elimina un snapshot
 
 OBSERVACIÓN
+  topo                                             diagrama ASCII de todo
   events                                           stream de eventos del daemon
   info                                             estado del daemon
 
@@ -82,6 +83,8 @@ func main() {
 		err = cmdSnapshots(args)
 	case "rmi":
 		err = cmdRmi(args)
+	case "topo":
+		err = cmdTopo(args)
 	case "events":
 		err = cmdEvents(args)
 	case "info":
@@ -392,6 +395,137 @@ func cmdEvents(args []string) error {
 		}
 		fmt.Println(line)
 	})
+}
+
+// cmdTopo dibuja la topología: qué snapshots hay, qué instancias cuelgan de cada
+// uno y por dónde se alcanzan. Agrupa por snapshot porque es la relación que
+// determina el coste: las instancias de un mismo snapshot comparten memoria.
+func cmdTopo(args []string) error {
+	fs := flag.NewFlagSet("topo", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	c := api.NewClient(*host)
+	info, err := c.Info(ctx)
+	if err != nil {
+		return err
+	}
+	machines, err := c.List(ctx)
+	if err != nil {
+		return err
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+
+	kvm := "sin KVM"
+	if info.KVM {
+		kvm = "KVM ok"
+	}
+	fmt.Printf("kindling  %s\n", c.Endpoint())
+	fmt.Printf("          %s · %s\n\n", kvm, strings.TrimSpace(info.Firecrack))
+
+	// agrupar por snapshot de origen
+	byFrom := map[string][]*api.Machine{}
+	for _, mc := range machines {
+		byFrom[mc.From] = append(byFrom[mc.From], mc)
+	}
+
+	groups := make([]string, 0, len(snaps)+1)
+	for _, s := range snaps {
+		groups = append(groups, s.Name)
+	}
+	if len(byFrom[""]) > 0 {
+		groups = append(groups, "")
+	}
+
+	fmt.Printf("  host  %s\n", netRange(machines))
+	var running, warm, stopped int
+	var diskOwn, diskShared int64
+	for _, s := range snaps {
+		diskShared += s.DiskBytes
+	}
+
+	for gi, g := range groups {
+		last := gi == len(groups)-1
+		branch, cont := "├─", "│ "
+		if last {
+			branch, cont = "└─", "  "
+		}
+
+		if g == "" {
+			fmt.Printf("   %s◆ (arrancadas en frío)\n", branch)
+		} else {
+			var snap *api.Snapshot
+			for _, s := range snaps {
+				if s.Name == g {
+					snap = s
+				}
+			}
+			fmt.Printf("   %s◆ %-16s snapshot dorado · %s de memoria compartida\n",
+				branch, g, human(snap.MemBytes))
+		}
+
+		list := byFrom[g]
+		for mi, mc := range list {
+			mbranch := "├──"
+			if mi == len(list)-1 {
+				mbranch = "└──"
+			}
+			ip := mc.IP
+			if mc.State != api.StateRunning || ip == "" {
+				ip = "—"
+			}
+			diskOwn += mc.DiskBytes
+			switch mc.State {
+			case api.StateRunning:
+				running++
+			case api.StateWarm:
+				warm++
+			default:
+				stopped++
+			}
+			fmt.Printf("   %s %s %-14s %-8s %-15s %6s  %s\n",
+				cont, mbranch, trunc(mc.Name, 14), mc.State, ip, human(mc.DiskBytes), lastOp(mc))
+		}
+		if len(list) == 0 {
+			fmt.Printf("   %s └── (sin instancias)\n", cont)
+		}
+		if !last {
+			fmt.Printf("   │\n")
+		}
+	}
+
+	fmt.Printf("\n  %d running · %d warm · %d parada(s)   disco: %s propio + %s compartido\n",
+		running, warm, stopped, human(diskOwn), human(diskShared))
+	return nil
+}
+
+// netRange resume el rango en uso a partir de las máquinas vivas.
+func netRange(ms []*api.Machine) string {
+	for _, mc := range ms {
+		if mc.IP != "" {
+			if i := strings.LastIndex(mc.IP, "."); i > 0 {
+				if j := strings.Index(mc.IP, "."); j > 0 {
+					return mc.IP[:strings.Index(mc.IP[j+1:], ".")+j+1] + ".0.0/16"
+				}
+			}
+		}
+	}
+	return "(sin red activa)"
+}
+
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 func cmdInfo(args []string) error {

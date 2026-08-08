@@ -4,8 +4,8 @@ Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: co
 servidor MCP open source cualquiera y convertirlo automáticamente en un servicio que se
 levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
 
-> Estado: **fase 2 de 5**. `kling` gestiona microVMs con interfaz tipo docker, local o
-> por SSH, con eventos en streaming. Falta la red y el gateway MCP.
+> Estado: **fase 3 de 5**. `kling` gestiona microVMs con interfaz tipo docker, con red,
+> snapshots dorados y eventos en streaming. Falta el gateway MCP.
 
 ## kling
 
@@ -213,7 +213,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 1** — Laboratorio: microVM que arranca, snapshot/restore medido
 - [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH
 - [x] **Fase 1.6** — Overlays, snapshots dispersos y snapshots dorados con memoria compartida
-- [ ] **Fase 2** — Red por TAP, y resolver que el estado de red no sobrevive al snapshot
+- [x] **Fase 2** — Red por TAP con un namespace por microVM
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
 - [ ] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger
 - [ ] **Fase 5** — Conversión automática de un MCP open source a microVM
@@ -245,3 +245,42 @@ cuenta como suyas.
 
 Esto es, en la práctica, lo que se persigue con UFFD — y sale del backend `File`, sin
 escribir un gestor de fallos de página.
+
+## Red: un namespace por microVM
+
+```
+$ kling topo
+kindling  ssh://juan@192.168.2.60
+          KVM ok · Firecracker v1.16.1
+
+  host  172.30.0.0/16
+   ├─◆ golden           snapshot dorado · 82M de memoria compartida
+   │  ├── g3             running  172.30.0.18       384K  thaw 28ms
+   │  ├── g2             running  172.30.0.14       384K  thaw 26ms
+   │  └── g1             running  172.30.0.10       384K  thaw 41ms
+   │
+   └─◆ (arrancadas en frío)
+      └── plantilla      running  172.30.0.6          8M  boot 46ms
+
+  4 running · 0 warm · 0 parada(s)   disco: 9M propio + 83M compartido
+```
+
+**El problema:** un snapshot graba el nombre del dispositivo TAP del host. Si N instancias
+restauran del mismo snapshot dorado, las N piden el mismo TAP y chocan. Y no vale
+reasignarlo: Firecracker no permite parchear `host_dev_name`.
+
+**La solución:** un namespace de red por microVM. Dentro de cada uno el TAP se llama
+siempre `tap0` y el invitado tiene siempre la misma IP, así que **el snapshot vale para
+todas**. La diferenciación ocurre entera en el host, al otro lado de un veth:
+
+```
+        host                  │  netns kl-<id>          │  microVM
+ vh-<id> 172.30.a.b/30 ◄─veth─► vg-<id> 172.30.a.b+1    │
+                              │ tap0    172.16.0.1/30   ├─ eth0 172.16.0.2
+```
+
+El invitado se configura con el parámetro `ip=` del kernel, sin necesitar herramientas de
+red dentro de la imagen. Desde el host cada máquina se alcanza por la IP de su namespace,
+que hace DNAT hacia el invitado.
+
+Es el mismo enfoque que usa AWS Lambda, y por la misma razón.

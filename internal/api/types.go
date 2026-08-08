@@ -42,6 +42,11 @@ type Machine struct {
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
 
+	// IP por la que el host alcanza esta microVM. Dentro, todas las máquinas
+	// usan la misma dirección: la diferenciación vive en el host.
+	IP       string `json:"ip,omitempty"`
+	NetIndex int    `json:"net_index,omitempty"`
+
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`

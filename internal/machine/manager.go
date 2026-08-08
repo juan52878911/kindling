@@ -19,13 +19,18 @@ import (
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
+	knet "github.com/juan52878911/kindling/internal/net"
 )
 
 // La raíz se monta en SOLO LECTURA y el init es overlay-init, que superpone el
 // disco propio de cada máquina (/dev/vdb) sobre la imagen base compartida
 // (/dev/vda). Así N microVMs comparten una base de cientos de MB en vez de
 // copiarla N veces.
-const bootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init"
+const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init"
+
+// bootArgs añade la configuración de red, que el kernel del invitado aplica solo
+// sin necesitar herramientas dentro de la imagen.
+func bootArgs() string { return bootArgsBase + " " + knet.BootArg() }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
 // disperso, el coste real en disco es solo lo que la microVM llegue a escribir.
@@ -174,6 +179,22 @@ func (m *Manager) Count() int {
 	return len(m.byID)
 }
 
+// allocNetIndex devuelve el menor índice de red libre, para reutilizar huecos en
+// vez de agotar el rango con máquinas que ya no existen.
+func (m *Manager) allocNetIndex() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	used := make(map[int]bool, len(m.byID))
+	for _, mc := range m.byID {
+		used[mc.NetIndex] = true
+	}
+	for i := 1; ; i++ {
+		if !used[i] {
+			return i
+		}
+	}
+}
+
 // ── ciclo de vida ─────────────────────────────────────────────────────────────
 
 func newID() string {
@@ -234,9 +255,17 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
+	netcfg := knet.Plan(m.allocNetIndex(), id)
+	if err := netcfg.Setup(); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("montando la red: %w", err)
+	}
+	mc.IP, mc.NetIndex = netcfg.NSIP, netcfg.Index
+
 	start := time.Now()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg)
 	if err != nil {
+		netcfg.Teardown()
 		m.fail(mc, err)
 		return nil, err
 	}
@@ -285,11 +314,11 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net) (int, error) {
 	sock := filepath.Join(m.dir(id), "fc.sock")
 	_ = os.Remove(sock)
 
-	pid, err := m.spawn(id, sock)
+	pid, err := m.spawn(id, sock, n)
 	if err != nil {
 		return 0, err
 	}
@@ -298,7 +327,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs()}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -313,6 +342,15 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	}); err != nil {
 		return pid, err
 	}
+	if n != nil {
+		// tap0 se llama igual en todos los namespaces: por eso el snapshot vale
+		// para cualquier instancia.
+		if err := c.SetNetwork(ctx, fc.NetworkInterface{
+			IfaceID: "eth0", HostDevName: knet.TapName, GuestMAC: knet.GuestMAC,
+		}); err != nil {
+			return pid, err
+		}
+	}
 	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memMiB}); err != nil {
 		return pid, err
 	}
@@ -326,12 +364,17 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 }
 
 // spawn arranca firecracker desacoplado del daemon y devuelve su PID.
-func (m *Manager) spawn(id, sock string) (int, error) {
+func (m *Manager) spawn(id, sock string, n *knet.Net) (int, error) {
 	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
 	if err != nil {
 		return 0, err
 	}
-	cmd := exec.Command(m.fcBin, "--api-sock", sock)
+	// Firecracker corre DENTRO del namespace de la microVM: es donde vive su tap0.
+	argv := []string{m.fcBin, "--api-sock", sock}
+	if n != nil {
+		argv = n.Wrap(m.fcBin, "--api-sock", sock)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -430,7 +473,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	sock := filepath.Join(dir, "fc.sock")
 	_ = os.Remove(sock)
 
-	pid, err := m.spawn(mc.ID, sock)
+	// El namespace pudo desaparecer con un reinicio del host; lo rehacemos con el
+	// mismo índice para que la máquina conserve su IP.
+	netcfg := knet.Plan(mc.NetIndex, mc.ID)
+	if err := netcfg.Setup(); err != nil {
+		return nil, fmt.Errorf("rehaciendo la red: %w", err)
+	}
+	pid, err := m.spawn(mc.ID, sock, netcfg)
 	if err != nil {
 		return nil, err
 	}
@@ -491,6 +540,7 @@ func (m *Manager) Remove(ref string) error {
 		return fmt.Errorf("no existe la máquina %q", ref)
 	}
 	m.kill(mc.ID)
+	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
