@@ -95,41 +95,6 @@ func (g Group) Flow() []string {
 	return steps
 }
 
-// Persistence explica dónde acaba lo que una herramienta escriba.
-//
-// memService es el servicio de memoria configurado, si lo hay.
-func (g Group) Persistence(memService string) (string, string) {
-	writers := g.writers()
-
-	if g.Link != nil {
-		return "El servidor externo gestiona su propio almacenamiento, fuera de kindling.", ""
-	}
-	if len(writers) == 0 {
-		return "Ninguna de sus herramientas escribe: no hay nada que persistir.", ""
-	}
-
-	list := strings.Join(writers, ", ")
-	if g.Snapshot != nil && g.Snapshot.Stateful() {
-		return fmt.Sprintf(
-				"Escribe con %s. Lo escrito vive en el disco de su instancia y sobrevive a que "+
-					"se congele, pero NO a que la instancia se elimine.", list),
-			advice(memService)
-	}
-	return fmt.Sprintf(
-			"Escribe con %s. La máquina se destruye al terminar la llamada, así que "+
-				"lo escrito DESAPARECE: un fichero guardado no estará ahí en la siguiente llamada.", list),
-		advice(memService)
-}
-
-func advice(memService string) string {
-	if memService == "" {
-		return "Para lo que deba sobrevivir, enlaza un servicio de memoria: " +
-			"kling mcp link engram <url> && kling memory enable"
-	}
-	return "Para lo que deba sobrevivir, guárdalo en " + memService +
-		": es un servidor externo, vive fuera de las microVMs y no se lo lleva ninguna."
-}
-
 // writers son las herramientas del servicio que parecen escribir algo.
 func (g Group) writers() []string {
 	var tools []api.ToolSpec

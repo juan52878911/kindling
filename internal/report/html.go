@@ -26,68 +26,9 @@ type Group struct {
 	RAMShared int64
 }
 
-// Kind describe de dónde sale un servicio.
-func (g Group) Kind() string {
-	switch {
-	case g.Link != nil:
-		return "externo"
-	case g.Snapshot != nil:
-		return "microVM"
-	default:
-		return "sin snapshot"
-	}
-}
-
 // Ephemeral indica si sus instancias mueren tras cada acción.
 func (g Group) Ephemeral() bool {
 	return g.Link == nil && g.Snapshot != nil && !g.Snapshot.Stateful()
-}
-
-// Trigger explica qué hace aparecer a una instancia de este servicio.
-func (g Group) Trigger() string {
-	switch {
-	case g.Link != nil:
-		return "no arranca nada: se enruta a " + g.Link.URL
-	case g.Snapshot == nil:
-		return "sin snapshot: no puede instanciarse"
-	case g.Snapshot.Stateful():
-		return "primera llamada a una de sus herramientas; se congela al quedar ociosa"
-	default:
-		return "cada llamada a una de sus herramientas; muere al terminar"
-	}
-}
-
-// Shares describe qué comparten sus instancias entre sí.
-func (g Group) Shares() string {
-	switch {
-	case g.Link != nil:
-		return "el proceso remoto y su estado"
-	case g.Snapshot == nil:
-		return "—"
-	default:
-		return human(g.Snapshot.MemBytes) + " de memoria del snapshot, y la imagen base"
-	}
-}
-
-// Runnable dice si el servicio puede atender una llamada ahora mismo.
-func (g Group) Runnable() (bool, string) {
-	switch {
-	case g.Link != nil:
-		return true, "enrutado a un servidor externo"
-	case g.Snapshot == nil:
-		return false, "no hay snapshot del que instanciar"
-	case len(g.Snapshot.Tools) == 0:
-		return false, "sin catálogo: reimporta con kling mcp import"
-	}
-	for _, m := range g.Machines {
-		if m.State == api.StateRunning {
-			return true, "ya hay una instancia en marcha"
-		}
-		if m.State == api.StateWarm {
-			return true, "instancia congelada: vuelve en milisegundos"
-		}
-	}
-	return true, "se instanciará del snapshot dorado"
 }
 
 // Build agrupa por la etiqueta "service" y, en su defecto, por el snapshot del
@@ -196,25 +137,9 @@ func age(t time.Time, now time.Time) string {
 	}
 }
 
-// Render produce el informe: el mapa de llamadas.
-func Render(info *api.Info, groups []Group, endpoint string, now time.Time) string {
-	return RenderMap(info, groups, endpoint, now, "")
-}
-
 func stat(b *strings.Builder, value, label, class string) {
 	b.WriteString(`<div class="stat ` + class + `"><span class="v">` + esc(value) +
 		`</span><span class="l">` + esc(label) + `</span></div>`)
-}
-
-func stateClass(s api.State) string {
-	switch s {
-	case api.StateRunning:
-		return "running"
-	case api.StateWarm:
-		return "warm"
-	default:
-		return "other"
-	}
 }
 
 func lastOp(m *api.Machine) string {
@@ -227,22 +152,6 @@ func lastOp(m *api.Machine) string {
 		return fmt.Sprintf("boot %d ms", m.BootMS)
 	}
 	return "—"
-}
-
-func labels(l map[string]string) string {
-	if len(l) == 0 {
-		return `<span class="muted">—</span>`
-	}
-	keys := make([]string, 0, len(l))
-	for k := range l {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var sb strings.Builder
-	for _, k := range keys {
-		sb.WriteString(`<span class="chip">` + esc(k) + `=` + esc(l[k]) + `</span>`)
-	}
-	return sb.String()
 }
 
 // diagram dibuja host → grupos → máquinas en SVG.

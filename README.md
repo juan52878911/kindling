@@ -840,66 +840,60 @@ make bridge-local
 kling mcp link engram http://<tu-ip>:9100/mcp
 ```
 
-## Mapa de llamadas
+## Informe de topología
 
 ```sh
-kling export -o mapa.html
+kling export -o topologia.html
 ```
 
-Un HTML autocontenido con el recorrido de una llamada dibujado: un carril por servicio,
-de izquierda a derecha, y el color diciendo en qué estado está cada uno.
+Un HTML autocontenido con el mismo árbol de siempre —el host a la izquierda, sus servicios
+en columna, las instancias a la derecha— pero navegable: cada caja con hijos se abre y se
+cierra, y la que elijas se detalla debajo.
 
 ```
-QUIEN LLAMA      GATEWAY          SERVICIO           AL TERMINAR              SI ESCRIBE ALGO
-
-                              ┌ eco ─────────┐   la máquina muere
-                              │ 2 herram.  ○ │
-                              └──────────────┘
-                              ┌ engram ──────┐   sigue vivo donde está   propio, fuera de kindling
-                              │ 11 herram. ● │
-                              └──────────────┘
- ┌ modelo ┐   ┌ gateway ────┐ ┌ filesystem ──┐   se congela al quedar    vive mientras viva la
- │        ├───┤             ├─┤ 14 herram. ● │   ociosa                  instancia → engram
- └────────┘   └─────────────┘ └──────────────┘
+                        ┌ eco ──────────┐
+                        │ 2 herramientas│  sin instancias · ~250 ms
+                        └───────────────┘
+                        ┌ engram ───────┐
+                        │ 11 herramient.│  no corre aquí
+ ┌ host ────────────┐   └───────────────┘
+ │ ssh://…2.60    − ├───┌ filesystem ───┐   ┌ fs-66e51d ────┐
+ └──────────────────┘   │ 14 herramient.├───┤ 244f32b7      │  172.30.0.54 · thaw 30 ms
+                        └───────────────┘   └───────────────┘
 ```
 
-Responde de un vistazo a tres cosas:
+El borde dice el estado: verde atendiendo, ámbar dormido, punteado gris listo pero sin
+instancia, azul externo. Un servicio punteado no está roto — aparece solo en cuanto alguien
+lo llame, y la anotación gris de la derecha dice cuánto costará.
 
-**Qué puede ejecutarse aunque no haya nada corriendo.** El borde de cada servicio dice su
-estado — sólido verde si ya está atendiendo, ámbar si duerme congelado, punteado gris si
-está listo pero sin instancia viva, azul si es un servidor externo — y la etiqueta sobre su
-cable dice lo que costará la próxima llamada: `inmediata`, `~30 ms`, `~250 ms`, `externo`.
-Un servicio punteado no está apagado: aparece solo en cuanto alguien lo llame.
+### Cuatro vistas del mismo sistema
 
-**Qué se activa al llamar a una herramienta.** Al pulsar un carril se ilumina su recorrido
-completo, el resto se atenúa, y abajo se detalla el flujo paso a paso:
+| vista | qué enseña |
+|---|---|
+| **Topología** | el host, sus servicios y las instancias vivas de cada uno |
+| **Capas** | qué atraviesa una llamada: gateway → agregador → microVM → kernel, rootfs, overlay, puente → servidor MCP |
+| **MCP** | el catálogo completo: cada servicio con sus herramientas, marcando cuáles escriben |
+| **Red** | quién puede salir a internet y quién está aislado, namespace por namespace |
 
-```
-1. El gateway resuelve la herramienta al servicio eco
-2. Toma una microVM del fondo pre-calentado, o instancia una (~250 ms)
-3. El puente reenvía la llamada al servidor MCP por stdin/stdout
-4. Al responder, la máquina SE DESTRUYE — y con ella todo lo que escribiera
-```
+### Profundizar
 
-**Dónde acaba lo que esa herramienta escriba.** La última columna lo dice por servicio, y un
-segundo diagrama lo resuelve en general:
+Pulsar una caja la abre. Si quieres bajar de nivel del todo, el panel ofrece **Profundizar**:
+ese nodo pasa a ser la raíz y aparece una miga de pan para volver.
 
 ```
-                          ┌ disco de una microVM efímera ─────┐  ✗ se pierde al responder
-                       ┌──┤ el fichero, la fila, lo que sea   │
- ┌ la herramienta ┐    │  └───────────────────────────────────┘
- │ escribe algo   ├────┤  ┌ disco de instancia persistente ───┐  ✗ se pierde si la instancia
- └────────────────┘    ├──┤ sobrevive a congelarse            │    se elimina
-                       │  └───────────────────────────────────┘
-                       │  ┌ engram ───────────────────────────┐  ✓ sobrevive a todo
-                       └──┤ servidor externo, fuera de las VMs│
-                          └───────────────────────────────────┘
+catálogo › filesystem
 ```
 
-Si una herramienta necesita persistir un fichero, una fila en una base de datos o cualquier
-otra cosa, **el destino correcto es el servicio de memoria enlazado**, no el disco del
-invitado. El informe marca en ámbar cada servicio cuyas escrituras no sobreviven, y nombra
-las herramientas concretas que escriben.
+El panel de abajo cambia con lo que selecciones: los datos del nodo, el flujo paso a paso de
+una llamada a ese servicio, y —si escribe algo— dónde acaba lo escrito.
+
+> **Ojo con lo que escriba.** Escribe con `create_directory`, `edit_file`, `move_file`,
+> `write_file`. Vive mientras viva la instancia → guárdalo en **engram**.
+
+Ahí está la regla que más confusión causa: el overlay de una microVM muere con ella. Si una
+herramienta necesita persistir un fichero, una fila en una base de datos o cualquier otra
+cosa, **el destino correcto es el servicio de memoria enlazado**, no el disco del invitado.
+La vista de Capas lo marca en el propio nodo `overlay propio`.
 
 ## Memoria de uso (opcional)
 
