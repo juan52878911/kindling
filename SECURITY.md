@@ -20,6 +20,14 @@ comprometidos.
 El acceso remoto es **SSH y nada más**: `ssh host kling dial-stdio`. La autenticación es la
 de SSH; kindling no inventa credenciales propias.
 
+Ese socket incluye `POST /machines/{ref}/guest`, que reenvía una petición HTTP al servidor
+que corre dentro de una microVM. Es lo que permite importar un servicio desde un CLI remoto,
+porque las IP de los invitados solo existen en la red del host. Amplía lo que puede hacer
+quien alcance el socket, pero no por encima de lo que ya podía: quien controla el daemon
+puede arrancar la máquina que quiera y hablarle igualmente. El proxy acota destino
+—una máquina en marcha, un puerto, una ruta— y trunca la respuesta a 8 MiB para que un
+invitado desbocado no agote la memoria del daemon.
+
 ### 2. Firecracker corre sin privilegios
 
 El daemon necesita root para crear namespaces y dispositivos TAP. **El VMM no.** Firecracker
@@ -116,6 +124,9 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   entras, puedes con todo.
 - **Los snapshots dorados no se verifican.** No hay firma ni checksum, así que quien pueda
   escribir en `snapshots/` decide qué se ejecuta.
+- **El proxy al invitado no filtra el destino.** `POST /machines/{ref}/guest` acepta
+  cualquier puerto y cualquier ruta de la máquina indicada. No es una escalada —quien llega
+  al socket ya manda— pero conviene saberlo si algún día el socket se comparte.
 
 ## Ante un incidente
 

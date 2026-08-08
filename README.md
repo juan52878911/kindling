@@ -19,8 +19,10 @@ todavía NO está resuelto.
 $ kling info
 endpoint:     ssh://juan@192.168.2.60
 daemon:       0.1.0
+root:         /var/lib/kindling
 KVM:          sí
 firecracker:  Firecracker v1.16.1
+máquinas:     7
 
 $ kling run -name mcp-demo
 efad9e5f7003  mcp-demo  arrancada en frío en 54 ms
@@ -207,19 +209,36 @@ pero es lo que da densidad cuando hay muchas herramientas calientes a la vez.
 ## Arquitectura
 
 ```
-   Modelo local (Qwen3)
-            │  MCP / Streamable HTTP
-            ▼
-      ┌───────────┐   restaura snapshot (~30 ms)
-      │  gateway  │──────────────┬──────────────┐
-      └───────────┘              ▼              ▼
-                            ┌────────┐    ┌────────┐
-                            │ µVM: A │    │ µVM: B │
-                            └────────┘    └────────┘
+   Tu agente (Claude Code, opencode, un modelo local…)
+        │  MCP / Streamable HTTP
+        ▼
+  ┌───────────┐  enlace   ┌──────────────────┐
+  │  gateway  │──────────>│ servidor externo │  fuera de kindling
+  └─────┬─────┘           └──────────────────┘
+        │  restaura (~30 ms) y hace de proxy a :8080/mcp
+        ├────────────────────────┬─────────────────────────┐
+        ▼                        ▼                         ▼
+  ┌──────────────┐        ┌──────────────┐          ┌──────────────┐
+  │ µVM servicio │        │ µVM servicio │          │ µVM efímera  │
+  │ puente→stdio │        │  HTTP nativo │          │ muere al fin │
+  └──────────────┘        └──────────────┘          └──────────────┘
+        └────────────────────────┴─────────────────────────┘
+                       un namespace de red cada una
+                                 ▲
+                          ┌───────────┐
+                          │  daemon   │  ciclo de vida, red, snapshots
+                          └───────────┘
 ```
 
-El gateway recibe la llamada de herramienta, restaura el snapshot que corresponde, hace de
-proxy de la petición y recoge la microVM cuando expira su TTL.
+El **gateway** recibe la llamada, restaura el snapshot que corresponde, hace de proxy y
+recoge la microVM cuando expira su TTL. Dentro del invitado siempre llama al mismo sitio,
+`:8080/mcp`, hable el servidor stdio (con `kling-bridge` traduciendo) o Streamable HTTP
+nativo (sin nada en medio).
+
+El **daemon** gestiona el ciclo de vida y es el único que alcanza a los invitados: sus IP
+solo existen en la red del host. Por eso expone `POST /machines/{ref}/guest`, que reenvía una
+petición HTTP al servidor de dentro. Sin eso, `kling mcp import` solo funcionaría ejecutando
+el CLI en el propio host — por SSH el sondeo no tiene ruta y agota el plazo.
 
 ## Requisitos
 
@@ -251,7 +270,23 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y vigilancia
 - [x] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP nativo, sin puente
 - [x] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger por inactividad
-- [x] **Fase 5** — Puente stdio→HTTP: cualquier servidor MCP se aloja bajo demanda
+- [x] **Fase 5** — Puente stdio→HTTP: también los servidores que solo hablan por tuberías
+
+### Lo que sigue sin resolver
+
+La hoja de ruta está completa; el proyecto no. Lo que queda, por orden de lo que más
+molesta:
+
+- **Llamadas en paralelo a servicios persistentes.** Alrededor de un 25% agota los 60 s.
+  No es el aislamiento: el puente por su cuenta despacha 16 llamadas en paralelo en 127 ms,
+  y los servicios efímeros hacen 8 de 8 en 785 ms. El fallo está en el gateway, sin localizar.
+  Mientras tanto, con un servicio persistente conviene ir en serie.
+- **No hay almacenamiento duradero.** Un servicio persistente conserva su estado mientras
+  viva su instancia, no más. Para lo que deba sobrevivir a todo hace falta montar un volumen
+  del host dentro de la microVM, que no está implementado — de ahí que la recomendación sea
+  un servicio de memoria enlazado.
+- **Las barreras que faltan** están enumeradas en [SECURITY.md](SECURITY.md): sin chroot,
+  sin cuota dura de disco, sin cifrado en reposo, snapshots dorados sin firmar.
 
 ## Notas de campo
 
@@ -403,21 +438,6 @@ kling commit tmpl mi-tool && kling stop tmpl
 El directorio necesita un `entrypoint` ejecutable que escuche en el puerto 8080. Ver
 [examples/echo](examples/echo).
 
-## Informe HTML
-
-```sh
-kling export -o topologia.html      # se genera en TU máquina, no en el daemon
-```
-
-Autocontenido: sin CDN, sin fuentes remotas, sin peticiones al abrirlo — describe la
-topología de un homelab y no tiene por qué contársela a nadie. Agrupa por la etiqueta
-`service`, y en su defecto por el snapshot de origen, porque dos máquinas del mismo snapshot
-comparten memoria y pertenecen juntas aunque nadie las haya etiquetado.
-
-```sh
-kling run -from echo -service echo -label tier=prod
-```
-
 ## Convertir cualquier servidor MCP en un servicio
 
 ```sh
@@ -506,7 +526,7 @@ La contrapartida es que no hay estado entre llamadas. Las herramientas que lo ne
 —memoria, razonamiento por pasos— deben usar la ruta con sesión (`/mcp/<servicio>`), que
 mantiene el proceso vivo.
 
-## Fase 5: cualquier servidor MCP, alojado bajo demanda
+## Cualquier servidor MCP, alojado bajo demanda
 
 La mayoría de servidores MCP open source solo hablan **stdio**: un proceso hijo persistente
 con el que se dialoga por tuberías. No hay puerto al que llamar, y el ciclo de vida lo impone
@@ -729,7 +749,7 @@ El punto de cruce está en torno a 8 herramientas. Con 28 el proxy ahorra **17 v
 
 ## Servidores MCP oficiales corriendo
 
-Los servidores oficiales de Anthropic, alojados como microVMs efímeras:
+Los servidores oficiales de Anthropic, alojados como microVMs:
 
 ```sh
 sudo ./scripts/80-mcp-image.sh stdio filesystem \
@@ -738,16 +758,27 @@ kling mcp import filesystem
 ```
 
 ```
-SERVICIO     HERRAMIENTAS   CATÁLOGO    MEMORIA   INSTANCIAS
-filesystem   14             46s atrás   125M      0
-memory        9             2m atrás    122M      0
+SERVICIO     HERRAMIENTAS   CATÁLOGO   MEMORIA   INSTANCIAS
+everything   13             6m atrás   128M      1
+thinking      1             3h atrás   121M      1
+memory        9             3h atrás   122M      1
+filesystem   14             3h atrás   125M      1
+notas         2             3h atrás    42M      1
+eco           2             3h atrás    42M      1
+engram       11             2h atrás     —       externo: http://192.168.2.3:9100/mcp
+
+52 herramienta(s) en 7 servicio(s) (6 microVM, 1 externo(s)).
 ```
+
+`everything` es el servidor de referencia del protocolo y habla **Streamable HTTP nativo**:
+no lleva puente. Los demás hablan stdio y van envueltos. Desde fuera no se distinguen.
 
 Uso real, a través del agregador y en microVMs de un solo uso:
 
 ```
 filesystem.read_text_file  /data/prueba.txt   ->  "hola desde kindling"   (31 ms)
 memory.create_entities     kindling/proyecto  ->  entidad creada          (31 ms)
+everything.get-sum         {"a":100,"b":23}   ->  "The sum … is 123."     (nativo)
 ```
 
 **31 ms por acción**, cada una en su propia máquina que muere al terminar.
@@ -760,6 +791,8 @@ memory.create_entities     kindling/proyecto  ->  entidad creada          (31 ms
   instala npm no se encuentran: `executable file not found in $PATH`.
 - **Los directorios que espera el servidor deben existir DENTRO de la imagen.** El
   `server-filesystem` quiere `/data`; crearlo en el host no sirve de nada.
+- **Si el servidor habla HTTP, tiene que escuchar donde se le dice.** El entrypoint fija
+  `PORT=8080` y el servidor debe servir el protocolo en `/mcp`: es lo que el gateway busca.
 
 ## Efímero o persistente: se decide solo
 
@@ -873,9 +906,13 @@ kling mcp link engram http://<tu-ip>:9100/mcp
 kling export -o topologia.html
 ```
 
-Un HTML autocontenido con el mismo árbol de siempre —el host a la izquierda, sus servicios
-en columna, las instancias a la derecha— pero navegable: cada caja con hijos se abre y se
-cierra, y la que elijas se detalla debajo.
+Autocontenido: sin CDN, sin fuentes remotas, sin peticiones al abrirlo — describe la
+topología de un homelab y no tiene por qué contársela a nadie. Se genera en **tu** máquina,
+no en el daemon.
+
+Es el mismo árbol de siempre —el host a la izquierda, sus servicios en columna, las
+instancias a la derecha— pero navegable: cada caja con hijos se abre y se cierra, y la que
+elijas se detalla debajo.
 
 ```
                         ┌ eco ──────────┐
@@ -913,6 +950,14 @@ catálogo › filesystem
 
 El panel de abajo cambia con lo que selecciones: los datos del nodo, el flujo paso a paso de
 una llamada a ese servicio, y —si escribe algo— dónde acaba lo escrito.
+
+Los nodos se agrupan por la etiqueta `service`, y en su defecto por el snapshot de origen:
+dos máquinas del mismo snapshot comparten memoria y pertenecen juntas aunque nadie las haya
+etiquetado.
+
+```sh
+kling run -from eco -service eco -label tier=prod
+```
 
 > **Ojo con lo que escriba.** Escribe con `create_directory`, `edit_file`, `move_file`,
 > `write_file`. Vive mientras viva la instancia → guárdalo en **engram**.

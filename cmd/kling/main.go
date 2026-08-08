@@ -66,7 +66,7 @@ SNAPSHOTS DORADOS
 
 OBSERVACIÓN
   topo                                             diagrama ASCII de todo
-  export [-o fichero.html]                         mapa de llamadas en HTML
+  export [-o fichero.html]                         topología navegable en HTML
   events                                           stream de eventos del daemon
   info                                             estado del daemon
 
