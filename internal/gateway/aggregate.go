@@ -48,6 +48,15 @@ type aggregator struct {
 	snapMu   sync.RWMutex
 	snapOf   map[string]string
 	stateful map[string]bool
+
+	// initLocks serializa la creación de sesión por servicio.
+	initLocks sync.Map // servicio -> *sync.Mutex
+}
+
+// serviceLock devuelve el candado de creación de sesión de un servicio.
+func (a *aggregator) serviceLock(service string) *sync.Mutex {
+	v, _ := a.initLocks.LoadOrStore(service, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 type aggSession struct {
@@ -424,6 +433,10 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		return nil, fault
 	}
 
+	// Antes de nada, reparar los tipos que el cliente pudiera haber estropeado.
+	// Se hace aquí, con el esquema declarado por la herramienta a mano.
+	args = coerceArgs(args, t.Schema)
+
 	// Modo efímero: la acción se ejecuta en una microVM propia que muere después.
 	//
 	// Salvo que el servicio esté marcado como stateful: destruir su máquina se
@@ -442,9 +455,28 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 
 	// Una sesión por servicio y por conversación: el estado del servidor MCP debe
 	// persistir entre llamadas del mismo cliente.
+	//
+	// La creación va bajo candado por servicio. Sin él, N llamadas concurrentes
+	// que llegan antes de existir la sesión crean N sesiones, y cada sesión lanza
+	// un proceso del servidor MCP dentro de la microVM: ocho peticiones paralelas
+	// arrancaban ocho procesos de node en 384 MiB y la máquina se ahogaba.
+	initLock := a.serviceLock(t.Service)
+	initLock.Lock()
 	a.mu.Lock()
 	sid := s.backing[t.Service]
 	a.mu.Unlock()
+	if sid == "" {
+		newSid, ierr := mcpInit(ctx, base)
+		if ierr != nil {
+			initLock.Unlock()
+			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, ierr)}
+		}
+		sid = newSid
+		a.mu.Lock()
+		s.backing[t.Service] = sid
+		a.mu.Unlock()
+	}
+	initLock.Unlock()
 
 	call := func(sid string) (json.RawMessage, error) {
 		if len(args) == 0 {
@@ -456,17 +488,27 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	}
 
 	raw, err := call(sid)
-	if err != nil || sid == "" {
-		// Sesión caducada o inexistente: se rehace. Pasa siempre que la microVM
-		// se congeló entre llamadas, porque sus procesos mueren con ella.
-		newSid, ierr := mcpInit(ctx, base)
-		if ierr != nil {
-			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, ierr)}
-		}
+	if err != nil {
+		// La sesión caducó: pasa siempre que la microVM se congeló entre llamadas,
+		// porque sus procesos mueren con ella. Se rehace, también bajo candado
+		// para que no se dupliquen.
+		initLock.Lock()
 		a.mu.Lock()
-		s.backing[t.Service] = newSid
+		cur := s.backing[t.Service]
 		a.mu.Unlock()
-		if raw, err = call(newSid); err != nil {
+		if cur == sid { // nadie la rehízo mientras esperábamos
+			newSid, ierr := mcpInit(ctx, base)
+			if ierr != nil {
+				initLock.Unlock()
+				return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, ierr)}
+			}
+			cur = newSid
+			a.mu.Lock()
+			s.backing[t.Service] = cur
+			a.mu.Unlock()
+		}
+		initLock.Unlock()
+		if raw, err = call(cur); err != nil {
 			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
 		}
 	}

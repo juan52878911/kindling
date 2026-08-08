@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -141,7 +142,8 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
-	raw, err := mcpCall(ctx, base, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	raw, err := mcpCall(ctx, base, sid,
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list"}`, nextRPCID()))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
@@ -216,6 +218,12 @@ func (c *catalog) invalidate(service string) {
 // ── utilidades MCP ────────────────────────────────────────────────────────────
 
 var httpc = &http.Client{Timeout: 60 * time.Second}
+
+// rpcSeq da identificadores JSON-RPC únicos. El protocolo exige que un id no se
+// repita dentro de una sesión mientras haya peticiones en vuelo.
+var rpcSeq atomic.Int64
+
+func nextRPCID() int64 { return rpcSeq.Add(1) }
 
 func mcpPost(ctx context.Context, base, sid, body string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/mcp", strings.NewReader(body))

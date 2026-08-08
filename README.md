@@ -574,6 +574,17 @@ usarse estaba congelada, y despertarla cuesta milisegundos.
 | Handshake MCP en frío, desde el Mac | **310 ms** |
 | Llamada a herramienta, en caliente | **9 ms** |
 
+## Reparación de tipos
+
+Varios clientes MCP y modelos estropean los tipos JSON antes de enviarlos: los arrays llegan
+como objetos con claves `"0"`, `"1"`, los números como strings, los booleanos como `"true"`.
+El servidor los rechaza con "expected array, received object" y desde fuera parece un fallo
+de la herramienta, cuando nunca llegó a verla.
+
+Como el catálogo guarda el esquema declarado de cada herramienta, el agregador deshace el
+daño antes de reenviar. Solo se convierte lo que contradice el esquema: un objeto legítimo
+se deja intacto.
+
 ## Conectarlo con tu agente de IA
 
 ```sh

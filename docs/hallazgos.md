@@ -560,3 +560,38 @@ otra llamada devolvería "no existe".
 
 Es un buen recordatorio de que la pregunta correcta no es "¿guarda estado?" sino "¿dónde vive
 lo que escribe?". En una microVM efímera, todo lo que no salga por la red muere con ella.
+
+## El bug de tipos no estaba en kindling, pero se repara aquí
+
+Un informe de pruebas señalaba que arrays llegaban como objetos indexados, números como
+strings y booleanos como `"true"`. Reproducido con curl contra el agregador: **los tipos
+llegan intactos**. kindling usa `json.RawMessage` de extremo a extremo y no toca nada; el
+destrozo ocurre antes, en el cliente MCP o en la serialización del modelo.
+
+Aun así se repara aquí, porque el catálogo guarda el esquema declarado de cada herramienta y
+con él se puede deshacer el daño:
+
+	array   <- objeto con claves "0","1",...
+	array   <- string con el JSON dentro
+	number  <- string
+	boolean <- string
+
+Solo se convierte lo que contradice el esquema. Un objeto legítimo cuyo esquema dice
+`object` se deja intacto, y un array que ya es array no se toca: reparar de más sería peor
+que no reparar.
+
+## Tres bugs de concurrencia que solo aparecen en paralelo
+
+1. **id JSON-RPC fijo.** El agregador mandaba todas las llamadas con `"id":1`. Dos peticiones
+   concurrentes sobre la misma sesión comparten entrada en la tabla de pendientes del puente:
+   la segunda pisa a la primera, que espera una respuesta ya entregada a otro.
+2. **N llamadas concurrentes creaban N sesiones.** Y cada sesión lanza un proceso del
+   servidor MCP dentro de la microVM: ocho peticiones paralelas arrancaban ocho procesos de
+   node en 384 MiB, la memoria se agotaba y el puente moría. La máquina quedaba viva pero
+   sorda — respondía a ping y no a HTTP.
+3. **Thaw concurrente sobre la misma máquina** rehacía su namespace dos veces a la vez, y el
+   segundo encontraba el veth a medio crear: `Cannot find device vh-...`.
+
+Los tres se arreglan serializando lo que debe serializarse: un id único por llamada, un
+candado por servicio para crear sesión, y un candado por máquina para las operaciones de
+ciclo de vida.

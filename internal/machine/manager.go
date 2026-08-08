@@ -73,6 +73,19 @@ type Manager struct {
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int
+
+	// lifecycle serializa las operaciones sobre UNA MISMA máquina. Sin esto, dos
+	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
+	// veth a medio crear: "Cannot find device vh-...".
+	lifecycle sync.Map // id -> *sync.Mutex
+}
+
+// lock serializa las operaciones de ciclo de vida de una máquina concreta.
+func (m *Manager) lock(id string) func() {
+	v, _ := m.lifecycle.LoadOrStore(id, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
@@ -488,6 +501,12 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if !ok {
 		return nil, fmt.Errorf("no existe la máquina %q", ref)
 	}
+	defer m.lock(mc.ID)()
+
+	// Pudo congelarla otro mientras esperábamos.
+	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateWarm {
+		return cur, nil
+	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("solo se puede congelar una máquina running (está %s)", mc.State)
 	}
@@ -552,6 +571,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, fmt.Errorf("no existe la máquina %q", ref)
+	}
+	defer m.lock(mc.ID)()
+
+	// Otra llamada pudo descongelarla mientras esperábamos el candado.
+	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateRunning {
+		return cur, nil
 	}
 	if mc.State != api.StateWarm {
 		return nil, fmt.Errorf("solo se puede descongelar una máquina warm (está %s)", mc.State)
@@ -645,9 +670,11 @@ func (m *Manager) Remove(ref string) error {
 	if !ok {
 		return fmt.Errorf("no existe la máquina %q", ref)
 	}
+	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)
+	m.lifecycle.Delete(mc.ID)
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
