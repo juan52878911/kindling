@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/config"
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/gateway"
 	"github.com/juan52878911/kindling/internal/report"
@@ -65,14 +66,27 @@ GATEWAY
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  arranca el núcleo
 
+CONFIGURACIÓN
+  context [ls]                                     lista los daemons conocidos
+  context add <nombre> <host>                      añade uno y lo activa
+  context use <nombre>                             cambia de daemon
+  context rm <nombre>                              lo elimina
+  config [show|path]                               configuración actual
+  config set <clave> <valor>                       p. ej. defaults.image min
+  version                                          versión del CLI
+
 CONEXIÓN
-  El CLI usa $KLING_HOST, o -H, o el socket local por defecto.
-    export KLING_HOST=ssh://juan@192.168.2.60     daemon remoto por SSH
-    export KLING_HOST=/run/kling.sock             daemon local
+  Precedencia:  -H  >  $KLING_HOST  >  contexto activo  >  socket local
+
+    kling context add lab ssh://juan@192.168.2.60
+    kling context use lab
 
   El daemon jamás escucha en un puerto de red: controlar microVMs equivale a
   root en su host, así que el único acceso remoto es SSH.
 `
+
+// Version se fija al compilar:  -ldflags "-X main.Version=..."
+var Version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -111,6 +125,13 @@ func main() {
 		err = cmdEvents(args)
 	case "info":
 		err = cmdInfo(args)
+	case "context":
+		err = cmdContext(args)
+	case "config":
+		err = cmdConfig(args)
+	case "version", "--version", "-v":
+		fmt.Printf("kling %s\n", Version)
+		return
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -133,9 +154,27 @@ func envOr(k, def string) string {
 }
 
 // hostFlag registra -H en cualquier subcomando del cliente.
+//
+// Por defecto vacío a propósito: así hostOf() distingue "no me lo han dicho" de
+// "me han dicho esto", y puede aplicar la precedencia
+// -H > $KLING_HOST > contexto activo > socket local.
 func hostFlag(fs *flag.FlagSet) *string {
-	return fs.String("H", os.Getenv("KLING_HOST"), "endpoint del daemon (socket o ssh://usuario@host)")
+	return fs.String("H", "", "endpoint del daemon (socket o ssh://usuario@host)")
 }
+
+// loadConfig lee la configuración sin hacer fallar al CLI si está corrupta: una
+// configuración ilegible no debe impedir listar máquinas.
+func loadConfig() *config.Config {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aviso: %v (sigo con los valores por defecto)\n", err)
+		return &config.Config{}
+	}
+	return cfg
+}
+
+// hostOf resuelve a qué daemon hablar.
+func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
 func ctxWithSignals() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -166,8 +205,8 @@ func cmdDaemon(args []string) error {
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	host := hostFlag(fs)
-	listen := fs.String("listen", envOr("KLING_GATEWAY_LISTEN", "127.0.0.1:8080"), "dirección donde escuchar")
-	idle := fs.Duration("idle", 5*time.Minute, "tiempo sin peticiones antes de congelar una herramienta")
+	listen := fs.String("listen", "", "dónde escuchar (por defecto: gateway.listen, o 127.0.0.1:8080)")
+	idle := fs.Duration("idle", 0, "tiempo sin peticiones antes de congelar (por defecto: gateway.idle, o 5m)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -175,10 +214,21 @@ func cmdGateway(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	c := api.NewClient(*host)
+	cfg := loadConfig()
+	c := api.NewClient(cfg.Host(*host))
 	if _, err := c.Info(ctx); err != nil {
 		return fmt.Errorf("no alcanzo el daemon: %w", err)
 	}
+
+	addr := config.Or(*listen, cfg.Gateway.Listen, "127.0.0.1:8080")
+	wait := *idle
+	if wait == 0 {
+		wait, _ = time.ParseDuration(cfg.Gateway.Idle)
+	}
+	if wait == 0 {
+		wait = 5 * time.Minute
+	}
+	listen, idle = &addr, &wait
 
 	gw := gateway.New(c, *idle)
 	go gw.Reap(ctx)
@@ -205,11 +255,11 @@ func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	host := hostFlag(fs)
 	name := fs.String("name", "", "nombre de la máquina")
-	image := fs.String("image", "default", "imagen de rootfs")
+	image := fs.String("image", "", "imagen de rootfs (por defecto: defaults.image, o 'default')")
 	from := fs.String("from", "", "instanciar desde un snapshot dorado (~ms, sin arranque en frío)")
-	cpus := fs.Int("cpus", 1, "vCPUs")
-	mem := fs.Int("mem", 256, "memoria en MiB")
-	egress := fs.String("egress", "none", "salida de red: none | internet (nunca alcanza redes privadas)")
+	cpus := fs.Int("cpus", 0, "vCPUs (por defecto: 1)")
+	mem := fs.Int("mem", 0, "memoria en MiB (por defecto: 256)")
+	egress := fs.String("egress", "", "salida de red: none | internet (nunca alcanza redes privadas)")
 	ttl := fs.Int("ttl", 0, "segundos hasta congelarse sola (0 = nunca)")
 	cpu := fs.Int("cpu", 0, "techo de CPU en porcentaje de un core (0 = por defecto)")
 	service := fs.String("service", "", "servicio MCP al que pertenece (agrupa en topo y export)")
@@ -222,10 +272,19 @@ func cmdRun(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	mc, err := api.NewClient(*host).Run(ctx, api.RunRequest{
-		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
-		Egress: *egress, TTLSeconds: *ttl, CPUPct: *cpu,
-		Labels: labels.merge(*service),
+	cfg := loadConfig()
+	mc, err := api.NewClient(cfg.Host(*host)).Run(ctx, api.RunRequest{
+		Name:  *name,
+		From:  *from,
+		Image: config.Or(*image, cfg.Defaults.Image, "default"),
+		// El flag gana; si no se dio, manda la configuración; y si tampoco,
+		// el valor incorporado.
+		VCPUs:      config.Or(*cpus, cfg.Defaults.VCPUs, 1),
+		MemMiB:     config.Or(*mem, cfg.Defaults.MemMiB, 256),
+		Egress:     config.Or(*egress, cfg.Defaults.Egress, "none"),
+		TTLSeconds: config.Or(*ttl, cfg.Defaults.TTL),
+		CPUPct:     config.Or(*cpu, cfg.Defaults.CPUPct),
+		Labels:     labels.merge(*service),
 	})
 	if err != nil {
 		return err
@@ -282,7 +341,7 @@ func cmdExport(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	c := api.NewClient(*host)
+	c := api.NewClient(hostOf(*host))
 	info, err := c.Info(ctx)
 	if err != nil {
 		return err
@@ -333,7 +392,7 @@ func cmdLogs(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	out, err := api.NewClient(*host).Logs(ctx, fs.Arg(0), *tail)
+	out, err := api.NewClient(hostOf(*host)).Logs(ctx, fs.Arg(0), *tail)
 	if err != nil {
 		return err
 	}
@@ -354,7 +413,7 @@ func cmdCommit(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	snap, err := api.NewClient(*host).Commit(ctx, fs.Arg(0), fs.Arg(1))
+	snap, err := api.NewClient(hostOf(*host)).Commit(ctx, fs.Arg(0), fs.Arg(1))
 	if err != nil {
 		return err
 	}
@@ -374,7 +433,7 @@ func cmdSnapshots(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	list, err := api.NewClient(*host).Snapshots(ctx)
+	list, err := api.NewClient(hostOf(*host)).Snapshots(ctx)
 	if err != nil {
 		return err
 	}
@@ -405,7 +464,7 @@ func cmdRmi(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	c := api.NewClient(*host)
+	c := api.NewClient(hostOf(*host))
 	for _, n := range fs.Args() {
 		if err := c.RemoveSnapshot(ctx, n); err != nil {
 			return err
@@ -427,7 +486,7 @@ func cmdPS(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	list, err := api.NewClient(*host).List(ctx)
+	list, err := api.NewClient(hostOf(*host)).List(ctx)
 	if err != nil {
 		return err
 	}
@@ -512,7 +571,7 @@ func cmdLifecycle(op string, args []string) error {
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
-	c := api.NewClient(*host)
+	c := api.NewClient(hostOf(*host))
 
 	for _, ref := range fs.Args() {
 		var mc *api.Machine
@@ -558,7 +617,7 @@ func cmdEvents(args []string) error {
 	defer stop()
 
 	enc := json.NewEncoder(os.Stdout)
-	return api.NewClient(*host).Events(ctx, func(ev api.Event) {
+	return api.NewClient(hostOf(*host)).Events(ctx, func(ev api.Event) {
 		if *asJSON {
 			_ = enc.Encode(ev)
 			return
@@ -584,7 +643,7 @@ func cmdTopo(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	c := api.NewClient(*host)
+	c := api.NewClient(hostOf(*host))
 	info, err := c.Info(ctx)
 	if err != nil {
 		return err
@@ -717,7 +776,7 @@ func cmdInfo(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	c := api.NewClient(*host)
+	c := api.NewClient(hostOf(*host))
 	i, err := c.Info(ctx)
 	if err != nil {
 		return err

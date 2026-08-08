@@ -346,3 +346,26 @@ El `thaw` mide 29 ms, pero la primera petición HTTP tras despertar tarda ~218 m
 diferencia no es la microVM: es el estado de red que no sobrevive al snapshot —el TAP se
 recrea y hay que rehacer ARP—. Sigue siendo aceptable, pero explica por qué el número de
 `thaw` y el de latencia de extremo a extremo no coinciden.
+
+## El paquete `flag` deja de parsear en el primer posicional
+
+`kling context add lab ssh://... -description "X"` perdía el flag **en silencio**: `flag`
+para de parsear al encontrar el primer argumento que no empieza por `-`, y todo lo que viene
+después se considera posicional.
+
+Como obligar al usuario a poner los flags delante es una trampa que nadie recuerda, se
+reordenan los argumentos antes de parsear. Hay que llevar la lista de flags booleanos, o el
+reordenador se traga el siguiente argumento pensando que es su valor.
+
+## `os.UserConfigDir()` no es lo que quieres para un CLI
+
+En macOS devuelve `~/Library/Application Support`. Es lo correcto para una app de escritorio
+y desconcertante para una herramienta de terminal: nadie va a buscar ahí la configuración de
+un CLI. kindling usa `~/.config/kling` en todas las plataformas, respetando
+`XDG_CONFIG_HOME`.
+
+## Instalar en /usr/local/bin pide sudo y no hace falta
+
+`make install` recorre `~/.local/bin`, `~/go/bin`, `/opt/homebrew/bin` y `/usr/local/bin`, y
+se queda con el primero que sea escribible. Además avisa si el destino no está en el PATH,
+que es el fallo silencioso clásico de instalar en `~/.local/bin`.

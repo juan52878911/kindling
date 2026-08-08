@@ -78,19 +78,43 @@ se invoca `kling dial-stdio`, que puentea la tubería SSH con el socket local.
 ### Instalación
 
 ```sh
-go build -o kling ./cmd/kling                                  # CLI para tu máquina
-GOOS=linux GOARCH=amd64 go build -o kling-linux ./cmd/kling    # daemon para el host KVM
+make install                              # CLI en tu máquina
+make deploy HOST=ssh://juan@192.168.2.60  # daemon en el host con KVM
 ```
 
-En el host con KVM, tras copiar el binario a `/usr/local/bin/kling`:
+`make install` elige el primer directorio escribible de tu PATH y **no pide sudo**:
+instalar una herramienta de usuario no debería requerirlo. Fuérzalo con
+`make install PREFIX=/usr/local` si lo prefieres en el sistema.
+
+`make deploy` compila para `linux/amd64`, copia binario y unit de systemd, y arranca el
+servicio. El unit cede el socket al usuario con el que entras por SSH, para no ejecutar
+todo el cliente con sudo.
+
+### Configuración
+
+Contextos con nombre, al estilo de `docker context`, para no arrastrar `KLING_HOST`:
 
 ```sh
-sudo install -m644 packaging/kling.service /etc/systemd/system/
-sudo systemctl enable --now kling
+kling context add lab ssh://juan@192.168.2.60 -description "Proxmox de casa"
+kling context use lab
+kling context ls
 ```
 
-`KLING_SOCKET_USER` en el unit cede el socket al usuario con el que entra el CLI por SSH,
-para no tener que ejecutar todo el cliente con sudo.
+Y valores por defecto, para no repetir opciones en cada `run`:
+
+```sh
+kling config set defaults.image min
+kling config set defaults.ttl_seconds 600
+kling config set gateway.idle 5m
+kling config show
+```
+
+El fichero vive en `~/.config/kling/config.json` — también en macOS: `UserConfigDir()`
+devolvería ahí `~/Library/Application Support`, que es correcto para apps de escritorio pero
+sorprendente para un CLI.
+
+**Precedencia:** `-H` > `$KLING_HOST` > contexto activo > socket local. El flag gana siempre,
+para que una invocación puntual no obligue a cambiar de contexto.
 
 ## Por qué microVMs y no contenedores
 
