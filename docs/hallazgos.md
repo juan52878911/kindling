@@ -109,3 +109,48 @@ objetivo, y la vía es el backend UFFD en lugar de File.
 `ls -lh` da el tamaño lógico; con overlays dispersos la diferencia con lo realmente
 asignado es de dos órdenes de magnitud. `kling ps` suma `st_blocks * 512`, que es la única
 cifra honesta.
+
+## El snapshot de memoria es disco, no RAM
+
+Conviene decirlo claro porque induce a error: una máquina `warm` **no ocupa RAM**. `freeze`
+pausa, vuelca y **mata el proceso de Firecracker**. Lo que queda es un fichero.
+
+## Perforar el fichero de memoria: 256 MB -> 81 MB
+
+Firecracker vuelca el rango de memoria entero, pero en una microVM recién arrancada la
+mayoría son páginas a cero. `fallocate --dig-holes` las convierte en agujeros. Leer un
+agujero devuelve ceros, que es justo lo que había, así que la restauración es indiferente:
+medido en ~30 ms antes y después, en ciclos repetidos de freeze/thaw.
+
+## Bajar la RAM asignada NO es la palanca
+
+Contraintuitivo, y ahorra perder el tiempo optimizando lo que no toca:
+
+| RAM asignada | Congelada |
+|---|---|
+| 512 MiB | 86 MB |
+| 256 MiB | 81 MB |
+| 96 MiB  | 80 MB |
+
+Una vez el fichero es disperso, lo que se guarda es el working set real. La RAM reservada
+de más son ceros, y los ceros son agujeros.
+
+## Lo que sí manda: qué arranca dentro
+
+Mismo kernel, misma RAM asignada (256 MiB), distinto init:
+
+| Invitado | Congelada |
+|---|---|
+| Ubuntu 24.04 + systemd | 80 MB |
+| solo `/bin/sh` | **36 MB** |
+
+Casi la mitad del coste es userspace de Ubuntu que una herramienta efímera nunca usa. El
+camino para bajar de 80 MB es un rootfs mínimo, no tocar parámetros de memoria.
+
+## Sin explotar todavía
+
+- **Snapshots diff** (`snapshot_type: "Diff"`): guardan solo las páginas cambiadas respecto
+  a una base. Con N herramientas sobre una misma imagen, cada diff serían pocos MB.
+- **Backend UFFD** en vez de File: varias microVMs restauradas del mismo snapshot pueden
+  compartir páginas en RAM. No reduce disco; da densidad cuando hay muchas calientes a la
+  vez. Es la técnica con la que Lambda consigue su densidad.

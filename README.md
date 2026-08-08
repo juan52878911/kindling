@@ -113,15 +113,47 @@ Cada máquina solo tiene un overlay disperso propio, montado con overlayfs por
 |---|---|
 | Imagen base, compartida | 386 MB, una sola vez |
 | Por máquina en marcha | **~8.5 MB** |
-| Por máquina en `warm` | +256 MB (el fichero de memoria del snapshot) |
+| Por máquina en `warm` | **~81 MB** |
 
 Antes de los overlays cada máquina copiaba los 800 MB enteros: tres máquinas costaban
 2.4 GB, ahora cuestan 386 MB + 25 MB.
 
-**El cuello de botella se ha movido:** ahora lo caro es el snapshot de memoria, que pesa
-tanto como la RAM asignada. Diez herramientas congeladas a 256 MB son 2.5 GB. Se ataca
-bajando la RAM por microVM y, más adelante, con el backend UFFD en lugar de File para
-carga perezosa.
+**Una máquina `warm` no consume RAM.** `freeze` mata el proceso de Firecracker; lo que
+queda es un fichero. Su coste es disco, no memoria.
+
+Firecracker vuelca la memoria entera al congelar, pero la mayor parte son páginas a cero.
+kindling las perfora con `fallocate --dig-holes`: el kernel devuelve ceros al leer un
+agujero, que es exactamente lo que había, así que la restauración no se entera.
+
+**256 MB → 81 MB, y el `thaw` sigue en ~30 ms.**
+
+### Qué determina ese coste
+
+Dos medidas que orientan cualquier optimización futura:
+
+| RAM asignada | Coste congelada |
+|---|---|
+| 512 MiB | 86 MB |
+| 256 MiB | 81 MB |
+| 96 MiB | 80 MB |
+
+**Asignar más RAM es casi gratis** una vez el fichero es disperso: lo que se guarda es el
+working set real, no la RAM reservada. Bajar `-mem` no es la palanca.
+
+La palanca es lo que arranca dentro:
+
+| Invitado | Coste congelada |
+|---|---|
+| Ubuntu 24.04 + systemd | 80 MB |
+| solo `/bin/sh` | **36 MB** |
+
+Casi la mitad del coste es userspace de Ubuntu que una herramienta efímera no necesita. Un
+rootfs mínimo con solo el servidor MCP debería quedarse cerca de esos 36 MB.
+
+Más allá quedan dos técnicas de Firecracker sin explotar: **snapshots diff**, que guardan
+solo las páginas cambiadas respecto a una base, y el **backend UFFD**, que permite a varias
+microVMs restauradas del mismo snapshot compartir páginas en RAM. UFFD no reduce disco,
+pero es lo que da densidad cuando hay muchas herramientas calientes a la vez.
 
 ## Arquitectura
 

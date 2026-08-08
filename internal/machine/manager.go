@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,6 +118,19 @@ func (m *Manager) List() []*api.Machine {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// allocatedBytes devuelve los bytes realmente ocupados por un fichero, que con
+// ficheros dispersos no tiene nada que ver con su tamaño lógico.
+func allocatedBytes(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return st.Blocks * 512
+	}
+	return fi.Size()
 }
 
 // diskUsage suma bloques asignados, no tamaños lógicos: es la única cifra
@@ -363,10 +377,15 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// Con el snapshot en disco el proceso sobra: aquí es donde se libera la RAM.
 	m.kill(mc.ID)
 
-	var size int64
-	if fi, err := os.Stat(memPath); err == nil {
-		size = fi.Size()
+	// Firecracker vuelca la memoria entera, pero en una microVM recién arrancada
+	// la mayor parte son páginas a cero. Perforarlas deja el fichero disperso: el
+	// kernel devuelve ceros al leer un agujero, que es exactamente lo que había,
+	// así que la restauración no se entera. Mide ~3x menos en disco.
+	if out, err := exec.CommandContext(ctx, "fallocate", "--dig-holes", memPath).CombinedOutput(); err != nil {
+		log.Printf("aviso: no pude perforar %s: %v: %s", memPath, err, out)
 	}
+
+	size := allocatedBytes(memPath) + allocatedBytes(snapPath)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
