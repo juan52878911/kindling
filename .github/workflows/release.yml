@@ -184,7 +184,7 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.version }}
           name: ${{ steps.ver.outputs.version }}
-          body_path: release/notes.md
+          body_path: notes.md
           fail_on_unmatched_files: true
           files: |
             release/kling-linux-amd64
@@ -194,6 +194,5 @@ jobs:
             release/kling-bridge-linux-amd64
             release/kling-bridge-linux-arm64
             release/SHA256SUMS
-            release/notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
