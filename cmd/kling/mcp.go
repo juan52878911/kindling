@@ -57,6 +57,7 @@ func mcpImport(args []string) error {
 	keep := fs.Bool("keep", false, "no destruir la plantilla al terminar")
 	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
 	force := fs.Bool("force", false, "reemplazar el servicio si ya existe")
+	stateful := fs.Bool("stateful", false, "el servicio acumula estado: usa instancia persistente en vez de efímera")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func mcpImport(args []string) error {
 	fmt.Printf("  1/5  arrancando la plantilla... ")
 	mc, err := c.Run(ctx, api.RunRequest{
 		Name: tmpl, Image: img, MemMiB: *mem, Egress: *egress,
-		Labels: map[string]string{api.LabelService: service},
+		Labels: labelsFor(service, *stateful),
 	})
 	if err != nil {
 		fmt.Println("✗")
@@ -159,6 +160,10 @@ func mcpImport(args []string) error {
 	}
 	_ = tw.Flush()
 
+	if *stateful {
+		fmt.Printf("\nMarcado como CON ESTADO: usará una instancia persistente, congelada al\n")
+		fmt.Printf("quedar ociosa, para no perder lo que acumule entre llamadas.\n")
+	}
 	fmt.Printf("\nA partir de ahora listar sus capacidades NO despierta la microVM.\n")
 	fmt.Printf("Conéctalo:  kling connect -all -install opencode\n")
 	return nil
@@ -353,6 +358,14 @@ func introspect(ctx context.Context, base string) (string, []api.ToolSpec, error
 		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
 	}
 	return name, out.Result.Tools, nil
+}
+
+func labelsFor(service string, stateful bool) map[string]string {
+	l := map[string]string{api.LabelService: service}
+	if stateful {
+		l[api.LabelStateful] = "true"
+	}
+	return l
 }
 
 // config_Or evita importar el paquete config solo por un valor por defecto.

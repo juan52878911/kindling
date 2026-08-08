@@ -513,3 +513,27 @@ Con 27 herramientas de servidores oficiales:
 
 11 veces menos. Con 4 herramientas el proxy salía más caro; el cruce estaba, como se
 calculó, en torno a 8.
+
+## El modo efímero rompe los servidores que acumulan estado
+
+`memory.create_entities` funcionaba y devolvía la entidad creada, así que parecía correcto.
+No lo era: cada llamada corría en una microVM nueva que moría al terminar, **llevándose el
+grafo**. La siguiente consulta habría encontrado el grafo vacío.
+
+Es un fallo que no se ve probando una sola llamada. Lo mismo aplica a
+`sequential-thinking`, cuyo sentido entero es encadenar pasos.
+
+La solución es no tratar a todos los servicios igual: los marcados como `stateful` usan una
+instancia persistente que se congela al quedar ociosa —conservando su contenido— en vez de
+destruirse. Un servidor de ficheros no la necesita, porque su estado vive fuera de la
+microVM.
+
+## Ser demasiado perezoso también cuesta
+
+El modo proxy escondía TODO tras meta-herramientas, incluido el inventario. El resultado fue
+que un modelo, preguntado por lo que podía hacer, tuvo que gastar una llamada en
+`list_services` antes de poder responder.
+
+Los nombres de herramienta cuestan ~100 tokens para 27 herramientas; los esquemas, 3300.
+Poner solo los nombres en el campo `instructions` del `initialize` da el inventario gratis y
+deja lo caro bajo demanda. Con eso `list_services` sobra: de cuatro meta-herramientas a tres.

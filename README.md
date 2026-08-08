@@ -692,3 +692,45 @@ memory.create_entities     kindling/proyecto  ->  entidad creada          (31 ms
   instala npm no se encuentran: `executable file not found in $PATH`.
 - **Los directorios que espera el servidor deben existir DENTRO de la imagen.** El
   `server-filesystem` quiere `/data`; crearlo en el host no sirve de nada.
+
+## Servicios con estado
+
+No todas las herramientas pueden ser efímeras. Destruir la máquina tras cada acción se lleva
+por delante lo que el servidor acumulara: un grafo de conocimiento, una cadena de
+razonamiento. Para un servidor de ficheros da igual —el estado vive fuera—, pero
+`server-memory` y `server-sequential-thinking` empezarían de cero en cada llamada.
+
+```sh
+kling mcp import memory   -image memory   -stateful
+kling mcp import thinking -image thinking -stateful
+```
+
+Los servicios marcados usan **una instancia persistente**, congelada al quedar ociosa y de
+vuelta en milisegundos con lo que tenía. El resto sigue siendo efímero.
+
+El agregador lo indica en su inventario para que el modelo lo sepa:
+
+```
+memory [recuerda entre llamadas]: create_entities, add_observations, ...
+filesystem: read_text_file, write_file, list_directory, ...
+```
+
+## El inventario va en el handshake
+
+Los nombres de herramienta son baratos —27 ocupan ~100 tokens—; lo caro son los esquemas de
+argumentos. Por eso el `initialize` devuelve el **inventario completo** en su campo
+`instructions`:
+
+```
+Herramientas disponibles, agrupadas por servicio:
+
+filesystem: read_text_file, write_file, list_directory, ...
+memory [recuerda entre llamadas]: create_entities, ...
+
+Llámalas con call_tool y el nombre completo servicio.herramienta.
+Si no conoces sus argumentos, pide primero describe_tool.
+```
+
+Así el modelo sabe qué hay **desde el primer momento** y va directo a `call_tool`, en vez de
+gastar una llamada en descubrir. Quedan tres meta-herramientas: `find_tools`,
+`describe_tool` y `call_tool`.

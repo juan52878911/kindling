@@ -45,8 +45,9 @@ type aggregator struct {
 
 	// snapOf cachea servicio -> snapshot. Está en el camino caliente del modo
 	// efímero y solo cambia al importar un servicio.
-	snapMu sync.RWMutex
-	snapOf map[string]string
+	snapMu   sync.RWMutex
+	snapOf   map[string]string
+	stateful map[string]bool
 }
 
 type aggSession struct {
@@ -63,7 +64,7 @@ func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
 	return &aggregator{
 		gw: gw, cat: newCatalog(gw, 10*time.Minute),
 		ephemeral: ephemeral, sessions: map[string]*aggSession{},
-		snapOf: map[string]string{},
+		snapOf: map[string]string{}, stateful: map[string]bool{},
 	}
 }
 
@@ -127,7 +128,7 @@ func (a *aggregator) dispatch(ctx context.Context, s *aggSession, method string,
 				"name":    "kindling",
 				"version": "1.0.0",
 			},
-			"instructions": a.instructions(s),
+			"instructions": a.instructions(ctx, s),
 		}, nil
 
 	case "ping":
@@ -144,30 +145,55 @@ func (a *aggregator) dispatch(ctx context.Context, s *aggSession, method string,
 	}
 }
 
-func (a *aggregator) instructions(s *aggSession) string {
+// instructions incluye el INVENTARIO COMPLETO de nombres.
+//
+// Los nombres son baratos (27 herramientas ocupan ~100 tokens); lo caro son los
+// esquemas de argumentos. Poniéndolos aquí, el modelo sabe qué hay disponible
+// desde el primer momento y se ahorra una llamada de descubrimiento: pasa
+// directamente a describe_tool o a call_tool.
+func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	if s.mode == modeExpand {
 		return "Herramientas de varios servidores MCP, con nombres servicio.herramienta."
 	}
-	base := "Acceso a varios servidores MCP sin cargar todas sus definiciones. " +
-		"Empieza por find_tools con una descripción de lo que necesitas; usa describe_tool " +
-		"para ver los argumentos exactos antes de llamar; ejecuta con call_tool."
-	if a.ephemeral {
-		base += " Cada llamada corre en una máquina aislada que se destruye al terminar, " +
-			"así que las herramientas NO conservan estado entre llamadas."
+
+	var b strings.Builder
+	b.WriteString("Herramientas disponibles, agrupadas por servicio:\n\n")
+
+	tools, _ := a.cat.all(ctx, s.services)
+	bySvc := map[string][]string{}
+	var order []string
+	for _, t := range tools {
+		if _, seen := bySvc[t.Service]; !seen {
+			order = append(order, t.Service)
+		}
+		bySvc[t.Service] = append(bySvc[t.Service], t.Name)
 	}
-	return base
+	for _, svc := range order {
+		mark := ""
+		if a.ephemeral && a.isStateful(ctx, svc) {
+			mark = " [recuerda entre llamadas]"
+		}
+		fmt.Fprintf(&b, "%s%s: %s\n", svc, mark, strings.Join(bySvc[svc], ", "))
+	}
+
+	b.WriteString("\nLlámalas con call_tool y el nombre completo servicio.herramienta " +
+		"(p. ej. filesystem.read_text_file). Si no conoces sus argumentos, pide primero " +
+		"describe_tool. find_tools sirve para buscar por palabras clave.")
+
+	if a.ephemeral {
+		b.WriteString("\n\nCada llamada corre en una máquina aislada que se destruye al " +
+			"terminar, así que las herramientas marcadas como sin estado NO recuerdan nada " +
+			"entre llamadas.")
+	}
+	return b.String()
 }
 
 // ── modo proxy: cuatro meta-herramientas ──────────────────────────────────────
 
 func (a *aggregator) metaTools() []map[string]any {
+	// Tres, no cuatro: el inventario va en las instrucciones del initialize, así
+	// que `list_services` sobraba y obligaba a una llamada de más.
 	return []map[string]any{
-		{
-			"name": "list_services",
-			"description": "Lista los servidores MCP disponibles y cuántas herramientas ofrece cada uno. " +
-				"Empieza por aquí si no sabes qué hay.",
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
-		},
 		{
 			"name": "find_tools",
 			"description": "Busca herramientas por palabras clave en todos los servicios. Devuelve nombres " +
@@ -399,7 +425,12 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	}
 
 	// Modo efímero: la acción se ejecuta en una microVM propia que muere después.
-	if a.ephemeral {
+	//
+	// Salvo que el servicio esté marcado como stateful: destruir su máquina se
+	// llevaría por delante lo que acumula —un grafo de conocimiento, una cadena
+	// de razonamiento— y cada llamada empezaría de cero. Esos van por la ruta
+	// persistente, que congela la instancia al quedar ociosa en vez de matarla.
+	if a.ephemeral && !a.isStateful(ctx, t.Service) {
 		return a.callEphemeral(ctx, t, args)
 	}
 
@@ -557,4 +588,32 @@ func writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg stri
 		"jsonrpc": "2.0", "id": id,
 		"error": map[string]any{"code": code, "message": msg},
 	})
+}
+
+// isStateful consulta si el servicio conserva estado entre llamadas.
+//
+// Se cachea junto al resto de metadatos del snapshot: está en el camino caliente
+// y solo cambia al reimportar el servicio.
+func (a *aggregator) isStateful(ctx context.Context, service string) bool {
+	a.snapMu.RLock()
+	v, ok := a.stateful[service]
+	a.snapMu.RUnlock()
+	if ok {
+		return v
+	}
+
+	snaps, err := a.gw.client.Snapshots(ctx)
+	if err != nil {
+		return false
+	}
+	a.snapMu.Lock()
+	for _, s := range snaps {
+		if svc := s.Service(); svc != "" {
+			a.stateful[svc] = s.Stateful()
+		}
+		a.stateful[s.Name] = s.Stateful()
+	}
+	v = a.stateful[service]
+	a.snapMu.Unlock()
+	return v
 }

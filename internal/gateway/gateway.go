@@ -433,6 +433,11 @@ func (g *Gateway) PrewarmAll(ctx context.Context) {
 		return
 	}
 	for _, s := range snaps {
+		// Un servicio con estado usa UNA instancia persistente: pre-calentar
+		// varias sería crear grafos paralelos que nadie reconcilia.
+		if s.Stateful() {
+			continue
+		}
 		svc := s.Name
 		if n := s.Service(); n != "" {
 			svc = n
