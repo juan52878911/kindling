@@ -11,6 +11,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -64,6 +66,7 @@ type Gateway struct {
 	mu       sync.Mutex
 	services map[string]*entry        // servicio -> instancia "por defecto"
 	routes   map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
+	agg      *aggregator              // endpoint virtual que reúne a todos
 }
 
 type entry struct {
@@ -83,11 +86,13 @@ type sessionRoute struct {
 }
 
 func New(client *api.Client, idle time.Duration) *Gateway {
-	return &Gateway{
+	g := &Gateway{
 		client: client, idle: idle,
 		services: map[string]*entry{},
 		routes:   map[string]*sessionRoute{},
 	}
+	g.agg = newAggregator(g)
+	return g
 }
 
 // Handler expone las rutas del gateway.
@@ -98,6 +103,10 @@ func (g *Gateway) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/services", g.handleServices)
+	// El agregador tiene que registrarse ANTES que el comodín de servicio, o
+	// "_all" se interpretaría como el nombre de un servicio cualquiera.
+	mux.HandleFunc("/mcp/"+AggregatePath, g.handleAggregate)
+	mux.HandleFunc("/mcp/"+AggregatePath+"/", g.handleAggregate)
 	mux.HandleFunc("/mcp/{service}/", g.handleProxy)
 	mux.HandleFunc("/mcp/{service}", g.handleProxy)
 	return logging(mux)
@@ -401,6 +410,7 @@ func (g *Gateway) Reap(ctx context.Context) {
 			return
 		case <-t.C:
 			g.reapOnce(ctx)
+			g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
 		}
 	}
 }
@@ -432,4 +442,11 @@ func (g *Gateway) reapOnce(ctx context.Context) {
 		}
 		log.Printf("%s: congelada por inactividad", v.service)
 	}
+}
+
+// newSessionID genera el identificador de una sesión del agregador.
+func newSessionID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

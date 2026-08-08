@@ -60,9 +60,14 @@ OBSERVACIÓN
 
 CONECTAR CON TU AGENTE
   connect                                          guía paso a paso
-  connect <servicio>                               URL y configuración
-  connect <servicio> -install opencode             la escribe por ti
-  connect <servicio> -install claude-code
+  connect -all                                     UNA entrada para todos los
+                                                   servicios, con 4 meta-
+                                                   herramientas en vez de N
+  connect -all -only eco,files                     solo esos servicios
+  connect -all -expand                             catálogo completo (gasta más
+                                                   contexto)
+  connect <servicio>                               un servicio suelto
+  connect ... -install opencode|claude-code        escribe la configuración
 
 GATEWAY
   gateway [-listen ADDR] [-idle DUR]               enruta llamadas MCP a microVMs

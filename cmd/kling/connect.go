@@ -16,6 +16,7 @@ import (
 
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/config"
+	"github.com/juan52878911/kindling/internal/gateway"
 )
 
 // cmdConnect conecta una herramienta de kindling a un agente de IA.
@@ -30,6 +31,9 @@ func cmdConnect(args []string) error {
 	gwFlag := fs.String("gateway", "", "URL del gateway (por defecto: gateway.url, o se deduce del contexto)")
 	install := fs.String("install", "", "escribir la configuración: claude-code | opencode")
 	name := fs.String("name", "", "nombre con el que aparecerá en el agente (por defecto: el del servicio)")
+	all := fs.Bool("all", false, "una sola entrada que reúne TODOS los servicios")
+	only := fs.String("only", "", "con -all: limitar a estos servicios, separados por comas")
+	expand := fs.Bool("expand", false, "con -all: cargar el catálogo completo en vez de meta-herramientas")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -39,6 +43,49 @@ func cmdConnect(args []string) error {
 
 	cfg := loadConfig()
 	gw := config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host)))
+
+	// Entrada agregada: un solo servidor MCP que reúne a todos.
+	if *all {
+		label := config.Or(*name, "kindling")
+		url := strings.TrimSuffix(gw, "/") + "/mcp/" + gateway.AggregatePath
+		var q []string
+		if *only != "" {
+			q = append(q, "services="+strings.ReplaceAll(*only, " ", ""))
+		}
+		if *expand {
+			q = append(q, "mode=expand")
+		}
+		if len(q) > 0 {
+			url += "?" + strings.Join(q, "&")
+		}
+
+		scope := "todos los servicios"
+		if *only != "" {
+			scope = *only
+		}
+		fmt.Printf("Entrada:   %s (%s)\n", label, scope)
+		fmt.Printf("Endpoint:  %s\n", url)
+		if *expand {
+			fmt.Println("Modo:      expand — el agente carga TODAS las definiciones")
+		} else {
+			fmt.Println("Modo:      proxy — 4 meta-herramientas; el agente busca lo que necesita")
+		}
+		if info, tools, err := probeMCP(url); err != nil {
+			fmt.Printf("Estado:    ✗ %v\n\n", err)
+		} else {
+			fmt.Printf("Estado:    ✓ %s · %d herramienta(s) expuesta(s): %s\n",
+				info, len(tools), strings.Join(tools, ", "))
+			advise(strings.TrimSuffix(gw, "/")+"/mcp/"+gateway.AggregatePath, *only, *expand)
+		}
+		if *install != "" {
+			return installConfig(*install, label, url)
+		}
+		printSnippets(label, url)
+		fmt.Printf("\nInstalación automática:\n")
+		fmt.Printf("  kling connect -all -install opencode\n")
+		fmt.Printf("  kling connect -all -only eco,files -install opencode\n")
+		return nil
+	}
 
 	// Sin servicio: modo guiado.
 	if fs.NArg() == 0 {
@@ -148,6 +195,84 @@ func probeMCP(url string) (string, []string, error) {
 		names = append(names, t.Name)
 	}
 	return server, names, nil
+}
+
+// advise compara lo que cuesta cada modo CON TU CATÁLOGO REAL.
+//
+// El modo proxy tiene un coste fijo (cuatro meta-herramientas) y el expand crece
+// con cada herramienta. Con pocas herramientas el proxy sale MÁS caro, así que
+// recomendarlo siempre sería vender humo: se mide y se dice.
+func advise(base, only string, expand bool) {
+	q := ""
+	if only != "" {
+		q = "?services=" + strings.ReplaceAll(only, " ", "")
+	}
+	sep := "?"
+	if q != "" {
+		sep = "&"
+	}
+
+	proxy, n1, err1 := catalogCost(base + q)
+	exp, n2, err2 := catalogCost(base + q + sep + "mode=expand")
+	if err1 != nil || err2 != nil {
+		fmt.Println()
+		return
+	}
+
+	fmt.Printf("\nCoste en contexto, con tu catálogo actual:\n")
+	fmt.Printf("  proxy   %2d definiciones  ≈%5d tokens\n", n1, proxy/4)
+	fmt.Printf("  expand  %2d definiciones  ≈%5d tokens\n", n2, exp/4)
+
+	switch {
+	case exp < proxy && !expand:
+		fmt.Printf("  → Con %d herramientas te sale más barato -expand.\n", n2)
+		fmt.Println("    El modo proxy compensa a partir de ~8 herramientas, cuando su")
+		fmt.Println("    coste fijo se amortiza.")
+	case exp >= proxy && expand:
+		fmt.Printf("  → Con %d herramientas el modo proxy (por defecto) ahorra %d tokens.\n",
+			n2, (exp-proxy)/4)
+	case exp >= proxy:
+		fmt.Printf("  → El modo proxy que estás usando ahorra %d tokens.\n", (exp-proxy)/4)
+	default:
+		fmt.Println("  → Estás en expand, que ahora mismo es lo más barato.")
+	}
+	fmt.Println()
+}
+
+// catalogCost mide los bytes que ocupa el catálogo que verá el agente.
+func catalogCost(url string) (int, int, error) {
+	c := &http.Client{Timeout: 60 * time.Second}
+	post := func(sid, body string) (*http.Response, error) {
+		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if sid != "" {
+			req.Header.Set("Mcp-Session-Id", sid)
+		}
+		return c.Do(req)
+	}
+	resp, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	if err != nil {
+		return 0, 0, err
+	}
+	sid := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	tr, err := post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tr.Body.Close()
+
+	var out struct {
+		Result struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(tr.Body).Decode(&out); err != nil {
+		return 0, 0, err
+	}
+	b, _ := json.Marshal(out.Result.Tools)
+	return len(b), len(out.Result.Tools), nil
 }
 
 func printSnippets(name, url string) {
@@ -286,13 +411,15 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 	fmt.Println("  Si no está arrancado, en el host del daemon:")
 	fmt.Println("    kling gateway -listen 0.0.0.0:8080")
 	fmt.Println()
-	fmt.Println("Conecta uno:")
+	fmt.Println("RECOMENDADO — una sola entrada para todos, sin llenar el contexto:")
+	fmt.Println("  kling connect -all -install opencode")
+	fmt.Println("  kling connect -all -only eco,files -install opencode   (solo algunos)")
+	fmt.Println()
+	fmt.Println("O uno suelto:")
 	first := snaps[0].Name
 	if svc := snaps[0].Service(); svc != "" {
 		first = svc
 	}
-	fmt.Printf("  kling connect %s                        ver la configuración\n", first)
-	fmt.Printf("  kling connect %s -install opencode      escribirla por ti\n", first)
-	fmt.Printf("  kling connect %s -install claude-code\n", first)
+	fmt.Printf("  kling connect %s -install opencode\n", first)
 	return nil
 }

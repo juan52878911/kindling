@@ -180,7 +180,7 @@ func reorder(args []string) []string {
 // argumento al reordenar.
 func isBoolFlag(f string) bool {
 	switch strings.TrimLeft(f, "-") {
-	case "use", "no-use":
+	case "use", "no-use", "all", "expand":
 		return true
 	}
 	return false

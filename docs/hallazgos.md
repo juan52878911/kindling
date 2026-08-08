@@ -395,3 +395,35 @@ atascado en el buffer y el cliente no ve nada.
 El recolector del gateway tictaquea cada `idle/3`. Un test que espera `idle + 5s` puede caer
 entre dos pulsos y parecer que no funciona. Pasó: dimos por roto el congelado automático
 cuando solo hacía falta esperar al siguiente tic.
+
+## Las meta-herramientas no siempre ahorran contexto
+
+Exponer `find_tools`/`describe_tool`/`call_tool` en vez del catálogo entero es la técnica
+estándar para no llenar el contexto. Pero tiene **coste fijo**: las cuatro meta-herramientas
+ocupan ~300 tokens, mientras que el catálogo aplanado cuesta ~45 tokens por herramienta.
+
+Medido con 4 herramientas: proxy 299 tokens, expand 170. **El proxy sale más caro.** El
+cruce está en torno a 8 herramientas.
+
+Por eso `kling connect -all` mide ambos modos contra el catálogo real y recomienda. Vender el
+modo proxy como "ahorra contexto" sin mirar cuántas herramientas hay sería falso en la mitad
+de los casos.
+
+## Construir el catálogo despierta todas las microVMs
+
+Responder "¿qué herramientas hay?" exige un `tools/list` contra cada servidor MCP, y eso
+instancia su microVM. Sin caché, una pregunta inocente arranca veinte máquinas.
+
+El catálogo se cachea 10 minutos y las consultas se limitan a 4 servicios en paralelo. Un
+servicio que falle no tumba la respuesta: se devuelve lo que sí contestó y el error se anota
+aparte, porque dejar al modelo ciego sobre diecinueve herramientas porque una está rota es
+peor que informar del fallo.
+
+## Las sesiones contra los servicios de detrás caducan solas
+
+El agregador guarda una sesión MCP por servicio y conversación. Pero si la microVM se congela
+por inactividad entre dos llamadas, sus procesos mueren y la sesión deja de existir. La
+llamada siguiente falla con "sesión desconocida".
+
+Se resuelve reintentando con un `initialize` nuevo ante cualquier fallo, en vez de intentar
+predecir cuándo caducó.

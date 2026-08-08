@@ -526,3 +526,48 @@ sudo systemctl enable --now kling-gateway
 
 El gateway **no corre como root**: solo habla con el daemon por su socket y hace de proxy.
 Toda la parte privilegiada se queda en `kling.service`.
+
+## Una sola entrada para todos los servicios
+
+Un cliente MCP carga las definiciones de **todas** las herramientas al conectarse. Con veinte
+servicios de diez herramientas son doscientos esquemas JSON en el contexto del modelo antes
+de que empiece a trabajar.
+
+```sh
+kling connect -all -install opencode              # todos los servicios
+kling connect -all -only eco,notas -install opencode   # solo algunos
+kling connect -all -expand                        # catálogo completo
+```
+
+El endpoint `/mcp/_all` es un servidor MCP que enruta a los demás. Tiene dos modos:
+
+**`proxy`** (por defecto) — expone **cuatro meta-herramientas** en vez de N:
+
+| | |
+|---|---|
+| `list_services` | qué servidores hay y cuántas herramientas tiene cada uno |
+| `find_tools` | busca por palabras clave; devuelve nombres y descripciones, **sin esquemas** |
+| `describe_tool` | el esquema completo de una sola herramienta |
+| `call_tool` | ejecuta, enrutando a la microVM que toque |
+
+El modelo busca lo que necesita, pide el esquema de lo que va a usar, y llama.
+
+**`expand`** — aplana el catálogo con nombres `servicio.herramienta`, para clientes que
+funcionen mejor con todo cargado.
+
+### Cuál sale más barato depende de cuántas herramientas tengas
+
+El modo `proxy` tiene un **coste fijo** de ~300 tokens; `expand` crece con cada herramienta.
+Con pocas herramientas, proxy sale **más caro**. Por eso `connect -all` lo mide contra tu
+catálogo real y te lo dice:
+
+```
+Coste en contexto, con tu catálogo actual:
+  proxy    4 definiciones  ≈  299 tokens
+  expand   4 definiciones  ≈  170 tokens
+  → Con 4 herramientas te sale más barato -expand.
+    El modo proxy compensa a partir de ~8 herramientas.
+```
+
+El punto de cruce está en torno a 8 herramientas. Con 200, `proxy` ahorra decenas de miles
+de tokens en cada conversación.
