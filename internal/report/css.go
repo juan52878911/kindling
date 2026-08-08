@@ -75,24 +75,76 @@ tr:last-child td{border-bottom:none}
 footer{color:var(--muted);font-size:.78rem;text-align:center;margin-top:2rem}
 `
 
-// cssDetail se añade cuando el informe incluye fichas por servicio.
-const cssDetail = `
-.detail{display:grid;grid-template-columns:auto 1fr;gap:.35rem 1rem;margin:0 0 1rem;
-        padding:.85rem 1rem;background:var(--bg);border:1px solid var(--line);border-radius:9px;font-size:.85rem}
-.detail dt{color:var(--muted);font-weight:600;white-space:nowrap}
-.detail dd{margin:0}
-.tools{font:.78rem ui-monospace,Menlo,monospace;color:var(--muted)}
-.run{font-weight:700}
-.run.yes{color:var(--running)} .run.no{color:#c0392b}
-.tag.ext{border-color:var(--accent);color:var(--accent)}
-`
+// cssMap estiliza el mapa de llamadas: el informe es un diagrama, y el color
+// codifica estado (verde atiende, ámbar duerme, azul externo, gris listo).
+const cssMap = `
+.hint{float:right;font-weight:400;font-size:.78rem;color:var(--muted)}
+.map{overflow-x:auto;margin:.5rem 0 .2rem}
+.map svg{min-width:860px;width:100%;height:auto;display:block}
 
-// cssFlow estiliza los pasos de ejecución y el aviso de persistencia.
-const cssFlow = `
-.flow{margin:.15rem 0 0;padding-left:1.1rem}
-.flow li{margin:.1rem 0;color:var(--fg)}
-.flow li::marker{color:var(--muted);font-size:.8em}
-.fate{display:block}
-.tip{display:block;margin-top:.35rem;padding:.4rem .6rem;border-left:3px solid var(--accent);
-     background:var(--bg);border-radius:0 5px 5px 0;color:var(--muted);font-size:.82rem}
+.node{fill:var(--bg);stroke:var(--line);stroke-width:1.5}
+.node.caller,.node.gw{fill:var(--card);stroke:var(--muted)}
+.node.n-atendiendo{stroke:#2ea043;stroke-width:2}
+.node.n-dormido{stroke:#d29922;stroke-width:2;stroke-dasharray:5 3}
+.node.n-listo{stroke:var(--muted);stroke-dasharray:5 3}
+.node.n-bloqueado{stroke:#f85149;opacity:.55}
+.node.n-die{stroke:#f85149}
+.node.n-keep{stroke:#d29922}
+.node.n-ext{stroke:#58a6ff;stroke-width:2}
+
+svg text{font:500 13px ui-sans-serif,-apple-system,system-ui,sans-serif;fill:var(--fg)}
+text.col{font-size:10.5px;font-weight:600;fill:var(--muted);letter-spacing:.09em;text-transform:uppercase}
+text.s{font-size:11px;fill:var(--muted);font-weight:400}
+text.lat{font-size:10.5px;fill:var(--muted);text-anchor:end;font-weight:400}
+text.fate{font-size:12px}
+text.fate.die{fill:#f85149}
+text.fate.keep{fill:#d29922}
+text.fate.ext{fill:#58a6ff}
+text.fate.blocked{fill:var(--muted);opacity:.6}
+text.store{font-size:12px}
+text.store.good{fill:#2ea043}
+text.store.bad{fill:var(--muted)}
+
+.edge{fill:none;stroke:var(--line);stroke-width:1.6}
+.edge.trunk{stroke:var(--muted)}
+.edge.e-atendiendo{stroke:#2ea043}
+.edge.e-dormido{stroke:#d29922;stroke-dasharray:5 4}
+.edge.e-listo{stroke:var(--line);stroke-dasharray:5 4}
+.edge.e-bloqueado{stroke:#f85149;opacity:.4}
+.edge.e-die{stroke:#f85149}
+.edge.e-keep{stroke:#d29922}
+.edge.e-ext{stroke:#58a6ff}
+.edge.e-store{stroke:var(--line);stroke-dasharray:2 3}
+
+.dot{stroke:none}
+.dot.atendiendo{fill:#2ea043}
+.dot.dormido{fill:#d29922}
+.dot.listo{fill:var(--muted);opacity:.45}
+.dot.ext{fill:#58a6ff}
+.dot.bloqueado{fill:#f85149}
+
+/* Al pulsar un servicio, su carril entero se ilumina y el resto se apaga. */
+.svc{cursor:pointer}
+.svc:focus{outline:none}
+.svc:hover .node,.svc:focus .node{filter:brightness(1.28)}
+body.picked .svc:not(.on) .node,
+body.picked .svc:not(.on) text{opacity:.3}
+body.picked .wire:not(.on){opacity:.18}
+.svc.on .node{stroke-width:2.6}
+
+.k{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin:0 .3rem 0 .9rem}
+.k.running{background:#2ea043}.k.warm{background:#d29922}
+.k.ready{background:transparent;border:1.5px dashed var(--muted)}.k.ext{background:#58a6ff}
+
+#panel h3{font-size:.76rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 .45rem}
+#panel .empty{color:var(--muted);margin:0}
+#p-steps{margin:0;padding-left:1.15rem}
+#p-steps li{margin:.22rem 0}
+.persist{margin:1.1rem 0;padding:.7rem .9rem;border-radius:7px;border-left:3px solid}
+.persist.good{border-color:#2ea043;background:color-mix(in srgb,#2ea043 8%,transparent)}
+.persist.bad{border-color:#d29922;background:color-mix(in srgb,#d29922 9%,transparent)}
+.persist p{margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:.32rem}
+.chip{font:400 11.5px ui-monospace,monospace;padding:.16rem .45rem;border:1px solid var(--line);
+      border-radius:4px;color:var(--muted)}
 `

@@ -66,7 +66,7 @@ SNAPSHOTS DORADOS
 
 OBSERVACIÓN
   topo                                             diagrama ASCII de todo
-  export [-o fichero.html] [-detail]               informe HTML autocontenido
+  export [-o fichero.html]                         mapa de llamadas en HTML
   events                                           stream de eventos del daemon
   info                                             estado del daemon
 
@@ -390,7 +390,9 @@ func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	host := hostFlag(fs)
 	out := fs.String("o", "kindling.html", "fichero de salida")
-	detail := fs.Bool("detail", false, "añade por servicio: qué lo detona, si puede ejecutarse, a qué MCP pertenece y qué comparte")
+	// El mapa ya trae todo el detalle; la bandera sigue aceptándose para no
+	// romper a quien la tuviera en un script.
+	_ = fs.Bool("detail", false, "obsoleta: el informe siempre incluye el detalle")
 	open := fs.Bool("open", false, "abrirlo al terminar")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -420,8 +422,8 @@ func cmdExport(args []string) error {
 	if cfg := loadConfig(); cfg.Memory.Enabled {
 		memSvc = cfg.Memory.Service
 	}
-	doc := report.RenderFull(info, report.BuildWith(machines, snaps, links),
-		c.Endpoint(), time.Now(), *detail, memSvc)
+	groups := report.BuildWith(machines, snaps, links)
+	doc := report.RenderMap(info, groups, c.Endpoint(), time.Now(), memSvc)
 	if err := os.WriteFile(*out, []byte(doc), 0o644); err != nil {
 		return err
 	}

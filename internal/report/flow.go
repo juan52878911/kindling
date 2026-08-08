@@ -142,7 +142,7 @@ func (g Group) writers() []string {
 
 	verbs := []string{"write", "save", "store", "create", "add", "delete", "remove",
 		"update", "edit", "move", "rename", "append", "insert", "guardar", "crear", "borrar"}
-	var out []string
+	out := []string{}
 	for _, t := range tools {
 		n := strings.ToLower(t.Name)
 		for _, v := range verbs {

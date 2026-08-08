@@ -840,26 +840,39 @@ make bridge-local
 kling mcp link engram http://<tu-ip>:9100/mcp
 ```
 
-## Informe con detalle
+## Mapa de llamadas
 
 ```sh
-kling export -detail -o topologia.html
+kling export -o mapa.html
 ```
 
-Responde a tres preguntas que la tabla de instancias no contesta.
-
-**Qué puede ejecutarse aunque no haya nada corriendo.** Una tabla al principio separa los
-servicios que están atendiendo, los que están listos sin instancia viva, y los que no pueden
-ejecutarse — con el coste de la próxima llamada en cada caso:
+Un HTML autocontenido con el recorrido de una llamada dibujado: un carril por servicio,
+de izquierda a derecha, y el color diciendo en qué estado está cada uno.
 
 ```
-SERVICIO     ESTADO                 COSTE DE LA PRÓXIMA LLAMADA
-filesystem   listo, sin instancia   ~250 ms: se instancia del snapshot dorado
-memory       listo, sin instancia   ~30 ms: hay una congelada esperando
-engram       listo, sin instancia   lo que tarde el servidor externo
+QUIEN LLAMA      GATEWAY          SERVICIO           AL TERMINAR              SI ESCRIBE ALGO
+
+                              ┌ eco ─────────┐   la máquina muere
+                              │ 2 herram.  ○ │
+                              └──────────────┘
+                              ┌ engram ──────┐   sigue vivo donde está   propio, fuera de kindling
+                              │ 11 herram. ● │
+                              └──────────────┘
+ ┌ modelo ┐   ┌ gateway ────┐ ┌ filesystem ──┐   se congela al quedar    vive mientras viva la
+ │        ├───┤             ├─┤ 14 herram. ● │   ociosa                  instancia → engram
+ └────────┘   └─────────────┘ └──────────────┘
 ```
 
-**Qué pasa exactamente al llamar a una herramienta**, paso a paso:
+Responde de un vistazo a tres cosas:
+
+**Qué puede ejecutarse aunque no haya nada corriendo.** El borde de cada servicio dice su
+estado — sólido verde si ya está atendiendo, ámbar si duerme congelado, punteado gris si
+está listo pero sin instancia viva, azul si es un servidor externo — y la etiqueta sobre su
+cable dice lo que costará la próxima llamada: `inmediata`, `~30 ms`, `~250 ms`, `externo`.
+Un servicio punteado no está apagado: aparece solo en cuanto alguien lo llame.
+
+**Qué se activa al llamar a una herramienta.** Al pulsar un carril se ilumina su recorrido
+completo, el resto se atenúa, y abajo se detalla el flujo paso a paso:
 
 ```
 1. El gateway resuelve la herramienta al servicio eco
@@ -868,19 +881,25 @@ engram       listo, sin instancia   lo que tarde el servidor externo
 4. Al responder, la máquina SE DESTRUYE — y con ella todo lo que escribiera
 ```
 
-**Dónde acaba lo que una herramienta escriba.** Es la pregunta que más confusión causa, y la
-respuesta honesta es incómoda:
+**Dónde acaba lo que esa herramienta escriba.** La última columna lo dice por servicio, y un
+segundo diagrama lo resuelve en general:
 
-> Escribe con `create_directory`, `edit_file`, `move_file`, `write_file`. Lo escrito vive en
-> el disco de su instancia y sobrevive a que se congele, pero **NO** a que la instancia se
-> elimine.
->
-> → Para lo que deba sobrevivir, guárdalo en **engram**: es un servidor externo, vive fuera
-> de las microVMs y no se lo lleva ninguna.
+```
+                          ┌ disco de una microVM efímera ─────┐  ✗ se pierde al responder
+                       ┌──┤ el fichero, la fila, lo que sea   │
+ ┌ la herramienta ┐    │  └───────────────────────────────────┘
+ │ escribe algo   ├────┤  ┌ disco de instancia persistente ───┐  ✗ se pierde si la instancia
+ └────────────────┘    ├──┤ sobrevive a congelarse            │    se elimina
+                       │  └───────────────────────────────────┘
+                       │  ┌ engram ───────────────────────────┐  ✓ sobrevive a todo
+                       └──┤ servidor externo, fuera de las VMs│
+                          └───────────────────────────────────┘
+```
 
-Un servicio efímero es aún más tajante: lo escrito desaparece al terminar la llamada. Si una
-herramienta necesita persistir un fichero, una fila en una base de datos o cualquier otra
-cosa, **el destino correcto es el servicio de memoria enlazado**, no el disco del invitado.
+Si una herramienta necesita persistir un fichero, una fila en una base de datos o cualquier
+otra cosa, **el destino correcto es el servicio de memoria enlazado**, no el disco del
+invitado. El informe marca en ámbar cada servicio cuyas escrituras no sobreviven, y nombra
+las herramientas concretas que escriben.
 
 ## Memoria de uso (opcional)
 
