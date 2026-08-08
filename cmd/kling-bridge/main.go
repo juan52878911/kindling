@@ -82,6 +82,11 @@ Opciones:
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	// /reset cierra TODAS las sesiones y mata los procesos hijos. Lo usa el
+	// import tras capturar el catálogo, para que el snapshot dorado no se
+	// congele con estado de sesión abierto (que es lo que rompe los restores
+	// posteriores).
+	mux.HandleFunc("/reset", b.handleReset)
 
 	log.Printf("kling-bridge escuchando en %s -> %s", *listen, strings.Join(argv, " "))
 	if err := http.ListenAndServe(*listen, mux); err != nil {
@@ -233,6 +238,35 @@ func (b *bridge) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		s.close()
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleReset cierra TODAS las sesiones vivas, liberando los procesos hijo
+// y dejando al bridge en un estado equivalente al primer arranque: sin
+// sesiones, listo para recibir el primer initialize de un cliente nuevo.
+//
+// Sirve al ciclo de import: tras capturar el catálogo, mcpImport llama a
+// /reset antes de hacer commit del snapshot. Sin esto, el snapshot dorado se
+// congela con el bridge teniendo sesiones activas (y sus procesos hijo
+// hablando por pipes), y al restaurar la microVM queda en un estado donde
+// los handshakes posteriores fallan (HTTP 400/406).
+func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	b.mu.Lock()
+	dead := make([]*session, 0, len(b.sessions))
+	for _, s := range b.sessions {
+		dead = append(dead, s)
+	}
+	b.sessions = map[string]*session{}
+	b.mu.Unlock()
+	for _, s := range dead {
+		s.close()
+	}
+	log.Printf("reset: %d sesión(es) cerrada(s)", len(dead))
 	w.WriteHeader(http.StatusNoContent)
 }
 

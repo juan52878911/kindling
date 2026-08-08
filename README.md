@@ -80,6 +80,30 @@ se invoca `kling dial-stdio`, que puentea la tubería SSH con el socket local.
 
 ### Instalación
 
+**Opción rápida — binarios pre-compilados (recomendado):**
+
+```sh
+# macOS / Linux — una línea, sin dependencias
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+
+# Para incluir kling-bridge (lo necesita el daemon cuando rebuildea imágenes):
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh -s -- --bridge
+
+# Versión concreta (por defecto instala la última release):
+curl -fsSL .../install.sh | sh -s -- --tag v0.1.0
+
+# Prefijo personalizado:
+curl -fsSL .../install.sh | sh -s -- --prefix ~/.local --bridge
+```
+
+Los binarios se publican en [Releases](https://github.com/juan52878911/kindling/releases)
+para **linux/amd64**, **linux/arm64**, **darwin/amd64** y **darwin/arm64**.
+Cada release incluye `SHA256SUMS` y el script de instalación verifica el checksum antes
+de mover nada al disco. **Windows no está soportado** — el código usa syscalls POSIX
+(`syscall.Kill`, `Setsid`, `Stat_t`).
+
+**Opción desde fuentes — `make`:**
+
 ```sh
 make install                              # CLI en tu máquina
 make deploy HOST=ssh://juan@192.168.2.60  # daemon en el host con KVM
@@ -254,11 +278,17 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 
 | | |
 |---|---|
+| `scripts/install.sh` | Instalador curl-pipe-sh: descarga el binario de la release y verifica SHA256 |
+| `scripts/release.sh` | Crea el tag y lo pushea; activa el workflow de release |
 | `scripts/10-provision-lab.sh` | Crea la VM del laboratorio en Proxmox |
 | `scripts/20-install-firecracker.sh` | Instala Firecracker y jailer desde la última release |
 | `scripts/30-fetch-artifacts.sh` | Descubre y descarga kernel + rootfs del CI |
 | `scripts/40-bench-boot.sh` | Mide arranque en frío, snapshot y restauración |
 | `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
+| `scripts/80-mcp-image.sh` | Empaqueta un servidor MCP (stdio + bridge, o HTTP nativo) en una imagen |
+
+Detalles del ciclo de release: [`docs/releases.md`](docs/releases.md).
+Cambios por versión: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Hoja de ruta
 

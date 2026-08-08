@@ -1,0 +1,199 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'tag a publicar (ej. v0.1.0). Si vacío usa el último tag.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target.os }}/${{ matrix.target.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { os: linux,   arch: amd64, ext: linux-amd64,   artifact: kling-linux-amd64   }
+          - { os: linux,   arch: arm64, ext: linux-arm64,   artifact: kling-linux-arm64   }
+          - { os: darwin,  arch: amd64, ext: darwin-amd64,  artifact: kling-darwin-amd64  }
+          - { os: darwin,  arch: arm64, ext: darwin-arm64,  artifact: kling-darwin-arm64  }
+          # Windows queda fuera: internal/machine usa syscall.Kill, Setsid y
+          # Stat_t que son POSIX. Un binario para Windows sería humo.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: compute version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          # Limpia prefijo v para ldflags -X main.Version
+          LDVER="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "ldver=${LDVER}"     >> "$GITHUB_OUTPUT"
+
+      - name: build CLI (${{ matrix.target.os }}/${{ matrix.target.arch }})
+        env:
+          GOOS:   ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.ldver }}
+          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/${{ matrix.target.artifact }} ./cmd/kling
+
+      - name: build daemon linux/${{ matrix.target.arch }} only
+        if: matrix.target.os == 'linux'
+        env:
+          GOOS:   ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.ldver }}
+          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
+        run: |
+          # El daemon siempre linux/amd64 o linux/arm64 según matriz.
+          # Es el mismo binario que el CLI; el unit systemd lo invoca con
+          # `kling daemon`. El nombre lleva el sufijo por consistencia con
+          # otros binarios y para que el daemon se pueda bajar de la release.
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/kling-${{ matrix.target.ext }} ./cmd/kling
+
+      - name: build kling-bridge (linux only, estático musl-safe)
+        if: matrix.target.os == 'linux'
+        env:
+          GOOS:   linux
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.ldver }}
+          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
+        run: |
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/kling-bridge-${{ matrix.target.ext }} ./cmd/kling-bridge
+
+      - name: checksum
+        working-directory: dist
+        run: |
+          # Calcula SHA256SUMS en la primera matriz linux (no duplica).
+          if [ "${{ matrix.target.os }}" = "linux" ] && [ "${{ matrix.target.arch }}" = "amd64" ]; then
+            sha256sum * > SHA256SUMS
+          fi
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kling-${{ matrix.target.ext }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: consolidate binaries
+        run: |
+          mkdir -p release
+          # Junta los binarios de cada plataforma en un solo directorio.
+          # Estructura final por plataforma:
+          #   release/kling-<plat>                  (CLI)
+          #   release/kling-linux-<arch>            (daemon, solo linux)
+          #   release/kling-bridge-linux-<arch>     (bridge, solo linux)
+          for d in artifacts/*; do
+            cp -v "$d"/* release/ 2>/dev/null || true
+          done
+          ls -la release/
+
+      - name: compute final version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: compute SHA256SUMS (multi-plataforma)
+        working-directory: release
+        run: |
+          sha256sum kling-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: generate release notes
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          # Notas: prioriza el primer bloque CHANGELOG/RELEASES desde el repo,
+          # si existe; si no, autogenera un resumen a partir de los commits
+          # entre el tag anterior y este.
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="${VERSION#v}" '
+              /^## / { if (seen) exit; if ($0 ~ ver || index($0, ver)) seen=1 }
+              seen { print }
+            ' CHANGELOG.md > notes.md
+          fi
+          if [ ! -s notes.md ]; then
+            {
+              echo "## ${VERSION}"
+              echo ""
+              echo "Binarios pre-compilados para Linux (amd64, arm64), macOS (amd64, arm64) y Windows (amd64)."
+              echo ""
+              echo "### Instalación rápida"
+              echo ""
+              echo '```sh'
+              echo "curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh"
+              echo '```'
+              echo ""
+              echo "Ver [README](https://github.com/juan52878911/kindling#instalación) para más opciones."
+            } > notes.md
+          fi
+          cat notes.md
+
+      - name: create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: ${{ steps.ver.outputs.version }}
+          body_path: release/notes.md
+          fail_on_unmatched_files: true
+          files: |
+            release/kling-linux-amd64
+            release/kling-linux-arm64
+            release/kling-darwin-amd64
+            release/kling-darwin-arm64
+            release/kling-bridge-linux-amd64
+            release/kling-bridge-linux-arm64
+            release/SHA256SUMS
+            release/notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

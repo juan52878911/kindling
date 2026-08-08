@@ -140,6 +140,28 @@ if [ "$MODE" = "stdio" ]; then
 elif [ ${#CMD[@]} -gt 0 ]; then
   # HTTP nativo: no hay puente. El servidor escucha él mismo, y el gateway le
   # habla igual que a cualquier otro: POST a /mcp del puerto 8080.
+  #
+  # AUTO-RESET (KLING_HTTP_RESET_AFTER). Si está definido y > 0, el wrapper
+  # mata el servidor una vez tras ese número de segundos y lo re-arranca.
+  # El estado del servidor (sesión stateful, conexiones abiertas, etc.) se
+  # borra. Esto resuelve el bug del snapshot dorado: si el snapshot se congela
+  # con el servidor YA inicializado, restaurar produce una microVM con un
+  # proceso zombie que rechaza nuevos handshakes. Tras el reset, el servidor
+  # queda limpio y acepta el primer initialize del gateway como si fuera
+  # nuevo.
+  #
+  # El marker /var/run/kling-http-reset-done persiste en el overlay, así que
+  # el reset ocurre UNA sola vez por imagen: el snapshot dorado lo congela
+  # con el marker ya puesto, y las instancias restauradas desde él ven el
+  # archivo y no vuelven a resetear.
+  #
+  # El valor por defecto es 30s: lo bastante para que mcpImport termine su
+  # catálogo (initialize + tools/list) sin carreras, lo bastante corto para
+  # no alargar el ciclo de import más de lo necesario.
+  #
+  # NOTA sobre el shell: las funciones de POSIX sh no se exportan a los
+  # subshells automáticamente. Por eso definimos el comando del servidor como
+  # variable y llamamos exec directamente en cada sitio que lo necesita.
   {
     echo '#!/bin/sh'
     echo '# Generado por 80-mcp-image.sh — servidor HTTP nativo, sin puente.'
@@ -150,9 +172,36 @@ elif [ ${#CMD[@]} -gt 0 ]; then
     echo 'export HOME=/root'
     echo '# 8080 es el puerto que busca el gateway dentro del invitado.'
     echo 'export PORT=8080'
-    printf 'exec'
+    echo ''
+    echo 'RESET_AFTER="${KLING_HTTP_RESET_AFTER:-30}"'
+    echo 'MARKER=/var/run/kling-http-reset-done'
+    printf 'SERVER_CMD='
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
+    echo ''
+    echo 'if [ "$RESET_AFTER" -gt 0 ] && [ ! -f "$MARKER" ]; then'
+    echo '    # Primer arranque: lanzar servidor, esperar el reset, re-arrancar.'
+    echo '    # La línea entera, con la asignación, sustituye al proceso actual'
+    echo '    # por el servidor (exec) y devuelve cuando el servidor muere.'
+    echo '    $SERVER_CMD &'
+    echo '    SERVER_PID=$!'
+    echo '    ('
+    echo '        sleep "$RESET_AFTER"'
+    echo '        kill -KILL "$SERVER_PID" 2>/dev/null'
+    echo '        wait "$SERVER_PID" 2>/dev/null'
+    echo '        mkdir -p "$(dirname "$MARKER")" 2>/dev/null'
+    echo '        touch "$MARKER"'
+    echo '        # Re-arrancar el servidor. Sin subshells extra: $SERVER_CMD se'
+    echo '        # ejecuta directamente. El subshell se reemplaza por el'
+    echo '        # servidor, que se convierte en PID del subshell.'
+    echo '        exec $SERVER_CMD'
+    echo '    ) &'
+    echo '    wait'
+    echo 'else'
+    echo '    # Marker presente (post-reset, o imagen sin auto-reset): servidor'
+    echo '    # limpio directo, sin supervisores intermedios.'
+    echo '    exec $SERVER_CMD'
+    echo 'fi'
   } > "$mnt/entrypoint"
 fi
 

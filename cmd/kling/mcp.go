@@ -130,6 +130,57 @@ func mcpImport(args []string) error {
 	}
 	fmt.Printf("✓ %s · %d herramienta(s)\n", info, len(tools))
 
+	// AUTO-RESET POST-CATALOG. Sin esto, el snapshot dorado se congela con el
+	// servidor en estado post-handshake: sesiones abiertas, procesos hijos
+	// hablando por pipes. Al restaurar, la microVM queda con un proceso zombie
+	// que rechaza nuevos handshakes (HTTP 400 "Server already initialized" o
+	// 406).
+	//
+	// Hay dos casos, según el modo de la imagen:
+	//
+	//   stdio + bridge (kling-bridge): el bridge expone POST /reset, que cierra
+	//   TODAS las sesiones y mata los procesos hijo. Instantáneo.
+	//
+	//   HTTP nativo (mcp-server-X streamableHttp): el wrapper del entrypoint
+	//   (ver scripts/80-mcp-image.sh) hace un kill -KILL del servidor tras
+	//   KLING_HTTP_RESET_AFTER segundos y lo re-arranca. Necesita tiempo.
+	//
+	// Probamos /reset primero. Si responde 204, es stdio y ya está. Si da 404,
+	// es HTTP nativo: esperamos el auto-reset del wrapper.
+	fmt.Printf("       reseteando estado post-handshake... ")
+	gresp, err := c.Guest(ctx, mc.ID, api.GuestRequest{
+		Path:   "/reset",
+		Method: "POST",
+	})
+	if err == nil && gresp.Status == 204 {
+		fmt.Println("✓ (bridge)")
+	} else {
+		// HTTP nativo: el wrapper hace kill -KILL del servidor tras 30s y lo
+		// re-arranca. Le damos un poco más de margen y verificamos que el
+		// puerto vuelve a abrir antes del commit.
+		resetAfter := 35 * time.Second
+		if *wait < resetAfter {
+			resetAfter = *wait + 5*time.Second
+		}
+		fmt.Printf("esperando %s para auto-reset del servidor HTTP nativo... ", resetAfter)
+		select {
+		case <-time.After(resetAfter):
+			fmt.Println("✓ (HTTP nativo)")
+		case <-ctx.Done():
+			fmt.Println("✗")
+			cleanup()
+			return ctx.Err()
+		}
+		fmt.Printf("       verificando que el servidor responde... ")
+		if err := waitGuest(ctx, c, mc.ID, 30*time.Second); err != nil {
+			fmt.Println("✗")
+			fmt.Printf("\nEl servidor no volvió a abrir el puerto 8080 tras el reset. Mira qué pasó:\n  kling logs %s\n", tmpl)
+			cleanup()
+			return err
+		}
+		fmt.Println("✓")
+	}
+
 	// Decisión automática: ¿puede este servicio correr en máquinas efímeras?
 	verdict := api.ClassifyTools(tools)
 	switch {
