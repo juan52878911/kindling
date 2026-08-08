@@ -104,6 +104,32 @@ func (c *Client) Remove(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
 }
 
+// Logs trae la consola serie. Se devuelve texto plano, no JSON: es para leer.
+func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("http://kling/machines/%s/logs?tail=%d", ref, tail), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 300 {
+		var e Error
+		if json.Unmarshal(b, &e) == nil && e.Message != "" {
+			return "", fmt.Errorf("%s", e.Message)
+		}
+		return "", fmt.Errorf("%s", resp.Status)
+	}
+	return string(b), nil
+}
+
 func (c *Client) Commit(ctx context.Context, ref, name string) (*Snapshot, error) {
 	var s Snapshot
 	return &s, c.do(ctx, http.MethodPost, "/machines/"+ref+"/commit", CommitRequest{Name: name}, &s)

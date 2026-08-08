@@ -47,6 +47,11 @@ const (
 	// red del host y tumba a todas las demás.
 	diskBytesPerSec = 128 << 20 // 128 MiB/s
 	netBytesPerSec  = 16 << 20  // 16 MiB/s
+
+	// defaultCPUPct: media vCPU por microVM. Una herramienta MCP responde a
+	// peticiones puntuales; darle un core entero solo sirve para que un bucle
+	// infinito degrade a las vecinas.
+	defaultCPUPct = 50
 )
 
 // Manager gestiona todas las microVMs del daemon.
@@ -55,10 +60,15 @@ type Manager struct {
 	fcBin       string
 	priv        *Privileges
 	PrivWarning string
-	bus         *events.Bus
-	mu          sync.RWMutex
-	byID        map[string]*api.Machine
-	socket      map[string]string // id -> ruta del socket de firecracker
+
+	// cgroupRoot vacío = sin límite de CPU; el motivo queda en CgroupWarning.
+	cgroupRoot    string
+	CgroupWarning string
+
+	bus    *events.Bus
+	mu     sync.RWMutex
+	byID   map[string]*api.Machine
+	socket map[string]string // id -> ruta del socket de firecracker
 }
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
@@ -73,8 +83,15 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		byID:   make(map[string]*api.Machine),
 		socket: make(map[string]string),
 	}
+	if cg, err := ensureDelegation(); err != nil {
+		m.CgroupWarning = err.Error()
+	} else {
+		m.cgroupRoot = cg
+	}
+
 	priv.EnsureReadable(filepath.Join(root, "images"))
 	m.load()
+	m.reconcile()
 	return m, nil
 }
 
@@ -101,13 +118,9 @@ func (m *Manager) load() {
 	if json.Unmarshal(b, &list) != nil {
 		return
 	}
+	// No se toca el estado aquí: reconcile() decide comparando con la realidad
+	// del host, porque una microVM SÍ puede sobrevivir al daemon.
 	for _, mc := range list {
-		// Un proceso en marcha no sobrevive al daemon; solo warm y stopped son
-		// estados fiables tras un reinicio.
-		if mc.State == api.StateRunning {
-			mc.State = api.StateStopped
-			mc.PID = 0
-		}
 		m.byID[mc.ID] = mc
 	}
 }
@@ -269,6 +282,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: time.Now(),
+		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
@@ -302,6 +316,13 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.fail(mc, err)
 		return nil, err
 	}
+	if mc.CPUPct <= 0 {
+		mc.CPUPct = defaultCPUPct
+	}
+	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+		log.Printf("aviso: %s: %s", mc.Name, warn)
+	}
+
 	m.mu.Lock()
 	now := time.Now()
 	mc.PID = pid
@@ -471,6 +492,10 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 
 	// Con el snapshot en disco el proceso sobra: aquí es donde se libera la RAM.
 	m.kill(mc.ID)
+	// Y su namespace y su cgroup tampoco hacen nada mientras está congelada.
+	// Thaw los recrea.
+	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.releaseCPU(mc.ID)
 
 	// Firecracker vuelca la memoria entera, pero en una microVM recién arrancada
 	// la mayor parte son páginas a cero. Perforarlas deja el fichero disperso: el
@@ -562,6 +587,9 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("no existe la máquina %q", ref)
 	}
 	m.kill(mc.ID)
+	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
+	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.releaseCPU(mc.ID)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -584,6 +612,7 @@ func (m *Manager) Remove(ref string) error {
 	}
 	m.kill(mc.ID)
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.releaseCPU(mc.ID)
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
@@ -607,6 +636,9 @@ func (m *Manager) kill(id string) {
 }
 
 func (m *Manager) fail(mc *api.Machine, err error) {
+	m.kill(mc.ID)
+	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.releaseCPU(mc.ID)
 	m.mu.Lock()
 	mc.State = api.StateFailed
 	mc.LastErr = err.Error()

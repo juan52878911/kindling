@@ -48,6 +48,9 @@ type Machine struct {
 	NetIndex int    `json:"net_index,omitempty"`
 	Egress   string `json:"egress,omitempty"`
 
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
+	CPUPct     int `json:"cpu_pct,omitempty"`
+
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`
@@ -68,6 +71,14 @@ type RunRequest struct {
 	// Egress: "none" (por defecto) o "internet". Nunca hay acceso a redes
 	// privadas: el código de dentro se considera hostil.
 	Egress string `json:"egress,omitempty"`
+
+	// TTLSeconds congela la máquina automáticamente pasado ese tiempo. Es la
+	// pieza que hace "serverless" el modelo: una herramienta ociosa deja de
+	// costar CPU y RAM sin intervención de nadie.
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
+
+	// CPUPct acota el uso de CPU (100 = un core completo).
+	CPUPct int `json:"cpu_pct,omitempty"`
 }
 
 // Snapshot es una microVM congelada y reutilizable: el artefacto del que se

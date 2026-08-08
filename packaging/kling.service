@@ -18,5 +18,14 @@ ExecStart=/usr/local/bin/kling daemon
 Restart=on-failure
 RestartSec=2
 
+# CRÍTICO: sin esto systemd mata TODO el cgroup al reiniciar el servicio, y se
+# lleva por delante las microVMs en marcha. Con KillMode=process solo se detiene
+# el daemon; al volver, reconcile() readopta las que sigan vivas.
+KillMode=process
+
+# Los cgroups de las microVMs viven en /sys/fs/cgroup/kindling, fuera del árbol
+# de systemd: colgarlos del cgroup del servicio rompe el arranque con 219/CGROUP,
+# porque cgroup v2 prohíbe tener procesos y controladores delegados a la vez.
+
 [Install]
 WantedBy=multi-user.target

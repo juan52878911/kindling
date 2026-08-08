@@ -168,6 +168,28 @@ func (n *Net) Wrap(cmd string, args ...string) []string {
 	return append([]string{"ip", "netns", "exec", n.NS, cmd}, args...)
 }
 
+// ListNamespaces devuelve los namespaces creados por kindling.
+func ListNamespaces() []string {
+	out, err := exec.Command("ip", "netns", "list").Output()
+	if err != nil {
+		return nil
+	}
+	var res []string
+	for _, line := range strings.Split(string(out), "\n") {
+		name, _, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if strings.HasPrefix(name, "kl-") {
+			res = append(res, name)
+		}
+	}
+	return res
+}
+
+// TeardownNamespace borra un namespace y su veth por nombre.
+func TeardownNamespace(ns string) {
+	quiet("ip", "netns", "del", ns)
+	quiet("ip", "link", "del", "vh-"+strings.TrimPrefix(ns, "kl-"))
+}
+
 // Available indica si el host tiene lo necesario para montar redes.
 func Available() error {
 	for _, c := range []string{"ip", "iptables"} {

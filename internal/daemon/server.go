@@ -54,6 +54,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
+	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	return mux
 }
@@ -86,6 +87,11 @@ func (s *Server) Listen(ctx context.Context) error {
 		}
 	}
 
+	// Vigilancia de vida: una microVM puede morir sola (pánico del invitado, OOM
+	// del host). Decir "running" sobre algo muerto haría que el gateway enrutara
+	// peticiones a la nada.
+	s.mgr.Watch(ctx, 10*time.Second)
+
 	srv := &http.Server{Handler: s.routes()}
 	go func() {
 		<-ctx.Done()
@@ -103,6 +109,9 @@ func (s *Server) Listen(ctx context.Context) error {
 
 	if s.mgr.PrivWarning != "" {
 		log.Printf("AVISO DE SEGURIDAD: %s", s.mgr.PrivWarning)
+	}
+	if s.mgr.CgroupWarning != "" {
+		log.Printf("AVISO: sin límite de CPU por microVM: %s", s.mgr.CgroupWarning)
 	}
 	log.Printf("kling daemon %s escuchando en %s (root=%s)", Version, s.socket, s.root)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -229,6 +238,22 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	tail := 200
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			tail = n
+		}
+	}
+	out, err := s.mgr.Logs(r.PathValue("ref"), tail)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(out))
 }
 
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {

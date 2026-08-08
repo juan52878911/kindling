@@ -11,6 +11,8 @@ import (
 	"sort"
 	"time"
 
+	"log"
+
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -233,6 +235,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
+		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
 		CreatedAt: time.Now(),
 	}
 	m.mu.Lock()
@@ -275,6 +278,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()
+
+	if mc.CPUPct <= 0 {
+		mc.CPUPct = defaultCPUPct
+	}
+	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+		log.Printf("aviso: %s: %s", mc.Name, warn)
+	}
 
 	m.mu.Lock()
 	now := time.Now()

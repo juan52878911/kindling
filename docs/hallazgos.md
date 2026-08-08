@@ -285,3 +285,38 @@ Firecracker, no el daemon: el directorio destino tiene que ser suyo ANTES de ped
 Regla general para este proyecto: **el daemon crea, el VMM escribe**. Todo lo que Firecracker
 vaya a escribir hay que cedérselo; todo lo que solo vaya a leer (imágenes base, snapshots
 dorados) se le deja en solo lectura.
+
+## Reiniciar el daemon mataba todas las microVMs
+
+`KillMode` por defecto en systemd es `control-group`: al parar el servicio mata **todo** su
+cgroup, y los procesos de Firecracker cuelgan de ahí aunque se lancen con `setsid`.
+
+Con `KillMode=process` solo se detiene el daemon, y al volver `reconcile()` readopta lo que
+siga vivo. Para readoptar no basta con mirar si el PID existe —los PID se reciclan—: se
+comprueba que la línea de comandos del proceso menciona el socket de ESA máquina.
+
+## Los cgroups de las microVMs no pueden colgar del cgroup del servicio
+
+Primer intento: crear los cgroups bajo `kling.service` con `Delegate=yes`. Falla por la regla
+de "no procesos internos" de cgroup v2 — un cgroup no puede tener procesos propios y
+controladores delegados a la vez.
+
+Se puede sortear moviendo el daemon a una hoja... y entonces **el siguiente arranque del
+servicio falla con `219/CGROUP`**, porque systemd ya no puede colocar su proceso principal en
+un cgroup con controladores habilitados. El servicio se recupera al reintentar, pero queda
+un arranque fallido en cada reinicio.
+
+La solución es un árbol propio en `/sys/fs/cgroup/kindling`, fuera del de systemd. Cada uno
+gestiona el suyo y no hay conflicto.
+
+## Borrar un cgroup justo después de matar el proceso falla
+
+`rmdir` sobre un cgroup con procesos da EBUSY, y entre el `SIGKILL` y la salida real del
+proceso pasa un instante. Reintentar durante medio segundo lo resuelve; lo que sobreviva lo
+recoge el barrido periódico.
+
+## Al medir fugas de recursos, cuidado con el propio test
+
+Comprobando si `stop` liberaba el namespace medí "1 antes, 1 después" y lo di por roto. En
+realidad la máquina que paré ya había liberado el suyo al fallar en el paso anterior, y el
+que contaba era el de otra máquina que seguía viva. El arreglo era correcto; el test, no.

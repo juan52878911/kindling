@@ -131,9 +131,11 @@ Cada máquina solo tiene un overlay disperso propio, montado con overlayfs por
 
 | | |
 |---|---|
-| Imagen base, compartida | 386 MB, una sola vez |
-| Por máquina en marcha | **~8.5 MB** |
-| Por máquina en `warm` | **~81 MB** |
+| Imagen base `min` (Alpine), compartida | **17 MB**, una sola vez |
+| Imagen base `default` (Ubuntu), compartida | 386 MB |
+| Por máquina en marcha | **~8 MB** |
+| Por máquina en `warm`, imagen `min` | **~35 MB** |
+| Por máquina en `warm`, imagen `default` | ~82 MB |
 
 Antes de los overlays cada máquina copiaba los 800 MB enteros: tres máquinas costaban
 2.4 GB, ahora cuestan 386 MB + 25 MB.
@@ -164,11 +166,12 @@ La palanca es lo que arranca dentro:
 
 | Invitado | Coste congelada |
 |---|---|
-| Ubuntu 24.04 + systemd | 80 MB |
-| solo `/bin/sh` | **36 MB** |
+| Ubuntu 24.04 + systemd | 82 MB |
+| Alpine sin systemd (imagen `min`) | **35 MB** |
 
-Casi la mitad del coste es userspace de Ubuntu que una herramienta efímera no necesita. Un
-rootfs mínimo con solo el servidor MCP debería quedarse cerca de esos 36 MB.
+Casi la mitad del coste era userspace de Ubuntu que una herramienta efímera nunca usa.
+`scripts/70-build-minimal-image.sh` construye la imagen `min`: Alpine con
+`/sbin/overlay-init` y sin gestor de servicios, que arranca directamente `/entrypoint`.
 
 Más allá quedan dos técnicas de Firecracker sin explotar: **snapshots diff**, que guardan
 solo las páginas cambiadas respecto a una base, y el **backend UFFD**, que permite a varias
@@ -219,6 +222,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 1.6** — Overlays, snapshots dispersos y snapshots dorados con memoria compartida
 - [x] **Fase 2** — Red por TAP con un namespace por microVM
 - [x] **Fase 2.5** — Endurecimiento: privilegios bajados, salida filtrada, límites de caudal
+- [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y vigilancia
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
 - [ ] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger
 - [ ] **Fase 5** — Conversión automática de un MCP open source a microVM
@@ -310,4 +314,31 @@ RESULTADO 192.168.2.1:   BLOQUEADO      (router de casa)
 RESULTADO 10.10.10.1:    BLOQUEADO      (túnel WireGuard)
 RESULTADO 169.254.169.254: BLOQUEADO    (metadatos de cloud)
 RESULTADO 1.1.1.1:       ALCANZABLE
+```
+
+## Ciclo de vida y robustez
+
+```
+$ kling run -image min -ttl 300 -cpu 25 -egress internet
+$ kling logs <ref> -tail 50        # consola serie: la única ventana al interior
+```
+
+- **`-ttl`** congela la máquina sola pasado ese tiempo. Congelar, no matar: deja de costar
+  CPU y RAM, pero vuelve en ~30 ms. Es lo que hace serverless al modelo.
+- **`-cpu`** acota el uso de CPU con un cgroup propio (50% de un core por defecto).
+- **Reconciliación al arrancar**: el daemon compara su estado guardado con la realidad del
+  host, readopta las microVMs que sigan vivas y limpia namespaces y cgroups huérfanos.
+- **Vigilancia continua**: cada 10 s comprueba que lo que dice `running` corre de verdad.
+  Una máquina cuyo proceso desapareció pasa a `failed` y libera sus recursos.
+
+**Reiniciar el daemon no mata las microVMs.** El unit lleva `KillMode=process`; sin eso
+systemd arrastra todo el cgroup y se lleva por delante las máquinas en marcha.
+
+### Medido con 8 instancias
+
+```
+RAM añadida:          113 MiB   (14 MiB por instancia)
+conectividad:         9/9
+VMM sin privilegios:  9/9
+cgroups activos:      9
 ```

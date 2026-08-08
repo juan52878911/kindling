@@ -29,7 +29,9 @@ USO
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
       [-egress none|internet]                      salida de red (por defecto: none)
+      [-ttl SEGUNDOS] [-cpu PCT]                   congelado automático y techo de CPU
   ps [-a]                                          lista las máquinas
+  logs <ref> [-tail N]                             consola serie de la microVM
   freeze <ref>                                     congela en snapshot -> warm
   thaw <ref>                                       restaura desde snapshot (~ms)
   stop <ref>                                       termina la máquina
@@ -76,6 +78,8 @@ func main() {
 		err = cmdRun(args)
 	case "ps":
 		err = cmdPS(args)
+	case "logs":
+		err = cmdLogs(args)
 	case "freeze", "thaw", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
 	case "commit":
@@ -153,6 +157,8 @@ func cmdRun(args []string) error {
 	cpus := fs.Int("cpus", 1, "vCPUs")
 	mem := fs.Int("mem", 256, "memoria en MiB")
 	egress := fs.String("egress", "none", "salida de red: none | internet (nunca alcanza redes privadas)")
+	ttl := fs.Int("ttl", 0, "segundos hasta congelarse sola (0 = nunca)")
+	cpu := fs.Int("cpu", 0, "techo de CPU en porcentaje de un core (0 = por defecto)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -161,7 +167,8 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	mc, err := api.NewClient(*host).Run(ctx, api.RunRequest{
-		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem, Egress: *egress,
+		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
+		Egress: *egress, TTLSeconds: *ttl, CPUPct: *cpu,
 	})
 	if err != nil {
 		return err
@@ -171,6 +178,28 @@ func cmdRun(args []string) error {
 	} else {
 		fmt.Printf("%s  %s  arrancada en frío en %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
 	}
+	return nil
+}
+
+func cmdLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	host := hostFlag(fs)
+	tail := fs.Int("tail", 200, "últimas N líneas (0 = todo)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("uso: kling logs <ref> [-tail N]")
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	out, err := api.NewClient(*host).Logs(ctx, fs.Arg(0), *tail)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
 	return nil
 }
 
