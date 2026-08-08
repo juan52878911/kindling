@@ -230,12 +230,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
 	start := time.Now()
-	if err := m.boot(ctx, mc, src, overlay); err != nil {
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay)
+	if err != nil {
 		m.fail(mc, err)
 		return nil, err
 	}
 	m.mu.Lock()
 	now := time.Now()
+	mc.PID = pid
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
 	mc.BootMS = time.Since(start).Milliseconds()
@@ -274,45 +276,48 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // boot lanza el proceso firecracker y configura la microVM por su API.
 //
 // Dos discos: la imagen base compartida en solo lectura y el overlay propio.
-func (m *Manager) boot(ctx context.Context, mc *api.Machine, base, overlay string) error {
-	sock := filepath.Join(m.dir(mc.ID), "fc.sock")
+//
+// Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
+// bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
+// máquinas concurrentemente.
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string) (int, error) {
+	sock := filepath.Join(m.dir(id), "fc.sock")
 	_ = os.Remove(sock)
 
-	pid, err := m.spawn(mc.ID, sock)
+	pid, err := m.spawn(id, sock)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	mc.PID = pid
 
 	c := fc.New(sock)
 	if err := waitSocket(ctx, c); err != nil {
-		return err
+		return pid, err
 	}
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs}); err != nil {
-		return err
+		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "rootfs", PathOnHost: base, IsRootDevice: true, IsReadOnly: true,
 	}); err != nil {
-		return err
+		return pid, err
 	}
 	// vdb: capa escribible propia de esta microVM.
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "overlay", PathOnHost: overlay, IsRootDevice: false, IsReadOnly: false,
 	}); err != nil {
-		return err
+		return pid, err
 	}
-	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: mc.VCPUs, MemSizeMiB: mc.MemMiB}); err != nil {
-		return err
+	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memMiB}); err != nil {
+		return pid, err
 	}
 	if err := c.Start(ctx); err != nil {
-		return err
+		return pid, err
 	}
 	m.mu.Lock()
-	m.socket[mc.ID] = sock
+	m.socket[id] = sock
 	m.mu.Unlock()
-	return nil
+	return pid, nil
 }
 
 // spawn arranca firecracker desacoplado del daemon y devuelve su PID.

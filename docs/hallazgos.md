@@ -154,3 +154,54 @@ camino para bajar de 80 MB es un rootfs mínimo, no tocar parámetros de memoria
 - **Backend UFFD** en vez de File: varias microVMs restauradas del mismo snapshot pueden
   compartir páginas en RAM. No reduce disco; da densidad cuando hay muchas calientes a la
   vez. Es la técnica con la que Lambda consigue su densidad.
+
+## Test de estrés: 10, 20 y 50 microVMs
+
+Medido en la VM del laboratorio (4 cores, 3.9 GB), 256 MiB asignados por máquina,
+arranque y congelación en paralelo. **Sin un solo fallo ni OOM en ningún lote.**
+
+| Lote | Arranque | RAM en marcha | RSS | Freeze | Thaw | RAM tras thaw | RSS tras thaw | Load |
+|---|---|---|---|---|---|---|---|---|
+| 10 | 459 ms | 1167 MiB | 807 MiB | 2.9 s | 54 ms | 404 MiB | 78 MiB | 1.6 |
+| 20 | 363 ms | 1378 MiB | 1051 MiB | 12.3 s | 84 ms | 470 MiB | 166 MiB | 6.8 |
+| 50 | 2360 ms | 2631 MiB | 2341 MiB | 26.6 s | 418 ms | 653 MiB | 446 MiB | 28.1 |
+
+Tres lecturas:
+
+- **`warm` es gratis en RAM, confirmado a escala.** Con 50 máquinas congeladas la RAM
+  usada volvió a la línea base (345 MiB) y no quedaba ni un proceso firecracker.
+- **`thaw` escala.** 50 máquinas restauradas en 418 ms, frente a 2.360 ms arrancándolas.
+- **`freeze` es el cuello de botella**: 26,6 s para 50, con load 28. Es E/S pura — cada
+  máquina vuelca ~110 MB y el perforado los vuelve a leer. Ver más abajo por qué en uso
+  real esto casi desaparece.
+
+## Restaurar no solo es más rápido: gasta 3x menos RAM
+
+El hallazgo más importante del test. Misma microVM, medido en `/proc/PID/status`:
+
+| | Arrancada en frío | Restaurada |
+|---|---|---|
+| VmRSS | 110.996 kB | **33.032 kB** |
+| RssAnon | 108.540 kB | 10.188 kB |
+| RssFile | 2.452 kB | **22.840 kB** |
+
+Con `backend_type: "File"`, Firecracker **mapea** el fichero de memoria en vez de
+reservar memoria anónima. Las consecuencias son grandes:
+
+1. Las páginas se cargan **bajo demanda**: solo entra lo que el invitado toca de verdad.
+2. Lo residente es **page cache**, no memoria anónima: el kernel puede desalojarlo bajo
+   presión y releerlo del snapshot, sin swap.
+
+Por eso 50 máquinas restauradas ocupan 446 MiB de RSS y las mismas 50 arrancadas en frío
+ocupan 2.341 MiB.
+
+## La consecuencia de diseño: snapshot dorado
+
+Si N microVMs restauran del **mismo** fichero de snapshot, mapean las mismas páginas y el
+kernel las comparte en page cache. Eso es, en la práctica, lo que se busca con UFFD — y
+sale gratis con el backend File, a condición de compartir el snapshot.
+
+Hoy kindling guarda un snapshot por máquina, así que no hay compartición. El siguiente paso
+arquitectónico es que **el snapshot sea un artefacto de imagen, no de máquina**: se congela
+una vez por herramienta y N instancias restauran de ese fichero. De paso desaparece el
+cuello de botella del freeze, porque se congela una vez y no una por instancia.
