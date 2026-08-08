@@ -130,6 +130,12 @@ func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error)
 	return string(b), nil
 }
 
+// SetLabels reetiqueta una máquina. Se usa al importar, cuando la decisión sobre
+// el modo de ejecución solo puede tomarse DESPUÉS de ver su catálogo.
+func (c *Client) SetLabels(ctx context.Context, ref string, labels map[string]string) error {
+	return c.do(ctx, http.MethodPut, "/machines/"+ref+"/labels", labels, nil)
+}
+
 func (c *Client) Commit(ctx context.Context, ref, name string) (*Snapshot, error) {
 	var s Snapshot
 	return &s, c.do(ctx, http.MethodPost, "/machines/"+ref+"/commit", CommitRequest{Name: name}, &s)

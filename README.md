@@ -693,20 +693,38 @@ memory.create_entities     kindling/proyecto  ->  entidad creada          (31 ms
 - **Los directorios que espera el servidor deben existir DENTRO de la imagen.** El
   `server-filesystem` quiere `/data`; crearlo en el host no sirve de nada.
 
-## Servicios con estado
+## Efímero o persistente: se decide solo
 
-No todas las herramientas pueden ser efímeras. Destruir la máquina tras cada acción se lleva
-por delante lo que el servidor acumulara: un grafo de conocimiento, una cadena de
-razonamiento. Para un servidor de ficheros da igual —el estado vive fuera—, pero
-`server-memory` y `server-sequential-thinking` empezarían de cero en cada llamada.
+Una microVM efímera muere con todo lo suyo, memoria **y disco**. Así que la pregunta no es
+"¿el servidor guarda estado?" sino:
 
-```sh
-kling mcp import memory   -image memory   -stateful
-kling mcp import thinking -image thinking -stateful
+> ¿algo que escribe una llamada tiene que verlo una llamada posterior?
+
+`kling mcp import` lo deduce del catálogo y lo dice:
+
+```
+eco          EFÍMERO      porque solo consulta: no deja nada que preservar
+notas        PERSISTENTE  porque escribe con guardar_nota y lee con session_info
+filesystem   PERSISTENTE  porque escribe con write_file y lee con read_file
+memory       PERSISTENTE  porque read_graph sugiere que acumula contexto
+thinking     PERSISTENTE  porque sequentialthinking sugiere que acumula contexto
 ```
 
-Los servicios marcados usan **una instancia persistente**, congelada al quedar ociosa y de
-vuelta en milisegundos con lo que tenía. El resto sigue siendo efímero.
+**`filesystem` también es persistente**, aunque no lo parezca: escribe en el disco del
+invitado, que es tan volátil como su memoria.
+
+La señal fiable es estructural —que el servidor exponga a la vez herramientas que escriben y
+que leen—, con un puñado de palabras en el NOMBRE de la herramienta para los servidores de
+una sola. Buscar esas palabras en las descripciones clasificaba todo como persistente:
+"session" o "sequence" aparecen de pasada en cualquier texto.
+
+Se puede forzar con `-stateful` o `-ephemeral`.
+
+### Ante la duda, persistente
+
+Equivocarse hacia efímero produce **pérdida silenciosa**: la llamada responde bien y lo
+escrito desaparece. Equivocarse hacia persistente solo cuesta una instancia congelada, que
+no gasta ni CPU ni RAM.
 
 El agregador lo indica en su inventario para que el modelo lo sepa:
 
@@ -734,3 +752,21 @@ Si no conoces sus argumentos, pide primero describe_tool.
 Así el modelo sabe qué hay **desde el primer momento** y va directo a `call_tool`, en vez de
 gastar una llamada en descubrir. Quedan tres meta-herramientas: `find_tools`,
 `describe_tool` y `call_tool`.
+
+### Persistente no significa siempre encendido
+
+Un servicio persistente conserva su estado, pero **deja de consumir al terminar**. Medido con
+`-idle 30s`:
+
+```
+escribir /data/nota.txt        →  Successfully wrote
+leer /data/nota.txt (otra llamada) →  "esto debe sobrevivir"
+
+en marcha:   running   41 MiB sobre la línea base
+tras 35 s:   warm      RAM de vuelta a 0   (freeze 661 ms)
+al volver:   "esto debe sobrevivir"        (thaw 18 ms)
+```
+
+Congelar no es apagar: la instancia deja de existir como proceso —cero CPU, cero RAM— pero su
+estado sigue en disco y vuelve en milisegundos. El coste es el fichero de memoria: 151 MiB
+para este servicio mientras está congelado.

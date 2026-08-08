@@ -51,6 +51,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
+	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
 	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
@@ -255,6 +256,19 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(out))
+}
+
+func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
+	var labels map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.mgr.SetLabels(r.PathValue("ref"), labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {

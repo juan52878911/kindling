@@ -57,7 +57,8 @@ func mcpImport(args []string) error {
 	keep := fs.Bool("keep", false, "no destruir la plantilla al terminar")
 	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
 	force := fs.Bool("force", false, "reemplazar el servicio si ya existe")
-	stateful := fs.Bool("stateful", false, "el servicio acumula estado: usa instancia persistente en vez de efímera")
+	stateful := fs.Bool("stateful", false, "forzar instancia persistente (por defecto se deduce del catálogo)")
+	ephemeral := fs.Bool("ephemeral", false, "forzar máquinas efímeras aunque el análisis diga lo contrario")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -93,7 +94,7 @@ func mcpImport(args []string) error {
 	fmt.Printf("  1/5  arrancando la plantilla... ")
 	mc, err := c.Run(ctx, api.RunRequest{
 		Name: tmpl, Image: img, MemMiB: *mem, Egress: *egress,
-		Labels: labelsFor(service, *stateful),
+		Labels: map[string]string{api.LabelService: service},
 	})
 	if err != nil {
 		fmt.Println("✗")
@@ -127,8 +128,29 @@ func mcpImport(args []string) error {
 	}
 	fmt.Printf("✓ %s · %d herramienta(s)\n", info, len(tools))
 
+	// Decisión automática: ¿puede este servicio correr en máquinas efímeras?
+	verdict := api.ClassifyTools(tools)
+	switch {
+	case *stateful:
+		verdict = api.StatefulVerdict{Stateful: true, Reason: "forzado con -stateful"}
+	case *ephemeral:
+		verdict = api.StatefulVerdict{Stateful: false, Reason: "forzado con -ephemeral"}
+	}
+	modo := "EFÍMERO — una microVM por acción, destruida al terminar"
+	if verdict.Stateful {
+		modo = "PERSISTENTE — una instancia, congelada al quedar ociosa"
+	}
+	fmt.Printf("       %s\n", modo)
+	fmt.Printf("       porque %s\n", verdict.Reason)
+
 	// 3 y 4. snapshot dorado y catálogo
 	fmt.Printf("  4/5  congelando como snapshot dorado... ")
+	// La etiqueta viaja con la máquina hasta el snapshot.
+	if err := c.SetLabels(ctx, mc.ID, labelsFor(service, verdict.Stateful)); err != nil {
+		fmt.Println("✗")
+		cleanup()
+		return err
+	}
 	if _, err := c.Commit(ctx, mc.ID, service); err != nil {
 		fmt.Println("✗")
 		cleanup()
@@ -160,9 +182,10 @@ func mcpImport(args []string) error {
 	}
 	_ = tw.Flush()
 
-	if *stateful {
-		fmt.Printf("\nMarcado como CON ESTADO: usará una instancia persistente, congelada al\n")
-		fmt.Printf("quedar ociosa, para no perder lo que acumule entre llamadas.\n")
+	if verdict.Stateful {
+		fmt.Printf("\nUsará una instancia persistente para no perder lo que acumule. Al quedar\n")
+		fmt.Printf("ociosa se congela: deja de gastar CPU y RAM, y vuelve en milisegundos con\n")
+		fmt.Printf("su estado intacto.\n")
 	}
 	fmt.Printf("\nA partir de ahora listar sus capacidades NO despierta la microVM.\n")
 	fmt.Printf("Conéctalo:  kling connect -all -install opencode\n")

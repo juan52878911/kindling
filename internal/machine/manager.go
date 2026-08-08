@@ -602,6 +602,19 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	return &out, nil
 }
 
+// SetLabels reetiqueta una máquina viva.
+func (m *Manager) SetLabels(ref string, labels map[string]string) error {
+	mc, ok := m.Get(ref)
+	if !ok {
+		return fmt.Errorf("no existe la máquina %q", ref)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.byID[mc.ID].Labels = api.MergeLabels(m.byID[mc.ID].Labels, labels)
+	m.persist()
+	return nil
+}
+
 // Stop termina la microVM sin borrar su directorio.
 func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)

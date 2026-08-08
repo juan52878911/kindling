@@ -537,3 +537,26 @@ que un modelo, preguntado por lo que podía hacer, tuvo que gastar una llamada e
 Los nombres de herramienta cuestan ~100 tokens para 27 herramientas; los esquemas, 3300.
 Poner solo los nombres en el campo `instructions` del `initialize` da el inventario gratis y
 deja lo caro bajo demanda. Con eso `list_services` sobra: de cuatro meta-herramientas a tres.
+
+## Clasificar por palabras en la descripción no funciona
+
+Primer intento del detector: buscar "session", "sequence", "graph", "memory"... en el nombre
+Y en la descripción de cada herramienta. Resultado: **los cinco servicios salieron
+persistentes**, incluido uno que solo hace echo.
+
+Esas palabras aparecen de pasada en cualquier texto descriptivo —"a sequence of edits",
+"session information"— y no dicen nada sobre si el servidor acumula algo.
+
+La señal que sí funciona es estructural: **que el servidor exponga a la vez herramientas que
+escriben y herramientas que leen**. Quien escribe espera que alguien lea después; si nadie
+puede, el servidor no sirve para nada. Las palabras clave se quedan solo para el nombre de la
+herramienta, y solo para los servidores de una sola, donde esa señal no puede aparecer.
+
+## `filesystem` tampoco puede ser efímero
+
+Parece el caso claro de servicio sin estado: escribe en disco, no en memoria. Pero el disco
+del invitado es el overlay de la microVM, que muere con ella. Escribir un fichero y leerlo en
+otra llamada devolvería "no existe".
+
+Es un buen recordatorio de que la pregunta correcta no es "¿guarda estado?" sino "¿dónde vive
+lo que escribe?". En una microVM efímera, todo lo que no salga por la red muere con ella.
