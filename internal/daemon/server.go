@@ -50,6 +50,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
+	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
+	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
+	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	return mux
 }
@@ -212,6 +215,32 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Remove(r.PathValue("ref")); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
+	var req api.CommitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, snap)
+}
+
+func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.mgr.Snapshots())
+}
+
+func (s *Server) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
+	if err := s.mgr.RemoveSnapshot(r.PathValue("name")); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}

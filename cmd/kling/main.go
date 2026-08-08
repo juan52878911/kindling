@@ -34,6 +34,13 @@ MÁQUINAS
   stop <ref>                                       termina la máquina
   rm <ref>                                         elimina máquina y snapshot
 
+SNAPSHOTS DORADOS
+  commit <ref> <nombre>                            congela una máquina como
+                                                   snapshot reutilizable
+  run -from <nombre>                               instancia desde el snapshot
+  snapshots                                        lista los snapshots
+  rmi <nombre>                                     elimina un snapshot
+
 OBSERVACIÓN
   events                                           stream de eventos del daemon
   info                                             estado del daemon
@@ -69,6 +76,12 @@ func main() {
 		err = cmdPS(args)
 	case "freeze", "thaw", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
+	case "commit":
+		err = cmdCommit(args)
+	case "snapshots":
+		err = cmdSnapshots(args)
+	case "rmi":
+		err = cmdRmi(args)
 	case "events":
 		err = cmdEvents(args)
 	case "info":
@@ -131,6 +144,7 @@ func cmdRun(args []string) error {
 	host := hostFlag(fs)
 	name := fs.String("name", "", "nombre de la máquina")
 	image := fs.String("image", "default", "imagen de rootfs")
+	from := fs.String("from", "", "instanciar desde un snapshot dorado (~ms, sin arranque en frío)")
 	cpus := fs.Int("cpus", 1, "vCPUs")
 	mem := fs.Int("mem", 256, "memoria en MiB")
 	if err := fs.Parse(args); err != nil {
@@ -141,12 +155,90 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	mc, err := api.NewClient(*host).Run(ctx, api.RunRequest{
-		Name: *name, Image: *image, VCPUs: *cpus, MemMiB: *mem,
+		Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  %s  arrancada en frío en %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
+	if mc.From != "" {
+		fmt.Printf("%s  %s  instanciada desde %s en %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
+	} else {
+		fmt.Printf("%s  %s  arrancada en frío en %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
+	}
+	return nil
+}
+
+func cmdCommit(args []string) error {
+	fs := flag.NewFlagSet("commit", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return fmt.Errorf("uso: kling commit <ref> <nombre-snapshot>")
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	snap, err := api.NewClient(*host).Commit(ctx, fs.Arg(0), fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s  snapshot dorado  (%s de memoria)\n", snap.Name, human(snap.MemBytes))
+	fmt.Printf("instancia con:  kling run -from %s\n", snap.Name)
+	return nil
+}
+
+func cmdSnapshots(args []string) error {
+	fs := flag.NewFlagSet("snapshots", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "salida en JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	list, err := api.NewClient(*host).Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(list)
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NOMBRE\tIMAGEN\tCPU/MEM\tMEMORIA\tDISCO\tINSTANCIAS\tEDAD")
+	for _, s := range list {
+		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
+			s.Name, s.Image, s.VCPUs, s.MemMiB,
+			human(s.MemBytes), human(s.DiskBytes), s.Instances, since(s.CreatedAt))
+	}
+	return tw.Flush()
+}
+
+func cmdRmi(args []string) error {
+	fs := flag.NewFlagSet("rmi", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("uso: kling rmi <nombre-snapshot>")
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	c := api.NewClient(*host)
+	for _, n := range fs.Args() {
+		if err := c.RemoveSnapshot(ctx, n); err != nil {
+			return err
+		}
+		fmt.Println(n)
+	}
 	return nil
 }
 

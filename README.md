@@ -28,6 +28,22 @@ efad9e5f7003   mcp-demo   default   warm     1/256MiB   17s    freeze 754ms, 256
 
 $ kling thaw mcp-demo
 efad9e5f7003  running  (22 ms)
+```
+
+### Snapshots dorados
+
+Congela una máquina una vez y instancia N copias que **comparten su memoria**:
+
+```
+$ kling commit plantilla golden
+golden  snapshot dorado  (80M de memoria)
+
+$ kling run -from golden -name g1
+a3f9...  g1  instanciada desde golden en 34 ms
+
+$ kling snapshots
+NOMBRE   IMAGEN    CPU/MEM    MEMORIA   DISCO   INSTANCIAS   EDAD
+golden   default   1/256MiB   80M       80M     10           21s
 
 $ kling events
 23:52:20  machine.frozen   mcp-demo  congelada en 754 ms (256 MiB en disco)
@@ -196,6 +212,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 
 - [x] **Fase 1** — Laboratorio: microVM que arranca, snapshot/restore medido
 - [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH
+- [x] **Fase 1.6** — Overlays, snapshots dispersos y snapshots dorados con memoria compartida
 - [ ] **Fase 2** — Red por TAP, y resolver que el estado de red no sobrevive al snapshot
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
 - [ ] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger
@@ -205,3 +222,26 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 
 Ver [docs/hallazgos.md](docs/hallazgos.md) — cosas que cuestan horas de descubrir por tu cuenta,
 como que las URLs de artefactos de todos los tutoriales que hay por internet devuelven 404.
+
+## Densidad: por qué el snapshot dorado lo cambia todo
+
+Un snapshot dorado es un artefacto **de imagen, no de máquina**: se congela una vez y N
+instancias restauran del mismo fichero. Como Firecracker lo **mapea** en vez de reservar
+memoria anónima, el kernel comparte esas páginas entre todas las instancias y cada una solo
+paga lo que escribe.
+
+Medido instanciando de una en una y mirando la RAM del sistema:
+
+| | 10 desde snapshot dorado | 10 arrancadas en frío |
+|---|---|---|
+| RAM total añadida | **+68 MiB** | +824 MiB |
+| Por máquina | **6.8 MiB** | 82 MiB |
+| Tiempo por máquina | ~40 ms | ~2.6 s hasta userspace |
+
+**12 veces más densidad.** La prueba de que las páginas se comparten está en el desfase
+entre dos cifras: la suma de RSS de los diez procesos daba 258 MiB, pero la RAM del sistema
+solo subió 68 MiB. Los 190 MiB de diferencia son páginas compartidas que cada proceso
+cuenta como suyas.
+
+Esto es, en la práctica, lo que se persigue con UFFD — y sale del backend `File`, sin
+escribir un gestor de fallos de página.

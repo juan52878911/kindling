@@ -184,6 +184,11 @@ func newID() string {
 
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
+	// nada en frío, se restaura.
+	if req.From != "" {
+		return m.runFrom(ctx, req)
+	}
 	if req.Image == "" {
 		req.Image = "default"
 	}
@@ -435,7 +440,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 
 	start := time.Now()
-	if err := c.LoadSnapshot(ctx, snapPath, memPath); err != nil {
+	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()

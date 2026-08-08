@@ -39,6 +39,9 @@ type Machine struct {
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	FrozenAt  *time.Time `json:"frozen_at,omitempty"`
 
+	// From es el snapshot dorado del que se restauró, si lo hubo.
+	From string `json:"from,omitempty"`
+
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`
@@ -46,11 +49,37 @@ type Machine struct {
 }
 
 // RunRequest crea y arranca una microVM.
+//
+// Si From apunta a un snapshot dorado, la máquina se restaura desde él en vez de
+// arrancar en frío, y el resto de campos se heredan del snapshot.
 type RunRequest struct {
 	Name   string `json:"name,omitempty"`
 	Image  string `json:"image,omitempty"`
+	From   string `json:"from,omitempty"`
 	VCPUs  int    `json:"vcpus,omitempty"`
 	MemMiB int    `json:"mem_mib,omitempty"`
+}
+
+// Snapshot es una microVM congelada y reutilizable: el artefacto del que se
+// instancian N máquinas.
+//
+// Es a nivel de imagen, no de máquina. Todas las instancias mapean el MISMO
+// fichero de memoria, así que el kernel comparte sus páginas en page cache: la
+// segunda instancia y las siguientes salen casi gratis en RAM.
+type Snapshot struct {
+	Name      string    `json:"name"`
+	Image     string    `json:"image"`
+	CreatedAt time.Time `json:"created_at"`
+	VCPUs     int       `json:"vcpus"`
+	MemMiB    int       `json:"mem_mib"`
+	MemBytes  int64     `json:"mem_bytes"`  // ocupación real del fichero de memoria
+	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
+	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
+}
+
+// CommitRequest congela una máquina en marcha como snapshot reutilizable.
+type CommitRequest struct {
+	Name string `json:"name"`
 }
 
 // Event es un cambio de estado publicado en el bus del daemon.
@@ -64,12 +93,13 @@ type Event struct {
 
 // Tipos de evento.
 const (
-	EvCreated = "machine.created"
-	EvStarted = "machine.started"
-	EvFrozen  = "machine.frozen"
-	EvThawed  = "machine.thawed"
-	EvStopped = "machine.stopped"
-	EvFailed  = "machine.failed"
+	EvCreated   = "machine.created"
+	EvStarted   = "machine.started"
+	EvFrozen    = "machine.frozen"
+	EvThawed    = "machine.thawed"
+	EvStopped   = "machine.stopped"
+	EvCommitted = "snapshot.committed"
+	EvFailed    = "machine.failed"
 )
 
 // Info describe el daemon.

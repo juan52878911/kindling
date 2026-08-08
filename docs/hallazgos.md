@@ -205,3 +205,30 @@ Hoy kindling guarda un snapshot por máquina, así que no hay compartición. El 
 arquitectónico es que **el snapshot sea un artefacto de imagen, no de máquina**: se congela
 una vez por herramienta y N instancias restauran de ese fichero. De paso desaparece el
 cuello de botella del freeze, porque se congela una vez y no una por instancia.
+
+## Reapuntar discos al restaurar: obligatorio y delicado
+
+El snapshot lleva grabadas las rutas de los discos. Si N instancias restauran del mismo
+snapshot sin tocar nada, las N escriben en el overlay de la máquina original.
+
+La salida es cargar con `resume_vm: false`, hacer `PATCH /drives/{id}` con la ruta propia y
+después `Resume`. Pero con una condición que no es negociable: **el disco nuevo debe ser una
+copia del que se congeló**. El invitado despierta con su estado de montaje en memoria —
+superbloque, inodos cacheados, journal— y darle un disco con otro contenido lo corrompe.
+
+Por eso `commit` guarda tres cosas, no dos: estado de la VM, memoria y **una copia del
+overlay tal como estaba al congelar**. Y la copia se hace con la microVM pausada, para que
+sea coherente con la memoria volcada.
+
+## Medida de la compartición de páginas
+
+Al instanciar 10 máquinas del mismo snapshot dorado:
+
+- suma de RSS de los 10 procesos: **258 MiB**
+- crecimiento real de la RAM del sistema: **68 MiB**
+
+Los 190 MiB de diferencia son páginas de page cache que los 10 procesos comparten y que cada
+uno contabiliza como propias. **RSS no sirve para medir densidad**: hay que mirar la memoria
+del sistema.
+
+Comparado con arrancar 10 en frío, que costaron +824 MiB: **12x de densidad**.

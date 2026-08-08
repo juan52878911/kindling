@@ -104,6 +104,20 @@ func (c *Client) Remove(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
 }
 
+func (c *Client) Commit(ctx context.Context, ref, name string) (*Snapshot, error) {
+	var s Snapshot
+	return &s, c.do(ctx, http.MethodPost, "/machines/"+ref+"/commit", CommitRequest{Name: name}, &s)
+}
+
+func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
+	var l []*Snapshot
+	return l, c.do(ctx, http.MethodGet, "/snapshots", nil, &l)
+}
+
+func (c *Client) RemoveSnapshot(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/snapshots/"+name, nil, nil)
+}
+
 // Events consume el stream NDJSON del daemon hasta que se cancele el contexto.
 func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://kling/events", nil)

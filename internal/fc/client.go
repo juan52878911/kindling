@@ -112,6 +112,20 @@ func (c *Client) SetNetwork(ctx context.Context, n NetworkInterface) error {
 	return c.do(ctx, http.MethodPut, "/network-interfaces/"+n.IfaceID, n)
 }
 
+// PatchDrive reapunta un disco ya configurado a otro fichero del host.
+//
+// Es la pieza que hace posible el snapshot dorado: el snapshot lleva grabadas
+// las rutas de los discos, así que al restaurar hay que reapuntar el overlay al
+// de esta instancia antes de reanudar. El fichero nuevo debe ser una COPIA del
+// que se congeló: el invitado despierta con su estado de montaje en memoria, y
+// darle un disco con otro contenido lo corrompería.
+func (c *Client) PatchDrive(ctx context.Context, driveID, pathOnHost string) error {
+	return c.do(ctx, http.MethodPatch, "/drives/"+driveID, map[string]string{
+		"drive_id":     driveID,
+		"path_on_host": pathOnHost,
+	})
+}
+
 func (c *Client) Start(ctx context.Context) error {
 	return c.do(ctx, http.MethodPut, "/actions", map[string]string{"action_type": "InstanceStart"})
 }
@@ -133,12 +147,20 @@ func (c *Client) Snapshot(ctx context.Context, snapPath, memPath string) error {
 	})
 }
 
-// LoadSnapshot restaura y reanuda. Es la operación de ~30 ms sobre la que se
-// sostiene todo el proyecto.
-func (c *Client) LoadSnapshot(ctx context.Context, snapPath, memPath string) error {
+// LoadSnapshot restaura desde un snapshot. Es la operación de ~30 ms sobre la
+// que se sostiene todo el proyecto.
+//
+// El backend "File" hace que Firecracker MAPEE el fichero de memoria en vez de
+// reservar memoria anónima. De ahí salen dos propiedades decisivas: las páginas
+// entran bajo demanda, y lo residente es page cache — desalojable sin swap y
+// COMPARTIDO entre las instancias que restauren del mismo fichero.
+//
+// resume=false deja la microVM pausada para poder reapuntar discos antes de
+// arrancarla.
+func (c *Client) LoadSnapshot(ctx context.Context, snapPath, memPath string, resume bool) error {
 	return c.do(ctx, http.MethodPut, "/snapshot/load", map[string]any{
 		"snapshot_path": snapPath,
 		"mem_backend":   map[string]string{"backend_path": memPath, "backend_type": "File"},
-		"resume_vm":     true,
+		"resume_vm":     resume,
 	})
 }
