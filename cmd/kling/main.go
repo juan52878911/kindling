@@ -416,8 +416,12 @@ func cmdExport(args []string) error {
 	// El HTML se construye aquí, en la máquina del CLI: el fichero acaba donde
 	// trabajas aunque el daemon esté al otro lado de un SSH.
 	links, _ := c.Links(ctx) // un daemon antiguo puede no tenerlos: no es fatal
-	doc := report.RenderDetail(info, report.BuildWith(machines, snaps, links),
-		c.Endpoint(), time.Now(), *detail)
+	memSvc := ""
+	if cfg := loadConfig(); cfg.Memory.Enabled {
+		memSvc = cfg.Memory.Service
+	}
+	doc := report.RenderFull(info, report.BuildWith(machines, snaps, links),
+		c.Endpoint(), time.Now(), *detail, memSvc)
 	if err := os.WriteFile(*out, []byte(doc), 0o644); err != nil {
 		return err
 	}

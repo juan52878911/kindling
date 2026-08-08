@@ -86,3 +86,13 @@ const cssDetail = `
 .run.yes{color:var(--running)} .run.no{color:#c0392b}
 .tag.ext{border-color:var(--accent);color:var(--accent)}
 `
+
+// cssFlow estiliza los pasos de ejecución y el aviso de persistencia.
+const cssFlow = `
+.flow{margin:.15rem 0 0;padding-left:1.1rem}
+.flow li{margin:.1rem 0;color:var(--fg)}
+.flow li::marker{color:var(--muted);font-size:.8em}
+.fate{display:block}
+.tip{display:block;margin-top:.35rem;padding:.4rem .6rem;border-left:3px solid var(--accent);
+     background:var(--bg);border-radius:0 5px 5px 0;color:var(--muted);font-size:.82rem}
+`

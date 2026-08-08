@@ -204,6 +204,12 @@ func Render(info *api.Info, groups []Group, endpoint string, now time.Time) stri
 // RenderDetail añade, con detail=true, una ficha por servicio explicando qué lo
 // detona, si puede ejecutarse ahora, a qué MCP pertenece y qué comparte.
 func RenderDetail(info *api.Info, groups []Group, endpoint string, now time.Time, detail bool) string {
+	return RenderFull(info, groups, endpoint, now, detail, "")
+}
+
+// RenderFull añade el servicio de memoria configurado, para poder decir a dónde
+// debe ir lo que una herramienta necesite persistir.
+func RenderFull(info *api.Info, groups []Group, endpoint string, now time.Time, detail bool, memService string) string {
 	var b strings.Builder
 
 	var running, warm, other int
@@ -228,7 +234,7 @@ func RenderDetail(info *api.Info, groups []Group, endpoint string, now time.Time
 	b.WriteString(`<title>kindling — topología</title>`)
 	style := css
 	if detail {
-		style += cssDetail
+		style += cssDetail + cssFlow
 	}
 	b.WriteString("<style>" + style + "</style></head><body>")
 
@@ -262,6 +268,10 @@ func RenderDetail(info *api.Info, groups []Group, endpoint string, now time.Time
     &nbsp;·&nbsp; <b>→</b> salida a internet &nbsp; <b>⌀</b> aislada
   </p></section>`)
 
+	if detail {
+		b.WriteString(readinessSection(groups))
+	}
+
 	// ── grupos ────────────────────────────────────────────────────────────────
 	for _, g := range groups {
 		b.WriteString(`<section class="card"><h2>` + esc(g.Service))
@@ -279,7 +289,7 @@ func RenderDetail(info *api.Info, groups []Group, endpoint string, now time.Time
 		b.WriteString(`</h2>`)
 
 		if detail {
-			b.WriteString(detailCard(g))
+			b.WriteString(detailCard(g, memService))
 		}
 
 		if len(g.Machines) == 0 {
@@ -449,10 +459,11 @@ func trunc(s string, n int) string {
 }
 
 // detailCard resume lo que no se ve en la tabla de instancias: de dónde sale el
-// servicio, qué lo despierta, si puede responder ahora y qué comparte.
-func detailCard(g Group) string {
+// servicio, qué lo despierta, qué pasa al llamarlo y dónde acaba lo que escriba.
+func detailCard(g Group, memService string) string {
 	var b strings.Builder
 	ok, why := g.Runnable()
+	r := g.Readiness()
 
 	mark, cls := "✓", "yes"
 	if !ok {
@@ -465,8 +476,28 @@ func detailCard(g Group) string {
 	}
 	row("Tipo", esc(g.Kind()))
 	row("Ejecutable ahora", `<span class="run `+cls+`">`+mark+`</span> `+esc(why))
+	if r.Blocked == "" {
+		row("Coste de la próxima llamada", esc(r.Latency))
+	}
 	row("Qué lo detona", esc(g.Trigger()))
 	row("Qué comparten sus instancias", esc(g.Shares()))
+
+	// Qué ocurre paso a paso al llamar a una de sus herramientas.
+	var steps strings.Builder
+	steps.WriteString(`<ol class="flow">`)
+	for _, st := range g.Flow() {
+		steps.WriteString(`<li>` + esc(st) + `</li>`)
+	}
+	steps.WriteString(`</ol>`)
+	row("Qué pasa al llamarla", steps.String())
+
+	// Dónde acaba lo que escriba: la pregunta que más confunde.
+	fate, tip := g.Persistence(memService)
+	p := `<span class="fate">` + esc(fate) + `</span>`
+	if tip != "" {
+		p += `<span class="tip">` + esc(tip) + `</span>`
+	}
+	row("Si escribe algo", p)
 
 	// A qué MCP pertenece, y con qué herramientas.
 	switch {
@@ -495,4 +526,65 @@ func names(tools []api.ToolSpec) string {
 	sort.Strings(ns)
 	return fmt.Sprintf(` — %d herramienta(s): <span class="tools">%s</span>`,
 		len(ns), esc(strings.Join(ns, ", ")))
+}
+
+// readinessSection destaca lo que puede ejecutarse aunque ahora no haya nada
+// corriendo: es lo que el inventario de instancias no deja ver.
+func readinessSection(groups []Group) string {
+	var listo, dormido, bloqueado []Group
+	for _, g := range groups {
+		r := g.Readiness()
+		switch {
+		case r.Blocked != "":
+			bloqueado = append(bloqueado, g)
+		case r.Live > 0:
+			listo = append(listo, g)
+		default:
+			dormido = append(dormido, g)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(`<section class="card"><h2>Qué puede ejecutarse</h2>`)
+	b.WriteString(`<table><thead><tr><th>Servicio</th><th>Estado</th>` +
+		`<th>Coste de la próxima llamada</th><th>Herramientas</th></tr></thead><tbody>`)
+
+	emit := func(g Group, badge, cls string) {
+		r := g.Readiness()
+		detail := r.Latency
+		if r.Blocked != "" {
+			detail = r.Blocked
+		}
+		n := 0
+		switch {
+		case g.Link != nil:
+			n = len(g.Link.Tools)
+		case g.Snapshot != nil:
+			n = len(g.Snapshot.Tools)
+		}
+		b.WriteString(`<tr><td><b>` + esc(g.Service) + `</b></td>`)
+		b.WriteString(`<td><span class="badge ` + cls + `">` + esc(badge) + `</span></td>`)
+		b.WriteString(`<td>` + esc(detail) + `</td>`)
+		b.WriteString(fmt.Sprintf(`<td class="mono">%d</td></tr>`, n))
+	}
+
+	for _, g := range listo {
+		emit(g, "atendiendo", "running")
+	}
+	for _, g := range dormido {
+		emit(g, "listo, sin instancia", "warm")
+	}
+	for _, g := range bloqueado {
+		emit(g, "no ejecutable", "other")
+	}
+	b.WriteString(`</tbody></table>`)
+
+	if len(dormido) > 0 {
+		b.WriteString(`<p class="legend">` +
+			esc(fmt.Sprintf("%d servicio(s) sin ninguna instancia viva, y aun así disponibles: "+
+				"aparecen solos en cuanto alguien llame a una de sus herramientas.", len(dormido))) +
+			`</p>`)
+	}
+	b.WriteString(`</section>`)
+	return b.String()
 }

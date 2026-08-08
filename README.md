@@ -846,15 +846,41 @@ kling mcp link engram http://<tu-ip>:9100/mcp
 kling export -detail -o topologia.html
 ```
 
-Añade una ficha por servicio con lo que no se ve en la tabla de instancias:
+Responde a tres preguntas que la tabla de instancias no contesta.
 
-| | |
-|---|---|
-| **Tipo** | microVM o externo |
-| **Ejecutable ahora** | y por qué: hay instancia viva, hay una congelada, se instanciará del snapshot, o falta algo |
-| **Qué lo detona** | cada llamada (efímero), la primera llamada (persistente), o nada (externo) |
-| **Qué comparten sus instancias** | la memoria del snapshot dorado y la imagen base |
-| **Servidor MCP** | de qué imagen o URL sale, y sus herramientas |
+**Qué puede ejecutarse aunque no haya nada corriendo.** Una tabla al principio separa los
+servicios que están atendiendo, los que están listos sin instancia viva, y los que no pueden
+ejecutarse — con el coste de la próxima llamada en cada caso:
+
+```
+SERVICIO     ESTADO                 COSTE DE LA PRÓXIMA LLAMADA
+filesystem   listo, sin instancia   ~250 ms: se instancia del snapshot dorado
+memory       listo, sin instancia   ~30 ms: hay una congelada esperando
+engram       listo, sin instancia   lo que tarde el servidor externo
+```
+
+**Qué pasa exactamente al llamar a una herramienta**, paso a paso:
+
+```
+1. El gateway resuelve la herramienta al servicio eco
+2. Toma una microVM del fondo pre-calentado, o instancia una (~250 ms)
+3. El puente reenvía la llamada al servidor MCP por stdin/stdout
+4. Al responder, la máquina SE DESTRUYE — y con ella todo lo que escribiera
+```
+
+**Dónde acaba lo que una herramienta escriba.** Es la pregunta que más confusión causa, y la
+respuesta honesta es incómoda:
+
+> Escribe con `create_directory`, `edit_file`, `move_file`, `write_file`. Lo escrito vive en
+> el disco de su instancia y sobrevive a que se congele, pero **NO** a que la instancia se
+> elimine.
+>
+> → Para lo que deba sobrevivir, guárdalo en **engram**: es un servidor externo, vive fuera
+> de las microVMs y no se lo lleva ninguna.
+
+Un servicio efímero es aún más tajante: lo escrito desaparece al terminar la llamada. Si una
+herramienta necesita persistir un fichero, una fila en una base de datos o cualquier otra
+cosa, **el destino correcto es el servicio de memoria enlazado**, no el disco del invitado.
 
 ## Memoria de uso (opcional)
 
