@@ -70,6 +70,10 @@ type aggSession struct {
 	// el estado de una conversación sobreviva entre llamadas.
 	backing map[string]string
 	lastUse time.Time
+
+	// lastQuery es la última búsqueda de find_tools: sirve para atribuir el
+	// acierto a la herramienta que acabe usándose.
+	lastQuery string
 }
 
 func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
@@ -293,7 +297,14 @@ func (a *aggregator) callTool(ctx context.Context, s *aggSession, params json.Ra
 				Arguments json.RawMessage `json:"arguments"`
 			}
 			_ = json.Unmarshal(p.Arguments, &inner)
-			return a.forward(ctx, s, inner.Name, inner.Arguments)
+			res, fault := a.forward(ctx, s, inner.Name, inner.Arguments)
+			if fault == nil && a.gw.mem != nil {
+				a.mu.Lock()
+				q := s.lastQuery
+				a.mu.Unlock()
+				a.gw.mem.Record(ctx, q, inner.Name)
+			}
+			return res, fault
 		default:
 			// Un nombre cualificado directo también vale: si el modelo ya lo sabe,
 			// no tiene sentido obligarle a envolverlo en call_tool.
@@ -346,7 +357,9 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	}
 
 	tools, _ := a.cat.all(ctx, services)
-	terms := strings.Fields(strings.ToLower(p.Query))
+	// Los términos se expanden con sinónimos: el modelo pregunta en el idioma
+	// del usuario y las herramientas se describen en inglés.
+	terms := expandTerms(p.Query)
 
 	type scored struct {
 		t Tool
@@ -378,6 +391,24 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 		}
 		return hits[i].t.Qualified < hits[j].t.Qualified
 	})
+
+	// Si la memoria está activa, lo que ya funcionó antes va primero.
+	if a.gw.mem != nil {
+		ordered := make([]Tool, 0, len(hits))
+		for _, h := range hits {
+			ordered = append(ordered, h.t)
+		}
+		ordered = a.gw.mem.Rank(p.Query, ordered)
+		hits = hits[:0]
+		for _, t := range ordered {
+			hits = append(hits, scored{t, 0})
+		}
+	}
+
+	// La consulta se recuerda para poder anotar qué herramienta la resolvió.
+	a.mu.Lock()
+	s.lastQuery = p.Query
+	a.mu.Unlock()
 
 	var sb strings.Builder
 	for i, h := range hits {
@@ -462,10 +493,12 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		return a.callEphemeral(ctx, t, args)
 	}
 
+	tEnsure := time.Now()
 	e, err := a.gw.ensure(ctx, t.Service)
 	if err != nil {
 		return nil, &rpcFault{-32000, err.Error()}
 	}
+	dEnsure := time.Since(tEnsure)
 	base := "http://" + e.ip + ":" + fmt.Sprint(GuestPort)
 
 	// Una sesión por servicio y por conversación: el estado del servidor MCP debe
@@ -492,6 +525,8 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		a.mu.Unlock()
 	}
 	initLock.Unlock()
+	dLock := time.Since(tEnsure) - dEnsure
+	tCall := time.Now()
 
 	call := func(sid string) (json.RawMessage, error) {
 		if len(args) == 0 {
@@ -503,6 +538,11 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	}
 
 	raw, err := call(sid)
+	if d := time.Since(tCall); d > 2*time.Second || dEnsure > time.Second || dLock > time.Second {
+		log.Printf("lento %s: ensure=%s candado=%s llamada=%s",
+			t.Qualified, dEnsure.Round(time.Millisecond), dLock.Round(time.Millisecond),
+			d.Round(time.Millisecond))
+	}
 	if err != nil {
 		// La sesión caducó: pasa siempre que la microVM se congeló entre llamadas,
 		// porque sus procesos mueren con ella. Se rehace, también bajo candado
@@ -704,11 +744,31 @@ func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *api.Link, t
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
-	raw, err := mcpCallAt(ctx, l.URL, sid, fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-		nextRPCID(), t.Name, args))
+	body := func(sid string) (json.RawMessage, error) {
+		return mcpCallAt(ctx, l.URL, sid, fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+			nextRPCID(), t.Name, args))
+	}
+	raw, err := body(sid)
 	if err != nil {
-		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+		// Un servidor externo puede reiniciarse por su cuenta —lo controla su
+		// dueño, no kindling— y su sesión deja de existir. Se rehace y se
+		// reintenta una vez en vez de devolver un error que el modelo no puede
+		// interpretar.
+		lock.Lock()
+		newSid, ierr := mcpInitAt(ctx, l.URL)
+		if ierr == nil {
+			a.mu.Lock()
+			s.backing[t.Service] = newSid
+			a.mu.Unlock()
+		}
+		lock.Unlock()
+		if ierr != nil {
+			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, ierr)}
+		}
+		if raw, err = body(newSid); err != nil {
+			return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+		}
 	}
 
 	var resp struct {

@@ -16,3 +16,15 @@ bench-*.json
 
 # Sistema
 .DS_Store
+
+# Binarios compilados
+/kling
+/kling-bridge
+/kling-bridge-local
+/kling-linux-amd64
+
+# Informes generados
+*.html
+
+# Restos de herramientas ajenas
+.utm-workspace/

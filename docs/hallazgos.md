@@ -635,3 +635,43 @@ kindling entero se reinstale.
 `kling-bridge` se escribió para convertir servidores MCP de stdio en HTTP dentro del
 invitado, pero no tiene nada específico de microVMs. Ejecutado en el portátil expone
 cualquier servidor stdio local —engram, obsidian— por HTTP, listo para enlazar.
+
+## launchd tampoco hereda el PATH
+
+El mismo fallo que en las microVMs, en otro sitio: un agente de launchd que invoca `engram`
+por nombre falla con `executable file not found in $PATH`, porque launchd arranca con un
+entorno mínimo. Se resuelve la ruta absoluta al escribir el plist, y además se fija PATH en
+`EnvironmentVariables`.
+
+Vale la pena recordarlo como patrón: **todo lo que arranca fuera de una shell —PID 1 de una
+microVM, un agente de launchd, un unit de systemd— empieza sin PATH.**
+
+## Buscar herramientas en un idioma y describirlas en otro
+
+`find_tools("leer un fichero de texto")` devolvía `notas.guardar_nota` como primer resultado.
+No era un fallo de ordenación: ningún término de la consulta aparecía en las descripciones,
+que están en inglés, así que no había nada que ordenar y se devolvía el catálogo entero.
+
+Una tabla de sinónimos del dominio —dos docenas de verbos y sustantivos— resuelve la mayoría
+de los casos sin motor de búsqueda ni embeddings.
+
+## Concurrencia: cuatro bugs encontrados, uno abierto
+
+Persiguiendo por qué las llamadas paralelas se colgaban aparecieron cuatro causas distintas,
+todas reales:
+
+1. **N llamadas creaban N microVMs** del mismo servicio persistente: `ensure()` no estaba
+   serializado por servicio.
+2. **N llamadas creaban N sesiones**, y cada una lanza un proceso del servidor MCP dentro de
+   la microVM: ocho procesos de node en 384 MiB agotaban su memoria y mataban el puente.
+3. **Se comprobaba que la instancia siguiera viva en CADA llamada**, y esa comprobación hace
+   un `List()` que recorre el disco de todas las máquinas. Bajo el candado del servicio,
+   ocho peticiones se ponían en fila detrás de ocho recorridos de disco. Cachear esa
+   comprobación 15 s llevó el caso secuencial de 60 s a 19 ms.
+4. **id JSON-RPC fijo**: dos peticiones concurrentes compartían entrada en la tabla de
+   pendientes del puente.
+
+Queda abierto: con 8 peticiones paralelas a un servicio PERSISTENTE, ~25% siguen agotando su
+tiempo de espera. El puente aguanta 16 en paralelo en 127 ms medido directamente, y los
+servicios efímeros van 8/8 en 785 ms, así que la causa está en el gateway y no se ha
+aislado. Para servicios persistentes, secuencial.

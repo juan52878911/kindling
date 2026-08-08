@@ -30,6 +30,10 @@ type Config struct {
 	// Gateway configura `kling gateway` sin flags.
 	Gateway Gateway `json:"gateway"`
 
+	// Memory es opcional y viene apagada: kindling no escribe en la memoria de
+	// nadie sin que se lo pidan.
+	Memory Memory `json:"memory"`
+
 	path string
 }
 
@@ -45,6 +49,12 @@ type Defaults struct {
 	VCPUs  int    `json:"vcpus,omitempty"`
 	CPUPct int    `json:"cpu_pct,omitempty"`
 	TTL    int    `json:"ttl_seconds,omitempty"`
+}
+
+// Memory apunta a un servicio MCP donde recordar el uso de herramientas.
+type Memory struct {
+	Enabled bool   `json:"enabled"`
+	Service string `json:"service,omitempty"`
 }
 
 type Gateway struct {
@@ -198,6 +208,15 @@ func (c *Config) Set(key, value string) error {
 		default:
 			return fmt.Errorf("campo desconocido defaults.%s", field)
 		}
+	case "memory":
+		switch field {
+		case "enabled":
+			c.Memory.Enabled = value == "true" || value == "1" || value == "si" || value == "sí"
+		case "service":
+			c.Memory.Service = value
+		default:
+			return fmt.Errorf("campo desconocido memory.%s", field)
+		}
 	case "gateway":
 		switch field {
 		case "listen":
@@ -210,7 +229,7 @@ func (c *Config) Set(key, value string) error {
 			return fmt.Errorf("campo desconocido gateway.%s", field)
 		}
 	default:
-		return fmt.Errorf("sección desconocida %q: usa defaults o gateway", section)
+		return fmt.Errorf("sección desconocida %q: usa defaults, gateway o memory", section)
 	}
 	return nil
 }
@@ -227,7 +246,16 @@ func (c *Config) Keys() [][2]string {
 		{"gateway.listen", c.Gateway.Listen},
 		{"gateway.idle", c.Gateway.Idle},
 		{"gateway.url", c.Gateway.URL},
+		{"memory.enabled", boolStr(c.Memory.Enabled)},
+		{"memory.service", c.Memory.Service},
 	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return ""
 }
 
 func itoa(n int) string {

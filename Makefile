@@ -28,17 +28,25 @@ build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) $(PKG)
 
 ## install — pone el CLI en PREFIX/bin (usa sudo si hace falta escribir ahí)
-install: build
+install: build bridge-local
 	@mkdir -p $(PREFIX)/bin 2>/dev/null || sudo mkdir -p $(PREFIX)/bin
 	@install -m755 $(BIN) $(PREFIX)/bin/$(BIN) 2>/dev/null \
 		|| sudo install -m755 $(BIN) $(PREFIX)/bin/$(BIN)
+	@# El puente se instala SIEMPRE aunque la memoria venga apagada: activarla
+	@# debe ser un comando, no un proyecto.
+	@install -m755 kling-bridge-local $(PREFIX)/bin/kling-bridge 2>/dev/null \
+		|| sudo install -m755 kling-bridge-local $(PREFIX)/bin/kling-bridge
 	@echo "instalado: $(PREFIX)/bin/$(BIN)  ($(VERSION))"
+	@echo "           $(PREFIX)/bin/kling-bridge"
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
 	  *) echo; echo "AVISO: $(PREFIX)/bin no está en tu PATH. Añádelo:"; \
 	     echo "  echo 'export PATH=\"$(PREFIX)/bin:$$PATH\"' >> ~/.zshrc";; esac
 	@echo
 	@echo "Apúntalo a tu daemon:"
 	@echo "  $(BIN) context add lab ssh://usuario@host"
+	@echo
+	@echo "Memoria de uso (opcional, apagada):"
+	@echo "  $(BIN) memory status"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN) 2>/dev/null || sudo rm -f $(PREFIX)/bin/$(BIN)

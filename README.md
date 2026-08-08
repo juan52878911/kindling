@@ -855,3 +855,35 @@ Añade una ficha por servicio con lo que no se ve en la tabla de instancias:
 | **Qué lo detona** | cada llamada (efímero), la primera llamada (persistente), o nada (externo) |
 | **Qué comparten sus instancias** | la memoria del snapshot dorado y la imagen base |
 | **Servidor MCP** | de qué imagen o URL sale, y sus herramientas |
+
+## Memoria de uso (opcional)
+
+Apagada por defecto: kindling no escribe en la memoria de nadie sin que se lo pidan. El
+binario del puente sí se instala siempre, para que activarla sea un comando y no un proyecto.
+
+```sh
+kling memory status            # si está activa y sobre qué
+kling memory install-service   # deja el puente local como servicio permanente (macOS)
+kling memory enable            # usa engram; -service <svc> para otro
+kling memory disable
+```
+
+Cuando está activa, el gateway anota en el servicio de memoria qué herramienta resolvió cada
+petición, y usa ese historial para ordenar mejor las búsquedas siguientes:
+
+```
+buscar "leer un fichero de texto"  →  filesystem.read_text_file
+usar la herramienta                →  "hola desde kindling"
+en engram queda:  kindling: la petición "leer un fichero de texto"
+                  se resolvió con la herramienta filesystem.read_text_file
+```
+
+No guarda nada propio: se apoya en el servicio MCP que hayas enlazado, y busca en su catálogo
+una herramienta de escritura en vez de suponer la API de ninguno en concreto.
+
+### Búsqueda bilingüe
+
+El modelo pregunta en el idioma del usuario y las herramientas se describen en inglés.
+Buscar "leer un fichero de texto" contra *"Read the complete contents of a file"* no casaba ni
+un término, así que `find_tools` devolvía cualquier cosa. Una tabla de sinónimos del dominio
+—leer/read, fichero/file, carpeta/directory…— lo arregla sin meter un motor de búsqueda.

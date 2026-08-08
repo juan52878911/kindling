@@ -30,6 +30,11 @@ import (
 // GuestPort es donde se espera que escuche el servidor MCP dentro de la microVM.
 const GuestPort = 8080
 
+// livenessTTL es cuánto se confía en que una instancia sigue viva sin volver a
+// preguntárselo al daemon. El vigilante del daemon detecta las muertes en 10 s,
+// así que comprobarlo más a menudo desde aquí no aporta nada y sí cuesta.
+const livenessTTL = 15 * time.Second
+
 // SessionHeader identifica la conversación MCP. El gateway la usa para enrutar
 // SIEMPRE a la misma instancia: el estado de una sesión vive en el proceso del
 // servidor MCP, así que mandar la segunda petición a otra microVM la rompería.
@@ -69,6 +74,8 @@ type Gateway struct {
 	routes    map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
 	agg       *aggregator              // endpoint virtual que reúne a todos
 	pool      *pool                    // instancias pre-calentadas por servicio
+	ensureMu  sync.Map                 // servicio -> *sync.Mutex; ver ensure()
+	mem       *memory                  // memoria de uso; nil si está desactivada
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
@@ -81,6 +88,9 @@ type entry struct {
 	ip        string
 	lastUse   time.Time
 	proxy     *httputil.ReverseProxy
+
+	// checkedAt es cuándo se confirmó por última vez que la instancia vive.
+	checkedAt time.Time
 }
 
 // sessionRoute recuerda a qué instancia pertenece cada sesión MCP.
@@ -92,7 +102,7 @@ type sessionRoute struct {
 	lastUse   time.Time
 }
 
-func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int) *Gateway {
+func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, memService string) *Gateway {
 	g := &Gateway{
 		client: client, idle: idle, Ephemeral: ephemeral,
 		services: map[string]*entry{},
@@ -100,6 +110,7 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int) *G
 	}
 	g.agg = newAggregator(g, ephemeral)
 	g.pool = newPool(g, prewarm)
+	g.mem = newMemory(g, memService)
 	return g
 }
 
@@ -297,11 +308,40 @@ func short(s string) string {
 //  2. hay una congelada            -> ~30 ms de thaw
 //  3. no hay ninguna               -> se instancia del snapshot dorado
 func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
+	// Serializado POR SERVICIO. Sin esto, N llamadas concurrentes que llegan
+	// antes de existir la instancia entran todas en acquire() y cada una crea la
+	// suya: ocho peticiones paralelas levantaban ocho microVMs del mismo servicio
+	// persistente, cada una con su proceso de node. El host se quedaba sin RAM y
+	// todas acababan agotando su tiempo de espera.
+	//
+	// Es el mismo patrón que ya protegía la creación de sesión, aplicado un nivel
+	// más arriba: quien llega segundo debe esperar y reutilizar, no duplicar.
+	lock := g.ensureLock(service)
+	lock.Lock()
+	defer lock.Unlock()
+
 	g.mu.Lock()
 	if e, ok := g.services[service]; ok {
 		e.lastUse = time.Now()
+		recent := time.Since(e.checkedAt) < livenessTTL
 		g.mu.Unlock()
+
+		// Comprobar que sigue viva cuesta un List() al daemon, y List() recorre
+		// el disco de TODAS las máquinas para calcular su ocupación. Hacerlo en
+		// cada llamada, bajo el candado del servicio, serializaba todo: ocho
+		// peticiones paralelas se ponían en fila detrás de ocho recorridos de
+		// disco y agotaban su tiempo de espera.
+		//
+		// Se confía en la instancia durante un rato. Si de verdad murió, la
+		// llamada fallará y el manejador de errores del proxy la reconstruye:
+		// más barato equivocarse una vez que verificar mil.
+		if recent {
+			return e, nil
+		}
 		if g.alive(ctx, e.machineID) {
+			g.mu.Lock()
+			e.checkedAt = time.Now()
+			g.mu.Unlock()
 			return e, nil
 		}
 		// Murió por debajo: se descarta y se reconstruye.
@@ -328,6 +368,7 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		machineID: mc.ID,
 		ip:        mc.IP,
 		lastUse:   time.Now(),
+		checkedAt: time.Now(),
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 	}
 	// Timeouts generosos: MCP usa streaming HTTP y las respuestas pueden ser largas.
@@ -527,4 +568,10 @@ func (g *Gateway) linkFor(ctx context.Context, service string) *api.Link {
 		}
 	}
 	return nil
+}
+
+// ensureLock devuelve el candado de aprovisionamiento de un servicio.
+func (g *Gateway) ensureLock(service string) *sync.Mutex {
+	v, _ := g.ensureMu.LoadOrStore(service, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }

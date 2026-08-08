@@ -70,6 +70,13 @@ OBSERVACIÓN
   events                                           stream de eventos del daemon
   info                                             estado del daemon
 
+MEMORIA DE USO (opcional, apagada por defecto)
+  memory status                                    si está activa y sobre qué
+  memory enable [-service N]                       la activa; usa engram por defecto
+  memory disable                                   la apaga
+  memory install-service                           deja el puente local como
+                                                   servicio permanente (macOS)
+
 CONECTAR CON TU AGENTE
   connect                                          guía paso a paso
   connect -all                                     UNA entrada para todos los
@@ -129,6 +136,8 @@ func main() {
 		err = cmdConnect(args)
 	case "mcp":
 		err = cmdMCP(args)
+	case "memory":
+		err = cmdMemory(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
 	case "run":
@@ -237,6 +246,7 @@ func cmdGateway(args []string) error {
 	idle := fs.Duration("idle", 0, "tiempo sin peticiones antes de congelar (por defecto: gateway.idle, o 5m)")
 	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
 	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado)")
+	memory := fs.String("memory", "", "servicio MCP donde recordar qué herramienta resolvió cada petición")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -260,7 +270,11 @@ func cmdGateway(args []string) error {
 	}
 	listen, idle = &addr, &wait
 
-	gw := gateway.New(c, *idle, *ephemeral, *prewarm)
+	memSvc := *memory
+	if memSvc == "" && cfg.Memory.Enabled {
+		memSvc = cfg.Memory.Service
+	}
+	gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
 	go gw.Reap(ctx)
 	if *ephemeral {
 		go gw.PrewarmAll(ctx)
@@ -276,6 +290,9 @@ func cmdGateway(args []string) error {
 	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
 	fmt.Printf("  inventario:   http://%s/services\n", *listen)
 	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+	if memSvc != "" {
+		fmt.Printf("  memoria:      activa sobre %q — ordena las búsquedas por lo que ya funcionó\n", memSvc)
+	}
 	if *ephemeral {
 		fmt.Printf("  modo:         EFÍMERO — cada acción en su propia microVM, destruida al terminar\n")
 		if *prewarm > 0 {
