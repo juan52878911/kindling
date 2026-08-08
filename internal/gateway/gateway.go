@@ -68,6 +68,7 @@ type Gateway struct {
 	services  map[string]*entry        // servicio -> instancia "por defecto"
 	routes    map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
 	agg       *aggregator              // endpoint virtual que reúne a todos
+	pool      *pool                    // instancias pre-calentadas por servicio
 }
 
 type entry struct {
@@ -86,13 +87,14 @@ type sessionRoute struct {
 	lastUse   time.Time
 }
 
-func New(client *api.Client, idle time.Duration, ephemeral bool) *Gateway {
+func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int) *Gateway {
 	g := &Gateway{
 		client: client, idle: idle, Ephemeral: ephemeral,
 		services: map[string]*entry{},
 		routes:   map[string]*sessionRoute{},
 	}
 	g.agg = newAggregator(g, ephemeral)
+	g.pool = newPool(g, prewarm)
 	return g
 }
 
@@ -138,6 +140,9 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 			name = svc
 		}
 		status := "frío"
+		if n := g.pool.stats()[name]; n > 0 {
+			status = fmt.Sprintf("%d instancia(s) pre-calentada(s)", n)
+		}
 		if e, ok := g.services[name]; ok {
 			n := 0
 			for _, rt := range g.routes {
@@ -412,9 +417,32 @@ func (g *Gateway) Reap(ctx context.Context) {
 		case <-t.C:
 			g.reapOnce(ctx)
 			g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
+			g.pool.evictStale(ctx, g.idle*2)
+			g.PrewarmAll(ctx)
 		}
 	}
 }
+
+// prewarmAll rellena el fondo de cada servicio conocido.
+func (g *Gateway) PrewarmAll(ctx context.Context) {
+	if g.pool.size == 0 || !g.Ephemeral {
+		return
+	}
+	snaps, err := g.client.Snapshots(ctx)
+	if err != nil {
+		return
+	}
+	for _, s := range snaps {
+		svc := s.Name
+		if n := s.Service(); n != "" {
+			svc = n
+		}
+		g.pool.fill(ctx, svc, s.Name)
+	}
+}
+
+// Drain destruye las instancias pre-calentadas. Se llama al parar el gateway.
+func (g *Gateway) Drain(ctx context.Context) { g.pool.drain(ctx) }
 
 func (g *Gateway) reapOnce(ctx context.Context) {
 	type victim struct{ service, id string }

@@ -461,23 +461,45 @@ en **0**.
 ## Modo efímero: una microVM por acción
 
 ```sh
-kling gateway -ephemeral
+kling gateway -ephemeral -prewarm 3
 ```
 
-Cada llamada a herramienta recibe **su propia microVM**: se instancia del snapshot dorado,
-atiende la acción y se destruye. Nace, actúa y muere.
-
-Seis acciones seguidas:
+Cada llamada recibe **su propia microVM**: se toma una del fondo pre-calentado, atiende la
+acción y se destruye. Nace, actúa y muere.
 
 ```
-1: 358ms  pid=305 llamadas_en_esta_sesion=1
-2: 418ms  pid=305 llamadas_en_esta_sesion=1
-...
-éxitos: 6/6   máquinas vivas: 0
+acción 1: 19 ms   pid=305 llamadas_en_esta_sesion=1
+acción 2: 24 ms   pid=305 llamadas_en_esta_sesion=1
+acción 3: 19 ms   pid=305 llamadas_en_esta_sesion=1
 ```
 
-`llamadas_en_esta_sesion=1` en todas: **ninguna acción ve lo que hizo la anterior**. El coste
-son ~350 ms por llamada, frente a los 9 ms del modo persistente.
+`llamadas_en_esta_sesion=1` **en todas**: ninguna acción ve lo que hizo la anterior.
+
+### De 350 ms a 19 ms
+
+Perfilando una acción efímera sin optimizar:
+
+| Fase | Coste |
+|---|---|
+| Restaurar la microVM | 131 ms |
+| Esperar a que vuelva la red | 53 ms |
+| `initialize` (lanza el servidor MCP) | 61 ms — **con node son 300-500 ms** |
+| `tools/call` | 9 ms |
+| Destruir la máquina | ~100 ms |
+
+Todo menos `tools/call` se puede pagar por adelantado o después:
+
+- **`-prewarm N`** mantiene N instancias ya restauradas y **con su sesión MCP abierta**. La
+  llamada se ahorra restaurar, esperar la red e inicializar.
+- **La destrucción es asíncrona.** Estaba en un `defer`, así que el cliente esperaba al
+  desmontaje del namespace y al borrado de ficheros: 100 ms sobre una llamada de 2 ms. La
+  máquina muere igual; el cliente ya no espera a que ocurra.
+
+Resultado: **2 ms de ejecución real, 19 ms de extremo a extremo.**
+
+La contrapartida sigue siendo que no hay estado entre llamadas. Las herramientas que lo
+necesitan —memoria, razonamiento por pasos— deben usar la ruta con sesión
+(`/mcp/<servicio>`), que mantiene el proceso vivo.
 
 La contrapartida es que no hay estado entre llamadas. Las herramientas que lo necesitan
 —memoria, razonamiento por pasos— deben usar la ruta con sesión (`/mcp/<servicio>`), que

@@ -41,8 +41,32 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	if fault != nil {
 		return nil, fault
 	}
-
 	start := time.Now()
+
+	// Camino rápido: una instancia ya restaurada y con su sesión MCP abierta.
+	if vm := a.gw.pool.take(t.Service); vm != nil {
+		defer func() {
+			// Destruir y reponer EN SEGUNDO PLANO. Hacerlo antes de responder
+			// obligaba al cliente a esperar el desmontaje del namespace y el
+			// borrado de ficheros: ~100 ms sobre una llamada de 2 ms.
+			//
+			// La garantía efímera se mantiene: la máquina muere igual, solo que
+			// el cliente ya no espera a que ocurra.
+			go func() {
+				bg := context.WithoutCancel(ctx)
+				_ = a.gw.client.Remove(bg, vm.id)
+				a.gw.pool.fill(bg, t.Service, snap)
+			}()
+		}()
+		res, fault := a.invoke(ctx, "http://"+vm.ip+":"+itoa(GuestPort), vm.session, t, args)
+		log.Printf("efímera %s: %s en %s (del fondo)", vm.id[:8], t.Qualified,
+			time.Since(start).Round(time.Millisecond))
+		return res, fault
+	}
+
+	// Camino lento: no había nada preparado. Se instancia ahora y, de paso, se
+	// pide que el fondo se rellene para las siguientes.
+	defer a.gw.pool.fill(context.WithoutCancel(ctx), t.Service, snap)
 	mc, err := a.gw.client.Run(ctx, api.RunRequest{
 		From: snap,
 		Labels: map[string]string{
@@ -60,9 +84,11 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 
 	// Pase lo que pase, la máquina muere. Es la promesa del modo efímero.
 	defer func() {
-		if err := a.gw.client.Remove(context.WithoutCancel(ctx), mc.ID); err != nil {
-			log.Printf("efímera %s: no pude destruirla: %v", mc.ID[:8], err)
-		}
+		go func() {
+			if err := a.gw.client.Remove(context.WithoutCancel(ctx), mc.ID); err != nil {
+				log.Printf("efímera %s: no pude destruirla: %v", mc.ID[:8], err)
+			}
+		}()
 	}()
 
 	base := "http://" + mc.IP + ":" + fmt.Sprint(GuestPort)
@@ -74,6 +100,14 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	if err != nil {
 		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
 	}
+	res, fault := a.invoke(ctx, base, sid, t, args)
+	log.Printf("efímera %s: %s en %s (en frío)", mc.ID[:8], t.Qualified,
+		time.Since(start).Round(time.Millisecond))
+	return res, fault
+}
+
+// invoke manda el tools/call y traduce la respuesta.
+func (a *aggregator) invoke(ctx context.Context, base, sid string, t *Tool, args json.RawMessage) (any, *rpcFault) {
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
@@ -83,7 +117,6 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	if err != nil {
 		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
 	}
-
 	var resp struct {
 		Result json.RawMessage `json:"result"`
 		Error  *struct {
@@ -94,8 +127,6 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, &rpcFault{-32000, "respuesta ilegible de " + t.Service}
 	}
-	log.Printf("efímera %s: %s en %s", mc.ID[:8], t.Qualified, time.Since(start).Round(time.Millisecond))
-
 	if resp.Error != nil {
 		return nil, &rpcFault{resp.Error.Code, resp.Error.Message}
 	}
@@ -103,15 +134,35 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 }
 
 // snapshotOf resuelve qué snapshot dorado corresponde a un servicio.
+//
+// Cacheado porque estaba en el camino caliente: preguntárselo al daemon en cada
+// acción añadía ~100 ms a una llamada cuya ejecución real son 2 ms. La relación
+// servicio -> snapshot solo cambia al importar, así que una caché sirve.
 func (a *aggregator) snapshotOf(ctx context.Context, service string) (string, *rpcFault) {
+	a.snapMu.RLock()
+	name, ok := a.snapOf[service]
+	a.snapMu.RUnlock()
+	if ok {
+		return name, nil
+	}
+
 	snaps, err := a.gw.client.Snapshots(ctx)
 	if err != nil {
 		return "", &rpcFault{-32000, err.Error()}
 	}
+	a.snapMu.Lock()
 	for _, s := range snaps {
-		if s.Service() == service || s.Name == service {
-			return s.Name, nil
+		n := s.Name
+		if svc := s.Service(); svc != "" {
+			a.snapOf[svc] = n
 		}
+		a.snapOf[n] = n
 	}
-	return "", &rpcFault{-32602, "no hay snapshot para el servicio " + service}
+	name, ok = a.snapOf[service]
+	a.snapMu.Unlock()
+
+	if !ok {
+		return "", &rpcFault{-32602, "no hay snapshot para el servicio " + service}
+	}
+	return name, nil
 }

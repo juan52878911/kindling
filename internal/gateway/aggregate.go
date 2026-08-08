@@ -42,6 +42,11 @@ type aggregator struct {
 
 	mu       sync.Mutex
 	sessions map[string]*aggSession
+
+	// snapOf cachea servicio -> snapshot. Está en el camino caliente del modo
+	// efímero y solo cambia al importar un servicio.
+	snapMu sync.RWMutex
+	snapOf map[string]string
 }
 
 type aggSession struct {
@@ -58,6 +63,7 @@ func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
 	return &aggregator{
 		gw: gw, cat: newCatalog(gw, 10*time.Minute),
 		ephemeral: ephemeral, sessions: map[string]*aggSession{},
+		snapOf: map[string]string{},
 	}
 }
 

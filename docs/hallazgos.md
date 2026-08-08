@@ -463,3 +463,32 @@ Un `apk add` huérfano de un build abortado por timeout retuvo el lock de la bas
 el relanzamiento chocó con él: `Unable to lock database: Resource temporarily unavailable`.
 Antes de reintentar una construcción hay que matar los procesos que quedaron y desmontar los
 loop devices, o los dos trabajos se estorban indefinidamente.
+
+## Perfilar antes de optimizar: el coste no estaba donde parecía
+
+Una acción efímera tardaba ~350 ms y la intuición decía "restaurar la microVM es lo caro".
+El perfil dijo otra cosa:
+
+	restaurar la microVM       131 ms
+	esperar a que vuelva la red 53 ms
+	initialize                  61 ms   (con node: 300-500 ms)
+	tools/call                   9 ms
+	destruir la máquina        ~100 ms
+
+Dos hallazgos que no se veían sin medir:
+
+1. **La destrucción estaba en el camino crítico.** Un `defer Remove(...)` se ejecuta ANTES de
+   devolver la respuesta, así que el cliente esperaba al desmontaje del namespace y al
+   borrado de ficheros. Moverlo a una goroutine no debilita la garantía —la máquina muere
+   igual— y quita 100 ms de la latencia percibida.
+2. **`initialize` es caro porque lanza el servidor MCP.** Con un binario Go son 61 ms; con
+   node, entre 300 y 500. Pre-calentar instancias **con la sesión ya abierta** lo elimina del
+   camino caliente.
+
+De 350 ms a 19 ms, con 2 ms de ejecución real.
+
+## Un fondo de máquinas no debe hacer esperar
+
+`take()` no bloquea nunca: si el fondo está vacío devuelve nil y quien llama sigue por el
+camino lento. Esperar a que se pre-caliente una instancia convertiría un fondo vacío en
+latencia AÑADIDA sobre la que ya había, que es lo contrario de para lo que existe.

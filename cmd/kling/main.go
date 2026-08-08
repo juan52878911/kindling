@@ -232,6 +232,7 @@ func cmdGateway(args []string) error {
 	listen := fs.String("listen", "", "dónde escuchar (por defecto: gateway.listen, o 127.0.0.1:8080)")
 	idle := fs.Duration("idle", 0, "tiempo sin peticiones antes de congelar (por defecto: gateway.idle, o 5m)")
 	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
+	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -255,8 +256,12 @@ func cmdGateway(args []string) error {
 	}
 	listen, idle = &addr, &wait
 
-	gw := gateway.New(c, *idle, *ephemeral)
+	gw := gateway.New(c, *idle, *ephemeral, *prewarm)
 	go gw.Reap(ctx)
+	if *ephemeral {
+		go gw.PrewarmAll(ctx)
+	}
+	defer gw.Drain(context.Background())
 
 	srv := &http.Server{Addr: *listen, Handler: gw.Handler()}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
@@ -269,6 +274,9 @@ func cmdGateway(args []string) error {
 	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
 	if *ephemeral {
 		fmt.Printf("  modo:         EFÍMERO — cada acción en su propia microVM, destruida al terminar\n")
+		if *prewarm > 0 {
+			fmt.Printf("  pre-calentado: %d instancia(s) por servicio, listas para responder\n", *prewarm)
+		}
 	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
