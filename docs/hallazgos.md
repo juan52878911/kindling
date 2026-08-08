@@ -369,3 +369,29 @@ un CLI. kindling usa `~/.config/kling` en todas las plataformas, respetando
 `make install` recorre `~/.local/bin`, `~/go/bin`, `/opt/homebrew/bin` y `/usr/local/bin`, y
 se queda con el primero que sea escribible. Además avisa si el destino no está en el PATH,
 que es el fallo silencioso clásico de instalar en `~/.local/bin`.
+
+## Un servidor MCP de stdio es de sesión única por diseño
+
+Su estado vive en el proceso: no hay forma de multiplexar dos conversaciones sobre el mismo
+stdin/stdout sin que se pisen. Por eso `kling-bridge` lanza **un proceso hijo por sesión** en
+vez de compartir uno.
+
+Eso obliga a que el enrutado del gateway sea pegajoso: si la segunda petición de una sesión
+cae en otra microVM, se encuentra un servidor recién arrancado sin nada de su estado. Se
+resuelve observando la cabecera `Mcp-Session-Id` de la respuesta al `initialize` y fijando
+ahí la ruta.
+
+## Envolver la respuesta HTTP para capturar una cabecera
+
+Para fijar la ruta hay que leer `Mcp-Session-Id` de la respuesta, y `httputil.ReverseProxy`
+no ofrece un gancho para eso. Se envuelve el `http.ResponseWriter` e se intercepta
+`WriteHeader`/`Write`.
+
+Cuidado: hay que implementar también `Flush()`, o el streaming SSE del puente se queda
+atascado en el buffer y el cliente no ve nada.
+
+## Los tiempos de recolección se miden con ventanas amplias
+
+El recolector del gateway tictaquea cada `idle/3`. Un test que espera `idle + 5s` puede caer
+entre dos pulsos y parecer que no funciona. Pasó: dimos por roto el congelado automático
+cuando solo hacía falta esperar al siguiente tic.

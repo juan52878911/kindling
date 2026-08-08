@@ -28,6 +28,11 @@ import (
 // GuestPort es donde se espera que escuche el servidor MCP dentro de la microVM.
 const GuestPort = 8080
 
+// SessionHeader identifica la conversación MCP. El gateway la usa para enrutar
+// SIEMPRE a la misma instancia: el estado de una sesión vive en el proceso del
+// servidor MCP, así que mandar la segunda petición a otra microVM la rompería.
+const SessionHeader = "Mcp-Session-Id"
+
 // readyTimeout acota la espera a que la herramienta abra su puerto. Generoso
 // para el arranque en frío, irrelevante tras un thaw.
 const readyTimeout = 20 * time.Second
@@ -57,7 +62,8 @@ type Gateway struct {
 	client   *api.Client
 	idle     time.Duration
 	mu       sync.Mutex
-	services map[string]*entry // servicio -> instancia
+	services map[string]*entry        // servicio -> instancia "por defecto"
+	routes   map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
 }
 
 type entry struct {
@@ -67,8 +73,21 @@ type entry struct {
 	proxy     *httputil.ReverseProxy
 }
 
+// sessionRoute recuerda a qué instancia pertenece cada sesión MCP.
+type sessionRoute struct {
+	service   string
+	machineID string
+	ip        string
+	proxy     *httputil.ReverseProxy
+	lastUse   time.Time
+}
+
 func New(client *api.Client, idle time.Duration) *Gateway {
-	return &Gateway{client: client, idle: idle, services: map[string]*entry{}}
+	return &Gateway{
+		client: client, idle: idle,
+		services: map[string]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
 }
 
 // Handler expone las rutas del gateway.
@@ -110,24 +129,27 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 		}
 		status := "frío"
 		if e, ok := g.services[name]; ok {
-			status = fmt.Sprintf("caliente en %s desde hace %s",
-				e.ip, time.Since(e.lastUse).Round(time.Second))
+			n := 0
+			for _, rt := range g.routes {
+				if rt.service == name {
+					n++
+				}
+			}
+			status = fmt.Sprintf("caliente en %s · %d sesión(es) · ocioso %s",
+				e.ip, n, time.Since(e.lastUse).Round(time.Second))
 		}
 		fmt.Fprintf(w, "%-24s snapshot=%-20s %s\n", name, s.Name, status)
 	}
 }
 
 // handleProxy es el camino caliente: asegura instancia y hace de proxy.
+//
+// Con sesión MCP el enrutado es PEGAJOSO: la misma conversación vuelve siempre a
+// la misma microVM, porque su estado vive en el proceso del servidor MCP.
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	service := r.PathValue("service")
 	if service == "" {
 		http.Error(w, "falta el servicio en la ruta", http.StatusBadRequest)
-		return
-	}
-
-	e, err := g.ensure(r.Context(), service)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusBadGateway)
 		return
 	}
 
@@ -136,7 +158,108 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "" {
 		r.URL.Path = "/"
 	}
-	e.proxy.ServeHTTP(w, r)
+
+	// Sesión ya conocida: directo a su instancia, sin consultar al daemon.
+	if sid := r.Header.Get(SessionHeader); sid != "" {
+		if rt := g.route(sid); rt != nil {
+			rt.proxy.ServeHTTP(w, r)
+			return
+		}
+		// Sesión desconocida: puede venir de un gateway anterior. Se deja seguir;
+		// el puente responderá 400 y el cliente reiniciará el handshake.
+	}
+
+	e, err := g.ensure(r.Context(), service)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusBadGateway)
+		return
+	}
+
+	// Se observa la respuesta para capturar el Mcp-Session-Id que asigne el
+	// puente en el initialize, y fijar desde ahí el enrutado de esa conversación.
+	sw := &sessionWriter{ResponseWriter: w, gw: g, service: service, e: e}
+	e.proxy.ServeHTTP(sw, r)
+
+	// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
+	if r.Method == http.MethodDelete {
+		if sid := r.Header.Get(SessionHeader); sid != "" {
+			g.forget(sid)
+		}
+	}
+}
+
+// sessionWriter detecta la cabecera de sesión en la respuesta y registra la ruta.
+type sessionWriter struct {
+	http.ResponseWriter
+	gw      *Gateway
+	service string
+	e       *entry
+	done    bool
+}
+
+func (s *sessionWriter) WriteHeader(code int) {
+	s.capture()
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *sessionWriter) Write(b []byte) (int, error) {
+	s.capture()
+	return s.ResponseWriter.Write(b)
+}
+
+// Flush hace falta para que el streaming SSE del puente no se quede atascado.
+func (s *sessionWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *sessionWriter) capture() {
+	if s.done {
+		return
+	}
+	s.done = true
+	if sid := s.Header().Get(SessionHeader); sid != "" {
+		s.gw.bind(sid, s.service, s.e)
+	}
+}
+
+func (g *Gateway) route(sid string) *sessionRoute {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	rt, ok := g.routes[sid]
+	if !ok {
+		return nil
+	}
+	rt.lastUse = time.Now()
+	// Mantener viva la instancia: la sesión cuenta como uso del servicio.
+	if e, ok := g.services[rt.service]; ok {
+		e.lastUse = time.Now()
+	}
+	return rt
+}
+
+func (g *Gateway) bind(sid, service string, e *entry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.routes[sid] = &sessionRoute{
+		service: service, machineID: e.machineID, ip: e.ip,
+		proxy: e.proxy, lastUse: time.Now(),
+	}
+	log.Printf("%s: sesión %s fijada a %s", service, short(sid), e.ip)
+}
+
+func (g *Gateway) forget(sid string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.routes, sid)
+}
+
+func short(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // ensure devuelve una instancia viva del servicio, despertándola si hace falta.
@@ -291,6 +414,13 @@ func (g *Gateway) reapOnce(ctx context.Context) {
 		if time.Since(e.lastUse) > g.idle {
 			victims = append(victims, victim{svc, e.machineID})
 			delete(g.services, svc)
+		}
+	}
+	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
+	// proceso servidor muere con ella.
+	for sid, rt := range g.routes {
+		if time.Since(rt.lastUse) > g.idle {
+			delete(g.routes, sid)
 		}
 	}
 	g.mu.Unlock()

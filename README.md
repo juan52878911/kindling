@@ -4,9 +4,9 @@ Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: co
 servidor MCP open source cualquiera y convertirlo automáticamente en un servicio que se
 levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
 
-> Estado: **fase 4 de 5**. `kling` gestiona microVMs con interfaz tipo docker, con red,
-> snapshots dorados, aislamiento, eventos y **gateway MCP funcionando**. Falta la conversión
-> automática de servidores MCP existentes.
+> Estado: **fase 5 de 5** — el circuito completo funciona. `kling` gestiona microVMs con interfaz tipo docker, con red,
+> snapshots dorados, aislamiento, eventos, gateway MCP con sesiones y **puente
+> stdio→HTTP**: cualquier servidor MCP open source se aloja bajo demanda.
 
 **El invitado se considera hostil**: no se sabe qué servidor MCP se va a alojar. Ver
 [SECURITY.md](SECURITY.md) para el modelo de amenaza, las barreras y —sobre todo— lo que
@@ -250,7 +250,7 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 - [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y vigilancia
 - [ ] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP
 - [x] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger por inactividad
-- [ ] **Fase 5** — Conversión automática de un MCP open source a microVM
+- [x] **Fase 5** — Puente stdio→HTTP: cualquier servidor MCP se aloja bajo demanda
 
 ## Notas de campo
 
@@ -416,3 +416,72 @@ comparten memoria y pertenecen juntas aunque nadie las haya etiquetado.
 ```sh
 kling run -from echo -service echo -label tier=prod
 ```
+
+## Fase 5: cualquier servidor MCP, alojado bajo demanda
+
+La mayoría de servidores MCP open source solo hablan **stdio**: un proceso hijo persistente
+con el que se dialoga por tuberías. No hay puerto al que llamar, y el ciclo de vida lo impone
+el cliente. Es lo contrario de invocable bajo demanda.
+
+`kling-bridge` corre **dentro** de la microVM, lanza el servidor como hijo y expone su
+protocolo por Streamable HTTP:
+
+```
+gateway ──HTTP──> kling-bridge ──stdin/stdout──> servidor MCP
+```
+
+Desde fuera, un servidor stdio parece nativo de HTTP. Envolverlo es una línea:
+
+```sh
+make bridge
+sudo ./scripts/80-mcp-image.sh stdio files -p "nodejs npm" -- \
+     npx -y @modelcontextprotocol/server-filesystem /data
+
+kling run -name files-tmpl -image files -service files
+kling commit files-tmpl files && kling stop files-tmpl
+```
+
+Para servidores que ya hablan HTTP el modo es `http` y no hace falta puente.
+
+### Sesiones
+
+MCP identifica conversaciones con `Mcp-Session-Id`, y un servidor stdio es de **sesión única
+por naturaleza**: su estado vive en el proceso. Por eso:
+
+- **El puente lanza un proceso hijo por sesión.** Dos conversaciones concurrentes no se
+  pisan el estado.
+- **El gateway enruta de forma pegajosa.** La misma sesión vuelve siempre a la misma
+  microVM; mandarla a otra instancia encontraría un servidor sin ese estado.
+
+Demostrado con la herramienta `session_info`, que informa de su pid y de sus llamadas:
+
+```
+sesión 1 (3 llamadas extra): pid=305 llamadas_en_esta_sesion=5
+sesión 2 (recién creada):    pid=309 llamadas_en_esta_sesion=1
+```
+
+### El circuito completo
+
+```
+modelo local  ──>  gateway  ──>  microVM  ──>  servidor MCP
+  (tu Mac)        (Proxmox)     (Firecracker)   (stdio o HTTP)
+```
+
+[examples/agent/agent.py](examples/agent/agent.py) lo cierra: cliente MCP + bucle de
+tool-calling contra ollama.
+
+```
+$ python3 examples/agent/agent.py "usa echo para decir hola"
+→ kindling-echo v1.0.0  sesión b2787e00
+→ herramientas: echo, session_info
+→ llamando echo({"text": "hola"})
+← hola
+```
+
+El modelo no sabe nada de microVMs: pide una herramienta y aparece. Si llevaba rato sin
+usarse estaba congelada, y despertarla cuesta milisegundos.
+
+| Camino | Latencia |
+|---|---|
+| Handshake MCP en frío, desde el Mac | **310 ms** |
+| Llamada a herramienta, en caliente | **9 ms** |

@@ -20,7 +20,7 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 # activo, para no repetirlo en cada despliegue.
 HOST ?= $(shell $(BIN) config show 2>/dev/null | awk '/^contexto:/{print $$2}')
 
-.PHONY: all build install uninstall daemon deploy test clean fmt
+.PHONY: all build install uninstall daemon bridge deploy test clean fmt
 
 all: build
 
@@ -43,6 +43,13 @@ install: build
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN) 2>/dev/null || sudo rm -f $(PREFIX)/bin/$(BIN)
 	@echo "desinstalado (la configuración en ~/.config/kling se conserva)"
+
+## bridge — el puente stdio<->HTTP que corre DENTRO de las microVMs.
+## Estático a propósito: el invitado es Alpine (musl) y no debe depender de libc.
+bridge:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+		-ldflags "$(LDFLAGS)" -o kling-bridge ./cmd/kling-bridge
+	@echo "kling-bridge  ($(VERSION))"
 
 ## daemon — compila el binario del host con KVM (siempre linux/amd64)
 daemon:
