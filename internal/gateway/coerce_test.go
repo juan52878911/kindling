@@ -30,3 +30,26 @@ func TestCoerce(t *testing.T) {
 		}
 	}
 }
+
+func TestCoerceExtra(t *testing.T) {
+	cases := []struct{ name, schema, in, want string }{
+		{"array envuelto en objeto de un campo",
+			`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}`,
+			`{"paths":{"paths":["/a","/b"]}}`, `{"paths":["/a","/b"]}`},
+		{"objeto suelto donde se espera array de objetos",
+			`{"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"}}}}}}`,
+			`{"edits":{"oldText":"x"}}`, `{"edits":[{"oldText":"x"}]}`},
+		{"objeto vacío donde se espera array",
+			`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}`,
+			`{"paths":{}}`, `{"paths":[]}`},
+		{"argumentos enteros como string JSON",
+			`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}`,
+			`"{\"paths\":[\"/a\"]}"`, `{"paths":["/a"]}`},
+	}
+	for _, c := range cases {
+		got := string(coerceArgs([]byte(c.in), []byte(c.schema)))
+		if got != c.want {
+			t.Errorf("%s:\n  esperado %s\n  obtenido %s", c.name, c.want, got)
+		}
+	}
+}

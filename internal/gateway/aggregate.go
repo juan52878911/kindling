@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -435,7 +436,12 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 
 	// Antes de nada, reparar los tipos que el cliente pudiera haber estropeado.
 	// Se hace aquí, con el esquema declarado por la herramienta a mano.
+	before := string(args)
 	args = coerceArgs(args, t.Schema)
+	if s := string(args); s != before {
+		log.Printf("%s: tipos reparados\n  recibido: %s\n  enviado:  %s",
+			t.Qualified, trunc(before, 300), trunc(s, 300))
+	}
 
 	// Modo efímero: la acción se ejecuta en una microVM propia que muere después.
 	//

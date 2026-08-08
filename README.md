@@ -582,8 +582,38 @@ El servidor los rechaza con "expected array, received object" y desde fuera pare
 de la herramienta, cuando nunca llegó a verla.
 
 Como el catálogo guarda el esquema declarado de cada herramienta, el agregador deshace el
-daño antes de reenviar. Solo se convierte lo que contradice el esquema: un objeto legítimo
-se deja intacto.
+daño antes de reenviar. Cuatro formas rotas reconocidas donde el esquema pide un array:
+
+| Lo que llega | Se repara a |
+|---|---|
+| `{"0":…,"1":…}` objeto indexado | `[…,…]` |
+| `"[{…}]"` string con JSON dentro | `[{…}]` |
+| `{…}` un objeto suelto | `[{…}]` |
+| `{"paths":{"paths":[…]}}` envuelto | `[…]` |
+
+Solo se convierte lo que contradice el esquema: un objeto legítimo se deja intacto. Cada
+reparación queda registrada, y si un servidor rechaza los argumentos **pese** a la
+reparación, se registra lo que se le envió — sin eso es imposible saber qué forma les dio el
+cliente.
+
+## Qué persiste y qué no
+
+Importa tenerlo claro porque no es obvio:
+
+| | Sobrevive a |
+|---|---|
+| Estado de un servicio **efímero** | nada: la microVM muere tras cada acción |
+| Estado de un servicio **persistente** | congelaciones y despertares de SU instancia |
+| | pero **no** a que esa instancia se elimine |
+| Imagen base y snapshot dorado | todo: son ficheros en el host |
+
+Un servicio persistente conserva su contenido mientras viva su instancia, que se congela al
+quedar ociosa y vuelve intacta. Pero si esa instancia se elimina —limpieza manual, `kling rm`,
+reinstalar el servicio— el estado se va con ella, porque vive en su overlay.
+
+**kindling da persistencia de sesión, no almacenamiento duradero.** Para datos que deban
+sobrevivir a todo hace falta montar un volumen del host dentro de la microVM, que hoy no está
+implementado.
 
 ## Conectarlo con tu agente de IA
 

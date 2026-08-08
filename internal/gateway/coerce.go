@@ -141,25 +141,59 @@ func coerceArray(v any, schema map[string]any) any {
 		return v
 
 	case map[string]any:
-		// El daño más común: el array se convirtió en objeto indexado por
-		// posición. Solo se deshace si TODAS las claves son numéricas; si no,
-		// era un objeto de verdad y no hay nada que reparar.
-		keys := make([]int, 0, len(x))
-		for k := range x {
-			n, err := strconv.Atoi(k)
-			if err != nil {
-				return v
+		if len(x) == 0 {
+			return []any{}
+		}
+
+		// Caso 1: objeto indexado por posición, {"0":…,"1":…}. Es el daño más
+		// común y el único que se puede deshacer con certeza absoluta.
+		if keys, ok := numericKeys(x); ok {
+			out := make([]any, 0, len(keys))
+			for _, k := range keys {
+				out = append(out, x[strconv.Itoa(k)])
 			}
-			keys = append(keys, n)
+			return fixItems(out)
 		}
-		sort.Ints(keys)
-		out := make([]any, 0, len(keys))
-		for _, k := range keys {
-			out = append(out, x[strconv.Itoa(k)])
+
+		// Caso 2: el array llegó envuelto en un objeto de un solo campo, que es
+		// lo que hacen algunos clientes al serializar argumentos:
+		//   {"paths": {"paths": ["/a"]}}  o  {"paths": {"items": ["/a"]}}
+		if len(x) == 1 {
+			for _, inner := range x {
+				if arr, ok := inner.([]any); ok {
+					return fixItems(arr)
+				}
+				if str, ok := inner.(string); ok {
+					var parsed []any
+					if json.Unmarshal([]byte(str), &parsed) == nil {
+						return fixItems(parsed)
+					}
+				}
+			}
 		}
-		return fixItems(out)
+
+		// Caso 3: el esquema pide un array de objetos y llegó UN objeto suelto.
+		// Envolverlo es lo que el cliente quiso decir.
+		if items != nil && schemaType(items) == "object" {
+			return fixItems([]any{x})
+		}
+		return v
 	}
 	return v
+}
+
+// numericKeys indica si todas las claves son índices, y los devuelve ordenados.
+func numericKeys(m map[string]any) ([]int, bool) {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			return nil, false
+		}
+		keys = append(keys, n)
+	}
+	sort.Ints(keys)
+	return keys, true
 }
 
 func coerceNumber(v any) any {

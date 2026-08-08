@@ -595,3 +595,23 @@ que no reparar.
 Los tres se arreglan serializando lo que debe serializarse: un id único por llamada, un
 candado por servicio para crear sesión, y un candado por máquina para las operaciones de
 ciclo de vida.
+
+## Cuatro formas distintas de romper un array
+
+Un informe de pruebas insistía en que los arrays seguían fallando después de arreglarlos. La
+reparación funcionaba en las pruebas propias y no en las suyas, lo que solo puede significar
+una cosa: su cliente enviaba una forma distinta a la que se estaba simulando.
+
+Se ampliaron las formas reconocidas —objeto indexado, string con JSON, objeto suelto donde va
+un array de objetos, array envuelto en un objeto de un campo— y, sobre todo, **se añadió
+registro de lo que se envía cuando el servidor rechaza los argumentos igualmente**. Adivinar
+la forma de un payload ajeno es perder el tiempo; registrarlo lo resuelve en una ejecución.
+
+## Persistencia de sesión no es almacenamiento
+
+Un servicio persistente conserva su estado mientras viva su instancia. Pero ese estado vive
+en el overlay de la microVM, así que desaparece si la instancia se elimina — y eso incluye
+cualquier limpieza rutinaria.
+
+Es una distinción que conviene explicar antes de que alguien guarde algo importante ahí. Para
+datos duraderos haría falta montar un volumen del host dentro del invitado, que hoy no existe.

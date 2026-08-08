@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -133,6 +134,13 @@ func (a *aggregator) invoke(ctx context.Context, base, sid string, t *Tool, args
 		return nil, &rpcFault{-32000, "respuesta ilegible de " + t.Service}
 	}
 	if resp.Error != nil {
+		// Un error de validación significa que los tipos no cuadraron pese a la
+		// reparación. Se registra lo que se envió: sin eso es imposible saber qué
+		// forma les dio el cliente.
+		if strings.Contains(strings.ToLower(resp.Error.Message), "expected") {
+			log.Printf("%s: el servidor rechazó los argumentos (%s)\n  enviado: %s",
+				t.Qualified, resp.Error.Message, trunc(string(args), 400))
+		}
 		return nil, &rpcFault{resp.Error.Code, resp.Error.Message}
 	}
 	return json.RawMessage(resp.Result), nil

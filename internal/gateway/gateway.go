@@ -270,6 +270,14 @@ func (g *Gateway) forget(sid string) {
 	delete(g.routes, sid)
 }
 
+// trunc acorta cadenas para los registros de diagnóstico.
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 func short(s string) string {
 	if len(s) > 8 {
 		return s[:8]
