@@ -535,11 +535,19 @@ func (g *Gateway) reapOnce(ctx context.Context) {
 	}
 }
 
+// idBufPool reaprovecha el buffer de 16 bytes de newSessionID. Cada sesión
+// MCP aloca uno nuevo; bajo carga con muchos agentes concurrentes, el pool
+// evita presión de GC por algo tan efímero.
+var idBufPool = sync.Pool{New: func() any { b := make([]byte, 16); return &b }}
+
 // newSessionID genera el identificador de una sesión del agregador.
 func newSessionID() string {
-	b := make([]byte, 16)
+	bp := idBufPool.Get().(*[]byte)
+	b := (*bp)[:16]
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	s := hex.EncodeToString(b)
+	idBufPool.Put(bp)
+	return s
 }
 
 // links devuelve los servidores externos registrados, cacheados brevemente: el

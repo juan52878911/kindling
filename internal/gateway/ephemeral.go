@@ -109,17 +109,12 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 
 // invoke manda el tools/call y traduce la respuesta.
 func (a *aggregator) invoke(ctx context.Context, base, sid string, t *Tool, args json.RawMessage) (any, *rpcFault) {
-	if len(args) == 0 {
-		args = json.RawMessage("{}")
-	}
 	// Identificador ÚNICO por llamada. Con un id fijo, dos peticiones concurrentes
 	// sobre la misma sesión comparten entrada en la tabla de pendientes del
 	// puente: la segunda pisa a la primera y esa se queda esperando una respuesta
 	// que ya se entregó a otro. Solo se nota en paralelo, que es cuando peor
 	// viene descubrirlo.
-	raw, err := mcpCall(ctx, base, sid, fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-		nextRPCID(), t.Name, args))
+	raw, err := mcpCall(ctx, base, sid, encodeRPC("tools/call", t.Name, args))
 	if err != nil {
 		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
 	}

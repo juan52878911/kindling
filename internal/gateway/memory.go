@@ -75,11 +75,13 @@ func (m *memory) Record(ctx context.Context, query, tool string) {
 	}()
 }
 
-// Rank reordena una lista de herramientas poniendo delante las que ya
-// resolvieron consultas parecidas.
-func (m *memory) Rank(query string, tools []Tool) []Tool {
+// Rank devuelve la permutación de tools que pone delante las que ya resolvieron
+// consultas parecidas. Devolver índices (no la slice reordenada) evita una copia
+// completa del slice por llamada, que en el camino caliente de find_tools se
+// notaba: cada búsqueda hacía 2 reempaquetados.
+func (m *memory) Rank(query string, tools []Tool) []int {
 	if m == nil || len(tools) < 2 {
-		return tools
+		return nil
 	}
 	q := normalize(query)
 
@@ -98,13 +100,16 @@ func (m *memory) Rank(query string, tools []Tool) []Tool {
 	m.mu.Unlock()
 
 	if len(scores) == 0 {
-		return tools
+		return nil
 	}
-	out := append([]Tool(nil), tools...)
-	sort.SliceStable(out, func(i, j int) bool {
-		return scores[out[i].Qualified] > scores[out[j].Qualified]
+	idx := make([]int, len(tools))
+	for i := range tools {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(i, j int) bool {
+		return scores[tools[idx[i]].Qualified] > scores[tools[idx[j]].Qualified]
 	})
-	return out
+	return idx
 }
 
 func shareTerms(a, b string) bool {
@@ -156,9 +161,7 @@ func (m *memory) save(ctx context.Context, query, tool string) error {
 		"observation": content,
 		"tags":        []string{"kindling", "uso-de-herramientas"},
 	})
-	_, err := mcpCallAt(ctx, l.URL, sid, fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-		nextRPCID(), write, args))
+	_, err := mcpCallAt(ctx, l.URL, sid, encodeRPC("tools/call", write, args))
 	return err
 }
 

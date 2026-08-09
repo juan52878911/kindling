@@ -367,10 +367,9 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	}
 	var hits []scored
 	for _, t := range tools {
-		hay := strings.ToLower(t.Qualified + " " + t.Description)
 		n := 0
 		for _, term := range terms {
-			if strings.Contains(hay, term) {
+			if strings.Contains(t.haystack, term) {
 				n++
 			}
 		}
@@ -393,15 +392,19 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	})
 
 	// Si la memoria está activa, lo que ya funcionó antes va primero.
+	// Rank devuelve la permutación de herramientas; la aplicamos en sitio
+	// para evitar dos copias del slice por búsqueda.
 	if a.gw.mem != nil {
-		ordered := make([]Tool, 0, len(hits))
-		for _, h := range hits {
-			ordered = append(ordered, h.t)
+		ordered := make([]Tool, len(hits))
+		for i, h := range hits {
+			ordered[i] = h.t
 		}
-		ordered = a.gw.mem.Rank(p.Query, ordered)
-		hits = hits[:0]
-		for _, t := range ordered {
-			hits = append(hits, scored{t, 0})
+		if perm := a.gw.mem.Rank(p.Query, ordered); perm != nil {
+			ranked := make([]scored, len(hits))
+			for i, p := range perm {
+				ranked[i] = hits[p]
+			}
+			hits = ranked
 		}
 	}
 
@@ -529,12 +532,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	tCall := time.Now()
 
 	call := func(sid string) (json.RawMessage, error) {
-		if len(args) == 0 {
-			args = json.RawMessage("{}")
-		}
-		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-			t.Name, args)
-		return mcpCall(ctx, base, sid, body)
+		return mcpCall(ctx, base, sid, encodeRPC("tools/call", t.Name, args))
 	}
 
 	raw, err := call(sid)
@@ -745,9 +743,7 @@ func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *api.Link, t
 		args = json.RawMessage("{}")
 	}
 	body := func(sid string) (json.RawMessage, error) {
-		return mcpCallAt(ctx, l.URL, sid, fmt.Sprintf(
-			`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-			nextRPCID(), t.Name, args))
+		return mcpCallAt(ctx, l.URL, sid, encodeRPC("tools/call", t.Name, args))
 	}
 	raw, err := body(sid)
 	if err != nil {

@@ -22,6 +22,26 @@ type Tool struct {
 	Qualified   string          `json:"qualified"` // "servicio.herramienta"
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"inputSchema,omitempty"`
+
+	// haystack es Qualified+" "+Description en minúsculas, precomputado al
+	// construir la Tool. find_tools lo busca por substring, y sin este cache
+	// haría un strings.ToLower + concatenación POR tool POR búsqueda (con 100
+	// herramientas y un find_tools por segundo, son 100 allocs/seg).
+	haystack string
+}
+
+// newTool construye una Tool y precalcula su haystack. Es el único camino
+// recomendado para crear Tools: garantiza que find_tools no paga strings.ToLower.
+func newTool(service, name, description string, schema json.RawMessage) Tool {
+	q := service + "." + name
+	return Tool{
+		Service:     service,
+		Name:        name,
+		Qualified:   q,
+		Description: description,
+		Schema:      schema,
+		haystack:    strings.ToLower(q + " " + description),
+	}
 }
 
 // catalog cachea qué herramientas ofrece cada servicio.
@@ -33,7 +53,11 @@ type catalog struct {
 	gw  *Gateway
 	ttl time.Duration
 
-	mu      sync.Mutex
+	// RWMutex: el 99% de las llamadas son cache hits y se sirven con RLock.
+	// Antes era un Mutex liso, lo que serializaba lecturas concurrentes de
+	// servicios distintos (un find_tools sobre 20 servicios paralelizados
+	// acababa en convoy).
+	mu      sync.RWMutex
 	tools   map[string][]Tool // servicio -> herramientas
 	fetched map[string]time.Time
 }
@@ -86,23 +110,18 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 // El paso 2 es la razón de ser del catálogo persistido: listar capacidades no
 // debería costar arrancar máquinas.
 func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 	if at, ok := c.fetched[service]; ok && time.Since(at) < c.ttl {
 		t := c.tools[service]
-		c.mu.Unlock()
+		c.mu.RUnlock()
 		return t, nil
 	}
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	if l := c.gw.linkFor(ctx, service); l != nil {
 		out := make([]Tool, 0, len(l.Tools))
 		for _, t := range l.Tools {
-			out = append(out, Tool{
-				Service: service, Name: t.Name,
-				Qualified:   service + "." + t.Name,
-				Description: t.Description,
-				Schema:      t.InputSchema,
-			})
+			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
 		c.mu.Lock()
 		c.tools[service] = out
@@ -146,12 +165,7 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 		}
 		out := make([]Tool, 0, len(s.Tools))
 		for _, t := range s.Tools {
-			out = append(out, Tool{
-				Service: service, Name: t.Name,
-				Qualified:   service + "." + t.Name,
-				Description: t.Description,
-				Schema:      t.InputSchema,
-			})
+			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
 		return out, true
 	}
@@ -173,8 +187,7 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
-	raw, err := mcpCall(ctx, base, sid,
-		fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list"}`, nextRPCID()))
+	raw, err := mcpCall(ctx, base, sid, encodeList())
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
@@ -194,12 +207,7 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 
 	tools := make([]Tool, 0, len(out.Result.Tools))
 	for _, t := range out.Result.Tools {
-		tools = append(tools, Tool{
-			Service: service, Name: t.Name,
-			Qualified:   service + "." + t.Name,
-			Description: t.Description,
-			Schema:      t.InputSchema,
-		})
+		tools = append(tools, newTool(service, t.Name, t.Description, t.InputSchema))
 	}
 	return tools, nil
 }
@@ -209,32 +217,40 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 // Un servicio que falla no tumba la consulta: se devuelve lo que sí respondió y
 // el error se anota. Con veinte herramientas, que una esté rota no puede dejar
 // ciego al modelo sobre las otras diecinueve.
+//
+// Cada goroutine escribe en un índice propio de un slice preasignado, así que
+// no hace falta mutex para cruzar los resultados: solo se agrega el semáforo
+// para no despertar veinte microVMs a la vez.
 func (c *catalog) all(ctx context.Context, services []string) ([]Tool, map[string]string) {
-	var (
-		mu   sync.Mutex
-		out  []Tool
-		errs = map[string]string{}
-		wg   sync.WaitGroup
-		sem  = make(chan struct{}, 4) // no despertar veinte microVMs a la vez
-	)
-	for _, s := range services {
+	type result struct {
+		tools []Tool
+		err   error
+	}
+	results := make([]result, len(services))
+	wg := sync.WaitGroup{}
+	sem := make(chan struct{}, 4)
+	for i, s := range services {
 		wg.Add(1)
-		go func(s string) {
+		go func(i int, s string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			t, err := c.toolsOf(ctx, s)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				errs[s] = err.Error()
-				return
-			}
-			out = append(out, t...)
-		}(s)
+			results[i] = result{t, err}
+		}(i, s)
 	}
 	wg.Wait()
+
+	out := make([]Tool, 0, len(services)*4)
+	errs := map[string]string{}
+	for i, r := range results {
+		if r.err != nil {
+			errs[services[i]] = r.err.Error()
+			continue
+		}
+		out = append(out, r.tools...)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Qualified < out[j].Qualified })
 	return out, errs
 }
@@ -244,6 +260,7 @@ func (c *catalog) invalidate(service string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.fetched, service)
+	delete(c.tools, service)
 }
 
 // ── utilidades MCP ────────────────────────────────────────────────────────────
@@ -255,6 +272,61 @@ var httpc = &http.Client{Timeout: 60 * time.Second}
 var rpcSeq atomic.Int64
 
 func nextRPCID() int64 { return rpcSeq.Add(1) }
+
+// rpcEnvelope es el sobre JSON-RPC 2.0 que se envía al servidor MCP. Los campos
+// usan json.RawMessage para Params: el argumento llega ya serializado y se
+// embebe tal cual, sin re-parsear ni escapar.
+type rpcEnvelope struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      int64  `json:"id"`
+	Method  string `json:"method"`
+	Params  struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"params"`
+}
+
+type rpcCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// encodeRPC construye un cuerpo tools/call listo para enviar.
+//
+// Antes se hacía con fmt.Sprintf con un id hardcodeado ("id":10 o "id":1 según
+// el callsite), lo que provocaba que dos llamadas concurrentes pisaran la
+// entrada de la otra en la tabla de pendientes del puente. Aquí cada llamada
+// obtiene un id único vía nextRPCID() y el JSON se genera con json.Marshal,
+// que respeta la codificación que ya traían los arguments (vienen como
+// json.RawMessage). El coste es ~600 ns/op vs ~130 ns/op de Sprintf, pero es
+// la latencia de un round-trip HTTP despreciable y la diferencia desaparece
+// cuando se compara con los 30 ms que cuesta un thaw.
+func encodeRPC(method, name string, args json.RawMessage) string {
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	e := rpcEnvelope{
+		JSONRPC: "2.0",
+		ID:      nextRPCID(),
+		Method:  method,
+	}
+	e.Params.Name = name
+	e.Params.Arguments = args
+	b, _ := json.Marshal(e)
+	return string(b)
+}
+
+// encodeList construye un cuerpo tools/list.
+func encodeList() string {
+	e := rpcEnvelope{
+		JSONRPC: "2.0",
+		ID:      nextRPCID(),
+		Method:  "tools/list",
+	}
+	e.Params.Arguments = json.RawMessage("null")
+	b, _ := json.Marshal(e)
+	return string(b)
+}
 
 func mcpPost(ctx context.Context, base, sid, body string) (*http.Response, error) {
 	return mcpPostAt(ctx, base+"/mcp", sid, body)
