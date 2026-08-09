@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/http/pprof"
 	"net/url"
 	"strconv"
 	"strings"
@@ -66,16 +67,17 @@ func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) 
 
 // Gateway mantiene una instancia caliente por servicio y enruta hacia ella.
 type Gateway struct {
-	client    *api.Client
-	idle      time.Duration
-	Ephemeral bool
-	mu        sync.Mutex
-	services  map[string]*entry        // servicio -> instancia "por defecto"
-	routes    map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
-	agg       *aggregator              // endpoint virtual que reúne a todos
-	pool      *pool                    // instancias pre-calentadas por servicio
-	ensureMu  sync.Map                 // servicio -> *sync.Mutex; ver ensure()
-	mem       *memory                  // memoria de uso; nil si está desactivada
+	client      *api.Client
+	idle        time.Duration
+	Ephemeral   bool
+	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
+	mu          sync.Mutex
+	services    map[string]*entry        // servicio -> instancia "por defecto"
+	routes      map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
+	agg         *aggregator              // endpoint virtual que reúne a todos
+	pool        *pool                    // instancias pre-calentadas por servicio
+	ensureMu    sync.Map                 // servicio -> *sync.Mutex; ver ensure()
+	mem         *memory                  // memoria de uso; nil si está desactivada
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
@@ -128,6 +130,24 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("/mcp/"+AggregatePath+"/", g.handleAggregate)
 	mux.HandleFunc("/mcp/{service}/", g.handleProxy)
 	mux.HandleFunc("/mcp/{service}", g.handleProxy)
+
+	// pprof SOLO si el operador lo pidió con -pprof. El gateway escucha en
+	// TCP, así que exponer perfiles por defecto regalaría un volcado de
+	// memoria y de stacks a cualquiera que pueda llegar al puerto.
+	if g.PprofEnabled {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+		mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+		mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+		mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+		mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+		mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	}
+
 	return logging(mux)
 }
 
@@ -193,6 +213,15 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/mcp"
 	}
 
+	// Enlace externo: no hay microVM que despertar, se reenvía HTTP al servidor
+	// del dueño. Sin este desvío, un servicio registrado con `kling mcp link`
+	// respondía 502 "no hay snapshot" porque ensure() lo buscaba en el catálogo
+	// de VMs y no lo encontraba.
+	if l := g.linkFor(r.Context(), service); l != nil {
+		g.handleLinkProxy(w, r, l)
+		return
+	}
+
 	// Sesión ya conocida: directo a su instancia, sin consultar al daemon.
 	if sid := r.Header.Get(SessionHeader); sid != "" {
 		if rt := g.route(sid); rt != nil {
@@ -220,6 +249,24 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			g.forget(sid)
 		}
 	}
+}
+
+// handleLinkProxy reenvía la petición HTTP al servidor MCP externo.
+//
+// El enlace expone la URL completa de su servidor (p. ej. http://host:8080/mcp).
+// El cliente, en cambio, pidió `/mcp/<servicio>/...` y ya le quitamos el prefijo
+// en el llamador, así que r.URL.Path empieza por `/mcp`. Para que el proxy no
+// concatene dos veces la ruta, se elimina el sufijo `/mcp` de la URL del enlace
+// antes de construir el destino.
+func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api.Link) {
+	base := strings.TrimSuffix(l.URL, "/mcp")
+	target, err := url.Parse(base)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("URL de enlace inválida: %v", err), http.StatusInternalServerError)
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ServeHTTP(w, r)
 }
 
 // sessionWriter detecta la cabecera de sesión en la respuesta y registra la ruta.
