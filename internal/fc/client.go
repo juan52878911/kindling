@@ -11,12 +11,35 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
+
+// bufPool recicla el buffer de serialización JSON. Firecracker recibe ~6
+// llamadas REST por boot, más un Ping cada 10ms durante el arranque.
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 // Client apunta al socket de una instancia concreta de Firecracker.
 type Client struct {
 	http *http.Client
+}
+
+// clientCache reaprovecha el http.Client por socket. Cada boot/freeze/thaw
+// hace 2-6 llamadas REST a Firecracker; con un cliente por llamada se
+// descartaba el connection pool entre medias, abriendo y cerrando un socket
+// Unix cada vez. Cada entrada es pequeña (~200 bytes) y se mantiene viva
+// durante toda la vida de la VM, así que el crecimiento está acotado por el
+// número total de máquinas arrancadas desde el arranque del daemon.
+var clientCache sync.Map // socketPath -> *Client
+
+// Get devuelve el cliente asociado a un socket, creándolo si hace falta.
+func Get(socketPath string) *Client {
+	if v, ok := clientCache.Load(socketPath); ok {
+		return v.(*Client)
+	}
+	c := New(socketPath)
+	actual, _ := clientCache.LoadOrStore(socketPath, c)
+	return actual.(*Client)
 }
 
 func New(socketPath string) *Client {
@@ -31,13 +54,15 @@ func New(socketPath string) *Client {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) error {
-	var buf bytes.Buffer
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
 	if body != nil {
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		if err := json.NewEncoder(buf).Encode(body); err != nil {
 			return err
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, &buf)
+	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, buf)
 	if err != nil {
 		return err
 	}

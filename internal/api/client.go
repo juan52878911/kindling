@@ -9,6 +9,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/transport"
 )
@@ -20,17 +23,26 @@ type Client struct {
 	d    *transport.Dialer
 }
 
+// bufPool recicla el buffer de serialización JSON. Sin él, cada RPC aloca un
+// bytes.Buffer nuevo y eso son 8-10 allocs por cada boot/thaw/freeze de VM.
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
 func NewClient(endpoint string) *Client {
 	d := transport.New(endpoint)
+	// Sobre SSH, mantener conexiones vivas añade complejidad que no compensa el
+	// ahorro: cada petición abre y cierra su propia conexión. Sobre socket Unix,
+	// en cambio, sí merece la pena: un connect+disconnect por RPC es overhead
+	// gratuito.
+	disableKeepAlives := strings.HasPrefix(endpoint, "ssh://")
 	return &Client{
 		d: d,
 		http: &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return d.Dial(ctx)
 			},
-			// Cada petición abre su propia conexión: con SSH detrás, reutilizar
-			// conexiones complica más de lo que ahorra.
-			DisableKeepAlives: true,
+			DisableKeepAlives:   disableKeepAlives,
+			MaxIdleConnsPerHost: 16,
+			IdleConnTimeout:     90 * time.Second,
 		}},
 	}
 }
@@ -38,13 +50,15 @@ func NewClient(endpoint string) *Client {
 func (c *Client) Endpoint() string { return c.d.Describe() }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
-	var buf bytes.Buffer
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
 	if body != nil {
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		if err := json.NewEncoder(buf).Encode(body); err != nil {
 			return err
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://kling"+path, &buf)
+	req, err := http.NewRequestWithContext(ctx, method, "http://kling"+path, buf)
 	if err != nil {
 		return err
 	}
@@ -182,6 +196,10 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	defer resp.Body.Close()
 
 	sc := bufio.NewScanner(resp.Body)
+	// Buffer por defecto 64 KB se queda corto en eventos grandes (snapshots
+	// con catálogos de docenas de herramientas, logs con adjuntos). Subimos
+	// el techo a 16 MB para no abortar el stream a mitad de evento.
+	sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {

@@ -13,6 +13,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -120,6 +121,12 @@ func (p *pipeConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // ServeStdio conecta stdin/stdout con el socket local del daemon. Es el extremo
 // remoto de dialSSH y no está pensado para uso manual.
+//
+// Sale cuando una de las direcciones se agota (EOF en in o el par cierra c).
+// Si solo se esperase a la primera goroutine, la otra se quedaría viva hasta
+// que el proceso muriera: <-done y return deja el otro io.Copy bloqueado.
+// Aquí se drenan las dos y se devuelve el primer error real (descartando
+// io.EOF, que es terminación limpia).
 func ServeStdio(socket string, in io.Reader, out io.Writer) error {
 	c, err := net.Dial("unix", socket)
 	if err != nil {
@@ -130,6 +137,13 @@ func ServeStdio(socket string, in io.Reader, out io.Writer) error {
 	done := make(chan error, 2)
 	go func() { _, err := io.Copy(c, in); done <- err }()
 	go func() { _, err := io.Copy(out, c); done <- err }()
-	<-done
+	err1 := <-done
+	err2 := <-done
+	if err1 != nil && !errors.Is(err1, io.EOF) {
+		return err1
+	}
+	if err2 != nil && !errors.Is(err2, io.EOF) {
+		return err2
+	}
 	return nil
 }
