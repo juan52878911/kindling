@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -78,6 +79,15 @@ type Manager struct {
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
 	// veth a medio crear: "Cannot find device vh-...".
 	lifecycle sync.Map // id -> *sync.Mutex
+
+	// Persistencia con debounce. Cada Run/Freeze/Thaw/Remove llama a
+	// schedulePersist() (no bloqueante), que despierta a persistLoop; este
+	// espera 50 ms antes de volcar, coalesciendo ráfagas. Antes el persist se
+	// ejecutaba DENTRO de m.mu, lo que bloqueaba toda la API durante el write.
+	persistCh chan struct{}
+	persistWG sync.WaitGroup
+	quitOnce  sync.Once
+	quit      chan struct{}
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -97,8 +107,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	priv, warn := resolvePrivileges(runAs)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
-		byID:   make(map[string]*api.Machine),
-		socket: make(map[string]string),
+		byID:      make(map[string]*api.Machine),
+		socket:    make(map[string]string),
+		persistCh: make(chan struct{}, 1),
+		quit:      make(chan struct{}),
 	}
 	if cg, err := ensureDelegation(); err != nil {
 		m.CgroupWarning = err.Error()
@@ -114,6 +126,17 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	m.reconcile()
+
+	// Prepara la plantilla de overlay: la primera microVM que arranque la
+	// materializa con mkfs.ext4 y las siguientes la copian. Antes cada VM
+	// pagaba su propio mkfs (~30-50 ms); ahora solo una vez por vida del daemon.
+	if err := m.ensureOverlayTemplate(); err != nil {
+		log.Printf("aviso: no pude preparar la plantilla de overlay: %v", err)
+	}
+
+	m.persistWG.Add(1)
+	go m.persistLoop()
+
 	return m, nil
 }
 
@@ -148,18 +171,94 @@ func (m *Manager) load() {
 }
 
 func (m *Manager) persist() {
+	// Toma el snapshot bajo RLock: ya no se ejecuta dentro de un Lock() del
+	// llamador, así que protegemos la lectura del map explícitamente.
+	m.mu.RLock()
 	list := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		list = append(list, mc)
 	}
-	b, err := json.MarshalIndent(list, "", "  ")
+	m.mu.RUnlock()
+
+	b, err := json.Marshal(list)
 	if err != nil {
 		return
 	}
 	tmp := m.statePath() + ".tmp"
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		_ = os.Rename(tmp, m.statePath())
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return
 	}
+	_, _ = f.Write(b)
+	_ = f.Sync()
+	_ = f.Close()
+	_ = os.Rename(tmp, m.statePath())
+}
+
+// schedulePersist pide una escritura no bloqueante. Si ya hay una pendiente
+// no se duplica: las ráfagas de transiciones coalescen en una sola escritura.
+//
+// Antes el persist era síncrono bajo m.mu: bloqueaba TODO el Manager (List,
+// Get, otros Run/Freeze) durante el MarshalIndent + WriteFile + Rename. Ahora
+// la escritura ocurre fuera del lock, con debounce de 50 ms.
+func (m *Manager) schedulePersist() {
+	select {
+	case m.persistCh <- struct{}{}:
+	default:
+	}
+}
+
+// flush fuerza una escritura sincrónica, saltándose el debounce. Se usa al
+// cerrar el daemon para no perder el último estado.
+func (m *Manager) flush() {
+	m.persist()
+}
+
+// persistLoop es la goroutine que materializa las escrituras. Duerme hasta que
+// schedulePersist le despierta, espera 50 ms (debounce), y entonces serializa
+// el estado y escribe fuera del lock.
+func (m *Manager) persistLoop() {
+	defer m.persistWG.Done()
+	const debounce = 50 * time.Millisecond
+	var timer *time.Timer
+	var tC <-chan time.Time
+
+	for {
+		select {
+		case <-m.persistCh:
+			if timer == nil {
+				timer = time.NewTimer(debounce)
+				tC = timer.C
+			} else {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(debounce)
+			}
+		case <-tC:
+			tC = nil
+			timer = nil
+			m.persist()
+		case <-m.quit:
+			// Última escritura para no perder nada al apagar.
+			m.persist()
+			if timer != nil {
+				timer.Stop()
+			}
+			return
+		}
+	}
+}
+
+// Close detiene la goroutine de persistencia y espera al último flush.
+func (m *Manager) Close() {
+	m.quitOnce.Do(func() {
+		close(m.quit)
+		m.persistWG.Wait()
+	})
 }
 
 // ── consultas ─────────────────────────────────────────────────────────────────
@@ -170,11 +269,25 @@ func (m *Manager) List() []*api.Machine {
 	out := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		c := *mc
-		c.DiskBytes = diskUsage(m.dir(mc.ID))
 		out = append(out, &c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// touchDiskUsage refresca el campo DiskBytes de una máquina. Se llama tras las
+// operaciones que cambian los ficheros en disco (Run, Freeze, Thaw); en el
+// resto basta con el valor que ya está en el estado persistido. Antes se
+// recalculaba dentro de List() por cada máquina, lo que con 50 VMs eran 50
+// filepath.WalkDir (~150 syscalls stat cada uno) por cada `kling ps`.
+func (m *Manager) touchDiskUsage(id string) int64 {
+	used := diskUsage(m.dir(id))
+	m.mu.Lock()
+	if mc, ok := m.byID[id]; ok {
+		mc.DiskBytes = used
+	}
+	m.mu.Unlock()
+	return used
 }
 
 // allocatedBytes devuelve los bytes realmente ocupados por un fichero, que con
@@ -262,10 +375,17 @@ func (m *Manager) allocNetIndex() int {
 
 // ── ciclo de vida ─────────────────────────────────────────────────────────────
 
+// idBufPool reaprovecha el buffer de newID. Las máquinas se crean a un ritmo
+// bajo (decenas/segundo en ráfaga) pero el allocs sigue siendo evitable.
+var idBufPool = sync.Pool{New: func() any { b := make([]byte, 8); return &b }}
+
 func newID() string {
-	b := make([]byte, 8)
+	bp := idBufPool.Get().(*[]byte)
+	b := (*bp)[:8]
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	s := hex.EncodeToString(b)
+	idBufPool.Put(bp)
+	return s
 }
 
 // Run crea una microVM y la arranca en frío.
@@ -307,9 +427,10 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
-	// esta microVM es su overlay escribible, que nace prácticamente vacío.
+	// esta microVM es su overlay escribible, que se clona de una plantilla única
+	// (mkfs.ext4 se hace una vez en NewManager, no por cada VM).
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if err := createOverlay(ctx, overlay, defaultOverlayMiB); err != nil {
+	if err := m.copyFromTemplate(ctx, overlay); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -321,7 +442,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
-	m.persist()
+	m.schedulePersist()
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
@@ -364,9 +485,12 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
 	mc.BootMS = time.Since(start).Milliseconds()
-	m.persist()
+	m.schedulePersist()
 	out := *mc
 	m.mu.Unlock()
+
+	// overlay.ext4 ya existe en disco; lo dejamos contado para el próximo List.
+	m.touchDiskUsage(id)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("arrancada en frío en %d ms", out.BootMS)})
@@ -396,6 +520,45 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 	return nil
 }
 
+// overlayTemplatePath devuelve la ruta de la plantilla compartida de overlays.
+// Vive en images/ para que el usuario sin privilegios la pueda leer igual que
+// las imágenes base.
+func (m *Manager) overlayTemplatePath() string {
+	return filepath.Join(m.root, "images", "overlay-template.ext4")
+}
+
+// ensureOverlayTemplate crea la plantilla si no existe. Es la única operación
+// de mkfs.ext4 de toda la vida del daemon: cada VM posterior copia este fichero
+// con cp --sparse=always en lugar de formatear el suyo, ahorrando ~30-50 ms
+// por máquina. Se llama desde NewManager para que la primera Run sea rápida.
+func (m *Manager) ensureOverlayTemplate() error {
+	path := m.overlayTemplatePath()
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := createOverlay(context.Background(), path, defaultOverlayMiB); err != nil {
+		return err
+	}
+	// El VMM corre sin privilegios y necesita abrir la plantilla para copiarla.
+	m.priv.EnsureReadable(path)
+	return nil
+}
+
+// copyFromTemplate crea el overlay de una VM copiando la plantilla dispersa.
+// Si la plantilla no está aún (carrera con la primera Run), cae al mkfs
+// clásico: peor que la copia, pero no deja la VM sin disco.
+func (m *Manager) copyFromTemplate(ctx context.Context, dst string) error {
+	src := m.overlayTemplatePath()
+	if _, err := os.Stat(src); err != nil {
+		return createOverlay(ctx, dst, defaultOverlayMiB)
+	}
+	out, err := exec.CommandContext(ctx, "cp", "--sparse=always", src, dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copiando la plantilla de overlay: %v: %s", err, out)
+	}
+	return nil
+}
+
 // boot lanza el proceso firecracker y configura la microVM por su API.
 //
 // Dos discos: la imagen base compartida en solo lectura y el overlay propio.
@@ -412,9 +575,9 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		return 0, err
 	}
 
-	c := fc.New(sock)
+	c := fc.Get(sock)
 	if err := waitSocket(ctx, c); err != nil {
-		return pid, err
+		return 0, err
 	}
 	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs()}); err != nil {
 		return pid, err
@@ -521,7 +684,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 
-	c := fc.New(sock)
+	c := fc.Get(sock)
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
 		return nil, err
@@ -562,9 +725,13 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	live.SnapSize = size
 	live.PID = 0
 	delete(m.socket, mc.ID)
-	m.persist()
+	m.schedulePersist()
 	out := *live
 	m.mu.Unlock()
+
+	// snap.file + mem.file se acaban de crear; el walk que antes hacía List
+	// en cada llamada ya no los pillaría en frío.
+	m.touchDiskUsage(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("congelada en %d ms (%d MiB en disco)", elapsed, size>>20)})
@@ -603,7 +770,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := fc.New(sock)
+	c := fc.Get(sock)
 	if err := waitSocket(ctx, c); err != nil {
 		return nil, err
 	}
@@ -623,9 +790,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	live.ThawMS = elapsed
 	live.PID = pid
 	m.socket[mc.ID] = sock
-	m.persist()
+	m.schedulePersist()
 	out := *live
 	m.mu.Unlock()
+
+	// Thaw recarga el snapshot en una VM nueva: el overlay se copia del snapshot
+	// y la cifra puede cambiar levemente. Refrescar el contador.
+	m.touchDiskUsage(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("descongelada en %d ms", elapsed)})
@@ -641,7 +812,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.byID[mc.ID].Labels = api.MergeLabels(m.byID[mc.ID].Labels, labels)
-	m.persist()
+	m.schedulePersist()
 	return nil
 }
 
@@ -661,7 +832,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	live.State = api.StateStopped
 	live.PID = 0
 	delete(m.socket, mc.ID)
-	m.persist()
+	m.schedulePersist()
 	out := *live
 	m.mu.Unlock()
 
@@ -686,7 +857,7 @@ func (m *Manager) Remove(ref string) error {
 	m.mu.Lock()
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
-	m.persist()
+	m.schedulePersist()
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "eliminada"})
 	return nil
@@ -699,7 +870,30 @@ func (m *Manager) kill(id string) {
 	if mc == nil || mc.PID == 0 {
 		return
 	}
+	// Escalado TERM→KILL: dar un instante al proceso para terminar limpio
+	// (cerrar el socket del invitado, volcar buffers) antes de forzar la
+	// salida. Si ya está zombie o el TERM no hace efecto, KILL es inmediato.
+	_ = syscall.Kill(mc.PID, syscall.SIGTERM)
+	if procGone(mc.PID, 500*time.Millisecond) {
+		return
+	}
 	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
+}
+
+// procGone sondea si el proceso ya no existe. kill(pid, 0) devuelve ESRCH
+// cuando el PID está libre; cualquier otro error (EPERM, etc.) se interpreta
+// como "sigue vivo" para no quedarnos cortos.
+func procGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := syscall.Kill(pid, 0); err != nil && errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (m *Manager) fail(mc *api.Machine, err error) {
@@ -709,7 +903,7 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	m.mu.Lock()
 	mc.State = api.StateFailed
 	mc.LastErr = err.Error()
-	m.persist()
+	m.schedulePersist()
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name, Message: err.Error()})
 }

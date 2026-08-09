@@ -45,7 +45,7 @@ func (m *Manager) reconcile() {
 			m.releaseCPU(mc.ID)
 		}
 	}
-	m.persist()
+	m.schedulePersist()
 
 	// Cgroups de máquinas que ya no corren.
 	liveCg := make(map[string]bool)
@@ -140,7 +140,7 @@ func (m *Manager) sweep() {
 		died = append(died, mc)
 	}
 	if len(died) > 0 {
-		m.persist()
+		m.schedulePersist()
 	}
 	m.mu.Unlock()
 

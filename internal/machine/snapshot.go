@@ -72,7 +72,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 
 	ownOverlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
 
-	c := fc.New(sock)
+	c := fc.Get(sock)
 	if err := c.Pause(ctx); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
@@ -166,7 +166,8 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 		if err != nil {
 			continue
 		}
-		s.DiskBytes = diskUsage(m.snapDir(e.Name()))
+		// DiskBytes se lee de meta.json — se calculó al hacer Commit().
+		// Recalcularlo en cada Snapshots() era un filepath.WalkDir por snapshot.
 		s.Instances = live[e.Name()]
 		out = append(out, s)
 	}
@@ -294,7 +295,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
-	m.persist()
+	m.schedulePersist()
 	m.mu.Unlock()
 
 	sock := filepath.Join(dir, "fc.sock")
@@ -305,7 +306,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		m.fail(mc, err)
 		return nil, err
 	}
-	c := fc.New(sock)
+	c := fc.Get(sock)
 	if err := waitSocket(ctx, c); err != nil {
 		m.fail(mc, err)
 		return nil, err
@@ -347,7 +348,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc.StartedAt = &now
 	mc.ThawMS = elapsed
 	m.socket[id] = sock
-	m.persist()
+	m.schedulePersist()
 	out := *mc
 	m.mu.Unlock()
 
