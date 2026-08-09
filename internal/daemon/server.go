@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/exec"
 	"os/user"
@@ -72,6 +73,28 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
 	mux.HandleFunc("GET /events", s.handleEvents)
+
+	// pprof va por el mismo socket Unix. El socket tiene chmod 0660 y se cede
+	// al usuario de SSH o al indicado por -socket-user: quien ya tiene acceso
+	// al socket puede correr comandos como root en el host (de hecho el CLI
+	// lo usa para arrancar microVMs con KVM). pprof no añade superficie nueva:
+	// es el mismo nivel de confianza. El endpoint está pensado para diagnóstico
+	// temporal: cuando se termina, se reinicia el daemon sin /debug/pprof.
+	//
+	// Go 1.22+ rechaza mezclar mux.HandleFunc restringido por método con mux.Handle
+	// sin restricción sobre rutas que se solapan ("pattern A conflicts with pattern B").
+	// Por eso registramos TODO sin método, y dejamos que pprof.Handler decida.
+	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	return mux
 }
 

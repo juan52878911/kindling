@@ -247,6 +247,7 @@ func cmdGateway(args []string) error {
 	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
 	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado)")
 	memory := fs.String("memory", "", "servicio MCP donde recordar qué herramienta resolvió cada petición")
+	pprof := fs.Bool("pprof", false, "expone /debug/pprof en el puerto del gateway — solo para diagnóstico temporal")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -275,6 +276,7 @@ func cmdGateway(args []string) error {
 		memSvc = cfg.Memory.Service
 	}
 	gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
+	gw.PprofEnabled = *pprof
 	go gw.Reap(ctx)
 	if *ephemeral {
 		go gw.PrewarmAll(ctx)
@@ -301,6 +303,9 @@ func cmdGateway(args []string) error {
 	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
 	fmt.Printf("  inventario:   http://%s/services\n", *listen)
 	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+	if *pprof {
+		fmt.Printf("  pprof:        ACTIVO en http://%s/debug/pprof/ — apagar en cuanto termine el diagnóstico\n", *listen)
+	}
 	if memSvc != "" {
 		fmt.Printf("  memoria:      activa sobre %q — ordena las búsquedas por lo que ya funcionó\n", memSvc)
 	}
