@@ -64,8 +64,11 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 			out = append(out, n)
 		}
 	}
-	// Los servidores externos enlazados son servicios de pleno derecho: el
-	// modelo no tiene por qué saber cuáles corren en microVM y cuáles no.
+	// Los servidores externos enlazados entran en la lista unificada: así una
+	// memoria registrada como enlace aparece al lado de un filesystem de microVM,
+	// y el modelo descubre todo con una sola búsqueda. El catálogo marca luego
+	// cuáles son VMs y cuáles no; sin esa pista, el modelo llama a engram.*
+	// esperando una microVM que no existe.
 	for _, l := range c.gw.links(ctx) {
 		if n := l.Service(); !seen[n] {
 			seen[n] = true
@@ -74,6 +77,21 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// externalSet devuelve el conjunto de servicios servidos por un enlace externo.
+// Complementa a services(): la lista plana no dice cuál corre en microVM y cuál
+// no, y el agregador necesita esa distinción para etiquetar las instrucciones.
+func (c *catalog) externalSet(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	for _, l := range c.gw.links(ctx) {
+		n := l.Service()
+		if n == "" {
+			n = l.Name
+		}
+		out[n] = true
+	}
+	return out
 }
 
 // toolsOf devuelve las herramientas de un servicio.

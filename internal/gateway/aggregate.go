@@ -176,6 +176,7 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	b.WriteString("Herramientas disponibles, agrupadas por servicio:\n\n")
 
 	tools, _ := a.cat.all(ctx, s.services)
+	external := a.cat.externalSet(ctx)
 	bySvc := map[string][]string{}
 	var order []string
 	for _, t := range tools {
@@ -186,8 +187,11 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	}
 	for _, svc := range order {
 		mark := ""
+		if external[svc] {
+			mark = " (externo)"
+		}
 		if a.ephemeral && a.isStateful(ctx, svc) {
-			mark = " [recuerda entre llamadas]"
+			mark += " [recuerda entre llamadas]"
 		}
 		fmt.Fprintf(&b, "%s%s: %s\n", svc, mark, strings.Join(bySvc[svc], ", "))
 	}
@@ -195,6 +199,17 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	b.WriteString("\nLlámalas con call_tool y el nombre completo servicio.herramienta " +
 		"(p. ej. filesystem.read_text_file). Si no conoces sus argumentos, pide primero " +
 		"describe_tool. find_tools sirve para buscar por palabras clave.")
+
+	// Aviso explícito para los servidores externos: mezclarlos en una misma lista
+	// con los snapshots sin marcar hacía creer al modelo que `/mcp/engram` o
+	// `engram.*` iban a levantar una microVM, y al fallar devolvía un
+	// "no hay snapshot" que no le decía nada.
+	if len(external) > 0 {
+		b.WriteString("\n\nLos servicios marcados como (externo) no corren en una microVM: " +
+			"viven donde su dueño los aloja y kindling solo los enruta. Se llaman igual " +
+			"que los demás, con `call_tool servicio.herramienta`, o directamente a su " +
+			"endpoint `/mcp/<servicio>`.")
+	}
 
 	if a.ephemeral {
 		b.WriteString("\n\nCada llamada corre en una máquina aislada que se destruye al " +
