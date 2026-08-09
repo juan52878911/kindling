@@ -281,7 +281,18 @@ func cmdGateway(args []string) error {
 	}
 	defer gw.Drain(context.Background())
 
-	srv := &http.Server{Addr: *listen, Handler: gw.Handler()}
+	srv := &http.Server{
+		Addr:    *listen,
+		Handler: gw.Handler(),
+		// Mismas razones que en el daemon: gateway es la única superficie
+		// que escucha en TCP, y un cliente que no termina el header
+		// mantiene goroutine + FD indefinidamente. /mcp/{svc} puede ser
+		// streaming (SSE), así que ReadTimeout va holgado.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+	}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
 
 	// El gateway escucha en red; el daemon no. Por defecto solo en loopback:

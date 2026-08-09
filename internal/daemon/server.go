@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,12 @@ import (
 )
 
 const Version = "0.1.0"
+
+// guestClient reenvía peticiones al servidor dentro de la microVM. Es un
+// singleton a nivel de paquete para que http.Client reúse sus conexiones
+// entre llamadas al mismo invitado — recrearlo en cada request() obligaba a
+// hacer un handshake TCP nuevo con cada tools/call.
+var guestClient = &http.Client{Timeout: 60 * time.Second}
 
 type Server struct {
 	socket     string
@@ -101,12 +108,25 @@ func (s *Server) Listen(ctx context.Context) error {
 	// peticiones a la nada.
 	s.mgr.Watch(ctx, 10*time.Second)
 
-	srv := &http.Server{Handler: s.routes()}
+	srv := &http.Server{
+		Handler: s.routes(),
+		// Sin timeouts, un cliente que abre la conexión y nunca termina
+		// el header mantiene una goroutine y un FD indefinidamente. El
+		// daemon controla root: este es el tipo de superficie que no
+		// debe existir.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+	}
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sc)
+		// Flush final del estado antes de borrar el socket: si el daemon se
+		// reinicia justo después, queremos que vea las últimas máquinas.
+		s.mgr.Close()
 		_ = os.Remove(s.socket)
 	}()
 
@@ -171,20 +191,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Machines: s.mgr.Count(),
 	}
 	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
-		if line, _, _ := bytesCut(out, '\n'); len(line) > 0 {
+		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
 			info.Firecrack = string(line)
 		}
 	}
 	writeJSON(w, http.StatusOK, info)
-}
-
-func bytesCut(b []byte, sep byte) ([]byte, []byte, bool) {
-	for i, c := range b {
-		if c == sep {
-			return b[:i], b[i+1:], true
-		}
-	}
-	return b, nil, false
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +458,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		greq.Header.Set(k, v)
 	}
 
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(greq)
+	resp, err := guestClient.Do(greq)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err)
 		return
