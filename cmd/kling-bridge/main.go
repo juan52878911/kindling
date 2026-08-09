@@ -31,8 +31,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -70,9 +72,21 @@ Opciones:
 		maxSessions: *maxSessions,
 		sessions:    map[string]*session{},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go b.reapIdle(ctx)
+	// SIGTERM y SIGINT cancelan el ctx. reapIdle lo observa para soltar el
+	// ticker, y la goroutine de abajo lo usa para arrancar el shutdown limpio
+	// del servidor HTTP. Sin esto, ListenAndServe bloquea hasta que algo mate
+	// el proceso (kill -9), reapIdle nunca recibe el ctx.Done(), y todas las
+	// sesiones activas dejan sus procesos hijo huérfanos hasta que el kernel
+	// los recoge al morírseles el PPID.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	var bg sync.WaitGroup
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		b.reapIdle(ctx)
+	}()
 
 	mux := http.NewServeMux()
 	// El mismo manejador en / y en /mcp: distintos clientes asumen distinta ruta
@@ -88,10 +102,37 @@ Opciones:
 	// posteriores).
 	mux.HandleFunc("/reset", b.handleReset)
 
-	log.Printf("kling-bridge escuchando en %s -> %s", *listen, strings.Join(argv, " "))
-	if err := http.ListenAndServe(*listen, mux); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	// Shutdown en cadena: al recibir la señal, paramos de aceptar conexiones
+	// y esperamos a los handlers en vuelo (incluido el SSE de handleGet, que
+	// termina cuando r.Context() se cancela). Después cerramos TODAS las
+	// sesiones: aunque reapIdle ya recoge las inactivas, las que aún tienen
+	// un cliente conectado se quedan con su proceso hijo vivo si no las
+	// matamos nosotros.
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+		b.closeAll()
+	}()
+
+	log.Printf("kling-bridge escuchando en %s -> %s", *listen, strings.Join(argv, " "))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("listen: %v", err)
+	}
+
+	// Esperar a que reapIdle termine (sale por ctx.Done). Sin esto, main
+	// podría retornar antes de que la goroutine soltase el ticker y cerrase
+	// cualquier sesión que estuviera reapeando.
+	bg.Wait()
 }
 
 type bridge struct {
@@ -114,12 +155,29 @@ type session struct {
 	pending map[string]chan json.RawMessage // id JSON-RPC -> quien espera
 	notes   chan json.RawMessage            // mensajes que el servidor inicia
 	closed  bool
+	done    chan struct{} // se cierra al cerrar la sesión; despierta a los request()
 }
 
+// idBufPool reaprovecha el buffer de 16 bytes de newID. Cada sesión del
+// puente aloca uno; el pool evita que un patrón de conexión/desconexión
+// repetido presione al GC.
+var idBufPool = sync.Pool{New: func() any { b := make([]byte, 16); return &b }}
+
+// respChPool reaprovecha los canales de respuesta de cada request JSON-RPC.
+// Cada llamada aloca uno nuevo: con muchos agentes concurrentes, eso es GC
+// pressure gratis. El canal se devuelve al pool al consumir la respuesta, al
+// cancelar el contexto, al agotar el timeout o al cerrar la sesión. Nunca
+// se cierra: la siguiente vez que se saque del pool se drena cualquier valor
+// residual de un receptor que se fue antes de tiempo.
+var respChPool = sync.Pool{New: func() any { return make(chan json.RawMessage, 1) }}
+
 func newID() string {
-	b := make([]byte, 16)
+	bp := idBufPool.Get().(*[]byte)
+	b := (*bp)[:16]
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	s := hex.EncodeToString(b)
+	idBufPool.Put(bp)
+	return s
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -320,6 +378,7 @@ func (b *bridge) spawn() (*session, error) {
 		id: newID(), cmd: cmd, stdin: stdin, lastUse: time.Now(),
 		pending: map[string]chan json.RawMessage{},
 		notes:   make(chan json.RawMessage, 32),
+		done:    make(chan struct{}),
 	}
 	go s.readLoop(stdout)
 	log.Printf("sesión %s: servidor MCP arrancado (pid %d)", s.id[:8], cmd.Process.Pid)
@@ -362,7 +421,13 @@ func (s *session) readLoop(stdout io.Reader) {
 		delete(s.pending, string(probe.ID))
 		s.mu.Unlock()
 		if ok {
-			ch <- raw
+			// No bloqueante: si el receptor ya renunció (ctx, timeout o sesión
+			// cerrada) el canal está lleno o huérfano, y la respuesta se
+			// descarta antes de parar el readLoop.
+			select {
+			case ch <- raw:
+			default:
+			}
 		}
 	}
 	s.close()
@@ -382,11 +447,18 @@ func (s *session) send(msg []byte) error {
 
 // request envía un mensaje y espera la respuesta con el mismo id JSON-RPC.
 func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawMessage, error) {
-	ch := make(chan json.RawMessage, 1)
+	ch := respChPool.Get().(chan json.RawMessage)
+	// Drenar por si trae un valor de un uso anterior (el receptor se fue
+	// después de que el readLoop escribiera pero antes de consumir).
+	select {
+	case <-ch:
+	default:
+	}
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		respChPool.Put(ch)
 		return nil, fmt.Errorf("la sesión está cerrada")
 	}
 	s.pending[id] = ch
@@ -396,21 +468,39 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
+		respChPool.Put(ch)
 		return nil, err
 	}
 
 	select {
 	case resp := <-ch:
+		respChPool.Put(ch)
 		return resp, nil
+	case <-s.done:
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+		respChPool.Put(ch)
+		return nil, fmt.Errorf("la sesión está cerrada")
 	case <-ctx.Done():
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
+		select {
+		case <-ch:
+		default:
+		}
+		respChPool.Put(ch)
 		return nil, ctx.Err()
 	case <-time.After(120 * time.Second):
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
+		select {
+		case <-ch:
+		default:
+		}
+		respChPool.Put(ch)
 		return nil, fmt.Errorf("el servidor MCP no respondió al mensaje %s", id)
 	}
 }
@@ -426,17 +516,40 @@ func (s *session) close() {
 	s.pending = map[string]chan json.RawMessage{}
 	s.mu.Unlock()
 
-	// Nadie debe quedarse esperando una respuesta que ya no va a llegar.
-	for _, ch := range pending {
-		close(ch)
-	}
+	// Despierta a los request() bloqueados para que devuelvan sus canales al
+	// pool. NO cerramos los canales de pending: cerrarlos impediría reusarlos
+	// en el respChPool, y el readLoop no va a escribir en ellos porque ya
+	// no están en el mapa.
+	close(s.done)
 	close(s.notes)
 	_ = s.stdin.Close()
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
 	_ = s.cmd.Wait()
+	_ = pending
 	log.Printf("sesión %s: cerrada", s.id[:8])
+}
+
+// closeAll cierra TODAS las sesiones vivas. Se llama tras srv.Shutdown, cuando
+// ya no quedan handlers en vuelo: cada sesión es un proceso del servidor MCP
+// ejecutándose dentro de la microVM, y dejarlo vivo después de que el bridge
+// muere es peor que no haberlas abierto.
+func (b *bridge) closeAll() {
+	b.mu.Lock()
+	dead := make([]*session, 0, len(b.sessions))
+	for _, s := range b.sessions {
+		dead = append(dead, s)
+	}
+	b.sessions = map[string]*session{}
+	b.mu.Unlock()
+
+	for _, s := range dead {
+		s.close()
+	}
+	if len(dead) > 0 {
+		log.Printf("bridge: %d sesión(es) cerrada(s) al parar", len(dead))
+	}
 }
 
 // reapIdle cierra las sesiones abandonadas. Cada una es un proceso vivo dentro de

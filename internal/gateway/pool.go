@@ -33,6 +33,14 @@ type pool struct {
 	ready map[string][]*warmVM // servicio -> instancias listas
 	// filling evita lanzar veinte reposiciones simultáneas del mismo servicio.
 	filling map[string]bool
+	// wg cuenta las goroutines de fill en vuelo. drain() espera a que todas
+	// salgan antes de vaciar ready, para no dejar huérfanas a las VMs que
+	// estén a medio crear cuando el gateway se cierra.
+	wg sync.WaitGroup
+
+	// warmer restaura una VM. Es un campo función (no un método) para que los
+	// tests puedan inyectar un doble sin necesidad de un mock del API client.
+	warmer func(ctx context.Context, service, snapshot string) (*warmVM, error)
 }
 
 // warmVM es una microVM restaurada y con su sesión MCP ya abierta.
@@ -44,11 +52,15 @@ type warmVM struct {
 }
 
 func newPool(gw *Gateway, size int) *pool {
-	return &pool{
+	p := &pool{
 		gw: gw, size: size,
 		ready:   map[string][]*warmVM{},
 		filling: map[string]bool{},
 	}
+	// Enlazamos el warmer al método por defecto. Se hace tras construir el
+	// pool para que el campo apunte al receptor correcto (method value).
+	p.warmer = p.warm
+	return p
 }
 
 // take entrega una instancia lista, o nil si el fondo está vacío.
@@ -70,6 +82,14 @@ func (p *pool) take(service string) *warmVM {
 }
 
 // fill repone el fondo de un servicio en segundo plano.
+//
+// Si el ctx se cancela a mitad de un warm, la goroutine sale en la siguiente
+// iteración: el check de ctx.Err() al principio del bucle es la primera línea
+// de defensa (corta el caso obvio), y warm() también lo respeta vía los
+// contextos de HTTP/Dial que pasan al daemon. Lo que faltaba era poder
+// ESPERAR a que esa goroutine saliera desde drain(): sin el WaitGroup, drain
+// podía correr mientras un warm creaba una VM y dejarla huérfana (no estaba
+// en ready cuando drain hizo swap, ni fue removida).
 func (p *pool) fill(ctx context.Context, service, snapshot string) {
 	p.mu.Lock()
 	if p.filling[service] || len(p.ready[service]) >= p.size {
@@ -80,14 +100,20 @@ func (p *pool) fill(ctx context.Context, service, snapshot string) {
 	p.filling[service] = true
 	p.mu.Unlock()
 
+	p.wg.Add(1)
 	go func() {
+		defer p.wg.Done()
 		defer func() {
 			p.mu.Lock()
 			p.filling[service] = false
 			p.mu.Unlock()
 		}()
 		for i := 0; i < missing; i++ {
-			vm, err := p.warm(ctx, service, snapshot)
+			if err := ctx.Err(); err != nil {
+				log.Printf("fondo %s: paro de pre-calentar: %v", service, err)
+				return
+			}
+			vm, err := p.warmer(ctx, service, snapshot)
 			if err != nil {
 				log.Printf("fondo %s: no pude pre-calentar: %v", service, err)
 				return
@@ -130,7 +156,15 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 
 // drain destruye lo que quede en el fondo. Se llama al parar el gateway: dejar
 // microVMs huérfanas sería peor que no haber pre-calentado nada.
+//
+// Antes de vaciar ready se espera a que TODAS las goroutines de fill en vuelo
+// terminen. Si un warm está a punto de añadir una VM cuando drain hace el swap
+// de ready, esa VM acaba en una cola que ya nadie va a procesar: el daemon la
+// mantendría viva hasta su TTL (10 min) sin que el gateway pueda pedir su
+// Remove. wg.Wait() cierra esa ventana.
 func (p *pool) drain(ctx context.Context) {
+	p.wg.Wait()
+
 	p.mu.Lock()
 	all := p.ready
 	p.ready = map[string][]*warmVM{}
