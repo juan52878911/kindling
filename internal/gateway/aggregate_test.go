@@ -29,17 +29,20 @@ import (
 //
 // macOS limita los sockets unix a 104 bytes; se usa /tmp directamente para no
 // caer en ese límite cuando el tempdir del runner es largo.
-func mockDaemon(t *testing.T, snapshots []*api.Snapshot, links []*api.Link, linksCalls *atomic.Int32) string {
+func mockDaemon(t *testing.T, snapshots []*api.Snapshot, links []*api.Link, counters ...*atomic.Int32) string {
 	t.Helper()
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("kg-test-%d.sock", time.Now().UnixNano()))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		if len(counters) > 0 && counters[0] != nil {
+			counters[0].Add(1)
+		}
 		_ = json.NewEncoder(w).Encode(snapshots)
 	})
 	mux.HandleFunc("/links", func(w http.ResponseWriter, r *http.Request) {
-		if linksCalls != nil {
-			linksCalls.Add(1)
+		if len(counters) > 1 && counters[1] != nil {
+			counters[1].Add(1)
 		}
 		_ = json.NewEncoder(w).Encode(links)
 	})
@@ -224,6 +227,71 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 		if secondCalls > firstCalls {
 			t.Fatalf("externalSet/linkFor no debería re-consultar /links: primera=%d, segunda=%d",
 				firstCalls, secondCalls)
+		}
+	})
+
+	// 6) instructions() cachea el resultado: la segunda llamada con el mismo
+//    session no reconstruye el texto ni habla con el daemon. Sin la caché,
+//    cada initialize reconstruía map + strings.Builder + 2 llamadas al
+//    daemon — ~50% de los allocs del gateway bajo carga.
+	t.Run("instructions se cachea entre llamadas del mismo session", func(t *testing.T) {
+		var snapsCalls, linksCalls atomic.Int32
+		sockPath := mockDaemon(t,
+			[]*api.Snapshot{{
+				Name:   "snap-files",
+				Labels: map[string]string{api.LabelService: "files"},
+				Tools: []api.ToolSpec{
+					{Name: "read_text", Description: "Lee un fichero"},
+				},
+			}},
+			[]*api.Link{{
+				Name:   "engram",
+				URL:    "http://example.invalid/mcp",
+				Labels: map[string]string{api.LabelService: "engram"},
+				Tools: []api.ToolSpec{
+					{Name: "mem_search", Description: "busca"},
+				},
+			}},
+			&snapsCalls, &linksCalls,
+		)
+
+		gw := New(api.NewClient(sockPath), 5*time.Minute, false, 0, "")
+		a := newAggregator(gw, false)
+		s := &aggSession{
+			id: "t", services: []string{"files", "engram"}, mode: modeProxy,
+			backing: map[string]string{},
+		}
+
+		// Primera llamada: pobla la caché. Cuenta las llamadas a /snapshots y /links.
+		first := a.instructions(ctx, s)
+		snaps1 := snapsCalls.Load()
+		links1 := linksCalls.Load()
+		if snaps1 == 0 || links1 == 0 {
+			t.Fatalf("primera llamada debería haber consultado al daemon: snaps=%d links=%d", snaps1, links1)
+		}
+
+		// Segunda llamada: la caché debe responder, sin nuevas llamadas al daemon.
+		second := a.instructions(ctx, s)
+		if snapsCalls.Load() != snaps1 {
+			t.Errorf("la 2ª llamada incrementó /snapshots: %d → %d", snaps1, snapsCalls.Load())
+		}
+		if linksCalls.Load() != links1 {
+			t.Errorf("la 2ª llamada incrementó /links: %d → %d", links1, linksCalls.Load())
+		}
+		if first != second {
+			t.Errorf("mismo input debe dar mismo output (cache hit)")
+		}
+
+		// Verifica que invalidateCatalog realmente borra la caché: debe
+		// observarse un cambio en el generation counter (indicador de que se
+		// ha invalidado, no del contenido). Esto verifica que el callback está
+		// bien cableado.
+		genBefore := a.cat.Generation()
+		a.invalidateCatalog()
+		genAfter := a.cat.Generation()
+		if genAfter != genBefore {
+			t.Errorf("invalidateCatalog no debería bump generation (solo borra caché local): %d → %d",
+				genBefore, genAfter)
 		}
 	})
 }

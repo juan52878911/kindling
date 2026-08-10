@@ -2,6 +2,7 @@ package machine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -126,5 +127,57 @@ func BenchmarkPersistSync(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		m.schedulePersist()
+	}
+}
+
+// BenchmarkRunFailFast mide la latencia del camino de error rápido de Run:
+// imagen inexistente. Sin KVM ni firecracker, aborta en os.Stat y devuelve
+// el error al caller. Es la métrica que ve un cliente cuando pide algo
+// imposible: cuánto tarda el daemon en decir "no puedo".
+func BenchmarkRunFailFast(b *testing.B) {
+	root := b.TempDir()
+	m := &Manager{
+		root:      root,
+		byID:      make(map[string]*api.Machine),
+		socket:    make(map[string]string),
+		persistCh: make(chan struct{}, 1),
+		quit:      make(chan struct{}),
+		bus:       events.New(),
+	}
+	m.persistWG.Add(1)
+	go m.persistLoop()
+	defer m.Close()
+
+	ctx := context.Background()
+	req := api.RunRequest{Image: "no-existe-esta-imagen"}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := m.Run(ctx, req)
+		if err == nil {
+			b.Fatalf("esperaba error de imagen inexistente, got nil")
+		}
+	}
+}
+
+// TestTouchDiskUsageCache cubre la API mínima del helper: no entra en pánico
+// cuando el dir no existe y devuelve 0 (lo mismo que el cálculo real con
+// filepath.WalkDir sobre un dir vacío).
+func TestTouchDiskUsageCache(t *testing.T) {
+	root := t.TempDir()
+	m := &Manager{
+		root:      root,
+		byID:      make(map[string]*api.Machine),
+		socket:    make(map[string]string),
+		persistCh: make(chan struct{}, 1),
+		quit:      make(chan struct{}),
+		bus:       events.New(),
+	}
+	defer m.Close()
+
+	m.byID["x"] = &api.Machine{ID: "x", Name: "test", Image: "default",
+		State: api.StateRunning, CreatedAt: time.Now()}
+	if got := m.touchDiskUsage("x"); got != 0 {
+		t.Fatalf("dir sin contenido debe ser 0, got %d", got)
 	}
 }

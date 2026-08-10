@@ -53,13 +53,22 @@ type catalog struct {
 	gw  *Gateway
 	ttl time.Duration
 
-	// RWMutex: el 99% de las llamadas son cache hits y se sirven con RLock.
+	// RWMutex: el 99% de los accesos son cache hits y se sirven con RLock.
 	// Antes era un Mutex liso, lo que serializaba lecturas concurrentes de
 	// servicios distintos (un find_tools sobre 20 servicios paralelizados
 	// acababa en convoy).
 	mu      sync.RWMutex
 	tools   map[string][]Tool // servicio -> herramientas
 	fetched map[string]time.Time
+
+	// generation se incrementa cada vez que c.tools cambia. El agregador
+	// lo observa para invalidar su caché de instructions sin acoplamiento
+	// directo entre paquetes.
+	generation atomic.Uint64
+
+	// onChange se invoca tras cada actualización de c.tools. Es opcional;
+	// el agregador lo usa para invalidar su caché de instrucciones.
+	onChange func()
 }
 
 func newCatalog(gw *Gateway, ttl time.Duration) *catalog {
@@ -69,6 +78,10 @@ func newCatalog(gw *Gateway, ttl time.Duration) *catalog {
 		fetched: map[string]time.Time{},
 	}
 }
+
+// SetOnChange registra un callback que se invoca tras cada actualización del
+// catálogo. Lo usa el agregador para invalidar su caché de instructions.
+func (c *catalog) SetOnChange(fn func()) { c.onChange = fn }
 
 // services devuelve los servicios disponibles: microVMs y servidores externos.
 func (c *catalog) services(ctx context.Context) ([]string, error) {
@@ -152,18 +165,12 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 		for _, t := range l.Tools {
 			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
-		c.mu.Lock()
-		c.tools[service] = out
-		c.fetched[service] = time.Now()
-		c.mu.Unlock()
+		c.updateTools(service, out, false) // changed=detectado por toolListsEqual
 		return out, nil
 	}
 
 	if tools, ok := c.fromSnapshot(ctx, service); ok {
-		c.mu.Lock()
-		c.tools[service] = tools
-		c.fetched[service] = time.Now()
-		c.mu.Unlock()
+		c.updateTools(service, tools, false)
 		return tools, nil
 	}
 
@@ -171,13 +178,49 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.updateTools(service, tools, false)
+	return tools, nil
+}
 
+// updateTools persiste la lista de herramientas para un servicio. changed se
+// pone a true cuando los datos son distintos de lo que ya estaba en caché
+// (mismo número de tools y mismas descripciones/nombres); un false evita
+// disparar el callback onChange en refrescos por TTL que no aportan nada
+// nuevo, lo que mantendría la caché de instructions del agregador
+// perpetuamente invalidada.
+func (c *catalog) updateTools(service string, tools []Tool, changed bool) {
 	c.mu.Lock()
+	prev := c.tools[service]
 	c.tools[service] = tools
 	c.fetched[service] = time.Now()
 	c.mu.Unlock()
-	return tools, nil
+	if !changed && toolListsEqual(prev, tools) {
+		return
+	}
+	c.generation.Add(1)
+	if c.onChange != nil {
+		c.onChange()
+	}
 }
+
+// toolListsEqual compara dos slice de Tools por nombre y descripción. Es
+// deliberadamente laxo (no compara Schema): para invalidar la caché de
+// instructions basta saber si el inventario visible al modelo cambió.
+func toolListsEqual(a, b []Tool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Description != b[i].Description {
+			return false
+		}
+	}
+	return true
+}
+
+// Generation devuelve el contador de cambios del catálogo. El agregador lo
+// usa para invalidar su caché cuando el catálogo o los enlaces cambian.
+func (c *catalog) Generation() uint64 { return c.generation.Load() }
 
 // fromSnapshot lee el catálogo que se capturó al importar el servicio.
 func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, bool) {

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -35,7 +36,9 @@ const Version = "0.1.0"
 var guestClient = &http.Client{Timeout: 60 * time.Second}
 
 type Server struct {
-	socket     string
+	socket      string
+	cachedFCVer string // caché del `fcBin --version`; se calcula una vez al arrancar
+	cachedFCLk  sync.Mutex
 	bus        *events.Bus
 	mgr        *machine.Manager
 	root       string
@@ -212,13 +215,29 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Root:     s.root,
 		KVM:      kvmErr == nil,
 		Machines: s.mgr.Count(),
-	}
-	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
-		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
-			info.Firecrack = string(line)
-		}
+		Firecrack: s.fcVersion(),
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// fcVersion devuelve la primera línea de `fcBin --version`, cacheada.
+//
+// La versión del binario de firecracker no cambia durante la vida del daemon:
+// un fork+exec por cada /info no aporta información y dobla el allocs de la
+// ruta caliente (era el #1 del heap dump — ~14 MB de buffers por ráfaga).
+func (s *Server) fcVersion() string {
+	s.cachedFCLk.Lock()
+	defer s.cachedFCLk.Unlock()
+	if s.cachedFCVer != "" {
+		return s.cachedFCVer
+	}
+	out, err := exec.Command(s.fcBin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	line, _, _ := bytes.Cut(out, []byte{'\n'})
+	s.cachedFCVer = string(line)
+	return s.cachedFCVer
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

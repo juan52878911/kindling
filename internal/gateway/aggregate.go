@@ -52,8 +52,23 @@ type aggregator struct {
 	snapOf   map[string]string
 	stateful map[string]bool
 
+	// instructions cachea el texto de initialize agrupado por servicio.
+	// Se reconstruye cada vez que el catálogo o los enlaces cambian
+	// (invalidate() los borra), lo que sucede solo al importar un servicio
+	// o añadir un enlace: en operación estable el texto es estático.
+	instrMu      sync.RWMutex
+	instrCache   map[mode]string // modeProxy | modeExpand
+
 	// initLocks serializa la creación de sesión por servicio.
 	initLocks sync.Map // servicio -> *sync.Mutex
+}
+
+// invalidateCatalog borra la caché de instructions. Lo llama catalog.invalidate
+// cuando el catálogo o los enlaces cambian.
+func (a *aggregator) invalidateCatalog() {
+	a.instrMu.Lock()
+	a.instrCache = nil
+	a.instrMu.Unlock()
 }
 
 // serviceLock devuelve el candado de creación de sesión de un servicio.
@@ -77,11 +92,16 @@ type aggSession struct {
 }
 
 func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
-	return &aggregator{
+	a := &aggregator{
 		gw: gw, cat: newCatalog(gw, 10*time.Minute),
 		ephemeral: ephemeral, sessions: map[string]*aggSession{},
 		snapOf: map[string]string{}, stateful: map[string]bool{},
 	}
+	// Cuando el catálogo o los enlaces cambian, se borra la caché de
+	// instructions. Sin esto, un snapshot importado no se vería hasta el
+	// siguiente reinicio del gateway.
+	a.cat.SetOnChange(func() { a.invalidateCatalog() })
+	return a
 }
 
 // handleAggregate atiende el endpoint virtual /mcp/_all.
@@ -172,6 +192,18 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 		return "Herramientas de varios servidores MCP, con nombres servicio.herramienta."
 	}
 
+	// Caché: el texto solo cambia cuando el catálogo o los enlaces cambian,
+	// y eso sucede solo al importar/snapshot/link. En operación normal cada
+	// initialize del agregador recibía el mismo texto y reconstruía map +
+	// strings.Builder + 2 llamadas HTTP al daemon. Bajo concurrencia eso
+	// eran N allocs por initialize. La caché se invalida en invalidateCatalog.
+	a.instrMu.RLock()
+	if cached, ok := a.instrCache[s.mode]; ok {
+		a.instrMu.RUnlock()
+		return cached
+	}
+	a.instrMu.RUnlock()
+
 	var b strings.Builder
 	b.WriteString("Herramientas disponibles, agrupadas por servicio:\n\n")
 
@@ -216,7 +248,16 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 			"terminar, así que las herramientas marcadas como sin estado NO recuerdan nada " +
 			"entre llamadas.")
 	}
-	return b.String()
+	out := b.String()
+
+	a.instrMu.Lock()
+	if a.instrCache == nil {
+		a.instrCache = map[mode]string{}
+	}
+	a.instrCache[s.mode] = out
+	a.instrMu.Unlock()
+
+	return out
 }
 
 // ── modo proxy: cuatro meta-herramientas ──────────────────────────────────────
