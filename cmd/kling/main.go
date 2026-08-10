@@ -293,7 +293,15 @@ func cmdGateway(args []string) error {
 	if *ephemeral {
 		go gw.PrewarmAll(ctx)
 	}
-	defer gw.Drain(context.Background())
+	// Contexto propio y ACOTADO: no puede ser el del proceso, que ya está
+	// cancelado cuando llega el apagado (los Remove no se harían), ni uno sin
+	// límite, que dejaría a Ctrl-C esperando indefinidamente a un daemon que no
+	// responde. Retirar las pre-calentadas es deseable, no obligatorio.
+	defer func() {
+		dc, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		gw.Drain(dc)
+	}()
 
 	srv := &http.Server{
 		Addr:    *listen,
