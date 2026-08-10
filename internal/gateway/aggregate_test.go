@@ -21,11 +21,15 @@ import (
 // mínimo que la pasarela espera: /snapshots, /links y /machines (para que
 // ensure() no se queje si por error se la llama durante un test).
 //
+// linksCalls, si no es nil, se incrementa con cada petición a /links. Sirve
+// para que un test verifique que la pasarela evita esa llamada en un caso
+// concreto.
+//
 // Devuelve la ruta del socket, lista para api.NewClient.
 //
 // macOS limita los sockets unix a 104 bytes; se usa /tmp directamente para no
 // caer en ese límite cuando el tempdir del runner es largo.
-func mockDaemon(t *testing.T, snapshots []*api.Snapshot, links []*api.Link) string {
+func mockDaemon(t *testing.T, snapshots []*api.Snapshot, links []*api.Link, linksCalls *atomic.Int32) string {
 	t.Helper()
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("kg-test-%d.sock", time.Now().UnixNano()))
 
@@ -34,6 +38,9 @@ func mockDaemon(t *testing.T, snapshots []*api.Snapshot, links []*api.Link) stri
 		_ = json.NewEncoder(w).Encode(snapshots)
 	})
 	mux.HandleFunc("/links", func(w http.ResponseWriter, r *http.Request) {
+		if linksCalls != nil {
+			linksCalls.Add(1)
+		}
 		_ = json.NewEncoder(w).Encode(links)
 	})
 	mux.HandleFunc("/machines", func(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +95,7 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 				{Name: "mem_search", Description: "Busca en memoria"},
 			},
 		}},
+		nil,
 	)
 
 	gw := New(api.NewClient(sockPath), 5*time.Minute, false, 0, "")
@@ -171,6 +179,51 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 		}
 		if engramHits.Load() == 0 {
 			t.Errorf("la pasarela no reenvió la petición al servidor engram")
+		}
+	})
+
+	// 5) externalSet (y linkFor) evitan re-consultar /links cuando ya se sabe
+	//    que no hay enlaces: tras la primera llamada al agregador, el cache
+	//    queda vacío y linkEverSeen=true, y un segundo initialize no debe
+	//    volver a hablar con el daemon. Sin esta pista, un gateway sin
+	//    enlaces pagaría un round-trip a /links en cada initialize del
+	//    agregador, que es el camino caliente.
+	t.Run("externalSet no re-consulta /links cuando no hay enlaces", func(t *testing.T) {
+		var linksCalls atomic.Int32
+		sockPath := mockDaemon(t,
+			[]*api.Snapshot{{
+				Name:   "snap-files",
+				Labels: map[string]string{api.LabelService: "files"},
+				Tools: []api.ToolSpec{
+					{Name: "read_text", Description: "Lee un fichero"},
+				},
+			}},
+			[]*api.Link{}, // sin enlaces externos
+			&linksCalls,
+		)
+
+		gw := New(api.NewClient(sockPath), 5*time.Minute, false, 0, "")
+		a := newAggregator(gw, false)
+		s := &aggSession{
+			id: "t", services: []string{"files"}, mode: modeProxy,
+			backing: map[string]string{},
+		}
+
+		// Primer initialize: al menos 1 llamada (para enterarse de que no hay
+		// enlaces); el contenido exacto depende de qué funciones pasen por el
+		// camino. Lo que importa es el SIGUIENTE.
+		_ = a.instructions(ctx, s)
+		firstCalls := linksCalls.Load()
+		if firstCalls == 0 {
+			t.Fatalf("la primera vez debería consultar /links para confirmar que no hay enlaces")
+		}
+
+		// Segundo initialize: la optimización debe evitar nuevas llamadas.
+		_ = a.instructions(ctx, s)
+		secondCalls := linksCalls.Load()
+		if secondCalls > firstCalls {
+			t.Fatalf("externalSet/linkFor no debería re-consultar /links: primera=%d, segunda=%d",
+				firstCalls, secondCalls)
 		}
 	})
 }

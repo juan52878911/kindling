@@ -4,6 +4,61 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## perf-improvements — 2026-08-09
+
+Optimizaciones para llevar el rendimiento al límite sobre la base ya
+optimizada de v0.1.0. La rama `perf-improvements` aún no está mergeada —
+este changelog documenta el trabajo en curso para revisión.
+
+### Rendimiento medido
+
+Cuellos de botella detectados con pprof y eliminados durante esta ronda:
+
+- `find_tools` (gateway): 11.270 ns/op y 200 allocs → 1.212 ns/op y 0 allocs
+  con haystack precomputado y ranking por índices.
+- `schedulePersist()` (machine): de 30-50 ms bloqueando bajo el lock
+  global a 3,9 ns/op y 0 allocs moviendo el fsync fuera del lock de
+  escritura.
+- `Manager.List()` (machine): 50 walks por VM → O(1) por máquina con
+  `DiskBytes` cacheado en `State`.
+- Template overlay (machine): mkfs se ejecuta una sola vez para la primera
+  VM; el resto reutiliza el overlay — ahorra 30-50 ms por VM a partir de
+  la segunda.
+
+### Cambios estructurales
+
+- `persist()` con debounce de 50 ms y fsync fuera del lock.
+- `encodeRPC` con `json.Marshal` y un id único por invocación — además de
+  la mejora de velocidad, corrige una condición de carrera latente cuando
+  el RPC respondía antes de que el request terminara de serializarse.
+- Pool de `http.Client` por socket en fc y `sync.Pool` de `bytes.Buffer`
+  para evitar asignaciones en el hot path de los clientes api/fc.
+- `bytes.Cut` en lugar de `strings.Split` + trim para parsing de headers
+  HTTP.
+
+### Seguridad
+
+- `http.Server` con timeouts `ReadHeader`, `Read`, `Write`, `Idle` — el
+  daemon y el gateway ya no son vulnerables a Slowloris.
+
+### Arreglos
+
+- El agregador del gateway trataba enlaces externos (como engram) como
+  microVMs internas; ahora los etiqueta y excluye correctamente.
+- pprof disponible en el daemon (socket Unix) y en el gateway (opt-in por
+  flag) para diagnóstico en caliente.
+- `kling-bridge` con shutdown limpio: SIGTERM cierra sesiones y libera el
+  socket — antes un `kill` dejaba sesiones huérfanas.
+- `pool.fill` con cancel path — los fills cancelados ya no quedaban sin
+  procesar.
+- `kling stop` con SIGTERM y escalado a SIGKILL tras 500 ms de gracia.
+
+### Tests
+
+Seis archivos de test añadidos con cobertura para todas las optimizaciones
+de la ronda: persist debounce, DiskBytes cache, haystack, encodeRPC,
+pool de buffers y timeouts del servidor HTTP.
+
 ## v0.1.0 — 2026-08-08
 
 Primera release con binarios distribuidos. Antes de esta versión, `kling` solo

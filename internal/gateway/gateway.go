@@ -80,9 +80,15 @@ type Gateway struct {
 	mem         *memory                  // memoria de uso; nil si está desactivada
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
-	linkMu    sync.RWMutex
+	linkMu sync.RWMutex
 	linkCache []*api.Link
 	linkAt    time.Time
+	// linkEverSeen es true si alguna vez se observó al menos un enlace. Permite
+	// que externalSet devuelva un mapa vacío sin hablar con el daemon cuando
+	// el operador nunca ha registrado enlaces: en ese caso la consulta a /links
+	// es overhead gratis en cada initialize. Se escribe bajo linkMu.Lock(), así
+	// que un RLock posterior ve el cambio por la barrera del mutex.
+	linkEverSeen bool
 }
 
 type entry struct {
@@ -599,8 +605,18 @@ func newSessionID() string {
 
 // links devuelve los servidores externos registrados, cacheados brevemente: el
 // agregador los consulta en cada resolución de servicio.
+//
+// linkEverSeen pasa a true tras el primer fetch (haya o no enlaces). Si ya
+// pasó y el cache dice que NO hay enlaces, devolvemos cache sin re-fetchear:
+// sin esta pista, un gateway sin enlaces pagaría un round-trip a /links en
+// cada initialize del agregador, que es el camino caliente.
 func (g *Gateway) links(ctx context.Context) []*api.Link {
 	g.linkMu.RLock()
+	if g.linkEverSeen && len(g.linkCache) == 0 && time.Since(g.linkAt) < 30*time.Second {
+		out := g.linkCache
+		g.linkMu.RUnlock()
+		return out
+	}
 	if time.Since(g.linkAt) < 30*time.Second {
 		out := g.linkCache
 		g.linkMu.RUnlock()
@@ -614,12 +630,24 @@ func (g *Gateway) links(ctx context.Context) []*api.Link {
 	}
 	g.linkMu.Lock()
 	g.linkCache, g.linkAt = ls, time.Now()
+	g.linkEverSeen = true
 	g.linkMu.Unlock()
 	return ls
 }
 
 // linkFor busca el enlace que sirve a un servicio, o nil si lo sirve una microVM.
 func (g *Gateway) linkFor(ctx context.Context, service string) *api.Link {
+	// Si ya sabemos que no hay enlaces (cache vacío + visto alguna vez), no
+	// tiene sentido iterar. Mantiene también a linkFor coherente con la
+	// optimización de externalSet: cualquier path que vaya a iterar links
+	// paga cero round-trips al daemon cuando no hay nada que iterar.
+	g.linkMu.RLock()
+	empty := g.linkEverSeen && len(g.linkCache) == 0
+	g.linkMu.RUnlock()
+	if empty {
+		return nil
+	}
+
 	for _, l := range g.links(ctx) {
 		if l.Service() == service || l.Name == service {
 			return l

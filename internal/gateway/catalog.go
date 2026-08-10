@@ -106,7 +106,18 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 // externalSet devuelve el conjunto de servicios servidos por un enlace externo.
 // Complementa a services(): la lista plana no dice cuál corre en microVM y cuál
 // no, y el agregador necesita esa distinción para etiquetar las instrucciones.
+//
+// Si linkEverSeen es true y el cache dice que no hay enlaces, devolvemos mapa
+// vacío sin llamar a links(). Sin esta pista, un gateway sin enlaces pagaría
+// un round-trip a /links en cada initialize del agregador.
 func (c *catalog) externalSet(ctx context.Context) map[string]bool {
+	c.gw.linkMu.RLock()
+	empty := c.gw.linkEverSeen && len(c.gw.linkCache) == 0
+	c.gw.linkMu.RUnlock()
+	if empty {
+		return map[string]bool{}
+	}
+
 	out := map[string]bool{}
 	for _, l := range c.gw.links(ctx) {
 		n := l.Service()

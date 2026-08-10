@@ -128,6 +128,27 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   cualquier puerto y cualquier ruta de la máquina indicada. No es una escalada —quien llega
   al socket ya manda— pero conviene saberlo si algún día el socket se comparte.
 
+## Observabilidad — superficie que añade diagnóstico
+
+`/debug/pprof/` está disponible para perfilar el daemon y el gateway. La decisión sobre
+cómo se expone es asimétrica a propósito:
+
+- **Daemon (`kling daemon`)**: `pprof` siempre activo bajo el mismo socket Unix. El socket
+  tiene `chmod 0660` y se cede (`chown`) al usuario de SSH o al indicado por
+  `-socket-user`. Quien ya tiene acceso al socket puede ejecutar comandos como root en el
+  host (de hecho, eso es lo que hace el CLI al arrancar microVMs con KVM). `pprof` no
+  añade superficie nueva — es el mismo nivel de confianza.
+- **Gateway (`kling gateway`)**: `pprof` **opt-in** vía flag `-pprof`. El gateway escucha
+  en TCP, así que exponer `/debug/pprof/` por defecto regalaría un volcado de memoria y
+  stacks a quien pueda llegar al puerto. Con `-pprof` se asume que el operador sabe lo
+  que hace (lo recordará el banner al arrancar) y que el puerto está en loopback o detrás
+  de un proxy con auth.
+
+`/debug/pprof/heap` revela el contenido de variables en memoria: tokens del gateway,
+estado de máquinas, secretos en buffers. Es la razón de no exponerlo por defecto en el
+gateway, y la razón de NO activar `-pprof` en producción a menos que sea para diagnóstico
+temporal. Tras la sesión: reiniciar sin la flag.
+
 ## Ante un incidente
 
 Aislar sin destruir pruebas:
