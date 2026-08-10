@@ -247,6 +247,7 @@ func cmdGateway(args []string) error {
 	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
 	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado)")
 	memory := fs.String("memory", "", "servicio MCP donde recordar qué herramienta resolvió cada petición")
+	pprofOn := fs.Bool("pprof", false, "expone /debug/pprof; solo diagnóstico temporal y solo en loopback")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -255,12 +256,24 @@ func cmdGateway(args []string) error {
 	defer stop()
 
 	cfg := loadConfig()
+	addr := config.Or(*listen, cfg.Gateway.Listen, "127.0.0.1:8080")
+
+	// Los argumentos se validan ANTES de hablar con nadie: un flag mal puesto
+	// debe fallar al instante, no después de esperar a un daemon que quizá ni
+	// esté. El flag registra los perfiles, pero no los protege — si el gateway
+	// escucha fuera de loopback, activarlos regala volcados de goroutines y la
+	// línea de comandos a quien alcance el puerto, y deja que quien llame elija
+	// cuántos segundos de CPU consume /debug/pprof/profile.
+	if *pprofOn && !gateway.IsLoopback(addr) {
+		return fmt.Errorf("-pprof exige escuchar en loopback, y %q no lo es.\n"+
+			"Diagnostica por un túnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
+	}
+
 	c := api.NewClient(cfg.Host(*host))
 	if _, err := c.Info(ctx); err != nil {
 		return fmt.Errorf("no alcanzo el daemon: %w", err)
 	}
 
-	addr := config.Or(*listen, cfg.Gateway.Listen, "127.0.0.1:8080")
 	wait := *idle
 	if wait == 0 {
 		wait, _ = time.ParseDuration(cfg.Gateway.Idle)
@@ -275,6 +288,7 @@ func cmdGateway(args []string) error {
 		memSvc = cfg.Memory.Service
 	}
 	gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
+	gw.PprofEnabled = *pprofOn
 	go gw.Reap(ctx)
 	if *ephemeral {
 		go gw.PrewarmAll(ctx)
@@ -301,6 +315,9 @@ func cmdGateway(args []string) error {
 	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
 	fmt.Printf("  inventario:   http://%s/services\n", *listen)
 	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+	if *pprofOn {
+		fmt.Printf("  pprof:        ACTIVO en http://%s/debug/pprof/ — apágalo al terminar\n", *listen)
+	}
 	if memSvc != "" {
 		fmt.Printf("  memoria:      activa sobre %q — ordena las búsquedas por lo que ya funcionó\n", memSvc)
 	}

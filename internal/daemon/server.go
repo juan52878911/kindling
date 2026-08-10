@@ -119,15 +119,18 @@ func (s *Server) Listen(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 16,
 	}
+	// El apagado se ORDENA desde una goroutine pero se COMPLETA en el camino
+	// principal. Es la diferencia entre limpiar y creer que se limpió:
+	// srv.Shutdown hace que Serve retorne de inmediato, así que todo lo que se
+	// ponga detrás del Shutdown dentro de esta goroutine corre contra la salida
+	// del proceso y normalmente la pierde.
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sc)
-		// Flush final del estado antes de borrar el socket: si el daemon se
-		// reinicia justo después, queremos que vea las últimas máquinas.
-		s.mgr.Close()
-		_ = os.Remove(s.socket)
+		close(shutdownDone)
 	}()
 
 	if err := knet.Available(); err != nil {
@@ -146,6 +149,12 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+
+	// Serve retorna en cuanto se cierran los listeners, pero Shutdown sigue
+	// drenando las peticiones en vuelo. Esperarlo antes de tocar nada garantiza
+	// que ninguna petición cambie el estado después de la limpieza.
+	<-shutdownDone
+	_ = os.Remove(s.socket)
 	return nil
 }
 
