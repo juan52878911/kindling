@@ -10,7 +10,7 @@
 // gateway busca las herramientas. Desde fuera, cualquier servidor stdio parece
 // nativo de HTTP.
 //
-//	   gateway ──HTTP──> kling-bridge ──stdin/stdout──> servidor MCP
+//	gateway ──HTTP──> kling-bridge ──stdin/stdout──> servidor MCP
 //
 // SESIONES. MCP identifica conversaciones con la cabecera Mcp-Session-Id. Un
 // servidor stdio es de sesión única por naturaleza: su estado vive en el proceso.

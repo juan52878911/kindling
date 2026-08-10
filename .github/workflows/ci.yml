@@ -1,0 +1,54 @@
+# Comprobaciones en cada push. Separado de release.yml, que solo corre con tags.
+#
+# Existe porque el repo llegó a tener 1.300 líneas de test que ningún automatismo
+# ejecutaba: `make test` era vet + build, y el workflow de release ni eso. Los dos
+# peores fallos que se encontraron revisando la rama de rendimiento eran carreras
+# de datos — exactamente lo que `-race` habría cazado el mismo día.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: vet, fmt y test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up Go
+        uses: actions/setup-go@v5
+        with:
+          # La misma que declara go.mod, para no depender de que Go se descargue
+          # una toolchain por su cuenta.
+          go-version: '1.24'
+          cache: true
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "estos ficheros no están formateados:" >&2
+            echo "$out" >&2
+            gofmt -d $out >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race es el punto de todo esto: el daemon maneja microVMs desde varias
+      # goroutines y el puente reparte respuestas entre sesiones concurrentes.
+      - name: go test -race
+        run: go test -race ./...
+
+      # El daemon solo se compila para linux, pero el CLI se instala en macOS:
+      # que compile cruzado es parte del contrato.
+      - name: cross-compile
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/kling
+          GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling
+          GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-bridge

@@ -91,9 +91,15 @@ deploy: daemon
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
 
+## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
+##
+## `-race` no es opcional aquí: el daemon toca su estado desde varias goroutines
+## y el puente reparte respuestas entre sesiones concurrentes. Sin él, un build
+## limpio no dice nada sobre lo que de verdad rompe este proyecto.
 test:
+	gofmt -l . | tee /dev/stderr | (! read)
 	go vet ./...
-	go build -race -o /dev/null $(PKG)
+	go test -race ./...
 
 fmt:
 	gofmt -l -w .
