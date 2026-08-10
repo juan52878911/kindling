@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/transport"
 )
@@ -31,6 +32,21 @@ func NewClient(endpoint string) *Client {
 			// Cada petición abre su propia conexión: con SSH detrás, reutilizar
 			// conexiones complica más de lo que ahorra.
 			DisableKeepAlives: true,
+
+			// ResponseHeaderTimeout y NO http.Client.Timeout.
+			//
+			// Hace falta un límite: sin ninguno, un daemon atascado deja
+			// colgado para siempre a quien le habla, y eso se nota sobre todo
+			// al apagar el gateway, que espera a sus llamadas en vuelo.
+			//
+			// Pero Timeout acota la petición ENTERA, incluida la lectura del
+			// cuerpo, y `kling events` es un flujo NDJSON que dura lo que dure
+			// la sesión: lo mataría a los 60 s. Esto solo acota la espera a las
+			// CABECERAS, que en un flujo llegan de inmediato.
+			//
+			// Quien añada un endpoint que tarde más de un minuto en responder
+			// tiene que pasar su propio cliente, no subir este número.
+			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
 }
