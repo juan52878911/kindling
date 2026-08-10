@@ -74,6 +74,10 @@ type Manager struct {
 	// Ver allocNetIndex.
 	netCursor int
 
+	// templateMu serializa la construcción de la plantilla de overlay: dos
+	// arranques a la vez sobre un host limpio la formatearían por duplicado.
+	templateMu sync.Mutex
+
 	// lifecycle serializa las operaciones sobre UNA MISMA máquina. Sin esto, dos
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
 	// veth a medio crear: "Cannot find device vh-...".
@@ -127,6 +131,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	m.reconcile()
+	// Relleno inicial: DiskBytes no se persiste —es dato derivado— así que sin
+	// esto todas las máquinas cargadas del estado saldrían a 0 en `kling ps`
+	// hasta el primer tic del vigilante.
+	m.refreshDiskUsage()
 	return m, nil
 }
 
@@ -315,8 +323,11 @@ func (m *Manager) List() []*api.Machine {
 	defer m.mu.RUnlock()
 	out := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
+		// DiskBytes viene de la caché: recorrer el directorio de cada máquina
+		// aquí era un walk por máquina en CADA `kling ps`, y encima con el
+		// candado global cogido, así que contar bytes bloqueaba arranques y
+		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
-		c.DiskBytes = diskUsage(m.dir(mc.ID))
 		out = append(out, &c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -338,6 +349,49 @@ func allocatedBytes(path string) int64 {
 
 // diskUsage suma bloques asignados, no tamaños lógicos: es la única cifra
 // honesta cuando los ficheros son dispersos.
+// touchDisk recalcula el disco de UNA máquina. Se usa tras las operaciones que
+// mueven ficheros, para que la respuesta de esa llamada ya lleve el dato bueno
+// en vez del de la última pasada del vigilante.
+//
+// El walk va fuera del lock; solo la escritura del campo lo toma.
+func (m *Manager) touchDisk(id string) int64 {
+	n := diskUsage(m.dir(id))
+	m.mu.Lock()
+	if mc := m.byID[id]; mc != nil {
+		mc.DiskBytes = n
+	}
+	m.mu.Unlock()
+	return n
+}
+
+// refreshDiskUsage recalcula el disco de todas las máquinas.
+//
+// Lo llama el vigilante, que ya pasa cada pocos segundos. El overlay es un
+// fichero disperso que CRECE mientras el invitado escribe, así que un valor
+// que solo se actualizara al arrancar o congelar sería justo el que no sirve:
+// el número con el que se detecta a un invitado llenando su disco.
+func (m *Manager) refreshDiskUsage() {
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.byID))
+	for id := range m.byID {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+
+	sizes := make(map[string]int64, len(ids))
+	for _, id := range ids {
+		sizes[id] = diskUsage(m.dir(id))
+	}
+
+	m.mu.Lock()
+	for id, n := range sizes {
+		if mc := m.byID[id]; mc != nil {
+			mc.DiskBytes = n
+		}
+	}
+	m.mu.Unlock()
+}
+
 func diskUsage(dir string) int64 {
 	var total int64
 	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
@@ -455,7 +509,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
 	// esta microVM es su overlay escribible, que nace prácticamente vacío.
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if err := createOverlay(ctx, overlay, defaultOverlayMiB); err != nil {
+	if err := m.newOverlay(ctx, overlay); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -514,6 +568,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	out := *mc
 	m.mu.Unlock()
 
+	// El walk va DESPUÉS de soltar el lock, y su resultado entra en la
+	// respuesta: si se dejara solo al vigilante, esta llamada devolvería 0 y
+	// quien la hizo vería una máquina sin disco.
+	out.DiskBytes = m.touchDisk(id)
+
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("arrancada en frío en %d ms", out.BootMS)})
 	return &out, nil
@@ -522,6 +581,57 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 // createOverlay crea el disco escribible de una microVM: un fichero disperso con
 // ext4 encima. Sin journal a propósito — es almacenamiento efímero y el journal
 // costaría varios MB de suelo en cada máquina sin aportar nada aquí.
+// overlayTemplatePath es un overlay ya formateado que se copia para cada
+// microVM nueva, en vez de correr mkfs.ext4 una vez por máquina.
+func (m *Manager) overlayTemplatePath() string {
+	return filepath.Join(m.root, "images", "overlay-template.ext4")
+}
+
+// ensureOverlayTemplate la construye si falta.
+//
+// Se formatea en un .tmp y se renombra, para que EXISTIR IMPLIQUE ESTAR
+// COMPLETA. Comprobar solo la existencia sobre el nombre definitivo sería una
+// trampa: si el daemon muere entre el Truncate y el mkfs queda medio giga de
+// ceros sin sistema de ficheros, y a partir de ahí TODAS las microVMs arrancan
+// con un /dev/vdb que no monta — un fallo que aparece dentro del invitado y no
+// en el log del daemon.
+func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
+	m.templateMu.Lock()
+	defer m.templateMu.Unlock()
+
+	path := m.overlayTemplatePath()
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
+	if err := createOverlay(ctx, tmp, defaultOverlayMiB); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// newOverlay deja listo el disco escribible de una microVM.
+//
+// Copiar la plantilla ahorra el mkfs.ext4 por máquina, que son decenas de
+// milisegundos sobre un arranque que aspira a estar en el orden de los 30 ms.
+// Si la plantilla no se puede construir se formatea directamente: más lento,
+// pero nadie se queda sin arrancar por una optimización.
+func (m *Manager) newOverlay(ctx context.Context, dst string) error {
+	if err := m.ensureOverlayTemplate(ctx); err != nil {
+		log.Printf("plantilla de overlay no disponible (%v): formateo directo", err)
+		return createOverlay(ctx, dst, defaultOverlayMiB)
+	}
+	// --sparse=always: el overlay es disperso y copiarlo denso destruiría lo
+	// que hace que una máquina cueste ~8 MB en vez de 512.
+	out, err := exec.CommandContext(ctx, "cp", "--sparse=always", m.overlayTemplatePath(), dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copiando la plantilla de overlay: %v: %s", err, out)
+	}
+	return nil
+}
+
 func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -712,6 +822,8 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	out := *live
 	m.mu.Unlock()
 
+	out.DiskBytes = m.touchDisk(mc.ID)
+
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("congelada en %d ms (%d MiB en disco)", elapsed, size>>20)})
 	return &out, nil
@@ -772,6 +884,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+
+	out.DiskBytes = m.touchDisk(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("descongelada en %d ms", elapsed)})

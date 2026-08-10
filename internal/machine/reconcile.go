@@ -116,6 +116,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			m.sweep()
 			m.expireTTL(ctx)
+			// El disco se recalcula aquí y no en List(): así `kling ps` no paga
+			// un recorrido por máquina, y el dato sigue fresco para las que
+			// están escribiendo.
+			m.refreshDiskUsage()
 		}
 	}
 }
