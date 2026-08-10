@@ -848,6 +848,35 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 	sock := filepath.Join(dir, "fc.sock")
+
+	// Antes de borrar el socket y arrancar: ¿hay ya un firecracker vivo que sea
+	// de ESTA máquina?
+	//
+	// Con el estado obsoleto —un thaw anterior cuya escritura no llegó a disco,
+	// por ejemplo— la máquina figura warm mientras corre de verdad. Seguir
+	// adelante arrancaría un SEGUNDO firecracker sobre el mismo overlay.ext4:
+	// dos VMMs escribiendo el mismo sistema de ficheros es corrupción, y del
+	// tipo que no se nota hasta mucho después.
+	if live := m.liveVMs(); live[mc.ID] > 0 {
+		pid := live[mc.ID]
+		log.Printf("thaw: %s (%s) ya estaba corriendo (pid %d); la readopto en vez de arrancar otra",
+			mc.Name, mc.ID[:8], pid)
+		m.mu.Lock()
+		if cur := m.byID[mc.ID]; cur != nil {
+			now := time.Now()
+			cur.State = api.StateRunning
+			cur.PID = pid
+			cur.StartedAt = &now
+			cur.FrozenAt = nil
+			m.socket[mc.ID] = sock
+			m.persist()
+			out := *cur
+			m.mu.Unlock()
+			return &out, nil
+		}
+		m.mu.Unlock()
+	}
+
 	_ = os.Remove(sock)
 
 	// El namespace pudo desaparecer con un reinicio del host; lo rehacemos con el

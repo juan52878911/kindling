@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,23 +19,59 @@ import (
 // vivas. Sin esto, kling afirmaría cosas falsas: máquinas "running" cuyo proceso
 // murió, o namespaces de máquinas que ya no existen.
 func (m *Manager) reconcile() {
+	// Lo primero es MIRAR, y hacerlo fuera del lock porque lee /proc.
+	//
+	// El estado en disco no es la verdad: se escribe con debounce y fuera del
+	// candado, y sobre todo una microVM SOBREVIVE al daemon (firecracker se
+	// lanza con setsid). Fiarse solo del fichero significa quitarle la red y el
+	// techo de CPU a máquinas que están funcionando, y en el peor caso arrancar
+	// un segundo firecracker sobre el mismo overlay.
+	live := m.liveVMs()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	seen := make(map[string]bool, len(m.byID))
+	liveCg := make(map[string]bool)
+
+	// Los namespaces y cgroups de lo que está VIVO se protegen aunque el estado
+	// no lo conozca: una máquina creada justo antes de un corte puede no haber
+	// llegado al fichero, y desmontarle la red la deja corriendo a ciegas.
+	for id := range live {
+		seen[nsName(id)] = true
+		liveCg[cgName(id)] = true
+	}
+
 	for _, mc := range m.byID {
 		seen[knet.Plan(mc.NetIndex, mc.ID).NS] = true
 
+		if pid, alive := live[mc.ID]; alive {
+			// Está viva: se readopta y NO se toca nada suyo.
+			m.socket[mc.ID] = m.dir(mc.ID) + "/fc.sock"
+			if mc.State != api.StateRunning {
+				log.Printf("reconcile: %s (%s) sigue viva (pid %d) aunque el estado decía %q; la readopto",
+					mc.Name, mc.ID[:8], pid, mc.State)
+				mc.State = api.StateRunning
+			}
+			mc.PID = pid
+			liveCg[cgName(mc.ID)] = true
+			continue
+		}
+
 		switch mc.State {
 		case api.StateRunning:
-			if sock, ok := m.adopt(mc); ok {
-				// Sigue viva: la readoptamos con su socket.
-				m.socket[mc.ID] = sock
-				continue
+			// Su proceso ya no está. Si dejó un snapshot completo está WARM, no
+			// parada: decir "stopped" deja el snapshot varado, porque Thaw se
+			// niega a descongelar lo que no esté warm y habría que editar el
+			// state.json a mano para recuperarlo.
+			if m.hasSnapshot(mc.ID) {
+				log.Printf("reconcile: %s (%s) ya no corre pero conserva su snapshot: warm",
+					mc.Name, mc.ID[:8])
+				mc.State = api.StateWarm
+			} else {
+				log.Printf("reconcile: %s (%s) ya no corre, marcada como stopped", mc.Name, mc.ID[:8])
+				mc.State = api.StateStopped
 			}
-			// Su proceso ya no está: no podemos seguir diciendo que corre.
-			log.Printf("reconcile: %s (%s) ya no corre, marcada como stopped", mc.Name, mc.ID[:8])
-			mc.State = api.StateStopped
 			mc.PID = 0
 			knet.Plan(mc.NetIndex, mc.ID).Teardown()
 			m.releaseCPU(mc.ID)
@@ -47,13 +85,6 @@ func (m *Manager) reconcile() {
 	}
 	m.persist()
 
-	// Cgroups de máquinas que ya no corren.
-	liveCg := make(map[string]bool)
-	for _, mc := range m.byID {
-		if mc.State == api.StateRunning {
-			liveCg["kl-"+mc.ID[:8]] = true
-		}
-	}
 	m.sweepCgroups(liveCg)
 
 	// Namespaces de máquinas que ya no existen: basura de ejecuciones anteriores.
@@ -63,6 +94,66 @@ func (m *Manager) reconcile() {
 			knet.TeardownNamespace(ns)
 		}
 	}
+}
+
+// nsName y cgName derivan del id igual que knet.Plan y el gestor de cgroups, y
+// existen para poder proteger lo de una máquina viva sin conocer su NetIndex
+// —que es justo lo que falta cuando no está en el estado guardado—.
+func nsName(id string) string { return "kl-" + shortID(id) }
+func cgName(id string) string { return "kl-" + shortID(id) }
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// hasSnapshot dice si una máquina tiene un congelado completo en disco.
+func (m *Manager) hasSnapshot(id string) bool {
+	d := m.dir(id)
+	for _, f := range []string{"snap.file", "mem.file"} {
+		if _, err := os.Stat(filepath.Join(d, f)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// liveVMs escanea /proc y devuelve qué microVM posee cada firecracker vivo.
+//
+// Es adopt() del revés: en vez de "¿sigue vivo el PID que apunté?", pregunta
+// "¿qué está corriendo ahí fuera?". Esa vuelta es lo que permite reconciliar sin
+// creerse el fichero de estado.
+func (m *Manager) liveVMs() map[string]int {
+	out := map[string]int{}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return out // no es Linux, o /proc no está montado
+	}
+	prefix := filepath.Join(m.root, "machines") + "/"
+
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue // no es un proceso
+		}
+		b, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil {
+			continue // murió mientras mirábamos, o no es nuestro
+		}
+		for _, arg := range strings.Split(strings.TrimRight(string(b), "\x00"), "\x00") {
+			rest, ok := strings.CutPrefix(arg, prefix)
+			if !ok {
+				continue
+			}
+			id, ok := strings.CutSuffix(rest, "/fc.sock")
+			if ok && id != "" && !strings.Contains(id, "/") {
+				out[id] = pid
+			}
+		}
+	}
+	return out
 }
 
 // adopt comprueba si el proceso de una microVM sigue vivo y es realmente suyo.
