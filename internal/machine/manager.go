@@ -78,6 +78,15 @@ type Manager struct {
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
 	// veth a medio crear: "Cannot find device vh-...".
 	lifecycle sync.Map // id -> *sync.Mutex
+
+	// Escritura del estado, fuera del lock. Ver persist().
+	stateMu   sync.Mutex
+	pending   []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
+	hasPend   bool
+	wake      chan struct{}
+	quit      chan struct{}
+	quitOnce  sync.Once
+	persistWG sync.WaitGroup
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -99,7 +108,11 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
 		byID:   make(map[string]*api.Machine),
 		socket: make(map[string]string),
+		wake:   make(chan struct{}, 1),
+		quit:   make(chan struct{}),
 	}
+	m.persistWG.Add(1)
+	go m.persistLoop()
 	if cg, err := ensureDelegation(); err != nil {
 		m.CgroupWarning = err.Error()
 	} else {
@@ -147,19 +160,152 @@ func (m *Manager) load() {
 	}
 }
 
+// persist encola una escritura del estado. Se llama SIEMPRE con m.mu tomado por
+// quien la invoca — los doce sitios que la usan están dentro de una operación de
+// ciclo de vida.
+//
+// Antes serializaba y escribía aquí mismo, con el lock global cogido: cada
+// transición pagaba la latencia del disco y, mientras tanto, ninguna otra
+// máquina podía arrancar, congelarse ni descongelarse. Ahora solo toma la foto y
+// se va; escribirla es cosa de persistLoop.
+//
+// La foto se copia POR VALOR, no por puntero. Es la diferencia entre esto y una
+// carrera de datos: si se guardaran los *api.Machine, json.Marshal los leería
+// fuera del lock mientras otra goroutine les cambia State, PID o los punteros
+// StartedAt/FrozenAt, y el fichero podría acabar describiendo un estado que
+// nunca existió (una máquina "warm" con PID vivo, por ejemplo).
 func (m *Manager) persist() {
-	list := make([]*api.Machine, 0, len(m.byID))
+	list := make([]api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
-		list = append(list, mc)
+		list = append(list, *mc)
 	}
-	b, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
+
+	m.stateMu.Lock()
+	m.pending, m.hasPend = list, true
+	m.stateMu.Unlock()
+
+	// Aviso no bloqueante: si ya hay uno sin atender, este sobra. Las ráfagas
+	// coalescen solas porque cada foto pisa a la anterior, y la última es la
+	// que describe el estado actual.
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+const (
+	// persistDebounce agrupa las transiciones que llegan juntas.
+	persistDebounce = 50 * time.Millisecond
+	// persistMaxDelay acota lo que puede posponerse una escritura. Sin este
+	// tope, un debounce que se reinicia con cada aviso deja el estado sin
+	// escribir indefinidamente mientras haya actividad — justo cuando más
+	// importa que esté en disco.
+	persistMaxDelay = 250 * time.Millisecond
+)
+
+// persistLoop materializa las escrituras fuera del lock.
+func (m *Manager) persistLoop() {
+	defer m.persistWG.Done()
+
+	var (
+		timer *time.Timer
+		tC    <-chan time.Time
+		first time.Time
+	)
+	for {
+		select {
+		case <-m.wake:
+			if tC == nil {
+				first = time.Now()
+				timer = time.NewTimer(persistDebounce)
+				tC = timer.C
+				continue
+			}
+			if time.Since(first) >= persistMaxDelay {
+				// Ya se aplazó bastante: que dispare el temporizador vigente.
+				continue
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(persistDebounce)
+
+		case <-tC:
+			tC, timer = nil, nil
+			m.writePending()
+
+		case <-m.quit:
+			if timer != nil {
+				timer.Stop()
+			}
+			m.writePending()
+			return
+		}
+	}
+}
+
+// writePending vuelca la última foto, si hay alguna.
+func (m *Manager) writePending() {
+	m.stateMu.Lock()
+	if !m.hasPend {
+		m.stateMu.Unlock()
 		return
 	}
-	tmp := m.statePath() + ".tmp"
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		_ = os.Rename(tmp, m.statePath())
+	list := m.pending
+	m.pending, m.hasPend = nil, false
+	m.stateMu.Unlock()
+
+	b, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		log.Printf("estado: no pude serializarlo: %v", err)
+		return
 	}
+
+	tmp := m.statePath() + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		log.Printf("estado: no pude escribir %s: %v", tmp, err)
+		return
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		log.Printf("estado: escritura incompleta: %v", err)
+		return
+	}
+	// fsync del fichero Y del directorio. Sin el segundo, el rename puede no
+	// haber llegado al disco cuando se corta la luz, y el daemon arrancaría
+	// leyendo el estado anterior — que es peor que no leer ninguno, porque se
+	// da por bueno.
+	if err := f.Sync(); err != nil {
+		log.Printf("estado: fsync falló: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("estado: cierre falló: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, m.statePath()); err != nil {
+		log.Printf("estado: rename falló: %v", err)
+		return
+	}
+	if d, err := os.Open(m.root); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+}
+
+// Close para la escritura de estado tras volcar lo que quede pendiente.
+//
+// Lo llama el daemon en su camino de apagado, y tiene que esperarse: si el
+// proceso sale antes, se pierde la última transición y el arranque siguiente
+// reconstruye un estado que ya no es el real.
+func (m *Manager) Close() {
+	m.quitOnce.Do(func() {
+		close(m.quit)
+		m.persistWG.Wait()
+	})
 }
 
 // ── consultas ─────────────────────────────────────────────────────────────────

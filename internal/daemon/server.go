@@ -154,6 +154,10 @@ func (s *Server) Listen(ctx context.Context) error {
 	// drenando las peticiones en vuelo. Esperarlo antes de tocar nada garantiza
 	// que ninguna petición cambie el estado después de la limpieza.
 	<-shutdownDone
+	// Con las peticiones ya drenadas, esta es la última escritura del estado y
+	// nadie va a cambiarlo por detrás. Se espera de verdad: perder la última
+	// transición hace que el arranque siguiente reconstruya algo que no es.
+	s.mgr.Close()
 	_ = os.Remove(s.socket)
 	return nil
 }
