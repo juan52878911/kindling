@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/config"
 )
 
 // cmdMCP convierte servidores MCP en servicios de kindling.
@@ -69,7 +70,7 @@ func mcpImport(args []string) error {
 		return fmt.Errorf("uso: kling mcp import <servicio> [-image imagen]")
 	}
 	service := fs.Arg(0)
-	img := config_Or(*image, service)
+	img := config.Or(*image, service)
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -96,7 +97,18 @@ func mcpImport(args []string) error {
 	// 1. plantilla
 	fmt.Printf("  1/5  arrancando la plantilla... ")
 	mc, err := c.Run(ctx, api.RunRequest{
-		Name: tmpl, Image: img, MemMiB: *mem, Egress: *egress,
+		Name:  tmpl,
+		Image: img,
+		// Los valores por defecto se aplican IGUAL que en `kling run`. No
+		// hacerlo era un fallo caro y silencioso: la memoria QUEDA GRABADA en
+		// el snapshot dorado, así que un servicio importado se quedaba con los
+		// 256 MiB del daemon aunque su dueño hubiera puesto defaults.mem_mib a
+		// 1024 — que es justo lo que se sube para aguantar varias sesiones,
+		// porque cada una arranca su propio proceso del servidor MCP dentro del
+		// invitado.
+		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
+		VCPUs:  config.Or(cfg.Defaults.VCPUs, 1),
+		Egress: config.Or(*egress, cfg.Defaults.Egress, "none"),
 		Labels: map[string]string{api.LabelService: service},
 	})
 	if err != nil {
@@ -554,12 +566,4 @@ func labelsFor(service string, stateful bool) map[string]string {
 		l[api.LabelStateful] = "true"
 	}
 	return l
-}
-
-// config_Or evita importar el paquete config solo por un valor por defecto.
-func config_Or(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

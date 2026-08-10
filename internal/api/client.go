@@ -101,6 +101,16 @@ func (c *Client) Run(ctx context.Context, r RunRequest) (*Machine, error) {
 	return &m, c.do(ctx, http.MethodPost, "/machines", r, &m)
 }
 
+// BuildImage empaqueta un servidor MCP de stdio como imagen.
+//
+// Puede tardar minutos: instala node y sus dependencias dentro de un chroot. El
+// ResponseHeaderTimeout del cliente NO lo cubre, así que el daemon responde en
+// cuanto termina y quien llame debe darle margen en su contexto.
+func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildImageResult, error) {
+	var res BuildImageResult
+	return &res, c.do(ctx, http.MethodPost, "/images", r, &res)
+}
+
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)

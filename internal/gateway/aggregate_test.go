@@ -164,7 +164,7 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 		req.Header.Set("Accept", "application/json")
 		rec := httptest.NewRecorder()
 
-		gw.Handler().ServeHTTP(rec, req)
+		gw.Handler("").ServeHTTP(rec, req)
 
 		if rec.Code == http.StatusBadGateway && strings.Contains(rec.Body.String(), "no hay snapshot") {
 			t.Fatalf("no debería devolver 'no hay snapshot': %s", rec.Body.String())

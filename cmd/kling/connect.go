@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -30,11 +28,12 @@ func cmdConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	host := hostFlag(fs)
 	gwFlag := fs.String("gateway", "", "URL del gateway (por defecto: gateway.url, o se deduce del contexto)")
-	install := fs.String("install", "", "escribir la configuración: claude-code | opencode")
+	install := fs.String("install", "", "escribir la configuración: "+clientNames()+" — o `all` para todos los detectados")
 	name := fs.String("name", "", "nombre con el que aparecerá en el agente (por defecto: el del servicio)")
 	all := fs.Bool("all", false, "una sola entrada que reúne TODOS los servicios")
 	only := fs.String("only", "", "con -all: limitar a estos servicios, separados por comas")
 	expand := fs.Bool("expand", false, "con -all: cargar el catálogo completo en vez de meta-herramientas")
+	tokenFlag := fs.String("token", "", "token del gateway (por defecto: gateway.token)")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -44,6 +43,7 @@ func cmdConnect(args []string) error {
 
 	cfg := loadConfig()
 	gw := config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host)))
+	token := config.Or(*tokenFlag, cfg.Gateway.Token)
 
 	// Entrada agregada: un solo servidor MCP que reúne a todos.
 	if *all {
@@ -71,18 +71,19 @@ func cmdConnect(args []string) error {
 		} else {
 			fmt.Println("Modo:      proxy — inventario en el handshake + 3 meta-herramientas")
 		}
-		if info, tools, err := probeMCP(url); err != nil {
+		if info, tools, err := probeMCP(url, token); err != nil {
 			fmt.Printf("Estado:    ✗ %v\n\n", err)
 		} else {
 			fmt.Printf("Estado:    ✓ %s · %d herramienta(s) expuesta(s): %s\n",
 				info, len(tools), strings.Join(tools, ", "))
-			advise(strings.TrimSuffix(gw, "/")+"/mcp/"+gateway.AggregatePath, *only, *expand)
+			advise(strings.TrimSuffix(gw, "/")+"/mcp/"+gateway.AggregatePath, *only, *expand, token)
 		}
 		if *install != "" {
-			return installConfig(*install, label, url)
+			return installConfig(*install, label, url, token)
 		}
-		printSnippets(label, url)
+		printSnippets(label, url, token)
 		fmt.Printf("\nInstalación automática:\n")
+		fmt.Printf("  kling connect -all -install all        (todos los clientes detectados)\n")
 		fmt.Printf("  kling connect -all -install opencode\n")
 		fmt.Printf("  kling connect -all -only eco,files -install opencode\n")
 		return nil
@@ -101,7 +102,7 @@ func cmdConnect(args []string) error {
 
 	// Comprobarlo de verdad: una configuración que parece correcta y no responde
 	// es peor que no tener ninguna, porque el fallo aparece dentro del agente.
-	if info, tools, err := probeMCP(url); err != nil {
+	if info, tools, err := probeMCP(url, token); err != nil {
 		fmt.Printf("Estado:    ✗ %v\n\n", err)
 		fmt.Println("Arranca el gateway en el host del daemon:")
 		fmt.Println("  kling gateway -listen 0.0.0.0:8080")
@@ -111,13 +112,13 @@ func cmdConnect(args []string) error {
 	fmt.Println()
 
 	if *install != "" {
-		return installConfig(*install, label, url)
+		return installConfig(*install, label, url, token)
 	}
 
-	printSnippets(label, url)
+	printSnippets(label, url, token)
 	fmt.Printf("\nInstalación automática:\n")
+	fmt.Printf("  kling connect %s -install all\n", service)
 	fmt.Printf("  kling connect %s -install claude-code\n", service)
-	fmt.Printf("  kling connect %s -install opencode\n", service)
 	return nil
 }
 
@@ -138,25 +139,41 @@ func guessGateway(daemonHost string) string {
 	return "http://127.0.0.1:8080"
 }
 
-// probeMCP hace un initialize real y devuelve el servidor y sus herramientas.
-func probeMCP(url string) (string, []string, error) {
-	c := &http.Client{Timeout: 30 * time.Second}
-
-	post := func(sid, body string) (*http.Response, error) {
+// authedPost construye el que manda peticiones MCP con el token puesto.
+//
+// El token va SIEMPRE que lo haya: comprobar el endpoint sin la cabecera que
+// van a usar los agentes daría un ✗ que no significa nada, o peor, un ✓ de un
+// gateway abierto que creíamos cerrado.
+func authedPost(c *http.Client, url, token string) func(sid, body string) (*http.Response, error) {
+	return func(sid, body string) (*http.Response, error) {
 		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", api.AcceptMCP)
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 		return c.Do(req)
 	}
+}
+
+// probeMCP hace un initialize real y devuelve el servidor y sus herramientas.
+func probeMCP(url, token string) (string, []string, error) {
+	post := authedPost(&http.Client{Timeout: 30 * time.Second}, url, token)
 
 	resp, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
 	if err != nil {
 		return "", nil, fmt.Errorf("no responde: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		if token == "" {
+			return "", nil, fmt.Errorf("el gateway pide token y no tengo ninguno.\n" +
+				"           Cópialo del host del gateway:  kling config set gateway.token <t>")
+		}
+		return "", nil, fmt.Errorf("el gateway rechaza el token (401)")
+	}
 	if resp.StatusCode >= 300 {
 		return "", nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
@@ -169,7 +186,7 @@ func probeMCP(url string) (string, []string, error) {
 			} `json:"serverInfo"`
 		} `json:"result"`
 	}
-	_ = json.Unmarshal(readMCP(resp), &init)
+	_ = json.NewDecoder(resp.Body).Decode(&init)
 	server := init.Result.ServerInfo.Name
 	if server == "" {
 		server = "servidor MCP"
@@ -191,7 +208,7 @@ func probeMCP(url string) (string, []string, error) {
 			} `json:"tools"`
 		} `json:"result"`
 	}
-	_ = json.Unmarshal(readMCP(tr), &tl)
+	_ = json.NewDecoder(tr.Body).Decode(&tl)
 	names := make([]string, 0, len(tl.Result.Tools))
 	for _, t := range tl.Result.Tools {
 		names = append(names, t.Name)
@@ -204,7 +221,7 @@ func probeMCP(url string) (string, []string, error) {
 // El modo proxy tiene un coste fijo (cuatro meta-herramientas) y el expand crece
 // con cada herramienta. Con pocas herramientas el proxy sale MÁS caro, así que
 // recomendarlo siempre sería vender humo: se mide y se dice.
-func advise(base, only string, expand bool) {
+func advise(base, only string, expand bool, token string) {
 	q := ""
 	if only != "" {
 		q = "?services=" + strings.ReplaceAll(only, " ", "")
@@ -214,8 +231,8 @@ func advise(base, only string, expand bool) {
 		sep = "&"
 	}
 
-	proxy, n1, err1 := catalogCost(base + q)
-	exp, n2, err2 := catalogCost(base + q + sep + "mode=expand")
+	proxy, n1, err1 := catalogCost(base+q, token)
+	exp, n2, err2 := catalogCost(base+q+sep+"mode=expand", token)
 	if err1 != nil || err2 != nil {
 		fmt.Println()
 		return
@@ -242,17 +259,8 @@ func advise(base, only string, expand bool) {
 }
 
 // catalogCost mide los bytes que ocupa el catálogo que verá el agente.
-func catalogCost(url string) (int, int, error) {
-	c := &http.Client{Timeout: 60 * time.Second}
-	post := func(sid, body string) (*http.Response, error) {
-		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", api.AcceptMCP)
-		if sid != "" {
-			req.Header.Set("Mcp-Session-Id", sid)
-		}
-		return c.Do(req)
-	}
+func catalogCost(url, token string) (int, int, error) {
+	post := authedPost(&http.Client{Timeout: 60 * time.Second}, url, token)
 	resp, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	if err != nil {
 		return 0, 0, err
@@ -271,61 +279,80 @@ func catalogCost(url string) (int, int, error) {
 			Tools []json.RawMessage `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(readMCP(tr), &out); err != nil {
+	if err := json.NewDecoder(tr.Body).Decode(&out); err != nil {
 		return 0, 0, err
 	}
 	b, _ := json.Marshal(out.Result.Tools)
 	return len(b), len(out.Result.Tools), nil
 }
 
-func printSnippets(name, url string) {
-	fmt.Println("── Claude Code ──────────────────────────────────────")
-	fmt.Printf("  claude mcp add --transport http %s %s\n\n", name, url)
-	fmt.Println("  o a mano en ~/.claude.json, dentro de \"mcpServers\":")
-	fmt.Printf("    %q: {\"type\": \"http\", \"url\": %q}\n\n", name, url)
-
-	fmt.Println("── opencode ─────────────────────────────────────────")
-	fmt.Println("  en ~/.config/opencode/opencode.json, dentro de \"mcp\":")
-	fmt.Printf("    %q: {\"type\": \"remote\", \"url\": %q, \"enabled\": true}\n", name, url)
-}
-
-// installConfig escribe la entrada en la configuración del agente.
-func installConfig(target, name, url string) error {
-	switch target {
-	case "claude-code", "claude":
-		return installClaudeCode(name, url)
-	case "opencode":
-		return installOpencode(name, url)
-	default:
-		return fmt.Errorf("destino desconocido %q: usa claude-code u opencode", target)
+// printSnippets enseña la configuración manual de los clientes detectados.
+//
+// Solo los detectados: una lista de siete formatos para una máquina que tiene
+// dos agentes instalados es ruido, y el ruido esconde lo que sí importa.
+func printSnippets(name, url, token string) {
+	list := detectedClients()
+	if len(list) == 0 {
+		fmt.Println("No detecto ningún agente instalado. Formatos de todos los que conozco:")
+		list = clients()
+	}
+	for _, c := range list {
+		fmt.Printf("── %s %s\n", c.label, strings.Repeat("─", max(0, 48-len(c.label))))
+		fmt.Println(c.text(name, url, token))
+		fmt.Println()
+	}
+	if token == "" {
+		fmt.Println("Sin token: el gateway está abierto a quien alcance su puerto.")
 	}
 }
 
-func installClaudeCode(name, url string) error {
-	// Si el CLI está disponible es la vía oficial y evita tocar su fichero.
-	if _, err := exec.LookPath("claude"); err == nil {
-		cmd := exec.Command("claude", "mcp", "add", "--transport", "http", name, url)
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			fmt.Printf("✓ añadido a Claude Code vía CLI\n%s", out)
-			fmt.Println("\nReinicia Claude Code y pregúntale: \"¿qué herramientas tienes disponibles?\"")
-			return nil
+// installConfig escribe la entrada en la configuración del agente o agentes.
+func installConfig(target, name, url, token string) error {
+	if target == "all" {
+		list := detectedClients()
+		if len(list) == 0 {
+			return fmt.Errorf("no detecto ningún agente instalado; usa -install <%s>", clientNames())
 		}
-		fmt.Printf("el CLI falló (%v), escribo el fichero directamente\n", err)
+		fmt.Printf("Detectados: %s\n\n", labels(list))
+		var failed []string
+		for _, c := range list {
+			// Un cliente que falla no puede impedir que se registren los
+			// demás: lo normal es tener cuatro y que uno tenga el fichero
+			// a medio escribir por otra herramienta.
+			if err := c.install(name, url, token); err != nil {
+				fmt.Printf("✗ %s — %v\n", c.label, err)
+				failed = append(failed, c.name)
+			}
+		}
+		if len(failed) > 0 {
+			return fmt.Errorf("no pude registrar en: %s", strings.Join(failed, ", "))
+		}
+		return nil
 	}
 
-	home, _ := os.UserHomeDir()
-	return patchJSON(filepath.Join(home, ".claude.json"), "mcpServers", name,
-		map[string]any{"type": "http", "url": url},
-		"Reinicia Claude Code y pregúntale: \"¿qué herramientas tienes disponibles?\"")
+	c, ok := findClient(target)
+	if !ok {
+		return fmt.Errorf("destino desconocido %q: usa uno de %s, o `all`", target, clientNames())
+	}
+	return c.install(name, url, token)
 }
 
-func installOpencode(name, url string) error {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".config", "opencode", "opencode.json")
-	return patchJSON(p, "mcp", name,
-		map[string]any{"type": "remote", "url": url, "enabled": true},
-		"Reinicia opencode: la herramienta aparecerá en su lista de MCP.")
+func labels(list []client) string {
+	var out []string
+	for _, c := range list {
+		out = append(out, c.label)
+	}
+	return strings.Join(out, ", ")
+}
+
+// mustJSON serializa para imprimir. Los valores vienen de esta misma tabla, no
+// de fuera, así que un error solo puede ser un fallo de programación.
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<no serializable: %v>", err)
+	}
+	return string(b)
 }
 
 // patchJSON inserta una entrada en una sección de un JSON conservando el resto.
@@ -336,7 +363,10 @@ func patchJSON(path, section, key string, value any, hint string) error {
 	doc := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(b, &doc); err != nil {
-			return fmt.Errorf("%s no es JSON válido: %w", path, err)
+			// errNotJSON y no el error crudo: quien llama tiene que poder
+			// distinguir "esto no se puede parchear sin romperlo" de un fallo
+			// de E/S, porque la respuesta correcta es enseñar el fragmento.
+			return fmt.Errorf("%s: %w", path, errNotJSON)
 		}
 		backup := path + ".kling-backup"
 		if err := os.WriteFile(backup, b, 0o600); err != nil {
@@ -413,26 +443,19 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 	fmt.Printf("\nGateway: %s\n", gw)
 	fmt.Println("  Si no está arrancado, en el host del daemon:")
 	fmt.Println("    kling gateway -listen 0.0.0.0:8080")
+	if list := detectedClients(); len(list) > 0 {
+		fmt.Printf("\nAgentes detectados aquí: %s\n", labels(list))
+	}
 	fmt.Println()
 	fmt.Println("RECOMENDADO — una sola entrada para todos, sin llenar el contexto:")
-	fmt.Println("  kling connect -all -install opencode")
-	fmt.Println("  kling connect -all -only eco,files -install opencode   (solo algunos)")
+	fmt.Println("  kling connect -all -install all")
+	fmt.Println("  kling connect -all -only eco,files -install all        (solo algunos)")
 	fmt.Println()
 	fmt.Println("O uno suelto:")
 	first := snaps[0].Name
 	if svc := snaps[0].Service(); svc != "" {
 		first = svc
 	}
-	fmt.Printf("  kling connect %s -install opencode\n", first)
+	fmt.Printf("  kling connect %s -install claude-code\n", first)
 	return nil
-}
-
-// readMCP lee el cuerpo de una respuesta MCP, que puede llegar como JSON suelto
-// o envuelto en un evento SSE según cómo hable el servidor.
-func readMCP(resp *http.Response) []byte {
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil
-	}
-	return api.MCPPayload(b)
 }

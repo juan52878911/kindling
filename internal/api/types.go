@@ -193,6 +193,34 @@ type Info struct {
 	Firecrack string `json:"firecracker,omitempty"`
 }
 
+// BuildImageRequest pide al daemon que empaquete un servidor MCP de stdio.
+//
+// La construcción vive en el daemon porque monta un loopback y hace chroot: son
+// operaciones de root en el host con KVM, y el CLI corre en otra máquina.
+type BuildImageRequest struct {
+	// Name es el de la imagen y, después, el del servicio.
+	Name string `json:"name"`
+	// Base es la imagen de partida (por defecto: min).
+	Base string `json:"base,omitempty"`
+	// Packages son paquetes de apk que instalar en el invitado.
+	Packages []string `json:"packages,omitempty"`
+	// NPM son paquetes de node que PREINSTALAR. Es obligatorio y no una
+	// comodidad: las microVMs arrancan sin salida a internet, así que un
+	// `npx -y` en tiempo de ejecución fallaría al intentar descargar.
+	NPM []string `json:"npm,omitempty"`
+	// Cmd es el comando que arranca el servidor MCP dentro del invitado.
+	Cmd []string `json:"cmd"`
+	// GrowMB agranda la imagen. 0 deja que el script decida.
+	GrowMB int `json:"grow_mb,omitempty"`
+}
+
+// BuildImageResult describe la imagen construida.
+type BuildImageResult struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Output string `json:"output,omitempty"`
+}
+
 // Error es la respuesta de error de la API.
 type Error struct {
 	Message string `json:"message"`

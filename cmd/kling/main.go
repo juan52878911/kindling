@@ -45,6 +45,12 @@ MÁQUINAS
   stop <ref>                                       termina la máquina
   rm <ref>                                         elimina máquina y snapshot
 
+CATÁLOGO
+  search <consulta>                                busca en el registro oficial
+                                                   de servidores MCP
+  add <servidor> [-as nombre] [-arg valor]         lo empaqueta, lo importa y lo
+                                                   deja congelado como servicio
+
 SERVICIOS MCP
   mcp import <servicio> -image <img>               convierte un servidor MCP en
                                                    servicio: arranca, pregunta
@@ -86,13 +92,23 @@ CONECTAR CON TU AGENTE
   connect -all -expand                             catálogo completo (gasta más
                                                    contexto)
   connect <servicio>                               un servicio suelto
-  connect ... -install opencode|claude-code        escribe la configuración
+  connect ... -install all                         escribe en TODOS los agentes
+                                                   detectados: Claude Code,
+                                                   opencode, Cursor, VS Code,
+                                                   Windsurf, Cline y Zed
+  connect ... -install <cliente>                   solo en ese
 
 GATEWAY
   gateway [-listen ADDR] [-idle DUR] [-ephemeral]  enruta llamadas MCP a microVMs
                                                    bajo demanda. Con -ephemeral,
                                                    cada acción corre en su propia
                                                    máquina, que muere al terminar
+          [-no-auth] [-pprof]                      sin token / con perfiles; las
+                                                   dos exigen escuchar en
+                                                   loopback. Por defecto pide
+                                                   Authorization: Bearer con el
+                                                   token de gateway.token, que se
+                                                   genera solo la primera vez
 
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  arranca el núcleo
@@ -132,6 +148,10 @@ func main() {
 		err = cmdDaemon(args)
 	case "gateway":
 		err = cmdGateway(args)
+	case "add":
+		err = cmdAdd(args)
+	case "search":
+		err = cmdSearch(args)
 	case "connect":
 		err = cmdConnect(args)
 	case "mcp":
@@ -248,6 +268,7 @@ func cmdGateway(args []string) error {
 	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado)")
 	memory := fs.String("memory", "", "servicio MCP donde recordar qué herramienta resolvió cada petición")
 	pprofOn := fs.Bool("pprof", false, "expone /debug/pprof; solo diagnóstico temporal y solo en loopback")
+	noAuth := fs.Bool("no-auth", false, "sin token; solo para desarrollo y solo escuchando en loopback")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -267,6 +288,14 @@ func cmdGateway(args []string) error {
 	if *pprofOn && !gateway.IsLoopback(addr) {
 		return fmt.Errorf("-pprof exige escuchar en loopback, y %q no lo es.\n"+
 			"Diagnostica por un túnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
+	}
+
+	// El token se resuelve aquí, con el resto de la validación de argumentos y
+	// antes de hablar con nadie: -no-auth mal puesto debe fallar al instante, no
+	// después de esperar a un daemon que quizá ni esté.
+	token, err := resolveGatewayToken(cfg, *noAuth, addr)
+	if err != nil {
+		return err
 	}
 
 	c := api.NewClient(cfg.Host(*host))
@@ -305,7 +334,7 @@ func cmdGateway(args []string) error {
 
 	srv := &http.Server{
 		Addr:    *listen,
-		Handler: gw.Handler(),
+		Handler: gw.Handler(token),
 		// Mismas razones que en el daemon: gateway es la única superficie
 		// que escucha en TCP, y un cliente que no termina el header
 		// mantiene goroutine + FD indefinidamente. /mcp/{svc} puede ser
@@ -323,8 +352,13 @@ func cmdGateway(args []string) error {
 	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
 	fmt.Printf("  inventario:   http://%s/services\n", *listen)
 	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+	if token == "" {
+		fmt.Printf("  auth:         DESACTIVADA (-no-auth) — solo vale porque escucha en loopback\n")
+	} else {
+		fmt.Printf("  auth:         Authorization: Bearer <token>  ·  /healthz abierto\n")
+	}
 	if *pprofOn {
-		fmt.Printf("  pprof:        ACTIVO en http://%s/debug/pprof/ — apágalo al terminar\n", *listen)
+		fmt.Printf("  pprof:        ACTIVO en http://%s/debug/pprof/ (tras el token) — apágalo al terminar\n", *listen)
 	}
 	if memSvc != "" {
 		fmt.Printf("  memoria:      activa sobre %q — ordena las búsquedas por lo que ya funcionó\n", memSvc)
@@ -340,6 +374,55 @@ func cmdGateway(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// resolveGatewayToken decide con qué token arranca el gateway.
+//
+// No hay flag `-token` a propósito: la línea de comandos de un proceso la lee
+// cualquier usuario del host en /proc, así que un secreto no puede viajar por
+// ahí. Variable de entorno para systemd, fichero de configuración para el resto,
+// y si no hay ninguno se genera y se guarda: que el gateway quede abierto no
+// puede ser lo que pasa cuando no configuras nada.
+func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, error) {
+	if noAuth {
+		if !gateway.IsLoopback(addr) {
+			return "", fmt.Errorf("-no-auth exige escuchar en loopback, y %q no lo es.\n"+
+				"Despertar un snapshot es ejecutar código: sin token, cualquiera que alcance\n"+
+				"ese puerto ejecuta tus herramientas. Quita -no-auth o escucha en 127.0.0.1", addr)
+		}
+		return "", nil
+	}
+	if t := os.Getenv("KLING_GATEWAY_TOKEN"); t != "" {
+		return t, nil
+	}
+	if cfg.Gateway.Token != "" {
+		return cfg.Gateway.Token, nil
+	}
+
+	t, err := gateway.NewToken()
+	if err != nil {
+		return "", err
+	}
+	cfg.Gateway.Token = t
+
+	// Si no se puede guardar NO se aborta: un gateway que se niega a arrancar
+	// porque no pudo persistir un token es peor que uno que arranca y avisa.
+	// Pasa con systemd, donde ProtectHome deja su configuración en solo lectura,
+	// y ahí lo grave no es el fallo sino el silencio: el token cambiaría en cada
+	// reinicio y todos los agentes ya configurados dejarían de entrar.
+	if err := cfg.Save(); err != nil {
+		fmt.Printf("\nAVISO: generé un token pero no pude guardarlo en %s (%v).\n", config.Path(), err)
+		fmt.Printf("       Va a CAMBIAR en cada reinicio. Fíjalo para que no pase:\n")
+		fmt.Printf("         Environment=KLING_GATEWAY_TOKEN=%s\n\n", t)
+		return t, nil
+	}
+
+	// La única vez que se imprime entero. A partir de aquí `config show` lo
+	// enmascara, porque esa orden se teclea con gente mirando la pantalla.
+	fmt.Printf("token generado y guardado en %s\n\n", config.Path())
+	fmt.Printf("  En la máquina desde la que uses el CLI:\n")
+	fmt.Printf("    kling config set gateway.token %s\n\n", t)
+	return t, nil
 }
 
 // ── máquinas ──────────────────────────────────────────────────────────────────

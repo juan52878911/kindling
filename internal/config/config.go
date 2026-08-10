@@ -65,6 +65,14 @@ type Gateway struct {
 	// tiene por qué ser la de escucha: el gateway puede escuchar en 0.0.0.0 y
 	// los clientes llegar por la IP de la LAN.
 	URL string `json:"url,omitempty"`
+
+	// Token es el secreto que exige el gateway en Authorization: Bearer.
+	//
+	// En el host del gateway lo genera él solo la primera vez. En la máquina
+	// donde corre el CLI hay que ponerlo a mano, porque son dos ficheros de
+	// configuración distintos: `connect` lo necesita para comprobar que el
+	// endpoint responde y para escribirlo en la configuración del agente.
+	Token string `json:"token,omitempty"`
 }
 
 // Path devuelve la ruta del fichero de configuración.
@@ -225,6 +233,8 @@ func (c *Config) Set(key, value string) error {
 			c.Gateway.Idle = value
 		case "url":
 			c.Gateway.URL = value
+		case "token":
+			c.Gateway.Token = value
 		default:
 			return fmt.Errorf("campo desconocido gateway.%s", field)
 		}
@@ -246,9 +256,26 @@ func (c *Config) Keys() [][2]string {
 		{"gateway.listen", c.Gateway.Listen},
 		{"gateway.idle", c.Gateway.Idle},
 		{"gateway.url", c.Gateway.URL},
+		{"gateway.token", mask(c.Gateway.Token)},
 		{"memory.enabled", boolStr(c.Memory.Enabled)},
 		{"memory.service", c.Memory.Service},
 	}
+}
+
+// mask oculta un secreto dejando lo justo para reconocerlo.
+//
+// `config show` se teclea en terminales que se comparten por pantalla, así que
+// el valor entero no puede salir por ahí. Para copiarlo está la salida de
+// `kling gateway` al generarlo, y en último caso el propio fichero, que es del
+// usuario y tiene modo 0600.
+func mask(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return "********"
+	}
+	return s[:4] + "…" + s[len(s)-4:]
 }
 
 func boolStr(b bool) string {

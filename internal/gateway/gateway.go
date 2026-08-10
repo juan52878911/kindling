@@ -117,7 +117,11 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 }
 
 // Handler expone las rutas del gateway.
-func (g *Gateway) Handler() http.Handler {
+//
+// El token llega por parámetro en vez de vivir en el Gateway para que arrancar
+// sin autenticación sea una decisión explícita de quien compone el servidor: el
+// compilador obliga a escribir algo, aunque sea la cadena vacía.
+func (g *Gateway) Handler(token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -131,9 +135,13 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("/mcp/{service}/", g.handleProxy)
 	mux.HandleFunc("/mcp/{service}", g.handleProxy)
 
-	// pprof SOLO si el operador lo pidió con -pprof. El gateway escucha en
-	// TCP, así que exponer perfiles por defecto regalaría un volcado de
-	// memoria y de stacks a cualquiera que pueda llegar al puerto.
+	// pprof SOLO si el operador lo pidió con -pprof, y SOLO en loopback: eso lo
+	// comprueba quien construye el gateway.
+	//
+	// Queda además detrás de Auth, porque Auth envuelve el mux entero. Que no se
+	// le añada nunca una exención como la de /healthz: un volcado de goroutines
+	// o la línea de comandos completa no son cosas que deba poder pedir alguien
+	// que no tenga el token.
 	if g.PprofEnabled {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)
 		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -148,7 +156,9 @@ func (g *Gateway) Handler() http.Handler {
 		mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	}
 
-	return logging(mux)
+	// El registro va POR FUERA de la autenticación: los 401 son justo lo que
+	// hay que poder ver cuando alguien sondea el puerto.
+	return logging(Auth(mux, token))
 }
 
 func logging(h http.Handler) http.Handler {

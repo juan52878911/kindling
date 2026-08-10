@@ -66,6 +66,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /links", s.handleLinks)
 	mux.HandleFunc("PUT /links", s.handleSetLink)
 	mux.HandleFunc("DELETE /links/{name}", s.handleRemoveLink)
+	mux.HandleFunc("POST /images", s.handleBuildImage)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)

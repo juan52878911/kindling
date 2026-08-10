@@ -12,16 +12,27 @@ Type=simple
 User=juan
 Group=juan
 
-# 0.0.0.0 para que los agentes de la LAN lleguen. Es una decisión consciente:
-# el gateway solo sabe despertar snapshots que ya existen, mientras que el daemon
-# —que equivale a root en este host— sigue sin escuchar en la red.
-# Restringe con firewall si la LAN no es de confianza.
+# 0.0.0.0 para que los agentes de la LAN lleguen, y por eso hay token: despertar
+# un snapshot y llamar a una de sus herramientas ES ejecutar código, así que esto
+# no puede quedar abierto a quien alcance el puerto. El daemon —que equivale a
+# root en este host— sigue sin escuchar en la red, y esa sigue siendo la barrera
+# de verdad; el token protege lo que hay por delante de ella.
+#
+# El token va por entorno y no por flag a propósito: /proc/<pid>/cmdline lo lee
+# cualquiera del host, y un secreto no debe viajar por ahí.
+#
+# Lo genera `make deploy` una vez, en modo 0600. Que lo genere el propio gateway
+# y lo guarde en su configuración —que es lo que hace cuando lo arrancas a mano—
+# aquí no vale: el endurecimiento de más abajo le deja el home en solo lectura, y
+# un token que no persiste cambiaría en cada reinicio, dejando fuera a todos los
+# agentes ya configurados.
+EnvironmentFile=-/etc/kling/gateway.env
 ExecStart=/usr/local/bin/kling gateway -listen 0.0.0.0:8080 -idle 5m
 
 Restart=on-failure
 RestartSec=3
 
-# Endurecimiento: el gateway no toca disco ni necesita privilegios.
+# Endurecimiento: el gateway no necesita privilegios y casi no toca disco.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only

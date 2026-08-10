@@ -78,18 +78,37 @@ daemon:
 	@echo "$(BIN)-linux-amd64  ($(VERSION))"
 
 ## deploy — instala el daemon por SSH y lo reinicia
-deploy: daemon
+## Van también el puente y 80-mcp-image.sh: `kling add` los necesita EN el host,
+## porque construir una imagen monta un loopback y hace chroot, y eso solo lo
+## puede hacer quien ya es root allí.
+deploy: daemon bridge
 	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-amd64 $(TARGET):/tmp/$(BIN)
+	scp -q kling-bridge scripts/80-mcp-image.sh $(TARGET):/tmp/
 	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
-		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
+		sudo install -d /usr/local/lib/kindling && \
+		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
+		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
+		sudo install -m644 /tmp/$(BIN).service /tmp/$(BIN)-gateway.service /etc/systemd/system/ && \
+		sudo install -d -m755 /etc/kling && \
+		( [ -s /etc/kling/gateway.env ] || \
+		  printf "KLING_GATEWAY_TOKEN=%s\n" \
+		    "$$(head -c32 /dev/urandom | base64 | tr "+/" "\-_" | tr -d "=")" \
+		  | sudo tee /etc/kling/gateway.env >/dev/null ) && \
+		sudo chmod 600 /etc/kling/gateway.env && \
 		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
 		sudo systemctl restart $(BIN) && sudo systemctl try-restart $(BIN)-gateway && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
+	@echo "  puente y empaquetador en /usr/local/lib/kindling (los usa 'kling add')"
+	@echo
+	@echo "Apunta tu CLI al token del gateway (se generó una vez, se conserva):"
+	@echo "  kling config set gateway.token \\"
+	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/gateway.env')"
+	@echo "  kling connect -all -install all"
 
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##
