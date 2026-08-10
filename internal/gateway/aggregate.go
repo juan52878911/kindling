@@ -382,10 +382,9 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	}
 	var hits []scored
 	for _, t := range tools {
-		hay := strings.ToLower(t.Qualified + " " + t.Description)
 		n := 0
 		for _, term := range terms {
-			if strings.Contains(hay, term) {
+			if strings.Contains(t.haystack, term) {
 				n++
 			}
 		}
@@ -547,8 +546,13 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		if len(args) == 0 {
 			args = json.RawMessage("{}")
 		}
-		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-			t.Name, args)
+		// nextRPCID() y no un id fijo. Con "id":10 quemado, dos call_tool
+		// concurrentes de la MISMA sesión compartían entrada en la tabla de
+		// pendientes del puente: la segunda pisaba a la primera, que se quedaba
+		// esperando una respuesta ya entregada a otro. Era el único sitio del
+		// gateway que aún lo hacía.
+		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+			nextRPCID(), t.Name, args)
 		return mcpCall(ctx, base, sid, body)
 	}
 
