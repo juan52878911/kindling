@@ -436,3 +436,25 @@ type BridgeRefresh struct {
 	Skipped bool   `json:"skipped,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
+
+// ImageRecipe es CÓMO se construyó una imagen.
+//
+// Se guarda junto a ella porque, si no, una imagen no es reproducible: lo único
+// que sobrevive del comando es el /entrypoint de DENTRO, y para leerlo hay que
+// montar la imagen. Los paquetes no sobreviven en ninguna parte — hay que
+// deducirlos, y deducir mal significa reconstruir algo que no es lo que había.
+//
+// El caso que lo motivó: actualizar el puente de cuatro servicios exigió sacar
+// el comando de cada imagen con `debugfs`, y aun así los paquetes hubo que
+// adivinarlos.
+type ImageRecipe struct {
+	Name     string    `json:"name"`
+	Base     string    `json:"base,omitempty"`
+	Packages []string  `json:"packages,omitempty"`
+	NPM      []string  `json:"npm,omitempty"`
+	PIP      []string  `json:"pip,omitempty"`
+	Cmd      []string  `json:"cmd"`
+	GrowMB   int       `json:"grow_mb,omitempty"`
+	BuiltAt  time.Time `json:"built_at"`
+	KlingVer string    `json:"kling_version,omitempty"`
+}

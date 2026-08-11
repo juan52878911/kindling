@@ -131,6 +131,12 @@ func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildIma
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
+// ImageRecipe devuelve cómo se construyó una imagen.
+func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, error) {
+	var rec ImageRecipe
+	return &rec, c.do(ctx, http.MethodGet, "/images/"+name+"/recipe", nil, &rec)
+}
+
 // RefreshBridges pone el puente actual dentro de las imágenes ya construidas.
 //
 // Por c.long: monta y desmonta cada imagen, y con varias grandes pasa del plazo

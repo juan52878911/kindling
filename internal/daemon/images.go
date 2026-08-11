@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -191,6 +192,18 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// La receta se guarda JUNTO a la imagen, no dentro.
+	//
+	// Dentro haría falta montarla para leerla, que es una operación de root con
+	// riesgo de corromper el ext4 — justo lo que hay que evitar para responder
+	// a "¿cómo se construyó esto?". Al lado, es un fichero de texto.
+	//
+	// Un fallo al escribirla NO tumba la construcción: la imagen ya está hecha y
+	// funciona; perder la receta es peor documentación, no un error.
+	if err := s.saveRecipe(req); err != nil {
+		log.Printf("imagen %s: construida, pero no pude guardar su receta: %v", req.Name, err)
+	}
+
 	writeJSON(w, http.StatusOK, api.BuildImageResult{
 		Name:   req.Name,
 		Path:   filepath.Join(s.root, "images", req.Name+".ext4"),
@@ -234,4 +247,47 @@ func (s *Server) handleRefreshBridges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// recipePath es dónde vive la receta de una imagen.
+func (s *Server) recipePath(name string) string {
+	return filepath.Join(s.root, "images", name+".recipe.json")
+}
+
+// saveRecipe deja constancia de cómo se construyó la imagen.
+//
+// Se escribe en .tmp y se renombra: una receta a medias sería peor que ninguna,
+// porque parece una respuesta.
+func (s *Server) saveRecipe(r api.BuildImageRequest) error {
+	rec := api.ImageRecipe{
+		Name: r.Name, Base: r.Base, Packages: r.Packages, NPM: r.NPM,
+		PIP: r.PIP, Cmd: r.Cmd, GrowMB: r.GrowMB, BuiltAt: time.Now(),
+		KlingVer: Version,
+	}
+	b, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.recipePath(r.Name) + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.recipePath(r.Name))
+}
+
+func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !reName.MatchString(name) {
+		fail(w, http.StatusBadRequest, fmt.Errorf("nombre inválido %q", name))
+		return
+	}
+	b, err := os.ReadFile(s.recipePath(name))
+	if err != nil {
+		fail(w, http.StatusNotFound, fmt.Errorf(
+			"no hay receta de %q. Las imágenes construidas antes de que se guardaran no la tienen; "+
+				"el comando sigue estando dentro, en /entrypoint", name))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b)
 }

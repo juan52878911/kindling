@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"strings"
 
 	"github.com/juan52878911/kindling/internal/api"
 )
@@ -20,8 +21,10 @@ func cmdImages(args []string) error {
 		return imagesRefresh(args[1:])
 	case "toolchain":
 		return imagesToolchain(args[1:])
+	case "recipe":
+		return imagesRecipe(args[1:])
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa refresh o toolchain", args[0])
+		return fmt.Errorf("subcomando desconocido %q: usa refresh, toolchain o recipe", args[0])
 	}
 }
 
@@ -139,5 +142,45 @@ func imagesToolchain(args []string) error {
 	fmt.Println("Ya puedes poblar volúmenes sin instalar nada en el anfitrión:")
 	fmt.Printf("  kling volume populate <vol> -- npm install --prefix /data --ignore-scripts lodash\n")
 	fmt.Printf("  kling volume populate <vol> -- pip install --target /data requests\n")
+	return nil
+}
+
+// imagesRecipe enseña cómo se construyó una imagen.
+//
+// Existe porque hasta ahora una imagen no era reproducible: lo único que
+// sobrevivía del comando era el /entrypoint de dentro —y leerlo exige montarla—
+// mientras que los paquetes instalados no quedaban registrados en ninguna parte.
+func imagesRecipe(args []string) error {
+	fs := flag.NewFlagSet("images recipe", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(reorder(args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("uso: kling images recipe <imagen>")
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	rec, err := api.NewClient(hostOf(*host)).ImageRecipe(ctx, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s  (construida %s con kling %s)\n", rec.Name,
+		rec.BuiltAt.Local().Format("2006-01-02 15:04"), rec.KlingVer)
+	if rec.Base != "" {
+		fmt.Printf("  base:      %s\n", rec.Base)
+	}
+	if len(rec.Packages) > 0 {
+		fmt.Printf("  apk:       %s\n", strings.Join(rec.Packages, " "))
+	}
+	if len(rec.NPM) > 0 {
+		fmt.Printf("  npm:       %s\n", strings.Join(rec.NPM, " "))
+	}
+	if len(rec.PIP) > 0 {
+		fmt.Printf("  pip:       %s\n", strings.Join(rec.PIP, " "))
+	}
+	fmt.Printf("  comando:   %s\n", strings.Join(rec.Cmd, " "))
 	return nil
 }
