@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -163,5 +164,53 @@ func TestDoneSeCierraAlCerrarLaSesion(t *testing.T) {
 	case <-s.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("close no cerró done: el flujo SSE se quedaría colgado")
+	}
+}
+
+// Un tope de respuesta a cero significa "sin configurar", no "vence ya".
+//
+// Importa porque el campo se copia del puente al nacer la sesión: cualquier
+// sitio que construya una sesión sin rellenarlo —un test, un refactor— haría
+// que time.After(0) disparase en el acto y TODA llamada fallase al instante,
+// con un mensaje que habla de tiempos de espera. Es el peor error posible de
+// diagnosticar: parece un servidor MCP lento.
+func TestTopeDeRespuestaCeroNoVenceEnElActo(t *testing.T) {
+	// El extremo de escritura de una tubería hace de stdin: request() envía
+	// antes de esperar, y sin destino ahí el test moriría por otra razón.
+	r, w := io.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, r) }()
+	s := &session{
+		id:      "cero",
+		stdin:   w,
+		pending: map[string]chan json.RawMessage{},
+		notes:   make(chan json.RawMessage, 1),
+		done:    make(chan struct{}),
+		// reqTimeout deliberadamente sin poner.
+	}
+	if s.reqTimeout != 0 {
+		t.Fatal("el test no prueba lo que dice")
+	}
+
+	// Se responde enseguida: si el cero se tomara como plazo, el select elegiría
+	// la rama del tiempo agotado antes de llegar la respuesta.
+	go func() {
+		for i := 0; i < 200; i++ {
+			s.mu.Lock()
+			ch, ok := s.pending["1"]
+			s.mu.Unlock()
+			if ok {
+				ch <- json.RawMessage(`{"jsonrpc":"2.0","id":"1","result":{}}`)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	resp, err := s.request(t.Context(), "1", []byte(`{"jsonrpc":"2.0","id":"1"}`))
+	if err != nil {
+		t.Fatalf("con el tope sin configurar debería esperar la respuesta: %v", err)
+	}
+	if len(resp) == 0 {
+		t.Error("respuesta vacía")
 	}
 }

@@ -112,6 +112,38 @@ type entry struct {
 
 	// checkedAt es cuándo se confirmó por última vez que la instancia vive.
 	checkedAt time.Time
+
+	// inflight cuenta las peticiones que se están atendiendo AHORA.
+	//
+	// Sin esto, "inactivo" se medía por la LLEGADA de peticiones, y una
+	// herramienta que tarda más que g.idle en responder —un analizador estático
+	// sobre un árbol grande— se quedaba sin microVM a media faena: el segador la
+	// congelaba por debajo del trabajo que estaba corriendo. El cliente veía un
+	// "connection timed out" de TCP, que no se parece en nada a la causa.
+	//
+	// Se toca siempre con g.mu tomado, igual que lastUse.
+	inflight int
+}
+
+// begin y end marcan el trabajo en vuelo de una instancia.
+//
+// begin refresca además lastUse: una petición que empieza es uso, aunque tarde
+// en terminar. Y end lo vuelve a refrescar, para que el plazo de inactividad se
+// cuente desde que la respuesta salió y no desde que la petición entró.
+func (g *Gateway) begin(e *entry) {
+	g.mu.Lock()
+	e.inflight++
+	e.lastUse = time.Now()
+	g.mu.Unlock()
+}
+
+func (g *Gateway) end(e *entry) {
+	g.mu.Lock()
+	if e.inflight > 0 {
+		e.inflight--
+	}
+	e.lastUse = time.Now()
+	g.mu.Unlock()
 }
 
 // sessionRoute recuerda a qué instancia pertenece cada sesión MCP.
@@ -272,6 +304,15 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Sesión ya conocida: directo a su instancia, sin consultar al daemon.
 	if sid := r.Header.Get(SessionHeader); sid != "" {
 		if rt := g.route(sid); rt != nil {
+			// La instancia de esta sesión también tiene trabajo en vuelo: si no
+			// se cuenta, el segador la congela igual y la sesión muere con ella.
+			g.mu.Lock()
+			e := g.services[rt.service]
+			g.mu.Unlock()
+			if e != nil {
+				g.begin(e)
+				defer g.end(e)
+			}
 			rt.proxy.ServeHTTP(w, r)
 			return
 		}
@@ -288,7 +329,9 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Se observa la respuesta para capturar el Mcp-Session-Id que asigne el
 	// puente en el initialize, y fijar desde ahí el enrutado de esa conversación.
 	sw := &sessionWriter{ResponseWriter: w, gw: g, service: service, e: e}
+	g.begin(e)
 	e.proxy.ServeHTTP(sw, r)
+	g.end(e)
 
 	// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
 	if r.Method == http.MethodDelete {
@@ -628,7 +671,9 @@ func (g *Gateway) reapOnce(ctx context.Context) {
 
 	g.mu.Lock()
 	for svc, e := range g.services {
-		if time.Since(e.lastUse) > g.idle {
+		// Con trabajo en vuelo NO se congela, por vieja que parezca: lastUse
+		// solo dice cuándo llegó algo, no si sigue corriendo.
+		if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
 			victims = append(victims, victim{svc, e.machineID})
 			delete(g.services, svc)
 		}

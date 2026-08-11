@@ -158,3 +158,58 @@ func TestFillNoDuplicaReposicion(t *testing.T) {
 		t.Errorf("pre-calentó %d, más que el tamaño del fondo (3)", created)
 	}
 }
+
+// Una llamada en vuelo impide que el segador congele su microVM.
+//
+// Este es el fallo que hacía parecer roto un servicio meramente lento: la
+// inactividad se medía por la LLEGADA de peticiones, así que una herramienta
+// que tardaba más que el plazo de inactividad se quedaba sin máquina a media
+// faena. El cliente recibía un "connection timed out" de TCP —la conexión con
+// el invitado congelado— que no señala a la causa por ningún lado.
+func TestNoSeCongelaLoQueEstaTrabajando(t *testing.T) {
+	g := &Gateway{
+		idle:     time.Millisecond, // ya vencido para cualquier lastUse
+		services: map[string]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	e := &entry{machineID: "m1", ip: "172.30.0.2", lastUse: time.Now().Add(-time.Hour)}
+	g.services["lento"] = e
+
+	// Con trabajo en vuelo: intocable, por vieja que sea su última petición.
+	g.begin(e)
+	g.mu.Lock()
+	victima := e.inflight == 0 && time.Since(e.lastUse) > g.idle
+	g.mu.Unlock()
+	if victima {
+		t.Fatal("iba a congelar una instancia que está atendiendo una petición")
+	}
+	if e.inflight != 1 {
+		t.Errorf("inflight = %d, want 1", e.inflight)
+	}
+
+	// Al terminar, lastUse se refresca: el plazo cuenta desde que salió la
+	// respuesta, no desde que entró la petición. Si contase desde la entrada,
+	// una llamada larga dejaría la máquina lista para el sacrificio justo al
+	// devolver el resultado.
+	g.end(e)
+	g.mu.Lock()
+	inflight, reciente := e.inflight, time.Since(e.lastUse) < time.Second
+	g.mu.Unlock()
+	if inflight != 0 {
+		t.Errorf("inflight = %d tras terminar, want 0", inflight)
+	}
+	if !reciente {
+		t.Error("end() debería refrescar lastUse")
+	}
+
+	// Y end() no baja de cero aunque se llame de más: un contador negativo
+	// volvería inmortal a la instancia.
+	g.end(e)
+	g.end(e)
+	g.mu.Lock()
+	n := e.inflight
+	g.mu.Unlock()
+	if n != 0 {
+		t.Errorf("inflight = %d tras end() de más, want 0", n)
+	}
+}

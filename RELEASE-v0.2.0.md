@@ -5,7 +5,7 @@ externas** — el `go.mod` no ha cambiado un byte.
 
 La versión anterior demostraba que la idea funciona: microVMs que descongelan en
 milisegundos y un gateway que las despierta bajo demanda. Esta la hace instalable,
-autenticada y capaz de guardar estado, y arregla siete fallos que solo aparecen cuando
+autenticada y capaz de guardar estado, y arregla nueve fallos que solo aparecen cuando
 metes servicios de verdad.
 
 ---
@@ -109,7 +109,7 @@ Ejecución de `scripts/90-e2e.sh` contra un daemon con KVM (Debian, i7):
 
 ---
 
-## Corrección: siete fallos que solo salen con servicios de verdad
+## Corrección: nueve fallos que solo salen con servicios de verdad
 
 | Fallo | Síntoma que daba | Causa |
 |---|---|---|
@@ -119,6 +119,8 @@ Ejecución de `scripts/90-e2e.sh` contra un daemon con KVM (Debian, i7):
 | Volúmenes sin journal | `EBADMSG` al leer desde la siguiente microVM | Se reutilizaba el formateador de overlays (`-O ^has_journal`), correcto para algo desechable y fatal para algo que debe sobrevivir a matar el VMM |
 | Dos microVMs podían montar el mismo ext4 | Corrupción silenciosa | Faltaba el guard: un ext4 no admite dos escritores |
 | Bucle infinito de reintentos en el gateway | El proxy giraba durante minutos | El `ErrorHandler` reservía una petición cuyo cuerpo ya se había consumido |
+| El segador del gateway congelaba microVMs con trabajo en vuelo | `read: connection timed out` de TCP tras varios minutos, que parece un servidor caído | La inactividad se medía por la LLEGADA de peticiones: una herramienta más lenta que `gateway.idle` se quedaba sin máquina a media faena |
+| El puente cortaba toda respuesta a los 120 s | La misma llamada fallaba siempre en el mismo segundo exacto | Plazo incrustado, más estricto que el del gateway que tiene delante, y con un mensaje que decía «no respondió» en vez de «sigo trabajando» |
 | El empaquetador ejecutaba código ajeno como root | — | `npm install` sin `--ignore-scripts` durante el chroot |
 
 Tres clases de timeout mal calibrados estrangulaban trabajo legítimo (construir una imagen,

@@ -45,6 +45,17 @@ func main() {
 	listen := flag.String("listen", ":8080", "dónde escuchar")
 	idle := flag.Duration("session-idle", 10*time.Minute, "inactividad antes de cerrar una sesión")
 	maxSessions := flag.Int("max-sessions", 32, "sesiones concurrentes como máximo")
+	// Tope de seguridad para una respuesta, NO el plazo real: quien manda es el
+	// contexto de quien llama, que se cancela si el cliente se va. Esto solo
+	// existe para que un servidor MCP colgado no retenga la entrada pendiente
+	// para siempre cuando el cliente tampoco se desconecta.
+	//
+	// El defecto son 5 minutos, no 2: tiene que ser MÁS generoso que el plazo
+	// del gateway que hay delante, o el puente corta trabajo que el gateway
+	// estaba dispuesto a esperar. Un analizador estático sobre un árbol grande
+	// pasa de dos minutos sin estar roto en absoluto.
+	reqTimeout := flag.Duration("request-timeout", defaultRequestTimeout,
+		"tope de seguridad para una respuesta del servidor MCP")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `kling-bridge — expone un servidor MCP de stdio por HTTP
 
@@ -70,6 +81,7 @@ Opciones:
 		argv:        argv,
 		idle:        *idle,
 		maxSessions: *maxSessions,
+		reqTimeout:  *reqTimeout,
 		sessions:    map[string]*session{},
 	}
 	// El puente es PID 1 dentro de la microVM. Si muere sin recoger, deja
@@ -158,10 +170,17 @@ func (b *bridge) closeAll() {
 	}
 }
 
+// defaultRequestTimeout es el tope de seguridad para una respuesta del servidor
+// MCP. Más generoso que el plazo del gateway que hay delante, a propósito: si
+// fuera más corto, el puente cortaría trabajo que el gateway estaba dispuesto a
+// esperar, y el fallo aparecería como un servidor roto en vez de como un límite.
+const defaultRequestTimeout = 5 * time.Minute
+
 type bridge struct {
 	argv        []string
 	idle        time.Duration
 	maxSessions int
+	reqTimeout  time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -173,6 +192,10 @@ type session struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	lastUse time.Time
+	// reqTimeout se copia del puente al nacer la sesión en vez de consultarlo
+	// allí: call() lo lee sin tomar el mutex del puente, y esa dependencia entre
+	// candados es justo la que sale cara de descubrir.
+	reqTimeout time.Duration
 
 	mu      sync.Mutex
 	pending map[string]chan json.RawMessage // id JSON-RPC -> quien espera
@@ -388,9 +411,10 @@ func (b *bridge) spawn() (*session, error) {
 
 	s := &session{
 		id: newID(), cmd: cmd, stdin: stdin, lastUse: time.Now(),
-		pending: map[string]chan json.RawMessage{},
-		notes:   make(chan json.RawMessage, 32),
-		done:    make(chan struct{}),
+		reqTimeout: b.reqTimeout,
+		pending:    map[string]chan json.RawMessage{},
+		notes:      make(chan json.RawMessage, 32),
+		done:       make(chan struct{}),
 	}
 	go s.readLoop(stdout)
 	log.Printf("sesión %s: servidor MCP arrancado (pid %d)", s.id[:8], cmd.Process.Pid)
@@ -470,6 +494,14 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		return nil, err
 	}
 
+	// Un cero significa "sin configurar", no "vence ya". Sin esto, cualquier
+	// sesión construida sin el campo —un test, un refactor futuro— haría que
+	// time.After(0) disparase en el acto y toda llamada fallara al instante.
+	timeout := s.reqTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+
 	select {
 	case resp, ok := <-ch:
 		// Recepción de DOS valores, no de uno. close() cierra los canales
@@ -486,11 +518,17 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		delete(s.pending, id)
 		s.mu.Unlock()
 		return nil, ctx.Err()
-	case <-time.After(120 * time.Second):
+	case <-time.After(timeout):
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
-		return nil, fmt.Errorf("el servidor MCP no respondió al mensaje %s", id)
+		// Se dice que SIGUE trabajando, no que esté roto: el proceso no se mata
+		// aquí, y confundir "tarda mucho" con "muerto" manda a quien depura al
+		// sitio equivocado. Ya pasó con un escaneo que topaba contra este plazo
+		// exacto y parecía un servidor caído.
+		return nil, fmt.Errorf("el servidor MCP no respondió al mensaje %s en %s; "+
+			"sigue trabajando, es el tope del puente. Súbelo con -request-timeout",
+			id, timeout)
 	}
 }
 
