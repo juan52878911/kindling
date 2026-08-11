@@ -544,34 +544,59 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCreated, ID: id, Name: mc.Name})
 
-	egress, err := knet.ParseEgress(req.Egress)
-	if err != nil {
+	// abandonar deshace lo publicado: la máquina ya está en byID, y dejarla ahí
+	// tras un fallo crea un fantasma que no se puede arrancar (no hay `start`) y
+	// que RETIENE su volumen en exclusiva, porque volumeUsers cuenta todo lo que
+	// no esté stopped o failed. Nadie podría montarlo hasta un `rm` a mano.
+	abandonar := func(err error) (*api.Machine, error) {
+		m.mu.Lock()
+		delete(m.byID, id)
+		delete(m.socket, id)
+		m.persist()
+		m.mu.Unlock()
 		os.RemoveAll(dir)
 		return nil, err
 	}
+
+	egress, err := knet.ParseEgress(req.Egress)
+	if err != nil {
+		return abandonar(err)
+	}
 	netcfg := knet.Plan(m.allocNetIndex(), id)
 	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("montando la red: %w", err)
+		return abandonar(fmt.Errorf("montando la red: %w", err))
 	}
+	// Bajo el candado: mc ya está en byID, y List()/Get()/persist() la copian
+	// desde otras goroutines. Es la misma regla por la que boot() devuelve el PID
+	// en vez de escribirlo él.
+	m.mu.Lock()
 	mc.IP, mc.NetIndex, mc.Egress = netcfg.NSIP, netcfg.Index, string(egress)
+	m.mu.Unlock()
 
 	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.
 	if err := m.priv.Own(dir, overlay); err != nil {
 		netcfg.Teardown()
-		os.RemoveAll(dir)
-		return nil, err
+		return abandonar(err)
 	}
 
 	start := time.Now()
 	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, vols, req.AllowExec)
 	if err != nil {
+		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
+		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
+		// máquina — y ahí todavía es 0. Sin esto queda un firecracker vivo para
+		// siempre esperando en un socket que ya nadie usa.
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
 		netcfg.Teardown()
 		m.fail(mc, err)
 		return nil, err
 	}
 	if mc.CPUPct <= 0 {
+		m.mu.Lock()
 		mc.CPUPct = defaultCPUPct
+		m.mu.Unlock()
 	}
 	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
 		log.Printf("aviso: %s: %s", mc.Name, warn)
@@ -815,6 +840,14 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 
 	c := fc.New(sock)
+
+	// El vaciado va ANTES de pausar, y no dentro de kill() como en los demás
+	// caminos. Un invitado pausado no atiende HTTP: la petición se comía su
+	// plazo entero en CADA congelación, y lo que quedara sin vaciar solo vivía
+	// en mem.file — si luego se elimina la máquina warm, esas escrituras
+	// desaparecen sin dejar rastro.
+	m.flushVolume(mc)
+
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
 		return nil, err
@@ -966,7 +999,14 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.byID[mc.ID].Labels = api.MergeLabels(m.byID[mc.ID].Labels, labels)
+	live := m.byID[mc.ID]
+	if live == nil {
+		// La eliminaron entre el Get y el candado. Etiquetar algo que ya no
+		// existe no es un error del que llama, pero deref nil sí tumbaba el
+		// daemon entero.
+		return fmt.Errorf("la máquina %q ya no existe", ref)
+	}
+	live.Labels = api.MergeLabels(live.Labels, labels)
 	m.persist()
 	return nil
 }
@@ -984,6 +1024,16 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
+	if live == nil {
+		// La eliminó alguien mientras parábamos. No es un error: el resultado
+		// que se pedía —que deje de correr— ya se cumplió. Antes esto era un
+		// deref nil que se llevaba por delante el daemon entero.
+		m.mu.Unlock()
+		// mc es ya una COPIA (Get la devuelve por valor), así que ajustarla aquí
+		// no toca el estado compartido.
+		mc.State, mc.PID = api.StateStopped, 0
+		return mc, nil
+	}
 	live.State = api.StateStopped
 	live.PID = 0
 	delete(m.socket, mc.ID)

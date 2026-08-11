@@ -108,6 +108,22 @@ Binaries are published on
 disk. **Windows is not supported** — the code uses POSIX syscalls (`syscall.Kill`,
 `Setsid`, `Stat_t`).
 
+**Getting the runtime ready — `kling up`:**
+
+```sh
+kling up        # checks KVM, nftables, the kindling user, artifacts and images
+kling status    # one-pass diagnosis: daemon, gateway and the agents it finds
+```
+
+`kling up` **prints** the commands that need privileges instead of running them: letting an
+installer touch nftables and create system users on its own is asking for trust that does not
+need to be asked for. The kernel and the base image ship inside the binary, so there is no
+script to run first.
+
+The two silent failures it catches — the ones that cost you an afternoon if they slip
+through — are a missing `nft` (microVMs boot with no network) and a missing `kindling` user
+(Firecracker ends up running as root).
+
 **From source — `make`:**
 
 ```sh
@@ -150,14 +166,33 @@ surprising for a CLI.
 **Precedence:** `-H` > `$KLING_HOST` > active context > local socket. The flag always
 wins, so a one-off invocation doesn't force you to switch contexts.
 
+## Catalog: searching for and adding MCP servers
+
+You don't need to know how to package anything. `kling` talks to the official registry
+(`registry.modelcontextprotocol.io`):
+
+```sh
+kling search filesystem                    # what is out there, and what it can package on its own
+kling add io.github.domdomegg/filesystem-mcp
+```
+
+`kling add` builds the image, boots a template, asks it what it can do, freezes it as a
+golden snapshot and stores its catalog. From then on, listing its capabilities **does not
+wake the microVM**.
+
+The "kling add" column of `search` says no when the server does not speak stdio over npm,
+which is the only thing the packager can do unattended — and when it says no, it explains
+why and what the alternative is, instead of failing halfway through the build.
+
 ## Volumes: what outlives the microVM
 
 Each machine's overlay dies with it. A **volume** is the opposite: an ext4 file on the host,
-exposed as a third disk (`vdc`), that persists.
+attached as a disk of its own — `vdc` onwards, up to four of them — that persists.
 
 ```sh
 kling volume create notes -size 2G
 kling mcp import notes-mcp -volume notes          # or: kling add <server> ...
+kling run -name jottings -volume notes:/data      # or a microVM by hand
 kling volume ls
 ```
 
@@ -178,11 +213,123 @@ imported without a volume cannot get one without re-importing, and kling says ex
 instead of failing inside the guest.
 
 **Who mounts it.** The bridge, not the image's init — so no base image needs rebuilding. The
-mountpoint travels on the kernel command line (`kling.volume=/data`), which means the same
-golden snapshot works with different volumes.
+mountpoints travel on the kernel command line (`kling.volume=/data,/libs:ro`), which means
+the same golden snapshot works with different volumes.
 
-Deleting a volume that a microVM has mounted would corrupt its filesystem underneath, so
-`kling volume rm` refuses and tells you who is using it.
+**One writer, or many readers.** That is not a policy, it is physics: ext4 does not tolerate
+two systems mounting it read-write. Each one caches metadata the other cannot see, and the
+result is corruption. Reading is a different matter: if nobody writes, the blocks do not
+change. So kling allows **one** exclusive writer **or** as many readers as you like, and
+never both at once.
+
+The rule is enforced on the boot path, not only on delete: whoever mounts a volume is as
+dangerous as whoever removes it. `kling volume rm` refuses while a microVM has it mounted —
+deleting the file underneath would corrupt its filesystem — and a `run` or an `import` that
+would break the one-writer rule is turned down the same way, naming the machine that holds
+it and, when reading is enough, showing you the `-volume <name>:ro` that would work.
+
+### A shared package library
+
+That is what makes it possible not to duplicate the same dependencies in every image:
+
+```sh
+kling volume create libs -size 2G
+
+# the image carrying the installers, once:
+kling images toolchain
+
+# populate it INSIDE a single-use microVM, which is destroyed when it finishes:
+kling volume populate libs -- npm install --prefix /data --ignore-scripts lodash axios zod
+kling volume populate libs -- pip install --target /data requests
+
+# and consume it from as many microVMs as you need:
+kling mcp import my-service -volume libs:/libs:ro
+kling run -name another -volume libs:/libs:ro
+```
+
+The mode travels glued to the mountpoint on the kernel command line (`kling.volume=/libs:ro`),
+so the bridge cannot read one without the other. Inside, it is mounted with `MS_RDONLY`
+**and** `noload`: without `noload`, ext4 would try to replay the journal at mount time —
+which is a write — and several guests doing that at once against the same file is precisely
+the corruption read-only mode exists to avoid. The drive is marked read-only in Firecracker
+itself as well, so the barrier does not rely on the guest behaving: writing gets `EROFS`.
+
+### Several volumes in the same microVM
+
+The two natural uses were getting in each other's way: a service wants its own read-write
+storage **and** the shared library read-only. `-volume` can be repeated, and the order you
+write them in is the order of the disks (`vdc`, `vdd`, …):
+
+```sh
+kling mcp import my-service -volume data:/data -volume libs:/libs:ro
+```
+
+```
+NAME     LOGICAL   ON DISK   USED BY
+data     2.0G      97M       my-service-1a98a4 (writing)
+libs     2.0G      109M      my-service-1a98a4, another-one
+```
+
+Four is the ceiling, because each one is a disk and disks are named by letter.
+
+**Installing is running third-party code**, so `volume populate` does it inside a microVM
+with the volume mounted read-write and destroys it when it is done — rather than in a chroot
+on the host, which would take that execution outside the very boundary that justifies the
+project. The ability to run commands is switched on by the kernel (`kling.exec=1`) and only
+the daemon sets it, only for those machines: a service microVM does not even have that route
+registered.
+
+**Packages find themselves.** Once everything is mounted, the bridge looks inside each volume
+and exports `NODE_PATH` and `PYTHONPATH` to the MCP server:
+
+| What the volume holds | What gets exported |
+|---|---|
+| `<vol>/node_modules` | `NODE_PATH=<vol>/node_modules` |
+| `<vol>/*.dist-info` (`pip install --target`) | `PYTHONPATH=<vol>` |
+| `<vol>/lib/python*/site-packages` (`pip install --prefix`) | that path in `PYTHONPATH` |
+
+It is worked out at boot rather than at image build time because the mountpoint is decided at
+boot: a `NODE_PATH` baked into the image would start lying the moment you mounted the library
+somewhere else. And the directory is checked for existence before being added — an ordinary
+data volume does not end up in `PYTHONPATH`, because a `json.py` sitting in it would shadow
+the standard library module and the failure would surface nowhere near its cause. Whatever
+the image already has installed comes **first**: updating the volume must not silently change
+the version a service that already worked is using.
+
+**The set of disks is fixed at freeze time.** Firecracker will not add or remove drives on a
+restored VM — it only lets you repoint each one at a different file — so changing how many
+volumes a service carries means re-importing it, and kling says exactly that instead of
+failing inside the guest.
+
+**It survives the machine being killed.** Stopping a microVM means killing the VMM, which
+from the guest's point of view is indistinguishable from a power cut. That is why a volume is
+formatted **with a journal** — unlike overlays, which are disposable — and why the daemon
+asks the guest to flush its cache to disk before killing it. Without the first, the
+filesystem is left inconsistent and with nothing to replay; without the second, you lose
+exactly what was written last. Every boot is preceded by an `e2fsck -p`, which on a healthy
+volume costs milliseconds.
+
+### The bridge lives inside every image
+
+It is the guest's PID 1, so it is copied in when the image is built. Updating kindling on the
+host does **not** update the bridge of services that are already packaged:
+
+```sh
+kling images refresh              # all of them
+kling images refresh semgrep      # just one
+```
+
+This is not a missing feature, it is a baffling failure if you forget it: an old bridge does
+not understand the new kernel command line parameters, dies at startup and — being PID 1 —
+the guest panics. Deducing from a kernel panic that an image needs updating is asking too
+much.
+
+It never touches an image some microVM is using (modifying an ext4 that another system has
+mounted corrupts it, even if that system holds it read-only), it compares by content so it
+does not rewrite what is already current, and it writes alongside and renames: either the old
+bridge is there or the new one, never a truncated one. Afterwards you have to **re-import**
+the affected services, because their golden snapshot was frozen with the previous bridge
+inside.
 
 ## Why microVMs and not containers
 
@@ -486,11 +633,19 @@ root on its host. The gateway does listen, but all it knows how to do is wake in
 snapshots that already exist.
 
 ```sh
-kling gateway -listen 127.0.0.1:8080 -idle 5m
-curl http://127.0.0.1:8080/mcp/echo/       # the tool appears on its own
-curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/services   # needs the token
-curl http://127.0.0.1:8080/healthz        # open: it is the liveness probe
+kling gateway -listen 127.0.0.1:8080 -idle 5m   # generates the token the first time
+
+# The gateway REQUIRES a token: waking a snapshot is running code, and while the
+# daemon protects itself by not listening, the gateway does listen.
+T=$(kling config path >/dev/null && echo "$KLING_GATEWAY_TOKEN")
+curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/mcp/echo/
+curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/services
+curl http://127.0.0.1:8080/healthz              # open: it is the liveness probe
 ```
+
+The token is stored in `gateway.token` on the host the gateway runs on, and copied to the
+client with `kling config set gateway.token …` (`kling connect` does it for you). To skip it
+during development there is `-no-auth`, which insists on listening on loopback.
 
 Measured end to end with a real MCP server inside the microVM:
 

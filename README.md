@@ -182,7 +182,8 @@ y qué alternativa hay, en vez de fallar a mitad de la construcción.
 ## Volúmenes: lo que sobrevive a la microVM
 
 El overlay de cada máquina muere con ella. Un **volumen** es lo contrario: un fichero ext4
-en el host que se expone como tercer disco (`vdc`) y que persiste.
+en el host que se engancha como disco propio —de `vdc` en adelante, hasta cuatro— y que
+persiste.
 
 ```sh
 kling volume create notas -size 2G
@@ -209,7 +210,8 @@ kling lo dice con esas palabras en vez de fallar dentro del invitado.
 
 **Quién lo monta.** El puente, no el init de la imagen: así no hay que reconstruir ninguna
 imagen base. El punto de montaje viaja en la línea de comandos del kernel
-(`kling.volume=/data`), de modo que el mismo snapshot dorado sirve con volúmenes distintos.
+(`kling.volume=/data,/libs:ro`, con el modo pegado a cada punto de montaje), de modo que el
+mismo snapshot dorado sirve con volúmenes distintos.
 
 **Un escritor, o muchos lectores.** No es una política, es física: un ext4 no admite dos
 sistemas montándolo en escritura. Cada uno cachea metadatos que el otro no ve, y el
@@ -490,10 +492,11 @@ molesta:
   No es el aislamiento: el puente por su cuenta despacha 16 llamadas en paralelo en 127 ms,
   y los servicios efímeros hacen 8 de 8 en 785 ms. El fallo está en el gateway, sin localizar.
   Mientras tanto, con un servicio persistente conviene ir en serie.
-- **No hay almacenamiento duradero.** Un servicio persistente conserva su estado mientras
-  viva su instancia, no más. Para lo que deba sobrevivir a todo hace falta montar un volumen
-  del host dentro de la microVM, que no está implementado — de ahí que la recomendación sea
-  un servicio de memoria enlazado.
+- **Lo que no está en un volumen no sobrevive.** Un servicio conserva su estado mientras
+  viva su instancia; lo que deba sobrevivir a todo va en un volumen, y hay que declararlo al
+  importar porque el conjunto de discos queda fijado al congelar el snapshot. Se olvida con
+  facilidad, y el fallo es silencioso: la escritura dice «success» y el fichero no está la
+  próxima vez.
 - **Las barreras que faltan** están enumeradas en [SECURITY.md](SECURITY.md): sin chroot,
   sin cuota dura de disco, sin cifrado en reposo, snapshots dorados sin firmar.
 
@@ -872,9 +875,9 @@ Un servicio persistente conserva su contenido mientras viva su instancia, que se
 quedar ociosa y vuelve intacta. Pero si esa instancia se elimina —limpieza manual, `kling rm`,
 reinstalar el servicio— el estado se va con ella, porque vive en su overlay.
 
-**kindling da persistencia de sesión, no almacenamiento duradero.** Para datos que deban
-sobrevivir a todo hace falta montar un volumen del host dentro de la microVM, que hoy no está
-implementado.
+**Sin volumen, kindling da persistencia de sesión y nada más.** Lo que deba sobrevivir a la
+microVM va en un volumen (ver [Volúmenes](#volúmenes-lo-que-sobrevive-a-la-microvm)), y hay
+que pedirlo al importar el servicio.
 
 ## Conectarlo con tu agente de IA
 
@@ -1088,10 +1091,13 @@ para este servicio mientras está congelado.
 
 ## Traer tu propio servicio de memoria
 
-kindling no implementa almacenamiento compartido, y es deliberado: se probó la vía de montar
-un filesystem común entre microVMs y se descartó. Firecracker solo expone dispositivos de
-bloque, y un ext4 compartido entre varias VMs se corrompe; lo demás —NFS, virtio-fs— añade
-mucha maquinaria para algo que un servidor MCP ya resuelve.
+kindling comparte almacenamiento **en solo lectura** —una biblioteca de paquetes que puebla
+una máquina y consumen muchas—, pero no en escritura, y es deliberado: Firecracker solo
+expone dispositivos de bloque, y un ext4 montado en escritura por dos VMs se corrompe. Eso no
+es una limitación de kindling, es cómo funciona un sistema de ficheros.
+
+Para estado compartido que varios servicios escriban, lo demás —NFS, virtio-fs— añade mucha
+maquinaria para algo que un servidor MCP ya resuelve.
 
 En su lugar, se enlaza un servidor MCP **externo**:
 
