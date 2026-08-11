@@ -26,6 +26,15 @@ ok()   { printf "  \033[32mok\033[0m    %s\n" "$1"; pass=$((pass+1)); }
 bad()  { printf "  \033[31mFALLO\033[0m %s\n     esperaba: %s\n     obtuvo:   %s\n" "$1" "$2" "$3"; fail=$((fail+1)); }
 step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 
+# contiene busca una subcadena SIN tuberías.
+#
+# `algo | grep -q X` es una trampa con `set -o pipefail`: grep sale en cuanto
+# encuentra la coincidencia y cierra la tubería, el productor recibe SIGPIPE y
+# sale distinto de cero, y la tubería entera se da por fallida AUNQUE el texto
+# estuviera. Una prueba que falla sobre una función que funciona es peor que no
+# tenerla: manda a corregir lo que no está roto.
+contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
+
 need() { command -v "$1" >/dev/null || { echo "falta $1" >&2; exit 1; }; }
 need "$KLING"; need curl; need python3
 
@@ -45,22 +54,23 @@ trap cleanup EXIT
 # ── 1. el daemon está y tiene lo que hace falta ───────────────────────────────
 step "1. Daemon"
 info=$($KLING info 2>&1) || { echo "$info"; echo "no alcanzo el daemon"; exit 1; }
-echo "$info" | grep -q "KVM: *sí" && ok "KVM disponible" \
-  || bad "KVM" "sí" "$(echo "$info" | grep -i kvm)"
-echo "$info" | grep -qi firecracker && ok "firecracker instalado" \
+# Los espacios de la tabla son variables, así que se aplasta antes de comparar.
+kvm=$(printf '%s' "$info" | tr -s ' ' | grep -i '^KVM:' || true)
+contiene "$kvm" "sí" && ok "KVM disponible" || bad "KVM" "KVM: sí" "${kvm:-nada}"
+contiene "$info" "irecracker" && ok "firecracker instalado" \
   || bad "firecracker" "una versión" "nada"
 
 # ── 2. ciclo de vida: arrancar, congelar, descongelar ─────────────────────────
 step "2. Ciclo de vida de una microVM"
 NAME="e2e-vida-$$"
 out=$($KLING run -name "$NAME" -image min 2>&1)
-if echo "$out" | grep -q "arrancada"; then
+if contiene "$out" "arrancada"; then
   ok "arranque en frío: $(echo "$out" | grep -o '[0-9]* ms' | head -1)"
 else
   bad "run" "una máquina arrancada" "$out"
 fi
 out=$($KLING freeze "$NAME" 2>&1)
-echo "$out" | grep -q warm && ok "freeze -> warm ($(echo "$out" | grep -o '[0-9]* ms' | head -1))" \
+contiene "$out" "warm" && ok "freeze -> warm ($(echo "$out" | grep -o '[0-9]* ms' | head -1))" \
   || bad "freeze" "estado warm" "$out"
 
 # El thaw es LA cifra del proyecto: si sube de 200 ms, algo se rompió.
@@ -83,7 +93,7 @@ $KLING rm "$NAME" >/dev/null 2>&1
 step "3. Volumen persistente"
 $KLING volume rm "$VOL" >/dev/null 2>&1
 out=$($KLING volume create "$VOL" -size 256M 2>&1)
-echo "$out" | grep -q creado && ok "volumen creado" || bad "volume create" "creado" "$out"
+contiene "$out" "creado" && ok "volumen creado" || bad "volume create" "creado" "$out"
 
 # CON journal. Sin él, matar el VMM —que es como se para una microVM— deja el
 # sistema de ficheros incoherente y sin nada que reproducir: el siguiente
@@ -91,7 +101,7 @@ echo "$out" | grep -q creado && ok "volumen creado" || bad "volume create" "crea
 if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
   feats=$(ssh "${KLING_HOST#ssh://}" \
     "sudo dumpe2fs -h /var/lib/kindling/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem features'")
-  echo "$feats" | grep -q has_journal && ok "formateado con journal" \
+  contiene "$feats" "has_journal" && ok "formateado con journal" \
     || bad "journal" "has_journal entre las features" "${feats:-no pude leerlo}"
 fi
 
@@ -99,14 +109,14 @@ NAME="e2e-vol-$$"
 if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
   # No se puede BORRAR mientras alguien lo usa.
   out=$($KLING volume rm "$VOL" 2>&1)
-  echo "$out" | grep -qi "usan\|use" && ok "se niega a borrar un volumen en uso" \
+  contiene "$out" "usan" && ok "se niega a borrar un volumen en uso" \
     || bad "volume rm en uso" "un rechazo" "$out"
 
   # Y tampoco se puede MONTAR dos veces. Un ext4 no admite dos escritores: cada
   # uno cachea metadatos que el otro no ve y el resultado es corrupción. Esta
   # comprobación es lo único que lo impide.
   out=$($KLING run -name "$NAME-bis" -image min -volume "$VOL" 2>&1)
-  if echo "$out" | grep -qi "en ESCRITURA"; then
+  if contiene "$out" "en ESCRITURA"; then
     ok "se niega a montar el mismo volumen en dos escritores"
   else
     bad "doble montaje" "un rechazo nombrando a $NAME" "$out"
@@ -116,7 +126,7 @@ if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
   # Con un escritor dentro no entra NADIE, ni a leer: vería metadatos cambiando
   # bajo sus pies.
   out=$($KLING run -name "$NAME-ro" -image min -volume "$VOL:/x:ro" 2>&1)
-  if echo "$out" | grep -qi "en ESCRITURA"; then
+  if contiene "$out" "en ESCRITURA"; then
     ok "un escritor bloquea también a los lectores"
   else
     bad "lector con escritor dentro" "un rechazo" "$out"
@@ -124,8 +134,9 @@ if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
   fi
 
   # Aparece a quién pertenece, que es lo que hace comprensible el rechazo.
-  $KLING volume ls 2>&1 | grep -q "$NAME" && ok "volume ls dice quién lo usa" \
-    || bad "volume ls" "el nombre de la máquina que lo monta" "$($KLING volume ls 2>&1 | grep "$VOL")"
+  out=$($KLING volume ls 2>&1)
+  contiene "$out" "$NAME" && ok "volume ls dice quién lo usa" \
+    || bad "volume ls" "el nombre de la máquina que lo monta" "$out"
 
   $KLING rm "$NAME" >/dev/null 2>&1
 else
@@ -134,12 +145,13 @@ fi
 
 # Liberado tras destruir la máquina, y el sistema de ficheros queda limpio: el
 # daemon le pide al invitado que vacíe la caché antes de matarlo.
-$KLING volume ls 2>&1 | grep "$VOL" | grep -q "—" && ok "se libera al destruir la máquina" \
-  || bad "liberación" "sin usuarios" "$($KLING volume ls 2>&1 | grep "$VOL")"
+out=$($KLING volume ls 2>&1 | grep "$VOL " || true)
+contiene "$out" "—" && ok "se libera al destruir la máquina" \
+  || bad "liberación" "sin usuarios" "$out"
 if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
   st=$(ssh "${KLING_HOST#ssh://}" \
     "sudo dumpe2fs -h /var/lib/kindling/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem state'")
-  echo "$st" | grep -qi clean && ok "queda limpio tras matar el VMM" \
+  contiene "$st" "clean" && ok "queda limpio tras matar el VMM" \
     || bad "estado del ext4" "clean" "${st:-no pude leerlo}"
 fi
 
@@ -157,7 +169,7 @@ done
 
 # Y con lectores dentro no entra un escritor.
 out=$($KLING run -name "e2e-esc-$$" -image min -volume "$VOL" 2>&1)
-if echo "$out" | grep -qi "leyendo"; then
+if contiene "$out" "leyendo"; then
   ok "los lectores bloquean al escritor"
 else
   bad "escritor con lectores dentro" "un rechazo" "$out"
@@ -172,8 +184,9 @@ NAME="e2e-multi-$$"
 if $KLING run -name "$NAME" -image min -volume "$VOL:/uno" -volume "$VOL2:/dos:ro" >/dev/null 2>&1; then
   ok "una microVM con dos volúmenes"
   # volume ls debe distinguir quién escribe de quién lee.
-  $KLING volume ls 2>&1 | grep "$VOL " | grep -q "escritura" && ok "volume ls distingue escritor de lectores" \
-    || bad "volume ls" "marca de (escritura)" "$($KLING volume ls 2>&1 | grep "$VOL ")"
+  out=$($KLING volume ls 2>&1)
+  contiene "$out" "escritura" && ok "volume ls distingue escritor de lectores" \
+    || bad "volume ls" "marca de (escritura)" "$out"
   $KLING rm "$NAME" >/dev/null 2>&1
 else
   bad "dos volúmenes" "una máquina con ambos" "no arrancó"
@@ -181,7 +194,7 @@ fi
 
 # Dos volúmenes en el mismo punto de montaje: el segundo taparía al primero.
 out=$($KLING run -name "e2e-choque-$$" -image min -volume "$VOL:/x" -volume "$VOL2:/x" 2>&1)
-echo "$out" | grep -qi "taparía" && ok "rechaza dos volúmenes en el mismo punto" \
+contiene "$out" "taparía" && ok "rechaza dos volúmenes en el mismo punto" \
   || bad "puntos de montaje repetidos" "un rechazo" "$out"
 $KLING rm "e2e-choque-$$" >/dev/null 2>&1
 
