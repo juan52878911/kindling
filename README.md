@@ -225,6 +225,23 @@ libs     2.0G     109M       mi-servicio-1a98a4, otra-mas
 
 El máximo son cuatro, porque cada uno es un disco y los discos se nombran por letra.
 
+**Los paquetes se encuentran solos.** Tras montar, el puente mira dentro de cada volumen y
+exporta `NODE_PATH` y `PYTHONPATH` al servidor MCP:
+
+| Lo que hay en el volumen | Qué se exporta |
+|---|---|
+| `<vol>/node_modules` | `NODE_PATH=<vol>/node_modules` |
+| `<vol>/*.dist-info` (`pip install --target`) | `PYTHONPATH=<vol>` |
+| `<vol>/lib/python*/site-packages` (`pip install --prefix`) | esa ruta en `PYTHONPATH` |
+
+Se calcula al arrancar y no al construir la imagen porque el punto de montaje se decide al
+arrancar: un `NODE_PATH` incrustado mentiría en cuanto montaras la biblioteca en otro sitio.
+Y se comprueba que el directorio existe antes de añadirlo — un volumen de datos cualquiera
+no entra en `PYTHONPATH`, porque un `json.py` dentro taparía el módulo de la biblioteca
+estándar y el fallo aparecería lejísimos de su causa. Lo que la imagen ya traiga instalado
+va **primero**: actualizar el volumen no debe cambiar en silencio la versión que usa un
+servicio que ya funcionaba.
+
 **El conjunto de discos queda fijado al congelar.** Firecracker no admite añadir ni quitar
 discos a una VM restaurada —solo reapuntar cada uno a otro fichero—, así que cambiar
 cuántos volúmenes lleva un servicio exige reimportarlo, y kling lo dice con esas palabras

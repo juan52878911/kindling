@@ -197,7 +197,9 @@ está `scripts/90-e2e.sh`, que corre contra un daemon real con KVM:
   política de red, así que los que usen internet fallarán al despertar.
 - **`make deploy` no actualiza el puente dentro de las imágenes ya construidas.** El puente
   vive *dentro* de cada imagen y se copia cuando la imagen se construye, así que un servicio
-  empaquetado antes seguirá con el puente viejo — y sin el vaciado de volumen que esta
-  versión añade. Reconstruye los que usen volumen con `kling add <servidor> -volume …`.
+  empaquetado antes seguirá con el puente viejo. Con volúmenes de solo lectura el síntoma es
+  brutal: el puente antiguo no entiende el sufijo `:ro`, intenta montar en escritura un disco
+  que no lo admite, muere — y como es PID 1, **el invitado entra en pánico**. Reconstruye con
+  `kling add <servidor> -volume …` los servicios que vayan a usar volúmenes.
 - **Los volúmenes creados antes de esta versión no tienen journal.** `kling volume ls` los
   sigue mostrando, pero no sobrevivirán bien a un apagado brusco: recréalos.

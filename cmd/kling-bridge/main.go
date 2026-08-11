@@ -113,6 +113,14 @@ Opciones:
 	if err != nil {
 		log.Fatalf("volumen: %v", err)
 	}
+	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
+	// saber cuáles traen paquetes.
+	b.env = libraryEnv(os.Environ(), volumes)
+	for _, kv := range b.env {
+		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
+			log.Printf("biblioteca: %s", kv)
+		}
+	}
 
 	// /volume/sync vacía la caché del invitado al disco.
 	//
@@ -178,6 +186,11 @@ type bridge struct {
 	idle        time.Duration
 	maxSessions int
 	reqTimeout  time.Duration
+	// env es el entorno con el que se lanza cada servidor MCP, ya con
+	// NODE_PATH y PYTHONPATH apuntando a los volúmenes que traen paquetes. Se
+	// calcula UNA vez, tras montar: recorrer el disco en cada sesión nueva
+	// sería trabajo repetido sobre algo que no cambia.
+	env []string
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -392,6 +405,7 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 // spawn lanza un proceso del servidor MCP para una sesión nueva.
 func (b *bridge) spawn() (*session, error) {
 	cmd := exec.Command(b.argv[0], b.argv[1:]...)
+	cmd.Env = b.env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

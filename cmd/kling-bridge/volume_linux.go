@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -41,6 +42,21 @@ func mountVolumes() ([]volumeSpec, error) {
 			flags, opts = syscall.MS_RDONLY, "noload"
 		}
 		if err := syscall.Mount(v.device, v.mount, "ext4", flags, opts); err != nil {
+			// EACCES sobre un disco que el VMM marcó de solo lectura casi
+			// siempre significa que este puente no entendió el modo y pidió
+			// montarlo en escritura. Pasa cuando la imagen lleva un puente
+			// anterior a los volúmenes compartidos: interpreta el ":ro" como
+			// parte del nombre del directorio.
+			//
+			// Merece un mensaje propio porque el puente es PID 1: al morir, el
+			// kernel entra en pánico, y un pánico es un sitio pésimo para
+			// deducir que hay que reconstruir una imagen.
+			if errors.Is(err, syscall.EACCES) && !v.readOnly {
+				return nil, fmt.Errorf("montando %s en %s: %w.\n"+
+					"El disco parece de SOLO LECTURA y este puente lo pidió en escritura.\n"+
+					"Suele ser una imagen con un puente antiguo: reconstrúyela con `kling add`",
+					v.device, v.mount, err)
+			}
 			return nil, fmt.Errorf("montando %s en %s: %w", v.device, v.mount, err)
 		}
 		if v.readOnly {
