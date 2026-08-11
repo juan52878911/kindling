@@ -44,6 +44,7 @@ VOLÚMENES
                                                    a la microVM
   volume ls | rm <n>                               listar / eliminar
   volume populate <n> -image I -- <cmd>            instala paquetes dentro de una microVM
+  images refresh [imagen...]                       pone el puente actual dentro de las imágenes
 
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
@@ -191,6 +192,8 @@ func main() {
 		err = cmdCommit(args)
 	case "snapshots":
 		err = cmdSnapshots(args)
+	case "images":
+		err = cmdImages(args)
 	case "rmi":
 		err = cmdRmi(args)
 	case "topo":

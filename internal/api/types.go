@@ -421,3 +421,15 @@ type PopulateResult struct {
 	Machine  string `json:"machine"`
 	UsedMiB  int64  `json:"used_mib"`
 }
+
+// BridgeRefresh es lo que pasó con una imagen al poner el puente actual dentro.
+//
+// Se informa TAMBIÉN de las que no hacía falta tocar y de las que se saltaron:
+// saber que una imagen sigue con el puente viejo porque la está usando alguien
+// es justo lo que hay que saber, y omitirlo la haría parecer al día.
+type BridgeRefresh struct {
+	Image   string `json:"image"`
+	Updated bool   `json:"updated"`
+	Skipped bool   `json:"skipped,omitempty"`
+	Error   string `json:"error,omitempty"`
+}

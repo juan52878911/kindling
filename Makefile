@@ -141,6 +141,13 @@ deploy: daemon bridge
 	@echo "daemon desplegado en $(TARGET)"
 	@echo "  puente y empaquetador en /usr/local/lib/kindling (los usa 'kling add')"
 	@echo
+	@# El puente vive DENTRO de cada imagen: desplegarlo aquí no toca los
+	@# servicios ya empaquetados, y uno antiguo no entiende los parámetros
+	@# nuevos del kernel — muere al arrancar y, como es PID 1, el invitado
+	@# entra en pánico. Este aviso es lo que separa eso de un misterio.
+	@echo "El puente vive DENTRO de cada imagen. Ponlo al día en las ya construidas:"
+	@echo "  kling images refresh"
+	@echo
 	@echo "Apunta tu CLI al token del gateway (se generó una vez, se conserva):"
 	@echo "  kling config set gateway.token \\"
 	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/gateway.env')"

@@ -131,6 +131,18 @@ func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildIma
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
+// RefreshBridges pone el puente actual dentro de las imágenes ya construidas.
+//
+// Por c.long: monta y desmonta cada imagen, y con varias grandes pasa del plazo
+// del cliente normal.
+func (c *Client) RefreshBridges(ctx context.Context, images []string) ([]BridgeRefresh, error) {
+	var res []BridgeRefresh
+	body := struct {
+		Images []string `json:"images,omitempty"`
+	}{images}
+	return res, c.doWith(c.long, ctx, http.MethodPost, "/images/refresh-bridge", body, &res)
+}
+
 func (c *Client) Volumes(ctx context.Context) ([]*Volume, error) {
 	var l []*Volume
 	return l, c.do(ctx, http.MethodGet, "/volumes", nil, &l)

@@ -203,3 +203,21 @@ func (s *Server) bridgePath() string {
 	}
 	return ""
 }
+
+func (s *Server) handleRefreshBridges(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Images []string `json:"images,omitempty"`
+	}
+	// Cuerpo vacío = todas las imágenes. No es un error.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	// context.WithoutCancel: si el cliente corta a media faena, abandonar aquí
+	// dejaría una imagen montada en escritura. Es exactamente la cadena que ya
+	// corrompió una imagen en este proyecto y acabó en un pánico del invitado.
+	res, err := s.mgr.RefreshBridges(context.WithoutCancel(r.Context()), s.bridgePath(), req.Images)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}

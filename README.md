@@ -261,6 +261,27 @@ ficheros queda incoherente y sin nada que reproducir; sin lo segundo, se pierde 
 último que se escribió. Antes de cada arranque se le pasa un `e2fsck -p`, que sobre un
 volumen sano cuesta milisegundos.
 
+### El puente vive dentro de cada imagen
+
+Es el PID 1 del invitado, así que se copia dentro cuando la imagen se construye. Actualizar
+kindling en el anfitrión **no** actualiza el puente de los servicios ya empaquetados:
+
+```sh
+kling images refresh              # todas
+kling images refresh semgrep      # solo una
+```
+
+No es una carencia de funciones, es un fallo desconcertante si se olvida: un puente antiguo
+no entiende los parámetros nuevos de la línea de comandos del kernel, muere al arrancar y
+—por ser PID 1— el invitado entra en pánico. Deducir de un pánico del kernel que hay que
+actualizar una imagen es pedir demasiado.
+
+Nunca toca una imagen que esté usando alguna microVM (modificar un ext4 montado por otro
+sistema lo corrompe, aunque él lo tenga en solo lectura), compara por contenido para no
+reescribir lo que ya está al día, y escribe al lado y renombra: o está el puente viejo o el
+nuevo, nunca uno truncado. Después hay que **reimportar** los servicios, porque su snapshot
+dorado se congeló con el puente anterior dentro.
+
 ## Por qué microVMs y no contenedores
 
 Un servidor MCP es un proceso Node o Python de 50-100 MB. Meterlo en una microVM no ahorra
