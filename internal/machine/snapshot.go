@@ -285,6 +285,24 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, err
 	}
+	// El volumen se resuelve ANTES de arrancar nada: si se pide uno sobre un
+	// snapshot que no lo lleva, hay que decirlo aquí y no tras el arranque.
+	volPath, _, verr := m.resolveVolume(req)
+	if verr != nil {
+		os.RemoveAll(dir)
+		return nil, verr
+	}
+	if volPath != "" && !snap.HasVolume {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("el servicio %q se importó sin volumen, y a una microVM restaurada "+
+			"no se le pueden añadir discos.\nReimpórtalo con volumen:  kling mcp import %s -volume %s",
+			req.From, req.From, req.Volume)
+	}
+	if volPath == "" && snap.HasVolume {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("el servicio %q se importó CON volumen y hay que darle uno:  -volume <nombre>", req.From)
+	}
+
 	netcfg := knet.Plan(m.allocNetIndex(), id)
 	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
 		os.RemoveAll(dir)
@@ -301,6 +319,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
+		Volume: req.Volume, VolumeMount: snap.VolumeMount,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(snap.Labels, req.Labels),
 		CreatedAt: time.Now(),
@@ -339,6 +358,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err := c.PatchDrive(ctx, "overlay", overlay); err != nil {
 		m.fail(mc, fmt.Errorf("reapuntando el overlay: %w", err))
 		return nil, err
+	}
+	// El volumen se reapunta igual que el overlay: el dispositivo ya existe
+	// dentro del snapshot, y aquí solo se le dice a qué fichero del host mira.
+	// Es lo que permite que el mismo snapshot dorado sirva a volúmenes distintos.
+	if volPath != "" {
+		if err := c.PatchDrive(ctx, "volume", volPath); err != nil {
+			m.fail(mc, fmt.Errorf("reapuntando el volumen: %w", err))
+			return nil, err
+		}
 	}
 	if err := c.Resume(ctx); err != nil {
 		m.fail(mc, err)

@@ -20,7 +20,14 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 # activo, para no repetirlo en cada despliegue.
 HOST ?= $(shell $(BIN) config show 2>/dev/null | awk '/^contexto:/{print $$2}')
 
-.PHONY: all build install uninstall daemon bridge bridge-local deploy test clean fmt
+# Artefactos que se pueden embeber en el binario del daemon (ver `make assets`).
+# El kernel lo deja 30-fetch-artifacts.sh en /opt/fc; la imagen base la construye
+# 70-build-minimal-image.sh en $KLING_ROOT/images.
+FC_DIR     ?= /opt/fc
+IMAGES_DIR ?= /var/lib/kindling/images
+BLOBS      := internal/assets/blobs
+
+.PHONY: all build install uninstall daemon daemon-full assets bridge bridge-local deploy test clean fmt
 
 all: build
 
@@ -76,6 +83,35 @@ bridge-local:
 daemon:
 	GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN)-linux-amd64 $(PKG)
 	@echo "$(BIN)-linux-amd64  ($(VERSION))"
+
+## assets — reúne en internal/assets/blobs lo que va a ir DENTRO del binario.
+##
+## Los blobs no se versionan (están en .gitignore): pesan ~20 MB, se regeneran
+## con los scripts y meterlos en git haría que cada clon los arrastrase para
+## siempre. Este target solo los copia; conseguirlos sigue siendo trabajo de
+## 30-fetch-artifacts.sh y 70-build-minimal-image.sh, que necesitan root.
+assets:
+	@test -f $(FC_DIR)/vmlinux || { \
+	  echo "falta $(FC_DIR)/vmlinux — consíguelo con:  sudo ./scripts/30-fetch-artifacts.sh" >&2; exit 1; }
+	@test -f $(IMAGES_DIR)/min.ext4 || { \
+	  echo "falta $(IMAGES_DIR)/min.ext4 — constrúyela con:  sudo ./scripts/70-build-minimal-image.sh" >&2; exit 1; }
+	@mkdir -p $(BLOBS)
+	@# -L porque en /opt/fc `vmlinux` es un enlace a vmlinux-6.1.x, y go:embed
+	@# no sigue enlaces: copiar el enlace embebería 20 bytes de ruta.
+	@cp -L $(FC_DIR)/vmlinux $(BLOBS)/vmlinux
+	@cp $(IMAGES_DIR)/min.ext4 $(BLOBS)/min.ext4
+	@ls -lh $(BLOBS) | awk 'NR>1 {print "  " $$5, $$9}'
+
+## daemon-full — el daemon CON el kernel y la imagen base dentro.
+##
+## Es lo que hace que instalar sea un binario: `kling up` los materializa en
+## $KLING_ROOT/images y ya no hace falta correr ningún script a mano. El binario
+## engorda ~20 MB, por eso `make daemon` a secas sigue existiendo y por eso el
+## CLI (`make build`) no lleva nada: en un Mac ese kernel no se usa jamás.
+daemon-full: assets
+	GOOS=linux GOARCH=amd64 go build -trimpath -tags embed_assets \
+		-ldflags "$(LDFLAGS)" -o $(BIN)-linux-amd64 $(PKG)
+	@echo "$(BIN)-linux-amd64  ($(VERSION))  con artefactos embebidos"
 
 ## deploy — instala el daemon por SSH y lo reinicia
 ## Van también el puente y 80-mcp-image.sh: `kling add` los necesita EN el host,

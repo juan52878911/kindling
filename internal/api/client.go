@@ -131,6 +131,22 @@ func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildIma
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
+func (c *Client) Volumes(ctx context.Context) ([]*Volume, error) {
+	var l []*Volume
+	return l, c.do(ctx, http.MethodGet, "/volumes", nil, &l)
+}
+
+// CreateVolume formatea un ext4 nuevo. Va por el cliente largo: mkfs sobre un
+// fichero disperso de varios GiB puede pasar del minuto en un disco lento.
+func (c *Client) CreateVolume(ctx context.Context, r CreateVolumeRequest) (*Volume, error) {
+	var v Volume
+	return &v, c.doWith(c.long, ctx, http.MethodPost, "/volumes", r, &v)
+}
+
+func (c *Client) RemoveVolume(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/volumes/"+name, nil, nil)
+}
+
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)

@@ -54,6 +54,10 @@ type Machine struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 
+	// Volume es el volumen persistente montado, si lo hay, y dónde.
+	Volume      string `json:"volume,omitempty"`
+	VolumeMount string `json:"volume_mount,omitempty"`
+
 	// Labels agrupa máquinas. La clave "service" es convencional: identifica de
 	// qué servidor MCP es instancia esta microVM, y es por donde agrupan tanto
 	// `topo` como el HTML exportado.
@@ -88,7 +92,43 @@ type RunRequest struct {
 	// CPUPct acota el uso de CPU (100 = un core completo).
 	CPUPct int `json:"cpu_pct,omitempty"`
 
+	// Volume monta un volumen persistente como tercer disco. VolumeMount es
+	// dónde aparece dentro del invitado (por defecto /data).
+	//
+	// Es la respuesta a "quiero que lo que escriba mi herramienta sobreviva":
+	// el overlay de cada máquina muere con ella, y un directorio del host
+	// montado dentro rompería el aislamiento que justifica usar microVMs.
+	Volume      string `json:"volume,omitempty"`
+	VolumeMount string `json:"volume_mount,omitempty"`
+
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// VolumeBootParam es el parámetro de la línea de comandos del kernel por el que
+// el invitado sabe dónde montar su volumen.
+//
+// Viaja por ahí y no dentro de la imagen para que el mismo snapshot dorado sirva
+// con volúmenes distintos, o sin ninguno.
+const VolumeBootParam = "kling.volume"
+
+// Volume es almacenamiento que sobrevive a la microVM que lo usa.
+type Volume struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// SizeBytes es el tamaño lógico; UsedBytes lo realmente asignado en disco,
+	// que con un fichero disperso no tiene nada que ver.
+	SizeBytes    int64     `json:"size_bytes"`
+	UsedBytes    int64     `json:"used_bytes"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastModified time.Time `json:"last_modified"`
+	// UsedBy son las máquinas que lo tienen montado ahora mismo.
+	UsedBy []string `json:"used_by,omitempty"`
+}
+
+// CreateVolumeRequest crea un volumen.
+type CreateVolumeRequest struct {
+	Name    string `json:"name"`
+	SizeMiB int    `json:"size_mib,omitempty"`
 }
 
 // Snapshot es una microVM congelada y reutilizable: el artefacto del que se
@@ -106,6 +146,14 @@ type Snapshot struct {
 	MemBytes  int64     `json:"mem_bytes"`  // ocupación real del fichero de memoria
 	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
 	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
+
+	// HasVolume dice si el snapshot lleva el DISPOSITIVO de volumen dentro.
+	//
+	// Firecracker no permite añadir discos a una VM restaurada, así que esto no
+	// se puede cambiar después: un servicio importado sin volumen no podrá
+	// tener uno sin reimportarlo. VolumeMount recuerda dónde lo monta.
+	HasVolume   bool   `json:"has_volume,omitempty"`
+	VolumeMount string `json:"volume_mount,omitempty"`
 
 	// Egress es la política de red con la que se importó el servicio.
 	//

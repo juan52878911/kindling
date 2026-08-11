@@ -33,6 +33,17 @@ const usage = `kling - microVMs de Firecracker con interfaz tipo docker
 USO
   kling <comando> [opciones]
 
+EMPEZAR
+  up                                               deja el runtime listo: KVM,
+                                                   nftables, usuario, imágenes,
+                                                   daemon y gateway
+  status                                           qué pieza está y cuál falta
+
+VOLÚMENES
+  volume create <n> [-size 2G]                     almacenamiento que sobrevive
+                                                   a la microVM
+  volume ls | rm <n>                               listar / eliminar
+
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
       [-egress none|internet]                      salida de red (por defecto: none)
@@ -152,6 +163,12 @@ func main() {
 		err = cmdAdd(args)
 	case "search":
 		err = cmdSearch(args)
+	case "up":
+		err = cmdUp(args)
+	case "status":
+		err = cmdStatus(args)
+	case "volume", "volumes":
+		err = cmdVolume(args)
 	case "connect":
 		err = cmdConnect(args)
 	case "mcp":

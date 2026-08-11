@@ -1,3 +1,5 @@
+[Read this in English](README.en.md)
+
 # kindling
 
 Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: coger un
@@ -142,6 +144,40 @@ sorprendente para un CLI.
 
 **Precedencia:** `-H` > `$KLING_HOST` > contexto activo > socket local. El flag gana siempre,
 para que una invocación puntual no obligue a cambiar de contexto.
+
+## Volúmenes: lo que sobrevive a la microVM
+
+El overlay de cada máquina muere con ella. Un **volumen** es lo contrario: un fichero ext4
+en el host que se expone como tercer disco (`vdc`) y que persiste.
+
+```sh
+kling volume create notas -size 2G
+kling mcp import notas-mcp -volume notas          # o: kling add <servidor> ...
+kling volume ls
+```
+
+```
+NOMBRE   LÓGICO   EN DISCO   EN USO POR
+notas    2.0G     4.0M       notas-a3f9
+```
+
+**Por qué un disco y no un directorio del host.** La petición natural es «monta
+`~/notas` dentro». No se hace: Firecracker no tiene virtio-fs, y sobre todo un directorio
+del host montado en escritura le da al invitado —que se considera hostil— un canal directo
+al sistema de ficheros del anfitrión. Sería tirar por tierra la frontera que justifica usar
+microVMs en vez de contenedores. Es disperso, así que solo ocupa lo que se escriba.
+
+**El volumen se declara al importar, no después.** Firecracker no permite añadir discos a
+una VM restaurada, así que el dispositivo tiene que estar presente cuando se congela el
+snapshot dorado. Un servicio importado sin volumen no puede tener uno sin reimportarlo, y
+kling lo dice con esas palabras en vez de fallar dentro del invitado.
+
+**Quién lo monta.** El puente, no el init de la imagen: así no hay que reconstruir ninguna
+imagen base. El punto de montaje viaja en la línea de comandos del kernel
+(`kling.volume=/data`), de modo que el mismo snapshot dorado sirve con volúmenes distintos.
+
+Borrar un volumen que una microVM tiene montado le corrompería el sistema de ficheros por
+debajo, así que `kling volume rm` se niega y dice quién lo está usando.
 
 ## Por qué microVMs y no contenedores
 
@@ -547,10 +583,6 @@ Todo menos `tools/call` se puede pagar por adelantado o después:
   máquina muere igual; el cliente ya no espera a que ocurra.
 
 Resultado: **2 ms de ejecución real, 19 ms de extremo a extremo.**
-
-La contrapartida sigue siendo que no hay estado entre llamadas. Las herramientas que lo
-necesitan —memoria, razonamiento por pasos— deben usar la ruta con sesión
-(`/mcp/<servicio>`), que mantiene el proceso vivo.
 
 La contrapartida es que no hay estado entre llamadas. Las herramientas que lo necesitan
 —memoria, razonamiento por pasos— deben usar la ruta con sesión (`/mcp/<servicio>`), que

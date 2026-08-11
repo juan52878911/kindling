@@ -93,6 +93,16 @@ Opciones:
 	// posteriores).
 	mux.HandleFunc("/reset", b.handleReset)
 
+	// El volumen se monta ANTES de servir nada. Si el kernel pidió uno y no se
+	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
+	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
+	// que va a desaparecer con la máquina.
+	if mp, err := mountVolume(); err != nil {
+		log.Fatalf("volumen: %v", err)
+	} else if mp != "" {
+		log.Printf("volumen persistente montado en %s", mp)
+	}
+
 	srv := &http.Server{Addr: *listen, Handler: mux}
 
 	// El apagado se ORDENA aquí y se COMPLETA abajo. Shutdown hace que

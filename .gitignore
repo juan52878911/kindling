@@ -5,6 +5,10 @@ vmlinux*
 bzImage*
 initramfs*
 
+# Artefactos preparados para go:embed (`make assets`). Son copias de lo que ya
+# producen los scripts: ~20 MB que no tienen por qué vivir en la historia de git.
+/internal/assets/blobs/
+
 # Snapshots (el fichero de memoria pesa lo que la RAM asignada)
 snap.file
 mem.file

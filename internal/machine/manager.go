@@ -28,9 +28,14 @@ import (
 // copiarla N veces.
 const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init"
 
-// bootArgs añade la configuración de red, que el kernel del invitado aplica solo
-// sin necesitar herramientas dentro de la imagen.
-func bootArgs() string { return bootArgsBase + " " + knet.BootArg() }
+// bootArgs arma la línea de comandos del kernel del invitado. La red la aplica
+// el propio kernel con el parámetro ip=, sin herramientas dentro de la imagen.
+//
+// El punto de montaje del volumen viaja aquí y no dentro de la imagen: así el
+// mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno.
+func bootArgs(volMount string) string {
+	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(volMount)
+}
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
 // disperso, el coste real en disco es solo lo que la microVM llegue a escribir.
@@ -489,6 +494,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("límite de %d máquinas alcanzado (hay %d)", MaxMachines, n)
 	}
 
+	volPath, volMount, err := m.resolveVolume(req)
+	if err != nil {
+		return nil, err
+	}
+
 	src := m.imagePath(req.Image)
 	if _, err := os.Stat(src); err != nil {
 		return nil, fmt.Errorf("no encuentro la imagen %q en %s", req.Image, src)
@@ -518,6 +528,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: time.Now(),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
+		Volume: req.Volume, VolumeMount: volMount,
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
@@ -545,7 +556,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, volPath, volMount)
 	if err != nil {
 		netcfg.Teardown()
 		m.fail(mc, err)
@@ -659,7 +670,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, volPath, volMount string) (int, error) {
 	sock := filepath.Join(m.dir(id), "fc.sock")
 	_ = os.Remove(sock)
 
@@ -672,7 +683,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs()}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(volMount)}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -682,12 +693,23 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	}); err != nil {
 		return pid, err
 	}
-	// vdb: capa escribible propia de esta microVM.
+	// vdb: capa escribible propia de esta microVM. Muere con ella.
 	if err := c.SetDrive(ctx, fc.Drive{
 		DriveID: "overlay", PathOnHost: overlay, IsRootDevice: false, IsReadOnly: false,
 		RateLimiter: fc.Limit(diskBytesPerSec),
 	}); err != nil {
 		return pid, err
+	}
+	// vdc: volumen persistente, si se pidió. Es lo único que SOBREVIVE a la
+	// máquina. El host no lo monta mientras esté aquí: dos sistemas escribiendo
+	// el mismo ext4 es corrupción segura.
+	if volPath != "" {
+		if err := c.SetDrive(ctx, fc.Drive{
+			DriveID: "volume", PathOnHost: volPath, IsRootDevice: false, IsReadOnly: false,
+			RateLimiter: fc.Limit(diskBytesPerSec),
+		}); err != nil {
+			return pid, err
+		}
 	}
 	if n != nil {
 		// tap0 se llama igual en todos los namespaces: por eso el snapshot vale
