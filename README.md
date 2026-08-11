@@ -104,6 +104,22 @@ Cada release incluye `SHA256SUMS` y el script de instalación verifica el checks
 de mover nada al disco. **Windows no está soportado** — el código usa syscalls POSIX
 (`syscall.Kill`, `Setsid`, `Stat_t`).
 
+**Dejar el runtime listo — `kling up`:**
+
+```sh
+kling up        # comprueba KVM, nftables, el usuario kindling, artefactos e imágenes
+kling status    # diagnóstico de una pasada: daemon, gateway y agentes detectados
+```
+
+`kling up` **imprime** los comandos que exigen privilegios en vez de ejecutarlos: dejar que
+un instalador toque nftables y cree usuarios de sistema por su cuenta es pedir confianza que
+no hace falta pedir. El kernel y la imagen base van dentro del binario, así que no hay que
+correr ningún script antes.
+
+Los dos fallos silenciosos que caza —y que cuestan una tarde si se escapan— son que falte
+`nft` (las microVMs arrancan sin red) y que falte el usuario `kindling` (Firecracker acaba
+corriendo como root).
+
 **Opción desde fuentes — `make`:**
 
 ```sh
@@ -145,6 +161,24 @@ sorprendente para un CLI.
 **Precedencia:** `-H` > `$KLING_HOST` > contexto activo > socket local. El flag gana siempre,
 para que una invocación puntual no obligue a cambiar de contexto.
 
+## Catálogo: buscar y añadir servidores MCP
+
+No hace falta saber empaquetar nada. `kling` habla con el registro oficial
+(`registry.modelcontextprotocol.io`):
+
+```sh
+kling search filesystem                    # qué hay, y cuáles sabe empaquetar solo
+kling add io.github.domdomegg/filesystem-mcp
+```
+
+`kling add` construye la imagen, arranca una plantilla, le pregunta qué sabe hacer, la
+congela como snapshot dorado y guarda su catálogo. A partir de ahí, listar sus capacidades
+**no despierta la microVM**.
+
+La columna «kling add» de `search` dice «no» cuando el servidor no habla stdio sobre npm,
+que es lo único que el empaquetador sabe hacer solo — y cuando dice que no, explica por qué
+y qué alternativa hay, en vez de fallar a mitad de la construcción.
+
 ## Volúmenes: lo que sobrevive a la microVM
 
 El overlay de cada máquina muere con ella. Un **volumen** es lo contrario: un fichero ext4
@@ -153,7 +187,7 @@ en el host que se expone como tercer disco (`vdc`) y que persiste.
 ```sh
 kling volume create notas -size 2G
 kling mcp import notas-mcp -volume notas          # o: kling add <servidor> ...
-kling run -name apuntes -volume notas -mount /data   # o una microVM a mano
+kling run -name apuntes -volume notas:/data          # o una microVM a mano
 kling volume ls
 ```
 
@@ -427,7 +461,10 @@ runtime — consume más batería que la solución que este proyecto pretende ev
 | `scripts/30-fetch-artifacts.sh` | Descubre y descarga kernel + rootfs del CI |
 | `scripts/40-bench-boot.sh` | Mide arranque en frío, snapshot y restauración |
 | `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
+| `scripts/60-stress.sh` | Carga sostenida sobre el daemon: arranques, congelados y despertares en paralelo |
+| `scripts/70-build-minimal-image.sh` | Construye la imagen base mínima desde cero |
 | `scripts/80-mcp-image.sh` | Empaqueta un servidor MCP (stdio + bridge, o HTTP nativo) en una imagen |
+| `scripts/90-e2e.sh` | Prueba de extremo a extremo contra un daemon real con KVM (21 comprobaciones) |
 
 Detalles del ciclo de release: [`docs/releases.md`](docs/releases.md).
 Cambios por versión: [`CHANGELOG.md`](CHANGELOG.md).
@@ -583,10 +620,19 @@ propósito: el daemon nunca escucha en red porque controlarlo equivale a root en
 gateway sí escucha, pero solo sabe despertar instancias de snapshots que ya existen.
 
 ```sh
-kling gateway -listen 127.0.0.1:8080 -idle 5m
-curl http://127.0.0.1:8080/mcp/echo/       # la herramienta aparece sola
-curl http://127.0.0.1:8080/services        # inventario y qué está caliente
+kling gateway -listen 127.0.0.1:8080 -idle 5m   # genera el token la 1ª vez
+
+# El gateway EXIGE token: despertar un snapshot es ejecutar código, y el daemon
+# se protege no escuchando, pero el gateway sí escucha.
+T=$(kling config path >/dev/null && echo "$KLING_GATEWAY_TOKEN")
+curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/mcp/echo/
+curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/services
+curl http://127.0.0.1:8080/healthz              # abierto: es la sonda de vida
 ```
+
+El token se guarda en `gateway.token` del host donde corre el gateway y se copia al
+cliente con `kling config set gateway.token …` (lo hace `kling connect` solo). Para saltárselo
+en desarrollo está `-no-auth`, que exige escuchar en loopback.
 
 Medido de extremo a extremo con un servidor MCP real dentro de la microVM:
 

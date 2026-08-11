@@ -488,7 +488,8 @@ snapshots that already exist.
 ```sh
 kling gateway -listen 127.0.0.1:8080 -idle 5m
 curl http://127.0.0.1:8080/mcp/echo/       # the tool appears on its own
-curl http://127.0.0.1:8080/services        # inventory and what is hot
+curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/services   # needs the token
+curl http://127.0.0.1:8080/healthz        # open: it is the liveness probe
 ```
 
 Measured end to end with a real MCP server inside the microVM:

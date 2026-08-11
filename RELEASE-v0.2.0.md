@@ -1,6 +1,6 @@
 # kindling v0.2.0
 
-20 commits desde `v0.1.0`. 56 ficheros, **+8 070 / −235** líneas, y **cero dependencias
+33 commits desde `v0.1.0`. 66 ficheros, **+10 703 / −241** líneas, y **cero dependencias
 externas** — el `go.mod` no ha cambiado un byte.
 
 La versión anterior demostraba que la idea funciona: microVMs que descongelan en
@@ -19,7 +19,7 @@ metes servicios de verdad.
 | Clientes de IA | 2 | **7** |
 | Catálogo de servidores MCP | a mano | registro oficial: `kling search` / `kling add` |
 | Estado persistente | ninguno | volúmenes con journal, hasta 4 por microVM, compartibles en lectura |
-| Tests | 2 | **56** + 6 benchmarks |
+| Tests | 2 | **80** + 6 benchmarks |
 | Prueba de extremo a extremo | — | `90-e2e.sh`, 21 comprobaciones |
 | CI | — | gofmt + vet + `go test -race` en cada push |
 | Dependencias externas | 0 | **0** |
@@ -162,14 +162,14 @@ el apagado es ordenado, el puente además desmonta. Antes de cada arranque se le
 
 | | v0.1.0 | v0.2.0 |
 |---|---:|---:|
-| `cmd/kling` | 0 | 6 |
-| `cmd/kling-bridge` | 0 | 5 |
-| `internal/daemon` | 0 | 2 |
-| `internal/gateway` | 2 | 17 |
-| `internal/machine` | 0 | 26 |
-| **Total** | **2** | **56** |
+| `cmd/kling` | 0 | 8 |
+| `cmd/kling-bridge` | 0 | 15 |
+| `internal/daemon` | 0 | 3 |
+| `internal/gateway` | 2 | 18 |
+| `internal/machine` | 0 | 36 |
+| **Total** | **2** | **80** |
 | Benchmarks | 0 | 6 |
-| Ficheros `_test.go` | 1 | 15 |
+| Ficheros `_test.go` | 1 | 19 |
 
 Los tests de Go cubren la lógica; no pueden cubrir lo que de verdad se rompe aquí. Para eso
 está `scripts/90-e2e.sh`, que corre contra un daemon real con KVM:
@@ -178,12 +178,17 @@ está `scripts/90-e2e.sh`, que corre contra un daemon real con KVM:
 1. Daemon                 KVM disponible · firecracker instalado
 2. Ciclo de vida          arranque en frío 51 ms · freeze → warm · thaw 25 ms
 3. Volumen persistente    creado · con journal · no se borra en uso ·
-                          no se monta dos veces · dice quién lo usa ·
+                          no se monta en dos escritores · un escritor bloquea
+                          también a los lectores · dice quién lo usa ·
                           se libera al destruir · queda limpio tras matar el VMM
+3b. Volumen compartido    tres microVMs leyéndolo a la vez · los lectores
+                          bloquean al escritor · dos volúmenes en una microVM ·
+                          volume ls distingue escritor de lectores ·
+                          rechaza dos volúmenes en el mismo punto
 4. Gateway                /services sin token → 401 · /healthz abierto → 200
 5. Reinicio del daemon    las microVMs vivas sobreviven
 
-15 ok · 0 fallo(s)
+21 ok · 0 fallo(s)
 ```
 
 ---
