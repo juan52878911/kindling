@@ -126,9 +126,21 @@ if [ -n "$NPM" ]; then
   echo "preinstalando npm: $NPM"
   cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
   mount --bind /proc "$mnt/proc" 2>/dev/null || true
+  # --ignore-scripts NO es opcional.
+  #
+  # Esto es un chroot sobre el HOST, como root, con /proc del host montado. Sin
+  # este flag, los `postinstall` de cualquier paquete de npm se ejecutan aquí:
+  # un paquete malicioso del registro no necesita escapar de ninguna microVM,
+  # porque corre en el host con privilegios ANTES de que exista ninguna. Sería
+  # contradictorio con la premisa del proyecto —"el invitado es hostil"— dejar
+  # que el empaquetado ocurra fuera de esa frontera.
+  #
+  # Rompe los paquetes que compilan binarios nativos en la instalación. Que esos
+  # fallen ruidosamente es preferible a ejecutar código arbitrario como root.
+  #
   # --omit=dev recorta lo que no hace falta en ejecución; el espacio dentro de la
   # imagen es el que más pesa en el snapshot.
-  chroot "$mnt" /usr/bin/npm install -g --omit=dev --no-fund --no-audit $NPM
+  chroot "$mnt" /usr/bin/npm install -g --ignore-scripts --omit=dev --no-fund --no-audit $NPM
   chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
 fi
@@ -143,7 +155,11 @@ if [ -n "$PIP" ]; then
   echo "preinstalando pip: $PIP"
   cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
   mount --bind /proc "$mnt/proc" 2>/dev/null || true
-  chroot "$mnt" /usr/bin/pip install --no-cache-dir --break-system-packages $PIP
+  # --only-binary=:all: por la misma razón que --ignore-scripts en npm: un
+  # sdist ejecuta su setup.py durante la instalación, aquí como root sobre el
+  # host. Con ruedas precompiladas no se ejecuta nada del paquete.
+  chroot "$mnt" /usr/bin/pip install --no-cache-dir --break-system-packages \
+    --only-binary=:all: $PIP
   chroot "$mnt" /bin/sh -c 'rm -rf /root/.cache /usr/lib/python3*/site-packages/pip/_vendor/certifi/*.pem.orig' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
 fi
