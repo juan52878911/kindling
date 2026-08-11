@@ -60,7 +60,7 @@ MÁQUINAS
 CATÁLOGO
   search <consulta>                                busca en el registro oficial
                                                    de servidores MCP
-  add <servidor> [-as nombre] [-arg valor]         lo empaqueta, lo importa y lo
+  add <servidor> [-as nombre] [-volume N] [-mount RUTA] [-arg valor]         lo empaqueta, lo importa y lo
                                                    deja congelado como servicio
 
 SERVICIOS MCP

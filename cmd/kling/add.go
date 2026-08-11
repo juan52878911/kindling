@@ -72,6 +72,12 @@ func cmdAdd(args []string) error {
 	as := fs.String("as", "", "nombre del servicio (por defecto: el del servidor, sin espacio de nombres)")
 	extra := multiFlag(fs, "arg", "valor para un argumento obligatorio del servidor; repetible")
 	dryRun := fs.Bool("dry-run", false, "enseñar lo que haría y no hacerlo")
+	// Sin esto, el camino recomendado para añadir un servidor no puede darle
+	// almacenamiento persistente: habría que reimportarlo a mano después, y
+	// reimportar es justo lo que un volumen obliga a hacer si se olvida (el
+	// conjunto de discos queda fijado al congelar el snapshot dorado).
+	volume := fs.String("volume", "", "volumen persistente a montar (ver `kling volume ls`)")
+	mount := fs.String("mount", "", "dónde montarlo dentro de la microVM (por defecto /data)")
 	fresh := fs.Bool("refresh", false, "ignorar la caché del registro")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
@@ -88,14 +94,14 @@ func cmdAdd(args []string) error {
 	rc.Fresh = *fresh
 
 	for _, want := range fs.Args() {
-		if err := addOne(ctx, rc, *host, want, *as, *extra, *dryRun); err != nil {
+		if err := addOne(ctx, rc, *host, want, *as, *volume, *mount, *extra, *dryRun); err != nil {
 			return fmt.Errorf("%s: %w", want, err)
 		}
 	}
 	return nil
 }
 
-func addOne(ctx context.Context, rc *registry.Client, host, want, as string, extra []string, dryRun bool) error {
+func addOne(ctx context.Context, rc *registry.Client, host, want, as, volume, mount string, extra []string, dryRun bool) error {
 	srv, candidates, err := rc.Get(ctx, want, 30)
 	if err != nil {
 		if len(candidates) > 0 {
@@ -188,7 +194,7 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, ext
 	//    pregunta qué sabe hacer, la congela como snapshot dorado y guarda el
 	//    catálogo. Se reutiliza tal cual en vez de duplicar los cinco pasos.
 	fmt.Printf("  2/2  importando el servicio\n")
-	if err := runImport(hostOf(host), service, loadConfig()); err != nil {
+	if err := runImport(hostOf(host), service, volume, mount, loadConfig()); err != nil {
 		return err
 	}
 
@@ -202,8 +208,14 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, ext
 // IP de la microVM (172.30.x.x), que solo es enrutable desde el host donde
 // corre el daemon. Desde un portátil apuntando por SSH, ese paso da un timeout
 // que parece del servidor MCP y no lo es.
-func runImport(endpoint, service string, cfg *config.Config) error {
+func runImport(endpoint, service, volume, mount string, cfg *config.Config) error {
 	args := []string{service, "-image", service, "-force"}
+	if volume != "" {
+		args = append(args, "-volume", volume)
+		if mount != "" {
+			args = append(args, "-mount", mount)
+		}
+	}
 
 	// Los valores por defecto se resuelven AQUÍ y viajan explícitos. Por SSH se
 	// ejecuta el `kling` del otro lado, que leería SU configuración: los
@@ -232,8 +244,8 @@ func runImport(endpoint, service string, cfg *config.Config) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("la importación falló en %s: %w\n"+
 			"La imagen SÍ se construyó; reintenta el paso allí:\n"+
-			"  ssh %s 'kling mcp import %s -image %s -force'",
-			target, err, target, service, service)
+			"  ssh %s 'kling mcp import %s'",
+			target, err, target, strings.Join(args, " "))
 	}
 	return nil
 }

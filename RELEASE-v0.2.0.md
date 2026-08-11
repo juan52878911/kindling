@@ -38,6 +38,8 @@ metes servicios de verdad.
 | `kling add <servidor>` | Empaqueta un servidor del registro, lo importa y lo deja congelado como servicio |
 | `kling volume create\|ls\|rm` | Almacenamiento que sobrevive a la microVM |
 
+`kling run`, `kling add` y `kling mcp import` aceptan los tres `-volume` y `-mount`.
+
 ### Comandos que cambian
 
 | Comando | Cambio |
@@ -191,5 +193,9 @@ está `scripts/90-e2e.sh`, que corre contra un daemon real con KVM:
   correr `kling connect -all -install all`.
 - **Los servicios importados con v0.1.0 conviene reimportarlos.** Sus snapshots no guardan la
   política de red, así que los que usen internet fallarán al despertar.
+- **`make deploy` no actualiza el puente dentro de las imágenes ya construidas.** El puente
+  vive *dentro* de cada imagen y se copia cuando la imagen se construye, así que un servicio
+  empaquetado antes seguirá con el puente viejo — y sin el vaciado de volumen que esta
+  versión añade. Reconstruye los que usen volumen con `kling add <servidor> -volume …`.
 - **Los volúmenes creados antes de esta versión no tienen journal.** `kling volume ls` los
   sigue mostrando, pero no sobrevivirán bien a un apagado brusco: recréalos.
