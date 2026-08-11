@@ -145,7 +145,7 @@ func parseSizeMiB(s string) (int, error) {
 func volumePopulate(args []string) error {
 	fs := flag.NewFlagSet("volume populate", flag.ExitOnError)
 	host := hostFlag(fs)
-	image := fs.String("image", "", "imagen que trae el instalador (npm, pip...)")
+	image := fs.String("image", ToolchainImage, "imagen que trae el instalador (npm, pip...)")
 	mount := fs.String("mount", "/data", "dónde se monta el volumen dentro de la microVM")
 	mem := fs.Int("mem", 0, "memoria en MiB de la microVM de instalación")
 
@@ -172,8 +172,7 @@ func volumePopulate(args []string) error {
 	}
 	name := fs.Arg(0)
 	if *image == "" {
-		return fmt.Errorf("falta -image: hace falta una imagen que traiga el instalador.\n" +
-			"Cualquiera de las que ya tengas con node o python vale:  kling snapshots")
+		return fmt.Errorf("falta -image: hace falta una imagen que traiga el instalador")
 	}
 
 	ctx, stop := ctxWithSignals()

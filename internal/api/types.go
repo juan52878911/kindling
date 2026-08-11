@@ -323,6 +323,9 @@ type BuildImageRequest struct {
 	// comodidad: las microVMs arrancan sin salida a internet, así que un
 	// `npx -y` en tiempo de ejecución fallaría al intentar descargar.
 	NPM []string `json:"npm,omitempty"`
+	// PIP son paquetes de Python que preinstalar, por la misma razón que NPM:
+	// dentro no hay internet en tiempo de ejecución.
+	PIP []string `json:"pip,omitempty"`
 	// Cmd es el comando que arranca el servidor MCP dentro del invitado.
 	Cmd []string `json:"cmd"`
 	// GrowMB agranda la imagen. 0 deja que el script decida.

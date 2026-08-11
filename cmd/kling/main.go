@@ -45,6 +45,7 @@ VOLÚMENES
   volume ls | rm <n>                               listar / eliminar
   volume populate <n> -image I -- <cmd>            instala paquetes dentro de una microVM
   images refresh [imagen...]                       pone el puente actual dentro de las imágenes
+  images toolchain                                 construye la imagen con npm y pip (la usa populate)
 
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM

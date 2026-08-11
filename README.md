@@ -190,9 +190,12 @@ Eso es lo que hace posible no duplicar las mismas dependencias en cada imagen:
 ```sh
 kling volume create libs -size 2G
 
+# la imagen con los instaladores, una vez:
+kling images toolchain
+
 # poblarla DENTRO de una microVM de un solo uso, que se destruye al terminar:
-kling volume populate libs -image <una-con-npm> -mount /data -- \
-  npm install --prefix /data --ignore-scripts lodash axios zod
+kling volume populate libs -- npm install --prefix /data --ignore-scripts lodash axios zod
+kling volume populate libs -- pip install --target /data requests
 
 # y consumirla desde tantas microVMs como haga falta:
 kling mcp import mi-servicio -volume libs:/libs:ro

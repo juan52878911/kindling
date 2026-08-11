@@ -18,8 +18,10 @@ func cmdImages(args []string) error {
 	switch args[0] {
 	case "refresh", "refresh-bridge":
 		return imagesRefresh(args[1:])
+	case "toolchain":
+		return imagesToolchain(args[1:])
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa refresh", args[0])
+		return fmt.Errorf("subcomando desconocido %q: usa refresh o toolchain", args[0])
 	}
 }
 
@@ -85,5 +87,57 @@ func imagesRefresh(args []string) error {
 	if fallos > 0 {
 		return fmt.Errorf("%d imagen(es) no se pudieron actualizar", fallos)
 	}
+	return nil
+}
+
+// ToolchainImage es la imagen con instaladores que usa `volume populate`.
+//
+// Tiene nombre fijo y conocido a propósito: sin ella, poblar un volumen obligaba
+// a pasar `-image` con alguna imagen de servicio que casualmente trajera npm.
+// Eso funcionaba por accidente, no por diseño, y dejaba al usuario adivinando
+// cuál de sus imágenes sirve.
+const ToolchainImage = "toolchain"
+
+// imagesToolchain construye la imagen con npm y pip dentro.
+//
+// No lleva servidor MCP: su comando es un shell que nunca se invoca, porque a
+// esta imagen no se le abren sesiones MCP. Lo único que se usa de ella es el
+// puente y su /exec, que es como `volume populate` instala paquetes dentro de
+// una microVM en vez de en el anfitrión.
+func imagesToolchain(args []string) error {
+	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
+	host := hostFlag(fs)
+	name := fs.String("as", ToolchainImage, "nombre de la imagen")
+	if err := fs.Parse(reorder(args)); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	fmt.Printf("Construyendo %q: node, npm, python3 y pip dentro.\n", *name)
+	fmt.Print("  (instala bastante; tarda unos minutos)... ")
+
+	res, err := api.NewClient(hostOf(*host)).BuildImage(ctx, api.BuildImageRequest{
+		Name: *name,
+		// nodejs/npm para el mundo de node; python3/py3-pip para el de Python.
+		// Nada más: cada paquete extra es peso en una imagen que solo existe
+		// para instalar cosas en un volumen y morirse.
+		Packages: []string{"nodejs", "npm", "python3", "py3-pip"},
+		// Sitio para que quepan node y las ruedas de Python a la vez.
+		GrowMB: 1536,
+		// Un shell que nunca llega a ejecutarse: el puente solo lanza este
+		// comando cuando alguien abre una sesión MCP, y a esta imagen no se le
+		// abren. Existe porque el empaquetador exige un comando.
+		Cmd: []string{"/bin/sh"},
+	})
+	if err != nil {
+		fmt.Println("✗")
+		return err
+	}
+	fmt.Printf("✓ %s\n\n", res.Path)
+	fmt.Println("Ya puedes poblar volúmenes sin instalar nada en el anfitrión:")
+	fmt.Printf("  kling volume populate <vol> -- npm install --prefix /data --ignore-scripts lodash\n")
+	fmt.Printf("  kling volume populate <vol> -- pip install --target /data requests\n")
 	return nil
 }

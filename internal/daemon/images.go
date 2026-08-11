@@ -41,6 +41,12 @@ var (
 	// Paquete de apk.
 	reAPK = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
 	// Paquete de npm, con ámbito y versión opcionales.
+	// Los nombres de PyPI admiten punto, guion y guion bajo, y el
+	// especificador de versión va con ==, >= o ~=. Nada de eso puede empezar
+	// por guion: acabaría en `pip install $PIP` sin comillas, donde un valor
+	// que empieza por guion es un flag.
+	rePIP = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*((==|>=|<=|~=|!=)[a-zA-Z0-9._*+-]+)?$`)
+
 	reNPM = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[a-zA-Z0-9._~+-]+)?$`)
 )
 
@@ -86,6 +92,11 @@ func validateBuild(r api.BuildImageRequest) error {
 			return fmt.Errorf("paquete npm inválido %q", p)
 		}
 	}
+	for _, p := range r.PIP {
+		if !rePIP.MatchString(p) {
+			return fmt.Errorf("paquete pip inválido %q", p)
+		}
+	}
 	if len(r.Cmd) == 0 {
 		return fmt.Errorf("falta el comando que arranca el servidor MCP")
 	}
@@ -125,6 +136,9 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.NPM) > 0 {
 		argv = append(argv, "-n", strings.Join(req.NPM, " "))
+	}
+	if len(req.PIP) > 0 {
+		argv = append(argv, "-P", strings.Join(req.PIP, " "))
 	}
 	argv = append(argv, "--")
 	argv = append(argv, req.Cmd...)
