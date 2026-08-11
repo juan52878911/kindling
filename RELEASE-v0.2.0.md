@@ -1,6 +1,6 @@
 # kindling v0.2.0
 
-18 commits desde `v0.1.0`. 55 ficheros, **+7 857 / −235** líneas, y **cero dependencias
+20 commits desde `v0.1.0`. 56 ficheros, **+8 070 / −235** líneas, y **cero dependencias
 externas** — el `go.mod` no ha cambiado un byte.
 
 La versión anterior demostraba que la idea funciona: microVMs que descongelan en
