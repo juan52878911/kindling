@@ -165,10 +165,8 @@ type Volume struct {
 	Path string `json:"path"`
 	// SizeBytes es el tamaño lógico; UsedBytes lo realmente asignado en disco,
 	// que con un fichero disperso no tiene nada que ver.
-	SizeBytes    int64     `json:"size_bytes"`
-	UsedBytes    int64     `json:"used_bytes"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastModified time.Time `json:"last_modified"`
+	SizeBytes int64 `json:"size_bytes"`
+	UsedBytes int64 `json:"used_bytes"`
 	// UsedBy son las máquinas que lo tienen montado ahora mismo.
 	UsedBy []string `json:"used_by,omitempty"`
 }
@@ -389,9 +387,9 @@ func (s *Snapshot) VolumeSet() []VolumeAttachment {
 
 // VolumeSet devuelve los volúmenes pedidos, normalizando la forma corta.
 //
-// La forma corta (-volume X -mount Y) es la de un solo volumen y se conserva
-// porque es la que está en la documentación y en los dedos de quien la use. Si
-// se dan las dos, manda la lista.
+// La forma corta (-volume X -mount Y) es la de un solo volumen y se conserva por
+// compatibilidad: peticiones de un CLI de v0.1.0 contra un daemon nuevo. Si se
+// dan las dos, manda la lista.
 func (r RunRequest) VolumeSet() []VolumeAttachment {
 	if len(r.Volumes) > 0 {
 		return r.Volumes

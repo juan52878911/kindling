@@ -43,7 +43,7 @@ VOLÚMENES
   volume create <n> [-size 2G]                     almacenamiento que sobrevive
                                                    a la microVM
   volume ls | rm <n>                               listar / eliminar
-  volume populate <n> -image I -- <cmd>            instala paquetes dentro de una microVM
+  volume populate <n> [-image I] -- <cmd>           instala paquetes dentro de una microVM
   images refresh [imagen...]                       pone el puente actual dentro de las imágenes
   images toolchain                                 construye la imagen con npm y pip (la usa populate)
   images recipe <imagen>                           cómo se construyó
@@ -64,14 +64,15 @@ MÁQUINAS
 CATÁLOGO
   search <consulta>                                busca en el registro oficial
                                                    de servidores MCP
-  add <servidor> [-as nombre] [-volume N] [-mount RUTA] [-arg valor]         lo empaqueta, lo importa y lo
-                                                   deja congelado como servicio
+  add <servidor> [-as nombre] [-arg valor]         lo empaqueta, lo importa y lo
+      [-volume NOMBRE[:/punto][:ro]] (repetible)   deja congelado como servicio
 
 SERVICIOS MCP
   mcp import <servicio> -image <img>               convierte un servidor MCP en
-                                                   servicio: arranca, pregunta
-                                                   qué sabe hacer, lo congela y
-                                                   guarda su catálogo
+      [-cpus N] [-mem MiB]                         servicio: arranca, pregunta
+      [-egress none|internet]                      qué sabe hacer, lo congela y
+      [-volume NOMBRE[:/punto][:ro]] (repetible)   guarda su catálogo. Todo esto
+                                                   queda GRABADO en el snapshot
   mcp list [-v]                                    servicios y sus herramientas
   mcp refresh <servicio>                           vuelve a capturar el catálogo
   mcp link <nombre> <url>                          enlaza un servidor MCP EXTERNO
@@ -113,12 +114,16 @@ CONECTAR CON TU AGENTE
                                                    opencode, Cursor, VS Code,
                                                    Windsurf, Cline y Zed
   connect ... -install <cliente>                   solo en ese
+  connect ... -token T                             usa ese token en vez del de
+                                                   gateway.token
 
 GATEWAY
   gateway [-listen ADDR] [-idle DUR] [-ephemeral]  enruta llamadas MCP a microVMs
                                                    bajo demanda. Con -ephemeral,
                                                    cada acción corre en su propia
                                                    máquina, que muere al terminar
+          [-prewarm N]                             instancias listas por servicio
+          [-memory SVC]                            servicio de memoria del agente
           [-no-auth] [-pprof]                      sin token / con perfiles; las
                                                    dos exigen escuchar en
                                                    loopback. Por defecto pide

@@ -16,7 +16,9 @@ import (
 // Sintaxis:  nombre  ·  nombre:/punto/de/montaje  ·  nombre:/punto:ro
 //
 // La forma corta de un solo volumen (-volume X -mount Y -volume-ro) se conserva
-// porque es la que está documentada; se combinan en volumeSet().
+// por compatibilidad: scripts de v0.1.0 y CLIs antiguos que hablan con un daemon
+// nuevo. NO se documenta a propósito — documentar dos sintaxis para lo mismo
+// obliga a quien lee a decidir cuál es la buena. Se combinan en volumeSet().
 type volumeFlag []api.VolumeAttachment
 
 func (f *volumeFlag) String() string {

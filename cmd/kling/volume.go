@@ -15,6 +15,7 @@ import (
 //	kling volume create notas -size 2G
 //	kling volume ls
 //	kling volume rm notas
+//	kling volume populate libs -- npm install --prefix /data lodash
 func cmdVolume(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("uso: kling volume [create|ls|rm]")
@@ -166,9 +167,10 @@ func volumePopulate(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || len(cmd) == 0 {
-		return fmt.Errorf("uso: kling volume populate <nombre> -image IMG -- <comando>\n" +
-			"  p. ej.:  kling volume populate libs -image node-base -- \\\n" +
-			"             npm install --prefix /data --ignore-scripts lodash zod")
+		return fmt.Errorf("uso: kling volume populate <nombre> [-image IMG] -- <comando>\n" +
+			"  p. ej.:  kling volume populate libs -- \\\n" +
+			"             npm install --prefix /data --ignore-scripts lodash zod\n" +
+			"  (usa la imagen `toolchain` por defecto: constrúyela con `kling images toolchain`)")
 	}
 	name := fs.Arg(0)
 	if *image == "" {

@@ -21,11 +21,11 @@ import (
 // reVolume acota el nombre: es un componente de ruta.
 var reVolume = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
-// defaultVolumeMiB es el tamaño lógico por defecto. Al ser disperso, lo que
-// ocupa de verdad es solo lo que se escriba.
 // defaultVolumeMount es dónde se monta un volumen si no se dice otra cosa.
 const defaultVolumeMount = "/data"
 
+// defaultVolumeMiB es el tamaño lógico por defecto. Al ser disperso, lo que
+// ocupa de verdad es solo lo que se escriba.
 const defaultVolumeMiB = 1024
 
 func (m *Manager) volumesDir() string         { return filepath.Join(m.root, "volumes") }
@@ -103,12 +103,13 @@ func (m *Manager) statVolume(name string) (*api.Volume, error) {
 		return nil, fmt.Errorf("no existe el volumen %q", name)
 	}
 	return &api.Volume{
-		Name:         name,
-		Path:         m.volumePath(name),
-		SizeBytes:    fi.Size(),
-		UsedBytes:    allocatedBytes(m.volumePath(name)),
-		CreatedAt:    fi.ModTime(),
-		LastModified: fi.ModTime(),
+		Name:      name,
+		Path:      m.volumePath(name),
+		SizeBytes: fi.Size(),
+		// Lo asignado de verdad, que con un fichero disperso no tiene nada que
+		// ver con el tamaño lógico: un volumen de 2 GiB recién creado ocupa
+		// kilobytes.
+		UsedBytes: allocatedBytes(m.volumePath(name)),
 	}, nil
 }
 
@@ -284,6 +285,18 @@ func attachments(vols []resolvedVolume) []api.VolumeAttachment {
 	return out
 }
 
+// execBootArg enciende /exec dentro del invitado.
+//
+// Solo lo pone el daemon, y solo para las microVMs de un solo uso que pueblan un
+// volumen: el invitado no puede concedérselo a sí mismo porque la línea de
+// comandos del kernel la escribe quien arranca la máquina.
+func execBootArg(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return " " + api.ExecBootParam + "=1"
+}
+
 // volumeBootArg es lo que lee el puente dentro del invitado para saber dónde
 // montar cada disco. Vacío si no hay volúmenes.
 //
@@ -293,13 +306,6 @@ func attachments(vols []resolvedVolume) []api.VolumeAttachment {
 // que la posición i de esta lista es el disco i. Y el modo va pegado, y no como
 // parámetro aparte, para que sea imposible leer uno sin el otro: montar en
 // escritura lo que se pidió de solo lectura corrompería lo que leen los demás.
-func execBootArg(enabled bool) string {
-	if !enabled {
-		return ""
-	}
-	return " " + api.ExecBootParam + "=1"
-}
-
 func volumeBootArg(vols []api.VolumeAttachment) string {
 	if len(vols) == 0 {
 		return ""
@@ -313,18 +319,6 @@ func volumeBootArg(vols []api.VolumeAttachment) string {
 	}
 	return " " + api.VolumeBootParam + "=" + strings.Join(specs, ",")
 }
-
-// touchVolume actualiza la marca de tiempo para que `kling volume ls` muestre
-// cuándo se usó por última vez.
-func (m *Manager) touchVolume(name string) {
-	if name == "" {
-		return
-	}
-	now := time.Now()
-	_ = os.Chtimes(m.volumePath(name), now, now)
-}
-
-var _ = exec.Command // se usa desde createOverlay
 
 // createVolumeImage formatea un volumen en ext4 CON journal.
 //

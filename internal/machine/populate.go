@@ -53,7 +53,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	image := req.Image
 	if image == "" {
 		return nil, fmt.Errorf("hace falta una imagen que traiga el instalador: " +
-			"-image con una que tenga npm o pip")
+			"constrúyela con `kling images toolchain`")
 	}
 	memMiB := req.MemMiB
 	if memMiB <= 0 {
@@ -76,10 +76,9 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	if err != nil {
 		return nil, err
 	}
-	// Pase lo que pase por debajo. Con context.WithoutCancel porque el contexto
-	// de la petición HTTP puede estar ya cancelado justo cuando más falta hace
-	// limpiar: si el cliente cortó, la máquina sigue viva y reteniendo el
-	// volumen.
+	// La máquina se destruye pase lo que pase: una microVM huérfana retendría el
+	// volumen en exclusiva y nadie podría ni leerlo, y el mensaje de ESE fallo no
+	// señalaría a esta función por ningún lado.
 	defer func() { _ = m.Remove(mc.ID) }()
 
 	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort))

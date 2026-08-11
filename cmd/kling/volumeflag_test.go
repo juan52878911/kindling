@@ -64,7 +64,7 @@ func TestElOrdenDeLosVolumenesSeConserva(t *testing.T) {
 	if _, err := volumeSet(f, "/data", false); err == nil {
 		t.Error("aceptó -mount con varios volúmenes")
 	}
-	// Con uno solo sí: es la forma corta documentada.
+	// Con uno solo sí: es la forma corta que se mantiene por compatibilidad.
 	uno := volumeFlag{{Name: "datos"}}
 	got, err = volumeSet(uno, "/data", true)
 	if err != nil || got[0].Mount != "/data" || !got[0].ReadOnly {

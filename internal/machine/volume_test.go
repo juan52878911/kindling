@@ -1,8 +1,8 @@
 package machine
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -195,7 +195,6 @@ func TestCrearVolumenNoPisaElExistente(t *testing.T) {
 	if _, err := os.Stat(m.volumePath("notas") + ".tmp"); err == nil {
 		t.Error("quedó un .tmp suelto")
 	}
-	_ = filepath.Join // silencia el import si el resto cambia
 }
 
 // Dos microVMs no pueden montar el mismo volumen a la vez.
@@ -386,11 +385,10 @@ func TestElModoViajaConElPuntoDeMontaje(t *testing.T) {
 	if got := volumeBootArg([]api.VolumeAttachment{{Mount: "/data"}}); strings.Contains(got, ":ro") {
 		t.Errorf("marcó de solo lectura lo que no lo es: %q", got)
 	}
-	// Y sin volumen no se añade nada, en ninguno de los dos modos.
-	for _, ro := range []bool{true, false} {
-		if got := volumeBootArg(nil); got != "" {
-			t.Errorf("sin volumen no debe añadir nada (ro=%v): %q", ro, got)
-		}
+	// Y sin volúmenes no se añade nada: un kling.volume= vacío haría que el
+	// puente intentara montar en "".
+	if got := volumeBootArg(nil); got != "" {
+		t.Errorf("sin volumen no debe añadir nada: %q", got)
 	}
 }
 
@@ -483,12 +481,18 @@ func TestVolumenesQueNoTienenSentido(t *testing.T) {
 	}
 
 	// Y el tope: cada volumen es un disco más, y los discos se nombran por letra.
+	// Nombres y puntos DISTINTOS: si se repitieran, el input violaría tres
+	// reglas a la vez y el test seguiría en verde aunque el tope desapareciera.
 	muchos := make([]api.VolumeAttachment, api.MaxVolumes+1)
 	for i := range muchos {
-		muchos[i] = api.VolumeAttachment{Name: "a", Mount: "/m"}
+		muchos[i] = api.VolumeAttachment{
+			Name:  fmt.Sprintf("v%d", i),
+			Mount: fmt.Sprintf("/m%d", i),
+		}
 	}
-	if _, err := m.resolveVolumes(api.RunRequest{Volumes: muchos}); err == nil {
-		t.Error("aceptó más volúmenes que el máximo")
+	_, err := m.resolveVolumes(api.RunRequest{Volumes: muchos})
+	if err == nil || !strings.Contains(err.Error(), "el máximo es") {
+		t.Errorf("el tope no se aplicó: %v", err)
 	}
 }
 

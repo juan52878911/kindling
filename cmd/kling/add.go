@@ -76,8 +76,10 @@ func cmdAdd(args []string) error {
 	// almacenamiento persistente: habría que reimportarlo a mano después, y
 	// reimportar es justo lo que un volumen obliga a hacer si se olvida (el
 	// conjunto de discos queda fijado al congelar el snapshot dorado).
-	volume := fs.String("volume", "", "volumen persistente a montar (ver `kling volume ls`)")
-	mount := fs.String("mount", "", "dónde montarlo dentro de la microVM (por defecto /data)")
+	var volumes volumeFlag
+	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
+	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
+	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: compartible entre servicios")
 	fresh := fs.Bool("refresh", false, "ignorar la caché del registro")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
@@ -87,6 +89,11 @@ func cmdAdd(args []string) error {
 			"     búscalo antes con:  kling search <consulta>")
 	}
 
+	vols, err := volumeSet(volumes, *mount, *volRO)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
@@ -94,14 +101,14 @@ func cmdAdd(args []string) error {
 	rc.Fresh = *fresh
 
 	for _, want := range fs.Args() {
-		if err := addOne(ctx, rc, *host, want, *as, *volume, *mount, *extra, *dryRun); err != nil {
+		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun); err != nil {
 			return fmt.Errorf("%s: %w", want, err)
 		}
 	}
 	return nil
 }
 
-func addOne(ctx context.Context, rc *registry.Client, host, want, as, volume, mount string, extra []string, dryRun bool) error {
+func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun bool) error {
 	srv, candidates, err := rc.Get(ctx, want, 30)
 	if err != nil {
 		if len(candidates) > 0 {
@@ -194,7 +201,7 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as, volume, mo
 	//    pregunta qué sabe hacer, la congela como snapshot dorado y guarda el
 	//    catálogo. Se reutiliza tal cual en vez de duplicar los cinco pasos.
 	fmt.Printf("  2/2  importando el servicio\n")
-	if err := runImport(hostOf(host), service, volume, mount, loadConfig()); err != nil {
+	if err := runImport(hostOf(host), service, vols, loadConfig()); err != nil {
 		return err
 	}
 
@@ -208,13 +215,21 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as, volume, mo
 // IP de la microVM (172.30.x.x), que solo es enrutable desde el host donde
 // corre el daemon. Desde un portátil apuntando por SSH, ese paso da un timeout
 // que parece del servidor MCP y no lo es.
-func runImport(endpoint, service, volume, mount string, cfg *config.Config) error {
+func runImport(endpoint, service string, vols []api.VolumeAttachment, cfg *config.Config) error {
 	args := []string{service, "-image", service, "-force"}
-	if volume != "" {
-		args = append(args, "-volume", volume)
-		if mount != "" {
-			args = append(args, "-mount", mount)
+	// Un -volume por cada uno, en el mismo ORDEN: ese orden es el de los discos
+	// dentro de la microVM. Antes se pasaba un solo volumen como cadena, así que
+	// un segundo -volume se perdía en silencio — y perder un volumen en silencio
+	// significa que el servicio escribe en un overlay que muere con la máquina.
+	for _, v := range vols {
+		spec := v.Name
+		if v.Mount != "" {
+			spec += ":" + v.Mount
 		}
+		if v.ReadOnly {
+			spec += ":ro"
+		}
+		args = append(args, "-volume", spec)
 	}
 
 	// Los valores por defecto se resuelven AQUÍ y viajan explícitos. Por SSH se
