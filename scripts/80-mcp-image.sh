@@ -208,6 +208,23 @@ fi
 [ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }
 chmod +x "$mnt/entrypoint"
 umount "$mnt"
+
+# Comprobar el sistema de ficheros ANTES de que nadie lo arranque.
+#
+# El invitado monta esta imagen como raíz en SOLO LECTURA, y un ext4 con el
+# journal a medias (needs_recovery) no se puede montar así: el kernel entra en
+# pánico con EUCLEAN y el fallo aparece como "el servidor no abrió el puerto",
+# que no se parece en nada a la causa. Si algo interrumpió el chroot, aquí se
+# ve; y si no se puede reparar, mejor fallar ahora que entregar una imagen que
+# no arranca.
+sync
+if ! e2fsck -fp "$DEST" >/dev/null 2>&1; then
+  echo "AVISO: el sistema de ficheros de la imagen necesitaba reparación" >&2
+  e2fsck -fy "$DEST" >/dev/null 2>&1 || {
+    echo "ERROR: '$NAME' quedó con un sistema de ficheros irreparable; bórrala y repite" >&2
+    exit 1; }
+fi
+
 chmod a+r "$DEST"
 
 echo "imagen '$NAME' lista ($(du -h "$DEST" | cut -f1) reales)"

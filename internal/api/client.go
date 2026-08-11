@@ -18,13 +18,26 @@ import (
 // intercambiable y el resto del CLI no necesita saber cuál está en uso.
 type Client struct {
 	http *http.Client
+	// long sirve a las operaciones que tardan MINUTOS en responder, como
+	// construir una imagen (instala node y sus dependencias en un chroot).
+	// El cliente normal acota la espera a las cabeceras para que un daemon
+	// atascado no cuelgue a nadie; ese límite es correcto para todo lo demás y
+	// letal aquí, así que estas llamadas van por su propio cliente en vez de
+	// subirle el número al de todos.
+	long *http.Client
 	d    *transport.Dialer
 }
 
 func NewClient(endpoint string) *Client {
 	d := transport.New(endpoint)
-	return &Client{
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) { return d.Dial(ctx) }
+	c := &Client{
 		d: d,
+		// Sin ResponseHeaderTimeout: quien lo use acota con su contexto.
+		long: &http.Client{Transport: &http.Transport{
+			DialContext:       dial,
+			DisableKeepAlives: true,
+		}},
 		http: &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return d.Dial(ctx)
@@ -49,11 +62,16 @@ func NewClient(endpoint string) *Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	return c
 }
 
 func (c *Client) Endpoint() string { return c.d.Describe() }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(c.http, ctx, method, path, body, out)
+}
+
+func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path string, body, out any) error {
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -66,7 +84,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -108,7 +126,7 @@ func (c *Client) Run(ctx context.Context, r RunRequest) (*Machine, error) {
 // cuanto termina y quien llame debe darle margen en su contexto.
 func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildImageResult, error) {
 	var res BuildImageResult
-	return &res, c.do(ctx, http.MethodPost, "/images", r, &res)
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {

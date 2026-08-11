@@ -139,7 +139,19 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), buildTimeout)
+	// El contexto de la PETICIÓN no manda aquí, a propósito.
+	//
+	// exec.CommandContext mata el proceso con SIGKILL cuando su contexto se
+	// cancela, y este script monta un loopback, hace bind de /proc y ejecuta un
+	// chroot. SIGKILL no dispara su `trap cleanup EXIT`, así que un cliente que
+	// se rinde —un timeout, un Ctrl-C— deja la imagen MONTADA en escritura y a
+	// medio construir. A partir de ahí, cada arranque de esa imagen la corrompe
+	// más: el invitado ve un ext4 con needs_recovery y el kernel entra en
+	// pánico con EUCLEAN. Pasó de verdad, y costó un rato entenderlo.
+	//
+	// Que el cliente cuelgue es molesto; dejar el host con un montaje huérfano
+	// y una imagen inservible, no. Se acota solo por buildTimeout.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, sh, argv...)

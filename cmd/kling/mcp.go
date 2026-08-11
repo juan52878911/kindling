@@ -552,7 +552,21 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(api.MCPPayload(raw), &out); err != nil {
-		return name, nil, fmt.Errorf("respuesta ilegible: %w", err)
+		// Enseñar lo que llegó, no solo que no se pudo parsear.
+		//
+		// Cuando el servidor MCP muere al arrancar —le faltan argumentos, el
+		// paquete de npm está roto— el puente contesta con un error en texto
+		// plano, y "respuesta ilegible: invalid character 'l'" no dice
+		// absolutamente nada sobre la causa. El cuerpo sí.
+		body := strings.TrimSpace(string(api.MCPPayload(raw)))
+		if len(body) > 300 {
+			body = body[:300] + "…"
+		}
+		if body == "" {
+			body = "(respuesta vacía)"
+		}
+		return name, nil, fmt.Errorf("no entiendo la respuesta a tools/list (%w).\n"+
+			"El servidor contestó: %s", err, body)
 	}
 	if out.Error != nil {
 		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
