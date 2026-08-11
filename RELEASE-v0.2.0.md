@@ -18,9 +18,9 @@ metes servicios de verdad.
 | Gateway | abierto a quien alcance el puerto | token obligatorio, `crypto/subtle` |
 | Clientes de IA | 2 | **7** |
 | Catálogo de servidores MCP | a mano | registro oficial: `kling search` / `kling add` |
-| Estado persistente | ninguno | volúmenes con journal |
+| Estado persistente | ninguno | volúmenes con journal, hasta 4 por microVM, compartibles en lectura |
 | Tests | 2 | **56** + 6 benchmarks |
-| Prueba de extremo a extremo | — | `90-e2e.sh`, 15 comprobaciones |
+| Prueba de extremo a extremo | — | `90-e2e.sh`, 21 comprobaciones |
 | CI | — | gofmt + vet + `go test -race` en cada push |
 | Dependencias externas | 0 | **0** |
 

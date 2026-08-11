@@ -18,6 +18,7 @@ set -uo pipefail
 KLING="${KLING:-kling}"
 SVC="${SVC:-e2e-eco}"
 VOL="${VOL:-e2e-vol}"
+VOL2="${VOL2:-e2e-vol2}"
 KEEP="${KEEP:-0}"
 
 pass=0; fail=0
@@ -32,11 +33,12 @@ cleanup() {
   [ "$KEEP" = "1" ] && { echo; echo "KEEP=1: no limpio. Restos: servicio $SVC, volumen $VOL"; return; }
   echo
   echo "limpiando..."
-  for m in $($KLING ps -a 2>/dev/null | awk -v s="$SVC" '$0 ~ s {print $1}'); do
+  for m in $($KLING ps -a 2>/dev/null | awk '/e2e-/ {print $1}'); do
     $KLING rm "$m" >/dev/null 2>&1
   done
   $KLING rmi "$SVC" >/dev/null 2>&1
   $KLING volume rm "$VOL" >/dev/null 2>&1
+  $KLING volume rm "$VOL2" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -104,11 +106,21 @@ if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
   # uno cachea metadatos que el otro no ve y el resultado es corrupción. Esta
   # comprobación es lo único que lo impide.
   out=$($KLING run -name "$NAME-bis" -image min -volume "$VOL" 2>&1)
-  if echo "$out" | grep -qi "ya lo tiene montado"; then
-    ok "se niega a montar el mismo volumen en dos microVMs"
+  if echo "$out" | grep -qi "en ESCRITURA"; then
+    ok "se niega a montar el mismo volumen en dos escritores"
   else
     bad "doble montaje" "un rechazo nombrando a $NAME" "$out"
     $KLING rm "$NAME-bis" >/dev/null 2>&1
+  fi
+
+  # Con un escritor dentro no entra NADIE, ni a leer: vería metadatos cambiando
+  # bajo sus pies.
+  out=$($KLING run -name "$NAME-ro" -image min -volume "$VOL:/x:ro" 2>&1)
+  if echo "$out" | grep -qi "en ESCRITURA"; then
+    ok "un escritor bloquea también a los lectores"
+  else
+    bad "lector con escritor dentro" "un rechazo" "$out"
+    $KLING rm "$NAME-ro" >/dev/null 2>&1
   fi
 
   # Aparece a quién pertenece, que es lo que hace comprensible el rechazo.
@@ -130,6 +142,48 @@ if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
   echo "$st" | grep -qi clean && ok "queda limpio tras matar el VMM" \
     || bad "estado del ext4" "clean" "${st:-no pude leerlo}"
 fi
+
+# Un escritor, o muchos lectores. Es lo que hace posible una biblioteca de
+# paquetes compartida sin duplicarla en cada imagen.
+step "3b. Volumen compartido en solo lectura"
+LECTORES=0
+for i in 1 2 3; do
+  if $KLING run -name "e2e-lec-$i-$$" -image min -volume "$VOL:/libs:ro" >/dev/null 2>&1; then
+    LECTORES=$((LECTORES+1))
+  fi
+done
+[ "$LECTORES" = "3" ] && ok "tres microVMs lo montan a la vez en lectura" \
+  || bad "lectores concurrentes" "3" "$LECTORES"
+
+# Y con lectores dentro no entra un escritor.
+out=$($KLING run -name "e2e-esc-$$" -image min -volume "$VOL" 2>&1)
+if echo "$out" | grep -qi "leyendo"; then
+  ok "los lectores bloquean al escritor"
+else
+  bad "escritor con lectores dentro" "un rechazo" "$out"
+  $KLING rm "e2e-esc-$$" >/dev/null 2>&1
+fi
+for i in 1 2 3; do $KLING rm "e2e-lec-$i-$$" >/dev/null 2>&1; done
+
+# Varios volúmenes en la misma microVM: el caso que motivó todo esto.
+$KLING volume rm "$VOL2" >/dev/null 2>&1
+$KLING volume create "$VOL2" -size 128M >/dev/null 2>&1
+NAME="e2e-multi-$$"
+if $KLING run -name "$NAME" -image min -volume "$VOL:/uno" -volume "$VOL2:/dos:ro" >/dev/null 2>&1; then
+  ok "una microVM con dos volúmenes"
+  # volume ls debe distinguir quién escribe de quién lee.
+  $KLING volume ls 2>&1 | grep "$VOL " | grep -q "escritura" && ok "volume ls distingue escritor de lectores" \
+    || bad "volume ls" "marca de (escritura)" "$($KLING volume ls 2>&1 | grep "$VOL ")"
+  $KLING rm "$NAME" >/dev/null 2>&1
+else
+  bad "dos volúmenes" "una máquina con ambos" "no arrancó"
+fi
+
+# Dos volúmenes en el mismo punto de montaje: el segundo taparía al primero.
+out=$($KLING run -name "e2e-choque-$$" -image min -volume "$VOL:/x" -volume "$VOL2:/x" 2>&1)
+echo "$out" | grep -qi "taparía" && ok "rechaza dos volúmenes en el mismo punto" \
+  || bad "puntos de montaje repetidos" "un rechazo" "$out"
+$KLING rm "e2e-choque-$$" >/dev/null 2>&1
 
 # ── 4. el gateway pide token ─────────────────────────────────────────────────
 step "4. Gateway y autenticación"
