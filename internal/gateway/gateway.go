@@ -540,7 +540,11 @@ func (g *Gateway) acquire(ctx context.Context, service string) (*api.Machine, er
 	}
 	log.Printf("%s: instanciando desde el snapshot %s", service, snap.Name)
 	return g.client.Run(ctx, api.RunRequest{
-		From:       snap.Name,
+		From: snap.Name,
+		// La política de salida viaja con el snapshot. Sin esto, un servicio
+		// importado con -egress internet despierta sin red y cada llamada suya
+		// al exterior falla con un "fetch failed" que no señala a ninguna parte.
+		Egress:     snap.Egress,
 		Labels:     map[string]string{api.LabelService: service},
 		TTLSeconds: int(g.idle.Seconds()) * 2, // red de seguridad si el gateway muere
 	})

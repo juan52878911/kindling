@@ -107,6 +107,14 @@ type Snapshot struct {
 	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
 	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
 
+	// Egress es la política de red con la que se importó el servicio.
+	//
+	// Vive aquí porque las instancias se crean DESDE el snapshot, no desde la
+	// máquina original: sin esto, un servicio importado con acceso a internet
+	// despertaba sin él y toda llamada suya al exterior fallaba, para siempre y
+	// sin explicación.
+	Egress string `json:"egress,omitempty"`
+
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
 	Labels map[string]string `json:"labels,omitempty"`
