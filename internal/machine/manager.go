@@ -495,6 +495,12 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	volPath, volMount, err := m.resolveVolume(req)
+	if volPath != "" {
+		// Antes de entregárselo al VMM y con la certeza de que nadie más lo
+		// tiene montado: un e2fsck sobre un volumen en uso haría más daño que
+		// el que repara.
+		repairVolume(ctx, volPath)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1003,6 +1009,13 @@ func (m *Manager) Remove(ref string) error {
 	return nil
 }
 
+// kill para el VMM. SIGKILL y no SIGTERM: un invitado hostil puede ignorar una
+// señal educada, y la garantía de que una microVM se para no puede depender de
+// que colabore.
+//
+// Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
+// cortesía con el invitado, es que si no, el volumen persistente pierde lo
+// último que se escribió en él.
 func (m *Manager) kill(id string) {
 	m.mu.RLock()
 	mc := m.byID[id]
@@ -1010,6 +1023,7 @@ func (m *Manager) kill(id string) {
 	if mc == nil || mc.PID == 0 {
 		return
 	}
+	m.flushVolume(mc)
 	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
 }
 

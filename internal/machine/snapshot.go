@@ -126,9 +126,17 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
 		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
-		Egress:    mc.Egress,
-		MemBytes:  allocatedBytes(memPath),
-		DiskBytes: diskUsage(dir),
+		Egress: mc.Egress,
+		// El volumen se graba en el snapshot porque el conjunto de discos de una
+		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
+		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
+		// servicio sin volumen y la herramienta escribe en un overlay que muere
+		// con la máquina — sin un solo error por ningún lado.
+		Volume:      mc.Volume,
+		VolumeMount: mc.VolumeMount,
+		HasVolume:   mc.Volume != "",
+		MemBytes:    allocatedBytes(memPath),
+		DiskBytes:   diskUsage(dir),
 	}
 	m.priv.EnsureReadable(dir)
 
@@ -287,7 +295,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	// El volumen se resuelve ANTES de arrancar nada: si se pide uno sobre un
 	// snapshot que no lo lleva, hay que decirlo aquí y no tras el arranque.
+	// El volumen se HEREDA del snapshot, igual que la política de salida: quien
+	// despierta un servicio no tiene por qué saber con qué volumen se importó,
+	// y el gateway desde luego no lo sabe.
+	if req.Volume == "" && snap.Volume != "" {
+		req.Volume = snap.Volume
+		req.VolumeMount = snap.VolumeMount
+	}
 	volPath, _, verr := m.resolveVolume(req)
+	if volPath != "" {
+		repairVolume(ctx, volPath)
+	}
 	if verr != nil {
 		os.RemoveAll(dir)
 		return nil, verr

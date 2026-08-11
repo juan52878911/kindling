@@ -31,7 +31,7 @@ import (
 )
 
 // GuestPort es donde se espera que escuche el servidor MCP dentro de la microVM.
-const GuestPort = 8080
+const GuestPort = api.GuestPort
 
 // livenessTTL es cuánto se confía en que una instancia sigue viva sin volver a
 // preguntárselo al daemon. El vigilante del daemon detecta las muertes en 10 s,

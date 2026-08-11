@@ -191,3 +191,90 @@ func TestCrearVolumenNoPisaElExistente(t *testing.T) {
 	}
 	_ = filepath.Join // silencia el import si el resto cambia
 }
+
+// Dos microVMs no pueden montar el mismo volumen a la vez.
+//
+// No es una política: un ext4 no admite dos escritores. Cada uno cachea
+// metadatos que el otro no ve y el sistema de ficheros se corrompe. Comprobado
+// en el laboratorio — el síntoma es un EBADMSG al leer desde la siguiente
+// máquina, que no señala a la causa por ninguna parte.
+func TestUnVolumenNoSeMontaDosVeces(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.volumesDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.volumePath("notas"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Libre: se puede montar.
+	if _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err != nil {
+		t.Fatalf("un volumen libre debería poder montarse: %v", err)
+	}
+
+	m.mu.Lock()
+	m.byID["a"] = &api.Machine{ID: "a", Name: "primera", State: api.StateRunning, Volume: "notas"}
+	m.mu.Unlock()
+
+	_, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"})
+	if err == nil {
+		t.Fatal("dejó montar el mismo volumen en dos máquinas a la vez")
+	}
+	if !strings.Contains(err.Error(), "primera") {
+		t.Errorf("el error debe decir QUIÉN lo tiene: %v", err)
+	}
+
+	// Una máquina warm también lo retiene: al descongelar vuelve a montarlo.
+	m.mu.Lock()
+	m.byID["a"].State = api.StateWarm
+	m.mu.Unlock()
+	if _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err == nil {
+		t.Error("una máquina warm sigue siendo dueña del volumen")
+	}
+
+	// Parada, ya no.
+	m.mu.Lock()
+	m.byID["a"].State = api.StateStopped
+	m.mu.Unlock()
+	if _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err != nil {
+		t.Errorf("con la máquina parada debería liberarse: %v", err)
+	}
+}
+
+// Un snapshot tiene que RECORDAR su volumen.
+//
+// El conjunto de discos de una microVM queda fijado al congelarla, así que si el
+// snapshot no recuerda con qué volumen se importó, el gateway la despierta sin
+// él y la herramienta escribe en un overlay que muere con la máquina. Sin un
+// solo error: la escritura dice "success", y el fichero no está la próxima vez.
+//
+// Eso fue exactamente lo que pasó en el laboratorio, y por eso este test existe.
+func TestElSnapshotRecuerdaSuVolumen(t *testing.T) {
+	mc := &api.Machine{Volume: "notas", VolumeMount: "/data", Egress: "internet"}
+	snap := &api.Snapshot{
+		Egress:      mc.Egress,
+		Volume:      mc.Volume,
+		VolumeMount: mc.VolumeMount,
+		HasVolume:   mc.Volume != "",
+	}
+	if !snap.HasVolume || snap.Volume != "notas" || snap.VolumeMount != "/data" {
+		t.Fatalf("el snapshot perdió el volumen: %+v", snap)
+	}
+
+	// Y al despertar, una petición SIN volumen tiene que heredarlo: el gateway
+	// despierta servicios por nombre y no sabe nada de volúmenes.
+	req := api.RunRequest{From: "svc"}
+	if req.Volume == "" && snap.Volume != "" {
+		req.Volume, req.VolumeMount = snap.Volume, snap.VolumeMount
+	}
+	if req.Volume != "notas" || req.VolumeMount != "/data" {
+		t.Errorf("no heredó el volumen del snapshot: %+v", req)
+	}
+
+	// Una máquina sin volumen no debe marcar el snapshot como si lo tuviera:
+	// eso obligaría a pasar -volume para despertar servicios que no lo usan.
+	sin := &api.Snapshot{HasVolume: (&api.Machine{}).Volume != ""}
+	if sin.HasVolume {
+		t.Error("marcó HasVolume en una máquina sin volumen")
+	}
+}

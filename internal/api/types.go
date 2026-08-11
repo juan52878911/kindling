@@ -104,6 +104,11 @@ type RunRequest struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// GuestPort es donde escucha el puente dentro de la microVM. Vive aquí, y no en
+// el gateway, porque también lo necesita el manager para pedirle al invitado que
+// vacíe su volumen antes de morir — y machine no puede importar gateway.
+const GuestPort = 8080
+
 // VolumeBootParam es el parámetro de la línea de comandos del kernel por el que
 // el invitado sabe dónde montar su volumen.
 //
@@ -146,6 +151,11 @@ type Snapshot struct {
 	MemBytes  int64     `json:"mem_bytes"`  // ocupación real del fichero de memoria
 	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
 	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
+
+	// Volume es el volumen que tenía la plantilla. Se recuerda para que
+	// despertar una instancia no exija repetirlo: el gateway despierta
+	// servicios por nombre y no sabe nada de volúmenes.
+	Volume string `json:"volume,omitempty"`
 
 	// HasVolume dice si el snapshot lleva el DISPOSITIVO de volumen dentro.
 	//

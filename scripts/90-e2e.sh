@@ -74,23 +74,62 @@ fi
 $KLING rm "$NAME" >/dev/null 2>&1
 
 # ── 3. volumen que sobrevive a la microVM ────────────────────────────────────
+# Este bloque existe porque la persistencia falló de tres formas distintas, y
+# ninguna daba un error: dos microVMs montando el mismo ext4, un volumen sin
+# journal, y un snapshot que no recordaba con qué volumen se importó. Las tres
+# terminaban en escrituras que decían "success" y luego no estaban.
 step "3. Volumen persistente"
 $KLING volume rm "$VOL" >/dev/null 2>&1
 out=$($KLING volume create "$VOL" -size 256M 2>&1)
 echo "$out" | grep -q creado && ok "volumen creado" || bad "volume create" "creado" "$out"
 
-# No se puede borrar mientras alguien lo usa: es lo que evita corromperlo.
+# CON journal. Sin él, matar el VMM —que es como se para una microVM— deja el
+# sistema de ficheros incoherente y sin nada que reproducir: el siguiente
+# arranque monta sin quejarse y el primer read devuelve EBADMSG.
+if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+  feats=$(ssh "${KLING_HOST#ssh://}" \
+    "sudo dumpe2fs -h /var/lib/kindling/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem features'")
+  echo "$feats" | grep -q has_journal && ok "formateado con journal" \
+    || bad "journal" "has_journal entre las features" "${feats:-no pude leerlo}"
+fi
+
 NAME="e2e-vol-$$"
 if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
+  # No se puede BORRAR mientras alguien lo usa.
   out=$($KLING volume rm "$VOL" 2>&1)
   echo "$out" | grep -qi "usan\|use" && ok "se niega a borrar un volumen en uso" \
     || bad "volume rm en uso" "un rechazo" "$out"
+
+  # Y tampoco se puede MONTAR dos veces. Un ext4 no admite dos escritores: cada
+  # uno cachea metadatos que el otro no ve y el resultado es corrupción. Esta
+  # comprobación es lo único que lo impide.
+  out=$($KLING run -name "$NAME-bis" -image min -volume "$VOL" 2>&1)
+  if echo "$out" | grep -qi "ya lo tiene montado"; then
+    ok "se niega a montar el mismo volumen en dos microVMs"
+  else
+    bad "doble montaje" "un rechazo nombrando a $NAME" "$out"
+    $KLING rm "$NAME-bis" >/dev/null 2>&1
+  fi
+
+  # Aparece a quién pertenece, que es lo que hace comprensible el rechazo.
+  $KLING volume ls 2>&1 | grep -q "$NAME" && ok "volume ls dice quién lo usa" \
+    || bad "volume ls" "el nombre de la máquina que lo monta" "$($KLING volume ls 2>&1 | grep "$VOL")"
+
   $KLING rm "$NAME" >/dev/null 2>&1
 else
   bad "run -volume" "una máquina con volumen" "no arrancó"
 fi
-out=$($KLING volume ls 2>&1)
-echo "$out" | grep -q "$VOL" && ok "aparece en volume ls" || bad "volume ls" "$VOL" "$out"
+
+# Liberado tras destruir la máquina, y el sistema de ficheros queda limpio: el
+# daemon le pide al invitado que vacíe la caché antes de matarlo.
+$KLING volume ls 2>&1 | grep "$VOL" | grep -q "—" && ok "se libera al destruir la máquina" \
+  || bad "liberación" "sin usuarios" "$($KLING volume ls 2>&1 | grep "$VOL")"
+if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+  st=$(ssh "${KLING_HOST#ssh://}" \
+    "sudo dumpe2fs -h /var/lib/kindling/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem state'")
+  echo "$st" | grep -qi clean && ok "queda limpio tras matar el VMM" \
+    || bad "estado del ext4" "clean" "${st:-no pude leerlo}"
+fi
 
 # ── 4. el gateway pide token ─────────────────────────────────────────────────
 step "4. Gateway y autenticación"

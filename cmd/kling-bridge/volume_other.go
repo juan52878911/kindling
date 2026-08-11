@@ -2,13 +2,18 @@
 
 package main
 
-import "fmt"
+import "errors"
 
-// mountVolume fuera de Linux solo existe para que el paquete compile en la
-// máquina donde se desarrolla. El puente SOLO corre dentro de la microVM.
+// En el anfitrión (macOS, donde se desarrolla) no hay volumen que montar: el
+// puente local expone un MCP de stdio y nada más. Estas versiones existen para
+// que `go build ./...` compile fuera de Linux, no para usarse.
+
 func mountVolume() (string, error) {
-	if volumeMountpoint() == "" {
-		return "", nil
+	if volumeMountpoint() != "" {
+		return "", errors.New("los volúmenes solo existen dentro de la microVM")
 	}
-	return "", fmt.Errorf("montar volúmenes solo funciona dentro de la microVM (Linux)")
+	return "", nil
 }
+
+func syncVolume(string)    {}
+func unmountVolume(string) {}

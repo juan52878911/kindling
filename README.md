@@ -153,6 +153,7 @@ en el host que se expone como tercer disco (`vdc`) y que persiste.
 ```sh
 kling volume create notas -size 2G
 kling mcp import notas-mcp -volume notas          # o: kling add <servidor> ...
+kling run -name apuntes -volume notas -mount /data   # o una microVM a mano
 kling volume ls
 ```
 
@@ -176,8 +177,19 @@ kling lo dice con esas palabras en vez de fallar dentro del invitado.
 imagen base. El punto de montaje viaja en la línea de comandos del kernel
 (`kling.volume=/data`), de modo que el mismo snapshot dorado sirve con volúmenes distintos.
 
-Borrar un volumen que una microVM tiene montado le corrompería el sistema de ficheros por
-debajo, así que `kling volume rm` se niega y dice quién lo está usando.
+**Un solo escritor a la vez.** No es una política, es física: un ext4 no admite dos
+sistemas montándolo en escritura. Cada uno cachea metadatos que el otro no ve, y el
+resultado es corrupción. Así que ni se puede montar el mismo volumen en dos microVMs, ni
+se puede borrar uno que alguien tenga montado; en ambos casos kling se niega y dice quién
+lo tiene. Un volumen es para el estado de *un* servicio, no un disco compartido.
+
+**Sobrevive a que maten la máquina.** Parar una microVM es matar el VMM, que para el
+invitado es indistinguible de un corte de corriente. Por eso un volumen se formatea **con
+journal** —al contrario que los overlays, que son desechables— y por eso el daemon le pide
+al invitado que vacíe su caché al disco antes de matarlo. Sin lo primero, el sistema de
+ficheros queda incoherente y sin nada que reproducir; sin lo segundo, se pierde justo lo
+último que se escribió. Antes de cada arranque se le pasa un `e2fsck -p`, que sobre un
+volumen sano cuesta milisegundos.
 
 ## Por qué microVMs y no contenedores
 

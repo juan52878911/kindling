@@ -97,11 +97,24 @@ Opciones:
 	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
 	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
 	// que va a desaparecer con la máquina.
-	if mp, err := mountVolume(); err != nil {
+	mountpoint, err := mountVolume()
+	if err != nil {
 		log.Fatalf("volumen: %v", err)
-	} else if mp != "" {
-		log.Printf("volumen persistente montado en %s", mp)
 	}
+	if mountpoint != "" {
+		log.Printf("volumen persistente montado en %s", mountpoint)
+	}
+
+	// /volume/sync vacía la caché del invitado al disco.
+	//
+	// El daemon lo llama antes de matar la microVM. Sin esto lo último que
+	// escribió la herramienta se queda en la caché de páginas del invitado y
+	// muere con él: el volumen "persistente" perdería justo lo más reciente,
+	// que es lo que a nadie se le ocurre comprobar.
+	mux.HandleFunc("/volume/sync", func(w http.ResponseWriter, r *http.Request) {
+		syncVolume(mountpoint)
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	srv := &http.Server{Addr: *listen, Handler: mux}
 
@@ -125,6 +138,9 @@ Opciones:
 
 	<-shutdownDone
 	b.closeAll()
+	// Después de closeAll, no antes: mientras los servidores MCP vivan pueden
+	// seguir escribiendo, y desmontar por debajo perdería esas escrituras.
+	unmountVolume(mountpoint)
 }
 
 // closeAll cierra todas las sesiones y mata sus procesos hijo.

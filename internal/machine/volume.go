@@ -1,40 +1,17 @@
 package machine
 
-// VOLÚMENES: almacenamiento que sobrevive a la microVM.
-//
-// El README dice, con razón, que kindling da persistencia de SESIÓN y no
-// almacenamiento duradero: el overlay de cada máquina muere con ella. Esto es lo
-// segundo.
-//
-// POR QUÉ UN DISCO Y NO UN DIRECTORIO DEL HOST. La petición natural es "monta
-// /home/juan/notas dentro". No se hace, y no por pereza:
-//
-//   - Firecracker no tiene virtio-fs. Compartir un directorio exigiría 9p o un
-//     servidor de ficheros dentro del invitado, que es superficie nueva.
-//   - Y sobre todo: el invitado se considera HOSTIL. Un directorio del host
-//     montado en escritura le da un canal directo al sistema de ficheros del
-//     anfitrión, que es exactamente la frontera que justifica usar microVMs en
-//     vez de contenedores. Sería tirar por tierra la premisa del proyecto para
-//     ahorrar un `cp`.
-//
-// Un volumen es un fichero-imagen ext4 en el host que se expone como TERCER
-// DISCO (vdc). El host no lo monta mientras la microVM lo use, así que nunca hay
-// dos sistemas escribiendo el mismo ext4 — que es corrupción garantizada.
-//
-// QUIÉN LO MONTA DENTRO. El puente (kling-bridge), no el init de la imagen.
-// Ponerlo en el init obligaría a reconstruir todas las imágenes base; el puente
-// ya viaja en cada imagen de modo stdio y es PID 1, así que puede montar antes
-// de lanzar el servidor MCP. El punto de montaje viaja en la línea de comandos
-// del kernel, así que es dinámico por arranque y no queda grabado en la imagen.
-
 import (
 	"context"
 	"fmt"
+	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,7 +52,7 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 	// fallo aparecería allí, no aquí.
 	tmp := path + ".tmp"
 	_ = os.Remove(tmp)
-	if err := createOverlay(ctx, tmp, sizeMiB); err != nil {
+	if err := createVolumeImage(ctx, tmp, sizeMiB); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("formateando el volumen: %w", err)
 	}
@@ -180,6 +157,20 @@ func (m *Manager) resolveVolume(req api.RunRequest) (path, mountpoint string, er
 		return "", "", fmt.Errorf("no existe el volumen %q: créalo con `kling volume create %s`", req.Volume, req.Volume)
 	}
 
+	// UNA SOLA MÁQUINA A LA VEZ. Esto no es una política, es física: un ext4 no
+	// admite dos sistemas montándolo en escritura. Cada uno cachea metadatos que
+	// el otro no ve, y el resultado es corrupción — comprobado, y el síntoma es
+	// un EBADMSG al leer desde la siguiente microVM, que no se parece en nada a
+	// la causa.
+	//
+	// Se comprueba aquí, en el camino de arranque, y no solo al borrar: quien
+	// monta es tan peligroso como quien borra.
+	if users := m.volumeUsers()[req.Volume]; len(users) > 0 {
+		return "", "", fmt.Errorf("el volumen %q ya lo tiene montado %s.\n"+
+			"Un ext4 no admite dos escritores: párala antes, o usa otro volumen",
+			req.Volume, strings.Join(users, ", "))
+	}
+
 	mp := req.VolumeMount
 	if mp == "" {
 		mp = "/data"
@@ -213,3 +204,92 @@ func (m *Manager) touchVolume(name string) {
 }
 
 var _ = exec.Command // se usa desde createOverlay
+
+// createVolumeImage formatea un volumen en ext4 CON journal.
+//
+// Esta es la única diferencia con createOverlay, y no es un detalle: un overlay
+// es desechable —muere con la máquina, y por eso ahorrarse el journal es gratis—
+// mientras que un volumen tiene que sobrevivir a que maten el VMM con SIGKILL,
+// que para el invitado es indistinguible de un corte de corriente.
+//
+// Sin journal, ese corte deja el sistema de ficheros incoherente y sin nada que
+// reproducir. El síntoma no se parece en nada a la causa: el siguiente arranque
+// monta sin quejarse y el primer read devuelve EBADMSG. Comprobado.
+func createVolumeImage(ctx context.Context, path string, sizeMiB int) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(int64(sizeMiB) << 20); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+
+	// -E nodiscard preserva la dispersión: un volumen de 1 GiB recién creado
+	// ocupa kilobytes en el anfitrión y crece según se usa.
+	out, err := exec.CommandContext(ctx, "mkfs.ext4",
+		"-q", "-F", "-E", "nodiscard", "-L", "kling-vol", path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, out)
+	}
+	return nil
+}
+
+// repairVolume repasa el sistema de ficheros antes de entregárselo al invitado.
+//
+// El journal cubre los cortes normales, pero no cubre dos cosas: los volúmenes
+// creados antes de que los volúmenes llevasen journal, y el caso de un anfitrión
+// que se apagó a la brava a media escritura. Un e2fsck aquí cuesta milisegundos
+// sobre un volumen sano y es la diferencia entre arrancar y un pánico del kernel
+// invitado en los demás casos.
+//
+// No devuelve error a propósito: si e2fsck no está instalado, o el volumen está
+// tan dañado que no se puede arreglar solo, seguir adelante y dejar que falle el
+// montaje dentro del invitado da un mensaje más útil que negarse a arrancar.
+func repairVolume(ctx context.Context, path string) {
+	// -p arregla solo lo que no admite ambigüedad. Sin -p, e2fsck haría
+	// preguntas a un stdin que no existe y se quedaría colgado.
+	cmd := exec.CommandContext(ctx, "e2fsck", "-p", "-f", path)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	// e2fsck sale con 1 cuando ARREGLÓ algo: es un éxito, no un fallo.
+	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+		log.Printf("volumen %s: reparado antes de montar: %s",
+			filepath.Base(path), strings.TrimSpace(string(out)))
+		return
+	}
+	log.Printf("volumen %s: e2fsck no pudo repasarlo (%v); lo monto igualmente",
+		filepath.Base(path), err)
+}
+
+// flushVolume le pide al invitado que vacíe su caché al disco.
+//
+// Se llama justo antes de matar el VMM. El daemon mata con SIGKILL —no hay otra
+// forma de garantizar que un invitado hostil se pare— y eso significa que lo que
+// el servidor MCP acabase de escribir sigue en la caché de páginas del invitado
+// y no ha tocado el fichero del anfitrión. Esta llamada es la que hace que un
+// volumen persistente persista de verdad.
+//
+// El plazo es corto y los fallos se ignoran: si el invitado no contesta, ya
+// estaba roto, y retrasar el apagado por él no arregla nada.
+func (m *Manager) flushVolume(mc *api.Machine) {
+	if mc == nil || mc.Volume == "" || mc.IP == "" || mc.State != api.StateRunning {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	url := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort)) + "/volume/sync"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("volumen %s: el invitado no vació la caché antes de morir: %v", mc.Volume, err)
+		return
+	}
+	resp.Body.Close()
+}

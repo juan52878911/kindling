@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -75,7 +76,8 @@ func upHere(root string, checkOnly bool) error {
 	fmt.Println()
 
 	p := localProbe(root)
-	fatal, warn := printChecks(checksOf(p), "")
+	cs := checksOf(p)
+	fatal, warn := printChecks(cs, "")
 	if fatal > 0 {
 		fmt.Println()
 		return fmt.Errorf("faltan prerrequisitos sin los que no hay microVMs; están arriba, con el comando que los instala")
@@ -96,11 +98,13 @@ func upHere(root string, checkOnly bool) error {
 
 	// Los avisos se repiten AL FINAL a propósito: arriba quedan sepultados bajo
 	// la salida de systemd, y son justo los dos que dejan una instalación que
-	// parece funcionar y no funciona.
+	// parece funcionar y no funciona. Se repite la MISMA lista, no una nueva
+	// comprobación, para que el número del encabezado y lo que se lee debajo no
+	// puedan contradecirse.
 	if warn > 0 {
 		fmt.Println()
-		fmt.Printf("PENDIENTE (%d):\n", warn)
-		printChecks(onlyFailed(checksOf(localProbe(root))), "")
+		fmt.Printf("PENDIENTE (%d) — el daemon ya corre, pero esto sigue roto:\n", warn)
+		printChecks(onlyFailed(cs), "")
 	}
 
 	fmt.Println()
@@ -545,8 +549,12 @@ func cmdStatus(args []string) error {
 	info, err := c.Info(ctx)
 	if err != nil {
 		fmt.Printf("daemon:       ✗ no responde (%v)\n", err)
-		fmt.Printf("KVM:          ?\n")
-		fmt.Printf("firecracker:  ?\n")
+		fmt.Printf("              diagnostica y arráncalo con:  kling up\n")
+		// KVM y firecracker los reporta el propio daemon: sin él no se sabe si
+		// faltan o si simplemente no hay quien conteste, y decir "no" sería
+		// mentir sobre una máquina que quizá está perfecta.
+		fmt.Printf("KVM:          ? (lo informa el daemon)\n")
+		fmt.Printf("firecracker:  ? (lo informa el daemon)\n")
 	} else {
 		fmt.Printf("daemon:       ✓ %s · %d máquina(s) · raíz %s\n", info.Version, info.Machines, info.Root)
 		fmt.Printf("KVM:          %s\n", markYes(info.KVM, "disponible", "NO disponible — no se puede arrancar ninguna microVM"))
@@ -616,10 +624,11 @@ func servicesLine(url, token string) string {
 		return "✗ HTTP " + resp.Status
 	}
 
-	body := make([]byte, 64<<10)
-	n, _ := readFull(resp.Body, body)
+	// Acotado: leer sin límite una respuesta ajena es regalarle a quien esté al
+	// otro lado la memoria de este proceso. 64 KiB dan para miles de servicios.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var names []string
-	for _, line := range strings.Split(string(body[:n]), "\n") {
+	for _, line := range strings.Split(string(body), "\n") {
 		if f := strings.Fields(line); len(f) > 0 {
 			names = append(names, f[0])
 		}
@@ -704,18 +713,4 @@ func httpOK(url string) error {
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
 	return nil
-}
-
-// readFull llena b hasta donde pueda. Un io.ReadAll sin límite sobre una
-// respuesta ajena es una invitación a quedarse sin memoria.
-func readFull(r interface{ Read([]byte) (int, error) }, b []byte) (int, error) {
-	total := 0
-	for total < len(b) {
-		n, err := r.Read(b[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
 }
