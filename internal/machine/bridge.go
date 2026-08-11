@@ -236,3 +236,35 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	}
 	return out.Close()
 }
+
+// imageHasBridge dice si la imagen lleva puente dentro, SIN montarla.
+//
+// debugfs lee el ext4 en frío. Montar en escritura solo para mirar si existe un
+// fichero es la operación que ya corrompió una imagen en este proyecto, y para
+// esta pregunta ni siquiera hace falta.
+//
+// El error va aparte del booleano a propósito: "no lo sé" —debugfs ausente— no
+// es lo mismo que "no lo lleva", y quien pregunta decide si falla abierto.
+func imageHasBridge(ctx context.Context, image string) (bool, error) {
+	bin, err := exec.LookPath("debugfs")
+	if err != nil {
+		// En Debian vive en /sbin, que no siempre está en el PATH de un
+		// servicio de systemd.
+		for _, p := range []string{"/sbin/debugfs", "/usr/sbin/debugfs"} {
+			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+				bin, err = p, nil
+				break
+			}
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("no encuentro debugfs (viene con e2fsprogs): %w", err)
+	}
+	out, err := exec.CommandContext(ctx, bin, "-R", "stat /"+guestBridgePath, image).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("debugfs sobre %s: %v: %s", image, err, strings.TrimSpace(string(out)))
+	}
+	// debugfs sale con 0 aunque el fichero no exista: la respuesta está en la
+	// salida. Un stat con éxito imprime la línea "Inode: NNN Type: ...".
+	return strings.Contains(string(out), "Inode:"), nil
+}

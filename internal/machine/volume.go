@@ -281,7 +281,11 @@ func attachments(vols []resolvedVolume) []api.VolumeAttachment {
 	}
 	out := make([]api.VolumeAttachment, len(vols))
 	for i, v := range vols {
-		out[i] = api.VolumeAttachment{Name: v.name, Mount: v.mount, ReadOnly: v.readOnly}
+		// El DriveID se estampa aquí, en el nacimiento, y coincide con el que
+		// boot() registra en SetDrive. A partir de este momento viaja con la
+		// máquina y con cada snapshot que salga de ella.
+		out[i] = api.VolumeAttachment{Name: v.name, Mount: v.mount,
+			ReadOnly: v.readOnly, DriveID: volumeDriveID(i)}
 	}
 	return out
 }
@@ -503,4 +507,4 @@ func volumeDriveID(i int) string { return "volume" + strconv.Itoa(i) }
 // Los snapshots congelados con aquella versión lo llevan grabado dentro y no se
 // pueden reescribir, así que restaurarlos exige usar este nombre. Es la única
 // razón por la que existe.
-const legacyVolumeDriveID = "volume"
+const legacyVolumeDriveID = api.LegacyVolumeDriveID

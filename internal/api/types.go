@@ -135,6 +135,16 @@ type VolumeAttachment struct {
 	Name     string `json:"name"`
 	Mount    string `json:"mount"`
 	ReadOnly bool   `json:"read_only,omitempty"`
+	// DriveID es cómo se llama este disco DENTRO del VMM.
+	//
+	// Queda fijado en el primer arranque en frío y viaja con cada snapshot de la
+	// cadena: a una VM restaurada solo se le puede reapuntar un disco por el
+	// nombre con el que se congeló. Deducirlo del meta.json rompía la cadena,
+	// porque el meta SÍ cambia en cada commit y el nombre del disco no.
+	//
+	// Vacío en máquinas y snapshots anteriores a este campo; quien restaura
+	// aplica entonces la heurística de siempre.
+	DriveID string `json:"drive_id,omitempty"`
 }
 
 // MaxVolumes acota cuántos puede llevar una microVM.
@@ -150,6 +160,11 @@ const MaxVolumes = 4
 // Viaja por ahí y no dentro de la imagen para que el mismo snapshot dorado sirva
 // con volúmenes distintos, o sin ninguno.
 const VolumeBootParam = "kling.volume"
+
+// LegacyVolumeDriveID es como se llamaba el disco de volumen cuando solo podía
+// haber uno. Los snapshots congelados entonces lo llevan grabado dentro y no se
+// pueden reescribir, así que restaurarlos exige seguir usando este nombre.
+const LegacyVolumeDriveID = "volume"
 
 // ExecBootParam enciende la ejecución de comandos dentro del invitado.
 //
@@ -382,7 +397,9 @@ func (s *Snapshot) VolumeSet() []VolumeAttachment {
 	if s.Volume == "" && !s.HasVolume {
 		return nil
 	}
-	return []VolumeAttachment{{Name: s.Volume, Mount: s.VolumeMount, ReadOnly: s.VolumeReadOnly}}
+	// Los snapshots de una sola unidad llamaban al disco "volume" a secas.
+	return []VolumeAttachment{{Name: s.Volume, Mount: s.VolumeMount,
+		ReadOnly: s.VolumeReadOnly, DriveID: LegacyVolumeDriveID}}
 }
 
 // VolumeSet devuelve los volúmenes pedidos, normalizando la forma corta.

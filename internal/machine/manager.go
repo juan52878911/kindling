@@ -515,6 +515,30 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("falta el kernel en %s", m.KernelPath())
 	}
 
+	// Sin puente no hay quien monte los volúmenes.
+	//
+	// El puente es lo único que lee kling.volume y monta dentro del invitado.
+	// Una imagen en modo HTTP nativo no lo lleva, así que el disco se
+	// engancharía, el snapshot lo registraría y `volume ls` diría "en uso"…
+	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
+	// Se comprueba ANTES de crear el directorio, para no tener que limpiarlo.
+	if len(vols) > 0 {
+		switch has, herr := imageHasBridge(ctx, src); {
+		case herr != nil:
+			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
+			// herramienta de diagnóstico en una dependencia de arranque sería
+			// peor que el problema.
+			log.Printf("aviso: no pude comprobar si %q lleva puente: %v", req.Image, herr)
+		case !has:
+			return nil, fmt.Errorf("la imagen %q no lleva kling-bridge, y es el puente quien monta "+
+				"los volúmenes dentro del invitado.\n"+
+				"Con esta imagen el disco se engancharía pero nadie lo montaría, y todo lo escrito "+
+				"en %s moriría con la máquina, sin un solo error.\n"+
+				"Reempaquétala en modo stdio, o quita el volumen",
+				req.Image, vols[0].mount)
+		}
+	}
+
 	id := newID()
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]

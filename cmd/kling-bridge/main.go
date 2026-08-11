@@ -89,6 +89,7 @@ Opciones:
 	// puestos: por eso atiende a SIGTERM en vez de dejarse matar.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	go procReaper.run()
 	go b.reapIdle(ctx)
 
 	mux := http.NewServeMux()
@@ -249,6 +250,8 @@ type session struct {
 	// allí: call() lo lee sin tomar el mutex del puente, y esa dependencia entre
 	// candados es justo la que sale cara de descubrir.
 	reqTimeout time.Duration
+	// exitCh recibe el estado de salida si el cosechador se adelanta a Wait.
+	exitCh chan syscall.WaitStatus
 
 	mu sync.Mutex
 	// wmu serializa las escrituras a stdin: el protocolo es una línea por
@@ -465,13 +468,18 @@ func (b *bridge) spawn() (*session, error) {
 	}
 	cmd.Stderr = os.Stderr // el log del servidor va a la consola serie de la microVM
 
-	if err := cmd.Start(); err != nil {
+	// Registrado en el cosechador: el puente es PID 1 y recoge huérfanos con
+	// wait4(-1), que no distingue. Esto le permite devolvernos el estado si se
+	// adelanta a nuestro Wait.
+	exitCh, err := procReaper.startTracked(cmd)
+	if err != nil {
 		return nil, fmt.Errorf("no pude lanzar el servidor MCP: %w", err)
 	}
 
 	s := &session{
 		id: newID(), cmd: cmd, stdin: stdin, lastUse: time.Now(),
 		reqTimeout: b.reqTimeout,
+		exitCh:     exitCh,
 		pending:    map[string]chan json.RawMessage{},
 		notes:      make(chan json.RawMessage, 32),
 		done:       make(chan struct{}),
@@ -635,7 +643,14 @@ func (s *session) close() {
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
-	err := s.cmd.Wait()
+	// waitFor y no Wait a secas: el cosechador puede haberse llevado a este hijo
+	// con wait4(-1), y entonces Wait devuelve ECHILD sin código de salida. El
+	// estado real llega por el canal, y sin eso se perdería justo la
+	// distinción que el log de abajo necesita.
+	err := waitFor(s.cmd, s.exitCh)
+	if s.cmd.Process != nil {
+		procReaper.forget(s.cmd.Process.Pid)
+	}
 
 	// El motivo importa: la consola serie es la única ventana al interior de la
 	// microVM, y un hijo al que se llevó el oom-killer sale por señal. Esa

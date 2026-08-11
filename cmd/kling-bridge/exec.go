@@ -15,6 +15,7 @@ package main
 // que tarde o temprano alguien alcanza.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,12 +85,30 @@ func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
 	// PYTHONPATH ya apuntando a los volúmenes: instalar en un volumen y luego
 	// no encontrarlo desde el mismo sitio sería desconcertante.
 	cmd.Env = b.env
-	out, err := cmd.CombinedOutput()
+
+	// Por el cosechador, igual que los servidores MCP: si se adelanta a nuestro
+	// Wait, CombinedOutput devolvería un error que no es *ExitError y un
+	// `npm install` que terminó bien se reportaría como "no pude ejecutarlo".
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	exitCh, err := procReaper.startTracked(cmd)
+	if err != nil {
+		resp := execResponse{ExitCode: -1,
+			Output: fmt.Sprintf("no pude ejecutar %q: %v", req.Cmd[0], err)}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+	err = waitFor(cmd, exitCh)
+	if cmd.Process != nil {
+		procReaper.forget(cmd.Process.Pid)
+	}
+	out := buf.Bytes()
 
 	resp := execResponse{Output: string(out)}
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			resp.ExitCode = ee.ExitCode()
+		if code, ok := exitCodeOf(err); ok {
+			resp.ExitCode = code
 		} else {
 			// Ni siquiera se pudo lanzar: no existe el binario, o no hay
 			// permisos. Eso sí es un fallo de la petición, y el mensaje tiene

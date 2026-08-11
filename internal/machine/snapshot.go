@@ -438,17 +438,29 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// El identificador tiene que ser el que quedó GRABADO al congelar, que en
 	// los snapshots de una sola unidad era "volume" a secas. Equivocarlo deja a
 	// la microVM mirando el fichero de otra máquina, o ninguno.
-	legado := len(snap.Volumes) == 0
+	// El nombre del disco se LEE del snapshot, no se deduce.
+	//
+	// Antes se deducía del meta.json (¿lista de volúmenes o campos sueltos?), y
+	// eso rompía la cadena: el meta cambia en cada commit, el nombre del disco
+	// dentro del VMM no. Restaurar de un snapshot legacy y volver a congelar esa
+	// instancia producía un meta con lista sobre un VMM cuyo disco seguía
+	// llamándose "volume" — y la siguiente restauración fallaba con drive not
+	// found, de forma determinista y sin arreglo salvo reimportar.
+	usados := make([]string, len(vols))
 	for i, v := range vols {
-		id := volumeDriveID(i)
-		if legado {
-			id = legacyVolumeDriveID
-		}
-		if err := c.PatchDrive(ctx, id, v.path); err != nil {
+		id, err := m.patchVolumeDrive(ctx, c, grabados[i], i, len(vols), v.path)
+		if err != nil {
 			m.fail(mc, fmt.Errorf("reapuntando el volumen %s: %w", v.name, err))
 			return nil, err
 		}
+		usados[i] = id
 	}
+	// El nombre que de verdad funcionó se anota en la máquina, para que el
+	// próximo commit lo escriba en su meta y la cadena se auto-repare: la
+	// generación siguiente ya no necesita heurística ni reintento.
+	m.mu.Lock()
+	withDriveIDs(mc.Volumes, usados)
+	m.mu.Unlock()
 	if err := c.Resume(ctx); err != nil {
 		m.fail(mc, err)
 		return nil, err
@@ -513,4 +525,46 @@ func writeMeta(dir string, b []byte) error {
 		return err
 	}
 	return nil
+}
+
+// patchVolumeDrive reapunta un disco de volumen y devuelve el nombre que de
+// verdad funcionó.
+//
+// Prefiere el grabado en el snapshot. Si no lo hay —snapshots anteriores al
+// campo— cae en la heurística de siempre, y si esa falla con un solo volumen,
+// reintenta con el nombre antiguo: eso cura los snapshots que la heurística ya
+// dejó rotos, sin exigir reimportar el servicio.
+func (m *Manager) patchVolumeDrive(ctx context.Context, c *fc.Client,
+	grabado api.VolumeAttachment, i, total int, path string) (string, error) {
+
+	id := grabado.DriveID
+	if id == "" {
+		id = volumeDriveID(i)
+	}
+	err := c.PatchDrive(ctx, id, path)
+	if err == nil {
+		return id, nil
+	}
+	// Con un solo volumen no hay ambigüedad posible: o el disco se llama
+	// "volume0" o se llama "volume", nunca los dos. Así que reintentar no puede
+	// reapuntar el disco de otro por error.
+	if total == 1 && id != legacyVolumeDriveID {
+		if err2 := c.PatchDrive(ctx, legacyVolumeDriveID, path); err2 == nil {
+			log.Printf("el disco de este snapshot se llama %q y no %q (cadena antigua); "+
+				"queda anotado para los siguientes", legacyVolumeDriveID, id)
+			return legacyVolumeDriveID, nil
+		}
+	}
+	return "", err
+}
+
+// withDriveIDs deja en los adjuntos el nombre de disco que REALMENTE funcionó,
+// para que el próximo commit lo escriba en su meta y la cadena se auto-repare.
+func withDriveIDs(vols []api.VolumeAttachment, ids []string) []api.VolumeAttachment {
+	for i := range vols {
+		if i < len(ids) && ids[i] != "" {
+			vols[i].DriveID = ids[i]
+		}
+	}
+	return vols
 }
