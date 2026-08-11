@@ -43,6 +43,7 @@ VOLÚMENES
   volume create <n> [-size 2G]                     almacenamiento que sobrevive
                                                    a la microVM
   volume ls | rm <n>                               listar / eliminar
+  volume populate <n> -image I -- <cmd>            instala paquetes dentro de una microVM
 
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM

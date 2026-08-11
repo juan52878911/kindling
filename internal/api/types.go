@@ -94,6 +94,11 @@ type RunRequest struct {
 	// Volumes son los volúmenes a montar, en orden. Es la forma completa.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
+	// AllowExec enciende /exec dentro del invitado. Solo lo pone el daemon, y
+	// solo para las microVMs de un solo uso que pueblan un volumen: nunca para
+	// un servicio.
+	AllowExec bool `json:"-"`
+
 	// Volume monta un volumen persistente como tercer disco. VolumeMount es
 	// dónde aparece dentro del invitado (por defecto /data).
 	//
@@ -145,6 +150,14 @@ const MaxVolumes = 4
 // Viaja por ahí y no dentro de la imagen para que el mismo snapshot dorado sirva
 // con volúmenes distintos, o sin ninguno.
 const VolumeBootParam = "kling.volume"
+
+// ExecBootParam enciende la ejecución de comandos dentro del invitado.
+//
+// Solo lo pone el anfitrión, y solo en las microVMs de un solo uso que pueblan
+// un volumen. Una microVM de servicio no lo lleva nunca: el invitado no puede
+// concederse a sí mismo esa capacidad porque la línea de comandos del kernel la
+// escribe quien arranca la máquina.
+const ExecBootParam = "kling.exec"
 
 // Volume es almacenamiento que sobrevive a la microVM que lo usa.
 type Volume struct {
@@ -384,4 +397,27 @@ func (r RunRequest) VolumeSet() []VolumeAttachment {
 		return nil
 	}
 	return []VolumeAttachment{{Name: r.Volume, Mount: r.VolumeMount, ReadOnly: r.VolumeReadOnly}}
+}
+
+// PopulateRequest es una instalación de paquetes DENTRO de una microVM
+// desechable, con el volumen montado en escritura.
+//
+// Existe para no instalar en el anfitrión. Instalar paquetes es ejecutar código
+// de terceros, y hacerlo fuera de la frontera que kindling levanta contradice la
+// razón de ser del proyecto: con esto, un paquete con sorpresas se lleva por
+// delante una máquina que se destruye a continuación.
+type PopulateRequest struct {
+	Volume string   `json:"volume"`
+	Mount  string   `json:"mount,omitempty"`
+	Image  string   `json:"image,omitempty"`
+	Cmd    []string `json:"cmd"`
+	MemMiB int      `json:"mem_mib,omitempty"`
+}
+
+// PopulateResult es lo que salió de ahí.
+type PopulateResult struct {
+	ExitCode int    `json:"exit_code"`
+	Output   string `json:"output"`
+	Machine  string `json:"machine"`
+	UsedMiB  int64  `json:"used_mib"`
 }

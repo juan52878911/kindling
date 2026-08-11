@@ -105,6 +105,16 @@ Opciones:
 	// posteriores).
 	mux.HandleFunc("/reset", b.handleReset)
 
+	// /exec solo existe si el kernel la enciende. En una microVM de servicio no
+	// está registrada siquiera: una capacidad de ejecutar comandos que solo
+	// depende de no ser alcanzable es una capacidad que alguien acaba
+	// alcanzando, y el gateway reenvía peticiones a los invitados.
+	if execEnabled() {
+		mux.HandleFunc("/exec", b.handleExec)
+		log.Printf("ejecución de comandos habilitada (%s=1): esta microVM es de un solo uso",
+			execBootParam)
+	}
+
 	// El volumen se monta ANTES de servir nada. Si el kernel pidió uno y no se
 	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
 	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay

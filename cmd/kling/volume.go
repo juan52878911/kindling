@@ -27,8 +27,10 @@ func cmdVolume(args []string) error {
 		return volumeList(rest)
 	case "rm", "remove":
 		return volumeRemove(rest)
+	case "populate", "install":
+		return volumePopulate(rest)
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa create, ls o rm", sub)
+		return fmt.Errorf("subcomando desconocido %q: usa create, ls, rm o populate", sub)
 	}
 }
 
@@ -130,4 +132,87 @@ func parseSizeMiB(s string) (int, error) {
 		return 0, fmt.Errorf("tamaño inválido %q: usa 512M, 2G o un número en MiB", s)
 	}
 	return n * mult, nil
+}
+
+// volumePopulate instala paquetes DENTRO de una microVM desechable.
+//
+//	kling volume populate libs -image filesystem-mcp -- npm install --prefix /data lodash
+//
+// El sentido de que sea una microVM y no el anfitrión: instalar paquetes es
+// ejecutar código de terceros, y hacerlo fuera de la frontera que kindling
+// levanta contradice la razón de ser del proyecto. La máquina se destruye al
+// terminar, salga bien o mal.
+func volumePopulate(args []string) error {
+	fs := flag.NewFlagSet("volume populate", flag.ExitOnError)
+	host := hostFlag(fs)
+	image := fs.String("image", "", "imagen que trae el instalador (npm, pip...)")
+	mount := fs.String("mount", "/data", "dónde se monta el volumen dentro de la microVM")
+	mem := fs.Int("mem", 0, "memoria en MiB de la microVM de instalación")
+
+	// El "--" se separa ANTES de parsear, y no se deja en manos de flag.
+	//
+	// Lo que va detrás es el comando del instalador, y trae sus PROPIOS flags:
+	// `npm install --prefix /data`. Si se dejara pasar por el reordenador de
+	// argumentos, --prefix se interpretaría como un flag de kling y el comando
+	// llegaría descuartizado. Pasó exactamente eso la primera vez.
+	nuestros, cmd := args, []string(nil)
+	for i, a := range args {
+		if a == "--" {
+			nuestros, cmd = args[:i], args[i+1:]
+			break
+		}
+	}
+	if err := fs.Parse(reorder(nuestros)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || len(cmd) == 0 {
+		return fmt.Errorf("uso: kling volume populate <nombre> -image IMG -- <comando>\n" +
+			"  p. ej.:  kling volume populate libs -image node-base -- \\\n" +
+			"             npm install --prefix /data --ignore-scripts lodash zod")
+	}
+	name := fs.Arg(0)
+	if *image == "" {
+		return fmt.Errorf("falta -image: hace falta una imagen que traiga el instalador.\n" +
+			"Cualquiera de las que ya tengas con node o python vale:  kling snapshots")
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	fmt.Printf("Poblando %q dentro de una microVM de un solo uso.\n", name)
+	fmt.Printf("  imagen:   %s\n", *image)
+	fmt.Printf("  montado:  %s\n", *mount)
+	fmt.Printf("  comando:  %s\n\n", strings.Join(cmd, " "))
+	fmt.Print("  instalando (puede tardar; el código de terceros corre dentro)... ")
+
+	res, err := api.NewClient(hostOf(*host)).PopulateVolume(ctx, api.PopulateRequest{
+		Volume: name, Mount: *mount, Image: *image, Cmd: cmd, MemMiB: *mem,
+	})
+	if err != nil {
+		fmt.Println("✗")
+		return err
+	}
+	if res.ExitCode != 0 {
+		fmt.Println("✗")
+		// La salida completa, no un resumen: si un install falla, el motivo
+		// está en su propia salida y recortarla obliga a repetirlo todo para
+		// verlo.
+		fmt.Fprintln(os.Stderr, res.Output)
+		return fmt.Errorf("el comando terminó con código %d", res.ExitCode)
+	}
+	fmt.Println("✓")
+	if res.Output != "" {
+		fmt.Println(indent(strings.TrimRight(res.Output, "\n")))
+	}
+	fmt.Printf("\n%s ocupa ahora %d MiB. Móntalo donde haga falta:\n", name, res.UsedMiB)
+	fmt.Printf("  kling mcp import <servicio> -volume %s:/libs:ro\n", name)
+	return nil
+}
+
+// indent sangra un bloque de salida ajena para que se distinga de lo nuestro.
+func indent(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "    " + strings.ReplaceAll(s, "\n", "\n    ")
 }

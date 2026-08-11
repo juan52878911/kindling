@@ -143,6 +143,16 @@ func (c *Client) CreateVolume(ctx context.Context, r CreateVolumeRequest) (*Volu
 	return &v, c.doWith(c.long, ctx, http.MethodPost, "/volumes", r, &v)
 }
 
+// PopulateVolume instala paquetes dentro de una microVM desechable.
+//
+// Va por c.long porque una instalación tarda minutos y el cliente normal corta
+// mucho antes: con el cliente de siempre, un `npm install` de un árbol grande
+// fallaría por tiempo mientras el daemon lo está haciendo bien.
+func (c *Client) PopulateVolume(ctx context.Context, r PopulateRequest) (*PopulateResult, error) {
+	var res PopulateResult
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+r.Volume+"/populate", r, &res)
+}
+
 func (c *Client) RemoveVolume(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/volumes/"+name, nil, nil)
 }

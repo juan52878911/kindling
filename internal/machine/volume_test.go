@@ -95,7 +95,7 @@ func TestArgDeArranqueSoloConVolumen(t *testing.T) {
 	if !strings.HasPrefix(got, " ") {
 		t.Errorf("se pegaría al argumento anterior: %q", got)
 	}
-	full := bootArgs([]api.VolumeAttachment{{Mount: "/data"}})
+	full := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false)
 	if !strings.Contains(full, "root=/dev/vda") || !strings.Contains(full, api.VolumeBootParam+"=/data") {
 		t.Errorf("la línea de comandos perdió algo: %s", full)
 	}
@@ -489,5 +489,34 @@ func TestVolumenesQueNoTienenSentido(t *testing.T) {
 	}
 	if _, err := m.resolveVolumes(api.RunRequest{Volumes: muchos}); err == nil {
 		t.Error("aceptó más volúmenes que el máximo")
+	}
+}
+
+// La ejecución de comandos solo se enciende cuando se pide, y solo la pide el
+// daemon para las microVMs de un solo uso que pueblan un volumen.
+//
+// Si esto se colara en el arranque de un servicio, cualquiera que alcanzase al
+// invitado podría ejecutar comandos dentro — y el gateway alcanza a todos los
+// invitados por definición.
+func TestLaEjecucionNoSeCuelaEnUnServicio(t *testing.T) {
+	if got := execBootArg(false); got != "" {
+		t.Errorf("añadió el parámetro sin pedirlo: %q", got)
+	}
+	got := execBootArg(true)
+	if !strings.Contains(got, api.ExecBootParam+"=1") {
+		t.Errorf("no lo añadió cuando se pidió: %q", got)
+	}
+	if !strings.HasPrefix(got, " ") {
+		t.Errorf("se pegaría al argumento anterior: %q", got)
+	}
+
+	// Y la línea de arranque de un servicio normal no lo lleva por ningún lado.
+	normal := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false)
+	if strings.Contains(normal, api.ExecBootParam) {
+		t.Errorf("la línea de un servicio lleva el parámetro de ejecución: %s", normal)
+	}
+	conExec := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, true)
+	if !strings.Contains(conExec, api.ExecBootParam+"=1") {
+		t.Errorf("la microVM de instalación no lo lleva: %s", conExec)
 	}
 }

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -36,4 +37,29 @@ func (s *Server) handleRemoveVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handlePopulateVolume(w http.ResponseWriter, r *http.Request) {
+	var req api.PopulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Volume = r.PathValue("name")
+
+	// context.WithoutCancel a propósito, y no es un descuido.
+	//
+	// Si el cliente corta —se le acaba la paciencia, se cae la red—, cancelar
+	// esto mataría la microVM a media instalación y dejaría el volumen a medio
+	// poblar: con paquetes a medias, que es peor que vacío porque parece
+	// completo. Se deja terminar y se destruye la máquina limpiamente.
+	//
+	// Ya pasó con la construcción de imágenes, y el síntoma fue una imagen
+	// corrupta que hacía entrar en pánico al invitado siguiente.
+	res, err := s.mgr.PopulateVolume(context.WithoutCancel(r.Context()), req)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

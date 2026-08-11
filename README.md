@@ -189,10 +189,10 @@ Eso es lo que hace posible no duplicar las mismas dependencias en cada imagen:
 
 ```sh
 kling volume create libs -size 2G
-# poblarla una vez, desde el host, con el volumen desmontado:
-sudo mount -o loop /var/lib/kindling/volumes/libs.ext4 /mnt/libs
-npm install --prefix /mnt/libs --ignore-scripts lodash axios zod
-sudo umount /mnt/libs
+
+# poblarla DENTRO de una microVM de un solo uso, que se destruye al terminar:
+kling volume populate libs -image <una-con-npm> -mount /data -- \
+  npm install --prefix /data --ignore-scripts lodash axios zod
 
 # y consumirla desde tantas microVMs como haga falta:
 kling mcp import mi-servicio -volume libs:/libs:ro
@@ -224,6 +224,12 @@ libs     2.0G     109M       mi-servicio-1a98a4, otra-mas
 ```
 
 El máximo son cuatro, porque cada uno es un disco y los discos se nombran por letra.
+
+**Instalar es ejecutar código de terceros**, así que `volume populate` lo hace dentro de una
+microVM con el volumen montado en escritura y la destruye al acabar — en vez de en un chroot
+del anfitrión, que es sacar esa ejecución fuera de la frontera que justifica el proyecto. La
+capacidad de ejecutar comandos la enciende el kernel (`kling.exec=1`) y solo la pone el
+daemon para esas máquinas: una microVM de servicio no tiene esa ruta registrada siquiera.
 
 **Los paquetes se encuentran solos.** Tras montar, el puente mira dentro de cada volumen y
 exporta `NODE_PATH` y `PYTHONPATH` al servidor MCP:

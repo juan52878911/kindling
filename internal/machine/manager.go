@@ -33,8 +33,8 @@ const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro in
 //
 // El punto de montaje del volumen viaja aquí y no dentro de la imagen: así el
 // mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno.
-func bootArgs(vols []api.VolumeAttachment) string {
-	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols)
+func bootArgs(vols []api.VolumeAttachment, allowExec bool) string {
+	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -564,7 +564,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, vols)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, vols, req.AllowExec)
 	if err != nil {
 		netcfg.Teardown()
 		m.fail(mc, err)
@@ -678,7 +678,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
 	sock := filepath.Join(m.dir(id), "fc.sock")
 	_ = os.Remove(sock)
 
@@ -691,7 +691,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols))}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec)}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.

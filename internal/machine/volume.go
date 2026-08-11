@@ -293,6 +293,13 @@ func attachments(vols []resolvedVolume) []api.VolumeAttachment {
 // que la posición i de esta lista es el disco i. Y el modo va pegado, y no como
 // parámetro aparte, para que sea imposible leer uno sin el otro: montar en
 // escritura lo que se pidió de solo lectura corrompería lo que leen los demás.
+func execBootArg(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return " " + api.ExecBootParam + "=1"
+}
+
 func volumeBootArg(vols []api.VolumeAttachment) string {
 	if len(vols) == 0 {
 		return ""
