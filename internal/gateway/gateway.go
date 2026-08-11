@@ -10,10 +10,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -40,6 +42,23 @@ const livenessTTL = 15 * time.Second
 // SIEMPRE a la misma instancia: el estado de una sesión vive en el proceso del
 // servidor MCP, así que mandar la segunda petición a otra microVM la rompería.
 const SessionHeader = "Mcp-Session-Id"
+
+// maxProxyBody acota lo que se guarda en memoria para poder reintentar. Coincide
+// con el límite que ya aplica el puente al leer una petición.
+const maxProxyBody = 8 << 20
+
+// retryKey marca una petición que ya se reintentó, para que el ErrorHandler no
+// pueda entrar en bucle consigo mismo.
+type retryKey struct{}
+
+func markRetried(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryKey{}, true)
+}
+
+func retried(r *http.Request) bool {
+	v, _ := r.Context().Value(retryKey{}).(bool)
+	return v
+}
 
 // readyTimeout acota la espera a que la herramienta abra su puerto. Generoso
 // para el arranque en frío, irrelevante tras un thaw.
@@ -221,6 +240,24 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/mcp/"+service)
 	if r.URL.Path == "" || r.URL.Path == "/" {
 		r.URL.Path = "/mcp"
+	}
+
+	// El cuerpo se guarda para poder REENVIARLO una vez. Sin esto, el único
+	// reintento posible tras un fallo de conexión es imposible: ReverseProxy ya
+	// consumió el original. Las peticiones MCP son JSON de tamaño moderado y el
+	// puente ya las acota, así que el coste es asumible.
+	if r.Body != nil && r.Method == http.MethodPost {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody))
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "no pude leer el cuerpo", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		}
+		r.ContentLength = int64(len(body))
 	}
 
 	// Enlace externo: no hay microVM que despertar, se reenvía HTTP al servidor
@@ -431,18 +468,36 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		checkedAt: time.Now(),
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 	}
-	// Timeouts generosos: MCP usa streaming HTTP y las respuestas pueden ser largas.
+	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
+	// LA RESPUESTA es larga a propósito: al otro lado hay una herramienta, y una
+	// herramienta puede tardar. Un escaneo de semgrep sobre un repo pasa del
+	// minuto sin que nada vaya mal, y con 60 s el gateway lo mataba y devolvía
+	// un 502 que parecía un fallo del servicio.
 	e.proxy.Transport = &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 	}
 	e.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		// Una herramienta puede reiniciarse entre peticiones. Se le da una
-		// oportunidad de volver antes de declarar el fallo.
-		if waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
-			log.Printf("proxy %s: %v (reintentando)", service, err)
-			e.proxy.ServeHTTP(w, r)
-			return
+		// UNA sola oportunidad, y solo si el cuerpo se puede reenviar.
+		//
+		// Reintentar llamando otra vez a ServeHTTP con la MISMA petición era una
+		// recursión infinita: el cuerpo ya se consumió en el primer intento, así
+		// que el reintento falla con "invalid Read on closed Body", eso vuelve a
+		// entrar aquí, y así hasta que el cliente se rinde. Medido: 4 min 40 s
+		// girando en vacío, con la pila creciendo en cada vuelta.
+		//
+		// GetBody solo existe si alguien preparó el cuerpo para reenviarlo — lo
+		// hace handleProxy. Sin él no hay reintento posible, y fingirlo es peor
+		// que fallar.
+		if !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
+			body, berr := r.GetBody()
+			if berr == nil {
+				log.Printf("proxy %s: %v (un reintento)", service, err)
+				r2 := r.Clone(markRetried(r.Context()))
+				r2.Body = body
+				e.proxy.ServeHTTP(w, r2)
+				return
+			}
 		}
 		log.Printf("proxy %s: %v", service, err)
 		http.Error(w, fmt.Sprintf("la herramienta %q no respondió: %v", service, err), http.StatusBadGateway)

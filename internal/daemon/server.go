@@ -31,7 +31,15 @@ const Version = "0.1.0"
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
 // entre llamadas al mismo invitado — recrearlo en cada request() obligaba a
 // hacer un handshake TCP nuevo con cada tools/call.
-var guestClient = &http.Client{Timeout: 60 * time.Second}
+// Timeout global NO: acota la petición entera, y al otro lado hay una microVM
+// que puede estar descongelándose y una herramienta que puede tardar lo suyo
+// —un escaneo de semgrep sobre un repo, por ejemplo—. Se acota la espera a las
+// CABECERAS, que es lo que separa "está trabajando" de "no hay nadie".
+var guestClient = &http.Client{Transport: &http.Transport{
+	ResponseHeaderTimeout: 5 * time.Minute,
+	MaxIdleConnsPerHost:   8,
+	IdleConnTimeout:       90 * time.Second,
+}}
 
 type Server struct {
 	socket     string

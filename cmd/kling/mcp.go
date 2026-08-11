@@ -468,7 +468,14 @@ type poster func(sid, body string) (string, []byte, error)
 
 // directPost habla con una URL alcanzable desde aquí: servidores enlazados.
 func directPost(ctx context.Context, url string) poster {
-	c := &http.Client{Timeout: 45 * time.Second}
+	// Sin Timeout global: acotarlo aquí acota el ARRANQUE del servidor MCP, que
+	// es trabajo legítimo y muy variable —un servidor de node con semgrep
+	// dentro tarda bastante más que un eco—. Lo que sí se acota es la espera a
+	// las cabeceras, que separa "está pensando" de "no hay nadie", y por encima
+	// manda el contexto de quien llama (-wait).
+	c := &http.Client{Transport: &http.Transport{
+		ResponseHeaderTimeout: 4 * time.Minute,
+	}}
 	return func(sid, body string) (string, []byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 		if err != nil {

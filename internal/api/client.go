@@ -18,8 +18,10 @@ import (
 // intercambiable y el resto del CLI no necesita saber cuál está en uso.
 type Client struct {
 	http *http.Client
-	// long sirve a las operaciones que tardan MINUTOS en responder, como
-	// construir una imagen (instala node y sus dependencias en un chroot).
+	// long sirve a las operaciones que tardan MINUTOS en responder: construir
+	// una imagen (instala node y pip en un chroot) y hablar con el invitado
+	// (que puede estar arrancando en frío, y cuya herramienta puede ser un
+	// escaneo de semgrep sobre un repo entero).
 	// El cliente normal acota la espera a las cabeceras para que un daemon
 	// atascado no cuelgue a nadie; ese límite es correcto para todo lo demás y
 	// letal aquí, así que estas llamadas van por su propio cliente en vez de
@@ -246,7 +248,11 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 // daemon. Es la única vía que funciona igual en local y por SSH.
 func (c *Client) Guest(ctx context.Context, ref string, r GuestRequest) (*GuestResponse, error) {
 	var out GuestResponse
-	if err := c.do(ctx, "POST", "/machines/"+ref+"/guest", r, &out); err != nil {
+	// Cliente largo: al otro lado hay una microVM, no el daemon. Puede estar
+	// descongelándose, y la herramienta que se invoca puede tardar lo suyo.
+	// Acotar esto por cabeceras es acotar el trabajo del usuario, no la salud
+	// del daemon.
+	if err := c.doWith(c.long, ctx, "POST", "/machines/"+ref+"/guest", r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
