@@ -50,6 +50,7 @@ MÁQUINAS
       [-ttl SEGUNDOS] [-cpu PCT]                   congelado automático y techo de CPU
       [-service NOMBRE] [-label k=v]               agrupación por servicio MCP
       [-volume NOMBRE] [-mount RUTA]               almacenamiento que sobrevive a la máquina
+      [-volume-ro]                                 en solo lectura: compartible entre microVMs
   ps [-a]                                          lista las máquinas
   logs <ref> [-tail N]                             consola serie de la microVM
   freeze <ref>                                     congela en snapshot -> warm
@@ -459,6 +460,7 @@ func cmdRun(args []string) error {
 	service := fs.String("service", "", "servicio MCP al que pertenece (agrupa en topo y export)")
 	volume := fs.String("volume", "", "volumen persistente a montar (ver `kling volume ls`)")
 	mount := fs.String("mount", "", "dónde montarlo dentro de la microVM (por defecto /data)")
+	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: así lo pueden compartir varias microVMs")
 	var labels labelFlag
 	fs.Var(&labels, "label", "etiqueta clave=valor (repetible)")
 	if err := fs.Parse(args); err != nil {
@@ -484,8 +486,9 @@ func cmdRun(args []string) error {
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
-		Volume:      *volume,
-		VolumeMount: *mount,
+		Volume:         *volume,
+		VolumeMount:    *mount,
+		VolumeReadOnly: *volRO,
 	})
 	if err != nil {
 		return err

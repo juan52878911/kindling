@@ -87,7 +87,7 @@ func (m *Manager) Volumes() []*api.Volume {
 		if err != nil {
 			continue
 		}
-		v.UsedBy = inUse[name]
+		v.UsedBy = inUse[name].all()
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -109,16 +109,42 @@ func (m *Manager) statVolume(name string) (*api.Volume, error) {
 	}, nil
 }
 
-// volumeUsers dice qué máquinas tienen montado cada volumen.
-func (m *Manager) volumeUsers() map[string][]string {
+// volumeUsers dice qué máquinas tienen montado cada volumen, y cómo.
+//
+// Distinguir lectores de escritores no es un adorno: es lo que decide si una
+// máquina más puede montarlo. Ver resolveVolume.
+type volumeUse struct {
+	readers []string
+	// writers es una lista y no un solo nombre aunque solo pueda haber uno: si
+	// alguna vez hay dos, es una anomalía que hay que VER, no una que colapsar
+	// en un nombre. Reportar de menos convierte un estado imposible en un
+	// informe tranquilizador.
+	writers []string
+}
+
+func (u volumeUse) all() []string {
+	out := make([]string, 0, len(u.writers)+len(u.readers))
+	for _, w := range u.writers {
+		out = append(out, w+" (escritura)")
+	}
+	return append(out, u.readers...)
+}
+
+func (m *Manager) volumeUsers() map[string]volumeUse {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := map[string][]string{}
+	out := map[string]volumeUse{}
 	for _, mc := range m.byID {
 		if mc.Volume == "" || mc.State == api.StateStopped || mc.State == api.StateFailed {
 			continue
 		}
-		out[mc.Volume] = append(out[mc.Volume], mc.Name)
+		u := out[mc.Volume]
+		if mc.VolumeReadOnly {
+			u.readers = append(u.readers, mc.Name)
+		} else {
+			u.writers = append(u.writers, mc.Name)
+		}
+		out[mc.Volume] = u
 	}
 	return out
 }
@@ -128,7 +154,7 @@ func (m *Manager) volumeUsers() map[string][]string {
 // La comprobación no es cortesía: borrar el fichero bajo una microVM que lo
 // tiene montado le corrompe el sistema de ficheros sin avisar.
 func (m *Manager) RemoveVolume(name string) error {
-	if users := m.volumeUsers()[name]; len(users) > 0 {
+	if users := m.volumeUsers()[name].all(); len(users) > 0 {
 		return fmt.Errorf("el volumen %q lo usan %d máquina(s): %s",
 			name, len(users), strings.Join(users, ", "))
 	}
@@ -145,30 +171,46 @@ func (m *Manager) RemoveVolume(name string) error {
 //
 // Devuelve ("", "", nil) cuando no se pidió ninguno: no tener volumen es el caso
 // normal, no un error.
-func (m *Manager) resolveVolume(req api.RunRequest) (path, mountpoint string, err error) {
+func (m *Manager) resolveVolume(req api.RunRequest) (path, mountpoint string, readOnly bool, err error) {
 	if req.Volume == "" {
-		return "", "", nil
+		return "", "", false, nil
 	}
 	if !reVolume.MatchString(req.Volume) {
-		return "", "", fmt.Errorf("nombre de volumen inválido %q", req.Volume)
+		return "", "", false, fmt.Errorf("nombre de volumen inválido %q", req.Volume)
 	}
 	p := m.volumePath(req.Volume)
 	if _, err := os.Stat(p); err != nil {
-		return "", "", fmt.Errorf("no existe el volumen %q: créalo con `kling volume create %s`", req.Volume, req.Volume)
+		return "", "", false, fmt.Errorf("no existe el volumen %q: créalo con `kling volume create %s`", req.Volume, req.Volume)
 	}
 
-	// UNA SOLA MÁQUINA A LA VEZ. Esto no es una política, es física: un ext4 no
-	// admite dos sistemas montándolo en escritura. Cada uno cachea metadatos que
-	// el otro no ve, y el resultado es corrupción — comprobado, y el síntoma es
-	// un EBADMSG al leer desde la siguiente microVM, que no se parece en nada a
-	// la causa.
+	// UN ESCRITOR, O MUCHOS LECTORES. Nunca las dos cosas.
+	//
+	// No es una política, es física. Un ext4 no admite dos sistemas montándolo
+	// en ESCRITURA: cada uno cachea metadatos que el otro no ve, y el resultado
+	// es corrupción — comprobado, y el síntoma es un EBADMSG al leer desde la
+	// siguiente microVM, que no se parece en nada a la causa.
+	//
+	// En LECTURA no hay tal problema: si nadie escribe, los bloques no cambian
+	// y cada invitado puede leerlos por su cuenta. Eso es lo que hace posible
+	// una biblioteca compartida —un volumen con paquetes que puebla una máquina
+	// y consumen muchas— sin duplicarla en cada imagen.
 	//
 	// Se comprueba aquí, en el camino de arranque, y no solo al borrar: quien
 	// monta es tan peligroso como quien borra.
-	if users := m.volumeUsers()[req.Volume]; len(users) > 0 {
-		return "", "", fmt.Errorf("el volumen %q ya lo tiene montado %s.\n"+
-			"Un ext4 no admite dos escritores: párala antes, o usa otro volumen",
-			req.Volume, strings.Join(users, ", "))
+	u := m.volumeUsers()[req.Volume]
+	switch {
+	case len(u.writers) > 0:
+		// Hay escritor: no entra nadie más, ni siquiera a leer. Un lector vería
+		// un sistema de ficheros cambiando bajo sus pies, con los metadatos que
+		// leyó ya obsoletos.
+		return "", "", false, fmt.Errorf("el volumen %q lo tiene montado %s en ESCRITURA.\n"+
+			"Mientras alguien escribe no puede entrar nadie más, ni a leer: párala antes",
+			req.Volume, strings.Join(u.writers, ", "))
+	case !req.VolumeReadOnly && len(u.readers) > 0:
+		// Quiere escribir y ya hay lectores: tampoco, por la misma razón.
+		return "", "", false, fmt.Errorf("el volumen %q lo están leyendo %d máquina(s): %s.\n"+
+			"Para escribir hace falta tenerlo en exclusiva; o móntalo con -volume-ro",
+			req.Volume, len(u.readers), strings.Join(u.readers, ", "))
 	}
 
 	mp := req.VolumeMount
@@ -179,16 +221,23 @@ func (m *Manager) resolveVolume(req api.RunRequest) (path, mountpoint string, er
 	// el espacio: un punto de montaje con espacios partiría el argumento y el
 	// invitado montaría en otro sitio.
 	if !strings.HasPrefix(mp, "/") || strings.ContainsAny(mp, " \t\"'") {
-		return "", "", fmt.Errorf("punto de montaje inválido %q: ruta absoluta y sin espacios", mp)
+		return "", "", false, fmt.Errorf("punto de montaje inválido %q: ruta absoluta y sin espacios", mp)
 	}
-	return p, mp, nil
+	return p, mp, req.VolumeReadOnly, nil
 }
 
 // volumeBootArg es lo que lee el puente dentro del invitado para saber dónde
 // montar /dev/vdc. Vacío si no hay volumen.
-func volumeBootArg(mountpoint string) string {
+func volumeBootArg(mountpoint string, readOnly bool) string {
 	if mountpoint == "" {
 		return ""
+	}
+	// El modo va PEGADO al punto de montaje con dos puntos, y no como parámetro
+	// aparte, para que el puente no pueda leer uno sin el otro: montar en
+	// escritura algo que se pidió de solo lectura corrompe lo que comparten los
+	// demás lectores.
+	if readOnly {
+		return " " + api.VolumeBootParam + "=" + mountpoint + ":ro"
 	}
 	return " " + api.VolumeBootParam + "=" + mountpoint
 }

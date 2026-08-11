@@ -109,11 +109,17 @@ Opciones:
 	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
 	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
 	// que va a desaparecer con la máquina.
-	mountpoint, err := mountVolume()
+	mountpoint, volumeRO, err := mountVolume()
 	if err != nil {
 		log.Fatalf("volumen: %v", err)
 	}
-	if mountpoint != "" {
+	// Un solo mensaje, y que diga cuál de los dos es: "persistente" para algo de
+	// solo lectura despistaría a quien lea esta consola buscando por qué no se
+	// guardó lo que escribió.
+	switch {
+	case mountpoint != "" && volumeRO:
+		log.Printf("biblioteca compartida montada en %s (solo lectura)", mountpoint)
+	case mountpoint != "":
 		log.Printf("volumen persistente montado en %s", mountpoint)
 	}
 

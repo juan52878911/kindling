@@ -66,6 +66,7 @@ func mcpImport(args []string) error {
 	egress := fs.String("egress", "", "salida de red del servicio: none | internet")
 	volume := fs.String("volume", "", "volumen persistente que montar (créalo con `kling volume create`)")
 	mount := fs.String("mount", "", "dónde montarlo dentro del invitado (por defecto /data)")
+	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: compartible entre servicios")
 	keep := fs.Bool("keep", false, "no destruir la plantilla al terminar")
 	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
 	force := fs.Bool("force", false, "reemplazar el servicio si ya existe")
@@ -120,9 +121,10 @@ func mcpImport(args []string) error {
 		// El volumen se decide AQUÍ y no después: Firecracker no deja añadir
 		// discos a una VM restaurada, así que el dispositivo tiene que estar
 		// presente cuando se congela el snapshot dorado o no lo estará nunca.
-		Volume:      *volume,
-		VolumeMount: *mount,
-		Labels:      map[string]string{api.LabelService: service},
+		Volume:         *volume,
+		VolumeMount:    *mount,
+		VolumeReadOnly: *volRO,
+		Labels:         map[string]string{api.LabelService: service},
 	})
 	if err != nil {
 		fmt.Println("✗")

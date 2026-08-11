@@ -29,16 +29,26 @@ const volumeDevice = "/dev/vdc"
 // arrastrar el paquete api solo por una constante.
 const volumeBootParam = "kling.volume"
 
-// volumeMountpoint lee el punto de montaje de /proc/cmdline.
-func volumeMountpoint() string {
+// volumeMountpoint lee de /proc/cmdline dónde montar el volumen y en qué modo.
+//
+// El valor es "/ruta" o "/ruta:ro". El modo va pegado al punto de montaje, no
+// como parámetro aparte, para que sea imposible leer uno sin el otro: montar en
+// escritura un volumen que se pidió de solo lectura corrompería lo que están
+// leyendo las demás microVMs que lo comparten.
+func volumeMountpoint() (mountpoint string, readOnly bool) {
 	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
-		return ""
+		return "", false
 	}
 	for _, tok := range strings.Fields(string(b)) {
-		if v, ok := strings.CutPrefix(tok, volumeBootParam+"="); ok && v != "" {
-			return v
+		v, ok := strings.CutPrefix(tok, volumeBootParam+"=")
+		if !ok || v == "" {
+			continue
 		}
+		if mp, found := strings.CutSuffix(v, ":ro"); found {
+			return mp, true
+		}
+		return v, false
 	}
-	return ""
+	return "", false
 }

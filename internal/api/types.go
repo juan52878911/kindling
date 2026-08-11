@@ -57,6 +57,10 @@ type Machine struct {
 	// Volume es el volumen persistente montado, si lo hay, y dónde.
 	Volume      string `json:"volume,omitempty"`
 	VolumeMount string `json:"volume_mount,omitempty"`
+	// VolumeReadOnly monta el volumen en SOLO LECTURA. Es lo que permite que
+	// varias microVMs compartan uno: un ext4 no admite dos escritores, pero sí
+	// muchos lectores. Sirve para una biblioteca de paquetes común.
+	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
 
 	// Labels agrupa máquinas. La clave "service" es convencional: identifica de
 	// qué servidor MCP es instancia esta microVM, y es por donde agrupan tanto
@@ -100,6 +104,10 @@ type RunRequest struct {
 	// montado dentro rompería el aislamiento que justifica usar microVMs.
 	Volume      string `json:"volume,omitempty"`
 	VolumeMount string `json:"volume_mount,omitempty"`
+	// VolumeReadOnly monta el volumen en SOLO LECTURA. Es lo que permite que
+	// varias microVMs compartan uno: un ext4 no admite dos escritores, pero sí
+	// muchos lectores. Sirve para una biblioteca de paquetes común.
+	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
 
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -164,6 +172,10 @@ type Snapshot struct {
 	// tener uno sin reimportarlo. VolumeMount recuerda dónde lo monta.
 	HasVolume   bool   `json:"has_volume,omitempty"`
 	VolumeMount string `json:"volume_mount,omitempty"`
+	// VolumeReadOnly monta el volumen en SOLO LECTURA. Es lo que permite que
+	// varias microVMs compartan uno: un ext4 no admite dos escritores, pero sí
+	// muchos lectores. Sirve para una biblioteca de paquetes común.
+	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
 
 	// Egress es la política de red con la que se importó el servicio.
 	//

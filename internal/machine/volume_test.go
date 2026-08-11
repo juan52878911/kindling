@@ -40,12 +40,12 @@ func TestPuntoDeMontajeRechazaLoQueRompeElCmdline(t *testing.T) {
 
 	malos := []string{"con espacio", "rel/ativa", `con"comilla`, "con\ttab"}
 	for _, mp := range malos {
-		if _, _, err := m.resolveVolume(api.RunRequest{Volume: "v", VolumeMount: mp}); err == nil {
+		if _, _, _, err := m.resolveVolume(api.RunRequest{Volume: "v", VolumeMount: mp}); err == nil {
 			t.Errorf("debería rechazar el punto de montaje %q", mp)
 		}
 	}
 	// Y el caso bueno, con el defecto aplicado.
-	p, mp, err := m.resolveVolume(api.RunRequest{Volume: "v"})
+	p, mp, _, err := m.resolveVolume(api.RunRequest{Volume: "v"})
 	if err != nil {
 		t.Fatalf("un volumen existente sin -mount debería valer: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestPuntoDeMontajeRechazaLoQueRompeElCmdline(t *testing.T) {
 // Pedir un volumen que no existe tiene que decir cómo crearlo, no fallar seco.
 func TestVolumenInexistenteExplicaComoCrearlo(t *testing.T) {
 	m := newTestManager(t)
-	_, _, err := m.resolveVolume(api.RunRequest{Volume: "no-existe"})
+	_, _, _, err := m.resolveVolume(api.RunRequest{Volume: "no-existe"})
 	if err == nil {
 		t.Fatal("debería fallar")
 	}
@@ -72,7 +72,7 @@ func TestVolumenInexistenteExplicaComoCrearlo(t *testing.T) {
 // No pedir volumen es el caso NORMAL, no un error.
 func TestSinVolumenNoEsError(t *testing.T) {
 	m := newTestManager(t)
-	p, mp, err := m.resolveVolume(api.RunRequest{})
+	p, mp, _, err := m.resolveVolume(api.RunRequest{})
 	if err != nil || p != "" || mp != "" {
 		t.Errorf("sin volumen debería devolver vacío y nil: %q %q %v", p, mp, err)
 	}
@@ -81,10 +81,10 @@ func TestSinVolumenNoEsError(t *testing.T) {
 // El parámetro del kernel solo aparece si hay volumen: una línea de comandos con
 // kling.volume= vacío haría que el puente intentara montar en "".
 func TestArgDeArranqueSoloConVolumen(t *testing.T) {
-	if got := volumeBootArg(""); got != "" {
+	if got := volumeBootArg("", false); got != "" {
 		t.Errorf("sin volumen no debe añadir nada, añadió %q", got)
 	}
-	got := volumeBootArg("/data")
+	got := volumeBootArg("/data", false)
 	if !strings.Contains(got, api.VolumeBootParam+"=/data") {
 		t.Errorf("falta el parámetro: %q", got)
 	}
@@ -92,7 +92,7 @@ func TestArgDeArranqueSoloConVolumen(t *testing.T) {
 	if !strings.HasPrefix(got, " ") {
 		t.Errorf("se pegaría al argumento anterior: %q", got)
 	}
-	full := bootArgs("/data")
+	full := bootArgs("/data", false)
 	if !strings.Contains(full, "root=/dev/vda") || !strings.Contains(full, api.VolumeBootParam+"=/data") {
 		t.Errorf("la línea de comandos perdió algo: %s", full)
 	}
@@ -208,7 +208,7 @@ func TestUnVolumenNoSeMontaDosVeces(t *testing.T) {
 	}
 
 	// Libre: se puede montar.
-	if _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err != nil {
+	if _, _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err != nil {
 		t.Fatalf("un volumen libre debería poder montarse: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestUnVolumenNoSeMontaDosVeces(t *testing.T) {
 	m.byID["a"] = &api.Machine{ID: "a", Name: "primera", State: api.StateRunning, Volume: "notas"}
 	m.mu.Unlock()
 
-	_, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"})
+	_, _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"})
 	if err == nil {
 		t.Fatal("dejó montar el mismo volumen en dos máquinas a la vez")
 	}
@@ -228,7 +228,7 @@ func TestUnVolumenNoSeMontaDosVeces(t *testing.T) {
 	m.mu.Lock()
 	m.byID["a"].State = api.StateWarm
 	m.mu.Unlock()
-	if _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err == nil {
+	if _, _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err == nil {
 		t.Error("una máquina warm sigue siendo dueña del volumen")
 	}
 
@@ -236,7 +236,7 @@ func TestUnVolumenNoSeMontaDosVeces(t *testing.T) {
 	m.mu.Lock()
 	m.byID["a"].State = api.StateStopped
 	m.mu.Unlock()
-	if _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err != nil {
+	if _, _, _, err := m.resolveVolume(api.RunRequest{Volume: "notas"}); err != nil {
 		t.Errorf("con la máquina parada debería liberarse: %v", err)
 	}
 }
@@ -276,5 +276,86 @@ func TestElSnapshotRecuerdaSuVolumen(t *testing.T) {
 	sin := &api.Snapshot{HasVolume: (&api.Machine{}).Volume != ""}
 	if sin.HasVolume {
 		t.Error("marcó HasVolume en una máquina sin volumen")
+	}
+}
+
+// Un escritor, o muchos lectores. Nunca las dos cosas.
+//
+// Es la regla que hace posible una biblioteca compartida: un volumen con
+// paquetes que puebla una máquina y consumen muchas, sin duplicarlo en cada
+// imagen. Y es la misma física de siempre — dos escritores corrompen un ext4,
+// muchos lectores sobre bloques que no cambian no.
+func TestUnEscritorOMuchosLectores(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.volumesDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.volumePath("libs"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	añadir := func(id, name string, ro bool) {
+		m.mu.Lock()
+		m.byID[id] = &api.Machine{ID: id, Name: name, State: api.StateRunning,
+			Volume: "libs", VolumeReadOnly: ro}
+		m.mu.Unlock()
+	}
+	lector := api.RunRequest{Volume: "libs", VolumeReadOnly: true}
+	escritor := api.RunRequest{Volume: "libs"}
+
+	// Tres lectores concurrentes: los tres entran.
+	for i, n := range []string{"a", "b", "c"} {
+		if _, _, ro, err := m.resolveVolume(lector); err != nil || !ro {
+			t.Fatalf("lector %d rechazado (ro=%v): %v", i, ro, err)
+		}
+		añadir(n, "svc-"+n, true)
+	}
+
+	// Un escritor con lectores dentro: no.
+	_, _, _, err := m.resolveVolume(escritor)
+	if err == nil {
+		t.Fatal("dejó escribir con lectores dentro")
+	}
+	if !strings.Contains(err.Error(), "svc-a") || !strings.Contains(err.Error(), "-volume-ro") {
+		t.Errorf("el error debe decir quién lee y cómo entrar igualmente: %v", err)
+	}
+
+	// Sin lectores, el escritor entra.
+	m.mu.Lock()
+	m.byID = map[string]*api.Machine{}
+	m.mu.Unlock()
+	if _, _, ro, err := m.resolveVolume(escritor); err != nil || ro {
+		t.Fatalf("un volumen libre debería admitir escritor: ro=%v %v", ro, err)
+	}
+	añadir("w", "el-escritor", false)
+
+	// Y con escritor dentro no entra NADIE, ni siquiera a leer: vería metadatos
+	// cambiando bajo sus pies.
+	for _, req := range []api.RunRequest{lector, escritor} {
+		_, _, _, err := m.resolveVolume(req)
+		if err == nil {
+			t.Errorf("dejó entrar con un escritor dentro (ro=%v)", req.VolumeReadOnly)
+			continue
+		}
+		if !strings.Contains(err.Error(), "el-escritor") {
+			t.Errorf("el error debe nombrar al escritor: %v", err)
+		}
+	}
+}
+
+// El modo viaja PEGADO al punto de montaje, para que el puente no pueda leer
+// uno sin el otro: montar en escritura lo que se pidió de solo lectura
+// corrompería lo que están leyendo las demás microVMs.
+func TestElModoViajaConElPuntoDeMontaje(t *testing.T) {
+	if got := volumeBootArg("/libs", true); !strings.HasSuffix(got, "=/libs:ro") {
+		t.Errorf("falta el sufijo :ro: %q", got)
+	}
+	if got := volumeBootArg("/data", false); strings.Contains(got, ":ro") {
+		t.Errorf("marcó de solo lectura lo que no lo es: %q", got)
+	}
+	// Y sin volumen no se añade nada, en ninguno de los dos modos.
+	for _, ro := range []bool{true, false} {
+		if got := volumeBootArg("", ro); got != "" {
+			t.Errorf("sin volumen no debe añadir nada (ro=%v): %q", ro, got)
+		}
 	}
 }

@@ -132,11 +132,12 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
 		// servicio sin volumen y la herramienta escribe en un overlay que muere
 		// con la máquina — sin un solo error por ningún lado.
-		Volume:      mc.Volume,
-		VolumeMount: mc.VolumeMount,
-		HasVolume:   mc.Volume != "",
-		MemBytes:    allocatedBytes(memPath),
-		DiskBytes:   diskUsage(dir),
+		Volume:         mc.Volume,
+		VolumeMount:    mc.VolumeMount,
+		VolumeReadOnly: mc.VolumeReadOnly,
+		HasVolume:      mc.Volume != "",
+		MemBytes:       allocatedBytes(memPath),
+		DiskBytes:      diskUsage(dir),
 	}
 	m.priv.EnsureReadable(dir)
 
@@ -301,9 +302,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if req.Volume == "" && snap.Volume != "" {
 		req.Volume = snap.Volume
 		req.VolumeMount = snap.VolumeMount
+		req.VolumeReadOnly = snap.VolumeReadOnly
 	}
-	volPath, _, verr := m.resolveVolume(req)
-	if volPath != "" {
+	volPath, _, volRO, verr := m.resolveVolume(req)
+	if volPath != "" && !volRO {
+		// Solo si vamos a montarlo en ESCRITURA. e2fsck escribe, y un volumen
+		// compartido puede tenerlo abierto otra microVM ahora mismo: repararlo
+		// por debajo sería justo la corrupción que el modo lectura evita.
 		repairVolume(ctx, volPath)
 	}
 	if verr != nil {
@@ -337,7 +342,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
-		Volume: req.Volume, VolumeMount: snap.VolumeMount,
+		Volume: req.Volume, VolumeMount: snap.VolumeMount, VolumeReadOnly: volRO,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(snap.Labels, req.Labels),
 		CreatedAt: time.Now(),

@@ -177,11 +177,39 @@ kling lo dice con esas palabras en vez de fallar dentro del invitado.
 imagen base. El punto de montaje viaja en la línea de comandos del kernel
 (`kling.volume=/data`), de modo que el mismo snapshot dorado sirve con volúmenes distintos.
 
-**Un solo escritor a la vez.** No es una política, es física: un ext4 no admite dos
+**Un escritor, o muchos lectores.** No es una política, es física: un ext4 no admite dos
 sistemas montándolo en escritura. Cada uno cachea metadatos que el otro no ve, y el
-resultado es corrupción. Así que ni se puede montar el mismo volumen en dos microVMs, ni
-se puede borrar uno que alguien tenga montado; en ambos casos kling se niega y dice quién
-lo tiene. Un volumen es para el estado de *un* servicio, no un disco compartido.
+resultado es corrupción. En lectura no hay tal problema: si nadie escribe, los bloques no
+cambian. Así que kling admite **un** escritor exclusivo, **o** cuantos lectores quieras, y
+nunca las dos cosas; cuando se niega, dice quién lo tiene y cómo.
+
+### Una biblioteca de paquetes compartida
+
+Eso es lo que hace posible no duplicar las mismas dependencias en cada imagen:
+
+```sh
+kling volume create libs -size 2G
+# poblarla una vez, desde el host, con el volumen desmontado:
+sudo mount -o loop /var/lib/kindling/volumes/libs.ext4 /mnt/libs
+npm install --prefix /mnt/libs --ignore-scripts lodash axios zod
+sudo umount /mnt/libs
+
+# y consumirla desde tantas microVMs como haga falta:
+kling mcp import mi-servicio -volume libs -mount /libs -volume-ro
+kling run -name otra -volume libs -mount /libs -volume-ro
+```
+
+El modo viaja pegado al punto de montaje en la línea de comandos del kernel
+(`kling.volume=/libs:ro`), para que el puente no pueda leer uno sin el otro. Dentro se
+monta con `MS_RDONLY` **y** `noload`: sin `noload`, ext4 intentaría reproducir el journal
+al montar —que es una escritura— y varios invitados haciéndolo a la vez sobre el mismo
+fichero es justo la corrupción que el modo lectura evita. El disco se marca además de solo
+lectura en el propio Firecracker, así que la barrera no depende de que el invitado se
+porte bien: escribir da `EROFS`.
+
+**Una microVM monta un volumen, no varios.** El tercer disco (`vdc`) es uno solo, así que
+hoy un servicio tiene o su almacenamiento propio o la biblioteca compartida, no las dos
+cosas.
 
 **Sobrevive a que maten la máquina.** Parar una microVM es matar el VMM, que para el
 invitado es indistinguible de un corte de corriente. Por eso un volumen se formatea **con

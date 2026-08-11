@@ -13,29 +13,41 @@ import (
 //
 // Devuelve el punto de montaje, o "" si no había volumen que montar — que es el
 // caso normal y no un error.
-func mountVolume() (string, error) {
-	mp := volumeMountpoint()
+func mountVolume() (mountpoint string, readOnly bool, err error) {
+	mp, ro := volumeMountpoint()
 	if mp == "" {
-		return "", nil
+		return "", false, nil
 	}
 	if _, err := os.Stat(volumeDevice); err != nil {
-		return "", fmt.Errorf("el kernel pide montar %s en %s pero %s no existe: %w",
+		return "", false, fmt.Errorf("el kernel pide montar %s en %s pero %s no existe: %w",
 			volumeBootParam, mp, volumeDevice, err)
 	}
 	if err := os.MkdirAll(mp, 0o755); err != nil {
-		return "", fmt.Errorf("creando %s: %w", mp, err)
+		return "", false, fmt.Errorf("creando %s: %w", mp, err)
 	}
-	// Sin flags de solo lectura: el sentido de un volumen es que lo que escriba
-	// la herramienta sobreviva.
-	//
 	// data=ordered es el defecto de ext4 y aquí importa que lo sea: garantiza
 	// que los datos llegan al disco ANTES que los metadatos que los referencian.
 	// Sin eso, un corte a destiempo deja ficheros del tamaño correcto llenos de
 	// basura, que es peor que no tenerlos.
-	if err := syscall.Mount(volumeDevice, mp, "ext4", 0, "data=ordered"); err != nil {
-		return "", fmt.Errorf("montando %s en %s: %w", volumeDevice, mp, err)
+	flags, opts := uintptr(0), "data=ordered"
+	if ro {
+		// noload además de MS_RDONLY: sin él, ext4 intentaría REPRODUCIR el
+		// journal al montar, que es una escritura — y varias microVMs
+		// reproduciéndolo a la vez sobre el mismo fichero es exactamente la
+		// corrupción que el modo de solo lectura viene a evitar.
+		flags, opts = syscall.MS_RDONLY, "noload"
 	}
-	return mp, nil
+	if err := syscall.Mount(volumeDevice, mp, "ext4", flags, opts); err != nil {
+		return "", false, fmt.Errorf("montando %s en %s: %w", volumeDevice, mp, err)
+	}
+	return mp, ro, nil
+}
+
+// volumeIsReadOnly dice si el volumen se montó en solo lectura. Un volumen así
+// no hay que vaciarlo ni desmontarlo con cuidado: no hay nada que perder.
+func volumeIsReadOnly() bool {
+	_, ro := volumeMountpoint()
+	return ro
 }
 
 // syncVolume vacía al disco lo que el invitado tenga en caché.
@@ -48,7 +60,7 @@ func mountVolume() (string, error) {
 // Sync() no puede fallar ni bloquear indefinidamente sobre un virtio-blk local,
 // así que no devuelve error: no hay nada que el que llama pudiera hacer.
 func syncVolume(mp string) {
-	if mp == "" {
+	if mp == "" || volumeIsReadOnly() {
 		return
 	}
 	syscall.Sync()
@@ -62,6 +74,11 @@ func syncVolume(mp string) {
 // corte en algo reproducible en vez de en corrupción.
 func unmountVolume(mp string) {
 	if mp == "" {
+		return
+	}
+	if volumeIsReadOnly() {
+		// Nada que vaciar: se desengancha y ya.
+		_ = syscall.Unmount(mp, syscall.MNT_DETACH)
 		return
 	}
 	syscall.Sync()
