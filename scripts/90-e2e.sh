@@ -19,6 +19,10 @@ KLING="${KLING:-kling}"
 SVC="${SVC:-e2e-eco}"
 VOL="${VOL:-e2e-vol}"
 VOL2="${VOL2:-e2e-vol2}"
+# Los volúmenes los monta el PUENTE, y la imagen mínima no lo lleva: el daemon
+# rechaza montarlos ahí a propósito, porque el disco se engancharía y nadie lo
+# montaría. Para los bloques de volúmenes hace falta una imagen de servicio.
+IMGVOL="${IMGVOL:-toolchain}"
 KEEP="${KEEP:-0}"
 
 pass=0; fail=0
@@ -106,7 +110,7 @@ if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
 fi
 
 NAME="e2e-vol-$$"
-if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
+if $KLING run -name "$NAME" -image "$IMGVOL" -volume "$VOL" >/dev/null 2>&1; then
   # No se puede BORRAR mientras alguien lo usa.
   out=$($KLING volume rm "$VOL" 2>&1)
   contiene "$out" "usan" && ok "se niega a borrar un volumen en uso" \
@@ -115,7 +119,7 @@ if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
   # Y tampoco se puede MONTAR dos veces. Un ext4 no admite dos escritores: cada
   # uno cachea metadatos que el otro no ve y el resultado es corrupción. Esta
   # comprobación es lo único que lo impide.
-  out=$($KLING run -name "$NAME-bis" -image min -volume "$VOL" 2>&1)
+  out=$($KLING run -name "$NAME-bis" -image "$IMGVOL" -volume "$VOL" 2>&1)
   if contiene "$out" "en ESCRITURA"; then
     ok "se niega a montar el mismo volumen en dos escritores"
   else
@@ -125,7 +129,7 @@ if $KLING run -name "$NAME" -image min -volume "$VOL" >/dev/null 2>&1; then
 
   # Con un escritor dentro no entra NADIE, ni a leer: vería metadatos cambiando
   # bajo sus pies.
-  out=$($KLING run -name "$NAME-ro" -image min -volume "$VOL:/x:ro" 2>&1)
+  out=$($KLING run -name "$NAME-ro" -image "$IMGVOL" -volume "$VOL:/x:ro" 2>&1)
   if contiene "$out" "en ESCRITURA"; then
     ok "un escritor bloquea también a los lectores"
   else
@@ -160,7 +164,7 @@ fi
 step "3b. Volumen compartido en solo lectura"
 LECTORES=0
 for i in 1 2 3; do
-  if $KLING run -name "e2e-lec-$i-$$" -image min -volume "$VOL:/libs:ro" >/dev/null 2>&1; then
+  if $KLING run -name "e2e-lec-$i-$$" -image "$IMGVOL" -volume "$VOL:/libs:ro" >/dev/null 2>&1; then
     LECTORES=$((LECTORES+1))
   fi
 done
@@ -168,7 +172,7 @@ done
   || bad "lectores concurrentes" "3" "$LECTORES"
 
 # Y con lectores dentro no entra un escritor.
-out=$($KLING run -name "e2e-esc-$$" -image min -volume "$VOL" 2>&1)
+out=$($KLING run -name "e2e-esc-$$" -image "$IMGVOL" -volume "$VOL" 2>&1)
 if contiene "$out" "leyendo"; then
   ok "los lectores bloquean al escritor"
 else
@@ -181,7 +185,7 @@ for i in 1 2 3; do $KLING rm "e2e-lec-$i-$$" >/dev/null 2>&1; done
 $KLING volume rm "$VOL2" >/dev/null 2>&1
 $KLING volume create "$VOL2" -size 128M >/dev/null 2>&1
 NAME="e2e-multi-$$"
-if $KLING run -name "$NAME" -image min -volume "$VOL:/uno" -volume "$VOL2:/dos:ro" >/dev/null 2>&1; then
+if $KLING run -name "$NAME" -image "$IMGVOL" -volume "$VOL:/uno" -volume "$VOL2:/dos:ro" >/dev/null 2>&1; then
   ok "una microVM con dos volúmenes"
   # volume ls debe distinguir quién escribe de quién lee.
   out=$($KLING volume ls 2>&1)
@@ -193,7 +197,7 @@ else
 fi
 
 # Dos volúmenes en el mismo punto de montaje: el segundo taparía al primero.
-out=$($KLING run -name "e2e-choque-$$" -image min -volume "$VOL:/x" -volume "$VOL2:/x" 2>&1)
+out=$($KLING run -name "e2e-choque-$$" -image "$IMGVOL" -volume "$VOL:/x" -volume "$VOL2:/x" 2>&1)
 contiene "$out" "taparía" && ok "rechaza dos volúmenes en el mismo punto" \
   || bad "puntos de montaje repetidos" "un rechazo" "$out"
 $KLING rm "e2e-choque-$$" >/dev/null 2>&1
