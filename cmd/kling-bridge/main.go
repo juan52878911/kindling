@@ -109,18 +109,9 @@ Opciones:
 	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
 	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
 	// que va a desaparecer con la máquina.
-	mountpoint, volumeRO, err := mountVolume()
+	volumes, err := mountVolumes()
 	if err != nil {
 		log.Fatalf("volumen: %v", err)
-	}
-	// Un solo mensaje, y que diga cuál de los dos es: "persistente" para algo de
-	// solo lectura despistaría a quien lea esta consola buscando por qué no se
-	// guardó lo que escribió.
-	switch {
-	case mountpoint != "" && volumeRO:
-		log.Printf("biblioteca compartida montada en %s (solo lectura)", mountpoint)
-	case mountpoint != "":
-		log.Printf("volumen persistente montado en %s", mountpoint)
 	}
 
 	// /volume/sync vacía la caché del invitado al disco.
@@ -130,7 +121,7 @@ Opciones:
 	// muere con él: el volumen "persistente" perdería justo lo más reciente,
 	// que es lo que a nadie se le ocurre comprobar.
 	mux.HandleFunc("/volume/sync", func(w http.ResponseWriter, r *http.Request) {
-		syncVolume(mountpoint)
+		syncVolumes(volumes)
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -158,7 +149,7 @@ Opciones:
 	b.closeAll()
 	// Después de closeAll, no antes: mientras los servidores MCP vivan pueden
 	// seguir escribiendo, y desmontar por debajo perdería esas escrituras.
-	unmountVolume(mountpoint)
+	unmountVolumes(volumes)
 }
 
 // closeAll cierra todas las sesiones y mata sus procesos hijo.

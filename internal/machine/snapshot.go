@@ -132,12 +132,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
 		// servicio sin volumen y la herramienta escribe en un overlay que muere
 		// con la máquina — sin un solo error por ningún lado.
-		Volume:         mc.Volume,
-		VolumeMount:    mc.VolumeMount,
-		VolumeReadOnly: mc.VolumeReadOnly,
-		HasVolume:      mc.Volume != "",
-		MemBytes:       allocatedBytes(memPath),
-		DiskBytes:      diskUsage(dir),
+		Volumes:   mc.Volumes,
+		MemBytes:  allocatedBytes(memPath),
+		DiskBytes: diskUsage(dir),
 	}
 	m.priv.EnsureReadable(dir)
 
@@ -299,31 +296,27 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// El volumen se HEREDA del snapshot, igual que la política de salida: quien
 	// despierta un servicio no tiene por qué saber con qué volumen se importó,
 	// y el gateway desde luego no lo sabe.
-	if req.Volume == "" && snap.Volume != "" {
-		req.Volume = snap.Volume
-		req.VolumeMount = snap.VolumeMount
-		req.VolumeReadOnly = snap.VolumeReadOnly
+	if len(req.VolumeSet()) == 0 {
+		req.Volumes = snap.VolumeSet()
 	}
-	volPath, _, volRO, verr := m.resolveVolume(req)
-	if volPath != "" && !volRO {
-		// Solo si vamos a montarlo en ESCRITURA. e2fsck escribe, y un volumen
-		// compartido puede tenerlo abierto otra microVM ahora mismo: repararlo
-		// por debajo sería justo la corrupción que el modo lectura evita.
-		repairVolume(ctx, volPath)
-	}
+	vols, verr := m.resolveVolumes(req)
 	if verr != nil {
 		os.RemoveAll(dir)
 		return nil, verr
 	}
-	if volPath != "" && !snap.HasVolume {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("el servicio %q se importó sin volumen, y a una microVM restaurada "+
-			"no se le pueden añadir discos.\nReimpórtalo con volumen:  kling mcp import %s -volume %s",
-			req.From, req.From, req.Volume)
+	for _, v := range vols {
+		if !v.readOnly {
+			repairVolume(ctx, v.path)
+		}
 	}
-	if volPath == "" && snap.HasVolume {
+	// El CONJUNTO de discos quedó fijado al congelar: Firecracker no admite
+	// añadir ni quitar discos a una VM restaurada. Solo se puede reapuntar cada
+	// uno a otro fichero, así que el número tiene que coincidir exactamente.
+	if n, quiere := len(snap.VolumeSet()), len(vols); n != quiere {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("el servicio %q se importó CON volumen y hay que darle uno:  -volume <nombre>", req.From)
+		return nil, fmt.Errorf("el servicio %q se importó con %d volumen(es) y se le están dando %d.\n"+
+			"A una microVM restaurada no se le pueden añadir ni quitar discos: reimpórtalo si quieres cambiarlo",
+			req.From, n, quiere)
 	}
 
 	netcfg := knet.Plan(m.allocNetIndex(), id)
@@ -342,7 +335,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
-		Volume: req.Volume, VolumeMount: snap.VolumeMount, VolumeReadOnly: volRO,
+		Volumes: attachments(vols),
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(snap.Labels, req.Labels),
 		CreatedAt: time.Now(),
@@ -382,12 +375,21 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		m.fail(mc, fmt.Errorf("reapuntando el overlay: %w", err))
 		return nil, err
 	}
-	// El volumen se reapunta igual que el overlay: el dispositivo ya existe
+	// Cada volumen se reapunta igual que el overlay: el dispositivo ya existe
 	// dentro del snapshot, y aquí solo se le dice a qué fichero del host mira.
 	// Es lo que permite que el mismo snapshot dorado sirva a volúmenes distintos.
-	if volPath != "" {
-		if err := c.PatchDrive(ctx, "volume", volPath); err != nil {
-			m.fail(mc, fmt.Errorf("reapuntando el volumen: %w", err))
+	//
+	// El identificador tiene que ser el que quedó GRABADO al congelar, que en
+	// los snapshots de una sola unidad era "volume" a secas. Equivocarlo deja a
+	// la microVM mirando el fichero de otra máquina, o ninguno.
+	legado := len(snap.Volumes) == 0
+	for i, v := range vols {
+		id := volumeDriveID(i)
+		if legado {
+			id = legacyVolumeDriveID
+		}
+		if err := c.PatchDrive(ctx, id, v.path); err != nil {
+			m.fail(mc, fmt.Errorf("reapuntando el volumen %s: %w", v.name, err))
 			return nil, err
 		}
 	}

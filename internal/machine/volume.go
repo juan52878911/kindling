@@ -23,6 +23,9 @@ var reVolume = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // defaultVolumeMiB es el tamaño lógico por defecto. Al ser disperso, lo que
 // ocupa de verdad es solo lo que se escriba.
+// defaultVolumeMount es dónde se monta un volumen si no se dice otra cosa.
+const defaultVolumeMount = "/data"
+
 const defaultVolumeMiB = 1024
 
 func (m *Manager) volumesDir() string         { return filepath.Join(m.root, "volumes") }
@@ -135,16 +138,18 @@ func (m *Manager) volumeUsers() map[string]volumeUse {
 	defer m.mu.RUnlock()
 	out := map[string]volumeUse{}
 	for _, mc := range m.byID {
-		if mc.Volume == "" || mc.State == api.StateStopped || mc.State == api.StateFailed {
+		if mc.State == api.StateStopped || mc.State == api.StateFailed {
 			continue
 		}
-		u := out[mc.Volume]
-		if mc.VolumeReadOnly {
-			u.readers = append(u.readers, mc.Name)
-		} else {
-			u.writers = append(u.writers, mc.Name)
+		for _, v := range mc.Volumes {
+			u := out[v.Name]
+			if v.ReadOnly {
+				u.readers = append(u.readers, mc.Name)
+			} else {
+				u.writers = append(u.writers, mc.Name)
+			}
+			out[v.Name] = u
 		}
-		out[mc.Volume] = u
 	}
 	return out
 }
@@ -167,79 +172,139 @@ func (m *Manager) RemoveVolume(name string) error {
 	return nil
 }
 
-// resolveVolume valida la petición de montaje y devuelve la ruta en el host.
+// resolvedVolume es un volumen ya validado y listo para engancharse.
+type resolvedVolume struct {
+	name     string
+	path     string // en el anfitrión
+	mount    string // dentro del invitado
+	readOnly bool
+}
+
+// resolveVolumes valida la petición de montaje y devuelve las rutas del host.
 //
-// Devuelve ("", "", nil) cuando no se pidió ninguno: no tener volumen es el caso
-// normal, no un error.
-func (m *Manager) resolveVolume(req api.RunRequest) (path, mountpoint string, readOnly bool, err error) {
-	if req.Volume == "" {
-		return "", "", false, nil
+// Devuelve nil cuando no se pidió ninguno: no tener volumen es el caso normal,
+// no un error.
+//
+// UN ESCRITOR, O MUCHOS LECTORES. Nunca las dos cosas.
+//
+// No es una política, es física. Un ext4 no admite dos sistemas montándolo en
+// ESCRITURA: cada uno cachea metadatos que el otro no ve, y el resultado es
+// corrupción — comprobado, y el síntoma es un EBADMSG al leer desde la siguiente
+// microVM, que no se parece en nada a la causa.
+//
+// En LECTURA no hay tal problema: si nadie escribe, los bloques no cambian y
+// cada invitado puede leerlos por su cuenta. Eso es lo que hace posible una
+// biblioteca compartida —un volumen con paquetes que puebla una máquina y
+// consumen muchas— sin duplicarla en cada imagen.
+//
+// Se comprueba aquí, en el camino de arranque, y no solo al borrar: quien monta
+// es tan peligroso como quien borra.
+func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
+	want := req.VolumeSet()
+	if len(want) == 0 {
+		return nil, nil
 	}
-	if !reVolume.MatchString(req.Volume) {
-		return "", "", false, fmt.Errorf("nombre de volumen inválido %q", req.Volume)
-	}
-	p := m.volumePath(req.Volume)
-	if _, err := os.Stat(p); err != nil {
-		return "", "", false, fmt.Errorf("no existe el volumen %q: créalo con `kling volume create %s`", req.Volume, req.Volume)
-	}
-
-	// UN ESCRITOR, O MUCHOS LECTORES. Nunca las dos cosas.
-	//
-	// No es una política, es física. Un ext4 no admite dos sistemas montándolo
-	// en ESCRITURA: cada uno cachea metadatos que el otro no ve, y el resultado
-	// es corrupción — comprobado, y el síntoma es un EBADMSG al leer desde la
-	// siguiente microVM, que no se parece en nada a la causa.
-	//
-	// En LECTURA no hay tal problema: si nadie escribe, los bloques no cambian
-	// y cada invitado puede leerlos por su cuenta. Eso es lo que hace posible
-	// una biblioteca compartida —un volumen con paquetes que puebla una máquina
-	// y consumen muchas— sin duplicarla en cada imagen.
-	//
-	// Se comprueba aquí, en el camino de arranque, y no solo al borrar: quien
-	// monta es tan peligroso como quien borra.
-	u := m.volumeUsers()[req.Volume]
-	switch {
-	case len(u.writers) > 0:
-		// Hay escritor: no entra nadie más, ni siquiera a leer. Un lector vería
-		// un sistema de ficheros cambiando bajo sus pies, con los metadatos que
-		// leyó ya obsoletos.
-		return "", "", false, fmt.Errorf("el volumen %q lo tiene montado %s en ESCRITURA.\n"+
-			"Mientras alguien escribe no puede entrar nadie más, ni a leer: párala antes",
-			req.Volume, strings.Join(u.writers, ", "))
-	case !req.VolumeReadOnly && len(u.readers) > 0:
-		// Quiere escribir y ya hay lectores: tampoco, por la misma razón.
-		return "", "", false, fmt.Errorf("el volumen %q lo están leyendo %d máquina(s): %s.\n"+
-			"Para escribir hace falta tenerlo en exclusiva; o móntalo con -volume-ro",
-			req.Volume, len(u.readers), strings.Join(u.readers, ", "))
+	if len(want) > api.MaxVolumes {
+		return nil, fmt.Errorf("son %d volúmenes y el máximo es %d: cada uno es un disco más",
+			len(want), api.MaxVolumes)
 	}
 
-	mp := req.VolumeMount
-	if mp == "" {
-		mp = "/data"
+	inUse := m.volumeUsers()
+	vistos := map[string]bool{}
+	puntos := map[string]bool{}
+	out := make([]resolvedVolume, 0, len(want))
+
+	for _, v := range want {
+		if !reVolume.MatchString(v.Name) {
+			return nil, fmt.Errorf("nombre de volumen inválido %q", v.Name)
+		}
+		// El mismo volumen dos veces en la MISMA microVM es un doble montaje
+		// tan malo como entre dos máquinas distintas, y además se le escaparía
+		// a la comprobación de abajo: la máquina aún no está en byID.
+		if vistos[v.Name] {
+			return nil, fmt.Errorf("el volumen %q aparece dos veces: un disco no se monta dos veces", v.Name)
+		}
+		vistos[v.Name] = true
+
+		p := m.volumePath(v.Name)
+		if _, err := os.Stat(p); err != nil {
+			return nil, fmt.Errorf("no existe el volumen %q: créalo con `kling volume create %s`", v.Name, v.Name)
+		}
+
+		u := inUse[v.Name]
+		switch {
+		case len(u.writers) > 0:
+			// Hay escritor: no entra nadie más, ni siquiera a leer. Un lector
+			// vería un sistema de ficheros cambiando bajo sus pies, con los
+			// metadatos que leyó ya obsoletos.
+			return nil, fmt.Errorf("el volumen %q lo tiene montado %s en ESCRITURA.\n"+
+				"Mientras alguien escribe no puede entrar nadie más, ni a leer: párala antes",
+				v.Name, strings.Join(u.writers, ", "))
+		case !v.ReadOnly && len(u.readers) > 0:
+			// El "cómo" va con la sintaxis exacta: un error que dice qué pasa
+			// pero no qué escribir obliga a ir a buscarlo a la documentación.
+			return nil, fmt.Errorf("el volumen %q lo están leyendo %d máquina(s): %s.\n"+
+				"Para escribir hace falta tenerlo en exclusiva; o léelo tú también:  -volume %s:ro",
+				v.Name, len(u.readers), strings.Join(u.readers, ", "), v.Name)
+		}
+
+		mp := v.Mount
+		if mp == "" {
+			mp = defaultVolumeMount
+		}
+		// Las rutas viajan por la línea de comandos del kernel separadas por
+		// comas, y el separador de argumentos es el espacio: cualquiera de los
+		// dos dentro de un punto de montaje partiría la lista y el invitado
+		// montaría los volúmenes cruzados, o en ningún sitio.
+		if !strings.HasPrefix(mp, "/") || strings.ContainsAny(mp, " \t\"',") {
+			return nil, fmt.Errorf("punto de montaje inválido %q: ruta absoluta, sin espacios ni comas", mp)
+		}
+		// Dos volúmenes en el mismo punto: el segundo taparía al primero, que
+		// quedaría montado y fuera de alcance.
+		if puntos[mp] {
+			return nil, fmt.Errorf("dos volúmenes montados en %s: el segundo taparía al primero", mp)
+		}
+		puntos[mp] = true
+
+		out = append(out, resolvedVolume{name: v.Name, path: p, mount: mp, readOnly: v.ReadOnly})
 	}
-	// La ruta viaja por la línea de comandos del kernel, donde el separador es
-	// el espacio: un punto de montaje con espacios partiría el argumento y el
-	// invitado montaría en otro sitio.
-	if !strings.HasPrefix(mp, "/") || strings.ContainsAny(mp, " \t\"'") {
-		return "", "", false, fmt.Errorf("punto de montaje inválido %q: ruta absoluta y sin espacios", mp)
+	return out, nil
+}
+
+// attachments convierte lo resuelto en lo que se graba en la máquina y en el
+// snapshot. El orden se conserva: es el orden de los discos.
+func attachments(vols []resolvedVolume) []api.VolumeAttachment {
+	if len(vols) == 0 {
+		return nil
 	}
-	return p, mp, req.VolumeReadOnly, nil
+	out := make([]api.VolumeAttachment, len(vols))
+	for i, v := range vols {
+		out[i] = api.VolumeAttachment{Name: v.name, Mount: v.mount, ReadOnly: v.readOnly}
+	}
+	return out
 }
 
 // volumeBootArg es lo que lee el puente dentro del invitado para saber dónde
-// montar /dev/vdc. Vacío si no hay volumen.
-func volumeBootArg(mountpoint string, readOnly bool) string {
-	if mountpoint == "" {
+// montar cada disco. Vacío si no hay volúmenes.
+//
+// Formato: kling.volume=/data,/libs:ro — los puntos de montaje separados por
+// comas, EN EL MISMO ORDEN en que se engancharon los discos, y el modo pegado a
+// cada uno. El orden es todo el contrato: el puente cuenta desde /dev/vdc, así
+// que la posición i de esta lista es el disco i. Y el modo va pegado, y no como
+// parámetro aparte, para que sea imposible leer uno sin el otro: montar en
+// escritura lo que se pidió de solo lectura corrompería lo que leen los demás.
+func volumeBootArg(vols []api.VolumeAttachment) string {
+	if len(vols) == 0 {
 		return ""
 	}
-	// El modo va PEGADO al punto de montaje con dos puntos, y no como parámetro
-	// aparte, para que el puente no pueda leer uno sin el otro: montar en
-	// escritura algo que se pidió de solo lectura corrompe lo que comparten los
-	// demás lectores.
-	if readOnly {
-		return " " + api.VolumeBootParam + "=" + mountpoint + ":ro"
+	specs := make([]string, len(vols))
+	for i, v := range vols {
+		specs[i] = v.Mount
+		if v.ReadOnly {
+			specs[i] += ":ro"
+		}
 	}
-	return " " + api.VolumeBootParam + "=" + mountpoint
+	return " " + api.VolumeBootParam + "=" + strings.Join(specs, ",")
 }
 
 // touchVolume actualiza la marca de tiempo para que `kling volume ls` muestre
@@ -325,7 +390,20 @@ func repairVolume(ctx context.Context, path string) {
 // El plazo es corto y los fallos se ignoran: si el invitado no contesta, ya
 // estaba roto, y retrasar el apagado por él no arregla nada.
 func (m *Manager) flushVolume(mc *api.Machine) {
-	if mc == nil || mc.Volume == "" || mc.IP == "" || mc.State != api.StateRunning {
+	if mc == nil || mc.IP == "" || mc.State != api.StateRunning {
+		return
+	}
+	// Solo si hay algo que pueda haberse escrito. Un invitado con únicamente
+	// volúmenes de solo lectura no tiene nada en caché que perder, y pedirle un
+	// vaciado retrasaría su apagado a cambio de nada.
+	escribible := false
+	for _, v := range mc.Volumes {
+		if !v.ReadOnly {
+			escribible = true
+			break
+		}
+	}
+	if !escribible {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -337,8 +415,23 @@ func (m *Manager) flushVolume(mc *api.Machine) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("volumen %s: el invitado no vació la caché antes de morir: %v", mc.Volume, err)
+		log.Printf("%s: el invitado no vació sus volúmenes antes de morir: %v", mc.Name, err)
 		return
 	}
 	resp.Body.Close()
 }
+
+// volumeDriveID nombra el disco i-ésimo de volumen.
+//
+// Los identificadores tienen que ser ESTABLES entre el arranque y la
+// restauración: al restaurar un snapshot hay que reapuntar cada disco por su
+// identificador, y uno que no coincida deja a la microVM leyendo el fichero de
+// otra máquina, o ninguno.
+func volumeDriveID(i int) string { return "volume" + strconv.Itoa(i) }
+
+// legacyVolumeDriveID es como se llamaba el disco cuando solo podía haber uno.
+//
+// Los snapshots congelados con aquella versión lo llevan grabado dentro y no se
+// pueden reescribir, así que restaurarlos exige usar este nombre. Es la única
+// razón por la que existe.
+const legacyVolumeDriveID = "volume"

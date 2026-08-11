@@ -1,54 +1,80 @@
 package main
 
-// Montaje del volumen persistente dentro de la microVM.
+// Montaje de los volúmenes persistentes dentro de la microVM.
 //
 // El puente es PID 1: corre antes que nadie y es el único sitio donde se puede
 // montar sin tocar el init de la imagen base. Ponerlo en el init obligaría a
 // reconstruir TODAS las imágenes existentes para estrenar volúmenes; aquí no
 // hace falta reconstruir ninguna.
 //
-// El punto de montaje llega por la línea de comandos del kernel
-// (kling.volume=/data) en vez de estar grabado en la imagen, así que el mismo
-// snapshot dorado sirve con volúmenes distintos, o montado en otro sitio.
+// Los puntos de montaje llegan por la línea de comandos del kernel
+// (kling.volume=/data,/libs:ro) en vez de estar grabados en la imagen, así que
+// el mismo snapshot dorado sirve con volúmenes distintos, o montados en otro
+// sitio.
 //
 // El montaje en sí vive en volume_linux.go: syscall.Mount no existe fuera de
-// Linux, y sin separarlo un `go build ./...` en un Mac —donde se desarrolla—
-// no compilaría.
+// Linux, y sin separarlo un `go build ./...` en un Mac —donde se desarrolla— no
+// compilaría.
 
 import (
 	"os"
 	"strings"
 )
 
-// volumeDevice es el tercer disco. vda es la base de solo lectura y vdb el
-// overlay de la máquina; el volumen siempre entra el último.
-const volumeDevice = "/dev/vdc"
-
 // volumeBootParam debe coincidir con api.VolumeBootParam. Se repite aquí como
 // literal a propósito: el puente se compila estático para el invitado y no debe
 // arrastrar el paquete api solo por una constante.
 const volumeBootParam = "kling.volume"
 
-// volumeMountpoint lee de /proc/cmdline dónde montar el volumen y en qué modo.
+// firstVolumeDevice es el primer disco de volumen. vda es la base de solo
+// lectura y vdb el overlay de la máquina; los volúmenes empiezan en vdc y
+// siguen por orden de enganche.
+const firstVolumeDevice = 'c'
+
+// volumeSpec es un volumen a montar: dónde y cómo.
+type volumeSpec struct {
+	device   string
+	mount    string
+	readOnly bool
+}
+
+// volumeSpecs lee de /proc/cmdline qué montar y en qué modo.
 //
-// El valor es "/ruta" o "/ruta:ro". El modo va pegado al punto de montaje, no
-// como parámetro aparte, para que sea imposible leer uno sin el otro: montar en
-// escritura un volumen que se pidió de solo lectura corrompería lo que están
-// leyendo las demás microVMs que lo comparten.
-func volumeMountpoint() (mountpoint string, readOnly bool) {
+// El valor es una lista separada por comas —"/data" o "/data,/libs:ro"— y la
+// POSICIÓN es el contrato: el i-ésimo punto de montaje corresponde al i-ésimo
+// disco de volumen, contando desde /dev/vdc. Por eso no se ordena ni se filtra
+// nada aquí: alterar el orden montaría cada volumen en el sitio de otro.
+//
+// El modo va pegado a cada punto de montaje, y no como parámetro aparte, para
+// que sea imposible leer uno sin el otro: montar en escritura lo que se pidió
+// de solo lectura corrompería lo que están leyendo las demás microVMs.
+func volumeSpecs() []volumeSpec {
 	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
-		return "", false
+		return nil
 	}
+	var raw string
 	for _, tok := range strings.Fields(string(b)) {
-		v, ok := strings.CutPrefix(tok, volumeBootParam+"=")
-		if !ok || v == "" {
+		if v, ok := strings.CutPrefix(tok, volumeBootParam+"="); ok && v != "" {
+			raw = v
+			break
+		}
+	}
+	if raw == "" {
+		return nil
+	}
+	var out []volumeSpec
+	for i, spec := range strings.Split(raw, ",") {
+		if spec == "" {
 			continue
 		}
-		if mp, found := strings.CutSuffix(v, ":ro"); found {
-			return mp, true
+		v := volumeSpec{device: "/dev/vd" + string(rune(firstVolumeDevice+i))}
+		if mp, ro := strings.CutSuffix(spec, ":ro"); ro {
+			v.mount, v.readOnly = mp, true
+		} else {
+			v.mount = spec
 		}
-		return v, false
+		out = append(out, v)
 	}
-	return "", false
+	return out
 }

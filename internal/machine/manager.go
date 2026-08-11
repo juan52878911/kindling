@@ -33,8 +33,8 @@ const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro in
 //
 // El punto de montaje del volumen viaja aquí y no dentro de la imagen: así el
 // mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno.
-func bootArgs(volMount string, volRO bool) string {
-	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(volMount, volRO)
+func bootArgs(vols []api.VolumeAttachment) string {
+	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -494,12 +494,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("límite de %d máquinas alcanzado (hay %d)", MaxMachines, n)
 	}
 
-	volPath, volMount, volRO, err := m.resolveVolume(req)
-	if volPath != "" && !volRO {
-		// Solo si vamos a montarlo en ESCRITURA. e2fsck escribe, y un volumen
+	vols, err := m.resolveVolumes(req)
+	for _, v := range vols {
+		// Solo los que vamos a montar en ESCRITURA. e2fsck escribe, y un volumen
 		// compartido puede tenerlo abierto otra microVM ahora mismo: repararlo
 		// por debajo sería justo la corrupción que el modo lectura evita.
-		repairVolume(ctx, volPath)
+		if !v.readOnly {
+			repairVolume(ctx, v.path)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -534,7 +536,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: time.Now(),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
-		Volume: req.Volume, VolumeMount: volMount, VolumeReadOnly: volRO,
+		Volumes: attachments(vols),
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
@@ -562,7 +564,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, volPath, volMount, volRO)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, vols)
 	if err != nil {
 		netcfg.Teardown()
 		m.fail(mc, err)
@@ -676,7 +678,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, volPath, volMount string, volRO bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume) (int, error) {
 	sock := filepath.Join(m.dir(id), "fc.sock")
 	_ = os.Remove(sock)
 
@@ -689,7 +691,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(volMount, volRO)}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols))}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -706,12 +708,19 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	}); err != nil {
 		return pid, err
 	}
-	// vdc: volumen persistente, si se pidió. Es lo único que SOBREVIVE a la
-	// máquina. El host no lo monta mientras esté aquí: dos sistemas escribiendo
-	// el mismo ext4 es corrupción segura.
-	if volPath != "" {
+	// vdc en adelante: los volúmenes, que son lo único que SOBREVIVE a la
+	// máquina. El host no los monta mientras estén aquí: dos sistemas
+	// escribiendo el mismo ext4 es corrupción segura.
+	//
+	// El orden de este bucle es el orden de las letras de disco, y el mismo en
+	// que viajan los puntos de montaje al invitado. No es un detalle de estilo:
+	// alterarlo montaría cada volumen en el sitio de otro.
+	for i, v := range vols {
 		if err := c.SetDrive(ctx, fc.Drive{
-			DriveID: "volume", PathOnHost: volPath, IsRootDevice: false, IsReadOnly: volRO,
+			DriveID: volumeDriveID(i), PathOnHost: v.path, IsRootDevice: false,
+			// De solo lectura para el propio VMM, no solo en el mount: la
+			// barrera no puede depender de que el invitado se porte bien.
+			IsReadOnly:  v.readOnly,
 			RateLimiter: fc.Limit(diskBytesPerSec),
 		}); err != nil {
 			return pid, err

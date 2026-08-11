@@ -64,8 +64,9 @@ func mcpImport(args []string) error {
 	// reimportar — por eso el flag va aquí y no en el arranque.
 	cpus := fs.Int("cpus", 0, "vCPUs de la plantilla")
 	egress := fs.String("egress", "", "salida de red del servicio: none | internet")
-	volume := fs.String("volume", "", "volumen persistente que montar (créalo con `kling volume create`)")
-	mount := fs.String("mount", "", "dónde montarlo dentro del invitado (por defecto /data)")
+	var volumes volumeFlag
+	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
+	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
 	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: compartible entre servicios")
 	keep := fs.Bool("keep", false, "no destruir la plantilla al terminar")
 	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
@@ -73,6 +74,10 @@ func mcpImport(args []string) error {
 	stateful := fs.Bool("stateful", false, "forzar instancia persistente (por defecto se deduce del catálogo)")
 	ephemeral := fs.Bool("ephemeral", false, "forzar máquinas efímeras aunque el análisis diga lo contrario")
 	if err := fs.Parse(reorder(args)); err != nil {
+		return err
+	}
+	importVols, err := volumeSet(volumes, *mount, *volRO)
+	if err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -121,10 +126,8 @@ func mcpImport(args []string) error {
 		// El volumen se decide AQUÍ y no después: Firecracker no deja añadir
 		// discos a una VM restaurada, así que el dispositivo tiene que estar
 		// presente cuando se congela el snapshot dorado o no lo estará nunca.
-		Volume:         *volume,
-		VolumeMount:    *mount,
-		VolumeReadOnly: *volRO,
-		Labels:         map[string]string{api.LabelService: service},
+		Volumes: importVols,
+		Labels:  map[string]string{api.LabelService: service},
 	})
 	if err != nil {
 		fmt.Println("✗")

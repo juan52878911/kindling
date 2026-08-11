@@ -54,13 +54,8 @@ type Machine struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 
-	// Volume es el volumen persistente montado, si lo hay, y dónde.
-	Volume      string `json:"volume,omitempty"`
-	VolumeMount string `json:"volume_mount,omitempty"`
-	// VolumeReadOnly monta el volumen en SOLO LECTURA. Es lo que permite que
-	// varias microVMs compartan uno: un ext4 no admite dos escritores, pero sí
-	// muchos lectores. Sirve para una biblioteca de paquetes común.
-	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
+	// Volumes son los volúmenes montados, en el orden en que van los discos.
+	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
 	// Labels agrupa máquinas. La clave "service" es convencional: identifica de
 	// qué servidor MCP es instancia esta microVM, y es por donde agrupan tanto
@@ -96,6 +91,9 @@ type RunRequest struct {
 	// CPUPct acota el uso de CPU (100 = un core completo).
 	CPUPct int `json:"cpu_pct,omitempty"`
 
+	// Volumes son los volúmenes a montar, en orden. Es la forma completa.
+	Volumes []VolumeAttachment `json:"volumes,omitempty"`
+
 	// Volume monta un volumen persistente como tercer disco. VolumeMount es
 	// dónde aparece dentro del invitado (por defecto /data).
 	//
@@ -116,6 +114,30 @@ type RunRequest struct {
 // el gateway, porque también lo necesita el manager para pedirle al invitado que
 // vacíe su volumen antes de morir — y machine no puede importar gateway.
 const GuestPort = 8080
+
+// VolumeAttachment es un volumen montado en una microVM: cuál, dónde y cómo.
+//
+// Se admite más de uno porque los dos usos naturales se estorban: un servicio
+// quiere su almacenamiento propio en escritura Y la biblioteca de paquetes
+// compartida en lectura, y con un solo disco había que elegir.
+//
+// El ORDEN importa y es parte del contrato: el orden de esta lista es el orden
+// en que se enganchan los discos (/dev/vdc, /dev/vdd, ...) y el orden en que
+// viajan los puntos de montaje en la línea de comandos del kernel. Reordenarla
+// entre el arranque y la restauración montaría cada volumen en el sitio del
+// otro.
+type VolumeAttachment struct {
+	Name     string `json:"name"`
+	Mount    string `json:"mount"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+}
+
+// MaxVolumes acota cuántos puede llevar una microVM.
+//
+// El límite existe porque cada volumen es un disco más, y los discos se nombran
+// por letra: vda es la base, vdb el overlay, y de vdc en adelante los volúmenes.
+// Cuatro cubre de sobra los usos reales y mantiene la correspondencia legible.
+const MaxVolumes = 4
 
 // VolumeBootParam es el parámetro de la línea de comandos del kernel por el que
 // el invitado sabe dónde montar su volumen.
@@ -160,22 +182,24 @@ type Snapshot struct {
 	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
 	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
 
-	// Volume es el volumen que tenía la plantilla. Se recuerda para que
-	// despertar una instancia no exija repetirlo: el gateway despierta
-	// servicios por nombre y no sabe nada de volúmenes.
-	Volume string `json:"volume,omitempty"`
-
-	// HasVolume dice si el snapshot lleva el DISPOSITIVO de volumen dentro.
+	// Volumes son los volúmenes que tenía la plantilla, en el orden de los
+	// discos. Se recuerdan para que despertar una instancia no exija repetirlos:
+	// el gateway despierta servicios por nombre y no sabe nada de volúmenes.
 	//
-	// Firecracker no permite añadir discos a una VM restaurada, así que esto no
-	// se puede cambiar después: un servicio importado sin volumen no podrá
-	// tener uno sin reimportarlo. VolumeMount recuerda dónde lo monta.
-	HasVolume   bool   `json:"has_volume,omitempty"`
-	VolumeMount string `json:"volume_mount,omitempty"`
-	// VolumeReadOnly monta el volumen en SOLO LECTURA. Es lo que permite que
-	// varias microVMs compartan uno: un ext4 no admite dos escritores, pero sí
-	// muchos lectores. Sirve para una biblioteca de paquetes común.
-	VolumeReadOnly bool `json:"volume_read_only,omitempty"`
+	// Y sobre todo porque el CONJUNTO DE DISCOS queda fijado al congelar:
+	// Firecracker no admite añadir ni quitar discos a una VM restaurada, así que
+	// al restaurar hay que reenganchar exactamente estos, en este orden.
+	Volumes []VolumeAttachment `json:"volumes,omitempty"`
+
+	// Los tres campos siguientes son de los snapshots de una sola unidad, de
+	// antes de que una microVM pudiera llevar varios. Se conservan para poder
+	// leerlos: un snapshot ya congelado no se puede reescribir, y romperlos
+	// obligaría a reimportar todos los servicios existentes. VolumeSet() los
+	// normaliza a la lista y es lo único que debe consultar el resto del código.
+	Volume         string `json:"volume,omitempty"`
+	HasVolume      bool   `json:"has_volume,omitempty"`
+	VolumeMount    string `json:"volume_mount,omitempty"`
+	VolumeReadOnly bool   `json:"volume_read_only,omitempty"`
 
 	// Egress es la política de red con la que se importó el servicio.
 	//
@@ -330,4 +354,34 @@ type GuestResponse struct {
 	Status  int               `json:"status"`
 	Body    string            `json:"body"`
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// VolumeSet devuelve los volúmenes del snapshot, vengan de la lista o de los
+// campos sueltos de un snapshot antiguo.
+//
+// Existe para que el resto del código no tenga que saber de qué época es cada
+// snapshot. Los que se congelaron con un solo volumen siguen arrancando.
+func (s *Snapshot) VolumeSet() []VolumeAttachment {
+	if len(s.Volumes) > 0 {
+		return s.Volumes
+	}
+	if s.Volume == "" && !s.HasVolume {
+		return nil
+	}
+	return []VolumeAttachment{{Name: s.Volume, Mount: s.VolumeMount, ReadOnly: s.VolumeReadOnly}}
+}
+
+// VolumeSet devuelve los volúmenes pedidos, normalizando la forma corta.
+//
+// La forma corta (-volume X -mount Y) es la de un solo volumen y se conserva
+// porque es la que está en la documentación y en los dedos de quien la use. Si
+// se dan las dos, manda la lista.
+func (r RunRequest) VolumeSet() []VolumeAttachment {
+	if len(r.Volumes) > 0 {
+		return r.Volumes
+	}
+	if r.Volume == "" {
+		return nil
+	}
+	return []VolumeAttachment{{Name: r.Volume, Mount: r.VolumeMount, ReadOnly: r.VolumeReadOnly}}
 }

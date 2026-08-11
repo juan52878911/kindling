@@ -195,8 +195,8 @@ npm install --prefix /mnt/libs --ignore-scripts lodash axios zod
 sudo umount /mnt/libs
 
 # y consumirla desde tantas microVMs como haga falta:
-kling mcp import mi-servicio -volume libs -mount /libs -volume-ro
-kling run -name otra -volume libs -mount /libs -volume-ro
+kling mcp import mi-servicio -volume libs:/libs:ro
+kling run -name otra -volume libs:/libs:ro
 ```
 
 El modo viaja pegado al punto de montaje en la línea de comandos del kernel
@@ -207,9 +207,28 @@ fichero es justo la corrupción que el modo lectura evita. El disco se marca ade
 lectura en el propio Firecracker, así que la barrera no depende de que el invitado se
 porte bien: escribir da `EROFS`.
 
-**Una microVM monta un volumen, no varios.** El tercer disco (`vdc`) es uno solo, así que
-hoy un servicio tiene o su almacenamiento propio o la biblioteca compartida, no las dos
-cosas.
+### Varios volúmenes en la misma microVM
+
+Los dos usos naturales se estorbaban: un servicio quiere su almacenamiento propio en
+escritura **y** la biblioteca compartida en lectura. `-volume` es repetible, y el orden en
+que se escriben es el orden de los discos (`vdc`, `vdd`, …):
+
+```sh
+kling mcp import mi-servicio -volume datos:/data -volume libs:/libs:ro
+```
+
+```
+NOMBRE   LÓGICO   EN DISCO   EN USO POR
+datos    2.0G     97M        mi-servicio-1a98a4 (escritura)
+libs     2.0G     109M       mi-servicio-1a98a4, otra-mas
+```
+
+El máximo son cuatro, porque cada uno es un disco y los discos se nombran por letra.
+
+**El conjunto de discos queda fijado al congelar.** Firecracker no admite añadir ni quitar
+discos a una VM restaurada —solo reapuntar cada uno a otro fichero—, así que cambiar
+cuántos volúmenes lleva un servicio exige reimportarlo, y kling lo dice con esas palabras
+en vez de fallar dentro del invitado.
 
 **Sobrevive a que maten la máquina.** Parar una microVM es matar el VMM, que para el
 invitado es indistinguible de un corte de corriente. Por eso un volumen se formatea **con
