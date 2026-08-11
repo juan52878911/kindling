@@ -57,6 +57,12 @@ func mcpImport(args []string) error {
 	host := hostFlag(fs)
 	image := fs.String("image", "", "imagen de la que importar (por defecto: el nombre del servicio)")
 	mem := fs.Int("mem", 0, "memoria en MiB de la plantilla")
+	// Sin esto solo se podía subir la memoria, y hay servicios cuyo cuello de
+	// botella es la CPU: un analizador estático pasa por cada fichero, y con un
+	// solo vCPU un escaneo se acerca al plazo del cliente MCP. Como la memoria,
+	// queda GRABADO en el snapshot dorado y no se puede cambiar después sin
+	// reimportar — por eso el flag va aquí y no en el arranque.
+	cpus := fs.Int("cpus", 0, "vCPUs de la plantilla")
 	egress := fs.String("egress", "", "salida de red del servicio: none | internet")
 	volume := fs.String("volume", "", "volumen persistente que montar (créalo con `kling volume create`)")
 	mount := fs.String("mount", "", "dónde montarlo dentro del invitado (por defecto /data)")
@@ -109,7 +115,7 @@ func mcpImport(args []string) error {
 		// porque cada una arranca su propio proceso del servidor MCP dentro del
 		// invitado.
 		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
-		VCPUs:  config.Or(cfg.Defaults.VCPUs, 1),
+		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		Egress: config.Or(*egress, cfg.Defaults.Egress, "none"),
 		// El volumen se decide AQUÍ y no después: Firecracker no deja añadir
 		// discos a una VM restaurada, así que el dispositivo tiene que estar
