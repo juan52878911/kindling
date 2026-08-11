@@ -329,9 +329,12 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Se observa la respuesta para capturar el Mcp-Session-Id que asigne el
 	// puente en el initialize, y fijar desde ahí el enrutado de esa conversación.
 	sw := &sessionWriter{ResponseWriter: w, gw: g, service: service, e: e}
+	// En defer, no después: un pánico dentro del proxy dejaría inflight alto
+	// para siempre, y esa instancia no volvería a congelarse nunca — el segador
+	// la respeta precisamente porque cree que está trabajando.
 	g.begin(e)
+	defer g.end(e)
 	e.proxy.ServeHTTP(sw, r)
-	g.end(e)
 
 	// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
 	if r.Method == http.MethodDelete {

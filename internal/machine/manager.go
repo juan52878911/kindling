@@ -853,6 +853,20 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		return nil, err
 	}
 	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
+		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
+		// para siempre figurando como running: el vigilante no la detecta
+		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
+		// ninguna responde jamás.
+		//
+		// Y hay que devolverle sus volúmenes, que se soltaron arriba para poder
+		// congelar: si no, seguiría corriendo escribiendo en su overlay.
+		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+			// Si tampoco se puede reanudar, la máquina no es recuperable y
+			// dejarla como running sería mentir. Se marca fallida.
+			m.fail(mc, fmt.Errorf("congelar falló (%v) y tampoco pude reanudarla: %w", err, rerr))
+			return nil, err
+		}
+		_ = m.acquireVolumes(mc)
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()

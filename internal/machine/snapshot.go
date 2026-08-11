@@ -160,7 +160,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	m.priv.EnsureReadable(dir)
 
 	b, _ := json.MarshalIndent(snap, "", "  ")
-	if err := os.WriteFile(filepath.Join(dir, "meta.json"), b, 0o644); err != nil {
+	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
 
@@ -235,7 +235,7 @@ func (m *Manager) SetCatalog(name string, tools []api.ToolSpec) (*api.Snapshot, 
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(m.snapDir(name), "meta.json"), b, 0o644); err != nil {
+	if err := writeMeta(m.snapDir(name), b); err != nil {
 		return nil, err
 	}
 	m.priv.EnsureReadable(m.snapDir(name))
@@ -489,4 +489,28 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("instanciada desde %s en %d ms", req.From, elapsed)})
 	return &out, nil
+}
+
+// writeMeta guarda el meta.json de un snapshot de forma atómica.
+//
+// Al lado y renombrar, nunca encima. os.WriteFile TRUNCA primero: un corte a
+// media escritura —o simplemente un lector concurrente, y Snapshots() se sirve
+// en cada petición del gateway— deja un meta vacío o partido. El servicio
+// "desaparece" del catálogo, y encima de forma PERMANENTE: RemoveSnapshot se
+// niega a borrar lo que no puede leer, así que el directorio queda varado.
+//
+// El renombrado dentro de un mismo sistema de ficheros es atómico: o está el
+// meta viejo o el nuevo. El proyecto ya usa este patrón en writePending y
+// saveRecipe; aquí faltaba.
+func writeMeta(dir string, b []byte) error {
+	final := filepath.Join(dir, "meta.json")
+	tmp := final + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

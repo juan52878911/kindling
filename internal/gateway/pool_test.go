@@ -213,3 +213,44 @@ func TestNoSeCongelaLoQueEstaTrabajando(t *testing.T) {
 		t.Errorf("inflight = %d tras end() de más, want 0", n)
 	}
 }
+
+// El contador de trabajo en vuelo se decrementa SIEMPRE, también si el proxy
+// entra en pánico.
+//
+// Sin el defer, una instancia con inflight alto no vuelve a congelarse nunca:
+// el segador la respeta precisamente porque cree que está trabajando. Un solo
+// pánico la dejaba consumiendo RAM para siempre.
+func TestElContadorEnVueloBajaAunqueHayaPanico(t *testing.T) {
+	g := &Gateway{
+		idle:     time.Millisecond,
+		services: map[string]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	e := &entry{machineID: "m1", lastUse: time.Now().Add(-time.Hour)}
+	g.services["svc"] = e
+
+	func() {
+		defer func() { _ = recover() }()
+		g.begin(e)
+		defer g.end(e)
+		panic("el proxy se fue al garete")
+	}()
+
+	g.mu.Lock()
+	n := e.inflight
+	g.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("inflight = %d tras un pánico, want 0: esa instancia no se congelaría jamás", n)
+	}
+	// end() refresca lastUse a propósito: el plazo de inactividad cuenta desde
+	// que SALE la respuesta, no desde que entró la petición. Así que ahora mismo
+	// la instancia es reciente — lo que importa es que ya no es intocable por
+	// culpa del contador, que era el fallo.
+	time.Sleep(2 * time.Millisecond)
+	g.mu.Lock()
+	reclamable := e.inflight == 0 && time.Since(e.lastUse) > g.idle
+	g.mu.Unlock()
+	if !reclamable {
+		t.Error("la instancia sigue siendo intocable para el segador")
+	}
+}
