@@ -45,7 +45,17 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	start := time.Now()
 
 	// Camino rápido: una instancia ya restaurada y con su sesión MCP abierta.
-	if vm := a.gw.pool.take(t.Service); vm != nil {
+	//
+	// En bucle, y comprobando que sigue viva: el fondo guarda máquinas que el
+	// daemon puede haber congelado por TTL desde debajo. Entregar una congelada
+	// hacía que el fallo llegara al cliente sin reintento, y un dial a una VM
+	// viva cuesta un milisegundo — no se nota en el camino rápido.
+	for vm := a.gw.pool.take(t.Service); vm != nil; vm = a.gw.pool.take(t.Service) {
+		if err := waitReady(ctx, vm.ip, GuestPort, time.Second); err != nil {
+			log.Printf("fondo: %s no responde (%v); la retiro y pruebo la siguiente", vm.id[:8], err)
+			go a.gw.client.Remove(context.WithoutCancel(ctx), vm.id)
+			continue
+		}
 		defer func() {
 			// Destruir y reponer EN SEGUNDO PLANO. Hacerlo antes de responder
 			// obligaba al cliente a esperar el desmontaje del namespace y el

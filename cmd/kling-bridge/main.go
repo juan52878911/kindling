@@ -204,9 +204,15 @@ func (b *bridge) closeAll() {
 	b.sessions = map[string]*session{}
 	b.mu.Unlock()
 
+	// Aquí SÍ se espera, al contrario que en el cosechador de ociosas: después
+	// de esto se sueltan los volúmenes y el proceso sale. En paralelo para que
+	// una sesión lenta no retrase el apagado de la microVM entera.
+	var wg sync.WaitGroup
 	for _, s := range all {
-		s.close()
+		wg.Add(1)
+		go func(s *session) { defer wg.Done(); s.close() }(s)
 	}
+	wg.Wait()
 	if len(all) > 0 {
 		log.Printf("kling-bridge: %d sesión(es) cerradas al salir", len(all))
 	}
@@ -244,7 +250,13 @@ type session struct {
 	// candados es justo la que sale cara de descubrir.
 	reqTimeout time.Duration
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// wmu serializa las escrituras a stdin: el protocolo es una línea por
+	// mensaje, y dos Write entrelazados lo corromperían. Va APARTE de mu porque
+	// una escritura puede bloquear indefinidamente, y quien la desbloquea
+	// —close(), cerrando stdin— no debe necesitar un candado que la escritura
+	// tenga cogido. Nunca se toma uno teniendo el otro.
+	wmu     sync.Mutex
 	pending map[string]chan json.RawMessage // id JSON-RPC -> quien espera
 	notes   chan json.RawMessage            // mensajes que el servidor inicia
 	closed  bool
@@ -513,10 +525,26 @@ func (s *session) readLoop(stdout io.Reader) {
 
 func (s *session) send(msg []byte) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return fmt.Errorf("la sesión está cerrada")
 	}
+
+	// La escritura va bajo wmu, NO bajo mu.
+	//
+	// Escribir a un pipe puede bloquear para siempre: si el servidor MCP deja
+	// de leer su stdin, a los ~64 KiB encolados el Write se para. Hacerlo con el
+	// candado de estado tomado colgaba la sesión entera —y con ella el
+	// cosechador de ociosas, que las cierra en serie, y el apagado, que como
+	// somos PID 1 impide que la microVM muera limpia—, porque close(), que es
+	// justo quien desatasca cerrando stdin, esperaba ese mismo candado.
+	//
+	// La carrera que esto abre es benigna: si close() cierra stdin entre el
+	// chequeo y el Write, el Write devuelve ErrClosed y el cliente ve un error,
+	// que es exactamente lo que debe ver.
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	if _, err := s.stdin.Write(append(msg, '\n')); err != nil {
 		return fmt.Errorf("escribiendo al servidor MCP: %w", err)
 	}
@@ -643,8 +671,10 @@ func (b *bridge) reapIdle(ctx context.Context) {
 				}
 			}
 			b.mu.Unlock()
+			// En paralelo: cerrarlas en serie hacía que una sesión lenta
+			// retuviera la cosecha de todas las demás. close() es idempotente.
 			for _, s := range dead {
-				s.close()
+				go s.close()
 			}
 		}
 	}

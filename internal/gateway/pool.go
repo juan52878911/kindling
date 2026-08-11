@@ -148,8 +148,16 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 			api.LabelService: service,
 			"pool":           "true",
 		},
-		// Si el gateway muriera, el daemon las congela en vez de dejarlas vivas.
-		TTLSeconds: 600,
+		// Red de seguridad para si el gateway muriera: el daemon las congela en
+		// vez de dejarlas vivas para siempre.
+		//
+		// Tiene que dispararse DESPUÉS que la purga del gateway, no antes. Con
+		// los 600 s fijos de antes empataba exactamente con evictStale(idle*2)
+		// del idle por defecto, y como el daemon cuenta desde StartedAt y el
+		// gateway desde que la máquina está lista, el daemon ganaba siempre:
+		// congelaba VMs que el fondo seguía creyendo vivas y las entregaba
+		// muertas, con el fallo llegando al cliente sin reintento.
+		TTLSeconds: int((p.gw.idle*2 + 2*time.Minute).Seconds()),
 	})
 	if err != nil {
 		return nil, err

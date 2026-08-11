@@ -563,6 +563,14 @@ func (g *Gateway) acquire(ctx context.Context, service string) (*api.Machine, er
 	}
 
 	match := func(m *api.Machine) bool {
+		// Las del fondo y las efímeras YA TIENEN DUEÑO, y ese dueño las destruye
+		// al terminar. Adoptarlas aquí como instancia persistente crea una
+		// máquina con dos dueños: una acción efímera la borra debajo de las
+		// sesiones que el gateway había fijado a ella, y esas sesiones mueren
+		// sin que nada apunte a la causa.
+		if m.Labels["pool"] == "true" || m.Labels["ephemeral"] == "true" {
+			return false
+		}
 		return m.Service() == service || m.From == service
 	}
 

@@ -214,3 +214,47 @@ func TestTopeDeRespuestaCeroNoVenceEnElActo(t *testing.T) {
 		t.Error("respuesta vacía")
 	}
 }
+
+// Un hijo que deja de leer su stdin no debe poder colgar el puente entero.
+//
+// send() escribía al pipe con el candado de ESTADO tomado. A los ~64 KiB
+// encolados el Write se para para siempre, y close() —que es justo quien
+// desatasca cerrando stdin— esperaba ese mismo candado. Con el puente siendo
+// PID 1, eso dejaba la microVM sin poder morir limpia.
+func TestUnHijoQueNoLeeNoCuelgaElCierre(t *testing.T) {
+	r, w := io.Pipe()
+	// Nadie lee de r: la escritura se bloqueará en cuanto se llene el pipe.
+	s := &session{
+		id:      "atascada",
+		stdin:   w,
+		pending: map[string]chan json.RawMessage{},
+		notes:   make(chan json.RawMessage, 1),
+		done:    make(chan struct{}),
+	}
+
+	escribiendo := make(chan struct{})
+	go func() {
+		close(escribiendo)
+		// io.Pipe no tiene buffer: el primer Write ya bloquea sin lector.
+		_ = s.send([]byte(`{"jsonrpc":"2.0"}`))
+	}()
+	<-escribiendo
+	time.Sleep(50 * time.Millisecond) // que llegue a bloquearse de verdad
+
+	// close() tiene que poder tomar el candado de estado aunque haya una
+	// escritura atascada. Antes del arreglo, esto no retornaba jamás.
+	cerrado := make(chan struct{})
+	go func() {
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+		close(cerrado)
+	}()
+
+	select {
+	case <-cerrado:
+	case <-time.After(2 * time.Second):
+		t.Fatal("el candado de estado sigue retenido por una escritura bloqueada: interbloqueo")
+	}
+	_ = r.Close()
+}

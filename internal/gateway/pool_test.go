@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"github.com/juan52878911/kindling/internal/api"
 	"sync"
 	"testing"
 	"time"
@@ -252,5 +253,42 @@ func TestElContadorEnVueloBajaAunqueHayaPanico(t *testing.T) {
 	g.mu.Unlock()
 	if !reclamable {
 		t.Error("la instancia sigue siendo intocable para el segador")
+	}
+}
+
+// Las máquinas del fondo y las efímeras NO son adoptables como instancia
+// persistente del servicio.
+//
+// Ya tienen dueño, y ese dueño las destruye al terminar. Adoptarlas creaba una
+// máquina con dos dueños: una acción efímera la borraba debajo de las sesiones
+// que el gateway había fijado a ella, y esas sesiones morían sin que nada
+// apuntara a la causa.
+func TestLasMaquinasConDuenoNoSeAdoptan(t *testing.T) {
+	// La misma condición que usa acquire(), aislada.
+	adoptable := func(m *api.Machine) bool {
+		if m.Labels["pool"] == "true" || m.Labels["ephemeral"] == "true" {
+			return false
+		}
+		return m.Service() == "svc" || m.From == "svc"
+	}
+
+	casos := []struct {
+		nombre string
+		m      *api.Machine
+		want   bool
+	}{
+		{"instancia normal del servicio",
+			&api.Machine{Labels: map[string]string{api.LabelService: "svc"}}, true},
+		{"restaurada del snapshot", &api.Machine{From: "svc"}, true},
+		{"del fondo: la entrega y la destruye el pool",
+			&api.Machine{Labels: map[string]string{api.LabelService: "svc", "pool": "true"}}, false},
+		{"efímera: muere al acabar la llamada",
+			&api.Machine{Labels: map[string]string{api.LabelService: "svc", "ephemeral": "true"}}, false},
+		{"de otro servicio", &api.Machine{Labels: map[string]string{api.LabelService: "otro"}}, false},
+	}
+	for _, c := range casos {
+		if got := adoptable(c.m); got != c.want {
+			t.Errorf("%s: adoptable = %v, want %v", c.nombre, got, c.want)
+		}
 	}
 }
