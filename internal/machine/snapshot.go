@@ -73,6 +73,19 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	ownOverlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
 
 	c := fc.New(sock)
+
+	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
+	// corriendo: un invitado pausado no atiende HTTP.
+	//
+	// Sin esto, la memoria volcada lleva dentro la caché de ext4 —superbloque,
+	// mapas de bloques, posición del journal— de un disco que después seguirá
+	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
+	// instancia restaurada arrancaría creyendo un estado que ya no existe.
+	if err := m.releaseVolumes(mc); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("preparando los volúmenes para congelar: %w", err)
+	}
+
 	if err := c.Pause(ctx); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
@@ -81,6 +94,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		os.RemoveAll(dir)
 		_ = c.PatchDrive(ctx, "overlay", ownOverlay)
 		_ = c.Resume(ctx)
+		// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay que
+		// devolvérselos, o seguirá corriendo escribiendo en su overlay.
+		_ = m.acquireVolumes(mc)
 		return nil, err
 	}
 
@@ -117,6 +133,11 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	}
 	if err := c.Resume(ctx); err != nil {
 		return nil, err
+	}
+	// La plantilla vuelve a montarlos: sigue viva hasta que la importación la
+	// destruya, y con -keep puede quedarse.
+	if err := m.acquireVolumes(mc); err != nil {
+		log.Printf("aviso: la plantilla %s se quedó sin sus volúmenes tras congelar: %v", mc.Name, err)
 	}
 
 	if out, err := exec.CommandContext(ctx, "fallocate", "--dig-holes", memPath).CombinedOutput(); err != nil {
@@ -312,11 +333,46 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// El CONJUNTO de discos quedó fijado al congelar: Firecracker no admite
 	// añadir ni quitar discos a una VM restaurada. Solo se puede reapuntar cada
 	// uno a otro fichero, así que el número tiene que coincidir exactamente.
-	if n, quiere := len(snap.VolumeSet()), len(vols); n != quiere {
+	grabados := snap.VolumeSet()
+	if n, quiere := len(grabados), len(vols); n != quiere {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("el servicio %q se importó con %d volumen(es) y se le están dando %d.\n"+
 			"A una microVM restaurada no se le pueden añadir ni quitar discos: reimpórtalo si quieres cambiarlo",
 			req.From, n, quiere)
+	}
+	// El MODO tampoco se puede cambiar, y esto es lo que impedía verlo.
+	//
+	// PatchDrive solo reapunta el fichero: is_read_only quedó fijado al congelar,
+	// igual que el conjunto de discos. Pedir :ro sobre un snapshot que se congeló
+	// en escritura no monta nada en solo lectura — monta en ESCRITURA y encima
+	// engaña a la contabilidad, que lo apunta como lector y deja entrar a más.
+	// El resultado son varios ext4 montados en escritura sobre el mismo fichero,
+	// que es exactamente lo que el resto de este fichero existe para impedir.
+	//
+	// El punto de montaje va por el mismo camino: viaja en la línea de comandos
+	// del kernel, que se congeló con la memoria.
+	for i, v := range vols {
+		g := grabados[i]
+		if v.readOnly != g.ReadOnly {
+			os.RemoveAll(dir)
+			modo := func(ro bool) string {
+				if ro {
+					return "solo lectura"
+				}
+				return "escritura"
+			}
+			return nil, fmt.Errorf("el volumen %q se congeló en %s y se está pidiendo en %s.\n"+
+				"El modo queda GRABADO en el snapshot y no se puede cambiar al restaurar: "+
+				"reimporta el servicio si quieres el otro",
+				v.name, modo(g.ReadOnly), modo(v.readOnly))
+		}
+		if v.mount != g.Mount {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("el volumen %q se congeló montado en %s y se está pidiendo en %s.\n"+
+				"El punto de montaje viaja en la línea de comandos del kernel, que se congeló "+
+				"con la memoria: reimporta el servicio si quieres moverlo",
+				v.name, g.Mount, v.mount)
+		}
 	}
 
 	netcfg := knet.Plan(m.allocNetIndex(), id)
@@ -396,6 +452,19 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err := c.Resume(ctx); err != nil {
 		m.fail(mc, err)
 		return nil, err
+	}
+	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
+	// invitado los monta. Se congelaron desmontados a propósito, para que su
+	// memoria no llevara dentro la caché de un ext4 que después cambia.
+	//
+	// Un fallo aquí es un fallo de la máquina: sin volumen, la herramienta
+	// escribe en un directorio del overlay que muere con ella, y eso no da ni un
+	// aviso hasta que alguien busca lo que guardó.
+	if len(vols) > 0 {
+		if err := m.acquireVolumes(mc); err != nil {
+			m.fail(mc, err)
+			return nil, err
+		}
 	}
 	elapsed := time.Since(start).Milliseconds()
 

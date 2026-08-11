@@ -119,13 +119,12 @@ Opciones:
 	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
 	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
 	// que va a desaparecer con la máquina.
-	volumes, err := mountVolumes()
-	if err != nil {
+	if err := volumeState.acquire(); err != nil {
 		log.Fatalf("volumen: %v", err)
 	}
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
 	// saber cuáles traen paquetes.
-	b.env = libraryEnv(os.Environ(), volumes)
+	b.env = libraryEnv(os.Environ(), volumeState.specs())
 	for _, kv := range b.env {
 		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
 			log.Printf("biblioteca: %s", kv)
@@ -139,7 +138,35 @@ Opciones:
 	// muere con él: el volumen "persistente" perdería justo lo más reciente,
 	// que es lo que a nadie se le ocurre comprobar.
 	mux.HandleFunc("/volume/sync", func(w http.ResponseWriter, r *http.Request) {
-		syncVolumes(volumes)
+		volumeState.sync()
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// /volume/release DESMONTA, y existe por el snapshot dorado.
+	//
+	// Un snapshot congela la memoria del invitado, y ahí dentro va la caché de
+	// ext4: superbloque, mapas de bloques, posición del journal. El fichero del
+	// volumen NO se copia al snapshot — sigue siendo el mismo del anfitrión y
+	// sigue cambiando. Así que cada instancia restaurada arranca con metadatos
+	// de la época del import sobre un disco que ya divergió, y escribe encima.
+	//
+	// El daemon llama aquí ANTES de congelar la plantilla, para que la memoria
+	// que se vuelca no lleve ningún ext4 montado dentro.
+	mux.HandleFunc("/volume/release", func(w http.ResponseWriter, r *http.Request) {
+		volumeState.release()
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// /volume/acquire vuelve a montar. Lo llama el daemon tras restaurar, cuando
+	// los discos ya apuntan a los ficheros de ESTA instancia.
+	mux.HandleFunc("/volume/acquire", func(w http.ResponseWriter, r *http.Request) {
+		if err := volumeState.acquire(); err != nil {
+			// 500 y no un log: si el volumen no se monta, la herramienta
+			// escribiría en un directorio del overlay que muere con la máquina,
+			// y eso no da ni un error hasta que alguien busca lo que guardó.
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -167,7 +194,7 @@ Opciones:
 	b.closeAll()
 	// Después de closeAll, no antes: mientras los servidores MCP vivan pueden
 	// seguir escribiendo, y desmontar por debajo perdería esas escrituras.
-	unmountVolumes(volumes)
+	volumeState.release()
 }
 
 // closeAll cierra todas las sesiones y mata sus procesos hijo.

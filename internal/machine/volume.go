@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -390,6 +391,73 @@ func repairVolume(ctx context.Context, path string) {
 //
 // El plazo es corto y los fallos se ignoran: si el invitado no contesta, ya
 // estaba roto, y retrasar el apagado por él no arregla nada.
+// releaseVolumes le pide al invitado que DESMONTE sus volúmenes.
+//
+// Se llama antes de congelar un snapshot dorado. Un snapshot congela la memoria
+// del invitado, y ahí dentro va la caché de ext4: superbloque, mapas de bloques,
+// posición del journal. El fichero del volumen NO se copia al snapshot —sigue
+// siendo el del anfitrión y sigue cambiando—, así que cada instancia restaurada
+// arrancaría con metadatos de la época del import sobre un disco que ya divergió.
+//
+// El síntoma de no hacerlo aparece en la SEGUNDA generación de instancias y no
+// señala jamás al commit.
+func (m *Manager) releaseVolumes(mc *api.Machine) error {
+	return m.guestVolumeOp(mc, "release", 10*time.Second)
+}
+
+// acquireVolumes le pide al invitado que MONTE sus volúmenes.
+//
+// Tras restaurar, cuando los discos ya apuntan a los ficheros de esta instancia.
+// Un fallo aquí SÍ es un error: sin volumen, la herramienta escribe en un
+// directorio del overlay que muere con la máquina, y eso no da ni un aviso hasta
+// que alguien busca lo que guardó.
+func (m *Manager) acquireVolumes(mc *api.Machine) error {
+	if mc == nil || mc.IP == "" || len(mc.Volumes) == 0 {
+		return nil
+	}
+	// Se espera a que conteste antes de pedírselo. Tras un Resume el invitado
+	// está listo casi al instante, pero "casi" no es "siempre": sin esperar, la
+	// primera petición se comería un connection refused y la máquina se marcaría
+	// fallida por una carrera de milisegundos.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort))
+	if err := waitGuest(ctx, base, 20*time.Second); err != nil {
+		return fmt.Errorf("el invitado no empezó a escuchar para montar sus volúmenes: %w", err)
+	}
+	return m.guestVolumeOp(mc, "acquire", 30*time.Second)
+}
+
+func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration) error {
+	if mc == nil || mc.IP == "" || len(mc.Volumes) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	url := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort)) + "/volume/" + op
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("pidiendo al invitado que %s sus volúmenes: %w", op, err)
+	}
+	defer resp.Body.Close()
+	// El código SÍ se mira, al contrario que en el vaciado: un puente antiguo no
+	// conoce estas rutas y devuelve 404, y tomarlo por éxito es justo el fallo
+	// silencioso que esto viene a cerrar.
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("el puente de esta imagen no sabe %s volúmenes: "+
+				"es anterior a los snapshots sin montar. Ponlo al día con `kling images refresh`", op)
+		}
+		return fmt.Errorf("el invitado no pudo %s sus volúmenes: %s", op, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
 func (m *Manager) flushVolume(mc *api.Machine) {
 	if mc == nil || mc.IP == "" || mc.State != api.StateRunning {
 		return

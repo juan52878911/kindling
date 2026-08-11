@@ -19,6 +19,7 @@ package main
 import (
 	"os"
 	"strings"
+	"sync"
 )
 
 // volumeBootParam debe coincidir con api.VolumeBootParam. Se repite aquí como
@@ -77,4 +78,64 @@ func volumeSpecs() []volumeSpec {
 		out = append(out, v)
 	}
 	return out
+}
+
+// volumeState guarda si los volúmenes están montados ahora mismo.
+//
+// Hace falta estado porque el montaje deja de ser una cosa que pasa al arrancar:
+// el daemon puede pedir DESMONTAR antes de congelar un snapshot dorado y volver
+// a MONTAR después de restaurarlo. Sin llevar la cuenta, un acquire de más
+// montaría dos veces sobre el mismo punto —tapando el primero— y un release de
+// más devolvería un error donde no lo hay.
+//
+// Es global y con candado propio porque lo tocan dos manejadores HTTP a la vez y
+// el apagado, y ninguno pasa por el mutex del puente.
+var volumeState = &volumes{}
+
+type volumes struct {
+	mu      sync.Mutex
+	mounted []volumeSpec
+}
+
+// specs devuelve lo montado. Copia, para que quien la reciba no pueda alterar el
+// estado por debajo.
+func (v *volumes) specs() []volumeSpec {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]volumeSpec(nil), v.mounted...)
+}
+
+// acquire monta lo que pida el kernel. Es idempotente: si ya está montado, no
+// hace nada.
+func (v *volumes) acquire() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if len(v.mounted) > 0 {
+		return nil
+	}
+	got, err := mountVolumes()
+	if err != nil {
+		return err
+	}
+	v.mounted = got
+	return nil
+}
+
+// sync vacía al disco lo que haya en la caché del invitado.
+func (v *volumes) sync() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	syncVolumes(v.mounted)
+}
+
+// release desmonta. También idempotente: desmontar dos veces no es un error, y
+// el apagado ordenado puede llegar después de un release del daemon.
+func (v *volumes) release() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if len(v.mounted) == 0 {
+		return
+	}
+	unmountVolumes(v.mounted)
+	v.mounted = nil
 }

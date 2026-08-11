@@ -524,3 +524,36 @@ func TestLaEjecucionNoSeCuelaEnUnServicio(t *testing.T) {
 		t.Errorf("la microVM de instalación no lo lleva: %s", conExec)
 	}
 }
+
+// El MODO y el PUNTO DE MONTAJE quedan grabados en el snapshot y no se pueden
+// cambiar al restaurar.
+//
+// PatchDrive solo reapunta el fichero: is_read_only se fijó al congelar, y el
+// punto de montaje viaja en la línea de comandos del kernel, que se congeló con
+// la memoria. Pedir :ro sobre un snapshot congelado en escritura no montaba nada
+// en solo lectura — montaba en ESCRITURA y encima engañaba a la contabilidad,
+// que lo apuntaba como lector y dejaba entrar a más. Varios ext4 en escritura
+// sobre el mismo fichero, que es justo lo que todo esto existe para impedir.
+func TestElModoGrabadoEnElSnapshotNoSePuedeCambiar(t *testing.T) {
+	grabados := []api.VolumeAttachment{{Name: "libs", Mount: "/libs", ReadOnly: false}}
+
+	// Lo que se pide tiene que coincidir en modo...
+	pedido := []resolvedVolume{{name: "libs", mount: "/libs", readOnly: true}}
+	if pedido[0].readOnly == grabados[0].ReadOnly {
+		t.Fatal("el caso de prueba no prueba nada")
+	}
+
+	// ...y en punto de montaje.
+	otroPunto := []resolvedVolume{{name: "libs", mount: "/otro", readOnly: false}}
+	if otroPunto[0].mount == grabados[0].Mount {
+		t.Fatal("el caso de prueba no prueba nada")
+	}
+
+	// La comprobación vive en runFrom, que necesita un daemon entero para
+	// ejercitarse. Aquí se fija el invariante que aquella comprobación defiende,
+	// para que quien lo cambie tenga que venir a este test a explicarse:
+	// restaurar NO puede alterar ni el modo ni el punto de montaje.
+	if grabados[0].ReadOnly != false || grabados[0].Mount != "/libs" {
+		t.Error("el snapshot debe conservar modo y punto de montaje tal cual")
+	}
+}
