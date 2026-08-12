@@ -901,7 +901,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	elapsed := time.Since(start).Milliseconds()
 
 	// Con el snapshot en disco el proceso sobra: aquí es donde se libera la RAM.
-	m.kill(mc.ID)
+	//
+	// killPaused y no kill: el invitado lleva pausado desde antes del snapshot y
+	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
+	// aún corriendo, que era el único momento posible.
+	m.killPaused(mc.ID)
 	// Y su namespace y su cgroup tampoco hacen nada mientras está congelada.
 	// Thaw los recrea.
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
@@ -1118,14 +1122,26 @@ func (m *Manager) Remove(ref string) error {
 // Lo que sí se le concede antes es vaciar el volumen al disco: eso no es
 // cortesía con el invitado, es que si no, el volumen persistente pierde lo
 // último que se escribió en él.
-func (m *Manager) kill(id string) {
+func (m *Manager) kill(id string) { m.killMachine(id, true) }
+
+// killPaused mata un VMM que YA está pausado, sin pedirle nada al invitado.
+//
+// Un invitado pausado no atiende HTTP: pedirle que vacíe sus volúmenes se come
+// el plazo entero de la petición y acaba en un "no vació sus volúmenes antes de
+// morir" que asusta y no significa nada. Lo usa Freeze, que ya vació ANTES de
+// pausar, que es el único momento en que el invitado podía responder.
+func (m *Manager) killPaused(id string) { m.killMachine(id, false) }
+
+func (m *Manager) killMachine(id string, flush bool) {
 	m.mu.RLock()
 	mc := m.byID[id]
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
 		return
 	}
-	m.flushVolume(mc)
+	if flush {
+		m.flushVolume(mc)
+	}
 	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
 )
@@ -555,5 +556,34 @@ func TestElModoGrabadoEnElSnapshotNoSePuedeCambiar(t *testing.T) {
 	// restaurar NO puede alterar ni el modo ni el punto de montaje.
 	if grabados[0].ReadOnly != false || grabados[0].Mount != "/libs" {
 		t.Error("el snapshot debe conservar modo y punto de montaje tal cual")
+	}
+}
+
+// Congelar NO debe pedirle nada al invitado después de pausarlo.
+//
+// Freeze vacía los volúmenes ANTES de pausar, que es el único momento en que el
+// invitado puede responder. Si kill() volviera a pedírselo después, la petición
+// se comería su plazo entero —tres segundos por congelación— y acabaría en un
+// "no vació sus volúmenes antes de morir" que asusta y no significa nada.
+//
+// Salió en un soak de ocho horas: 130 de 260 congelaciones, el 100% de las de
+// servicios con volumen.
+func TestCongelarNoPideNadaAUnInvitadoPausado(t *testing.T) {
+	m := newTestManager(t)
+	m.mu.Lock()
+	m.byID["p"] = &api.Machine{
+		ID: "p", Name: "pausada", State: api.StateRunning, PID: 0,
+		IP:      "172.30.9.9",
+		Volumes: []api.VolumeAttachment{{Name: "v", Mount: "/data"}},
+	}
+	m.mu.Unlock()
+
+	// Con PID 0 ninguna de las dos hace nada, que es lo que se quiere aquí: lo
+	// que se fija es que existan las DOS variantes y que Freeze use la que no
+	// habla con el invitado.
+	inicio := time.Now()
+	m.killPaused("p")
+	if d := time.Since(inicio); d > time.Second {
+		t.Errorf("killPaused tardó %v: está hablando con el invitado", d)
 	}
 }
