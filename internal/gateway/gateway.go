@@ -498,7 +498,10 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 	g.mu.Unlock()
 
 	mc, err := g.acquire(ctx, service)
-	if api.IsInsufficientMemory(err) {
+	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
+	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
+	// falta varias—, y rendirse tras la primera dejaba el 502 igual que antes.
+	for api.IsInsufficientMemory(err) {
 		// No cabe: se hace sitio en vez de rendirse.
 		//
 		// Un anfitrión justo no puede tener todos los servicios despiertos a la
@@ -510,10 +513,14 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		// Se congela el más antiguo SIN trabajo en vuelo. Congelar cuesta un par
 		// de segundos y descongelar 25 ms, así que la instancia sacrificada
 		// vuelve barata; el que espera, en cambio, no tenía alternativa.
-		if victima := g.evictLRU(ctx, service); victima != "" {
-			log.Printf("%s: no cabía; congelé %s para hacerle sitio", service, victima)
-			mc, err = g.acquire(ctx, service)
+		victima := g.evictLRU(ctx, service)
+		if victima == "" {
+			// No queda nada ocioso que sacrificar: ahora sí hay que rendirse, y
+			// el error de falta de memoria explica por qué.
+			break
 		}
+		log.Printf("%s: no cabía; congelé %s para hacerle sitio", service, victima)
+		mc, err = g.acquire(ctx, service)
 	}
 	if err != nil {
 		return nil, err

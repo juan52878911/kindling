@@ -342,3 +342,36 @@ func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
 		t.Errorf("sacrificó %q sin haber candidatos", v)
 	}
 }
+
+// Si una sola víctima no basta, se congela más de una: el bucle sigue hasta que
+// quepa o no queden candidatos. Un anfitrión muy justo puede necesitar liberar
+// varios servicios para uno grande.
+func TestElDesalojoLiberaVariasSiHaceFalta(t *testing.T) {
+	g := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	var congeladas []string
+	g.freezeFn = func(id string) error { congeladas = append(congeladas, id); return nil }
+
+	ahora := time.Now()
+	for i, n := range []string{"a", "b", "c"} {
+		g.services[n] = &entry{machineID: "m-" + n, lastUse: ahora.Add(-time.Duration(i) * time.Hour)}
+	}
+	// Se sacrifican de una en una, siempre la más antigua de las que quedan, sin
+	// tocar al que pide sitio.
+	for i := 0; i < 3; i++ {
+		v := g.evictLRU(t.Context(), "quiere")
+		if v == "" {
+			break
+		}
+	}
+	if len(congeladas) != 3 {
+		t.Fatalf("congeló %d instancias, quería 3: %v", len(congeladas), congeladas)
+	}
+	// La primera en caer es la MÁS antigua (c, con -2h).
+	if congeladas[0] != "m-c" {
+		t.Errorf("la primera víctima fue %q, quería la más antigua (m-c)", congeladas[0])
+	}
+	// Y una vez vacío, se rinde.
+	if v := g.evictLRU(t.Context(), "quiere"); v != "" {
+		t.Errorf("sacrificó %q con el mapa ya vacío", v)
+	}
+}
