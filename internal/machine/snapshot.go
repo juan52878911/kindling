@@ -126,6 +126,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
 		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
+		Egress:    mc.Egress,
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
 	}
@@ -245,6 +246,18 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	snap, err := m.loadSnapshot(req.From)
 	if err != nil {
 		return nil, err
+	}
+
+	// HERENCIA desde el snapshot. RunRequest ya promete que "el resto de campos
+	// se heredan del snapshot", y la política de red no era una excepción: sin
+	// esto, un servicio importado con -egress internet despertaba SIEMPRE sin
+	// red, porque quien lo instancia —el gateway, el fondo, el modo efímero—
+	// solo conoce el nombre del snapshot. El síntoma era un "fetch failed"
+	// dentro del invitado que no señalaba a ninguna parte.
+	//
+	// Lo que venga en la petición manda; el snapshot solo rellena el hueco.
+	if req.Egress == "" {
+		req.Egress = snap.Egress
 	}
 
 	id := newID()

@@ -74,10 +74,23 @@ type Manager struct {
 	// Ver allocNetIndex.
 	netCursor int
 
+	// templateMu serializa la construcción de la plantilla de overlay: dos
+	// arranques a la vez sobre un host limpio la formatearían por duplicado.
+	templateMu sync.Mutex
+
 	// lifecycle serializa las operaciones sobre UNA MISMA máquina. Sin esto, dos
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
 	// veth a medio crear: "Cannot find device vh-...".
 	lifecycle sync.Map // id -> *sync.Mutex
+
+	// Escritura del estado, fuera del lock. Ver persist().
+	stateMu   sync.Mutex
+	pending   []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
+	hasPend   bool
+	wake      chan struct{}
+	quit      chan struct{}
+	quitOnce  sync.Once
+	persistWG sync.WaitGroup
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -99,7 +112,11 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
 		byID:   make(map[string]*api.Machine),
 		socket: make(map[string]string),
+		wake:   make(chan struct{}, 1),
+		quit:   make(chan struct{}),
 	}
+	m.persistWG.Add(1)
+	go m.persistLoop()
 	if cg, err := ensureDelegation(); err != nil {
 		m.CgroupWarning = err.Error()
 	} else {
@@ -114,6 +131,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	m.reconcile()
+	// Relleno inicial: DiskBytes no se persiste —es dato derivado— así que sin
+	// esto todas las máquinas cargadas del estado saldrían a 0 en `kling ps`
+	// hasta el primer tic del vigilante.
+	m.refreshDiskUsage()
 	return m, nil
 }
 
@@ -147,19 +168,152 @@ func (m *Manager) load() {
 	}
 }
 
+// persist encola una escritura del estado. Se llama SIEMPRE con m.mu tomado por
+// quien la invoca — los doce sitios que la usan están dentro de una operación de
+// ciclo de vida.
+//
+// Antes serializaba y escribía aquí mismo, con el lock global cogido: cada
+// transición pagaba la latencia del disco y, mientras tanto, ninguna otra
+// máquina podía arrancar, congelarse ni descongelarse. Ahora solo toma la foto y
+// se va; escribirla es cosa de persistLoop.
+//
+// La foto se copia POR VALOR, no por puntero. Es la diferencia entre esto y una
+// carrera de datos: si se guardaran los *api.Machine, json.Marshal los leería
+// fuera del lock mientras otra goroutine les cambia State, PID o los punteros
+// StartedAt/FrozenAt, y el fichero podría acabar describiendo un estado que
+// nunca existió (una máquina "warm" con PID vivo, por ejemplo).
 func (m *Manager) persist() {
-	list := make([]*api.Machine, 0, len(m.byID))
+	list := make([]api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
-		list = append(list, mc)
+		list = append(list, *mc)
 	}
-	b, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
+
+	m.stateMu.Lock()
+	m.pending, m.hasPend = list, true
+	m.stateMu.Unlock()
+
+	// Aviso no bloqueante: si ya hay uno sin atender, este sobra. Las ráfagas
+	// coalescen solas porque cada foto pisa a la anterior, y la última es la
+	// que describe el estado actual.
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+const (
+	// persistDebounce agrupa las transiciones que llegan juntas.
+	persistDebounce = 50 * time.Millisecond
+	// persistMaxDelay acota lo que puede posponerse una escritura. Sin este
+	// tope, un debounce que se reinicia con cada aviso deja el estado sin
+	// escribir indefinidamente mientras haya actividad — justo cuando más
+	// importa que esté en disco.
+	persistMaxDelay = 250 * time.Millisecond
+)
+
+// persistLoop materializa las escrituras fuera del lock.
+func (m *Manager) persistLoop() {
+	defer m.persistWG.Done()
+
+	var (
+		timer *time.Timer
+		tC    <-chan time.Time
+		first time.Time
+	)
+	for {
+		select {
+		case <-m.wake:
+			if tC == nil {
+				first = time.Now()
+				timer = time.NewTimer(persistDebounce)
+				tC = timer.C
+				continue
+			}
+			if time.Since(first) >= persistMaxDelay {
+				// Ya se aplazó bastante: que dispare el temporizador vigente.
+				continue
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(persistDebounce)
+
+		case <-tC:
+			tC, timer = nil, nil
+			m.writePending()
+
+		case <-m.quit:
+			if timer != nil {
+				timer.Stop()
+			}
+			m.writePending()
+			return
+		}
+	}
+}
+
+// writePending vuelca la última foto, si hay alguna.
+func (m *Manager) writePending() {
+	m.stateMu.Lock()
+	if !m.hasPend {
+		m.stateMu.Unlock()
 		return
 	}
-	tmp := m.statePath() + ".tmp"
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		_ = os.Rename(tmp, m.statePath())
+	list := m.pending
+	m.pending, m.hasPend = nil, false
+	m.stateMu.Unlock()
+
+	b, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		log.Printf("estado: no pude serializarlo: %v", err)
+		return
 	}
+
+	tmp := m.statePath() + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		log.Printf("estado: no pude escribir %s: %v", tmp, err)
+		return
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		log.Printf("estado: escritura incompleta: %v", err)
+		return
+	}
+	// fsync del fichero Y del directorio. Sin el segundo, el rename puede no
+	// haber llegado al disco cuando se corta la luz, y el daemon arrancaría
+	// leyendo el estado anterior — que es peor que no leer ninguno, porque se
+	// da por bueno.
+	if err := f.Sync(); err != nil {
+		log.Printf("estado: fsync falló: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("estado: cierre falló: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, m.statePath()); err != nil {
+		log.Printf("estado: rename falló: %v", err)
+		return
+	}
+	if d, err := os.Open(m.root); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+}
+
+// Close para la escritura de estado tras volcar lo que quede pendiente.
+//
+// Lo llama el daemon en su camino de apagado, y tiene que esperarse: si el
+// proceso sale antes, se pierde la última transición y el arranque siguiente
+// reconstruye un estado que ya no es el real.
+func (m *Manager) Close() {
+	m.quitOnce.Do(func() {
+		close(m.quit)
+		m.persistWG.Wait()
+	})
 }
 
 // ── consultas ─────────────────────────────────────────────────────────────────
@@ -169,8 +323,11 @@ func (m *Manager) List() []*api.Machine {
 	defer m.mu.RUnlock()
 	out := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
+		// DiskBytes viene de la caché: recorrer el directorio de cada máquina
+		// aquí era un walk por máquina en CADA `kling ps`, y encima con el
+		// candado global cogido, así que contar bytes bloqueaba arranques y
+		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
-		c.DiskBytes = diskUsage(m.dir(mc.ID))
 		out = append(out, &c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -192,6 +349,49 @@ func allocatedBytes(path string) int64 {
 
 // diskUsage suma bloques asignados, no tamaños lógicos: es la única cifra
 // honesta cuando los ficheros son dispersos.
+// touchDisk recalcula el disco de UNA máquina. Se usa tras las operaciones que
+// mueven ficheros, para que la respuesta de esa llamada ya lleve el dato bueno
+// en vez del de la última pasada del vigilante.
+//
+// El walk va fuera del lock; solo la escritura del campo lo toma.
+func (m *Manager) touchDisk(id string) int64 {
+	n := diskUsage(m.dir(id))
+	m.mu.Lock()
+	if mc := m.byID[id]; mc != nil {
+		mc.DiskBytes = n
+	}
+	m.mu.Unlock()
+	return n
+}
+
+// refreshDiskUsage recalcula el disco de todas las máquinas.
+//
+// Lo llama el vigilante, que ya pasa cada pocos segundos. El overlay es un
+// fichero disperso que CRECE mientras el invitado escribe, así que un valor
+// que solo se actualizara al arrancar o congelar sería justo el que no sirve:
+// el número con el que se detecta a un invitado llenando su disco.
+func (m *Manager) refreshDiskUsage() {
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.byID))
+	for id := range m.byID {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+
+	sizes := make(map[string]int64, len(ids))
+	for _, id := range ids {
+		sizes[id] = diskUsage(m.dir(id))
+	}
+
+	m.mu.Lock()
+	for id, n := range sizes {
+		if mc := m.byID[id]; mc != nil {
+			mc.DiskBytes = n
+		}
+	}
+	m.mu.Unlock()
+}
+
 func diskUsage(dir string) int64 {
 	var total int64
 	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
@@ -309,7 +509,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
 	// esta microVM es su overlay escribible, que nace prácticamente vacío.
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if err := createOverlay(ctx, overlay, defaultOverlayMiB); err != nil {
+	if err := m.newOverlay(ctx, overlay); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -368,6 +568,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	out := *mc
 	m.mu.Unlock()
 
+	// El walk va DESPUÉS de soltar el lock, y su resultado entra en la
+	// respuesta: si se dejara solo al vigilante, esta llamada devolvería 0 y
+	// quien la hizo vería una máquina sin disco.
+	out.DiskBytes = m.touchDisk(id)
+
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("arrancada en frío en %d ms", out.BootMS)})
 	return &out, nil
@@ -376,6 +581,57 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 // createOverlay crea el disco escribible de una microVM: un fichero disperso con
 // ext4 encima. Sin journal a propósito — es almacenamiento efímero y el journal
 // costaría varios MB de suelo en cada máquina sin aportar nada aquí.
+// overlayTemplatePath es un overlay ya formateado que se copia para cada
+// microVM nueva, en vez de correr mkfs.ext4 una vez por máquina.
+func (m *Manager) overlayTemplatePath() string {
+	return filepath.Join(m.root, "images", "overlay-template.ext4")
+}
+
+// ensureOverlayTemplate la construye si falta.
+//
+// Se formatea en un .tmp y se renombra, para que EXISTIR IMPLIQUE ESTAR
+// COMPLETA. Comprobar solo la existencia sobre el nombre definitivo sería una
+// trampa: si el daemon muere entre el Truncate y el mkfs queda medio giga de
+// ceros sin sistema de ficheros, y a partir de ahí TODAS las microVMs arrancan
+// con un /dev/vdb que no monta — un fallo que aparece dentro del invitado y no
+// en el log del daemon.
+func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
+	m.templateMu.Lock()
+	defer m.templateMu.Unlock()
+
+	path := m.overlayTemplatePath()
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
+	if err := createOverlay(ctx, tmp, defaultOverlayMiB); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// newOverlay deja listo el disco escribible de una microVM.
+//
+// Copiar la plantilla ahorra el mkfs.ext4 por máquina, que son decenas de
+// milisegundos sobre un arranque que aspira a estar en el orden de los 30 ms.
+// Si la plantilla no se puede construir se formatea directamente: más lento,
+// pero nadie se queda sin arrancar por una optimización.
+func (m *Manager) newOverlay(ctx context.Context, dst string) error {
+	if err := m.ensureOverlayTemplate(ctx); err != nil {
+		log.Printf("plantilla de overlay no disponible (%v): formateo directo", err)
+		return createOverlay(ctx, dst, defaultOverlayMiB)
+	}
+	// --sparse=always: el overlay es disperso y copiarlo denso destruiría lo
+	// que hace que una máquina cueste ~8 MB en vez de 512.
+	out, err := exec.CommandContext(ctx, "cp", "--sparse=always", m.overlayTemplatePath(), dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copiando la plantilla de overlay: %v: %s", err, out)
+	}
+	return nil
+}
+
 func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -566,6 +822,8 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	out := *live
 	m.mu.Unlock()
 
+	out.DiskBytes = m.touchDisk(mc.ID)
+
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("congelada en %d ms (%d MiB en disco)", elapsed, size>>20)})
 	return &out, nil
@@ -590,6 +848,35 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 	sock := filepath.Join(dir, "fc.sock")
+
+	// Antes de borrar el socket y arrancar: ¿hay ya un firecracker vivo que sea
+	// de ESTA máquina?
+	//
+	// Con el estado obsoleto —un thaw anterior cuya escritura no llegó a disco,
+	// por ejemplo— la máquina figura warm mientras corre de verdad. Seguir
+	// adelante arrancaría un SEGUNDO firecracker sobre el mismo overlay.ext4:
+	// dos VMMs escribiendo el mismo sistema de ficheros es corrupción, y del
+	// tipo que no se nota hasta mucho después.
+	if live := m.liveVMs(); live[mc.ID] > 0 {
+		pid := live[mc.ID]
+		log.Printf("thaw: %s (%s) ya estaba corriendo (pid %d); la readopto en vez de arrancar otra",
+			mc.Name, mc.ID[:8], pid)
+		m.mu.Lock()
+		if cur := m.byID[mc.ID]; cur != nil {
+			now := time.Now()
+			cur.State = api.StateRunning
+			cur.PID = pid
+			cur.StartedAt = &now
+			cur.FrozenAt = nil
+			m.socket[mc.ID] = sock
+			m.persist()
+			out := *cur
+			m.mu.Unlock()
+			return &out, nil
+		}
+		m.mu.Unlock()
+	}
+
 	_ = os.Remove(sock)
 
 	// El namespace pudo desaparecer con un reinicio del host; lo rehacemos con el
@@ -626,6 +913,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+
+	out.DiskBytes = m.touchDisk(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("descongelada en %d ms", elapsed)})

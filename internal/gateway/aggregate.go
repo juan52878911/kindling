@@ -176,6 +176,7 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	b.WriteString("Herramientas disponibles, agrupadas por servicio:\n\n")
 
 	tools, _ := a.cat.all(ctx, s.services)
+	external := a.cat.externalSet(ctx)
 	bySvc := map[string][]string{}
 	var order []string
 	for _, t := range tools {
@@ -186,8 +187,11 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	}
 	for _, svc := range order {
 		mark := ""
+		if external[svc] {
+			mark = " (externo)"
+		}
 		if a.ephemeral && a.isStateful(ctx, svc) {
-			mark = " [recuerda entre llamadas]"
+			mark += " [recuerda entre llamadas]"
 		}
 		fmt.Fprintf(&b, "%s%s: %s\n", svc, mark, strings.Join(bySvc[svc], ", "))
 	}
@@ -195,6 +199,17 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	b.WriteString("\nLlámalas con call_tool y el nombre completo servicio.herramienta " +
 		"(p. ej. filesystem.read_text_file). Si no conoces sus argumentos, pide primero " +
 		"describe_tool. find_tools sirve para buscar por palabras clave.")
+
+	// Aviso explícito para los servidores externos: mezclarlos en una misma lista
+	// con los snapshots sin marcar hacía creer al modelo que `/mcp/engram` o
+	// `engram.*` iban a levantar una microVM, y al fallar devolvía un
+	// "no hay snapshot" que no le decía nada.
+	if len(external) > 0 {
+		b.WriteString("\n\nLos servicios marcados como (externo) no corren en una microVM: " +
+			"viven donde su dueño los aloja y kindling solo los enruta. Se llaman igual " +
+			"que los demás, con `call_tool servicio.herramienta`, o directamente a su " +
+			"endpoint `/mcp/<servicio>`.")
+	}
 
 	if a.ephemeral {
 		b.WriteString("\n\nCada llamada corre en una máquina aislada que se destruye al " +
@@ -367,10 +382,9 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	}
 	var hits []scored
 	for _, t := range tools {
-		hay := strings.ToLower(t.Qualified + " " + t.Description)
 		n := 0
 		for _, term := range terms {
-			if strings.Contains(hay, term) {
+			if strings.Contains(t.haystack, term) {
 				n++
 			}
 		}
@@ -532,8 +546,13 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		if len(args) == 0 {
 			args = json.RawMessage("{}")
 		}
-		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
-			t.Name, args)
+		// nextRPCID() y no un id fijo. Con "id":10 quemado, dos call_tool
+		// concurrentes de la MISMA sesión compartían entrada en la tabla de
+		// pendientes del puente: la segunda pisaba a la primera, que se quedaba
+		// esperando una respuesta ya entregada a otro. Era el único sitio del
+		// gateway que aún lo hacía.
+		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+			nextRPCID(), t.Name, args)
 		return mcpCall(ctx, base, sid, body)
 	}
 

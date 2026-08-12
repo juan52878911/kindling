@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/transport"
 )
@@ -17,13 +18,28 @@ import (
 // intercambiable y el resto del CLI no necesita saber cuál está en uso.
 type Client struct {
 	http *http.Client
+	// long sirve a las operaciones que tardan MINUTOS en responder: construir
+	// una imagen (instala node y pip en un chroot) y hablar con el invitado
+	// (que puede estar arrancando en frío, y cuya herramienta puede ser un
+	// escaneo de semgrep sobre un repo entero).
+	// El cliente normal acota la espera a las cabeceras para que un daemon
+	// atascado no cuelgue a nadie; ese límite es correcto para todo lo demás y
+	// letal aquí, así que estas llamadas van por su propio cliente en vez de
+	// subirle el número al de todos.
+	long *http.Client
 	d    *transport.Dialer
 }
 
 func NewClient(endpoint string) *Client {
 	d := transport.New(endpoint)
-	return &Client{
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) { return d.Dial(ctx) }
+	c := &Client{
 		d: d,
+		// Sin ResponseHeaderTimeout: quien lo use acota con su contexto.
+		long: &http.Client{Transport: &http.Transport{
+			DialContext:       dial,
+			DisableKeepAlives: true,
+		}},
 		http: &http.Client{Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return d.Dial(ctx)
@@ -31,13 +47,33 @@ func NewClient(endpoint string) *Client {
 			// Cada petición abre su propia conexión: con SSH detrás, reutilizar
 			// conexiones complica más de lo que ahorra.
 			DisableKeepAlives: true,
+
+			// ResponseHeaderTimeout y NO http.Client.Timeout.
+			//
+			// Hace falta un límite: sin ninguno, un daemon atascado deja
+			// colgado para siempre a quien le habla, y eso se nota sobre todo
+			// al apagar el gateway, que espera a sus llamadas en vuelo.
+			//
+			// Pero Timeout acota la petición ENTERA, incluida la lectura del
+			// cuerpo, y `kling events` es un flujo NDJSON que dura lo que dure
+			// la sesión: lo mataría a los 60 s. Esto solo acota la espera a las
+			// CABECERAS, que en un flujo llegan de inmediato.
+			//
+			// Quien añada un endpoint que tarde más de un minuto en responder
+			// tiene que pasar su propio cliente, no subir este número.
+			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	return c
 }
 
 func (c *Client) Endpoint() string { return c.d.Describe() }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(c.http, ctx, method, path, body, out)
+}
+
+func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path string, body, out any) error {
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -50,7 +86,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -83,6 +119,16 @@ func (c *Client) List(ctx context.Context) ([]*Machine, error) {
 func (c *Client) Run(ctx context.Context, r RunRequest) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines", r, &m)
+}
+
+// BuildImage empaqueta un servidor MCP de stdio como imagen.
+//
+// Puede tardar minutos: instala node y sus dependencias dentro de un chroot. El
+// ResponseHeaderTimeout del cliente NO lo cubre, así que el daemon responde en
+// cuanto termina y quien llame debe darle margen en su contexto.
+func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildImageResult, error) {
+	var res BuildImageResult
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
@@ -202,7 +248,11 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 // daemon. Es la única vía que funciona igual en local y por SSH.
 func (c *Client) Guest(ctx context.Context, ref string, r GuestRequest) (*GuestResponse, error) {
 	var out GuestResponse
-	if err := c.do(ctx, "POST", "/machines/"+ref+"/guest", r, &out); err != nil {
+	// Cliente largo: al otro lado hay una microVM, no el daemon. Puede estar
+	// descongelándose, y la herramienta que se invoca puede tardar lo suyo.
+	// Acotar esto por cabeceras es acotar el trabajo del usuario, no la salud
+	// del daemon.
+	if err := c.doWith(c.long, ctx, "POST", "/machines/"+ref+"/guest", r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

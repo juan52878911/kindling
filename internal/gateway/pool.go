@@ -33,6 +33,20 @@ type pool struct {
 	ready map[string][]*warmVM // servicio -> instancias listas
 	// filling evita lanzar veinte reposiciones simultáneas del mismo servicio.
 	filling map[string]bool
+	// closed lo pone drain(). A partir de ahí no se pre-calienta nada nuevo, y
+	// lo que estuviera a medio calentar se retira solo en vez de quedar en una
+	// cola que ya nadie va a recorrer.
+	closed bool
+
+	// wg cuenta las reposiciones en vuelo para que drain pueda esperarlas.
+	wg sync.WaitGroup
+
+	// warmFn y removeFn son puntos de inyección para las pruebas: el fondo es
+	// casi todo concurrencia —quién espera a quién al apagar—, y eso no se
+	// puede ejercitar si cada instancia exige un daemon con KVM detrás.
+	// newPool los fija a los de verdad.
+	warmFn   func(ctx context.Context, service, snapshot string) (*warmVM, error)
+	removeFn func(ctx context.Context, id string) error
 }
 
 // warmVM es una microVM restaurada y con su sesión MCP ya abierta.
@@ -44,11 +58,14 @@ type warmVM struct {
 }
 
 func newPool(gw *Gateway, size int) *pool {
-	return &pool{
+	p := &pool{
 		gw: gw, size: size,
 		ready:   map[string][]*warmVM{},
 		filling: map[string]bool{},
 	}
+	p.warmFn = p.warm
+	p.removeFn = gw.client.Remove
+	return p
 }
 
 // take entrega una instancia lista, o nil si el fondo está vacío.
@@ -72,27 +89,51 @@ func (p *pool) take(service string) *warmVM {
 // fill repone el fondo de un servicio en segundo plano.
 func (p *pool) fill(ctx context.Context, service, snapshot string) {
 	p.mu.Lock()
-	if p.filling[service] || len(p.ready[service]) >= p.size {
+	if p.closed || p.filling[service] || len(p.ready[service]) >= p.size {
 		p.mu.Unlock()
 		return
 	}
 	missing := p.size - len(p.ready[service])
 	p.filling[service] = true
+	// wg.Add DENTRO del lock, no después del Unlock.
+	//
+	// Si se hace fuera, drain() puede colarse en medio: ve el contador a cero,
+	// da por hecho que no hay nadie pre-calentando, vacía `ready`, y esta
+	// goroutine añade luego su microVM a un mapa que ya nadie va a recorrer.
+	// Esa máquina se queda viva hasta que expire su TTL sin que el gateway
+	// pueda pedir su Remove. Es además lo que exige el contrato de WaitGroup:
+	// un Add que parte de cero tiene que ocurrir antes del Wait.
+	p.wg.Add(1)
 	p.mu.Unlock()
 
 	go func() {
+		defer p.wg.Done()
 		defer func() {
 			p.mu.Lock()
 			p.filling[service] = false
 			p.mu.Unlock()
 		}()
 		for i := 0; i < missing; i++ {
-			vm, err := p.warm(ctx, service, snapshot)
+			if err := ctx.Err(); err != nil {
+				return
+			}
+			vm, err := p.warmFn(ctx, service, snapshot)
 			if err != nil {
 				log.Printf("fondo %s: no pude pre-calentar: %v", service, err)
 				return
 			}
 			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				// El fondo se vació mientras esta máquina se calentaba: no la
+				// va a recoger nadie, así que la retira quien la creó. Con el
+				// contexto ya cancelado hay que usar uno nuevo o el Remove se
+				// iría sin hacer nada.
+				rm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				_ = p.removeFn(rm, vm.id)
+				cancel()
+				return
+			}
 			p.ready[service] = append(p.ready[service], vm)
 			p.mu.Unlock()
 		}
@@ -128,9 +169,33 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 	return &warmVM{id: mc.ID, ip: mc.IP, session: sid, born: time.Now()}, nil
 }
 
+// drainGrace acota lo que se espera a los pre-calentados en vuelo.
+//
+// La espera es deseable —una microVM a medio calentar debe poder retirarse
+// sola— pero no puede ser incondicional: los fill se lanzan con contextos que
+// no se cancelan, así que un Wait desnudo cuelga el apagado del gateway para
+// siempre si el daemon deja de responder.
+const drainGrace = 5 * time.Second
+
 // drain destruye lo que quede en el fondo. Se llama al parar el gateway: dejar
 // microVMs huérfanas sería peor que no haber pre-calentado nada.
 func (p *pool) drain(ctx context.Context) {
+	// Cerrar PRIMERO: a partir de aquí ningún fill nuevo arranca, y los que
+	// estén en vuelo retiran ellos mismos lo que terminen de calentar.
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { p.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		log.Printf("fondo: salgo sin esperar a los pre-calentados (%v)", ctx.Err())
+	case <-time.After(drainGrace):
+		log.Printf("fondo: los pre-calentados no terminaron en %s; sigo con la limpieza", drainGrace)
+	}
+
 	p.mu.Lock()
 	all := p.ready
 	p.ready = map[string][]*warmVM{}
@@ -138,7 +203,7 @@ func (p *pool) drain(ctx context.Context) {
 
 	for _, q := range all {
 		for _, vm := range q {
-			_ = p.gw.client.Remove(ctx, vm.id)
+			_ = p.removeFn(ctx, vm.id)
 		}
 	}
 }
@@ -165,7 +230,7 @@ func (p *pool) evictStale(ctx context.Context, maxAge time.Duration) {
 	p.mu.Unlock()
 
 	for _, vm := range dead {
-		_ = p.gw.client.Remove(ctx, vm.id)
+		_ = p.removeFn(ctx, vm.id)
 	}
 	if len(dead) > 0 {
 		log.Printf("fondo: %d instancia(s) retiradas por antigüedad", len(dead))

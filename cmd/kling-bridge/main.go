@@ -10,7 +10,7 @@
 // gateway busca las herramientas. Desde fuera, cualquier servidor stdio parece
 // nativo de HTTP.
 //
-//	   gateway ──HTTP──> kling-bridge ──stdin/stdout──> servidor MCP
+//	gateway ──HTTP──> kling-bridge ──stdin/stdout──> servidor MCP
 //
 // SESIONES. MCP identifica conversaciones con la cabecera Mcp-Session-Id. Un
 // servidor stdio es de sesión única por naturaleza: su estado vive en el proceso.
@@ -31,8 +31,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -70,8 +72,11 @@ Opciones:
 		maxSessions: *maxSessions,
 		sessions:    map[string]*session{},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// El puente es PID 1 dentro de la microVM. Si muere sin recoger, deja
+	// procesos del servidor MCP sueltos que el snapshot siguiente se lleva
+	// puestos: por eso atiende a SIGTERM en vez de dejarse matar.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	go b.reapIdle(ctx)
 
 	mux := http.NewServeMux()
@@ -88,9 +93,42 @@ Opciones:
 	// posteriores).
 	mux.HandleFunc("/reset", b.handleReset)
 
+	srv := &http.Server{Addr: *listen, Handler: mux}
+
+	// El apagado se ORDENA aquí y se COMPLETA abajo. Shutdown hace que
+	// ListenAndServe retorne de inmediato, así que cerrar las sesiones dentro
+	// de esta goroutine sería una carrera contra la salida del proceso: los
+	// hijos quedarían tan huérfanos como sin manejar la señal.
+	shutdownDone := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+		close(shutdownDone)
+	}()
+
 	log.Printf("kling-bridge escuchando en %s -> %s", *listen, strings.Join(argv, " "))
-	if err := http.ListenAndServe(*listen, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+
+	<-shutdownDone
+	b.closeAll()
+}
+
+// closeAll cierra todas las sesiones y mata sus procesos hijo.
+func (b *bridge) closeAll() {
+	b.mu.Lock()
+	all := b.sessions
+	b.sessions = map[string]*session{}
+	b.mu.Unlock()
+
+	for _, s := range all {
+		s.close()
+	}
+	if len(all) > 0 {
+		log.Printf("kling-bridge: %d sesión(es) cerradas al salir", len(all))
 	}
 }
 
@@ -114,6 +152,10 @@ type session struct {
 	pending map[string]chan json.RawMessage // id JSON-RPC -> quien espera
 	notes   chan json.RawMessage            // mensajes que el servidor inicia
 	closed  bool
+	// done se cierra al terminar la sesión. Es la señal para el flujo SSE, y
+	// sustituye a cerrar notes: un canal que solo se cierra no puede provocar
+	// el pánico de "send on closed channel" en el readLoop.
+	done chan struct{}
 }
 
 func newID() string {
@@ -215,10 +257,12 @@ func (b *bridge) handleGet(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case m, ok := <-s.notes:
-			if !ok {
-				return
-			}
+		case <-s.done:
+			// La sesión terminó: se corta el flujo. Antes esto se detectaba
+			// porque notes se cerraba, que es justo lo que provocaba el pánico
+			// en el readLoop.
+			return
+		case m := <-s.notes:
 			fmt.Fprintf(w, "data: %s\n\n", m)
 			flusher.Flush()
 		case <-ping.C:
@@ -320,6 +364,7 @@ func (b *bridge) spawn() (*session, error) {
 		id: newID(), cmd: cmd, stdin: stdin, lastUse: time.Now(),
 		pending: map[string]chan json.RawMessage{},
 		notes:   make(chan json.RawMessage, 32),
+		done:    make(chan struct{}),
 	}
 	go s.readLoop(stdout)
 	log.Printf("sesión %s: servidor MCP arrancado (pid %d)", s.id[:8], cmd.Process.Pid)
@@ -400,7 +445,15 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 	}
 
 	select {
-	case resp := <-ch:
+	case resp, ok := <-ch:
+		// Recepción de DOS valores, no de uno. close() cierra los canales
+		// pendientes cuando muere el servidor MCP, y un canal cerrado entrega
+		// el valor cero sin bloquear: con `resp := <-ch` esto devolvía
+		// (nil, nil) y el cliente recibía una respuesta vacía en lugar de un
+		// error, que es la forma más cara de diagnosticar un proceso muerto.
+		if !ok {
+			return nil, fmt.Errorf("el servidor MCP murió mientras atendía el mensaje %s", id)
+		}
 		return resp, nil
 	case <-ctx.Done():
 		s.mu.Lock()
@@ -430,13 +483,33 @@ func (s *session) close() {
 	for _, ch := range pending {
 		close(ch)
 	}
-	close(s.notes)
+
+	// s.notes NO se cierra: el readLoop sigue vivo hasta que el hijo suelte su
+	// stdout, y enviar por un canal cerrado entra en pánico incluso dentro de
+	// un select con default. Bastaba con que el servidor MCP emitiera una
+	// notificación en esta ventana para tumbar el puente entero. La señal de
+	// fin va por s.done, que solo se cierra, nunca se escribe.
+	close(s.done)
+
 	_ = s.stdin.Close()
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
-	_ = s.cmd.Wait()
-	log.Printf("sesión %s: cerrada", s.id[:8])
+	err := s.cmd.Wait()
+
+	// El motivo importa: la consola serie es la única ventana al interior de la
+	// microVM, y un hijo al que se llevó el oom-killer sale por señal. Esa
+	// distinción es la diferencia entre "se cerró la sesión", que no explica
+	// nada, y saber que el invitado se quedó sin memoria.
+	switch {
+	case err == nil:
+		log.Printf("sesión %s: cerrada", s.id[:8])
+	case len(pending) > 0:
+		log.Printf("sesión %s: el servidor MCP terminó (%v) con %d petición(es) en vuelo",
+			s.id[:8], err, len(pending))
+	default:
+		log.Printf("sesión %s: cerrada, el servidor MCP terminó con %v", s.id[:8], err)
+	}
 }
 
 // reapIdle cierra las sesiones abandonadas. Cada una es un proceso vivo dentro de

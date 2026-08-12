@@ -14,11 +14,14 @@
 #
 #   stdio — el servidor habla JSON-RPC por tuberías, que es el caso MAYORITARIO
 #   entre los servidores MCP open source:
-#     sudo ./80-mcp-image.sh stdio <nombre> [-p "apk"] [-n "npm"] [-d dir] -- <comando>
+#     sudo ./80-mcp-image.sh stdio <nombre> [-p "apk"] [-n "npm"] [-P "pip"] [-d dir] -- <comando>
 #
 #     -n PREINSTALA paquetes npm en la imagen. Es obligatorio, no una comodidad:
 #        las microVMs arrancan sin salida a internet, así que un `npx -y` en
 #        tiempo de ejecución fallaría al intentar descargar.
+#
+#     -P hace lo mismo con pip. Media biblioteca de servidores MCP es Python
+#        —incluido el de semgrep— y sin esto quedaba fuera de alcance.
 #
 #     Se le añade kling-bridge, que lanza el servidor como hijo y expone su
 #     protocolo por HTTP. El servidor no se entera de nada.
@@ -44,7 +47,7 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 [ -f "$ROOT/images/$BASE.ext4" ] || {
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
-PKGS=""; NPM=""; EXTRA_DIR=""; CMD=()
+PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; CMD=()
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
 parse_build_opts() {
@@ -52,19 +55,28 @@ parse_build_opts() {
     case "$1" in
       -p) PKGS="$2"; shift 2 ;;
       -n) NPM="$2"; shift 2 ;;
+      -P) PIP="$2"; shift 2 ;;
       -d) EXTRA_DIR="$2"; shift 2 ;;
       --) shift; CMD=("$@"); break ;;
       *)  echo "opción desconocida: $1" >&2; exit 1 ;;
     esac
   done
   [ ${#CMD[@]} -gt 0 ] || { echo "falta el comando tras --" >&2; exit 1; }
-  # Node y sus dependencias piden bastante más sitio que un binario suelto.
+  # Node y sus dependencias piden bastante más sitio que un binario suelto, y
+  # las ruedas de Python bastante más que node: semgrep solo son ~400 MB con
+  # sus binarios de OCaml dentro.
   if [ "$GROW" -eq 0 ]; then
-    [ -n "$NPM" ] && GROW=768 || GROW=256
+    if   [ -n "$PIP" ]; then GROW=1536
+    elif [ -n "$NPM" ]; then GROW=768
+    else                     GROW=256
+    fi
   fi
-  # npm implica node: se añade si no se pidió explícitamente.
+  # npm implica node; pip implica python. Se añaden si no se pidieron.
   if [ -n "$NPM" ] && ! echo " $PKGS " | grep -q " nodejs "; then
     PKGS="$PKGS nodejs npm"
+  fi
+  if [ -n "$PIP" ] && ! echo " $PKGS " | grep -q " py3-pip "; then
+    PKGS="$PKGS python3 py3-pip"
   fi
 }
 
@@ -114,10 +126,41 @@ if [ -n "$NPM" ]; then
   echo "preinstalando npm: $NPM"
   cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
   mount --bind /proc "$mnt/proc" 2>/dev/null || true
+  # --ignore-scripts NO es opcional.
+  #
+  # Esto es un chroot sobre el HOST, como root, con /proc del host montado. Sin
+  # este flag, los `postinstall` de cualquier paquete de npm se ejecutan aquí:
+  # un paquete malicioso del registro no necesita escapar de ninguna microVM,
+  # porque corre en el host con privilegios ANTES de que exista ninguna. Sería
+  # contradictorio con la premisa del proyecto —"el invitado es hostil"— dejar
+  # que el empaquetado ocurra fuera de esa frontera.
+  #
+  # Rompe los paquetes que compilan binarios nativos en la instalación. Que esos
+  # fallen ruidosamente es preferible a ejecutar código arbitrario como root.
+  #
   # --omit=dev recorta lo que no hace falta en ejecución; el espacio dentro de la
   # imagen es el que más pesa en el snapshot.
-  chroot "$mnt" /usr/bin/npm install -g --omit=dev --no-fund --no-audit $NPM
+  chroot "$mnt" /usr/bin/npm install -g --ignore-scripts --omit=dev --no-fund --no-audit $NPM
   chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
+  umount "$mnt/proc" 2>/dev/null || true
+fi
+
+# Igual que npm, y por la misma razón: el invitado arranca SIN salida a
+# internet, así que un `pip install` en tiempo de ejecución fallaría.
+#
+# --break-system-packages hace falta desde PEP 668: Alpine marca su python como
+# "externally managed" y pip se niega a tocarlo sin esto. Aquí es inofensivo —
+# la imagen es de un solo uso y no hay nada más que romper.
+if [ -n "$PIP" ]; then
+  echo "preinstalando pip: $PIP"
+  cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
+  mount --bind /proc "$mnt/proc" 2>/dev/null || true
+  # --only-binary=:all: por la misma razón que --ignore-scripts en npm: un
+  # sdist ejecuta su setup.py durante la instalación, aquí como root sobre el
+  # host. Con ruedas precompiladas no se ejecuta nada del paquete.
+  chroot "$mnt" /usr/bin/pip install --no-cache-dir --break-system-packages \
+    --only-binary=:all: $PIP
+  chroot "$mnt" /bin/sh -c 'rm -rf /root/.cache /usr/lib/python3*/site-packages/pip/_vendor/certifi/*.pem.orig' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
@@ -208,6 +251,23 @@ fi
 [ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }
 chmod +x "$mnt/entrypoint"
 umount "$mnt"
+
+# Comprobar el sistema de ficheros ANTES de que nadie lo arranque.
+#
+# El invitado monta esta imagen como raíz en SOLO LECTURA, y un ext4 con el
+# journal a medias (needs_recovery) no se puede montar así: el kernel entra en
+# pánico con EUCLEAN y el fallo aparece como "el servidor no abrió el puerto",
+# que no se parece en nada a la causa. Si algo interrumpió el chroot, aquí se
+# ve; y si no se puede reparar, mejor fallar ahora que entregar una imagen que
+# no arranca.
+sync
+if ! e2fsck -fp "$DEST" >/dev/null 2>&1; then
+  echo "AVISO: el sistema de ficheros de la imagen necesitaba reparación" >&2
+  e2fsck -fy "$DEST" >/dev/null 2>&1 || {
+    echo "ERROR: '$NAME' quedó con un sistema de ficheros irreparable; bórrala y repite" >&2
+    exit 1; }
+fi
+
 chmod a+r "$DEST"
 
 echo "imagen '$NAME' lista ($(du -h "$DEST" | cut -f1) reales)"

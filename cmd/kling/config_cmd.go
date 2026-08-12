@@ -213,11 +213,26 @@ func cmdConfig(args []string) error {
 		if err := cfg.Save(); err != nil {
 			return err
 		}
-		fmt.Printf("%s = %s\n", args[1], args[2])
+		// Se reimprime desde la configuración ya guardada, no desde el
+		// argumento: así los secretos salen enmascarados igual que en
+		// `config show`. El valor suele venir de un `$(...)` que quien lo
+		// teclea nunca llegó a ver, y no hay razón para enseñarlo ahora.
+		fmt.Printf("%s = %s\n", args[1], valueOf(cfg, args[1]))
 		return nil
 	default:
 		return fmt.Errorf("uso: kling config [show|path|set <clave> <valor>]")
 	}
+}
+
+// valueOf busca una clave entre las que lista Keys(), que ya enmascara lo que
+// no debe salir por pantalla.
+func valueOf(cfg *config.Config, key string) string {
+	for _, kv := range cfg.Keys() {
+		if kv[0] == key {
+			return kv[1]
+		}
+	}
+	return ""
 }
 
 func configShow() error {

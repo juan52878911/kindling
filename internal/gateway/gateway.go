@@ -10,14 +10,17 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/http/pprof"
 	"net/url"
 	"strconv"
 	"strings"
@@ -39,6 +42,23 @@ const livenessTTL = 15 * time.Second
 // SIEMPRE a la misma instancia: el estado de una sesión vive en el proceso del
 // servidor MCP, así que mandar la segunda petición a otra microVM la rompería.
 const SessionHeader = "Mcp-Session-Id"
+
+// maxProxyBody acota lo que se guarda en memoria para poder reintentar. Coincide
+// con el límite que ya aplica el puente al leer una petición.
+const maxProxyBody = 8 << 20
+
+// retryKey marca una petición que ya se reintentó, para que el ErrorHandler no
+// pueda entrar en bucle consigo mismo.
+type retryKey struct{}
+
+func markRetried(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryKey{}, true)
+}
+
+func retried(r *http.Request) bool {
+	v, _ := r.Context().Value(retryKey{}).(bool)
+	return v
+}
 
 // readyTimeout acota la espera a que la herramienta abra su puerto. Generoso
 // para el arranque en frío, irrelevante tras un thaw.
@@ -66,16 +86,17 @@ func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) 
 
 // Gateway mantiene una instancia caliente por servicio y enruta hacia ella.
 type Gateway struct {
-	client    *api.Client
-	idle      time.Duration
-	Ephemeral bool
-	mu        sync.Mutex
-	services  map[string]*entry        // servicio -> instancia "por defecto"
-	routes    map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
-	agg       *aggregator              // endpoint virtual que reúne a todos
-	pool      *pool                    // instancias pre-calentadas por servicio
-	ensureMu  sync.Map                 // servicio -> *sync.Mutex; ver ensure()
-	mem       *memory                  // memoria de uso; nil si está desactivada
+	client       *api.Client
+	idle         time.Duration
+	Ephemeral    bool
+	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
+	mu           sync.Mutex
+	services     map[string]*entry        // servicio -> instancia "por defecto"
+	routes       map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
+	agg          *aggregator              // endpoint virtual que reúne a todos
+	pool         *pool                    // instancias pre-calentadas por servicio
+	ensureMu     sync.Map                 // servicio -> *sync.Mutex; ver ensure()
+	mem          *memory                  // memoria de uso; nil si está desactivada
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
@@ -115,7 +136,11 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 }
 
 // Handler expone las rutas del gateway.
-func (g *Gateway) Handler() http.Handler {
+//
+// El token llega por parámetro en vez de vivir en el Gateway para que arrancar
+// sin autenticación sea una decisión explícita de quien compone el servidor: el
+// compilador obliga a escribir algo, aunque sea la cadena vacía.
+func (g *Gateway) Handler(token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -128,7 +153,31 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("/mcp/"+AggregatePath+"/", g.handleAggregate)
 	mux.HandleFunc("/mcp/{service}/", g.handleProxy)
 	mux.HandleFunc("/mcp/{service}", g.handleProxy)
-	return logging(mux)
+
+	// pprof SOLO si el operador lo pidió con -pprof, y SOLO en loopback: eso lo
+	// comprueba quien construye el gateway.
+	//
+	// Queda además detrás de Auth, porque Auth envuelve el mux entero. Que no se
+	// le añada nunca una exención como la de /healthz: un volcado de goroutines
+	// o la línea de comandos completa no son cosas que deba poder pedir alguien
+	// que no tenga el token.
+	if g.PprofEnabled {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+		mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+		mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+		mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+		mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+		mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	}
+
+	// El registro va POR FUERA de la autenticación: los 401 son justo lo que
+	// hay que poder ver cuando alguien sondea el puerto.
+	return logging(Auth(mux, token))
 }
 
 func logging(h http.Handler) http.Handler {
@@ -193,6 +242,33 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/mcp"
 	}
 
+	// El cuerpo se guarda para poder REENVIARLO una vez. Sin esto, el único
+	// reintento posible tras un fallo de conexión es imposible: ReverseProxy ya
+	// consumió el original. Las peticiones MCP son JSON de tamaño moderado y el
+	// puente ya las acota, así que el coste es asumible.
+	if r.Body != nil && r.Method == http.MethodPost {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody))
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "no pude leer el cuerpo", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		}
+		r.ContentLength = int64(len(body))
+	}
+
+	// Enlace externo: no hay microVM que despertar, se reenvía HTTP al servidor
+	// del dueño. Sin este desvío, un servicio registrado con `kling mcp link`
+	// respondía 502 "no hay snapshot" porque ensure() lo buscaba en el catálogo
+	// de VMs y no lo encontraba.
+	if l := g.linkFor(r.Context(), service); l != nil {
+		g.handleLinkProxy(w, r, l)
+		return
+	}
+
 	// Sesión ya conocida: directo a su instancia, sin consultar al daemon.
 	if sid := r.Header.Get(SessionHeader); sid != "" {
 		if rt := g.route(sid); rt != nil {
@@ -220,6 +296,24 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			g.forget(sid)
 		}
 	}
+}
+
+// handleLinkProxy reenvía la petición HTTP al servidor MCP externo.
+//
+// El enlace expone la URL completa de su servidor (p. ej. http://host:8080/mcp).
+// El cliente, en cambio, pidió `/mcp/<servicio>/...` y ya le quitamos el prefijo
+// en el llamador, así que r.URL.Path empieza por `/mcp`. Para que el proxy no
+// concatene dos veces la ruta, se elimina el sufijo `/mcp` de la URL del enlace
+// antes de construir el destino.
+func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api.Link) {
+	base := strings.TrimSuffix(l.URL, "/mcp")
+	target, err := url.Parse(base)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("URL de enlace inválida: %v", err), http.StatusInternalServerError)
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ServeHTTP(w, r)
 }
 
 // sessionWriter detecta la cabecera de sesión en la respuesta y registra la ruta.
@@ -374,18 +468,36 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		checkedAt: time.Now(),
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 	}
-	// Timeouts generosos: MCP usa streaming HTTP y las respuestas pueden ser largas.
+	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
+	// LA RESPUESTA es larga a propósito: al otro lado hay una herramienta, y una
+	// herramienta puede tardar. Un escaneo de semgrep sobre un repo pasa del
+	// minuto sin que nada vaya mal, y con 60 s el gateway lo mataba y devolvía
+	// un 502 que parecía un fallo del servicio.
 	e.proxy.Transport = &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 	}
 	e.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		// Una herramienta puede reiniciarse entre peticiones. Se le da una
-		// oportunidad de volver antes de declarar el fallo.
-		if waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
-			log.Printf("proxy %s: %v (reintentando)", service, err)
-			e.proxy.ServeHTTP(w, r)
-			return
+		// UNA sola oportunidad, y solo si el cuerpo se puede reenviar.
+		//
+		// Reintentar llamando otra vez a ServeHTTP con la MISMA petición era una
+		// recursión infinita: el cuerpo ya se consumió en el primer intento, así
+		// que el reintento falla con "invalid Read on closed Body", eso vuelve a
+		// entrar aquí, y así hasta que el cliente se rinde. Medido: 4 min 40 s
+		// girando en vacío, con la pila creciendo en cada vuelta.
+		//
+		// GetBody solo existe si alguien preparó el cuerpo para reenviarlo — lo
+		// hace handleProxy. Sin él no hay reintento posible, y fingirlo es peor
+		// que fallar.
+		if !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
+			body, berr := r.GetBody()
+			if berr == nil {
+				log.Printf("proxy %s: %v (un reintento)", service, err)
+				r2 := r.Clone(markRetried(r.Context()))
+				r2.Body = body
+				e.proxy.ServeHTTP(w, r2)
+				return
+			}
 		}
 		log.Printf("proxy %s: %v", service, err)
 		http.Error(w, fmt.Sprintf("la herramienta %q no respondió: %v", service, err), http.StatusBadGateway)
@@ -428,7 +540,11 @@ func (g *Gateway) acquire(ctx context.Context, service string) (*api.Machine, er
 	}
 	log.Printf("%s: instanciando desde el snapshot %s", service, snap.Name)
 	return g.client.Run(ctx, api.RunRequest{
-		From:       snap.Name,
+		From: snap.Name,
+		// La política de salida viaja con el snapshot. Sin esto, un servicio
+		// importado con -egress internet despierta sin red y cada llamada suya
+		// al exterior falla con un "fetch failed" que no señala a ninguna parte.
+		Egress:     snap.Egress,
 		Labels:     map[string]string{api.LabelService: service},
 		TTLSeconds: int(g.idle.Seconds()) * 2, // red de seguridad si el gateway muere
 	})

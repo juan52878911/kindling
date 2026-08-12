@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,20 @@ import (
 )
 
 const Version = "0.1.0"
+
+// guestClient reenvía peticiones al servidor dentro de la microVM. Es un
+// singleton a nivel de paquete para que http.Client reúse sus conexiones
+// entre llamadas al mismo invitado — recrearlo en cada request() obligaba a
+// hacer un handshake TCP nuevo con cada tools/call.
+// Timeout global NO: acota la petición entera, y al otro lado hay una microVM
+// que puede estar descongelándose y una herramienta que puede tardar lo suyo
+// —un escaneo de semgrep sobre un repo, por ejemplo—. Se acota la espera a las
+// CABECERAS, que es lo que separa "está trabajando" de "no hay nadie".
+var guestClient = &http.Client{Transport: &http.Transport{
+	ResponseHeaderTimeout: 5 * time.Minute,
+	MaxIdleConnsPerHost:   8,
+	IdleConnTimeout:       90 * time.Second,
+}}
 
 type Server struct {
 	socket     string
@@ -59,6 +74,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /links", s.handleLinks)
 	mux.HandleFunc("PUT /links", s.handleSetLink)
 	mux.HandleFunc("DELETE /links/{name}", s.handleRemoveLink)
+	mux.HandleFunc("POST /images", s.handleBuildImage)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
@@ -101,13 +117,29 @@ func (s *Server) Listen(ctx context.Context) error {
 	// peticiones a la nada.
 	s.mgr.Watch(ctx, 10*time.Second)
 
-	srv := &http.Server{Handler: s.routes()}
+	srv := &http.Server{
+		Handler: s.routes(),
+		// Sin timeouts, un cliente que abre la conexión y nunca termina
+		// el header mantiene una goroutine y un FD indefinidamente. El
+		// daemon controla root: este es el tipo de superficie que no
+		// debe existir.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+	}
+	// El apagado se ORDENA desde una goroutine pero se COMPLETA en el camino
+	// principal. Es la diferencia entre limpiar y creer que se limpió:
+	// srv.Shutdown hace que Serve retorne de inmediato, así que todo lo que se
+	// ponga detrás del Shutdown dentro de esta goroutine corre contra la salida
+	// del proceso y normalmente la pierde.
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sc)
-		_ = os.Remove(s.socket)
+		close(shutdownDone)
 	}()
 
 	if err := knet.Available(); err != nil {
@@ -126,6 +158,16 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+
+	// Serve retorna en cuanto se cierran los listeners, pero Shutdown sigue
+	// drenando las peticiones en vuelo. Esperarlo antes de tocar nada garantiza
+	// que ninguna petición cambie el estado después de la limpieza.
+	<-shutdownDone
+	// Con las peticiones ya drenadas, esta es la última escritura del estado y
+	// nadie va a cambiarlo por detrás. Se espera de verdad: perder la última
+	// transición hace que el arranque siguiente reconstruya algo que no es.
+	s.mgr.Close()
+	_ = os.Remove(s.socket)
 	return nil
 }
 
@@ -171,20 +213,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Machines: s.mgr.Count(),
 	}
 	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
-		if line, _, _ := bytesCut(out, '\n'); len(line) > 0 {
+		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
 			info.Firecrack = string(line)
 		}
 	}
 	writeJSON(w, http.StatusOK, info)
-}
-
-func bytesCut(b []byte, sep byte) ([]byte, []byte, bool) {
-	for i, c := range b {
-		if c == sep {
-			return b[:i], b[i+1:], true
-		}
-	}
-	return b, nil, false
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +480,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		greq.Header.Set(k, v)
 	}
 
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(greq)
+	resp, err := guestClient.Do(greq)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err)
 		return

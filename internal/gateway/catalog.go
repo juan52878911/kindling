@@ -22,6 +22,31 @@ type Tool struct {
 	Qualified   string          `json:"qualified"` // "servicio.herramienta"
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"inputSchema,omitempty"`
+
+	// haystack es "qualified descripción" en minúsculas, precomputado.
+	//
+	// find_tools recorre el catálogo entero por cada término de búsqueda, y
+	// construir esta cadena en el bucle significaba una minúscula y una
+	// concatenación por herramienta y por búsqueda. Es inmutable en cuanto se
+	// conoce la herramienta, así que se calcula una vez.
+	//
+	// Sin exportar a propósito: es un detalle interno y no debe salir al cable.
+	haystack string
+}
+
+// newTool es el ÚNICO constructor de Tool, para que el haystack no se pueda
+// olvidar. Si alguien añade un sitio que construya el struct a mano, esa
+// herramienta se volvería invisible para find_tools sin ningún error.
+func newTool(service, name, description string, schema json.RawMessage) Tool {
+	q := service + "." + name
+	return Tool{
+		Service:     service,
+		Name:        name,
+		Qualified:   q,
+		Description: description,
+		Schema:      schema,
+		haystack:    strings.ToLower(q + " " + description),
+	}
 }
 
 // catalog cachea qué herramientas ofrece cada servicio.
@@ -64,8 +89,11 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 			out = append(out, n)
 		}
 	}
-	// Los servidores externos enlazados son servicios de pleno derecho: el
-	// modelo no tiene por qué saber cuáles corren en microVM y cuáles no.
+	// Los servidores externos enlazados entran en la lista unificada: así una
+	// memoria registrada como enlace aparece al lado de un filesystem de microVM,
+	// y el modelo descubre todo con una sola búsqueda. El catálogo marca luego
+	// cuáles son VMs y cuáles no; sin esa pista, el modelo llama a engram.*
+	// esperando una microVM que no existe.
 	for _, l := range c.gw.links(ctx) {
 		if n := l.Service(); !seen[n] {
 			seen[n] = true
@@ -74,6 +102,21 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// externalSet devuelve el conjunto de servicios servidos por un enlace externo.
+// Complementa a services(): la lista plana no dice cuál corre en microVM y cuál
+// no, y el agregador necesita esa distinción para etiquetar las instrucciones.
+func (c *catalog) externalSet(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	for _, l := range c.gw.links(ctx) {
+		n := l.Service()
+		if n == "" {
+			n = l.Name
+		}
+		out[n] = true
+	}
+	return out
 }
 
 // toolsOf devuelve las herramientas de un servicio.
@@ -97,12 +140,7 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 	if l := c.gw.linkFor(ctx, service); l != nil {
 		out := make([]Tool, 0, len(l.Tools))
 		for _, t := range l.Tools {
-			out = append(out, Tool{
-				Service: service, Name: t.Name,
-				Qualified:   service + "." + t.Name,
-				Description: t.Description,
-				Schema:      t.InputSchema,
-			})
+			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
 		c.mu.Lock()
 		c.tools[service] = out
@@ -146,12 +184,7 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 		}
 		out := make([]Tool, 0, len(s.Tools))
 		for _, t := range s.Tools {
-			out = append(out, Tool{
-				Service: service, Name: t.Name,
-				Qualified:   service + "." + t.Name,
-				Description: t.Description,
-				Schema:      t.InputSchema,
-			})
+			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
 		return out, true
 	}
@@ -194,12 +227,7 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 
 	tools := make([]Tool, 0, len(out.Result.Tools))
 	for _, t := range out.Result.Tools {
-		tools = append(tools, Tool{
-			Service: service, Name: t.Name,
-			Qualified:   service + "." + t.Name,
-			Description: t.Description,
-			Schema:      t.InputSchema,
-		})
+		tools = append(tools, newTool(service, t.Name, t.Description, t.InputSchema))
 	}
 	return tools, nil
 }

@@ -28,3 +28,6 @@ bench-*.json
 
 # Restos de herramientas ajenas
 .utm-workspace/
+
+# Grafo de conocimiento (graphify): se regenera con /graphify
+/graphify-out/

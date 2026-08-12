@@ -107,6 +107,14 @@ type Snapshot struct {
 	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
 	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
 
+	// Egress es la política de red con la que se importó el servicio.
+	//
+	// Vive aquí porque las instancias se crean DESDE el snapshot, no desde la
+	// máquina original: sin esto, un servicio importado con acceso a internet
+	// despertaba sin él y toda llamada suya al exterior fallaba, para siempre y
+	// sin explicación.
+	Egress string `json:"egress,omitempty"`
+
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
 	Labels map[string]string `json:"labels,omitempty"`
@@ -191,6 +199,34 @@ type Info struct {
 	KVM       bool   `json:"kvm"`
 	Machines  int    `json:"machines"`
 	Firecrack string `json:"firecracker,omitempty"`
+}
+
+// BuildImageRequest pide al daemon que empaquete un servidor MCP de stdio.
+//
+// La construcción vive en el daemon porque monta un loopback y hace chroot: son
+// operaciones de root en el host con KVM, y el CLI corre en otra máquina.
+type BuildImageRequest struct {
+	// Name es el de la imagen y, después, el del servicio.
+	Name string `json:"name"`
+	// Base es la imagen de partida (por defecto: min).
+	Base string `json:"base,omitempty"`
+	// Packages son paquetes de apk que instalar en el invitado.
+	Packages []string `json:"packages,omitempty"`
+	// NPM son paquetes de node que PREINSTALAR. Es obligatorio y no una
+	// comodidad: las microVMs arrancan sin salida a internet, así que un
+	// `npx -y` en tiempo de ejecución fallaría al intentar descargar.
+	NPM []string `json:"npm,omitempty"`
+	// Cmd es el comando que arranca el servidor MCP dentro del invitado.
+	Cmd []string `json:"cmd"`
+	// GrowMB agranda la imagen. 0 deja que el script decida.
+	GrowMB int `json:"grow_mb,omitempty"`
+}
+
+// BuildImageResult describe la imagen construida.
+type BuildImageResult struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Output string `json:"output,omitempty"`
 }
 
 // Error es la respuesta de error de la API.

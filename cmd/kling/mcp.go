@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/config"
 )
 
 // cmdMCP convierte servidores MCP en servicios de kindling.
@@ -69,7 +70,7 @@ func mcpImport(args []string) error {
 		return fmt.Errorf("uso: kling mcp import <servicio> [-image imagen]")
 	}
 	service := fs.Arg(0)
-	img := config_Or(*image, service)
+	img := config.Or(*image, service)
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -96,7 +97,18 @@ func mcpImport(args []string) error {
 	// 1. plantilla
 	fmt.Printf("  1/5  arrancando la plantilla... ")
 	mc, err := c.Run(ctx, api.RunRequest{
-		Name: tmpl, Image: img, MemMiB: *mem, Egress: *egress,
+		Name:  tmpl,
+		Image: img,
+		// Los valores por defecto se aplican IGUAL que en `kling run`. No
+		// hacerlo era un fallo caro y silencioso: la memoria QUEDA GRABADA en
+		// el snapshot dorado, así que un servicio importado se quedaba con los
+		// 256 MiB del daemon aunque su dueño hubiera puesto defaults.mem_mib a
+		// 1024 — que es justo lo que se sube para aguantar varias sesiones,
+		// porque cada una arranca su propio proceso del servidor MCP dentro del
+		// invitado.
+		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
+		VCPUs:  config.Or(cfg.Defaults.VCPUs, 1),
+		Egress: config.Or(*egress, cfg.Defaults.Egress, "none"),
 		Labels: map[string]string{api.LabelService: service},
 	})
 	if err != nil {
@@ -456,7 +468,14 @@ type poster func(sid, body string) (string, []byte, error)
 
 // directPost habla con una URL alcanzable desde aquí: servidores enlazados.
 func directPost(ctx context.Context, url string) poster {
-	c := &http.Client{Timeout: 45 * time.Second}
+	// Sin Timeout global: acotarlo aquí acota el ARRANQUE del servidor MCP, que
+	// es trabajo legítimo y muy variable —un servidor de node con semgrep
+	// dentro tarda bastante más que un eco—. Lo que sí se acota es la espera a
+	// las cabeceras, que separa "está pensando" de "no hay nadie", y por encima
+	// manda el contexto de quien llama (-wait).
+	c := &http.Client{Transport: &http.Transport{
+		ResponseHeaderTimeout: 4 * time.Minute,
+	}}
 	return func(sid, body string) (string, []byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 		if err != nil {
@@ -540,7 +559,21 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(api.MCPPayload(raw), &out); err != nil {
-		return name, nil, fmt.Errorf("respuesta ilegible: %w", err)
+		// Enseñar lo que llegó, no solo que no se pudo parsear.
+		//
+		// Cuando el servidor MCP muere al arrancar —le faltan argumentos, el
+		// paquete de npm está roto— el puente contesta con un error en texto
+		// plano, y "respuesta ilegible: invalid character 'l'" no dice
+		// absolutamente nada sobre la causa. El cuerpo sí.
+		body := strings.TrimSpace(string(api.MCPPayload(raw)))
+		if len(body) > 300 {
+			body = body[:300] + "…"
+		}
+		if body == "" {
+			body = "(respuesta vacía)"
+		}
+		return name, nil, fmt.Errorf("no entiendo la respuesta a tools/list (%w).\n"+
+			"El servidor contestó: %s", err, body)
 	}
 	if out.Error != nil {
 		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
@@ -554,12 +587,4 @@ func labelsFor(service string, stateful bool) map[string]string {
 		l[api.LabelStateful] = "true"
 	}
 	return l
-}
-
-// config_Or evita importar el paquete config solo por un valor por defecto.
-func config_Or(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
