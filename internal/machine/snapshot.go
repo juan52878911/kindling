@@ -438,6 +438,19 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.persist()
 	m.mu.Unlock()
 
+	// Puerta de arranque: restaurar es cargar un snapshot en KVM, tan intensivo
+	// como encender en frío, y es EL camino del gateway cuando despierta varios
+	// servicios de golpe. Sin acotarlo, esa ráfaga simultánea cuelga el host bajo
+	// anidamiento. El defer suelta el hueco al volver; si el contexto se cancela en
+	// la cola, se deshace lo ya montado igual que un fallo de spawn.
+	release, glErr := m.enterLaunch(ctx)
+	if glErr != nil {
+		netcfg.Teardown()
+		m.fail(mc, glErr)
+		return nil, glErr
+	}
+	defer release()
+
 	var sock string
 	var pid int
 	var c *fc.Client

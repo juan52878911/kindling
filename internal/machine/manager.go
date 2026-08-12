@@ -91,6 +91,12 @@ type Manager struct {
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
 	templateMu sync.Mutex
 
+	// launchGate acota cuántas microVMs ENCIENDEN a la vez. Ver launch.go: una
+	// tormenta de arranques simultáneos —todos creando vCPU y mapeando memoria en
+	// KVM en el mismo instante— cuelga el kernel bajo virtualización anidada.
+	// Capacidad = KLING_MAX_PARALLEL_BOOT. nil en un Manager de test = sin límite.
+	launchGate chan struct{}
+
 	// lifecycle serializa las operaciones sobre UNA MISMA máquina. Sin esto, dos
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
 	// veth a medio crear: "Cannot find device vh-...".
@@ -123,10 +129,11 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	priv, warn := resolvePrivileges(runAs)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
-		byID:   make(map[string]*api.Machine),
-		socket: make(map[string]string),
-		wake:   make(chan struct{}, 1),
-		quit:   make(chan struct{}),
+		byID:       make(map[string]*api.Machine),
+		socket:     make(map[string]string),
+		wake:       make(chan struct{}, 1),
+		quit:       make(chan struct{}),
+		launchGate: make(chan struct{}, maxParallelLaunch()),
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
@@ -757,6 +764,16 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
 func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
+	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
+	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
+	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
+	// defer suelta el hueco en cuanto la microVM está encendida y el siguiente pasa.
+	release, glErr := m.enterLaunch(ctx)
+	if glErr != nil {
+		return 0, glErr
+	}
+	defer release()
+
 	var sock string
 	var pid int
 	var err error
@@ -1057,6 +1074,17 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 		m.mu.Unlock()
 	}
+
+	// Puerta de arranque: descongelar es cargar un snapshot en KVM —mapear su
+	// memoria y reanudar los vCPU—, tan intensivo como un arranque en frío. Es,
+	// además, la mayoría del ciclo, así que es aquí donde una tormenta simultánea
+	// hace más daño. Va tras la readopción de arriba: readoptar no enciende nada,
+	// no tiene por qué esperar turno.
+	release, glErr := m.enterLaunch(ctx)
+	if glErr != nil {
+		return nil, glErr
+	}
+	defer release()
 
 	_ = os.Remove(sock)
 
