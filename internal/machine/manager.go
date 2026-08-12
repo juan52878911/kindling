@@ -1143,6 +1143,36 @@ func (m *Manager) killMachine(id string, flush bool) {
 		m.flushVolume(mc)
 	}
 	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
+
+	// Esperar a que MUERA de verdad, no solo a mandar la señal.
+	//
+	// SIGKILL es asíncrono: el proceso tarda en morir y el kernel en reclamar su
+	// memoria —un gigabyte no se libera al instante—. Quien congela para hacer
+	// sitio (el gateway, cuando el anfitrión está lleno) reintentaba antes de que
+	// esa memoria estuviera disponible y volvía a chocar con "no cabe". Bloquear
+	// aquí hace que Freeze/Stop/Remove no digan "hecho" mientras el VMM siga vivo
+	// gastando RAM, que es lo que "hecho" debería significar.
+	//
+	// Con tope: un firecracker que ignorase el SIGKILL (imposible, pero) no debe
+	// colgar el daemon. El proceso lo recoge la goroutine de cmd.Wait() del
+	// arranque, así que Kill(pid, 0) devuelve ESRCH en cuanto desaparece.
+	waitGone(mc.PID, 5*time.Second)
+}
+
+// waitGone espera a que un pid desaparezca de la tabla de procesos.
+//
+// Kill(pid, 0) no manda señal: solo pregunta si el proceso existe. Devuelve
+// ESRCH cuando ya no —ni vivo ni zombi—, que es justo cuando su memoria está
+// reclamada. Sondea con pausas cortas porque morir tras un SIGKILL es cuestión
+// de milisegundos en el caso normal.
+func waitGone(pid int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (m *Manager) fail(mc *api.Machine, err error) {
