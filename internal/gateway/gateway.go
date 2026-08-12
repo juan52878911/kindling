@@ -65,6 +65,21 @@ func retried(r *http.Request) bool {
 // para el arranque en frío, irrelevante tras un thaw.
 const readyTimeout = 20 * time.Second
 
+// alive dice si el invitado acepta conexiones AHORA, con un solo intento corto.
+//
+// El camino sticky lo llama en cada petición, así que tiene que ser barato: en
+// LAN, un dial a un puerto abierto es submilisegundo. Lo que detecta es lo que
+// el machineID no puede — que el DAEMON congeló la instancia por debajo, sin
+// que el gateway tocara su mapa.
+func alive(ip string, port int) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 400*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // waitReady sondea el puerto del invitado hasta que acepta conexiones.
 func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) error {
 	addr := net.JoinHostPort(ip, strconv.Itoa(port))
@@ -325,9 +340,21 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			e := g.services[rt.service]
 			g.mu.Unlock()
 
-			if e == nil || e.machineID != rt.machineID {
+			// Dos formas de que la instancia haya muerto bajo la sesión, y hay
+			// que cubrir las dos: que el GATEWAY la reconstruyera (cambia el
+			// machineID en el mapa) o que el DAEMON la congelara por TTL (el
+			// mapa no cambia, pero el invitado deja de responder). Lo segundo no
+			// se ve por el machineID, solo comprobando vida.
+			if e == nil || e.machineID != rt.machineID || !alive(rt.ip, GuestPort) {
 				// La instancia se congeló o se reconstruyó por debajo. Se
 				// reconstruye —ensure descongela la misma si sigue warm—.
+				// Si el mapa aún cree viva la instancia congelada, se invalida
+				// para que ensure la reconstruya en vez de devolverla tal cual.
+				g.mu.Lock()
+				if cur := g.services[rt.service]; cur != nil && cur.machineID == rt.machineID {
+					delete(g.services, rt.service)
+				}
+				g.mu.Unlock()
 				var err error
 				e, err = g.ensure(r.Context(), rt.service)
 				if err != nil {
