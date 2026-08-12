@@ -94,6 +94,44 @@ func (m *Manager) reconcile() {
 			knet.TeardownNamespace(ns)
 		}
 	}
+
+	m.sweepMachineDirs()
+}
+
+// sweepMachineDirs borra los directorios de machines/ que no pertenecen a
+// ninguna máquina conocida ni viva.
+//
+// Cada directorio guarda un mem.file del tamaño de la RAM de su microVM, así que
+// uno huérfano no es un despiste inofensivo: es un gigabyte que no se recupera
+// nunca. Aparecen por un corte entre crear el directorio y persistir el estado,
+// o por un registro que se pierde — y sin esto, se acumulan hasta llenar el
+// disco, con el daemon sano y sin nada en su estado que lo explique.
+//
+// Se llama con m.mu tomado. Solo borra lo que NO está en byID: una máquina viva
+// cuyo registro aún no ha llegado al disco sigue teniendo su entrada en memoria,
+// así que su directorio nunca es candidato.
+func (m *Manager) sweepMachineDirs() {
+	dir := filepath.Join(m.root, "machines")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, conocida := m.byID[e.Name()]; conocida {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		size := diskUsage(p)
+		if err := os.RemoveAll(p); err != nil {
+			log.Printf("reconcile: no pude borrar el directorio huérfano %s: %v", e.Name(), err)
+			continue
+		}
+		log.Printf("reconcile: directorio huérfano %s eliminado (%d MiB recuperados)",
+			e.Name()[:min(12, len(e.Name()))], size>>20)
+	}
 }
 
 // nsName y cgName derivan del id igual que knet.Plan y el gestor de cgroups, y
@@ -207,6 +245,14 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			m.sweep()
 			m.expireTTL(ctx)
+			// Barrer directorios huérfanos también en marcha: no solo aparecen
+			// al arrancar. Bajo el lock, como reconcile.
+			m.mu.Lock()
+			m.sweepMachineDirs()
+			m.mu.Unlock()
+			// Y, si el disco aprieta, recuperar espacio eliminando instancias
+			// dormidas que se pueden recrear desde su snapshot.
+			m.gcDisk(ctx)
 			// El disco se recalcula aquí y no en List(): así `kling ps` no paga
 			// un recorrido por máquina, y el dato sigue fresco para las que
 			// están escribiendo.
