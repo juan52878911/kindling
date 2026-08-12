@@ -511,6 +511,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if _, err := os.Stat(src); err != nil {
 		return nil, fmt.Errorf("no encuentro la imagen %q en %s", req.Image, src)
 	}
+	// Antes de comprometer nada: una microVM que no cabe no falla al arrancar,
+	// arranca — y luego el OOM killer del anfitrión mata procesos al azar.
+	if err := checkHostMemory(req.MemMiB); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(m.KernelPath()); err != nil {
 		return nil, fmt.Errorf("falta el kernel en %s", m.KernelPath())
 	}

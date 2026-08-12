@@ -258,3 +258,69 @@ func TestUnHijoQueNoLeeNoCuelgaElCierre(t *testing.T) {
 	}
 	_ = r.Close()
 }
+
+// Dos peticiones concurrentes con el MISMO id JSON-RPC: la segunda se rechaza.
+//
+// Antes se sobrescribía la entrada de pending. El primero que esperaba quedaba
+// huérfano —nadie volvería a escribir en su canal— y se colgaba hasta el tope de
+// respuesta, minutos después. Y la primera respuesta que llegaba con ese id se
+// le entregaba al SEGUNDO, que recibía la contestación de una petición ajena.
+//
+// Un error inmediato es infinitamente mejor que colgar a uno y contestarle otra
+// cosa al otro.
+func TestDosPeticionesConElMismoIdNoSePisan(t *testing.T) {
+	r, w := io.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, r) }()
+	s := &session{
+		id:      "dup",
+		stdin:   w,
+		pending: map[string]chan json.RawMessage{},
+		notes:   make(chan json.RawMessage, 1),
+		done:    make(chan struct{}),
+	}
+
+	// La primera queda esperando: se registra y nadie le responde todavía.
+	lista := make(chan struct{})
+	go func() {
+		close(lista)
+		_, _ = s.request(t.Context(), "mismo", []byte(`{"jsonrpc":"2.0","id":"mismo"}`))
+	}()
+	<-lista
+	for i := 0; i < 200; i++ {
+		s.mu.Lock()
+		n := len(s.pending)
+		s.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// La segunda con el mismo id debe fallar EN EL ACTO, no quedarse colgada ni
+	// desalojar a la primera.
+	hecho := make(chan error, 1)
+	go func() {
+		_, err := s.request(t.Context(), "mismo", []byte(`{"jsonrpc":"2.0","id":"mismo"}`))
+		hecho <- err
+	}()
+	select {
+	case err := <-hecho:
+		if err == nil {
+			t.Fatal("aceptó un id ya en vuelo: el primero se quedaría huérfano")
+		}
+		if !strings.Contains(err.Error(), "en vuelo") {
+			t.Errorf("el error no explica el problema: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("la segunda petición se colgó en vez de rechazarse")
+	}
+
+	// Y la PRIMERA sigue esperando su respuesta, no la han desalojado.
+	s.mu.Lock()
+	_, sigue := s.pending["mismo"]
+	s.mu.Unlock()
+	if !sigue {
+		t.Error("desalojaron a la primera petición")
+	}
+	_ = w.Close()
+}

@@ -317,6 +317,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// El volumen se HEREDA del snapshot, igual que la política de salida: quien
 	// despierta un servicio no tiene por qué saber con qué volumen se importó,
 	// y el gateway desde luego no lo sabe.
+	// El camino del gateway pasa por aquí, no por Run: es despertando servicios
+	// bajo demanda como se llena el anfitrión, y una restauración que no cabe
+	// deja al OOM killer del host eligiendo víctimas entre las demás microVMs.
+	if err := checkHostMemory(snap.MemMiB); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+
 	if len(req.VolumeSet()) == 0 {
 		req.Volumes = snap.VolumeSet()
 	}

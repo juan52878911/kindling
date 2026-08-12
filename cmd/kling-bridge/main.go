@@ -44,7 +44,10 @@ const SessionHeader = "Mcp-Session-Id"
 func main() {
 	listen := flag.String("listen", ":8080", "dónde escuchar")
 	idle := flag.Duration("session-idle", 10*time.Minute, "inactividad antes de cerrar una sesión")
-	maxSessions := flag.Int("max-sessions", 32, "sesiones concurrentes como máximo")
+	// 0 = derivarlo de la memoria del invitado. El flag sigue existiendo para
+	// forzarlo, porque la estimación por sesión es eso, una estimación.
+	maxSessions := flag.Int("max-sessions", 0,
+		"sesiones concurrentes como máximo (0 = según la memoria de la microVM)")
 	// Tope de seguridad para una respuesta, NO el plazo real: quien manda es el
 	// contexto de quien llama, que se cancela si el cliente se va. Esto solo
 	// existe para que un servidor MCP colgado no retenga la entrada pendiente
@@ -75,6 +78,19 @@ Opciones:
 	if len(argv) == 0 {
 		flag.Usage()
 		os.Exit(2)
+	}
+
+	if *maxSessions <= 0 {
+		mem := guestMemMiB()
+		if mem <= 0 {
+			// Sin poder leer la memoria, el valor histórico. Mejor un tope
+			// conocido que ninguno.
+			*maxSessions = maxSessionsCap
+		} else {
+			*maxSessions = deriveMaxSessions(mem)
+			log.Printf("tope de sesiones: %d (%d MiB de memoria, ~%d MiB por sesión)",
+				*maxSessions, mem, sessionMiB)
+		}
 	}
 
 	b := &bridge{
@@ -567,6 +583,23 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 	if s.closed {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("la sesión está cerrada")
+	}
+	// Un id ya en vuelo se RECHAZA, no se pisa.
+	//
+	// Antes se sobrescribía la entrada: el primero que esperaba quedaba
+	// huérfano —nadie volvería a escribir en su canal— y se colgaba hasta el
+	// tope de respuesta, minutos después. Y peor: la primera respuesta que
+	// llegara con ese id se entregaba al SEGUNDO, que recibía la contestación
+	// de una petición que no era la suya, y las siguientes se descartaban por
+	// no encontrar a nadie esperando.
+	//
+	// JSON-RPC exige que los id en vuelo sean únicos; el que los repite tiene
+	// un fallo, y decírselo con un error inmediato es infinitamente mejor que
+	// colgarlo y contestarle otra cosa.
+	if _, repetido := s.pending[id]; repetido {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("ya hay una petición en vuelo con el id %s: "+
+			"JSON-RPC exige ids únicos entre las peticiones sin responder", id)
 	}
 	s.pending[id] = ch
 	s.mu.Unlock()
