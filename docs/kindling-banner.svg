@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="kindling — small dry twigs that catch fire first">
+  <defs>
+    <linearGradient id="ember" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#ea580c"/>
+      <stop offset="0.6" stop-color="#f97316"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#fef3c7"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="300" rx="12" fill="#0f1216"/>
+
+  <!-- crossed twigs: the small dry sticks that catch fire first -->
+  <g stroke="#4b5563" stroke-width="7" stroke-linecap="round">
+    <line x1="88"  y1="228" x2="184" y2="182"/>
+    <line x1="88"  y1="182" x2="184" y2="228"/>
+    <line x1="102" y1="238" x2="170" y2="238"/>
+  </g>
+
+  <!-- the first flame -->
+  <path d="M136 88
+           c 15 22 26 34 26 52
+           a 26 26 0 0 1 -52 0
+           c 0 -18 11 -30 26 -52 z"
+        fill="url(#ember)"/>
+  <path d="M136 124
+           c 7 11 12 17 12 26
+           a 12 12 0 0 1 -24 0
+           c 0 -9 5 -15 12 -26 z"
+        fill="url(#core)"/>
+
+  <!-- wordmark -->
+  <text x="250" y="158" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="76" font-weight="600" letter-spacing="1" fill="#f5f5f4">kindling</text>
+
+  <!-- name origin, dictionary style -->
+  <text x="252" y="204" font-family="ui-serif, Georgia, 'Times New Roman', serif"
+        font-size="22" font-style="italic" fill="#9ca3af">kin·dling — n. small dry twigs that catch fire first, used to start a larger fire.</text>
+
+  <text x="252" y="238" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="20" fill="#6b7280">Serverless MCP tools on Firecracker microVMs — frozen on disk, awake in milliseconds.</text>
+</svg>
