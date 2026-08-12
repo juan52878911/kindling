@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"log"
@@ -72,6 +73,23 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 
 	ownOverlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
 
+	// Una plantilla jailed corre chrooteada: no ve snapDir. El overlay dorado y
+	// el volcado se escriben en el jail (en su path absoluto) y se recuperan al
+	// host después. goldDst es dónde se copia el overlay para que firecracker lo
+	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot.
+	jailed := jailerEnabled() && strings.HasPrefix(sock, m.jailRoot(mc.ID))
+	goldDst := goldOverlay
+	if jailed {
+		goldDst = m.jailPath(mc.ID, goldOverlay)
+		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
+			os.RemoveAll(dir)
+			return nil, err
+		}
+		if m.priv.Enabled {
+			_ = os.Chown(filepath.Dir(goldDst), m.priv.UID, m.priv.GID)
+		}
+	}
+
 	c := fc.New(sock)
 
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
@@ -103,13 +121,13 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
 	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always",
-		ownOverlay, goldOverlay).CombinedOutput(); err != nil {
+		ownOverlay, goldDst).CombinedOutput(); err != nil {
 		return abort(fmt.Errorf("copiando el overlay: %v: %s", err, out))
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
 	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
 	// "Permission denied".
-	if err := m.priv.Own(goldOverlay); err != nil {
+	if err := m.priv.Own(goldDst); err != nil {
 		return abort(err)
 	}
 
@@ -125,6 +143,15 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	}
 	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
 		return abort(err)
+	}
+	if jailed {
+		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
+		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
+		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
+			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
+				return abort(fmt.Errorf("recuperando %s del jail: %w", f, err))
+			}
+		}
 	}
 	// Se devuelve el disco propio: la plantilla sigue viva y no debe escribir en
 	// el overlay dorado, que a partir de ahora es plantilla de otras instancias.

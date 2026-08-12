@@ -54,6 +54,13 @@ func (m *Manager) jailRoot(id string) string {
 	return filepath.Join(m.jailBase(), "firecracker", id, "root")
 }
 
+// jailPath es dónde cae, dentro del jail, un fichero cuyo path absoluto en el
+// host es hostPath. La convención de todo el jail: los paths que se pasan a la
+// API son los absolutos del host, y resuelven dentro del chroot a esta ruta.
+func (m *Manager) jailPath(id, hostPath string) string {
+	return filepath.Join(m.jailRoot(id), hostPath)
+}
+
 // jailSock es el socket de la API dentro del jail, visto desde el anfitrión.
 // jailer lo crea en <root>/run/firecracker.socket.
 func (m *Manager) jailSock(id string) string {
