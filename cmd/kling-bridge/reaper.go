@@ -166,11 +166,20 @@ func waitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 	if !isECHILD(err) {
 		return err
 	}
+	// Se ESPERA un momento al canal, no se mira con default.
+	//
+	// cmd.Wait() puede devolver ECHILD en cuanto el cosechador hace su wait4,
+	// una línea antes de que ejecute `owner <- ws`. Con default, esa carrera de
+	// microsegundos perdía el estado —y con él la distinción "se cerró" vs "se
+	// lo llevó el OOM killer", que es justo el dato que se quería preservar—.
+	//
+	// El envío va bufferizado y ocurre en la misma sección crítica que el wait4,
+	// así que llega enseguida; el plazo es una red de seguridad para no colgar el
+	// cierre si por lo que sea no llegara nunca.
 	select {
 	case ws := <-exitCh:
 		return waitStatusErr(ws)
-	default:
-		// Sin estado a mano: no hay nada que reportar salvo que terminó.
+	case <-time.After(2 * time.Second):
 		return nil
 	}
 }

@@ -420,3 +420,43 @@ func TestUnaRutaHuerfanaSeDetecta(t *testing.T) {
 		t.Errorf("rebind no reapuntó la ruta: %+v", rt)
 	}
 }
+
+// Cuando no hay instancia de servicio que sacrificar, evictOne libera una del
+// fondo: retiene RAM sin atender a nadie, y en un anfitrión justo es la
+// diferencia entre que el siguiente servicio arranque o reciba un 507.
+func TestElFondoCedeUnaMaquinaBajoPresion(t *testing.T) {
+	var quitadas []string
+	p := &pool{
+		size:  2,
+		ready: map[string][]*warmVM{},
+		removeFn: func(_ context.Context, id string) error {
+			quitadas = append(quitadas, id)
+			return nil
+		},
+	}
+	ahora := time.Now()
+	p.ready["a"] = []*warmVM{{id: "a-vieja", born: ahora.Add(-time.Hour)}, {id: "a-nueva", born: ahora}}
+	p.ready["b"] = []*warmVM{{id: "b-media", born: ahora.Add(-time.Minute)}}
+
+	// Retira la MÁS antigua de todo el fondo.
+	if !p.evictOne(t.Context()) {
+		t.Fatal("había máquinas en el fondo y no retiró ninguna")
+	}
+	if len(quitadas) != 1 || quitadas[0] != "a-vieja" {
+		t.Errorf("retiró %v, quería [a-vieja]", quitadas)
+	}
+	// Y la sacó de la cola sin tocar las demás.
+	p.mu.Lock()
+	na, nb := len(p.ready["a"]), len(p.ready["b"])
+	p.mu.Unlock()
+	if na != 1 || nb != 1 {
+		t.Errorf("colas tras evictOne: a=%d b=%d, quería 1 y 1", na, nb)
+	}
+
+	// Con el fondo vacío, evictOne no miente: devuelve false para que el
+	// llamador se rinda de verdad.
+	p.ready = map[string][]*warmVM{}
+	if p.evictOne(t.Context()) {
+		t.Error("dijo que retiró algo con el fondo vacío")
+	}
+}

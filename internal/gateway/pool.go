@@ -245,6 +245,41 @@ func (p *pool) evictStale(ctx context.Context, maxAge time.Duration) {
 	}
 }
 
+// evictOne retira del fondo la instancia pre-calentada más antigua y la destruye,
+// para liberar su RAM. Devuelve true si retiró alguna.
+//
+// Es el segundo escalón de evictLRU: cuando no hay ninguna instancia de servicio
+// que sacrificar, las máquinas del fondo siguen reteniendo memoria sin atender a
+// nadie. En un anfitrión justo con el fondo activo, esa RAM es la diferencia
+// entre que el servicio que llega arranque o reciba un 507.
+func (p *pool) evictOne(ctx context.Context) bool {
+	var elegida *warmVM
+	var deSvc string
+
+	p.mu.Lock()
+	for svc, q := range p.ready {
+		if len(q) == 0 {
+			continue
+		}
+		// La más antigua de la cola de cada servicio; entre servicios, la de born
+		// menor. Es la que lleva más tiempo esperando sin que nadie la use.
+		if elegida == nil || q[0].born.Before(elegida.born) {
+			elegida, deSvc = q[0], svc
+		}
+	}
+	if elegida != nil {
+		p.ready[deSvc] = p.ready[deSvc][1:]
+	}
+	p.mu.Unlock()
+
+	if elegida == nil {
+		return false
+	}
+	_ = p.removeFn(ctx, elegida.id)
+	log.Printf("fondo: retiré una instancia de %s para hacer sitio", deSvc)
+	return true
+}
+
 func (p *pool) stats() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
