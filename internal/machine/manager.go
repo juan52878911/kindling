@@ -757,12 +757,31 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
 func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
-	sock := filepath.Join(m.dir(id), "fc.sock")
-	_ = os.Remove(sock)
-
-	pid, err := m.spawn(id, sock, n)
-	if err != nil {
-		return 0, err
+	var sock string
+	var pid int
+	var err error
+	if jailerEnabled() {
+		// Arranque en frío dentro del jail. A diferencia de la restauración, aquí
+		// firecracker abre el KERNEL (SetBootSource) y los discos por su API, así
+		// que también hay que replicar el kernel dentro del chroot.
+		pid, sock, err = m.spawnJailed(id, n)
+		if err != nil {
+			return 0, err
+		}
+		toLink := []string{m.KernelPath(), base, overlay}
+		for _, v := range vols {
+			toLink = append(toLink, v.path)
+		}
+		if err := m.prepareJail(id, toLink...); err != nil {
+			return pid, err
+		}
+	} else {
+		sock = filepath.Join(m.dir(id), "fc.sock")
+		_ = os.Remove(sock)
+		pid, err = m.spawn(id, sock, n)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	c := fc.New(sock)
