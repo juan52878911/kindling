@@ -292,3 +292,53 @@ func TestLasMaquinasConDuenoNoSeAdoptan(t *testing.T) {
 		}
 	}
 }
+
+// Cuando no cabe una instancia más, se hace sitio congelando la ociosa más
+// antigua — no se falla.
+//
+// Un anfitrión justo no puede tener todos los servicios despiertos a la vez, y
+// eso no debería significar que el último que llega no funcione NUNCA. Antes
+// devolvía un 502 perfectamente explicado y perfectamente inútil: el usuario no
+// tiene forma de saber que la solución es esperar a que otro se enfríe.
+func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
+	var congelada string
+	g := &Gateway{
+		services: map[string]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	g.freezeFn = func(id string) error { congelada = id; return nil }
+
+	ahora := time.Now()
+	g.services["viejo"] = &entry{machineID: "m-viejo", lastUse: ahora.Add(-time.Hour)}
+	g.services["medio"] = &entry{machineID: "m-medio", lastUse: ahora.Add(-time.Minute)}
+	g.services["ocupado"] = &entry{machineID: "m-ocupado", lastUse: ahora.Add(-2 * time.Hour), inflight: 1}
+	g.services["quiere"] = &entry{machineID: "m-quiere", lastUse: ahora}
+
+	got := g.evictLRU(t.Context(), "quiere")
+	if got != "viejo" {
+		t.Fatalf("sacrificó %q, quería \"viejo\"", got)
+	}
+	if congelada != "m-viejo" {
+		t.Errorf("congeló %q", congelada)
+	}
+	// "ocupado" es MÁS antiguo pero tiene trabajo en vuelo: congelarlo debajo de
+	// una llamada en curso convierte un "espera un poco" en un fallo para quien
+	// ya estaba siendo atendido.
+	g.mu.Lock()
+	_, sigue := g.services["ocupado"]
+	_, fuera := g.services["viejo"]
+	g.mu.Unlock()
+	if !sigue {
+		t.Error("sacrificó una instancia con peticiones en vuelo")
+	}
+	if fuera {
+		t.Error("dejó en el mapa una instancia que acaba de congelar")
+	}
+
+	// Sin nadie a quien sacrificar, se rinde de verdad en vez de mentir.
+	g2 := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	g2.services["unico"] = &entry{machineID: "m", lastUse: ahora}
+	if v := g2.evictLRU(t.Context(), "unico"); v != "" {
+		t.Errorf("sacrificó %q sin haber candidatos", v)
+	}
+}

@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -472,4 +473,29 @@ type ImageRecipe struct {
 	GrowMB   int       `json:"grow_mb,omitempty"`
 	BuiltAt  time.Time `json:"built_at"`
 	KlingVer string    `json:"kling_version,omitempty"`
+}
+
+// StatusError es un error de la API que conserva el código HTTP.
+//
+// Existe porque quien llama a veces necesita distinguir QUÉ clase de negativa
+// recibió, no solo leer un texto. El caso que lo motivó: el gateway tiene que
+// saber que un arranque falló por falta de memoria —y no por otra cosa— para
+// poder hacer sitio congelando otra instancia y reintentar. Comparar cadenas
+// para eso es frágil: el día que alguien reescriba el mensaje, el gateway deja
+// de hacer sitio y nadie relaciona una cosa con la otra.
+type StatusError struct {
+	Code    int
+	Message string
+}
+
+func (e *StatusError) Error() string { return e.Message }
+
+// StatusInsufficientMemory es la negativa por falta de memoria en el anfitrión.
+// 507 es "Insufficient Storage", que es lo más cerca que hay en HTTP.
+const StatusInsufficientMemory = 507
+
+// IsInsufficientMemory dice si un error es una negativa por falta de memoria.
+func IsInsufficientMemory(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == StatusInsufficientMemory
 }

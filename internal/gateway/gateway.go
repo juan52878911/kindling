@@ -90,13 +90,17 @@ type Gateway struct {
 	idle         time.Duration
 	Ephemeral    bool
 	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
-	mu           sync.Mutex
-	services     map[string]*entry        // servicio -> instancia "por defecto"
-	routes       map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
-	agg          *aggregator              // endpoint virtual que reúne a todos
-	pool         *pool                    // instancias pre-calentadas por servicio
-	ensureMu     sync.Map                 // servicio -> *sync.Mutex; ver ensure()
-	mem          *memory                  // memoria de uso; nil si está desactivada
+	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
+	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
+	// de otro modo sin levantar un daemon con KVM.
+	freezeFn func(id string) error
+	mu       sync.Mutex
+	services map[string]*entry        // servicio -> instancia "por defecto"
+	routes   map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
+	agg      *aggregator              // endpoint virtual que reúne a todos
+	pool     *pool                    // instancias pre-calentadas por servicio
+	ensureMu sync.Map                 // servicio -> *sync.Mutex; ver ensure()
+	mem      *memory                  // memoria de uso; nil si está desactivada
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
@@ -494,6 +498,23 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 	g.mu.Unlock()
 
 	mc, err := g.acquire(ctx, service)
+	if api.IsInsufficientMemory(err) {
+		// No cabe: se hace sitio en vez de rendirse.
+		//
+		// Un anfitrión justo no puede tener todos los servicios despiertos a la
+		// vez, y eso NO debería significar que el último que llega no funcione
+		// nunca. Antes fallaba con un 502 perfectamente explicado y perfectamente
+		// inútil: el usuario no tiene forma de saber que la solución es esperar a
+		// que otro servicio se enfríe.
+		//
+		// Se congela el más antiguo SIN trabajo en vuelo. Congelar cuesta un par
+		// de segundos y descongelar 25 ms, así que la instancia sacrificada
+		// vuelve barata; el que espera, en cambio, no tenía alternativa.
+		if victima := g.evictLRU(ctx, service); victima != "" {
+			log.Printf("%s: no cabía; congelé %s para hacerle sitio", service, victima)
+			mc, err = g.acquire(ctx, service)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -749,4 +770,47 @@ func (g *Gateway) linkFor(ctx context.Context, service string) *api.Link {
 func (g *Gateway) ensureLock(service string) *sync.Mutex {
 	v, _ := g.ensureMu.LoadOrStore(service, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// evictLRU congela la instancia ociosa más antigua para liberar memoria.
+//
+// Devuelve el servicio sacrificado, o "" si no había ninguno que sacrificar —en
+// cuyo caso quien llama debe rendirse de verdad, porque no hay nada que hacer.
+//
+// Nunca toca la instancia del servicio que pide sitio (sería absurdo), ni una
+// con peticiones en vuelo: congelar debajo de una llamada en curso convierte un
+// "espera un poco" en un fallo para alguien que ya estaba siendo atendido.
+func (g *Gateway) evictLRU(ctx context.Context, salvo string) string {
+	g.mu.Lock()
+	var elegido string
+	var masAntiguo time.Time
+	var id string
+	for svc, e := range g.services {
+		if svc == salvo || e.inflight > 0 {
+			continue
+		}
+		if elegido == "" || e.lastUse.Before(masAntiguo) {
+			elegido, masAntiguo, id = svc, e.lastUse, e.machineID
+		}
+	}
+	if elegido != "" {
+		// Se saca del mapa ANTES de congelar: si alguien pide ese servicio
+		// mientras tanto, que lo reconstruya en vez de enrutar a una máquina que
+		// está a punto de dejar de existir.
+		delete(g.services, elegido)
+	}
+	g.mu.Unlock()
+
+	if elegido == "" {
+		return ""
+	}
+	freeze := func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
+	if g.freezeFn != nil {
+		freeze = g.freezeFn
+	}
+	if err := freeze(id); err != nil {
+		log.Printf("no pude congelar %s para hacer sitio: %v", elegido, err)
+		return ""
+	}
+	return elegido
 }

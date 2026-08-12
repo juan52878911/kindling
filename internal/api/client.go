@@ -98,7 +98,7 @@ func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path strin
 		if e.Message == "" {
 			e.Message = resp.Status
 		}
-		return fmt.Errorf("%s", e.Message)
+		return &StatusError{Code: resp.StatusCode, Message: e.Message}
 	}
 	if out == nil {
 		return nil

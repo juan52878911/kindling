@@ -15,6 +15,8 @@ package machine
 
 import (
 	"fmt"
+
+	"github.com/juan52878911/kindling/internal/api"
 	"os"
 	"strconv"
 	"strings"
@@ -72,9 +74,10 @@ func checkHostMemory(wantMiB int) error {
 	if wantMiB+hostReserveMiB <= avail {
 		return nil
 	}
-	return fmt.Errorf("no cabe: la microVM pide %d MiB y al anfitrión le quedan %d MiB "+
-		"(se reservan %d para el propio host).\n"+
-		"Arrancarla igualmente haría que el OOM killer del anfitrión matara procesos al azar, "+
-		"incluidas otras microVMs.\nPara: `kling ps -a`, o dale menos memoria con -mem",
-		wantMiB, avail, hostReserveMiB)
+	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
+		"no cabe: la microVM pide %d MiB y al anfitrión le quedan %d MiB "+
+			"(se reservan %d para el propio host).\n"+
+			"Arrancarla igualmente haría que el OOM killer del anfitrión matara procesos al azar, "+
+			"incluidas otras microVMs.\nPara: `kling ps -a`, o dale menos memoria con -mem",
+		wantMiB, avail, hostReserveMiB)}
 }

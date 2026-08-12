@@ -206,7 +206,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// fail escribe el error con su código.
+//
+// Si el error YA trae un código propio, ese manda: es información que el manager
+// puso a propósito para que quien llama pueda reaccionar —el gateway hace sitio
+// cuando ve un 507— y aplastarla con un 500 genérico la perdería justo donde
+// hace falta.
 func fail(w http.ResponseWriter, code int, err error) {
+	var se *api.StatusError
+	if errors.As(err, &se) && se.Code != 0 {
+		code = se.Code
+	}
 	writeJSON(w, code, api.Error{Message: err.Error()})
 }
 
