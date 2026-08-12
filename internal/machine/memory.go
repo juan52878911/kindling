@@ -15,6 +15,7 @@ package machine
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/juan52878911/kindling/internal/api"
 	"os"
@@ -66,6 +67,35 @@ func availableMiB() int {
 //
 // No comprueba nada si no puede leer la memoria: convertir una comprobación de
 // cordura en una dependencia de arranque sería peor que el problema.
+// reserveMemory comprueba que la microVM cabe y, si cabe, RESERVA su memoria
+// hasta que termine de arrancar. Devuelve una función para liberar la reserva,
+// que hay que llamar SIEMPRE —arranque bien o mal— o la reserva se queda colgada
+// y bloquea a los siguientes.
+//
+// La reserva es lo que cierra el TOCTOU: entre leer la memoria y que el invitado
+// la ocupe de verdad pasan segundos, y en ese hueco otro arranque veía la misma
+// memoria libre. Contar lo que ya está en vuelo hace que el segundo vea que no
+// cabe y espere su turno —o desaloje— en vez de sumarse al desbordamiento.
+func (m *Manager) reserveMemory(wantMiB int) (release func(), err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := checkHostMemory(wantMiB + m.pendingMiB); err != nil {
+		return nil, err
+	}
+	m.pendingMiB += wantMiB
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			m.pendingMiB -= wantMiB
+			if m.pendingMiB < 0 {
+				m.pendingMiB = 0
+			}
+			m.mu.Unlock()
+		})
+	}, nil
+}
+
 func checkHostMemory(wantMiB int) error {
 	avail := availableMiB()
 	if avail <= 0 || wantMiB <= 0 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -200,6 +201,10 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	// En vuelo mientras se captura el catálogo: si no, el segador puede congelar
+	// la instancia a mitad y dejar el fetch a medias.
+	c.gw.begin(e)
+	defer c.gw.end(e)
 	base := "http://" + e.ip + ":" + fmt.Sprint(GuestPort)
 
 	sid, err := mcpInit(ctx, base)
@@ -276,7 +281,22 @@ func (c *catalog) invalidate(service string) {
 
 // ── utilidades MCP ────────────────────────────────────────────────────────────
 
-var httpc = &http.Client{Timeout: 60 * time.Second}
+// Sin Timeout global: acota la peticion ENTERA, y una herramienta puede tardar
+// minutos sin que nada vaya mal —un scan de semgrep pasa del minuto—. Vencerlo
+// no solo cortaba la llamada: hacia que el agregador la diera por "sesion
+// caducada" y la RE-EJECUTARA, duplicando cualquier efecto no idempotente. El
+// plazo real lo pone el contexto de quien llama; aqui solo se acota la ESPERA A
+// LAS CABECERAS, que es lo unico que de verdad indica un invitado que no
+// arranca frente a uno que trabaja.
+var httpc = &http.Client{
+	Transport: &http.Transport{ResponseHeaderTimeout: 5 * time.Minute},
+}
+
+// errStaleSession marca la unica condicion que justifica rehacer el handshake:
+// el puente dice que no conoce la sesion (400/404), lo que pasa cuando la
+// microVM se congelo entre llamadas y sus procesos murieron. Un TIMEOUT no es
+// esto: reintentarlo re-ejecuta la llamada.
+var errStaleSession = errors.New("el puente no reconoce la sesión")
 
 // rpcSeq da identificadores JSON-RPC únicos. El protocolo exige que un id no se
 // repita dentro de una sesión mientras haya peticiones en vuelo.
@@ -330,6 +350,9 @@ func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, err
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 400 || resp.StatusCode == 404 {
+		return nil, errStaleSession
+	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}

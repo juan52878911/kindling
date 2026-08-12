@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"github.com/juan52878911/kindling/internal/api"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,55 @@ func TestNoSeArrancaLoQueNoCabe(t *testing.T) {
 func TestSinDatosDeMemoriaNoSeBloquea(t *testing.T) {
 	if err := checkHostMemory(0); err != nil {
 		t.Errorf("bloqueó una petición sin memoria declarada: %v", err)
+	}
+}
+
+// reserveMemory cierra el TOCTOU: dos arranques concurrentes no pueden ver los
+// dos la misma memoria libre y pasar.
+//
+// Sin la reserva, entre leer MemAvailable y que el invitado ocupe su RAM pasan
+// segundos, y en ese hueco un segundo arranque veía la misma memoria y se sumaba
+// al desbordamiento — el OOM del anfitrión que el check existe para impedir.
+func TestLaReservaDeMemoriaNoSeCuentaDosVeces(t *testing.T) {
+	m := newTestManager(t)
+	avail := availableMiB()
+	if avail <= 0 {
+		t.Skip("sin /proc/meminfo (macOS): la reserva se prueba en Linux")
+	}
+
+	// Reservar casi toda la memoria disponible: la primera pasa.
+	grande := avail - hostReserveMiB - 64
+	if grande <= 0 {
+		t.Skip("el host de test no tiene memoria de sobra para el caso")
+	}
+	release, err := m.reserveMemory(grande)
+	if err != nil {
+		t.Fatalf("la primera reserva debería caber: %v", err)
+	}
+
+	// Con esa reserva viva, una segunda del mismo tamaño ya NO cabe, aunque el
+	// MemAvailable crudo diga que sí: es justo lo que el TOCTOU no veía.
+	if _, err := m.reserveMemory(grande); err == nil {
+		t.Error("la segunda reserva pasó: el TOCTOU sigue abierto")
+	} else if !api.IsInsufficientMemory(err) {
+		t.Errorf("el error no es de memoria insuficiente: %v", err)
+	}
+
+	// Liberada la primera, la segunda vuelve a caber.
+	release()
+	release2, err := m.reserveMemory(grande)
+	if err != nil {
+		t.Errorf("tras liberar debería caber otra vez: %v", err)
+	} else {
+		release2()
+	}
+
+	// Y liberar dos veces no deja el contador en negativo (bloquearía a todos).
+	release()
+	m.mu.RLock()
+	pend := m.pendingMiB
+	m.mu.RUnlock()
+	if pend < 0 {
+		t.Errorf("pendingMiB quedó negativo: %d", pend)
 	}
 }

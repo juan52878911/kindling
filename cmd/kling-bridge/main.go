@@ -239,7 +239,7 @@ func (b *bridge) closeAll() {
 // MCP. Más generoso que el plazo del gateway que hay delante, a propósito: si
 // fuera más corto, el puente cortaría trabajo que el gateway estaba dispuesto a
 // esperar, y el fallo aparecería como un servidor roto en vez de como un límite.
-const defaultRequestTimeout = 5 * time.Minute
+const defaultRequestTimeout = 6 * time.Minute
 
 type bridge struct {
 	argv        []string
@@ -371,6 +371,12 @@ func (b *bridge) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming no soportado", http.StatusInternalServerError)
 		return
 	}
+	// Tener el stream SSE abierto ES actividad. Sin esto, reapIdle mira solo el
+	// lastUse de las peticiones POST y cosecha a un cliente que está conectado y
+	// a la espera de notificaciones: su stream muere y su proceso con él.
+	b.mu.Lock()
+	s.lastUse = time.Now()
+	b.mu.Unlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

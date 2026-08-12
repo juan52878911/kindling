@@ -375,3 +375,48 @@ func TestElDesalojoLiberaVariasSiHaceFalta(t *testing.T) {
 		t.Errorf("sacrificó %q con el mapa ya vacío", v)
 	}
 }
+
+// Una ruta fijada a una instancia que se congeló por debajo debe reconstruirse,
+// no enrutar a un cadáver.
+//
+// Es el cuelgue permanente de context7: evictLRU o el segador congelaban la
+// instancia, la ruta seguía apuntando a su proxy, y como route() refresca
+// lastUse en cada intento fallido, la ruta no expiraba jamás. La sesión quedaba
+// soldada a un invitado pausado.
+func TestUnaRutaHuerfanaSeDetecta(t *testing.T) {
+	g := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+
+	// Sesión fijada a la instancia m1 de "svc".
+	e := &entry{machineID: "m1", ip: "172.30.0.2"}
+	g.services["svc"] = e
+	g.routes["sesion-1"] = &sessionRoute{service: "svc", machineID: "m1", ip: "172.30.0.2"}
+
+	// La instancia sigue siendo la misma: la ruta es válida.
+	g.mu.Lock()
+	cur := g.services["svc"]
+	valida := cur != nil && cur.machineID == g.routes["sesion-1"].machineID
+	g.mu.Unlock()
+	if !valida {
+		t.Fatal("una ruta a la instancia actual debería ser válida")
+	}
+
+	// Ahora el servicio se reconstruye con OTRA instancia (m2): la ruta vieja
+	// apunta a un cadáver y hay que detectarlo.
+	g.services["svc"] = &entry{machineID: "m2", ip: "172.30.0.9"}
+	g.mu.Lock()
+	cur = g.services["svc"]
+	huerfana := cur == nil || cur.machineID != g.routes["sesion-1"].machineID
+	g.mu.Unlock()
+	if !huerfana {
+		t.Error("no detectó que la ruta apunta a una instancia que ya no existe")
+	}
+
+	// rebind la reengancha a la instancia viva conservando la sesión.
+	g.rebind("sesion-1", g.services["svc"])
+	g.mu.Lock()
+	rt := g.routes["sesion-1"]
+	g.mu.Unlock()
+	if rt.machineID != "m2" || rt.ip != "172.30.0.9" {
+		t.Errorf("rebind no reapuntó la ruta: %+v", rt)
+	}
+}

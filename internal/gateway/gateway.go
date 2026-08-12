@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -305,23 +306,58 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sesión ya conocida: directo a su instancia, sin consultar al daemon.
+	// Sesión ya conocida: directo a su instancia.
+	//
+	// Pero antes se COMPRUEBA que esa instancia sigue siendo la de este servicio,
+	// y no un cadáver. El estado del gateway y el de las microVMs divergen por
+	// tres caminos —el segador congela por TTL, evictLRU hace sitio, ensure la
+	// reconstruye— y ninguno tocaba las rutas fijadas. Una sesión soldada a una
+	// instancia congelada enrutaba a un invitado pausado: SYN sin respuesta, i/o
+	// timeout, y como route() refresca lastUse en cada intento, la ruta no
+	// expiraba nunca. Era el cuelgue permanente de context7.
+	//
+	// La ironía es que congelar preserva la memoria del invitado, así que la
+	// sesión del puente SOBREVIVE: basta con descongelar la misma instancia para
+	// que siga funcionando.
 	if sid := r.Header.Get(SessionHeader); sid != "" {
 		if rt := g.route(sid); rt != nil {
-			// La instancia de esta sesión también tiene trabajo en vuelo: si no
-			// se cuenta, el segador la congela igual y la sesión muere con ella.
 			g.mu.Lock()
 			e := g.services[rt.service]
 			g.mu.Unlock()
-			if e != nil {
+
+			if e == nil || e.machineID != rt.machineID {
+				// La instancia se congeló o se reconstruyó por debajo. Se
+				// reconstruye —ensure descongela la misma si sigue warm—.
+				var err error
+				e, err = g.ensure(r.Context(), rt.service)
+				if err != nil {
+					g.forget(sid)
+					http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
+						http.StatusBadGateway)
+					return
+				}
+				if e.machineID == rt.machineID {
+					// Mismo VMM descongelado: la sesión del puente sigue viva,
+					// solo hay que reapuntar al proxy nuevo.
+					g.rebind(sid, e)
+				} else {
+					// Máquina distinta: su puente no conoce esta sesión y
+					// responderá 400. Se olvida para que el cliente rehaga el
+					// handshake contra la instancia nueva.
+					g.forget(sid)
+					rt = nil
+				}
+			}
+
+			if rt != nil {
 				g.begin(e)
 				defer g.end(e)
+				rt.proxy.ServeHTTP(w, r)
+				return
 			}
-			rt.proxy.ServeHTTP(w, r)
-			return
 		}
-		// Sesión desconocida: puede venir de un gateway anterior. Se deja seguir;
-		// el puente responderá 400 y el cliente reiniciará el handshake.
+		// Sesión desconocida o reasignada: se deja seguir. El puente responderá
+		// 400 y el cliente reiniciará el handshake.
 	}
 
 	e, err := g.ensure(r.Context(), service)
@@ -425,6 +461,17 @@ func (g *Gateway) bind(sid, service string, e *entry) {
 		proxy: e.proxy, lastUse: time.Now(),
 	}
 	log.Printf("%s: sesión %s fijada a %s", service, short(sid), e.ip)
+}
+
+// rebind reapunta una sesión a la instancia actual de su servicio, conservando
+// la sesión: se usa cuando el MISMO VMM se descongeló y solo cambió el proxy.
+func (g *Gateway) rebind(sid string, e *entry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if rt, ok := g.routes[sid]; ok {
+		rt.machineID, rt.ip, rt.proxy = e.machineID, e.ip, e.proxy
+		rt.lastUse = time.Now()
+	}
 }
 
 func (g *Gateway) forget(sid string) {
@@ -563,7 +610,14 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		// GetBody solo existe si alguien preparó el cuerpo para reenviarlo — lo
 		// hace handleProxy. Sin él no hay reintento posible, y fingirlo es peor
 		// que fallar.
-		if !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
+		// SOLO se reintenta un fallo de DIAL: no había nadie escuchando cuando se
+		// intentó conectar. Un timeout de cabeceras es otra cosa —el invitado
+		// aceptó la conexión y está trabajando—, y reenviar la petición
+		// RE-EJECUTARÍA un tools/call que quizá ya tuvo efecto. La distinción es
+		// la misma que en el agregador: "no conecté" se reintenta, "tardó" no.
+		var opErr *net.OpError
+		esDial := errors.As(err, &opErr) && opErr.Op == "dial"
+		if esDial && !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
 			body, berr := r.GetBody()
 			if berr == nil {
 				log.Printf("proxy %s: %v (un reintento)", service, err)
@@ -811,6 +865,22 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo string) string {
 	if elegido == "" {
 		return ""
 	}
+
+	// El candado del servicio víctima, para no congelar debajo de un ensure
+	// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace List(),
+	// la ve todavía running (el freeze tarda ~2 s), la adopta como "ya en marcha"
+	// y espera 20 s a un invitado que se está pausando. TryLock y no Lock: quien
+	// llama a evictLRU ya tiene tomado el candado de SU servicio, y un Lock aquí
+	// podría cruzarse con él. Si no se consigue, se prueba la siguiente víctima.
+	vlock := g.ensureLock(elegido)
+	if !vlock.TryLock() {
+		// Ese servicio está ocupado en su propio ensure. Devolverla al mapa y
+		// dejar que el llamador reintente con otra: quitarla y no congelarla
+		// dejaría al gateway creyendo que no existe.
+		return ""
+	}
+	defer vlock.Unlock()
+
 	freeze := func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
 	if g.freezeFn != nil {
 		freeze = g.freezeFn

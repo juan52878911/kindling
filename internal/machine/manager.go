@@ -79,6 +79,13 @@ type Manager struct {
 	// Ver allocNetIndex.
 	netCursor int
 
+	// pendingMiB es la memoria de las microVMs que están ARRANCANDO ahora mismo,
+	// aún sin proceso que la ocupe. checkHostMemory la resta de lo disponible:
+	// sin esto, dos arranques concurrentes ven los dos la misma memoria libre,
+	// pasan los dos, y juntos no caben — el OOM del anfitrión que el check existe
+	// para impedir. Se toca bajo mu.
+	pendingMiB int
+
 	// templateMu serializa la construcción de la plantilla de overlay: dos
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
 	templateMu sync.Mutex
@@ -475,6 +482,14 @@ func newID() string {
 
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	// El tope va ANTES de bifurcar: restaurar desde un snapshot es tan capaz de
+	// agotar el host como arrancar en frío, y es el camino que más rápido crea
+	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
+	// dejaba sin freno justo donde más falta hace.
+	if n := m.Count(); n >= MaxMachines {
+		return nil, fmt.Errorf("límite de %d máquinas alcanzado (hay %d)", MaxMachines, n)
+	}
+
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.
 	if req.From != "" {
@@ -513,9 +528,17 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	// Antes de comprometer nada: una microVM que no cabe no falla al arrancar,
 	// arranca — y luego el OOM killer del anfitrión mata procesos al azar.
-	if err := checkHostMemory(req.MemMiB); err != nil {
+	//
+	// reserveMemory y no un check suelto: reserva la memoria durante todo el
+	// arranque para que dos microVMs concurrentes no vean la misma memoria libre
+	// y pasen las dos. La reserva se libera al salir —el defer cubre todos los
+	// returns—: en un fallo, la memoria nunca se ocupó; en el éxito, ya la ocupa
+	// el proceso, así que "pendiente" deja de tener sentido.
+	releaseMem, err := m.reserveMemory(req.MemMiB)
+	if err != nil {
 		return nil, err
 	}
+	defer releaseMem()
 	if _, err := os.Stat(m.KernelPath()); err != nil {
 		return nil, fmt.Errorf("falta el kernel en %s", m.KernelPath())
 	}

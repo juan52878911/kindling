@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -512,6 +513,13 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	if err != nil {
 		return nil, &rpcFault{-32000, err.Error()}
 	}
+	// Contar la llamada como trabajo en vuelo, igual que handleProxy. Sin esto,
+	// el agregador —que es el camino que usan los clientes reales con call_tool—
+	// quedaba fuera de la protección: evictLRU y el segador podían congelar la
+	// instancia en plena llamada, y un scan de dos minutos moría con un timeout
+	// que parecía un fallo de la herramienta.
+	a.gw.begin(e)
+	defer a.gw.end(e)
 	dEnsure := time.Since(tEnsure)
 	base := "http://" + e.ip + ":" + fmt.Sprint(GuestPort)
 
@@ -562,10 +570,11 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 			t.Qualified, dEnsure.Round(time.Millisecond), dLock.Round(time.Millisecond),
 			d.Round(time.Millisecond))
 	}
-	if err != nil {
-		// La sesión caducó: pasa siempre que la microVM se congeló entre llamadas,
-		// porque sus procesos mueren con ella. Se rehace, también bajo candado
-		// para que no se dupliquen.
+	// SOLO se rehace el handshake si el puente dijo que no conoce la sesión. Un
+	// timeout NO es eso: reintentarlo re-ejecutaría un tools/call que quizá ya
+	// escribió en un volumen o guardó en memoria. Antes cualquier error entraba
+	// aquí, y una herramienta lenta se ejecutaba dos veces en silencio.
+	if errors.Is(err, errStaleSession) {
 		initLock.Lock()
 		a.mu.Lock()
 		cur := s.backing[t.Service]

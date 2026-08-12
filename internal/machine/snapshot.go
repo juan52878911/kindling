@@ -291,6 +291,16 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if req.Name == "" {
 		req.Name = req.From + "-" + id[:6]
 	}
+	// Reserva de memoria, igual que en Run y por la misma razón: el gateway
+	// despierta varios servicios a la vez cuando el anfitrión aprieta, y sin
+	// reservar veían todos la misma memoria libre. Ahora el segundo ve que no
+	// cabe y el gateway hace sitio antes de reintentar.
+	releaseMem, merr := m.reserveMemory(snap.MemMiB)
+	if merr != nil {
+		return nil, merr
+	}
+	defer releaseMem()
+
 	dir := m.dir(id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -317,14 +327,6 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// El volumen se HEREDA del snapshot, igual que la política de salida: quien
 	// despierta un servicio no tiene por qué saber con qué volumen se importó,
 	// y el gateway desde luego no lo sabe.
-	// El camino del gateway pasa por aquí, no por Run: es despertando servicios
-	// bajo demanda como se llena el anfitrión, y una restauración que no cabe
-	// deja al OOM killer del host eligiendo víctimas entre las demás microVMs.
-	if err := checkHostMemory(snap.MemMiB); err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-
 	if len(req.VolumeSet()) == 0 {
 		req.Volumes = snap.VolumeSet()
 	}
