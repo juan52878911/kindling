@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -96,6 +97,36 @@ func (m *Manager) reconcile() {
 	}
 
 	m.sweepMachineDirs()
+	m.killOrphanVMMs()
+}
+
+// killOrphanVMMs mata los procesos de firecracker cuya microVM ya no existe o
+// no debería estar corriendo.
+//
+// Aparecen cuando una instancia se marca failed —sweep le pone PID 0— y luego se
+// elimina: el kill de Remove lee ese PID 0 y no mata nada, así que el VMM queda
+// huérfano reteniendo su RAM para siempre, con el daemon sano y sin nada en su
+// estado que lo explique. liveVMs sí lo ve (escanea /proc), y es la única forma
+// de reconciliar con la realidad. Se llama con m.mu tomado.
+func (m *Manager) killOrphanVMMs() {
+	for id, pid := range m.liveVMs() {
+		mc := m.byID[id]
+		// Vivo y debería estarlo: no se toca.
+		if mc != nil && mc.State == api.StateRunning {
+			continue
+		}
+		// O no está registrado, o su estado dice que no corre: el proceso sobra.
+		log.Printf("reconcile: matando VMM huérfano de %s (pid %d, estado %s)",
+			shortID(id), pid, estadoDe(mc))
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+func estadoDe(mc *api.Machine) string {
+	if mc == nil {
+		return "no registrada"
+	}
+	return string(mc.State)
 }
 
 // sweepMachineDirs borra los directorios de machines/ que no pertenecen a
@@ -180,14 +211,23 @@ func (m *Manager) liveVMs() map[string]int {
 		if err != nil {
 			continue // murió mientras mirábamos, o no es nuestro
 		}
-		for _, arg := range strings.Split(strings.TrimRight(string(b), "\x00"), "\x00") {
-			rest, ok := strings.CutPrefix(arg, prefix)
-			if !ok {
+		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+		for i, arg := range args {
+			// Camino normal: el socket lleva el prefijo de machines/.
+			if rest, ok := strings.CutPrefix(arg, prefix); ok {
+				if id, ok := strings.CutSuffix(rest, "/fc.sock"); ok && id != "" && !strings.Contains(id, "/") {
+					out[id] = pid
+				}
 				continue
 			}
-			id, ok := strings.CutSuffix(rest, "/fc.sock")
-			if ok && id != "" && !strings.Contains(id, "/") {
-				out[id] = pid
+			// Camino con jail: jailer lleva "--id <id>" y el socket es relativo
+			// al chroot, sin el prefijo. Se reconoce por el argumento --id.
+			if arg == "--id" && i+1 < len(args) {
+				if id := args[i+1]; id != "" && !strings.Contains(id, "/") {
+					if _, err := os.Stat(m.jailSock(id)); err == nil {
+						out[id] = pid
+					}
+				}
 			}
 		}
 	}
@@ -206,8 +246,23 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// Una instancia jailed: tras el exec de jailer, el proceso ES firecracker con
+	// "--id <id>" en su línea —la palabra "jailer" desaparece con el exec, así
+	// que buscarla marcaría la máquina como muerta y el sweep la mataría en
+	// bucle—. Su socket vive dentro del chroot.
+	args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+	for i, a := range args {
+		if a == "--id" && i+1 < len(args) && args[i+1] == mc.ID {
+			sock := m.jailSock(mc.ID)
+			if _, err := os.Stat(sock); err != nil {
+				return "", false
+			}
+			return sock, true
+		}
+	}
+	line := strings.ReplaceAll(string(cmdline), "\x00", " ")
 	sock := m.dir(mc.ID) + "/fc.sock"
-	if !strings.Contains(strings.ReplaceAll(string(cmdline), "\x00", " "), sock) {
+	if !strings.Contains(line, sock) {
 		return "", false
 	}
 	if _, err := os.Stat(sock); err != nil {

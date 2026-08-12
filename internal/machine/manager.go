@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -891,6 +892,15 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 
+	// Una instancia jailed corre chrooteada: no puede escribir en el dir del
+	// host. Se le pide el volcado en la raíz de su chroot y luego se recupera al
+	// dir real. Mismo filesystem, así que el traslado es un rename atómico y el
+	// mem.file conserva su inodo —y su caché de páginas—.
+	jailed := jailerEnabled() && strings.HasPrefix(sock, m.jailRoot(mc.ID))
+	if jailed {
+		snapPath, memPath = "/snap.file", "/mem.file"
+	}
+
 	c := fc.New(sock)
 
 	// El vaciado va ANTES de pausar, y no dentro de kill() como en los demás
@@ -922,6 +932,18 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		return nil, err
 	}
 	elapsed := time.Since(start).Milliseconds()
+
+	if jailed {
+		// Recuperar el volcado del chroot al dir del host: es donde Thaw y
+		// reconcile lo buscan. Rename dentro del mismo filesystem.
+		root := m.jailRoot(mc.ID)
+		for _, f := range []string{"snap.file", "mem.file"} {
+			if err := os.Rename(filepath.Join(root, f), filepath.Join(dir, f)); err != nil {
+				return nil, fmt.Errorf("recuperando %s del jail: %w", f, err)
+			}
+		}
+		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
+	}
 
 	// Con el snapshot en disco el proceso sobra: aquí es donde se libera la RAM.
 	//
@@ -1026,13 +1048,37 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
 		return nil, fmt.Errorf("rehaciendo la red: %w", err)
 	}
-	pid, err := m.spawn(mc.ID, sock, netcfg)
-	if err != nil {
-		return nil, err
-	}
-	c := fc.New(sock)
-	if err := waitSocket(ctx, c); err != nil {
-		return nil, err
+	var pid int
+	var c *fc.Client
+	var err error
+	if jailerEnabled() {
+		// El warm también se descongela dentro de un jail, o el aislamiento se
+		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
+		// Mismo patrón que runFrom: poblar el chroot antes de cargar.
+		pid, sock, err = m.spawnJailed(mc.ID, netcfg)
+		if err != nil {
+			return nil, err
+		}
+		c = fc.New(sock)
+		if err := waitSocket(ctx, c); err != nil {
+			return nil, err
+		}
+		toLink := []string{snapPath, memPath, m.imagePath(mc.Image), filepath.Join(dir, "overlay.ext4")}
+		for _, v := range mc.Volumes {
+			toLink = append(toLink, m.volumePath(v.Name))
+		}
+		if err := m.prepareJail(mc.ID, toLink...); err != nil {
+			return nil, err
+		}
+	} else {
+		pid, err = m.spawn(mc.ID, sock, netcfg)
+		if err != nil {
+			return nil, err
+		}
+		c = fc.New(sock)
+		if err := waitSocket(ctx, c); err != nil {
+			return nil, err
+		}
 	}
 
 	start := time.Now()
@@ -1126,6 +1172,9 @@ func (m *Manager) Remove(ref string) error {
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)
 	m.lifecycle.Delete(mc.ID)
+	// El chroot del jail vive aparte del directorio de la máquina: se limpia
+	// también, o cada restauración jailed deja un árbol huérfano.
+	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}

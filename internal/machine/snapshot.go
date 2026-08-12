@@ -411,25 +411,65 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.persist()
 	m.mu.Unlock()
 
-	sock := filepath.Join(dir, "fc.sock")
-	_ = os.Remove(sock)
-	pid, err := m.spawn(id, sock, netcfg)
-	if err != nil {
-		netcfg.Teardown()
-		m.fail(mc, err)
-		return nil, err
-	}
-	c := fc.New(sock)
-	if err := waitSocket(ctx, c); err != nil {
-		m.fail(mc, err)
-		return nil, err
+	var sock string
+	var pid int
+	var c *fc.Client
+	snapDir := m.snapDir(req.From)
+	if jailerEnabled() {
+		// Restauración dentro de un jail: firecracker corre chrooteado. Todo lo
+		// que va a abrir tiene que estar replicado dentro del jail EN SU RUTA
+		// ABSOLUTA, porque LoadSnapshot abre cada drive con el path que quedó
+		// grabado —comprobado en el laboratorio—.
+		pid, sock, err = m.spawnJailed(id, netcfg)
+		if err != nil {
+			netcfg.Teardown()
+			m.fail(mc, err)
+			return nil, err
+		}
+		c = fc.New(sock)
+		if err := waitSocket(ctx, c); err != nil {
+			m.fail(mc, err)
+			return nil, err
+		}
+		// Poblar el jail entre el arranque de jailer y la carga: el snapshot y
+		// sus discos, el rootfs base, el overlay dorado (que el snapshot abre) y
+		// la copia propia, más los volúmenes.
+		volPaths := make([]string, len(vols))
+		for i, v := range vols {
+			volPaths[i] = v.path
+		}
+		toLink := append([]string{
+			filepath.Join(snapDir, "snap.file"),
+			filepath.Join(snapDir, "mem.file"),
+			m.imagePath(snap.Image),
+			filepath.Join(snapDir, "overlay.ext4"),
+			overlay,
+		}, volPaths...)
+		if err := m.prepareJail(id, toLink...); err != nil {
+			m.fail(mc, err)
+			return nil, err
+		}
+	} else {
+		sock = filepath.Join(dir, "fc.sock")
+		_ = os.Remove(sock)
+		pid, err = m.spawn(id, sock, netcfg)
+		if err != nil {
+			netcfg.Teardown()
+			m.fail(mc, err)
+			return nil, err
+		}
+		c = fc.New(sock)
+		if err := waitSocket(ctx, c); err != nil {
+			m.fail(mc, err)
+			return nil, err
+		}
 	}
 
 	start := time.Now()
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr.
 	if err := c.LoadSnapshot(ctx,
-		filepath.Join(m.snapDir(req.From), "snap.file"),
-		filepath.Join(m.snapDir(req.From), "mem.file"), false); err != nil {
+		filepath.Join(snapDir, "snap.file"),
+		filepath.Join(snapDir, "mem.file"), false); err != nil {
 		m.fail(mc, err)
 		return nil, err
 	}
