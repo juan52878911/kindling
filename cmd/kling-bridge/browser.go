@@ -1,6 +1,6 @@
 package main
 
-// Modo navegador COMPARTIDO.
+// Modo navegador COMPARTIDO, con arranque PEREZOSO.
 //
 // Un servidor MCP de navegador (Playwright, Puppeteer) lanza un Chromium, y
 // Chromium pesa cientos de MB. El modelo por defecto del puente —un proceso por
@@ -9,18 +9,20 @@ package main
 //
 // Cuando la construcción de la imagen detecta la dependencia de Chromium, deja
 // un marcador (/etc/kling/browser.json). Con él, el puente arranca UN solo
-// Chromium con puerto de depuración (el "punto común") ANTES de servir nada, y a
-// cada sesión le añade el argumento que la conecta a ese Chromium por CDP. Así:
+// Chromium con puerto de depuración (el "punto común") y a cada sesión le añade
+// el argumento que la conecta a ese Chromium por CDP con su PROPIO contexto.
 //
-//   - hay UN navegador, no uno por sesión;
-//   - cada sesión abre su PROPIO contexto (cookies/almacenamiento aislados) y sus
-//     páginas dentro de ese navegador;
-//   - el enrutado por Mcp-Session-Id que ya hace el puente basta para que cada
-//     conjunto de herramientas caiga en su sesión, y por tanto en su contexto.
+// PEREZOSO a propósito, por la filosofía serverless: el Chromium NO arranca al
+// bootear, sino en la primera sesión que lo necesita, y se detiene al resetear.
+// Así:
+//   - el snapshot dorado se congela SIN Chromium dentro → mem.file ligero, thaw
+//     más rápido, el guard reserva menos;
+//   - una microVM viva pero entre sesiones no retiene ~500 MB de navegador;
+//   - cuando de verdad hace falta, arranca en ~2 s y N sesiones lo reusan.
 //
-// Todo lo dispara el marcador; el puente no sabe (ni le importa) que es
-// Chromium: solo arranca lo que diga `sidecar`, espera a `ready_url` y añade
-// `session_args` a cada sesión.
+// El puente no sabe (ni le importa) que es Chromium: solo arranca lo que diga
+// `sidecar`, espera a `ready_url` y añade `session_args`. Vale igual para
+// Puppeteer o cualquier navegador futuro.
 
 import (
 	"encoding/json"
@@ -55,25 +57,24 @@ func loadBrowserSpec() *browserSpec {
 	return &s
 }
 
-// start lanza el Chromium compartido y espera a que su puerto de depuración
-// responda. Va ANTES de servir: si el navegador común no está listo, la primera
-// sesión que intente conectarse por CDP fallaría, y es mejor verlo aquí —en la
-// consola serie— que como un handshake roto más tarde.
-func (s *browserSpec) start(env []string) error {
+// launch arranca el Chromium compartido y espera a que su puerto de depuración
+// responda. Si no llega a estar listo, mata el proceso y devuelve error: mejor
+// fallar aquí, donde se ve en la consola serie, que como un CDP roto más tarde.
+func (s *browserSpec) launch(env []string) (*exec.Cmd, error) {
 	cmd := exec.Command(s.Sidecar[0], s.Sidecar[1:]...)
 	cmd.Env = env
 	// La salida del navegador va a la consola serie de la microVM, como la del
 	// servidor MCP: si Chromium se queja (sandbox, /dev/shm), se lee ahí.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("lanzando el Chromium compartido: %w", err)
+		return nil, fmt.Errorf("lanzando el Chromium compartido: %w", err)
 	}
 	log.Printf("navegador: Chromium compartido lanzado (pid %d)", cmd.Process.Pid)
-	// No hacemos Wait: es un proceso de por vida. Cuando muera, el cosechador
-	// (procReaper, wait4 de PID 1) lo recoge como huérfano.
+	// No hacemos Wait: es de por vida. Cuando muera, el cosechador (procReaper,
+	// wait4 de PID 1) lo recoge como huérfano.
 
 	if s.ReadyURL == "" {
-		return nil
+		return cmd, nil
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(40 * time.Second)
@@ -81,9 +82,61 @@ func (s *browserSpec) start(env []string) error {
 		resp, err := client.Get(s.ReadyURL)
 		if err == nil {
 			resp.Body.Close()
-			return nil
+			return cmd, nil
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return fmt.Errorf("el Chromium compartido no abrió %s en 40s", s.ReadyURL)
+	_ = cmd.Process.Kill()
+	return nil, fmt.Errorf("el Chromium compartido no abrió %s en 40s", s.ReadyURL)
+}
+
+// ensureBrowser arranca el Chromium compartido si aún no corre. Se llama cuando
+// llega la primera sesión (initialize), no al bootear: ese es el arranque
+// perezoso. Bajo su propio candado, para no bloquear la tabla de sesiones
+// durante los ~2 s que tarda el navegador en levantar.
+func (b *bridge) ensureBrowser() error {
+	if b.browser == nil {
+		return nil
+	}
+	b.bmu.Lock()
+	defer b.bmu.Unlock()
+	if b.bproc != nil {
+		return nil // ya vivo, se reusa
+	}
+	cmd, err := b.browser.launch(b.env)
+	if err != nil {
+		return err
+	}
+	b.bproc = cmd
+	return nil
+}
+
+// stopBrowser mata el Chromium compartido si corre. Lo llama /reset —para que el
+// commit del snapshot dorado se congele SIN navegador— y el cierre de la última
+// sesión, para no retener el navegador entre trabajos.
+func (b *bridge) stopBrowser() {
+	if b.browser == nil {
+		return
+	}
+	b.bmu.Lock()
+	defer b.bmu.Unlock()
+	if b.bproc != nil {
+		_ = b.bproc.Process.Kill()
+		b.bproc = nil
+		log.Printf("navegador: Chromium compartido detenido")
+	}
+}
+
+// stopBrowserIfIdle detiene el navegador solo si no queda ninguna sesión viva.
+// Se llama tras cerrar una sesión: si era la última, libera los ~500 MB.
+func (b *bridge) stopBrowserIfIdle() {
+	if b.browser == nil {
+		return
+	}
+	b.mu.Lock()
+	n := len(b.sessions)
+	b.mu.Unlock()
+	if n == 0 {
+		b.stopBrowser()
+	}
 }

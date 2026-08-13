@@ -148,17 +148,14 @@ Opciones:
 		}
 	}
 
-	// Modo navegador compartido: si la imagen dejó el marcador, arranca UN
-	// Chromium común y prepara los args que conectan cada sesión a él por CDP.
-	// Va aquí, tras el entorno y antes de servir: la primera sesión ya lo
-	// encuentra listo. Ver browser.go.
+	// Modo navegador compartido: si la imagen dejó el marcador, se guarda para
+	// arrancar el Chromium común de forma PEREZOSA (en la primera sesión que lo
+	// use, no aquí), y se preparan los args que conectan cada sesión por CDP. Así
+	// el snapshot dorado se congela sin navegador dentro. Ver browser.go.
 	if spec := loadBrowserSpec(); spec != nil {
-		log.Printf("navegador: modo compartido detectado (%s)", spec.Sidecar[0])
-		if err := spec.start(b.env); err != nil {
-			log.Fatalf("navegador: %v", err)
-		}
+		log.Printf("navegador: modo compartido detectado (%s); arranque perezoso", spec.Sidecar[0])
+		b.browser = spec
 		b.sessionArgs = spec.SessionArgs
-		log.Printf("navegador: Chromium compartido listo; cada sesión tendrá su propio contexto")
 	}
 
 	// /volume/sync vacía la caché del invitado al disco.
@@ -271,6 +268,13 @@ type bridge struct {
 	// su propio contexto y sus páginas, atados a su Mcp-Session-Id.
 	sessionArgs []string
 
+	// Modo navegador compartido con arranque perezoso. browser es el marcador
+	// (nil si el servicio no es de navegador); bproc es el Chromium común mientras
+	// vive; bmu los protege. Ver browser.go.
+	browser *browserSpec
+	bmu     sync.Mutex
+	bproc   *exec.Cmd
+
 	mu       sync.Mutex
 	sessions map[string]*session
 }
@@ -344,6 +348,16 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	sid := r.Header.Get(SessionHeader)
 	isInit := msg.Method == "initialize"
+
+	// Arranque perezoso del navegador compartido: la primera sesión lo levanta,
+	// antes de crear la sesión (que conectará a él por CDP). Va fuera del candado
+	// de sesiones para no bloquear todo durante los ~2 s que tarda Chromium.
+	if isInit {
+		if err := b.ensureBrowser(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
 
 	// `initialize` abre sesión; el resto la exige. Es lo que permite al gateway
 	// enrutar cada conversación a la misma instancia.
@@ -434,6 +448,9 @@ func (b *bridge) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		s.close()
 	}
+	// Si era la última sesión, apaga el navegador compartido: en reposo no debe
+	// retener ~500 MB.
+	b.stopBrowserIfIdle()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -462,6 +479,9 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	for _, s := range dead {
 		s.close()
 	}
+	// El reset deja la microVM como recién arrancada; también apaga el navegador
+	// compartido, para que el commit del snapshot dorado se congele sin él.
+	b.stopBrowser()
 	log.Printf("reset: %d sesión(es) cerrada(s)", len(dead))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -751,6 +771,11 @@ func (b *bridge) reapIdle(ctx context.Context) {
 			// retuviera la cosecha de todas las demás. close() es idempotente.
 			for _, s := range dead {
 				go s.close()
+			}
+			// Si el segador se llevó la última sesión, apaga el navegador
+			// compartido: una microVM viva pero ociosa no debe retenerlo.
+			if len(dead) > 0 {
+				b.stopBrowserIfIdle()
 			}
 		}
 	}
