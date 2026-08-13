@@ -65,7 +65,8 @@ func mcpImport(args []string) error {
 	// queda GRABADO en el snapshot dorado y no se puede cambiar después sin
 	// reimportar — por eso el flag va aquí y no en el arranque.
 	cpus := fs.Int("cpus", 0, "vCPUs de la plantilla")
-	egress := fs.String("egress", "", "salida de red del servicio: none | internet")
+	egress := fs.String("egress", "", "salida de red del servicio: none | internet | allowlist")
+	allow := fs.String("allow", "", "dominios permitidos con -egress allowlist (separados por coma)")
 	var volumes volumeFlag
 	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
 	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
@@ -117,10 +118,22 @@ func mcpImport(args []string) error {
 	// que un servicio de navegador o de API remota no arranque por un flag
 	// olvidado es un mal por defecto. También avisa de módulos nativos.
 	egr := config.Or(*egress, cfg.Defaults.Egress)
+	// Dominios permitidos: lo que ponga -allow manda; si no, la semilla que el
+	// build extrajo del árbol npm (editable, no exhaustiva) rellena el hueco.
+	allowDomains := splitDomains(*allow)
 	if caps, cerr := c.ImageCapabilities(ctx, img); cerr == nil && caps != nil {
+		if egr == "" && caps.Egress == "allowlist" {
+			egr = "allowlist"
+			fmt.Printf("  capacidades: el servicio declara allowlist → egress=allowlist (automático)\n")
+		}
 		if egr == "" && (caps.Egress == "internet" || caps.Browser) {
 			egr = "internet"
 			fmt.Printf("  capacidades: el servicio necesita internet → egress=internet (automático)\n")
+		}
+		if egr == "allowlist" && len(allowDomains) == 0 && len(caps.AllowDomains) > 0 {
+			allowDomains = caps.AllowDomains
+			fmt.Printf("  capacidades: semilla de dominios del build (%d); edítala con -allow si falta alguno\n",
+				len(caps.AllowDomains))
 		}
 		if len(caps.Native) > 0 {
 			fmt.Printf("  aviso: módulos nativos detectados (%s); si el servidor falla al usarlos, reconstruye instalándolos con sus scripts\n",
@@ -129,6 +142,16 @@ func mcpImport(args []string) error {
 	}
 	if egr == "" {
 		egr = "none"
+	}
+	if egr == "allowlist" {
+		if len(allowDomains) == 0 {
+			// Sin dominios el modo cierra en falso: solo DNS, cero salida útil. Es
+			// legítimo (deny-all con DNS) pero casi siempre un despiste, así que se
+			// avisa en vez de fallar.
+			fmt.Printf("  aviso: allowlist SIN dominios; el servicio no podrá salir a ninguna parte. Añade -allow dom1,dom2\n")
+		} else {
+			fmt.Printf("  allowlist: %s\n", strings.Join(allowDomains, ", "))
+		}
 	}
 
 	// 1. plantilla
@@ -146,6 +169,9 @@ func mcpImport(args []string) error {
 		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		Egress: egr,
+		// Se graban en el snapshot dorado: las instancias nacen de él y sin esto
+		// despertarían con la lista vacía. Solo se usan si egr == "allowlist".
+		AllowDomains: allowDomains,
 		// El volumen se decide AQUÍ y no después: Firecracker no deja añadir
 		// discos a una VM restaurada, así que el dispositivo tiene que estar
 		// presente cuando se congela el snapshot dorado o no lo estará nunca.
@@ -322,6 +348,14 @@ func mcpImport(args []string) error {
 		fmt.Printf("\nUsará una instancia persistente para no perder lo que acumule. Al quedar\n")
 		fmt.Printf("ociosa se congela: deja de gastar CPU y RAM, y vuelve en milisegundos con\n")
 		fmt.Printf("su estado intacto.\n")
+	}
+	if egr == "allowlist" {
+		if len(allowDomains) > 0 {
+			fmt.Printf("\nSalida restringida (allowlist) a: %s\n", strings.Join(allowDomains, ", "))
+		} else {
+			fmt.Printf("\nSalida restringida (allowlist) SIN dominios: no saldrá a ninguna parte.\n")
+		}
+		fmt.Printf("Cambia la lista reimportando con -allow dom1,dom2.\n")
 	}
 	fmt.Printf("\nA partir de ahora listar sus capacidades NO despierta la microVM.\n")
 	fmt.Printf("Conéctalo:  kling connect -all -install opencode\n")
@@ -650,6 +684,19 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
 	}
 	return name, out.Result.Tools, nil
+}
+
+// splitDomains parte una lista de dominios separada por comas, recortando
+// espacios y descartando vacíos. Acepta también espacios como separador para
+// tolerar "dom1, dom2".
+func splitDomains(s string) []string {
+	var out []string
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if d := strings.TrimSpace(f); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func labelsFor(service string, stateful bool) map[string]string {

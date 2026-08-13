@@ -174,7 +174,8 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
 		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
-		Egress: mc.Egress,
+		Egress:       mc.Egress,
+		AllowDomains: mc.AllowDomains,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
 		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
@@ -312,6 +313,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Lo que venga en la petición manda; el snapshot solo rellena el hueco.
 	if req.Egress == "" {
 		req.Egress = snap.Egress
+		// Los dominios permitidos viajan con el egress: si se hereda uno, se hereda
+		// el otro, o un servicio importado con allowlist despertaría con la lista
+		// vacía —sin poder salir a ninguno de sus dominios— sin señal de por qué.
+		if len(req.AllowDomains) == 0 {
+			req.AllowDomains = snap.AllowDomains
+		}
 	}
 
 	id := newID()
@@ -416,7 +423,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 
 	netcfg := knet.Plan(m.allocNetIndex(), id)
-	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
+	if err := netcfg.Setup(egress, req.AllowDomains, m.priv.UID); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("montando la red: %w", err)
 	}
@@ -430,7 +437,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
-		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct,
+		AllowDomains: req.AllowDomains,
+		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct,
 		Volumes: attachments(vols),
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(snap.Labels, req.Labels),

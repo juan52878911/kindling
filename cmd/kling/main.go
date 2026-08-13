@@ -50,7 +50,8 @@ VOLÚMENES
 
 MÁQUINAS
   run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
-      [-egress none|internet]                      salida de red (por defecto: none)
+      [-egress none|internet|allowlist]            salida de red (por defecto: none)
+      [-allow dom1,dom2]                           dominios permitidos con allowlist
       [-ttl SEGUNDOS] [-cpu PCT]                   congelado automático y techo de CPU
       [-service NOMBRE] [-label k=v]               agrupación por servicio MCP
       [-volume NOMBRE[:/punto][:ro]] (repetible)   almacenamiento que sobrevive a la máquina
@@ -70,9 +71,9 @@ CATÁLOGO
 SERVICIOS MCP
   mcp import <servicio> -image <img>               convierte un servidor MCP en
       [-cpus N] [-mem MiB]                         servicio: arranca, pregunta
-      [-egress none|internet]                      qué sabe hacer, lo congela y
-      [-volume NOMBRE[:/punto][:ro]] (repetible)   guarda su catálogo. Todo esto
-                                                   queda GRABADO en el snapshot
+      [-egress none|internet|allowlist]            qué sabe hacer, lo congela y
+      [-allow dom1,dom2]                           guarda su catálogo. Todo esto
+      [-volume NOMBRE[:/punto][:ro]] (repetible)   queda GRABADO en el snapshot
   mcp list [-v]                                    servicios y sus herramientas
   mcp refresh <servicio>                           vuelve a capturar el catálogo
   mcp link <nombre> <url>                          enlaza un servidor MCP EXTERNO
@@ -470,7 +471,8 @@ func cmdRun(args []string) error {
 	from := fs.String("from", "", "instanciar desde un snapshot dorado (~ms, sin arranque en frío)")
 	cpus := fs.Int("cpus", 0, "vCPUs (por defecto: 1)")
 	mem := fs.Int("mem", 0, "memoria en MiB (por defecto: 256)")
-	egress := fs.String("egress", "", "salida de red: none | internet (nunca alcanza redes privadas)")
+	egress := fs.String("egress", "", "salida de red: none | internet | allowlist (nunca alcanza redes privadas)")
+	allow := fs.String("allow", "", "dominios permitidos con -egress allowlist (separados por coma)")
 	ttl := fs.Int("ttl", 0, "segundos hasta congelarse sola (0 = nunca)")
 	cpu := fs.Int("cpu", 0, "techo de CPU en porcentaje de un core (0 = por defecto)")
 	service := fs.String("service", "", "servicio MCP al que pertenece (agrupa en topo y export)")
@@ -499,12 +501,13 @@ func cmdRun(args []string) error {
 		Image: config.Or(*image, cfg.Defaults.Image, "default"),
 		// El flag gana; si no se dio, manda la configuración; y si tampoco,
 		// el valor incorporado.
-		VCPUs:      config.Or(*cpus, cfg.Defaults.VCPUs, 1),
-		MemMiB:     config.Or(*mem, cfg.Defaults.MemMiB, 256),
-		Egress:     config.Or(*egress, cfg.Defaults.Egress, "none"),
-		TTLSeconds: config.Or(*ttl, cfg.Defaults.TTL),
-		CPUPct:     config.Or(*cpu, cfg.Defaults.CPUPct),
-		Labels:     labels.merge(*service),
+		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
+		MemMiB:       config.Or(*mem, cfg.Defaults.MemMiB, 256),
+		Egress:       config.Or(*egress, cfg.Defaults.Egress, "none"),
+		AllowDomains: splitDomains(*allow),
+		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
+		CPUPct:       config.Or(*cpu, cfg.Defaults.CPUPct),
+		Labels:       labels.merge(*service),
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.

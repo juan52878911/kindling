@@ -90,7 +90,9 @@ func Plan(index int, id string) *Net {
 // owner es el UID que podrá abrir el TAP. Firecracker corre sin privilegios, y
 // abrir un tap ajeno exige CAP_NET_ADMIN: creándolo ya a su nombre, no le hace
 // falta ninguna capacidad.
-func (n *Net) Setup(egress Egress, owner int) error {
+// domains solo se usa cuando egress es EgressAllowlist: son los dominios a los
+// que se deja salir. En los demás modos se ignora.
+func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	n.Teardown() // restos de una ejecución anterior
 
 	if err := run("ip", "netns", "add", n.NS); err != nil {
@@ -153,7 +155,7 @@ func (n *Net) Setup(egress Egress, owner int) error {
 		"-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP); err != nil {
 		return err
 	}
-	return n.applyEgress(egress)
+	return n.applyEgress(egress, domains)
 }
 
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,

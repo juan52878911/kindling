@@ -52,6 +52,10 @@ type Machine struct {
 	NetIndex int    `json:"net_index,omitempty"`
 	Egress   string `json:"egress,omitempty"`
 
+	// AllowDomains son los dominios permitidos con egress "allowlist". Viajan con
+	// la máquina para que descongelarla rehaga el mismo filtro (ver thaw).
+	AllowDomains []string `json:"allow_domains,omitempty"`
+
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 
@@ -80,9 +84,14 @@ type RunRequest struct {
 	VCPUs  int    `json:"vcpus,omitempty"`
 	MemMiB int    `json:"mem_mib,omitempty"`
 
-	// Egress: "none" (por defecto) o "internet". Nunca hay acceso a redes
-	// privadas: el código de dentro se considera hostil.
+	// Egress: "none" (por defecto), "internet" o "allowlist". Nunca hay acceso a
+	// redes privadas: el código de dentro se considera hostil.
 	Egress string `json:"egress,omitempty"`
+
+	// AllowDomains son los dominios permitidos cuando Egress es "allowlist".
+	// Todo lo demás se descarta (IP directa, resolver ajeno, dominio no listado).
+	// Se ignora en los otros modos.
+	AllowDomains []string `json:"allow_domains,omitempty"`
 
 	// TTLSeconds congela la máquina automáticamente pasado ese tiempo. Es la
 	// pieza que hace "serverless" el modelo: una herramienta ociosa deja de
@@ -235,6 +244,12 @@ type Snapshot struct {
 	// despertaba sin él y toda llamada suya al exterior fallaba, para siempre y
 	// sin explicación.
 	Egress string `json:"egress,omitempty"`
+
+	// AllowDomains es la lista de dominios permitidos cuando Egress es
+	// "allowlist". Se graba junto al snapshot por la misma razón que Egress: las
+	// instancias nacen DESDE el snapshot, y sin esto despertarían con la lista
+	// vacía —es decir, sin poder salir a ninguno de sus dominios— para siempre.
+	AllowDomains []string `json:"allow_domains,omitempty"`
 
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
@@ -507,8 +522,13 @@ type ImageRecipe struct {
 // El import las usa para configurar el egress solo y avisar de módulos nativos.
 type Capabilities struct {
 	Browser bool     `json:"browser"`          // usa un navegador (Chromium)
-	Egress  string   `json:"egress,omitempty"` // "none" | "internet"
+	Egress  string   `json:"egress,omitempty"` // "none" | "internet" | "allowlist"
 	Native  []string `json:"native,omitempty"` // módulos nativos npm detectados
+
+	// AllowDomains es la SEMILLA de dominios que el build extrajo de los literales
+	// de URL del árbol npm. Es una pista editable, no una lista exhaustiva ni
+	// autoritativa: el import la usa solo si se elige el modo "allowlist".
+	AllowDomains []string `json:"allow_domains,omitempty"`
 }
 
 // StatusError es un error de la API que conserva el código HTTP.

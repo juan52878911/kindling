@@ -631,7 +631,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return abandonar(err)
 	}
 	netcfg := knet.Plan(m.allocNetIndex(), id)
-	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
+	if err := netcfg.Setup(egress, req.AllowDomains, m.priv.UID); err != nil {
 		return abandonar(fmt.Errorf("montando la red: %w", err))
 	}
 	// Bajo el candado: mc ya está en byID, y List()/Get()/persist() la copian
@@ -639,6 +639,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// en vez de escribirlo él.
 	m.mu.Lock()
 	mc.IP, mc.NetIndex, mc.Egress = netcfg.NSIP, netcfg.Index, string(egress)
+	mc.AllowDomains = req.AllowDomains
 	m.mu.Unlock()
 
 	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.
@@ -1236,7 +1237,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// mismo índice para que la máquina conserve su IP.
 	egress, _ := knet.ParseEgress(mc.Egress)
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
-	if err := netcfg.Setup(egress, m.priv.UID); err != nil {
+	if err := netcfg.Setup(egress, mc.AllowDomains, m.priv.UID); err != nil {
 		return nil, fmt.Errorf("rehaciendo la red: %w", err)
 	}
 	var pid int
