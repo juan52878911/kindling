@@ -81,6 +81,7 @@ func cmdAdd(args []string) error {
 	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
 	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: compartible entre servicios")
 	fresh := fs.Bool("refresh", false, "ignorar la caché del registro")
+	bundle := fs.Bool("bundle", false, "empaquetar el servidor node en 1 fichero (esbuild) al construir: arranca mucho más rápido en frío, sobre todo en arm64/Mac")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -101,14 +102,14 @@ func cmdAdd(args []string) error {
 	rc.Fresh = *fresh
 
 	for _, want := range fs.Args() {
-		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun); err != nil {
+		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun, *bundle); err != nil {
 			return fmt.Errorf("%s: %w", want, err)
 		}
 	}
 	return nil
 }
 
-func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun bool) error {
+func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun, bundle bool) error {
 	srv, candidates, err := rc.Get(ctx, want, 30)
 	if err != nil {
 		if len(candidates) > 0 {
@@ -190,6 +191,7 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 		Packages: []string{"nodejs", "npm"},
 		NPM:      []string{npmSpec},
 		Cmd:      cmd,
+		Bundle:   bundle,
 	})
 	if err != nil {
 		fmt.Println("✗")

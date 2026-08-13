@@ -430,6 +430,11 @@ type BuildImageRequest struct {
 	Cmd []string `json:"cmd"`
 	// GrowMB agranda la imagen. 0 deja que el script decida.
 	GrowMB int `json:"grow_mb,omitempty"`
+	// Bundle empaqueta el servidor node en un solo fichero con esbuild al
+	// construir. Acelera el arranque en frío dentro de la microVM (sobre todo en
+	// arm64/Mac, donde cargar cientos de ficheros de node_modules se amplifica
+	// bajo KVM anidado): carga 1 fichero en vez de todo el árbol. Solo node (NPM).
+	Bundle bool `json:"bundle,omitempty"`
 }
 
 // BuildImageResult describe la imagen construida.
@@ -557,6 +562,7 @@ type ImageRecipe struct {
 	PIP      []string  `json:"pip,omitempty"`
 	Cmd      []string  `json:"cmd"`
 	GrowMB   int       `json:"grow_mb,omitempty"`
+	Bundle   bool      `json:"bundle,omitempty"`
 	BuiltAt  time.Time `json:"built_at"`
 	KlingVer string    `json:"kling_version,omitempty"`
 }

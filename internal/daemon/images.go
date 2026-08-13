@@ -115,6 +115,27 @@ func validateBuild(r api.BuildImageRequest) error {
 	return nil
 }
 
+// buildScriptArgs traduce un BuildImageRequest a los argumentos de 80-mcp-image.sh
+// (sin el propio script como argv[0]). El daemon siempre construye en modo stdio.
+// Los flags van ANTES de `--`, que separa el comando del servidor.
+func buildScriptArgs(req api.BuildImageRequest) []string {
+	args := []string{"stdio", req.Name}
+	if len(req.Packages) > 0 {
+		args = append(args, "-p", strings.Join(req.Packages, " "))
+	}
+	if len(req.NPM) > 0 {
+		args = append(args, "-n", strings.Join(req.NPM, " "))
+	}
+	if len(req.PIP) > 0 {
+		args = append(args, "-P", strings.Join(req.PIP, " "))
+	}
+	if req.Bundle {
+		args = append(args, "-bundle")
+	}
+	args = append(args, "--")
+	return append(args, req.Cmd...)
+}
+
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	var req api.BuildImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -131,18 +152,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	argv := []string{script, "stdio", req.Name}
-	if len(req.Packages) > 0 {
-		argv = append(argv, "-p", strings.Join(req.Packages, " "))
-	}
-	if len(req.NPM) > 0 {
-		argv = append(argv, "-n", strings.Join(req.NPM, " "))
-	}
-	if len(req.PIP) > 0 {
-		argv = append(argv, "-P", strings.Join(req.PIP, " "))
-	}
-	argv = append(argv, "--")
-	argv = append(argv, req.Cmd...)
+	argv := append([]string{script}, buildScriptArgs(req)...)
 
 	// bash y no /bin/sh: en Debian /bin/sh es dash, y el script usa `set -o
 	// pipefail`, arrays y `printf %q`. Con dash falla en la línea 26 con un
@@ -261,7 +271,7 @@ func (s *Server) recipePath(name string) string {
 func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 	rec := api.ImageRecipe{
 		Name: r.Name, Base: r.Base, Packages: r.Packages, NPM: r.NPM,
-		PIP: r.PIP, Cmd: r.Cmd, GrowMB: r.GrowMB, BuiltAt: time.Now(),
+		PIP: r.PIP, Cmd: r.Cmd, GrowMB: r.GrowMB, Bundle: r.Bundle, BuiltAt: time.Now(),
 		KlingVer: Version,
 	}
 	b, err := json.MarshalIndent(rec, "", "  ")
