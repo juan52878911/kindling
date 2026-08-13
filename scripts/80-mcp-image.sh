@@ -78,6 +78,27 @@ parse_build_opts() {
   if [ -n "$PIP" ] && ! echo " $PKGS " | grep -q " py3-pip "; then
     PKGS="$PKGS python3 py3-pip"
   fi
+
+  # DETECCIÓN AUTOMÁTICA de dependencia de navegador. Playwright y Puppeteer
+  # traen —o son— un servidor MCP que lanza Chromium. Si se ve en los paquetes
+  # npm, se hornea Chromium en la imagen y se marca el modo COMPARTIDO (ver
+  # kling-bridge/browser.go): un solo navegador y un contexto por sesión. Así el
+  # usuario no tiene que añadir chromium ni los flags a mano.
+  #
+  # Va aquí, ANTES de crear el filesystem, porque Chromium pide sitio (~500 MB)
+  # y el disco se dimensiona a partir de GROW más abajo.
+  BROWSER=""
+  case " $NPM " in
+    *playwright*) BROWSER="playwright" ;;
+    *puppeteer*)  BROWSER="puppeteer" ;;
+  esac
+  if [ -n "$BROWSER" ]; then
+    echo "dependencia de navegador detectada ($BROWSER) → Chromium + modo compartido"
+    if ! echo " $PKGS " | grep -q " chromium "; then
+      PKGS="$PKGS chromium chromium-swiftshader nss freetype harfbuzz ttf-freefont font-noto dbus"
+    fi
+    [ "$GROW" -lt 2560 ] && GROW=2560
+  fi
 }
 
 case "$MODE" in
@@ -143,6 +164,31 @@ if [ -n "$NPM" ]; then
   chroot "$mnt" /usr/bin/npm install -g --ignore-scripts --omit=dev --no-fund --no-audit $NPM
   chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
+fi
+
+# Marcador del modo navegador COMPARTIDO. Lo lee kling-bridge al arrancar: pone en
+# marcha un solo Chromium con puerto de depuración y añade `session_args` a cada
+# sesión para que conecte a él por CDP con su propio contexto. Ver browser.go.
+if [ -n "${BROWSER:-}" ]; then
+  echo "modo navegador compartido: escribiendo /etc/kling/browser.json"
+  # --isolated NO es opcional en el modo compartido: sin él, cada sesión conecta
+  # por CDP y cae en el CONTEXTO POR DEFECTO del Chromium común, así que todas
+  # verían la misma página y se pisarían. Con él, cada sesión crea su propio
+  # contexto (cookies/almacenamiento/páginas aislados). Verificado: dos sesiones
+  # a URLs distintas mantienen cada una la suya.
+  case "$BROWSER" in
+    playwright) SESSION_ARGS='["--cdp-endpoint","http://127.0.0.1:9222","--isolated"]' ;;
+    puppeteer)  SESSION_ARGS='["--browser-url","http://127.0.0.1:9222"]' ;;
+    *)          SESSION_ARGS='[]' ;;
+  esac
+  mkdir -p "$mnt/etc/kling"
+  cat > "$mnt/etc/kling/browser.json" <<BJSON
+{
+  "sidecar": ["/usr/bin/chromium-browser","--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-software-rasterizer","--remote-debugging-address=127.0.0.1","--remote-debugging-port=9222","about:blank"],
+  "ready_url": "http://127.0.0.1:9222/json/version",
+  "session_args": $SESSION_ARGS
+}
+BJSON
 fi
 
 # Igual que npm, y por la misma razón: el invitado arranca SIN salida a

@@ -148,6 +148,19 @@ Opciones:
 		}
 	}
 
+	// Modo navegador compartido: si la imagen dejó el marcador, arranca UN
+	// Chromium común y prepara los args que conectan cada sesión a él por CDP.
+	// Va aquí, tras el entorno y antes de servir: la primera sesión ya lo
+	// encuentra listo. Ver browser.go.
+	if spec := loadBrowserSpec(); spec != nil {
+		log.Printf("navegador: modo compartido detectado (%s)", spec.Sidecar[0])
+		if err := spec.start(b.env); err != nil {
+			log.Fatalf("navegador: %v", err)
+		}
+		b.sessionArgs = spec.SessionArgs
+		log.Printf("navegador: Chromium compartido listo; cada sesión tendrá su propio contexto")
+	}
+
 	// /volume/sync vacía la caché del invitado al disco.
 	//
 	// El daemon lo llama antes de matar la microVM. Sin esto lo último que
@@ -251,6 +264,12 @@ type bridge struct {
 	// calcula UNA vez, tras montar: recorrer el disco en cada sesión nueva
 	// sería trabajo repetido sobre algo que no cambia.
 	env []string
+
+	// sessionArgs se AÑADEN al comando de CADA sesión. Los usa el modo navegador
+	// compartido (ver browser.go): apuntan cada sesión al mismo Chromium común
+	// por CDP, de modo que N sesiones usan un solo navegador y cada una se lleva
+	// su propio contexto y sus páginas, atados a su Mcp-Session-Id.
+	sessionArgs []string
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -478,7 +497,10 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 
 // spawn lanza un proceso del servidor MCP para una sesión nueva.
 func (b *bridge) spawn() (*session, error) {
-	cmd := exec.Command(b.argv[0], b.argv[1:]...)
+	// argv del servidor + los sessionArgs del modo navegador (vacío en el resto
+	// de servicios): apuntan esta sesión al Chromium compartido por CDP.
+	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
+	cmd := exec.Command(b.argv[0], args...)
 	cmd.Env = b.env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
