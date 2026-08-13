@@ -314,7 +314,7 @@ func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
 	g.services["ocupado"] = &entry{machineID: "m-ocupado", lastUse: ahora.Add(-2 * time.Hour), inflight: 1}
 	g.services["quiere"] = &entry{machineID: "m-quiere", lastUse: ahora}
 
-	got := g.evictLRU(t.Context(), "quiere")
+	got := g.evictLRU(t.Context(), "quiere", "")
 	if got != "viejo" {
 		t.Fatalf("sacrificó %q, quería \"viejo\"", got)
 	}
@@ -338,7 +338,7 @@ func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
 	// Sin nadie a quien sacrificar, se rinde de verdad en vez de mentir.
 	g2 := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
 	g2.services["unico"] = &entry{machineID: "m", lastUse: ahora}
-	if v := g2.evictLRU(t.Context(), "unico"); v != "" {
+	if v := g2.evictLRU(t.Context(), "unico", ""); v != "" {
 		t.Errorf("sacrificó %q sin haber candidatos", v)
 	}
 }
@@ -358,7 +358,7 @@ func TestElDesalojoLiberaVariasSiHaceFalta(t *testing.T) {
 	// Se sacrifican de una en una, siempre la más antigua de las que quedan, sin
 	// tocar al que pide sitio.
 	for i := 0; i < 3; i++ {
-		v := g.evictLRU(t.Context(), "quiere")
+		v := g.evictLRU(t.Context(), "quiere", "")
 		if v == "" {
 			break
 		}
@@ -371,7 +371,7 @@ func TestElDesalojoLiberaVariasSiHaceFalta(t *testing.T) {
 		t.Errorf("la primera víctima fue %q, quería la más antigua (m-c)", congeladas[0])
 	}
 	// Y una vez vacío, se rinde.
-	if v := g.evictLRU(t.Context(), "quiere"); v != "" {
+	if v := g.evictLRU(t.Context(), "quiere", ""); v != "" {
 		t.Errorf("sacrificó %q con el mapa ya vacío", v)
 	}
 }
