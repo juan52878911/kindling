@@ -340,6 +340,22 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Un GET SIN sesión es la sonda del "stream SSE independiente" del transporte
+	// Streamable HTTP: el cliente pregunta si el servidor le empujará mensajes por
+	// su cuenta. Nuestro puente no ofrece ese stream sin una sesión previa, y
+	// devolvía 404 —que clientes como opencode interpretan como "servidor caído" y
+	// abandonan la conexión, así que un `kling connect <servicio>` / `migrate` no
+	// llegaba a cargar—. El spec de MCP dice que un endpoint sin ese stream debe
+	// responder 405; entonces el cliente cae a POST y conecta. Se responde aquí,
+	// ANTES de despertar la microVM: una sonda no debe costar un thaw. El GET CON
+	// sesión sí sigue (abre el stream de esa conversación en el puente).
+	if r.Method == http.MethodGet && r.Header.Get(SessionHeader) == "" {
+		w.Header().Set("Allow", "POST, DELETE")
+		http.Error(w, "este endpoint no ofrece un stream SSE independiente; usa POST",
+			http.StatusMethodNotAllowed)
+		return
+	}
+
 	// A partir de aquí es un servicio respaldado por microVM. Se cuenta la llegada
 	// para que el prewarm por popularidad sepa qué se usa de verdad y priorice su
 	// fondo antes que el de servicios que nadie llama.
