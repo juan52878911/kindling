@@ -161,8 +161,21 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 // Teardown deshace todo. El veth del host desaparece al borrar el namespace,
 // pero lo intentamos por si el namespace ya no está.
 func (n *Net) Teardown() {
+	// Primero el resolver dinámico (goroutine del daemon), si este netns tenía uno
+	// en modo allowlist. Es no-op para none/internet.
+	stopResolver(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
+}
+
+// StartAllowlistResolver revive el resolver dinámico de una microVM en modo
+// allowlist tras un reinicio del daemon, SIN re-montar la red: el netns y sus
+// reglas sobreviven al daemon (la microVM también), pero el resolver es una
+// goroutine del daemon y muere con él. Sin esto, el DNAT del invitado apuntaría a
+// un puerto sin nadie escuchando y se quedaría sin DNS hasta el próximo Setup. Es
+// idempotente. Solo tiene sentido llamarlo para máquinas con egress allowlist.
+func (n *Net) StartAllowlistResolver(domains []string) error {
+	return startDNSResolver(n, domains)
 }
 
 // Wrap antepone lo necesario para ejecutar un comando dentro del namespace.
@@ -188,6 +201,7 @@ func ListNamespaces() []string {
 
 // TeardownNamespace borra un namespace y su veth por nombre.
 func TeardownNamespace(ns string) {
+	stopResolver(ns)
 	quiet("ip", "netns", "del", ns)
 	quiet("ip", "link", "del", "vh-"+strings.TrimPrefix(ns, "kl-"))
 }

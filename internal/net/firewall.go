@@ -120,7 +120,13 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 // ipset es POR namespace (los comandos corren dentro de él), así que basta con
 // un nombre estable; al borrar el netns en Teardown, su ipset se va con él.
 func (n *Net) setName() string {
-	return "klaw-" + strings.TrimPrefix(n.NS, "kl-")
+	return setNameFromNS(n.NS)
+}
+
+// setNameFromNS deriva el nombre del ipset a partir del nombre del netns, para
+// poder sembrarlo desde el resolver sin tener el *Net completo delante.
+func setNameFromNS(ns string) string {
+	return "klaw-" + strings.TrimPrefix(ns, "kl-")
 }
 
 // applyAllowlist monta el modo allowlist dentro del namespace.
@@ -137,26 +143,30 @@ func (n *Net) setName() string {
 //     barrera, y al sembrar el ipset se descartan las IP privadas que devuelva un
 //     resolver envenenado.
 //
-// QUÉ NO PROTEGE / TODO(resolver dinámico):
-//   - El ipset se SIEMBRA UNA VEZ, resolviendo los dominios en el host al arrancar.
-//     Un dominio detrás de CDN o con DNS rotatorio (TTL corto) puede devolverle al
-//     invitado una IP distinta de la sembrada, y esa conexión se caería. La pieza
-//     que falta es el resolver dinámico del diseño: un DNS del host que intercepte
-//     las respuestas del invitado y meta en el ipset —con el TTL del registro— las
-//     IP que va resolviendo para los dominios permitidos. Sin él, allowlist es
-//     fiable para dominios de IP estable y "cierra en falso" (bloquea de más) para
-//     los de IP volátil. Falla CERRADO, nunca abierto.
-//   - DNS tunneling hacia el propio resolver forzado sigue siendo posible (ver
-//     DNSResolver): cerrarlo es parte del mismo resolver del host pendiente.
+// IP VOLÁTIL (CDN / DNS rotatorio): lo resuelve el resolver dinámico del host,
+// en dnsresolver.go. El 53 del invitado se DNATea a un resolver por microVM que
+// corre en el host; ese resolver siembra en el ipset, con el TTL real del
+// registro, la IP que va a devolver JUSTO ANTES de responder. Así la IP que el
+// invitado usará siempre está permitida, aunque cambie en cada consulta. El
+// sembrado estático de abajo queda como arranque en caliente y red de seguridad
+// por si el resolver tuviera un tropiezo.
+//
+// QUÉ SIGUE PENDIENTE / TODO:
+//   - AAAA / IPv6: el resolver solo siembra A (IPv4); el ipset es v4. Ver extractA.
+//   - Tunneling por SUBDOMINIOS de un dominio permitido: se reenvían (un CDN los
+//     necesita), así que un dominio permitido con NS autoritativo del atacante
+//     sigue siendo un canal. Ver dnsresolver.go.
 func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	if _, err := exec.LookPath("ipset"); err != nil {
 		return fmt.Errorf("el modo allowlist necesita ipset y no está instalado: %w", err)
 	}
 
 	set := n.setName()
-	// hash:ip con timeout: cada IP caduca sola. Hoy sembramos con un TTL largo
-	// fijo porque no hay resolver dinámico que renueve; cuando lo haya, meterá
-	// cada IP con el TTL real del registro DNS y esto encaja sin cambios.
+	// hash:ip con la opción timeout ACTIVADA (el "timeout 0" del create solo fija
+	// el defecto en "permanente"; lo que importa es que habilita el timeout por
+	// entrada). El resolver dinámico añade cada IP con "timeout <ttl-real>", así
+	// que caduca sola cuando expira el registro. El sembrado estático de abajo va
+	// sin timeout (permanente): es la red de seguridad.
 	if err := ns("ipset", "create", set, "hash:ip", "timeout", "0", "-exist"); err != nil {
 		return err
 	}
@@ -171,23 +181,29 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 		}
 	}
 
-	// Forzar el DNS del invitado a nuestro resolver: cualquier salida al puerto 53
-	// (UDP y TCP) se reescribe hacia DNSResolver. Le quita al invitado la opción
-	// de usar un resolver ajeno como canal de fuga o para resolver por su cuenta.
+	// Forzar el DNS del invitado a NUESTRO resolver del host: cualquier salida al
+	// puerto 53 (UDP y TCP) se reescribe hacia n.HostIP:dnsPort, el resolver
+	// dinámico que corre en el host atado a ESTE netns (ver dnsresolver.go). Antes
+	// se DNATeaba a DNSResolver (1.1.1.1) directo, que resolvía pero no sembraba el
+	// ipset ni cerraba el tunneling; ahora pasa primero por nuestro resolver, que
+	// solo responde por los dominios permitidos y siembra la IP antes de devolverla.
+	dnsTarget := fmt.Sprintf("%s:%d", n.HostIP, dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
 		if err := ns("iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
 			"-p", proto, "--dport", "53", "-j", "DNAT",
-			"--to-destination", DNSResolver+":53"); err != nil {
+			"--to-destination", dnsTarget); err != nil {
 			return err
 		}
 	}
 
 	// FORWARD, en orden (la primera que casa gana):
-	//   1. DNS hacia nuestro resolver: permitido, para que el invitado pueda
-	//      resolver los nombres permitidos.
+	//   1. DNS hacia nuestro resolver del host: permitido. Tras el DNAT el destino
+	//      es n.HostIP:dnsPort (el lado host del veth), así que el paquete cruza el
+	//      FORWARD del netns antes de llegar al resolver.
+	dnsPortStr := fmt.Sprintf("%d", dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
 		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
-			"-p", proto, "-d", DNSResolver, "--dport", "53", "-j", "ACCEPT"); err != nil {
+			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"); err != nil {
 			return err
 		}
 	}
@@ -206,7 +222,15 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 
 	// El host enmascara hacia internet y vuelve a bloquear las redes privadas como
 	// segunda barrera (HostEgressRules), igual que en modo internet.
-	return ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE")
+	if err := ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"); err != nil {
+		return err
+	}
+
+	// Arrancar el resolver dinámico del host para este netns. Debe quedar vivo
+	// ANTES de devolver: es quien siembra el ipset con las IP reales (y su TTL) que
+	// el invitado va a usar. Si no arranca, el DNAT de arriba apunta a un puerto sin
+	// nadie escuchando y el invitado se queda sin DNS, así que su fallo es fatal.
+	return startDNSResolver(n, domains)
 }
 
 // resolvePublicIPv4 resuelve un dominio a sus IPv4 públicas, usando el mismo

@@ -56,6 +56,14 @@ func (m *Manager) reconcile() {
 			}
 			mc.PID = pid
 			liveCg[cgName(mc.ID)] = true
+			// Su netns y reglas sobrevivieron al daemon, pero el resolver dinámico
+			// del modo allowlist es una goroutine nuestra y murió con nosotros.
+			// Reanudarlo, o su DNS (DNATeado a un puerto sin nadie) se quedaría mudo.
+			if mc.Egress == string(knet.EgressAllowlist) {
+				if err := knet.Plan(mc.NetIndex, mc.ID).StartAllowlistResolver(mc.AllowDomains); err != nil {
+					log.Printf("reconcile: no pude reanudar el resolver dns de %s: %v", shortID(mc.ID), err)
+				}
+			}
 			continue
 		}
 
