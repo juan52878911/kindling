@@ -354,6 +354,22 @@ func cmdGateway(args []string) error {
 	}
 	gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
 	gw.PprofEnabled = *pprofOn
+	// Cuotas por token/tenant, si la configuración las trae. Retrocompatible: sin
+	// tokens con nombre, el token único sigue siendo el tenant "default" sin
+	// límites. Es reparto justo, no una frontera de seguridad (todo comparte
+	// daemon y bridge).
+	if len(cfg.Gateway.Tokens) > 0 {
+		tenants := make([]gateway.TenantLimit, 0, len(cfg.Gateway.Tokens))
+		for _, t := range cfg.Gateway.Tokens {
+			tenants = append(tenants, gateway.TenantLimit{
+				Name:         t.Name,
+				Token:        t.Token,
+				MaxInstances: t.MaxInstances,
+				MaxInflight:  t.MaxInflight,
+			})
+		}
+		gw.SetTenants(tenants)
+	}
 	go gw.Reap(ctx)
 	if *ephemeral {
 		go gw.PrewarmAll(ctx)

@@ -120,6 +120,14 @@ type Gateway struct {
 	mem      *memory                  // memoria de uso; nil si está desactivada
 	pop      *popularity              // popularidad por servicio; guía el prewarm
 
+	// Cuotas por tenant (token con nombre). Reparto justo, NO seguridad: ver
+	// quota.go. extraTenants son los tokens con nombre; tenantInflight lleva la
+	// cuenta de peticiones en vuelo por tenant, bajo su propio candado para no
+	// pelear con g.mu en el camino caliente.
+	extraTenants   []TenantLimit
+	tenantMu       sync.Mutex
+	tenantInflight map[string]int
+
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
 	linkCache []*api.Link
@@ -134,6 +142,12 @@ type entry struct {
 
 	// checkedAt es cuándo se confirmó por última vez que la instancia vive.
 	checkedAt time.Time
+
+	// tenant es a quién se atribuye esta instancia despierta: el primer tenant
+	// que la despertó o creó. Guía la cuota de instancias y el fairness de
+	// evictLRU (un tenant sacrifica lo suyo antes que lo ajeno). Vacío = sin
+	// dueño conocido (p. ej. adoptada de un arranque anterior). Se toca con g.mu.
+	tenant string
 
 	// inflight cuenta las peticiones que se están atendiendo AHORA.
 	//
@@ -231,8 +245,10 @@ func (g *Gateway) Handler(token string) http.Handler {
 	}
 
 	// El registro va POR FUERA de la autenticación: los 401 son justo lo que
-	// hay que poder ver cuando alguien sondea el puerto.
-	return logging(Auth(mux, token))
+	// hay que poder ver cuando alguien sondea el puerto. authHandler resuelve el
+	// token a un tenant (el único = "default") y lo cuelga del contexto para que
+	// handleProxy pueda aplicar las cuotas.
+	return logging(g.authHandler(mux, token))
 }
 
 func logging(h http.Handler) http.Handler {
@@ -329,6 +345,21 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// fondo antes que el de servicios que nadie llama.
 	g.pop.observe(service)
 
+	// Cuota de peticiones en vuelo del tenant. Es reparto justo, NO seguridad
+	// (ver quota.go): un solo cliente en bucle no debe acaparar todas las
+	// conexiones y dejar a los demás esperando. El 429 envuelve TODA la petición
+	// —tanto el camino pegajoso como el que despierta instancia— con un único
+	// begin/end, así que basta contabilizar aquí una vez.
+	tnt := tenantFrom(r.Context())
+	if !g.tenantBegin(tnt) {
+		http.Error(w, fmt.Sprintf(
+			"429: el tenant %q ha alcanzado su cuota de %d peticiones en vuelo.\n"+
+				"Es un límite de reparto justo, no de seguridad: reintenta cuando terminen las anteriores.",
+			tnt.name, tnt.maxInflight), http.StatusTooManyRequests)
+		return
+	}
+	defer g.tenantEnd(tnt)
+
 	// Sesión ya conocida: directo a su instancia.
 	//
 	// Pero antes se COMPRUEBA que esa instancia sigue siendo la de este servicio,
@@ -367,6 +398,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				e, err = g.ensure(r.Context(), rt.service)
 				if err != nil {
 					g.forget(sid)
+					if errors.Is(err, errTenantInstances) {
+						http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
+							http.StatusTooManyRequests)
+						return
+					}
 					http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
 						http.StatusBadGateway)
 					return
@@ -397,6 +433,12 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	e, err := g.ensure(r.Context(), service)
 	if err != nil {
+		// La cuota de instancias del tenant es un 429 (reparto justo), no un 502:
+		// el servicio no falla, es que este tenant ya tiene todas las suyas.
+		if errors.Is(err, errTenantInstances) {
+			http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusBadGateway)
 		return
 	}
@@ -549,9 +591,17 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 	lock.Lock()
 	defer lock.Unlock()
 
+	tnt := tenantFrom(ctx)
+
 	g.mu.Lock()
 	if e, ok := g.services[service]; ok {
 		e.lastUse = time.Now()
+		// La instancia ya está caliente: no se despierta nada nuevo, así que no
+		// se aplica la cuota de instancias. Si no tenía dueño, lo adopta el primer
+		// tenant que la usa —importa para el fairness de evictLRU—.
+		if e.tenant == "" {
+			e.tenant = tnt.name
+		}
 		recent := time.Since(e.checkedAt) < livenessTTL
 		g.mu.Unlock()
 
@@ -579,6 +629,20 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 	}
 	g.mu.Unlock()
 
+	// A partir de aquí sí se va a DESPERTAR o CREAR una instancia nueva. Es el
+	// único punto donde se aplica la cuota de instancias del tenant: reparto
+	// justo, no seguridad (ver quota.go). Se cuenta lo que ya tiene despierto y,
+	// si llega a su tope, se rechaza con un error que handleProxy vuelve 429.
+	if tnt.maxInstances > 0 {
+		g.mu.Lock()
+		actuales := g.tenantInstances(tnt.name)
+		g.mu.Unlock()
+		if actuales >= tnt.maxInstances {
+			return nil, fmt.Errorf("%w: %q ya tiene %d instancia(s) despierta(s) (máx %d)",
+				errTenantInstances, tnt.name, actuales, tnt.maxInstances)
+		}
+	}
+
 	mc, err := g.acquire(ctx, service)
 	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
 	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
@@ -595,7 +659,7 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		// Se congela el más antiguo SIN trabajo en vuelo. Congelar cuesta un par
 		// de segundos y descongelar 25 ms, así que la instancia sacrificada
 		// vuelve barata; el que espera, en cambio, no tenía alternativa.
-		victima := g.evictLRU(ctx, service)
+		victima := g.evictLRU(ctx, service, tnt.name)
 		if victima == "" {
 			// No queda nada ocioso que sacrificar: ahora sí hay que rendirse, y
 			// el error de falta de memoria explica por qué.
@@ -622,6 +686,7 @@ func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
 		ip:        mc.IP,
 		lastUse:   time.Now(),
 		checkedAt: time.Now(),
+		tenant:    tnt.name, // quien la despertó es su dueño para cuota y fairness
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 	}
 	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
@@ -954,18 +1019,39 @@ func (g *Gateway) ensureLock(service string) *sync.Mutex {
 // Nunca toca la instancia del servicio que pide sitio (sería absurdo), ni una
 // con peticiones en vuelo: congelar debajo de una llamada en curso convierte un
 // "espera un poco" en un fallo para alguien que ya estaba siendo atendido.
-func (g *Gateway) evictLRU(ctx context.Context, salvo string) string {
+//
+// FAIRNESS (reparto justo, NO seguridad): quien pide sitio sacrifica PRIMERO lo
+// SUYO. Se busca víctima entre las instancias del mismo tenant que pide, y solo
+// si no hay ninguna se recurre a las de otro. Así la presión de un tenant no
+// desaloja el trabajo de otro mientras aún le quede algo propio ocioso que ceder.
+// No aísla nada —todo comparte daemon y bridge— pero evita el accidente de que un
+// cliente activo eche a los demás de la memoria.
+func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
+	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
+	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
+	// los demás.
+	pick := func(mismo bool) (string, string) {
+		var elegido, id string
+		var masAntiguo time.Time
+		for svc, e := range g.services {
+			if svc == salvo || e.inflight > 0 {
+				continue
+			}
+			if mismo != (e.tenant == tenant) {
+				continue
+			}
+			if elegido == "" || e.lastUse.Before(masAntiguo) {
+				elegido, masAntiguo, id = svc, e.lastUse, e.machineID
+			}
+		}
+		return elegido, id
+	}
+
 	g.mu.Lock()
-	var elegido string
-	var masAntiguo time.Time
-	var id string
-	for svc, e := range g.services {
-		if svc == salvo || e.inflight > 0 {
-			continue
-		}
-		if elegido == "" || e.lastUse.Before(masAntiguo) {
-			elegido, masAntiguo, id = svc, e.lastUse, e.machineID
-		}
+	// Primero lo propio; si no hay, lo ajeno.
+	elegido, id := pick(true)
+	if elegido == "" {
+		elegido, id = pick(false)
 	}
 	if elegido != "" {
 		// Se saca del mapa ANTES de congelar: si alguien pide ese servicio

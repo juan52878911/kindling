@@ -8,7 +8,6 @@ package gateway
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -41,31 +40,13 @@ func NewToken() (string, error) {
 // Un token vacío devuelve el handler sin envolver. Que eso sea seguro depende
 // de quien llama, y por eso `kling gateway` se niega a hacerlo fuera de
 // loopback: ver IsLoopback.
+//
+// Delega en authHandler: el token único es el tenant "default" sin cuotas. La
+// resolución token->tenant y las cuotas viven en quota.go; aquí se conserva la
+// firma sencilla que usan quienes solo tienen un token.
 func Auth(h http.Handler, token string) http.Handler {
-	if token == "" {
-		return h
-	}
-	want := []byte(token)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /healthz queda abierto: systemd y cualquier monitor tienen que poder
-		// preguntar si el proceso vive sin que le repartamos el token.
-		if r.URL.Path == "/healthz" {
-			h.ServeHTTP(w, r)
-			return
-		}
-
-		got, ok := bearer(r.Header.Get("Authorization"))
-		// ConstantTimeCompare para no filtrar por tiempo cuánto prefijo se ha
-		// acertado. Ya devuelve 0 si las longitudes difieren, así que no hace
-		// falta compararlas aparte.
-		if !ok || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="kindling"`)
-			http.Error(w, "falta la cabecera Authorization: Bearer <token>, o el token no vale.\n"+
-				"El token vive en gateway.token del host donde corre el gateway.", http.StatusUnauthorized)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
+	g := &Gateway{}
+	return g.authHandler(h, token)
 }
 
 // bearer extrae el token de una cabecera Authorization.

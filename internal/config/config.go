@@ -73,6 +73,33 @@ type Gateway struct {
 	// configuración distintos: `connect` lo necesita para comprobar que el
 	// endpoint responde y para escribirlo en la configuración del agente.
 	Token string `json:"token,omitempty"`
+
+	// Tokens son tokens con nombre y cuotas, ADEMÁS del Token único de arriba.
+	//
+	// Retrocompatible a propósito: si esta lista está vacía, el gateway se
+	// comporta exactamente como siempre con el Token único como tenant "default"
+	// y sin límites. En cuanto hay tokens con nombre, cada uno lleva sus cuotas.
+	Tokens []TokenLimit `json:"tokens,omitempty"`
+}
+
+// TokenLimit es un token con nombre y sus cuotas, para repartir el gateway entre
+// varios clientes (tenants).
+//
+// OJO: las cuotas NO son una frontera de seguridad. Todas las microVMs comparten
+// el mismo daemon y el mismo bridge de red, así que un tenant puede alcanzar lo
+// de otro por debajo del gateway. Existen para OTRA cosa: reparto justo y
+// contención de accidentes (un cliente en bucle que abre mil conexiones no debe
+// dejar sin memoria ni sin servicio a los demás). Quien necesite aislamiento
+// fuerte necesita daemons separados, no cuotas.
+type TokenLimit struct {
+	Name  string `json:"name"`
+	Token string `json:"token"`
+	// MaxInstances es el máximo de instancias despiertas atribuibles al tenant.
+	// 0 = sin límite.
+	MaxInstances int `json:"max_instances,omitempty"`
+	// MaxInflight es el máximo de peticiones en vuelo simultáneas del tenant.
+	// 0 = sin límite.
+	MaxInflight int `json:"max_inflight,omitempty"`
 }
 
 // Path devuelve la ruta del fichero de configuración.
