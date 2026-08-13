@@ -746,3 +746,15 @@ Dos detalles de Streamable HTTP que el puente tapaba, porque es permisivo:
 Desplegar el binario y ejecutar `enable --now` deja el proceso viejo en memoria: `--now`
 arranca la unidad si está parada, pero no reinicia una activa. Media hora persiguiendo un
 `404` de un endpoint que sí estaba compilado. El despliegue tiene que hacer `restart`.
+
+## zram en el host: densidad extra para heaps que divergen (opt-in)
+
+Las páginas que las copias de un snapshot **no** comparten son sobre todo el heap de node de
+cada invitado: anónimas y muy repetitivas, comprimen 3x-4x. Un swap comprimido en RAM (zram)
+en el HOST puede guardarlas comprimidas en vez de tocar disco, subiendo cuántas microVMs
+co-residentes caben. Es cero código de kindling: configuración del sistema, opt-in.
+
+No es promesa, es palanca a medir: la descompresión mete latencia en el p99 del thaw y el
+compresor gasta CPU. La entrega (`packaging/zram-kindling.{conf,sh,service}`) va con un plan
+de medición antes/después con `kling top` (PSS) y `free -m`. Recomendación zram sobre zswap y
+el detalle completo en [densidad-zram.md](densidad-zram.md).
