@@ -177,6 +177,14 @@ func (g *Gateway) tenantInstances(name string) int {
 			n++
 		}
 	}
+	// También las réplicas de scale-out cuentan como instancias del tenant.
+	for _, es := range g.extra {
+		for _, e := range es {
+			if e.tenant == name {
+				n++
+			}
+		}
+	}
 	return n
 }
 
