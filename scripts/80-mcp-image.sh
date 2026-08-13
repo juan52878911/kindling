@@ -201,7 +201,16 @@ fi
 #   nativo     → sqlite3 / better-sqlite3 / sharp / canvas / bcrypt (node-gyp)
 if [ -n "$NPM" ]; then
   NM="$mnt/usr/lib/node_modules"
-  hasdep() { find "$NM" -maxdepth 4 -type d -name "$1" 2>/dev/null | grep -q .; }
+  # Sin -maxdepth: el árbol ya instalado es finito y los módulos nativos se
+  # anidan a profundidad arbitraria (sharp dentro de @kazuph/mcp-fetch cae más
+  # hondo que 4 niveles). Se admite además nombre con scope (@scope/paquete),
+  # que hay que casar como PATH y no como -name de un solo componente.
+  hasdep() {
+    case "$1" in
+      */*) find "$NM" -type d -path "*/$1" 2>/dev/null | grep -q . ;;
+      *)   find "$NM" -type d -name "$1" 2>/dev/null | grep -q . ;;
+    esac
+  }
   CAP_EGRESS=none
   [ -n "${BROWSER:-}" ] && CAP_EGRESS=internet   # un navegador navega la web
   for m in axios undici got node-fetch cross-fetch ky openai cohere-ai exa-js \
@@ -219,12 +228,140 @@ if [ -n "$NPM" ]; then
       [ -n "$pj" ] && grep -qiE '"(fetch|scrape|crawl|search|web|http|api-client)"' "$pj" 2>/dev/null && CAP_EGRESS=internet
     done
   fi
-  NATIVE=""
-  for m in sqlite3 better-sqlite3 sharp canvas bcrypt; do
-    hasdep "$m" && NATIVE="$NATIVE $m"
+  # ── Módulos nativos: detección ESTRUCTURAL (no por lista cerrada) ───────────
+  #
+  # Antes se buscaba una lista fija de nombres con -maxdepth 4 y fallaba doble:
+  # un nombre nuevo no estaba, y sharp anidado en las deps de otro paquete caía
+  # fuera del alcance. Ahora se detecta por la ESTRUCTURA del árbol ya instalado:
+  #   - binding.gyp                -> el paquete se compila con node-gyp
+  #   - marcadores de instaladores de prebuilds en package.json
+  #     (node-pre-gyp / prebuild-install / node-gyp-build / node-gyp rebuild /
+  #      "gypfile":true). Se anclan a la INVOCACIÓN, no al mero nombre
+  #      "node-gyp", que aparece como devDependency en medio ecosistema y daría
+  #      falsos positivos (y con ellos, falsos native_missing que romperían el
+  #      import). El caso node-gyp puro ya lo cubre binding.gyp.
+  #   - ficheros *.node            -> binario nativo YA presente en el árbol
+  # El nombre del módulo se deriva del path bajo el ÚLTIMO node_modules/.
+
+  # pkg_of_path deriva "@scope/name" o "name" del primer segmento tras el último
+  # node_modules/ del path que se le pasa.
+  pkg_of_path() {
+    local rel="${1##*/node_modules/}"
+    case "$rel" in
+      @*/*) local tail="${rel#*/}"; echo "${rel%%/*}/${tail%%/*}" ;;
+      *)    echo "${rel%%/*}" ;;
+    esac
+  }
+
+  # HAVE: paquetes que ya tienen algún *.node (binario nativo presente). Incluye
+  # tanto el propio módulo (better-sqlite3 con su build/Release/*.node) como los
+  # paquetes de plataforma que otros usan (sharp≥0.33 -> @img/sharp-linuxmusl-*).
+  HAVE=$( { find "$NM" -name '*.node' -type f 2>/dev/null \
+    | while IFS= read -r f; do pkg_of_path "$f"; done | sort -u; } || true)
+
+  # CAND: paquetes que DECLARAN necesitar un binario nativo (lo compilan o lo
+  # descargan en un script de instalación). Son los candidatos a quedarse sin él.
+  CAND=$( { {
+      find "$NM" -name binding.gyp -type f 2>/dev/null
+      grep -rlE '(node-pre-gyp|prebuild-install|node-gyp-build|node-gyp rebuild|"gypfile"[[:space:]]*:[[:space:]]*true)' \
+        --include=package.json "$NM" 2>/dev/null
+    } | while IFS= read -r f; do pkg_of_path "$f"; done | sort -u; } || true )
+
+  # native = todo lo que toca código nativo (candidatos + los que traen *.node),
+  # para el aviso informativo. native_missing = candidatos SIN binario: ni ellos
+  # traen *.node ni existe un paquete de plataforma que lo aporte.
+  #
+  # La verificación evita el FALSO-FALTANTE de sharp≥0.33: sharp declara el
+  # binario (binding.gyp), pero su .node vive en @img/sharp-linuxmusl-*, que se
+  # instala como optionalDependency normal (sin postinstall) y sobrevive a
+  # --ignore-scripts. Se da por satisfecho si el nombre base del módulo (sin
+  # scope) aparece en algún paquete que sí trae *.node.
+  NATIVE=""; NATIVE_MISSING=""
+  for m in $CAND; do
+    base="${m##*/}"
+    if echo "$HAVE" | grep -qxF "$m" || echo "$HAVE" | grep -qF "$base"; then
+      : # tiene binario propio o de plataforma
+    else
+      NATIVE_MISSING="$NATIVE_MISSING $m"
+    fi
   done
+  NATIVE=$(printf '%s\n%s\n' "$CAND" "$HAVE" | sed '/^$/d' | sort -u | paste -sd' ' -)
   NATJSON="[]"
   [ -n "$NATIVE" ] && NATJSON="[\"$(echo $NATIVE | sed 's/ /","/g')\"]"
+  NATMISSJSON="[]"
+  NATIVE_MISSING="$(echo $NATIVE_MISSING | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' -)"
+  [ -n "$NATIVE_MISSING" ] && NATMISSJSON="[\"$(echo $NATIVE_MISSING | sed 's/ /","/g')\"]"
+
+  # ── Binarios del SISTEMA (no-npm) que el servidor invoca ────────────────────
+  #
+  # Un MCP de node puede llamar a binarios que NO vienen de npm: git, ffmpeg,
+  # ripgrep, pandoc, python… Si no están en la imagen, la tool falla en caliente
+  # con "command not found", síntoma que no se parece a su causa. Se detectan por
+  # DOS vías, ambas de SOLO LECTURA (no se ejecuta nada del paquete):
+  SYS=""
+  add_sys() { case " $SYS " in *" $1 "*) ;; *) SYS="$SYS $1" ;; esac; }
+  #   (1) Tabla curada npm->apk: dependencias cuya razón de ser es envolver un
+  #       binario del sistema. Que exista la dep es señal fuerte de que se usa.
+  for m in simple-git isomorphic-git; do hasdep "$m" && add_sys git; done
+  for m in fluent-ffmpeg ffmpeg-static;  do hasdep "$m" && add_sys ffmpeg; done
+  hasdep "@vscode/ripgrep" && add_sys ripgrep
+  hasdep node-pandoc       && add_sys pandoc
+  hasdep python-shell      && add_sys python3
+  #   (2) Escaneo estático de invocaciones: literales de spawn/exec/execFile/
+  #       execa en el código ya instalado. Se INTERSECTA con una allow-list de
+  #       nombres que Alpine empaqueta, para no convertir un literal cualquiera
+  #       (un nombre de variable, un "cat") en un `apk add`. Solo lectura.
+  SYS_ALLOW=" git ffmpeg rg ripgrep pandoc python python3 pdftotext pdfinfo soffice libreoffice convert magick imagemagick tesseract gs ghostscript dot graphviz yt-dlp exiftool "
+  bin2apk() {
+    case "$1" in
+      rg)              echo ripgrep ;;
+      python)          echo python3 ;;
+      convert|magick)  echo imagemagick ;;
+      soffice)         echo libreoffice ;;
+      dot)             echo graphviz ;;
+      gs)              echo ghostscript ;;
+      *)               echo "$1" ;;
+    esac
+  }
+  SCAN_RE='(spawn|execFile|exec|execa)\([[:space:]]*["'"'"']([a-z0-9._/-]+)'
+  for raw in $( { grep -rhoE "$SCAN_RE" "$NM" 2>/dev/null \
+      | sed -E 's/.*["'"'"']//' | sed -E 's#.*/##' | sort -u; } || true); do
+    case "$SYS_ALLOW" in
+      *" $raw "*) add_sys "$(bin2apk "$raw")" ;;
+    esac
+  done
+  # Descartar los que ya están en la imagen. El escaneo caza también binarios
+  # base ya presentes (node, sh…) que no hay que reinstalar. Se usa `command -v`
+  # (builtin de sh) en vez de `which`, que la imagen mínima puede no traer.
+  SYS_FINAL=""
+  for b in $SYS; do
+    chroot "$mnt" /bin/sh -c "command -v '$b'" >/dev/null 2>&1 || SYS_FINAL="$SYS_FINAL $b"
+  done
+  SYS="$(echo $SYS_FINAL | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' -)"
+  SYSJSON="[]"
+  [ -n "$SYS" ] && SYSJSON="[\"$(echo $SYS | sed 's/ /","/g')\"]"
+
+  # apk add de los binarios de sistema detectados. El disco ya se dimensionó
+  # ANTES de montar (no se sabía esta lista entonces), así que se agranda EN
+  # CALIENTE: desmontar, crecer, reparar el journal y remontar. GROW sube según
+  # el peso esperado —libreoffice pesa lo suyo— y solo si la lista no está vacía.
+  if [ -n "$SYS" ]; then
+    echo "binarios de sistema detectados: $SYS → apk add"
+    SYS_GROW=256
+    case " $SYS " in *" libreoffice "*|*" imagemagick "*) SYS_GROW=768 ;; esac
+    umount "$mnt/proc" 2>/dev/null || true
+    umount "$mnt"
+    truncate -s "+${SYS_GROW}M" "$DEST"
+    e2fsck -fp "$DEST" >/dev/null 2>&1 || true
+    resize2fs "$DEST" >/dev/null 2>&1
+    mount -o loop "$DEST" "$mnt"
+    cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
+    mount --bind /proc "$mnt/proc" 2>/dev/null || true
+    chroot "$mnt" /sbin/apk add --no-cache $SYS \
+      || echo "AVISO: 'apk add' de binarios de sistema falló ($SYS); revisa la lista" >&2
+    umount "$mnt/proc" 2>/dev/null || true
+  fi
+
   BROWSERJSON=false; [ -n "${BROWSER:-}" ] && BROWSERJSON=true
 
   # SEMILLA de dominios permitidos, para el modo egress=allowlist. Se extraen los
@@ -252,10 +389,12 @@ if [ -n "$NPM" ]; then
   "browser": $BROWSERJSON,
   "egress": "$CAP_EGRESS",
   "native": $NATJSON,
+  "native_missing": $NATMISSJSON,
+  "system": $SYSJSON,
   "allow_domains": $ALLOWJSON
 }
 CJSON
-  echo "capacidades detectadas: browser=$BROWSERJSON egress=$CAP_EGRESS native='${NATIVE:-ninguno}' allow_domains=$ALLOWJSON"
+  echo "capacidades detectadas: browser=$BROWSERJSON egress=$CAP_EGRESS native='${NATIVE:-ninguno}' native_missing='${NATIVE_MISSING:-ninguno}' system='${SYS:-ninguno}' allow_domains=$ALLOWJSON"
 fi
 
 # Igual que npm, y por la misma razón: el invitado arranca SIN salida a

@@ -135,9 +135,28 @@ func mcpImport(args []string) error {
 			fmt.Printf("  capacidades: semilla de dominios del build (%d); edítala con -allow si falta alguno\n",
 				len(caps.AllowDomains))
 		}
+		if len(caps.System) > 0 {
+			// Ya horneados en la imagen por el build; solo se informa de qué trae.
+			fmt.Printf("  capacidades: binarios de sistema en la imagen (%s)\n",
+				strings.Join(caps.System, ", "))
+		}
 		if len(caps.Native) > 0 {
 			fmt.Printf("  aviso: módulos nativos detectados (%s); si el servidor falla al usarlos, reconstruye instalándolos con sus scripts\n",
 				strings.Join(caps.Native, ", "))
+		}
+		// ERROR, no aviso: estos nativos quedaron sin binario. Antes la imagen se
+		// importaba "bien" y petaba en la primera tool que tocara sharp/canvas/…
+		// Se aborta ANTES de arrancar la plantilla: no tiene sentido gastar el
+		// ciclo de import en un servicio que se sabe roto.
+		if len(caps.NativeMissing) > 0 {
+			return fmt.Errorf("módulos nativos sin binario: %s\n"+
+				"La imagen se construyó con --ignore-scripts (no compila en el host) y estos módulos no\n"+
+				"traían prebuilt en el paquete ni un paquete de plataforma que lo aportara. El servidor\n"+
+				"arrancaría, pero la primera herramienta que los use fallaría en caliente.\n"+
+				"Arréglalo reconstruyendo con una versión que publique binarios de plataforma\n"+
+				"(p.ej. sharp≥0.33 con sus optionalDependencies @img/sharp-*) o añadiendo el paquete\n"+
+				"de plataforma correspondiente a los npm de la imagen.",
+				strings.Join(caps.NativeMissing, ", "))
 		}
 	}
 	if egr == "" {

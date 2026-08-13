@@ -525,6 +525,21 @@ type Capabilities struct {
 	Egress  string   `json:"egress,omitempty"` // "none" | "internet" | "allowlist"
 	Native  []string `json:"native,omitempty"` // módulos nativos npm detectados
 
+	// NativeMissing son los módulos nativos que quedaron SIN su binario: el
+	// empaquetado con --ignore-scripts no compila, y ni traían prebuild en el
+	// tarball ni un paquete de plataforma que lo aportara. El servidor arranca e
+	// introspecciona igual, pero la PRIMERA herramienta que los use peta en
+	// caliente. Por eso el import lo trata como ERROR y no como aviso: es mejor
+	// fallar al construir el catálogo que entregar un servicio que revienta luego.
+	NativeMissing []string `json:"native_missing,omitempty"`
+
+	// System son binarios del SISTEMA (no-npm) que el servidor invoca —git,
+	// ffmpeg, ripgrep, pandoc, python…— y que el build horneó en la imagen con
+	// apk. Sin ellos, la herramienta que los llame fallaría con "command not
+	// found", un síntoma que no se parece a su causa. Es informativo: ya están
+	// dentro.
+	System []string `json:"system,omitempty"`
+
 	// AllowDomains es la SEMILLA de dominios que el build extrajo de los literales
 	// de URL del árbol npm. Es una pista editable, no una lista exhaustiva ni
 	// autoritativa: el import la usa solo si se elige el modo "allowlist".
