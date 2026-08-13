@@ -48,7 +48,8 @@ carga de sus dependencias. Tres palancas validadas, de más a menos impacto:
 1. **Empaqueta el servidor: `-bundle`.** Es la palanca mayor para servidores node. Colapsa
    `node_modules` (cientos/miles de ficheros) en **uno** con esbuild al construir la imagen,
    matando la tormenta de ficheros. Medido en `seqthink` (**1205 ficheros → 1**): el
-   `initialize` en frío cae de **~7 s a ~2.5 s** (2.9×). Construcción:
+   `initialize` en frío cae de **~7 s a ~2.5 s** (2.9×). Desde el registro:
+   `kling add <servidor> -bundle`. A mano:
    `sudo ./scripts/80-mcp-image.sh stdio <n> -n "<paquete-npm>" -bundle -- <bin>`.
 
 2. **Importa con `-cpu 100`.** El techo por defecto (`cpu_pct=50`, media vCPU) estrangula el
