@@ -263,6 +263,25 @@ type Snapshot struct {
 	// catálogo en disco, listar capacidades no toca el servicio.
 	Tools   []ToolSpec `json:"tools,omitempty"`
 	ToolsAt *time.Time `json:"tools_at,omitempty"`
+
+	// INTEGRIDAD. sha256 del overlay dorado (rootfs) y del volcado de estado
+	// (snap.file), calculados al congelar y verificados al restaurar. Detectan que
+	// un snapshot se corrompió en disco —bit rot, una copia a medias, un tercero
+	// que lo tocó— antes de despertar una microVM en un estado que ya no es el que
+	// se congeló, y que sin esto no daría una sola señal.
+	//
+	// El mem.file NO se hashea a propósito: es el fichero grande y restaurar
+	// promete ~30 ms; leerlo entero por sha256 en cada thaw mataría esa cifra.
+	// Ver Manager.verifyIntegrity.
+	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
+	SnapSHA256   string `json:"snap_sha256,omitempty"`
+
+	// SALUD. Resultado del último sondeo (`kling mcp health`): se instancia una
+	// microVM efímera del snapshot y se le pide tools/list; si contesta, "healthy".
+	// Vacío mientras no se haya sondeado nunca.
+	Health    string     `json:"health,omitempty"` // "healthy" | "unhealthy" | ""
+	HealthAt  *time.Time `json:"health_at,omitempty"`
+	HealthErr string     `json:"health_err,omitempty"` // por qué falló, si "unhealthy"
 }
 
 // ToolSpec describe una herramienta tal y como la declaró su servidor MCP.
@@ -301,6 +320,14 @@ func (l *Link) Service() string {
 // CatalogRequest adjunta el catálogo de capacidades a un snapshot.
 type CatalogRequest struct {
 	Tools []ToolSpec `json:"tools"`
+}
+
+// HealthRequest anota en un snapshot el resultado de un sondeo de salud. El
+// sondeo lo hace quien puede arrancar la microVM efímera (el CLI, vía el daemon);
+// aquí solo se persiste el veredicto en el meta.
+type HealthRequest struct {
+	Healthy bool   `json:"healthy"`
+	Error   string `json:"error,omitempty"` // por qué falló, si no está sano
 }
 
 // CommitRequest congela una máquina en marcha como snapshot reutilizable.

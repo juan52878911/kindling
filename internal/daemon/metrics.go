@@ -59,6 +59,27 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "kling_machine_pss_mib{id=%q,name=%q,service=%q,from=%q,state=%q} %d\n",
 			mc.ID, esc(mc.Name), esc(mc.Service), esc(mc.From), mc.State, mc.PSSMiB)
 	}
+
+	// Salud del último sondeo por snapshot (`kling mcp health`): 1 sana, 0 enferma.
+	// Los que no se han sondeado nunca no emiten serie: una salud "desconocida" no
+	// es un 0, y publicarla como tal haría saltar alertas por servicios que solo
+	// están sin probar.
+	fmt.Fprintln(w, "# HELP kling_snapshot_healthy Salud del último sondeo del snapshot (1 sana, 0 enferma).")
+	fmt.Fprintln(w, "# TYPE kling_snapshot_healthy gauge")
+	for _, sn := range s.mgr.Snapshots() {
+		if sn.Health == "" {
+			continue
+		}
+		val := 0
+		if sn.Health == "healthy" {
+			val = 1
+		}
+		svc := sn.Name
+		if v := sn.Service(); v != "" {
+			svc = v
+		}
+		fmt.Fprintf(w, "kling_snapshot_healthy{service=%q,snapshot=%q} %d\n", esc(svc), esc(sn.Name), val)
+	}
 }
 
 // esc escapa un valor de etiqueta según el formato de Prometheus: barra, comilla

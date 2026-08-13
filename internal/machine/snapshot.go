@@ -2,8 +2,11 @@ package machine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,11 +174,28 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		return nil, fmt.Errorf("perforando el fichero de memoria: %v: %s", err, out)
 	}
 
+	// Digests de integridad del rootfs dorado y del volcado de estado.
+	//
+	// Se calculan aquí, con los ficheros ya en su forma final (el overlay copiado,
+	// el snap volcado, la memoria perforada). El mem.file se deja fuera a
+	// propósito: es el grande y volver a leerlo entero en cada restauración mataría
+	// los ~30 ms del thaw. Ver verifyIntegrity para el porqué completo.
+	rootfsSHA, err := fileSHA256(goldOverlay)
+	if err != nil {
+		return nil, fmt.Errorf("calculando el digest del overlay dorado: %w", err)
+	}
+	snapSHA, err := fileSHA256(snapPath)
+	if err != nil {
+		return nil, fmt.Errorf("calculando el digest del volcado de estado: %w", err)
+	}
+
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
 		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
 		Egress:       mc.Egress,
 		AllowDomains: mc.AllowDomains,
+		RootfsSHA256: rootfsSHA,
+		SnapSHA256:   snapSHA,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
 		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
@@ -273,6 +293,99 @@ func (m *Manager) SetCatalog(name string, tools []api.ToolSpec) (*api.Snapshot, 
 	return snap, nil
 }
 
+// SetHealth anota en el meta del snapshot el resultado del último sondeo de
+// salud. El sondeo real —arrancar una microVM efímera y pedirle tools/list— lo
+// hace quien puede hablar con el invitado (el CLI, `kling mcp health`); el daemon
+// solo persiste el veredicto, para que `mcp list` y /metrics lo puedan mostrar
+// sin volver a despertar nada.
+func (m *Manager) SetHealth(name string, healthy bool, probeErr string) (*api.Snapshot, error) {
+	snap, err := m.loadSnapshot(name)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if healthy {
+		snap.Health, snap.HealthErr = "healthy", ""
+	} else {
+		snap.Health, snap.HealthErr = "unhealthy", probeErr
+	}
+	snap.HealthAt = &now
+
+	b, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := writeMeta(m.snapDir(name), b); err != nil {
+		return nil, err
+	}
+	m.priv.EnsureReadable(m.snapDir(name))
+
+	estado := "sana"
+	if !healthy {
+		estado = "enferma"
+	}
+	m.bus.Publish(api.Event{Time: now, Type: api.EvCommitted, Name: name,
+		Message: fmt.Sprintf("sondeo de salud: %s", estado)})
+	return snap, nil
+}
+
+// verifyIntegrity comprueba que el rootfs dorado y el volcado de estado no se
+// corrompieron desde que se congelaron.
+//
+// DECISIÓN — qué se hashea y qué no:
+//
+//	overlay.ext4 (rootfs) y snap.file  -> SÍ, en cada restauración.
+//	mem.file                           -> NO aquí.
+//
+// El fichero de memoria es el grande —cientos de MiB— y restaurar promete ~30 ms;
+// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra. El rootfs y
+// el snap.file son pequeños, y encima el overlay ya se lee entero al copiarlo con
+// `cp` justo después de esta comprobación: el sobrecoste real es una segunda
+// pasada de lectura sobre unos pocos MiB, no sobre el volcado completo. La
+// integridad del mem.file, si algún día se quiere, se comprobaría UNA vez tras
+// reiniciar el daemon (fuera del camino caliente), no en cada arranque.
+//
+// Los snapshots anteriores a esta comprobación no tienen digests grabados: se
+// saltan en vez de fallar, o reimportar dejaría de ser opcional para todos.
+func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
+	if snap.RootfsSHA256 == "" && snap.SnapSHA256 == "" {
+		return nil // snapshot legacy: no hay digests que comprobar
+	}
+	for _, chk := range []struct{ file, want string }{
+		{"overlay.ext4", snap.RootfsSHA256},
+		{"snap.file", snap.SnapSHA256},
+	} {
+		if chk.want == "" {
+			continue
+		}
+		got, err := fileSHA256(filepath.Join(snapDir, chk.file))
+		if err != nil {
+			return fmt.Errorf("no pude leer %s para verificar su integridad: %w", chk.file, err)
+		}
+		if got != chk.want {
+			return fmt.Errorf("el snapshot %q está corrupto: %s no coincide con lo que se congeló "+
+				"(sha256 esperado %s…, encontrado %s…). Reimpórtalo con `kling mcp import %s -force`",
+				snap.Name, chk.file, chk.want[:12], got[:12], snap.Name)
+		}
+	}
+	return nil
+}
+
+// fileSHA256 devuelve el sha256 de un fichero en hexadecimal. Con crypto/sha256
+// de la stdlib: cero dependencias nuevas.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // RemoveSnapshot borra un snapshot dorado, salvo que tenga instancias vivas.
 func (m *Manager) RemoveSnapshot(name string) error {
 	if _, err := m.loadSnapshot(name); err != nil {
@@ -300,6 +413,15 @@ func (m *Manager) RemoveSnapshot(name string) error {
 func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	snap, err := m.loadSnapshot(req.From)
 	if err != nil {
+		return nil, err
+	}
+
+	// INTEGRIDAD. Antes de tocar nada: si el rootfs dorado o el volcado de estado
+	// se corrompieron en disco desde que se congelaron, restaurar produciría una
+	// microVM en un estado que ya no es el suyo —o un pánico del invitado— sin una
+	// sola señal de la causa. Se falla aquí, claro y pronto, antes de copiar el
+	// overlay y de arrancar el VMM.
+	if err := m.verifyIntegrity(snap, m.snapDir(req.From)); err != nil {
 		return nil, err
 	}
 

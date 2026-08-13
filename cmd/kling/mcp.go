@@ -23,7 +23,7 @@ import (
 //	kling mcp refresh <servicio>
 func cmdMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("uso: kling mcp [import|verify|list|refresh]")
+		return fmt.Errorf("uso: kling mcp [import|verify|list|refresh|health]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -35,12 +35,14 @@ func cmdMCP(args []string) error {
 		return mcpList(rest)
 	case "refresh":
 		return mcpRefresh(rest)
+	case "health":
+		return mcpHealth(rest)
 	case "link":
 		return mcpLink(rest)
 	case "unlink":
 		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa import, verify, list, refresh, link o unlink", sub)
+		return fmt.Errorf("subcomando desconocido %q: usa import, verify, list, refresh, health, link o unlink", sub)
 	}
 }
 
@@ -383,7 +385,7 @@ func mcpList(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "SERVICIO\tHERRAMIENTAS\tCATÁLOGO\tMEMORIA\tINSTANCIAS")
+	fmt.Fprintln(tw, "SERVICIO\tHERRAMIENTAS\tCATÁLOGO\tSALUD\tMEMORIA\tINSTANCIAS")
 	total := 0
 	for _, s := range snaps {
 		n := s.Name
@@ -395,7 +397,8 @@ func mcpList(args []string) error {
 			cat = since(*s.ToolsAt) + " atrás"
 		}
 		total += len(s.Tools)
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\n", n, len(s.Tools), cat, human(s.MemBytes), s.Instances)
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n",
+			n, len(s.Tools), cat, healthCell(s), human(s.MemBytes), s.Instances)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -403,8 +406,8 @@ func mcpList(args []string) error {
 	links, _ := api.NewClient(hostOf(*host)).Links(ctx)
 	for _, l := range links {
 		total += len(l.Tools)
-		fmt.Printf("%-12s %-14d %-11s %-9s externo: %s\n",
-			l.Service(), len(l.Tools), since(l.CreatedAt)+" atrás", "—", l.URL)
+		fmt.Printf("%-12s %-14d %-11s %-13s %-9s externo: %s\n",
+			l.Service(), len(l.Tools), since(l.CreatedAt)+" atrás", "—", "—", l.URL)
 	}
 	fmt.Printf("\n%d herramienta(s) en %d servicio(s) (%d microVM, %d externo(s)).\n",
 		total, len(snaps)+len(links), len(snaps), len(links))
@@ -469,6 +472,131 @@ func mcpRefresh(args []string) error {
 	}
 	fmt.Printf("✓ %d herramienta(s)\n", len(tools))
 	return nil
+}
+
+// mcpHealth sondea la salud de uno o de todos los servicios importados.
+//
+//	kling mcp health            sondea todos
+//	kling mcp health <servicio> sondea uno
+//
+// Para cada servicio arranca una microVM efímera del snapshot dorado, le pide
+// tools/list y la destruye, marcándolo healthy/unhealthy en su meta. Reutiliza el
+// MISMO camino de arranque que el modo efímero del gateway (Run desde el snapshot
+// + tools/list), no inventa uno nuevo.
+//
+// TODO(P1-4): sondeo periódico automático (una vez por hora). El scheduler
+// debería vivir en un proceso de vida larga —el daemon o el gateway— y llamar a
+// este mismo camino de sondeo. Se deja fuera de esta pasada a propósito: el
+// sondeo manual ya cubre la operación y el CI, y el scheduler es aditivo.
+func mcpHealth(args []string) error {
+	fs := flag.NewFlagSet("mcp health", flag.ExitOnError)
+	host := hostFlag(fs)
+	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
+	if err := fs.Parse(reorder(args)); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+
+	// Qué sondear: el servicio indicado, o todos los snapshots si no se da ninguno.
+	var targets []string
+	if fs.NArg() >= 1 {
+		targets = []string{fs.Arg(0)}
+	} else {
+		snaps, err := c.Snapshots(ctx)
+		if err != nil {
+			return err
+		}
+		for _, s := range snaps {
+			n := s.Name
+			if svc := s.Service(); svc != "" {
+				n = svc
+			}
+			targets = append(targets, n)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("Sin servicios que sondear. Importa uno:  kling mcp import <nombre> -image <imagen>")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	var enfermos int
+	for _, svc := range targets {
+		probeErr := probeHealth(ctx, c, svc, *wait)
+		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
+		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
+		if _, err := c.SetHealth(ctx, svc, probeErr == nil, errMsg(probeErr)); err != nil {
+			fmt.Fprintf(tw, "  %s\t✗ no pude anotar la salud: %v\n", svc, err)
+			continue
+		}
+		if probeErr != nil {
+			enfermos++
+			fmt.Fprintf(tw, "  %s\t✗ enferma: %v\n", svc, probeErr)
+		} else {
+			fmt.Fprintf(tw, "  %s\t✓ sana\n", svc)
+		}
+	}
+	_ = tw.Flush()
+
+	if enfermos > 0 {
+		return fmt.Errorf("%d de %d servicio(s) no respondieron al sondeo", enfermos, len(targets))
+	}
+	return nil
+}
+
+// probeHealth arranca una instancia efímera del snapshot, le pide tools/list y la
+// destruye. Devuelve nil si el servicio contestó. Es el mismo ciclo que hace el
+// gateway en modo efímero, expresado con las utilidades del CLI.
+func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration) error {
+	mc, err := c.Run(ctx, api.RunRequest{
+		From: service, Name: service + "-health",
+		Labels: map[string]string{api.LabelService: service, "health": "true"},
+		// Red de seguridad: si el CLI muriera antes de destruirla, el daemon la
+		// congela sola en vez de dejarla corriendo para siempre.
+		TTLSeconds: 120,
+	})
+	if err != nil {
+		return fmt.Errorf("no arrancó (%w)", err)
+	}
+	defer func() { _ = c.Remove(context.WithoutCancel(ctx), mc.ID) }()
+
+	if err := waitGuest(ctx, c, mc.ID, wait); err != nil {
+		return fmt.Errorf("no abrió el puerto MCP (%w)", err)
+	}
+	if _, _, err := introspectWith(guestPost(ctx, c, mc.ID)); err != nil {
+		return fmt.Errorf("no respondió a tools/list (%w)", err)
+	}
+	return nil
+}
+
+// healthCell resume el estado de salud de un snapshot para `mcp list`.
+func healthCell(s *api.Snapshot) string {
+	switch s.Health {
+	case "healthy":
+		if s.HealthAt != nil {
+			return "sana (" + since(*s.HealthAt) + ")"
+		}
+		return "sana"
+	case "unhealthy":
+		if s.HealthAt != nil {
+			return "enferma (" + since(*s.HealthAt) + ")"
+		}
+		return "enferma"
+	default:
+		return "sin sondear"
+	}
+}
+
+// errMsg devuelve el texto de un error, o "" si es nil. Sirve para persistir el
+// motivo de un sondeo fallido sin encadenar comprobaciones de nil en el llamador.
+func errMsg(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // mcpLink registra un servidor MCP EXTERNO en el agregador.
