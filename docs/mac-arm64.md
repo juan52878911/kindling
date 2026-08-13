@@ -34,9 +34,33 @@ M4 (2026-08).
   bastante mejor. Hay optimización en curso (mantener réplicas calientes para sacar el
   arranque del camino crítico); ver el historial de rendimiento del proyecto.
 
-Subir `cpus` en la VM Lima (ver el `lima.yaml` de abajo) es la palanca de tuning más
-directa: más pCPUs para el host anidado aceleran el `Resume` y permiten más arranques
-en paralelo. La RAM (8 GiB en el ejemplo) rara vez es el límite en Mac.
+## Acelerar el arranque (medido en M4)
+
+El cuello del arranque en Mac **no es el restore** (el `Resume` del snapshot son ~140 ms,
+medido) sino el **cold start del servidor MCP en el `initialize`**: en modo stdio el puente
+lanza un proceso node por sesión, y bajo KVM anidado eso tarda segundos. Dos palancas
+validadas, de más a menos general:
+
+1. **Importa con `-cpu 100`.** El cuello es CPU: el techo por defecto (`cpu_pct=50`, media
+   vCPU) estrangula el arranque de node. Subirlo al 100 % de un core casi lo parte por dos
+   —medido en `seqthink`: **~16 s → ~7 s** por el camino real del gateway—. El techo viaja
+   con el snapshot (`kling mcp import -cpu 100 <servicio>`), así que es **por-servicio y por
+   host**: no toca el default de Proxmox. Subir a 2 vCPU **no** ayuda (es estrangulamiento de
+   techo, no de paralelismo).
+
+2. **Para servicios STATELESS, constrúyelos en modo http-proxy.** En stdio node arranca por
+   sesión; en http-proxy el puente arranca **un** node al bootear y queda **congelado vivo**
+   en el snapshot, así que al restaurar no se re-arranca. Medido con `context7` (mismo
+   servidor, dos modos): stdio **~25.7 s** el primer `initialize` → http-proxy **~8.4 s** el
+   primero y **~2.4 s** en estable. Matiz honesto: congelar node vivo **no** da restore
+   instantáneo —V8 se re-calienta al reanudar (~6 s la primera vez)—, pero es 3× mejor en
+   frío y ~10× en estable. Solo para servicios sin estado (el hijo node es **compartido**
+   entre sesiones): kindling lo auto-detecta como efímero. Construcción:
+   `sudo ./scripts/80-mcp-image.sh http <n> -n "<paquete-npm>" -- <bin> --transport http --port 8090`.
+
+Lo que **no** mueve la aguja en Mac: el `keep-warm` de instancias (el restore ya es ~140 ms,
+no el cuello) y subir los `cpus` de la VM Lima (ya suele haber margen; el límite es el techo
+de CPU **por microVM**, no las pCPUs del host anidado).
 
 ## Requisitos honestos
 
