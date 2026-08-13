@@ -87,6 +87,12 @@ type Manager struct {
 	// para impedir. Se toca bajo mu.
 	pendingMiB int
 
+	// snapPending cuenta, por snapshot dorado, cuántas instancias están
+	// arrancando de él ahora mismo. Sirve a reserveMemory para saber si el
+	// mem.file ya está anclado y cobrar solo la fracción divergente a las copias.
+	// Se toca bajo mu.
+	snapPending map[string]int
+
 	// templateMu serializa la construcción de la plantilla de overlay: dos
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
 	templateMu sync.Mutex
@@ -129,11 +135,12 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	priv, warn := resolvePrivileges(runAs)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
-		byID:       make(map[string]*api.Machine),
-		socket:     make(map[string]string),
-		wake:       make(chan struct{}, 1),
-		quit:       make(chan struct{}),
-		launchGate: make(chan struct{}, maxParallelLaunch()),
+		byID:        make(map[string]*api.Machine),
+		socket:      make(map[string]string),
+		wake:        make(chan struct{}, 1),
+		quit:        make(chan struct{}),
+		launchGate:  make(chan struct{}, maxParallelLaunch()),
+		snapPending: make(map[string]int),
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
@@ -542,7 +549,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// y pasen las dos. La reserva se libera al salir —el defer cubre todos los
 	// returns—: en un fallo, la memoria nunca se ocupó; en el éxito, ya la ocupa
 	// el proceso, así que "pendiente" deja de tener sentido.
-	releaseMem, err := m.reserveMemory(req.MemMiB)
+	releaseMem, err := m.reserveMemory(req.MemMiB, "")
 	if err != nil {
 		return nil, err
 	}

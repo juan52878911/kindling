@@ -322,7 +322,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// despierta varios servicios a la vez cuando el anfitrión aprieta, y sin
 	// reservar veían todos la misma memoria libre. Ahora el segundo ve que no
 	// cabe y el gateway hace sitio antes de reintentar.
-	releaseMem, merr := m.reserveMemory(snap.MemMiB)
+	// La clave de compartición es el snapshot de origen: todas sus instancias
+	// mapean el MISMO mem.file dorado, así que la segunda y siguientes solo
+	// reservan su fracción divergente. Es aquí donde la densidad se vuelve real.
+	releaseMem, merr := m.reserveMemory(snap.MemMiB, req.From)
 	if merr != nil {
 		return nil, merr
 	}

@@ -67,6 +67,23 @@ func availableMiB() int {
 //
 // No comprueba nada si no puede leer la memoria: convertir una comprobación de
 // cordura en una dependencia de arranque sería peor que el problema.
+// shareReserveDiv dice entre cuánto se divide la reserva de una instancia
+// ADICIONAL del mismo snapshot dorado. Las copias de un snapshot comparten su
+// mem.file por copia-en-escritura: la primera lo mapea entero, las siguientes
+// solo añaden las páginas que divergen —en la práctica una fracción pequeña—.
+// Reservar mem_mib entero a cada una es correcto pero deja densidad sobre la
+// mesa; dividir por 4 (por defecto) mantiene un margen holgado sobre lo que se
+// mide (~1/20) sin apostar la casa. Ajustable con KLING_SHARE_RESERVE_DIV; ponlo
+// a 1 para volver al comportamiento conservador de antes.
+func shareReserveDiv() int {
+	if v := os.Getenv("KLING_SHARE_RESERVE_DIV"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return 4
+}
+
 // reserveMemory comprueba que la microVM cabe y, si cabe, RESERVA su memoria
 // hasta que termine de arrancar. Devuelve una función para liberar la reserva,
 // que hay que llamar SIEMPRE —arranque bien o mal— o la reserva se queda colgada
@@ -76,24 +93,62 @@ func availableMiB() int {
 // la ocupe de verdad pasan segundos, y en ese hueco otro arranque veía la misma
 // memoria libre. Contar lo que ya está en vuelo hace que el segundo vea que no
 // cabe y espere su turno —o desaloje— en vez de sumarse al desbordamiento.
-func (m *Manager) reserveMemory(wantMiB int) (release func(), err error) {
+//
+// shareKey identifica el snapshot dorado del que sale la instancia (vacío = cold
+// boot o thaw, que NO comparten mem.file). Si ya hay una instancia viva de ese
+// snapshot mapeando el mem.file, esta solo reserva su fracción divergente: es lo
+// que convierte la densidad teórica de kindling en real bajo arranques
+// concurrentes, donde antes el pendingMiB sumaba mem_mib entero por copia y
+// rechazaba con 507 aunque la RAM real apenas se moviera.
+func (m *Manager) reserveMemory(wantMiB int, shareKey string) (release func(), err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := checkHostMemory(wantMiB + m.pendingMiB); err != nil {
+	effMiB := wantMiB
+	if shareKey != "" && m.shareAnchoredLocked(shareKey) {
+		effMiB = wantMiB / shareReserveDiv()
+		if effMiB < 1 {
+			effMiB = 1
+		}
+	}
+	if err := checkHostMemory(effMiB + m.pendingMiB); err != nil {
 		return nil, err
 	}
-	m.pendingMiB += wantMiB
+	m.pendingMiB += effMiB
+	if shareKey != "" {
+		m.snapPending[shareKey]++
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			m.mu.Lock()
-			m.pendingMiB -= wantMiB
+			m.pendingMiB -= effMiB
 			if m.pendingMiB < 0 {
 				m.pendingMiB = 0
+			}
+			if shareKey != "" {
+				if m.snapPending[shareKey]--; m.snapPending[shareKey] <= 0 {
+					delete(m.snapPending, shareKey)
+				}
 			}
 			m.mu.Unlock()
 		})
 	}, nil
+}
+
+// shareAnchoredLocked dice si ya hay una instancia —arrancando o viva y
+// corriendo— de este snapshot que tenga el mem.file mapeado. Solo cuentan las
+// RUNNING: una warm está congelada, su proceso muerto y el mem.file sin mapear,
+// así que la siguiente vuelve a anclar el mapeo entero. Se llama con m.mu tomado.
+func (m *Manager) shareAnchoredLocked(shareKey string) bool {
+	if m.snapPending[shareKey] > 0 {
+		return true
+	}
+	for _, mc := range m.byID {
+		if mc.From == shareKey && mc.State == api.StateRunning {
+			return true
+		}
+	}
+	return false
 }
 
 func checkHostMemory(wantMiB int) error {

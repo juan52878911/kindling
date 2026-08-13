@@ -17,11 +17,12 @@ func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	root := t.TempDir()
 	m := &Manager{
-		root:   root,
-		byID:   map[string]*api.Machine{},
-		socket: map[string]string{},
-		wake:   make(chan struct{}, 1),
-		quit:   make(chan struct{}),
+		root:        root,
+		byID:        map[string]*api.Machine{},
+		socket:      map[string]string{},
+		wake:        make(chan struct{}, 1),
+		quit:        make(chan struct{}),
+		snapPending: map[string]int{},
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
