@@ -134,6 +134,10 @@ GATEWAY
                                                    cada acción corre en su propia
                                                    máquina, que muere al terminar
           [-prewarm N]                             instancias listas por servicio
+                                                   (solo -ephemeral)
+          [-keepwarm N]                            N servicios populares con su
+                                                   primaria caliente (persistente;
+                                                   evita el arranque en frío en Mac)
           [-memory SVC]                            servicio de memoria del agente
           [-no-auth] [-pprof]                      sin token / con perfiles; las
                                                    dos exigen escuchar en
@@ -313,7 +317,8 @@ func cmdGateway(args []string) error {
 	listen := fs.String("listen", "", "dónde escuchar (por defecto: gateway.listen, o 127.0.0.1:8080)")
 	idle := fs.Duration("idle", 0, "tiempo sin peticiones antes de congelar (por defecto: gateway.idle, o 5m)")
 	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
-	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado)")
+	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado; solo -ephemeral)")
+	keepwarm := fs.Int("keepwarm", 0, "N servicios populares con su primaria caliente en modo persistente (0 = desactivado; evita el arranque en frío, útil en Mac)")
 	memory := fs.String("memory", "", "servicio MCP donde recordar qué herramienta resolvió cada petición")
 	pprofOn := fs.Bool("pprof", false, "expone /debug/pprof; solo diagnóstico temporal y solo en loopback")
 	noAuth := fs.Bool("no-auth", false, "sin token; solo para desarrollo y solo escuchando en loopback")
@@ -366,6 +371,7 @@ func cmdGateway(args []string) error {
 	}
 	gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
 	gw.PprofEnabled = *pprofOn
+	gw.KeepWarm = *keepwarm
 	// Cuotas por token/tenant, si la configuración las trae. Retrocompatible: sin
 	// tokens con nombre, el token único sigue siendo el tenant "default" sin
 	// límites. Es reparto justo, no una frontera de seguridad (todo comparte
@@ -385,6 +391,12 @@ func cmdGateway(args []string) error {
 	go gw.Reap(ctx)
 	if *ephemeral {
 		go gw.PrewarmAll(ctx)
+	}
+	// Calienta ya al arrancar, sin esperar al primer tick del segador (idle/3): así
+	// los servicios populares están listos antes de la primera petición. No se ata a
+	// -ephemeral a propósito —el keep-warm es justo para el modo persistente—.
+	if *keepwarm > 0 {
+		go gw.KeepWarmAll(ctx)
 	}
 	// Contexto propio y ACOTADO: no puede ser el del proceso, que ya está
 	// cancelado cuando llega el apagado (los Remove no se harían), ni uno sin
@@ -432,6 +444,9 @@ func cmdGateway(args []string) error {
 		if *prewarm > 0 {
 			fmt.Printf("  pre-calentado: %d instancia(s) por servicio, listas para responder\n", *prewarm)
 		}
+	}
+	if *keepwarm > 0 {
+		fmt.Printf("  keep-warm:    %d servicio(s) popular(es) con su primaria caliente (sin arranque en frío)\n", *keepwarm)
 	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

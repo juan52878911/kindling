@@ -108,6 +108,16 @@ type Gateway struct {
 	idle         time.Duration
 	Ephemeral    bool
 	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
+	// KeepWarm mantiene caliente la primaria de los N servicios más populares en
+	// modo PERSISTENTE, para que la primera sesión no pague el arranque en frío
+	// (~16 s bajo KVM anidado en Mac; ~3 s en Linux nativo). 0 = desactivado (por
+	// defecto). Lo decide el operador, igual que PprofEnabled: en un host con la RAM
+	// justa (la caja x86 de pruebas) mantener instancias que nadie usa provoca
+	// desalojos, así que es una palanca para hosts donde el cuello es el ARRANQUE y
+	// no la memoria. A diferencia del prewarm (fondo efímero), esto puebla
+	// g.services normales: la siguiente petición reutiliza la instancia caliente, o
+	// —si el segador la congeló por ociosa— paga solo un thaw (~25 ms).
+	KeepWarm int
 	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
@@ -773,8 +783,16 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 	// un thaw el proceso está listo casi al instante, pero en frío el invitado aún
 	// arranca. Sin esperar aquí, la primera petición se comería un "connection
 	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
+	wr0 := time.Now()
 	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
 		return nil, fmt.Errorf("la herramienta no empezó a escuchar: %w", err)
+	}
+	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
+	// botella del arranque (ver docs de rendimiento en Mac): un thaw acepta casi al
+	// instante, un arranque en frío bajo KVM anidado tarda segundos. Se registra solo
+	// cuando es notable, para no ensuciar el log con los thaws de milisegundos.
+	if d := time.Since(wr0); d > 500*time.Millisecond {
+		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
 	}
 
 	target, _ := url.Parse("http://" + net.JoinHostPort(mc.IP, strconv.Itoa(GuestPort)))
@@ -1032,6 +1050,7 @@ func (g *Gateway) Reap(ctx context.Context) {
 			g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
 			g.pool.evictStale(ctx, g.idle*2)
 			g.PrewarmAll(ctx)
+			g.KeepWarmAll(ctx)
 		}
 	}
 }
@@ -1115,6 +1134,103 @@ func (g *Gateway) PrewarmAll(ctx context.Context) {
 			budget -= c.mem * faltan
 		}
 		g.pool.fillN(ctx, c.svc, c.snap, faltan)
+	}
+}
+
+// KeepWarmAll mantiene caliente la primaria de los servicios más populares en modo
+// PERSISTENTE, para que la primera sesión no pague el arranque en frío. Es la
+// hermana persistente de PrewarmAll: aquel llena el fondo EFÍMERO (instancias de un
+// solo uso, consumidas por callEphemeral), y encima se apaga si !Ephemeral; este
+// puebla g.services normales vía ensure(), que es de donde tiran las sesiones
+// persistentes. Sin esto, el primer initialize de un servicio dormido entra en
+// buildEntry→acquire→runFresh y se come los ~16 s de arranque en frío (Mac); con
+// esto, la instancia ya existe (reutilización directa) o el segador la dejó WARM y
+// solo se paga un thaw (~25 ms).
+//
+// Apagado por defecto (KeepWarm == 0): en un host con la RAM justa mantener
+// calientes servicios que nadie llama fuerza desalojos. Es una palanca para hosts
+// donde el cuello es el arranque, no la memoria.
+//
+// Deja que el segador la congele por ociosa: no se ancla. La siguiente pasada la
+// re-asegura (reutiliza la RUNNING, o descongela la WARM), nunca vuelve a runFresh.
+// Así la RAM sigue siendo honesta en hosts justos y aun así se elimina el arranque
+// en frío del camino crítico.
+func (g *Gateway) KeepWarmAll(ctx context.Context) {
+	if g.KeepWarm <= 0 {
+		return
+	}
+	snaps, err := g.client.Snapshots(ctx)
+	if err != nil {
+		return
+	}
+
+	// La popularidad solo avanza si alguien la pliega una vez por pasada. En modo
+	// persistente PrewarmAll sale antes de plegarla (el gate !Ephemeral), así que lo
+	// hace este; si además corriera el efímero, PrewarmAll ya la plegó y no se
+	// re-pliega para no adelantar dos veces la ventana de la media móvil.
+	if !g.Ephemeral {
+		g.pop.fold()
+	}
+
+	type cand struct {
+		svc string
+		mem int
+	}
+	var cands []cand
+	for _, s := range snaps {
+		// Un servicio con estado usa UNA instancia persistente; ya la mantiene
+		// caliente su propio uso, no se fuerza aquí.
+		if s.Stateful() {
+			continue
+		}
+		svc := s.Name
+		if n := s.Service(); n != "" {
+			svc = n
+		}
+		cands = append(cands, cand{svc: svc, mem: s.MemMiB})
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		return g.pop.score(cands[i].svc) > g.pop.score(cands[j].svc)
+	})
+
+	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
+	warmed := 0
+	for _, c := range cands {
+		if warmed >= g.KeepWarm {
+			break
+		}
+		// ¿Ya está caliente la primaria? No cuesta nada y cuenta para el cupo.
+		g.mu.Lock()
+		_, yaCaliente := g.services[c.svc]
+		g.mu.Unlock()
+		if yaCaliente {
+			warmed++
+			continue
+		}
+		// Presupuesto: no despertar una primaria nueva si no cabe. La estimación es
+		// conservadora (mem_mib entero, sin descontar páginas compartidas), igual que
+		// en PrewarmAll; el 507 del daemon sigue siendo la última red.
+		if budget >= 0 && c.mem > 0 {
+			if budget < c.mem {
+				break
+			}
+			budget -= c.mem
+		}
+		// ensure() hace todo el trabajo pesado: candado por servicio, buildEntry y
+		// registro en g.services. En una goroutine para no bloquear el segador ~16 s
+		// por cada servicio en frío; la compuerta de arranque del daemon serializa los
+		// encendidos de verdad, así que disparar varias a la vez es seguro. ensure es
+		// idempotente bajo su candado, de modo que si la siguiente pasada la encuentra
+		// aún arrancando no duplica nada. Contexto de fondo sin tenant: es una acción
+		// del sistema, el primer usuario real la adopta como dueña (ver ensure).
+		warmed++
+		go func(svc string) {
+			if _, err := g.ensure(ctx, svc); err != nil {
+				log.Printf("keepwarm %s: %v", svc, err)
+				return
+			}
+			log.Printf("%s: primaria mantenida caliente", svc)
+		}(c.svc)
 	}
 }
 
