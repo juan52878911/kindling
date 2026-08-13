@@ -1,0 +1,27 @@
+[Unit]
+Description=zram para kindling — swap comprimido en RAM para densificar microVMs
+Documentation=https://github.com/juan52878911/kindling
+# OPT-IN. Optimización del HOST, no forma parte de kindling ni cambia su código.
+# No la arrastra ninguna otra unidad: hay que habilitarla a mano
+# (systemctl enable --now zram-kindling.service). Ver docs/densidad-zram.md.
+#
+# Va antes de kling para que, cuando el daemon empiece a levantar microVMs, el
+# swap comprimido ya esté listo. Es un WantedBy suelto: si esta unidad no está
+# instalada, kling arranca igual. No es un Requires en ningún sentido.
+#
+# Se dejan las dependencias por defecto de systemd a propósito: así el ExecStop
+# (swapoff) queda bien ordenado en el apagado, antes de desmontar sistemas de
+# ficheros.
+Before=kling.service
+
+[Service]
+# oneshot + RemainAfterExit: configura el dispositivo al arrancar y lo da por
+# "activo" mientras la unidad viva; ExecStop lo desmonta al parar o apagar.
+Type=oneshot
+RemainAfterExit=yes
+Environment=ZRAM_KINDLING_CONF=/etc/kling/zram-kindling.conf
+ExecStart=/usr/local/bin/zram-kindling.sh start
+ExecStop=/usr/local/bin/zram-kindling.sh stop
+
+[Install]
+WantedBy=multi-user.target
