@@ -85,6 +85,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /images/{name}/capabilities", s.handleImageCapabilities)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
+	mux.HandleFunc("PUT /snapshots/{name}/health", s.handleHealth)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
@@ -391,6 +392,24 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap, err := s.mgr.SetCatalog(r.PathValue("name"), req.Tools)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// handleHealth persiste el veredicto de un sondeo de salud en el meta del
+// snapshot. El sondeo lo hace el CLI (arranca la microVM efímera y le pide
+// tools/list); aquí solo se guarda el resultado para que lo vean `mcp list` y
+// /metrics.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	var req api.HealthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	snap, err := s.mgr.SetHealth(r.PathValue("name"), req.Healthy, req.Error)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return

@@ -283,6 +283,14 @@ func (c *Client) RemoveSnapshot(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/snapshots/"+name, nil, nil)
 }
 
+// SetHealth anota en el snapshot el resultado de un sondeo de salud. Lo llama
+// `kling mcp health` tras arrancar y sondear una microVM efímera del servicio.
+func (c *Client) SetHealth(ctx context.Context, name string, healthy bool, probeErr string) (*Snapshot, error) {
+	var s Snapshot
+	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/health",
+		HealthRequest{Healthy: healthy, Error: probeErr}, &s)
+}
+
 // Events consume el stream NDJSON del daemon hasta que se cancele el contexto.
 func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://kling/events", nil)
