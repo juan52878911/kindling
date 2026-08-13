@@ -112,6 +112,25 @@ func mcpImport(args []string) error {
 		_ = c.RemoveSnapshot(ctx, service)
 	}
 
+	// Capacidades de la imagen: detectadas al construirla del árbol de deps. Si
+	// declara que necesita internet y el usuario no forzó egress, se pone solo —
+	// que un servicio de navegador o de API remota no arranque por un flag
+	// olvidado es un mal por defecto. También avisa de módulos nativos.
+	egr := config.Or(*egress, cfg.Defaults.Egress)
+	if caps, cerr := c.ImageCapabilities(ctx, img); cerr == nil && caps != nil {
+		if egr == "" && (caps.Egress == "internet" || caps.Browser) {
+			egr = "internet"
+			fmt.Printf("  capacidades: el servicio necesita internet → egress=internet (automático)\n")
+		}
+		if len(caps.Native) > 0 {
+			fmt.Printf("  aviso: módulos nativos detectados (%s); si el servidor falla al usarlos, reconstruye instalándolos con sus scripts\n",
+				strings.Join(caps.Native, ", "))
+		}
+	}
+	if egr == "" {
+		egr = "none"
+	}
+
 	// 1. plantilla
 	fmt.Printf("  1/5  arrancando la plantilla... ")
 	mc, err := c.Run(ctx, api.RunRequest{
@@ -126,7 +145,7 @@ func mcpImport(args []string) error {
 		// invitado.
 		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
-		Egress: config.Or(*egress, cfg.Defaults.Egress, "none"),
+		Egress: egr,
 		// El volumen se decide AQUÍ y no después: Firecracker no deja añadir
 		// discos a una VM restaurada, así que el dispositivo tiene que estar
 		// presente cuando se congela el snapshot dorado o no lo estará nunca.

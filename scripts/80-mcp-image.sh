@@ -191,6 +191,52 @@ if [ -n "${BROWSER:-}" ]; then
 BJSON
 fi
 
+# DETECCIÓN DE CAPACIDADES. Inspecciona el árbol de dependencias npm ya instalado
+# y deja /etc/kling/capabilities.json, que el import lee para configurar el egress
+# solo y avisar de módulos nativos. El patrón (marcadores de paquete) sale de
+# caracterizar servidores MCP reales:
+#   navegador  → playwright* / puppeteer* / chrome-launcher  (ya baja Chromium)
+#   internet   → clientes HTTP (axios, undici, got, node-fetch…) o SDKs de
+#                servicio (openai, @anthropic-ai, exa-js, @mendable, dotenv…)
+#   nativo     → sqlite3 / better-sqlite3 / sharp / canvas / bcrypt (node-gyp)
+if [ -n "$NPM" ]; then
+  NM="$mnt/usr/lib/node_modules"
+  hasdep() { find "$NM" -maxdepth 4 -type d -name "$1" 2>/dev/null | grep -q .; }
+  CAP_EGRESS=none
+  [ -n "${BROWSER:-}" ] && CAP_EGRESS=internet   # un navegador navega la web
+  for m in axios undici got node-fetch cross-fetch ky openai cohere-ai exa-js \
+           firecrawl-js "@anthropic-ai" "@mendable" "@aws-sdk" "@azure" dotenv; do
+    hasdep "$m" && CAP_EGRESS=internet
+  done
+  # Fallback: los que usan el fetch global de Node ≥18 no traen cliente HTTP en
+  # deps; se infiere del nombre y de las keywords del paquete principal.
+  if [ "$CAP_EGRESS" = none ]; then
+    for pkg in $NPM; do
+      case "$pkg" in
+        *fetch*|*scrape*|*crawl*|*search*|*web*|*http*|*browser*|*firecrawl*|*exa*) CAP_EGRESS=internet ;;
+      esac
+      pj=$(find "$NM" -maxdepth 3 -name package.json -path "*$pkg*" 2>/dev/null | head -1)
+      [ -n "$pj" ] && grep -qiE '"(fetch|scrape|crawl|search|web|http|api-client)"' "$pj" 2>/dev/null && CAP_EGRESS=internet
+    done
+  fi
+  NATIVE=""
+  for m in sqlite3 better-sqlite3 sharp canvas bcrypt; do
+    hasdep "$m" && NATIVE="$NATIVE $m"
+  done
+  NATJSON="[]"
+  [ -n "$NATIVE" ] && NATJSON="[\"$(echo $NATIVE | sed 's/ /","/g')\"]"
+  BROWSERJSON=false; [ -n "${BROWSER:-}" ] && BROWSERJSON=true
+  mkdir -p "$mnt/etc/kling"
+  cat > "$mnt/etc/kling/capabilities.json" <<CJSON
+{
+  "browser": $BROWSERJSON,
+  "egress": "$CAP_EGRESS",
+  "native": $NATJSON
+}
+CJSON
+  echo "capacidades detectadas: browser=$BROWSERJSON egress=$CAP_EGRESS native='${NATIVE:-ninguno}'"
+fi
+
 # Igual que npm, y por la misma razón: el invitado arranca SIN salida a
 # internet, así que un `pip install` en tiempo de ejecución fallaría.
 #

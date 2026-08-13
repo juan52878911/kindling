@@ -475,6 +475,15 @@ type ImageRecipe struct {
 	KlingVer string    `json:"kling_version,omitempty"`
 }
 
+// Capabilities son las capacidades que una imagen declara sobre lo que su
+// servidor MCP necesita, detectadas de su árbol de dependencias al construirla.
+// El import las usa para configurar el egress solo y avisar de módulos nativos.
+type Capabilities struct {
+	Browser bool     `json:"browser"`          // usa un navegador (Chromium)
+	Egress  string   `json:"egress,omitempty"` // "none" | "internet"
+	Native  []string `json:"native,omitempty"` // módulos nativos npm detectados
+}
+
 // StatusError es un error de la API que conserva el código HTTP.
 //
 // Existe porque quien llama a veces necesita distinguir QUÉ clase de negativa

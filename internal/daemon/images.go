@@ -291,3 +291,22 @@ func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(b)
 }
+
+func (s *Server) handleImageCapabilities(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !reName.MatchString(name) {
+		fail(w, http.StatusBadRequest, fmt.Errorf("nombre inválido %q", name))
+		return
+	}
+	caps, err := s.mgr.ImageCapabilities(r.Context(), name)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+	// Sin capacidades declaradas se devuelve un objeto vacío, no un 404: quien
+	// llama trata "no declara nada" como "sin necesidades especiales".
+	if caps == nil {
+		caps = &api.Capabilities{}
+	}
+	writeJSON(w, http.StatusOK, caps)
+}

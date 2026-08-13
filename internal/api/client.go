@@ -137,6 +137,14 @@ func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, er
 	return &rec, c.do(ctx, http.MethodGet, "/images/"+name+"/recipe", nil, &rec)
 }
 
+// ImageCapabilities devuelve lo que una imagen declara necesitar (navegador,
+// internet, módulos nativos), detectado al construirla. El import lo usa para
+// configurar el egress automáticamente.
+func (c *Client) ImageCapabilities(ctx context.Context, name string) (*Capabilities, error) {
+	var caps Capabilities
+	return &caps, c.do(ctx, http.MethodGet, "/images/"+name+"/capabilities", nil, &caps)
+}
+
 // RefreshBridges pone el puente actual dentro de las imágenes ya construidas.
 //
 // Por c.long: monta y desmonta cada imagen, y con varias grandes pasa del plazo
