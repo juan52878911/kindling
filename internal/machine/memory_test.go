@@ -156,3 +156,30 @@ func pend(m *Manager) int {
 	defer m.mu.RUnlock()
 	return m.pendingMiB
 }
+
+// El suelo de MemFree atrapa el caso que MemAvailable no ve (muchos snapshots
+// distintos vivos): con un suelo altísimo, checkHostMemory rechaza con 507 limpio
+// aunque MemAvailable diga que cabe.
+func TestSueloDeMemoriaLibre(t *testing.T) {
+	if freeMiB() <= 0 {
+		t.Skip("sin /proc/meminfo (macOS): el suelo se prueba en Linux")
+	}
+	t.Setenv("KLING_MIN_FREE_MIB", "99999999")
+	err := checkHostMemory(16)
+	if err == nil {
+		t.Fatal("con suelo altísimo debía rechazar por MemFree")
+	}
+	if !api.IsInsufficientMemory(err) {
+		t.Errorf("el rechazo no es 507: %v", err)
+	}
+	for _, q := range []string{"realmente libre", "suelo"} {
+		if !strings.Contains(strings.ToLower(err.Error()), q) {
+			t.Errorf("el mensaje del suelo no menciona %q: %v", q, err)
+		}
+	}
+	// Suelo 0 lo desactiva: 16 MiB vuelven a pasar.
+	t.Setenv("KLING_MIN_FREE_MIB", "0")
+	if err := checkHostMemory(16); err != nil {
+		t.Errorf("con el suelo desactivado, 16 MiB deberían caber: %v", err)
+	}
+}

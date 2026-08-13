@@ -28,22 +28,31 @@ import (
 // microVM que cabe deja al host sin aire y el OOM killer elige a quien quiera.
 const hostReserveMiB = 384
 
-// availableMiB devuelve la memoria realmente disponible del anfitrión.
-//
-// MemAvailable y no MemFree: incluye la caché reclamable, que es lo que de
-// verdad se puede usar. MemFree solo mediría lo que está sin tocar, y en un host
-// que lleva horas sirviendo imágenes eso es casi nada aunque haya gigas
-// reclamables.
-//
-// Devuelve 0 si no se puede saber; quien llama debe tratarlo como "no comprobar"
-// en vez de como "no hay memoria".
-func availableMiB() int {
+// defaultMinFreeMiB es el suelo de memoria REALMENTE libre (MemFree) por debajo
+// del cual no se arranca, pase lo que diga MemAvailable. Es la red que faltaba
+// para los snapshots distintos: cuando cada mem.file caliente infla la caché,
+// MemAvailable miente y sin este suelo el arranque fallaba al no poder ni crear
+// sus ficheros. 384 MiB deja margen para que un arranque toque su working-set y
+// el kernel respire. Ajustable con KLING_MIN_FREE_MIB (0 lo desactiva).
+const defaultMinFreeMiB = 384
+
+func minFreeMiB() int {
+	if v := os.Getenv("KLING_MIN_FREE_MIB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultMinFreeMiB
+}
+
+// meminfoMiB lee un campo de /proc/meminfo en MiB. Devuelve 0 si no se puede.
+func meminfoMiB(key string) int {
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		rest, ok := strings.CutPrefix(line, "MemAvailable:")
+		rest, ok := strings.CutPrefix(line, key+":")
 		if !ok {
 			continue
 		}
@@ -59,6 +68,27 @@ func availableMiB() int {
 	}
 	return 0
 }
+
+// availableMiB devuelve la memoria realmente disponible del anfitrión.
+//
+// MemAvailable y no MemFree: incluye la caché reclamable, que es lo que de
+// verdad se puede usar. MemFree solo mediría lo que está sin tocar, y en un host
+// que lleva horas sirviendo imágenes eso es casi nada aunque haya gigas
+// reclamables.
+//
+// Devuelve 0 si no se puede saber; quien llama debe tratarlo como "no comprobar"
+// en vez de como "no hay memoria".
+func availableMiB() int { return meminfoMiB("MemAvailable") }
+
+// freeMiB devuelve la memoria REALMENTE libre (MemFree), sin contar caché.
+//
+// Es el complemento honesto de availableMiB para un caso concreto: muchas
+// microVMs de snapshots DISTINTOS vivas a la vez. Cada una mantiene su mem.file
+// en caché de página, que MemAvailable cuenta como "disponible" (es reclaimable)
+// aunque esté caliente —reclamarla es re-faultear desde disco—. Así, con
+// snapshots distintos MemAvailable se queda alto mientras MemFree se agota, y el
+// arranque siguiente ni puede crear sus ficheros: falla feo en vez de con un 507.
+func freeMiB() int { return meminfoMiB("MemFree") }
 
 // checkHostMemory se niega a arrancar una microVM que no cabe.
 //
@@ -155,6 +185,22 @@ func checkHostMemory(wantMiB int) error {
 	avail := availableMiB()
 	if avail <= 0 || wantMiB <= 0 {
 		return nil
+	}
+	// Suelo de memoria REALMENTE libre. Va ANTES del check de MemAvailable porque
+	// es el que atrapa el caso que el otro no ve: muchos snapshots distintos
+	// vivos, cada uno con su mem.file caliente en caché. Ahí MemAvailable sigue
+	// alto (la caché es reclaimable) mientras MemFree se agota, y sin este suelo
+	// el arranque siguiente fallaba al no poder crear sus ficheros. Con él, un 507
+	// limpio antes de llegar a ese punto.
+	if floor := minFreeMiB(); floor > 0 {
+		if free := freeMiB(); free > 0 && free < floor {
+			return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
+				"poca memoria REALMENTE libre: quedan %d MiB (suelo %d).\n"+
+					"MemAvailable dice %d MiB, pero es caché caliente de los mem.file de las microVMs "+
+					"vivas: reclamarla es re-faultear desde disco.\n"+
+					"Congela o quita alguna instancia (`kling ps -a`), o baja el suelo con KLING_MIN_FREE_MIB",
+				free, floor, avail)}
+		}
 	}
 	if wantMiB+hostReserveMiB <= avail {
 		return nil
