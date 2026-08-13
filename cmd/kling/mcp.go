@@ -67,6 +67,11 @@ func mcpImport(args []string) error {
 	// queda GRABADO en el snapshot dorado y no se puede cambiar después sin
 	// reimportar — por eso el flag va aquí y no en el arranque.
 	cpus := fs.Int("cpus", 0, "vCPUs de la plantilla")
+	// El techo de CPU también se graba en el snapshot dorado (ver api.Snapshot):
+	// las instancias nacen de él, y sin fijarlo aquí toda restauración caía al 50 %
+	// del daemon. En Mac ese estrangulamiento a media vCPU dobla el arranque en frío
+	// de node (16 s → 6.9 s al 100 %), así que subirlo es la palanca directa allí.
+	cpu := fs.Int("cpu", 0, "techo de CPU en % de un core de la plantilla (0 = defecto del daemon)")
 	egress := fs.String("egress", "", "salida de red del servicio: none | internet | allowlist")
 	allow := fs.String("allow", "", "dominios permitidos con -egress allowlist (separados por coma)")
 	var volumes volumeFlag
@@ -189,6 +194,9 @@ func mcpImport(args []string) error {
 		// invitado.
 		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
+		// Techo de CPU: se graba en el snapshot (Commit copia mc.CPUPct) para que la
+		// restauración no caiga al 50 % del daemon. 0 = deja decidir al daemon.
+		CPUPct: config.Or(*cpu, cfg.Defaults.CPUPct),
 		Egress: egr,
 		// Se graban en el snapshot dorado: las instancias nacen de él y sin esto
 		// despertarían con la lista vacía. Solo se usan si egr == "allowlist".

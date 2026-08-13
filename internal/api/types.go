@@ -252,6 +252,16 @@ type Snapshot struct {
 	// sin explicación.
 	Egress string `json:"egress,omitempty"`
 
+	// CPUPct es el techo de CPU (% de un core) con el que se importó el servicio.
+	// Viaja con el snapshot por la misma razón que Egress: las instancias nacen
+	// DESDE él y el techo es un límite de cgroup en runtime, no algo que quede
+	// dentro del volcado de memoria. Sin grabarlo, toda restauración caía al
+	// defaultCPUPct=50 del daemon aunque el servicio se hubiera importado con más
+	// —y en Mac ese estrangulamiento a media vCPU dobla el arranque en frío de
+	// node (medido: 16 s a 50 % → 6.9 s a 100 %)—. 0 = usar el defecto del daemon
+	// (compatibilidad con snapshots anteriores a este campo).
+	CPUPct int `json:"cpu_pct,omitempty"`
+
 	// AllowDomains es la lista de dominios permitidos cuando Egress es
 	// "allowlist". Se graba junto al snapshot por la misma razón que Egress: las
 	// instancias nacen DESDE el snapshot, y sin esto despertarían con la lista

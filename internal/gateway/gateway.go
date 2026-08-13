@@ -1002,7 +1002,11 @@ func (g *Gateway) runFresh(ctx context.Context, service string) (*api.Machine, e
 		// La política de salida viaja con el snapshot. Sin esto, un servicio
 		// importado con -egress internet despierta sin red y cada llamada suya
 		// al exterior falla con un "fetch failed" que no señala a ninguna parte.
-		Egress:     snap.Egress,
+		Egress: snap.Egress,
+		// El techo de CPU también viaja con el snapshot: sin esto la restauración
+		// caía al defaultCPUPct=50 del daemon y un servicio importado con más CPU
+		// arrancaba estrangulado. 0 (snapshots viejos) deja que el daemon decida.
+		CPUPct:     snap.CPUPct,
 		Labels:     map[string]string{api.LabelService: service},
 		TTLSeconds: int(g.idle.Seconds()) * 2, // red de seguridad si el gateway muere
 	})
