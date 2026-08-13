@@ -313,6 +313,33 @@ const (
 	EvFailed    = "machine.failed"
 )
 
+// ProcStat es la foto de recursos de UNA microVM.
+//
+// PSS y no RSS a propósito: las instancias de un mismo snapshot dorado mapean el
+// MISMO fichero de memoria en copy-on-write, así que el RSS de cada proceso
+// cuenta el mem.file entero y las N copias suman N veces lo que en realidad
+// ocupa una. El PSS reparte cada página compartida entre quienes la mapean, y es
+// la única cifra que suma lo que de verdad cuesta el host (~7 MiB por copia).
+type ProcStat struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Service string `json:"service,omitempty"`
+	From    string `json:"from,omitempty"` // snapshot dorado de origen, si lo hubo
+	State   State  `json:"state"`
+	PID     int    `json:"pid,omitempty"`
+	PSSMiB  int64  `json:"pss_mib"`
+}
+
+// ProcStats es la respuesta de GET /procstats: el consumo del conjunto.
+type ProcStats struct {
+	Machines    []ProcStat     `json:"machines"`
+	ByState     map[string]int `json:"by_state"`      // running/warm/… -> cuántas
+	TotalPSSMiB int64          `json:"total_pss_mib"` // suma del PSS de las vivas
+	// Memoria del host, leída de /proc/meminfo. 0 en dev sobre macOS (sin /proc).
+	AvailableMiB int64 `json:"available_mib"` // MemAvailable
+	FreeMiB      int64 `json:"free_mib"`      // MemFree
+}
+
 // Info describe el daemon.
 type Info struct {
 	Version   string `json:"version"`
@@ -498,6 +525,16 @@ type StatusError struct {
 }
 
 func (e *StatusError) Error() string { return e.Message }
+
+// SqueezeResult informa de un apretón de globo: cuánta RAM se devolvió al host
+// sin congelar la microVM. ReclaimedMiB y RSSMiB son 0 en un host sin /proc
+// (macOS de desarrollo); GuestFreeMiB sale de las estadísticas del propio globo.
+type SqueezeResult struct {
+	ID           string `json:"id"`
+	ReclaimedMiB int    `json:"reclaimed_mib"`  // caída medida del RSS del proceso firecracker
+	GuestFreeMiB int    `json:"guest_free_mib"` // memoria libre que reportaba el invitado
+	RSSMiB       int    `json:"rss_mib"`        // RSS del proceso tras apretar
+}
 
 // StatusInsufficientMemory es la negativa por falta de memoria en el anfitrión.
 // 507 es "Insufficient Storage", que es lo más cerca que hay en HTTP.

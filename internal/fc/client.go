@@ -1,7 +1,8 @@
 // Package fc habla con la API REST de Firecracker por su socket Unix.
 //
-// Deliberadamente sin SDK: la superficie que necesitamos son seis llamadas y así
-// no arrastramos deriva de versiones con un binario que actualizamos aparte.
+// Deliberadamente sin SDK: la superficie que necesitamos es un puñado de
+// llamadas y así no arrastramos deriva de versiones con un binario que
+// actualizamos aparte.
 package fc
 
 import (
@@ -194,4 +195,71 @@ func (c *Client) LoadSnapshot(ctx context.Context, snapPath, memPath string, res
 		"mem_backend":   map[string]string{"backend_path": memPath, "backend_type": "File"},
 		"resume_vm":     resume,
 	})
+}
+
+// SetBalloon configura el globo de memoria (virtio-balloon) del invitado.
+//
+// TIENE que hacerse ANTES de Start: Firecracker no admite añadir el globo en
+// caliente. Por eso queda grabado en el snapshot dorado y las copias restauradas
+// lo heredan sin más. Al arrancar se deja a 0 (no reclama nada); lo que habilita
+// es poder APRETARLO luego para devolver RAM al host entre sesiones.
+//
+// deflateOnOOM deja que el invitado recupere sus páginas si se queda corto, en
+// vez de morir por el OOM killer del propio invitado. statsPollingSec>0 activa
+// las estadísticas del globo —imprescindibles para saber cuánta memoria libre
+// tiene el invitado antes de apretarlo—.
+func (c *Client) SetBalloon(ctx context.Context, amountMiB int, deflateOnOOM bool, statsPollingSec int) error {
+	return c.do(ctx, http.MethodPut, "/balloon", map[string]any{
+		"amount_mib":               amountMiB,
+		"deflate_on_oom":           deflateOnOOM,
+		"stats_polling_interval_s": statsPollingSec,
+	})
+}
+
+// PatchBalloon cambia el tamaño del globo en caliente.
+//
+// Inflarlo hace que el driver del invitado entregue páginas libres al host, que
+// Firecracker devuelve con madvise(DONTNEED): así cae el RSS del proceso en el
+// anfitrión sin congelar la microVM. Desinflarlo a 0 deja que el invitado vuelva
+// a usar esa memoria —las páginas reentran perezosas como ceros—.
+func (c *Client) PatchBalloon(ctx context.Context, amountMiB int) error {
+	return c.do(ctx, http.MethodPatch, "/balloon", map[string]int{"amount_mib": amountMiB})
+}
+
+// BalloonStats son las estadísticas del globo. Los campos de memoria van en
+// BYTES. Solo existen si el globo se configuró con statsPollingSec>0.
+type BalloonStats struct {
+	TargetMiB       int   `json:"target_mib"`
+	ActualMiB       int   `json:"actual_mib"`
+	FreeMemory      int64 `json:"free_memory"`
+	AvailableMemory int64 `json:"available_memory"`
+	TotalMemory     int64 `json:"total_memory"`
+}
+
+// BalloonStats lee las estadísticas del globo del invitado. A diferencia de do(),
+// necesita el cuerpo de la respuesta, así que hace la petición y la decodifica
+// aquí. Devuelve error si el globo no está configurado (imagen anterior al
+// balloon) o si el invitado aún no ha reportado.
+func (c *Client) BalloonStats(ctx context.Context) (*BalloonStats, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/balloon/statistics", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		var e struct {
+			FaultMessage string `json:"fault_message"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		return nil, fmt.Errorf("firecracker GET /balloon/statistics: %s: %s", resp.Status, e.FaultMessage)
+	}
+	var s BalloonStats
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }

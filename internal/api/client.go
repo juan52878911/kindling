@@ -116,6 +116,14 @@ func (c *Client) List(ctx context.Context) ([]*Machine, error) {
 	return l, c.do(ctx, http.MethodGet, "/machines", nil, &l)
 }
 
+// ProcStats trae el consumo de memoria del conjunto para `kling top`. Se sirve
+// en JSON (GET /procstats) en vez de parsear el texto de /metrics: el mismo dato,
+// sin volver a interpretar el formato de exposición.
+func (c *Client) ProcStats(ctx context.Context) (*ProcStats, error) {
+	var ps ProcStats
+	return &ps, c.do(ctx, http.MethodGet, "/procstats", nil, &ps)
+}
+
 func (c *Client) Run(ctx context.Context, r RunRequest) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines", r, &m)
@@ -196,6 +204,14 @@ func (c *Client) Thaw(ctx context.Context, ref string) (*Machine, error) {
 func (c *Client) Stop(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/stop", nil, &m)
+}
+
+// Squeeze aprieta el globo de una instancia running para devolver RAM al host
+// sin congelarla. Va por el cliente largo: al otro lado hay una microVM que
+// tarda un par de segundos en entregar sus páginas.
+func (c *Client) Squeeze(ctx context.Context, ref string) (*SqueezeResult, error) {
+	var res SqueezeResult
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/squeeze", nil, &res)
 }
 
 func (c *Client) Remove(ctx context.Context, ref string) error {

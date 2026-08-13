@@ -89,6 +89,8 @@ SNAPSHOTS DORADOS
 
 OBSERVACIÓN
   topo                                             diagrama ASCII de todo
+  top [-watch DUR]                                 memoria por microVM (PSS) y
+                                                   del host; foto o refresco
   export [-o fichero.html]                         topología navegable en HTML
   events                                           stream de eventos del daemon
   info                                             estado del daemon
@@ -195,6 +197,8 @@ func main() {
 		err = cmdLogs(args)
 	case "freeze", "thaw", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
+	case "squeeze":
+		err = cmdSqueeze(args)
 	case "commit":
 		err = cmdCommit(args)
 	case "snapshots":
@@ -205,6 +209,8 @@ func main() {
 		err = cmdRmi(args)
 	case "topo":
 		err = cmdTopo(args)
+	case "top":
+		err = cmdTop(args)
 	case "export":
 		err = cmdExport(args)
 	case "events":
@@ -826,6 +832,32 @@ func cmdLifecycle(op string, args []string) error {
 		default:
 			fmt.Printf("%s  %s\n", mc.ID[:12], mc.State)
 		}
+	}
+	return nil
+}
+
+// cmdSqueeze aprieta el globo de una o varias microVMs running para devolver al
+// host la RAM que el invitado tiene libre, sin congelarlas. A diferencia de
+// freeze, la máquina sigue viva y atendiendo: es el ahorro barato entre sesiones.
+func cmdSqueeze(args []string) error {
+	fs := flag.NewFlagSet("squeeze", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("uso: kling squeeze <ref>...")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	for _, ref := range fs.Args() {
+		res, err := c.Squeeze(ctx, ref)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s  ~%d MiB devueltos al host  (invitado libre %d MiB, RSS ahora %d MiB)\n",
+			res.ID[:12], res.ReclaimedMiB, res.GuestFreeMiB, res.RSSMiB)
 	}
 	return nil
 }

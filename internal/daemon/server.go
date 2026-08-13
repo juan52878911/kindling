@@ -67,6 +67,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /machines/{ref}", s.handleGet)
 	mux.HandleFunc("POST /machines/{ref}/freeze", s.handleFreeze)
 	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
+	mux.HandleFunc("POST /machines/{ref}/squeeze", s.handleSqueeze)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
@@ -88,6 +89,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
 	mux.HandleFunc("GET /events", s.handleEvents)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("GET /procstats", s.handleProcStats)
 	return mux
 }
 
@@ -280,6 +283,15 @@ func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
+	res, err := s.mgr.Squeeze(r.Context(), r.PathValue("ref"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {

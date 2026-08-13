@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -865,6 +866,15 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memMiB}); err != nil {
 		return pid, err
 	}
+	// virtio-balloon a 0: no reclama nada al arrancar, pero deja el dispositivo
+	// listo para que un "squeeze" posterior devuelva RAM al host entre sesiones.
+	// Va ANTES de Start (Firecracker no lo admite en caliente) y así queda dentro
+	// del snapshot dorado, heredado por las copias. No es fatal: si el kernel
+	// invitado no trae el driver o la versión de Firecracker lo rechaza, la
+	// microVM arranca igual y solo se pierde el squeeze.
+	if err := c.SetBalloon(ctx, 0, true, balloonStatsPollSec); err != nil {
+		log.Printf("aviso: no pude configurar el balloon en %s: %v (el squeeze no estará disponible)", id, err)
+	}
 	if err := c.Start(ctx); err != nil {
 		return pid, err
 	}
@@ -1032,6 +1042,133 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("congelada en %d ms (%d MiB en disco)", elapsed, size>>20)})
 	return &out, nil
+}
+
+// balloonStatsPollSec es cada cuánto reporta el globo sus estadísticas. Hace
+// falta >0 para poder leer la memoria libre del invitado antes de apretarlo; 1 s
+// es barato (el hilo vive dentro del invitado) y suficientemente fresco.
+const balloonStatsPollSec = 1
+
+// balloonSqueezeMarginMiB es el colchón que se le deja al invitado al apretar:
+// se reclama su memoria libre MENOS este margen, para no dejarlo pegado al borde
+// del OOM justo después.
+const balloonSqueezeMarginMiB = 128
+
+// Squeeze aprieta el globo de una instancia running para devolver al host la RAM
+// que el invitado tiene LIBRE, sin congelarla.
+//
+// Es el estado intermedio que faltaba entre "running" (faultea su mem_mib entero
+// y node nunca lo devuelve al SO, de ahí la densidad 3-8 bajo carga) y "warm"
+// (congelada; descongelar cuesta más que un simple globo). Infla el globo hasta
+// dejar al invitado con un margen mínimo, espera a que su driver entregue las
+// páginas —Firecracker las suelta con madvise(DONTNEED), y ahí cae el RSS del
+// host—, y desinfla a 0 para que el invitado pueda volver a crecer: la RAM ya
+// está reclamada y solo reentra si de verdad se necesita.
+func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, error) {
+	mc, ok := m.Get(ref)
+	if !ok {
+		return nil, fmt.Errorf("no existe la máquina %q", ref)
+	}
+	defer m.lock(mc.ID)()
+
+	// Pudo cambiar de estado mientras esperábamos el lock.
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("no existe la máquina %q", ref)
+	}
+	if cur.State != api.StateRunning {
+		return nil, fmt.Errorf("solo se puede apretar una máquina running (está %s)", cur.State)
+	}
+
+	m.mu.RLock()
+	sock := m.socket[mc.ID]
+	pid := cur.PID
+	m.mu.RUnlock()
+	if sock == "" {
+		return nil, fmt.Errorf("sin socket para %s", mc.ID)
+	}
+	c := fc.New(sock)
+
+	stats, err := c.BalloonStats(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("el balloon no está disponible en esta instancia "+
+			"(reimporta la imagen para grabarlo en el snapshot): %w", err)
+	}
+	freeMiB := int(stats.FreeMemory >> 20)
+	rssBefore := procRSSMiB(pid)
+
+	target := stats.ActualMiB + freeMiB - balloonSqueezeMarginMiB
+	if target <= stats.ActualMiB {
+		// El invitado no tiene holgura que reclamar.
+		return &api.SqueezeResult{ID: mc.ID, ReclaimedMiB: 0, GuestFreeMiB: freeMiB, RSSMiB: rssBefore}, nil
+	}
+
+	if err := c.PatchBalloon(ctx, target); err != nil {
+		return nil, fmt.Errorf("inflando el globo: %w", err)
+	}
+	// El inflado es asíncrono: el driver del invitado va entregando páginas.
+	// Esperamos a que se acerque al objetivo (o a un plazo corto) antes de medir.
+	waitBalloon(ctx, c, target)
+	// Desinflar: la RAM ya se reclamó al inflar; esto solo devuelve el presupuesto
+	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
+	// cliente abandonó.
+	if err := c.PatchBalloon(context.WithoutCancel(ctx), 0); err != nil {
+		log.Printf("aviso: no pude desinflar el globo de %s: %v", mc.ID, err)
+	}
+
+	rssAfter := procRSSMiB(pid)
+	reclaimed := rssBefore - rssAfter
+	if reclaimed < 0 {
+		reclaimed = 0
+	}
+
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
+		Message: fmt.Sprintf("apretada: ~%d MiB devueltos al host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+
+	return &api.SqueezeResult{ID: mc.ID, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
+}
+
+// waitBalloon espera a que el globo alcance ~el objetivo. El inflado lo hace el
+// driver del invitado a su ritmo; sin esta espera mediríamos el RSS antes de que
+// soltara nada. Plazo corto: si el invitado no coopera, no bloqueamos.
+func waitBalloon(ctx context.Context, c *fc.Client, targetMiB int) {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s, err := c.BalloonStats(ctx)
+		if err == nil && s.ActualMiB >= targetMiB-16 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// procRSSMiB lee el RSS del proceso (VmRSS de /proc/<pid>/status) en MiB. Es la
+// cifra del host que cae cuando el globo devuelve páginas. Devuelve 0 si no se
+// puede leer (macOS de desarrollo, o proceso ya muerto).
+func procRSSMiB(pid int) int {
+	if pid <= 0 {
+		return 0
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		rest, ok := strings.CutPrefix(line, "VmRSS:")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			return 0
+		}
+		kb, err := strconv.Atoi(f[0])
+		if err != nil {
+			return 0
+		}
+		return kb / 1024
+	}
+	return 0
 }
 
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
