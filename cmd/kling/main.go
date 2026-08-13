@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -61,6 +62,9 @@ MÁQUINAS
   thaw <ref>                                       restaura desde snapshot (~ms)
   stop <ref>                                       termina la máquina
   rm <ref>                                         elimina máquina y snapshot
+  mmds <ref> [-f store.json]                       inyecta un secreto de sesión por
+                                                   MMDS (lee stdin si no hay -f); la
+                                                   máquina ya no se podrá congelar
 
 CATÁLOGO
   search <consulta>                                busca en el registro oficial
@@ -200,6 +204,8 @@ func main() {
 		err = cmdLifecycle(cmd, args)
 	case "squeeze":
 		err = cmdSqueeze(args)
+	case "mmds":
+		err = cmdMMDS(args)
 	case "commit":
 		err = cmdCommit(args)
 	case "snapshots":
@@ -878,6 +884,59 @@ func cmdSqueeze(args []string) error {
 		fmt.Printf("%s  ~%d MiB devueltos al host  (invitado libre %d MiB, RSS ahora %d MiB)\n",
 			res.ID[:12], res.ReclaimedMiB, res.GuestFreeMiB, res.RSSMiB)
 	}
+	return nil
+}
+
+// cmdMMDS inyecta un secreto de sesión en una microVM viva por MMDS. El store es
+// un documento JSON que se lee de -f o de stdin. Es sobre todo para pruebas en el
+// lab: en producción quien inyecta es el gateway al resolver una sesión.
+//
+// Esquema del store (lo entiende el bridge de dentro):
+//
+//	{
+//	  "env": { "VAR_COMUN": "valor" },
+//	  "sessions": { "<Mcp-Session-Id>": { "TOKEN": "secreto-de-esa-sesion" } }
+//	}
+//
+// El secreto NO viaja por la línea de comandos (cualquiera lee /proc/<pid>/cmdline):
+// se lee de un fichero o de la entrada estándar.
+func cmdMMDS(args []string) error {
+	fs := flag.NewFlagSet("mmds", flag.ExitOnError)
+	host := hostFlag(fs)
+	file := fs.String("f", "", "fichero JSON con el store MMDS (por defecto: stdin)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("uso: kling mmds <ref> [-f store.json]  (si no hay -f, lee de stdin)")
+	}
+
+	var raw []byte
+	var err error
+	if *file != "" {
+		raw, err = os.ReadFile(*file)
+	} else {
+		raw, err = io.ReadAll(os.Stdin)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Se valida que sea JSON antes de mandarlo: un store inválido lo rechazaría
+	// Firecracker con un error mucho menos claro.
+	var data json.RawMessage
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return fmt.Errorf("el store MMDS no es JSON válido: %w", err)
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	mc, err := api.NewClient(hostOf(*host)).PutMMDS(ctx, fs.Arg(0), data)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s  secretos inyectados por MMDS (ya no se puede congelar)\n", mc.ID[:12])
 	return nil
 }
 

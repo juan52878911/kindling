@@ -236,6 +236,41 @@ type BalloonStats struct {
 	TotalMemory     int64 `json:"total_memory"`
 }
 
+// SetMMDS configura el metadata service (MMDS) de Firecracker: qué versión y por
+// qué interfaces lo sirve. TIENE que hacerse ANTES de Start, como el balloon:
+// Firecracker no admite añadir MMDS en caliente. Por eso queda grabado en el
+// snapshot dorado y las copias restauradas lo heredan.
+//
+// MODELO DE AMENAZA. MMDS es el canal por el que se inyecta un secreto de sesión
+// —un token, una credencial— en una microVM YA VIVA, sin hornearlo en la imagen
+// compartida ni en el snapshot dorado. El invitado es hostil, pero el secreto es
+// SUYO (de esa sesión); lo que se busca es que no acabe grabado en un artefacto
+// que comparten todas las instancias.
+//
+// Versión V2 a propósito: exige que el invitado pida primero un token de sesión
+// (PUT .../api/token) y lo presente en cada lectura (cabecera X-metadata-token).
+// V1 deja leer sin token, y como el gateway reenvía peticiones a los invitados,
+// un canal de metadatos legible sin credencial es una fuga esperando a ocurrir.
+// La 169.254.169.254 es la link-local estándar del metadata service.
+func (c *Client) SetMMDS(ctx context.Context, ifaceIDs []string) error {
+	return c.do(ctx, http.MethodPut, "/mmds/config", map[string]any{
+		"version":            "V2",
+		"ipv4_address":       "169.254.169.254",
+		"network_interfaces": ifaceIDs,
+	})
+}
+
+// PutMMDSData escribe el store JSON del MMDS. Es lo que el invitado lee luego por
+// 169.254.169.254. A diferencia de SetMMDS (config, pre-boot), esto se hace sobre
+// una microVM VIVA: es la inyección del secreto de sesión.
+//
+// El store es un único documento JSON que PISA por completo al anterior (PUT, no
+// merge). El esquema lo define kindling (ver bridge): un objeto con "env" (comunes
+// a todas las sesiones) y "sessions" keyed por Mcp-Session-Id.
+func (c *Client) PutMMDSData(ctx context.Context, data any) error {
+	return c.do(ctx, http.MethodPut, "/mmds", data)
+}
+
 // BalloonStats lee las estadísticas del globo del invitado. A diferencia de do(),
 // necesita el cuerpo de la respuesta, así que hace la petición y la decodifica
 // aquí. Devuelve error si el globo no está configurado (imagen anterior al

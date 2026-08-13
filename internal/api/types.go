@@ -67,6 +67,13 @@ type Machine struct {
 	// `topo` como el HTML exportado.
 	Labels map[string]string `json:"labels,omitempty"`
 
+	// HasSecrets marca que se inyectó un secreto de sesión por MMDS en esta
+	// microVM viva. Importa para la CONGELACIÓN: un secreto inyectado vive en la
+	// RAM del invitado, y congelar vuelca esa RAM a mem.file —que, si la máquina
+	// es o llega a ser un snapshot dorado, se COMPARTE con todas las copias—. Por
+	// eso Freeze se niega a congelar una máquina marcada así (ver Freeze).
+	HasSecrets bool `json:"has_secrets,omitempty"`
+
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`
