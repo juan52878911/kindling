@@ -1098,7 +1098,19 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	freeMiB := int(stats.FreeMemory >> 20)
 	rssBefore := procRSSMiB(pid)
 
-	target := stats.ActualMiB + freeMiB - balloonSqueezeMarginMiB
+	// Se reclama la memoria DISPONIBLE, no solo la LIBRE. Al inflar el globo, el
+	// invitado suelta también su caché de página limpia para cedérnosla, así que
+	// esas páginas vuelven al host igual que las libres. AvailableMemory es la
+	// estimación del kernel invitado de lo reclamable sin entrar en swap; el
+	// colchón y el deflate_on_oom configurado en boot cubren que se quede corta.
+	// Si el invitado no reporta AvailableMemory (0 en guests que no exponen ese
+	// stat), se cae a la memoria libre, que siempre es segura de reclamar.
+	reclaimMiB := freeMiB
+	if avail := int(stats.AvailableMemory >> 20); avail > reclaimMiB {
+		reclaimMiB = avail
+	}
+
+	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
 	if target <= stats.ActualMiB {
 		// El invitado no tiene holgura que reclamar.
 		return &api.SqueezeResult{ID: mc.ID, ReclaimedMiB: 0, GuestFreeMiB: freeMiB, RSSMiB: rssBefore}, nil
