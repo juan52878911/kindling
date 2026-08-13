@@ -23,12 +23,14 @@ import (
 //	kling mcp refresh <servicio>
 func cmdMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("uso: kling mcp [import|list|refresh]")
+		return fmt.Errorf("uso: kling mcp [import|verify|list|refresh]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "import":
 		return mcpImport(rest)
+	case "verify":
+		return mcpVerify(rest)
 	case "list", "ls":
 		return mcpList(rest)
 	case "refresh":
@@ -38,7 +40,7 @@ func cmdMCP(args []string) error {
 	case "unlink":
 		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa import, list, refresh, link o unlink", sub)
+		return fmt.Errorf("subcomando desconocido %q: usa import, verify, list, refresh, link o unlink", sub)
 	}
 }
 
@@ -73,6 +75,8 @@ func mcpImport(args []string) error {
 	force := fs.Bool("force", false, "reemplazar el servicio si ya existe")
 	stateful := fs.Bool("stateful", false, "forzar instancia persistente (por defecto se deduce del catálogo)")
 	ephemeral := fs.Bool("ephemeral", false, "forzar máquinas efímeras aunque el análisis diga lo contrario")
+	allowRuntimeInstall := fs.Bool("allow-runtime-install", false,
+		"importar aunque el servidor instale dependencias en caliente (no recomendado: hornéalas en la imagen)")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -159,6 +163,36 @@ func mcpImport(args []string) error {
 		return err
 	}
 	fmt.Printf("✓ %s · %d herramienta(s)\n", info, len(tools))
+
+	// GUARDIÁN: que el servidor no se instale nada en caliente.
+	//
+	// La microVM corre aislada (egress:none), igual que en producción, así que un
+	// servidor que intente `pip install`/`npx -y` al arrancar ya ha fracasado para
+	// cuando llegamos aquí, y su huella está en la consola. Se comprueba ANTES del
+	// commit: no queremos congelar un snapshot dorado de un servicio roto. Ver
+	// verify.go.
+	fmt.Printf("       comprobando que no instala en caliente... ")
+	if logtxt, lerr := c.Logs(ctx, mc.ID, 0); lerr == nil {
+		if hits := detectRuntimeInstall(logtxt); len(hits) > 0 {
+			fmt.Println("✗")
+			msg := installFindingsMsg(service, hits)
+			if !*allowRuntimeInstall {
+				cleanup()
+				return fmt.Errorf("%s", msg)
+			}
+			fmt.Println(msg)
+			fmt.Println("       --allow-runtime-install: importo de todos modos")
+		} else {
+			// El escaneo de consola caza a quien instala al arrancar. Los que solo
+			// instalan al USAR una herramienta (semgrep) no se disparan aquí: para
+			// eso está `kling mcp verify`, que ejerce las herramientas.
+			fmt.Println("✓ (para el chequeo profundo: kling mcp verify " + service + ")")
+		}
+	} else {
+		// Sin consola no se puede afirmar que esté limpio, pero tampoco es motivo
+		// para abortar: se deja constancia y se sigue.
+		fmt.Printf("(sin log: %v)\n", lerr)
+	}
 
 	// AUTO-RESET POST-CATALOG. Sin esto, el snapshot dorado se congela con el
 	// servidor en estado post-handshake: sesiones abiertas, procesos hijos
