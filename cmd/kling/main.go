@@ -123,6 +123,10 @@ CONECTAR CON TU AGENTE
   connect ... -install <cliente>                   solo en ese
   connect ... -token T                             usa ese token en vez del de
                                                    gateway.token
+  migrate <mcp> -install <cliente>                 mueve un MCP existente a
+                                                   kindling SIN reescribir las
+                                                   skills que lo usan (conserva
+                                                   nombre y herramientas)
 
 GATEWAY
   gateway [-listen ADDR] [-idle DUR] [-ephemeral]  enruta llamadas MCP a microVMs
@@ -188,6 +192,8 @@ func main() {
 		err = cmdVolume(args)
 	case "connect":
 		err = cmdConnect(args)
+	case "migrate":
+		err = cmdMigrate(args)
 	case "mcp":
 		err = cmdMCP(args)
 	case "memory":
