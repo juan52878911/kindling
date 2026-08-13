@@ -131,9 +131,15 @@ make deploy HOST=ssh://juan@192.168.2.60  # daemon en el host con KVM
 instalar una herramienta de usuario no debería requerirlo. Fuérzalo con
 `make install PREFIX=/usr/local` si lo prefieres en el sistema.
 
-`make deploy` compila para `linux/amd64`, copia binario y unit de systemd, y arranca el
-servicio. El unit cede el socket al usuario con el que entras por SSH, para no ejecutar
-todo el cliente con sudo.
+`make deploy` compila para `linux/amd64` por defecto, copia binario y unit de systemd, y
+arranca el servicio. El unit cede el socket al usuario con el que entras por SSH, para no
+ejecutar todo el cliente con sudo. La arquitectura es paramétrica con `GOARCH`: para
+desplegar a un host arm64 usa `make deploy GOARCH=arm64 HOST=ssh://...` (el binario sale
+como `kling-linux-arm64`).
+
+**En Mac Apple Silicon** (M3+), Firecracker necesita una VM Linux arm64 con virtualización
+anidada; hay un atajo `make deploy-mac HOST=ssh://...` y la receta reproducible completa en
+[`docs/mac-arm64.md`](docs/mac-arm64.md).
 
 ### Configuración
 
