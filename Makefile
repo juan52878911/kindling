@@ -8,6 +8,13 @@
 BIN     := kling
 PKG     := ./cmd/kling
 
+# Arquitectura del binario del daemon/bridge que se compila para Linux.
+# Por defecto amd64 (el laboratorio habitual). Para desplegar a una VM Linux
+# arm64 (p.ej. Lima vz+nested en un Mac Apple Silicon):
+#   make deploy GOARCH=arm64 HOST=ssh://usuario@vm-arm
+# El CLI local (`make build`) no usa esta variable: se compila para tu máquina.
+GOARCH  ?= amd64
+
 # Destino de instalación. Se elige el primer directorio del PATH que sea tuyo,
 # para no pedir sudo: instalar una herramienta de usuario no debería requerirlo.
 # Se puede forzar con PREFIX=/usr/local.
@@ -27,7 +34,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets bridge bridge-local deploy test clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets bridge bridge-local deploy deploy-mac test clean fmt
 
 all: build
 
@@ -62,9 +69,9 @@ uninstall:
 ## bridge — el puente stdio<->HTTP que corre DENTRO de las microVMs.
 ## Estático a propósito: el invitado es Alpine (musl) y no debe depender de libc.
 bridge:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
 		-ldflags "$(LDFLAGS)" -o kling-bridge ./cmd/kling-bridge
-	@echo "kling-bridge  ($(VERSION))"
+	@echo "kling-bridge  ($(VERSION), linux/$(GOARCH))"
 
 ## bridge-local — el mismo puente, para TU máquina.
 ##
@@ -79,10 +86,10 @@ bridge-local:
 	@echo "  ./kling-bridge-local -listen 0.0.0.0:9100 -- engram mcp --tools=agent"
 	@echo "  kling mcp link engram http://<tu-ip>:9100/mcp"
 
-## daemon — compila el binario del host con KVM (siempre linux/amd64)
+## daemon — compila el binario del host con KVM (linux/$(GOARCH), amd64 por defecto)
 daemon:
-	GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN)-linux-amd64 $(PKG)
-	@echo "$(BIN)-linux-amd64  ($(VERSION))"
+	GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN)-linux-$(GOARCH) $(PKG)
+	@echo "$(BIN)-linux-$(GOARCH)  ($(VERSION))"
 
 ## assets — reúne en internal/assets/blobs lo que va a ir DENTRO del binario.
 ##
@@ -109,9 +116,9 @@ assets:
 ## engorda ~20 MB, por eso `make daemon` a secas sigue existiendo y por eso el
 ## CLI (`make build`) no lleva nada: en un Mac ese kernel no se usa jamás.
 daemon-full: assets
-	GOOS=linux GOARCH=amd64 go build -trimpath -tags embed_assets \
-		-ldflags "$(LDFLAGS)" -o $(BIN)-linux-amd64 $(PKG)
-	@echo "$(BIN)-linux-amd64  ($(VERSION))  con artefactos embebidos"
+	GOOS=linux GOARCH=$(GOARCH) go build -trimpath -tags embed_assets \
+		-ldflags "$(LDFLAGS)" -o $(BIN)-linux-$(GOARCH) $(PKG)
+	@echo "$(BIN)-linux-$(GOARCH)  ($(VERSION))  con artefactos embebidos"
 
 ## deploy — instala el daemon por SSH y lo reinicia
 ## Van también el puente y 80-mcp-image.sh: `kling add` los necesita EN el host,
@@ -121,7 +128,7 @@ deploy: daemon bridge
 	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
-	scp -q $(BIN)-linux-amd64 $(TARGET):/tmp/$(BIN)
+	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
 	scp -q kling-bridge scripts/80-mcp-image.sh $(TARGET):/tmp/
 	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
@@ -153,6 +160,16 @@ deploy: daemon bridge
 	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/gateway.env')"
 	@echo "  kling connect -all -install all"
 
+## deploy-mac — atajo para desplegar a una VM Linux arm64 desde un Mac Apple Silicon.
+##
+## Firecracker es Linux/KVM: en un Mac el daemon no corre nativo, hace falta una
+## VM Linux arm64 con virtualización anidada (Lima con vmType:vz + nestedVirtua-
+## lization, solo M3+). Esto es un `make deploy` con GOARCH=arm64 ya fijado; el
+## HOST es el ssh de esa VM (`limactl show-ssh <vm>` o ~/.lima/<vm>/ssh.config).
+## Receta completa en docs/mac-arm64.md.
+deploy-mac:
+	@$(MAKE) deploy GOARCH=arm64 HOST="$(HOST)"
+
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##
 ## `-race` no es opcional aquí: el daemon toca su estado desde varias goroutines
@@ -167,4 +184,4 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-bridge kling-bridge-local
