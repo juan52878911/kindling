@@ -564,7 +564,21 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 		return nil, false, fmt.Errorf("falta la cabecera %s (envía initialize primero)", SessionHeader)
 	}
 	if len(b.sessions) >= b.maxSessions {
-		return nil, false, fmt.Errorf("límite de %d sesiones alcanzado", b.maxSessions)
+		// Al tope. Antes de rechazar, intenta hacer sitio reciclando la sesión más
+		// OCIOSA si lleva parada más que una gracia corta. Es lo que permite que un
+		// cliente que se RECONECTA (p. ej. opencode reiniciado) entre aunque su
+		// sesión anterior siga contada: el reaper de inactividad espera b.idle
+		// —minutos—, y sin esto un servicio con tope 1 rechaza toda reconexión
+		// durante todo ese rato. Solo se reciclan ociosas: una sesión con su stream
+		// SSE abierto se marca activa y nunca es candidata.
+		v := b.oldestReclaimableLocked()
+		if v == nil {
+			return nil, false, fmt.Errorf("límite de %d sesiones alcanzado", b.maxSessions)
+		}
+		delete(b.sessions, v.id)
+		go v.close()
+		log.Printf("sesión %s reciclada (ociosa %s) para dar sitio a una nueva",
+			v.id, time.Since(v.lastUse).Round(time.Second))
 	}
 
 	s, err := b.spawn()
@@ -573,6 +587,28 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 	}
 	b.sessions[s.id] = s
 	return s, true, nil
+}
+
+// sessionReclaimGrace: cuánto debe llevar OCIOSA una sesión para poder
+// reciclarla y hacer sitio a una nueva cuando se alcanza el tope. Corto —una
+// reconexión no debe esperar el idle completo, que son minutos— pero no cero:
+// entre dos mensajes de una conversación viva pasan segundos, y no queremos
+// matar una que solo está pensando entre herramientas.
+const sessionReclaimGrace = 45 * time.Second
+
+// oldestReclaimableLocked devuelve la sesión ociosa más antigua que ya supera la
+// gracia de reciclado, o nil si ninguna cumple. Se llama con b.mu tomado.
+func (b *bridge) oldestReclaimableLocked() *session {
+	var oldest *session
+	for _, s := range b.sessions {
+		if time.Since(s.lastUse) < sessionReclaimGrace {
+			continue
+		}
+		if oldest == nil || s.lastUse.Before(oldest.lastUse) {
+			oldest = s
+		}
+	}
+	return oldest
 }
 
 // spawn lanza un proceso del servidor MCP para una sesión nueva.

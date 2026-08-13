@@ -47,7 +47,7 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 [ -f "$ROOT/images/$BASE.ext4" ] || {
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
-PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; CMD=()
+PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; EXTRA_ENV=(); CMD=()
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
 parse_build_opts() {
@@ -57,6 +57,13 @@ parse_build_opts() {
       -n) NPM="$2"; shift 2 ;;
       -P) PIP="$2"; shift 2 ;;
       -d) EXTRA_DIR="$2"; shift 2 ;;
+      # -e KEY=VAL hornea una variable de entorno en el entrypoint (repetible).
+      # Sirve para apagar comportamientos de red del servidor que, con egress
+      # restringido, cuelgan el arranque: p. ej. semgrep hace phone-home de
+      # métricas/versión al arrancar y, con la salida en DROP, espera ~2 min al
+      # timeout. Con `-e SEMGREP_SEND_METRICS=off -e SEMGREP_ENABLE_VERSION_CHECK=0`
+      # el arranque cae de ~124 s a ~10 s.
+      -e) EXTRA_ENV+=("$2"); shift 2 ;;
       --) shift; CMD=("$@"); break ;;
       *)  echo "opción desconocida: $1" >&2; exit 1 ;;
     esac
@@ -443,6 +450,7 @@ if [ "$MODE" = "stdio" ]; then
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
+    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do echo "export $kv"; done
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
@@ -478,6 +486,7 @@ SJSON
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
+    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do echo "export $kv"; done
     echo '# El servidor hijo escucha en este puerto; el puente ocupa el 8080 (lo'
     echo '# que ve el gateway) y le reversa las peticiones. service.json le dice'
     echo '# al puente el mismo número.'
