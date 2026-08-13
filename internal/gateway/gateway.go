@@ -23,6 +23,7 @@ import (
 	"net/http/httputil"
 	"net/http/pprof"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,6 +118,7 @@ type Gateway struct {
 	pool     *pool                    // instancias pre-calentadas por servicio
 	ensureMu sync.Map                 // servicio -> *sync.Mutex; ver ensure()
 	mem      *memory                  // memoria de uso; nil si está desactivada
+	pop      *popularity              // popularidad por servicio; guía el prewarm
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
@@ -184,6 +186,7 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	g.agg = newAggregator(g, ephemeral)
 	g.pool = newPool(g, prewarm)
 	g.mem = newMemory(g, memService)
+	g.pop = newPopularity(popularityPath())
 	return g
 }
 
@@ -320,6 +323,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		g.handleLinkProxy(w, r, l)
 		return
 	}
+
+	// A partir de aquí es un servicio respaldado por microVM. Se cuenta la llegada
+	// para que el prewarm por popularidad sepa qué se usa de verdad y priorice su
+	// fondo antes que el de servicios que nadie llama.
+	g.pop.observe(service)
 
 	// Sesión ya conocida: directo a su instancia.
 	//
@@ -759,7 +767,20 @@ func (g *Gateway) Reap(ctx context.Context) {
 	}
 }
 
-// prewarmAll rellena el fondo de cada servicio conocido.
+// prewarmMarginMiB es el colchón que el prewarm NO toca de la memoria disponible
+// del anfitrión: parte para el propio host y parte para el tráfico real —una
+// instancia de servicio despertándose fuera del fondo—. Precalentar hasta el
+// último MiB dejaría sin aire justo a las peticiones que estamos intentando
+// acelerar.
+const prewarmMarginMiB = 512
+
+// PrewarmAll rellena el fondo, pero con cabeza: primero los servicios que más se
+// usan y solo mientras haya presupuesto de memoria.
+//
+// Antes rellenaba TODOS los snapshots por igual. Con la RAM justa eso significaba
+// precalentar lo que nadie llama y que el servicio popular acabara pagando el 507.
+// Ahora se ordena por popularidad (EMA de llegadas) y se para al agotar el
+// presupuesto: los menos populares se quedan sin fondo hasta que se libere memoria.
 func (g *Gateway) PrewarmAll(ctx context.Context) {
 	if g.pool.size == 0 || !g.Ephemeral {
 		return
@@ -768,6 +789,16 @@ func (g *Gateway) PrewarmAll(ctx context.Context) {
 	if err != nil {
 		return
 	}
+
+	// Se pliega la popularidad al principio de cada pasada: esta cadencia es la
+	// ventana de la media móvil, y de paso deja el historial persistido.
+	g.pop.fold()
+
+	type cand struct {
+		svc, snap string
+		mem       int
+	}
+	var cands []cand
 	for _, s := range snaps {
 		// Un servicio con estado usa UNA instancia persistente: pre-calentar
 		// varias sería crear grafos paralelos que nadie reconcilia.
@@ -778,12 +809,67 @@ func (g *Gateway) PrewarmAll(ctx context.Context) {
 		if n := s.Service(); n != "" {
 			svc = n
 		}
-		g.pool.fill(ctx, svc, s.Name)
+		cands = append(cands, cand{svc: svc, snap: s.Name, mem: s.MemMiB})
+	}
+
+	// Orden por popularidad (desc). Estable a propósito: sin historial todos
+	// puntúan 0 y se conserva el orden del catálogo —el comportamiento de siempre—,
+	// así un gateway recién arrancado no regresa a peor, solo deja de malgastar
+	// memoria en lo que nadie usa en cuanto hay datos.
+	sort.SliceStable(cands, func(i, j int) bool {
+		return g.pop.score(cands[i].svc) > g.pop.score(cands[j].svc)
+	})
+
+	// Presupuesto de memoria. Se consulta la memoria disponible del anfitrión (la
+	// misma que mira el guard del daemon) menos el margen. La estimación del coste
+	// es conservadora —mem_mib entero por copia, sin descontar la compartición de
+	// páginas entre instancias del mismo snapshot— para pecar de precavido; el 507
+	// limpio de reserveMemory sigue siendo la última red si aun así nos pasamos.
+	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
+	ready := g.pool.stats()
+
+	for _, c := range cands {
+		faltan := g.pool.size - ready[c.svc]
+		if faltan <= 0 {
+			continue
+		}
+		if budget >= 0 && c.mem > 0 {
+			if budget < c.mem {
+				// No cabe ni una instancia más: se acabó el presupuesto y el resto
+				// —menos popular, por el orden— se queda sin fondo hasta que se
+				// libere memoria.
+				break
+			}
+			if c.mem*faltan > budget {
+				faltan = budget / c.mem
+			}
+			budget -= c.mem * faltan
+		}
+		g.pool.fillN(ctx, c.svc, c.snap, faltan)
 	}
 }
 
+// prewarmBudget es cuánta memoria del anfitrión se puede dedicar a precalentar,
+// en MiB. Devuelve -1 si no se puede medir (p. ej. un daemon en macOS sin /proc):
+// en ese caso no se limita y se cae al comportamiento de rellenarlo todo, con el
+// 507 del daemon como única red.
+func (g *Gateway) prewarmBudget(ctx context.Context) int {
+	ps, err := g.client.ProcStats(ctx)
+	if err != nil || ps.AvailableMiB <= 0 {
+		return -1
+	}
+	b := int(ps.AvailableMiB) - prewarmMarginMiB
+	if b < 0 {
+		b = 0
+	}
+	return b
+}
+
 // Drain destruye las instancias pre-calentadas. Se llama al parar el gateway.
-func (g *Gateway) Drain(ctx context.Context) { g.pool.drain(ctx) }
+func (g *Gateway) Drain(ctx context.Context) {
+	g.pop.fold() // deja el historial de popularidad en disco antes de irse
+	g.pool.drain(ctx)
+}
 
 func (g *Gateway) reapOnce(ctx context.Context) {
 	type victim struct{ service, id string }

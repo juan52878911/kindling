@@ -86,14 +86,31 @@ func (p *pool) take(service string) *warmVM {
 	return vm
 }
 
-// fill repone el fondo de un servicio en segundo plano.
+// fill repone el fondo de un servicio hasta su tamaño, en segundo plano.
 func (p *pool) fill(ctx context.Context, service, snapshot string) {
+	p.fillN(ctx, service, snapshot, p.size)
+}
+
+// fillN repone hasta `want` instancias, sin pasar nunca del tamaño del fondo.
+//
+// Es lo que permite al prewarm por popularidad precalentar menos de lo que cabría
+// cuando el presupuesto de memoria aprieta: el llamador decide cuántas, y aquí
+// solo se acota a lo que queda por rellenar.
+func (p *pool) fillN(ctx context.Context, service, snapshot string, want int) {
 	p.mu.Lock()
-	if p.closed || p.filling[service] || len(p.ready[service]) >= p.size {
+	if p.closed || p.filling[service] {
 		p.mu.Unlock()
 		return
 	}
-	missing := p.size - len(p.ready[service])
+	// Nunca por encima del tamaño del fondo, pida lo que pida el llamador.
+	if room := p.size - len(p.ready[service]); want > room {
+		want = room
+	}
+	if want <= 0 {
+		p.mu.Unlock()
+		return
+	}
+	missing := want
 	p.filling[service] = true
 	// wg.Add DENTRO del lock, no después del Unlock.
 	//
