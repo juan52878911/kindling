@@ -1,6 +1,13 @@
 package net
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	stdnet "net"
+	"os/exec"
+	"strings"
+	"time"
+)
 
 // Egress define qué puede alcanzar una microVM hacia fuera.
 //
@@ -18,18 +25,40 @@ const (
 	// que una herramienta comprometida pivote hacia la LAN de casa, el host de
 	// Proxmox, otras microVMs o los metadatos del cloud.
 	EgressInternet Egress = "internet"
+
+	// EgressAllowlist: solo salen los dominios declarados; todo lo demás DROP.
+	// Es el modo más estricto con salida: parte de que el invitado es HOSTIL y
+	// tratará de escaparse (IP directa, resolver ajeno, dominio no listado), así
+	// que el filtro no confía en nombres sino en IPs concretas metidas en un
+	// ipset, y fuerza el DNS del invitado a un resolver bajo control. Ver
+	// applyAllowlist para qué protege de verdad y qué queda pendiente.
+	EgressAllowlist Egress = "allowlist"
 )
 
 func ParseEgress(s string) (Egress, error) {
 	switch Egress(s) {
-	case EgressNone, EgressInternet:
+	case EgressNone, EgressInternet, EgressAllowlist:
 		return Egress(s), nil
 	case "":
 		return EgressNone, nil
 	default:
-		return "", fmt.Errorf("política de salida desconocida: %q (usa none o internet)", s)
+		return "", fmt.Errorf("política de salida desconocida: %q (usa none, internet o allowlist)", s)
 	}
 }
+
+// DNSResolver es el resolver al que se fuerza TODO el DNS del invitado en modo
+// allowlist. Redirigir el puerto 53 a un único resolver bajo nuestra elección
+// quita al invitado la opción de usar un resolver ajeno como canal de fuga, y es
+// también el resolver con el que el host siembra el ipset, para que las IP que
+// ve el invitado y las que permitimos coincidan.
+//
+// TODO(allowlist): esto es un resolver recursivo público, no uno propio. Un
+// invitado decidido todavía puede filtrar datos codificándolos en subdominios
+// que este resolver reenvía a un NS autoritativo del atacante (DNS tunneling).
+// Cerrar ese hueco pide un resolver del host que SOLO responda por los dominios
+// permitidos —y que de paso siembre el ipset con lo que resuelva—; ese es el
+// resolver dinámico que aún falta (ver applyAllowlist).
+const DNSResolver = "1.1.1.1"
 
 // blocked son los destinos que una microVM no debe alcanzar jamás, ni siquiera
 // con salida a internet habilitada.
@@ -42,8 +71,9 @@ var blocked = []string{
 	"100.64.0.0/10",  // CGNAT
 }
 
-// applyEgress instala las reglas de salida dentro del namespace.
-func (n *Net) applyEgress(e Egress) error {
+// applyEgress instala las reglas de salida dentro del namespace. domains solo se
+// usa en modo allowlist; en el resto se ignora.
+func (n *Net) applyEgress(e Egress, domains []string) error {
 	ns := func(args ...string) error {
 		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
 	}
@@ -72,6 +102,10 @@ func (n *Net) applyEgress(e Egress) error {
 		return nil
 	}
 
+	if e == EgressAllowlist {
+		return n.applyAllowlist(ns, domains)
+	}
+
 	// EgressInternet: primero se cierran las redes privadas, luego se permite el resto.
 	// El orden importa: la primera regla que casa, gana.
 	for _, cidr := range blocked {
@@ -80,6 +114,146 @@ func (n *Net) applyEgress(e Egress) error {
 		}
 	}
 	return ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE")
+}
+
+// setName es el nombre del ipset de dominios permitidos de este namespace. El
+// ipset es POR namespace (los comandos corren dentro de él), así que basta con
+// un nombre estable; al borrar el netns en Teardown, su ipset se va con él.
+func (n *Net) setName() string {
+	return "klaw-" + strings.TrimPrefix(n.NS, "kl-")
+}
+
+// applyAllowlist monta el modo allowlist dentro del namespace.
+//
+// QUÉ PROTEGE DE VERDAD (con el invitado tratado como hostil):
+//   - IP directa: el invitado NO puede conectar a una IP que no esté en el ipset,
+//     aunque se salte el DNS por completo. El filtro es por IP, no por nombre.
+//   - Resolver ajeno: TODO el tráfico al puerto 53 se redirige (DNAT) al resolver
+//     bajo nuestro control, así que el invitado no puede hablar con un resolver
+//     suyo ni tunelar por uno arbitrario.
+//   - Dominio no listado: aunque el invitado lo resuelva, la IP resultante no
+//     está en el ipset y la conexión se descarta.
+//   - Redes privadas: el host (HostEgressRules) sigue bloqueándolas como segunda
+//     barrera, y al sembrar el ipset se descartan las IP privadas que devuelva un
+//     resolver envenenado.
+//
+// QUÉ NO PROTEGE / TODO(resolver dinámico):
+//   - El ipset se SIEMBRA UNA VEZ, resolviendo los dominios en el host al arrancar.
+//     Un dominio detrás de CDN o con DNS rotatorio (TTL corto) puede devolverle al
+//     invitado una IP distinta de la sembrada, y esa conexión se caería. La pieza
+//     que falta es el resolver dinámico del diseño: un DNS del host que intercepte
+//     las respuestas del invitado y meta en el ipset —con el TTL del registro— las
+//     IP que va resolviendo para los dominios permitidos. Sin él, allowlist es
+//     fiable para dominios de IP estable y "cierra en falso" (bloquea de más) para
+//     los de IP volátil. Falla CERRADO, nunca abierto.
+//   - DNS tunneling hacia el propio resolver forzado sigue siendo posible (ver
+//     DNSResolver): cerrarlo es parte del mismo resolver del host pendiente.
+func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
+	if _, err := exec.LookPath("ipset"); err != nil {
+		return fmt.Errorf("el modo allowlist necesita ipset y no está instalado: %w", err)
+	}
+
+	set := n.setName()
+	// hash:ip con timeout: cada IP caduca sola. Hoy sembramos con un TTL largo
+	// fijo porque no hay resolver dinámico que renueve; cuando lo haya, meterá
+	// cada IP con el TTL real del registro DNS y esto encaja sin cambios.
+	if err := ns("ipset", "create", set, "hash:ip", "timeout", "0", "-exist"); err != nil {
+		return err
+	}
+
+	// Sembrado estático: resolvemos en el host, por el MISMO resolver al que
+	// forzaremos al invitado, y metemos solo IPv4 públicas. Las privadas se
+	// descartan aquí para que un resolver envenenado no cuele 169.254 (metadatos)
+	// ni 192.168 (LAN de casa) en la lista de permitidos.
+	for _, d := range domains {
+		for _, ip := range resolvePublicIPv4(d) {
+			_ = ns("ipset", "add", set, ip, "-exist")
+		}
+	}
+
+	// Forzar el DNS del invitado a nuestro resolver: cualquier salida al puerto 53
+	// (UDP y TCP) se reescribe hacia DNSResolver. Le quita al invitado la opción
+	// de usar un resolver ajeno como canal de fuga o para resolver por su cuenta.
+	for _, proto := range []string{"udp", "tcp"} {
+		if err := ns("iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
+			"-p", proto, "--dport", "53", "-j", "DNAT",
+			"--to-destination", DNSResolver+":53"); err != nil {
+			return err
+		}
+	}
+
+	// FORWARD, en orden (la primera que casa gana):
+	//   1. DNS hacia nuestro resolver: permitido, para que el invitado pueda
+	//      resolver los nombres permitidos.
+	for _, proto := range []string{"udp", "tcp"} {
+		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+			"-p", proto, "-d", DNSResolver, "--dport", "53", "-j", "ACCEPT"); err != nil {
+			return err
+		}
+	}
+	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas.
+	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+		"-m", "conntrack", "--ctstate", "NEW",
+		"-m", "set", "--match-set", set, "dst", "-j", "ACCEPT"); err != nil {
+		return err
+	}
+	//   3. Todo lo demás que el invitado inicie: DROP. Esto bloquea IP directa,
+	//      dominios no listados y cualquier otro puerto/destino.
+	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+		"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"); err != nil {
+		return err
+	}
+
+	// El host enmascara hacia internet y vuelve a bloquear las redes privadas como
+	// segunda barrera (HostEgressRules), igual que en modo internet.
+	return ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE")
+}
+
+// resolvePublicIPv4 resuelve un dominio a sus IPv4 públicas, usando el mismo
+// resolver (DNSResolver) al que se fuerza al invitado, para que lo que sembramos
+// coincida con lo que el invitado verá. Devuelve solo direcciones enrutables:
+// las privadas/link-local se descartan por seguridad (resolver envenenado).
+func resolvePublicIPv4(domain string) []string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil
+	}
+	r := &stdnet.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (stdnet.Conn, error) {
+			var d stdnet.Dialer
+			return d.DialContext(ctx, network, DNSResolver+":53")
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := r.LookupHost(ctx, domain)
+	if err != nil {
+		return nil // falla CERRADO: sin IP, el dominio simplemente no se permite
+	}
+	var out []string
+	for _, a := range addrs {
+		ip := stdnet.ParseIP(a)
+		if ip == nil || ip.To4() == nil {
+			continue // solo IPv4: las reglas de este fichero son iptables v4
+		}
+		if isBlockedIP(ip) {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// isBlockedIP dice si una IP cae en alguno de los rangos que jamás se permiten,
+// para no sembrar el ipset con una privada que devuelva un resolver hostil.
+func isBlockedIP(ip stdnet.IP) bool {
+	for _, cidr := range blocked {
+		if _, n, err := stdnet.ParseCIDR(cidr); err == nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // HostEgressRules son las reglas que el host necesita para dar salida a los

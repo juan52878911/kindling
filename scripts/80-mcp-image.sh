@@ -226,15 +226,36 @@ if [ -n "$NPM" ]; then
   NATJSON="[]"
   [ -n "$NATIVE" ] && NATJSON="[\"$(echo $NATIVE | sed 's/ /","/g')\"]"
   BROWSERJSON=false; [ -n "${BROWSER:-}" ] && BROWSERJSON=true
+
+  # SEMILLA de dominios permitidos, para el modo egress=allowlist. Se extraen los
+  # hosts de los literales de URL del árbol npm ya instalado. Es una PISTA
+  # EDITABLE, no exhaustiva ni autoritativa: un servidor puede construir URLs en
+  # tiempo de ejecución que no aparecen como literales, y aquí se cuelan hosts de
+  # documentación o de badges. El import solo la usa si se elige -egress allowlist
+  # (con -allow se sustituye entera); en none/internet se ignora. Solo se siembra
+  # cuando el egress detectado apunta a un servicio concreto (internet), no en el
+  # caso vacío 'none'.
+  ALLOWJSON="[]"
+  if [ "$CAP_EGRESS" = internet ]; then
+    DOMAINS=$(grep -rhoE 'https?://[a-zA-Z0-9._-]+' "$NM" 2>/dev/null \
+      | sed -E 's#^https?://##' \
+      | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|registry\.npmjs\.org|nodejs\.org|github\.com)$' \
+      | sort -u | head -40)
+    if [ -n "$DOMAINS" ]; then
+      ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
+    fi
+  fi
+
   mkdir -p "$mnt/etc/kling"
   cat > "$mnt/etc/kling/capabilities.json" <<CJSON
 {
   "browser": $BROWSERJSON,
   "egress": "$CAP_EGRESS",
-  "native": $NATJSON
+  "native": $NATJSON,
+  "allow_domains": $ALLOWJSON
 }
 CJSON
-  echo "capacidades detectadas: browser=$BROWSERJSON egress=$CAP_EGRESS native='${NATIVE:-ninguno}'"
+  echo "capacidades detectadas: browser=$BROWSERJSON egress=$CAP_EGRESS native='${NATIVE:-ninguno}' allow_domains=$ALLOWJSON"
 fi
 
 # Igual que npm, y por la misma razón: el invitado arranca SIN salida a
