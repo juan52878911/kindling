@@ -14,7 +14,11 @@
 #
 #   stdio — el servidor habla JSON-RPC por tuberías, que es el caso MAYORITARIO
 #   entre los servidores MCP open source:
-#     sudo ./80-mcp-image.sh stdio <nombre> [-p "apk"] [-n "npm"] [-P "pip"] [-d dir] -- <comando>
+#     sudo ./80-mcp-image.sh stdio <nombre> [-p "apk"] [-n "npm"] [-P "pip"] [-d dir] [-bundle] -- <comando>
+#
+#     -bundle (servidores node): empaqueta el servidor en UN fichero con esbuild al
+#        construir. Acelera mucho el arranque en frío en la microVM (sobre todo arm64/Mac):
+#        carga 1 fichero en vez de cientos de node_modules. Medido: ~7 s -> ~2.5 s.
 #
 #     -n PREINSTALA paquetes npm en la imagen. Es obligatorio, no una comodidad:
 #        las microVMs arrancan sin salida a internet, así que un `npx -y` en
@@ -47,7 +51,7 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 [ -f "$ROOT/images/$BASE.ext4" ] || {
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
-PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; EXTRA_ENV=(); CMD=()
+PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; EXTRA_ENV=(); CMD=(); BUNDLE=0
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
 parse_build_opts() {
@@ -64,6 +68,13 @@ parse_build_opts() {
       # timeout. Con `-e SEMGREP_SEND_METRICS=off -e SEMGREP_ENABLE_VERSION_CHECK=0`
       # el arranque cae de ~124 s a ~10 s.
       -e) EXTRA_ENV+=("$2"); shift 2 ;;
+      # -bundle empaqueta un servidor node (-n) en UN fichero con esbuild al
+      # construir la imagen. El arranque de node dentro de la microVM no lo frena
+      # el CÓMPUTO (es ~ms) sino la tormenta de stat/open/mmap al cargar cientos
+      # de ficheros de node_modules, que bajo KVM anidado (arm64/Mac) se amplifica
+      # ~25-60×. Colapsarlos en un fichero mata esa tormenta: medido en seqthink
+      # (1205 ficheros → 1), el initialize en frío cae de ~7 s a ~2.5 s.
+      -bundle) BUNDLE=1; shift ;;
       --) shift; CMD=("$@"); break ;;
       *)  echo "opción desconocida: $1" >&2; exit 1 ;;
     esac
@@ -186,6 +197,41 @@ if [ -n "$NPM" ]; then
   chroot "$mnt" /usr/bin/npm install -g --ignore-scripts --omit=dev --no-fund --no-audit $NPM
   chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm /usr/lib/node_modules/npm/man' 2>/dev/null || true
   umount "$mnt/proc" 2>/dev/null || true
+fi
+
+# -bundle: colapsa node_modules en UN fichero con esbuild. El cuello del arranque de
+# node en la microVM no es el cómputo (ms) sino cargar cientos de ficheros; bajo KVM
+# anidado cada open/mmap se amplifica muchísimo. Un solo fichero mata esa tormenta.
+if [ "$BUNDLE" = 1 ]; then
+  if [ -z "$NPM" ]; then
+    echo "AVISO: -bundle solo aplica a servidores node (-n); se ignora" >&2
+  else
+    # Resolver el fichero JS que arranca el servidor: o `node <fichero>`, o un bin de
+    # /usr/local/bin (symlink al dist/index.js del paquete).
+    case "${CMD[0]}" in
+      node|/usr/bin/node|/usr/local/bin/node) ENTRY="${CMD[1]}"; REST=("${CMD[@]:2}") ;;
+      *) ENTRY="$(chroot "$mnt" /usr/bin/readlink -f "/usr/local/bin/$(basename "${CMD[0]}")" 2>/dev/null)"; REST=("${CMD[@]:1}") ;;
+    esac
+    if [ -n "$ENTRY" ] && chroot "$mnt" /usr/bin/test -f "$ENTRY"; then
+      echo "empaquetando con esbuild: $ENTRY -> /opt/$NAME.bundle.mjs"
+      cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
+      mount --bind /proc "$mnt/proc" 2>/dev/null || true
+      # esbuild se baja por npx (una vez) y corre en musl; --ignore-scripts ya se
+      # aplicó al instalar el paquete, esto solo transforma JS ya presente.
+      if chroot "$mnt" /bin/sh -c "cd /opt && npx --yes esbuild '$ENTRY' --bundle --platform=node --format=esm --outfile=/opt/$NAME.bundle.mjs"; then
+        chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm' 2>/dev/null || true
+        # El entrypoint pasa a ejecutar el bundle; se conserva node_modules por si el
+        # servidor lee assets en runtime por ruta absoluta (el bundle no los inlinea).
+        CMD=(node "/opt/$NAME.bundle.mjs" ${REST[@]+"${REST[@]}"})
+        echo "  ✓ bundle listo; el arranque cargará 1 fichero en vez de node_modules entero"
+      else
+        echo "AVISO: esbuild falló; se deja el servidor SIN empaquetar (arranca por node_modules)" >&2
+      fi
+      umount "$mnt/proc" 2>/dev/null || true
+    else
+      echo "AVISO: -bundle no pudo resolver el entry JS de '${CMD[0]}'; sin empaquetar" >&2
+    fi
+  fi
 fi
 
 # Marcador del modo navegador COMPARTIDO. Lo lee kling-bridge al arrancar: pone en
