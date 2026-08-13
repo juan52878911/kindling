@@ -29,6 +29,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -158,6 +159,21 @@ Opciones:
 		b.sessionArgs = spec.SessionArgs
 	}
 
+	// Modo proxy HTTP: si la imagen declara transport:http, el servidor MCP hijo
+	// habla Streamable HTTP nativo. El puente lo arranca UNA vez, espera a su
+	// puerto y le reversa las peticiones, en vez de lanzar un proceso por sesión.
+	// Se pierde el aislamiento proceso-por-sesión del modo stdio: el hijo es
+	// compartido por todas las sesiones (ver proxy.go). A diferencia del
+	// navegador, esto NO es perezoso: no hay handshake que traducir, el servidor
+	// tiene que estar en pie antes de servir la primera petición.
+	if svc := loadServiceSpec(); svc != nil {
+		b.service = svc
+		log.Printf("modo http: servidor MCP en :%d (compartido por todas las sesiones, sin aislamiento por sesión)", svc.Port)
+		if err := b.startProxy(); err != nil {
+			log.Fatalf("modo http: %v", err)
+		}
+	}
+
 	// /volume/sync vacía la caché del invitado al disco.
 	//
 	// El daemon lo llama antes de matar la microVM. Sin esto lo último que
@@ -219,6 +235,9 @@ Opciones:
 
 	<-shutdownDone
 	b.closeAll()
+	// En modo proxy no hay sesiones-proceso, pero sí el hijo HTTP compartido:
+	// somos PID 1 y no debemos dejarlo suelto al morir la microVM.
+	b.stopProxyChild()
 	// Después de closeAll, no antes: mientras los servidores MCP vivan pueden
 	// seguir escribiendo, y desmontar por debajo perdería esas escrituras.
 	volumeState.release()
@@ -275,8 +294,18 @@ type bridge struct {
 	bmu     sync.Mutex
 	bproc   *exec.Cmd
 
-	mu       sync.Mutex
-	sessions map[string]*session
+	// Modo proxy HTTP (ver proxy.go). service es el marcador (nil = modo stdio);
+	// proxy reversa hacia el hijo ÚNICO y compartido; proxyChild es ese hijo y
+	// pmu lo protege. proxySeen rastrea la última actividad por Mcp-Session-Id
+	// SOLO para el reaper de ociosas: en este modo no hay proceso por sesión.
+	service    *serviceSpec
+	proxy      *httputil.ReverseProxy
+	pmu        sync.Mutex
+	proxyChild *exec.Cmd
+
+	mu        sync.Mutex
+	sessions  map[string]*session
+	proxySeen map[string]time.Time
 }
 
 // session es una conversación MCP: un proceso hijo y su estado.
@@ -317,6 +346,15 @@ func newID() string {
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 
 func (b *bridge) handle(w http.ResponseWriter, r *http.Request) {
+	// Modo proxy HTTP: el hijo es único y habla HTTP nativo; se le reversa la
+	// petición tal cual, sin parsear JSON-RPC ni lanzar procesos. Ver proxy.go.
+	// Las rutas de infraestructura (/healthz, /reset, /volume/*, /exec) tienen su
+	// propio manejador en el mux y no pasan por aquí, así que siguen siendo del
+	// puente y no del servidor de detrás.
+	if b.proxy != nil {
+		b.handleProxy(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodPost:
 		b.handlePost(w, r)
@@ -467,6 +505,23 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	// Modo proxy: no hay sesiones-proceso que cerrar, pero el snapshot dorado no
+	// debe congelarse con el servidor HTTP en estado post-handshake (rechazaría
+	// los initialize que lleguen tras restaurar). Reiniciar el hijo compartido lo
+	// deja limpio, y de paso se olvida el rastreo de sesiones. Devolver 204 hace
+	// que el import tome la vía rápida "bridge" en vez de esperar un auto-reset.
+	if b.proxy != nil {
+		b.mu.Lock()
+		b.proxySeen = map[string]time.Time{}
+		b.mu.Unlock()
+		if err := b.restartProxyChild(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("reset: servidor MCP HTTP reiniciado")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	b.mu.Lock()
@@ -776,6 +831,12 @@ func (b *bridge) reapIdle(ctx context.Context) {
 			// compartido: una microVM viva pero ociosa no debe retenerlo.
 			if len(dead) > 0 {
 				b.stopBrowserIfIdle()
+			}
+			// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
+			// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
+			// compartido. Ver reapIdleProxy.
+			if b.proxy != nil {
+				b.reapIdleProxy()
 			}
 		}
 	}
