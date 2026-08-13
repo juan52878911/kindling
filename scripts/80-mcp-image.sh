@@ -101,15 +101,30 @@ parse_build_opts() {
   fi
 }
 
+# HTTP_PROXY marca el modo http servido POR EL PUENTE (proxy). Lo activa la forma
+# con `--` (un comando de servidor HTTP), no la forma antigua (un directorio con
+# su propio entrypoint, que sigue hablándole directo al gateway sin puente).
+HTTP_PROXY=0
+# Puerto donde escucha el servidor HTTP hijo DENTRO del invitado. Distinto del
+# 8080 que ve el gateway: en modo proxy el puente ocupa el 8080 y reversa aquí.
+CHILD_PORT=8090
+
 case "$MODE" in
   http)
-    # Forma antigua: un directorio que ya trae su propio entrypoint.
+    # Forma antigua: un directorio que ya trae su propio entrypoint. Se queda
+    # como estaba: sin puente, el gateway le habla directo al puerto 8080.
     if [ $# -gt 0 ] && [ -d "$1" ]; then
       EXTRA_DIR="$1"; shift
       PKGS="${1:-}"
       [ -x "$EXTRA_DIR/entrypoint" ] || { echo "falta $EXTRA_DIR/entrypoint ejecutable" >&2; exit 1; }
     else
+      # Forma con `--`: el servidor HTTP se envuelve en el PUENTE en modo proxy.
+      # Así recupera lo que el HTTP directo no tenía —/reset, montaje de
+      # volúmenes, reaper de ociosas— a cambio de un hijo COMPARTIDO por todas
+      # las sesiones (sin el aislamiento proceso-por-sesión del modo stdio).
       parse_build_opts "$@"
+      HTTP_PROXY=1
+      [ -f "$BRIDGE" ] || { echo "no encuentro $BRIDGE (compílalo con: make bridge)" >&2; exit 1; }
     fi
     ;;
   stdio)
@@ -432,71 +447,44 @@ if [ "$MODE" = "stdio" ]; then
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
   } > "$mnt/entrypoint"
-elif [ ${#CMD[@]} -gt 0 ]; then
-  # HTTP nativo: no hay puente. El servidor escucha él mismo, y el gateway le
-  # habla igual que a cualquier otro: POST a /mcp del puerto 8080.
+elif [ "$HTTP_PROXY" = 1 ]; then
+  # HTTP NATIVO TRAS EL PUENTE (modo proxy). El servidor MCP habla Streamable
+  # HTTP/SSE de fábrica; el puente lo arranca UNA vez, espera a su puerto y le
+  # reversa las peticiones del gateway (ver cmd/kling-bridge/proxy.go).
   #
-  # AUTO-RESET (KLING_HTTP_RESET_AFTER). Si está definido y > 0, el wrapper
-  # mata el servidor una vez tras ese número de segundos y lo re-arranca.
-  # El estado del servidor (sesión stateful, conexiones abiertas, etc.) se
-  # borra. Esto resuelve el bug del snapshot dorado: si el snapshot se congela
-  # con el servidor YA inicializado, restaurar produce una microVM con un
-  # proceso zombie que rechaza nuevos handshakes. Tras el reset, el servidor
-  # queda limpio y acepta el primer initialize del gateway como si fuera
-  # nuevo.
+  # Frente al HTTP directo de la "forma antigua", esto recupera lo que el puente
+  # ya sabía hacer: POST /reset (que resuelve el bug del snapshot dorado sin el
+  # hack de KLING_HTTP_RESET_AFTER), el montaje de kling.volume dentro del
+  # invitado, y el reaper de sesiones ociosas.
   #
-  # El marker /var/run/kling-http-reset-done persiste en el overlay, así que
-  # el reset ocurre UNA sola vez por imagen: el snapshot dorado lo congela
-  # con el marker ya puesto, y las instancias restauradas desde él ven el
-  # archivo y no vuelven a resetear.
-  #
-  # El valor por defecto es 30s: lo bastante para que mcpImport termine su
-  # catálogo (initialize + tools/list) sin carreras, lo bastante corto para
-  # no alargar el ciclo de import más de lo necesario.
-  #
-  # NOTA sobre el shell: las funciones de POSIX sh no se exportan a los
-  # subshells automáticamente. Por eso definimos el comando del servidor como
-  # variable y llamamos exec directamente en cada sitio que lo necesita.
+  # PROPIEDAD QUE SE PIERDE: el hijo es ÚNICO y COMPARTIDO por todas las
+  # sesiones, así que NO hay el aislamiento proceso-por-sesión que sí da el modo
+  # stdio. Si el servidor mezclara estado entre sesiones, el puente ya no lo
+  # impediría. Es el precio de correr un servidor HTTP multi-sesión tal cual.
+  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+  # Marcador que lee el puente al arrancar para entrar en modo proxy.
+  mkdir -p "$mnt/etc/kling"
+  cat > "$mnt/etc/kling/service.json" <<SJSON
+{
+  "transport": "http",
+  "port": $CHILD_PORT
+}
+SJSON
   {
     echo '#!/bin/sh'
-    echo '# Generado por 80-mcp-image.sh — servidor HTTP nativo, sin puente.'
+    echo '# Generado por 80-mcp-image.sh — servidor HTTP nativo tras el puente.'
     echo '#'
     echo '# El entrypoint es PID 1 y el kernel no le pasa PATH, así que hay que'
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
-    echo '# 8080 es el puerto que busca el gateway dentro del invitado.'
-    echo 'export PORT=8080'
-    echo ''
-    echo 'RESET_AFTER="${KLING_HTTP_RESET_AFTER:-30}"'
-    echo 'MARKER=/var/run/kling-http-reset-done'
-    printf 'SERVER_CMD='
+    echo '# El servidor hijo escucha en este puerto; el puente ocupa el 8080 (lo'
+    echo '# que ve el gateway) y le reversa las peticiones. service.json le dice'
+    echo '# al puente el mismo número.'
+    echo "export PORT=$CHILD_PORT"
+    printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
-    echo ''
-    echo 'if [ "$RESET_AFTER" -gt 0 ] && [ ! -f "$MARKER" ]; then'
-    echo '    # Primer arranque: lanzar servidor, esperar el reset, re-arrancar.'
-    echo '    # La línea entera, con la asignación, sustituye al proceso actual'
-    echo '    # por el servidor (exec) y devuelve cuando el servidor muere.'
-    echo '    $SERVER_CMD &'
-    echo '    SERVER_PID=$!'
-    echo '    ('
-    echo '        sleep "$RESET_AFTER"'
-    echo '        kill -KILL "$SERVER_PID" 2>/dev/null'
-    echo '        wait "$SERVER_PID" 2>/dev/null'
-    echo '        mkdir -p "$(dirname "$MARKER")" 2>/dev/null'
-    echo '        touch "$MARKER"'
-    echo '        # Re-arrancar el servidor. Sin subshells extra: $SERVER_CMD se'
-    echo '        # ejecuta directamente. El subshell se reemplaza por el'
-    echo '        # servidor, que se convierte en PID del subshell.'
-    echo '        exec $SERVER_CMD'
-    echo '    ) &'
-    echo '    wait'
-    echo 'else'
-    echo '    # Marker presente (post-reset, o imagen sin auto-reset): servidor'
-    echo '    # limpio directo, sin supervisores intermedios.'
-    echo '    exec $SERVER_CMD'
-    echo 'fi'
   } > "$mnt/entrypoint"
 fi
 
@@ -523,6 +511,12 @@ fi
 chmod a+r "$DEST"
 
 echo "imagen '$NAME' lista ($(du -h "$DEST" | cut -f1) reales)"
+if [ "$HTTP_PROXY" = 1 ]; then
+  echo "modo http (proxy): el servidor MCP habla HTTP nativo y lo envuelve el puente."
+  echo "  AISLAMIENTO: el hijo es COMPARTIDO por todas las sesiones (un solo proceso"
+  echo "  para todos los Mcp-Session-Id). No hay el aislamiento proceso-por-sesión del"
+  echo "  modo stdio; a cambio funcionan /reset, los volúmenes y el reaper de ociosas."
+fi
 echo
 echo "Congélala como servicio del gateway:"
 echo "  kling run -name ${NAME}-tmpl -image $NAME -service $NAME"
