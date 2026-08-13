@@ -214,6 +214,14 @@ func (c *Client) Squeeze(ctx context.Context, ref string) (*SqueezeResult, error
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/squeeze", nil, &res)
 }
 
+// PutMMDS inyecta el store MMDS (un secreto de sesión) en una microVM viva. data
+// es el documento JSON del store; el daemon lo pasa opaco a Firecracker. Tras
+// esto la máquina queda marcada HasSecrets y ya no se puede congelar.
+func (c *Client) PutMMDS(ctx context.Context, ref string, data any) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/mmds", data, &m)
+}
+
 func (c *Client) Remove(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
 }

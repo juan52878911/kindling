@@ -109,6 +109,11 @@ Opciones:
 	go procReaper.run()
 	go b.reapIdle(ctx)
 
+	// Ruta a 169.254.169.254 (MMDS) por eth0. Best-effort: si el servicio no usa
+	// secretos por MMDS es inocuo, y si los usa esta es la ruta que los hace
+	// legibles. Es la pieza a validar en hardware; ver mmds.go.
+	setupMMDSRoute()
+
 	mux := http.NewServeMux()
 	// El mismo manejador en / y en /mcp: distintos clientes asumen distinta ruta
 	// y no merece la pena que falle un handshake por una barra.
@@ -574,9 +579,15 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 func (b *bridge) spawn() (*session, error) {
 	// argv del servidor + los sessionArgs del modo navegador (vacío en el resto
 	// de servicios): apuntan esta sesión al Chromium compartido por CDP.
+	// El id se genera ANTES del comando: sessionEnv lo necesita para buscar los
+	// secretos de MMDS de ESTA sesión (sessions[<id>]) y añadirlos a su entorno.
+	id := newID()
+
 	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
 	cmd := exec.Command(b.argv[0], args...)
-	cmd.Env = b.env
+	// Entorno base del puente MÁS los secretos de sesión que MMDS traiga (comunes
+	// + los de esta sesión). Sin MMDS, es exactamente b.env.
+	cmd.Env = b.sessionEnv(id)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -596,7 +607,7 @@ func (b *bridge) spawn() (*session, error) {
 	}
 
 	s := &session{
-		id: newID(), cmd: cmd, stdin: stdin, lastUse: time.Now(),
+		id: id, cmd: cmd, stdin: stdin, lastUse: time.Now(),
 		reqTimeout: b.reqTimeout,
 		exitCh:     exitCh,
 		pending:    map[string]chan json.RawMessage{},

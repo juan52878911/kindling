@@ -68,6 +68,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/freeze", s.handleFreeze)
 	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
 	mux.HandleFunc("POST /machines/{ref}/squeeze", s.handleSqueeze)
+	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
@@ -293,6 +294,23 @@ func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// handleMMDS inyecta el store MMDS (un secreto de sesión) en una microVM viva. El
+// cuerpo es el documento JSON del store tal cual; se pasa opaco al manager, que lo
+// entrega a Firecracker. No se interpreta aquí: el esquema lo entiende el bridge.
+func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
+	var data json.RawMessage
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&data); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	mc, err := s.mgr.PutMMDS(r.Context(), r.PathValue("ref"), data)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {

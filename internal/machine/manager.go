@@ -858,6 +858,18 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		}); err != nil {
 			return pid, err
 		}
+		// MMDS por eth0: habilita el metadata service para poder INYECTAR secretos
+		// de sesión (un token, una credencial) en la microVM ya viva, sin hornearlos
+		// en la imagen compartida ni en el snapshot dorado. Va tras la red (necesita
+		// una interfaz) y antes de Start (Firecracker no lo admite en caliente), así
+		// que queda grabado en el snapshot dorado y las copias lo heredan.
+		//
+		// No es fatal, como el balloon: si la versión de Firecracker lo rechaza o el
+		// invitado no trae ruta a 169.254.169.254, la microVM arranca igual y solo se
+		// pierde la inyección de secretos por MMDS.
+		if err := c.SetMMDS(ctx, []string{"eth0"}); err != nil {
+			log.Printf("aviso: no pude configurar MMDS en %s: %v (no habrá secretos por sesión)", id, err)
+		}
 	}
 	// virtio-rng: sin esto, las instancias de un mismo snapshot clonarían el
 	// estado del generador de aleatoriedad y podrían producir las mismas claves.
@@ -934,6 +946,20 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("solo se puede congelar una máquina running (está %s)", mc.State)
+	}
+
+	// Negativa deliberada: una máquina con secretos inyectados por MMDS NO se
+	// congela. El secreto vive en la RAM del invitado, y Freeze vuelca esa RAM a
+	// mem.file; si esta máquina se promociona luego a snapshot dorado (o ya lo es
+	// una copia suya), ese mem.file se COMPARTE con todas las instancias, y el
+	// secreto de una sesión acabaría legible por las demás. Es justo lo que el
+	// modelo MMDS existe para impedir, así que preferimos fallar claro a filtrar.
+	// Quien quiera liberar RAM de una máquina con secretos tiene `squeeze` (no
+	// vuelca nada a disco) o `stop`/`rm`.
+	if mc.HasSecrets {
+		return nil, fmt.Errorf("la máquina %s tiene secretos de sesión inyectados por MMDS y "+
+			"no puede congelarse: el volcado de RAM acabaría en mem.file, compartido si es o "+
+			"llega a ser un snapshot dorado. Usa squeeze (no vuelca a disco) o stop/rm", mc.ID[:12])
 	}
 
 	m.mu.RLock()
@@ -1182,6 +1208,59 @@ func procRSSMiB(pid int) int {
 		return kb / 1024
 	}
 	return 0
+}
+
+// PutMMDS inyecta el store MMDS en una microVM VIVA: es la entrega del secreto de
+// sesión (un token, una credencial) a una instancia ya arrancada, sin haberlo
+// horneado en la imagen compartida ni en el snapshot dorado.
+//
+// Resuelve la máquina, coge su socket de Firecracker —igual que Squeeze— y hace
+// PUT /mmds con el documento JSON tal cual. El esquema del store lo entiende el
+// bridge de dentro (objeto con "env" comunes y "sessions" por Mcp-Session-Id).
+//
+// Al inyectar marca la máquina con HasSecrets: a partir de aquí Freeze se niega a
+// congelarla, para que el secreto no acabe en un mem.file compartido.
+func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machine, error) {
+	mc, ok := m.Get(ref)
+	if !ok {
+		return nil, fmt.Errorf("no existe la máquina %q", ref)
+	}
+	defer m.lock(mc.ID)()
+
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("no existe la máquina %q", ref)
+	}
+	if cur.State != api.StateRunning {
+		return nil, fmt.Errorf("solo se puede inyectar MMDS en una máquina running (está %s)", cur.State)
+	}
+
+	m.mu.RLock()
+	sock := m.socket[mc.ID]
+	m.mu.RUnlock()
+	if sock == "" {
+		return nil, fmt.Errorf("sin socket para %s", mc.ID)
+	}
+
+	c := fc.New(sock)
+	if err := c.PutMMDSData(ctx, data); err != nil {
+		return nil, fmt.Errorf("inyectando MMDS: %w", err)
+	}
+
+	m.mu.Lock()
+	live := m.byID[mc.ID]
+	if live == nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("la máquina %q ya no existe", ref)
+	}
+	live.HasSecrets = true
+	m.persist()
+	out := *live
+	m.mu.Unlock()
+
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: mc.ID, Name: mc.Name,
+		Message: "secretos de sesión inyectados por MMDS (ya no se puede congelar)"})
+	return &out, nil
 }
 
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
