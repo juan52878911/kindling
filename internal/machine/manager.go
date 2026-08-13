@@ -1370,6 +1370,19 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	elapsed := time.Since(start).Milliseconds()
 
+	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
+	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
+	// freeze→thaw. Sin esto una microVM descongelada corría en el cgroup del daemon,
+	// SIN límite —hueco de aislamiento— y, además, se saltaba el cpu_pct que viaja
+	// con el snapshot justo en el camino de thaw, que es el habitual del gateway.
+	// Mismo patrón que Run (boot) y runFrom.
+	if mc.CPUPct <= 0 {
+		mc.CPUPct = defaultCPUPct
+	}
+	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+		log.Printf("aviso: %s: %s", mc.Name, warn)
+	}
+
 	m.mu.Lock()
 	live := m.byID[mc.ID]
 	now := time.Now()
