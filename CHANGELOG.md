@@ -4,6 +4,56 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.3.0 — 2026-08-13
+
+Notas completas, con tablas comparativas: [`RELEASE-v0.3.0.md`](RELEASE-v0.3.0.md).
+
+La v0.2.0 hizo kindling instalable, autenticado y con estado. Esta lo hace denso, paralelo
+y compartido, y estrena soporte (limitado) para Mac Apple Silicon.
+
+### Novedades
+
+- **Misma herramienta en paralelo.** El gateway crea **réplicas por servicio** bajo demanda
+  desde el snapshot dorado (COW); varias sesiones concurrentes ya no las topa el cap de
+  sesión del puente.
+- **`kling migrate`.** Mueve un MCP a kindling **conservando el nombre de la entrada y de
+  las herramientas** (endpoint per-servicio): las skills que lo usaban siguen funcionando
+  sin reescribirse.
+- **Secretos por sesión vía MMDS**, inyectados en la microVM viva; un snapshot congelado
+  nunca lleva secretos dentro.
+- **Egress allowlist de dominios** (tercer modo, fail-closed): solo salen los dominios
+  declarados, con resolver dinámico DNS→ipset.
+- **Cuotas por token/tenant** en el gateway (reparto justo).
+- **Devolver la RAM**: `kling squeeze` (balloon) reclama la memoria disponible; `/metrics`
+  y `kling top` (PSS) hacen visible el peso real, contando el `mem.file` compartido.
+- **Modo proxy HTTP/SSE** en el puente: soporta MCP que no hablan stdio.
+- **Auto-detección de capacidades** (navegador/internet/nativo) y Chromium compartido con
+  contexto por sesión.
+- **zram opt-in** en el host para densificar.
+- **Mac Apple Silicon (arm64), compatibilidad limitada.** `make deploy-mac` y binarios
+  `kling-darwin-arm64`/`kling-linux-arm64`. Requiere M3+ y virtualización anidada; el
+  arranque en frío es ~16 s bajo KVM anidado (vs ~3 s en Linux nativo) y el paralelismo
+  práctico ronda ~8 réplicas. Límites y receta en [`docs/mac-arm64.md`](docs/mac-arm64.md).
+
+### Correcciones
+
+- `mcp import` respeta `-cpus` y `defaults.mem_mib`.
+- El puente **recicla la sesión más ociosa** al llegar al tope (reconexión limpia en
+  servicios de 1 sesión); `-e KEY=VAL` para hornear env que apagan el phone-home (semgrep:
+  124 s → ~10 s).
+- GET sin sesión a un servicio devuelve **405, no 404** (clientes streamable-HTTP cargan
+  el endpoint per-servicio).
+- Segador/evict sin perder trabajo en vuelo, reconciliación de rutas pegajosas por vida,
+  suelo de `MemFree` y cierre del TOCTOU de memoria. Jailer opt-in en frío/restauración,
+  matando VMMs huérfanos. Integridad (sha256) y salud del catálogo.
+
+### Actualizar desde v0.2.0
+
+- Corre `kling images refresh`: el puente trae el modo proxy y la inyección de secretos.
+- El paralelismo de la misma herramienta no pide configuración; ajusta las cuotas por
+  tenant si repartes un mismo token.
+- En Mac: necesitas M3+ y `nested virt` (ver [`docs/mac-arm64.md`](docs/mac-arm64.md)).
+
 ## v0.2.0 — 2026-08-11
 
 Notas completas, con tablas comparativas: [`RELEASE-v0.2.0.md`](RELEASE-v0.2.0.md).

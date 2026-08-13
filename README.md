@@ -1,21 +1,28 @@
-[Read this in English](README.en.md)
+<p align="center">
+  <img src="docs/kindling-banner.svg" alt="kindling — small dry twigs that catch fire first" width="760">
+</p>
+
+[Léelo en español](README.es.md)
 
 # kindling
 
-Herramientas MCP serverless sobre microVMs de Firecracker. El objetivo final: coger un
-servidor MCP open source cualquiera y convertirlo automáticamente en un servicio que se
-levanta bajo demanda, en milisegundos, con aislamiento a nivel de kernel.
+Serverless MCP tools on Firecracker microVMs. The end goal: take any open source MCP
+server and turn it automatically into a service that comes up on demand, in
+milliseconds, with kernel-level isolation.
 
-> Estado: **completo** — el circuito completo funciona. `kling` gestiona microVMs con interfaz tipo docker, con red,
-> snapshots dorados, aislamiento, eventos, gateway MCP con sesiones y **puente
-> stdio→HTTP**: cualquier servidor MCP open source se aloja bajo demanda, hable
-> stdio o Streamable HTTP nativo.
+> Status: **complete** — the whole circuit works. `kling` manages microVMs behind a
+> docker-like interface, with networking, golden snapshots, isolation, events, an MCP
+> gateway with sessions and a **stdio→HTTP bridge**: any open source MCP server can be
+> hosted on demand, whether it speaks stdio or native Streamable HTTP.
 
-**El invitado se considera hostil**: no se sabe qué servidor MCP se va a alojar. Ver
-[SECURITY.md](SECURITY.md) para el modelo de amenaza, las barreras y —sobre todo— lo que
-todavía NO está resuelto.
+**The guest is assumed hostile**: there is no telling which MCP server will end up being
+hosted. See [SECURITY.md](SECURITY.md) for the threat model, the barriers in place and
+— above all — what is NOT solved yet.
 
 ## kling
+
+> The CLI still prints in Spanish. The transcripts below are reproduced verbatim, so
+> what you see here is what the tool actually outputs.
 
 ```
 $ kling info
@@ -40,9 +47,9 @@ $ kling thaw mcp-demo
 efad9e5f7003  running  (22 ms)
 ```
 
-### Snapshots dorados
+### Golden snapshots
 
-Congela una máquina una vez y instancia N copias que **comparten su memoria**:
+Freeze a machine once and instantiate N copies that **share its memory**:
 
 ```
 $ kling commit plantilla golden
@@ -60,98 +67,101 @@ $ kling events
 23:52:20  machine.thawed   mcp-demo  descongelada en 22 ms
 ```
 
-El estado **`warm`** es lo que distingue a kindling de un runtime de contenedores: la
-máquina está congelada en disco, no consume CPU ni RAM, y despierta en decenas de
-milisegundos.
+The **`warm`** state is what sets kindling apart from a container runtime: the machine is
+frozen on disk, burns neither CPU nor RAM, and wakes up in tens of milliseconds.
 
-### Conexión
+### Connecting
 
-El mismo binario es CLI y daemon. `kling daemon` corre donde esté KVM; el CLI le habla
-por un socket Unix, local o a través de SSH:
+The same binary is both CLI and daemon. `kling daemon` runs wherever KVM is; the CLI
+talks to it over a Unix socket, locally or through SSH:
 
 ```sh
-export KLING_HOST=ssh://juan@192.168.2.60   # daemon remoto
-export KLING_HOST=/run/kling.sock           # daemon local
+export KLING_HOST=ssh://juan@192.168.2.60   # remote daemon
+export KLING_HOST=/run/kling.sock           # local daemon
 ```
 
-**El daemon nunca escucha en un puerto de red.** Controlar microVMs equivale a root en su
-host: puede montar discos y arrancar kernels arbitrarios. Exponerlo por TCP sería repetir
-el error que ha costado a Docker una década de servidores comprometidos. Para remoto se usa
-SSH con la misma técnica que `docker context`: en vez de exigir socat o nc en el destino,
-se invoca `kling dial-stdio`, que puentea la tubería SSH con el socket local.
+**The daemon never listens on a network port.** Controlling microVMs is equivalent to
+root on their host: it can mount disks and boot arbitrary kernels. Exposing it over TCP
+would repeat the mistake that has cost Docker a decade of compromised servers. For remote
+access it uses SSH with the same technique as `docker context`: instead of requiring
+socat or nc on the far end, it invokes `kling dial-stdio`, which bridges the SSH pipe to
+the local socket.
 
-### Instalación
+### Installation
 
-**Opción rápida — binarios pre-compilados (recomendado):**
+**Quick option — pre-built binaries (recommended):**
 
 ```sh
-# macOS / Linux — una línea, sin dependencias
+# macOS / Linux — one line, no dependencies
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 
-# Para incluir kling-bridge (lo necesita el daemon cuando rebuildea imágenes):
+# To include kling-bridge (the daemon needs it when it rebuilds images):
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh -s -- --bridge
 
-# Versión concreta (por defecto instala la última release):
+# A specific version (it installs the latest release by default):
 curl -fsSL .../install.sh | sh -s -- --tag v0.1.0
 
-# Prefijo personalizado:
+# Custom prefix:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local --bridge
 ```
 
-Los binarios se publican en [Releases](https://github.com/juan52878911/kindling/releases)
-para **linux/amd64**, **linux/arm64**, **darwin/amd64** y **darwin/arm64**.
-Cada release incluye `SHA256SUMS` y el script de instalación verifica el checksum antes
-de mover nada al disco. **Windows no está soportado** — el código usa syscalls POSIX
-(`syscall.Kill`, `Setsid`, `Stat_t`).
+Binaries are published on
+[Releases](https://github.com/juan52878911/kindling/releases) for **linux/amd64**,
+**linux/arm64**, **darwin/amd64** and **darwin/arm64**. Every release ships a
+`SHA256SUMS`, and the install script verifies the checksum before moving anything onto
+disk. **Windows is not supported** — the code uses POSIX syscalls (`syscall.Kill`,
+`Setsid`, `Stat_t`).
 
-**Dejar el runtime listo — `kling up`:**
-
-```sh
-kling up        # comprueba KVM, nftables, el usuario kindling, artefactos e imágenes
-kling status    # diagnóstico de una pasada: daemon, gateway y agentes detectados
-```
-
-`kling up` **imprime** los comandos que exigen privilegios en vez de ejecutarlos: dejar que
-un instalador toque nftables y cree usuarios de sistema por su cuenta es pedir confianza que
-no hace falta pedir. El kernel y la imagen base van dentro del binario, así que no hay que
-correr ningún script antes.
-
-Los dos fallos silenciosos que caza —y que cuestan una tarde si se escapan— son que falte
-`nft` (las microVMs arrancan sin red) y que falte el usuario `kindling` (Firecracker acaba
-corriendo como root).
-
-**Opción desde fuentes — `make`:**
+**Getting the runtime ready — `kling up`:**
 
 ```sh
-make install                              # CLI en tu máquina
-make deploy HOST=ssh://juan@192.168.2.60  # daemon en el host con KVM
+kling up        # checks KVM, nftables, the kindling user, artifacts and images
+kling status    # one-pass diagnosis: daemon, gateway and the agents it finds
 ```
 
-`make install` elige el primer directorio escribible de tu PATH y **no pide sudo**:
-instalar una herramienta de usuario no debería requerirlo. Fuérzalo con
-`make install PREFIX=/usr/local` si lo prefieres en el sistema.
+`kling up` **prints** the commands that need privileges instead of running them: letting an
+installer touch nftables and create system users on its own is asking for trust that does not
+need to be asked for. The kernel and the base image ship inside the binary, so there is no
+script to run first.
 
-`make deploy` compila para `linux/amd64` por defecto, copia binario y unit de systemd, y
-arranca el servicio. El unit cede el socket al usuario con el que entras por SSH, para no
-ejecutar todo el cliente con sudo. La arquitectura es paramétrica con `GOARCH`: para
-desplegar a un host arm64 usa `make deploy GOARCH=arm64 HOST=ssh://...` (el binario sale
-como `kling-linux-arm64`).
+The two silent failures it catches — the ones that cost you an afternoon if they slip
+through — are a missing `nft` (microVMs boot with no network) and a missing `kindling` user
+(Firecracker ends up running as root).
 
-**En Mac Apple Silicon** (M3+), Firecracker necesita una VM Linux arm64 con virtualización
-anidada; hay un atajo `make deploy-mac HOST=ssh://...` y la receta reproducible completa en
+**From source — `make`:**
+
+```sh
+make install                              # CLI on your machine
+make deploy HOST=ssh://juan@192.168.2.60  # daemon on the host with KVM
+```
+
+`make install` picks the first writable directory on your PATH and **does not ask for
+sudo**: installing a user tool should not require it. Force it with
+`make install PREFIX=/usr/local` if you prefer it system-wide.
+
+`make deploy` builds for `linux/amd64`, copies the binary and the systemd unit, and starts
+the service. The unit hands the socket to the user you SSH in as, so you don't have to run
+the entire client under sudo. The build is arch-parametric with `GOARCH`: to deploy to an
+arm64 host use `make deploy GOARCH=arm64 HOST=ssh://...` (the binary comes out as
+`kling-linux-arm64`).
+
+**On Mac Apple Silicon** (M3+, **limited compatibility**), Firecracker needs an arm64 Linux
+VM with nested virtualization; there's a `make deploy-mac HOST=ssh://...` shortcut and the
+full reproducible recipe — with its honest limits — in
 [`docs/mac-arm64.md`](docs/mac-arm64.md).
 
-### Configuración
+### Configuration
 
-Contextos con nombre, al estilo de `docker context`, para no arrastrar `KLING_HOST`:
+Named contexts, in the style of `docker context`, so you don't have to carry `KLING_HOST`
+around:
 
 ```sh
-kling context add lab ssh://juan@192.168.2.60 -description "Proxmox de casa"
+kling context add lab ssh://juan@192.168.2.60 -description "Home Proxmox"
 kling context use lab
 kling context ls
 ```
 
-Y valores por defecto, para no repetir opciones en cada `run`:
+And defaults, so you don't repeat the same options on every `run`:
 
 ```sh
 kling config set defaults.image min
@@ -160,381 +170,383 @@ kling config set gateway.idle 5m
 kling config show
 ```
 
-El fichero vive en `~/.config/kling/config.json` — también en macOS: `UserConfigDir()`
-devolvería ahí `~/Library/Application Support`, que es correcto para apps de escritorio pero
-sorprendente para un CLI.
+The file lives at `~/.config/kling/config.json` — on macOS too: `UserConfigDir()` would
+put it under `~/Library/Application Support`, which is right for desktop apps but
+surprising for a CLI.
 
-**Precedencia:** `-H` > `$KLING_HOST` > contexto activo > socket local. El flag gana siempre,
-para que una invocación puntual no obligue a cambiar de contexto.
+**Precedence:** `-H` > `$KLING_HOST` > active context > local socket. The flag always
+wins, so a one-off invocation doesn't force you to switch contexts.
 
-## Catálogo: buscar y añadir servidores MCP
+## Catalog: searching for and adding MCP servers
 
-No hace falta saber empaquetar nada. `kling` habla con el registro oficial
+You don't need to know how to package anything. `kling` talks to the official registry
 (`registry.modelcontextprotocol.io`):
 
 ```sh
-kling search filesystem                    # qué hay, y cuáles sabe empaquetar solo
+kling search filesystem                    # what is out there, and what it can package on its own
 kling add io.github.domdomegg/filesystem-mcp
 ```
 
-`kling add` construye la imagen, arranca una plantilla, le pregunta qué sabe hacer, la
-congela como snapshot dorado y guarda su catálogo. A partir de ahí, listar sus capacidades
-**no despierta la microVM**.
+`kling add` builds the image, boots a template, asks it what it can do, freezes it as a
+golden snapshot and stores its catalog. From then on, listing its capabilities **does not
+wake the microVM**.
 
-La columna «kling add» de `search` dice «no» cuando el servidor no habla stdio sobre npm,
-que es lo único que el empaquetador sabe hacer solo — y cuando dice que no, explica por qué
-y qué alternativa hay, en vez de fallar a mitad de la construcción.
+The "kling add" column of `search` says no when the server does not speak stdio over npm,
+which is the only thing the packager can do unattended — and when it says no, it explains
+why and what the alternative is, instead of failing halfway through the build.
 
-## Volúmenes: lo que sobrevive a la microVM
+## Volumes: what outlives the microVM
 
-El overlay de cada máquina muere con ella. Un **volumen** es lo contrario: un fichero ext4
-en el host que se engancha como disco propio —de `vdc` en adelante, hasta cuatro— y que
-persiste.
+Each machine's overlay dies with it. A **volume** is the opposite: an ext4 file on the host,
+attached as a disk of its own — `vdc` onwards, up to four of them — that persists.
 
 ```sh
-kling volume create notas -size 2G
-kling mcp import notas-mcp -volume notas          # o: kling add <servidor> ...
-kling run -name apuntes -volume notas:/data          # o una microVM a mano
+kling volume create notes -size 2G
+kling mcp import notes-mcp -volume notes          # or: kling add <server> ...
+kling run -name jottings -volume notes:/data      # or a microVM by hand
 kling volume ls
 ```
 
 ```
-NOMBRE   LÓGICO   EN DISCO   EN USO POR
-notas    2.0G     4.0M       notas-a3f9
+NAME     LOGICAL   ON DISK   USED BY
+notes    2.0G      4.0M      notes-a3f9
 ```
 
-**Por qué un disco y no un directorio del host.** La petición natural es «monta
-`~/notas` dentro». No se hace: Firecracker no tiene virtio-fs, y sobre todo un directorio
-del host montado en escritura le da al invitado —que se considera hostil— un canal directo
-al sistema de ficheros del anfitrión. Sería tirar por tierra la frontera que justifica usar
-microVMs en vez de contenedores. Es disperso, así que solo ocupa lo que se escriba.
+**Why a disk and not a host directory.** The natural request is "mount `~/notes` inside".
+It isn't done: Firecracker has no virtio-fs, and more importantly a host directory mounted
+read-write hands the guest — which is assumed hostile — a direct channel into the host's
+filesystem. That would throw away the very boundary that justifies using microVMs instead of
+containers. The file is sparse, so it only takes up what actually gets written.
 
-**El volumen se declara al importar, no después.** Firecracker no permite añadir discos a
-una VM restaurada, así que el dispositivo tiene que estar presente cuando se congela el
-snapshot dorado. Un servicio importado sin volumen no puede tener uno sin reimportarlo, y
-kling lo dice con esas palabras en vez de fallar dentro del invitado.
+**A volume is declared at import time, not later.** Firecracker cannot add drives to a
+restored VM, so the device has to be present when the golden snapshot is frozen. A service
+imported without a volume cannot get one without re-importing, and kling says exactly that
+instead of failing inside the guest.
 
-**Quién lo monta.** El puente, no el init de la imagen: así no hay que reconstruir ninguna
-imagen base. El punto de montaje viaja en la línea de comandos del kernel
-(`kling.volume=/data,/libs:ro`, con el modo pegado a cada punto de montaje), de modo que el
-mismo snapshot dorado sirve con volúmenes distintos.
+**Who mounts it.** The bridge, not the image's init — so no base image needs rebuilding. The
+mountpoints travel on the kernel command line (`kling.volume=/data,/libs:ro`), which means
+the same golden snapshot works with different volumes.
 
-**Un escritor, o muchos lectores.** No es una política, es física: un ext4 no admite dos
-sistemas montándolo en escritura. Cada uno cachea metadatos que el otro no ve, y el
-resultado es corrupción. En lectura no hay tal problema: si nadie escribe, los bloques no
-cambian. Así que kling admite **un** escritor exclusivo, **o** cuantos lectores quieras, y
-nunca las dos cosas; cuando se niega, dice quién lo tiene y cómo.
+**One writer, or many readers.** That is not a policy, it is physics: ext4 does not tolerate
+two systems mounting it read-write. Each one caches metadata the other cannot see, and the
+result is corruption. Reading is a different matter: if nobody writes, the blocks do not
+change. So kling allows **one** exclusive writer **or** as many readers as you like, and
+never both at once.
 
-### Una biblioteca de paquetes compartida
+The rule is enforced on the boot path, not only on delete: whoever mounts a volume is as
+dangerous as whoever removes it. `kling volume rm` refuses while a microVM has it mounted —
+deleting the file underneath would corrupt its filesystem — and a `run` or an `import` that
+would break the one-writer rule is turned down the same way, naming the machine that holds
+it and, when reading is enough, showing you the `-volume <name>:ro` that would work.
 
-Eso es lo que hace posible no duplicar las mismas dependencias en cada imagen:
+### A shared package library
+
+That is what makes it possible not to duplicate the same dependencies in every image:
 
 ```sh
 kling volume create libs -size 2G
 
-# la imagen con los instaladores, una vez:
+# the image carrying the installers, once:
 kling images toolchain
 
-# poblarla DENTRO de una microVM de un solo uso, que se destruye al terminar:
+# populate it INSIDE a single-use microVM, which is destroyed when it finishes:
 kling volume populate libs -- npm install --prefix /data --ignore-scripts lodash axios zod
 kling volume populate libs -- pip install --target /data requests
 
-# y consumirla desde tantas microVMs como haga falta:
-kling mcp import mi-servicio -volume libs:/libs:ro
-kling run -name otra -volume libs:/libs:ro
+# and consume it from as many microVMs as you need:
+kling mcp import my-service -volume libs:/libs:ro
+kling run -name another -volume libs:/libs:ro
 ```
 
-El modo viaja pegado al punto de montaje en la línea de comandos del kernel
-(`kling.volume=/libs:ro`), para que el puente no pueda leer uno sin el otro. Dentro se
-monta con `MS_RDONLY` **y** `noload`: sin `noload`, ext4 intentaría reproducir el journal
-al montar —que es una escritura— y varios invitados haciéndolo a la vez sobre el mismo
-fichero es justo la corrupción que el modo lectura evita. El disco se marca además de solo
-lectura en el propio Firecracker, así que la barrera no depende de que el invitado se
-porte bien: escribir da `EROFS`.
+The mode travels glued to the mountpoint on the kernel command line (`kling.volume=/libs:ro`),
+so the bridge cannot read one without the other. Inside, it is mounted with `MS_RDONLY`
+**and** `noload`: without `noload`, ext4 would try to replay the journal at mount time —
+which is a write — and several guests doing that at once against the same file is precisely
+the corruption read-only mode exists to avoid. The drive is marked read-only in Firecracker
+itself as well, so the barrier does not rely on the guest behaving: writing gets `EROFS`.
 
-### Varios volúmenes en la misma microVM
+### Several volumes in the same microVM
 
-Los dos usos naturales se estorbaban: un servicio quiere su almacenamiento propio en
-escritura **y** la biblioteca compartida en lectura. `-volume` es repetible, y el orden en
-que se escriben es el orden de los discos (`vdc`, `vdd`, …):
+The two natural uses were getting in each other's way: a service wants its own read-write
+storage **and** the shared library read-only. `-volume` can be repeated, and the order you
+write them in is the order of the disks (`vdc`, `vdd`, …):
 
 ```sh
-kling mcp import mi-servicio -volume datos:/data -volume libs:/libs:ro
+kling mcp import my-service -volume data:/data -volume libs:/libs:ro
 ```
 
 ```
-NOMBRE   LÓGICO   EN DISCO   EN USO POR
-datos    2.0G     97M        mi-servicio-1a98a4 (escritura)
-libs     2.0G     109M       mi-servicio-1a98a4, otra-mas
+NAME     LOGICAL   ON DISK   USED BY
+data     2.0G      97M       my-service-1a98a4 (writing)
+libs     2.0G      109M      my-service-1a98a4, another-one
 ```
 
-El máximo son cuatro, porque cada uno es un disco y los discos se nombran por letra.
+Four is the ceiling, because each one is a disk and disks are named by letter.
 
-**Instalar es ejecutar código de terceros**, así que `volume populate` lo hace dentro de una
-microVM con el volumen montado en escritura y la destruye al acabar — en vez de en un chroot
-del anfitrión, que es sacar esa ejecución fuera de la frontera que justifica el proyecto. La
-capacidad de ejecutar comandos la enciende el kernel (`kling.exec=1`) y solo la pone el
-daemon para esas máquinas: una microVM de servicio no tiene esa ruta registrada siquiera.
+**Installing is running third-party code**, so `volume populate` does it inside a microVM
+with the volume mounted read-write and destroys it when it is done — rather than in a chroot
+on the host, which would take that execution outside the very boundary that justifies the
+project. The ability to run commands is switched on by the kernel (`kling.exec=1`) and only
+the daemon sets it, only for those machines: a service microVM does not even have that route
+registered.
 
-**Los paquetes se encuentran solos.** Tras montar, el puente mira dentro de cada volumen y
-exporta `NODE_PATH` y `PYTHONPATH` al servidor MCP:
+**Packages find themselves.** Once everything is mounted, the bridge looks inside each volume
+and exports `NODE_PATH` and `PYTHONPATH` to the MCP server:
 
-| Lo que hay en el volumen | Qué se exporta |
+| What the volume holds | What gets exported |
 |---|---|
 | `<vol>/node_modules` | `NODE_PATH=<vol>/node_modules` |
 | `<vol>/*.dist-info` (`pip install --target`) | `PYTHONPATH=<vol>` |
-| `<vol>/lib/python*/site-packages` (`pip install --prefix`) | esa ruta en `PYTHONPATH` |
+| `<vol>/lib/python*/site-packages` (`pip install --prefix`) | that path in `PYTHONPATH` |
 
-Se calcula al arrancar y no al construir la imagen porque el punto de montaje se decide al
-arrancar: un `NODE_PATH` incrustado mentiría en cuanto montaras la biblioteca en otro sitio.
-Y se comprueba que el directorio existe antes de añadirlo — un volumen de datos cualquiera
-no entra en `PYTHONPATH`, porque un `json.py` dentro taparía el módulo de la biblioteca
-estándar y el fallo aparecería lejísimos de su causa. Lo que la imagen ya traiga instalado
-va **primero**: actualizar el volumen no debe cambiar en silencio la versión que usa un
-servicio que ya funcionaba.
+It is worked out at boot rather than at image build time because the mountpoint is decided at
+boot: a `NODE_PATH` baked into the image would start lying the moment you mounted the library
+somewhere else. And the directory is checked for existence before being added — an ordinary
+data volume does not end up in `PYTHONPATH`, because a `json.py` sitting in it would shadow
+the standard library module and the failure would surface nowhere near its cause. Whatever
+the image already has installed comes **first**: updating the volume must not silently change
+the version a service that already worked is using.
 
-**El conjunto de discos queda fijado al congelar.** Firecracker no admite añadir ni quitar
-discos a una VM restaurada —solo reapuntar cada uno a otro fichero—, así que cambiar
-cuántos volúmenes lleva un servicio exige reimportarlo, y kling lo dice con esas palabras
-en vez de fallar dentro del invitado.
+**The set of disks is fixed at freeze time.** Firecracker will not add or remove drives on a
+restored VM — it only lets you repoint each one at a different file — so changing how many
+volumes a service carries means re-importing it, and kling says exactly that instead of
+failing inside the guest.
 
-**Sobrevive a que maten la máquina.** Parar una microVM es matar el VMM, que para el
-invitado es indistinguible de un corte de corriente. Por eso un volumen se formatea **con
-journal** —al contrario que los overlays, que son desechables— y por eso el daemon le pide
-al invitado que vacíe su caché al disco antes de matarlo. Sin lo primero, el sistema de
-ficheros queda incoherente y sin nada que reproducir; sin lo segundo, se pierde justo lo
-último que se escribió. Antes de cada arranque se le pasa un `e2fsck -p`, que sobre un
-volumen sano cuesta milisegundos.
+**It survives the machine being killed.** Stopping a microVM means killing the VMM, which
+from the guest's point of view is indistinguishable from a power cut. That is why a volume is
+formatted **with a journal** — unlike overlays, which are disposable — and why the daemon
+asks the guest to flush its cache to disk before killing it. Without the first, the
+filesystem is left inconsistent and with nothing to replay; without the second, you lose
+exactly what was written last. Every boot is preceded by an `e2fsck -p`, which on a healthy
+volume costs milliseconds.
 
-### El puente vive dentro de cada imagen
+### The bridge lives inside every image
 
-Es el PID 1 del invitado, así que se copia dentro cuando la imagen se construye. Actualizar
-kindling en el anfitrión **no** actualiza el puente de los servicios ya empaquetados:
+It is the guest's PID 1, so it is copied in when the image is built. Updating kindling on the
+host does **not** update the bridge of services that are already packaged:
 
 ```sh
-kling images refresh              # todas
-kling images refresh semgrep      # solo una
+kling images refresh              # all of them
+kling images refresh semgrep      # just one
 ```
 
-No es una carencia de funciones, es un fallo desconcertante si se olvida: un puente antiguo
-no entiende los parámetros nuevos de la línea de comandos del kernel, muere al arrancar y
-—por ser PID 1— el invitado entra en pánico. Deducir de un pánico del kernel que hay que
-actualizar una imagen es pedir demasiado.
+This is not a missing feature, it is a baffling failure if you forget it: an old bridge does
+not understand the new kernel command line parameters, dies at startup and — being PID 1 —
+the guest panics. Deducing from a kernel panic that an image needs updating is asking too
+much.
 
-Nunca toca una imagen que esté usando alguna microVM (modificar un ext4 montado por otro
-sistema lo corrompe, aunque él lo tenga en solo lectura), compara por contenido para no
-reescribir lo que ya está al día, y escribe al lado y renombra: o está el puente viejo o el
-nuevo, nunca uno truncado. Después hay que **reimportar** los servicios, porque su snapshot
-dorado se congeló con el puente anterior dentro.
+It never touches an image some microVM is using (modifying an ext4 that another system has
+mounted corrupts it, even if that system holds it read-only), it compares by content so it
+does not rewrite what is already current, and it writes alongside and renames: either the old
+bridge is there or the new one, never a truncated one. Afterwards you have to **re-import**
+the affected services, because their golden snapshot was frozen with the previous bridge
+inside.
 
-## Por qué microVMs y no contenedores
+## Why microVMs and not containers
 
-Un servidor MCP es un proceso Node o Python de 50-100 MB. Meterlo en una microVM no ahorra
-recursos frente a un contenedor — cuesta más, porque cada microVM arranca su propio kernel.
+An MCP server is a 50-100 MB Node or Python process. Putting it inside a microVM does not
+save resources compared to a container — it costs more, because every microVM boots its
+own kernel.
 
-La razón de hacerlo es otra: **una IA local ejecutando tooling open source arbitrario es
-código no confiado**. El aislamiento de un contenedor es el namespace del kernel compartido;
-el de una microVM es una frontera de hipervisor. Esa es la única justificación honesta del
-proyecto, y conviene tenerla clara antes de escribir una línea más.
+The reason to do it is a different one: **a local AI running arbitrary open source tooling
+is untrusted code**. A container's isolation is a namespace of the shared kernel; a
+microVM's is a hypervisor boundary. That is the project's only honest justification, and
+it is worth being clear about it before writing another line.
 
-## Números medidos
+## Measured numbers
 
-Medidos sobre Proxmox (Intel i7-8700T) con Firecracker v1.16.1 **anidado** dentro de una VM,
-kernel 6.1.177 y rootfs Ubuntu 24.04 de 800 MB:
+Measured on Proxmox (Intel i7-8700T) with Firecracker v1.16.1 running **nested** inside a
+VM, kernel 6.1.177 and an 800 MB Ubuntu 24.04 rootfs:
 
-| Operación | Tiempo |
+| Operation | Time |
 |---|---|
-| Arranque en frío | **2.643 ms** |
-| Creación de snapshot | 305 ms |
-| **Restauración desde snapshot** | **~30 ms** |
+| Cold boot | **2,643 ms** |
+| Snapshot creation | 305 ms |
+| **Restore from snapshot** | **~30 ms** |
 
-Reprodúcelos con `scripts/40-bench-boot.sh`.
+Reproduce them with `scripts/40-bench-boot.sh`.
 
-**La conclusión que define la arquitectura:** 2.6 s en frío hace inviable el modelo de una
-microVM por petición. Los 125 ms que anuncia Firecracker son con kernel recortado y rootfs
-mínimo sobre metal desnudo. Con snapshot/restore, 30 ms es imperceptible dentro de una
-llamada de herramienta.
+**The conclusion that defines the architecture:** 2.6 s cold makes the one-microVM-per-request
+model unworkable. The 125 ms Firecracker advertises assume a trimmed kernel and a minimal
+rootfs on bare metal. With snapshot/restore, 30 ms is imperceptible inside a tool call.
 
-Por tanto: **cada herramienta arranca una vez, se congela con el servidor MCP ya escuchando,
-y el gateway restaura bajo demanda.** El snapshot no es una optimización opcional; es lo que
-sostiene todo lo demás.
+Therefore: **every tool boots once, is frozen with the MCP server already listening, and
+the gateway restores it on demand.** The snapshot is not an optional optimization; it is
+what holds everything else up.
 
-## Coste en disco
+## Disk cost
 
-La imagen base **no se copia**: se monta en solo lectura y la comparten todas las microVMs.
-Cada máquina solo tiene un overlay disperso propio, montado con overlayfs por
-`/sbin/overlay-init` dentro del invitado.
+The base image **is not copied**: it is mounted read-only and shared by every microVM.
+Each machine only carries its own sparse overlay, mounted with overlayfs by
+`/sbin/overlay-init` inside the guest.
 
 | | |
 |---|---|
-| Imagen base `min` (Alpine), compartida | **17 MB**, una sola vez |
-| Imagen base `default` (Ubuntu), compartida | 386 MB |
-| Por máquina en marcha | **~8 MB** |
-| Por máquina en `warm`, imagen `min` | **~35 MB** |
-| Por máquina en `warm`, imagen `default` | ~82 MB |
+| Base image `min` (Alpine), shared | **17 MB**, once |
+| Base image `default` (Ubuntu), shared | 386 MB |
+| Per running machine | **~8 MB** |
+| Per `warm` machine, `min` image | **~35 MB** |
+| Per `warm` machine, `default` image | ~82 MB |
 
-Antes de los overlays cada máquina copiaba los 800 MB enteros: tres máquinas costaban
-2.4 GB, ahora cuestan 386 MB + 25 MB.
+Before overlays, every machine copied the full 800 MB: three machines cost 2.4 GB, now
+they cost 386 MB + 25 MB.
 
-**Una máquina `warm` no consume RAM.** `freeze` mata el proceso de Firecracker; lo que
-queda es un fichero. Su coste es disco, no memoria.
+**A `warm` machine consumes no RAM.** `freeze` kills the Firecracker process; what remains
+is a file. Its cost is disk, not memory.
 
-Firecracker vuelca la memoria entera al congelar, pero la mayor parte son páginas a cero.
-kindling las perfora con `fallocate --dig-holes`: el kernel devuelve ceros al leer un
-agujero, que es exactamente lo que había, así que la restauración no se entera.
+Firecracker dumps the entire memory when freezing, but most of it is zeroed pages.
+kindling punches them out with `fallocate --dig-holes`: the kernel returns zeros when
+reading a hole, which is exactly what was there, so the restore never notices.
 
-**256 MB → 81 MB, y el `thaw` sigue en ~30 ms.**
+**256 MB → 81 MB, and `thaw` is still ~30 ms.**
 
-### Qué determina ese coste
+### What drives that cost
 
-Dos medidas que orientan cualquier optimización futura:
+Two measurements that should guide any future optimization:
 
-| RAM asignada | Coste congelada |
+| Allocated RAM | Frozen cost |
 |---|---|
 | 512 MiB | 86 MB |
 | 256 MiB | 81 MB |
 | 96 MiB | 80 MB |
 
-**Asignar más RAM es casi gratis** una vez el fichero es disperso: lo que se guarda es el
-working set real, no la RAM reservada. Bajar `-mem` no es la palanca.
+**Allocating more RAM is nearly free** once the file is sparse: what gets stored is the
+real working set, not the reserved RAM. Lowering `-mem` is not the lever.
 
-La palanca es lo que arranca dentro:
+The lever is what boots inside:
 
-| Invitado | Coste congelada |
+| Guest | Frozen cost |
 |---|---|
 | Ubuntu 24.04 + systemd | 82 MB |
-| Alpine sin systemd (imagen `min`) | **35 MB** |
+| Alpine without systemd (`min` image) | **35 MB** |
 
-Casi la mitad del coste era userspace de Ubuntu que una herramienta efímera nunca usa.
-`scripts/70-build-minimal-image.sh` construye la imagen `min`: Alpine con
-`/sbin/overlay-init` y sin gestor de servicios, que arranca directamente `/entrypoint`.
+Nearly half the cost was Ubuntu userspace that an ephemeral tool never touches.
+`scripts/70-build-minimal-image.sh` builds the `min` image: Alpine with
+`/sbin/overlay-init` and no service manager, booting straight into `/entrypoint`.
 
-Más allá quedan dos técnicas de Firecracker sin explotar: **snapshots diff**, que guardan
-solo las páginas cambiadas respecto a una base, y el **backend UFFD**, que permite a varias
-microVMs restauradas del mismo snapshot compartir páginas en RAM. UFFD no reduce disco,
-pero es lo que da densidad cuando hay muchas herramientas calientes a la vez.
+Beyond that, two Firecracker techniques remain unexploited: **diff snapshots**, which store
+only the pages changed relative to a base, and the **UFFD backend**, which lets several
+microVMs restored from the same snapshot share pages in RAM. UFFD does not reduce disk
+usage, but it is what gives you density when many tools are hot at once.
 
-## Arquitectura
+## Architecture
 
 ```
-   Tu agente (Claude Code, opencode, un modelo local…)
+   Your agent (Claude Code, opencode, a local model…)
         │  MCP / Streamable HTTP
         ▼
-  ┌───────────┐  enlace   ┌──────────────────┐
-  │  gateway  │──────────>│ servidor externo │  fuera de kindling
+  ┌───────────┐   link    ┌──────────────────┐
+  │  gateway  │──────────>│ external server  │  outside kindling
   └─────┬─────┘           └──────────────────┘
-        │  restaura (~30 ms) y hace de proxy a :8080/mcp
+        │  restores (~30 ms) and proxies to :8080/mcp
         ├────────────────────────┬─────────────────────────┐
         ▼                        ▼                         ▼
   ┌──────────────┐        ┌──────────────┐          ┌──────────────┐
-  │ µVM servicio │        │ µVM servicio │          │ µVM efímera  │
-  │ puente→stdio │        │  HTTP nativo │          │ muere al fin │
+  │ µVM service  │        │ µVM service  │          │ µVM ephemeral│
+  │ bridge→stdio │        │ native HTTP  │          │ dies at end  │
   └──────────────┘        └──────────────┘          └──────────────┘
         └────────────────────────┴─────────────────────────┘
-                       un namespace de red cada una
+                    one network namespace each
                                  ▲
                           ┌───────────┐
-                          │  daemon   │  ciclo de vida, red, snapshots
+                          │  daemon   │  lifecycle, network, snapshots
                           └───────────┘
 ```
 
-El **gateway** recibe la llamada, restaura el snapshot que corresponde, hace de proxy y
-recoge la microVM cuando expira su TTL. Dentro del invitado siempre llama al mismo sitio,
-`:8080/mcp`, hable el servidor stdio (con `kling-bridge` traduciendo) o Streamable HTTP
-nativo (sin nada en medio).
+The **gateway** takes the call, restores the matching snapshot, proxies the request and
+reaps the microVM once its TTL expires. Inside the guest it always calls the same place,
+`:8080/mcp`, whether the server speaks stdio (with `kling-bridge` translating) or native
+Streamable HTTP (with nothing in between).
 
-El **daemon** gestiona el ciclo de vida y es el único que alcanza a los invitados: sus IP
-solo existen en la red del host. Por eso expone `POST /machines/{ref}/guest`, que reenvía una
-petición HTTP al servidor de dentro. Sin eso, `kling mcp import` solo funcionaría ejecutando
-el CLI en el propio host — por SSH el sondeo no tiene ruta y agota el plazo.
+The **daemon** manages the lifecycle and is the only one that can reach the guests: their
+IPs only exist on the host's network. That is why it exposes `POST /machines/{ref}/guest`,
+which forwards an HTTP request to the server inside. Without it, `kling mcp import` would
+only work by running the CLI on the host itself — over SSH the probe has no route and
+times out.
 
-## Requisitos
+## Requirements
 
-- Un host con KVM y `cpu: host` (o equivalente) para que pasen las extensiones de virtualización
-- Si corre anidado, virtualización anidada activada en el host padre
+- A host with KVM and `cpu: host` (or equivalent) so the virtualization extensions get through
+- If it runs nested, nested virtualization enabled on the parent host
 - `firecracker` + `jailer`, `e2fsprogs`, `squashfs-tools`, `curl`, `jq`
 
-Sobre **macOS**: Firecracker no corre nativo. En Apple Silicon M3 o superior con macOS 15+
-puede correr dentro de una VM Linux aarch64 con anidación. Sirve para desarrollar, no como
-runtime — consume más batería que la solución que este proyecto pretende evitar.
+On **macOS**: Firecracker does not run natively. On Apple Silicon M3 or newer with
+macOS 15+ it runs inside an aarch64 Linux VM with nested virtualization — **supported, with
+limits**: cold starts are slower under nested KVM (~16 s per new replica vs ~3 s on native
+Linux), so it's good for local development and evaluation, not high-concurrency workloads.
+See [`docs/mac-arm64.md`](docs/mac-arm64.md).
 
 ## Scripts
 
 | | |
 |---|---|
-| `scripts/install.sh` | Instalador curl-pipe-sh: descarga el binario de la release y verifica SHA256 |
-| `scripts/release.sh` | Crea el tag y lo pushea; activa el workflow de release |
-| `scripts/10-provision-lab.sh` | Crea la VM del laboratorio en Proxmox |
-| `scripts/20-install-firecracker.sh` | Instala Firecracker y jailer desde la última release |
-| `scripts/30-fetch-artifacts.sh` | Descubre y descarga kernel + rootfs del CI |
-| `scripts/40-bench-boot.sh` | Mide arranque en frío, snapshot y restauración |
-| `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
-| `scripts/60-stress.sh` | Carga sostenida sobre el daemon: arranques, congelados y despertares en paralelo |
-| `scripts/70-build-minimal-image.sh` | Construye la imagen base mínima desde cero |
-| `scripts/80-mcp-image.sh` | Empaqueta un servidor MCP (stdio + bridge, o HTTP nativo) en una imagen |
-| `scripts/90-e2e.sh` | Prueba de extremo a extremo contra un daemon real con KVM (21 comprobaciones) |
+| `scripts/install.sh` | curl-pipe-sh installer: downloads the release binary and verifies SHA256 |
+| `scripts/release.sh` | Creates the tag and pushes it; triggers the release workflow |
+| `scripts/10-provision-lab.sh` | Creates the lab VM on Proxmox |
+| `scripts/20-install-firecracker.sh` | Installs Firecracker and jailer from the latest release |
+| `scripts/30-fetch-artifacts.sh` | Discovers and downloads kernel + rootfs from CI |
+| `scripts/40-bench-boot.sh` | Measures cold boot, snapshot and restore |
+| `scripts/50-prepare-image.sh` | Injects `overlay-init` and registers the base image |
+| `scripts/80-mcp-image.sh` | Packages an MCP server (stdio + bridge, or native HTTP) into an image |
 
-Detalles del ciclo de release: [`docs/releases.md`](docs/releases.md).
-Cambios por versión: [`CHANGELOG.md`](CHANGELOG.md).
+Release cycle details: [`docs/releases.md`](docs/releases.md).
+Per-version changes: [`CHANGELOG.md`](CHANGELOG.md).
 
-## Hoja de ruta
+## Roadmap
 
-- [x] **Fase 1** — Laboratorio: microVM que arranca, snapshot/restore medido
-- [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH
-- [x] **Fase 1.6** — Overlays, snapshots dispersos y snapshots dorados con memoria compartida
-- [x] **Fase 2** — Red por TAP con un namespace por microVM
-- [x] **Fase 2.5** — Endurecimiento: privilegios bajados, salida filtrada, límites de caudal
-- [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y vigilancia
-- [x] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP nativo, sin puente
-- [x] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → recoger por inactividad
-- [x] **Fase 5** — Puente stdio→HTTP: también los servidores que solo hablan por tuberías
+- [x] **Phase 1** — Lab: a microVM that boots, snapshot/restore measured
+- [x] **Phase 1.5** — `kling`: lifecycle, states, events, local and SSH transport
+- [x] **Phase 1.6** — Overlays, sparse snapshots and golden snapshots with shared memory
+- [x] **Phase 2** — TAP networking with one namespace per microVM
+- [x] **Phase 2.5** — Hardening: dropped privileges, filtered egress, rate limits
+- [x] **Phase 2.6** — Minimal image, TTL, CPU cgroups, reconciliation and watchdog
+- [x] **Phase 3** — A real MCP server inside, speaking native Streamable HTTP, no bridge
+- [x] **Phase 4** — Gateway: route call → restore → proxy → reap on idle
+- [x] **Phase 5** — stdio→HTTP bridge: servers that only speak over pipes, too
 
-### Lo que sigue sin resolver
+### What is still unresolved
 
-La hoja de ruta está completa; el proyecto no. Lo que queda, por orden de lo que más
-molesta:
+The roadmap is complete; the project is not. What remains, ordered by how much it hurts:
 
-- **Llamadas en paralelo a servicios persistentes.** Alrededor de un 25% agota los 60 s.
-  No es el aislamiento: el puente por su cuenta despacha 16 llamadas en paralelo en 127 ms,
-  y los servicios efímeros hacen 8 de 8 en 785 ms. El fallo está en el gateway, sin localizar.
-  Mientras tanto, con un servicio persistente conviene ir en serie.
-- **Lo que no está en un volumen no sobrevive.** Un servicio conserva su estado mientras
-  viva su instancia; lo que deba sobrevivir a todo va en un volumen, y hay que declararlo al
-  importar porque el conjunto de discos queda fijado al congelar el snapshot. Se olvida con
-  facilidad, y el fallo es silencioso: la escritura dice «success» y el fichero no está la
-  próxima vez.
-- **Las barreras que faltan** están enumeradas en [SECURITY.md](SECURITY.md): sin chroot,
-  sin cuota dura de disco, sin cifrado en reposo, snapshots dorados sin firmar.
+- **Parallel calls to persistent services.** Around 25% of them hit the 60 s timeout.
+  It is not the isolation: the bridge on its own dispatches 16 parallel calls in 127 ms,
+  and ephemeral services do 8 out of 8 in 785 ms. The fault is in the gateway, not yet
+  pinned down. In the meantime, go serial against a persistent service.
+- **There is no durable storage.** A persistent service keeps its state for as long as its
+  instance lives, no longer. Anything that must survive everything needs a host volume
+  mounted inside the microVM, which is not implemented — hence the recommendation to link
+  a memory service.
+- **The missing barriers** are listed in [SECURITY.md](SECURITY.md): no chroot, no hard
+  disk quota, no encryption at rest, unsigned golden snapshots.
 
-## Notas de campo
+## Field notes
 
-Ver [docs/hallazgos.md](docs/hallazgos.md) — cosas que cuestan horas de descubrir por tu cuenta,
-como que las URLs de artefactos de todos los tutoriales que hay por internet devuelven 404.
+See [docs/hallazgos.md](docs/hallazgos.md) — things that take hours to figure out on your
+own, such as the fact that the artifact URLs in every tutorial on the internet return 404.
 
-## Densidad: por qué el snapshot dorado lo cambia todo
+## Density: why the golden snapshot changes everything
 
-Un snapshot dorado es un artefacto **de imagen, no de máquina**: se congela una vez y N
-instancias restauran del mismo fichero. Como Firecracker lo **mapea** en vez de reservar
-memoria anónima, el kernel comparte esas páginas entre todas las instancias y cada una solo
-paga lo que escribe.
+A golden snapshot is an artifact **of an image, not of a machine**: you freeze once and N
+instances restore from the same file. Because Firecracker **maps** it instead of reserving
+anonymous memory, the kernel shares those pages across every instance and each one only
+pays for what it writes.
 
-Medido instanciando de una en una y mirando la RAM del sistema:
+Measured by instantiating one at a time and watching system RAM:
 
-| | 10 desde snapshot dorado | 10 arrancadas en frío |
+| | 10 from a golden snapshot | 10 cold-booted |
 |---|---|---|
-| RAM total añadida | **+68 MiB** | +824 MiB |
-| Por máquina | **6.8 MiB** | 82 MiB |
-| Tiempo por máquina | ~40 ms | ~2.6 s hasta userspace |
+| Total RAM added | **+68 MiB** | +824 MiB |
+| Per machine | **6.8 MiB** | 82 MiB |
+| Time per machine | ~40 ms | ~2.6 s to userspace |
 
-**12 veces más densidad.** La prueba de que las páginas se comparten está en el desfase
-entre dos cifras: la suma de RSS de los diez procesos daba 258 MiB, pero la RAM del sistema
-solo subió 68 MiB. Los 190 MiB de diferencia son páginas compartidas que cada proceso
-cuenta como suyas.
+**12x the density.** The proof that pages are shared is in the gap between two numbers: the
+sum of RSS across the ten processes came to 258 MiB, but system RAM only rose by 68 MiB.
+The 190 MiB difference is shared pages that each process counts as its own.
 
-Esto es, en la práctica, lo que se persigue con UFFD — y sale del backend `File`, sin
-escribir un gestor de fallos de página.
+This is, in practice, what UFFD is after — and it falls out of the `File` backend, without
+writing a page-fault handler.
 
-## Red: un namespace por microVM
+## Networking: one namespace per microVM
 
 ```
 $ kling topo
@@ -553,13 +565,13 @@ kindling  ssh://juan@192.168.2.60
   4 running · 0 warm · 0 parada(s)   disco: 9M propio + 83M compartido
 ```
 
-**El problema:** un snapshot graba el nombre del dispositivo TAP del host. Si N instancias
-restauran del mismo snapshot dorado, las N piden el mismo TAP y chocan. Y no vale
-reasignarlo: Firecracker no permite parchear `host_dev_name`.
+**The problem:** a snapshot records the name of the host's TAP device. If N instances
+restore from the same golden snapshot, all N ask for the same TAP and collide. And you
+cannot just reassign it: Firecracker does not allow patching `host_dev_name`.
 
-**La solución:** un namespace de red por microVM. Dentro de cada uno el TAP se llama
-siempre `tap0` y el invitado tiene siempre la misma IP, así que **el snapshot vale para
-todas**. La diferenciación ocurre entera en el host, al otro lado de un veth:
+**The solution:** one network namespace per microVM. Inside each one the TAP is always
+called `tap0` and the guest always has the same IP, so **one snapshot works for all of
+them**. All the differentiation happens on the host, on the far side of a veth:
 
 ```
         host                  │  netns kl-<id>          │  microVM
@@ -567,53 +579,56 @@ todas**. La diferenciación ocurre entera en el host, al otro lado de un veth:
                               │ tap0    172.16.0.1/30   ├─ eth0 172.16.0.2
 ```
 
-El invitado se configura con el parámetro `ip=` del kernel, sin necesitar herramientas de
-red dentro de la imagen. Desde el host cada máquina se alcanza por la IP de su namespace,
-que hace DNAT hacia el invitado.
+The guest configures itself from the kernel's `ip=` parameter, with no need for networking
+tools inside the image. From the host each machine is reachable at its namespace's IP,
+which DNATs to the guest.
 
-Es el mismo enfoque que usa AWS Lambda, y por la misma razón.
+It is the same approach AWS Lambda uses, and for the same reason.
 
-## Aislamiento
+## Isolation
 
-El invitado es código de terceros: se asume hostil.
+The guest is third-party code: assume it is hostile.
 
-| Barrera | Cómo |
+| Barrier | How |
 |---|---|
-| Daemon inalcanzable por red | Solo socket Unix; remoto exclusivamente por SSH |
-| VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo grupo `kvm` |
-| Sin acceso a la LAN | Salida `none` por defecto; con `internet` las redes privadas siguen bloqueadas |
-| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina; tope de 256 |
-| Claves no repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
+| Daemon unreachable over the network | Unix socket only; remote access exclusively over SSH |
+| Unprivileged VMM | `setpriv` to a service user: **CapEff 0**, `no_new_privs`, only the `kvm` group |
+| No LAN access | Egress `none` by default; with `internet`, private networks stay blocked |
+| No degrading the neighbours | 128 MiB/s of disk and 16 MiB/s of network per machine; cap of 256 |
+| No repeated keys | virtio-rng + `CONFIG_VMGENID`: the guest reseeds on restore |
 
-Verificado **desde dentro del invitado**, que es la única medición que vale:
+Verified **from inside the guest**, which is the only measurement that counts:
 
 ```
-RESULTADO 192.168.2.100: BLOQUEADO      (host Proxmox)
-RESULTADO 192.168.2.1:   BLOQUEADO      (router de casa)
-RESULTADO 10.10.10.1:    BLOQUEADO      (túnel WireGuard)
-RESULTADO 169.254.169.254: BLOQUEADO    (metadatos de cloud)
-RESULTADO 1.1.1.1:       ALCANZABLE
+RESULT 192.168.2.100:   BLOCKED        (Proxmox host)
+RESULT 192.168.2.1:     BLOCKED        (home router)
+RESULT 10.10.10.1:      BLOCKED        (WireGuard tunnel)
+RESULT 169.254.169.254: BLOCKED        (cloud metadata)
+RESULT 1.1.1.1:         REACHABLE
 ```
 
-## Ciclo de vida y robustez
+## Lifecycle and robustness
 
 ```
 $ kling run -image min -ttl 300 -cpu 25 -egress internet
-$ kling logs <ref> -tail 50        # consola serie: la única ventana al interior
+$ kling logs <ref> -tail 50        # serial console: the only window inside
 ```
 
-- **`-ttl`** congela la máquina sola pasado ese tiempo. Congelar, no matar: deja de costar
-  CPU y RAM, pero vuelve en ~30 ms. Es lo que hace serverless al modelo.
-- **`-cpu`** acota el uso de CPU con un cgroup propio (50% de un core por defecto).
-- **Reconciliación al arrancar**: el daemon compara su estado guardado con la realidad del
-  host, readopta las microVMs que sigan vivas y limpia namespaces y cgroups huérfanos.
-- **Vigilancia continua**: cada 10 s comprueba que lo que dice `running` corre de verdad.
-  Una máquina cuyo proceso desapareció pasa a `failed` y libera sus recursos.
+- **`-ttl`** freezes the machine by itself once that time passes. Freeze, not kill: it
+  stops costing CPU and RAM, but comes back in ~30 ms. It is what makes the model
+  serverless.
+- **`-cpu`** bounds CPU usage with its own cgroup (50% of a core by default).
+- **Reconciliation at startup**: the daemon compares its saved state against the host's
+  reality, re-adopts the microVMs that are still alive and cleans up orphaned namespaces
+  and cgroups.
+- **Continuous watchdog**: every 10 s it checks that whatever claims to be `running` is
+  actually running. A machine whose process disappeared moves to `failed` and releases its
+  resources.
 
-**Reiniciar el daemon no mata las microVMs.** El unit lleva `KillMode=process`; sin eso
-systemd arrastra todo el cgroup y se lleva por delante las máquinas en marcha.
+**Restarting the daemon does not kill the microVMs.** The unit carries `KillMode=process`;
+without it systemd drags the whole cgroup down and takes the running machines with it.
 
-### Medido con 8 instancias
+### Measured with 8 instances
 
 ```
 RAM añadida:          113 MiB   (14 MiB por instancia)
@@ -622,50 +637,51 @@ VMM sin privilegios:  9/9
 cgroups activos:      9
 ```
 
-## Gateway MCP
+## MCP gateway
 
-Enruta llamadas a herramientas y las despierta bajo demanda. Corre **aparte del daemon**, a
-propósito: el daemon nunca escucha en red porque controlarlo equivale a root en su host. El
-gateway sí escucha, pero solo sabe despertar instancias de snapshots que ya existen.
+Routes tool calls and wakes them on demand. It runs **separately from the daemon**, on
+purpose: the daemon never listens on the network because controlling it is equivalent to
+root on its host. The gateway does listen, but all it knows how to do is wake instances of
+snapshots that already exist.
 
 ```sh
-kling gateway -listen 127.0.0.1:8080 -idle 5m   # genera el token la 1ª vez
+kling gateway -listen 127.0.0.1:8080 -idle 5m   # generates the token the first time
 
-# El gateway EXIGE token: despertar un snapshot es ejecutar código, y el daemon
-# se protege no escuchando, pero el gateway sí escucha.
+# The gateway REQUIRES a token: waking a snapshot is running code, and while the
+# daemon protects itself by not listening, the gateway does listen.
 T=$(kling config path >/dev/null && echo "$KLING_GATEWAY_TOKEN")
 curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/mcp/echo/
 curl -H "Authorization: Bearer $T" http://127.0.0.1:8080/services
-curl http://127.0.0.1:8080/healthz              # abierto: es la sonda de vida
+curl http://127.0.0.1:8080/healthz              # open: it is the liveness probe
 ```
 
-El token se guarda en `gateway.token` del host donde corre el gateway y se copia al
-cliente con `kling config set gateway.token …` (lo hace `kling connect` solo). Para saltárselo
-en desarrollo está `-no-auth`, que exige escuchar en loopback.
+The token is stored in `gateway.token` on the host the gateway runs on, and copied to the
+client with `kling config set gateway.token …` (`kling connect` does it for you). To skip it
+during development there is `-no-auth`, which insists on listening on loopback.
 
-Medido de extremo a extremo con un servidor MCP real dentro de la microVM:
+Measured end to end with a real MCP server inside the microVM:
 
-| Camino | Latencia |
+| Path | Latency |
 |---|---|
-| En frío (instanciar del snapshot dorado) | **244 ms** |
-| Caliente | **9 ms** |
-| Tras congelarse por inactividad | **218 ms** (29 ms de thaw + red del invitado) |
+| Cold (instantiate from the golden snapshot) | **244 ms** |
+| Hot | **9 ms** |
+| After freezing on idle | **218 ms** (29 ms of thaw + guest networking) |
 
-Al agotarse el tiempo de inactividad la herramienta **se congela, no se mata**: deja de
-costar CPU y RAM, y la siguiente llamada la trae de vuelta en milisegundos.
+When the idle timeout expires the tool **freezes, it is not killed**: it stops costing CPU
+and RAM, and the next call brings it back in milliseconds.
 
-### Envolver un servidor MCP
+### Wrapping an MCP server
 
 ```sh
-sudo ./scripts/80-mcp-image.sh mi-tool ./mi-servidor "nodejs npm"
-kling run -name tmpl -image mi-tool -service mi-tool
-kling commit tmpl mi-tool && kling stop tmpl
+sudo ./scripts/80-mcp-image.sh my-tool ./my-server "nodejs npm"
+kling run -name tmpl -image my-tool -service my-tool
+kling commit tmpl my-tool && kling stop tmpl
 ```
 
-El directorio necesita un `entrypoint` ejecutable que escuche en el puerto 8080. Ver
+The directory needs an executable `entrypoint` that listens on port 8080. See
 [examples/echo](examples/echo).
 
-## Convertir cualquier servidor MCP en un servicio
+## Turning any MCP server into a service
 
 ```sh
 sudo ./scripts/80-mcp-image.sh stdio filesystem \
@@ -674,7 +690,7 @@ sudo ./scripts/80-mcp-image.sh stdio filesystem \
 kling mcp import filesystem
 ```
 
-`mcp import` hace el ciclo entero:
+`mcp import` does the whole cycle:
 
 ```
 1/5  arrancando la plantilla...        ✓ 0aeee853 en 172.30.0.6
@@ -684,85 +700,85 @@ kling mcp import filesystem
 5/5  guardando el catálogo...          ✓
 ```
 
-El paso 3 es **introspección**: se le pregunta al servidor qué sabe hacer una sola vez, y el
-paso 5 guarda ese catálogo junto al snapshot.
+Step 3 is **introspection**: the server is asked what it can do exactly once, and step 5
+stores that catalog alongside the snapshot.
 
-**`-n` preinstala los paquetes npm en la imagen.** No es comodidad: las microVMs arrancan sin
-salida a internet, así que un `npx -y` en tiempo de ejecución fallaría al descargar.
+**`-n` pre-installs the npm packages into the image.** That is not convenience: microVMs
+boot with no internet egress, so an `npx -y` at runtime would fail to download.
 
-## El inventario no toca el servicio
+## Listing the inventory does not touch the services
 
-Sin catálogo persistido, preguntar "¿qué herramientas hay?" obliga a un `tools/list` contra
-cada servidor, y eso **despierta sus microVMs**. Una pregunta de inventario acabaría
-arrancando veinte máquinas.
+Without a persisted catalog, asking "what tools are there?" forces a `tools/list` against
+every server, and that **wakes their microVMs**. One inventory question would end up
+booting twenty machines.
 
-Con `mcp import`, el catálogo vive en disco junto al snapshot:
+With `mcp import`, the catalog lives on disk next to the snapshot:
 
 ```sh
-kling mcp list -v          # todas las herramientas, sin arrancar nada
-kling mcp refresh <svc>    # recapturar tras actualizar el servidor
+kling mcp list -v          # every tool, without starting anything
+kling mcp refresh <svc>    # recapture after updating the server
 ```
 
-Verificado: listar el inventario completo por el agregador deja el contador de máquinas
-en **0**.
+Verified: listing the full inventory through the aggregator leaves the machine counter at
+**0**.
 
-## Modo efímero: una microVM por acción
+## Ephemeral mode: one microVM per action
 
 ```sh
 kling gateway -ephemeral -prewarm 3
 ```
 
-Cada llamada recibe **su propia microVM**: se toma una del fondo pre-calentado, atiende la
-acción y se destruye. Nace, actúa y muere.
+Every call gets **its own microVM**: one is taken from the pool of pre-warmed machines, it
+serves the action and is destroyed. It is born, acts and dies.
 
 ```
-acción 1: 19 ms   pid=305 llamadas_en_esta_sesion=1
-acción 2: 24 ms   pid=305 llamadas_en_esta_sesion=1
-acción 3: 19 ms   pid=305 llamadas_en_esta_sesion=1
+action 1: 19 ms   pid=305 llamadas_en_esta_sesion=1
+action 2: 24 ms   pid=305 llamadas_en_esta_sesion=1
+action 3: 19 ms   pid=305 llamadas_en_esta_sesion=1
 ```
 
-`llamadas_en_esta_sesion=1` **en todas**: ninguna acción ve lo que hizo la anterior.
+`llamadas_en_esta_sesion=1` **in all of them**: no action sees what the previous one did.
 
-### De 350 ms a 19 ms
+### From 350 ms to 19 ms
 
-Perfilando una acción efímera sin optimizar:
+Profiling an unoptimized ephemeral action:
 
-| Fase | Coste |
+| Stage | Cost |
 |---|---|
-| Restaurar la microVM | 131 ms |
-| Esperar a que vuelva la red | 53 ms |
-| `initialize` (lanza el servidor MCP) | 61 ms — **con node son 300-500 ms** |
+| Restore the microVM | 131 ms |
+| Wait for networking to come back | 53 ms |
+| `initialize` (launches the MCP server) | 61 ms — **with node it is 300-500 ms** |
 | `tools/call` | 9 ms |
-| Destruir la máquina | ~100 ms |
+| Destroy the machine | ~100 ms |
 
-Todo menos `tools/call` se puede pagar por adelantado o después:
+Everything except `tools/call` can be paid up front or afterwards:
 
-- **`-prewarm N`** mantiene N instancias ya restauradas y **con su sesión MCP abierta**. La
-  llamada se ahorra restaurar, esperar la red e inicializar.
-- **La destrucción es asíncrona.** Estaba en un `defer`, así que el cliente esperaba al
-  desmontaje del namespace y al borrado de ficheros: 100 ms sobre una llamada de 2 ms. La
-  máquina muere igual; el cliente ya no espera a que ocurra.
+- **`-prewarm N`** keeps N instances already restored and **with their MCP session open**.
+  The call skips restoring, waiting for the network and initializing.
+- **Destruction is asynchronous.** It used to sit in a `defer`, so the client waited for
+  the namespace teardown and the file deletion: 100 ms on top of a 2 ms call. The machine
+  dies all the same; the client just no longer waits for it to happen.
 
-Resultado: **2 ms de ejecución real, 19 ms de extremo a extremo.**
+Result: **2 ms of actual execution, 19 ms end to end.**
 
-La contrapartida es que no hay estado entre llamadas. Las herramientas que lo necesitan
-—memoria, razonamiento por pasos— deben usar la ruta con sesión (`/mcp/<servicio>`), que
-mantiene el proceso vivo.
+The trade-off is that there is no state between calls. Tools that need it — memory,
+step-by-step reasoning — have to use the session-based route (`/mcp/<service>`), which
+keeps the process alive.
 
-## Cualquier servidor MCP, alojado bajo demanda
+## Any MCP server, hosted on demand
 
-La mayoría de servidores MCP open source solo hablan **stdio**: un proceso hijo persistente
-con el que se dialoga por tuberías. No hay puerto al que llamar, y el ciclo de vida lo impone
-el cliente. Es lo contrario de invocable bajo demanda.
+Most open source MCP servers only speak **stdio**: a persistent child process you talk to
+over pipes. There is no port to call, and the client dictates the lifecycle. It is the
+opposite of invocable on demand.
 
-`kling-bridge` corre **dentro** de la microVM, lanza el servidor como hijo y expone su
-protocolo por Streamable HTTP:
+`kling-bridge` runs **inside** the microVM, launches the server as a child and exposes its
+protocol over Streamable HTTP:
 
 ```
-gateway ──HTTP──> kling-bridge ──stdin/stdout──> servidor MCP
+gateway ──HTTP──> kling-bridge ──stdin/stdout──> MCP server
 ```
 
-Desde fuera, un servidor stdio parece nativo de HTTP. Envolverlo es una línea:
+From the outside, a stdio server looks HTTP-native. Wrapping one is a single line:
 
 ```sh
 make bridge
@@ -773,10 +789,10 @@ kling run -name files-tmpl -image files -service files
 kling commit files-tmpl files && kling stop files-tmpl
 ```
 
-### Servidores que ya hablan HTTP
+### Servers that already speak HTTP
 
-Si el servidor habla **Streamable HTTP nativo** no hace falta puente: escucha él mismo y el
-gateway le habla directamente. El modo `http` acepta las mismas opciones:
+If the server speaks **native Streamable HTTP** there is no need for a bridge: it listens
+itself and the gateway talks to it directly. The `http` mode accepts the same options:
 
 ```sh
 sudo ./scripts/80-mcp-image.sh http everything -p "nodejs npm" \
@@ -785,13 +801,13 @@ sudo ./scripts/80-mcp-image.sh http everything -p "nodejs npm" \
 kling mcp import everything -image everything
 ```
 
-Dos condiciones, y las dos las fija el entrypoint generado:
+Two conditions, and the generated entrypoint sets both:
 
-- **escuchar en el puerto de `$PORT` (8080)**, que es donde mira el gateway dentro del invitado
-- **servir el protocolo en `/mcp`**, que es la ruta a la que llama
+- **listen on `$PORT` (8080)**, which is where the gateway looks inside the guest
+- **serve the protocol at `/mcp`**, which is the path it calls
 
-Probado con `@modelcontextprotocol/server-everything`, el servidor de referencia del
-protocolo. La imagen no lleva `kling-bridge` por ninguna parte:
+Tested with `@modelcontextprotocol/server-everything`, the protocol's reference server.
+The image carries no `kling-bridge` anywhere:
 
 ```
 $ kling connect everything
@@ -801,32 +817,32 @@ $ call_tool everything.get-sum {"a":100,"b":23}
 The sum of 100 and 23 is 123.
 ```
 
-### Sesiones
+### Sessions
 
-MCP identifica conversaciones con `Mcp-Session-Id`, y un servidor stdio es de **sesión única
-por naturaleza**: su estado vive en el proceso. Por eso:
+MCP identifies conversations with `Mcp-Session-Id`, and a stdio server is **single-session
+by nature**: its state lives in the process. Hence:
 
-- **El puente lanza un proceso hijo por sesión.** Dos conversaciones concurrentes no se
-  pisan el estado.
-- **El gateway enruta de forma pegajosa.** La misma sesión vuelve siempre a la misma
-  microVM; mandarla a otra instancia encontraría un servidor sin ese estado.
+- **The bridge launches one child process per session.** Two concurrent conversations do
+  not trample each other's state.
+- **The gateway routes stickily.** The same session always goes back to the same microVM;
+  sending it to another instance would find a server without that state.
 
-Demostrado con la herramienta `session_info`, que informa de su pid y de sus llamadas:
-
-```
-sesión 1 (3 llamadas extra): pid=305 llamadas_en_esta_sesion=5
-sesión 2 (recién creada):    pid=309 llamadas_en_esta_sesion=1
-```
-
-### El circuito completo
+Demonstrated with the `session_info` tool, which reports its pid and its call count:
 
 ```
-modelo local  ──>  gateway  ──>  microVM  ──>  servidor MCP
-  (tu Mac)        (Proxmox)     (Firecracker)   (stdio o HTTP)
+session 1 (3 extra calls):  pid=305 llamadas_en_esta_sesion=5
+session 2 (freshly created): pid=309 llamadas_en_esta_sesion=1
 ```
 
-[examples/agent/agent.py](examples/agent/agent.py) lo cierra: cliente MCP + bucle de
-tool-calling contra ollama.
+### The full circuit
+
+```
+local model   ──>  gateway  ──>  microVM  ──>  MCP server
+ (your Mac)       (Proxmox)     (Firecracker)   (stdio or HTTP)
+```
+
+[examples/agent/agent.py](examples/agent/agent.py) closes it: an MCP client plus a
+tool-calling loop against ollama.
 
 ```
 $ python3 examples/agent/agent.py "usa echo para decir hola"
@@ -836,68 +852,69 @@ $ python3 examples/agent/agent.py "usa echo para decir hola"
 ← hola
 ```
 
-El modelo no sabe nada de microVMs: pide una herramienta y aparece. Si llevaba rato sin
-usarse estaba congelada, y despertarla cuesta milisegundos.
+The model knows nothing about microVMs: it asks for a tool and the tool shows up. If it
+had not been used for a while it was frozen, and waking it costs milliseconds.
 
-| Camino | Latencia |
+| Path | Latency |
 |---|---|
-| Handshake MCP en frío, desde el Mac | **310 ms** |
-| Llamada a herramienta, en caliente | **9 ms** |
+| Cold MCP handshake, from the Mac | **310 ms** |
+| Tool call, hot | **9 ms** |
 
-## Reparación de tipos
+## Type repair
 
-Varios clientes MCP y modelos estropean los tipos JSON antes de enviarlos: los arrays llegan
-como objetos con claves `"0"`, `"1"`, los números como strings, los booleanos como `"true"`.
-El servidor los rechaza con "expected array, received object" y desde fuera parece un fallo
-de la herramienta, cuando nunca llegó a verla.
+Several MCP clients and models mangle JSON types before sending them: arrays arrive as
+objects with `"0"`, `"1"` keys, numbers as strings, booleans as `"true"`. The server
+rejects them with "expected array, received object", and from the outside it looks like a
+tool failure when the tool never even saw the call.
 
-Como el catálogo guarda el esquema declarado de cada herramienta, el agregador deshace el
-daño antes de reenviar. Cuatro formas rotas reconocidas donde el esquema pide un array:
+Since the catalog stores each tool's declared schema, the aggregator undoes the damage
+before forwarding. Four broken shapes are recognized where the schema asks for an array:
 
-| Lo que llega | Se repara a |
+| What arrives | Repaired to |
 |---|---|
-| `{"0":…,"1":…}` objeto indexado | `[…,…]` |
-| `"[{…}]"` string con JSON dentro | `[{…}]` |
-| `{…}` un objeto suelto | `[{…}]` |
-| `{"paths":{"paths":[…]}}` envuelto | `[…]` |
+| `{"0":…,"1":…}` indexed object | `[…,…]` |
+| `"[{…}]"` string with JSON inside | `[{…}]` |
+| `{…}` a bare object | `[{…}]` |
+| `{"paths":{"paths":[…]}}` wrapped | `[…]` |
 
-Solo se convierte lo que contradice el esquema: un objeto legítimo se deja intacto. Cada
-reparación queda registrada, y si un servidor rechaza los argumentos **pese** a la
-reparación, se registra lo que se le envió — sin eso es imposible saber qué forma les dio el
-cliente.
+Only what contradicts the schema is converted: a legitimate object is left untouched.
+Every repair is logged, and if a server rejects the arguments **despite** the repair, what
+was sent to it gets logged too — without that it is impossible to know what shape the
+client gave them.
 
-## Qué persiste y qué no
+## What persists and what does not
 
-Importa tenerlo claro porque no es obvio:
+Worth being clear about, because it is not obvious:
 
-| | Sobrevive a |
+| | Survives |
 |---|---|
-| Estado de un servicio **efímero** | nada: la microVM muere tras cada acción |
-| Estado de un servicio **persistente** | congelaciones y despertares de SU instancia |
-| | pero **no** a que esa instancia se elimine |
-| Imagen base y snapshot dorado | todo: son ficheros en el host |
+| State of an **ephemeral** service | nothing: the microVM dies after every action |
+| State of a **persistent** service | freezes and thaws of ITS instance |
+| | but **not** that instance being deleted |
+| Base image and golden snapshot | everything: they are files on the host |
 
-Un servicio persistente conserva su contenido mientras viva su instancia, que se congela al
-quedar ociosa y vuelve intacta. Pero si esa instancia se elimina —limpieza manual, `kling rm`,
-reinstalar el servicio— el estado se va con ella, porque vive en su overlay.
+A persistent service keeps its contents for as long as its instance lives; the instance
+freezes when idle and comes back intact. But if that instance is deleted — manual cleanup,
+`kling rm`, reinstalling the service — the state goes with it, because it lives in its
+overlay.
 
-**Sin volumen, kindling da persistencia de sesión y nada más.** Lo que deba sobrevivir a la
-microVM va en un volumen (ver [Volúmenes](#volúmenes-lo-que-sobrevive-a-la-microvm)), y hay
-que pedirlo al importar el servicio.
+**kindling gives you session persistence, not durable storage.** For data that has to
+survive everything you need a host volume mounted inside the microVM, which is not
+implemented today.
 
-## Conectarlo con tu agente de IA
+## Connecting it to your AI agent
 
 ```sh
-kling connect                          # guía paso a paso
-kling connect eco                      # URL, estado y configuración
-kling connect eco -install opencode    # la escribe por ti
+kling connect                          # step-by-step guide
+kling connect eco                      # URL, status and configuration
+kling connect eco -install opencode    # writes it for you
 kling connect eco -install claude-code
 ```
 
-`connect` **comprueba el servicio de verdad** —hace un `initialize` MCP y lista las
-herramientas— antes de darte nada. Una configuración que parece correcta y no responde es
-peor que ninguna, porque el fallo aparece dentro del agente y ahí cuesta mucho más
-diagnosticarlo.
+`connect` **actually checks the service** — it does a real MCP `initialize` and lists the
+tools — before handing you anything. A configuration that looks right and does not respond
+is worse than none at all, because the failure shows up inside the agent and is far more
+expensive to diagnose there.
 
 ```
 Servicio:  eco
@@ -905,60 +922,61 @@ Endpoint:  http://192.168.2.60:8080/mcp/eco
 Estado:    ✓ kindling-echo v1.0.0 · 2 herramienta(s): echo, session_info
 ```
 
-Con `-install` respalda el fichero antes de tocarlo (`.kling-backup`) y conserva el resto de
-la configuración. Para Claude Code usa `claude mcp add` si el CLI está disponible, que es la
-vía oficial, y solo escribe el JSON si no lo está.
+With `-install` it backs up the file before touching it (`.kling-backup`) and preserves the
+rest of the configuration. For Claude Code it uses `claude mcp add` if the CLI is
+available, which is the official route, and only writes the JSON if it is not.
 
-`gateway.url` es la dirección por la que los **agentes** alcanzan el gateway, que no tiene
-por qué ser la de escucha:
+`gateway.url` is the address **agents** use to reach the gateway, which need not be the
+listen address:
 
 ```sh
 kling config set gateway.url http://192.168.2.60:8080
 ```
 
-### Que sobreviva a los reinicios
+### Surviving reboots
 
 ```sh
 sudo install -m644 packaging/kling-gateway.service /etc/systemd/system/
 sudo systemctl enable --now kling-gateway
 ```
 
-El gateway **no corre como root**: solo habla con el daemon por su socket y hace de proxy.
-Toda la parte privilegiada se queda en `kling.service`.
+The gateway **does not run as root**: it only talks to the daemon over its socket and
+proxies. All the privileged work stays in `kling.service`.
 
-## Una sola entrada para todos los servicios
+## A single entry point for every service
 
-Un cliente MCP carga las definiciones de **todas** las herramientas al conectarse. Con veinte
-servicios de diez herramientas son doscientos esquemas JSON en el contexto del modelo antes
-de que empiece a trabajar.
+An MCP client loads the definitions of **all** tools when it connects. With twenty
+services of ten tools each that is two hundred JSON schemas in the model's context before
+it starts working.
 
 ```sh
-kling connect -all -install opencode              # todos los servicios
-kling connect -all -only eco,notas -install opencode   # solo algunos
-kling connect -all -expand                        # catálogo completo
+kling connect -all -install opencode              # every service
+kling connect -all -only eco,notas -install opencode   # only some
+kling connect -all -expand                        # full catalog
 ```
 
-El endpoint `/mcp/_all` es un servidor MCP que enruta a los demás. Tiene dos modos:
+The `/mcp/_all` endpoint is an MCP server that routes to the others. It has two modes:
 
-**`proxy`** (por defecto) — expone **cuatro meta-herramientas** en vez de N:
+**`proxy`** (default) — exposes **four meta-tools** instead of N:
 
 | | |
 |---|---|
-| `list_services` | qué servidores hay y cuántas herramientas tiene cada uno |
-| `find_tools` | busca por palabras clave; devuelve nombres y descripciones, **sin esquemas** |
-| `describe_tool` | el esquema completo de una sola herramienta |
-| `call_tool` | ejecuta, enrutando a la microVM que toque |
+| `list_services` | which servers exist and how many tools each one has |
+| `find_tools` | search by keyword; returns names and descriptions, **without schemas** |
+| `describe_tool` | the full schema of a single tool |
+| `call_tool` | executes, routing to whichever microVM is needed |
 
-El modelo busca lo que necesita, pide el esquema de lo que va a usar, y llama.
+The model searches for what it needs, asks for the schema of what it is going to use, and
+calls.
 
-**`expand`** — aplana el catálogo con nombres `servicio.herramienta`, para clientes que
-funcionen mejor con todo cargado.
+**`expand`** — flattens the catalog with `service.tool` names, for clients that work better
+with everything loaded.
 
-### Cuál sale más barato depende de cuántas herramientas tengas
+### Which one is cheaper depends on how many tools you have
 
-El modo `proxy` tiene un **coste fijo** de ~300 tokens; `expand` crece con cada herramienta.
-Con pocas herramientas, proxy sale **más caro**. Por eso `connect -all` lo mide contra tu
-catálogo real y te lo dice:
+The `proxy` mode has a **fixed cost** of ~300 tokens; `expand` grows with every tool. With
+few tools, proxy comes out **more expensive**. That is why `connect -all` measures it
+against your real catalog and tells you:
 
 ```
 Coste en contexto, con tu catálogo actual:
@@ -967,12 +985,12 @@ Coste en contexto, con tu catálogo actual:
   → El modo proxy que estás usando ahorra 4079 tokens.
 ```
 
-El punto de cruce está en torno a 8 herramientas. Con 28 el proxy ahorra **17 veces**; con
-200, decenas de miles de tokens en cada conversación.
+The crossover sits around 8 tools. With 28, proxy saves **17x**; with 200, tens of
+thousands of tokens in every conversation.
 
-## Servidores MCP oficiales corriendo
+## Official MCP servers running
 
-Los servidores oficiales de Anthropic, alojados como microVMs:
+Anthropic's official servers, hosted as microVMs:
 
 ```sh
 sudo ./scripts/80-mcp-image.sh stdio filesystem \
@@ -993,38 +1011,40 @@ engram       11             2h atrás     —       externo: http://192.168.2.3:
 52 herramienta(s) en 7 servicio(s) (6 microVM, 1 externo(s)).
 ```
 
-`everything` es el servidor de referencia del protocolo y habla **Streamable HTTP nativo**:
-no lleva puente. Los demás hablan stdio y van envueltos. Desde fuera no se distinguen.
+`everything` is the protocol's reference server and speaks **native Streamable HTTP**: it
+carries no bridge. The rest speak stdio and are wrapped. From the outside you cannot tell
+them apart.
 
-Uso real, a través del agregador y en microVMs de un solo uso:
+Real usage, through the aggregator and on single-use microVMs:
 
 ```
-filesystem.read_text_file  /data/prueba.txt   ->  "hola desde kindling"   (31 ms)
-memory.create_entities     kindling/proyecto  ->  entidad creada          (31 ms)
-everything.get-sum         {"a":100,"b":23}   ->  "The sum … is 123."     (nativo)
+filesystem.read_text_file  /data/test.txt     ->  "hello from kindling"   (31 ms)
+memory.create_entities     kindling/project   ->  entity created          (31 ms)
+everything.get-sum         {"a":100,"b":23}   ->  "The sum … is 123."     (native)
 ```
 
-**31 ms por acción**, cada una en su propia máquina que muere al terminar.
+**31 ms per action**, each one on its own machine, which dies when it finishes.
 
-### Tres cosas que hay que saber al empaquetar un servidor de node
+### Three things to know when packaging a node server
 
-- **`-n` preinstala el paquete npm.** Las microVMs arrancan sin salida a internet: un
-  `npx -y` fallaría al descargar.
-- **El `entrypoint` es PID 1 y el kernel no le da PATH.** Sin fijarlo, los binarios que
-  instala npm no se encuentran: `executable file not found in $PATH`.
-- **Los directorios que espera el servidor deben existir DENTRO de la imagen.** El
-  `server-filesystem` quiere `/data`; crearlo en el host no sirve de nada.
-- **Si el servidor habla HTTP, tiene que escuchar donde se le dice.** El entrypoint fija
-  `PORT=8080` y el servidor debe servir el protocolo en `/mcp`: es lo que el gateway busca.
+- **`-n` pre-installs the npm package.** microVMs boot with no internet egress: an
+  `npx -y` would fail to download.
+- **The `entrypoint` is PID 1 and the kernel gives it no PATH.** Without setting it, the
+  binaries npm installs are not found: `executable file not found in $PATH`.
+- **The directories the server expects must exist INSIDE the image.** `server-filesystem`
+  wants `/data`; creating it on the host does nothing.
+- **If the server speaks HTTP, it has to listen where it is told.** The entrypoint sets
+  `PORT=8080` and the server must serve the protocol at `/mcp`: that is what the gateway
+  looks for.
 
-## Efímero o persistente: se decide solo
+## Ephemeral or persistent: decided automatically
 
-Una microVM efímera muere con todo lo suyo, memoria **y disco**. Así que la pregunta no es
-"¿el servidor guarda estado?" sino:
+An ephemeral microVM dies with everything of its own, memory **and disk**. So the question
+is not "does the server keep state?" but:
 
-> ¿algo que escribe una llamada tiene que verlo una llamada posterior?
+> does something one call writes have to be visible to a later call?
 
-`kling mcp import` lo deduce del catálogo y lo dice:
+`kling mcp import` infers it from the catalog and says so:
 
 ```
 eco          EFÍMERO      porque solo consulta: no deja nada que preservar
@@ -1034,34 +1054,34 @@ memory       PERSISTENTE  porque read_graph sugiere que acumula contexto
 thinking     PERSISTENTE  porque sequentialthinking sugiere que acumula contexto
 ```
 
-**`filesystem` también es persistente**, aunque no lo parezca: escribe en el disco del
-invitado, que es tan volátil como su memoria.
+**`filesystem` is persistent too**, even though it may not look like it: it writes to the
+guest's disk, which is exactly as volatile as its memory.
 
-La señal fiable es estructural —que el servidor exponga a la vez herramientas que escriben y
-que leen—, con un puñado de palabras en el NOMBRE de la herramienta para los servidores de
-una sola. Buscar esas palabras en las descripciones clasificaba todo como persistente:
-"session" o "sequence" aparecen de pasada en cualquier texto.
+The reliable signal is structural — the server exposing both writing and reading tools at
+once — with a handful of words matched against the tool NAME for servers that only have
+one. Looking for those words in the descriptions classified everything as persistent:
+"session" or "sequence" show up in passing in almost any text.
 
-Se puede forzar con `-stateful` o `-ephemeral`.
+You can force it with `-stateful` or `-ephemeral`.
 
-### Ante la duda, persistente
+### When in doubt, persistent
 
-Equivocarse hacia efímero produce **pérdida silenciosa**: la llamada responde bien y lo
-escrito desaparece. Equivocarse hacia persistente solo cuesta una instancia congelada, que
-no gasta ni CPU ni RAM.
+Getting it wrong towards ephemeral produces **silent loss**: the call answers fine and what
+was written disappears. Getting it wrong towards persistent only costs one frozen
+instance, which spends neither CPU nor RAM.
 
-El agregador lo indica en su inventario para que el modelo lo sepa:
+The aggregator flags it in its inventory so the model knows:
 
 ```
 memory [recuerda entre llamadas]: create_entities, add_observations, ...
 filesystem: read_text_file, write_file, list_directory, ...
 ```
 
-## El inventario va en el handshake
+## The inventory travels in the handshake
 
-Los nombres de herramienta son baratos —27 ocupan ~100 tokens—; lo caro son los esquemas de
-argumentos. Por eso el `initialize` devuelve el **inventario completo** en su campo
-`instructions`:
+Tool names are cheap — 27 of them take ~100 tokens — what is expensive are the argument
+schemas. That is why `initialize` returns the **full inventory** in its `instructions`
+field:
 
 ```
 Herramientas disponibles, agrupadas por servicio:
@@ -1073,72 +1093,69 @@ Llámalas con call_tool y el nombre completo servicio.herramienta.
 Si no conoces sus argumentos, pide primero describe_tool.
 ```
 
-Así el modelo sabe qué hay **desde el primer momento** y va directo a `call_tool`, en vez de
-gastar una llamada en descubrir. Quedan tres meta-herramientas: `find_tools`,
-`describe_tool` y `call_tool`.
+That way the model knows what is there **from the first moment** and goes straight to
+`call_tool`, instead of spending a call on discovery. Three meta-tools remain:
+`find_tools`, `describe_tool` and `call_tool`.
 
-### Persistente no significa siempre encendido
+### Persistent does not mean always on
 
-Un servicio persistente conserva su estado, pero **deja de consumir al terminar**. Medido con
-`-idle 30s`:
+A persistent service keeps its state, but **stops consuming when it is done**. Measured
+with `-idle 30s`:
 
 ```
-escribir /data/nota.txt        →  Successfully wrote
-leer /data/nota.txt (otra llamada) →  "esto debe sobrevivir"
+write /data/note.txt              →  Successfully wrote
+read /data/note.txt (another call) →  "this must survive"
 
-en marcha:   running   41 MiB sobre la línea base
-tras 35 s:   warm      RAM de vuelta a 0   (freeze 661 ms)
-al volver:   "esto debe sobrevivir"        (thaw 18 ms)
+running:      running   41 MiB above baseline
+after 35 s:   warm      RAM back to 0   (freeze 661 ms)
+on return:    "this must survive"       (thaw 18 ms)
 ```
 
-Congelar no es apagar: la instancia deja de existir como proceso —cero CPU, cero RAM— pero su
-estado sigue en disco y vuelve en milisegundos. El coste es el fichero de memoria: 151 MiB
-para este servicio mientras está congelado.
+Freezing is not shutting down: the instance stops existing as a process — zero CPU, zero
+RAM — but its state stays on disk and comes back in milliseconds. The cost is the memory
+file: 151 MiB for this service while it is frozen.
 
-## Traer tu propio servicio de memoria
+## Bring your own memory service
 
-kindling comparte almacenamiento **en solo lectura** —una biblioteca de paquetes que puebla
-una máquina y consumen muchas—, pero no en escritura, y es deliberado: Firecracker solo
-expone dispositivos de bloque, y un ext4 montado en escritura por dos VMs se corrompe. Eso no
-es una limitación de kindling, es cómo funciona un sistema de ficheros.
+kindling does not implement shared storage, and that is deliberate: mounting a common
+filesystem across microVMs was tried and discarded. Firecracker only exposes block
+devices, and an ext4 shared between several VMs corrupts itself; the alternatives — NFS,
+virtio-fs — add a lot of machinery for something an MCP server already solves.
 
-Para estado compartido que varios servicios escriban, lo demás —NFS, virtio-fs— añade mucha
-maquinaria para algo que un servidor MCP ya resuelve.
-
-En su lugar, se enlaza un servidor MCP **externo**:
+Instead, you link an **external** MCP server:
 
 ```sh
-kling mcp link engram http://192.168.2.3:9100/mcp -description "memoria compartida"
+kling mcp link engram http://192.168.2.3:9100/mcp -description "shared memory"
 kling mcp unlink engram
 ```
 
-No corre en una microVM: sigue viviendo donde ya estaba, y kindling solo lo enruta. Aparece
-en el agregador como un servicio más, así que cualquier herramienta —y el modelo— puede
-guardar y leer ahí.
+It does not run in a microVM: it stays where it already was, and kindling only routes to
+it. It shows up in the aggregator as one more service, so any tool — and the model — can
+save to it and read from it.
 
-### Si tu servidor habla stdio
+### If your server speaks stdio
 
-El mismo puente que se usa dentro de las microVMs sirve en tu máquina:
+The same bridge used inside the microVMs works on your machine:
 
 ```sh
 make bridge-local
 ./kling-bridge-local -listen 0.0.0.0:9100 -- engram mcp --tools=agent
-kling mcp link engram http://<tu-ip>:9100/mcp
+kling mcp link engram http://<your-ip>:9100/mcp
 ```
 
-## Informe de topología
+## Topology report
 
 ```sh
-kling export -o topologia.html
+kling export -o topology.html
 ```
 
-Autocontenido: sin CDN, sin fuentes remotas, sin peticiones al abrirlo — describe la
-topología de un homelab y no tiene por qué contársela a nadie. Se genera en **tu** máquina,
-no en el daemon.
+Self-contained: no CDN, no remote fonts, no requests when you open it — it describes a
+homelab's topology and has no business telling anyone about it. It is generated on **your**
+machine, not on the daemon.
 
-Es el mismo árbol de siempre —el host a la izquierda, sus servicios en columna, las
-instancias a la derecha— pero navegable: cada caja con hijos se abre y se cierra, y la que
-elijas se detalla debajo.
+It is the same tree as always — the host on the left, its services in a column, the
+instances on the right — but navigable: every box with children opens and closes, and
+whichever one you pick is detailed below.
 
 ```
                         ┌ eco ──────────┐
@@ -1152,100 +1169,106 @@ elijas se detalla debajo.
                         └───────────────┘   └───────────────┘
 ```
 
-El borde dice el estado: verde atendiendo, ámbar dormido, punteado gris listo pero sin
-instancia, azul externo. Un servicio punteado no está roto — aparece solo en cuanto alguien
-lo llame, y la anotación gris de la derecha dice cuánto costará.
+The border tells you the state: green serving, amber asleep, dotted grey ready but with no
+instance, blue external. A dotted service is not broken — it appears on its own as soon as
+someone calls it, and the grey annotation on the right says how much that will cost.
 
-### Cuatro vistas del mismo sistema
+### Four views of the same system
 
-| vista | qué enseña |
+| view | what it shows |
 |---|---|
-| **Topología** | el host, sus servicios y las instancias vivas de cada uno |
-| **Capas** | qué atraviesa una llamada: gateway → agregador → microVM → kernel, rootfs, overlay, puente → servidor MCP |
-| **MCP** | el catálogo completo: cada servicio con sus herramientas, marcando cuáles escriben |
-| **Red** | quién puede salir a internet y quién está aislado, namespace por namespace |
+| **Topology** | the host, its services and the live instances of each one |
+| **Layers** | what a call goes through: gateway → aggregator → microVM → kernel, rootfs, overlay, bridge → MCP server |
+| **MCP** | the full catalog: every service with its tools, marking which ones write |
+| **Network** | who can reach the internet and who is isolated, namespace by namespace |
 
-### Profundizar
+### Drill down
 
-Pulsar una caja la abre. Si quieres bajar de nivel del todo, el panel ofrece **Profundizar**:
-ese nodo pasa a ser la raíz y aparece una miga de pan para volver.
+Clicking a box opens it. If you want to go all the way down a level, the panel offers
+**Drill down**: that node becomes the root and a breadcrumb appears to get back.
 
 ```
 catálogo › filesystem
 ```
 
-El panel de abajo cambia con lo que selecciones: los datos del nodo, el flujo paso a paso de
-una llamada a ese servicio, y —si escribe algo— dónde acaba lo escrito.
+The bottom panel changes with whatever you select: the node's data, the step-by-step flow
+of a call to that service, and — if it writes anything — where what it writes ends up.
 
-Los nodos se agrupan por la etiqueta `service`, y en su defecto por el snapshot de origen:
-dos máquinas del mismo snapshot comparten memoria y pertenecen juntas aunque nadie las haya
-etiquetado.
+Nodes are grouped by the `service` label, and failing that by their source snapshot: two
+machines from the same snapshot share memory and belong together even if nobody labelled
+them.
 
 ```sh
 kling run -from eco -service eco -label tier=prod
 ```
 
-> **Ojo con lo que escriba.** Escribe con `create_directory`, `edit_file`, `move_file`,
-> `write_file`. Vive mientras viva la instancia → guárdalo en **engram**.
+```
+Ojo con lo que escriba
+Escribe con create_directory, edit_file, move_file, write_file.
+Vive mientras viva la instancia → guárdalo en engram.
+```
 
-Ahí está la regla que más confusión causa: el overlay de una microVM muere con ella. Si una
-herramienta necesita persistir un fichero, una fila en una base de datos o cualquier otra
-cosa, **el destino correcto es el servicio de memoria enlazado**, no el disco del invitado.
-La vista de Capas lo marca en el propio nodo `overlay propio`.
+That warning — "watch what it writes; it lives only as long as the instance does, so put it
+in engram" — is the rule that causes the most confusion: a microVM's overlay dies with it. If a
+tool needs to persist a file, a row in a database or anything else, **the right
+destination is the linked memory service**, not the guest's disk. The Layers view marks it
+on the `overlay propio` node itself.
 
-## Memoria de uso (opcional)
+## Usage memory (optional)
 
-Apagada por defecto: kindling no escribe en la memoria de nadie sin que se lo pidan. El
-binario del puente sí se instala siempre, para que activarla sea un comando y no un proyecto.
+Off by default: kindling does not write into anyone's memory unless asked. The bridge
+binary is always installed, though, so turning it on is one command rather than a project.
 
 ```sh
-kling memory status            # si está activa y sobre qué
-kling memory install-service   # deja el puente local como servicio permanente (macOS)
-kling memory enable            # usa engram; -service <svc> para otro
+kling memory status            # whether it is on and against what
+kling memory install-service   # leaves the local bridge as a permanent service (macOS)
+kling memory enable            # uses engram; -service <svc> for another one
 kling memory disable
 ```
 
-Cuando está activa, el gateway anota en el servicio de memoria qué herramienta resolvió cada
-petición, y usa ese historial para ordenar mejor las búsquedas siguientes:
+When it is on, the gateway records in the memory service which tool resolved each request,
+and uses that history to rank subsequent searches better:
 
 ```
-buscar "leer un fichero de texto"  →  filesystem.read_text_file
-usar la herramienta                →  "hola desde kindling"
-en engram queda:  kindling: la petición "leer un fichero de texto"
-                  se resolvió con la herramienta filesystem.read_text_file
+search "leer un fichero de texto"  →  filesystem.read_text_file
+use the tool                       →  "hello from kindling"
+engram then holds:  kindling: la petición "leer un fichero de texto"
+                    se resolvió con la herramienta filesystem.read_text_file
 ```
 
-No guarda nada propio: se apoya en el servicio MCP que hayas enlazado, y busca en su catálogo
-una herramienta de escritura en vez de suponer la API de ninguno en concreto.
+It stores nothing of its own: it leans on whichever MCP service you linked, and looks
+through that service's catalog for a writing tool instead of assuming any particular API.
 
-### Búsqueda bilingüe
+### Bilingual search
 
-El modelo pregunta en el idioma del usuario y las herramientas se describen en inglés.
-Buscar "leer un fichero de texto" contra *"Read the complete contents of a file"* no casaba ni
-un término, así que `find_tools` devolvía cualquier cosa. Una tabla de sinónimos del dominio
-—leer/read, fichero/file, carpeta/directory…— lo arregla sin meter un motor de búsqueda.
+The model asks in the user's language and the tools are described in English. Searching
+"leer un fichero de texto" against *"Read the complete contents of a file"* did not match a
+single term, so `find_tools` returned junk. A table of domain synonyms — leer/read,
+fichero/file, carpeta/directory… — fixes it without pulling in a search engine.
 
-## Memoria: qué es real y qué es caché
+## Memory: what is real and what is cache
 
-Tras muchos ciclos de congelar y descongelar, el hipervisor puede mostrar la VM del
-laboratorio al 80% de memoria. Casi todo es **caché de disco**, no uso real:
+After many freeze and thaw cycles, the hypervisor may show the lab VM at 80% memory. Almost
+all of it is **disk cache**, not real usage:
 
 ```
-Cached:      2.9 GiB    ← lo que ves en el panel
-AnonPages:   273 MiB    ← memoria de procesos, lo real
+Cached:      2.9 GiB    ← what you see in the panel
+AnonPages:   273 MiB    ← process memory, the real number
 ```
 
-Se comprueba soltándola: la caché baja de 3.098 a 178 MiB, el uso se queda en ~600 MiB y las
-microVMs siguen respondiendo. Es memoria reclamable; el kernel la suelta bajo presión.
+You can check by dropping it: the cache falls from 3,098 to 178 MiB, usage settles at
+~600 MiB and the microVMs keep responding. It is reclaimable memory; the kernel releases it
+under pressure.
 
-Dos cosas ayudan:
+Two things help:
 
-- **`qemu-guest-agent` en la VM del laboratorio.** Sin él, el hipervisor no distingue uso de
-  caché y reporta todo lo que el invitado ha tocado. Con él, el panel pasó de 3.26 GiB a
-  961 MiB para el mismo estado real.
-- **kindling suelta la caché del fichero de memoria tras congelar.** Ese fichero se escribe
-  entero y se relee para perforarlo, y luego no se toca hasta que alguien descongele esa
-  máquina concreta. Bajó la acumulación de ~150 MiB a ~54 MiB por ciclo.
+- **`qemu-guest-agent` in the lab VM.** Without it, the hypervisor cannot tell usage from
+  cache and reports everything the guest has ever touched. With it, the panel went from
+  3.26 GiB to 961 MiB for the same real state.
+- **kindling drops the page cache of the memory file after freezing.** That file is written
+  in full and read back to punch holes in it, and then nobody touches it until someone
+  thaws that particular machine. It brought the accumulation down from ~150 MiB to ~54 MiB
+  per cycle.
 
-Los snapshots **dorados** no se sueltan a propósito: ahí la caché es justo lo que permite que
-N instancias compartan páginas.
+**Golden** snapshots are deliberately not dropped: there the cache is precisely what lets N
+instances share pages.
