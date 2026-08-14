@@ -285,6 +285,30 @@ func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 	return os.Rename(tmp, s.recipePath(r.Name))
 }
 
+// handleImages enumera las imágenes de rootfs construidas: nombre, tamaño en
+// disco, si se guardó su receta y cuántos snapshots dorados salieron de cada
+// una. Ese último dato es el que dice qué imagen se puede retirar sin dejar
+// servicios sin base.
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+	usedBy := map[string]int{}
+	for _, snap := range s.mgr.Snapshots() {
+		usedBy[snap.Image]++
+	}
+	names := s.mgr.Images()
+	out := make([]api.Image, 0, len(names))
+	for _, name := range names {
+		img := api.Image{Name: name, UsedBy: usedBy[name]}
+		if fi, err := os.Stat(filepath.Join(s.root, "images", name+".ext4")); err == nil {
+			img.SizeBytes = fi.Size()
+		}
+		if _, err := os.Stat(s.recipePath(name)); err == nil {
+			img.HasRecipe = true
+		}
+		out = append(out, img)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !reName.MatchString(name) {

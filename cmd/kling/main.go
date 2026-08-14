@@ -45,6 +45,7 @@ VOLUMES
                                                    the microVM
   volume ls [-json] | rm <name>                    list / remove
   volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
+  images ls [-json]                                lists built rootfs images
   images refresh [image...]                        puts the current bridge inside the images
   images toolchain                                 builds the image with npm and pip (used by populate)
   images recipe <image>                            how it was built

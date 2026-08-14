@@ -1,10 +1,17 @@
 package daemon
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/machine"
 )
 
 // buildScriptArgs traduce el request a los flags de 80-mcp-image.sh. El único
@@ -156,5 +163,80 @@ func TestNombresDePipQueNoDebenColar(t *testing.T) {
 		}); err != nil {
 			t.Errorf("rechazó el paquete pip legítimo %q: %v", p, err)
 		}
+	}
+}
+
+// TestHandleImages cubre GET /images: enumera los .ext4 (menos overlay-template),
+// marca cuáles tienen receta y cuenta los snapshots dorados que salen de cada
+// imagen (el dato que dice cuál se puede retirar sin dejar servicios sin base).
+func TestHandleImages(t *testing.T) {
+	root := t.TempDir()
+	mgr, err := machine.NewManager(root, "", "", events.New())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	imgs := filepath.Join(root, "images")
+
+	// foo (con receta) y bar (sin); overlay-template debe quedar fuera.
+	for _, n := range []string{"foo", "bar", "overlay-template"} {
+		if err := os.WriteFile(filepath.Join(imgs, n+".ext4"), []byte("rootfs-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(imgs, "foo.recipe.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Dos snapshots que salen de foo, ninguno de bar.
+	for _, name := range []string{"svc1", "svc2"} {
+		dir := filepath.Join(root, "snapshots", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"name":"` + name + `","image":"foo"}`
+		if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Server{mgr: mgr, root: root}
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/images", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	var out []api.Image
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+	}
+
+	byName := map[string]api.Image{}
+	for _, img := range out {
+		byName[img.Name] = img
+	}
+	if _, ok := byName["overlay-template"]; ok {
+		t.Error("overlay-template no debería listarse como imagen")
+	}
+	foo, ok := byName["foo"]
+	if !ok {
+		t.Fatalf("falta foo en %v", out)
+	}
+	if !foo.HasRecipe {
+		t.Error("foo debería tener receta")
+	}
+	if foo.UsedBy != 2 {
+		t.Errorf("foo.UsedBy = %d, want 2", foo.UsedBy)
+	}
+	if foo.SizeBytes == 0 {
+		t.Error("foo.SizeBytes no debería ser 0")
+	}
+	bar, ok := byName["bar"]
+	if !ok {
+		t.Fatalf("falta bar en %v", out)
+	}
+	if bar.HasRecipe {
+		t.Error("bar no debería tener receta")
+	}
+	if bar.UsedBy != 0 {
+		t.Errorf("bar.UsedBy = %d, want 0", bar.UsedBy)
 	}
 }
