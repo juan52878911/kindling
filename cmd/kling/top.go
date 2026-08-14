@@ -22,7 +22,7 @@ func cmdTop(args []string) error {
 	fs := flag.NewFlagSet("top", flag.ExitOnError)
 	host := hostFlag(fs)
 	watch := fs.Duration("watch", 0, "refresh every interval (e.g. 2s); 0 = a single snapshot")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 

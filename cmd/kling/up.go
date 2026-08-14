@@ -46,7 +46,7 @@ func cmdUp(args []string) error {
 	host := hostFlag(fs)
 	root := fs.String("root", envOr("KLING_ROOT", "/var/lib/kindling"), "daemon data directory")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -535,7 +535,7 @@ func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	host := hostFlag(fs)
 	gwFlag := fs.String("gateway", "", "gateway URL (default: gateway.url, or inferred from context)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 

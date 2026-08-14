@@ -38,7 +38,7 @@ func cmdImages(args []string) error {
 func imagesRefresh(args []string) error {
 	fs := flag.NewFlagSet("images refresh", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -111,7 +111,7 @@ func imagesToolchain(args []string) error {
 	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
 	host := hostFlag(fs)
 	name := fs.String("as", ToolchainImage, "image name")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -153,7 +153,7 @@ func imagesToolchain(args []string) error {
 func imagesRecipe(args []string) error {
 	fs := flag.NewFlagSet("images recipe", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {

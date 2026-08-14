@@ -40,7 +40,7 @@ func cmdMemory(args []string) error {
 func memoryStatus(args []string) error {
 	fs := flag.NewFlagSet("memory status", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	cfg := loadConfig()
@@ -83,7 +83,7 @@ func memoryEnable(args []string) error {
 	service := fs.String("service", "engram", "MCP service where the history is stored")
 	listen := fs.String("listen", "0.0.0.0:9100", "where to expose the local server, if it needs wrapping")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "how to start the memory server if it speaks stdio")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -148,7 +148,7 @@ func finishEnable(cfg *config.Config, service, url string, tools int) error {
 
 func memoryDisable(args []string) error {
 	fs := flag.NewFlagSet("memory disable", flag.ExitOnError)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	cfg := loadConfig()
@@ -203,7 +203,7 @@ func memoryInstallService(args []string) error {
 	fs := flag.NewFlagSet("memory install-service", flag.ExitOnError)
 	listen := fs.String("listen", "0.0.0.0:9100", "where to listen")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "stdio MCP server to wrap")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	bin := bridgePath()

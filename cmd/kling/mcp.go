@@ -85,7 +85,7 @@ func mcpImport(args []string) error {
 	ephemeral := fs.Bool("ephemeral", false, "force ephemeral machines even if the analysis says otherwise")
 	allowRuntimeInstall := fs.Bool("allow-runtime-install", false,
 		"import even if the server installs dependencies at runtime (not recommended: bake them into the image)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	importVols, err := volumeSet(volumes, *mount, *volRO)
@@ -395,7 +395,7 @@ func mcpList(args []string) error {
 	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
 	host := hostFlag(fs)
 	verbose := fs.Bool("v", false, "show each tool")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -461,7 +461,7 @@ func mcpList(args []string) error {
 func mcpRefresh(args []string) error {
 	fs := flag.NewFlagSet("mcp refresh", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -519,7 +519,7 @@ func mcpHealth(args []string) error {
 	fs := flag.NewFlagSet("mcp health", flag.ExitOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -638,7 +638,7 @@ func mcpLink(args []string) error {
 	desc := fs.String("description", "", "what it's for")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -693,7 +693,7 @@ func mcpLink(args []string) error {
 func mcpUnlink(args []string) error {
 	fs := flag.NewFlagSet("mcp unlink", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {

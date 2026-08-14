@@ -298,7 +298,7 @@ func cmdDaemon(args []string) error {
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
 	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "user to hand the socket to (for the CLI over SSH)")
 	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -322,7 +322,7 @@ func cmdGateway(args []string) error {
 	memory := fs.String("memory", "", "MCP service that remembers which tool resolved each request")
 	pprofOn := fs.Bool("pprof", false, "exposes /debug/pprof; temporary diagnostics only, loopback only")
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -525,7 +525,7 @@ func cmdRun(args []string) error {
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -607,7 +607,7 @@ func cmdExport(args []string) error {
 	// romper a quien la tuviera en un script.
 	_ = fs.Bool("detail", false, "deprecated: the report always includes detail")
 	open := fs.Bool("open", false, "open it when done")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -661,7 +661,7 @@ func cmdLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ExitOnError)
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N lines (0 = all)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -682,7 +682,7 @@ func cmdLogs(args []string) error {
 func cmdCommit(args []string) error {
 	fs := flag.NewFlagSet("commit", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -705,7 +705,7 @@ func cmdSnapshots(args []string) error {
 	fs := flag.NewFlagSet("snapshots", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -733,7 +733,7 @@ func cmdSnapshots(args []string) error {
 func cmdRmi(args []string) error {
 	fs := flag.NewFlagSet("rmi", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -758,7 +758,7 @@ func cmdPS(args []string) error {
 	host := hostFlag(fs)
 	all := fs.Bool("a", false, "include stopped ones")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -841,7 +841,7 @@ func since(t time.Time) string {
 func cmdLifecycle(op string, args []string) error {
 	fs := flag.NewFlagSet(op, flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -888,7 +888,7 @@ func cmdLifecycle(op string, args []string) error {
 func cmdSqueeze(args []string) error {
 	fs := flag.NewFlagSet("squeeze", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -925,7 +925,7 @@ func cmdMMDS(args []string) error {
 	fs := flag.NewFlagSet("mmds", flag.ExitOnError)
 	host := hostFlag(fs)
 	file := fs.String("f", "", "JSON file with the MMDS store (default: stdin)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -967,7 +967,7 @@ func cmdEvents(args []string) error {
 	fs := flag.NewFlagSet("events", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "one JSON line per event")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -994,7 +994,7 @@ func cmdEvents(args []string) error {
 func cmdTopo(args []string) error {
 	fs := flag.NewFlagSet("topo", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -1127,7 +1127,7 @@ func trunc(s string, n int) string {
 func cmdInfo(args []string) error {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 

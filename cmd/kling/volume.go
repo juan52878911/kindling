@@ -39,7 +39,7 @@ func volumeCreate(args []string) error {
 	fs := flag.NewFlagSet("volume create", flag.ExitOnError)
 	host := hostFlag(fs)
 	size := fs.String("size", "1G", "logical size: 512M, 2G, 10G")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -69,7 +69,7 @@ func volumeCreate(args []string) error {
 func volumeList(args []string) error {
 	fs := flag.NewFlagSet("volume ls", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -98,7 +98,7 @@ func volumeList(args []string) error {
 func volumeRemove(args []string) error {
 	fs := flag.NewFlagSet("volume rm", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -163,7 +163,7 @@ func volumePopulate(args []string) error {
 			break
 		}
 	}
-	if err := fs.Parse(reorder(nuestros)); err != nil {
+	if err := fs.Parse(reorderFor(fs, nuestros)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || len(cmd) == 0 {
