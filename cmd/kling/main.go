@@ -38,12 +38,12 @@ GETTING STARTED
   up                                               gets the runtime ready: KVM,
                                                    nftables, user, images,
                                                    daemon and gateway
-  status                                           which piece is up and which is missing
+  status [-json]                                   which piece is up and which is missing
 
 VOLUMES
   volume create <name> [-size 2G]                  storage that survives
                                                    the microVM
-  volume ls | rm <name>                            list / remove
+  volume ls [-json] | rm <name>                    list / remove
   volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
   images refresh [image...]                        puts the current bridge inside the images
   images toolchain                                 builds the image with npm and pip (used by populate)
@@ -56,7 +56,7 @@ MACHINES
       [-ttl SECONDS] [-cpu-pct PCT]                auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by MCP service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
-  ps [-a]                                          lists the machines
+  ps [-a] [-q] [-json]                             lists the machines
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
@@ -78,7 +78,7 @@ MCP SERVICES
       [-egress none|internet|allowlist]            what it can do, freezes it and
       [-allow dom1,dom2]                           saves its catalog. All of this
       [-volume NAME[:/mount][:ro]] (repeatable)    ends up BAKED into the snapshot
-  mcp list [-v]                                    services and their tools
+  mcp list [-v] [-json]                            services and their tools
   mcp refresh <service>                            recaptures the catalog
   mcp link <name> <url>                            links an EXTERNAL MCP server
                                                    (e.g. your engram) without putting
@@ -94,11 +94,11 @@ GOLDEN SNAPSHOTS
 
 OBSERVATION
   topo                                             ASCII diagram of everything
-  top [-watch DUR]                                 memory per microVM (PSS) and
+  top [-watch DUR] [-json]                         memory per microVM (PSS) and
                                                    the host; snapshot or refresh
   export [-o file.html]                            browsable topology in HTML
   events                                           stream of daemon events
-  info                                             daemon status
+  info [-json]                                     daemon status
 
 USAGE MEMORY (optional, off by default)
   memory status                                    whether it's active and on what
@@ -778,6 +778,7 @@ func cmdPS(args []string) error {
 	host := hostFlag(fs)
 	all := fs.Bool("a", false, "include stopped ones")
 	asJSON := fs.Bool("json", false, "JSON output")
+	quiet := fs.Bool("q", false, "print only machine IDs (for scripting)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -791,6 +792,17 @@ func cmdPS(args []string) error {
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(list)
+	}
+	// -q imprime solo IDs (12 chars), una por línea: pensado para tuberías como
+	// `kling rm $(kling ps -q)`. Respeta -a igual que la tabla.
+	if *quiet {
+		for _, mc := range list {
+			if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
+				continue
+			}
+			fmt.Println(mc.ID[:12])
+		}
+		return nil
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
@@ -1147,6 +1159,7 @@ func trunc(s string, n int) string {
 func cmdInfo(args []string) error {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -1158,6 +1171,9 @@ func cmdInfo(args []string) error {
 	i, err := c.Info(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(i)
 	}
 	kvm := "no"
 	if i.KVM {

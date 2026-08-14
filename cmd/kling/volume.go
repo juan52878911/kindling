@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -69,6 +70,7 @@ func volumeCreate(args []string) error {
 func volumeList(args []string) error {
 	fs := flag.NewFlagSet("volume ls", flag.ExitOnError)
 	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -78,6 +80,9 @@ func volumeList(args []string) error {
 	vols, err := api.NewClient(hostOf(*host)).Volumes(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(vols)
 	}
 	if len(vols) == 0 {
 		fmt.Println("No volumes. Create one:  kling volume create notes -size 2G")

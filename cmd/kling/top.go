@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ func cmdTop(args []string) error {
 	fs := flag.NewFlagSet("top", flag.ExitOnError)
 	host := hostFlag(fs)
 	watch := fs.Duration("watch", 0, "refresh every interval (e.g. 2s); 0 = a single snapshot")
+	asJSON := fs.Bool("json", false, "JSON output (a single snapshot; ignores -watch)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -30,6 +32,16 @@ func cmdTop(args []string) error {
 	defer stop()
 
 	c := api.NewClient(hostOf(*host))
+
+	// JSON es siempre una foto única: repintar la pantalla no tiene sentido para
+	// un consumidor de máquina, así que -json ignora -watch.
+	if *asJSON {
+		ps, err := c.ProcStats(ctx)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(ps)
+	}
 
 	if *watch <= 0 {
 		ps, err := c.ProcStats(ctx)

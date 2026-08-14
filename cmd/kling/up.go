@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -535,6 +536,7 @@ func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	host := hostFlag(fs)
 	gwFlag := fs.String("gateway", "", "gateway URL (default: gateway.url, or inferred from context)")
+	asJSON := fs.Bool("json", false, "JSON output (daemon, gateway and detected agents)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -544,6 +546,10 @@ func cmdStatus(args []string) error {
 
 	cfg := loadConfig()
 	c := api.NewClient(cfg.Host(*host))
+	gw := strings.TrimSuffix(config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host))), "/")
+	if *asJSON {
+		return statusJSON(ctx, c, gw, cfg.Gateway.Token)
+	}
 	fmt.Printf("endpoint:     %s\n", c.Endpoint())
 
 	info, err := c.Info(ctx)
@@ -571,7 +577,6 @@ func cmdStatus(args []string) error {
 	// abierto a propósito (systemd y los monitores tienen que poder mirar) y
 	// solo dice "el proceso está vivo". /services va detrás del token, así que
 	// es lo único que demuestra que el token configurado AQUÍ sirve para entrar.
-	gw := strings.TrimSuffix(config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host))), "/")
 	fmt.Printf("gateway:      %s\n", gw)
 	if err := httpOK(gw + "/healthz"); err != nil {
 		fmt.Printf("  health:     ✗ not responding (%v)\n", err)
@@ -595,6 +600,92 @@ func cmdStatus(args []string) error {
 		fmt.Printf("              plug them in with:  kling connect -all -install all\n")
 	}
 	return nil
+}
+
+// statusJSON emite el mismo diagnóstico que `status`, pero como un objeto
+// estable para consumo de máquina. Cada bloque (daemon, gateway) sobrevive al
+// fallo del otro: un daemon caído no impide reportar el gateway, y al revés.
+func statusJSON(ctx context.Context, c *api.Client, gw, token string) error {
+	type daemonInfo struct {
+		OK          bool   `json:"ok"`
+		Version     string `json:"version,omitempty"`
+		Machines    int    `json:"machines"`
+		Root        string `json:"root,omitempty"`
+		KVM         bool   `json:"kvm"`
+		Firecracker string `json:"firecracker,omitempty"`
+		Error       string `json:"error,omitempty"`
+	}
+	type gatewayInfo struct {
+		URL      string   `json:"url"`
+		Healthy  bool     `json:"healthy"`
+		Services []string `json:"services,omitempty"`
+		Error    string   `json:"error,omitempty"`
+	}
+	var report struct {
+		Endpoint string      `json:"endpoint"`
+		Daemon   daemonInfo  `json:"daemon"`
+		Gateway  gatewayInfo `json:"gateway"`
+		Agents   []string    `json:"agents"`
+	}
+	report.Endpoint = c.Endpoint()
+
+	if info, err := c.Info(ctx); err != nil {
+		report.Daemon.Error = err.Error()
+	} else {
+		report.Daemon.OK = true
+		report.Daemon.Version = info.Version
+		report.Daemon.Machines = info.Machines
+		report.Daemon.Root = info.Root
+		report.Daemon.KVM = info.KVM
+		report.Daemon.Firecracker = strings.TrimSpace(info.Firecrack)
+	}
+
+	report.Gateway.URL = gw
+	if err := httpOK(gw + "/healthz"); err != nil {
+		report.Gateway.Error = err.Error()
+	} else {
+		report.Gateway.Healthy = true
+		if names, err := gatewayServiceNames(gw+"/services", token); err != nil {
+			report.Gateway.Error = err.Error()
+		} else {
+			report.Gateway.Services = names
+		}
+	}
+
+	report.Agents = []string{}
+	for _, cl := range detectedClients() {
+		report.Agents = append(report.Agents, cl.label)
+	}
+	return json.NewEncoder(os.Stdout).Encode(report)
+}
+
+// gatewayServiceNames pide /services (texto plano, un servicio por línea) y
+// devuelve solo los nombres. Es la variante para JSON de servicesLine, sin sus
+// mensajes de remediación.
+func gatewayServiceNames(url, token string) ([]string, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %s", resp.Status)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var names []string
+	for _, line := range strings.Split(string(body), "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			names = append(names, f[0])
+		}
+	}
+	return names, nil
 }
 
 // servicesLine resume /services, que responde texto plano, una línea por
