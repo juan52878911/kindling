@@ -70,7 +70,7 @@ func (m *memory) Record(ctx context.Context, query, tool string) {
 		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if err := m.save(bg, q, tool); err != nil {
-			log.Printf("memoria: no pude anotar %q -> %s: %v", trunc(q, 60), tool, err)
+			log.Printf("memory: could not record %q -> %s: %v", trunc(q, 60), tool, err)
 		}
 	}()
 }
@@ -126,7 +126,7 @@ func shareTerms(a, b string) bool {
 func (m *memory) save(ctx context.Context, query, tool string) error {
 	l := m.gw.linkFor(ctx, m.service)
 	if l == nil {
-		return fmt.Errorf("el servicio de memoria %q no está enlazado", m.service)
+		return fmt.Errorf("memory service %q is not linked", m.service)
 	}
 
 	m.mu.Lock()
@@ -146,15 +146,15 @@ func (m *memory) save(ctx context.Context, query, tool string) error {
 	// de suponer la API de engram: así vale cualquier servidor de memoria.
 	write := pickTool(l.Tools, []string{"save", "remember", "store", "add", "create", "guardar"})
 	if write == "" {
-		return fmt.Errorf("%s no expone ninguna herramienta de escritura", m.service)
+		return fmt.Errorf("%s does not expose any write tool", m.service)
 	}
 
-	content := fmt.Sprintf("kindling: la petición %q se resolvió con la herramienta %s", query, tool)
+	content := fmt.Sprintf("kindling: request %q was resolved with tool %s", query, tool)
 	args, _ := json.Marshal(map[string]any{
 		"content":     content,
 		"text":        content,
 		"observation": content,
-		"tags":        []string{"kindling", "uso-de-herramientas"},
+		"tags":        []string{"kindling", "tool-usage"},
 	})
 	_, err := mcpCallAt(ctx, l.URL, sid, fmt.Sprintf(
 		`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,

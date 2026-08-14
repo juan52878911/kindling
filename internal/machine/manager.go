@@ -296,19 +296,19 @@ func (m *Manager) writePending() {
 
 	b, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
-		log.Printf("estado: no pude serializarlo: %v", err)
+		log.Printf("state: could not serialize it: %v", err)
 		return
 	}
 
 	tmp := m.statePath() + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		log.Printf("estado: no pude escribir %s: %v", tmp, err)
+		log.Printf("state: could not write %s: %v", tmp, err)
 		return
 	}
 	if _, err := f.Write(b); err != nil {
 		f.Close()
-		log.Printf("estado: escritura incompleta: %v", err)
+		log.Printf("state: incomplete write: %v", err)
 		return
 	}
 	// fsync del fichero Y del directorio. Sin el segundo, el rename puede no
@@ -316,14 +316,14 @@ func (m *Manager) writePending() {
 	// leyendo el estado anterior — que es peor que no leer ninguno, porque se
 	// da por bueno.
 	if err := f.Sync(); err != nil {
-		log.Printf("estado: fsync falló: %v", err)
+		log.Printf("state: fsync failed: %v", err)
 	}
 	if err := f.Close(); err != nil {
-		log.Printf("estado: cierre falló: %v", err)
+		log.Printf("state: close failed: %v", err)
 		return
 	}
 	if err := os.Rename(tmp, m.statePath()); err != nil {
-		log.Printf("estado: rename falló: %v", err)
+		log.Printf("state: rename failed: %v", err)
 		return
 	}
 	if d, err := os.Open(m.root); err == nil {
@@ -503,7 +503,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
 	// dejaba sin freno justo donde más falta hace.
 	if n := m.Count(); n >= MaxMachines {
-		return nil, fmt.Errorf("límite de %d máquinas alcanzado (hay %d)", MaxMachines, n)
+		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
 	}
 
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
@@ -522,7 +522,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	if n := m.Count(); n >= MaxMachines {
-		return nil, fmt.Errorf("límite de %d máquinas alcanzado (hay %d)", MaxMachines, n)
+		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
 	}
 
 	vols, err := m.resolveVolumes(req)
@@ -540,7 +540,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	src := m.imagePath(req.Image)
 	if _, err := os.Stat(src); err != nil {
-		return nil, fmt.Errorf("no encuentro la imagen %q en %s", req.Image, src)
+		return nil, fmt.Errorf("can't find image %q in %s", req.Image, src)
 	}
 	// Antes de comprometer nada: una microVM que no cabe no falla al arrancar,
 	// arranca — y luego el OOM killer del anfitrión mata procesos al azar.
@@ -556,7 +556,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	defer releaseMem()
 	if _, err := os.Stat(m.KernelPath()); err != nil {
-		return nil, fmt.Errorf("falta el kernel en %s", m.KernelPath())
+		return nil, fmt.Errorf("missing kernel at %s", m.KernelPath())
 	}
 
 	// Sin puente no hay quien monte los volúmenes.
@@ -572,13 +572,13 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
 			// herramienta de diagnóstico en una dependencia de arranque sería
 			// peor que el problema.
-			log.Printf("aviso: no pude comprobar si %q lleva puente: %v", req.Image, herr)
+			log.Printf("warning: could not check whether %q has a bridge: %v", req.Image, herr)
 		case !has:
-			return nil, fmt.Errorf("la imagen %q no lleva kling-bridge, y es el puente quien monta "+
-				"los volúmenes dentro del invitado.\n"+
-				"Con esta imagen el disco se engancharía pero nadie lo montaría, y todo lo escrito "+
-				"en %s moriría con la máquina, sin un solo error.\n"+
-				"Reempaquétala en modo stdio, o quita el volumen",
+			return nil, fmt.Errorf("image %q does not have kling-bridge, and the bridge is what mounts "+
+				"the volumes inside the guest.\n"+
+				"With this image the disk would be attached but nobody would mount it, and everything written "+
+				"to %s would die with the machine, without a single error.\n"+
+				"Repackage it in stdio mode, or remove the volume",
 				req.Image, vols[0].mount)
 		}
 	}
@@ -632,7 +632,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	netcfg := knet.Plan(m.allocNetIndex(), id)
 	if err := netcfg.Setup(egress, req.AllowDomains, m.priv.UID); err != nil {
-		return abandonar(fmt.Errorf("montando la red: %w", err))
+		return abandonar(fmt.Errorf("mounting the network: %w", err))
 	}
 	// Bajo el candado: mc ya está en byID, y List()/Get()/persist() la copian
 	// desde otras goroutines. Es la misma regla por la que boot() devuelve el PID
@@ -668,7 +668,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.mu.Unlock()
 	}
 	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
-		log.Printf("aviso: %s: %s", mc.Name, warn)
+		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
 	m.mu.Lock()
@@ -687,7 +687,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	out.DiskBytes = m.touchDisk(id)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
-		Message: fmt.Sprintf("arrancada en frío en %d ms", out.BootMS)})
+		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
 }
 
@@ -733,14 +733,14 @@ func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 // pero nadie se queda sin arrancar por una optimización.
 func (m *Manager) newOverlay(ctx context.Context, dst string) error {
 	if err := m.ensureOverlayTemplate(ctx); err != nil {
-		log.Printf("plantilla de overlay no disponible (%v): formateo directo", err)
+		log.Printf("overlay template not available (%v): formatting directly", err)
 		return createOverlay(ctx, dst, defaultOverlayMiB)
 	}
 	// --sparse=always: el overlay es disperso y copiarlo denso destruiría lo
 	// que hace que una máquina cueste ~8 MB en vez de 512.
 	out, err := exec.CommandContext(ctx, "cp", "--sparse=always", m.overlayTemplatePath(), dst).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("copiando la plantilla de overlay: %v: %s", err, out)
+		return fmt.Errorf("copying overlay template: %v: %s", err, out)
 	}
 	return nil
 }
@@ -760,7 +760,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 	out, err := exec.CommandContext(ctx, "mkfs.ext4",
 		"-q", "-F", "-O", "^has_journal", "-E", "nodiscard", path).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("formateando el overlay: %v: %s", err, out)
+		return fmt.Errorf("formatting overlay: %v: %s", err, out)
 	}
 	return nil
 }
@@ -868,13 +868,13 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		// invitado no trae ruta a 169.254.169.254, la microVM arranca igual y solo se
 		// pierde la inyección de secretos por MMDS.
 		if err := c.SetMMDS(ctx, []string{"eth0"}); err != nil {
-			log.Printf("aviso: no pude configurar MMDS en %s: %v (no habrá secretos por sesión)", id, err)
+			log.Printf("warning: could not configure MMDS on %s: %v (no session secrets available)", id, err)
 		}
 	}
 	// virtio-rng: sin esto, las instancias de un mismo snapshot clonarían el
 	// estado del generador de aleatoriedad y podrían producir las mismas claves.
 	if err := c.SetEntropy(ctx); err != nil {
-		return pid, fmt.Errorf("añadiendo entropía: %w", err)
+		return pid, fmt.Errorf("adding entropy: %w", err)
 	}
 	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memMiB}); err != nil {
 		return pid, err
@@ -886,7 +886,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	// invitado no trae el driver o la versión de Firecracker lo rechaza, la
 	// microVM arranca igual y solo se pierde el squeeze.
 	if err := c.SetBalloon(ctx, 0, true, balloonStatsPollSec); err != nil {
-		log.Printf("aviso: no pude configurar el balloon en %s: %v (el squeeze no estará disponible)", id, err)
+		log.Printf("warning: could not configure balloon on %s: %v (squeeze will not be available)", id, err)
 	}
 	if err := c.Start(ctx); err != nil {
 		return pid, err
@@ -914,7 +914,7 @@ func (m *Manager) spawn(id, sock string, n *knet.Net) (int, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logf.Close()
-		return 0, fmt.Errorf("lanzando firecracker: %w", err)
+		return 0, fmt.Errorf("launching firecracker: %w", err)
 	}
 	// Sin Wait() el proceso quedaría zombi al terminar.
 	go func() { _ = cmd.Wait(); logf.Close() }()
@@ -929,14 +929,14 @@ func waitSocket(ctx context.Context, c *fc.Client) error {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return fmt.Errorf("el socket de firecracker no respondió en 5s")
+	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
 
 // Freeze pausa la microVM, la vuelca a disco y libera su RAM y su proceso.
 func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
 
@@ -945,7 +945,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		return cur, nil
 	}
 	if mc.State != api.StateRunning {
-		return nil, fmt.Errorf("solo se puede congelar una máquina running (está %s)", mc.State)
+		return nil, fmt.Errorf("only a running machine can be frozen (it is %s)", mc.State)
 	}
 
 	// Negativa deliberada: una máquina con secretos inyectados por MMDS NO se
@@ -957,16 +957,16 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// Quien quiera liberar RAM de una máquina con secretos tiene `squeeze` (no
 	// vuelca nada a disco) o `stop`/`rm`.
 	if mc.HasSecrets {
-		return nil, fmt.Errorf("la máquina %s tiene secretos de sesión inyectados por MMDS y "+
-			"no puede congelarse: el volcado de RAM acabaría en mem.file, compartido si es o "+
-			"llega a ser un snapshot dorado. Usa squeeze (no vuelca a disco) o stop/rm", mc.ID[:12])
+		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and "+
+			"cannot be frozen: the RAM dump would end up in mem.file, which is shared if it is or "+
+			"becomes a golden snapshot. Use squeeze (does not dump to disk) or stop/rm", mc.ID[:12])
 	}
 
 	m.mu.RLock()
 	sock := m.socket[mc.ID]
 	m.mu.RUnlock()
 	if sock == "" {
-		return nil, fmt.Errorf("sin socket para %s", mc.ID)
+		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
 	dir := m.dir(mc.ID)
@@ -1005,7 +1005,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
 			// Si tampoco se puede reanudar, la máquina no es recuperable y
 			// dejarla como running sería mentir. Se marca fallida.
-			m.fail(mc, fmt.Errorf("congelar falló (%v) y tampoco pude reanudarla: %w", err, rerr))
+			m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 			return nil, err
 		}
 		_ = m.acquireVolumes(mc)
@@ -1019,7 +1019,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		root := m.jailRoot(mc.ID)
 		for _, f := range []string{"snap.file", "mem.file"} {
 			if err := os.Rename(filepath.Join(root, f), filepath.Join(dir, f)); err != nil {
-				return nil, fmt.Errorf("recuperando %s del jail: %w", f, err)
+				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
 			}
 		}
 		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
@@ -1041,7 +1041,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// kernel devuelve ceros al leer un agujero, que es exactamente lo que había,
 	// así que la restauración no se entera. Mide ~3x menos en disco.
 	if out, err := exec.CommandContext(ctx, "fallocate", "--dig-holes", memPath).CombinedOutput(); err != nil {
-		log.Printf("aviso: no pude perforar %s: %v: %s", memPath, err, out)
+		log.Printf("warning: could not punch holes in %s: %v: %s", memPath, err, out)
 	}
 
 	// El fichero de memoria queda entero en caché tras escribirlo y releerlo para
@@ -1067,7 +1067,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	out.DiskBytes = m.touchDisk(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("congelada en %d ms (%d MiB en disco)", elapsed, size>>20)})
+		Message: fmt.Sprintf("frozen in %d ms (%d MiB on disk)", elapsed, size>>20)})
 	return &out, nil
 }
 
@@ -1094,17 +1094,17 @@ const balloonSqueezeMarginMiB = 128
 func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
 
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("solo se puede apretar una máquina running (está %s)", cur.State)
+		return nil, fmt.Errorf("only a running machine can be squeezed (it is %s)", cur.State)
 	}
 
 	m.mu.RLock()
@@ -1112,14 +1112,14 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	pid := cur.PID
 	m.mu.RUnlock()
 	if sock == "" {
-		return nil, fmt.Errorf("sin socket para %s", mc.ID)
+		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 	c := fc.New(sock)
 
 	stats, err := c.BalloonStats(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("el balloon no está disponible en esta instancia "+
-			"(reimporta la imagen para grabarlo en el snapshot): %w", err)
+		return nil, fmt.Errorf("the balloon is not available on this instance "+
+			"(reimport the image to record it in the snapshot): %w", err)
 	}
 	freeMiB := int(stats.FreeMemory >> 20)
 	rssBefore := procRSSMiB(pid)
@@ -1143,7 +1143,7 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	}
 
 	if err := c.PatchBalloon(ctx, target); err != nil {
-		return nil, fmt.Errorf("inflando el globo: %w", err)
+		return nil, fmt.Errorf("inflating the balloon: %w", err)
 	}
 	// El inflado es asíncrono: el driver del invitado va entregando páginas.
 	// Esperamos a que se acerque al objetivo (o a un plazo corto) antes de medir.
@@ -1152,7 +1152,7 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
 	// cliente abandonó.
 	if err := c.PatchBalloon(context.WithoutCancel(ctx), 0); err != nil {
-		log.Printf("aviso: no pude desinflar el globo de %s: %v", mc.ID, err)
+		log.Printf("warning: could not deflate the balloon for %s: %v", mc.ID, err)
 	}
 
 	rssAfter := procRSSMiB(pid)
@@ -1162,7 +1162,7 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("apretada: ~%d MiB devueltos al host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
+		Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
 
 	return &api.SqueezeResult{ID: mc.ID, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
 }
@@ -1223,35 +1223,35 @@ func procRSSMiB(pid int) int {
 func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
 
 	cur, ok := m.Get(mc.ID)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	if cur.State != api.StateRunning {
-		return nil, fmt.Errorf("solo se puede inyectar MMDS en una máquina running (está %s)", cur.State)
+		return nil, fmt.Errorf("MMDS can only be injected into a running machine (it is %s)", cur.State)
 	}
 
 	m.mu.RLock()
 	sock := m.socket[mc.ID]
 	m.mu.RUnlock()
 	if sock == "" {
-		return nil, fmt.Errorf("sin socket para %s", mc.ID)
+		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
 	c := fc.New(sock)
 	if err := c.PutMMDSData(ctx, data); err != nil {
-		return nil, fmt.Errorf("inyectando MMDS: %w", err)
+		return nil, fmt.Errorf("injecting MMDS: %w", err)
 	}
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
 	if live == nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("la máquina %q ya no existe", ref)
+		return nil, fmt.Errorf("machine %q no longer exists", ref)
 	}
 	live.HasSecrets = true
 	m.persist()
@@ -1259,7 +1259,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: mc.ID, Name: mc.Name,
-		Message: "secretos de sesión inyectados por MMDS (ya no se puede congelar)"})
+		Message: "session secrets injected via MMDS (can no longer be frozen)"})
 	return &out, nil
 }
 
@@ -1267,7 +1267,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
 
@@ -1276,7 +1276,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return cur, nil
 	}
 	if mc.State != api.StateWarm {
-		return nil, fmt.Errorf("solo se puede descongelar una máquina warm (está %s)", mc.State)
+		return nil, fmt.Errorf("only a warm machine can be thawed (it is %s)", mc.State)
 	}
 
 	dir := m.dir(mc.ID)
@@ -1293,7 +1293,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// tipo que no se nota hasta mucho después.
 	if live := m.liveVMs(); live[mc.ID] > 0 {
 		pid := live[mc.ID]
-		log.Printf("thaw: %s (%s) ya estaba corriendo (pid %d); la readopto en vez de arrancar otra",
+		log.Printf("thaw: %s (%s) was already running (pid %d); re-adopting it instead of starting another",
 			mc.Name, mc.ID[:8], pid)
 		m.mu.Lock()
 		if cur := m.byID[mc.ID]; cur != nil {
@@ -1329,7 +1329,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	egress, _ := knet.ParseEgress(mc.Egress)
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
 	if err := netcfg.Setup(egress, mc.AllowDomains, m.priv.UID); err != nil {
-		return nil, fmt.Errorf("rehaciendo la red: %w", err)
+		return nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
 	var pid int
 	var c *fc.Client
@@ -1380,7 +1380,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		mc.CPUPct = defaultCPUPct
 	}
 	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
-		log.Printf("aviso: %s: %s", mc.Name, warn)
+		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
 	m.mu.Lock()
@@ -1399,7 +1399,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	out.DiskBytes = m.touchDisk(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("descongelada en %d ms", elapsed)})
+		Message: fmt.Sprintf("thawed in %d ms", elapsed)})
 	return &out, nil
 }
 
@@ -1407,7 +1407,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("no existe la máquina %q", ref)
+		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1416,7 +1416,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 		// La eliminaron entre el Get y el candado. Etiquetar algo que ya no
 		// existe no es un error del que llama, pero deref nil sí tumbaba el
 		// daemon entero.
-		return fmt.Errorf("la máquina %q ya no existe", ref)
+		return fmt.Errorf("machine %q no longer exists", ref)
 	}
 	live.Labels = api.MergeLabels(live.Labels, labels)
 	m.persist()
@@ -1427,7 +1427,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
@@ -1461,7 +1461,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 func (m *Manager) Remove(ref string) error {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return fmt.Errorf("no existe la máquina %q", ref)
+		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
@@ -1479,7 +1479,7 @@ func (m *Manager) Remove(ref string) error {
 	delete(m.socket, mc.ID)
 	m.persist()
 	m.mu.Unlock()
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "eliminada"})
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil
 }
 

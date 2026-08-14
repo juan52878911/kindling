@@ -23,7 +23,7 @@ import (
 // más excedería la cuota de instancias del tenant. handleProxy lo traduce a un
 // 429 en vez del 502 genérico: no es que el servicio falle, es que este tenant
 // ya tiene todas las que le tocan.
-var errTenantInstances = errors.New("cuota de instancias del tenant excedida")
+var errTenantInstances = errors.New("tenant instance quota exceeded")
 
 // TenantLimit describe un token con nombre y sus cuotas. main.go lo rellena
 // desde la configuración; vive aquí, en tipos propios, para no acoplar el
@@ -135,8 +135,8 @@ func (g *Gateway) authHandler(h http.Handler, token string) http.Handler {
 // authFail responde el 401 con la pista de cómo autenticarse.
 func authFail(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kindling"`)
-	http.Error(w, "falta la cabecera Authorization: Bearer <token>, o el token no vale.\n"+
-		"El token vive en gateway.token del host donde corre el gateway.", http.StatusUnauthorized)
+	http.Error(w, "missing Authorization header: Bearer <token>, or the token is invalid.\n"+
+		"The token lives in gateway.token on the host where the gateway runs.", http.StatusUnauthorized)
 }
 
 // tenantBegin contabiliza una petición en vuelo para el tenant y comprueba su

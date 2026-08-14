@@ -85,7 +85,7 @@ func (m *Manager) linkAbs(id, hostPath string) error {
 	}
 	_ = os.Remove(dst) // una restauración anterior sin limpiar apuntaría a un inodo viejo
 	if err := os.Link(hostPath, dst); err != nil {
-		return fmt.Errorf("enlazando %s dentro del jail: %w", hostPath, err)
+		return fmt.Errorf("linking %s inside the jail: %w", hostPath, err)
 	}
 	// firecracker corre como el usuario del jail: tiene que poder abrirlo. Chown
 	// del hardlink toca el inodo compartido con el original; para una imagen o
@@ -126,7 +126,7 @@ func (m *Manager) jailerArgv(id string, netnsPath string) ([]string, error) {
 	if !filepath.IsAbs(fc) {
 		resolved, err := exec.LookPath(fc)
 		if err != nil {
-			return nil, fmt.Errorf("no encuentro el binario de firecracker %q para jailer: %w", fc, err)
+			return nil, fmt.Errorf("can't find firecracker binary %q for jailer: %w", fc, err)
 		}
 		fc = resolved
 	}
@@ -187,7 +187,7 @@ func (m *Manager) spawnJailed(id string, n *knet.Net) (int, string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logf.Close()
-		return 0, "", fmt.Errorf("lanzando jailer: %w", err)
+		return 0, "", fmt.Errorf("launching jailer: %w", err)
 	}
 	go func() { _ = cmd.Wait(); logf.Close() }()
 

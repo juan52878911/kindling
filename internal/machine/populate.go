@@ -44,7 +44,7 @@ const populateTimeout = 20 * time.Minute
 // ningún lado.
 func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (*api.PopulateResult, error) {
 	if len(req.Cmd) == 0 {
-		return nil, fmt.Errorf("falta el comando a ejecutar")
+		return nil, fmt.Errorf("missing command to execute")
 	}
 	mount := req.Mount
 	if mount == "" {
@@ -52,8 +52,8 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	}
 	image := req.Image
 	if image == "" {
-		return nil, fmt.Errorf("hace falta una imagen que traiga el instalador: " +
-			"constrúyela con `kling images toolchain`")
+		return nil, fmt.Errorf("an image with the installer is required: " +
+			"build it with `kling images toolchain`")
 	}
 	memMiB := req.MemMiB
 	if memMiB <= 0 {
@@ -83,7 +83,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 
 	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort))
 	if err := waitGuest(ctx, base, 60*time.Second); err != nil {
-		return nil, fmt.Errorf("la microVM de instalación no empezó a escuchar: %w", err)
+		return nil, fmt.Errorf("installation microVM did not start listening: %w", err)
 	}
 
 	body, _ := json.Marshal(map[string]any{"cmd": req.Cmd})
@@ -102,7 +102,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	cli := &http.Client{}
 	resp, err := cli.Do(hreq)
 	if err != nil {
-		return nil, fmt.Errorf("ejecutando dentro de la microVM: %w", err)
+		return nil, fmt.Errorf("executing inside the microVM: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -111,7 +111,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 		Output   string `json:"output"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("respuesta ilegible del invitado: %w", err)
+		return nil, fmt.Errorf("unreadable response from guest: %w", err)
 	}
 
 	// El vaciado a disco se lo pide Remove() al matar, pero aquí se pide antes

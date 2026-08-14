@@ -295,9 +295,9 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 		if svc := s.Service(); svc != "" {
 			name = svc
 		}
-		status := "frío"
+		status := "cold"
 		if n := g.pool.stats()[name]; n > 0 {
-			status = fmt.Sprintf("%d instancia(s) pre-calentada(s)", n)
+			status = fmt.Sprintf("%d prewarmed instance(s)", n)
 		}
 		if e, ok := g.services[name]; ok {
 			n := 0
@@ -306,7 +306,7 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 					n++
 				}
 			}
-			status = fmt.Sprintf("caliente en %s · %d sesión(es) · ocioso %s",
+			status = fmt.Sprintf("warm at %s · %d session(s) · idle %s",
 				e.ip, n, time.Since(e.lastUse).Round(time.Second))
 		}
 		fmt.Fprintf(w, "%-24s snapshot=%-20s %s\n", name, s.Name, status)
@@ -320,7 +320,7 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	service := r.PathValue("service")
 	if service == "" {
-		http.Error(w, "falta el servicio en la ruta", http.StatusBadRequest)
+		http.Error(w, "missing service in path", http.StatusBadRequest)
 		return
 	}
 
@@ -341,7 +341,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody))
 		_ = r.Body.Close()
 		if err != nil {
-			http.Error(w, "no pude leer el cuerpo", http.StatusBadRequest)
+			http.Error(w, "could not read body", http.StatusBadRequest)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -371,7 +371,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// sesión sí sigue (abre el stream de esa conversación en el puente).
 	if r.Method == http.MethodGet && r.Header.Get(SessionHeader) == "" {
 		w.Header().Set("Allow", "POST, DELETE")
-		http.Error(w, "este endpoint no ofrece un stream SSE independiente; usa POST",
+		http.Error(w, "this endpoint does not offer a standalone SSE stream; use POST",
 			http.StatusMethodNotAllowed)
 		return
 	}
@@ -389,8 +389,8 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	tnt := tenantFrom(r.Context())
 	if !g.tenantBegin(tnt) {
 		http.Error(w, fmt.Sprintf(
-			"429: el tenant %q ha alcanzado su cuota de %d peticiones en vuelo.\n"+
-				"Es un límite de reparto justo, no de seguridad: reintenta cuando terminen las anteriores.",
+			"429: tenant %q has reached its quota of %d in-flight requests.\n"+
+				"This is a fair-share limit, not a security limit: retry once the earlier ones finish.",
 			tnt.name, tnt.maxInflight), http.StatusTooManyRequests)
 		return
 	}
@@ -434,11 +434,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					g.forget(sid)
 					if errors.Is(err, errTenantInstances) {
-						http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
+						http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.service, err),
 							http.StatusTooManyRequests)
 						return
 					}
-					http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
+					http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.service, err),
 						http.StatusBadGateway)
 					return
 				}
@@ -537,7 +537,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		// ¿El puente rechazó por tope de sesiones? Esa instancia está llena: se crea
 		// otra y se reintenta. Cualquier otra respuesta (incluido otro 400) se
 		// entrega tal cual al cliente.
-		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "sesiones alcanzado") {
+		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "session limit") {
 			continue
 		}
 
@@ -556,7 +556,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		}
 		return
 	}
-	http.Error(w, fmt.Sprintf("no pude ubicar la sesión de %q: todas las réplicas llenas o el host sin sitio", service),
+	http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full or no room on host", service),
 		http.StatusServiceUnavailable)
 }
 
@@ -564,10 +564,10 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, service string, err err
 	// La cuota de instancias del tenant es un 429 (reparto justo), no un 502: el
 	// servicio no falla, es que este tenant ya tiene todas las suyas.
 	if errors.Is(err, errTenantInstances) {
-		http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusTooManyRequests)
+		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
 		return
 	}
-	http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusBadGateway)
+	http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
 }
 
 // pickInstance devuelve una instancia del servicio con hueco de sesión. Despierta
@@ -599,7 +599,7 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api
 	base := strings.TrimSuffix(l.URL, "/mcp")
 	target, err := url.Parse(base)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("URL de enlace inválida: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("invalid link URL: %v", err), http.StatusInternalServerError)
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -630,7 +630,7 @@ func (g *Gateway) bind(sid, service string, e *entry) {
 		service: service, machineID: e.machineID, ip: e.ip,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
-	log.Printf("%s: sesión %s fijada a %s", service, short(sid), e.ip)
+	log.Printf("%s: session %s bound to %s", service, short(sid), e.ip)
 }
 
 // rebind reapunta una sesión a la instancia actual de su servicio, conservando
@@ -745,7 +745,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		actuales := g.tenantInstances(tnt.name)
 		g.mu.Unlock()
 		if actuales >= tnt.maxInstances {
-			return nil, fmt.Errorf("%w: %q ya tiene %d instancia(s) despierta(s) (máx %d)",
+			return nil, fmt.Errorf("%w: %q already has %d instance(s) awake (max %d)",
 				errTenantInstances, tnt.name, actuales, tnt.maxInstances)
 		}
 	}
@@ -772,7 +772,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 			// el error de falta de memoria explica por qué.
 			break
 		}
-		log.Printf("%s: no cabía; congelé %s para hacerle sitio", service, victima)
+		log.Printf("%s: didn't fit; froze %s to make room", service, victima)
 		mc, err = g.acquire(ctx, service, fresh)
 	}
 	if err != nil {
@@ -785,7 +785,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
 	wr0 := time.Now()
 	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
-		return nil, fmt.Errorf("la herramienta no empezó a escuchar: %w", err)
+		return nil, fmt.Errorf("tool did not start listening: %w", err)
 	}
 	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
 	// botella del arranque (ver docs de rendimiento en Mac): un thaw acepta casi al
@@ -836,7 +836,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		if esDial && !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
 			body, berr := r.GetBody()
 			if berr == nil {
-				log.Printf("proxy %s: %v (un reintento)", service, err)
+				log.Printf("proxy %s: %v (one retry)", service, err)
 				r2 := r.Clone(markRetried(r.Context()))
 				r2.Body = body
 				e.proxy.ServeHTTP(w, r2)
@@ -844,7 +844,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 			}
 		}
 		log.Printf("proxy %s: %v", service, err)
-		http.Error(w, fmt.Sprintf("la herramienta %q no respondió: %v", service, err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
 	}
 
 	return e, nil
@@ -940,7 +940,7 @@ func (g *Gateway) scaleOut(ctx context.Context, service string, tnt *tenant) (*e
 	g.extra[service] = append(g.extra[service], e)
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
-	log.Printf("%s: scale-out — nueva réplica %s (%d instancias del servicio)", service, short(e.machineID), total)
+	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
 	return e, nil
 }
 
@@ -980,7 +980,7 @@ func (g *Gateway) acquire(ctx context.Context, service string, fresh bool) (*api
 	// 2) alguna congelada: ~30 ms
 	for _, m := range machines {
 		if match(m) && m.State == api.StateWarm {
-			log.Printf("%s: descongelando %s", service, m.Name)
+			log.Printf("%s: thawing %s", service, m.Name)
 			return g.client.Thaw(ctx, m.ID)
 		}
 	}
@@ -996,7 +996,7 @@ func (g *Gateway) runFresh(ctx context.Context, service string) (*api.Machine, e
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("%s: instanciando desde el snapshot %s", service, snap.Name)
+	log.Printf("%s: instantiating from snapshot %s", service, snap.Name)
 	return g.client.Run(ctx, api.RunRequest{
 		From: snap.Name,
 		// La política de salida viaja con el snapshot. Sin esto, un servicio
@@ -1022,7 +1022,7 @@ func (g *Gateway) snapshotFor(ctx context.Context, service string) (*api.Snapsho
 			return s, nil
 		}
 	}
-	return nil, fmt.Errorf("no hay snapshot para el servicio %q", service)
+	return nil, fmt.Errorf("no snapshot for service %q", service)
 }
 
 func (g *Gateway) alive(ctx context.Context, id string) bool {
@@ -1233,7 +1233,7 @@ func (g *Gateway) KeepWarmAll(ctx context.Context) {
 				log.Printf("keepwarm %s: %v", svc, err)
 				return
 			}
-			log.Printf("%s: primaria mantenida caliente", svc)
+			log.Printf("%s: primary kept warm", svc)
 		}(c.svc)
 	}
 }
@@ -1300,7 +1300,7 @@ func (g *Gateway) reapOnce(ctx context.Context) {
 			log.Printf("reap %s: %v", v.service, err)
 			continue
 		}
-		log.Printf("%s: congelada por inactividad", v.service)
+		log.Printf("%s: frozen due to inactivity", v.service)
 	}
 }
 
@@ -1432,7 +1432,7 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
 		freeze = g.freezeFn
 	}
 	if err := freeze(id); err != nil {
-		log.Printf("no pude congelar %s para hacer sitio: %v", elegido, err)
+		log.Printf("could not freeze %s to make room: %v", elegido, err)
 		return ""
 	}
 	return elegido

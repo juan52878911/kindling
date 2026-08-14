@@ -158,7 +158,7 @@ func (c *Client) Get(ctx context.Context, name string, limit int) (*Server, []Se
 		return nil, nil, err
 	}
 	if len(servers) == 0 {
-		return nil, nil, fmt.Errorf("no encuentro %q en el registro oficial", name)
+		return nil, nil, fmt.Errorf("cannot find %q in the official registry", name)
 	}
 
 	var exact, suffix []Server
@@ -177,11 +177,11 @@ func (c *Client) Get(ctx context.Context, name string, limit int) (*Server, []Se
 	case len(suffix) == 1:
 		return &suffix[0], nil, nil
 	case len(exact) > 1:
-		return nil, exact, fmt.Errorf("%q está publicado por varios; usa el nombre completo", name)
+		return nil, exact, fmt.Errorf("%q is published by several; use the full name", name)
 	case len(suffix) > 1:
-		return nil, suffix, fmt.Errorf("%q es ambiguo; usa el nombre completo", name)
+		return nil, suffix, fmt.Errorf("%q is ambiguous; use the full name", name)
 	}
-	return nil, servers, fmt.Errorf("no hay ninguno que se llame exactamente %q", name)
+	return nil, servers, fmt.Errorf("none is named exactly %q", name)
 }
 
 // Stdio devuelve el paquete que kindling sabe empaquetar.
@@ -231,11 +231,11 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("no alcanzo el registro: %w", err)
+		return fmt.Errorf("cannot reach the registry: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("el registro respondió %s", resp.Status)
+		return fmt.Errorf("the registry responded %s", resp.Status)
 	}
 
 	// Se lee entero para poder guardarlo en caché y decodificarlo del mismo
@@ -245,7 +245,7 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		return err
 	}
 	if err := json.Unmarshal(b, out); err != nil {
-		return fmt.Errorf("el registro devolvió algo que no entiendo: %w", err)
+		return fmt.Errorf("the registry returned something I don't understand: %w", err)
 	}
 	c.store(path, b)
 	return nil

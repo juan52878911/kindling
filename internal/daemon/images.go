@@ -71,46 +71,46 @@ func (s *Server) imageScript() (string, error) {
 			return filepath.Abs(p)
 		}
 	}
-	return "", fmt.Errorf("no encuentro 80-mcp-image.sh; despliégalo con `make deploy` " +
-		"o apunta a él con KLING_IMAGE_SCRIPT")
+	return "", fmt.Errorf("can't find 80-mcp-image.sh; deploy it with `make deploy` " +
+		"or point to it with KLING_IMAGE_SCRIPT")
 }
 
 // validateBuild comprueba la petición antes de que nada llegue a un shell.
 func validateBuild(r api.BuildImageRequest) error {
 	if !reName.MatchString(r.Name) {
-		return fmt.Errorf("nombre inválido %q: minúsculas, dígitos, guion y guion bajo, hasta 64", r.Name)
+		return fmt.Errorf("invalid name %q: lowercase, digits, hyphen and underscore, up to 64", r.Name)
 	}
 	if r.Base != "" && !reName.MatchString(r.Base) {
-		return fmt.Errorf("imagen base inválida %q", r.Base)
+		return fmt.Errorf("invalid base image %q", r.Base)
 	}
 	for _, p := range r.Packages {
 		if !reAPK.MatchString(p) {
-			return fmt.Errorf("paquete apk inválido %q", p)
+			return fmt.Errorf("invalid apk package %q", p)
 		}
 	}
 	for _, p := range r.NPM {
 		if !reNPM.MatchString(p) {
-			return fmt.Errorf("paquete npm inválido %q", p)
+			return fmt.Errorf("invalid npm package %q", p)
 		}
 	}
 	for _, p := range r.PIP {
 		if !rePIP.MatchString(p) {
-			return fmt.Errorf("paquete pip inválido %q", p)
+			return fmt.Errorf("invalid pip package %q", p)
 		}
 	}
 	if len(r.Cmd) == 0 {
-		return fmt.Errorf("falta el comando que arranca el servidor MCP")
+		return fmt.Errorf("missing the command that starts the MCP server")
 	}
 	for _, a := range r.Cmd {
 		// El script mete cada argumento con `printf %q`, así que no hay
 		// inyección de shell; pero un salto de línea partiría el entrypoint
 		// generado en dos y un NUL lo truncaría.
 		if strings.ContainsAny(a, "\x00\n\r") {
-			return fmt.Errorf("el comando no puede llevar saltos de línea ni bytes nulos")
+			return fmt.Errorf("the command can't contain newlines or null bytes")
 		}
 	}
 	if r.GrowMB < 0 || r.GrowMB > 8192 {
-		return fmt.Errorf("crecimiento fuera de rango: %d MB", r.GrowMB)
+		return fmt.Errorf("growth out of range: %d MB", r.GrowMB)
 	}
 	return nil
 }
@@ -160,7 +160,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	sh, err := exec.LookPath("bash")
 	if err != nil {
 		fail(w, http.StatusPreconditionFailed,
-			fmt.Errorf("hace falta bash para empaquetar: 80-mcp-image.sh usa arrays y pipefail"))
+			fmt.Errorf("bash is required to package: 80-mcp-image.sh uses arrays and pipefail"))
 		return
 	}
 
@@ -198,7 +198,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		// La salida del script es lo único que explica POR QUÉ falló —un apk
 		// que no existe, un npm sin red—, así que viaja entera al cliente.
 		fail(w, http.StatusInternalServerError,
-			fmt.Errorf("la construcción falló: %w\n%s", err, strings.TrimSpace(out.String())))
+			fmt.Errorf("build failed: %w\n%s", err, strings.TrimSpace(out.String())))
 		return
 	}
 
@@ -211,7 +211,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	// Un fallo al escribirla NO tumba la construcción: la imagen ya está hecha y
 	// funciona; perder la receta es peor documentación, no un error.
 	if err := s.saveRecipe(req); err != nil {
-		log.Printf("imagen %s: construida, pero no pude guardar su receta: %v", req.Name, err)
+		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}
 
 	writeJSON(w, http.StatusOK, api.BuildImageResult{
@@ -288,14 +288,14 @@ func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !reName.MatchString(name) {
-		fail(w, http.StatusBadRequest, fmt.Errorf("nombre inválido %q", name))
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid name %q", name))
 		return
 	}
 	b, err := os.ReadFile(s.recipePath(name))
 	if err != nil {
 		fail(w, http.StatusNotFound, fmt.Errorf(
-			"no hay receta de %q. Las imágenes construidas antes de que se guardaran no la tienen; "+
-				"el comando sigue estando dentro, en /entrypoint", name))
+			"no recipe for %q. Images built before recipes were saved don't have one; "+
+				"the command is still inside, in /entrypoint", name))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -305,7 +305,7 @@ func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleImageCapabilities(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !reName.MatchString(name) {
-		fail(w, http.StatusBadRequest, fmt.Errorf("nombre inválido %q", name))
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid name %q", name))
 		return
 	}
 	caps, err := s.mgr.ImageCapabilities(r.Context(), name)

@@ -54,7 +54,7 @@ func (d *Dialer) Dial(ctx context.Context) (net.Conn, error) {
 func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", path)
 	if err != nil {
-		return nil, fmt.Errorf("no puedo hablar con el daemon en %s: %w", path, err)
+		return nil, fmt.Errorf("cannot talk to the daemon at %s: %w", path, err)
 	}
 	return c, nil
 }
@@ -81,7 +81,7 @@ func dialSSH(ctx context.Context, dest string) (net.Conn, error) {
 	}
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("lanzando ssh a %s: %w", target, err)
+		return nil, fmt.Errorf("launching ssh to %s: %w", target, err)
 	}
 	return &pipeConn{r: stdout, w: stdin, cmd: cmd}, nil
 }

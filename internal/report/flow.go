@@ -39,18 +39,18 @@ func (g Group) Readiness() Readiness {
 
 	switch {
 	case g.Link != nil:
-		r.Latency = "lo que tarde el servidor externo"
+		r.Latency = "whatever the external server takes"
 	case g.Snapshot == nil:
-		r.Blocked = "no hay snapshot del que instanciar"
+		r.Blocked = "no snapshot to instantiate from"
 	case len(g.Snapshot.Tools) == 0:
-		r.Blocked = "sin catálogo capturado: reimporta con kling mcp import"
+		r.Blocked = "no catalog captured: re-import with kling mcp import"
 	case r.Live > 0:
-		r.Latency = "inmediata: ya hay una instancia atendiendo"
+		r.Latency = "immediate: an instance is already running"
 	case r.Warm > 0:
-		r.Latency = "~30 ms: hay una congelada esperando"
+		r.Latency = "~30 ms: a frozen instance is waiting"
 	default:
 		r.Cold = true
-		r.Latency = "~250 ms: se instancia del snapshot dorado"
+		r.Latency = "~250 ms: instantiates from the golden snapshot"
 	}
 	return r
 }
@@ -61,37 +61,37 @@ func (g Group) Readiness() Readiness {
 func (g Group) Flow() []string {
 	if g.Link != nil {
 		return []string{
-			"El gateway reconoce que " + g.Service + " es un servidor externo",
-			"No arranca ninguna máquina: reenvía la llamada a " + g.Link.URL,
-			"El servidor responde con su propio estado, que persiste entre llamadas",
+			"The gateway recognizes that " + g.Service + " is an external server",
+			"It doesn't start any machine: it forwards the call to " + g.Link.URL,
+			"The server responds with its own state, which persists between calls",
 		}
 	}
 	if g.Snapshot == nil {
-		return []string{"Sin snapshot: la llamada falla antes de arrancar nada"}
+		return []string{"No snapshot: the call fails before anything starts"}
 	}
 
 	r := g.Readiness()
-	steps := []string{"El gateway resuelve la herramienta al servicio " + g.Service}
+	steps := []string{"The gateway resolves the tool to the " + g.Service + " service"}
 
 	if g.Snapshot.Stateful() {
 		switch {
 		case r.Live > 0:
-			steps = append(steps, "Reutiliza su instancia, que ya está en marcha")
+			steps = append(steps, "Reuses its instance, which is already running")
 		case r.Warm > 0:
-			steps = append(steps, "Descongela su instancia (~30 ms), con su estado intacto")
+			steps = append(steps, "Thaws its instance (~30 ms), with its state intact")
 		default:
-			steps = append(steps, "Instancia una máquina del snapshot dorado (~250 ms)")
+			steps = append(steps, "Instantiates a machine from the golden snapshot (~250 ms)")
 		}
 		steps = append(steps,
-			"El puente reenvía la llamada al servidor MCP por stdin/stdout",
-			"La máquina SIGUE VIVA al terminar; se congela sola si deja de usarse")
+			"The bridge forwards the call to the MCP server over stdin/stdout",
+			"The machine STAYS ALIVE when it's done; it freezes itself if it goes unused")
 		return steps
 	}
 
 	steps = append(steps,
-		"Toma una microVM del fondo pre-calentado, o instancia una (~250 ms)",
-		"El puente reenvía la llamada al servidor MCP por stdin/stdout",
-		"Al responder, la máquina SE DESTRUYE — y con ella todo lo que escribiera")
+		"Takes a microVM from the pre-warmed pool, or instantiates one (~250 ms)",
+		"The bridge forwards the call to the MCP server over stdin/stdout",
+		"Once it responds, the machine IS DESTROYED — taking with it everything it wrote")
 	return steps
 }
 
@@ -119,7 +119,7 @@ func (g Group) writers() []string {
 	}
 	sort.Strings(out)
 	if len(out) > 6 {
-		out = append(out[:6], fmt.Sprintf("y %d más", len(out)-6))
+		out = append(out[:6], fmt.Sprintf("and %d more", len(out)-6))
 	}
 	return out
 }

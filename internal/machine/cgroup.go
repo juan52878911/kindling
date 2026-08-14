@@ -27,22 +27,22 @@ const cgroupBase = "/sys/fs/cgroup/kindling"
 func ensureDelegation() (string, error) {
 	root := "/sys/fs/cgroup"
 	if _, err := os.Stat(filepath.Join(root, "cgroup.controllers")); err != nil {
-		return "", fmt.Errorf("no hay cgroup v2 montado")
+		return "", fmt.Errorf("no cgroup v2 mounted")
 	}
 	// El controlador cpu tiene que estar disponible para los hijos de la raíz.
 	if !strings.Contains(readFile(filepath.Join(root, "cgroup.subtree_control")), "cpu") {
 		if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"),
 			[]byte("+cpu"), 0o644); err != nil {
-			return "", fmt.Errorf("el controlador cpu no está disponible en la raíz: %w", err)
+			return "", fmt.Errorf("cpu controller is not available at the root: %w", err)
 		}
 	}
 	if err := os.MkdirAll(cgroupBase, 0o755); err != nil {
-		return "", fmt.Errorf("creando %s: %w", cgroupBase, err)
+		return "", fmt.Errorf("creating %s: %w", cgroupBase, err)
 	}
 	// Nuestro árbol nunca tiene procesos propios, solo hijos: puede delegar.
 	if err := os.WriteFile(filepath.Join(cgroupBase, "cgroup.subtree_control"),
 		[]byte("+cpu"), 0o644); err != nil {
-		return "", fmt.Errorf("habilitando cpu en %s: %w", cgroupBase, err)
+		return "", fmt.Errorf("enabling cpu on %s: %w", cgroupBase, err)
 	}
 	return cgroupBase, nil
 }
@@ -63,16 +63,16 @@ func (m *Manager) limitCPU(id string, pid int, quotaPct int) string {
 	}
 	dir := filepath.Join(m.cgroupRoot, "kl-"+id[:8])
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Sprintf("no pude crear el cgroup: %v", err)
+		return fmt.Sprintf("could not create cgroup: %v", err)
 	}
 	// cpu.max = "<cuota> <periodo>" en microsegundos; 100000 = un core completo.
 	if err := os.WriteFile(filepath.Join(dir, "cpu.max"),
 		[]byte(fmt.Sprintf("%d 100000", quotaPct*1000)), 0o644); err != nil {
-		return fmt.Sprintf("no pude fijar cpu.max: %v", err)
+		return fmt.Sprintf("could not set cpu.max: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"),
 		[]byte(strconv.Itoa(pid)), 0o644); err != nil {
-		return fmt.Sprintf("no pude mover el proceso al cgroup: %v", err)
+		return fmt.Sprintf("could not move process to cgroup: %v", err)
 	}
 	return ""
 }

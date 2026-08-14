@@ -66,16 +66,16 @@ func execEnabled() bool {
 // de "lo ejecuté y falló", que son cosas muy distintas.
 func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "usa POST", http.StatusMethodNotAllowed)
+		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
 	}
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("cuerpo inválido: %v", err), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid body: %v", err), http.StatusBadRequest)
 		return
 	}
 	if len(req.Cmd) == 0 {
-		http.Error(w, "falta cmd", http.StatusBadRequest)
+		http.Error(w, "missing cmd", http.StatusBadRequest)
 		return
 	}
 
@@ -94,7 +94,7 @@ func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
 	exitCh, err := procReaper.startTracked(cmd)
 	if err != nil {
 		resp := execResponse{ExitCode: -1,
-			Output: fmt.Sprintf("no pude ejecutar %q: %v", req.Cmd[0], err)}
+			Output: fmt.Sprintf("could not execute %q: %v", req.Cmd[0], err)}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 		return
@@ -114,7 +114,7 @@ func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
 			// permisos. Eso sí es un fallo de la petición, y el mensaje tiene
 			// que decirlo porque no habrá salida que lo explique.
 			resp.ExitCode = -1
-			resp.Output += fmt.Sprintf("\nno pude ejecutar %q: %v", req.Cmd[0], err)
+			resp.Output += fmt.Sprintf("\ncould not execute %q: %v", req.Cmd[0], err)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

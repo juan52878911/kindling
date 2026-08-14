@@ -32,7 +32,7 @@ import (
 
 // errNoBridge marca una imagen que no lleva puente dentro: una base mínima, no
 // una de servicio. No es un fallo, es una imagen que no aplica.
-var errNoBridge = errors.New("no lleva puente: no es una imagen de servicio")
+var errNoBridge = errors.New("has no bridge: not a service image")
 
 // guestBridgePath es dónde vive el puente dentro de la imagen. Lo fija
 // 80-mcp-image.sh al construirla, y el entrypoint lo invoca por esa ruta.
@@ -65,12 +65,12 @@ func (m *Manager) Images() []string {
 // estaba al día vale tanto como saber que se actualizó.
 func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []string) ([]api.BridgeRefresh, error) {
 	if bridge == "" {
-		return nil, fmt.Errorf("no encuentro el puente que inyectar: " +
-			"debería estar en /usr/local/lib/kindling/kling-bridge (lo pone `make deploy`)")
+		return nil, fmt.Errorf("cannot find the bridge to inject: " +
+			"it should be at /usr/local/lib/kindling/kling-bridge (put there by `make deploy`)")
 	}
 	quiero, err := fileDigest(bridge)
 	if err != nil {
-		return nil, fmt.Errorf("leyendo el puente %s: %w", bridge, err)
+		return nil, fmt.Errorf("reading bridge %s: %w", bridge, err)
 	}
 	if len(names) == 0 {
 		names = m.Images()
@@ -87,13 +87,13 @@ func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []str
 		fila := api.BridgeRefresh{Image: name}
 		path := m.imagePath(name)
 		if _, err := os.Stat(path); err != nil {
-			fila.Error = "no existe"
+			fila.Error = "does not exist"
 			out = append(out, fila)
 			continue
 		}
 		if users := enUso[name]; len(users) > 0 {
 			fila.Skipped = true
-			fila.Error = fmt.Sprintf("la usan %d máquina(s): %s", len(users), strings.Join(users, ", "))
+			fila.Error = fmt.Sprintf("in use by %d machine(s): %s", len(users), strings.Join(users, ", "))
 			out = append(out, fila)
 			continue
 		}
@@ -147,7 +147,7 @@ func (m *Manager) refreshOne(ctx context.Context, image, bridge, quiero string) 
 	defer os.RemoveAll(mnt)
 
 	if out, err := exec.CommandContext(ctx, "mount", "-o", "loop", image, mnt).CombinedOutput(); err != nil {
-		return false, fmt.Errorf("montando: %v: %s", err, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("mounting: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	// El desmontaje va en defer y NO al final del cuerpo: cualquier retorno
 	// intermedio dejaría la imagen montada, y una imagen montada en escritura es
@@ -191,11 +191,11 @@ func (m *Manager) refreshOne(ctx context.Context, image, bridge, quiero string) 
 	tmp := dentro + ".nuevo"
 	if err := copyFile(bridge, tmp, 0o755); err != nil {
 		_ = os.Remove(tmp)
-		return false, fmt.Errorf("copiando el puente: %w", err)
+		return false, fmt.Errorf("copying bridge: %w", err)
 	}
 	if err := os.Rename(tmp, dentro); err != nil {
 		_ = os.Remove(tmp)
-		return false, fmt.Errorf("reemplazando el puente: %w", err)
+		return false, fmt.Errorf("replacing bridge: %w", err)
 	}
 	desmontar()
 	return true, nil
@@ -258,11 +258,11 @@ func imageHasBridge(ctx context.Context, image string) (bool, error) {
 		}
 	}
 	if err != nil {
-		return false, fmt.Errorf("no encuentro debugfs (viene con e2fsprogs): %w", err)
+		return false, fmt.Errorf("cannot find debugfs (comes with e2fsprogs): %w", err)
 	}
 	out, err := exec.CommandContext(ctx, bin, "-R", "stat /"+guestBridgePath, image).CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("debugfs sobre %s: %v: %s", image, err, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("debugfs on %s: %v: %s", image, err, strings.TrimSpace(string(out)))
 	}
 	// debugfs sale con 0 aunque el fichero no exista: la respuesta está en la
 	// salida. Un stat con éxito imprime la línea "Inode: NNN Type: ...".

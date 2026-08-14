@@ -35,20 +35,20 @@ func (m *Manager) volumePath(n string) string { return filepath.Join(m.volumesDi
 // CreateVolume crea un volumen vacío formateado en ext4.
 func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*api.Volume, error) {
 	if !reVolume.MatchString(name) {
-		return nil, fmt.Errorf("nombre de volumen inválido %q: minúsculas, dígitos, guion y guion bajo", name)
+		return nil, fmt.Errorf("invalid volume name %q: lowercase letters, digits, hyphen and underscore", name)
 	}
 	if sizeMiB <= 0 {
 		sizeMiB = defaultVolumeMiB
 	}
 	if sizeMiB > 64<<10 {
-		return nil, fmt.Errorf("tamaño excesivo: %d MiB", sizeMiB)
+		return nil, fmt.Errorf("size too large: %d MiB", sizeMiB)
 	}
 	if err := os.MkdirAll(m.volumesDir(), 0o755); err != nil {
 		return nil, err
 	}
 	path := m.volumePath(name)
 	if _, err := os.Stat(path); err == nil {
-		return nil, fmt.Errorf("el volumen %q ya existe", name)
+		return nil, fmt.Errorf("volume %q already exists", name)
 	}
 
 	// Se construye en .tmp y se renombra: existir tiene que implicar estar
@@ -58,7 +58,7 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 	_ = os.Remove(tmp)
 	if err := createVolumeImage(ctx, tmp, sizeMiB); err != nil {
 		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("formateando el volumen: %w", err)
+		return nil, fmt.Errorf("formatting volume: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
@@ -101,7 +101,7 @@ func (m *Manager) Volumes() []*api.Volume {
 func (m *Manager) statVolume(name string) (*api.Volume, error) {
 	fi, err := os.Stat(m.volumePath(name))
 	if err != nil {
-		return nil, fmt.Errorf("no existe el volumen %q", name)
+		return nil, fmt.Errorf("volume %q not found", name)
 	}
 	return &api.Volume{
 		Name:      name,
@@ -162,12 +162,12 @@ func (m *Manager) volumeUsers() map[string]volumeUse {
 // tiene montado le corrompe el sistema de ficheros sin avisar.
 func (m *Manager) RemoveVolume(name string) error {
 	if users := m.volumeUsers()[name].all(); len(users) > 0 {
-		return fmt.Errorf("el volumen %q lo usan %d máquina(s): %s",
+		return fmt.Errorf("volume %q is used by %d machine(s): %s",
 			name, len(users), strings.Join(users, ", "))
 	}
 	if err := os.Remove(m.volumePath(name)); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("no existe el volumen %q", name)
+			return fmt.Errorf("volume %q not found", name)
 		}
 		return err
 	}
@@ -207,7 +207,7 @@ func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
 		return nil, nil
 	}
 	if len(want) > api.MaxVolumes {
-		return nil, fmt.Errorf("son %d volúmenes y el máximo es %d: cada uno es un disco más",
+		return nil, fmt.Errorf("%d volumes requested but the maximum is %d: each one is another disk",
 			len(want), api.MaxVolumes)
 	}
 
@@ -218,19 +218,19 @@ func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
 
 	for _, v := range want {
 		if !reVolume.MatchString(v.Name) {
-			return nil, fmt.Errorf("nombre de volumen inválido %q", v.Name)
+			return nil, fmt.Errorf("invalid volume name %q", v.Name)
 		}
 		// El mismo volumen dos veces en la MISMA microVM es un doble montaje
 		// tan malo como entre dos máquinas distintas, y además se le escaparía
 		// a la comprobación de abajo: la máquina aún no está en byID.
 		if vistos[v.Name] {
-			return nil, fmt.Errorf("el volumen %q aparece dos veces: un disco no se monta dos veces", v.Name)
+			return nil, fmt.Errorf("volume %q appears twice: a disk cannot be mounted twice", v.Name)
 		}
 		vistos[v.Name] = true
 
 		p := m.volumePath(v.Name)
 		if _, err := os.Stat(p); err != nil {
-			return nil, fmt.Errorf("no existe el volumen %q: créalo con `kling volume create %s`", v.Name, v.Name)
+			return nil, fmt.Errorf("volume %q not found: create it with `kling volume create %s`", v.Name, v.Name)
 		}
 
 		u := inUse[v.Name]
@@ -239,14 +239,14 @@ func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
 			// Hay escritor: no entra nadie más, ni siquiera a leer. Un lector
 			// vería un sistema de ficheros cambiando bajo sus pies, con los
 			// metadatos que leyó ya obsoletos.
-			return nil, fmt.Errorf("el volumen %q lo tiene montado %s en ESCRITURA.\n"+
-				"Mientras alguien escribe no puede entrar nadie más, ni a leer: párala antes",
+			return nil, fmt.Errorf("volume %q is mounted by %s in WRITE mode.\n"+
+				"While someone is writing, no one else can enter, not even to read: stop it first",
 				v.Name, strings.Join(u.writers, ", "))
 		case !v.ReadOnly && len(u.readers) > 0:
 			// El "cómo" va con la sintaxis exacta: un error que dice qué pasa
 			// pero no qué escribir obliga a ir a buscarlo a la documentación.
-			return nil, fmt.Errorf("el volumen %q lo están leyendo %d máquina(s): %s.\n"+
-				"Para escribir hace falta tenerlo en exclusiva; o léelo tú también:  -volume %s:ro",
+			return nil, fmt.Errorf("volume %q is being read by %d machine(s): %s.\n"+
+				"Writing requires exclusive access; or read it too:  -volume %s:ro",
 				v.Name, len(u.readers), strings.Join(u.readers, ", "), v.Name)
 		}
 
@@ -259,12 +259,12 @@ func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
 		// dos dentro de un punto de montaje partiría la lista y el invitado
 		// montaría los volúmenes cruzados, o en ningún sitio.
 		if !strings.HasPrefix(mp, "/") || strings.ContainsAny(mp, " \t\"',") {
-			return nil, fmt.Errorf("punto de montaje inválido %q: ruta absoluta, sin espacios ni comas", mp)
+			return nil, fmt.Errorf("invalid mount point %q: absolute path, no spaces or commas", mp)
 		}
 		// Dos volúmenes en el mismo punto: el segundo taparía al primero, que
 		// quedaría montado y fuera de alcance.
 		if puntos[mp] {
-			return nil, fmt.Errorf("dos volúmenes montados en %s: el segundo taparía al primero", mp)
+			return nil, fmt.Errorf("two volumes mounted at %s: the second would shadow the first", mp)
 		}
 		puntos[mp] = true
 
@@ -377,11 +377,11 @@ func repairVolume(ctx context.Context, path string) {
 	}
 	// e2fsck sale con 1 cuando ARREGLÓ algo: es un éxito, no un fallo.
 	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
-		log.Printf("volumen %s: reparado antes de montar: %s",
+		log.Printf("volume %s: repaired before mounting: %s",
 			filepath.Base(path), strings.TrimSpace(string(out)))
 		return
 	}
-	log.Printf("volumen %s: e2fsck no pudo repasarlo (%v); lo monto igualmente",
+	log.Printf("volume %s: e2fsck could not check it (%v); mounting anyway",
 		filepath.Base(path), err)
 }
 
@@ -427,7 +427,7 @@ func (m *Manager) acquireVolumes(mc *api.Machine) error {
 	defer cancel()
 	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort))
 	if err := waitGuest(ctx, base, 20*time.Second); err != nil {
-		return fmt.Errorf("el invitado no empezó a escuchar para montar sus volúmenes: %w", err)
+		return fmt.Errorf("guest did not start listening to mount its volumes: %w", err)
 	}
 	return m.guestVolumeOp(mc, "acquire", 30*time.Second)
 }
@@ -445,7 +445,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("pidiendo al invitado que %s sus volúmenes: %w", op, err)
+		return fmt.Errorf("asking guest to %s its volumes: %w", op, err)
 	}
 	defer resp.Body.Close()
 	// El código SÍ se mira, al contrario que en el vaciado: un puente antiguo no
@@ -454,10 +454,10 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("el puente de esta imagen no sabe %s volúmenes: "+
-				"es anterior a los snapshots sin montar. Ponlo al día con `kling images refresh`", op)
+			return fmt.Errorf("this image's bridge does not know how to %s volumes: "+
+				"it predates unmounted snapshots. Update it with `kling images refresh`", op)
 		}
-		return fmt.Errorf("el invitado no pudo %s sus volúmenes: %s", op, strings.TrimSpace(string(b)))
+		return fmt.Errorf("guest could not %s its volumes: %s", op, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
@@ -488,7 +488,7 @@ func (m *Manager) flushVolume(mc *api.Machine) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("%s: el invitado no vació sus volúmenes antes de morir: %v", mc.Name, err)
+		log.Printf("%s: guest did not flush its volumes before dying: %v", mc.Name, err)
 		return
 	}
 	resp.Body.Close()

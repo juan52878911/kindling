@@ -345,7 +345,7 @@ func mcpImport(args []string) error {
 	if _, err := c.Commit(ctx, mc.ID, service); err != nil {
 		fmt.Println("✗")
 		cleanup()
-		if strings.Contains(err.Error(), "ya existe") {
+		if strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("service %q already exists; use -force to replace it", service)
 		}
 		return fmt.Errorf("couldn't freeze it: %w", err)
