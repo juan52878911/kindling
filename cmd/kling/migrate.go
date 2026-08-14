@@ -30,17 +30,17 @@ import (
 func cmdMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	host := hostFlag(fs)
-	gwFlag := fs.String("gateway", "", "URL del gateway (por defecto: gateway.url, o se deduce del contexto)")
-	service := fs.String("service", "", "nombre del servicio en kindling, si difiere del nombre del MCP")
-	install := fs.String("install", "", "escribir la configuración: "+clientNames()+", o `all`")
-	tokenFlag := fs.String("token", "", "token del gateway (por defecto: gateway.token)")
+	gwFlag := fs.String("gateway", "", "gateway URL (default: gateway.url, or inferred from context)")
+	service := fs.String("service", "", "service name in kindling, if it differs from the MCP name")
+	install := fs.String("install", "", "write the configuration: "+clientNames()+", or `all`")
+	tokenFlag := fs.String("token", "", "gateway token (default: gateway.token)")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("uso: kling migrate <nombre-del-mcp> [-service <servicio>] -install <cliente>\n" +
-			"  <nombre-del-mcp> es como lo referencian tus skills/config; se conserva para no reescribirlas.\n" +
-			"  -service solo si el servicio se importó en kindling con OTRO nombre.")
+		return fmt.Errorf("usage: kling migrate <mcp-name> [-service <service>] -install <client>\n" +
+			"  <mcp-name> is how your skills/config reference it; it's kept so they don't need rewriting.\n" +
+			"  -service only if the service was imported into kindling under a DIFFERENT name.")
 	}
 	mcp := fs.Arg(0) // el nombre que la skill referencia -> se CONSERVA como clave de la entrada
 
@@ -51,28 +51,28 @@ func cmdMigrate(args []string) error {
 	entryName, url := migrateTarget(mcp, *service, gw)
 	svc := config.Or(*service, mcp)
 
-	fmt.Printf("Migrando el MCP %q → kindling (servicio %q)\n", mcp, svc)
-	fmt.Printf("Endpoint:  %s   (por-servicio: conserva los nombres de las herramientas)\n", url)
-	fmt.Printf("Entrada:   %q   (mismo nombre que ya usan tus skills → NO hay que reescribirlas)\n", entryName)
+	fmt.Printf("Migrating MCP %q → kindling (service %q)\n", mcp, svc)
+	fmt.Printf("Endpoint:  %s   (per-service: preserves tool names)\n", url)
+	fmt.Printf("Entry:     %q   (same name your skills already use → no need to rewrite them)\n", entryName)
 
 	// Verificarlo de verdad es la garantía del drop-in: si el endpoint no responde
 	// o da 0 herramientas, la skill fallaría DENTRO del agente, que es el peor
 	// sitio para descubrirlo.
 	info, tools, err := probeMCP(url, token)
 	if err != nil {
-		fmt.Printf("Estado:    ✗ %v\n\n", err)
-		fmt.Println("¿Está importado el servicio y arrancado el gateway en el host del daemon?")
+		fmt.Printf("Status:    ✗ %v\n\n", err)
+		fmt.Println("Is the service imported and the gateway running on the daemon's host?")
 		fmt.Printf("  kling mcp import %s -image %s\n", svc, svc)
 		fmt.Println("  kling gateway -listen 0.0.0.0:8080")
 		if *install == "" {
 			return nil
 		}
-		fmt.Println("\nAviso: escribo la configuración igual (el gateway puede estar caído ahora),")
-		fmt.Println("pero comprueba que el servicio responde antes de confiar en la skill.")
+		fmt.Println("\nWarning: writing the configuration anyway (the gateway may be down right now),")
+		fmt.Println("but check that the service responds before relying on the skill.")
 	} else {
-		fmt.Printf("Estado:    ✓ %s · %d herramienta(s), con su nombre ORIGINAL: %s\n",
+		fmt.Printf("Status:    ✓ %s · %d tool(s), with their ORIGINAL name(s): %s\n",
 			info, len(tools), strings.Join(tools, ", "))
-		fmt.Printf("           tus skills las siguen encontrando bajo el servidor %q, igual que antes.\n", entryName)
+		fmt.Printf("           your skills still find them under server %q, same as before.\n", entryName)
 	}
 	fmt.Println()
 
@@ -80,13 +80,13 @@ func cmdMigrate(args []string) error {
 		if err := installConfig(*install, entryName, url, token); err != nil {
 			return err
 		}
-		fmt.Printf("\n✓ %q lo sirve ahora kindling en una microVM aislada, sin cambiar la skill.\n", mcp)
+		fmt.Printf("\n✓ %q is now served by kindling in an isolated microVM, without changing the skill.\n", mcp)
 		return nil
 	}
 
 	printSnippets(entryName, url, token)
-	fmt.Printf("\nInstalación automática:\n")
-	fmt.Printf("  kling migrate %s -install all       (todos los clientes detectados)\n", mcp)
+	fmt.Printf("\nAutomatic installation:\n")
+	fmt.Printf("  kling migrate %s -install all       (all detected clients)\n", mcp)
 	fmt.Printf("  kling migrate %s -install opencode\n", mcp)
 	return nil
 }

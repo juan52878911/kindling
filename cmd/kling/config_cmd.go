@@ -29,7 +29,7 @@ func cmdContext(args []string) error {
 	case "rm", "remove":
 		return contextRemove(rest)
 	default:
-		return fmt.Errorf("uso: kling context [ls|use <nombre>|add <nombre> <host>|rm <nombre>]")
+		return fmt.Errorf("usage: kling context [ls|use <name>|add <name> <host>|rm <name>]")
 	}
 }
 
@@ -39,14 +39,14 @@ func contextList() error {
 		return err
 	}
 	if len(cfg.Contexts) == 0 {
-		fmt.Println("Sin contextos. Añade uno con:")
-		fmt.Println("  kling context add lab ssh://usuario@host")
-		fmt.Printf("\nSin contexto activo se usa el socket local (%s).\n", transport.DefaultSocket)
+		fmt.Println("No contexts. Add one with:")
+		fmt.Println("  kling context add lab ssh://user@host")
+		fmt.Printf("\nWith no active context the local socket is used (%s).\n", transport.DefaultSocket)
 		return nil
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "\tNOMBRE\tHOST\tDESCRIPCIÓN")
+	fmt.Fprintln(tw, "\tNAME\tHOST\tDESCRIPTION")
 	for _, n := range cfg.ContextNames() {
 		mark := " "
 		if n == cfg.CurrentContext {
@@ -59,14 +59,14 @@ func contextList() error {
 		return err
 	}
 	if v := os.Getenv("KLING_HOST"); v != "" {
-		fmt.Printf("\nOJO: $KLING_HOST=%s tiene prioridad sobre el contexto activo.\n", v)
+		fmt.Printf("\nNOTE: $KLING_HOST=%s takes priority over the active context.\n", v)
 	}
 	return nil
 }
 
 func contextUse(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("uso: kling context use <nombre>")
+		return fmt.Errorf("usage: kling context use <name>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -78,24 +78,24 @@ func contextUse(args []string) error {
 		if err := cfg.Save(); err != nil {
 			return err
 		}
-		fmt.Printf("sin contexto: se usará el socket local (%s)\n", transport.DefaultSocket)
+		fmt.Printf("no context: the local socket will be used (%s)\n", transport.DefaultSocket)
 		return nil
 	}
 	if _, ok := cfg.Contexts[name]; !ok {
-		return fmt.Errorf("no existe el contexto %q (mira `kling context ls`)", name)
+		return fmt.Errorf("context %q does not exist (see `kling context ls`)", name)
 	}
 	cfg.CurrentContext = name
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("contexto activo: %s (%s)\n", name, cfg.Contexts[name].Host)
+	fmt.Printf("active context: %s (%s)\n", name, cfg.Contexts[name].Host)
 	return nil
 }
 
 func contextAdd(args []string) error {
 	fs := flag.NewFlagSet("context add", flag.ExitOnError)
-	desc := fs.String("description", "", "descripción")
-	use := fs.Bool("use", true, "activarlo tras añadirlo")
+	desc := fs.String("description", "", "description")
+	use := fs.Bool("use", true, "activate it after adding")
 
 	// El paquete flag deja de parsear en el primer argumento posicional, así que
 	// `context add lab ssh://... -description X` perdería el flag en silencio.
@@ -104,8 +104,8 @@ func contextAdd(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("uso: kling context add <nombre> <host>\n" +
-			"  host: ssh://usuario@maquina  o  /run/kling.sock")
+		return fmt.Errorf("usage: kling context add <name> <host>\n" +
+			"  host: ssh://user@machine  or  /run/kling.sock")
 	}
 	name, host := fs.Arg(0), fs.Arg(1)
 
@@ -121,21 +121,21 @@ func contextAdd(args []string) error {
 		return err
 	}
 
-	fmt.Printf("contexto %q -> %s\n", name, host)
+	fmt.Printf("context %q -> %s\n", name, host)
 	// Comprobarlo aquí ahorra descubrir el error en la primera orden de verdad.
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	if info, err := api.NewClient(host).Info(ctx); err != nil {
-		fmt.Printf("aviso: no alcanzo el daemon todavía: %v\n", err)
+		fmt.Printf("warning: cannot reach the daemon yet: %v\n", err)
 	} else {
-		fmt.Printf("daemon %s alcanzado, %d máquinas\n", info.Version, info.Machines)
+		fmt.Printf("daemon %s reached, %d machines\n", info.Version, info.Machines)
 	}
 	return nil
 }
 
 func contextRemove(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("uso: kling context rm <nombre>")
+		return fmt.Errorf("usage: kling context rm <name>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -143,7 +143,7 @@ func contextRemove(args []string) error {
 	}
 	name := args[0]
 	if _, ok := cfg.Contexts[name]; !ok {
-		return fmt.Errorf("no existe el contexto %q", name)
+		return fmt.Errorf("context %q does not exist", name)
 	}
 	delete(cfg.Contexts, name)
 	if cfg.CurrentContext == name {
@@ -200,8 +200,8 @@ func cmdConfig(args []string) error {
 		return nil
 	case "set":
 		if len(args) < 3 {
-			return fmt.Errorf("uso: kling config set <clave> <valor>\n" +
-				"  p. ej.: kling config set defaults.image min")
+			return fmt.Errorf("usage: kling config set <key> <value>\n" +
+				"  e.g.: kling config set defaults.image min")
 		}
 		cfg, err := config.Load()
 		if err != nil {
@@ -220,7 +220,7 @@ func cmdConfig(args []string) error {
 		fmt.Printf("%s = %s\n", args[1], valueOf(cfg, args[1]))
 		return nil
 	default:
-		return fmt.Errorf("uso: kling config [show|path|set <clave> <valor>]")
+		return fmt.Errorf("usage: kling config [show|path|set <key> <value>]")
 	}
 }
 
@@ -240,18 +240,18 @@ func configShow() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("fichero:  %s\n", config.Path())
+	fmt.Printf("file:     %s\n", config.Path())
 	if _, err := os.Stat(config.Path()); os.IsNotExist(err) {
-		fmt.Println("          (aún no existe; se crea al escribir algo)")
+		fmt.Println("          (does not exist yet; created on first write)")
 	}
 	ctxName := cfg.CurrentContext
 	if ctxName == "" {
-		ctxName = "(ninguno: socket local)"
+		ctxName = "(none: local socket)"
 	}
-	fmt.Printf("contexto: %s\n\n", ctxName)
+	fmt.Printf("context:  %s\n\n", ctxName)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "CLAVE\tVALOR")
+	fmt.Fprintln(tw, "KEY\tVALUE")
 	for _, kv := range cfg.Keys() {
 		v := kv[1]
 		if v == "" {

@@ -33,7 +33,7 @@ func cmdMemory(args []string) error {
 	case "install-service":
 		return memoryInstallService(rest)
 	default:
-		return fmt.Errorf("uso: kling memory [status|enable|disable|install-service]")
+		return fmt.Errorf("usage: kling memory [status|enable|disable|install-service]")
 	}
 }
 
@@ -46,33 +46,33 @@ func memoryStatus(args []string) error {
 	cfg := loadConfig()
 
 	if !cfg.Memory.Enabled {
-		fmt.Println("Memoria de uso: DESACTIVADA")
+		fmt.Println("Usage memory: DISABLED")
 		fmt.Println()
-		fmt.Println("Cuando se activa, kindling apunta qué herramienta resolvió cada petición")
-		fmt.Println("y usa ese historial para ordenar mejor las búsquedas siguientes.")
+		fmt.Println("When enabled, kindling notes which tool resolved each request")
+		fmt.Println("and uses that history to rank later searches better.")
 		fmt.Println()
-		fmt.Println("Actívala con:")
-		fmt.Println("  kling memory enable                 usa engram, que viene con kling")
-		fmt.Println("  kling memory enable -service <svc>  usa otro servicio ya enlazado")
+		fmt.Println("Enable it with:")
+		fmt.Println("  kling memory enable                 uses engram, which ships with kling")
+		fmt.Println("  kling memory enable -service <svc>  uses another already-linked service")
 		return nil
 	}
 
-	fmt.Printf("Memoria de uso: ACTIVA sobre %q\n", cfg.Memory.Service)
+	fmt.Printf("Usage memory: ACTIVE on %q\n", cfg.Memory.Service)
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	links, err := api.NewClient(cfg.Host(*host)).Links(ctx)
 	if err != nil {
-		fmt.Printf("  aviso: no alcanzo el daemon (%v)\n", err)
+		fmt.Printf("  warning: can't reach the daemon (%v)\n", err)
 		return nil
 	}
 	for _, l := range links {
 		if l.Service() == cfg.Memory.Service || l.Name == cfg.Memory.Service {
-			fmt.Printf("  enlazado a %s · %d herramienta(s)\n", l.URL, len(l.Tools))
+			fmt.Printf("  linked to %s · %d tool(s)\n", l.URL, len(l.Tools))
 			return nil
 		}
 	}
-	fmt.Printf("  ⚠ %q no está enlazado. Enlázalo:\n", cfg.Memory.Service)
+	fmt.Printf("  ⚠ %q is not linked. Link it:\n", cfg.Memory.Service)
 	fmt.Printf("     kling mcp link %s <url>\n", cfg.Memory.Service)
 	return nil
 }
@@ -80,9 +80,9 @@ func memoryStatus(args []string) error {
 func memoryEnable(args []string) error {
 	fs := flag.NewFlagSet("memory enable", flag.ExitOnError)
 	host := hostFlag(fs)
-	service := fs.String("service", "engram", "servicio MCP donde guardar el historial")
-	listen := fs.String("listen", "0.0.0.0:9100", "dónde exponer el servidor local, si hay que envolverlo")
-	cmdline := fs.String("cmd", "engram mcp --tools=agent", "cómo arrancar el servidor de memoria si habla stdio")
+	service := fs.String("service", "engram", "MCP service where the history is stored")
+	listen := fs.String("listen", "0.0.0.0:9100", "where to expose the local server, if it needs wrapping")
+	cmdline := fs.String("cmd", "engram mcp --tools=agent", "how to start the memory server if it speaks stdio")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func memoryEnable(args []string) error {
 	// ¿Ya está enlazado? Entonces solo hay que encender el interruptor.
 	links, err := c.Links(ctx)
 	if err != nil {
-		return fmt.Errorf("no alcanzo el daemon: %w", err)
+		return fmt.Errorf("can't reach the daemon: %w", err)
 	}
 	for _, l := range links {
 		if l.Service() == *service || l.Name == *service {
@@ -106,26 +106,26 @@ func memoryEnable(args []string) error {
 
 	// No lo está. Si el servidor habla stdio hay que exponerlo por HTTP, y para
 	// eso sirve el mismo puente que usan las microVMs.
-	fmt.Printf("%q no está enlazado todavía.\n\n", *service)
+	fmt.Printf("%q is not linked yet.\n\n", *service)
 
 	bin := bridgePath()
 	if bin == "" {
-		return fmt.Errorf("no encuentro kling-bridge. Compílalo con:\n  make bridge-local")
+		return fmt.Errorf("can't find kling-bridge. Build it with:\n  make bridge-local")
 	}
 	name := strings.Fields(*cmdline)[0]
 	if _, err := exec.LookPath(name); err != nil {
-		return fmt.Errorf("no encuentro %q en el PATH.\n"+
-			"Instálalo, o usa otro servidor:  kling memory enable -service <svc> -cmd '<comando>'", name)
+		return fmt.Errorf("can't find %q in PATH.\n"+
+			"Install it, or use another server:  kling memory enable -service <svc> -cmd '<command>'", name)
 	}
 
-	fmt.Printf("Para exponerlo por HTTP, deja esto corriendo en otra terminal:\n\n")
+	fmt.Printf("To expose it over HTTP, leave this running in another terminal:\n\n")
 	fmt.Printf("  %s -listen %s -- %s\n\n", bin, *listen, *cmdline)
 	if runtime.GOOS == "darwin" {
-		fmt.Printf("O instálalo como servicio permanente:\n")
+		fmt.Printf("Or install it as a permanent service:\n")
 		fmt.Printf("  kling memory install-service\n\n")
 	}
 	ip := localIP()
-	fmt.Printf("Y luego enlázalo y actívalo:\n")
+	fmt.Printf("Then link it and enable it:\n")
 	fmt.Printf("  kling mcp link %s http://%s:%s/mcp\n", *service, ip, portOf(*listen))
 	fmt.Printf("  kling memory enable\n")
 	return nil
@@ -137,11 +137,11 @@ func finishEnable(cfg *config.Config, service, url string, tools int) error {
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("Memoria de uso ACTIVADA sobre %q (%s, %d herramienta(s)).\n\n", service, url, tools)
-	fmt.Println("A partir de ahora el gateway apunta qué herramienta resolvió cada petición")
-	fmt.Println("y pone delante lo que ya funcionó al buscar.")
+	fmt.Printf("Usage memory ENABLED on %q (%s, %d tool(s)).\n\n", service, url, tools)
+	fmt.Println("From now on the gateway notes which tool resolved each request")
+	fmt.Println("and puts what already worked at the front of searches.")
 	fmt.Println()
-	fmt.Println("Reinicia el gateway para que lo tome:")
+	fmt.Println("Restart the gateway to pick it up:")
 	fmt.Println("  sudo systemctl restart kling-gateway")
 	return nil
 }
@@ -156,8 +156,8 @@ func memoryDisable(args []string) error {
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	fmt.Println("Memoria de uso desactivada. El servicio enlazado sigue disponible como")
-	fmt.Println("herramienta normal; solo deja de escribirse el historial.")
+	fmt.Println("Usage memory disabled. The linked service is still available as a")
+	fmt.Println("regular tool; only the history stops being written.")
 	return nil
 }
 
@@ -194,24 +194,24 @@ func localIP() string {
 	if ip := strings.TrimSpace(string(out)); err == nil && ip != "" {
 		return ip
 	}
-	return "<tu-ip>"
+	return "<your-ip>"
 }
 
 // memoryInstallService deja el puente local como servicio permanente, para que
 // el servidor de memoria no dependa de una terminal abierta.
 func memoryInstallService(args []string) error {
 	fs := flag.NewFlagSet("memory install-service", flag.ExitOnError)
-	listen := fs.String("listen", "0.0.0.0:9100", "dónde escuchar")
-	cmdline := fs.String("cmd", "engram mcp --tools=agent", "servidor MCP de stdio a envolver")
+	listen := fs.String("listen", "0.0.0.0:9100", "where to listen")
+	cmdline := fs.String("cmd", "engram mcp --tools=agent", "stdio MCP server to wrap")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	bin := bridgePath()
 	if bin == "" {
-		return fmt.Errorf("no encuentro kling-bridge. Compílalo con:\n  make bridge-local && make install")
+		return fmt.Errorf("can't find kling-bridge. Build it with:\n  make bridge-local && make install")
 	}
 	if runtime.GOOS != "darwin" {
-		return fmt.Errorf("por ahora solo macOS; en Linux usa un unit de systemd:\n"+
+		return fmt.Errorf("macOS only for now; on Linux use a systemd unit:\n"+
 			"  ExecStart=%s -listen %s -- %s", bin, *listen, *cmdline)
 	}
 
@@ -229,7 +229,7 @@ func memoryInstallService(args []string) error {
 	if abs, err := exec.LookPath(parts[0]); err == nil {
 		parts[0] = abs
 	} else {
-		return fmt.Errorf("no encuentro %q en el PATH: instálalo o dame la ruta completa con -cmd", parts[0])
+		return fmt.Errorf("can't find %q in PATH: install it or provide the full path with -cmd", parts[0])
 	}
 
 	var argsXML strings.Builder
@@ -263,11 +263,11 @@ func memoryInstallService(args []string) error {
 		return fmt.Errorf("launchctl load: %v: %s", err, out)
 	}
 
-	fmt.Printf("Servicio instalado: %s\n", plist)
-	fmt.Printf("  expone: %s\n", *cmdline)
-	fmt.Printf("  en:     http://%s:%s/mcp\n", localIP(), portOf(*listen))
-	fmt.Printf("  log:    ~/Library/Logs/kindling-bridge.log\n\n")
-	fmt.Printf("Arranca solo al iniciar sesión. Para quitarlo:\n")
+	fmt.Printf("Service installed: %s\n", plist)
+	fmt.Printf("  exposes: %s\n", *cmdline)
+	fmt.Printf("  at:      http://%s:%s/mcp\n", localIP(), portOf(*listen))
+	fmt.Printf("  log:     ~/Library/Logs/kindling-bridge.log\n\n")
+	fmt.Printf("Starts automatically at login. To remove it:\n")
 	fmt.Printf("  launchctl unload %s && rm %s\n", plist, plist)
 	return nil
 }
