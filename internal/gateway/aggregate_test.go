@@ -124,13 +124,13 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 		}
 		instr := a.instructions(ctx, s)
 
-		if !strings.Contains(instr, "engram (externo)") {
+		if !strings.Contains(instr, "engram (external)") {
 			t.Errorf("instructions debería marcar engram como externo:\n%s", instr)
 		}
-		if strings.Contains(instr, "files (externo)") {
+		if strings.Contains(instr, "files (external)") {
 			t.Errorf("files no debería marcarse como externo:\n%s", instr)
 		}
-		if !strings.Contains(instr, "Los servicios marcados como (externo)") {
+		if !strings.Contains(instr, "Services marked (external)") {
 			t.Errorf("instructions debería explicar el sufijo (externo):\n%s", instr)
 		}
 	})
@@ -166,7 +166,7 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 
 		gw.Handler("").ServeHTTP(rec, req)
 
-		if rec.Code == http.StatusBadGateway && strings.Contains(rec.Body.String(), "no hay snapshot") {
+		if rec.Code == http.StatusBadGateway && strings.Contains(rec.Body.String(), "no snapshot") {
 			t.Fatalf("no debería devolver 'no hay snapshot': %s", rec.Body.String())
 		}
 		if engramHits.Load() == 0 {

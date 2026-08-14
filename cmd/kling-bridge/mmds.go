@@ -74,8 +74,8 @@ func setupMMDSRoute() {
 		// añadir rutas (no viven ahí), así que aquí no hay plan B limpio: se deja
 		// constancia para que se resuelva en el build de la imagen o se valide que
 		// la ruta por defecto basta.
-		log.Printf("mmds: no encuentro `ip` en el invitado; no puedo fijar la ruta a 169.254.169.254 "+
-			"(si el servicio no usa secretos por MMDS, es inocuo): %v", err)
+		log.Printf("mmds: cannot find `ip` in the guest; cannot set the route to 169.254.169.254 "+
+			"(if the service doesn't use MMDS secrets, this is harmless): %v", err)
 		return
 	}
 	// ip route add 169.254.169.254/32 dev eth0
@@ -87,11 +87,11 @@ func setupMMDSRoute() {
 		if strings.Contains(msg, "File exists") {
 			return
 		}
-		log.Printf("mmds: no pude fijar la ruta a 169.254.169.254 por eth0 (%v: %s); "+
-			"si este servicio no usa secretos por MMDS, es inocuo", err, msg)
+		log.Printf("mmds: could not set the route to 169.254.169.254 via eth0 (%v: %s); "+
+			"if this service doesn't use MMDS secrets, this is harmless", err, msg)
 		return
 	}
-	log.Printf("mmds: ruta a 169.254.169.254 por eth0 lista")
+	log.Printf("mmds: route to 169.254.169.254 via eth0 ready")
 }
 
 // fetchMMDS lee el store completo del metadata service con el flujo v2. Devuelve
@@ -146,7 +146,7 @@ func fetchMMDS() *mmdsStore {
 	if json.Unmarshal(body, &store) != nil {
 		// El store existe pero no encaja con el esquema esperado: lo ignoramos en
 		// vez de tumbar la sesión. Un aviso, porque sí indica un store mal formado.
-		log.Printf("mmds: store presente pero no sigue el esquema {env,sessions}; lo ignoro")
+		log.Printf("mmds: store present but doesn't follow the {env,sessions} schema; ignoring it")
 		return nil
 	}
 	return &store
@@ -183,6 +183,6 @@ func (b *bridge) sessionEnv(id string) []string {
 	for k, v := range extra {
 		env = append(env, k+"="+v)
 	}
-	log.Printf("sesión %s: %d secreto(s) de MMDS inyectados en el entorno", id[:8], len(extra))
+	log.Printf("session %s: %d MMDS secret(s) injected into the environment", id[:8], len(extra))
 	return env
 }

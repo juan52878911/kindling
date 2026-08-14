@@ -93,7 +93,7 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "solo POST y DELETE", http.StatusMethodNotAllowed)
+		http.Error(w, "only POST and DELETE", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -103,7 +103,7 @@ func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		Params json.RawMessage `json:"params"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
@@ -158,7 +158,7 @@ func (a *aggregator) dispatch(ctx context.Context, s *aggSession, method string,
 		return a.callTool(ctx, s, params)
 
 	default:
-		return nil, &rpcFault{-32601, "método no soportado: " + method}
+		return nil, &rpcFault{-32601, "unsupported method: " + method}
 	}
 }
 
@@ -170,11 +170,11 @@ func (a *aggregator) dispatch(ctx context.Context, s *aggSession, method string,
 // directamente a describe_tool o a call_tool.
 func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	if s.mode == modeExpand {
-		return "Herramientas de varios servidores MCP, con nombres servicio.herramienta."
+		return "Tools from several MCP servers, with service.tool names."
 	}
 
 	var b strings.Builder
-	b.WriteString("Herramientas disponibles, agrupadas por servicio:\n\n")
+	b.WriteString("Available tools, grouped by service:\n\n")
 
 	tools, _ := a.cat.all(ctx, s.services)
 	external := a.cat.externalSet(ctx)
@@ -189,33 +189,32 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	for _, svc := range order {
 		mark := ""
 		if external[svc] {
-			mark = " (externo)"
+			mark = " (external)"
 		}
 		if a.ephemeral && a.isStateful(ctx, svc) {
-			mark += " [recuerda entre llamadas]"
+			mark += " [remembers between calls]"
 		}
 		fmt.Fprintf(&b, "%s%s: %s\n", svc, mark, strings.Join(bySvc[svc], ", "))
 	}
 
-	b.WriteString("\nLlámalas con call_tool y el nombre completo servicio.herramienta " +
-		"(p. ej. filesystem.read_text_file). Si no conoces sus argumentos, pide primero " +
-		"describe_tool. find_tools sirve para buscar por palabras clave.")
+	b.WriteString("\nCall them with call_tool and the full service.tool name " +
+		"(e.g. filesystem.read_text_file). If you don't know its arguments, ask " +
+		"describe_tool first. find_tools is for searching by keyword.")
 
 	// Aviso explícito para los servidores externos: mezclarlos en una misma lista
 	// con los snapshots sin marcar hacía creer al modelo que `/mcp/engram` o
 	// `engram.*` iban a levantar una microVM, y al fallar devolvía un
 	// "no hay snapshot" que no le decía nada.
 	if len(external) > 0 {
-		b.WriteString("\n\nLos servicios marcados como (externo) no corren en una microVM: " +
-			"viven donde su dueño los aloja y kindling solo los enruta. Se llaman igual " +
-			"que los demás, con `call_tool servicio.herramienta`, o directamente a su " +
-			"endpoint `/mcp/<servicio>`.")
+		b.WriteString("\n\nServices marked (external) do not run in a microVM: " +
+			"they live wherever their owner hosts them and kindling only routes to them. " +
+			"They are called the same way as the rest, with `call_tool service.tool`, " +
+			"or directly at their `/mcp/<service>` endpoint.")
 	}
 
 	if a.ephemeral {
-		b.WriteString("\n\nCada llamada corre en una máquina aislada que se destruye al " +
-			"terminar, así que las herramientas marcadas como sin estado NO recuerdan nada " +
-			"entre llamadas.")
+		b.WriteString("\n\nEach call runs in an isolated machine that is destroyed when " +
+			"it finishes, so tools marked stateless do NOT remember anything between calls.")
 	}
 	return b.String()
 }
@@ -228,37 +227,37 @@ func (a *aggregator) metaTools() []map[string]any {
 	return []map[string]any{
 		{
 			"name": "find_tools",
-			"description": "Busca herramientas por palabras clave en todos los servicios. Devuelve nombres " +
-				"y descripciones, SIN los esquemas de argumentos, para no gastar contexto.",
+			"description": "Search for tools by keyword across every service. Returns names " +
+				"and descriptions, WITHOUT the argument schemas, to save context.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query":   map[string]any{"type": "string", "description": "qué necesitas hacer"},
-					"service": map[string]any{"type": "string", "description": "limitar a un servicio (opcional)"},
+					"query":   map[string]any{"type": "string", "description": "what you need to do"},
+					"service": map[string]any{"type": "string", "description": "limit to one service (optional)"},
 				},
 				"required": []string{"query"},
 			},
 		},
 		{
 			"name": "describe_tool",
-			"description": "Devuelve el esquema completo de argumentos de una herramienta. " +
-				"Úsalo antes de call_tool si no conoces sus parámetros.",
+			"description": "Returns the full argument schema of a tool. " +
+				"Use it before call_tool if you don't know its parameters.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string", "description": "nombre servicio.herramienta"},
+					"name": map[string]any{"type": "string", "description": "service.tool name"},
 				},
 				"required": []string{"name"},
 			},
 		},
 		{
 			"name":        "call_tool",
-			"description": "Ejecuta una herramienta de cualquier servicio.",
+			"description": "Executes a tool from any service.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":      map[string]any{"type": "string", "description": "nombre servicio.herramienta"},
-					"arguments": map[string]any{"type": "object", "description": "argumentos de la herramienta"},
+					"name":      map[string]any{"type": "string", "description": "service.tool name"},
+					"arguments": map[string]any{"type": "object", "description": "the tool's arguments"},
 				},
 				"required": []string{"name"},
 			},
@@ -327,7 +326,7 @@ func (a *aggregator) callTool(ctx context.Context, s *aggSession, params json.Ra
 			if strings.Contains(p.Name, ".") {
 				return a.forward(ctx, s, p.Name, p.Arguments)
 			}
-			return nil, &rpcFault{-32602, "herramienta desconocida: " + p.Name}
+			return nil, &rpcFault{-32602, "unknown tool: " + p.Name}
 		}
 	}
 	return a.forward(ctx, s, p.Name, p.Arguments)
@@ -342,17 +341,17 @@ func (a *aggregator) doListServices(ctx context.Context, s *aggSession) (any, *r
 	for _, svc := range s.services {
 		tools, err := a.cat.toolsOf(ctx, svc)
 		if err != nil {
-			fmt.Fprintf(&sb, "%-20s (no disponible: %v)\n", svc, err)
+			fmt.Fprintf(&sb, "%-20s (unavailable: %v)\n", svc, err)
 			continue
 		}
 		names := make([]string, 0, len(tools))
 		for _, t := range tools {
 			names = append(names, t.Name)
 		}
-		fmt.Fprintf(&sb, "%-20s %d herramienta(s): %s\n", svc, len(tools), strings.Join(names, ", "))
+		fmt.Fprintf(&sb, "%-20s %d tool(s): %s\n", svc, len(tools), strings.Join(names, ", "))
 	}
 	if sb.Len() == 0 {
-		return textResult("No hay servicios disponibles."), nil
+		return textResult("No services available."), nil
 	}
 	return textResult(sb.String()), nil
 }
@@ -367,7 +366,7 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	services := s.services
 	if p.Service != "" {
 		if !contains(services, p.Service) {
-			return nil, &rpcFault{-32602, "servicio no disponible: " + p.Service}
+			return nil, &rpcFault{-32602, "service not available: " + p.Service}
 		}
 		services = []string{p.Service}
 	}
@@ -428,12 +427,12 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 	var sb strings.Builder
 	for i, h := range hits {
 		if i >= 25 {
-			fmt.Fprintf(&sb, "... y %d más; afina la búsqueda\n", len(hits)-i)
+			fmt.Fprintf(&sb, "... and %d more; narrow your search\n", len(hits)-i)
 			break
 		}
 		fmt.Fprintf(&sb, "%-28s %s\n", h.t.Qualified, h.t.Description)
 	}
-	sb.WriteString("\nUsa describe_tool para ver los argumentos, o call_tool para ejecutar.")
+	sb.WriteString("\nUse describe_tool to see the arguments, or call_tool to run it.")
 	return textResult(sb.String()), nil
 }
 
@@ -451,17 +450,17 @@ func (a *aggregator) doDescribeTool(ctx context.Context, s *aggSession, args jso
 	if len(t.Schema) > 0 {
 		schema = string(t.Schema)
 	}
-	return textResult(fmt.Sprintf("%s\n\n%s\n\nArgumentos:\n%s",
+	return textResult(fmt.Sprintf("%s\n\n%s\n\nArguments:\n%s",
 		t.Qualified, t.Description, schema)), nil
 }
 
 func (a *aggregator) lookup(ctx context.Context, s *aggSession, name string) (*Tool, *rpcFault) {
 	service, tool, ok := strings.Cut(name, ".")
 	if !ok {
-		return nil, &rpcFault{-32602, "usa el nombre cualificado servicio.herramienta, no " + name}
+		return nil, &rpcFault{-32602, "use the qualified name service.tool, not " + name}
 	}
 	if !contains(s.services, service) {
-		return nil, &rpcFault{-32602, "servicio no disponible: " + service}
+		return nil, &rpcFault{-32602, "service not available: " + service}
 	}
 	tools, err := a.cat.toolsOf(ctx, service)
 	if err != nil {
@@ -472,7 +471,7 @@ func (a *aggregator) lookup(ctx context.Context, s *aggSession, name string) (*T
 			return &tools[i], nil
 		}
 	}
-	return nil, &rpcFault{-32602, "no existe la herramienta " + name}
+	return nil, &rpcFault{-32602, "no such tool: " + name}
 }
 
 // forward ejecuta la llamada contra el servicio real.
@@ -487,7 +486,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	before := string(args)
 	args = coerceArgs(args, t.Schema)
 	if s := string(args); s != before {
-		log.Printf("%s: tipos reparados\n  recibido: %s\n  enviado:  %s",
+		log.Printf("%s: types repaired\n  received: %s\n  sent:     %s",
 			t.Qualified, trunc(before, 300), trunc(s, 300))
 	}
 
@@ -566,7 +565,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 
 	raw, err := call(sid)
 	if d := time.Since(tCall); d > 2*time.Second || dEnsure > time.Second || dLock > time.Second {
-		log.Printf("lento %s: ensure=%s candado=%s llamada=%s",
+		log.Printf("slow %s: ensure=%s lock=%s call=%s",
 			t.Qualified, dEnsure.Round(time.Millisecond), dLock.Round(time.Millisecond),
 			d.Round(time.Millisecond))
 	}
@@ -604,7 +603,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, &rpcFault{-32000, "respuesta ilegible de " + t.Service}
+		return nil, &rpcFault{-32000, "unreadable response from " + t.Service}
 	}
 	if resp.Error != nil {
 		return nil, &rpcFault{resp.Error.Code, resp.Error.Message}
@@ -640,7 +639,7 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 
 	available, err := a.cat.services(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("no puedo listar los servicios: %w", err)
+		return nil, false, fmt.Errorf("cannot list services: %w", err)
 	}
 	services := available
 	if sel := q.Get("services"); sel != "" {
@@ -651,13 +650,13 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 				continue
 			}
 			if !contains(available, want) {
-				return nil, false, fmt.Errorf("servicio %q no existe (hay: %s)", want, strings.Join(available, ", "))
+				return nil, false, fmt.Errorf("service %q not found (available: %s)", want, strings.Join(available, ", "))
 			}
 			services = append(services, want)
 		}
 	}
 	if len(services) == 0 {
-		return nil, false, fmt.Errorf("no hay servicios disponibles: crea uno con `kling commit`")
+		return nil, false, fmt.Errorf("no services available: create one with `kling commit`")
 	}
 
 	s := &aggSession{
@@ -807,7 +806,7 @@ func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *api.Link, t
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, &rpcFault{-32000, "respuesta ilegible de " + t.Service}
+		return nil, &rpcFault{-32000, "unreadable response from " + t.Service}
 	}
 	if resp.Error != nil {
 		return nil, &rpcFault{resp.Error.Code, resp.Error.Message}

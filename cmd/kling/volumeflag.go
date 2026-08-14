@@ -31,7 +31,7 @@ func (f *volumeFlag) String() string {
 
 func (f *volumeFlag) Set(s string) error {
 	if s == "" {
-		return fmt.Errorf("volumen vacío")
+		return fmt.Errorf("empty volume")
 	}
 	v := api.VolumeAttachment{}
 	// Se parte por la DERECHA para el modo, y luego por la izquierda para el
@@ -45,10 +45,10 @@ func (f *volumeFlag) Set(s string) error {
 	}
 	v.Name, v.Mount, _ = strings.Cut(rest, ":")
 	if v.Name == "" {
-		return fmt.Errorf("falta el nombre en %q; usa nombre[:/punto/montaje][:ro]", s)
+		return fmt.Errorf("missing name in %q; use name[:/mount/point][:ro]", s)
 	}
 	if v.Mount != "" && !strings.HasPrefix(v.Mount, "/") {
-		return fmt.Errorf("el punto de montaje de %q debe ser una ruta absoluta: %q", v.Name, v.Mount)
+		return fmt.Errorf("mount point of %q must be an absolute path: %q", v.Name, v.Mount)
 	}
 	*f = append(*f, v)
 	return nil
@@ -64,8 +64,8 @@ func volumeSet(vols volumeFlag, mount string, readOnly bool) ([]api.VolumeAttach
 		return nil, nil
 	}
 	if len(vols) > 1 && (mount != "" || readOnly) {
-		return nil, fmt.Errorf("-mount y -volume-ro solo valen con un volumen; con varios "+
-			"pon el punto de montaje en cada uno:  -volume %s:/ruta", vols[0].Name)
+		return nil, fmt.Errorf("-mount and -volume-ro only work with a single volume; with multiple "+
+			"volumes put the mount point on each one:  -volume %s:/path", vols[0].Name)
 	}
 	out := append([]api.VolumeAttachment(nil), vols...)
 	if len(out) == 1 {

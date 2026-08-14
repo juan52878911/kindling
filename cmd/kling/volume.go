@@ -18,7 +18,7 @@ import (
 //	kling volume populate libs -- npm install --prefix /data lodash
 func cmdVolume(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("uso: kling volume [create|ls|rm]")
+		return fmt.Errorf("usage: kling volume [create|ls|rm]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -31,19 +31,19 @@ func cmdVolume(args []string) error {
 	case "populate", "install":
 		return volumePopulate(rest)
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa create, ls, rm o populate", sub)
+		return fmt.Errorf("unknown subcommand %q: use create, ls, rm, or populate", sub)
 	}
 }
 
 func volumeCreate(args []string) error {
 	fs := flag.NewFlagSet("volume create", flag.ExitOnError)
 	host := hostFlag(fs)
-	size := fs.String("size", "1G", "tamaño lógico: 512M, 2G, 10G")
+	size := fs.String("size", "1G", "logical size: 512M, 2G, 10G")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling volume create <nombre> [-size 2G]")
+		return fmt.Errorf("usage: kling volume create <name> [-size 2G]")
 	}
 	mib, err := parseSizeMiB(*size)
 	if err != nil {
@@ -59,10 +59,10 @@ func volumeCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  creado  (%s lógicos, %s en disco)\n", v.Name, human(v.SizeBytes), human(v.UsedBytes))
-	fmt.Printf("\nEs disperso: solo ocupa lo que se escriba dentro.\n")
-	fmt.Printf("Móntalo al importar un servicio:\n")
-	fmt.Printf("  kling mcp import <servicio> -volume %s\n", v.Name)
+	fmt.Printf("%s  created  (%s logical, %s on disk)\n", v.Name, human(v.SizeBytes), human(v.UsedBytes))
+	fmt.Printf("\nIt's sparse: it only uses what gets written inside.\n")
+	fmt.Printf("Mount it when importing a service:\n")
+	fmt.Printf("  kling mcp import <service> -volume %s\n", v.Name)
 	return nil
 }
 
@@ -80,11 +80,11 @@ func volumeList(args []string) error {
 		return err
 	}
 	if len(vols) == 0 {
-		fmt.Println("Sin volúmenes. Crea uno:  kling volume create notas -size 2G")
+		fmt.Println("No volumes. Create one:  kling volume create notes -size 2G")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NOMBRE\tLÓGICO\tEN DISCO\tEN USO POR")
+	fmt.Fprintln(tw, "NAME\tLOGICAL\tON DISK\tUSED BY")
 	for _, v := range vols {
 		users := strings.Join(v.UsedBy, ", ")
 		if users == "" {
@@ -102,7 +102,7 @@ func volumeRemove(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling volume rm <nombre>")
+		return fmt.Errorf("usage: kling volume rm <name>")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -110,7 +110,7 @@ func volumeRemove(args []string) error {
 	if err := api.NewClient(hostOf(*host)).RemoveVolume(ctx, fs.Arg(0)); err != nil {
 		return err
 	}
-	fmt.Printf("%s eliminado\n", fs.Arg(0))
+	fmt.Printf("%s removed\n", fs.Arg(0))
 	return nil
 }
 
@@ -130,7 +130,7 @@ func parseSizeMiB(s string) (int, error) {
 	}
 	var n int
 	if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n <= 0 {
-		return 0, fmt.Errorf("tamaño inválido %q: usa 512M, 2G o un número en MiB", s)
+		return 0, fmt.Errorf("invalid size %q: use 512M, 2G, or a plain number in MiB", s)
 	}
 	return n * mult, nil
 }
@@ -146,9 +146,9 @@ func parseSizeMiB(s string) (int, error) {
 func volumePopulate(args []string) error {
 	fs := flag.NewFlagSet("volume populate", flag.ExitOnError)
 	host := hostFlag(fs)
-	image := fs.String("image", ToolchainImage, "imagen que trae el instalador (npm, pip...)")
-	mount := fs.String("mount", "/data", "dónde se monta el volumen dentro de la microVM")
-	mem := fs.Int("mem", 0, "memoria en MiB de la microVM de instalación")
+	image := fs.String("image", ToolchainImage, "image that provides the installer (npm, pip...)")
+	mount := fs.String("mount", "/data", "where the volume is mounted inside the microVM")
+	mem := fs.Int("mem", 0, "memory in MiB for the installation microVM")
 
 	// El "--" se separa ANTES de parsear, y no se deja en manos de flag.
 	//
@@ -167,24 +167,24 @@ func volumePopulate(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || len(cmd) == 0 {
-		return fmt.Errorf("uso: kling volume populate <nombre> [-image IMG] -- <comando>\n" +
-			"  p. ej.:  kling volume populate libs -- \\\n" +
+		return fmt.Errorf("usage: kling volume populate <name> [-image IMG] -- <command>\n" +
+			"  e.g.:  kling volume populate libs -- \\\n" +
 			"             npm install --prefix /data --ignore-scripts lodash zod\n" +
-			"  (usa la imagen `toolchain` por defecto: constrúyela con `kling images toolchain`)")
+			"  (uses the `toolchain` image by default: build it with `kling images toolchain`)")
 	}
 	name := fs.Arg(0)
 	if *image == "" {
-		return fmt.Errorf("falta -image: hace falta una imagen que traiga el instalador")
+		return fmt.Errorf("missing -image: an image that provides the installer is required")
 	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	fmt.Printf("Poblando %q dentro de una microVM de un solo uso.\n", name)
-	fmt.Printf("  imagen:   %s\n", *image)
-	fmt.Printf("  montado:  %s\n", *mount)
-	fmt.Printf("  comando:  %s\n\n", strings.Join(cmd, " "))
-	fmt.Print("  instalando (puede tardar; el código de terceros corre dentro)... ")
+	fmt.Printf("Populating %q inside a single-use microVM.\n", name)
+	fmt.Printf("  image:    %s\n", *image)
+	fmt.Printf("  mounted:  %s\n", *mount)
+	fmt.Printf("  command:  %s\n\n", strings.Join(cmd, " "))
+	fmt.Print("  installing (may take a while; third-party code runs inside)... ")
 
 	res, err := api.NewClient(hostOf(*host)).PopulateVolume(ctx, api.PopulateRequest{
 		Volume: name, Mount: *mount, Image: *image, Cmd: cmd, MemMiB: *mem,
@@ -199,14 +199,14 @@ func volumePopulate(args []string) error {
 		// está en su propia salida y recortarla obliga a repetirlo todo para
 		// verlo.
 		fmt.Fprintln(os.Stderr, res.Output)
-		return fmt.Errorf("el comando terminó con código %d", res.ExitCode)
+		return fmt.Errorf("the command exited with code %d", res.ExitCode)
 	}
 	fmt.Println("✓")
 	if res.Output != "" {
 		fmt.Println(indent(strings.TrimRight(res.Output, "\n")))
 	}
-	fmt.Printf("\n%s ocupa ahora %d MiB. Móntalo donde haga falta:\n", name, res.UsedMiB)
-	fmt.Printf("  kling mcp import <servicio> -volume %s:/libs:ro\n", name)
+	fmt.Printf("\n%s now uses %d MiB. Mount it wherever needed:\n", name, res.UsedMiB)
+	fmt.Printf("  kling mcp import <service> -volume %s:/libs:ro\n", name)
 	return nil
 }
 

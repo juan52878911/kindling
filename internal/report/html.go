@@ -52,7 +52,7 @@ func BuildWith(machines []*api.Machine, snaps []*api.Snapshot, links []*api.Link
 		if m.From != "" {
 			return m.From
 		}
-		return "(sin agrupar)"
+		return "(ungrouped)"
 	}
 
 	idx := map[string]*Group{}
@@ -169,13 +169,13 @@ func trunc(s string, n int) string {
 // names lista los nombres de herramienta en compacto: es lo barato del catálogo.
 func names(tools []api.ToolSpec) string {
 	if len(tools) == 0 {
-		return ` <span class="muted">(sin catálogo)</span>`
+		return ` <span class="muted">(no catalog)</span>`
 	}
 	ns := make([]string, 0, len(tools))
 	for _, t := range tools {
 		ns = append(ns, t.Name)
 	}
 	sort.Strings(ns)
-	return fmt.Sprintf(` — %d herramienta(s): <span class="tools">%s</span>`,
+	return fmt.Sprintf(` — %d tool(s): <span class="tools">%s</span>`,
 		len(ns), esc(strings.Join(ns, ", ")))
 }

@@ -29,7 +29,7 @@ func resolvePrivileges(username string) (*Privileges, string) {
 	}
 	u, err := user.Lookup(username)
 	if err != nil {
-		return &Privileges{}, fmt.Sprintf("usuario %q no existe: Firecracker correrá como root", username)
+		return &Privileges{}, fmt.Sprintf("user %q does not exist: Firecracker will run as root", username)
 	}
 	uid, _ := strconv.Atoi(u.Uid)
 	gid, _ := strconv.Atoi(u.Gid)
@@ -39,7 +39,7 @@ func resolvePrivileges(username string) (*Privileges, string) {
 		kvmGid, _ = strconv.Atoi(g.Gid)
 	}
 	if kvmGid < 0 {
-		return &Privileges{}, "no encuentro el grupo kvm: Firecracker correrá como root"
+		return &Privileges{}, "can't find kvm group: Firecracker will run as root"
 	}
 	return &Privileges{UID: uid, GID: gid, KVMGid: kvmGid, Enabled: true}, ""
 }
@@ -71,7 +71,7 @@ func (p *Privileges) Own(paths ...string) error {
 	}
 	for _, path := range paths {
 		if err := os.Chown(path, p.UID, p.GID); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("cediendo %s: %w", path, err)
+			return fmt.Errorf("granting %s: %w", path, err)
 		}
 	}
 	return nil

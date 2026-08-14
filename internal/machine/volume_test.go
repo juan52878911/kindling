@@ -453,20 +453,20 @@ func TestVolumenesQueNoTienenSentido(t *testing.T) {
 			// la comprobación de usuarios: la máquina aún no está registrada.
 			"el mismo volumen dos veces",
 			[]api.VolumeAttachment{{Name: "a", Mount: "/uno"}, {Name: "a", Mount: "/dos"}},
-			"dos veces",
+			"twice",
 		},
 		{
 			// El segundo taparía al primero, que quedaría montado y fuera de
 			// alcance: los ficheros existen y no se ven.
 			"dos volúmenes en el mismo punto",
 			[]api.VolumeAttachment{{Name: "a", Mount: "/x"}, {Name: "b", Mount: "/x"}},
-			"taparía",
+			"shadow",
 		},
 		{
 			// La lista viaja separada por comas en la línea del kernel.
 			"una coma en el punto de montaje",
 			[]api.VolumeAttachment{{Name: "a", Mount: "/con,coma"}},
-			"sin espacios ni comas",
+			"no spaces or commas",
 		},
 	}
 	for _, c := range casos {
@@ -492,7 +492,7 @@ func TestVolumenesQueNoTienenSentido(t *testing.T) {
 		}
 	}
 	_, err := m.resolveVolumes(api.RunRequest{Volumes: muchos})
-	if err == nil || !strings.Contains(err.Error(), "el máximo es") {
+	if err == nil || !strings.Contains(err.Error(), "the maximum is") {
 		t.Errorf("el tope no se aplicó: %v", err)
 	}
 }

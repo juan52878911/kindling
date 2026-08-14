@@ -88,7 +88,7 @@ func (b *bridge) startProxy() error {
 	}
 	target := &url.URL{Scheme: "http", Host: b.childAddr()}
 	b.proxy = b.newReverseProxy(target)
-	log.Printf("modo http: reverse-proxy :8080 -> %s listo", b.childAddr())
+	log.Printf("http mode: reverse-proxy :8080 -> %s ready", b.childAddr())
 	return nil
 }
 
@@ -126,7 +126,7 @@ func (b *bridge) spawnProxyChild() error {
 	// stdio y que el navegador compartido.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("arrancando el servidor MCP HTTP: %w", err)
+		return fmt.Errorf("starting the HTTP MCP server: %w", err)
 	}
 	// No hacemos Wait: el servidor es de por vida. Si muere, el cosechador
 	// (procReaper, wait4 de PID 1) lo recoge como huérfano; en /reset lo matamos
@@ -134,7 +134,7 @@ func (b *bridge) spawnProxyChild() error {
 	b.pmu.Lock()
 	b.proxyChild = cmd
 	b.pmu.Unlock()
-	log.Printf("modo http: servidor MCP arrancado (pid %d), esperando %s", cmd.Process.Pid, b.childAddr())
+	log.Printf("http mode: MCP server started (pid %d), waiting on %s", cmd.Process.Pid, b.childAddr())
 
 	if err := waitForPort(b.childAddr(), 40*time.Second); err != nil {
 		_ = cmd.Process.Kill()
@@ -184,7 +184,7 @@ func waitForPort(addr string, timeout time.Duration) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("el servidor MCP HTTP no abrió %s en %s", addr, timeout)
+	return fmt.Errorf("the HTTP MCP server did not open %s within %s", addr, timeout)
 }
 
 // ── ruteo y reaper del modo proxy ───────────────────────────────────────────
@@ -256,5 +256,5 @@ func (b *bridge) deleteProxySession(sid string) {
 	if resp, err := client.Do(req); err == nil {
 		resp.Body.Close()
 	}
-	log.Printf("modo http: sesión %.8s ociosa, DELETE al servidor compartido", sid)
+	log.Printf("http mode: session %.8s idle, DELETE to the shared server", sid)
 }

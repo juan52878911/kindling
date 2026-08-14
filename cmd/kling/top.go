@@ -21,7 +21,7 @@ import (
 func cmdTop(args []string) error {
 	fs := flag.NewFlagSet("top", flag.ExitOnError)
 	host := hostFlag(fs)
-	watch := fs.Duration("watch", 0, "refresca cada intervalo (p. ej. 2s); 0 = una sola foto")
+	watch := fs.Duration("watch", 0, "refresh every interval (e.g. 2s); 0 = a single snapshot")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func printTop(ps *api.ProcStats, endpoint string, at time.Time) {
 	fmt.Println(header)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSERVICIO\tESTADO\tPSS")
+	fmt.Fprintln(tw, "ID\tSERVICE\tSTATE\tPSS")
 	for _, mc := range live {
 		svc := mc.Service
 		if svc == "" {
@@ -93,11 +93,11 @@ func printTop(ps *api.ProcStats, endpoint string, at time.Time) {
 	}
 
 	// Estados que no aparecen en la tabla (warm/stopped) sí cuentan para el resumen.
-	fmt.Printf("\n%d viva(s) · %d warm · PSS total %d MiB\n",
+	fmt.Printf("\n%d alive · %d warm · total PSS %d MiB\n",
 		len(live), ps.ByState[string(api.StateWarm)], ps.TotalPSSMiB)
 	if ps.AvailableMiB > 0 || ps.FreeMiB > 0 {
 		fmt.Printf("host: MemAvailable %d MiB · MemFree %d MiB\n", ps.AvailableMiB, ps.FreeMiB)
 	} else {
-		fmt.Printf("host: sin /proc (no es Linux); PSS y memoria del host no disponibles\n")
+		fmt.Printf("host: no /proc (not Linux); PSS and host memory unavailable\n")
 	}
 }

@@ -67,9 +67,9 @@ func (s *browserSpec) launch(env []string) (*exec.Cmd, error) {
 	// servidor MCP: si Chromium se queja (sandbox, /dev/shm), se lee ahí.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("lanzando el Chromium compartido: %w", err)
+		return nil, fmt.Errorf("launching shared Chromium: %w", err)
 	}
-	log.Printf("navegador: Chromium compartido lanzado (pid %d)", cmd.Process.Pid)
+	log.Printf("browser: shared Chromium launched (pid %d)", cmd.Process.Pid)
 	// No hacemos Wait: es de por vida. Cuando muera, el cosechador (procReaper,
 	// wait4 de PID 1) lo recoge como huérfano.
 
@@ -87,7 +87,7 @@ func (s *browserSpec) launch(env []string) (*exec.Cmd, error) {
 		time.Sleep(300 * time.Millisecond)
 	}
 	_ = cmd.Process.Kill()
-	return nil, fmt.Errorf("el Chromium compartido no abrió %s en 40s", s.ReadyURL)
+	return nil, fmt.Errorf("shared Chromium did not open %s within 40s", s.ReadyURL)
 }
 
 // ensureBrowser arranca el Chromium compartido si aún no corre. Se llama cuando
@@ -123,7 +123,7 @@ func (b *bridge) stopBrowser() {
 	if b.bproc != nil {
 		_ = b.bproc.Process.Kill()
 		b.bproc = nil
-		log.Printf("navegador: Chromium compartido detenido")
+		log.Printf("browser: shared Chromium stopped")
 	}
 }
 

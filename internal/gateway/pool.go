@@ -136,7 +136,7 @@ func (p *pool) fillN(ctx context.Context, service, snapshot string, want int) {
 			}
 			vm, err := p.warmFn(ctx, service, snapshot)
 			if err != nil {
-				log.Printf("fondo %s: no pude pre-calentar: %v", service, err)
+				log.Printf("pool %s: could not prewarm: %v", service, err)
 				return
 			}
 			p.mu.Lock()
@@ -216,9 +216,9 @@ func (p *pool) drain(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		log.Printf("fondo: salgo sin esperar a los pre-calentados (%v)", ctx.Err())
+		log.Printf("pool: leaving without waiting for prewarmed instances (%v)", ctx.Err())
 	case <-time.After(drainGrace):
-		log.Printf("fondo: los pre-calentados no terminaron en %s; sigo con la limpieza", drainGrace)
+		log.Printf("pool: prewarmed instances did not finish within %s; continuing cleanup", drainGrace)
 	}
 
 	p.mu.Lock()
@@ -258,7 +258,7 @@ func (p *pool) evictStale(ctx context.Context, maxAge time.Duration) {
 		_ = p.removeFn(ctx, vm.id)
 	}
 	if len(dead) > 0 {
-		log.Printf("fondo: %d instancia(s) retiradas por antigüedad", len(dead))
+		log.Printf("pool: %d instance(s) removed due to age", len(dead))
 	}
 }
 
@@ -293,7 +293,7 @@ func (p *pool) evictOne(ctx context.Context) bool {
 		return false
 	}
 	_ = p.removeFn(ctx, elegida.id)
-	log.Printf("fondo: retiré una instancia de %s para hacer sitio", deSvc)
+	log.Printf("pool: removed an instance of %s to make room", deSvc)
 	return true
 }
 

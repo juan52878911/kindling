@@ -25,7 +25,7 @@ const bearerPrefix = "Bearer "
 func NewToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("no pude generar el token: %w", err)
+		return "", fmt.Errorf("could not generate token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }

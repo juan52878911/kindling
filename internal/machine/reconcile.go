@@ -50,7 +50,7 @@ func (m *Manager) reconcile() {
 			// Está viva: se readopta y NO se toca nada suyo.
 			m.socket[mc.ID] = m.dir(mc.ID) + "/fc.sock"
 			if mc.State != api.StateRunning {
-				log.Printf("reconcile: %s (%s) sigue viva (pid %d) aunque el estado decía %q; la readopto",
+				log.Printf("reconcile: %s (%s) is still alive (pid %d) even though the state said %q; readopting it",
 					mc.Name, mc.ID[:8], pid, mc.State)
 				mc.State = api.StateRunning
 			}
@@ -61,7 +61,7 @@ func (m *Manager) reconcile() {
 			// Reanudarlo, o su DNS (DNATeado a un puerto sin nadie) se quedaría mudo.
 			if mc.Egress == string(knet.EgressAllowlist) {
 				if err := knet.Plan(mc.NetIndex, mc.ID).StartAllowlistResolver(mc.AllowDomains); err != nil {
-					log.Printf("reconcile: no pude reanudar el resolver dns de %s: %v", shortID(mc.ID), err)
+					log.Printf("reconcile: couldn't resume the dns resolver for %s: %v", shortID(mc.ID), err)
 				}
 			}
 			continue
@@ -74,11 +74,11 @@ func (m *Manager) reconcile() {
 			// niega a descongelar lo que no esté warm y habría que editar el
 			// state.json a mano para recuperarlo.
 			if m.hasSnapshot(mc.ID) {
-				log.Printf("reconcile: %s (%s) ya no corre pero conserva su snapshot: warm",
+				log.Printf("reconcile: %s (%s) is no longer running but keeps its snapshot: warm",
 					mc.Name, mc.ID[:8])
 				mc.State = api.StateWarm
 			} else {
-				log.Printf("reconcile: %s (%s) ya no corre, marcada como stopped", mc.Name, mc.ID[:8])
+				log.Printf("reconcile: %s (%s) is no longer running, marked as stopped", mc.Name, mc.ID[:8])
 				mc.State = api.StateStopped
 			}
 			mc.PID = 0
@@ -99,7 +99,7 @@ func (m *Manager) reconcile() {
 	// Namespaces de máquinas que ya no existen: basura de ejecuciones anteriores.
 	for _, ns := range knet.ListNamespaces() {
 		if !seen[ns] {
-			log.Printf("reconcile: limpiando namespace huérfano %s", ns)
+			log.Printf("reconcile: cleaning up orphan namespace %s", ns)
 			knet.TeardownNamespace(ns)
 		}
 	}
@@ -124,7 +124,7 @@ func (m *Manager) killOrphanVMMs() {
 			continue
 		}
 		// O no está registrado, o su estado dice que no corre: el proceso sobra.
-		log.Printf("reconcile: matando VMM huérfano de %s (pid %d, estado %s)",
+		log.Printf("reconcile: killing orphan VMM of %s (pid %d, state %s)",
 			shortID(id), pid, estadoDe(mc))
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
@@ -132,7 +132,7 @@ func (m *Manager) killOrphanVMMs() {
 
 func estadoDe(mc *api.Machine) string {
 	if mc == nil {
-		return "no registrada"
+		return "not registered"
 	}
 	return string(mc.State)
 }
@@ -165,10 +165,10 @@ func (m *Manager) sweepMachineDirs() {
 		p := filepath.Join(dir, e.Name())
 		size := diskUsage(p)
 		if err := os.RemoveAll(p); err != nil {
-			log.Printf("reconcile: no pude borrar el directorio huérfano %s: %v", e.Name(), err)
+			log.Printf("reconcile: couldn't delete orphan directory %s: %v", e.Name(), err)
 			continue
 		}
-		log.Printf("reconcile: directorio huérfano %s eliminado (%d MiB recuperados)",
+		log.Printf("reconcile: orphan directory %s deleted (%d MiB recovered)",
 			e.Name()[:min(12, len(e.Name()))], size>>20)
 	}
 }
@@ -338,7 +338,7 @@ func (m *Manager) sweep() {
 			continue
 		}
 		mc.State = api.StateFailed
-		mc.LastErr = "el proceso de la microVM desapareció"
+		mc.LastErr = "the microVM process disappeared"
 		mc.PID = 0
 		delete(m.socket, mc.ID)
 		died = append(died, mc)
@@ -357,7 +357,7 @@ func (m *Manager) sweep() {
 		m.releaseCPU(mc.ID)
 		m.bus.Publish(api.Event{
 			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
-			Message: "el proceso de la microVM desapareció",
+			Message: "the microVM process disappeared",
 		})
 	}
 }
@@ -387,7 +387,7 @@ func (m *Manager) expireTTL(ctx context.Context) {
 
 	for _, id := range due {
 		if _, err := m.Freeze(ctx, id); err != nil {
-			log.Printf("ttl: no pude congelar %s: %v", id[:8], err)
+			log.Printf("ttl: couldn't freeze %s: %v", id[:8], err)
 		}
 	}
 }

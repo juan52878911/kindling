@@ -22,34 +22,34 @@ const coste = l => (l.split(':')[0] || l).trim();
 
 // Detalle de persistencia: se repite en varias vistas, así que vive aparte.
 function storeNote(s) {
-  if (!s.writers.length) return {cls: 'ok', title: 'No persiste nada',
-    text: 'Ninguna de sus herramientas escribe.'};
+  if (!s.writers.length) return {cls: 'ok', title: "Doesn't persist anything",
+    text: 'None of its tools write.'};
   return {
     cls: s.storeOk ? 'ok' : 'warn',
-    title: s.storeOk ? 'Lo que escriba sobrevive' : 'Ojo con lo que escriba',
-    text: 'Escribe con ' + s.writers.join(', ') + '. ' + s.store + '.',
+    title: s.storeOk ? 'What it writes survives' : 'Watch what it writes',
+    text: 'Writes via ' + s.writers.join(', ') + '. ' + s.store + '.',
   };
 }
 
 function svcDetail(s) {
-  const rows = [['tipo', s.kind === 'externo' ? 'servidor externo' :
-                         s.ephemeral ? 'microVM efímera' : 'microVM persistente'],
-                ['próxima llamada', s.latency],
-                ['herramientas', String(s.tools.length)]];
-  if (s.snapshot)  rows.push(['snapshot', s.snapshot], ['imagen', s.image],
-                             ['memoria compartida', s.ramShared],
-                             ['recursos', s.vcpus + ' vCPU · ' + s.memMiB + ' MiB']);
+  const rows = [['type', s.kind === 'externo' ? 'external server' :
+                         s.ephemeral ? 'ephemeral microVM' : 'persistent microVM'],
+                ['next call', s.latency],
+                ['tools', String(s.tools.length)]];
+  if (s.snapshot)  rows.push(['snapshot', s.snapshot], ['image', s.image],
+                             ['shared memory', s.ramShared],
+                             ['resources', s.vcpus + ' vCPU · ' + s.memMiB + ' MiB']);
   if (s.url)       rows.push(['url', s.url]);
-  rows.push(['instancias vivas', String(s.machines.length)]);
+  rows.push(['live instances', String(s.machines.length)]);
   return {rows, steps: s.flow, note: storeNote(s)};
 }
 
 function machDetail(m) {
-  const rows = [['id', m.id], ['estado', m.state], ['ip', m.ip],
-                ['salida', m.egress === 'internet' ? 'internet' : 'aislada'],
-                ['recursos', m.vcpus + ' vCPU · ' + m.memMiB + ' MiB'],
-                ['disco propio', m.disk], ['última operación', m.lastOp], ['edad', m.age]];
-  for (const [k, v] of Object.entries(m.labels || {})) rows.push(['etiqueta ' + k, v]);
+  const rows = [['id', m.id], ['state', m.state], ['ip', m.ip],
+                ['egress', m.egress === 'internet' ? 'internet' : 'isolated'],
+                ['resources', m.vcpus + ' vCPU · ' + m.memMiB + ' MiB'],
+                ['own disk', m.disk], ['last operation', m.lastOp], ['age', m.age]];
+  for (const [k, v] of Object.entries(m.labels || {})) rows.push(['label ' + k, v]);
   return {rows};
 }
 
@@ -68,154 +68,154 @@ function svcKids(s) {
 const VIEWS = {
 
   topologia: {
-    label: 'Topología',
-    hint: 'El host, sus servicios y las instancias vivas de cada uno.',
-    legend: [['running', 'atendiendo'], ['warm', 'dormido'],
-             ['ready', 'listo, sin instancia'], ['ext', 'externo']],
+    label: 'Topology',
+    hint: "The host, its services, and each one's live instances.",
+    legend: [['running', 'running'], ['warm', 'asleep'],
+             ['ready', 'ready, no instance'], ['ext', 'external']],
     build() {
       const kids = M.services.map(s => n('s:' + s.name, s.name, {
         cls: s.kind === 'externo' ? 'ext' : s.state,
-        sub: plural(s.tools.length, 'herramienta', 'herramientas'),
+        sub: plural(s.tools.length, 'tool', 'tools'),
         note: s.machines.length ? '' :
-              s.kind === 'externo' ? 'no corre aquí' : 'sin instancias · ' + coste(s.latency),
+              s.kind === 'externo' ? "doesn't run here" : 'no instances · ' + coste(s.latency),
         kids: svcKids(s), open: s.machines.length > 0,
         detail: svcDetail(s),
       }));
       return n('host', 'host', {cls: 'host', sub: M.host.endpoint, kids, open: true,
         detail: {rows: [['endpoint', M.host.endpoint],
                         ['firecracker', M.host.firecracker || '—'],
-                        ['kvm', M.host.kvm ? 'sí' : 'no'],
-                        ['memoria compartida', M.host.ramShared],
-                        ['disco propio de las instancias', M.host.diskOwn],
-                        ['servicio de memoria', mem || 'ninguno']]}});
+                        ['kvm', M.host.kvm ? 'yes' : 'no'],
+                        ['shared memory', M.host.ramShared],
+                        ["instances' own disk", M.host.diskOwn],
+                        ['memory service', mem || 'none']]}});
     },
   },
 
   capas: {
-    label: 'Capas',
-    hint: 'Qué atraviesa una llamada, de la petición del modelo al servidor MCP.',
-    legend: [['ready', 'capa de software'], ['running', 'proceso en marcha']],
+    label: 'Layers',
+    hint: "What a call passes through, from the model's request to the MCP server.",
+    legend: [['ready', 'software layer'], ['running', 'running process']],
     build() {
-      const vm = n('l:vm', 'microVM Firecracker', {
-        sub: 'un proceso por instancia', cls: 'ready',
-        detail: {rows: [['aislamiento', 'KVM: no comparte kernel con el host'],
-                        ['arranque', '~250 ms desde snapshot dorado'],
-                        ['descongelar', '~30 ms']],
-                 steps: ['Firecracker restaura el snapshot dorado',
-                         'La memoria se mapea con backend File: las instancias comparten páginas',
-                         'El disco base va de solo lectura; cada una escribe en su overlay']},
+      const vm = n('l:vm', 'Firecracker microVM', {
+        sub: 'one process per instance', cls: 'ready',
+        detail: {rows: [['isolation', "KVM: doesn't share a kernel with the host"],
+                        ['boot', '~250 ms from the golden snapshot'],
+                        ['thaw', '~30 ms']],
+                 steps: ['Firecracker restores the golden snapshot',
+                         'Memory is mapped with the File backend: instances share pages',
+                         'The base disk is read-only; each instance writes to its own overlay']},
         kids: [
-          n('l:kernel', 'kernel vmlinux', {sub: 'compartido por todas', cls: 'ready',
-            detail: {rows: [['modo', 'solo lectura'], ['coste', 'una copia en caché para todas']]}}),
-          n('l:base', 'rootfs base', {sub: '/dev/vda · solo lectura', cls: 'ready',
-            detail: {rows: [['modo', 'solo lectura, compartido'],
-                            ['por qué', 'una imagen sirve a N instancias sin duplicarse']]}}),
-          n('l:overlay', 'overlay propio', {sub: '/dev/vdb · disperso', cls: 'ready',
-            note: 'aquí acaba lo que escriba el invitado',
-            detail: {rows: [['modo', 'lectura y escritura, por instancia'],
-                            ['tamaño', 'disperso: solo ocupa lo que se escribe']],
-                     note: {cls: 'warn', title: 'Esto no sobrevive a la instancia',
-                            text: 'El overlay muere con la máquina. Lo que deba durar va a ' +
-                                  (mem || 'un servicio de memoria enlazado') + '.'}}}),
-          n('l:bridge', 'puente', {sub: 'stdin/stdout ↔ HTTP', cls: 'running',
-            detail: {rows: [['papel', 'traduce la llamada MCP al proceso del invitado']],
-                     steps: ['Recibe la llamada del gateway',
-                             'La escribe en el stdin del servidor MCP',
-                             'Lee la respuesta de su stdout y la devuelve']},
-            kids: [n('l:mcp', 'servidor MCP', {sub: 'el binario original, sin tocar', cls: 'running',
-              detail: {rows: [['transporte', 'stdio'],
-                              ['modificaciones', 'ninguna: se ejecuta tal cual']]}})],
+          n('l:kernel', 'vmlinux kernel', {sub: 'shared by all', cls: 'ready',
+            detail: {rows: [['mode', 'read-only'], ['cost', 'one cached copy for all']]}}),
+          n('l:base', 'base rootfs', {sub: '/dev/vda · read-only', cls: 'ready',
+            detail: {rows: [['mode', 'read-only, shared'],
+                            ['why', 'one image serves N instances without duplication']]}}),
+          n('l:overlay', 'own overlay', {sub: '/dev/vdb · sparse', cls: 'ready',
+            note: 'this is where whatever the guest writes ends up',
+            detail: {rows: [['mode', 'read-write, per instance'],
+                            ['size', 'sparse: only takes up what gets written']],
+                     note: {cls: 'warn', title: "This doesn't survive the instance",
+                            text: 'The overlay dies with the machine. Whatever needs to last goes to ' +
+                                  (mem || 'a linked memory service') + '.'}}}),
+          n('l:bridge', 'bridge', {sub: 'stdin/stdout ↔ HTTP', cls: 'running',
+            detail: {rows: [['role', 'translates the MCP call to the guest process']],
+                     steps: ['Receives the call from the gateway',
+                             "Writes it to the MCP server's stdin",
+                             'Reads the response from its stdout and returns it']},
+            kids: [n('l:mcp', 'MCP server', {sub: 'the original binary, untouched', cls: 'running',
+              detail: {rows: [['transport', 'stdio'],
+                              ['modifications', 'none: it runs as-is']]}})],
             open: true}),
         ], open: true});
 
-      return n('l:gw', 'kling gateway', {cls: 'host', sub: 'un solo endpoint HTTP', open: true,
+      return n('l:gw', 'kling gateway', {cls: 'host', sub: 'a single HTTP endpoint', open: true,
         detail: {rows: [['endpoint', M.host.endpoint],
-                        ['servicios', String(M.services.length)]]},
+                        ['services', String(M.services.length)]]},
         kids: [
-          n('l:agg', 'agregador /mcp/_all', {sub: '3 meta-herramientas', cls: 'running',
-            note: 'evita volcar todos los catálogos en el contexto',
-            detail: {rows: [['por qué', 'exponer N catálogos enteros llena el contexto'],
-                            ['a cambio', 'el inventario va en initialize.instructions']],
+          n('l:agg', '/mcp/_all aggregator', {sub: '3 meta-tools', cls: 'running',
+            note: 'avoids dumping every catalog into the context',
+            detail: {rows: [['why', 'exposing N full catalogs fills up the context'],
+                            ['in exchange', 'the inventory goes in initialize.instructions']],
                      chips: ['find_tools', 'describe_tool', 'call_tool']},
             kids: [
-              n('l:find', 'find_tools', {sub: 'busca por intención', cls: 'ready',
-                detail: {rows: [['entrada', 'una consulta en lenguaje natural'],
-                                ['extra', 'tabla de sinónimos español↔inglés']]}}),
-              n('l:desc', 'describe_tool', {sub: 'devuelve el esquema', cls: 'ready',
-                detail: {rows: [['entrada', 'nombre de herramienta'],
-                                ['salida', 'su esquema de parámetros, solo cuando hace falta']]}}),
-              n('l:call', 'call_tool', {sub: 'ejecuta', cls: 'ready',
-                detail: {rows: [['extra', 'repara tipos contra el esquema declarado']]}}),
+              n('l:find', 'find_tools', {sub: 'searches by intent', cls: 'ready',
+                detail: {rows: [['input', 'a natural-language query'],
+                                ['extra', 'Spanish↔English synonym table']]}}),
+              n('l:desc', 'describe_tool', {sub: 'returns the schema', cls: 'ready',
+                detail: {rows: [['input', 'tool name'],
+                                ['output', 'its parameter schema, only when needed']]}}),
+              n('l:call', 'call_tool', {sub: 'executes', cls: 'ready',
+                detail: {rows: [['extra', 'coerces types against the declared schema']]}}),
             ]}),
-          n('l:pool', 'fondo pre-calentado', {sub: 'instancias listas de antemano', cls: 'running',
-            note: 'convierte 250 ms en ~20 ms',
-            detail: {rows: [['qué guarda', 'instancias con la sesión MCP ya abierta'],
-                            ['para qué', 'la primera llamada no paga el arranque']]}}),
+          n('l:pool', 'pre-warmed pool', {sub: 'instances ready ahead of time', cls: 'running',
+            note: 'turns 250 ms into ~20 ms',
+            detail: {rows: [['what it holds', 'instances with the MCP session already open'],
+                            ['what for', "the first call doesn't pay for the boot"]]}}),
           vm,
-          n('l:links', 'enlaces externos', {
-            sub: plural(M.services.filter(s => s.kind === 'externo').length, 'servidor', 'servidores'),
-            cls: 'ext', note: 'no arrancan ninguna máquina aquí',
+          n('l:links', 'external links', {
+            sub: plural(M.services.filter(s => s.kind === 'externo').length, 'server', 'servers'),
+            cls: 'ext', note: "they don't start any machine here",
             kids: M.services.filter(s => s.kind === 'externo').map(s =>
               n('s:' + s.name, s.name, {cls: 'ext', sub: s.url, detail: svcDetail(s)})),
-            detail: {rows: [['qué son', 'servidores MCP que ya corren en otra parte'],
-                            ['coste', 'el gateway solo reenvía']]}}),
+            detail: {rows: [['what they are', 'MCP servers already running elsewhere'],
+                            ['cost', 'the gateway just forwards']]}}),
         ]});
     },
   },
 
   mcp: {
     label: 'MCP',
-    hint: 'El catálogo: qué herramientas ofrece cada servicio y cuáles escriben.',
-    legend: [['running', 'lee'], ['warn', 'escribe'], ['ext', 'servidor externo']],
+    hint: 'The catalog: which tools each service offers and which ones write.',
+    legend: [['running', 'reads'], ['warn', 'writes'], ['ext', 'external server']],
     build() {
       const kids = M.services.map(s => n('s:' + s.name, s.name, {
         cls: s.kind === 'externo' ? 'ext' : s.state,
-        sub: plural(s.tools.length, 'herramienta', 'herramientas'),
-        note: s.writers.length ? plural(s.writers.length, 'escribe', 'escriben') : 'solo lectura',
+        sub: plural(s.tools.length, 'tool', 'tools'),
+        note: s.writers.length ? plural(s.writers.length, 'writes', 'write') : 'read-only',
         detail: svcDetail(s),
         kids: s.tools.map(t => n('t:' + s.name + '.' + t.name, t.name, {
-          cls: t.writes ? 'warn' : 'running', sub: t.writes ? 'escribe' : 'lee',
+          cls: t.writes ? 'warn' : 'running', sub: t.writes ? 'writes' : 'reads',
           note: t.desc,
-          detail: {rows: [['servicio', s.name], ['efecto', t.writes ? 'escribe' : 'solo lectura'],
-                          ['descripción', t.desc || '—']],
+          detail: {rows: [['service', s.name], ['effect', t.writes ? 'writes' : 'read-only'],
+                          ['description', t.desc || '—']],
                    steps: s.flow,
                    note: t.writes ? storeNote(s) : null},
         })),
       }));
       const total = M.services.reduce((a, s) => a + s.tools.length, 0);
-      return n('cat', 'catálogo', {cls: 'host', sub: plural(total, 'herramienta', 'herramientas'),
+      return n('cat', 'catalog', {cls: 'host', sub: plural(total, 'tool', 'tools'),
         kids, open: true,
-        detail: {rows: [['servicios', String(M.services.length)],
-                        ['herramientas', String(total)],
-                        ['cómo se expone', 'inventario en initialize.instructions, no el catálogo entero']]}});
+        detail: {rows: [['services', String(M.services.length)],
+                        ['tools', String(total)],
+                        ['how it is exposed', 'inventory in initialize.instructions, not the entire catalog']]}});
     },
   },
 
   red: {
-    label: 'Red',
-    hint: 'Quién puede salir a internet y quién está aislado.',
-    legend: [['running', 'con salida'], ['ready', 'aislada'], ['ext', 'fuera del host']],
+    label: 'Network',
+    hint: 'Who can reach the internet and who is isolated.',
+    legend: [['running', 'has egress'], ['ready', 'isolated'], ['ext', 'outside the host']],
     build() {
       const live = M.services.flatMap(s => s.machines.map(m => ({s, m})));
       const kids = [];
 
       const externos = M.services.filter(s => s.kind === 'externo');
       if (externos.length) kids.push(n('r:ext', 'internet', {cls: 'ext',
-        sub: plural(externos.length, 'servidor externo', 'servidores externos'),
-        note: 'el gateway sale a buscarlos',
+        sub: plural(externos.length, 'external server', 'external servers'),
+        note: 'the gateway reaches out to them',
         kids: externos.map(s => n('s:' + s.name, s.name, {cls: 'ext', sub: s.url,
           detail: svcDetail(s)})),
-        detail: {rows: [['dirección', 'saliente, iniciada por el gateway']]}}));
+        detail: {rows: [['direction', 'outbound, initiated by the gateway']]}}));
 
       if (!live.length) {
-        kids.push(n('r:none', 'sin instancias', {cls: 'ready',
-          sub: 'nada tiene red ahora mismo',
-          note: 'cada instancia recibe su propio namespace al arrancar',
-          detail: {rows: [['por qué', 'las microVM solo existen mientras se las usa']],
-                   steps: ['Al arrancar, cada instancia recibe un namespace propio',
-                           'Dentro todas ven el mismo tap0 y la misma 172.16.0.2',
-                           'En el host las distingue su veth',
-                           'La salida a internet está cerrada salvo que se pida']}}));
+        kids.push(n('r:none', 'no instances', {cls: 'ready',
+          sub: 'nothing has networking right now',
+          note: 'each instance gets its own namespace when it boots',
+          detail: {rows: [['why', 'microVMs only exist while they are being used']],
+                   steps: ['On boot, each instance gets its own namespace',
+                           'Inside, they all see the same tap0 and the same 172.16.0.2',
+                           'On the host, their veth tells them apart',
+                           'Internet egress is closed unless requested']}}));
       }
 
       for (const {s, m} of live) {
@@ -223,22 +223,22 @@ const VIEWS = {
         kids.push(n('r:' + m.id, 'netns ' + m.id.slice(0, 8), {
           cls: open ? 'running' : 'ready',
           sub: s.name + ' · ' + m.name,
-          note: open ? 'salida a internet permitida' : 'aislada',
+          note: open ? 'internet egress allowed' : 'isolated',
           kids: [n('r:tap' + m.id, 'tap0 → 172.16.0.2', {cls: open ? 'running' : 'ready',
-            sub: 'idéntico dentro de cada namespace',
-            note: 'en el host lo distingue su veth (' + m.ip + ')',
-            detail: {rows: [['ip del invitado', '172.16.0.2 (siempre la misma)'],
-                            ['ip vista desde el host', m.ip],
-                            ['por qué', 'un namespace por máquina permite reusar el mismo plan de red']]}})],
-          detail: {rows: [['máquina', m.name], ['servicio', s.name],
-                          ['ip', m.ip], ['salida', open ? 'internet' : 'aislada']],
-                   note: open ? {cls: 'warn', title: 'Esta instancia puede salir a internet',
-                                 text: 'Solo debería tenerlo lo que de verdad lo necesite.'} : null}}));
+            sub: 'identical inside every namespace',
+            note: 'on the host, its veth tells it apart (' + m.ip + ')',
+            detail: {rows: [['guest ip', '172.16.0.2 (always the same)'],
+                            ['ip as seen from the host', m.ip],
+                            ['why', 'one namespace per machine lets every instance reuse the same network plan']]}})],
+          detail: {rows: [['machine', m.name], ['service', s.name],
+                          ['ip', m.ip], ['egress', open ? 'internet' : 'isolated']],
+                   note: open ? {cls: 'warn', title: 'This instance can reach the internet',
+                                 text: 'Only what truly needs it should have this.'} : null}}));
       }
 
       return n('r:host', 'host', {cls: 'host', sub: M.host.endpoint, kids, open: true,
-        detail: {rows: [['papel', 'enruta, filtra y aísla'],
-                        ['política', 'sin salida a internet salvo que se pida explícitamente']]}});
+        detail: {rows: [['role', 'routes, filters, and isolates'],
+                        ['policy', 'no internet egress unless explicitly requested']]}});
     },
   },
 };

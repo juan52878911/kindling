@@ -77,7 +77,7 @@ func main() {
 			resp.Result = map[string]any{"tools": []any{
 				map[string]any{
 					"name":        "guardar_nota",
-					"description": "Escribe una nota con nombre y contenido",
+					"description": "Writes a note with a name and content",
 					"inputSchema": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -89,7 +89,7 @@ func main() {
 				},
 				map[string]any{
 					"name":        "leer_nota",
-					"description": "Lee el contenido de una nota",
+					"description": "Reads the content of a note",
 					"inputSchema": map[string]any{
 						"type":       "object",
 						"properties": map[string]any{"nombre": map[string]any{"type": "string"}},
@@ -98,7 +98,7 @@ func main() {
 				},
 				map[string]any{
 					"name":        "listar_notas",
-					"description": "Lista los nombres de todas las notas guardadas",
+					"description": "Lists the names of all saved notes",
 					"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 				},
 			}}
@@ -113,21 +113,21 @@ func main() {
 				n, _ := p.Arguments["nombre"].(string)
 				c, _ := p.Arguments["contenido"].(string)
 				if n == "" {
-					resp.Error = &rpcError{Code: -32602, Message: "falta nombre"}
+					resp.Error = &rpcError{Code: -32602, Message: "missing name"}
 					break
 				}
 				mu.Lock()
 				store[n] = c
 				_ = os.WriteFile(filepath.Join(root, n), []byte(c), 0o644)
 				mu.Unlock()
-				resp.Result = text(fmt.Sprintf("nota %q guardada (%d bytes)", n, len(c)))
+				resp.Result = text(fmt.Sprintf("note %q saved (%d bytes)", n, len(c)))
 			case "leer_nota":
 				n, _ := p.Arguments["nombre"].(string)
 				mu.Lock()
 				v, ok := store[n]
 				mu.Unlock()
 				if !ok {
-					resp.Error = &rpcError{Code: -32602, Message: "no existe: " + n}
+					resp.Error = &rpcError{Code: -32602, Message: "does not exist: " + n}
 					break
 				}
 				resp.Result = text(v)
@@ -140,12 +140,12 @@ func main() {
 				mu.Unlock()
 				resp.Result = text(strings.Join(keys, ", "))
 			default:
-				resp.Error = &rpcError{Code: -32602, Message: "herramienta desconocida: " + p.Name}
+				resp.Error = &rpcError{Code: -32602, Message: "unknown tool: " + p.Name}
 			}
 		case "ping":
 			resp.Result = map[string]any{}
 		default:
-			resp.Error = &rpcError{Code: -32601, Message: "método no soportado: " + req.Method}
+			resp.Error = &rpcError{Code: -32601, Message: "unsupported method: " + req.Method}
 		}
 		b, _ := json.Marshal(resp)
 		out.Write(b)

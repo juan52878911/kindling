@@ -138,14 +138,14 @@ func clients() []client {
 			name:   "zed",
 			label:  "Zed",
 			paths:  []string{home(".config", "zed", "settings.json")},
-			manual: "Zed todavía no habla MCP remoto por HTTP, y su settings.json admite comentarios que un parcheo automático destruiría",
+			manual: "Zed doesn't speak remote MCP over HTTP yet, and its settings.json allows comments that an automatic patch would destroy",
 			snippet: func(name, url, token string) string {
 				// El rodeo es un proxy de stdio que reenvía a la URL.
 				args := []string{"-y", "mcp-remote", url}
 				if token != "" {
 					args = append(args, "--header", "Authorization: Bearer "+token)
 				}
-				return fmt.Sprintf("  en ~/.config/zed/settings.json, dentro de \"context_servers\":\n"+
+				return fmt.Sprintf("  in ~/.config/zed/settings.json, inside \"context_servers\":\n"+
 					"    %q: {\"source\": \"custom\", \"command\": {\"path\": \"npx\", \"args\": %s}}",
 					name, mustJSON(args))
 			},
@@ -157,7 +157,7 @@ func clients() []client {
 //
 // Separado del resto de errores porque la respuesta correcta no es rendirse:
 // es enseñar el fragmento para que lo pegue quien sí entiende ese fichero.
-var errNotJSON = errors.New("no es JSON válido (¿tiene comentarios?)")
+var errNotJSON = errors.New("not valid JSON (does it have comments?)")
 
 // withAuth añade la cabecera del token. Los seis clientes que hablan HTTP
 // coinciden en llamarla `headers`, que es la única cosa en la que coinciden.
@@ -235,9 +235,9 @@ func (c client) text(name, url, token string) string {
 		fmt.Fprintf(&b, "  %s %s\n\n", c.bin, strings.Join(quoteAll(c.cliArgs(name, url, token)), " "))
 	}
 	if p := c.configPath(); p != "" {
-		fmt.Fprintf(&b, "  en %s, dentro de %q:\n", p, c.section)
+		fmt.Fprintf(&b, "  in %s, inside %q:\n", p, c.section)
 	} else {
-		fmt.Fprintf(&b, "  o a mano, dentro de %q:\n", c.section)
+		fmt.Fprintf(&b, "  or by hand, inside %q:\n", c.section)
 	}
 	fmt.Fprintf(&b, "    %q: %s", name, mustJSON(c.entry(url, token)))
 	return b.String()
@@ -251,13 +251,13 @@ func (c client) install(name, url, token string) error {
 		if _, err := exec.LookPath(c.bin); err == nil {
 			out, err := exec.Command(c.bin, c.cliArgs(name, url, token)...).CombinedOutput()
 			if err == nil {
-				fmt.Printf("✓ %s — añadido con `%s`\n", c.label, c.bin)
+				fmt.Printf("✓ %s — added with `%s`\n", c.label, c.bin)
 				if s := strings.TrimSpace(string(out)); s != "" {
 					fmt.Printf("  %s\n", s)
 				}
 				return nil
 			}
-			fmt.Printf("aviso: `%s` falló (%v)\n", c.bin, err)
+			fmt.Printf("warning: `%s` failed (%v)\n", c.bin, err)
 		}
 	}
 
@@ -265,17 +265,17 @@ func (c client) install(name, url, token string) error {
 	if c.manual != "" || len(c.paths) == 0 {
 		reason := c.manual
 		if reason == "" {
-			reason = "no tengo una ruta de configuración fiable para tu versión"
+			reason = "I don't have a reliable config path for your version"
 		}
-		fmt.Printf("→ %s — hazlo a mano: %s\n%s\n", c.label, reason, c.text(name, url, token))
+		fmt.Printf("→ %s — do it by hand: %s\n%s\n", c.label, reason, c.text(name, url, token))
 		return nil
 	}
 
 	// 3. Parcheo, con respaldo y escritura atómica.
 	err := patchJSON(c.configPath(), c.section, name, c.entry(url, token),
-		fmt.Sprintf("Reinicia %s y pregúntale qué herramientas tiene.", c.label))
+		fmt.Sprintf("Restart %s and ask it what tools it has.", c.label))
 	if errors.Is(err, errNotJSON) {
-		fmt.Printf("→ %s — no lo toco: %v\n  Se queda como está. Pega esto tú:\n%s\n",
+		fmt.Printf("→ %s — leaving it alone: %v\n  It stays as is. Paste this yourself:\n%s\n",
 			c.label, err, c.text(name, url, token))
 		return nil
 	}

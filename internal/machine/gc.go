@@ -93,17 +93,17 @@ func (m *Manager) gcDisk(ctx context.Context) {
 			return
 		}
 		if err := m.Remove(c.id); err != nil {
-			log.Printf("gc: no pude eliminar la instancia dormida %s: %v", c.name, err)
+			log.Printf("gc: couldn't remove dormant instance %s: %v", c.name, err)
 			continue
 		}
-		log.Printf("gc: disco al %d%%, eliminé la instancia dormida %s (se recrea desde %s)",
+		log.Printf("gc: disk at %d%%, removed dormant instance %s (recreates from %s)",
 			m.diskUsedPct(), c.name, c.name)
 	}
 
 	if p := m.diskUsedPct(); p >= diskHighPct {
 		// Se hizo lo que se pudo y sigue lleno: hay que decirlo, porque el
 		// siguiente síntoma será un arranque que falla por disco y no por esto.
-		log.Printf("gc: disco todavía al %d%% tras recuperar lo recuperable; "+
-			"revisa imágenes, volúmenes o instancias sin snapshot de respaldo", p)
+		log.Printf("gc: disk still at %d%% after recovering what could be recovered; "+
+			"check images, volumes, or instances without a backup snapshot", p)
 	}
 }

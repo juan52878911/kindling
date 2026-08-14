@@ -68,10 +68,10 @@ func (m *Manager) Links() []*api.Link {
 // SetLink registra o actualiza un servidor externo.
 func (m *Manager) SetLink(l *api.Link) (*api.Link, error) {
 	if !validName.MatchString(l.Name) {
-		return nil, fmt.Errorf("nombre inválido: %q", l.Name)
+		return nil, fmt.Errorf("invalid name: %q", l.Name)
 	}
 	if l.URL == "" {
-		return nil, fmt.Errorf("falta la URL del servidor MCP")
+		return nil, fmt.Errorf("missing MCP server URL")
 	}
 
 	m.mu.Lock()
@@ -90,7 +90,7 @@ func (m *Manager) SetLink(l *api.Link) (*api.Link, error) {
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, Name: l.Name,
-		Message: fmt.Sprintf("servidor externo enlazado: %s (%d herramienta(s))", l.URL, len(l.Tools))})
+		Message: fmt.Sprintf("external server linked: %s (%d tool(s))", l.URL, len(l.Tools))})
 	return l, nil
 }
 
@@ -101,7 +101,7 @@ func (m *Manager) RemoveLink(name string) error {
 
 	links := m.loadLinks()
 	if _, ok := links[name]; !ok {
-		return fmt.Errorf("no existe el enlace %q", name)
+		return fmt.Errorf("link %q not found", name)
 	}
 	delete(links, name)
 	return m.saveLinks(links)

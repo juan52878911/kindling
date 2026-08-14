@@ -29,143 +29,143 @@ import (
 	"github.com/juan52878911/kindling/internal/transport"
 )
 
-const usage = `kling - microVMs de Firecracker con interfaz tipo docker
+const usage = `kling - Firecracker microVMs with a docker-style interface
 
-USO
-  kling <comando> [opciones]
+USAGE
+  kling <command> [options]
 
-EMPEZAR
-  up                                               deja el runtime listo: KVM,
-                                                   nftables, usuario, imágenes,
-                                                   daemon y gateway
-  status                                           qué pieza está y cuál falta
+GETTING STARTED
+  up                                               gets the runtime ready: KVM,
+                                                   nftables, user, images,
+                                                   daemon and gateway
+  status                                           which piece is up and which is missing
 
-VOLÚMENES
-  volume create <n> [-size 2G]                     almacenamiento que sobrevive
-                                                   a la microVM
-  volume ls | rm <n>                               listar / eliminar
-  volume populate <n> [-image I] -- <cmd>           instala paquetes dentro de una microVM
-  images refresh [imagen...]                       pone el puente actual dentro de las imágenes
-  images toolchain                                 construye la imagen con npm y pip (la usa populate)
-  images recipe <imagen>                           cómo se construyó
+VOLUMES
+  volume create <name> [-size 2G]                  storage that survives
+                                                   the microVM
+  volume ls | rm <name>                            list / remove
+  volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
+  images refresh [image...]                        puts the current bridge inside the images
+  images toolchain                                 builds the image with npm and pip (used by populate)
+  images recipe <image>                            how it was built
 
-MÁQUINAS
-  run [-name N] [-image I] [-cpus N] [-mem MiB]   crea y arranca una microVM
-      [-egress none|internet|allowlist]            salida de red (por defecto: none)
-      [-allow dom1,dom2]                           dominios permitidos con allowlist
-      [-ttl SEGUNDOS] [-cpu PCT]                   congelado automático y techo de CPU
-      [-service NOMBRE] [-label k=v]               agrupación por servicio MCP
-      [-volume NOMBRE[:/punto][:ro]] (repetible)   almacenamiento que sobrevive a la máquina
-  ps [-a]                                          lista las máquinas
-  logs <ref> [-tail N]                             consola serie de la microVM
-  freeze <ref>                                     congela en snapshot -> warm
-  thaw <ref>                                       restaura desde snapshot (~ms)
-  stop <ref>                                       termina la máquina
-  rm <ref>                                         elimina máquina y snapshot
-  mmds <ref> [-f store.json]                       inyecta un secreto de sesión por
-                                                   MMDS (lee stdin si no hay -f); la
-                                                   máquina ya no se podrá congelar
+MACHINES
+  run [-name N] [-image I] [-cpus N] [-mem MiB]    creates and starts a microVM
+      [-egress none|internet|allowlist]            network egress (default: none)
+      [-allow dom1,dom2]                           domains allowed with allowlist
+      [-ttl SECONDS] [-cpu PCT]                    auto-freeze and CPU ceiling
+      [-service NAME] [-label k=v]                 grouping by MCP service
+      [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
+  ps [-a]                                          lists the machines
+  logs <ref> [-tail N]                             microVM serial console
+  freeze <ref>                                     freezes into a snapshot -> warm
+  thaw <ref>                                       restores from snapshot (~ms)
+  stop <ref>                                       terminates the machine
+  rm <ref>                                         removes machine and snapshot
+  mmds <ref> [-f store.json]                       injects a session secret via
+                                                   MMDS (reads stdin if no -f); the
+                                                   machine can no longer be frozen
 
-CATÁLOGO
-  search <consulta>                                busca en el registro oficial
-                                                   de servidores MCP
-  add <servidor> [-as nombre] [-arg valor]         lo empaqueta, lo importa y lo
-      [-volume NOMBRE[:/punto][:ro]] (repetible)   deja congelado como servicio
+CATALOG
+  search <query>                                   searches the official
+                                                   MCP server registry
+  add <server> [-as name] [-arg value]             packages it, imports it and
+      [-volume NAME[:/mount][:ro]] (repeatable)    leaves it frozen as a service
 
-SERVICIOS MCP
-  mcp import <servicio> -image <img>               convierte un servidor MCP en
-      [-cpus N] [-mem MiB]                         servicio: arranca, pregunta
-      [-egress none|internet|allowlist]            qué sabe hacer, lo congela y
-      [-allow dom1,dom2]                           guarda su catálogo. Todo esto
-      [-volume NOMBRE[:/punto][:ro]] (repetible)   queda GRABADO en el snapshot
-  mcp list [-v]                                    servicios y sus herramientas
-  mcp refresh <servicio>                           vuelve a capturar el catálogo
-  mcp link <nombre> <url>                          enlaza un servidor MCP EXTERNO
-                                                   (p. ej. tu engram) sin meterlo
-                                                   en una microVM
-  mcp unlink <nombre>                              lo desenlaza
+MCP SERVICES
+  mcp import <service> -image <img>                turns an MCP server into a
+      [-cpus N] [-mem MiB]                         service: it starts, asks
+      [-egress none|internet|allowlist]            what it can do, freezes it and
+      [-allow dom1,dom2]                           saves its catalog. All of this
+      [-volume NAME[:/mount][:ro]] (repeatable)    ends up BAKED into the snapshot
+  mcp list [-v]                                    services and their tools
+  mcp refresh <service>                            recaptures the catalog
+  mcp link <name> <url>                            links an EXTERNAL MCP server
+                                                   (e.g. your engram) without putting
+                                                   it in a microVM
+  mcp unlink <name>                                unlinks it
 
-SNAPSHOTS DORADOS
-  commit <ref> <nombre>                            congela una máquina como
-                                                   snapshot reutilizable
-  run -from <nombre>                               instancia desde el snapshot
-  snapshots                                        lista los snapshots
-  rmi <nombre>                                     elimina un snapshot
+GOLDEN SNAPSHOTS
+  commit <ref> <name>                              freezes a machine as a
+                                                   reusable snapshot
+  run -from <name>                                 instantiates from the snapshot
+  snapshots                                        lists the snapshots
+  rmi <name>                                       removes a snapshot
 
-OBSERVACIÓN
-  topo                                             diagrama ASCII de todo
-  top [-watch DUR]                                 memoria por microVM (PSS) y
-                                                   del host; foto o refresco
-  export [-o fichero.html]                         topología navegable en HTML
-  events                                           stream de eventos del daemon
-  info                                             estado del daemon
+OBSERVATION
+  topo                                             ASCII diagram of everything
+  top [-watch DUR]                                 memory per microVM (PSS) and
+                                                   the host; snapshot or refresh
+  export [-o file.html]                            browsable topology in HTML
+  events                                           stream of daemon events
+  info                                             daemon status
 
-MEMORIA DE USO (opcional, apagada por defecto)
-  memory status                                    si está activa y sobre qué
-  memory enable [-service N]                       la activa; usa engram por defecto
-  memory disable                                   la apaga
-  memory install-service                           deja el puente local como
-                                                   servicio permanente (macOS)
+USAGE MEMORY (optional, off by default)
+  memory status                                    whether it's active and on what
+  memory enable [-service N]                       enables it; uses engram by default
+  memory disable                                   disables it
+  memory install-service                           installs the local bridge as a
+                                                   permanent service (macOS)
 
-CONECTAR CON TU AGENTE
-  connect                                          guía paso a paso
-  connect -all                                     UNA entrada para todos los
-                                                   servicios: inventario en el
-                                                   handshake, esquemas a demanda
-  connect -all -only eco,files                     solo esos servicios
-  connect -all -expand                             catálogo completo (gasta más
-                                                   contexto)
-  connect <servicio>                               un servicio suelto
-  connect ... -install all                         escribe en TODOS los agentes
-                                                   detectados: Claude Code,
+CONNECT YOUR AGENT
+  connect                                          step-by-step guide
+  connect -all                                     ONE entry for all
+                                                   services: inventory at
+                                                   handshake, schemas on demand
+  connect -all -only eco,files                     only those services
+  connect -all -expand                             full catalog (uses more
+                                                   context)
+  connect <service>                                a single service
+  connect ... -install all                         writes to ALL detected
+                                                   agents: Claude Code,
                                                    opencode, Cursor, VS Code,
-                                                   Windsurf, Cline y Zed
-  connect ... -install <cliente>                   solo en ese
-  connect ... -token T                             usa ese token en vez del de
+                                                   Windsurf, Cline and Zed
+  connect ... -install <client>                    just that one
+  connect ... -token T                             uses that token instead of
                                                    gateway.token
-  migrate <mcp> -install <cliente>                 mueve un MCP existente a
-                                                   kindling SIN reescribir las
-                                                   skills que lo usan (conserva
-                                                   nombre y herramientas)
+  migrate <mcp> -install <client>                  moves an existing MCP to
+                                                   kindling WITHOUT rewriting the
+                                                   skills that use it (keeps its
+                                                   name and tools)
 
 GATEWAY
-  gateway [-listen ADDR] [-idle DUR] [-ephemeral]  enruta llamadas MCP a microVMs
-                                                   bajo demanda. Con -ephemeral,
-                                                   cada acción corre en su propia
-                                                   máquina, que muere al terminar
-          [-prewarm N]                             instancias listas por servicio
-                                                   (solo -ephemeral)
-          [-keepwarm N]                            N servicios populares con su
-                                                   primaria caliente (persistente;
-                                                   evita el arranque en frío en Mac)
-          [-memory SVC]                            servicio de memoria del agente
-          [-no-auth] [-pprof]                      sin token / con perfiles; las
-                                                   dos exigen escuchar en
-                                                   loopback. Por defecto pide
-                                                   Authorization: Bearer con el
-                                                   token de gateway.token, que se
-                                                   genera solo la primera vez
+  gateway [-listen ADDR] [-idle DUR] [-ephemeral]  routes MCP calls to microVMs
+                                                   on demand. With -ephemeral,
+                                                   each action runs in its own
+                                                   machine, which dies when it ends
+          [-prewarm N]                             ready instances per service
+                                                   (only -ephemeral)
+          [-keepwarm N]                            N popular services with their
+                                                   primary warm (persistent;
+                                                   avoids cold start on Mac)
+          [-memory SVC]                            agent memory service
+          [-no-auth] [-pprof]                      no token / with profiling; both
+                                                   require listening on
+                                                   loopback. Defaults to requiring
+                                                   Authorization: Bearer with the
+                                                   gateway.token token, which is
+                                                   generated only the first time
 
 DAEMON
-  daemon [-socket S] [-root R] [-firecracker BIN]  arranca el núcleo
+  daemon [-socket S] [-root R] [-firecracker BIN]  starts the core
 
-CONFIGURACIÓN
-  context [ls]                                     lista los daemons conocidos
-  context add <nombre> <host>                      añade uno y lo activa
-  context use <nombre>                             cambia de daemon
-  context rm <nombre>                              lo elimina
-  config [show|path]                               configuración actual
-  config set <clave> <valor>                       p. ej. defaults.image min
-  version                                          versión del CLI
+CONFIGURATION
+  context [ls]                                     lists known daemons
+  context add <name> <host>                        adds one and activates it
+  context use <name>                               switches daemon
+  context rm <name>                                removes it
+  config [show|path]                               current configuration
+  config set <key> <value>                         e.g. defaults.image min
+  version                                          CLI version
 
-CONEXIÓN
-  Precedencia:  -H  >  $KLING_HOST  >  contexto activo  >  socket local
+CONNECTION
+  Precedence:  -H  >  $KLING_HOST  >  active context  >  local socket
 
     kling context add lab ssh://juan@192.168.2.60
     kling context use lab
 
-  El daemon jamás escucha en un puerto de red: controlar microVMs equivale a
-  root en su host, así que el único acceso remoto es SSH.
+  The daemon never listens on a network port: controlling microVMs is
+  equivalent to root on its host, so the only remote access is SSH.
 `
 
 // Version se fija al compilar:  -ldflags "-X main.Version=..."
@@ -245,7 +245,7 @@ func main() {
 		fmt.Print(usage)
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "comando desconocido: %s\n\n%s", cmd, usage)
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", cmd, usage)
 		os.Exit(2)
 	}
 
@@ -268,7 +268,7 @@ func envOr(k, def string) string {
 // "me han dicho esto", y puede aplicar la precedencia
 // -H > $KLING_HOST > contexto activo > socket local.
 func hostFlag(fs *flag.FlagSet) *string {
-	return fs.String("H", "", "endpoint del daemon (socket o ssh://usuario@host)")
+	return fs.String("H", "", "daemon endpoint (socket or ssh://user@host)")
 }
 
 // loadConfig lee la configuración sin hacer fallar al CLI si está corrupta: una
@@ -276,7 +276,7 @@ func hostFlag(fs *flag.FlagSet) *string {
 func loadConfig() *config.Config {
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aviso: %v (sigo con los valores por defecto)\n", err)
+		fmt.Fprintf(os.Stderr, "warning: %v (falling back to defaults)\n", err)
 		return &config.Config{}
 	}
 	return cfg
@@ -293,11 +293,11 @@ func ctxWithSignals() (context.Context, context.CancelFunc) {
 
 func cmdDaemon(args []string) error {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-	socket := fs.String("socket", envOr("KLING_SOCKET", transport.DefaultSocket), "socket Unix a servir")
-	root := fs.String("root", envOr("KLING_ROOT", "/var/lib/kindling"), "directorio de datos")
-	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "binario de firecracker")
-	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "usuario al que ceder el socket (para el CLI por SSH)")
-	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "usuario sin privilegios con el que corre Firecracker")
+	socket := fs.String("socket", envOr("KLING_SOCKET", transport.DefaultSocket), "Unix socket to serve")
+	root := fs.String("root", envOr("KLING_ROOT", "/var/lib/kindling"), "data directory")
+	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
+	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "user to hand the socket to (for the CLI over SSH)")
+	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -314,14 +314,14 @@ func cmdDaemon(args []string) error {
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	host := hostFlag(fs)
-	listen := fs.String("listen", "", "dónde escuchar (por defecto: gateway.listen, o 127.0.0.1:8080)")
-	idle := fs.Duration("idle", 0, "tiempo sin peticiones antes de congelar (por defecto: gateway.idle, o 5m)")
-	ephemeral := fs.Bool("ephemeral", false, "una microVM por acción, destruida al terminar (máximo aislamiento, sin estado)")
-	prewarm := fs.Int("prewarm", 1, "instancias pre-calentadas por servicio (0 = desactivado; solo -ephemeral)")
-	keepwarm := fs.Int("keepwarm", 0, "N servicios populares con su primaria caliente en modo persistente (0 = desactivado; evita el arranque en frío, útil en Mac)")
-	memory := fs.String("memory", "", "servicio MCP donde recordar qué herramienta resolvió cada petición")
-	pprofOn := fs.Bool("pprof", false, "expone /debug/pprof; solo diagnóstico temporal y solo en loopback")
-	noAuth := fs.Bool("no-auth", false, "sin token; solo para desarrollo y solo escuchando en loopback")
+	listen := fs.String("listen", "", "where to listen (default: gateway.listen, or 127.0.0.1:8080)")
+	idle := fs.Duration("idle", 0, "time without requests before freezing (default: gateway.idle, or 5m)")
+	ephemeral := fs.Bool("ephemeral", false, "one microVM per action, destroyed when it's done (maximum isolation, stateless)")
+	prewarm := fs.Int("prewarm", 1, "pre-warmed instances per service (0 = disabled; -ephemeral only)")
+	keepwarm := fs.Int("keepwarm", 0, "N popular services with their primary warm in persistent mode (0 = disabled; avoids cold start, useful on Mac)")
+	memory := fs.String("memory", "", "MCP service that remembers which tool resolved each request")
+	pprofOn := fs.Bool("pprof", false, "exposes /debug/pprof; temporary diagnostics only, loopback only")
+	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -339,8 +339,8 @@ func cmdGateway(args []string) error {
 	// línea de comandos a quien alcance el puerto, y deja que quien llame elija
 	// cuántos segundos de CPU consume /debug/pprof/profile.
 	if *pprofOn && !gateway.IsLoopback(addr) {
-		return fmt.Errorf("-pprof exige escuchar en loopback, y %q no lo es.\n"+
-			"Diagnostica por un túnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
+		return fmt.Errorf("-pprof requires listening on loopback, and %q is not.\n"+
+			"Diagnose over a tunnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
 	}
 
 	// El token se resuelve aquí, con el resto de la validación de argumentos y
@@ -353,7 +353,7 @@ func cmdGateway(args []string) error {
 
 	c := api.NewClient(cfg.Host(*host))
 	if _, err := c.Info(ctx); err != nil {
-		return fmt.Errorf("no alcanzo el daemon: %w", err)
+		return fmt.Errorf("can't reach the daemon: %w", err)
 	}
 
 	wait := *idle
@@ -424,29 +424,29 @@ func cmdGateway(args []string) error {
 
 	// El gateway escucha en red; el daemon no. Por defecto solo en loopback:
 	// abrirlo al mundo debe ser una decisión consciente.
-	fmt.Printf("gateway en http://%s\n", *listen)
-	fmt.Printf("  herramienta:  http://%s/mcp/<servicio>\n", *listen)
-	fmt.Printf("  inventario:   http://%s/services\n", *listen)
-	fmt.Printf("  ocioso:       %s antes de congelar\n", *idle)
+	fmt.Printf("gateway at http://%s\n", *listen)
+	fmt.Printf("  tool:         http://%s/mcp/<service>\n", *listen)
+	fmt.Printf("  inventory:    http://%s/services\n", *listen)
+	fmt.Printf("  idle:         %s before freezing\n", *idle)
 	if token == "" {
-		fmt.Printf("  auth:         DESACTIVADA (-no-auth) — solo vale porque escucha en loopback\n")
+		fmt.Printf("  auth:         DISABLED (-no-auth) — only valid because it listens on loopback\n")
 	} else {
-		fmt.Printf("  auth:         Authorization: Bearer <token>  ·  /healthz abierto\n")
+		fmt.Printf("  auth:         Authorization: Bearer <token>  ·  /healthz open\n")
 	}
 	if *pprofOn {
-		fmt.Printf("  pprof:        ACTIVO en http://%s/debug/pprof/ (tras el token) — apágalo al terminar\n", *listen)
+		fmt.Printf("  pprof:        ACTIVE at http://%s/debug/pprof/ (behind the token) — turn it off when done\n", *listen)
 	}
 	if memSvc != "" {
-		fmt.Printf("  memoria:      activa sobre %q — ordena las búsquedas por lo que ya funcionó\n", memSvc)
+		fmt.Printf("  memory:       active on %q — ranks searches by what already worked\n", memSvc)
 	}
 	if *ephemeral {
-		fmt.Printf("  modo:         EFÍMERO — cada acción en su propia microVM, destruida al terminar\n")
+		fmt.Printf("  mode:         EPHEMERAL — each action in its own microVM, destroyed when done\n")
 		if *prewarm > 0 {
-			fmt.Printf("  pre-calentado: %d instancia(s) por servicio, listas para responder\n", *prewarm)
+			fmt.Printf("  pre-warmed:   %d instance(s) per service, ready to respond\n", *prewarm)
 		}
 	}
 	if *keepwarm > 0 {
-		fmt.Printf("  keep-warm:    %d servicio(s) popular(es) con su primaria caliente (sin arranque en frío)\n", *keepwarm)
+		fmt.Printf("  keep-warm:    %d popular service(s) with their primary warm (no cold start)\n", *keepwarm)
 	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -465,9 +465,9 @@ func cmdGateway(args []string) error {
 func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, error) {
 	if noAuth {
 		if !gateway.IsLoopback(addr) {
-			return "", fmt.Errorf("-no-auth exige escuchar en loopback, y %q no lo es.\n"+
-				"Despertar un snapshot es ejecutar código: sin token, cualquiera que alcance\n"+
-				"ese puerto ejecuta tus herramientas. Quita -no-auth o escucha en 127.0.0.1", addr)
+			return "", fmt.Errorf("-no-auth requires listening on loopback, and %q is not.\n"+
+				"Waking a snapshot means executing code: without a token, anyone who reaches\n"+
+				"that port runs your tools. Remove -no-auth or listen on 127.0.0.1", addr)
 		}
 		return "", nil
 	}
@@ -490,16 +490,16 @@ func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, 
 	// y ahí lo grave no es el fallo sino el silencio: el token cambiaría en cada
 	// reinicio y todos los agentes ya configurados dejarían de entrar.
 	if err := cfg.Save(); err != nil {
-		fmt.Printf("\nAVISO: generé un token pero no pude guardarlo en %s (%v).\n", config.Path(), err)
-		fmt.Printf("       Va a CAMBIAR en cada reinicio. Fíjalo para que no pase:\n")
+		fmt.Printf("\nWARNING: I generated a token but couldn't save it to %s (%v).\n", config.Path(), err)
+		fmt.Printf("       It WILL CHANGE on every restart. Pin it so that doesn't happen:\n")
 		fmt.Printf("         Environment=KLING_GATEWAY_TOKEN=%s\n\n", t)
 		return t, nil
 	}
 
 	// La única vez que se imprime entero. A partir de aquí `config show` lo
 	// enmascara, porque esa orden se teclea con gente mirando la pantalla.
-	fmt.Printf("token generado y guardado en %s\n\n", config.Path())
-	fmt.Printf("  En la máquina desde la que uses el CLI:\n")
+	fmt.Printf("token generated and saved to %s\n\n", config.Path())
+	fmt.Printf("  On the machine where you use the CLI:\n")
 	fmt.Printf("    kling config set gateway.token %s\n\n", t)
 	return t, nil
 }
@@ -509,22 +509,22 @@ func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, 
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	host := hostFlag(fs)
-	name := fs.String("name", "", "nombre de la máquina")
-	image := fs.String("image", "", "imagen de rootfs (por defecto: defaults.image, o 'default')")
-	from := fs.String("from", "", "instanciar desde un snapshot dorado (~ms, sin arranque en frío)")
-	cpus := fs.Int("cpus", 0, "vCPUs (por defecto: 1)")
-	mem := fs.Int("mem", 0, "memoria en MiB (por defecto: 256)")
-	egress := fs.String("egress", "", "salida de red: none | internet | allowlist (nunca alcanza redes privadas)")
-	allow := fs.String("allow", "", "dominios permitidos con -egress allowlist (separados por coma)")
-	ttl := fs.Int("ttl", 0, "segundos hasta congelarse sola (0 = nunca)")
-	cpu := fs.Int("cpu", 0, "techo de CPU en porcentaje de un core (0 = por defecto)")
-	service := fs.String("service", "", "servicio MCP al que pertenece (agrupa en topo y export)")
+	name := fs.String("name", "", "machine name")
+	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
+	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
+	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
+	mem := fs.Int("mem", 0, "memory in MiB (default: 256)")
+	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
+	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
+	ttl := fs.Int("ttl", 0, "seconds until it freezes itself (0 = never)")
+	cpu := fs.Int("cpu", 0, "CPU ceiling as a percentage of one core (0 = default)")
+	service := fs.String("service", "", "MCP service it belongs to (groups in topo and export)")
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
-	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
-	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: así lo comparten varias microVMs")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
+	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
+	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	var labels labelFlag
-	fs.Var(&labels, "label", "etiqueta clave=valor (repetible)")
+	fs.Var(&labels, "label", "key=value label (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -560,9 +560,9 @@ func cmdRun(args []string) error {
 		return err
 	}
 	if mc.From != "" {
-		fmt.Printf("%s  %s  instanciada desde %s en %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
+		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
 	} else {
-		fmt.Printf("%s  %s  arrancada en frío en %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
+		fmt.Printf("%s  %s  booted cold in %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
 	}
 	return nil
 }
@@ -575,7 +575,7 @@ func (l *labelFlag) String() string { return "" }
 func (l *labelFlag) Set(v string) error {
 	k, val, ok := strings.Cut(v, "=")
 	if !ok || k == "" {
-		return fmt.Errorf("etiqueta inválida %q: usa clave=valor", v)
+		return fmt.Errorf("invalid label %q: use key=value", v)
 	}
 	if *l == nil {
 		*l = labelFlag{}
@@ -602,11 +602,11 @@ func (l labelFlag) merge(service string) map[string]string {
 func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	host := hostFlag(fs)
-	out := fs.String("o", "kindling.html", "fichero de salida")
+	out := fs.String("o", "kindling.html", "output file")
 	// El mapa ya trae todo el detalle; la bandera sigue aceptándose para no
 	// romper a quien la tuviera en un script.
-	_ = fs.Bool("detail", false, "obsoleta: el informe siempre incluye el detalle")
-	open := fs.Bool("open", false, "abrirlo al terminar")
+	_ = fs.Bool("detail", false, "deprecated: the report always includes detail")
+	open := fs.Bool("open", false, "open it when done")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -641,7 +641,7 @@ func cmdExport(args []string) error {
 		return err
 	}
 	abs, _ := filepath.Abs(*out)
-	fmt.Printf("%s  (%d máquinas, %d snapshots, %.0f KB)\n",
+	fmt.Printf("%s  (%d machines, %d snapshots, %.0f KB)\n",
 		abs, len(machines), len(snaps), float64(len(doc))/1024)
 
 	if *open {
@@ -660,12 +660,12 @@ func openCmd() string {
 func cmdLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ExitOnError)
 	host := hostFlag(fs)
-	tail := fs.Int("tail", 200, "últimas N líneas (0 = todo)")
+	tail := fs.Int("tail", 200, "last N lines (0 = all)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling logs <ref> [-tail N]")
+		return fmt.Errorf("usage: kling logs <ref> [-tail N]")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -686,7 +686,7 @@ func cmdCommit(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("uso: kling commit <ref> <nombre-snapshot>")
+		return fmt.Errorf("usage: kling commit <ref> <snapshot-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -696,15 +696,15 @@ func cmdCommit(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  snapshot dorado  (%s de memoria)\n", snap.Name, human(snap.MemBytes))
-	fmt.Printf("instancia con:  kling run -from %s\n", snap.Name)
+	fmt.Printf("%s  golden snapshot  (%s of memory)\n", snap.Name, human(snap.MemBytes))
+	fmt.Printf("instantiate with:  kling run -from %s\n", snap.Name)
 	return nil
 }
 
 func cmdSnapshots(args []string) error {
 	fs := flag.NewFlagSet("snapshots", flag.ExitOnError)
 	host := hostFlag(fs)
-	asJSON := fs.Bool("json", false, "salida en JSON")
+	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -721,7 +721,7 @@ func cmdSnapshots(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NOMBRE\tIMAGEN\tCPU/MEM\tMEMORIA\tDISCO\tINSTANCIAS\tEDAD")
+	fmt.Fprintln(tw, "NAME\tIMAGE\tCPU/MEM\tMEMORY\tDISK\tINSTANCES\tAGE")
 	for _, s := range list {
 		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
 			s.Name, s.Image, s.VCPUs, s.MemMiB,
@@ -737,7 +737,7 @@ func cmdRmi(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling rmi <nombre-snapshot>")
+		return fmt.Errorf("usage: kling rmi <snapshot-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -756,8 +756,8 @@ func cmdRmi(args []string) error {
 func cmdPS(args []string) error {
 	fs := flag.NewFlagSet("ps", flag.ExitOnError)
 	host := hostFlag(fs)
-	all := fs.Bool("a", false, "incluye las paradas")
-	asJSON := fs.Bool("json", false, "salida en JSON")
+	all := fs.Bool("a", false, "include stopped ones")
+	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -774,7 +774,7 @@ func cmdPS(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNOMBRE\tIMAGEN\tESTADO\tCPU/MEM\tDISCO\tSALIDA\tEDAD\tÚLTIMA OP")
+	fmt.Fprintln(tw, "ID\tNAME\tIMAGE\tSTATE\tCPU/MEM\tDISK\tEGRESS\tAGE\tLAST OP")
 	var totalDisk int64
 	for _, mc := range list {
 		if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
@@ -793,7 +793,7 @@ func cmdPS(args []string) error {
 		return err
 	}
 	if totalDisk > 0 {
-		fmt.Printf("\ndisco propio de las máquinas: %s (la imagen base se comparte)\n", human(totalDisk))
+		fmt.Printf("\nmachines' own disk: %s (base image is shared)\n", human(totalDisk))
 	}
 	return nil
 }
@@ -845,7 +845,7 @@ func cmdLifecycle(op string, args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling %s <ref>", op)
+		return fmt.Errorf("usage: kling %s <ref>", op)
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -872,7 +872,7 @@ func cmdLifecycle(op string, args []string) error {
 		case op == "rm":
 			fmt.Println(ref)
 		case op == "freeze":
-			fmt.Printf("%s  warm  (%d ms, %d MiB en disco)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
+			fmt.Printf("%s  warm  (%d ms, %d MiB on disk)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
 		case op == "thaw":
 			fmt.Printf("%s  running  (%d ms)\n", mc.ID[:12], mc.ThawMS)
 		default:
@@ -892,7 +892,7 @@ func cmdSqueeze(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling squeeze <ref>...")
+		return fmt.Errorf("usage: kling squeeze <ref>...")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -902,7 +902,7 @@ func cmdSqueeze(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s  ~%d MiB devueltos al host  (invitado libre %d MiB, RSS ahora %d MiB)\n",
+		fmt.Printf("%s  ~%d MiB returned to the host  (guest free %d MiB, RSS now %d MiB)\n",
 			res.ID[:12], res.ReclaimedMiB, res.GuestFreeMiB, res.RSSMiB)
 	}
 	return nil
@@ -924,12 +924,12 @@ func cmdSqueeze(args []string) error {
 func cmdMMDS(args []string) error {
 	fs := flag.NewFlagSet("mmds", flag.ExitOnError)
 	host := hostFlag(fs)
-	file := fs.String("f", "", "fichero JSON con el store MMDS (por defecto: stdin)")
+	file := fs.String("f", "", "JSON file with the MMDS store (default: stdin)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling mmds <ref> [-f store.json]  (si no hay -f, lee de stdin)")
+		return fmt.Errorf("usage: kling mmds <ref> [-f store.json]  (reads stdin if no -f)")
 	}
 
 	var raw []byte
@@ -947,7 +947,7 @@ func cmdMMDS(args []string) error {
 	// Firecracker con un error mucho menos claro.
 	var data json.RawMessage
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return fmt.Errorf("el store MMDS no es JSON válido: %w", err)
+		return fmt.Errorf("the MMDS store is not valid JSON: %w", err)
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -957,7 +957,7 @@ func cmdMMDS(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  secretos inyectados por MMDS (ya no se puede congelar)\n", mc.ID[:12])
+	fmt.Printf("%s  secrets injected via MMDS (can no longer be frozen)\n", mc.ID[:12])
 	return nil
 }
 
@@ -966,7 +966,7 @@ func cmdMMDS(args []string) error {
 func cmdEvents(args []string) error {
 	fs := flag.NewFlagSet("events", flag.ExitOnError)
 	host := hostFlag(fs)
-	asJSON := fs.Bool("json", false, "una línea JSON por evento")
+	asJSON := fs.Bool("json", false, "one JSON line per event")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1015,7 +1015,7 @@ func cmdTopo(args []string) error {
 		return err
 	}
 
-	kvm := "sin KVM"
+	kvm := "no KVM"
 	if info.KVM {
 		kvm = "KVM ok"
 	}
@@ -1051,7 +1051,7 @@ func cmdTopo(args []string) error {
 		}
 
 		if g == "" {
-			fmt.Printf("   %s◆ (arrancadas en frío)\n", branch)
+			fmt.Printf("   %s◆ (booted cold)\n", branch)
 		} else {
 			var snap *api.Snapshot
 			for _, s := range snaps {
@@ -1059,7 +1059,7 @@ func cmdTopo(args []string) error {
 					snap = s
 				}
 			}
-			fmt.Printf("   %s◆ %-16s snapshot dorado · %s de memoria compartida\n",
+			fmt.Printf("   %s◆ %-16s golden snapshot · %s shared memory\n",
 				branch, g, human(snap.MemBytes))
 		}
 
@@ -1090,16 +1090,16 @@ func cmdTopo(args []string) error {
 				cont, mbranch, trunc(mc.Name, 14), mc.State, ip, egMark, human(mc.DiskBytes), lastOp(mc))
 		}
 		if len(list) == 0 {
-			fmt.Printf("   %s └── (sin instancias)\n", cont)
+			fmt.Printf("   %s └── (no instances)\n", cont)
 		}
 		if !last {
 			fmt.Printf("   │\n")
 		}
 	}
 
-	fmt.Printf("\n  %d running · %d warm · %d parada(s)   disco: %s propio + %s compartido\n",
+	fmt.Printf("\n  %d running · %d warm · %d stopped   disk: %s own + %s shared\n",
 		running, warm, stopped, human(diskOwn), human(diskShared))
-	fmt.Printf("  salida:  ⌀ aislada   → internet (las redes privadas están bloqueadas siempre)\n")
+	fmt.Printf("  egress:  ⌀ isolated   → internet (private networks are always blocked)\n")
 	return nil
 }
 
@@ -1114,7 +1114,7 @@ func netRange(ms []*api.Machine) string {
 			}
 		}
 	}
-	return "(sin red activa)"
+	return "(no active network)"
 }
 
 func trunc(s string, n int) string {
@@ -1141,13 +1141,13 @@ func cmdInfo(args []string) error {
 	}
 	kvm := "no"
 	if i.KVM {
-		kvm = "sí"
+		kvm = "yes"
 	}
 	fmt.Printf("endpoint:     %s\n", c.Endpoint())
 	fmt.Printf("daemon:       %s\n", i.Version)
 	fmt.Printf("root:         %s\n", i.Root)
 	fmt.Printf("KVM:          %s\n", kvm)
 	fmt.Printf("firecracker:  %s\n", strings.TrimSpace(i.Firecrack))
-	fmt.Printf("máquinas:     %d\n", i.Machines)
+	fmt.Printf("machines:     %d\n", i.Machines)
 	return nil
 }

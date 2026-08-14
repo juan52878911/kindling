@@ -123,7 +123,7 @@ func buildService(g Group, memService string) Service {
 	case g.Link != nil:
 		s.Kind, s.State = "externo", "listo"
 		s.URL = g.Link.URL
-		s.Store, s.StoreOK = "propio, fuera de kindling", true
+		s.Store, s.StoreOK = "its own, outside kindling", true
 	case r.Blocked != "":
 		s.Kind, s.State = "roto", "bloqueado"
 		s.Latency = r.Blocked
@@ -143,16 +143,16 @@ func buildService(g Group, memService string) Service {
 			s.State = "listo"
 		}
 		if s.Ephemeral {
-			s.Store, s.StoreOK = "se pierde al terminar la llamada", false
+			s.Store, s.StoreOK = "is lost when the call ends", false
 		} else {
-			s.Store, s.StoreOK = "vive mientras viva la instancia", false
+			s.Store, s.StoreOK = "lives as long as the instance does", false
 		}
 	}
 
 	if len(s.Writers) == 0 && s.Kind != "roto" {
-		s.Store, s.StoreOK = "no escribe nada", true
+		s.Store, s.StoreOK = "writes nothing", true
 	} else if !s.StoreOK && memService != "" {
-		s.Store += " → guárdalo en " + memService
+		s.Store += " → save it to " + memService
 	}
 	return s
 }

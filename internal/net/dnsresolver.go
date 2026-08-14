@@ -98,16 +98,16 @@ func startDNSResolver(n *Net, domains []string) error {
 
 	ip := stdnet.ParseIP(n.HostIP)
 	if ip == nil {
-		return fmt.Errorf("resolver dns: IP de host inválida %q", n.HostIP)
+		return fmt.Errorf("dns resolver: invalid host IP %q", n.HostIP)
 	}
 	udp, err := stdnet.ListenUDP("udp4", &stdnet.UDPAddr{IP: ip, Port: dnsPort})
 	if err != nil {
-		return fmt.Errorf("resolver dns: no pude escuchar udp %s:%d: %w", n.HostIP, dnsPort, err)
+		return fmt.Errorf("dns resolver: could not listen on udp %s:%d: %w", n.HostIP, dnsPort, err)
 	}
 	tcp, err := stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: ip, Port: dnsPort})
 	if err != nil {
 		udp.Close()
-		return fmt.Errorf("resolver dns: no pude escuchar tcp %s:%d: %w", n.HostIP, dnsPort, err)
+		return fmt.Errorf("dns resolver: could not listen on tcp %s:%d: %w", n.HostIP, dnsPort, err)
 	}
 
 	r := &dnsResolver{

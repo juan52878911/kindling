@@ -210,7 +210,7 @@ func TeardownNamespace(ns string) {
 func Available() error {
 	for _, c := range []string{"ip", "iptables"} {
 		if _, err := exec.LookPath(c); err != nil {
-			return fmt.Errorf("falta %s", c)
+			return fmt.Errorf("missing %s", c)
 		}
 	}
 	return nil

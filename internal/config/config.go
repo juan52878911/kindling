@@ -196,12 +196,12 @@ func (c *Config) ContextNames() []string {
 func (c *Config) Set(key, value string) error {
 	section, field, ok := strings.Cut(key, ".")
 	if !ok {
-		return fmt.Errorf("clave inválida %q: usa sección.campo (p. ej. defaults.image)", key)
+		return fmt.Errorf("invalid key %q: use section.field (e.g. defaults.image)", key)
 	}
 	atoi := func() (int, error) {
 		n, err := strconv.Atoi(value)
 		if err != nil {
-			return 0, fmt.Errorf("%s espera un número, no %q", key, value)
+			return 0, fmt.Errorf("%s expects a number, not %q", key, value)
 		}
 		return n, nil
 	}
@@ -213,7 +213,7 @@ func (c *Config) Set(key, value string) error {
 			c.Defaults.Image = value
 		case "egress":
 			if value != "none" && value != "internet" {
-				return fmt.Errorf("defaults.egress solo admite none o internet")
+				return fmt.Errorf("defaults.egress only accepts none or internet")
 			}
 			c.Defaults.Egress = value
 		case "mem_mib":
@@ -241,7 +241,7 @@ func (c *Config) Set(key, value string) error {
 			}
 			c.Defaults.TTL = n
 		default:
-			return fmt.Errorf("campo desconocido defaults.%s", field)
+			return fmt.Errorf("unknown field defaults.%s", field)
 		}
 	case "memory":
 		switch field {
@@ -250,7 +250,7 @@ func (c *Config) Set(key, value string) error {
 		case "service":
 			c.Memory.Service = value
 		default:
-			return fmt.Errorf("campo desconocido memory.%s", field)
+			return fmt.Errorf("unknown field memory.%s", field)
 		}
 	case "gateway":
 		switch field {
@@ -263,10 +263,10 @@ func (c *Config) Set(key, value string) error {
 		case "token":
 			c.Gateway.Token = value
 		default:
-			return fmt.Errorf("campo desconocido gateway.%s", field)
+			return fmt.Errorf("unknown field gateway.%s", field)
 		}
 	default:
-		return fmt.Errorf("sección desconocida %q: usa defaults, gateway o memory", section)
+		return fmt.Errorf("unknown section %q: use defaults, gateway, or memory", section)
 	}
 	return nil
 }

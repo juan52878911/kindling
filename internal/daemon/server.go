@@ -118,9 +118,9 @@ func (s *Server) Listen(ctx context.Context) error {
 	// obligar a que todo el CLI vaya con sudo.
 	if uid, gid, ok := s.socketOwner(); ok {
 		if err := os.Chown(s.socket, uid, gid); err != nil {
-			log.Printf("aviso: no pude ceder el socket a uid %d: %v", uid, err)
+			log.Printf("warning: couldn't hand off the socket to uid %d: %v", uid, err)
 		} else {
-			log.Printf("socket cedido a uid %d gid %d", uid, gid)
+			log.Printf("socket handed off to uid %d gid %d", uid, gid)
 		}
 	}
 
@@ -155,18 +155,18 @@ func (s *Server) Listen(ctx context.Context) error {
 	}()
 
 	if err := knet.Available(); err != nil {
-		log.Printf("AVISO: red no disponible (%v): las microVMs arrancarán sin conectividad", err)
+		log.Printf("WARNING: network unavailable (%v): microVMs will boot without connectivity", err)
 	} else if err := knet.SetupHost(); err != nil {
-		log.Printf("AVISO: no pude instalar las reglas de barrera del host: %v", err)
+		log.Printf("WARNING: couldn't install the host barrier rules: %v", err)
 	}
 
 	if s.mgr.PrivWarning != "" {
-		log.Printf("AVISO DE SEGURIDAD: %s", s.mgr.PrivWarning)
+		log.Printf("SECURITY WARNING: %s", s.mgr.PrivWarning)
 	}
 	if s.mgr.CgroupWarning != "" {
-		log.Printf("AVISO: sin límite de CPU por microVM: %s", s.mgr.CgroupWarning)
+		log.Printf("WARNING: no CPU limit per microVM: %s", s.mgr.CgroupWarning)
 	}
-	log.Printf("kling daemon %s escuchando en %s (root=%s)", Version, s.socket, s.root)
+	log.Printf("kling daemon %s listening on %s (root=%s)", Version, s.socket, s.root)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -189,7 +189,7 @@ func (s *Server) socketOwner() (uid, gid int, ok bool) {
 	if s.socketUser != "" {
 		u, err := user.Lookup(s.socketUser)
 		if err != nil {
-			log.Printf("aviso: usuario %q desconocido: %v", s.socketUser, err)
+			log.Printf("warning: unknown user %q: %v", s.socketUser, err)
 			return 0, 0, false
 		}
 		uid, _ = strconv.Atoi(u.Uid)
@@ -249,7 +249,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	mc, ok := s.mgr.Get(r.PathValue("ref"))
 	if !ok {
-		fail(w, http.StatusNotFound, errors.New("no existe esa máquina"))
+		fail(w, http.StatusNotFound, errors.New("that machine doesn't exist"))
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -448,7 +448,7 @@ func (s *Server) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		fail(w, http.StatusInternalServerError, errors.New("streaming no soportado"))
+		fail(w, http.StatusInternalServerError, errors.New("streaming not supported"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -498,11 +498,11 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, ok := s.mgr.Get(r.PathValue("ref"))
 	if !ok {
-		fail(w, http.StatusNotFound, errors.New("no existe esa máquina"))
+		fail(w, http.StatusNotFound, errors.New("that machine doesn't exist"))
 		return
 	}
 	if mc.State != api.StateRunning || mc.IP == "" {
-		fail(w, http.StatusConflict, fmt.Errorf("la máquina está %s, no atiende llamadas", mc.State))
+		fail(w, http.StatusConflict, fmt.Errorf("the machine is %s, not accepting calls", mc.State))
 		return
 	}
 
@@ -587,5 +587,5 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 		last = err
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("nadie abrió %s: %w", addr, last)
+	return fmt.Errorf("nobody opened %s: %w", addr, last)
 }
