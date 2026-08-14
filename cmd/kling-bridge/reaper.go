@@ -102,7 +102,7 @@ func (r *reaper) reapAll() {
 			owner <- ws
 			delete(r.tracked, pid)
 		} else {
-			log.Printf("init: huérfano %d recogido (%v)", pid, ws)
+			log.Printf("init: orphan %d reaped (%v)", pid, ws)
 		}
 		r.mu.Unlock()
 	}

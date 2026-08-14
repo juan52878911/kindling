@@ -28,13 +28,13 @@ import (
 
 func cmdSearch(args []string) error {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	limit := fs.Int("n", 20, "cuántos resultados")
-	fresh := fs.Bool("refresh", false, "ignorar la caché")
+	limit := fs.Int("n", 20, "how many results")
+	fresh := fs.Bool("refresh", false, "ignore the cache")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("uso: kling search <consulta>")
+		return fmt.Errorf("usage: kling search <query>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -47,46 +47,47 @@ func cmdSearch(args []string) error {
 		return err
 	}
 	if len(servers) == 0 {
-		fmt.Println("sin resultados")
+		fmt.Println("no results")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NOMBRE\tVERSIÓN\tkling add\tDESCRIPCIÓN")
+	fmt.Fprintln(w, "NAME\tVERSION\tkling add\tDESCRIPTION")
 	for _, s := range servers {
 		ok := "no"
 		if _, can := s.Stdio(); can {
-			ok = "sí"
+			ok = "yes"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Name, s.Version, ok, truncate(s.Description, 60))
 	}
 	_ = w.Flush()
-	fmt.Println("\n\"kling add no\" significa que ese servidor no habla stdio sobre npm,")
-	fmt.Println("que es lo único que kindling sabe empaquetar solo. Ver scripts/80-mcp-image.sh.")
+	fmt.Println("\n\"kling add no\" means that server doesn't speak stdio over npm,")
+	fmt.Println("which is the only thing kindling knows how to package on its own. See scripts/80-mcp-image.sh.")
 	return nil
 }
 
 func cmdAdd(args []string) error {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	host := hostFlag(fs)
-	as := fs.String("as", "", "nombre del servicio (por defecto: el del servidor, sin espacio de nombres)")
-	extra := multiFlag(fs, "arg", "valor para un argumento obligatorio del servidor; repetible")
-	dryRun := fs.Bool("dry-run", false, "enseñar lo que haría y no hacerlo")
+	as := fs.String("as", "", "service name (default: the server's, without namespace)")
+	extra := multiFlag(fs, "arg", "value for a required argument of the server; repeatable")
+	dryRun := fs.Bool("dry-run", false, "show what it would do without doing it")
 	// Sin esto, el camino recomendado para añadir un servidor no puede darle
 	// almacenamiento persistente: habría que reimportarlo a mano después, y
 	// reimportar es justo lo que un volumen obliga a hacer si se olvida (el
 	// conjunto de discos queda fijado al congelar el snapshot dorado).
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
-	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
-	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: compartible entre servicios")
-	fresh := fs.Bool("refresh", false, "ignorar la caché del registro")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mountpoint][:ro] (repeatable)")
+	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
+	volRO := fs.Bool("volume-ro", false, "mount it read-only: shareable between services")
+	fresh := fs.Bool("refresh", false, "ignore the registry cache")
+	bundle := fs.Bool("bundle", false, "bundle the node server into 1 file (esbuild) when building: starts much faster on cold start, especially on arm64/Mac")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("uso: kling add <servidor> [-as nombre] [-arg valor]\n" +
-			"     búscalo antes con:  kling search <consulta>")
+		return fmt.Errorf("usage: kling add <server> [-as name] [-arg value]\n" +
+			"     search for it first with:  kling search <query>")
 	}
 
 	vols, err := volumeSet(volumes, *mount, *volRO)
@@ -101,14 +102,14 @@ func cmdAdd(args []string) error {
 	rc.Fresh = *fresh
 
 	for _, want := range fs.Args() {
-		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun); err != nil {
+		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun, *bundle); err != nil {
 			return fmt.Errorf("%s: %w", want, err)
 		}
 	}
 	return nil
 }
 
-func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun bool) error {
+func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun, bundle bool) error {
 	srv, candidates, err := rc.Get(ctx, want, 30)
 	if err != nil {
 		if len(candidates) > 0 {
@@ -131,15 +132,15 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 	// es donde peor se diagnostica.
 	if missing := pkg.MissingEnv(nil); len(missing) > 0 {
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s necesita variables de entorno que kindling todavía no sabe inyectar:\n", srv.Name)
+		fmt.Fprintf(&b, "%s needs environment variables that kindling doesn't yet know how to inject:\n", srv.Name)
 		for _, v := range missing {
 			secret := ""
 			if v.IsSecret {
-				secret = "  [secreto]"
+				secret = "  [secret]"
 			}
 			fmt.Fprintf(&b, "  %s%s  %s\n", v.Name, secret, truncate(v.Description, 60))
 		}
-		b.WriteString("\nEmpaquétalo a mano añadiéndolas al entrypoint: scripts/80-mcp-image.sh")
+		b.WriteString("\nPackage it by hand by adding them to the entrypoint: scripts/80-mcp-image.sh")
 		return fmt.Errorf("%s", b.String())
 	}
 
@@ -159,11 +160,11 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 	cmd, unmet := renderArgs(bin, pkg, extra)
 	if len(unmet) > 0 {
 		var b strings.Builder
-		fmt.Fprintf(&b, "faltan %d argumento(s) obligatorio(s); pásalos con -arg:\n", len(unmet))
+		fmt.Fprintf(&b, "missing %d required argument(s); pass them with -arg:\n", len(unmet))
 		for _, a := range unmet {
 			fmt.Fprintf(&b, "  %s  %s\n", argLabel(a), truncate(a.Description, 60))
 		}
-		fmt.Fprintf(&b, "\np. ej.:  kling add %s -arg /data", want)
+		fmt.Fprintf(&b, "\ne.g.:  kling add %s -arg /data", want)
 		return fmt.Errorf("%s", b.String())
 	}
 
@@ -173,23 +174,24 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 	}
 
 	fmt.Printf("%s  v%s\n", srv.Name, srv.Version)
-	fmt.Printf("  servicio:  %s\n", service)
+	fmt.Printf("  service:   %s\n", service)
 	fmt.Printf("  npm:       %s\n", npmSpec)
-	fmt.Printf("  comando:   %s\n", strings.Join(cmd, " "))
+	fmt.Printf("  command:   %s\n", strings.Join(cmd, " "))
 	if dryRun {
-		fmt.Println("\n(-dry-run: no hago nada)")
+		fmt.Println("\n(-dry-run: not doing anything)")
 		return nil
 	}
 	fmt.Println()
 
 	// 1. Empaquetar. Lo hace el daemon porque monta un loopback y hace chroot.
-	fmt.Printf("  1/2  construyendo la imagen (instala node, puede tardar)... ")
+	fmt.Printf("  1/2  building the image (installs node, may take a while)... ")
 	c := api.NewClient(hostOf(host))
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{
 		Name:     service,
 		Packages: []string{"nodejs", "npm"},
 		NPM:      []string{npmSpec},
 		Cmd:      cmd,
+		Bundle:   bundle,
 	})
 	if err != nil {
 		fmt.Println("✗")
@@ -200,12 +202,12 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 	// 2. Y el ciclo de importación que ya existe: arranca la plantilla, le
 	//    pregunta qué sabe hacer, la congela como snapshot dorado y guarda el
 	//    catálogo. Se reutiliza tal cual en vez de duplicar los cinco pasos.
-	fmt.Printf("  2/2  importando el servicio\n")
+	fmt.Printf("  2/2  importing the service\n")
 	if err := runImport(hostOf(host), service, vols, loadConfig()); err != nil {
 		return err
 	}
 
-	fmt.Printf("\nListo. Conéctalo:  kling connect %s -install all\n", service)
+	fmt.Printf("\nDone. Connect it:  kling connect %s -install all\n", service)
 	return nil
 }
 
@@ -257,8 +259,8 @@ func runImport(endpoint, service string, vols []api.VolumeAttachment, cfg *confi
 	cmd := exec.Command("ssh", remote...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("la importación falló en %s: %w\n"+
-			"La imagen SÍ se construyó; reintenta el paso allí:\n"+
+		return fmt.Errorf("import failed on %s: %w\n"+
+			"The image WAS built; retry that step there:\n"+
 			"  ssh %s 'kling mcp import %s'",
 			target, err, target, strings.Join(args, " "))
 	}
@@ -268,23 +270,23 @@ func runImport(endpoint, service string, vols []api.VolumeAttachment, cfg *confi
 // explainUnpackageable dice por qué no se puede y qué hacer, en vez de un "no".
 func explainUnpackageable(srv *registry.Server) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s no lo puedo empaquetar solo.\n", srv.Name)
+	fmt.Fprintf(&b, "%s can't be packaged automatically.\n", srv.Name)
 	if len(srv.Remotes) > 0 {
-		b.WriteString("\nYa está alojado por su autor, así que no hace falta meterlo en una microVM:\n")
+		b.WriteString("\nIt's already hosted by its author, so there's no need to put it in a microVM:\n")
 		for _, r := range srv.Remotes {
 			fmt.Fprintf(&b, "  kling mcp link %s %s\n", serviceName(srv.Name), r.URL)
 		}
 		return fmt.Errorf("%s", b.String())
 	}
 	if len(srv.Packages) == 0 {
-		b.WriteString("No publica ningún paquete instalable.")
+		b.WriteString("It doesn't publish any installable package.")
 		return fmt.Errorf("%s", b.String())
 	}
-	b.WriteString("\nPublica esto, y kindling solo automatiza npm sobre stdio:\n")
+	b.WriteString("\nIt publishes this, and kindling only automates npm over stdio:\n")
 	for _, p := range srv.Packages {
 		fmt.Fprintf(&b, "  %s %s (%s)\n", p.RegistryType, p.Identifier, p.Transport.Type)
 	}
-	b.WriteString("\nA mano se puede igual: scripts/80-mcp-image.sh")
+	b.WriteString("\nIt can still be done by hand: scripts/80-mcp-image.sh")
 	return fmt.Errorf("%s", b.String())
 }
 
@@ -338,7 +340,7 @@ func argLabel(a registry.Argument) string {
 	if a.ValueHint != "" {
 		return "<" + a.ValueHint + ">"
 	}
-	return "<valor>"
+	return "<value>"
 }
 
 // serviceName reduce "io.github.usuario/servidor" a "servidor", que es lo que

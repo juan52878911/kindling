@@ -227,7 +227,7 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("%s: respuesta ilegible: %w", service, err)
+		return nil, fmt.Errorf("%s: unreadable response: %w", service, err)
 	}
 
 	tools := make([]Tool, 0, len(out.Result.Tools))
@@ -296,7 +296,7 @@ var httpc = &http.Client{
 // el puente dice que no conoce la sesion (400/404), lo que pasa cuando la
 // microVM se congelo entre llamadas y sus procesos murieron. Un TIMEOUT no es
 // esto: reintentarlo re-ejecuta la llamada.
-var errStaleSession = errors.New("el puente no reconoce la sesión")
+var errStaleSession = errors.New("the bridge does not recognize the session")
 
 // rpcSeq da identificadores JSON-RPC únicos. El protocolo exige que un id no se
 // repita dentro de una sesión mientras haya peticiones en vuelo.

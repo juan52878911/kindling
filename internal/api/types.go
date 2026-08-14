@@ -252,6 +252,16 @@ type Snapshot struct {
 	// sin explicación.
 	Egress string `json:"egress,omitempty"`
 
+	// CPUPct es el techo de CPU (% de un core) con el que se importó el servicio.
+	// Viaja con el snapshot por la misma razón que Egress: las instancias nacen
+	// DESDE él y el techo es un límite de cgroup en runtime, no algo que quede
+	// dentro del volcado de memoria. Sin grabarlo, toda restauración caía al
+	// defaultCPUPct=50 del daemon aunque el servicio se hubiera importado con más
+	// —y en Mac ese estrangulamiento a media vCPU dobla el arranque en frío de
+	// node (medido: 16 s a 50 % → 6.9 s a 100 %)—. 0 = usar el defecto del daemon
+	// (compatibilidad con snapshots anteriores a este campo).
+	CPUPct int `json:"cpu_pct,omitempty"`
+
 	// AllowDomains es la lista de dominios permitidos cuando Egress es
 	// "allowlist". Se graba junto al snapshot por la misma razón que Egress: las
 	// instancias nacen DESDE el snapshot, y sin esto despertarían con la lista
@@ -420,6 +430,11 @@ type BuildImageRequest struct {
 	Cmd []string `json:"cmd"`
 	// GrowMB agranda la imagen. 0 deja que el script decida.
 	GrowMB int `json:"grow_mb,omitempty"`
+	// Bundle empaqueta el servidor node en un solo fichero con esbuild al
+	// construir. Acelera el arranque en frío dentro de la microVM (sobre todo en
+	// arm64/Mac, donde cargar cientos de ficheros de node_modules se amplifica
+	// bajo KVM anidado): carga 1 fichero en vez de todo el árbol. Solo node (NPM).
+	Bundle bool `json:"bundle,omitempty"`
 }
 
 // BuildImageResult describe la imagen construida.
@@ -547,6 +562,7 @@ type ImageRecipe struct {
 	PIP      []string  `json:"pip,omitempty"`
 	Cmd      []string  `json:"cmd"`
 	GrowMB   int       `json:"grow_mb,omitempty"`
+	Bundle   bool      `json:"bundle,omitempty"`
 	BuiltAt  time.Time `json:"built_at"`
 	KlingVer string    `json:"kling_version,omitempty"`
 }

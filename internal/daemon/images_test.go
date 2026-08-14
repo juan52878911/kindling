@@ -7,6 +7,50 @@ import (
 	"github.com/juan52878911/kindling/internal/api"
 )
 
+// buildScriptArgs traduce el request a los flags de 80-mcp-image.sh. El único
+// matiz que importa por corrección: -bundle (y el resto de flags) va ANTES de `--`,
+// porque parse_build_opts deja de leer flags al ver `--`.
+func TestBuildScriptArgs(t *testing.T) {
+	base := api.BuildImageRequest{
+		Name: "svc", NPM: []string{"@scope/server"}, Packages: []string{"nodejs", "npm"},
+		Cmd: []string{"server-bin", "--flag"},
+	}
+
+	// Sin bundle: no aparece -bundle.
+	got := buildScriptArgs(base)
+	if idx := indexOf(got, "-bundle"); idx != -1 {
+		t.Errorf("sin Bundle no debería haber -bundle: %v", got)
+	}
+
+	// Con bundle: aparece -bundle y ANTES del separador --.
+	base.Bundle = true
+	got = buildScriptArgs(base)
+	bi, sep := indexOf(got, "-bundle"), indexOf(got, "--")
+	if bi == -1 {
+		t.Fatalf("falta -bundle: %v", got)
+	}
+	if sep == -1 || bi > sep {
+		t.Errorf("-bundle (%d) debe ir antes de -- (%d): %v", bi, sep, got)
+	}
+	// El comando del servidor queda después de --, intacto.
+	if got[len(got)-2] != "server-bin" || got[len(got)-1] != "--flag" {
+		t.Errorf("el comando no quedó tras --: %v", got)
+	}
+	// Modo siempre stdio y el nombre como segundo arg.
+	if got[0] != "stdio" || got[1] != "svc" {
+		t.Errorf("cabecera esperada [stdio svc], got %v", got[:2])
+	}
+}
+
+func indexOf(xs []string, s string) int {
+	for i, x := range xs {
+		if x == s {
+			return i
+		}
+	}
+	return -1
+}
+
 // validateBuild es lo único que separa el socket del daemon de un `apk add` y
 // un `npm install -g` corriendo como root con argumentos ajenos. Los campos
 // llegan a esos comandos SIN comillas dentro del script, y el nombre acaba

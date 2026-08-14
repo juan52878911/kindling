@@ -14,7 +14,7 @@ import (
 //	kling images refresh semgrep    solo en esa
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("uso: kling images refresh [imagen...]")
+		return fmt.Errorf("usage: kling images refresh [image...]")
 	}
 	switch args[0] {
 	case "refresh", "refresh-bridge":
@@ -24,7 +24,7 @@ func cmdImages(args []string) error {
 	case "recipe":
 		return imagesRecipe(args[1:])
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa refresh, toolchain o recipe", args[0])
+		return fmt.Errorf("unknown subcommand %q: use refresh, toolchain, or recipe", args[0])
 	}
 }
 
@@ -50,7 +50,7 @@ func imagesRefresh(args []string) error {
 		return err
 	}
 	if len(res) == 0 {
-		fmt.Println("no hay imágenes construidas todavía")
+		fmt.Println("no images built yet")
 		return nil
 	}
 
@@ -66,29 +66,29 @@ func imagesRefresh(args []string) error {
 			fmt.Printf("  ✗  %-24s %s\n", r.Image, r.Error)
 			fallos++
 		case r.Updated:
-			fmt.Printf("  ✓  %-24s puente actualizado\n", r.Image)
+			fmt.Printf("  ✓  %-24s bridge updated\n", r.Image)
 			actualizadas++
 		default:
-			fmt.Printf("     %-24s ya estaba al día\n", r.Image)
+			fmt.Printf("     %-24s already up to date\n", r.Image)
 		}
 	}
 
 	fmt.Println()
-	fmt.Printf("%d actualizada(s), %d al día, %d saltada(s), %d con fallo\n",
+	fmt.Printf("%d updated, %d up to date, %d skipped, %d failed\n",
 		actualizadas, len(res)-actualizadas-saltadas-fallos, saltadas, fallos)
 	if saltadas > 0 {
-		fmt.Println("\nLas saltadas las está usando alguna microVM: párala y repite.")
+		fmt.Println("\nSkipped images are in use by a microVM: stop it and try again.")
 		fmt.Println("  kling ps -a")
 	}
 	if actualizadas > 0 {
 		// El snapshot dorado se congeló con el puente ANTIGUO dentro, así que
 		// las instancias siguen despertando con él hasta que se reimporte. Sin
 		// este aviso, el comando parecería no haber servido de nada.
-		fmt.Println("\nReimporta los servicios afectados para que sus snapshots lo estrenen:")
-		fmt.Println("  kling mcp import <servicio> -force")
+		fmt.Println("\nRe-import the affected services so their snapshots pick it up:")
+		fmt.Println("  kling mcp import <service> -force")
 	}
 	if fallos > 0 {
-		return fmt.Errorf("%d imagen(es) no se pudieron actualizar", fallos)
+		return fmt.Errorf("%d image(s) failed to update", fallos)
 	}
 	return nil
 }
@@ -110,7 +110,7 @@ const ToolchainImage = "toolchain"
 func imagesToolchain(args []string) error {
 	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
 	host := hostFlag(fs)
-	name := fs.String("as", ToolchainImage, "nombre de la imagen")
+	name := fs.String("as", ToolchainImage, "image name")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -118,8 +118,8 @@ func imagesToolchain(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	fmt.Printf("Construyendo %q: node, npm, python3 y pip dentro.\n", *name)
-	fmt.Print("  (instala bastante; tarda unos minutos)... ")
+	fmt.Printf("Building %q: node, npm, python3 and pip inside.\n", *name)
+	fmt.Print("  (installs quite a bit; takes a few minutes)... ")
 
 	res, err := api.NewClient(hostOf(*host)).BuildImage(ctx, api.BuildImageRequest{
 		Name: *name,
@@ -139,7 +139,7 @@ func imagesToolchain(args []string) error {
 		return err
 	}
 	fmt.Printf("✓ %s\n\n", res.Path)
-	fmt.Println("Ya puedes poblar volúmenes sin instalar nada en el anfitrión:")
+	fmt.Println("You can now populate volumes without installing anything on the host:")
 	fmt.Printf("  kling volume populate <vol> -- npm install --prefix /data --ignore-scripts lodash\n")
 	fmt.Printf("  kling volume populate <vol> -- pip install --target /data requests\n")
 	return nil
@@ -157,7 +157,7 @@ func imagesRecipe(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling images recipe <imagen>")
+		return fmt.Errorf("usage: kling images recipe <image>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -167,7 +167,7 @@ func imagesRecipe(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  (construida %s con kling %s)\n", rec.Name,
+	fmt.Printf("%s  (built %s with kling %s)\n", rec.Name,
 		rec.BuiltAt.Local().Format("2006-01-02 15:04"), rec.KlingVer)
 	if rec.Base != "" {
 		fmt.Printf("  base:      %s\n", rec.Base)
@@ -181,6 +181,6 @@ func imagesRecipe(args []string) error {
 	if len(rec.PIP) > 0 {
 		fmt.Printf("  pip:       %s\n", strings.Join(rec.PIP, " "))
 	}
-	fmt.Printf("  comando:   %s\n", strings.Join(rec.Cmd, " "))
+	fmt.Printf("  command:   %s\n", strings.Join(rec.Cmd, " "))
 	return nil
 }

@@ -108,6 +108,16 @@ type Gateway struct {
 	idle         time.Duration
 	Ephemeral    bool
 	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
+	// KeepWarm mantiene caliente la primaria de los N servicios más populares en
+	// modo PERSISTENTE, para que la primera sesión no pague el arranque en frío
+	// (~16 s bajo KVM anidado en Mac; ~3 s en Linux nativo). 0 = desactivado (por
+	// defecto). Lo decide el operador, igual que PprofEnabled: en un host con la RAM
+	// justa (la caja x86 de pruebas) mantener instancias que nadie usa provoca
+	// desalojos, así que es una palanca para hosts donde el cuello es el ARRANQUE y
+	// no la memoria. A diferencia del prewarm (fondo efímero), esto puebla
+	// g.services normales: la siguiente petición reutiliza la instancia caliente, o
+	// —si el segador la congeló por ociosa— paga solo un thaw (~25 ms).
+	KeepWarm int
 	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
@@ -285,9 +295,9 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 		if svc := s.Service(); svc != "" {
 			name = svc
 		}
-		status := "frío"
+		status := "cold"
 		if n := g.pool.stats()[name]; n > 0 {
-			status = fmt.Sprintf("%d instancia(s) pre-calentada(s)", n)
+			status = fmt.Sprintf("%d prewarmed instance(s)", n)
 		}
 		if e, ok := g.services[name]; ok {
 			n := 0
@@ -296,7 +306,7 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 					n++
 				}
 			}
-			status = fmt.Sprintf("caliente en %s · %d sesión(es) · ocioso %s",
+			status = fmt.Sprintf("warm at %s · %d session(s) · idle %s",
 				e.ip, n, time.Since(e.lastUse).Round(time.Second))
 		}
 		fmt.Fprintf(w, "%-24s snapshot=%-20s %s\n", name, s.Name, status)
@@ -310,7 +320,7 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	service := r.PathValue("service")
 	if service == "" {
-		http.Error(w, "falta el servicio en la ruta", http.StatusBadRequest)
+		http.Error(w, "missing service in path", http.StatusBadRequest)
 		return
 	}
 
@@ -331,7 +341,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody))
 		_ = r.Body.Close()
 		if err != nil {
-			http.Error(w, "no pude leer el cuerpo", http.StatusBadRequest)
+			http.Error(w, "could not read body", http.StatusBadRequest)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -361,7 +371,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// sesión sí sigue (abre el stream de esa conversación en el puente).
 	if r.Method == http.MethodGet && r.Header.Get(SessionHeader) == "" {
 		w.Header().Set("Allow", "POST, DELETE")
-		http.Error(w, "este endpoint no ofrece un stream SSE independiente; usa POST",
+		http.Error(w, "this endpoint does not offer a standalone SSE stream; use POST",
 			http.StatusMethodNotAllowed)
 		return
 	}
@@ -379,8 +389,8 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	tnt := tenantFrom(r.Context())
 	if !g.tenantBegin(tnt) {
 		http.Error(w, fmt.Sprintf(
-			"429: el tenant %q ha alcanzado su cuota de %d peticiones en vuelo.\n"+
-				"Es un límite de reparto justo, no de seguridad: reintenta cuando terminen las anteriores.",
+			"429: tenant %q has reached its quota of %d in-flight requests.\n"+
+				"This is a fair-share limit, not a security limit: retry once the earlier ones finish.",
 			tnt.name, tnt.maxInflight), http.StatusTooManyRequests)
 		return
 	}
@@ -424,11 +434,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					g.forget(sid)
 					if errors.Is(err, errTenantInstances) {
-						http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
+						http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.service, err),
 							http.StatusTooManyRequests)
 						return
 					}
-					http.Error(w, fmt.Sprintf("no pude recuperar la sesión de %q: %v", rt.service, err),
+					http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.service, err),
 						http.StatusBadGateway)
 					return
 				}
@@ -527,7 +537,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		// ¿El puente rechazó por tope de sesiones? Esa instancia está llena: se crea
 		// otra y se reintenta. Cualquier otra respuesta (incluido otro 400) se
 		// entrega tal cual al cliente.
-		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "sesiones alcanzado") {
+		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "session limit") {
 			continue
 		}
 
@@ -546,7 +556,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		}
 		return
 	}
-	http.Error(w, fmt.Sprintf("no pude ubicar la sesión de %q: todas las réplicas llenas o el host sin sitio", service),
+	http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full or no room on host", service),
 		http.StatusServiceUnavailable)
 }
 
@@ -554,10 +564,10 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, service string, err err
 	// La cuota de instancias del tenant es un 429 (reparto justo), no un 502: el
 	// servicio no falla, es que este tenant ya tiene todas las suyas.
 	if errors.Is(err, errTenantInstances) {
-		http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusTooManyRequests)
+		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
 		return
 	}
-	http.Error(w, fmt.Sprintf("no pude preparar %q: %v", service, err), http.StatusBadGateway)
+	http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
 }
 
 // pickInstance devuelve una instancia del servicio con hueco de sesión. Despierta
@@ -589,7 +599,7 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api
 	base := strings.TrimSuffix(l.URL, "/mcp")
 	target, err := url.Parse(base)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("URL de enlace inválida: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("invalid link URL: %v", err), http.StatusInternalServerError)
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -620,7 +630,7 @@ func (g *Gateway) bind(sid, service string, e *entry) {
 		service: service, machineID: e.machineID, ip: e.ip,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
-	log.Printf("%s: sesión %s fijada a %s", service, short(sid), e.ip)
+	log.Printf("%s: session %s bound to %s", service, short(sid), e.ip)
 }
 
 // rebind reapunta una sesión a la instancia actual de su servicio, conservando
@@ -735,7 +745,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		actuales := g.tenantInstances(tnt.name)
 		g.mu.Unlock()
 		if actuales >= tnt.maxInstances {
-			return nil, fmt.Errorf("%w: %q ya tiene %d instancia(s) despierta(s) (máx %d)",
+			return nil, fmt.Errorf("%w: %q already has %d instance(s) awake (max %d)",
 				errTenantInstances, tnt.name, actuales, tnt.maxInstances)
 		}
 	}
@@ -762,7 +772,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 			// el error de falta de memoria explica por qué.
 			break
 		}
-		log.Printf("%s: no cabía; congelé %s para hacerle sitio", service, victima)
+		log.Printf("%s: didn't fit; froze %s to make room", service, victima)
 		mc, err = g.acquire(ctx, service, fresh)
 	}
 	if err != nil {
@@ -773,8 +783,16 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 	// un thaw el proceso está listo casi al instante, pero en frío el invitado aún
 	// arranca. Sin esperar aquí, la primera petición se comería un "connection
 	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
+	wr0 := time.Now()
 	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
-		return nil, fmt.Errorf("la herramienta no empezó a escuchar: %w", err)
+		return nil, fmt.Errorf("tool did not start listening: %w", err)
+	}
+	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
+	// botella del arranque (ver docs de rendimiento en Mac): un thaw acepta casi al
+	// instante, un arranque en frío bajo KVM anidado tarda segundos. Se registra solo
+	// cuando es notable, para no ensuciar el log con los thaws de milisegundos.
+	if d := time.Since(wr0); d > 500*time.Millisecond {
+		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
 	}
 
 	target, _ := url.Parse("http://" + net.JoinHostPort(mc.IP, strconv.Itoa(GuestPort)))
@@ -818,7 +836,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		if esDial && !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
 			body, berr := r.GetBody()
 			if berr == nil {
-				log.Printf("proxy %s: %v (un reintento)", service, err)
+				log.Printf("proxy %s: %v (one retry)", service, err)
 				r2 := r.Clone(markRetried(r.Context()))
 				r2.Body = body
 				e.proxy.ServeHTTP(w, r2)
@@ -826,7 +844,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 			}
 		}
 		log.Printf("proxy %s: %v", service, err)
-		http.Error(w, fmt.Sprintf("la herramienta %q no respondió: %v", service, err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
 	}
 
 	return e, nil
@@ -922,7 +940,7 @@ func (g *Gateway) scaleOut(ctx context.Context, service string, tnt *tenant) (*e
 	g.extra[service] = append(g.extra[service], e)
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
-	log.Printf("%s: scale-out — nueva réplica %s (%d instancias del servicio)", service, short(e.machineID), total)
+	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
 	return e, nil
 }
 
@@ -962,7 +980,7 @@ func (g *Gateway) acquire(ctx context.Context, service string, fresh bool) (*api
 	// 2) alguna congelada: ~30 ms
 	for _, m := range machines {
 		if match(m) && m.State == api.StateWarm {
-			log.Printf("%s: descongelando %s", service, m.Name)
+			log.Printf("%s: thawing %s", service, m.Name)
 			return g.client.Thaw(ctx, m.ID)
 		}
 	}
@@ -978,13 +996,17 @@ func (g *Gateway) runFresh(ctx context.Context, service string) (*api.Machine, e
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("%s: instanciando desde el snapshot %s", service, snap.Name)
+	log.Printf("%s: instantiating from snapshot %s", service, snap.Name)
 	return g.client.Run(ctx, api.RunRequest{
 		From: snap.Name,
 		// La política de salida viaja con el snapshot. Sin esto, un servicio
 		// importado con -egress internet despierta sin red y cada llamada suya
 		// al exterior falla con un "fetch failed" que no señala a ninguna parte.
-		Egress:     snap.Egress,
+		Egress: snap.Egress,
+		// El techo de CPU también viaja con el snapshot: sin esto la restauración
+		// caía al defaultCPUPct=50 del daemon y un servicio importado con más CPU
+		// arrancaba estrangulado. 0 (snapshots viejos) deja que el daemon decida.
+		CPUPct:     snap.CPUPct,
 		Labels:     map[string]string{api.LabelService: service},
 		TTLSeconds: int(g.idle.Seconds()) * 2, // red de seguridad si el gateway muere
 	})
@@ -1000,7 +1022,7 @@ func (g *Gateway) snapshotFor(ctx context.Context, service string) (*api.Snapsho
 			return s, nil
 		}
 	}
-	return nil, fmt.Errorf("no hay snapshot para el servicio %q", service)
+	return nil, fmt.Errorf("no snapshot for service %q", service)
 }
 
 func (g *Gateway) alive(ctx context.Context, id string) bool {
@@ -1032,6 +1054,7 @@ func (g *Gateway) Reap(ctx context.Context) {
 			g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
 			g.pool.evictStale(ctx, g.idle*2)
 			g.PrewarmAll(ctx)
+			g.KeepWarmAll(ctx)
 		}
 	}
 }
@@ -1118,6 +1141,103 @@ func (g *Gateway) PrewarmAll(ctx context.Context) {
 	}
 }
 
+// KeepWarmAll mantiene caliente la primaria de los servicios más populares en modo
+// PERSISTENTE, para que la primera sesión no pague el arranque en frío. Es la
+// hermana persistente de PrewarmAll: aquel llena el fondo EFÍMERO (instancias de un
+// solo uso, consumidas por callEphemeral), y encima se apaga si !Ephemeral; este
+// puebla g.services normales vía ensure(), que es de donde tiran las sesiones
+// persistentes. Sin esto, el primer initialize de un servicio dormido entra en
+// buildEntry→acquire→runFresh y se come los ~16 s de arranque en frío (Mac); con
+// esto, la instancia ya existe (reutilización directa) o el segador la dejó WARM y
+// solo se paga un thaw (~25 ms).
+//
+// Apagado por defecto (KeepWarm == 0): en un host con la RAM justa mantener
+// calientes servicios que nadie llama fuerza desalojos. Es una palanca para hosts
+// donde el cuello es el arranque, no la memoria.
+//
+// Deja que el segador la congele por ociosa: no se ancla. La siguiente pasada la
+// re-asegura (reutiliza la RUNNING, o descongela la WARM), nunca vuelve a runFresh.
+// Así la RAM sigue siendo honesta en hosts justos y aun así se elimina el arranque
+// en frío del camino crítico.
+func (g *Gateway) KeepWarmAll(ctx context.Context) {
+	if g.KeepWarm <= 0 {
+		return
+	}
+	snaps, err := g.client.Snapshots(ctx)
+	if err != nil {
+		return
+	}
+
+	// La popularidad solo avanza si alguien la pliega una vez por pasada. En modo
+	// persistente PrewarmAll sale antes de plegarla (el gate !Ephemeral), así que lo
+	// hace este; si además corriera el efímero, PrewarmAll ya la plegó y no se
+	// re-pliega para no adelantar dos veces la ventana de la media móvil.
+	if !g.Ephemeral {
+		g.pop.fold()
+	}
+
+	type cand struct {
+		svc string
+		mem int
+	}
+	var cands []cand
+	for _, s := range snaps {
+		// Un servicio con estado usa UNA instancia persistente; ya la mantiene
+		// caliente su propio uso, no se fuerza aquí.
+		if s.Stateful() {
+			continue
+		}
+		svc := s.Name
+		if n := s.Service(); n != "" {
+			svc = n
+		}
+		cands = append(cands, cand{svc: svc, mem: s.MemMiB})
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		return g.pop.score(cands[i].svc) > g.pop.score(cands[j].svc)
+	})
+
+	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
+	warmed := 0
+	for _, c := range cands {
+		if warmed >= g.KeepWarm {
+			break
+		}
+		// ¿Ya está caliente la primaria? No cuesta nada y cuenta para el cupo.
+		g.mu.Lock()
+		_, yaCaliente := g.services[c.svc]
+		g.mu.Unlock()
+		if yaCaliente {
+			warmed++
+			continue
+		}
+		// Presupuesto: no despertar una primaria nueva si no cabe. La estimación es
+		// conservadora (mem_mib entero, sin descontar páginas compartidas), igual que
+		// en PrewarmAll; el 507 del daemon sigue siendo la última red.
+		if budget >= 0 && c.mem > 0 {
+			if budget < c.mem {
+				break
+			}
+			budget -= c.mem
+		}
+		// ensure() hace todo el trabajo pesado: candado por servicio, buildEntry y
+		// registro en g.services. En una goroutine para no bloquear el segador ~16 s
+		// por cada servicio en frío; la compuerta de arranque del daemon serializa los
+		// encendidos de verdad, así que disparar varias a la vez es seguro. ensure es
+		// idempotente bajo su candado, de modo que si la siguiente pasada la encuentra
+		// aún arrancando no duplica nada. Contexto de fondo sin tenant: es una acción
+		// del sistema, el primer usuario real la adopta como dueña (ver ensure).
+		warmed++
+		go func(svc string) {
+			if _, err := g.ensure(ctx, svc); err != nil {
+				log.Printf("keepwarm %s: %v", svc, err)
+				return
+			}
+			log.Printf("%s: primary kept warm", svc)
+		}(c.svc)
+	}
+}
+
 // prewarmBudget es cuánta memoria del anfitrión se puede dedicar a precalentar,
 // en MiB. Devuelve -1 si no se puede medir (p. ej. un daemon en macOS sin /proc):
 // en ese caso no se limita y se cae al comportamiento de rellenarlo todo, con el
@@ -1180,7 +1300,7 @@ func (g *Gateway) reapOnce(ctx context.Context) {
 			log.Printf("reap %s: %v", v.service, err)
 			continue
 		}
-		log.Printf("%s: congelada por inactividad", v.service)
+		log.Printf("%s: frozen due to inactivity", v.service)
 	}
 }
 
@@ -1312,7 +1432,7 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
 		freeze = g.freezeFn
 	}
 	if err := freeze(id); err != nil {
-		log.Printf("no pude congelar %s para hacer sitio: %v", elegido, err)
+		log.Printf("could not freeze %s to make room: %v", elegido, err)
 		return ""
 	}
 	return elegido

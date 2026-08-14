@@ -47,39 +47,39 @@ type installSig struct {
 // que se lee solo.
 var installSigs = []installSig{
 	// gestores de paquetes lanzados en runtime
-	{"pip install", "pip instalando paquetes de Python en caliente"},
-	{"pip3 install", "pip instalando paquetes de Python en caliente"},
-	{"pip download", "pip descargando paquetes en caliente"},
-	{"uv pip install", "uv instalando paquetes de Python en caliente"},
-	{"pipx install", "pipx instalando una herramienta en caliente"},
-	{"npm install", "npm instalando paquetes de Node en caliente"},
-	{"npm i ", "npm instalando paquetes de Node en caliente"},
-	{"npx -y", "npx descargando un paquete en caliente"},
-	{"pnpm add", "pnpm instalando paquetes en caliente"},
-	{"pnpm dlx", "pnpm descargando un paquete en caliente"},
-	{"yarn add", "yarn instalando paquetes en caliente"},
-	{"apk add", "apk instalando paquetes del sistema en caliente"},
-	{"apt-get install", "apt instalando paquetes del sistema en caliente"},
-	{"apt install", "apt instalando paquetes del sistema en caliente"},
-	{"cargo install", "cargo compilando/instalando en caliente"},
-	{"go install", "go instalando un binario en caliente"},
-	{"gem install", "gem instalando en caliente"},
+	{"pip install", "pip installing Python packages at runtime"},
+	{"pip3 install", "pip installing Python packages at runtime"},
+	{"pip download", "pip downloading packages at runtime"},
+	{"uv pip install", "uv installing Python packages at runtime"},
+	{"pipx install", "pipx installing a tool at runtime"},
+	{"npm install", "npm installing Node packages at runtime"},
+	{"npm i ", "npm installing Node packages at runtime"},
+	{"npx -y", "npx downloading a package at runtime"},
+	{"pnpm add", "pnpm installing packages at runtime"},
+	{"pnpm dlx", "pnpm downloading a package at runtime"},
+	{"yarn add", "yarn installing packages at runtime"},
+	{"apk add", "apk installing system packages at runtime"},
+	{"apt-get install", "apt installing system packages at runtime"},
+	{"apt install", "apt installing system packages at runtime"},
+	{"cargo install", "cargo compiling/installing at runtime"},
+	{"go install", "go installing a binary at runtime"},
+	{"gem install", "gem installing at runtime"},
 	// hosts de registros de paquetes: alcanzarlos en runtime es descargar
-	{"registry.npmjs.org", "alcanza el registro de npm en caliente"},
-	{"pypi.org", "alcanza PyPI en caliente"},
-	{"files.pythonhosted.org", "descarga ruedas de PyPI en caliente"},
-	{"registry.yarnpkg.com", "alcanza el registro de yarn en caliente"},
+	{"registry.npmjs.org", "reaches the npm registry at runtime"},
+	{"pypi.org", "reaches PyPI at runtime"},
+	{"files.pythonhosted.org", "downloads PyPI wheels at runtime"},
+	{"registry.yarnpkg.com", "reaches the yarn registry at runtime"},
 	// el servidor mismo informa de que le falta o instala una dependencia
-	{"error installing", "el servidor informó de un fallo instalando una dependencia"},
-	{"failed to install", "el servidor informó de un fallo instalando una dependencia"},
-	{"is not installed", "el servidor dice que su herramienta no está instalada"},
-	{"please install", "el servidor pide instalar una dependencia que falta"},
+	{"error installing", "the server reported a failure installing a dependency"},
+	{"failed to install", "the server reported a failure installing a dependency"},
+	{"is not installed", "the server says its tool isn't installed"},
+	{"please install", "the server asks to install a missing dependency"},
 	// fracasos que prueban que lo intentó y no pudo (sin red)
-	{"externally-managed-environment", "intentó pip install y el sistema lo rechazó (PEP 668)"},
-	{"could not resolve host", "un descargador no pudo resolver un host (sin red en la microVM)"},
-	{"enotfound", "npm/node no resolvió un host de descarga (sin red en la microVM)"},
-	{"temporary failure in name resolution", "una descarga no resolvió DNS (sin red en la microVM)"},
-	{"network is unreachable", "una descarga no alcanzó la red (la microVM corre aislada)"},
+	{"externally-managed-environment", "tried pip install and the system rejected it (PEP 668)"},
+	{"could not resolve host", "a downloader couldn't resolve a host (no network in the microVM)"},
+	{"enotfound", "npm/node couldn't resolve a download host (no network in the microVM)"},
+	{"temporary failure in name resolution", "a download couldn't resolve DNS (no network in the microVM)"},
+	{"network is unreachable", "a download couldn't reach the network (the microVM runs isolated)"},
 }
 
 // detectRuntimeInstall busca en el texto (consola + respuestas de herramientas)
@@ -118,16 +118,16 @@ func clip(s string, n int) string {
 // installFindingsMsg arma el mensaje que se muestra cuando el guardián dispara.
 func installFindingsMsg(service string, hits []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "el servidor %q intenta INSTALAR dependencias en caliente, dentro de la microVM:\n", service)
+	fmt.Fprintf(&b, "server %q is trying to INSTALL dependencies at runtime, inside the microVM:\n", service)
 	for _, h := range hits {
 		fmt.Fprintf(&b, "    · %s\n", h)
 	}
-	b.WriteString("\nEso instala en el overlay efímero (muere con la sesión y se reinstala cada vez)\n")
-	b.WriteString("en vez de en la imagen compartida, y sin salida a internet el intento falla y\n")
-	b.WriteString("agota la memoria del invitado. Hornéalo en la imagen al construirla:\n")
-	b.WriteString("    scripts/80-mcp-image.sh …  -P \"<paquetes pip>\"   (p. ej. -P semgrep)\n")
-	b.WriteString("                               -n \"<paquetes npm>\"\n")
-	b.WriteString("Reconstruye la imagen y reimporta. Para importar igualmente: --allow-runtime-install")
+	b.WriteString("\nThat installs into the ephemeral overlay (dies with the session and reinstalls every time)\n")
+	b.WriteString("instead of into the shared image, and with no internet egress the attempt fails and\n")
+	b.WriteString("exhausts the guest's memory. Bake it into the image when building it:\n")
+	b.WriteString("    scripts/80-mcp-image.sh …  -P \"<pip packages>\"   (e.g. -P semgrep)\n")
+	b.WriteString("                               -n \"<npm packages>\"\n")
+	b.WriteString("Rebuild the image and reimport. To import anyway: --allow-runtime-install")
 	return b.String()
 }
 
@@ -223,22 +223,22 @@ func exerciseTools(post poster, tools []api.ToolSpec) string {
 func mcpVerify(args []string) error {
 	fs := flag.NewFlagSet("mcp verify", flag.ExitOnError)
 	host := hostFlag(fs)
-	image := fs.String("image", "", "imagen a probar (por defecto: el nombre dado)")
-	mem := fs.Int("mem", 0, "memoria en MiB de la prueba")
-	cpus := fs.Int("cpus", 0, "vCPUs de la prueba")
-	egress := fs.String("egress", "", "salida de red: none | internet (por defecto none, como producción)")
+	image := fs.String("image", "", "image to test (default: the given name)")
+	mem := fs.Int("mem", 0, "test memory in MiB")
+	cpus := fs.Int("cpus", 0, "test vCPUs")
+	egress := fs.String("egress", "", "network egress: none | internet (default none, like production)")
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
-	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
-	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura")
-	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
-	settle := fs.Duration("settle", 90*time.Second, "cuánto vigilar la consola tras ejercer las herramientas (las instalaciones tardan en fallar)")
-	keep := fs.Bool("keep", false, "no destruir la microVM de prueba al terminar")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mountpoint][:ro] (repeatable)")
+	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
+	volRO := fs.Bool("volume-ro", false, "mount it read-only")
+	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
+	settle := fs.Duration("settle", 90*time.Second, "how long to watch the console after exercising the tools (installs take a while to fail)")
+	keep := fs.Bool("keep", false, "don't destroy the test microVM when done")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling mcp verify <servicio> [-image imagen]")
+		return fmt.Errorf("usage: kling mcp verify <service> [-image image]")
 	}
 	importVols, err := volumeSet(volumes, *mount, *volRO)
 	if err != nil {
@@ -254,9 +254,9 @@ func mcpVerify(args []string) error {
 	c := api.NewClient(cfg.Host(*host))
 	tmpl := name + "-verify"
 
-	fmt.Printf("Probando %q desde la imagen %q (sin importar)\n\n", name, img)
+	fmt.Printf("Testing %q from image %q (without importing)\n\n", name, img)
 
-	fmt.Printf("  1/4  arrancando en aislamiento... ")
+	fmt.Printf("  1/4  starting in isolation... ")
 	mc, err := c.Run(ctx, api.RunRequest{
 		Name:    tmpl,
 		Image:   img,
@@ -268,7 +268,7 @@ func mcpVerify(args []string) error {
 	})
 	if err != nil {
 		fmt.Println("✗")
-		return fmt.Errorf("no pude arrancar la prueba: %w", err)
+		return fmt.Errorf("couldn't start the test: %w", err)
 	}
 	fmt.Printf("✓ %s\n", mc.ID[:8])
 	remove := func() {
@@ -277,10 +277,10 @@ func mcpVerify(args []string) error {
 		}
 	}
 
-	fmt.Printf("  2/4  esperando al servidor... ")
+	fmt.Printf("  2/4  waiting for the server... ")
 	if err := waitGuest(ctx, c, mc.ID, *wait); err != nil {
 		fmt.Println("✗")
-		fmt.Printf("\nEl servidor no abrió el puerto 8080. Log:\n  kling logs %s\n", tmpl)
+		fmt.Printf("\nThe server didn't open port 8080. Log:\n  kling logs %s\n", tmpl)
 		remove()
 		return err
 	}
@@ -289,11 +289,11 @@ func mcpVerify(args []string) error {
 	if ierr != nil {
 		fmt.Println("✗")
 		remove()
-		return fmt.Errorf("introspección: %w", ierr)
+		return fmt.Errorf("introspection: %w", ierr)
 	}
-	fmt.Printf("✓ %d herramienta(s)\n", len(tools))
+	fmt.Printf("✓ %d tool(s)\n", len(tools))
 
-	fmt.Printf("  3/4  ejerciendo las herramientas... ")
+	fmt.Printf("  3/4  exercising the tools... ")
 	// Acotado: una herramienta que se cuelgue —un escaneo enorme— no debe colgar
 	// el verify. El disparo de instalación ocurre al principio del trabajo, así
 	// que unos minutos sobran para provocarlo.
@@ -302,7 +302,7 @@ func mcpVerify(args []string) error {
 	cancel()
 	fmt.Println("✓")
 
-	fmt.Printf("  4/4  vigilando la consola (hasta %s)... ", *settle)
+	fmt.Printf("  4/4  watching the console (up to %s)... ", *settle)
 	deadline := time.Now().Add(*settle)
 	var hits []string
 	for {
@@ -325,7 +325,7 @@ func mcpVerify(args []string) error {
 		return fmt.Errorf("%s", installFindingsMsg(name, hits))
 	}
 	fmt.Println("✓")
-	fmt.Printf("\n%s no intentó instalar nada en caliente: toma todo de la imagen compartida.\n", name)
-	fmt.Printf("(se ejercieron %d herramienta(s) y se vigiló la consola %s)\n", len(tools), *settle)
+	fmt.Printf("\n%s didn't try to install anything at runtime: it takes everything from the shared image.\n", name)
+	fmt.Printf("(exercised %d tool(s) and watched the console for %s)\n", len(tools), *settle)
 	return nil
 }

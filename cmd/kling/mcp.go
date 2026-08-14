@@ -23,7 +23,7 @@ import (
 //	kling mcp refresh <servicio>
 func cmdMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("uso: kling mcp [import|verify|list|refresh|health]")
+		return fmt.Errorf("usage: kling mcp [import|verify|list|refresh|health]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -42,7 +42,7 @@ func cmdMCP(args []string) error {
 	case "unlink":
 		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("subcomando desconocido %q: usa import, verify, list, refresh, health, link o unlink", sub)
+		return fmt.Errorf("unknown subcommand %q: use import, verify, list, refresh, health, link, or unlink", sub)
 	}
 }
 
@@ -59,27 +59,32 @@ func cmdMCP(args []string) error {
 func mcpImport(args []string) error {
 	fs := flag.NewFlagSet("mcp import", flag.ExitOnError)
 	host := hostFlag(fs)
-	image := fs.String("image", "", "imagen de la que importar (por defecto: el nombre del servicio)")
-	mem := fs.Int("mem", 0, "memoria en MiB de la plantilla")
+	image := fs.String("image", "", "image to import from (default: the service name)")
+	mem := fs.Int("mem", 0, "template memory in MiB")
 	// Sin esto solo se podía subir la memoria, y hay servicios cuyo cuello de
 	// botella es la CPU: un analizador estático pasa por cada fichero, y con un
 	// solo vCPU un escaneo se acerca al plazo del cliente MCP. Como la memoria,
 	// queda GRABADO en el snapshot dorado y no se puede cambiar después sin
 	// reimportar — por eso el flag va aquí y no en el arranque.
-	cpus := fs.Int("cpus", 0, "vCPUs de la plantilla")
-	egress := fs.String("egress", "", "salida de red del servicio: none | internet | allowlist")
-	allow := fs.String("allow", "", "dominios permitidos con -egress allowlist (separados por coma)")
+	cpus := fs.Int("cpus", 0, "template vCPUs")
+	// El techo de CPU también se graba en el snapshot dorado (ver api.Snapshot):
+	// las instancias nacen de él, y sin fijarlo aquí toda restauración caía al 50 %
+	// del daemon. En Mac ese estrangulamiento a media vCPU dobla el arranque en frío
+	// de node (16 s → 6.9 s al 100 %), así que subirlo es la palanca directa allí.
+	cpu := fs.Int("cpu", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	egress := fs.String("egress", "", "service network egress: none | internet | allowlist")
+	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	var volumes volumeFlag
-	fs.Var(&volumes, "volume", "volumen a montar: nombre[:/punto][:ro] (repetible)")
-	mount := fs.String("mount", "", "dónde montar el volumen (por defecto /data; solo con uno)")
-	volRO := fs.Bool("volume-ro", false, "montarlo en solo lectura: compartible entre servicios")
-	keep := fs.Bool("keep", false, "no destruir la plantilla al terminar")
-	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
-	force := fs.Bool("force", false, "reemplazar el servicio si ya existe")
-	stateful := fs.Bool("stateful", false, "forzar instancia persistente (por defecto se deduce del catálogo)")
-	ephemeral := fs.Bool("ephemeral", false, "forzar máquinas efímeras aunque el análisis diga lo contrario")
+	fs.Var(&volumes, "volume", "volume to mount: name[:/mountpoint][:ro] (repeatable)")
+	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
+	volRO := fs.Bool("volume-ro", false, "mount it read-only: shareable across services")
+	keep := fs.Bool("keep", false, "don't destroy the template when done")
+	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
+	force := fs.Bool("force", false, "replace the service if it already exists")
+	stateful := fs.Bool("stateful", false, "force a persistent instance (default: inferred from the catalog)")
+	ephemeral := fs.Bool("ephemeral", false, "force ephemeral machines even if the analysis says otherwise")
 	allowRuntimeInstall := fs.Bool("allow-runtime-install", false,
-		"importar aunque el servidor instale dependencias en caliente (no recomendado: hornéalas en la imagen)")
+		"import even if the server installs dependencies at runtime (not recommended: bake them into the image)")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -88,7 +93,7 @@ func mcpImport(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling mcp import <servicio> [-image imagen]")
+		return fmt.Errorf("usage: kling mcp import <service> [-image image]")
 	}
 	service := fs.Arg(0)
 	img := config.Or(*image, service)
@@ -100,7 +105,7 @@ func mcpImport(args []string) error {
 	c := api.NewClient(cfg.Host(*host))
 	tmpl := service + "-import"
 
-	fmt.Printf("Importando %q desde la imagen %q\n\n", service, img)
+	fmt.Printf("Importing %q from image %q\n\n", service, img)
 
 	// Reimportar es lo normal cuando cambia la versión del servidor MCP, así que
 	// hay que poder reemplazar: primero se retiran sus instancias, que son las
@@ -126,24 +131,24 @@ func mcpImport(args []string) error {
 	if caps, cerr := c.ImageCapabilities(ctx, img); cerr == nil && caps != nil {
 		if egr == "" && caps.Egress == "allowlist" {
 			egr = "allowlist"
-			fmt.Printf("  capacidades: el servicio declara allowlist → egress=allowlist (automático)\n")
+			fmt.Printf("  capabilities: the service declares allowlist -> egress=allowlist (automatic)\n")
 		}
 		if egr == "" && (caps.Egress == "internet" || caps.Browser) {
 			egr = "internet"
-			fmt.Printf("  capacidades: el servicio necesita internet → egress=internet (automático)\n")
+			fmt.Printf("  capabilities: the service needs internet -> egress=internet (automatic)\n")
 		}
 		if egr == "allowlist" && len(allowDomains) == 0 && len(caps.AllowDomains) > 0 {
 			allowDomains = caps.AllowDomains
-			fmt.Printf("  capacidades: semilla de dominios del build (%d); edítala con -allow si falta alguno\n",
+			fmt.Printf("  capabilities: domain seed from the build (%d); edit it with -allow if any are missing\n",
 				len(caps.AllowDomains))
 		}
 		if len(caps.System) > 0 {
 			// Ya horneados en la imagen por el build; solo se informa de qué trae.
-			fmt.Printf("  capacidades: binarios de sistema en la imagen (%s)\n",
+			fmt.Printf("  capabilities: system binaries in the image (%s)\n",
 				strings.Join(caps.System, ", "))
 		}
 		if len(caps.Native) > 0 {
-			fmt.Printf("  aviso: módulos nativos detectados (%s); si el servidor falla al usarlos, reconstruye instalándolos con sus scripts\n",
+			fmt.Printf("  warning: native modules detected (%s); if the server fails when using them, rebuild installing them with their scripts\n",
 				strings.Join(caps.Native, ", "))
 		}
 		// ERROR, no aviso: estos nativos quedaron sin binario. Antes la imagen se
@@ -151,13 +156,13 @@ func mcpImport(args []string) error {
 		// Se aborta ANTES de arrancar la plantilla: no tiene sentido gastar el
 		// ciclo de import en un servicio que se sabe roto.
 		if len(caps.NativeMissing) > 0 {
-			return fmt.Errorf("módulos nativos sin binario: %s\n"+
-				"La imagen se construyó con --ignore-scripts (no compila en el host) y estos módulos no\n"+
-				"traían prebuilt en el paquete ni un paquete de plataforma que lo aportara. El servidor\n"+
-				"arrancaría, pero la primera herramienta que los use fallaría en caliente.\n"+
-				"Arréglalo reconstruyendo con una versión que publique binarios de plataforma\n"+
-				"(p.ej. sharp≥0.33 con sus optionalDependencies @img/sharp-*) o añadiendo el paquete\n"+
-				"de plataforma correspondiente a los npm de la imagen.",
+			return fmt.Errorf("native modules without a binary: %s\n"+
+				"The image was built with --ignore-scripts (it doesn't compile on the host) and these modules\n"+
+				"didn't ship a prebuilt binary in the package, nor a platform package that provided one. The server\n"+
+				"would start, but the first tool that uses them would fail at runtime.\n"+
+				"Fix it by rebuilding with a version that publishes platform binaries\n"+
+				"(e.g. sharp>=0.33 with its optionalDependencies @img/sharp-*) or by adding the matching\n"+
+				"platform package to the image's npm dependencies.",
 				strings.Join(caps.NativeMissing, ", "))
 		}
 	}
@@ -169,14 +174,14 @@ func mcpImport(args []string) error {
 			// Sin dominios el modo cierra en falso: solo DNS, cero salida útil. Es
 			// legítimo (deny-all con DNS) pero casi siempre un despiste, así que se
 			// avisa en vez de fallar.
-			fmt.Printf("  aviso: allowlist SIN dominios; el servicio no podrá salir a ninguna parte. Añade -allow dom1,dom2\n")
+			fmt.Printf("  warning: allowlist WITHOUT domains; the service won't be able to reach anywhere. Add -allow dom1,dom2\n")
 		} else {
 			fmt.Printf("  allowlist: %s\n", strings.Join(allowDomains, ", "))
 		}
 	}
 
 	// 1. plantilla
-	fmt.Printf("  1/5  arrancando la plantilla... ")
+	fmt.Printf("  1/5  starting the template... ")
 	mc, err := c.Run(ctx, api.RunRequest{
 		Name:  tmpl,
 		Image: img,
@@ -189,6 +194,9 @@ func mcpImport(args []string) error {
 		// invitado.
 		MemMiB: config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
+		// Techo de CPU: se graba en el snapshot (Commit copia mc.CPUPct) para que la
+		// restauración no caiga al 50 % del daemon. 0 = deja decidir al daemon.
+		CPUPct: config.Or(*cpu, cfg.Defaults.CPUPct),
 		Egress: egr,
 		// Se graban en el snapshot dorado: las instancias nacen de él y sin esto
 		// despertarían con la lista vacía. Solo se usan si egr == "allowlist".
@@ -201,7 +209,7 @@ func mcpImport(args []string) error {
 	})
 	if err != nil {
 		fmt.Println("✗")
-		return fmt.Errorf("no pude arrancar la plantilla: %w", err)
+		return fmt.Errorf("couldn't start the template: %w", err)
 	}
 	fmt.Printf("✓ %s en %s\n", mc.ID[:8], mc.IP)
 
@@ -212,23 +220,23 @@ func mcpImport(args []string) error {
 	}
 
 	// 2. introspección
-	fmt.Printf("  2/5  esperando al servidor MCP... ")
+	fmt.Printf("  2/5  waiting for the MCP server... ")
 	if err := waitGuest(ctx, c, mc.ID, *wait); err != nil {
 		fmt.Println("✗")
-		fmt.Printf("\nEl servidor no abrió el puerto 8080. Mira qué pasó dentro:\n  kling logs %s\n", tmpl)
+		fmt.Printf("\nThe server didn't open port 8080. Check what happened inside:\n  kling logs %s\n", tmpl)
 		cleanup()
 		return err
 	}
 	fmt.Println("✓")
 
-	fmt.Printf("  3/5  preguntando qué sabe hacer... ")
+	fmt.Printf("  3/5  asking what it can do... ")
 	info, tools, err := introspectWith(guestPost(ctx, c, mc.ID))
 	if err != nil {
 		fmt.Println("✗")
 		cleanup()
 		return err
 	}
-	fmt.Printf("✓ %s · %d herramienta(s)\n", info, len(tools))
+	fmt.Printf("✓ %s · %d tool(s)\n", info, len(tools))
 
 	// GUARDIÁN: que el servidor no se instale nada en caliente.
 	//
@@ -237,7 +245,7 @@ func mcpImport(args []string) error {
 	// cuando llegamos aquí, y su huella está en la consola. Se comprueba ANTES del
 	// commit: no queremos congelar un snapshot dorado de un servicio roto. Ver
 	// verify.go.
-	fmt.Printf("       comprobando que no instala en caliente... ")
+	fmt.Printf("       checking that it doesn't install at runtime... ")
 	if logtxt, lerr := c.Logs(ctx, mc.ID, 0); lerr == nil {
 		if hits := detectRuntimeInstall(logtxt); len(hits) > 0 {
 			fmt.Println("✗")
@@ -247,17 +255,17 @@ func mcpImport(args []string) error {
 				return fmt.Errorf("%s", msg)
 			}
 			fmt.Println(msg)
-			fmt.Println("       --allow-runtime-install: importo de todos modos")
+			fmt.Println("       --allow-runtime-install: importing anyway")
 		} else {
 			// El escaneo de consola caza a quien instala al arrancar. Los que solo
 			// instalan al USAR una herramienta (semgrep) no se disparan aquí: para
 			// eso está `kling mcp verify`, que ejerce las herramientas.
-			fmt.Println("✓ (para el chequeo profundo: kling mcp verify " + service + ")")
+			fmt.Println("✓ (for the deep check: kling mcp verify " + service + ")")
 		}
 	} else {
 		// Sin consola no se puede afirmar que esté limpio, pero tampoco es motivo
 		// para abortar: se deja constancia y se sigue.
-		fmt.Printf("(sin log: %v)\n", lerr)
+		fmt.Printf("(no log: %v)\n", lerr)
 	}
 
 	// AUTO-RESET POST-CATALOG. Sin esto, el snapshot dorado se congela con el
@@ -277,7 +285,7 @@ func mcpImport(args []string) error {
 	//
 	// Probamos /reset primero. Si responde 204, es stdio y ya está. Si da 404,
 	// es HTTP nativo: esperamos el auto-reset del wrapper.
-	fmt.Printf("       reseteando estado post-handshake... ")
+	fmt.Printf("       resetting post-handshake state... ")
 	gresp, err := c.Guest(ctx, mc.ID, api.GuestRequest{
 		Path:   "/reset",
 		Method: "POST",
@@ -292,19 +300,19 @@ func mcpImport(args []string) error {
 		if *wait < resetAfter {
 			resetAfter = *wait + 5*time.Second
 		}
-		fmt.Printf("esperando %s para auto-reset del servidor HTTP nativo... ", resetAfter)
+		fmt.Printf("waiting %s for the native HTTP server auto-reset... ", resetAfter)
 		select {
 		case <-time.After(resetAfter):
-			fmt.Println("✓ (HTTP nativo)")
+			fmt.Println("✓ (native HTTP)")
 		case <-ctx.Done():
 			fmt.Println("✗")
 			cleanup()
 			return ctx.Err()
 		}
-		fmt.Printf("       verificando que el servidor responde... ")
+		fmt.Printf("       verifying the server responds... ")
 		if err := waitGuest(ctx, c, mc.ID, 30*time.Second); err != nil {
 			fmt.Println("✗")
-			fmt.Printf("\nEl servidor no volvió a abrir el puerto 8080 tras el reset. Mira qué pasó:\n  kling logs %s\n", tmpl)
+			fmt.Printf("\nThe server didn't reopen port 8080 after the reset. Check what happened:\n  kling logs %s\n", tmpl)
 			cleanup()
 			return err
 		}
@@ -315,19 +323,19 @@ func mcpImport(args []string) error {
 	verdict := api.ClassifyTools(tools)
 	switch {
 	case *stateful:
-		verdict = api.StatefulVerdict{Stateful: true, Reason: "forzado con -stateful"}
+		verdict = api.StatefulVerdict{Stateful: true, Reason: "forced with -stateful"}
 	case *ephemeral:
-		verdict = api.StatefulVerdict{Stateful: false, Reason: "forzado con -ephemeral"}
+		verdict = api.StatefulVerdict{Stateful: false, Reason: "forced with -ephemeral"}
 	}
-	modo := "EFÍMERO — una microVM por acción, destruida al terminar"
+	modo := "EPHEMERAL — one microVM per action, destroyed when done"
 	if verdict.Stateful {
-		modo = "PERSISTENTE — una instancia, congelada al quedar ociosa"
+		modo = "PERSISTENT — one instance, frozen when idle"
 	}
 	fmt.Printf("       %s\n", modo)
-	fmt.Printf("       porque %s\n", verdict.Reason)
+	fmt.Printf("       because %s\n", verdict.Reason)
 
 	// 3 y 4. snapshot dorado y catálogo
-	fmt.Printf("  4/5  congelando como snapshot dorado... ")
+	fmt.Printf("  4/5  freezing as golden snapshot... ")
 	// La etiqueta viaja con la máquina hasta el snapshot.
 	if err := c.SetLabels(ctx, mc.ID, labelsFor(service, verdict.Stateful)); err != nil {
 		fmt.Println("✗")
@@ -337,14 +345,14 @@ func mcpImport(args []string) error {
 	if _, err := c.Commit(ctx, mc.ID, service); err != nil {
 		fmt.Println("✗")
 		cleanup()
-		if strings.Contains(err.Error(), "ya existe") {
-			return fmt.Errorf("el servicio %q ya existe; usa -force para reemplazarlo", service)
+		if strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("service %q already exists; use -force to replace it", service)
 		}
-		return fmt.Errorf("no pude congelarlo: %w", err)
+		return fmt.Errorf("couldn't freeze it: %w", err)
 	}
 	fmt.Println("✓")
 
-	fmt.Printf("  5/5  guardando el catálogo... ")
+	fmt.Printf("  5/5  saving the catalog... ")
 	if _, err := c.SetCatalog(ctx, service, tools); err != nil {
 		fmt.Println("✗")
 		cleanup()
@@ -354,7 +362,7 @@ func mcpImport(args []string) error {
 
 	cleanup()
 
-	fmt.Printf("\n%q importado con %d herramienta(s):\n", service, len(tools))
+	fmt.Printf("\n%q imported with %d tool(s):\n", service, len(tools))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	for _, t := range tools {
 		d := t.Description
@@ -366,27 +374,27 @@ func mcpImport(args []string) error {
 	_ = tw.Flush()
 
 	if verdict.Stateful {
-		fmt.Printf("\nUsará una instancia persistente para no perder lo que acumule. Al quedar\n")
-		fmt.Printf("ociosa se congela: deja de gastar CPU y RAM, y vuelve en milisegundos con\n")
-		fmt.Printf("su estado intacto.\n")
+		fmt.Printf("\nIt will use a persistent instance so it doesn't lose what it accumulates. When idle\n")
+		fmt.Printf("it freezes: it stops spending CPU and RAM, and comes back in milliseconds with\n")
+		fmt.Printf("its state intact.\n")
 	}
 	if egr == "allowlist" {
 		if len(allowDomains) > 0 {
-			fmt.Printf("\nSalida restringida (allowlist) a: %s\n", strings.Join(allowDomains, ", "))
+			fmt.Printf("\nRestricted egress (allowlist) to: %s\n", strings.Join(allowDomains, ", "))
 		} else {
-			fmt.Printf("\nSalida restringida (allowlist) SIN dominios: no saldrá a ninguna parte.\n")
+			fmt.Printf("\nRestricted egress (allowlist) WITHOUT domains: it won't be able to reach anywhere.\n")
 		}
-		fmt.Printf("Cambia la lista reimportando con -allow dom1,dom2.\n")
+		fmt.Printf("Change the list by reimporting with -allow dom1,dom2.\n")
 	}
-	fmt.Printf("\nA partir de ahora listar sus capacidades NO despierta la microVM.\n")
-	fmt.Printf("Conéctalo:  kling connect -all -install opencode\n")
+	fmt.Printf("\nFrom now on, listing its capabilities does NOT wake the microVM.\n")
+	fmt.Printf("Connect it:  kling connect -all -install opencode\n")
 	return nil
 }
 
 func mcpList(args []string) error {
 	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
 	host := hostFlag(fs)
-	verbose := fs.Bool("v", false, "mostrar cada herramienta")
+	verbose := fs.Bool("v", false, "show each tool")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -399,21 +407,21 @@ func mcpList(args []string) error {
 		return err
 	}
 	if len(snaps) == 0 {
-		fmt.Println("Sin servicios. Importa uno:  kling mcp import <nombre> -image <imagen>")
+		fmt.Println("No services. Import one:  kling mcp import <name> -image <image>")
 		return nil
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "SERVICIO\tHERRAMIENTAS\tCATÁLOGO\tSALUD\tMEMORIA\tINSTANCIAS")
+	fmt.Fprintln(tw, "SERVICE\tTOOLS\tCATALOG\tHEALTH\tMEMORY\tINSTANCES")
 	total := 0
 	for _, s := range snaps {
 		n := s.Name
 		if svc := s.Service(); svc != "" {
 			n = svc
 		}
-		cat := "sin capturar"
+		cat := "not captured"
 		if s.ToolsAt != nil {
-			cat = since(*s.ToolsAt) + " atrás"
+			cat = since(*s.ToolsAt) + " ago"
 		}
 		total += len(s.Tools)
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n",
@@ -425,10 +433,10 @@ func mcpList(args []string) error {
 	links, _ := api.NewClient(hostOf(*host)).Links(ctx)
 	for _, l := range links {
 		total += len(l.Tools)
-		fmt.Printf("%-12s %-14d %-11s %-13s %-9s externo: %s\n",
-			l.Service(), len(l.Tools), since(l.CreatedAt)+" atrás", "—", "—", l.URL)
+		fmt.Printf("%-12s %-14d %-11s %-13s %-9s external: %s\n",
+			l.Service(), len(l.Tools), since(l.CreatedAt)+" ago", "—", "—", l.URL)
 	}
-	fmt.Printf("\n%d herramienta(s) en %d servicio(s) (%d microVM, %d externo(s)).\n",
+	fmt.Printf("\n%d tool(s) across %d service(s) (%d microVM, %d external).\n",
 		total, len(snaps)+len(links), len(snaps), len(links))
 
 	if *verbose {
@@ -457,7 +465,7 @@ func mcpRefresh(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling mcp refresh <servicio>")
+		return fmt.Errorf("usage: kling mcp refresh <service>")
 	}
 	service := fs.Arg(0)
 
@@ -465,7 +473,7 @@ func mcpRefresh(args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 
-	fmt.Printf("Refrescando el catálogo de %q... ", service)
+	fmt.Printf("Refreshing the catalog for %q... ", service)
 	mc, err := c.Run(ctx, api.RunRequest{
 		From: service, Name: service + "-refresh",
 		Labels: map[string]string{api.LabelService: service},
@@ -489,7 +497,7 @@ func mcpRefresh(args []string) error {
 		fmt.Println("✗")
 		return err
 	}
-	fmt.Printf("✓ %d herramienta(s)\n", len(tools))
+	fmt.Printf("✓ %d tool(s)\n", len(tools))
 	return nil
 }
 
@@ -510,7 +518,7 @@ func mcpRefresh(args []string) error {
 func mcpHealth(args []string) error {
 	fs := flag.NewFlagSet("mcp health", flag.ExitOnError)
 	host := hostFlag(fs)
-	wait := fs.Duration("wait", 45*time.Second, "espera máxima a que el servidor arranque")
+	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
@@ -537,7 +545,7 @@ func mcpHealth(args []string) error {
 		}
 	}
 	if len(targets) == 0 {
-		fmt.Println("Sin servicios que sondear. Importa uno:  kling mcp import <nombre> -image <imagen>")
+		fmt.Println("No services to probe. Import one:  kling mcp import <name> -image <image>")
 		return nil
 	}
 
@@ -548,20 +556,20 @@ func mcpHealth(args []string) error {
 		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
 		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
 		if _, err := c.SetHealth(ctx, svc, probeErr == nil, errMsg(probeErr)); err != nil {
-			fmt.Fprintf(tw, "  %s\t✗ no pude anotar la salud: %v\n", svc, err)
+			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", svc, err)
 			continue
 		}
 		if probeErr != nil {
 			enfermos++
-			fmt.Fprintf(tw, "  %s\t✗ enferma: %v\n", svc, probeErr)
+			fmt.Fprintf(tw, "  %s\t✗ unhealthy: %v\n", svc, probeErr)
 		} else {
-			fmt.Fprintf(tw, "  %s\t✓ sana\n", svc)
+			fmt.Fprintf(tw, "  %s\t✓ healthy\n", svc)
 		}
 	}
 	_ = tw.Flush()
 
 	if enfermos > 0 {
-		return fmt.Errorf("%d de %d servicio(s) no respondieron al sondeo", enfermos, len(targets))
+		return fmt.Errorf("%d of %d service(s) didn't respond to the probe", enfermos, len(targets))
 	}
 	return nil
 }
@@ -578,15 +586,15 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 		TTLSeconds: 120,
 	})
 	if err != nil {
-		return fmt.Errorf("no arrancó (%w)", err)
+		return fmt.Errorf("didn't start (%w)", err)
 	}
 	defer func() { _ = c.Remove(context.WithoutCancel(ctx), mc.ID) }()
 
 	if err := waitGuest(ctx, c, mc.ID, wait); err != nil {
-		return fmt.Errorf("no abrió el puerto MCP (%w)", err)
+		return fmt.Errorf("didn't open the MCP port (%w)", err)
 	}
 	if _, _, err := introspectWith(guestPost(ctx, c, mc.ID)); err != nil {
-		return fmt.Errorf("no respondió a tools/list (%w)", err)
+		return fmt.Errorf("didn't respond to tools/list (%w)", err)
 	}
 	return nil
 }
@@ -596,16 +604,16 @@ func healthCell(s *api.Snapshot) string {
 	switch s.Health {
 	case "healthy":
 		if s.HealthAt != nil {
-			return "sana (" + since(*s.HealthAt) + ")"
+			return "healthy (" + since(*s.HealthAt) + ")"
 		}
-		return "sana"
+		return "healthy"
 	case "unhealthy":
 		if s.HealthAt != nil {
-			return "enferma (" + since(*s.HealthAt) + ")"
+			return "unhealthy (" + since(*s.HealthAt) + ")"
 		}
-		return "enferma"
+		return "unhealthy"
 	default:
-		return "sin sondear"
+		return "not probed"
 	}
 }
 
@@ -627,15 +635,15 @@ func errMsg(err error) string {
 func mcpLink(args []string) error {
 	fs := flag.NewFlagSet("mcp link", flag.ExitOnError)
 	host := hostFlag(fs)
-	desc := fs.String("description", "", "para qué sirve")
+	desc := fs.String("description", "", "what it's for")
 	var labels labelFlag
-	fs.Var(&labels, "label", "etiqueta clave=valor (repetible)")
+	fs.Var(&labels, "label", "key=value label (repeatable)")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("uso: kling mcp link <nombre> <url>\n" +
-			"  ej: kling mcp link engram http://192.168.2.3:9100/mcp")
+		return fmt.Errorf("usage: kling mcp link <name> <url>\n" +
+			"  e.g.: kling mcp link engram http://192.168.2.3:9100/mcp")
 	}
 	name, url := fs.Arg(0), fs.Arg(1)
 
@@ -643,23 +651,23 @@ func mcpLink(args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 
-	fmt.Printf("Enlazando %q -> %s\n\n", name, url)
+	fmt.Printf("Linking %q -> %s\n\n", name, url)
 
 	// Se introspecciona igual que a un servicio propio: el catálogo se guarda y
 	// a partir de ahí listar capacidades no toca el servidor externo.
-	fmt.Printf("  1/2  preguntando qué sabe hacer... ")
+	fmt.Printf("  1/2  asking what it can do... ")
 	info, tools, err := introspectAt(ctx, strings.TrimSuffix(url, "/mcp")+"/mcp")
 	if err != nil {
 		// Puede que la URL ya sea el endpoint completo.
 		info, tools, err = introspectAt(ctx, url)
 		if err != nil {
 			fmt.Println("✗")
-			return fmt.Errorf("no pude hablar con %s: %w", url, err)
+			return fmt.Errorf("couldn't talk to %s: %w", url, err)
 		}
 	}
-	fmt.Printf("✓ %s · %d herramienta(s)\n", info, len(tools))
+	fmt.Printf("✓ %s · %d tool(s)\n", info, len(tools))
 
-	fmt.Printf("  2/2  registrando... ")
+	fmt.Printf("  2/2  registering... ")
 	l, err := c.SetLink(ctx, &api.Link{
 		Name: name, URL: url, Description: *desc,
 		Labels: labels.merge(name), Tools: tools,
@@ -670,7 +678,7 @@ func mcpLink(args []string) error {
 	}
 	fmt.Println("✓")
 
-	fmt.Printf("\n%q disponible en el agregador con %d herramienta(s):\n", l.Name, len(l.Tools))
+	fmt.Printf("\n%q available in the aggregator with %d tool(s):\n", l.Name, len(l.Tools))
 	for _, t := range l.Tools {
 		d := t.Description
 		if len(d) > 66 {
@@ -678,7 +686,7 @@ func mcpLink(args []string) error {
 		}
 		fmt.Printf("  %-28s %s\n", t.Name, d)
 	}
-	fmt.Printf("\nNo corre en una microVM: se enruta a donde ya vive.\n")
+	fmt.Printf("\nIt doesn't run in a microVM: it's routed to wherever it already lives.\n")
 	return nil
 }
 
@@ -689,7 +697,7 @@ func mcpUnlink(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("uso: kling mcp unlink <nombre>")
+		return fmt.Errorf("usage: kling mcp unlink <name>")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -788,7 +796,7 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 
 	name := initRes.Result.ServerInfo.Name
 	if name == "" {
-		name = "servidor MCP"
+		name = "MCP server"
 	} else if v := initRes.Result.ServerInfo.Version; v != "" {
 		name += " v" + v
 	}
@@ -822,10 +830,10 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 			body = body[:300] + "…"
 		}
 		if body == "" {
-			body = "(respuesta vacía)"
+			body = "(empty response)"
 		}
-		return name, nil, fmt.Errorf("no entiendo la respuesta a tools/list (%w).\n"+
-			"El servidor contestó: %s", err, body)
+		return name, nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
+			"The server replied: %s", err, body)
 	}
 	if out.Error != nil {
 		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)

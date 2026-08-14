@@ -52,7 +52,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	// viva cuesta un milisegundo — no se nota en el camino rápido.
 	for vm := a.gw.pool.take(t.Service); vm != nil; vm = a.gw.pool.take(t.Service) {
 		if err := waitReady(ctx, vm.ip, GuestPort, time.Second); err != nil {
-			log.Printf("fondo: %s no responde (%v); la retiro y pruebo la siguiente", vm.id[:8], err)
+			log.Printf("pool: %s not responding (%v); removing it and trying the next one", vm.id[:8], err)
 			go a.gw.client.Remove(context.WithoutCancel(ctx), vm.id)
 			continue
 		}
@@ -70,7 +70,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 			}()
 		}()
 		res, fault := a.invoke(ctx, "http://"+vm.ip+":"+itoa(GuestPort), vm.session, t, args)
-		log.Printf("efímera %s: %s en %s (del fondo)", vm.id[:8], t.Qualified,
+		log.Printf("ephemeral %s: %s in %s (from pool)", vm.id[:8], t.Qualified,
 			time.Since(start).Round(time.Millisecond))
 		return res, fault
 	}
@@ -90,21 +90,21 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 		TTLSeconds: 120,
 	})
 	if err != nil {
-		return nil, &rpcFault{-32000, fmt.Sprintf("no pude instanciar %s: %v", t.Service, err)}
+		return nil, &rpcFault{-32000, fmt.Sprintf("could not instantiate %s: %v", t.Service, err)}
 	}
 
 	// Pase lo que pase, la máquina muere. Es la promesa del modo efímero.
 	defer func() {
 		go func() {
 			if err := a.gw.client.Remove(context.WithoutCancel(ctx), mc.ID); err != nil {
-				log.Printf("efímera %s: no pude destruirla: %v", mc.ID[:8], err)
+				log.Printf("ephemeral %s: could not destroy it: %v", mc.ID[:8], err)
 			}
 		}()
 	}()
 
 	base := "http://" + mc.IP + ":" + fmt.Sprint(GuestPort)
 	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
-		return nil, &rpcFault{-32000, fmt.Sprintf("%s no empezó a escuchar: %v", t.Service, err)}
+		return nil, &rpcFault{-32000, fmt.Sprintf("%s did not start listening: %v", t.Service, err)}
 	}
 
 	sid, err := mcpInit(ctx, base)
@@ -112,7 +112,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
 	}
 	res, fault := a.invoke(ctx, base, sid, t, args)
-	log.Printf("efímera %s: %s en %s (en frío)", mc.ID[:8], t.Qualified,
+	log.Printf("ephemeral %s: %s in %s (cold)", mc.ID[:8], t.Qualified,
 		time.Since(start).Round(time.Millisecond))
 	return res, fault
 }
@@ -141,14 +141,14 @@ func (a *aggregator) invoke(ctx context.Context, base, sid string, t *Tool, args
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, &rpcFault{-32000, "respuesta ilegible de " + t.Service}
+		return nil, &rpcFault{-32000, "unreadable response from " + t.Service}
 	}
 	if resp.Error != nil {
 		// Un error de validación significa que los tipos no cuadraron pese a la
 		// reparación. Se registra lo que se envió: sin eso es imposible saber qué
 		// forma les dio el cliente.
 		if strings.Contains(strings.ToLower(resp.Error.Message), "expected") {
-			log.Printf("%s: el servidor rechazó los argumentos (%s)\n  enviado: %s",
+			log.Printf("%s: server rejected the arguments (%s)\n  sent: %s",
 				t.Qualified, resp.Error.Message, trunc(string(args), 400))
 		}
 		return nil, &rpcFault{resp.Error.Code, resp.Error.Message}
@@ -185,7 +185,7 @@ func (a *aggregator) snapshotOf(ctx context.Context, service string) (string, *r
 	a.snapMu.Unlock()
 
 	if !ok {
-		return "", &rpcFault{-32602, "no hay snapshot para el servicio " + service}
+		return "", &rpcFault{-32602, "no snapshot for service " + service}
 	}
 	return name, nil
 }

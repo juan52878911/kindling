@@ -43,12 +43,12 @@ import (
 const SessionHeader = "Mcp-Session-Id"
 
 func main() {
-	listen := flag.String("listen", ":8080", "dónde escuchar")
-	idle := flag.Duration("session-idle", 10*time.Minute, "inactividad antes de cerrar una sesión")
+	listen := flag.String("listen", ":8080", "where to listen")
+	idle := flag.Duration("session-idle", 10*time.Minute, "idle time before closing a session")
 	// 0 = derivarlo de la memoria del invitado. El flag sigue existiendo para
 	// forzarlo, porque la estimación por sesión es eso, una estimación.
 	maxSessions := flag.Int("max-sessions", 0,
-		"sesiones concurrentes como máximo (0 = según la memoria de la microVM)")
+		"maximum concurrent sessions (0 = based on microVM memory)")
 	// Tope de seguridad para una respuesta, NO el plazo real: quien manda es el
 	// contexto de quien llama, que se cancela si el cliente se va. Esto solo
 	// existe para que un servidor MCP colgado no retenga la entrada pendiente
@@ -59,17 +59,17 @@ func main() {
 	// estaba dispuesto a esperar. Un analizador estático sobre un árbol grande
 	// pasa de dos minutos sin estar roto en absoluto.
 	reqTimeout := flag.Duration("request-timeout", defaultRequestTimeout,
-		"tope de seguridad para una respuesta del servidor MCP")
+		"safety cap for an MCP server response")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `kling-bridge — expone un servidor MCP de stdio por HTTP
+		fmt.Fprintf(os.Stderr, `kling-bridge — exposes a stdio MCP server over HTTP
 
-  kling-bridge [opciones] -- <comando del servidor MCP> [args...]
+  kling-bridge [options] -- <MCP server command> [args...]
 
-Ejemplos:
+Examples:
   kling-bridge -- npx -y @modelcontextprotocol/server-filesystem /data
-  kling-bridge -- python3 -m mi_servidor_mcp
+  kling-bridge -- python3 -m my_mcp_server
 
-Opciones:
+Options:
 `)
 		flag.PrintDefaults()
 	}
@@ -89,7 +89,7 @@ Opciones:
 			*maxSessions = maxSessionsCap
 		} else {
 			*maxSessions = deriveMaxSessions(mem)
-			log.Printf("tope de sesiones: %d (%d MiB de memoria, ~%d MiB por sesión)",
+			log.Printf("session limit: %d (%d MiB memory, ~%d MiB per session)",
 				*maxSessions, mem, sessionMiB)
 		}
 	}
@@ -134,7 +134,7 @@ Opciones:
 	// alcanzando, y el gateway reenvía peticiones a los invitados.
 	if execEnabled() {
 		mux.HandleFunc("/exec", b.handleExec)
-		log.Printf("ejecución de comandos habilitada (%s=1): esta microVM es de un solo uso",
+		log.Printf("command execution enabled (%s=1): this microVM is single-use",
 			execBootParam)
 	}
 
@@ -143,14 +143,14 @@ Opciones:
 	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
 	// que va a desaparecer con la máquina.
 	if err := volumeState.acquire(); err != nil {
-		log.Fatalf("volumen: %v", err)
+		log.Fatalf("volume: %v", err)
 	}
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
 	// saber cuáles traen paquetes.
 	b.env = libraryEnv(os.Environ(), volumeState.specs())
 	for _, kv := range b.env {
 		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
-			log.Printf("biblioteca: %s", kv)
+			log.Printf("library: %s", kv)
 		}
 	}
 
@@ -159,7 +159,7 @@ Opciones:
 	// use, no aquí), y se preparan los args que conectan cada sesión por CDP. Así
 	// el snapshot dorado se congela sin navegador dentro. Ver browser.go.
 	if spec := loadBrowserSpec(); spec != nil {
-		log.Printf("navegador: modo compartido detectado (%s); arranque perezoso", spec.Sidecar[0])
+		log.Printf("browser: shared mode detected (%s); lazy start", spec.Sidecar[0])
 		b.browser = spec
 		b.sessionArgs = spec.SessionArgs
 	}
@@ -173,9 +173,9 @@ Opciones:
 	// tiene que estar en pie antes de servir la primera petición.
 	if svc := loadServiceSpec(); svc != nil {
 		b.service = svc
-		log.Printf("modo http: servidor MCP en :%d (compartido por todas las sesiones, sin aislamiento por sesión)", svc.Port)
+		log.Printf("http mode: MCP server on :%d (shared by all sessions, no per-session isolation)", svc.Port)
 		if err := b.startProxy(); err != nil {
-			log.Fatalf("modo http: %v", err)
+			log.Fatalf("http mode: %v", err)
 		}
 	}
 
@@ -233,7 +233,7 @@ Opciones:
 		close(shutdownDone)
 	}()
 
-	log.Printf("kling-bridge escuchando en %s -> %s", *listen, strings.Join(argv, " "))
+	log.Printf("kling-bridge listening on %s -> %s", *listen, strings.Join(argv, " "))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func (b *bridge) closeAll() {
 	}
 	wg.Wait()
 	if len(all) > 0 {
-		log.Printf("kling-bridge: %d sesión(es) cerradas al salir", len(all))
+		log.Printf("kling-bridge: %d session(s) closed on exit", len(all))
 	}
 }
 
@@ -369,14 +369,14 @@ func (b *bridge) handle(w http.ResponseWriter, r *http.Request) {
 		b.handleDelete(w, r)
 	default:
 		w.Header().Set("Allow", "GET, POST, DELETE")
-		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
-		http.Error(w, "no pude leer el cuerpo", http.StatusBadRequest)
+		http.Error(w, "could not read body", http.StatusBadRequest)
 		return
 	}
 
@@ -385,7 +385,7 @@ func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
 		Method string          `json:"method"`
 	}
 	if err := json.Unmarshal(body, &msg); err != nil {
-		http.Error(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -439,12 +439,12 @@ func (b *bridge) handleGet(w http.ResponseWriter, r *http.Request) {
 	s, ok := b.sessions[sid]
 	b.mu.Unlock()
 	if !ok {
-		http.Error(w, "sesión desconocida", http.StatusNotFound)
+		http.Error(w, "unknown session", http.StatusNotFound)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming no soportado", http.StatusInternalServerError)
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 	// Tener el stream SSE abierto ES actividad. Sin esto, reapIdle mira solo el
@@ -509,7 +509,7 @@ func (b *bridge) handleDelete(w http.ResponseWriter, r *http.Request) {
 func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
-		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Modo proxy: no hay sesiones-proceso que cerrar, pero el snapshot dorado no
@@ -525,7 +525,7 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		log.Printf("reset: servidor MCP HTTP reiniciado")
+		log.Printf("reset: HTTP MCP server restarted")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -542,7 +542,7 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	// El reset deja la microVM como recién arrancada; también apaga el navegador
 	// compartido, para que el commit del snapshot dorado se congele sin él.
 	b.stopBrowser()
-	log.Printf("reset: %d sesión(es) cerrada(s)", len(dead))
+	log.Printf("reset: %d session(s) closed", len(dead))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -557,11 +557,11 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 			return s, false, nil
 		}
 		if !isInit {
-			return nil, false, fmt.Errorf("sesión %q desconocida o expirada", sid)
+			return nil, false, fmt.Errorf("session %q unknown or expired", sid)
 		}
 	}
 	if !isInit {
-		return nil, false, fmt.Errorf("falta la cabecera %s (envía initialize primero)", SessionHeader)
+		return nil, false, fmt.Errorf("missing header %s (send initialize first)", SessionHeader)
 	}
 	if len(b.sessions) >= b.maxSessions {
 		// Al tope. Antes de rechazar, intenta hacer sitio reciclando la sesión más
@@ -573,11 +573,11 @@ func (b *bridge) resolve(sid string, isInit bool) (*session, bool, error) {
 		// SSE abierto se marca activa y nunca es candidata.
 		v := b.oldestReclaimableLocked()
 		if v == nil {
-			return nil, false, fmt.Errorf("límite de %d sesiones alcanzado", b.maxSessions)
+			return nil, false, fmt.Errorf("session limit of %d reached", b.maxSessions)
 		}
 		delete(b.sessions, v.id)
 		go v.close()
-		log.Printf("sesión %s reciclada (ociosa %s) para dar sitio a una nueva",
+		log.Printf("session %s reclaimed (idle %s) to make room for a new one",
 			v.id, time.Since(v.lastUse).Round(time.Second))
 	}
 
@@ -639,7 +639,7 @@ func (b *bridge) spawn() (*session, error) {
 	// adelanta a nuestro Wait.
 	exitCh, err := procReaper.startTracked(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("no pude lanzar el servidor MCP: %w", err)
+		return nil, fmt.Errorf("could not start MCP server: %w", err)
 	}
 
 	s := &session{
@@ -651,7 +651,7 @@ func (b *bridge) spawn() (*session, error) {
 		done:       make(chan struct{}),
 	}
 	go s.readLoop(stdout)
-	log.Printf("sesión %s: servidor MCP arrancado (pid %d)", s.id[:8], cmd.Process.Pid)
+	log.Printf("session %s: MCP server started (pid %d)", s.id[:8], cmd.Process.Pid)
 	return s, nil
 }
 
@@ -702,7 +702,7 @@ func (s *session) send(msg []byte) error {
 	closed := s.closed
 	s.mu.Unlock()
 	if closed {
-		return fmt.Errorf("la sesión está cerrada")
+		return fmt.Errorf("session is closed")
 	}
 
 	// La escritura va bajo wmu, NO bajo mu.
@@ -720,7 +720,7 @@ func (s *session) send(msg []byte) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	if _, err := s.stdin.Write(append(msg, '\n')); err != nil {
-		return fmt.Errorf("escribiendo al servidor MCP: %w", err)
+		return fmt.Errorf("writing to MCP server: %w", err)
 	}
 	return nil
 }
@@ -732,7 +732,7 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("la sesión está cerrada")
+		return nil, fmt.Errorf("session is closed")
 	}
 	// Un id ya en vuelo se RECHAZA, no se pisa.
 	//
@@ -748,8 +748,8 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 	// colgarlo y contestarle otra cosa.
 	if _, repetido := s.pending[id]; repetido {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("ya hay una petición en vuelo con el id %s: "+
-			"JSON-RPC exige ids únicos entre las peticiones sin responder", id)
+		return nil, fmt.Errorf("a request with id %s is already in flight: "+
+			"JSON-RPC requires unique ids among unanswered requests", id)
 	}
 	s.pending[id] = ch
 	s.mu.Unlock()
@@ -777,7 +777,7 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		// (nil, nil) y el cliente recibía una respuesta vacía en lugar de un
 		// error, que es la forma más cara de diagnosticar un proceso muerto.
 		if !ok {
-			return nil, fmt.Errorf("el servidor MCP murió mientras atendía el mensaje %s", id)
+			return nil, fmt.Errorf("MCP server died while handling message %s", id)
 		}
 		return resp, nil
 	case <-ctx.Done():
@@ -793,8 +793,8 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		// aquí, y confundir "tarda mucho" con "muerto" manda a quien depura al
 		// sitio equivocado. Ya pasó con un escaneo que topaba contra este plazo
 		// exacto y parecía un servidor caído.
-		return nil, fmt.Errorf("el servidor MCP no respondió al mensaje %s en %s; "+
-			"sigue trabajando, es el tope del puente. Súbelo con -request-timeout",
+		return nil, fmt.Errorf("MCP server did not respond to message %s within %s; "+
+			"it's still working, this is the bridge's cap. Raise it with -request-timeout",
 			id, timeout)
 	}
 }
@@ -841,12 +841,12 @@ func (s *session) close() {
 	// nada, y saber que el invitado se quedó sin memoria.
 	switch {
 	case err == nil:
-		log.Printf("sesión %s: cerrada", s.id[:8])
+		log.Printf("session %s: closed", s.id[:8])
 	case len(pending) > 0:
-		log.Printf("sesión %s: el servidor MCP terminó (%v) con %d petición(es) en vuelo",
+		log.Printf("session %s: MCP server exited (%v) with %d request(s) in flight",
 			s.id[:8], err, len(pending))
 	default:
-		log.Printf("sesión %s: cerrada, el servidor MCP terminó con %v", s.id[:8], err)
+		log.Printf("session %s: closed, MCP server exited with %v", s.id[:8], err)
 	}
 }
 

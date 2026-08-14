@@ -34,9 +34,42 @@ M4 (2026-08).
   bastante mejor. Hay optimización en curso (mantener réplicas calientes para sacar el
   arranque del camino crítico); ver el historial de rendimiento del proyecto.
 
-Subir `cpus` en la VM Lima (ver el `lima.yaml` de abajo) es la palanca de tuning más
-directa: más pCPUs para el host anidado aceleran el `Resume` y permiten más arranques
-en paralelo. La RAM (8 GiB en el ejemplo) rara vez es el límite en Mac.
+## Acelerar el arranque (medido en M4)
+
+El cuello del arranque en Mac **no es el restore** (el `Resume` del snapshot son ~140 ms,
+medido) sino el **cold start del servidor MCP en el `initialize`**. Y ese cold start **no es
+cómputo**: el mismo servidor arranca en **~91-276 ms nativo** (chroot arm64) pero **7-16 s
+dentro de la microVM**. La diferencia es que arrancar node es una tormenta de `stat`/`open`/
+`mmap`/page-faults al cargar cientos de ficheros de `node_modules`, y bajo **KVM anidado
+arm64** (macOS → VM Linux → Firecracker) cada uno se amplifica **~25-60×**. Un MCP mínimo de
+un solo fichero arranca en ~1 s en la microVM; los ~6 s extra de un servidor real son la
+carga de sus dependencias. Tres palancas validadas, de más a menos impacto:
+
+1. **Empaqueta el servidor: `-bundle`.** Es la palanca mayor para servidores node. Colapsa
+   `node_modules` (cientos/miles de ficheros) en **uno** con esbuild al construir la imagen,
+   matando la tormenta de ficheros. Medido en `seqthink` (**1205 ficheros → 1**): el
+   `initialize` en frío cae de **~7 s a ~2.5 s** (2.9×). Desde el registro:
+   `kling add <servidor> -bundle`. A mano:
+   `sudo ./scripts/80-mcp-image.sh stdio <n> -n "<paquete-npm>" -bundle -- <bin>`.
+
+2. **Importa con `-cpu 100`.** El techo por defecto (`cpu_pct=50`, media vCPU) estrangula el
+   arranque; subirlo al 100 % de un core lo parte por ~2 (`seqthink` **~16 s → ~7 s** por el
+   gateway). Viaja con el snapshot (`kling mcp import -cpu 100 <servicio>`): **por-servicio y
+   por-host**, no toca Proxmox. **Se acumula con el bundle.** Subir a 2 vCPU no ayuda (es el
+   techo, no el paralelismo). En x86/Proxmox también rinde (~2×) y no penaliza bajo carga.
+
+3. **Para servicios STATELESS, constrúyelos en modo http-proxy.** El puente arranca **un**
+   node al bootear, **congelado vivo** en el snapshot → al restaurar no se re-arranca.
+   `context7` (mismo servidor): stdio **~25.7 s** el 1er `initialize` → http-proxy **~8.4 s**
+   el 1º y **~2.4 s** estable. Matiz: congelar node vivo no da restore instantáneo (V8 se
+   re-calienta ~6 s la 1ª vez). Solo sin estado (el node es compartido). Construcción:
+   `...80-mcp-image.sh http <n> -n "<npm>" -bundle -- <bin> --transport http --port 8090`.
+
+Lo que **no** mueve la aguja en Mac (medido / razonado): el `keep-warm` de instancias y subir
+los `cpus` de Lima (el restore ya es ~140 ms); **prefaultar el `mem.file`** (los ~6 s no son
+page cache de Lima sino faults stage-2); **`NODE_COMPILE_CACHE`** (el compile es ms, no el
+cuello); y el **rate limiter de disco** (capa bytes/s, pero el cuello es el *número* de ops,
+que el bundle ya colapsa).
 
 ## Requisitos honestos
 

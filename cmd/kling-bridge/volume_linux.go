@@ -23,11 +23,11 @@ func mountVolumes() ([]volumeSpec, error) {
 	}
 	for _, v := range specs {
 		if _, err := os.Stat(v.device); err != nil {
-			return nil, fmt.Errorf("el kernel pide montar %s en %s pero no existe: %w",
+			return nil, fmt.Errorf("the kernel asked to mount %s at %s but it doesn't exist: %w",
 				v.device, v.mount, err)
 		}
 		if err := os.MkdirAll(v.mount, 0o755); err != nil {
-			return nil, fmt.Errorf("creando %s: %w", v.mount, err)
+			return nil, fmt.Errorf("creating %s: %w", v.mount, err)
 		}
 		// data=ordered es el defecto de ext4 y aquí importa que lo sea:
 		// garantiza que los datos llegan al disco ANTES que los metadatos que
@@ -52,17 +52,17 @@ func mountVolumes() ([]volumeSpec, error) {
 			// kernel entra en pánico, y un pánico es un sitio pésimo para
 			// deducir que hay que reconstruir una imagen.
 			if errors.Is(err, syscall.EACCES) && !v.readOnly {
-				return nil, fmt.Errorf("montando %s en %s: %w.\n"+
-					"El disco parece de SOLO LECTURA y este puente lo pidió en escritura.\n"+
-					"Suele ser una imagen con un puente antiguo: reconstrúyela con `kling add`",
+				return nil, fmt.Errorf("mounting %s at %s: %w.\n"+
+					"The disk appears to be READ-ONLY and this bridge requested it writable.\n"+
+					"Usually means an image with an old bridge: rebuild it with `kling add`",
 					v.device, v.mount, err)
 			}
-			return nil, fmt.Errorf("montando %s en %s: %w", v.device, v.mount, err)
+			return nil, fmt.Errorf("mounting %s at %s: %w", v.device, v.mount, err)
 		}
 		if v.readOnly {
-			log.Printf("biblioteca compartida montada en %s (solo lectura)", v.mount)
+			log.Printf("shared library mounted at %s (read-only)", v.mount)
 		} else {
-			log.Printf("volumen persistente montado en %s", v.mount)
+			log.Printf("persistent volume mounted at %s", v.mount)
 		}
 	}
 	return specs, nil
@@ -106,7 +106,7 @@ func unmountVolumes(specs []volumeSpec) {
 		// vaciar. Con detach el árbol se desengancha y el sistema de ficheros se
 		// cierra en cuanto se suelta la última referencia.
 		if err := syscall.Unmount(v.mount, syscall.MNT_DETACH); err != nil {
-			log.Printf("volumen: no pude desmontar %s: %v", v.mount, err)
+			log.Printf("volume: could not unmount %s: %v", v.mount, err)
 			continue
 		}
 		if !v.readOnly {

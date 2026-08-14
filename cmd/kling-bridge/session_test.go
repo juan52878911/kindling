@@ -99,7 +99,7 @@ func TestRequestDevuelveErrorSiMuereElHijo(t *testing.T) {
 		if r.err == nil {
 			t.Fatalf("devolvió (%q, nil): una respuesta vacía en vez de un error", r.raw)
 		}
-		if !strings.Contains(r.err.Error(), "murió") && !strings.Contains(r.err.Error(), "cerrada") {
+		if !strings.Contains(r.err.Error(), "died") && !strings.Contains(r.err.Error(), "closed") {
 			t.Errorf("el error no explica qué pasó: %v", r.err)
 		}
 	case <-time.After(3 * time.Second):
@@ -308,7 +308,7 @@ func TestDosPeticionesConElMismoIdNoSePisan(t *testing.T) {
 		if err == nil {
 			t.Fatal("aceptó un id ya en vuelo: el primero se quedaría huérfano")
 		}
-		if !strings.Contains(err.Error(), "en vuelo") {
+		if !strings.Contains(err.Error(), "in flight") {
 			t.Errorf("el error no explica el problema: %v", err)
 		}
 	case <-time.After(2 * time.Second):

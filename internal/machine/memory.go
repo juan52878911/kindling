@@ -195,10 +195,10 @@ func checkHostMemory(wantMiB int) error {
 	if floor := minFreeMiB(); floor > 0 {
 		if free := freeMiB(); free > 0 && free < floor {
 			return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
-				"poca memoria REALMENTE libre: quedan %d MiB (suelo %d).\n"+
-					"MemAvailable dice %d MiB, pero es caché caliente de los mem.file de las microVMs "+
-					"vivas: reclamarla es re-faultear desde disco.\n"+
-					"Congela o quita alguna instancia (`kling ps -a`), o baja el suelo con KLING_MIN_FREE_MIB",
+				"low on REALLY free memory: %d MiB left (floor %d).\n"+
+					"MemAvailable says %d MiB, but that's hot cache from the mem.files of the "+
+					"live microVMs: reclaiming it means re-faulting it from disk.\n"+
+					"Freeze or remove an instance (`kling ps -a`), or lower the floor with KLING_MIN_FREE_MIB",
 				free, floor, avail)}
 		}
 	}
@@ -206,9 +206,9 @@ func checkHostMemory(wantMiB int) error {
 		return nil
 	}
 	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
-		"no cabe: la microVM pide %d MiB y al anfitrión le quedan %d MiB "+
-			"(se reservan %d para el propio host).\n"+
-			"Arrancarla igualmente haría que el OOM killer del anfitrión matara procesos al azar, "+
-			"incluidas otras microVMs.\nPara: `kling ps -a`, o dale menos memoria con -mem",
+		"doesn't fit: the microVM asks for %d MiB and the host only has %d MiB left "+
+			"(%d is reserved for the host itself).\n"+
+			"Starting it anyway would make the host's OOM killer kill processes at random, "+
+			"including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem",
 		wantMiB, avail, hostReserveMiB)}
 }

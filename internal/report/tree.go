@@ -116,7 +116,7 @@ function showPanel(nd) {
   let h = '';
 
   if (nd.kids.length)
-    h += '<button class="drill" data-drill="' + xml(nd.id) + '">Profundizar en ' +
+    h += '<button class="drill" data-drill="' + xml(nd.id) + '">Drill into ' +
          xml(nd.label) + ' →</button>';
 
   if (d.rows && d.rows.length) {
@@ -125,7 +125,7 @@ function showPanel(nd) {
     h += '</dl>';
   }
   if (d.steps && d.steps.length)
-    h += '<div class="steps"><h3>Qué pasa al llamarla</h3><ol>' +
+    h += '<div class="steps"><h3>What happens when you call it</h3><ol>' +
          d.steps.map(x => '<li>' + xml(x) + '</li>').join('') + '</ol></div>';
   if (d.note)
     h += '<div class="persist ' + d.note.cls + '"><h3>' + xml(d.note.title) + '</h3><p>' +
@@ -134,7 +134,7 @@ function showPanel(nd) {
     h += '<div class="chips">' + d.chips.map(c => '<span class="chip">' + xml(c) + '</span>').join('') +
          '</div>';
 
-  body.innerHTML = h || '<p class="empty">Sin más detalle.</p>';
+  body.innerHTML = h || '<p class="empty">No further detail.</p>';
 }
 
 // ── pintar todo ────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ document.addEventListener('click', e => {
   const tab = e.target.closest('[data-view]');
   if (tab) { view = tab.dataset.view; path = []; selId = null;
              $('p-body').hidden = true; $('p-empty').hidden = false;
-             $('p-title').textContent = 'Elige un nodo'; return render(); }
+             $('p-title').textContent = 'Choose a node'; return render(); }
 
   const up = e.target.closest('[data-up]');
   if (up) { path = path.slice(0, +up.dataset.up); return render(); }

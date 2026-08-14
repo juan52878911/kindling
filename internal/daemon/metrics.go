@@ -25,28 +25,28 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// microVMs por estado. Se emiten los estados conocidos aunque estén a 0 para
 	// que un scrape no vea "desaparecer" una serie cuando el contador cae a cero.
-	fmt.Fprintln(w, "# HELP kling_machines Número de microVMs por estado.")
+	fmt.Fprintln(w, "# HELP kling_machines Number of microVMs by state.")
 	fmt.Fprintln(w, "# TYPE kling_machines gauge")
 	for _, st := range []api.State{api.StateRunning, api.StateWarm, api.StateCreated, api.StateStopped, api.StateFailed} {
 		fmt.Fprintf(w, "kling_machines{state=%q} %d\n", st, ps.ByState[string(st)])
 	}
 
 	// Memoria del host (0 si no hay /proc, p. ej. en dev sobre macOS).
-	fmt.Fprintln(w, "# HELP kling_available_mib MemAvailable del host en MiB (/proc/meminfo).")
+	fmt.Fprintln(w, "# HELP kling_available_mib Host MemAvailable in MiB (/proc/meminfo).")
 	fmt.Fprintln(w, "# TYPE kling_available_mib gauge")
 	fmt.Fprintf(w, "kling_available_mib %d\n", ps.AvailableMiB)
-	fmt.Fprintln(w, "# HELP kling_free_mib MemFree del host en MiB (/proc/meminfo).")
+	fmt.Fprintln(w, "# HELP kling_free_mib Host MemFree in MiB (/proc/meminfo).")
 	fmt.Fprintln(w, "# TYPE kling_free_mib gauge")
 	fmt.Fprintf(w, "kling_free_mib %d\n", ps.FreeMiB)
 
-	fmt.Fprintln(w, "# HELP kling_total_pss_mib Suma del PSS de las microVMs vivas, en MiB.")
+	fmt.Fprintln(w, "# HELP kling_total_pss_mib Sum of PSS across live microVMs, in MiB.")
 	fmt.Fprintln(w, "# TYPE kling_total_pss_mib gauge")
 	fmt.Fprintf(w, "kling_total_pss_mib %d\n", ps.TotalPSSMiB)
 
 	// PSS por microVM viva. PSS y no RSS: con el mem.file compartido por COW
 	// entre copias del mismo snapshot, el RSS cuenta el fichero entero en cada
 	// una y las copias mienten; el PSS es la única cifra que suma de verdad.
-	fmt.Fprintln(w, "# HELP kling_machine_pss_mib PSS de cada microVM viva, en MiB (/proc/<pid>/smaps_rollup).")
+	fmt.Fprintln(w, "# HELP kling_machine_pss_mib PSS of each live microVM, in MiB (/proc/<pid>/smaps_rollup).")
 	fmt.Fprintln(w, "# TYPE kling_machine_pss_mib gauge")
 	live := make([]api.ProcStat, 0, len(ps.Machines))
 	for _, mc := range ps.Machines {
@@ -64,7 +64,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Los que no se han sondeado nunca no emiten serie: una salud "desconocida" no
 	// es un 0, y publicarla como tal haría saltar alertas por servicios que solo
 	// están sin probar.
-	fmt.Fprintln(w, "# HELP kling_snapshot_healthy Salud del último sondeo del snapshot (1 sana, 0 enferma).")
+	fmt.Fprintln(w, "# HELP kling_snapshot_healthy Health of the snapshot's last probe (1 healthy, 0 unhealthy).")
 	fmt.Fprintln(w, "# TYPE kling_snapshot_healthy gauge")
 	for _, sn := range s.mgr.Snapshots() {
 		if sn.Health == "" {

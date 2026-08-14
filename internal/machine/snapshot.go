@@ -38,26 +38,26 @@ func (m *Manager) snapDir(name string) string {
 // congelarse.
 func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, error) {
 	if !validName.MatchString(name) {
-		return nil, fmt.Errorf("nombre de snapshot inválido: %q", name)
+		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
 	mc, ok := m.Get(ref)
 	if !ok {
-		return nil, fmt.Errorf("no existe la máquina %q", ref)
+		return nil, fmt.Errorf("machine %q does not exist", ref)
 	}
 	if mc.State != api.StateRunning {
-		return nil, fmt.Errorf("solo se puede commitear una máquina running (está %s)", mc.State)
+		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}
 
 	m.mu.RLock()
 	sock := m.socket[mc.ID]
 	m.mu.RUnlock()
 	if sock == "" {
-		return nil, fmt.Errorf("sin socket para %s", mc.ID)
+		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
 	dir := m.snapDir(name)
 	if _, err := os.Stat(dir); err == nil {
-		return nil, fmt.Errorf("el snapshot %q ya existe", name)
+		return nil, fmt.Errorf("snapshot %q already exists", name)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -104,7 +104,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
 	if err := m.releaseVolumes(mc); err != nil {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("preparando los volúmenes para congelar: %w", err)
+		return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 	}
 
 	if err := c.Pause(ctx); err != nil {
@@ -125,7 +125,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	// memoria que se va a volcar.
 	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always",
 		ownOverlay, goldDst).CombinedOutput(); err != nil {
-		return abort(fmt.Errorf("copiando el overlay: %v: %s", err, out))
+		return abort(fmt.Errorf("copying overlay: %v: %s", err, out))
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
 	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
@@ -142,7 +142,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	// sobre un overlay que ya no existe. El snapshot dorado tiene que ser
 	// autocontenido, porque su razón de ser es sobrevivir a la máquina que lo creó.
 	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
-		return abort(fmt.Errorf("reapuntando el overlay a la copia dorada: %w", err))
+		return abort(fmt.Errorf("repointing overlay to golden copy: %w", err))
 	}
 	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
 		return abort(err)
@@ -152,14 +152,14 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
 		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
 			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
-				return abort(fmt.Errorf("recuperando %s del jail: %w", f, err))
+				return abort(fmt.Errorf("recovering %s from jail: %w", f, err))
 			}
 		}
 	}
 	// Se devuelve el disco propio: la plantilla sigue viva y no debe escribir en
 	// el overlay dorado, que a partir de ahora es plantilla de otras instancias.
 	if err := c.PatchDrive(ctx, "overlay", ownOverlay); err != nil {
-		return nil, fmt.Errorf("devolviendo el overlay a la máquina: %w", err)
+		return nil, fmt.Errorf("returning overlay to machine: %w", err)
 	}
 	if err := c.Resume(ctx); err != nil {
 		return nil, err
@@ -167,11 +167,11 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	// La plantilla vuelve a montarlos: sigue viva hasta que la importación la
 	// destruya, y con -keep puede quedarse.
 	if err := m.acquireVolumes(mc); err != nil {
-		log.Printf("aviso: la plantilla %s se quedó sin sus volúmenes tras congelar: %v", mc.Name, err)
+		log.Printf("warning: template %s ended up without its volumes after freeze: %v", mc.Name, err)
 	}
 
 	if out, err := exec.CommandContext(ctx, "fallocate", "--dig-holes", memPath).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("perforando el fichero de memoria: %v: %s", err, out)
+		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
 	}
 
 	// Digests de integridad del rootfs dorado y del volcado de estado.
@@ -182,17 +182,18 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	// los ~30 ms del thaw. Ver verifyIntegrity para el porqué completo.
 	rootfsSHA, err := fileSHA256(goldOverlay)
 	if err != nil {
-		return nil, fmt.Errorf("calculando el digest del overlay dorado: %w", err)
+		return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
 	}
 	snapSHA, err := fileSHA256(snapPath)
 	if err != nil {
-		return nil, fmt.Errorf("calculando el digest del volcado de estado: %w", err)
+		return nil, fmt.Errorf("computing digest of state dump: %w", err)
 	}
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
 		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
 		Egress:       mc.Egress,
+		CPUPct:       mc.CPUPct,
 		AllowDomains: mc.AllowDomains,
 		RootfsSHA256: rootfsSHA,
 		SnapSHA256:   snapSHA,
@@ -213,7 +214,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
-		Message: fmt.Sprintf("snapshot dorado desde %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
+		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
 	return snap, nil
 }
 
@@ -254,11 +255,11 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 	// El nombre llega de la URL. Sin validarlo, un "../../etc" saldría del
 	// directorio de datos: recorrido de rutas de manual.
 	if !validName.MatchString(name) {
-		return nil, fmt.Errorf("nombre de snapshot inválido: %q", name)
+		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
 	b, err := os.ReadFile(filepath.Join(m.snapDir(name), "meta.json"))
 	if err != nil {
-		return nil, fmt.Errorf("no existe el snapshot %q", name)
+		return nil, fmt.Errorf("snapshot %q does not exist", name)
 	}
 	var s api.Snapshot
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -289,7 +290,7 @@ func (m *Manager) SetCatalog(name string, tools []api.ToolSpec) (*api.Snapshot, 
 	m.priv.EnsureReadable(m.snapDir(name))
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvCommitted, Name: name,
-		Message: fmt.Sprintf("catálogo actualizado: %d herramienta(s)", len(tools))})
+		Message: fmt.Sprintf("catalog updated: %d tool(s)", len(tools))})
 	return snap, nil
 }
 
@@ -320,12 +321,12 @@ func (m *Manager) SetHealth(name string, healthy bool, probeErr string) (*api.Sn
 	}
 	m.priv.EnsureReadable(m.snapDir(name))
 
-	estado := "sana"
+	estado := "healthy"
 	if !healthy {
-		estado = "enferma"
+		estado = "unhealthy"
 	}
 	m.bus.Publish(api.Event{Time: now, Type: api.EvCommitted, Name: name,
-		Message: fmt.Sprintf("sondeo de salud: %s", estado)})
+		Message: fmt.Sprintf("health probe: %s", estado)})
 	return snap, nil
 }
 
@@ -360,11 +361,11 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 		}
 		got, err := fileSHA256(filepath.Join(snapDir, chk.file))
 		if err != nil {
-			return fmt.Errorf("no pude leer %s para verificar su integridad: %w", chk.file, err)
+			return fmt.Errorf("couldn't read %s to verify its integrity: %w", chk.file, err)
 		}
 		if got != chk.want {
-			return fmt.Errorf("el snapshot %q está corrupto: %s no coincide con lo que se congeló "+
-				"(sha256 esperado %s…, encontrado %s…). Reimpórtalo con `kling mcp import %s -force`",
+			return fmt.Errorf("snapshot %q is corrupt: %s doesn't match what was frozen "+
+				"(sha256 expected %s…, found %s…). Reimport it with `kling mcp import %s -force`",
 				snap.Name, chk.file, chk.want[:12], got[:12], snap.Name)
 		}
 	}
@@ -400,7 +401,7 @@ func (m *Manager) RemoveSnapshot(name string) error {
 	}
 	m.mu.RUnlock()
 	if len(users) > 0 {
-		return fmt.Errorf("el snapshot %q tiene %d instancias vivas (%v)", name, len(users), users)
+		return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
 	}
 	return os.RemoveAll(m.snapDir(name))
 }
@@ -471,7 +472,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always",
 		filepath.Join(m.snapDir(req.From), "overlay.ext4"), overlay).CombinedOutput(); err != nil {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("copiando el overlay dorado: %v: %s", err, out)
+		return nil, fmt.Errorf("copying golden overlay: %v: %s", err, out)
 	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
@@ -505,8 +506,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	grabados := snap.VolumeSet()
 	if n, quiere := len(grabados), len(vols); n != quiere {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("el servicio %q se importó con %d volumen(es) y se le están dando %d.\n"+
-			"A una microVM restaurada no se le pueden añadir ni quitar discos: reimpórtalo si quieres cambiarlo",
+		return nil, fmt.Errorf("service %q was imported with %d volume(s) and is being given %d.\n"+
+			"A restored microVM can't have disks added or removed: reimport it if you want to change it",
 			req.From, n, quiere)
 	}
 	// El MODO tampoco se puede cambiar, y esto es lo que impedía verlo.
@@ -526,20 +527,20 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			os.RemoveAll(dir)
 			modo := func(ro bool) string {
 				if ro {
-					return "solo lectura"
+					return "read-only"
 				}
-				return "escritura"
+				return "write"
 			}
-			return nil, fmt.Errorf("el volumen %q se congeló en %s y se está pidiendo en %s.\n"+
-				"El modo queda GRABADO en el snapshot y no se puede cambiar al restaurar: "+
-				"reimporta el servicio si quieres el otro",
+			return nil, fmt.Errorf("volume %q was frozen in %s and is being requested in %s.\n"+
+				"The mode is RECORDED in the snapshot and can't change on restore: "+
+				"reimport the service if you want the other one",
 				v.name, modo(g.ReadOnly), modo(v.readOnly))
 		}
 		if v.mount != g.Mount {
 			os.RemoveAll(dir)
-			return nil, fmt.Errorf("el volumen %q se congeló montado en %s y se está pidiendo en %s.\n"+
-				"El punto de montaje viaja en la línea de comandos del kernel, que se congeló "+
-				"con la memoria: reimporta el servicio si quieres moverlo",
+			return nil, fmt.Errorf("volume %q was frozen mounted at %s and is being requested at %s.\n"+
+				"The mount point travels in the kernel command line, which was frozen "+
+				"with memory: reimport the service if you want to move it",
 				v.name, g.Mount, v.mount)
 		}
 	}
@@ -547,7 +548,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	netcfg := knet.Plan(m.allocNetIndex(), id)
 	if err := netcfg.Setup(egress, req.AllowDomains, m.priv.UID); err != nil {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("montando la red: %w", err)
+		return nil, fmt.Errorf("setting up network: %w", err)
 	}
 	if err := m.priv.Own(dir, overlay); err != nil {
 		netcfg.Teardown()
@@ -651,7 +652,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al
 	// detectar que ha sido restaurado.
 	if err := c.PatchDrive(ctx, "overlay", overlay); err != nil {
-		m.fail(mc, fmt.Errorf("reapuntando el overlay: %w", err))
+		m.fail(mc, fmt.Errorf("repointing overlay: %w", err))
 		return nil, err
 	}
 	// Cada volumen se reapunta igual que el overlay: el dispositivo ya existe
@@ -673,7 +674,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	for i, v := range vols {
 		id, err := m.patchVolumeDrive(ctx, c, grabados[i], i, len(vols), v.path)
 		if err != nil {
-			m.fail(mc, fmt.Errorf("reapuntando el volumen %s: %w", v.name, err))
+			m.fail(mc, fmt.Errorf("repointing volume %s: %w", v.name, err))
 			return nil, err
 		}
 		usados[i] = id
@@ -707,7 +708,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		mc.CPUPct = defaultCPUPct
 	}
 	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
-		log.Printf("aviso: %s: %s", mc.Name, warn)
+		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
 	m.mu.Lock()
@@ -722,7 +723,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
-		Message: fmt.Sprintf("instanciada desde %s en %d ms", req.From, elapsed)})
+		Message: fmt.Sprintf("instantiated from %s in %d ms", req.From, elapsed)})
 	return &out, nil
 }
 
@@ -773,8 +774,8 @@ func (m *Manager) patchVolumeDrive(ctx context.Context, c *fc.Client,
 	// reapuntar el disco de otro por error.
 	if total == 1 && id != legacyVolumeDriveID {
 		if err2 := c.PatchDrive(ctx, legacyVolumeDriveID, path); err2 == nil {
-			log.Printf("el disco de este snapshot se llama %q y no %q (cadena antigua); "+
-				"queda anotado para los siguientes", legacyVolumeDriveID, id)
+			log.Printf("this snapshot's disk is called %q, not %q (legacy chain); "+
+				"noted for next time", legacyVolumeDriveID, id)
 			return legacyVolumeDriveID, nil
 		}
 	}

@@ -35,11 +35,11 @@ func ResolveBin(ctx context.Context, cl *http.Client, pkg string) (string, error
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("no alcanzo el registro de npm: %w", err)
+		return "", fmt.Errorf("cannot reach the npm registry: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("npm respondió %s para %s", resp.Status, name)
+		return "", fmt.Errorf("npm responded %s for %s", resp.Status, name)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
@@ -67,8 +67,8 @@ func ResolveBin(ctx context.Context, cl *http.Client, pkg string) (string, error
 
 	var multi map[string]string
 	if err := json.Unmarshal(meta.Bin, &multi); err != nil || len(multi) == 0 {
-		return "", fmt.Errorf("%s no declara ningún ejecutable, así que no sé cómo arrancarlo.\n"+
-			"Empaquétalo a mano con scripts/80-mcp-image.sh indicando el comando", name)
+		return "", fmt.Errorf("%s declares no executable, so I don't know how to start it.\n"+
+			"Package it by hand with scripts/80-mcp-image.sh specifying the command", name)
 	}
 	if len(multi) == 1 {
 		for k := range multi {

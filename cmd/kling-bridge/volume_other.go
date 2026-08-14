@@ -10,7 +10,7 @@ import "errors"
 
 func mountVolumes() ([]volumeSpec, error) {
 	if len(volumeSpecs()) > 0 {
-		return nil, errors.New("los volúmenes solo existen dentro de la microVM")
+		return nil, errors.New("volumes only exist inside the microVM")
 	}
 	return nil, nil
 }

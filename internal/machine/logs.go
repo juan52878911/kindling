@@ -13,11 +13,11 @@ import (
 func (m *Manager) Logs(ref string, tail int) (string, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
-		return "", fmt.Errorf("no existe la máquina %q", ref)
+		return "", fmt.Errorf("machine %q does not exist", ref)
 	}
 	b, err := os.ReadFile(m.dir(mc.ID) + "/firecracker.log")
 	if err != nil {
-		return "", fmt.Errorf("sin log para %s: %w", mc.Name, err)
+		return "", fmt.Errorf("no log for %s: %w", mc.Name, err)
 	}
 	if tail <= 0 {
 		return string(b), nil

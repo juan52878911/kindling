@@ -42,7 +42,7 @@ func ParseEgress(s string) (Egress, error) {
 	case "":
 		return EgressNone, nil
 	default:
-		return "", fmt.Errorf("política de salida desconocida: %q (usa none, internet o allowlist)", s)
+		return "", fmt.Errorf("unknown egress policy: %q (use none, internet, or allowlist)", s)
 	}
 }
 
@@ -158,7 +158,7 @@ func setNameFromNS(ns string) string {
 //     sigue siendo un canal. Ver dnsresolver.go.
 func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	if _, err := exec.LookPath("ipset"); err != nil {
-		return fmt.Errorf("el modo allowlist necesita ipset y no está instalado: %w", err)
+		return fmt.Errorf("allowlist mode needs ipset and it is not installed: %w", err)
 	}
 
 	set := n.setName()

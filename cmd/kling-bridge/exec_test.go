@@ -51,7 +51,7 @@ func TestUnBinarioQueNoExisteLoDice(t *testing.T) {
 	if res.ExitCode != -1 {
 		t.Errorf("exit_code = %d, want -1", res.ExitCode)
 	}
-	if !strings.Contains(res.Output, "no pude ejecutar") {
+	if !strings.Contains(res.Output, "could not execute") {
 		t.Errorf("no explica que ni se pudo lanzar: %q", res.Output)
 	}
 }
