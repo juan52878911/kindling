@@ -71,7 +71,8 @@ func mcpImport(args []string) error {
 	// las instancias nacen de él, y sin fijarlo aquí toda restauración caía al 50 %
 	// del daemon. En Mac ese estrangulamiento a media vCPU dobla el arranque en frío
 	// de node (16 s → 6.9 s al 100 %), así que subirlo es la palanca directa allí.
-	cpu := fs.Int("cpu", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	cpuPct := fs.Int("cpu-pct", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
 	egress := fs.String("egress", "", "service network egress: none | internet | allowlist")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	var volumes volumeFlag
@@ -196,7 +197,7 @@ func mcpImport(args []string) error {
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		// Techo de CPU: se graba en el snapshot (Commit copia mc.CPUPct) para que la
 		// restauración no caiga al 50 % del daemon. 0 = deja decidir al daemon.
-		CPUPct: config.Or(*cpu, cfg.Defaults.CPUPct),
+		CPUPct: config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Egress: egr,
 		// Se graban en el snapshot dorado: las instancias nacen de él y sin esto
 		// despertarían con la lista vacía. Solo se usan si egr == "allowlist".

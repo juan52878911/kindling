@@ -53,7 +53,7 @@ MACHINES
   run [-name N] [-image I] [-cpus N] [-mem MiB]    creates and starts a microVM
       [-egress none|internet|allowlist]            network egress (default: none)
       [-allow dom1,dom2]                           domains allowed with allowlist
-      [-ttl SECONDS] [-cpu PCT]                    auto-freeze and CPU ceiling
+      [-ttl SECONDS] [-cpu-pct PCT]                auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by MCP service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
   ps [-a]                                          lists the machines
@@ -280,6 +280,25 @@ func loadConfig() *config.Config {
 		return &config.Config{}
 	}
 	return cfg
+}
+
+// resolveCPUPct devuelve el techo de CPU eligiendo entre el flag nuevo -cpu-pct y
+// el alias deprecado -cpu. -cpu se mantiene por compatibilidad pero avisa: colisiona
+// visualmente con -cpus (número de vCPUs), a un solo carácter y en el mismo comando.
+func resolveCPUPct(fs *flag.FlagSet, pct, old int) int {
+	usedOld := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "cpu" {
+			usedOld = true
+		}
+	})
+	if usedOld {
+		fmt.Fprintln(os.Stderr, "warning: -cpu is deprecated; use -cpu-pct (it looks like -cpus, which sets vCPU count)")
+		if pct == 0 {
+			return old
+		}
+	}
+	return pct
 }
 
 // hostOf resuelve a qué daemon hablar.
@@ -517,7 +536,8 @@ func cmdRun(args []string) error {
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	ttl := fs.Int("ttl", 0, "seconds until it freezes itself (0 = never)")
-	cpu := fs.Int("cpu", 0, "CPU ceiling as a percentage of one core (0 = default)")
+	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core (0 = default)")
+	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
 	service := fs.String("service", "", "MCP service it belongs to (groups in topo and export)")
 	var volumes volumeFlag
 	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
@@ -549,7 +569,7 @@ func cmdRun(args []string) error {
 		Egress:       config.Or(*egress, cfg.Defaults.Egress, "none"),
 		AllowDomains: splitDomains(*allow),
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
-		CPUPct:       config.Or(*cpu, cfg.Defaults.CPUPct),
+		CPUPct:       config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Labels:       labels.merge(*service),
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
