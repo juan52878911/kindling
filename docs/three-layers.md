@@ -163,6 +163,58 @@ pone en `kling.layer`.
 5. **Ahorro**: `images ls` — base una vez + capas pequeñas; medir disco real total
    vs el modelo monolítico.
 
+## Resultados medidos (fc-test, 2026-08-15)
+
+Las cinco pruebas pasan sobre Firecracker de verdad, con el parque real de 9
+servicios monolíticos delante y sin tocarlos.
+
+| | monolítico | por capas |
+|---|---|---|
+| `sequentialthinking` / `nseq` | 128 MiB | **31 MiB** |
+| `memory` / `nmem` | 139 MiB | **20 MiB** |
+| base `node` compartida | — | 113 MiB (una vez) |
+| **total de los dos** | **267 MiB** | **164 MiB** |
+
+Arranque en frío: 117/38/86 ms por capas contra 63/142/83 ms monolítico — el ruido
+tapa la diferencia, la capa no cuesta arranque medible. Thaw: 18/20/27/36/41/42 ms,
+dentro de lo de siempre. `tools/list` responde por el gateway igual en las dos
+formas, y los servicios legacy (`memory`, `fetch`, `everything`, `sequentialthinking`)
+siguen despertando y respondiendo tras el despliegue.
+
+**EL AHORRO SALE DE LO QUE HAY EN LA BASE, no de las capas.** Es el hallazgo que
+corrige la premisa de este documento: la base `min` real pesa 23 MiB, no los
+110-130 MiB que se supusieron aquí. Esos 130 MiB de un servicio monolítico son en
+su mayoría **nodejs+npm**, no la base. Construir por capas sobre `min` deja una
+capa de 126 MiB y ahorra ~2 MiB: nada.
+
+Con el runtime dentro de la base (`PKGS="nodejs npm" ./70-build-minimal-image.sh
+node`) la capa cae a 20-31 MiB y el ahorro aparece. Extrapolado a 500 servicios
+node: 500 × 130 MiB ≈ **65 GB** monolítico contra 113 MiB + 500 × 25 MiB ≈
+**13 GB** — que es la cifra que prometía el plan, pero solo por esta vía.
+
+Consecuencia práctica: **hace falta una base por familia de runtime** (una `node`,
+una `python`…), y `kling add` no tiene todavía por dónde elegirla — el campo `base`
+existe en la API y en la receta, pero no hay flag en el CLI. Sin eso, todo lo que
+se empaquete por el camino cómodo cae sobre `min` y no ahorra.
+
+Verificado además, punto por punto:
+- **El orden de discos era el correcto**, incluido el caso que lo podía romper: con
+  un volumen enganchado, la consola del invitado enseña `vdc` = volumen de 64 MiB y
+  `vdd` = capa de 256 MiB, y el volumen montado en `/data`. Era lo único del diseño
+  que no se podía comprobar sin Firecracker delante.
+- **El puente horneado en la base funciona**: el build dijo *"ya viene en la base
+  'min', no se duplica en la capa"*, la capa NO lo lleva dentro (`debugfs`), y aun
+  así la microVM arranca — porque el PID 1 sale de la base.
+- `images ls` enseña `BASE`, `N layer(s)` y el total con cada base contada una vez.
+- `images refresh` sobre una capa avisa *"its bridge comes from base X"* y no la
+  toca; sobre la base, la actualiza para todas.
+
+Un fallo encontrado por el camino que **no es de las capas**: `sweepMachineDirs`
+(reconcile) borra el directorio de una máquina que aún se está creando, porque
+`runFrom` lo crea cientos de ms antes de registrarla en `byID`. Se ve como
+`open .../firecracker.log: no such file or directory` y solo aparece cuando el GC
+corre a menudo (disco >90%). Queda anotado aparte.
+
 ## Estado
 - [x] Mecanismo OCI (delta-como-lower + whiteout) validado en el kernel de fc-test.
 - [x] Decisión de numeración de discos (capa por cmdline `kling.layer`, como `kling.volume`).
@@ -170,8 +222,9 @@ pone en `kling.layer`.
 - [x] Stage 2 — overlay-init + manager boot.
 - [x] Stage 3 — snapshot/thaw.
 - [x] Stage 4 — accounting + bridge en base.
-- [ ] **Validación en fc-test**: el código está completo y los tests de unidad
-  pasan, pero NADA de esto se ha ejecutado todavía sobre Firecracker de verdad.
-  El plan de pruebas de arriba (1-5) sigue pendiente entero, y el paso previo es
-  reconstruir la base para que su init entienda `kling.layer`:
-  `sudo BRIDGE=$(pwd)/kling-bridge ./scripts/70-build-minimal-image.sh min`
+- [x] **Validación en fc-test** — las cinco pruebas pasan; ver arriba.
+- [ ] Flag `-base` en `kling add`: sin él no se puede empaquetar sobre una base con
+  runtime desde el CLI, y es de donde sale todo el ahorro.
+- [ ] Una base por familia de runtime (`node` ya construida en fc-test; falta
+  `python` para semgrep y compañía).
+- [ ] Reimportar los 9 servicios del laboratorio por capas, ya con base `node`.

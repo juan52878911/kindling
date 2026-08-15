@@ -128,8 +128,11 @@ func imagesRefresh(args []string) error {
 		return nil
 	}
 
-	var actualizadas, saltadas, fallos int
+	var actualizadas, saltadas, ocupadas, fallos int
 	for _, r := range res {
+		if r.Busy {
+			ocupadas++
+		}
 		switch {
 		case r.Error != "" && r.Skipped:
 			// Saltada no es un fallo: es información. La imagen sigue con el
@@ -150,8 +153,10 @@ func imagesRefresh(args []string) error {
 	fmt.Println()
 	fmt.Printf("%d updated, %d up to date, %d skipped, %d failed\n",
 		actualizadas, len(res)-actualizadas-saltadas-fallos, saltadas, fallos)
-	if saltadas > 0 {
-		fmt.Println("\nSkipped images are in use by a microVM: stop it and try again.")
+	// Solo cuando hay algo que parar: una capa cuyo puente vive en su base
+	// también sale saltada, y ahí no hay ninguna microVM que apagar.
+	if ocupadas > 0 {
+		fmt.Println("\nSome images were skipped because a microVM is using them: stop it and try again.")
 		fmt.Println("  kling ps -a")
 	}
 	if actualizadas > 0 {

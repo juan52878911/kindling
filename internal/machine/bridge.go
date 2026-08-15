@@ -116,7 +116,7 @@ func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []str
 			continue
 		}
 		if users := enUso[name]; len(users) > 0 {
-			fila.Skipped = true
+			fila.Skipped, fila.Busy = true, true
 			fila.Error = fmt.Sprintf("in use by %d machine(s): %s", len(users), strings.Join(users, ", "))
 			out = append(out, fila)
 			continue

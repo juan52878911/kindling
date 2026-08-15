@@ -583,6 +583,15 @@ type BridgeRefresh struct {
 	Updated bool   `json:"updated"`
 	Skipped bool   `json:"skipped,omitempty"`
 	Error   string `json:"error,omitempty"`
+
+	// Busy separa el salto que se cura parando una microVM del que no.
+	//
+	// Se saltan imágenes por dos motivos que no se arreglan igual: una en uso hay
+	// que pararla y repetir; una que no lleva puente propio —una base mínima, o
+	// una capa cuyo puente vive en su base— no hay nada que repetir. Sin este
+	// campo, quien lo lee acaba adivinándolo del texto del error, y el consejo
+	// "párala y vuelve a intentarlo" sale también cuando no hay nada que parar.
+	Busy bool `json:"busy,omitempty"`
 }
 
 // ImageRecipe es CÓMO se construyó una imagen.
