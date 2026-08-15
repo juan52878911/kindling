@@ -467,6 +467,14 @@ type BuildImageRequest struct {
 	// PIP son paquetes de Python que preinstalar, por la misma razón que NPM:
 	// dentro no hay internet en tiempo de ejecución.
 	PIP []string `json:"pip,omitempty"`
+	// Env son variables de entorno ("KEY=value") que se HORNEAN en el
+	// entrypoint de la imagen, en texto plano — no valen para secretos.
+	//
+	// El caso que las motivó es semgrep: hace phone-home de métricas al
+	// arrancar y, con el egress cerrado, espera ~2 minutos al timeout en cada
+	// arranque en frío. SEMGREP_SEND_METRICS=off lo corta de raíz, y sin este
+	// campo la única forma de fijarlo era empaquetar a mano con el script.
+	Env []string `json:"env,omitempty"`
 	// Cmd es el comando que arranca el servidor MCP dentro del invitado.
 	Cmd []string `json:"cmd"`
 	// GrowMB agranda la imagen. 0 deja que el script decida.
@@ -610,6 +618,7 @@ type ImageRecipe struct {
 	Packages []string  `json:"packages,omitempty"`
 	NPM      []string  `json:"npm,omitempty"`
 	PIP      []string  `json:"pip,omitempty"`
+	Env      []string  `json:"env,omitempty"`
 	Cmd      []string  `json:"cmd"`
 	GrowMB   int       `json:"grow_mb,omitempty"`
 	Bundle   bool      `json:"bundle,omitempty"`

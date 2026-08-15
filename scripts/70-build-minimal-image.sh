@@ -3,6 +3,8 @@
 # efímeras: sin systemd, sin gestor de servicios, solo busybox y lo que añadas.
 #
 #   sudo ./70-build-minimal-image.sh                 # imagen "min"
+#   sudo ./70-build-minimal-image.sh node            # base de runtime node
+#   sudo ./70-build-minimal-image.sh python          # base de runtime python
 #   sudo PKGS="nodejs npm" ./70-build-minimal-image.sh mcp-node
 #
 # El objetivo es el working set congelado, no el tamaño del disco: arrancar
@@ -16,6 +18,23 @@ SIZE="${SIZE:-256M}"
 PKGS="${PKGS:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE="${BRIDGE:-./kling-bridge}"
+
+# FAMILIAS DE RUNTIME CON NOMBRE. Todo el ahorro de las imágenes por capas sale
+# de que el runtime viva en la base (docs/three-layers.md): sobre `min`, la capa
+# de un servidor node arrastra nodejs+npm (~126 MiB) y no ahorra nada. Estas
+# bases se construyen UNA vez por host, y con nombre fijo por dos razones:
+#   - el operador no tiene que recordar la lista de paquetes de cada runtime, y
+#     dos operadores no acaban con dos bases "python" distintas;
+#   - `kling add` busca una base que se llame COMO LA FAMILIA (node, python)
+#     para elegirla sola cuando no se le pasa -base. Renombrarlas aquí rompe
+#     esa detección (hay un test que ata los dos extremos).
+# PKGS explícito gana, para poder añadir extras sobre el preset.
+if [ -z "$PKGS" ]; then
+  case "$NAME" in
+    node)   PKGS="nodejs npm" ;;
+    python) PKGS="python3 py3-pip" ;;
+  esac
+fi
 
 [ "$(id -u)" -eq 0 ] || { echo "ejecútalo como root" >&2; exit 1; }
 for c in curl mkfs.ext4; do

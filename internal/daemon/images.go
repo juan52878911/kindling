@@ -50,6 +50,13 @@ var (
 	rePIP = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*((==|>=|<=|~=|!=)[a-zA-Z0-9._*+-]+)?$`)
 
 	reNPM = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[a-zA-Z0-9._~+-]+)?$`)
+	// Variable de entorno horneada: KEY=value. La clave con la forma estricta
+	// de un identificador de shell; el valor, cualquier cosa MENOS saltos de
+	// línea y NUL — el script la escribe en el entrypoint con `printf %q`, así
+	// que el resto de caracteres viaja inerte, pero un salto de línea antes de
+	// llegar ahí partiría otras cosas y no hay ningún valor legítimo que lo
+	// necesite.
+	reEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
 )
 
 // imageScript localiza scripts/80-mcp-image.sh.
@@ -99,6 +106,11 @@ func validateBuild(r api.BuildImageRequest) error {
 			return fmt.Errorf("invalid pip package %q", p)
 		}
 	}
+	for _, e := range r.Env {
+		if !reEnv.MatchString(e) {
+			return fmt.Errorf("invalid environment variable %q: expected KEY=value", e)
+		}
+	}
 	if len(r.Cmd) == 0 {
 		return fmt.Errorf("missing the command that starts the MCP server")
 	}
@@ -129,6 +141,12 @@ func buildScriptArgs(req api.BuildImageRequest) []string {
 	}
 	if len(req.PIP) > 0 {
 		args = append(args, "-P", strings.Join(req.PIP, " "))
+	}
+	// -e va una vez POR variable, no unido con espacios como -p/-n/-P: un valor
+	// puede llevar espacios y el script guarda cada "-e KEY=value" como un
+	// elemento de su array EXTRA_ENV.
+	for _, e := range req.Env {
+		args = append(args, "-e", e)
 	}
 	if req.Bundle {
 		args = append(args, "-bundle")
@@ -275,7 +293,8 @@ func (s *Server) recipePath(name string) string {
 func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 	rec := api.ImageRecipe{
 		Name: r.Name, Base: r.Base, Packages: r.Packages, NPM: r.NPM,
-		PIP: r.PIP, Cmd: r.Cmd, GrowMB: r.GrowMB, Bundle: r.Bundle, BuiltAt: time.Now(),
+		PIP: r.PIP, Env: r.Env, Cmd: r.Cmd, GrowMB: r.GrowMB, Bundle: r.Bundle,
+		BuiltAt:  time.Now(),
 		KlingVer: Version,
 	}
 	b, err := json.MarshalIndent(rec, "", "  ")

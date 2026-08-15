@@ -49,6 +49,62 @@ func TestBuildScriptArgs(t *testing.T) {
 	}
 }
 
+// El caso Python del traductor: -P y -e también tienen que caer ANTES de `--`,
+// y -e una vez POR variable — un valor puede llevar espacios, y unirlos con
+// espacios como -p/-n/-P los partiría al llegar al array EXTRA_ENV del script.
+func TestBuildScriptArgsPython(t *testing.T) {
+	got := buildScriptArgs(api.BuildImageRequest{
+		Name:     "semgrep",
+		Packages: []string{"python3", "py3-pip"},
+		PIP:      []string{"semgrep-mcp==1.0.0"},
+		Env:      []string{"SEMGREP_SEND_METRICS=off", "A=b c"},
+		Cmd:      []string{"semgrep-mcp"},
+	})
+	sep := indexOf(got, "--")
+	if sep == -1 {
+		t.Fatalf("falta el separador --: %v", got)
+	}
+	pi := indexOf(got, "-P")
+	if pi == -1 || pi > sep {
+		t.Errorf("-P debe ir antes de -- : %v", got)
+	}
+	if pi != -1 && got[pi+1] != "semgrep-mcp==1.0.0" {
+		t.Errorf("-P debe llevar el paquete pip: %v", got)
+	}
+	// Cada variable con su propio -e, valor intacto (espacios incluidos).
+	var envs []string
+	for i, a := range got[:sep] {
+		if a == "-e" {
+			envs = append(envs, got[i+1])
+		}
+	}
+	if len(envs) != 2 || envs[0] != "SEMGREP_SEND_METRICS=off" || envs[1] != "A=b c" {
+		t.Errorf("-e no conserva las variables una a una: %v", envs)
+	}
+}
+
+// Todo flag que buildScriptArgs pueda emitir tiene que existir en el parser de
+// 80-mcp-image.sh. Los dos extremos están en lenguajes distintos: añadir un
+// flag aquí sin tocar el script no falla en compilación — falla en el daemon
+// como "opción desconocida" a mitad de una construcción como root.
+func TestBuildScriptEntiendeLosFlags(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "scripts", "80-mcp-image.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, f := range []string{"-p)", "-n)", "-P)", "-e)", "-d)", "-bundle)"} {
+		if !strings.Contains(s, f) {
+			t.Errorf("80-mcp-image.sh no parsea %s, y buildScriptArgs puede emitirlo", strings.TrimSuffix(f, ")"))
+		}
+	}
+	// Y las variables de -e tienen que escribirse en el entrypoint con %q: un
+	// `echo "export $kv"` ejecutaría la mitad de un valor con espacios.
+	if !strings.Contains(s, `printf 'export %s=%q\n'`) {
+		t.Error("80-mcp-image.sh no cita los valores de -e (printf con formato q) en el entrypoint")
+	}
+}
+
 func indexOf(xs []string, s string) int {
 	for i, x := range xs {
 		if x == s {
@@ -101,6 +157,15 @@ func TestValidateBuildRechaza(t *testing.T) {
 
 		{"crecimiento negativo", func(r *api.BuildImageRequest) { r.GrowMB = -1 }},
 		{"crecimiento absurdo", func(r *api.BuildImageRequest) { r.GrowMB = 1 << 20 }},
+
+		// Las variables de entorno acaban en el entrypoint generado. La clave
+		// tiene que ser un identificador de shell; el valor, una sola línea.
+		{"env sin igual", func(r *api.BuildImageRequest) { r.Env = []string{"SOLO_CLAVE"} }},
+		{"env con clave vacía", func(r *api.BuildImageRequest) { r.Env = []string{"=valor"} }},
+		{"env con clave con espacio", func(r *api.BuildImageRequest) { r.Env = []string{"A B=c"} }},
+		{"env con clave que empieza por dígito", func(r *api.BuildImageRequest) { r.Env = []string{"1A=b"} }},
+		{"env con salto de línea", func(r *api.BuildImageRequest) { r.Env = []string{"A=b\nrm -rf /"} }},
+		{"env con byte nulo", func(r *api.BuildImageRequest) { r.Env = []string{"A=b\x00c"} }},
 	}
 
 	for _, c := range cases {
@@ -120,6 +185,11 @@ func TestValidateBuildAcepta(t *testing.T) {
 		{Name: "files-2", Base: "min", Packages: []string{"nodejs", "npm", "py3-pip"},
 			NPM: []string{"@scope/pkg", "otro@1.2.3"}, Cmd: []string{"bin", "--flag", "valor con espacios"}},
 		{Name: "a", Cmd: []string{"x"}, GrowMB: 8192},
+		// El caso que motivó Env: apagar el phone-home de semgrep. El valor
+		// admite espacios y símbolos; el script lo cita con %q en el entrypoint.
+		{Name: "semgrep", Base: "python", Packages: []string{"python3", "py3-pip"},
+			PIP: []string{"semgrep-mcp"}, Cmd: []string{"semgrep-mcp"},
+			Env: []string{"SEMGREP_SEND_METRICS=off", "SEMGREP_ENABLE_VERSION_CHECK=0", "X=a b;c", "VACIA="}},
 	}
 	for _, r := range cases {
 		if err := validateBuild(r); err != nil {
