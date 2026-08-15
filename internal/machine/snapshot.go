@@ -461,10 +461,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	defer releaseMem()
 
-	dir := m.dir(id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// El directorio nace RESERVADO: desde aquí hasta la entrada en byID —copiar
+	// el overlay dorado, resolver volúmenes, montar la red— es de lejos la
+	// ventana más ancha del daemon, y el barrido de huérfanos corre cada 10 s en
+	// cuanto el disco aprieta. Ver makeMachineDir.
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
 		return nil, err
 	}
+	defer unreserve()
 
 	// Copia del overlay dorado: mismo contenido, fichero propio. Compartirlo
 	// haría que las instancias se pisaran el disco entre ellas.

@@ -79,6 +79,11 @@ type Manager struct {
 	byID   map[string]*api.Machine
 	socket map[string]string // id -> ruta del socket de firecracker
 
+	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
+	// sin entrada en byID. Ver reserveDir: sin esto el barrido de huérfanos los
+	// borra bajo los pies de quien los está llenando. Se toca bajo mu.
+	reserved map[string]bool
+
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int
@@ -613,10 +618,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.Name == "" {
 		req.Name = req.Image + "-" + id[:6]
 	}
-	dir := m.dir(id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// El directorio nace reservado: la ventana hasta byID es más corta que en
+	// runFrom, pero newOverlay sigue formateando un ext4 en medio. Ver
+	// makeMachineDir.
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
 		return nil, err
 	}
+	defer unreserve()
 
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
 	// esta microVM es su overlay escribible, que nace prácticamente vacío.

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // liveVMs es la pieza sobre la que se apoya todo el reconcile nuevo: si no ve
@@ -51,6 +52,115 @@ func TestLiveVMsNoSeConfundeConRutasAjenas(t *testing.T) {
 		if strings.Contains(id, "/") {
 			t.Errorf("devolvió un id con barras: %q", id)
 		}
+	}
+}
+
+// El barrido de huérfanos no puede llevarse por delante el directorio de una
+// máquina que se está CONSTRUYENDO.
+//
+// Reproduce la carrera real: runFrom crea el directorio, copia ~100 MiB de
+// overlay dorado, resuelve volúmenes y monta la red, y solo entonces registra la
+// máquina en byID. En esa ventana —cientos de milisegundos— el directorio no era
+// de "ninguna máquina conocida", y el GC de disco, que barre cada 10 s en cuanto
+// el anfitrión va justo de espacio, lo borraba. El caller veía un error sobre un
+// firecracker.log que no existe, que no dice nada de la causa.
+func TestSweepNoBorraElDirectorioDeUnaMaquinaEnConstruccion(t *testing.T) {
+	m := newTestManager(t)
+	id := "0123456789abcdef0123456789abcdef"
+
+	// Barrido agresivo en paralelo, como el del disco lleno.
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			m.mu.Lock()
+			m.sweepMachineDirs()
+			m.mu.Unlock()
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unreserve()
+
+	// El llenado lento del directorio: si el barrido se lo lleva, esto falla con
+	// un ENOENT, que es exactamente lo que se veía en el laboratorio.
+	for i := 0; i < 50; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "overlay.ext4"), []byte("golden"), 0o644); err != nil {
+			t.Fatalf("el barrido borró el directorio a medio construir: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// El registro en byID llega al final, como en producción, y a partir de ahí
+	// la máquina se protege sola.
+	m.addForTest(id)
+
+	// El síntoma que se reportó, comprobado tal cual.
+	if _, err := os.Create(filepath.Join(dir, "firecracker.log")); err != nil {
+		t.Fatalf("open firecracker.log: %v", err)
+	}
+}
+
+// La reserva tiene que valer POR SÍ SOLA, sin apoyarse en la edad del
+// directorio: una copia de overlay sobre un anfitrión cargado puede tardar más
+// que el margen de cortesía, y entonces solo queda ella.
+func TestSweepRespetaLaReservaAunqueElDirectorioSeaViejo(t *testing.T) {
+	m := newTestManager(t)
+	id := "aaaabbbbccccdddd"
+
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unreserve()
+	envejecer(t, dir)
+
+	m.mu.Lock()
+	m.sweepMachineDirs()
+	m.mu.Unlock()
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("borró un directorio reservado: %v", err)
+	}
+}
+
+// El margen de cortesía es el cinturón sobre los tirantes: cubre a cualquier
+// camino futuro que cree un directorio antes de registrar su id.
+func TestSweepPerdonaLosDirectoriosRecienTocados(t *testing.T) {
+	m := newTestManager(t)
+	dir := m.dir("eeeeffff00001111")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m.mu.Lock()
+	m.sweepMachineDirs()
+	m.mu.Unlock()
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("borró un directorio recién creado sin darle margen: %v", err)
+	}
+}
+
+// Que el barrido SIGA recogiendo huérfanos de verdad lo cubre
+// TestSeBorranLosDirectoriosHuerfanos, en gc_test.go.
+
+// envejecer retrasa la fecha del directorio más allá del margen de cortesía, que
+// es la única forma de probar el barrido sin dormir dos minutos.
+func envejecer(t *testing.T, dir string) {
+	t.Helper()
+	viejo := time.Now().Add(-2 * dirGrace)
+	if err := os.Chtimes(dir, viejo, viejo); err != nil {
+		t.Fatal(err)
 	}
 }
 

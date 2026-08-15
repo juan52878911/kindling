@@ -137,6 +137,58 @@ func estadoDe(mc *api.Machine) string {
 	return string(mc.State)
 }
 
+// reserveDir aparta un id para que sweepMachineDirs no borre su directorio
+// mientras se está construyendo.
+//
+// Entre el MkdirAll de una máquina y su entrada en byID pasan cientos de
+// milisegundos —copiar el overlay dorado son ~100 MiB, más resolver volúmenes y
+// montar la red—, y en esa ventana el directorio no es de "ninguna máquina
+// conocida": el barrido lo veía como basura y lo borraba bajo los pies de quien
+// lo estaba llenando. El síntoma era un error sobre un firecracker.log que no
+// existe, que no dice absolutamente nada de la causa real.
+//
+// Devuelve la función que suelta la reserva. Se usa con defer, para que cubra
+// también los caminos de error que borran el directorio a medio hacer.
+func (m *Manager) reserveDir(id string) func() {
+	m.mu.Lock()
+	if m.reserved == nil {
+		m.reserved = make(map[string]bool)
+	}
+	m.reserved[id] = true
+	m.mu.Unlock()
+
+	return func() {
+		m.mu.Lock()
+		delete(m.reserved, id)
+		m.mu.Unlock()
+	}
+}
+
+// makeMachineDir crea el directorio de una máquina y lo protege del barrido
+// hasta que quien la construye suelte la reserva.
+//
+// Reservar y crear van SOLDADOS en la misma función a propósito: el fallo que
+// esto arregla fue exactamente olvidar que entre las dos cosas hay una ventana.
+// Mientras el único camino para tener un directorio de máquina pase por aquí, no
+// hay forma de reintroducirlo.
+func (m *Manager) makeMachineDir(id string) (string, func(), error) {
+	release := m.reserveDir(id)
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		release()
+		return "", nil, err
+	}
+	return dir, release, nil
+}
+
+// dirGrace es la edad mínima que ha de tener un directorio para ser candidato al
+// barrido. Es el cinturón sobre los tirantes de reserveDir: cubre cualquier
+// camino que en el futuro cree un directorio antes de registrar su id, sin que
+// haya que acordarse de reservarlo. Retrasar unos minutos la recuperación de
+// basura real no cuesta nada —el barrido corre cada 10 s—; borrar el directorio
+// de una máquina que está naciendo cuesta la máquina.
+const dirGrace = 2 * time.Minute
+
 // sweepMachineDirs borra los directorios de machines/ que no pertenecen a
 // ninguna máquina conocida ni viva.
 //
@@ -146,9 +198,10 @@ func estadoDe(mc *api.Machine) string {
 // o por un registro que se pierde — y sin esto, se acumulan hasta llenar el
 // disco, con el daemon sano y sin nada en su estado que lo explique.
 //
-// Se llama con m.mu tomado. Solo borra lo que NO está en byID: una máquina viva
-// cuyo registro aún no ha llegado al disco sigue teniendo su entrada en memoria,
-// así que su directorio nunca es candidato.
+// Se llama con m.mu tomado. Solo borra lo que NO está en byID, NO está reservado
+// y lleva un rato quieto: una máquina viva cuyo registro aún no ha llegado al
+// disco sigue teniendo su entrada en memoria, y una que aún se está construyendo
+// tiene su id en reserved, así que ninguna de las dos es candidata.
 func (m *Manager) sweepMachineDirs() {
 	dir := filepath.Join(m.root, "machines")
 	entries, err := os.ReadDir(dir)
@@ -160,6 +213,14 @@ func (m *Manager) sweepMachineDirs() {
 			continue
 		}
 		if _, conocida := m.byID[e.Name()]; conocida {
+			continue
+		}
+		if m.reserved[e.Name()] {
+			continue
+		}
+		// Recién tocado: o lo está llenando alguien ahora mismo, o acaba de
+		// quedarse huérfano y el próximo barrido lo recogerá igual.
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < dirGrace {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())

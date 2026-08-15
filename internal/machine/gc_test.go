@@ -25,6 +25,9 @@ func TestSeBorranLosDirectoriosHuerfanos(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(base, id, "mem.file"), make([]byte, 4096), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// Un directorio recién tocado tiene margen de cortesía: podría ser una
+		// máquina naciendo. Ver dirGrace.
+		envejecer(t, filepath.Join(base, id))
 	}
 	m.mu.Lock()
 	m.byID["viva1234"] = &api.Machine{ID: "viva1234", Name: "viva", State: api.StateWarm}
