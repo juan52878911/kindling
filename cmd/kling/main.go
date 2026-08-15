@@ -157,6 +157,7 @@ CONFIGURATION
   context rm <name>                                removes it
   config [show|path]                               current configuration
   config set <key> <value>                         e.g. defaults.image min
+  completion [bash|zsh]                            shell completion script
   version                                          CLI version
 
 CONNECTION
@@ -239,6 +240,8 @@ func main() {
 		err = cmdContext(args)
 	case "config":
 		err = cmdConfig(args)
+	case "completion":
+		err = cmdCompletion(args)
 	case "version", "--version", "-v":
 		fmt.Printf("kling %s\n", Version)
 		return
