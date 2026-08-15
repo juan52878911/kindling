@@ -306,11 +306,21 @@ APARTA (la monolítica tiene precedencia sobre la capa, así que apartarla es lo
 activa la nueva), y solo se retira cuando el catálogo del servicio reconstruido
 coincide con el de antes.
 
-Los dos que siguen monolíticos:
-- **semgrep** — es Python. Espera a la base `python`.
-- **playwright** — 2.5 GiB con Chromium dentro; además hoy no arranca en fc-test
-  por RAM: pide 1536 MiB y quedan ~1222 libres, porque docker/containerd retienen
-  2,4 GiB de la VM. No es de las capas.
+**semgrep también, y no era lo que parecía.** Se daba por hecho que era un
+servicio de Python a la espera de la base `python`. No lo es: es un servidor
+**node** (`mcp-server-semgrep`) que invoca la CLI de semgrep, que sí es Python. Y
+la CLI ya estaba horneada en su imagen (`/usr/bin/semgrep`), junto con los
+interruptores del phone-home. Así que no necesitaba nada nuevo, solo la capa:
+**679 → 585 MiB**, y de paso su primera receta. Es el caso que ejercita npm y pip
+en la MISMA construcción, sobre la base `node`.
+
+Queda uno monolítico: **playwright**, 2.5 GiB con Chromium dentro. Además hoy no
+arranca en fc-test por RAM —pide 1536 MiB y quedan ~1222 libres, porque
+docker/containerd retienen 2,4 GiB de la VM—, así que no se pudo ni verificar. No
+es de las capas.
+
+Del parque entero: **8 de 9 servicios por capas, 67 herramientas intactas**, y el
+disco de la VM del 89% al 81%.
 
 ## Estado
 - [x] Mecanismo OCI (delta-como-lower + whiteout) validado en el kernel de fc-test.
@@ -327,9 +337,11 @@ Los dos que siguen monolíticos:
 - [x] Python de primera: familias de runtime con nombre en 70-build, `kling add`
   para PyPI (base automática, pip, ejecutable por convención + comprobación en
   el build, `-env`). Ver "Familias de runtime y servidores de Python".
-- [ ] Construir la base `python` en fc-test (`sudo ./70-build-minimal-image.sh
-  python`) y validar el camino PyPI de punta a punta con semgrep: build por
-  capas, import, thaw y `tools/call`. La `node` ya está.
+- [x] Base `python` construida en fc-test (75 MiB) y camino PyPI validado de punta
+  a punta con `mcp-sqlite3`: `kling add` elige la base sola, construye por capas,
+  importa y responde `tools/list` por el gateway (37 herramientas).
+- [x] semgrep por capas (679 → 585 MiB). Resultó ser un servicio node, no python:
+  ver arriba.
 - [ ] `playwright`: 2.5 GiB con Chromium. Merece su propia base (`node` + las
   dependencias del navegador) y decidir si el navegador va en la base o en la capa.
   Hoy además no arranca en fc-test por RAM.
