@@ -193,9 +193,29 @@ node: 500 × 130 MiB ≈ **65 GB** monolítico contra 113 MiB + 500 × 25 MiB �
 **13 GB** — que es la cifra que prometía el plan, pero solo por esta vía.
 
 Consecuencia práctica: **hace falta una base por familia de runtime** (una `node`,
-una `python`…), y `kling add` no tiene todavía por dónde elegirla — el campo `base`
-existe en la API y en la receta, pero no hay flag en el CLI. Sin eso, todo lo que
-se empaquete por el camino cómodo cae sobre `min` y no ahorra.
+una `python`…). `kling add -base node` ya existe para elegirla; sin ese flag, todo
+lo que se empaquetara por el camino cómodo caía sobre `min` y no ahorraba nada.
+`nodejs`/`npm` se piden igual aunque la base ya los traiga: apk sobre lo instalado
+no engorda la capa (medido: 28 MiB contra 31) y así el flag vale con cualquier
+base, en vez de fallar con un `npm: not found` a mitad de construcción.
+
+### El encogido de la capa nunca se ejecutaba
+
+Salió al empaquetar una calculadora con `kling add`: **451 MiB de capa para
+73 MiB de contenido**. El sistema de ficheros seguía a 805 MiB con 716 libres
+dentro — `resize2fs -M` no había corrido nunca.
+
+La causa es un orden: resize2fs se NIEGA a tocar un fs que no se acabe de
+comprobar (*"Please run 'e2fsck -f' first"*), y el script lo llamaba ANTES del
+`e2fsck`, con la salida a `/dev/null` y un `|| true` detrás. Fallaba siempre y en
+silencio. Además, encoger el fs no basta: el FICHERO conserva asignado todo lo que
+se escribió alguna vez —los node_modules temporales de npm, la caché de apk— y eso
+solo se devuelve recortándolo a la frontera del fs, tamaño que ahora se lee del
+superbloque en vez de estimarse.
+
+Arreglado: e2fsck → resize2fs -M → truncate a `Block count × Block size` → e2fsck.
+La misma imagen pasa de **451 MiB a 75 MiB**, y sigue arrancando y respondiendo
+`tools/call` por el gateway (`6*7` → `42`).
 
 Verificado además, punto por punto:
 - **El orden de discos era el correcto**, incluido el caso que lo podía romper: con
@@ -223,8 +243,10 @@ corre a menudo (disco >90%). Queda anotado aparte.
 - [x] Stage 3 — snapshot/thaw.
 - [x] Stage 4 — accounting + bridge en base.
 - [x] **Validación en fc-test** — las cinco pruebas pasan; ver arriba.
-- [ ] Flag `-base` en `kling add`: sin él no se puede empaquetar sobre una base con
-  runtime desde el CLI, y es de donde sale todo el ahorro.
-- [ ] Una base por familia de runtime (`node` ya construida en fc-test; falta
-  `python` para semgrep y compañía).
-- [ ] Reimportar los 9 servicios del laboratorio por capas, ya con base `node`.
+- [x] Flag `-base` en `kling add`, probado de punta a punta: construye por capas,
+  importa, congela y responde `tools/call` por el gateway.
+- [x] El encogido de la capa, que no se ejecutaba nunca (451 MiB → 75 MiB).
+- [ ] Una base `python` (semgrep y compañía). La `node` ya está en fc-test.
+- [ ] Reimportar los 9 servicios del laboratorio por capas sobre `node`. Es la
+  operación que convierte el ahorro medido en ahorro real, y toca el parque en
+  producción: conviene hacerla servicio a servicio y con el gateway mirando.

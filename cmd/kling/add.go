@@ -82,6 +82,12 @@ func cmdAdd(args []string) error {
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: shareable between services")
 	fresh := fs.Bool("refresh", false, "ignore the registry cache")
 	bundle := fs.Bool("bundle", false, "bundle the node server into 1 file (esbuild) when building: starts much faster on cold start, especially on arm64/Mac")
+	// Sin esto no se puede empaquetar sobre una base con el runtime dentro, que
+	// es de donde sale TODO el ahorro de las imágenes por capas: sobre la base
+	// mínima, la capa de un servidor node se lleva nodejs+npm dentro (~126 MiB) y
+	// ahorra un par de megas. Sobre una base que ya los trae, baja a ~25 MiB.
+	// Medido en fc-test — docs/three-layers.md.
+	base := fs.String("base", "", "base image to build on: a base carrying the runtime (e.g. one built with nodejs+npm) makes the service's layer ~5x smaller")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -102,14 +108,14 @@ func cmdAdd(args []string) error {
 	rc.Fresh = *fresh
 
 	for _, want := range fs.Args() {
-		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun, *bundle); err != nil {
+		if err := addOne(ctx, rc, *host, want, *as, vols, *extra, *dryRun, *bundle, *base); err != nil {
 			return fmt.Errorf("%s: %w", want, err)
 		}
 	}
 	return nil
 }
 
-func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun, bundle bool) error {
+func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vols []api.VolumeAttachment, extra []string, dryRun, bundle bool, base string) error {
 	srv, candidates, err := rc.Get(ctx, want, 30)
 	if err != nil {
 		if len(candidates) > 0 {
@@ -177,6 +183,9 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 	fmt.Printf("  service:   %s\n", service)
 	fmt.Printf("  npm:       %s\n", npmSpec)
 	fmt.Printf("  command:   %s\n", strings.Join(cmd, " "))
+	if base != "" {
+		fmt.Printf("  base:      %s  (layered: only the delta goes in this image)\n", base)
+	}
 	if dryRun {
 		fmt.Println("\n(-dry-run: not doing anything)")
 		return nil
@@ -187,11 +196,16 @@ func addOne(ctx context.Context, rc *registry.Client, host, want, as string, vol
 	fmt.Printf("  1/2  building the image (installs node, may take a while)... ")
 	c := api.NewClient(hostOf(host))
 	res, err := c.BuildImage(ctx, api.BuildImageRequest{
-		Name:     service,
+		Name: service,
+		// nodejs y npm van SIEMPRE, también con una base que ya los trae: apk
+		// sobre lo ya instalado no engorda la capa —medido: 28 MiB contra 31—, y
+		// pedirlos igualmente hace que -base valga con cualquier base, en vez de
+		// fallar con un "npm: not found" a mitad de construcción.
 		Packages: []string{"nodejs", "npm"},
 		NPM:      []string{npmSpec},
 		Cmd:      cmd,
 		Bundle:   bundle,
+		Base:     base,
 	})
 	if err != nil {
 		fmt.Println("✗")

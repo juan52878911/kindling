@@ -603,12 +603,42 @@ umount "$layer_mnt"
 # journal a medias no se puede montar así: el kernel entra en pánico y el fallo
 # aparece como "el servidor no abrió el puerto", que no se parece a la causa.
 sync
-resize2fs -M "$LAYER" >/dev/null 2>&1 || true
+# El e2fsck va ANTES del encogido, y ese orden no es estético: resize2fs se NIEGA
+# a tocar un sistema de ficheros que no se acaba de comprobar ("Please run
+# 'e2fsck -f' first"). Al revés —como estaba— el encogido fallaba SIEMPRE, y en
+# silencio, porque su salida iba a /dev/null con un `|| true` detrás. El
+# resultado eran capas con el tamaño de todo lo que el build llegó a tocar: una
+# calculadora ocupaba 451 MiB de los que 73 eran suyos.
 if ! e2fsck -fp "$LAYER" >/dev/null 2>&1; then
   echo "AVISO: el sistema de ficheros de la capa necesitaba reparación" >&2
   e2fsck -fy "$LAYER" >/dev/null 2>&1 || {
     echo "ERROR: '$NAME' quedó con una capa irreparable; bórrala y repite" >&2
     exit 1; }
+fi
+
+# Encoger el sistema de ficheros al contenido real, y DESPUÉS recortar el
+# fichero a ese tamaño.
+#
+# Las dos cosas, porque arreglan cosas distintas: resize2fs mueve los datos y
+# baja el tamaño del fs, pero el fichero sigue teniendo asignado todo lo que se
+# escribió alguna vez —los node_modules temporales de npm, la caché de apk— y
+# eso NO se recupera solo. El truncate a la frontera del fs es lo que devuelve
+# esos bloques al anfitrión. Un truncate por debajo de esa frontera destruiría el
+# sistema de ficheros, así que el tamaño se lee del propio superbloque y no se
+# estima.
+if resize2fs -M "$LAYER" >/dev/null 2>&1; then
+  blocks=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2); print $2}')
+  bsize=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
+  if [ -n "$blocks" ] && [ -n "$bsize" ]; then
+    truncate -s "$((blocks * bsize))" "$LAYER"
+  fi
+  e2fsck -fp "$LAYER" >/dev/null 2>&1 || {
+    echo "ERROR: la capa quedó dañada al encogerla; bórrala y repite" >&2
+    exit 1; }
+else
+  # No es fatal: la capa funciona igual, solo ocupa de más. Pero hay que decirlo,
+  # porque el bulto en disco es justo lo que estas imágenes existen para evitar.
+  echo "AVISO: no se pudo encoger la capa; ocupará más disco del necesario" >&2
 fi
 
 chmod a+r "$LAYER"
