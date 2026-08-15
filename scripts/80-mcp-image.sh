@@ -190,6 +190,17 @@ cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; 
 trap cleanup EXIT
 ov_up
 
+# emit_env escribe los `export` de las variables de -e en el entrypoint. El
+# VALOR va con %q y no con un `echo "export $kv"`: llega tal cual del operador
+# (o de `kling add -env`) y puede llevar espacios o caracteres que el shell
+# interpretaría — un valor "a b" exportaría a y ejecutaría b.
+emit_env() {
+  local kv
+  for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
+    printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
+  done
+}
+
 # install_bridge deja el puente donde el entrypoint lo invoca, pero SIN escribirlo
 # en la capa cuando la base ya trae ese mismo binario.
 #
@@ -511,6 +522,12 @@ fi
 # Igual que npm, y por la misma razón: el invitado arranca SIN salida a
 # internet, así que un `pip install` en tiempo de ejecución fallaría.
 #
+# El caso que convirtió esto de comodidad en necesidad es el semgrep del
+# laboratorio: su imagen NO traía semgrep dentro y hacía `pip install` al
+# arrancar — cada arranque en frío pagaba la descarga, y varios a la vez
+# tumbaban la máquina por OOM. Con -P el paquete queda HORNEADO en la capa y el
+# arranque no descarga nada.
+#
 # --break-system-packages hace falta desde PEP 668: Alpine marca su python como
 # "externally managed" y pip se niega a tocarlo sin esto. Aquí es inofensivo —
 # la imagen es de un solo uso y no hay nada más que romper.
@@ -527,6 +544,40 @@ if [ -n "$PIP" ]; then
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
+# DETECCIÓN DE CAPACIDADES para servidores Python, hermana de la de npm de más
+# arriba pero mucho más corta a propósito: las ruedas (--only-binary) ya traen
+# sus binarios compilados —no existe el "native_missing" de npm— y los MCP de
+# navegador reales se distribuyen por npm. Lo único que de verdad cambia el
+# import es el egress, y su marcador es un cliente HTTP en site-packages.
+# Un servicio mixto npm+pip no pisa lo que ya detectó el árbol npm.
+if [ -n "$PIP" ] && [ ! -f "$mnt/etc/kling/capabilities.json" ]; then
+  SP="$(echo "$mnt"/usr/lib/python3*/site-packages)"
+  CAP_EGRESS=none
+  for m in requests httpx aiohttp openai anthropic boto3 googleapiclient; do
+    [ -d "$SP/$m" ] && CAP_EGRESS=internet
+  done
+  # La misma semilla de dominios que en npm: una PISTA editable para el modo
+  # egress=allowlist, extraída de los literales de URL. -I salta los binarios
+  # de las ruedas: un match dentro de un .so saldría como basura, no como host.
+  ALLOWJSON="[]"
+  if [ "$CAP_EGRESS" = internet ]; then
+    DOMAINS=$(grep -rhoIE 'https?://[a-zA-Z0-9._-]+' "$SP" 2>/dev/null \
+      | sed -E 's#^https?://##' \
+      | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|pypi\.org|files\.pythonhosted\.org|github\.com)$' \
+      | sort -u | head -40)
+    [ -n "$DOMAINS" ] && ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
+  fi
+  mkdir -p "$mnt/etc/kling"
+  cat > "$mnt/etc/kling/capabilities.json" <<CJSON
+{
+  "browser": false,
+  "egress": "$CAP_EGRESS",
+  "allow_domains": $ALLOWJSON
+}
+CJSON
+  echo "capacidades detectadas (pip): egress=$CAP_EGRESS allow_domains=$ALLOWJSON"
+fi
+
 if [ "$MODE" = "stdio" ]; then
   install_bridge
   # El entrypoint es PID 1 de la microVM: si muere, el kernel entra en pánico.
@@ -539,7 +590,7 @@ if [ "$MODE" = "stdio" ]; then
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
-    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do echo "export $kv"; done
+    emit_env
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
@@ -575,7 +626,7 @@ SJSON
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
-    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do echo "export $kv"; done
+    emit_env
     echo '# El servidor hijo escucha en este puerto; el puente ocupa el 8080 (lo'
     echo '# que ve el gateway) y le reversa las peticiones. service.json le dice'
     echo '# al puente el mismo número.'
@@ -584,6 +635,26 @@ SJSON
     for a in "${CMD[@]}"; do printf ' %q' "$a"; done
     echo
   } > "$mnt/entrypoint"
+fi
+
+# El comando del servidor tiene que EXISTIR dentro de la imagen, y se comprueba
+# AQUÍ porque puede venir inferido: el ejecutable de un paquete de PyPI se
+# deduce por convención del nombre del paquete (PyPI no publica los entry
+# points en su API — ver ResolvePyPIBin), así que un paquete que no la siga
+# produciría una imagen rota. Sin esta comprobación no fallaría al construir:
+# fallaría en el import como "el servidor no abrió el puerto", un síntoma que
+# no se parece en nada a la causa. Con el mismo PATH que fija el entrypoint.
+# SKIP_CMD_CHECK=1 la salta, para el caso raro de un binario que llega por
+# volumen en tiempo de ejecución.
+if [ ${#CMD[@]} -gt 0 ] && [ "${SKIP_CMD_CHECK:-0}" != 1 ]; then
+  if ! chroot "$mnt" /bin/sh -c \
+      'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v "$1" >/dev/null' \
+      sh "${CMD[0]}"; then
+    echo "ERROR: el comando '${CMD[0]}' no existe dentro de la imagen." >&2
+    echo "  Si el paquete instala su ejecutable con OTRO nombre, repite pasándolo" >&2
+    echo "  explícito tras --  (SKIP_CMD_CHECK=1 salta esta comprobación)." >&2
+    exit 1
+  fi
 fi
 
 [ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }

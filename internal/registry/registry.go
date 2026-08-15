@@ -190,10 +190,18 @@ func (c *Client) Get(ctx context.Context, name string, limit int) (*Server, []Se
 // es el mayoritario; un paquete que solo habla SSE o streamable-http tendría que
 // escuchar dentro del invitado con una configuración que el registro no
 // describe, así que fingir que lo soportamos daría un servicio que no arranca.
+//
+// De los tipos de registro se aceptan npm y pypi, que son los dos que el
+// empaquetado sabe preinstalar (npm install / pip install en la imagen). Si un
+// servidor publica en los dos, gana npm: su ejecutable se resuelve con certeza
+// (el campo `bin` del package.json), mientras que en PyPI se infiere por
+// convención — ver ResolvePyPIBin.
 func (s *Server) Stdio() (Package, bool) {
-	for _, p := range s.Packages {
-		if p.Transport.Type == "stdio" && p.RegistryType == "npm" {
-			return p, true
+	for _, want := range []string{"npm", "pypi"} {
+		for _, p := range s.Packages {
+			if p.Transport.Type == "stdio" && p.RegistryType == want {
+				return p, true
+			}
 		}
 	}
 	return Package{}, false

@@ -199,6 +199,49 @@ lo que se empaquetara por el camino cómodo caía sobre `min` y no ahorraba nada
 no engorda la capa (medido: 28 MiB contra 31) y así el flag vale con cualquier
 base, en vez de fallar con un `npm: not found` a mitad de construcción.
 
+## Familias de runtime y servidores de Python
+
+Las bases de familia se construyen POR NOMBRE, sin recordar listas de paquetes:
+
+    sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh node     # nodejs npm
+    sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh python   # python3 py3-pip
+
+El nombre no es cosmético: `kling add` sin `-base` busca en el daemon una base
+que se llame **como la familia del runtime del paquete** (`node`, `python`) y la
+usa sola; si no está, avisa de que la capa cargará con el runtime entero y dice
+qué construir. `-base` explícito sigue mandando (`-base min` fuerza la mínima).
+`TestFamiliasDeRuntimeCasanConElScriptDeBase` ata los nombres a los presets.
+
+Con eso, los servidores MCP de **PyPI** entran por el mismo camino que los de
+npm: `registry.Stdio()` acepta ambos tipos (npm gana si el servidor publica en
+los dos), el paquete se preinstala con `pip` (`-P`, con `--only-binary=:all:`
+por la misma razón que `--ignore-scripts` en npm) y la base elegida es `python`.
+Dos diferencias con npm que hay que conocer:
+
+- **El ejecutable se INFIERE, no se resuelve.** PyPI no publica los entry
+  points en su API JSON (el equivalente al campo `bin` vive dentro de la
+  rueda), así que se aplica la convención de uvx: ejecutable = nombre
+  normalizado (PEP 503) de la distribución. Los paquetes que no la siguen los
+  caza el propio build: `80-mcp-image.sh` comprueba con `chroot ... command -v`
+  que el comando exista dentro de la imagen y falla ANTES de importar, no en el
+  import como "el servidor no abrió el puerto".
+- **`kling add -env KEY=value`** hornea variables de entorno en el entrypoint
+  (en texto plano: para interruptores, no para secretos). Existía `-e` en el
+  script y ningún camino del CLI llegaba a él.
+
+### El caso que lo justifica: semgrep
+
+El `semgrep` que corre en producción NO trae semgrep dentro de la imagen: hace
+`pip install` al arrancar, cada arranque en frío paga la descarga y varios a la
+vez tiran la máquina por OOM. Reimportado por capas queda horneado y sin
+phone-home (que con el egress cerrado costaba ~2 min de timeout por arranque):
+
+    kling add semgrep \
+      -env SEMGREP_SEND_METRICS=off -env SEMGREP_ENABLE_VERSION_CHECK=0
+
+(la base `python` la encuentra sola si existe; las ruedas de semgrep pesan
+~400 MB, el GROW por defecto con `-P` ya lo contempla).
+
 ### El encogido de la capa nunca se ejecutaba
 
 Salió al empaquetar una calculadora con `kling add`: **451 MiB de capa para
@@ -281,7 +324,12 @@ Los dos que siguen monolíticos:
   importa, congela y responde `tools/call` por el gateway.
 - [x] El encogido de la capa, que no se ejecutaba nunca (451 MiB → 75 MiB).
 - [x] Reimportar el parque: los 7 servicios node, hechos y verificados (ver arriba).
-- [ ] Una base `python` — y con ella `semgrep`, que hoy ni siquiera trae semgrep
-  dentro: hace `pip install` al arrancar. En marcha en paralelo.
+- [x] Python de primera: familias de runtime con nombre en 70-build, `kling add`
+  para PyPI (base automática, pip, ejecutable por convención + comprobación en
+  el build, `-env`). Ver "Familias de runtime y servidores de Python".
+- [ ] Construir la base `python` en fc-test (`sudo ./70-build-minimal-image.sh
+  python`) y validar el camino PyPI de punta a punta con semgrep: build por
+  capas, import, thaw y `tools/call`. La `node` ya está.
 - [ ] `playwright`: 2.5 GiB con Chromium. Merece su propia base (`node` + las
   dependencias del navegador) y decidir si el navegador va en la base o en la capa.
+  Hoy además no arranca en fc-test por RAM.
