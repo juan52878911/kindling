@@ -89,7 +89,7 @@ func TestSinDatoDeDiscoElGCNoActua(t *testing.T) {
 	// aquí es el contrato de que -1 (no se sabe) no dispara nada. Se comprueba
 	// que la marca alta manda: por debajo de ella, gcDisk retorna sin mirar
 	// candidatos.
-	if pct := m.diskUsedPct(); pct >= 0 && pct < diskHighPct {
+	if pct := m.diskUsedPct(); pct >= 0 && pct < gcDiskHighPct() {
 		// Con el disco por debajo de la marca, no debe eliminar nada aunque
 		// haya candidatos.
 		m.mu.Lock()
@@ -102,5 +102,36 @@ func TestSinDatoDeDiscoElGCNoActua(t *testing.T) {
 		if !sigue {
 			t.Error("eliminó una instancia con el disco por debajo de la marca")
 		}
+	}
+}
+
+// Los umbrales del GC de disco son configurables por entorno, con defectos e
+// invariante target<high (el hueco evita expulsar en cada tick).
+func TestGCThresholdsFromEnv(t *testing.T) {
+	// Defectos sin entorno.
+	if h := gcDiskHighPct(); h != defaultDiskHighPct {
+		t.Errorf("high por defecto = %d, want %d", h, defaultDiskHighPct)
+	}
+	if tg := gcDiskTargetPct(defaultDiskHighPct); tg != defaultDiskTargetPct {
+		t.Errorf("target por defecto = %d, want %d", tg, defaultDiskTargetPct)
+	}
+	// Override válido.
+	t.Setenv("KLING_GC_DISK_HIGH", "95")
+	t.Setenv("KLING_GC_DISK_TARGET", "70")
+	if h := gcDiskHighPct(); h != 95 {
+		t.Errorf("high override = %d, want 95", h)
+	}
+	if tg := gcDiskTargetPct(95); tg != 70 {
+		t.Errorf("target override = %d, want 70", tg)
+	}
+	// Valor fuera de rango en high → defecto.
+	t.Setenv("KLING_GC_DISK_HIGH", "150")
+	if h := gcDiskHighPct(); h != defaultDiskHighPct {
+		t.Errorf("high fuera de rango = %d, want %d", h, defaultDiskHighPct)
+	}
+	// Invariante: target >= high se acota a high-1.
+	t.Setenv("KLING_GC_DISK_TARGET", "99")
+	if tg := gcDiskTargetPct(90); tg != 89 {
+		t.Errorf("target>=high se acota a %d, want 89", tg)
 	}
 }

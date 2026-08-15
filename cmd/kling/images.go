@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/juan52878911/kindling/internal/api"
 )
@@ -14,9 +17,11 @@ import (
 //	kling images refresh semgrep    solo en esa
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling images refresh [image...]")
+		return fmt.Errorf("usage: kling images [ls|refresh|toolchain|recipe]")
 	}
 	switch args[0] {
+	case "ls", "list":
+		return imagesList(args[1:])
 	case "refresh", "refresh-bridge":
 		return imagesRefresh(args[1:])
 	case "toolchain":
@@ -24,8 +29,49 @@ func cmdImages(args []string) error {
 	case "recipe":
 		return imagesRecipe(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use refresh, toolchain, or recipe", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, refresh, toolchain, or recipe", args[0])
 	}
+}
+
+// imagesList enumera las imágenes de rootfs construidas. USED BY cuenta los
+// snapshots dorados que salen de cada una: una imagen con 0 es candidata a
+// retirar; con >0, quitarla dejaría esos servicios sin base.
+func imagesList(args []string) error {
+	fs := flag.NewFlagSet("images ls", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	imgs, err := api.NewClient(hostOf(*host)).Images(ctx)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(imgs)
+	}
+	if len(imgs) == 0 {
+		fmt.Println("No images built yet. Package one:  kling add <server>")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tSIZE\tRECIPE\tUSED BY")
+	for _, img := range imgs {
+		recipe := "no"
+		if img.HasRecipe {
+			recipe = "yes"
+		}
+		used := "—"
+		if img.UsedBy > 0 {
+			used = fmt.Sprintf("%d snapshot(s)", img.UsedBy)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", img.Name, human(img.SizeBytes), recipe, used)
+	}
+	return tw.Flush()
 }
 
 // imagesRefresh reemplaza el puente dentro de las imágenes.
@@ -38,7 +84,7 @@ func cmdImages(args []string) error {
 func imagesRefresh(args []string) error {
 	fs := flag.NewFlagSet("images refresh", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -111,7 +157,7 @@ func imagesToolchain(args []string) error {
 	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
 	host := hostFlag(fs)
 	name := fs.String("as", ToolchainImage, "image name")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -153,7 +199,7 @@ func imagesToolchain(args []string) error {
 func imagesRecipe(args []string) error {
 	fs := flag.NewFlagSet("images recipe", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {

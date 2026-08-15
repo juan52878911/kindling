@@ -19,19 +19,51 @@ package machine
 import (
 	"context"
 	"log"
+	"os"
 	"sort"
+	"strconv"
 	"syscall"
 
 	"github.com/juan52878911/kindling/internal/api"
 )
 
 const (
-	// diskHighPct: por encima, se empieza a recuperar espacio.
-	diskHighPct = 90
-	// diskTargetPct: se recupera hasta bajar aquí. El hueco entre las dos evita
-	// expulsar en cada tick por un fichero temporal que sube y baja.
-	diskTargetPct = 80
+	// defaultDiskHighPct: por encima, se empieza a recuperar espacio.
+	defaultDiskHighPct = 90
+	// defaultDiskTargetPct: se recupera hasta bajar aquí. El hueco entre las dos
+	// evita expulsar en cada tick por un fichero temporal que sube y baja.
+	defaultDiskTargetPct = 80
 )
+
+// gcDiskHighPct es el umbral por encima del cual empieza la recuperación de
+// disco. Ajustable con KLING_GC_DISK_HIGH (1-100), en la línea del resto de
+// knobs del daemon (KLING_MAX_PARALLEL_BOOT, KLING_MIN_FREE_MIB…). Un valor
+// fuera de rango se ignora y se usa el defecto.
+func gcDiskHighPct() int {
+	if v := os.Getenv("KLING_GC_DISK_HIGH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 100 {
+			return n
+		}
+	}
+	return defaultDiskHighPct
+}
+
+// gcDiskTargetPct es hasta dónde se recupera. Ajustable con KLING_GC_DISK_TARGET.
+// Debe quedar por DEBAJO de la marca alta: el hueco es lo que evita expulsar en
+// cada tick. Si el valor dado no respeta esa invariante, se acota a high-1, que
+// es lo mínimo que sigue teniendo sentido.
+func gcDiskTargetPct(high int) int {
+	target := defaultDiskTargetPct
+	if v := os.Getenv("KLING_GC_DISK_TARGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			target = n
+		}
+	}
+	if target >= high {
+		target = high - 1
+	}
+	return target
+}
 
 // diskUsedPct devuelve el porcentaje de disco usado en la raíz de datos, o -1 si
 // no se puede saber (en cuyo caso quien llama no debe hacer nada: mejor no
@@ -56,8 +88,10 @@ func (m *Manager) diskUsedPct() int {
 // eliminan de más antigua a más nueva: la que lleva más tiempo dormida es la que
 // menos probable es que se pida pronto.
 func (m *Manager) gcDisk(ctx context.Context) {
+	high := gcDiskHighPct()
+	target := gcDiskTargetPct(high)
 	pct := m.diskUsedPct()
-	if pct < diskHighPct {
+	if pct < high {
 		return
 	}
 
@@ -89,7 +123,7 @@ func (m *Manager) gcDisk(ctx context.Context) {
 	sort.Slice(cands, func(i, j int) bool { return cands[i].since < cands[j].since })
 
 	for _, c := range cands {
-		if m.diskUsedPct() < diskTargetPct {
+		if m.diskUsedPct() < target {
 			return
 		}
 		if err := m.Remove(c.id); err != nil {
@@ -100,7 +134,7 @@ func (m *Manager) gcDisk(ctx context.Context) {
 			m.diskUsedPct(), c.name, c.name)
 	}
 
-	if p := m.diskUsedPct(); p >= diskHighPct {
+	if p := m.diskUsedPct(); p >= high {
 		// Se hizo lo que se pudo y sigue lleno: hay que decirlo, porque el
 		// siguiente síntoma será un arranque que falla por disco y no por esto.
 		log.Printf("gc: disk still at %d%% after recovering what could be recovered; "+

@@ -234,7 +234,7 @@ func mcpVerify(args []string) error {
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
 	settle := fs.Duration("settle", 90*time.Second, "how long to watch the console after exercising the tools (installs take a while to fail)")
 	keep := fs.Bool("keep", false, "don't destroy the test microVM when done")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {

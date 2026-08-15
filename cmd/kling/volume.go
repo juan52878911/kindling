@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -39,7 +40,7 @@ func volumeCreate(args []string) error {
 	fs := flag.NewFlagSet("volume create", flag.ExitOnError)
 	host := hostFlag(fs)
 	size := fs.String("size", "1G", "logical size: 512M, 2G, 10G")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -69,7 +70,8 @@ func volumeCreate(args []string) error {
 func volumeList(args []string) error {
 	fs := flag.NewFlagSet("volume ls", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -78,6 +80,9 @@ func volumeList(args []string) error {
 	vols, err := api.NewClient(hostOf(*host)).Volumes(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(vols)
 	}
 	if len(vols) == 0 {
 		fmt.Println("No volumes. Create one:  kling volume create notes -size 2G")
@@ -98,7 +103,7 @@ func volumeList(args []string) error {
 func volumeRemove(args []string) error {
 	fs := flag.NewFlagSet("volume rm", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -163,7 +168,7 @@ func volumePopulate(args []string) error {
 			break
 		}
 	}
-	if err := fs.Parse(reorder(nuestros)); err != nil {
+	if err := fs.Parse(reorderFor(fs, nuestros)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || len(cmd) == 0 {

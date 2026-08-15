@@ -100,7 +100,7 @@ func contextAdd(args []string) error {
 	// El paquete flag deja de parsear en el primer argumento posicional, así que
 	// `context add lab ssh://... -description X` perdería el flag en silencio.
 	// Se separan a mano para que el orden no importe.
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -156,16 +156,41 @@ func contextRemove(args []string) error {
 	return nil
 }
 
-// reorder pone los flags delante de los posicionales.
-func reorder(args []string) []string {
+// reorderFor mueve los flags delante de los posicionales para que un flag escrito
+// DESPUÉS de un argumento posicional no se ignore en silencio (el paquete `flag`
+// de Go deja de parsear al primer no-flag). Es la versión correcta de reorder:
+//   - Consulta el flagset para saber qué flags son booleanos (y por tanto NO se
+//     llevan el siguiente argumento), en vez de una lista hardcodeada.
+//   - Se detiene en `--`: todo lo que sigue es el comando del servidor y se deja
+//     intacto, sin reordenar.
+//
+// Los flags SÍ deben estar definidos en fs antes de llamar aquí (lo están: se
+// define todo y luego se parsea).
+func reorderFor(fs *flag.FlagSet, args []string) []string {
+	isBool := func(a string) bool {
+		name := strings.TrimLeft(a, "-")
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			return false
+		}
+		bf, ok := f.Value.(interface{ IsBoolFlag() bool })
+		return ok && bf.IsBoolFlag()
+	}
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			// Fin de las opciones: el resto es el comando del servidor.
+			out := append(flags, positional...)
+			return append(out, args[i:]...)
+		}
 		if len(a) > 1 && a[0] == '-' {
 			flags = append(flags, a)
-			// Un flag con valor separado se lleva el siguiente argumento.
 			if !strings.Contains(a, "=") && i+1 < len(args) &&
-				(len(args[i+1]) == 0 || args[i+1][0] != '-') && !isBoolFlag(a) {
+				(len(args[i+1]) == 0 || args[i+1][0] != '-') && !isBool(a) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -174,16 +199,6 @@ func reorder(args []string) []string {
 		positional = append(positional, a)
 	}
 	return append(flags, positional...)
-}
-
-// isBoolFlag lista los flags que no llevan valor, para no tragarse el siguiente
-// argumento al reordenar.
-func isBoolFlag(f string) bool {
-	switch strings.TrimLeft(f, "-") {
-	case "use", "no-use", "all", "expand":
-		return true
-	}
-	return false
 }
 
 // ── configuración general ─────────────────────────────────────────────────────

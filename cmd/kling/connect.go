@@ -34,7 +34,7 @@ func cmdConnect(args []string) error {
 	only := fs.String("only", "", "with -all: limit to these services, comma-separated")
 	expand := fs.Bool("expand", false, "with -all: load the full catalog instead of meta-tools")
 	tokenFlag := fs.String("token", "", "gateway token (default: gateway.token)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
