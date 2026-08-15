@@ -71,7 +71,8 @@ func mcpImport(args []string) error {
 	// las instancias nacen de él, y sin fijarlo aquí toda restauración caía al 50 %
 	// del daemon. En Mac ese estrangulamiento a media vCPU dobla el arranque en frío
 	// de node (16 s → 6.9 s al 100 %), así que subirlo es la palanca directa allí.
-	cpu := fs.Int("cpu", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	cpuPct := fs.Int("cpu-pct", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
 	egress := fs.String("egress", "", "service network egress: none | internet | allowlist")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	var volumes volumeFlag
@@ -85,7 +86,7 @@ func mcpImport(args []string) error {
 	ephemeral := fs.Bool("ephemeral", false, "force ephemeral machines even if the analysis says otherwise")
 	allowRuntimeInstall := fs.Bool("allow-runtime-install", false,
 		"import even if the server installs dependencies at runtime (not recommended: bake them into the image)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	importVols, err := volumeSet(volumes, *mount, *volRO)
@@ -196,7 +197,7 @@ func mcpImport(args []string) error {
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		// Techo de CPU: se graba en el snapshot (Commit copia mc.CPUPct) para que la
 		// restauración no caiga al 50 % del daemon. 0 = deja decidir al daemon.
-		CPUPct: config.Or(*cpu, cfg.Defaults.CPUPct),
+		CPUPct: config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Egress: egr,
 		// Se graban en el snapshot dorado: las instancias nacen de él y sin esto
 		// despertarían con la lista vacía. Solo se usan si egr == "allowlist".
@@ -395,16 +396,27 @@ func mcpList(args []string) error {
 	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
 	host := hostFlag(fs)
 	verbose := fs.Bool("v", false, "show each tool")
-	if err := fs.Parse(args); err != nil {
+	asJSON := fs.Bool("json", false, "JSON output (services + external, with tools)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	snaps, err := api.NewClient(hostOf(*host)).Snapshots(ctx)
+	c := api.NewClient(hostOf(*host))
+	snaps, err := c.Snapshots(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		// Los links (servicios externos) también son servicios MCP: se emiten
+		// aparte para que un consumidor distinga microVM de puente externo.
+		links, _ := c.Links(ctx)
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"services": snaps,
+			"external": links,
+		})
 	}
 	if len(snaps) == 0 {
 		fmt.Println("No services. Import one:  kling mcp import <name> -image <image>")
@@ -430,7 +442,7 @@ func mcpList(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	links, _ := api.NewClient(hostOf(*host)).Links(ctx)
+	links, _ := c.Links(ctx)
 	for _, l := range links {
 		total += len(l.Tools)
 		fmt.Printf("%-12s %-14d %-11s %-13s %-9s external: %s\n",
@@ -461,7 +473,7 @@ func mcpList(args []string) error {
 func mcpRefresh(args []string) error {
 	fs := flag.NewFlagSet("mcp refresh", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -519,7 +531,7 @@ func mcpHealth(args []string) error {
 	fs := flag.NewFlagSet("mcp health", flag.ExitOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -638,7 +650,7 @@ func mcpLink(args []string) error {
 	desc := fs.String("description", "", "what it's for")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -693,7 +705,7 @@ func mcpLink(args []string) error {
 func mcpUnlink(args []string) error {
 	fs := flag.NewFlagSet("mcp unlink", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {

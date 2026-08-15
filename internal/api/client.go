@@ -139,6 +139,12 @@ func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildIma
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
+// Images lista las imágenes de rootfs construidas en el daemon.
+func (c *Client) Images(ctx context.Context) ([]Image, error) {
+	var l []Image
+	return l, c.do(ctx, http.MethodGet, "/images", nil, &l)
+}
+
 // ImageRecipe devuelve cómo se construyó una imagen.
 func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, error) {
 	var rec ImageRecipe

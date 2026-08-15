@@ -30,7 +30,7 @@ func cmdSearch(args []string) error {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	limit := fs.Int("n", 20, "how many results")
 	fresh := fs.Bool("refresh", false, "ignore the cache")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
@@ -82,7 +82,7 @@ func cmdAdd(args []string) error {
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: shareable between services")
 	fresh := fs.Bool("refresh", false, "ignore the registry cache")
 	bundle := fs.Bool("bundle", false, "bundle the node server into 1 file (esbuild) when building: starts much faster on cold start, especially on arm64/Mac")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
