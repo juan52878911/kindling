@@ -166,6 +166,66 @@ func TestLayerGuestPath(t *testing.T) {
 	}
 }
 
+// Images() lista una imagen por capas UNA vez y con su nombre, no como
+// "files.layer": el sufijo largo también acaba en .ext4.
+func TestImagesListaCapas(t *testing.T) {
+	m := layerFixture(t, map[string]string{
+		"min.ext4":              "b",
+		"files.layer.ext4":      "y",
+		"legacy.ext4":           "x",
+		"overlay-template.ext4": "molde",
+		"vmlinux":               "kernel",
+	})
+	got := m.Images()
+	want := []string{"files", "legacy", "min"}
+	if len(got) != len(want) {
+		t.Fatalf("Images() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Images() = %v, want %v", got, want)
+		}
+	}
+}
+
+// Una máquina por capas retiene su capa Y la base: reescribir la base mientras
+// corre le corrompería el sistema de ficheros por debajo.
+func TestImageUsersRetieneLaBase(t *testing.T) {
+	m := layerFixture(t, map[string]string{
+		"min.ext4":          "b",
+		"files.layer.ext4":  "y",
+		"files.recipe.json": `{"name":"files","base":"min"}`,
+	})
+	m.byID = map[string]*api.Machine{
+		"a": {ID: "a", Name: "files-1", Image: "files", State: api.StateRunning},
+		// Una parada no retiene nada: ya no lee de la imagen.
+		"b": {ID: "b", Name: "files-2", Image: "files", State: api.StateStopped},
+	}
+	users := m.imageUsers()
+	if len(users["files"]) != 1 {
+		t.Errorf("users[files] = %v, want 1", users["files"])
+	}
+	if len(users["min"]) != 1 {
+		t.Errorf("users[min] = %v: la base tiene que quedar retenida por la capa viva", users["min"])
+	}
+}
+
+// ImageFile es lo que se mide y lo que se enseña como ruta: de una imagen por
+// capas, su capa.
+func TestImageFile(t *testing.T) {
+	m := layerFixture(t, map[string]string{
+		"min.ext4":         "b",
+		"files.layer.ext4": "y",
+		"legacy.ext4":      "x",
+	})
+	if got := m.ImageFile("files"); got != m.layerPath("files") {
+		t.Errorf("ImageFile(files) = %q, want la capa", got)
+	}
+	if got := m.ImageFile("legacy"); got != m.imagePath("legacy") {
+		t.Errorf("ImageFile(legacy) = %q, want el ext4 monolítico", got)
+	}
+}
+
 // Los dos extremos del contrato están en lenguajes distintos: el anfitrión
 // escribe kling.layer= en Go y el invitado lo lee en sh. Renombrar la constante
 // no toca los scripts, y el fallo se vería como un invitado sin /entrypoint —un

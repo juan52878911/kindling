@@ -59,19 +59,47 @@ func imagesList(args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tLOGICAL\tON DISK\tRECIPE\tUSED BY")
+	fmt.Fprintln(tw, "NAME\tBASE\tLOGICAL\tON DISK\tRECIPE\tUSED BY")
+	var total int64
+	var porCapas bool
 	for _, img := range imgs {
 		recipe := "no"
 		if img.HasRecipe {
 			recipe = "yes"
 		}
-		used := "—"
+		// Las dos formas de estar en uso: snapshots que salieron de aquí, y capas
+		// que se apoyan encima. Se dicen las dos porque se retiran distinto.
+		var usos []string
 		if img.UsedBy > 0 {
-			used = fmt.Sprintf("%d snapshot(s)", img.UsedBy)
+			usos = append(usos, fmt.Sprintf("%d snapshot(s)", img.UsedBy))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", img.Name, human(img.SizeBytes), human(img.DiskBytes), recipe, used)
+		if img.Layers > 0 {
+			usos = append(usos, fmt.Sprintf("%d layer(s)", img.Layers))
+		}
+		used := "—"
+		if len(usos) > 0 {
+			used = strings.Join(usos, ", ")
+		}
+		base := "—"
+		if img.Base != "" {
+			base, porCapas = img.Base, true
+		}
+		total += img.DiskBytes
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", img.Name, base,
+			human(img.SizeBytes), human(img.DiskBytes), recipe, used)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// El total es la cifra que justifica las capas, y no es la suma de lo que
+	// ocupa cada servicio "completo": la base aparece UNA vez y cada capa cuesta
+	// solo su delta. Sin esta línea hay que sumarlo a mano para verlo.
+	fmt.Printf("\nTotal on disk: %s across %d image(s)", human(total), len(imgs))
+	if porCapas {
+		fmt.Print(" — each base counted once, shared by its layers")
+	}
+	fmt.Println(".")
+	return nil
 }
 
 // imagesRefresh reemplaza el puente dentro de las imágenes.

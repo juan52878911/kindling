@@ -216,8 +216,11 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, api.BuildImageResult{
-		Name:   req.Name,
-		Path:   filepath.Join(s.root, "images", req.Name+".ext4"),
+		Name: req.Name,
+		// ImageFile y no el .ext4 a pelo: una construcción por capas deja
+		// $NAME.layer.ext4, y devolver una ruta que no existe convierte el "✓" en
+		// una pista falsa para quien vaya a mirarla.
+		Path:   s.mgr.ImageFile(req.Name),
 		Output: out.String(),
 	})
 }
@@ -290,16 +293,37 @@ func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 // disco, si se guardó su receta y cuántos snapshots dorados salieron de cada
 // una. Ese último dato es el que dice qué imagen se puede retirar sin dejar
 // servicios sin base.
+//
+// Con imágenes por capas hay una segunda forma de estar en uso: ser la BASE de
+// otras. Se cuenta aparte de los snapshots porque significa otra cosa —quitar
+// una base se lleva por delante servicios que solo guardan su delta— y porque el
+// tamaño que se enseña de cada capa es el suyo, sin la base, que es compartida.
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	usedBy := map[string]int{}
 	for _, snap := range s.mgr.Snapshots() {
 		usedBy[snap.Image]++
 	}
 	names := s.mgr.Images()
+
+	// Primera pasada: quién se apoya en quién. Una base con capas encima no se
+	// puede retirar aunque no tenga snapshots propios, y eso hay que poder verlo
+	// ANTES de borrar nada.
+	base := map[string]string{}
+	layers := map[string]int{}
+	for _, name := range names {
+		if b, ok := s.mgr.ImageBase(name); ok {
+			base[name] = b
+			layers[b]++
+		}
+	}
+
 	out := make([]api.Image, 0, len(names))
 	for _, name := range names {
-		img := api.Image{Name: name, UsedBy: usedBy[name]}
-		if fi, err := os.Stat(filepath.Join(s.root, "images", name+".ext4")); err == nil {
+		img := api.Image{Name: name, UsedBy: usedBy[name],
+			Base: base[name], Layers: layers[name]}
+		// El fichero que se mide es el de la imagen: su capa si va por capas, el
+		// ext4 entero si es monolítica.
+		if fi, err := os.Stat(s.mgr.ImageFile(name)); err == nil {
 			// Tamaño lógico y, aparte, el REALMENTE asignado en disco (bloques ×
 			// 512): con ext4 disperso difieren, y solo el segundo dice cuánto se
 			// recupera al borrar.

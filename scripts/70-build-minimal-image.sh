@@ -15,6 +15,7 @@ ROOT="${KLING_ROOT:-/var/lib/kindling}"
 SIZE="${SIZE:-256M}"
 PKGS="${PKGS:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+BRIDGE="${BRIDGE:-./kling-bridge}"
 
 [ "$(id -u)" -eq 0 ] || { echo "ejecútalo como root" >&2; exit 1; }
 for c in curl mkfs.ext4; do
@@ -63,6 +64,26 @@ fi
 
 install -m755 "$HERE/minimal-init.sh" "$mnt/sbin/overlay-init"
 mkdir -p "$mnt/overlay" "$mnt/rom" "$mnt/run"
+
+# EL PUENTE, EN LA BASE.
+#
+# El puente es el PID 1 de los servicios stdio y hasta ahora viajaba dentro de
+# cada imagen: actualizarlo eran N ficheros, uno por servicio, y cada uno exigía
+# montar su ext4. Horneado aquí es UNO —`kling images refresh min`— y todas las
+# capas que se apoyen en esta base lo heredan sin tocarlas.
+#
+# 80-mcp-image.sh sigue metiéndolo en la capa cuando el binario que trae la base
+# no es el mismo, así que una base sin puente (o con otro) no rompe nada: la
+# imagen del servicio se queda con el suyo, que gana por estar en la lower de
+# delante.
+if [ -f "$BRIDGE" ]; then
+  # -D: el rootfs mínimo puede no traer /usr/local/bin, e install no crea padres.
+  install -Dm755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+  echo "puente horneado en la base desde $BRIDGE"
+else
+  echo "aviso: sin puente en $BRIDGE — cada imagen de servicio llevará el suyo"
+  echo "       (compílalo con 'make bridge' y repite para ahorrarte N copias)"
+fi
 
 umount "$mnt"
 e2fsck -fp "$DEST" >/dev/null 2>&1 || true

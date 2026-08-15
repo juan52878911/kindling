@@ -95,20 +95,45 @@ pone en `kling.layer`.
   hay, con la base de respaldo: si no, un servicio por capas con volumen se
   rechazaría por "no lleva puente" llevándolo.
 
-### 4. `internal/machine/snapshot.go` (Stage 3 — snapshot/thaw)
-- `api.Snapshot`: nuevo campo `Layer string` (nombre de la capa) junto a `Image`
-  (que pasa a ser la base).
-- `Commit`: no copia nada (la capa es ro compartida, como la base); graba la ruta.
-- `runFrom`/thaw: replicar el drive de la capa en el jail (toLink ~l.1349) y
-  re-pasar `kling.layer=` en la cmdline. Los snapshots viejos (sin `Layer`) siguen
-  el camino de 2 discos: back-compat por presencia de campo.
+### 4. `internal/machine/snapshot.go` (Stage 3 — snapshot/thaw) ✅
+- `Commit`: **cero cambios**. La capa es ro compartida como la base, así que no se
+  copia; y el conjunto de discos ya queda grabado por Firecracker.
+- `runFrom`/thaw: replicar el drive de la capa en el jail. Y ya está.
+- **Sin campo `Layer` en el meta, y sin re-pasar `kling.layer=`.** El plan preveía
+  las dos cosas; ninguna hace falta, y añadirlas habría sido estado de más:
+  - La línea de comandos del kernel se congeló DENTRO de la memoria. Una VM
+    restaurada no admite una cmdline nueva —ni discos nuevos—: despierta con la
+    capa ya montada en su tabla de montajes. Lo único que hay que garantizar es
+    que el fichero siga en la ruta que el snapshot grabó, y eso es el enlace.
+  - La capa se resuelve del nombre de la imagen (`imageLayer(snap.Image)`), igual
+    que la base. Guardarlo aparte habría cambiado el significado de `Image` —que
+    hoy es el nombre del SERVICIO, y de ahí sale el conteo `usedBy`— sin comprar
+    nada. Los snapshots viejos siguen valiendo sin tocar su meta.
 
-### 5. `internal/daemon/images.go` + `bridge.go` (Stage 4 — accounting/bridge)
-- `handleImages`/`Images()`: listar imágenes por capas (existe `.layer.ext4`),
-  sumar tamaño base compartida aparte. Proteger la base de borrado si hay capas
-  que la referencian (extender el conteo `usedBy`).
-- Bonus: hornear el bridge en la BASE → `RefreshBridges` actualiza 1 fichero en
-  vez de N. `imageHasBridge` consulta base+capa.
+### 5. `internal/daemon/images.go` + `bridge.go` (Stage 4 — accounting/bridge) ✅
+- `Images()`: recorta `.layer.ext4` ANTES que `.ext4` — el sufijo largo también
+  casa con el corto, y sin ese orden aparecía una imagen fantasma `files.layer`.
+- `handleImages`: `api.Image` gana `Base` (sobre qué se apoya) y `Layers` (cuántas
+  se apoyan en ella). Los tamaños de una imagen por capas miden LA CAPA: la base
+  no es suya, y sumársela a cada una haría creer que el disco está N veces más
+  lleno de lo que está. `kling images ls` añade columna BASE y un total al pie —la
+  cifra que justifica todo esto, con cada base contada UNA vez—.
+- Protección de la base: no hay endpoint de borrado (las imágenes se quitan a mano
+  del host), así que la protección es lo que `images ls` enseña antes del `rm`:
+  una base con capas encima sale con `N layer(s)` en USED BY aunque no tenga
+  snapshots propios.
+- `imageUsers()`: una máquina por capas retiene su capa **y la base**. Sin eso,
+  `images refresh` reescribiría la base bajo un servicio vivo — la corrupción que
+  esa cuenta existe para impedir.
+- `RefreshBridges`: en una imagen por capas toca la CAPA (el puente está en
+  `/upper/...`), nunca la base, que es de otros.
+- **Bonus hecho — el puente, horneado en la base.** `70-build-minimal-image.sh` lo
+  instala en la base, y `80-mcp-image.sh` (`install_bridge`) NO lo copia a la capa
+  si el binario que ya se ve es idéntico. Así actualizarlo son ~8 MiB menos por
+  servicio y **un** fichero (`kling images refresh min`) en vez de N. Una capa sin
+  puente propio no se reporta como "no es una imagen de servicio" sino como *"its
+  bridge comes from base X"*. Si la base no lo trae, la capa se lleva el suyo y
+  todo sigue igual: lo que está en la capa gana por ir de lower delante.
 
 ## Back-compat y migración
 - Imágenes monolíticas existentes: `$NAME.ext4` presente → camino legacy de 2
@@ -134,7 +159,12 @@ pone en `kling.layer`.
 ## Estado
 - [x] Mecanismo OCI (delta-como-lower + whiteout) validado en el kernel de fc-test.
 - [x] Decisión de numeración de discos (capa por cmdline `kling.layer`, como `kling.volume`).
-- [ ] Stage 1 — build script.
-- [x] Stage 2 — overlay-init + manager boot (código; falta la prueba en fc-test).
-- [ ] Stage 3 — snapshot/thaw.
-- [ ] Stage 4 — accounting + bridge en base.
+- [x] Stage 1 — build script.
+- [x] Stage 2 — overlay-init + manager boot.
+- [x] Stage 3 — snapshot/thaw.
+- [x] Stage 4 — accounting + bridge en base.
+- [ ] **Validación en fc-test**: el código está completo y los tests de unidad
+  pasan, pero NADA de esto se ha ejecutado todavía sobre Firecracker de verdad.
+  El plan de pruebas de arriba (1-5) sigue pendiente entero, y el paso previo es
+  reconstruir la base para que su init entienda `kling.layer`:
+  `sudo BRIDGE=$(pwd)/kling-bridge ./scripts/70-build-minimal-image.sh min`

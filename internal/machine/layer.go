@@ -82,6 +82,31 @@ func (m *Manager) imageLayer(image string) (base, layer string, err error) {
 	return base, layer, nil
 }
 
+// ImageBase dice si una imagen va por capas y sobre qué base se apoya.
+//
+// Para contabilidad, no para arrancar: devuelve el NOMBRE de la base aunque el
+// fichero no esté, que es justo lo que hay que poder enseñar —una capa cuya base
+// falta es lo que hay que ver en `images ls`, no un hueco—.
+func (m *Manager) ImageBase(image string) (string, bool) {
+	if _, err := os.Stat(m.imagePath(image)); err == nil {
+		return "", false
+	}
+	if _, err := os.Stat(m.layerPath(image)); err != nil {
+		return "", false
+	}
+	return m.recipeBase(image), true
+}
+
+// ImageFile es el fichero que representa una imagen en disco: su capa si va por
+// capas, y si no el ext4 monolítico. Es lo que hay que medir para saber lo que
+// CUESTA de verdad, porque la base no es suya: se comparte.
+func (m *Manager) ImageFile(image string) string {
+	if _, ok := m.ImageBase(image); ok {
+		return m.layerPath(image)
+	}
+	return m.imagePath(image)
+}
+
 // recipeBase lee de la receta sobre qué base se construyó la imagen.
 //
 // Sin receta —o con una ilegible— se asume la base por defecto: es la que usó el

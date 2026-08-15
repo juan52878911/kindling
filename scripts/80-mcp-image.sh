@@ -190,6 +190,26 @@ cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; 
 trap cleanup EXIT
 ov_up
 
+# install_bridge deja el puente donde el entrypoint lo invoca, pero SIN escribirlo
+# en la capa cuando la base ya trae ese mismo binario.
+#
+# Copiarlo igualmente funcionaría —el overlay lo pondría en el upper— pero son
+# ~8 MiB de delta por servicio para acabar con una copia byte a byte de algo que
+# ya está en la lower de debajo. Y sobre todo: si no está en la capa, actualizar
+# el puente de TODOS los servicios por capas es un solo fichero (la base) en vez
+# de N. Ver RefreshBridges.
+#
+# Si la base no lo trae, o trae otro, se copia: la imagen del servicio tiene que
+# ser correcta por sí misma, y lo que esté en la capa gana por ir de lower
+# delante.
+install_bridge() {
+  if cmp -s "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"; then
+    echo "puente: ya viene en la base '$BASE', no se duplica en la capa"
+    return 0
+  fi
+  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+}
+
 [ -n "$EXTRA_DIR" ] && cp -a "$EXTRA_DIR"/. "$mnt"/
 
 if [ -n "$PKGS" ]; then
@@ -508,7 +528,7 @@ if [ -n "$PIP" ]; then
 fi
 
 if [ "$MODE" = "stdio" ]; then
-  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+  install_bridge
   # El entrypoint es PID 1 de la microVM: si muere, el kernel entra en pánico.
   # `exec` evita dejar un shell intermedio que no aporta nada.
   {
@@ -538,7 +558,7 @@ elif [ "$HTTP_PROXY" = 1 ]; then
   # sesiones, así que NO hay el aislamiento proceso-por-sesión que sí da el modo
   # stdio. Si el servidor mezclara estado entre sesiones, el puente ya no lo
   # impediría. Es el precio de correr un servidor HTTP multi-sesión tal cual.
-  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+  install_bridge
   # Marcador que lee el puente al arrancar para entrar en modo proxy.
   mkdir -p "$mnt/etc/kling"
   cat > "$mnt/etc/kling/service.json" <<SJSON

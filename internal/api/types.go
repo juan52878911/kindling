@@ -210,10 +210,26 @@ type Image struct {
 	// SizeBytes es el tamaño LÓGICO del .ext4; DiskBytes lo REALMENTE asignado en
 	// disco (bloques × 512). Con ficheros dispersos difieren, así que el lógico
 	// solo no dice cuánto se recupera al borrar. Mismo par que Volume.
+	//
+	// En una imagen por capas miden LA CAPA, no la suma con la base: la base no
+	// es suya, se comparte con todas las demás, y sumársela a cada una haría creer
+	// que el disco está N veces más lleno de lo que está. Lo que cuesta este
+	// servicio, y lo que se recupera al borrarlo, es su capa.
 	SizeBytes int64 `json:"size_bytes"`
 	DiskBytes int64 `json:"disk_bytes"`
 	HasRecipe bool  `json:"has_recipe"` // se guardó cómo se construyó
 	UsedBy    int   `json:"used_by"`    // snapshots dorados que salieron de aquí
+
+	// Base es la imagen sobre la que se apoya, si va por capas. Vacío =
+	// monolítica, que es como se construía todo antes.
+	Base string `json:"base,omitempty"`
+
+	// Layers cuenta las imágenes por capas que usan ESTA como base.
+	//
+	// Es lo que dice si se puede retirar: una base con capas encima no se puede
+	// borrar aunque no tenga snapshots propios — se llevaría por delante todos
+	// esos servicios, que solo guardan su delta.
+	Layers int `json:"layers,omitempty"`
 }
 
 // Volume es almacenamiento que sobrevive a la microVM que lo usa.

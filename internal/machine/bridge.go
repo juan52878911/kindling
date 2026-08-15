@@ -39,19 +39,36 @@ var errNoBridge = errors.New("has no bridge: not a service image")
 const guestBridgePath = "usr/local/bin/kling-bridge"
 
 // Images lista las imágenes de rootfs disponibles.
+//
+// Una imagen por capas se llama igual que una monolítica: lo que cambia es el
+// fichero que la representa ($NAME.layer.ext4). Se recorta el sufijo largo
+// PRIMERO, porque el corto también casa y dejaría "files.layer" como si fuera
+// una imagen aparte.
 func (m *Manager) Images() []string {
 	entries, err := os.ReadDir(filepath.Join(m.root, "images"))
 	if err != nil {
 		return nil
 	}
-	var out []string
+	vistas := map[string]bool{}
 	for _, e := range entries {
-		name, ok := strings.CutSuffix(e.Name(), ".ext4")
-		// overlay-template no es una imagen de rootfs: es el molde vacío del
-		// disco de escritura de cada máquina, y no lleva puente dentro.
-		if !ok || e.IsDir() || name == "overlay-template" {
+		if e.IsDir() {
 			continue
 		}
+		name, ok := strings.CutSuffix(e.Name(), ".layer.ext4")
+		if !ok {
+			if name, ok = strings.CutSuffix(e.Name(), ".ext4"); !ok {
+				continue
+			}
+		}
+		// overlay-template no es una imagen de rootfs: es el molde vacío del
+		// disco de escritura de cada máquina, y no lleva puente dentro.
+		if name == "overlay-template" {
+			continue
+		}
+		vistas[name] = true
+	}
+	out := make([]string, 0, len(vistas))
+	for name := range vistas {
 		out = append(out, name)
 	}
 	sort.Strings(out)
@@ -85,7 +102,14 @@ func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []str
 	out := make([]api.BridgeRefresh, 0, len(names))
 	for _, name := range names {
 		fila := api.BridgeRefresh{Image: name}
-		path := m.imagePath(name)
+		// Con una imagen por capas se toca la CAPA, no la base: el puente lo puso
+		// ahí el build, y la base es de otros —reescribirla desde aquí cambiaría
+		// bajo los pies de todos los servicios que se apoyan en ella—.
+		base, layered := m.ImageBase(name)
+		path, dentro := m.imagePath(name), "/"+guestBridgePath
+		if layered {
+			path, dentro = m.layerPath(name), layerGuestPath(guestBridgePath)
+		}
 		if _, err := os.Stat(path); err != nil {
 			fila.Error = "does not exist"
 			out = append(out, fila)
@@ -97,8 +121,14 @@ func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []str
 			out = append(out, fila)
 			continue
 		}
-		actualizada, err := m.refreshOne(ctx, path, bridge, quiero)
+		actualizada, err := m.refreshOne(ctx, path, dentro, bridge, quiero)
 		switch {
+		case errors.Is(err, errNoBridge) && layered:
+			// Una capa sin puente NO es "no es una imagen de servicio": es un
+			// servicio cuyo puente vive en la base, que es donde hay que
+			// actualizarlo — y se actualiza una vez para todos.
+			fila.Skipped = true
+			fila.Error = fmt.Sprintf("its bridge comes from base %q; refresh that one", base)
 		case errors.Is(err, errNoBridge):
 			// Ni actualizada ni fallida: no aplica. Se informa igualmente para
 			// que no parezca que se olvidó.
@@ -117,25 +147,45 @@ func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []str
 //
 // Cuentan también las warm: al descongelarse vuelven a leer de la imagen base,
 // que además está mapeada en el snapshot de memoria.
+//
+// Una máquina por capas cuenta como usuaria de DOS imágenes: su capa y la base
+// sobre la que se apoya. Sin lo segundo, tocar la base mientras corre un servicio
+// por capas le corrompería el sistema de ficheros por debajo — que es
+// exactamente lo que esta cuenta existe para impedir.
 func (m *Manager) imageUsers() map[string][]string {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := map[string][]string{}
+	vivas := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		if mc.Image == "" || mc.State == api.StateStopped || mc.State == api.StateFailed {
 			continue
 		}
+		vivas = append(vivas, mc)
+	}
+	m.mu.RUnlock()
+
+	// La resolución toca disco (stat de la capa, lectura de la receta), así que
+	// va FUERA del candado: m.mu protege el mapa de máquinas, y sostenerlo
+	// mientras se lee el disco bloquea a List() y a persist().
+	out := map[string][]string{}
+	for _, mc := range vivas {
 		out[mc.Image] = append(out[mc.Image], mc.Name)
+		if base, ok := m.ImageBase(mc.Image); ok {
+			out[base] = append(out[base], mc.Name)
+		}
 	}
 	return out
 }
 
 // refreshOne monta la imagen, cambia el puente si hace falta y la desmonta.
 //
+// dentro es la ruta del puente DENTRO de ese ext4: en una imagen monolítica la
+// del invitado, y en una capa la misma bajo /upper, que es donde el build deja
+// el delta.
+//
 // Devuelve si hubo cambio. Una imagen que ya tenía el puente correcto se
 // desmonta sin tocarla: reescribirla por gusto la ensuciaría y desharía su
 // dispersión en disco.
-func (m *Manager) refreshOne(ctx context.Context, image, bridge, quiero string) (bool, error) {
+func (m *Manager) refreshOne(ctx context.Context, image, dentroPath, bridge, quiero string) (bool, error) {
 	// Antes de montar en ESCRITURA. Montar así un ext4 sucio es como se corrompió
 	// una imagen en este proyecto, y el síntoma fue un pánico del invitado.
 	repairVolume(ctx, image)
@@ -170,7 +220,7 @@ func (m *Manager) refreshOne(ctx context.Context, image, bridge, quiero string) 
 	}
 	defer desmontar()
 
-	dentro := filepath.Join(mnt, guestBridgePath)
+	dentro := filepath.Join(mnt, dentroPath)
 	tengo, err := fileDigest(dentro)
 	if os.IsNotExist(err) {
 		// Una imagen SIN puente no es una imagen de servicio: es una base
