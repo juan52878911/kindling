@@ -152,19 +152,43 @@ case "$MODE" in
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
 
-DEST="$ROOT/images/$NAME.ext4"
-cp "$ROOT/images/$BASE.ext4" "$DEST"
+# ── Imagen por CAPAS ────────────────────────────────────────────────────────
+# En vez de copiar la base entera (~110-130 MiB reales duplicados por servicio),
+# se construye SOLO el delta como upperdir de un overlay sobre la base (patrón
+# OCI). La base queda compartida por todos los servicios; esta imagen guarda
+# únicamente lo que cambia. Validado en el kernel de destino — docs/three-layers.md.
+#
+# La capa se dimensiona con GROW (el tamaño del delta esperado). Es dispersa: el
+# coste real en disco es solo lo que se escriba, y al final se encoge al mínimo.
+LAYER="$ROOT/images/$NAME.layer.ext4"
+BASE_IMG="$ROOT/images/$BASE.ext4"
+[ "$GROW" -gt 0 ] || GROW=256
+rm -f "$LAYER"
+truncate -s "${GROW}M" "$LAYER"
+mkfs.ext4 -q -F -O '^has_journal' -E nodiscard "$LAYER"
 
-if [ "$GROW" -gt 0 ]; then
-  truncate -s "+${GROW}M" "$DEST"
-  e2fsck -fp "$DEST" >/dev/null 2>&1 || true
-  resize2fs "$DEST" >/dev/null 2>&1
-fi
+mnt="$(mktemp -d)"; base_mnt="$(mktemp -d)"; layer_mnt="$(mktemp -d)"
 
-mnt="$(mktemp -d)"
-cleanup() { umount "$mnt/proc" 2>/dev/null || true; umount "$mnt" 2>/dev/null || true; rmdir "$mnt" 2>/dev/null || true; }
+# ov_up/ov_down: montan y desmontan el overlay del BUILD. La base va de lower en
+# solo lectura; la capa aporta upperdir y workdir (deben compartir fs y no
+# anidarse, por eso /upper y /work son hermanos dentro de la capa). Todo lo que
+# el resto del script escribe en $mnt cae en /upper de la capa.
+ov_up() {
+  mount -o loop,ro "$BASE_IMG" "$base_mnt"
+  mount -o loop "$LAYER" "$layer_mnt"
+  mkdir -p "$layer_mnt/upper" "$layer_mnt/work"
+  mount -t overlay overlay \
+    -o "lowerdir=$base_mnt,upperdir=$layer_mnt/upper,workdir=$layer_mnt/work" "$mnt"
+}
+ov_down() {
+  umount "$mnt/proc" 2>/dev/null || true
+  umount "$mnt"       2>/dev/null || true
+  umount "$layer_mnt" 2>/dev/null || true
+  umount "$base_mnt"  2>/dev/null || true
+}
+cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
 trap cleanup EXIT
-mount -o loop "$DEST" "$mnt"
+ov_up
 
 [ -n "$EXTRA_DIR" ] && cp -a "$EXTRA_DIR"/. "$mnt"/
 
@@ -417,12 +441,11 @@ if [ -n "$NPM" ]; then
     echo "binarios de sistema detectados: $SYS → apk add"
     SYS_GROW=256
     case " $SYS " in *" libreoffice "*|*" imagemagick "*) SYS_GROW=768 ;; esac
-    umount "$mnt/proc" 2>/dev/null || true
-    umount "$mnt"
-    truncate -s "+${SYS_GROW}M" "$DEST"
-    e2fsck -fp "$DEST" >/dev/null 2>&1 || true
-    resize2fs "$DEST" >/dev/null 2>&1
-    mount -o loop "$DEST" "$mnt"
+    ov_down
+    truncate -s "+${SYS_GROW}M" "$LAYER"
+    e2fsck -fp "$LAYER" >/dev/null 2>&1 || true
+    resize2fs "$LAYER" >/dev/null 2>&1
+    ov_up
     cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
     mount --bind /proc "$mnt/proc" 2>/dev/null || true
     chroot "$mnt" /sbin/apk add --no-cache $SYS \
@@ -545,27 +568,32 @@ fi
 
 [ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }
 chmod +x "$mnt/entrypoint"
-umount "$mnt"
-
-# Comprobar el sistema de ficheros ANTES de que nadie lo arranque.
-#
-# El invitado monta esta imagen como raíz en SOLO LECTURA, y un ext4 con el
-# journal a medias (needs_recovery) no se puede montar así: el kernel entra en
-# pánico con EUCLEAN y el fallo aparece como "el servidor no abrió el puerto",
-# que no se parece en nada a la causa. Si algo interrumpió el chroot, aquí se
-# ve; y si no se puede reparar, mejor fallar ahora que entregar una imagen que
-# no arranca.
 sync
-if ! e2fsck -fp "$DEST" >/dev/null 2>&1; then
-  echo "AVISO: el sistema de ficheros de la imagen necesitaba reparación" >&2
-  e2fsck -fy "$DEST" >/dev/null 2>&1 || {
-    echo "ERROR: '$NAME' quedó con un sistema de ficheros irreparable; bórrala y repite" >&2
+ov_down                       # desmonta overlay, capa y base
+
+# La capa ya contiene solo el delta en /upper. Se quita /work (scratch de
+# overlayfs), se encoge al mínimo y se comprueba: es lo único que viaja por
+# servicio, así que cuanto más pequeña, mejor.
+mount -o loop "$LAYER" "$layer_mnt"
+rm -rf "$layer_mnt/work"
+umount "$layer_mnt"
+
+# Comprobar el sistema de ficheros de la capa ANTES de que nadie la arranque. El
+# invitado la monta en SOLO LECTURA como lower del overlay, y un ext4 con el
+# journal a medias no se puede montar así: el kernel entra en pánico y el fallo
+# aparece como "el servidor no abrió el puerto", que no se parece a la causa.
+sync
+resize2fs -M "$LAYER" >/dev/null 2>&1 || true
+if ! e2fsck -fp "$LAYER" >/dev/null 2>&1; then
+  echo "AVISO: el sistema de ficheros de la capa necesitaba reparación" >&2
+  e2fsck -fy "$LAYER" >/dev/null 2>&1 || {
+    echo "ERROR: '$NAME' quedó con una capa irreparable; bórrala y repite" >&2
     exit 1; }
 fi
 
-chmod a+r "$DEST"
+chmod a+r "$LAYER"
 
-echo "imagen '$NAME' lista ($(du -h "$DEST" | cut -f1) reales)"
+echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales; la base se comparte)"
 if [ "$HTTP_PROXY" = 1 ]; then
   echo "modo http (proxy): el servidor MCP habla HTTP nativo y lo envuelve el puente."
   echo "  AISLAMIENTO: el hijo es COMPARTIDO por todas las sesiones (un solo proceso"
