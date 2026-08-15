@@ -301,8 +301,19 @@ func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 	if err != nil {
 		return err
 	}
+	// Una receta con variables horneadas se guarda SOLO para su dueño.
+	//
+	// El resto de una receta es información pública —qué paquetes, qué comando—,
+	// pero los valores de -env los escribe quien construye y pueden no serlo: el
+	// CLI avisa de que un secreto queda en texto plano, y sería incoherente
+	// avisarlo y a la vez dejarlo legible para todo el mundo en un 0644 junto a
+	// la imagen. Sin variables, el modo de siempre.
+	perm := os.FileMode(0o644)
+	if len(rec.Env) > 0 {
+		perm = 0o600
+	}
 	tmp := s.recipePath(r.Name) + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(b, '\n'), perm); err != nil {
 		return err
 	}
 	return os.Rename(tmp, s.recipePath(r.Name))

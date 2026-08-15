@@ -347,7 +347,9 @@ if [ -n "$NPM" ]; then
       case "$pkg" in
         *fetch*|*scrape*|*crawl*|*search*|*web*|*http*|*browser*|*firecrawl*|*exa*) CAP_EGRESS=internet ;;
       esac
-      pj=$(find "$NM" -maxdepth 3 -name package.json -path "*$pkg*" 2>/dev/null | head -1)
+      # -print -quit y no `| head -1`: es find quien para, sin tubería de por
+      # medio. Ver el aviso sobre SIGPIPE unas líneas más abajo.
+      pj=$(find "$NM" -maxdepth 3 -name package.json -path "*$pkg*" -print -quit 2>/dev/null)
       [ -n "$pj" ] && grep -qiE '"(fetch|scrape|crawl|search|web|http|api-client)"' "$pj" 2>/dev/null && CAP_EGRESS=internet
     done
   fi
@@ -495,11 +497,19 @@ if [ -n "$NPM" ]; then
   # cuando el egress detectado apunta a un servicio concreto (internet), no en el
   # caso vacío 'none'.
   ALLOWJSON="[]"
+  # `sed -n '1,40p'` y NO `head -40`, aquí y en el bloque hermano de pip.
+  #
+  # head cierra la tubería en cuanto tiene sus 40 líneas, y quien escribe al
+  # otro lado —sort, y detrás un grep recursivo sobre un árbol enorme— muere de
+  # SIGPIPE. Con `set -o pipefail` eso es un 141 que aborta la construcción
+  # ENTERA, y solo pasa cuando hay más de 40 dominios: un servidor pequeño no lo
+  # dispara nunca y uno grande falla siempre. sed lee toda la entrada y no cierra
+  # nada, que es lo que hace la diferencia.
   if [ "$CAP_EGRESS" = internet ]; then
     DOMAINS=$(grep -rhoE 'https?://[a-zA-Z0-9._-]+' "$NM" 2>/dev/null \
       | sed -E 's#^https?://##' \
       | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|registry\.npmjs\.org|nodejs\.org|github\.com)$' \
-      | sort -u | head -40)
+      | sort -u | sed -n '1,40p')
     if [ -n "$DOMAINS" ]; then
       ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
     fi
@@ -564,7 +574,7 @@ if [ -n "$PIP" ] && [ ! -f "$mnt/etc/kling/capabilities.json" ]; then
     DOMAINS=$(grep -rhoIE 'https?://[a-zA-Z0-9._-]+' "$SP" 2>/dev/null \
       | sed -E 's#^https?://##' \
       | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|pypi\.org|files\.pythonhosted\.org|github\.com)$' \
-      | sort -u | head -40)
+      | sort -u | sed -n '1,40p')
     [ -n "$DOMAINS" ] && ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
   fi
   mkdir -p "$mnt/etc/kling"
@@ -651,8 +661,36 @@ if [ ${#CMD[@]} -gt 0 ] && [ "${SKIP_CMD_CHECK:-0}" != 1 ]; then
       'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v "$1" >/dev/null' \
       sh "${CMD[0]}"; then
     echo "ERROR: el comando '${CMD[0]}' no existe dentro de la imagen." >&2
-    echo "  Si el paquete instala su ejecutable con OTRO nombre, repite pasándolo" >&2
-    echo "  explícito tras --  (SKIP_CMD_CHECK=1 salta esta comprobación)." >&2
+    # Decir QUÉ hay dentro, no solo que lo pedido no está.
+    #
+    # El caso corriente en Python no es un ejecutable con otro nombre: es que no
+    # haya ninguno. Muchos servidores MCP de PyPI solo traen un __main__.py y se
+    # arrancan con `python3 -m <módulo>` —mcp-sqlite3, sin ir más lejos—, así que
+    # un error que solo diga "no existe" deja al usuario adivinando entre dos
+    # posibilidades distintas. Aquí se miran las dos y se propone la que aplique.
+    if [ -n "$PIP" ]; then
+      # El módulo que probablemente busca el usuario es el del paquete que pidió,
+      # normalizado como lo hace Python: mcp-sqlite3 -> mcp_sqlite3. Se propone
+      # ESE primero y aparte, porque el resto de la lista son las dependencias
+      # —pip, certifi, pygments...— y enterrar la respuesta buena entre veinte
+      # candidatos no es mucho mejor que no darla.
+      WANT_MOD=$(echo "$PIP" | awk '{print $1}' | sed -E 's/(==|>=|<=|~=|!=).*//; s/-/_/g')
+      for sp in "$mnt"/usr/lib/python3*/site-packages; do
+        [ -d "$sp" ] || continue
+        if [ -f "$sp/$WANT_MOD/__main__.py" ]; then
+          echo "  el paquete no trae ejecutable, pero sí módulo. Prueba:" >&2
+          echo "      -cmd \"python3 -m $WANT_MOD\"" >&2
+        fi
+        SCRIPTS=$(sed -n '/^\[console_scripts\]/,/^\[/p' "$sp"/*.dist-info/entry_points.txt 2>/dev/null \
+          | sed -n 's/^\([A-Za-z0-9._-]*\) *=.*/\1/p' | sort -u | sed -n '1,10p')
+        [ -n "$SCRIPTS" ] && echo "  ejecutables que instaló pip: $(echo "$SCRIPTS" | paste -sd' ' -)" >&2
+        MODS=$(find "$sp" -maxdepth 2 -name __main__.py 2>/dev/null \
+          | sed -E "s#^$sp/##; s#/__main__.py##" | grep -v "^$WANT_MOD$" | sort | sed -n '1,8p')
+        [ -n "$MODS" ] && echo "  otros módulos con -m: $(echo "$MODS" | paste -sd' ' -)" >&2
+      done
+    fi
+    echo "  Repite pasando el comando bueno tras --, o con 'kling add -cmd \"...\"'." >&2
+    echo "  (SKIP_CMD_CHECK=1 salta esta comprobación.)" >&2
     exit 1
   fi
 fi

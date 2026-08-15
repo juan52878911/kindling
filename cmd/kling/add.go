@@ -94,6 +94,10 @@ func cmdAdd(args []string) error {
 	// interruptores (SEMGREP_SEND_METRICS=off), no para secretos. Sin esto, un
 	// servidor que exige una variable no se podía añadir por este camino.
 	envs := multiFlag(fs, "env", "environment variable to bake into the image, KEY=value; repeatable (plaintext: not for secrets)")
+	// La inferencia del ejecutable acierta en npm (el registro publica los bin)
+	// pero en PyPI es una convención, y hay paquetes que no la siguen porque no
+	// traen ejecutable ninguno: se arrancan con `python3 -m <módulo>`.
+	cmd := fs.String("cmd", "", "command that starts the server, overriding the inferred one (e.g. \"python3 -m mcp_sqlite3\")")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -114,7 +118,7 @@ func cmdAdd(args []string) error {
 	rc.Fresh = *fresh
 
 	opts := addOpts{as: *as, vols: vols, args: *extra, env: *envs,
-		dryRun: *dryRun, bundle: *bundle, base: *base}
+		dryRun: *dryRun, bundle: *bundle, base: *base, cmd: *cmd}
 	for _, want := range fs.Args() {
 		if err := addOne(ctx, rc, *host, want, opts); err != nil {
 			return fmt.Errorf("%s: %w", want, err)
@@ -134,6 +138,7 @@ type addOpts struct {
 	dryRun bool
 	bundle bool
 	base   string
+	cmd    string
 }
 
 // buildPlan es lo que cambia entre ecosistemas al empaquetar: qué runtime pide
@@ -282,12 +287,29 @@ func addOne(ctx context.Context, rc *registry.Client, host, want string, o addOp
 		service = serviceName(srv.Name)
 	}
 
-	bin, err := resolveBin(ctx, pkg)
-	if err != nil {
-		return err
+	// El comando dado a mano gana sobre el inferido, y ni siquiera se consulta a
+	// PyPI: es la salida para los paquetes que no traen ejecutable.
+	//
+	// Hace falta más de lo que parece. Un servidor de PyPI que solo trae
+	// __main__.py —mcp-sqlite3, el primero que probamos— se arranca con
+	// `python3 -m mcp_sqlite3`, y no hay convención que lo adivine: el wheel no
+	// declara ningún console_script. Sin esta puerta, esos servidores solo se
+	// podían empaquetar bajando al script a mano.
+	var bin string
+	if o.cmd == "" {
+		var err error
+		if bin, err = resolveBin(ctx, pkg); err != nil {
+			return err
+		}
 	}
 
 	cmd, unmet := renderArgs(bin, pkg, o.args)
+	if o.cmd != "" {
+		// strings.Fields y no una sola palabra: lo natural aquí es escribir
+		// `-cmd "python3 -m mcp_sqlite3"`, que son tres argumentos.
+		cmd = strings.Fields(o.cmd)
+		unmet = nil
+	}
 	if len(unmet) > 0 {
 		var b strings.Builder
 		fmt.Fprintf(&b, "missing %d required argument(s); pass them with -arg:\n", len(unmet))
