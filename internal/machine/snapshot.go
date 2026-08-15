@@ -612,10 +612,26 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		for i, v := range vols {
 			volPaths[i] = v.path
 		}
+		// Los discos de solo lectura de la imagen: la base y, si el servicio se
+		// empaquetó por capas, su capa.
+		//
+		// NO se re-pasa kling.layer= aquí, ni haría falta: la línea de comandos del
+		// kernel se congeló DENTRO de la memoria, y el invitado restaurado despierta
+		// con la capa ya montada en su tabla de montajes. Lo único que hace falta es
+		// que el fichero siga estando donde el snapshot lo grabó — que es justo lo
+		// que hace este enlace. Por eso tampoco hay campo Layer en el meta: se
+		// resuelve del nombre de la imagen, como la base, y los snapshots viejos no
+		// necesitan nada nuevo dentro.
+		imgBase, imgLayer, ierr := m.imageLayer(snap.Image)
+		if ierr != nil {
+			m.fail(mc, ierr)
+			return nil, ierr
+		}
 		toLink := append([]string{
 			filepath.Join(snapDir, "snap.file"),
 			filepath.Join(snapDir, "mem.file"),
-			m.imagePath(snap.Image),
+			imgBase,
+			imgLayer,
 			filepath.Join(snapDir, "overlay.ext4"),
 			overlay,
 		}, volPaths...)
