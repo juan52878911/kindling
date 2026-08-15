@@ -195,10 +195,14 @@ const ExecBootParam = "kling.exec"
 // de la que se arrancan las microVMs. Hasta que existió GET /images no se podían
 // ni enumerar.
 type Image struct {
-	Name      string `json:"name"`
-	SizeBytes int64  `json:"size_bytes"` // el .ext4 en disco
-	HasRecipe bool   `json:"has_recipe"` // se guardó cómo se construyó
-	UsedBy    int    `json:"used_by"`    // snapshots dorados que salieron de aquí
+	Name string `json:"name"`
+	// SizeBytes es el tamaño LÓGICO del .ext4; DiskBytes lo REALMENTE asignado en
+	// disco (bloques × 512). Con ficheros dispersos difieren, así que el lógico
+	// solo no dice cuánto se recupera al borrar. Mismo par que Volume.
+	SizeBytes int64 `json:"size_bytes"`
+	DiskBytes int64 `json:"disk_bytes"`
+	HasRecipe bool  `json:"has_recipe"` // se guardó cómo se construyó
+	UsedBy    int   `json:"used_by"`    // snapshots dorados que salieron de aquí
 }
 
 // Volume es almacenamiento que sobrevive a la microVM que lo usa.

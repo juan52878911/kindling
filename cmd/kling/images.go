@@ -59,7 +59,7 @@ func imagesList(args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSIZE\tRECIPE\tUSED BY")
+	fmt.Fprintln(tw, "NAME\tLOGICAL\tON DISK\tRECIPE\tUSED BY")
 	for _, img := range imgs {
 		recipe := "no"
 		if img.HasRecipe {
@@ -69,7 +69,7 @@ func imagesList(args []string) error {
 		if img.UsedBy > 0 {
 			used = fmt.Sprintf("%d snapshot(s)", img.UsedBy)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", img.Name, human(img.SizeBytes), recipe, used)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", img.Name, human(img.SizeBytes), human(img.DiskBytes), recipe, used)
 	}
 	return tw.Flush()
 }

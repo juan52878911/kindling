@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -299,7 +300,15 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	for _, name := range names {
 		img := api.Image{Name: name, UsedBy: usedBy[name]}
 		if fi, err := os.Stat(filepath.Join(s.root, "images", name+".ext4")); err == nil {
+			// Tamaño lógico y, aparte, el REALMENTE asignado en disco (bloques ×
+			// 512): con ext4 disperso difieren, y solo el segundo dice cuánto se
+			// recupera al borrar.
 			img.SizeBytes = fi.Size()
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				img.DiskBytes = st.Blocks * 512
+			} else {
+				img.DiskBytes = fi.Size()
+			}
 		}
 		if _, err := os.Stat(s.recipePath(name)); err == nil {
 			img.HasRecipe = true

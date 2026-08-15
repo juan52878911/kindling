@@ -227,7 +227,10 @@ func TestHandleImages(t *testing.T) {
 		t.Errorf("foo.UsedBy = %d, want 2", foo.UsedBy)
 	}
 	if foo.SizeBytes == 0 {
-		t.Error("foo.SizeBytes no debería ser 0")
+		t.Error("foo.SizeBytes (lógico) no debería ser 0")
+	}
+	if foo.DiskBytes == 0 {
+		t.Error("foo.DiskBytes (asignado en disco) no debería ser 0 para un fichero con contenido")
 	}
 	bar, ok := byName["bar"]
 	if !ok {
