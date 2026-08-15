@@ -150,6 +150,13 @@ pone en `kling.layer`.
    ~130 MiB); montarla y verificar que solo tiene el delta.
 2. **Stage 2**: `kling run` de una imagen por capas; debe bootear y el MCP
    responder `tools/list`. Comparar `boot_ms` con legacy.
+   - **Lo primero que hay que confirmar aquí** es que la letra de disco de la capa
+     sale del ORDEN DE ENGANCHE. El manager la calcula así (`layerDevice`), igual
+     que el puente cuenta los volúmenes desde vdc, pero esto es lo único del
+     diseño que no se puede comprobar sin Firecracker delante. Si fallara, el
+     síntoma es un `mount ... failed: No such file or directory` en la consola
+     nombrando el device — y la prueba que lo aisla es arrancar CON un volumen,
+     donde base+overlay+volumen empujan la capa a vdd.
 3. **Stage 3**: `kling mcp import` (freeze) de un servicio por capas; `thaw`;
    verificar que restaura y responde, y que `thaw_ms` sigue ~25 ms.
 4. **Regresión**: una imagen legacy monolítica sigue booteando y thaweando igual.
