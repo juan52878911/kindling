@@ -153,13 +153,16 @@ func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []str
 // por capas le corrompería el sistema de ficheros por debajo — que es
 // exactamente lo que esta cuenta existe para impedir.
 func (m *Manager) imageUsers() map[string][]string {
+	// Se copian los dos campos que hacen falta, no el puntero: sacar máquinas
+	// vivas del candado es lo que hace List() y por el mismo motivo.
+	type uso struct{ image, name string }
 	m.mu.RLock()
-	vivas := make([]*api.Machine, 0, len(m.byID))
+	vivas := make([]uso, 0, len(m.byID))
 	for _, mc := range m.byID {
 		if mc.Image == "" || mc.State == api.StateStopped || mc.State == api.StateFailed {
 			continue
 		}
-		vivas = append(vivas, mc)
+		vivas = append(vivas, uso{mc.Image, mc.Name})
 	}
 	m.mu.RUnlock()
 
@@ -167,10 +170,10 @@ func (m *Manager) imageUsers() map[string][]string {
 	// va FUERA del candado: m.mu protege el mapa de máquinas, y sostenerlo
 	// mientras se lee el disco bloquea a List() y a persist().
 	out := map[string][]string{}
-	for _, mc := range vivas {
-		out[mc.Image] = append(out[mc.Image], mc.Name)
-		if base, ok := m.ImageBase(mc.Image); ok {
-			out[base] = append(out[base], mc.Name)
+	for _, u := range vivas {
+		out[u.image] = append(out[u.image], u.name)
+		if base, ok := m.ImageBase(u.image); ok {
+			out[base] = append(out[base], u.name)
 		}
 	}
 	return out
