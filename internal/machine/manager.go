@@ -34,9 +34,11 @@ const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro in
 // el propio kernel con el parámetro ip=, sin herramientas dentro de la imagen.
 //
 // El punto de montaje del volumen viaja aquí y no dentro de la imagen: así el
-// mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno.
-func bootArgs(vols []api.VolumeAttachment, allowExec bool) string {
-	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec)
+// mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno. Lo mismo
+// vale para layerDev, el disco de la capa de servicio: vacío en las imágenes
+// monolíticas, que siguen arrancando con la línea de siempre.
+func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string) string {
+	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -80,6 +82,11 @@ type Manager struct {
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int
+
+	// layerOK memoriza qué bases traen un overlay-init que entiende las capas.
+	// Es dato de un fichero que no cambia, y preguntarlo cuesta un debugfs en el
+	// camino de arranque en frío. Ver baseSupportsLayers.
+	layerOK sync.Map
 
 	// pendingMiB es la memoria de las microVMs que están ARRANCANDO ahora mismo,
 	// aún sin proceso que la ocupe. checkHostMemory la resta de lo disponible:
@@ -538,9 +545,28 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, err
 	}
 
-	src := m.imagePath(req.Image)
-	if _, err := os.Stat(src); err != nil {
-		return nil, fmt.Errorf("can't find image %q in %s", req.Image, src)
+	// src es el rootfs que va en vda; layer, el delta del servicio si la imagen
+	// va por capas (vacío en las monolíticas de siempre).
+	src, layer, err := m.imageLayer(req.Image)
+	if err != nil {
+		return nil, err
+	}
+	// Una base anterior a las capas ignoraría kling.layer y arrancaría el
+	// invitado sin el servicio dentro. Se comprueba aquí, donde se puede explicar,
+	// y no allí, donde se ve como un pánico del kernel.
+	if layer != "" {
+		switch ok, cerr := m.baseSupportsLayers(ctx, src); {
+		case cerr != nil:
+			// Sin poder comprobarlo se sigue: convertir una comprobación de
+			// diagnóstico en una dependencia de arranque sería peor que el problema.
+			log.Printf("warning: could not check whether base %s understands layers: %v", src, cerr)
+		case !ok:
+			return nil, fmt.Errorf("image %q is layered, but its base (%s) has an overlay-init "+
+				"from before layers existed: it would ignore %s and boot the guest without the "+
+				"service inside.\nRebuild the base (scripts/70-build-minimal-image.sh) or "+
+				"repackage this service as a monolithic image",
+				req.Image, src, api.LayerBootParam)
+		}
 	}
 	// Antes de comprometer nada: una microVM que no cabe no falla al arrancar,
 	// arranca — y luego el OOM killer del anfitrión mata procesos al azar.
@@ -567,7 +593,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
 	// Se comprueba ANTES de crear el directorio, para no tener que limpiarlo.
 	if len(vols) > 0 {
-		switch has, herr := imageHasBridge(ctx, src); {
+		switch has, herr := imageHasBridge(ctx, src, layer); {
 		case herr != nil:
 			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
 			// herramienta de diagnóstico en una dependencia de arranque sería
@@ -649,7 +675,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, vols, req.AllowExec)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, layer, overlay, netcfg, vols, req.AllowExec)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -767,12 +793,14 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 
 // boot lanza el proceso firecracker y configura la microVM por su API.
 //
-// Dos discos: la imagen base compartida en solo lectura y el overlay propio.
+// Dos discos: la imagen base compartida en solo lectura y el overlay propio. Con
+// una imagen por capas hay un tercero de solo lectura, la capa del servicio, que
+// se engancha DETRÁS de los volúmenes para no correrles la letra.
 //
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -782,6 +810,16 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		return 0, glErr
 	}
 	defer release()
+
+	// El device de la capa se calcula ANTES de lanzar nada: si no cabe, mejor no
+	// haber encendido un firecracker que luego hay que matar.
+	var layerDev string
+	if layer != "" {
+		var err error
+		if layerDev, err = layerDevice(len(vols)); err != nil {
+			return 0, err
+		}
+	}
 
 	var sock string
 	var pid int
@@ -794,7 +832,9 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		if err != nil {
 			return 0, err
 		}
-		toLink := []string{m.KernelPath(), base, overlay}
+		// layer va con cadena vacía si la imagen es monolítica; prepareJail las
+		// ignora.
+		toLink := []string{m.KernelPath(), base, layer, overlay}
 		for _, v := range vols {
 			toLink = append(toLink, v.path)
 		}
@@ -814,7 +854,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec)}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec, layerDev)}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -844,6 +884,21 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 			// De solo lectura para el propio VMM, no solo en el mount: la
 			// barrera no puede depender de que el invitado se porte bien.
 			IsReadOnly:  v.readOnly,
+			RateLimiter: fc.Limit(diskBytesPerSec),
+		}); err != nil {
+			return pid, err
+		}
+	}
+	// La capa del servicio, EL ÚLTIMO. Va aquí y no junto a la base porque las
+	// letras de disco salen del orden de enganche: colarla antes correría los
+	// volúmenes, y el puente los cuenta desde vdc por posición. Su device viaja
+	// en kling.layer=, que ya se calculó arriba a partir de este mismo orden.
+	//
+	// De solo lectura como la base: es compartida por todas las microVMs del
+	// servicio, y lo que las hace seguras de compartir es que nadie escriba.
+	if layer != "" {
+		if err := c.SetDrive(ctx, fc.Drive{
+			DriveID: layerDriveID, PathOnHost: layer, IsRootDevice: false, IsReadOnly: true,
 			RateLimiter: fc.Limit(diskBytesPerSec),
 		}); err != nil {
 			return pid, err

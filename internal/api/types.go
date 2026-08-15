@@ -183,6 +183,17 @@ const VolumeBootParam = "kling.volume"
 // pueden reescribir, así que restaurarlos exige seguir usando este nombre.
 const LegacyVolumeDriveID = "volume"
 
+// LayerBootParam dice al invitado en qué disco está la capa de servicio.
+//
+// Una imagen por capas son dos discos de solo lectura: la base compartida por
+// todos los servicios (vda) y el delta propio de este (un disco extra). El
+// device viaja aquí, y no por posición, porque la posición depende de cuántos
+// volúmenes lleve la máquina — el mismo motivo por el que el punto de montaje
+// del volumen viaja en VolumeBootParam.
+//
+// Ausente = imagen monolítica: el invitado hace el overlay de siempre sobre /.
+const LayerBootParam = "kling.layer"
+
 // ExecBootParam enciende la ejecución de comandos dentro del invitado.
 //
 // Solo lo pone el anfitrión, y solo en las microVMs de un solo uso que pueblan

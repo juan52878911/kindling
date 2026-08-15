@@ -243,9 +243,24 @@ func copyFile(src, dst string, mode os.FileMode) error {
 // fichero es la operación que ya corrompió una imagen en este proyecto, y para
 // esta pregunta ni siquiera hace falta.
 //
+// Con una imagen por capas hay dos sitios donde mirar, y se miran los dos: el
+// puente lo pone el build en la capa, pero una base con el puente ya horneado
+// también vale. Basta con que esté en uno.
+//
 // El error va aparte del booleano a propósito: "no lo sé" —debugfs ausente— no
 // es lo mismo que "no lo lleva", y quien pregunta decide si falla abierto.
-func imageHasBridge(ctx context.Context, image string) (bool, error) {
+func imageHasBridge(ctx context.Context, base, layer string) (bool, error) {
+	if layer != "" {
+		has, err := hasFile(ctx, layer, layerGuestPath(guestBridgePath))
+		if err != nil || has {
+			return has, err
+		}
+	}
+	return hasFile(ctx, base, "/"+guestBridgePath)
+}
+
+// hasFile mira con debugfs si un fichero existe dentro de un ext4 sin montarlo.
+func hasFile(ctx context.Context, image, path string) (bool, error) {
 	bin, err := exec.LookPath("debugfs")
 	if err != nil {
 		// En Debian vive en /sbin, que no siempre está en el PATH de un
@@ -260,7 +275,7 @@ func imageHasBridge(ctx context.Context, image string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("cannot find debugfs (comes with e2fsprogs): %w", err)
 	}
-	out, err := exec.CommandContext(ctx, bin, "-R", "stat /"+guestBridgePath, image).CombinedOutput()
+	out, err := exec.CommandContext(ctx, bin, "-R", "stat "+path, image).CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("debugfs on %s: %v: %s", image, err, strings.TrimSpace(string(out)))
 	}

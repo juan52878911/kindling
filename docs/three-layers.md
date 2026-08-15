@@ -57,22 +57,43 @@ pone en `kling.layer`.
 - Flag de salida: escribir `$NAME.layer.ext4` (no `$NAME.ext4`). Un `$NAME.ext4`
   ausente + `$NAME.layer.ext4` presente = imagen por capas.
 
-### 2. `scripts/overlay-init.sh` (Stage 2 — guest)
-- Leer `kling.layer=/dev/vdX` de `/proc/cmdline`. Si está:
-  `mount -t ext4 -o ro $LAYER /svc` y
-  `mount -t overlay -o lowerdir=/svc:/,upperdir=/overlay/upper,workdir=/overlay/work /overlay/merged`.
-- Si no está: camino legacy actual (`lowerdir=/`). Intacto.
+### 2. `scripts/overlay-init.sh` + `scripts/minimal-init.sh` (Stage 2 — guest) ✅
+- Leer `kling.layer=/dev/vdX` de `/proc/cmdline`. Si está: montar la capa ro y
+  `lowerdir=<capa>/upper:/`. Si no está: camino legacy (`lowerdir=/`), intacto.
+- **Los dos scripts.** `70-build-minimal-image.sh` instala `minimal-init.sh` como
+  `/sbin/overlay-init` en la base `min` — que es la de los servicios MCP—, así que
+  tocar solo `overlay-init.sh` (la base con systemd) no habría cambiado nada donde
+  importa. `TestInitScriptsReadLayerParam` ata los dos al nombre del parámetro.
+- **Punto de montaje `/overlay/svc`, no `/svc`**: la raíz va en solo lectura, así
+  que dentro del invitado no se puede crear un punto de montaje nuevo. `/overlay`
+  ya es el disco escribible de la máquina.
+- **Prefijo `/upper`**: el delta cuelga de ahí dentro de la capa porque el build lo
+  construye como upperdir (overlayfs exige upper y work hermanos, sin anidar).
+- El parámetro se busca partiendo `/proc/cmdline` por palabras, sin `sed`: el sed
+  de busybox va contra el regex de musl y no trae `\b` ni las demás extensiones
+  de GNU. Un patrón que no case dejaría la capa sin montar.
 
-### 3. `internal/machine/manager.go` (Stage 2 — boot)
-- `imagePath`: si existe `$image.layer.ext4` y no `$image.ext4`, es por capas;
-  resolver la base desde la receta (nuevo helper `imageLayer(image) (base, layer,
-  ok)`).
-- `boot()`: cuando la imagen es por capas, vda=base (de la receta), y añadir un
-  `SetDrive{DriveID:"svclayer", ...capa..., IsReadOnly:true}` como disco extra
-  tras los volúmenes; calcular su `/dev/vdX` y pasarlo en `bootArgs` como
-  `kling.layer=`.
-- `bootArgs`: nuevo argumento opcional `layerDev string` → `+ " kling.layer=" +`.
-- Jailer `toLink` (cold ~l.797): añadir el fichero de la capa a los bind-mounts.
+### 3. `internal/machine/manager.go` + `layer.go` (Stage 2 — boot) ✅
+- Nuevo `internal/machine/layer.go`: `imageLayer(image) (base, layer, err)`
+  —`layer == ""` es monolítica—, `layerDevice(nvols)`, `layerBootArg`,
+  `layerGuestPath`, `baseSupportsLayers`. `imagePath` NO cambia de significado:
+  sigue siendo la ruta de la monolítica, y la resolución va aparte para no
+  alterarla bajo `snapshot.go` (Stage 3).
+- Precedencia: si están `$image.ext4` y `$image.layer.ext4`, manda la monolítica.
+  La base sale de la receta (`Base`), y sin receta se asume `min`, que es lo que
+  asume el propio build. Una capa sin base da un error que la nombra.
+- `boot()`: vda=base, y `SetDrive{DriveID:"svclayer", IsReadOnly:true}` como disco
+  extra TRAS los volúmenes; su `/dev/vdX` va en `bootArgs` como `kling.layer=`.
+- `bootArgs(vols, allowExec, layerDev)`: sin capa la línea no cambia ni un byte.
+- Jailer `toLink`: la capa entra en los hardlinks del jail.
+- **Base antigua = error explicado, no pánico.** El `overlay-init` viaja DENTRO de
+  la base, así que una base anterior a las capas ignoraría `kling.layer` y
+  arrancaría el invitado sin el servicio: se vería como un pánico del kernel.
+  `baseSupportsLayers` lo comprueba con debugfs (cacheado por tamaño+mtime) y
+  Create falla diciendo qué reconstruir. Sin debugfs se sigue, con aviso.
+- `imageHasBridge` y `ImageCapabilities` leen de la capa (`/upper/...`) cuando la
+  hay, con la base de respaldo: si no, un servicio por capas con volumen se
+  rechazaría por "no lleva puente" llevándolo.
 
 ### 4. `internal/machine/snapshot.go` (Stage 3 — snapshot/thaw)
 - `api.Snapshot`: nuevo campo `Layer string` (nombre de la capa) junto a `Image`
@@ -94,6 +115,10 @@ pone en `kling.layer`.
   discos, sin cambios. Nada que migrar para que sigan funcionando.
 - Migrar un servicio a capas = reimportarlo (flujo ya conocido, como el refresh de
   bridge). No hay conversión in-place.
+- **La base hay que reconstruirla una vez** (`scripts/70-build-minimal-image.sh`):
+  el init que entiende `kling.layer` vive dentro de ella. Las imágenes monolíticas
+  siguen arrancando con la base nueva —el parámetro simplemente no está—, así que
+  se puede hacer antes de empaquetar nada por capas.
 
 ## Plan de pruebas (fc-test, por etapas)
 1. **Stage 1**: construir una imagen por capas; `ls -la` la capa (debe ser MB, no
@@ -110,6 +135,6 @@ pone en `kling.layer`.
 - [x] Mecanismo OCI (delta-como-lower + whiteout) validado en el kernel de fc-test.
 - [x] Decisión de numeración de discos (capa por cmdline `kling.layer`, como `kling.volume`).
 - [ ] Stage 1 — build script.
-- [ ] Stage 2 — overlay-init + manager boot.
+- [x] Stage 2 — overlay-init + manager boot (código; falta la prueba en fc-test).
 - [ ] Stage 3 — snapshot/thaw.
 - [ ] Stage 4 — accounting + bridge en base.

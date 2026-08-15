@@ -96,7 +96,7 @@ func TestArgDeArranqueSoloConVolumen(t *testing.T) {
 	if !strings.HasPrefix(got, " ") {
 		t.Errorf("se pegaría al argumento anterior: %q", got)
 	}
-	full := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false)
+	full := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false, "")
 	if !strings.Contains(full, "root=/dev/vda") || !strings.Contains(full, api.VolumeBootParam+"=/data") {
 		t.Errorf("la línea de comandos perdió algo: %s", full)
 	}
@@ -516,11 +516,11 @@ func TestLaEjecucionNoSeCuelaEnUnServicio(t *testing.T) {
 	}
 
 	// Y la línea de arranque de un servicio normal no lo lleva por ningún lado.
-	normal := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false)
+	normal := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false, "")
 	if strings.Contains(normal, api.ExecBootParam) {
 		t.Errorf("la línea de un servicio lleva el parámetro de ejecución: %s", normal)
 	}
-	conExec := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, true)
+	conExec := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, true, "")
 	if !strings.Contains(conExec, api.ExecBootParam+"=1") {
 		t.Errorf("la microVM de instalación no lo lleva: %s", conExec)
 	}
