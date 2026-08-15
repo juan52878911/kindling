@@ -235,6 +235,40 @@ Un fallo encontrado por el camino que **no es de las capas**: `sweepMachineDirs`
 `open .../firecracker.log: no such file or directory` y solo aparece cuando el GC
 corre a menudo (disco >90%). Queda anotado aparte.
 
+## El parque real, reconstruido (fc-test, 2026-08-15)
+
+Los 7 servicios node de producción, reimportados por capas sobre la base `node`:
+
+| servicio | antes | después |
+|---|---|---|
+| context7 | 129 MiB | 39 MiB |
+| everything | 134 MiB | 39 MiB |
+| fetch | 164 MiB | 77 MiB |
+| filesystem-mcp | 135 MiB | 36 MiB |
+| memory | 139 MiB | 37 MiB |
+| sequentialthinking | 128 MiB | 38 MiB |
+| wikipedia-mcp-server | 471 MiB | 54 MiB |
+| **suma** | **1300 MiB** | **320 MiB** + 113 de base compartida |
+
+**1300 MiB → 433 MiB, un 67% menos**, y el disco de la VM baja del 89% al 82%.
+Los 7 responden `tools/list` por el gateway con el mismo catálogo que antes.
+
+Efecto secundario que vale tanto como el disco: **ahora los 7 tienen receta**.
+Ninguno la tenía —se construyeron antes de que existieran—, así que reconstruirlos
+exigió sacar el comando de cada `/entrypoint` con `debugfs` y deducir el paquete
+npm del árbol de `node_modules`. Eso ya no hay que volver a hacerlo.
+
+El procedimiento fue reversible por servicio: la imagen monolítica no se borra, se
+APARTA (la monolítica tiene precedencia sobre la capa, así que apartarla es lo que
+activa la nueva), y solo se retira cuando el catálogo del servicio reconstruido
+coincide con el de antes.
+
+Los dos que siguen monolíticos:
+- **semgrep** — es Python. Espera a la base `python`.
+- **playwright** — 2.5 GiB con Chromium dentro; además hoy no arranca en fc-test
+  por RAM: pide 1536 MiB y quedan ~1222 libres, porque docker/containerd retienen
+  2,4 GiB de la VM. No es de las capas.
+
 ## Estado
 - [x] Mecanismo OCI (delta-como-lower + whiteout) validado en el kernel de fc-test.
 - [x] Decisión de numeración de discos (capa por cmdline `kling.layer`, como `kling.volume`).
@@ -246,7 +280,8 @@ corre a menudo (disco >90%). Queda anotado aparte.
 - [x] Flag `-base` en `kling add`, probado de punta a punta: construye por capas,
   importa, congela y responde `tools/call` por el gateway.
 - [x] El encogido de la capa, que no se ejecutaba nunca (451 MiB → 75 MiB).
-- [ ] Una base `python` (semgrep y compañía). La `node` ya está en fc-test.
-- [ ] Reimportar los 9 servicios del laboratorio por capas sobre `node`. Es la
-  operación que convierte el ahorro medido en ahorro real, y toca el parque en
-  producción: conviene hacerla servicio a servicio y con el gateway mirando.
+- [x] Reimportar el parque: los 7 servicios node, hechos y verificados (ver arriba).
+- [ ] Una base `python` — y con ella `semgrep`, que hoy ni siquiera trae semgrep
+  dentro: hace `pip install` al arrancar. En marcha en paralelo.
+- [ ] `playwright`: 2.5 GiB con Chromium. Merece su propia base (`node` + las
+  dependencias del navegador) y decidir si el navegador va en la base o en la capa.
