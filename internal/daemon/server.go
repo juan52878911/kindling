@@ -156,6 +156,21 @@ func (s *Server) Listen(ctx context.Context) error {
 		_ = os.Remove(s.socket)
 	}()
 
+	// Los externos que el daemon necesita para arrancar una microVM. Antes solo se
+	// comprobaba la red (`ip`, `iptables`), asi que el daemon se quedaba escuchando
+	// y aceptando peticiones sin `firecracker`, sin `setpriv` y sin `mkfs.ext4`.
+	// `setpriv` era el peor: no lo cubria ninguna comprobacion y fallaba por microVM
+	// con "executable file not found in $PATH", ya en pleno arranque y sin relacion
+	// visible con la causa.
+	//
+	// Sigue siendo un AVISO y no un error: el daemon vale para inspeccionar estado
+	// aunque no pueda arrancar nada, y convertirlo en fatal romperia esos usos. Pero
+	// ahora los nombra TODOS de golpe, en vez de descubrirlos de uno en uno.
+	if faltan := binariosQueFaltan(); len(faltan) > 0 {
+		log.Printf("AVISO: faltan binarios (%s): no se podran arrancar microVMs en este host",
+			strings.Join(faltan, ", "))
+	}
+
 	if err := knet.Available(); err != nil {
 		log.Printf("AVISO: red no disponible (%v): las microVMs arrancarán sin conectividad", err)
 	} else if err := knet.SetupHost(); err != nil {
@@ -542,4 +557,19 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("nadie abrió %s: %w", addr, last)
+}
+
+// binariosQueFaltan devuelve los externos que el daemon necesita y no encuentra.
+//
+// `cp` y `chmod` no estan: son coreutils y su ausencia significa que el sistema
+// esta roto de una forma que esta lista no va a arreglar. `fallocate` tampoco, que
+// solo se usa para compactar el fichero de memoria y degrada sin romper nada.
+func binariosQueFaltan() []string {
+	var faltan []string
+	for _, b := range []string{"firecracker", "setpriv", "mkfs.ext4"} {
+		if _, err := exec.LookPath(b); err != nil {
+			faltan = append(faltan, b)
+		}
+	}
+	return faltan
 }
