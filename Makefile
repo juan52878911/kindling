@@ -84,11 +84,17 @@ deploy: daemon
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-amd64 $(TARGET):/tmp/$(BIN)
 	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service $(TARGET):/tmp/
+	@# Los DOS units se instalan. Antes solo se instalaba $(BIN).service: el del
+	@# gateway se subia a /tmp/ y se quedaba ahi para siempre, asi que ningun cambio
+	@# en packaging/$(BIN)-gateway.service llegaba nunca al host — y el deploy decia
+	@# "desplegado" porque la comprobacion final solo miraba el daemon.
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
+		sudo install -m644 /tmp/$(BIN)-gateway.service /etc/systemd/system/ && \
 		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
 		sudo systemctl restart $(BIN) && sudo systemctl try-restart $(BIN)-gateway && \
-		sleep 1 && systemctl is-active $(BIN)'
+		sleep 1 && systemctl is-active $(BIN) && \
+		{ ! systemctl is-enabled --quiet $(BIN)-gateway || systemctl is-active --quiet $(BIN)-gateway; }'
 	@echo "daemon desplegado en $(TARGET)"
 
 test:
