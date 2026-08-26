@@ -110,6 +110,12 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err := os.Remove(s.socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// El limite de sun_path son 104 bytes en macOS y 108 en Linux, y pasarse da
+	// "bind: invalid argument", que no menciona la longitud ni el socket. Se dice
+	// aqui porque el mensaje del kernel no hay forma de mejorarlo despues.
+	if n := len(s.socket); n >= 104 {
+		return fmt.Errorf("la ruta del socket son %d bytes y el limite de un socket unix son ~104: %s", n, s.socket)
+	}
 	ln, err := net.Listen("unix", s.socket)
 	if err != nil {
 		return err
