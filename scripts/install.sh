@@ -174,6 +174,9 @@ if [ -z "$EXPECTED" ]; then
     fail "no encuentro $BIN_NAME en SHA256SUMS"
 fi
 ACTUAL="$(sha256sum "$WORK/$BIN_NAME" | awk '{print $1}')"
+if [ -z "$ACTUAL" ]; then
+    fail "no pude calcular el sha256 de $BIN_NAME (¿falta sha256sum?)"
+fi
 if [ "$EXPECTED" != "$ACTUAL" ]; then
     fail "checksum no coincide (esperaba $EXPECTED, obtuve $ACTUAL)"
 fi
@@ -199,7 +202,17 @@ if [ "$INSTALL_BRIDGE" = "1" ] && [ "$PLAT_OS" = "linux" ]; then
     info "descargando $BRIDGE_NAME"
     fetch "$BASE/$BRIDGE_NAME" "$WORK/$BRIDGE_NAME"
     EXPECTED="$(grep -E "  ${BRIDGE_NAME}\$" "$WORK/SHA256SUMS" | awk '{print $1}')"
+    # Las dos guardas de vacio, no solo una: sin `set -e`, un `sha256sum` que no
+    # exista deja ACTUAL vacio, y `"" != ""` es FALSO — o sea que la comprobacion
+    # PASA y se instala un binario sin verificar. El bloque del CLI ya tenia la de
+    # EXPECTED; este no tenia ninguna.
+    if [ -z "$EXPECTED" ]; then
+        fail "no encuentro $BRIDGE_NAME en SHA256SUMS"
+    fi
     ACTUAL="$(sha256sum "$WORK/$BRIDGE_NAME" | awk '{print $1}')"
+    if [ -z "$ACTUAL" ]; then
+        fail "no pude calcular el sha256 de $BRIDGE_NAME (¿falta sha256sum?)"
+    fi
     if [ "$EXPECTED" != "$ACTUAL" ]; then
         fail "checksum del bridge no coincide"
     fi
