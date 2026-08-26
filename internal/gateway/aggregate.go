@@ -56,8 +56,8 @@ type aggregator struct {
 	// Se reconstruye cada vez que el catálogo o los enlaces cambian
 	// (invalidate() los borra), lo que sucede solo al importar un servicio
 	// o añadir un enlace: en operación estable el texto es estático.
-	instrMu      sync.RWMutex
-	instrCache   map[mode]string // modeProxy | modeExpand
+	instrMu    sync.RWMutex
+	instrCache map[mode]string // modeProxy | modeExpand
 
 	// initLocks serializa la creación de sesión por servicio.
 	initLocks sync.Map // servicio -> *sync.Mutex

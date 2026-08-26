@@ -231,9 +231,9 @@ func TestAgregadorDistingueExternos(t *testing.T) {
 	})
 
 	// 6) instructions() cachea el resultado: la segunda llamada con el mismo
-//    session no reconstruye el texto ni habla con el daemon. Sin la caché,
-//    cada initialize reconstruía map + strings.Builder + 2 llamadas al
-//    daemon — ~50% de los allocs del gateway bajo carga.
+	//    session no reconstruye el texto ni habla con el daemon. Sin la caché,
+	//    cada initialize reconstruía map + strings.Builder + 2 llamadas al
+	//    daemon — ~50% de los allocs del gateway bajo carga.
 	t.Run("instructions se cachea entre llamadas del mismo session", func(t *testing.T) {
 		var snapsCalls, linksCalls atomic.Int32
 		sockPath := mockDaemon(t,

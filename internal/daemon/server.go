@@ -39,11 +39,11 @@ type Server struct {
 	socket      string
 	cachedFCVer string // caché del `fcBin --version`; se calcula una vez al arrancar
 	cachedFCLk  sync.Mutex
-	bus        *events.Bus
-	mgr        *machine.Manager
-	root       string
-	fcBin      string
-	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
+	bus         *events.Bus
+	mgr         *machine.Manager
+	root        string
+	fcBin       string
+	socketUser  string // a quién se cede el socket (vacío = a quien invocó sudo)
 }
 
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
@@ -226,10 +226,10 @@ func fail(w http.ResponseWriter, code int, err error) {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	_, kvmErr := os.Stat("/dev/kvm")
 	info := api.Info{
-		Version:  Version,
-		Root:     s.root,
-		KVM:      kvmErr == nil,
-		Machines: s.mgr.Count(),
+		Version:   Version,
+		Root:      s.root,
+		KVM:       kvmErr == nil,
+		Machines:  s.mgr.Count(),
 		Firecrack: s.fcVersion(),
 	}
 	writeJSON(w, http.StatusOK, info)

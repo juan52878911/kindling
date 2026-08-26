@@ -67,20 +67,20 @@ func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) 
 
 // Gateway mantiene una instancia caliente por servicio y enruta hacia ella.
 type Gateway struct {
-	client      *api.Client
-	idle        time.Duration
-	Ephemeral   bool
+	client       *api.Client
+	idle         time.Duration
+	Ephemeral    bool
 	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
-	mu          sync.Mutex
-	services    map[string]*entry        // servicio -> instancia "por defecto"
-	routes      map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
-	agg         *aggregator              // endpoint virtual que reúne a todos
-	pool        *pool                    // instancias pre-calentadas por servicio
-	ensureMu    sync.Map                 // servicio -> *sync.Mutex; ver ensure()
-	mem         *memory                  // memoria de uso; nil si está desactivada
+	mu           sync.Mutex
+	services     map[string]*entry        // servicio -> instancia "por defecto"
+	routes       map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
+	agg          *aggregator              // endpoint virtual que reúne a todos
+	pool         *pool                    // instancias pre-calentadas por servicio
+	ensureMu     sync.Map                 // servicio -> *sync.Mutex; ver ensure()
+	mem          *memory                  // memoria de uso; nil si está desactivada
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
-	linkMu sync.RWMutex
+	linkMu    sync.RWMutex
 	linkCache []*api.Link
 	linkAt    time.Time
 	// linkEverSeen es true si alguna vez se observó al menos un enlace. Permite
