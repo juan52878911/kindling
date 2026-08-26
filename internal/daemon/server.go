@@ -105,6 +105,11 @@ func (s *Server) Listen(ctx context.Context) error {
 	if err := os.Remove(s.socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// El limite de sun_path son 104 bytes en macOS y 108 en Linux, y pasarse da
+	// "bind: invalid argument", que no menciona ni la longitud ni el socket.
+	if n := len(s.socket); n >= 104 {
+		return fmt.Errorf("socket path is %d bytes and a unix socket allows about 104: %s", n, s.socket)
+	}
 	ln, err := net.Listen("unix", s.socket)
 	if err != nil {
 		return err
@@ -153,6 +158,18 @@ func (s *Server) Listen(ctx context.Context) error {
 		_ = srv.Shutdown(sc)
 		close(shutdownDone)
 	}()
+
+	// Los externos que hacen falta para arrancar una microVM. Solo se comprobaba la
+	// red (`ip`, `iptables`), asi que el daemon se quedaba escuchando y aceptando
+	// peticiones sin `firecracker`, sin `setpriv` y sin `mkfs.ext4`. `setpriv` era el
+	// peor: no lo cubria ninguna comprobacion y fallaba por microVM en pleno arranque.
+	//
+	// Sigue siendo AVISO y no error: el daemon vale para inspeccionar estado aunque no
+	// pueda arrancar nada. Pero ahora los nombra TODOS de golpe.
+	if missing := missingBinaries(); len(missing) > 0 {
+		log.Printf("WARNING: missing binaries (%s): microVMs cannot be started on this host",
+			strings.Join(missing, ", "))
+	}
 
 	if err := knet.Available(); err != nil {
 		log.Printf("WARNING: network unavailable (%v): microVMs will boot without connectivity", err)
@@ -588,4 +605,19 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("nobody opened %s: %w", addr, last)
+}
+
+// missingBinaries devuelve los externos que el daemon necesita y no encuentra.
+//
+// `cp` y `chmod` no estan: son coreutils y su ausencia significa que el sistema esta
+// roto de una forma que esta lista no arregla. `fallocate` tampoco, que solo compacta
+// el fichero de memoria y degrada sin romper nada.
+func missingBinaries() []string {
+	var missing []string
+	for _, b := range []string{"firecracker", "setpriv", "mkfs.ext4"} {
+		if _, err := exec.LookPath(b); err != nil {
+			missing = append(missing, b)
+		}
+	}
+	return missing
 }

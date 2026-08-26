@@ -4,6 +4,54 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## Sin publicar
+
+### Correcciones — auditoría de supuestos del entorno
+
+Siete fallos que **no daban ningún error**: cada uno reportaba éxito mientras no
+hacía lo que decía. Todos verificados en ejecución, no sólo leídos.
+
+- **`kling memory install-service` instalaba un LaunchAgent que no podía arrancar,
+  y salía 0.** `bridgePath()` podía devolver la ruta *relativa* `./kling-bridge-local`,
+  y el cwd de launchd es `/`: el job moría con `EX_CONFIG` (78), con stderr vacío y
+  sin escribir el log. Ahora la ruta es siempre absoluta, y se consulta a launchd si
+  el job vive de verdad — `launchctl load` devuelve 0 aunque nunca llegue a arrancar.
+  Los dos códigos que no dicen nada por sí solos se traducen: **78** (ruta relativa o
+  inexistente) y **126** (sin permiso, típico bajo `~/Documents`, `~/Desktop` o en un
+  volumen externo por TCC).
+
+- **El puente ya no se expone a la red por defecto.** `-listen` pasa de
+  `0.0.0.0:9100` a `127.0.0.1:9100` en `memory enable` e `install-service`. Lo que se
+  envuelve suele ser la memoria personal, el puente **no autentica** —ni puede
+  hacerlo de forma útil, porque `kling mcp link` no manda cabeceras— y `/reset` queda
+  accesible para cualquiera que alcance el puerto. Exponerlo sigue siendo posible y
+  legítimo con el gateway en otra máquina, pero ahora es una decisión y avisa.
+  *Cambia comportamiento:* si el gateway corre en otro host, hace falta
+  `-listen 0.0.0.0:9100` explícito.
+
+- **El daemon arrancaba «sano» en un host donde no podía hacer nada.** Sólo se
+  comprobaban `ip` e `iptables`. Ahora también `firecracker`, `setpriv` y `mkfs.ext4`,
+  y los nombra todos de golpe. `setpriv` era el peor: no lo cubría ninguna
+  comprobación y fallaba por microVM en pleno arranque, sin relación visible con la
+  causa.
+
+- **`install.sh` podía aceptar un checksum sin verificar nada.** Con `sha256sum`
+  ausente, `EXPECTED` y `ACTUAL` quedan vacíos y `"" != ""` es falso: la comprobación
+  **pasa**. Añadidas las guardas de vacío en los dos bloques.
+
+- **El puente se aceptaba por existir, no por ser ejecutable en el destino.**
+  `[ -f ]` no dice nada del formato: un Mach-O de `make bridge-local` pasaba, se
+  instalaba como PID 1 de una imagen x86-64, y la microVM reventaba con un pánico del
+  kernel sin mencionar al puente. Ahora se comprueba el mágico `\x7fELF`.
+
+- **`printf %q` es de bash y los entrypoints son `#!/bin/sh`.** En Alpine eso es
+  busybox ash, y para un argumento con tabulador `%q` emite `$'x\ty'`, sintaxis que
+  dash no entiende. Sustituido por entrecomillado POSIX con comilla simple.
+
+- **Una ruta de socket demasiado larga daba `bind: invalid argument`**, sin mencionar
+  ni la longitud ni el socket. El límite de `sun_path` son 104 bytes en macOS y 108 en
+  Linux; ahora se dice.
+
 ## v0.3.0 — 2026-08-13
 
 Notas completas, con tablas comparativas: [`RELEASE-v0.3.0.md`](RELEASE-v0.3.0.md).
