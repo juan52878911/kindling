@@ -47,6 +47,22 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 PKGS=""; NPM=""; EXTRA_DIR=""; CMD=()
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
+# Entrecomillado POSIX para lo que se escribe en los entrypoints.
+#
+# `printf %q` de bash NO sirve aqui: los entrypoints declaran `#!/bin/sh` y en
+# Alpine eso es busybox ash. Para un argumento con tabulador o salto, %q emite
+# `$'x\ty'`, que es sintaxis de bash: dash lo imprime literal. Este ayudante usa
+# comilla simple, que es portable en cualquier sh: cierra, escapa la comilla y
+# reabre.
+# es_elf comprueba el numero magico \x7fELF. Ver el uso para el porque.
+es_elf() {
+  [ "$(head -c4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]
+}
+
+sq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 parse_build_opts() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -82,6 +98,15 @@ case "$MODE" in
   stdio)
     parse_build_opts "$@"
     [ -f "$BRIDGE" ] || { echo "no encuentro $BRIDGE (compílalo con: make bridge)" >&2; exit 1; }
+    # `-f` no dice nada del formato, y el fallo que provoca no se parece a su causa:
+    # un Mach-O de `make bridge-local` pasa la comprobacion, se instala como PID 1 de
+    # una imagen x86-64, y la microVM revienta con un panico del kernel sin mencionar
+    # al puente. `make bridge` compila GOOS=linux GOARCH=amd64; esto lo exige.
+    es_elf "$BRIDGE" || {
+      echo "$BRIDGE no es un ELF de Linux ($(file -b "$BRIDGE" 2>/dev/null || echo 'formato desconocido'))." >&2
+      echo "Tiene que ejecutarse como PID 1 dentro de la microVM: compílalo con 'make bridge'." >&2
+      exit 1
+    }
     ;;
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
@@ -134,7 +159,7 @@ if [ "$MODE" = "stdio" ]; then
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
-    for a in "${CMD[@]}"; do printf ' %q' "$a"; done
+    for a in "${CMD[@]}"; do printf ' %s' "$(sq "$a")"; done
     echo
   } > "$mnt/entrypoint"
 elif [ ${#CMD[@]} -gt 0 ]; then
@@ -175,9 +200,12 @@ elif [ ${#CMD[@]} -gt 0 ]; then
     echo ''
     echo 'RESET_AFTER="${KLING_HTTP_RESET_AFTER:-30}"'
     echo 'MARKER=/var/run/kling-http-reset-done'
-    printf 'SERVER_CMD='
-    for a in "${CMD[@]}"; do printf ' %q' "$a"; done
-    echo
+    # Una sola palabra entrecomillada, o no es una asignacion: `VAR=a b` deja VAR
+    # vacia y EJECUTA `a b`. Como esta linea es PID 1, arrancaba el servidor por
+    # accidente y bloqueaba ahi para siempre: el auto-reset de debajo no se
+    # alcanzaba nunca y la imagen parecia sana. `$SERVER_CMD` se expande sin
+    # comillas mas abajo, que es lo que se quiere para que vuelva a separarse.
+    printf 'SERVER_CMD=%s\n' "$(sq "${CMD[*]}")"
     echo ''
     echo 'if [ "$RESET_AFTER" -gt 0 ] && [ ! -f "$MARKER" ]; then'
     echo '    # Primer arranque: lanzar servidor, esperar el reset, re-arrancar.'
