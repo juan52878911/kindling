@@ -3,11 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/config"
@@ -81,7 +85,7 @@ func memoryEnable(args []string) error {
 	fs := flag.NewFlagSet("memory enable", flag.ExitOnError)
 	host := hostFlag(fs)
 	service := fs.String("service", "engram", "servicio MCP donde guardar el historial")
-	listen := fs.String("listen", "0.0.0.0:9100", "dónde exponer el servidor local, si hay que envolverlo")
+	listen := fs.String("listen", "127.0.0.1:9100", "dónde exponer el servidor local, si hay que envolverlo")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "cómo arrancar el servidor de memoria si habla stdio")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
@@ -120,6 +124,13 @@ func memoryEnable(args []string) error {
 
 	fmt.Printf("Para exponerlo por HTTP, deja esto corriendo en otra terminal:\n\n")
 	fmt.Printf("  %s -listen %s -- %s\n\n", bin, *listen, *cmdline)
+	avisarExposicion(*listen)
+	if h, _, err := net.SplitHostPort(*listen); err == nil {
+		if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+			fmt.Printf("Si el gateway corre en OTRA máquina, necesitas exponerlo:\n")
+			fmt.Printf("  kling memory enable -listen 0.0.0.0:%s\n\n", portOf(*listen))
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		fmt.Printf("O instálalo como servicio permanente:\n")
 		fmt.Printf("  kling memory install-service\n\n")
@@ -161,6 +172,80 @@ func memoryDisable(args []string) error {
 	return nil
 }
 
+var reSalida = regexp.MustCompile(`last exit code = (\d+)`)
+
+// avisarExposicion advierte cuando el puente deja de ser local.
+//
+// El default es loopback a proposito: lo que se envuelve suele ser `engram mcp`, la
+// memoria personal, y el puente NO tiene autenticacion — ni la puede tener de forma
+// util, porque `kling mcp link` no manda cabeceras. Exponerlo a la LAN es legitimo
+// cuando el gateway corre en otra maquina, pero tiene que ser una decision, no un
+// default. `/reset` tambien queda accesible para cualquiera que alcance el puerto.
+func avisarExposicion(listen string) {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		fmt.Printf("AVISO: escuchando en %s — accesible desde toda la red, SIN autenticación.\n", listen)
+		fmt.Printf("       Cualquiera que alcance el puerto puede leer la memoria y llamar a /reset.\n")
+		fmt.Printf("       Protégelo con el cortafuegos, o usa -listen 127.0.0.1:PUERTO si el\n")
+		fmt.Printf("       gateway corre en esta misma máquina.\n\n")
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+		fmt.Printf("AVISO: %s no es loopback y el puente no autentica. Limita el acceso.\n\n", listen)
+	}
+}
+
+// esperarArranque confirma con launchd que el job existe y no murió al nacer.
+//
+// `launchctl load` devuelve 0 aunque el job no pueda arrancar nunca: una ruta que
+// no existe da EX_CONFIG (78) y una que launchd no puede ejecutar da 126
+// (Operation not permitted — pasa bajo ~/Documents, ~/Desktop o en un volumen
+// externo, por TCC). En los dos casos stderr queda vacío y el log ni se crea, así
+// que sin esto el comando decía "Servicio instalado" y salía 0.
+//
+// Se espera con margen porque `load` es asíncrono: launchd acepta el plist y
+// spawnea después.
+func esperarArranque(bin string) error {
+	etiqueta := "gui/" + strconv.Itoa(os.Getuid()) + "/com.kindling.bridge"
+	ultimo := "el servicio no llegó a aparecer"
+	for i := 0; i < 20; i++ {
+		time.Sleep(150 * time.Millisecond)
+		out, err := exec.Command("launchctl", "print", etiqueta).CombinedOutput()
+		if err != nil {
+			ultimo = "launchd no conoce el servicio"
+			continue
+		}
+		txt := string(out)
+		if strings.Contains(txt, "state = running") {
+			return nil
+		}
+		m := reSalida.FindStringSubmatch(txt)
+		if m == nil {
+			ultimo = "el servicio no ha arrancado todavía"
+			continue
+		}
+		switch m[1] {
+		case "0":
+			return nil
+		case "78":
+			return fmt.Errorf("launchd no encuentra %s (código 78).\n"+
+				"El cwd de launchd es \"/\": la ruta debe ser absoluta y existir.", bin)
+		case "126":
+			return fmt.Errorf("launchd no tiene permiso para ejecutar %s (código 126).\n"+
+				"Pasa con rutas bajo ~/Documents, ~/Desktop o en volúmenes externos.\n"+
+				"Instálalo donde sí puede: make install (lo deja en ~/.local/bin).", bin)
+		default:
+			return fmt.Errorf("el servicio arrancó y murió (código %s).\n"+
+				"Mira ~/Library/Logs/kindling-bridge.log y `launchctl print %s`.", m[1], etiqueta)
+		}
+	}
+	return fmt.Errorf("no pude confirmar que el servicio arrancara: %s.\n"+
+		"Comprueba con: launchctl print %s", ultimo, etiqueta)
+}
+
 // bridgePath busca el puente allí donde lo deja la instalación.
 func bridgePath() string {
 	home, _ := os.UserHomeDir()
@@ -171,6 +256,14 @@ func bridgePath() string {
 		"./kling-bridge-local",
 	} {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			// Absoluta SIEMPRE. El ultimo candidato es relativo —es donde lo deja
+			// `make bridge-local`— y devolverlo tal cual metia "./kling-bridge-local"
+			// en el ProgramArguments de un LaunchAgent. El cwd de launchd es "/", asi
+			// que se resolvia a "/kling-bridge-local" y el job moria con EX_CONFIG
+			// (78) sin escribir nada en el log.
+			if abs, err := filepath.Abs(p); err == nil {
+				return abs
+			}
 			return p
 		}
 	}
@@ -201,7 +294,7 @@ func localIP() string {
 // el servidor de memoria no dependa de una terminal abierta.
 func memoryInstallService(args []string) error {
 	fs := flag.NewFlagSet("memory install-service", flag.ExitOnError)
-	listen := fs.String("listen", "0.0.0.0:9100", "dónde escuchar")
+	listen := fs.String("listen", "127.0.0.1:9100", "dónde escuchar")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "servidor MCP de stdio a envolver")
 	if err := fs.Parse(reorder(args)); err != nil {
 		return err
@@ -262,6 +355,10 @@ func memoryInstallService(args []string) error {
 	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl load: %v: %s", err, out)
 	}
+	if err := esperarArranque(bin); err != nil {
+		return err
+	}
+	avisarExposicion(*listen)
 
 	fmt.Printf("Servicio instalado: %s\n", plist)
 	fmt.Printf("  expone: %s\n", *cmdline)
