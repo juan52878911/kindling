@@ -630,15 +630,25 @@ func (g *Gateway) anotarFallo(service string, causa error) {
 // cada servicio vuelve a escribir su estado. Es barato y deja el meta al día
 // aunque algo lo cambiara mientras estaba parado.
 func (g *Gateway) anotarSalud(service string, sano bool, causa string) {
+	// El recuerdo en memoria se actualiza SIEMPRE, haya daemon o no: es lo que
+	// evita una escritura por peticion, y no depende de poder persistir.
 	if !g.saludCambio(service, sano) {
 		return
 	}
+	// Lo que si depende del daemon es escribirlo en el meta. Sin cliente no hay
+	// donde, y la goroutine de abajo desreferenciaria un nulo — que, por ser una
+	// goroutine, se llevaria el PROCESO entero y no solo esta anotacion.
+	if g.client == nil {
+		return
+	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := g.client.SetHealth(ctx, service, sano, causa); err != nil {
-			log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
-		}
+		panico.Contener("gateway.anotarSalud", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := g.client.SetHealth(ctx, service, sano, causa); err != nil {
+				log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
+			}
+		})
 	}()
 }
 
