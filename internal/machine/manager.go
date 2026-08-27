@@ -1128,6 +1128,15 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
+	if live == nil {
+		// La eliminaron mientras congelabamos. Los ficheros del snapshot estan
+		// escritos, pero ya no hay maquina a la que pertenezcan. Antes esto era
+		// un deref nil, y un deref nil en el daemon no se lleva esta operacion:
+		// se lleva el proceso, y con el TODAS las microVM quedan huerfanas.
+		delete(m.socket, mc.ID)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("machine %q was removed while it was being frozen", mc.Name)
+	}
 	now := time.Now()
 	live.State = api.StateWarm
 	live.FrozenAt = &now
@@ -1465,6 +1474,18 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
+	if live == nil {
+		delete(m.socket, mc.ID)
+		m.mu.Unlock()
+		// Acabamos de arrancar un VMM para una maquina que ya no existe. Hay que
+		// matarlo AQUI: dejarlo seria un firecracker huerfano reteniendo la RAM
+		// de su invitado, que no aparece en `kling ps` y que nadie contabiliza al
+		// decidir si cabe la siguiente microVM.
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+	}
 	now := time.Now()
 	live.State = api.StateRunning
 	live.StartedAt = &now
@@ -1509,6 +1530,11 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
+	// El cerrojo de ciclo de vida, que aqui faltaba y lo tienen Freeze, Thaw,
+	// Squeeze, PutMMDS y Remove. Sin el, un Stop concurrente a un Thaw desmonta
+	// el namespace de red POR DEBAJO del thaw: la maquina queda "running" y sin
+	// red, y el gateway ve timeouts que no apuntan a nada.
+	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
@@ -1543,11 +1569,19 @@ func (m *Manager) Remove(ref string) error {
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
-	defer m.lock(mc.ID)()
+	unlock := m.lock(mc.ID)
+	defer func() {
+		unlock()
+		// El cerrojo se retira del mapa DESPUES de soltarlo y de que la maquina
+		// ya no este en byID. Borrarlo antes —como se hacia— dejaba a cualquier
+		// m.lock(id) entrante creando un mutex NUEVO con LoadOrStore y entrando
+		// en la seccion critica mientras este Remove seguia borrando ficheros de
+		// cientos de MB.
+		m.lifecycle.Delete(mc.ID)
+	}()
 	m.kill(mc.ID)
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)
-	m.lifecycle.Delete(mc.ID)
 	// El chroot del jail vive aparte del directorio de la máquina: se limpia
 	// también, o cada restauración jailed deja un árbol huérfano.
 	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
