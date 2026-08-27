@@ -84,6 +84,11 @@ type Manager struct {
 	// borra bajo los pies de quien los está llenando. Se toca bajo mu.
 	reserved map[string]bool
 
+	// Dorados cuya integridad ya se comprobó, por huella de sus ficheros. Ver
+	// verifyIntegrity: hashear el overlay cuesta el 67% de una instanciación y
+	// un dorado no cambia desde que se congela.
+	integridad map[string]huellaSnapshot
+
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int

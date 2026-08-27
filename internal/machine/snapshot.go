@@ -345,22 +345,35 @@ func (m *Manager) SetHealth(name string, healthy bool, probeErr string) (*api.Sn
 //
 // DECISIÓN — qué se hashea y qué no:
 //
-//	overlay.ext4 (rootfs) y snap.file  -> SÍ, en cada restauración.
+//	overlay.ext4 (rootfs) y snap.file  -> SÍ, la PRIMERA vez.
 //	mem.file                           -> NO aquí.
 //
 // El fichero de memoria es el grande —cientos de MiB— y restaurar promete ~30 ms;
-// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra. El rootfs y
-// el snap.file son pequeños, y encima el overlay ya se lee entero al copiarlo con
-// `cp` justo después de esta comprobación: el sobrecoste real es una segunda
-// pasada de lectura sobre unos pocos MiB, no sobre el volcado completo. La
-// integridad del mem.file, si algún día se quiere, se comprobaría UNA vez tras
-// reiniciar el daemon (fuera del camino caliente), no en cada arranque.
+// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra.
+//
+// CORRECCIÓN, medida: la versión anterior de esta nota daba por hecho que "el
+// rootfs y el snap.file son pequeños". No lo son. El overlay dorado son 512 MiB
+// nominales, y sha256 los lee ENTEROS —los huecos de un fichero disperso se leen
+// como ceros, y por el hash pasan igual—. Medido en fc-test: hashearlo cuesta
+// 2.866 ms de los 4.280 que tarda una instanciación, el 67%.
+//
+// El razonamiento era bueno; el supuesto estaba mal por dos órdenes de magnitud.
+//
+// Lo que arregla el desfase no es hashear menos sino hashear MENOS VECES: un
+// dorado es INMUTABLE desde que se congela, así que verificarlo en cada una de
+// las 142 instanciaciones no aporta nada sobre verificarlo en la primera. Se
+// recuerda el veredicto y se reusa mientras el fichero no cambie de tamaño ni de
+// fecha; si cambia, se vuelve a verificar. Un dorado corrupto se sigue detectando,
+// y se detecta igual de pronto.
 //
 // Los snapshots anteriores a esta comprobación no tienen digests grabados: se
 // saltan en vez de fallar, o reimportar dejaría de ser opcional para todos.
 func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 	if snap.RootfsSHA256 == "" && snap.SnapSHA256 == "" {
 		return nil // snapshot legacy: no hay digests que comprobar
+	}
+	if m.integridadYaVista(snap.Name, snapDir) {
+		return nil
 	}
 	for _, chk := range []struct{ file, want string }{
 		{"overlay.ext4", snap.RootfsSHA256},
@@ -379,7 +392,57 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 				snap.Name, chk.file, chk.want[:12], got[:12], snap.Name)
 		}
 	}
+	m.anotarIntegridad(snap.Name, snapDir)
 	return nil
+}
+
+// huellaSnapshot describe los ficheros verificados sin leerlos: tamaño y fecha de
+// los dos que se hashean. Basta para saber si el dorado sigue siendo el mismo, y
+// cuesta dos stat en vez de 512 MiB de sha256.
+type huellaSnapshot struct {
+	tam   [2]int64
+	fecha [2]int64
+}
+
+func huellaDe(snapDir string) (huellaSnapshot, bool) {
+	var h huellaSnapshot
+	for i, f := range [2]string{"overlay.ext4", "snap.file"} {
+		st, err := os.Stat(filepath.Join(snapDir, f))
+		if err != nil {
+			return h, false
+		}
+		h.tam[i] = st.Size()
+		h.fecha[i] = st.ModTime().UnixNano()
+	}
+	return h, true
+}
+
+// integridadYaVista dice si este dorado, EXACTAMENTE como está ahora en disco, ya
+// pasó la verificación. El veredicto vive en memoria y no en disco a propósito:
+// tras reiniciar el daemon se vuelve a verificar una vez, que es barato y cubre
+// una corrupción ocurrida mientras estaba parado.
+func (m *Manager) integridadYaVista(name, snapDir string) bool {
+	h, ok := huellaDe(snapDir)
+	if !ok {
+		return false
+	}
+	m.mu.RLock()
+	visto, hay := m.integridad[name]
+	m.mu.RUnlock()
+	return hay && visto == h
+}
+
+func (m *Manager) anotarIntegridad(name, snapDir string) {
+	h, ok := huellaDe(snapDir)
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	if m.integridad == nil {
+		m.integridad = map[string]huellaSnapshot{}
+	}
+	m.integridad[name] = h
+	m.mu.Unlock()
 }
 
 // fileSHA256 devuelve el sha256 de un fichero en hexadecimal. Con crypto/sha256

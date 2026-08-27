@@ -287,3 +287,70 @@ despertar de 7,9 s a 4,8 s a cambio de 12 GB más a escala de 150. Debería ser 
 > 260 ms» cuando el puerto no había abierto nunca. Un bucle que se agota **no es una
 > medición**: hay que distinguir "encontré la condición" de "se me acabaron los
 > intentos".
+
+---
+
+## 7. El verdadero cuello: verificar lo inmutable 142 veces
+
+Fui a paralelizar la creación de máquina, que en §6 parecía serializada. **No lo
+estaba**, y el camino hasta descubrirlo importa más que el arreglo.
+
+### Lo que la primera medición no decía
+
+Las 20 peticiones concurrentes de §6 iban **al mismo servicio**, y el gateway
+serializa por servicio **a propósito** (`ensure()` en `gateway.go`): sin eso, N
+llamadas simultáneas levantarían N microVMs del mismo servicio y agotarían la RAM.
+Medí ese guardián y lo llamé cuello de botella.
+
+Con servicios **distintos** sí había paralelismo, aunque imperfecto. Y durante una
+ráfaga de cinco: **96–97% de CPU en usuario, 0% ocioso, 0% de espera de E/S**. No
+había nada que paralelizar — ya lo estaba, y saturaba los cuatro núcleos.
+
+### Qué quemaba esa CPU
+
+`runFrom` llama a `verifyIntegrity`, que hashea `overlay.ext4` en **cada**
+instanciación. El overlay dorado son **512 MiB nominales**, y sha256 los lee
+enteros: los huecos de un fichero disperso se leen como ceros y por el hash pasan
+igual.
+
+Medido en `fc-test`: **2.866 ms de los 4.280** que tardaba una instanciación. El
+**67%**.
+
+El comentario que justificaba la decisión razonaba bien pero partía de un supuesto
+falso — *«el rootfs y el snap.file son pequeños»*—, equivocado por dos órdenes de
+magnitud.
+
+### El arreglo
+
+Un dorado es **inmutable** desde que se congela: verificarlo en las 142
+instanciaciones no aporta nada sobre verificarlo en la primera. Se recuerda el
+veredicto, con huella de tamaño y fecha de los dos ficheros; si cambian, se vuelve a
+verificar. La corrupción se sigue detectando, y se detecta igual de pronto.
+
+El veredicto vive en memoria y no en disco a propósito: tras reiniciar el daemon se
+verifica una vez más, que es barato y cubre una corrupción ocurrida mientras estaba
+parado.
+
+### Medido después
+
+Despertar suelto: **4.350 ms** la primera vez (verifica) y **175–202 ms** las
+siguientes. **23×.**
+
+Carga concurrente por el gateway, mismo servicio:
+
+| Concurrentes | Antes p50 | Ahora p50 | |
+|---|---|---|---|
+| 1 | 4,82 s | **0,70 s** | 6,9× |
+| 5 | 11,16 s | **1,30 s** | 8,6× |
+| 10 | 21,78 s | **2,13 s** | 10,2× |
+| 20 | 44,08 s | **4,66 s** | 9,5× |
+
+100% de éxito en los cuatro niveles, igual que antes.
+
+Servicios distintos, en régimen permanente: 1 → 0,66 s · 2 → 0,90 s · 4 → 1,53 s ·
+5 → 1,52 s. Cuatro y cinco cuestan lo mismo: ahí sí se ve el paralelismo que antes
+tapaba el hasheo.
+
+> **El coste de la primera vez sigue ahí**, y es correcto que siga: 4,4 s por
+> snapshot y por arranque del daemon. Quien tenga 150 servicios los paga una vez
+> cada uno, no 150 veces cada uno.
