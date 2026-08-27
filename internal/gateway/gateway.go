@@ -1550,11 +1550,16 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
 	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
 	// los demás.
+	// descartadas son las que ya se probaron y no se pudieron congelar. Sin
+	// esto, evictLRU se rendia con la PRIMERA victima ocupada y devolvia un 507
+	// al cliente habiendo RAM perfectamente liberable en otra instancia.
+	descartadas := map[string]bool{}
+
 	pick := func(mismo bool) (string, string) {
 		var elegido, id string
 		var masAntiguo time.Time
 		consid := func(svc string, e *entry) {
-			if svc == salvo || e.inflight > 0 {
+			if svc == salvo || e.inflight > 0 || descartadas[e.machineID] {
 				return
 			}
 			if mismo != (e.tenant == tenant) {
@@ -1577,46 +1582,86 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
 		return elegido, id
 	}
 
-	g.mu.Lock()
-	// Primero lo propio; si no hay, lo ajeno.
-	elegido, id := pick(true)
-	if elegido == "" {
-		elegido, id = pick(false)
-	}
-	if elegido != "" {
-		// Se saca del mapa (primaria o réplica, por machineID) ANTES de congelar:
-		// si alguien pide ese servicio mientras tanto, que lo reconstruya en vez de
-		// enrutar a una máquina que está a punto de dejar de existir.
-		g.removeEntryLocked(elegido, id)
-	}
-	g.mu.Unlock()
-
-	if elegido == "" {
-		return ""
-	}
-
-	// El candado del servicio víctima, para no congelar debajo de un ensure
-	// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace List(),
-	// la ve todavía running (el freeze tarda ~2 s), la adopta como "ya en marcha"
-	// y espera 20 s a un invitado que se está pausando. TryLock y no Lock: quien
-	// llama a evictLRU ya tiene tomado el candado de SU servicio, y un Lock aquí
-	// podría cruzarse con él. Si no se consigue, se prueba la siguiente víctima.
-	vlock := g.ensureLock(elegido)
-	if !vlock.TryLock() {
-		// Ese servicio está ocupado en su propio ensure. Devolverla al mapa y
-		// dejar que el llamador reintente con otra: quitarla y no congelarla
-		// dejaría al gateway creyendo que no existe.
-		return ""
-	}
-	defer vlock.Unlock()
-
 	freeze := func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
 	if g.freezeFn != nil {
 		freeze = g.freezeFn
 	}
-	if err := freeze(id); err != nil {
-		log.Printf("could not freeze %s to make room: %v", elegido, err)
-		return ""
+
+	// Hasta tres victimas. Antes se probaba UNA: si estaba ocupada en su propio
+	// ensure, evictLRU devolvia "" y el llamador respondia 507 aunque hubiera
+	// otras instancias ociosas de sobra.
+	const intentos = 3
+	for i := 0; i < intentos; i++ {
+		g.mu.Lock()
+		// Primero lo propio; si no hay, lo ajeno.
+		elegido, id := pick(true)
+		if elegido == "" {
+			elegido, id = pick(false)
+		}
+		var victima *entry
+		if elegido != "" {
+			victima = g.entryByMachineLocked(elegido, id)
+			// Se saca del mapa (primaria o réplica, por machineID) ANTES de
+			// congelar: si alguien pide ese servicio mientras tanto, que lo
+			// reconstruya en vez de enrutar a una máquina que está a punto de
+			// dejar de existir.
+			g.removeEntryLocked(elegido, id)
+		}
+		g.mu.Unlock()
+
+		if elegido == "" {
+			return "" // ya no queda ninguna candidata
+		}
+
+		// devolver repone la instancia. Se saco para que nadie enrutara a una
+		// maquina a punto de congelarse; si al final NO se congela, dejarla
+		// fuera es peor que no haberla tocado: el gateway cree que no existe,
+		// y el siguiente ensure la adopta desde List() cuando ya no toca.
+		devolver := func() {
+			if victima == nil {
+				return
+			}
+			g.mu.Lock()
+			g.reponerEntryLocked(elegido, victima)
+			g.mu.Unlock()
+		}
+		descartadas[id] = true
+
+		// El candado del servicio víctima, para no congelar debajo de un ensure
+		// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace
+		// List(), la ve todavía running (el freeze tarda ~2 s), la adopta como
+		// "ya en marcha" y espera 20 s a un invitado que se está pausando.
+		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
+		// de SU servicio, y un Lock aquí podría cruzarse con él.
+		vlock := g.ensureLock(elegido)
+		if !vlock.TryLock() {
+			devolver()
+			continue // esa esta ocupada; se prueba otra
+		}
+
+		err := freeze(id)
+		vlock.Unlock()
+		if err != nil {
+			log.Printf("could not freeze %s to make room: %v", elegido, err)
+			devolver()
+			continue
+		}
+		return elegido
 	}
-	return elegido
+	return ""
+}
+
+// reponerEntryLocked devuelve al mapa una instancia que se saco para congelar y
+// al final no se congelo. Se llama con g.mu tomado.
+func (g *Gateway) reponerEntryLocked(service string, e *entry) {
+	if g.services[service] == nil {
+		g.services[service] = e
+		return
+	}
+	for _, x := range g.extra[service] {
+		if x.machineID == e.machineID {
+			return // ya volvio por otro camino
+		}
+	}
+	g.extra[service] = append(g.extra[service], e)
 }
