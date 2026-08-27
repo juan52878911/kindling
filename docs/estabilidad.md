@@ -132,66 +132,88 @@ diferencia.
 
 ---
 
-## 5. Evaluación: WebView en lugar de Chromium
+## 5. Motor de navegador: la evaluación, medida
 
-### Lo medido
+Se pedía evaluar «WebView en lugar de un Chromium completo». La conclusión llegó
+por un camino distinto al esperado, así que va entera.
 
-| Imagen | Lógico | En disco |
-|---|---|---|
-| **playwright** | **2,5 G** | **899 M** |
-| semgrep | 786 M | 585 M |
-| fetch | 89 M | 77 M |
-| wikipedia | 67 M | 54 M |
-| context7 / everything / memory / sequentialthinking | ~50 M | 36–39 M |
-
-Playwright es **12–25× más grande** que cualquier MCP de node y por sí solo supone
-el **45%** de los 2,0 GB totales. La motivación es real y está medida.
-
-### La buena noticia: el puente ya es agnóstico
-
-`cmd/kling-bridge/browser.go` no sabe que arranca Chromium. Lee
-`/etc/kling/browser.json`:
-
-```json
-{ "sidecar": [...], "ready_url": "...", "session_args": [...] }
-```
-
-y su propio comentario lo dice: *«el puente no sabe (ni le importa) que es
-Chromium: sólo arranca lo que diga `sidecar`, espera a `ready_url` y añade
-`session_args`»*. Añadir un motor alternativo es **una receta de imagen y un
-marcador**, no un rediseño. La arquitectura para «que sea una opción sin descartar
-Chromium» ya existe.
-
-### La mala: «WebView» no existe dentro de estas microVMs
+### «WebView» no existe dentro de estas microVMs
 
 WebView significa un motor embebido **que aporta el sistema operativo**: WKWebView
-en macOS, WebView2 en Windows (que es Chromium), Android WebView (Chromium),
-WebKitGTK en escritorio Linux. Las microVMs son **Alpine mínimo**: no hay ningún
-WebView del sistema que embeber.
+en macOS, WebView2 en Windows (que por dentro es Chromium), WebKitGTK en escritorio
+Linux. Las microVMs son **Alpine mínimo**: no hay ningún WebView del sistema que
+embeber. Y los servidores MCP de navegador hablan **CDP**, que WebKitGTK no habla,
+así que usarlo obligaría a escribir un adaptador.
 
-Y hay un obstáculo de protocolo: los servidores MCP de navegador hablan **CDP**
-(Chrome DevTools Protocol). WebKitGTK no habla CDP, así que usarlo obligaría a
-escribir un adaptador — mucho más trabajo que el ahorro.
+Pero el objetivo detrás de la pregunta —gastar mucho menos— sí se cumple, con otro
+binario.
 
-### Los candidatos reales, en orden
+### Dónde está el peso, medido
 
-1. **`chrome-headless-shell`.** Es el Chromium sin capa de interfaz, pensado
-   exactamente para automatización. Habla el mismo CDP, así que **ningún cliente
-   cambia**: es sustituir el `sidecar` del marcador. Es la primera medición que
-   haría.
-2. **El WebKit que trae Playwright** (`playwright install webkit`). Más ligero que
-   su Chromium y soportado nativamente por Playwright, pero cambia el motor de
-   render: hay sitios que se comportan distinto.
-3. **WebKitGTK con un adaptador CDP.** Descartado: el coste de escribir y mantener
-   el adaptador supera al ahorro.
+Desglose de los 883 MB de la imagen `playwright`:
 
-### Lo que propongo
+| | |
+|---|---|
+| `/usr/lib/chromium` | 313 M |
+| **`libLLVM.so`** | **183 M** |
+| `libgallium.so` | 42 M |
+| `libx265.so` | 21 M |
+| `libavcodec.so` | 20 M |
+| `libaom.so` | 8 M |
+| `libgtk-3.so` | 7 M |
 
-Medir (1) antes de comprometerse. La pregunta que decide es **cuánto baja de los
-899 MB**, y no la sé: no la he medido, y estimarla sería inventar. El camino es
-construir la receta con `chrome-headless-shell`, compararla contra la de playwright
-en disco, en `mem.file` del dorado y en tiempo hasta servir, y **sólo entonces**
-decidir el defecto.
+Unos **280 MB son pila gráfica y códecs de vídeo**, más GTK —un toolkit de
+interfaz— dentro de un navegador headless. Un scraper no toca nada de eso.
 
-Lo que sí está claro es que la infraestructura para tenerlo como opción, y para
-cambiar el defecto si gana, **ya está construida**.
+**Pero no se pueden quitar por selección de paquetes.** Medido en Alpine 3.21:
+
+| Combinación | Instalado |
+|---|---|
+| chromium + swiftshader + fuentes (actual) | 745 MiB |
+| sin swiftshader | 740 MiB |
+| sólo `chromium` | **720 MiB** |
+
+Quitar swiftshader ahorra **5 MiB**. LLVM, Mesa y los códecs son dependencias
+duras del paquete `chromium` de Alpine.
+
+### El binario que sí cambia las cosas
+
+`chrome-headless-shell` es el Chromium que Google construye para automatización, sin
+capa de interfaz. **Habla el mismo CDP, así que ningún cliente cambia.**
+
+Comparación cara a cara, mismo script, mismos tres sitios reales
+(`example.com`, la primera página web del CERN, y el RFC 2324):
+
+| | Alpine + `chromium` | glibc + `headless-shell` |
+|---|---|---|
+| Imagen total | **986,8 MB** | **637 MB** |
+| Arranque (3 pasadas) | 369 · 337 · 395 ms | **107 · 97 · 113 ms** |
+| example.com | 449 ms | **147 ms** |
+| CERN | 1047 ms | **962 ms** |
+| RFC 2324 | 1890 ms | **853 ms** |
+| Texto extraído | 129 / 983 / 19601 car. | **idéntico** |
+
+Gana en las dos dimensiones: **35% menos disco y 3,4× más rápido al arrancar**, con
+poca varianza en las tres pasadas. Y los caracteres extraídos coinciden **exactos**,
+que es lo que prueba que el scraping es equivalente y no una versión degradada.
+
+### El bloqueo, nombrado con precisión
+
+`chrome-headless-shell` es **glibc**; las microVMs son Alpine (**musl**).
+
+Probado: con `gcompat` y 20 bibliotecas de compatibilidad **no arranca** — quedan 52
+bibliotecas sin resolver. No es viable.
+
+Todas las bases de kling salen del *minirootfs* de Alpine
+(`scripts/70-build-minimal-image.sh`). Usar `headless-shell` exige **una familia de
+base glibc** —un script hermano que traiga un rootfs de Debian— y que
+`80-mcp-image.sh` sepa elegir motor y escribir el `browser.json` que corresponda.
+
+### Lo que ya está resuelto
+
+El puente **ya es agnóstico al motor**. `cmd/kling-bridge/browser.go` lee
+`/etc/kling/browser.json` con `sidecar`, `ready_url` y `session_args`, y su propio
+comentario lo dice: *«no sabe (ni le importa) que es Chromium»*. La infraestructura
+para tener dos motores y cambiar el defecto **existe**; lo que falta es la base
+glibc debajo.
+
