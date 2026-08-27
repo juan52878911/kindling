@@ -20,6 +20,8 @@ import (
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -871,16 +873,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 // meta viejo o el nuevo. El proyecto ya usa este patrón en writePending y
 // saveRecipe; aquí faltaba.
 func writeMeta(dir string, b []byte) error {
-	final := filepath.Join(dir, "meta.json")
-	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	// Durable, no solo atomico. Un meta perdido en un corte no da error: el
+	// servicio DESAPARECE del catalogo en silencio (Snapshots() salta lo que no
+	// puede leer), y RemoveSnapshot se niega despues a borrar lo ilegible, asi
+	// que el directorio queda varado con su mem.file de cientos de MB.
+	return durable.Escribir(filepath.Join(dir, "meta.json"), b, 0o644)
 }
 
 // patchVolumeDrive reapunta un disco de volumen y devuelve el nombre que de

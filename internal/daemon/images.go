@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // buildTimeout: instalar node y un paquete npm en un chroot va lento, y en un
@@ -312,11 +314,11 @@ func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 	if len(rec.Env) > 0 {
 		perm = 0o600
 	}
-	tmp := s.recipePath(r.Name) + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.recipePath(r.Name))
+	// Durable: de la receta sale la BASE sobre la que arranca la imagen. Una
+	// receta perdida hace que recipeBase caiga en la base por defecto SIN log, y
+	// el invitado arranca sobre el rootfs equivocado — faltan bibliotecas y el
+	// fallo aparece dentro, no aqui.
+	return durable.Escribir(s.recipePath(r.Name), append(b, '\n'), perm)
 }
 
 // handleImages enumera las imágenes de rootfs construidas: nombre, tamaño en
