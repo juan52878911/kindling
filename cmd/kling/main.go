@@ -711,23 +711,77 @@ func cmdCommit(args []string) error {
 	// rutina — pero pisar uno por un nombre repetido sin querer no debe poder
 	// pasar, y por eso no es el comportamiento por defecto.
 	replace := fs.Bool("replace", false, "replace the snapshot if one with this name already exists")
+	// Congelar un servidor que no sirve produce un snapshot que NO sirve, y el
+	// fallo no aparece hasta que alguien lo despierta —minutos u horas despues—
+	// con un "tool did not start listening" que no menciona el commit. Por eso
+	// se comprueba antes, y por eso saltarselo es explicito.
+	force := fs.Bool("force", false, "commit even if the guest is not serving (produces a snapshot that may not work)")
+	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve before committing")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling commit [-replace] <ref> <snapshot-name>")
+		return fmt.Errorf("usage: kling commit [-replace] [-force] <ref> <snapshot-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	snap, err := api.NewClient(hostOf(*host)).Commit(ctx, fs.Arg(0), fs.Arg(1), *replace)
+	c := api.NewClient(hostOf(*host))
+	if !*force {
+		if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera); err != nil {
+			return err
+		}
+	}
+
+	snap, err := c.Commit(ctx, fs.Arg(0), fs.Arg(1), *replace)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("%s  golden snapshot  (%s of memory)\n", snap.Name, human(snap.MemBytes))
 	fmt.Printf("instantiate with:  kling run -from %s\n", snap.Name)
 	return nil
+}
+
+// listoParaCongelar exige que el invitado SIRVA antes de convertirse en dorado.
+//
+// `kling mcp import` ya hacia esta danza; `kling commit` a secas no, y es el
+// camino que documentamos para crear dorados a mano. El resultado era un snapshot
+// que restaura en 26 ms y luego no contesta: la microVM arranca, el proceso del
+// servidor no esta escuchando, y el gateway devuelve 502 tras esperar en balde.
+//
+// Ademas del puerto se pide el /reset del puente, que cierra las sesiones y mata
+// los hijos: un dorado congelado en estado post-handshake rechaza el siguiente
+// initialize con 400 "Server already initialized". Si el invitado no habla por
+// puente (HTTP nativo) el /reset no existe y no es un fallo — el puerto abierto
+// es cuanto se puede comprobar.
+func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration) error {
+	fmt.Printf("checking the guest is serving before freezing... ")
+	if err := waitGuest(ctx, c, ref, espera); err != nil {
+		fmt.Println("✗")
+		return fmt.Errorf("%s: %w", mensajeNoSirve(ref, espera.String()), err)
+	}
+	// El /reset deja el servidor como recien arrancado. 404 = no hay puente, que
+	// es legitimo; solo se informa de lo que se pudo comprobar.
+	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: "/reset", Method: "POST"})
+	switch {
+	case err == nil && resp.Status == 204:
+		fmt.Println("✓ (serving, session state reset)")
+	default:
+		fmt.Println("✓ (serving)")
+	}
+	return nil
+}
+
+// mensajeNoSirve explica la cadena entera: que pasa ahora, que pasaria al
+// despertar, como diagnosticarlo y como saltarselo. Vive aparte para poder
+// comprobar que no se queda a medias.
+func mensajeNoSirve(ref, espera string) string {
+	return fmt.Sprintf("the guest is not serving on port 8080 after %s\n"+
+		"A golden snapshot of a server that is not listening restores fine and then "+
+		"fails on wake with \"tool did not start listening\".\n"+
+		"Check it with:  kling logs %s\n"+
+		"Or freeze anyway with:  kling commit -force ...", espera, ref)
 }
 
 func cmdSnapshots(args []string) error {
