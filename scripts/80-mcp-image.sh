@@ -51,6 +51,39 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 [ -f "$ROOT/images/$BASE.ext4" ] || {
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
+BASE_BROWSER=no
+
+# base_trae_navegador mira si la imagen base ya lleva su propio marcador de
+# navegador. Se comprueba montandola en SOLO LECTURA, y no por el nombre de la
+# base: el nombre es una convencion, el fichero es un hecho.
+base_trae_navegador() {
+  local m rc=1
+  m="$(mktemp -d)"
+  if mount -o loop,ro "$ROOT/images/$BASE.ext4" "$m" 2>/dev/null; then
+    [ -f "$m/etc/kling/browser.json" ] && rc=0
+    umount "$m" 2>/dev/null || true
+  fi
+  rmdir "$m" 2>/dev/null || true
+  return $rc
+}
+
+# pkg_add instala con el gestor que tenga la base: apk en Alpine, apt en la base
+# glibc. Se decide por el binario que hay DENTRO de la imagen, no por su nombre.
+#
+# No monta /proc ni copia resolv.conf: de eso se encargan los dos llamadores, que
+# ya lo hacian antes de que esto existiera. Hacerlo tambien aqui dejaria un bind
+# mount de mas por cada llamada.
+pkg_add() {
+  [ $# -gt 0 ] || return 0
+  if [ -x "$mnt/sbin/apk" ]; then
+    chroot "$mnt" /sbin/apk add --no-cache "$@"
+  else
+    chroot "$mnt" env DEBIAN_FRONTEND=noninteractive sh -c \
+      "apt-get update -qq && apt-get install -y --no-install-recommends $*" \
+      && chroot "$mnt" sh -c "apt-get clean; rm -rf /var/lib/apt/lists/*" 2>/dev/null
+  fi
+}
+
 PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; EXTRA_ENV=(); CMD=(); BUNDLE=0
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
@@ -137,11 +170,21 @@ parse_build_opts() {
     *puppeteer*)  BROWSER="puppeteer" ;;
   esac
   if [ -n "$BROWSER" ]; then
-    echo "dependencia de navegador detectada ($BROWSER) → Chromium + modo compartido"
-    if ! echo " $PKGS " | grep -q " chromium "; then
-      PKGS="$PKGS chromium chromium-swiftshader nss freetype harfbuzz ttf-freefont font-noto dbus"
+    # Si la base YA trae navegador y su marcador, no se instala otro. Es lo que
+    # permite construir el MISMO servidor MCP sobre Alpine+Chromium o sobre la
+    # base glibc con chrome-headless-shell sin tocar la receta: el puente habla
+    # CDP, y le da igual cual de los dos haya al otro lado.
+    if base_trae_navegador; then
+      BASE_BROWSER=si
+      echo "dependencia de navegador detectada ($BROWSER) → la base '$BASE' ya trae uno; no se instala Chromium"
+      if [ "$GROW" -lt 512 ]; then GROW=512; fi
+    else
+      echo "dependencia de navegador detectada ($BROWSER) → Chromium + modo compartido"
+      if ! echo " $PKGS " | grep -q " chromium "; then
+        PKGS="$PKGS chromium chromium-swiftshader nss freetype harfbuzz ttf-freefont font-noto dbus"
+      fi
+      if [ "$GROW" -lt 2560 ]; then GROW=2560; fi
     fi
-    [ "$GROW" -lt 2560 ] && GROW=2560
   fi
 }
 
@@ -255,7 +298,7 @@ if [ -n "$PKGS" ]; then
   echo "instalando en la imagen: $PKGS"
   cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
   mount --bind /proc "$mnt/proc" 2>/dev/null || true
-  chroot "$mnt" /sbin/apk add --no-cache $PKGS
+  pkg_add $PKGS
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
@@ -333,13 +376,28 @@ if [ -n "${BROWSER:-}" ]; then
     *)          SESSION_ARGS='[]' ;;
   esac
   mkdir -p "$mnt/etc/kling"
-  cat > "$mnt/etc/kling/browser.json" <<BJSON
+  if [ "$BASE_BROWSER" = si ]; then
+    # La base ya declaro SU motor. Aqui solo se anaden los session_args, que
+    # dependen del cliente MCP (playwright o puppeteer) y no del navegador.
+    # Sidecar y ready_url se dejan intactos: sobreescribirlos pondria la ruta
+    # del Chromium de Alpine en una imagen donde ese binario no existe.
+    python3 - "$mnt/etc/kling/browser.json" "$SESSION_ARGS" <<'PYJSON'
+import json, sys
+ruta, args = sys.argv[1], json.loads(sys.argv[2])
+d = json.load(open(ruta))
+d["session_args"] = args
+json.dump(d, open(ruta, "w"), indent=2)
+PYJSON
+    echo "  motor: el que trae la base '$BASE'"
+  else
+    cat > "$mnt/etc/kling/browser.json" <<BJSON
 {
   "sidecar": ["/usr/bin/chromium-browser","--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-software-rasterizer","--remote-debugging-address=127.0.0.1","--remote-debugging-port=9222","about:blank"],
   "ready_url": "http://127.0.0.1:9222/json/version",
   "session_args": $SESSION_ARGS
 }
 BJSON
+  fi
 fi
 
 # DETECCIÓN DE CAPACIDADES. Inspecciona el árbol de dependencias npm ya instalado
@@ -509,8 +567,8 @@ if [ -n "$NPM" ]; then
     ov_up
     cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
     mount --bind /proc "$mnt/proc" 2>/dev/null || true
-    chroot "$mnt" /sbin/apk add --no-cache $SYS \
-      || echo "AVISO: 'apk add' de binarios de sistema falló ($SYS); revisa la lista" >&2
+    pkg_add $SYS \
+      || echo "AVISO: instalar los binarios de sistema falló ($SYS); revisa la lista" >&2
     umount "$mnt/proc" 2>/dev/null || true
   fi
 
@@ -537,7 +595,7 @@ if [ -n "$NPM" ]; then
     DOMAINS=$(grep -rhoE 'https?://[a-zA-Z0-9._-]+' "$NM" 2>/dev/null \
       | sed -E 's#^https?://##' \
       | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|registry\.npmjs\.org|nodejs\.org|github\.com)$' \
-      | sort -u | sed -n '1,40p')
+      | sort -u | sed -n '1,40p' || true)
     if [ -n "$DOMAINS" ]; then
       ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
     fi
@@ -602,7 +660,7 @@ if [ -n "$PIP" ] && [ ! -f "$mnt/etc/kling/capabilities.json" ]; then
     DOMAINS=$(grep -rhoIE 'https?://[a-zA-Z0-9._-]+' "$SP" 2>/dev/null \
       | sed -E 's#^https?://##' \
       | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|pypi\.org|files\.pythonhosted\.org|github\.com)$' \
-      | sort -u | sed -n '1,40p')
+      | sort -u | sed -n '1,40p' || true)
     [ -n "$DOMAINS" ] && ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
   fi
   mkdir -p "$mnt/etc/kling"
@@ -710,7 +768,7 @@ if [ ${#CMD[@]} -gt 0 ] && [ "${SKIP_CMD_CHECK:-0}" != 1 ]; then
           echo "      -cmd \"python3 -m $WANT_MOD\"" >&2
         fi
         SCRIPTS=$(sed -n '/^\[console_scripts\]/,/^\[/p' "$sp"/*.dist-info/entry_points.txt 2>/dev/null \
-          | sed -n 's/^\([A-Za-z0-9._-]*\) *=.*/\1/p' | sort -u | sed -n '1,10p')
+          | sed -n 's/^\([A-Za-z0-9._-]*\) *=.*/\1/p' | sort -u | sed -n '1,10p' || true)
         [ -n "$SCRIPTS" ] && echo "  ejecutables que instaló pip: $(echo "$SCRIPTS" | paste -sd' ' -)" >&2
         MODS=$(find "$sp" -maxdepth 2 -name __main__.py 2>/dev/null \
           | sed -E "s#^$sp/##; s#/__main__.py##" | grep -v "^$WANT_MOD$" | sort | sed -n '1,8p')
@@ -726,6 +784,14 @@ fi
 [ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }
 chmod +x "$mnt/entrypoint"
 sync
+# EL RESOLVER DEL INVITADO. Durante la construccion se copio el del anfitrion
+# para que apk/apt/npm resolvieran, y ese fichero acaba EN LA CAPA, tapando el
+# de la base. En un host con systemd-resolved dice "nameserver 127.0.0.53", que
+# dentro de la microVM no existe, y el resolver real del host suele ser una IP
+# privada que el cortafuegos de salida bloquea. El sintoma llega mucho despues:
+# un ERR_NAME_NOT_RESOLVED la primera vez que el servicio resuelve un nombre.
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$mnt/etc/resolv.conf"
+
 ov_down                       # desmonta overlay, capa y base
 
 # La capa ya contiene solo el delta en /upper. Se quita /work (scratch de
@@ -779,6 +845,30 @@ else
 fi
 
 chmod a+r "$LAYER"
+
+# LA RECETA. Es donde consta sobre que base se construyo la imagen, y el daemon
+# la lee para saber que rootfs montar debajo de la capa.
+#
+# Hasta ahora solo la escribia `kling add`, asi que una imagen construida
+# llamando a este script directamente se quedaba SIN receta — y sin receta el
+# daemon asume la base por defecto. El sintoma no es un error al construir: es
+# un invitado que arranca con la base equivocada debajo y no encuentra ficheros
+# que si estan en la imagen. Visto con la base glibc: el marcador del navegador
+# venia de la capa y el binario faltaba, porque debajo se monto Alpine.
+RECIPE="$ROOT/images/$NAME.recipe.json"
+python3 - "$RECIPE" "$NAME" "$BASE" "$PKGS" "$NPM" "${PIP:-}" "$GROW" "${CMD[@]}" <<'PYRECIPE'
+import json, sys, datetime
+ruta, nombre, base, pkgs, npm, pip, grow, *cmd = sys.argv[1:]
+rec = {"name": nombre, "base": base, "cmd": cmd,
+       "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+for clave, valor in (("packages", pkgs), ("npm", npm), ("pip", pip)):
+    if valor.strip():
+        rec[clave] = valor.split()
+if grow and grow != "0":
+    rec["grow_mb"] = int(grow)
+json.dump(rec, open(ruta, "w"), indent=2)
+PYRECIPE
+echo "receta escrita en $RECIPE (base '$BASE')"
 
 echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales; la base se comparte)"
 if [ "$HTTP_PROXY" = 1 ]; then

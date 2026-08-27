@@ -81,6 +81,20 @@ if [ -n "$PKGS" ]; then
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
+# EL RESOLVER DEL INVITADO, no el del anfitrion.
+#
+# Durante la construccion se copia el resolv.conf del host para que apk/apt
+# resuelvan. Dejarlo asi es un fallo silencioso: en un host con systemd-resolved
+# ese fichero dice "nameserver 127.0.0.53", que dentro de la microVM no existe;
+# y el resolver de verdad del host suele ser una IP privada (aqui 192.168.2.1)
+# que el cortafuegos de salida BLOQUEA a proposito.
+#
+# El sintoma no aparece al construir ni al arrancar: aparece la primera vez que
+# el servicio intenta resolver un nombre, como un ERR_NAME_NOT_RESOLVED que no
+# apunta a nada. Se deja el mismo resolver publico que usa el modo allowlist
+# (internal/net.DNSResolver), para que las dos vias coincidan.
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$mnt/etc/resolv.conf"
+
 install -m755 "$HERE/minimal-init.sh" "$mnt/sbin/overlay-init"
 mkdir -p "$mnt/overlay" "$mnt/rom" "$mnt/run"
 
