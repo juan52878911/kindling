@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -165,5 +166,24 @@ func TestSeCuraReconstruyendoSoloLasDosCausasQueLoSon(t *testing.T) {
 		if got := seCuraReconstruyendo(c.err, c.grabada); got != c.cura {
 			t.Errorf("%s: %v, esperaba %v", c.nombre, got, c.cura)
 		}
+	}
+}
+
+// El motivo que se imprime tiene que ser el de VERDAD: decir "no sobrevivió al
+// reinicio del anfitrión" cuando lo que pasó es que se refrescó la imagen manda
+// a buscar el problema al sitio equivocado.
+func TestElMotivoDeReconstruirDiceLaCausaCorrecta(t *testing.T) {
+	tsc := errors.New("... Could not set TSC scaling ...")
+	noArranca := errors.New("didn't start (tool did not start listening)")
+
+	if m := motivoDeReconstruir(tsc, ""); !strings.Contains(m, "TSC") {
+		t.Errorf("caso TSC: %q", m)
+	}
+	m := motivoDeReconstruir(noArranca, api.MotivoImagenCambiada)
+	if !strings.Contains(m, "refreshed") {
+		t.Errorf("caso imagen refrescada: %q", m)
+	}
+	if strings.Contains(m, "reboot") {
+		t.Errorf("el caso de la imagen no puede hablar del reinicio: %q", m)
 	}
 }

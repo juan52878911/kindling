@@ -125,6 +125,18 @@ func seCuraReconstruyendo(probeErr error, saludGrabada string) bool {
 	return api.EsImagenCambiada(errors.New(saludGrabada))
 }
 
+// motivoDeReconstruir dice POR QUE se reconstruye, en una linea.
+func motivoDeReconstruir(probeErr error, saludGrabada string) string {
+	switch {
+	case api.EsFalloTSC(probeErr):
+		return "its golden snapshot didn't survive the host reboot (TSC)"
+	case api.EsImagenCambiada(probeErr) || api.EsImagenCambiada(errors.New(saludGrabada)):
+		return "its image was refreshed and the golden snapshot still has the old bridge"
+	default:
+		return "its golden snapshot is no longer usable"
+	}
+}
+
 func mcpHeal(args []string) error {
 	fs := flag.NewFlagSet("mcp heal", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -211,7 +223,9 @@ func mcpHeal(args []string) error {
 		// Vaciar antes de una reconstruccion que tarda entre 15 y 40 s: si no,
 		// el tabwriter se guarda las lineas anteriores y parece colgado.
 		_ = tw.Flush()
-		fmt.Printf("  %s  rebuilding: its golden snapshot didn't survive the host reboot\n", nombre)
+		// El motivo va en el mensaje: son dos causas distintas y decir la que no
+		// es manda a buscar el problema al sitio equivocado.
+		fmt.Printf("  %s  rebuilding: %s\n", nombre, motivoDeReconstruir(probeErr, s.HealthErr))
 		if err := mcpImport(argv); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ rebuild failed: %v\n", nombre, err)
 			continue
