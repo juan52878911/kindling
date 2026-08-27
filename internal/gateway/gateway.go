@@ -694,7 +694,43 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// El destino es una URL de TERCEROS, puesta con `kling mcp link`. Mandarle el
+	// token del gateway seria filtrar la credencial de todo el sistema a un host
+	// que no controlamos.
+	sinCredencialDelGateway(proxy)
 	proxy.ServeHTTP(w, r)
+}
+
+// sinCredencialDelGateway quita la cabecera Authorization antes de reenviar.
+//
+// `Authorization` NO es hop-by-hop, asi que httputil.ReverseProxy la propaga
+// verbatim. Sin esto, el token que autentica a los clientes del gateway llega
+// entero a cada servidor MCP invitado —que este codigo declara HOSTILES por
+// diseno, ver internal/machine/mmds.go— y a cada URL externa enlazada.
+//
+// Con ese token, un invitado comprometido llama al gateway como cliente
+// legitimo: despertar un snapshot ES ejecutar codigo, y desde ahi puede invocar
+// cualquier herramienta de cualquier servicio y cruzar tenants. Las cuotas no
+// son una frontera de seguridad y no lo impedirian.
+//
+// Lo que el destino necesite para autenticarse es SUYO y se anade aparte: los
+// enlaces (api.Link) no llevan credencial, asi que aqui no hay nada que
+// reponer.
+// proxyInvitado arma el proxy hacia una microVM, sin la credencial del gateway.
+func proxyInvitado(target *url.URL) *httputil.ReverseProxy {
+	p := httputil.NewSingleHostReverseProxy(target)
+	sinCredencialDelGateway(p)
+	return p
+}
+
+func sinCredencialDelGateway(p *httputil.ReverseProxy) {
+	dir := p.Director
+	p.Director = func(r *http.Request) {
+		if dir != nil {
+			dir(r)
+		}
+		r.Header.Del("Authorization")
+	}
 }
 
 func (g *Gateway) route(sid string) *sessionRoute {
@@ -894,7 +930,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		checkedAt:   time.Now(),
 		tenant:      tnt.name, // quien la despertó es su dueño para cuota y fairness
 		maxSessions: gwMaxSessions(mc.MemMiB),
-		proxy:       httputil.NewSingleHostReverseProxy(target),
+		proxy:       proxyInvitado(target),
 	}
 	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
 	// LA RESPUESTA es larga a propósito: al otro lado hay una herramienta, y una
