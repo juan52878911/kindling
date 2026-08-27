@@ -220,7 +220,24 @@ Options:
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	srv := &http.Server{Addr: *listen, Handler: mux}
+	srv := &http.Server{
+		Addr:    *listen,
+		Handler: mux,
+		// El puente es el PID 1 del invitado: una goroutine y un descriptor
+		// retenidos para siempre por un cliente que no termina su cabecera se
+		// pagan contra las ~12 sesiones que caben en 1 GiB, no contra un
+		// servidor holgado. El daemon y el gateway ya llevaban estos plazos;
+		// aqui faltaban.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout va a CERO a proposito, y es la diferencia con los otros
+		// dos: aqui al otro lado hay una herramienta MCP ejecutandose. Un escaneo
+		// de semgrep sobre un repo grande, o un navegador cargando una pagina
+		// lenta, pasan del minuto con toda legitimidad. Un WriteTimeout cortaria
+		// esa respuesta a medias y el cliente veria una conexion caida en vez de
+		// un resultado — un fallo peor que la espera que pretendia evitar.
+	}
 
 	// El apagado se ORDENA aquí y se COMPLETA abajo. Shutdown hace que
 	// ListenAndServe retorne de inmediato, así que cerrar las sesiones dentro

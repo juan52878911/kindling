@@ -293,6 +293,9 @@ func (c *Client) store(path string, b []byte) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return
 	}
+	// Atomico pero SIN fsync, a proposito: esto es una cache del registro
+	// remoto. Perderla en un corte cuesta una descarga, no un dato. Ver
+	// internal/durable para lo que si tiene que sobrevivir.
 	tmp := p + ".tmp"
 	if os.WriteFile(tmp, b, 0o644) == nil {
 		_ = os.Rename(tmp, p)

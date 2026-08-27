@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -328,35 +329,12 @@ func (m *Manager) writePending() {
 		return
 	}
 
-	tmp := m.statePath() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		log.Printf("state: could not write %s: %v", tmp, err)
+	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
+	// (internal/durable): tenerlo escrito dos veces era tenerlo bien en uno y
+	// mal en el otro, que es lo que pasaba con links.json.
+	if err := durable.Escribir(m.statePath(), b, 0o644); err != nil {
+		log.Printf("state: could not persist it: %v", err)
 		return
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		log.Printf("state: incomplete write: %v", err)
-		return
-	}
-	// fsync del fichero Y del directorio. Sin el segundo, el rename puede no
-	// haber llegado al disco cuando se corta la luz, y el daemon arrancaría
-	// leyendo el estado anterior — que es peor que no leer ninguno, porque se
-	// da por bueno.
-	if err := f.Sync(); err != nil {
-		log.Printf("state: fsync failed: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		log.Printf("state: close failed: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, m.statePath()); err != nil {
-		log.Printf("state: rename failed: %v", err)
-		return
-	}
-	if d, err := os.Open(m.root); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
 	}
 }
 

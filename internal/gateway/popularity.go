@@ -142,6 +142,12 @@ func (p *popularity) save(snapshot map[string]float64) {
 	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
 		return
 	}
+	// Atomico pero SIN fsync, a proposito. Esto es un contador de popularidad
+	// para decidir a quien precalentar: se reescribe a menudo, y perderlo en un
+	// corte solo hace que el primer precalentado tras el arranque sea peor
+	// elegido. Pagar un fsync por cada actualizacion de una heuristica que se
+	// reconstruye sola en minutos no sale a cuenta. Para el estado que SI hay
+	// que conservar esta internal/durable.
 	tmp := p.path + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
 		_ = os.Rename(tmp, p.path)
