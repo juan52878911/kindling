@@ -3,11 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/config"
@@ -81,7 +85,7 @@ func memoryEnable(args []string) error {
 	fs := flag.NewFlagSet("memory enable", flag.ExitOnError)
 	host := hostFlag(fs)
 	service := fs.String("service", "engram", "MCP service where the history is stored")
-	listen := fs.String("listen", "0.0.0.0:9100", "where to expose the local server, if it needs wrapping")
+	listen := fs.String("listen", "127.0.0.1:9100", "where to expose the local server, if it needs wrapping")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "how to start the memory server if it speaks stdio")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -161,6 +165,79 @@ func memoryDisable(args []string) error {
 	return nil
 }
 
+var reExitCode = regexp.MustCompile(`last exit code = (\d+)`)
+
+// waitForStart confirma con launchd que el job existe y no murio al nacer.
+//
+// `launchctl load` devuelve 0 aunque el job no pueda arrancar nunca: una ruta que
+// no existe da EX_CONFIG (78) y una que launchd no puede ejecutar da 126
+// (Operation not permitted — pasa bajo ~/Documents, ~/Desktop o en un volumen
+// externo, por TCC). En los dos casos stderr queda vacio y el log ni se crea, asi
+// que sin esto el comando decia "Service installed" y salia 0.
+//
+// Se espera con margen porque `load` es asincrono: launchd acepta el plist y
+// spawnea despues.
+func waitForStart(bin string) error {
+	label := "gui/" + strconv.Itoa(os.Getuid()) + "/com.kindling.bridge"
+	last := "the service never appeared"
+	for i := 0; i < 20; i++ {
+		time.Sleep(150 * time.Millisecond)
+		out, err := exec.Command("launchctl", "print", label).CombinedOutput()
+		if err != nil {
+			last = "launchd does not know the service"
+			continue
+		}
+		txt := string(out)
+		if strings.Contains(txt, "state = running") {
+			return nil
+		}
+		m := reExitCode.FindStringSubmatch(txt)
+		if m == nil {
+			last = "the service has not started yet"
+			continue
+		}
+		switch m[1] {
+		case "0":
+			return nil
+		case "78":
+			return fmt.Errorf("launchd cannot find %s (code 78).\n"+
+				"launchd's cwd is \"/\": the path must be absolute and exist.", bin)
+		case "126":
+			return fmt.Errorf("launchd is not allowed to run %s (code 126).\n"+
+				"This happens under ~/Documents, ~/Desktop or on external volumes.\n"+
+				"Install it where it can: make install (puts it in ~/.local/bin).", bin)
+		default:
+			return fmt.Errorf("the service started and died (code %s).\n"+
+				"Check ~/Library/Logs/kindling-bridge.log and `launchctl print %s`.", m[1], label)
+		}
+	}
+	return fmt.Errorf("could not confirm the service started: %s.\n"+
+		"Check with: launchctl print %s", last, label)
+}
+
+// warnIfExposed advierte cuando el puente deja de ser local.
+//
+// El default es loopback a proposito: lo que se envuelve suele ser la memoria
+// personal del usuario, y el puente NO autentica — ni lo puede hacer de forma util,
+// porque `kling mcp link` no manda cabeceras. Exponerlo a la LAN es legitimo cuando
+// el gateway corre en otra maquina, pero tiene que ser una decision, no un default.
+// `/reset` tambien queda accesible para cualquiera que alcance el puerto.
+func warnIfExposed(listen string) {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		fmt.Printf("WARNING: listening on %s — reachable from the whole network, with NO authentication.\n", listen)
+		fmt.Printf("         Anyone who can reach the port can read the memory and call /reset.\n")
+		fmt.Printf("         Firewall it, or use -listen 127.0.0.1:PORT if the gateway runs on this machine.\n\n")
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+		fmt.Printf("WARNING: %s is not loopback and the bridge does not authenticate. Restrict access.\n\n", listen)
+	}
+}
+
 // bridgePath busca el puente allí donde lo deja la instalación.
 func bridgePath() string {
 	home, _ := os.UserHomeDir()
@@ -171,6 +248,14 @@ func bridgePath() string {
 		"./kling-bridge-local",
 	} {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			// Absoluta SIEMPRE. El ultimo candidato es relativo —es donde lo deja
+			// `make bridge-local`— y devolverlo tal cual mete "./kling-bridge-local"
+			// en el ProgramArguments de un LaunchAgent. El cwd de launchd es "/", asi
+			// que se resuelve a "/kling-bridge-local" y el job muere con EX_CONFIG
+			// (78) sin escribir nada en el log.
+			if abs, err := filepath.Abs(p); err == nil {
+				return abs
+			}
 			return p
 		}
 	}
@@ -201,7 +286,7 @@ func localIP() string {
 // el servidor de memoria no dependa de una terminal abierta.
 func memoryInstallService(args []string) error {
 	fs := flag.NewFlagSet("memory install-service", flag.ExitOnError)
-	listen := fs.String("listen", "0.0.0.0:9100", "where to listen")
+	listen := fs.String("listen", "127.0.0.1:9100", "where to listen")
 	cmdline := fs.String("cmd", "engram mcp --tools=agent", "stdio MCP server to wrap")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -262,6 +347,10 @@ func memoryInstallService(args []string) error {
 	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl load: %v: %s", err, out)
 	}
+	if err := waitForStart(bin); err != nil {
+		return err
+	}
+	warnIfExposed(*listen)
 
 	fmt.Printf("Service installed: %s\n", plist)
 	fmt.Printf("  exposes: %s\n", *cmdline)

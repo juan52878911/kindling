@@ -54,6 +54,32 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; EXTRA_ENV=(); CMD=(); BUNDLE=0
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
+# Entrecomillado POSIX para lo que se escribe en los entrypoints.
+#
+# `printf %q` de bash NO sirve: los entrypoints declaran `#!/bin/sh` y en Alpine eso
+# es busybox ash. Para un argumento con tabulador o salto, %q emite `$'x\ty'`, que es
+# sintaxis de bash. La comilla simple es portable en cualquier sh: cierra, escapa la
+# comilla y reabre.
+sq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# es_elf comprueba el numero magico \x7fELF.
+#
+# `-f` no dice nada del formato, y el fallo que provoca no se parece a su causa: un
+# Mach-O de `make bridge-local` pasa la comprobacion, se instala como PID 1 de una
+# imagen x86-64, y la microVM revienta con un panico del kernel sin mencionar al
+# puente.
+es_elf() {
+  [ "$(head -c4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]
+}
+
+fallo_formato_bridge() {
+  echo "$BRIDGE is not a Linux ELF ($(file -b "$BRIDGE" 2>/dev/null || echo 'unknown format'))." >&2
+  echo "It must run as PID 1 inside the microVM: build it with 'make bridge'." >&2
+  exit 1
+}
+
 parse_build_opts() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -143,11 +169,13 @@ case "$MODE" in
       parse_build_opts "$@"
       HTTP_PROXY=1
       [ -f "$BRIDGE" ] || { echo "no encuentro $BRIDGE (compílalo con: make bridge)" >&2; exit 1; }
+      es_elf "$BRIDGE" || fallo_formato_bridge
     fi
     ;;
   stdio)
     parse_build_opts "$@"
     [ -f "$BRIDGE" ] || { echo "no encuentro $BRIDGE (compílalo con: make bridge)" >&2; exit 1; }
+    es_elf "$BRIDGE" || fallo_formato_bridge
     ;;
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
@@ -602,7 +630,7 @@ if [ "$MODE" = "stdio" ]; then
     echo 'export HOME=/root'
     emit_env
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
-    for a in "${CMD[@]}"; do printf ' %q' "$a"; done
+    for a in "${CMD[@]}"; do printf ' %s' "$(sq "$a")"; done
     echo
   } > "$mnt/entrypoint"
 elif [ "$HTTP_PROXY" = 1 ]; then
@@ -642,7 +670,7 @@ SJSON
     echo '# al puente el mismo número.'
     echo "export PORT=$CHILD_PORT"
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
-    for a in "${CMD[@]}"; do printf ' %q' "$a"; done
+    for a in "${CMD[@]}"; do printf ' %s' "$(sq "$a")"; done
     echo
   } > "$mnt/entrypoint"
 fi
