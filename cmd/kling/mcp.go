@@ -543,6 +543,7 @@ func mcpHealth(args []string) error {
 	fs := flag.NewFlagSet("mcp health", flag.ExitOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
+	profundo := fs.Bool("deep", true, "also call one real tool, not just tools/list")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -576,7 +577,7 @@ func mcpHealth(args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	var enfermos int
 	for _, svc := range targets {
-		probeErr := probeHealth(ctx, c, svc, *wait)
+		probeErr := probeHealth(ctx, c, svc, *wait, *profundo)
 		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
 		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
 		if _, err := c.SetHealth(ctx, svc, probeErr == nil, errMsg(probeErr)); err != nil {
@@ -601,7 +602,7 @@ func mcpHealth(args []string) error {
 // probeHealth arranca una instancia efímera del snapshot, le pide tools/list y la
 // destruye. Devuelve nil si el servicio contestó. Es el mismo ciclo que hace el
 // gateway en modo efímero, expresado con las utilidades del CLI.
-func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration) error {
+func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration, profundo bool) error {
 	mc, err := c.Run(ctx, api.RunRequest{
 		From: service, Name: service + "-health",
 		Labels: map[string]string{api.LabelService: service, "health": "true"},
@@ -617,8 +618,23 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 	if err := waitGuest(ctx, c, mc.ID, wait); err != nil {
 		return fmt.Errorf("didn't open the MCP port (%w)", err)
 	}
-	if _, _, err := introspectWith(guestPost(ctx, c, mc.ID)); err != nil {
+	post := guestPost(ctx, c, mc.ID)
+	_, tools, err := introspectWith(post)
+	if err != nil {
 		return fmt.Errorf("didn't respond to tools/list (%w)", err)
+	}
+	if !profundo {
+		return nil
+	}
+	// Y ahora la parte que SI puede fallar. Ver prueba.go: tools/list lo
+	// contesta el servidor sin tocar lo que de verdad usa, asi que hasta aqui
+	// un servicio de navegador con el navegador roto sale impecable.
+	herramienta, args, que, hay := pruebaAplicable(tools)
+	if !hay {
+		return nil
+	}
+	if err := ejercitar(post, herramienta, args); err != nil {
+		return fmt.Errorf("answers tools/list but doesn't work: checking that %s failed: %w", que, err)
 	}
 	return nil
 }

@@ -113,6 +113,7 @@ func mcpHeal(args []string) error {
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
 	seco := fs.Bool("dry-run", false, "say what would be rebuilt, without rebuilding it")
+	profundo := fs.Bool("deep", true, "also call one real tool, not just tools/list")
 	arranque := fs.Duration("wait-daemon", 60*time.Second, "how long to wait for the daemon to answer")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -152,7 +153,7 @@ func mcpHeal(args []string) error {
 			nombre = s.Name
 		}
 
-		probeErr := probeHealth(ctx, c, nombre, *wait)
+		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo)
 		if _, err := c.SetHealth(ctx, nombre, probeErr == nil, errMsg(probeErr)); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", nombre, err)
 			continue
