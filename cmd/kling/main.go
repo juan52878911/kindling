@@ -716,12 +716,16 @@ func cmdCommit(args []string) error {
 	// con un "tool did not start listening" que no menciona el commit. Por eso
 	// se comprueba antes, y por eso saltarselo es explicito.
 	force := fs.Bool("force", false, "commit even if the guest is not serving (produces a snapshot that may not work)")
+	// El hijo caliente vive DENTRO del dorado y lo engorda: medido, 39 MB -> 120 MB
+	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
+	// de unas decenas de servicios la cuenta puede no salir.
+	warm := fs.Bool("warm", true, "freeze with the MCP runtime already started (bigger snapshot, much faster first wake)")
 	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve before committing")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling commit [-replace] [-force] <ref> <snapshot-name>")
+		return fmt.Errorf("usage: kling commit [-replace] [-force] [-warm=false] <ref> <snapshot-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -729,7 +733,7 @@ func cmdCommit(args []string) error {
 
 	c := api.NewClient(hostOf(*host))
 	if !*force {
-		if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera); err != nil {
+		if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera, *warm); err != nil {
 			return err
 		}
 	}
@@ -755,7 +759,7 @@ func cmdCommit(args []string) error {
 // initialize con 400 "Server already initialized". Si el invitado no habla por
 // puente (HTTP nativo) el /reset no existe y no es un fallo — el puerto abierto
 // es cuanto se puede comprobar.
-func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration) error {
+func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration, warm bool) error {
 	fmt.Printf("checking the guest is serving before freezing... ")
 	if err := waitGuest(ctx, c, ref, espera); err != nil {
 		fmt.Println("✗")
@@ -763,10 +767,16 @@ func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera ti
 	}
 	// El /reset deja el servidor como recien arrancado. 404 = no hay puente, que
 	// es legitimo; solo se informa de lo que se pudo comprobar.
-	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: "/reset", Method: "POST"})
+	ruta := "/reset"
+	if !warm {
+		ruta = "/reset?warm=0"
+	}
+	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: ruta, Method: "POST"})
 	switch {
+	case err == nil && resp.Status == 204 && warm:
+		fmt.Println("✓ (serving, session state reset, runtime prewarmed)")
 	case err == nil && resp.Status == 204:
-		fmt.Println("✓ (serving, session state reset)")
+		fmt.Println("✓ (serving, session state reset, no prewarm)")
 	default:
 		fmt.Println("✓ (serving)")
 	}

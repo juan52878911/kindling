@@ -558,7 +558,15 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	// el runtime ya arrancado y el primer initialize tras restaurar lo adopte.
 	// Si no se puede, el reset sigue siendo válido: solo se pierde la velocidad,
 	// nunca la corrección. Ver warm.go.
-	if err := b.replenishWarm(); err != nil {
+	//
+	// Se puede pedir que NO se precaliente. El hijo caliente vive dentro del
+	// dorado, asi que lo engorda: medido, 39 MB -> 120 MB en un servicio de node.
+	// A 150 servicios son 12 GB de diferencia, y quien los tenga puede preferir
+	// el disco al medio segundo de despertar. Por defecto SI se precalienta,
+	// porque el caso comun es tener pocos servicios y usarlos a menudo.
+	if r.URL.Query().Get("warm") == "0" {
+		log.Printf("reset: prewarm skipped on request (smaller snapshot, slower first wake)")
+	} else if err := b.replenishWarm(); err != nil {
 		log.Printf("reset: no prewarmed MCP server (the first session will pay the full start): %v", err)
 	}
 	log.Printf("reset: %d session(s) closed", len(dead))

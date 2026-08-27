@@ -129,8 +129,13 @@ type Gateway struct {
 	agg      *aggregator              // endpoint virtual que reúne a todos
 	pool     *pool                    // instancias pre-calentadas por servicio
 	ensureMu sync.Map                 // servicio -> *sync.Mutex; ver ensure()
-	mem      *memory                  // memoria de uso; nil si está desactivada
-	pop      *popularity              // popularidad por servicio; guía el prewarm
+
+	// Último estado de salud escrito por servicio, para no repetir la escritura
+	// en cada petición. Ver anotarSalud.
+	saludMu    sync.Mutex
+	saludVista map[string]bool
+	mem        *memory     // memoria de uso; nil si está desactivada
+	pop        *popularity // popularidad por servicio; guía el prewarm
 
 	// Cuotas por tenant (token con nombre). Reparto justo, NO seguridad: ver
 	// quota.go. extraTenants son los tokens con nombre; tenantInflight lleva la
@@ -505,6 +510,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.newSessionError(w, service, err)
 			return
 		}
+		g.anotarExito(service)
 		g.begin(e)
 		defer g.end(e)
 		e.proxy.ServeHTTP(w, r)
@@ -525,6 +531,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.newSessionError(w, service, err)
 			return
 		}
+		g.anotarExito(service)
 
 		if b, berr := r.GetBody(); berr == nil {
 			r.Body = b
@@ -567,7 +574,70 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, service string, err err
 		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
 		return
 	}
+	g.anotarFallo(service, err)
 	http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
+}
+
+// anotarFallo guarda en el snapshot que este servicio no se pudo preparar.
+//
+// El caso que lo motiva: nueve servicios estuvieron 26 HORAS caídos —sus snapshots
+// habían quedado irrestaurables tras reiniciar el host— mientras `kling status`
+// informaba «services: ✓ 9» y la columna HEALTH decía «not probed». El fallo se
+// veía en cada petición y no se guardaba en ningún sitio.
+//
+// Es mejor señal que un sondeo periódico y no cuesta nada: un sondeo activo
+// levanta una microVM por servicio y por vuelta, y sólo mira cuando le toca;
+// esto refleja lo que de verdad le pasa a quien usa el servicio, en el momento
+// en que le pasa.
+//
+// En segundo plano y sin bloquear la respuesta al cliente: el error ya está
+// decidido, y si anotarlo falla no hay nada mejor que hacer que registrarlo.
+// saludCambio registra el estado nuevo y dice si difiere del último anotado.
+//
+// Vive aparte de anotarSalud para poder comprobarse: la decisión de escribir es
+// la parte con lógica, y la escritura es un viaje al daemon dentro de una
+// goroutine que un test no debería tener que montar.
+func (g *Gateway) saludCambio(service string, sano bool) bool {
+	g.saludMu.Lock()
+	defer g.saludMu.Unlock()
+	if previo, hay := g.saludVista[service]; hay && previo == sano {
+		return false
+	}
+	if g.saludVista == nil {
+		g.saludVista = map[string]bool{}
+	}
+	g.saludVista[service] = sano
+	return true
+}
+
+func (g *Gateway) anotarExito(service string) {
+	g.anotarSalud(service, true, "")
+}
+
+func (g *Gateway) anotarFallo(service string, causa error) {
+	g.anotarSalud(service, false, causa.Error())
+}
+
+// anotarSalud escribe en el meta del snapshot SOLO cuando el estado cambia.
+//
+// Sin esa memoria haría una escritura a disco por petición atendida, que es
+// justo lo que no puede permitirse un camino caliente. Con ella, un servicio
+// sano no cuesta nada y uno que se rompe (o se recupera) lo anota una vez.
+//
+// El recuerdo vive en memoria: tras reiniciar el gateway, la primera petición de
+// cada servicio vuelve a escribir su estado. Es barato y deja el meta al día
+// aunque algo lo cambiara mientras estaba parado.
+func (g *Gateway) anotarSalud(service string, sano bool, causa string) {
+	if !g.saludCambio(service, sano) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := g.client.SetHealth(ctx, service, sano, causa); err != nil {
+			log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
+		}
+	}()
 }
 
 // pickInstance devuelve una instancia del servicio con hueco de sesión. Despierta

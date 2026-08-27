@@ -279,3 +279,39 @@ func TestCloseAllDescartaElCaliente(t *testing.T) {
 		t.Error("closeAll no mató al hijo caliente: proceso fugado")
 	}
 }
+
+// El precalentamiento se puede desactivar por peticion, y eso NO debe romper el
+// reset: sigue cerrando sesiones y contestando 204, solo que sin dejar caliente.
+//
+// Importa porque el hijo caliente vive dentro del dorado y lo engorda —39 MB a
+// 120 MB, medido—: a escala de decenas de servicios el disco puede pesar mas que
+// medio segundo de despertar, y quien lo tenga debe poder elegir.
+func TestElPrecalentamientoSePuedeDesactivar(t *testing.T) {
+	b := testBridge()
+
+	// Con warm=0 no queda caliente, pero el reset es valido.
+	rec := httptest.NewRecorder()
+	b.handleReset(rec, httptest.NewRequest("POST", "/reset?warm=0", nil))
+	if rec.Code != 204 {
+		t.Fatalf("el reset debe seguir devolviendo 204, dio %d", rec.Code)
+	}
+	b.mu.Lock()
+	caliente := b.warm
+	b.mu.Unlock()
+	if caliente != nil {
+		t.Error("con warm=0 no debería quedar un hijo caliente")
+	}
+
+	// Sin el parametro, el comportamiento por defecto no cambia.
+	rec = httptest.NewRecorder()
+	b.handleReset(rec, httptest.NewRequest("POST", "/reset", nil))
+	if rec.Code != 204 {
+		t.Fatalf("204 esperado, dio %d", rec.Code)
+	}
+	b.mu.Lock()
+	caliente = b.warm
+	b.mu.Unlock()
+	if caliente == nil {
+		t.Error("por defecto sí debería precalentar")
+	}
+}

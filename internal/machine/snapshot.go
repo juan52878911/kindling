@@ -275,6 +275,19 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, err
 	}
+	// El DIRECTORIO manda sobre lo que diga el meta.
+	//
+	// `runFrom` resuelve el snapshot por `snapDir(nombre)`, o sea por directorio.
+	// Si el meta declara otro nombre —un meta copiado a mano, un renombrado a
+	// medias— el listado enseñaría un servicio que no se puede instanciar, y dos
+	// directorios que declaren el mismo nombre saldrían como DUPLICADOS
+	// indistinguibles. Observado: `sequentialthinking` apareció dos veces, con
+	// tamaños distintos y un solo directorio en disco.
+	if s.Name != name {
+		log.Printf("snapshot %q: its meta claims the name %q; going with the directory",
+			name, s.Name)
+		s.Name = name
+	}
 	return &s, nil
 }
 

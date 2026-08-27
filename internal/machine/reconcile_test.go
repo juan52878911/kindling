@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -34,11 +35,25 @@ func TestLiveVMsEncuentraLaMaquinaPorSuSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("sleep", "30", "--api-sock", sock)
+	// `sleep 30 --api-sock X` NO vale: sleep trata todos sus argumentos como
+	// duraciones y muere al instante con "unrecognized option". `cmd.Start()`
+	// tenía éxito igualmente —el fork funciona— así que el test parecía correcto
+	// y buscaba un proceso que ya no existía. Como sólo corre en Linux y el
+	// desarrollo es en macOS, donde se salta, nadie lo vio fallar.
+	//
+	// La forma que sí funciona: `sh -c 'sleep 30' <ruta>` deja la ruta en $0 del
+	// SHELL, que sigue vivo esperando a su hijo, así que su cmdline la conserva.
+	// Con `exec sleep 30` no valdría: exec sustituye la imagen del proceso y el
+	// cmdline pasa a ser "sleep 30", perdiendo la ruta que liveVMs busca.
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30", sock)
 	if err := cmd.Start(); err != nil {
 		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	// Esperar a que el cmdline del hijo sea visible: Start() vuelve al fork, no
+	// al exec, y liveVMs lee /proc.
+	esperarCmdline(t, cmd.Process.Pid, sock)
 
 	live := m.liveVMs()
 	got, ok := live[id]
@@ -327,4 +342,21 @@ func TestElSegadorNoTocaLoQueYaNoCorre(t *testing.T) {
 	if conCuenta {
 		t.Error("no limpió el contador de una máquina que ya no corre")
 	}
+}
+
+// esperarCmdline aguarda a que /proc/<pid>/cmdline contenga lo que se busca.
+//
+// exec.Cmd.Start() devuelve cuando el fork terminó, no cuando el exec sustituyó
+// la imagen del proceso: entre ambos momentos el cmdline todavía es el del padre.
+// Sin esta espera el test es una carrera que gana casi siempre y pierde a veces.
+func esperarCmdline(t *testing.T, pid int, quiero string) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+		if err == nil && strings.Contains(string(b), quiero) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Skipf("el proceso de prueba no llegó a mostrar %q en su cmdline", quiero)
 }
