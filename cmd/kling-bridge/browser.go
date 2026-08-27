@@ -66,6 +66,9 @@ func (s *browserSpec) launch(env []string) (*exec.Cmd, error) {
 	// La salida del navegador va a la consola serie de la microVM, como la del
 	// servidor MCP: si Chromium se queja (sandbox, /dev/shm), se lee ahí.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	// Chromium lanza un arbol de procesos (zygote, gpu, renderers). En su propio
+	// grupo se puede matar entero; sin esto quedaban vivos al cerrar.
+	enSuPropioGrupo(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launching shared Chromium: %w", err)
 	}
@@ -86,7 +89,7 @@ func (s *browserSpec) launch(env []string) (*exec.Cmd, error) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	_ = cmd.Process.Kill()
+	matarGrupo(cmd)
 	return nil, fmt.Errorf("shared Chromium did not open %s within 40s", s.ReadyURL)
 }
 
@@ -121,7 +124,7 @@ func (b *bridge) stopBrowser() {
 	b.bmu.Lock()
 	defer b.bmu.Unlock()
 	if b.bproc != nil {
-		_ = b.bproc.Process.Kill()
+		matarGrupo(b.bproc)
 		b.bproc = nil
 		log.Printf("browser: shared Chromium stopped")
 	}

@@ -47,6 +47,7 @@ var procReaper = &reaper{tracked: map[int]chan syscall.WaitStatus{}}
 func (r *reaper) startTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	enSuPropioGrupo(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -54,6 +55,37 @@ func (r *reaper) startTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 	ch := make(chan syscall.WaitStatus, 1)
 	r.tracked[cmd.Process.Pid] = ch
 	return ch, nil
+}
+
+// enSuPropioGrupo hace del hijo el lider de su grupo de procesos.
+//
+// Es lo que permite matarlo CON sus descendientes. Un servidor MCP lanzado a
+// traves de un envoltorio —`npx`, un script de shell— deja el proceso de verdad
+// como NIETO, y matando solo el pid del hijo el nieto sobrevive.
+func enSuPropioGrupo(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// matarGrupo mata al hijo Y a todo lo que haya lanzado.
+//
+// Antes se mataba solo su pid. Por cada sesion cerrada quedaba vivo el nieto —el
+// servidor de verdad— reteniendo la RAM de su invitado: memoria que
+// deriveMaxSessions NO contabiliza al decidir cuantas sesiones caben, asi que la
+// microVM se quedaba sin memoria rotando sesiones. Y un /reset podia congelar el
+// dorado con nietos aun corriendo dentro.
+//
+// El pid en negativo significa "todo el grupo". Si el hijo no llego a tener
+// grupo propio, queda el camino de siempre.
+func matarGrupo(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // forget retira un pid ya esperado con éxito, para no acumular entradas.

@@ -906,7 +906,7 @@ func (s *session) close() {
 
 	_ = s.stdin.Close()
 	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		matarGrupo(s.cmd)
 	}
 	// waitFor y no Wait a secas: el cosechador puede haberse llevado a este hijo
 	// con wait4(-1), y entonces Wait devuelve ECHILD sin código de salida. El

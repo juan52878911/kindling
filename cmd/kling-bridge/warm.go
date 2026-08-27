@@ -177,7 +177,7 @@ func (w *warmChild) alive() bool {
 func (w *warmChild) discard() {
 	_ = w.stdin.Close()
 	if w.cmd.Process != nil {
-		_ = w.cmd.Process.Kill()
+		matarGrupo(w.cmd)
 	}
 	err := waitFor(w.cmd, w.exitCh)
 	if w.cmd.Process != nil {
