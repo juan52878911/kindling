@@ -358,3 +358,63 @@ tapaba el hasheo.
 > **El coste de la primera vez sigue ahí**, y es correcto que siga: 4,4 s por
 > snapshot y por arranque del daemon. Quien tenga 150 servicios los paga una vez
 > cada uno, no 150 veces cada uno.
+
+---
+
+## 8. Los cuatro pendientes, cerrados
+
+### `kling commit -warm=false`
+
+El hijo caliente vive **dentro** del dorado y lo engorda: 39 MB → 120 MB en un
+servicio de node. A 150 servicios son 12 GB. Sigue activo por defecto —el caso
+común es tener pocos servicios y usarlos a menudo— pero ahora se puede cambiar
+disco por latencia de despertar.
+
+### El gateway anota la salud que ya ve
+
+El `TODO(P1-4)` proponía un sondeo periódico. Hay algo mejor y gratis: **el gateway
+ya sabe cuándo un servicio falla** —devuelve 502— y esa señal se tiraba. Nueve
+servicios estuvieron 26 horas caídos mientras `status` decía «✓ 9».
+
+Un sondeo activo levanta una microVM por servicio y por vuelta, y sólo mira cuando
+le toca. Esto refleja lo que le pasa a quien usa el servicio, en el momento en que
+le pasa. Se escribe **sólo al cambiar de estado**, para no meter una escritura a
+disco por petición atendida, y un éxito posterior recupera el servicio.
+
+### El listado usa el directorio, no el meta
+
+`loadSnapshot` devolvía el nombre que declaraba `meta.json`. Dos directorios que
+declararan el mismo nombre salían como duplicados indistinguibles —observado con
+`sequentialthinking`: dos entradas, un solo directorio— y un meta incoherente
+mostraba un servicio que `runFrom` **no puede instanciar**, porque resuelve por
+directorio.
+
+Era la causa que en §6 quedó sin identificar.
+
+### El test que nunca pasó en ninguna parte
+
+`TestLiveVMsEncuentraLaMaquinaPorSuSocket` lanzaba `sleep 30 --api-sock X`, y
+`sleep` trata todos sus argumentos como duraciones: moría al instante con
+`unrecognized option`. `cmd.Start()` tenía éxito igualmente —el fork funciona— así
+que el test parecía correcto y buscaba un proceso que ya no existía.
+
+Sólo corre en Linux y el desarrollo es en macOS, donde se salta. **Nadie lo vio
+fallar nunca.**
+
+> Mi primer arreglo tampoco valía: usé `sh -c 'exec sleep 30'`, y `exec` sustituye
+> la imagen del proceso, así que el `cmdline` perdía la ruta del socket. Sin el
+> `exec`, el shell sigue vivo y la conserva.
+
+### Cómo se ejercitan los tests de Linux
+
+No hay Go en las máquinas Linux. Se compila el binario de tests en cruzado, **y hay
+que llevar el árbol**: varios tests leen `scripts/*.sh` con rutas relativas y sin él
+fallan por un motivo que no tiene nada que ver con el código.
+
+```sh
+tar czf - --exclude=.git . | ssh lab 'tar xzf - -C /tmp/k'
+GOOS=linux GOARCH=amd64 go test -c -o /tmp/t.test ./internal/machine
+scp /tmp/t.test lab:/tmp/k/internal/machine/ && ssh lab 'cd /tmp/k/internal/machine && ./t.test'
+```
+
+**Los siete paquetes pasan en Linux**, no sólo en macOS.
