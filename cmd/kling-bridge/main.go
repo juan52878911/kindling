@@ -37,6 +37,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // SessionHeader es la cabecera del protocolo MCP que identifica la conversación.
@@ -896,31 +898,36 @@ func (b *bridge) reapIdle(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			var dead []*session
-			b.mu.Lock()
-			for id, s := range b.sessions {
-				if time.Since(s.lastUse) > b.idle {
-					dead = append(dead, s)
-					delete(b.sessions, id)
+			// El puente es el PID 1 del invitado: si muere, la microVM entra en
+			// panico del kernel. Contener aqui es lo que separa "una cosecha
+			// salio mal" de "el invitado se cayo".
+			panico.Contener("bridge.reapIdle", func() {
+				var dead []*session
+				b.mu.Lock()
+				for id, s := range b.sessions {
+					if time.Since(s.lastUse) > b.idle {
+						dead = append(dead, s)
+						delete(b.sessions, id)
+					}
 				}
-			}
-			b.mu.Unlock()
-			// En paralelo: cerrarlas en serie hacía que una sesión lenta
-			// retuviera la cosecha de todas las demás. close() es idempotente.
-			for _, s := range dead {
-				go s.close()
-			}
-			// Si el segador se llevó la última sesión, apaga el navegador
-			// compartido: una microVM viva pero ociosa no debe retenerlo.
-			if len(dead) > 0 {
-				b.stopBrowserIfIdle()
-			}
-			// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
-			// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
-			// compartido. Ver reapIdleProxy.
-			if b.proxy != nil {
-				b.reapIdleProxy()
-			}
+				b.mu.Unlock()
+				// En paralelo: cerrarlas en serie hacía que una sesión lenta
+				// retuviera la cosecha de todas las demás. close() es idempotente.
+				for _, s := range dead {
+					go s.close()
+				}
+				// Si el segador se llevó la última sesión, apaga el navegador
+				// compartido: una microVM viva pero ociosa no debe retenerlo.
+				if len(dead) > 0 {
+					b.stopBrowserIfIdle()
+				}
+				// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
+				// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
+				// compartido. Ver reapIdleProxy.
+				if b.proxy != nil {
+					b.reapIdleProxy()
+				}
+			})
 		}
 	}
 }

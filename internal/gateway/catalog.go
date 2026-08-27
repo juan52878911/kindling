@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // Tool es una herramienta de un servicio, tal como la describe su servidor MCP.
@@ -253,18 +255,23 @@ func (c *catalog) all(ctx context.Context, services []string) ([]Tool, map[strin
 	for _, s := range services {
 		wg.Add(1)
 		go func(s string) {
+			// El Done va fuera del contenedor: si el panico se tragara tambien
+			// el Done, el Wait de abajo se quedaria esperando para siempre y el
+			// refresco del catalogo no volveria nunca.
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			panico.Contener("gateway.catalog", func() {
+				sem <- struct{}{}
+				defer func() { <-sem }()
 
-			t, err := c.toolsOf(ctx, s)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				errs[s] = err.Error()
-				return
-			}
-			out = append(out, t...)
+				t, err := c.toolsOf(ctx, s)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					errs[s] = err.Error()
+					return
+				}
+				out = append(out, t...)
+			})
 		}(s)
 	}
 	wg.Wait()

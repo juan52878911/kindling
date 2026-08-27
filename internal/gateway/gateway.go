@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // GuestPort es donde se espera que escuche el servidor MCP dentro de la microVM.
@@ -1120,11 +1122,17 @@ func (g *Gateway) Reap(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			g.reapOnce(ctx)
-			g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
-			g.pool.evictStale(ctx, g.idle*2)
-			g.PrewarmAll(ctx)
-			g.KeepWarmAll(ctx)
+			// El segador toca cinco subsistemas por vuelta. Un panico en
+			// cualquiera de ellos mataria el gateway entero, y con el se
+			// caerian TODOS los servicios a la vez — incluidos los que no
+			// tienen nada que ver con el que fallo.
+			panico.Contener("gateway.Reap", func() {
+				g.reapOnce(ctx)
+				g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
+				g.pool.evictStale(ctx, g.idle*2)
+				g.PrewarmAll(ctx)
+				g.KeepWarmAll(ctx)
+			})
 		}
 	}
 }

@@ -15,6 +15,8 @@ import (
 
 	"github.com/juan52878911/kindling/internal/api"
 	knet "github.com/juan52878911/kindling/internal/net"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // reconcile ajusta el estado guardado a la realidad del host al arrancar.
@@ -370,24 +372,30 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			m.sweep()
-			m.expireTTL(ctx)
-			// Recoger los cadáveres: una failed conserva su motivo un tiempo
-			// para poder diagnosticarla, y después se recoge sola. Sin esto se
-			// acumulaban indefinidamente, una por intento fallido.
-			m.gcFailed()
-			// Barrer directorios huérfanos también en marcha: no solo aparecen
-			// al arrancar. Bajo el lock, como reconcile.
-			m.mu.Lock()
-			m.sweepMachineDirs()
-			m.mu.Unlock()
-			// Y, si el disco aprieta, recuperar espacio eliminando instancias
-			// dormidas que se pueden recrear desde su snapshot.
-			m.gcDisk(ctx)
-			// El disco se recalcula aquí y no en List(): así `kling ps` no paga
-			// un recorrido por máquina, y el dato sigue fresco para las que
-			// están escribiendo.
-			m.refreshDiskUsage()
+			// Una vuelta entera por iteracion: si cualquiera de estas tareas
+			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
+			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
+			// y eso es peor que caerse.
+			panico.Contener("machine.watch", func() {
+				m.sweep()
+				m.expireTTL(ctx)
+				// Recoger los cadáveres: una failed conserva su motivo un tiempo
+				// para poder diagnosticarla, y después se recoge sola. Sin esto se
+				// acumulaban indefinidamente, una por intento fallido.
+				m.gcFailed()
+				// Barrer directorios huérfanos también en marcha: no solo aparecen
+				// al arrancar. Bajo el lock, como reconcile.
+				m.mu.Lock()
+				m.sweepMachineDirs()
+				m.mu.Unlock()
+				// Y, si el disco aprieta, recuperar espacio eliminando instancias
+				// dormidas que se pueden recrear desde su snapshot.
+				m.gcDisk(ctx)
+				// El disco se recalcula aquí y no en List(): así `kling ps` no paga
+				// un recorrido por máquina, y el dato sigue fresco para las que
+				// están escribiendo.
+				m.refreshDiskUsage()
+			})
 		}
 	}
 }

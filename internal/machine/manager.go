@@ -22,6 +22,7 @@ import (
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // La raíz se monta en SOLO LECTURA y el init es overlay-init, que superpone el
@@ -295,13 +296,16 @@ func (m *Manager) persistLoop() {
 
 		case <-tC:
 			tC, timer = nil, nil
-			m.writePending()
+			// Contenido: si volcar el estado entrara en panico, el proceso
+			// entero moriria y las microVM quedarian huerfanas. Perder UNA
+			// escritura es recuperable; perder el daemon, no.
+			panico.Contener("persistLoop", m.writePending)
 
 		case <-m.quit:
 			if timer != nil {
 				timer.Stop()
 			}
-			m.writePending()
+			panico.Contener("persistLoop (cierre)", m.writePending)
 			return
 		}
 	}
