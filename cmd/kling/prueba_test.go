@@ -49,7 +49,7 @@ func TestEjercitarDetectaElFalloQueVieneDentroDeUnaRespuestaCorrecta(t *testing.
 	// exactamente como playwright estuvo marcado "healthy" sin poder navegar.
 	conIsError := `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[` +
 		`{"type":"text","text":"### Error\nTimeoutError: Timeout 30000ms exceeded."}]}}`
-	err := ejercitar(posterFalso(conIsError), "browser_navigate", `{"url":"about:blank"}`)
+	err := ejercitar(posterFalso(conIsError), "sid-1", "browser_navigate", `{"url":"about:blank"}`)
 	if err == nil {
 		t.Fatal("isError:true se dio por bueno")
 	}
@@ -64,15 +64,28 @@ func TestEjercitarDetectaElFalloQueVieneDentroDeUnaRespuestaCorrecta(t *testing.
 
 func TestEjercitarAceptaUnaLlamadaQueFunciona(t *testing.T) {
 	ok := `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"### Page\n- Page URL: about:blank"}]}}`
-	if err := ejercitar(posterFalso(ok), "browser_navigate", `{"url":"about:blank"}`); err != nil {
+	if err := ejercitar(posterFalso(ok), "sid-1", "browser_navigate", `{"url":"about:blank"}`); err != nil {
 		t.Errorf("una llamada correcta se reporto como fallo: %v", err)
 	}
 }
 
 func TestEjercitarPropagaUnErrorDeJSONRPC(t *testing.T) {
 	rpcErr := `{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"unknown tool"}}`
-	err := ejercitar(posterFalso(rpcErr), "browser_navigate", `{}`)
+	err := ejercitar(posterFalso(rpcErr), "sid-1", "browser_navigate", `{}`)
 	if err == nil || !strings.Contains(err.Error(), "unknown tool") {
 		t.Errorf("error de JSON-RPC no propagado: %v", err)
+	}
+}
+
+// Sin sesion no se puede ejercer nada, y hay que decirlo en vez de abrir una
+// nueva: la segunda sesion es justo lo que rechazan los servicios con la
+// memoria por defecto.
+func TestEjercitarSinSesionLoDice(t *testing.T) {
+	err := ejercitar(posterFalso(`{}`), "", "browser_navigate", `{}`)
+	if err == nil {
+		t.Fatal("sin sesion deberia fallar")
+	}
+	if !strings.Contains(err.Error(), "session") {
+		t.Errorf("el error no dice que falta la sesion: %v", err)
 	}
 }

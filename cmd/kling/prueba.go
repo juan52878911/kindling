@@ -51,14 +51,13 @@ func pruebaAplicable(tools []api.ToolSpec) (herramienta, args, que string, hay b
 // ejercitar hace el handshake y llama a una herramienta. Devuelve error si la
 // llamada falla O si el servidor contesta con isError, que es como los
 // servidores MCP reportan un fallo de la herramienta sin fallar el JSON-RPC.
-func ejercitar(post poster, herramienta, args string) error {
-	sid, _, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
-		`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
-	if err != nil {
-		return fmt.Errorf("initialize: %w", err)
+// El `sid` viene de fuera y NO se abre uno nuevo: un servicio con la memoria por
+// defecto (256 MiB) admite UNA sola sesion, y pedir la segunda la rechaza con un
+// 400 en texto plano. La sonda profunda fallaba en todos ellos por eso.
+func ejercitar(post poster, sid, herramienta, args string) error {
+	if sid == "" {
+		return fmt.Errorf("no session to exercise %s with", herramienta)
 	}
-	_, _, _ = post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
-
 	cuerpo := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
 		herramienta, args)
 	_, raw, err := post(sid, cuerpo)

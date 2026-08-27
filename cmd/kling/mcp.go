@@ -633,7 +633,10 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 		return fmt.Errorf("didn't open the MCP port (%w)", err)
 	}
 	post := guestPost(ctx, c, mc.ID)
-	_, tools, err := introspectWith(post)
+	// Con sesion: se REUTILIZA para ejercer la herramienta. Abrir una segunda la
+	// rechaza en cualquier servicio con la memoria por defecto — 256 MiB dan
+	// para UNA sesion— y la sonda fallaba siempre en ellos.
+	_, sid, tools, err := introspectConSesion(post)
 	if err != nil {
 		return fmt.Errorf("didn't respond to tools/list (%w)", err)
 	}
@@ -647,7 +650,7 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 	if !hay {
 		return nil
 	}
-	if err := ejercitar(post, herramienta, args); err != nil {
+	if err := ejercitar(post, sid, herramienta, args); err != nil {
 		return fmt.Errorf("answers tools/list but doesn't work: checking that %s failed: %w", que, err)
 	}
 	return nil
@@ -833,10 +836,22 @@ func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, erro
 
 // introspectWith hace el handshake sin saber por dónde viajan las peticiones.
 func introspectWith(post poster) (string, []api.ToolSpec, error) {
+	name, _, tools, err := introspectConSesion(post)
+	return name, tools, err
+}
+
+// introspectConSesion es lo mismo pero devuelve TAMBIEN el id de sesion, para
+// quien quiera seguir usandola.
+//
+// Reutilizarla no es una optimizacion: un servicio de 256 MiB admite UNA sola
+// sesion (deriveMaxSessions: 64 MiB por sesion, 192 reservados), asi que abrir
+// una segunda para ejercer una herramienta la rechaza siempre. La sonda
+// profunda fallaba en todo servicio con la memoria por defecto.
+func introspectConSesion(post poster) (string, string, []api.ToolSpec, error) {
 	sid, raw, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
 		`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
 	if err != nil {
-		return "", nil, fmt.Errorf("initialize: %w", err)
+		return "", "", nil, fmt.Errorf("initialize: %w", err)
 	}
 	var initRes struct {
 		Result struct {
@@ -861,7 +876,7 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 
 	_, raw, err = post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if err != nil {
-		return name, nil, fmt.Errorf("tools/list: %w", err)
+		return name, sid, nil, fmt.Errorf("tools/list: %w", err)
 	}
 
 	var out struct {
@@ -886,13 +901,13 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 		if body == "" {
 			body = "(empty response)"
 		}
-		return name, nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
+		return name, sid, nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
 			"The server replied: %s", err, body)
 	}
 	if out.Error != nil {
-		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
+		return name, sid, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
 	}
-	return name, out.Result.Tools, nil
+	return name, sid, out.Result.Tools, nil
 }
 
 // splitDomains parte una lista de dominios separada por comas, recortando
