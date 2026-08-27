@@ -143,7 +143,10 @@ type Manager struct {
 	// lifecycle serializa las operaciones sobre UNA MISMA máquina. Sin esto, dos
 	// thaw concurrentes rehacen su namespace a la vez y el segundo encuentra el
 	// veth a medio crear: "Cannot find device vh-...".
-	lifecycle sync.Map // id -> *sync.Mutex
+	//
+	// Con contador de referencias: la entrada se retira sola cuando sale el
+	// ultimo que la usaba. Ver cerrojos.go para por que un sync.Map no bastaba.
+	lifecycle cerrojos
 
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu   sync.Mutex
@@ -156,12 +159,7 @@ type Manager struct {
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
-func (m *Manager) lock(id string) func() {
-	v, _ := m.lifecycle.LoadOrStore(id, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}
+func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
@@ -1569,16 +1567,9 @@ func (m *Manager) Remove(ref string) error {
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
-	unlock := m.lock(mc.ID)
-	defer func() {
-		unlock()
-		// El cerrojo se retira del mapa DESPUES de soltarlo y de que la maquina
-		// ya no este en byID. Borrarlo antes —como se hacia— dejaba a cualquier
-		// m.lock(id) entrante creando un mutex NUEVO con LoadOrStore y entrando
-		// en la seccion critica mientras este Remove seguia borrando ficheros de
-		// cientos de MB.
-		m.lifecycle.Delete(mc.ID)
-	}()
+	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
+	// Borrar la entrada desde aqui era justo lo que abria la ventana.
+	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)

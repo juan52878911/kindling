@@ -153,7 +153,7 @@ func mcpHeal(args []string) error {
 			nombre = s.Name
 		}
 
-		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo)
+		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo, s.Egress)
 		if _, err := c.SetHealth(ctx, nombre, probeErr == nil, errMsg(probeErr)); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", nombre, err)
 			continue

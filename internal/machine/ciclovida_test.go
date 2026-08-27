@@ -82,9 +82,9 @@ func TestRemoveNoSueltaSuCerrojoAntesDeTerminar(t *testing.T) {
 	if _, sigue := m.byID[id]; sigue {
 		t.Error("la máquina sigue en byID tras Remove")
 	}
-	// Y el cerrojo se retira, o el mapa crece sin fin con cada maquina borrada.
-	if _, sigue := m.lifecycle.Load(id); sigue {
-		t.Error("quedó la entrada del cerrojo: el mapa crecería con cada máquina retirada")
+	// Y el cerrojo se retira solo, o el mapa crece sin fin con cada máquina.
+	if n := m.lifecycle.vivos(); n != 0 {
+		t.Errorf("quedaron %d entradas de cerrojo: el mapa crecería con cada máquina retirada", n)
 	}
 }
 
