@@ -238,6 +238,21 @@ func mcpImport(args []string) error {
 		cleanup()
 		return err
 	}
+	// Cero herramientas NO es un import correcto.
+	//
+	// Se aceptaba, y el resultado era un "✓ 0 tool(s)" y un dorado congelado de
+	// un servicio que no ofrece nada. Peor: con el catalogo vacio, el agregador
+	// despierta la microVM en CADA listado para volver a preguntarle, porque no
+	// tiene nada guardado que enseñar. Un servidor MCP sin herramientas es un
+	// servidor mal empaquetado, no un caso legitimo.
+	if len(tools) == 0 {
+		fmt.Println("✗")
+		cleanup()
+		return fmt.Errorf("%q answered tools/list with an EMPTY catalog.\n"+
+			"That is not a valid service: check the command (a wrong argument makes many\n"+
+			"servers start and answer without registering anything), and try it first with:\n"+
+			"  kling mcp verify -image %s -- <command>", service, img)
+	}
 	fmt.Printf("✓ %s · %d tool(s)\n", info, len(tools))
 
 	// GUARDIÁN: que el servidor no se instale nada en caliente.
