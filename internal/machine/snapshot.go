@@ -502,7 +502,7 @@ func (m *Manager) RemoveSnapshot(name string) error {
 // "Could not set TSC scaling ... Invalid argument (os error 22)" que no apunta
 // a nada. La recuperación es siempre la misma: rehacer el snapshot.
 func explainRestoreErr(err error, what, remedy string) error {
-	if err == nil || !strings.Contains(err.Error(), "TSC") {
+	if !api.EsFalloTSC(err) {
 		return err
 	}
 	return fmt.Errorf("%s can't be restored on this host: the snapshot records the CPU's TSC "+

@@ -130,12 +130,14 @@ deploy: daemon bridge
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
 	scp -q kling-bridge scripts/80-mcp-image.sh $(TARGET):/tmp/
-	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service $(TARGET):/tmp/
+	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service \
+		packaging/$(BIN)-heal.service packaging/$(BIN)-heal.timer $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
 		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
 		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
-		sudo install -m644 /tmp/$(BIN).service /tmp/$(BIN)-gateway.service /etc/systemd/system/ && \
+		sudo install -m644 /tmp/$(BIN).service /tmp/$(BIN)-gateway.service \
+			/tmp/$(BIN)-heal.service /tmp/$(BIN)-heal.timer /etc/systemd/system/ && \
 		sudo install -d -m755 /etc/kling && \
 		( [ -s /etc/kling/gateway.env ] || \
 		  printf "KLING_GATEWAY_TOKEN=%s\n" \
@@ -143,6 +145,7 @@ deploy: daemon bridge
 		  | sudo tee /etc/kling/gateway.env >/dev/null ) && \
 		sudo chmod 600 /etc/kling/gateway.env && \
 		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
+			sudo systemctl enable --now $(BIN)-heal.timer && \
 		sudo systemctl restart $(BIN) && sudo systemctl try-restart $(BIN)-gateway && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"

@@ -23,7 +23,7 @@ import (
 //	kling mcp refresh <servicio>
 func cmdMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling mcp [import|verify|list|refresh|health]")
+		return fmt.Errorf("usage: kling mcp [import|verify|list|refresh|health|heal]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -37,12 +37,14 @@ func cmdMCP(args []string) error {
 		return mcpRefresh(rest)
 	case "health":
 		return mcpHealth(rest)
+	case "heal":
+		return mcpHeal(rest)
 	case "link":
 		return mcpLink(rest)
 	case "unlink":
 		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use import, verify, list, refresh, health, link, or unlink", sub)
+		return fmt.Errorf("unknown subcommand %q: use import, verify, list, refresh, health, heal, link, or unlink", sub)
 	}
 }
 
