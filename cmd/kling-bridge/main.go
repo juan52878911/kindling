@@ -39,6 +39,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/panico"
+
+	"github.com/juan52878911/kindling/internal/api"
 )
 
 // SessionHeader es la cabecera del protocolo MCP que identifica la conversación.
@@ -356,6 +358,12 @@ type session struct {
 	// exitCh recibe el estado de salida si el cosechador se adelanta a Wait.
 	exitCh chan syscall.WaitStatus
 
+	// scanErr es por que dejo de leerse la salida del servidor, cuando no fue
+	// un cierre normal. Sin esto, una linea demasiado larga se reportaba como
+	// "MCP server died" — que manda a mirar al servidor, y el servidor estaba
+	// perfecto. Se lee y se escribe bajo mu.
+	scanErr error
+
 	mu sync.Mutex
 	// wmu serializa las escrituras a stdin: el protocolo es una línea por
 	// mensaje, y dos Write entrelazados lo corromperían. Va APARTE de mu porque
@@ -404,7 +412,7 @@ func (b *bridge) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	body, err := api.LeerCuerpo(r.Body, 8<<20)
 	if err != nil {
 		http.Error(w, "could not read body", http.StatusBadRequest)
 		return
@@ -749,6 +757,17 @@ func (s *session) readLoop(stdout io.Reader) {
 			ch <- raw
 		}
 	}
+	// El bucle acaba de dos maneras muy distintas y antes no se distinguian: el
+	// servidor cerro su salida (normal), o el escaner se rindio. Lo segundo pasa
+	// con una linea de mas de 16 MiB —una captura en base64, un PDF— y el
+	// resultado era que la sesion moria entera y el log decia "MCP server died":
+	// un diagnostico FALSO que manda a mirar al servidor, que estaba perfecto.
+	if err := sc.Err(); err != nil {
+		s.mu.Lock()
+		s.scanErr = err
+		s.mu.Unlock()
+		log.Printf("session %s: reading its output failed: %v", s.id, err)
+	}
 	s.close()
 }
 
@@ -832,6 +851,14 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		// (nil, nil) y el cliente recibía una respuesta vacía en lugar de un
 		// error, que es la forma más cara de diagnosticar un proceso muerto.
 		if !ok {
+			s.mu.Lock()
+			motivo := s.scanErr
+			s.mu.Unlock()
+			if motivo != nil {
+				return nil, fmt.Errorf("could not read the MCP server's reply to message %s: %w.\n"+
+					"The server is fine: its response did not fit. Responses are read line by "+
+					"line with a %d MiB cap", id, motivo, 16)
+			}
 			return nil, fmt.Errorf("MCP server died while handling message %s", id)
 		}
 		return resp, nil

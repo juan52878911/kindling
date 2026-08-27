@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -791,7 +790,7 @@ func directPost(ctx context.Context, url string) poster {
 			return "", nil, err
 		}
 		defer resp.Body.Close()
-		out, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		out, err := api.LeerCuerpo(resp.Body, 8<<20)
 		return resp.Header.Get("Mcp-Session-Id"), out, err
 	}
 }

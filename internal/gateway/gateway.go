@@ -345,7 +345,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// consumió el original. Las peticiones MCP son JSON de tamaño moderado y el
 	// puente ya las acota, así que el coste es asumible.
 	if r.Body != nil && r.Method == http.MethodPost {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody))
+		body, err := api.LeerCuerpo(r.Body, maxProxyBody)
 		_ = r.Body.Close()
 		if err != nil {
 			http.Error(w, "could not read body", http.StatusBadRequest)

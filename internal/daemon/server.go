@@ -573,7 +573,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 
 	// Un catálogo grande puede pesar; el límite evita que un invitado que se
 	// desmadre agote la memoria del daemon.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := api.LeerCuerpo(resp.Body, 8<<20)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err)
 		return
