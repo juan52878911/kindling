@@ -27,6 +27,8 @@ import (
 	"github.com/juan52878911/kindling/internal/gateway"
 	"github.com/juan52878911/kindling/internal/report"
 	"github.com/juan52878911/kindling/internal/transport"
+
+	"errors"
 )
 
 const usage = `kling - Firecracker microVMs with a docker-style interface
@@ -255,8 +257,30 @@ func main() {
 
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		os.Exit(codigoDeSalida(err))
 	}
+}
+
+// errConCodigo deja que un comando pida un codigo de salida concreto.
+//
+// Existe por una distincion que systemd necesita y el codigo 1 no permite:
+// "hice mi trabajo y algo sigue mal" no es lo mismo que "no pude ni empezar".
+// La primera no debe marcar la unidad como fallida —el estado ya quedo grabado
+// donde toca—; la segunda si, porque significa que nadie comprobo nada.
+type errConCodigo struct {
+	code int
+	err  error
+}
+
+func (e *errConCodigo) Error() string { return e.err.Error() }
+func (e *errConCodigo) Unwrap() error { return e.err }
+
+func codigoDeSalida(err error) int {
+	var e *errConCodigo
+	if errors.As(err, &e) {
+		return e.code
+	}
+	return 1
 }
 
 func envOr(k, def string) string {

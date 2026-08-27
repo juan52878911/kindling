@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -119,5 +121,23 @@ func TestArgvReimportarPropagaElHost(t *testing.T) {
 	i := slices.Index(argv, "-H")
 	if i < 0 || argv[i+1] != "ssh://juan@lab" {
 		t.Errorf("el -H del vigia debe llegar al import: %v", argv)
+	}
+}
+
+// La distincion que systemd necesita: "algo sigue roto" no es lo mismo que "no
+// pude ni empezar". Si las dos salieran con 1, la unidad tendria que tratarlas
+// igual — y marcar las dos como exito esconde la segunda, que es la grave.
+func TestElCodigoDeSalidaDistingueNoPuedeEmpezarDeSigueRoto(t *testing.T) {
+	sigueRoto := &errConCodigo{code: 3, err: errors.New("2 service(s) still unhealthy")}
+	if got := codigoDeSalida(sigueRoto); got != 3 {
+		t.Errorf("servicio aun enfermo: codigo %d, esperaba 3", got)
+	}
+	noPudoEmpezar := errors.New("cannot talk to the daemon at /run/kling.sock")
+	if got := codigoDeSalida(noPudoEmpezar); got != 1 {
+		t.Errorf("no pudo hablar con el daemon: codigo %d, esperaba 1", got)
+	}
+	// Y tiene que sobrevivir a que alguien lo envuelva por el camino.
+	if got := codigoDeSalida(fmt.Errorf("heal: %w", sigueRoto)); got != 3 {
+		t.Errorf("envuelto: codigo %d, esperaba 3", got)
 	}
 }

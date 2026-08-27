@@ -13,6 +13,7 @@ package main
 // catalogo). Meterlo dentro seria duplicar la orquestacion entera.
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -86,11 +87,33 @@ func specVolumen(v api.VolumeAttachment) string {
 	return spec
 }
 
+// esperarDaemon bloquea hasta que el daemon conteste, o hasta agotar el plazo.
+func esperarDaemon(ctx context.Context, c *api.Client, limite time.Duration) error {
+	fin := time.Now().Add(limite)
+	var ultimo error
+	for {
+		if _, err := c.Info(ctx); err == nil {
+			return nil
+		} else {
+			ultimo = err
+		}
+		if time.Now().After(fin) {
+			return fmt.Errorf("the daemon didn't answer within %s: %w", limite, ultimo)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 func mcpHeal(args []string) error {
 	fs := flag.NewFlagSet("mcp heal", flag.ExitOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
 	seco := fs.Bool("dry-run", false, "say what would be rebuilt, without rebuilding it")
+	arranque := fs.Duration("wait-daemon", 60*time.Second, "how long to wait for the daemon to answer")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -98,6 +121,15 @@ func mcpHeal(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
+
+	// El vigia arranca justo detras del daemon, y systemd da por "arrancado" un
+	// Type=simple en cuanto hace fork: el socket puede no existir todavia. Sin
+	// esta espera, el arranque del anfitrion —que es EL momento en el que hay
+	// algo que curar— seria justo cuando el vigia no encuentra a nadie con quien
+	// hablar. Observado en el laboratorio a la primera ejecucion.
+	if err := esperarDaemon(ctx, c, *arranque); err != nil {
+		return err
+	}
 
 	snaps, err := c.Snapshots(ctx)
 	if err != nil {
@@ -172,7 +204,11 @@ func mcpHeal(args []string) error {
 		fmt.Printf("\n%d of %d service(s) were stale after a host reboot; all rebuilt\n", curados, len(snaps))
 	default:
 		fmt.Printf("\n%d unhealthy, %d rebuilt\n", rotos, curados)
-		return fmt.Errorf("%d service(s) still unhealthy", rotos-curados)
+		// Codigo propio: el vigia SI hizo su trabajo —sondeo todo y grabo la
+		// salud de cada uno—, solo que algo sigue roto por una causa que no se
+		// cura reconstruyendo. Eso no es un fallo de la unidad; que no pudiera
+		// hablar con el daemon, si.
+		return &errConCodigo{code: 3, err: fmt.Errorf("%d service(s) still unhealthy", rotos-curados)}
 	}
 	return nil
 }

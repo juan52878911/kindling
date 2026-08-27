@@ -20,10 +20,15 @@ Group=juan
 ExecStart=/usr/local/bin/kling mcp heal
 TimeoutStartSec=30min
 
-# Que un servicio siga enfermo NO es un fallo de la unidad: el vigía ya lo dijo
-# en el log y lo grabó en la salud del snapshot. Marcar la unidad como fallida
-# solo añadiría un segundo sitio donde mirar.
-SuccessExitStatus=0 1
+# Solo el 3, que es el codigo con el que el vigia dice "sonde todo y grabe la
+# salud de cada uno, pero algo sigue roto por una causa que no se cura
+# reconstruyendo". Eso no es un fallo de la unidad.
+#
+# El 1 SI lo es, y a proposito: significa que el vigia no pudo ni empezar —no
+# encontro al daemon, por ejemplo—. Marcar tambien el 1 como exito escondia
+# exactamente eso, y paso: la primera ejecucion real fallo al hablar con el
+# daemon y systemd la dio por buena.
+SuccessExitStatus=3
 
 NoNewPrivileges=true
 ProtectSystem=strict
