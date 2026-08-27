@@ -91,6 +91,11 @@ type Manager struct {
 	// un dorado no cambia desde que se congela.
 	integridad map[string]huellaSnapshot
 
+	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
+	// pasada completa no libera nada, lo que significa que el disco lo llena algo
+	// ajeno a kindling y seguir expulsando solo cuesta warm-pooling.
+	gcPausadoHasta time.Time
+
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int

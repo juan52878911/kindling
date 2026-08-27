@@ -512,10 +512,15 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.newSessionError(w, service, err)
 			return
 		}
-		g.anotarExito(service)
 		g.begin(e)
 		defer g.end(e)
-		e.proxy.ServeHTTP(w, r)
+		// El codigo se mira DESPUES de servir: anotar el exito por haber
+		// conseguido la instancia daba por sano un servicio que no contestaba.
+		cw := &codigoVisto{ResponseWriter: w, code: http.StatusOK}
+		e.proxy.ServeHTTP(cw, r)
+		if cw.code < 500 {
+			g.anotarExito(service)
+		}
 		return
 	}
 
@@ -533,8 +538,6 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.newSessionError(w, service, err)
 			return
 		}
-		g.anotarExito(service)
-
 		if b, berr := r.GetBody(); berr == nil {
 			r.Body = b
 		}
@@ -548,6 +551,12 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		// entrega tal cual al cliente.
 		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "session limit") {
 			continue
+		}
+
+		// Sano si SIRVIO, no si se consiguio instancia. Un 5xx aqui ya lo anoto
+		// el ErrorHandler como fallo; anotar exito tambien lo borraria.
+		if rec.Code < 500 {
+			g.anotarExito(service)
 		}
 
 		// Entregar la respuesta bufereada y fijar la ruta de la sesión a ESTA
@@ -915,7 +924,12 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		// la misma que en el agregador: "no conecté" se reintenta, "tardó" no.
 		var opErr *net.OpError
 		esDial := errors.As(err, &opErr) && opErr.Op == "dial"
-		if esDial && !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
+		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
+		// reintentar: la respuesta distingue dos situaciones muy distintas —el
+		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
+		vivo := esDial && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil
+
+		if vivo && !retried(r) && r.GetBody != nil {
 			body, berr := r.GetBody()
 			if berr == nil {
 				log.Printf("proxy %s: %v (one retry)", service, err)
@@ -925,6 +939,22 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 				return
 			}
 		}
+
+		// No se pudo conectar Y el invitado tampoco responde ahora: esta
+		// instancia ya no esta. Pasa de verdad — el recolector de disco del
+		// daemon retira instancias dormidas para hacer sitio, y el gateway se
+		// quedaba con la entrada apuntando a una IP muerta PARA SIEMPRE: todas
+		// las peticiones siguientes daban 502 sin que nada lo arreglara. Se
+		// olvida aqui para que la proxima peticion levante una nueva.
+		if esDial && !vivo {
+			log.Printf("proxy %s: its instance is gone; forgetting it so the next call creates another", service)
+			g.olvidarInstancia(service, e.machineID)
+		}
+		// Y se DEGRADA la salud. Antes el exito se anotaba al conseguir la
+		// instancia, no al servir: un servicio caido devolvia 502 una y otra vez
+		// mientras cada intento REAFIRMABA que estaba sano.
+		g.anotarFallo(service, err)
+
 		log.Printf("proxy %s: %v", service, err)
 		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
 	}
@@ -987,6 +1017,35 @@ func (g *Gateway) sessionCountLocked(machineID string) int {
 		}
 	}
 	return n
+}
+
+// codigoVisto recuerda el codigo con el que se respondio, para poder decidir la
+// salud por el RESULTADO. httptest.NewRecorder no vale en el camino sin cuerpo
+// reenviable: ahi se sirve directo al cliente, sin bufferear.
+type codigoVisto struct {
+	http.ResponseWriter
+	code int
+}
+
+func (c *codigoVisto) WriteHeader(code int) {
+	c.code = code
+	c.ResponseWriter.WriteHeader(code)
+}
+
+// Flush hace falta para el streaming (SSE): sin reenviarlo, envolver el
+// ResponseWriter dejaria las respuestas en el buffer hasta cerrar.
+func (c *codigoVisto) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// olvidarInstancia retira una instancia que ya no existe, tomando el cerrojo.
+// Es removeEntryLocked para quien no lo tiene.
+func (g *Gateway) olvidarInstancia(service, machineID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.removeEntryLocked(service, machineID)
 }
 
 // removeEntryLocked quita una instancia del servicio, sea la primaria o una
