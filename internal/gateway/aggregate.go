@@ -777,6 +777,19 @@ func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *api.Link, t
 			nextRPCID(), t.Name, args))
 	}
 	raw, err := body(sid)
+	// SOLO se reintenta la sesión caducada, que es la única señal de que el
+	// servidor rechazó la llamada ANTES de ejecutarla (contesta 400/404 sin
+	// tocar la herramienta).
+	//
+	// Antes se reintentaba ante CUALQUIER error, timeout incluido. Y un timeout
+	// significa lo contrario: la petición salió y puede haberse ejecutado ya.
+	// Reenviarla ejecuta el tools/call DOS VECES — en un servicio con estado
+	// como engram, una escritura lenta se guarda dos veces sin que nada lo diga.
+	// Es la misma distinción que forward() ya hacía en gateway.go: "no llegué"
+	// se reintenta, "tardó" no.
+	if err != nil && !errors.Is(err, errStaleSession) {
+		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+	}
 	if err != nil {
 		// Un servidor externo puede reiniciarse por su cuenta —lo controla su
 		// dueño, no kindling— y su sesión deja de existir. Se rehace y se
