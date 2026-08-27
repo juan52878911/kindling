@@ -232,3 +232,58 @@ comentario lo dice: *«no sabe (ni le importa) que es Chromium»*. La infraestru
 para tener dos motores y cambiar el defecto **existe**; lo que falta es la base
 glibc debajo.
 
+---
+
+## 6. Prueba de estrés (27-08-2026)
+
+Informe visual: `docs/prueba-estres.html`. Lo esencial, todo medido sobre `fc-test`:
+
+### Densidad
+
+| microVMs | PSS total | por réplica | libre | `run -from` |
+|---|---|---|---|---|
+| 1 | 12 MiB | 12,0 | 224 MB | 4.390 ms |
+| 40 | 630 MiB | 15,8 | 113 MB | 4.494 ms |
+| 80 | 1.606 MiB | 20,1 | 100 MB | 4.721 ms |
+| 120 | 2.572 MiB | 21,4 | 104 MB | 4.974 ms |
+| 140 | 2.785 MiB | 19,9 | 103 MB | 5.120 ms |
+| **143** | — | — | — | **rechazado** |
+
+**142 microVMs simultáneas en 3,9 GB.** La memoria libre no baja mientras el PSS
+sube: la copia-en-escritura comparte las páginas del dorado. El rechazo en la 143 es
+determinista y explicado (pide 64 MiB, quedan 424, 384 reservados al anfitrión). Ni
+un OOM ni una caída en 142 intentos.
+
+### Carga concurrente
+
+| Concurrentes | Éxito | p50 | p95 |
+|---|---|---|---|
+| 1 | 1/1 | 4,82 s | 4,82 s |
+| 5 | 5/5 | 11,16 s | 11,16 s |
+| 10 | 10/10 | 21,78 s | 21,96 s |
+| 20 | 20/20 | 44,08 s | 44,29 s |
+
+**100% de éxito, y latencia lineal.** ~2,2 s por petición añadida con el anfitrión al
+80% ocioso: no es saturación, es **serialización** — las instanciaciones se atienden
+de una en una. Es la única cifra que no mejora con mejor hardware.
+
+### Coste por servicio
+
+**120 MB de disco** cada uno (aparente 769 MB; los ficheros son dispersos). A 150
+servicios son ~18 GB. **El hijo caliente triplicó esto**: antes eran 39 MB. Bajó el
+despertar de 7,9 s a 4,8 s a cambio de 12 GB más a escala de 150. Debería ser opcional.
+
+### Por dónde seguir
+
+1. **Paralelizar la creación de máquina** — es el 99% del despertar (Firecracker
+   restaura en 26-31 ms) y no mejora con hardware.
+2. **Hacer opcional el hijo caliente** — quien tenga 150 servicios querrá elegir.
+3. **Sondear la salud sola** — diez servicios siguen con `never probed`.
+4. Entrada duplicada en el catálogo tras `-replace`; se cura al reiniciar el daemon,
+   sin causa identificada.
+
+> **Un error de método que cometí midiendo.** Un bucle de sondeo `nc` sin pausa
+> completa 400 iteraciones fallidas en ~300 ms, así que reporté «puerto listo a los
+> 260 ms» cuando el puerto no había abierto nunca. Un bucle que se agota **no es una
+> medición**: hay que distinguir "encontré la condición" de "se me acabaron los
+> intentos".
