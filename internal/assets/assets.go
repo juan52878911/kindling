@@ -68,6 +68,12 @@ func Materialize(dir string) ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
+	return copiarDesde(src, dir)
+}
+
+// copiarDesde es Materialize con el origen inyectado, para poder probarlo sin
+// depender de que este binario se haya compilado con `embed_assets`.
+func copiarDesde(src fs.FS, dir string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
