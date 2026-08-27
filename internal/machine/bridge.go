@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/juan52878911/kindling/internal/api"
 )
@@ -33,6 +35,35 @@ import (
 // errNoBridge marca una imagen que no lleva puente dentro: una base mínima, no
 // una de servicio. No es un fallo, es una imagen que no aplica.
 var errNoBridge = errors.New("has no bridge: not a service image")
+
+// holguraRefresh es el aire que se deja dentro de la imagen despues de meter el
+// puente, para que el siguiente recambio no vuelva a tropezar por unos KB.
+const holguraRefresh = 8 << 20
+
+// errSinHueco dice que la imagen no tiene sitio DENTRO para el puente nuevo, y
+// cuantos bytes le faltan. No es lo mismo que el disco del anfitrion lleno: el
+// sintoma es identico ("no space left on device") y la causa, opuesta.
+type errSinHueco struct{ faltan int64 }
+
+// faltaParaElPuente dice cuantos bytes hay que anadir a la imagen para que el
+// puente nuevo quepa AL LADO del viejo, mas la holgura. Cero significa que cabe.
+func faltaParaElPuente(libre, puente int64) int64 {
+	if falta := puente + holguraRefresh - libre; falta > 0 {
+		return redondearMiB(falta)
+	}
+	return 0
+}
+
+// redondearMiB sube al MiB siguiente: resize2fs trabaja por bloques, y un
+// tamano redondo deja ficheros legibles en un ls.
+func redondearMiB(n int64) int64 {
+	const mib = 1 << 20
+	return (n + mib - 1) &^ (mib - 1)
+}
+
+func (e errSinHueco) Error() string {
+	return fmt.Sprintf("no room inside the image: %d bytes short", e.faltan)
+}
 
 // guestBridgePath es dónde vive el puente dentro de la imagen. Lo fija
 // 80-mcp-image.sh al construirla, y el entrypoint lo invoca por esa ruta.
@@ -189,6 +220,72 @@ func (m *Manager) imageUsers() map[string][]string {
 // desmonta sin tocarla: reescribirla por gusto la ensuciaría y desharía su
 // dispersión en disco.
 func (m *Manager) refreshOne(ctx context.Context, image, dentroPath, bridge, quiero string) (bool, error) {
+	// Las imágenes se construyen ajustadas al byte, así que una que ya lleva
+	// puente NO tiene sitio para su propio recambio: durante el renombrado
+	// atómico conviven las dos copias. Crecer es la única salida que conserva
+	// esa atomicidad; escribir encima dejaría, si algo falla a mitad, un PID 1
+	// truncado — un invitado que no arranca en vez de un error.
+	//
+	// Se reintenta porque un ext4 NO entrega como espacio libre todo lo que se
+	// le añade: parte se va en metadatos. Medido aquí: pedir 12 MB dejó 11,12
+	// libres, un 7% menos, y la primera pasada se quedó a 0,5 MB de caber.
+	// `reservaMetadatos` cubre ese margen; el bucle es la garantía de que un
+	// anfitrión con otra geometría de bloques converge igual.
+	const intentos = 3
+	for i := 0; ; i++ {
+		cambio, err := m.intentarRefresh(ctx, image, dentroPath, bridge, quiero)
+		var sinHueco errSinHueco
+		if !errors.As(err, &sinHueco) || i == intentos {
+			return cambio, err
+		}
+		log.Printf("image %s: growing it by %d MiB; it was built with no room for a new bridge",
+			filepath.Base(image), conReservaDeMetadatos(sinHueco.faltan)/(1<<20))
+		if err := crecerImagen(ctx, image, sinHueco.faltan); err != nil {
+			return false, err
+		}
+	}
+}
+
+// conReservaDeMetadatos infla lo que se pide para que el hueco que el ext4
+// ENTREGA sea el que hacía falta.
+//
+// El 1/8 no es el 7% medido sino su inverso con margen: si el sistema de
+// ficheros se queda una fracción p, hay que pedir 1/(1-p), no 1+p. Con 1/8 se
+// tolera una pérdida de hasta el 11%. El MiB suelto cubre los déficits
+// pequeños, donde el porcentaje no da ni para un grupo de bloques.
+func conReservaDeMetadatos(falta int64) int64 {
+	return redondearMiB(falta + falta/8 + (1 << 20))
+}
+
+// crecerImagen agranda el ext4 de una imagen. El fichero se estira y luego se
+// le dice al sistema de ficheros que ocupe el hueco nuevo.
+func crecerImagen(ctx context.Context, image string, extra int64) error {
+	fi, err := os.Stat(image)
+	if err != nil {
+		return err
+	}
+	if err := os.Truncate(image, fi.Size()+conReservaDeMetadatos(extra)); err != nil {
+		return fmt.Errorf("growing %s: %w", filepath.Base(image), err)
+	}
+	// resize2fs se niega a tocar un ext4 que no venga de un fsck reciente.
+	repairVolume(ctx, image)
+	if out, err := exec.CommandContext(ctx, "resize2fs", image).CombinedOutput(); err != nil {
+		return fmt.Errorf("resize2fs %s: %v: %s", filepath.Base(image), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// espacioLibre devuelve los bytes disponibles DENTRO del sistema de ficheros
+// montado en mnt.
+func espacioLibre(mnt string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(mnt, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Bavail) * int64(st.Bsize), nil
+}
+
+func (m *Manager) intentarRefresh(ctx context.Context, image, dentroPath, bridge, quiero string) (bool, error) {
 	// Antes de montar en ESCRITURA. Montar así un ext4 sucio es como se corrompió
 	// una imagen en este proyecto, y el síntoma fue un pánico del invitado.
 	repairVolume(ctx, image)
@@ -241,6 +338,18 @@ func (m *Manager) refreshOne(ctx context.Context, image, dentroPath, bridge, qui
 	// puente viejo o el nuevo, nunca uno a medias. Escribir encima dejaría, si
 	// algo falla a mitad, una imagen cuyo PID 1 es un binario truncado — y eso
 	// no da un error, da un invitado que no arranca.
+	// ¿Cabe? El renombrado atómico exige que quepan las dos copias a la vez, así
+	// que el hueco se mide ANTES de escribir: un ENOSPC a media copia deja un
+	// .nuevo trunco dentro de una imagen que ya no se puede arreglar sin crecer.
+	if libre, err := espacioLibre(mnt); err == nil {
+		if fi, err := os.Stat(bridge); err == nil {
+			if falta := faltaParaElPuente(libre, fi.Size()); falta > 0 {
+				desmontar()
+				return false, errSinHueco{faltan: falta}
+			}
+		}
+	}
+
 	tmp := dentro + ".nuevo"
 	if err := copyFile(bridge, tmp, 0o755); err != nil {
 		_ = os.Remove(tmp)
