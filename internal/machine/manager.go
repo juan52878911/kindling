@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // La raíz se monta en SOLO LECTURA y el init es overlay-init, que superpone el
@@ -34,9 +36,11 @@ const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro in
 // el propio kernel con el parámetro ip=, sin herramientas dentro de la imagen.
 //
 // El punto de montaje del volumen viaja aquí y no dentro de la imagen: así el
-// mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno.
-func bootArgs(vols []api.VolumeAttachment, allowExec bool) string {
-	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec)
+// mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno. Lo mismo
+// vale para layerDev, el disco de la capa de servicio: vacío en las imágenes
+// monolíticas, que siguen arrancando con la línea de siempre.
+func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string) string {
+	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -77,9 +81,35 @@ type Manager struct {
 	byID   map[string]*api.Machine
 	socket map[string]string // id -> ruta del socket de firecracker
 
+	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
+	// sin entrada en byID. Ver reserveDir: sin esto el barrido de huérfanos los
+	// borra bajo los pies de quien los está llenando. Se toca bajo mu.
+	reserved map[string]bool
+
+	// Dorados cuya integridad ya se comprobó, por huella de sus ficheros. Ver
+	// verifyIntegrity: hashear el overlay cuesta el 67% de una instanciación y
+	// un dorado no cambia desde que se congela.
+	integridad map[string]huellaSnapshot
+
+	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
+	// pasada completa no libera nada, lo que significa que el disco lo llena algo
+	// ajeno a kindling y seguir expulsando solo cuesta warm-pooling.
+	gcPausadoHasta time.Time
+
+	// volReservas: volumenes comprometidos entre la comprobacion y la
+	// publicacion en byID, por nombre de volumen. Cierra la ventana en la que
+	// dos arranques simultaneos veian los dos "cero escritores". Se lee y se
+	// escribe SIEMPRE bajo m.mu, igual que byID.
+	volReservas map[string][]reservaVolumen
+
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int
+
+	// layerOK memoriza qué bases traen un overlay-init que entiende las capas.
+	// Es dato de un fichero que no cambia, y preguntarlo cuesta un debugfs en el
+	// camino de arranque en frío. Ver baseSupportsLayers.
+	layerOK sync.Map
 
 	// pendingMiB es la memoria de las microVMs que están ARRANCANDO ahora mismo,
 	// aún sin proceso que la ocupe. checkHostMemory la resta de lo disponible:
@@ -93,6 +123,12 @@ type Manager struct {
 	// mem.file ya está anclado y cobrar solo la fracción divergente a las copias.
 	// Se toca bajo mu.
 	snapPending map[string]int
+
+	// freezeFails cuenta los fallos CONSECUTIVOS de congelación por TTL de cada
+	// máquina. Existe para que el segador pueda rendirse: sin memoria de cuántas
+	// veces ha fallado, reintentaba para siempre sobre máquinas irrecuperables.
+	// Se toca bajo mu; se limpia al congelar con éxito o al darla por perdida.
+	freezeFails map[string]int
 
 	// templateMu serializa la construcción de la plantilla de overlay: dos
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
@@ -142,6 +178,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		quit:        make(chan struct{}),
 		launchGate:  make(chan struct{}, maxParallelLaunch()),
 		snapPending: make(map[string]int),
+		freezeFails: make(map[string]int),
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
@@ -271,13 +308,16 @@ func (m *Manager) persistLoop() {
 
 		case <-tC:
 			tC, timer = nil, nil
-			m.writePending()
+			// Contenido: si volcar el estado entrara en panico, el proceso
+			// entero moriria y las microVM quedarian huerfanas. Perder UNA
+			// escritura es recuperable; perder el daemon, no.
+			panico.Contener("persistLoop", m.writePending)
 
 		case <-m.quit:
 			if timer != nil {
 				timer.Stop()
 			}
-			m.writePending()
+			panico.Contener("persistLoop (cierre)", m.writePending)
 			return
 		}
 	}
@@ -300,35 +340,12 @@ func (m *Manager) writePending() {
 		return
 	}
 
-	tmp := m.statePath() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		log.Printf("state: could not write %s: %v", tmp, err)
+	// El detalle del temporal, los dos fsync y el rename vive en un solo sitio
+	// (internal/durable): tenerlo escrito dos veces era tenerlo bien en uno y
+	// mal en el otro, que es lo que pasaba con links.json.
+	if err := durable.Escribir(m.statePath(), b, 0o644); err != nil {
+		log.Printf("state: could not persist it: %v", err)
 		return
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		log.Printf("state: incomplete write: %v", err)
-		return
-	}
-	// fsync del fichero Y del directorio. Sin el segundo, el rename puede no
-	// haber llegado al disco cuando se corta la luz, y el daemon arrancaría
-	// leyendo el estado anterior — que es peor que no leer ninguno, porque se
-	// da por bueno.
-	if err := f.Sync(); err != nil {
-		log.Printf("state: fsync failed: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		log.Printf("state: close failed: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, m.statePath()); err != nil {
-		log.Printf("state: rename failed: %v", err)
-		return
-	}
-	if d, err := os.Open(m.root); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
 	}
 }
 
@@ -525,7 +542,20 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
 	}
 
-	vols, err := m.resolveVolumes(req)
+	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
+	// reserva tiene que existir antes de que empiece nada lento.
+	id := newID()
+	if req.Name == "" {
+		req.Name = req.Image + "-" + id[:6]
+	}
+
+	vols, err := m.reservarVolumenes(req, id, req.Name)
+	// Se suelta pase lo que pase: si la maquina llego a byID, byID ya la cubre;
+	// si no llego, la reserva no puede quedarse bloqueando el volumen.
+	defer m.soltarReservas(id)
+	if err != nil {
+		return nil, err
+	}
 	for _, v := range vols {
 		// Solo los que vamos a montar en ESCRITURA. e2fsck escribe, y un volumen
 		// compartido puede tenerlo abierto otra microVM ahora mismo: repararlo
@@ -534,13 +564,29 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			repairVolume(ctx, v.path)
 		}
 	}
+
+	// src es el rootfs que va en vda; layer, el delta del servicio si la imagen
+	// va por capas (vacío en las monolíticas de siempre).
+	src, layer, err := m.imageLayer(req.Image)
 	if err != nil {
 		return nil, err
 	}
-
-	src := m.imagePath(req.Image)
-	if _, err := os.Stat(src); err != nil {
-		return nil, fmt.Errorf("can't find image %q in %s", req.Image, src)
+	// Una base anterior a las capas ignoraría kling.layer y arrancaría el
+	// invitado sin el servicio dentro. Se comprueba aquí, donde se puede explicar,
+	// y no allí, donde se ve como un pánico del kernel.
+	if layer != "" {
+		switch ok, cerr := m.baseSupportsLayers(ctx, src); {
+		case cerr != nil:
+			// Sin poder comprobarlo se sigue: convertir una comprobación de
+			// diagnóstico en una dependencia de arranque sería peor que el problema.
+			log.Printf("warning: could not check whether base %s understands layers: %v", src, cerr)
+		case !ok:
+			return nil, fmt.Errorf("image %q is layered, but its base (%s) has an overlay-init "+
+				"from before layers existed: it would ignore %s and boot the guest without the "+
+				"service inside.\nRebuild the base (scripts/70-build-minimal-image.sh) or "+
+				"repackage this service as a monolithic image",
+				req.Image, src, api.LayerBootParam)
+		}
 	}
 	// Antes de comprometer nada: una microVM que no cabe no falla al arrancar,
 	// arranca — y luego el OOM killer del anfitrión mata procesos al azar.
@@ -567,7 +613,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
 	// Se comprueba ANTES de crear el directorio, para no tener que limpiarlo.
 	if len(vols) > 0 {
-		switch has, herr := imageHasBridge(ctx, src); {
+		switch has, herr := imageHasBridge(ctx, src, layer); {
 		case herr != nil:
 			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
 			// herramienta de diagnóstico en una dependencia de arranque sería
@@ -583,14 +629,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		}
 	}
 
-	id := newID()
-	if req.Name == "" {
-		req.Name = req.Image + "-" + id[:6]
-	}
-	dir := m.dir(id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// El directorio nace reservado: la ventana hasta byID es más corta que en
+	// runFrom, pero newOverlay sigue formateando un ext4 en medio. Ver
+	// makeMachineDir.
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
 		return nil, err
 	}
+	defer unreserve()
 
 	// La imagen base no se copia: se comparte en solo lectura. Lo único propio de
 	// esta microVM es su overlay escribible, que nace prácticamente vacío.
@@ -649,7 +695,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, overlay, netcfg, vols, req.AllowExec)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, layer, overlay, netcfg, vols, req.AllowExec)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -767,12 +813,14 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 
 // boot lanza el proceso firecracker y configura la microVM por su API.
 //
-// Dos discos: la imagen base compartida en solo lectura y el overlay propio.
+// Dos discos: la imagen base compartida en solo lectura y el overlay propio. Con
+// una imagen por capas hay un tercero de solo lectura, la capa del servicio, que
+// se engancha DETRÁS de los volúmenes para no correrles la letra.
 //
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -782,6 +830,16 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		return 0, glErr
 	}
 	defer release()
+
+	// El device de la capa se calcula ANTES de lanzar nada: si no cabe, mejor no
+	// haber encendido un firecracker que luego hay que matar.
+	var layerDev string
+	if layer != "" {
+		var err error
+		if layerDev, err = layerDevice(len(vols)); err != nil {
+			return 0, err
+		}
+	}
 
 	var sock string
 	var pid int
@@ -794,7 +852,9 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 		if err != nil {
 			return 0, err
 		}
-		toLink := []string{m.KernelPath(), base, overlay}
+		// layer va con cadena vacía si la imagen es monolítica; prepareJail las
+		// ignora.
+		toLink := []string{m.KernelPath(), base, layer, overlay}
 		for _, v := range vols {
 			toLink = append(toLink, v.path)
 		}
@@ -814,7 +874,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec)}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec, layerDev)}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -844,6 +904,21 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 			// De solo lectura para el propio VMM, no solo en el mount: la
 			// barrera no puede depender de que el invitado se porte bien.
 			IsReadOnly:  v.readOnly,
+			RateLimiter: fc.Limit(diskBytesPerSec),
+		}); err != nil {
+			return pid, err
+		}
+	}
+	// La capa del servicio, EL ÚLTIMO. Va aquí y no junto a la base porque las
+	// letras de disco salen del orden de enganche: colarla antes correría los
+	// volúmenes, y el puente los cuenta desde vdc por posición. Su device viaja
+	// en kling.layer=, que ya se calculó arriba a partir de este mismo orden.
+	//
+	// De solo lectura como la base: es compartida por todas las microVMs del
+	// servicio, y lo que las hace seguras de compartir es que nadie escriba.
+	if layer != "" {
+		if err := c.SetDrive(ctx, fc.Drive{
+			DriveID: layerDriveID, PathOnHost: layer, IsRootDevice: false, IsReadOnly: true,
 			RateLimiter: fc.Limit(diskBytesPerSec),
 		}); err != nil {
 			return pid, err
@@ -1053,6 +1128,15 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
+	if live == nil {
+		// La eliminaron mientras congelabamos. Los ficheros del snapshot estan
+		// escritos, pero ya no hay maquina a la que pertenezcan. Antes esto era
+		// un deref nil, y un deref nil en el daemon no se lleva esta operacion:
+		// se lleva el proceso, y con el TODAS las microVM quedan huerfanas.
+		delete(m.socket, mc.ID)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("machine %q was removed while it was being frozen", mc.Name)
+	}
 	now := time.Now()
 	live.State = api.StateWarm
 	live.FrozenAt = &now
@@ -1366,7 +1450,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 	start := time.Now()
 	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
-		return nil, err
+		// Mismo motivo que en runFrom: si la causa es el TSC de un host
+		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
+		// hacer, y este texto es lo que verá quien despierte la máquina.
+		return nil, explainRestoreErr(err, fmt.Sprintf("machine %q", mc.Name),
+			"  kling rm "+mc.Name+"\n"+
+				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)")
 	}
 	elapsed := time.Since(start).Milliseconds()
 
@@ -1385,6 +1474,18 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
+	if live == nil {
+		delete(m.socket, mc.ID)
+		m.mu.Unlock()
+		// Acabamos de arrancar un VMM para una maquina que ya no existe. Hay que
+		// matarlo AQUI: dejarlo seria un firecracker huerfano reteniendo la RAM
+		// de su invitado, que no aparece en `kling ps` y que nadie contabiliza al
+		// decidir si cabe la siguiente microVM.
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
+	}
 	now := time.Now()
 	live.State = api.StateRunning
 	live.StartedAt = &now
@@ -1429,6 +1530,11 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
+	// El cerrojo de ciclo de vida, que aqui faltaba y lo tienen Freeze, Thaw,
+	// Squeeze, PutMMDS y Remove. Sin el, un Stop concurrente a un Thaw desmonta
+	// el namespace de red POR DEBAJO del thaw: la maquina queda "running" y sin
+	// red, y el gateway ve timeouts que no apuntan a nada.
+	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
@@ -1463,11 +1569,19 @@ func (m *Manager) Remove(ref string) error {
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
-	defer m.lock(mc.ID)()
+	unlock := m.lock(mc.ID)
+	defer func() {
+		unlock()
+		// El cerrojo se retira del mapa DESPUES de soltarlo y de que la maquina
+		// ya no este en byID. Borrarlo antes —como se hacia— dejaba a cualquier
+		// m.lock(id) entrante creando un mutex NUEVO con LoadOrStore y entrando
+		// en la seccion critica mientras este Remove seguia borrando ficheros de
+		// cientos de MB.
+		m.lifecycle.Delete(mc.ID)
+	}()
 	m.kill(mc.ID)
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)
-	m.lifecycle.Delete(mc.ID)
 	// El chroot del jail vive aparte del directorio de la máquina: se limpia
 	// también, o cada restauración jailed deja un árbol huérfano.
 	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
@@ -1548,8 +1662,12 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)
 	m.mu.Lock()
+	now := time.Now()
 	mc.State = api.StateFailed
 	mc.LastErr = err.Error()
+	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
+	// se quedaba en la lista para siempre (ver gcFailed).
+	mc.FailedAt = &now
 	m.persist()
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name, Message: err.Error()})

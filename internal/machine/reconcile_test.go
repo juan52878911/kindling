@@ -1,12 +1,21 @@
 package machine
 
 import (
+	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/events"
 )
 
 // liveVMs es la pieza sobre la que se apoya todo el reconcile nuevo: si no ve
@@ -26,11 +35,25 @@ func TestLiveVMsEncuentraLaMaquinaPorSuSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("sleep", "30", "--api-sock", sock)
+	// `sleep 30 --api-sock X` NO vale: sleep trata todos sus argumentos como
+	// duraciones y muere al instante con "unrecognized option". `cmd.Start()`
+	// tenía éxito igualmente —el fork funciona— así que el test parecía correcto
+	// y buscaba un proceso que ya no existía. Como sólo corre en Linux y el
+	// desarrollo es en macOS, donde se salta, nadie lo vio fallar.
+	//
+	// La forma que sí funciona: `sh -c 'sleep 30' <ruta>` deja la ruta en $0 del
+	// SHELL, que sigue vivo esperando a su hijo, así que su cmdline la conserva.
+	// Con `exec sleep 30` no valdría: exec sustituye la imagen del proceso y el
+	// cmdline pasa a ser "sleep 30", perdiendo la ruta que liveVMs busca.
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30", sock)
 	if err := cmd.Start(); err != nil {
 		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	// Esperar a que el cmdline del hijo sea visible: Start() vuelve al fork, no
+	// al exec, y liveVMs lee /proc.
+	esperarCmdline(t, cmd.Process.Pid, sock)
 
 	live := m.liveVMs()
 	got, ok := live[id]
@@ -51,6 +74,115 @@ func TestLiveVMsNoSeConfundeConRutasAjenas(t *testing.T) {
 		if strings.Contains(id, "/") {
 			t.Errorf("devolvió un id con barras: %q", id)
 		}
+	}
+}
+
+// El barrido de huérfanos no puede llevarse por delante el directorio de una
+// máquina que se está CONSTRUYENDO.
+//
+// Reproduce la carrera real: runFrom crea el directorio, copia ~100 MiB de
+// overlay dorado, resuelve volúmenes y monta la red, y solo entonces registra la
+// máquina en byID. En esa ventana —cientos de milisegundos— el directorio no era
+// de "ninguna máquina conocida", y el GC de disco, que barre cada 10 s en cuanto
+// el anfitrión va justo de espacio, lo borraba. El caller veía un error sobre un
+// firecracker.log que no existe, que no dice nada de la causa.
+func TestSweepNoBorraElDirectorioDeUnaMaquinaEnConstruccion(t *testing.T) {
+	m := newTestManager(t)
+	id := "0123456789abcdef0123456789abcdef"
+
+	// Barrido agresivo en paralelo, como el del disco lleno.
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			m.mu.Lock()
+			m.sweepMachineDirs()
+			m.mu.Unlock()
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unreserve()
+
+	// El llenado lento del directorio: si el barrido se lo lleva, esto falla con
+	// un ENOENT, que es exactamente lo que se veía en el laboratorio.
+	for i := 0; i < 50; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "overlay.ext4"), []byte("golden"), 0o644); err != nil {
+			t.Fatalf("el barrido borró el directorio a medio construir: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// El registro en byID llega al final, como en producción, y a partir de ahí
+	// la máquina se protege sola.
+	m.addForTest(id)
+
+	// El síntoma que se reportó, comprobado tal cual.
+	if _, err := os.Create(filepath.Join(dir, "firecracker.log")); err != nil {
+		t.Fatalf("open firecracker.log: %v", err)
+	}
+}
+
+// La reserva tiene que valer POR SÍ SOLA, sin apoyarse en la edad del
+// directorio: una copia de overlay sobre un anfitrión cargado puede tardar más
+// que el margen de cortesía, y entonces solo queda ella.
+func TestSweepRespetaLaReservaAunqueElDirectorioSeaViejo(t *testing.T) {
+	m := newTestManager(t)
+	id := "aaaabbbbccccdddd"
+
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unreserve()
+	envejecer(t, dir)
+
+	m.mu.Lock()
+	m.sweepMachineDirs()
+	m.mu.Unlock()
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("borró un directorio reservado: %v", err)
+	}
+}
+
+// El margen de cortesía es el cinturón sobre los tirantes: cubre a cualquier
+// camino futuro que cree un directorio antes de registrar su id.
+func TestSweepPerdonaLosDirectoriosRecienTocados(t *testing.T) {
+	m := newTestManager(t)
+	dir := m.dir("eeeeffff00001111")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m.mu.Lock()
+	m.sweepMachineDirs()
+	m.mu.Unlock()
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("borró un directorio recién creado sin darle margen: %v", err)
+	}
+}
+
+// Que el barrido SIGA recogiendo huérfanos de verdad lo cubre
+// TestSeBorranLosDirectoriosHuerfanos, en gc_test.go.
+
+// envejecer retrasa la fecha del directorio más allá del margen de cortesía, que
+// es la única forma de probar el barrido sin dormir dos minutos.
+func envejecer(t *testing.T, dir string) {
+	t.Helper()
+	viejo := time.Now().Add(-2 * dirGrace)
+	if err := os.Chtimes(dir, viejo, viejo); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -96,4 +228,135 @@ func TestHasSnapshotExigeLosDosFicheros(t *testing.T) {
 	if !m.hasSnapshot(id) {
 		t.Error("con snap.file y mem.file sí hay snapshot")
 	}
+}
+
+// El segador de TTL tiene que distinguir "no pude congelarla AHORA" de "no voy
+// a poder congelarla NUNCA". Lo segundo es un socket que ya no existe o nadie
+// escuchando: reintentarlo cada 10 segundos es lo que produjo 260 horas de
+// fallos idénticos sobre la misma máquina.
+func TestElFalloDeSocketDesaparecidoEsEstructural(t *testing.T) {
+	// Así llega de verdad: el dial del cliente HTTP envuelve el errno del
+	// sistema en un net.OpError, como en el fallo observado
+	// ("dial unix .../fc.sock: connect: no such file or directory").
+	enoent := fmt.Errorf("Patch \"http://localhost/vm\": %w",
+		&net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ENOENT)})
+	if !freezeErrIsStructural(enoent) {
+		t.Error("un ENOENT al conectar al socket es irrecuperable y no lo reconoció")
+	}
+	refused := fmt.Errorf("Patch \"http://localhost/vm\": %w",
+		&net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})
+	if !freezeErrIsStructural(refused) {
+		t.Error("un ECONNREFUSED (socket sin nadie detrás) es irrecuperable y no lo reconoció")
+	}
+
+	// Lo transitorio se queda transitorio: un timeout o un error cualquiera
+	// merecen reintento, y tratarlos de estructurales mataría máquinas sanas.
+	if freezeErrIsStructural(errors.New("context deadline exceeded")) {
+		t.Error("trató un timeout como estructural")
+	}
+	if freezeErrIsStructural(fmt.Errorf("firecracker PATCH /vm: 400 Bad Request: some transient thing")) {
+		t.Error("trató un error genérico como estructural")
+	}
+	if freezeErrIsStructural(nil) {
+		t.Error("nil no es un fallo de nada")
+	}
+}
+
+// Y aunque el fallo no se sepa clasificar, el segador se rinde tras un número
+// finito de intentos seguidos: la máquina pasa a failed (terminal) y no se
+// vuelve a intentar. Un fallo "transitorio" que dura horas no es transitorio.
+func TestElSegadorSeRindeTrasDemasiadosFallosSeguidos(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "feedfacefeedface"
+	now := time.Now()
+	m.mu.Lock()
+	m.byID[id] = &api.Machine{ID: id, Name: "tozuda", State: api.StateRunning,
+		StartedAt: &now, TTLSeconds: 1}
+	m.mu.Unlock()
+
+	// Un fallo que no se sabe clasificar, repetido: los primeros se toleran…
+	for i := 0; i < maxFreezeFailures-1; i++ {
+		if n := m.noteFreezeFailure(id); n >= maxFreezeFailures {
+			t.Fatalf("se rindió en el intento %d, antes del tope %d", n, maxFreezeFailures)
+		}
+	}
+	// …y el que llega al tope, no.
+	if n := m.noteFreezeFailure(id); n < maxFreezeFailures {
+		t.Fatalf("tras %d fallos seguidos el contador dice %d", maxFreezeFailures, n)
+	}
+	m.giveUpOn(id, errors.New("gave up for the test"))
+
+	m.mu.RLock()
+	mc := m.byID[id]
+	m.mu.RUnlock()
+	if mc.State != api.StateFailed {
+		t.Fatalf("tras rendirse la máquina debe quedar failed (terminal), está %q", mc.State)
+	}
+	if mc.FailedAt == nil {
+		t.Error("una failed sin FailedAt no se puede recoger después")
+	}
+	// Y el contador se limpió: si reviviera, empezaría de cero.
+	m.mu.RLock()
+	_, sigue := m.freezeFails[id]
+	m.mu.RUnlock()
+	if sigue {
+		t.Error("el contador de fallos no se limpió al rendirse")
+	}
+}
+
+// Un éxito (o que otro camino la congele) borra la cuenta: los fallos solo
+// suman si son consecutivos, que es lo que separa una racha mala de una avería.
+func TestUnExitoReiniciaElContadorDeFallos(t *testing.T) {
+	m := newTestManager(t)
+	id := "cafebabecafebabe"
+	for i := 0; i < 5; i++ {
+		m.noteFreezeFailure(id)
+	}
+	m.clearFreezeFailures(id)
+	if n := m.noteFreezeFailure(id); n != 1 {
+		t.Errorf("tras limpiar, el siguiente fallo debía ser el 1, fue el %d", n)
+	}
+}
+
+// handleFreezeFailure no debe tocar una máquina que ya no está running: si otro
+// camino la congeló o la paró mientras tanto, el "fallo" ya no significa nada.
+func TestElSegadorNoTocaLoQueYaNoCorre(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "0123456789abcdef"
+	m.mu.Lock()
+	m.byID[id] = &api.Machine{ID: id, Name: "dormida", State: api.StateWarm}
+	m.mu.Unlock()
+	m.noteFreezeFailure(id)
+
+	m.handleFreezeFailure(id, errors.New("whatever"))
+
+	m.mu.RLock()
+	estado := m.byID[id].State
+	_, conCuenta := m.freezeFails[id]
+	m.mu.RUnlock()
+	if estado != api.StateWarm {
+		t.Errorf("cambió el estado de una máquina que ya no corría: %q", estado)
+	}
+	if conCuenta {
+		t.Error("no limpió el contador de una máquina que ya no corre")
+	}
+}
+
+// esperarCmdline aguarda a que /proc/<pid>/cmdline contenga lo que se busca.
+//
+// exec.Cmd.Start() devuelve cuando el fork terminó, no cuando el exec sustituyó
+// la imagen del proceso: entre ambos momentos el cmdline todavía es el del padre.
+// Sin esta espera el test es una carrera que gana casi siempre y pierde a veces.
+func esperarCmdline(t *testing.T, pid int, quiero string) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+		if err == nil && strings.Contains(string(b), quiero) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Skipf("el proceso de prueba no llegó a mostrar %q en su cmdline", quiero)
 }

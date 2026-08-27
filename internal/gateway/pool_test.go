@@ -460,3 +460,32 @@ func TestElFondoCedeUnaMaquinaBajoPresion(t *testing.T) {
 		t.Error("dijo que retiró algo con el fondo vacío")
 	}
 }
+
+// Un panico rellenando el fondo NO debe llevarse el gateway por delante — y con
+// el, TODOS los servicios, incluidos los que no tienen nada que ver.
+//
+// Sin la contencion este test no "falla": mata el proceso de tests entero, que
+// es exactamente lo que le pasaria al daemon en produccion.
+func TestUnPanicoAlRellenarNoSeLlevaElGateway(t *testing.T) {
+	p := newTestPool(t, 2, &fakeWarmer{})
+	p.warmFn = func(ctx context.Context, service, snapshot string) (*warmVM, error) {
+		panic("el daemon devolvio algo inesperado")
+	}
+
+	p.fill(context.Background(), "eco", "eco")
+
+	// Y ademas el servicio tiene que quedar DESMARCADO. Si "filling" se quedara
+	// en true, nadie volveria a rellenar su fondo nunca: el gateway seguiria
+	// vivo, contestando, y ese servicio se degradaria en silencio.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		llenando := p.filling["eco"]
+		p.mu.Unlock()
+		if !llenando {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error(`tras el panico, "eco" sigue marcado como llenandose: nadie repondra su fondo`)
+}

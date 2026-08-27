@@ -1,0 +1,36 @@
+[Unit]
+Description=kling heal — rehace los dorados que no sobrevivieron al reinicio del anfitrión
+Documentation=https://github.com/juan52878911/kindling
+After=kling.service
+Requires=kling.service
+
+[Service]
+Type=oneshot
+
+# Mismo usuario que el gateway: habla con el daemon por su socket Unix, y toda
+# la parte privilegiada (crear microVMs, congelarlas) vive al otro lado, en
+# kling.service. El vigía no necesita root para pedirlo.
+User=juan
+Group=juan
+
+# En serie y sin prisa. Reconstruir un servicio son 15-40 s y arranca una microVM
+# que reserva su memoria por adelantado: nueve en paralelo competirían justo por
+# la RAM que necesitan para arrancar. Con nueve servicios el peor caso son ~3 min,
+# y el plazo deja margen de sobra sin llegar a colgarse para siempre.
+ExecStart=/usr/local/bin/kling mcp heal
+TimeoutStartSec=30min
+
+# Solo el 3, que es el codigo con el que el vigia dice "sonde todo y grabe la
+# salud de cada uno, pero algo sigue roto por una causa que no se cura
+# reconstruyendo". Eso no es un fallo de la unidad.
+#
+# El 1 SI lo es, y a proposito: significa que el vigia no pudo ni empezar —no
+# encontro al daemon, por ejemplo—. Marcar tambien el 1 como exito escondia
+# exactamente eso, y paso: la primera ejecucion real fallo al hablar con el
+# daemon y systemd la dio por buena.
+SuccessExitStatus=3
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

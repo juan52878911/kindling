@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -23,7 +22,7 @@ import (
 //	kling mcp refresh <servicio>
 func cmdMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling mcp [import|verify|list|refresh|health]")
+		return fmt.Errorf("usage: kling mcp [import|verify|list|refresh|health|heal]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -37,12 +36,14 @@ func cmdMCP(args []string) error {
 		return mcpRefresh(rest)
 	case "health":
 		return mcpHealth(rest)
+	case "heal":
+		return mcpHeal(rest)
 	case "link":
 		return mcpLink(rest)
 	case "unlink":
 		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use import, verify, list, refresh, health, link, or unlink", sub)
+		return fmt.Errorf("unknown subcommand %q: use import, verify, list, refresh, health, heal, link, or unlink", sub)
 	}
 }
 
@@ -71,7 +72,8 @@ func mcpImport(args []string) error {
 	// las instancias nacen de él, y sin fijarlo aquí toda restauración caía al 50 %
 	// del daemon. En Mac ese estrangulamiento a media vCPU dobla el arranque en frío
 	// de node (16 s → 6.9 s al 100 %), así que subirlo es la palanca directa allí.
-	cpu := fs.Int("cpu", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	cpuPct := fs.Int("cpu-pct", 0, "CPU cap in % of one core for the template (0 = daemon default)")
+	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
 	egress := fs.String("egress", "", "service network egress: none | internet | allowlist")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	var volumes volumeFlag
@@ -85,7 +87,7 @@ func mcpImport(args []string) error {
 	ephemeral := fs.Bool("ephemeral", false, "force ephemeral machines even if the analysis says otherwise")
 	allowRuntimeInstall := fs.Bool("allow-runtime-install", false,
 		"import even if the server installs dependencies at runtime (not recommended: bake them into the image)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	importVols, err := volumeSet(volumes, *mount, *volRO)
@@ -196,7 +198,7 @@ func mcpImport(args []string) error {
 		VCPUs:  config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		// Techo de CPU: se graba en el snapshot (Commit copia mc.CPUPct) para que la
 		// restauración no caiga al 50 % del daemon. 0 = deja decidir al daemon.
-		CPUPct: config.Or(*cpu, cfg.Defaults.CPUPct),
+		CPUPct: config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Egress: egr,
 		// Se graban en el snapshot dorado: las instancias nacen de él y sin esto
 		// despertarían con la lista vacía. Solo se usan si egr == "allowlist".
@@ -235,6 +237,21 @@ func mcpImport(args []string) error {
 		fmt.Println("✗")
 		cleanup()
 		return err
+	}
+	// Cero herramientas NO es un import correcto.
+	//
+	// Se aceptaba, y el resultado era un "✓ 0 tool(s)" y un dorado congelado de
+	// un servicio que no ofrece nada. Peor: con el catalogo vacio, el agregador
+	// despierta la microVM en CADA listado para volver a preguntarle, porque no
+	// tiene nada guardado que enseñar. Un servidor MCP sin herramientas es un
+	// servidor mal empaquetado, no un caso legitimo.
+	if len(tools) == 0 {
+		fmt.Println("✗")
+		cleanup()
+		return fmt.Errorf("%q answered tools/list with an EMPTY catalog.\n"+
+			"That is not a valid service: check the command (a wrong argument makes many\n"+
+			"servers start and answer without registering anything), and try it first with:\n"+
+			"  kling mcp verify -image %s -- <command>", service, img)
 	}
 	fmt.Printf("✓ %s · %d tool(s)\n", info, len(tools))
 
@@ -342,7 +359,7 @@ func mcpImport(args []string) error {
 		cleanup()
 		return err
 	}
-	if _, err := c.Commit(ctx, mc.ID, service); err != nil {
+	if _, err := c.Commit(ctx, mc.ID, service, false); err != nil {
 		fmt.Println("✗")
 		cleanup()
 		if strings.Contains(err.Error(), "already exists") {
@@ -395,16 +412,27 @@ func mcpList(args []string) error {
 	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
 	host := hostFlag(fs)
 	verbose := fs.Bool("v", false, "show each tool")
-	if err := fs.Parse(args); err != nil {
+	asJSON := fs.Bool("json", false, "JSON output (services + external, with tools)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	snaps, err := api.NewClient(hostOf(*host)).Snapshots(ctx)
+	c := api.NewClient(hostOf(*host))
+	snaps, err := c.Snapshots(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		// Los links (servicios externos) también son servicios MCP: se emiten
+		// aparte para que un consumidor distinga microVM de puente externo.
+		links, _ := c.Links(ctx)
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"services": snaps,
+			"external": links,
+		})
 	}
 	if len(snaps) == 0 {
 		fmt.Println("No services. Import one:  kling mcp import <name> -image <image>")
@@ -413,7 +441,7 @@ func mcpList(args []string) error {
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "SERVICE\tTOOLS\tCATALOG\tHEALTH\tMEMORY\tINSTANCES")
-	total := 0
+	total, unprobed := 0, 0
 	for _, s := range snaps {
 		n := s.Name
 		if svc := s.Service(); svc != "" {
@@ -423,6 +451,9 @@ func mcpList(args []string) error {
 		if s.ToolsAt != nil {
 			cat = since(*s.ToolsAt) + " ago"
 		}
+		if s.Health == "" {
+			unprobed++
+		}
 		total += len(s.Tools)
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n",
 			n, len(s.Tools), cat, healthCell(s), human(s.MemBytes), s.Instances)
@@ -430,7 +461,14 @@ func mcpList(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	links, _ := api.NewClient(hostOf(*host)).Links(ctx)
+	links, _ := c.Links(ctx)
+	// "not probed" no es un dato de salud, es su ausencia — y una columna llena
+	// de ausencias sin decir cómo llenarla es como se pasan 26 horas de caída
+	// sin que nadie sondee. El sondeo no ocurre aquí: cada sondeo despierta una
+	// microVM y `ls` debe seguir siendo instantáneo.
+	if unprobed > 0 {
+		fmt.Printf("\nHealth has never been probed for %d service(s). Probe them:  kling mcp health\n", unprobed)
+	}
 	for _, l := range links {
 		total += len(l.Tools)
 		fmt.Printf("%-12s %-14d %-11s %-13s %-9s external: %s\n",
@@ -461,7 +499,7 @@ func mcpList(args []string) error {
 func mcpRefresh(args []string) error {
 	fs := flag.NewFlagSet("mcp refresh", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -519,7 +557,8 @@ func mcpHealth(args []string) error {
 	fs := flag.NewFlagSet("mcp health", flag.ExitOnError)
 	host := hostFlag(fs)
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
-	if err := fs.Parse(reorder(args)); err != nil {
+	profundo := fs.Bool("deep", true, "also call one real tool, not just tools/list")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -552,7 +591,7 @@ func mcpHealth(args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	var enfermos int
 	for _, svc := range targets {
-		probeErr := probeHealth(ctx, c, svc, *wait)
+		probeErr := probeHealth(ctx, c, svc, *wait, *profundo)
 		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
 		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
 		if _, err := c.SetHealth(ctx, svc, probeErr == nil, errMsg(probeErr)); err != nil {
@@ -577,7 +616,7 @@ func mcpHealth(args []string) error {
 // probeHealth arranca una instancia efímera del snapshot, le pide tools/list y la
 // destruye. Devuelve nil si el servicio contestó. Es el mismo ciclo que hace el
 // gateway en modo efímero, expresado con las utilidades del CLI.
-func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration) error {
+func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration, profundo bool) error {
 	mc, err := c.Run(ctx, api.RunRequest{
 		From: service, Name: service + "-health",
 		Labels: map[string]string{api.LabelService: service, "health": "true"},
@@ -593,8 +632,26 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 	if err := waitGuest(ctx, c, mc.ID, wait); err != nil {
 		return fmt.Errorf("didn't open the MCP port (%w)", err)
 	}
-	if _, _, err := introspectWith(guestPost(ctx, c, mc.ID)); err != nil {
+	post := guestPost(ctx, c, mc.ID)
+	// Con sesion: se REUTILIZA para ejercer la herramienta. Abrir una segunda la
+	// rechaza en cualquier servicio con la memoria por defecto — 256 MiB dan
+	// para UNA sesion— y la sonda fallaba siempre en ellos.
+	_, sid, tools, err := introspectConSesion(post)
+	if err != nil {
 		return fmt.Errorf("didn't respond to tools/list (%w)", err)
+	}
+	if !profundo {
+		return nil
+	}
+	// Y ahora la parte que SI puede fallar. Ver prueba.go: tools/list lo
+	// contesta el servidor sin tocar lo que de verdad usa, asi que hasta aqui
+	// un servicio de navegador con el navegador roto sale impecable.
+	herramienta, args, que, hay := pruebaAplicable(tools)
+	if !hay {
+		return nil
+	}
+	if err := ejercitar(post, sid, herramienta, args); err != nil {
+		return fmt.Errorf("answers tools/list but doesn't work: checking that %s failed: %w", que, err)
 	}
 	return nil
 }
@@ -638,7 +695,7 @@ func mcpLink(args []string) error {
 	desc := fs.String("description", "", "what it's for")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -693,7 +750,7 @@ func mcpLink(args []string) error {
 func mcpUnlink(args []string) error {
 	fs := flag.NewFlagSet("mcp unlink", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -751,7 +808,7 @@ func directPost(ctx context.Context, url string) poster {
 			return "", nil, err
 		}
 		defer resp.Body.Close()
-		out, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		out, err := api.LeerCuerpo(resp.Body, 8<<20)
 		return resp.Header.Get("Mcp-Session-Id"), out, err
 	}
 }
@@ -779,10 +836,22 @@ func introspectAt(ctx context.Context, url string) (string, []api.ToolSpec, erro
 
 // introspectWith hace el handshake sin saber por dónde viajan las peticiones.
 func introspectWith(post poster) (string, []api.ToolSpec, error) {
+	name, _, tools, err := introspectConSesion(post)
+	return name, tools, err
+}
+
+// introspectConSesion es lo mismo pero devuelve TAMBIEN el id de sesion, para
+// quien quiera seguir usandola.
+//
+// Reutilizarla no es una optimizacion: un servicio de 256 MiB admite UNA sola
+// sesion (deriveMaxSessions: 64 MiB por sesion, 192 reservados), asi que abrir
+// una segunda para ejercer una herramienta la rechaza siempre. La sonda
+// profunda fallaba en todo servicio con la memoria por defecto.
+func introspectConSesion(post poster) (string, string, []api.ToolSpec, error) {
 	sid, raw, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
 		`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
 	if err != nil {
-		return "", nil, fmt.Errorf("initialize: %w", err)
+		return "", "", nil, fmt.Errorf("initialize: %w", err)
 	}
 	var initRes struct {
 		Result struct {
@@ -807,7 +876,7 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 
 	_, raw, err = post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if err != nil {
-		return name, nil, fmt.Errorf("tools/list: %w", err)
+		return name, sid, nil, fmt.Errorf("tools/list: %w", err)
 	}
 
 	var out struct {
@@ -832,13 +901,13 @@ func introspectWith(post poster) (string, []api.ToolSpec, error) {
 		if body == "" {
 			body = "(empty response)"
 		}
-		return name, nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
+		return name, sid, nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
 			"The server replied: %s", err, body)
 	}
 	if out.Error != nil {
-		return name, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
+		return name, sid, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
 	}
-	return name, out.Result.Tools, nil
+	return name, sid, out.Result.Tools, nil
 }
 
 // splitDomains parte una lista de dominios separada por comas, recortando

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // Config es el contenido del fichero.
@@ -156,11 +158,13 @@ func (c *Config) Save() error {
 		return err
 	}
 	b = append(b, '\n')
-	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// Durable: aqui vive el endpoint del daemon y el token del gateway, que los
+	// pone una persona. Perderlos en un corte no se arregla solo — hay que
+	// volver a configurarlos a mano, y el sintoma es un 401 sin explicacion.
+	if err := durable.Escribir(c.path, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, c.path)
+	return nil
 }
 
 // Host resuelve a qué daemon hablar, por orden de precedencia:

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // FONDO DE MÁQUINAS PRE-CALENTADAS.
@@ -124,36 +126,41 @@ func (p *pool) fillN(ctx context.Context, service, snapshot string, want int) {
 	p.mu.Unlock()
 
 	go func() {
+		// Igual que en el catalogo: Done y el desmarcado de "filling" van fuera,
+		// o un panico dejaria el servicio marcado como llenandose para siempre
+		// y nadie volveria a rellenar su pool.
 		defer p.wg.Done()
 		defer func() {
 			p.mu.Lock()
 			p.filling[service] = false
 			p.mu.Unlock()
 		}()
-		for i := 0; i < missing; i++ {
-			if err := ctx.Err(); err != nil {
-				return
-			}
-			vm, err := p.warmFn(ctx, service, snapshot)
-			if err != nil {
-				log.Printf("pool %s: could not prewarm: %v", service, err)
-				return
-			}
-			p.mu.Lock()
-			if p.closed {
+		panico.Contener("gateway.pool", func() {
+			for i := 0; i < missing; i++ {
+				if err := ctx.Err(); err != nil {
+					return
+				}
+				vm, err := p.warmFn(ctx, service, snapshot)
+				if err != nil {
+					log.Printf("pool %s: could not prewarm: %v", service, err)
+					return
+				}
+				p.mu.Lock()
+				if p.closed {
+					p.mu.Unlock()
+					// El fondo se vació mientras esta máquina se calentaba: no la
+					// va a recoger nadie, así que la retira quien la creó. Con el
+					// contexto ya cancelado hay que usar uno nuevo o el Remove se
+					// iría sin hacer nada.
+					rm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					_ = p.removeFn(rm, vm.id)
+					cancel()
+					return
+				}
+				p.ready[service] = append(p.ready[service], vm)
 				p.mu.Unlock()
-				// El fondo se vació mientras esta máquina se calentaba: no la
-				// va a recoger nadie, así que la retira quien la creó. Con el
-				// contexto ya cancelado hay que usar uno nuevo o el Remove se
-				// iría sin hacer nada.
-				rm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				_ = p.removeFn(rm, vm.id)
-				cancel()
-				return
 			}
-			p.ready[service] = append(p.ready[service], vm)
-			p.mu.Unlock()
-		}
+		})
 	}()
 }
 

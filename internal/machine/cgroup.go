@@ -30,7 +30,12 @@ func ensureDelegation() (string, error) {
 		return "", fmt.Errorf("no cgroup v2 mounted")
 	}
 	// El controlador cpu tiene que estar disponible para los hijos de la raíz.
-	if !strings.Contains(readFile(filepath.Join(root, "cgroup.subtree_control")), "cpu") {
+	//
+	// Se compara PALABRA a palabra y no con Contains: la lista de controladores
+	// incluye `cpuset`, que contiene "cpu" como subcadena. En un anfitrion donde
+	// cpuset este delegado y cpu no, Contains daba un falso positivo, se saltaba
+	// el `+cpu`, y a partir de ahi ninguna microVM tenia techo de CPU.
+	if !controladorPresente(readFile(filepath.Join(root, "cgroup.subtree_control")), "cpu") {
 		if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"),
 			[]byte("+cpu"), 0o644); err != nil {
 			return "", fmt.Errorf("cpu controller is not available at the root: %w", err)
@@ -110,4 +115,15 @@ func (m *Manager) sweepCgroups(live map[string]bool) {
 			_ = os.Remove(filepath.Join(m.cgroupRoot, e.Name()))
 		}
 	}
+}
+
+// controladorPresente busca un controlador EXACTO en la lista de cgroup v2, que
+// viene separada por espacios ("cpuset cpu io memory pids").
+func controladorPresente(lista, quiero string) bool {
+	for _, c := range strings.Fields(lista) {
+		if c == quiero {
+			return true
+		}
+	}
+	return false
 }

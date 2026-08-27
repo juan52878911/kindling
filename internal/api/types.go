@@ -43,6 +43,11 @@ type Machine struct {
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	FrozenAt  *time.Time `json:"frozen_at,omitempty"`
 
+	// FailedAt es cuándo pasó a failed. Es lo que permite recogerla después de
+	// un tiempo de gracia: una failed sin fecha no se puede envejecer, y las
+	// fallidas se acumulaban para siempre, una por intento de instanciación roto.
+	FailedAt *time.Time `json:"failed_at,omitempty"`
+
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
 
@@ -183,6 +188,17 @@ const VolumeBootParam = "kling.volume"
 // pueden reescribir, así que restaurarlos exige seguir usando este nombre.
 const LegacyVolumeDriveID = "volume"
 
+// LayerBootParam dice al invitado en qué disco está la capa de servicio.
+//
+// Una imagen por capas son dos discos de solo lectura: la base compartida por
+// todos los servicios (vda) y el delta propio de este (un disco extra). El
+// device viaja aquí, y no por posición, porque la posición depende de cuántos
+// volúmenes lleve la máquina — el mismo motivo por el que el punto de montaje
+// del volumen viaja en VolumeBootParam.
+//
+// Ausente = imagen monolítica: el invitado hace el overlay de siempre sobre /.
+const LayerBootParam = "kling.layer"
+
 // ExecBootParam enciende la ejecución de comandos dentro del invitado.
 //
 // Solo lo pone el anfitrión, y solo en las microVMs de un solo uso que pueblan
@@ -190,6 +206,36 @@ const LegacyVolumeDriveID = "volume"
 // concederse a sí mismo esa capacidad porque la línea de comandos del kernel la
 // escribe quien arranca la máquina.
 const ExecBootParam = "kling.exec"
+
+// Image es una imagen de rootfs ya construida ($ROOT/images/$NAME.ext4): la base
+// de la que se arrancan las microVMs. Hasta que existió GET /images no se podían
+// ni enumerar.
+type Image struct {
+	Name string `json:"name"`
+	// SizeBytes es el tamaño LÓGICO del .ext4; DiskBytes lo REALMENTE asignado en
+	// disco (bloques × 512). Con ficheros dispersos difieren, así que el lógico
+	// solo no dice cuánto se recupera al borrar. Mismo par que Volume.
+	//
+	// En una imagen por capas miden LA CAPA, no la suma con la base: la base no
+	// es suya, se comparte con todas las demás, y sumársela a cada una haría creer
+	// que el disco está N veces más lleno de lo que está. Lo que cuesta este
+	// servicio, y lo que se recupera al borrarlo, es su capa.
+	SizeBytes int64 `json:"size_bytes"`
+	DiskBytes int64 `json:"disk_bytes"`
+	HasRecipe bool  `json:"has_recipe"` // se guardó cómo se construyó
+	UsedBy    int   `json:"used_by"`    // snapshots dorados que salieron de aquí
+
+	// Base es la imagen sobre la que se apoya, si va por capas. Vacío =
+	// monolítica, que es como se construía todo antes.
+	Base string `json:"base,omitempty"`
+
+	// Layers cuenta las imágenes por capas que usan ESTA como base.
+	//
+	// Es lo que dice si se puede retirar: una base con capas encima no se puede
+	// borrar aunque no tenga snapshots propios — se llevaría por delante todos
+	// esos servicios, que solo guardan su delta.
+	Layers int `json:"layers,omitempty"`
+}
 
 // Volume es almacenamiento que sobrevive a la microVM que lo usa.
 type Volume struct {
@@ -348,8 +394,15 @@ type HealthRequest struct {
 }
 
 // CommitRequest congela una máquina en marcha como snapshot reutilizable.
+//
+// Replace pide reemplazar un snapshot que ya exista con ese nombre. Es opt-in a
+// propósito: pisar un snapshot destruye el anterior, y eso no debe pasar por un
+// nombre repetido sin querer. El caso que lo hace necesario es real: los
+// snapshots quedan atados al TSC del host y un reinicio los invalida TODOS, así
+// que rehacerlos es operación rutinaria, no excepción.
 type CommitRequest struct {
-	Name string `json:"name"`
+	Name    string `json:"name"`
+	Replace bool   `json:"replace,omitempty"`
 }
 
 // Event es un cambio de estado publicado en el bus del daemon.
@@ -426,6 +479,14 @@ type BuildImageRequest struct {
 	// PIP son paquetes de Python que preinstalar, por la misma razón que NPM:
 	// dentro no hay internet en tiempo de ejecución.
 	PIP []string `json:"pip,omitempty"`
+	// Env son variables de entorno ("KEY=value") que se HORNEAN en el
+	// entrypoint de la imagen, en texto plano — no valen para secretos.
+	//
+	// El caso que las motivó es semgrep: hace phone-home de métricas al
+	// arrancar y, con el egress cerrado, espera ~2 minutos al timeout en cada
+	// arranque en frío. SEMGREP_SEND_METRICS=off lo corta de raíz, y sin este
+	// campo la única forma de fijarlo era empaquetar a mano con el script.
+	Env []string `json:"env,omitempty"`
 	// Cmd es el comando que arranca el servidor MCP dentro del invitado.
 	Cmd []string `json:"cmd"`
 	// GrowMB agranda la imagen. 0 deja que el script decida.
@@ -542,6 +603,15 @@ type BridgeRefresh struct {
 	Updated bool   `json:"updated"`
 	Skipped bool   `json:"skipped,omitempty"`
 	Error   string `json:"error,omitempty"`
+
+	// Busy separa el salto que se cura parando una microVM del que no.
+	//
+	// Se saltan imágenes por dos motivos que no se arreglan igual: una en uso hay
+	// que pararla y repetir; una que no lleva puente propio —una base mínima, o
+	// una capa cuyo puente vive en su base— no hay nada que repetir. Sin este
+	// campo, quien lo lee acaba adivinándolo del texto del error, y el consejo
+	// "párala y vuelve a intentarlo" sale también cuando no hay nada que parar.
+	Busy bool `json:"busy,omitempty"`
 }
 
 // ImageRecipe es CÓMO se construyó una imagen.
@@ -560,6 +630,7 @@ type ImageRecipe struct {
 	Packages []string  `json:"packages,omitempty"`
 	NPM      []string  `json:"npm,omitempty"`
 	PIP      []string  `json:"pip,omitempty"`
+	Env      []string  `json:"env,omitempty"`
 	Cmd      []string  `json:"cmd"`
 	GrowMB   int       `json:"grow_mb,omitempty"`
 	Bundle   bool      `json:"bundle,omitempty"`

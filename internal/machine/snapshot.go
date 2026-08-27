@@ -20,6 +20,8 @@ import (
 	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
@@ -36,7 +38,7 @@ func (m *Manager) snapDir(name string) string {
 // restaurar, el invitado despierta con su estado de montaje en memoria, así que
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
-func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, error) {
+func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*api.Snapshot, error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -57,7 +59,17 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 
 	dir := m.snapDir(name)
 	if _, err := os.Stat(dir); err == nil {
-		return nil, fmt.Errorf("snapshot %q already exists", name)
+		if !replace {
+			return nil, fmt.Errorf("snapshot %q already exists (use `kling commit -replace` to replace it)", name)
+		}
+		// Reemplazar pasa por RemoveSnapshot y no por un RemoveAll directo: es
+		// quien sabe negarse si el snapshot tiene instancias vivas, que seguirían
+		// mapeando un mem.file que estaríamos pisando debajo de ellas. El borrado
+		// previo no es atómico, pero el caso que motiva -replace es un snapshot
+		// que un reinicio del host ya dejó irrestaurable: no hay nada que salvar.
+		if err := m.RemoveSnapshot(name); err != nil {
+			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
+		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -265,6 +277,19 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, err
 	}
+	// El DIRECTORIO manda sobre lo que diga el meta.
+	//
+	// `runFrom` resuelve el snapshot por `snapDir(nombre)`, o sea por directorio.
+	// Si el meta declara otro nombre —un meta copiado a mano, un renombrado a
+	// medias— el listado enseñaría un servicio que no se puede instanciar, y dos
+	// directorios que declaren el mismo nombre saldrían como DUPLICADOS
+	// indistinguibles. Observado: `sequentialthinking` apareció dos veces, con
+	// tamaños distintos y un solo directorio en disco.
+	if s.Name != name {
+		log.Printf("snapshot %q: its meta claims the name %q; going with the directory",
+			name, s.Name)
+		s.Name = name
+	}
 	return &s, nil
 }
 
@@ -335,22 +360,35 @@ func (m *Manager) SetHealth(name string, healthy bool, probeErr string) (*api.Sn
 //
 // DECISIÓN — qué se hashea y qué no:
 //
-//	overlay.ext4 (rootfs) y snap.file  -> SÍ, en cada restauración.
+//	overlay.ext4 (rootfs) y snap.file  -> SÍ, la PRIMERA vez.
 //	mem.file                           -> NO aquí.
 //
 // El fichero de memoria es el grande —cientos de MiB— y restaurar promete ~30 ms;
-// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra. El rootfs y
-// el snap.file son pequeños, y encima el overlay ya se lee entero al copiarlo con
-// `cp` justo después de esta comprobación: el sobrecoste real es una segunda
-// pasada de lectura sobre unos pocos MiB, no sobre el volcado completo. La
-// integridad del mem.file, si algún día se quiere, se comprobaría UNA vez tras
-// reiniciar el daemon (fuera del camino caliente), no en cada arranque.
+// leerlo entero por sha256 en cada thaw tiraría esa cifra por tierra.
+//
+// CORRECCIÓN, medida: la versión anterior de esta nota daba por hecho que "el
+// rootfs y el snap.file son pequeños". No lo son. El overlay dorado son 512 MiB
+// nominales, y sha256 los lee ENTEROS —los huecos de un fichero disperso se leen
+// como ceros, y por el hash pasan igual—. Medido en fc-test: hashearlo cuesta
+// 2.866 ms de los 4.280 que tarda una instanciación, el 67%.
+//
+// El razonamiento era bueno; el supuesto estaba mal por dos órdenes de magnitud.
+//
+// Lo que arregla el desfase no es hashear menos sino hashear MENOS VECES: un
+// dorado es INMUTABLE desde que se congela, así que verificarlo en cada una de
+// las 142 instanciaciones no aporta nada sobre verificarlo en la primera. Se
+// recuerda el veredicto y se reusa mientras el fichero no cambie de tamaño ni de
+// fecha; si cambia, se vuelve a verificar. Un dorado corrupto se sigue detectando,
+// y se detecta igual de pronto.
 //
 // Los snapshots anteriores a esta comprobación no tienen digests grabados: se
 // saltan en vez de fallar, o reimportar dejaría de ser opcional para todos.
 func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 	if snap.RootfsSHA256 == "" && snap.SnapSHA256 == "" {
 		return nil // snapshot legacy: no hay digests que comprobar
+	}
+	if m.integridadYaVista(snap.Name, snapDir) {
+		return nil
 	}
 	for _, chk := range []struct{ file, want string }{
 		{"overlay.ext4", snap.RootfsSHA256},
@@ -369,7 +407,57 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 				snap.Name, chk.file, chk.want[:12], got[:12], snap.Name)
 		}
 	}
+	m.anotarIntegridad(snap.Name, snapDir)
 	return nil
+}
+
+// huellaSnapshot describe los ficheros verificados sin leerlos: tamaño y fecha de
+// los dos que se hashean. Basta para saber si el dorado sigue siendo el mismo, y
+// cuesta dos stat en vez de 512 MiB de sha256.
+type huellaSnapshot struct {
+	tam   [2]int64
+	fecha [2]int64
+}
+
+func huellaDe(snapDir string) (huellaSnapshot, bool) {
+	var h huellaSnapshot
+	for i, f := range [2]string{"overlay.ext4", "snap.file"} {
+		st, err := os.Stat(filepath.Join(snapDir, f))
+		if err != nil {
+			return h, false
+		}
+		h.tam[i] = st.Size()
+		h.fecha[i] = st.ModTime().UnixNano()
+	}
+	return h, true
+}
+
+// integridadYaVista dice si este dorado, EXACTAMENTE como está ahora en disco, ya
+// pasó la verificación. El veredicto vive en memoria y no en disco a propósito:
+// tras reiniciar el daemon se vuelve a verificar una vez, que es barato y cubre
+// una corrupción ocurrida mientras estaba parado.
+func (m *Manager) integridadYaVista(name, snapDir string) bool {
+	h, ok := huellaDe(snapDir)
+	if !ok {
+		return false
+	}
+	m.mu.RLock()
+	visto, hay := m.integridad[name]
+	m.mu.RUnlock()
+	return hay && visto == h
+}
+
+func (m *Manager) anotarIntegridad(name, snapDir string) {
+	h, ok := huellaDe(snapDir)
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	if m.integridad == nil {
+		m.integridad = map[string]huellaSnapshot{}
+	}
+	m.integridad[name] = h
+	m.mu.Unlock()
 }
 
 // fileSHA256 devuelve el sha256 de un fichero en hexadecimal. Con crypto/sha256
@@ -404,6 +492,25 @@ func (m *Manager) RemoveSnapshot(name string) error {
 		return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
 	}
 	return os.RemoveAll(m.snapDir(name))
+}
+
+// explainRestoreErr traduce los fallos de restauración de Firecracker con causa
+// conocida a un error que dice qué pasó y qué hacer. Los que no reconoce pasan
+// intactos: adornar un error sin entenderlo es peor que dejarlo crudo.
+//
+// El caso que motiva esto: el snapshot graba la frecuencia del TSC del host, y
+// esa frecuencia se mide de nuevo en cada arranque — tras reiniciar el host,
+// TODOS los snapshots anteriores dejan de restaurar a la vez, con un
+// "Could not set TSC scaling ... Invalid argument (os error 22)" que no apunta
+// a nada. La recuperación es siempre la misma: rehacer el snapshot.
+func explainRestoreErr(err error, what, remedy string) error {
+	if !api.EsFalloTSC(err) {
+		return err
+	}
+	return fmt.Errorf("%s can't be restored on this host: the snapshot records the CPU's TSC "+
+		"frequency, which changes on every host boot, so a host reboot invalidates every "+
+		"snapshot taken before it (this is a Firecracker limitation, not corruption).\n"+
+		"Recover by recreating it:\n%s\nUnderlying error: %v", what, remedy, err)
 }
 
 // runFrom instancia una microVM desde un snapshot dorado.
@@ -461,10 +568,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	defer releaseMem()
 
-	dir := m.dir(id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// El directorio nace RESERVADO: desde aquí hasta la entrada en byID —copiar
+	// el overlay dorado, resolver volúmenes, montar la red— es de lejos la
+	// ventana más ancha del daemon, y el barrido de huérfanos corre cada 10 s en
+	// cuanto el disco aprieta. Ver makeMachineDir.
+	dir, unreserve, err := m.makeMachineDir(id)
+	if err != nil {
 		return nil, err
 	}
+	defer unreserve()
 
 	// Copia del overlay dorado: mismo contenido, fichero propio. Compartirlo
 	// haría que las instancias se pisaran el disco entre ellas.
@@ -490,7 +602,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if len(req.VolumeSet()) == 0 {
 		req.Volumes = snap.VolumeSet()
 	}
-	vols, verr := m.resolveVolumes(req)
+	vols, verr := m.reservarVolumenes(req, id, req.Name)
+	// Igual que en Run: se suelta al salir, haya publicado o no. Aqui la ventana
+	// era la mas ancha del daemon —incluye copiar el overlay del dorado— y por
+	// eso reservar es lo que de verdad la cierra.
+	defer m.soltarReservas(id)
 	if verr != nil {
 		os.RemoveAll(dir)
 		return nil, verr
@@ -612,10 +728,26 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		for i, v := range vols {
 			volPaths[i] = v.path
 		}
+		// Los discos de solo lectura de la imagen: la base y, si el servicio se
+		// empaquetó por capas, su capa.
+		//
+		// NO se re-pasa kling.layer= aquí, ni haría falta: la línea de comandos del
+		// kernel se congeló DENTRO de la memoria, y el invitado restaurado despierta
+		// con la capa ya montada en su tabla de montajes. Lo único que hace falta es
+		// que el fichero siga estando donde el snapshot lo grabó — que es justo lo
+		// que hace este enlace. Por eso tampoco hay campo Layer en el meta: se
+		// resuelve del nombre de la imagen, como la base, y los snapshots viejos no
+		// necesitan nada nuevo dentro.
+		imgBase, imgLayer, ierr := m.imageLayer(snap.Image)
+		if ierr != nil {
+			m.fail(mc, ierr)
+			return nil, ierr
+		}
 		toLink := append([]string{
 			filepath.Join(snapDir, "snap.file"),
 			filepath.Join(snapDir, "mem.file"),
-			m.imagePath(snap.Image),
+			imgBase,
+			imgLayer,
 			filepath.Join(snapDir, "overlay.ext4"),
 			overlay,
 		}, volPaths...)
@@ -644,6 +776,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err := c.LoadSnapshot(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false); err != nil {
+		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
+		// propagar: este error acaba en el 502 del gateway y en el CLI, y el
+		// texto crudo de Firecracker no le dice a nadie qué hacer.
+		err = explainRestoreErr(err, fmt.Sprintf("snapshot %q", req.From), fmt.Sprintf(
+			"  kling mcp import %s -force    (imported MCP service)\n"+
+				"  kling commit -replace <machine> %s    (manual snapshot)", req.From, req.From))
 		m.fail(mc, err)
 		return nil, err
 	}
@@ -739,16 +877,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 // meta viejo o el nuevo. El proyecto ya usa este patrón en writePending y
 // saveRecipe; aquí faltaba.
 func writeMeta(dir string, b []byte) error {
-	final := filepath.Join(dir, "meta.json")
-	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	// Durable, no solo atomico. Un meta perdido en un corte no da error: el
+	// servicio DESAPARECE del catalogo en silencio (Snapshots() salta lo que no
+	// puede leer), y RemoveSnapshot se niega despues a borrar lo ilegible, asi
+	// que el directorio queda varado con su mem.file de cientos de MB.
+	return durable.Escribir(filepath.Join(dir, "meta.json"), b, 0o644)
 }
 
 // patchVolumeDrive reapunta un disco de volumen y devuelve el nombre que de

@@ -27,6 +27,8 @@ import (
 	"github.com/juan52878911/kindling/internal/gateway"
 	"github.com/juan52878911/kindling/internal/report"
 	"github.com/juan52878911/kindling/internal/transport"
+
+	"errors"
 )
 
 const usage = `kling - Firecracker microVMs with a docker-style interface
@@ -38,13 +40,14 @@ GETTING STARTED
   up                                               gets the runtime ready: KVM,
                                                    nftables, user, images,
                                                    daemon and gateway
-  status                                           which piece is up and which is missing
+  status [-json]                                   which piece is up and which is missing
 
 VOLUMES
   volume create <name> [-size 2G]                  storage that survives
                                                    the microVM
-  volume ls | rm <name>                            list / remove
+  volume ls [-json] | rm <name>                    list / remove
   volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
+  images ls [-json]                                lists built rootfs images
   images refresh [image...]                        puts the current bridge inside the images
   images toolchain                                 builds the image with npm and pip (used by populate)
   images recipe <image>                            how it was built
@@ -53,10 +56,10 @@ MACHINES
   run [-name N] [-image I] [-cpus N] [-mem MiB]    creates and starts a microVM
       [-egress none|internet|allowlist]            network egress (default: none)
       [-allow dom1,dom2]                           domains allowed with allowlist
-      [-ttl SECONDS] [-cpu PCT]                    auto-freeze and CPU ceiling
+      [-ttl SECONDS] [-cpu-pct PCT]                auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by MCP service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
-  ps [-a]                                          lists the machines
+  ps [-a] [-q] [-json]                             lists the machines
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
@@ -78,7 +81,7 @@ MCP SERVICES
       [-egress none|internet|allowlist]            what it can do, freezes it and
       [-allow dom1,dom2]                           saves its catalog. All of this
       [-volume NAME[:/mount][:ro]] (repeatable)    ends up BAKED into the snapshot
-  mcp list [-v]                                    services and their tools
+  mcp list [-v] [-json]                            services and their tools
   mcp refresh <service>                            recaptures the catalog
   mcp link <name> <url>                            links an EXTERNAL MCP server
                                                    (e.g. your engram) without putting
@@ -86,7 +89,7 @@ MCP SERVICES
   mcp unlink <name>                                unlinks it
 
 GOLDEN SNAPSHOTS
-  commit <ref> <name>                              freezes a machine as a
+  commit [-replace] <ref> <name>                   freezes a machine as a
                                                    reusable snapshot
   run -from <name>                                 instantiates from the snapshot
   snapshots                                        lists the snapshots
@@ -94,11 +97,11 @@ GOLDEN SNAPSHOTS
 
 OBSERVATION
   topo                                             ASCII diagram of everything
-  top [-watch DUR]                                 memory per microVM (PSS) and
+  top [-watch DUR] [-json]                         memory per microVM (PSS) and
                                                    the host; snapshot or refresh
   export [-o file.html]                            browsable topology in HTML
   events                                           stream of daemon events
-  info                                             daemon status
+  info [-json]                                     daemon status
 
 USAGE MEMORY (optional, off by default)
   memory status                                    whether it's active and on what
@@ -156,6 +159,7 @@ CONFIGURATION
   context rm <name>                                removes it
   config [show|path]                               current configuration
   config set <key> <value>                         e.g. defaults.image min
+  completion [bash|zsh]                            shell completion script
   version                                          CLI version
 
 CONNECTION
@@ -238,6 +242,8 @@ func main() {
 		err = cmdContext(args)
 	case "config":
 		err = cmdConfig(args)
+	case "completion":
+		err = cmdCompletion(args)
 	case "version", "--version", "-v":
 		fmt.Printf("kling %s\n", Version)
 		return
@@ -251,8 +257,30 @@ func main() {
 
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		os.Exit(codigoDeSalida(err))
 	}
+}
+
+// errConCodigo deja que un comando pida un codigo de salida concreto.
+//
+// Existe por una distincion que systemd necesita y el codigo 1 no permite:
+// "hice mi trabajo y algo sigue mal" no es lo mismo que "no pude ni empezar".
+// La primera no debe marcar la unidad como fallida —el estado ya quedo grabado
+// donde toca—; la segunda si, porque significa que nadie comprobo nada.
+type errConCodigo struct {
+	code int
+	err  error
+}
+
+func (e *errConCodigo) Error() string { return e.err.Error() }
+func (e *errConCodigo) Unwrap() error { return e.err }
+
+func codigoDeSalida(err error) int {
+	var e *errConCodigo
+	if errors.As(err, &e) {
+		return e.code
+	}
+	return 1
 }
 
 func envOr(k, def string) string {
@@ -282,6 +310,25 @@ func loadConfig() *config.Config {
 	return cfg
 }
 
+// resolveCPUPct devuelve el techo de CPU eligiendo entre el flag nuevo -cpu-pct y
+// el alias deprecado -cpu. -cpu se mantiene por compatibilidad pero avisa: colisiona
+// visualmente con -cpus (número de vCPUs), a un solo carácter y en el mismo comando.
+func resolveCPUPct(fs *flag.FlagSet, pct, old int) int {
+	usedOld := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "cpu" {
+			usedOld = true
+		}
+	})
+	if usedOld {
+		fmt.Fprintln(os.Stderr, "warning: -cpu is deprecated; use -cpu-pct (it looks like -cpus, which sets vCPU count)")
+		if pct == 0 {
+			return old
+		}
+	}
+	return pct
+}
+
 // hostOf resuelve a qué daemon hablar.
 func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
@@ -298,7 +345,7 @@ func cmdDaemon(args []string) error {
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
 	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "user to hand the socket to (for the CLI over SSH)")
 	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -322,7 +369,7 @@ func cmdGateway(args []string) error {
 	memory := fs.String("memory", "", "MCP service that remembers which tool resolved each request")
 	pprofOn := fs.Bool("pprof", false, "exposes /debug/pprof; temporary diagnostics only, loopback only")
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -517,7 +564,8 @@ func cmdRun(args []string) error {
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	ttl := fs.Int("ttl", 0, "seconds until it freezes itself (0 = never)")
-	cpu := fs.Int("cpu", 0, "CPU ceiling as a percentage of one core (0 = default)")
+	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core (0 = default)")
+	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
 	service := fs.String("service", "", "MCP service it belongs to (groups in topo and export)")
 	var volumes volumeFlag
 	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
@@ -525,7 +573,7 @@ func cmdRun(args []string) error {
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -549,7 +597,7 @@ func cmdRun(args []string) error {
 		Egress:       config.Or(*egress, cfg.Defaults.Egress, "none"),
 		AllowDomains: splitDomains(*allow),
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
-		CPUPct:       config.Or(*cpu, cfg.Defaults.CPUPct),
+		CPUPct:       config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Labels:       labels.merge(*service),
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
@@ -607,7 +655,7 @@ func cmdExport(args []string) error {
 	// romper a quien la tuviera en un script.
 	_ = fs.Bool("detail", false, "deprecated: the report always includes detail")
 	open := fs.Bool("open", false, "open it when done")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -661,7 +709,7 @@ func cmdLogs(args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ExitOnError)
 	host := hostFlag(fs)
 	tail := fs.Int("tail", 200, "last N lines (0 = all)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -682,17 +730,39 @@ func cmdLogs(args []string) error {
 func cmdCommit(args []string) error {
 	fs := flag.NewFlagSet("commit", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	// Reemplazar es opt-in: los snapshots quedan atados al TSC del host y un
+	// reinicio los invalida todos, así que rehacerlos con el mismo nombre es
+	// rutina — pero pisar uno por un nombre repetido sin querer no debe poder
+	// pasar, y por eso no es el comportamiento por defecto.
+	replace := fs.Bool("replace", false, "replace the snapshot if one with this name already exists")
+	// Congelar un servidor que no sirve produce un snapshot que NO sirve, y el
+	// fallo no aparece hasta que alguien lo despierta —minutos u horas despues—
+	// con un "tool did not start listening" que no menciona el commit. Por eso
+	// se comprueba antes, y por eso saltarselo es explicito.
+	force := fs.Bool("force", false, "commit even if the guest is not serving (produces a snapshot that may not work)")
+	// El hijo caliente vive DENTRO del dorado y lo engorda: medido, 39 MB -> 120 MB
+	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
+	// de unas decenas de servicios la cuenta puede no salir.
+	warm := fs.Bool("warm", true, "freeze with the MCP runtime already started (bigger snapshot, much faster first wake)")
+	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve before committing")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling commit <ref> <snapshot-name>")
+		return fmt.Errorf("usage: kling commit [-replace] [-force] [-warm=false] <ref> <snapshot-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	snap, err := api.NewClient(hostOf(*host)).Commit(ctx, fs.Arg(0), fs.Arg(1))
+	c := api.NewClient(hostOf(*host))
+	if !*force {
+		if err := listoParaCongelar(ctx, c, fs.Arg(0), *espera, *warm); err != nil {
+			return err
+		}
+	}
+
+	snap, err := c.Commit(ctx, fs.Arg(0), fs.Arg(1), *replace)
 	if err != nil {
 		return err
 	}
@@ -701,11 +771,58 @@ func cmdCommit(args []string) error {
 	return nil
 }
 
+// listoParaCongelar exige que el invitado SIRVA antes de convertirse en dorado.
+//
+// `kling mcp import` ya hacia esta danza; `kling commit` a secas no, y es el
+// camino que documentamos para crear dorados a mano. El resultado era un snapshot
+// que restaura en 26 ms y luego no contesta: la microVM arranca, el proceso del
+// servidor no esta escuchando, y el gateway devuelve 502 tras esperar en balde.
+//
+// Ademas del puerto se pide el /reset del puente, que cierra las sesiones y mata
+// los hijos: un dorado congelado en estado post-handshake rechaza el siguiente
+// initialize con 400 "Server already initialized". Si el invitado no habla por
+// puente (HTTP nativo) el /reset no existe y no es un fallo — el puerto abierto
+// es cuanto se puede comprobar.
+func listoParaCongelar(ctx context.Context, c *api.Client, ref string, espera time.Duration, warm bool) error {
+	fmt.Printf("checking the guest is serving before freezing... ")
+	if err := waitGuest(ctx, c, ref, espera); err != nil {
+		fmt.Println("✗")
+		return fmt.Errorf("%s: %w", mensajeNoSirve(ref, espera.String()), err)
+	}
+	// El /reset deja el servidor como recien arrancado. 404 = no hay puente, que
+	// es legitimo; solo se informa de lo que se pudo comprobar.
+	ruta := "/reset"
+	if !warm {
+		ruta = "/reset?warm=0"
+	}
+	resp, err := c.Guest(ctx, ref, api.GuestRequest{Path: ruta, Method: "POST"})
+	switch {
+	case err == nil && resp.Status == 204 && warm:
+		fmt.Println("✓ (serving, session state reset, runtime prewarmed)")
+	case err == nil && resp.Status == 204:
+		fmt.Println("✓ (serving, session state reset, no prewarm)")
+	default:
+		fmt.Println("✓ (serving)")
+	}
+	return nil
+}
+
+// mensajeNoSirve explica la cadena entera: que pasa ahora, que pasaria al
+// despertar, como diagnosticarlo y como saltarselo. Vive aparte para poder
+// comprobar que no se queda a medias.
+func mensajeNoSirve(ref, espera string) string {
+	return fmt.Sprintf("the guest is not serving on port 8080 after %s\n"+
+		"A golden snapshot of a server that is not listening restores fine and then "+
+		"fails on wake with \"tool did not start listening\".\n"+
+		"Check it with:  kling logs %s\n"+
+		"Or freeze anyway with:  kling commit -force ...", espera, ref)
+}
+
 func cmdSnapshots(args []string) error {
 	fs := flag.NewFlagSet("snapshots", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -733,7 +850,7 @@ func cmdSnapshots(args []string) error {
 func cmdRmi(args []string) error {
 	fs := flag.NewFlagSet("rmi", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -758,7 +875,8 @@ func cmdPS(args []string) error {
 	host := hostFlag(fs)
 	all := fs.Bool("a", false, "include stopped ones")
 	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	quiet := fs.Bool("q", false, "print only machine IDs (for scripting)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -771,6 +889,17 @@ func cmdPS(args []string) error {
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(list)
+	}
+	// -q imprime solo IDs (12 chars), una por línea: pensado para tuberías como
+	// `kling rm $(kling ps -q)`. Respeta -a igual que la tabla.
+	if *quiet {
+		for _, mc := range list {
+			if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
+				continue
+			}
+			fmt.Println(mc.ID[:12])
+		}
+		return nil
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
@@ -841,7 +970,7 @@ func since(t time.Time) string {
 func cmdLifecycle(op string, args []string) error {
 	fs := flag.NewFlagSet(op, flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -888,7 +1017,7 @@ func cmdLifecycle(op string, args []string) error {
 func cmdSqueeze(args []string) error {
 	fs := flag.NewFlagSet("squeeze", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -925,7 +1054,7 @@ func cmdMMDS(args []string) error {
 	fs := flag.NewFlagSet("mmds", flag.ExitOnError)
 	host := hostFlag(fs)
 	file := fs.String("f", "", "JSON file with the MMDS store (default: stdin)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -967,7 +1096,7 @@ func cmdEvents(args []string) error {
 	fs := flag.NewFlagSet("events", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "one JSON line per event")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -994,7 +1123,7 @@ func cmdEvents(args []string) error {
 func cmdTopo(args []string) error {
 	fs := flag.NewFlagSet("topo", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -1127,7 +1256,8 @@ func trunc(s string, n int) string {
 func cmdInfo(args []string) error {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 
@@ -1138,6 +1268,9 @@ func cmdInfo(args []string) error {
 	i, err := c.Info(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(i)
 	}
 	kvm := "no"
 	if i.KVM {

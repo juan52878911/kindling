@@ -34,7 +34,7 @@ func cmdMigrate(args []string) error {
 	service := fs.String("service", "", "service name in kindling, if it differs from the MCP name")
 	install := fs.String("install", "", "write the configuration: "+clientNames()+", or `all`")
 	tokenFlag := fs.String("token", "", "gateway token (default: gateway.token)")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {

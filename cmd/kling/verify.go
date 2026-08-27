@@ -197,11 +197,15 @@ func minimalArgs(schema json.RawMessage) map[string]any {
 // exerciseTools llama a cada herramienta con argumentos mínimos y devuelve las
 // respuestas concatenadas, para escanearlas junto con la consola. Es lo que
 // dispara las instalaciones que solo ocurren al USAR una herramienta.
-func exerciseTools(post poster, tools []api.ToolSpec) string {
+func exerciseTools(post poster, tools []api.ToolSpec) (salida string, ejercidas int, err error) {
 	sid, _, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
 		`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling-verify","version":"1"}}}`)
 	if err != nil {
-		return ""
+		// Devolver "" sin error decia "no salio nada" cuando lo cierto es que no
+		// se pudo ni empezar. El verify imprimia su ✓ igual y salia con codigo 0
+		// sin haber ejercido una sola herramienta: una comprobacion que no puede
+		// fallar no comprueba nada.
+		return "", 0, fmt.Errorf("initialize: %w", err)
 	}
 	_, _, _ = post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	var out strings.Builder
@@ -209,12 +213,16 @@ func exerciseTools(post poster, tools []api.ToolSpec) string {
 		args, _ := json.Marshal(minimalArgs(t.InputSchema))
 		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
 			100+i, t.Name, args)
-		if _, raw, err := post(sid, body); err == nil {
-			out.Write(api.MCPPayload(raw))
-			out.WriteByte('\n')
+		_, raw, err := post(sid, body)
+		if err != nil {
+			// Una llamada que no llega tampoco se cuenta como ejercida.
+			continue
 		}
+		ejercidas++
+		out.Write(api.MCPPayload(raw))
+		out.WriteByte('\n')
 	}
-	return out.String()
+	return out.String(), ejercidas, nil
 }
 
 // mcpVerify PRUEBA una imagen sin importarla: la arranca como una microVM
@@ -234,7 +242,7 @@ func mcpVerify(args []string) error {
 	wait := fs.Duration("wait", 45*time.Second, "maximum wait for the server to start")
 	settle := fs.Duration("settle", 90*time.Second, "how long to watch the console after exercising the tools (installs take a while to fail)")
 	keep := fs.Bool("keep", false, "don't destroy the test microVM when done")
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -298,9 +306,19 @@ func mcpVerify(args []string) error {
 	// el verify. El disparo de instalación ocurre al principio del trabajo, así
 	// que unos minutos sobran para provocarlo.
 	exCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	resp := exerciseTools(guestPost(exCtx, c, mc.ID), tools)
+	resp, ejercidas, exErr := exerciseTools(guestPost(exCtx, c, mc.ID), tools)
 	cancel()
-	fmt.Println("✓")
+	if exErr != nil {
+		fmt.Printf("✗ %v\n", exErr)
+		return fmt.Errorf("could not exercise the tools of %q: %w", *image, exErr)
+	}
+	if ejercidas < len(tools) {
+		// Se dice AQUI, no en el resumen: un ✓ con la mitad de las herramientas
+		// sin llamar es la clase de senal que no puede fallar.
+		fmt.Printf("✓ %d de %d (las demas no respondieron)\n", ejercidas, len(tools))
+	} else {
+		fmt.Println("✓")
+	}
 
 	fmt.Printf("  4/4  watching the console (up to %s)... ", *settle)
 	deadline := time.Now().Add(*settle)
@@ -326,6 +344,6 @@ func mcpVerify(args []string) error {
 	}
 	fmt.Println("✓")
 	fmt.Printf("\n%s didn't try to install anything at runtime: it takes everything from the shared image.\n", name)
-	fmt.Printf("(exercised %d tool(s) and watched the console for %s)\n", len(tools), *settle)
+	fmt.Printf("(exercised %d of %d tool(s) and watched the console for %s)\n", ejercidas, len(tools), *settle)
 	return nil
 }

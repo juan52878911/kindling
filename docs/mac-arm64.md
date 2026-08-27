@@ -52,9 +52,9 @@ carga de sus dependencias. Tres palancas validadas, de más a menos impacto:
    `kling add <servidor> -bundle`. A mano:
    `sudo ./scripts/80-mcp-image.sh stdio <n> -n "<paquete-npm>" -bundle -- <bin>`.
 
-2. **Importa con `-cpu 100`.** El techo por defecto (`cpu_pct=50`, media vCPU) estrangula el
+2. **Importa con `-cpu-pct 100`.** El techo por defecto (`cpu_pct=50`, media vCPU) estrangula el
    arranque; subirlo al 100 % de un core lo parte por ~2 (`seqthink` **~16 s → ~7 s** por el
-   gateway). Viaja con el snapshot (`kling mcp import -cpu 100 <servicio>`): **por-servicio y
+   gateway). Viaja con el snapshot (`kling mcp import -cpu-pct 100 <servicio>`): **por-servicio y
    por-host**, no toca Proxmox. **Se acumula con el bundle.** Subir a 2 vCPU no ayuda (es el
    techo, no el paralelismo). En x86/Proxmox también rinde (~2×) y no penaliza bajo carga.
 

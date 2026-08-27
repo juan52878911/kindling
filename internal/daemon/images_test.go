@@ -1,10 +1,17 @@
 package daemon
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/machine"
 )
 
 // buildScriptArgs traduce el request a los flags de 80-mcp-image.sh. El único
@@ -39,6 +46,62 @@ func TestBuildScriptArgs(t *testing.T) {
 	// Modo siempre stdio y el nombre como segundo arg.
 	if got[0] != "stdio" || got[1] != "svc" {
 		t.Errorf("cabecera esperada [stdio svc], got %v", got[:2])
+	}
+}
+
+// El caso Python del traductor: -P y -e también tienen que caer ANTES de `--`,
+// y -e una vez POR variable — un valor puede llevar espacios, y unirlos con
+// espacios como -p/-n/-P los partiría al llegar al array EXTRA_ENV del script.
+func TestBuildScriptArgsPython(t *testing.T) {
+	got := buildScriptArgs(api.BuildImageRequest{
+		Name:     "semgrep",
+		Packages: []string{"python3", "py3-pip"},
+		PIP:      []string{"semgrep-mcp==1.0.0"},
+		Env:      []string{"SEMGREP_SEND_METRICS=off", "A=b c"},
+		Cmd:      []string{"semgrep-mcp"},
+	})
+	sep := indexOf(got, "--")
+	if sep == -1 {
+		t.Fatalf("falta el separador --: %v", got)
+	}
+	pi := indexOf(got, "-P")
+	if pi == -1 || pi > sep {
+		t.Errorf("-P debe ir antes de -- : %v", got)
+	}
+	if pi != -1 && got[pi+1] != "semgrep-mcp==1.0.0" {
+		t.Errorf("-P debe llevar el paquete pip: %v", got)
+	}
+	// Cada variable con su propio -e, valor intacto (espacios incluidos).
+	var envs []string
+	for i, a := range got[:sep] {
+		if a == "-e" {
+			envs = append(envs, got[i+1])
+		}
+	}
+	if len(envs) != 2 || envs[0] != "SEMGREP_SEND_METRICS=off" || envs[1] != "A=b c" {
+		t.Errorf("-e no conserva las variables una a una: %v", envs)
+	}
+}
+
+// Todo flag que buildScriptArgs pueda emitir tiene que existir en el parser de
+// 80-mcp-image.sh. Los dos extremos están en lenguajes distintos: añadir un
+// flag aquí sin tocar el script no falla en compilación — falla en el daemon
+// como "opción desconocida" a mitad de una construcción como root.
+func TestBuildScriptEntiendeLosFlags(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "scripts", "80-mcp-image.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, f := range []string{"-p)", "-n)", "-P)", "-e)", "-d)", "-bundle)"} {
+		if !strings.Contains(s, f) {
+			t.Errorf("80-mcp-image.sh no parsea %s, y buildScriptArgs puede emitirlo", strings.TrimSuffix(f, ")"))
+		}
+	}
+	// Y las variables de -e tienen que escribirse en el entrypoint con %q: un
+	// `echo "export $kv"` ejecutaría la mitad de un valor con espacios.
+	if !strings.Contains(s, `printf 'export %s=%q\n'`) {
+		t.Error("80-mcp-image.sh no cita los valores de -e (printf con formato q) en el entrypoint")
 	}
 }
 
@@ -94,6 +157,15 @@ func TestValidateBuildRechaza(t *testing.T) {
 
 		{"crecimiento negativo", func(r *api.BuildImageRequest) { r.GrowMB = -1 }},
 		{"crecimiento absurdo", func(r *api.BuildImageRequest) { r.GrowMB = 1 << 20 }},
+
+		// Las variables de entorno acaban en el entrypoint generado. La clave
+		// tiene que ser un identificador de shell; el valor, una sola línea.
+		{"env sin igual", func(r *api.BuildImageRequest) { r.Env = []string{"SOLO_CLAVE"} }},
+		{"env con clave vacía", func(r *api.BuildImageRequest) { r.Env = []string{"=valor"} }},
+		{"env con clave con espacio", func(r *api.BuildImageRequest) { r.Env = []string{"A B=c"} }},
+		{"env con clave que empieza por dígito", func(r *api.BuildImageRequest) { r.Env = []string{"1A=b"} }},
+		{"env con salto de línea", func(r *api.BuildImageRequest) { r.Env = []string{"A=b\nrm -rf /"} }},
+		{"env con byte nulo", func(r *api.BuildImageRequest) { r.Env = []string{"A=b\x00c"} }},
 	}
 
 	for _, c := range cases {
@@ -113,6 +185,11 @@ func TestValidateBuildAcepta(t *testing.T) {
 		{Name: "files-2", Base: "min", Packages: []string{"nodejs", "npm", "py3-pip"},
 			NPM: []string{"@scope/pkg", "otro@1.2.3"}, Cmd: []string{"bin", "--flag", "valor con espacios"}},
 		{Name: "a", Cmd: []string{"x"}, GrowMB: 8192},
+		// El caso que motivó Env: apagar el phone-home de semgrep. El valor
+		// admite espacios y símbolos; el script lo cita con %q en el entrypoint.
+		{Name: "semgrep", Base: "python", Packages: []string{"python3", "py3-pip"},
+			PIP: []string{"semgrep-mcp"}, Cmd: []string{"semgrep-mcp"},
+			Env: []string{"SEMGREP_SEND_METRICS=off", "SEMGREP_ENABLE_VERSION_CHECK=0", "X=a b;c", "VACIA="}},
 	}
 	for _, r := range cases {
 		if err := validateBuild(r); err != nil {
@@ -156,5 +233,150 @@ func TestNombresDePipQueNoDebenColar(t *testing.T) {
 		}); err != nil {
 			t.Errorf("rechazó el paquete pip legítimo %q: %v", p, err)
 		}
+	}
+}
+
+// TestHandleImages cubre GET /images: enumera los .ext4 (menos overlay-template),
+// marca cuáles tienen receta y cuenta los snapshots dorados que salen de cada
+// imagen (el dato que dice cuál se puede retirar sin dejar servicios sin base).
+func TestHandleImages(t *testing.T) {
+	root := t.TempDir()
+	mgr, err := machine.NewManager(root, "", "", events.New())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	imgs := filepath.Join(root, "images")
+
+	// foo (con receta) y bar (sin); overlay-template debe quedar fuera.
+	for _, n := range []string{"foo", "bar", "overlay-template"} {
+		if err := os.WriteFile(filepath.Join(imgs, n+".ext4"), []byte("rootfs-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(imgs, "foo.recipe.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Dos snapshots que salen de foo, ninguno de bar.
+	for _, name := range []string{"svc1", "svc2"} {
+		dir := filepath.Join(root, "snapshots", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"name":"` + name + `","image":"foo"}`
+		if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Server{mgr: mgr, root: root}
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/images", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	var out []api.Image
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+	}
+
+	byName := map[string]api.Image{}
+	for _, img := range out {
+		byName[img.Name] = img
+	}
+	if _, ok := byName["overlay-template"]; ok {
+		t.Error("overlay-template no debería listarse como imagen")
+	}
+	foo, ok := byName["foo"]
+	if !ok {
+		t.Fatalf("falta foo en %v", out)
+	}
+	if !foo.HasRecipe {
+		t.Error("foo debería tener receta")
+	}
+	if foo.UsedBy != 2 {
+		t.Errorf("foo.UsedBy = %d, want 2", foo.UsedBy)
+	}
+	if foo.SizeBytes == 0 {
+		t.Error("foo.SizeBytes (lógico) no debería ser 0")
+	}
+	if foo.DiskBytes == 0 {
+		t.Error("foo.DiskBytes (asignado en disco) no debería ser 0 para un fichero con contenido")
+	}
+	bar, ok := byName["bar"]
+	if !ok {
+		t.Fatalf("falta bar en %v", out)
+	}
+	if bar.HasRecipe {
+		t.Error("bar no debería tener receta")
+	}
+	if bar.UsedBy != 0 {
+		t.Errorf("bar.UsedBy = %d, want 0", bar.UsedBy)
+	}
+}
+
+// Una imagen por capas se lista UNA vez, con su nombre de siempre, midiendo su
+// capa —no la base, que es de todas—; y la base tiene que decir cuántas capas se
+// apoyan en ella, que es lo que dice si se puede retirar.
+func TestHandleImagesPorCapas(t *testing.T) {
+	root := t.TempDir()
+	mgr, err := machine.NewManager(root, "", "", events.New())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	imgs := filepath.Join(root, "images")
+
+	// La base, y dos servicios que solo guardan su delta encima.
+	if err := os.WriteFile(filepath.Join(imgs, "min.ext4"), []byte(strings.Repeat("b", 4096)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"files", "semgrep"} {
+		if err := os.WriteFile(filepath.Join(imgs, n+".layer.ext4"), []byte("delta"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(imgs, n+".recipe.json"),
+			[]byte(`{"name":"`+n+`","base":"min"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Server{mgr: mgr, root: root}
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/images", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	var out []api.Image
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+	}
+	byName := map[string]api.Image{}
+	for _, img := range out {
+		byName[img.Name] = img
+	}
+
+	// El sufijo largo también acaba en .ext4: recortar el corto dejaría una
+	// imagen fantasma llamada "files.layer".
+	if _, ok := byName["files.layer"]; ok {
+		t.Errorf("la capa se listó como imagen aparte: %v", out)
+	}
+	files, ok := byName["files"]
+	if !ok {
+		t.Fatalf("falta files en %v", out)
+	}
+	if files.Base != "min" {
+		t.Errorf("files.Base = %q, want min", files.Base)
+	}
+	if files.SizeBytes != int64(len("delta")) {
+		t.Errorf("files.SizeBytes = %d: debe medir la CAPA, no la base", files.SizeBytes)
+	}
+	base, ok := byName["min"]
+	if !ok {
+		t.Fatalf("falta min en %v", out)
+	}
+	if base.Layers != 2 {
+		t.Errorf("min.Layers = %d, want 2: sin esto la base parece retirable", base.Layers)
+	}
+	if base.Base != "" {
+		t.Errorf("min no se apoya en nada, y dice %q", base.Base)
 	}
 }

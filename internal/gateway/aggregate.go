@@ -176,7 +176,7 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 	var b strings.Builder
 	b.WriteString("Available tools, grouped by service:\n\n")
 
-	tools, _ := a.cat.all(ctx, s.services)
+	tools, errs := a.cat.all(ctx, s.services)
 	external := a.cat.externalSet(ctx)
 	bySvc := map[string][]string{}
 	var order []string
@@ -195,6 +195,17 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 			mark += " [remembers between calls]"
 		}
 		fmt.Fprintf(&b, "%s%s: %s\n", svc, mark, strings.Join(bySvc[svc], ", "))
+	}
+	// Los que no contestaron se nombran. Omitirlos presentaba un catalogo
+	// incompleto como si fuera el catalogo entero.
+	if len(errs) > 0 {
+		var caidos []string
+		for svc := range errs {
+			caidos = append(caidos, svc)
+		}
+		sort.Strings(caidos)
+		fmt.Fprintf(&b, "\nNot listed right now (they did not answer): %s\n",
+			strings.Join(caidos, ", "))
 	}
 
 	b.WriteString("\nCall them with call_tool and the full service.tool name " +
@@ -371,7 +382,7 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 		services = []string{p.Service}
 	}
 
-	tools, _ := a.cat.all(ctx, services)
+	tools, errs := a.cat.all(ctx, services)
 	// Los términos se expanden con sinónimos: el modelo pregunta en el idioma
 	// del usuario y las herramientas se describen en inglés.
 	terms := expandTerms(p.Query)
@@ -398,6 +409,22 @@ func (a *aggregator) doFindTools(ctx context.Context, s *aggSession, args json.R
 		for _, t := range tools {
 			hits = append(hits, scored{t, 0})
 		}
+	}
+	// Y si NO HAY NADA que devolver porque los servicios no contestaron, hay que
+	// decirlo. Descartar el mapa de errores hacia que un catalogo vacio por
+	// fallo fuera indistinguible de uno vacio de verdad: el modelo concluia "no
+	// hay herramientas" y dejaba de intentarlo, sin que nada indicara que el
+	// problema era de conexion.
+	if len(hits) == 0 && len(errs) > 0 {
+		var caidos []string
+		for svc := range errs {
+			caidos = append(caidos, svc)
+		}
+		sort.Strings(caidos)
+		return nil, &rpcFault{-32000, fmt.Sprintf(
+			"no tools could be listed: %d service(s) did not answer (%s). "+
+				"This is not an empty catalog, it is a failure to reach them",
+			len(caidos), strings.Join(caidos, ", "))}
 	}
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].n != hits[j].n {
@@ -777,6 +804,19 @@ func (a *aggregator) callLink(ctx context.Context, s *aggSession, l *api.Link, t
 			nextRPCID(), t.Name, args))
 	}
 	raw, err := body(sid)
+	// SOLO se reintenta la sesión caducada, que es la única señal de que el
+	// servidor rechazó la llamada ANTES de ejecutarla (contesta 400/404 sin
+	// tocar la herramienta).
+	//
+	// Antes se reintentaba ante CUALQUIER error, timeout incluido. Y un timeout
+	// significa lo contrario: la petición salió y puede haberse ejecutado ya.
+	// Reenviarla ejecuta el tools/call DOS VECES — en un servicio con estado
+	// como engram, una escritura lenta se guarda dos veces sin que nada lo diga.
+	// Es la misma distinción que forward() ya hacía en gateway.go: "no llegué"
+	// se reintenta, "tardó" no.
+	if err != nil && !errors.Is(err, errStaleSession) {
+		return nil, &rpcFault{-32000, fmt.Sprintf("%s: %v", t.Service, err)}
+	}
 	if err != nil {
 		// Un servidor externo puede reiniciarse por su cuenta —lo controla su
 		// dueño, no kindling— y su sesión deja de existir. Se rehace y se

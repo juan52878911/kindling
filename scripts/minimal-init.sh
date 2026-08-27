@@ -24,8 +24,38 @@ mkdir -p /overlay
 mount -t ext4 "$OVERLAY_DEV" /overlay
 
 mkdir -p /overlay/upper /overlay/work /overlay/merged
+
+# IMÁGENES POR CAPAS. Si el anfitrión engancha una capa de servicio, su device
+# llega en kling.layer=/dev/vdX y se monta de lower POR DELANTE de la base:
+# lowerdir=<capa>/upper:/. Así la base deja de duplicarse por servicio. El
+# contenido de la capa cuelga de /upper dentro de su ext4 porque se construyó
+# como el upperdir de un overlay sobre la base (scripts/80-mcp-image.sh).
+#
+# Sin ese parámetro, el camino es el de siempre: una sola lower, la raíz. Las
+# imágenes monolíticas ya construidas arrancan exactamente igual.
+#
+# La capa se monta dentro de /overlay y no en la raíz: la raíz es de solo
+# lectura, así que aquí no se puede crear un punto de montaje nuevo.
+#
+# La línea de comandos se parte por palabras y se compara entera, sin regex: el
+# sed de busybox va contra el regex de musl, que no trae las extensiones de GNU,
+# y un patrón que no case dejaría la capa sin montar — un invitado sin
+# /entrypoint, que no se parece en nada a la causa.
+LOWER="/"
+LAYER_DEV=""
+for tok in $(cat /proc/cmdline); do
+  case "$tok" in
+    kling.layer=*) LAYER_DEV="${tok#kling.layer=}" ;;
+  esac
+done
+if [ -n "$LAYER_DEV" ]; then
+  mkdir -p /overlay/svc
+  mount -t ext4 -o ro "$LAYER_DEV" /overlay/svc
+  LOWER="/overlay/svc/upper:/"
+fi
+
 mount -t overlay overlay \
-  -o lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work \
+  -o "lowerdir=$LOWER,upperdir=/overlay/upper,workdir=/overlay/work" \
   /overlay/merged
 
 mkdir -p /overlay/merged/rom

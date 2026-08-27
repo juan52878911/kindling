@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // GuestPort es donde se espera que escuche el servidor MCP dentro de la microVM.
@@ -129,8 +131,13 @@ type Gateway struct {
 	agg      *aggregator              // endpoint virtual que reúne a todos
 	pool     *pool                    // instancias pre-calentadas por servicio
 	ensureMu sync.Map                 // servicio -> *sync.Mutex; ver ensure()
-	mem      *memory                  // memoria de uso; nil si está desactivada
-	pop      *popularity              // popularidad por servicio; guía el prewarm
+
+	// Último estado de salud escrito por servicio, para no repetir la escritura
+	// en cada petición. Ver anotarSalud.
+	saludMu    sync.Mutex
+	saludVista map[string]bool
+	mem        *memory     // memoria de uso; nil si está desactivada
+	pop        *popularity // popularidad por servicio; guía el prewarm
 
 	// Cuotas por tenant (token con nombre). Reparto justo, NO seguridad: ver
 	// quota.go. extraTenants son los tokens con nombre; tenantInflight lleva la
@@ -338,7 +345,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// consumió el original. Las peticiones MCP son JSON de tamaño moderado y el
 	// puente ya las acota, así que el coste es asumible.
 	if r.Body != nil && r.Method == http.MethodPost {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody))
+		body, err := api.LeerCuerpo(r.Body, maxProxyBody)
 		_ = r.Body.Close()
 		if err != nil {
 			http.Error(w, "could not read body", http.StatusBadRequest)
@@ -507,7 +514,13 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		}
 		g.begin(e)
 		defer g.end(e)
-		e.proxy.ServeHTTP(w, r)
+		// El codigo se mira DESPUES de servir: anotar el exito por haber
+		// conseguido la instancia daba por sano un servicio que no contestaba.
+		cw := &codigoVisto{ResponseWriter: w, code: http.StatusOK}
+		e.proxy.ServeHTTP(cw, r)
+		if cw.code < 500 {
+			g.anotarExito(service)
+		}
 		return
 	}
 
@@ -525,7 +538,6 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.newSessionError(w, service, err)
 			return
 		}
-
 		if b, berr := r.GetBody(); berr == nil {
 			r.Body = b
 		}
@@ -539,6 +551,12 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		// entrega tal cual al cliente.
 		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "session limit") {
 			continue
+		}
+
+		// Sano si SIRVIO, no si se consiguio instancia. Un 5xx aqui ya lo anoto
+		// el ErrorHandler como fallo; anotar exito tambien lo borraria.
+		if rec.Code < 500 {
+			g.anotarExito(service)
 		}
 
 		// Entregar la respuesta bufereada y fijar la ruta de la sesión a ESTA
@@ -567,7 +585,80 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, service string, err err
 		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
 		return
 	}
+	g.anotarFallo(service, err)
 	http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
+}
+
+// anotarFallo guarda en el snapshot que este servicio no se pudo preparar.
+//
+// El caso que lo motiva: nueve servicios estuvieron 26 HORAS caídos —sus snapshots
+// habían quedado irrestaurables tras reiniciar el host— mientras `kling status`
+// informaba «services: ✓ 9» y la columna HEALTH decía «not probed». El fallo se
+// veía en cada petición y no se guardaba en ningún sitio.
+//
+// Es mejor señal que un sondeo periódico y no cuesta nada: un sondeo activo
+// levanta una microVM por servicio y por vuelta, y sólo mira cuando le toca;
+// esto refleja lo que de verdad le pasa a quien usa el servicio, en el momento
+// en que le pasa.
+//
+// En segundo plano y sin bloquear la respuesta al cliente: el error ya está
+// decidido, y si anotarlo falla no hay nada mejor que hacer que registrarlo.
+// saludCambio registra el estado nuevo y dice si difiere del último anotado.
+//
+// Vive aparte de anotarSalud para poder comprobarse: la decisión de escribir es
+// la parte con lógica, y la escritura es un viaje al daemon dentro de una
+// goroutine que un test no debería tener que montar.
+func (g *Gateway) saludCambio(service string, sano bool) bool {
+	g.saludMu.Lock()
+	defer g.saludMu.Unlock()
+	if previo, hay := g.saludVista[service]; hay && previo == sano {
+		return false
+	}
+	if g.saludVista == nil {
+		g.saludVista = map[string]bool{}
+	}
+	g.saludVista[service] = sano
+	return true
+}
+
+func (g *Gateway) anotarExito(service string) {
+	g.anotarSalud(service, true, "")
+}
+
+func (g *Gateway) anotarFallo(service string, causa error) {
+	g.anotarSalud(service, false, causa.Error())
+}
+
+// anotarSalud escribe en el meta del snapshot SOLO cuando el estado cambia.
+//
+// Sin esa memoria haría una escritura a disco por petición atendida, que es
+// justo lo que no puede permitirse un camino caliente. Con ella, un servicio
+// sano no cuesta nada y uno que se rompe (o se recupera) lo anota una vez.
+//
+// El recuerdo vive en memoria: tras reiniciar el gateway, la primera petición de
+// cada servicio vuelve a escribir su estado. Es barato y deja el meta al día
+// aunque algo lo cambiara mientras estaba parado.
+func (g *Gateway) anotarSalud(service string, sano bool, causa string) {
+	// El recuerdo en memoria se actualiza SIEMPRE, haya daemon o no: es lo que
+	// evita una escritura por peticion, y no depende de poder persistir.
+	if !g.saludCambio(service, sano) {
+		return
+	}
+	// Lo que si depende del daemon es escribirlo en el meta. Sin cliente no hay
+	// donde, y la goroutine de abajo desreferenciaria un nulo — que, por ser una
+	// goroutine, se llevaria el PROCESO entero y no solo esta anotacion.
+	if g.client == nil {
+		return
+	}
+	go func() {
+		panico.Contener("gateway.anotarSalud", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := g.client.SetHealth(ctx, service, sano, causa); err != nil {
+				log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
+			}
+		})
+	}()
 }
 
 // pickInstance devuelve una instancia del servicio con hueco de sesión. Despierta
@@ -603,7 +694,43 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// El destino es una URL de TERCEROS, puesta con `kling mcp link`. Mandarle el
+	// token del gateway seria filtrar la credencial de todo el sistema a un host
+	// que no controlamos.
+	sinCredencialDelGateway(proxy)
 	proxy.ServeHTTP(w, r)
+}
+
+// sinCredencialDelGateway quita la cabecera Authorization antes de reenviar.
+//
+// `Authorization` NO es hop-by-hop, asi que httputil.ReverseProxy la propaga
+// verbatim. Sin esto, el token que autentica a los clientes del gateway llega
+// entero a cada servidor MCP invitado —que este codigo declara HOSTILES por
+// diseno, ver internal/machine/mmds.go— y a cada URL externa enlazada.
+//
+// Con ese token, un invitado comprometido llama al gateway como cliente
+// legitimo: despertar un snapshot ES ejecutar codigo, y desde ahi puede invocar
+// cualquier herramienta de cualquier servicio y cruzar tenants. Las cuotas no
+// son una frontera de seguridad y no lo impedirian.
+//
+// Lo que el destino necesite para autenticarse es SUYO y se anade aparte: los
+// enlaces (api.Link) no llevan credencial, asi que aqui no hay nada que
+// reponer.
+// proxyInvitado arma el proxy hacia una microVM, sin la credencial del gateway.
+func proxyInvitado(target *url.URL) *httputil.ReverseProxy {
+	p := httputil.NewSingleHostReverseProxy(target)
+	sinCredencialDelGateway(p)
+	return p
+}
+
+func sinCredencialDelGateway(p *httputil.ReverseProxy) {
+	dir := p.Director
+	p.Director = func(r *http.Request) {
+		if dir != nil {
+			dir(r)
+		}
+		r.Header.Del("Authorization")
+	}
 }
 
 func (g *Gateway) route(sid string) *sessionRoute {
@@ -803,7 +930,7 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		checkedAt:   time.Now(),
 		tenant:      tnt.name, // quien la despertó es su dueño para cuota y fairness
 		maxSessions: gwMaxSessions(mc.MemMiB),
-		proxy:       httputil.NewSingleHostReverseProxy(target),
+		proxy:       proxyInvitado(target),
 	}
 	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
 	// LA RESPUESTA es larga a propósito: al otro lado hay una herramienta, y una
@@ -833,7 +960,12 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 		// la misma que en el agregador: "no conecté" se reintenta, "tardó" no.
 		var opErr *net.OpError
 		esDial := errors.As(err, &opErr) && opErr.Op == "dial"
-		if esDial && !retried(r) && r.GetBody != nil && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil {
+		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
+		// reintentar: la respuesta distingue dos situaciones muy distintas —el
+		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
+		vivo := esDial && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil
+
+		if vivo && !retried(r) && r.GetBody != nil {
 			body, berr := r.GetBody()
 			if berr == nil {
 				log.Printf("proxy %s: %v (one retry)", service, err)
@@ -843,6 +975,22 @@ func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, f
 				return
 			}
 		}
+
+		// No se pudo conectar Y el invitado tampoco responde ahora: esta
+		// instancia ya no esta. Pasa de verdad — el recolector de disco del
+		// daemon retira instancias dormidas para hacer sitio, y el gateway se
+		// quedaba con la entrada apuntando a una IP muerta PARA SIEMPRE: todas
+		// las peticiones siguientes daban 502 sin que nada lo arreglara. Se
+		// olvida aqui para que la proxima peticion levante una nueva.
+		if esDial && !vivo {
+			log.Printf("proxy %s: its instance is gone; forgetting it so the next call creates another", service)
+			g.olvidarInstancia(service, e.machineID)
+		}
+		// Y se DEGRADA la salud. Antes el exito se anotaba al conseguir la
+		// instancia, no al servir: un servicio caido devolvia 502 una y otra vez
+		// mientras cada intento REAFIRMABA que estaba sano.
+		g.anotarFallo(service, err)
+
 		log.Printf("proxy %s: %v", service, err)
 		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
 	}
@@ -905,6 +1053,35 @@ func (g *Gateway) sessionCountLocked(machineID string) int {
 		}
 	}
 	return n
+}
+
+// codigoVisto recuerda el codigo con el que se respondio, para poder decidir la
+// salud por el RESULTADO. httptest.NewRecorder no vale en el camino sin cuerpo
+// reenviable: ahi se sirve directo al cliente, sin bufferear.
+type codigoVisto struct {
+	http.ResponseWriter
+	code int
+}
+
+func (c *codigoVisto) WriteHeader(code int) {
+	c.code = code
+	c.ResponseWriter.WriteHeader(code)
+}
+
+// Flush hace falta para el streaming (SSE): sin reenviarlo, envolver el
+// ResponseWriter dejaria las respuestas en el buffer hasta cerrar.
+func (c *codigoVisto) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// olvidarInstancia retira una instancia que ya no existe, tomando el cerrojo.
+// Es removeEntryLocked para quien no lo tiene.
+func (g *Gateway) olvidarInstancia(service, machineID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.removeEntryLocked(service, machineID)
 }
 
 // removeEntryLocked quita una instancia del servicio, sea la primaria o una
@@ -1050,11 +1227,17 @@ func (g *Gateway) Reap(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			g.reapOnce(ctx)
-			g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
-			g.pool.evictStale(ctx, g.idle*2)
-			g.PrewarmAll(ctx)
-			g.KeepWarmAll(ctx)
+			// El segador toca cinco subsistemas por vuelta. Un panico en
+			// cualquiera de ellos mataria el gateway entero, y con el se
+			// caerian TODOS los servicios a la vez — incluidos los que no
+			// tienen nada que ver con el que fallo.
+			panico.Contener("gateway.Reap", func() {
+				g.reapOnce(ctx)
+				g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
+				g.pool.evictStale(ctx, g.idle*2)
+				g.PrewarmAll(ctx)
+				g.KeepWarmAll(ctx)
+			})
 		}
 	}
 }
@@ -1367,11 +1550,16 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
 	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
 	// los demás.
+	// descartadas son las que ya se probaron y no se pudieron congelar. Sin
+	// esto, evictLRU se rendia con la PRIMERA victima ocupada y devolvia un 507
+	// al cliente habiendo RAM perfectamente liberable en otra instancia.
+	descartadas := map[string]bool{}
+
 	pick := func(mismo bool) (string, string) {
 		var elegido, id string
 		var masAntiguo time.Time
 		consid := func(svc string, e *entry) {
-			if svc == salvo || e.inflight > 0 {
+			if svc == salvo || e.inflight > 0 || descartadas[e.machineID] {
 				return
 			}
 			if mismo != (e.tenant == tenant) {
@@ -1394,46 +1582,86 @@ func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
 		return elegido, id
 	}
 
-	g.mu.Lock()
-	// Primero lo propio; si no hay, lo ajeno.
-	elegido, id := pick(true)
-	if elegido == "" {
-		elegido, id = pick(false)
-	}
-	if elegido != "" {
-		// Se saca del mapa (primaria o réplica, por machineID) ANTES de congelar:
-		// si alguien pide ese servicio mientras tanto, que lo reconstruya en vez de
-		// enrutar a una máquina que está a punto de dejar de existir.
-		g.removeEntryLocked(elegido, id)
-	}
-	g.mu.Unlock()
-
-	if elegido == "" {
-		return ""
-	}
-
-	// El candado del servicio víctima, para no congelar debajo de un ensure
-	// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace List(),
-	// la ve todavía running (el freeze tarda ~2 s), la adopta como "ya en marcha"
-	// y espera 20 s a un invitado que se está pausando. TryLock y no Lock: quien
-	// llama a evictLRU ya tiene tomado el candado de SU servicio, y un Lock aquí
-	// podría cruzarse con él. Si no se consigue, se prueba la siguiente víctima.
-	vlock := g.ensureLock(elegido)
-	if !vlock.TryLock() {
-		// Ese servicio está ocupado en su propio ensure. Devolverla al mapa y
-		// dejar que el llamador reintente con otra: quitarla y no congelarla
-		// dejaría al gateway creyendo que no existe.
-		return ""
-	}
-	defer vlock.Unlock()
-
 	freeze := func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
 	if g.freezeFn != nil {
 		freeze = g.freezeFn
 	}
-	if err := freeze(id); err != nil {
-		log.Printf("could not freeze %s to make room: %v", elegido, err)
-		return ""
+
+	// Hasta tres victimas. Antes se probaba UNA: si estaba ocupada en su propio
+	// ensure, evictLRU devolvia "" y el llamador respondia 507 aunque hubiera
+	// otras instancias ociosas de sobra.
+	const intentos = 3
+	for i := 0; i < intentos; i++ {
+		g.mu.Lock()
+		// Primero lo propio; si no hay, lo ajeno.
+		elegido, id := pick(true)
+		if elegido == "" {
+			elegido, id = pick(false)
+		}
+		var victima *entry
+		if elegido != "" {
+			victima = g.entryByMachineLocked(elegido, id)
+			// Se saca del mapa (primaria o réplica, por machineID) ANTES de
+			// congelar: si alguien pide ese servicio mientras tanto, que lo
+			// reconstruya en vez de enrutar a una máquina que está a punto de
+			// dejar de existir.
+			g.removeEntryLocked(elegido, id)
+		}
+		g.mu.Unlock()
+
+		if elegido == "" {
+			return "" // ya no queda ninguna candidata
+		}
+
+		// devolver repone la instancia. Se saco para que nadie enrutara a una
+		// maquina a punto de congelarse; si al final NO se congela, dejarla
+		// fuera es peor que no haberla tocado: el gateway cree que no existe,
+		// y el siguiente ensure la adopta desde List() cuando ya no toca.
+		devolver := func() {
+			if victima == nil {
+				return
+			}
+			g.mu.Lock()
+			g.reponerEntryLocked(elegido, victima)
+			g.mu.Unlock()
+		}
+		descartadas[id] = true
+
+		// El candado del servicio víctima, para no congelar debajo de un ensure
+		// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace
+		// List(), la ve todavía running (el freeze tarda ~2 s), la adopta como
+		// "ya en marcha" y espera 20 s a un invitado que se está pausando.
+		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
+		// de SU servicio, y un Lock aquí podría cruzarse con él.
+		vlock := g.ensureLock(elegido)
+		if !vlock.TryLock() {
+			devolver()
+			continue // esa esta ocupada; se prueba otra
+		}
+
+		err := freeze(id)
+		vlock.Unlock()
+		if err != nil {
+			log.Printf("could not freeze %s to make room: %v", elegido, err)
+			devolver()
+			continue
+		}
+		return elegido
 	}
-	return elegido
+	return ""
+}
+
+// reponerEntryLocked devuelve al mapa una instancia que se saco para congelar y
+// al final no se congelo. Se llama con g.mu tomado.
+func (g *Gateway) reponerEntryLocked(service string, e *entry) {
+	if g.services[service] == nil {
+		g.services[service] = e
+		return
+	}
+	for _, x := range g.extra[service] {
+		if x.machineID == e.machineID {
+			return // ya volvio por otro camino
+		}
+	}
+	g.extra[service] = append(g.extra[service], e)
 }

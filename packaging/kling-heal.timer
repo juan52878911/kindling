@@ -1,0 +1,23 @@
+[Unit]
+Description=Comprobar y curar los dorados de kling
+Documentation=https://github.com/juan52878911/kindling
+
+[Timer]
+Unit=kling-heal.service
+
+# Tras arrancar: es EL caso. Un reinicio del anfitrión invalida todos los dorados
+# a la vez, porque cada snapshot graba la frecuencia del TSC y esa se vuelve a
+# medir en cada arranque. Dos minutos dan tiempo a que el daemon esté listo.
+OnBootSec=2min
+
+# Y luego, de vez en cuando, para lo que no venga de un reinicio: un dorado
+# borrado a mano, un disco que se llenó a media escritura.
+OnUnitActiveSec=6h
+
+# Sin Persistent=: solo tiene efecto en temporizadores OnCalendar. Aquí no hace
+# falta — OnBootSec dispara después de CADA arranque, que es justo la ocasión en
+# la que hay algo que curar.
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

@@ -125,6 +125,7 @@ func (b *bridge) spawnProxyChild() error {
 	// La salida del servidor va a la consola serie de la microVM, igual que en
 	// stdio y que el navegador compartido.
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	enSuPropioGrupo(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting the HTTP MCP server: %w", err)
 	}
@@ -137,7 +138,7 @@ func (b *bridge) spawnProxyChild() error {
 	log.Printf("http mode: MCP server started (pid %d), waiting on %s", cmd.Process.Pid, b.childAddr())
 
 	if err := waitForPort(b.childAddr(), 40*time.Second); err != nil {
-		_ = cmd.Process.Kill()
+		matarGrupo(cmd)
 		return err
 	}
 	return nil
@@ -153,7 +154,7 @@ func (b *bridge) restartProxyChild() error {
 	b.proxyChild = nil
 	b.pmu.Unlock()
 	if old != nil && old.Process != nil {
-		_ = old.Process.Kill()
+		matarGrupo(old)
 	}
 	return b.spawnProxyChild()
 }
@@ -166,7 +167,7 @@ func (b *bridge) stopProxyChild() {
 	b.proxyChild = nil
 	b.pmu.Unlock()
 	if c != nil && c.Process != nil {
-		_ = c.Process.Kill()
+		matarGrupo(c)
 	}
 }
 

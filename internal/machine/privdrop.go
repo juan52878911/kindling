@@ -3,7 +3,6 @@ package machine
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -77,11 +76,31 @@ func (p *Privileges) Own(paths ...string) error {
 	return nil
 }
 
-// EnsureReadable deja las imágenes accesibles en solo lectura para el VMM.
+// EnsureReadable deja las imágenes accesibles en solo lectura para el VMM —y
+// SOLO para el VMM.
+//
+// Antes esto era `chmod -R a+rX`, que es una forma cómoda de decir "legible para
+// todo el mundo". Y aquí dentro puede haber secretos: `kling add -env` los hornea
+// como líneas `export CLAVE=valor` en el /entrypoint de la imagen, así que
+// cualquier cuenta del anfitrión los sacaba con `strings *.layer.ext4 | grep
+// export`, sin root y sin montar nada. La incoherencia saltaba a la vista: la
+// receta con esos mismos valores se guarda 0600 y la imagen quedaba 0644.
+//
+// El VMM corre como el usuario de servicio, así que basta con dárselo a él.
 func (p *Privileges) EnsureReadable(dir string) {
 	if !p.Enabled {
 		return
 	}
-	_ = exec.Command("chmod", "-R", "a+rX", dir).Run()
-	_ = filepath.Walk(dir, func(string, os.FileInfo, error) error { return nil })
+	_ = filepath.Walk(dir, func(ruta string, fi os.FileInfo, err error) error {
+		if err != nil || fi == nil {
+			return nil // un fichero que desaparece a mitad no es motivo de parada
+		}
+		_ = os.Chown(ruta, p.UID, p.GID)
+		if fi.IsDir() {
+			_ = os.Chmod(ruta, 0o750)
+		} else if fi.Mode().IsRegular() {
+			_ = os.Chmod(ruta, 0o640)
+		}
+		return nil
+	})
 }

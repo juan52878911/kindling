@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // Los enlaces son servidores MCP externos que el agregador enruta sin
@@ -44,11 +46,11 @@ func (m *Manager) saveLinks(links map[string]*api.Link) error {
 	if err != nil {
 		return err
 	}
-	tmp := m.linksPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.linksPath())
+	// Durable, no solo atomico. Aqui viven los servicios EXTERNOS enlazados
+	// —las cinco capas de UltraMemory, por ejemplo—, y perderlos en un corte
+	// significa que el gateway arranca sin saber que existen: no da error,
+	// simplemente deja de enrutar hacia ellos.
+	return durable.Escribir(m.linksPath(), b, 0o644)
 }
 
 // Links devuelve los servidores externos registrados.

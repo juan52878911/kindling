@@ -77,6 +77,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /links", s.handleSetLink)
 	mux.HandleFunc("DELETE /links/{name}", s.handleRemoveLink)
 	mux.HandleFunc("POST /images", s.handleBuildImage)
+	mux.HandleFunc("GET /images", s.handleImages)
 	mux.HandleFunc("GET /volumes", s.handleVolumes)
 	mux.HandleFunc("POST /volumes", s.handleCreateVolume)
 	mux.HandleFunc("DELETE /volumes/{name}", s.handleRemoveVolume)
@@ -382,7 +383,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name)
+	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name, req.Replace)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
@@ -572,7 +573,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 
 	// Un catálogo grande puede pesar; el límite evita que un invitado que se
 	// desmadre agote la memoria del daemon.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := api.LeerCuerpo(resp.Body, 8<<20)
 	if err != nil {
 		fail(w, http.StatusBadGateway, err)
 		return

@@ -37,6 +37,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/panico"
+
+	"github.com/juan52878911/kindling/internal/api"
 )
 
 // SessionHeader es la cabecera del protocolo MCP que identifica la conversación.
@@ -218,7 +222,24 @@ Options:
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	srv := &http.Server{Addr: *listen, Handler: mux}
+	srv := &http.Server{
+		Addr:    *listen,
+		Handler: mux,
+		// El puente es el PID 1 del invitado: una goroutine y un descriptor
+		// retenidos para siempre por un cliente que no termina su cabecera se
+		// pagan contra las ~12 sesiones que caben en 1 GiB, no contra un
+		// servidor holgado. El daemon y el gateway ya llevaban estos plazos;
+		// aqui faltaban.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout va a CERO a proposito, y es la diferencia con los otros
+		// dos: aqui al otro lado hay una herramienta MCP ejecutandose. Un escaneo
+		// de semgrep sobre un repo grande, o un navegador cargando una pagina
+		// lenta, pasan del minuto con toda legitimidad. Un WriteTimeout cortaria
+		// esa respuesta a medias y el cliente veria una conexion caida en vez de
+		// un resultado — un fallo peor que la espera que pretendia evitar.
+	}
 
 	// El apagado se ORDENA aquí y se COMPLETA abajo. Shutdown hace que
 	// ListenAndServe retorne de inmediato, así que cerrar las sesiones dentro
@@ -248,12 +269,18 @@ Options:
 	volumeState.release()
 }
 
-// closeAll cierra todas las sesiones y mata sus procesos hijo.
+// closeAll cierra todas las sesiones y mata sus procesos hijo, incluido el
+// caliente sin ligar: somos PID 1 y nada debe quedar suelto al apagar.
 func (b *bridge) closeAll() {
 	b.mu.Lock()
 	all := b.sessions
 	b.sessions = map[string]*session{}
+	warm := b.warm
+	b.warm = nil
 	b.mu.Unlock()
+	if warm != nil {
+		warm.discard()
+	}
 
 	// Aquí SÍ se espera, al contrario que en el cosechador de ociosas: después
 	// de esto se sueltan los volúmenes y el proceso sale. En paralelo para que
@@ -311,6 +338,11 @@ type bridge struct {
 	mu        sync.Mutex
 	sessions  map[string]*session
 	proxySeen map[string]time.Time
+	// warm es el hijo caliente sin ligar que deja /reset para que el primer
+	// initialize tras restaurar el dorado no pague el arranque del runtime
+	// (ver warm.go). Protegido por mu. A propósito NO vive en sessions: no
+	// cuenta para maxSessions ni puede cosecharlo el reaper de ociosas.
+	warm *warmChild
 }
 
 // session es una conversación MCP: un proceso hijo y su estado.
@@ -325,6 +357,12 @@ type session struct {
 	reqTimeout time.Duration
 	// exitCh recibe el estado de salida si el cosechador se adelanta a Wait.
 	exitCh chan syscall.WaitStatus
+
+	// scanErr es por que dejo de leerse la salida del servidor, cuando no fue
+	// un cierre normal. Sin esto, una linea demasiado larga se reportaba como
+	// "MCP server died" — que manda a mirar al servidor, y el servidor estaba
+	// perfecto. Se lee y se escribe bajo mu.
+	scanErr error
 
 	mu sync.Mutex
 	// wmu serializa las escrituras a stdin: el protocolo es una línea por
@@ -374,7 +412,7 @@ func (b *bridge) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *bridge) handlePost(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	body, err := api.LeerCuerpo(r.Body, 8<<20)
 	if err != nil {
 		http.Error(w, "could not read body", http.StatusBadRequest)
 		return
@@ -542,6 +580,22 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	// El reset deja la microVM como recién arrancada; también apaga el navegador
 	// compartido, para que el commit del snapshot dorado se congele sin él.
 	b.stopBrowser()
+	// Caliente pero sin estado: se deja (o repone) un hijo arrancado y SIN ligar
+	// antes de contestar, para que el dorado que se congele tras este 204 lleve
+	// el runtime ya arrancado y el primer initialize tras restaurar lo adopte.
+	// Si no se puede, el reset sigue siendo válido: solo se pierde la velocidad,
+	// nunca la corrección. Ver warm.go.
+	//
+	// Se puede pedir que NO se precaliente. El hijo caliente vive dentro del
+	// dorado, asi que lo engorda: medido, 39 MB -> 120 MB en un servicio de node.
+	// A 150 servicios son 12 GB de diferencia, y quien los tenga puede preferir
+	// el disco al medio segundo de despertar. Por defecto SI se precalienta,
+	// porque el caso comun es tener pocos servicios y usarlos a menudo.
+	if r.URL.Query().Get("warm") == "0" {
+		log.Printf("reset: prewarm skipped on request (smaller snapshot, slower first wake)")
+	} else if err := b.replenishWarm(); err != nil {
+		log.Printf("reset: no prewarmed MCP server (the first session will pay the full start): %v", err)
+	}
 	log.Printf("reset: %d session(s) closed", len(dead))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -619,11 +673,20 @@ func (b *bridge) spawn() (*session, error) {
 	// secretos de MMDS de ESTA sesión (sessions[<id>]) y añadirlos a su entorno.
 	id := newID()
 
-	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
-	cmd := exec.Command(b.argv[0], args...)
 	// Entorno base del puente MÁS los secretos de sesión que MMDS traiga (comunes
 	// + los de esta sesión). Sin MMDS, es exactamente b.env.
-	cmd.Env = b.sessionEnv(id)
+	env, secrets := b.sessionEnv(id)
+
+	// Si /reset dejó un hijo caliente y esta sesión puede adoptarlo —vivo y sin
+	// secretos que él no tenga—, se ahorra el arranque del runtime, que es lo
+	// que anulaba la ventaja del snapshot dorado. Ver warm.go.
+	if s := b.adoptWarmLocked(id, secrets); s != nil {
+		return s, nil
+	}
+
+	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
+	cmd := exec.Command(b.argv[0], args...)
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -693,6 +756,17 @@ func (s *session) readLoop(stdout io.Reader) {
 		if ok {
 			ch <- raw
 		}
+	}
+	// El bucle acaba de dos maneras muy distintas y antes no se distinguian: el
+	// servidor cerro su salida (normal), o el escaner se rindio. Lo segundo pasa
+	// con una linea de mas de 16 MiB —una captura en base64, un PDF— y el
+	// resultado era que la sesion moria entera y el log decia "MCP server died":
+	// un diagnostico FALSO que manda a mirar al servidor, que estaba perfecto.
+	if err := sc.Err(); err != nil {
+		s.mu.Lock()
+		s.scanErr = err
+		s.mu.Unlock()
+		log.Printf("session %s: reading its output failed: %v", s.id, err)
 	}
 	s.close()
 }
@@ -777,6 +851,14 @@ func (s *session) request(ctx context.Context, id string, msg []byte) (json.RawM
 		// (nil, nil) y el cliente recibía una respuesta vacía en lugar de un
 		// error, que es la forma más cara de diagnosticar un proceso muerto.
 		if !ok {
+			s.mu.Lock()
+			motivo := s.scanErr
+			s.mu.Unlock()
+			if motivo != nil {
+				return nil, fmt.Errorf("could not read the MCP server's reply to message %s: %w.\n"+
+					"The server is fine: its response did not fit. Responses are read line by "+
+					"line with a %d MiB cap", id, motivo, 16)
+			}
 			return nil, fmt.Errorf("MCP server died while handling message %s", id)
 		}
 		return resp, nil
@@ -824,7 +906,7 @@ func (s *session) close() {
 
 	_ = s.stdin.Close()
 	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		matarGrupo(s.cmd)
 	}
 	// waitFor y no Wait a secas: el cosechador puede haberse llevado a este hijo
 	// con wait4(-1), y entonces Wait devuelve ECHILD sin código de salida. El
@@ -860,31 +942,36 @@ func (b *bridge) reapIdle(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			var dead []*session
-			b.mu.Lock()
-			for id, s := range b.sessions {
-				if time.Since(s.lastUse) > b.idle {
-					dead = append(dead, s)
-					delete(b.sessions, id)
+			// El puente es el PID 1 del invitado: si muere, la microVM entra en
+			// panico del kernel. Contener aqui es lo que separa "una cosecha
+			// salio mal" de "el invitado se cayo".
+			panico.Contener("bridge.reapIdle", func() {
+				var dead []*session
+				b.mu.Lock()
+				for id, s := range b.sessions {
+					if time.Since(s.lastUse) > b.idle {
+						dead = append(dead, s)
+						delete(b.sessions, id)
+					}
 				}
-			}
-			b.mu.Unlock()
-			// En paralelo: cerrarlas en serie hacía que una sesión lenta
-			// retuviera la cosecha de todas las demás. close() es idempotente.
-			for _, s := range dead {
-				go s.close()
-			}
-			// Si el segador se llevó la última sesión, apaga el navegador
-			// compartido: una microVM viva pero ociosa no debe retenerlo.
-			if len(dead) > 0 {
-				b.stopBrowserIfIdle()
-			}
-			// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
-			// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
-			// compartido. Ver reapIdleProxy.
-			if b.proxy != nil {
-				b.reapIdleProxy()
-			}
+				b.mu.Unlock()
+				// En paralelo: cerrarlas en serie hacía que una sesión lenta
+				// retuviera la cosecha de todas las demás. close() es idempotente.
+				for _, s := range dead {
+					go s.close()
+				}
+				// Si el segador se llevó la última sesión, apaga el navegador
+				// compartido: una microVM viva pero ociosa no debe retenerlo.
+				if len(dead) > 0 {
+					b.stopBrowserIfIdle()
+				}
+				// Modo proxy: no hay sesiones-proceso en b.sessions, pero sí un
+				// rastro de Mcp-Session-Id que limpiar cerrándolos en el servidor
+				// compartido. Ver reapIdleProxy.
+				if b.proxy != nil {
+					b.reapIdleProxy()
+				}
+			})
 		}
 	}
 }

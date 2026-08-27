@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // MEMORIA DE USO.
@@ -67,11 +69,13 @@ func (m *memory) Record(ctx context.Context, query, tool string) {
 	m.mu.Unlock()
 
 	go func() {
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-		defer cancel()
-		if err := m.save(bg, q, tool); err != nil {
-			log.Printf("memory: could not record %q -> %s: %v", trunc(q, 60), tool, err)
-		}
+		panico.Contener("gateway.memory", func() {
+			bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			if err := m.save(bg, q, tool); err != nil {
+				log.Printf("memory: could not record %q -> %s: %v", trunc(q, 60), tool, err)
+			}
+		})
 	}()
 }
 

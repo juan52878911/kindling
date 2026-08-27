@@ -139,6 +139,12 @@ func (c *Client) BuildImage(ctx context.Context, r BuildImageRequest) (*BuildIma
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/images", r, &res)
 }
 
+// Images lista las imágenes de rootfs construidas en el daemon.
+func (c *Client) Images(ctx context.Context) ([]Image, error) {
+	var l []Image
+	return l, c.do(ctx, http.MethodGet, "/images", nil, &l)
+}
+
 // ImageRecipe devuelve cómo se construyó una imagen.
 func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, error) {
 	var rec ImageRecipe
@@ -258,9 +264,11 @@ func (c *Client) SetLabels(ctx context.Context, ref string, labels map[string]st
 	return c.do(ctx, http.MethodPut, "/machines/"+ref+"/labels", labels, nil)
 }
 
-func (c *Client) Commit(ctx context.Context, ref, name string) (*Snapshot, error) {
+// Commit congela una máquina como snapshot dorado. replace permite pisar uno
+// existente con el mismo nombre (el daemon se niega si tiene instancias vivas).
+func (c *Client) Commit(ctx context.Context, ref, name string, replace bool) (*Snapshot, error) {
 	var s Snapshot
-	return &s, c.do(ctx, http.MethodPost, "/machines/"+ref+"/commit", CommitRequest{Name: name}, &s)
+	return &s, c.do(ctx, http.MethodPost, "/machines/"+ref+"/commit", CommitRequest{Name: name, Replace: replace}, &s)
 }
 
 func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {

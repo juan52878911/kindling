@@ -51,6 +51,39 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 [ -f "$ROOT/images/$BASE.ext4" ] || {
   echo "falta la imagen base '$BASE'. Constrúyela con 70-build-minimal-image.sh" >&2; exit 1; }
 
+BASE_BROWSER=no
+
+# base_trae_navegador mira si la imagen base ya lleva su propio marcador de
+# navegador. Se comprueba montandola en SOLO LECTURA, y no por el nombre de la
+# base: el nombre es una convencion, el fichero es un hecho.
+base_trae_navegador() {
+  local m rc=1
+  m="$(mktemp -d)"
+  if mount -o loop,ro "$ROOT/images/$BASE.ext4" "$m" 2>/dev/null; then
+    [ -f "$m/etc/kling/browser.json" ] && rc=0
+    umount "$m" 2>/dev/null || true
+  fi
+  rmdir "$m" 2>/dev/null || true
+  return $rc
+}
+
+# pkg_add instala con el gestor que tenga la base: apk en Alpine, apt en la base
+# glibc. Se decide por el binario que hay DENTRO de la imagen, no por su nombre.
+#
+# No monta /proc ni copia resolv.conf: de eso se encargan los dos llamadores, que
+# ya lo hacian antes de que esto existiera. Hacerlo tambien aqui dejaria un bind
+# mount de mas por cada llamada.
+pkg_add() {
+  [ $# -gt 0 ] || return 0
+  if [ -x "$mnt/sbin/apk" ]; then
+    chroot "$mnt" /sbin/apk add --no-cache "$@"
+  else
+    chroot "$mnt" env DEBIAN_FRONTEND=noninteractive sh -c \
+      "apt-get update -qq && apt-get install -y --no-install-recommends $*" \
+      && chroot "$mnt" sh -c "apt-get clean; rm -rf /var/lib/apt/lists/*" 2>/dev/null
+  fi
+}
+
 PKGS=""; NPM=""; PIP=""; EXTRA_DIR=""; EXTRA_ENV=(); CMD=(); BUNDLE=0
 
 # Los dos modos se instalan igual; solo cambia quién habla HTTP al final.
@@ -137,11 +170,21 @@ parse_build_opts() {
     *puppeteer*)  BROWSER="puppeteer" ;;
   esac
   if [ -n "$BROWSER" ]; then
-    echo "dependencia de navegador detectada ($BROWSER) → Chromium + modo compartido"
-    if ! echo " $PKGS " | grep -q " chromium "; then
-      PKGS="$PKGS chromium chromium-swiftshader nss freetype harfbuzz ttf-freefont font-noto dbus"
+    # Si la base YA trae navegador y su marcador, no se instala otro. Es lo que
+    # permite construir el MISMO servidor MCP sobre Alpine+Chromium o sobre la
+    # base glibc con chrome-headless-shell sin tocar la receta: el puente habla
+    # CDP, y le da igual cual de los dos haya al otro lado.
+    if base_trae_navegador; then
+      BASE_BROWSER=si
+      echo "dependencia de navegador detectada ($BROWSER) → la base '$BASE' ya trae uno; no se instala Chromium"
+      if [ "$GROW" -lt 512 ]; then GROW=512; fi
+    else
+      echo "dependencia de navegador detectada ($BROWSER) → Chromium + modo compartido"
+      if ! echo " $PKGS " | grep -q " chromium "; then
+        PKGS="$PKGS chromium chromium-swiftshader nss freetype harfbuzz ttf-freefont font-noto dbus"
+      fi
+      if [ "$GROW" -lt 2560 ]; then GROW=2560; fi
     fi
-    [ "$GROW" -lt 2560 ] && GROW=2560
   fi
 }
 
@@ -180,19 +223,74 @@ case "$MODE" in
   *) echo "modo desconocido '$MODE': usa http o stdio" >&2; exit 1 ;;
 esac
 
-DEST="$ROOT/images/$NAME.ext4"
-cp "$ROOT/images/$BASE.ext4" "$DEST"
+# ── Imagen por CAPAS ────────────────────────────────────────────────────────
+# En vez de copiar la base entera (~110-130 MiB reales duplicados por servicio),
+# se construye SOLO el delta como upperdir de un overlay sobre la base (patrón
+# OCI). La base queda compartida por todos los servicios; esta imagen guarda
+# únicamente lo que cambia. Validado en el kernel de destino — docs/three-layers.md.
+#
+# La capa se dimensiona con GROW (el tamaño del delta esperado). Es dispersa: el
+# coste real en disco es solo lo que se escriba, y al final se encoge al mínimo.
+LAYER="$ROOT/images/$NAME.layer.ext4"
+BASE_IMG="$ROOT/images/$BASE.ext4"
+[ "$GROW" -gt 0 ] || GROW=256
+rm -f "$LAYER"
+truncate -s "${GROW}M" "$LAYER"
+mkfs.ext4 -q -F -O '^has_journal' -E nodiscard "$LAYER"
 
-if [ "$GROW" -gt 0 ]; then
-  truncate -s "+${GROW}M" "$DEST"
-  e2fsck -fp "$DEST" >/dev/null 2>&1 || true
-  resize2fs "$DEST" >/dev/null 2>&1
-fi
+mnt="$(mktemp -d)"; base_mnt="$(mktemp -d)"; layer_mnt="$(mktemp -d)"
 
-mnt="$(mktemp -d)"
-cleanup() { umount "$mnt/proc" 2>/dev/null || true; umount "$mnt" 2>/dev/null || true; rmdir "$mnt" 2>/dev/null || true; }
+# ov_up/ov_down: montan y desmontan el overlay del BUILD. La base va de lower en
+# solo lectura; la capa aporta upperdir y workdir (deben compartir fs y no
+# anidarse, por eso /upper y /work son hermanos dentro de la capa). Todo lo que
+# el resto del script escribe en $mnt cae en /upper de la capa.
+ov_up() {
+  mount -o loop,ro "$BASE_IMG" "$base_mnt"
+  mount -o loop "$LAYER" "$layer_mnt"
+  mkdir -p "$layer_mnt/upper" "$layer_mnt/work"
+  mount -t overlay overlay \
+    -o "lowerdir=$base_mnt,upperdir=$layer_mnt/upper,workdir=$layer_mnt/work" "$mnt"
+}
+ov_down() {
+  umount "$mnt/proc" 2>/dev/null || true
+  umount "$mnt"       2>/dev/null || true
+  umount "$layer_mnt" 2>/dev/null || true
+  umount "$base_mnt"  2>/dev/null || true
+}
+cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
 trap cleanup EXIT
-mount -o loop "$DEST" "$mnt"
+ov_up
+
+# emit_env escribe los `export` de las variables de -e en el entrypoint. El
+# VALOR va con %q y no con un `echo "export $kv"`: llega tal cual del operador
+# (o de `kling add -env`) y puede llevar espacios o caracteres que el shell
+# interpretaría — un valor "a b" exportaría a y ejecutaría b.
+emit_env() {
+  local kv
+  for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
+    printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
+  done
+}
+
+# install_bridge deja el puente donde el entrypoint lo invoca, pero SIN escribirlo
+# en la capa cuando la base ya trae ese mismo binario.
+#
+# Copiarlo igualmente funcionaría —el overlay lo pondría en el upper— pero son
+# ~8 MiB de delta por servicio para acabar con una copia byte a byte de algo que
+# ya está en la lower de debajo. Y sobre todo: si no está en la capa, actualizar
+# el puente de TODOS los servicios por capas es un solo fichero (la base) en vez
+# de N. Ver RefreshBridges.
+#
+# Si la base no lo trae, o trae otro, se copia: la imagen del servicio tiene que
+# ser correcta por sí misma, y lo que esté en la capa gana por ir de lower
+# delante.
+install_bridge() {
+  if cmp -s "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"; then
+    echo "puente: ya viene en la base '$BASE', no se duplica en la capa"
+    return 0
+  fi
+  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+}
 
 [ -n "$EXTRA_DIR" ] && cp -a "$EXTRA_DIR"/. "$mnt"/
 
@@ -200,7 +298,7 @@ if [ -n "$PKGS" ]; then
   echo "instalando en la imagen: $PKGS"
   cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
   mount --bind /proc "$mnt/proc" 2>/dev/null || true
-  chroot "$mnt" /sbin/apk add --no-cache $PKGS
+  pkg_add $PKGS
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
@@ -278,13 +376,28 @@ if [ -n "${BROWSER:-}" ]; then
     *)          SESSION_ARGS='[]' ;;
   esac
   mkdir -p "$mnt/etc/kling"
-  cat > "$mnt/etc/kling/browser.json" <<BJSON
+  if [ "$BASE_BROWSER" = si ]; then
+    # La base ya declaro SU motor. Aqui solo se anaden los session_args, que
+    # dependen del cliente MCP (playwright o puppeteer) y no del navegador.
+    # Sidecar y ready_url se dejan intactos: sobreescribirlos pondria la ruta
+    # del Chromium de Alpine en una imagen donde ese binario no existe.
+    python3 - "$mnt/etc/kling/browser.json" "$SESSION_ARGS" <<'PYJSON'
+import json, sys
+ruta, args = sys.argv[1], json.loads(sys.argv[2])
+d = json.load(open(ruta))
+d["session_args"] = args
+json.dump(d, open(ruta, "w"), indent=2)
+PYJSON
+    echo "  motor: el que trae la base '$BASE'"
+  else
+    cat > "$mnt/etc/kling/browser.json" <<BJSON
 {
   "sidecar": ["/usr/bin/chromium-browser","--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-software-rasterizer","--remote-debugging-address=127.0.0.1","--remote-debugging-port=9222","about:blank"],
   "ready_url": "http://127.0.0.1:9222/json/version",
   "session_args": $SESSION_ARGS
 }
 BJSON
+  fi
 fi
 
 # DETECCIÓN DE CAPACIDADES. Inspecciona el árbol de dependencias npm ya instalado
@@ -320,7 +433,9 @@ if [ -n "$NPM" ]; then
       case "$pkg" in
         *fetch*|*scrape*|*crawl*|*search*|*web*|*http*|*browser*|*firecrawl*|*exa*) CAP_EGRESS=internet ;;
       esac
-      pj=$(find "$NM" -maxdepth 3 -name package.json -path "*$pkg*" 2>/dev/null | head -1)
+      # -print -quit y no `| head -1`: es find quien para, sin tubería de por
+      # medio. Ver el aviso sobre SIGPIPE unas líneas más abajo.
+      pj=$(find "$NM" -maxdepth 3 -name package.json -path "*$pkg*" -print -quit 2>/dev/null)
       [ -n "$pj" ] && grep -qiE '"(fetch|scrape|crawl|search|web|http|api-client)"' "$pj" 2>/dev/null && CAP_EGRESS=internet
     done
   fi
@@ -445,16 +560,15 @@ if [ -n "$NPM" ]; then
     echo "binarios de sistema detectados: $SYS → apk add"
     SYS_GROW=256
     case " $SYS " in *" libreoffice "*|*" imagemagick "*) SYS_GROW=768 ;; esac
-    umount "$mnt/proc" 2>/dev/null || true
-    umount "$mnt"
-    truncate -s "+${SYS_GROW}M" "$DEST"
-    e2fsck -fp "$DEST" >/dev/null 2>&1 || true
-    resize2fs "$DEST" >/dev/null 2>&1
-    mount -o loop "$DEST" "$mnt"
+    ov_down
+    truncate -s "+${SYS_GROW}M" "$LAYER"
+    e2fsck -fp "$LAYER" >/dev/null 2>&1 || true
+    resize2fs "$LAYER" >/dev/null 2>&1
+    ov_up
     cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
     mount --bind /proc "$mnt/proc" 2>/dev/null || true
-    chroot "$mnt" /sbin/apk add --no-cache $SYS \
-      || echo "AVISO: 'apk add' de binarios de sistema falló ($SYS); revisa la lista" >&2
+    pkg_add $SYS \
+      || echo "AVISO: instalar los binarios de sistema falló ($SYS); revisa la lista" >&2
     umount "$mnt/proc" 2>/dev/null || true
   fi
 
@@ -469,11 +583,19 @@ if [ -n "$NPM" ]; then
   # cuando el egress detectado apunta a un servicio concreto (internet), no en el
   # caso vacío 'none'.
   ALLOWJSON="[]"
+  # `sed -n '1,40p'` y NO `head -40`, aquí y en el bloque hermano de pip.
+  #
+  # head cierra la tubería en cuanto tiene sus 40 líneas, y quien escribe al
+  # otro lado —sort, y detrás un grep recursivo sobre un árbol enorme— muere de
+  # SIGPIPE. Con `set -o pipefail` eso es un 141 que aborta la construcción
+  # ENTERA, y solo pasa cuando hay más de 40 dominios: un servidor pequeño no lo
+  # dispara nunca y uno grande falla siempre. sed lee toda la entrada y no cierra
+  # nada, que es lo que hace la diferencia.
   if [ "$CAP_EGRESS" = internet ]; then
     DOMAINS=$(grep -rhoE 'https?://[a-zA-Z0-9._-]+' "$NM" 2>/dev/null \
       | sed -E 's#^https?://##' \
       | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|registry\.npmjs\.org|nodejs\.org|github\.com)$' \
-      | sort -u | head -40)
+      | sort -u | sed -n '1,40p' || true)
     if [ -n "$DOMAINS" ]; then
       ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
     fi
@@ -496,6 +618,12 @@ fi
 # Igual que npm, y por la misma razón: el invitado arranca SIN salida a
 # internet, así que un `pip install` en tiempo de ejecución fallaría.
 #
+# El caso que convirtió esto de comodidad en necesidad es el semgrep del
+# laboratorio: su imagen NO traía semgrep dentro y hacía `pip install` al
+# arrancar — cada arranque en frío pagaba la descarga, y varios a la vez
+# tumbaban la máquina por OOM. Con -P el paquete queda HORNEADO en la capa y el
+# arranque no descarga nada.
+#
 # --break-system-packages hace falta desde PEP 668: Alpine marca su python como
 # "externally managed" y pip se niega a tocarlo sin esto. Aquí es inofensivo —
 # la imagen es de un solo uso y no hay nada más que romper.
@@ -512,8 +640,42 @@ if [ -n "$PIP" ]; then
   umount "$mnt/proc" 2>/dev/null || true
 fi
 
+# DETECCIÓN DE CAPACIDADES para servidores Python, hermana de la de npm de más
+# arriba pero mucho más corta a propósito: las ruedas (--only-binary) ya traen
+# sus binarios compilados —no existe el "native_missing" de npm— y los MCP de
+# navegador reales se distribuyen por npm. Lo único que de verdad cambia el
+# import es el egress, y su marcador es un cliente HTTP en site-packages.
+# Un servicio mixto npm+pip no pisa lo que ya detectó el árbol npm.
+if [ -n "$PIP" ] && [ ! -f "$mnt/etc/kling/capabilities.json" ]; then
+  SP="$(echo "$mnt"/usr/lib/python3*/site-packages)"
+  CAP_EGRESS=none
+  for m in requests httpx aiohttp openai anthropic boto3 googleapiclient; do
+    [ -d "$SP/$m" ] && CAP_EGRESS=internet
+  done
+  # La misma semilla de dominios que en npm: una PISTA editable para el modo
+  # egress=allowlist, extraída de los literales de URL. -I salta los binarios
+  # de las ruedas: un match dentro de un .so saldría como basura, no como host.
+  ALLOWJSON="[]"
+  if [ "$CAP_EGRESS" = internet ]; then
+    DOMAINS=$(grep -rhoIE 'https?://[a-zA-Z0-9._-]+' "$SP" 2>/dev/null \
+      | sed -E 's#^https?://##' \
+      | grep -viE '^(localhost|127\.|0\.0\.0\.0|example\.(com|org|net)|schemas?\.|www\.w3\.org|json-schema\.org|pypi\.org|files\.pythonhosted\.org|github\.com)$' \
+      | sort -u | sed -n '1,40p' || true)
+    [ -n "$DOMAINS" ] && ALLOWJSON="[\"$(echo "$DOMAINS" | paste -sd, - | sed 's/,/","/g')\"]"
+  fi
+  mkdir -p "$mnt/etc/kling"
+  cat > "$mnt/etc/kling/capabilities.json" <<CJSON
+{
+  "browser": false,
+  "egress": "$CAP_EGRESS",
+  "allow_domains": $ALLOWJSON
+}
+CJSON
+  echo "capacidades detectadas (pip): egress=$CAP_EGRESS allow_domains=$ALLOWJSON"
+fi
+
 if [ "$MODE" = "stdio" ]; then
-  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+  install_bridge
   # El entrypoint es PID 1 de la microVM: si muere, el kernel entra en pánico.
   # `exec` evita dejar un shell intermedio que no aporta nada.
   {
@@ -524,7 +686,7 @@ if [ "$MODE" = "stdio" ]; then
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
-    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do echo "export $kv"; done
+    emit_env
     printf 'exec /usr/local/bin/kling-bridge -listen :8080 --'
     for a in "${CMD[@]}"; do printf ' %s' "$(sq "$a")"; done
     echo
@@ -543,7 +705,7 @@ elif [ "$HTTP_PROXY" = 1 ]; then
   # sesiones, así que NO hay el aislamiento proceso-por-sesión que sí da el modo
   # stdio. Si el servidor mezclara estado entre sesiones, el puente ya no lo
   # impediría. Es el precio de correr un servidor HTTP multi-sesión tal cual.
-  install -m755 "$BRIDGE" "$mnt/usr/local/bin/kling-bridge"
+  install_bridge
   # Marcador que lee el puente al arrancar para entrar en modo proxy.
   mkdir -p "$mnt/etc/kling"
   cat > "$mnt/etc/kling/service.json" <<SJSON
@@ -560,7 +722,7 @@ SJSON
     echo '# fijarlo: sin él no se encuentran los binarios que instala npm.'
     echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     echo 'export HOME=/root'
-    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do echo "export $kv"; done
+    emit_env
     echo '# El servidor hijo escucha en este puerto; el puente ocupa el 8080 (lo'
     echo '# que ve el gateway) y le reversa las peticiones. service.json le dice'
     echo '# al puente el mismo número.'
@@ -571,29 +733,144 @@ SJSON
   } > "$mnt/entrypoint"
 fi
 
+# El comando del servidor tiene que EXISTIR dentro de la imagen, y se comprueba
+# AQUÍ porque puede venir inferido: el ejecutable de un paquete de PyPI se
+# deduce por convención del nombre del paquete (PyPI no publica los entry
+# points en su API — ver ResolvePyPIBin), así que un paquete que no la siga
+# produciría una imagen rota. Sin esta comprobación no fallaría al construir:
+# fallaría en el import como "el servidor no abrió el puerto", un síntoma que
+# no se parece en nada a la causa. Con el mismo PATH que fija el entrypoint.
+# SKIP_CMD_CHECK=1 la salta, para el caso raro de un binario que llega por
+# volumen en tiempo de ejecución.
+if [ ${#CMD[@]} -gt 0 ] && [ "${SKIP_CMD_CHECK:-0}" != 1 ]; then
+  if ! chroot "$mnt" /bin/sh -c \
+      'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v "$1" >/dev/null' \
+      sh "${CMD[0]}"; then
+    echo "ERROR: el comando '${CMD[0]}' no existe dentro de la imagen." >&2
+    # Decir QUÉ hay dentro, no solo que lo pedido no está.
+    #
+    # El caso corriente en Python no es un ejecutable con otro nombre: es que no
+    # haya ninguno. Muchos servidores MCP de PyPI solo traen un __main__.py y se
+    # arrancan con `python3 -m <módulo>` —mcp-sqlite3, sin ir más lejos—, así que
+    # un error que solo diga "no existe" deja al usuario adivinando entre dos
+    # posibilidades distintas. Aquí se miran las dos y se propone la que aplique.
+    if [ -n "$PIP" ]; then
+      # El módulo que probablemente busca el usuario es el del paquete que pidió,
+      # normalizado como lo hace Python: mcp-sqlite3 -> mcp_sqlite3. Se propone
+      # ESE primero y aparte, porque el resto de la lista son las dependencias
+      # —pip, certifi, pygments...— y enterrar la respuesta buena entre veinte
+      # candidatos no es mucho mejor que no darla.
+      WANT_MOD=$(echo "$PIP" | awk '{print $1}' | sed -E 's/(==|>=|<=|~=|!=).*//; s/-/_/g')
+      for sp in "$mnt"/usr/lib/python3*/site-packages; do
+        [ -d "$sp" ] || continue
+        if [ -f "$sp/$WANT_MOD/__main__.py" ]; then
+          echo "  el paquete no trae ejecutable, pero sí módulo. Prueba:" >&2
+          echo "      -cmd \"python3 -m $WANT_MOD\"" >&2
+        fi
+        SCRIPTS=$(sed -n '/^\[console_scripts\]/,/^\[/p' "$sp"/*.dist-info/entry_points.txt 2>/dev/null \
+          | sed -n 's/^\([A-Za-z0-9._-]*\) *=.*/\1/p' | sort -u | sed -n '1,10p' || true)
+        [ -n "$SCRIPTS" ] && echo "  ejecutables que instaló pip: $(echo "$SCRIPTS" | paste -sd' ' -)" >&2
+        MODS=$(find "$sp" -maxdepth 2 -name __main__.py 2>/dev/null \
+          | sed -E "s#^$sp/##; s#/__main__.py##" | grep -v "^$WANT_MOD$" | sort | sed -n '1,8p')
+        [ -n "$MODS" ] && echo "  otros módulos con -m: $(echo "$MODS" | paste -sd' ' -)" >&2
+      done
+    fi
+    echo "  Repite pasando el comando bueno tras --, o con 'kling add -cmd \"...\"'." >&2
+    echo "  (SKIP_CMD_CHECK=1 salta esta comprobación.)" >&2
+    exit 1
+  fi
+fi
+
 [ -f "$mnt/entrypoint" ] || { echo "la imagen se queda sin entrypoint" >&2; exit 1; }
 chmod +x "$mnt/entrypoint"
-umount "$mnt"
-
-# Comprobar el sistema de ficheros ANTES de que nadie lo arranque.
-#
-# El invitado monta esta imagen como raíz en SOLO LECTURA, y un ext4 con el
-# journal a medias (needs_recovery) no se puede montar así: el kernel entra en
-# pánico con EUCLEAN y el fallo aparece como "el servidor no abrió el puerto",
-# que no se parece en nada a la causa. Si algo interrumpió el chroot, aquí se
-# ve; y si no se puede reparar, mejor fallar ahora que entregar una imagen que
-# no arranca.
 sync
-if ! e2fsck -fp "$DEST" >/dev/null 2>&1; then
-  echo "AVISO: el sistema de ficheros de la imagen necesitaba reparación" >&2
-  e2fsck -fy "$DEST" >/dev/null 2>&1 || {
-    echo "ERROR: '$NAME' quedó con un sistema de ficheros irreparable; bórrala y repite" >&2
+# EL RESOLVER DEL INVITADO. Durante la construccion se copio el del anfitrion
+# para que apk/apt/npm resolvieran, y ese fichero acaba EN LA CAPA, tapando el
+# de la base. En un host con systemd-resolved dice "nameserver 127.0.0.53", que
+# dentro de la microVM no existe, y el resolver real del host suele ser una IP
+# privada que el cortafuegos de salida bloquea. El sintoma llega mucho despues:
+# un ERR_NAME_NOT_RESOLVED la primera vez que el servicio resuelve un nombre.
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$mnt/etc/resolv.conf"
+
+ov_down                       # desmonta overlay, capa y base
+
+# La capa ya contiene solo el delta en /upper. Se quita /work (scratch de
+# overlayfs), se encoge al mínimo y se comprueba: es lo único que viaja por
+# servicio, así que cuanto más pequeña, mejor.
+mount -o loop "$LAYER" "$layer_mnt"
+rm -rf "$layer_mnt/work"
+umount "$layer_mnt"
+
+# Comprobar el sistema de ficheros de la capa ANTES de que nadie la arranque. El
+# invitado la monta en SOLO LECTURA como lower del overlay, y un ext4 con el
+# journal a medias no se puede montar así: el kernel entra en pánico y el fallo
+# aparece como "el servidor no abrió el puerto", que no se parece a la causa.
+sync
+# El e2fsck va ANTES del encogido, y ese orden no es estético: resize2fs se NIEGA
+# a tocar un sistema de ficheros que no se acaba de comprobar ("Please run
+# 'e2fsck -f' first"). Al revés —como estaba— el encogido fallaba SIEMPRE, y en
+# silencio, porque su salida iba a /dev/null con un `|| true` detrás. El
+# resultado eran capas con el tamaño de todo lo que el build llegó a tocar: una
+# calculadora ocupaba 451 MiB de los que 73 eran suyos.
+if ! e2fsck -fp "$LAYER" >/dev/null 2>&1; then
+  echo "AVISO: el sistema de ficheros de la capa necesitaba reparación" >&2
+  e2fsck -fy "$LAYER" >/dev/null 2>&1 || {
+    echo "ERROR: '$NAME' quedó con una capa irreparable; bórrala y repite" >&2
     exit 1; }
 fi
 
-chmod a+r "$DEST"
+# Encoger el sistema de ficheros al contenido real, y DESPUÉS recortar el
+# fichero a ese tamaño.
+#
+# Las dos cosas, porque arreglan cosas distintas: resize2fs mueve los datos y
+# baja el tamaño del fs, pero el fichero sigue teniendo asignado todo lo que se
+# escribió alguna vez —los node_modules temporales de npm, la caché de apk— y
+# eso NO se recupera solo. El truncate a la frontera del fs es lo que devuelve
+# esos bloques al anfitrión. Un truncate por debajo de esa frontera destruiría el
+# sistema de ficheros, así que el tamaño se lee del propio superbloque y no se
+# estima.
+if resize2fs -M "$LAYER" >/dev/null 2>&1; then
+  blocks=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2); print $2}')
+  bsize=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
+  if [ -n "$blocks" ] && [ -n "$bsize" ]; then
+    truncate -s "$((blocks * bsize))" "$LAYER"
+  fi
+  e2fsck -fp "$LAYER" >/dev/null 2>&1 || {
+    echo "ERROR: la capa quedó dañada al encogerla; bórrala y repite" >&2
+    exit 1; }
+else
+  # No es fatal: la capa funciona igual, solo ocupa de más. Pero hay que decirlo,
+  # porque el bulto en disco es justo lo que estas imágenes existen para evitar.
+  echo "AVISO: no se pudo encoger la capa; ocupará más disco del necesario" >&2
+fi
 
-echo "imagen '$NAME' lista ($(du -h "$DEST" | cut -f1) reales)"
+chmod a+r "$LAYER"
+
+# LA RECETA. Es donde consta sobre que base se construyo la imagen, y el daemon
+# la lee para saber que rootfs montar debajo de la capa.
+#
+# Hasta ahora solo la escribia `kling add`, asi que una imagen construida
+# llamando a este script directamente se quedaba SIN receta — y sin receta el
+# daemon asume la base por defecto. El sintoma no es un error al construir: es
+# un invitado que arranca con la base equivocada debajo y no encuentra ficheros
+# que si estan en la imagen. Visto con la base glibc: el marcador del navegador
+# venia de la capa y el binario faltaba, porque debajo se monto Alpine.
+RECIPE="$ROOT/images/$NAME.recipe.json"
+python3 - "$RECIPE" "$NAME" "$BASE" "$PKGS" "$NPM" "${PIP:-}" "$GROW" "${CMD[@]}" <<'PYRECIPE'
+import json, sys, datetime
+ruta, nombre, base, pkgs, npm, pip, grow, *cmd = sys.argv[1:]
+rec = {"name": nombre, "base": base, "cmd": cmd,
+       "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+for clave, valor in (("packages", pkgs), ("npm", npm), ("pip", pip)):
+    if valor.strip():
+        rec[clave] = valor.split()
+if grow and grow != "0":
+    rec["grow_mb"] = int(grow)
+json.dump(rec, open(ruta, "w"), indent=2)
+PYRECIPE
+echo "receta escrita en $RECIPE (base '$BASE')"
+
+echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales; la base se comparte)"
 if [ "$HTTP_PROXY" = 1 ]; then
   echo "modo http (proxy): el servidor MCP habla HTTP nativo y lo envuelve el puente."
   echo "  AISLAMIENTO: el hijo es COMPARTIDO por todas las sesiones (un solo proceso"

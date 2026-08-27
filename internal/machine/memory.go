@@ -15,6 +15,7 @@ package machine
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -90,13 +91,6 @@ func availableMiB() int { return meminfoMiB("MemAvailable") }
 // arranque siguiente ni puede crear sus ficheros: falla feo en vez de con un 507.
 func freeMiB() int { return meminfoMiB("MemFree") }
 
-// checkHostMemory se niega a arrancar una microVM que no cabe.
-//
-// Es un aviso caro de ignorar y barato de dar: leer /proc/meminfo cuesta
-// microsegundos, y el fallo que evita cuesta una tarde de diagnóstico.
-//
-// No comprueba nada si no puede leer la memoria: convertir una comprobación de
-// cordura en una dependencia de arranque sería peor que el problema.
 // shareReserveDiv dice entre cuánto se divide la reserva de una instancia
 // ADICIONAL del mismo snapshot dorado. Las copias de un snapshot comparten su
 // mem.file por copia-en-escritura: la primera lo mapea entero, las siguientes
@@ -140,7 +134,7 @@ func (m *Manager) reserveMemory(wantMiB int, shareKey string) (release func(), e
 			effMiB = 1
 		}
 	}
-	if err := checkHostMemory(effMiB + m.pendingMiB); err != nil {
+	if err := checkHostMemory(effMiB+m.pendingMiB, m.hotMemFilesMiBLocked()); err != nil {
 		return nil, err
 	}
 	m.pendingMiB += effMiB
@@ -181,28 +175,100 @@ func (m *Manager) shareAnchoredLocked(shareKey string) bool {
 	return false
 }
 
-func checkHostMemory(wantMiB int) error {
+// hotMemFilesMiBLocked estima cuánta caché de página es atribuible a los
+// mem.file de las microVMs vivas: los snapshots dorados con instancias RUNNING
+// (todas mapean el MISMO fichero, se cuenta una vez), los que están arrancando
+// ahora mismo (snapPending), y el mem.file propio de una máquina descongelada.
+//
+// Es la pieza que separa "la caché está caliente" de "TODA la caché está
+// caliente". Descartar MemAvailable entero castigaba al caso normal: con una
+// sola microVM viva, el grueso del buff/cache del host es caché fría de
+// imágenes y ficheros, perfectamente reclamable, y el arranque se rechazaba
+// con gigas genuinamente disponibles. Se llama con m.mu tomado.
+//
+// Es una cota superior (el fichero puede no estar entero en caché), y eso es lo
+// conservador: sobrestimar lo caliente rechaza antes, nunca deja pasar de más.
+func (m *Manager) hotMemFilesMiBLocked() int {
+	var total int64
+	snapSeen := make(map[string]bool)
+	count := func(snap string) {
+		if snap == "" || snapSeen[snap] {
+			return
+		}
+		snapSeen[snap] = true
+		total += allocatedBytes(filepath.Join(m.snapDir(snap), "mem.file"))
+	}
+	for _, mc := range m.byID {
+		if mc.State != api.StateRunning {
+			continue
+		}
+		count(mc.From)
+		// Una máquina descongelada mapea su propio volcado, no el dorado.
+		total += allocatedBytes(filepath.Join(m.dir(mc.ID), "mem.file"))
+	}
+	// Los que están arrancando aún no figuran RUNNING pero ya mapean su dorado.
+	for snap := range m.snapPending {
+		count(snap)
+	}
+	return int(total >> 20)
+}
+
+// effectiveAvailMiB es la memoria con la que de verdad se puede contar: de
+// MemAvailable se descuenta SOLO la caché atribuible a los mem.file vivos
+// (hotMiB), nunca más de lo que hay de caché reclamable (avail - free).
+//
+// MemAvailable cuenta esa caché como disponible porque es reclaimable, pero
+// reclamarla es re-faultear la memoria de una microVM viva desde disco. El
+// resto de la caché —imágenes, overlays, ficheros fríos— sí es dinero contante:
+// el kernel la suelta al momento cuando alguien pide memoria.
+func effectiveAvailMiB(avail, free, hotMiB int) int {
+	if avail <= 0 {
+		return avail
+	}
+	reclaim := avail - free
+	if reclaim < 0 {
+		reclaim = 0
+	}
+	if hotMiB > reclaim {
+		hotMiB = reclaim
+	}
+	return avail - hotMiB
+}
+
+// checkHostMemory se niega a arrancar una microVM que no cabe.
+//
+// Es un aviso caro de ignorar y barato de dar: leer /proc/meminfo cuesta
+// microsegundos, y el fallo que evita cuesta una tarde de diagnóstico.
+//
+// No comprueba nada si no puede leer la memoria: convertir una comprobación de
+// cordura en una dependencia de arranque sería peor que el problema.
+//
+// hotMiB es la caché atribuible a los mem.file de las microVMs vivas (ver
+// hotMemFilesMiBLocked); 0 significa "ninguna" y deja mandar a MemAvailable.
+func checkHostMemory(wantMiB, hotMiB int) error {
 	avail := availableMiB()
 	if avail <= 0 || wantMiB <= 0 {
 		return nil
 	}
-	// Suelo de memoria REALMENTE libre. Va ANTES del check de MemAvailable porque
-	// es el que atrapa el caso que el otro no ve: muchos snapshots distintos
-	// vivos, cada uno con su mem.file caliente en caché. Ahí MemAvailable sigue
-	// alto (la caché es reclaimable) mientras MemFree se agota, y sin este suelo
-	// el arranque siguiente fallaba al no poder crear sus ficheros. Con él, un 507
-	// limpio antes de llegar a ese punto.
-	if floor := minFreeMiB(); floor > 0 {
-		if free := freeMiB(); free > 0 && free < floor {
-			return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
-				"low on REALLY free memory: %d MiB left (floor %d).\n"+
-					"MemAvailable says %d MiB, but that's hot cache from the mem.files of the "+
-					"live microVMs: reclaiming it means re-faulting it from disk.\n"+
-					"Freeze or remove an instance (`kling ps -a`), or lower the floor with KLING_MIN_FREE_MIB",
-				free, floor, avail)}
-		}
+	eff := effectiveAvailMiB(avail, freeMiB(), hotMiB)
+	// Suelo de memoria realmente utilizable. Atrapa el caso que el check de
+	// tamaño no ve: muchos snapshots DISTINTOS vivos, cada uno con su mem.file
+	// caliente en caché. Ahí MemAvailable sigue alto mientras lo utilizable se
+	// agota, y el arranque siguiente fallaba al no poder ni crear sus ficheros.
+	//
+	// El suelo se compara contra eff y no contra MemFree a secas: la caché que
+	// NO es de mem.files vivos se reclama al instante y cuenta como libre.
+	// Compararlo contra MemFree rechazaba arranques con gigas genuinamente
+	// reclamables — comprobado con una sola microVM viva y 3,4 GB de caché fría.
+	if floor := minFreeMiB(); floor > 0 && eff < floor {
+		return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
+			"low on really free memory: %d MiB usable (floor %d).\n"+
+				"MemAvailable says %d MiB, but %d MiB of it is hot cache from the mem.files of the "+
+				"live microVMs: reclaiming it means re-faulting their memory from disk.\n"+
+				"Freeze or remove an instance (`kling ps -a`), or lower the floor with KLING_MIN_FREE_MIB",
+			eff, floor, avail, avail-eff)}
 	}
-	if wantMiB+hostReserveMiB <= avail {
+	if wantMiB+hostReserveMiB <= eff {
 		return nil
 	}
 	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
@@ -210,5 +276,5 @@ func checkHostMemory(wantMiB int) error {
 			"(%d is reserved for the host itself).\n"+
 			"Starting it anyway would make the host's OOM killer kill processes at random, "+
 			"including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem",
-		wantMiB, avail, hostReserveMiB)}
+		wantMiB, eff, hostReserveMiB)}
 }

@@ -2,6 +2,9 @@ package machine
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,6 +15,8 @@ import (
 
 	"github.com/juan52878911/kindling/internal/api"
 	knet "github.com/juan52878911/kindling/internal/net"
+
+	"github.com/juan52878911/kindling/internal/panico"
 )
 
 // reconcile ajusta el estado guardado a la realidad del host al arrancar.
@@ -137,6 +142,58 @@ func estadoDe(mc *api.Machine) string {
 	return string(mc.State)
 }
 
+// reserveDir aparta un id para que sweepMachineDirs no borre su directorio
+// mientras se está construyendo.
+//
+// Entre el MkdirAll de una máquina y su entrada en byID pasan cientos de
+// milisegundos —copiar el overlay dorado son ~100 MiB, más resolver volúmenes y
+// montar la red—, y en esa ventana el directorio no es de "ninguna máquina
+// conocida": el barrido lo veía como basura y lo borraba bajo los pies de quien
+// lo estaba llenando. El síntoma era un error sobre un firecracker.log que no
+// existe, que no dice absolutamente nada de la causa real.
+//
+// Devuelve la función que suelta la reserva. Se usa con defer, para que cubra
+// también los caminos de error que borran el directorio a medio hacer.
+func (m *Manager) reserveDir(id string) func() {
+	m.mu.Lock()
+	if m.reserved == nil {
+		m.reserved = make(map[string]bool)
+	}
+	m.reserved[id] = true
+	m.mu.Unlock()
+
+	return func() {
+		m.mu.Lock()
+		delete(m.reserved, id)
+		m.mu.Unlock()
+	}
+}
+
+// makeMachineDir crea el directorio de una máquina y lo protege del barrido
+// hasta que quien la construye suelte la reserva.
+//
+// Reservar y crear van SOLDADOS en la misma función a propósito: el fallo que
+// esto arregla fue exactamente olvidar que entre las dos cosas hay una ventana.
+// Mientras el único camino para tener un directorio de máquina pase por aquí, no
+// hay forma de reintroducirlo.
+func (m *Manager) makeMachineDir(id string) (string, func(), error) {
+	release := m.reserveDir(id)
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		release()
+		return "", nil, err
+	}
+	return dir, release, nil
+}
+
+// dirGrace es la edad mínima que ha de tener un directorio para ser candidato al
+// barrido. Es el cinturón sobre los tirantes de reserveDir: cubre cualquier
+// camino que en el futuro cree un directorio antes de registrar su id, sin que
+// haya que acordarse de reservarlo. Retrasar unos minutos la recuperación de
+// basura real no cuesta nada —el barrido corre cada 10 s—; borrar el directorio
+// de una máquina que está naciendo cuesta la máquina.
+const dirGrace = 2 * time.Minute
+
 // sweepMachineDirs borra los directorios de machines/ que no pertenecen a
 // ninguna máquina conocida ni viva.
 //
@@ -146,9 +203,10 @@ func estadoDe(mc *api.Machine) string {
 // o por un registro que se pierde — y sin esto, se acumulan hasta llenar el
 // disco, con el daemon sano y sin nada en su estado que lo explique.
 //
-// Se llama con m.mu tomado. Solo borra lo que NO está en byID: una máquina viva
-// cuyo registro aún no ha llegado al disco sigue teniendo su entrada en memoria,
-// así que su directorio nunca es candidato.
+// Se llama con m.mu tomado. Solo borra lo que NO está en byID, NO está reservado
+// y lleva un rato quieto: una máquina viva cuyo registro aún no ha llegado al
+// disco sigue teniendo su entrada en memoria, y una que aún se está construyendo
+// tiene su id en reserved, así que ninguna de las dos es candidata.
 func (m *Manager) sweepMachineDirs() {
 	dir := filepath.Join(m.root, "machines")
 	entries, err := os.ReadDir(dir)
@@ -160,6 +218,14 @@ func (m *Manager) sweepMachineDirs() {
 			continue
 		}
 		if _, conocida := m.byID[e.Name()]; conocida {
+			continue
+		}
+		if m.reserved[e.Name()] {
+			continue
+		}
+		// Recién tocado: o lo está llenando alguien ahora mismo, o acaba de
+		// quedarse huérfano y el próximo barrido lo recogerá igual.
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < dirGrace {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
@@ -306,20 +372,30 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			m.sweep()
-			m.expireTTL(ctx)
-			// Barrer directorios huérfanos también en marcha: no solo aparecen
-			// al arrancar. Bajo el lock, como reconcile.
-			m.mu.Lock()
-			m.sweepMachineDirs()
-			m.mu.Unlock()
-			// Y, si el disco aprieta, recuperar espacio eliminando instancias
-			// dormidas que se pueden recrear desde su snapshot.
-			m.gcDisk(ctx)
-			// El disco se recalcula aquí y no en List(): así `kling ps` no paga
-			// un recorrido por máquina, y el dato sigue fresco para las que
-			// están escribiendo.
-			m.refreshDiskUsage()
+			// Una vuelta entera por iteracion: si cualquiera de estas tareas
+			// entra en panico se pierde ESA vuelta, no el vigilante. Un daemon
+			// que sigue vivo pero ha dejado de reconciliar no da ningun sintoma,
+			// y eso es peor que caerse.
+			panico.Contener("machine.watch", func() {
+				m.sweep()
+				m.expireTTL(ctx)
+				// Recoger los cadáveres: una failed conserva su motivo un tiempo
+				// para poder diagnosticarla, y después se recoge sola. Sin esto se
+				// acumulaban indefinidamente, una por intento fallido.
+				m.gcFailed()
+				// Barrer directorios huérfanos también en marcha: no solo aparecen
+				// al arrancar. Bajo el lock, como reconcile.
+				m.mu.Lock()
+				m.sweepMachineDirs()
+				m.mu.Unlock()
+				// Y, si el disco aprieta, recuperar espacio eliminando instancias
+				// dormidas que se pueden recrear desde su snapshot.
+				m.gcDisk(ctx)
+				// El disco se recalcula aquí y no en List(): así `kling ps` no paga
+				// un recorrido por máquina, y el dato sigue fresco para las que
+				// están escribiendo.
+				m.refreshDiskUsage()
+			})
 		}
 	}
 }
@@ -337,8 +413,10 @@ func (m *Manager) sweep() {
 			live["kl-"+mc.ID[:8]] = true
 			continue
 		}
+		now := time.Now()
 		mc.State = api.StateFailed
 		mc.LastErr = "the microVM process disappeared"
+		mc.FailedAt = &now
 		mc.PID = 0
 		delete(m.socket, mc.ID)
 		died = append(died, mc)
@@ -387,7 +465,103 @@ func (m *Manager) expireTTL(ctx context.Context) {
 
 	for _, id := range due {
 		if _, err := m.Freeze(ctx, id); err != nil {
-			log.Printf("ttl: couldn't freeze %s: %v", id[:8], err)
+			m.handleFreezeFailure(id, err)
+			continue
 		}
+		m.clearFreezeFailures(id)
 	}
+}
+
+// maxFreezeFailures es cuántos fallos CONSECUTIVOS de congelación por TTL se
+// toleran antes de dar la máquina por perdida. A un tic de ~10 s son unos cinco
+// minutos: lo transitorio de verdad —disco lento, un timeout puntual— se
+// resuelve mucho antes, y lo que sigue fallando pasado eso es estructural
+// aunque no sepamos ponerle nombre. Sin este tope, un fallo no clasificado se
+// reintentaba cada tic para siempre — se observaron 260 horas seguidas.
+const maxFreezeFailures = 30
+
+// freezeErrIsStructural reconoce los fallos de congelación que NO se arreglan
+// reintentando: el socket de control ya no existe (ENOENT al conectar) o hay
+// fichero pero nadie escucha (ECONNREFUSED: firecracker no vuelve a abrir su
+// API). Un timeout o un error de E/S puntual, en cambio, sí merece otro intento.
+func freezeErrIsStructural(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// handleFreezeFailure decide qué hacer con una máquina cuyo TTL venció pero no
+// se pudo congelar: reintentar, o darla por perdida y dejar de insistir.
+//
+// Antes esto era un log y a otra cosa, y el resultado fue el peor de los casos
+// observados: una máquina con el proceso vivo pero el fc.sock desaparecido se
+// reintentó cada 10 segundos durante 260 horas. Perdida es perdida: se marca
+// failed (estado terminal), se mata el proceso zombi y el segador no vuelve.
+func (m *Manager) handleFreezeFailure(id string, err error) {
+	cur, ok := m.Get(id)
+	if !ok || cur.State != api.StateRunning {
+		// Otro camino la congeló, paró o marcó mientras tanto: nada que hacer.
+		m.clearFreezeFailures(id)
+		return
+	}
+	// Una máquina con secretos no se congela POR DISEÑO (ver Freeze): el fallo
+	// es una negativa de política sobre una máquina sana, no una avería. Matarla
+	// por acumular negativas sería perder trabajo del usuario.
+	if cur.HasSecrets {
+		log.Printf("ttl: couldn't freeze %s: %v", shortID(id), err)
+		return
+	}
+	if freezeErrIsStructural(err) || !m.controlSockAlive(cur) {
+		m.giveUpOn(id, fmt.Errorf("unreachable: couldn't freeze it when its TTL expired (%v); "+
+			"its control socket is gone, so no retry can succeed", err))
+		return
+	}
+	n := m.noteFreezeFailure(id)
+	if n >= maxFreezeFailures {
+		m.giveUpOn(id, fmt.Errorf("gave up freezing it after %d consecutive attempts; last error: %v", n, err))
+		return
+	}
+	log.Printf("ttl: couldn't freeze %s (attempt %d/%d): %v", shortID(id), n, maxFreezeFailures, err)
+}
+
+// controlSockAlive dice si el VMM de la máquina sigue siendo alcanzable: su
+// proceso es suyo Y su socket de control existe. Es la misma comprobación que
+// usa el vigilante (adopt), reutilizada aquí porque el caso observado era
+// exactamente el hueco entre ambas: proceso vivo, socket desaparecido.
+func (m *Manager) controlSockAlive(mc *api.Machine) bool {
+	_, ok := m.adopt(mc)
+	return ok
+}
+
+// giveUpOn marca una máquina como perdida (failed, terminal) y limpia su
+// contador de reintentos. fail() además mata el proceso si sigue vivo: es lo
+// que evita que un firecracker sordo retenga su RAM para siempre.
+func (m *Manager) giveUpOn(id string, err error) {
+	m.clearFreezeFailures(id)
+	m.mu.RLock()
+	mc := m.byID[id]
+	m.mu.RUnlock()
+	if mc == nil {
+		return
+	}
+	log.Printf("ttl: giving up on %s: %v", shortID(id), err)
+	m.fail(mc, err)
+}
+
+// noteFreezeFailure apunta un fallo consecutivo más y devuelve cuántos van.
+func (m *Manager) noteFreezeFailure(id string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.freezeFails == nil {
+		m.freezeFails = make(map[string]int)
+	}
+	m.freezeFails[id]++
+	return m.freezeFails[id]
+}
+
+// clearFreezeFailures borra el contador: los fallos solo cuentan si son seguidos.
+func (m *Manager) clearFreezeFailures(id string) {
+	m.mu.Lock()
+	delete(m.freezeFails, id)
+	m.mu.Unlock()
 }

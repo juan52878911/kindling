@@ -23,19 +23,29 @@ import (
 	"github.com/juan52878911/kindling/internal/api"
 )
 
+// guestCapabilitiesPath es dónde deja el build las capacidades declaradas, visto
+// desde dentro del invitado.
+const guestCapabilitiesPath = "/etc/kling/capabilities.json"
+
 // ImageCapabilities devuelve las capacidades declaradas por una imagen, o nil si
 // no las declara (imágenes antiguas, o las que no son de npm): eso NO es un
 // error, es una imagen que no trae la información.
 func (m *Manager) ImageCapabilities(ctx context.Context, image string) (*api.Capabilities, error) {
-	path := m.imagePath(image)
-	if _, err := os.Stat(path); err != nil {
+	base, layer, err := m.imageLayer(image)
+	if err != nil {
 		return nil, err
 	}
 	bin := debugfsBin()
 	if bin == "" {
 		return nil, nil // sin debugfs no se puede saber; se falla abierto
 	}
-	out, err := exec.CommandContext(ctx, bin, "-R", "cat /etc/kling/capabilities.json", path).Output()
+	// En una imagen por capas el fichero lo escribió el build, así que está en la
+	// capa y no en la base compartida.
+	path, inside := base, guestCapabilitiesPath
+	if layer != "" {
+		path, inside = layer, layerGuestPath(guestCapabilitiesPath)
+	}
+	out, err := exec.CommandContext(ctx, bin, "-R", "cat "+inside, path).Output()
 	if err != nil {
 		return nil, nil // el fichero no existe: imagen sin capacidades declaradas
 	}

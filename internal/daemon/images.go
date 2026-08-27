@@ -27,9 +27,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+
+	"github.com/juan52878911/kindling/internal/durable"
 )
 
 // buildTimeout: instalar node y un paquete npm en un chroot va lento, y en un
@@ -49,6 +52,13 @@ var (
 	rePIP = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*((==|>=|<=|~=|!=)[a-zA-Z0-9._*+-]+)?$`)
 
 	reNPM = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[a-zA-Z0-9._~+-]+)?$`)
+	// Variable de entorno horneada: KEY=value. La clave con la forma estricta
+	// de un identificador de shell; el valor, cualquier cosa MENOS saltos de
+	// línea y NUL — el script la escribe en el entrypoint con `printf %q`, así
+	// que el resto de caracteres viaja inerte, pero un salto de línea antes de
+	// llegar ahí partiría otras cosas y no hay ningún valor legítimo que lo
+	// necesite.
+	reEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
 )
 
 // imageScript localiza scripts/80-mcp-image.sh.
@@ -98,6 +108,11 @@ func validateBuild(r api.BuildImageRequest) error {
 			return fmt.Errorf("invalid pip package %q", p)
 		}
 	}
+	for _, e := range r.Env {
+		if !reEnv.MatchString(e) {
+			return fmt.Errorf("invalid environment variable %q: expected KEY=value", e)
+		}
+	}
 	if len(r.Cmd) == 0 {
 		return fmt.Errorf("missing the command that starts the MCP server")
 	}
@@ -128,6 +143,12 @@ func buildScriptArgs(req api.BuildImageRequest) []string {
 	}
 	if len(req.PIP) > 0 {
 		args = append(args, "-P", strings.Join(req.PIP, " "))
+	}
+	// -e va una vez POR variable, no unido con espacios como -p/-n/-P: un valor
+	// puede llevar espacios y el script guarda cada "-e KEY=value" como un
+	// elemento de su array EXTRA_ENV.
+	for _, e := range req.Env {
+		args = append(args, "-e", e)
 	}
 	if req.Bundle {
 		args = append(args, "-bundle")
@@ -215,8 +236,11 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, api.BuildImageResult{
-		Name:   req.Name,
-		Path:   filepath.Join(s.root, "images", req.Name+".ext4"),
+		Name: req.Name,
+		// ImageFile y no el .ext4 a pelo: una construcción por capas deja
+		// $NAME.layer.ext4, y devolver una ruta que no existe convierte el "✓" en
+		// una pista falsa para quien vaya a mirarla.
+		Path:   s.mgr.ImageFile(req.Name),
 		Output: out.String(),
 	})
 }
@@ -271,18 +295,83 @@ func (s *Server) recipePath(name string) string {
 func (s *Server) saveRecipe(r api.BuildImageRequest) error {
 	rec := api.ImageRecipe{
 		Name: r.Name, Base: r.Base, Packages: r.Packages, NPM: r.NPM,
-		PIP: r.PIP, Cmd: r.Cmd, GrowMB: r.GrowMB, Bundle: r.Bundle, BuiltAt: time.Now(),
+		PIP: r.PIP, Env: r.Env, Cmd: r.Cmd, GrowMB: r.GrowMB, Bundle: r.Bundle,
+		BuiltAt:  time.Now(),
 		KlingVer: Version,
 	}
 	b, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.recipePath(r.Name) + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
-		return err
+	// Una receta con variables horneadas se guarda SOLO para su dueño.
+	//
+	// El resto de una receta es información pública —qué paquetes, qué comando—,
+	// pero los valores de -env los escribe quien construye y pueden no serlo: el
+	// CLI avisa de que un secreto queda en texto plano, y sería incoherente
+	// avisarlo y a la vez dejarlo legible para todo el mundo en un 0644 junto a
+	// la imagen. Sin variables, el modo de siempre.
+	perm := os.FileMode(0o644)
+	if len(rec.Env) > 0 {
+		perm = 0o600
 	}
-	return os.Rename(tmp, s.recipePath(r.Name))
+	// Durable: de la receta sale la BASE sobre la que arranca la imagen. Una
+	// receta perdida hace que recipeBase caiga en la base por defecto SIN log, y
+	// el invitado arranca sobre el rootfs equivocado — faltan bibliotecas y el
+	// fallo aparece dentro, no aqui.
+	return durable.Escribir(s.recipePath(r.Name), append(b, '\n'), perm)
+}
+
+// handleImages enumera las imágenes de rootfs construidas: nombre, tamaño en
+// disco, si se guardó su receta y cuántos snapshots dorados salieron de cada
+// una. Ese último dato es el que dice qué imagen se puede retirar sin dejar
+// servicios sin base.
+//
+// Con imágenes por capas hay una segunda forma de estar en uso: ser la BASE de
+// otras. Se cuenta aparte de los snapshots porque significa otra cosa —quitar
+// una base se lleva por delante servicios que solo guardan su delta— y porque el
+// tamaño que se enseña de cada capa es el suyo, sin la base, que es compartida.
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+	usedBy := map[string]int{}
+	for _, snap := range s.mgr.Snapshots() {
+		usedBy[snap.Image]++
+	}
+	names := s.mgr.Images()
+
+	// Primera pasada: quién se apoya en quién. Una base con capas encima no se
+	// puede retirar aunque no tenga snapshots propios, y eso hay que poder verlo
+	// ANTES de borrar nada.
+	base := map[string]string{}
+	layers := map[string]int{}
+	for _, name := range names {
+		if b, ok := s.mgr.ImageBase(name); ok {
+			base[name] = b
+			layers[b]++
+		}
+	}
+
+	out := make([]api.Image, 0, len(names))
+	for _, name := range names {
+		img := api.Image{Name: name, UsedBy: usedBy[name],
+			Base: base[name], Layers: layers[name]}
+		// El fichero que se mide es el de la imagen: su capa si va por capas, el
+		// ext4 entero si es monolítica.
+		if fi, err := os.Stat(s.mgr.ImageFile(name)); err == nil {
+			// Tamaño lógico y, aparte, el REALMENTE asignado en disco (bloques ×
+			// 512): con ext4 disperso difieren, y solo el segundo dice cuánto se
+			// recupera al borrar.
+			img.SizeBytes = fi.Size()
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				img.DiskBytes = st.Blocks * 512
+			} else {
+				img.DiskBytes = fi.Size()
+			}
+		}
+		if _, err := os.Stat(s.recipePath(name)); err == nil {
+			img.HasRecipe = true
+		}
+		out = append(out, img)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
