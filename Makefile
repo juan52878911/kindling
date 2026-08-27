@@ -140,9 +140,10 @@ deploy: daemon bridge
 			/tmp/$(BIN)-heal.service /tmp/$(BIN)-heal.timer /etc/systemd/system/ && \
 		sudo install -d -m755 /etc/kling && \
 		( [ -s /etc/kling/gateway.env ] || \
+		  ( sudo install -m600 /dev/null /etc/kling/gateway.env && \
 		  printf "KLING_GATEWAY_TOKEN=%s\n" \
 		    "$$(head -c32 /dev/urandom | base64 | tr "+/" "\-_" | tr -d "=")" \
-		  | sudo tee /etc/kling/gateway.env >/dev/null ) && \
+		  | sudo tee /etc/kling/gateway.env >/dev/null ) ) && \
 		sudo chmod 600 /etc/kling/gateway.env && \
 		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
 			sudo systemctl enable --now $(BIN)-heal.timer && \
