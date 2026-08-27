@@ -95,22 +95,37 @@ prematuro.
 
 ---
 
-## 4. Lo que sigue abierto
+## 4. El despertar, descompuesto
 
-### El arranque del invitado domina el despertar
+Con el dorado congelado **con un hijo caliente sin ligar** (ver §3), medido en el
+laboratorio sobre `sequentialthinking`:
 
-26 ms de *thaw* frente a **7,8 s** hasta que el servidor escucha. El dorado se
-congela con el `/reset` aplicado —que mata los procesos hijo— así que al restaurar
-hay que volver a arrancarlos.
+| | Antes | Ahora |
+|---|---|---|
+| Despertar por el gateway | 7,88–8,20 s | **4,76–5,32 s** |
+| Del cual, el invitado abre el puerto | ~7,8 s | **~0,3 s** |
 
-Es una tensión real de diseño, no un descuido:
+El lado del invitado —que era el objetivo— es **26× más rápido**. El coste del
+arranque del runtime se movió del despertar al momento de congelar: `kling commit`
+pasó de ~6 s a ~14 s, y el dorado de 39 MB a 120 MB de memoria. Es el intercambio
+correcto: se paga una vez al construir, no en cada despertar.
 
-- **sin `/reset`**: el dorado guarda un servidor caliente → rápido, pero rechaza el
-  siguiente `initialize` con `400 Server already initialized`;
-- **con `/reset`**: limpio y correcto, pero se paga el arranque del runtime.
+### Y aparece otro cuello de botella, mayor
 
-Resolverlo pide capturar el servidor *caliente pero sin estado de sesión*, que hoy
-el puente no sabe producir.
+Midiendo `kling run -from` directamente, sin gateway:
+
+| | |
+|---|---|
+| `kling run -from` completo | **4.260–4.302 ms** |
+| El invitado abre el puerto, después | +260–320 ms |
+| Restauración de Firecracker | **28–31 ms** |
+
+O sea: de los ~4,8 s del despertar, **~4,3 s son el camino de creación de máquina de
+kling** —jail, red, cgroup, disco, contabilidad—, no Firecracker (31 ms) y ya no el
+invitado (0,3 s).
+
+Ese es el siguiente objetivo, y es donde más hay que ganar. Sin medirlo por dentro
+no se puede decir qué parte de esos 4,3 s es cada cosa.
 
 ### Un test que falla en Linux y nadie ve
 
