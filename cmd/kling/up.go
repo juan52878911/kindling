@@ -547,6 +547,7 @@ func cmdStatus(args []string) error {
 	fmt.Printf("endpoint:     %s\n", c.Endpoint())
 
 	info, err := c.Info(ctx)
+	daemonUp := err == nil
 	if err != nil {
 		fmt.Printf("daemon:       ✗ not responding (%v)\n", err)
 		fmt.Printf("              diagnose and start it with:  kling up\n")
@@ -581,6 +582,17 @@ func cmdStatus(args []string) error {
 		fmt.Printf("  services:   %s\n", servicesLine(gw+"/services", cfg.Gateway.Token))
 	}
 
+	// Salud de los servicios MCP: el catálogo dice cuántos hay; esto, cuántos
+	// CONTESTAN. Sin esta línea, "services: ✓ 9" era una afirmación sobre el
+	// inventario que se leía como una sobre la salud — y se observaron nueve
+	// servicios 26 horas caídos detrás de ese ✓. El dato sale del meta de cada
+	// snapshot (lo escribe `kling mcp health`); aquí no se despierta nada.
+	if daemonUp {
+		if snaps, serr := c.Snapshots(ctx); serr == nil && len(snaps) > 0 {
+			fmt.Printf("mcp health:   %s\n", mcpHealthLine(snaps))
+		}
+	}
+
 	// Agentes: sin esto, "el gateway funciona" y "mi editor lo usa" siguen
 	// siendo dos cosas distintas, y la segunda es la que importa.
 	det := detectedClients()
@@ -595,6 +607,45 @@ func cmdStatus(args []string) error {
 		fmt.Printf("              plug them in with:  kling connect -all -install all\n")
 	}
 	return nil
+}
+
+// mcpHealthLine resume el último sondeo de salud de los servicios importados.
+//
+// Solo LEE los veredictos que dejó `kling mcp health` en el meta de cada
+// snapshot: sondear aquí arrancaría una microVM por servicio y `status` debe
+// ser instantáneo. Por eso "never probed" es un estado que se muestra y no se
+// disimula: sin sondeo no hay dato, y fingir salud es lo que tapó la caída.
+func mcpHealthLine(snaps []*api.Snapshot) string {
+	var healthy, unknown int
+	var sick []string
+	for _, s := range snaps {
+		switch s.Health {
+		case "healthy":
+			healthy++
+		case "unhealthy":
+			n := s.Name
+			if svc := s.Service(); svc != "" {
+				n = svc
+			}
+			sick = append(sick, n)
+		default:
+			unknown++
+		}
+	}
+	switch {
+	case len(sick) > 0:
+		line := fmt.Sprintf("✗ %d unhealthy (%s) · %d healthy", len(sick), strings.Join(sick, ", "), healthy)
+		if unknown > 0 {
+			line += fmt.Sprintf(" · %d never probed", unknown)
+		}
+		return line + " — details: kling mcp ls"
+	case unknown == len(snaps):
+		return fmt.Sprintf("? none of the %d service(s) has ever been probed — probe them: kling mcp health", unknown)
+	case unknown > 0:
+		return fmt.Sprintf("✓ %d healthy · %d never probed — probe them: kling mcp health", healthy, unknown)
+	default:
+		return fmt.Sprintf("✓ %d healthy", healthy)
+	}
 }
 
 // servicesLine resume /services, que responde texto plano, una línea por

@@ -1,9 +1,12 @@
 package machine
 
 import (
-	"github.com/juan52878911/kindling/internal/api"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/internal/api"
 )
 
 // No arrancar lo que no cabe. Una microVM que desborda el anfitrión no falla al
@@ -17,16 +20,16 @@ func TestNoSeArrancaLoQueNoCabe(t *testing.T) {
 	}
 
 	// Lo que cabe de sobra, pasa.
-	if err := checkHostMemory(16); err != nil {
+	if err := checkHostMemory(16, 0); err != nil {
 		t.Errorf("rechazó 16 MiB habiendo %d disponibles: %v", avail, err)
 	}
 	// Lo que no cabe ni de lejos, no.
-	err := checkHostMemory(avail + hostReserveMiB + 1024)
+	err := checkHostMemory(avail+hostReserveMiB+1024, 0)
 	if err == nil {
 		t.Fatal("aceptó una microVM más grande que el anfitrión")
 	}
 	// Y el error tiene que decir las dos cifras y qué hacer, o no sirve de nada.
-	for _, quiero := range []string{"no cabe", "reserva", "kling ps -a"} {
+	for _, quiero := range []string{"doesn't fit", "reserved", "kling ps -a"} {
 		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(quiero)) {
 			t.Errorf("el error no menciona %q: %v", quiero, err)
 		}
@@ -36,7 +39,7 @@ func TestNoSeArrancaLoQueNoCabe(t *testing.T) {
 // Sin poder leer la memoria NO se bloquea nada: convertir una comprobación de
 // cordura en una dependencia de arranque sería peor que el problema que evita.
 func TestSinDatosDeMemoriaNoSeBloquea(t *testing.T) {
-	if err := checkHostMemory(0); err != nil {
+	if err := checkHostMemory(0, 0); err != nil {
 		t.Errorf("bloqueó una petición sin memoria declarada: %v", err)
 	}
 }
@@ -165,21 +168,127 @@ func TestSueloDeMemoriaLibre(t *testing.T) {
 		t.Skip("sin /proc/meminfo (macOS): el suelo se prueba en Linux")
 	}
 	t.Setenv("KLING_MIN_FREE_MIB", "99999999")
-	err := checkHostMemory(16)
+	err := checkHostMemory(16, 0)
 	if err == nil {
-		t.Fatal("con suelo altísimo debía rechazar por MemFree")
+		t.Fatal("con suelo altísimo debía rechazar por el suelo de memoria utilizable")
 	}
 	if !api.IsInsufficientMemory(err) {
 		t.Errorf("el rechazo no es 507: %v", err)
 	}
-	for _, q := range []string{"realmente libre", "suelo"} {
+	for _, q := range []string{"really free", "floor", "kling_min_free_mib"} {
 		if !strings.Contains(strings.ToLower(err.Error()), q) {
 			t.Errorf("el mensaje del suelo no menciona %q: %v", q, err)
 		}
 	}
 	// Suelo 0 lo desactiva: 16 MiB vuelven a pasar.
 	t.Setenv("KLING_MIN_FREE_MIB", "0")
-	if err := checkHostMemory(16); err != nil {
+	if err := checkHostMemory(16, 0); err != nil {
 		t.Errorf("con el suelo desactivado, 16 MiB deberían caber: %v", err)
+	}
+}
+
+// La caché caliente se descuenta SOLO en lo atribuible a los mem.file vivos.
+//
+// Es el caso observado en producción: MemFree 108, MemAvailable 3520, UNA sola
+// microVM viva — y el guardián rechazaba el arranque dando por caliente una
+// caché que en su mayoría era fría y reclamable (3,4 GB al soltarla). El
+// descuento tiene que salir de lo atribuible, no de descartar MemAvailable.
+func TestLaCacheSoloSeDescuentaEnLoAtribuible(t *testing.T) {
+	// Sin mem.files vivos, MemAvailable manda entero: el caso del host con una
+	// caché grande y fría.
+	if got := effectiveAvailMiB(3520, 108, 0); got != 3520 {
+		t.Errorf("sin caché caliente, effective = %d, want 3520", got)
+	}
+	// Con más caché atribuible que caché total, el descuento se acota a la
+	// caché reclamable: queda exactamente MemFree, nunca menos.
+	if got := effectiveAvailMiB(3520, 108, 99999); got != 108 {
+		t.Errorf("con todo caliente, effective = %d, want 108 (MemFree)", got)
+	}
+	// Atribución parcial: se descuenta lo caliente y lo frío sigue contando.
+	if got := effectiveAvailMiB(4000, 1000, 1200); got != 2800 {
+		t.Errorf("con 1200 calientes, effective = %d, want 2800", got)
+	}
+	// Sin dato de memoria no se inventa nada.
+	if got := effectiveAvailMiB(0, 0, 100); got != 0 {
+		t.Errorf("sin MemAvailable, effective = %d, want 0", got)
+	}
+}
+
+// Y checkHostMemory usa ese descuento: con la caché entera marcada como
+// caliente, lo utilizable cae a MemFree y una petición grande se rechaza,
+// aunque el MemAvailable crudo diga que cabe.
+func TestElGuardianDescuentaLaCacheCaliente(t *testing.T) {
+	avail, free := availableMiB(), freeMiB()
+	if avail <= 0 || free <= 0 {
+		t.Skip("sin /proc/meminfo (macOS): el guardián se prueba en Linux")
+	}
+	t.Setenv("KLING_MIN_FREE_MIB", "0") // aislar el check de tamaño del suelo
+	want := free + hostReserveMiB + 64  // no cabe en MemFree, sí en MemAvailable crudo
+	if want+hostReserveMiB > avail {
+		t.Skip("el host de test no tiene hueco entre MemFree y MemAvailable para el caso")
+	}
+	if err := checkHostMemory(want, avail); err == nil {
+		t.Error("con toda la caché caliente debía rechazar: solo queda MemFree de verdad")
+	} else if !api.IsInsufficientMemory(err) {
+		t.Errorf("el rechazo no es 507: %v", err)
+	}
+	// La misma petición sin caché caliente cabe: es la diferencia que corrige
+	// el falso rechazo observado.
+	if err := checkHostMemory(want, 0); err != nil {
+		t.Errorf("sin caché caliente debía caber (%d de %d disponibles): %v", want, avail, err)
+	}
+}
+
+// `hotMemFilesMiBLocked` no tenia ninguna cobertura: se podia hacer que devolviera
+// 0 —anulando el arreglo entero— y toda la suite seguia verde, en Linux tambien.
+// El test que decia cubrirlo (`TestElGuardianDescuentaLaCacheCaliente`) mide el
+// guardian de punta a punta contra el /proc REAL del host, asi que su resultado
+// depende de cuanta caché tenga la maquina en ese momento y no llega a distinguir
+// si el descuento se calculo o no.
+//
+// Este prueba la funcion directamente, con ficheros de verdad en disco, porque lo
+// que decide es cuantos bytes ASIGNADOS tienen los mem.file: son dispersos, y ahi
+// esta la gracia — 256 MB nominales pueden ser 19 MB reales.
+func TestSoloCuentaLosMemFileDeMaquinasVivas(t *testing.T) {
+	m := newTestManager(t)
+
+	// Un mem.file de 8 MiB reales dentro del snapshot dorado "dorado".
+	crear := func(dir string, mib int) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Create(filepath.Join(dir, "mem.file"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.Write(make([]byte, mib<<20)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	crear(m.snapDir("dorado"), 8)
+
+	// Sin maquinas: no hay nada caliente.
+	if got := m.hotMemFilesMiBLocked(); got != 0 {
+		t.Errorf("sin maquinas vivas deberia ser 0, fue %d MiB", got)
+	}
+
+	// Una PARADA que use ese dorado tampoco cuenta: no lo mapea nadie.
+	m.byID["aaaa"] = &api.Machine{ID: "aaaa", From: "dorado", State: api.StateStopped}
+	if got := m.hotMemFilesMiBLocked(); got != 0 {
+		t.Errorf("una maquina parada no mapea su dorado; esperaba 0, fue %d MiB", got)
+	}
+
+	// Corriendo si: cuenta los 8 MiB del dorado.
+	m.byID["aaaa"].State = api.StateRunning
+	got := m.hotMemFilesMiBLocked()
+	if got < 7 || got > 9 {
+		t.Errorf("una viva sobre el dorado deberia contar ~8 MiB, fue %d", got)
+	}
+
+	// Una SEGUNDA sobre el MISMO dorado no lo cuenta dos veces: se comparte.
+	m.byID["bbbb"] = &api.Machine{ID: "bbbb", From: "dorado", State: api.StateRunning}
+	if dos := m.hotMemFilesMiBLocked(); dos != got {
+		t.Errorf("el dorado compartido se conto dos veces: %d -> %d MiB", got, dos)
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/events"
 )
 
 // Un directorio de machines/ que no pertenece a ninguna máquina conocida es
@@ -102,5 +104,100 @@ func TestSinDatoDeDiscoElGCNoActua(t *testing.T) {
 		if !sigue {
 			t.Error("eliminó una instancia con el disco por debajo de la marca")
 		}
+	}
+}
+
+// Las failed se recogen solas pasado su tiempo de gracia. Failed es terminal
+// —no hay `start` que las saque de ahí—, así que acumularlas no da opciones,
+// solo basura: se observaron nueve en 21 horas, una por intento roto.
+func TestLasFailedViejasSeRecogenSolas(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+
+	vieja := time.Now().Add(-2 * defaultFailedRetention)
+	reciente := time.Now().Add(-time.Minute)
+	m.mu.Lock()
+	m.byID["vieja456789abcde"] = &api.Machine{ID: "vieja456789abcde", Name: "vieja",
+		State: api.StateFailed, FailedAt: &vieja, LastErr: "boom"}
+	m.byID["fresca6789abcdef"] = &api.Machine{ID: "fresca6789abcdef", Name: "fresca",
+		State: api.StateFailed, FailedAt: &reciente, LastErr: "boom"}
+	m.byID["sana567890abcdef"] = &api.Machine{ID: "sana567890abcdef", Name: "sana",
+		State: api.StateWarm}
+	m.mu.Unlock()
+
+	m.gcFailed()
+
+	m.mu.RLock()
+	_, viejaSigue := m.byID["vieja456789abcde"]
+	_, frescaSigue := m.byID["fresca6789abcdef"]
+	_, sanaSigue := m.byID["sana567890abcdef"]
+	m.mu.RUnlock()
+	if viejaSigue {
+		t.Error("no recogió una failed que ya cumplió su tiempo de gracia")
+	}
+	if !frescaSigue {
+		t.Error("recogió una failed reciente: la gracia existe para poder diagnosticarla")
+	}
+	if !sanaSigue {
+		t.Error("tocó una máquina que no estaba failed")
+	}
+}
+
+// Una failed sin fecha (estado de antes del campo FailedAt) no se borra al
+// instante: se le arranca el reloj y cae cuando le toque. La diferencia entre
+// recoger basura y borrar algo que quizá falló hace un minuto.
+func TestUnaFailedSinFechaRecibeRelojNoBorrado(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	m.mu.Lock()
+	m.byID["legacy4567890abc"] = &api.Machine{ID: "legacy4567890abc", Name: "legacy",
+		State: api.StateFailed}
+	m.mu.Unlock()
+
+	m.gcFailed()
+
+	m.mu.RLock()
+	mc := m.byID["legacy4567890abc"]
+	m.mu.RUnlock()
+	if mc == nil {
+		t.Fatal("borró una failed sin fecha en la primera pasada")
+	}
+	if mc.FailedAt == nil {
+		t.Fatal("no le arrancó el reloj: sin FailedAt no se recogerá nunca")
+	}
+
+	// Con el reloj ya envejecido, la siguiente pasada sí la recoge.
+	old := time.Now().Add(-2 * defaultFailedRetention)
+	m.mu.Lock()
+	mc.FailedAt = &old
+	m.mu.Unlock()
+	m.gcFailed()
+	m.mu.RLock()
+	_, sigue := m.byID["legacy4567890abc"]
+	m.mu.RUnlock()
+	if sigue {
+		t.Error("no la recogió ni con el reloj cumplido")
+	}
+}
+
+// KLING_FAILED_RETENTION=0 desactiva la recogida: quien quiera conservar los
+// cadáveres para una autopsia larga puede.
+func TestLaRecogidaDeFailedSePuedeDesactivar(t *testing.T) {
+	t.Setenv("KLING_FAILED_RETENTION", "0")
+	m := newTestManager(t)
+	m.bus = events.New()
+	vieja := time.Now().Add(-100 * defaultFailedRetention)
+	m.mu.Lock()
+	m.byID["eterna4567890abc"] = &api.Machine{ID: "eterna4567890abc", Name: "eterna",
+		State: api.StateFailed, FailedAt: &vieja}
+	m.mu.Unlock()
+
+	m.gcFailed()
+
+	m.mu.RLock()
+	_, sigue := m.byID["eterna4567890abc"]
+	m.mu.RUnlock()
+	if !sigue {
+		t.Error("recogió una failed con la recogida desactivada")
 	}
 }

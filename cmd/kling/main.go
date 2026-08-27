@@ -86,7 +86,7 @@ MCP SERVICES
   mcp unlink <name>                                unlinks it
 
 GOLDEN SNAPSHOTS
-  commit <ref> <name>                              freezes a machine as a
+  commit [-replace] <ref> <name>                   freezes a machine as a
                                                    reusable snapshot
   run -from <name>                                 instantiates from the snapshot
   snapshots                                        lists the snapshots
@@ -682,17 +682,22 @@ func cmdLogs(args []string) error {
 func cmdCommit(args []string) error {
 	fs := flag.NewFlagSet("commit", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	// Reemplazar es opt-in: los snapshots quedan atados al TSC del host y un
+	// reinicio los invalida todos, así que rehacerlos con el mismo nombre es
+	// rutina — pero pisar uno por un nombre repetido sin querer no debe poder
+	// pasar, y por eso no es el comportamiento por defecto.
+	replace := fs.Bool("replace", false, "replace the snapshot if one with this name already exists")
+	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling commit <ref> <snapshot-name>")
+		return fmt.Errorf("usage: kling commit [-replace] <ref> <snapshot-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	snap, err := api.NewClient(hostOf(*host)).Commit(ctx, fs.Arg(0), fs.Arg(1))
+	snap, err := api.NewClient(hostOf(*host)).Commit(ctx, fs.Arg(0), fs.Arg(1), *replace)
 	if err != nil {
 		return err
 	}

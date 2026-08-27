@@ -94,6 +94,12 @@ type Manager struct {
 	// Se toca bajo mu.
 	snapPending map[string]int
 
+	// freezeFails cuenta los fallos CONSECUTIVOS de congelación por TTL de cada
+	// máquina. Existe para que el segador pueda rendirse: sin memoria de cuántas
+	// veces ha fallado, reintentaba para siempre sobre máquinas irrecuperables.
+	// Se toca bajo mu; se limpia al congelar con éxito o al darla por perdida.
+	freezeFails map[string]int
+
 	// templateMu serializa la construcción de la plantilla de overlay: dos
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
 	templateMu sync.Mutex
@@ -142,6 +148,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		quit:        make(chan struct{}),
 		launchGate:  make(chan struct{}, maxParallelLaunch()),
 		snapPending: make(map[string]int),
+		freezeFails: make(map[string]int),
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
@@ -1366,7 +1373,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 	start := time.Now()
 	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
-		return nil, err
+		// Mismo motivo que en runFrom: si la causa es el TSC de un host
+		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
+		// hacer, y este texto es lo que verá quien despierte la máquina.
+		return nil, explainRestoreErr(err, fmt.Sprintf("machine %q", mc.Name),
+			"  kling rm "+mc.Name+"\n"+
+				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)")
 	}
 	elapsed := time.Since(start).Milliseconds()
 
@@ -1548,8 +1560,12 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	knet.Plan(mc.NetIndex, mc.ID).Teardown()
 	m.releaseCPU(mc.ID)
 	m.mu.Lock()
+	now := time.Now()
 	mc.State = api.StateFailed
 	mc.LastErr = err.Error()
+	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
+	// se quedaba en la lista para siempre (ver gcFailed).
+	mc.FailedAt = &now
 	m.persist()
 	m.mu.Unlock()
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name, Message: err.Error()})

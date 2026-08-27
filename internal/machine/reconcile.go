@@ -2,6 +2,9 @@ package machine
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -308,6 +311,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			m.sweep()
 			m.expireTTL(ctx)
+			// Recoger los cadáveres: una failed conserva su motivo un tiempo
+			// para poder diagnosticarla, y después se recoge sola. Sin esto se
+			// acumulaban indefinidamente, una por intento fallido.
+			m.gcFailed()
 			// Barrer directorios huérfanos también en marcha: no solo aparecen
 			// al arrancar. Bajo el lock, como reconcile.
 			m.mu.Lock()
@@ -337,8 +344,10 @@ func (m *Manager) sweep() {
 			live["kl-"+mc.ID[:8]] = true
 			continue
 		}
+		now := time.Now()
 		mc.State = api.StateFailed
 		mc.LastErr = "the microVM process disappeared"
+		mc.FailedAt = &now
 		mc.PID = 0
 		delete(m.socket, mc.ID)
 		died = append(died, mc)
@@ -387,7 +396,103 @@ func (m *Manager) expireTTL(ctx context.Context) {
 
 	for _, id := range due {
 		if _, err := m.Freeze(ctx, id); err != nil {
-			log.Printf("ttl: couldn't freeze %s: %v", id[:8], err)
+			m.handleFreezeFailure(id, err)
+			continue
 		}
+		m.clearFreezeFailures(id)
 	}
+}
+
+// maxFreezeFailures es cuántos fallos CONSECUTIVOS de congelación por TTL se
+// toleran antes de dar la máquina por perdida. A un tic de ~10 s son unos cinco
+// minutos: lo transitorio de verdad —disco lento, un timeout puntual— se
+// resuelve mucho antes, y lo que sigue fallando pasado eso es estructural
+// aunque no sepamos ponerle nombre. Sin este tope, un fallo no clasificado se
+// reintentaba cada tic para siempre — se observaron 260 horas seguidas.
+const maxFreezeFailures = 30
+
+// freezeErrIsStructural reconoce los fallos de congelación que NO se arreglan
+// reintentando: el socket de control ya no existe (ENOENT al conectar) o hay
+// fichero pero nadie escucha (ECONNREFUSED: firecracker no vuelve a abrir su
+// API). Un timeout o un error de E/S puntual, en cambio, sí merece otro intento.
+func freezeErrIsStructural(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// handleFreezeFailure decide qué hacer con una máquina cuyo TTL venció pero no
+// se pudo congelar: reintentar, o darla por perdida y dejar de insistir.
+//
+// Antes esto era un log y a otra cosa, y el resultado fue el peor de los casos
+// observados: una máquina con el proceso vivo pero el fc.sock desaparecido se
+// reintentó cada 10 segundos durante 260 horas. Perdida es perdida: se marca
+// failed (estado terminal), se mata el proceso zombi y el segador no vuelve.
+func (m *Manager) handleFreezeFailure(id string, err error) {
+	cur, ok := m.Get(id)
+	if !ok || cur.State != api.StateRunning {
+		// Otro camino la congeló, paró o marcó mientras tanto: nada que hacer.
+		m.clearFreezeFailures(id)
+		return
+	}
+	// Una máquina con secretos no se congela POR DISEÑO (ver Freeze): el fallo
+	// es una negativa de política sobre una máquina sana, no una avería. Matarla
+	// por acumular negativas sería perder trabajo del usuario.
+	if cur.HasSecrets {
+		log.Printf("ttl: couldn't freeze %s: %v", shortID(id), err)
+		return
+	}
+	if freezeErrIsStructural(err) || !m.controlSockAlive(cur) {
+		m.giveUpOn(id, fmt.Errorf("unreachable: couldn't freeze it when its TTL expired (%v); "+
+			"its control socket is gone, so no retry can succeed", err))
+		return
+	}
+	n := m.noteFreezeFailure(id)
+	if n >= maxFreezeFailures {
+		m.giveUpOn(id, fmt.Errorf("gave up freezing it after %d consecutive attempts; last error: %v", n, err))
+		return
+	}
+	log.Printf("ttl: couldn't freeze %s (attempt %d/%d): %v", shortID(id), n, maxFreezeFailures, err)
+}
+
+// controlSockAlive dice si el VMM de la máquina sigue siendo alcanzable: su
+// proceso es suyo Y su socket de control existe. Es la misma comprobación que
+// usa el vigilante (adopt), reutilizada aquí porque el caso observado era
+// exactamente el hueco entre ambas: proceso vivo, socket desaparecido.
+func (m *Manager) controlSockAlive(mc *api.Machine) bool {
+	_, ok := m.adopt(mc)
+	return ok
+}
+
+// giveUpOn marca una máquina como perdida (failed, terminal) y limpia su
+// contador de reintentos. fail() además mata el proceso si sigue vivo: es lo
+// que evita que un firecracker sordo retenga su RAM para siempre.
+func (m *Manager) giveUpOn(id string, err error) {
+	m.clearFreezeFailures(id)
+	m.mu.RLock()
+	mc := m.byID[id]
+	m.mu.RUnlock()
+	if mc == nil {
+		return
+	}
+	log.Printf("ttl: giving up on %s: %v", shortID(id), err)
+	m.fail(mc, err)
+}
+
+// noteFreezeFailure apunta un fallo consecutivo más y devuelve cuántos van.
+func (m *Manager) noteFreezeFailure(id string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.freezeFails == nil {
+		m.freezeFails = make(map[string]int)
+	}
+	m.freezeFails[id]++
+	return m.freezeFails[id]
+}
+
+// clearFreezeFailures borra el contador: los fallos solo cuentan si son seguidos.
+func (m *Manager) clearFreezeFailures(id string) {
+	m.mu.Lock()
+	delete(m.freezeFails, id)
+	m.mu.Unlock()
 }
