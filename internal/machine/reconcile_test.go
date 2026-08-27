@@ -1,13 +1,20 @@
 package machine
 
 import (
+	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/events"
 )
 
 // liveVMs es la pieza sobre la que se apoya todo el reconcile nuevo: si no ve
@@ -205,5 +212,119 @@ func TestHasSnapshotExigeLosDosFicheros(t *testing.T) {
 	}
 	if !m.hasSnapshot(id) {
 		t.Error("con snap.file y mem.file sí hay snapshot")
+	}
+}
+
+// El segador de TTL tiene que distinguir "no pude congelarla AHORA" de "no voy
+// a poder congelarla NUNCA". Lo segundo es un socket que ya no existe o nadie
+// escuchando: reintentarlo cada 10 segundos es lo que produjo 260 horas de
+// fallos idénticos sobre la misma máquina.
+func TestElFalloDeSocketDesaparecidoEsEstructural(t *testing.T) {
+	// Así llega de verdad: el dial del cliente HTTP envuelve el errno del
+	// sistema en un net.OpError, como en el fallo observado
+	// ("dial unix .../fc.sock: connect: no such file or directory").
+	enoent := fmt.Errorf("Patch \"http://localhost/vm\": %w",
+		&net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ENOENT)})
+	if !freezeErrIsStructural(enoent) {
+		t.Error("un ENOENT al conectar al socket es irrecuperable y no lo reconoció")
+	}
+	refused := fmt.Errorf("Patch \"http://localhost/vm\": %w",
+		&net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})
+	if !freezeErrIsStructural(refused) {
+		t.Error("un ECONNREFUSED (socket sin nadie detrás) es irrecuperable y no lo reconoció")
+	}
+
+	// Lo transitorio se queda transitorio: un timeout o un error cualquiera
+	// merecen reintento, y tratarlos de estructurales mataría máquinas sanas.
+	if freezeErrIsStructural(errors.New("context deadline exceeded")) {
+		t.Error("trató un timeout como estructural")
+	}
+	if freezeErrIsStructural(fmt.Errorf("firecracker PATCH /vm: 400 Bad Request: some transient thing")) {
+		t.Error("trató un error genérico como estructural")
+	}
+	if freezeErrIsStructural(nil) {
+		t.Error("nil no es un fallo de nada")
+	}
+}
+
+// Y aunque el fallo no se sepa clasificar, el segador se rinde tras un número
+// finito de intentos seguidos: la máquina pasa a failed (terminal) y no se
+// vuelve a intentar. Un fallo "transitorio" que dura horas no es transitorio.
+func TestElSegadorSeRindeTrasDemasiadosFallosSeguidos(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "feedfacefeedface"
+	now := time.Now()
+	m.mu.Lock()
+	m.byID[id] = &api.Machine{ID: id, Name: "tozuda", State: api.StateRunning,
+		StartedAt: &now, TTLSeconds: 1}
+	m.mu.Unlock()
+
+	// Un fallo que no se sabe clasificar, repetido: los primeros se toleran…
+	for i := 0; i < maxFreezeFailures-1; i++ {
+		if n := m.noteFreezeFailure(id); n >= maxFreezeFailures {
+			t.Fatalf("se rindió en el intento %d, antes del tope %d", n, maxFreezeFailures)
+		}
+	}
+	// …y el que llega al tope, no.
+	if n := m.noteFreezeFailure(id); n < maxFreezeFailures {
+		t.Fatalf("tras %d fallos seguidos el contador dice %d", maxFreezeFailures, n)
+	}
+	m.giveUpOn(id, errors.New("gave up for the test"))
+
+	m.mu.RLock()
+	mc := m.byID[id]
+	m.mu.RUnlock()
+	if mc.State != api.StateFailed {
+		t.Fatalf("tras rendirse la máquina debe quedar failed (terminal), está %q", mc.State)
+	}
+	if mc.FailedAt == nil {
+		t.Error("una failed sin FailedAt no se puede recoger después")
+	}
+	// Y el contador se limpió: si reviviera, empezaría de cero.
+	m.mu.RLock()
+	_, sigue := m.freezeFails[id]
+	m.mu.RUnlock()
+	if sigue {
+		t.Error("el contador de fallos no se limpió al rendirse")
+	}
+}
+
+// Un éxito (o que otro camino la congele) borra la cuenta: los fallos solo
+// suman si son consecutivos, que es lo que separa una racha mala de una avería.
+func TestUnExitoReiniciaElContadorDeFallos(t *testing.T) {
+	m := newTestManager(t)
+	id := "cafebabecafebabe"
+	for i := 0; i < 5; i++ {
+		m.noteFreezeFailure(id)
+	}
+	m.clearFreezeFailures(id)
+	if n := m.noteFreezeFailure(id); n != 1 {
+		t.Errorf("tras limpiar, el siguiente fallo debía ser el 1, fue el %d", n)
+	}
+}
+
+// handleFreezeFailure no debe tocar una máquina que ya no está running: si otro
+// camino la congeló o la paró mientras tanto, el "fallo" ya no significa nada.
+func TestElSegadorNoTocaLoQueYaNoCorre(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	id := "0123456789abcdef"
+	m.mu.Lock()
+	m.byID[id] = &api.Machine{ID: id, Name: "dormida", State: api.StateWarm}
+	m.mu.Unlock()
+	m.noteFreezeFailure(id)
+
+	m.handleFreezeFailure(id, errors.New("whatever"))
+
+	m.mu.RLock()
+	estado := m.byID[id].State
+	_, conCuenta := m.freezeFails[id]
+	m.mu.RUnlock()
+	if estado != api.StateWarm {
+		t.Errorf("cambió el estado de una máquina que ya no corría: %q", estado)
+	}
+	if conCuenta {
+		t.Error("no limpió el contador de una máquina que ya no corre")
 	}
 }

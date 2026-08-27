@@ -36,7 +36,7 @@ func (m *Manager) snapDir(name string) string {
 // restaurar, el invitado despierta con su estado de montaje en memoria, así que
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
-func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, error) {
+func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*api.Snapshot, error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -57,7 +57,17 @@ func (m *Manager) Commit(ctx context.Context, ref, name string) (*api.Snapshot, 
 
 	dir := m.snapDir(name)
 	if _, err := os.Stat(dir); err == nil {
-		return nil, fmt.Errorf("snapshot %q already exists", name)
+		if !replace {
+			return nil, fmt.Errorf("snapshot %q already exists (use `kling commit -replace` to replace it)", name)
+		}
+		// Reemplazar pasa por RemoveSnapshot y no por un RemoveAll directo: es
+		// quien sabe negarse si el snapshot tiene instancias vivas, que seguirían
+		// mapeando un mem.file que estaríamos pisando debajo de ellas. El borrado
+		// previo no es atómico, pero el caso que motiva -replace es un snapshot
+		// que un reinicio del host ya dejó irrestaurable: no hay nada que salvar.
+		if err := m.RemoveSnapshot(name); err != nil {
+			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
+		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -406,6 +416,25 @@ func (m *Manager) RemoveSnapshot(name string) error {
 	return os.RemoveAll(m.snapDir(name))
 }
 
+// explainRestoreErr traduce los fallos de restauración de Firecracker con causa
+// conocida a un error que dice qué pasó y qué hacer. Los que no reconoce pasan
+// intactos: adornar un error sin entenderlo es peor que dejarlo crudo.
+//
+// El caso que motiva esto: el snapshot graba la frecuencia del TSC del host, y
+// esa frecuencia se mide de nuevo en cada arranque — tras reiniciar el host,
+// TODOS los snapshots anteriores dejan de restaurar a la vez, con un
+// "Could not set TSC scaling ... Invalid argument (os error 22)" que no apunta
+// a nada. La recuperación es siempre la misma: rehacer el snapshot.
+func explainRestoreErr(err error, what, remedy string) error {
+	if err == nil || !strings.Contains(err.Error(), "TSC") {
+		return err
+	}
+	return fmt.Errorf("%s can't be restored on this host: the snapshot records the CPU's TSC "+
+		"frequency, which changes on every host boot, so a host reboot invalidates every "+
+		"snapshot taken before it (this is a Firecracker limitation, not corruption).\n"+
+		"Recover by recreating it:\n%s\nUnderlying error: %v", what, remedy, err)
+}
+
 // runFrom instancia una microVM desde un snapshot dorado.
 //
 // Todas las instancias mapean el MISMO fichero de memoria: Firecracker lo mapea
@@ -665,6 +694,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err := c.LoadSnapshot(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false); err != nil {
+		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
+		// propagar: este error acaba en el 502 del gateway y en el CLI, y el
+		// texto crudo de Firecracker no le dice a nadie qué hacer.
+		err = explainRestoreErr(err, fmt.Sprintf("snapshot %q", req.From), fmt.Sprintf(
+			"  kling mcp import %s -force    (imported MCP service)\n"+
+				"  kling commit -replace <machine> %s    (manual snapshot)", req.From, req.From))
 		m.fail(mc, err)
 		return nil, err
 	}

@@ -383,7 +383,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name)
+	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name, req.Replace)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return

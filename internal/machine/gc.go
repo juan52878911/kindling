@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/api"
 )
@@ -139,5 +140,74 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		// siguiente síntoma será un arranque que falla por disco y no por esto.
 		log.Printf("gc: disk still at %d%% after recovering what could be recovered; "+
 			"check images, volumes, or instances without a backup snapshot", p)
+	}
+}
+
+// defaultFailedRetention es cuánto se conserva una máquina failed antes de
+// recogerla. Una hora: de sobra para que `kling ps -a` y su LastErr cuenten qué
+// pasó, y lo bastante corto para que los intentos fallidos no se acumulen — se
+// observaron nueve en 21 horas, uno por instanciación rota, para siempre.
+const defaultFailedRetention = time.Hour
+
+// failedRetention devuelve la retención, ajustable con KLING_FAILED_RETENTION
+// (una duración de Go: "30m", "2h"; "0" desactiva la recogida).
+func failedRetention() time.Duration {
+	if v := os.Getenv("KLING_FAILED_RETENTION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultFailedRetention
+}
+
+// gcFailed recoge las máquinas failed que ya cumplieron su tiempo de gracia.
+//
+// Automático y no un comando, por la misma razón que gcDisk: failed es un
+// estado TERMINAL (no hay `start` que lo saque de ahí), así que conservarlas no
+// da ninguna opción nueva — solo diagnóstico, y para eso basta la ventana de
+// gracia. Un daemon que exige limpieza manual de sus propios restos acumula
+// restos, que es exactamente lo observado.
+//
+// Una failed sin fecha (estado anterior al campo FailedAt) no se borra al
+// instante: se le arranca el reloj ahora y cae en la pasada que le toque. Es la
+// diferencia entre recoger basura y borrar algo que quizá falló hace un minuto.
+func (m *Manager) gcFailed() {
+	retention := failedRetention()
+	if retention <= 0 {
+		return
+	}
+	now := time.Now()
+
+	type victim struct{ id, name, lastErr string }
+	var due []victim
+	stamped := false
+
+	m.mu.Lock()
+	for _, mc := range m.byID {
+		if mc.State != api.StateFailed {
+			continue
+		}
+		if mc.FailedAt == nil {
+			t := now
+			mc.FailedAt = &t
+			stamped = true
+			continue
+		}
+		if now.Sub(*mc.FailedAt) >= retention {
+			due = append(due, victim{mc.ID, mc.Name, mc.LastErr})
+		}
+	}
+	if stamped {
+		m.persist()
+	}
+	m.mu.Unlock()
+
+	// Fuera del candado: Remove toma el suyo y además toca disco y red.
+	for _, v := range due {
+		if err := m.Remove(v.id); err != nil {
+			log.Printf("gc: couldn't collect failed machine %s: %v", v.name, err)
+			continue
+		}
+		log.Printf("gc: collected failed machine %s (failed with: %s)", v.name, v.lastErr)
 	}
 }

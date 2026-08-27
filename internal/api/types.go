@@ -43,6 +43,11 @@ type Machine struct {
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	FrozenAt  *time.Time `json:"frozen_at,omitempty"`
 
+	// FailedAt es cuándo pasó a failed. Es lo que permite recogerla después de
+	// un tiempo de gracia: una failed sin fecha no se puede envejecer, y las
+	// fallidas se acumulaban para siempre, una por intento de instanciación roto.
+	FailedAt *time.Time `json:"failed_at,omitempty"`
+
 	// From es el snapshot dorado del que se restauró, si lo hubo.
 	From string `json:"from,omitempty"`
 
@@ -389,8 +394,15 @@ type HealthRequest struct {
 }
 
 // CommitRequest congela una máquina en marcha como snapshot reutilizable.
+//
+// Replace pide reemplazar un snapshot que ya exista con ese nombre. Es opt-in a
+// propósito: pisar un snapshot destruye el anterior, y eso no debe pasar por un
+// nombre repetido sin querer. El caso que lo hace necesario es real: los
+// snapshots quedan atados al TSC del host y un reinicio los invalida TODOS, así
+// que rehacerlos es operación rutinaria, no excepción.
 type CommitRequest struct {
-	Name string `json:"name"`
+	Name    string `json:"name"`
+	Replace bool   `json:"replace,omitempty"`
 }
 
 // Event es un cambio de estado publicado en el bus del daemon.

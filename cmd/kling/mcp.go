@@ -343,7 +343,7 @@ func mcpImport(args []string) error {
 		cleanup()
 		return err
 	}
-	if _, err := c.Commit(ctx, mc.ID, service); err != nil {
+	if _, err := c.Commit(ctx, mc.ID, service, false); err != nil {
 		fmt.Println("✗")
 		cleanup()
 		if strings.Contains(err.Error(), "already exists") {
@@ -425,7 +425,7 @@ func mcpList(args []string) error {
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "SERVICE\tTOOLS\tCATALOG\tHEALTH\tMEMORY\tINSTANCES")
-	total := 0
+	total, unprobed := 0, 0
 	for _, s := range snaps {
 		n := s.Name
 		if svc := s.Service(); svc != "" {
@@ -435,6 +435,9 @@ func mcpList(args []string) error {
 		if s.ToolsAt != nil {
 			cat = since(*s.ToolsAt) + " ago"
 		}
+		if s.Health == "" {
+			unprobed++
+		}
 		total += len(s.Tools)
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n",
 			n, len(s.Tools), cat, healthCell(s), human(s.MemBytes), s.Instances)
@@ -443,6 +446,13 @@ func mcpList(args []string) error {
 		return err
 	}
 	links, _ := c.Links(ctx)
+	// "not probed" no es un dato de salud, es su ausencia — y una columna llena
+	// de ausencias sin decir cómo llenarla es como se pasan 26 horas de caída
+	// sin que nadie sondee. El sondeo no ocurre aquí: cada sondeo despierta una
+	// microVM y `ls` debe seguir siendo instantáneo.
+	if unprobed > 0 {
+		fmt.Printf("\nHealth has never been probed for %d service(s). Probe them:  kling mcp health\n", unprobed)
+	}
 	for _, l := range links {
 		total += len(l.Tools)
 		fmt.Printf("%-12s %-14d %-11s %-13s %-9s external: %s\n",
