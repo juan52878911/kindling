@@ -135,9 +135,33 @@ func (u volumeUse) all() []string {
 	return append(out, u.readers...)
 }
 
+// reservaVolumen es un volumen comprometido por una maquina que TODAVIA no esta
+// en byID.
+//
+// Sin esto habia una ventana real entre comprobar y publicar: dos arranques
+// simultaneos —un `kling run -volume` desde el CLI y un scaleOut del gateway—
+// veian los DOS "cero escritores", y los dos montaban el mismo ext4 en
+// escritura. El sintoma no es un error: es corrupcion del sistema de ficheros
+// del usuario, que aparece mucho despues como un EBADMSG.
+type reservaVolumen struct {
+	// maquina es el ID de quien reservo. Es tambien la llave para soltarla, y
+	// permite ignorar la reserva en cuanto esa maquina llega a byID, para no
+	// contarla dos veces.
+	maquina  string
+	nombre   string // el nombre legible, para los mensajes de error
+	soloLect bool
+}
+
+// volumeUsers da los usuarios de cada volumen, tomando el cerrojo.
 func (m *Manager) volumeUsers() map[string]volumeUse {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.volumeUsersLocked()
+}
+
+// volumeUsersLocked es lo mismo para quien ya tiene el cerrojo. Cuenta las
+// maquinas vivas Y las reservas, que es lo que cierra la ventana.
+func (m *Manager) volumeUsersLocked() map[string]volumeUse {
 	out := map[string]volumeUse{}
 	for _, mc := range m.byID {
 		if mc.State == api.StateStopped || mc.State == api.StateFailed {
@@ -153,7 +177,93 @@ func (m *Manager) volumeUsers() map[string]volumeUse {
 			out[v.Name] = u
 		}
 	}
+
+	// Las reservas: una maquina a medio arrancar YA cuenta como usuaria. Las de
+	// quien ya llego a byID se saltan, o el mismo volumen aparecería dos veces y
+	// el mensaje de error nombraría a la misma maquina como dos escritores.
+	for nombre, rs := range m.volReservas {
+		u := out[nombre]
+		for _, r := range rs {
+			if _, ya := m.byID[r.maquina]; ya {
+				continue
+			}
+			quien := r.nombre + " (starting)"
+			if r.soloLect {
+				u.readers = append(u.readers, quien)
+			} else {
+				u.writers = append(u.writers, quien)
+			}
+		}
+		out[nombre] = u
+	}
 	return out
+}
+
+// reservarVolumenes comprueba Y reserva en la MISMA seccion critica.
+//
+// Ahi esta todo el arreglo: mientras se sostiene el cerrojo, nadie mas puede
+// mirar y decidir. Lo lento —el e2fsck, el formateo del overlay, el arranque—
+// queda FUERA, que es por lo que la ventana existia.
+func (m *Manager) reservarVolumenes(req api.RunRequest, id, nombre string) ([]resolvedVolume, error) {
+	if len(req.VolumeSet()) == 0 {
+		return nil, nil
+	}
+	if nombre == "" {
+		nombre = id
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vols, err := comprobarVolumenes(m, req, m.volumeUsersLocked())
+	if err != nil {
+		return nil, err
+	}
+	if m.volReservas == nil {
+		m.volReservas = map[string][]reservaVolumen{}
+	}
+	for _, v := range vols {
+		m.volReservas[v.name] = append(m.volReservas[v.name],
+			reservaVolumen{maquina: id, nombre: nombre, soloLect: v.readOnly})
+	}
+	return vols, nil
+}
+
+// resolveVolumes comprueba sin reservar, tomando el cerrojo para leer.
+//
+// Es el camino de solo-lectura: sirve para validar una peticion sin
+// comprometerse. Arrancar una maquina NO puede usarlo — entre esta comprobacion
+// y la publicacion en byID hay una ventana, y para eso esta reservarVolumenes.
+func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
+	m.mu.RLock()
+	inUse := m.volumeUsersLocked()
+	m.mu.RUnlock()
+	return comprobarVolumenes(m, req, inUse)
+}
+
+// soltarReservas quita lo reservado por una maquina.
+//
+// Se llama SIEMPRE al salir, con defer. Si la maquina llego a byID, byID ya la
+// cubre; si no llego —fallo el arranque, el disco estaba lleno—, la reserva no
+// puede quedarse bloqueando el volumen para siempre.
+func (m *Manager) soltarReservas(id string) {
+	if id == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for nombre, rs := range m.volReservas {
+		quedan := rs[:0]
+		for _, r := range rs {
+			if r.maquina != id {
+				quedan = append(quedan, r)
+			}
+		}
+		if len(quedan) == 0 {
+			delete(m.volReservas, nombre)
+		} else {
+			m.volReservas[nombre] = quedan
+		}
+	}
 }
 
 // RemoveVolume borra un volumen, salvo que alguien lo esté usando.
@@ -161,7 +271,17 @@ func (m *Manager) volumeUsers() map[string]volumeUse {
 // La comprobación no es cortesía: borrar el fichero bajo una microVM que lo
 // tiene montado le corrompe el sistema de ficheros sin avisar.
 func (m *Manager) RemoveVolume(name string) error {
-	if users := m.volumeUsers()[name].all(); len(users) > 0 {
+	// La comprobacion y el borrado van bajo el MISMO cerrojo. Mirar primero y
+	// borrar despues dejaba una ventana en la que una microVM podia empezar a
+	// usar el volumen justo en medio, y borrar el fichero bajo una que lo tiene
+	// montado le corrompe el sistema de ficheros sin un solo error.
+	//
+	// El os.Remove es un unlink: cuesta lo mismo que la comprobacion, asi que
+	// sostener el cerrojo aqui no bloquea nada apreciable.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if users := m.volumeUsersLocked()[name].all(); len(users) > 0 {
 		return fmt.Errorf("volume %q is used by %d machine(s): %s",
 			name, len(users), strings.Join(users, ", "))
 	}
@@ -201,7 +321,12 @@ type resolvedVolume struct {
 //
 // Se comprueba aquí, en el camino de arranque, y no solo al borrar: quien monta
 // es tan peligroso como quien borra.
-func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
+// resolveVolumes comprueba una peticion contra los usuarios que se le pasan.
+//
+// Recibe `inUse` en vez de calcularlo: quien llama ya tiene el cerrojo tomado, y
+// pedirlo aqui otra vez seria un interbloqueo. Es tambien lo que permite que la
+// comprobacion y la reserva ocurran sin que nadie se cuele en medio.
+func comprobarVolumenes(m *Manager, req api.RunRequest, inUse map[string]volumeUse) ([]resolvedVolume, error) {
 	want := req.VolumeSet()
 	if len(want) == 0 {
 		return nil, nil
@@ -211,7 +336,6 @@ func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
 			len(want), api.MaxVolumes)
 	}
 
-	inUse := m.volumeUsers()
 	vistos := map[string]bool{}
 	puntos := map[string]bool{}
 	out := make([]resolvedVolume, 0, len(want))

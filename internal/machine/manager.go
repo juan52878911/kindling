@@ -96,6 +96,12 @@ type Manager struct {
 	// ajeno a kindling y seguir expulsando solo cuesta warm-pooling.
 	gcPausadoHasta time.Time
 
+	// volReservas: volumenes comprometidos entre la comprobacion y la
+	// publicacion en byID, por nombre de volumen. Cierra la ventana en la que
+	// dos arranques simultaneos veian los dos "cero escritores". Se lee y se
+	// escribe SIEMPRE bajo m.mu, igual que byID.
+	volReservas map[string][]reservaVolumen
+
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
 	// Ver allocNetIndex.
 	netCursor int
@@ -536,7 +542,20 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
 	}
 
-	vols, err := m.resolveVolumes(req)
+	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
+	// reserva tiene que existir antes de que empiece nada lento.
+	id := newID()
+	if req.Name == "" {
+		req.Name = req.Image + "-" + id[:6]
+	}
+
+	vols, err := m.reservarVolumenes(req, id, req.Name)
+	// Se suelta pase lo que pase: si la maquina llego a byID, byID ya la cubre;
+	// si no llego, la reserva no puede quedarse bloqueando el volumen.
+	defer m.soltarReservas(id)
+	if err != nil {
+		return nil, err
+	}
 	for _, v := range vols {
 		// Solo los que vamos a montar en ESCRITURA. e2fsck escribe, y un volumen
 		// compartido puede tenerlo abierto otra microVM ahora mismo: repararlo
@@ -544,9 +563,6 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		if !v.readOnly {
 			repairVolume(ctx, v.path)
 		}
-	}
-	if err != nil {
-		return nil, err
 	}
 
 	// src es el rootfs que va en vda; layer, el delta del servicio si la imagen
@@ -613,10 +629,6 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		}
 	}
 
-	id := newID()
-	if req.Name == "" {
-		req.Name = req.Image + "-" + id[:6]
-	}
 	// El directorio nace reservado: la ventana hasta byID es más corta que en
 	// runFrom, pero newOverlay sigue formateando un ext4 en medio. Ver
 	// makeMachineDir.

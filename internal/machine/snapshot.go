@@ -602,7 +602,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if len(req.VolumeSet()) == 0 {
 		req.Volumes = snap.VolumeSet()
 	}
-	vols, verr := m.resolveVolumes(req)
+	vols, verr := m.reservarVolumenes(req, id, req.Name)
+	// Igual que en Run: se suelta al salir, haya publicado o no. Aqui la ventana
+	// era la mas ancha del daemon —incluye copiar el overlay del dorado— y por
+	// eso reservar es lo que de verdad la cierra.
+	defer m.soltarReservas(id)
 	if verr != nil {
 		os.RemoveAll(dir)
 		return nil, verr
