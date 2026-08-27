@@ -157,13 +157,17 @@ func fetchMMDS() *mmdsStore {
 // "sessions[<id>]"). Si no hay MMDS o no hay entrada, devuelve el entorno base tal
 // cual, así que el comportamiento sin secretos queda intacto.
 //
+// El segundo valor dice si se inyectó ALGO: la adopción del hijo caliente lo usa
+// como veto, porque el caliente se lanzó con el entorno base y el entorno de un
+// proceso no se puede cambiar después de exec (ver warm.go).
+//
 // Se lee MMDS EN CADA sesión, no una vez al arrancar: el store puede cambiar entre
 // sesiones (un secreto se inyecta después del boot, en la microVM ya viva), y una
 // caché lo dejaría sin ver justo lo recién inyectado.
-func (b *bridge) sessionEnv(id string) []string {
+func (b *bridge) sessionEnv(id string) ([]string, bool) {
 	store := fetchMMDS()
 	if store == nil {
-		return b.env
+		return b.env, false
 	}
 
 	// Se parte del entorno base y se AÑADEN/PISAN las claves de MMDS. append sobre
@@ -176,7 +180,7 @@ func (b *bridge) sessionEnv(id string) []string {
 		extra[k] = v
 	}
 	if len(extra) == 0 {
-		return b.env
+		return b.env, false
 	}
 
 	env := append([]string(nil), b.env...)
@@ -184,5 +188,5 @@ func (b *bridge) sessionEnv(id string) []string {
 		env = append(env, k+"="+v)
 	}
 	log.Printf("session %s: %d MMDS secret(s) injected into the environment", id[:8], len(extra))
-	return env
+	return env, true
 }

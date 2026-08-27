@@ -248,12 +248,18 @@ Options:
 	volumeState.release()
 }
 
-// closeAll cierra todas las sesiones y mata sus procesos hijo.
+// closeAll cierra todas las sesiones y mata sus procesos hijo, incluido el
+// caliente sin ligar: somos PID 1 y nada debe quedar suelto al apagar.
 func (b *bridge) closeAll() {
 	b.mu.Lock()
 	all := b.sessions
 	b.sessions = map[string]*session{}
+	warm := b.warm
+	b.warm = nil
 	b.mu.Unlock()
+	if warm != nil {
+		warm.discard()
+	}
 
 	// Aquí SÍ se espera, al contrario que en el cosechador de ociosas: después
 	// de esto se sueltan los volúmenes y el proceso sale. En paralelo para que
@@ -311,6 +317,11 @@ type bridge struct {
 	mu        sync.Mutex
 	sessions  map[string]*session
 	proxySeen map[string]time.Time
+	// warm es el hijo caliente sin ligar que deja /reset para que el primer
+	// initialize tras restaurar el dorado no pague el arranque del runtime
+	// (ver warm.go). Protegido por mu. A propósito NO vive en sessions: no
+	// cuenta para maxSessions ni puede cosecharlo el reaper de ociosas.
+	warm *warmChild
 }
 
 // session es una conversación MCP: un proceso hijo y su estado.
@@ -542,6 +553,14 @@ func (b *bridge) handleReset(w http.ResponseWriter, r *http.Request) {
 	// El reset deja la microVM como recién arrancada; también apaga el navegador
 	// compartido, para que el commit del snapshot dorado se congele sin él.
 	b.stopBrowser()
+	// Caliente pero sin estado: se deja (o repone) un hijo arrancado y SIN ligar
+	// antes de contestar, para que el dorado que se congele tras este 204 lleve
+	// el runtime ya arrancado y el primer initialize tras restaurar lo adopte.
+	// Si no se puede, el reset sigue siendo válido: solo se pierde la velocidad,
+	// nunca la corrección. Ver warm.go.
+	if err := b.replenishWarm(); err != nil {
+		log.Printf("reset: no prewarmed MCP server (the first session will pay the full start): %v", err)
+	}
 	log.Printf("reset: %d session(s) closed", len(dead))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -619,11 +638,20 @@ func (b *bridge) spawn() (*session, error) {
 	// secretos de MMDS de ESTA sesión (sessions[<id>]) y añadirlos a su entorno.
 	id := newID()
 
-	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
-	cmd := exec.Command(b.argv[0], args...)
 	// Entorno base del puente MÁS los secretos de sesión que MMDS traiga (comunes
 	// + los de esta sesión). Sin MMDS, es exactamente b.env.
-	cmd.Env = b.sessionEnv(id)
+	env, secrets := b.sessionEnv(id)
+
+	// Si /reset dejó un hijo caliente y esta sesión puede adoptarlo —vivo y sin
+	// secretos que él no tenga—, se ahorra el arranque del runtime, que es lo
+	// que anulaba la ventaja del snapshot dorado. Ver warm.go.
+	if s := b.adoptWarmLocked(id, secrets); s != nil {
+		return s, nil
+	}
+
+	args := append(append([]string(nil), b.argv[1:]...), b.sessionArgs...)
+	cmd := exec.Command(b.argv[0], args...)
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
