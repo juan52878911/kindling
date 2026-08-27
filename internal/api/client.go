@@ -295,6 +295,11 @@ func (c *Client) SetCatalog(ctx context.Context, name string, tools []ToolSpec) 
 	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/catalog", CatalogRequest{Tools: tools}, &s)
 }
 
+// RemoveImage retira una imagen del disco.
+func (c *Client) RemoveImage(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/images/"+name, nil, nil)
+}
+
 func (c *Client) RemoveSnapshot(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/snapshots/"+name, nil, nil)
 }

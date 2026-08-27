@@ -18,7 +18,7 @@ import (
 //	kling images refresh semgrep    solo en esa
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling images [ls|refresh|toolchain|recipe]")
+		return fmt.Errorf("X")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -27,10 +27,12 @@ func cmdImages(args []string) error {
 		return imagesRefresh(args[1:])
 	case "toolchain":
 		return imagesToolchain(args[1:])
+	case "rm", "remove":
+		return imagesRm(args[1:])
 	case "recipe":
 		return imagesRecipe(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, refresh, toolchain, or recipe", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, refresh, toolchain, or recipe", args[0])
 	}
 }
 
@@ -304,4 +306,38 @@ func marcarAfectados(ctx context.Context, c *api.Client, imagenes []string) int 
 		}
 	}
 	return n
+}
+
+// imagesRm retira una imagen que ya no usa nadie.
+//
+// Sin esto, la unica forma de recuperar el espacio de una imagen era borrar su
+// fichero a mano, sin ninguna comprobacion — y borrar la BASE de una capa, o la
+// imagen de la que cuelga un dorado, no da un error al borrar: da un invitado
+// que no arranca, mucho despues.
+func imagesRm(args []string) error {
+	fs := flag.NewFlagSet("images rm", flag.ExitOnError)
+	host := hostFlag(fs)
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: kling images rm <image> [<image>...]")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+
+	var fallos int
+	for _, n := range fs.Args() {
+		if err := c.RemoveImage(ctx, n); err != nil {
+			fmt.Printf("  ✗  %-24s %v\n", n, err)
+			fallos++
+			continue
+		}
+		fmt.Printf("  ✓  %-24s removed\n", n)
+	}
+	if fallos > 0 {
+		return fmt.Errorf("%d image(s) could not be removed", fallos)
+	}
+	return nil
 }

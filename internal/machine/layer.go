@@ -194,3 +194,54 @@ func layerBootArg(dev string) string {
 func layerGuestPath(path string) string {
 	return "/" + layerUpperDir + "/" + strings.TrimPrefix(path, "/")
 }
+
+// RemoveImage retira una imagen del disco, salvo que alguien dependa de ella.
+//
+// Existe porque no habia forma de hacerlo: las imagenes se acumulaban —una base
+// de pruebas, un servicio que se dejo de usar— y la unica salida era borrar el
+// fichero a mano, sin ninguna comprobacion. Y esas comprobaciones importan: una
+// base con capas encima o un snapshot dorado que la use se quedan sin su rootfs,
+// y el sintoma no es un error al borrar sino un invitado que no arranca.
+func (m *Manager) RemoveImage(name string) error {
+	if _, ok := m.ImageBase(name); !ok {
+		// Monolitica: puede ser la BASE de otras capas.
+		for _, otra := range m.Images() {
+			if otra == name {
+				continue
+			}
+			if b, ok := m.ImageBase(otra); ok && b == name {
+				return fmt.Errorf("image %q is the base of %q: removing it would leave that layer without a rootfs",
+					name, otra)
+			}
+		}
+	}
+	// Y ningun dorado puede depender de ella.
+	for _, s := range m.Snapshots() {
+		if s.Image == name {
+			return fmt.Errorf("image %q is used by the golden snapshot %q: re-import or remove that service first",
+				name, s.Name)
+		}
+	}
+	// Ni ninguna maquina viva.
+	m.mu.RLock()
+	for _, mc := range m.byID {
+		if mc.Image == name && mc.State != api.StateStopped && mc.State != api.StateFailed {
+			m.mu.RUnlock()
+			return fmt.Errorf("image %q is in use by machine %q", name, mc.Name)
+		}
+	}
+	m.mu.RUnlock()
+
+	borrado := false
+	for _, ruta := range []string{m.imagePath(name), m.layerPath(name), m.recipePath(name)} {
+		if err := os.Remove(ruta); err == nil {
+			borrado = true
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if !borrado {
+		return fmt.Errorf("image %q does not exist", name)
+	}
+	return nil
+}
