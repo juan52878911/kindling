@@ -264,8 +264,12 @@ un OOM ni una caída en 142 intentos.
 | 20 | 20/20 | 44,08 s | 44,29 s |
 
 **100% de éxito, y latencia lineal.** ~2,2 s por petición añadida con el anfitrión al
-80% ocioso: no es saturación, es **serialización** — las instanciaciones se atienden
-de una en una. Es la única cifra que no mejora con mejor hardware.
+80% ocioso.
+
+> **Aviso: la conclusión que saqué aquí era errónea.** Interpreté esta linealidad como
+> serialización del camino de creación de máquina. No lo era: las 20 peticiones iban al
+> MISMO servicio, y el gateway lo serializa a propósito. El cuello real está en la §7,
+> junto con los números tras arreglarlo — estos de arriba son los de ANTES.
 
 ### Coste por servicio
 
@@ -275,8 +279,8 @@ despertar de 7,9 s a 4,8 s a cambio de 12 GB más a escala de 150. Debería ser 
 
 ### Por dónde seguir
 
-1. **Paralelizar la creación de máquina** — es el 99% del despertar (Firecracker
-   restaura en 26-31 ms) y no mejora con hardware.
+1. ~~Paralelizar la creación de máquina~~ — **descartado**: ya era paralelo. El
+   coste real era rehashear el dorado en cada instanciación. Ver §7.
 2. **Hacer opcional el hijo caliente** — quien tenga 150 servicios querrá elegir.
 3. **Sondear la salud sola** — diez servicios siguen con `never probed`.
 4. Entrada duplicada en el catálogo tras `-replace`; se cura al reiniciar el daemon,
