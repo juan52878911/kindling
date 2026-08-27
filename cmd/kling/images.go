@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -129,6 +130,7 @@ func imagesRefresh(args []string) error {
 	}
 
 	var actualizadas, saltadas, ocupadas, fallos int
+	var cambiadas []string
 	for _, r := range res {
 		if r.Busy {
 			ocupadas++
@@ -145,6 +147,7 @@ func imagesRefresh(args []string) error {
 		case r.Updated:
 			fmt.Printf("  ✓  %-24s bridge updated\n", r.Image)
 			actualizadas++
+			cambiadas = append(cambiadas, r.Image)
 		default:
 			fmt.Printf("     %-24s already up to date\n", r.Image)
 		}
@@ -160,9 +163,18 @@ func imagesRefresh(args []string) error {
 		fmt.Println("  kling ps -a")
 	}
 	if actualizadas > 0 {
-		// El snapshot dorado se congeló con el puente ANTIGUO dentro, así que
-		// las instancias siguen despertando con él hasta que se reimporte. Sin
-		// este aviso, el comando parecería no haber servido de nada.
+		// Y se GRABA en la salud, no solo se imprime. El dorado se congeló con
+		// el puente ANTIGUO dentro y con esas páginas mapeadas: a partir de aquí
+		// el servicio despierta y no sirve, con un "tool did not start listening"
+		// que no menciona la imagen por ningún sitio. Un aviso en pantalla no
+		// impide nada —basta no leerlo—; en la salud lo ve la sonda y lo cura
+		// `kling mcp heal`.
+		if n := marcarAfectados(ctx, api.NewClient(hostOf(*host)), cambiadas); n > 0 {
+			fmt.Printf("\n%d service(s) marked unhealthy: their golden snapshot still has the old bridge.\n", n)
+			fmt.Println("Rebuild them all at once:")
+			fmt.Println("  kling mcp heal")
+			return nil
+		}
 		fmt.Println("\nRe-import the affected services so their snapshots pick it up:")
 		fmt.Println("  kling mcp import <service> -force")
 	}
@@ -262,4 +274,34 @@ func imagesRecipe(args []string) error {
 	}
 	fmt.Printf("  command:   %s\n", strings.Join(rec.Cmd, " "))
 	return nil
+}
+
+// marcarAfectados graba en la salud que estos servicios tienen un dorado viejo.
+// Devuelve cuantos se marcaron.
+func marcarAfectados(ctx context.Context, c *api.Client, imagenes []string) int {
+	if len(imagenes) == 0 {
+		return 0
+	}
+	tocada := map[string]bool{}
+	for _, i := range imagenes {
+		tocada[i] = true
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, s := range snaps {
+		if !tocada[s.Image] {
+			continue
+		}
+		nombre := s.Service()
+		if nombre == "" {
+			nombre = s.Name
+		}
+		if _, err := c.SetHealth(ctx, nombre, false, api.MotivoImagenCambiada); err == nil {
+			n++
+		}
+	}
+	return n
 }
