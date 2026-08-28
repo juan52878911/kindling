@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -108,6 +109,34 @@ func esperarDaemon(ctx context.Context, c *api.Client, limite time.Duration) err
 	}
 }
 
+// seCuraReconstruyendo decide si reimportar arreglaria este servicio.
+//
+// `saludGrabada` es lo que habia en el meta ANTES de sondear, y hace falta: el
+// sintoma de una imagen refrescada bajo el dorado es un "tool did not start
+// listening" que no menciona la imagen por ningun sitio. Quien SI lo sabe es
+// `images refresh`, que lo dejo escrito ahi al terminar.
+func seCuraReconstruyendo(probeErr error, saludGrabada string) bool {
+	if probeErr == nil {
+		return false
+	}
+	if api.EsFalloTSC(probeErr) || api.EsImagenCambiada(probeErr) {
+		return true
+	}
+	return api.EsImagenCambiada(errors.New(saludGrabada))
+}
+
+// motivoDeReconstruir dice POR QUE se reconstruye, en una linea.
+func motivoDeReconstruir(probeErr error, saludGrabada string) string {
+	switch {
+	case api.EsFalloTSC(probeErr):
+		return "its golden snapshot didn't survive the host reboot (TSC)"
+	case api.EsImagenCambiada(probeErr) || api.EsImagenCambiada(errors.New(saludGrabada)):
+		return "its image was refreshed and the golden snapshot still has the old bridge"
+	default:
+		return "its golden snapshot is no longer usable"
+	}
+}
+
 func mcpHeal(args []string) error {
 	fs := flag.NewFlagSet("mcp heal", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -153,7 +182,7 @@ func mcpHeal(args []string) error {
 			nombre = s.Name
 		}
 
-		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo)
+		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo, s.Egress)
 		if _, err := c.SetHealth(ctx, nombre, probeErr == nil, errMsg(probeErr)); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", nombre, err)
 			continue
@@ -164,12 +193,18 @@ func mcpHeal(args []string) error {
 		}
 		rotos++
 
-		// Solo el TSC. Un servicio roto por cualquier otra causa —el servidor MCP
-		// falla, falta un secreto, la imagen no trae lo que dice— NO se arregla
+		// Dos causas curables, y solo dos. Las une lo mismo: los ficheros del
+		// servicio estan bien y lo que ya no vale es el SNAPSHOT.
+		//
+		//   - el TSC del anfitrion cambio (un reinicio del host);
+		//   - la imagen se refresco por debajo del dorado.
+		//
+		// Un servicio roto por cualquier otra causa —el servidor MCP falla, falta
+		// un secreto, la imagen no trae lo que dice— NO se arregla
 		// reconstruyendolo: reimportar en bucle gastaria minutos por vuelta y
 		// taparia el problema real bajo un "lo intente".
-		if !api.EsFalloTSC(probeErr) {
-			fmt.Fprintf(tw, "  %s\t✗ unhealthy, and not the TSC failure — left alone\n", nombre)
+		if !seCuraReconstruyendo(probeErr, s.HealthErr) {
+			fmt.Fprintf(tw, "  %s\t✗ unhealthy, and not a cause that rebuilding fixes — left alone\n", nombre)
 			continue
 		}
 		if s.Service() == "" {
@@ -188,7 +223,9 @@ func mcpHeal(args []string) error {
 		// Vaciar antes de una reconstruccion que tarda entre 15 y 40 s: si no,
 		// el tabwriter se guarda las lineas anteriores y parece colgado.
 		_ = tw.Flush()
-		fmt.Printf("  %s  rebuilding: its golden snapshot didn't survive the host reboot\n", nombre)
+		// El motivo va en el mensaje: son dos causas distintas y decir la que no
+		// es manda a buscar el problema al sitio equivocado.
+		fmt.Printf("  %s  rebuilding: %s\n", nombre, motivoDeReconstruir(probeErr, s.HealthErr))
 		if err := mcpImport(argv); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ rebuild failed: %v\n", nombre, err)
 			continue

@@ -78,6 +78,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /links/{name}", s.handleRemoveLink)
 	mux.HandleFunc("POST /images", s.handleBuildImage)
 	mux.HandleFunc("GET /images", s.handleImages)
+	mux.HandleFunc("DELETE /images/{name}", s.handleRemoveImage)
 	mux.HandleFunc("GET /volumes", s.handleVolumes)
 	mux.HandleFunc("POST /volumes", s.handleCreateVolume)
 	mux.HandleFunc("DELETE /volumes/{name}", s.handleRemoveVolume)
@@ -451,6 +452,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
+	if err := s.mgr.RemoveImage(r.PathValue("name")); err != nil {
+		fail(w, http.StatusConflict, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleRemoveSnapshot(w http.ResponseWriter, r *http.Request) {

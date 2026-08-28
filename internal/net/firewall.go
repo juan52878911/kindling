@@ -280,6 +280,21 @@ func isBlockedIP(ip stdnet.IP) bool {
 	return false
 }
 
+// InalcanzableDesdeUnInvitado dice si una direccion, escrita como texto, es de
+// las que una microVM no puede alcanzar jamas.
+//
+// Es el mismo criterio que filtra lo que entra en el ipset, expuesto para quien
+// necesite comprobar una CONFIGURACION en vez de un destino: un resolv.conf que
+// apunte a 127.0.0.53 o a la IP privada del router es inservible dentro de un
+// invitado, y saberlo no requiere tocar la red.
+func InalcanzableDesdeUnInvitado(dir string) bool {
+	ip := stdnet.ParseIP(strings.TrimSpace(dir))
+	if ip == nil {
+		return true // lo que no es una IP no lleva a ninguna parte
+	}
+	return isBlockedIP(ip)
+}
+
 // HostEgressRules son las reglas que el host necesita para dar salida a los
 // namespaces. Se instalan una sola vez, no por máquina.
 //

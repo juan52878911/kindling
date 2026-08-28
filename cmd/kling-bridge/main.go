@@ -130,6 +130,10 @@ Options:
 	// import tras capturar el catálogo, para que el snapshot dorado no se
 	// congele con estado de sesión abierto (que es lo que rompe los restores
 	// posteriores).
+	// /dns cuenta lo que el invitado sabe de su propia resolucion de nombres.
+	// Lo usa la sonda profunda: un DNS roto no se ve desde fuera, porque el
+	// servidor MCP arranca y responde tools/list igual.
+	mux.HandleFunc("/dns", b.handleDNS)
 	mux.HandleFunc("/reset", b.handleReset)
 
 	// /exec solo existe si el kernel la enciende. En una microVM de servicio no

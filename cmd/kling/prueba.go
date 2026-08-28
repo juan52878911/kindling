@@ -12,11 +12,13 @@ package main
 // catalogo lo permite, aqui se LLAMA a una herramienta de verdad.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/api"
+	knet "github.com/juan52878911/kindling/internal/net"
 )
 
 // pruebasDeVida son herramientas conocidas, invocables sin efectos, que
@@ -103,4 +105,76 @@ func resumirContenido(c []struct {
 		t = t[:220] + "…"
 	}
 	return t
+}
+
+// posterCrudo habla con el invitado por una ruta y un metodo cualesquiera, no
+// solo por /mcp. Lo necesita la comprobacion de DNS, que consulta /dns.
+type posterCrudo func(metodo, ruta, cuerpo string) ([]byte, error)
+
+// guestRaw arma un posterCrudo contra una maquina concreta.
+func guestRaw(ctx context.Context, c *api.Client, ref string) posterCrudo {
+	return func(metodo, ruta, cuerpo string) ([]byte, error) {
+		resp, err := c.Guest(ctx, ref, api.GuestRequest{
+			Port: 8080, Path: ruta, Method: metodo, Body: cuerpo,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status >= 300 {
+			return nil, fmt.Errorf("HTTP %d from %s", resp.Status, ruta)
+		}
+		return []byte(resp.Body), nil
+	}
+}
+
+// comprobarDNS mira si el invitado puede resolver nombres.
+//
+// La comprobacion tiene dos mitades muy distintas, y esa distincion es el
+// arreglo entero:
+//
+//   - la CONFIGURACION no depende de la red. Un resolv.conf que apunte a
+//     127.0.0.53 —lo que deja systemd-resolved— o a la IP privada del router es
+//     inservible dentro de una microVM, y eso se sabe sin mandar un solo
+//     paquete. Es el fallo que de verdad hubo, y el que aqui se caza siempre.
+//   - la RESOLUCION si depende de que haya salida y de que el resolver conteste.
+//     Se reporta, pero se distingue: culpar al servicio de que un tercero este
+//     caido seria convertir una caida ajena en una alarma tuya.
+func comprobarDNS(post posterCrudo) error {
+	raw, err := post("GET", "/dns", "")
+	if err != nil {
+		// Un puente antiguo no tiene /dns. No es un fallo del servicio.
+		return nil
+	}
+	var info struct {
+		Nameservers []string `json:"nameservers"`
+		Resuelve    bool     `json:"resuelve"`
+		Probado     string   `json:"probado"`
+		Error       string   `json:"error"`
+	}
+	if json.Unmarshal(raw, &info) != nil {
+		return nil // idem: no se entiende, no se juzga
+	}
+
+	if len(info.Nameservers) == 0 {
+		return fmt.Errorf("the guest has NO nameserver in /etc/resolv.conf: it cannot resolve anything")
+	}
+	// Si TODOS son inalcanzables, la configuracion esta rota. Uno solo utilizable
+	// basta: el resolver es una lista y se prueban en orden.
+	utiles := 0
+	for _, ns := range info.Nameservers {
+		if !knet.InalcanzableDesdeUnInvitado(ns) {
+			utiles++
+		}
+	}
+	if utiles == 0 {
+		return fmt.Errorf("every nameserver of the guest is unreachable from inside a microVM (%s).\n"+
+			"That is what the host's /etc/resolv.conf leaves behind: 127.0.0.53 does not exist in "+
+			"there, and a private address is blocked by the egress firewall on purpose",
+			strings.Join(info.Nameservers, ", "))
+	}
+	if !info.Resuelve {
+		return fmt.Errorf("the nameservers look usable (%s) but resolving %q failed: %s",
+			strings.Join(info.Nameservers, ", "), info.Probado, info.Error)
+	}
+	return nil
 }

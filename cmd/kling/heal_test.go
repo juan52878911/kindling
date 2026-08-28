@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/api"
@@ -139,5 +140,50 @@ func TestElCodigoDeSalidaDistingueNoPuedeEmpezarDeSigueRoto(t *testing.T) {
 	// Y tiene que sobrevivir a que alguien lo envuelva por el camino.
 	if got := codigoDeSalida(fmt.Errorf("heal: %w", sigueRoto)); got != 3 {
 		t.Errorf("envuelto: codigo %d, esperaba 3", got)
+	}
+}
+
+// Dos causas curables y solo dos. Las une lo mismo: los ficheros del servicio
+// estan bien y lo que ya no vale es el SNAPSHOT.
+func TestSeCuraReconstruyendoSoloLasDosCausasQueLoSon(t *testing.T) {
+	tsc := errors.New("snapshot \"x\" can't be restored on this host: ... Could not set TSC scaling ...")
+	noArranca := errors.New("didn't start (tool did not start listening: dial tcp 172.30.0.30:8080: i/o timeout)")
+
+	casos := []struct {
+		nombre  string
+		err     error
+		grabada string
+		cura    bool
+	}{
+		{"el TSC tras reiniciar el anfitrion", tsc, "", true},
+		{"la imagen se refresco bajo el dorado", noArranca, api.MotivoImagenCambiada, true},
+		{"no arranca y nadie sabe por que", noArranca, "", false},
+		{"el servidor MCP responde mal", errors.New("didn't respond to tools/list (timeout)"), "", false},
+		{"falta un secreto", errors.New("missing env GITHUB_TOKEN"), "", false},
+		{"sano: no hay nada que curar", nil, api.MotivoImagenCambiada, false},
+	}
+	for _, c := range casos {
+		if got := seCuraReconstruyendo(c.err, c.grabada); got != c.cura {
+			t.Errorf("%s: %v, esperaba %v", c.nombre, got, c.cura)
+		}
+	}
+}
+
+// El motivo que se imprime tiene que ser el de VERDAD: decir "no sobrevivió al
+// reinicio del anfitrión" cuando lo que pasó es que se refrescó la imagen manda
+// a buscar el problema al sitio equivocado.
+func TestElMotivoDeReconstruirDiceLaCausaCorrecta(t *testing.T) {
+	tsc := errors.New("... Could not set TSC scaling ...")
+	noArranca := errors.New("didn't start (tool did not start listening)")
+
+	if m := motivoDeReconstruir(tsc, ""); !strings.Contains(m, "TSC") {
+		t.Errorf("caso TSC: %q", m)
+	}
+	m := motivoDeReconstruir(noArranca, api.MotivoImagenCambiada)
+	if !strings.Contains(m, "refreshed") {
+		t.Errorf("caso imagen refrescada: %q", m)
+	}
+	if strings.Contains(m, "reboot") {
+		t.Errorf("el caso de la imagen no puede hablar del reinicio: %q", m)
 	}
 }

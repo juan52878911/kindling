@@ -567,21 +567,31 @@ func mcpHealth(args []string) error {
 	c := api.NewClient(hostOf(*host))
 
 	// Qué sondear: el servicio indicado, o todos los snapshots si no se da ninguno.
-	var targets []string
-	if fs.NArg() >= 1 {
-		targets = []string{fs.Arg(0)}
-	} else {
-		snaps, err := c.Snapshots(ctx)
-		if err != nil {
-			return err
+	// El egress viaja con cada objetivo: la comprobacion de DNS depende de si el
+	// servicio tiene salida, y preguntarselo al snapshot es lo unico fiable.
+	type objetivo struct {
+		nombre string
+		egress string
+	}
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+	var targets []objetivo
+	for _, s := range snaps {
+		n := s.Name
+		if svc := s.Service(); svc != "" {
+			n = svc
 		}
-		for _, s := range snaps {
-			n := s.Name
-			if svc := s.Service(); svc != "" {
-				n = svc
-			}
-			targets = append(targets, n)
+		if fs.NArg() >= 1 && n != fs.Arg(0) {
+			continue
 		}
+		targets = append(targets, objetivo{nombre: n, egress: s.Egress})
+	}
+	if fs.NArg() >= 1 && len(targets) == 0 {
+		// Un nombre que no corresponde a ningun snapshot: se sondea igual, para
+		// que el error lo de la sonda y diga que no existe.
+		targets = append(targets, objetivo{nombre: fs.Arg(0)})
 	}
 	if len(targets) == 0 {
 		fmt.Println("No services to probe. Import one:  kling mcp import <name> -image <image>")
@@ -590,8 +600,9 @@ func mcpHealth(args []string) error {
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	var enfermos int
-	for _, svc := range targets {
-		probeErr := probeHealth(ctx, c, svc, *wait, *profundo)
+	for _, t := range targets {
+		svc := t.nombre
+		probeErr := probeHealth(ctx, c, svc, *wait, *profundo, t.egress)
 		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
 		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
 		if _, err := c.SetHealth(ctx, svc, probeErr == nil, errMsg(probeErr)); err != nil {
@@ -616,7 +627,7 @@ func mcpHealth(args []string) error {
 // probeHealth arranca una instancia efímera del snapshot, le pide tools/list y la
 // destruye. Devuelve nil si el servicio contestó. Es el mismo ciclo que hace el
 // gateway en modo efímero, expresado con las utilidades del CLI.
-func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration, profundo bool) error {
+func probeHealth(ctx context.Context, c *api.Client, service string, wait time.Duration, profundo bool, egress string) error {
 	mc, err := c.Run(ctx, api.RunRequest{
 		From: service, Name: service + "-health",
 		Labels: map[string]string{api.LabelService: service, "health": "true"},
@@ -642,6 +653,14 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 	}
 	if !profundo {
 		return nil
+	}
+
+	// El DNS solo se juzga si el servicio TIENE salida. Uno con egress:none no
+	// resuelve nombres a proposito, y exigirselo seria inventarse un fallo.
+	if egress != "" && egress != "none" {
+		if err := comprobarDNS(guestRaw(ctx, c, mc.ID)); err != nil {
+			return fmt.Errorf("answers tools/list but its DNS is broken: %w", err)
+		}
 	}
 	// Y ahora la parte que SI puede fallar. Ver prueba.go: tools/list lo
 	// contesta el servidor sin tocar lo que de verdad usa, asi que hasta aqui
