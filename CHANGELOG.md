@@ -4,7 +4,134 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
-## Sin publicar
+## v0.4.0 — 2026-08-28
+
+Ochenta y un commits desde v0.3.0. La versión va de **que funcione** a **que se
+recupere solo y que no se caiga entera**: casi todo lo de abajo salió de mirar el
+sistema vivo, no de leer código.
+
+El fallo que mejor resume la tanda: `semgrep` y `playwright` estuvieron **297 horas
+caídos** y nadie se enteró, porque la salud sólo se registraba cuando llegaba una
+petición. Un servicio que nadie llama se queda roto en silencio hasta que alguien lo
+llama.
+
+### Novedades
+
+- **`kling mcp heal`** con temporizador de systemd (`OnBootSec=2min`,
+  `OnUnitActiveSec=6h`). Un reinicio del anfitrión invalida **todos** los dorados a
+  la vez —Firecracker los ata a la frecuencia del TSC— y hasta ahora había que
+  reimportarlos a mano. `heal` sondea, y sólo reconstruye lo que el TSC invalidó:
+  un servicio enfermo por otra causa no se arregla rehaciéndolo, y reimportarlo
+  sería ruido que tapa el problema real. Reconstruye con la configuración
+  **original** —memoria, vCPUs, egress, volúmenes, etiquetas— no con la de por
+  defecto.
+
+- **`kling mcp verify` puede fallar.** Antes salía 0 sin ejercitar nada: pedía
+  `tools/list` y se daba por satisfecho. Ahora llama a una herramienta de verdad
+  (`browser_navigate` sobre `about:blank` en las imágenes de navegador) y consulta
+  `/dns` del puente, que devuelve los nameservers del invitado y si resuelve.
+
+- **`kling images rm`**, que se niega si la imagen es base de otra capa, la usa un
+  dorado o tiene una máquina viva.
+
+- **Base glibc con `chrome-headless-shell`** (`scripts/71-build-glibc-base.sh`).
+  Medido contra el Chromium de Alpine sobre tres sitios reales: **misma cantidad de
+  texto extraído**, 637 MB frente a 986,8 MB y 116 ms frente a 401 ms. Chromium se
+  queda como opción; el puente no sabe qué motor arranca, lee
+  `/etc/kling/browser.json`.
+
+- **`images refresh` hace crecer la imagen** cuando el puente no cabe dentro, en vez
+  de fallar. Y **graba la salud** en lugar de sólo imprimir un aviso: al refrescar
+  invalida el dorado, y antes el servicio quedaba roto sin que nadie lo supiera.
+
+### Correcciones — el 502 permanente
+
+Tres fallos encadenados que se disfrazaban de uno solo, y que dejaban un servicio
+devolviendo 502 para siempre:
+
+- el recolector de basura medía **el sistema de ficheros entero**, así que se
+  desataba por disco que no era suyo;
+- el gateway **cacheaba la instancia muerta** y seguía marcándola hacia ella;
+- la salud se anotaba **al adquirir** la instancia, no según el resultado, así que
+  un servicio roto se reafirmaba sano en cada intento fallido.
+
+Medido después: `memory` y `sequentialthinking` pasan de 502 a 200 en **688 ms**.
+
+### Correcciones — seguridad
+
+- **El gateway ya no reenvía su propio token.** Lo mandaba al invitado y a URLs de
+  terceros: un servidor MCP comprometido se llevaba la credencial del agregador.
+- **Las imágenes dejan de ser world-readable.** Contenían los ficheros `-env` con
+  los secretos de cada servicio; ahora se hace `chown` al usuario del servicio con
+  `0640`/`0750`.
+- **`cpu` no es `cpuset`.** La detección de controladores de cgroup usaba
+  `Contains`, y `cpuset` contiene `cpu` como subcadena: el límite se daba por puesto
+  sin estarlo. Ahora se compara palabra a palabra.
+- **Tests del cortafuegos de salida**: `isBlockedIP` cubre RFC1918, loopback,
+  link-local —incluido el `169.254.169.254` de metadatos—, CGNAT, multicast y sus
+  equivalentes IPv6; y `ParseEgress` **falla** ante un valor desconocido en vez de
+  caer en el más permisivo.
+
+### Correcciones — robustez
+
+- **Los pánicos de los bucles de fondo quedan contenidos.** Había 21 goroutines y
+  **cero** `recover()`: un nil-pointer en el reconciliador o en el persistidor de
+  estado mataba el proceso y dejaba huérfanas todas las microVM. Se envuelve **cada
+  iteración**, no el bucle: contener el bucle entero dejaría el daemon vivo sin
+  reconciliar nada, que es peor porque no se nota.
+- **Registro de cerrojos con contador de referencias.** El `sync.Map` de antes
+  borraba la entrada mientras otra goroutine seguía esperándola. Medido rompiendo el
+  código a propósito: **1.758 entradas dobles** en la sección crítica.
+- **Volúmenes: comprobar y reservar bajo el mismo cerrojo.** Dos arranques
+  simultáneos podían quedarse el mismo volumen exclusivo. `RemoveVolume` tenía la
+  misma carrera entre la comprobación y el `os.Remove`.
+- **Escritura durable en un solo sitio**: fichero temporal, `fsync` del fichero,
+  `rename`, `fsync` del directorio. Antes sólo `state.json` hacía `fsync`;
+  `links.json`, la configuración, `meta.json` y las recetas de imagen no.
+- **Matar el grupo de procesos, no sólo el pid del hijo**, para que no queden nietos
+  huérfanos.
+- **Los topes de tamaño fallan en vez de truncar.** Un JSON cortado por la mitad no
+  es un JSON pequeño: es ilegible, y el error decía otra cosa.
+- **`kling commit` exige que el invitado SIRVA** antes de congelar un dorado. Un
+  snapshot tomado antes de tiempo restaura en 26 ms y luego no contesta, minutos u
+  horas después, con un error que no menciona el commit.
+- **`evictLRU` reponía la víctima** que no se pudo congelar, y prueba con otra en vez
+  de rendirse.
+- **`MCPPayload` elegía el primer evento SSE**, que puede ser una notificación; ahora
+  busca la respuesta.
+- **`callLink` reintentaba ante cualquier error**, incluidos los tiempos de espera;
+  ahora sólo ante sesión caducada.
+- Dos deref nil en `Freeze`/`Thaw`, `Stop` sin el cerrojo de ciclo de vida, `Remove`
+  borrando su entrada demasiado pronto, y un firecracker huérfano al hacer `Thaw`.
+
+### Rendimiento
+
+- **El despertar baja de 4.350 ms a 175–202 ms**, y una carga de 20 peticiones de
+  44,08 s a 4,66 s. El puente deja un hijo **caliente sin ligar**, así que el dorado
+  no paga el arranque del runtime al restaurar.
+- **El veredicto de integridad del snapshot se recuerda** en vez de rehashear 512 MiB
+  en cada uso.
+
+### Tests
+
+Los cinco paquetes que no tenían ninguno: `internal/report`, `internal/assets`,
+`internal/config`, `internal/events` y `cmd/notas-server`. Más los del registro de
+cerrojos, la retirada de imágenes, el transporte, el cliente de Firecracker y el
+cortafuegos. Cada arreglo se verificó **rompiendo el código a propósito** y
+comprobando que el test se pone rojo.
+
+### Actualizar desde v0.3.0
+
+Un cambio de comportamiento, de la auditoría de entorno de más abajo: el puente
+escucha en `127.0.0.1:9100` en vez de `0.0.0.0:9100`. Si el gateway corre en otra
+máquina, hace falta `-listen 0.0.0.0:9100` explícito.
+
+Instalar el temporizador de autocuración:
+
+```sh
+sudo cp packaging/kling-heal.service packaging/kling-heal.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now kling-heal.timer
+```
 
 ### Correcciones — auditoría de supuestos del entorno
 
