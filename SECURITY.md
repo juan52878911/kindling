@@ -56,6 +56,10 @@ Cada máquina vive en su propio namespace de red. La política por defecto es **
 |---|---|
 | `none` (por defecto) | La microVM solo responde a quien la invoca. No inicia nada. |
 | `internet` | Sale a internet. **Nunca** a redes privadas. |
+| `allowlist` | Solo salen los dominios declarados con `-allow` (resolver dinámico DNS→ipset). **Fail-closed**: lo no declarado, y todas las redes privadas, quedan bloqueados. |
+
+Un valor de egress desconocido es un **error**, no una caída al modo más permisivo, y la
+política viaja con el snapshot del servicio: reimportar o curar un servicio la conserva.
 
 Bloqueado siempre, incluso con `internet`:
 
@@ -87,8 +91,12 @@ RESULTADO 1.1.1.1:       ALCANZABLE
 
 - **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red, con limitadores
   de Firecracker.
+- **Techo de CPU por máquina** con su propio cgroup (`-cpu-pct`, 50% de un core por
+  defecto): un invitado en bucle no se come el host.
 - **Tope de máquinas** (`MaxMachines = 256`) para que un cliente comprometido no agote el host.
 - **RAM fija** por microVM; el invitado no puede pedir más.
+- En el gateway, **cuotas por token/tenant**: varios clientes sobre un mismo token se
+  reparten la capacidad en vez de matarse de hambre.
 
 ### 5. Aleatoriedad
 
@@ -108,25 +116,39 @@ Los nombres de snapshot llegan por la URL y se usan para construir rutas. Se val
 `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` en **todos** los caminos —crear, leer y borrar— y no
 solo al crear: un `../../etc` saldría del directorio de datos.
 
+### 7. Secretos y credenciales
+
+- **Un snapshot congelado nunca lleva secretos dentro.** Los secretos se inyectan por
+  sesión vía MMDS en la microVM **viva** (`kling mmds`), y una máquina que los ha
+  recibido **ya no puede congelarse** — se impone, no se aconseja.
+- **El gateway no reenvía su propio token** ni al invitado ni a URLs de terceros: un
+  servidor MCP comprometido no se lleva la credencial del agregador.
+- **Las imágenes no son world-readable.** Contienen los ficheros `-env` de cada
+  servicio; van con `chown` al usuario del servicio y permisos `0640`/`0750`.
+- **La integridad de un dorado se comprueba** (sha256 de sus ficheros) antes de
+  instanciarlo; el veredicto se recuerda y se re-verifica si tamaño o fecha cambian.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
 
-- **Sin chroot.** El VMM no tiene privilegios, pero sí ve el sistema de ficheros del host con
-  los permisos de su usuario. `jailer` daría además chroot y cgroups; no está integrado.
-- **Sin límite de CPU por máquina.** Firecracker acota la RAM y el caudal de E/S, pero un
-  invitado puede consumir su vCPU al 100%. Faltan cgroups.
+- **Sin chroot por defecto.** El VMM no tiene privilegios, pero sí ve el sistema de
+  ficheros del host con los permisos de su usuario. `jailer` (chroot + cgroups) existe
+  como **opt-in** en arranque y restauración; no es el camino por defecto.
 - **Cuota de disco blanda.** Cada overlay son 512 MiB lógicos; un invitado puede llenarlos.
   Con muchas máquinas eso llena el host.
 - **Sin cifrado en reposo** de snapshots ni overlays. Quien tenga el disco del host tiene la
   memoria de las herramientas.
 - **El daemon confía en quien alcanza su socket.** No hay autorización por operación: si
   entras, puedes con todo.
-- **Los snapshots dorados no se verifican.** No hay firma ni checksum, así que quien pueda
-  escribir en `snapshots/` decide qué se ejecuta.
+- **Los snapshots dorados no van firmados.** El checksum detecta corrupción, no
+  manipulación: quien pueda escribir en `snapshots/` sigue decidiendo qué se ejecuta.
 - **El proxy al invitado no filtra el destino.** `POST /machines/{ref}/guest` acepta
   cualquier puerto y cualquier ruta de la máquina indicada. No es una escalada —quien llega
   al socket ya manda— pero conviene saberlo si algún día el socket se comparte.
+- **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
+  en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
+  (`-listen 0.0.0.0:9100`) y avisa.
 
 ## Ante un incidente
 

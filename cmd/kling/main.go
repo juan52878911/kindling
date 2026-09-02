@@ -51,6 +51,8 @@ VOLUMES
   images refresh [image...]                        puts the current bridge inside the images
   images toolchain                                 builds the image with npm and pip (used by populate)
   images recipe <image>                            how it was built
+  images rm <image>                                removes it (refuses if a layer,
+                                                   a golden or a machine uses it)
 
 MACHINES
   run [-name N] [-image I] [-cpus N] [-mem MiB]    creates and starts a microVM
@@ -65,6 +67,8 @@ MACHINES
   thaw <ref>                                       restores from snapshot (~ms)
   stop <ref>                                       terminates the machine
   rm <ref>                                         removes machine and snapshot
+  squeeze <ref>...                                 balloon: returns the guest's
+                                                   free memory to the host
   mmds <ref> [-f store.json]                       injects a session secret via
                                                    MMDS (reads stdin if no -f); the
                                                    machine can no longer be frozen
@@ -83,6 +87,12 @@ MCP SERVICES
       [-volume NAME[:/mount][:ro]] (repeatable)    ends up BAKED into the snapshot
   mcp list [-v] [-json]                            services and their tools
   mcp refresh <service>                            recaptures the catalog
+  mcp verify <service> [-deep]                     exercises it for real: calls a
+                                                   tool and checks the guest's DNS
+  mcp health                                       probes every service and
+                                                   records the result
+  mcp heal [-dry-run]                              rebuilds only what a host
+                                                   reboot (TSC) invalidated
   mcp link <name> <url>                            links an EXTERNAL MCP server
                                                    (e.g. your engram) without putting
                                                    it in a microVM

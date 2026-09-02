@@ -213,7 +213,7 @@ func mcpImport(args []string) error {
 		fmt.Println("✗")
 		return fmt.Errorf("couldn't start the template: %w", err)
 	}
-	fmt.Printf("✓ %s en %s\n", mc.ID[:8], mc.IP)
+	fmt.Printf("✓ %s at %s\n", mc.ID[:8], mc.IP)
 
 	cleanup := func() {
 		if !*keep {

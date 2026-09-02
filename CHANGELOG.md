@@ -181,7 +181,7 @@ hacía lo que decía. Todos verificados en ejecución, no sólo leídos.
 
 ## v0.3.0 — 2026-08-13
 
-Notas completas, con tablas comparativas: [`RELEASE-v0.3.0.md`](RELEASE-v0.3.0.md).
+Notas completas, con tablas comparativas: [`docs/RELEASE-v0.3.0.md`](docs/RELEASE-v0.3.0.md).
 
 La v0.2.0 hizo kindling instalable, autenticado y con estado. Esta lo hace denso, paralelo
 y compartido, y estrena soporte (limitado) para Mac Apple Silicon.
@@ -231,7 +231,7 @@ y compartido, y estrena soporte (limitado) para Mac Apple Silicon.
 
 ## v0.2.0 — 2026-08-11
 
-Notas completas, con tablas comparativas: [`RELEASE-v0.2.0.md`](RELEASE-v0.2.0.md).
+Notas completas, con tablas comparativas: [`docs/RELEASE-v0.2.0.md`](docs/RELEASE-v0.2.0.md).
 
 La v0.1.0 demostraba que la idea funciona: microVMs que descongelan en milisegundos y un
 gateway que las despierta bajo demanda. Esta la hace instalable, autenticada y capaz de

@@ -65,7 +65,7 @@ func matchesAny(hay string, needles []string) string {
 // solo cuesta una instancia congelada, que no gasta ni CPU ni RAM.
 func ClassifyTools(tools []ToolSpec) StatefulVerdict {
 	if len(tools) == 0 {
-		return StatefulVerdict{false, "sin herramientas que analizar"}
+		return StatefulVerdict{false, "no tools to analyze"}
 	}
 
 	var writers, readers []string
@@ -74,7 +74,7 @@ func ClassifyTools(tools []ToolSpec) StatefulVerdict {
 
 		if w := matchesAny(name, stateNames); w != "" {
 			return StatefulVerdict{true,
-				t.Name + " sugiere que acumula contexto entre llamadas"}
+				t.Name + " suggests it accumulates context"}
 		}
 		if matchesAny(name, writeVerbs) != "" {
 			writers = append(writers, t.Name)
@@ -87,12 +87,12 @@ func ClassifyTools(tools []ToolSpec) StatefulVerdict {
 	switch {
 	case len(writers) > 0 && len(readers) > 0:
 		return StatefulVerdict{true,
-			"escribe con " + writers[0] + " y lee con " + readers[0] +
-				": lo escrito debe sobrevivir a la llamada"}
+			"it writes with " + writers[0] + " and reads with " + readers[0] +
+				": what it writes must outlive the call"}
 	case len(writers) > 0:
 		return StatefulVerdict{false,
-			"solo escribe (" + writers[0] + "): su efecto sale de la microVM"}
+			"it only writes (" + writers[0] + "): its effect leaves the microVM"}
 	default:
-		return StatefulVerdict{false, "solo consulta: no deja nada que preservar"}
+		return StatefulVerdict{false, "it only queries: nothing to preserve"}
 	}
 }
