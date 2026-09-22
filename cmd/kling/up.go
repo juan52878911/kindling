@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/assets"
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -710,10 +711,10 @@ func mcpHealthLine(snaps []*api.Snapshot) string {
 	var healthy, unknown int
 	var sick []string
 	for _, s := range snaps {
-		switch s.Health {
-		case "healthy":
+		switch mcp.HealthOf(s).Status {
+		case mcp.Healthy:
 			healthy++
-		case "unhealthy":
+		case mcp.Unhealthy:
 			n := s.Name
 			if svc := s.Service(); svc != "" {
 				n = svc

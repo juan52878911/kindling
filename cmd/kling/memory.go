@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -65,7 +66,7 @@ func memoryStatus(args []string) error {
 
 	ctx, stop := ctxWithSignals()
 	defer stop()
-	links, err := api.NewClient(cfg.Host(*host)).Links(ctx)
+	links, err := mcp.Links(ctx, api.NewClient(cfg.Host(*host)))
 	if err != nil {
 		fmt.Printf("  warning: can't reach the daemon (%v)\n", err)
 		return nil
@@ -98,7 +99,7 @@ func memoryEnable(args []string) error {
 	c := api.NewClient(cfg.Host(*host))
 
 	// ¿Ya está enlazado? Entonces solo hay que encender el interruptor.
-	links, err := c.Links(ctx)
+	links, err := mcp.Links(ctx, c)
 	if err != nil {
 		return fmt.Errorf("can't reach the daemon: %w", err)
 	}

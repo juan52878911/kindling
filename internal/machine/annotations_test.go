@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -164,5 +166,33 @@ func TestAnotacionesConcurrentesNoSePierden(t *testing.T) {
 	}
 	if len(s.Annotations) != 20 {
 		t.Fatalf("se perdieron anotaciones: quedan %d de 20", len(s.Annotations))
+	}
+}
+
+// Las formas JSON que escribe internal/mcp tienen que ser las que el núcleo
+// sabe espejar a los campos de v0.4: si alguien cambia una etiqueta JSON en un
+// lado y no en el otro, un CLI antiguo deja de ver catálogo y salud sin error.
+func TestFormasCompatiblesConElNucleo(t *testing.T) {
+	m := annotTestManager(t)
+	writeSnapMeta(t, m, "svc", `{"name":"svc","image":"svc"}`)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	tools, _ := json.Marshal(mcp.Tools{Tools: []mcp.ToolSpec{{Name: "echo"}}, CapturedAt: &now})
+	health, _ := json.Marshal(mcp.Health{Status: mcp.Unhealthy, At: &now, Error: "boom"})
+	if _, err := m.SetAnnotation("svc", mcp.ToolsKey, tools); err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.SetAnnotation("svc", mcp.HealthKey, health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tools) != 1 || s.ToolsAt == nil || !s.ToolsAt.Equal(now) {
+		t.Fatalf("mcp.tools no se espeja: %+v %v", s.Tools, s.ToolsAt)
+	}
+	if s.Health != mcp.Unhealthy || s.HealthErr != "boom" || s.HealthAt == nil {
+		t.Fatalf("mcp.health no se espeja: %q %q", s.Health, s.HealthErr)
+	}
+	if legacyToolsKey != mcp.ToolsKey || legacyHealthKey != mcp.HealthKey {
+		t.Fatal("las claves de anotación del núcleo y de mcp no coinciden")
 	}
 }

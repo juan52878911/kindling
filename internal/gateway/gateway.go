@@ -32,6 +32,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/api"
 
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/panico"
 )
 
@@ -654,7 +655,7 @@ func (g *Gateway) anotarSalud(service string, sano bool, causa string) {
 		panico.Contener("gateway.anotarSalud", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if _, err := g.client.SetHealth(ctx, service, sano, causa); err != nil {
+			if err := mcp.SetHealth(ctx, g.client, service, sano, causa); err != nil {
 				log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
 			}
 		})
@@ -1277,7 +1278,7 @@ func (g *Gateway) PrewarmAll(ctx context.Context) {
 	for _, s := range snaps {
 		// Un servicio con estado usa UNA instancia persistente: pre-calentar
 		// varias sería crear grafos paralelos que nadie reconcilia.
-		if s.Stateful() {
+		if mcp.Stateful(s) {
 			continue
 		}
 		svc := s.Name
@@ -1367,7 +1368,7 @@ func (g *Gateway) KeepWarmAll(ctx context.Context) {
 	for _, s := range snaps {
 		// Un servicio con estado usa UNA instancia persistente; ya la mantiene
 		// caliente su propio uso, no se fuerza aquí.
-		if s.Stateful() {
+		if mcp.Stateful(s) {
 			continue
 		}
 		svc := s.Name
@@ -1505,7 +1506,7 @@ func (g *Gateway) links(ctx context.Context) []*api.Link {
 	}
 	g.linkMu.RUnlock()
 
-	ls, err := g.client.Links(ctx)
+	ls, err := mcp.Links(ctx, g.client)
 	if err != nil {
 		return nil
 	}

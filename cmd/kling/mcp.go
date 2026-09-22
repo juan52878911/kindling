@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -337,12 +338,12 @@ func mcpImport(args []string) error {
 	}
 
 	// Decisión automática: ¿puede este servicio correr en máquinas efímeras?
-	verdict := api.ClassifyTools(tools)
+	verdict := mcp.ClassifyTools(tools)
 	switch {
 	case *stateful:
-		verdict = api.StatefulVerdict{Stateful: true, Reason: "forced with -stateful"}
+		verdict = mcp.StatefulVerdict{Stateful: true, Reason: "forced with -stateful"}
 	case *ephemeral:
-		verdict = api.StatefulVerdict{Stateful: false, Reason: "forced with -ephemeral"}
+		verdict = mcp.StatefulVerdict{Stateful: false, Reason: "forced with -ephemeral"}
 	}
 	modo := "EPHEMERAL — one microVM per action, destroyed when done"
 	if verdict.Stateful {
@@ -370,7 +371,7 @@ func mcpImport(args []string) error {
 	fmt.Println("✓")
 
 	fmt.Printf("  5/5  saving the catalog... ")
-	if _, err := c.SetCatalog(ctx, service, tools); err != nil {
+	if err := mcp.SetTools(ctx, c, service, tools); err != nil {
 		fmt.Println("✗")
 		cleanup()
 		return err
@@ -428,7 +429,7 @@ func mcpList(args []string) error {
 	if *asJSON {
 		// Los links (servicios externos) también son servicios MCP: se emiten
 		// aparte para que un consumidor distinga microVM de puente externo.
-		links, _ := c.Links(ctx)
+		links, _ := mcp.Links(ctx, c)
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"services": snaps,
 			"external": links,
@@ -447,21 +448,22 @@ func mcpList(args []string) error {
 		if svc := s.Service(); svc != "" {
 			n = svc
 		}
+		tools, capturedAt := mcp.ToolsOf(s)
 		cat := "not captured"
-		if s.ToolsAt != nil {
-			cat = since(*s.ToolsAt) + " ago"
+		if capturedAt != nil {
+			cat = since(*capturedAt) + " ago"
 		}
-		if s.Health == "" {
+		if mcp.HealthOf(s).Status == "" {
 			unprobed++
 		}
-		total += len(s.Tools)
+		total += len(tools)
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\n",
-			n, len(s.Tools), cat, healthCell(s), human(s.MemBytes), s.Instances)
+			n, len(tools), cat, healthCell(s), human(s.MemBytes), s.Instances)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	links, _ := c.Links(ctx)
+	links, _ := mcp.Links(ctx, c)
 	// "not probed" no es un dato de salud, es su ausencia — y una columna llena
 	// de ausencias sin decir cómo llenarla es como se pasan 26 horas de caída
 	// sin que nadie sondee. El sondeo no ocurre aquí: cada sondeo despierta una
@@ -479,11 +481,12 @@ func mcpList(args []string) error {
 
 	if *verbose {
 		for _, s := range snaps {
-			if len(s.Tools) == 0 {
+			tools, _ := mcp.ToolsOf(s)
+			if len(tools) == 0 {
 				continue
 			}
 			fmt.Printf("\n%s:\n", s.Name)
-			for _, t := range s.Tools {
+			for _, t := range tools {
 				d := t.Description
 				if len(d) > 70 {
 					d = d[:69] + "…"
@@ -531,7 +534,7 @@ func mcpRefresh(args []string) error {
 		fmt.Println("✗")
 		return err
 	}
-	if _, err := c.SetCatalog(ctx, service, tools); err != nil {
+	if err := mcp.SetTools(ctx, c, service, tools); err != nil {
 		fmt.Println("✗")
 		return err
 	}
@@ -605,7 +608,7 @@ func mcpHealth(args []string) error {
 		probeErr := probeHealth(ctx, c, svc, *wait, *profundo, t.egress)
 		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
 		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
-		if _, err := c.SetHealth(ctx, svc, probeErr == nil, errMsg(probeErr)); err != nil {
+		if err := mcp.SetHealth(ctx, c, svc, probeErr == nil, errMsg(probeErr)); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", svc, err)
 			continue
 		}
@@ -677,15 +680,16 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 
 // healthCell resume el estado de salud de un snapshot para `mcp list`.
 func healthCell(s *api.Snapshot) string {
-	switch s.Health {
-	case "healthy":
-		if s.HealthAt != nil {
-			return "healthy (" + since(*s.HealthAt) + ")"
+	h := mcp.HealthOf(s)
+	switch h.Status {
+	case mcp.Healthy:
+		if h.At != nil {
+			return "healthy (" + since(*h.At) + ")"
 		}
 		return "healthy"
-	case "unhealthy":
-		if s.HealthAt != nil {
-			return "unhealthy (" + since(*s.HealthAt) + ")"
+	case mcp.Unhealthy:
+		if h.At != nil {
+			return "unhealthy (" + since(*h.At) + ")"
 		}
 		return "unhealthy"
 	default:
@@ -744,7 +748,7 @@ func mcpLink(args []string) error {
 	fmt.Printf("✓ %s · %d tool(s)\n", info, len(tools))
 
 	fmt.Printf("  2/2  registering... ")
-	l, err := c.SetLink(ctx, &api.Link{
+	l, err := mcp.SetLink(ctx, c, &mcp.Link{
 		Name: name, URL: url, Description: *desc,
 		Labels: labels.merge(name), Tools: tools,
 	})
@@ -777,7 +781,7 @@ func mcpUnlink(args []string) error {
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
-	if err := api.NewClient(hostOf(*host)).RemoveLink(ctx, fs.Arg(0)); err != nil {
+	if err := mcp.RemoveLink(ctx, api.NewClient(hostOf(*host)), fs.Arg(0)); err != nil {
 		return err
 	}
 	fmt.Println(fs.Arg(0))
@@ -818,7 +822,7 @@ func directPost(ctx context.Context, url string) poster {
 			return "", nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", api.AcceptMCP)
+		req.Header.Set("Accept", mcp.AcceptMCP)
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
@@ -880,7 +884,7 @@ func introspectConSesion(post poster) (string, string, []api.ToolSpec, error) {
 			} `json:"serverInfo"`
 		} `json:"result"`
 	}
-	_ = json.Unmarshal(api.MCPPayload(raw), &initRes)
+	_ = json.Unmarshal(mcp.MCPPayload(raw), &initRes)
 
 	name := initRes.Result.ServerInfo.Name
 	if name == "" {
@@ -906,14 +910,14 @@ func introspectConSesion(post poster) (string, string, []api.ToolSpec, error) {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(api.MCPPayload(raw), &out); err != nil {
+	if err := json.Unmarshal(mcp.MCPPayload(raw), &out); err != nil {
 		// Enseñar lo que llegó, no solo que no se pudo parsear.
 		//
 		// Cuando el servidor MCP muere al arrancar —le faltan argumentos, el
 		// paquete de npm está roto— el puente contesta con un error en texto
 		// plano, y "respuesta ilegible: invalid character 'l'" no dice
 		// absolutamente nada sobre la causa. El cuerpo sí.
-		body := strings.TrimSpace(string(api.MCPPayload(raw)))
+		body := strings.TrimSpace(string(mcp.MCPPayload(raw)))
 		if len(body) > 300 {
 			body = body[:300] + "…"
 		}
@@ -945,7 +949,7 @@ func splitDomains(s string) []string {
 func labelsFor(service string, stateful bool) map[string]string {
 	l := map[string]string{api.LabelService: service}
 	if stateful {
-		l[api.LabelStateful] = "true"
+		l[mcp.LabelStateful] = "true"
 	}
 	return l
 }

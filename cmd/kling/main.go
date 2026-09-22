@@ -29,6 +29,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/config"
 
 	"errors"
+	"github.com/juan52878911/kindling/internal/mcp"
 )
 
 const usage = `kling - Firecracker microVMs with a docker-style interface
@@ -689,7 +690,7 @@ func cmdExport(args []string) error {
 
 	// El HTML se construye aquí, en la máquina del CLI: el fichero acaba donde
 	// trabajas aunque el daemon esté al otro lado de un SSH.
-	links, _ := c.Links(ctx) // un daemon antiguo puede no tenerlos: no es fatal
+	links, _ := mcp.Links(ctx, c) // un daemon antiguo puede no tenerlos: no es fatal
 	memSvc := ""
 	if cfg := loadConfig(); cfg.Memory.Enabled {
 		memSvc = cfg.Memory.Service

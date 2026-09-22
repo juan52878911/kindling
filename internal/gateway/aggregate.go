@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -760,9 +761,9 @@ func (a *aggregator) isStateful(ctx context.Context, service string) bool {
 	a.snapMu.Lock()
 	for _, s := range snaps {
 		if svc := s.Service(); svc != "" {
-			a.stateful[svc] = s.Stateful()
+			a.stateful[svc] = mcp.Stateful(s)
 		}
-		a.stateful[s.Name] = s.Stateful()
+		a.stateful[s.Name] = mcp.Stateful(s)
 	}
 	v = a.stateful[service]
 	a.snapMu.Unlock()

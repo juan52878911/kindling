@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -301,7 +302,7 @@ func marcarAfectados(ctx context.Context, c *api.Client, imagenes []string) int 
 		if nombre == "" {
 			nombre = s.Name
 		}
-		if _, err := c.SetHealth(ctx, nombre, false, api.MotivoImagenCambiada); err == nil {
+		if err := mcp.SetHealth(ctx, c, nombre, false, mcp.MotivoImagenCambiada); err == nil {
 			n++
 		}
 	}

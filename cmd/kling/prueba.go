@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/mcp"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -78,7 +79,7 @@ func ejercitar(post poster, sid, herramienta, args string) error {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(api.MCPPayload(raw), &res); err != nil {
+	if err := json.Unmarshal(mcp.MCPPayload(raw), &res); err != nil {
 		return fmt.Errorf("%s: respuesta ilegible: %w", herramienta, err)
 	}
 	if res.Error != nil {

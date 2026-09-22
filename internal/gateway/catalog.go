@@ -13,8 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/api"
-
+	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/panico"
 )
 
@@ -182,11 +181,12 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 		if s.Service() != service && s.Name != service {
 			continue
 		}
-		if len(s.Tools) == 0 {
+		tools, _ := mcp.ToolsOf(s)
+		if len(tools) == 0 {
 			return nil, false // importado sin catálogo: habrá que preguntar
 		}
-		out := make([]Tool, 0, len(s.Tools))
-		for _, t := range s.Tools {
+		out := make([]Tool, 0, len(tools))
+		for _, t := range tools {
 			out = append(out, newTool(service, t.Name, t.Description, t.InputSchema))
 		}
 		return out, true
@@ -323,7 +323,7 @@ func mcpPostAt(ctx context.Context, url, sid, body string) (*http.Response, erro
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", api.AcceptMCP)
+	req.Header.Set("Accept", mcp.AcceptMCP)
 	if sid != "" {
 		req.Header.Set(SessionHeader, sid)
 	}
@@ -367,5 +367,5 @@ func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, err
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
 		return nil, err
 	}
-	return api.MCPPayload(buf.Bytes()), nil
+	return mcp.MCPPayload(buf.Bytes()), nil
 }
