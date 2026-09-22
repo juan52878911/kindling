@@ -235,6 +235,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	//
 	// Un fallo al escribirla NO tumba la construcción: la imagen ya está hecha y
 	// funciona; perder la receta es peor documentación, no un error.
+	s.mgr.EnsureImageReadable(req.Name)
 	if err := s.saveRecipe(req); err != nil {
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}

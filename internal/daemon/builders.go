@@ -144,6 +144,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		return
 	}
 
+	s.mgr.EnsureImageReadable(req.Name)
 	img := s.mgr.ImageFile(req.Name)
 	if _, err := os.Stat(img); err != nil {
 		if _, lerr := os.Stat(filepath.Join(s.root, "images", req.Name+".layer.ext4")); lerr != nil {

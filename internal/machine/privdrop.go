@@ -104,3 +104,20 @@ func (p *Privileges) EnsureReadable(dir string) {
 		return nil
 	})
 }
+
+// EnsureImageReadable deja legibles para el VMM los ficheros de una imagen
+// recién construida (la imagen o su capa), sin tocar la receta, que puede llevar
+// secretos. Lo llama el daemon tras cada construcción: un constructor no tiene
+// por qué saber con qué usuario corre Firecracker, y sin esto la imagen se
+// construye bien y luego no arranca por "permission denied".
+func (m *Manager) EnsureImageReadable(name string) {
+	if !m.priv.Enabled || !validName.MatchString(name) {
+		return
+	}
+	for _, p := range []string{m.imagePath(name), m.layerPath(name)} {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			_ = os.Chown(p, m.priv.UID, m.priv.GID)
+			_ = os.Chmod(p, 0o640)
+		}
+	}
+}
