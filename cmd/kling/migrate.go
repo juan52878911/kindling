@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/config"
+	"github.com/juan52878911/kindling/pkg/config"
 )
 
 // cmdMigrate mueve un servidor MCP existente a kindling SIN romper las skills,

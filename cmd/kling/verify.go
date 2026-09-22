@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
-	"github.com/juan52878911/kindling/internal/config"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
 )
 
 // installSig es una huella de "instalando algo en caliente" en la consola o en

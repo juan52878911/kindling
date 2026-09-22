@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Group es un conjunto de máquinas que comparten servicio MCP.

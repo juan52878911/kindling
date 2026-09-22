@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // AggregatePath es el servicio virtual que reúne a todos los demás.

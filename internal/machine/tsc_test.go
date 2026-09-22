@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // El daemon TRADUCE el error del TSC antes de devolverlo, asi que el CLI nunca

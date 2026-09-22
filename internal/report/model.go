@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // El informe no dibuja: describe. Go emite un modelo plano y el navegador lo

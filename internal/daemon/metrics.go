@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // handleProcStats devuelve el consumo de memoria en JSON, para `kling top`.

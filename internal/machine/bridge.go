@@ -29,7 +29,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // errNoBridge marca una imagen que no lleva puente dentro: una base mínima, no

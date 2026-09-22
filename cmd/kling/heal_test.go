@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // La autocuracion rehace el servicio COMO ESTABA. Si perdiera un campo por el

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // buildScriptArgs traduce el request a los flags de 80-mcp-image.sh. El único

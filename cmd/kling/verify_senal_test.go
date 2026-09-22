@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 func tresHerramientas() []api.ToolSpec {

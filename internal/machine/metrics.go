@@ -6,7 +6,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // ProcStats toma una foto del consumo de memoria del conjunto de microVMs.

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // El nombre acaba siendo un componente de ruta: volumes/<nombre>.ext4. Si se

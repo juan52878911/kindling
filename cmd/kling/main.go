@@ -21,12 +21,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
-	"github.com/juan52878911/kindling/internal/config"
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/gateway"
 	"github.com/juan52878911/kindling/internal/report"
 	"github.com/juan52878911/kindling/internal/transport"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
 
 	"errors"
 )

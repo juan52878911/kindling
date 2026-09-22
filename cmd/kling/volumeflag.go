@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // volumeFlag acumula los -volume de la línea de comandos.

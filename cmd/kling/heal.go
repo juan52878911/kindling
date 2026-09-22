@@ -23,7 +23,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // argvReimportar reconstruye la linea de `mcp import` que rehace un servicio TAL

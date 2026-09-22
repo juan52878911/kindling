@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
-	"github.com/juan52878911/kindling/internal/panico"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/panico"
 )
 
 // La raíz se monta en SOLO LECTURA y el init es overlay-init, que superpone el

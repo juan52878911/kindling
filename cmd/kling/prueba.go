@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // pruebasDeVida son herramientas conocidas, invocables sin efectos, que

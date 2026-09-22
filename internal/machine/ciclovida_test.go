@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Stop no tomaba el cerrojo de ciclo de vida, que SI tienen Freeze, Thaw,

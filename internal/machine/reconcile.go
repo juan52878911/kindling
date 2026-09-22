@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/api"
 
-	"github.com/juan52878911/kindling/internal/panico"
+	"github.com/juan52878911/kindling/pkg/panico"
 )
 
 // reconcile ajusta el estado guardado a la realidad del host al arrancar.

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Este fichero responde a tres preguntas que la tabla de instancias no contesta:

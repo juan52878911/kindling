@@ -8,7 +8,7 @@ package events
 import (
 	"sync"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 const subBuffer = 64

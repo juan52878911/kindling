@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Un directorio de machines/ que no pertenece a ninguna máquina conocida es

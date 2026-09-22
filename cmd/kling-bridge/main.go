@@ -38,9 +38,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/panico"
+	"github.com/juan52878911/kindling/pkg/panico"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // SessionHeader es la cabecera del protocolo MCP que identifica la conversación.
