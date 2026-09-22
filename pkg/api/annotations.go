@@ -104,3 +104,42 @@ func (c *Client) PutStore(ctx context.Context, ns, key string, v any) error {
 func (c *Client) DeleteStore(ctx context.Context, ns, key string) error {
 	return c.do(ctx, http.MethodDelete, "/store/"+url.PathEscape(ns)+"/"+url.PathEscape(key), nil, nil)
 }
+
+// ImageFile lee un fichero dentro de una imagen ya construida (hasta 1 MiB).
+// Si no está, el error cumple IsNotFound.
+func (c *Client) ImageFile(ctx context.Context, image, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://kling/images/"+url.PathEscape(image)+"/files?path="+url.QueryEscape(path), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, err := LeerCuerpo(resp.Body, 2<<20)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		var e Error
+		if json.Unmarshal(b, &e) != nil || e.Message == "" {
+			e.Message = resp.Status
+		}
+		return nil, &StatusError{Code: resp.StatusCode, Message: e.Message}
+	}
+	return b, nil
+}
+
+// StatImageFile dice si un fichero está en una imagen, cuánto ocupa y su sha256.
+func (c *Client) StatImageFile(ctx context.Context, image, path string) (*ImageFileStat, error) {
+	var st ImageFileStat
+	return &st, c.do(ctx, http.MethodGet, "/images/"+url.PathEscape(image)+"/files?stat=1&path="+url.QueryEscape(path), nil, &st)
+}
+
+// PutImageFile pone un fichero dentro de una imagen ya construida.
+func (c *Client) PutImageFile(ctx context.Context, image string, req PutImageFileRequest) (*ImageFileResult, error) {
+	var res ImageFileResult
+	return &res, c.doWith(c.long, ctx, http.MethodPut, "/images/"+url.PathEscape(image)+"/files", req, &res)
+}

@@ -220,6 +220,12 @@ func (m *Manager) imageUsers() map[string][]string {
 // desmonta sin tocarla: reescribirla por gusto la ensuciaría y desharía su
 // dispersión en disco.
 func (m *Manager) refreshOne(ctx context.Context, image, dentroPath, bridge, quiero string) (bool, error) {
+	return m.putOne(ctx, image, dentroPath, bridge, quiero, 0o755, false)
+}
+
+// putOne pone src en dentroPath de la imagen, creciéndola si no cabe. Con
+// create=false solo reemplaza: si el fichero no está, devuelve errNoBridge.
+func (m *Manager) putOne(ctx context.Context, image, dentroPath, bridge, quiero string, mode os.FileMode, create bool) (bool, error) {
 	// Las imágenes se construyen ajustadas al byte, así que una que ya lleva
 	// puente NO tiene sitio para su propio recambio: durante el renombrado
 	// atómico conviven las dos copias. Crecer es la única salida que conserva
@@ -233,7 +239,7 @@ func (m *Manager) refreshOne(ctx context.Context, image, dentroPath, bridge, qui
 	// anfitrión con otra geometría de bloques converge igual.
 	const intentos = 3
 	for i := 0; ; i++ {
-		cambio, err := m.intentarRefresh(ctx, image, dentroPath, bridge, quiero)
+		cambio, err := m.intentarPut(ctx, image, dentroPath, bridge, quiero, mode, create)
 		var sinHueco errSinHueco
 		if !errors.As(err, &sinHueco) || i == intentos {
 			return cambio, err
@@ -285,7 +291,7 @@ func espacioLibre(mnt string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-func (m *Manager) intentarRefresh(ctx context.Context, image, dentroPath, bridge, quiero string) (bool, error) {
+func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, quiero string, mode os.FileMode, create bool) (bool, error) {
 	// Antes de montar en ESCRITURA. Montar así un ext4 sucio es como se corrompió
 	// una imagen en este proyecto, y el síntoma fue un pánico del invitado.
 	repairVolume(ctx, image)
@@ -322,11 +328,17 @@ func (m *Manager) intentarRefresh(ctx context.Context, image, dentroPath, bridge
 
 	dentro := filepath.Join(mnt, dentroPath)
 	tengo, err := fileDigest(dentro)
-	if os.IsNotExist(err) {
+	if os.IsNotExist(err) && !create {
 		// Una imagen SIN puente no es una imagen de servicio: es una base
 		// mínima, cuyo entrypoint no invoca ningún puente. Inyectarle uno no
-		// haría nada salvo engordarla, así que se deja como está.
+		// haría nada salvo engordarla, así que se deja como está. Lo mismo para
+		// cualquier otro fichero que solo se quiera poner al día.
 		return false, errNoBridge
+	}
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(filepath.Dir(dentro), 0o755); err != nil {
+			return false, fmt.Errorf("creating %s: %w", filepath.Dir(dentroPath), err)
+		}
 	}
 	if err == nil && tengo == quiero {
 		return false, nil
@@ -351,13 +363,13 @@ func (m *Manager) intentarRefresh(ctx context.Context, image, dentroPath, bridge
 	}
 
 	tmp := dentro + ".nuevo"
-	if err := copyFile(bridge, tmp, 0o755); err != nil {
+	if err := copyFile(bridge, tmp, mode); err != nil {
 		_ = os.Remove(tmp)
-		return false, fmt.Errorf("copying bridge: %w", err)
+		return false, fmt.Errorf("copying %s: %w", dentroPath, err)
 	}
 	if err := os.Rename(tmp, dentro); err != nil {
 		_ = os.Remove(tmp)
-		return false, fmt.Errorf("replacing bridge: %w", err)
+		return false, fmt.Errorf("replacing %s: %w", dentroPath, err)
 	}
 	desmontar()
 	return true, nil

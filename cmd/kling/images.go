@@ -19,7 +19,7 @@ import (
 //	kling images refresh semgrep    solo en esa
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("X")
+		return fmt.Errorf("usage: kling images <ls|rm|refresh|toolchain|recipe|build|cat|put> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -32,8 +32,14 @@ func cmdImages(args []string) error {
 		return imagesRm(args[1:])
 	case "recipe":
 		return imagesRecipe(args[1:])
+	case "build":
+		return imagesBuild(args[1:])
+	case "cat":
+		return imagesCat(args[1:])
+	case "put":
+		return imagesPut(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, refresh, toolchain, or recipe", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, refresh, toolchain, recipe, build, cat or put", args[0])
 	}
 }
 

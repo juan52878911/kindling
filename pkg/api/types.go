@@ -522,6 +522,17 @@ type BuildImageRequest struct {
 	// arm64/Mac, donde cargar cientos de ficheros de node_modules se amplifica
 	// bajo KVM anidado): carga 1 fichero en vez de todo el árbol. Solo node (NPM).
 	Bundle bool `json:"bundle,omitempty"`
+
+	// Builder elige quién construye la imagen: un ejecutable de confianza que
+	// el administrador instaló en el directorio de constructores del daemon
+	// (/usr/local/lib/kindling/builders/<builder>). Vacío = el constructor de
+	// servidores MCP de siempre, con los campos de arriba.
+	//
+	// Con Builder, lo único que el daemon interpreta es Name, Base y GrowMB; el
+	// resto va en Spec, que el constructor valida y usa. Así una extensión trae
+	// su forma de construir imágenes sin que el núcleo la conozca.
+	Builder string          `json:"builder,omitempty"`
+	Spec    json.RawMessage `json:"spec,omitempty"`
 }
 
 // BuildImageResult describe la imagen construida.
@@ -529,6 +540,38 @@ type BuildImageResult struct {
 	Name   string `json:"name"`
 	Path   string `json:"path"`
 	Output string `json:"output,omitempty"`
+}
+
+// ImageFileStat es la respuesta de GET /images/{name}/files?path=...&stat=1.
+type ImageFileStat struct {
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+// PutImageFileRequest pone un fichero dentro de una imagen ya construida.
+// Lleva el contenido (ContentB64) o el nombre de un fichero del directorio de
+// librerías del daemon (FromHost, relativo a /usr/local/lib/kindling), que es
+// donde una extensión deja lo que quiere meter en sus imágenes.
+type PutImageFileRequest struct {
+	Path       string `json:"path"`
+	Mode       string `json:"mode,omitempty"` // octal, "0644" por defecto
+	ContentB64 string `json:"content_b64,omitempty"`
+	FromHost   string `json:"from_host,omitempty"`
+	// Create permite crear el fichero si no existe. Sin él solo se reemplaza,
+	// que es lo seguro para poner al día algo que la imagen ya traía.
+	Create bool `json:"create,omitempty"`
+}
+
+// ImageFileResult cuenta qué pasó al poner un fichero en una imagen.
+type ImageFileResult struct {
+	Image   string `json:"image"`
+	Path    string `json:"path"`
+	Updated bool   `json:"updated"`           // se cambió (false = ya era idéntico)
+	Skipped bool   `json:"skipped,omitempty"` // no estaba y no se pidió crearlo
+	Busy    bool   `json:"busy,omitempty"`    // la imagen está en uso
+	Error   string `json:"error,omitempty"`
 }
 
 // Error es la respuesta de error de la API.
@@ -684,6 +727,11 @@ type ImageRecipe struct {
 	Bundle   bool      `json:"bundle,omitempty"`
 	BuiltAt  time.Time `json:"built_at"`
 	KlingVer string    `json:"kling_version,omitempty"`
+
+	// Builder y Spec son los de la petición cuando la construyó un constructor
+	// externo.
+	Builder string          `json:"builder,omitempty"`
+	Spec    json.RawMessage `json:"spec,omitempty"`
 }
 
 // Capabilities son las capacidades que una imagen declara sobre lo que su

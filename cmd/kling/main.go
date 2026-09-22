@@ -54,6 +54,11 @@ VOLUMES
   images refresh [image...]                        puts the current bridge inside the images
   images toolchain                                 builds the image with npm and pip (used by populate)
   images recipe <image>                            how it was built
+  images build <name> -builder B [-spec f.json]    builds it with a builder installed
+                                                   on the daemon (extensions ship them)
+  images cat <image> <path> [-stat]                prints a file inside an image
+  images put <image> <path> (-file F|-from-host N) puts a file inside a built image
+      [-mode 0755] [-create]
   images rm <image>                                removes it (refuses if a layer,
                                                    a golden or a machine uses it)
 

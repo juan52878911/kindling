@@ -163,6 +163,10 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if req.Builder != "" {
+		s.buildWithBuilder(w, r, req)
+		return
+	}
 	if err := validateBuild(req); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
