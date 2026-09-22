@@ -359,6 +359,7 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 
+	daemon.Version = strings.TrimPrefix(Version, "v")
 	srv, err := daemon.New(*socket, *root, *fcBin, *sockUser, *runAs)
 	if err != nil {
 		return err
@@ -1292,5 +1293,8 @@ func cmdInfo(args []string) error {
 	fmt.Printf("KVM:          %s\n", kvm)
 	fmt.Printf("firecracker:  %s\n", strings.TrimSpace(i.Firecrack))
 	fmt.Printf("machines:     %d\n", i.Machines)
+	if len(i.Capabilities) > 0 {
+		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))
+	}
 	return nil
 }

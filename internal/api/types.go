@@ -459,6 +459,20 @@ type Info struct {
 	KVM       bool   `json:"kvm"`
 	Machines  int    `json:"machines"`
 	Firecrack string `json:"firecracker,omitempty"`
+	// Capabilities lista las capacidades del API que sirve el daemon (p. ej.
+	// "annotations", "store"). Un daemon anterior no la envía: vacía significa
+	// "solo el API de siempre".
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// Has dice si el daemon anuncia la capacidad c.
+func (i *Info) Has(c string) bool {
+	for _, x := range i.Capabilities {
+		if x == c {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildImageRequest pide al daemon que empaquete un servidor MCP de stdio.

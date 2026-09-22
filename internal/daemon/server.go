@@ -25,7 +25,16 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 )
 
-const Version = "0.1.0"
+// Version es la versión del daemon que devuelve GET /info. La fija el binario
+// al arrancar (cmd/kling: daemon.Version = main.Version); antes era una
+// constante "0.1.0" que nunca se actualizaba, así que /info mentía y nadie
+// podía comprobar compatibilidad contra ella.
+var Version = "dev"
+
+// Capabilities son las capacidades del API que este daemon sirve. Una extensión
+// (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
+// de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
+var Capabilities = []string{}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -248,10 +257,11 @@ func fail(w http.ResponseWriter, code int, err error) {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	_, kvmErr := os.Stat("/dev/kvm")
 	info := api.Info{
-		Version:  Version,
-		Root:     s.root,
-		KVM:      kvmErr == nil,
-		Machines: s.mgr.Count(),
+		Version:      Version,
+		Root:         s.root,
+		KVM:          kvmErr == nil,
+		Machines:     s.mgr.Count(),
+		Capabilities: Capabilities,
 	}
 	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
 		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
