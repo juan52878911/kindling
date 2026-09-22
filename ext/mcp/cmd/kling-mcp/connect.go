@@ -1,0 +1,461 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/juan52878911/kindling-mcp/internal/gateway"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
+)
+
+// cmdConnect conecta una herramienta de kindling a un agente de IA.
+//
+// Existe porque el hueco entre "el servicio funciona" y "mi agente lo usa" son
+// tres formatos de configuración distintos y una URL que hay que adivinar. El
+// comando la deduce, COMPRUEBA que responde de verdad, y escribe la
+// configuración donde corresponda.
+func cmdConnect(args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ExitOnError)
+	host := hostFlag(fs)
+	gwFlag := fs.String("gateway", "", "gateway URL (default: gateway.url, or inferred from context)")
+	install := fs.String("install", "", "write the config: "+clientNames()+" — or `all` for all detected")
+	name := fs.String("name", "", "name it will show up as in the agent (default: the service's name)")
+	all := fs.Bool("all", false, "a single entry that gathers ALL services")
+	only := fs.String("only", "", "with -all: limit to these services, comma-separated")
+	expand := fs.Bool("expand", false, "with -all: load the full catalog instead of meta-tools")
+	tokenFlag := fs.String("token", "", "gateway token (default: gateway.token)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	cfg := loadConfig()
+	gw := config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host)))
+	token := config.Or(*tokenFlag, cfg.Gateway.Token)
+
+	// Entrada agregada: un solo servidor MCP que reúne a todos.
+	if *all {
+		label := config.Or(*name, "kindling")
+		url := strings.TrimSuffix(gw, "/") + "/mcp/" + gateway.AggregatePath
+		var q []string
+		if *only != "" {
+			q = append(q, "services="+strings.ReplaceAll(*only, " ", ""))
+		}
+		if *expand {
+			q = append(q, "mode=expand")
+		}
+		if len(q) > 0 {
+			url += "?" + strings.Join(q, "&")
+		}
+
+		scope := "all services"
+		if *only != "" {
+			scope = *only
+		}
+		fmt.Printf("Entry:     %s (%s)\n", label, scope)
+		fmt.Printf("Endpoint:  %s\n", url)
+		if *expand {
+			fmt.Println("Mode:      expand — the agent loads ALL definitions")
+		} else {
+			fmt.Println("Mode:      proxy — inventory in the handshake + 3 meta-tools")
+		}
+		if info, tools, err := probeMCP(url, token); err != nil {
+			fmt.Printf("Status:    ✗ %v\n\n", err)
+		} else {
+			fmt.Printf("Status:    ✓ %s · %d tool(s) exposed: %s\n",
+				info, len(tools), strings.Join(tools, ", "))
+			advise(strings.TrimSuffix(gw, "/")+"/mcp/"+gateway.AggregatePath, *only, *expand, token)
+		}
+		if *install != "" {
+			return installConfig(*install, label, url, token)
+		}
+		printSnippets(label, url, token)
+		fmt.Printf("\nAutomatic installation:\n")
+		fmt.Printf("  kling connect -all -install all        (all detected clients)\n")
+		fmt.Printf("  kling connect -all -install opencode\n")
+		fmt.Printf("  kling connect -all -only eco,files -install opencode\n")
+		return nil
+	}
+
+	// Sin servicio: modo guiado.
+	if fs.NArg() == 0 {
+		return connectGuide(ctx, cfg.Host(*host), gw)
+	}
+	service := fs.Arg(0)
+	label := config.Or(*name, service)
+	url := strings.TrimSuffix(gw, "/") + "/mcp/" + service
+
+	fmt.Printf("Service:   %s\n", service)
+	fmt.Printf("Endpoint:  %s\n", url)
+
+	// Comprobarlo de verdad: una configuración que parece correcta y no responde
+	// es peor que no tener ninguna, porque el fallo aparece dentro del agente.
+	if info, tools, err := probeMCP(url, token); err != nil {
+		fmt.Printf("Status:    ✗ %v\n\n", err)
+		fmt.Println("Start the gateway on the daemon host:")
+		fmt.Println("  kling gateway -listen 0.0.0.0:8080")
+	} else {
+		fmt.Printf("Status:    ✓ %s · %d tool(s): %s\n", info, len(tools), strings.Join(tools, ", "))
+	}
+	fmt.Println()
+
+	if *install != "" {
+		return installConfig(*install, label, url, token)
+	}
+
+	printSnippets(label, url, token)
+	fmt.Printf("\nAutomatic installation:\n")
+	fmt.Printf("  kling connect %s -install all\n", service)
+	fmt.Printf("  kling connect %s -install claude-code\n", service)
+	return nil
+}
+
+// guessGateway deduce la URL del gateway a partir del contexto activo: el daemon
+// vive en la misma máquina, así que el host coincide.
+func guessGateway(daemonHost string) string {
+	h := daemonHost
+	if rest, ok := strings.CutPrefix(h, "ssh://"); ok {
+		if _, after, found := strings.Cut(rest, "@"); found {
+			h = after
+		} else {
+			h = rest
+		}
+		h, _, _ = strings.Cut(h, "/")
+		return "http://" + net.JoinHostPort(h, "8080")
+	}
+	// Socket local: el gateway estará en la misma máquina.
+	return "http://127.0.0.1:8080"
+}
+
+// authedPost construye el que manda peticiones MCP con el token puesto.
+//
+// El token va SIEMPRE que lo haya: comprobar el endpoint sin la cabecera que
+// van a usar los agentes daría un ✗ que no significa nada, o peor, un ✓ de un
+// gateway abierto que creíamos cerrado.
+func authedPost(c *http.Client, url, token string) func(sid, body string) (*http.Response, error) {
+	return func(sid, body string) (*http.Response, error) {
+		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if sid != "" {
+			req.Header.Set("Mcp-Session-Id", sid)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		return c.Do(req)
+	}
+}
+
+// probeMCP hace un initialize real y devuelve el servidor y sus herramientas.
+func probeMCP(url, token string) (string, []string, error) {
+	post := authedPost(&http.Client{Timeout: 30 * time.Second}, url, token)
+
+	resp, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kling","version":"1"}}}`)
+	if err != nil {
+		return "", nil, fmt.Errorf("not responding: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		if token == "" {
+			return "", nil, fmt.Errorf("the gateway requires a token and I don't have one.\n" +
+				"           Copy it from the gateway host:  kling config set gateway.token <t>")
+		}
+		return "", nil, fmt.Errorf("the gateway rejects the token (401)")
+	}
+	if resp.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("HTTP %s", resp.Status)
+	}
+
+	var init struct {
+		Result struct {
+			ServerInfo struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&init)
+	server := init.Result.ServerInfo.Name
+	if server == "" {
+		server = "MCP server"
+	} else if v := init.Result.ServerInfo.Version; v != "" {
+		server += " v" + v
+	}
+
+	sid := resp.Header.Get("Mcp-Session-Id")
+	tr, err := post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if err != nil {
+		return server, nil, nil
+	}
+	defer tr.Body.Close()
+
+	var tl struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	_ = json.NewDecoder(tr.Body).Decode(&tl)
+	names := make([]string, 0, len(tl.Result.Tools))
+	for _, t := range tl.Result.Tools {
+		names = append(names, t.Name)
+	}
+	return server, names, nil
+}
+
+// advise compara lo que cuesta cada modo CON TU CATÁLOGO REAL.
+//
+// El modo proxy tiene un coste fijo (cuatro meta-herramientas) y el expand crece
+// con cada herramienta. Con pocas herramientas el proxy sale MÁS caro, así que
+// recomendarlo siempre sería vender humo: se mide y se dice.
+func advise(base, only string, expand bool, token string) {
+	q := ""
+	if only != "" {
+		q = "?services=" + strings.ReplaceAll(only, " ", "")
+	}
+	sep := "?"
+	if q != "" {
+		sep = "&"
+	}
+
+	proxy, n1, err1 := catalogCost(base+q, token)
+	exp, n2, err2 := catalogCost(base+q+sep+"mode=expand", token)
+	if err1 != nil || err2 != nil {
+		fmt.Println()
+		return
+	}
+
+	fmt.Printf("\nContext cost, with your current catalog:\n")
+	fmt.Printf("  proxy   %2d definitions   ≈%5d tokens\n", n1, proxy/4)
+	fmt.Printf("  expand  %2d definitions   ≈%5d tokens\n", n2, exp/4)
+
+	switch {
+	case exp < proxy && !expand:
+		fmt.Printf("  → With %d tools, -expand comes out cheaper.\n", n2)
+		fmt.Println("    Proxy mode pays off from ~8 tools onward, once its")
+		fmt.Println("    fixed cost is amortized.")
+	case exp >= proxy && expand:
+		fmt.Printf("  → With %d tools, proxy mode (default) saves %d tokens.\n",
+			n2, (exp-proxy)/4)
+	case exp >= proxy:
+		fmt.Printf("  → The proxy mode you're using saves %d tokens.\n", (exp-proxy)/4)
+	default:
+		fmt.Println("  → You're on expand, which right now is the cheapest.")
+	}
+	fmt.Println()
+}
+
+// catalogCost mide los bytes que ocupa el catálogo que verá el agente.
+func catalogCost(url, token string) (int, int, error) {
+	post := authedPost(&http.Client{Timeout: 60 * time.Second}, url, token)
+	resp, err := post("", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	if err != nil {
+		return 0, 0, err
+	}
+	sid := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	tr, err := post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tr.Body.Close()
+
+	var out struct {
+		Result struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(tr.Body).Decode(&out); err != nil {
+		return 0, 0, err
+	}
+	b, _ := json.Marshal(out.Result.Tools)
+	return len(b), len(out.Result.Tools), nil
+}
+
+// printSnippets enseña la configuración manual de los clientes detectados.
+//
+// Solo los detectados: una lista de siete formatos para una máquina que tiene
+// dos agentes instalados es ruido, y el ruido esconde lo que sí importa.
+func printSnippets(name, url, token string) {
+	list := detectedClients()
+	if len(list) == 0 {
+		fmt.Println("No installed agent detected. Formats for everything I know about:")
+		list = clients()
+	}
+	for _, c := range list {
+		fmt.Printf("── %s %s\n", c.label, strings.Repeat("─", max(0, 48-len(c.label))))
+		fmt.Println(c.text(name, url, token))
+		fmt.Println()
+	}
+	if token == "" {
+		fmt.Println("No token: the gateway is open to anyone who can reach its port.")
+	}
+}
+
+// installConfig escribe la entrada en la configuración del agente o agentes.
+func installConfig(target, name, url, token string) error {
+	if target == "all" {
+		list := detectedClients()
+		if len(list) == 0 {
+			return fmt.Errorf("no installed agent detected; use -install <%s>", clientNames())
+		}
+		fmt.Printf("Detected: %s\n\n", labels(list))
+		var failed []string
+		for _, c := range list {
+			// Un cliente que falla no puede impedir que se registren los
+			// demás: lo normal es tener cuatro y que uno tenga el fichero
+			// a medio escribir por otra herramienta.
+			if err := c.install(name, url, token); err != nil {
+				fmt.Printf("✗ %s — %v\n", c.label, err)
+				failed = append(failed, c.name)
+			}
+		}
+		if len(failed) > 0 {
+			return fmt.Errorf("couldn't register with: %s", strings.Join(failed, ", "))
+		}
+		return nil
+	}
+
+	c, ok := findClient(target)
+	if !ok {
+		return fmt.Errorf("unknown target %q: use one of %s, or `all`", target, clientNames())
+	}
+	return c.install(name, url, token)
+}
+
+func labels(list []client) string {
+	var out []string
+	for _, c := range list {
+		out = append(out, c.label)
+	}
+	return strings.Join(out, ", ")
+}
+
+// mustJSON serializa para imprimir. Los valores vienen de esta misma tabla, no
+// de fuera, así que un error solo puede ser un fallo de programación.
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<not serializable: %v>", err)
+	}
+	return string(b)
+}
+
+// patchJSON inserta una entrada en una sección de un JSON conservando el resto.
+//
+// Se copia el fichero antes de tocarlo: estas configuraciones suelen tener horas
+// de ajustes de su dueño, y kindling no es quién para arriesgarlas.
+func patchJSON(path, section, key string, value any, hint string) error {
+	doc := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &doc); err != nil {
+			// errNotJSON y no el error crudo: quien llama tiene que poder
+			// distinguir "esto no se puede parchear sin romperlo" de un fallo
+			// de E/S, porque la respuesta correcta es enseñar el fragmento.
+			return fmt.Errorf("%s: %w", path, errNotJSON)
+		}
+		backup := path + ".kling-backup"
+		if err := os.WriteFile(backup, b, 0o600); err != nil {
+			return fmt.Errorf("couldn't back up %s: %w", path, err)
+		}
+		fmt.Printf("backup: %s\n", backup)
+	} else if !os.IsNotExist(err) {
+		return err
+	} else if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	sec, _ := doc[section].(map[string]any)
+	if sec == nil {
+		sec = map[string]any{}
+	}
+	if _, exists := sec[key]; exists {
+		fmt.Printf("warning: %q already existed in %s; replacing it\n", key, section)
+	}
+	sec[key] = value
+	doc[section] = sec
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+
+	fmt.Printf("✓ %q added to %s\n\n%s\n", key, path, hint)
+	return nil
+}
+
+// connectGuide es el modo paso a paso cuando no se dice qué servicio conectar.
+func connectGuide(ctx context.Context, daemonHost, gw string) error {
+	fmt.Println("kling connect — connect a tool to your AI agent")
+	fmt.Println()
+
+	snaps, err := api.NewClient(daemonHost).Snapshots(ctx)
+	if err != nil {
+		fmt.Printf("1. Can't reach the daemon (%v)\n", err)
+		fmt.Println("   Check the context:  kling context ls")
+		return nil
+	}
+	if len(snaps) == 0 {
+		fmt.Println("1. There's no service yet. Create one:")
+		fmt.Println()
+		fmt.Println("   make bridge")
+		fmt.Println("   sudo ./scripts/80-mcp-image.sh stdio files -p \"nodejs npm\" -- \\")
+		fmt.Println("        npx -y @modelcontextprotocol/server-filesystem /data")
+		fmt.Println("   kling run -name files-tmpl -image files -service files")
+		fmt.Println("   kling commit files-tmpl files && kling stop files-tmpl")
+		fmt.Println()
+		fmt.Println("2. Then come back here:  kling connect files")
+		return nil
+	}
+
+	fmt.Println("Available services:")
+	for _, s := range snaps {
+		n := s.Name
+		if svc := s.Service(); svc != "" {
+			n = svc
+		}
+		fmt.Printf("  · %-20s (%s shared memory)\n", n, human(s.MemBytes))
+	}
+	fmt.Printf("\nGateway: %s\n", gw)
+	fmt.Println("  If it's not running yet, on the daemon host:")
+	fmt.Println("    kling gateway -listen 0.0.0.0:8080")
+	if list := detectedClients(); len(list) > 0 {
+		fmt.Printf("\nAgents detected here: %s\n", labels(list))
+	}
+	fmt.Println()
+	fmt.Println("RECOMMENDED — a single entry for everything, without filling up the context:")
+	fmt.Println("  kling connect -all -install all")
+	fmt.Println("  kling connect -all -only eco,files -install all        (only some)")
+	fmt.Println()
+	fmt.Println("Or a standalone one:")
+	first := snaps[0].Name
+	if svc := snaps[0].Service(); svc != "" {
+		first = svc
+	}
+	fmt.Printf("  kling connect %s -install claude-code\n", first)
+	return nil
+}

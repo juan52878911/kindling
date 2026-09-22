@@ -1,0 +1,7 @@
+/kling-mcp
+/kling-mcp-linux-*
+/kling-bridge
+/kling-bridge-local
+/dist/
+go.work
+go.work.sum
