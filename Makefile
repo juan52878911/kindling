@@ -34,7 +34,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets bridge bridge-local deploy deploy-mac test clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets bridge bridge-local guest deploy deploy-mac test clean fmt
 
 all: build
 
@@ -72,6 +72,14 @@ bridge:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
 		-ldflags "$(LDFLAGS)" -o kling-bridge ./cmd/kling-bridge
 	@echo "kling-bridge  ($(VERSION), linux/$(GOARCH))"
+
+## guest — el agente genérico de invitado (PID 1 de las microVMs sin servidor
+## MCP: imágenes de herramientas, sandboxes). Estático por la misma razón que el
+## puente.
+guest:
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
+		-ldflags "$(LDFLAGS)" -o kling-guest ./cmd/kling-guest
+	@echo "kling-guest  ($(VERSION), linux/$(GOARCH))"
 
 ## bridge-local — el mismo puente, para TU máquina.
 ##
@@ -124,17 +132,19 @@ daemon-full: assets
 ## Van también el puente y 80-mcp-image.sh: `kling add` los necesita EN el host,
 ## porque construir una imagen monta un loopback y hace chroot, y eso solo lo
 ## puede hacer quien ya es root allí.
-deploy: daemon bridge
+deploy: daemon bridge guest
 	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-bridge scripts/80-mcp-image.sh $(TARGET):/tmp/
+	scp -q kling-bridge kling-guest scripts/80-mcp-image.sh $(TARGET):/tmp/
 	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service \
 		packaging/$(BIN)-heal.service packaging/$(BIN)-heal.timer $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
 		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
+		sudo install -m755 /tmp/kling-guest /usr/local/lib/kindling/kling-guest && \
+		sudo install -d -m755 /usr/local/lib/kindling/builders && \
 		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
 		sudo install -m644 /tmp/$(BIN).service /tmp/$(BIN)-gateway.service \
 			/tmp/$(BIN)-heal.service /tmp/$(BIN)-heal.timer /etc/systemd/system/ && \
@@ -188,4 +198,4 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-bridge kling-bridge-local
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-bridge kling-bridge-local kling-guest

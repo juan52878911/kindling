@@ -13,6 +13,13 @@ depuración.
 | [`releases.md`](releases.md) | Cómo se compilan, verifican y publican los binarios; cómo crear una release nueva | mantienes el proyecto o quieres compilar desde fuentes |
 | [`densidad-zram.md`](densidad-zram.md) | Swap comprimido en RAM para densificar el host: cuándo ayuda, cuándo estorba, y el plan de medición antes/después | quieres más microVMs co-residentes sin más RAM |
 
+## Para quien amplía kindling
+
+| Documento | Qué cubre | Léelo si… |
+|---|---|---|
+| [`extensions.md`](extensions.md) | El protocolo de extensiones de `kling`: manifiesto, descubrimiento, `exec`, ganchos de `status`, configuración, y lo que el núcleo ofrece a una extensión | vas a escribir una extensión o quieres entender cómo llega `kling mcp` a su código |
+| [`api.md`](api.md) | Todas las rutas del daemon, las capacidades, el protocolo de los constructores de imágenes y el proxy al invitado | vas a hablar con el daemon desde otro programa |
+
 ## Diseño y auditorías
 
 | Documento | Qué cubre | Léelo si… |
