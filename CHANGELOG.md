@@ -4,6 +4,43 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## Sin publicar — v0.7.0
+
+**Sandboxes para agentes de código.** El núcleo gana lo que necesita un agente para
+ejecutar lo que escribe sin tocar el host: exec en streaming, ficheros y sandboxes de
+usar y tirar. Guía en [`docs/exec-sandbox.md`](docs/exec-sandbox.md).
+
+| kindling | kindling-mcp |
+|---|---|
+| v0.7.x | v0.1.x |
+
+### Novedades
+
+- **`kling sandbox create|ls|renew|rm`** (`/sandboxes`): una microVM con exec, sin red
+  por defecto, que se destruye al vencer su TTL (10 min por defecto). Desde un snapshot
+  con exec arranca en ~300 ms con el estado de la plantilla.
+- **`kling exec`** (`POST /machines/{ref}/exec`): stdout y stderr por separado y en
+  streaming (NDJSON, también por SSH), stdin, entorno, directorio, plazo que mata al
+  grupo de procesos (código 137) y topes de salida por flujo. Termina con el código del
+  comando remoto. `?wait=1` da el resultado agregado.
+- **`kling cp`** (`/machines/{ref}/files`): subir y bajar ficheros, con escritura
+  atómica y sin seguir enlaces en el último componente.
+- **`kling run -allow-exec` y `-on-ttl remove`.** `allow_exec` viaja por el API como
+  opt-in explícito, se graba en el snapshot con `commit` y las instancias lo heredan;
+  pedirlo sobre un snapshot sin él es `409`.
+- El agente de invitado (`pkg/guest`, `kling-guest`) sirve `/exec/stream` y `/files`,
+  solo con `kling.exec=1`.
+- `GET /info` anuncia las capacidades `exec` y `sandboxes`.
+
+### Cambios que se notan
+
+- Las imágenes construidas antes de v0.7 llevan un agente sin exec en streaming: el
+  daemon contesta `501` y pide reconstruirlas (`kling images toolchain`, o
+  `kling images build -builder base`). `kling volume populate` sigue funcionando con
+  ellas.
+- `scripts/90-e2e.sh` prueba exec, ficheros y sandboxes, y compara con los mensajes en
+  inglés del CLI.
+
 ## Sin publicar — v0.6.0
 
 **El núcleo deja de llevar MCP.** Todo lo de alojar servidores MCP —el puente, el

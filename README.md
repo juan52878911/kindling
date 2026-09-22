@@ -17,9 +17,9 @@ A Firecracker microVM runtime with golden snapshots: machines that wake in
 milliseconds from a file on disk, with kernel-level isolation, behind a docker-like CLI
 called `kling`. What runs inside is up to you, and `kling` grows through extensions.
 
-> Status: **v0.6.0 — the core stands on its own.** `kling` manages microVMs with
+> Status: **v0.7.0 — sandboxes for code agents.** `kling` manages microVMs with
 > networking, golden snapshots, isolation, persistent volumes, layered images, events,
-> image builders and a documented daemon API. Hosting MCP servers on demand — the use
+> image builders, a documented daemon API and throwaway sandboxes with streaming exec. Hosting MCP servers on demand — the use
 > kindling was born for — now lives in the **[kindling-mcp](https://github.com/juan52878911/kindling-mcp)**
 > extension, which adds `kling mcp`, `kling add`, `kling connect`, `kling gateway` and the
 > rest to the same `kling` command. See the [CHANGELOG](CHANGELOG.md) for what each
@@ -67,6 +67,9 @@ sections:
 · [Golden snapshots](#golden-snapshots)
 · [Lifecycle and robustness](#lifecycle-and-robustness)
 · [Networking](#networking-one-namespace-per-microvm)
+
+**Sandboxes**
+· [Sandboxes for code agents](#sandboxes-for-code-agents)
 
 **Extensions**
 · [Extensions: MCP servers and more](#extensions)
@@ -429,6 +432,34 @@ It is the same approach AWS Lambda uses, and for the same reason.
 
 ---
 
+# Sandboxes for code agents
+
+An agent writes a script and needs to run it without touching your machine. `kling`
+gives it a throwaway microVM: it wakes from a snapshot in milliseconds, has no network
+unless asked for, streams the output of whatever it is told to run, and destroys itself
+when its lifetime runs out.
+
+```sh
+kling images toolchain                          # an image with node, npm, python3 and pip
+kling sandbox create -image toolchain -name sb  # ~5 s cold
+kling cp ./analysis.py sb:/tmp/
+kling exec sb -- python3 /tmp/analysis.py       # output arrives as it is produced
+kling cp sb:/tmp/result.json .
+kling sandbox rm sb
+```
+
+`kling exec` exits with the remote exit code, separates stdout from stderr, takes stdin
+with `-i` and kills the whole process group on `-timeout`. Prepare a template once
+(`kling run -allow-exec`, install what you need, `kling commit`) and every sandbox
+created with `-from` starts in **~300 ms** with it already inside — five in parallel took
+0.57 s in the lab.
+
+Exec is **opt-in at boot**: it travels in the kernel command line that only the host
+writes, and it is frozen with the memory. A service microVM never has it, and a snapshot
+without it cannot become a sandbox. Guide: [`docs/exec-sandbox.md`](docs/exec-sandbox.md).
+
+---
+
 # Extensions
 
 `kling` is the only command you type. What is not part of the microVM core arrives as an
@@ -462,7 +493,7 @@ connection to your AI agent. The measured numbers above were taken with it.
 
 | kindling | kindling-mcp |
 |---|---|
-| v0.6.x | v0.1.x |
+| v0.6.x, v0.7.x | v0.1.x |
 
 Upgrading from v0.5 or earlier: snapshots, catalogs, health and links are migrated in
 place by the daemon; install kindling-mcp and every command you used keeps working.
@@ -973,6 +1004,7 @@ instances share pages.
 | [`docs/README.md`](docs/README.md) | Index of everything under `docs/` |
 | [`docs/extensions.md`](docs/extensions.md) | The extension protocol: manifest, dispatch, hooks, units |
 | [`docs/api.md`](docs/api.md) | The daemon HTTP API that extensions build on |
+| [`docs/exec-sandbox.md`](docs/exec-sandbox.md) | Sandboxes, streaming exec and file copy for code agents |
 | [`SECURITY.md`](SECURITY.md) | Threat model, barriers, and what is NOT solved |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-version changes; release notes for [v0.2.0](docs/RELEASE-v0.2.0.md) and [v0.3.0](docs/RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: the Lima recipe, limits, and cold-start levers |

@@ -128,6 +128,17 @@ solo al crear: un `../../etc` saldría del directorio de datos.
 - **La integridad de un dorado se comprueba** (sha256 de sus ficheros) antes de
   instanciarlo; el veredicto se recuerda y se re-verifica si tamaño o fecha cambian.
 
+### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
+
+`kling exec`, `kling cp` y los sandboxes ejecutan y escriben dentro de una microVM.
+Solo existen en máquinas creadas con `allow_exec`, que viaja en la línea de comandos
+del kernel: la escribe el host, el invitado no puede concedérsela, y sin ella las
+rutas `/exec` y `/files` del agente no están registradas. Se congela con la memoria,
+así que un snapshot de servicio (sin ella) nunca da máquinas que ejecuten, y el
+daemon se niega a crear un sandbox desde él. El daemon no se fía del flujo del
+agente: recorta la salida a los topes y valida cada evento. Los sandboxes nacen sin
+red y se destruyen al vencer su TTL.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
