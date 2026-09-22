@@ -52,7 +52,7 @@ func cmdCompletion(args []string) error {
 func completionCommands() string {
 	var out []string
 	for _, c := range coreCommands {
-		if c != "dial-stdio" && c != "volumes" {
+		if c != "dial-stdio" && c != "volumes" && c != "builder" {
 			out = append(out, c)
 		}
 	}

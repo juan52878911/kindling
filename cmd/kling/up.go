@@ -114,8 +114,7 @@ func upHere(root string, checkOnly bool) error {
 	fmt.Println()
 	fmt.Println("Next step:")
 	fmt.Println("  kling status                     checks that everything responds")
-	fmt.Println("  kling add <server>               packages an MCP server as a service")
-	fmt.Println("  kling connect -all -install all  plugs it into your agents")
+	fmt.Println("  kling plugins                    what the installed extensions add (kling-mcp: MCP servers)")
 	return nil
 }
 
@@ -145,7 +144,7 @@ func upRemote(endpoint, root string, checkOnly bool) error {
 	case checkOnly:
 	default:
 		fmt.Printf("Everything's ready. Start it there (needs sudo, and sudo needs your terminal):\n")
-		fmt.Printf("  ssh -t %s 'sudo systemctl enable --now kling && sudo systemctl start kling-gateway'\n", target)
+		fmt.Printf("  ssh -t %s 'sudo systemctl enable --now %s'\n", target, strings.Join(append([]string{"kling"}, p.extUnits...), " "))
 	}
 	fmt.Println()
 	fmt.Println("And then, from here:  kling status")
@@ -212,11 +211,11 @@ type probe struct {
 	runAs       string // nombre del usuario sin privilegios
 	runAsExists bool
 	systemd     bool
-	unit        bool // /etc/systemd/system/kling.service
-	unitGateway bool
-	active      string // salida de systemctl is-active kling
-	kernel      bool   // $root/images/vmlinux
-	baseImage   bool   // $root/images/min.ext4
+	unit        bool     // /etc/systemd/system/kling.service
+	extUnits    []string // unidades de extensiones instaladas (kling-gateway.service...)
+	active      string   // salida de systemctl is-active kling
+	kernel      bool     // $root/images/vmlinux
+	baseImage   bool     // $root/images/min.ext4
 	root        string
 }
 
@@ -248,7 +247,11 @@ func localProbe(root string) probe {
 	p.runAsExists = err == nil
 	p.systemd = inPath("systemctl")
 	p.unit = fileExists("/etc/systemd/system/kling.service")
-	p.unitGateway = fileExists("/etc/systemd/system/kling-gateway.service")
+	for _, u := range extensionUnits() {
+		if fileExists("/etc/systemd/system/" + u) {
+			p.extUnits = append(p.extUnits, u)
+		}
+	}
 	if p.systemd {
 		// is-active devuelve estado 3 cuando no está activo: el error da igual,
 		// lo que importa es la palabra que imprime.
@@ -274,7 +277,7 @@ echo "nft=$(si "$(command -v nft 2>/dev/null)")"
 echo "runas=$(si "$(id -u "$RUNAS" 2>/dev/null)")"
 echo "systemd=$(si "$(command -v systemctl 2>/dev/null)")"
 echo "unit=$(si "$([ -f /etc/systemd/system/kling.service ] && echo 1)")"
-echo "unitgw=$(si "$([ -f /etc/systemd/system/kling-gateway.service ] && echo 1)")"
+echo "units=$(for u in $UNITS; do [ -f "/etc/systemd/system/$u" ] && printf '%s ' "$u"; done)"
 echo "active=$(systemctl is-active kling 2>/dev/null || true)"
 echo "kernel=$(si "$([ -f "$ROOT/images/vmlinux" ] && echo 1)")"
 echo "image=$(si "$([ -f "$ROOT/images/min.ext4" ] && echo 1)")"
@@ -286,7 +289,7 @@ func remoteProbe(target, root string) (probe, error) {
 	// BatchMode: si las claves no están puestas queremos un error inmediato, no
 	// una petición de contraseña en mitad de un diagnóstico.
 	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-		target, "RUNAS="+p.runAs, "ROOT="+root, "sh", "-s")
+		target, "RUNAS="+p.runAs, "ROOT="+root, "UNITS='"+strings.Join(extensionUnits(), " ")+"'", "sh", "-s")
 	cmd.Stdin = strings.NewReader(remoteScript)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -307,7 +310,8 @@ func remoteProbe(target, root string) (probe, error) {
 	p.ip, p.iptables, p.nft = yes("ip"), yes("iptables"), yes("nft")
 	p.runAsExists = yes("runas")
 	p.systemd = yes("systemd")
-	p.unit, p.unitGateway = yes("unit"), yes("unitgw")
+	p.unit = yes("unit")
+	p.extUnits = strings.Fields(vals["units"])
 	p.active = vals["active"]
 	p.kernel, p.baseImage = yes("kernel"), yes("image")
 	return p, nil
@@ -469,16 +473,14 @@ func startServices(p probe) error {
 		fmt.Println("  Deploy them from this repo (installs binary, units, and token):")
 		fmt.Println("    make deploy HOST=ssh://user@this-host")
 		fmt.Println()
-		fmt.Println("  Or start it by hand, in two terminals:")
+		fmt.Println("  Or start it by hand:")
 		fmt.Printf("    sudo kling daemon -root %s\n", p.root)
-		fmt.Println("    kling gateway -listen 127.0.0.1:8080")
 		return nil
 	}
 
-	units := []string{"kling"}
-	if p.unitGateway {
-		units = append(units, "kling-gateway")
-	}
+	// El daemon y lo que las extensiones instalaron (el gateway MCP, su
+	// temporizador de heal...).
+	units := append([]string{"kling"}, p.extUnits...)
 	for _, u := range units {
 		// La orden se imprime ANTES de lanzarla: quien la ve puede pararla, y
 		// sobre todo puede repetirla sin kindling delante.
@@ -816,4 +818,15 @@ func httpOK(url string) error {
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
 	return nil
+}
+
+// extensionUnits son las unidades de systemd que declaran las extensiones.
+func extensionUnits() []string {
+	var out []string
+	for _, p := range extensions().Plugins {
+		if p.Err == nil {
+			out = append(out, p.Manifest.Units...)
+		}
+	}
+	return out
 }

@@ -26,6 +26,7 @@ func mcpExtension() *plugin.Builtin {
 			Summary:         "hosts MCP servers on demand in microVMs",
 			Commands:        mcpCommands,
 			Hooks:           []string{plugin.HookStatus},
+			Units:           []string{"kling-gateway.service", "kling-heal.timer"},
 		},
 		Commands: map[string]func([]string) error{
 			"search":  cmdSearch,

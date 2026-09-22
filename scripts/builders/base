@@ -1,0 +1,3 @@
+#!/bin/sh
+# Constructor "base" del núcleo: valida en Go y construye con 81-base-image.sh.
+exec /usr/local/bin/kling builder base "$@"

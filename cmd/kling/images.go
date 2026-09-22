@@ -203,10 +203,10 @@ const ToolchainImage = "toolchain"
 
 // imagesToolchain construye la imagen con npm y pip dentro.
 //
-// No lleva servidor MCP: su comando es un shell que nunca se invoca, porque a
-// esta imagen no se le abren sesiones MCP. Lo único que se usa de ella es el
-// puente y su /exec, que es como `volume populate` instala paquetes dentro de
-// una microVM en vez de en el anfitrión.
+// No lleva servidor MCP: su PID 1 es el agente de invitado genérico,
+// kling-guest, y lo único que se usa de ella es su /exec, que es como
+// `volume populate` instala paquetes dentro de una microVM en vez de en el
+// anfitrión. La construye el constructor "base" del núcleo.
 func imagesToolchain(args []string) error {
 	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -221,18 +221,15 @@ func imagesToolchain(args []string) error {
 	fmt.Printf("Building %q: node, npm, python3 and pip inside.\n", *name)
 	fmt.Print("  (installs quite a bit; takes a few minutes)... ")
 
+	// El constructor "base" del núcleo: paquetes del sistema y kling-guest como
+	// PID 1, que es quien sirve /exec cuando populate enciende kling.exec=1.
+	spec, _ := json.Marshal(BaseSpec{Packages: []string{"nodejs", "npm", "python3", "py3-pip"}})
 	res, err := api.NewClient(hostOf(*host)).BuildImage(ctx, api.BuildImageRequest{
-		Name: *name,
-		// nodejs/npm para el mundo de node; python3/py3-pip para el de Python.
-		// Nada más: cada paquete extra es peso en una imagen que solo existe
-		// para instalar cosas en un volumen y morirse.
-		Packages: []string{"nodejs", "npm", "python3", "py3-pip"},
-		// Sitio para que quepan node y las ruedas de Python a la vez.
-		GrowMB: 1536,
-		// Un shell que nunca llega a ejecutarse: el puente solo lanza este
-		// comando cuando alguien abre una sesión MCP, y a esta imagen no se le
-		// abren. Existe porque el empaquetador exige un comando.
-		Cmd: []string{"/bin/sh"},
+		Name:    *name,
+		Base:    "min",
+		GrowMB:  1536,
+		Builder: "base",
+		Spec:    spec,
 	})
 	if err != nil {
 		fmt.Println("✗")

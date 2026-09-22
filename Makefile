@@ -137,7 +137,8 @@ deploy: daemon bridge guest
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-bridge kling-guest scripts/80-mcp-image.sh $(TARGET):/tmp/
+	scp -q kling-bridge kling-guest scripts/80-mcp-image.sh scripts/81-base-image.sh $(TARGET):/tmp/
+	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
 	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service \
 		packaging/$(BIN)-heal.service packaging/$(BIN)-heal.timer $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
@@ -145,6 +146,8 @@ deploy: daemon bridge guest
 		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
 		sudo install -m755 /tmp/kling-guest /usr/local/lib/kindling/kling-guest && \
 		sudo install -d -m755 /usr/local/lib/kindling/builders && \
+		sudo install -m755 /tmp/81-base-image.sh /usr/local/lib/kindling/81-base-image.sh && \
+		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
 		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
 		sudo install -m644 /tmp/$(BIN).service /tmp/$(BIN)-gateway.service \
 			/tmp/$(BIN)-heal.service /tmp/$(BIN)-heal.timer /etc/systemd/system/ && \

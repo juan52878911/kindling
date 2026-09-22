@@ -55,6 +55,11 @@ type Manifest struct {
 	Commands []Command   `json:"commands"`
 	Config   []ConfigKey `json:"config,omitempty"`
 	Hooks    []string    `json:"hooks,omitempty"`
+
+	// Units son unidades de systemd que la extensión instala en el host del
+	// daemon (p. ej. "kling-gateway.service"). `kling up` las arranca junto al
+	// daemon si están instaladas.
+	Units []string `json:"units,omitempty"`
 }
 
 // Command es un subcomando de primer nivel que la extensión añade a `kling`.
@@ -86,6 +91,7 @@ var (
 	reName    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	reCommand = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	reKey     = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`)
+	reUnit    = regexp.MustCompile(`^[a-zA-Z0-9@_.-]+\.(service|timer|socket|path)$`)
 )
 
 // Validate comprueba que el manifiesto se puede usar. Un manifiesto inválido no
@@ -110,6 +116,11 @@ func (m *Manifest) Validate() error {
 	for _, h := range m.Hooks {
 		if h != HookStatus && h != HookUp {
 			return fmt.Errorf("unknown hook %q", h)
+		}
+	}
+	for _, u := range m.Units {
+		if !reUnit.MatchString(u) {
+			return fmt.Errorf("invalid systemd unit %q", u)
 		}
 	}
 	for _, k := range m.Config {

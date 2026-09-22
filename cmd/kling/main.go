@@ -185,6 +185,8 @@ func main() {
 		return
 	case "plugins":
 		err = cmdPlugins(args)
+	case "builder": // lo ejecuta el daemon como root; ver builder.go
+		err = cmdBuilder(args)
 	case "-h", "--help", "help":
 		if len(args) > 0 {
 			err = helpFor(args[0])
