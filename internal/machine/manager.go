@@ -50,9 +50,11 @@ const defaultOverlayMiB = 512
 // Límites de seguridad. El código que corre dentro se considera hostil, así que
 // una sola microVM no debe poder degradar el host ni a las demás.
 const (
-	// MaxMachines evita que un cliente comprometido agote el host creando
-	// máquinas sin fin.
-	MaxMachines = 256
+	// defaultMaxMachines evita que un cliente comprometido agote el host creando
+	// máquinas sin fin. Es un tope de seguridad, no una medida de capacidad: con
+	// sandboxes efímeros y un host grande se queda corto, así que se puede subir
+	// con KLING_MAX_MACHINES (ver maxMachines).
+	defaultMaxMachines = 256
 
 	// Caudal máximo por dispositivo. Sin esto una microVM satura el disco o la
 	// red del host y tumba a todas las demás.
@@ -136,6 +138,10 @@ type Manager struct {
 	// Se toca bajo mu; se limpia al congelar con éxito o al darla por perdida.
 	freezeFails map[string]int
 
+	// squeezedAt es cuándo se apretó por última vez el globo de cada máquina
+	// para hacer sitio. Ver makeRoom.
+	squeezedAt map[string]time.Time
+
 	// orphanSeen cuenta las vueltas seguidas del vigilante en las que un VMM
 	// pareció huérfano. Ver sweepOrphanVMMs: matar a la primera es una carrera
 	// con la máquina que está naciendo.
@@ -171,6 +177,9 @@ type Manager struct {
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
 func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
+
+// tryLock es lock sin esperar: (nil, false) si otro tiene la máquina.
+func (m *Manager) tryLock(id string) (func(), bool) { return m.lifecycle.intentar(id) }
 
 func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	for _, d := range []string{root, filepath.Join(root, "machines"), filepath.Join(root, "images")} {
@@ -528,8 +537,8 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// agotar el host como arrancar en frío, y es el camino que más rápido crea
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
 	// dejaba sin freno justo donde más falta hace.
-	if n := m.Count(); n >= MaxMachines {
-		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
+	if err := m.checkMachineLimit(); err != nil {
+		return nil, err
 	}
 	switch req.OnTTL {
 	case "", api.OnTTLFreeze:
@@ -554,8 +563,8 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		req.MemMiB = 256
 	}
 
-	if n := m.Count(); n >= MaxMachines {
-		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
+	if err := m.checkMachineLimit(); err != nil {
+		return nil, err
 	}
 
 	// El id se genera AQUI y no mas abajo: es la llave de la reserva, y la
@@ -612,7 +621,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// y pasen las dos. La reserva se libera al salir —el defer cubre todos los
 	// returns—: en un fallo, la memoria nunca se ocupó; en el éxito, ya la ocupa
 	// el proceso, así que "pendiente" deja de tener sentido.
-	releaseMem, err := m.reserveMemory(req.MemMiB, "")
+	releaseMem, err := m.reserveMemoryMakingRoom(ctx, req.MemMiB, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -1201,9 +1210,15 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
+	return m.squeezeLocked(ctx, mc.ID, ref)
+}
 
+// squeezeLocked es el apretón propiamente dicho, con el cerrojo de la máquina ya
+// tomado por quien llama (Squeeze espera por él; makeRoom lo intenta y se salta
+// las ocupadas).
+func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.SqueezeResult, error) {
 	// Pudo cambiar de estado mientras esperábamos el lock.
-	cur, ok := m.Get(mc.ID)
+	cur, ok := m.Get(id)
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
@@ -1212,11 +1227,11 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	}
 
 	m.mu.RLock()
-	sock := m.socket[mc.ID]
+	sock := m.socket[id]
 	pid := cur.PID
 	m.mu.RUnlock()
 	if sock == "" {
-		return nil, fmt.Errorf("no socket for %s", mc.ID)
+		return nil, fmt.Errorf("no socket for %s", id)
 	}
 	c := fc.New(sock)
 
@@ -1243,7 +1258,7 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
 	if target <= stats.ActualMiB {
 		// El invitado no tiene holgura que reclamar.
-		return &api.SqueezeResult{ID: mc.ID, ReclaimedMiB: 0, GuestFreeMiB: freeMiB, RSSMiB: rssBefore}, nil
+		return &api.SqueezeResult{ID: id, ReclaimedMiB: 0, GuestFreeMiB: freeMiB, RSSMiB: rssBefore}, nil
 	}
 
 	if err := c.PatchBalloon(ctx, target); err != nil {
@@ -1256,7 +1271,7 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
 	// cliente abandonó.
 	if err := c.PatchBalloon(context.WithoutCancel(ctx), 0); err != nil {
-		log.Printf("warning: could not deflate the balloon for %s: %v", mc.ID, err)
+		log.Printf("warning: could not deflate the balloon for %s: %v", id, err)
 	}
 
 	rssAfter := procRSSMiB(pid)
@@ -1265,10 +1280,10 @@ func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, 
 		reclaimed = 0
 	}
 
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
 		Message: fmt.Sprintf("squeezed: ~%d MiB returned to host (RSS %d→%d MiB)", reclaimed, rssBefore, rssAfter)})
 
-	return &api.SqueezeResult{ID: mc.ID, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
+	return &api.SqueezeResult{ID: id, ReclaimedMiB: reclaimed, GuestFreeMiB: freeMiB, RSSMiB: rssAfter}, nil
 }
 
 // waitBalloon espera a que el globo alcance ~el objetivo. El inflado lo hace el

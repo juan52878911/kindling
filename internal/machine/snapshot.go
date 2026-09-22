@@ -515,7 +515,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La clave de compartición es el snapshot de origen: todas sus instancias
 	// mapean el MISMO mem.file dorado, así que la segunda y siguientes solo
 	// reservan su fracción divergente. Es aquí donde la densidad se vuelve real.
-	releaseMem, merr := m.reserveMemory(snap.MemMiB, req.From)
+	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, snap.MemMiB, req.From, "")
 	if merr != nil {
 		return nil, merr
 	}

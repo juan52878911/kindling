@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -666,6 +667,22 @@ type SqueezeResult struct {
 	GuestFreeMiB int    `json:"guest_free_mib"` // memoria libre que reportaba el invitado
 	RSSMiB       int    `json:"rss_mib"`        // RSS del proceso tras apretar
 }
+
+// StatusMachineLimit es la negativa por haber llegado al tope de máquinas del
+// daemon. 409 y no 507: no es falta de memoria, y confundirlos hace que quien
+// escala intente hacer sitio congelando —que no sube el contador— en vez de
+// retirar máquinas o subir el tope.
+const StatusMachineLimit = 409
+
+// IsMachineLimit dice si un error es la negativa por el tope de máquinas.
+func IsMachineLimit(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == StatusMachineLimit && strings.Contains(se.Message, machineLimitMark)
+}
+
+// machineLimitMark marca los errores de tope de máquinas para poder
+// reconocerlos: 409 lo usan más cosas.
+const machineLimitMark = "machine limit"
 
 // StatusInsufficientMemory es la negativa por falta de memoria en el anfitrión.
 // 507 es "Insufficient Storage", que es lo más cerca que hay en HTTP.

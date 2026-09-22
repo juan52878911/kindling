@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 func gwConDosOciosas(t *testing.T) (*Scheduler, *int) {
@@ -80,5 +82,26 @@ func TestNoSeSacrificaUnaConPeticionesEnVuelo(t *testing.T) {
 
 	if got := g.evictLRU(context.Background(), "otro", ""); got != "nueva" {
 		t.Errorf("evictLRU = %q; 'vieja' esta atendiendo y no debe tocarse", got)
+	}
+}
+
+// El tope de máquinas del daemon no es falta de memoria: congelar no baja el
+// contador, así que la única salida sin perder trabajo de nadie es soltar una
+// precalentada. Antes el error ni se reconocía y el cliente se lo comía.
+func TestTopeDeMaquinasSeDistingueDeLaFaltaDeMemoria(t *testing.T) {
+	tope := &api.StatusError{Code: api.StatusMachineLimit,
+		Message: "machine limit reached: 256 of 256 machines (200 running, 56 warm, 0 failed, 0 stopped)"}
+	if !api.IsMachineLimit(tope) {
+		t.Error("no reconoce el tope de máquinas")
+	}
+	if api.IsInsufficientMemory(tope) {
+		t.Error("lo confunde con falta de memoria")
+	}
+	// Un 409 cualquiera no es el tope: hay más cosas que contestan 409.
+	if api.IsMachineLimit(&api.StatusError{Code: 409, Message: "the machine is warm"}) {
+		t.Error("cualquier 409 pasa por tope de máquinas")
+	}
+	if api.IsMachineLimit(&api.StatusError{Code: api.StatusInsufficientMemory, Message: "doesn't fit"}) {
+		t.Error("un 507 pasa por tope de máquinas")
 	}
 }

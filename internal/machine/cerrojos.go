@@ -67,6 +67,44 @@ func (c *cerrojos) tomar(id string) func() {
 	}
 }
 
+// intentar es tomar sin esperar: devuelve false si otro lo tiene.
+//
+// Lo usa quien puede permitirse saltarse una máquina ocupada (makeRoom, que
+// aprieta globos para hacer sitio): bloquear ahí pondría un arranque a esperar
+// detrás de una congelación entera, que es justo lo que se intenta evitar.
+func (c *cerrojos) intentar(id string) (func(), bool) {
+	c.mu.Lock()
+	if c.m == nil {
+		c.m = map[string]*cerrojo{}
+	}
+	e := c.m[id]
+	if e == nil {
+		e = &cerrojo{}
+		c.m[id] = e
+	}
+	e.refs++
+	c.mu.Unlock()
+
+	if !e.mu.TryLock() {
+		c.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(c.m, id)
+		}
+		c.mu.Unlock()
+		return nil, false
+	}
+	return func() {
+		e.mu.Unlock()
+		c.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(c.m, id)
+		}
+		c.mu.Unlock()
+	}, true
+}
+
 // vivos dice cuantas entradas hay. Solo para pruebas y diagnostico: si esto
 // crece sin parar, algo no esta soltando.
 func (c *cerrojos) vivos() int {
