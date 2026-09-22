@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,12 +13,9 @@ import (
 )
 
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
-//
-//	kling images refresh            pone el puente actual dentro de todas
-//	kling images refresh semgrep    solo en esa
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling images <ls|rm|refresh|toolchain|recipe|build|cat|put> [...]")
+		return fmt.Errorf("usage: kling images <ls|rm|toolchain|recipe|build|cat|put> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -38,7 +36,7 @@ func cmdImages(args []string) error {
 	case "put":
 		return imagesPut(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, refresh, toolchain, recipe, build, cat or put", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, cat or put", args[0])
 	}
 }
 
@@ -196,7 +194,20 @@ func imagesRecipe(args []string) error {
 	if len(rec.PIP) > 0 {
 		fmt.Printf("  pip:       %s\n", strings.Join(rec.PIP, " "))
 	}
-	fmt.Printf("  command:   %s\n", strings.Join(rec.Cmd, " "))
+	if len(rec.Cmd) > 0 {
+		fmt.Printf("  command:   %s\n", strings.Join(rec.Cmd, " "))
+	}
+	// Desde v0.6 las imágenes las construye un constructor con nombre, y lo que
+	// pidió va en su spec, que el núcleo no interpreta: se enseña tal cual.
+	if rec.Builder != "" {
+		fmt.Printf("  builder:   %s\n", rec.Builder)
+	}
+	if len(rec.Spec) > 0 && string(rec.Spec) != "null" {
+		var buf bytes.Buffer
+		if json.Indent(&buf, rec.Spec, "             ", "  ") == nil {
+			fmt.Printf("  spec:      %s\n", buf.String())
+		}
+	}
 	return nil
 }
 

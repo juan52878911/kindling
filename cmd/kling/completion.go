@@ -20,7 +20,7 @@ import (
 // coreSubcommands son los subcomandos del núcleo que se completan.
 var coreSubcommands = [][2]string{
 	{"volume|volumes", "create ls rm populate"},
-	{"images", "ls refresh toolchain recipe rm build cat put"},
+	{"images", "ls toolchain recipe rm build cat put"},
 	{"context", "ls use add rm"},
 	{"config", "show path set"},
 	{"plugins", "ls"},

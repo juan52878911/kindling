@@ -34,7 +34,7 @@ USAGE
 GETTING STARTED
   up                                               gets the runtime ready: KVM,
                                                    nftables, user, images,
-                                                   daemon and gateway
+                                                   daemon and extension units
   status [-json]                                   which piece is up and which is missing
 
 VOLUMES
@@ -43,7 +43,6 @@ VOLUMES
   volume ls [-json] | rm <name>                    list / remove
   volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
   images ls [-json]                                lists built rootfs images
-  images refresh [image...]                        puts the current bridge inside the images
   images toolchain                                 builds the image with npm and pip (used by populate)
   images recipe <image>                            how it was built
   images build <name> -builder B [-spec f.json]    builds it with a builder installed
@@ -192,6 +191,10 @@ func main() {
 		if p := extensions().Lookup(cmd); p != nil {
 			err = plugin.Exec(p, cmd, args, config.Path())
 			break
+		}
+		if hint, ok := movedToExtension[cmd]; ok {
+			fmt.Fprintf(os.Stderr, "kling %s %s\n", cmd, hint)
+			os.Exit(2)
 		}
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage(os.Stderr)
@@ -978,3 +981,16 @@ func cmdInfo(args []string) error {
 	}
 	return nil
 }
+
+// movedToExtension son comandos que hasta v0.5 traía el núcleo y ahora aporta
+// una extensión. Quien actualiza kindling sin instalarla teclea lo de siempre, y
+// volcarle la ayuda entera no le dice qué le falta.
+var movedToExtension = func() map[string]string {
+	const mcp = "is provided by the kindling-mcp extension since kindling v0.6. Install it with:\n" +
+		"  curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling-mcp/main/scripts/install.sh | sh"
+	m := map[string]string{}
+	for _, c := range []string{"mcp", "add", "search", "connect", "export", "memory", "migrate", "gateway"} {
+		m[c] = mcp
+	}
+	return m
+}()

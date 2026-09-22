@@ -62,8 +62,8 @@ func volumeCreate(args []string) error {
 	}
 	fmt.Printf("%s  created  (%s logical, %s on disk)\n", v.Name, human(v.SizeBytes), human(v.UsedBytes))
 	fmt.Printf("\nIt's sparse: it only uses what gets written inside.\n")
-	fmt.Printf("Mount it when importing a service:\n")
-	fmt.Printf("  kling mcp import <service> -volume %s\n", v.Name)
+	fmt.Printf("Mount it in a microVM (or a service, with kindling-mcp's -volume):\n")
+	fmt.Printf("  kling run -image <image> -volume %s\n", v.Name)
 	return nil
 }
 
@@ -211,7 +211,7 @@ func volumePopulate(args []string) error {
 		fmt.Println(indent(strings.TrimRight(res.Output, "\n")))
 	}
 	fmt.Printf("\n%s now uses %d MiB. Mount it wherever needed:\n", name, res.UsedMiB)
-	fmt.Printf("  kling mcp import <service> -volume %s:/libs:ro\n", name)
+	fmt.Printf("  kling run -image <image> -volume %s:/libs:ro\n", name)
 	return nil
 }
 
