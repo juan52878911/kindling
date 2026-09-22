@@ -445,7 +445,8 @@ func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	go m.watch(ctx, every)
 }
 
-// expireTTL congela las máquinas cuyo tiempo de vida se agotó.
+// expireTTL congela las máquinas cuyo tiempo de vida se agotó (o las destruye,
+// si se crearon con OnTTL "remove").
 //
 // Congelar, no matar: es la diferencia entre serverless y apagar cosas. La
 // herramienta deja de costar CPU y RAM, pero vuelve en ~30 ms cuando haga falta.
@@ -464,6 +465,15 @@ func (m *Manager) expireTTL(ctx context.Context) {
 	m.mu.RUnlock()
 
 	for _, id := range due {
+		// Un sandbox no se congela: se destruye. Lo que se ejecutó dentro no
+		// tiene por qué seguir existiendo, y congelarlo guardaría en disco una
+		// memoria que nadie va a volver a usar.
+		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
+			if err := m.Remove(id); err != nil {
+				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
+			}
+			continue
+		}
 		if _, err := m.Freeze(ctx, id); err != nil {
 			m.handleFreezeFailure(id, err)
 			continue

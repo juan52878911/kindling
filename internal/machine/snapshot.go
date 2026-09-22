@@ -207,6 +207,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 		Egress:       mc.Egress,
 		CPUPct:       mc.CPUPct,
 		AllowDomains: mc.AllowDomains,
+		// La puerta de exec se congela con la memoria: las instancias la tendrán
+		// quiera quien las cree o no, y el snapshot tiene que decirlo.
+		AllowExec:    mc.AllowExec,
 		RootfsSHA256: rootfsSHA,
 		SnapSHA256:   snapSHA,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
@@ -472,6 +475,16 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 
+	// La ejecución se encendió (o no) al arrancar la plantilla, en la línea de
+	// comandos del kernel que se congeló con la memoria: no se puede conceder al
+	// restaurar. Pedirla sobre un snapshot que no la tiene es un error, no un
+	// silencio que acabaría en un 404 del invitado.
+	if req.AllowExec && !snap.AllowExec {
+		return nil, fmt.Errorf("%w: snapshot %q was made from a machine without exec; "+
+			"commit one created with allow_exec (kling run -allow-exec) to use it as a sandbox",
+			ErrExecNotInSnapshot, req.From)
+	}
+
 	// HERENCIA desde el snapshot. RunRequest ya promete que "el resto de campos
 	// se heredan del snapshot", y la política de red no era una excepción: sin
 	// esto, un servicio importado con -egress internet despertaba SIEMPRE sin
@@ -617,7 +630,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		AllowDomains: req.AllowDomains,
 		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct,
-		Volumes: attachments(vols),
+		Volumes:   attachments(vols),
+		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(snap.Labels, req.Labels),
 		CreatedAt: time.Now(),

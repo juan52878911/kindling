@@ -64,6 +64,11 @@ type Machine struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	CPUPct     int `json:"cpu_pct,omitempty"`
 
+	// AllowExec: la máquina acepta exec y ficheros (ver RunRequest.AllowExec).
+	AllowExec bool `json:"allow_exec,omitempty"`
+	// OnTTL: "remove" si se destruye al vencer el TTL; vacío = se congela.
+	OnTTL string `json:"on_ttl,omitempty"`
+
 	// Volumes son los volúmenes montados, en el orden en que van los discos.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
@@ -116,10 +121,17 @@ type RunRequest struct {
 	// Volumes son los volúmenes a montar, en orden. Es la forma completa.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
-	// AllowExec enciende /exec dentro del invitado. Solo lo pone el daemon, y
-	// solo para las microVMs de un solo uso que pueblan un volumen: nunca para
-	// un servicio.
-	AllowExec bool `json:"-"`
+	// AllowExec enciende la ejecución de comandos y el acceso a ficheros dentro
+	// del invitado (POST /machines/{ref}/exec, /files). Es opt-in explícito y se
+	// decide al arrancar: viaja en la línea de comandos del kernel, que se congela
+	// con la memoria. Con From, el snapshot tiene que haberse hecho de una
+	// máquina con AllowExec (si no, 409); y al revés, las máquinas de un snapshot
+	// con AllowExec la tienen siempre, se pida o no.
+	AllowExec bool `json:"allow_exec,omitempty"`
+
+	// OnTTL es qué pasa cuando vence TTLSeconds: "freeze" (por defecto) o
+	// "remove".
+	OnTTL string `json:"on_ttl,omitempty"`
 
 	// Volume monta un volumen persistente como tercer disco. VolumeMount es
 	// dónde aparece dentro del invitado (por defecto /data).
@@ -313,6 +325,10 @@ type Snapshot struct {
 	// instancias nacen DESDE el snapshot, y sin esto despertarían con la lista
 	// vacía —es decir, sin poder salir a ninguno de sus dominios— para siempre.
 	AllowDomains []string `json:"allow_domains,omitempty"`
+
+	// AllowExec: la plantilla tenía la ejecución encendida, y por tanto la
+	// tienen todas sus instancias (la puerta se congeló con la memoria).
+	AllowExec bool `json:"allow_exec,omitempty"`
 
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.

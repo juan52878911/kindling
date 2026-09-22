@@ -59,7 +59,7 @@ step "1. Daemon"
 info=$($KLING info 2>&1) || { echo "$info"; echo "no alcanzo el daemon"; exit 1; }
 # Los espacios de la tabla son variables, así que se aplasta antes de comparar.
 kvm=$(printf '%s' "$info" | tr -s ' ' | grep -i '^KVM:' || true)
-contiene "$kvm" "sí" && ok "KVM disponible" || bad "KVM" "KVM: sí" "${kvm:-nada}"
+contiene "$kvm" "yes" && ok "KVM disponible" || bad "KVM" "KVM: yes" "${kvm:-nada}"
 contiene "$info" "irecracker" && ok "firecracker instalado" \
   || bad "firecracker" "una versión" "nada"
 
@@ -67,7 +67,7 @@ contiene "$info" "irecracker" && ok "firecracker instalado" \
 step "2. Ciclo de vida de una microVM"
 NAME="e2e-vida-$$"
 out=$($KLING run -name "$NAME" -image min 2>&1)
-if contiene "$out" "arrancada"; then
+if contiene "$out" "booted cold"; then
   ok "arranque en frío: $(echo "$out" | grep -o '[0-9]* ms' | head -1)"
 else
   bad "run" "una máquina arrancada" "$out"
@@ -96,7 +96,7 @@ $KLING rm "$NAME" >/dev/null 2>&1
 step "3. Volumen persistente"
 $KLING volume rm "$VOL" >/dev/null 2>&1
 out=$($KLING volume create "$VOL" -size 256M 2>&1)
-contiene "$out" "creado" && ok "volumen creado" || bad "volume create" "creado" "$out"
+contiene "$out" "created" && ok "volumen creado" || bad "volume create" "creado" "$out"
 
 # CON journal. Sin él, matar el VMM —que es como se para una microVM— deja el
 # sistema de ficheros incoherente y sin nada que reproducir: el siguiente
@@ -112,14 +112,14 @@ NAME="e2e-vol-$$"
 if $KLING run -name "$NAME" -image "$IMGVOL" -volume "$VOL" >/dev/null 2>&1; then
   # No se puede BORRAR mientras alguien lo usa.
   out=$($KLING volume rm "$VOL" 2>&1)
-  contiene "$out" "usan" && ok "se niega a borrar un volumen en uso" \
+  contiene "$out" "is used by" && ok "se niega a borrar un volumen en uso" \
     || bad "volume rm en uso" "un rechazo" "$out"
 
   # Y tampoco se puede MONTAR dos veces. Un ext4 no admite dos escritores: cada
   # uno cachea metadatos que el otro no ve y el resultado es corrupción. Esta
   # comprobación es lo único que lo impide.
   out=$($KLING run -name "$NAME-bis" -image "$IMGVOL" -volume "$VOL" 2>&1)
-  if contiene "$out" "en ESCRITURA"; then
+  if contiene "$out" "in WRITE mode"; then
     ok "se niega a montar el mismo volumen en dos escritores"
   else
     bad "doble montaje" "un rechazo nombrando a $NAME" "$out"
@@ -129,7 +129,7 @@ if $KLING run -name "$NAME" -image "$IMGVOL" -volume "$VOL" >/dev/null 2>&1; the
   # Con un escritor dentro no entra NADIE, ni a leer: vería metadatos cambiando
   # bajo sus pies.
   out=$($KLING run -name "$NAME-ro" -image "$IMGVOL" -volume "$VOL:/x:ro" 2>&1)
-  if contiene "$out" "en ESCRITURA"; then
+  if contiene "$out" "in WRITE mode"; then
     ok "un escritor bloquea también a los lectores"
   else
     bad "lector con escritor dentro" "un rechazo" "$out"
@@ -172,7 +172,7 @@ done
 
 # Y con lectores dentro no entra un escritor.
 out=$($KLING run -name "e2e-esc-$$" -image "$IMGVOL" -volume "$VOL" 2>&1)
-if contiene "$out" "leyendo"; then
+if contiene "$out" "is being read"; then
   ok "los lectores bloquean al escritor"
 else
   bad "escritor con lectores dentro" "un rechazo" "$out"
@@ -197,7 +197,7 @@ fi
 
 # Dos volúmenes en el mismo punto de montaje: el segundo taparía al primero.
 out=$($KLING run -name "e2e-choque-$$" -image "$IMGVOL" -volume "$VOL:/x" -volume "$VOL2:/x" 2>&1)
-contiene "$out" "taparía" && ok "rechaza dos volúmenes en el mismo punto" \
+contiene "$out" "would shadow" && ok "rechaza dos volúmenes en el mismo punto" \
   || bad "puntos de montaje repetidos" "un rechazo" "$out"
 $KLING rm "e2e-choque-$$" >/dev/null 2>&1
 
@@ -220,6 +220,74 @@ if $KLING run -name "$NAME" -image min >/dev/null 2>&1; then
   $KLING rm "$NAME" >/dev/null 2>&1
 else
   bad "run" "una máquina" "no arrancó"
+fi
+
+# ── 5. exec, ficheros y sandboxes ─────────────────────────────────────────────
+# Lo que usa un agente de código. Tres cosas que no se ven sin KVM: que el
+# agente del invitado ejecute y trocee la salida, que la puerta de exec viaje con
+# el snapshot, y que un sandbox se destruya solo al vencer su TTL.
+step "5. Exec, ficheros y sandboxes"
+SB="e2e-sb-$$"
+if $KLING sandbox create -image "$IMGVOL" -name "$SB" -ttl 5m -q >/dev/null 2>&1; then
+  out=$($KLING exec "$SB" -- sh -c 'echo out; echo err >&2; exit 3' 2>&1); code=$?
+  [ "$code" = "3" ] && contiene "$out" "out" && contiene "$out" "err" \
+    && ok "exec: salida de los dos flujos y código de salida 3" \
+    || bad "exec" "out, err y código 3" "código $code: $out"
+
+  out=$(echo hola | $KLING exec -i "$SB" -- tr a-z A-Z 2>&1)
+  [ "$out" = "HOLA" ] && ok "exec -i: stdin llega al comando" || bad "exec -i" "HOLA" "$out"
+
+  out=$($KLING exec "$SB" -- sh -c 'wget -q -T 3 -O- http://example.com >/dev/null && echo RED || echo SIN-RED' 2>/dev/null)
+  contiene "$out" "SIN-RED" && ok "sin red por defecto" || bad "egress de un sandbox" "SIN-RED" "$out"
+
+  $KLING exec -timeout 2s "$SB" -- sleep 30 >/dev/null 2>&1; code=$?
+  [ "$code" = "137" ] && ok "el plazo mata el comando (137)" || bad "exec -timeout" "137" "$code"
+
+  tmp=$(mktemp); echo "print(6*7)" > "$tmp"
+  if $KLING cp "$tmp" "$SB:/tmp/e2e.py" >/dev/null 2>&1; then
+    out=$($KLING exec "$SB" -- python3 /tmp/e2e.py 2>&1)
+    [ "$out" = "42" ] && ok "cp dentro y ejecutar" || bad "cp + python3" "42" "$out"
+    out=$($KLING cp "$SB:/tmp/e2e.py" - 2>&1)
+    [ "$out" = "print(6*7)" ] && ok "cp fuera" || bad "cp fuera" "print(6*7)" "$out"
+  else
+    bad "cp" "copia" "falló"
+  fi
+  rm -f "$tmp"
+  $KLING sandbox rm "$SB" >/dev/null 2>&1
+else
+  bad "sandbox create" "un sandbox sobre $IMGVOL" "no se creó"
+fi
+
+# Una máquina sin allow_exec no ejecuta nada: es lo que protege a los servicios.
+NAME="e2e-noexec-$$"
+if $KLING run -name "$NAME" -image "$IMGVOL" >/dev/null 2>&1; then
+  out=$($KLING exec "$NAME" -- true 2>&1)
+  contiene "$out" "not enabled" && ok "exec rechazado sin allow_exec" || bad "exec sin allow_exec" "un rechazo" "$out"
+  $KLING rm "$NAME" >/dev/null 2>&1
+fi
+
+# La puerta viaja con el snapshot: un sandbox desde él arranca en milisegundos
+# con el estado de la plantilla.
+TPL="e2e-tpl-$$"; SNAP="e2e-exec-snap-$$"
+if $KLING run -name "$TPL" -image "$IMGVOL" -allow-exec >/dev/null 2>&1 \
+   && $KLING exec "$TPL" -- sh -c 'echo plantilla > /root/marca' >/dev/null 2>&1 \
+   && $KLING commit "$TPL" "$SNAP" >/dev/null 2>&1; then
+  out=$($KLING sandbox create -from "$SNAP" -name "$SB-snap" -q 2>&1) \
+    && out=$($KLING exec "$SB-snap" -- cat /root/marca 2>&1)
+  [ "$out" = "plantilla" ] && ok "sandbox desde un snapshot con exec, con su estado" \
+    || bad "sandbox -from" "plantilla" "$out"
+  $KLING sandbox rm "$SB-snap" >/dev/null 2>&1
+else
+  bad "snapshot con exec" "run -allow-exec + commit" "falló"
+fi
+$KLING rm "$TPL" >/dev/null 2>&1; $KLING rmi "$SNAP" >/dev/null 2>&1
+
+# Al vencer el TTL, un sandbox se destruye (no se congela).
+if $KLING sandbox create -image "$IMGVOL" -name "$SB-ttl" -ttl 10s -q >/dev/null 2>&1; then
+  sleep 25
+  out=$($KLING ps -a 2>&1)
+  contiene "$out" "$SB-ttl" && bad "TTL de un sandbox" "destruido" "sigue en ps -a" \
+    || ok "el sandbox se destruye al vencer su TTL"
 fi
 
 # ── resumen ──────────────────────────────────────────────────────────────────

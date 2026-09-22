@@ -178,6 +178,11 @@ func waitStatusErr(ws syscall.WaitStatus) error {
 func ExitCodeOf(err error) (int, bool) {
 	switch e := err.(type) {
 	case *exec.ExitError:
+		// Go da -1 a un proceso matado por una señal; una shell da 128+señal, que
+		// es lo que espera quien lee el código (137 = SIGKILL).
+		if ws, ok := e.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return 128 + int(ws.Signal()), true
+		}
 		return e.ExitCode(), true
 	case *reapedExit:
 		return e.ExitCode(), true
