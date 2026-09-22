@@ -30,10 +30,11 @@ import (
 
 	"errors"
 	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/plugin"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
-const usage = `kling - Firecracker microVMs with a docker-style interface
+const usageHead = `kling - Firecracker microVMs with a docker-style interface
 
 USAGE
   kling <command> [options]
@@ -61,7 +62,7 @@ MACHINES
       [-egress none|internet|allowlist]            network egress (default: none)
       [-allow dom1,dom2]                           domains allowed with allowlist
       [-ttl SECONDS] [-cpu-pct PCT]                auto-freeze and CPU ceiling
-      [-service NAME] [-label k=v]                 grouping by MCP service
+      [-service NAME] [-label k=v]                 grouping by service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
   ps [-a] [-q] [-json]                             lists the machines
   logs <ref> [-tail N]                             microVM serial console
@@ -75,31 +76,6 @@ MACHINES
                                                    MMDS (reads stdin if no -f); the
                                                    machine can no longer be frozen
 
-CATALOG
-  search <query>                                   searches the official
-                                                   MCP server registry
-  add <server> [-as name] [-arg value]             packages it, imports it and
-      [-volume NAME[:/mount][:ro]] (repeatable)    leaves it frozen as a service
-
-MCP SERVICES
-  mcp import <service> -image <img>                turns an MCP server into a
-      [-cpus N] [-mem MiB]                         service: it starts, asks
-      [-egress none|internet|allowlist]            what it can do, freezes it and
-      [-allow dom1,dom2]                           saves its catalog. All of this
-      [-volume NAME[:/mount][:ro]] (repeatable)    ends up BAKED into the snapshot
-  mcp list [-v] [-json]                            services and their tools
-  mcp refresh <service>                            recaptures the catalog
-  mcp verify <service> [-deep]                     exercises it for real: calls a
-                                                   tool and checks the guest's DNS
-  mcp health                                       probes every service and
-                                                   records the result
-  mcp heal [-dry-run]                              rebuilds only what a host
-                                                   reboot (TSC) invalidated
-  mcp link <name> <url>                            links an EXTERNAL MCP server
-                                                   (e.g. your engram) without putting
-                                                   it in a microVM
-  mcp unlink <name>                                unlinks it
-
 GOLDEN SNAPSHOTS
   commit [-replace] <ref> <name>                   freezes a machine as a
                                                    reusable snapshot
@@ -111,57 +87,12 @@ OBSERVATION
   topo                                             ASCII diagram of everything
   top [-watch DUR] [-json]                         memory per microVM (PSS) and
                                                    the host; snapshot or refresh
-  export [-o file.html]                            browsable topology in HTML
   events                                           stream of daemon events
   info [-json]                                     daemon status
 
-USAGE MEMORY (optional, off by default)
-  memory status                                    whether it's active and on what
-  memory enable [-service N]                       enables it; uses engram by default
-  memory disable                                   disables it
-  memory install-service                           installs the local bridge as a
-                                                   permanent service (macOS)
+`
 
-CONNECT YOUR AGENT
-  connect                                          step-by-step guide
-  connect -all                                     ONE entry for all
-                                                   services: inventory at
-                                                   handshake, schemas on demand
-  connect -all -only eco,files                     only those services
-  connect -all -expand                             full catalog (uses more
-                                                   context)
-  connect <service>                                a single service
-  connect ... -install all                         writes to ALL detected
-                                                   agents: Claude Code,
-                                                   opencode, Cursor, VS Code,
-                                                   Windsurf, Cline and Zed
-  connect ... -install <client>                    just that one
-  connect ... -token T                             uses that token instead of
-                                                   gateway.token
-  migrate <mcp> -install <client>                  moves an existing MCP to
-                                                   kindling WITHOUT rewriting the
-                                                   skills that use it (keeps its
-                                                   name and tools)
-
-GATEWAY
-  gateway [-listen ADDR] [-idle DUR] [-ephemeral]  routes MCP calls to microVMs
-                                                   on demand. With -ephemeral,
-                                                   each action runs in its own
-                                                   machine, which dies when it ends
-          [-prewarm N]                             ready instances per service
-                                                   (only -ephemeral)
-          [-keepwarm N]                            N popular services with their
-                                                   primary warm (persistent;
-                                                   avoids cold start on Mac)
-          [-memory SVC]                            agent memory service
-          [-no-auth] [-pprof]                      no token / with profiling; both
-                                                   require listening on
-                                                   loopback. Defaults to requiring
-                                                   Authorization: Bearer with the
-                                                   gateway.token token, which is
-                                                   generated only the first time
-
-DAEMON
+const usageTail = `DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  starts the core
 
 CONFIGURATION
@@ -173,6 +104,10 @@ CONFIGURATION
   config set <key> <value>                         e.g. defaults.image min
   completion [bash|zsh]                            shell completion script
   version                                          CLI version
+
+EXTENSIONS
+  plugins [ls] [-json]                             installed extensions (kling-<name>
+                                                   binaries) and what they add
 
 CONNECTION
   Precedence:  -H  >  $KLING_HOST  >  active context  >  local socket
@@ -189,7 +124,7 @@ var Version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Print(usage)
+		printUsage(os.Stdout)
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -198,26 +133,12 @@ func main() {
 	switch cmd {
 	case "daemon":
 		err = cmdDaemon(args)
-	case "gateway":
-		err = cmdGateway(args)
-	case "add":
-		err = cmdAdd(args)
-	case "search":
-		err = cmdSearch(args)
 	case "up":
 		err = cmdUp(args)
 	case "status":
 		err = cmdStatus(args)
 	case "volume", "volumes":
 		err = cmdVolume(args)
-	case "connect":
-		err = cmdConnect(args)
-	case "migrate":
-		err = cmdMigrate(args)
-	case "mcp":
-		err = cmdMCP(args)
-	case "memory":
-		err = cmdMemory(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
 	case "run":
@@ -244,8 +165,6 @@ func main() {
 		err = cmdTopo(args)
 	case "top":
 		err = cmdTop(args)
-	case "export":
-		err = cmdExport(args)
 	case "events":
 		err = cmdEvents(args)
 	case "info":
@@ -259,11 +178,24 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Printf("kling %s\n", Version)
 		return
+	case "plugins":
+		err = cmdPlugins(args)
 	case "-h", "--help", "help":
-		fmt.Print(usage)
+		if len(args) > 0 {
+			err = helpFor(args[0])
+			break
+		}
+		printUsage(os.Stdout)
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", cmd, usage)
+		// Lo que no es del núcleo lo sirve una extensión: una incorporada corre
+		// aquí mismo; una externa reemplaza este proceso y no vuelve.
+		if p := extensions().Lookup(cmd); p != nil {
+			err = plugin.Exec(p, cmd, args, config.Path())
+			break
+		}
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
+		printUsage(os.Stderr)
 		os.Exit(2)
 	}
 
@@ -292,7 +224,7 @@ func codigoDeSalida(err error) int {
 	if errors.As(err, &e) {
 		return e.code
 	}
-	return 1
+	return plugin.ExitCode(err)
 }
 
 func envOr(k, def string) string {

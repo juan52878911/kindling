@@ -129,3 +129,36 @@ func TestElTokenSaleEnmascarado(t *testing.T) {
 		t.Error("mask de vacío debería ser vacío, no ocho asteriscos: parecería que hay algo")
 	}
 }
+
+func TestExtensiones(t *testing.T) {
+	c := &Config{}
+	if err := c.SetExtension("mcp", "memory.enabled", "bool", "sí"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetExtension("mcp", "port", "int", "8080"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetExtension("mcp", "token", "secret", "abcdefghijklmnop"); err != nil {
+		t.Fatal(err)
+	}
+	var on bool
+	if ok, err := c.Extension("mcp", "memory.enabled", &on); !ok || err != nil || !on {
+		t.Fatalf("bool: ok=%v err=%v on=%v", ok, err, on)
+	}
+	var port int
+	if ok, _ := c.Extension("mcp", "port", &port); !ok || port != 8080 {
+		t.Fatalf("int: %d", port)
+	}
+	if v := c.ExtensionValue("mcp", "token", "secret"); v == "abcdefghijklmnop" || v == "" {
+		t.Fatalf("un secreto debe mostrarse enmascarado: %q", v)
+	}
+	if err := c.SetExtension("mcp", "port", "int", "ocho"); err == nil {
+		t.Fatal("un int que no es número debe rechazarse")
+	}
+	if err := c.SetExtension("mcp", "memory.enabled", "bool", "quizá"); err == nil {
+		t.Fatal("un bool ambiguo debe rechazarse")
+	}
+	if ok, _ := c.Extension("otra", "k", new(string)); ok {
+		t.Fatal("una clave nunca puesta no existe")
+	}
+}

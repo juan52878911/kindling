@@ -36,6 +36,11 @@ type Config struct {
 	// nadie sin que se lo pidan.
 	Memory Memory `json:"memory"`
 
+	// Extensions guarda la configuración que declaran las extensiones de kling:
+	// extensions.<extensión>.<clave> = valor. El núcleo no sabe qué significa;
+	// solo lo convierte al tipo que declara el manifiesto al escribirlo.
+	Extensions map[string]map[string]json.RawMessage `json:"extensions,omitempty"`
+
 	path string
 }
 
@@ -273,6 +278,72 @@ func (c *Config) Set(key, value string) error {
 		return fmt.Errorf("unknown section %q: use defaults, gateway, or memory", section)
 	}
 	return nil
+}
+
+// Extension decodifica en out la clave key de la extensión name. false si no
+// está puesta.
+func (c *Config) Extension(name, key string, out any) (bool, error) {
+	raw, ok := c.Extensions[name][key]
+	if !ok {
+		return false, nil
+	}
+	return true, json.Unmarshal(raw, out)
+}
+
+// SetExtension guarda value en la clave key de la extensión name, convertido al
+// tipo que la extensión declaró: string, secret, bool o int.
+func (c *Config) SetExtension(name, key, typ, value string) error {
+	var v any
+	switch typ {
+	case "string", "secret":
+		v = value
+	case "bool":
+		switch strings.ToLower(value) {
+		case "true", "1", "yes", "si", "sí", "on":
+			v = true
+		case "false", "0", "no", "off":
+			v = false
+		default:
+			return fmt.Errorf("%s.%s expects true or false, not %q", name, key, value)
+		}
+	case "int":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("%s.%s expects a number, not %q", name, key, value)
+		}
+		v = n
+	default:
+		return fmt.Errorf("%s.%s has an unknown type %q", name, key, typ)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if c.Extensions == nil {
+		c.Extensions = map[string]map[string]json.RawMessage{}
+	}
+	if c.Extensions[name] == nil {
+		c.Extensions[name] = map[string]json.RawMessage{}
+	}
+	c.Extensions[name][key] = b
+	return nil
+}
+
+// ExtensionValue devuelve el valor de una clave de extensión para mostrarlo;
+// los de tipo secret, enmascarados.
+func (c *Config) ExtensionValue(name, key, typ string) string {
+	raw, ok := c.Extensions[name][key]
+	if !ok {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if typ == "secret" {
+			return mask(s)
+		}
+		return s
+	}
+	return string(raw)
 }
 
 // Keys lista las claves configurables con su valor actual.
