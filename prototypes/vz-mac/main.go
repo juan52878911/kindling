@@ -105,7 +105,7 @@ type opts struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "uso: vzproto boot|restore [flags]")
+		fmt.Fprintln(os.Stderr, "uso: vzproto boot|restore|fleet [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -114,6 +114,10 @@ func main() {
 		err = cmdBoot(os.Args[2:])
 	case "restore":
 		err = cmdRestore(os.Args[2:])
+	case "fleet":
+		err = cmdFleet(os.Args[2:])
+	case "maxvms":
+		err = cmdMaxVMs(os.Args[2:])
 	default:
 		err = fmt.Errorf("comando desconocido: %s", os.Args[1])
 	}
@@ -297,7 +301,7 @@ func (o *opts) newMachine(idx int) (*machine, error) {
 			macPath = fmt.Sprintf("%s.mac%d", o.idPath, idx)
 		}
 		var mac *vz.MACAddress
-		if b, err := os.ReadFile(macPath); err == nil {
+		if b, err := os.ReadFile(macPath); o.idPath != "" && err == nil {
 			hw, err := net.ParseMAC(strings.TrimSpace(string(b)))
 			if err != nil {
 				return nil, err
@@ -519,7 +523,38 @@ var lastSession string
 
 const toolsListBody = `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
 
+// httpClient reutiliza conexiones: el Transport por defecto solo guarda 2 por
+// host y con 64 clientes abre y cierra sin parar hasta agotar los puertos
+// efímeros del anfitrión ("can't assign requested address"). Eso mide al
+// generador de carga, no al puente.
+var httpClient = &http.Client{
+	Timeout: 3 * time.Minute,
+	Transport: &http.Transport{
+		MaxIdleConns:        1024,
+		MaxIdleConnsPerHost: 256,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 func mcpPost(ip, body, session string) (time.Duration, string, string, error) {
+	return mcpPostRaw(ip, body, session)
+}
+
+// mcpPostRaw hace la petición y devuelve (latencia, nota, Mcp-Session-Id). La
+// nota empieza por "http <código>" y lleva "rpc-error" si el JSON-RPC trae error:
+// un 200 con error dentro no es una petición servida.
+func mcpPostRaw(ip, body, session string) (time.Duration, string, string, error) {
+	d, note, sid, _, err := mcpPostFull(ip, body, session)
+	return d, note, sid, err
+}
+
+// mcpPostRawSample devuelve (latencia, nota, recorte del cuerpo).
+func mcpPostRawSample(ip, body, session string) (time.Duration, string, string, error) {
+	d, note, _, sample, err := mcpPostFull(ip, body, session)
+	return d, note, sample, err
+}
+
+func mcpPostFull(ip, body, session string) (time.Duration, string, string, string, error) {
 	t0 := time.Now()
 	req, _ := http.NewRequest("POST", "http://"+ip+":8080/mcp", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -527,13 +562,39 @@ func mcpPost(ip, body, session string) (time.Duration, string, string, error) {
 	if session != "" {
 		req.Header.Set("Mcp-Session-Id", session)
 	}
-	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", "", "", err
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	return time.Since(t0), fmt.Sprintf("http %d, %d bytes", resp.StatusCode, len(b)), resp.Header.Get("Mcp-Session-Id"), nil
+	sample := strings.TrimSpace(string(b))
+	if len(sample) > 200 {
+		sample = sample[:200] + "…"
+	}
+	note := fmt.Sprintf("http %d, %d bytes", resp.StatusCode, len(b))
+	if resp.StatusCode != 200 {
+		snip := strings.TrimSpace(string(b))
+		if len(snip) > 120 {
+			snip = snip[:120]
+		}
+		note += " «" + snip + "»"
+	}
+	var rpc struct {
+		Error *json.RawMessage `json:"error"`
+	}
+	// Puede venir como SSE ("data: {...}"); se busca la primera línea JSON.
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimPrefix(strings.TrimSpace(line), "data:")
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "{") {
+			if json.Unmarshal([]byte(line), &rpc) == nil && rpc.Error != nil {
+				note += " rpc-error " + string(*rpc.Error)
+			}
+			break
+		}
+	}
+	return time.Since(t0), note, resp.Header.Get("Mcp-Session-Id"), sample, nil
 }
 
 type result struct {
@@ -770,6 +831,7 @@ func cmdRestore(args []string) error {
 	keep := fs.Duration("keep", 0, "mantener las VMs vivas este tiempo antes de parar")
 	jsonOut := fs.String("json", "", "escribir resultados en este fichero")
 	parallel := fs.Bool("parallel", false, "restaurar las N máquinas a la vez en vez de una tras otra")
+	gate := fs.Int("gate", 0, "con -parallel, restauraciones simultáneas como mucho (0 = sin límite)")
 	stress := fs.Int("stress", 0, "antes del globo, que cada invitado ocupe y libere estos MiB en tmpfs")
 	pulse := fs.Int("pulse", 0, "tras restaurar, inflar el globo hasta estos MiB y volver a soltarlo (descompromete las páginas libres que el restore dejó sucias)")
 	release := fs.Int("release", 0, "hasta cuántos MiB soltar el globo tras el pulso (0 = toda la RAM configurada)")
@@ -846,8 +908,18 @@ func cmdRestore(args []string) error {
 			err error
 		}
 		ch := make(chan res, *n)
+		g := *gate
+		if g <= 0 {
+			g = *n
+		}
+		sem := make(chan struct{}, g)
 		for i := 0; i < *n; i++ {
-			go func(i int) { m, err := restoreOne(i); ch <- res{m, err} }(i)
+			go func(i int) {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				m, err := restoreOne(i)
+				ch <- res{m, err}
+			}(i)
 		}
 		for i := 0; i < *n; i++ {
 			r := <-ch
@@ -867,7 +939,7 @@ func cmdRestore(args []string) error {
 	}
 	mode := "en serie"
 	if *parallel {
-		mode = "en paralelo"
+		mode = fmt.Sprintf("en paralelo (gate %d)", *gate)
 	}
 	record(fmt.Sprintf("%d máquinas restauradas %s", *n, mode), time.Since(tAll), "", 0)
 
@@ -1002,4 +1074,69 @@ func cmdRestore(args []string) error {
 	}
 	record(fmt.Sprintf("Stop() x%d", *n), time.Since(t0), "", 0)
 	return dumpJSON(*jsonOut)
+}
+
+// cmdMaxVMs arranca máquinas mínimas una a una hasta que el framework se
+// niegue, para ver si el tope es un número o la memoria: si cambia con -mem,
+// es memoria.
+func cmdMaxVMs(args []string) error {
+	fs := flag.NewFlagSet("maxvms", flag.ExitOnError)
+	o := commonFlags(fs)
+	limit := fs.Int("limit", 64, "no pasar de aquí")
+	fs.Parse(args)
+	var ms_ []*machine
+	defer func() {
+		for _, m := range ms_ {
+			m.vm.Stop()
+		}
+	}()
+	for i := 0; i < *limit; i++ {
+		m, err := o.newMachine(i)
+		if err != nil {
+			return err
+		}
+		if err := m.vm.Start(); err != nil {
+			phys, _ := mem()
+			fmt.Printf("FALLO al arrancar la máquina #%d (%d vivas) con mem=%d MiB: %v\n  phys total %.0f MiB · %s\n", i, len(ms_), o.memMiB, err, phys, vmFree())
+			return nil
+		}
+		if err := m.waitState(vz.VirtualMachineStateRunning, 15*time.Second); err != nil {
+			return err
+		}
+		if _, err := m.waitLine(o.ready, 30*time.Second); err != nil {
+			return fmt.Errorf("#%d: %w", i, err)
+		}
+		ms_ = append(ms_, m)
+		if (i+1)%4 == 0 {
+			phys, _ := mem()
+			fmt.Printf("  %2d vivas · phys %.0f MiB · %s\n", len(ms_), phys, vmFree())
+		}
+	}
+	fmt.Printf("llegó a %d máquinas sin fallar (límite -limit)\n", len(ms_))
+	return nil
+}
+
+// vmFree resume la memoria libre del sistema según vm_stat.
+func vmFree() string {
+	out, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return ""
+	}
+	var free, comp float64
+	for _, l := range strings.Split(string(out), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 3 {
+			continue
+		}
+		v := strings.TrimSuffix(f[len(f)-1], ".")
+		var n float64
+		fmt.Sscanf(v, "%f", &n)
+		switch {
+		case strings.HasPrefix(l, "Pages free"):
+			free = n * 16384 / (1 << 20)
+		case strings.HasPrefix(l, "Pages occupied by compressor"):
+			comp = n * 16384 / (1 << 20)
+		}
+	}
+	return fmt.Sprintf("sistema: libres %.0f MiB, compresor %.0f MiB", free, comp)
 }

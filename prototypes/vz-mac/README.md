@@ -36,6 +36,15 @@ Es un módulo Go aparte a propósito: trae cgo y una dependencia
 ./vzproto restore -ip 192.168.64.222 -layer guest/seqthink.layer.ext4 -state guest/state/seq.vzs -n 1
 ```
 
+```sh
+# flota de MCPs reales: arranque con compuerta, initialize, carga con tools/call, ciclos pausa/reanuda
+./vzproto fleet -n 4 -gate 4 -layer guest/files.layer.ext4 -ip 192.168.64.100 \
+    -call list_directory -args '{"path":"/tmp"}' -duration 15s -concurrency 8 -cycles 3
+
+# cuántas máquinas admite el host antes de que el framework se niegue
+./vzproto maxvms -mem 256
+```
+
 La memoria se mide sumando `phys_footprint` de este proceso y de los auxiliares
 `com.apple.Virtualization.VirtualMachine` que crea el framework: el invitado vive
 ahí, no en el proceso que configura la VM.

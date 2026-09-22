@@ -141,6 +141,68 @@ Con esto, la propuesta para el gateway en Mac: pausar al vencer el TTL en vez de
 congelar, guardar a disco solo tras un TTL largo o por presión, y al restaurar
 inflar el globo y dejarlo. Las N populares (`-keepwarm`) viven pausadas.
 
+## Tercera ronda: MCPs reales, carga y estrés
+
+Seis servidores del registro oficial, empaquetados con `80-mcp-image.sh` (tres de
+node, dos de Python, más `everything`), cada uno en **4 máquinas** arrancadas en
+frío con compuerta 4, **8 clientes** durante **15 s** lanzando la herramienta real
+indicada, y después 3 ciclos pausa → reanuda → petición por máquina. Cero errores
+HTTP y cero errores JSON-RPC en las seis. Comando: `vzproto fleet`.
+
+| Servidor | Herramienta | Puente escucha (p50) | `initialize` en frío (p50) | req/s | p50 | p99 | Memoria por máquina, en marcha → bajo carga | Despertar (p50) |
+|---|---|---|---|---|---|---|---|---|
+| seqthink (node) | `sequentialthinking` | 1831 ms | 2334 ms | 10 088 | 0,7 ms | 2,8 ms | 170 → 204 MiB | 2,5 ms |
+| filesystem (node) | `list_directory /tmp` | 1392 ms | 2349 ms | 24 323 | 0,3 ms | 0,9 ms | 172 → 208 MiB | 1,4 ms |
+| memory (node) | `read_graph` | 1038 ms | 2330 ms | 17 483 | 0,4 ms | 1,5 ms | 170 → 204 MiB | 2,1 ms |
+| everything (node) | `echo` | 693 ms | 2338 ms | 29 593 | 0,2 ms | 0,8 ms | 171 → 208 MiB | 0,9 ms |
+| time (Python) | `get_current_time` | 612 ms | 2436 ms | 4 425 | 1,5 ms | 4,8 ms | 172 → 196 MiB | 6,2 ms |
+| fetch (Python) | `tools/list` (sin salida a internet) | 617 ms | 2570 ms | 5 843 | 1,2 ms | 3,4 ms | 190 → 214 MiB | 5,6 ms |
+
+Lecturas:
+
+- **El `initialize` en frío es ~2,3 s para cualquier servidor**, node o Python. Es
+  el arranque del intérprete y sus dependencias en la microVM; la herramienta
+  concreta no importa. Los ~0,6–1,8 s hasta que el puente escucha, cuando arrancan 4
+  a la vez, es el kernel más el init compartiendo CPU.
+- **Una vez caliente, la latencia la pone el servidor, no la microVM.** Un `echo`
+  de node cuesta 0,2 ms de extremo a extremo (host → NAT → puente → stdio → node y
+  vuelta); Python cuesta 1,2–1,5 ms.
+- **Memoria: +33 MiB por máquina bajo carga y ni un MiB de deriva después** en
+  ninguno de los seis, ni tras los ciclos de pausa.
+- **Despertar de pausa → petición servida: 1–6 ms** en las 72 reanudaciones.
+
+### Estrés
+
+| Escenario | Resultado |
+|---|---|
+| **1 máquina, 64 clientes concurrentes** (`everything echo`, 15 s) | **25 127 req/s**, p50 2,2 ms, p99 10,7 ms, 0 errores. El puente y el stdio del servidor aguantan 64 peticiones en vuelo sobre **una** sesión. Memoria +60 MiB por el heap de node |
+| **12 máquinas, 32 clientes** (`seqthink`, 20 s) | 8 466 req/s, p50 2,1 ms, p99 30,9 ms, 0 errores; 182 MiB por máquina; 36 despertares p50 57 ms (host bajo presión, ver abajo) |
+| **8 máquinas, 16 clientes, 90 s sostenidos** (`filesystem`) | **1 999 308 llamadas**, 22 215 req/s, p50 0,6 ms, p99 3,2 ms, 0 errores; memoria 172 → 212 MiB y **deriva 0,2 MiB** en los 40 despertares posteriores |
+| 16 máquinas gate 4 · 24 máquinas gate 6 · 20 restauraciones gate 4 | Fallan al arrancar la 13ª, la 21ª y la 19ª con "Internal Virtualization error" |
+| `maxvms`: mínimas una a una hasta fallar | **25 con 256 MiB, 15 con 64 MiB** |
+
+**El tope no es del framework, es del host.** Que con menos RAM por máquina
+quepan *menos* descarta un límite por memoria configurada o por número. En
+todos los fallos el sistema tenía 60–200 MiB libres y más de 4 GiB en el
+compresor: este Mac tenía navegadores y otras apps ocupando ~11 GiB, y hay un
+`JetsamEvent-2026-09-21-215928.ips` en `/Library/Logs/DiagnosticReports` a la hora
+exacta del fallo. Jetsam es el mecanismo con que macOS mata procesos al agotarse
+la memoria; el informe registra 3,6 GiB anónimos, 3,8 GiB cableados, 5,1 GiB en el
+compresor y un proceso matado, sin decir cuál. No prueba que matara al auxiliar,
+pero sitúa el fallo dentro de un episodio de presión del host. Consecuencias para el
+backend: hay que leer la presión de memoria del host (`memory_pressure` /
+`dispatch_source` de `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE`) y negarse a arrancar
+antes de que jetsam decida, igual que kindling ya limita con `MaxMachines` y la
+compuerta de arranque. Y el p50 de 57 ms al despertar con 12 máquinas, frente a
+1–6 ms con 4, es el compresor devolviendo páginas: bajo presión, "pausada" deja
+de ser gratis.
+
+**Dos detalles del generador de carga que parecían fallos del puente y no lo eran**
+(quedan corregidos en el prototipo): todas las peticiones con el mismo `id` JSON-RPC
+producen 502 «a request with id N is already in flight», que es el puente haciendo
+cumplir el protocolo; y 64 clientes sin keep-alive agotan los puertos efímeros del
+host («can't assign requested address»).
+
 ## Qué necesitaría un backend real
 
 - Una interfaz de backend en `internal/machine` (hoy no existe: el `Manager` llama
