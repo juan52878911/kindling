@@ -345,6 +345,16 @@ type Snapshot struct {
 	Health    string     `json:"health,omitempty"` // "healthy" | "unhealthy" | ""
 	HealthAt  *time.Time `json:"health_at,omitempty"`
 	HealthErr string     `json:"health_err,omitempty"` // por qué falló, si "unhealthy"
+
+	// Annotations son datos opacos que una extensión cuelga del snapshot: el
+	// daemon los guarda en meta.json y los devuelve, sin interpretarlos. Es lo que
+	// sustituye a Tools y Health, que eran de MCP: kindling-mcp guarda su catálogo
+	// en "mcp.tools" y su salud en "mcp.health".
+	//
+	// COMPATIBILIDAD (v0.5): Tools/ToolsAt/Health* se siguen rellenando a partir
+	// de esas dos anotaciones, para que un CLI anterior los lea. Desaparecen en
+	// v0.6, cuando MCP sale del núcleo.
+	Annotations map[string]json.RawMessage `json:"annotations,omitempty"`
 }
 
 // ToolSpec describe una herramienta tal y como la declaró su servidor MCP.
@@ -422,6 +432,8 @@ const (
 	EvThawed    = "machine.thawed"
 	EvStopped   = "machine.stopped"
 	EvCommitted = "snapshot.committed"
+	EvAnnotated = "snapshot.annotated"
+	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
 )
 

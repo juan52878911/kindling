@@ -290,69 +290,8 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 			name, s.Name)
 		s.Name = name
 	}
+	liftLegacyMCP(&s)
 	return &s, nil
-}
-
-// SetCatalog guarda las capacidades declaradas por el servidor MCP.
-//
-// Se captura una sola vez, al importar el servicio, y a partir de ahí el
-// inventario se sirve desde disco sin tocar ninguna microVM.
-func (m *Manager) SetCatalog(name string, tools []api.ToolSpec) (*api.Snapshot, error) {
-	snap, err := m.loadSnapshot(name)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	snap.Tools, snap.ToolsAt = tools, &now
-
-	b, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := writeMeta(m.snapDir(name), b); err != nil {
-		return nil, err
-	}
-	m.priv.EnsureReadable(m.snapDir(name))
-
-	m.bus.Publish(api.Event{Time: now, Type: api.EvCommitted, Name: name,
-		Message: fmt.Sprintf("catalog updated: %d tool(s)", len(tools))})
-	return snap, nil
-}
-
-// SetHealth anota en el meta del snapshot el resultado del último sondeo de
-// salud. El sondeo real —arrancar una microVM efímera y pedirle tools/list— lo
-// hace quien puede hablar con el invitado (el CLI, `kling mcp health`); el daemon
-// solo persiste el veredicto, para que `mcp list` y /metrics lo puedan mostrar
-// sin volver a despertar nada.
-func (m *Manager) SetHealth(name string, healthy bool, probeErr string) (*api.Snapshot, error) {
-	snap, err := m.loadSnapshot(name)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	if healthy {
-		snap.Health, snap.HealthErr = "healthy", ""
-	} else {
-		snap.Health, snap.HealthErr = "unhealthy", probeErr
-	}
-	snap.HealthAt = &now
-
-	b, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := writeMeta(m.snapDir(name), b); err != nil {
-		return nil, err
-	}
-	m.priv.EnsureReadable(m.snapDir(name))
-
-	estado := "healthy"
-	if !healthy {
-		estado = "unhealthy"
-	}
-	m.bus.Publish(api.Event{Time: now, Type: api.EvCommitted, Name: name,
-		Message: fmt.Sprintf("health probe: %s", estado)})
-	return snap, nil
 }
 
 // verifyIntegrity comprueba que el rootfs dorado y el volcado de estado no se

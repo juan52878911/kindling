@@ -76,9 +76,15 @@ type Manager struct {
 	cgroupRoot    string
 	CgroupWarning string
 
-	bus    *events.Bus
-	mu     sync.RWMutex
-	byID   map[string]*api.Machine
+	bus  *events.Bus
+	mu   sync.RWMutex
+	byID map[string]*api.Machine
+
+	// metaMu serializa las escrituras de meta.json de snapshots existentes
+	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
+	// simultáneas —el gateway marcando salud y el CLI guardando el catálogo— se
+	// pisaran y una se perdiera sin error.
+	metaMu sync.Mutex
 	socket map[string]string // id -> ruta del socket de firecracker
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún

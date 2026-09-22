@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -34,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{}
+var Capabilities = []string{"annotations", "store"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -57,6 +58,9 @@ type Server struct {
 	root       string
 	fcBin      string
 	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
+
+	store   *store
+	linksMu sync.Mutex // serializa el leer-modificar-escribir de /links
 }
 
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
@@ -65,7 +69,9 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser}, nil
+	st := &store{dir: filepath.Join(root, "store")}
+	migrateLinks(root, st)
+	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st}, nil
 }
 
 func (s *Server) routes() http.Handler {
@@ -96,6 +102,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /images/{name}/recipe", s.handleImageRecipe)
 	mux.HandleFunc("GET /images/{name}/capabilities", s.handleImageCapabilities)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
+	mux.HandleFunc("GET /snapshots/{name}", s.handleSnapshot)
+	mux.HandleFunc("PUT /snapshots/{name}/annotations/{key}", s.handleSetAnnotation)
+	mux.HandleFunc("DELETE /snapshots/{name}/annotations/{key}", s.handleRemoveAnnotation)
+	mux.HandleFunc("GET /store/{ns}", s.handleStoreKeys)
+	mux.HandleFunc("GET /store/{ns}/{key}", s.handleStoreGet)
+	mux.HandleFunc("PUT /store/{ns}/{key}", s.handleStorePut)
+	mux.HandleFunc("DELETE /store/{ns}/{key}", s.handleStoreDelete)
+	// Rutas de v0.4, deprecadas: escriben las anotaciones mcp.tools/mcp.health.
+	// Se retiran en v0.6.
 	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
 	mux.HandleFunc("PUT /snapshots/{name}/health", s.handleHealth)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
@@ -404,32 +419,6 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.mgr.Snapshots())
-}
-
-func (s *Server) handleLinks(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.mgr.Links())
-}
-
-func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
-	var l api.Link
-	if err := json.NewDecoder(r.Body).Decode(&l); err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	out, err := s.mgr.SetLink(&l)
-	if err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (s *Server) handleRemoveLink(w http.ResponseWriter, r *http.Request) {
-	if err := s.mgr.RemoveLink(r.PathValue("name")); err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
