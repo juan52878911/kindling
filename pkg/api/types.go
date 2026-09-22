@@ -69,6 +69,13 @@ type Machine struct {
 	// OnTTL: "remove" si se destruye al vencer el TTL; vacío = se congela.
 	OnTTL string `json:"on_ttl,omitempty"`
 
+	// TTLAt es cuándo empezó a contar TTLSeconds.
+	//
+	// Es un reloj aparte de StartedAt a propósito: StartedAt se reescribe en cada
+	// thaw, así que una máquina que se congela y despierta reiniciaba su TTL en
+	// cada ciclo y podía no vencer nunca. Lo renueva `renew`, y solo eso.
+	TTLAt *time.Time `json:"ttl_at,omitempty"`
+
 	// Volumes son los volúmenes montados, en el orden en que van los discos.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 

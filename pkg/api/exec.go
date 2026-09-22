@@ -111,9 +111,14 @@ type SandboxRequest struct {
 	From   string `json:"from,omitempty"`
 	VCPUs  int    `json:"vcpus,omitempty"`
 	MemMiB int    `json:"mem_mib,omitempty"`
-	// TTLSeconds: por defecto SandboxDefaultTTL. Vence y se destruye; renovarlo
-	// es POST /sandboxes/{id}/renew.
-	TTLSeconds   int                `json:"ttl_seconds,omitempty"`
+	// TTLSeconds: por defecto SandboxDefaultTTL. Renovarlo es
+	// POST /sandboxes/{id}/renew.
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
+	// OnTTL decide qué pasa al vencer: "remove" (por defecto) lo destruye;
+	// "freeze" lo duerme a coste cero y el siguiente exec lo despierta en
+	// milisegundos, con su estado intacto. Un sandbox dormido sigue venciendo:
+	// si nadie lo renueva ni lo usa, se destruye igualmente.
+	OnTTL        string             `json:"on_ttl,omitempty"`
 	Egress       string             `json:"egress,omitempty"`
 	AllowDomains []string           `json:"allow_domains,omitempty"`
 	CPUPct       int                `json:"cpu_pct,omitempty"`

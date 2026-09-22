@@ -330,6 +330,15 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			"Any image with the guest agent works: kling images toolchain builds one with node and python"))
 		return
 	}
+	onTTL := req.OnTTL
+	switch onTTL {
+	case "", api.OnTTLRemove:
+		onTTL = api.OnTTLRemove
+	case api.OnTTLFreeze:
+	default:
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLRemove, api.OnTTLFreeze))
+		return
+	}
 	egress := req.Egress
 	if egress == "" {
 		// Sin red por defecto: lo que corre en un sandbox lo escribió un agente, y
@@ -359,7 +368,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, Image: req.Image, From: req.From,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CPUPct: req.CPUPct,
 		Egress: egress, AllowDomains: req.AllowDomains,
-		TTLSeconds: ttl, OnTTL: api.OnTTLRemove,
+		TTLSeconds: ttl, OnTTL: onTTL,
 		Volumes: req.Volumes, Labels: labels,
 		AllowExec: true,
 	})

@@ -75,8 +75,9 @@ MACHINES
 
 SANDBOXES AND EXEC
   sandbox create [-image I | -from S] [-ttl 10m]   a throwaway microVM that runs code:
-      [-egress none|internet|allowlist]            no network by default, destroyed
-      [-mem MiB] [-cpus N] [-volume ...] [-q]      when its TTL runs out
+      [-egress none|internet|allowlist]            no network by default; when idle
+      [-on-ttl remove|freeze]                      it is destroyed, or frozen at zero
+      [-mem MiB] [-cpus N] [-volume ...] [-q]      cost and woken by the next exec
   sandbox ls | renew <sb> [-ttl D] | rm <sb>...    list / extend / destroy
   exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming its
       <ref> [--] <cmd> [args...]                   output; exits with its exit code

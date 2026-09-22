@@ -136,6 +136,11 @@ type Manager struct {
 	// Se toca bajo mu; se limpia al congelar con éxito o al darla por perdida.
 	freezeFails map[string]int
 
+	// orphanSeen cuenta las vueltas seguidas del vigilante en las que un VMM
+	// pareció huérfano. Ver sweepOrphanVMMs: matar a la primera es una carrera
+	// con la máquina que está naciendo.
+	orphanSeen map[string]int
+
 	// templateMu serializa la construcción de la plantilla de overlay: dos
 	// arranques a la vez sobre un host limpio la formatearían por duplicado.
 	templateMu sync.Mutex
@@ -658,12 +663,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, err
 	}
 
+	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
-		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: time.Now(),
+		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: creada,
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
 		Volumes:   attachments(vols),
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
+		TTLAt: &creada,
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
@@ -1431,33 +1438,51 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	var pid int
 	var c *fc.Client
 	var err error
+
+	// abortar es la única salida de error a partir de aquí.
+	//
+	// Sin esto, un fallo tras el spawn —el caso real es el TSC invalidado al
+	// reiniciar el host, que hace fallar LoadSnapshot— dejaba tres cosas: un
+	// firecracker vivo SIN snapshot cargado, su namespace de red montado, y la
+	// máquina figurando como warm. El siguiente thaw veía ese proceso en
+	// liveVMs, lo readoptaba como sano y marcaba la máquina running: el gateway
+	// enrutaba a una microVM vacía que no contesta nunca, y sweep() no lo
+	// detectaba porque el proceso existe de verdad.
+	abortar := func(err error) (*api.Machine, error) {
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		netcfg.Teardown()
+		return nil, err
+	}
+
 	if jailerEnabled() {
 		// El warm también se descongela dentro de un jail, o el aislamiento se
 		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
 		// Mismo patrón que runFrom: poblar el chroot antes de cargar.
 		pid, sock, err = m.spawnJailed(mc.ID, netcfg)
 		if err != nil {
-			return nil, err
+			return abortar(err)
 		}
 		c = fc.New(sock)
 		if err := waitSocket(ctx, c); err != nil {
-			return nil, err
+			return abortar(err)
 		}
 		toLink := []string{snapPath, memPath, m.imagePath(mc.Image), filepath.Join(dir, "overlay.ext4")}
 		for _, v := range mc.Volumes {
 			toLink = append(toLink, m.volumePath(v.Name))
 		}
 		if err := m.prepareJail(mc.ID, toLink...); err != nil {
-			return nil, err
+			return abortar(err)
 		}
 	} else {
 		pid, err = m.spawn(mc.ID, sock, netcfg)
 		if err != nil {
-			return nil, err
+			return abortar(err)
 		}
 		c = fc.New(sock)
 		if err := waitSocket(ctx, c); err != nil {
-			return nil, err
+			return abortar(err)
 		}
 	}
 
@@ -1466,9 +1491,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.
-		return nil, explainRestoreErr(err, fmt.Sprintf("machine %q", mc.Name),
+		return abortar(explainRestoreErr(err, fmt.Sprintf("machine %q", mc.Name),
 			"  kling rm "+mc.Name+"\n"+
-				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)")
+				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
 
@@ -1497,6 +1522,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
+		netcfg.Teardown()
 		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
 	}
 	now := time.Now()
