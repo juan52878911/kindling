@@ -1,16 +1,16 @@
 #!/bin/sh
-# install.sh — instala kling (CLI) y opcionalmente kling-bridge desde GitHub Releases.
+# install.sh — instala kling (CLI) desde GitHub Releases.
 #
 # USO
 #   curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --tag v0.1.0 --bridge --prefix ~/.local
+#   curl -fsSL .../install.sh | sh -s -- --tag v0.1.0 --prefix ~/.local
 #   curl -fsSL .../install.sh | sh -s -- --dry-run
 #
 # Comportamiento:
 #   - Detecta OS (linux/darwin) y arch (amd64/arm64).
 #   - Descarga el binario CLI correspondiente de la release.
 #   - Verifica SHA256 contra SHA256SUMS publicado en la misma release.
-#   - Si se pasa --bridge, descarga también kling-bridge-linux-<arch> (solo linux).
+#   - kling-bridge es de kindling-mcp desde v0.6: su install.sh lo trae.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
 #
@@ -32,7 +32,6 @@ set -u
 REPO="${KLING_REPO:-juan52878911/kindling}"
 PREFIX="${KLING_PREFIX:-${HOME}/.local/bin}"
 TAG=""
-INSTALL_BRIDGE=0
 DRY_RUN=0
 
 usage() {
@@ -41,7 +40,6 @@ Uso: install.sh [opciones]
 
   --tag VER          instala una versión concreta (ej. v0.1.0). Por defecto: última.
   --prefix DIR       directorio destino (por defecto: ~/.local/bin)
-  --bridge           instala también kling-bridge (solo Linux; va dentro de microVMs)
   --repo OWNER/NAME  repo de GitHub (por defecto: juan52878911/kindling)
   --dry-run          muestra lo que haría sin descargar ni instalar nada
   -h, --help         muestra esta ayuda
@@ -54,7 +52,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --tag)       TAG="$2"; shift 2 ;;
         --prefix)    PREFIX="$2"; shift 2 ;;
-        --bridge)    INSTALL_BRIDGE=1; shift ;;
+        --bridge)    printf "  ✗ kling-bridge es de kindling-mcp desde v0.6: https://github.com/juan52878911/kindling-mcp\n" >&2; exit 1 ;;
         --repo)      REPO="$2"; shift 2 ;;
         --dry-run)   DRY_RUN=1; shift ;;
         -h|--help)   usage; exit 0 ;;
@@ -140,7 +138,6 @@ echo
 echo "kling ${TAG} — instalación"
 echo "  plataforma:  ${PLAT}"
 echo "  destino:     ${PREFIX}"
-[ "$INSTALL_BRIDGE" = "1" ] && echo "  bridge:      sí"
 echo
 
 if [ "$DRY_RUN" = "1" ]; then
@@ -148,14 +145,6 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "Descargaría:"
     info "$BASE/$BIN_NAME"
     info "$BASE/SHA256SUMS"
-    if [ "$INSTALL_BRIDGE" = "1" ]; then
-        if [ "$PLAT_OS" = "linux" ]; then
-            info "$BASE/kling-bridge-${PLAT}"
-        else
-            printf '  · %s (¡omitido: bridge solo linux; estás en %s!)\n' \
-                "$BASE/kling-bridge-${PLAT}" "$PLAT_OS"
-        fi
-    fi
     exit 0
 fi
 
@@ -195,30 +184,6 @@ fi
 chmod +x "$WORK/$BIN_NAME"
 mv "$WORK/$BIN_NAME" "$PREFIX/kling"
 ok "instalado en $PREFIX/kling"
-
-# Bridge opcional (solo Linux)
-if [ "$INSTALL_BRIDGE" = "1" ] && [ "$PLAT_OS" = "linux" ]; then
-    BRIDGE_NAME="kling-bridge-${PLAT}"
-    info "descargando $BRIDGE_NAME"
-    fetch "$BASE/$BRIDGE_NAME" "$WORK/$BRIDGE_NAME"
-    # Las dos guardas de vacio, no solo una: sin `set -e`, un `sha256sum` que no
-    # exista deja ACTUAL vacio, y `"" != ""` es FALSO — o sea que la comprobacion
-    # PASA y se instala un binario sin verificar.
-    EXPECTED="$(grep -E "  ${BRIDGE_NAME}\$" "$WORK/SHA256SUMS" | awk '{print $1}')"
-    if [ -z "$EXPECTED" ]; then
-        fail "$BRIDGE_NAME not found in SHA256SUMS"
-    fi
-    ACTUAL="$(sha256sum "$WORK/$BRIDGE_NAME" | awk '{print $1}')"
-    if [ -z "$ACTUAL" ]; then
-        fail "could not compute sha256 of $BRIDGE_NAME (is sha256sum missing?)"
-    fi
-    if [ "$EXPECTED" != "$ACTUAL" ]; then
-        fail "checksum del bridge no coincide"
-    fi
-    chmod +x "$WORK/$BRIDGE_NAME"
-    mv "$WORK/$BRIDGE_NAME" "$PREFIX/kling-bridge"
-    ok "instalado en $PREFIX/kling-bridge"
-fi
 
 cat <<EOF
 
