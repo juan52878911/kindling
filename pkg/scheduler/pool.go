@@ -1,4 +1,4 @@
-package gateway
+package scheduler
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 // Se conserva la semántica efímera —cada acción estrena máquina y la mata al
 // terminar— pero el coste visible baja al de la llamada.
 type pool struct {
-	gw   *Gateway
+	gw   *Scheduler
 	size int
 
 	mu    sync.Mutex
@@ -59,7 +59,7 @@ type warmVM struct {
 	born    time.Time
 }
 
-func newPool(gw *Gateway, size int) *pool {
+func newPool(gw *Scheduler, size int) *pool {
 	p := &pool{
 		gw: gw, size: size,
 		ready:   map[string][]*warmVM{},
@@ -192,12 +192,17 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
 		return nil, err
 	}
-	// El initialize se paga AQUÍ, no cuando llegue la petición.
-	sid, err := mcpInit(ctx, base)
-	if err != nil {
-		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
-		return nil, err
+	// La preparación (el initialize de MCP) se paga AQUÍ, no cuando llegue la
+	// petición.
+	var sid string
+	if p.gw.Prepare != nil {
+		sid, err = p.gw.Prepare(ctx, mc.IP)
+		if err != nil {
+			_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
+			return nil, err
+		}
 	}
+	_ = base
 	return &warmVM{id: mc.ID, ip: mc.IP, session: sid, born: time.Now()}, nil
 }
 

@@ -1,4 +1,4 @@
-package gateway
+package scheduler
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 // entraría en g.client.Snapshots y provocaría un panic. Que no lo haga demuestra que
 // el corte ocurre antes de tocar nada.
 func TestKeepWarmAll_DesactivadoNoTocaElDaemon(t *testing.T) {
-	g := &Gateway{
+	g := &Scheduler{
 		services: map[string]*entry{},
 		extra:    map[string][]*entry{},
 		routes:   map[string]*sessionRoute{},

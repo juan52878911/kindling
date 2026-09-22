@@ -75,7 +75,7 @@ func newCatalog(gw *Gateway, ttl time.Duration) *catalog {
 
 // services devuelve los servicios disponibles: microVMs y servidores externos.
 func (c *catalog) services(ctx context.Context) ([]string, error) {
-	snaps, err := c.gw.client.Snapshots(ctx)
+	snaps, err := c.gw.Client().Snapshots(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func (c *catalog) toolsOf(ctx context.Context, service string) ([]Tool, error) {
 
 // fromSnapshot lee el catálogo que se capturó al importar el servicio.
 func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, bool) {
-	snaps, err := c.gw.client.Snapshots(ctx)
+	snaps, err := c.gw.Client().Snapshots(ctx)
 	if err != nil {
 		return nil, false
 	}
@@ -199,15 +199,15 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 // Es el camino caro: despierta la microVM. Solo se usa si el snapshot no trae
 // catálogo, es decir, si el servicio no se importó con `kling mcp import`.
 func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
-	e, err := c.gw.ensure(ctx, service)
+	e, err := c.gw.Ensure(ctx, service)
 	if err != nil {
 		return nil, err
 	}
 	// En vuelo mientras se captura el catálogo: si no, el segador puede congelar
 	// la instancia a mitad y dejar el fetch a medias.
-	c.gw.begin(e)
-	defer c.gw.end(e)
-	base := "http://" + e.ip + ":" + fmt.Sprint(GuestPort)
+	c.gw.Begin(e)
+	defer c.gw.End(e)
+	base := "http://" + e.IP() + ":" + fmt.Sprint(GuestPort)
 
 	sid, err := mcpInit(ctx, base)
 	if err != nil {

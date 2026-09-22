@@ -24,7 +24,6 @@ import (
 	"net/http/httputil"
 	"net/http/pprof"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,119 +33,37 @@ import (
 
 	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/panico"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
-
-// GuestPort es donde se espera que escuche el servidor MCP dentro de la microVM.
-const GuestPort = api.GuestPort
-
-// livenessTTL es cuánto se confía en que una instancia sigue viva sin volver a
-// preguntárselo al daemon. El vigilante del daemon detecta las muertes en 10 s,
-// así que comprobarlo más a menudo desde aquí no aporta nada y sí cuesta.
-const livenessTTL = 15 * time.Second
 
 // SessionHeader identifica la conversación MCP. El gateway la usa para enrutar
 // SIEMPRE a la misma instancia: el estado de una sesión vive en el proceso del
 // servidor MCP, así que mandar la segunda petición a otra microVM la rompería.
 const SessionHeader = "Mcp-Session-Id"
 
+// GuestPort es donde escucha el puente dentro de la microVM.
+const GuestPort = api.GuestPort
+
 // maxProxyBody acota lo que se guarda en memoria para poder reintentar. Coincide
 // con el límite que ya aplica el puente al leer una petición.
 const maxProxyBody = 8 << 20
 
-// retryKey marca una petición que ya se reintentó, para que el ErrorHandler no
-// pueda entrar en bucle consigo mismo.
-type retryKey struct{}
-
-func markRetried(ctx context.Context) context.Context {
-	return context.WithValue(ctx, retryKey{}, true)
-}
-
-func retried(r *http.Request) bool {
-	v, _ := r.Context().Value(retryKey{}).(bool)
-	return v
-}
-
-// readyTimeout acota la espera a que la herramienta abra su puerto. Generoso
-// para el arranque en frío, irrelevante tras un thaw.
-const readyTimeout = 20 * time.Second
-
-// alive dice si el invitado acepta conexiones AHORA, con un solo intento corto.
-//
-// El camino sticky lo llama en cada petición, así que tiene que ser barato: en
-// LAN, un dial a un puerto abierto es submilisegundo. Lo que detecta es lo que
-// el machineID no puede — que el DAEMON congeló la instancia por debajo, sin
-// que el gateway tocara su mapa.
-func alive(ip string, port int) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 400*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-// waitReady sondea el puerto del invitado hasta que acepta conexiones.
-func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) error {
-	addr := net.JoinHostPort(ip, strconv.Itoa(port))
-	deadline := time.Now().Add(timeout)
-	var last error
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		last = err
-		time.Sleep(25 * time.Millisecond)
-	}
-	return last
-}
-
-// Gateway mantiene una instancia caliente por servicio y enruta hacia ella.
+// Gateway enruta llamadas MCP a microVMs. La planificación —despertar, congelar
+// por inactividad, réplicas, precalentado, cuotas— es de pkg/scheduler; aquí
+// vive lo que es MCP: la cabecera de sesión, el agregador _all, el catálogo, la
+// memoria de uso, los servidores externos enlazados y la salud de cada servicio.
 type Gateway struct {
-	client       *api.Client
-	idle         time.Duration
-	Ephemeral    bool
+	*scheduler.Scheduler
+
 	PprofEnabled bool // expone /debug/pprof en Handler(); debe decidirlo el operador
-	// KeepWarm mantiene caliente la primaria de los N servicios más populares en
-	// modo PERSISTENTE, para que la primera sesión no pague el arranque en frío
-	// (~16 s bajo KVM anidado en Mac; ~3 s en Linux nativo). 0 = desactivado (por
-	// defecto). Lo decide el operador, igual que PprofEnabled: en un host con la RAM
-	// justa (la caja x86 de pruebas) mantener instancias que nadie usa provoca
-	// desalojos, así que es una palanca para hosts donde el cuello es el ARRANQUE y
-	// no la memoria. A diferencia del prewarm (fondo efímero), esto puebla
-	// g.services normales: la siguiente petición reutiliza la instancia caliente, o
-	// —si el segador la congeló por ociosa— paga solo un thaw (~25 ms).
-	KeepWarm int
-	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
-	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
-	// de otro modo sin levantar un daemon con KVM.
-	freezeFn func(id string) error
-	mu       sync.Mutex
-	services map[string]*entry        // servicio -> instancia "por defecto" (primaria)
-	extra    map[string][]*entry      // servicio -> RÉPLICAS de scale-out (además de la primaria)
-	routes   map[string]*sessionRoute // Mcp-Session-Id -> instancia fija
-	agg      *aggregator              // endpoint virtual que reúne a todos
-	pool     *pool                    // instancias pre-calentadas por servicio
-	ensureMu sync.Map                 // servicio -> *sync.Mutex; ver ensure()
+
+	agg *aggregator // endpoint virtual que reúne a todos
+	mem *memory     // memoria de uso; nil si está desactivada
 
 	// Último estado de salud escrito por servicio, para no repetir la escritura
 	// en cada petición. Ver anotarSalud.
 	saludMu    sync.Mutex
 	saludVista map[string]bool
-	mem        *memory     // memoria de uso; nil si está desactivada
-	pop        *popularity // popularidad por servicio; guía el prewarm
-
-	// Cuotas por tenant (token con nombre). Reparto justo, NO seguridad: ver
-	// quota.go. extraTenants son los tokens con nombre; tenantInflight lleva la
-	// cuenta de peticiones en vuelo por tenant, bajo su propio candado para no
-	// pelear con g.mu en el camino caliente.
-	extraTenants   []TenantLimit
-	tenantMu       sync.Mutex
-	tenantInflight map[string]int
 
 	// Servidores MCP externos enlazados: no corren aquí, solo se enrutan.
 	linkMu    sync.RWMutex
@@ -154,81 +71,24 @@ type Gateway struct {
 	linkAt    time.Time
 }
 
-type entry struct {
-	machineID string
-	ip        string
-	lastUse   time.Time
-	proxy     *httputil.ReverseProxy
-
-	// checkedAt es cuándo se confirmó por última vez que la instancia vive.
-	checkedAt time.Time
-
-	// tenant es a quién se atribuye esta instancia despierta: el primer tenant
-	// que la despertó o creó. Guía la cuota de instancias y el fairness de
-	// evictLRU (un tenant sacrifica lo suyo antes que lo ajeno). Vacío = sin
-	// dueño conocido (p. ej. adoptada de un arranque anterior). Se toca con g.mu.
-	tenant string
-
-	// inflight cuenta las peticiones que se están atendiendo AHORA.
-	//
-	// Sin esto, "inactivo" se medía por la LLEGADA de peticiones, y una
-	// herramienta que tarda más que g.idle en responder —un analizador estático
-	// sobre un árbol grande— se quedaba sin microVM a media faena: el segador la
-	// congelaba por debajo del trabajo que estaba corriendo. El cliente veía un
-	// "connection timed out" de TCP, que no se parece en nada a la causa.
-	//
-	// Se toca siempre con g.mu tomado, igual que lastUse.
-	inflight int
-
-	// maxSessions es cuántas sesiones (procesos servidor) caben en ESTA instancia,
-	// derivado de su memoria con la misma fórmula que el puente (ver gwMaxSessions).
-	// Cuando las sesiones de un servicio superan la capacidad de una instancia, el
-	// gateway crea RÉPLICAS (g.extra) y reparte: es lo que permite usar la misma
-	// herramienta en paralelo. Se fija al crear la instancia y no cambia.
-	maxSessions int
-}
-
-// begin y end marcan el trabajo en vuelo de una instancia.
-//
-// begin refresca además lastUse: una petición que empieza es uso, aunque tarde
-// en terminar. Y end lo vuelve a refrescar, para que el plazo de inactividad se
-// cuente desde que la respuesta salió y no desde que la petición entró.
-func (g *Gateway) begin(e *entry) {
-	g.mu.Lock()
-	e.inflight++
-	e.lastUse = time.Now()
-	g.mu.Unlock()
-}
-
-func (g *Gateway) end(e *entry) {
-	g.mu.Lock()
-	if e.inflight > 0 {
-		e.inflight--
-	}
-	e.lastUse = time.Now()
-	g.mu.Unlock()
-}
-
-// sessionRoute recuerda a qué instancia pertenece cada sesión MCP.
-type sessionRoute struct {
-	service   string
-	machineID string
-	ip        string
-	proxy     *httputil.ReverseProxy
-	lastUse   time.Time
-}
-
 func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, memService string) *Gateway {
-	g := &Gateway{
-		client: client, idle: idle, Ephemeral: ephemeral,
-		services: map[string]*entry{},
-		extra:    map[string][]*entry{},
-		routes:   map[string]*sessionRoute{},
-	}
+	g := &Gateway{Scheduler: scheduler.New(client, idle, ephemeral, prewarm)}
 	g.agg = newAggregator(g, ephemeral)
-	g.pool = newPool(g, prewarm)
 	g.mem = newMemory(g, memService)
-	g.pop = newPopularity(popularityPath())
+
+	// Lo que el planificador no sabe de MCP entra por sus ganchos.
+	//
+	// Una precalentada se entrega con la sesión MCP ya abierta: el initialize
+	// se paga al calentarla, no cuando llega la petición.
+	g.Prepare = func(ctx context.Context, ip string) (string, error) {
+		return mcpInit(ctx, "http://"+net.JoinHostPort(ip, strconv.Itoa(GuestPort)))
+	}
+	// Los servicios con estado no se precalientan: su instancia es persistente.
+	g.Skip = mcp.Stateful
+	// Una instancia que no contesta marca la salud del servicio.
+	g.OnProxyError = g.anotarFallo
+	// Las sesiones del agregador viven más que las instancias: son baratas.
+	g.OnTick = func(context.Context) { g.agg.reap(g.Idle() * 4) }
 	return g
 }
 
@@ -276,7 +136,7 @@ func (g *Gateway) Handler(token string) http.Handler {
 	// hay que poder ver cuando alguien sondea el puerto. authHandler resuelve el
 	// token a un tenant (el único = "default") y lo cuelga del contexto para que
 	// handleProxy pueda aplicar las cuotas.
-	return logging(g.authHandler(mux, token))
+	return logging(g.AuthHandler(mux, token))
 }
 
 func logging(h http.Handler) http.Handler {
@@ -289,33 +149,25 @@ func logging(h http.Handler) http.Handler {
 
 // handleServices lista qué snapshots hay disponibles como servicios MCP.
 func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
-	snaps, err := g.client.Snapshots(r.Context())
+	snaps, err := g.Client().Snapshots(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	for _, s := range snaps {
 		name := s.Name
 		if svc := s.Service(); svc != "" {
 			name = svc
 		}
+		st := g.Status(name)
 		status := "cold"
-		if n := g.pool.stats()[name]; n > 0 {
-			status = fmt.Sprintf("%d prewarmed instance(s)", n)
+		if st.Prewarmed > 0 {
+			status = fmt.Sprintf("%d prewarmed instance(s)", st.Prewarmed)
 		}
-		if e, ok := g.services[name]; ok {
-			n := 0
-			for _, rt := range g.routes {
-				if rt.service == name {
-					n++
-				}
-			}
+		if st.Warm {
 			status = fmt.Sprintf("warm at %s · %d session(s) · idle %s",
-				e.ip, n, time.Since(e.lastUse).Round(time.Second))
+				st.IP, st.Sessions, st.Idle.Round(time.Second))
 		}
 		fmt.Fprintf(w, "%-24s snapshot=%-20s %s\n", name, s.Name, status)
 	}
@@ -387,22 +239,22 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// A partir de aquí es un servicio respaldado por microVM. Se cuenta la llegada
 	// para que el prewarm por popularidad sepa qué se usa de verdad y priorice su
 	// fondo antes que el de servicios que nadie llama.
-	g.pop.observe(service)
+	g.Observe(service)
 
 	// Cuota de peticiones en vuelo del tenant. Es reparto justo, NO seguridad
 	// (ver quota.go): un solo cliente en bucle no debe acaparar todas las
 	// conexiones y dejar a los demás esperando. El 429 envuelve TODA la petición
 	// —tanto el camino pegajoso como el que despierta instancia— con un único
 	// begin/end, así que basta contabilizar aquí una vez.
-	tnt := tenantFrom(r.Context())
-	if !g.tenantBegin(tnt) {
+	tnt := scheduler.TenantFrom(r.Context())
+	if !g.TenantBegin(tnt) {
 		http.Error(w, fmt.Sprintf(
 			"429: tenant %q has reached its quota of %d in-flight requests.\n"+
 				"This is a fair-share limit, not a security limit: retry once the earlier ones finish.",
-			tnt.name, tnt.maxInflight), http.StatusTooManyRequests)
+			tnt.Name(), tnt.MaxInflight()), http.StatusTooManyRequests)
 		return
 	}
-	defer g.tenantEnd(tnt)
+	defer g.TenantEnd(tnt)
 
 	// Sesión ya conocida: directo a su instancia.
 	//
@@ -418,55 +270,51 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// sesión del puente SOBREVIVE: basta con descongelar la misma instancia para
 	// que siga funcionando.
 	if sid := r.Header.Get(SessionHeader); sid != "" {
-		if rt := g.route(sid); rt != nil {
+		if rt := g.Route(sid); rt != nil {
 			// La instancia de la sesión puede ser la primaria O una réplica de
 			// scale-out: se busca por machineID entre todas, no solo la primaria
 			// (mirar solo g.services rompía las sesiones enrutadas a una réplica).
-			g.mu.Lock()
-			e := g.entryByMachineLocked(rt.service, rt.machineID)
-			g.mu.Unlock()
+			e := g.Instance(rt.Service(), rt.MachineID())
 
 			// Dos formas de que la instancia haya muerto bajo la sesión: que el
 			// GATEWAY la retirara (ya no aparece por machineID) o que el DAEMON la
 			// congelara por TTL (aún figura, pero el invitado no responde). Lo
 			// segundo solo se ve comprobando vida.
-			if e == nil || !alive(rt.ip, GuestPort) {
+			if e == nil || !scheduler.Alive(rt.IP(), GuestPort) {
 				// Se invalida la instancia congelada (si aún figura) para que
 				// ensure la reconstruya en vez de devolverla tal cual, y se
 				// reconstruye la primaria del servicio.
-				g.mu.Lock()
-				g.removeEntryLocked(rt.service, rt.machineID)
-				g.mu.Unlock()
+				g.DropInstance(rt.Service(), rt.MachineID())
 				var err error
-				e, err = g.ensure(r.Context(), rt.service)
+				e, err = g.Ensure(r.Context(), rt.Service())
 				if err != nil {
-					g.forget(sid)
-					if errors.Is(err, errTenantInstances) {
-						http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.service, err),
+					g.Forget(sid)
+					if errors.Is(err, scheduler.ErrTenantInstances) {
+						http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
 							http.StatusTooManyRequests)
 						return
 					}
-					http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.service, err),
+					http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
 						http.StatusBadGateway)
 					return
 				}
-				if e.machineID == rt.machineID {
+				if e.MachineID() == rt.MachineID() {
 					// Mismo VMM descongelado: la sesión del puente sigue viva,
 					// solo hay que reapuntar al proxy nuevo.
-					g.rebind(sid, e)
+					g.Rebind(sid, e)
 				} else {
 					// Máquina distinta: su puente no conoce esta sesión y
 					// responderá 400. Se olvida para que el cliente rehaga el
 					// handshake contra la instancia nueva.
-					g.forget(sid)
+					g.Forget(sid)
 					rt = nil
 				}
 			}
 
 			if rt != nil {
-				g.begin(e)
-				defer g.end(e)
-				rt.proxy.ServeHTTP(w, r)
+				g.Begin(e)
+				defer g.End(e)
+				rt.ServeHTTP(w, r)
 				return
 			}
 		}
@@ -481,7 +329,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
 	if r.Method == http.MethodDelete {
 		if sid := r.Header.Get(SessionHeader); sid != "" {
-			g.forget(sid)
+			g.Forget(sid)
 		}
 	}
 }
@@ -502,23 +350,23 @@ const maxScaleOut = 16
 // cliente. Solo se buferea AQUÍ, donde la respuesta es un initialize pequeño; las
 // peticiones de una sesión ya establecida (tools/call, que pueden devolver mucho
 // o en streaming) siguen yendo directas por el camino pegajoso.
-func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, service string, tnt *tenant) {
+func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, service string, tnt *scheduler.Tenant) {
 	// Sin cuerpo reenviable no hay reintento posible: se sirve directo por la
 	// primaria. handleProxy prepara GetBody para los POST, así que esto solo pasa
 	// con métodos sin cuerpo, que no crean sesión y por tanto nunca dan el 400 de
 	// tope.
 	if r.GetBody == nil {
-		e, err := g.ensure(r.Context(), service)
+		e, err := g.Ensure(r.Context(), service)
 		if err != nil {
 			g.newSessionError(w, service, err)
 			return
 		}
-		g.begin(e)
-		defer g.end(e)
+		g.Begin(e)
+		defer g.End(e)
 		// El codigo se mira DESPUES de servir: anotar el exito por haber
 		// conseguido la instancia daba por sano un servicio que no contestaba.
 		cw := &codigoVisto{ResponseWriter: w, code: http.StatusOK}
-		e.proxy.ServeHTTP(cw, r)
+		e.Proxy().ServeHTTP(cw, r)
 		if cw.code < 500 {
 			g.anotarExito(service)
 		}
@@ -526,14 +374,14 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 	}
 
 	for try := 0; try < maxScaleOut; try++ {
-		var e *entry
+		var e *scheduler.Instance
 		var err error
 		if try == 0 {
-			e, err = g.pickInstance(r.Context(), service, tnt)
+			e, err = g.PickInstance(r.Context(), service, tnt)
 		} else {
 			// El intento anterior chocó con el tope de una instancia: se fuerza una
 			// réplica nueva para esta sesión.
-			e, err = g.scaleOut(r.Context(), service, tnt)
+			e, err = g.ScaleOut(r.Context(), service, tnt)
 		}
 		if err != nil {
 			g.newSessionError(w, service, err)
@@ -543,9 +391,9 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			r.Body = b
 		}
 		rec := httptest.NewRecorder()
-		g.begin(e)
-		e.proxy.ServeHTTP(rec, r)
-		g.end(e)
+		g.Begin(e)
+		e.Proxy().ServeHTTP(rec, r)
+		g.End(e)
 
 		// ¿El puente rechazó por tope de sesiones? Esa instancia está llena: se crea
 		// otra y se reintenta. Cualquier otra respuesta (incluido otro 400) se
@@ -571,7 +419,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		w.WriteHeader(rec.Code)
 		_, _ = w.Write(rec.Body.Bytes())
 		if sid := rec.Header().Get(SessionHeader); sid != "" {
-			g.bind(sid, service, e)
+			g.Bind(sid, service, e)
 		}
 		return
 	}
@@ -582,7 +430,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 func (g *Gateway) newSessionError(w http.ResponseWriter, service string, err error) {
 	// La cuota de instancias del tenant es un 429 (reparto justo), no un 502: el
 	// servicio no falla, es que este tenant ya tiene todas las suyas.
-	if errors.Is(err, errTenantInstances) {
+	if errors.Is(err, scheduler.ErrTenantInstances) {
 		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
 		return
 	}
@@ -648,36 +496,18 @@ func (g *Gateway) anotarSalud(service string, sano bool, causa string) {
 	// Lo que si depende del daemon es escribirlo en el meta. Sin cliente no hay
 	// donde, y la goroutine de abajo desreferenciaria un nulo — que, por ser una
 	// goroutine, se llevaria el PROCESO entero y no solo esta anotacion.
-	if g.client == nil {
+	if g.Client() == nil {
 		return
 	}
 	go func() {
 		panico.Contener("gateway.anotarSalud", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := mcp.SetHealth(ctx, g.client, service, sano, causa); err != nil {
+			if err := mcp.SetHealth(ctx, g.Client(), service, sano, causa); err != nil {
 				log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
 			}
 		})
 	}()
-}
-
-// pickInstance devuelve una instancia del servicio con hueco de sesión. Despierta
-// la primaria si hace falta, y si todas las instancias (primaria + réplicas) están
-// al tope, crea una réplica nueva.
-func (g *Gateway) pickInstance(ctx context.Context, service string, tnt *tenant) (*entry, error) {
-	if _, err := g.ensure(ctx, service); err != nil {
-		return nil, err
-	}
-	g.mu.Lock()
-	for _, e := range g.entriesLocked(service) {
-		if g.sessionCountLocked(e.machineID) < e.maxSessions {
-			g.mu.Unlock()
-			return e, nil
-		}
-	}
-	g.mu.Unlock()
-	return g.scaleOut(ctx, service, tnt)
 }
 
 // handleLinkProxy reenvía la petición HTTP al servidor MCP externo.
@@ -698,84 +528,8 @@ func (g *Gateway) handleLinkProxy(w http.ResponseWriter, r *http.Request, l *api
 	// El destino es una URL de TERCEROS, puesta con `kling mcp link`. Mandarle el
 	// token del gateway seria filtrar la credencial de todo el sistema a un host
 	// que no controlamos.
-	sinCredencialDelGateway(proxy)
+	scheduler.WithoutGatewayCredential(proxy)
 	proxy.ServeHTTP(w, r)
-}
-
-// sinCredencialDelGateway quita la cabecera Authorization antes de reenviar.
-//
-// `Authorization` NO es hop-by-hop, asi que httputil.ReverseProxy la propaga
-// verbatim. Sin esto, el token que autentica a los clientes del gateway llega
-// entero a cada servidor MCP invitado —que este codigo declara HOSTILES por
-// diseno, ver internal/machine/mmds.go— y a cada URL externa enlazada.
-//
-// Con ese token, un invitado comprometido llama al gateway como cliente
-// legitimo: despertar un snapshot ES ejecutar codigo, y desde ahi puede invocar
-// cualquier herramienta de cualquier servicio y cruzar tenants. Las cuotas no
-// son una frontera de seguridad y no lo impedirian.
-//
-// Lo que el destino necesite para autenticarse es SUYO y se anade aparte: los
-// enlaces (api.Link) no llevan credencial, asi que aqui no hay nada que
-// reponer.
-// proxyInvitado arma el proxy hacia una microVM, sin la credencial del gateway.
-func proxyInvitado(target *url.URL) *httputil.ReverseProxy {
-	p := httputil.NewSingleHostReverseProxy(target)
-	sinCredencialDelGateway(p)
-	return p
-}
-
-func sinCredencialDelGateway(p *httputil.ReverseProxy) {
-	dir := p.Director
-	p.Director = func(r *http.Request) {
-		if dir != nil {
-			dir(r)
-		}
-		r.Header.Del("Authorization")
-	}
-}
-
-func (g *Gateway) route(sid string) *sessionRoute {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	rt, ok := g.routes[sid]
-	if !ok {
-		return nil
-	}
-	rt.lastUse = time.Now()
-	// Mantener viva la instancia CONCRETA de esta sesión —primaria o réplica—: si
-	// se refrescara solo la primaria, el segador congelaría una réplica con
-	// sesiones activas por debajo.
-	if e := g.entryByMachineLocked(rt.service, rt.machineID); e != nil {
-		e.lastUse = time.Now()
-	}
-	return rt
-}
-
-func (g *Gateway) bind(sid, service string, e *entry) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.routes[sid] = &sessionRoute{
-		service: service, machineID: e.machineID, ip: e.ip,
-		proxy: e.proxy, lastUse: time.Now(),
-	}
-	log.Printf("%s: session %s bound to %s", service, short(sid), e.ip)
-}
-
-// rebind reapunta una sesión a la instancia actual de su servicio, conservando
-// la sesión: se usa cuando el MISMO VMM se descongeló y solo cambió el proxy.
-func (g *Gateway) rebind(sid string, e *entry) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if rt, ok := g.routes[sid]; ok {
-		rt.machineID, rt.ip, rt.proxy = e.machineID, e.ip, e.proxy
-		rt.lastUse = time.Now()
-	}
-}
-
-func (g *Gateway) forget(sid string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.routes, sid)
 }
 
 // trunc acorta cadenas para los registros de diagnóstico.
@@ -791,269 +545,6 @@ func short(s string) string {
 		return s[:8]
 	}
 	return s
-}
-
-// ensure devuelve una instancia viva del servicio, despertándola si hace falta.
-//
-// Tres casos, de más barato a más caro:
-//  1. ya hay una caliente          -> 0 ms
-//  2. hay una congelada            -> ~30 ms de thaw
-//  3. no hay ninguna               -> se instancia del snapshot dorado
-func (g *Gateway) ensure(ctx context.Context, service string) (*entry, error) {
-	// Serializado POR SERVICIO. Sin esto, N llamadas concurrentes que llegan
-	// antes de existir la instancia entran todas en acquire() y cada una crea la
-	// suya: ocho peticiones paralelas levantaban ocho microVMs del mismo servicio
-	// persistente, cada una con su proceso de node. El host se quedaba sin RAM y
-	// todas acababan agotando su tiempo de espera.
-	//
-	// Es el mismo patrón que ya protegía la creación de sesión, aplicado un nivel
-	// más arriba: quien llega segundo debe esperar y reutilizar, no duplicar.
-	lock := g.ensureLock(service)
-	lock.Lock()
-	defer lock.Unlock()
-
-	tnt := tenantFrom(ctx)
-
-	g.mu.Lock()
-	if e, ok := g.services[service]; ok {
-		e.lastUse = time.Now()
-		// La instancia ya está caliente: no se despierta nada nuevo, así que no
-		// se aplica la cuota de instancias. Si no tenía dueño, lo adopta el primer
-		// tenant que la usa —importa para el fairness de evictLRU—.
-		if e.tenant == "" {
-			e.tenant = tnt.name
-		}
-		recent := time.Since(e.checkedAt) < livenessTTL
-		g.mu.Unlock()
-
-		// Comprobar que sigue viva cuesta un List() al daemon, y List() recorre
-		// el disco de TODAS las máquinas para calcular su ocupación. Hacerlo en
-		// cada llamada, bajo el candado del servicio, serializaba todo: ocho
-		// peticiones paralelas se ponían en fila detrás de ocho recorridos de
-		// disco y agotaban su tiempo de espera.
-		//
-		// Se confía en la instancia durante un rato. Si de verdad murió, la
-		// llamada fallará y el manejador de errores del proxy la reconstruye:
-		// más barato equivocarse una vez que verificar mil.
-		if recent {
-			return e, nil
-		}
-		if g.alive(ctx, e.machineID) {
-			g.mu.Lock()
-			e.checkedAt = time.Now()
-			g.mu.Unlock()
-			return e, nil
-		}
-		// Murió por debajo: se descarta y se reconstruye.
-		g.mu.Lock()
-		delete(g.services, service)
-	}
-	g.mu.Unlock()
-
-	// A partir de aquí se DESPIERTA/CREA la instancia primaria del servicio.
-	e, err := g.buildEntry(ctx, service, tnt, false)
-	if err != nil {
-		return nil, err
-	}
-	g.mu.Lock()
-	g.services[service] = e
-	g.mu.Unlock()
-	return e, nil
-}
-
-// buildEntry despierta o crea UNA instancia del servicio y la devuelve montada
-// (con su proxy), SIN registrarla: quien llama decide si es la primaria
-// (g.services) o una réplica de scale-out (g.extra). Aplica siempre la cuota de
-// instancias del tenant y el desalojo por memoria, porque siempre crea/despierta
-// —el camino de reutilizar una instancia caliente retorna antes de llegar aquí—.
-func (g *Gateway) buildEntry(ctx context.Context, service string, tnt *tenant, fresh bool) (*entry, error) {
-	// Cuota de instancias del tenant: reparto justo, no seguridad (ver quota.go).
-	if tnt.maxInstances > 0 {
-		g.mu.Lock()
-		actuales := g.tenantInstances(tnt.name)
-		g.mu.Unlock()
-		if actuales >= tnt.maxInstances {
-			return nil, fmt.Errorf("%w: %q already has %d instance(s) awake (max %d)",
-				errTenantInstances, tnt.name, actuales, tnt.maxInstances)
-		}
-	}
-
-	mc, err := g.acquire(ctx, service, fresh)
-	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
-	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
-	// falta varias—, y rendirse tras la primera dejaba el 502 igual que antes.
-	for api.IsInsufficientMemory(err) {
-		// No cabe: se hace sitio en vez de rendirse.
-		//
-		// Un anfitrión justo no puede tener todos los servicios despiertos a la
-		// vez, y eso NO debería significar que el último que llega no funcione
-		// nunca. Antes fallaba con un 502 perfectamente explicado y perfectamente
-		// inútil: el usuario no tiene forma de saber que la solución es esperar a
-		// que otro servicio se enfríe.
-		//
-		// Se congela el más antiguo SIN trabajo en vuelo. Congelar cuesta un par
-		// de segundos y descongelar 25 ms, así que la instancia sacrificada
-		// vuelve barata; el que espera, en cambio, no tenía alternativa.
-		victima := g.evictLRU(ctx, service, tnt.name)
-		if victima == "" {
-			// No queda nada ocioso que sacrificar: ahora sí hay que rendirse, y
-			// el error de falta de memoria explica por qué.
-			break
-		}
-		log.Printf("%s: didn't fit; froze %s to make room", service, victima)
-		mc, err = g.acquire(ctx, service, fresh)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// Tener la microVM en marcha no significa que la herramienta escuche ya. Tras
-	// un thaw el proceso está listo casi al instante, pero en frío el invitado aún
-	// arranca. Sin esperar aquí, la primera petición se comería un "connection
-	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
-	wr0 := time.Now()
-	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
-		return nil, fmt.Errorf("tool did not start listening: %w", err)
-	}
-	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
-	// botella del arranque (ver docs de rendimiento en Mac): un thaw acepta casi al
-	// instante, un arranque en frío bajo KVM anidado tarda segundos. Se registra solo
-	// cuando es notable, para no ensuciar el log con los thaws de milisegundos.
-	if d := time.Since(wr0); d > 500*time.Millisecond {
-		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
-	}
-
-	target, _ := url.Parse("http://" + net.JoinHostPort(mc.IP, strconv.Itoa(GuestPort)))
-	e := &entry{
-		machineID:   mc.ID,
-		ip:          mc.IP,
-		lastUse:     time.Now(),
-		checkedAt:   time.Now(),
-		tenant:      tnt.name, // quien la despertó es su dueño para cuota y fairness
-		maxSessions: gwMaxSessions(mc.MemMiB),
-		proxy:       proxyInvitado(target),
-	}
-	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
-	// LA RESPUESTA es larga a propósito: al otro lado hay una herramienta, y una
-	// herramienta puede tardar. Un escaneo de semgrep sobre un repo pasa del
-	// minuto sin que nada vaya mal, y con 60 s el gateway lo mataba y devolvía
-	// un 502 que parecía un fallo del servicio.
-	e.proxy.Transport = &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 5 * time.Minute,
-	}
-	e.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		// UNA sola oportunidad, y solo si el cuerpo se puede reenviar.
-		//
-		// Reintentar llamando otra vez a ServeHTTP con la MISMA petición era una
-		// recursión infinita: el cuerpo ya se consumió en el primer intento, así
-		// que el reintento falla con "invalid Read on closed Body", eso vuelve a
-		// entrar aquí, y así hasta que el cliente se rinde. Medido: 4 min 40 s
-		// girando en vacío, con la pila creciendo en cada vuelta.
-		//
-		// GetBody solo existe si alguien preparó el cuerpo para reenviarlo — lo
-		// hace handleProxy. Sin él no hay reintento posible, y fingirlo es peor
-		// que fallar.
-		// SOLO se reintenta un fallo de DIAL: no había nadie escuchando cuando se
-		// intentó conectar. Un timeout de cabeceras es otra cosa —el invitado
-		// aceptó la conexión y está trabajando—, y reenviar la petición
-		// RE-EJECUTARÍA un tools/call que quizá ya tuvo efecto. La distinción es
-		// la misma que en el agregador: "no conecté" se reintenta, "tardó" no.
-		var opErr *net.OpError
-		esDial := errors.As(err, &opErr) && opErr.Op == "dial"
-		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
-		// reintentar: la respuesta distingue dos situaciones muy distintas —el
-		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
-		vivo := esDial && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil
-
-		if vivo && !retried(r) && r.GetBody != nil {
-			body, berr := r.GetBody()
-			if berr == nil {
-				log.Printf("proxy %s: %v (one retry)", service, err)
-				r2 := r.Clone(markRetried(r.Context()))
-				r2.Body = body
-				e.proxy.ServeHTTP(w, r2)
-				return
-			}
-		}
-
-		// No se pudo conectar Y el invitado tampoco responde ahora: esta
-		// instancia ya no esta. Pasa de verdad — el recolector de disco del
-		// daemon retira instancias dormidas para hacer sitio, y el gateway se
-		// quedaba con la entrada apuntando a una IP muerta PARA SIEMPRE: todas
-		// las peticiones siguientes daban 502 sin que nada lo arreglara. Se
-		// olvida aqui para que la proxima peticion levante una nueva.
-		if esDial && !vivo {
-			log.Printf("proxy %s: its instance is gone; forgetting it so the next call creates another", service)
-			g.olvidarInstancia(service, e.machineID)
-		}
-		// Y se DEGRADA la salud. Antes el exito se anotaba al conseguir la
-		// instancia, no al servir: un servicio caido devolvia 502 una y otra vez
-		// mientras cada intento REAFIRMABA que estaba sano.
-		g.anotarFallo(service, err)
-
-		log.Printf("proxy %s: %v", service, err)
-		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
-	}
-
-	return e, nil
-}
-
-// gwMaxSessions calcula cuántas sesiones caben en una instancia según su memoria.
-// Réplica de deriveMaxSessions del puente (cmd/kling-bridge/sessions.go): 64 MiB
-// por sesión, 192 reservados, tope 32, mínimo 1. Sirve para saber CUÁNDO escalar
-// sin preguntárselo al invitado; si por drift se equivoca, el 400 del puente lo
-// corrige (handleProxy crea otra réplica). Si cambia la fórmula del puente, hay
-// que cambiar esta —el 400 lo salva, pero mejor no depender de él—.
-func gwMaxSessions(memMiB int) int {
-	const sessionMiB, reservedMiB, cap = 64, 192, 32
-	if memMiB <= 0 {
-		return 1
-	}
-	usable := memMiB - reservedMiB
-	if usable < sessionMiB {
-		return 1
-	}
-	if n := usable / sessionMiB; n <= cap {
-		return n
-	}
-	return cap
-}
-
-// entriesLocked devuelve TODAS las instancias vivas de un servicio: la primaria y
-// las réplicas de scale-out. Se llama con g.mu tomado.
-func (g *Gateway) entriesLocked(service string) []*entry {
-	var es []*entry
-	if e := g.services[service]; e != nil {
-		es = append(es, e)
-	}
-	es = append(es, g.extra[service]...)
-	return es
-}
-
-// entryByMachineLocked encuentra la instancia (primaria o réplica) de un servicio
-// por su machineID. Es lo que permite que una sesión pegajosa a una RÉPLICA
-// vuelva a ella y no se confunda con la primaria. Se llama con g.mu tomado.
-func (g *Gateway) entryByMachineLocked(service, machineID string) *entry {
-	for _, e := range g.entriesLocked(service) {
-		if e.machineID == machineID {
-			return e
-		}
-	}
-	return nil
-}
-
-// sessionCountLocked cuenta cuántas sesiones vivas hay enrutadas a una instancia,
-// derivándolo del mapa de rutas (fuente autoritativa, sin contador que se
-// desincronice). Se llama con g.mu tomado.
-func (g *Gateway) sessionCountLocked(machineID string) int {
-	n := 0
-	for _, rt := range g.routes {
-		if rt.machineID == machineID {
-			n++
-		}
-	}
-	return n
 }
 
 // codigoVisto recuerda el codigo con el que se respondio, para poder decidir la
@@ -1077,417 +568,6 @@ func (c *codigoVisto) Flush() {
 	}
 }
 
-// olvidarInstancia retira una instancia que ya no existe, tomando el cerrojo.
-// Es removeEntryLocked para quien no lo tiene.
-func (g *Gateway) olvidarInstancia(service, machineID string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.removeEntryLocked(service, machineID)
-}
-
-// removeEntryLocked quita una instancia del servicio, sea la primaria o una
-// réplica. Se llama con g.mu tomado.
-func (g *Gateway) removeEntryLocked(service, machineID string) {
-	if e := g.services[service]; e != nil && e.machineID == machineID {
-		delete(g.services, service)
-		return
-	}
-	es := g.extra[service]
-	for i, e := range es {
-		if e.machineID == machineID {
-			g.extra[service] = append(es[:i], es[i+1:]...)
-			if len(g.extra[service]) == 0 {
-				delete(g.extra, service)
-			}
-			return
-		}
-	}
-}
-
-// scaleOut crea una RÉPLICA nueva del servicio para absorber sesiones que no caben
-// en las instancias existentes. Es lo que hace usable una herramienta en paralelo:
-// cada réplica atiende hasta su maxSessions, y el ruteo pegajoso manda cada sesión
-// a la suya. NO toma el candado por-servicio de ensure: queremos que varias
-// réplicas puedan nacer a la vez para sesiones concurrentes.
-func (g *Gateway) scaleOut(ctx context.Context, service string, tnt *tenant) (*entry, error) {
-	e, err := g.buildEntry(ctx, service, tnt, true)
-	if err != nil {
-		return nil, err
-	}
-	g.mu.Lock()
-	g.extra[service] = append(g.extra[service], e)
-	total := 1 + len(g.extra[service])
-	g.mu.Unlock()
-	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
-	return e, nil
-}
-
-// acquire busca una máquina utilizable para el servicio, por orden de coste.
-// acquire busca/crea una máquina para el servicio. Con fresh=true SIEMPRE crea una
-// instancia nueva del snapshot dorado, sin reutilizar una que ya esté en marcha:
-// es lo que necesita el scale-out, porque reutilizar la instancia llena sería
-// volver a chocar con su tope de sesiones. Con fresh=false (la primaria) reutiliza
-// por orden de coste.
-func (g *Gateway) acquire(ctx context.Context, service string, fresh bool) (*api.Machine, error) {
-	if fresh {
-		return g.runFresh(ctx, service)
-	}
-	machines, err := g.client.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	match := func(m *api.Machine) bool {
-		// Las del fondo y las efímeras YA TIENEN DUEÑO, y ese dueño las destruye
-		// al terminar. Adoptarlas aquí como instancia persistente crea una
-		// máquina con dos dueños: una acción efímera la borra debajo de las
-		// sesiones que el gateway había fijado a ella, y esas sesiones mueren
-		// sin que nada apunte a la causa.
-		if m.Labels["pool"] == "true" || m.Labels["ephemeral"] == "true" {
-			return false
-		}
-		return m.Service() == service || m.From == service
-	}
-
-	// 1) alguna ya en marcha
-	for _, m := range machines {
-		if match(m) && m.State == api.StateRunning && m.IP != "" {
-			return m, nil
-		}
-	}
-	// 2) alguna congelada: ~30 ms
-	for _, m := range machines {
-		if match(m) && m.State == api.StateWarm {
-			log.Printf("%s: thawing %s", service, m.Name)
-			return g.client.Thaw(ctx, m.ID)
-		}
-	}
-	// 3) instanciar del snapshot dorado
-	return g.runFresh(ctx, service)
-}
-
-// runFresh crea una instancia NUEVA del servicio desde su snapshot dorado. Cada
-// llamada da una microVM distinta (su propio machineID), que es lo que permite
-// tener varias réplicas del mismo servicio a la vez.
-func (g *Gateway) runFresh(ctx context.Context, service string) (*api.Machine, error) {
-	snap, err := g.snapshotFor(ctx, service)
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("%s: instantiating from snapshot %s", service, snap.Name)
-	return g.client.Run(ctx, api.RunRequest{
-		From: snap.Name,
-		// La política de salida viaja con el snapshot. Sin esto, un servicio
-		// importado con -egress internet despierta sin red y cada llamada suya
-		// al exterior falla con un "fetch failed" que no señala a ninguna parte.
-		Egress: snap.Egress,
-		// El techo de CPU también viaja con el snapshot: sin esto la restauración
-		// caía al defaultCPUPct=50 del daemon y un servicio importado con más CPU
-		// arrancaba estrangulado. 0 (snapshots viejos) deja que el daemon decida.
-		CPUPct:     snap.CPUPct,
-		Labels:     map[string]string{api.LabelService: service},
-		TTLSeconds: int(g.idle.Seconds()) * 2, // red de seguridad si el gateway muere
-	})
-}
-
-func (g *Gateway) snapshotFor(ctx context.Context, service string) (*api.Snapshot, error) {
-	snaps, err := g.client.Snapshots(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range snaps {
-		if s.Service() == service || s.Name == service {
-			return s, nil
-		}
-	}
-	return nil, fmt.Errorf("no snapshot for service %q", service)
-}
-
-func (g *Gateway) alive(ctx context.Context, id string) bool {
-	machines, err := g.client.List(ctx)
-	if err != nil {
-		return false
-	}
-	for _, m := range machines {
-		if m.ID == id {
-			return m.State == api.StateRunning
-		}
-	}
-	return false
-}
-
-// Reap congela las instancias que llevan demasiado tiempo sin recibir peticiones.
-//
-// Congelar y no eliminar es lo que hace que la siguiente petición cueste 30 ms en
-// vez de 2,6 segundos: la herramienta sigue ahí, solo que dormida.
-func (g *Gateway) Reap(ctx context.Context) {
-	t := time.NewTicker(g.idle / 3)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			// El segador toca cinco subsistemas por vuelta. Un panico en
-			// cualquiera de ellos mataria el gateway entero, y con el se
-			// caerian TODOS los servicios a la vez — incluidos los que no
-			// tienen nada que ver con el que fallo.
-			panico.Contener("gateway.Reap", func() {
-				g.reapOnce(ctx)
-				g.agg.reap(g.idle * 4) // las sesiones del agregador viven más: son baratas
-				g.pool.evictStale(ctx, g.idle*2)
-				g.PrewarmAll(ctx)
-				g.KeepWarmAll(ctx)
-			})
-		}
-	}
-}
-
-// prewarmMarginMiB es el colchón que el prewarm NO toca de la memoria disponible
-// del anfitrión: parte para el propio host y parte para el tráfico real —una
-// instancia de servicio despertándose fuera del fondo—. Precalentar hasta el
-// último MiB dejaría sin aire justo a las peticiones que estamos intentando
-// acelerar.
-const prewarmMarginMiB = 512
-
-// PrewarmAll rellena el fondo, pero con cabeza: primero los servicios que más se
-// usan y solo mientras haya presupuesto de memoria.
-//
-// Antes rellenaba TODOS los snapshots por igual. Con la RAM justa eso significaba
-// precalentar lo que nadie llama y que el servicio popular acabara pagando el 507.
-// Ahora se ordena por popularidad (EMA de llegadas) y se para al agotar el
-// presupuesto: los menos populares se quedan sin fondo hasta que se libere memoria.
-func (g *Gateway) PrewarmAll(ctx context.Context) {
-	if g.pool.size == 0 || !g.Ephemeral {
-		return
-	}
-	snaps, err := g.client.Snapshots(ctx)
-	if err != nil {
-		return
-	}
-
-	// Se pliega la popularidad al principio de cada pasada: esta cadencia es la
-	// ventana de la media móvil, y de paso deja el historial persistido.
-	g.pop.fold()
-
-	type cand struct {
-		svc, snap string
-		mem       int
-	}
-	var cands []cand
-	for _, s := range snaps {
-		// Un servicio con estado usa UNA instancia persistente: pre-calentar
-		// varias sería crear grafos paralelos que nadie reconcilia.
-		if mcp.Stateful(s) {
-			continue
-		}
-		svc := s.Name
-		if n := s.Service(); n != "" {
-			svc = n
-		}
-		cands = append(cands, cand{svc: svc, snap: s.Name, mem: s.MemMiB})
-	}
-
-	// Orden por popularidad (desc). Estable a propósito: sin historial todos
-	// puntúan 0 y se conserva el orden del catálogo —el comportamiento de siempre—,
-	// así un gateway recién arrancado no regresa a peor, solo deja de malgastar
-	// memoria en lo que nadie usa en cuanto hay datos.
-	sort.SliceStable(cands, func(i, j int) bool {
-		return g.pop.score(cands[i].svc) > g.pop.score(cands[j].svc)
-	})
-
-	// Presupuesto de memoria. Se consulta la memoria disponible del anfitrión (la
-	// misma que mira el guard del daemon) menos el margen. La estimación del coste
-	// es conservadora —mem_mib entero por copia, sin descontar la compartición de
-	// páginas entre instancias del mismo snapshot— para pecar de precavido; el 507
-	// limpio de reserveMemory sigue siendo la última red si aun así nos pasamos.
-	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
-	ready := g.pool.stats()
-
-	for _, c := range cands {
-		faltan := g.pool.size - ready[c.svc]
-		if faltan <= 0 {
-			continue
-		}
-		if budget >= 0 && c.mem > 0 {
-			if budget < c.mem {
-				// No cabe ni una instancia más: se acabó el presupuesto y el resto
-				// —menos popular, por el orden— se queda sin fondo hasta que se
-				// libere memoria.
-				break
-			}
-			if c.mem*faltan > budget {
-				faltan = budget / c.mem
-			}
-			budget -= c.mem * faltan
-		}
-		g.pool.fillN(ctx, c.svc, c.snap, faltan)
-	}
-}
-
-// KeepWarmAll mantiene caliente la primaria de los servicios más populares en modo
-// PERSISTENTE, para que la primera sesión no pague el arranque en frío. Es la
-// hermana persistente de PrewarmAll: aquel llena el fondo EFÍMERO (instancias de un
-// solo uso, consumidas por callEphemeral), y encima se apaga si !Ephemeral; este
-// puebla g.services normales vía ensure(), que es de donde tiran las sesiones
-// persistentes. Sin esto, el primer initialize de un servicio dormido entra en
-// buildEntry→acquire→runFresh y se come los ~16 s de arranque en frío (Mac); con
-// esto, la instancia ya existe (reutilización directa) o el segador la dejó WARM y
-// solo se paga un thaw (~25 ms).
-//
-// Apagado por defecto (KeepWarm == 0): en un host con la RAM justa mantener
-// calientes servicios que nadie llama fuerza desalojos. Es una palanca para hosts
-// donde el cuello es el arranque, no la memoria.
-//
-// Deja que el segador la congele por ociosa: no se ancla. La siguiente pasada la
-// re-asegura (reutiliza la RUNNING, o descongela la WARM), nunca vuelve a runFresh.
-// Así la RAM sigue siendo honesta en hosts justos y aun así se elimina el arranque
-// en frío del camino crítico.
-func (g *Gateway) KeepWarmAll(ctx context.Context) {
-	if g.KeepWarm <= 0 {
-		return
-	}
-	snaps, err := g.client.Snapshots(ctx)
-	if err != nil {
-		return
-	}
-
-	// La popularidad solo avanza si alguien la pliega una vez por pasada. En modo
-	// persistente PrewarmAll sale antes de plegarla (el gate !Ephemeral), así que lo
-	// hace este; si además corriera el efímero, PrewarmAll ya la plegó y no se
-	// re-pliega para no adelantar dos veces la ventana de la media móvil.
-	if !g.Ephemeral {
-		g.pop.fold()
-	}
-
-	type cand struct {
-		svc string
-		mem int
-	}
-	var cands []cand
-	for _, s := range snaps {
-		// Un servicio con estado usa UNA instancia persistente; ya la mantiene
-		// caliente su propio uso, no se fuerza aquí.
-		if mcp.Stateful(s) {
-			continue
-		}
-		svc := s.Name
-		if n := s.Service(); n != "" {
-			svc = n
-		}
-		cands = append(cands, cand{svc: svc, mem: s.MemMiB})
-	}
-	sort.SliceStable(cands, func(i, j int) bool {
-		return g.pop.score(cands[i].svc) > g.pop.score(cands[j].svc)
-	})
-
-	budget := g.prewarmBudget(ctx) // -1 = no se pudo medir: sin límite
-	warmed := 0
-	for _, c := range cands {
-		if warmed >= g.KeepWarm {
-			break
-		}
-		// ¿Ya está caliente la primaria? No cuesta nada y cuenta para el cupo.
-		g.mu.Lock()
-		_, yaCaliente := g.services[c.svc]
-		g.mu.Unlock()
-		if yaCaliente {
-			warmed++
-			continue
-		}
-		// Presupuesto: no despertar una primaria nueva si no cabe. La estimación es
-		// conservadora (mem_mib entero, sin descontar páginas compartidas), igual que
-		// en PrewarmAll; el 507 del daemon sigue siendo la última red.
-		if budget >= 0 && c.mem > 0 {
-			if budget < c.mem {
-				break
-			}
-			budget -= c.mem
-		}
-		// ensure() hace todo el trabajo pesado: candado por servicio, buildEntry y
-		// registro en g.services. En una goroutine para no bloquear el segador ~16 s
-		// por cada servicio en frío; la compuerta de arranque del daemon serializa los
-		// encendidos de verdad, así que disparar varias a la vez es seguro. ensure es
-		// idempotente bajo su candado, de modo que si la siguiente pasada la encuentra
-		// aún arrancando no duplica nada. Contexto de fondo sin tenant: es una acción
-		// del sistema, el primer usuario real la adopta como dueña (ver ensure).
-		warmed++
-		go func(svc string) {
-			if _, err := g.ensure(ctx, svc); err != nil {
-				log.Printf("keepwarm %s: %v", svc, err)
-				return
-			}
-			log.Printf("%s: primary kept warm", svc)
-		}(c.svc)
-	}
-}
-
-// prewarmBudget es cuánta memoria del anfitrión se puede dedicar a precalentar,
-// en MiB. Devuelve -1 si no se puede medir (p. ej. un daemon en macOS sin /proc):
-// en ese caso no se limita y se cae al comportamiento de rellenarlo todo, con el
-// 507 del daemon como única red.
-func (g *Gateway) prewarmBudget(ctx context.Context) int {
-	ps, err := g.client.ProcStats(ctx)
-	if err != nil || ps.AvailableMiB <= 0 {
-		return -1
-	}
-	b := int(ps.AvailableMiB) - prewarmMarginMiB
-	if b < 0 {
-		b = 0
-	}
-	return b
-}
-
-// Drain destruye las instancias pre-calentadas. Se llama al parar el gateway.
-func (g *Gateway) Drain(ctx context.Context) {
-	g.pop.fold() // deja el historial de popularidad en disco antes de irse
-	g.pool.drain(ctx)
-}
-
-func (g *Gateway) reapOnce(ctx context.Context) {
-	type victim struct{ service, id string }
-	var victims []victim
-
-	g.mu.Lock()
-	// Con trabajo en vuelo NO se congela, por vieja que parezca: lastUse solo dice
-	// cuándo llegó algo, no si sigue corriendo. Aplica igual a la primaria y a las
-	// réplicas de scale-out; una réplica con sesiones activas mantiene su lastUse
-	// fresco (ver route), así que solo se congelan las que de verdad quedaron
-	// ociosas. Se recogen todas y se quitan después, para no mutar mientras se
-	// recorre g.extra.
-	for svc, e := range g.services {
-		if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
-			victims = append(victims, victim{svc, e.machineID})
-		}
-	}
-	for svc, es := range g.extra {
-		for _, e := range es {
-			if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
-				victims = append(victims, victim{svc, e.machineID})
-			}
-		}
-	}
-	for _, v := range victims {
-		g.removeEntryLocked(v.service, v.id)
-	}
-	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
-	// proceso servidor muere con ella.
-	for sid, rt := range g.routes {
-		if time.Since(rt.lastUse) > g.idle {
-			delete(g.routes, sid)
-		}
-	}
-	g.mu.Unlock()
-
-	for _, v := range victims {
-		if _, err := g.client.Freeze(ctx, v.id); err != nil {
-			log.Printf("reap %s: %v", v.service, err)
-			continue
-		}
-		log.Printf("%s: frozen due to inactivity", v.service)
-	}
-}
-
 // newSessionID genera el identificador de una sesión del agregador.
 func newSessionID() string {
 	b := make([]byte, 16)
@@ -1506,7 +586,7 @@ func (g *Gateway) links(ctx context.Context) []*api.Link {
 	}
 	g.linkMu.RUnlock()
 
-	ls, err := mcp.Links(ctx, g.client)
+	ls, err := mcp.Links(ctx, g.Client())
 	if err != nil {
 		return nil
 	}
@@ -1524,145 +604,4 @@ func (g *Gateway) linkFor(ctx context.Context, service string) *api.Link {
 		}
 	}
 	return nil
-}
-
-// ensureLock devuelve el candado de aprovisionamiento de un servicio.
-func (g *Gateway) ensureLock(service string) *sync.Mutex {
-	v, _ := g.ensureMu.LoadOrStore(service, &sync.Mutex{})
-	return v.(*sync.Mutex)
-}
-
-// evictLRU congela la instancia ociosa más antigua para liberar memoria.
-//
-// Devuelve el servicio sacrificado, o "" si no había ninguno que sacrificar —en
-// cuyo caso quien llama debe rendirse de verdad, porque no hay nada que hacer.
-//
-// Nunca toca la instancia del servicio que pide sitio (sería absurdo), ni una
-// con peticiones en vuelo: congelar debajo de una llamada en curso convierte un
-// "espera un poco" en un fallo para alguien que ya estaba siendo atendido.
-//
-// FAIRNESS (reparto justo, NO seguridad): quien pide sitio sacrifica PRIMERO lo
-// SUYO. Se busca víctima entre las instancias del mismo tenant que pide, y solo
-// si no hay ninguna se recurre a las de otro. Así la presión de un tenant no
-// desaloja el trabajo de otro mientras aún le quede algo propio ocioso que ceder.
-// No aísla nada —todo comparte daemon y bridge— pero evita el accidente de que un
-// cliente activo eche a los demás de la memoria.
-func (g *Gateway) evictLRU(ctx context.Context, salvo, tenant string) string {
-	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
-	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
-	// los demás.
-	// descartadas son las que ya se probaron y no se pudieron congelar. Sin
-	// esto, evictLRU se rendia con la PRIMERA victima ocupada y devolvia un 507
-	// al cliente habiendo RAM perfectamente liberable en otra instancia.
-	descartadas := map[string]bool{}
-
-	pick := func(mismo bool) (string, string) {
-		var elegido, id string
-		var masAntiguo time.Time
-		consid := func(svc string, e *entry) {
-			if svc == salvo || e.inflight > 0 || descartadas[e.machineID] {
-				return
-			}
-			if mismo != (e.tenant == tenant) {
-				return
-			}
-			if elegido == "" || e.lastUse.Before(masAntiguo) {
-				elegido, masAntiguo, id = svc, e.lastUse, e.machineID
-			}
-		}
-		// Candidatas: la primaria y las réplicas de scale-out de cada servicio. Una
-		// réplica ociosa es tan sacrificable como cualquier otra instancia.
-		for svc, e := range g.services {
-			consid(svc, e)
-		}
-		for svc, es := range g.extra {
-			for _, e := range es {
-				consid(svc, e)
-			}
-		}
-		return elegido, id
-	}
-
-	freeze := func(id string) error { _, err := g.client.Freeze(ctx, id); return err }
-	if g.freezeFn != nil {
-		freeze = g.freezeFn
-	}
-
-	// Hasta tres victimas. Antes se probaba UNA: si estaba ocupada en su propio
-	// ensure, evictLRU devolvia "" y el llamador respondia 507 aunque hubiera
-	// otras instancias ociosas de sobra.
-	const intentos = 3
-	for i := 0; i < intentos; i++ {
-		g.mu.Lock()
-		// Primero lo propio; si no hay, lo ajeno.
-		elegido, id := pick(true)
-		if elegido == "" {
-			elegido, id = pick(false)
-		}
-		var victima *entry
-		if elegido != "" {
-			victima = g.entryByMachineLocked(elegido, id)
-			// Se saca del mapa (primaria o réplica, por machineID) ANTES de
-			// congelar: si alguien pide ese servicio mientras tanto, que lo
-			// reconstruya en vez de enrutar a una máquina que está a punto de
-			// dejar de existir.
-			g.removeEntryLocked(elegido, id)
-		}
-		g.mu.Unlock()
-
-		if elegido == "" {
-			return "" // ya no queda ninguna candidata
-		}
-
-		// devolver repone la instancia. Se saco para que nadie enrutara a una
-		// maquina a punto de congelarse; si al final NO se congela, dejarla
-		// fuera es peor que no haberla tocado: el gateway cree que no existe,
-		// y el siguiente ensure la adopta desde List() cuando ya no toca.
-		devolver := func() {
-			if victima == nil {
-				return
-			}
-			g.mu.Lock()
-			g.reponerEntryLocked(elegido, victima)
-			g.mu.Unlock()
-		}
-		descartadas[id] = true
-
-		// El candado del servicio víctima, para no congelar debajo de un ensure
-		// concurrente: sin esto, ese ensure no la encuentra en el mapa, hace
-		// List(), la ve todavía running (el freeze tarda ~2 s), la adopta como
-		// "ya en marcha" y espera 20 s a un invitado que se está pausando.
-		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
-		// de SU servicio, y un Lock aquí podría cruzarse con él.
-		vlock := g.ensureLock(elegido)
-		if !vlock.TryLock() {
-			devolver()
-			continue // esa esta ocupada; se prueba otra
-		}
-
-		err := freeze(id)
-		vlock.Unlock()
-		if err != nil {
-			log.Printf("could not freeze %s to make room: %v", elegido, err)
-			devolver()
-			continue
-		}
-		return elegido
-	}
-	return ""
-}
-
-// reponerEntryLocked devuelve al mapa una instancia que se saco para congelar y
-// al final no se congelo. Se llama con g.mu tomado.
-func (g *Gateway) reponerEntryLocked(service string, e *entry) {
-	if g.services[service] == nil {
-		g.services[service] = e
-		return
-	}
-	for _, x := range g.extra[service] {
-		if x.machineID == e.machineID {
-			return // ya volvio por otro camino
-		}
-	}
-	g.extra[service] = append(g.extra[service], e)
 }

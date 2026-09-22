@@ -10,7 +10,7 @@
 // CONTENER ACCIDENTES (un cliente en bucle que abre mil conexiones y ahoga la
 // memoria del anfitrión) y para REPARTIR con justicia, no para aislar. Quien
 // necesite aislamiento fuerte necesita daemons separados, no cuotas.
-package gateway
+package scheduler
 
 import (
 	"context"
@@ -64,7 +64,7 @@ func tenantFrom(ctx context.Context) *tenant {
 
 // SetTenants registra los tokens con nombre y sus cuotas. Debe llamarse ANTES de
 // Handler(). Lista vacía = solo el token único (comportamiento de siempre).
-func (g *Gateway) SetTenants(ts []TenantLimit) {
+func (g *Scheduler) SetTenants(ts []TenantLimit) {
 	g.extraTenants = ts
 }
 
@@ -75,7 +75,7 @@ func (g *Gateway) SetTenants(ts []TenantLimit) {
 // con nombre traen sus cuotas. Un token vacío y sin tokens con nombre desactiva
 // la autenticación: es el `-no-auth` de siempre, y que sea seguro depende de que
 // se escuche en loopback (ver resolveGatewayToken).
-func (g *Gateway) authHandler(h http.Handler, token string) http.Handler {
+func (g *Scheduler) authHandler(h http.Handler, token string) http.Handler {
 	type known struct {
 		secret string
 		t      *tenant
@@ -143,7 +143,7 @@ func authFail(w http.ResponseWriter) {
 // cuota. Devuelve false si la excedería: el llamador responde 429. Con
 // maxInflight 0 (el default) nunca rechaza, pero cuenta igual para que los
 // contadores estén listos para exponerse.
-func (g *Gateway) tenantBegin(t *tenant) bool {
+func (g *Scheduler) tenantBegin(t *tenant) bool {
 	g.tenantMu.Lock()
 	defer g.tenantMu.Unlock()
 	if g.tenantInflight == nil {
@@ -158,7 +158,7 @@ func (g *Gateway) tenantBegin(t *tenant) bool {
 
 // tenantEnd libera una petición en vuelo. No baja de cero: un contador negativo
 // abriría cuota de más al siguiente.
-func (g *Gateway) tenantEnd(t *tenant) {
+func (g *Scheduler) tenantEnd(t *tenant) {
 	g.tenantMu.Lock()
 	if g.tenantInflight != nil && g.tenantInflight[t.name] > 0 {
 		g.tenantInflight[t.name]--
@@ -170,7 +170,7 @@ func (g *Gateway) tenantEnd(t *tenant) {
 // deriva del mapa de servicios en vez de llevar un contador aparte: así nunca se
 // desincroniza cuando el segador o evictLRU retiran una instancia. Se llama con
 // g.mu tomado.
-func (g *Gateway) tenantInstances(name string) int {
+func (g *Scheduler) tenantInstances(name string) int {
 	n := 0
 	for _, e := range g.services {
 		if e.tenant == name {
@@ -195,7 +195,7 @@ func (g *Gateway) tenantInstances(name string) int {
 // esto y tenantInstances() son los contadores a exponer como series
 // kling_gateway_tenant_inflight / _instances. De momento quedan listos y
 // consultables desde código/tests.
-func (g *Gateway) TenantInflight() map[string]int {
+func (g *Scheduler) TenantInflight() map[string]int {
 	g.tenantMu.Lock()
 	defer g.tenantMu.Unlock()
 	out := make(map[string]int, len(g.tenantInflight))

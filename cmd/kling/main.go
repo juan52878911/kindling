@@ -30,6 +30,7 @@ import (
 
 	"errors"
 	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 const usage = `kling - Firecracker microVMs with a docker-style interface
@@ -397,7 +398,7 @@ func cmdGateway(args []string) error {
 	// escucha fuera de loopback, activarlos regala volcados de goroutines y la
 	// línea de comandos a quien alcance el puerto, y deja que quien llame elija
 	// cuántos segundos de CPU consume /debug/pprof/profile.
-	if *pprofOn && !gateway.IsLoopback(addr) {
+	if *pprofOn && !scheduler.IsLoopback(addr) {
 		return fmt.Errorf("-pprof requires listening on loopback, and %q is not.\n"+
 			"Diagnose over a tunnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
 	}
@@ -436,9 +437,9 @@ func cmdGateway(args []string) error {
 	// límites. Es reparto justo, no una frontera de seguridad (todo comparte
 	// daemon y bridge).
 	if len(cfg.Gateway.Tokens) > 0 {
-		tenants := make([]gateway.TenantLimit, 0, len(cfg.Gateway.Tokens))
+		tenants := make([]scheduler.TenantLimit, 0, len(cfg.Gateway.Tokens))
 		for _, t := range cfg.Gateway.Tokens {
-			tenants = append(tenants, gateway.TenantLimit{
+			tenants = append(tenants, scheduler.TenantLimit{
 				Name:         t.Name,
 				Token:        t.Token,
 				MaxInstances: t.MaxInstances,
@@ -523,7 +524,7 @@ func cmdGateway(args []string) error {
 // puede ser lo que pasa cuando no configuras nada.
 func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, error) {
 	if noAuth {
-		if !gateway.IsLoopback(addr) {
+		if !scheduler.IsLoopback(addr) {
 			return "", fmt.Errorf("-no-auth requires listening on loopback, and %q is not.\n"+
 				"Waking a snapshot means executing code: without a token, anyone who reaches\n"+
 				"that port runs your tools. Remove -no-auth or listen on 127.0.0.1", addr)
@@ -537,7 +538,7 @@ func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, 
 		return cfg.Gateway.Token, nil
 	}
 
-	t, err := gateway.NewToken()
+	t, err := scheduler.NewToken()
 	if err != nil {
 		return "", err
 	}

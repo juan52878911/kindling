@@ -1,4 +1,4 @@
-package gateway
+package scheduler
 
 import (
 	"context"
@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-func gwConDosOciosas(t *testing.T) (*Gateway, *int) {
+func gwConDosOciosas(t *testing.T) (*Scheduler, *int) {
 	t.Helper()
 	congeladas := 0
-	g := &Gateway{
+	g := &Scheduler{
 		services: map[string]*entry{},
 		extra:    map[string][]*entry{},
 		freezeFn: func(id string) error { congeladas++; return nil },
@@ -61,7 +61,7 @@ func TestLaVictimaQueNoSePudoCongelarVuelveAlMapa(t *testing.T) {
 
 // Sin ninguna candidata, "" sigue siendo la respuesta correcta.
 func TestSinCandidatasDevuelveVacio(t *testing.T) {
-	g := &Gateway{
+	g := &Scheduler{
 		services: map[string]*entry{},
 		extra:    map[string][]*entry{},
 		freezeFn: func(id string) error { return nil },

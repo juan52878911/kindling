@@ -4,7 +4,7 @@
 // necesita otra cosa: despertar un snapshot para llamar a una de sus
 // herramientas ES ejecutar código, y no puede quedar al alcance de cualquiera
 // que llegue al puerto. Un token basta, y no arrastra dependencias.
-package gateway
+package scheduler
 
 import (
 	"crypto/rand"
@@ -45,7 +45,7 @@ func NewToken() (string, error) {
 // resolución token->tenant y las cuotas viven en quota.go; aquí se conserva la
 // firma sencilla que usan quienes solo tienen un token.
 func Auth(h http.Handler, token string) http.Handler {
-	g := &Gateway{}
+	g := &Scheduler{}
 	return g.authHandler(h, token)
 }
 

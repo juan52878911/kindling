@@ -1,4 +1,4 @@
-package gateway
+package scheduler
 
 import (
 	"context"
@@ -168,7 +168,7 @@ func TestFillNoDuplicaReposicion(t *testing.T) {
 // faena. El cliente recibía un "connection timed out" de TCP —la conexión con
 // el invitado congelado— que no señala a la causa por ningún lado.
 func TestNoSeCongelaLoQueEstaTrabajando(t *testing.T) {
-	g := &Gateway{
+	g := &Scheduler{
 		idle:     time.Millisecond, // ya vencido para cualquier lastUse
 		services: map[string]*entry{},
 		routes:   map[string]*sessionRoute{},
@@ -222,7 +222,7 @@ func TestNoSeCongelaLoQueEstaTrabajando(t *testing.T) {
 // el segador la respeta precisamente porque cree que está trabajando. Un solo
 // pánico la dejaba consumiendo RAM para siempre.
 func TestElContadorEnVueloBajaAunqueHayaPanico(t *testing.T) {
-	g := &Gateway{
+	g := &Scheduler{
 		idle:     time.Millisecond,
 		services: map[string]*entry{},
 		routes:   map[string]*sessionRoute{},
@@ -302,7 +302,7 @@ func TestLasMaquinasConDuenoNoSeAdoptan(t *testing.T) {
 // tiene forma de saber que la solución es esperar a que otro se enfríe.
 func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
 	var congelada string
-	g := &Gateway{
+	g := &Scheduler{
 		services: map[string]*entry{},
 		routes:   map[string]*sessionRoute{},
 	}
@@ -336,7 +336,7 @@ func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
 	}
 
 	// Sin nadie a quien sacrificar, se rinde de verdad en vez de mentir.
-	g2 := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	g2 := &Scheduler{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
 	g2.services["unico"] = &entry{machineID: "m", lastUse: ahora}
 	if v := g2.evictLRU(t.Context(), "unico", ""); v != "" {
 		t.Errorf("sacrificó %q sin haber candidatos", v)
@@ -347,7 +347,7 @@ func TestSeHaceSitioCongelandoLaMasAntigua(t *testing.T) {
 // quepa o no queden candidatos. Un anfitrión muy justo puede necesitar liberar
 // varios servicios para uno grande.
 func TestElDesalojoLiberaVariasSiHaceFalta(t *testing.T) {
-	g := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	g := &Scheduler{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
 	var congeladas []string
 	g.freezeFn = func(id string) error { congeladas = append(congeladas, id); return nil }
 
@@ -384,7 +384,7 @@ func TestElDesalojoLiberaVariasSiHaceFalta(t *testing.T) {
 // lastUse en cada intento fallido, la ruta no expiraba jamás. La sesión quedaba
 // soldada a un invitado pausado.
 func TestUnaRutaHuerfanaSeDetecta(t *testing.T) {
-	g := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	g := &Scheduler{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
 
 	// Sesión fijada a la instancia m1 de "svc".
 	e := &entry{machineID: "m1", ip: "172.30.0.2"}

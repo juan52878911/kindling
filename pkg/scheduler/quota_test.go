@@ -1,4 +1,4 @@
-package gateway
+package scheduler
 
 import (
 	"net/http"
@@ -10,7 +10,7 @@ import (
 // El token con nombre resuelve a su tenant y lo cuelga del contexto; el token
 // único sigue siendo el tenant "default". Un token que no coincide, 401.
 func TestAuthResuelveTenant(t *testing.T) {
-	g := &Gateway{}
+	g := &Scheduler{}
 	g.SetTenants([]TenantLimit{
 		{Name: "equipo-a", Token: "tok-a", MaxInflight: 2},
 		{Name: "equipo-b", Token: "tok-b", MaxInstances: 1},
@@ -63,7 +63,7 @@ func TestTenantFromCaeADefault(t *testing.T) {
 
 // La cuota de inflight rechaza a partir del tope y vuelve a admitir al liberar.
 func TestCuotaInflight(t *testing.T) {
-	g := &Gateway{}
+	g := &Scheduler{}
 	tnt := &tenant{name: "t", maxInflight: 2}
 
 	if !g.tenantBegin(tnt) || !g.tenantBegin(tnt) {
@@ -89,7 +89,7 @@ func TestCuotaInflight(t *testing.T) {
 
 // maxInflight 0 (el default) no rechaza nunca, aunque cuente.
 func TestCuotaInflightSinLimite(t *testing.T) {
-	g := &Gateway{}
+	g := &Scheduler{}
 	tnt := &tenant{name: "libre"}
 	for i := 0; i < 100; i++ {
 		if !g.tenantBegin(tnt) {
@@ -102,7 +102,7 @@ func TestCuotaInflightSinLimite(t *testing.T) {
 // aunque el de otro sea más antiguo.
 func TestEvictPrefiereMismoTenant(t *testing.T) {
 	var congelada string
-	g := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	g := &Scheduler{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
 	g.freezeFn = func(id string) error { congelada = id; return nil }
 
 	ahora := time.Now()
@@ -129,7 +129,7 @@ func TestEvictPrefiereMismoTenant(t *testing.T) {
 // Cuando el tenant que pide no tiene nada propio ocioso, sí recurre a lo ajeno:
 // hacer sitio importa más que la pureza del reparto.
 func TestEvictCaeEnAjenoSiNoHayPropio(t *testing.T) {
-	g := &Gateway{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
+	g := &Scheduler{services: map[string]*entry{}, routes: map[string]*sessionRoute{}}
 	g.freezeFn = func(id string) error { return nil }
 
 	ahora := time.Now()

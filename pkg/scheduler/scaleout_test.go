@@ -1,4 +1,4 @@
-package gateway
+package scheduler
 
 import "testing"
 
@@ -20,7 +20,7 @@ func TestGwMaxSessions(t *testing.T) {
 // pegajosa a una réplica vuelva a ella y que el segador/evict no se equivoquen de
 // instancia. Se prueba con estructuras montadas a mano, sin daemon.
 func TestScaleOutBookkeeping(t *testing.T) {
-	g := &Gateway{
+	g := &Scheduler{
 		services: map[string]*entry{},
 		extra:    map[string][]*entry{},
 		routes:   map[string]*sessionRoute{},
