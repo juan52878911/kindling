@@ -86,32 +86,28 @@ func TestAnotacionesPorHTTP(t *testing.T) {
 	if rr := call(t, h, "GET", "/snapshots/nada", ""); rr.Code != 404 {
 		t.Fatalf("snapshot inexistente: %d", rr.Code)
 	}
-	rr := call(t, h, "PUT", "/snapshots/eco/annotations/mcp.tools", `{"tools":[{"name":"echo"}]}`)
-	if rr.Code != 200 {
+	if rr := call(t, h, "PUT", "/snapshots/eco/annotations/mcp.tools", `{"tools":[{"name":"echo"}]}`); rr.Code != 200 {
 		t.Fatalf("PUT anotación: %d %s", rr.Code, rr.Body)
 	}
 	var snap api.Snapshot
 	json.Unmarshal(call(t, h, "GET", "/snapshots/eco", "").Body.Bytes(), &snap)
-	if snap.Annotations["mcp.tools"] == nil || len(snap.Tools) != 1 {
-		t.Fatalf("GET /snapshots/eco sin la anotación o sin espejo: %+v", snap)
+	if snap.Annotations["mcp.tools"] == nil {
+		t.Fatalf("GET /snapshots/eco sin la anotación: %+v", snap)
 	}
-
-	// La ruta de v0.4 sigue funcionando y escribe la misma anotación.
-	if rr := call(t, h, "PUT", "/snapshots/eco/health", `{"healthy":true}`); rr.Code != 200 {
-		t.Fatalf("ruta antigua /health: %d", rr.Code)
-	}
-	json.Unmarshal(call(t, h, "GET", "/snapshots/eco", "").Body.Bytes(), &snap)
-	if snap.Health != "healthy" || snap.Annotations["mcp.health"] == nil {
-		t.Fatalf("la ruta antigua no escribió mcp.health: %+v", snap.Health)
-	}
-	if rr := call(t, h, "DELETE", "/snapshots/eco/annotations/mcp.health", ""); rr.Code != 204 {
+	if rr := call(t, h, "DELETE", "/snapshots/eco/annotations/mcp.tools", ""); rr.Code != 204 {
 		t.Fatalf("DELETE anotación: %d", rr.Code)
+	}
+	// Las rutas de v0.4 ya no existen.
+	for _, r := range []struct{ m, p string }{{"PUT", "/snapshots/eco/catalog"}, {"PUT", "/snapshots/eco/health"}, {"GET", "/links"}} {
+		if rr := call(t, h, r.m, r.p, `{}`); rr.Code != 404 && rr.Code != 405 {
+			t.Errorf("%s %s debería haber desaparecido: %d", r.m, r.p, rr.Code)
+		}
 	}
 }
 
-// Las rutas /links de v0.4 funcionan encima del store, y el links.json antiguo
-// se migra al arrancar sin perder nada.
-func TestLinksSobreElStoreYMigracion(t *testing.T) {
+// El links.json de v0.4 se migra al store al arrancar, sin perder nada, y una
+// segunda migración no pisa lo que ya hay.
+func TestMigracionDeLinks(t *testing.T) {
 	s, h := testServer(t)
 	old := `[{"name":"engram","url":"http://mac:9100/mcp","created_at":"2026-08-01T00:00:00Z"}]`
 	os.WriteFile(filepath.Join(s.root, "links.json"), []byte(old), 0o644)
@@ -120,33 +116,18 @@ func TestLinksSobreElStoreYMigracion(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(s.root, "links.json.migrated")); err != nil {
 		t.Fatal("el original debe quedar como links.json.migrated")
 	}
-	var list []*api.Link
-	json.Unmarshal(call(t, h, "GET", "/links", "").Body.Bytes(), &list)
-	if len(list) != 1 || list[0].Name != "engram" || list[0].CreatedAt.IsZero() {
-		t.Fatalf("links tras migrar: %s", call(t, h, "GET", "/links", "").Body)
+	var m map[string]struct {
+		URL string `json:"url"`
 	}
-
-	if rr := call(t, h, "PUT", "/links", `{"name":"Obsidian","url":"http://mac:9200/mcp"}`); rr.Code != 200 {
-		t.Fatalf("PUT /links: %d %s", rr.Code, rr.Body)
+	json.Unmarshal(call(t, h, "GET", "/store/mcp/links", "").Body.Bytes(), &m)
+	if m["engram"].URL != "http://mac:9100/mcp" {
+		t.Fatalf("links tras migrar: %+v", m)
 	}
-	if rr := call(t, h, "PUT", "/links", `{"name":"sin-url"}`); rr.Code != 400 {
-		t.Fatalf("un link sin URL debe rechazarse: %d", rr.Code)
-	}
-	json.Unmarshal(call(t, h, "GET", "/links", "").Body.Bytes(), &list)
-	if len(list) != 2 || list[0].Name != "Obsidian" {
-		t.Fatalf("links tras añadir (ordenados): %d", len(list))
-	}
-	if rr := call(t, h, "DELETE", "/links/engram", ""); rr.Code != 204 {
-		t.Fatalf("DELETE /links: %d", rr.Code)
-	}
-	if rr := call(t, h, "DELETE", "/links/engram", ""); rr.Code != 400 {
-		t.Fatalf("borrar un link inexistente: %d (v0.4 devolvía 400)", rr.Code)
-	}
-	// Una segunda migración no pisa lo que ya hay en el store.
+	call(t, h, "PUT", "/store/mcp/links", `{"otro":{"name":"otro","url":"x"}}`)
 	os.WriteFile(filepath.Join(s.root, "links.json"), []byte(old), 0o644)
 	migrateLinks(s.root, s.store)
-	json.Unmarshal(call(t, h, "GET", "/links", "").Body.Bytes(), &list)
-	if len(list) != 1 || list[0].Name != "Obsidian" {
-		t.Fatalf("la migración repetida pisó el store: %+v", list)
+	json.Unmarshal(call(t, h, "GET", "/store/mcp/links", "").Body.Bytes(), &m)
+	if _, ok := m["otro"]; !ok {
+		t.Fatalf("la migración repetida pisó el store: %+v", m)
 	}
 }

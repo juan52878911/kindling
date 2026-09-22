@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -163,149 +162,49 @@ func (s *Server) handleStoreDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---- COMPATIBILIDAD: /links sobre el store (se retira en v0.6)
+// ---- MIGRACIÓN DE links.json (v0.4)
 //
-// Los servidores MCP externos vivían en $KLING_ROOT/links.json, gestionados
-// por machine.Manager. Ahora son un documento más del store, mcp/links: un
-// objeto nombre -> Link. Las rutas antiguas se mantienen encima para que un CLI
-// o un gateway anteriores sigan funcionando contra este daemon.
+// Hasta v0.4 los servidores MCP externos enlazados vivían en
+// $KLING_ROOT/links.json, gestionados por el núcleo. Ahora son de kindling-mcp,
+// que los guarda en el store como el documento mcp/links (objeto nombre -> link).
+// La primera vez que arranca un daemon nuevo sobre datos de v0.4 se mueven ahí,
+// sin interpretarlos más allá del nombre, y el original se queda como
+// links.json.migrated. Se puede quitar cuando no queden hosts de v0.4.
 
-const (
-	linksNS  = "mcp"
-	linksKey = "links"
-)
-
-// validLinkName es la misma regla que tenían los enlaces en v0.4 (admite
-// mayúsculas), para no rechazar ahora un nombre que antes se aceptaba.
-var validLinkName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
-
-func (s *Server) loadLinks() (map[string]*api.Link, error) {
-	out := map[string]*api.Link{}
-	b, err := s.store.get(linksNS, linksKey)
-	if errors.Is(err, errStoreNotFound) {
-		return out, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return out, json.Unmarshal(b, &out)
-}
-
-func (s *Server) handleLinks(w http.ResponseWriter, r *http.Request) {
-	links, err := s.loadLinks()
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	list := make([]*api.Link, 0, len(links))
-	for _, l := range links {
-		list = append(list, l)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	writeJSON(w, http.StatusOK, list)
-}
-
-func (s *Server) handleSetLink(w http.ResponseWriter, r *http.Request) {
-	var l api.Link
-	if err := json.NewDecoder(r.Body).Decode(&l); err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	if !validLinkName.MatchString(l.Name) {
-		fail(w, http.StatusBadRequest, fmt.Errorf("invalid name: %q", l.Name))
-		return
-	}
-	if l.URL == "" {
-		fail(w, http.StatusBadRequest, fmt.Errorf("missing MCP server URL"))
-		return
-	}
-	s.linksMu.Lock()
-	defer s.linksMu.Unlock()
-	links, err := s.loadLinks()
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	if prev, ok := links[l.Name]; ok && l.CreatedAt.IsZero() {
-		l.CreatedAt = prev.CreatedAt
-	}
-	if l.CreatedAt.IsZero() {
-		l.CreatedAt = time.Now()
-	}
-	links[l.Name] = &l
-	if err := s.saveLinks(links); err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	s.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStored, Name: l.Name,
-		Message: fmt.Sprintf("external server linked: %s (%d tool(s))", l.URL, len(l.Tools))})
-	writeJSON(w, http.StatusOK, &l)
-}
-
-func (s *Server) handleRemoveLink(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	s.linksMu.Lock()
-	defer s.linksMu.Unlock()
-	links, err := s.loadLinks()
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	if _, ok := links[name]; !ok {
-		fail(w, http.StatusBadRequest, fmt.Errorf("link %q not found", name))
-		return
-	}
-	delete(links, name)
-	if err := s.saveLinks(links); err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) saveLinks(links map[string]*api.Link) error {
-	b, err := json.MarshalIndent(links, "", "  ")
-	if err != nil {
-		return err
-	}
-	return s.store.put(linksNS, linksKey, b)
-}
-
-// migrateLinks mueve $KLING_ROOT/links.json (v0.4) al store la primera vez que
-// arranca un daemon v0.5. Deja el original como links.json.migrated: no se
-// borra nada que no se pueda recuperar a mano.
 func migrateLinks(root string, st *store) {
 	old := filepath.Join(root, "links.json")
 	b, err := os.ReadFile(old)
 	if err != nil {
 		return
 	}
-	if _, err := st.get(linksNS, linksKey); err == nil {
-		return // ya migrado; el original se quedó por alguna razón
+	if _, err := st.get("mcp", "links"); err == nil {
+		return // ya migrado
 	}
-	var list []*api.Link
+	var list []json.RawMessage
 	if err := json.Unmarshal(b, &list); err != nil {
 		log.Printf("links.json: cannot read it (%v); leaving it where it is", err)
 		return
 	}
-	m := map[string]*api.Link{}
-	for _, l := range list {
-		if l != nil && l.Name != "" {
-			m[l.Name] = l
+	m := map[string]json.RawMessage{}
+	for _, raw := range list {
+		var named struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &named) == nil && named.Name != "" {
+			m[named.Name] = raw
 		}
 	}
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return
 	}
-	if err := st.put(linksNS, linksKey, out); err != nil {
+	if err := st.put("mcp", "links", out); err != nil {
 		log.Printf("links.json: cannot migrate it to the store: %v", err)
 		return
 	}
 	if err := os.Rename(old, old+".migrated"); err != nil {
-		log.Printf("links.json migrated to store/%s/%s, but it could not be renamed: %v", linksNS, linksKey, err)
+		log.Printf("links.json migrated to store/mcp/links, but it could not be renamed: %v", err)
 		return
 	}
-	log.Printf("links.json migrated to store/%s/%s (%d link(s)); original kept as links.json.migrated",
-		linksNS, linksKey, len(m))
+	log.Printf("links.json migrated to store/mcp/links (%d link(s)); original kept as links.json.migrated", len(m))
 }

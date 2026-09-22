@@ -36,9 +36,8 @@ func extensions() *plugin.Registry {
 	extOnce.Do(func() {
 		plugin.SetCoreVersion(strings.TrimPrefix(Version, "v"))
 		extReg = plugin.Discover(context.Background(), plugin.Options{
-			Core:     coreCommands,
-			Version:  strings.TrimPrefix(Version, "v"),
-			Builtins: []*plugin.Builtin{mcpExtension()},
+			Core:    coreCommands,
+			Version: strings.TrimPrefix(Version, "v"),
 		})
 	})
 	return extReg

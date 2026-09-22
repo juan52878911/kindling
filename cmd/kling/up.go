@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,7 +32,6 @@ import (
 
 	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
-	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -636,115 +634,6 @@ func statusJSON(ctx context.Context, c *api.Client, args []string) error {
 	}
 	return json.NewEncoder(os.Stdout).Encode(report)
 }
-
-func gatewayServiceNames(url, token string) ([]string, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	var names []string
-	for _, line := range strings.Split(string(body), "\n") {
-		if f := strings.Fields(line); len(f) > 0 {
-			names = append(names, f[0])
-		}
-	}
-	return names, nil
-}
-
-// mcpHealthLine resume el último sondeo de salud de los servicios importados.
-//
-// Solo LEE los veredictos que dejó `kling mcp health` en el meta de cada
-// snapshot: sondear aquí arrancaría una microVM por servicio y `status` debe
-// ser instantáneo. Por eso "never probed" es un estado que se muestra y no se
-// disimula: sin sondeo no hay dato, y fingir salud es lo que tapó la caída.
-func mcpHealthLine(snaps []*api.Snapshot) string {
-	var healthy, unknown int
-	var sick []string
-	for _, s := range snaps {
-		switch mcp.HealthOf(s).Status {
-		case mcp.Healthy:
-			healthy++
-		case mcp.Unhealthy:
-			n := s.Name
-			if svc := s.Service(); svc != "" {
-				n = svc
-			}
-			sick = append(sick, n)
-		default:
-			unknown++
-		}
-	}
-	switch {
-	case len(sick) > 0:
-		line := fmt.Sprintf("✗ %d unhealthy (%s) · %d healthy", len(sick), strings.Join(sick, ", "), healthy)
-		if unknown > 0 {
-			line += fmt.Sprintf(" · %d never probed", unknown)
-		}
-		return line + " — details: kling mcp ls"
-	case unknown == len(snaps):
-		return fmt.Sprintf("? none of the %d service(s) has ever been probed — probe them: kling mcp health", unknown)
-	case unknown > 0:
-		return fmt.Sprintf("✓ %d healthy · %d never probed — probe them: kling mcp health", healthy, unknown)
-	default:
-		return fmt.Sprintf("✓ %d healthy", healthy)
-	}
-}
-
-// servicesLine resume /services, que responde texto plano, una línea por
-// servicio.
-func servicesLine(url, token string) string {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return "✗ " + err.Error()
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return "✗ " + err.Error()
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		if token == "" {
-			return "✗ requires a token and none is configured here\n" +
-				"              copy it from the host:  kling config set gateway.token <t>"
-		}
-		return "✗ the gateway rejects the token from gateway.token (401)"
-	}
-	if resp.StatusCode >= 300 {
-		return "✗ HTTP " + resp.Status
-	}
-
-	// Acotado: leer sin límite una respuesta ajena es regalarle a quien esté al
-	// otro lado la memoria de este proceso. 64 KiB dan para miles de servicios.
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	var names []string
-	for _, line := range strings.Split(string(body), "\n") {
-		if f := strings.Fields(line); len(f) > 0 {
-			names = append(names, f[0])
-		}
-	}
-	if len(names) == 0 {
-		return "✓ none yet — package one with:  kling add <server>"
-	}
-	return fmt.Sprintf("✓ %d: %s", len(names), strings.Join(names, ", "))
-}
-
-// ── utilidades ────────────────────────────────────────────────────────────────
 
 func hasKVM() bool { return fileExists("/dev/kvm") }
 

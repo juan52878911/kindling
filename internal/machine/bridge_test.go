@@ -15,7 +15,7 @@ import (
 // otro sistema tiene montado lo corrompe, aunque él lo tenga en solo lectura. Y
 // aquí "vivo" incluye a las warm: al descongelarse vuelven a leer de la imagen,
 // que además está mapeada en su snapshot de memoria.
-func TestNoSeRefrescaLaImagenDeUnaMaquinaViva(t *testing.T) {
+func TestNoSeTocaLaImagenDeUnaMaquinaViva(t *testing.T) {
 	m := newTestManager(t)
 	imgs := filepath.Join(m.root, "images")
 	if err := os.MkdirAll(imgs, 0o755); err != nil {
@@ -35,46 +35,32 @@ func TestNoSeRefrescaLaImagenDeUnaMaquinaViva(t *testing.T) {
 	m.byID["a"] = &api.Machine{ID: "a", Name: "svc-a", State: api.StateWarm, Image: "ocupada"}
 	m.mu.Unlock()
 
-	res, err := m.RefreshBridges(t.Context(), puente, nil)
-	if err != nil {
-		t.Fatal(err)
+	res, err := m.PutImageFile(t.Context(), "ocupada", "/usr/local/bin/kling-bridge", puente, 0o755, false)
+	if err == nil || !res.Busy {
+		t.Fatalf("iba a tocar la imagen de una máquina viva: res=%+v err=%v", res, err)
 	}
-	porImagen := map[string]api.BridgeRefresh{}
-	for _, r := range res {
-		porImagen[r.Image] = r
-	}
-
-	ocupada, ok := porImagen["ocupada"]
-	if !ok {
-		t.Fatal("no informó de la imagen ocupada")
-	}
-	if !ocupada.Skipped {
-		t.Error("iba a tocar la imagen de una máquina viva")
-	}
-	if ocupada.Updated {
-		t.Error("dice que la actualizó pese a saltarla")
+	if res.Updated {
+		t.Error("dice que la actualizó pese a negarse")
 	}
 	// Y tiene que decir QUIÉN la retiene, o el usuario no sabe qué parar.
-	if !strings.Contains(ocupada.Error, "svc-a") {
-		t.Errorf("no dice quién la usa: %q", ocupada.Error)
+	if !strings.Contains(err.Error(), "svc-a") {
+		t.Errorf("no dice quién la usa: %v", err)
 	}
 
 	// La libre sí se intenta (fallará al montar, que aquí no hay loop, pero no
-	// se salta).
-	if porImagen["libre"].Skipped {
-		t.Error("saltó una imagen que no usa nadie")
+	// se niega por estar en uso).
+	res, _ = m.PutImageFile(t.Context(), "libre", "/usr/local/bin/kling-bridge", puente, 0o755, false)
+	if res.Busy {
+		t.Error("se negó con una imagen que no usa nadie")
 	}
 }
 
-// Sin puente que inyectar, se dice DÓNDE debería estar en vez de fallar seco.
-func TestSinPuenteExplicaDondeBuscarlo(t *testing.T) {
+// Sin fichero de origen se dice cuál falta en vez de fallar seco.
+func TestPutImageFileSinOrigen(t *testing.T) {
 	m := newTestManager(t)
-	_, err := m.RefreshBridges(t.Context(), "", nil)
-	if err == nil {
-		t.Fatal("debería fallar")
-	}
-	if !strings.Contains(err.Error(), "/usr/local/lib/kindling") {
-		t.Errorf("el error no dice dónde debería estar: %v", err)
+	_, err := m.PutImageFile(t.Context(), "x", "/etc/x", "/no/existe", 0o644, false)
+	if err == nil || !strings.Contains(err.Error(), "/no/existe") {
+		t.Fatalf("el error no dice qué fichero falta: %v", err)
 	}
 }
 

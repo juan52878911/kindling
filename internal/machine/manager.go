@@ -609,9 +609,10 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, fmt.Errorf("missing kernel at %s", m.KernelPath())
 	}
 
-	// Sin puente no hay quien monte los volúmenes.
+	// Sin agente de invitado no hay quien monte los volúmenes.
 	//
-	// El puente es lo único que lee kling.volume y monta dentro del invitado.
+	// El agente (kling-guest, o el puente de kindling-mcp que lo embebe) es lo
+	// único que lee kling.volume y monta dentro del invitado.
 	// Una imagen en modo HTTP nativo no lo lleva, así que el disco se
 	// engancharía, el snapshot lo registraría y `volume ls` diría "en uso"…
 	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
@@ -624,11 +625,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			// peor que el problema.
 			log.Printf("warning: could not check whether %q has a bridge: %v", req.Image, herr)
 		case !has:
-			return nil, fmt.Errorf("image %q does not have kling-bridge, and the bridge is what mounts "+
-				"the volumes inside the guest.\n"+
+			return nil, fmt.Errorf("image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
+				"is what mounts the volumes inside the guest.\n"+
 				"With this image the disk would be attached but nobody would mount it, and everything written "+
 				"to %s would die with the machine, without a single error.\n"+
-				"Repackage it in stdio mode, or remove the volume",
+				"Rebuild it with an agent (kling images build -builder base, or kindling-mcp in stdio mode), or remove the volume",
 				req.Image, vols[0].mount)
 		}
 	}

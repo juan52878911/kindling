@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -59,8 +58,7 @@ type Server struct {
 	fcBin      string
 	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
 
-	store   *store
-	linksMu sync.Mutex // serializa el leer-modificar-escribir de /links
+	store *store
 }
 
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
@@ -88,9 +86,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
 	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
-	mux.HandleFunc("GET /links", s.handleLinks)
-	mux.HandleFunc("PUT /links", s.handleSetLink)
-	mux.HandleFunc("DELETE /links/{name}", s.handleRemoveLink)
 	mux.HandleFunc("POST /images", s.handleBuildImage)
 	mux.HandleFunc("GET /images", s.handleImages)
 	mux.HandleFunc("DELETE /images/{name}", s.handleRemoveImage)
@@ -98,11 +93,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /volumes", s.handleCreateVolume)
 	mux.HandleFunc("DELETE /volumes/{name}", s.handleRemoveVolume)
 	mux.HandleFunc("POST /volumes/{name}/populate", s.handlePopulateVolume)
-	mux.HandleFunc("POST /images/refresh-bridge", s.handleRefreshBridges)
 	mux.HandleFunc("GET /images/{name}/recipe", s.handleImageRecipe)
 	mux.HandleFunc("GET /images/{name}/files", s.handleGetImageFile)
 	mux.HandleFunc("PUT /images/{name}/files", s.handlePutImageFile)
-	mux.HandleFunc("GET /images/{name}/capabilities", s.handleImageCapabilities)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("GET /snapshots/{name}", s.handleSnapshot)
 	mux.HandleFunc("PUT /snapshots/{name}/annotations/{key}", s.handleSetAnnotation)
@@ -111,10 +104,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /store/{ns}/{key}", s.handleStoreGet)
 	mux.HandleFunc("PUT /store/{ns}/{key}", s.handleStorePut)
 	mux.HandleFunc("DELETE /store/{ns}/{key}", s.handleStoreDelete)
-	// Rutas de v0.4, deprecadas: escriben las anotaciones mcp.tools/mcp.health.
-	// Se retiran en v0.6.
-	mux.HandleFunc("PUT /snapshots/{name}/catalog", s.handleCatalog)
-	mux.HandleFunc("PUT /snapshots/{name}/health", s.handleHealth)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
@@ -423,38 +412,6 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.mgr.Snapshots())
 }
 
-func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
-	var req api.CatalogRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	snap, err := s.mgr.SetCatalog(r.PathValue("name"), req.Tools)
-	if err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snap)
-}
-
-// handleHealth persiste el veredicto de un sondeo de salud en el meta del
-// snapshot. El sondeo lo hace el CLI (arranca la microVM efímera y le pide
-// tools/list); aquí solo se guarda el resultado para que lo vean `mcp list` y
-// /metrics.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	var req api.HealthRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	snap, err := s.mgr.SetHealth(r.PathValue("name"), req.Healthy, req.Error)
-	if err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snap)
-}
-
 func (s *Server) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.RemoveImage(r.PathValue("name")); err != nil {
 		fail(w, http.StatusConflict, err)
@@ -551,21 +508,17 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 // devuelve su respuesta. Si falla, code es el estado HTTP con el que contestar.
 // Está separado del handler para poder probarlo sin una microVM.
 func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.GuestResponse, int, error) {
-	// Sin ruta es un cliente v0.4, que contaba con los valores de MCP. Se
-	// mantienen para él hasta v0.6; cualquier otro llamador dice lo que quiere.
-	legacy := req.Path == ""
+	// El daemon no añade nada de ningún protocolo: ruta, cabeceras de ida y
+	// cuáles devolver las decide quien llama.
 	path := req.Path
 	respHeaders := req.ResponseHeaders
-	if legacy {
-		path = "/mcp"
-		if respHeaders == nil {
-			respHeaders = []string{"Mcp-Session-Id", "Content-Type"}
-		}
-	}
 	if len(respHeaders) == 0 {
 		respHeaders = []string{"Content-Type"}
 	}
-	if !strings.HasPrefix(path, "/") {
+	if path == "" && !req.ProbeOnly {
+		return api.GuestResponse{}, http.StatusBadRequest, fmt.Errorf("missing path")
+	}
+	if path != "" && !strings.HasPrefix(path, "/") {
 		return api.GuestResponse{}, http.StatusBadRequest, fmt.Errorf("path must start with '/': %q", path)
 	}
 	maxBody := req.MaxBodyBytes
@@ -597,9 +550,6 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.Gue
 		return api.GuestResponse{}, http.StatusBadRequest, err
 	}
 	greq.Header.Set("Content-Type", "application/json")
-	if legacy {
-		greq.Header.Set("Accept", "application/json, text/event-stream")
-	}
 	for k, v := range req.Headers {
 		greq.Header.Set(k, v)
 	}

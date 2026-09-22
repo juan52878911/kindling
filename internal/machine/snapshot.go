@@ -290,7 +290,7 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 			name, s.Name)
 		s.Name = name
 	}
-	liftLegacyMCP(&s)
+	liftV04(b, &s)
 	return &s, nil
 }
 

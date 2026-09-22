@@ -318,15 +318,6 @@ type Snapshot struct {
 	// las reciben salvo que se sobrescriban.
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Tools es el catálogo de capacidades, capturado UNA VEZ al importar el
-	// servicio y guardado junto al snapshot.
-	//
-	// Sin esto, responder "¿qué herramientas hay?" obligaría a despertar la
-	// microVM: una pregunta de inventario acabaría arrancando máquinas. Con el
-	// catálogo en disco, listar capacidades no toca el servicio.
-	Tools   []ToolSpec `json:"tools,omitempty"`
-	ToolsAt *time.Time `json:"tools_at,omitempty"`
-
 	// INTEGRIDAD. sha256 del overlay dorado (rootfs) y del volcado de estado
 	// (snap.file), calculados al congelar y verificados al restaurar. Detectan que
 	// un snapshot se corrompió en disco —bit rot, una copia a medias, un tercero
@@ -339,68 +330,11 @@ type Snapshot struct {
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
 
-	// SALUD. Resultado del último sondeo (`kling mcp health`): se instancia una
-	// microVM efímera del snapshot y se le pide tools/list; si contesta, "healthy".
-	// Vacío mientras no se haya sondeado nunca.
-	Health    string     `json:"health,omitempty"` // "healthy" | "unhealthy" | ""
-	HealthAt  *time.Time `json:"health_at,omitempty"`
-	HealthErr string     `json:"health_err,omitempty"` // por qué falló, si "unhealthy"
-
 	// Annotations son datos opacos que una extensión cuelga del snapshot: el
-	// daemon los guarda en meta.json y los devuelve, sin interpretarlos. Es lo que
-	// sustituye a Tools y Health, que eran de MCP: kindling-mcp guarda su catálogo
-	// en "mcp.tools" y su salud en "mcp.health".
-	//
-	// COMPATIBILIDAD (v0.5): Tools/ToolsAt/Health* se siguen rellenando a partir
-	// de esas dos anotaciones, para que un CLI anterior los lea. Desaparecen en
-	// v0.6, cuando MCP sale del núcleo.
+	// daemon los guarda en meta.json y los devuelve, sin interpretarlos
+	// (kindling-mcp guarda su catálogo en "mcp.tools" y su salud en
+	// "mcp.health").
 	Annotations map[string]json.RawMessage `json:"annotations,omitempty"`
-}
-
-// ToolSpec describe una herramienta tal y como la declaró su servidor MCP.
-type ToolSpec struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
-}
-
-// Link es un servidor MCP EXTERNO registrado en el agregador.
-//
-// No corre en una microVM: vive donde su dueño lo tenga —en el Mac, en otro
-// host, en un servicio remoto— y kindling solo lo enruta. Sirve para traer
-// capacidades que no tiene sentido meter en una máquina efímera, en particular
-// las de memoria: un servicio al que todas las herramientas puedan escribir y
-// del que puedan leer, sin que kindling tenga que implementar almacenamiento.
-type Link struct {
-	Name        string            `json:"name"`
-	URL         string            `json:"url"`
-	Description string            `json:"description,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Tools       []ToolSpec        `json:"tools,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-}
-
-// Service devuelve el nombre de servicio del enlace.
-func (l *Link) Service() string {
-	if l.Labels != nil {
-		if s := l.Labels[LabelService]; s != "" {
-			return s
-		}
-	}
-	return l.Name
-}
-
-// CatalogRequest adjunta el catálogo de capacidades a un snapshot.
-type CatalogRequest struct {
-	Tools []ToolSpec `json:"tools"`
-}
-
-// HealthRequest anota en un snapshot el resultado de un sondeo de salud. El
-// sondeo lo hace quien puede arrancar la microVM efímera (el CLI, vía el daemon);
-// aquí solo se persiste el veredicto en el meta.
-type HealthRequest struct {
-	Healthy bool   `json:"healthy"`
-	Error   string `json:"error,omitempty"` // por qué falló, si no está sano
 }
 
 // CommitRequest congela una máquina en marcha como snapshot reutilizable.
@@ -487,51 +421,23 @@ func (i *Info) Has(c string) bool {
 	return false
 }
 
-// BuildImageRequest pide al daemon que empaquete un servidor MCP de stdio.
+// BuildImageRequest pide al daemon que construya una imagen con un constructor.
 //
 // La construcción vive en el daemon porque monta un loopback y hace chroot: son
-// operaciones de root en el host con KVM, y el CLI corre en otra máquina.
+// operaciones de root en el host con KVM, y el CLI corre en otra máquina. El
+// daemon no sabe construir nada por sí mismo: ejecuta el constructor de nombre
+// Builder, instalado por el administrador en /usr/local/lib/kindling/builders/,
+// con esta petición (ver docs/api.md). El del núcleo es "base"; kindling-mcp
+// trae "mcp".
 type BuildImageRequest struct {
-	// Name es el de la imagen y, después, el del servicio.
+	// Name es el nombre de la imagen: componente de ruta y nombre de servicio.
 	Name string `json:"name"`
-	// Base es la imagen de partida (por defecto: min).
+	// Base es la imagen base sobre la que se construye la capa.
 	Base string `json:"base,omitempty"`
-	// Packages son paquetes de apk que instalar en el invitado.
-	Packages []string `json:"packages,omitempty"`
-	// NPM son paquetes de node que PREINSTALAR. Es obligatorio y no una
-	// comodidad: las microVMs arrancan sin salida a internet, así que un
-	// `npx -y` en tiempo de ejecución fallaría al intentar descargar.
-	NPM []string `json:"npm,omitempty"`
-	// PIP son paquetes de Python que preinstalar, por la misma razón que NPM:
-	// dentro no hay internet en tiempo de ejecución.
-	PIP []string `json:"pip,omitempty"`
-	// Env son variables de entorno ("KEY=value") que se HORNEAN en el
-	// entrypoint de la imagen, en texto plano — no valen para secretos.
-	//
-	// El caso que las motivó es semgrep: hace phone-home de métricas al
-	// arrancar y, con el egress cerrado, espera ~2 minutos al timeout en cada
-	// arranque en frío. SEMGREP_SEND_METRICS=off lo corta de raíz, y sin este
-	// campo la única forma de fijarlo era empaquetar a mano con el script.
-	Env []string `json:"env,omitempty"`
-	// Cmd es el comando que arranca el servidor MCP dentro del invitado.
-	Cmd []string `json:"cmd"`
-	// GrowMB agranda la imagen. 0 deja que el script decida.
+	// GrowMB reserva sitio para la capa.
 	GrowMB int `json:"grow_mb,omitempty"`
-	// Bundle empaqueta el servidor node en un solo fichero con esbuild al
-	// construir. Acelera el arranque en frío dentro de la microVM (sobre todo en
-	// arm64/Mac, donde cargar cientos de ficheros de node_modules se amplifica
-	// bajo KVM anidado): carga 1 fichero en vez de todo el árbol. Solo node (NPM).
-	Bundle bool `json:"bundle,omitempty"`
-
-	// Builder elige quién construye la imagen: un ejecutable de confianza que
-	// el administrador instaló en el directorio de constructores del daemon
-	// (/usr/local/lib/kindling/builders/<builder>). Vacío = el constructor de
-	// servidores MCP de siempre, con los campos de arriba.
-	//
-	// Con Builder, lo único que el daemon interpreta es Name, Base y GrowMB; el
-	// resto va en Spec, que el constructor valida y usa. Así una extensión trae
-	// su forma de construir imágenes sin que el núcleo la conozca.
-	Builder string          `json:"builder,omitempty"`
+	// Builder es el constructor; Spec, lo que él entiende. El daemon no lo mira.
+	Builder string          `json:"builder"`
 	Spec    json.RawMessage `json:"spec,omitempty"`
 }
 
@@ -684,27 +590,6 @@ type PopulateResult struct {
 	UsedMiB  int64  `json:"used_mib"`
 }
 
-// BridgeRefresh es lo que pasó con una imagen al poner el puente actual dentro.
-//
-// Se informa TAMBIÉN de las que no hacía falta tocar y de las que se saltaron:
-// saber que una imagen sigue con el puente viejo porque la está usando alguien
-// es justo lo que hay que saber, y omitirlo la haría parecer al día.
-type BridgeRefresh struct {
-	Image   string `json:"image"`
-	Updated bool   `json:"updated"`
-	Skipped bool   `json:"skipped,omitempty"`
-	Error   string `json:"error,omitempty"`
-
-	// Busy separa el salto que se cura parando una microVM del que no.
-	//
-	// Se saltan imágenes por dos motivos que no se arreglan igual: una en uso hay
-	// que pararla y repetir; una que no lleva puente propio —una base mínima, o
-	// una capa cuyo puente vive en su base— no hay nada que repetir. Sin este
-	// campo, quien lo lee acaba adivinándolo del texto del error, y el consejo
-	// "párala y vuelve a intentarlo" sale también cuando no hay nada que parar.
-	Busy bool `json:"busy,omitempty"`
-}
-
 // ImageRecipe es CÓMO se construyó una imagen.
 //
 // Se guarda junto a ella porque, si no, una imagen no es reproducible: lo único
@@ -732,35 +617,6 @@ type ImageRecipe struct {
 	// externo.
 	Builder string          `json:"builder,omitempty"`
 	Spec    json.RawMessage `json:"spec,omitempty"`
-}
-
-// Capabilities son las capacidades que una imagen declara sobre lo que su
-// servidor MCP necesita, detectadas de su árbol de dependencias al construirla.
-// El import las usa para configurar el egress solo y avisar de módulos nativos.
-type Capabilities struct {
-	Browser bool     `json:"browser"`          // usa un navegador (Chromium)
-	Egress  string   `json:"egress,omitempty"` // "none" | "internet" | "allowlist"
-	Native  []string `json:"native,omitempty"` // módulos nativos npm detectados
-
-	// NativeMissing son los módulos nativos que quedaron SIN su binario: el
-	// empaquetado con --ignore-scripts no compila, y ni traían prebuild en el
-	// tarball ni un paquete de plataforma que lo aportara. El servidor arranca e
-	// introspecciona igual, pero la PRIMERA herramienta que los use peta en
-	// caliente. Por eso el import lo trata como ERROR y no como aviso: es mejor
-	// fallar al construir el catálogo que entregar un servicio que revienta luego.
-	NativeMissing []string `json:"native_missing,omitempty"`
-
-	// System son binarios del SISTEMA (no-npm) que el servidor invoca —git,
-	// ffmpeg, ripgrep, pandoc, python…— y que el build horneó en la imagen con
-	// apk. Sin ellos, la herramienta que los llame fallaría con "command not
-	// found", un síntoma que no se parece a su causa. Es informativo: ya están
-	// dentro.
-	System []string `json:"system,omitempty"`
-
-	// AllowDomains es la SEMILLA de dominios que el build extrajo de los literales
-	// de URL del árbol npm. Es una pista editable, no una lista exhaustiva ni
-	// autoritativa: el import la usa solo si se elige el modo "allowlist".
-	AllowDomains []string `json:"allow_domains,omitempty"`
 }
 
 // StatusError es un error de la API que conserva el código HTTP.

@@ -161,7 +161,7 @@ func TestLayerGuestPath(t *testing.T) {
 		t.Fatalf("layerGuestPath = %q, want %q", got, want)
 	}
 	// Y no debe salir con doble barra: la ruta del invitado ya viene absoluta.
-	if got := layerGuestPath(guestCapabilitiesPath); strings.Contains(got, "//") {
+	if got := layerGuestPath("/etc/kling/capabilities.json"); strings.Contains(got, "//") {
 		t.Fatalf("ruta con doble barra: %q", got)
 	}
 }
