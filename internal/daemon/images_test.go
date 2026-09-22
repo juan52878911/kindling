@@ -105,6 +105,34 @@ func TestBuildScriptEntiendeLosFlags(t *testing.T) {
 	}
 }
 
+// -bundle deja el servidor en /opt/<nombre>.bundle.mjs, y hay servidores que leen
+// su versión del package.json EN TIEMPO DE EJECUCIÓN buscándolo junto al fichero
+// que arranca (server-sequential-thinking: <dir>/package.json y <dir>/../package.json
+// desde import.meta.url). Sin ese fichero en /opt el proceso muere al arrancar con
+// "Could not locate package.json for server version" y el initialize responde 502.
+// Construir la imagen exige root y un loopback, así que aquí solo se comprueba que
+// la rama de -bundle sigue copiando el package.json al lado del bundle.
+func TestBuildScriptBundleCopiaPackageJSON(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "scripts", "80-mcp-image.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	i := strings.Index(s, `--outfile=/opt/$NAME.bundle.mjs`)
+	if i == -1 {
+		t.Fatal("80-mcp-image.sh ya no escribe el bundle en /opt/$NAME.bundle.mjs; revisa este test y la copia del package.json")
+	}
+	// La copia va DESPUÉS de esbuild (para que npx no tome /opt por un proyecto) y
+	// ANTES de que CMD pase a apuntar al bundle.
+	j := strings.Index(s[i:], `CMD=(node "/opt/$NAME.bundle.mjs"`)
+	if j == -1 {
+		t.Fatal("80-mcp-image.sh ya no cambia CMD al bundle; revisa este test")
+	}
+	if !strings.Contains(s[i:i+j], `"$mnt/opt/package.json"`) {
+		t.Error("la rama -bundle de 80-mcp-image.sh no copia el package.json del paquete a /opt/package.json: server-sequential-thinking morirá al arrancar")
+	}
+}
+
 func indexOf(xs []string, s string) int {
 	for i, x := range xs {
 		if x == s {
