@@ -1,4 +1,4 @@
-package main
+package guest
 
 // Ejecutar un comando DENTRO de la microVM.
 //
@@ -39,7 +39,7 @@ type execResponse struct {
 }
 
 // execEnabled dice si el kernel encendió la ejecución de comandos.
-func execEnabled() bool {
+func ExecEnabled() bool {
 	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
 		return false
@@ -64,7 +64,14 @@ func execEnabled() bool {
 // atendió perfectamente y la respuesta es "el comando falló, aquí tienes por
 // qué". Devolver 500 obligaría a quien llama a distinguir "no pude ejecutarlo"
 // de "lo ejecuté y falló", que son cosas muy distintas.
-func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
+//
+// env es el entorno de los comandos: el mismo que reciben los servidores del
+// invitado, con NODE_PATH y PYTHONPATH apuntando a los volúmenes.
+func ExecHandler(env []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { handleExec(env, w, r) }
+}
+
+func handleExec(env []string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
@@ -84,14 +91,14 @@ func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
 	// El mismo entorno que reciben los servidores MCP, con NODE_PATH y
 	// PYTHONPATH ya apuntando a los volúmenes: instalar en un volumen y luego
 	// no encontrarlo desde el mismo sitio sería desconcertante.
-	cmd.Env = b.env
+	cmd.Env = env
 
 	// Por el cosechador, igual que los servidores MCP: si se adelanta a nuestro
 	// Wait, CombinedOutput devolvería un error que no es *ExitError y un
 	// `npm install` que terminó bien se reportaría como "no pude ejecutarlo".
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
-	exitCh, err := procReaper.startTracked(cmd)
+	exitCh, err := DefaultReaper.StartTracked(cmd)
 	if err != nil {
 		resp := execResponse{ExitCode: -1,
 			Output: fmt.Sprintf("could not execute %q: %v", req.Cmd[0], err)}
@@ -99,15 +106,15 @@ func (b *bridge) handleExec(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
-	err = waitFor(cmd, exitCh)
+	err = WaitFor(cmd, exitCh)
 	if cmd.Process != nil {
-		procReaper.forget(cmd.Process.Pid)
+		DefaultReaper.Forget(cmd.Process.Pid)
 	}
 	out := buf.Bytes()
 
 	resp := execResponse{Output: string(out)}
 	if err != nil {
-		if code, ok := exitCodeOf(err); ok {
+		if code, ok := ExitCodeOf(err); ok {
 			resp.ExitCode = code
 		} else {
 			// Ni siquiera se pudo lanzar: no existe el binario, o no hay

@@ -1,4 +1,4 @@
-package main
+package guest
 
 import (
 	"os"
@@ -27,7 +27,7 @@ func TestMatarGrupoSeLlevaTambienAlNieto(t *testing.T) {
 	// El hijo (sh) lanza un nieto (sleep) y espera. Es la forma exacta de un
 	// envoltorio: quien trabaja de verdad es el nieto.
 	cmd := exec.Command("sh", "-c", "sleep 30 & echo $! > "+marca+"; wait")
-	enSuPropioGrupo(cmd)
+	OwnGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("no arrancó: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestMatarGrupoSeLlevaTambienAlNieto(t *testing.T) {
 		t.Fatalf("el nieto %d ya no estaba vivo antes de matar nada", nieto)
 	}
 
-	matarGrupo(cmd)
+	KillGroup(cmd)
 	_ = cmd.Wait()
 
 	// El nieto tiene que morir con el grupo.
@@ -69,15 +69,15 @@ func TestMatarGrupoSeLlevaTambienAlNieto(t *testing.T) {
 	}
 }
 
-// enSuPropioGrupo tiene que ser lo que hace posible lo anterior: sin el, el
+// OwnGroup tiene que ser lo que hace posible lo anterior: sin el, el
 // hijo comparte grupo con el proceso de tests, y matar "-pid" seria matarnos.
 func TestEnSuPropioGrupoLoSeparaDelProcesoQueLoLanza(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "sleep 5")
-	enSuPropioGrupo(cmd)
+	OwnGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("no arrancó: %v", err)
 	}
-	defer func() { matarGrupo(cmd); _ = cmd.Wait() }()
+	defer func() { KillGroup(cmd); _ = cmd.Wait() }()
 
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err != nil {

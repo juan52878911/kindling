@@ -1,4 +1,4 @@
-package main
+package guest
 
 // Cosecha de procesos huérfanos.
 //
@@ -31,12 +31,12 @@ import (
 	"time"
 )
 
-type reaper struct {
+type Reaper struct {
 	mu      sync.Mutex
 	tracked map[int]chan syscall.WaitStatus
 }
 
-var procReaper = &reaper{tracked: map[int]chan syscall.WaitStatus{}}
+var DefaultReaper = &Reaper{tracked: map[int]chan syscall.WaitStatus{}}
 
 // startTracked arranca el proceso y lo registra, ambas cosas bajo el mismo
 // candado que usa el cosechador.
@@ -44,10 +44,10 @@ var procReaper = &reaper{tracked: map[int]chan syscall.WaitStatus{}}
 // Tiene que ser bajo el candado: un hijo que muere en el acto podría ser
 // recogido ANTES de quedar registrado, y su estado se descartaría como el de un
 // huérfano cualquiera.
-func (r *reaper) startTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
+func (r *Reaper) StartTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	enSuPropioGrupo(cmd)
+	OwnGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -57,19 +57,19 @@ func (r *reaper) startTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 	return ch, nil
 }
 
-// enSuPropioGrupo hace del hijo el lider de su grupo de procesos.
+// OwnGroup hace del hijo el lider de su grupo de procesos.
 //
 // Es lo que permite matarlo CON sus descendientes. Un servidor MCP lanzado a
 // traves de un envoltorio —`npx`, un script de shell— deja el proceso de verdad
 // como NIETO, y matando solo el pid del hijo el nieto sobrevive.
-func enSuPropioGrupo(cmd *exec.Cmd) {
+func OwnGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
 }
 
-// matarGrupo mata al hijo Y a todo lo que haya lanzado.
+// KillGroup mata al hijo Y a todo lo que haya lanzado.
 //
 // Antes se mataba solo su pid. Por cada sesion cerrada quedaba vivo el nieto —el
 // servidor de verdad— reteniendo la RAM de su invitado: memoria que
@@ -79,7 +79,7 @@ func enSuPropioGrupo(cmd *exec.Cmd) {
 //
 // El pid en negativo significa "todo el grupo". Si el hijo no llego a tener
 // grupo propio, queda el camino de siempre.
-func matarGrupo(cmd *exec.Cmd) {
+func KillGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
@@ -89,7 +89,7 @@ func matarGrupo(cmd *exec.Cmd) {
 }
 
 // forget retira un pid ya esperado con éxito, para no acumular entradas.
-func (r *reaper) forget(pid int) {
+func (r *Reaper) Forget(pid int) {
 	r.mu.Lock()
 	delete(r.tracked, pid)
 	r.mu.Unlock()
@@ -100,7 +100,7 @@ func (r *reaper) forget(pid int) {
 // Solo siendo PID 1: fuera de la microVM —tests, desarrollo en un Mac— el init
 // del sistema ya cosecha, y un wait4(-1) en un proceso normal robaría hijos
 // legítimos de quien sea que los esté esperando.
-func (r *reaper) run() {
+func (r *Reaper) Run() {
 	if os.Getpid() != 1 {
 		return
 	}
@@ -119,7 +119,7 @@ func (r *reaper) run() {
 	}
 }
 
-func (r *reaper) reapAll() {
+func (r *Reaper) reapAll() {
 	for {
 		r.mu.Lock()
 		var ws syscall.WaitStatus
@@ -175,7 +175,7 @@ func waitStatusErr(ws syscall.WaitStatus) error {
 
 // exitCodeOf saca el código de salida de un error de espera, venga de cmd.Wait
 // o del cosechador. Devuelve -1 y false si el proceso ni llegó a lanzarse.
-func exitCodeOf(err error) (int, bool) {
+func ExitCodeOf(err error) (int, bool) {
 	switch e := err.(type) {
 	case *exec.ExitError:
 		return e.ExitCode(), true
@@ -187,7 +187,7 @@ func exitCodeOf(err error) (int, bool) {
 
 // waitFor espera al proceso, recuperando el estado del cosechador si este se
 // adelantó.
-func waitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
+func WaitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 	err := cmd.Wait()
 	if err == nil {
 		return nil

@@ -1,4 +1,4 @@
-package main
+package guest
 
 import (
 	"encoding/json"
@@ -15,10 +15,9 @@ import (
 // ejecutarlo" de "lo ejecuté y falló", que son cosas muy distintas: la primera
 // se reintenta, la segunda no.
 func TestUnComandoQueFallaNoEsUnErrorHTTP(t *testing.T) {
-	b := &bridge{}
 	body := `{"cmd":["sh","-c","echo antes; echo el motivo >&2; exit 3"]}`
 	w := httptest.NewRecorder()
-	b.handleExec(w, httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body)))
+	handleExec(nil, w, httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body)))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("código HTTP = %d, want 200", w.Code)
@@ -39,9 +38,8 @@ func TestUnComandoQueFallaNoEsUnErrorHTTP(t *testing.T) {
 
 // Si el binario no existe, hay que DECIRLO: no habrá salida que lo explique.
 func TestUnBinarioQueNoExisteLoDice(t *testing.T) {
-	b := &bridge{}
 	w := httptest.NewRecorder()
-	b.handleExec(w, httptest.NewRequest(http.MethodPost, "/exec",
+	handleExec(nil, w, httptest.NewRequest(http.MethodPost, "/exec",
 		strings.NewReader(`{"cmd":["no-existe-este-binario-jamas"]}`)))
 
 	var res execResponse
@@ -58,7 +56,6 @@ func TestUnBinarioQueNoExisteLoDice(t *testing.T) {
 
 // Peticiones mal formadas se rechazan sin ejecutar nada.
 func TestExecRechazaLoQueNoEntiende(t *testing.T) {
-	b := &bridge{}
 	casos := []struct {
 		nombre string
 		metodo string
@@ -72,7 +69,7 @@ func TestExecRechazaLoQueNoEntiende(t *testing.T) {
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			b.handleExec(w, httptest.NewRequest(c.metodo, "/exec", strings.NewReader(c.cuerpo)))
+			handleExec(nil, w, httptest.NewRequest(c.metodo, "/exec", strings.NewReader(c.cuerpo)))
 			if w.Code != c.want {
 				t.Errorf("código = %d, want %d", w.Code, c.want)
 			}
@@ -90,7 +87,7 @@ func TestExecRechazaLoQueNoEntiende(t *testing.T) {
 func TestLaEjecucionSoloLaEnciendeElKernel(t *testing.T) {
 	// Sin /proc/cmdline legible (macOS, o un cmdline sin el parámetro) queda
 	// apagada, que es el valor seguro por defecto.
-	if execEnabled() {
+	if ExecEnabled() {
 		t.Error("la ejecución debería estar apagada si el kernel no la pide")
 	}
 	if execBootParam != "kling.exec" {

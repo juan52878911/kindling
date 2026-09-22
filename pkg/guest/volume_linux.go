@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package guest
 
 import (
 	"errors"
@@ -16,8 +16,8 @@ import (
 // falla, falla entero: montar la mitad dejaría al servidor MCP escribiendo en un
 // directorio del overlay que desaparece con la máquina, y eso no da ningún error
 // hasta que alguien busca lo que guardó.
-func mountVolumes() ([]volumeSpec, error) {
-	specs := volumeSpecs()
+func mountVolumes() ([]VolumeSpec, error) {
+	specs := volumeSpecsFromCmdline()
 	if len(specs) == 0 {
 		return nil, nil
 	}
@@ -79,7 +79,7 @@ func mountVolumes() ([]volumeSpec, error) {
 // saber que hay al menos uno escribible. No puede fallar ni bloquear
 // indefinidamente sobre discos virtio locales, y por eso no devuelve error: no
 // habría nada que hacer con él.
-func syncVolumes(specs []volumeSpec) {
+func syncVolumes(specs []VolumeSpec) {
 	for _, v := range specs {
 		if !v.readOnly {
 			syscall.Sync()
@@ -97,7 +97,7 @@ func syncVolumes(specs []volumeSpec) {
 //
 // En orden INVERSO al montaje: si un volumen se montó dentro de otro, el de
 // dentro tiene que salir primero.
-func unmountVolumes(specs []volumeSpec) {
+func unmountVolumes(specs []VolumeSpec) {
 	syncVolumes(specs)
 	for i := len(specs) - 1; i >= 0; i-- {
 		v := specs[i]

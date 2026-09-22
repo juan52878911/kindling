@@ -1,4 +1,4 @@
-package main
+package guest
 
 // Hacer que los paquetes de un volumen se ENCUENTREN solos.
 //
@@ -30,7 +30,7 @@ import (
 // Las rutas del volumen van DESPUÉS de lo que ya hubiera: lo que la imagen trae
 // instalado manda sobre la biblioteca compartida. Al revés, actualizar el
 // volumen cambiaría en silencio la versión que usa un servicio que ya funcionaba.
-func libraryEnv(base []string, vols []volumeSpec) []string {
+func LibraryEnv(base []string, vols []VolumeSpec) []string {
 	var node, py []string
 	for _, v := range vols {
 		if v.mount == "" {

@@ -1,4 +1,4 @@
-package main
+package guest
 
 import (
 	"os/exec"
@@ -26,7 +26,7 @@ func TestElEstadoNoSePierdeSiElCosechadorSeAdelanta(t *testing.T) {
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
 			cmd := exec.Command("sh", c.args...)
-			exitCh, err := procReaper.startTracked(cmd)
+			exitCh, err := DefaultReaper.StartTracked(cmd)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -35,10 +35,10 @@ func TestElEstadoNoSePierdeSiElCosechadorSeAdelanta(t *testing.T) {
 			// Que el cosechador gane la carrera, como dentro de la microVM.
 			var recogido bool
 			for i := 0; i < 200 && !recogido; i++ {
-				procReaper.reapAll()
-				procReaper.mu.Lock()
-				_, sigue := procReaper.tracked[pid]
-				procReaper.mu.Unlock()
+				DefaultReaper.reapAll()
+				DefaultReaper.mu.Lock()
+				_, sigue := DefaultReaper.tracked[pid]
+				DefaultReaper.mu.Unlock()
 				recogido = !sigue
 				if !recogido {
 					time.Sleep(5 * time.Millisecond)
@@ -48,8 +48,8 @@ func TestElEstadoNoSePierdeSiElCosechadorSeAdelanta(t *testing.T) {
 				t.Skip("el cosechador no llegó a recogerlo en este entorno")
 			}
 
-			err = waitFor(cmd, exitCh)
-			procReaper.forget(pid)
+			err = WaitFor(cmd, exitCh)
+			DefaultReaper.Forget(pid)
 
 			if c.code == 0 {
 				if err != nil {
@@ -57,7 +57,7 @@ func TestElEstadoNoSePierdeSiElCosechadorSeAdelanta(t *testing.T) {
 				}
 				return
 			}
-			got, ok := exitCodeOf(err)
+			got, ok := ExitCodeOf(err)
 			if !ok {
 				t.Fatalf("se perdió el código de salida: %v", err)
 			}
@@ -83,7 +83,7 @@ func TestUnaSenalSeDistingueDeUnCodigo(t *testing.T) {
 	if !strings.Contains(err.Error(), "signal") {
 		t.Errorf("el error no dice que fue una señal: %v", err)
 	}
-	if code, ok := exitCodeOf(err); !ok || code != 128+int(syscall.SIGKILL) {
+	if code, ok := ExitCodeOf(err); !ok || code != 128+int(syscall.SIGKILL) {
 		t.Errorf("código = %d (ok=%v), quería 128+9", code, ok)
 	}
 }
@@ -92,7 +92,7 @@ func TestUnaSenalSeDistingueDeUnCodigo(t *testing.T) {
 // hijos legítimos de quien los esté esperando.
 func TestElCosechadorSoloCorreComoPID1(t *testing.T) {
 	hecho := make(chan struct{})
-	go func() { procReaper.run(); close(hecho) }()
+	go func() { DefaultReaper.Run(); close(hecho) }()
 	select {
 	case <-hecho:
 	case <-time.After(time.Second):

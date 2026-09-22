@@ -1,4 +1,4 @@
-package main
+package guest
 
 // Secretos de sesión por MMDS (el metadata service de Firecracker).
 //
@@ -46,8 +46,8 @@ const (
 	mmdsTokenTTL = "60"
 )
 
-// mmdsStore es el documento JSON que sirve el metadata service.
-type mmdsStore struct {
+// MMDSStore es el documento JSON que sirve el metadata service.
+type MMDSStore struct {
 	Env      map[string]string            `json:"env"`
 	Sessions map[string]map[string]string `json:"sessions"`
 }
@@ -68,7 +68,7 @@ type mmdsStore struct {
 // VALIDACIÓN EN LAB. Esta es la pieza MÁS incierta del flujo: depende de que la
 // imagen traiga `iproute2` y de que la ruta on-link baste para que Firecracker
 // intercepte. Hay que confirmarlo en hardware; ver el reporte de la tarea.
-func setupMMDSRoute() {
+func SetupMMDSRoute() {
 	if _, err := exec.LookPath("ip"); err != nil {
 		// La imagen mínima puede no traer iproute2. No hay un /sys equivalente para
 		// añadir rutas (no viven ahí), así que aquí no hay plan B limpio: se deja
@@ -97,7 +97,7 @@ func setupMMDSRoute() {
 // fetchMMDS lee el store completo del metadata service con el flujo v2. Devuelve
 // nil sin ruido si MMDS no está disponible (la mayoría de servicios no usan
 // secretos): un fallo aquí NO debe impedir arrancar la sesión.
-func fetchMMDS() *mmdsStore {
+func FetchMMDS() *MMDSStore {
 	// Cliente de vida corta y plazo agresivo: el link-local es local, y si no hay
 	// nadie sirviendo MMDS no queremos retrasar el arranque de cada sesión.
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -142,7 +142,7 @@ func fetchMMDS() *mmdsStore {
 	if err != nil {
 		return nil
 	}
-	var store mmdsStore
+	var store MMDSStore
 	if json.Unmarshal(body, &store) != nil {
 		// El store existe pero no encaja con el esquema esperado: lo ignoramos en
 		// vez de tumbar la sesión. Un aviso, porque sí indica un store mal formado.
@@ -150,43 +150,4 @@ func fetchMMDS() *mmdsStore {
 		return nil
 	}
 	return &store
-}
-
-// sessionEnv construye el entorno del proceso de una sesión: el entorno base del
-// puente MÁS los secretos de MMDS que le correspondan (los comunes "env" y los de
-// "sessions[<id>]"). Si no hay MMDS o no hay entrada, devuelve el entorno base tal
-// cual, así que el comportamiento sin secretos queda intacto.
-//
-// El segundo valor dice si se inyectó ALGO: la adopción del hijo caliente lo usa
-// como veto, porque el caliente se lanzó con el entorno base y el entorno de un
-// proceso no se puede cambiar después de exec (ver warm.go).
-//
-// Se lee MMDS EN CADA sesión, no una vez al arrancar: el store puede cambiar entre
-// sesiones (un secreto se inyecta después del boot, en la microVM ya viva), y una
-// caché lo dejaría sin ver justo lo recién inyectado.
-func (b *bridge) sessionEnv(id string) ([]string, bool) {
-	store := fetchMMDS()
-	if store == nil {
-		return b.env, false
-	}
-
-	// Se parte del entorno base y se AÑADEN/PISAN las claves de MMDS. append sobre
-	// una copia para no mutar b.env, que comparten todas las sesiones.
-	extra := make(map[string]string)
-	for k, v := range store.Env { // comunes a todas las sesiones
-		extra[k] = v
-	}
-	for k, v := range store.Sessions[id] { // los de ESTA sesión pisan a los comunes
-		extra[k] = v
-	}
-	if len(extra) == 0 {
-		return b.env, false
-	}
-
-	env := append([]string(nil), b.env...)
-	for k, v := range extra {
-		env = append(env, k+"="+v)
-	}
-	log.Printf("session %s: %d MMDS secret(s) injected into the environment", id[:8], len(extra))
-	return env, true
 }

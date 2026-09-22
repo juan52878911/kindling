@@ -41,6 +41,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/panico"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 )
 
 // SessionHeader es la cabecera del protocolo MCP que identifica la conversación.
@@ -110,57 +111,31 @@ Options:
 	// puestos: por eso atiende a SIGTERM en vez de dejarse matar.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	go procReaper.run()
 	go b.reapIdle(ctx)
 
-	// Ruta a 169.254.169.254 (MMDS) por eth0. Best-effort: si el servicio no usa
-	// secretos por MMDS es inocuo, y si los usa esta es la ruta que los hace
-	// legibles. Es la pieza a validar en hardware; ver mmds.go.
-	setupMMDSRoute()
+	// El agente genérico de invitado (pkg/guest): cosechador de huérfanos, ruta
+	// a MMDS y volúmenes montados ANTES de servir nada. Si el kernel pidió un
+	// volumen y no se puede montar, es mejor morir aquí —donde se ve en la
+	// consola serie— que arrancar el servidor MCP y dejarle escribir en un
+	// directorio del overlay que va a desaparecer con la máquina.
+	agent, err := guest.New()
+	if err != nil {
+		log.Fatalf("volume: %v", err)
+	}
+	b.env = agent.Env
 
 	mux := http.NewServeMux()
 	// El mismo manejador en / y en /mcp: distintos clientes asumen distinta ruta
 	// y no merece la pena que falle un handshake por una barra.
 	mux.HandleFunc("/", b.handle)
 	mux.HandleFunc("/mcp", b.handle)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	// /healthz, /dns, /volume/* y, si el kernel la enciende, /exec.
+	agent.Register(mux)
 	// /reset cierra TODAS las sesiones y mata los procesos hijos. Lo usa el
 	// import tras capturar el catálogo, para que el snapshot dorado no se
 	// congele con estado de sesión abierto (que es lo que rompe los restores
 	// posteriores).
-	// /dns cuenta lo que el invitado sabe de su propia resolucion de nombres.
-	// Lo usa la sonda profunda: un DNS roto no se ve desde fuera, porque el
-	// servidor MCP arranca y responde tools/list igual.
-	mux.HandleFunc("/dns", b.handleDNS)
 	mux.HandleFunc("/reset", b.handleReset)
-
-	// /exec solo existe si el kernel la enciende. En una microVM de servicio no
-	// está registrada siquiera: una capacidad de ejecutar comandos que solo
-	// depende de no ser alcanzable es una capacidad que alguien acaba
-	// alcanzando, y el gateway reenvía peticiones a los invitados.
-	if execEnabled() {
-		mux.HandleFunc("/exec", b.handleExec)
-		log.Printf("command execution enabled (%s=1): this microVM is single-use",
-			execBootParam)
-	}
-
-	// El volumen se monta ANTES de servir nada. Si el kernel pidió uno y no se
-	// puede montar, es mejor morir aquí —donde se ve en la consola serie— que
-	// arrancar el servidor MCP y dejarle escribir en un directorio del overlay
-	// que va a desaparecer con la máquina.
-	if err := volumeState.acquire(); err != nil {
-		log.Fatalf("volume: %v", err)
-	}
-	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
-	// saber cuáles traen paquetes.
-	b.env = libraryEnv(os.Environ(), volumeState.specs())
-	for _, kv := range b.env {
-		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
-			log.Printf("library: %s", kv)
-		}
-	}
 
 	// Modo navegador compartido: si la imagen dejó el marcador, se guarda para
 	// arrancar el Chromium común de forma PEREZOSA (en la primera sesión que lo
@@ -186,45 +161,6 @@ Options:
 			log.Fatalf("http mode: %v", err)
 		}
 	}
-
-	// /volume/sync vacía la caché del invitado al disco.
-	//
-	// El daemon lo llama antes de matar la microVM. Sin esto lo último que
-	// escribió la herramienta se queda en la caché de páginas del invitado y
-	// muere con él: el volumen "persistente" perdería justo lo más reciente,
-	// que es lo que a nadie se le ocurre comprobar.
-	mux.HandleFunc("/volume/sync", func(w http.ResponseWriter, r *http.Request) {
-		volumeState.sync()
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	// /volume/release DESMONTA, y existe por el snapshot dorado.
-	//
-	// Un snapshot congela la memoria del invitado, y ahí dentro va la caché de
-	// ext4: superbloque, mapas de bloques, posición del journal. El fichero del
-	// volumen NO se copia al snapshot — sigue siendo el mismo del anfitrión y
-	// sigue cambiando. Así que cada instancia restaurada arranca con metadatos
-	// de la época del import sobre un disco que ya divergió, y escribe encima.
-	//
-	// El daemon llama aquí ANTES de congelar la plantilla, para que la memoria
-	// que se vuelca no lleve ningún ext4 montado dentro.
-	mux.HandleFunc("/volume/release", func(w http.ResponseWriter, r *http.Request) {
-		volumeState.release()
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	// /volume/acquire vuelve a montar. Lo llama el daemon tras restaurar, cuando
-	// los discos ya apuntan a los ficheros de ESTA instancia.
-	mux.HandleFunc("/volume/acquire", func(w http.ResponseWriter, r *http.Request) {
-		if err := volumeState.acquire(); err != nil {
-			// 500 y no un log: si el volumen no se monta, la herramienta
-			// escribiría en un directorio del overlay que muere con la máquina,
-			// y eso no da ni un error hasta que alguien busca lo que guardó.
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
 
 	srv := &http.Server{
 		Addr:    *listen,
@@ -270,7 +206,7 @@ Options:
 	b.stopProxyChild()
 	// Después de closeAll, no antes: mientras los servidores MCP vivan pueden
 	// seguir escribiendo, y desmontar por debajo perdería esas escrituras.
-	volumeState.release()
+	agent.Close()
 }
 
 // closeAll cierra todas las sesiones y mata sus procesos hijo, incluido el
@@ -704,7 +640,7 @@ func (b *bridge) spawn() (*session, error) {
 	// Registrado en el cosechador: el puente es PID 1 y recoge huérfanos con
 	// wait4(-1), que no distingue. Esto le permite devolvernos el estado si se
 	// adelanta a nuestro Wait.
-	exitCh, err := procReaper.startTracked(cmd)
+	exitCh, err := procReaper.StartTracked(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("could not start MCP server: %w", err)
 	}
@@ -918,7 +854,7 @@ func (s *session) close() {
 	// distinción que el log de abajo necesita.
 	err := waitFor(s.cmd, s.exitCh)
 	if s.cmd.Process != nil {
-		procReaper.forget(s.cmd.Process.Pid)
+		procReaper.Forget(s.cmd.Process.Pid)
 	}
 
 	// El motivo importa: la consola serie es la única ventana al interior de la

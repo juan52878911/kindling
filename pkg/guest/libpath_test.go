@@ -1,4 +1,4 @@
-package main
+package guest
 
 import (
 	"os"
@@ -38,7 +38,7 @@ func TestSoloEntranLosVolumenesQueTraenPaquetes(t *testing.T) {
 	conNode := volumenCon(t, "node_modules/lodash")
 	vacio := volumenCon(t, "cosas/mias")
 
-	env := libraryEnv(nil, []volumeSpec{
+	env := LibraryEnv(nil, []VolumeSpec{
 		{mount: conNode, readOnly: true},
 		{mount: vacio},
 	})
@@ -64,8 +64,8 @@ func TestSoloEntranLosVolumenesQueTraenPaquetes(t *testing.T) {
 // PYTHONPATH="" es una entrada de ruta vacía, y eso significa "el directorio
 // actual" — se colaría el cwd en el camino de búsqueda de imports.
 func TestSinPaquetesNoSeExportaNada(t *testing.T) {
-	for _, vols := range [][]volumeSpec{nil, {{mount: volumenCon(t, "datos")}}} {
-		env := libraryEnv([]string{"PATH=/bin"}, vols)
+	for _, vols := range [][]VolumeSpec{nil, {{mount: volumenCon(t, "datos")}}} {
+		env := LibraryEnv([]string{"PATH=/bin"}, vols)
 		if v, ok := valor(env, "NODE_PATH"); ok {
 			t.Errorf("exportó NODE_PATH=%q sin motivo", v)
 		}
@@ -84,7 +84,7 @@ func TestSinPaquetesNoSeExportaNada(t *testing.T) {
 // servicio que ya funcionaba, y el cambio no aparecería en ningún sitio.
 func TestLoDeLaImagenVaPrimero(t *testing.T) {
 	vol := volumenCon(t, "node_modules")
-	env := libraryEnv([]string{"NODE_PATH=/usr/local/lib/node_modules"}, []volumeSpec{{mount: vol}})
+	env := LibraryEnv([]string{"NODE_PATH=/usr/local/lib/node_modules"}, []VolumeSpec{{mount: vol}})
 
 	np, _ := valor(env, "NODE_PATH")
 	propio := strings.Index(np, "/usr/local/lib/node_modules")
@@ -115,7 +115,7 @@ func TestLasDosFormasDePip(t *testing.T) {
 	target := volumenCon(t, "requests", "requests-2.31.0.dist-info")
 	prefix := volumenCon(t, "lib/python3.12/site-packages/click")
 
-	env := libraryEnv(nil, []volumeSpec{{mount: target}, {mount: prefix}})
+	env := LibraryEnv(nil, []VolumeSpec{{mount: target}, {mount: prefix}})
 	pp, ok := valor(env, "PYTHONPATH")
 	if !ok {
 		t.Fatal("no puso PYTHONPATH")
@@ -139,7 +139,7 @@ func TestUnVolumenDeDatosNoSeCuelaEnPythonpath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(datos, "json.py"), []byte("# trampa\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env := libraryEnv(nil, []volumeSpec{{mount: datos}})
+	env := LibraryEnv(nil, []VolumeSpec{{mount: datos}})
 	if v, ok := valor(env, "PYTHONPATH"); ok {
 		t.Errorf("metió un volumen de datos en PYTHONPATH: %q", v)
 	}

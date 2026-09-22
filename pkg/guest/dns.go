@@ -1,4 +1,4 @@
-package main
+package guest
 
 // Lo que el invitado sabe de su propia resolucion de nombres.
 //
@@ -71,7 +71,10 @@ func diagnosticoDNS(ctx context.Context, dominio string) dnsInfo {
 	return info
 }
 
-func (b *bridge) handleDNS(w http.ResponseWriter, r *http.Request) {
+// DNSHandler sirve GET /dns?host=<dominio>: lo que el invitado sabe de su propia
+// resolución de nombres. Un DNS roto no se ve desde fuera, porque el servidor
+// arranca y responde igual; esta ruta lo hace visible.
+func DNSHandler(w http.ResponseWriter, r *http.Request) {
 	dominio := r.URL.Query().Get("host")
 	if dominio == "" {
 		dominio = "example.com"

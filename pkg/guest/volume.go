@@ -1,4 +1,4 @@
-package main
+package guest
 
 // Montaje de los volúmenes persistentes dentro de la microVM.
 //
@@ -32,8 +32,8 @@ const volumeBootParam = "kling.volume"
 // siguen por orden de enganche.
 const firstVolumeDevice = 'c'
 
-// volumeSpec es un volumen a montar: dónde y cómo.
-type volumeSpec struct {
+// VolumeSpec es un volumen a montar: dónde y cómo.
+type VolumeSpec struct {
 	device   string
 	mount    string
 	readOnly bool
@@ -49,7 +49,7 @@ type volumeSpec struct {
 // El modo va pegado a cada punto de montaje, y no como parámetro aparte, para
 // que sea imposible leer uno sin el otro: montar en escritura lo que se pidió
 // de solo lectura corrompería lo que están leyendo las demás microVMs.
-func volumeSpecs() []volumeSpec {
+func volumeSpecsFromCmdline() []VolumeSpec {
 	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
 		return nil
@@ -64,12 +64,12 @@ func volumeSpecs() []volumeSpec {
 	if raw == "" {
 		return nil
 	}
-	var out []volumeSpec
+	var out []VolumeSpec
 	for i, spec := range strings.Split(raw, ",") {
 		if spec == "" {
 			continue
 		}
-		v := volumeSpec{device: "/dev/vd" + string(rune(firstVolumeDevice+i))}
+		v := VolumeSpec{device: "/dev/vd" + string(rune(firstVolumeDevice+i))}
 		if mp, ro := strings.CutSuffix(spec, ":ro"); ro {
 			v.mount, v.readOnly = mp, true
 		} else {
@@ -90,24 +90,24 @@ func volumeSpecs() []volumeSpec {
 //
 // Es global y con candado propio porque lo tocan dos manejadores HTTP a la vez y
 // el apagado, y ninguno pasa por el mutex del puente.
-var volumeState = &volumes{}
+var volumeState = &Volumes{}
 
-type volumes struct {
+type Volumes struct {
 	mu      sync.Mutex
-	mounted []volumeSpec
+	mounted []VolumeSpec
 }
 
 // specs devuelve lo montado. Copia, para que quien la reciba no pueda alterar el
 // estado por debajo.
-func (v *volumes) specs() []volumeSpec {
+func (v *Volumes) Specs() []VolumeSpec {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return append([]volumeSpec(nil), v.mounted...)
+	return append([]VolumeSpec(nil), v.mounted...)
 }
 
 // acquire monta lo que pida el kernel. Es idempotente: si ya está montado, no
 // hace nada.
-func (v *volumes) acquire() error {
+func (v *Volumes) Acquire() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.mounted) > 0 {
@@ -122,7 +122,7 @@ func (v *volumes) acquire() error {
 }
 
 // sync vacía al disco lo que haya en la caché del invitado.
-func (v *volumes) sync() {
+func (v *Volumes) Sync() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	syncVolumes(v.mounted)
@@ -130,7 +130,7 @@ func (v *volumes) sync() {
 
 // release desmonta. También idempotente: desmontar dos veces no es un error, y
 // el apagado ordenado puede llegar después de un release del daemon.
-func (v *volumes) release() {
+func (v *Volumes) Release() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.mounted) == 0 {
