@@ -24,9 +24,9 @@ import (
 	"github.com/juan52878911/kindling/internal/daemon"
 	"github.com/juan52878911/kindling/internal/gateway"
 	"github.com/juan52878911/kindling/internal/report"
-	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
+	"github.com/juan52878911/kindling/pkg/transport"
 
 	"errors"
 	"github.com/juan52878911/kindling/internal/mcp"

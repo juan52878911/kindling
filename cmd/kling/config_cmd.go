@@ -7,9 +7,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/juan52878911/kindling/internal/transport"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
+	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 // ── contextos ─────────────────────────────────────────────────────────────────

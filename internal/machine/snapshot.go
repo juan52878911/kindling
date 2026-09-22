@@ -21,7 +21,7 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 
-	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
