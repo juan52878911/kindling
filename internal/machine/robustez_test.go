@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"testing"
 	"time"
 
@@ -15,9 +14,13 @@ import (
 )
 
 // vmmFalso deja corriendo un proceso cuya línea de comandos imita la de
-// firecracker para la máquina id, que es lo que liveVMs busca en /proc. Devuelve
-// su pid.
-func vmmFalso(t *testing.T, m *Manager, id string) int {
+// firecracker para la máquina id, que es lo que liveVMs busca en /proc.
+//
+// Devuelve su pid y un canal que se cierra cuando muere DE VERDAD. Hace falta el
+// canal y no vale `kill(pid, 0)`: al matar un hijo de este proceso queda un
+// zombi hasta que alguien lo recoge, y un zombi contesta a la señal 0 como si
+// estuviera vivo. El test se creía que el barrido no había matado nada.
+func vmmFalso(t *testing.T, m *Manager, id string) (int, <-chan struct{}) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
 		t.Skip("liveVMs lee /proc; solo aplica en Linux")
@@ -31,12 +34,28 @@ func vmmFalso(t *testing.T, m *Manager, id string) int {
 	if err := cmd.Start(); err != nil {
 		t.Skipf("no pude lanzar el proceso de prueba: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	muerto := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(muerto) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-muerto:
+		case <-time.After(5 * time.Second):
+		}
+	})
 	esperarCmdline(t, cmd.Process.Pid, sock)
-	return cmd.Process.Pid
+	return cmd.Process.Pid, muerto
 }
 
-func vivo(pid int) bool { return syscall.Kill(pid, 0) == nil }
+// sigueVivo dice si el proceso no ha muerto todavía.
+func sigueVivo(muerto <-chan struct{}) bool {
+	select {
+	case <-muerto:
+		return false
+	default:
+		return true
+	}
+}
 
 // El caso real: una restauración que falla marca la máquina failed con PID 0, y
 // su firecracker se queda vivo reteniendo la RAM. Hasta ahora solo lo recogía el
@@ -44,7 +63,7 @@ func vivo(pid int) bool { return syscall.Kill(pid, 0) == nil }
 func TestSweepOrphanVMMsMataElHuerfanoDeUnaFailed(t *testing.T) {
 	m := newTestManager(t)
 	id := "fa11ed0000000001"
-	pid := vmmFalso(t, m, id)
+	_, muerto := vmmFalso(t, m, id)
 
 	mc := m.addForTest(id)
 	m.mu.Lock()
@@ -54,11 +73,15 @@ func TestSweepOrphanVMMsMataElHuerfanoDeUnaFailed(t *testing.T) {
 	// Primera vuelta: solo lo apunta. Un fallo real sigue ahí a la siguiente;
 	// una transición en curso, no.
 	m.sweepOrphanVMMs()
-	if !vivo(pid) {
+	if !sigueVivo(muerto) {
 		t.Fatal("lo mató en la primera vuelta: eso es una carrera con quien esté creando la máquina")
 	}
 	m.sweepOrphanVMMs()
-	esperarMuerto(t, pid)
+	select {
+	case <-muerto:
+	case <-time.After(5 * time.Second):
+		t.Fatal("el VMM huérfano sigue vivo tras dos vueltas del barrido")
+	}
 }
 
 // Una máquina en pleno arranque está registrada como "created" y su VMM ya
@@ -74,7 +97,7 @@ func TestSweepOrphanVMMsRespetaLoQueEstaNaciendo(t *testing.T) {
 		{"warm", api.StateWarm},
 	} {
 		id := "0000000000000" + caso.nombre[:3]
-		pid := vmmFalso(t, m, id)
+		_, muerto := vmmFalso(t, m, id)
 		mc := m.addForTest(id)
 		m.mu.Lock()
 		mc.State = caso.estado
@@ -82,7 +105,7 @@ func TestSweepOrphanVMMsRespetaLoQueEstaNaciendo(t *testing.T) {
 
 		m.sweepOrphanVMMs()
 		m.sweepOrphanVMMs()
-		if !vivo(pid) {
+		if !sigueVivo(muerto) {
 			t.Errorf("%s: mató el VMM de una máquina que no había fallado", caso.nombre)
 		}
 	}
@@ -93,26 +116,15 @@ func TestSweepOrphanVMMsRespetaLoQueEstaNaciendo(t *testing.T) {
 func TestSweepOrphanVMMsRespetaLaReserva(t *testing.T) {
 	m := newTestManager(t)
 	id := "5e5e5e5e5e5e5e5e"
-	pid := vmmFalso(t, m, id)
+	_, muerto := vmmFalso(t, m, id)
 	soltar := m.reserveDir(id)
 	defer soltar()
 
 	m.sweepOrphanVMMs()
 	m.sweepOrphanVMMs()
-	if !vivo(pid) {
+	if !sigueVivo(muerto) {
 		t.Fatal("mató un VMM cuya máquina se estaba creando")
 	}
-}
-
-func esperarMuerto(t *testing.T, pid int) {
-	t.Helper()
-	for i := 0; i < 100; i++ {
-		if !vivo(pid) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("el proceso %d sigue vivo", pid)
 }
 
 // El TTL se medía desde StartedAt, y Thaw lo reescribe: una máquina que se
