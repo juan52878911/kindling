@@ -83,6 +83,8 @@ SANDBOXES AND EXEC
       <ref> [--] <cmd> [args...]                   output; exits with its exit code
   cp <local|-> <ref>:<path>                        copies a file into a machine
   cp <ref>:<path> <local|->                        ... or out of it
+  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
+      [--] [cmd [args...]]                         (Ctrl-C reaches the program)
 
 GOLDEN SNAPSHOTS
   commit [-replace] <ref> <name>                   freezes a machine as a
@@ -155,6 +157,16 @@ func main() {
 		// Termina con el código del comando remoto, sin el "error:" de siempre:
 		// un 1 de grep no es un fallo de kling.
 		code, xerr := cmdExec(args)
+		if xerr != nil {
+			fmt.Fprintln(os.Stderr, "error:", xerr)
+			if code == 0 {
+				code = 1
+			}
+		}
+		os.Exit(code)
+	case "shell":
+		// Como exec: el código es el de la shell remota.
+		code, xerr := cmdShell(args)
 		if xerr != nil {
 			fmt.Fprintln(os.Stderr, "error:", xerr)
 			if code == 0 {

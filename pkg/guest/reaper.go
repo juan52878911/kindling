@@ -62,6 +62,24 @@ func (r *Reaper) StartTracked(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
 // Es lo que permite matarlo CON sus descendientes. Un servidor MCP lanzado a
 // traves de un envoltorio —`npx`, un script de shell— deja el proceso de verdad
 // como NIETO, y matando solo el pid del hijo el nieto sobrevive.
+// StartTrackedSession es StartTracked para un proceso que va a ser LÍDER DE
+// SESIÓN (una shell con su PTY).
+//
+// No se puede usar StartTracked ahí: pone Setpgid, y el runtime de Go hace
+// setsid() y después setpgid(), que sobre un líder de sesión recién creado falla
+// con EPERM y el fork entero se va al traste. Tras setsid el pgid ya es el pid,
+// así que KillGroup sigue valiendo igual.
+func (r *Reaper) StartTrackedSession(cmd *exec.Cmd) (chan syscall.WaitStatus, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	ch := make(chan syscall.WaitStatus, 1)
+	r.tracked[cmd.Process.Pid] = ch
+	return ch, nil
+}
+
 func OwnGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}

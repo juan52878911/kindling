@@ -16,6 +16,11 @@ usar y tirar. Guía en [`docs/exec-sandbox.md`](docs/exec-sandbox.md).
 
 ### Novedades
 
+- **`kling shell <ref>`**: una terminal interactiva dentro de la microVM, con
+  pseudoterminal de verdad, redimensionado y Ctrl-C interrumpiendo lo de dentro y
+  no la sesión. Es un cambio de protocolo (`Upgrade: kling-shell/1`) con tramas en
+  los dos sentidos; el daemon valida cada una en vez de reenviar a ciegas. El
+  agente monta `devpts` si falta, así que no hay que reconstruir imágenes.
 - **`kling sandbox create|ls|renew|rm`** (`/sandboxes`): una microVM con exec, sin red
   por defecto, que se destruye al vencer su TTL (10 min por defecto). Desde un snapshot
   con exec arranca en ~300 ms con el estado de la plantilla.
@@ -25,12 +30,36 @@ usar y tirar. Guía en [`docs/exec-sandbox.md`](docs/exec-sandbox.md).
   comando remoto. `?wait=1` da el resultado agregado.
 - **`kling cp`** (`/machines/{ref}/files`): subir y bajar ficheros, con escritura
   atómica y sin seguir enlaces en el último componente.
+- **`-on-ttl freeze` en los sandboxes**: en vez de destruirse al vencer, se
+  duermen a coste cero y el siguiente exec los despierta en milisegundos. Con
+  `freeze` el TTL cuenta inactividad; con `remove`, vida máxima.
 - **`kling run -allow-exec` y `-on-ttl remove`.** `allow_exec` viaja por el API como
   opt-in explícito, se graba en el snapshot con `commit` y las instancias lo heredan;
   pedirlo sobre un snapshot sin él es `409`.
 - El agente de invitado (`pkg/guest`, `kling-guest`) sirve `/exec/stream` y `/files`,
   solo con `kling.exec=1`.
 - `GET /info` anuncia las capacidades `exec` y `sandboxes`.
+
+### Correcciones de robustez
+
+- **Un fallo posterior al arranque ya no deja un firecracker vivo.** Restaurar
+  desde un snapshot y descongelar no mataban el proceso que acababan de lanzar
+  —el arranque en frío sí lo hacía—, así que cada intento fallido (el caso real
+  es el TSC invalidado tras reiniciar el host) retenía su RAM para siempre,
+  invisible para `kling ps`. Descongelar, además, dejaba la red montada y la
+  máquina figurando como congelada, y el siguiente intento readoptaba ese proceso
+  vacío como sano.
+- **Los VMM huérfanos se recogen en marcha**, no solo al arrancar el daemon.
+- **El TTL no se reinicia al despertar**: se cuenta desde su propio reloj
+  (`ttl_at`), no desde el último arranque. Un sandbox que dormía y despertaba
+  podía no vencer nunca.
+- **Una máquina con un secreto inyectado ya no reintenta congelarse cada 10 s
+  para siempre**: se retira su TTL, una vez y diciéndolo en el log.
+- **Antes de rechazar por memoria se pide prestado a los globos** de los
+  invitados vivos, que devuelven lo que no usan sin congelar a nadie; y el
+  desalojo puede soltar una instancia precalentada, que hasta ahora nunca ocurría.
+- **El tope de máquinas del daemon se distingue de la falta de memoria** (409
+  propio) y se puede subir con `KLING_MAX_MACHINES`.
 
 ### Cambios que se notan
 
