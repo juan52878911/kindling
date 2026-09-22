@@ -241,12 +241,17 @@ func runShell(env []string, req api.ShellRequest, in io.Reader, out io.Writer) {
 
 	code := 0
 	if err != nil {
-		if c, ok := ExitCodeOf(err); ok {
-			code = c
-		} else {
+		c, ok := ExitCodeOf(err)
+		// Igual que en /exec/stream: si el proceso terminó, su código manda
+		// aunque esperarlo diera error.
+		if !ok && cmd.ProcessState != nil {
+			c, ok = cmd.ProcessState.ExitCode(), true
+		}
+		if !ok {
 			_ = escribir(api.ShellError, []byte(err.Error()))
 			return
 		}
+		code = c
 	}
 	_ = escribir(api.ShellExit, api.ExitPayload(int32(code)))
 

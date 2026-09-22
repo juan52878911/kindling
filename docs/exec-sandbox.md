@@ -141,6 +141,27 @@ Las rutas, los límites y el formato del flujo están en [`api.md`](api.md#exec-
 Desde Go, `pkg/api`: `Client.Exec`, `ReadFile`, `WriteFile`, `StatFile`,
 `RemoveFile`, `CreateSandbox`, `Sandboxes`, `RenewSandbox`, `RemoveSandbox`.
 
+## Bajo carga
+
+Medido en el laboratorio (Lima arm64 anidado, 6 vCPU, 8 GiB), con 24 sandboxes de
+una plantilla y 60 ejecuciones a la vez:
+
+| | |
+|---|---|
+| Crear, con el fondo de precalentadas vacío | p50 422 ms, p95 15,6 s |
+| Ejecutar, 60 a la vez sobre 24 sandboxes | p50 3,4 s, p95 12,3 s |
+| Despertar, 24 a la vez | p50 333 ms, p95 373 ms |
+
+Las colas largas son del anfitrión, no del daemon: seis vCPU repartidos entre
+decenas de microVMs que arrancan a la vez. Lo que importa es que no hubo ni una
+ejecución perdida ni un proceso huérfano.
+
+**kindling sobreasigna memoria a propósito.** Una microVM no toca toda la RAM que
+declara, y de ahí sale la densidad. La consecuencia es que en un host saturado el
+rechazo puede no llegar como "no cabe" sino como "el invitado no llegó a
+escuchar": el arranque se comió su plazo compitiendo por CPU. El mensaje lo dice y
+sugiere mirar `kling top`.
+
 ## Lo que hay que saber
 
 - **El TTL no espera a que acabe un comando.** Un sandbox de 10 minutos que ejecuta

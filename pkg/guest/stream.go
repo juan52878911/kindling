@@ -80,7 +80,14 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	}
 	// Y si aun así un nieto que escapó del grupo sostiene la tubería abierta, no
 	// se le espera más de esto.
-	cmd.WaitDelay = 2 * time.Second
+	//
+	// 30 s y no 2: bajo carga (medido con 60 ejecuciones a la vez sobre 6 vCPU)
+	// el proceso terminaba y el vaciado de sus tuberías no llegaba a tiempo, así
+	// que Wait devolvía "WaitDelay expired" y un comando que había ido bien se
+	// reportaba como error. Este plazo es una red de seguridad contra nietos
+	// escapados, no un límite de rendimiento: acortarlo no protege de nada y
+	// convierte la lentitud del host en un fallo.
+	cmd.WaitDelay = 30 * time.Second
 
 	stdout := &streamWriter{out: out, stream: "stdout", left: maxOut}
 	stderr := &streamWriter{out: out, stream: "stderr", left: maxOut}
@@ -106,6 +113,13 @@ func runStreaming(ctx context.Context, env []string, req api.ExecRequest, timeou
 	code := 0
 	if err != nil {
 		c, ok := ExitCodeOf(err)
+		// El proceso pudo terminar perfectamente y fallar el ESPERARLO (el caso
+		// real: WaitDelay agotado mientras se vaciaban sus tuberías en un host
+		// cargado). Si hay estado de salida, ese es el resultado: decir "no pude
+		// ejecutarlo" de algo que se ejecutó y terminó es mentir.
+		if !ok && cmd.ProcessState != nil {
+			c, ok = cmd.ProcessState.ExitCode(), true
+		}
 		if !ok {
 			if ev.TimedOut {
 				// Matado por el plazo: el código de un SIGKILL, que es lo que
