@@ -116,7 +116,9 @@ type posterCrudo func(metodo, ruta, cuerpo string) ([]byte, error)
 func guestRaw(ctx context.Context, c *api.Client, ref string) posterCrudo {
 	return func(metodo, ruta, cuerpo string) ([]byte, error) {
 		resp, err := c.Guest(ctx, ref, api.GuestRequest{
-			Port: 8080, Path: ruta, Method: metodo, Body: cuerpo,
+			Port: api.GuestPort, Path: ruta, Method: metodo, Body: cuerpo,
+			// La mayoría de estas rutas son /mcp; a /dns la cabecera no le estorba.
+			Headers: map[string]string{"Accept": mcp.AcceptMCP},
 		})
 		if err != nil {
 			return nil, err

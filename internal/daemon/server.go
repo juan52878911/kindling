@@ -534,67 +534,93 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 
 	port := req.Port
 	if port == 0 {
-		port = 8080
+		port = api.GuestPort
 	}
+	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
+	out, code, err := proxyGuest(r.Context(), addr, req)
+	if err != nil {
+		fail(w, code, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// proxyGuest manda req al servidor que escucha en addr dentro del invitado y
+// devuelve su respuesta. Si falla, code es el estado HTTP con el que contestar.
+// Está separado del handler para poder probarlo sin una microVM.
+func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.GuestResponse, int, error) {
+	// Sin ruta es un cliente v0.4, que contaba con los valores de MCP. Se
+	// mantienen para él hasta v0.6; cualquier otro llamador dice lo que quiere.
+	legacy := req.Path == ""
 	path := req.Path
-	if path == "" {
+	respHeaders := req.ResponseHeaders
+	if legacy {
 		path = "/mcp"
+		if respHeaders == nil {
+			respHeaders = []string{"Mcp-Session-Id", "Content-Type"}
+		}
+	}
+	if len(respHeaders) == 0 {
+		respHeaders = []string{"Content-Type"}
+	}
+	if !strings.HasPrefix(path, "/") {
+		return api.GuestResponse{}, http.StatusBadRequest, fmt.Errorf("path must start with '/': %q", path)
+	}
+	maxBody := req.MaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = api.GuestMaxBody
+	}
+	if maxBody > api.GuestMaxBodyCap {
+		return api.GuestResponse{}, http.StatusBadRequest,
+			fmt.Errorf("max_body_bytes %d is over the %d cap", maxBody, api.GuestMaxBodyCap)
 	}
 	method := req.Method
 	if method == "" {
 		method = http.MethodPost
 	}
-	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
 
 	// Un servidor recién arrancado tarda en escuchar. Esperar aquí, y no en el
 	// cliente, mantiene el sondeo en la red que puede verlo.
 	if req.WaitMS > 0 {
-		if err := waitPort(r.Context(), addr, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
-			fail(w, http.StatusGatewayTimeout, err)
-			return
+		if err := waitPort(ctx, addr, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
+			return api.GuestResponse{}, http.StatusGatewayTimeout, err
 		}
 	}
-
 	if req.ProbeOnly {
-		writeJSON(w, http.StatusOK, api.GuestResponse{Status: http.StatusOK})
-		return
+		return api.GuestResponse{Status: http.StatusOK}, 0, nil
 	}
 
-	greq, err := http.NewRequestWithContext(r.Context(), method,
-		"http://"+addr+path, strings.NewReader(req.Body))
+	greq, err := http.NewRequestWithContext(ctx, method, "http://"+addr+path, strings.NewReader(req.Body))
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
+		return api.GuestResponse{}, http.StatusBadRequest, err
 	}
 	greq.Header.Set("Content-Type", "application/json")
-	greq.Header.Set("Accept", "application/json, text/event-stream")
+	if legacy {
+		greq.Header.Set("Accept", "application/json, text/event-stream")
+	}
 	for k, v := range req.Headers {
 		greq.Header.Set(k, v)
 	}
 
 	resp, err := guestClient.Do(greq)
 	if err != nil {
-		fail(w, http.StatusBadGateway, err)
-		return
+		return api.GuestResponse{}, http.StatusBadGateway, err
 	}
 	defer resp.Body.Close()
 
-	// Un catálogo grande puede pesar; el límite evita que un invitado que se
-	// desmadre agote la memoria del daemon.
-	body, err := api.LeerCuerpo(resp.Body, 8<<20)
+	// El límite evita que un invitado que se desmadre agote la memoria del
+	// daemon. Se falla en vez de truncar: una respuesta a medias parece buena.
+	body, err := api.LeerCuerpo(resp.Body, maxBody)
 	if err != nil {
-		fail(w, http.StatusBadGateway, err)
-		return
+		return api.GuestResponse{}, http.StatusBadGateway, err
 	}
-
-	out := api.GuestResponse{Status: resp.StatusCode, Body: string(body),
-		Headers: map[string]string{}}
-	for _, h := range []string{"Mcp-Session-Id", "Content-Type"} {
+	out := api.GuestResponse{Status: resp.StatusCode, Body: string(body), Headers: map[string]string{}}
+	for _, h := range respHeaders {
 		if v := resp.Header.Get(h); v != "" {
 			out.Headers[h] = v
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, 0, nil
 }
 
 // waitPort espera a que algo escuche en addr, o se rinde al agotar el plazo.

@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Streamable HTTP deja al servidor elegir cómo contesta: puede devolver el
@@ -66,4 +67,28 @@ func esRespuesta(ev []byte) bool {
 		return false
 	}
 	return len(m.Result) > 0 || len(m.Error) > 0
+}
+
+// Path es donde escucha el protocolo dentro del invitado, tanto el puente
+// stdio→HTTP como los servidores que hablan Streamable HTTP por sí mismos.
+const Path = "/mcp"
+
+// SessionHeader es la cabecera con la que MCP identifica una conversación.
+const SessionHeader = "Mcp-Session-Id"
+
+// GuestPost arma la petición al proxy del daemon para mandar un mensaje MCP al
+// servidor de dentro de una microVM. El daemon ya no pone nada de MCP por su
+// cuenta: ruta, Accept y la cabecera de sesión de vuelta van aquí.
+func GuestPost(body, session string) api.GuestRequest {
+	req := api.GuestRequest{
+		Port:            api.GuestPort,
+		Path:            Path,
+		Body:            body,
+		Headers:         map[string]string{"Accept": AcceptMCP},
+		ResponseHeaders: []string{SessionHeader, "Content-Type"},
+	}
+	if session != "" {
+		req.Headers[SessionHeader] = session
+	}
+	return req
 }

@@ -541,11 +541,24 @@ type Error struct {
 // solo existen en la red del host, así que con transporte SSH un sondeo directo
 // se queda esperando hasta agotar el plazo.
 type GuestRequest struct {
-	Port    int               `json:"port,omitempty"`   // 8080 si no se dice otra cosa
-	Path    string            `json:"path,omitempty"`   // /mcp si no se dice otra cosa
+	Port int `json:"port,omitempty"` // GuestPort (8080) si no se dice otra cosa
+
+	// Path es la ruta dentro del invitado. VACÍO es el comportamiento de v0.4,
+	// que se conserva por compatibilidad hasta v0.6: /mcp, con la cabecera
+	// Accept de MCP y devolviendo Mcp-Session-Id. Un cliente nuevo pasa siempre
+	// la ruta y las cabeceras que quiere; el daemon no añade nada de MCP.
+	Path    string            `json:"path,omitempty"`
 	Method  string            `json:"method,omitempty"` // POST si no se dice otra cosa
 	Body    string            `json:"body,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"` // Content-Type es application/json si no se dice
+
+	// ResponseHeaders son las cabeceras de la respuesta del invitado que se
+	// devuelven en GuestResponse.Headers. Vacío = solo Content-Type.
+	ResponseHeaders []string `json:"response_headers,omitempty"`
+
+	// MaxBodyBytes es el tamaño máximo de la respuesta del invitado. Por
+	// encima, la llamada falla (no se trunca). 0 = GuestMaxBody; tope GuestMaxBodyCap.
+	MaxBodyBytes int64 `json:"max_body_bytes,omitempty"`
 
 	// WaitMS espera a que el puerto abra antes de mandar nada. Un servidor recién
 	// arrancado tarda en escuchar, y sin esto la primera llamada falla siempre.
@@ -556,6 +569,15 @@ type GuestRequest struct {
 	// diagnostican de forma muy distinta.
 	ProbeOnly bool `json:"probe_only,omitempty"`
 }
+
+const (
+	// GuestMaxBody es el tamaño máximo por defecto de una respuesta del
+	// invitado a través del proxy: un invitado que se desmadre no puede agotar
+	// la memoria del daemon.
+	GuestMaxBody int64 = 8 << 20
+	// GuestMaxBodyCap es lo máximo que se puede pedir con MaxBodyBytes.
+	GuestMaxBodyCap int64 = 64 << 20
+)
 
 // GuestResponse es lo que contestó el invitado, tal cual.
 type GuestResponse struct {

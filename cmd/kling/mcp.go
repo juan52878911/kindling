@@ -840,10 +840,7 @@ func directPost(ctx context.Context, url string) poster {
 // daemon, que es quien tiene ruta hasta él.
 func guestPost(ctx context.Context, c *api.Client, ref string) poster {
 	return func(sid, body string) (string, []byte, error) {
-		req := api.GuestRequest{Port: 8080, Path: "/mcp", Body: body}
-		if sid != "" {
-			req.Headers = map[string]string{"Mcp-Session-Id": sid}
-		}
+		req := mcp.GuestPost(body, sid)
 		resp, err := c.Guest(ctx, ref, req)
 		if err != nil {
 			return "", nil, err
