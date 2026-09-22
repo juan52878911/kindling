@@ -346,6 +346,31 @@ if [ "$BUNDLE" = 1 ]; then
       # aplicó al instalar el paquete, esto solo transforma JS ya presente.
       if chroot "$mnt" /bin/sh -c "cd /opt && npx --yes esbuild '$ENTRY' --bundle --platform=node --format=esm --outfile=/opt/$NAME.bundle.mjs"; then
         chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm' 2>/dev/null || true
+        # EL package.json VA JUNTO AL BUNDLE. Hay servidores que leen su versión del
+        # package.json EN TIEMPO DE EJECUCIÓN, no al compilar: server-sequential-thinking
+        # (dist/version.js) parte de import.meta.url y mira <dir>/package.json y
+        # <dir>/../package.json; si no hay ninguno, lanza "Could not locate package.json
+        # for server version" y el proceso muere al arrancar. Sin empaquetar lo
+        # encuentra (dist/../package.json); empaquetado, import.meta.url apunta a
+        # /opt/<nombre>.bundle.mjs y en /opt no hay nada. El síntoma era un 502 en el
+        # initialize de la imagen seqbundle. esbuild no puede resolverlo: la ruta se
+        # calcula en runtime, no es un import.
+        #
+        # Se copia el MISMO package.json que encontraría sin empaquetar: subiendo
+        # desde el directorio del entry hasta el primero que declare "version" (un
+        # dist/package.json con solo {"type":"module"} no vale, y el servidor también
+        # lo saltaría). Se copia entero y después de esbuild, para que npx no lo tome
+        # por un proyecto en /opt.
+        PKG_DIR="$(dirname "$ENTRY")"
+        while [ "$PKG_DIR" != "/" ] && ! grep -q '"version"' "$mnt$PKG_DIR/package.json" 2>/dev/null; do
+          PKG_DIR="$(dirname "$PKG_DIR")"
+        done
+        if grep -q '"version"' "$mnt$PKG_DIR/package.json" 2>/dev/null; then
+          cp "$mnt$PKG_DIR/package.json" "$mnt/opt/package.json"
+          echo "  ✓ $PKG_DIR/package.json copiado a /opt/package.json (hay servidores que leen su versión de ahí al arrancar)"
+        else
+          echo "AVISO: no hay package.json con \"version\" por encima de $ENTRY; si el servidor lee su versión de él, morirá al arrancar" >&2
+        fi
         # El entrypoint pasa a ejecutar el bundle; se conserva node_modules por si el
         # servidor lee assets en runtime por ruta absoluta (el bundle no los inlinea).
         CMD=(node "/opt/$NAME.bundle.mjs" ${REST[@]+"${REST[@]}"})

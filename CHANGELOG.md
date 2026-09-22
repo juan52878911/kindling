@@ -4,6 +4,19 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## Sin publicar
+
+### Correcciones
+
+- **`-bundle` copia el `package.json` junto al bundle.** `server-sequential-thinking`
+  lee su versión del `package.json` al arrancar, buscándolo junto al fichero que
+  ejecuta; el bundle de esbuild vivía solo en `/opt` y el proceso moría con
+  "Could not locate package.json for server version", que el gateway devolvía
+  como 502 en el `initialize`. Ahora `scripts/80-mcp-image.sh` deja en
+  `/opt/package.json` el del paquete que aporta el entry (el mismo que encontraría
+  sin empaquetar). De los servidores oficiales de npm sólo éste lo hace; el SDK
+  de TypeScript no.
+
 ## v0.4.0 — 2026-08-28
 
 Ochenta y un commits desde v0.3.0. La versión va de **que funcione** a **que se
