@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
 // knownFlags separa lo que el núcleo entiende de lo que es de una extensión:
@@ -59,6 +62,12 @@ func TestAyudaYCompletadoConUnaExtension(t *testing.T) {
 		t.Fatalf("compilando la extensión de prueba: %v\n%s", err, out)
 	}
 	t.Setenv("KLING_PLUGIN_PATH", dir)
+	// El plazo del manifiesto no es lo que se prueba aquí, y con 2 s el test
+	// fallaba de vez en cuando bajo `go test -race ./...` con la CPU ocupada
+	// por el resto de paquetes: la extensión tardaba más en ARRANCAR que eso.
+	previo := plugin.ManifestTimeout
+	plugin.ManifestTimeout = 30 * time.Second
+	t.Cleanup(func() { plugin.ManifestTimeout = previo })
 	reset()
 	b.Reset()
 	printUsage(&b)
