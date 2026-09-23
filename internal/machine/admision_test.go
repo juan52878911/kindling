@@ -48,3 +48,19 @@ func TestPresionDeMemoria(t *testing.T) {
 		t.Fatalf("PSI fuera de rango: %v", p)
 	}
 }
+
+// La puerta de arranque es de 2 en cualquier host virtual, incluido el Mac con
+// Virtualization.framework, cuyo cpuinfo arm64 no dice nada.
+func TestEsVirtualSegunDMI(t *testing.T) {
+	for dmi, want := range map[string]bool{
+		"Apple Inc.Apple Virtualization Generic Platform": true,
+		"QEMUStandard PC (Q35 + ICH9, 2009)":              true,
+		"Microsoft CorporationVirtual Machine":            true,
+		"Dell Inc.PowerEdge R650":                         false,
+		"":                                                false,
+	} {
+		if got := esVirtualSegunDMI(dmi); got != want {
+			t.Errorf("%q: %v, quería %v", dmi, got, want)
+		}
+	}
+}

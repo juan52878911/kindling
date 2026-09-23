@@ -64,15 +64,44 @@ func maxParallelLaunch() int {
 	return min(max(defaultMaxParallelLaunch, runtime.NumCPU()/2), maxParallelLaunchMetal)
 }
 
-// bajoHipervisor dice si el host es a su vez una máquina virtual: el flag
-// "hypervisor" de /proc/cpuinfo lo pone la CPU virtual. Sin /proc (no Linux) se
+// bajoHipervisor dice si el host es a su vez una máquina virtual.
+//
+// Tres señales, porque ninguna vale en todas partes: el flag "hypervisor" de
+// /proc/cpuinfo solo existe en x86 —en arm64 cpuinfo no lista nada parecido, y
+// el laboratorio anidado en un Mac se tomaba por hierro desnudo—; el fabricante
+// de la DMI, que cualquier hipervisor rellena; y /proc/device-tree/hypervisor,
+// que es como se anuncia KVM en arm64 sin DMI. Sin poder leer nada (no Linux) se
 // asume que sí, que es el valor prudente.
 func bajoHipervisor() bool {
-	b, err := os.ReadFile("/proc/cpuinfo")
+	cpu, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
 		return true
 	}
-	return strings.Contains(string(b), " hypervisor")
+	if strings.Contains(string(cpu), " hypervisor") {
+		return true
+	}
+	if _, err := os.Stat("/proc/device-tree/hypervisor"); err == nil {
+		return true
+	}
+	var dmi strings.Builder
+	for _, f := range []string{"sys_vendor", "product_name"} {
+		b, _ := os.ReadFile("/sys/class/dmi/id/" + f)
+		dmi.Write(b)
+	}
+	return esVirtualSegunDMI(dmi.String())
+}
+
+// esVirtualSegunDMI reconoce los fabricantes y productos que ponen los
+// hipervisores habituales en la DMI del invitado.
+func esVirtualSegunDMI(s string) bool {
+	for _, marca := range []string{"QEMU", "KVM", "VMware", "VirtualBox", "innotek", "Xen",
+		"Virtual Machine", "Virtualization", "Parallels", "BHYVE", "Google Compute",
+		"Amazon EC2", "OpenStack", "HVM domU"} {
+		if strings.Contains(s, marca) {
+			return true
+		}
+	}
+	return false
 }
 
 // enterLaunch toma un hueco en la puerta de arranque y devuelve la función para
