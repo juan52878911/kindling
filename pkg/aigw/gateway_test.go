@@ -1,0 +1,347 @@
+package aigw
+
+import (
+	"errors"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/juan52878911/kindling/pkg/jev"
+)
+
+// Si JEV está seguro contesta él y VON ni se entera; si duda, contesta VON y
+// su respuesta se traduce a una etiqueta del conjunto de JEV.
+func TestCascada(t *testing.T) {
+	g, ll, reps := newTestGateway(t, nil)
+	h := g.Handler("")
+
+	// Todo confiado: umbral 0 en todas las clases.
+	g.config().Tasks["kind"].Thresholds = map[string]float64{"bug": 0, "chore": 0, "docs": 0, "feat": 0}
+	rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash the parser segfault"})
+	if rec.Code != 200 {
+		t.Fatalf("classify: %d %s", rec.Code, rec.Body)
+	}
+	r := decode[ClassifyResponse](t, rec)
+	if r.Source != "jev" || r.Label != "bug" || r.JEV == nil || r.JEV.Decision != jev.DecisionConfident {
+		t.Fatalf("confident answer = %+v", r)
+	}
+	if n := ll.calls.Load(); n != 0 {
+		t.Fatalf("a confident answer called VON %d times", n)
+	}
+
+	// Todo escala: umbral 2 (nunca).
+	g.config().Tasks["kind"].Thresholds = map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}
+	ll.set("Docs.")
+	rec = do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash the parser segfault"})
+	r = decode[ClassifyResponse](t, rec)
+	if r.Source != "von" || r.Label != "docs" || r.VON == nil || r.JEV.Decision != jev.DecisionEscalate {
+		t.Fatalf("escalated answer = %+v", r)
+	}
+	if len(r.JEV.Candidates) == 0 || len(r.Evidence) == 0 {
+		t.Fatalf("escalation without candidates/evidence: %+v", r)
+	}
+	if reps.acquired.Load() != 1 || reps.released.Load() != 1 {
+		t.Fatalf("replica acquired %d released %d", reps.acquired.Load(), reps.released.Load())
+	}
+	body := ll.last()
+	gram, _ := body["grammar"].(string)
+	if !strings.HasPrefix(gram, "root ::= ") || !strings.Contains(gram, `"docs"`) {
+		t.Fatalf("grammar = %q", gram)
+	}
+	if _, ok := body["seed"]; !ok || body["temperature"] != 0.0 {
+		t.Fatalf("request to VON without seed or with temperature: %v", body)
+	}
+	// Muestra guardada para recalibrar.
+	if n := g.rings["kind"].len(); n != 1 {
+		t.Fatalf("samples = %d, want 1", n)
+	}
+
+	// Una respuesta que no es exactamente una etiqueta es unknown, no se guarda.
+	ll.set("I think it is a docs change")
+	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash"}))
+	if r.Label != Unknown || r.Source != "von" {
+		t.Fatalf("free-text answer = %+v", r)
+	}
+	if n := g.rings["kind"].len(); n != 1 {
+		t.Fatalf("an unknown answer was recorded as a sample")
+	}
+
+	// /v1/decide es lo mismo con decision.
+	ll.set("feat")
+	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/decide", "", map[string]any{"task": "kind", "text": "x"}))
+	if r.Decision != "feat" || r.Label != "feat" {
+		t.Fatalf("decide = %+v", r)
+	}
+
+	// Métricas: requests por fuente, cobertura, escalado.
+	m := do(t, h, "GET", "/metrics", "", nil).Body.String()
+	for _, want := range []string{
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="jev"} 1`,
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="von"} 2`,
+		`kling_ai_von_unknown_total{task="kind"} 1`,
+		`kling_ai_jev_coverage{task="kind"} 0.25`,
+		`kling_ai_escalation_rate{task="kind"} 0.75`,
+		`kling_ai_latency_seconds_count{task="kind",source="von"} 3`,
+		`kling_ai_samples{task="kind"} 2`,
+		`kling_ai_jev_models_loaded 1`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+}
+
+// Los modos jev y von sirven para medir cada escalón por separado.
+func TestModos(t *testing.T) {
+	g, ll, _ := newTestGateway(t, func(c *Config) {
+		c.Tasks["kind"].Thresholds = map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}
+	})
+	h := g.Handler("")
+	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic", "mode": "jev"}))
+	if r.Source != "jev" || r.Label != "bug" || r.Degraded != "" || ll.calls.Load() != 0 {
+		t.Fatalf("mode jev = %+v (von calls %d)", r, ll.calls.Load())
+	}
+	ll.set("chore")
+	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic", "mode": "von"}))
+	if r.Source != "von" || r.Label != "chore" {
+		t.Fatalf("mode von = %+v", r)
+	}
+	if rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "x", "mode": "nope"}); rec.Code != 400 {
+		t.Fatalf("bad mode: %d", rec.Code)
+	}
+	if rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "nope", "text": "x"}); rec.Code != 404 {
+		t.Fatalf("unknown task: %d", rec.Code)
+	}
+}
+
+// Si VON no contesta, la cascada responde con JEV marcado como degradado, o
+// con 503 si la tarea lo pide.
+func TestVONCaido(t *testing.T) {
+	g, _, reps := newTestGateway(t, func(c *Config) {
+		c.Tasks["kind"].Thresholds = map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}
+	})
+	reps.fail = errors.New("insufficient memory")
+	h := g.Handler("")
+	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash"}))
+	if r.Source != "jev" || r.Label != "bug" || !strings.Contains(r.Degraded, "insufficient memory") {
+		t.Fatalf("degraded = %+v", r)
+	}
+	g.config().Tasks["kind"].OnVONError = "error"
+	rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash"})
+	if rec.Code != 503 || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("on_von_error=error: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(do(t, h, "GET", "/metrics", "", nil).Body.String(), `kling_ai_von_errors_total{model="smol",reason="wake"} 2`) {
+		t.Fatal("wake errors not counted")
+	}
+}
+
+// Token: sin él 401, con él 200; /healthz abierto; un tenant con cuota da 429
+// y no puede usar las rutas de administración.
+func TestAuthYCuotas(t *testing.T) {
+	g, _, _ := newTestGateway(t, func(c *Config) {
+		c.Tenants = []TenantConfig{{Name: "bot", Token: "tenant-token-0123456789", MaxInflight: 1}}
+	})
+	h := g.Handler("main-token-0123456789")
+	if rec := do(t, h, "GET", "/v1/models", "", nil); rec.Code != 401 {
+		t.Fatalf("no token: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/models", "wrong", nil); rec.Code != 401 {
+		t.Fatalf("wrong token: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/healthz", "", nil); rec.Code != 200 {
+		t.Fatalf("healthz: %d", rec.Code)
+	}
+	rec := do(t, h, "GET", "/v1/models", "main-token-0123456789", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"id":"smol"`) {
+		t.Fatalf("models: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/v1/admin/calibrate", "tenant-token-0123456789", map[string]any{"task": "kind"}); rec.Code != 403 {
+		t.Fatalf("tenant on admin: %d", rec.Code)
+	}
+	// Cuota: una petición del tenant retenida en VON ocupa su único hueco y la
+	// siguiente recibe 429; el token principal no tiene cuota.
+	fl := newFakeLlama(t)
+	fl.entered, fl.block = make(chan struct{}, 1), make(chan struct{})
+	g.replicas = &fakeReplicas{addr: strings.TrimPrefix(fl.srv.URL, "http://")}
+	done := make(chan int)
+	go func() {
+		done <- do(t, h, "POST", "/v1/classify", "tenant-token-0123456789", map[string]any{"task": "kind", "text": "x", "mode": "von"}).Code
+	}()
+	<-fl.entered
+	if rec := do(t, h, "GET", "/v1/tasks", "tenant-token-0123456789", nil); rec.Code != 429 {
+		t.Fatalf("second request of the tenant: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/v1/tasks", "main-token-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("main token while tenant busy: %d", rec.Code)
+	}
+	close(fl.block)
+	if c := <-done; c != 200 {
+		t.Fatalf("held request: %d", c)
+	}
+	if rec := do(t, h, "GET", "/v1/tasks", "tenant-token-0123456789", nil); rec.Code != 200 {
+		t.Fatalf("tenant after release: %d", rec.Code)
+	}
+}
+
+// Límites: cuerpo grande 413; rutas de control del agente 404; JSON con
+// campos desconocidos 400.
+func TestLimites(t *testing.T) {
+	g, _, _ := newTestGateway(t, nil)
+	g.opts.MaxBody = 1024
+	h := g.Handler("")
+	big := `{"task":"kind","text":"` + strings.Repeat("a", 4096) + `"}`
+	if rec := do(t, h, "POST", "/v1/classify", "", big); rec.Code != 413 {
+		t.Fatalf("big body: %d %s", rec.Code, rec.Body)
+	}
+	for _, p := range []string{"/exec", "/files/etc/passwd", "/resync", "/volume/x"} {
+		if rec := do(t, h, "POST", p, "", "{}"); rec.Code != 404 {
+			t.Fatalf("%s: %d", p, rec.Code)
+		}
+	}
+	if rec := do(t, h, "POST", "/v1/classify", "", `{"task":"kind","text":"x","evil":1}`); rec.Code != 400 {
+		t.Fatalf("unknown field: %d", rec.Code)
+	}
+}
+
+// El proxy OpenAI: elige réplica por "model", añade semilla si falta, no pasa
+// el token al invitado, hace streaming y corta respuestas desmesuradas.
+func TestProxyOpenAI(t *testing.T) {
+	g, ll, reps := newTestGateway(t, nil)
+	h := g.Handler("main-token-0123456789")
+	ll.set("hello there friend")
+	rec := do(t, h, "POST", "/v1/chat/completions", "main-token-0123456789",
+		map[string]any{"model": "smol", "messages": []any{map[string]any{"role": "user", "content": "hi"}}})
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "hello there friend") {
+		t.Fatalf("chat: %d %s", rec.Code, rec.Body)
+	}
+	if _, ok := ll.last()["seed"]; !ok {
+		t.Fatal("no seed added")
+	}
+	ll.mu.Lock()
+	if ll.auth[len(ll.auth)-1] != "" {
+		t.Fatal("the gateway token reached the guest")
+	}
+	ll.mu.Unlock()
+
+	// Por el nombre del dorado también, y en streaming.
+	rec = do(t, h, "POST", "/v1/chat/completions", "main-token-0123456789",
+		map[string]any{"model": "von-smol", "stream": true, "seed": 7, "messages": []any{}})
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "text/event-stream" ||
+		strings.Count(rec.Body.String(), "data: ") != 4 || !rec.Flushed {
+		t.Fatalf("stream: %d %q flushed=%v", rec.Code, rec.Body, rec.Flushed)
+	}
+	if ll.last()["seed"] != 7.0 {
+		t.Fatalf("client seed overwritten: %v", ll.last()["seed"])
+	}
+	if reps.acquired.Load() != reps.released.Load() {
+		t.Fatal("replica not released")
+	}
+
+	if rec := do(t, h, "POST", "/v1/chat/completions", "main-token-0123456789", map[string]any{"model": "gpt-4"}); rec.Code != 404 {
+		t.Fatalf("unknown model: %d", rec.Code)
+	}
+
+	g.opts.MaxProxyBytes = 64
+	ll.set(strings.Repeat("x", 500))
+	rec = do(t, h, "POST", "/v1/chat/completions", "main-token-0123456789", map[string]any{"model": "smol"})
+	if rec.Body.Len() > 64 {
+		t.Fatalf("answer not capped: %d bytes", rec.Body.Len())
+	}
+}
+
+// La caché de JEV respeta el presupuesto: al cargar un segundo modelo con el
+// presupuesto de uno, el primero sale.
+func TestCacheJEV(t *testing.T) {
+	p1, p2 := trainedModel(t), trainedModel(t)
+	m, err := jev.LoadFile(p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newJEVCache(modelBytes(m) + 10)
+	if _, err := c.get(p1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.get(p2); err != nil {
+		t.Fatal(err)
+	}
+	st := c.stats()
+	if st.Loaded != 1 || st.Evictions != 1 || st.Loads != 2 {
+		t.Fatalf("stats = %+v", st)
+	}
+	if _, err := c.get(p1); err != nil { // vuelve a cargarse
+		t.Fatal(err)
+	}
+	if c.stats().Loads != 3 {
+		t.Fatal("evicted model was not reloaded")
+	}
+	if _, err := c.get("/no/such.jev"); err == nil || c.stats().Failures != 1 {
+		t.Fatal("missing model did not fail")
+	}
+	_ = os.Remove(p2)
+}
+
+func TestConfig(t *testing.T) {
+	bad := []string{
+		`{"models":{"a":{"kind":"gpt"}}}`,
+		`{"models":{"A":{"kind":"jev","path":"x"}}}`,
+		`{"models":{"a":{"kind":"von"}}}`,
+		`{"models":{"a":{"kind":"jev","path":"x"}},"tasks":{"t":{"von":"a"}}}`,
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v"}}}`,
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","labels":["a","a"]}}}`,
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","labels":["a"],"audit":2}}}`,
+		`{"models":{},"typo":1}`,
+		`{"tenants":[{"name":"x","token":"short"}]}`,
+		`{"tenants":[{"name":"default","token":"0123456789abcdefgh"}]}`,
+	}
+	for _, b := range bad {
+		if _, err := ParseConfig(strings.NewReader(b)); err == nil {
+			t.Errorf("accepted %s", b)
+		}
+	}
+	dir := t.TempDir()
+	p := dir + "/ai.json"
+	_ = os.WriteFile(p, []byte(`{"models":{"j":{"kind":"jev","path":"m.jev"},"v":{"kind":"von","snapshot":"von-smol"}},
+		"tasks":{"t":{"jev":"j","von":"v"}}}`), 0o600)
+	c, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Models["j"].Path != dir+"/m.jev" {
+		t.Fatalf("relative path = %q", c.Models["j"].Path)
+	}
+	if n, m := c.vonModel("von-smol"); n != "v" || m == nil {
+		t.Fatal("von model not found by snapshot")
+	}
+}
+
+func TestParseLabel(t *testing.T) {
+	labels := []string{"fix", "feat", "docs"}
+	for in, want := range map[string]string{
+		"fix":               "fix",
+		"  Fix.\n":          "fix",
+		"`feat`":            "feat",
+		"**docs**":          "docs",
+		"Label: docs":       "docs",
+		"\"feat\"\nbecause": "feat",
+		"it's a fix":        Unknown,
+		"fixes":             Unknown,
+		"":                  Unknown,
+		"fix, feat":         Unknown,
+	} {
+		if got := parseLabel(in, labels); got != want {
+			t.Errorf("parseLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if g := grammarFor([]string{`a"b`, `c\d`, "e\x01"}); g != `root ::= "a\"b" | "c\\d" | "e\x01"` {
+		t.Errorf("grammar = %s", g)
+	}
+	// Lo que trae el texto no se vuelve a expandir.
+	got := renderPrompt("{labels}|{text}", []string{"x"}, jev.Input{Text: "{labels}"}, nil)
+	if got != "x|{labels}" {
+		t.Errorf("prompt = %q", got)
+	}
+	if s := truncUTF8("añb", 2); s != "a" {
+		t.Errorf("truncUTF8 = %q", s)
+	}
+}
