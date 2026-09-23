@@ -1,6 +1,7 @@
 # API del daemon
 
-El daemon escucha en un socket Unix (`/run/kling.sock` por defecto) y nunca en un
+El daemon escucha en un socket Unix (`/run/kling.sock` por defecto en Linux,
+`~/Library/Application Support/kindling/kling.sock` en macOS) y nunca en un
 puerto de red: controlar microVMs equivale a root en su host, así que el único
 acceso remoto es SSH (`kling dial-stdio` al otro lado). El cliente Go es
 `pkg/api.Client`; todo `kling` —y cualquier extensión— habla con el daemon por
@@ -25,6 +26,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `shell` | v0.7 | `POST /machines/{ref}/shell` (protocolo `kling-shell/1`) |
 | `exec` | v0.7 | `POST /machines/{ref}/exec`, `GET/PUT/DELETE /machines/{ref}/files`, `allow_exec` y `on_ttl` en `POST /machines` |
 | `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
+| `image-blobs` | v0.9 | `GET/HEAD/PUT /images/{name}/blob` |
 
 ## Rutas
 
@@ -32,7 +34,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, firecracker, capacidades |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9) y `arch` (GOARCH del host) |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
@@ -86,6 +88,17 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | `GET /images/{name}/files?path=/p&stat=1` | `{exists, size, sha256}` |
 | `PUT /images/{name}/files` | pone un fichero dentro (`path`, `mode`, `content_b64` hasta 8 MiB o `from_host` relativo a `/usr/local/lib/kindling`, `create`); se niega si la imagen está en uso |
 | `DELETE /images/{name}` | la borra si nada la usa |
+| `GET /images/{name}/blob[?part=P]` | el fichero de la imagen, en flujo, con `Content-Length`, `X-Kling-Sha256` y `X-Kling-Part`. Sin `part`, el ext4 de una monolítica o la capa de una por capas. `HEAD` da las mismas cabeceras sin cuerpo |
+| `PUT /images/{name}/blob?part=P` | recibe una parte en flujo (hasta 16 GiB): temporal, sha256 comprobado si llega `X-Kling-Sha256`, renombrado atómico. `201` si la escribe, `200` con `unchanged` si ya había una idéntica, `409` si la imagen está en uso y el contenido es distinto |
+
+**Partes de un blob.** `part` es `image` (`<name>.ext4`), `layer`
+(`<name>.layer.ext4`) o `recipe` (`<name>.recipe.json`). El nombre `vmlinux` está
+reservado para el kernel compartido (`part` vacía o `kernel`). "En uso" es lo mismo
+que impide borrarla: un dorado o una máquina que no esté parada que la usen, o
+capas encima; para el kernel, cualquier máquina que no esté parada. La receta de
+una imagen por capas cuenta como la imagen, porque decide su base. Es lo que usa
+`kling images copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
+uno de macOS, donde `POST /images` contesta `501`.
 
 **El protocolo del constructor.** El daemon crea un directorio de trabajo, deja
 en él `request.json` y ejecuta `<constructor> <dir>` con `KLING_ROOT`,

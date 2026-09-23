@@ -3,9 +3,20 @@
 En Linux el daemon lanza un proceso `firecracker` por microVM y le habla por un
 socket unix con el API HTTP de Firecracker (`internal/fc`). En macOS lanza, en su
 lugar, un proceso **`kling-vz`** por microVM que habla **el mismo API** y por
-debajo usa Virtualization.framework. `kling-vz` vive en su propio repositorio
-(`github.com/juan52878911/kindling-vz`) porque necesita cgo y dependencias
-(`Code-Hex/vz`, la pila de red de gVisor); el núcleo sigue sin ninguna y sin cgo.
+debajo usa Virtualization.framework. `kling-vz` vive en este repositorio, en
+`vz/`, como **módulo Go aparte** (`github.com/juan52878911/kindling/vz`, binario
+`vz/cmd/kling-vz`, `make vz`) porque necesita cgo y dependencias (`Code-Hex/vz`,
+la pila de red de gVisor); el `go.mod` de la raíz sigue sin ninguna y sin cgo, y
+`go test ./...` desde la raíz no entra en `vz/` (un módulo anidado queda fuera
+del patrón).
+
+El backend lo elige el usuario con la clave `daemon.vmm` de la configuración
+(`firecracker` o `vz`; vacía = el de la plataforma) o con `KLING_VMM`, que acepta
+un nombre de backend o la ruta del binario. Se valida contra la máquina: `vz`
+solo en macOS sobre Apple Silicon, `firecracker` solo en Linux con KVM. Lo que
+el núcleo hace alrededor del VMM (§5) va por etiquetas de compilación, así que
+la clave elige binario y extensiones del protocolo dentro de lo que el binario
+de `kling` sabe hacer en su sistema.
 
 Por qué así y no un backend dentro del daemon: el `Manager` ya sabe arrancar,
 congelar, descongelar, clonar y apretar máquinas hablando ese API. Si el ayudante
@@ -25,6 +36,12 @@ kling-vz --api-sock <ruta>
 - Un proceso por microVM, como Firecracker. El daemon lo lanza con `setsid`,
   su stdout y stderr van a `machines/<id>/firecracker.log` (el nombre se
   conserva: es lo que lee `kling logs`).
+- La ruta de `--api-sock` puede pasar de los 104 bytes de `sun_path` (la raíz
+  vive en `~/Library/Application Support/kindling`): el ayudante se ata con
+  `chdir` a su directorio y el nombre corto, y el núcleo conecta a través de un
+  enlace simbólico corto en `/tmp/kling-<uid>/` (`internal/fc/dial.go`). La ruta
+  completa sigue en la línea de órdenes: es como el núcleo reconoce sus VMM en
+  la tabla de procesos.
 - **stdout = consola del invitado** (`hvc0`), más las líneas de diagnóstico del
   propio ayudante con prefijo `kling-vz:`.
 - Termina cuando la VM se para (el invitado se apaga o reinicia: `reboot=k
@@ -53,7 +70,7 @@ diga que `kling-vz` no lo implementa.
 | `PUT /entropy` | virtio-rng. |
 | `PUT /balloon` `{amount_mib, deflate_on_oom, stats_polling_interval_s}` | Globo tradicional. `amount_mib` es lo INFLADO, como en Firecracker: el objetivo del framework es `mem_size_mib - amount_mib`. |
 | `PATCH /balloon` `{amount_mib}` | Mueve el globo en caliente. |
-| `GET /balloon/statistics` | `{target_mib, actual_mib, free_memory, available_memory, total_memory}`. El framework no da estadísticas del invitado: `target_mib` y `actual_mib` son lo pedido y los tres de memoria van a 0, que el núcleo lee como "desconocido". |
+| `GET /balloon/statistics` | `{target_mib, actual_mib, free_memory, available_memory, total_memory}`. El framework no da estadísticas del invitado: `target_mib` y `actual_mib` son lo pedido y los tres de memoria van a 0, que el núcleo lee como "desconocido": `squeeze` aprieta entonces hasta dejar al invitado la mitad de su memoria (mínimo 128 MiB) y mide lo devuelto con `GET /kling/stats`. |
 | `PUT /mmds/config` `{version, ipv4_address, network_interfaces}` | Activa MMDS en esa dirección (siempre `169.254.169.254`, versión `V2`). |
 | `PUT /mmds` (cualquier JSON) | Sustituye el almacén de MMDS. |
 | `PUT /actions` `{"action_type": "InstanceStart"}` | Crea y arranca la VM con lo configurado. |
@@ -115,7 +132,7 @@ del namespace de Linux, para que un snapshot sirva igual en los dos sistemas:
 
 | Linux | macOS |
 |---|---|
-| `firecracker` (o `jailer`) | `kling-vz`, buscado junto a `kling` o en el `PATH` (`KLING_VMM` lo fuerza) |
+| `firecracker` (o `jailer`) | `kling-vz`, buscado junto a `kling` o en el `PATH` (`KLING_VMM` lo fuerza; `daemon.vmm` elige el backend) |
 | netns + veth + tap + iptables (`internal/net`) | `PUT /kling/network` al ayudante; sin red en el host |
 | `Machine.IP` = IP del veth | `Machine.IP` = `172.16.0.2` (informativa) y `Machine.Forwards` |
 | cgroups, jailer, bajada de privilegios | no existen; el aislamiento es el proceso auxiliar de Apple |
@@ -125,4 +142,5 @@ del namespace de Linux, para que un snapshot sirva igual en los dos sistemas:
 | barrido de huérfanos por `/proc` | por la tabla de procesos del sistema |
 | raíz `/var/lib/kindling`, daemon como root | raíz en el directorio del usuario, daemon sin root |
 | `mkfs.ext4`, `debugfs` de e2fsprogs | los mismos, de Homebrew (`brew install e2fsprogs`) |
-| construir imágenes (`POST /images`) | no disponible: se construyen en Linux y se copian (`kling images copy`) |
+| construir imágenes (`POST /images`) | no disponible (501): se construyen en Linux y se copian (`kling images copy`, `GET/PUT /images/{name}/blob`) |
+| arranques simultáneos: 2 anidado, núcleos/2 en hierro | 4 (`KLING_MAX_PARALLEL_BOOT`) |

@@ -34,7 +34,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets guest deploy deploy-mac test clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets guest deploy deploy-mac vz test clean fmt
 
 all: build
 
@@ -141,6 +141,18 @@ deploy: daemon guest
 ## Receta completa en docs/mac-arm64.md.
 deploy-mac:
 	@$(MAKE) deploy GOARCH=arm64 HOST="$(HOST)"
+
+## vz — el VMM de macOS (kling-vz), junto al CLI.
+##
+## Vive en vz/ como módulo Go APARTE (github.com/juan52878911/kindling/vz):
+## necesita cgo y dependencias (Code-Hex/vz, gVisor) que el núcleo no tiene ni
+## quiere tener. Por ser otro módulo, `go test ./...` y `go vet ./...` desde la
+## raíz no entran en vz/; su build.sh compila, firma con el entitlement de
+## virtualización y deja el binario. Solo en macOS.
+vz:
+	@test "$$(uname -s)" = Darwin || { echo "kling-vz only builds on macOS" >&2; exit 1; }
+	@test -x vz/build.sh || { echo "vz/build.sh not found: kling-vz is not in this checkout yet" >&2; exit 1; }
+	cd vz && ./build.sh
 
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##

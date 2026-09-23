@@ -260,8 +260,13 @@ And defaults, so you don't repeat the same options on every `run`:
 kling config set defaults.image min
 kling config set defaults.ttl_seconds 600
 kling config set gateway.idle 5m
+kling config set daemon.vmm vz        # the local daemon's VMM: firecracker (Linux) or vz (macOS)
 kling config show
 ```
+
+`daemon.vmm` is read by the daemon running as that user; empty means the platform's
+(`vz` on macOS, `firecracker` on Linux), and it is validated against the machine it
+runs on. `KLING_VMM` overrides it with a backend name or a binary path.
 
 The file lives at `~/.config/kling/config.json` — on macOS too: `UserConfigDir()` would
 put it under `~/Library/Application Support`, which is right for desktop apps but
@@ -275,7 +280,20 @@ Shell completion ships with the binary: `source <(kling completion bash)` or
 
 ## On a Mac (Apple Silicon)
 
-Firecracker does not run natively on macOS. On **M3 or newer** with macOS 15+ it runs
+**Native (v0.9, macOS 14+):** the daemon runs on the Mac itself with the `vz` backend —
+one `kling-vz` helper per microVM, speaking Firecracker's API on top of
+Virtualization.framework. No root, no Linux VM. Images are built on a Linux arm64 host and
+streamed over with `kling images copy <name> -from ssh://user@host`. Restores cost ~350
+MiB each (no shared golden memory), and there are no image builds, CPU caps or jailer.
+Install, launchd agent and limits: [`docs/mac.md`](docs/mac.md).
+
+```sh
+make install && make vz && brew install e2fsprogs
+kling up -check
+kling images copy min -from ssh://user@linux-arm64-host
+```
+
+**Inside a Linux VM:** Firecracker does not run natively on macOS. On **M3 or newer** with macOS 15+ it runs
 inside an aarch64 Linux VM with nested virtualization — **supported, with limits**: cold
 starts are slower under nested KVM (~16 s per new replica vs ~3 s on native Linux, and
 there are measured levers to bring that down to ~2.5 s), so it's good for local
