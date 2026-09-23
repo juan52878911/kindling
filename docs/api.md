@@ -132,7 +132,7 @@ El techo queda en el snapshot al hacer commit.
 
 | Código | Causa |
 |---|---|
-| `507` | no cabe en memoria, o el host está bajo presión (PSI `some avg10` por encima de `KLING_MAX_MEM_PRESSURE`, 20 % por defecto) |
+| `507` | no cabe en memoria, o el host está bajo presión (PSI `some avg10` por encima de `KLING_MAX_MEM_PRESSURE`, 20 % por defecto; en macOS, `kern.memorystatus_level` por debajo de `KLING_MIN_MEM_LEVEL`, 15 % por defecto) |
 | `503` | queda menos disco que `KLING_MIN_FREE_DISK_MIB` (2 GiB) bajo `$KLING_ROOT`. No es un 507 a propósito: quien recibe un 507 congela para hacer sitio, y congelar escribe en disco |
 | `409` | tope de máquinas del daemon (`KLING_MAX_MACHINES`, 256) |
 
@@ -141,6 +141,12 @@ El techo queda en el snapshot al hacer commit.
 `POST /machines/{ref}/guest` solo llega al puerto 8080 del invitado, salvo los
 que la máquina declare en la etiqueta `kling.ports` (lista separada por comas),
 que un snapshot hereda. Otro puerto es `403`.
+
+Una máquina lleva `ip` y, en macOS, `forwards`: `{"8080": "127.0.0.1:61234", ...}`,
+los puertos de loopback por los que el host llega a cada puerto expuesto del
+invitado (allí todos los invitados comparten IP). Quien hable con un invitado sin
+pasar por el daemon resuelve la dirección con `api.Machine.Addr(puerto)`, que usa
+el reenvío si lo hay y `ip:puerto` si no.
 
 ## Exec y ficheros
 
