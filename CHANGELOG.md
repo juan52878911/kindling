@@ -4,6 +4,39 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.11.0 — sin publicar
+
+### JEV: un clasificador lineal diminuto
+
+`kling jev train|eval|predict|inspect` y los paquetes `pkg/jev` (características,
+formato, inferencia, calibración) y `pkg/jev/train` (entrenador). Go puro, sin
+dependencias ni cgo; corre en local, sin daemon. Diseño en
+[docs/jev.md](docs/jev.md), evaluación en [docs/JEV-EVAL.md](docs/JEV-EVAL.md).
+
+- Características: palabras y bigramas normalizados (minúsculas Unicode, acentos
+  latinos plegados, CJK por carácter), n-gramas de caracteres opcionales y campos
+  estructurados del JSON (`campo=valor`, números por orden de magnitud), con
+  hashing trick con signo sobre FNV-1a + fmix64 (2^18 cubos por defecto).
+- Modelo: regresión logística multinomial o binaria (`-one-vs-rest`), AdaGrad con
+  L2, pesos por clase y parada temprana; cuantizado a int16 con escala por clase
+  (concordancia con el float64: 100 % en la evaluación). Determinista con la
+  semilla, también entre arquitecturas.
+- Cada predicción trae etiqueta, probabilidad calibrada (temperatura), umbral τ de
+  su clase elegido para una precisión objetivo (0,95), decisión `confident` /
+  `escalate` y, si se pide, la evidencia (características por w·x): lo que
+  necesita la cascada JEV → VON.
+- Inferencia entera y sin FMA: mismos bits en amd64 y arm64. 1,5 µs por texto de
+  200 caracteres (6 µs con n-gramas) en un M4, sin reservas, segura en
+  concurrencia.
+- Fichero `.jev`: magia, versión, especificación y su hash, pesos densos o
+  dispersos (1,1 MB para 10 clases), CRC-32C; el cargador acota lecturas y
+  reservas y rechaza ficheros corruptos sin pánico (`FuzzLoad`).
+- Evaluación real con 4 304 commits convencionales de repos locales
+  (`tools/jev-commits`, `scripts/jev-eval.sh`): exactitud 0,64–0,67 frente a 0,55
+  de unas reglas y 0,32 de la clase mayoritaria; pero la precisión prometida por
+  los umbrales cae de 0,95 a 0,77–0,85 con el cambio temporal y a 0,58 entre
+  repos. Opt-in hasta que cada tarea tenga su evaluación.
+
 ## v0.10.0 — 2026-09-23
 
 ### Carpetas compartidas
