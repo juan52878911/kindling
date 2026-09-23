@@ -4,7 +4,7 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
-## Sin publicar — v0.7.0
+## v0.7.0 — 2026-09-23
 
 **Sandboxes para agentes de código.** El núcleo gana lo que necesita un agente para
 ejecutar lo que escribe sin tocar el host: exec en streaming, ficheros y sandboxes de
@@ -70,7 +70,7 @@ usar y tirar. Guía en [`docs/exec-sandbox.md`](docs/exec-sandbox.md).
 - `scripts/90-e2e.sh` prueba exec, ficheros y sandboxes, y compara con los mensajes en
   inglés del CLI.
 
-## Sin publicar — v0.6.0
+## v0.6.0 — 2026-09-23
 
 **El núcleo deja de llevar MCP.** Todo lo de alojar servidores MCP —el puente, el
 gateway, el catálogo, `kling mcp`, `add`, `search`, `connect`, `export`, `memory`,
@@ -114,7 +114,7 @@ como antes, servidos por la extensión.
 - Fuera de `pkg/api` los tipos de MCP (`ToolSpec`, `Link`, `Capabilities`...);
   viven en kindling-mcp.
 
-## v0.5.0 — sin publicar
+## v0.5.0 — 2026-09-23
 
 kindling se separa en dos: **el núcleo de microVMs** y **kindling-mcp**, lo que se
 venía usando para alojar servidores MCP. Esta versión hace la separación dentro del
