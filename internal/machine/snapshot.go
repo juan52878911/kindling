@@ -229,6 +229,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
 	}
+	if err := m.firmar(snap); err != nil {
+		return nil, err
+	}
 	m.priv.EnsureReadable(dir)
 
 	b, _ := json.MarshalIndent(snap, "", "  ")
@@ -497,6 +500,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// microVM en un estado que ya no es el suyo —o un pánico del invitado— sin una
 	// sola señal de la causa. Se falla aquí, claro y pronto, antes de copiar el
 	// overlay y de arrancar el VMM.
+	if err := m.comprobarFirma(snap); err != nil {
+		return nil, err
+	}
 	if err := m.verifyIntegrity(snap, m.snapDir(req.From)); err != nil {
 		return nil, err
 	}
@@ -540,6 +546,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La clave de compartición es el snapshot de origen: todas sus instancias
 	// mapean el MISMO mem.file dorado, así que la segunda y siguientes solo
 	// reservan su fracción divergente. Es aquí donde la densidad se vuelve real.
+	if err := m.admitir(); err != nil {
+		return nil, err
+	}
 	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, snap.MemMiB, req.From, "")
 	if merr != nil {
 		return nil, merr

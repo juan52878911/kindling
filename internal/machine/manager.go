@@ -177,10 +177,15 @@ type Manager struct {
 	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
 	// un temporal de nombre fijo y dos a la vez se lo pisarían.
 	escrituraMu sync.Mutex
-	wake        chan struct{}
-	quit        chan struct{}
-	quitOnce    sync.Once
-	persistWG   sync.WaitGroup
+
+	// Clave de firma de snapshots (firma.go), cargada una vez.
+	firmaOnce  sync.Once
+	firmaClave []byte
+	firmaErr   error
+	wake       chan struct{}
+	quit       chan struct{}
+	quitOnce   sync.Once
+	persistWG  sync.WaitGroup
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -652,6 +657,9 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// y pasen las dos. La reserva se libera al salir —el defer cubre todos los
 	// returns—: en un fallo, la memoria nunca se ocupó; en el éxito, ya la ocupa
 	// el proceso, así que "pendiente" deja de tener sentido.
+	if err := m.admitir(); err != nil {
+		return nil, err
+	}
 	releaseMem, err := m.reserveMemoryMakingRoom(ctx, req.MemMiB, "", "")
 	if err != nil {
 		return nil, err

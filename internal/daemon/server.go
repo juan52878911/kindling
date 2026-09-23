@@ -511,6 +511,16 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	if port == 0 {
 		port = api.GuestPort
 	}
+	// Solo el puerto del agente, salvo que la máquina declare otros. Antes el
+	// proxy llegaba a cualquier puerto del invitado, y con él cualquiera con
+	// acceso al socket alcanzaba servicios internos de la microVM que nadie
+	// había decidido exponer. Los puertos extra se declaran con la etiqueta
+	// kling.ports (lista separada por comas), que un snapshot hereda.
+	if !puertoPermitido(mc, port) {
+		fail(w, http.StatusForbidden, fmt.Errorf("port %d is not exposed by %s: only %d, or those listed in its %s label",
+			port, mc.Name, api.GuestPort, api.LabelPorts))
+		return
+	}
 	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
 	out, code, err := proxyGuest(r.Context(), addr, req)
 	if err != nil {
@@ -623,4 +633,17 @@ func missingBinaries() []string {
 		}
 	}
 	return missing
+}
+
+// puertoPermitido dice si el proxy puede llegar a ese puerto de la máquina.
+func puertoPermitido(mc *api.Machine, port int) bool {
+	if port == api.GuestPort {
+		return true
+	}
+	for _, p := range strings.Split(mc.Labels[api.LabelPorts], ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil && n == port {
+			return true
+		}
+	}
+	return false
 }

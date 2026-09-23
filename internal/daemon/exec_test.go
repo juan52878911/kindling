@@ -158,3 +158,16 @@ func TestExecContraElAgenteDelInvitado(t *testing.T) {
 		t.Fatalf("old agent: %d %v", code, err)
 	}
 }
+
+// El proxy solo llega al puerto del agente, salvo que la máquina declare otros.
+func TestProxySoloAPuertosDeclarados(t *testing.T) {
+	mc := &api.Machine{Name: "m", Labels: map[string]string{api.LabelPorts: "9000, 9001"}}
+	for port, want := range map[int]bool{api.GuestPort: true, 9000: true, 9001: true, 22: false, 9002: false} {
+		if got := puertoPermitido(mc, port); got != want {
+			t.Errorf("puerto %d: %v, quería %v", port, got, want)
+		}
+	}
+	if puertoPermitido(&api.Machine{Name: "sin"}, 22) {
+		t.Error("sin etiqueta solo vale el puerto del agente")
+	}
+}

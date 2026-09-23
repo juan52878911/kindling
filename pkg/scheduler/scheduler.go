@@ -108,6 +108,13 @@ type Scheduler struct {
 	// g.services normales: la siguiente petición reutiliza la instancia caliente, o
 	// —si el segador la congeló por ociosa— paga solo un thaw (~25 ms).
 	KeepWarm int
+	// MaxInflight es cuántas peticiones en vuelo aguanta una instancia antes de
+	// que la siguiente sesión provoque una réplica nueva, aunque aún le quepan
+	// sesiones. 0 = solo cuenta sesiones, como siempre.
+	MaxInflight int
+	// MaxReplicas acota cuántas instancias puede tener un servicio al escalar
+	// por carga. 0 = sin tope (el límite lo pone la memoria del host).
+	MaxReplicas int
 	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
@@ -216,18 +223,52 @@ type sessionRoute struct {
 // pickInstance devuelve una instancia del servicio con hueco de sesión. Despierta
 // la primaria si hace falta, y si todas las instancias (primaria + réplicas) están
 // al tope, crea una réplica nueva.
+// elegirInstancia decide a qué instancia va una sesión nueva. Devuelve la
+// elegida si hay una con hueco de sesión y sin saturar de trabajo; si todas las
+// que tienen hueco están saturadas, devuelve nil y la menos cargada de ellas
+// (libre), por si no se puede escalar. Pura, para poder probarla sin daemon.
+func elegirInstancia(entries []*entry, sesiones func(string) int, maxInflight int) (elegida, libre *entry) {
+	for _, e := range entries {
+		if sesiones(e.machineID) >= e.maxSessions {
+			continue
+		}
+		if maxInflight <= 0 || e.inflight < maxInflight {
+			return e, nil
+		}
+		if libre == nil || e.inflight < libre.inflight {
+			libre = e
+		}
+	}
+	return nil, libre
+}
+
 func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenant) (*entry, error) {
 	if _, err := g.ensure(ctx, service); err != nil {
 		return nil, err
 	}
 	g.mu.Lock()
-	for _, e := range g.entriesLocked(service) {
-		if g.sessionCountLocked(e.machineID) < e.maxSessions {
-			g.mu.Unlock()
-			return e, nil
-		}
-	}
+	elegida, libre := elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
+	replicas := len(g.entriesLocked(service))
 	g.mu.Unlock()
+	if elegida != nil {
+		return elegida, nil
+	}
+
+	// Todas las que tienen hueco están saturadas de trabajo. Contar solo
+	// sesiones dejaba a una réplica con una sesión y veinte llamadas en vuelo
+	// sirviéndolo todo mientras sobraban recursos para otra. Se escala, con
+	// tope, y si no se puede se usa la menos cargada: una sesión atendida lenta
+	// es mejor que una rechazada.
+	if libre != nil {
+		if g.MaxReplicas > 0 && replicas >= g.MaxReplicas {
+			return libre, nil
+		}
+		e, err := g.scaleOut(ctx, service, tnt)
+		if err != nil {
+			return libre, nil
+		}
+		return e, nil
+	}
 	return g.scaleOut(ctx, service, tnt)
 }
 

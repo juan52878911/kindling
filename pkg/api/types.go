@@ -353,6 +353,10 @@ type Snapshot struct {
 	// Ver Manager.verifyIntegrity.
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
+	// Signature es el HMAC-SHA256, con la clave del host, de los hashes y la
+	// política del snapshot. Detecta manipulación y snapshots traídos de otro
+	// host, que los sha256 solos no detectan.
+	Signature string `json:"signature,omitempty"`
 
 	// Annotations son datos opacos que una extensión cuelga del snapshot: el
 	// daemon los guarda en meta.json y los devuelve, sin interpretarlos
@@ -683,6 +687,20 @@ func IsMachineLimit(err error) bool {
 // machineLimitMark marca los errores de tope de máquinas para poder
 // reconocerlos: 409 lo usan más cosas.
 const machineLimitMark = "machine limit"
+
+// StatusDiskFull es la negativa por quedar poco disco en el anfitrión. 503 y no
+// 507: quien recibe un 507 congela instancias para hacer sitio, y congelar
+// escribe en disco justo lo que falta.
+const StatusDiskFull = 503
+
+// IsDiskFull dice si un error es la negativa por disco casi lleno.
+func IsDiskFull(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == StatusDiskFull && strings.Contains(se.Message, diskFullMark)
+}
+
+// diskFullMark marca los errores de disco lleno: 503 lo usan más cosas.
+const diskFullMark = "of disk left under"
 
 // StatusInsufficientMemory es la negativa por falta de memoria en el anfitrión.
 // 507 es "Insufficient Storage", que es lo más cerca que hay en HTTP.
