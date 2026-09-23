@@ -10,8 +10,11 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 | v0.2.x | v0.7.x |
 | v0.1.x | v0.6.x, v0.7.x |
 
-## v0.4.0 — sin publicar
+## v0.4.0 — 2026-09-23
 
+- **El `initialize` de una sesión nueva se buferea con tope** (8 MiB, el de
+  `maxProxyBody`): el invitado es hostil, y una respuesta sin fin llenaba la
+  memoria del gateway. Pasado el tope, 502.
 - **El gateway acuña sus propios ids de sesión.** Hasta ahora el
   `Mcp-Session-Id` que daba el invitado era la clave del mapa de rutas, y se
   pisaba a ciegas: el smoke test sobre el backend nativo de macOS vio a dos

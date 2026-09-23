@@ -319,3 +319,18 @@ func TestAgregadorNoLlevaElIdDeUnaInstanciaAOtra(t *testing.T) {
 		t.Fatalf("B recibió %d initialize, quería 1: %v", inits, rb)
 	}
 }
+
+// Un initialize más grande que el tope no se buferea entero: el invitado es
+// hostil y podría llenar la memoria del gateway.
+func TestGrabadorAcotadoCortaRespuestasEnormes(t *testing.T) {
+	g := &grabadorAcotado{ResponseRecorder: httptest.NewRecorder(), max: 10}
+	if _, err := g.Write([]byte("0123456789")); err != nil || g.excedido {
+		t.Fatalf("hasta el tope tiene que aceptar: err=%v excedido=%v", err, g.excedido)
+	}
+	if _, err := g.Write([]byte("x")); err == nil || !g.excedido {
+		t.Fatal("pasado el tope tiene que cortar y marcarlo")
+	}
+	if g.Body.Len() != 10 {
+		t.Fatalf("buferado %d bytes, quería 10", g.Body.Len())
+	}
+}

@@ -493,10 +493,15 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		if b, berr := r.GetBody(); berr == nil {
 			r.Body = b
 		}
-		rec := httptest.NewRecorder()
+		rec := &grabadorAcotado{ResponseRecorder: httptest.NewRecorder(), max: maxProxyBody}
 		g.Begin(e)
 		e.Proxy().ServeHTTP(rec, r)
 		g.End(e)
+		if rec.excedido {
+			http.Error(w, fmt.Sprintf("the %q guest answered initialize with more than %d bytes", service, maxProxyBody),
+				http.StatusBadGateway)
+			return
+		}
 
 		// ¿El puente rechazó por tope de sesiones? Esa instancia está llena: se crea
 		// otra y se reintenta. Cualquier otra respuesta (incluido otro 400) se
@@ -550,6 +555,24 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 	}
 	http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full or no room on host", service),
 		http.StatusServiceUnavailable)
+}
+
+// grabadorAcotado buferea la respuesta del initialize con tope. El invitado es
+// hostil: sin tope, un initialize que no acaba nunca de escribir llenaba la
+// memoria del gateway, porque esta respuesta se guarda entera antes de
+// reenviarla (hay que ver su id de sesión y su código primero).
+type grabadorAcotado struct {
+	*httptest.ResponseRecorder
+	max      int
+	excedido bool
+}
+
+func (g *grabadorAcotado) Write(b []byte) (int, error) {
+	if g.Body.Len()+len(b) > g.max {
+		g.excedido = true
+		return 0, errors.New("initialize response too large")
+	}
+	return g.ResponseRecorder.Write(b)
 }
 
 func (g *Gateway) newSessionError(w http.ResponseWriter, r *http.Request, service string, err error) {
