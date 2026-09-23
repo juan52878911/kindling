@@ -57,3 +57,7 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 	}
 	return sock, true
 }
+
+// socketDe: en macOS no hay jailer y el socket está siempre en el directorio de
+// la máquina. No se llama a adopt, que lanza ps: reconcile lo usa bajo m.mu.
+func (m *Manager) socketDe(id string, pid int) string { return m.dir(id) + "/fc.sock" }

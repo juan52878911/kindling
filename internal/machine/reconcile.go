@@ -53,7 +53,7 @@ func (m *Manager) reconcile() {
 
 		if pid, alive := live[mc.ID]; alive {
 			// Está viva: se readopta y NO se toca nada suyo.
-			m.socket[mc.ID] = m.dir(mc.ID) + "/fc.sock"
+			m.socket[mc.ID] = m.socketDe(mc.ID, pid)
 			if mc.State != api.StateRunning {
 				log.Printf("reconcile: %s (%s) is still alive (pid %d) even though the state said %q; readopting it",
 					mc.Name, mc.ID[:8], pid, mc.State)

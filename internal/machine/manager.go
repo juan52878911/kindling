@@ -1549,6 +1549,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		pid := live[mc.ID]
 		log.Printf("thaw: %s (%s) was already running (pid %d); re-adopting it instead of starting another",
 			mc.Name, mc.ID[:8], pid)
+		// Con su socket real: si corre en jail, el del chroot (ver socketDe).
+		sock := m.socketDe(mc.ID, pid)
 		m.mu.Lock()
 		if cur := m.byID[mc.ID]; cur != nil {
 			now := time.Now()
