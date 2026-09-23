@@ -15,13 +15,16 @@ package machine
 // de quien la está leyendo es la corrupción de siempre.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -86,32 +89,11 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 		return nil, fmt.Errorf("installation microVM did not start listening: %w", err)
 	}
 
-	body, _ := json.Marshal(map[string]any{"cmd": req.Cmd})
 	runCtx, cancel := context.WithTimeout(ctx, populateTimeout)
 	defer cancel()
-
-	hreq, err := http.NewRequestWithContext(runCtx, http.MethodPost, base+"/exec", bytes.NewReader(body))
+	out, err := ejecutarEnInvitado(runCtx, base, req.Cmd)
 	if err != nil {
 		return nil, err
-	}
-	hreq.Header.Set("Content-Type", "application/json")
-
-	// Sin plazo de cabeceras en el cliente: el invitado no responde hasta que el
-	// comando termina, y una instalación larga no es un invitado colgado. El
-	// límite real es populateTimeout, arriba.
-	cli := &http.Client{}
-	resp, err := cli.Do(hreq)
-	if err != nil {
-		return nil, fmt.Errorf("executing inside the microVM: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var out struct {
-		ExitCode int    `json:"exit_code"`
-		Output   string `json:"output"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("unreadable response from guest: %w", err)
 	}
 
 	// El vaciado a disco se lo pide Remove() al matar, pero aquí se pide antes
@@ -150,4 +132,83 @@ func waitGuest(ctx context.Context, base string, limit time.Duration) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return last
+}
+
+// ejecutarEnInvitado corre cmd dentro de la microVM y devuelve su código y su
+// salida, stdout y stderr mezclados en el orden en que llegaron.
+//
+// Usa /exec/stream, la ruta de los sandboxes, y solo si el agente no la conoce
+// (imágenes anteriores a v0.7) cae a /exec, la de siempre. Así poblar un volumen
+// hereda lo que tiene la de streaming —plazo que mata al grupo, topes de
+// salida— sin dejar de funcionar con imágenes viejas.
+func ejecutarEnInvitado(ctx context.Context, base string, cmd []string) (poblado, error) {
+	body, _ := json.Marshal(api.ExecRequest{Cmd: cmd, TimeoutSeconds: int(populateTimeout / time.Second)})
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec/stream", bytes.NewReader(body))
+	if err != nil {
+		return poblado{}, err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	// Sin plazo de cabeceras: el agente contesta al empezar, pero una
+	// instalación larga no es un invitado colgado. El límite es el contexto.
+	resp, err := (&http.Client{}).Do(hreq)
+	if err != nil {
+		return poblado{}, fmt.Errorf("executing inside the microVM: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ejecutarLegado(ctx, base, cmd)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return poblado{}, fmt.Errorf("guest agent: %s", strings.TrimSpace(string(msg)))
+	}
+
+	var salida bytes.Buffer
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		var ev api.ExecEvent
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			continue
+		}
+		switch {
+		case ev.Error != "":
+			return poblado{}, fmt.Errorf("executing inside the microVM: %s", ev.Error)
+		case ev.Exit != nil:
+			return poblado{ExitCode: *ev.Exit, Output: salida.String()}, nil
+		case len(ev.Data) > 0 && salida.Len() < api.ExecDefaultOutput:
+			salida.Write(ev.Data)
+		}
+	}
+	return poblado{}, fmt.Errorf("the guest stopped answering before the installation finished")
+}
+
+// poblado es el resultado de una ejecución de instalación.
+type poblado struct {
+	ExitCode int
+	Output   string
+}
+
+// ejecutarLegado es la ruta /exec de los agentes anteriores a v0.7: la salida
+// llega entera, mezclada, al final.
+func ejecutarLegado(ctx context.Context, base string, cmd []string) (poblado, error) {
+	body, _ := json.Marshal(map[string]any{"cmd": cmd})
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec", bytes.NewReader(body))
+	if err != nil {
+		return poblado{}, err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{}).Do(hreq)
+	if err != nil {
+		return poblado{}, fmt.Errorf("executing inside the microVM: %w", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		ExitCode int    `json:"exit_code"`
+		Output   string `json:"output"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
+		return poblado{}, fmt.Errorf("unreadable response from guest: %w", err)
+	}
+	return poblado{ExitCode: out.ExitCode, Output: out.Output}, nil
 }

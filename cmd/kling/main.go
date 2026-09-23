@@ -61,12 +61,15 @@ MACHINES
       [-service NAME] [-label k=v]                 grouping by service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of freezing
+      [-mem-max MiB]                               ceiling for kling resize
   ps [-a] [-q] [-json]                             lists the machines
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
   stop <ref>                                       terminates the machine
   rm <ref>                                         removes machine and snapshot
+  resize <ref> -mem MiB                            changes its memory without restarting,
+                                                   up to the -mem-max it was started with
   squeeze <ref>...                                 balloon: returns the guest's
                                                    free memory to the host
   mmds <ref> [-f store.json]                       injects a session secret via
@@ -186,6 +189,8 @@ func main() {
 		err = cmdLifecycle(cmd, args)
 	case "squeeze":
 		err = cmdSqueeze(args)
+	case "resize":
+		err = cmdResize(args)
 	case "mmds":
 		err = cmdMMDS(args)
 	case "commit":
@@ -352,6 +357,7 @@ func cmdRun(args []string) error {
 	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
 	mem := fs.Int("mem", 0, "memory in MiB (default: 256)")
+	memMax := fs.Int("mem-max", 0, "ceiling for resizing its memory later without restarting (kling resize)")
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	ttl := fs.Int("ttl", 0, "seconds until it freezes itself (0 = never)")
@@ -387,6 +393,7 @@ func cmdRun(args []string) error {
 		// el valor incorporado.
 		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		MemMiB:       config.Or(*mem, cfg.Defaults.MemMiB, 256),
+		MemMaxMiB:    *memMax,
 		Egress:       config.Or(*egress, cfg.Defaults.Egress, "none"),
 		AllowDomains: splitDomains(*allow),
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
@@ -1022,6 +1029,13 @@ func cmdInfo(args []string) error {
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))
 	}
+	if i.EncryptedAtRest != nil {
+		if *i.EncryptedAtRest {
+			fmt.Printf("at rest:      encrypted (dm-crypt)\n")
+		} else {
+			fmt.Printf("at rest:      NOT encrypted: snapshots hold guest memory in clear; see docs/cifrado.md\n")
+		}
+	}
 	return nil
 }
 
@@ -1037,3 +1051,25 @@ var movedToExtension = func() map[string]string {
 	}
 	return m
 }()
+
+// cmdResize es `kling resize <ref> -mem N`: sube o baja la memoria de una
+// máquina sin reiniciarla, dentro del techo con el que arrancó.
+func cmdResize(args []string) error {
+	fs := flag.NewFlagSet("resize", flag.ExitOnError)
+	host := hostFlag(fs)
+	mem := fs.Int("mem", 0, "new memory in MiB")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *mem <= 0 {
+		return fmt.Errorf("usage: kling resize <machine> -mem MiB")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	mc, err := api.NewClient(hostOf(*host)).Resize(ctx, fs.Arg(0), *mem)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s  %d MiB (ceiling %d)\n", mc.Name, mc.MemMiB, mc.MemMaxMiB)
+	return nil
+}

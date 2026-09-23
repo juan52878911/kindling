@@ -184,8 +184,17 @@ for m in $($KLING ps -a 2>/dev/null | awk -v p="$PREFIJO-p" '$0 ~ p {print $1}')
 done
 
 # ── 5. congelar y despertar en masa ──────────────────────────────────────────
-step "5. Congelar y despertar todo lo vivo"
-ids=($($KLING ps -q 2>/dev/null))
+# Con máquinas propias: las de la ráfaga pueden haber vencido su TTL si la fase
+# de presión tardó (en un host anidado tarda), y entonces esta fase se quedaba
+# sin nada que congelar y fallaba por el reloj, no por el producto.
+K="${K:-12}"
+step "5. Congelar y despertar $K microVMs"
+for i in $(seq 1 "$K"); do
+  $KLING sandbox create -from "$TPL" -name "$PREFIJO-c$i" -ttl 30m -q >/dev/null 2>&1 &
+  while [ "$(jobs -r | wc -l)" -ge "$PAR" ]; do wait -n; done
+done
+wait
+ids=($($KLING ps -a 2>/dev/null | awk -v p="$PREFIJO-c" '$0 ~ p && /running/ {print $1}'))
 t0=$(date +%s%3N)
 for id in "${ids[@]}"; do $KLING freeze "$id" >/dev/null 2>&1 & done; wait
 t1=$(date +%s%3N)
@@ -197,26 +206,30 @@ for id in "${ids[@]}"; do
 done
 wait
 med "latencia de thaw" "$(cat "$tmp3"/* 2>/dev/null | percentil)"
-vivas=$($KLING ps -q 2>/dev/null | wc -l | tr -d ' ')
-[ "$vivas" -gt 0 ] && ok "las microVMs volvieron del snapshot" || bad "no volvió ninguna"
+vueltas=$(ls "$tmp3" 2>/dev/null | wc -l | tr -d ' ')
+[ "${#ids[@]}" -gt 0 ] && [ "$vueltas" = "${#ids[@]}" ] && ok "las $vueltas microVMs volvieron del snapshot" \
+  || bad "volvieron $vueltas de ${#ids[@]}"
 
 # ── 6. matar un VMM por debajo: el daemon tiene que darse cuenta ─────────────
 step "6. Matar un firecracker a mano (lo que pasa cuando el kernel invitado entra en pánico)"
-victima=$($KLING ps -q 2>/dev/null | head -1)
-if [ -n "$victima" ]; then
-  pid=$(pgrep -f "$victima" | head -1)
+if $KLING run -image "$IMG" -name "$PREFIJO-victima" >/dev/null 2>&1; then
+  # El id completo sale del JSON: `ps` lo recorta, y con jailer el proceso se
+  # llama /firecracker y solo lleva el id entero en --id.
+  victima=$($KLING ps -a -json 2>/dev/null | python3 -c 'import json,sys; print(next((m["id"] for m in json.load(sys.stdin) if m["name"].endswith("-victima")), ""))')
+  pid=$(pgrep -f -- "--id $victima" | head -1)
   if [ -n "$pid" ]; then
     sudo kill -9 "$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
     sleep 12   # el vigilante pasa cada 10 s
-    # El estado se lee del JSON: las columnas de `ps` cambian de sitio.
-    estado=$($KLING ps -a -json 2>/dev/null | python3 -c 'import json,sys; v=sys.argv[1]; print(next((m["state"] for m in json.load(sys.stdin) if m["id"].startswith(v)), ""))' "$victima")
+    estado=$($KLING ps -a -json 2>/dev/null | python3 -c 'import json,sys; v=sys.argv[1]; print(next((m["state"] for m in json.load(sys.stdin) if m["id"]==v), ""))' "$victima")
     case "$estado" in
       failed|"") ok "el daemon marcó la máquina muerta (estado: ${estado:-recogida})" ;;
       *) bad "sigue diciendo que está $estado sobre un proceso que ya no existe" ;;
     esac
   else
-    med "matar un VMM" "no encontré su proceso; me lo salto"
+    bad "no encontré el proceso de la víctima ($victima)"
   fi
+else
+  bad "no pude arrancar la víctima"
 fi
 
 # ── 7. lo que queda al final ─────────────────────────────────────────────────

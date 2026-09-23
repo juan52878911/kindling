@@ -4,6 +4,59 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## Sin publicar — v0.8.0
+
+Cierra lo que quedaba abierto de estabilidad, elasticidad y seguridad tras v0.7.
+
+### Estabilidad
+
+- **Un volcado de congelación a medias ya no se da por bueno.** Firecracker
+  escribe `snap.file` y `mem.file` sin temporal; si el daemon moría a mitad, al
+  volver la máquina figuraba congelada y el thaw cargaba un volcado truncado.
+  Ahora cada congelación deja una marca al empezar y un sello al terminar, con el
+  sha256 del estado y el tamaño de la memoria, y reconcile y thaw lo exigen.
+- **Los restos de un commit interrumpido se pueden borrar**, y el vigilante los
+  recoge solo; antes bloqueaban hasta `commit -replace` del mismo nombre.
+- **Borrar directorios huérfanos ya no congela el daemon**: bajo el cerrojo solo
+  se mueven a una papelera, y el borrado de GiB se hace fuera.
+- **Congelar dentro de jailer reanuda la máquina** si falla recuperar el volcado,
+  en vez de dejarla en pausa figurando como en marcha.
+- **Una máquina recién creada no se pierde si el daemon muere justo después**:
+  su registro se escribe a disco antes de lanzar su VMM, y las escrituras de
+  estado se serializan con una generación que descarta fotos viejas.
+
+### Elasticidad
+
+- **Memoria elástica**: `kling run -mem-max N` arranca con un techo y el globo
+  retiene la diferencia; `kling resize <ref> -mem M` la sube o la baja en caliente.
+- **Admisión por presión real**: con PSI por encima del 20 %, 507 aunque
+  MemAvailable parezca holgado; con poco disco, 503 (y no 507, para que nadie
+  congele para "hacer sitio" escribiendo más en disco).
+- **Escalado por carga** en `pkg/scheduler` (`MaxInflight`, `MaxReplicas`): una
+  instancia saturada de llamadas en vuelo ya no recibe sesiones nuevas aunque le
+  quepan.
+- **Puerta de arranque según el host**: 2 arranques a la vez en un host anidado,
+  la mitad de los núcleos (hasta 8) en hierro desnudo.
+
+### Seguridad
+
+- **Snapshots firmados** con una clave del host (HMAC-SHA256): detecta
+  manipulación y snapshots traídos de otro host. `KLING_REQUIRE_SIGNED=1` rechaza
+  los anteriores, que no llevan firma.
+- **El proxy al invitado solo llega al puerto del agente** salvo los declarados
+  en la etiqueta `kling.ports`.
+- **Jailer por defecto cuando está instalado**; `KLING_JAILER=0` lo apaga. Activarlo
+  destapó un fallo que llevaba ahí desde que existe el modo jailer: descongelar una
+  máquina de imagen por capas enlazaba en la jaula una ruta monolítica que no existe.
+  Corregido, y el e2e ahora congela y despierta una imagen por capas.
+- `kling info` dice si `$KLING_ROOT` está cifrado en reposo; receta en
+  [`docs/cifrado.md`](docs/cifrado.md).
+
+### Otros
+
+- `kling volume populate` usa la ruta de ejecución en streaming, con la antigua
+  como respaldo para imágenes anteriores a v0.7.
+
 ## v0.7.0 — 2026-09-23
 
 **Sandboxes para agentes de código.** El núcleo gana lo que necesita un agente para

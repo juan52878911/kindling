@@ -139,24 +139,54 @@ daemon se niega a crear un sandbox desde él. El daemon no se fía del flujo del
 agente: recorta la salida a los topes y valida cada evento. Los sandboxes nacen sin
 red y se destruyen al vencer su TTL.
 
+### 9. Snapshots firmados
+
+Cada snapshot dorado lleva un HMAC-SHA256, con una clave que solo existe en su
+host y solo lee root (`$KLING_ROOT/secrets/snapshot.key`), sobre los hashes de sus
+ficheros y la política con la que nacen las instancias: exec, red, dominios
+permitidos y volúmenes. Los sha256 solos detectaban corrupción; la firma detecta
+además manipulación —cambiar el overlay y su hash a la vez, o encender exec en el
+`meta.json`— y snapshots traídos de otro host. Los anteriores a esto no llevan
+firma y se aceptan, salvo con `KLING_REQUIRE_SIGNED=1`.
+
+### 10. El proxy al invitado solo llega al puerto del agente
+
+`POST /machines/{ref}/guest` solo alcanza el puerto 8080 del invitado, salvo los
+que la máquina declare en su etiqueta `kling.ports`. Antes llegaba a cualquier
+puerto, y con él a servicios internos de la microVM que nadie había decidido
+exponer.
+
+### 11. Jailer por defecto cuando está instalado
+
+Si el binario `jailer` está y el daemon corre como root, las microVMs corren
+dentro de él sin configurar nada; `KLING_JAILER=0` lo apaga. Antes había que
+pedirlo, y la barrera más fuerte quedaba apagada justo donde nadie había leído
+esto.
+
+### 12. Admisión por disco y por presión de memoria
+
+El daemon rechaza máquinas nuevas cuando queda poco disco bajo `$KLING_ROOT` o
+cuando el host está bajo presión de memoria según PSI, antes de arrancarlas. Un
+invitado no puede llenar el disco del host a base de que se creen máquinas.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
 
-- **Sin chroot por defecto.** El VMM no tiene privilegios, pero sí ve el sistema de
-  ficheros del host con los permisos de su usuario. `jailer` (chroot + cgroups) existe
-  como **opt-in** en arranque y restauración; no es el camino por defecto.
-- **Cuota de disco blanda.** Cada overlay son 512 MiB lógicos; un invitado puede llenarlos.
-  Con muchas máquinas eso llena el host.
-- **Sin cifrado en reposo** de snapshots ni overlays. Quien tenga el disco del host tiene la
-  memoria de las herramientas.
+- **Jailer solo si está instalado.** Desde v0.8 se usa por defecto cuando el binario
+  existe (ver 11); en un host sin él, el VMM ve el sistema de ficheros del host con los
+  permisos de su usuario.
+- **Cuota de disco por overlay, no por host.** Cada overlay son 512 MiB lógicos; la
+  admisión por disco (ver 12) impide crear máquinas nuevas con el disco casi lleno, pero
+  las que ya corren pueden seguir llenando los suyos.
+- **El cifrado en reposo es cosa del disco, no de kindling.** `kling info` dice si
+  `$KLING_ROOT` está sobre dm-crypt; si no, quien tenga el disco tiene la memoria de las
+  microVMs. Receta en `docs/cifrado.md`.
 - **El daemon confía en quien alcanza su socket.** No hay autorización por operación: si
   entras, puedes con todo.
-- **Los snapshots dorados no van firmados.** El checksum detecta corrupción, no
-  manipulación: quien pueda escribir en `snapshots/` sigue decidiendo qué se ejecuta.
-- **El proxy al invitado no filtra el destino.** `POST /machines/{ref}/guest` acepta
-  cualquier puerto y cualquier ruta de la máquina indicada. No es una escalada —quien llega
-  al socket ya manda— pero conviene saberlo si algún día el socket se comparte.
+- **El proxy al invitado no filtra la ruta.** Solo llega a los puertos permitidos (ver
+  10), pero dentro de ellos a cualquier ruta. No es una escalada —quien llega al socket
+  ya manda— pero conviene saberlo si algún día el socket se comparte.
 - **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
   en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
   (`-listen 0.0.0.0:9100`) y avisa.

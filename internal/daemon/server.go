@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -81,6 +81,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/freeze", s.handleFreeze)
 	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
 	mux.HandleFunc("POST /machines/{ref}/squeeze", s.handleSqueeze)
+	mux.HandleFunc("POST /machines/{ref}/resize", s.handleResize)
 	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
@@ -281,6 +282,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Machines:     s.mgr.Count(),
 		Capabilities: Capabilities,
 	}
+	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
+		info.EncryptedAtRest = &cifrado
+	}
 	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
 		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
 			info.Firecrack = string(line)
@@ -333,6 +337,27 @@ func (s *Server) handleThaw(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Thaw(r.Context(), r.PathValue("ref"))
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
+	var req api.ResizeRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	mc, err := s.mgr.Resize(r.Context(), r.PathValue("ref"), req.MemMiB)
+	if err != nil {
+		code := http.StatusBadRequest
+		switch {
+		case errors.Is(err, machine.ErrNoMachine):
+			code = http.StatusNotFound
+		case errors.Is(err, machine.ErrNotRunning):
+			code = http.StatusConflict
+		}
+		fail(w, code, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
@@ -511,6 +536,16 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	if port == 0 {
 		port = api.GuestPort
 	}
+	// Solo el puerto del agente, salvo que la máquina declare otros. Antes el
+	// proxy llegaba a cualquier puerto del invitado, y con él cualquiera con
+	// acceso al socket alcanzaba servicios internos de la microVM que nadie
+	// había decidido exponer. Los puertos extra se declaran con la etiqueta
+	// kling.ports (lista separada por comas), que un snapshot hereda.
+	if !puertoPermitido(mc, port) {
+		fail(w, http.StatusForbidden, fmt.Errorf("port %d is not exposed by %s: only %d, or those listed in its %s label",
+			port, mc.Name, api.GuestPort, api.LabelPorts))
+		return
+	}
 	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
 	out, code, err := proxyGuest(r.Context(), addr, req)
 	if err != nil {
@@ -623,4 +658,17 @@ func missingBinaries() []string {
 		}
 	}
 	return missing
+}
+
+// puertoPermitido dice si el proxy puede llegar a ese puerto de la máquina.
+func puertoPermitido(mc *api.Machine, port int) bool {
+	if port == api.GuestPort {
+		return true
+	}
+	for _, p := range strings.Split(mc.Labels[api.LabelPorts], ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil && n == port {
+			return true
+		}
+	}
+	return false
 }

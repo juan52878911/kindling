@@ -21,6 +21,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `store` | v0.5 | `GET /store/{ns}`, `GET/PUT/DELETE /store/{ns}/{key}` |
 | `builders` | v0.5 | `POST /images` con `builder` y `spec` |
 | `image-files` | v0.5 | `GET/PUT /images/{name}/files` |
+| `resize` | v0.8 | `POST /machines/{ref}/resize`, `mem_max_mib` en `POST /machines` |
 | `shell` | v0.7 | `POST /machines/{ref}/shell` (protocolo `kling-shell/1`) |
 | `exec` | v0.7 | `POST /machines/{ref}/exec`, `GET/PUT/DELETE /machines/{ref}/files`, `allow_exec` y `on_ttl` en `POST /machines` |
 | `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
@@ -103,6 +104,30 @@ permisos `0600` porque el spec puede llevar secretos.
 | `POST /volumes` | crea (`name`, `size_mib`) |
 | `POST /volumes/{name}/populate` | instala paquetes dentro con una microVM de un solo uso |
 | `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no) |
+
+### `POST /machines/{ref}/resize`
+
+`{"mem_mib": 1024}` cambia la memoria de una máquina en marcha sin reiniciarla,
+entre 128 MiB y el techo con el que arrancó (`mem_max_mib` en `POST /machines`).
+La máquina arranca con el techo y el globo retiene la diferencia; subir es
+desinflarlo y bajar, inflarlo. Una máquina sin techo tiene la memoria fija (400).
+El techo queda en el snapshot al hacer commit.
+
+### Admisión
+
+`POST /machines` y `POST /sandboxes` rechazan antes de arrancar:
+
+| Código | Causa |
+|---|---|
+| `507` | no cabe en memoria, o el host está bajo presión (PSI `some avg10` por encima de `KLING_MAX_MEM_PRESSURE`, 20 % por defecto) |
+| `503` | queda menos disco que `KLING_MIN_FREE_DISK_MIB` (2 GiB) bajo `$KLING_ROOT`. No es un 507 a propósito: quien recibe un 507 congela para hacer sitio, y congelar escribe en disco |
+| `409` | tope de máquinas del daemon (`KLING_MAX_MACHINES`, 256) |
+
+### El proxy y los puertos
+
+`POST /machines/{ref}/guest` solo llega al puerto 8080 del invitado, salvo los
+que la máquina declare en la etiqueta `kling.ports` (lista separada por comas),
+que un snapshot hereda. Otro puerto es `403`.
 
 ## Exec y ficheros
 

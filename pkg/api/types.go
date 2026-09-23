@@ -25,15 +25,18 @@ const (
 
 // Machine es una microVM gestionada por el daemon.
 type Machine struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Image    string `json:"image"`
-	State    State  `json:"state"`
-	VCPUs    int    `json:"vcpus"`
-	MemMiB   int    `json:"mem_mib"`
-	PID      int    `json:"pid,omitempty"`
-	LastErr  string `json:"last_error,omitempty"`
-	SnapSize int64  `json:"snapshot_bytes,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Image   string `json:"image"`
+	State   State  `json:"state"`
+	VCPUs   int    `json:"vcpus"`
+	MemMiB  int    `json:"mem_mib"`
+	PID     int    `json:"pid,omitempty"`
+	LastErr string `json:"last_error,omitempty"`
+	// MemMaxMiB es el techo al que se puede subir MemMiB en caliente (resize).
+	// 0 = sin elasticidad: MemMiB es fija, como siempre.
+	MemMaxMiB int   `json:"mem_max_mib,omitempty"`
+	SnapSize  int64 `json:"snapshot_bytes,omitempty"`
 
 	// DiskBytes es la ocupación REAL en disco de esta máquina: bloques asignados,
 	// no tamaño lógico. Con overlays dispersos la diferencia es de dos órdenes de
@@ -108,6 +111,10 @@ type RunRequest struct {
 	From   string `json:"from,omitempty"`
 	VCPUs  int    `json:"vcpus,omitempty"`
 	MemMiB int    `json:"mem_mib,omitempty"`
+	// MemMaxMiB arranca la máquina con este techo y el globo reteniendo la
+	// diferencia con MemMiB, para poder subirla o bajarla sin reiniciar
+	// (POST /machines/{ref}/resize). 0 = memoria fija.
+	MemMaxMiB int `json:"mem_max_mib,omitempty"`
 
 	// Egress: "none" (por defecto), "internet" o "allowlist". Nunca hay acceso a
 	// redes privadas: el código de dentro se considera hostil.
@@ -287,9 +294,10 @@ type Snapshot struct {
 	CreatedAt time.Time `json:"created_at"`
 	VCPUs     int       `json:"vcpus"`
 	MemMiB    int       `json:"mem_mib"`
-	MemBytes  int64     `json:"mem_bytes"`  // ocupación real del fichero de memoria
-	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
-	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
+	MemMaxMiB int       `json:"mem_max_mib,omitempty"` // techo de resize; ver Machine.MemMaxMiB
+	MemBytes  int64     `json:"mem_bytes"`             // ocupación real del fichero de memoria
+	DiskBytes int64     `json:"disk_bytes"`            // total del snapshot en disco
+	Instances int       `json:"instances"`             // máquinas vivas restauradas de aquí
 
 	// Volumes son los volúmenes que tenía la plantilla, en el orden de los
 	// discos. Se recuerdan para que despertar una instancia no exija repetirlos:
@@ -353,6 +361,10 @@ type Snapshot struct {
 	// Ver Manager.verifyIntegrity.
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
+	// Signature es el HMAC-SHA256, con la clave del host, de los hashes y la
+	// política del snapshot. Detecta manipulación y snapshots traídos de otro
+	// host, que los sha256 solos no detectan.
+	Signature string `json:"signature,omitempty"`
 
 	// Annotations son datos opacos que una extensión cuelga del snapshot: el
 	// daemon los guarda en meta.json y los devuelve, sin interpretarlos
@@ -393,6 +405,7 @@ const (
 	EvAnnotated = "snapshot.annotated"
 	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
+	EvResized   = "machine.resized"
 )
 
 // ProcStat es la foto de recursos de UNA microVM.
@@ -433,6 +446,9 @@ type Info struct {
 	// "annotations", "store"). Un daemon anterior no la envía: vacía significa
 	// "solo el API de siempre".
 	Capabilities []string `json:"capabilities,omitempty"`
+	// EncryptedAtRest dice si Root está sobre un disco cifrado (dm-crypt). nil =
+	// no se sabe (daemon anterior, u otro sistema). Ver docs/cifrado.md.
+	EncryptedAtRest *bool `json:"encrypted_at_rest,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.
@@ -658,6 +674,12 @@ type StatusError struct {
 
 func (e *StatusError) Error() string { return e.Message }
 
+// ResizeRequest cambia la memoria de una máquina en caliente, dentro de su
+// techo (MemMaxMiB).
+type ResizeRequest struct {
+	MemMiB int `json:"mem_mib"`
+}
+
 // SqueezeResult informa de un apretón de globo: cuánta RAM se devolvió al host
 // sin congelar la microVM. ReclaimedMiB y RSSMiB son 0 en un host sin /proc
 // (macOS de desarrollo); GuestFreeMiB sale de las estadísticas del propio globo.
@@ -683,6 +705,20 @@ func IsMachineLimit(err error) bool {
 // machineLimitMark marca los errores de tope de máquinas para poder
 // reconocerlos: 409 lo usan más cosas.
 const machineLimitMark = "machine limit"
+
+// StatusDiskFull es la negativa por quedar poco disco en el anfitrión. 503 y no
+// 507: quien recibe un 507 congela instancias para hacer sitio, y congelar
+// escribe en disco justo lo que falta.
+const StatusDiskFull = 503
+
+// IsDiskFull dice si un error es la negativa por disco casi lleno.
+func IsDiskFull(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == StatusDiskFull && strings.Contains(se.Message, diskFullMark)
+}
+
+// diskFullMark marca los errores de disco lleno: 503 lo usan más cosas.
+const diskFullMark = "of disk left under"
 
 // StatusInsufficientMemory es la negativa por falta de memoria en el anfitrión.
 // 507 es "Insufficient Storage", que es lo más cerca que hay en HTTP.

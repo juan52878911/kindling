@@ -262,6 +262,18 @@ if $KLING sandbox create -image "$IMGVOL" -name "$SB" -ttl 5m -q >/dev/null 2>&1
     echo "  (sin util-linux script: me salto la shell interactiva)"
   fi
 
+  # Congelar y despertar un sandbox sobre una imagen POR CAPAS. El ciclo de
+  # vida de arriba usa `min`, que es monolítica, y con jailer activo el thaw de
+  # una imagen por capas fallaba enlazando una ruta que no existe. Un exec sobre
+  # una máquina congelada la despierta sola.
+  if $KLING freeze "$SB" >/dev/null 2>&1; then
+    out=$($KLING exec "$SB" -- echo despierto 2>&1)
+    [ "$out" = "despierto" ] && ok "exec despierta un sandbox congelado (imagen por capas)" \
+      || bad "thaw de una imagen por capas" "despierto" "$out"
+  else
+    bad "freeze de un sandbox" "congelado" "falló"
+  fi
+
   tmp=$(mktemp); echo "print(6*7)" > "$tmp"
   if $KLING cp "$tmp" "$SB:/tmp/e2e.py" >/dev/null 2>&1; then
     out=$($KLING exec "$SB" -- python3 /tmp/e2e.py 2>&1)

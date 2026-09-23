@@ -73,3 +73,32 @@ func TestScaleOutBookkeeping(t *testing.T) {
 	// Quitar algo que no existe no debe entrar en pánico.
 	g.removeEntryLocked("svc", "fantasma")
 }
+
+// Escalar por carga: una instancia con hueco de sesión pero saturada de llamadas
+// en vuelo ya no se lleva la sesión nueva; se pide una réplica, y si no se puede,
+// se usa la menos cargada.
+func TestElegirInstanciaPorCarga(t *testing.T) {
+	sinSesiones := func(string) int { return 0 }
+	a := &entry{machineID: "a", maxSessions: 8, inflight: 5}
+	b := &entry{machineID: "b", maxSessions: 8, inflight: 2}
+
+	// Sin umbral, como siempre: la primera con hueco.
+	if e, _ := elegirInstancia([]*entry{a, b}, sinSesiones, 0); e != a {
+		t.Fatalf("sin umbral eligió %v", e)
+	}
+	// Con umbral 4: a está saturada, b no.
+	if e, _ := elegirInstancia([]*entry{a, b}, sinSesiones, 4); e != b {
+		t.Fatalf("con umbral eligió %v, quería b", e)
+	}
+	// Las dos saturadas: ninguna elegida, y la menos cargada como reserva.
+	b.inflight = 4
+	e, libre := elegirInstancia([]*entry{a, b}, sinSesiones, 4)
+	if e != nil || libre != b {
+		t.Fatalf("elegida %v, reserva %v; quería nil y b", e, libre)
+	}
+	// Sin hueco de sesión no cuenta ni como reserva.
+	llenas := func(string) int { return 8 }
+	if e, libre := elegirInstancia([]*entry{a, b}, llenas, 4); e != nil || libre != nil {
+		t.Fatalf("sin sesiones libres: %v, %v", e, libre)
+	}
+}

@@ -51,6 +51,10 @@ const (
 	KindSandbox = "sandbox"
 )
 
+// LabelPorts lista los puertos del invitado, además de GuestPort, a los que
+// puede llegar el proxy (POST /machines/{ref}/guest). Separados por comas.
+const LabelPorts = "kling.ports"
+
 // ExecRequest es un comando para ejecutar dentro de la microVM. Cmd es argv, sin
 // shell: quien quiera tuberías pasa ["sh", "-c", "..."].
 type ExecRequest struct {

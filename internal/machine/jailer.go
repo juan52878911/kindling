@@ -26,13 +26,42 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 
 	knet "github.com/juan52878911/kindling/internal/net"
 )
 
 // jailerEnabled indica si se restaura dentro de un jail. Se lee una vez.
-func jailerEnabled() bool { return os.Getenv("KLING_JAILER") == "1" }
+// jailerEnabled dice si las microVMs corren dentro de jailer (chroot, espacio de
+// nombres de montaje y usuario sin privilegios propios de Firecracker).
+//
+// KLING_JAILER=1 lo fuerza y KLING_JAILER=0 lo apaga. Sin configurar, se usa si
+// el binario está: antes era opcional por defecto, y eso dejaba la barrera más
+// fuerte apagada justo en las instalaciones donde nadie se había leído
+// SECURITY.md. Se mira una vez por proceso.
+func jailerEnabled() bool {
+	switch os.Getenv("KLING_JAILER") {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	jailerAutoOnce.Do(func() {
+		bin := os.Getenv("KLING_JAILER_BIN")
+		if bin == "" {
+			bin = "jailer"
+		}
+		_, err := exec.LookPath(bin)
+		jailerAuto = err == nil && os.Geteuid() == 0
+	})
+	return jailerAuto
+}
+
+var (
+	jailerAutoOnce sync.Once
+	jailerAuto     bool
+)
 
 // jailerBin es el binario de jailer. Junto a firecracker en las instalaciones
 // que lo traen.
