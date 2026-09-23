@@ -107,8 +107,9 @@ func validarResync(req api.GuestResync) error {
 // controlPaths son las rutas del agente que solo debe usar el host (y todo lo
 // que cuelga de ellas). Un proxy que reenvía peticiones de terceros al puerto
 // del agente —el gateway MCP— las tiene que cortar: /resync mueve el reloj,
-// /volume/release desmonta los volúmenes por debajo del servidor, /exec ejecuta.
-var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns"}
+// /volume/release desmonta los volúmenes por debajo del servidor, /exec ejecuta,
+// /share conecta una carpeta del host.
+var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns", "/share"}
 
 // IsControlPath dice si p (una ruta ya limpia, con path.Clean) es una ruta de
 // control del agente y no algo que un cliente del servicio deba alcanzar.

@@ -240,17 +240,25 @@ func sandboxCreate(args []string) error {
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core")
 	var volumes volumeFlag
 	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
+	var shares shareFlag
+	fs.Var(&shares, "share", shareUsage)
 	quiet := fs.Bool("q", false, "print only the id")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
+	endpoint := hostOf(*host)
+	client := api.NewClient(endpoint)
+	start := time.Now()
+	shareSpecs, err := prepareShares(ctx, client, endpoint, shares)
+	if err != nil {
+		return err
+	}
 	req := api.SandboxRequest{Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
 		TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Egress: *egress, AllowDomains: splitDomains(*allow),
-		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes)}
-	start := time.Now()
-	mc, err := api.NewClient(hostOf(*host)).CreateSandbox(ctx, req)
+		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes), Shares: shareSpecs}
+	mc, err := client.CreateSandbox(ctx, req)
 	if err != nil {
 		return err
 	}

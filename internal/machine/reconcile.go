@@ -382,6 +382,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 			// y eso es peor que caerse.
 			panico.Contener("machine.watch", func() {
 				m.sweep()
+				// Las carpetas vivas de las máquinas que corren y no tienen
+				// conexión (tras reiniciar el daemon, sobre todo).
+				m.ensureShares()
+				m.gcUploads()
 				m.expireTTL(ctx)
 				// Recoger los cadáveres: una failed conserva su motivo un tiempo
 				// para poder diagnosticarla, y después se recoge sola. Sin esto se
@@ -481,6 +485,9 @@ func (m *Manager) sweep() {
 
 // Watch lanza el vigilante en segundo plano.
 func (m *Manager) Watch(ctx context.Context, every time.Duration) {
+	// Las máquinas readoptadas al arrancar recuperan sus carpetas vivas ya, no
+	// a la primera vuelta del vigilante.
+	go m.ensureShares()
 	go m.watch(ctx, every)
 }
 

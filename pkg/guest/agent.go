@@ -15,6 +15,7 @@
 //	POST /volume/sync        vacía la caché del invitado a los volúmenes
 //	POST /volume/release     desmonta los volúmenes (antes de congelar)
 //	POST /volume/acquire     los vuelve a montar (después de restaurar)
+//	POST /share/attach       carpeta compartida en vivo (Upgrade: kling-share/1)
 //	POST /exec               solo si el kernel arrancó con kling.exec=1
 //	POST /exec/stream        ídem, en streaming (sandboxes)
 //	POST /exec/pty           ídem, con pseudoterminal: la shell interactiva
@@ -28,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Agent es el estado del agente de invitado de este proceso.
@@ -109,6 +111,11 @@ func (a *Agent) Register(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// /share/attach la abre el daemon para cada carpeta compartida en vivo
+	// (docs/compartir.md). No depende de kling.exec: montar una carpeta no da
+	// a nadie una forma de ejecutar nada dentro.
+	mux.HandleFunc(share.AttachPath, shareState.AttachHandler())
+
 	if ExecEnabled() {
 		mux.HandleFunc("/exec", ExecHandler(a.Env))
 		mux.HandleFunc("/exec/stream", StreamExecHandler(a.Env))
@@ -122,5 +129,6 @@ func (a *Agent) Register(mux *http.ServeMux) {
 // escribiendo en ellos: desmontar por debajo de un proceso vivo pierde sus
 // escrituras.
 func (a *Agent) Close() {
+	shareState.Close()
 	a.Volumes.Release()
 }

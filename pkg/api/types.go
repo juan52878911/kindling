@@ -90,6 +90,10 @@ type Machine struct {
 	// Volumes son los volúmenes montados, en el orden en que van los discos.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
 
+	// Shares son las carpetas del host compartidas con la máquina. La posición
+	// de una carpeta viva es su tag (ver docs/compartir.md).
+	Shares []ShareAttachment `json:"shares,omitempty"`
+
 	// Labels agrupa máquinas. La clave "service" es convencional: identifica de
 	// qué servidor MCP es instancia esta microVM, y es por donde agrupan tanto
 	// `topo` como el HTML exportado.
@@ -142,6 +146,11 @@ type RunRequest struct {
 
 	// Volumes son los volúmenes a montar, en orden. Es la forma completa.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
+
+	// Shares son carpetas del host a meter en la máquina: una copia de solo
+	// lectura (modo copy, subida antes con POST /shares/uploads) o el directorio
+	// vivo (ro, rw). Solo al arrancar en frío: con From se rechaza.
+	Shares []ShareSpec `json:"shares,omitempty"`
 
 	// AllowExec enciende la ejecución de comandos y el acceso a ficheros dentro
 	// del invitado (POST /machines/{ref}/exec, /files). Es opt-in explícito y se
@@ -464,6 +473,9 @@ type Info struct {
 	// Las imágenes y el kernel son de una arquitectura: `kling images copy`
 	// la compara antes de mover gigas que luego no arrancarían.
 	Arch string `json:"arch,omitempty"`
+	// ShareRoots son los directorios del host bajo los que se pueden compartir
+	// carpetas en vivo (daemon.share_roots). Vacío = ninguno.
+	ShareRoots []string `json:"share_roots,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

@@ -186,6 +186,12 @@ type Manager struct {
 	// un temporal de nombre fijo y dos a la vez se lo pisarían.
 	escrituraMu sync.Mutex
 
+	// shares lleva las conexiones de las carpetas compartidas en vivo, y
+	// shareCfg de dónde sale su configuración (ver shares.go).
+	shares     *shareSup
+	sharesOnce sync.Once
+	shareCfg   func() ShareConfig
+
 	// Clave de firma de snapshots (firma.go), cargada una vez.
 	firmaOnce  sync.Once
 	firmaClave []byte
@@ -427,7 +433,6 @@ func (m *Manager) Close() {
 
 func (m *Manager) List() []*api.Machine {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	out := make([]*api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
 		// DiskBytes viene de la caché: recorrer el directorio de cada máquina
@@ -436,6 +441,11 @@ func (m *Manager) List() []*api.Machine {
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
 		out = append(out, &c)
+	}
+	m.mu.RUnlock()
+	// Fuera del candado: el estado de las carpetas vivas tiene el suyo.
+	for _, c := range out {
+		m.decorarShares(c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
@@ -517,6 +527,15 @@ func diskUsage(dir string) int64 {
 
 // Get resuelve por ID completo, prefijo de ID o nombre, como hace docker.
 func (m *Manager) Get(ref string) (*api.Machine, bool) {
+	c, ok := m.get(ref)
+	if ok {
+		// Fuera del candado, como en List.
+		m.decorarShares(c)
+	}
+	return c, ok
+}
+
+func (m *Manager) get(ref string) (*api.Machine, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if mc, ok := m.byID[ref]; ok {
@@ -595,6 +614,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.
 	if req.From != "" {
+		// Las carpetas se deciden al arrancar en frío: una copia es un disco,
+		// y a una máquina restaurada no se le añaden discos.
+		if len(req.Shares) > 0 {
+			return nil, fmt.Errorf("%w: shared folders need a cold boot; they cannot be added to a machine restored from a snapshot", ErrShareRequest)
+		}
 		return m.runFrom(ctx, req)
 	}
 	if req.Image == "" {
@@ -628,6 +652,10 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Se suelta pase lo que pase: si la maquina llego a byID, byID ya la cubre;
 	// si no llego, la reserva no puede quedarse bloqueando el volumen.
 	defer m.soltarReservas(id)
+	if err != nil {
+		return nil, err
+	}
+	shares, err := m.resolveShares(req, vols)
 	if err != nil {
 		return nil, err
 	}
@@ -694,7 +722,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// engancharía, el snapshot lo registraría y `volume ls` diría "en uso"…
 	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
 	// Se comprueba ANTES de crear el directorio, para no tener que limpiarlo.
-	if len(vols) > 0 {
+	if len(vols) > 0 || len(shares) > 0 {
 		switch has, herr := imageHasBridge(ctx, src, layer); {
 		case herr != nil:
 			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
@@ -702,6 +730,12 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 			// peor que el problema.
 			log.Printf("warning: could not check whether %q has a bridge: %v", req.Image, herr)
 		case !has:
+			if len(vols) == 0 {
+				return nil, fmt.Errorf("%w: image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
+					"is what mounts shared folders inside the guest.\n"+
+					"Use an image with an agent (kling images toolchain, or kling images build -builder base)",
+					ErrShareRequest, req.Image)
+			}
 			return nil, fmt.Errorf("image %q has no guest agent (kling-guest or kling-bridge), and the agent "+
 				"is what mounts the volumes inside the guest.\n"+
 				"With this image the disk would be attached but nobody would mount it, and everything written "+
@@ -728,12 +762,27 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return nil, err
 	}
 
+	// Las copias: su ext4 pasa de la subida al directorio de la máquina y se
+	// engancha como un disco de solo lectura DETRÁS de los volúmenes. Para el
+	// invitado es un volumen de solo lectura más (kling.volume=…:ro), así que lo
+	// monta incluso un agente anterior a las carpetas compartidas.
+	copies, err := m.placeCopies(dir, shares)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	var shareAtts []api.ShareAttachment
+	for _, s := range shares {
+		shareAtts = append(shareAtts, s.att)
+	}
+
 	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, CreatedAt: creada,
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
 		Volumes:   attachments(vols),
+		Shares:    shareAtts,
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
 		TTLAt: &creada,
 	}
@@ -781,7 +830,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, vols, req.AllowExec)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -818,10 +867,27 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// quien la hizo vería una máquina sin disco.
 	out.DiskBytes = m.touchDisk(id)
 
+	// Las carpetas vivas: se conectan ahora y se espera al primer attach, para
+	// que quien arranca la máquina la reciba con la carpeta ya montada. Si el
+	// agente no sabe (imagen vieja) o no puede (kernel sin FUSE), la máquina
+	// no sirve para lo que se pidió: se destruye y se dice por qué.
+	if hasLiveShares(&out) {
+		m.startShares(id)
+		if err := m.waitShares(ctx, id, shareAttachWait); err != nil {
+			_ = m.Remove(id)
+			return nil, err
+		}
+		m.decorarShares(&out)
+	}
+
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
 }
+
+// shareAttachWait es cuánto se espera al primer attach de una carpeta viva al
+// arrancar: lo que tarda el agente en escuchar en un host cargado, con margen.
+const shareAttachWait = 2 * time.Minute
 
 // createOverlay crea el disco escribible de una microVM: un fichero disperso con
 // ext4 encima. Sin journal a propósito — es almacenamiento efímero y el journal
@@ -1174,6 +1240,17 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// en mem.file — si luego se elimina la máquina warm, esas escrituras
 	// desaparecen sin dejar rastro.
 	m.flushVolume(mc)
+
+	// Las carpetas vivas se desconectan ANTES de pausar: la conexión muere con
+	// el VMM, y si no se cortara aquí el daemon no se enteraría hasta que
+	// venciera el keepalive, con la sesión colgada. hold impide que el vigilante
+	// las reconecte mientras dura el volcado; al salir, si la máquina sigue
+	// corriendo (el volcado falló), releaseShares las relanza.
+	if hasLiveShares(mc) {
+		m.holdShares(mc.ID)
+		defer m.releaseShares(mc.ID)
+		m.stopShares(mc.ID)
+	}
 
 	// ¿Hay agente al que resincronizar al descongelarla? Se pregunta ahora,
 	// con el invitado en marcha, porque tras restaurar un invitado sin nadie en
@@ -1575,6 +1652,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			m.persist()
 			out := *cur
 			m.mu.Unlock()
+			m.startShares(mc.ID)
 			return &out, nil
 		}
 		m.mu.Unlock()
@@ -1652,6 +1730,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		for _, v := range mc.Volumes {
 			toLink = append(toLink, m.volumePath(v.Name))
 		}
+		toLink = append(toLink, m.copyImages(mc)...)
 		if err := m.prepareJail(mc.ID, toLink...); err != nil {
 			return abortar(err)
 		}
@@ -1732,6 +1811,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	m.mu.Unlock()
 
 	out.DiskBytes = m.touchDisk(mc.ID)
+
+	// Las carpetas vivas vuelven a conectarse: el agente reconoce cada montaje
+	// por su tag y sigue con el mismo. En segundo plano; lo que el invitado
+	// pida mientras tanto espera a la sesión.
+	m.startShares(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("thawed in %d ms%s", elapsed, resyncNota(resyncT, resyncOK))})
@@ -1846,6 +1930,9 @@ func (m *Manager) kill(id string) { m.killMachine(id, true) }
 func (m *Manager) killPaused(id string) { m.killMachine(id, false) }
 
 func (m *Manager) killMachine(id string, flush bool) {
+	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
+	// es mejor cerrarlas que esperar a que el keepalive lo note.
+	m.stopShares(id)
 	m.mu.RLock()
 	mc := m.byID[id]
 	m.mu.RUnlock()

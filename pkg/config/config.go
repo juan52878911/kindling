@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -67,6 +68,15 @@ type Daemon struct {
 	// kling-vz). Vacío = el de la plataforma (ver DefaultVMM). KLING_VMM lo
 	// sustituye sin tocar el fichero.
 	VMM string `json:"vmm,omitempty"`
+
+	// ShareRoots son los directorios del host bajo los que se pueden compartir
+	// carpetas EN VIVO (kling run -share SRC:DST:ro|rw). Vacío = ninguno: las
+	// carpetas vivas se rechazan. KLING_SHARE_ROOTS (separada por comas) lo
+	// sustituye sin tocar el fichero. Ver docs/compartir.md.
+	ShareRoots []string `json:"share_roots,omitempty"`
+
+	// ShareCopyMaxMiB acota el contenido de una carpeta en modo copy. 0 = 1024.
+	ShareCopyMaxMiB int `json:"share_copy_max_mib,omitempty"`
 }
 
 // Backends de microVM que entiende el daemon.
@@ -163,7 +173,15 @@ func Path() string {
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return filepath.Join(".kling", "config.json")
+			// Sin $HOME —un servicio de systemd sin User=, como el daemon—, el
+			// directorio del usuario sale de la base de usuarios. Sin esto el
+			// daemon leía .kling/config.json relativo a "/" y no veía lo que
+			// `sudo kling config set` acababa de escribir en /root/.config.
+			u, uerr := user.Current()
+			if uerr != nil || u.HomeDir == "" {
+				return filepath.Join(".kling", "config.json")
+			}
+			home = u.HomeDir
 		}
 		base = filepath.Join(home, ".config")
 	}
@@ -344,6 +362,21 @@ func (c *Config) Set(key, value string) error {
 				}
 			}
 			c.Daemon.VMM = value
+		case "share_roots":
+			roots, err := ParseShareRoots(value)
+			if err != nil {
+				return err
+			}
+			c.Daemon.ShareRoots = roots
+		case "share_copy_max_mib":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < 0 {
+				return fmt.Errorf("daemon.share_copy_max_mib can't be negative")
+			}
+			c.Daemon.ShareCopyMaxMiB = n
 		default:
 			return fmt.Errorf("unknown field daemon.%s", field)
 		}
@@ -433,7 +466,27 @@ func (c *Config) Keys() [][2]string {
 		{"gateway.url", c.Gateway.URL},
 		{"gateway.token", mask(c.Gateway.Token)},
 		{"daemon.vmm", c.Daemon.VMM},
+		{"daemon.share_roots", strings.Join(c.Daemon.ShareRoots, ",")},
+		{"daemon.share_copy_max_mib", itoa(c.Daemon.ShareCopyMaxMiB)},
 	}
+}
+
+// ParseShareRoots interpreta una lista de directorios separados por comas (la
+// de daemon.share_roots y KLING_SHARE_ROOTS). Tienen que ser rutas absolutas:
+// una relativa dependería del directorio en el que arrancó el daemon.
+func ParseShareRoots(v string) ([]string, error) {
+	var out []string
+	for _, r := range strings.Split(v, ",") {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("share root %q is not an absolute path", r)
+		}
+		out = append(out, filepath.Clean(r))
+	}
+	return out, nil
 }
 
 // mask oculta un secreto dejando lo justo para reconocerlo.

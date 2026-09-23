@@ -81,6 +81,7 @@ enlazadas:
 **Almacenamiento**
 · [Volúmenes](#volúmenes-lo-que-sobrevive-a-la-microvm)
 · [Una biblioteca de paquetes compartida](#una-biblioteca-de-paquetes-compartida)
+· [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -669,6 +670,34 @@ un volumen de datos corriente no acaba en `PYTHONPATH`, porque un `json.py` que 
 dentro taparía el módulo de la biblioteca estándar y el fallo afloraría lejísimos de su
 causa. Lo que la imagen ya trae instalado va **primero**: actualizar el volumen no debe
 cambiar en silencio la versión que usa un servicio que ya funcionaba.
+
+## Compartir una carpeta del host
+
+`-share SRC:DST[:copy|ro|rw]` mete una carpeta del host dentro de una máquina
+(`kling run` y `kling sandbox create`, repetible):
+
+```sh
+kling run -image toolchain -share ./repo:/work              # copy: una foto de solo lectura
+kling -H ssh://lab run -share ./repo:/work                  # ... subida desde tu portátil
+sudo kling config set daemon.share_roots /srv/code          # en el host del daemon, una vez
+kling run -image toolchain -share /srv/code/app:/src:rw     # en vivo, lectura y escritura
+```
+
+- **copy** (por defecto): el CLI empaqueta la carpeta en un tar, el daemon revisa cada
+  entrada y construye un ext4 de solo lectura que se engancha como un volumen. Vale con
+  cualquier daemon, local o por SSH; lo que cambies después en tu lado no se ve.
+- **ro / rw**: se sirve en vivo la carpeta *del host del daemon*. El agente del invitado
+  habla FUSE él mismo y el daemon sirve cada operación a través de `os.Root`, así que nada
+  sale de la carpeta — ni `..` ni un enlace simbólico. Lo que cambies en el host se ve en
+  menos de un segundo; `ro` lo impone el daemon, no solo el montaje. Sobrevive a
+  `freeze`/`thaw` y a reiniciar el daemon, y funciona con `egress none`. Solo se pueden
+  compartir en vivo carpetas bajo `daemon.share_roots` (vacío por defecto).
+
+El invitado no puede crear enlaces simbólicos, enlaces duros ni nodos de dispositivo en una
+carpeta viva (`npm install --no-bin-links` funciona), ve todo como de root, y una máquina
+con carpetas no se puede convertir en snapshot. Las carpetas vivas pasan por la interfaz de
+red del invitado, con un techo de 16 MiB/s por sentido en Firecracker. Diseño, límites y
+modelo de amenaza: [`docs/compartir.md`](docs/compartir.md).
 
 ## Qué persiste y qué no
 

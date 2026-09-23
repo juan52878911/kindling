@@ -50,6 +50,14 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}
+	// La memoria volcada llevaría montada una carpeta de ESTE host (las vivas)
+	// o un disco que no viaja con el snapshot (las copias): cada instancia
+	// restaurada despertaría con un montaje que no le corresponde.
+	if len(mc.Shares) > 0 {
+		return nil, fmt.Errorf("%w: %s has %d shared folder(s) mounted, and a snapshot would carry them to "+
+			"every instance restored from it. Commit a machine without -share (freeze/thaw of this one works)",
+			ErrSharesCommit, mc.Name, len(mc.Shares))
+	}
 
 	m.mu.RLock()
 	sock := m.socket[mc.ID]

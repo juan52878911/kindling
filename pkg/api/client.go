@@ -177,6 +177,12 @@ func (c *Client) RemoveVolume(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/volumes/"+name, nil, nil)
 }
 
+// Get devuelve una máquina por id, prefijo o nombre.
+func (c *Client) Get(ctx context.Context, ref string) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodGet, "/machines/"+ref, nil, &m)
+}
+
 func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)
