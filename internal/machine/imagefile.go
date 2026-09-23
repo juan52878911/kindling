@@ -51,7 +51,7 @@ func (m *Manager) ReadImageFile(ctx context.Context, image, p string, max int64)
 	}
 	bin := debugfsBin()
 	if bin == "" {
-		return nil, fmt.Errorf("cannot find debugfs (comes with e2fsprogs)")
+		return nil, ErrNoDebugfs
 	}
 	type candidato struct{ img, inside string }
 	var cs []candidato

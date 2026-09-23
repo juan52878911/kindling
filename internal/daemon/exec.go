@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -345,6 +346,14 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Image != "" {
 		has, err := s.mgr.ImageHasAgent(r.Context(), req.Image)
+		switch {
+		case errors.Is(err, machine.ErrNoDebugfs):
+			// Sin debugfs (un Mac sin e2fsprogs de Homebrew) no se puede mirar
+			// dentro de la imagen. Es una comprobación de diagnóstico: se sigue,
+			// y si no hay agente la espera de más abajo lo dirá.
+			log.Printf("warning: could not check whether %q has a guest agent: %v", req.Image, err)
+			has, err = true, nil
+		}
 		if err != nil {
 			fail(w, http.StatusBadRequest, fmt.Errorf("image %q: %w", req.Image, err))
 			return

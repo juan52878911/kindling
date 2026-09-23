@@ -151,7 +151,7 @@ func (m *Manager) baseSupportsLayers(ctx context.Context, base string) (bool, er
 	}
 	bin := debugfsBin()
 	if bin == "" {
-		return false, fmt.Errorf("cannot find debugfs (comes with e2fsprogs)")
+		return false, ErrNoDebugfs
 	}
 	out, err := exec.CommandContext(ctx, bin, "-R", "cat "+guestInitPath, base).Output()
 	if err != nil {

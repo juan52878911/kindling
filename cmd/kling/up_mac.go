@@ -140,10 +140,18 @@ func checksMac(p probeMac) []check {
 			fix:   []string{"make vz            # signs it (ad-hoc is enough)"},
 		},
 		{
-			label: "e2fsprogs", ok: p.mkfs && p.debugfs, fatal: true,
-			found: presence(p.mkfs && p.debugfs, "mkfs.ext4 and debugfs found", "mkfs.ext4 or debugfs missing"),
-			why:   "every microVM gets an ext4 overlay, and images are inspected with debugfs",
+			label: "mkfs.ext4", ok: p.mkfs, fatal: true,
+			found: presence(p.mkfs, "found", "missing"),
+			why:   "every microVM gets an ext4 overlay",
 			fix:   []string{"brew install e2fsprogs      # kling finds it in Homebrew's prefix, no PATH change needed"},
+		},
+		{
+			// Sin debugfs se arranca igual: solo se pierde la inspección de
+			// imágenes. Por eso no es fatal.
+			label: "debugfs", ok: p.debugfs,
+			found: presence(p.debugfs, "found", "missing"),
+			why:   "inspects images (images cat, agent and layer checks); microVMs run without it",
+			fix:   []string{"brew install e2fsprogs"},
 		},
 		{
 			label: "guest kernel", ok: p.kernel,

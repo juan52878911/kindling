@@ -39,10 +39,16 @@ func TestChecksMac(t *testing.T) {
 	if f := fatales(sinFirma); !f["vz entitlement"] || f["kling-vz"] {
 		t.Fatalf("sin firma: %v", f)
 	}
-	sinE2fs := sano
-	sinE2fs.debugfs = false
-	if !fatales(sinE2fs)["e2fsprogs"] {
-		t.Fatal("sin debugfs")
+	sinMkfs := sano
+	sinMkfs.mkfs = false
+	if !fatales(sinMkfs)["mkfs.ext4"] {
+		t.Fatal("sin mkfs.ext4 no hay overlay: es fatal")
+	}
+	// Sin debugfs se arranca igual (solo falla inspeccionar imágenes): aviso.
+	sinDebugfs := sano
+	sinDebugfs.debugfs = false
+	if f := fatales(sinDebugfs); len(f) != 0 {
+		t.Fatalf("sin debugfs no es fatal: %v", f)
 	}
 	// Sin imágenes el daemon arranca igual: es un aviso, no un fatal.
 	sinImg := sano

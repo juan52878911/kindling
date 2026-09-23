@@ -25,13 +25,18 @@ func (s *Server) comprobarHost() {
 	if _, err := exec.LookPath(s.fcBin); err != nil {
 		missing = append(missing, s.fcBin+" (build it with `make vz`, or set KLING_VMM to its path)")
 	}
-	for _, b := range []string{"mkfs.ext4", "debugfs"} {
-		if !machine.E2fsDisponible(b) {
-			missing = append(missing, b+" (brew install e2fsprogs)")
-		}
+	if !machine.E2fsDisponible("mkfs.ext4") {
+		missing = append(missing, "mkfs.ext4 (brew install e2fsprogs)")
 	}
 	if len(missing) > 0 {
 		log.Printf("WARNING: missing binaries: %s: microVMs cannot be started on this host",
 			strings.Join(missing, ", "))
+	}
+	// debugfs solo inspecciona imágenes: sin él se arranca igual, pero no se
+	// sabe si una imagen lleva agente o si su base entiende capas, e `images
+	// cat` no funciona. Decir que no se puede arrancar sería mentir.
+	if !machine.E2fsDisponible("debugfs") {
+		log.Printf("WARNING: debugfs not found (brew install e2fsprogs): microVMs run, " +
+			"but images can't be inspected (images cat, agent and layer checks are skipped)")
 	}
 }
