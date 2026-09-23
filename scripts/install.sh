@@ -16,7 +16,7 @@
 #
 # Plataformas soportadas:
 #   - linux/amd64, linux/arm64 (CLI + daemon)
-#   - darwin/amd64, darwin/arm64 (solo CLI; el daemon necesita KVM)
+#   - darwin/amd64 (solo CLI) y darwin/arm64 (CLI y daemon con kling-vz)
 #   - Windows: NO soportado (el código usa syscall.Kill, Setsid, Stat_t que son POSIX).
 #
 # Variables de entorno respetadas:
@@ -128,6 +128,15 @@ fetch() {
     fi
 }
 
+# macOS no trae sha256sum, sí shasum: sin esto la verificación fallaba en el Mac.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
 # ── trabajo ────────────────────────────────────────────────────────────────
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -144,6 +153,7 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "(dry-run) NO descargo ni instalo nada."
     echo "Descargaría:"
     info "$BASE/$BIN_NAME"
+    [ "$PLAT" = "darwin-arm64" ] && info "$BASE/kling-vz-darwin-arm64"
     info "$BASE/SHA256SUMS"
     exit 0
 fi
@@ -162,7 +172,7 @@ EXPECTED="$(grep -E "  ${BIN_NAME}\$" "$WORK/SHA256SUMS" | awk '{print $1}')"
 if [ -z "$EXPECTED" ]; then
     fail "no encuentro $BIN_NAME en SHA256SUMS"
 fi
-ACTUAL="$(sha256sum "$WORK/$BIN_NAME" | awk '{print $1}')"
+ACTUAL="$(sha256_of "$WORK/$BIN_NAME")"
 if [ -z "$ACTUAL" ]; then
     fail "could not compute sha256 of $BIN_NAME (is sha256sum missing?)"
 fi
@@ -184,6 +194,22 @@ fi
 chmod +x "$WORK/$BIN_NAME"
 mv "$WORK/$BIN_NAME" "$PREFIX/kling"
 ok "instalado en $PREFIX/kling"
+
+# En un Mac Apple Silicon el daemon arranca las microVMs con kling-vz, que tiene
+# que vivir junto a kling. Va firmado ad-hoc y sin notarizar: la cuarentena que
+# pone la descarga haría que macOS se negara a ejecutarlo, así que se quita.
+if [ "$PLAT" = "darwin-arm64" ]; then
+    VZ_NAME="kling-vz-darwin-arm64"
+    info "descargando $VZ_NAME"
+    fetch "$BASE/$VZ_NAME" "$WORK/$VZ_NAME"
+    EXPECTED="$(grep -E "  ${VZ_NAME}\$" "$WORK/SHA256SUMS" | awk '{print $1}')"
+    [ -n "$EXPECTED" ] || fail "no encuentro $VZ_NAME en SHA256SUMS"
+    [ "$EXPECTED" = "$(sha256_of "$WORK/$VZ_NAME")" ] || fail "checksum de $VZ_NAME no coincide"
+    chmod +x "$WORK/$VZ_NAME"
+    xattr -d com.apple.quarantine "$WORK/$VZ_NAME" 2>/dev/null || true
+    mv "$WORK/$VZ_NAME" "$PREFIX/kling-vz"
+    ok "instalado en $PREFIX/kling-vz (backend nativo de macOS)"
+fi
 
 cat <<EOF
 

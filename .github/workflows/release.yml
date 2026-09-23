@@ -105,9 +105,38 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # kling-vz (backend nativo de macOS) necesita cgo y la firma con el
+  # entitlement de virtualización: solo se puede compilar en un runner macOS.
+  # No se vuelve a tocar el binario tras build.sh (strip, re-firma): se perdería
+  # el entitlement.
+  vz:
+    name: build kling-vz darwin/arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: vz/go.mod
+          cache-dependency-path: vz/go.sum
+      - name: build y firma
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          cd vz && OUT=dist/kling-vz-darwin-arm64 VERSION="$VERSION" ./build.sh
+          codesign -d --entitlements - dist/kling-vz-darwin-arm64 2>&1 | grep -q com.apple.security.virtualization
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kling-vz-darwin-arm64
+          path: vz/dist/kling-vz-darwin-arm64
+          if-no-files-found: error
+
   release:
     name: release
-    needs: build
+    needs: [build, vz]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +219,7 @@ jobs:
             release/kling-linux-arm64
             release/kling-darwin-amd64
             release/kling-darwin-arm64
+            release/kling-vz-darwin-arm64
             release/kling-guest-linux-amd64
             release/kling-guest-linux-arm64
             release/SHA256SUMS
