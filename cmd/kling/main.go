@@ -122,6 +122,14 @@ OBSERVATION
   events                                           stream of daemon events
   info [-json]                                     daemon status
 
+SMALL MODELS (JEV, runs locally, no daemon)
+  jev train -data d.jsonl -o m.jev [-valid v]      tiny linear classifier: trains,
+                                                   quantizes, calibrates, picks τ
+  jev eval -model m.jev -data t.jsonl [-json]      accuracy, F1, ECE, coverage at τ
+  jev predict -model m.jev [-text T] [-top N]      label, calibrated p, confident or
+                                                   escalate, evidence (docs/jev.md)
+  jev inspect <m.jev> [-json]                      spec, labels, thresholds, metadata
+
 `
 
 const usageTail = `DAEMON
@@ -244,6 +252,8 @@ func main() {
 		return
 	case "plugins":
 		err = cmdPlugins(args)
+	case "jev":
+		err = cmdJev(args)
 	case "builder": // lo ejecuta el daemon como root; ver builder.go
 		err = cmdBuilder(args)
 	case "-h", "--help", "help":

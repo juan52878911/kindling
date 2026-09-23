@@ -81,6 +81,7 @@ sections:
 · [A shared package library](#a-shared-package-library)
 · [Sharing a host folder](#sharing-a-host-folder)
 · [Small LLMs on demand (VON)](#small-llms-on-demand-von)
+· [JEV: a tiny classifier for small decisions](#jev-a-tiny-classifier-for-small-decisions)
 · [What persists and what does not](#what-persists-and-what-does-not)
 
 **Performance and density**
@@ -711,6 +712,25 @@ total (sum of RSS 1715 MiB), ~12 MiB per extra replica. On a Mac (`vz`), a repli
 first token ~0.8 s after `run -from` and generates ~140 tok/s. Numbers, the nested-lab caveat and
 the GPU plan: [`docs/von.md`](docs/von.md).
 
+## JEV: a tiny classifier for small decisions
+
+`kling jev` trains and serves a linear model (hashed words, bigrams and structured
+fields; int16 weights; ~1 MB) for decisions that do not deserve a language model:
+classify an event, route an agent request, filter an input. It runs locally, needs no
+daemon, answers in 1.5–6 µs with zero allocations, and is bit-identical across
+amd64/arm64. Every prediction carries a calibrated probability and a per-class
+threshold decision, `confident` or `escalate`, so a gateway can answer with JEV and
+hand the rest to a bigger model.
+
+```sh
+kling jev train -data train.jsonl -valid valid.jsonl -o events.jev
+kling jev predict -model events.jev -text "panic in the parser" -fields '{"service":"api"}'
+```
+
+Design and file format: [`docs/jev.md`](docs/jev.md). An honest evaluation on 4,304
+real commits, including where the thresholds stop holding:
+[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
+
 ## What persists and what does not
 
 Worth being clear about, because it is not obvious:
@@ -1094,6 +1114,7 @@ instances share pages.
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: the Lima recipe, limits, and cold-start levers |
 | [`docs/three-layers.md`](docs/three-layers.md) | Layered images: design, measurements, runtime families |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
+| [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, the tiny linear classifier: features, `.jev` format, cascade; its evaluation on real commits |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |
 | [`docs/releases.md`](docs/releases.md) | How releases are built and published |

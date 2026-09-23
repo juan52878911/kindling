@@ -28,6 +28,8 @@ depuración.
 |---|---|---|
 | [`three-layers.md`](three-layers.md) | Imágenes por capas (base por familia de runtime + capa de servicio + overlay): diseño, decisiones, y el parque real reimportado — 1300 → 433 MiB | quieres entender `-base`, las familias `node`/`python` o el camino PyPI |
 | [`estabilidad.md`](estabilidad.md) | La auditoría de estabilidad y determinismo sobre el sistema vivo: el commit prematuro, los seis fallos de robustez, el hasheo que costaba el 67% del despertar, y la prueba de estrés de 142 microVMs | quieres saber por qué v0.4 es 9,5× más rápida bajo carga, o cómo se depuró |
+| [`jev.md`](jev.md) | JEV, el clasificador lineal diminuto de `kling jev`: características hasheadas, pesos int16, calibración y umbral por clase, formato `.jev`, y cómo lo usará la cascada JEV → VON | quieres clasificar o enrutar algo en microsegundos sin un modelo de lenguaje |
+| [`JEV-EVAL.md`](JEV-EVAL.md) | La evaluación de JEV con 4 304 commits reales frente a la clase mayoritaria y unas reglas: exactitud, macro-F1, ECE, cobertura, y dónde fallan los umbrales | vas a fiarte de un umbral de JEV |
 | [`hallazgos.md`](hallazgos.md) | Notas de campo acumuladas: overlays, ficheros dispersos, namespaces, cgroups, trampas de medición… cada una con su porqué | algo se comporta raro y sospechas que ya le pasó a alguien |
 
 ## Notas de release
