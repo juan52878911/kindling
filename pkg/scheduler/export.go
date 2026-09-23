@@ -40,6 +40,11 @@ func (g *Scheduler) Client() *api.Client {
 	return g.client
 }
 
+// SetPopularityFile cambia dónde se guarda el historial de popularidad ("" =
+// solo en memoria). Dos gateways con el mismo fichero se pisarían la media
+// móvil: el de IA usa el suyo.
+func (g *Scheduler) SetPopularityFile(path string) { g.pop = newPopularity(path) }
+
 // Idle es el tiempo sin uso tras el que una instancia se congela.
 func (g *Scheduler) Idle() time.Duration { return g.idle }
 
@@ -124,7 +129,7 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if e, ok := g.services[service]; ok {
-		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(GuestPort), time.Since(e.lastUse)
+		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(g.port()), time.Since(e.lastUse)
 		for _, rt := range g.routes {
 			if rt.service == service {
 				st.Sessions++
