@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -405,5 +406,32 @@ func TestRouterSesionPegajosaYSeOlvida(t *testing.T) {
 	r.sessMu.Unlock()
 	if vieja || !reciente {
 		t.Fatalf("olvidarFijadas: vieja=%v reciente=%v; quería false y true", vieja, reciente)
+	}
+}
+
+// Un `kling mcp link` recién hecho tiene que funcionar a la primera, aunque la
+// caché de enlaces del gateway (30 s) todavía no lo tenga. Antes contestaba 502
+// "no snapshot for service" hasta que caducaba.
+func TestEnlaceRecienCreadoFuncionaALaPrimera(t *testing.T) {
+	nuevo := newLinkedService(t, "nuevo", "hace", "hace algo")
+	otro := newLinkedService(t, "otro", "hace", "hace algo")
+	enlaces := []*mcp.Link{otro.link("hace", "hace algo")}
+	sock, _ := mockRouterDaemon(t, nil, enlaces, 0, nil)
+
+	g := New(api.NewClient(sock), 5*time.Minute, false, 0, "")
+	_ = g.links(context.Background()) // la caché queda llena SIN el enlace nuevo
+
+	// Se enlaza el servicio nuevo en el daemon (mismo array que ve el falso), un
+	// momento después de llenar la caché, como pasaría de verdad.
+	enlaces[0] = nuevo.link("hace", "hace algo")
+	time.Sleep(150 * time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/nuevo", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	g.Handler("").ServeHTTP(rec, req)
+	if nuevo.hits.Load() == 0 {
+		t.Fatalf("el enlace recién creado no se usó: %d %s", rec.Code, rec.Body.String())
 	}
 }

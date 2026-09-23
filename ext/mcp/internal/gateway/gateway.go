@@ -368,7 +368,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 	if r.GetBody == nil {
 		e, err := g.Ensure(r.Context(), service)
 		if err != nil {
-			g.newSessionError(w, service, err)
+			g.newSessionError(w, r, service, err)
 			return
 		}
 		g.Begin(e)
@@ -394,7 +394,7 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			e, err = g.ScaleOut(r.Context(), service, tnt)
 		}
 		if err != nil {
-			g.newSessionError(w, service, err)
+			g.newSessionError(w, r, service, err)
 			return
 		}
 		if b, berr := r.GetBody(); berr == nil {
@@ -437,7 +437,20 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		http.StatusServiceUnavailable)
 }
 
-func (g *Gateway) newSessionError(w http.ResponseWriter, service string, err error) {
+func (g *Gateway) newSessionError(w http.ResponseWriter, r *http.Request, service string, err error) {
+	// Sin snapshot puede ser un enlace recién creado que la caché aún no ve.
+	if strings.Contains(err.Error(), "no snapshot for service") {
+		if l := g.linkRecien(r.Context(), service); l != nil {
+			// El cuerpo pudo leerse en un intento anterior: se rebobina.
+			if r.GetBody != nil {
+				if b, gerr := r.GetBody(); gerr == nil {
+					r.Body = b
+				}
+			}
+			g.handleLinkProxy(w, r, l)
+			return
+		}
+	}
 	// La cuota de instancias del tenant es un 429 (reparto justo), no un 502: el
 	// servicio no falla, es que este tenant ya tiene todas las suyas.
 	if errors.Is(err, scheduler.ErrTenantInstances) {
@@ -587,9 +600,16 @@ func newSessionID() string {
 
 // links devuelve los servidores externos registrados, cacheados brevemente: el
 // agregador los consulta en cada resolución de servicio.
-func (g *Gateway) links(ctx context.Context) []*mcp.Link {
+func (g *Gateway) links(ctx context.Context) []*mcp.Link { return g.linksCon(ctx, false) }
+
+// linksCon es links; forzar relee aunque la caché esté fresca, salvo que se
+// haya leído hace menos de 100 ms (para que una ráfaga de peticiones a un
+// servicio inexistente no se convierta en una ráfaga contra el daemon). No más:
+// con un segundo, enlazar un servicio y usarlo acto seguido seguía fallando.
+func (g *Gateway) linksCon(ctx context.Context, forzar bool) []*mcp.Link {
 	g.linkMu.RLock()
-	if time.Since(g.linkAt) < 30*time.Second {
+	edad := time.Since(g.linkAt)
+	if edad < 30*time.Second && (!forzar || edad < 100*time.Millisecond) {
 		out := g.linkCache
 		g.linkMu.RUnlock()
 		return out
@@ -608,7 +628,22 @@ func (g *Gateway) links(ctx context.Context) []*mcp.Link {
 
 // linkFor busca el enlace que sirve a un servicio, o nil si lo sirve una microVM.
 func (g *Gateway) linkFor(ctx context.Context, service string) *mcp.Link {
-	for _, l := range g.links(ctx) {
+	return buscarLink(g.links(ctx), service)
+}
+
+// linkRecien relee los enlaces aunque la caché esté fresca y busca ahí el
+// servicio. Se usa SOLO cuando el servicio no tiene snapshot, justo antes de
+// contestar que no existe: un `kling mcp link` recién hecho no existía para el
+// gateway durante los 30 s de caché, y la primera petición acababa en "no
+// snapshot for service" (lo encontró el e2e de la extensión). Llamarlo en cada
+// fallo de caché costaría una lectura del store por cada petición a un
+// servicio en microVM, que nunca está entre los enlaces.
+func (g *Gateway) linkRecien(ctx context.Context, service string) *mcp.Link {
+	return buscarLink(g.linksCon(ctx, true), service)
+}
+
+func buscarLink(ls []*mcp.Link, service string) *mcp.Link {
+	for _, l := range ls {
 		if l.Service() == service || l.Name == service {
 			return l
 		}

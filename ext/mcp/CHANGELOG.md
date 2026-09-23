@@ -11,6 +11,10 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 
 ## Sin publicar — v0.3.0
 
+- **Un `kling mcp link` recién hecho funciona a la primera.** El gateway guarda
+  los enlaces 30 s en caché, y hasta que caducaba la primera petición al
+  servicio nuevo acababa en 502 "no snapshot for service". Ahora, antes de dar
+  ese error, relee los enlaces. Lo encontró el e2e nuevo.
 - Depende de kindling v0.8. El enrutador multi-host reintenta también en otro
   host cuando uno tiene el disco casi lleno (el 503 nuevo del núcleo), además de
   cuando no le cabe en memoria o llegó a su tope de máquinas.

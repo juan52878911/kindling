@@ -52,7 +52,7 @@ step() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 1; }; }
-need "$KLING"; need curl; need python3; need go
+need "$KLING"; need curl; need python3
 
 # ── token del gateway ─────────────────────────────────────────────────────────
 #
@@ -71,7 +71,7 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-BRIDGE_BIN="" STDIO_BIN="" BRIDGE_PID=""
+BRIDGE_BIN="${BRIDGE_BIN:-}" STDIO_BIN="${STDIO_BIN:-}" BRIDGE_PID=""
 
 cleanup() {
   if [ "$KEEP" = "1" ]; then
@@ -90,8 +90,12 @@ cleanup() {
   done
   $KLING rmi "$SVC" >/dev/null 2>&1
   $KLING images rm "$SVC" >/dev/null 2>&1
-  [ -n "$BRIDGE_BIN" ] && rm -f "$BRIDGE_BIN"
-  [ -n "$STDIO_BIN" ] && rm -f "$STDIO_BIN"
+  # Solo se borran si los compiló esta prueba: los que vienen de fuera son de
+  # quien los pasó.
+  if [ "${COMPILADOS:-0}" = "1" ]; then
+    [ -n "${BRIDGE_BIN:-}" ] && rm -f "$BRIDGE_BIN"
+    [ -n "${STDIO_BIN:-}" ] && rm -f "$STDIO_BIN"
+  fi
 }
 trap cleanup EXIT
 
@@ -263,6 +267,12 @@ out=$($KLING mcp heal 2>&1); code=$?
 
 # ── 6. refresh-bridge es idempotente ─────────────────────────────────────────
 step "6. refresh-bridge"
+# El daemon se niega (409) a tocar una imagen que usa una microVM viva, y el
+# gateway dejó instancias del servicio de las pruebas de arriba. Se retiran
+# primero: el snapshot se queda, y la siguiente petición las recrea.
+for m in $($KLING ps -a -json 2>/dev/null | python3 -c 'import json,sys; s=sys.argv[1]; [print(m["id"]) for m in json.load(sys.stdin) if (m.get("labels") or {}).get("service")==s]' "$SVC"); do
+  $KLING rm "$m" >/dev/null 2>&1
+done
 out=$($KLING mcp refresh-bridge "$SVC" 2>&1)
 first="$out"
 out=$($KLING mcp refresh-bridge "$SVC" 2>&1)
@@ -271,14 +281,24 @@ contiene "$out" "already up to date" && ok "second refresh-bridge says 'already 
 
 # ── 7. link a un kling-bridge local, y unlink ────────────────────────────────
 step "7. Link / unlink to a local server"
+# Los binarios locales se pueden pasar ya compilados (BRIDGE_BIN, STDIO_BIN):
+# el host del daemon no tiene por qué tener Go instalado. Sin ellos y sin Go,
+# esta parte se salta en vez de abortar la prueba entera.
 export GOWORK=off
-BRIDGE_BIN=$(mktemp /tmp/e2e-kling-bridge.XXXXXX)
-STDIO_BIN=$(mktemp /tmp/e2e-stdio-server.XXXXXX)
-if go build -o "$STDIO_BIN" "$ROOT/examples/stdio-server" 2>/tmp/e2e-build.log \
-   && go build -o "$BRIDGE_BIN" "$ROOT/cmd/kling-bridge" 2>>/tmp/e2e-build.log; then
-  ok "built kling-bridge and the example stdio server"
+if [ -n "${BRIDGE_BIN:-}" ] && [ -n "${STDIO_BIN:-}" ]; then
+  ok "using the prebuilt kling-bridge and stdio server"
+elif command -v go >/dev/null 2>&1; then
+  BRIDGE_BIN=$(mktemp /tmp/e2e-kling-bridge.XXXXXX)
+  STDIO_BIN=$(mktemp /tmp/e2e-stdio-server.XXXXXX)
+  if go build -o "$STDIO_BIN" "$ROOT/examples/stdio-server" 2>/tmp/e2e-build.log \
+     && go build -o "$BRIDGE_BIN" "$ROOT/cmd/kling-bridge" 2>>/tmp/e2e-build.log; then
+    ok "built kling-bridge and the example stdio server"
+    COMPILADOS=1
+  else
+    bad "go build kling-bridge/stdio-server" "both binaries" "$(cat /tmp/e2e-build.log)"
+  fi
 else
-  bad "go build kling-bridge/stdio-server" "both binaries" "$(cat /tmp/e2e-build.log)"
+  BRIDGE_BIN=""; STDIO_BIN=""
 fi
 
 if [ -x "$BRIDGE_BIN" ] && [ -x "$STDIO_BIN" ]; then
@@ -330,7 +350,7 @@ if [ -x "$BRIDGE_BIN" ] && [ -x "$STDIO_BIN" ]; then
   kill "$BRIDGE_PID" >/dev/null 2>&1
   BRIDGE_PID=""
 else
-  echo "  (skipping link/unlink: the local binaries didn't build)"
+  echo "  (skipping link/unlink: no Go here and no BRIDGE_BIN/STDIO_BIN given)"
 fi
 
 # ── resumen ──────────────────────────────────────────────────────────────────
