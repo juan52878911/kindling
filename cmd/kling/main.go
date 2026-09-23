@@ -1072,7 +1072,11 @@ func cmdInfo(args []string) error {
 		fmt.Printf("KVM:          %s\n", kvm)
 	}
 	// El campo se llama firecracker por historia; es la versión del VMM, sea cual sea.
-	fmt.Printf("%-14s%s\n", backend+":", strings.TrimSpace(i.Firecrack))
+	vmm := strings.TrimSpace(i.Firecrack)
+	if vmm == "" {
+		vmm = "(not found: the daemon could not run it)"
+	}
+	fmt.Printf("%-14s%s\n", backend+":", vmm)
 	fmt.Printf("machines:     %d\n", i.Machines)
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))

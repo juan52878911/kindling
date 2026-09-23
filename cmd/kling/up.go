@@ -35,6 +35,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
+	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 // runAsDefault es el usuario sin privilegios con el que el daemon lanza
@@ -46,7 +47,7 @@ const runAsDefault = "kindling"
 func cmdUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	host := hostFlag(fs)
-	root := fs.String("root", envOr("KLING_ROOT", "/var/lib/kindling"), "daemon data directory")
+	root := fs.String("root", os.Getenv("KLING_ROOT"), "daemon data directory (default: the platform's, /var/lib/kindling on Linux)")
 	checkOnly := fs.Bool("check", false, "only check prerequisites; doesn't start anything")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -57,11 +58,16 @@ func cmdUp(args []string) error {
 	// El orden importa y no es arbitrario. Primero el contexto: si alguien ya
 	// dijo "mi runtime está en ese host", preguntar por /dev/kvm aquí sería
 	// diagnosticar la máquina equivocada.
+	// La raíz por defecto es la del sistema donde corre el daemon: un Mac que
+	// diagnostica su host Linux no puede mandarle su propia ruta de macOS.
 	switch {
 	case strings.HasPrefix(endpoint, "ssh://"):
-		return upRemote(endpoint, *root, *checkOnly)
+		return upRemote(endpoint, config.Or(*root, "/var/lib/kindling"), *checkOnly)
+	case runtime.GOOS == "darwin":
+		// En macOS el runtime es kling-vz, sin KVM.
+		return upMac(config.Or(*root, transport.DefaultRoot()), *checkOnly)
 	case hasKVM():
-		return upHere(*root, *checkOnly)
+		return upHere(config.Or(*root, transport.DefaultRoot()), *checkOnly)
 	default:
 		return explainNoRuntime()
 	}
@@ -566,14 +572,26 @@ func cmdStatus(args []string) error {
 		fmt.Printf("firecracker:  ? (reported by the daemon)\n")
 	} else {
 		fmt.Printf("daemon:       ✓ %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
-		fmt.Printf("KVM:          %s\n", markYes(info.KVM, "available", "NOT available — no microVM can be started"))
-		fc := strings.TrimSpace(info.Firecrack)
-		if fc == "" {
-			fc = "✗ not found — install it with scripts/20-install-firecracker.sh"
+		if info.Backend == "vz" {
+			// macOS: sin KVM ni firecracker; el VMM es kling-vz.
+			vz := strings.TrimSpace(info.Firecrack)
+			if vz == "" {
+				vz = "✗ not found or not running — see `kling up`"
+			} else {
+				vz = "✓ " + vz
+			}
+			fmt.Printf("backend:      vz (Virtualization.framework)\n")
+			fmt.Printf("kling-vz:     %s\n", vz)
 		} else {
-			fc = "✓ " + fc
+			fmt.Printf("KVM:          %s\n", markYes(info.KVM, "available", "NOT available — no microVM can be started"))
+			fc := strings.TrimSpace(info.Firecrack)
+			if fc == "" {
+				fc = "✗ not found — install it with scripts/20-install-firecracker.sh"
+			} else {
+				fc = "✓ " + fc
+			}
+			fmt.Printf("firecracker:  %s\n", fc)
 		}
-		fmt.Printf("firecracker:  %s\n", fc)
 	}
 
 	// Lo demás lo cuenta cada extensión. Un gancho que falla es una línea de
