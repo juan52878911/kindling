@@ -195,6 +195,12 @@ func (c *Client) Stop(ctx context.Context, ref string) (*Machine, error) {
 // Squeeze aprieta el globo de una instancia running para devolver RAM al host
 // sin congelarla. Va por el cliente largo: al otro lado hay una microVM que
 // tarda un par de segundos en entregar sus páginas.
+// Resize cambia la memoria de una máquina en caliente, dentro de su techo.
+func (c *Client) Resize(ctx context.Context, ref string, memMiB int) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/resize", ResizeRequest{MemMiB: memMiB}, &m)
+}
+
 func (c *Client) Squeeze(ctx context.Context, ref string) (*SqueezeResult, error) {
 	var res SqueezeResult
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/squeeze", nil, &res)

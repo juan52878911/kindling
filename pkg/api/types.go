@@ -25,15 +25,18 @@ const (
 
 // Machine es una microVM gestionada por el daemon.
 type Machine struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Image    string `json:"image"`
-	State    State  `json:"state"`
-	VCPUs    int    `json:"vcpus"`
-	MemMiB   int    `json:"mem_mib"`
-	PID      int    `json:"pid,omitempty"`
-	LastErr  string `json:"last_error,omitempty"`
-	SnapSize int64  `json:"snapshot_bytes,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Image   string `json:"image"`
+	State   State  `json:"state"`
+	VCPUs   int    `json:"vcpus"`
+	MemMiB  int    `json:"mem_mib"`
+	PID     int    `json:"pid,omitempty"`
+	LastErr string `json:"last_error,omitempty"`
+	// MemMaxMiB es el techo al que se puede subir MemMiB en caliente (resize).
+	// 0 = sin elasticidad: MemMiB es fija, como siempre.
+	MemMaxMiB int   `json:"mem_max_mib,omitempty"`
+	SnapSize  int64 `json:"snapshot_bytes,omitempty"`
 
 	// DiskBytes es la ocupación REAL en disco de esta máquina: bloques asignados,
 	// no tamaño lógico. Con overlays dispersos la diferencia es de dos órdenes de
@@ -108,6 +111,10 @@ type RunRequest struct {
 	From   string `json:"from,omitempty"`
 	VCPUs  int    `json:"vcpus,omitempty"`
 	MemMiB int    `json:"mem_mib,omitempty"`
+	// MemMaxMiB arranca la máquina con este techo y el globo reteniendo la
+	// diferencia con MemMiB, para poder subirla o bajarla sin reiniciar
+	// (POST /machines/{ref}/resize). 0 = memoria fija.
+	MemMaxMiB int `json:"mem_max_mib,omitempty"`
 
 	// Egress: "none" (por defecto), "internet" o "allowlist". Nunca hay acceso a
 	// redes privadas: el código de dentro se considera hostil.
@@ -287,9 +294,10 @@ type Snapshot struct {
 	CreatedAt time.Time `json:"created_at"`
 	VCPUs     int       `json:"vcpus"`
 	MemMiB    int       `json:"mem_mib"`
-	MemBytes  int64     `json:"mem_bytes"`  // ocupación real del fichero de memoria
-	DiskBytes int64     `json:"disk_bytes"` // total del snapshot en disco
-	Instances int       `json:"instances"`  // máquinas vivas restauradas de aquí
+	MemMaxMiB int       `json:"mem_max_mib,omitempty"` // techo de resize; ver Machine.MemMaxMiB
+	MemBytes  int64     `json:"mem_bytes"`             // ocupación real del fichero de memoria
+	DiskBytes int64     `json:"disk_bytes"`            // total del snapshot en disco
+	Instances int       `json:"instances"`             // máquinas vivas restauradas de aquí
 
 	// Volumes son los volúmenes que tenía la plantilla, en el orden de los
 	// discos. Se recuerdan para que despertar una instancia no exija repetirlos:
@@ -397,6 +405,7 @@ const (
 	EvAnnotated = "snapshot.annotated"
 	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
+	EvResized   = "machine.resized"
 )
 
 // ProcStat es la foto de recursos de UNA microVM.
@@ -661,6 +670,12 @@ type StatusError struct {
 }
 
 func (e *StatusError) Error() string { return e.Message }
+
+// ResizeRequest cambia la memoria de una máquina en caliente, dentro de su
+// techo (MemMaxMiB).
+type ResizeRequest struct {
+	MemMiB int `json:"mem_mib"`
+}
 
 // SqueezeResult informa de un apretón de globo: cuánta RAM se devolvió al host
 // sin congelar la microVM. ReclaimedMiB y RSSMiB son 0 en un host sin /proc

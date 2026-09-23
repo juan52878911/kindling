@@ -21,7 +21,7 @@ var coreCommands = []string{
 	"up", "status", "run", "ps", "logs", "freeze", "thaw", "stop", "rm", "squeeze",
 	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
 	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
-	"exec", "shell", "cp", "sandbox", "sandboxes",
+	"exec", "shell", "cp", "sandbox", "sandboxes", "resize",
 	"completion", "version", "help",
 }
 

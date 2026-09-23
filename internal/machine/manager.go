@@ -598,6 +598,12 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if req.MemMiB <= 0 {
 		req.MemMiB = 256
 	}
+	if req.MemMaxMiB != 0 && req.MemMaxMiB < req.MemMiB {
+		return nil, fmt.Errorf("mem_max_mib (%d) can't be below mem_mib (%d)", req.MemMaxMiB, req.MemMiB)
+	}
+	if req.MemMaxMiB == req.MemMiB {
+		req.MemMaxMiB = 0 // un techo igual a la memoria es memoria fija
+	}
 
 	if err := m.checkMachineLimit(); err != nil {
 		return nil, err
@@ -714,7 +720,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
-		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: creada,
+		VCPUs: req.VCPUs, MemMiB: req.MemMiB, MemMaxMiB: req.MemMaxMiB, CreatedAt: creada,
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
 		Volumes:   attachments(vols),
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
@@ -764,7 +770,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, layer, overlay, netcfg, vols, req.AllowExec)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, vols, req.AllowExec)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -889,7 +895,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -1020,7 +1026,15 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	if err := c.SetEntropy(ctx); err != nil {
 		return pid, fmt.Errorf("adding entropy: %w", err)
 	}
-	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memMiB}); err != nil {
+	// Con techo, el VMM arranca con el techo y el globo retiene la diferencia:
+	// el invitado dispone de memMiB, y subirlas o bajarlas es mover el globo
+	// (Resize). Firecracker no admite añadir memoria en caliente, así que el
+	// techo se fija aquí y queda en el snapshot.
+	tamano, globo := memMiB, 0
+	if memMaxMiB > memMiB {
+		tamano, globo = memMaxMiB, memMaxMiB-memMiB
+	}
+	if err := c.SetMachineConfig(ctx, fc.MachineConfig{VCPUCount: vcpus, MemSizeMiB: tamano}); err != nil {
 		return pid, err
 	}
 	// virtio-balloon a 0: no reclama nada al arrancar, pero deja el dispositivo
@@ -1029,7 +1043,12 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB int, base, 
 	// del snapshot dorado, heredado por las copias. No es fatal: si el kernel
 	// invitado no trae el driver o la versión de Firecracker lo rechaza, la
 	// microVM arranca igual y solo se pierde el squeeze.
-	if err := c.SetBalloon(ctx, 0, true, balloonStatsPollSec); err != nil {
+	if err := c.SetBalloon(ctx, globo, true, balloonStatsPollSec); err != nil {
+		if globo > 0 {
+			// Sin globo no hay forma de retener la diferencia: el invitado
+			// vería el techo entero, que no es lo que se pidió.
+			return pid, fmt.Errorf("mem_max_mib needs the balloon, and it could not be configured: %w", err)
+		}
 		log.Printf("warning: could not configure balloon on %s: %v (squeeze will not be available)", id, err)
 	}
 	if err := c.Start(ctx); err != nil {
@@ -1332,7 +1351,10 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	// Desinflar: la RAM ya se reclamó al inflar; esto solo devuelve el presupuesto
 	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
 	// cliente abandonó.
-	if err := c.PatchBalloon(context.WithoutCancel(ctx), 0); err != nil {
+	// A la línea base, no a 0: en una máquina con techo el globo retiene la
+	// diferencia entre el techo y su memoria, y desinflarlo del todo le daría
+	// el techo entero.
+	if err := c.PatchBalloon(context.WithoutCancel(ctx), globoBase(cur)); err != nil {
 		log.Printf("warning: could not deflate the balloon for %s: %v", id, err)
 	}
 

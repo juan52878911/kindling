@@ -211,7 +211,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
-		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, Labels: mc.Labels,
+		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, MemMaxMiB: mc.MemMaxMiB, Labels: mc.Labels,
 		Egress:       mc.Egress,
 		CPUPct:       mc.CPUPct,
 		AllowDomains: mc.AllowDomains,
@@ -662,7 +662,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
-		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
+		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB, MemMaxMiB: snap.MemMaxMiB,
 		IP: netcfg.NSIP, NetIndex: netcfg.Index, Egress: string(egress),
 		AllowDomains: req.AllowDomains,
 		TTLSeconds:   req.TTLSeconds, CPUPct: req.CPUPct,
