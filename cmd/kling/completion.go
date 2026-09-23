@@ -25,6 +25,7 @@ var coreSubcommands = [][2]string{
 	{"config", "show path set"},
 	{"plugins", "ls"},
 	{"sandbox|sandboxes", "create ls renew rm"},
+	{"jev", "train eval predict inspect"},
 }
 
 // machineArgs son los comandos del núcleo que reciben un id de máquina.
