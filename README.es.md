@@ -82,6 +82,7 @@ enlazadas:
 · [Volúmenes](#volúmenes-lo-que-sobrevive-a-la-microvm)
 · [Una biblioteca de paquetes compartida](#una-biblioteca-de-paquetes-compartida)
 · [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
+· [JEV: un clasificador diminuto para decisiones pequeñas](#jev-un-clasificador-diminuto-para-decisiones-pequeñas)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -699,6 +700,25 @@ con carpetas no se puede convertir en snapshot. Las carpetas vivas pasan por la 
 red del invitado, con un techo de 16 MiB/s por sentido en Firecracker. Diseño, límites y
 modelo de amenaza: [`docs/compartir.md`](docs/compartir.md).
 
+## JEV: un clasificador diminuto para decisiones pequeñas
+
+`kling jev` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
+estructurados; pesos int16; ~1 MB) para las decisiones que no merecen un modelo de
+lenguaje: clasificar un evento, enrutar la petición de un agente, filtrar una entrada.
+Corre en local, sin daemon, contesta en 1,5–6 µs sin reservar memoria y da los mismos
+bits en amd64 y arm64. Cada predicción trae una probabilidad calibrada y la decisión
+frente al umbral de su clase, `confident` o `escalate`, para que un gateway conteste con
+JEV y pase el resto a un modelo mayor.
+
+```sh
+kling jev train -data train.jsonl -valid valid.jsonl -o eventos.jev
+kling jev predict -model eventos.jev -text "panic in the parser" -fields '{"service":"api"}'
+```
+
+Diseño y formato: [`docs/jev.md`](docs/jev.md). Una evaluación honesta con 4 304
+commits reales, incluido dónde dejan de valer los umbrales:
+[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
+
 ## Qué persiste y qué no
 
 Conviene tenerlo claro, porque no es obvio:
@@ -1085,6 +1105,7 @@ permite que N instancias compartan páginas.
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
 | [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
+| [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
 | [`docs/releases.md`](docs/releases.md) | Cómo se construyen y publican las releases |
