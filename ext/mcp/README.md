@@ -39,6 +39,7 @@ make deploy-mac HOST=ssh://user@lima-vm    # arm64 Linux VM on Apple Silicon
 |---|---|
 | v0.6.x | v0.1.x |
 | v0.7.x | v0.1.x, v0.2.x |
+| v0.8.x | v0.3.x |
 
 The installer refuses to install next to a `kling` older than the minimum the extension
 declares.
