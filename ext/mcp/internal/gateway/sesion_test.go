@@ -251,9 +251,11 @@ func TestRutasDeControlNoLleganAlInvitado(t *testing.T) {
 	for _, ruta := range []string{"/mcp/eco/resync", "/mcp/eco/volume/release", "/mcp/eco/exec",
 		"/mcp/eco/exec/pty", "/mcp/eco/files", "/mcp/eco/reset", "/mcp/eco/x/../resync"} {
 		rec := pedir(t, h, "POST", ruta, "", `{"unix_nano":1}`)
-		// Una ruta sin limpiar la redirige el propio ServeMux (307) a la
-		// limpia, que es 404: tampoco llega al invitado.
-		if rec.Code != http.StatusNotFound && !(strings.Contains(ruta, "..") && rec.Code == http.StatusTemporaryRedirect) {
+		// Una ruta sin limpiar la redirige el propio ServeMux a la limpia, que
+		// es 404: tampoco llega al invitado. Go 1.24 redirige con 301 y las
+		// versiones posteriores con 307; los dos valen.
+		redirige := rec.Code == http.StatusMovedPermanently || rec.Code == http.StatusTemporaryRedirect
+		if rec.Code != http.StatusNotFound && !(strings.Contains(ruta, "..") && redirige) {
 			t.Errorf("%s: %d, quería 404", ruta, rec.Code)
 		}
 	}
