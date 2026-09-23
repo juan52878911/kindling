@@ -376,15 +376,11 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CPUPct: req.CPUPct,
 		Egress: egress, AllowDomains: req.AllowDomains,
 		TTLSeconds: ttl, OnTTL: onTTL,
-		Volumes: req.Volumes, Labels: labels,
+		Volumes: req.Volumes, Shares: req.Shares, Labels: labels,
 		AllowExec: true,
 	})
 	if err != nil {
-		code := http.StatusInternalServerError
-		if errors.Is(err, machine.ErrExecNotInSnapshot) {
-			code = http.StatusConflict
-		}
-		fail(w, code, err)
+		fail(w, runStatus(err), err)
 		return
 	}
 	// Se devuelve cuando el agente ya escucha: quien crea un sandbox va a

@@ -127,6 +127,7 @@ type SandboxRequest struct {
 	AllowDomains []string           `json:"allow_domains,omitempty"`
 	CPUPct       int                `json:"cpu_pct,omitempty"`
 	Volumes      []VolumeAttachment `json:"volumes,omitempty"`
+	Shares       []ShareSpec        `json:"shares,omitempty"`
 	Labels       map[string]string  `json:"labels,omitempty"`
 }
 

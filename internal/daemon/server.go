@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -61,6 +61,11 @@ type Server struct {
 	store *store
 	lock  *os.File // cerrojo de la raíz (ver bloquearRaiz); abierto mientras viva
 }
+
+// SetShareConfig fija de dónde lee el daemon su configuración de carpetas
+// compartidas (daemon.share_roots y daemon.share_copy_max_mib). Se consulta en
+// cada petición: cambiarla no pide reiniciar.
+func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareConfig(f) }
 
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
@@ -123,6 +128,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /machines/{ref}/files", s.handleFiles)
 	mux.HandleFunc("PUT /machines/{ref}/files", s.handleFiles)
 	mux.HandleFunc("DELETE /machines/{ref}/files", s.handleFiles)
+	mux.HandleFunc("POST /shares/uploads", s.handleShareUpload)
 	mux.HandleFunc("POST /sandboxes", s.handleCreateSandbox)
 	mux.HandleFunc("GET /sandboxes", s.handleListSandboxes)
 	mux.HandleFunc("GET /sandboxes/{ref}", s.handleGetSandbox)
@@ -285,6 +291,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Capabilities: Capabilities,
 		Backend:      s.mgr.Backend(),
 		Arch:         runtime.GOARCH,
+		ShareRoots:   s.mgr.ShareRoots(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
@@ -318,14 +325,21 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.Run(r.Context(), req)
 	if err != nil {
-		code := http.StatusInternalServerError
-		if errors.Is(err, machine.ErrExecNotInSnapshot) {
-			code = http.StatusConflict
-		}
-		fail(w, code, err)
+		fail(w, runStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, mc)
+}
+
+// runStatus traduce los errores de arrancar una máquina a códigos HTTP.
+func runStatus(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrExecNotInSnapshot):
+		return http.StatusConflict
+	case errors.Is(err, machine.ErrShareRequest):
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +461,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name, req.Replace)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		code := http.StatusBadRequest
+		if errors.Is(err, machine.ErrSharesCommit) {
+			code = http.StatusConflict
+		}
+		fail(w, code, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, snap)

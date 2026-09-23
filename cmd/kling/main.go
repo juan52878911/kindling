@@ -10,9 +10,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -66,7 +68,10 @@ MACHINES
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
       [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of freezing
       [-mem-max MiB]                               ceiling for kling resize
+      [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only copy
+                                                   (default), or live (docs/compartir.md)
   ps [-a] [-q] [-json]                             lists the machines
+  inspect <ref>                                    a machine in JSON, shares included
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
@@ -85,6 +90,7 @@ SANDBOXES AND EXEC
       [-egress none|internet|allowlist]            no network by default; when idle
       [-on-ttl remove|freeze]                      it is destroyed, or frozen at zero
       [-mem MiB] [-cpus N] [-volume ...] [-q]      cost and woken by the next exec
+      [-share SRC:DST[:copy|ro|rw]]                host folder inside, as in run
   sandbox ls | renew <sb> [-ttl D] | rm <sb>...    list / extend / destroy
   exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming its
       <ref> [--] <cmd> [args...]                   output; exits with its exit code
@@ -186,6 +192,8 @@ func main() {
 		err = cmdCp(args)
 	case "sandbox", "sandboxes":
 		err = cmdSandbox(args)
+	case "inspect":
+		err = cmdInspect(args)
 	case "ps":
 		err = cmdPS(args)
 	case "logs":
@@ -355,9 +363,33 @@ func cmdDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
+	srv.SetShareConfig(shareConfig)
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
+}
+
+// shareConfig lee la configuración de carpetas compartidas del daemon. Se
+// llama en cada petición que la necesita, así que cambiarla con `kling config
+// set` no pide reiniciar el daemon. Las variables de entorno mandan sobre el
+// fichero: en systemd es lo cómodo.
+func shareConfig() machine.ShareConfig {
+	cfg := loadConfig()
+	roots := cfg.Daemon.ShareRoots
+	if v, ok := os.LookupEnv("KLING_SHARE_ROOTS"); ok {
+		r, err := config.ParseShareRoots(v)
+		if err != nil {
+			log.Printf("warning: KLING_SHARE_ROOTS: %v (no live shares allowed)", err)
+		}
+		roots = r
+	}
+	mib := cfg.Daemon.ShareCopyMaxMiB
+	if v := os.Getenv("KLING_SHARE_COPY_MAX_MIB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			mib = n
+		}
+	}
+	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
 }
 
 // daemonBackend decide con qué VMM arranca el daemon: KLING_VMM si es un
@@ -404,6 +436,8 @@ func cmdRun(args []string) error {
 	onTTL := fs.String("on-ttl", "", "what happens when -ttl runs out: freeze (default) or remove")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
+	var shares shareFlag
+	fs.Var(&shares, "share", shareUsage)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -417,7 +451,13 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	cfg := loadConfig()
-	mc, err := api.NewClient(cfg.Host(*host)).Run(ctx, api.RunRequest{
+	endpoint := cfg.Host(*host)
+	client := api.NewClient(endpoint)
+	shareSpecs, err := prepareShares(ctx, client, endpoint, shares)
+	if err != nil {
+		return err
+	}
+	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
 		From:  *from,
 		Image: config.Or(*image, cfg.Defaults.Image, "default"),
@@ -435,6 +475,7 @@ func cmdRun(args []string) error {
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
 		Volumes:   vols,
+		Shares:    shareSpecs,
 		AllowExec: *allowExec,
 		OnTTL:     *onTTL,
 	})
@@ -445,6 +486,9 @@ func cmdRun(args []string) error {
 		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
 	} else {
 		fmt.Printf("%s  %s  booted cold in %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
+	}
+	for _, s := range mc.Shares {
+		fmt.Printf("  %s  %s  (%s)\n", s.Mount, s.Source, s.Mode)
 	}
 	return nil
 }
@@ -678,8 +722,21 @@ func cmdPS(args []string) error {
 		return nil
 	}
 
+	// La columna de carpetas solo aparece si alguna máquina tiene: quien no
+	// las usa no paga el ancho, y los scripts que leen la tabla de siempre
+	// siguen viendo la misma.
+	conShares := false
+	for _, mc := range list {
+		if len(mc.Shares) > 0 {
+			conShares = true
+		}
+	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tIMAGE\tSTATE\tCPU/MEM\tDISK\tEGRESS\tAGE\tLAST OP")
+	head := "ID\tNAME\tIMAGE\tSTATE\tCPU/MEM\tDISK\tEGRESS\tAGE\tLAST OP"
+	if conShares {
+		head += "\tSHARES"
+	}
+	fmt.Fprintln(tw, head)
 	var totalDisk int64
 	for _, mc := range list {
 		if !*all && (mc.State == api.StateStopped || mc.State == api.StateFailed) {
@@ -690,9 +747,13 @@ func cmdPS(args []string) error {
 		if eg == "" {
 			eg = "none"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\t%s\n",
+		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\t%s",
 			mc.ID[:12], mc.Name, mc.Image, mc.State,
 			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), eg, since(mc.CreatedAt), lastOp(mc))
+		if conShares {
+			row += "\t" + sharesColumn(mc)
+		}
+		fmt.Fprintln(tw, row)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -1080,6 +1141,13 @@ func cmdInfo(args []string) error {
 	fmt.Printf("machines:     %d\n", i.Machines)
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))
+	}
+	if i.Has("shares-live") {
+		roots := "none (live shares disabled; see daemon.share_roots)"
+		if len(i.ShareRoots) > 0 {
+			roots = strings.Join(i.ShareRoots, ", ")
+		}
+		fmt.Printf("share roots:  %s\n", roots)
 	}
 	if i.EncryptedAtRest != nil {
 		if *i.EncryptedAtRest {
