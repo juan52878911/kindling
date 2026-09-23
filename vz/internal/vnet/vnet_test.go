@@ -232,6 +232,15 @@ func TestForwardReachesGuest(t *testing.T) {
 		t.Fatal("a forward to a closed guest port must fail")
 	}
 	c.Close()
+	// El reenvío acepta aunque dentro no escuche nadie; Probe sí distingue.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !r.n.Probe(ctx, 8080) {
+		t.Fatal("probe of the listening guest port says closed")
+	}
+	if r.n.Probe(ctx, 9999) {
+		t.Fatal("probe of a closed guest port says open")
+	}
 	if _, err := r.n.Forward(0); err == nil {
 		t.Fatal("port 0 must be rejected")
 	}

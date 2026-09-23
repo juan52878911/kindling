@@ -3,6 +3,7 @@ package fc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -58,6 +59,8 @@ func TestKlingStatsEInfo(t *testing.T) {
 			_, _ = io.WriteString(w, `{"footprint_mib": 412}`)
 		case "/kling/info":
 			_, _ = io.WriteString(w, `{"backend":"vz","version":"0.1.0"}`)
+		case "/kling/probe":
+			fmt.Fprintf(w, `{"open": %t}`, r.URL.Query().Get("port") == "8080")
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"fault_message":"kling-vz does not implement this"}`)
@@ -68,6 +71,12 @@ func TestKlingStatsEInfo(t *testing.T) {
 	}
 	if i, err := c.KlingInfo(context.Background()); err != nil || i.Backend != "vz" {
 		t.Fatalf("info = %+v, %v", i, err)
+	}
+	if open, err := c.KlingProbe(context.Background(), 8080); err != nil || !open {
+		t.Fatalf("probe 8080 = %v, %v", open, err)
+	}
+	if open, err := c.KlingProbe(context.Background(), 9000); err != nil || open {
+		t.Fatalf("probe 9000 = %v, %v", open, err)
 	}
 }
 

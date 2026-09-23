@@ -504,6 +504,24 @@ func (n *Net) acceptForward(l net.Listener, port uint16) {
 	}
 }
 
+// Probe dice si algo acepta conexiones en ese puerto del invitado: conecta por
+// la pila de usuario, como haría un reenvío, y cierra. false si el invitado
+// rechaza o no contesta antes de que venza ctx.
+func (n *Net) Probe(ctx context.Context, port int) bool {
+	if port < 1 || port > 65535 {
+		return false
+	}
+	gc, err := gonet.DialTCPWithBind(ctx, n.stack,
+		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GatewayIP.As4())},
+		tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: uint16(port)},
+		ipv4.ProtocolNumber)
+	if err != nil {
+		return false
+	}
+	gc.Close()
+	return true
+}
+
 // Close cierra puertos, pila y socketpair.
 func (n *Net) Close() {
 	n.mu.Lock()

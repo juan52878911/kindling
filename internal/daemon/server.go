@@ -551,7 +551,10 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	addr := mc.Addr(port)
-	out, code, err := proxyGuest(r.Context(), addr, req)
+	esperar := func(ctx context.Context, timeout time.Duration) error {
+		return s.esperarPuerto(ctx, mc, port, timeout)
+	}
+	out, code, err := proxyGuest(r.Context(), addr, req, esperar)
 	if err != nil {
 		fail(w, code, err)
 		return
@@ -562,7 +565,11 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 // proxyGuest manda req al servidor que escucha en addr dentro del invitado y
 // devuelve su respuesta. Si falla, code es el estado HTTP con el que contestar.
 // Está separado del handler para poder probarlo sin una microVM.
-func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.GuestResponse, int, error) {
+//
+// esperar es cómo se espera a que el puerto abra (wait_ms, probe_only): la
+// dirección no basta en macOS, donde el reenvío acepta siempre (esperarPuerto).
+func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
+	esperar func(context.Context, time.Duration) error) (api.GuestResponse, int, error) {
 	// El daemon no añade nada de ningún protocolo: ruta, cabeceras de ida y
 	// cuáles devolver las decide quien llama.
 	path := req.Path
@@ -592,7 +599,7 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.Gue
 	// Un servidor recién arrancado tarda en escuchar. Esperar aquí, y no en el
 	// cliente, mantiene el sondeo en la red que puede verlo.
 	if req.WaitMS > 0 {
-		if err := waitPort(ctx, addr, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
+		if err := esperar(ctx, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
 			return api.GuestResponse{}, http.StatusGatewayTimeout, err
 		}
 	}
@@ -631,6 +638,34 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.Gue
 }
 
 // waitPort espera a que algo escuche en addr, o se rinde al agotar el plazo.
+// esperarPuerto espera a que algo escuche en ese puerto del invitado de mc.
+//
+// En Linux es waitPort sobre su IP. En macOS se pregunta a kling-vz
+// (/kling/probe): el reenvío de loopback lo abre el ayudante y acepta la
+// conexión escuche el invitado o no, así que waitPort daba por abierto al
+// instante un servidor que aún no escuchaba, o que no existía —probe_only
+// contestaba 200 y wait_ms no esperaba nada—.
+func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		open, ok := s.mgr.ProbeGuestPort(ctx, mc.ID, port)
+		if !ok {
+			return waitPort(ctx, mc.Addr(port), time.Until(deadline))
+		}
+		if open {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("nobody is listening on port %d inside %s", port, mc.Name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
 func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error

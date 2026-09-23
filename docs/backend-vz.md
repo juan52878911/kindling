@@ -91,6 +91,7 @@ El núcleo las llama únicamente en macOS.
 | `GET /kling/info` | `{"backend": "vz", "version": "x.y.z"}`. |
 | `PUT /kling/network` `{"egress": "none"\|"internet"\|"allowlist", "allow_domains": [...]}` | Política de salida de esta máquina. Se manda antes de `InstanceStart` o de `snapshot/load`; si nunca llega, `none`. No viaja en el snapshot: es de la instancia, como el namespace en Linux. |
 | `PUT /kling/forwards` `{"ports": [8080, ...]}` | Abre un puerto en `127.0.0.1` (elegido por el sistema) por cada puerto del invitado y contesta `{"forwards": {"8080": "127.0.0.1:61234", ...}}`. Se puede llamar en cualquier momento tras crear la red; repetir un puerto devuelve la misma dirección. |
+| `GET /kling/probe?port=N` | `{"open": bool}`: si algo acepta conexiones en ese puerto DENTRO del invitado (conecta por la pila de usuario, espera ≤1 s al SYN). El reenvío no sirve para saberlo: el puerto de loopback lo abre el ayudante y acepta siempre. El núcleo lo usa para esperar al agente, `wait_ms` y `probe_only`. |
 | `GET /kling/stats` | `{"footprint_mib": N}`: memoria que ocupa esta máquina en el host, sumando el `phys_footprint` del ayudante y del proceso auxiliar `com.apple.Virtualization.VirtualMachine` que la aloja. Es lo que en Linux es el RSS de firecracker. |
 
 ### Por qué puertos en loopback y no la IP del invitado

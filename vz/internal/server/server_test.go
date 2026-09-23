@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,6 +113,14 @@ type fakeNet struct {
 }
 
 func (n *fakeNet) VMFile() *os.File { return nil }
+
+// Probe: en el doble, "escucha" lo que tenga reenvío pedido y sea par.
+func (n *fakeNet) Probe(_ context.Context, p int) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	_, ok := n.fwd[p]
+	return ok && p%2 == 0
+}
 func (n *fakeNet) Forward(p int) (string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -455,6 +464,21 @@ func TestBalloonReappliedAfterBoot(t *testing.T) {
 	if got := objetivos(); len(got) != n {
 		t.Fatalf("re-applied after the ceiling was lifted: %v", got)
 	}
+}
+
+func TestProbe(t *testing.T) {
+	r := newRig(t)
+	r.mustFail("GET", "/kling/probe?port=8080", "", "not up")
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	r.must("PUT", "/kling/forwards", `{"ports":[8080,9001]}`)
+	if out := r.must("GET", "/kling/probe?port=8080", ""); !strings.Contains(out, `"open":true`) {
+		t.Fatalf("probe 8080 = %s", out)
+	}
+	if out := r.must("GET", "/kling/probe?port=9001", ""); !strings.Contains(out, `"open":false`) {
+		t.Fatalf("probe 9001 = %s", out)
+	}
+	r.mustFail("GET", "/kling/probe?port=x", "", "invalid port")
 }
 
 func TestBalloonStatsAndFootprint(t *testing.T) {

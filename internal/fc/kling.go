@@ -114,3 +114,16 @@ func (c *Client) KlingFootprintMiB(ctx context.Context) (int64, error) {
 	}
 	return s.FootprintMiB, nil
 }
+
+// KlingProbe pregunta a kling-vz si algo escucha en ese puerto DENTRO del
+// invitado. El reenvío de loopback acepta siempre (lo abre el ayudante), así
+// que conectar a él no dice nada; esto sí.
+func (c *Client) KlingProbe(ctx context.Context, port int) (bool, error) {
+	var r struct {
+		Open bool `json:"open"`
+	}
+	if err := c.doOut(ctx, http.MethodGet, "/kling/probe?port="+strconv.Itoa(port), nil, &r); err != nil {
+		return false, err
+	}
+	return r.Open, nil
+}

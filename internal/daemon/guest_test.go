@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -34,7 +37,7 @@ func invitado(t *testing.T, respuesta string) (string, *vistoPorElInvitado) {
 // de sesión de vuelta, salvo que se pida.
 func TestProxyGuestGenerico(t *testing.T) {
 	addr, v := invitado(t, `hola`)
-	out, _, err := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/healthz", Method: "GET"})
+	out, _, err := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/healthz", Method: "GET"}, porDial(addr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +51,7 @@ func TestProxyGuestGenerico(t *testing.T) {
 	out, _, err = proxyGuest(context.Background(), addr, api.GuestRequest{
 		Path: "/mcp", Headers: map[string]string{"Mcp-Session-Id": "s0"},
 		ResponseHeaders: []string{"X-Otra", "Mcp-Session-Id"},
-	})
+	}, porDial(addr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +62,13 @@ func TestProxyGuestGenerico(t *testing.T) {
 
 func TestProxyGuestLimites(t *testing.T) {
 	addr, _ := invitado(t, strings.Repeat("x", 2048))
-	if _, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/", MaxBodyBytes: 1024}); err == nil || code != http.StatusBadGateway {
+	if _, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/", MaxBodyBytes: 1024}, porDial(addr)); err == nil || code != http.StatusBadGateway {
 		t.Fatalf("una respuesta mayor que max_body_bytes debe fallar, no truncarse: code=%d err=%v", code, err)
 	}
-	if _, code, _ := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/", MaxBodyBytes: api.GuestMaxBodyCap + 1}); code != http.StatusBadRequest {
+	if _, code, _ := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/", MaxBodyBytes: api.GuestMaxBodyCap + 1}, porDial(addr)); code != http.StatusBadRequest {
 		t.Fatalf("pasarse del tope es un 400: %d", code)
 	}
-	if _, code, _ := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "sin-barra"}); code != http.StatusBadRequest {
+	if _, code, _ := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "sin-barra"}, porDial(addr)); code != http.StatusBadRequest {
 		t.Fatalf("una ruta sin '/' es un 400: %d", code)
 	}
 }
@@ -74,10 +77,32 @@ func TestProxyGuestLimites(t *testing.T) {
 // dónde. Solo una sonda de puerto puede ir sin ruta.
 func TestProxyGuestExigeRuta(t *testing.T) {
 	addr, _ := invitado(t, `x`)
-	if _, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Body: "{}"}); err == nil || code != 400 {
+	if _, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Body: "{}"}, porDial(addr)); err == nil || code != 400 {
 		t.Fatalf("sin ruta debe ser un 400: code=%d err=%v", code, err)
 	}
-	if _, _, err := proxyGuest(context.Background(), addr, api.GuestRequest{ProbeOnly: true, WaitMS: 1000}); err != nil {
+	if _, _, err := proxyGuest(context.Background(), addr, api.GuestRequest{ProbeOnly: true, WaitMS: 1000}, porDial(addr)); err != nil {
 		t.Fatalf("una sonda de puerto no necesita ruta: %v", err)
+	}
+}
+
+// porDial es la espera de Linux: el puerto está abierto si se puede conectar.
+func porDial(addr string) func(context.Context, time.Duration) error {
+	return func(ctx context.Context, t time.Duration) error { return waitPort(ctx, addr, t) }
+}
+
+// probe_only tiene que esperar a que el puerto abra DENTRO del invitado, no a
+// que acepte la dirección: en macOS el reenvío acepta siempre. Con una espera
+// que nunca ve el puerto abierto, contesta 504 aunque addr acepte conexiones.
+func TestProxyGuestProbeUsaLaEspera(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	nunca := func(ctx context.Context, t time.Duration) error { return errors.New("nobody is listening") }
+	_, code, err := proxyGuest(context.Background(), ln.Addr().String(),
+		api.GuestRequest{ProbeOnly: true, WaitMS: 100}, nunca)
+	if err == nil || code != http.StatusGatewayTimeout {
+		t.Fatalf("probe_only con el puerto cerrado dentro: code=%d err=%v; quería 504", code, err)
 	}
 }

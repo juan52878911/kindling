@@ -46,7 +46,7 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		fail(w, execStatus(err), err)
 		return
 	}
-	if err := waitAgent(r.Context(), mc); err != nil {
+	if err := s.waitAgent(r.Context(), mc); err != nil {
 		fail(w, http.StatusGatewayTimeout, err)
 		return
 	}

@@ -47,8 +47,8 @@ func guestBase(mc *api.Machine) string {
 // detrás no debe fallar por eso. Si ya escucha, no cuesta nada.
 const agentWait = 30 * time.Second
 
-func waitAgent(ctx context.Context, mc *api.Machine) error {
-	if err := waitPort(ctx, mc.Addr(api.GuestPort), agentWait); err != nil {
+func (s *Server) waitAgent(ctx context.Context, mc *api.Machine) error {
+	if err := s.esperarPuerto(ctx, mc, api.GuestPort, agentWait); err != nil {
 		return fmt.Errorf("the guest agent of %s is not listening: %w", mc.Name, err)
 	}
 	return nil
@@ -81,7 +81,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := waitAgent(r.Context(), mc); err != nil {
+	if err := s.waitAgent(r.Context(), mc); err != nil {
 		fail(w, http.StatusGatewayTimeout, err)
 		return
 	}
@@ -260,7 +260,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		fail(w, execStatus(err), err)
 		return
 	}
-	if err := waitAgent(r.Context(), mc); err != nil {
+	if err := s.waitAgent(r.Context(), mc); err != nil {
 		fail(w, http.StatusGatewayTimeout, err)
 		return
 	}
@@ -394,7 +394,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	// vez— el invitado tarda más en llegar a escuchar, y rendirse antes destruye
 	// una máquina que iba a funcionar. Medido con 36 sandboxes de 1,5 GiB
 	// arrancando en ráfaga.
-	if err := waitPort(r.Context(), mc.Addr(api.GuestPort), 2*time.Minute); err != nil {
+	if err := s.esperarPuerto(r.Context(), mc, api.GuestPort, 2*time.Minute); err != nil {
 		_ = s.mgr.Remove(mc.ID)
 		fail(w, http.StatusGatewayTimeout, fmt.Errorf("the sandbox booted but its guest agent never answered in 2m: %w.\n"+
 			"The host is probably saturated: check `kling top` and `kling ps`, and give it fewer or smaller sandboxes", err))

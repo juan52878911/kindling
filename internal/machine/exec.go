@@ -8,8 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -113,4 +115,31 @@ func (m *Manager) ImageHasAgent(ctx context.Context, image string) (bool, error)
 		return false, err
 	}
 	return imageHasBridge(ctx, base, layer)
+}
+
+// ProbeGuestPort pregunta al VMM si algo escucha en ese puerto dentro del
+// invitado. ok=false cuando no se puede preguntar así —Linux, donde el host
+// llega al invitado por su IP y basta un dial, o una máquina sin reenvío de ese
+// puerto o sin VMM vivo— y quien llama sondea la dirección como siempre.
+//
+// En macOS es la única forma fiable: el reenvío de loopback lo abre kling-vz y
+// acepta la conexión escuche el invitado o no.
+func (m *Manager) ProbeGuestPort(ctx context.Context, id string, port int) (open, ok bool) {
+	m.mu.RLock()
+	mc := m.byID[id]
+	sock := m.socket[id]
+	var fwd bool
+	if mc != nil {
+		_, fwd = mc.Forwards[strconv.Itoa(port)]
+	}
+	m.mu.RUnlock()
+	if !fwd || sock == "" {
+		return false, false
+	}
+	open, err := fc.New(sock).KlingProbe(ctx, port)
+	if err != nil {
+		// Un kling-vz anterior a /kling/probe: se sondea el reenvío.
+		return false, false
+	}
+	return open, true
 }

@@ -47,6 +47,8 @@ type VM interface {
 type Network interface {
 	VMFile() *os.File
 	Forward(port int) (string, error)
+	// Probe dice si algo escucha en ese puerto del invitado (ver getProbe).
+	Probe(ctx context.Context, port int) bool
 	Close()
 }
 
@@ -191,6 +193,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /kling/info", s.getInfo)
 	mux.HandleFunc("PUT /kling/network", s.putKlingNetwork)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
+	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fault(w, fmt.Errorf("kling-vz does not implement %s %s", r.Method, r.URL.Path))
@@ -785,6 +788,37 @@ func (s *Server) putForwards(w http.ResponseWriter, r *http.Request) {
 		out[strconv.Itoa(p)] = addr
 	}
 	writeJSON(w, map[string]any{"forwards": out})
+}
+
+// probeTimeout es cuánto espera un sondeo a que el invitado conteste al SYN.
+// Mientras su red no ha subido, el SYN se pierde y la pila lo reintenta; más
+// que esto y quien sondea en bucle se queda esperando entero cada vuelta.
+const probeTimeout = time.Second
+
+// getProbe sirve GET /kling/probe?port=N: {"open": bool}, si algo escucha en
+// ese puerto DENTRO del invitado.
+//
+// Hace falta porque el reenvío no lo dice: el puerto de loopback lo abre este
+// proceso y acepta siempre, escuche el invitado o no (solo después, al no
+// poder conectar dentro, cierra). Sondear la dirección del reenvío con un
+// dial daba "abierto" al instante para un servidor que tardaba segundos en
+// arrancar, o que no existía: probe_only contestaba 200 y wait_ms no esperaba.
+func (s *Server) getProbe(w http.ResponseWriter, r *http.Request) {
+	port, err := strconv.Atoi(r.URL.Query().Get("port"))
+	if err != nil || port < 1 || port > 65535 {
+		fault(w, fmt.Errorf("invalid port %q", r.URL.Query().Get("port")))
+		return
+	}
+	s.mu.Lock()
+	n := s.net
+	s.mu.Unlock()
+	if n == nil {
+		fault(w, errors.New("the network is not up yet"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+	defer cancel()
+	writeJSON(w, map[string]any{"open": n.Probe(ctx, port)})
 }
 
 func (s *Server) getStats(w http.ResponseWriter, _ *http.Request) {
