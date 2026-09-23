@@ -28,8 +28,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
-	"github.com/juan52878911/kindling/internal/config"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
 )
 
 // installSig es una huella de "instalando algo en caliente" en la consola o en
@@ -219,7 +220,7 @@ func exerciseTools(post poster, tools []api.ToolSpec) (salida string, ejercidas 
 			continue
 		}
 		ejercidas++
-		out.Write(api.MCPPayload(raw))
+		out.Write(mcp.MCPPayload(raw))
 		out.WriteByte('\n')
 	}
 	return out.String(), ejercidas, nil

@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Group es un conjunto de máquinas que comparten servicio MCP.
@@ -28,7 +29,7 @@ type Group struct {
 
 // Ephemeral indica si sus instancias mueren tras cada acción.
 func (g Group) Ephemeral() bool {
-	return g.Link == nil && g.Snapshot != nil && !g.Snapshot.Stateful()
+	return g.Link == nil && g.Snapshot != nil && !mcp.Stateful(g.Snapshot)
 }
 
 // Build agrupa por la etiqueta "service" y, en su defecto, por el snapshot del

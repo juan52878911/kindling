@@ -86,7 +86,7 @@ func TestWaitReadyVenceSiNadieContesta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exitCh, err := procReaper.startTracked(cmd)
+	exitCh, err := procReaper.StartTracked(cmd)
 	if err != nil {
 		t.Skipf("no puedo lanzar sleep aquí: %v", err)
 	}

@@ -86,7 +86,7 @@ func (b *bridge) prewarm() (*warmChild, error) {
 	}
 	cmd.Stderr = os.Stderr // como en spawn: el log del servidor, a la consola serie
 
-	exitCh, err := procReaper.startTracked(cmd)
+	exitCh, err := procReaper.StartTracked(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("could not start the MCP server to prewarm: %w", err)
 	}
@@ -181,7 +181,7 @@ func (w *warmChild) discard() {
 	}
 	err := waitFor(w.cmd, w.exitCh)
 	if w.cmd.Process != nil {
-		procReaper.forget(w.cmd.Process.Pid)
+		procReaper.Forget(w.cmd.Process.Pid)
 	}
 	if err != nil {
 		log.Printf("prewarm: unbound MCP server discarded (%v)", err)

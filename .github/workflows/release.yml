@@ -91,6 +91,17 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" \
             -o dist/kling-bridge-${{ matrix.target.ext }} ./cmd/kling-bridge
 
+      - name: build kling-guest (linux only, estático)
+        if: matrix.target.os == 'linux'
+        env:
+          GOOS:   linux
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: '0'
+          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
+        run: |
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/kling-guest-${{ matrix.target.ext }} ./cmd/kling-guest
+
       - name: checksum
         working-directory: dist
         run: |
@@ -126,6 +137,7 @@ jobs:
           #   release/kling-<plat>                  (CLI)
           #   release/kling-linux-<arch>            (daemon, solo linux)
           #   release/kling-bridge-linux-<arch>     (bridge, solo linux)
+          #   release/kling-guest-linux-<arch>      (agente de invitado, solo linux)
           for d in artifacts/*; do
             cp -v "$d"/* release/ 2>/dev/null || true
           done
@@ -193,6 +205,8 @@ jobs:
             release/kling-darwin-arm64
             release/kling-bridge-linux-amd64
             release/kling-bridge-linux-arm64
+            release/kling-guest-linux-amd64
+            release/kling-guest-linux-arm64
             release/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

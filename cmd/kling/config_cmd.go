@@ -7,9 +7,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/juan52878911/kindling/internal/api"
-	"github.com/juan52878911/kindling/internal/config"
-	"github.com/juan52878911/kindling/internal/transport"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
+	"github.com/juan52878911/kindling/pkg/plugin"
+	"github.com/juan52878911/kindling/pkg/transport"
 )
 
 // ── contextos ─────────────────────────────────────────────────────────────────
@@ -222,11 +223,21 @@ func cmdConfig(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := cfg.Set(args[1], args[2]); err != nil {
+		shown := ""
+		if ext, key, ck := extensionKey(args[1]); ck != nil {
+			if err := cfg.SetExtension(ext, key, ck.Type, args[2]); err != nil {
+				return err
+			}
+			shown = cfg.ExtensionValue(ext, key, ck.Type)
+		} else if err := cfg.Set(args[1], args[2]); err != nil {
 			return err
 		}
 		if err := cfg.Save(); err != nil {
 			return err
+		}
+		if shown != "" {
+			fmt.Printf("%s = %s\n", args[1], shown)
+			return nil
 		}
 		// Se reimprime desde la configuración ya guardada, no desde el
 		// argumento: así los secretos salen enmascarados igual que en
@@ -237,6 +248,28 @@ func cmdConfig(args []string) error {
 	default:
 		return fmt.Errorf("usage: kling config [show|path|set <key> <value>]")
 	}
+}
+
+// extensionKey reconoce "<extensión>.<clave>" cuando la clave la declara una
+// extensión instalada. Las secciones del núcleo nunca se tratan como
+// extensiones, aunque una se llame igual.
+func extensionKey(full string) (string, string, *plugin.ConfigKey) {
+	ext, key, ok := strings.Cut(full, ".")
+	if !ok {
+		return "", "", nil
+	}
+	switch ext {
+	case "defaults", "gateway", "memory":
+		return "", "", nil
+	}
+	for _, p := range extensions().Plugins {
+		if p.Name == ext && p.Err == nil {
+			if ck := p.Manifest.ConfigKey(key); ck != nil {
+				return ext, key, ck
+			}
+		}
+	}
+	return "", "", nil
 }
 
 // valueOf busca una clave entre las que lista Keys(), que ya enmascara lo que
@@ -273,6 +306,19 @@ func configShow() error {
 			v = "-"
 		}
 		fmt.Fprintf(tw, "%s\t%s\n", kv[0], v)
+	}
+	// Las claves que declaran las extensiones instaladas, con su valor.
+	for _, p := range extensions().Plugins {
+		if p.Err != nil {
+			continue
+		}
+		for _, ck := range p.Manifest.Config {
+			v := cfg.ExtensionValue(p.Name, ck.Key, ck.Type)
+			if v == "" {
+				v = "-"
+			}
+			fmt.Fprintf(tw, "%s.%s\t%s\n", p.Name, ck.Key, v)
+		}
 	}
 	return tw.Flush()
 }

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // handleProcStats devuelve el consumo de memoria en JSON, para `kling top`.
@@ -64,6 +64,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Los que no se han sondeado nunca no emiten serie: una salud "desconocida" no
 	// es un 0, y publicarla como tal haría saltar alertas por servicios que solo
 	// están sin probar.
+	//
+	// COMPATIBILIDAD (v0.5): lee el campo Health, que el núcleo espeja desde la
+	// anotación mcp.health. En v0.6 esta serie sale del daemon y la publica el
+	// gateway de kindling-mcp en su propio /metrics.
 	fmt.Fprintln(w, "# HELP kling_snapshot_healthy Health of the snapshot's last probe (1 healthy, 0 unhealthy).")
 	fmt.Fprintln(w, "# TYPE kling_snapshot_healthy gauge")
 	for _, sn := range s.mgr.Snapshots() {

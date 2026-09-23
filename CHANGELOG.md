@@ -6,6 +6,50 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## Sin publicar
 
+kindling se separa en dos: **el núcleo de microVMs** y **kindling-mcp**, lo que se
+venía usando para alojar servidores MCP. Esta versión hace la separación dentro del
+repositorio sin que cambie nada de lo que se teclea: `kling mcp import`, `kling add`,
+`kling connect` y el gateway funcionan igual, ahora servidos por una extensión
+incorporada. El siguiente paso mueve kindling-mcp a su propio repositorio y binario.
+Ver [`docs/extensions.md`](docs/extensions.md) y [`docs/api.md`](docs/api.md).
+
+### Novedades
+
+- **Extensiones de `kling`.** Un ejecutable `kling-<nombre>` en el `PATH` (o en
+  `$KLING_PLUGIN_PATH`) añade subcomandos a `kling` declarándolos en un manifiesto:
+  aparecen en la ayuda y en el completado, y `kling` les pasa el control con `exec`,
+  así que códigos de salida y señales llegan intactos. Pueden añadir líneas a
+  `kling status` y claves a `kling config`. `kling plugins` las lista. Los comandos
+  MCP pasan por este mismo camino como extensión incorporada.
+- **Anotaciones de snapshot y store en el daemon**, para que una extensión guarde
+  su estado sin que el núcleo lo entienda. El catálogo y la salud de MCP son ahora
+  las anotaciones `mcp.tools` y `mcp.health`; los servidores externos enlazados,
+  `store/mcp/links`.
+- **Constructores de imágenes con nombre.** `POST /images` con `builder` ejecuta un
+  constructor de root instalado por el administrador en
+  `/usr/local/lib/kindling/builders/`; `kling images build <nombre> -builder <b>`.
+- **Ficheros dentro de imágenes**: `kling images cat` e `images put` leen o ponen al
+  día un fichero de una imagen ya construida, sin reconstruirla.
+- **`kling-guest`**, el agente de invitado genérico (exec, volúmenes, MMDS, DNS)
+  para microVMs sin servidor MCP. `kling-bridge` lo embebe.
+- **Paquetes públicos para extensiones**: `pkg/api`, `pkg/config`, `pkg/guest`,
+  `pkg/scheduler` (planificación genérica del gateway), `pkg/plugin`,
+  `pkg/transport`, `pkg/durable`, `pkg/panico`.
+- **`GET /info` devuelve la versión real del daemon** (era siempre `0.1.0`) y la
+  lista de capacidades del API.
+
+### Cambios que se notan
+
+- **`kling status -json`**: lo del gateway y los agentes pasa de `gateway` y
+  `agents` a `extensions.mcp.gateway` y `extensions.mcp.agents`.
+- **El proxy al invitado ya no asume MCP.** Quien pasa `path` recibe solo lo que
+  pide. Las peticiones sin `path` (clientes v0.4) conservan los valores de antes
+  hasta v0.6.
+- Las rutas `/snapshots/{n}/catalog`, `/snapshots/{n}/health`, `/links`,
+  `/images/refresh-bridge` y `/images/{n}/capabilities` quedan como alias
+  deprecados; se retiran en v0.6. Al arrancar, el daemon migra `links.json` al
+  store y deja el original como `links.json.migrated`.
+
 ### Correcciones
 
 - **`-bundle` copia el `package.json` junto al bundle.** `server-sequential-thinking`

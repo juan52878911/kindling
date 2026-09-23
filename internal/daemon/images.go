@@ -30,9 +30,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 
-	"github.com/juan52878911/kindling/internal/durable"
+	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // buildTimeout: instalar node y un paquete npm en un chroot va lento, y en un
@@ -163,6 +163,10 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if req.Builder != "" {
+		s.buildWithBuilder(w, r, req)
+		return
+	}
 	if err := validateBuild(req); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
@@ -231,6 +235,7 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	//
 	// Un fallo al escribirla NO tumba la construcción: la imagen ya está hecha y
 	// funciona; perder la receta es peor documentación, no un error.
+	s.mgr.EnsureImageReadable(req.Name)
 	if err := s.saveRecipe(req); err != nil {
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}

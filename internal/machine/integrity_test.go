@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // El digest se calcula sobre el contenido: mismos bytes, mismo hash; un byte

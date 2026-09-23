@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 	"os"
 	"strconv"
 	"strings"

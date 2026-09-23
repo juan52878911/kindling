@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {

@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // populateTimeout acota lo que puede tardar una instalación.

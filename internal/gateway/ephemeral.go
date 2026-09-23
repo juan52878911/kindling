@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/scheduler"
+	"strconv"
 )
 
 // EJECUCIÓN EFÍMERA.
@@ -50,10 +52,10 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	// daemon puede haber congelado por TTL desde debajo. Entregar una congelada
 	// hacía que el fallo llegara al cliente sin reintento, y un dial a una VM
 	// viva cuesta un milisegundo — no se nota en el camino rápido.
-	for vm := a.gw.pool.take(t.Service); vm != nil; vm = a.gw.pool.take(t.Service) {
-		if err := waitReady(ctx, vm.ip, GuestPort, time.Second); err != nil {
-			log.Printf("pool: %s not responding (%v); removing it and trying the next one", vm.id[:8], err)
-			go a.gw.client.Remove(context.WithoutCancel(ctx), vm.id)
+	for vm := a.gw.TakeWarm(t.Service); vm != nil; vm = a.gw.TakeWarm(t.Service) {
+		if err := scheduler.WaitReady(ctx, vm.IP(), GuestPort, time.Second); err != nil {
+			log.Printf("pool: %s not responding (%v); removing it and trying the next one", vm.ID()[:8], err)
+			go a.gw.Client().Remove(context.WithoutCancel(ctx), vm.ID())
 			continue
 		}
 		defer func() {
@@ -65,20 +67,20 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 			// el cliente ya no espera a que ocurra.
 			go func() {
 				bg := context.WithoutCancel(ctx)
-				_ = a.gw.client.Remove(bg, vm.id)
-				a.gw.pool.fill(bg, t.Service, snap)
+				_ = a.gw.Client().Remove(bg, vm.ID())
+				a.gw.FillPool(bg, t.Service, snap)
 			}()
 		}()
-		res, fault := a.invoke(ctx, "http://"+vm.ip+":"+itoa(GuestPort), vm.session, t, args)
-		log.Printf("ephemeral %s: %s in %s (from pool)", vm.id[:8], t.Qualified,
+		res, fault := a.invoke(ctx, "http://"+vm.IP()+":"+strconv.Itoa(GuestPort), vm.Token(), t, args)
+		log.Printf("ephemeral %s: %s in %s (from pool)", vm.ID()[:8], t.Qualified,
 			time.Since(start).Round(time.Millisecond))
 		return res, fault
 	}
 
 	// Camino lento: no había nada preparado. Se instancia ahora y, de paso, se
 	// pide que el fondo se rellene para las siguientes.
-	defer a.gw.pool.fill(context.WithoutCancel(ctx), t.Service, snap)
-	mc, err := a.gw.client.Run(ctx, api.RunRequest{
+	defer a.gw.FillPool(context.WithoutCancel(ctx), t.Service, snap)
+	mc, err := a.gw.Client().Run(ctx, api.RunRequest{
 		From: snap,
 		Labels: map[string]string{
 			api.LabelService: t.Service,
@@ -96,14 +98,14 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	// Pase lo que pase, la máquina muere. Es la promesa del modo efímero.
 	defer func() {
 		go func() {
-			if err := a.gw.client.Remove(context.WithoutCancel(ctx), mc.ID); err != nil {
+			if err := a.gw.Client().Remove(context.WithoutCancel(ctx), mc.ID); err != nil {
 				log.Printf("ephemeral %s: could not destroy it: %v", mc.ID[:8], err)
 			}
 		}()
 	}()
 
 	base := "http://" + mc.IP + ":" + fmt.Sprint(GuestPort)
-	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
+	if err := scheduler.WaitReady(ctx, mc.IP, GuestPort, scheduler.ReadyTimeout); err != nil {
 		return nil, &rpcFault{-32000, fmt.Sprintf("%s did not start listening: %v", t.Service, err)}
 	}
 
@@ -169,7 +171,7 @@ func (a *aggregator) snapshotOf(ctx context.Context, service string) (string, *r
 		return name, nil
 	}
 
-	snaps, err := a.gw.client.Snapshots(ctx)
+	snaps, err := a.gw.Client().Snapshots(ctx)
 	if err != nil {
 		return "", &rpcFault{-32000, err.Error()}
 	}

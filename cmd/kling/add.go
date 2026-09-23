@@ -21,9 +21,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
-	"github.com/juan52878911/kindling/internal/config"
 	"github.com/juan52878911/kindling/internal/registry"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
 )
 
 func cmdSearch(args []string) error {

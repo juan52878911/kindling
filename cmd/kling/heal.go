@@ -23,7 +23,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // argvReimportar reconstruye la linea de `mcp import` que rehace un servicio TAL
@@ -66,7 +67,7 @@ func argvReimportar(s *api.Snapshot, host string) []string {
 	// Explicito en ambos sentidos: el defecto de `mcp import` depende de lo que
 	// detecte de la imagen, y aqui no queremos que decida — queremos lo que
 	// habia.
-	if s.Stateful() {
+	if mcp.Stateful(s) {
 		args = append(args, "-stateful")
 	} else {
 		args = append(args, "-ephemeral")
@@ -119,10 +120,10 @@ func seCuraReconstruyendo(probeErr error, saludGrabada string) bool {
 	if probeErr == nil {
 		return false
 	}
-	if api.EsFalloTSC(probeErr) || api.EsImagenCambiada(probeErr) {
+	if api.EsFalloTSC(probeErr) || mcp.EsImagenCambiada(probeErr) {
 		return true
 	}
-	return api.EsImagenCambiada(errors.New(saludGrabada))
+	return mcp.EsImagenCambiada(errors.New(saludGrabada))
 }
 
 // motivoDeReconstruir dice POR QUE se reconstruye, en una linea.
@@ -130,7 +131,7 @@ func motivoDeReconstruir(probeErr error, saludGrabada string) string {
 	switch {
 	case api.EsFalloTSC(probeErr):
 		return "its golden snapshot didn't survive the host reboot (TSC)"
-	case api.EsImagenCambiada(probeErr) || api.EsImagenCambiada(errors.New(saludGrabada)):
+	case mcp.EsImagenCambiada(probeErr) || mcp.EsImagenCambiada(errors.New(saludGrabada)):
 		return "its image was refreshed and the golden snapshot still has the old bridge"
 	default:
 		return "its golden snapshot is no longer usable"
@@ -183,7 +184,7 @@ func mcpHeal(args []string) error {
 		}
 
 		probeErr := probeHealth(ctx, c, nombre, *wait, *profundo, s.Egress)
-		if _, err := c.SetHealth(ctx, nombre, probeErr == nil, errMsg(probeErr)); err != nil {
+		if err := mcp.SetHealth(ctx, c, nombre, probeErr == nil, errMsg(probeErr)); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", nombre, err)
 			continue
 		}
@@ -203,7 +204,7 @@ func mcpHeal(args []string) error {
 		// un secreto, la imagen no trae lo que dice— NO se arregla
 		// reconstruyendolo: reimportar en bucle gastaria minutos por vuelta y
 		// taparia el problema real bajo un "lo intente".
-		if !seCuraReconstruyendo(probeErr, s.HealthErr) {
+		if !seCuraReconstruyendo(probeErr, mcp.HealthOf(s).Error) {
 			fmt.Fprintf(tw, "  %s\t✗ unhealthy, and not a cause that rebuilding fixes — left alone\n", nombre)
 			continue
 		}
@@ -225,7 +226,7 @@ func mcpHeal(args []string) error {
 		_ = tw.Flush()
 		// El motivo va en el mensaje: son dos causas distintas y decir la que no
 		// es manda a buscar el problema al sitio equivocado.
-		fmt.Printf("  %s  rebuilding: %s\n", nombre, motivoDeReconstruir(probeErr, s.HealthErr))
+		fmt.Printf("  %s  rebuilding: %s\n", nombre, motivoDeReconstruir(probeErr, mcp.HealthOf(s).Error))
 		if err := mcpImport(argv); err != nil {
 			fmt.Fprintf(tw, "  %s\t✗ rebuild failed: %v\n", nombre, err)
 			continue

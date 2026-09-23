@@ -8,7 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // La autocuracion rehace el servicio COMO ESTABA. Si perdiera un campo por el
@@ -29,7 +30,7 @@ func TestArgvReimportarConservaLaConfiguracionDelDorado(t *testing.T) {
 			{Name: "codigo", Mount: "/data", ReadOnly: true},
 			{Name: "cache", Mount: "/cache"},
 		},
-		Labels: map[string]string{api.LabelService: "semgrep", api.LabelStateful: "true"},
+		Labels: map[string]string{api.LabelService: "semgrep", mcp.LabelStateful: "true"},
 	}
 
 	argv := argvReimportar(s, "")
@@ -156,11 +157,11 @@ func TestSeCuraReconstruyendoSoloLasDosCausasQueLoSon(t *testing.T) {
 		cura    bool
 	}{
 		{"el TSC tras reiniciar el anfitrion", tsc, "", true},
-		{"la imagen se refresco bajo el dorado", noArranca, api.MotivoImagenCambiada, true},
+		{"la imagen se refresco bajo el dorado", noArranca, mcp.MotivoImagenCambiada, true},
 		{"no arranca y nadie sabe por que", noArranca, "", false},
 		{"el servidor MCP responde mal", errors.New("didn't respond to tools/list (timeout)"), "", false},
 		{"falta un secreto", errors.New("missing env GITHUB_TOKEN"), "", false},
-		{"sano: no hay nada que curar", nil, api.MotivoImagenCambiada, false},
+		{"sano: no hay nada que curar", nil, mcp.MotivoImagenCambiada, false},
 	}
 	for _, c := range casos {
 		if got := seCuraReconstruyendo(c.err, c.grabada); got != c.cura {
@@ -179,7 +180,7 @@ func TestElMotivoDeReconstruirDiceLaCausaCorrecta(t *testing.T) {
 	if m := motivoDeReconstruir(tsc, ""); !strings.Contains(m, "TSC") {
 		t.Errorf("caso TSC: %q", m)
 	}
-	m := motivoDeReconstruir(noArranca, api.MotivoImagenCambiada)
+	m := motivoDeReconstruir(noArranca, mcp.MotivoImagenCambiada)
 	if !strings.Contains(m, "refreshed") {
 		t.Errorf("caso imagen refrescada: %q", m)
 	}

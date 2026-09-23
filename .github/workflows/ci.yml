@@ -52,3 +52,5 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/kling
           GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling
           GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-bridge
+          GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-guest
+          GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling-guest

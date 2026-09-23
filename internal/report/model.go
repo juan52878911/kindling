@@ -6,7 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // El informe no dibuja: describe. Go emite un modelo plano y el navegador lo
@@ -163,7 +164,7 @@ func buildTools(g Group) []Tool {
 	case g.Link != nil:
 		src = g.Link.Tools
 	case g.Snapshot != nil:
-		src = g.Snapshot.Tools
+		src = snapTools(g.Snapshot)
 	}
 	writes := map[string]bool{}
 	for _, w := range g.writers() {
@@ -217,3 +218,9 @@ func modelJSON(m Model) string {
 }
 
 func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// snapTools es el catálogo capturado del snapshot (anotación mcp.tools).
+func snapTools(s *api.Snapshot) []api.ToolSpec {
+	tools, _ := mcp.ToolsOf(s)
+	return tools
+}

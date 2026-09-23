@@ -31,9 +31,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
-	"github.com/juan52878911/kindling/internal/config"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/config"
+	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
 // runAsDefault es el usuario sin privilegios con el que el daemon lanza
@@ -535,9 +538,10 @@ func privileged(argv ...string) []string {
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	host := hostFlag(fs)
-	gwFlag := fs.String("gateway", "", "gateway URL (default: gateway.url, or inferred from context)")
-	asJSON := fs.Bool("json", false, "JSON output (daemon, gateway and detected agents)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+	asJSON := fs.Bool("json", false, "JSON output (the daemon, plus what each extension reports)")
+	// Los flags que no son del núcleo (p. ej. -gateway, de la extensión MCP)
+	// se ignoran aquí y llegan intactos a los ganchos.
+	if err := fs.Parse(knownFlags(fs, reorderFor(fs, args))); err != nil {
 		return err
 	}
 
@@ -546,20 +550,18 @@ func cmdStatus(args []string) error {
 
 	cfg := loadConfig()
 	c := api.NewClient(cfg.Host(*host))
-	gw := strings.TrimSuffix(config.Or(*gwFlag, cfg.Gateway.URL, guessGateway(cfg.Host(*host))), "/")
 	if *asJSON {
-		return statusJSON(ctx, c, gw, cfg.Gateway.Token)
+		return statusJSON(ctx, c, args)
 	}
 	fmt.Printf("endpoint:     %s\n", c.Endpoint())
 
 	info, err := c.Info(ctx)
-	daemonUp := err == nil
 	if err != nil {
 		fmt.Printf("daemon:       ✗ not responding (%v)\n", err)
 		fmt.Printf("              diagnose and start it with:  kling up\n")
-		// KVM y firecracker los reporta el propio daemon: sin él no se sabe si
-		// faltan o si simplemente no hay quien conteste, y decir "no" sería
-		// mentir sobre una máquina que quizá está perfecta.
+		// Sin daemon no se sabe de KVM ni de firecracker: lo reporta él. Se
+		// dice explícitamente en vez de omitir las líneas, para que no parezca
+		// que se comprobaron y estaban bien.
 		fmt.Printf("KVM:          ? (reported by the daemon)\n")
 		fmt.Printf("firecracker:  ? (reported by the daemon)\n")
 	} else {
@@ -574,50 +576,21 @@ func cmdStatus(args []string) error {
 		fmt.Printf("firecracker:  %s\n", fc)
 	}
 
-	// Gateway: dos preguntas distintas y hay que hacer las dos. /healthz está
-	// abierto a propósito (systemd y los monitores tienen que poder mirar) y
-	// solo dice "el proceso está vivo". /services va detrás del token, así que
-	// es lo único que demuestra que el token configurado AQUÍ sirve para entrar.
-	fmt.Printf("gateway:      %s\n", gw)
-	if err := httpOK(gw + "/healthz"); err != nil {
-		fmt.Printf("  health:     ✗ not responding (%v)\n", err)
-		fmt.Printf("              start it on the daemon's host:  kling gateway -listen 0.0.0.0:8080\n")
-	} else {
-		fmt.Printf("  health:     ✓ alive\n")
-		fmt.Printf("  services:   %s\n", servicesLine(gw+"/services", cfg.Gateway.Token))
-	}
-
-	// Salud de los servicios MCP: el catálogo dice cuántos hay; esto, cuántos
-	// CONTESTAN. Sin esta línea, "services: ✓ 9" era una afirmación sobre el
-	// inventario que se leía como una sobre la salud — y se observaron nueve
-	// servicios 26 horas caídos detrás de ese ✓. El dato sale del meta de cada
-	// snapshot (lo escribe `kling mcp health`); aquí no se despierta nada.
-	if daemonUp {
-		if snaps, serr := c.Snapshots(ctx); serr == nil && len(snaps) > 0 {
-			fmt.Printf("mcp health:   %s\n", mcpHealthLine(snaps))
+	// Lo demás lo cuenta cada extensión. Un gancho que falla es una línea de
+	// aviso, nunca un error de status.
+	for _, p := range extensions().WithHook(plugin.HookStatus) {
+		out, err := plugin.RunHook(ctx, p, plugin.HookStatus, args, config.Path())
+		os.Stdout.Write(out)
+		if err != nil {
+			fmt.Printf("%-13s ? (extension failed: %v)\n", p.Name+":", err)
 		}
-	}
-
-	// Agentes: sin esto, "el gateway funciona" y "mi editor lo usa" siguen
-	// siendo dos cosas distintas, y la segunda es la que importa.
-	det := detectedClients()
-	if len(det) == 0 {
-		fmt.Printf("agents:       none detected on this machine\n")
-	} else {
-		var names []string
-		for _, cl := range det {
-			names = append(names, cl.label)
-		}
-		fmt.Printf("agents:       %s\n", strings.Join(names, ", "))
-		fmt.Printf("              plug them in with:  kling connect -all -install all\n")
 	}
 	return nil
 }
 
-// statusJSON emite el mismo diagnóstico que `status`, pero como un objeto
-// estable para consumo de máquina. Cada bloque (daemon, gateway) sobrevive al
-// fallo del otro: un daemon caído no impide reportar el gateway, y al revés.
-func statusJSON(ctx context.Context, c *api.Client, gw, token string) error {
+// statusJSON es `kling status -json`: el daemon, y bajo "extensions" lo que
+// cada extensión reporta con su gancho de status.
+func statusJSON(ctx context.Context, c *api.Client, args []string) error {
 	type daemonInfo struct {
 		OK          bool   `json:"ok"`
 		Version     string `json:"version,omitempty"`
@@ -627,20 +600,12 @@ func statusJSON(ctx context.Context, c *api.Client, gw, token string) error {
 		Firecracker string `json:"firecracker,omitempty"`
 		Error       string `json:"error,omitempty"`
 	}
-	type gatewayInfo struct {
-		URL      string   `json:"url"`
-		Healthy  bool     `json:"healthy"`
-		Services []string `json:"services,omitempty"`
-		Error    string   `json:"error,omitempty"`
-	}
 	var report struct {
-		Endpoint string      `json:"endpoint"`
-		Daemon   daemonInfo  `json:"daemon"`
-		Gateway  gatewayInfo `json:"gateway"`
-		Agents   []string    `json:"agents"`
+		Endpoint   string                     `json:"endpoint"`
+		Daemon     daemonInfo                 `json:"daemon"`
+		Extensions map[string]json.RawMessage `json:"extensions"`
 	}
 	report.Endpoint = c.Endpoint()
-
 	if info, err := c.Info(ctx); err != nil {
 		report.Daemon.Error = err.Error()
 	} else {
@@ -652,28 +617,24 @@ func statusJSON(ctx context.Context, c *api.Client, gw, token string) error {
 		report.Daemon.Firecracker = strings.TrimSpace(info.Firecrack)
 	}
 
-	report.Gateway.URL = gw
-	if err := httpOK(gw + "/healthz"); err != nil {
-		report.Gateway.Error = err.Error()
-	} else {
-		report.Gateway.Healthy = true
-		if names, err := gatewayServiceNames(gw+"/services", token); err != nil {
-			report.Gateway.Error = err.Error()
-		} else {
-			report.Gateway.Services = names
+	report.Extensions = map[string]json.RawMessage{}
+	for _, p := range extensions().WithHook(plugin.HookStatus) {
+		out, err := plugin.RunHook(ctx, p, plugin.HookStatus, append(args, "-json"), config.Path())
+		out = bytes.TrimSpace(out)
+		if err != nil || !json.Valid(out) {
+			msg := "did not return JSON"
+			if err != nil {
+				msg = err.Error()
+			}
+			b, _ := json.Marshal(map[string]string{"error": msg})
+			report.Extensions[p.Name] = b
+			continue
 		}
-	}
-
-	report.Agents = []string{}
-	for _, cl := range detectedClients() {
-		report.Agents = append(report.Agents, cl.label)
+		report.Extensions[p.Name] = out
 	}
 	return json.NewEncoder(os.Stdout).Encode(report)
 }
 
-// gatewayServiceNames pide /services (texto plano, un servicio por línea) y
-// devuelve solo los nombres. Es la variante para JSON de servicesLine, sin sus
-// mensajes de remediación.
 func gatewayServiceNames(url, token string) ([]string, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -710,10 +671,10 @@ func mcpHealthLine(snaps []*api.Snapshot) string {
 	var healthy, unknown int
 	var sick []string
 	for _, s := range snaps {
-		switch s.Health {
-		case "healthy":
+		switch mcp.HealthOf(s).Status {
+		case mcp.Healthy:
 			healthy++
-		case "unhealthy":
+		case mcp.Unhealthy:
 			n := s.Name
 			if svc := s.Service(); svc != "" {
 				n = svc

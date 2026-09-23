@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // "services: ✓ 9" hablaba del inventario y se leía como salud: nueve servicios

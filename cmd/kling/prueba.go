@@ -17,8 +17,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // pruebasDeVida son herramientas conocidas, invocables sin efectos, que
@@ -78,7 +79,7 @@ func ejercitar(post poster, sid, herramienta, args string) error {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(api.MCPPayload(raw), &res); err != nil {
+	if err := json.Unmarshal(mcp.MCPPayload(raw), &res); err != nil {
 		return fmt.Errorf("%s: respuesta ilegible: %w", herramienta, err)
 	}
 	if res.Error != nil {
@@ -115,7 +116,9 @@ type posterCrudo func(metodo, ruta, cuerpo string) ([]byte, error)
 func guestRaw(ctx context.Context, c *api.Client, ref string) posterCrudo {
 	return func(metodo, ruta, cuerpo string) ([]byte, error) {
 		resp, err := c.Guest(ctx, ref, api.GuestRequest{
-			Port: 8080, Path: ruta, Method: metodo, Body: cuerpo,
+			Port: api.GuestPort, Path: ruta, Method: metodo, Body: cuerpo,
+			// La mayoría de estas rutas son /mcp; a /dns la cabecera no le estorba.
+			Headers: map[string]string{"Accept": mcp.AcceptMCP},
 		})
 		if err != nil {
 			return nil, err

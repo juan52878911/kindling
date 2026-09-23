@@ -5,7 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Este fichero responde a tres preguntas que la tabla de instancias no contesta:
@@ -42,7 +43,7 @@ func (g Group) Readiness() Readiness {
 		r.Latency = "whatever the external server takes"
 	case g.Snapshot == nil:
 		r.Blocked = "no snapshot to instantiate from"
-	case len(g.Snapshot.Tools) == 0:
+	case len(snapTools(g.Snapshot)) == 0:
 		r.Blocked = "no catalog captured: re-import with kling mcp import"
 	case r.Live > 0:
 		r.Latency = "immediate: an instance is already running"
@@ -73,7 +74,7 @@ func (g Group) Flow() []string {
 	r := g.Readiness()
 	steps := []string{"The gateway resolves the tool to the " + g.Service + " service"}
 
-	if g.Snapshot.Stateful() {
+	if mcp.Stateful(g.Snapshot) {
 		switch {
 		case r.Live > 0:
 			steps = append(steps, "Reuses its instance, which is already running")
@@ -102,7 +103,7 @@ func (g Group) writers() []string {
 	case g.Link != nil:
 		tools = g.Link.Tools
 	case g.Snapshot != nil:
-		tools = g.Snapshot.Tools
+		tools = snapTools(g.Snapshot)
 	}
 
 	verbs := []string{"write", "save", "store", "create", "add", "delete", "remove",

@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // AggregatePath es el servicio virtual que reúne a todos los demás.
@@ -535,7 +536,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	}
 
 	tEnsure := time.Now()
-	e, err := a.gw.ensure(ctx, t.Service)
+	e, err := a.gw.Ensure(ctx, t.Service)
 	if err != nil {
 		return nil, &rpcFault{-32000, err.Error()}
 	}
@@ -544,10 +545,10 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	// quedaba fuera de la protección: evictLRU y el segador podían congelar la
 	// instancia en plena llamada, y un scan de dos minutos moría con un timeout
 	// que parecía un fallo de la herramienta.
-	a.gw.begin(e)
-	defer a.gw.end(e)
+	a.gw.Begin(e)
+	defer a.gw.End(e)
 	dEnsure := time.Since(tEnsure)
-	base := "http://" + e.ip + ":" + fmt.Sprint(GuestPort)
+	base := "http://" + e.IP() + ":" + fmt.Sprint(GuestPort)
 
 	// Una sesión por servicio y por conversación: el estado del servidor MCP debe
 	// persistir entre llamadas del mismo cliente.
@@ -753,16 +754,16 @@ func (a *aggregator) isStateful(ctx context.Context, service string) bool {
 		return v
 	}
 
-	snaps, err := a.gw.client.Snapshots(ctx)
+	snaps, err := a.gw.Client().Snapshots(ctx)
 	if err != nil {
 		return false
 	}
 	a.snapMu.Lock()
 	for _, s := range snaps {
 		if svc := s.Service(); svc != "" {
-			a.stateful[svc] = s.Stateful()
+			a.stateful[svc] = mcp.Stateful(s)
 		}
-		a.stateful[s.Name] = s.Stateful()
+		a.stateful[s.Name] = mcp.Stateful(s)
 	}
 	v = a.stateful[service]
 	a.snapMu.Unlock()

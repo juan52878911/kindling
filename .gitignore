@@ -35,3 +35,4 @@ bench-*.json
 
 # Grafo de conocimiento (graphify): se regenera con /graphify
 /graphify-out/
+/kling-guest

@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Autocompletado de shell, escrito a mano.
 //
@@ -14,9 +17,17 @@ import "fmt"
 
 // completionCommands es la lista de comandos de primer nivel, en el orden del
 // dispatcher de main(). Si se añade un comando nuevo, va aquí.
-const completionCommands = "up status run ps logs freeze thaw stop rm squeeze " +
-	"mmds commit snapshots images rmi topo top export events info context config " +
-	"volume connect migrate mcp memory add search gateway daemon completion version help"
+// coreSubcommands son los subcomandos del núcleo que se completan.
+var coreSubcommands = [][2]string{
+	{"volume|volumes", "create ls rm populate"},
+	{"images", "ls refresh toolchain recipe rm build cat put"},
+	{"context", "ls use add rm"},
+	{"config", "show path set"},
+	{"plugins", "ls"},
+}
+
+// machineArgs son los comandos del núcleo que reciben un id de máquina.
+const machineArgs = "logs|freeze|thaw|stop|rm|top|commit|mmds|squeeze"
 
 func cmdCompletion(args []string) error {
 	if len(args) < 1 {
@@ -26,13 +37,54 @@ func cmdCompletion(args []string) error {
 	}
 	switch args[0] {
 	case "bash":
-		fmt.Print(bashCompletion)
+		fmt.Print(completionScript(false))
 	case "zsh":
-		fmt.Print(zshCompletion)
+		fmt.Print(completionScript(true))
 	default:
 		return fmt.Errorf("unsupported shell %q: use bash or zsh", args[0])
 	}
 	return nil
+}
+
+// completionCommands son los comandos de primer nivel: los del núcleo y los que
+// aportan las extensiones instaladas. El script es estático: tras instalar una
+// extensión hay que volver a cargarlo.
+func completionCommands() string {
+	var out []string
+	for _, c := range coreCommands {
+		if c != "dial-stdio" && c != "volumes" {
+			out = append(out, c)
+		}
+	}
+	for _, c := range extensions().Commands() {
+		out = append(out, c.Name)
+	}
+	return strings.Join(out, " ")
+}
+
+func completionScript(zsh bool) string {
+	var cases strings.Builder
+	add := func(pattern, words string) {
+		if zsh {
+			fmt.Fprintf(&cases, "        %s) compadd -- %s ;;\n", pattern, words)
+		} else {
+			fmt.Fprintf(&cases, "        %s) COMPREPLY=( $(compgen -W \"%s\" -- \"$cur\") ); return ;;\n", pattern, words)
+		}
+	}
+	for _, sc := range coreSubcommands {
+		add(sc[0], sc[1])
+	}
+	for _, c := range extensions().Commands() {
+		if len(c.Subcommands) > 0 {
+			add(c.Name, strings.Join(c.Subcommands, " "))
+		}
+	}
+	if zsh {
+		fmt.Fprintf(&cases, "        %s) compadd -- ${(f)\"$(kling ps -q 2>/dev/null)\"} ;;\n", machineArgs)
+		return fmt.Sprintf(zshCompletion, completionCommands(), cases.String())
+	}
+	fmt.Fprintf(&cases, "        %s) COMPREPLY=( $(compgen -W \"$(kling ps -q 2>/dev/null)\" -- \"$cur\") ); return ;;\n", machineArgs)
+	return fmt.Sprintf(bashCompletion, completionCommands(), cases.String())
 }
 
 const bashCompletion = `# kling bash completion.  Load with:  source <(kling completion bash)
@@ -42,7 +94,7 @@ _kling() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     cword=$COMP_CWORD
 
-    local commands="` + completionCommands + `"
+    local commands="%s"
 
     if [ "$cword" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -50,15 +102,7 @@ _kling() {
     fi
 
     case "${COMP_WORDS[1]}" in
-        mcp)            COMPREPLY=( $(compgen -W "import list refresh link unlink" -- "$cur") ); return ;;
-        volume|volumes) COMPREPLY=( $(compgen -W "create ls rm populate" -- "$cur") ); return ;;
-        images)         COMPREPLY=( $(compgen -W "ls refresh toolchain recipe" -- "$cur") ); return ;;
-        context)        COMPREPLY=( $(compgen -W "ls use add rm" -- "$cur") ); return ;;
-        config)         COMPREPLY=( $(compgen -W "show path set" -- "$cur") ); return ;;
-        memory)         COMPREPLY=( $(compgen -W "status enable disable install-service" -- "$cur") ); return ;;
-        logs|freeze|thaw|stop|rm|top|commit|mmds|squeeze)
-            COMPREPLY=( $(compgen -W "$(kling ps -q 2>/dev/null)" -- "$cur") ); return ;;
-    esac
+%s    esac
 }
 complete -F _kling kling
 `
@@ -66,7 +110,7 @@ complete -F _kling kling
 const zshCompletion = `# kling zsh completion.  Load with:  source <(kling completion zsh)
 _kling() {
     local -a commands
-    commands=(` + completionCommands + `)
+    commands=(%s)
 
     if (( CURRENT == 2 )); then
         compadd -- $commands
@@ -74,15 +118,7 @@ _kling() {
     fi
 
     case "${words[2]}" in
-        mcp)            compadd -- import list refresh link unlink ;;
-        volume|volumes) compadd -- create ls rm populate ;;
-        images)         compadd -- ls refresh toolchain recipe ;;
-        context)        compadd -- ls use add rm ;;
-        config)         compadd -- show path set ;;
-        memory)         compadd -- status enable disable install-service ;;
-        logs|freeze|thaw|stop|rm|top|commit|mmds|squeeze)
-            compadd -- ${(f)"$(kling ps -q 2>/dev/null)"} ;;
-    esac
+%s    esac
 }
 compdef _kling kling
 `

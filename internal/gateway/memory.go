@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 
-	"github.com/juan52878911/kindling/internal/panico"
+	"github.com/juan52878911/kindling/pkg/panico"
 )
 
 // MEMORIA DE USO.

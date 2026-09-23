@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // mockDaemon levanta un servidor HTTP sobre un socket unix que responde lo

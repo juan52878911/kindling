@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/internal/api"
-	"github.com/juan52878911/kindling/internal/durable"
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
-	"github.com/juan52878911/kindling/internal/panico"
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/panico"
 )
 
 // La raíz se monta en SOLO LECTURA y el init es overlay-init, que superpone el
@@ -76,9 +76,15 @@ type Manager struct {
 	cgroupRoot    string
 	CgroupWarning string
 
-	bus    *events.Bus
-	mu     sync.RWMutex
-	byID   map[string]*api.Machine
+	bus  *events.Bus
+	mu   sync.RWMutex
+	byID map[string]*api.Machine
+
+	// metaMu serializa las escrituras de meta.json de snapshots existentes
+	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
+	// simultáneas —el gateway marcando salud y el CLI guardando el catálogo— se
+	// pisaran y una se perdiera sin error.
+	metaMu sync.Mutex
 	socket map[string]string // id -> ruta del socket de firecracker
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún

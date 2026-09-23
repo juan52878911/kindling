@@ -1,0 +1,261 @@
+package plugin
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// ManifestTimeout es lo que se espera a que una extensión imprima su manifiesto.
+// Una extensión colgada no puede dejar a `kling help` esperando.
+var ManifestTimeout = 2 * time.Second
+
+// HookTimeout es lo que se espera a un gancho. Un gancho que falla o tarda
+// produce una línea de aviso, nunca un error de `kling`.
+var HookTimeout = 5 * time.Second
+
+// waitDelay es lo que se espera a que se cierre la salida de una extensión ya
+// muerta por plazo, antes de dejar de leerla.
+const waitDelay = 200 * time.Millisecond
+
+// notPlugins son ejecutables kling-* que acompañan a kindling y no son
+// extensiones: nunca se les pide un manifiesto.
+var notPlugins = map[string]bool{
+	"kling-bridge":       true,
+	"kling-bridge-local": true,
+	"kling-guest":        true,
+}
+
+// Builtin es una extensión que vive dentro del binario de kling. Sirve para
+// que lo que todavía no se ha mudado a su propio binario pase ya por el mismo
+// camino —ayuda, completado, ganchos— que una extensión externa.
+type Builtin struct {
+	Manifest Manifest
+	Commands map[string]func(args []string) error
+	Hooks    map[string]func(args []string, w io.Writer) error
+}
+
+// Plugin es una extensión encontrada.
+type Plugin struct {
+	Name     string
+	Path     string // vacío para las incorporadas
+	Manifest *Manifest
+	Builtin  *Builtin
+	// Err es por qué no se puede usar (manifiesto roto, versión, ...). Una
+	// extensión con Err se lista pero no se ejecuta.
+	Err error
+	// Shadowed son los comandos que declara y que ya tiene el núcleo u otra
+	// extensión anterior: no se le enrutan.
+	Shadowed []string
+}
+
+// Registry es el conjunto de extensiones que ve este kling.
+type Registry struct {
+	Plugins []*Plugin
+	owner   map[string]*Plugin // comando -> extensión que lo sirve
+}
+
+// Options configura el descubrimiento.
+type Options struct {
+	// Core son los comandos del núcleo: ganan siempre.
+	Core []string
+	// Version es la del núcleo, para comprobar MinKling.
+	Version string
+	// Builtins son las extensiones incorporadas; van antes que las externas.
+	Builtins []*Builtin
+	// Path son los directorios donde buscar kling-*; nil = SearchPath().
+	Path []string
+}
+
+// SearchPath es dónde se buscan extensiones, en orden: $KLING_PLUGIN_PATH, el
+// directorio lib/kindling/plugins junto al binario de kling, el de datos del
+// usuario y por último el PATH.
+func SearchPath() []string {
+	var dirs []string
+	if v := os.Getenv("KLING_PLUGIN_PATH"); v != "" {
+		dirs = append(dirs, filepath.SplitList(v)...)
+	}
+	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "..", "lib", "kindling", "plugins"))
+	}
+	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
+		dirs = append(dirs, filepath.Join(d, "kling", "plugins"))
+	} else if h, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(h, ".local", "share", "kling", "plugins"))
+	}
+	dirs = append(dirs, filepath.SplitList(os.Getenv("PATH"))...)
+	return dirs
+}
+
+// Discover encuentra las extensiones y resuelve qué comando sirve cada una.
+func Discover(ctx context.Context, o Options) *Registry {
+	r := &Registry{owner: map[string]*Plugin{}}
+	core := map[string]bool{}
+	for _, c := range o.Core {
+		core[c] = true
+	}
+	claim := func(p *Plugin) {
+		if p.Err != nil {
+			return
+		}
+		for _, c := range p.Manifest.Commands {
+			if core[c.Name] || r.owner[c.Name] != nil {
+				p.Shadowed = append(p.Shadowed, c.Name)
+				continue
+			}
+			r.owner[c.Name] = p
+		}
+	}
+
+	seen := map[string]bool{}
+	for _, b := range o.Builtins {
+		m := b.Manifest
+		p := &Plugin{Name: m.Name, Manifest: &m, Builtin: b}
+		p.Err = m.Validate()
+		seen[m.Name] = true
+		r.Plugins = append(r.Plugins, p)
+		claim(p)
+	}
+
+	path := o.Path
+	if path == nil {
+		path = SearchPath()
+	}
+	for _, dir := range path {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name, ok := strings.CutPrefix(e.Name(), "kling-")
+			if !ok || notPlugins[e.Name()] || strings.ContainsAny(name, ".") || seen[name] {
+				continue
+			}
+			full := filepath.Join(dir, e.Name())
+			if !isExecutable(full) {
+				continue
+			}
+			seen[name] = true
+			p := &Plugin{Name: name, Path: full}
+			p.Manifest, p.Err = loadManifest(ctx, full)
+			if p.Err == nil && p.Manifest.Name != name {
+				p.Err = fmt.Errorf("its manifest says it is %q, but the binary is kling-%s", p.Manifest.Name, name)
+			}
+			if p.Err == nil && !VersionAtLeast(o.Version, p.Manifest.MinKling) {
+				p.Err = fmt.Errorf("needs kling %s or newer (this is %s)", p.Manifest.MinKling, o.Version)
+			}
+			r.Plugins = append(r.Plugins, p)
+			claim(p)
+		}
+	}
+	return r
+}
+
+func isExecutable(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0
+}
+
+func loadManifest(ctx context.Context, path string) (*Manifest, error) {
+	ctx, cancel := context.WithTimeout(ctx, ManifestTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, path, "--kling-manifest")
+	cmd.Stdout = &out
+	cmd.Env = Env("")
+	// Sin WaitDelay, matar la extensión al vencer el plazo no basta: si dejó un
+	// nieto con la salida abierta (un script que llama a sleep), Run espera a que
+	// ese nieto la cierre y el plazo no sirve de nada.
+	cmd.WaitDelay = waitDelay
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("--kling-manifest took more than %s", ManifestTimeout)
+		}
+		return nil, fmt.Errorf("--kling-manifest failed: %v", err)
+	}
+	var m Manifest
+	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+		return nil, fmt.Errorf("--kling-manifest did not print a valid manifest: %v", err)
+	}
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// Lookup devuelve la extensión que sirve el comando, o nil.
+func (r *Registry) Lookup(cmd string) *Plugin {
+	return r.owner[cmd]
+}
+
+// Commands son los comandos que aportan las extensiones utilizables, en orden
+// de grupo y nombre.
+func (r *Registry) Commands() []Command {
+	var out []Command
+	for _, p := range r.Plugins {
+		if p.Err != nil {
+			continue
+		}
+		for _, c := range p.Manifest.Commands {
+			if r.owner[c.Name] == p {
+				out = append(out, c)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Group < out[j].Group })
+	return out
+}
+
+// WithHook son las extensiones utilizables que declaran el gancho h.
+func (r *Registry) WithHook(h string) []*Plugin {
+	var out []*Plugin
+	for _, p := range r.Plugins {
+		if p.Err == nil && p.Manifest.HasHook(h) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Env es el entorno para una extensión: el del proceso más lo que el núcleo le
+// cuenta de sí mismo. configPath vacío no añade KLING_CONFIG.
+func Env(configPath string) []string {
+	env := os.Environ()
+	set := func(k, v string) {
+		for i, kv := range env {
+			if strings.HasPrefix(kv, k+"=") {
+				env[i] = k + "=" + v
+				return
+			}
+		}
+		env = append(env, k+"="+v)
+	}
+	set("KLING_PLUGIN_API", APIVersion)
+	if exe, err := os.Executable(); err == nil {
+		set("KLING_BIN", exe)
+	}
+	if configPath != "" {
+		set("KLING_CONFIG", configPath)
+	}
+	if v := coreVersion; v != "" {
+		set("KLING_VERSION", v)
+	}
+	return env
+}
+
+// coreVersion la fija el núcleo con SetCoreVersion, para KLING_VERSION.
+var coreVersion string
+
+// SetCoreVersion registra la versión del núcleo que se pasa a las extensiones.
+func SetCoreVersion(v string) { coreVersion = v }
