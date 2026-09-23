@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -107,6 +107,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
+
+	// Ejecución y ficheros (solo máquinas con allow_exec) y sandboxes.
+	mux.HandleFunc("POST /machines/{ref}/exec", s.handleExec)
+	mux.HandleFunc("GET /machines/{ref}/files", s.handleFiles)
+	mux.HandleFunc("PUT /machines/{ref}/files", s.handleFiles)
+	mux.HandleFunc("DELETE /machines/{ref}/files", s.handleFiles)
+	mux.HandleFunc("POST /sandboxes", s.handleCreateSandbox)
+	mux.HandleFunc("GET /sandboxes", s.handleListSandboxes)
+	mux.HandleFunc("GET /sandboxes/{ref}", s.handleGetSandbox)
+	mux.HandleFunc("POST /sandboxes/{ref}/renew", s.handleRenewSandbox)
+	mux.HandleFunc("DELETE /sandboxes/{ref}", s.handleRemoveSandbox)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /procstats", s.handleProcStats)
@@ -298,7 +309,11 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	mc, err := s.mgr.Run(r.Context(), req)
 	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
+		code := http.StatusInternalServerError
+		if errors.Is(err, machine.ErrExecNotInSnapshot) {
+			code = http.StatusConflict
+		}
+		fail(w, code, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, mc)

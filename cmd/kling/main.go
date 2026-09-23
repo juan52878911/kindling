@@ -60,6 +60,7 @@ MACHINES
       [-ttl SECONDS] [-cpu-pct PCT]                auto-freeze and CPU ceiling
       [-service NAME] [-label k=v]                 grouping by service
       [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
+      [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of freezing
   ps [-a] [-q] [-json]                             lists the machines
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
@@ -71,6 +72,16 @@ MACHINES
   mmds <ref> [-f store.json]                       injects a session secret via
                                                    MMDS (reads stdin if no -f); the
                                                    machine can no longer be frozen
+
+SANDBOXES AND EXEC
+  sandbox create [-image I | -from S] [-ttl 10m]   a throwaway microVM that runs code:
+      [-egress none|internet|allowlist]            no network by default, destroyed
+      [-mem MiB] [-cpus N] [-volume ...] [-q]      when its TTL runs out
+  sandbox ls | renew <sb> [-ttl D] | rm <sb>...    list / extend / destroy
+  exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming its
+      <ref> [--] <cmd> [args...]                   output; exits with its exit code
+  cp <local|-> <ref>:<path>                        copies a file into a machine
+  cp <ref>:<path> <local|->                        ... or out of it
 
 GOLDEN SNAPSHOTS
   commit [-replace] <ref> <name>                   freezes a machine as a
@@ -139,6 +150,21 @@ func main() {
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
 	case "run":
 		err = cmdRun(args)
+	case "exec":
+		// Termina con el código del comando remoto, sin el "error:" de siempre:
+		// un 1 de grep no es un fallo de kling.
+		code, xerr := cmdExec(args)
+		if xerr != nil {
+			fmt.Fprintln(os.Stderr, "error:", xerr)
+			if code == 0 {
+				code = 1
+			}
+		}
+		os.Exit(code)
+	case "cp":
+		err = cmdCp(args)
+	case "sandbox", "sandboxes":
+		err = cmdSandbox(args)
 	case "ps":
 		err = cmdPS(args)
 	case "logs":
@@ -323,6 +349,8 @@ func cmdRun(args []string) error {
 	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
 	mount := fs.String("mount", "", "where to mount the volume (default /data; only with one)")
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
+	allowExec := fs.Bool("allow-exec", false, "enable kling exec and kling cp on this machine (decided at boot; snapshots keep it)")
+	onTTL := fs.String("on-ttl", "", "what happens when -ttl runs out: freeze (default) or remove")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -354,7 +382,9 @@ func cmdRun(args []string) error {
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
-		Volumes: vols,
+		Volumes:   vols,
+		AllowExec: *allowExec,
+		OnTTL:     *onTTL,
 	})
 	if err != nil {
 		return err

@@ -15,6 +15,8 @@
 //	POST /volume/release     desmonta los volúmenes (antes de congelar)
 //	POST /volume/acquire     los vuelve a montar (después de restaurar)
 //	POST /exec               solo si el kernel arrancó con kling.exec=1
+//	POST /exec/stream        ídem, en streaming (sandboxes)
+//	GET|PUT|DELETE /files    ídem: ficheros dentro de la microVM
 package guest
 
 import (
@@ -102,7 +104,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 
 	if ExecEnabled() {
 		mux.HandleFunc("/exec", ExecHandler(a.Env))
-		log.Printf("command execution enabled (%s=1): this microVM is single-use", execBootParam)
+		mux.HandleFunc("/exec/stream", StreamExecHandler(a.Env))
+		mux.HandleFunc("/files", FilesHandler())
+		log.Printf("command execution enabled (%s=1): exec and files are served", execBootParam)
 	}
 }
 

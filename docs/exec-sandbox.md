@@ -1,0 +1,124 @@
+# Exec y sandboxes
+
+Un agente de código escribe un script y necesita ejecutarlo sin tocar tu máquina.
+kindling le da una microVM de usar y tirar: arranca en milisegundos desde un
+snapshot, no tiene red salvo que se pida, ejecuta lo que se le mande con la salida
+en streaming, y se destruye sola al vencer su tiempo de vida.
+
+```sh
+kling images toolchain                          # una imagen con node, npm, python3 y pip
+kling sandbox create -image toolchain -name sb  # ~5 s en frío
+kling cp ./analisis.py sb:/tmp/
+kling exec sb -- python3 /tmp/analisis.py       # la salida llega según sale
+kling cp sb:/tmp/resultado.json .
+kling sandbox rm sb
+```
+
+## La puerta: allow_exec
+
+Ejecutar comandos y tocar ficheros dentro de una microVM exige que se creara con
+`allow_exec`. No es un permiso que se conceda después:
+
+- viaja en la línea de comandos del kernel (`kling.exec=1`), que solo escribe el
+  host, así que el invitado no puede dárselo a sí mismo;
+- sin él, las rutas `/exec` y `/files` del agente no existen, ni siquiera
+  desactivadas;
+- se congela con la memoria: las máquinas restauradas de un snapshot con
+  `allow_exec` la tienen siempre, y un snapshot sin ella no puede dar sandboxes
+  (`409`).
+
+Por eso una microVM de servicio —las que despierta el gateway de kindling-mcp— no
+ejecuta nada aunque alguien alcance su puerto.
+
+`kling sandbox create` la enciende siempre. Para una máquina normal:
+`kling run -allow-exec`.
+
+## Sandboxes
+
+Un sandbox es una máquina con `allow_exec`, sin red por defecto
+(`-egress internet` o `-egress allowlist -allow dominio` si hace falta), con la
+etiqueta `kind=sandbox` y que **se destruye** al vencer su TTL en vez de
+congelarse (por defecto 10 minutos, máximo 24 horas).
+
+| | |
+|---|---|
+| `kling sandbox create -image I` | arranque en frío, unos segundos |
+| `kling sandbox create -from S` | restaurado de un snapshot con exec: ~300 ms, con el estado de la plantilla |
+| `kling sandbox ls` | los vivos y cuánto les queda |
+| `kling sandbox renew sb -ttl 30m` | vence 30 minutos a partir de ahora |
+| `kling sandbox rm sb` | destruir ya |
+
+La imagen tiene que llevar el agente de invitado (`kling-guest`): la de
+`kling images toolchain`, o cualquiera construida con
+`kling images build -builder base`. El daemon lo comprueba antes de arrancar.
+
+### Plantillas: preparar una vez, restaurar muchas
+
+Instalar dependencias en cada sandbox es lento. Se prepara una máquina, se
+congela como snapshot y los sandboxes nacen de ella:
+
+```sh
+kling run -image toolchain -name plantilla -allow-exec -egress internet -mem 1024
+kling exec plantilla -- npm install -g typescript
+kling commit plantilla ts
+kling sandbox create -from ts -name sb            # ~300 ms, tsc ya dentro
+kling cp ./a.ts sb:/tmp/
+kling exec sb -- sh -c 'cd /tmp && tsc a.ts && node a.js'
+```
+
+Medido en el laboratorio (Lima arm64 con virtualización anidada):
+
+| | |
+|---|---|
+| sandbox en frío sobre `toolchain` | 5,6 s |
+| sandbox desde una plantilla | 0,13–0,32 s |
+| cinco sandboxes desde la misma plantilla, en paralelo | 0,57 s |
+
+La red de la plantilla no pasa a los sandboxes que se piden sin ella: cada sandbox
+elige su egress (sin red por defecto).
+
+## kling exec
+
+```sh
+kling exec [-i] [-e K=V] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] <cmd> [args...]
+```
+
+- `cmd` es argv, sin shell. Para tuberías: `kling exec sb -- sh -c '...'`.
+- stdout y stderr llegan por separado y según salen; también a través de SSH.
+- kling termina con el **código del comando remoto**: se puede usar en scripts.
+- `-i` manda la entrada estándar (hasta 1 MiB; para más, `kling cp`).
+- `-timeout` mata el comando y a todos sus hijos al vencer (por defecto 5 min,
+  máximo 1 h). El código es 137, como en una shell.
+- La salida se corta a 8 MiB por flujo (`-max-output`, máximo 64 MiB). El proceso
+  no muere por eso: se descarta lo que sobra y kling avisa.
+- Una máquina congelada se descongela sola; una recién arrancada se espera hasta
+  que su agente escucha.
+
+## kling cp
+
+```sh
+kling cp [-mode 0755] <local|-> <máquina>:<ruta>
+kling cp <máquina>:<ruta> <local|->
+```
+
+Un fichero por llamada (hasta 64 MiB de subida y 256 MiB de bajada). Para un
+directorio, copiar un tar y deshacerlo con `kling exec`. La escritura es atómica
+(se escribe al lado y se renombra) y el último componente de la ruta no se sigue si
+es un enlace simbólico.
+
+## API
+
+Las rutas, los límites y el formato del flujo están en [`api.md`](api.md#exec-y-ficheros).
+Desde Go, `pkg/api`: `Client.Exec`, `ReadFile`, `WriteFile`, `StatFile`,
+`RemoveFile`, `CreateSandbox`, `Sandboxes`, `RenewSandbox`, `RemoveSandbox`.
+
+## Lo que hay que saber
+
+- **El TTL no espera a que acabe un comando.** Un sandbox de 10 minutos que ejecuta
+  algo de 20 se destruye a los 10. Renuévalo antes, o créalo con más TTL.
+- **Dentro se es root.** La máquina es de usar y tirar y la frontera es el
+  hipervisor, no los permisos de dentro.
+- **Imágenes anteriores a v0.7** llevan un agente sin exec en streaming ni
+  ficheros: el daemon contesta `501` y dice que se reconstruya la imagen.
+- `kling volume populate` sigue usando la ruta de ejecución agregada de siempre,
+  que también entienden los agentes antiguos.

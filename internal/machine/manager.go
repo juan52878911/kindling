@@ -526,6 +526,13 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if n := m.Count(); n >= MaxMachines {
 		return nil, fmt.Errorf("limit of %d machines reached (there are %d)", MaxMachines, n)
 	}
+	switch req.OnTTL {
+	case "", api.OnTTLFreeze:
+		req.OnTTL = ""
+	case api.OnTTLRemove:
+	default:
+		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
+	}
 
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.
@@ -655,7 +662,8 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		ID: id, Name: req.Name, Image: req.Image, State: api.StateCreated,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CreatedAt: time.Now(),
 		TTLSeconds: req.TTLSeconds, CPUPct: req.CPUPct, Labels: req.Labels,
-		Volumes: attachments(vols),
+		Volumes:   attachments(vols),
+		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
 	}
 	m.mu.Lock()
 	m.byID[id] = mc

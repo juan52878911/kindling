@@ -18,9 +18,10 @@ milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detr�
 al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
 extensiones.
 
-> Estado: **v0.6.0 — el núcleo se sostiene solo.** `kling` gestiona microVMs con red,
-> snapshots dorados, aislamiento, volúmenes persistentes, imágenes por capas, eventos,
-> constructores de imágenes y un API del daemon documentado. Alojar servidores MCP bajo
+> Estado: **v0.7.0 — sandboxes para agentes de código.** `kling` gestiona microVMs con
+> red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por capas, eventos,
+> constructores de imágenes, un API del daemon documentado y sandboxes de usar y tirar
+> con exec en streaming. Alojar servidores MCP bajo
 > demanda — el uso para el que nació kindling — vive ahora en la extensión
 > **[kindling-mcp](https://github.com/juan52878911/kindling-mcp)**, que añade `kling mcp`,
 > `kling add`, `kling connect`, `kling gateway` y el resto al mismo comando `kling`. En el
@@ -68,6 +69,9 @@ enlazadas:
 · [Snapshots dorados](#snapshots-dorados)
 · [Ciclo de vida y robustez](#ciclo-de-vida-y-robustez)
 · [Red](#red-un-namespace-por-microvm)
+
+**Sandboxes**
+· [Sandboxes para agentes de código](#sandboxes-para-agentes-de-código)
 
 **Extensiones**
 · [Extensiones: servidores MCP y más](#extensiones)
@@ -428,6 +432,35 @@ Es el mismo enfoque que usa AWS Lambda, y por la misma razón.
 
 ---
 
+# Sandboxes para agentes de código
+
+Un agente escribe un script y necesita ejecutarlo sin tocar tu máquina. `kling` le da
+una microVM de usar y tirar: despierta de un snapshot en milisegundos, no tiene red salvo
+que se pida, transmite la salida de lo que se le mande ejecutar y se destruye sola al
+vencer su tiempo de vida.
+
+```sh
+kling images toolchain                          # una imagen con node, npm, python3 y pip
+kling sandbox create -image toolchain -name sb  # ~5 s en frío
+kling cp ./analisis.py sb:/tmp/
+kling exec sb -- python3 /tmp/analisis.py       # la salida llega según sale
+kling cp sb:/tmp/resultado.json .
+kling sandbox rm sb
+```
+
+`kling exec` termina con el código del comando remoto, separa stdout de stderr, acepta
+stdin con `-i` y con `-timeout` mata al grupo de procesos entero. Prepara una plantilla una
+vez (`kling run -allow-exec`, instala lo que haga falta, `kling commit`) y cada sandbox
+creado con `-from` arranca en **~300 ms** con todo dentro — cinco en paralelo tardaron
+0,57 s en el laboratorio.
+
+La ejecución es **opt-in al arrancar**: viaja en la línea de comandos del kernel, que
+solo escribe el host, y se congela con la memoria. Una microVM de servicio nunca la
+tiene, y un snapshot sin ella no puede convertirse en sandbox. Guía:
+[`docs/exec-sandbox.md`](docs/exec-sandbox.md).
+
+---
+
 # Extensiones
 
 `kling` es el único comando que tecleas. Lo que no es del núcleo de microVMs llega como
@@ -461,7 +494,7 @@ agente de IA. Los números medidos de arriba se tomaron con ella.
 
 | kindling | kindling-mcp |
 |---|---|
-| v0.6.x | v0.1.x |
+| v0.6.x, v0.7.x | v0.1.x |
 
 Si vienes de v0.5 o anterior: el daemon migra en su sitio snapshots, catálogos, salud y
 links; instala kindling-mcp y todos los comandos que usabas siguen funcionando.
@@ -984,6 +1017,7 @@ permite que N instancias compartan páginas.
 | [`docs/README.md`](docs/README.md) | Índice de todo lo que hay bajo `docs/` |
 | [`docs/extensions.md`](docs/extensions.md) | El protocolo de extensiones: manifiesto, despacho, ganchos, unidades |
 | [`docs/api.md`](docs/api.md) | El API HTTP del daemon sobre el que se construyen las extensiones |
+| [`docs/exec-sandbox.md`](docs/exec-sandbox.md) | Sandboxes, exec en streaming y copia de ficheros para agentes de código |
 | [`SECURITY.md`](SECURITY.md) | Modelo de amenaza, barreras, y lo que NO está resuelto |
 | [`CHANGELOG.md`](CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](docs/RELEASE-v0.2.0.md) y [v0.3.0](docs/RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |

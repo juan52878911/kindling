@@ -21,6 +21,8 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `store` | v0.5 | `GET /store/{ns}`, `GET/PUT/DELETE /store/{ns}/{key}` |
 | `builders` | v0.5 | `POST /images` con `builder` y `spec` |
 | `image-files` | v0.5 | `GET/PUT /images/{name}/files` |
+| `exec` | v0.7 | `POST /machines/{ref}/exec`, `GET/PUT/DELETE /machines/{ref}/files`, `allow_exec` y `on_ttl` en `POST /machines` |
+| `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
 
 ## Rutas
 
@@ -100,6 +102,87 @@ permisos `0600` porque el spec puede llevar secretos.
 | `POST /volumes` | crea (`name`, `size_mib`) |
 | `POST /volumes/{name}/populate` | instala paquetes dentro con una microVM de un solo uso |
 | `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no) |
+
+## Exec y ficheros
+
+Solo en máquinas creadas con `allow_exec` (`403` si no). Una máquina congelada se
+descongela; una recién arrancada se espera hasta 30 s a que su agente escuche.
+Guía de uso: [`exec-sandbox.md`](exec-sandbox.md).
+
+### `POST /machines/{ref}/exec`
+
+```json
+{
+  "cmd": ["sh", "-c", "echo hola; exit 3"],
+  "dir": "/tmp",
+  "env": ["FOO=bar"],
+  "stdin": "aG9sYQo=",
+  "timeout_seconds": 300,
+  "max_output_bytes": 8388608
+}
+```
+
+`cmd` es argv, sin shell. `stdin` va en base64, hasta 1 MiB. Plazo por defecto
+300 s (máximo 3600); salida por defecto 8 MiB **por flujo** (máximo 64 MiB).
+
+La respuesta es `application/x-ndjson`, una línea por evento según ocurren:
+
+```json
+{"stream":"stdout","data":"aG9sYQo="}
+{"stream":"stderr","data":"..."}
+{"exit":3,"duration_ms":12}
+```
+
+El último evento es siempre `exit` (con `truncated` si se cortó la salida y
+`timed_out` si lo mató el plazo, código 137) o `error` (no se pudo ejecutar, o el
+invitado dejó de contestar). Un código distinto de cero no es un error HTTP. Con
+`?wait=1` la respuesta es un único objeto: `exit_code`, `stdout`, `stderr` (base64),
+`duration_ms`, `truncated`, `timed_out`.
+
+El daemon no se fía del invitado: recorta cada flujo al tope pedido y garantiza que
+hay exactamente un evento final. Cerrar la conexión mata el comando.
+
+### `/machines/{ref}/files?path=/ruta/absoluta`
+
+| Método | Qué hace |
+|---|---|
+| `GET` | el contenido, en crudo (hasta 256 MiB) |
+| `GET` con `&stat=1` | `{path, size, mode, is_dir, mod_time}` |
+| `PUT` con `&mode=0755` y opcional `&mkdir=1` | escribe el cuerpo (hasta 64 MiB), atómicamente |
+| `DELETE` | borra un fichero o un directorio vacío |
+
+El último componente de la ruta no se sigue si es un enlace simbólico. `501`
+significa que el agente de la imagen es anterior a v0.7.
+
+## Sandboxes
+
+`POST /sandboxes` crea una máquina con `allow_exec`, egress `none` por defecto,
+`on_ttl: remove` y la etiqueta `kind=sandbox`, y contesta cuando su agente ya
+escucha:
+
+```json
+{"image": "toolchain", "ttl_seconds": 600, "egress": "none", "mem_mib": 512}
+```
+
+`image` o `from` (un snapshot hecho con `allow_exec`; si no lo es, `409`), no los
+dos. TTL por defecto 600 s, máximo 86400. También admite `name`, `vcpus`,
+`cpu_pct`, `allow_domains`, `volumes` y `labels`.
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /sandboxes` | los vivos |
+| `GET /sandboxes/{ref}` | uno |
+| `POST /sandboxes/{ref}/renew` | `{"ttl_seconds": N}`: vence N segundos a partir de ahora |
+| `DELETE /sandboxes/{ref}` | lo destruye |
+
+Estas rutas solo tocan máquinas con `kind=sandbox`.
+
+### `allow_exec` y `on_ttl` en `POST /machines`
+
+`allow_exec: true` enciende exec y ficheros. Con `from`, las máquinas heredan la
+del snapshot, y pedirla sobre uno que no la tiene es `409`. `on_ttl` decide qué pasa
+al vencer `ttl_seconds`: `freeze` (por defecto) o `remove`. `commit` graba
+`allow_exec` en el snapshot.
 
 ## El proxy al invitado
 
