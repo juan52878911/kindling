@@ -38,6 +38,7 @@ make deploy-mac HOST=ssh://user@lima-vm    # arm64 Linux VM on Apple Silicon
 | kindling | kindling-mcp |
 |---|---|
 | v0.6.x | v0.1.x |
+| v0.7.x | v0.1.x, v0.2.x |
 
 The installer refuses to install next to a `kling` older than the minimum the extension
 declares.

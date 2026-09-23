@@ -5,9 +5,16 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 
 | kindling-mcp | kindling |
 |---|---|
-| v0.1.x | v0.6.x |
+| v0.2.x | v0.7.x |
+| v0.1.x | v0.6.x, v0.7.x |
 
-## Sin publicar — v0.1.0
+## Sin publicar — v0.2.0
+
+- Sube la dependencia a kindling v0.7. El puente embebe el agente de invitado nuevo
+  (exec en streaming y ficheros), aunque en una microVM de servicio siguen sin
+  existir: solo se encienden con `allow_exec`, y un servicio no lo lleva nunca.
+
+## v0.1.0 — sin publicar
 
 Primera versión por separado. Es la mitad MCP de kindling v0.4/v0.5, sacada del
 núcleo sin cambiar lo que se teclea: con kindling-mcp instalado, `kling mcp`,
