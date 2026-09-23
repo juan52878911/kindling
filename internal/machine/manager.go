@@ -1574,7 +1574,15 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := waitSocket(ctx, c); err != nil {
 			return abortar(err)
 		}
-		toLink := []string{snapPath, memPath, m.imagePath(mc.Image), filepath.Join(dir, "overlay.ext4")}
+		// La imagen se resuelve igual que en runFrom: una imagen por capas no
+		// tiene $NAME.ext4, tiene su capa y la base de su familia. Enlazar la
+		// ruta monolítica fallaba con "no such file" en cuanto la imagen era por
+		// capas, y como jailer era opcional nadie lo había visto.
+		imgBase, imgLayer, ierr := m.imageLayer(mc.Image)
+		if ierr != nil {
+			return abortar(ierr)
+		}
+		toLink := []string{snapPath, memPath, imgBase, imgLayer, filepath.Join(dir, "overlay.ext4")}
 		for _, v := range mc.Volumes {
 			toLink = append(toLink, m.volumePath(v.Name))
 		}

@@ -45,7 +45,10 @@ Cierra lo que quedaba abierto de estabilidad, elasticidad y seguridad tras v0.7.
   los anteriores, que no llevan firma.
 - **El proxy al invitado solo llega al puerto del agente** salvo los declarados
   en la etiqueta `kling.ports`.
-- **Jailer por defecto cuando está instalado**; `KLING_JAILER=0` lo apaga.
+- **Jailer por defecto cuando está instalado**; `KLING_JAILER=0` lo apaga. Activarlo
+  destapó un fallo que llevaba ahí desde que existe el modo jailer: descongelar una
+  máquina de imagen por capas enlazaba en la jaula una ruta monolítica que no existe.
+  Corregido, y el e2e ahora congela y despierta una imagen por capas.
 - `kling info` dice si `$KLING_ROOT` está cifrado en reposo; receta en
   [`docs/cifrado.md`](docs/cifrado.md).
 
