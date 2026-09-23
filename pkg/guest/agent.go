@@ -11,6 +11,7 @@
 //
 //	GET  /healthz            "ok": el invitado está en pie
 //	GET  /dns?host=...       diagnóstico de la resolución de nombres
+//	POST /resync             hora del host y entropía fresca, tras restaurar
 //	POST /volume/sync        vacía la caché del invitado a los volúmenes
 //	POST /volume/release     desmonta los volúmenes (antes de congelar)
 //	POST /volume/acquire     los vuelve a montar (después de restaurar)
@@ -25,6 +26,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Agent es el estado del agente de invitado de este proceso.
@@ -78,6 +81,9 @@ func (a *Agent) Register(mux *http.ServeMux) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/dns", DNSHandler)
+	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
+	// en cada instancia de un mismo snapshot (ver resync.go).
+	mux.HandleFunc(api.GuestResyncPath, ResyncHandler())
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere

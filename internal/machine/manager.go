@@ -120,6 +120,10 @@ type Manager struct {
 	// camino de arranque en frío. Ver baseSupportsLayers.
 	layerOK sync.Map
 
+	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
+	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
+	resyncAvisado sync.Map
+
 	// pendingMiB es la memoria de las microVMs que están ARRANCANDO ahora mismo,
 	// aún sin proceso que la ocupe. checkHostMemory la resta de lo disponible:
 	// sin esto, dos arranques concurrentes ven los dos la misma memoria libre,
@@ -1664,6 +1668,10 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
 	}
+	// El invitado despierta con el reloj del momento en que se congeló, y si
+	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
+	// antes de devolverla como running (ver resync.go).
+	resyncT, resyncOK := m.resyncGuest(ctx, mc.ID)
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -1707,7 +1715,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	out.DiskBytes = m.touchDisk(mc.ID)
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("thawed in %d ms", elapsed)})
+		Message: fmt.Sprintf("thawed in %d ms%s", elapsed, resyncNota(resyncT, resyncOK))})
 	return &out, nil
 }
 

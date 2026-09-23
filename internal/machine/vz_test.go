@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -49,7 +50,16 @@ func TestMain(m *testing.M) {
 
 // puertoFalso es el puerto de loopback que el falso "abre" para cada puerto
 // del invitado. Determinista, para poder comprobarlo desde la prueba.
-func puertoFalso(p int) string { return "127.0.0.1:" + strconv.Itoa(40000+p%10000) }
+func puertoFalso(p int) string {
+	if a := os.Getenv(envFakeVZGuest); a != "" && p == api.GuestPort {
+		return a
+	}
+	return "127.0.0.1:" + strconv.Itoa(40000+p%10000)
+}
+
+// envFakeVZGuest, si está, es la dirección que el falso da como reenvío del
+// puerto del agente: la de un agente falso que monta la prueba.
+const envFakeVZGuest = "KLING_FAKE_VZ_GUEST"
 
 func servirVZFalso(sock, logPath string) {
 	// Como kling-vz: una ruta que no cabe en sun_path se ata desde su
@@ -453,4 +463,79 @@ func squeezeVZ(t *testing.T, libera bool) ([]string, *api.SqueezeResult) {
 		}
 	}
 	return patches, res
+}
+
+// Descongelar resincroniza el invitado ANTES de devolver la máquina: reloj y
+// entropía propios aunque su memoria sea la de otra (ver resync.go).
+func TestVZThawResincronizaAlInvitado(t *testing.T) {
+	m, _ := managerVZ(t)
+	var mu sync.Mutex
+	var vistos []api.GuestResync
+	agente := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != api.GuestResyncPath {
+			http.NotFound(w, r)
+			return
+		}
+		var req api.GuestResync
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		vistos = append(vistos, req)
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"skew_ms":0}`))
+	}))
+	defer agente.Close()
+	t.Setenv(envFakeVZGuest, strings.TrimPrefix(agente.URL, "http://"))
+
+	id := "0123abcd4567ef89"
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := volcadoEnCurso(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := sellarVolcado(dir); err != nil {
+		t.Fatal(err)
+	}
+	m.byID[id] = &api.Machine{ID: id, Name: "vz-resync", State: api.StateWarm, Egress: "none",
+		IP: knet.GuestIP, CreatedAt: time.Now()}
+	eventos, cancelar := m.bus.Subscribe()
+	defer cancelar()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	antes := time.Now()
+	out, err := m.Thaw(ctx, id)
+	if out != nil {
+		defer matarVMM(out.PID)
+	}
+	if err != nil {
+		t.Fatalf("thaw: %v", err)
+	}
+	mu.Lock()
+	n := len(vistos)
+	var v api.GuestResync
+	if n > 0 {
+		v = vistos[0]
+	}
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("el agente recibió %d resync, quería 1", n)
+	}
+	if len(v.Entropy) != api.GuestResyncEntropy || time.Unix(0, v.UnixNano).Before(antes) {
+		t.Fatalf("resync con datos raros: %d bytes, hora %v", len(v.Entropy), time.Unix(0, v.UnixNano))
+	}
+	select {
+	case ev := <-eventos:
+		if !strings.Contains(ev.Message, "guest resynced") {
+			t.Fatalf("el evento no dice que se resincronizó: %q", ev.Message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sin evento de thaw")
+	}
 }
