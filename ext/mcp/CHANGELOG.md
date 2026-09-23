@@ -11,6 +11,9 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 
 ## Sin publicar — v0.3.0
 
+- Depende de kindling v0.8. El enrutador multi-host reintenta también en otro
+  host cuando uno tiene el disco casi lleno (el 503 nuevo del núcleo), además de
+  cuando no le cabe en memoria o llegó a su tope de máquinas.
 - **`kling gateway` habla con varios daemons a la vez.** Hasta ahora un gateway
   solo podía hablar con UN daemon, así que cada servicio quedaba atado al host
   donde se importó. Con `-hosts nombre=endpoint,nombre2=endpoint2` (o la clave

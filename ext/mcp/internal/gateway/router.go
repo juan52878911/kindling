@@ -311,7 +311,9 @@ func (r *Router) handleProxy(w http.ResponseWriter, req *http.Request) {
 		// que no hay un candidato más al que pasar si también falla.
 		if i < len(candidates)-1 {
 			if _, err := h.GW.Ensure(ctx, service); err != nil {
-				if api.IsInsufficientMemory(err) || api.IsMachineLimit(err) {
+				// Falta de sitio en este host (memoria, tope de máquinas o, desde
+				// kindling v0.8, disco): otro host puede tener.
+				if api.IsInsufficientMemory(err) || api.IsMachineLimit(err) || api.IsDiskFull(err) {
 					log.Printf("router: %s: host %q no lo pudo tomar (%v); pruebo el siguiente", service, h.Name, err)
 					continue
 				}
