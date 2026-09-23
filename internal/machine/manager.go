@@ -123,6 +123,9 @@ type Manager struct {
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
 	resyncAvisado sync.Map
+	// resyncSinAgente: qué restauraciones no tienen agente al que resincronizar
+	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
+	resyncSinAgente sync.Map
 
 	// pendingMiB es la memoria de las microVMs que están ARRANCANDO ahora mismo,
 	// aún sin proceso que la ocupe. checkHostMemory la resta de lo disponible:
@@ -1172,6 +1175,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// desaparecen sin dejar rastro.
 	m.flushVolume(mc)
 
+	// ¿Hay agente al que resincronizar al descongelarla? Se pregunta ahora,
+	// con el invitado en marcha, porque tras restaurar un invitado sin nadie en
+	// el puerto puede tardar segundos en contestar (ver resyncSinAgenteTTL).
+	sinAgente := !m.agenteEscucha(ctx, mc.ID)
+
 	// Desde aquí, lo que haya en disco deja de valer hasta el sello final: si el
 	// daemon muere a mitad del volcado, reconcile y Thaw lo sabrán (volcado.go).
 	if err := volcadoEnCurso(dir); err != nil {
@@ -1281,6 +1289,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	m.mu.Unlock()
 
 	out.DiskBytes = m.touchDisk(mc.ID)
+	if sinAgente {
+		m.resyncSinAgente.Store(claveThaw(mc.ID), time.Time{})
+	} else {
+		m.resyncSinAgente.Delete(claveThaw(mc.ID))
+	}
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("frozen in %d ms (%d MiB on disk)", elapsed, size>>20)})
@@ -1673,7 +1686,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// El invitado despierta con el reloj del momento en que se congeló, y si
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
-	resyncT, resyncOK := m.resyncGuest(ctx, mc.ID)
+	var resyncT time.Duration
+	var resyncOK bool
+	if _, sinAgente := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID)); !sinAgente {
+		resyncT, resyncOK = m.resyncGuest(ctx, mc.ID, "")
+	}
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo

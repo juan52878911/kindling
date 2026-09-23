@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -34,6 +36,29 @@ const resyncPlazo = 2 * time.Second
 // cada restauración.
 const resyncReintento = 250 * time.Millisecond
 
+// Qué pasa cuando no hay agente. En Linux, justo tras restaurar, el primer SYN
+// a un invitado sin nadie en el puerto suele perderse (o el invitado aún está
+// arrancando y no contesta): cada restauración pagaría el plazo entero. Se
+// evita con lo que se sabe de ANTES de restaurar:
+//
+//   - Thaw: Freeze sondea el puerto del agente justo antes de pausar (ver
+//     agenteEscucha) y lo apunta en resyncSinAgente. Si nadie escuchaba, el
+//     thaw no lo intenta: es la continuación de UNA máquina, sin clones con
+//     los que compartir el CSPRNG, y lo único que se pierde es el reloj de un
+//     invitado que no tiene quién lo ponga.
+//   - run -from: un dorado se congela comprobando que sirve (kling commit), y
+//     un "nadie escucha" definitivo —RST, o el cierre del reenvío en macOS—
+//     se recuerda POR SNAPSHOT (nombre y fecha: su memoria no cambia) durante
+//     resyncSinAgenteTTL. Un plazo agotado no se recuerda: puede ser un host
+//     cargado, y saltarse el resync ahí sería repartir el mismo CSPRNG.
+const resyncSinAgenteTTL = 10 * time.Minute
+
+// claveThaw y claveSnapshot son las claves de resyncSinAgente.
+func claveThaw(id string) string { return "m:" + id }
+func claveSnapshot(s *api.Snapshot) string {
+	return "s:" + s.Name + "@" + s.CreatedAt.UTC().Format(time.RFC3339Nano)
+}
+
 // resyncClient no reutiliza conexiones: cada llamada va a una microVM recién
 // restaurada, y una conexión ociosa guardada hacia ella solo retendría un
 // descriptor hasta que el invitado muera.
@@ -42,8 +67,10 @@ var resyncClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: tr
 // resyncGuest resincroniza el invitado id. No devuelve error: un agente viejo
 // (404), una máquina sin agente o uno que falla dejan la máquina como antes de
 // esto —utilizable, con el reloj parado— y se avisa una vez por imagen.
-// Devuelve cuánto tardó y si el agente lo aplicó.
-func (m *Manager) resyncGuest(ctx context.Context, id string) (time.Duration, bool) {
+// clave es la del snapshot del que se restauró (claveSnapshot) para recordar
+// que no tiene agente, o "" para no recordar nada. Devuelve cuánto tardó y si
+// el agente lo aplicó.
+func (m *Manager) resyncGuest(ctx context.Context, id, clave string) (time.Duration, bool) {
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr, image, name string
@@ -53,6 +80,11 @@ func (m *Manager) resyncGuest(ctx context.Context, id string) (time.Duration, bo
 	m.mu.RUnlock()
 	if addr == "" {
 		return 0, false
+	}
+	if clave != "" {
+		if hasta, ok := m.resyncSinAgente.Load(clave); ok && time.Now().Before(hasta.(time.Time)) {
+			return 0, false
+		}
 	}
 
 	start := time.Now()
@@ -71,6 +103,9 @@ func (m *Manager) resyncGuest(ctx context.Context, id string) (time.Duration, bo
 	}
 	took := time.Since(start)
 	if err != nil {
+		if clave != "" && errors.Is(err, errResyncNadie) {
+			m.resyncSinAgente.Store(clave, time.Now().Add(resyncSinAgenteTTL))
+		}
 		m.avisarResync(image, name, err)
 		return took, false
 	}
@@ -90,6 +125,8 @@ func (m *Manager) avisarResync(image, name string, err error) {
 	switch {
 	case errors.Is(err, errResyncNoSoportado):
 		tipo = "viejo"
+	case errors.Is(err, errResyncNadie):
+		tipo = "nadie"
 	case errors.Is(err, errResyncConexion):
 		tipo = "conexion"
 	}
@@ -99,7 +136,13 @@ func (m *Manager) avisarResync(image, name string, err error) {
 	if errors.Is(err, errResyncNoSoportado) {
 		log.Printf("warning: %s (image %s): its guest agent predates %s, so instances restored "+
 			"from the same snapshot share clock and RNG state. Rebuild the image with a current "+
-			"kling-guest or kling-bridge (kling images refresh)", name, image, api.GuestResyncPath)
+			"kling-guest (kling images build), or refresh its MCP bridge (kling mcp refresh-bridge)",
+			name, image, api.GuestResyncPath)
+		return
+	}
+	if errors.Is(err, errResyncNadie) {
+		log.Printf("%s (image %s): no guest agent listens on port %d, so its clock and RNG are not "+
+			"resynced after restore", name, image, api.GuestPort)
 		return
 	}
 	log.Printf("warning: %s (image %s): could not resync the guest clock and RNG after restore: %v",
@@ -109,6 +152,9 @@ func (m *Manager) avisarResync(image, name string, err error) {
 var (
 	errResyncConexion    = errors.New("guest agent not reachable")
 	errResyncNoSoportado = errors.New("guest agent has no resync route")
+	// errResyncNadie acompaña a errResyncConexion cuando nadie escucha en el
+	// puerto del agente: RST en Linux, cierre del reenvío en macOS.
+	errResyncNadie = errors.New("nothing listens on the guest agent port")
 )
 
 func resyncOnce(ctx context.Context, base string) (api.GuestResyncResult, error) {
@@ -130,12 +176,21 @@ func resyncOnce(ctx context.Context, base string) (api.GuestResyncResult, error)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := resyncClient.Do(req)
 	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return out, fmt.Errorf("%w: %w: %v", errResyncConexion, errResyncNadie, err)
+		}
 		return out, fmt.Errorf("%w: %v", errResyncConexion, err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	switch {
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
+		return out, errResyncNoSoportado
+	case resp.StatusCode == http.StatusBadRequest && bytes.Contains(b, []byte("Mcp-Session-Id")):
+		// El puente MCP anterior atiende "/" entero y contesta a /resync como a
+		// una petición MCP sin sesión. Su texto ya no va a cambiar: es el de
+		// binarios publicados.
 		return out, errResyncNoSoportado
 	case resp.StatusCode != http.StatusOK:
 		return out, fmt.Errorf("guest answered %d: %s", resp.StatusCode, bytes.TrimSpace(b))
@@ -152,4 +207,34 @@ func resyncNota(t time.Duration, ok bool) string {
 		return ""
 	}
 	return fmt.Sprintf(", guest resynced in %.1f ms", float64(t.Microseconds())/1000)
+}
+
+// agenteEscucha dice si algo escucha en el puerto del agente de la máquina
+// id, que corre. Lo usa Freeze justo antes de pausar (ver resyncSinAgenteTTL).
+//
+// Un plazo agotado cuenta como "nadie": un invitado en marcha con su agente
+// contesta al SYN en microsegundos, y uno que no contesta en 200 ms es uno que
+// aún arranca o sin red —el caso que tras restaurar costaba el plazo entero del
+// resync—. Equivocarse aquí solo deja sin poner el reloj de UNA máquina: un
+// thaw no tiene clones con los que compartir el CSPRNG.
+func (m *Manager) agenteEscucha(ctx context.Context, id string) bool {
+	if open, ok := m.ProbeGuestPort(ctx, id, api.GuestPort); ok {
+		return open
+	}
+	m.mu.RLock()
+	mc := m.byID[id]
+	var addr string
+	if mc != nil && mc.Reachable() {
+		addr = mc.Addr(api.GuestPort)
+	}
+	m.mu.RUnlock()
+	if addr == "" {
+		return true
+	}
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }

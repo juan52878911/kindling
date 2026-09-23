@@ -835,7 +835,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
-	resyncT, resyncOK := m.resyncGuest(ctx, id)
+	resyncT, resyncOK := m.resyncGuest(ctx, id, claveSnapshot(snap))
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.

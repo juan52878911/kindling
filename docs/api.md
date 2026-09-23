@@ -308,7 +308,19 @@ evento `machine.thawed`/`machine.started` dice cuántos.
 Un agente anterior (404, o el 400 de un puente viejo) o una máquina sin agente no
 hacen fallar la restauración: la máquina queda como antes —reloj parado,
 aleatorios compartidos con sus hermanas— y el daemon avisa una vez por imagen.
-`kling images refresh` pone un agente actual.
+Un invitado sin nadie en el puerto del agente puede tardar segundos en contestar
+tras restaurar (en Linux el primer SYN se pierde), así que el daemon lo sabe de
+antes: `freeze` sondea el puerto con el invitado en marcha y, si nadie escucha, el
+`thaw` no lo intenta; y un snapshot cuyas instancias contestan "nadie escucha" no
+se vuelve a intentar en 10 minutos.
+
+En Firecracker la primera petición a un invitado recién restaurado cuesta
+~150–250 ms en el laboratorio (virtualización anidada: el invitado vuelve a traer
+sus páginas); `/resync` es esa primera petición, así que ese coste pasa del
+primer cliente al thaw, y la petición siguiente tarda lo de siempre. En macOS
+(`vz`) el resync cuesta 1–2 ms.
+Reconstruir la imagen con un `kling-guest` actual (`kling images build`) o
+refrescar su puente MCP (`kling mcp refresh-bridge`) lo arregla.
 
 Solo el host debe llamar a `/resync` (o a `/volume/*`, `/exec`, `/files`): quien
 reenvíe peticiones de terceros al puerto del agente tiene que cortar esas rutas

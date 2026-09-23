@@ -23,6 +23,20 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
   `guest-resync`; el evento de thaw dice cuánto costó.
 - `guest.IsControlPath`: las rutas del agente que solo debe usar el host, para
   que un proxy que reenvía peticiones de terceros (el gateway MCP) las corte.
+- Medido: 1–2 ms por restauración en macOS. En Firecracker (laboratorio anidado)
+  el resync es la primera petición al invitado restaurado y se lleva los
+  ~150–250 ms que antes pagaba el primer cliente; la siguiente va como siempre.
+  Para que una máquina sin agente no pague segundos en cada restauración,
+  `freeze` sondea el puerto del agente antes de pausar (el `thaw` no lo intenta
+  si nadie escuchaba) y un snapshot sin agente se recuerda 10 minutos.
+
+### Arreglos
+
+- **Tras reiniciar el daemon, las máquinas en jail se readoptan con el socket
+  de su chroot.** Se readoptaban con el de su directorio, que no existe:
+  seguían corriendo, pero `freeze`, `stop` y el resto de llamadas a su VMM
+  fallaban con `dial unix .../fc.sock: no such file or directory` hasta
+  destruirlas. Lo mismo al descongelar una máquina que ya corría.
 
 ### Planificador
 
