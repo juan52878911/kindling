@@ -31,6 +31,7 @@ func mcpExtension() *plugin.Builtin {
 			Config: []plugin.ConfigKey{
 				{Key: "memory.enabled", Type: "bool", Help: "the gateway records which tool resolved each request"},
 				{Key: "memory.service", Type: "string", Help: "linked MCP service used as usage memory (default engram)"},
+				{Key: "hosts", Type: "string", Help: "several daemons for `gateway`: name=endpoint,name2=endpoint2 (same format as -hosts; default: one host, the active context)"},
 			},
 		},
 		Commands: map[string]func([]string) error{
@@ -150,6 +151,13 @@ var mcpCommands = []plugin.Command{
                                                    primary warm (persistent;
                                                    avoids cold start on Mac)
           [-memory SVC]                            agent memory service
+          [-hosts name=endpoint,name2=endpoint2]   several daemons instead of
+                                                   one (default: mcp.hosts, or
+                                                   one host, the active
+                                                   context). /mcp/<service>
+                                                   goes to the host that has
+                                                   it; /mcp/_all combines all
+                                                   of them
           [-no-auth] [-pprof]                      no token / with profiling; both
                                                    require listening on
                                                    loopback. Defaults to requiring

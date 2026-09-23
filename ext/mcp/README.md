@@ -39,6 +39,7 @@ make deploy-mac HOST=ssh://user@lima-vm    # arm64 Linux VM on Apple Silicon
 |---|---|
 | v0.6.x | v0.1.x |
 | v0.7.x | v0.1.x, v0.2.x |
+| v0.8.x | v0.3.x |
 
 The installer refuses to install next to a `kling` older than the minimum the extension
 declares.
@@ -644,6 +645,24 @@ now **recorded** instead of thrown away: `kling mcp health` shows it, state chan
 persisted, and a later success recovers the service. This exists because nine services
 once spent 26 hours down while `status` said "✓ 9": it was reporting inventory, and being
 read as health.
+
+### Several hosts
+
+A snapshot does not travel between daemons: a service lives on the host where it was
+imported. `-hosts` (or the `mcp.hosts` config key, same format) points one gateway at
+several of them instead of one:
+
+```sh
+kling gateway -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
+```
+
+`/mcp/<service>` goes to the host that has it in its catalog; if more than one does, to
+whichever reports more available memory, retrying on the next if that one is out of room
+(507) or at its machine limit (409). `/mcp/_all` combines the catalog of every host and
+routes each `call_tool` to its owner — a host that does not answer is skipped, not fatal to
+the rest. The token, tenants and quotas keep working exactly the same, checked once at the
+router in front of all of them. **Without `-hosts`/`mcp.hosts`, nothing changes**: one host,
+the active context, same as always.
 
 ## Self-healing: `kling mcp heal`
 

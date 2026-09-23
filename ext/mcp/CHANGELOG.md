@@ -5,8 +5,36 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 
 | kindling-mcp | kindling |
 |---|---|
+| v0.3.x | v0.8.x |
 | v0.2.x | v0.7.x |
 | v0.1.x | v0.6.x, v0.7.x |
+
+## v0.3.0 — 2026-09-23
+
+- **Un `kling mcp link` recién hecho funciona a la primera.** El gateway guarda
+  los enlaces 30 s en caché, y hasta que caducaba la primera petición al
+  servicio nuevo acababa en 502 "no snapshot for service". Ahora, antes de dar
+  ese error, relee los enlaces. Lo encontró el e2e nuevo.
+- Depende de kindling v0.8. El enrutador multi-host reintenta también en otro
+  host cuando uno tiene el disco casi lleno (el 503 nuevo del núcleo), además de
+  cuando no le cabe en memoria o llegó a su tope de máquinas.
+- **`kling gateway` habla con varios daemons a la vez.** Hasta ahora un gateway
+  solo podía hablar con UN daemon, así que cada servicio quedaba atado al host
+  donde se importó. Con `-hosts nombre=endpoint,nombre2=endpoint2` (o la clave
+  de configuración `mcp.hosts`, mismo formato) levanta un `Gateway` completo por
+  host y enruta `/mcp/<servicio>` al que lo tiene en su catálogo; si varios lo
+  tienen, al que más memoria disponible reporte (`GET /procstats`), con
+  reintento automático en el siguiente si ese contesta con falta de memoria o
+  tope de máquinas. `/mcp/_all` agrega el catálogo de todos los hosts y reenvía
+  cada `call_tool` al dueño del servicio; un host que no contesta no tumba a los
+  demás. Sin `-hosts`/`mcp.hosts`, el comportamiento es EXACTAMENTE el de
+  siempre: un solo host, el del contexto activo.
+- **`scripts/90-e2e.sh`**: la extensión tiene ya su propia prueba de extremo a
+  extremo contra un daemon y un gateway reales, con el mismo estilo que la del
+  núcleo — catálogo (`kling add` desde el registro), el gateway con y sin
+  token, `/mcp/<servicio>` y `/mcp/_all`, `mcp health`/`heal`,
+  `refresh-bridge` idempotente y `mcp link`/`unlink` contra un `kling-bridge`
+  local.
 
 ## v0.2.0 — 2026-09-23
 
