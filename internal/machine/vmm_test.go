@@ -95,3 +95,20 @@ func TestReenviosSobrevivenAlEstado(t *testing.T) {
 		t.Fatalf("tras cargar: %+v", mc)
 	}
 }
+
+func TestObjetivoSinEstadisticas(t *testing.T) {
+	casos := []struct {
+		mem, max, quiero int
+	}{
+		{1024, 0, 512},     // la mitad
+		{200, 0, 72},       // suelo de minResizeMiB: se le dejan 128
+		{128, 0, 0},        // nada que apretar
+		{1024, 2048, 1536}, // con techo: la línea base (1024) más la mitad
+	}
+	for _, c := range casos {
+		got := objetivoSinEstadisticas(&api.Machine{MemMiB: c.mem, MemMaxMiB: c.max})
+		if got != c.quiero {
+			t.Errorf("mem %d techo %d: %d, quiero %d", c.mem, c.max, got, c.quiero)
+		}
+	}
+}

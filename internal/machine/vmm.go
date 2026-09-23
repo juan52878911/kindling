@@ -5,13 +5,16 @@ package machine
 // kling-vz); lo que hay aquí es puro y se prueba en los dos sistemas.
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
+	"github.com/juan52878911/kindling/internal/fc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -169,4 +172,25 @@ func E2fsDisponible(nombre string) bool {
 		return true
 	}
 	return nombre == "mkfs.ext4" && buscarE2fs("mke2fs") != ""
+}
+
+// estadisticasDesconocidas: el VMM no sabe nada de la memoria del invitado.
+// Es lo que devuelve kling-vz siempre (docs/backend-vz.md §2).
+func estadisticasDesconocidas(s *fc.BalloonStats) bool {
+	return s.FreeMemory == 0 && s.AvailableMemory == 0 && s.TotalMemory == 0
+}
+
+// esperarHuellaEstable espera, como mucho 3 s, a que la memoria del VMM en el
+// host deje de bajar tras inflar el globo.
+func esperarHuellaEstable(ctx context.Context, pid int, sock string) {
+	antes := rssVMM(pid, sock)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		time.Sleep(250 * time.Millisecond)
+		ahora := rssVMM(pid, sock)
+		if ahora >= antes {
+			return
+		}
+		antes = ahora
+	}
 }

@@ -1351,6 +1351,14 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	}
 
 	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
+	sinEstadisticas := globoSinEstadisticas && estadisticasDesconocidas(stats)
+	if sinEstadisticas {
+		// macOS: el framework no dice cuánta memoria tiene libre el invitado
+		// (los tres campos llegan a 0), así que la cuenta de arriba no reclama
+		// nada. Se aprieta hasta un suelo fijo en su lugar; ver
+		// objetivoSinEstadisticas.
+		target = objetivoSinEstadisticas(cur)
+	}
 	if target <= stats.ActualMiB {
 		// El invitado no tiene holgura que reclamar.
 		return &api.SqueezeResult{ID: id, ReclaimedMiB: 0, GuestFreeMiB: freeMiB, RSSMiB: rssBefore}, nil
@@ -1362,6 +1370,12 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	// El inflado es asíncrono: el driver del invitado va entregando páginas.
 	// Esperamos a que se acerque al objetivo (o a un plazo corto) antes de medir.
 	waitBalloon(ctx, c, target)
+	if sinEstadisticas {
+		// Sin estadísticas, actual_mib es lo pedido y waitBalloon vuelve al
+		// instante; lo que dice cuándo ha soltado el invitado es la huella del
+		// VMM en el host, que deja de bajar.
+		esperarHuellaEstable(ctx, pid, sock)
+	}
 	// Desinflar: la RAM ya se reclamó al inflar; esto solo devuelve el presupuesto
 	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
 	// cliente abandonó.

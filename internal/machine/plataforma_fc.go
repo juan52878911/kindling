@@ -21,6 +21,9 @@ const backendVMM = BackendFirecracker
 // jailerEnabled según haya binario y root.
 const jailerPosible = true
 
+// globoSinEstadisticas: Firecracker sí da las estadísticas del invitado.
+const globoSinEstadisticas = false
+
 // dirsE2fsExtra son directorios donde buscar e2fsprogs además del PATH, /sbin
 // y /usr/sbin. En Linux no hace falta ninguno.
 var dirsE2fsExtra []string

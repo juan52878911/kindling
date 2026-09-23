@@ -51,6 +51,14 @@ func TestMain(m *testing.M) {
 func puertoFalso(p int) string { return "127.0.0.1:" + strconv.Itoa(40000+p%10000) }
 
 func servirVZFalso(sock, logPath string) {
+	// Como kling-vz: una ruta que no cabe en sun_path se ata desde su
+	// directorio con el nombre corto.
+	if len(sock) >= 100 {
+		if err := os.Chdir(filepath.Dir(sock)); err != nil {
+			os.Exit(1)
+		}
+		sock = filepath.Base(sock)
+	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fake kling-vz:", err)
@@ -61,6 +69,7 @@ func servirVZFalso(sock, logPath string) {
 		os.Exit(1)
 	}
 	var mu sync.Mutex
+	globo := 0 // lo último pedido: kling-vz lo devuelve como target y actual
 	apuntar := func(linea string) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -98,6 +107,23 @@ func servirVZFalso(sock, logPath string) {
 			apuntar(linea)
 			_, _ = io.WriteString(w, `{"footprint_mib": 321}`)
 			return
+		case "/balloon/statistics":
+			// Lo que da kling-vz: lo pedido, y la memoria del invitado a 0.
+			apuntar(linea)
+			mu.Lock()
+			g := globo
+			mu.Unlock()
+			fmt.Fprintf(w, `{"target_mib":%d,"actual_mib":%d,"free_memory":0,"available_memory":0,"total_memory":0}`, g, g)
+			return
+		case "/balloon":
+			var b struct {
+				Amount int `json:"amount_mib"`
+			}
+			_ = json.Unmarshal(body, &b)
+			mu.Lock()
+			globo = b.Amount
+			mu.Unlock()
+			linea += " amount=" + strconv.Itoa(b.Amount)
 		}
 		apuntar(linea)
 		w.WriteHeader(http.StatusNoContent)
@@ -105,16 +131,23 @@ func servirVZFalso(sock, logPath string) {
 	_ = http.Serve(ln, h)
 }
 
-// managerVZ monta un Manager mínimo cuyo VMM es el falso.
-func managerVZ(t *testing.T) (*Manager, string) {
+// managerVZ monta un Manager mínimo cuyo VMM es el falso, con la raíz en un
+// temporal corto (/tmp) o, con largo, en uno tan hondo que el socket de cada
+// máquina no cabe en sun_path.
+func managerVZ(t *testing.T, largo ...bool) (*Manager, string) {
 	t.Helper()
-	// El socket unix no admite rutas largas, y el TempDir de las pruebas en
-	// macOS se pasa: se usa uno corto propio.
-	root, err := os.MkdirTemp("/tmp", "kvz")
+	base, err := os.MkdirTemp("/tmp", "kvz")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(root) })
+	t.Cleanup(func() { os.RemoveAll(base) })
+	root := base
+	if len(largo) > 0 && largo[0] {
+		root = filepath.Join(base, "Library", "Application Support", strings.Repeat("k", 50))
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	logPath := filepath.Join(root, "calls.log")
 	t.Setenv(envFakeVZ, logPath)
 	exe, err := os.Executable()
@@ -325,4 +358,67 @@ func TestVZMemoriaHost(t *testing.T) {
 	// La admisión real no debe fallar en una máquina de desarrollo sana... salvo
 	// que lo esté de verdad; basta con que no rompa.
 	_ = checkPresionPlataforma()
+}
+
+// Con una raíz honda el socket de la máquina no cabe en sun_path: el ayudante
+// se ata con chdir y el núcleo tiene que llegar igual (internal/fc/dial.go).
+func TestVZBootConRaizLarga(t *testing.T) {
+	m, logPath := managerVZ(t, true)
+	id := "cc11dd22ee33ff44"
+	if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(m.dir(id) + "/fc.sock"); n < 104 {
+		t.Fatalf("la ruta del socket no es larga: %d", n)
+	}
+	m.byID[id] = &api.Machine{ID: id, Name: "larga", State: api.StateCreated, Egress: "none"}
+	disco := filepath.Join(m.dir(id), "overlay.ext4")
+	_ = os.WriteFile(disco, nil, 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pid, err := m.boot(ctx, id, 1, 256, 0, disco, "", disco, knet.Plan(1, id), nil, false)
+	defer matarVMM(pid)
+	if err != nil {
+		t.Fatalf("boot con raíz larga: %v", err)
+	}
+	if indice(llamadas(t, logPath), "PUT /kling/forwards") < 0 {
+		t.Fatal("no llegó a pedir reenvíos")
+	}
+	if got := m.liveVMs()[id]; got != pid {
+		t.Fatalf("liveVMs con la raíz con espacios y larga: %v", m.liveVMs())
+	}
+}
+
+// Sin estadísticas del invitado, squeeze aprieta hasta la mitad de su memoria
+// y vuelve a la línea base, en vez de no reclamar nada.
+func TestVZSqueezeSinEstadisticas(t *testing.T) {
+	m, logPath := managerVZ(t)
+	id := "dd11ee22ff33aa44"
+	if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.byID[id] = &api.Machine{ID: id, Name: "sq", State: api.StateCreated, Egress: "none", MemMiB: 1024}
+	disco := filepath.Join(m.dir(id), "overlay.ext4")
+	_ = os.WriteFile(disco, nil, 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pid, err := m.boot(ctx, id, 1, 1024, 0, disco, "", disco, knet.Plan(1, id), nil, false)
+	defer matarVMM(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.byID[id].State, m.byID[id].PID = api.StateRunning, pid
+	if _, err := m.Squeeze(ctx, id); err != nil {
+		t.Fatalf("squeeze: %v", err)
+	}
+	ls := llamadas(t, logPath)
+	var patches []string
+	for _, l := range ls {
+		if strings.HasPrefix(l, "PATCH /balloon") {
+			patches = append(patches, l)
+		}
+	}
+	if len(patches) != 2 || patches[0] != "PATCH /balloon amount=512" || patches[1] != "PATCH /balloon amount=0" {
+		t.Fatalf("globo = %v", patches)
+	}
 }

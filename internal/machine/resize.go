@@ -24,6 +24,19 @@ const minResizeMiB = 128
 
 // globoBase es lo que retiene el globo de una máquina en reposo: la diferencia
 // entre su techo y su memoria. 0 en una máquina sin techo.
+// objetivoSinEstadisticas es hasta dónde se infla el globo al apretar una
+// máquina cuyo invitado no da estadísticas de memoria (macOS): se le deja la
+// mitad de su memoria, y nunca menos de minResizeMiB. Es a ciegas, así que es
+// prudente: con la mitad un invitado ocioso sigue sirviendo, y el globo se
+// desinfla justo después, con lo que el invitado puede volver a crecer.
+func objetivoSinEstadisticas(mc *api.Machine) int {
+	suelo := max(minResizeMiB, mc.MemMiB/2)
+	if suelo >= mc.MemMiB {
+		return globoBase(mc) // tan pequeña que no hay nada que apretar
+	}
+	return globoBase(mc) + mc.MemMiB - suelo
+}
+
 func globoBase(mc *api.Machine) int {
 	if mc == nil || mc.MemMaxMiB <= mc.MemMiB {
 		return 0

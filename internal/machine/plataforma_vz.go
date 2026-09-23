@@ -24,6 +24,10 @@ const backendVMM = BackendVZ
 // aloja cada VM, y el daemon corre sin root.
 const jailerPosible = false
 
+// globoSinEstadisticas: Virtualization.framework no da las estadísticas de
+// memoria del invitado; squeeze aprieta a ciegas (ver objetivoSinEstadisticas).
+const globoSinEstadisticas = true
+
 // e2fsprogs no viene con macOS; Homebrew lo instala "keg-only", fuera del
 // PATH, en uno de estos dos prefijos (Apple Silicon e Intel).
 var dirsE2fsExtra = []string{
