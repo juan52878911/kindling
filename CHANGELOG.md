@@ -72,6 +72,16 @@ dependencias ni cgo; corre en local, sin daemon. Diseño en
   los umbrales cae de 0,95 a 0,77–0,85 con el cambio temporal y a 0,58 entre
   repos. Opt-in hasta que cada tarea tenga su evaluación.
 
+### Despliegue: la unidad de systemd ya no lleva valores de un host concreto
+
+`packaging/kling.service` traía grabado `KLING_SOCKET_USER=juan`: en cualquier
+otro host, `make deploy` volvía a instalar la unidad y pisaba en silencio lo
+que ese host hubiera configurado, dejando el CLI sin acceso al socket (pasó en
+el laboratorio). Ahora la unidad no lleva ningún valor propio de una máquina:
+los lee de `EnvironmentFile=-/etc/default/kling` (opcional), y `make deploy`
+crea ese fichero solo la primera vez, con `KLING_SOCKET_USER` a partir del
+usuario de `HOST`; en los redespliegues siguientes no lo toca.
+
 ## v0.10.0 — 2026-09-23
 
 ### Carpetas compartidas
