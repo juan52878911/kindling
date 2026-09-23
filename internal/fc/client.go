@@ -24,7 +24,7 @@ func New(socketPath string) *Client {
 	return &Client{http: &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+				return dialUnix(ctx, socketPath)
 			},
 		},
 		Timeout: 30 * time.Second,

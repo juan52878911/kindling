@@ -207,7 +207,7 @@ func crecerImagen(ctx context.Context, image string, extra int64) error {
 	}
 	// resize2fs se niega a tocar un ext4 que no venga de un fsck reciente.
 	repairVolume(ctx, image)
-	if out, err := exec.CommandContext(ctx, "resize2fs", image).CombinedOutput(); err != nil {
+	if out, err := e2fsCmd(ctx, "resize2fs", image).CombinedOutput(); err != nil {
 		return fmt.Errorf("resize2fs %s: %v: %s", filepath.Base(image), err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -379,19 +379,11 @@ const guestAgentPath = "usr/local/bin/kling-guest"
 
 // hasFile mira con debugfs si un fichero existe dentro de un ext4 sin montarlo.
 func hasFile(ctx context.Context, image, path string) (bool, error) {
-	bin, err := exec.LookPath("debugfs")
-	if err != nil {
-		// En Debian vive en /sbin, que no siempre está en el PATH de un
-		// servicio de systemd.
-		for _, p := range []string{"/sbin/debugfs", "/usr/sbin/debugfs"} {
-			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
-				bin, err = p, nil
-				break
-			}
-		}
-	}
-	if err != nil {
-		return false, fmt.Errorf("cannot find debugfs (comes with e2fsprogs): %w", err)
+	// debugfsBin y no LookPath: en macOS e2fsprogs de Homebrew es keg-only y
+	// no está en el PATH.
+	bin := debugfsBin()
+	if bin == "" {
+		return false, ErrNoDebugfs
 	}
 	out, err := exec.CommandContext(ctx, bin, "-R", "stat "+path, image).CombinedOutput()
 	if err != nil {

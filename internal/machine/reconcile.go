@@ -8,11 +8,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 
@@ -111,6 +111,7 @@ func (m *Manager) reconcile() {
 
 	m.sweepMachineDirs()
 	m.killOrphanVMMs()
+	fc.BarrerEnlaces(m.root)
 }
 
 // killOrphanVMMs mata los procesos de firecracker cuya microVM ya no existe o
@@ -348,88 +349,6 @@ func (m *Manager) hasSnapshot(id string) bool {
 	return true
 }
 
-// liveVMs escanea /proc y devuelve qué microVM posee cada firecracker vivo.
-//
-// Es adopt() del revés: en vez de "¿sigue vivo el PID que apunté?", pregunta
-// "¿qué está corriendo ahí fuera?". Esa vuelta es lo que permite reconciliar sin
-// creerse el fichero de estado.
-func (m *Manager) liveVMs() map[string]int {
-	out := map[string]int{}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return out // no es Linux, o /proc no está montado
-	}
-	prefix := filepath.Join(m.root, "machines") + "/"
-
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue // no es un proceso
-		}
-		b, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
-		if err != nil {
-			continue // murió mientras mirábamos, o no es nuestro
-		}
-		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-		for i, arg := range args {
-			// Camino normal: el socket lleva el prefijo de machines/.
-			if rest, ok := strings.CutPrefix(arg, prefix); ok {
-				if id, ok := strings.CutSuffix(rest, "/fc.sock"); ok && id != "" && !strings.Contains(id, "/") {
-					out[id] = pid
-				}
-				continue
-			}
-			// Camino con jail: jailer lleva "--id <id>" y el socket es relativo
-			// al chroot, sin el prefijo. Se reconoce por el argumento --id.
-			if arg == "--id" && i+1 < len(args) {
-				if id := args[i+1]; id != "" && !strings.Contains(id, "/") {
-					if _, err := os.Stat(m.jailSock(id)); err == nil {
-						out[id] = pid
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
-// adopt comprueba si el proceso de una microVM sigue vivo y es realmente suyo.
-//
-// No basta con mirar si el PID existe: los PID se reciclan. Se verifica que la
-// línea de comandos del proceso menciona el socket de ESTA máquina.
-func (m *Manager) adopt(mc *api.Machine) (string, bool) {
-	if mc.PID <= 0 {
-		return "", false
-	}
-	cmdline, err := os.ReadFile("/proc/" + itoa(mc.PID) + "/cmdline")
-	if err != nil {
-		return "", false
-	}
-	// Una instancia jailed: tras el exec de jailer, el proceso ES firecracker con
-	// "--id <id>" en su línea —la palabra "jailer" desaparece con el exec, así
-	// que buscarla marcaría la máquina como muerta y el sweep la mataría en
-	// bucle—. Su socket vive dentro del chroot.
-	args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
-	for i, a := range args {
-		if a == "--id" && i+1 < len(args) && args[i+1] == mc.ID {
-			sock := m.jailSock(mc.ID)
-			if _, err := os.Stat(sock); err != nil {
-				return "", false
-			}
-			return sock, true
-		}
-	}
-	line := strings.ReplaceAll(string(cmdline), "\x00", " ")
-	sock := m.dir(mc.ID) + "/fc.sock"
-	if !strings.Contains(line, sock) {
-		return "", false
-	}
-	if _, err := os.Stat(sock); err != nil {
-		return "", false
-	}
-	return sock, true
-}
-
 func itoa(i int) string {
 	if i == 0 {
 		return "0"
@@ -481,6 +400,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				m.sweepSnapshotLeftovers()
 				m.mu.Unlock()
 				m.vaciarPapelera()
+				// Los enlaces cortos a sockets de máquinas que ya no existen
+				// (macOS, rutas largas: ver fc.BarrerEnlaces).
+				fc.BarrerEnlaces(m.root)
 				// Y, si el disco aprieta, recuperar espacio eliminando instancias
 				// dormidas que se pueden recrear desde su snapshot.
 				m.gcDisk(ctx)
@@ -497,13 +419,37 @@ func (m *Manager) sweep() {
 	var died []*api.Machine
 	live := make(map[string]bool)
 
-	m.mu.Lock()
+	// adopt va fuera del candado: en macOS lanza un ps por máquina, y hacerlo
+	// con m.mu tomado congelaba ps, run y thaw en cada vuelta del vigilante.
+	// Se comprueba sobre una copia y, al volver a tomar el candado, solo se
+	// marca la que sigue running con el mismo PID (entre medias pudo pararse,
+	// congelarse o relanzarse).
+	type vista struct {
+		mc  *api.Machine
+		pid int
+	}
+	var vistas []vista
+	m.mu.RLock()
 	for _, mc := range m.byID {
-		if mc.State != api.StateRunning {
+		if mc.State == api.StateRunning {
+			vistas = append(vistas, vista{mc, mc.PID})
+		}
+	}
+	m.mu.RUnlock()
+	var muertas []vista
+	for _, v := range vistas {
+		c := api.Machine{ID: v.mc.ID, PID: v.pid}
+		if _, ok := m.adopt(&c); ok {
+			live["kl-"+v.mc.ID[:8]] = true
 			continue
 		}
-		if _, ok := m.adopt(mc); ok {
-			live["kl-"+mc.ID[:8]] = true
+		muertas = append(muertas, v)
+	}
+
+	m.mu.Lock()
+	for _, v := range muertas {
+		mc := v.mc
+		if mc.State != api.StateRunning || mc.PID != v.pid || m.byID[mc.ID] != mc {
 			continue
 		}
 		now := time.Now()

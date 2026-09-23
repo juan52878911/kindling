@@ -4,6 +4,58 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.9.0 — sin publicar
+
+kindling corre nativo en macOS: el daemon, en un Mac con Apple Silicon, arranca
+las microVMs con Virtualization.framework en vez de Firecracker. Ver
+[docs/mac.md](docs/mac.md) y el contrato con el ayudante en
+[docs/backend-vz.md](docs/backend-vz.md).
+
+### macOS nativo (backend `vz`)
+
+- **Un `kling-vz` por microVM** que habla el mismo API que Firecracker: el
+  ciclo de vida, los snapshots dorados, el TTL, los sandboxes, el exec y el
+  planificador funcionan sin reescribirse. Lo que en Linux hace el host
+  alrededor del VMM —namespace, iptables, cgroups, jailer, `/proc`— va por
+  etiquetas de compilación: la red y los puertos se le piden al ayudante, el
+  overlay se clona con `clonefile`, la admisión mira `kern.memorystatus_level`,
+  los huérfanos se buscan con `ps` y la memoria de cada VMM con `GET /kling/stats`.
+- **El backend es una clave de configuración**: `kling config set daemon.vmm vz`
+  (o `firecracker`); vacía, el de la plataforma. Se valida contra la máquina y
+  `KLING_VMM` la sustituye con un nombre o una ruta. `kling info` dice el
+  `backend` y la `arch` del daemon.
+- **Sin root**: raíz en `~/Library/Application Support/kindling` y socket dentro;
+  `kling` sin `-H` lo encuentra. `kling up` diagnostica Apple Silicon, macOS 14+,
+  `kling-vz` firmado, e2fsprogs de Homebrew y las imágenes, y arranca el agente
+  de launchd si está instalado.
+- `kling-vz` vive en `vz/` como módulo aparte (`make vz`): el `go.mod` de la raíz
+  sigue sin dependencias ni cgo.
+- Límites frente a Linux: ~350 MiB por restauración (no se comparte la memoria
+  del dorado), sin construcción de imágenes, sin techo de CPU ni jailer, 4
+  arranques simultáneos por defecto y `squeeze` a ciegas (el framework no da
+  estadísticas del invitado).
+
+### Imágenes entre daemons
+
+- **`GET/PUT /images/{name}/blob`** (capacidad `image-blobs`): la imagen, la
+  capa, la receta y el kernel, en flujo, con sha256 verificado y renombrado
+  atómico. Nunca sustituye una imagen en uso por un contenido distinto.
+- **`kling images copy <name> -from <host> [-to <host>]`** mueve una imagen de un
+  daemon a otro con todo lo que necesita para arrancar (kernel, base de una
+  imagen por capas, receta); lo que el destino ya tiene idéntico no se manda, y
+  se niega si las arquitecturas no coinciden. Es como se consiguen imágenes en
+  un Mac: en macOS `POST /images` contesta 501.
+
+### Direcciones de los invitados
+
+- **`Machine.Forwards` y `Machine.Addr(port)`**: en macOS todos los invitados
+  tienen la misma IP y se alcanzan por puertos de loopback que abre su ayudante.
+  El proxy del daemon, exec, shell, los volúmenes y `pkg/scheduler` resuelven
+  la dirección con `Addr`, que en Linux sigue siendo `IP:puerto`.
+- `pkg/scheduler`: `Instance`, `Route` y `Warm` ganan `Addr(port)`; hay
+  `AliveAddr`, `WaitReadyAddr` y el gancho `PrepareAddr`. `IP()`, `Alive`,
+  `WaitReady` y `Prepare` se conservan: kindling-mcp compila igual y migra aparte.
+
 ## v0.8.0 — 2026-09-23
 
 Cierra lo que quedaba abierto de estabilidad, elasticidad y seguridad tras v0.7.

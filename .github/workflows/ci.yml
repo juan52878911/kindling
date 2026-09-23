@@ -53,3 +53,28 @@ jobs:
           GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling
           GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-guest
           GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling-guest
+
+  # kling-vz es un módulo aparte con cgo: `./...` en la raíz no entra en vz/, y
+  # solo compila de verdad en macOS. Sus tests no arrancan ninguna VM (la VM es
+  # una interfaz con un doble), así que valen en un runner sin virtualización.
+  vz:
+    name: kling-vz (macOS)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: vz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: vz/go.mod
+          cache-dependency-path: vz/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: GOOS=linux go vet ./...
+      - run: go test -race ./...
+      - run: ./build.sh
+      # Sin el entitlement el framework se niega a crear la VM: que la firma lo
+      # lleve es parte del contrato del binario.
+      - run: codesign -d --entitlements - bin/kling-vz 2>&1 | grep -q com.apple.security.virtualization
+      - run: bin/kling-vz --version

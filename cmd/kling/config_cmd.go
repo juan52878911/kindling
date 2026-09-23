@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 
@@ -42,7 +43,7 @@ func contextList() error {
 	if len(cfg.Contexts) == 0 {
 		fmt.Println("No contexts. Add one with:")
 		fmt.Println("  kling context add lab ssh://user@host")
-		fmt.Printf("\nWith no active context the local socket is used (%s).\n", transport.DefaultSocket)
+		fmt.Printf("\nWith no active context the local socket is used (%s).\n", transport.DefaultSocketPath())
 		return nil
 	}
 
@@ -79,7 +80,7 @@ func contextUse(args []string) error {
 		if err := cfg.Save(); err != nil {
 			return err
 		}
-		fmt.Printf("no context: the local socket will be used (%s)\n", transport.DefaultSocket)
+		fmt.Printf("no context: the local socket will be used (%s)\n", transport.DefaultSocketPath())
 		return nil
 	}
 	if _, ok := cfg.Contexts[name]; !ok {
@@ -302,7 +303,12 @@ func configShow() error {
 	fmt.Fprintln(tw, "KEY\tVALUE")
 	for _, kv := range cfg.Keys() {
 		v := kv[1]
-		if v == "" {
+		switch {
+		case v == "" && kv[0] == "daemon.vmm":
+			// Sin valor también hay backend: el de la plataforma. Decirlo evita
+			// que alguien crea que el daemon no tiene ninguno.
+			v = "- (default: " + config.DefaultVMM(runtime.GOOS) + ")"
+		case v == "":
 			v = "-"
 		}
 		fmt.Fprintf(tw, "%s\t%s\n", kv[0], v)

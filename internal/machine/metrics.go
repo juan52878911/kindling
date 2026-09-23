@@ -18,6 +18,9 @@ import (
 func (m *Manager) ProcStats() api.ProcStats {
 	m.mu.RLock()
 	stats := make([]api.ProcStat, 0, len(m.byID))
+	// El socket de cada VMM, en el mismo orden que stats: en macOS la memoria
+	// se le pregunta al ayudante por él (ver memoriaVMM).
+	socks := make([]string, 0, len(m.byID))
 	byState := make(map[string]int, 5)
 	for _, mc := range m.byID {
 		byState[string(mc.State)]++
@@ -25,6 +28,7 @@ func (m *Manager) ProcStats() api.ProcStats {
 			ID: mc.ID, Name: mc.Name, Service: mc.Service(),
 			From: mc.From, State: mc.State, PID: mc.PID,
 		})
+		socks = append(socks, m.socket[mc.ID])
 	}
 	m.mu.RUnlock()
 
@@ -32,11 +36,11 @@ func (m *Manager) ProcStats() api.ProcStats {
 	for i := range stats {
 		// Solo las máquinas vivas tienen proceso; las warm/stopped no gastan RAM.
 		if stats[i].PID > 0 {
-			stats[i].PSSMiB = pssMiB(stats[i].PID)
+			stats[i].PSSMiB = memoriaVMM(stats[i].PID, socks[i])
 			total += stats[i].PSSMiB
 		}
 	}
-	avail, free := hostMemMiB()
+	avail, free := memoriaHost()
 	return api.ProcStats{
 		Machines: stats, ByState: byState, TotalPSSMiB: total,
 		AvailableMiB: avail, FreeMiB: free,

@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -55,6 +56,12 @@ var (
 )
 
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
+	if !construirImagenes {
+		fail(w, http.StatusNotImplemented, errors.New("this daemon can't build images: building needs root, loop "+
+			"devices and chroot on Linux. Build the image on a Linux host and copy it here:\n"+
+			"  kling images copy <name> -from ssh://user@linux-host"))
+		return
+	}
 	var req api.BuildImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, err)

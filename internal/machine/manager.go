@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -200,7 +201,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 			return nil, err
 		}
 	}
-	priv, warn := resolvePrivileges(runAs)
+	priv, warn := privilegiosPlataforma(runAs)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
 		byID:        make(map[string]*api.Machine),
@@ -213,7 +214,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	}
 	m.persistWG.Add(1)
 	go m.persistLoop()
-	if cg, err := ensureDelegation(); err != nil {
+	if cg, err := delegacionCgroups(); err != nil {
 		m.CgroupWarning = err.Error()
 	} else {
 		m.cgroupRoot = cg
@@ -643,6 +644,9 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// y no allí, donde se ve como un pánico del kernel.
 	if layer != "" {
 		switch ok, cerr := m.baseSupportsLayers(ctx, src); {
+		case errors.Is(cerr, ErrNoDebugfs):
+			// Un Mac sin e2fsprogs de Homebrew: se sabe desde el arranque del
+			// daemon (ya lo avisa) y repetirlo en cada run solo ensucia el log.
 		case cerr != nil:
 			// Sin poder comprobarlo se sigue: convertir una comprobación de
 			// diagnóstico en una dependencia de arranque sería peor que el problema.
@@ -857,9 +861,10 @@ func (m *Manager) newOverlay(ctx context.Context, dst string) error {
 		log.Printf("overlay template not available (%v): formatting directly", err)
 		return createOverlay(ctx, dst, defaultOverlayMiB)
 	}
-	// --sparse=always: el overlay es disperso y copiarlo denso destruiría lo
-	// que hace que una máquina cueste ~8 MB en vez de 512.
-	out, err := exec.CommandContext(ctx, "cp", "--sparse=always", m.overlayTemplatePath(), dst).CombinedOutput()
+	// Sin perder la dispersión (ver copiarDisco): el overlay es disperso y
+	// copiarlo denso destruiría lo que hace que una máquina cueste ~8 MB en vez
+	// de 512.
+	out, err := copiarDisco(ctx, m.overlayTemplatePath(), dst)
 	if err != nil {
 		return fmt.Errorf("copying overlay template: %v: %s", err, out)
 	}
@@ -878,7 +883,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 	f.Close()
 
 	// -E nodiscard evita que mke2fs escriba ceros y destruya la dispersión.
-	out, err := exec.CommandContext(ctx, "mkfs.ext4",
+	out, err := e2fsCmd(ctx, "mkfs.ext4",
 		"-q", "-F", "-O", "^has_journal", "-E", "nodiscard", path).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("formatting overlay: %v: %s", err, out)
@@ -1051,7 +1056,17 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		}
 		log.Printf("warning: could not configure balloon on %s: %v (squeeze will not be available)", id, err)
 	}
+	// En macOS, la política de salida se le da al ayudante aquí, antes de crear
+	// la VM; en Linux ya la aplicó el namespace y esto no hace nada.
+	if err := m.redAntesDeArrancar(ctx, c, id); err != nil {
+		return pid, err
+	}
 	if err := c.Start(ctx); err != nil {
+		return pid, err
+	}
+	// Y los reenvíos de puertos, sin los que en macOS el host no llega al
+	// invitado. No hacen falta en Linux.
+	if err := m.abrirReenvios(ctx, c, id); err != nil {
 		return pid, err
 	}
 	m.mu.Lock()
@@ -1219,7 +1234,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// la mayor parte son páginas a cero. Perforarlas deja el fichero disperso: el
 	// kernel devuelve ceros al leer un agujero, que es exactamente lo que había,
 	// así que la restauración no se entera. Mide ~3x menos en disco.
-	if out, err := exec.CommandContext(ctx, "fallocate", "--dig-holes", memPath).CombinedOutput(); err != nil {
+	if out, err := perforarHuecos(ctx, memPath); err != nil {
 		log.Printf("warning: could not punch holes in %s: %v: %s", memPath, err, out)
 	}
 
@@ -1253,6 +1268,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	live.FreezeMS = elapsed
 	live.SnapSize = size
 	live.PID = 0
+	// Los reenvíos (macOS) eran del proceso que acaba de morir; los de la
+	// próxima descongelación serán otros.
+	live.Forwards = nil
 	delete(m.socket, mc.ID)
 	m.persist()
 	out := *live
@@ -1274,6 +1292,10 @@ const balloonStatsPollSec = 1
 // se reclama su memoria libre MENOS este margen, para no dejarlo pegado al borde
 // del OOM justo después.
 const balloonSqueezeMarginMiB = 128
+
+// squeezeMinRetenerMiB: por debajo de esto, en macOS, el apretón no ha devuelto
+// nada que valga la pena retener y el globo vuelve a la línea base.
+const squeezeMinRetenerMiB = 16
 
 // Squeeze aprieta el globo de una instancia running para devolver al host la RAM
 // que el invitado tiene LIBRE, sin congelarla.
@@ -1322,7 +1344,7 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 			"(reimport the image to record it in the snapshot): %w", err)
 	}
 	freeMiB := int(stats.FreeMemory >> 20)
-	rssBefore := procRSSMiB(pid)
+	rssBefore := rssVMM(pid, sock)
 
 	// Se reclama la memoria DISPONIBLE, no solo la LIBRE. Al inflar el globo, el
 	// invitado suelta también su caché de página limpia para cedérnosla, así que
@@ -1337,6 +1359,14 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	}
 
 	target := stats.ActualMiB + reclaimMiB - balloonSqueezeMarginMiB
+	sinEstadisticas := globoSinEstadisticas && estadisticasDesconocidas(stats)
+	if sinEstadisticas {
+		// macOS: el framework no dice cuánta memoria tiene libre el invitado
+		// (los tres campos llegan a 0), así que la cuenta de arriba no reclama
+		// nada. Se aprieta hasta un suelo fijo en su lugar; ver
+		// objetivoSinEstadisticas.
+		target = objetivoSinEstadisticas(cur)
+	}
 	if target <= stats.ActualMiB {
 		// El invitado no tiene holgura que reclamar.
 		return &api.SqueezeResult{ID: id, ReclaimedMiB: 0, GuestFreeMiB: freeMiB, RSSMiB: rssBefore}, nil
@@ -1348,20 +1378,37 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	// El inflado es asíncrono: el driver del invitado va entregando páginas.
 	// Esperamos a que se acerque al objetivo (o a un plazo corto) antes de medir.
 	waitBalloon(ctx, c, target)
+	if sinEstadisticas {
+		// Sin estadísticas, actual_mib es lo pedido y waitBalloon vuelve al
+		// instante; lo que dice cuándo ha soltado el invitado es la huella del
+		// VMM en el host, que deja de bajar.
+		esperarHuellaEstable(ctx, pid, sock)
+	}
+	rssAfter := rssVMM(pid, sock)
+	reclaimed := rssBefore - rssAfter
+	if reclaimed < 0 {
+		reclaimed = 0
+	}
+
 	// Desinflar: la RAM ya se reclamó al inflar; esto solo devuelve el presupuesto
 	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
 	// cliente abandonó.
 	// A la línea base, no a 0: en una máquina con techo el globo retiene la
 	// diferencia entre el techo y su memoria, y desinflarlo del todo le daría
 	// el techo entero.
-	if err := c.PatchBalloon(context.WithoutCancel(ctx), globoBase(cur)); err != nil {
-		log.Printf("warning: could not deflate the balloon for %s: %v", id, err)
-	}
-
-	rssAfter := procRSSMiB(pid)
-	reclaimed := rssBefore - rssAfter
-	if reclaimed < 0 {
-		reclaimed = 0
+	//
+	// En macOS NO se desinfla si el apretón devolvió algo: al desinflar,
+	// Virtualization.framework vuelve a poblar las páginas y la huella regresa
+	// entera en ~3 s (medido: 1123 -> 620 -> 1132 MiB), así que "apretar y
+	// soltar" no deja nada. El globo se queda inflado; deflate_on_oom (que se
+	// configura al arrancar) deja al invitado recuperarlo si de verdad lo
+	// necesita, y `kling resize` o el siguiente squeeze lo recolocan. Si no
+	// devolvió nada (una máquina arrancada en frío: ahí el framework no suelta
+	// las páginas del globo) retenerlo solo le quitaría memoria al invitado.
+	if !sinEstadisticas || reclaimed < squeezeMinRetenerMiB {
+		if err := c.PatchBalloon(context.WithoutCancel(ctx), globoBase(cur)); err != nil {
+			log.Printf("warning: could not deflate the balloon for %s: %v", id, err)
+		}
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,
@@ -1600,6 +1647,10 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 	}
 
+	// macOS: la política de salida viaja con la instancia, no con el snapshot.
+	if err := m.redAntesDeArrancar(ctx, c, mc.ID); err != nil {
+		return abortar(err)
+	}
 	start := time.Now()
 	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
@@ -1610,6 +1661,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
+	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
+		return abortar(err)
+	}
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -1707,6 +1761,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	}
 	live.State = api.StateStopped
 	live.PID = 0
+	live.Forwards = nil
 	delete(m.socket, mc.ID)
 	m.persist()
 	out := *live
@@ -1734,6 +1789,9 @@ func (m *Manager) Remove(ref string) error {
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
+	// Su enlace corto en /tmp/kling-<uid> (macOS) ya no apunta a nada; el
+	// vigilante lo barrería en la siguiente vuelta, pero así no queda ni ese rato.
+	fc.BarrerEnlaces(m.root)
 	m.mu.Lock()
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
@@ -1811,6 +1869,7 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	now := time.Now()
 	mc.State = api.StateFailed
 	mc.LastErr = err.Error()
+	mc.Forwards = nil
 	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
 	// se quedaba en la lista para siempre (ver gcFailed).
 	mc.FailedAt = &now

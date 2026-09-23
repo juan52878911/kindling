@@ -124,5 +124,8 @@ func (m *Manager) admitir() error {
 	if err := m.checkDisk(); err != nil {
 		return err
 	}
+	if err := checkPresionPlataforma(); err != nil {
+		return err
+	}
 	return checkPressure()
 }

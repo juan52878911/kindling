@@ -58,6 +58,9 @@ func maxParallelLaunch() int {
 			return n
 		}
 	}
+	if n := lanzamientoPlataforma(); n > 0 {
+		return n
+	}
 	if bajoHipervisor() {
 		return defaultMaxParallelLaunch
 	}

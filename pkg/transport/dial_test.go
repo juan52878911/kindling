@@ -10,8 +10,8 @@ import (
 )
 
 func TestNewSinEndpointUsaElSocketLocal(t *testing.T) {
-	if d := New(""); d.Endpoint != DefaultSocket {
-		t.Errorf("New(\"\") = %q, esperaba %q", d.Endpoint, DefaultSocket)
+	if d := New(""); d.Endpoint != DefaultSocketPath() {
+		t.Errorf("New(\"\") = %q, esperaba %q", d.Endpoint, DefaultSocketPath())
 	}
 	if d := New("ssh://juan@lab"); d.Endpoint != "ssh://juan@lab" {
 		t.Errorf("New no respeto el endpoint dado: %q", d.Endpoint)

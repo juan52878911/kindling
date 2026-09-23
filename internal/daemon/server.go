@@ -15,13 +15,13 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
-	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -59,17 +59,23 @@ type Server struct {
 	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
 
 	store *store
+	lock  *os.File // cerrojo de la raíz (ver bloquearRaiz); abierto mientras viva
 }
 
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
+	lock, err := bloquearRaiz(root)
+	if err != nil {
+		return nil, err
+	}
 	bus := events.New()
 	mgr, err := machine.NewManager(root, fcBin, runAs, bus)
 	if err != nil {
+		lock.Close()
 		return nil, err
 	}
 	st := &store{dir: filepath.Join(root, "store")}
 	migrateLinks(root, st)
-	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st}, nil
+	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock}, nil
 }
 
 func (s *Server) routes() http.Handler {
@@ -97,6 +103,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /images/{name}/recipe", s.handleImageRecipe)
 	mux.HandleFunc("GET /images/{name}/files", s.handleGetImageFile)
 	mux.HandleFunc("PUT /images/{name}/files", s.handlePutImageFile)
+	mux.HandleFunc("GET /images/{name}/blob", s.handleGetImageBlob)
+	mux.HandleFunc("PUT /images/{name}/blob", s.handlePutImageBlob)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("GET /snapshots/{name}", s.handleSnapshot)
 	mux.HandleFunc("PUT /snapshots/{name}/annotations/{key}", s.handleSetAnnotation)
@@ -196,16 +204,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	//
 	// Sigue siendo AVISO y no error: el daemon vale para inspeccionar estado aunque no
 	// pueda arrancar nada. Pero ahora los nombra TODOS de golpe.
-	if missing := missingBinaries(); len(missing) > 0 {
-		log.Printf("WARNING: missing binaries (%s): microVMs cannot be started on this host",
-			strings.Join(missing, ", "))
-	}
-
-	if err := knet.Available(); err != nil {
-		log.Printf("WARNING: network unavailable (%v): microVMs will boot without connectivity", err)
-	} else if err := knet.SetupHost(); err != nil {
-		log.Printf("WARNING: couldn't install the host barrier rules: %v", err)
-	}
+	s.comprobarHost()
 
 	if s.mgr.PrivWarning != "" {
 		log.Printf("SECURITY WARNING: %s", s.mgr.PrivWarning)
@@ -233,6 +232,9 @@ func (s *Server) Listen(ctx context.Context) error {
 // socketOwner resuelve a quién ceder el socket: al usuario indicado por
 // configuración o, si no lo hay, a quien haya invocado sudo.
 func (s *Server) socketOwner() (uid, gid int, ok bool) {
+	if !cederSocket {
+		return 0, 0, false // macOS: el daemon ya es el usuario; no hay a quién cederlo
+	}
 	if s.socketUser != "" {
 		u, err := user.Lookup(s.socketUser)
 		if err != nil {
@@ -281,6 +283,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		KVM:          kvmErr == nil,
 		Machines:     s.mgr.Count(),
 		Capabilities: Capabilities,
+		Backend:      s.mgr.Backend(),
+		Arch:         runtime.GOARCH,
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
@@ -527,7 +531,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, errors.New("that machine doesn't exist"))
 		return
 	}
-	if mc.State != api.StateRunning || mc.IP == "" {
+	if mc.State != api.StateRunning || !mc.Reachable() {
 		fail(w, http.StatusConflict, fmt.Errorf("the machine is %s, not accepting calls", mc.State))
 		return
 	}
@@ -546,8 +550,11 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 			port, mc.Name, api.GuestPort, api.LabelPorts))
 		return
 	}
-	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
-	out, code, err := proxyGuest(r.Context(), addr, req)
+	addr := mc.Addr(port)
+	esperar := func(ctx context.Context, timeout time.Duration) error {
+		return s.esperarPuerto(ctx, mc, port, timeout)
+	}
+	out, code, err := proxyGuest(r.Context(), addr, req, esperar)
 	if err != nil {
 		fail(w, code, err)
 		return
@@ -558,7 +565,11 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 // proxyGuest manda req al servidor que escucha en addr dentro del invitado y
 // devuelve su respuesta. Si falla, code es el estado HTTP con el que contestar.
 // Está separado del handler para poder probarlo sin una microVM.
-func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.GuestResponse, int, error) {
+//
+// esperar es cómo se espera a que el puerto abra (wait_ms, probe_only): la
+// dirección no basta en macOS, donde el reenvío acepta siempre (esperarPuerto).
+func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
+	esperar func(context.Context, time.Duration) error) (api.GuestResponse, int, error) {
 	// El daemon no añade nada de ningún protocolo: ruta, cabeceras de ida y
 	// cuáles devolver las decide quien llama.
 	path := req.Path
@@ -588,7 +599,7 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.Gue
 	// Un servidor recién arrancado tarda en escuchar. Esperar aquí, y no en el
 	// cliente, mantiene el sondeo en la red que puede verlo.
 	if req.WaitMS > 0 {
-		if err := waitPort(ctx, addr, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
+		if err := esperar(ctx, time.Duration(req.WaitMS)*time.Millisecond); err != nil {
 			return api.GuestResponse{}, http.StatusGatewayTimeout, err
 		}
 	}
@@ -627,6 +638,34 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest) (api.Gue
 }
 
 // waitPort espera a que algo escuche en addr, o se rinde al agotar el plazo.
+// esperarPuerto espera a que algo escuche en ese puerto del invitado de mc.
+//
+// En Linux es waitPort sobre su IP. En macOS se pregunta a kling-vz
+// (/kling/probe): el reenvío de loopback lo abre el ayudante y acepta la
+// conexión escuche el invitado o no, así que waitPort daba por abierto al
+// instante un servidor que aún no escuchaba, o que no existía —probe_only
+// contestaba 200 y wait_ms no esperaba nada—.
+func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		open, ok := s.mgr.ProbeGuestPort(ctx, mc.ID, port)
+		if !ok {
+			return waitPort(ctx, mc.Addr(port), time.Until(deadline))
+		}
+		if open {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("nobody is listening on port %d inside %s", port, mc.Name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
 func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error

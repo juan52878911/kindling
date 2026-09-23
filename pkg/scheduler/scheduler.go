@@ -57,8 +57,13 @@ const readyTimeout = 20 * time.Second
 // LAN, un dial a un puerto abierto es submilisegundo. Lo que detecta es lo que
 // el machineID no puede — que el DAEMON congeló la instancia por debajo, sin
 // que el gateway tocara su mapa.
-func alive(ip string, port int) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 400*time.Millisecond)
+func alive(ip string, port int) bool { return aliveAddr(net.JoinHostPort(ip, strconv.Itoa(port))) }
+
+// aliveAddr es alive sobre una dirección host:puerto ya resuelta. Es la forma
+// que vale en los dos sistemas: en macOS el invitado no se alcanza por su IP
+// sino por el reenvío que da api.Machine.Addr.
+func aliveAddr(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 400*time.Millisecond)
 	if err != nil {
 		return false
 	}
@@ -68,7 +73,11 @@ func alive(ip string, port int) bool {
 
 // waitReady sondea el puerto del invitado hasta que acepta conexiones.
 func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) error {
-	addr := net.JoinHostPort(ip, strconv.Itoa(port))
+	return waitReadyAddr(ctx, net.JoinHostPort(ip, strconv.Itoa(port)), timeout)
+}
+
+// waitReadyAddr es waitReady sobre una dirección host:puerto ya resuelta.
+func waitReadyAddr(ctx context.Context, addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error
 	for time.Now().Before(deadline) {
@@ -84,6 +93,22 @@ func waitReady(ctx context.Context, ip string, port int, timeout time.Duration) 
 		time.Sleep(25 * time.Millisecond)
 	}
 	return last
+}
+
+// esperarListo espera a que el agente del invitado escuche.
+//
+// En macOS (la máquina trae reenvíos) no vale sondear la dirección: el puerto
+// de loopback lo abre kling-vz y acepta siempre, escuche el invitado o no. Se
+// pregunta al daemon con probe_only, que mira dentro del invitado. En Linux,
+// el dial directo de siempre, que es submilisegundo.
+func (g *Scheduler) esperarListo(ctx context.Context, mc *api.Machine, timeout time.Duration) error {
+	if len(mc.Forwards) > 0 && g.client != nil {
+		_, err := g.client.Guest(ctx, mc.ID, api.GuestRequest{
+			Port: GuestPort, ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
+		})
+		return err
+	}
+	return waitReadyAddr(ctx, mc.Addr(GuestPort), timeout)
 }
 
 // Scheduler mantiene instancias calientes por servicio: las despierta al llegar
@@ -143,6 +168,12 @@ type Scheduler struct {
 	// la instancia (la sesión MCP abierta). nil = basta con que escuche.
 	Prepare func(ctx context.Context, ip string) (token string, err error)
 
+	// PrepareAddr es Prepare recibiendo la dirección host:puerto del agente
+	// (api.Machine.Addr(GuestPort)) en vez de la IP. Si está, gana a Prepare:
+	// en macOS la IP del invitado no se alcanza desde el host y solo la
+	// dirección sirve. Prepare se conserva para no romper a quien ya lo usa.
+	PrepareAddr func(ctx context.Context, addr string) (token string, err error)
+
 	// Skip excluye un snapshot del precalentado y del keepwarm (el gateway MCP
 	// excluye los servicios con estado).
 	Skip func(*api.Snapshot) bool
@@ -159,8 +190,12 @@ type Scheduler struct {
 type entry struct {
 	machineID string
 	ip        string
-	lastUse   time.Time
-	proxy     *httputil.ReverseProxy
+	// fwd son los reenvíos de puertos de la máquina (api.Machine.Forwards):
+	// vacío en Linux. Se guardan para resolver direcciones con Addr sin volver
+	// a preguntar al daemon.
+	fwd     map[string]string
+	lastUse time.Time
+	proxy   *httputil.ReverseProxy
 
 	// checkedAt es cuándo se confirmó por última vez que la instancia vive.
 	checkedAt time.Time
@@ -216,6 +251,7 @@ type sessionRoute struct {
 	service   string
 	machineID string
 	ip        string
+	fwd       map[string]string
 	proxy     *httputil.ReverseProxy
 	lastUse   time.Time
 }
@@ -325,7 +361,7 @@ func (g *Scheduler) bind(sid, service string, e *entry) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.routes[sid] = &sessionRoute{
-		service: service, machineID: e.machineID, ip: e.ip,
+		service: service, machineID: e.machineID, ip: e.ip, fwd: e.fwd,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
 	log.Printf("%s: session %s bound to %s", service, short(sid), e.ip)
@@ -337,7 +373,7 @@ func (g *Scheduler) rebind(sid string, e *entry) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if rt, ok := g.routes[sid]; ok {
-		rt.machineID, rt.ip, rt.proxy = e.machineID, e.ip, e.proxy
+		rt.machineID, rt.ip, rt.fwd, rt.proxy = e.machineID, e.ip, e.fwd, e.proxy
 		rt.lastUse = time.Now()
 	}
 }
@@ -484,7 +520,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	// arranca. Sin esperar aquí, la primera petición se comería un "connection
 	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
 	wr0 := time.Now()
-	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
+	if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
 		return nil, fmt.Errorf("tool did not start listening: %w", err)
 	}
 	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
@@ -495,10 +531,11 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
 	}
 
-	target, _ := url.Parse("http://" + net.JoinHostPort(mc.IP, strconv.Itoa(GuestPort)))
+	target, _ := url.Parse("http://" + mc.Addr(GuestPort))
 	e := &entry{
 		machineID:   mc.ID,
 		ip:          mc.IP,
+		fwd:         mc.Forwards,
 		lastUse:     time.Now(),
 		checkedAt:   time.Now(),
 		tenant:      tnt.name, // quien la despertó es su dueño para cuota y fairness
@@ -536,7 +573,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
 		// reintentar: la respuesta distingue dos situaciones muy distintas —el
 		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
-		vivo := esDial && waitReady(r.Context(), e.ip, GuestPort, 3*time.Second) == nil
+		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(GuestPort), 3*time.Second) == nil
 
 		if vivo && !retried(r) && r.GetBody != nil {
 			body, berr := r.GetBody()
@@ -704,7 +741,7 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*a
 
 	// 1) alguna ya en marcha
 	for _, m := range machines {
-		if match(m) && m.State == api.StateRunning && m.IP != "" {
+		if match(m) && m.State == api.StateRunning && m.Reachable() {
 			return m, nil
 		}
 	}

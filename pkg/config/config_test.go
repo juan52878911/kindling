@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -193,5 +194,55 @@ func TestSeElevaLaMemoriaAntigua(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"image": "min"`) {
 		t.Fatalf("se perdió el resto de la configuración: %s", b)
+	}
+}
+
+func TestValidateVMM(t *testing.T) {
+	casos := []struct {
+		name, goos, goarch string
+		ok                 bool
+	}{
+		{"firecracker", "linux", "amd64", true},
+		{"firecracker", "linux", "arm64", true},
+		{"firecracker", "darwin", "arm64", false},
+		{"vz", "darwin", "arm64", true},
+		{"vz", "darwin", "amd64", false},
+		{"vz", "linux", "arm64", false},
+		{"qemu", "linux", "amd64", false},
+	}
+	for _, c := range casos {
+		err := ValidateVMM(c.name, c.goos, c.goarch)
+		if (err == nil) != c.ok {
+			t.Errorf("ValidateVMM(%s, %s/%s) = %v", c.name, c.goos, c.goarch, err)
+		}
+	}
+	if DefaultVMM("darwin") != VMMVZ || DefaultVMM("linux") != VMMFirecracker {
+		t.Fatal("DefaultVMM")
+	}
+}
+
+func TestSetDaemonVMM(t *testing.T) {
+	c := &Config{}
+	if err := c.Set("daemon.vmm", "qemu"); err == nil {
+		t.Fatal("un backend desconocido no se acepta")
+	}
+	nativo := DefaultVMM(runtime.GOOS)
+	if runtime.GOOS == "darwin" && runtime.GOARCH != "arm64" {
+		t.Skip("vz solo en Apple Silicon")
+	}
+	if err := c.Set("daemon.vmm", nativo); err != nil {
+		t.Fatalf("el backend de la plataforma se acepta: %v", err)
+	}
+	found := false
+	for _, kv := range c.Keys() {
+		if kv[0] == "daemon.vmm" && kv[1] == nativo {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("daemon.vmm no aparece en Keys")
+	}
+	if err := c.Set("daemon.vmm", ""); err != nil || c.Daemon.VMM != "" {
+		t.Fatal("vaciarlo vuelve al defecto")
 	}
 }

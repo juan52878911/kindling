@@ -21,7 +21,9 @@ import (
 	"time"
 )
 
-// DefaultSocket es el socket del daemon local.
+// DefaultSocket es el socket del daemon local en Linux. Se conserva como
+// constante para quien ya la usa; el que vale en cada plataforma lo da
+// DefaultSocketPath (en macOS vive en el directorio del usuario).
 const DefaultSocket = "/run/kling.sock"
 
 // Dialer abre conexiones al daemon según el endpoint configurado.
@@ -32,7 +34,7 @@ type Dialer struct{ Endpoint string }
 
 func New(endpoint string) *Dialer {
 	if endpoint == "" {
-		endpoint = DefaultSocket
+		endpoint = DefaultSocketPath()
 	}
 	return &Dialer{Endpoint: endpoint}
 }

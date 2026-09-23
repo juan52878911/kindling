@@ -55,6 +55,7 @@ type pool struct {
 type warmVM struct {
 	id      string
 	ip      string
+	fwd     map[string]string
 	session string // sesión MCP viva: la llamada se ahorra el initialize
 	born    time.Time
 }
@@ -187,23 +188,24 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 		return nil, err
 	}
 
-	base := "http://" + mc.IP + ":" + itoa(GuestPort)
-	if err := waitReady(ctx, mc.IP, GuestPort, readyTimeout); err != nil {
+	if err := p.gw.esperarListo(ctx, mc, readyTimeout); err != nil {
 		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
 		return nil, err
 	}
 	// La preparación (el initialize de MCP) se paga AQUÍ, no cuando llegue la
 	// petición.
 	var sid string
-	if p.gw.Prepare != nil {
+	switch {
+	case p.gw.PrepareAddr != nil:
+		sid, err = p.gw.PrepareAddr(ctx, mc.Addr(GuestPort))
+	case p.gw.Prepare != nil:
 		sid, err = p.gw.Prepare(ctx, mc.IP)
-		if err != nil {
-			_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
-			return nil, err
-		}
 	}
-	_ = base
-	return &warmVM{id: mc.ID, ip: mc.IP, session: sid, born: time.Now()}, nil
+	if err != nil {
+		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
+		return nil, err
+	}
+	return &warmVM{id: mc.ID, ip: mc.IP, fwd: mc.Forwards, session: sid, born: time.Now()}, nil
 }
 
 // drainGrace acota lo que se espera a los pre-calentados en vuelo.

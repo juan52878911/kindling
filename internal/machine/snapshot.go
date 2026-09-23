@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -143,8 +142,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
-	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always",
-		ownOverlay, goldDst).CombinedOutput(); err != nil {
+	if out, err := copiarDisco(ctx, ownOverlay, goldDst); err != nil {
 		return abort(fmt.Errorf("copying overlay: %v: %s", err, out))
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
@@ -190,7 +188,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 		log.Printf("warning: template %s ended up without its volumes after freeze: %v", mc.Name, err)
 	}
 
-	if out, err := exec.CommandContext(ctx, "fallocate", "--dig-holes", memPath).CombinedOutput(); err != nil {
+	if out, err := perforarHuecos(ctx, memPath); err != nil {
 		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
 	}
 
@@ -568,8 +566,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Copia del overlay dorado: mismo contenido, fichero propio. Compartirlo
 	// haría que las instancias se pisaran el disco entre ellas.
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always",
-		filepath.Join(m.snapDir(req.From), "overlay.ext4"), overlay).CombinedOutput(); err != nil {
+	if out, err := copiarDisco(ctx, filepath.Join(m.snapDir(req.From), "overlay.ext4"), overlay); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("copying golden overlay: %v: %s", err, out)
 	}
@@ -774,6 +771,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		}
 	}
 
+	// macOS: la política de salida viaja con la instancia, no con el snapshot.
+	if err := m.redAntesDeArrancar(ctx, c, id); err != nil {
+		return abortar(err)
+	}
 	start := time.Now()
 	// Pausada: hay que reapuntar el overlay antes de dejarla correr.
 	if err := c.LoadSnapshot(ctx,
@@ -824,6 +825,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
 	if err := c.Resume(ctx); err != nil {
+		return abortar(err)
+	}
+	// macOS: sin reenvíos el host no llega al invitado, y acquireVolumes de
+	// aquí abajo ya necesita hablarle.
+	if err := m.abrirReenvios(ctx, c, id); err != nil {
 		return abortar(err)
 	}
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
