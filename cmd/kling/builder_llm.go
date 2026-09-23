@@ -3,12 +3,14 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -211,10 +213,23 @@ func buildLLMBase(root, lib, name string) error {
 	return nil
 }
 
+// stallTimeout es cuánto puede estar una descarga sin recibir ni un byte
+// antes de darla por muerta. No es un timeout total: un GGUF de varios GB en
+// una red lenta puede tardar minutos de forma legítima, y cortarlo por tiempo
+// total rompería esa descarga a mitad. Lo que sí es señal de que el otro lado
+// (HuggingFace, GitHub) se quedó colgado es que pasen 60s sin ni un byte.
+const stallTimeout = 60 * time.Second
+
 // fetchVerified deja en dst el fichero de url con ese sha256. Si dst ya está y
 // cuadra, no descarga nada. Escribe al lado y renombra: un corte a medias no
 // deja en la caché un fichero que parezca bueno.
 func fetchVerified(url, want, dst string) error {
+	return fetchVerifiedTimeout(url, want, dst, stallTimeout)
+}
+
+// fetchVerifiedTimeout es fetchVerified con el detector de estancamiento
+// configurable, para poder probarlo sin esperar 60s de verdad.
+func fetchVerifiedTimeout(url, want, dst string, stall time.Duration) error {
 	if got, err := sha256File(dst); err == nil {
 		if got == want {
 			return nil
@@ -230,7 +245,25 @@ func fetchVerified(url, want, dst string) error {
 	defer f.Close()
 
 	t0 := time.Now()
-	resp, err := http.Get(url)
+
+	// Cliente con timeouts de conexión, TLS y cabeceras: si el servidor ni
+	// siquiera llega a responder, no nos quedamos esperando indefinidamente
+	// antes de empezar a recibir el cuerpo.
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -238,9 +271,20 @@ func fetchVerified(url, want, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
+
+	// Detector de estancamiento: cada byte que llega reinicia el temporizador;
+	// si se agota, cancela el contexto de la petición y el io.Copy de abajo
+	// termina con error en vez de colgar el builder para siempre.
+	timer := time.AfterFunc(stall, cancel)
+	defer timer.Stop()
+	body := &stallReader{r: resp.Body, timer: timer, d: stall}
+
 	h := sha256.New()
-	nb, err := io.Copy(io.MultiWriter(f, h), resp.Body)
+	nb, err := io.Copy(io.MultiWriter(f, h), body)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("downloading %s: stalled, no data for %s", url, stall)
+		}
 		return fmt.Errorf("downloading %s: %w", url, err)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
@@ -258,6 +302,22 @@ func fetchVerified(url, want, dst string) error {
 	secs := time.Since(t0).Seconds()
 	fmt.Printf("downloaded %s: %d MiB in %.1f s, sha256 verified\n", path.Base(dst), nb>>20, secs)
 	return nil
+}
+
+// stallReader reinicia timer con cada lectura que trae bytes; si no llega
+// ninguna a tiempo, el AfterFunc de timer dispara y corta la descarga.
+type stallReader struct {
+	r     io.Reader
+	timer *time.Timer
+	d     time.Duration
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(s.d)
+	}
+	return n, err
 }
 
 func sha256File(p string) (string, error) {
