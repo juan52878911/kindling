@@ -115,7 +115,8 @@ if [ -f "$BRIDGE" ]; then
   echo "puente horneado en la base desde $BRIDGE"
 else
   echo "aviso: sin puente en $BRIDGE — cada imagen de servicio llevará el suyo"
-  echo "       (compílalo con 'make bridge' y repite para ahorrarte N copias)"
+  echo "       (es de kindling-mcp: compílalo allí con 'make bridge', pásalo con BRIDGE=ruta"
+  echo "        y repite para ahorrarte N copias)"
 fi
 
 umount "$mnt"

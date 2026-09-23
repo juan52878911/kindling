@@ -8,7 +8,7 @@
 BIN     := kling
 PKG     := ./cmd/kling
 
-# Arquitectura del binario del daemon/bridge que se compila para Linux.
+# Arquitectura de los binarios del daemon y del agente que se compilan para Linux.
 # Por defecto amd64 (el laboratorio habitual). Para desplegar a una VM Linux
 # arm64 (p.ej. Lima vz+nested en un Mac Apple Silicon):
 #   make deploy GOARCH=arm64 HOST=ssh://usuario@vm-arm
@@ -34,7 +34,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets bridge bridge-local guest deploy deploy-mac test clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets guest deploy deploy-mac test clean fmt
 
 all: build
 
@@ -42,16 +42,11 @@ build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) $(PKG)
 
 ## install — pone el CLI en PREFIX/bin (usa sudo si hace falta escribir ahí)
-install: build bridge-local
+install: build
 	@mkdir -p $(PREFIX)/bin 2>/dev/null || sudo mkdir -p $(PREFIX)/bin
 	@install -m755 $(BIN) $(PREFIX)/bin/$(BIN) 2>/dev/null \
 		|| sudo install -m755 $(BIN) $(PREFIX)/bin/$(BIN)
-	@# El puente se instala SIEMPRE aunque la memoria venga apagada: activarla
-	@# debe ser un comando, no un proyecto.
-	@install -m755 kling-bridge-local $(PREFIX)/bin/kling-bridge 2>/dev/null \
-		|| sudo install -m755 kling-bridge-local $(PREFIX)/bin/kling-bridge
 	@echo "instalado: $(PREFIX)/bin/$(BIN)  ($(VERSION))"
-	@echo "           $(PREFIX)/bin/kling-bridge"
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
 	  *) echo; echo "AVISO: $(PREFIX)/bin no está en tu PATH. Añádelo:"; \
 	     echo "  echo 'export PATH=\"$(PREFIX)/bin:$$PATH\"' >> ~/.zshrc";; esac
@@ -59,19 +54,12 @@ install: build bridge-local
 	@echo "Apúntalo a tu daemon:"
 	@echo "  $(BIN) context add lab ssh://usuario@host"
 	@echo
-	@echo "Memoria de uso (opcional, apagada):"
-	@echo "  $(BIN) memory status"
+	@echo "Para alojar servidores MCP, instala la extensión kindling-mcp:"
+	@echo "  https://github.com/juan52878911/kindling-mcp"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN) 2>/dev/null || sudo rm -f $(PREFIX)/bin/$(BIN)
 	@echo "desinstalado (la configuración en ~/.config/kling se conserva)"
-
-## bridge — el puente stdio<->HTTP que corre DENTRO de las microVMs.
-## Estático a propósito: el invitado es Alpine (musl) y no debe depender de libc.
-bridge:
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
-		-ldflags "$(LDFLAGS)" -o kling-bridge ./cmd/kling-bridge
-	@echo "kling-bridge  ($(VERSION), linux/$(GOARCH))"
 
 ## guest — el agente genérico de invitado (PID 1 de las microVMs sin servidor
 ## MCP: imágenes de herramientas, sandboxes). Estático por la misma razón que el
@@ -80,19 +68,6 @@ guest:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
 		-ldflags "$(LDFLAGS)" -o kling-guest ./cmd/kling-guest
 	@echo "kling-guest  ($(VERSION), linux/$(GOARCH))"
-
-## bridge-local — el mismo puente, para TU máquina.
-##
-## Sirve para exponer por HTTP un servidor MCP de stdio que ya tengas instalado
-## (engram, obsidian, lo que sea) y enlazarlo con `kling mcp link`, sin meterlo
-## en una microVM.
-bridge-local:
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o kling-bridge-local ./cmd/kling-bridge
-	@echo "kling-bridge-local  ($(VERSION))"
-	@echo
-	@echo "Expón un MCP de stdio que tengas en local:"
-	@echo "  ./kling-bridge-local -listen 0.0.0.0:9100 -- engram mcp --tools=agent"
-	@echo "  kling mcp link engram http://<tu-ip>:9100/mcp"
 
 ## daemon — compila el binario del host con KVM (linux/$(GOARCH), amd64 por defecto)
 daemon:
@@ -129,50 +104,33 @@ daemon-full: assets
 	@echo "$(BIN)-linux-$(GOARCH)  ($(VERSION))  con artefactos embebidos"
 
 ## deploy — instala el daemon por SSH y lo reinicia
-## Van también el puente y 80-mcp-image.sh: `kling add` los necesita EN el host,
-## porque construir una imagen monta un loopback y hace chroot, y eso solo lo
-## puede hacer quien ya es root allí.
-deploy: daemon bridge guest
+## Van también el agente de invitado (kling-guest) y el constructor "base", que
+## construye imágenes con él (la de herramientas de `volume populate`, por ejemplo):
+## construir monta un loopback y hace chroot, y eso solo lo puede hacer root allí.
+## Lo de MCP (puente, empaquetador, gateway) lo despliega kindling-mcp.
+deploy: daemon guest
 	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-bridge kling-guest scripts/80-mcp-image.sh $(TARGET):/tmp/
-	scp -q packaging/$(BIN).service packaging/$(BIN)-gateway.service \
-		packaging/$(BIN)-heal.service packaging/$(BIN)-heal.timer $(TARGET):/tmp/
+	scp -q kling-guest scripts/81-base-image.sh $(TARGET):/tmp/
+	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
+	scp -q packaging/$(BIN).service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
-		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
 		sudo install -m755 /tmp/kling-guest /usr/local/lib/kindling/kling-guest && \
 		sudo install -d -m755 /usr/local/lib/kindling/builders && \
-		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
-		sudo install -m644 /tmp/$(BIN).service /tmp/$(BIN)-gateway.service \
-			/tmp/$(BIN)-heal.service /tmp/$(BIN)-heal.timer /etc/systemd/system/ && \
-		sudo install -d -m755 /etc/kling && \
-		( [ -s /etc/kling/gateway.env ] || \
-		  ( sudo install -m600 /dev/null /etc/kling/gateway.env && \
-		  printf "KLING_GATEWAY_TOKEN=%s\n" \
-		    "$$(head -c32 /dev/urandom | base64 | tr "+/" "\-_" | tr -d "=")" \
-		  | sudo tee /etc/kling/gateway.env >/dev/null ) ) && \
-		sudo chmod 600 /etc/kling/gateway.env && \
+		sudo install -m755 /tmp/81-base-image.sh /usr/local/lib/kindling/81-base-image.sh && \
+		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
+		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
 		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
-			sudo systemctl enable --now $(BIN)-heal.timer && \
-		sudo systemctl restart $(BIN) && sudo systemctl try-restart $(BIN)-gateway && \
+		sudo systemctl restart $(BIN) && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
-	@echo "  puente y empaquetador en /usr/local/lib/kindling (los usa 'kling add')"
+	@echo "  agente de invitado y constructor base en /usr/local/lib/kindling"
 	@echo
-	@# El puente vive DENTRO de cada imagen: desplegarlo aquí no toca los
-	@# servicios ya empaquetados, y uno antiguo no entiende los parámetros
-	@# nuevos del kernel — muere al arrancar y, como es PID 1, el invitado
-	@# entra en pánico. Este aviso es lo que separa eso de un misterio.
-	@echo "El puente vive DENTRO de cada imagen. Ponlo al día en las ya construidas:"
-	@echo "  kling images refresh"
-	@echo
-	@echo "Apunta tu CLI al token del gateway (se generó una vez, se conserva):"
-	@echo "  kling config set gateway.token \\"
-	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/gateway.env')"
-	@echo "  kling connect -all -install all"
+	@echo "Imagen de herramientas para poblar volúmenes:  kling images toolchain"
+	@echo "Servidores MCP:  despliega kindling-mcp (make deploy HOST=$(HOST) en su repositorio)"
 
 ## deploy-mac — atajo para desplegar a una VM Linux arm64 desde un Mac Apple Silicon.
 ##
@@ -187,7 +145,7 @@ deploy-mac:
 ## test — lo mismo que corre el CI, para no descubrirlo después de empujar.
 ##
 ## `-race` no es opcional aquí: el daemon toca su estado desde varias goroutines
-## y el puente reparte respuestas entre sesiones concurrentes. Sin él, un build
+## y el planificador reparte instancias entre peticiones concurrentes. Sin él, un build
 ## limpio no dice nada sobre lo que de verdad rompe este proyecto.
 test:
 	gofmt -l . | tee /dev/stderr | (! read)
@@ -198,4 +156,4 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-bridge kling-bridge-local kling-guest
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest

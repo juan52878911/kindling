@@ -8,10 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
-	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -42,70 +40,6 @@ const metaV04 = `{
   "tools_at": "2026-08-10T10:00:05Z",
   "health": "unhealthy", "health_at": "2026-08-11T09:00:00Z", "health_err": "timeout"
 }`
-
-// Los snapshots de v0.4 no se reescriben al actualizar: su catálogo y su salud
-// tienen que aparecer como anotaciones, que es donde los busca kindling-mcp.
-func TestLiftLegacyMCP(t *testing.T) {
-	m := annotTestManager(t)
-	writeSnapMeta(t, m, "eco", metaV04)
-
-	s, err := m.loadSnapshot("eco")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tools legacyToolsAnnotation
-	if ok, err := s.Annotation("mcp.tools", &tools); !ok || err != nil {
-		t.Fatalf("mcp.tools no se elevó: ok=%v err=%v", ok, err)
-	}
-	if len(tools.Tools) != 1 || tools.Tools[0].Name != "echo" || tools.CapturedAt == nil {
-		t.Fatalf("mcp.tools mal elevado: %+v", tools)
-	}
-	var h legacyHealthAnnotation
-	if ok, _ := s.Annotation("mcp.health", &h); !ok || h.Status != "unhealthy" || h.Error != "timeout" {
-		t.Fatalf("mcp.health mal elevado: %+v", h)
-	}
-	// Leer no escribe: el meta en disco sigue siendo el de v0.4.
-	b, _ := os.ReadFile(filepath.Join(m.snapDir("eco"), "meta.json"))
-	if strings.Contains(string(b), "annotations") {
-		t.Fatal("leer un snapshot no debe reescribir su meta")
-	}
-}
-
-// Al escribir una anotación, los campos antiguos se rellenan a partir de ella:
-// un CLI v0.4 que lea este snapshot tiene que seguir viendo catálogo y salud.
-func TestSetCatalogYSaludEspejanCamposAntiguos(t *testing.T) {
-	m := annotTestManager(t)
-	writeSnapMeta(t, m, "svc", `{"name":"svc","image":"svc"}`)
-
-	if _, err := m.SetCatalog("svc", []api.ToolSpec{{Name: "a"}, {Name: "b"}}); err != nil {
-		t.Fatal(err)
-	}
-	s, err := m.SetHealth("svc", false, "no contesta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(s.Tools) != 2 || s.ToolsAt == nil || s.Health != "unhealthy" || s.HealthErr != "no contesta" {
-		t.Fatalf("campos antiguos no espejados: tools=%d health=%q err=%q", len(s.Tools), s.Health, s.HealthErr)
-	}
-	// Y en disco también, para que bajar de versión el daemon no pierda nada.
-	var disco api.Snapshot
-	b, _ := os.ReadFile(filepath.Join(m.snapDir("svc"), "meta.json"))
-	if err := json.Unmarshal(b, &disco); err != nil {
-		t.Fatal(err)
-	}
-	if len(disco.Tools) != 2 || disco.Health != "unhealthy" || disco.Annotations["mcp.tools"] == nil {
-		t.Fatalf("meta en disco sin espejo: %s", b)
-	}
-
-	// Borrar la anotación borra también el campo antiguo.
-	s, err = m.RemoveAnnotation("svc", "mcp.health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Health != "" || s.HealthAt != nil {
-		t.Fatalf("health debería haberse borrado con su anotación: %+v", s.Health)
-	}
-}
 
 func TestSetAnnotationValida(t *testing.T) {
 	m := annotTestManager(t)
@@ -169,30 +103,41 @@ func TestAnotacionesConcurrentesNoSePierden(t *testing.T) {
 	}
 }
 
-// Las formas JSON que escribe internal/mcp tienen que ser las que el núcleo
-// sabe espejar a los campos de v0.4: si alguien cambia una etiqueta JSON en un
-// lado y no en el otro, un CLI antiguo deja de ver catálogo y salud sin error.
-func TestFormasCompatiblesConElNucleo(t *testing.T) {
+// Los snapshots de v0.4 no se reescriben al actualizar: su catálogo y su salud
+// tienen que aparecer como anotaciones, que es donde los busca kindling-mcp, y
+// con la forma que kindling-mcp entiende.
+func TestLiftV04(t *testing.T) {
 	m := annotTestManager(t)
-	writeSnapMeta(t, m, "svc", `{"name":"svc","image":"svc"}`)
+	writeSnapMeta(t, m, "eco", metaV04)
 
-	now := time.Now().UTC().Truncate(time.Second)
-	tools, _ := json.Marshal(mcp.Tools{Tools: []mcp.ToolSpec{{Name: "echo"}}, CapturedAt: &now})
-	health, _ := json.Marshal(mcp.Health{Status: mcp.Unhealthy, At: &now, Error: "boom"})
-	if _, err := m.SetAnnotation("svc", mcp.ToolsKey, tools); err != nil {
-		t.Fatal(err)
-	}
-	s, err := m.SetAnnotation("svc", mcp.HealthKey, health)
+	s, err := m.loadSnapshot("eco")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Tools) != 1 || s.ToolsAt == nil || !s.ToolsAt.Equal(now) {
-		t.Fatalf("mcp.tools no se espeja: %+v %v", s.Tools, s.ToolsAt)
+	var tools struct {
+		Tools      []struct{ Name string } `json:"tools"`
+		CapturedAt string                  `json:"captured_at"`
 	}
-	if s.Health != mcp.Unhealthy || s.HealthErr != "boom" || s.HealthAt == nil {
-		t.Fatalf("mcp.health no se espeja: %q %q", s.Health, s.HealthErr)
+	if ok, err := s.Annotation("mcp.tools", &tools); !ok || err != nil || len(tools.Tools) != 1 ||
+		tools.Tools[0].Name != "echo" || tools.CapturedAt == "" {
+		t.Fatalf("mcp.tools mal elevado: ok=%v err=%v %+v", ok, err, tools)
 	}
-	if legacyToolsKey != mcp.ToolsKey || legacyHealthKey != mcp.HealthKey {
-		t.Fatal("las claves de anotación del núcleo y de mcp no coinciden")
+	var h struct{ Status, At, Error string }
+	if ok, _ := s.Annotation("mcp.health", &h); !ok || h.Status != "unhealthy" || h.Error != "timeout" || h.At == "" {
+		t.Fatalf("mcp.health mal elevado: %+v", h)
+	}
+	// Leer no escribe; la siguiente anotación deja el meta sin los campos viejos.
+	if _, err := m.SetAnnotation("eco", "otra", json.RawMessage(`1`)); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(m.snapDir("eco"), "meta.json"))
+	if strings.Contains(string(b), `"tools_at"`) || !strings.Contains(string(b), `"mcp.tools"`) {
+		t.Fatalf("tras escribir, el meta debe quedar solo con anotaciones: %s", b)
+	}
+	// Un snapshot de v0.4 que nunca se sondeó no se inventa una salud.
+	writeSnapMeta(t, m, "nuevo", `{"name":"nuevo","image":"x","tools":[]}`)
+	s, _ = m.loadSnapshot("nuevo")
+	if _, ok := s.Annotations["mcp.health"]; ok {
+		t.Fatal("sin salud en v0.4 no hay mcp.health")
 	}
 }

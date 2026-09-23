@@ -16,23 +16,16 @@ package daemon
 // directorio. Se valida con lista blanca, que es la única que no se queda corta.
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
-
-	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // buildTimeout: instalar node y un paquete npm en un chroot va lento, y en un
@@ -61,269 +54,25 @@ var (
 	reEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
 )
 
-// imageScript localiza scripts/80-mcp-image.sh.
-//
-// Se busca en varios sitios porque el daemon se despliega como un binario
-// suelto: `make deploy` deja el script en /usr/local/lib/kindling, pero en
-// desarrollo se trabaja desde el repositorio.
-func (s *Server) imageScript() (string, error) {
-	candidates := []string{
-		os.Getenv("KLING_IMAGE_SCRIPT"),
-		"/usr/local/lib/kindling/80-mcp-image.sh",
-		"/usr/lib/kindling/80-mcp-image.sh",
-		"scripts/80-mcp-image.sh",
-	}
-	for _, p := range candidates {
-		if p == "" {
-			continue
-		}
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			return filepath.Abs(p)
-		}
-	}
-	return "", fmt.Errorf("can't find 80-mcp-image.sh; deploy it with `make deploy` " +
-		"or point to it with KLING_IMAGE_SCRIPT")
-}
-
-// validateBuild comprueba la petición antes de que nada llegue a un shell.
-func validateBuild(r api.BuildImageRequest) error {
-	if !reName.MatchString(r.Name) {
-		return fmt.Errorf("invalid name %q: lowercase, digits, hyphen and underscore, up to 64", r.Name)
-	}
-	if r.Base != "" && !reName.MatchString(r.Base) {
-		return fmt.Errorf("invalid base image %q", r.Base)
-	}
-	for _, p := range r.Packages {
-		if !reAPK.MatchString(p) {
-			return fmt.Errorf("invalid apk package %q", p)
-		}
-	}
-	for _, p := range r.NPM {
-		if !reNPM.MatchString(p) {
-			return fmt.Errorf("invalid npm package %q", p)
-		}
-	}
-	for _, p := range r.PIP {
-		if !rePIP.MatchString(p) {
-			return fmt.Errorf("invalid pip package %q", p)
-		}
-	}
-	for _, e := range r.Env {
-		if !reEnv.MatchString(e) {
-			return fmt.Errorf("invalid environment variable %q: expected KEY=value", e)
-		}
-	}
-	if len(r.Cmd) == 0 {
-		return fmt.Errorf("missing the command that starts the MCP server")
-	}
-	for _, a := range r.Cmd {
-		// El script mete cada argumento con `printf %q`, así que no hay
-		// inyección de shell; pero un salto de línea partiría el entrypoint
-		// generado en dos y un NUL lo truncaría.
-		if strings.ContainsAny(a, "\x00\n\r") {
-			return fmt.Errorf("the command can't contain newlines or null bytes")
-		}
-	}
-	if r.GrowMB < 0 || r.GrowMB > 8192 {
-		return fmt.Errorf("growth out of range: %d MB", r.GrowMB)
-	}
-	return nil
-}
-
-// buildScriptArgs traduce un BuildImageRequest a los argumentos de 80-mcp-image.sh
-// (sin el propio script como argv[0]). El daemon siempre construye en modo stdio.
-// Los flags van ANTES de `--`, que separa el comando del servidor.
-func buildScriptArgs(req api.BuildImageRequest) []string {
-	args := []string{"stdio", req.Name}
-	if len(req.Packages) > 0 {
-		args = append(args, "-p", strings.Join(req.Packages, " "))
-	}
-	if len(req.NPM) > 0 {
-		args = append(args, "-n", strings.Join(req.NPM, " "))
-	}
-	if len(req.PIP) > 0 {
-		args = append(args, "-P", strings.Join(req.PIP, " "))
-	}
-	// -e va una vez POR variable, no unido con espacios como -p/-n/-P: un valor
-	// puede llevar espacios y el script guarda cada "-e KEY=value" como un
-	// elemento de su array EXTRA_ENV.
-	for _, e := range req.Env {
-		args = append(args, "-e", e)
-	}
-	if req.Bundle {
-		args = append(args, "-bundle")
-	}
-	args = append(args, "--")
-	return append(args, req.Cmd...)
-}
-
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 	var req api.BuildImageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Builder != "" {
-		s.buildWithBuilder(w, r, req)
+	if req.Builder == "" {
+		// Hasta v0.5 el daemon empaquetaba servidores MCP por su cuenta. Ahora
+		// lo hace el constructor "mcp" de kindling-mcp.
+		fail(w, http.StatusBadRequest, fmt.Errorf("missing builder: images are built by an installed builder "+
+			"(\"base\" from kindling, \"mcp\" from kindling-mcp); see docs/api.md"))
 		return
 	}
-	if err := validateBuild(req); err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	script, err := s.imageScript()
-	if err != nil {
-		fail(w, http.StatusPreconditionFailed, err)
-		return
-	}
-
-	argv := append([]string{script}, buildScriptArgs(req)...)
-
-	// bash y no /bin/sh: en Debian /bin/sh es dash, y el script usa `set -o
-	// pipefail`, arrays y `printf %q`. Con dash falla en la línea 26 con un
-	// error que no se parece en nada a la causa.
-	sh, err := exec.LookPath("bash")
-	if err != nil {
-		fail(w, http.StatusPreconditionFailed,
-			fmt.Errorf("bash is required to package: 80-mcp-image.sh uses arrays and pipefail"))
-		return
-	}
-
-	// El contexto de la PETICIÓN no manda aquí, a propósito.
-	//
-	// exec.CommandContext mata el proceso con SIGKILL cuando su contexto se
-	// cancela, y este script monta un loopback, hace bind de /proc y ejecuta un
-	// chroot. SIGKILL no dispara su `trap cleanup EXIT`, así que un cliente que
-	// se rinde —un timeout, un Ctrl-C— deja la imagen MONTADA en escritura y a
-	// medio construir. A partir de ahí, cada arranque de esa imagen la corrompe
-	// más: el invitado ve un ext4 con needs_recovery y el kernel entra en
-	// pánico con EUCLEAN. Pasó de verdad, y costó un rato entenderlo.
-	//
-	// Que el cliente cuelgue es molesto; dejar el host con un montaje huérfano
-	// y una imagen inservible, no. Se acota solo por buildTimeout.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, sh, argv...)
-	cmd.Dir = s.root
-	cmd.Env = append(os.Environ(), "KLING_ROOT="+s.root)
-	if req.Base != "" {
-		cmd.Env = append(cmd.Env, "BASE_IMAGE="+req.Base)
-	}
-	if req.GrowMB > 0 {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("GROW=%d", req.GrowMB))
-	}
-	if b := s.bridgePath(); b != "" {
-		cmd.Env = append(cmd.Env, "BRIDGE="+b)
-	}
-
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		// La salida del script es lo único que explica POR QUÉ falló —un apk
-		// que no existe, un npm sin red—, así que viaja entera al cliente.
-		fail(w, http.StatusInternalServerError,
-			fmt.Errorf("build failed: %w\n%s", err, strings.TrimSpace(out.String())))
-		return
-	}
-
-	// La receta se guarda JUNTO a la imagen, no dentro.
-	//
-	// Dentro haría falta montarla para leerla, que es una operación de root con
-	// riesgo de corromper el ext4 — justo lo que hay que evitar para responder
-	// a "¿cómo se construyó esto?". Al lado, es un fichero de texto.
-	//
-	// Un fallo al escribirla NO tumba la construcción: la imagen ya está hecha y
-	// funciona; perder la receta es peor documentación, no un error.
-	s.mgr.EnsureImageReadable(req.Name)
-	if err := s.saveRecipe(req); err != nil {
-		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
-	}
-
-	writeJSON(w, http.StatusOK, api.BuildImageResult{
-		Name: req.Name,
-		// ImageFile y no el .ext4 a pelo: una construcción por capas deja
-		// $NAME.layer.ext4, y devolver una ruta que no existe convierte el "✓" en
-		// una pista falsa para quien vaya a mirarla.
-		Path:   s.mgr.ImageFile(req.Name),
-		Output: out.String(),
-	})
-}
-
-// bridgePath localiza el puente que hay que inyectar en la imagen.
-//
-// El script lo busca en ./kling-bridge relativo a su directorio de trabajo, que
-// aquí es la raíz de datos y no el repositorio.
-func (s *Server) bridgePath() string {
-	for _, p := range []string{
-		os.Getenv("KLING_BRIDGE"),
-		"/usr/local/lib/kindling/kling-bridge",
-		"/usr/local/bin/kling-bridge",
-	} {
-		if p == "" {
-			continue
-		}
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-func (s *Server) handleRefreshBridges(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Images []string `json:"images,omitempty"`
-	}
-	// Cuerpo vacío = todas las imágenes. No es un error.
-	_ = json.NewDecoder(r.Body).Decode(&req)
-
-	// context.WithoutCancel: si el cliente corta a media faena, abandonar aquí
-	// dejaría una imagen montada en escritura. Es exactamente la cadena que ya
-	// corrompió una imagen en este proyecto y acabó en un pánico del invitado.
-	res, err := s.mgr.RefreshBridges(context.WithoutCancel(r.Context()), s.bridgePath(), req.Images)
-	if err != nil {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+	s.buildWithBuilder(w, r, req)
 }
 
 // recipePath es dónde vive la receta de una imagen.
 func (s *Server) recipePath(name string) string {
 	return filepath.Join(s.root, "images", name+".recipe.json")
-}
-
-// saveRecipe deja constancia de cómo se construyó la imagen.
-//
-// Se escribe en .tmp y se renombra: una receta a medias sería peor que ninguna,
-// porque parece una respuesta.
-func (s *Server) saveRecipe(r api.BuildImageRequest) error {
-	rec := api.ImageRecipe{
-		Name: r.Name, Base: r.Base, Packages: r.Packages, NPM: r.NPM,
-		PIP: r.PIP, Env: r.Env, Cmd: r.Cmd, GrowMB: r.GrowMB, Bundle: r.Bundle,
-		BuiltAt:  time.Now(),
-		KlingVer: Version,
-	}
-	b, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return err
-	}
-	// Una receta con variables horneadas se guarda SOLO para su dueño.
-	//
-	// El resto de una receta es información pública —qué paquetes, qué comando—,
-	// pero los valores de -env los escribe quien construye y pueden no serlo: el
-	// CLI avisa de que un secreto queda en texto plano, y sería incoherente
-	// avisarlo y a la vez dejarlo legible para todo el mundo en un 0644 junto a
-	// la imagen. Sin variables, el modo de siempre.
-	perm := os.FileMode(0o644)
-	if len(rec.Env) > 0 {
-		perm = 0o600
-	}
-	// Durable: de la receta sale la BASE sobre la que arranca la imagen. Una
-	// receta perdida hace que recipeBase caiga en la base por defecto SIN log, y
-	// el invitado arranca sobre el rootfs equivocado — faltan bibliotecas y el
-	// fallo aparece dentro, no aqui.
-	return durable.Escribir(s.recipePath(r.Name), append(b, '\n'), perm)
 }
 
 // handleImages enumera las imágenes de rootfs construidas: nombre, tamaño en
@@ -394,23 +143,4 @@ func (s *Server) handleImageRecipe(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(b)
-}
-
-func (s *Server) handleImageCapabilities(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if !reName.MatchString(name) {
-		fail(w, http.StatusBadRequest, fmt.Errorf("invalid name %q", name))
-		return
-	}
-	caps, err := s.mgr.ImageCapabilities(r.Context(), name)
-	if err != nil {
-		fail(w, http.StatusNotFound, err)
-		return
-	}
-	// Sin capacidades declaradas se devuelve un objeto vacío, no un 404: quien
-	// llama trata "no declara nada" como "sin necesidades especiales".
-	if caps == nil {
-		caps = &api.Capabilities{}
-	}
-	writeJSON(w, http.StatusOK, caps)
 }

@@ -4,7 +4,51 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
-## Sin publicar
+## Sin publicar — v0.6.0
+
+**El núcleo deja de llevar MCP.** Todo lo de alojar servidores MCP —el puente, el
+gateway, el catálogo, `kling mcp`, `add`, `search`, `connect`, `export`, `memory`,
+`migrate`— se muda a su propio repositorio y binario,
+[kindling-mcp](https://github.com/juan52878911/kindling-mcp) v0.1.0. `kling` sigue
+siendo el único comando: con kindling-mcp instalado, esos comandos aparecen en él
+como antes, servidos por la extensión.
+
+| kindling | kindling-mcp |
+|---|---|
+| v0.6.x | v0.1.x |
+
+### Para actualizar
+
+1. Actualiza kindling (`make deploy` o el instalador) y después instala
+   kindling-mcp en tu máquina y en el host del daemon (su `make deploy`), que
+   instala el puente, el empaquetador, el constructor `mcp` y las unidades
+   `kling-gateway` y `kling-heal`, ahora con `ExecStart=/usr/local/bin/kling-mcp`.
+2. Nada que migrar a mano: el daemon pasa catálogos, salud y links de v0.4 a
+   anotaciones y store, y `kling` mueve la sección `memory` de la configuración a
+   `extensions.mcp` (`kling config set mcp.memory.enabled true`).
+
+### Novedades
+
+- **Constructor `base` en el núcleo** (`scripts/81-base-image.sh`): una capa con
+  paquetes de apk/apt y `kling-guest` como PID 1. `kling images toolchain` lo usa.
+- **Unidades de extensiones en `kling up`**: el manifiesto declara `units` y
+  `kling up` las arranca con el daemon si están instaladas.
+
+### Cambios incompatibles
+
+- Fuera del núcleo los comandos MCP y `kling-bridge`; `install.sh --bridge` avisa
+  de que el puente viene con kindling-mcp.
+- Retiradas las rutas deprecadas en v0.5 (`/snapshots/{n}/catalog`,
+  `/snapshots/{n}/health`, `/links`, `/images/refresh-bridge`,
+  `/images/{n}/capabilities`) y los campos `tools`/`health*` del snapshot. Ver
+  [`docs/api.md`](docs/api.md#rutas-retiradas-en-v06).
+- `POST /images` exige `builder`; el proxy al invitado exige `path` (salvo
+  `probe_only`).
+- `kling images refresh` pasa a ser `kling mcp refresh-bridge`.
+- Fuera de `pkg/api` los tipos de MCP (`ToolSpec`, `Link`, `Capabilities`...);
+  viven en kindling-mcp.
+
+## v0.5.0 — sin publicar
 
 kindling se separa en dos: **el núcleo de microVMs** y **kindling-mcp**, lo que se
 venía usando para alojar servidores MCP. Esta versión hace la separación dentro del

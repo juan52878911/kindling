@@ -79,7 +79,6 @@ func (m *Manager) editMeta(name string, edit func(*api.Snapshot) (string, error)
 	if err != nil {
 		return nil, err
 	}
-	mirrorLegacyMCP(snap)
 
 	b, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {

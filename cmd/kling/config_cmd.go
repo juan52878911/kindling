@@ -259,7 +259,7 @@ func extensionKey(full string) (string, string, *plugin.ConfigKey) {
 		return "", "", nil
 	}
 	switch ext {
-	case "defaults", "gateway", "memory":
+	case "defaults", "gateway":
 		return "", "", nil
 	}
 	for _, p := range extensions().Plugins {

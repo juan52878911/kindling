@@ -162,3 +162,36 @@ func TestExtensiones(t *testing.T) {
 		t.Fatal("una clave nunca puesta no existe")
 	}
 }
+
+// La sección "memory" de v0.5 era de kindling-mcp: se eleva a extensions.mcp al
+// cargar y no se vuelve a escribir.
+func TestSeElevaLaMemoriaAntigua(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/config.json"
+	t.Setenv("KLING_CONFIG", p)
+	if err := os.WriteFile(p, []byte(`{"memory":{"enabled":true,"service":"engram"},"defaults":{"image":"min"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var on bool
+	var svc string
+	if ok, _ := c.Extension("mcp", "memory.enabled", &on); !ok || !on {
+		t.Fatal("memory.enabled no se elevó a extensions.mcp")
+	}
+	if ok, _ := c.Extension("mcp", "memory.service", &svc); !ok || svc != "engram" {
+		t.Fatalf("memory.service no se elevó: %q", svc)
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if strings.Contains(string(b), `"memory"`) {
+		t.Fatalf("la sección antigua no debe volver a escribirse: %s", b)
+	}
+	if !strings.Contains(string(b), `"image": "min"`) {
+		t.Fatalf("se perdió el resto de la configuración: %s", b)
+	}
+}

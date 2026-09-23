@@ -151,26 +151,6 @@ func (c *Client) ImageRecipe(ctx context.Context, name string) (*ImageRecipe, er
 	return &rec, c.do(ctx, http.MethodGet, "/images/"+name+"/recipe", nil, &rec)
 }
 
-// ImageCapabilities devuelve lo que una imagen declara necesitar (navegador,
-// internet, módulos nativos), detectado al construirla. El import lo usa para
-// configurar el egress automáticamente.
-func (c *Client) ImageCapabilities(ctx context.Context, name string) (*Capabilities, error) {
-	var caps Capabilities
-	return &caps, c.do(ctx, http.MethodGet, "/images/"+name+"/capabilities", nil, &caps)
-}
-
-// RefreshBridges pone el puente actual dentro de las imágenes ya construidas.
-//
-// Por c.long: monta y desmonta cada imagen, y con varias grandes pasa del plazo
-// del cliente normal.
-func (c *Client) RefreshBridges(ctx context.Context, images []string) ([]BridgeRefresh, error) {
-	var res []BridgeRefresh
-	body := struct {
-		Images []string `json:"images,omitempty"`
-	}{images}
-	return res, c.doWith(c.long, ctx, http.MethodPost, "/images/refresh-bridge", body, &res)
-}
-
 func (c *Client) Volumes(ctx context.Context) ([]*Volume, error) {
 	var l []*Volume
 	return l, c.do(ctx, http.MethodGet, "/volumes", nil, &l)
@@ -276,25 +256,6 @@ func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {
 	return l, c.do(ctx, http.MethodGet, "/snapshots", nil, &l)
 }
 
-func (c *Client) Links(ctx context.Context) ([]*Link, error) {
-	var l []*Link
-	return l, c.do(ctx, http.MethodGet, "/links", nil, &l)
-}
-
-func (c *Client) SetLink(ctx context.Context, l *Link) (*Link, error) {
-	var out Link
-	return &out, c.do(ctx, http.MethodPut, "/links", l, &out)
-}
-
-func (c *Client) RemoveLink(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/links/"+name, nil, nil)
-}
-
-func (c *Client) SetCatalog(ctx context.Context, name string, tools []ToolSpec) (*Snapshot, error) {
-	var s Snapshot
-	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/catalog", CatalogRequest{Tools: tools}, &s)
-}
-
 // RemoveImage retira una imagen del disco.
 func (c *Client) RemoveImage(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/images/"+name, nil, nil)
@@ -302,14 +263,6 @@ func (c *Client) RemoveImage(ctx context.Context, name string) error {
 
 func (c *Client) RemoveSnapshot(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/snapshots/"+name, nil, nil)
-}
-
-// SetHealth anota en el snapshot el resultado de un sondeo de salud. Lo llama
-// `kling mcp health` tras arrancar y sondear una microVM efímera del servicio.
-func (c *Client) SetHealth(ctx context.Context, name string, healthy bool, probeErr string) (*Snapshot, error) {
-	var s Snapshot
-	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/health",
-		HealthRequest{Healthy: healthy, Error: probeErr}, &s)
 }
 
 // Events consume el stream NDJSON del daemon hasta que se cancele el contexto.

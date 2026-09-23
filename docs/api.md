@@ -76,7 +76,7 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | Ruta | Qué hace |
 |---|---|
 | `GET /images` | lista, con receta y snapshots que salen de cada una |
-| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición; sin `builder`, el empaquetado de servidores MCP de siempre |
+| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base` y kindling-mcp instala `mcp` |
 | `GET /images/{name}/recipe` | cómo se construyó |
 | `GET /images/{name}/files?path=/p[&max=N]` | el contenido de un fichero de dentro (1 MiB por defecto, hasta 64) |
 | `GET /images/{name}/files?path=/p&stat=1` | `{exists, size, sha256}` |
@@ -125,20 +125,26 @@ devolver los decide quien llama. La respuesta del invitado se lee entera (8 MiB
 por defecto, hasta 64) y **falla** si se pasa, en vez de truncarse. `wait_ms`
 espera a que el puerto abra; `probe_only` se conforma con eso.
 
-**Compatibilidad (v0.5).** Una petición sin `path` es de un cliente v0.4 y recibe
-los valores de entonces: `/mcp`, la cabecera `Accept` de MCP y `Mcp-Session-Id`
-de vuelta. Se retira en v0.6.
+`path` es obligatorio salvo con `probe_only`: una petición sin él (la de un
+cliente v0.4, que contaba con los valores de MCP que el daemon ponía entonces)
+recibe `400`.
 
-## Rutas de v0.4 que se mantienen hasta v0.6
+## Rutas retiradas en v0.6
 
-| Ruta | Ahora |
+v0.5 las mantenía como alias; v0.6 las quita. Lo que hacían lo hace ahora
+kindling-mcp sobre las rutas genéricas:
+
+| Ruta de v0.4/v0.5 | Ahora |
 |---|---|
-| `PUT /snapshots/{name}/catalog` | escribe la anotación `mcp.tools` |
-| `PUT /snapshots/{name}/health` | escribe la anotación `mcp.health` |
-| `GET/PUT /links`, `DELETE /links/{name}` | leen y escriben `store/mcp/links`; al arrancar, el daemon migra el `links.json` antiguo y lo deja como `links.json.migrated` |
-| `POST /images/refresh-bridge` | pone el puente al día en las imágenes (lo mismo que `PUT /images/{name}/files` con `from_host`) |
-| `GET /images/{name}/capabilities` | lee `/etc/kling/capabilities.json` de la imagen |
+| `PUT /snapshots/{name}/catalog` | anotación `mcp.tools` (`PUT /snapshots/{name}/annotations/mcp.tools`) |
+| `PUT /snapshots/{name}/health` | anotación `mcp.health` |
+| `GET/PUT /links`, `DELETE /links/{name}` | `store/mcp/links` |
+| `POST /images/refresh-bridge` | `PUT /images/{name}/files` con `from_host: "kling-bridge"` (`kling mcp refresh-bridge`) |
+| `GET /images/{name}/capabilities` | `GET /images/{name}/files?path=/etc/kling/capabilities.json` |
+| `POST /images` sin `builder` | `builder: "mcp"` |
 
-Mientras duren, el snapshot sigue devolviendo `tools`, `tools_at`, `health`,
-`health_at` y `health_err`, rellenados a partir de las anotaciones, para que un
-CLI anterior los lea y bajar de versión el daemon no pierda nada.
+El snapshot ya no devuelve `tools`, `tools_at`, `health`, `health_at` ni
+`health_err`. Los datos no se pierden: al leer un `meta.json` de v0.4, el daemon
+los pasa a las anotaciones `mcp.tools` y `mcp.health`, y al arrancar migra un
+`links.json` que quede a `store/mcp/links` (dejando el original como
+`links.json.migrated`).

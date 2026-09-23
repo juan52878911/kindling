@@ -2,8 +2,11 @@ package main
 
 import (
 	"flag"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -23,32 +26,54 @@ func TestKnownFlags(t *testing.T) {
 	}
 }
 
-// Los comandos MCP siguen en la ayuda y en el completado aunque ya no estén en
-// el switch del núcleo: llegan por la extensión incorporada.
-func TestAyudaYCompletadoIncluyenLaExtensionMCP(t *testing.T) {
+// El núcleo no trae MCP: sin extensiones, la ayuda y el completado solo tienen
+// lo suyo. Con una extensión instalada, lo que ella declara aparece en los dos.
+func TestAyudaYCompletadoConUnaExtension(t *testing.T) {
+	reset := func() { extOnce = sync.Once{}; extReg = nil }
+	t.Cleanup(reset)
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("sin go en el PATH no se puede compilar la extensión de prueba")
+	}
+
+	t.Setenv("KLING_PLUGIN_PATH", t.TempDir())
+	t.Setenv("PATH", "/usr/bin:/bin") // que no encuentre extensiones reales del usuario
+	reset()
 	var b strings.Builder
 	printUsage(&b)
-	for _, want := range []string{"MCP SERVICES", "mcp import <service>", "CONNECT YOUR AGENT", "GATEWAY", "EXTENSIONS"} {
-		if !strings.Contains(b.String(), want) {
-			t.Errorf("la ayuda perdió %q", want)
+	for _, no := range []string{"MCP SERVICES", "mcp import", "CONNECT YOUR AGENT"} {
+		if strings.Contains(b.String(), no) {
+			t.Errorf("la ayuda del núcleo no debe traer %q", no)
 		}
 	}
-	for _, sh := range []bool{false, true} {
-		script := completionScript(sh)
-		for _, want := range []string{" mcp ", "import list", "status enable disable"} {
-			if !strings.Contains(script, want) {
-				t.Errorf("completado (zsh=%v) sin %q", sh, want)
-			}
-		}
-	}
-	// Ningún comando MCP se cuela en la lista del núcleo.
 	for _, c := range coreCommands {
 		switch c {
 		case "mcp", "add", "search", "connect", "migrate", "memory", "gateway", "export":
-			t.Errorf("%q es de la extensión MCP, no del núcleo", c)
+			t.Errorf("%q es de kindling-mcp, no del núcleo", c)
 		}
 	}
-	if p := extensions().Lookup("mcp"); p == nil || p.Builtin == nil {
-		t.Fatal("`kling mcp` tiene que servirlo la extensión incorporada")
+
+	dir := t.TempDir()
+	out, err := exec.Command(goBin, "build", "-o", filepath.Join(dir, "kling-hello"), "../../pkg/plugin/testdata/kling-hello").CombinedOutput()
+	if err != nil {
+		t.Fatalf("compilando la extensión de prueba: %v\n%s", err, out)
+	}
+	t.Setenv("KLING_PLUGIN_PATH", dir)
+	reset()
+	b.Reset()
+	printUsage(&b)
+	if !strings.Contains(b.String(), "HELLO") || !strings.Contains(b.String(), "says hello") {
+		t.Errorf("la ayuda no incluye la extensión instalada:\n%s", b.String())
+	}
+	for _, zsh := range []bool{false, true} {
+		if s := completionScript(zsh); !strings.Contains(s, " hello") || !strings.Contains(s, "world") {
+			t.Errorf("el completado (zsh=%v) no incluye la extensión", zsh)
+		}
+	}
+	if p := extensions().Lookup("hello"); p == nil || p.Path == "" {
+		t.Fatal("`kling hello` tiene que servirlo la extensión externa")
+	}
+	if extensions().Lookup("ps") != nil {
+		t.Fatal("un comando del núcleo nunca se cede a una extensión")
 	}
 }

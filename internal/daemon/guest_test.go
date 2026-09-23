@@ -30,22 +30,6 @@ func invitado(t *testing.T, respuesta string) (string, *vistoPorElInvitado) {
 	return strings.TrimPrefix(srv.URL, "http://"), v
 }
 
-// Un CLI v0.4 no manda ruta y cuenta con los valores de MCP: tienen que seguir
-// siendo los mismos o `kling mcp import` de una versión anterior deja de ir.
-func TestProxyGuestComoV04(t *testing.T) {
-	addr, v := invitado(t, `{"ok":true}`)
-	out, _, err := proxyGuest(context.Background(), addr, api.GuestRequest{Body: `{"jsonrpc":"2.0"}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.path != "/mcp" || v.method != "POST" || !strings.Contains(v.accept, "text/event-stream") {
-		t.Fatalf("valores de v0.4 perdidos: %+v", v)
-	}
-	if out.Headers["Mcp-Session-Id"] != "sesion-1" || out.Headers["X-Otra"] != "" {
-		t.Fatalf("cabeceras devueltas: %v", out.Headers)
-	}
-}
-
 // Con ruta explícita el daemon no añade nada de MCP: ni Accept ni la cabecera
 // de sesión de vuelta, salvo que se pida.
 func TestProxyGuestGenerico(t *testing.T) {
@@ -83,5 +67,17 @@ func TestProxyGuestLimites(t *testing.T) {
 	}
 	if _, code, _ := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "sin-barra"}); code != http.StatusBadRequest {
 		t.Fatalf("una ruta sin '/' es un 400: %d", code)
+	}
+}
+
+// Sin ruta ya no hay valores por defecto: quien habla con el invitado dice a
+// dónde. Solo una sonda de puerto puede ir sin ruta.
+func TestProxyGuestExigeRuta(t *testing.T) {
+	addr, _ := invitado(t, `x`)
+	if _, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Body: "{}"}); err == nil || code != 400 {
+		t.Fatalf("sin ruta debe ser un 400: code=%d err=%v", code, err)
+	}
+	if _, _, err := proxyGuest(context.Background(), addr, api.GuestRequest{ProbeOnly: true, WaitMS: 1000}); err != nil {
+		t.Fatalf("una sonda de puerto no necesita ruta: %v", err)
 	}
 }

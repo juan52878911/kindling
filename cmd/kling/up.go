@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,7 +32,6 @@ import (
 
 	"bytes"
 	"github.com/juan52878911/kindling/internal/assets"
-	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -114,8 +112,7 @@ func upHere(root string, checkOnly bool) error {
 	fmt.Println()
 	fmt.Println("Next step:")
 	fmt.Println("  kling status                     checks that everything responds")
-	fmt.Println("  kling add <server>               packages an MCP server as a service")
-	fmt.Println("  kling connect -all -install all  plugs it into your agents")
+	fmt.Println("  kling plugins                    what the installed extensions add (kling-mcp: MCP servers)")
 	return nil
 }
 
@@ -145,7 +142,7 @@ func upRemote(endpoint, root string, checkOnly bool) error {
 	case checkOnly:
 	default:
 		fmt.Printf("Everything's ready. Start it there (needs sudo, and sudo needs your terminal):\n")
-		fmt.Printf("  ssh -t %s 'sudo systemctl enable --now kling && sudo systemctl start kling-gateway'\n", target)
+		fmt.Printf("  ssh -t %s 'sudo systemctl enable --now %s'\n", target, strings.Join(append([]string{"kling"}, p.extUnits...), " "))
 	}
 	fmt.Println()
 	fmt.Println("And then, from here:  kling status")
@@ -212,11 +209,11 @@ type probe struct {
 	runAs       string // nombre del usuario sin privilegios
 	runAsExists bool
 	systemd     bool
-	unit        bool // /etc/systemd/system/kling.service
-	unitGateway bool
-	active      string // salida de systemctl is-active kling
-	kernel      bool   // $root/images/vmlinux
-	baseImage   bool   // $root/images/min.ext4
+	unit        bool     // /etc/systemd/system/kling.service
+	extUnits    []string // unidades de extensiones instaladas (kling-gateway.service...)
+	active      string   // salida de systemctl is-active kling
+	kernel      bool     // $root/images/vmlinux
+	baseImage   bool     // $root/images/min.ext4
 	root        string
 }
 
@@ -248,7 +245,11 @@ func localProbe(root string) probe {
 	p.runAsExists = err == nil
 	p.systemd = inPath("systemctl")
 	p.unit = fileExists("/etc/systemd/system/kling.service")
-	p.unitGateway = fileExists("/etc/systemd/system/kling-gateway.service")
+	for _, u := range extensionUnits() {
+		if fileExists("/etc/systemd/system/" + u) {
+			p.extUnits = append(p.extUnits, u)
+		}
+	}
 	if p.systemd {
 		// is-active devuelve estado 3 cuando no está activo: el error da igual,
 		// lo que importa es la palabra que imprime.
@@ -274,7 +275,7 @@ echo "nft=$(si "$(command -v nft 2>/dev/null)")"
 echo "runas=$(si "$(id -u "$RUNAS" 2>/dev/null)")"
 echo "systemd=$(si "$(command -v systemctl 2>/dev/null)")"
 echo "unit=$(si "$([ -f /etc/systemd/system/kling.service ] && echo 1)")"
-echo "unitgw=$(si "$([ -f /etc/systemd/system/kling-gateway.service ] && echo 1)")"
+echo "units=$(for u in $UNITS; do [ -f "/etc/systemd/system/$u" ] && printf '%s ' "$u"; done)"
 echo "active=$(systemctl is-active kling 2>/dev/null || true)"
 echo "kernel=$(si "$([ -f "$ROOT/images/vmlinux" ] && echo 1)")"
 echo "image=$(si "$([ -f "$ROOT/images/min.ext4" ] && echo 1)")"
@@ -286,7 +287,7 @@ func remoteProbe(target, root string) (probe, error) {
 	// BatchMode: si las claves no están puestas queremos un error inmediato, no
 	// una petición de contraseña en mitad de un diagnóstico.
 	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-		target, "RUNAS="+p.runAs, "ROOT="+root, "sh", "-s")
+		target, "RUNAS="+p.runAs, "ROOT="+root, "UNITS='"+strings.Join(extensionUnits(), " ")+"'", "sh", "-s")
 	cmd.Stdin = strings.NewReader(remoteScript)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -307,7 +308,8 @@ func remoteProbe(target, root string) (probe, error) {
 	p.ip, p.iptables, p.nft = yes("ip"), yes("iptables"), yes("nft")
 	p.runAsExists = yes("runas")
 	p.systemd = yes("systemd")
-	p.unit, p.unitGateway = yes("unit"), yes("unitgw")
+	p.unit = yes("unit")
+	p.extUnits = strings.Fields(vals["units"])
 	p.active = vals["active"]
 	p.kernel, p.baseImage = yes("kernel"), yes("image")
 	return p, nil
@@ -469,16 +471,14 @@ func startServices(p probe) error {
 		fmt.Println("  Deploy them from this repo (installs binary, units, and token):")
 		fmt.Println("    make deploy HOST=ssh://user@this-host")
 		fmt.Println()
-		fmt.Println("  Or start it by hand, in two terminals:")
+		fmt.Println("  Or start it by hand:")
 		fmt.Printf("    sudo kling daemon -root %s\n", p.root)
-		fmt.Println("    kling gateway -listen 127.0.0.1:8080")
 		return nil
 	}
 
-	units := []string{"kling"}
-	if p.unitGateway {
-		units = append(units, "kling-gateway")
-	}
+	// El daemon y lo que las extensiones instalaron (el gateway MCP, su
+	// temporizador de heal...).
+	units := append([]string{"kling"}, p.extUnits...)
 	for _, u := range units {
 		// La orden se imprime ANTES de lanzarla: quien la ve puede pararla, y
 		// sobre todo puede repetirla sin kindling delante.
@@ -635,115 +635,6 @@ func statusJSON(ctx context.Context, c *api.Client, args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(report)
 }
 
-func gatewayServiceNames(url, token string) ([]string, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	var names []string
-	for _, line := range strings.Split(string(body), "\n") {
-		if f := strings.Fields(line); len(f) > 0 {
-			names = append(names, f[0])
-		}
-	}
-	return names, nil
-}
-
-// mcpHealthLine resume el último sondeo de salud de los servicios importados.
-//
-// Solo LEE los veredictos que dejó `kling mcp health` en el meta de cada
-// snapshot: sondear aquí arrancaría una microVM por servicio y `status` debe
-// ser instantáneo. Por eso "never probed" es un estado que se muestra y no se
-// disimula: sin sondeo no hay dato, y fingir salud es lo que tapó la caída.
-func mcpHealthLine(snaps []*api.Snapshot) string {
-	var healthy, unknown int
-	var sick []string
-	for _, s := range snaps {
-		switch mcp.HealthOf(s).Status {
-		case mcp.Healthy:
-			healthy++
-		case mcp.Unhealthy:
-			n := s.Name
-			if svc := s.Service(); svc != "" {
-				n = svc
-			}
-			sick = append(sick, n)
-		default:
-			unknown++
-		}
-	}
-	switch {
-	case len(sick) > 0:
-		line := fmt.Sprintf("✗ %d unhealthy (%s) · %d healthy", len(sick), strings.Join(sick, ", "), healthy)
-		if unknown > 0 {
-			line += fmt.Sprintf(" · %d never probed", unknown)
-		}
-		return line + " — details: kling mcp ls"
-	case unknown == len(snaps):
-		return fmt.Sprintf("? none of the %d service(s) has ever been probed — probe them: kling mcp health", unknown)
-	case unknown > 0:
-		return fmt.Sprintf("✓ %d healthy · %d never probed — probe them: kling mcp health", healthy, unknown)
-	default:
-		return fmt.Sprintf("✓ %d healthy", healthy)
-	}
-}
-
-// servicesLine resume /services, que responde texto plano, una línea por
-// servicio.
-func servicesLine(url, token string) string {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return "✗ " + err.Error()
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return "✗ " + err.Error()
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		if token == "" {
-			return "✗ requires a token and none is configured here\n" +
-				"              copy it from the host:  kling config set gateway.token <t>"
-		}
-		return "✗ the gateway rejects the token from gateway.token (401)"
-	}
-	if resp.StatusCode >= 300 {
-		return "✗ HTTP " + resp.Status
-	}
-
-	// Acotado: leer sin límite una respuesta ajena es regalarle a quien esté al
-	// otro lado la memoria de este proceso. 64 KiB dan para miles de servicios.
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	var names []string
-	for _, line := range strings.Split(string(body), "\n") {
-		if f := strings.Fields(line); len(f) > 0 {
-			names = append(names, f[0])
-		}
-	}
-	if len(names) == 0 {
-		return "✓ none yet — package one with:  kling add <server>"
-	}
-	return fmt.Sprintf("✓ %d: %s", len(names), strings.Join(names, ", "))
-}
-
-// ── utilidades ────────────────────────────────────────────────────────────────
-
 func hasKVM() bool { return fileExists("/dev/kvm") }
 
 // isWSL2 mira /proc/version. Es la única forma fiable de reconocerlo, y el
@@ -816,4 +707,15 @@ func httpOK(url string) error {
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
 	return nil
+}
+
+// extensionUnits son las unidades de systemd que declaran las extensiones.
+func extensionUnits() []string {
+	var out []string
+	for _, p := range extensions().Plugins {
+		if p.Err == nil {
+			out = append(out, p.Manifest.Units...)
+		}
+	}
+	return out
 }

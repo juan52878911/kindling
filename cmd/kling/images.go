@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,23 +9,20 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/juan52878911/kindling/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
-//
-//	kling images refresh            pone el puente actual dentro de todas
-//	kling images refresh semgrep    solo en esa
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling images <ls|rm|refresh|toolchain|recipe|build|cat|put> [...]")
+		return fmt.Errorf("usage: kling images <ls|rm|toolchain|recipe|build|cat|put> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
 		return imagesList(args[1:])
 	case "refresh", "refresh-bridge":
-		return imagesRefresh(args[1:])
+		// El puente es de kindling-mcp y su recambio también.
+		return fmt.Errorf("the bridge belongs to kindling-mcp now: kling mcp refresh-bridge [image...]")
 	case "toolchain":
 		return imagesToolchain(args[1:])
 	case "rm", "remove":
@@ -39,7 +36,7 @@ func cmdImages(args []string) error {
 	case "put":
 		return imagesPut(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, refresh, toolchain, recipe, build, cat or put", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, cat or put", args[0])
 	}
 }
 
@@ -112,87 +109,6 @@ func imagesList(args []string) error {
 	return nil
 }
 
-// imagesRefresh reemplaza el puente dentro de las imágenes.
-//
-// Hace falta porque el puente es el PID 1 del invitado y vive DENTRO de cada
-// imagen: actualizar kindling en el anfitrión no toca los servicios ya
-// empaquetados. Y no es una carencia de funciones sino un fallo desconcertante —
-// un puente antiguo no entiende los parámetros nuevos del kernel, muere al
-// arrancar, y como es PID 1 el invitado entra en pánico.
-func imagesRefresh(args []string) error {
-	fs := flag.NewFlagSet("images refresh", flag.ExitOnError)
-	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-
-	ctx, stop := ctxWithSignals()
-	defer stop()
-
-	res, err := api.NewClient(hostOf(*host)).RefreshBridges(ctx, fs.Args())
-	if err != nil {
-		return err
-	}
-	if len(res) == 0 {
-		fmt.Println("no images built yet")
-		return nil
-	}
-
-	var actualizadas, saltadas, ocupadas, fallos int
-	var cambiadas []string
-	for _, r := range res {
-		if r.Busy {
-			ocupadas++
-		}
-		switch {
-		case r.Error != "" && r.Skipped:
-			// Saltada no es un fallo: es información. La imagen sigue con el
-			// puente viejo y hay que saberlo.
-			fmt.Printf("  ⏭  %-24s %s\n", r.Image, r.Error)
-			saltadas++
-		case r.Error != "":
-			fmt.Printf("  ✗  %-24s %s\n", r.Image, r.Error)
-			fallos++
-		case r.Updated:
-			fmt.Printf("  ✓  %-24s bridge updated\n", r.Image)
-			actualizadas++
-			cambiadas = append(cambiadas, r.Image)
-		default:
-			fmt.Printf("     %-24s already up to date\n", r.Image)
-		}
-	}
-
-	fmt.Println()
-	fmt.Printf("%d updated, %d up to date, %d skipped, %d failed\n",
-		actualizadas, len(res)-actualizadas-saltadas-fallos, saltadas, fallos)
-	// Solo cuando hay algo que parar: una capa cuyo puente vive en su base
-	// también sale saltada, y ahí no hay ninguna microVM que apagar.
-	if ocupadas > 0 {
-		fmt.Println("\nSome images were skipped because a microVM is using them: stop it and try again.")
-		fmt.Println("  kling ps -a")
-	}
-	if actualizadas > 0 {
-		// Y se GRABA en la salud, no solo se imprime. El dorado se congeló con
-		// el puente ANTIGUO dentro y con esas páginas mapeadas: a partir de aquí
-		// el servicio despierta y no sirve, con un "tool did not start listening"
-		// que no menciona la imagen por ningún sitio. Un aviso en pantalla no
-		// impide nada —basta no leerlo—; en la salud lo ve la sonda y lo cura
-		// `kling mcp heal`.
-		if n := marcarAfectados(ctx, api.NewClient(hostOf(*host)), cambiadas); n > 0 {
-			fmt.Printf("\n%d service(s) marked unhealthy: their golden snapshot still has the old bridge.\n", n)
-			fmt.Println("Rebuild them all at once:")
-			fmt.Println("  kling mcp heal")
-			return nil
-		}
-		fmt.Println("\nRe-import the affected services so their snapshots pick it up:")
-		fmt.Println("  kling mcp import <service> -force")
-	}
-	if fallos > 0 {
-		return fmt.Errorf("%d image(s) failed to update", fallos)
-	}
-	return nil
-}
-
 // ToolchainImage es la imagen con instaladores que usa `volume populate`.
 //
 // Tiene nombre fijo y conocido a propósito: sin ella, poblar un volumen obligaba
@@ -203,10 +119,10 @@ const ToolchainImage = "toolchain"
 
 // imagesToolchain construye la imagen con npm y pip dentro.
 //
-// No lleva servidor MCP: su comando es un shell que nunca se invoca, porque a
-// esta imagen no se le abren sesiones MCP. Lo único que se usa de ella es el
-// puente y su /exec, que es como `volume populate` instala paquetes dentro de
-// una microVM en vez de en el anfitrión.
+// No lleva servidor MCP: su PID 1 es el agente de invitado genérico,
+// kling-guest, y lo único que se usa de ella es su /exec, que es como
+// `volume populate` instala paquetes dentro de una microVM en vez de en el
+// anfitrión. La construye el constructor "base" del núcleo.
 func imagesToolchain(args []string) error {
 	fs := flag.NewFlagSet("images toolchain", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -221,18 +137,15 @@ func imagesToolchain(args []string) error {
 	fmt.Printf("Building %q: node, npm, python3 and pip inside.\n", *name)
 	fmt.Print("  (installs quite a bit; takes a few minutes)... ")
 
+	// El constructor "base" del núcleo: paquetes del sistema y kling-guest como
+	// PID 1, que es quien sirve /exec cuando populate enciende kling.exec=1.
+	spec, _ := json.Marshal(BaseSpec{Packages: []string{"nodejs", "npm", "python3", "py3-pip"}})
 	res, err := api.NewClient(hostOf(*host)).BuildImage(ctx, api.BuildImageRequest{
-		Name: *name,
-		// nodejs/npm para el mundo de node; python3/py3-pip para el de Python.
-		// Nada más: cada paquete extra es peso en una imagen que solo existe
-		// para instalar cosas en un volumen y morirse.
-		Packages: []string{"nodejs", "npm", "python3", "py3-pip"},
-		// Sitio para que quepan node y las ruedas de Python a la vez.
-		GrowMB: 1536,
-		// Un shell que nunca llega a ejecutarse: el puente solo lanza este
-		// comando cuando alguien abre una sesión MCP, y a esta imagen no se le
-		// abren. Existe porque el empaquetador exige un comando.
-		Cmd: []string{"/bin/sh"},
+		Name:    *name,
+		Base:    "min",
+		GrowMB:  1536,
+		Builder: "base",
+		Spec:    spec,
 	})
 	if err != nil {
 		fmt.Println("✗")
@@ -281,38 +194,21 @@ func imagesRecipe(args []string) error {
 	if len(rec.PIP) > 0 {
 		fmt.Printf("  pip:       %s\n", strings.Join(rec.PIP, " "))
 	}
-	fmt.Printf("  command:   %s\n", strings.Join(rec.Cmd, " "))
+	if len(rec.Cmd) > 0 {
+		fmt.Printf("  command:   %s\n", strings.Join(rec.Cmd, " "))
+	}
+	// Desde v0.6 las imágenes las construye un constructor con nombre, y lo que
+	// pidió va en su spec, que el núcleo no interpreta: se enseña tal cual.
+	if rec.Builder != "" {
+		fmt.Printf("  builder:   %s\n", rec.Builder)
+	}
+	if len(rec.Spec) > 0 && string(rec.Spec) != "null" {
+		var buf bytes.Buffer
+		if json.Indent(&buf, rec.Spec, "             ", "  ") == nil {
+			fmt.Printf("  spec:      %s\n", buf.String())
+		}
+	}
 	return nil
-}
-
-// marcarAfectados graba en la salud que estos servicios tienen un dorado viejo.
-// Devuelve cuantos se marcaron.
-func marcarAfectados(ctx context.Context, c *api.Client, imagenes []string) int {
-	if len(imagenes) == 0 {
-		return 0
-	}
-	tocada := map[string]bool{}
-	for _, i := range imagenes {
-		tocada[i] = true
-	}
-	snaps, err := c.Snapshots(ctx)
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, s := range snaps {
-		if !tocada[s.Image] {
-			continue
-		}
-		nombre := s.Service()
-		if nombre == "" {
-			nombre = s.Name
-		}
-		if err := mcp.SetHealth(ctx, c, nombre, false, mcp.MotivoImagenCambiada); err == nil {
-			n++
-		}
-	}
-	return n
 }
 
 // imagesRm retira una imagen que ya no usa nadie.

@@ -106,74 +106,6 @@ func (m *Manager) Images() []string {
 	return out
 }
 
-// RefreshBridges pone el puente actual dentro de las imágenes indicadas.
-//
-// Si no se dan nombres, se hacen todas. Devuelve una fila por imagen contando
-// qué pasó con ella, también las que no hicieron falta: saber que una imagen ya
-// estaba al día vale tanto como saber que se actualizó.
-func (m *Manager) RefreshBridges(ctx context.Context, bridge string, names []string) ([]api.BridgeRefresh, error) {
-	if bridge == "" {
-		return nil, fmt.Errorf("cannot find the bridge to inject: " +
-			"it should be at /usr/local/lib/kindling/kling-bridge (put there by `make deploy`)")
-	}
-	quiero, err := fileDigest(bridge)
-	if err != nil {
-		return nil, fmt.Errorf("reading bridge %s: %w", bridge, err)
-	}
-	if len(names) == 0 {
-		names = m.Images()
-	}
-
-	// Qué imágenes están en uso AHORA. Montar en escritura la imagen base de una
-	// microVM viva le corrompe el sistema de ficheros por debajo — es de solo
-	// lectura para ella, pero el ext4 no admite que otro lo modifique mientras
-	// lo tiene montado.
-	enUso := m.imageUsers()
-
-	out := make([]api.BridgeRefresh, 0, len(names))
-	for _, name := range names {
-		fila := api.BridgeRefresh{Image: name}
-		// Con una imagen por capas se toca la CAPA, no la base: el puente lo puso
-		// ahí el build, y la base es de otros —reescribirla desde aquí cambiaría
-		// bajo los pies de todos los servicios que se apoyan en ella—.
-		base, layered := m.ImageBase(name)
-		path, dentro := m.imagePath(name), "/"+guestBridgePath
-		if layered {
-			path, dentro = m.layerPath(name), layerGuestPath(guestBridgePath)
-		}
-		if _, err := os.Stat(path); err != nil {
-			fila.Error = "does not exist"
-			out = append(out, fila)
-			continue
-		}
-		if users := enUso[name]; len(users) > 0 {
-			fila.Skipped, fila.Busy = true, true
-			fila.Error = fmt.Sprintf("in use by %d machine(s): %s", len(users), strings.Join(users, ", "))
-			out = append(out, fila)
-			continue
-		}
-		actualizada, err := m.refreshOne(ctx, path, dentro, bridge, quiero)
-		switch {
-		case errors.Is(err, errNoBridge) && layered:
-			// Una capa sin puente NO es "no es una imagen de servicio": es un
-			// servicio cuyo puente vive en la base, que es donde hay que
-			// actualizarlo — y se actualiza una vez para todos.
-			fila.Skipped = true
-			fila.Error = fmt.Sprintf("its bridge comes from base %q; refresh that one", base)
-		case errors.Is(err, errNoBridge):
-			// Ni actualizada ni fallida: no aplica. Se informa igualmente para
-			// que no parezca que se olvidó.
-			fila.Skipped = true
-			fila.Error = err.Error()
-		case err != nil:
-			fila.Error = err.Error()
-		}
-		fila.Updated = actualizada
-		out = append(out, fila)
-	}
-	return out, nil
-}
-
 // imageUsers dice qué máquinas vivas usan cada imagen.
 //
 // Cuentan también las warm: al descongelarse vuelven a leer de la imagen base,
@@ -424,14 +356,26 @@ func copyFile(src, dst string, mode os.FileMode) error {
 // El error va aparte del booleano a propósito: "no lo sé" —debugfs ausente— no
 // es lo mismo que "no lo lleva", y quien pregunta decide si falla abierto.
 func imageHasBridge(ctx context.Context, base, layer string) (bool, error) {
-	if layer != "" {
-		has, err := hasFile(ctx, layer, layerGuestPath(guestBridgePath))
+	// Vale cualquiera de los dos agentes de invitado: kling-guest (el genérico
+	// del núcleo) o kling-bridge (el puente de kindling-mcp, que lo embebe).
+	// Los dos leen kling.volume y montan los volúmenes.
+	for _, agent := range []string{guestAgentPath, guestBridgePath} {
+		if layer != "" {
+			has, err := hasFile(ctx, layer, layerGuestPath(agent))
+			if err != nil || has {
+				return has, err
+			}
+		}
+		has, err := hasFile(ctx, base, "/"+agent)
 		if err != nil || has {
 			return has, err
 		}
 	}
-	return hasFile(ctx, base, "/"+guestBridgePath)
+	return false, nil
 }
+
+// guestAgentPath es donde vive el agente genérico de invitado en una imagen.
+const guestAgentPath = "usr/local/bin/kling-guest"
 
 // hasFile mira con debugfs si un fichero existe dentro de un ext4 sin montarlo.
 func hasFile(ctx context.Context, image, path string) (bool, error) {

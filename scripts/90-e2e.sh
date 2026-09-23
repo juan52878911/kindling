@@ -3,8 +3,8 @@
 #
 # Los tests de Go cubren la lógica, pero no pueden cubrir lo que de verdad se
 # rompe en este proyecto: que una microVM arranque, que su red funcione, que el
-# snapshot dorado despierte, que el gateway enrute con token y que un volumen
-# sobreviva a la máquina. Todo eso necesita KVM, y por eso vive aquí y no en el
+# snapshot dorado despierte y que un volumen sobreviva a la máquina. (El gateway
+# y el resto de lo MCP tienen su propio e2e en kindling-mcp.) Todo eso necesita KVM, y por eso vive aquí y no en el
 # CI.
 #
 #   ./90-e2e.sh                      contra el contexto activo de kling
@@ -16,12 +16,12 @@
 set -uo pipefail
 
 KLING="${KLING:-kling}"
-SVC="${SVC:-e2e-eco}"
 VOL="${VOL:-e2e-vol}"
 VOL2="${VOL2:-e2e-vol2}"
-# Los volúmenes los monta el PUENTE, y la imagen mínima no lo lleva: el daemon
-# rechaza montarlos ahí a propósito, porque el disco se engancharía y nadie lo
-# montaría. Para los bloques de volúmenes hace falta una imagen de servicio.
+# Los volúmenes los monta el agente de invitado, y la imagen mínima no lo lleva:
+# el daemon rechaza montarlos ahí a propósito, porque el disco se engancharía y
+# nadie lo montaría. Para los bloques de volúmenes hace falta una imagen con
+# agente: la de herramientas (`kling images toolchain`) lleva kling-guest.
 IMGVOL="${IMGVOL:-toolchain}"
 KEEP="${KEEP:-0}"
 
@@ -43,13 +43,12 @@ need() { command -v "$1" >/dev/null || { echo "falta $1" >&2; exit 1; }; }
 need "$KLING"; need curl; need python3
 
 cleanup() {
-  [ "$KEEP" = "1" ] && { echo; echo "KEEP=1: no limpio. Restos: servicio $SVC, volumen $VOL"; return; }
+  [ "$KEEP" = "1" ] && { echo; echo "KEEP=1: no limpio. Restos: volumen $VOL"; return; }
   echo
   echo "limpiando..."
   for m in $($KLING ps -a 2>/dev/null | awk '/e2e-/ {print $1}'); do
     $KLING rm "$m" >/dev/null 2>&1
   done
-  $KLING rmi "$SVC" >/dev/null 2>&1
   $KLING volume rm "$VOL" >/dev/null 2>&1
   $KLING volume rm "$VOL2" >/dev/null 2>&1
 }
@@ -202,22 +201,10 @@ contiene "$out" "taparía" && ok "rechaza dos volúmenes en el mismo punto" \
   || bad "puntos de montaje repetidos" "un rechazo" "$out"
 $KLING rm "e2e-choque-$$" >/dev/null 2>&1
 
-# ── 4. el gateway pide token ─────────────────────────────────────────────────
-step "4. Gateway y autenticación"
-GW=$($KLING config show 2>/dev/null | awk '/^gateway.url/{print $2}')
-if [ -z "$GW" ] || [ "$GW" = "" ]; then
-  echo "  (sin gateway.url configurado; me salto el bloque)"
-else
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$GW/services")
-  [ "$code" = "401" ] && ok "/services sin token -> 401" || bad "auth" "401" "$code"
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$GW/healthz")
-  [ "$code" = "200" ] && ok "/healthz abierto -> 200" || bad "healthz" "200" "$code"
-fi
-
-# ── 5. reconcile no destruye máquinas vivas ──────────────────────────────────
+# ── 4. reconcile no destruye máquinas vivas ──────────────────────────────────
 # El caso que motivó reescribirlo: el daemon se reinicia y una microVM viva NO
 # debe perder su red ni su cgroup, aunque el estado en disco vaya por detrás.
-step "5. El daemon se reinicia sin llevarse las microVMs por delante"
+step "4. El daemon se reinicia sin llevarse las microVMs por delante"
 NAME="e2e-rec-$$"
 if $KLING run -name "$NAME" -image min >/dev/null 2>&1; then
   if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then

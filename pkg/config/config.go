@@ -32,10 +32,6 @@ type Config struct {
 	// Gateway configura `kling gateway` sin flags.
 	Gateway Gateway `json:"gateway"`
 
-	// Memory es opcional y viene apagada: kindling no escribe en la memoria de
-	// nadie sin que se lo pidan.
-	Memory Memory `json:"memory"`
-
 	// Extensions guarda la configuración que declaran las extensiones de kling:
 	// extensions.<extensión>.<clave> = valor. El núcleo no sabe qué significa;
 	// solo lo convierte al tipo que declara el manifiesto al escribirlo.
@@ -56,12 +52,6 @@ type Defaults struct {
 	VCPUs  int    `json:"vcpus,omitempty"`
 	CPUPct int    `json:"cpu_pct,omitempty"`
 	TTL    int    `json:"ttl_seconds,omitempty"`
-}
-
-// Memory apunta a un servicio MCP donde recordar el uso de herramientas.
-type Memory struct {
-	Enabled bool   `json:"enabled"`
-	Service string `json:"service,omitempty"`
 }
 
 type Gateway struct {
@@ -150,7 +140,35 @@ func Load() (*Config, error) {
 	if c.Contexts == nil {
 		c.Contexts = map[string]*Context{}
 	}
+	liftLegacyMemory(c, b)
 	return c, nil
+}
+
+// legacyMemory es la sección "memory" de v0.5 y anteriores. Era de kindling-mcp
+// (la memoria de uso del gateway): Load la eleva una vez a extensions.mcp, y como
+// Config ya no la tiene, el siguiente Save no la vuelve a escribir.
+type legacyMemory struct {
+	Enabled bool   `json:"enabled"`
+	Service string `json:"service,omitempty"`
+}
+
+func liftLegacyMemory(c *Config, raw []byte) {
+	var old struct {
+		Memory *legacyMemory `json:"memory"`
+	}
+	if json.Unmarshal(raw, &old) != nil || old.Memory == nil {
+		return
+	}
+	if _, ok := c.Extensions["mcp"]["memory.enabled"]; ok {
+		return // ya elevada: manda lo nuevo
+	}
+	if !old.Memory.Enabled && old.Memory.Service == "" {
+		return
+	}
+	_ = c.SetExtension("mcp", "memory.enabled", "bool", strconv.FormatBool(old.Memory.Enabled))
+	if old.Memory.Service != "" {
+		_ = c.SetExtension("mcp", "memory.service", "string", old.Memory.Service)
+	}
 }
 
 // Save escribe la configuración de forma atómica.
@@ -252,15 +270,6 @@ func (c *Config) Set(key, value string) error {
 		default:
 			return fmt.Errorf("unknown field defaults.%s", field)
 		}
-	case "memory":
-		switch field {
-		case "enabled":
-			c.Memory.Enabled = value == "true" || value == "1" || value == "si" || value == "sí"
-		case "service":
-			c.Memory.Service = value
-		default:
-			return fmt.Errorf("unknown field memory.%s", field)
-		}
 	case "gateway":
 		switch field {
 		case "listen":
@@ -275,7 +284,7 @@ func (c *Config) Set(key, value string) error {
 			return fmt.Errorf("unknown field gateway.%s", field)
 		}
 	default:
-		return fmt.Errorf("unknown section %q: use defaults, gateway, or memory", section)
+		return fmt.Errorf("unknown section %q: use defaults or gateway, or <extension>.<key> for what an extension declares (kling plugins)", section)
 	}
 	return nil
 }
@@ -359,8 +368,6 @@ func (c *Config) Keys() [][2]string {
 		{"gateway.idle", c.Gateway.Idle},
 		{"gateway.url", c.Gateway.URL},
 		{"gateway.token", mask(c.Gateway.Token)},
-		{"memory.enabled", boolStr(c.Memory.Enabled)},
-		{"memory.service", c.Memory.Service},
 	}
 }
 

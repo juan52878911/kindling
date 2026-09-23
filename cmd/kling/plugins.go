@@ -20,7 +20,7 @@ import (
 var coreCommands = []string{
 	"up", "status", "run", "ps", "logs", "freeze", "thaw", "stop", "rm", "squeeze",
 	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
-	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "plugins",
+	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
 	"completion", "version", "help",
 }
 
@@ -36,9 +36,8 @@ func extensions() *plugin.Registry {
 	extOnce.Do(func() {
 		plugin.SetCoreVersion(strings.TrimPrefix(Version, "v"))
 		extReg = plugin.Discover(context.Background(), plugin.Options{
-			Core:     coreCommands,
-			Version:  strings.TrimPrefix(Version, "v"),
-			Builtins: []*plugin.Builtin{mcpExtension()},
+			Core:    coreCommands,
+			Version: strings.TrimPrefix(Version, "v"),
 		})
 	})
 	return extReg
