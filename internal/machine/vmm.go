@@ -161,3 +161,12 @@ func leerUint64LE(s string) uint64 {
 	}
 	return binary.LittleEndian.Uint64(b)
 }
+
+// E2fsDisponible dice si la herramienta de e2fsprogs está donde el daemon la
+// va a buscar (PATH, sbin o Homebrew). mkfs.ext4 vale también como mke2fs.
+func E2fsDisponible(nombre string) bool {
+	if buscarE2fs(nombre) != "" {
+		return true
+	}
+	return nombre == "mkfs.ext4" && buscarE2fs("mke2fs") != ""
+}

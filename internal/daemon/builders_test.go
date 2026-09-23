@@ -18,6 +18,9 @@ func instalarConstructor(t *testing.T, dir, name, script string) {
 }
 
 func TestConstructorExterno(t *testing.T) {
+	if !construirImagenes {
+		t.Skip("macOS no construye imágenes: POST /images contesta 501 (ver TestBuildImageSegunPlataforma)")
+	}
 	s, h := testServer(t)
 	bdir := t.TempDir()
 	t.Setenv("KLING_BUILDERS_DIR", bdir)

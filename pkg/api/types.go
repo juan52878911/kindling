@@ -460,6 +460,10 @@ type Info struct {
 	// en Linux, "vz" en macOS (kling-vz). Vacío = daemon anterior, que siempre
 	// era firecracker.
 	Backend string `json:"backend,omitempty"`
+	// Arch es la arquitectura del host del daemon (GOARCH: "amd64", "arm64").
+	// Las imágenes y el kernel son de una arquitectura: `kling images copy`
+	// la compara antes de mover gigas que luego no arrancarían.
+	Arch string `json:"arch,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

@@ -12,12 +12,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/daemon"
+	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/transport"
@@ -52,6 +54,8 @@ VOLUMES
       [-mode 0755] [-create]
   images rm <image>                                removes it (refuses if a layer,
                                                    a golden or a machine uses it)
+  images copy <image> -from H [-to H]              streams an image (and its kernel and
+                                                   base) from one daemon to another
 
 MACHINES
   run [-name N] [-image I] [-cpus N] [-mem MiB]    creates and starts a microVM
@@ -106,7 +110,8 @@ OBSERVATION
 `
 
 const usageTail = `DAEMON
-  daemon [-socket S] [-root R] [-firecracker BIN]  starts the core
+  daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,
+                                                   or $KLING_VMM with a name or a path)
 
 CONFIGURATION
   context [ls]                                     lists known daemons
@@ -153,7 +158,7 @@ func main() {
 	case "volume", "volumes":
 		err = cmdVolume(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
-		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocket), os.Stdin, os.Stdout)
+		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocketPath()), os.Stdin, os.Stdout)
 	case "run":
 		err = cmdRun(args)
 	case "exec":
@@ -330,8 +335,8 @@ func ctxWithSignals() (context.Context, context.CancelFunc) {
 
 func cmdDaemon(args []string) error {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-	socket := fs.String("socket", envOr("KLING_SOCKET", transport.DefaultSocket), "Unix socket to serve")
-	root := fs.String("root", envOr("KLING_ROOT", "/var/lib/kindling"), "data directory")
+	socket := fs.String("socket", envOr("KLING_SOCKET", transport.DefaultSocketPath()), "Unix socket to serve")
+	root := fs.String("root", envOr("KLING_ROOT", transport.DefaultRoot()), "data directory")
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
 	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "user to hand the socket to (for the CLI over SSH)")
 	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
@@ -339,14 +344,41 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 
+	backend, err := daemonBackend(loadConfig().Daemon.VMM, os.Getenv("KLING_VMM"), runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), *fcBin)
+
 	daemon.Version = strings.TrimPrefix(Version, "v")
-	srv, err := daemon.New(*socket, *root, *fcBin, *sockUser, *runAs)
+	srv, err := daemon.New(*socket, *root, vmm, *sockUser, *runAs)
 	if err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
+}
+
+// daemonBackend decide con qué VMM arranca el daemon: KLING_VMM si es un
+// nombre de backend, si no la clave daemon.vmm, si no el de la plataforma. Y
+// comprueba que ESTE binario sepa hablarlo: lo que hace el host alrededor del
+// VMM (red, cgroups, /proc) va compilado para un sistema concreto.
+func daemonBackend(ajuste, env, goos, goarch string) (string, error) {
+	backend := ajuste
+	if env == config.VMMFirecracker || env == config.VMMVZ {
+		backend = env
+	}
+	if backend == "" {
+		backend = config.DefaultVMM(goos)
+	}
+	if err := config.ValidateVMM(backend, goos, goarch); err != nil {
+		return "", fmt.Errorf("daemon.vmm: %w", err)
+	}
+	if c := machine.BackendCompilado(); backend != c {
+		return "", fmt.Errorf("daemon.vmm is %q but this kling binary was built for %q", backend, c)
+	}
+	return backend, nil
 }
 
 func cmdRun(args []string) error {
@@ -1028,8 +1060,19 @@ func cmdInfo(args []string) error {
 	fmt.Printf("endpoint:     %s\n", c.Endpoint())
 	fmt.Printf("daemon:       %s\n", i.Version)
 	fmt.Printf("root:         %s\n", i.Root)
-	fmt.Printf("KVM:          %s\n", kvm)
-	fmt.Printf("firecracker:  %s\n", strings.TrimSpace(i.Firecrack))
+	backend := i.Backend
+	if backend == "" {
+		backend = "firecracker" // daemon anterior a v0.9: siempre lo era
+	}
+	fmt.Printf("backend:      %s\n", backend)
+	if i.Arch != "" {
+		fmt.Printf("arch:         %s\n", i.Arch)
+	}
+	if backend == "firecracker" {
+		fmt.Printf("KVM:          %s\n", kvm)
+	}
+	// El campo se llama firecracker por historia; es la versión del VMM, sea cual sea.
+	fmt.Printf("%-14s%s\n", backend+":", strings.TrimSpace(i.Firecrack))
 	fmt.Printf("machines:     %d\n", i.Machines)
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))

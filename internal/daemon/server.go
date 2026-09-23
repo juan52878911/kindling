@@ -15,13 +15,13 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
-	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -97,6 +97,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /images/{name}/recipe", s.handleImageRecipe)
 	mux.HandleFunc("GET /images/{name}/files", s.handleGetImageFile)
 	mux.HandleFunc("PUT /images/{name}/files", s.handlePutImageFile)
+	mux.HandleFunc("GET /images/{name}/blob", s.handleGetImageBlob)
+	mux.HandleFunc("PUT /images/{name}/blob", s.handlePutImageBlob)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("GET /snapshots/{name}", s.handleSnapshot)
 	mux.HandleFunc("PUT /snapshots/{name}/annotations/{key}", s.handleSetAnnotation)
@@ -196,16 +198,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	//
 	// Sigue siendo AVISO y no error: el daemon vale para inspeccionar estado aunque no
 	// pueda arrancar nada. Pero ahora los nombra TODOS de golpe.
-	if missing := missingBinaries(); len(missing) > 0 {
-		log.Printf("WARNING: missing binaries (%s): microVMs cannot be started on this host",
-			strings.Join(missing, ", "))
-	}
-
-	if err := knet.Available(); err != nil {
-		log.Printf("WARNING: network unavailable (%v): microVMs will boot without connectivity", err)
-	} else if err := knet.SetupHost(); err != nil {
-		log.Printf("WARNING: couldn't install the host barrier rules: %v", err)
-	}
+	s.comprobarHost()
 
 	if s.mgr.PrivWarning != "" {
 		log.Printf("SECURITY WARNING: %s", s.mgr.PrivWarning)
@@ -233,6 +226,9 @@ func (s *Server) Listen(ctx context.Context) error {
 // socketOwner resuelve a quién ceder el socket: al usuario indicado por
 // configuración o, si no lo hay, a quien haya invocado sudo.
 func (s *Server) socketOwner() (uid, gid int, ok bool) {
+	if !cederSocket {
+		return 0, 0, false // macOS: el daemon ya es el usuario; no hay a quién cederlo
+	}
 	if s.socketUser != "" {
 		u, err := user.Lookup(s.socketUser)
 		if err != nil {
@@ -281,6 +277,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		KVM:          kvmErr == nil,
 		Machines:     s.mgr.Count(),
 		Capabilities: Capabilities,
+		Backend:      s.mgr.Backend(),
+		Arch:         runtime.GOARCH,
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado

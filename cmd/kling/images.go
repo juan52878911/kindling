@@ -15,7 +15,7 @@ import (
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling images <ls|rm|toolchain|recipe|build|cat|put> [...]")
+		return fmt.Errorf("usage: kling images <ls|rm|toolchain|recipe|build|cat|put|copy> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -35,8 +35,10 @@ func cmdImages(args []string) error {
 		return imagesCat(args[1:])
 	case "put":
 		return imagesPut(args[1:])
+	case "copy", "cp":
+		return imagesCopy(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, cat or put", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, rm, toolchain, recipe, build, cat, put or copy", args[0])
 	}
 }
 
@@ -242,5 +244,48 @@ func imagesRm(args []string) error {
 	if fallos > 0 {
 		return fmt.Errorf("%d image(s) could not be removed", fallos)
 	}
+	return nil
+}
+
+// imagesCopy copia una imagen de un daemon a otro: es como se consiguen
+// imágenes en un Mac, donde no se pueden construir. El CLI hace de tubería
+// entre los dos daemons (GET de uno, PUT al otro) y no guarda nada en disco.
+func imagesCopy(args []string) error {
+	fs := flag.NewFlagSet("images copy", flag.ExitOnError)
+	from := fs.String("from", "", "daemon to copy from (ssh://user@host or a socket)")
+	to := fs.String("to", "", "daemon to copy to (default: the usual one: -H, $KLING_HOST, context or local socket)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *from == "" {
+		return fmt.Errorf("usage: kling images copy <name> -from <host> [-to <host>]\n" +
+			"  e.g. kling images copy min -from ssh://user@linux-arm64-host")
+	}
+	name := fs.Arg(0)
+	dst := hostOf(*to)
+	if dst == *from {
+		return fmt.Errorf("source and destination are the same daemon (%s)", *from)
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	src, dstC := api.NewClient(*from), api.NewClient(dst)
+	fmt.Printf("copying %s  %s -> %s\n", name, src.Endpoint(), dstC.Endpoint())
+	err := api.CopyImage(ctx, src, dstC, name, func(p api.CopyStep) {
+		what := p.Name + " (" + p.Part + ")"
+		if p.Name == api.KernelBlobName {
+			what = "kernel"
+		}
+		size := (&api.BlobInfo{Size: p.Size}).SizeString()
+		if p.Skipped {
+			fmt.Printf("  %-32s %10s  already there\n", what, size)
+			return
+		}
+		fmt.Printf("  %-32s %10s  copied\n", what, size)
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("done: kling run -image %s\n", name)
 	return nil
 }

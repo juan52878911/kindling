@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,11 @@ type Config struct {
 	// Gateway configura `kling gateway` sin flags.
 	Gateway Gateway `json:"gateway"`
 
+	// Daemon configura el daemon LOCAL (`kling daemon`), el que corre con este
+	// mismo usuario. En Linux el daemon suele correr como root y leer la
+	// configuración de root, no la de quien usa el CLI.
+	Daemon Daemon `json:"daemon,omitempty"`
+
 	// Extensions guarda la configuración que declaran las extensiones de kling:
 	// extensions.<extensión>.<clave> = valor. El núcleo no sabe qué significa;
 	// solo lo convierte al tipo que declara el manifiesto al escribirlo.
@@ -52,6 +58,50 @@ type Defaults struct {
 	VCPUs  int    `json:"vcpus,omitempty"`
 	CPUPct int    `json:"cpu_pct,omitempty"`
 	TTL    int    `json:"ttl_seconds,omitempty"`
+}
+
+// Daemon es la sección daemon.* de la configuración.
+type Daemon struct {
+	// VMM es el backend con el que el daemon arranca las microVMs:
+	// "firecracker" (Linux con KVM) o "vz" (macOS en Apple Silicon, con
+	// kling-vz). Vacío = el de la plataforma (ver DefaultVMM). KLING_VMM lo
+	// sustituye sin tocar el fichero.
+	VMM string `json:"vmm,omitempty"`
+}
+
+// Backends de microVM que entiende el daemon.
+const (
+	VMMFirecracker = "firecracker"
+	VMMVZ          = "vz"
+)
+
+// DefaultVMM es el backend de la plataforma: vz en macOS, firecracker en el
+// resto.
+func DefaultVMM(goos string) string {
+	if goos == "darwin" {
+		return VMMVZ
+	}
+	return VMMFirecracker
+}
+
+// ValidateVMM dice si el backend name puede correr en goos/goarch. Es una
+// elección del usuario, pero no cualquiera vale: Firecracker es KVM y KVM es
+// Linux; kling-vz es Virtualization.framework en Apple Silicon.
+func ValidateVMM(name, goos, goarch string) error {
+	switch name {
+	case VMMFirecracker:
+		if goos != "linux" {
+			return fmt.Errorf("vmm %q needs Linux with KVM, and this is %s/%s: use %q here (or point the CLI at a Linux host with `kling context add`)",
+				name, goos, goarch, DefaultVMM(goos))
+		}
+	case VMMVZ:
+		if goos != "darwin" || goarch != "arm64" {
+			return fmt.Errorf("vmm %q needs macOS on Apple Silicon (darwin/arm64), and this is %s/%s", name, goos, goarch)
+		}
+	default:
+		return fmt.Errorf("unknown vmm %q: use %q or %q", name, VMMFirecracker, VMMVZ)
+	}
+	return nil
 }
 
 type Gateway struct {
@@ -283,8 +333,22 @@ func (c *Config) Set(key, value string) error {
 		default:
 			return fmt.Errorf("unknown field gateway.%s", field)
 		}
+	case "daemon":
+		switch field {
+		case "vmm":
+			// Se valida contra ESTA máquina: la clave la lee el daemon local,
+			// que corre donde se escribe el fichero.
+			if value != "" {
+				if err := ValidateVMM(value, runtime.GOOS, runtime.GOARCH); err != nil {
+					return err
+				}
+			}
+			c.Daemon.VMM = value
+		default:
+			return fmt.Errorf("unknown field daemon.%s", field)
+		}
 	default:
-		return fmt.Errorf("unknown section %q: use defaults or gateway, or <extension>.<key> for what an extension declares (kling plugins)", section)
+		return fmt.Errorf("unknown section %q: use defaults, gateway or daemon, or <extension>.<key> for what an extension declares (kling plugins)", section)
 	}
 	return nil
 }
@@ -368,6 +432,7 @@ func (c *Config) Keys() [][2]string {
 		{"gateway.idle", c.Gateway.Idle},
 		{"gateway.url", c.Gateway.URL},
 		{"gateway.token", mask(c.Gateway.Token)},
+		{"daemon.vmm", c.Daemon.VMM},
 	}
 }
 
