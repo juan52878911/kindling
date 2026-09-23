@@ -40,6 +40,7 @@ Diseño, uso y cifras en [docs/von.md](docs/von.md).
   caía al 50 % de un core salvo que lo pasara quien llamaba, como hace el
   planificador), y el daemon deja legible para el VMM la base que un constructor
   cree (antes solo la imagen construida).
+
 ### JEV: un clasificador lineal diminuto
 
 `kling jev train|eval|predict|inspect` y los paquetes `pkg/jev` (características,
