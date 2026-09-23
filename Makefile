@@ -107,27 +107,34 @@ daemon-full: assets
 ## Van también el agente de invitado (kling-guest) y el constructor "base", que
 ## construye imágenes con él (la de herramientas de `volume populate`, por ejemplo):
 ## construir monta un loopback y hace chroot, y eso solo lo puede hacer root allí.
+## Y el constructor "llm" (modelos VON, docs/von.md), con el script de la base
+## glibc y el init mínimo que esa base lleva dentro: la primera vez que se añade
+## un modelo, el constructor se hace su base Debian trixie.
 ## Lo de MCP (puente, empaquetador, gateway) lo despliega kindling-mcp.
 deploy: daemon guest
 	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-guest scripts/81-base-image.sh $(TARGET):/tmp/
+	scp -q kling-guest scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh $(TARGET):/tmp/
 	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
+	scp -q scripts/builders/llm $(TARGET):/tmp/builder-llm
 	scp -q packaging/$(BIN).service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
 		sudo install -m755 /tmp/kling-guest /usr/local/lib/kindling/kling-guest && \
 		sudo install -d -m755 /usr/local/lib/kindling/builders && \
 		sudo install -m755 /tmp/81-base-image.sh /usr/local/lib/kindling/81-base-image.sh && \
+		sudo install -m755 /tmp/71-build-glibc-base.sh /usr/local/lib/kindling/71-build-glibc-base.sh && \
+		sudo install -m755 /tmp/minimal-init.sh /usr/local/lib/kindling/minimal-init.sh && \
 		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
+		sudo install -m755 /tmp/builder-llm /usr/local/lib/kindling/builders/llm && \
 		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
 		sudo systemctl daemon-reload && sudo systemctl enable $(BIN) && \
 		sudo systemctl restart $(BIN) && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
-	@echo "  agente de invitado y constructor base en /usr/local/lib/kindling"
+	@echo "  agente de invitado y constructores base y llm en /usr/local/lib/kindling"
 	@echo
 	@echo "Imagen de herramientas para poblar volúmenes:  kling images toolchain"
 	@echo "Servidores MCP:  despliega kindling-mcp (make deploy HOST=$(HOST) en su repositorio)"

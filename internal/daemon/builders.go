@@ -145,6 +145,12 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	}
 
 	s.mgr.EnsureImageReadable(req.Name)
+	// La base también: un constructor puede crearla la primera vez (el de
+	// modelos, "llm", hace su base glibc), y sin esto la capa se construye bien
+	// y la máquina no arranca porque el VMM no puede leer el suelo.
+	if req.Base != "" {
+		s.mgr.EnsureImageReadable(req.Base)
+	}
 	img := s.mgr.ImageFile(req.Name)
 	if _, err := os.Stat(img); err != nil {
 		if _, lerr := os.Stat(filepath.Join(s.root, "images", req.Name+".layer.ext4")); lerr != nil {
