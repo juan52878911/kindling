@@ -110,14 +110,15 @@ type CalEval struct {
 type CalibrateReport struct {
 	Task       string     `json:"task"`
 	Model      string     `json:"model"`
-	Samples    int        `json:"samples"`   // con respuesta de VON válida
-	Escalated  int        `json:"escalated"` // de ellas, escaladas
-	Audited    int        `json:"audited"`   // de ellas, auditorías
-	Target     float64    `json:"target"`    // concordancia objetivo
-	Before     CalEval    `json:"before"`    // mitad de evaluación, umbrales actuales
-	After      CalEval    `json:"after"`     // mitad de evaluación, umbrales nuevos
-	Classes    []ClassCal `json:"classes"`   // umbrales por clase
-	Improved   bool       `json:"improved"`  // si los nuevos mejoran la promesa
+	Samples    int        `json:"samples"`           // con respuesta de VON válida
+	Escalated  int        `json:"escalated"`         // de ellas, escaladas
+	Audited    int        `json:"audited"`           // de ellas, auditorías
+	Target     float64    `json:"target"`            // concordancia objetivo
+	Before     CalEval    `json:"before"`            // mitad de evaluación, umbrales actuales
+	After      CalEval    `json:"after"`             // mitad de evaluación, umbrales nuevos
+	Classes    []ClassCal `json:"classes"`           // umbrales por clase
+	Overall    float64    `json:"overall_agreement"` // JEV = VON en toda la muestra (ponderada)
+	Improved   bool       `json:"improved"`          // si los nuevos mejoran la promesa
 	Written    string     `json:"written,omitempty"`
 	Backup     string     `json:"backup,omitempty"`
 	Reason     string     `json:"reason"`
@@ -230,10 +231,27 @@ func calibrate(m *jev.Model, samples []sample, overrides map[string]float64, tar
 	servir := effective(&jev.Model{Labels: m.Labels, Thresholds: nuevo}, overrides)
 	rep.Before = evalCascade(ep, eg, epr, ew, old)
 	rep.After = evalCascade(ep, eg, epr, ew, servir)
+	var agree, tot float64
+	for i := range pred {
+		tot += w[i]
+		if pred[i] == gold[i] {
+			agree += w[i]
+		}
+	}
+	if tot > 0 {
+		rep.Overall = agree / tot
+	}
 
 	switch {
 	case len(ep) < minSupport:
 		rep.Reason = fmt.Sprintf("not enough samples: %d in the evaluation half, need at least %d", len(ep), minSupport)
+	case rep.After.Confident == 0 && rep.Before.Confident > 0:
+		// Que JEV no conteste nunca "cumple" cualquier objetivo sin prometer
+		// nada, y mandaría todo a VON. Si VON discrepa tanto, lo primero es
+		// saber cuál de los dos acierta (mode=jev|von contra datos etiquetados):
+		// un maestro peor que el alumno empeoraría la cascada. No se escribe.
+		rep.Reason = fmt.Sprintf("at target %.2f JEV would never answer (it agrees with VON on %.3f of the sample): "+
+			"measure which of the two is right on labelled data before trusting VON as the teacher", target, rep.Overall)
 	case rep.Before.Agreement < target && rep.After.Agreement > rep.Before.Agreement:
 		rep.Improved = true
 		rep.Reason = fmt.Sprintf("agreement on held-out samples %.3f -> %.3f (target %.2f)", rep.Before.Agreement, rep.After.Agreement, target)

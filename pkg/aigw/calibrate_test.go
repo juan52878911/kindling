@@ -2,6 +2,7 @@ package aigw
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,5 +100,22 @@ func TestCalibrarSinMuestras(t *testing.T) {
 	}
 	if _, err := g.Calibrate(CalibrateRequest{Task: "nope"}); err == nil {
 		t.Fatal("unknown task accepted")
+	}
+}
+
+// Si VON discrepa de todo, "no contestar nunca" cumpliría el objetivo sin
+// prometer nada: no se escribe.
+func TestCalibrarNoApagaJEV(t *testing.T) {
+	g, _, _ := newTestGateway(t, nil)
+	r := g.rings["kind"]
+	for i := 0; i < 400; i++ {
+		r.add(sample{pred: "bug", prob: 1, teacher: "feat", weight: 1})
+	}
+	rep, err := g.Calibrate(CalibrateRequest{Task: "kind", Target: 0.9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Improved || rep.Written != "" || rep.Overall != 0 || !strings.Contains(rep.Reason, "never answer") {
+		t.Fatalf("report = %+v", rep)
 	}
 }

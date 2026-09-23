@@ -484,6 +484,7 @@ func aiCalibrate(args []string) error {
 	}
 	fmt.Printf("task %s (jev %s): %d samples with a VON answer (%d escalated, %d audited)\n",
 		rep.Task, rep.Model, rep.Samples, rep.Escalated, rep.Audited)
+	fmt.Printf("JEV agrees with VON on %.3f of the sample (weighted)\n", rep.Overall)
 	fmt.Printf("held-out half, target agreement %.2f:\n", rep.Target)
 	fmt.Printf("  before: coverage %.3f, agreement %.3f (%d confident)\n", rep.Before.Coverage, rep.Before.Agreement, rep.Before.Confident)
 	fmt.Printf("  after:  coverage %.3f, agreement %.3f (%d confident)\n", rep.After.Coverage, rep.After.Agreement, rep.After.Confident)
