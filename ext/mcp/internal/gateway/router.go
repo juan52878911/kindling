@@ -49,14 +49,33 @@ type Router struct {
 	// vive en el proceso del servidor MCP dentro de ESE host, y mandar la
 	// segunda petición a otro la rompería aunque el servicio exista en varios.
 	sessMu      sync.Mutex
-	sessionHost map[string]string
+	sessionHost map[string]*fijada
+}
+
+// fijada es a qué host va una sesión y cuándo se usó por última vez. La hora es
+// lo que permite olvidarla: sin ella el mapa crecía con cada sesión que se
+// abría y nunca se vaciaba, que en un gateway de larga vida es una fuga.
+type fijada struct {
+	host string
+	uso  time.Time
+}
+
+// olvidarFijadas borra las fijaciones sin uso desde hace más de idle.
+func (r *Router) olvidarFijadas(idle time.Duration) {
+	r.sessMu.Lock()
+	defer r.sessMu.Unlock()
+	for sid, f := range r.sessionHost {
+		if time.Since(f.uso) > idle {
+			delete(r.sessionHost, sid)
+		}
+	}
 }
 
 // NewRouter construye un Router sobre hosts ya inicializados (con su propio
 // New() ya llamado: Reap, PrewarmAll, etc. los arranca quien compone el
 // servidor, igual que hace hoy con un solo Gateway).
 func NewRouter(hosts []RouterHost) *Router {
-	r := &Router{sessionHost: map[string]string{}}
+	r := &Router{sessionHost: map[string]*fijada{}}
 	for i := range hosts {
 		h := hosts[i]
 		r.hosts = append(r.hosts, &h)
@@ -126,6 +145,7 @@ func (r *Router) Reap(ctx context.Context) {
 			return
 		case <-t.C:
 			r.agg.reap(idle * 4)
+			r.olvidarFijadas(idle * 4)
 		}
 	}
 }
@@ -238,15 +258,27 @@ func (r *Router) handleProxy(w http.ResponseWriter, req *http.Request) {
 	// en el proceso del servidor MCP de ESA instancia concreta.
 	if sid := req.Header.Get(SessionHeader); sid != "" {
 		r.sessMu.Lock()
-		pinned := r.sessionHost[sid]
+		pinned := ""
+		if f := r.sessionHost[sid]; f != nil {
+			pinned, f.uso = f.host, time.Now()
+		}
 		r.sessMu.Unlock()
 		if pinned != "" {
 			if h := r.hostByName(pinned); h != nil {
 				h.GW.routes().ServeHTTP(w, req)
+				// Cerrar la sesión es el momento natural de olvidarla.
+				if req.Method == http.MethodDelete {
+					r.sessMu.Lock()
+					delete(r.sessionHost, sid)
+					r.sessMu.Unlock()
+				}
 				return
 			}
-			// El host al que estaba fijada ya no está en -hosts: se sigue como
-			// sesión desconocida y se resuelve otra vez más abajo.
+			// El host al que estaba fijada ya no está en -hosts: se olvida y se
+			// resuelve otra vez más abajo como sesión desconocida.
+			r.sessMu.Lock()
+			delete(r.sessionHost, sid)
+			r.sessMu.Unlock()
 		}
 	}
 
@@ -295,7 +327,7 @@ func (r *Router) handleProxy(w http.ResponseWriter, req *http.Request) {
 		if req.Header.Get(SessionHeader) == "" {
 			if sid := w.Header().Get(SessionHeader); sid != "" {
 				r.sessMu.Lock()
-				r.sessionHost[sid] = h.Name
+				r.sessionHost[sid] = &fijada{host: h.Name, uso: time.Now()}
 				r.sessMu.Unlock()
 			}
 		}

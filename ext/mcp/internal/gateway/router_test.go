@@ -340,3 +340,70 @@ func TestByAvailableMemoryOrdena(t *testing.T) {
 		t.Errorf("el host inalcanzable debería ir al final, quedó en %v", ranked[2].Name)
 	}
 }
+
+// La sesión pegajosa del enrutador: con el mismo servicio en dos hosts, una
+// sesión abierta en uno sigue yendo a ese, y la fijación se olvida al cerrar la
+// sesión o por inactividad. Sin lo último, el mapa crecía para siempre.
+func TestRouterSesionPegajosaYSeOlvida(t *testing.T) {
+	enUno := newLinkedService(t, "alfa", "hace_a", "hace A")
+	enDos := newLinkedService(t, "alfa", "hace_a", "hace A")
+	sockUno, _ := mockRouterDaemon(t, nil, []*mcp.Link{enUno.link("hace_a", "hace A")}, 8000, nil)
+	sockDos, _ := mockRouterDaemon(t, nil, []*mcp.Link{enDos.link("hace_a", "hace A")}, 100, nil)
+
+	r := NewRouter([]RouterHost{
+		{Name: "uno", GW: New(api.NewClient(sockUno), 5*time.Minute, false, 0, "")},
+		{Name: "dos", GW: New(api.NewClient(sockDos), 5*time.Minute, false, 0, "")},
+	})
+	h := r.Handler("")
+	pedir := func(metodo, sid string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(metodo, "/mcp/alfa", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		if sid != "" {
+			req.Header.Set(SessionHeader, sid)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Sesión nueva: va al host con más memoria y queda fijada a él.
+	pedir(http.MethodPost, "")
+	r.sessMu.Lock()
+	f := r.sessionHost["alfa-sess"]
+	r.sessMu.Unlock()
+	if f == nil || f.host != "uno" {
+		t.Fatalf("la sesión nueva no quedó fijada a 'uno': %+v", f)
+	}
+
+	// Las siguientes peticiones de esa sesión van a 'uno', nunca a 'dos'.
+	for i := 0; i < 3; i++ {
+		pedir(http.MethodPost, "alfa-sess")
+	}
+	if enDos.hits.Load() != 0 {
+		t.Fatalf("una sesión fijada a 'uno' llegó %d veces a 'dos'", enDos.hits.Load())
+	}
+
+	// Cerrarla la olvida.
+	pedir(http.MethodDelete, "alfa-sess")
+	r.sessMu.Lock()
+	_, sigue := r.sessionHost["alfa-sess"]
+	r.sessMu.Unlock()
+	if sigue {
+		t.Fatal("la sesión cerrada sigue fijada")
+	}
+
+	// Y una que nadie usa se olvida por inactividad.
+	r.sessMu.Lock()
+	r.sessionHost["vieja"] = &fijada{host: "uno", uso: time.Now().Add(-time.Hour)}
+	r.sessionHost["reciente"] = &fijada{host: "uno", uso: time.Now()}
+	r.sessMu.Unlock()
+	r.olvidarFijadas(10 * time.Minute)
+	r.sessMu.Lock()
+	_, vieja := r.sessionHost["vieja"]
+	_, reciente := r.sessionHost["reciente"]
+	r.sessMu.Unlock()
+	if vieja || !reciente {
+		t.Fatalf("olvidarFijadas: vieja=%v reciente=%v; quería false y true", vieja, reciente)
+	}
+}
