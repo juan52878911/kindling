@@ -249,8 +249,12 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 	if err != nil {
 		fmt.Println("✗")
 		var se *api.StatusError
-		if errors.As(err, &se) && se.Code == 412 {
-			return fmt.Errorf("%w\nthe daemon has no llm builder: it ships with the daemon (make deploy), and only Linux daemons build images; on macOS copy the image from one: kling images copy %s -from ssh://<linux host>", err, name)
+		if errors.As(err, &se) && (se.Code == 412 || se.Code == 501) {
+			// 412: un daemon Linux sin el constructor instalado. 501: macOS, que
+			// no construye imágenes. En los dos casos, el camino es el mismo.
+			return fmt.Errorf("%w\nbuild the image on a Linux daemon (the llm builder ships with it: make deploy) and copy it here:\n"+
+				"  kling models add -H ssh://<linux host> %s %s -build-only\n  kling images copy %s -from ssh://<linux host>",
+				err, name, modelFlags(spec), name)
 		}
 		return err
 	}
