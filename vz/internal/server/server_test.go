@@ -147,6 +147,9 @@ func newRig(t *testing.T) *rig {
 		Footprint: func() (uint64, error) { return 150<<20 + 1, nil },
 		Version:   "9.9.9",
 	})
+	// Sin reintentos del globo salvo en la prueba que los mira: si no, una
+	// gorutina escribe en fakeVM.balloon mientras la prueba lo lee.
+	r.srv.globoEn = nil
 	r.h = r.srv.Handler()
 	return r
 }
@@ -421,6 +424,36 @@ func TestFailedRestoreCanRetry(t *testing.T) {
 	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
 	if len(r.f.vms) != 2 {
 		t.Fatalf("retry must create a new VM (%d created)", len(r.f.vms))
+	}
+}
+
+// El objetivo del globo fijado al arrancar se pierde en el framework (el
+// driver del invitado aún no existe): se tiene que repetir en los primeros
+// segundos, con el valor vigente, y dejar de hacerlo si ya no hay techo.
+func TestBalloonReappliedAfterBoot(t *testing.T) {
+	r := newRig(t)
+	r.srv.globoEn = []time.Duration{5 * time.Millisecond, 10 * time.Millisecond, 200 * time.Millisecond}
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	vm, _, _ := r.f.last()
+	objetivos := func() []int {
+		vm.mu.Lock()
+		defer vm.mu.Unlock()
+		return append([]int(nil), vm.balloon...)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(objetivos()) < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := objetivos(); len(got) < 3 || got[1] != 256 || got[2] != 256 {
+		t.Fatalf("balloon targets = %v, want 256 re-applied", got)
+	}
+	// Desinflado del todo antes del último reintento: ya no se toca.
+	r.must("PATCH", "/balloon", `{"amount_mib":0}`)
+	n := len(objetivos())
+	time.Sleep(300 * time.Millisecond)
+	if got := objetivos(); len(got) != n {
+		t.Fatalf("re-applied after the ceiling was lifted: %v", got)
 	}
 }
 

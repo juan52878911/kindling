@@ -123,6 +123,8 @@ type Server struct {
 
 	done     chan error
 	doneOnce sync.Once
+
+	globoEn []time.Duration // ver reaplicarGlobo; campo para las pruebas
 }
 
 func New(d Deps) *Server {
@@ -137,6 +139,9 @@ func New(d Deps) *Server {
 		store: mmds.NewStore(),
 		spec:  &spec.Spec{},
 		done:  make(chan error, 1),
+
+		globoEn: []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second,
+			4 * time.Second, 8 * time.Second, 15 * time.Second},
 	}
 }
 
@@ -864,6 +869,9 @@ func (s *Server) start() error {
 	}
 	s.st = stRunning
 	s.applyBalloon()
+	if s.spec.Balloon != nil && s.spec.Balloon.AmountMiB > 0 {
+		go s.reaplicarGlobo(s.vm, s.globoEn)
+	}
 	s.d.Logf("instance started in %d ms", time.Since(t0).Milliseconds())
 	return nil
 }
@@ -897,6 +905,35 @@ func (s *Server) applyBalloon() {
 	}
 	if err := s.vm.SetBalloonTargetMiB(s.spec.BalloonTargetMiB()); err != nil {
 		s.d.Logf("warning: could not set the balloon target: %v", err)
+	}
+}
+
+// reaplicarGlobo repite el objetivo del globo mientras el invitado arranca, en
+// los momentos de en (contados desde el arranque).
+//
+// El objetivo que se fija justo tras Start() se pierde: el driver
+// virtio-balloon del invitado aún no existe, y Virtualization.framework no lo
+// hace llegar cuando aparece. Medido: con mem 512 de techo 1024 el invitado
+// veía los 1024 enteros indefinidamente, y el mismo PATCH repetido a los 3 s
+// sí inflaba. El framework no dice cuándo está listo el driver (no hay
+// estadísticas del invitado), así que se repite unas veces en los primeros
+// segundos; fijar el mismo objetivo otra vez no mueve nada si ya se cumplía.
+// Se para si la VM cambia o deja de correr, o si ya no hay nada inflado.
+func (s *Server) reaplicarGlobo(vm VM, en []time.Duration) {
+	t0 := time.Now()
+	for _, d := range en {
+		time.Sleep(time.Until(t0.Add(d)))
+		s.mu.Lock()
+		if s.vm != vm || s.st != stRunning || s.spec.Balloon == nil || s.spec.Balloon.AmountMiB == 0 {
+			s.mu.Unlock()
+			return
+		}
+		err := vm.SetBalloonTargetMiB(s.spec.BalloonTargetMiB())
+		s.mu.Unlock()
+		if err != nil {
+			s.d.Logf("warning: could not set the balloon target: %v", err)
+			return
+		}
 	}
 }
 
