@@ -241,6 +241,14 @@ sesión única por naturaleza**: su estado vive en el proceso. De ahí:
   pisan el estado.
 - **El gateway enruta con pegajosidad.** La misma sesión vuelve siempre a la misma
   microVM; mandarla a otra instancia encontraría un servidor sin ese estado.
+- **El gateway acuña los ids de sesión que ven los clientes.** El que da el invitado se
+  guarda en el gateway y se traduce en los dos sentidos en cada petición, así que el
+  cliente nunca lo ve. El invitado no es de fiar, y réplicas restauradas del mismo
+  snapshot han llegado a dar ids idénticos: ni uno ni otro pueden hacer que la sesión de
+  un cliente acabe en la microVM de otro. Un id desconocido o caducado recibe `404` y el
+  cliente abre sesión nueva.
+- **Las rutas de control del agente no se reenvían** (`/resync`, `/volume/*`, `/exec`,
+  `/files`, `/dns`, `/reset`): son del host.
 - **La misma herramienta puede usarse en paralelo.** Cuando las sesiones concurrentes
   superan lo que sirve una instancia, el gateway crea **réplicas por servicio** bajo
   demanda desde el snapshot dorado (copy-on-write, así que comparten memoria).
