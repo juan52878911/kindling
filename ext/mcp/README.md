@@ -40,6 +40,7 @@ make deploy-mac HOST=ssh://user@lima-vm    # arm64 Linux VM on Apple Silicon
 | v0.6.x | v0.1.x |
 | v0.7.x | v0.1.x, v0.2.x |
 | v0.8.x | v0.3.x |
+| v0.9.x | v0.4.x — needed for the native macOS backend (`kling-vz`) |
 
 The installer refuses to install next to a `kling` older than the minimum the extension
 declares.
@@ -237,6 +238,13 @@ by nature**: its state lives in the process. Hence:
   not trample each other's state.
 - **The gateway routes stickily.** The same session always goes back to the same microVM;
   sending it to another instance would find a server without that state.
+- **The gateway mints the session ids clients see.** The id the guest gives is kept on
+  the gateway's side and swapped in both directions on every request, so the client never
+  sees it. A guest is untrusted, and replicas restored from the same snapshot have handed
+  out identical ids; neither can make one client's session land on another's microVM. An
+  unknown or expired id gets `404` and the client starts a new session.
+- **The guest agent's control routes are not proxied** (`/resync`, `/volume/*`, `/exec`,
+  `/files`, `/dns`, `/reset`): they belong to the host.
 - **The same tool can be used in parallel.** When concurrent sessions exceed what one
   instance can serve, the gateway creates **replicas per service** on demand from the
   golden snapshot (copy-on-write, so they share memory). Verified with 4 concurrent

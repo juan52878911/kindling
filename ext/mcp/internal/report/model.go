@@ -192,9 +192,13 @@ func buildMachines(g Group) []Mach {
 	out := make([]Mach, 0, len(g.Machines))
 	now := time.Now()
 	for _, m := range g.Machines {
-		ip := m.IP
-		if m.State != api.StateRunning || ip == "" {
-			ip = "—"
+		// m.Addr, no m.IP: en macOS todos los invitados comparten la misma IP
+		// (172.16.0.2, no enrutable) y lo que de verdad los distingue es el
+		// reenvío. m.Reachable() sustituye a "ip != ''" por la misma razón (ver
+		// docs/backend-vz.md §3 en el núcleo).
+		ip := "—"
+		if m.State == api.StateRunning && m.Reachable() {
+			ip = m.Addr(api.GuestPort)
 		}
 		out = append(out, Mach{
 			ID: m.ID, Name: m.Name, State: string(m.State), IP: ip,

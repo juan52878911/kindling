@@ -10,7 +10,6 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/scheduler"
-	"strconv"
 )
 
 // EJECUCIÓN EFÍMERA.
@@ -53,7 +52,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	// hacía que el fallo llegara al cliente sin reintento, y un dial a una VM
 	// viva cuesta un milisegundo — no se nota en el camino rápido.
 	for vm := a.gw.TakeWarm(t.Service); vm != nil; vm = a.gw.TakeWarm(t.Service) {
-		if err := scheduler.WaitReady(ctx, vm.IP(), GuestPort, time.Second); err != nil {
+		if err := scheduler.WaitReadyAddr(ctx, vm.Addr(GuestPort), time.Second); err != nil {
 			log.Printf("pool: %s not responding (%v); removing it and trying the next one", vm.ID()[:8], err)
 			go a.gw.Client().Remove(context.WithoutCancel(ctx), vm.ID())
 			continue
@@ -71,7 +70,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 				a.gw.FillPool(bg, t.Service, snap)
 			}()
 		}()
-		res, fault := a.invoke(ctx, "http://"+vm.IP()+":"+strconv.Itoa(GuestPort), vm.Token(), t, args)
+		res, fault := a.invoke(ctx, "http://"+vm.Addr(GuestPort), vm.Token(), t, args)
 		log.Printf("ephemeral %s: %s in %s (from pool)", vm.ID()[:8], t.Qualified,
 			time.Since(start).Round(time.Millisecond))
 		return res, fault
@@ -104,8 +103,8 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 		}()
 	}()
 
-	base := "http://" + mc.IP + ":" + fmt.Sprint(GuestPort)
-	if err := scheduler.WaitReady(ctx, mc.IP, GuestPort, scheduler.ReadyTimeout); err != nil {
+	base := "http://" + mc.Addr(GuestPort)
+	if err := scheduler.WaitReadyAddr(ctx, mc.Addr(GuestPort), scheduler.ReadyTimeout); err != nil {
 		return nil, &rpcFault{-32000, fmt.Sprintf("%s did not start listening: %v", t.Service, err)}
 	}
 

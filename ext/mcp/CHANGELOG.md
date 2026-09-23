@@ -5,9 +5,50 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 
 | kindling-mcp | kindling |
 |---|---|
+| v0.4.x | v0.9.x |
 | v0.3.x | v0.8.x |
 | v0.2.x | v0.7.x |
 | v0.1.x | v0.6.x, v0.7.x |
+
+## v0.4.0 — 2026-09-23
+
+- **El `initialize` de una sesión nueva se buferea con tope** (8 MiB, el de
+  `maxProxyBody`): el invitado es hostil, y una respuesta sin fin llenaba la
+  memoria del gateway. Pasado el tope, 502.
+- **El gateway acuña sus propios ids de sesión.** Hasta ahora el
+  `Mcp-Session-Id` que daba el invitado era la clave del mapa de rutas, y se
+  pisaba a ciegas: el smoke test sobre el backend nativo de macOS vio a dos
+  réplicas restauradas del mismo snapshot dar el MISMO id (el CSPRNG del
+  invitado no se resembraba) y el segundo cliente reapuntó la sesión del
+  primero a su microVM. Un invitado hostil podía hacerlo a propósito. Ahora
+  cada sesión nueva recibe 128 bits de `crypto/rand` acuñados en el gateway;
+  el id del invitado se guarda en la ruta y se traduce en cada petición y en
+  cada respuesta (también en las de streaming y en DELETE). Un id desconocido,
+  caducado, inventado o de otro servicio recibe `404` sin llegar a ningún
+  invitado, y el cliente rehace el `initialize`, como pide el transporte
+  Streamable HTTP. Antes se reenviaba al invitado tal cual.
+- **DELETE olvida la ruta de la sesión.** Solo se olvidaba cuando la sesión
+  era desconocida; las cerradas por el cliente se quedaban en el mapa hasta
+  que caducaban.
+- **El agregador `_all` no lleva el id de sesión de una instancia a otra**: la
+  sesión de detrás se guarda por servicio Y máquina, y una primaria nueva
+  recibe su propio `initialize`.
+- **Las rutas de control del agente ya no se reenvían** (`/resync`,
+  `/volume/*`, `/exec`, `/files`, `/dns`, y `/reset` del puente): un cliente
+  con token podía mover el reloj de la microVM, desmontarle los volúmenes o
+  cerrar las sesiones de los demás. Usa `guest.IsControlPath` del núcleo.
+- El puente embebe `pkg/guest`, así que recompilado contra kindling v0.9.1
+  sirve `POST /resync` y cada instancia restaurada tiene reloj y aleatorios
+  propios.
+- **Funciona sobre el backend nativo de macOS** (`kling-vz`, kindling v0.9).
+  Allí todos los invitados comparten la misma IP interna y no es alcanzable
+  desde el host: se llega a cada uno por el puerto que reenvía en loopback
+  (`api.Machine.Forwards`). El gateway, el agregador, el modo efímero y el
+  informe HTML dejan de construir `IP:puerto` a mano y usan `Machine.Addr` /
+  `scheduler.Instance.Addr` en su lugar, que en Linux se comporta exactamente
+  igual que antes. Requiere kindling v0.9.1 (`BindGuest`, `Route.GuestSID`,
+  `guest.IsControlPath`); de momento `go.mod` apunta con `replace` a una copia
+  local del núcleo hasta que se publique la etiqueta.
 
 ## v0.3.0 — 2026-09-23
 

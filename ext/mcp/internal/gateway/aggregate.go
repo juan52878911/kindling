@@ -68,7 +68,9 @@ type aggSession struct {
 	services []string
 	mode     mode
 	// Sesiones abiertas contra los servicios de detrás: se reutilizan para que
-	// el estado de una conversación sobreviva entre llamadas.
+	// el estado de una conversación sobreviva entre llamadas. La clave es
+	// servicio + máquina para las microVMs (ver forward) y el servicio a secas
+	// para los enlaces externos.
 	backing map[string]string
 	lastUse time.Time
 
@@ -552,7 +554,8 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	a.gw.Begin(e)
 	defer a.gw.End(e)
 	dEnsure := time.Since(tEnsure)
-	base := "http://" + e.IP() + ":" + fmt.Sprint(GuestPort)
+	// e.Addr resuelve el reenvío de macOS; en Linux es e.IP()+puerto de siempre.
+	base := "http://" + e.Addr(GuestPort)
 
 	// Una sesión por servicio y por conversación: el estado del servidor MCP debe
 	// persistir entre llamadas del mismo cliente.
@@ -561,10 +564,19 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	// que llegan antes de existir la sesión crean N sesiones, y cada sesión lanza
 	// un proceso del servidor MCP dentro de la microVM: ocho peticiones paralelas
 	// arrancaban ocho procesos de node en 384 MiB y la máquina se ahogaba.
+	//
+	// La sesión del invitado se guarda POR INSTANCIA, no solo por servicio. Un
+	// id de sesión solo significa algo dentro del proceso que lo dio: si la
+	// primaria cambia (congelada y reconstruida, otra máquina del mismo
+	// snapshot), mandarle el id de la anterior podía caer en la sesión de OTRO
+	// cliente de la nueva, porque réplicas restauradas del mismo snapshot
+	// llegaron a repartir ids idénticos. Con la máquina en la clave, una
+	// instancia nueva siempre recibe un initialize propio.
+	bkey := t.Service + "\x00" + e.MachineID()
 	initLock := a.serviceLock(t.Service)
 	initLock.Lock()
 	a.mu.Lock()
-	sid := s.backing[t.Service]
+	sid := s.backing[bkey]
 	a.mu.Unlock()
 	if sid == "" {
 		newSid, ierr := mcpInit(ctx, base)
@@ -574,7 +586,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 		}
 		sid = newSid
 		a.mu.Lock()
-		s.backing[t.Service] = sid
+		s.backing[bkey] = sid
 		a.mu.Unlock()
 	}
 	initLock.Unlock()
@@ -608,7 +620,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	if errors.Is(err, errStaleSession) {
 		initLock.Lock()
 		a.mu.Lock()
-		cur := s.backing[t.Service]
+		cur := s.backing[bkey]
 		a.mu.Unlock()
 		if cur == sid { // nadie la rehízo mientras esperábamos
 			newSid, ierr := mcpInit(ctx, base)
@@ -618,7 +630,7 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 			}
 			cur = newSid
 			a.mu.Lock()
-			s.backing[t.Service] = cur
+			s.backing[bkey] = cur
 			a.mu.Unlock()
 		}
 		initLock.Unlock()

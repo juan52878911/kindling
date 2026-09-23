@@ -18,18 +18,18 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/http/pprof"
 	"net/url"
-	"strconv"
+	"path"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/guest"
 
 	"github.com/juan52878911/kindling-mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/panico"
@@ -80,8 +80,13 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	//
 	// Una precalentada se entrega con la sesión MCP ya abierta: el initialize
 	// se paga al calentarla, no cuando llega la petición.
-	g.Prepare = func(ctx context.Context, ip string) (string, error) {
-		return mcpInit(ctx, "http://"+net.JoinHostPort(ip, strconv.Itoa(GuestPort)))
+	//
+	// PrepareAddr (no Prepare): en macOS la IP del invitado no se alcanza desde
+	// el host y solo la dirección con el reenvío sirve (ver docs/backend-vz.md
+	// §3). PrepareAddr gana a Prepare en pkg/scheduler, así que basta con fijar
+	// este.
+	g.PrepareAddr = func(ctx context.Context, addr string) (string, error) {
+		return mcpInit(ctx, "http://"+addr)
 	}
 	// Los servicios con estado no se precalientan: su instancia es persistente.
 	g.Skip = mcp.Stateful
@@ -176,8 +181,10 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 			status = fmt.Sprintf("%d prewarmed instance(s)", st.Prewarmed)
 		}
 		if st.Warm {
+			// st.Addr (host:puerto real) en vez de st.IP: en macOS la IP del
+			// invitado es la misma para todas las instancias y no dice nada.
 			status = fmt.Sprintf("warm at %s · %d session(s) · idle %s",
-				st.IP, st.Sessions, st.Idle.Round(time.Second))
+				st.Addr, st.Sessions, st.Idle.Round(time.Second))
 		}
 		fmt.Fprintf(w, "%-24s snapshot=%-20s %s\n", name, s.Name, status)
 	}
@@ -230,6 +237,16 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Las rutas de control del agente (/resync, /volume/*, /exec, /files, /dns)
+	// y el /reset del puente son del HOST, no de los clientes del servicio. El
+	// puente atiende "/" entero y el proxy reenvía cualquier ruta, así que sin
+	// este corte un cliente con token podía mover el reloj de la microVM,
+	// desmontarle los volúmenes o cerrar las sesiones de los demás.
+	if p := path.Clean(r.URL.Path); guest.IsControlPath(p) || p == "/reset" {
+		http.NotFound(w, r)
+		return
+	}
+
 	// Un GET SIN sesión es la sonda del "stream SSE independiente" del transporte
 	// Streamable HTTP: el cliente pregunta si el servidor le empujará mensajes por
 	// su cuenta. Nuestro puente no ofrece ese stream sin una sesión previa, y
@@ -268,6 +285,13 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Sesión ya conocida: directo a su instancia.
 	//
+	// El id que trae el cliente es SIEMPRE uno acuñado por el gateway, nunca el
+	// del invitado: el del invitado sale de un proceso que tratamos como hostil,
+	// y réplicas restauradas del mismo snapshot llegaron a dar ids idénticos.
+	// Con el id del invitado como clave del mapa de rutas, el segundo cliente
+	// reapuntaba en silencio la sesión del primero a su microVM. La ruta guarda
+	// el del invitado aparte y aquí se traduce en los dos sentidos.
+	//
 	// Pero antes se COMPRUEBA que esa instancia sigue siendo la de este servicio,
 	// y no un cadáver. El estado del gateway y el de las microVMs divergen por
 	// tres caminos —el segador congela por TTL, evictLRU hace sitio, ensure la
@@ -279,70 +303,137 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// La ironía es que congelar preserva la memoria del invitado, así que la
 	// sesión del puente SOBREVIVE: basta con descongelar la misma instancia para
 	// que siga funcionando.
-	if sid := r.Header.Get(SessionHeader); sid != "" {
-		if rt := g.Route(sid); rt != nil {
-			// La instancia de la sesión puede ser la primaria O una réplica de
-			// scale-out: se busca por machineID entre todas, no solo la primaria
-			// (mirar solo g.services rompía las sesiones enrutadas a una réplica).
-			e := g.Instance(rt.Service(), rt.MachineID())
+	if ext := r.Header.Get(SessionHeader); ext != "" {
+		rt := g.Route(ext)
+		if rt == nil || rt.Service() != service {
+			// Id desconocido, caducado, inventado o de otro servicio: NO se
+			// reenvía al invitado —que podría tener una sesión con ese id, de
+			// otro cliente—. 404 es lo que pide el transporte Streamable HTTP
+			// para una sesión que no existe: el cliente rehace el initialize.
+			http.Error(w, "unknown or expired MCP session; start a new one with initialize",
+				http.StatusNotFound)
+			return
+		}
+		// La instancia de la sesión puede ser la primaria O una réplica de
+		// scale-out: se busca por machineID entre todas, no solo la primaria
+		// (mirar solo g.services rompía las sesiones enrutadas a una réplica).
+		e := g.Instance(rt.Service(), rt.MachineID())
 
-			// Dos formas de que la instancia haya muerto bajo la sesión: que el
-			// GATEWAY la retirara (ya no aparece por machineID) o que el DAEMON la
-			// congelara por TTL (aún figura, pero el invitado no responde). Lo
-			// segundo solo se ve comprobando vida.
-			if e == nil || !scheduler.Alive(rt.IP(), GuestPort) {
-				// Se invalida la instancia congelada (si aún figura) para que
-				// ensure la reconstruya en vez de devolverla tal cual, y se
-				// reconstruye la primaria del servicio.
-				g.DropInstance(rt.Service(), rt.MachineID())
-				var err error
-				e, err = g.Ensure(r.Context(), rt.Service())
-				if err != nil {
-					g.Forget(sid)
-					if errors.Is(err, scheduler.ErrTenantInstances) {
-						http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
-							http.StatusTooManyRequests)
-						return
-					}
+		// Dos formas de que la instancia haya muerto bajo la sesión: que el
+		// GATEWAY la retirara (ya no aparece por machineID) o que el DAEMON la
+		// congelara por TTL (aún figura, pero el invitado no responde). Lo
+		// segundo solo se ve comprobando vida.
+		if e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort)) {
+			// Se invalida la instancia congelada (si aún figura) para que
+			// ensure la reconstruya en vez de devolverla tal cual, y se
+			// reconstruye la primaria del servicio.
+			g.DropInstance(rt.Service(), rt.MachineID())
+			var err error
+			e, err = g.Ensure(r.Context(), rt.Service())
+			if err != nil {
+				g.Forget(ext)
+				if errors.Is(err, scheduler.ErrTenantInstances) {
 					http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
-						http.StatusBadGateway)
+						http.StatusTooManyRequests)
 					return
 				}
-				if e.MachineID() == rt.MachineID() {
-					// Mismo VMM descongelado: la sesión del puente sigue viva,
-					// solo hay que reapuntar al proxy nuevo.
-					g.Rebind(sid, e)
-				} else {
-					// Máquina distinta: su puente no conoce esta sesión y
-					// responderá 400. Se olvida para que el cliente rehaga el
-					// handshake contra la instancia nueva.
-					g.Forget(sid)
-					rt = nil
-				}
+				http.Error(w, fmt.Sprintf("could not recover session for %q: %v", rt.Service(), err),
+					http.StatusBadGateway)
+				return
 			}
-
-			if rt != nil {
-				g.Begin(e)
-				defer g.End(e)
-				rt.ServeHTTP(w, r)
+			if e.MachineID() != rt.MachineID() {
+				// Máquina distinta: su puente no conoce esta sesión. Se olvida y
+				// el cliente rehace el handshake contra la instancia nueva.
+				g.Forget(ext)
+				http.Error(w, "the MCP session was lost with its instance; start a new one with initialize",
+					http.StatusNotFound)
+				return
+			}
+			// Mismo VMM descongelado: la sesión del puente sigue viva, solo hay
+			// que reapuntar al proxy nuevo.
+			g.Rebind(ext, e)
+			if rt = g.Route(ext); rt == nil {
+				http.Error(w, "unknown or expired MCP session; start a new one with initialize",
+					http.StatusNotFound)
 				return
 			}
 		}
-		// Sesión desconocida o reasignada: se deja seguir. El puente responderá
-		// 400 y el cliente reiniciará el handshake.
+
+		g.Begin(e)
+		defer g.End(e)
+		r.Header.Set(SessionHeader, guestSIDOf(rt, ext))
+		rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r)
+		// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
+		if r.Method == http.MethodDelete {
+			g.Forget(ext)
+		}
+		return
 	}
 
 	// Sesión NUEVA (initialize): se coloca en una instancia con hueco, escalando a
 	// una réplica si todas están llenas. Es lo que permite el uso en paralelo.
 	g.serveNewSession(w, r, service, tnt)
+}
 
-	// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
-	if r.Method == http.MethodDelete {
-		if sid := r.Header.Get(SessionHeader); sid != "" {
-			g.Forget(sid)
-		}
+// guestSIDOf es el id que el INVITADO dio a la sesión ext. Una ruta fijada con
+// Bind (sin id del invitado aparte) usa la clave tal cual.
+func guestSIDOf(rt *scheduler.Route, ext string) string {
+	if g := rt.GuestSID(); g != "" {
+		return g
+	}
+	return ext
+}
+
+// sidWriter traduce la cabecera de sesión de la respuesta del invitado al id
+// externo antes de que salga: el cliente no debe ver nunca el id del invitado,
+// ni adoptar otro que el invitado quiera colarle. Con ext vacío la quita.
+type sidWriter struct {
+	http.ResponseWriter
+	ext   string
+	hecho bool
+}
+
+func (s *sidWriter) reescribir() {
+	if s.hecho {
+		return
+	}
+	s.hecho = true
+	h := s.ResponseWriter.Header()
+	if len(h.Values(SessionHeader)) == 0 {
+		return
+	}
+	if s.ext == "" {
+		h.Del(SessionHeader)
+		return
+	}
+	h.Set(SessionHeader, s.ext)
+}
+
+func (s *sidWriter) WriteHeader(code int) {
+	// Las 1xx no son la respuesta final: las cabeceras aún pueden cambiar.
+	if code >= 200 {
+		s.reescribir()
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *sidWriter) Write(b []byte) (int, error) {
+	s.reescribir()
+	return s.ResponseWriter.Write(b)
+}
+
+// Flush hace falta para el streaming (SSE) de una sesión: sin reenviarlo, las
+// respuestas se quedarían en el buffer hasta cerrar.
+func (s *sidWriter) Flush() {
+	s.reescribir()
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 	}
 }
+
+// Unwrap deja a http.ResponseController (que usa ReverseProxy) llegar al
+// ResponseWriter de verdad.
+func (s *sidWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // maxScaleOut acota cuántas réplicas se crean para un servicio en una ráfaga de
 // sesiones nuevas. Es un cortacircuitos: la cuota de instancias del tenant y la
@@ -375,7 +466,9 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		defer g.End(e)
 		// El codigo se mira DESPUES de servir: anotar el exito por haber
 		// conseguido la instancia daba por sano un servicio que no contestaba.
-		cw := &codigoVisto{ResponseWriter: w, code: http.StatusOK}
+		// Sin sesión fijada no hay id externo que dar: si el invitado pone uno,
+		// se quita, para que el cliente no acabe usando el del invitado.
+		cw := &codigoVisto{ResponseWriter: &sidWriter{ResponseWriter: w}, code: http.StatusOK}
 		e.Proxy().ServeHTTP(cw, r)
 		if cw.code < 500 {
 			g.anotarExito(service)
@@ -400,10 +493,15 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 		if b, berr := r.GetBody(); berr == nil {
 			r.Body = b
 		}
-		rec := httptest.NewRecorder()
+		rec := &grabadorAcotado{ResponseRecorder: httptest.NewRecorder(), max: maxProxyBody}
 		g.Begin(e)
 		e.Proxy().ServeHTTP(rec, r)
 		g.End(e)
+		if rec.excedido {
+			http.Error(w, fmt.Sprintf("the %q guest answered initialize with more than %d bytes", service, maxProxyBody),
+				http.StatusBadGateway)
+			return
+		}
 
 		// ¿El puente rechazó por tope de sesiones? Esa instancia está llena: se crea
 		// otra y se reintenta. Cualquier otra respuesta (incluido otro 400) se
@@ -418,23 +516,63 @@ func (g *Gateway) serveNewSession(w http.ResponseWriter, r *http.Request, servic
 			g.anotarExito(service)
 		}
 
-		// Entregar la respuesta bufereada y fijar la ruta de la sesión a ESTA
-		// instancia (primaria o réplica), para que las siguientes peticiones de la
-		// conversación vuelvan aquí.
+		// Fijar la ruta de la sesión a ESTA instancia (primaria o réplica) ANTES
+		// de contestar —un cliente rápido manda la siguiente petición en cuanto
+		// lee la respuesta— y entregar la respuesta bufereada.
+		//
+		// El cliente recibe un id ACUÑADO aquí, no el del invitado: ver
+		// handleProxy. Dos instancias que den el mismo id acaban en dos
+		// sesiones distintas, cada una con su microVM.
+		ext := ""
+		if guestSID := rec.Header().Get(SessionHeader); guestSID != "" {
+			var berr error
+			for i := 0; i < 3; i++ {
+				ext = scheduler.NewSessionKey()
+				if berr = g.BindGuest(ext, guestSID, service, e); berr == nil {
+					break
+				}
+			}
+			if berr != nil {
+				http.Error(w, fmt.Sprintf("could not register the session for %q: %v", service, berr),
+					http.StatusInternalServerError)
+				return
+			}
+		}
 		for k, vs := range rec.Header() {
+			if k == SessionHeader {
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
 		}
+		if ext != "" {
+			w.Header().Set(SessionHeader, ext)
+		}
 		w.WriteHeader(rec.Code)
 		_, _ = w.Write(rec.Body.Bytes())
-		if sid := rec.Header().Get(SessionHeader); sid != "" {
-			g.Bind(sid, service, e)
-		}
 		return
 	}
 	http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full or no room on host", service),
 		http.StatusServiceUnavailable)
+}
+
+// grabadorAcotado buferea la respuesta del initialize con tope. El invitado es
+// hostil: sin tope, un initialize que no acaba nunca de escribir llenaba la
+// memoria del gateway, porque esta respuesta se guarda entera antes de
+// reenviarla (hay que ver su id de sesión y su código primero).
+type grabadorAcotado struct {
+	*httptest.ResponseRecorder
+	max      int
+	excedido bool
+}
+
+func (g *grabadorAcotado) Write(b []byte) (int, error) {
+	if g.Body.Len()+len(b) > g.max {
+		g.excedido = true
+		return 0, errors.New("initialize response too large")
+	}
+	return g.ResponseRecorder.Write(b)
 }
 
 func (g *Gateway) newSessionError(w http.ResponseWriter, r *http.Request, service string, err error) {

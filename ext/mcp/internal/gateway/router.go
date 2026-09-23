@@ -180,8 +180,9 @@ func (r *Router) handleServices(w http.ResponseWriter, req *http.Request) {
 				status = fmt.Sprintf("%d prewarmed instance(s)", st.Prewarmed)
 			}
 			if st.Warm {
+				// st.Addr en vez de st.IP: ver la misma nota en gateway.go.
 				status = fmt.Sprintf("warm at %s · %d session(s) · idle %s",
-					st.IP, st.Sessions, st.Idle.Round(time.Second))
+					st.Addr, st.Sessions, st.Idle.Round(time.Second))
 			}
 			fmt.Fprintf(w, "%-24s snapshot=%-20s host=%-10s %s\n", name, s.Name, h.Name, status)
 		}
