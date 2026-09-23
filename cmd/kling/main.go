@@ -1029,6 +1029,13 @@ func cmdInfo(args []string) error {
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))
 	}
+	if i.EncryptedAtRest != nil {
+		if *i.EncryptedAtRest {
+			fmt.Printf("at rest:      encrypted (dm-crypt)\n")
+		} else {
+			fmt.Printf("at rest:      NOT encrypted: snapshots hold guest memory in clear; see docs/cifrado.md\n")
+		}
+	}
 	return nil
 }
 

@@ -282,6 +282,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Machines:     s.mgr.Count(),
 		Capabilities: Capabilities,
 	}
+	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
+		info.EncryptedAtRest = &cifrado
+	}
 	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
 		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
 			info.Firecrack = string(line)

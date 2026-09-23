@@ -446,6 +446,9 @@ type Info struct {
 	// "annotations", "store"). Un daemon anterior no la envía: vacía significa
 	// "solo el API de siempre".
 	Capabilities []string `json:"capabilities,omitempty"`
+	// EncryptedAtRest dice si Root está sobre un disco cifrado (dm-crypt). nil =
+	// no se sabe (daemon anterior, u otro sistema). Ver docs/cifrado.md.
+	EncryptedAtRest *bool `json:"encrypted_at_rest,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

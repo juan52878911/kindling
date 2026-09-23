@@ -29,23 +29,50 @@ package machine
 import (
 	"context"
 	"os"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 )
 
-// defaultMaxParallelLaunch es cuántos encendidos simultáneos se permiten si nadie
-// lo configura. Dos deja pasar el paralelismo real —los servicios acaban
-// co-residentes— sin desatar la tormenta que cuelga un host anidado.
+// defaultMaxParallelLaunch es cuántos encendidos simultáneos se permiten en un
+// host ANIDADO si nadie lo configura. Dos deja pasar el paralelismo real —los
+// servicios acaban co-residentes— sin desatar la tormenta que cuelga un host
+// anidado.
 const defaultMaxParallelLaunch = 2
 
+// maxParallelLaunchMetal acota la puerta en hierro desnudo. Sin tope, una
+// ráfaga de cien arranques satura el disco igual; ocho ya no es el cuello.
+const maxParallelLaunchMetal = 8
+
 // maxParallelLaunch lee el tope de KLING_MAX_PARALLEL_BOOT, con mínimo 1.
+//
+// Sin configurar, depende de dónde corre. El 2 se eligió para hosts anidados
+// (una VM con KVM dentro), donde una ráfaga de arranques cuelga el host; en
+// hierro desnudo ese mismo 2 era el cuello de las ráfagas, que las pruebas de
+// estrés pusieron en p95 de 13 a 15 s. Allí se usa la mitad de los núcleos,
+// entre 2 y maxParallelLaunchMetal.
 func maxParallelLaunch() int {
 	if v := os.Getenv("KLING_MAX_PARALLEL_BOOT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			return n
 		}
 	}
-	return defaultMaxParallelLaunch
+	if bajoHipervisor() {
+		return defaultMaxParallelLaunch
+	}
+	return min(max(defaultMaxParallelLaunch, runtime.NumCPU()/2), maxParallelLaunchMetal)
+}
+
+// bajoHipervisor dice si el host es a su vez una máquina virtual: el flag
+// "hypervisor" de /proc/cpuinfo lo pone la CPU virtual. Sin /proc (no Linux) se
+// asume que sí, que es el valor prudente.
+func bajoHipervisor() bool {
+	b, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return true
+	}
+	return strings.Contains(string(b), " hypervisor")
 }
 
 // enterLaunch toma un hueco en la puerta de arranque y devuelve la función para
