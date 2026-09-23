@@ -166,13 +166,21 @@ type Manager struct {
 	lifecycle cerrojos
 
 	// Escritura del estado, fuera del lock. Ver persist().
-	stateMu   sync.Mutex
-	pending   []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
-	hasPend   bool
-	wake      chan struct{}
-	quit      chan struct{}
-	quitOnce  sync.Once
-	persistWG sync.WaitGroup
+	stateMu sync.Mutex
+	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
+	hasPend bool
+	// pendGen numera las fotos; escritoGen es la última que llegó a disco.
+	// Hacen falta desde que hay dos escritores (persistLoop y persistirYa):
+	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
+	pendGen    uint64
+	escritoGen uint64
+	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
+	// un temporal de nombre fijo y dos a la vez se lo pisarían.
+	escrituraMu sync.Mutex
+	wake        chan struct{}
+	quit        chan struct{}
+	quitOnce    sync.Once
+	persistWG   sync.WaitGroup
 }
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
@@ -272,6 +280,7 @@ func (m *Manager) persist() {
 	}
 
 	m.stateMu.Lock()
+	m.pendGen++
 	m.pending, m.hasPend = list, true
 	m.stateMu.Unlock()
 
@@ -348,9 +357,15 @@ func (m *Manager) writePending() {
 		m.stateMu.Unlock()
 		return
 	}
-	list := m.pending
+	list, gen := m.pending, m.pendGen
 	m.pending, m.hasPend = nil, false
 	m.stateMu.Unlock()
+
+	m.escrituraMu.Lock()
+	defer m.escrituraMu.Unlock()
+	if gen <= m.escritoGen {
+		return // ya se escribió una foto más nueva
+	}
 
 	b, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
@@ -365,6 +380,22 @@ func (m *Manager) writePending() {
 		log.Printf("state: could not persist it: %v", err)
 		return
 	}
+	m.escritoGen = gen
+}
+
+// persistirYa escribe el estado AHORA, sin esperar al debounce. Se llama SIN m.mu.
+//
+// Solo antes de lanzar un VMM nuevo. El debounce dejaba hasta 250 ms en los que
+// un firecracker ya vivía sin su máquina en disco; si el daemon moría en esa
+// ventana, al volver reconcile veía un VMM que nadie conocía y lo mataba —lo
+// correcto para un huérfano, lo incorrecto para una máquina que alguien acababa
+// de crear—. Con esto, un VMM vivo siempre tiene su registro escrito, y el que
+// no lo tiene es un huérfano de verdad.
+func (m *Manager) persistirYa() {
+	m.mu.RLock()
+	m.persist()
+	m.mu.RUnlock()
+	m.writePending()
 }
 
 // Close para la escritura de estado tras volcar lo que quede pendiente.
@@ -724,6 +755,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 
 	start := time.Now()
+	m.persistirYa()
 	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, src, layer, overlay, netcfg, vols, req.AllowExec)
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
@@ -1094,6 +1126,12 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// desaparecen sin dejar rastro.
 	m.flushVolume(mc)
 
+	// Desde aquí, lo que haya en disco deja de valer hasta el sello final: si el
+	// daemon muere a mitad del volcado, reconcile y Thaw lo sabrán (volcado.go).
+	if err := volcadoEnCurso(dir); err != nil {
+		return nil, fmt.Errorf("marking the freeze as in progress: %w", err)
+	}
+
 	start := time.Now()
 	if err := c.Pause(ctx); err != nil {
 		return nil, err
@@ -1123,7 +1161,17 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 		root := m.jailRoot(mc.ID)
 		for _, f := range []string{"snap.file", "mem.file"} {
 			if err := os.Rename(filepath.Join(root, f), filepath.Join(dir, f)); err != nil {
-				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
+				// La máquina sigue PAUSADA: devolver el error sin más la dejaba
+				// figurando como running, sin contestar a nada, y sin que el
+				// vigilante la viera, porque el proceso existe. Mismo trato que
+				// un fallo del propio snapshot, más arriba.
+				err = fmt.Errorf("recovering %s from jail: %w", f, err)
+				if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+					m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
+					return nil, err
+				}
+				_ = m.acquireVolumes(mc)
+				return nil, err
 			}
 		}
 		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
@@ -1154,6 +1202,12 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	dropCache(memPath)
 
 	size := allocatedBytes(memPath) + allocatedBytes(snapPath)
+
+	// El sello va cuando los ficheros están completos y en su sitio (tras
+	// sacarlos de la jaula y perforarlos): es lo que dice que este volcado vale.
+	if err := sellarVolcado(dir); err != nil {
+		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
+	}
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -1428,6 +1482,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return &out, nil
 		}
 		m.mu.Unlock()
+	}
+
+	// Un volcado a medias no se carga: fallaría con un error de Firecracker que
+	// no señala a ninguna parte, o peor, arrancaría un invitado corrupto.
+	if err := volcadoValido(dir); err != nil {
+		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
+			mc.Name, err, mc.Name)
 	}
 
 	// Puerta de arranque: descongelar es cargar un snapshot en KVM —mapear su

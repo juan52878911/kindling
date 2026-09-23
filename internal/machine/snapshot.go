@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -58,6 +59,12 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
+	// Reservado mientras dure el commit: sin meta.json todavía, este directorio
+	// es indistinguible de los restos de un commit interrumpido, y el barrido
+	// (sweepSnapshotLeftovers) o un RemoveSnapshot lo borrarían bajo nuestros pies.
+	soltar := m.reserveDir(reservaSnapshot(name))
+	defer soltar()
+
 	dir := m.snapDir(name)
 	if _, err := os.Stat(dir); err == nil {
 		if !replace {
@@ -68,7 +75,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 		// mapeando un mem.file que estaríamos pisando debajo de ellas. El borrado
 		// previo no es atómico, pero el caso que motiva -replace es un snapshot
 		// que un reinicio del host ya dejó irrestaurable: no hay nada que salvar.
-		if err := m.RemoveSnapshot(name); err != nil {
+		if err := m.removeSnapshot(name, true); err != nil {
 			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
 		}
 	}
@@ -419,9 +426,27 @@ func fileSHA256(path string) (string, error) {
 }
 
 // RemoveSnapshot borra un snapshot dorado, salvo que tenga instancias vivas.
-func (m *Manager) RemoveSnapshot(name string) error {
+func (m *Manager) RemoveSnapshot(name string) error { return m.removeSnapshot(name, false) }
+
+// removeSnapshot es RemoveSnapshot; propio=true lo llama el commit que TIENE la
+// reserva de ese nombre (el camino de -replace), que no debe toparse con ella.
+func (m *Manager) removeSnapshot(name string, propio bool) error {
 	if _, err := m.loadSnapshot(name); err != nil {
-		return err
+		// Sin meta.json pero con directorio: son los restos de un commit que se
+		// interrumpió antes de escribirlo (el meta es lo último). Antes esto
+		// abortaba aquí, así que esos GiB solo se recuperaban con un rm -rf a
+		// mano, y `commit -replace` con el mismo nombre fallaba igual.
+		if !restosDeCommit(m.snapDir(name)) {
+			return err
+		}
+		m.mu.RLock()
+		enCurso := m.reserved[reservaSnapshot(name)]
+		m.mu.RUnlock()
+		if enCurso && !propio {
+			return fmt.Errorf("snapshot %q is being committed right now", name)
+		}
+		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
+		return os.RemoveAll(m.snapDir(name))
 	}
 	m.mu.RLock()
 	var users []string
@@ -662,6 +687,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	var c *fc.Client
 	snapDir := m.snapDir(req.From)
 
+	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa).
+	m.persistirYa()
+
 	// abortar es la única salida de error a partir de aquí.
 	//
 	// m.fail() llama a kill(), que lee el PID de la MÁQUINA, y ese PID no se
@@ -885,4 +913,50 @@ func withDriveIDs(vols []api.VolumeAttachment, ids []string) []api.VolumeAttachm
 		}
 	}
 	return vols
+}
+
+// reservaSnapshot es la clave con la que un commit en curso reserva su
+// directorio en m.reserved, el mismo registro que protege los de las máquinas.
+func reservaSnapshot(name string) string { return "snap:" + name }
+
+// restosDeCommit dice si dir es un snapshot a medias: existe pero no tiene
+// meta.json, que es lo último que escribe un commit.
+func restosDeCommit(dir string) bool {
+	if _, err := os.Stat(dir); err != nil {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "meta.json"))
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// sweepSnapshotLeftovers aparta a la papelera los snapshots a medias que lleven
+// más de dirGrace sin tocarse y que nadie esté escribiendo. Solo mueve (rápido);
+// vaciarPapelera borra. Se llama con m.mu tomado.
+func (m *Manager) sweepSnapshotLeftovers() {
+	base := filepath.Join(m.root, "snapshots")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if m.reserved[reservaSnapshot(e.Name())] || !restosDeCommit(filepath.Join(base, e.Name())) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < dirGrace {
+			continue
+		}
+		papelera := filepath.Join(m.root, "machines", papeleraDir)
+		if err := os.MkdirAll(papelera, 0o700); err != nil {
+			return
+		}
+		destino := filepath.Join(papelera, fmt.Sprintf("snap-%s-%d", e.Name(), time.Now().UnixNano()))
+		if err := os.Rename(filepath.Join(base, e.Name()), destino); err != nil {
+			log.Printf("reconcile: couldn't move the leftovers of snapshot %q: %v", e.Name(), err)
+			continue
+		}
+		log.Printf("reconcile: snapshot %q was an interrupted commit; its leftovers go to the trash", e.Name())
+	}
 }

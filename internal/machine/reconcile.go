@@ -116,6 +116,11 @@ func (m *Manager) reconcile() {
 // killOrphanVMMs mata los procesos de firecracker cuya microVM ya no existe o
 // no debería estar corriendo.
 //
+// Un VMM vivo sin máquina registrada es un huérfano de verdad: Run y runFrom
+// escriben la máquina en disco en el acto (persistirYa) antes de lanzar su VMM,
+// así que ya no puede tratarse de una recién creada cuyo estado no llegó a
+// escribirse.
+//
 // Aparecen cuando una instancia se marca failed —sweep le pone PID 0— y luego se
 // elimina: el kill de Remove lee ese PID 0 y no mata nada, así que el VMM queda
 // huérfano reteniendo su RAM para siempre, con el daemon sano y sin nada en su
@@ -261,7 +266,7 @@ func (m *Manager) sweepMachineDirs() {
 		return
 	}
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		if _, conocida := m.byID[e.Name()]; conocida {
@@ -275,7 +280,38 @@ func (m *Manager) sweepMachineDirs() {
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < dirGrace {
 			continue
 		}
+		// Solo se MUEVE a la papelera: renombrar es instantáneo y se puede hacer
+		// con m.mu tomado. Borrar no: un directorio de máquina guarda un
+		// mem.file del tamaño de su RAM, y recorrerlo y borrarlo bajo el cerrojo
+		// global dejaba a ps, run y thaw esperando mientras el disco trabajaba.
+		// Lo vacía vaciarPapelera, ya sin cerrojo.
 		p := filepath.Join(dir, e.Name())
+		papelera := filepath.Join(dir, papeleraDir)
+		if err := os.MkdirAll(papelera, 0o700); err != nil {
+			log.Printf("reconcile: couldn't create the trash directory: %v", err)
+			return
+		}
+		destino := filepath.Join(papelera, fmt.Sprintf("%s-%d", e.Name(), time.Now().UnixNano()))
+		if err := os.Rename(p, destino); err != nil {
+			log.Printf("reconcile: couldn't move orphan directory %s to the trash: %v", e.Name(), err)
+		}
+	}
+}
+
+// papeleraDir es donde esperan los directorios huérfanos a ser borrados. Empieza
+// por punto para que ningún barrido lo tome por el directorio de una máquina.
+const papeleraDir = ".papelera"
+
+// vaciarPapelera borra lo que sweepMachineDirs apartó. Se llama SIN m.mu: es la
+// parte lenta, y nadie más toca esos directorios.
+func (m *Manager) vaciarPapelera() {
+	papelera := filepath.Join(m.root, "machines", papeleraDir)
+	entries, err := os.ReadDir(papelera)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		p := filepath.Join(papelera, e.Name())
 		size := diskUsage(p)
 		if err := os.RemoveAll(p); err != nil {
 			log.Printf("reconcile: couldn't delete orphan directory %s: %v", e.Name(), err)
@@ -301,11 +337,13 @@ func shortID(id string) string {
 
 // hasSnapshot dice si una máquina tiene un congelado completo en disco.
 func (m *Manager) hasSnapshot(id string) bool {
-	d := m.dir(id)
-	for _, f := range []string{"snap.file", "mem.file"} {
-		if _, err := os.Stat(filepath.Join(d, f)); err != nil {
-			return false
+	// No basta con que los ficheros existan: un volcado interrumpido también
+	// los deja. Ver volcado.go.
+	if err := volcadoValido(m.dir(id)); err != nil {
+		if !errors.Is(err, errVolcadoIncompleto) || !strings.Contains(err.Error(), "missing") {
+			log.Printf("reconcile: %s: %v", shortID(id), err)
 		}
+		return false
 	}
 	return true
 }
@@ -440,7 +478,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// al arrancar. Bajo el lock, como reconcile.
 				m.mu.Lock()
 				m.sweepMachineDirs()
+				m.sweepSnapshotLeftovers()
 				m.mu.Unlock()
+				m.vaciarPapelera()
 				// Y, si el disco aprieta, recuperar espacio eliminando instancias
 				// dormidas que se pueden recrear desde su snapshot.
 				m.gcDisk(ctx)
