@@ -111,11 +111,18 @@ func (m *Manager) StageShareUpload(ctx context.Context, r io.Reader) (*api.Share
 	// queda es el ext4.
 	defer os.RemoveAll(tree)
 
-	// Con margen para las cabeceras del tar: el tope que importa, el del
-	// contenido, lo aplica Extract.
-	body := io.LimitReader(r, cfg.CopyMaxBytes+cfg.CopyMaxBytes/8+64<<20)
+	// Con margen para las cabeceras del tar (hasta 1,5 KiB por entrada, con
+	// relleno y nombres largos): el tope que importa, el del contenido, lo
+	// aplica Extract.
+	limit := cfg.CopyMaxBytes + int64(hostshare.MaxCopyEntries)*1536 + 64<<20
+	body := &countingReader{r: io.LimitReader(r, limit)}
 	st, err := hostshare.Extract(body, tree, cfg.CopyMaxBytes)
 	if err != nil {
+		if body.n >= limit {
+			// El tar se cortó en el tope del cuerpo: decir "EOF inesperado"
+			// mandaría a buscar un fallo de red.
+			err = fmt.Errorf("%w: the archive is larger than %d MiB", hostshare.ErrTooLarge, limit>>20)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrShareRequest, err)
 	}
 
@@ -130,6 +137,18 @@ func (m *Manager) StageShareUpload(ctx context.Context, r io.Reader) (*api.Share
 	}
 	return &api.ShareUpload{ID: id, Bytes: st.Bytes, Files: st.Files, Dirs: st.Dirs, Links: st.Symlinks,
 		ImageBytes: fi.Size()}, nil
+}
+
+// countingReader cuenta lo leído.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // buildShareImage construye el ext4 de una copia con el contenido de tree.

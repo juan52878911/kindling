@@ -1,6 +1,8 @@
 package machine
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -8,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	hostshare "github.com/juan52878911/kindling/internal/share"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/share"
 )
@@ -139,5 +142,56 @@ func TestDecorarCarpetas(t *testing.T) {
 	defer m.mu.RUnlock()
 	if mc.Shares[1].Status != "" {
 		t.Fatal("decorating changed the stored machine")
+	}
+}
+
+// La subida del modo copy: un tar válido acaba en un ext4 con id; uno con
+// trampas o demasiado grande, en un error con el código que toca.
+func TestSubidaDeCopia(t *testing.T) {
+	if !E2fsDisponible("mkfs.ext4") && !E2fsDisponible("mke2fs") {
+		t.Skip("no mkfs.ext4 on this host")
+	}
+	m := newTestManager(t)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, f := range []struct{ name, body string }{{"a.txt", "hello"}, {"sub/b.txt", "world"}} {
+		_ = tw.WriteHeader(&tar.Header{Name: f.name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(f.body))})
+		_, _ = tw.Write([]byte(f.body))
+	}
+	_ = tw.Close()
+	up, err := m.StageShareUpload(context.Background(), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Files != 2 || up.Bytes != 10 || up.ImageBytes < 16<<20 {
+		t.Errorf("upload %+v", up)
+	}
+	if _, err := os.Stat(m.uploadPath(up.ID)); err != nil {
+		t.Fatalf("no image: %v", err)
+	}
+	if ents, _ := os.ReadDir(m.uploadsDir()); len(ents) != 1 {
+		t.Errorf("the extracted tree was left behind: %v", ents)
+	}
+	rs, err := m.resolveShares(api.RunRequest{Shares: []api.ShareSpec{{Mount: "/work", Upload: up.ID}}}, nil)
+	if err != nil || rs[0].att.Mode != share.ModeCopy || rs[0].upload == "" {
+		t.Fatalf("resolve the upload: %+v %v", rs, err)
+	}
+
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "../escape", Typeflag: tar.TypeReg, Mode: 0o644})
+	_ = tw.Close()
+	if _, err := m.StageShareUpload(context.Background(), &buf); !errors.Is(err, ErrShareRequest) {
+		t.Errorf("tar with ..: %v", err)
+	}
+
+	m.SetShareConfig(func() ShareConfig { return ShareConfig{CopyMaxBytes: 4} })
+	buf.Reset()
+	tw = tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "big", Typeflag: tar.TypeReg, Mode: 0o644, Size: 10})
+	_, _ = tw.Write(make([]byte, 10))
+	_ = tw.Close()
+	if _, err := m.StageShareUpload(context.Background(), &buf); !errors.Is(err, hostshare.ErrTooLarge) {
+		t.Errorf("oversized upload: %v", err)
 	}
 }
