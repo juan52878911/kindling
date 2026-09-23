@@ -114,7 +114,9 @@ func Extract(r io.Reader, dst string, maxBytes int64) (CopyStats, error) {
 			if h.Size < 0 {
 				return st, fmt.Errorf("%q has a negative size", name)
 			}
-			if st.Bytes+h.Size > maxBytes {
+			// Restando y no sumando: un tamaño enorme en la cabecera no puede
+			// desbordar la cuenta.
+			if h.Size > maxBytes-st.Bytes {
 				return st, fmt.Errorf("%w: more than %d MiB (daemon.share_copy_max_mib)", ErrTooLarge, maxBytes>>20)
 			}
 			f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
