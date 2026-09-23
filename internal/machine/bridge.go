@@ -207,7 +207,7 @@ func crecerImagen(ctx context.Context, image string, extra int64) error {
 	}
 	// resize2fs se niega a tocar un ext4 que no venga de un fsck reciente.
 	repairVolume(ctx, image)
-	if out, err := exec.CommandContext(ctx, "resize2fs", image).CombinedOutput(); err != nil {
+	if out, err := e2fsCmd(ctx, "resize2fs", image).CombinedOutput(); err != nil {
 		return fmt.Errorf("resize2fs %s: %v: %s", filepath.Base(image), err, strings.TrimSpace(string(out)))
 	}
 	return nil

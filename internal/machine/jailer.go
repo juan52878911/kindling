@@ -41,6 +41,9 @@ import (
 // fuerte apagada justo en las instalaciones donde nadie se había leído
 // SECURITY.md. Se mira una vez por proceso.
 func jailerEnabled() bool {
+	if !jailerPosible {
+		return false // macOS: ni jailer ni root
+	}
 	switch os.Getenv("KLING_JAILER") {
 	case "1":
 		return true

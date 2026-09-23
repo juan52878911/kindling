@@ -471,7 +471,7 @@ func createVolumeImage(ctx context.Context, path string, sizeMiB int) error {
 
 	// -E nodiscard preserva la dispersión: un volumen de 1 GiB recién creado
 	// ocupa kilobytes en el anfitrión y crece según se usa.
-	out, err := exec.CommandContext(ctx, "mkfs.ext4",
+	out, err := e2fsCmd(ctx, "mkfs.ext4",
 		"-q", "-F", "-E", "nodiscard", "-L", "kling-vol", path).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, out)
@@ -493,7 +493,7 @@ func createVolumeImage(ctx context.Context, path string, sizeMiB int) error {
 func repairVolume(ctx context.Context, path string) {
 	// -p arregla solo lo que no admite ambigüedad. Sin -p, e2fsck haría
 	// preguntas a un stdin que no existe y se quedaría colgado.
-	cmd := exec.CommandContext(ctx, "e2fsck", "-p", "-f", path)
+	cmd := e2fsCmd(ctx, "e2fsck", "-p", "-f", path)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return
