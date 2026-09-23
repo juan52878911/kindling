@@ -188,7 +188,7 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 		return nil, err
 	}
 
-	if err := waitReadyAddr(ctx, mc.Addr(GuestPort), readyTimeout); err != nil {
+	if err := p.gw.esperarListo(ctx, mc, readyTimeout); err != nil {
 		_ = p.gw.client.Remove(context.WithoutCancel(ctx), mc.ID)
 		return nil, err
 	}

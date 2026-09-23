@@ -95,6 +95,22 @@ func waitReadyAddr(ctx context.Context, addr string, timeout time.Duration) erro
 	return last
 }
 
+// esperarListo espera a que el agente del invitado escuche.
+//
+// En macOS (la máquina trae reenvíos) no vale sondear la dirección: el puerto
+// de loopback lo abre kling-vz y acepta siempre, escuche el invitado o no. Se
+// pregunta al daemon con probe_only, que mira dentro del invitado. En Linux,
+// el dial directo de siempre, que es submilisegundo.
+func (g *Scheduler) esperarListo(ctx context.Context, mc *api.Machine, timeout time.Duration) error {
+	if len(mc.Forwards) > 0 && g.client != nil {
+		_, err := g.client.Guest(ctx, mc.ID, api.GuestRequest{
+			Port: GuestPort, ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
+		})
+		return err
+	}
+	return waitReadyAddr(ctx, mc.Addr(GuestPort), timeout)
+}
+
 // Scheduler mantiene instancias calientes por servicio: las despierta al llegar
 // trabajo, las congela cuando se quedan ociosas, añade réplicas cuando una no da
 // abasto, desaloja por memoria y precalienta las más usadas.
@@ -504,7 +520,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	// arranca. Sin esperar aquí, la primera petición se comería un "connection
 	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
 	wr0 := time.Now()
-	if err := waitReadyAddr(ctx, mc.Addr(GuestPort), readyTimeout); err != nil {
+	if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
 		return nil, fmt.Errorf("tool did not start listening: %w", err)
 	}
 	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
