@@ -75,13 +75,16 @@ MACHINES
 
 SANDBOXES AND EXEC
   sandbox create [-image I | -from S] [-ttl 10m]   a throwaway microVM that runs code:
-      [-egress none|internet|allowlist]            no network by default, destroyed
-      [-mem MiB] [-cpus N] [-volume ...] [-q]      when its TTL runs out
+      [-egress none|internet|allowlist]            no network by default; when idle
+      [-on-ttl remove|freeze]                      it is destroyed, or frozen at zero
+      [-mem MiB] [-cpus N] [-volume ...] [-q]      cost and woken by the next exec
   sandbox ls | renew <sb> [-ttl D] | rm <sb>...    list / extend / destroy
   exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming its
       <ref> [--] <cmd> [args...]                   output; exits with its exit code
   cp <local|-> <ref>:<path>                        copies a file into a machine
   cp <ref>:<path> <local|->                        ... or out of it
+  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
+      [--] [cmd [args...]]                         (Ctrl-C reaches the program)
 
 GOLDEN SNAPSHOTS
   commit [-replace] <ref> <name>                   freezes a machine as a
@@ -154,6 +157,16 @@ func main() {
 		// Termina con el código del comando remoto, sin el "error:" de siempre:
 		// un 1 de grep no es un fallo de kling.
 		code, xerr := cmdExec(args)
+		if xerr != nil {
+			fmt.Fprintln(os.Stderr, "error:", xerr)
+			if code == 0 {
+				code = 1
+			}
+		}
+		os.Exit(code)
+	case "shell":
+		// Como exec: el código es el de la shell remota.
+		code, xerr := cmdShell(args)
 		if xerr != nil {
 			fmt.Fprintln(os.Stderr, "error:", xerr)
 			if code == 0 {

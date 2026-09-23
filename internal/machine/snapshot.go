@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"log"
@@ -514,7 +515,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La clave de compartición es el snapshot de origen: todas sus instancias
 	// mapean el MISMO mem.file dorado, así que la segunda y siguientes solo
 	// reservan su fracción divergente. Es aquí donde la densidad se vuelve real.
-	releaseMem, merr := m.reserveMemory(snap.MemMiB, req.From)
+	releaseMem, merr := m.reserveMemoryMakingRoom(ctx, snap.MemMiB, req.From, "")
 	if merr != nil {
 		return nil, merr
 	}
@@ -624,6 +625,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 
+	creada := time.Now()
 	mc := &api.Machine{
 		ID: id, Name: req.Name, Image: snap.Image, From: req.From,
 		State: api.StateCreated, VCPUs: snap.VCPUs, MemMiB: snap.MemMiB,
@@ -634,7 +636,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
 		Labels:    api.MergeLabels(snap.Labels, req.Labels),
-		CreatedAt: time.Now(),
+		CreatedAt: creada,
+		TTLAt:     &creada,
 	}
 	m.mu.Lock()
 	m.byID[id] = mc
@@ -658,6 +661,24 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	var pid int
 	var c *fc.Client
 	snapDir := m.snapDir(req.From)
+
+	// abortar es la única salida de error a partir de aquí.
+	//
+	// m.fail() llama a kill(), que lee el PID de la MÁQUINA, y ese PID no se
+	// escribe hasta el final de esta función: sin matar explícitamente el proceso
+	// que acabamos de lanzar, cada restauración fallida —un snapshot con el TSC
+	// invalidado tras reiniciar el host, por ejemplo— deja un firecracker vivo
+	// reteniendo su RAM, invisible para `kling ps` y para la contabilidad de
+	// memoria. El arranque en frío ya aprendió esta lección (ver Run); este
+	// camino no la había copiado.
+	abortar := func(err error) (*api.Machine, error) {
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		netcfg.Teardown()
+		m.fail(mc, err)
+		return nil, err
+	}
 	if jailerEnabled() {
 		// Restauración dentro de un jail: firecracker corre chrooteado. Todo lo
 		// que va a abrir tiene que estar replicado dentro del jail EN SU RUTA
@@ -665,14 +686,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		// grabado —comprobado en el laboratorio—.
 		pid, sock, err = m.spawnJailed(id, netcfg)
 		if err != nil {
-			netcfg.Teardown()
-			m.fail(mc, err)
-			return nil, err
+			return abortar(err)
 		}
 		c = fc.New(sock)
 		if err := waitSocket(ctx, c); err != nil {
-			m.fail(mc, err)
-			return nil, err
+			return abortar(err)
 		}
 		// Poblar el jail entre el arranque de jailer y la carga: el snapshot y
 		// sus discos, el rootfs base, el overlay dorado (que el snapshot abre) y
@@ -693,8 +711,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		// necesitan nada nuevo dentro.
 		imgBase, imgLayer, ierr := m.imageLayer(snap.Image)
 		if ierr != nil {
-			m.fail(mc, ierr)
-			return nil, ierr
+			return abortar(ierr)
 		}
 		toLink := append([]string{
 			filepath.Join(snapDir, "snap.file"),
@@ -705,22 +722,18 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			overlay,
 		}, volPaths...)
 		if err := m.prepareJail(id, toLink...); err != nil {
-			m.fail(mc, err)
-			return nil, err
+			return abortar(err)
 		}
 	} else {
 		sock = filepath.Join(dir, "fc.sock")
 		_ = os.Remove(sock)
 		pid, err = m.spawn(id, sock, netcfg)
 		if err != nil {
-			netcfg.Teardown()
-			m.fail(mc, err)
-			return nil, err
+			return abortar(err)
 		}
 		c = fc.New(sock)
 		if err := waitSocket(ctx, c); err != nil {
-			m.fail(mc, err)
-			return nil, err
+			return abortar(err)
 		}
 	}
 
@@ -735,16 +748,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		err = explainRestoreErr(err, fmt.Sprintf("snapshot %q", req.From), fmt.Sprintf(
 			"  kling mcp import %s -force    (imported MCP service)\n"+
 				"  kling commit -replace <machine> %s    (manual snapshot)", req.From, req.From))
-		m.fail(mc, err)
-		return nil, err
+		return abortar(err)
 	}
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir
 	// dispositivos. El virtio-rng ya viene dentro, porque la plantilla lo tenía
 	// al congelarse; y CONFIG_VMGENID hace que el invitado resiembre su pool al
 	// detectar que ha sido restaurado.
 	if err := c.PatchDrive(ctx, "overlay", overlay); err != nil {
-		m.fail(mc, fmt.Errorf("repointing overlay: %w", err))
-		return nil, err
+		return abortar(fmt.Errorf("repointing overlay: %w", err))
 	}
 	// Cada volumen se reapunta igual que el overlay: el dispositivo ya existe
 	// dentro del snapshot, y aquí solo se le dice a qué fichero del host mira.
@@ -765,8 +776,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	for i, v := range vols {
 		id, err := m.patchVolumeDrive(ctx, c, grabados[i], i, len(vols), v.path)
 		if err != nil {
-			m.fail(mc, fmt.Errorf("repointing volume %s: %w", v.name, err))
-			return nil, err
+			return abortar(fmt.Errorf("repointing volume %s: %w", v.name, err))
 		}
 		usados[i] = id
 	}
@@ -777,8 +787,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
 	if err := c.Resume(ctx); err != nil {
-		m.fail(mc, err)
-		return nil, err
+		return abortar(err)
 	}
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
@@ -789,8 +798,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// aviso hasta que alguien busca lo que guardó.
 	if len(vols) > 0 {
 		if err := m.acquireVolumes(mc); err != nil {
-			m.fail(mc, err)
-			return nil, err
+			return abortar(err)
 		}
 	}
 	elapsed := time.Since(start).Milliseconds()

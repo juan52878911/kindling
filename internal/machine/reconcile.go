@@ -135,6 +135,53 @@ func (m *Manager) killOrphanVMMs() {
 	}
 }
 
+// sweepOrphanVMMs mata, en marcha, los VMM que ya no son de ninguna máquina o
+// cuya máquina dice no estar corriendo.
+//
+// Es la versión periódica de killOrphanVMMs, y es MÁS prudente que ella a
+// propósito. Al arrancar el daemon nadie está creando máquinas, así que allí se
+// puede matar todo lo que no esté running. Aquí sí: una microVM en pleno
+// arranque está registrada como "created" y su VMM ya existe. Por eso:
+//
+//   - "created" y "warm" no se tocan (naciendo, o en pleno thaw);
+//   - lo reservado (makeMachineDir) tampoco, que es la misma señal que protege
+//     los directorios del barrido;
+//   - y lo demás tiene que parecer huérfano DOS vueltas seguidas, 10 s aparte,
+//     antes de morir. Un fallo real no se cura solo; una transición en curso, sí.
+func (m *Manager) sweepOrphanVMMs() {
+	// El escaneo de /proc va fuera del candado: recorrerlo con el lock global
+	// tomado congela ps, run y thaw mientras dura.
+	live := m.liveVMs()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.orphanSeen == nil {
+		m.orphanSeen = map[string]int{}
+	}
+	for id := range m.orphanSeen {
+		if _, sigue := live[id]; !sigue {
+			delete(m.orphanSeen, id)
+		}
+	}
+	for id, pid := range live {
+		mc := m.byID[id]
+		if m.reserved[id] {
+			continue
+		}
+		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StateCreated || mc.State == api.StateWarm) {
+			delete(m.orphanSeen, id)
+			continue
+		}
+		m.orphanSeen[id]++
+		if m.orphanSeen[id] < 2 {
+			continue
+		}
+		log.Printf("watch: killing orphan VMM of %s (pid %d, state %s)", shortID(id), pid, estadoDe(mc))
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		delete(m.orphanSeen, id)
+	}
+}
+
 func estadoDe(mc *api.Machine) string {
 	if mc == nil {
 		return "not registered"
@@ -383,6 +430,12 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// para poder diagnosticarla, y después se recoge sola. Sin esto se
 				// acumulaban indefinidamente, una por intento fallido.
 				m.gcFailed()
+				// Procesos de firecracker que ya no son de nadie. Hasta ahora esto
+				// solo corría al arrancar el daemon, así que un VMM huérfano
+				// —cada restauración fallida dejaba uno— retenía su RAM hasta el
+				// siguiente reinicio, invisible para `kling ps` y para la
+				// contabilidad de memoria que decide si cabe la siguiente microVM.
+				m.sweepOrphanVMMs()
 				// Barrer directorios huérfanos también en marcha: no solo aparecen
 				// al arrancar. Bajo el lock, como reconcile.
 				m.mu.Lock()
@@ -445,6 +498,20 @@ func (m *Manager) Watch(ctx context.Context, every time.Duration) {
 	go m.watch(ctx, every)
 }
 
+// ttlDesde es cuándo empezó a contar el TTL de mc.
+//
+// TTLAt es el reloj bueno; StartedAt es el respaldo para las máquinas creadas
+// antes de que TTLAt existiera, que es exactamente el comportamiento que tenían.
+func ttlDesde(mc *api.Machine) time.Time {
+	if mc.TTLAt != nil {
+		return *mc.TTLAt
+	}
+	if mc.StartedAt != nil {
+		return *mc.StartedAt
+	}
+	return time.Time{}
+}
+
 // expireTTL congela las máquinas cuyo tiempo de vida se agotó (o las destruye,
 // si se crearon con OnTTL "remove").
 //
@@ -455,19 +522,37 @@ func (m *Manager) expireTTL(ctx context.Context) {
 
 	m.mu.RLock()
 	for _, mc := range m.byID {
-		if mc.State != api.StateRunning || mc.TTLSeconds <= 0 || mc.StartedAt == nil {
+		if mc.TTLSeconds <= 0 {
 			continue
 		}
-		if time.Since(*mc.StartedAt) >= time.Duration(mc.TTLSeconds)*time.Second {
+		// Una máquina congelada solo vence si al vencer se DESTRUYE: congelar lo
+		// ya congelado no tiene sentido, pero un sandbox dormido que nadie
+		// reclama sí debe desaparecer, o dormir sería una forma de no morir
+		// nunca.
+		switch mc.State {
+		case api.StateRunning:
+		case api.StateWarm:
+			if mc.OnTTL != api.OnTTLRemove {
+				continue
+			}
+		default:
+			continue
+		}
+		desde := ttlDesde(mc)
+		if desde.IsZero() {
+			continue
+		}
+		if time.Since(desde) >= time.Duration(mc.TTLSeconds)*time.Second {
 			due = append(due, mc.ID)
 		}
 	}
 	m.mu.RUnlock()
 
 	for _, id := range due {
-		// Un sandbox no se congela: se destruye. Lo que se ejecutó dentro no
-		// tiene por qué seguir existiendo, y congelarlo guardaría en disco una
-		// memoria que nadie va a volver a usar.
+		// Con on_ttl=remove la máquina se destruye en vez de congelarse: es lo
+		// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué
+		// seguir existiendo, y congelarlo guardaría en disco una memoria que
+		// nadie va a volver a usar.
 		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
 			if err := m.Remove(id); err != nil {
 				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
@@ -517,8 +602,24 @@ func (m *Manager) handleFreezeFailure(id string, err error) {
 	// Una máquina con secretos no se congela POR DISEÑO (ver Freeze): el fallo
 	// es una negativa de política sobre una máquina sana, no una avería. Matarla
 	// por acumular negativas sería perder trabajo del usuario.
+	//
+	// Pero reintentar tampoco vale: la negativa es permanente mientras el
+	// secreto esté dentro, así que el TTL generaba un rechazo cada 10 s para
+	// siempre y no se aplicaba nunca. Se apaga el TTL de esa máquina, una vez y
+	// diciéndolo: lo que promete `ttl` no se puede cumplir aquí, y fingir que
+	// sigue vigente es peor que retirarlo.
 	if cur.HasSecrets {
-		log.Printf("ttl: couldn't freeze %s: %v", shortID(id), err)
+		m.mu.Lock()
+		if vivo := m.byID[id]; vivo != nil {
+			vivo.TTLSeconds = 0
+			m.persist()
+		}
+		m.mu.Unlock()
+		// Sin evento: la máquina no ha fallado ni ha cambiado de estado, y
+		// publicar EvFailed sobre una máquina sana mentiría a quien escucha
+		// /events. Queda en el log del daemon, que es donde se mira un "¿por qué
+		// esta máquina no se congeló?".
+		log.Printf("ttl: %s has an injected secret and can't be frozen; dropping its TTL (%v)", shortID(id), err)
 		return
 	}
 	if freezeErrIsStructural(err) || !m.controlSockAlive(cur) {

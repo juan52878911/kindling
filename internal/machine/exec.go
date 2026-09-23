@@ -37,6 +37,15 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 		return nil, fmt.Errorf("%w: %s was created without allow_exec. A service microVM never gets it; "+
 			"create a sandbox (kling sandbox create) or a machine with kling run -allow-exec", ErrExecNotAllowed, mc.Name)
 	}
+	// Con on_ttl=freeze el TTL es un plazo de INACTIVIDAD, no una vida máxima:
+	// usar el sandbox lo reinicia, igual que el segador del gateway con los
+	// servicios. Sin esto, un sandbox dormido que alguien despierta volvería a
+	// dormirse en la siguiente vuelta del vigilante, porque su reloj ya venció.
+	// Con on_ttl=remove no se toca: ahí el TTL es una vida máxima y usarlo no
+	// debe poder alargarla indefinidamente.
+	if mc.OnTTL != api.OnTTLRemove {
+		m.touchTTL(mc.ID)
+	}
 	if mc.State == api.StateWarm {
 		thawed, err := m.Thaw(ctx, mc.ID)
 		if err != nil {
@@ -50,11 +59,24 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 	return mc, nil
 }
 
+// touchTTL reinicia el reloj del TTL de una máquina que se acaba de usar.
+func (m *Manager) touchTTL(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mc := m.byID[id]
+	if mc == nil || mc.TTLSeconds <= 0 {
+		return
+	}
+	ahora := time.Now()
+	mc.TTLAt = &ahora
+	m.persist()
+}
+
 // Renew hace que el TTL de la máquina venza ttlSeconds a partir de ahora.
 //
-// El TTL se cuenta desde StartedAt, así que alargarlo es subir TTLSeconds hasta
-// lo que lleva corriendo más lo pedido. No hace falta un campo nuevo, y una
-// máquina renovada que se congela y se descongela sigue la regla de siempre.
+// Renovar es poner el reloj del TTL (TTLAt) a ahora. Una máquina congelada
+// también se puede renovar: un sandbox dormido vence igual, y quien lo quiere
+// conservar no debería tener que despertarlo para pedirlo.
 func (m *Manager) Renew(ref string, ttlSeconds int) (*api.Machine, error) {
 	if ttlSeconds <= 0 {
 		return nil, fmt.Errorf("ttl must be positive")
@@ -71,11 +93,12 @@ func (m *Manager) Renew(ref string, ttlSeconds int) (*api.Machine, error) {
 	if mc == nil {
 		return nil, ErrNoMachine
 	}
-	if mc.State != api.StateRunning || mc.StartedAt == nil {
+	if mc.State != api.StateRunning && mc.State != api.StateWarm {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, mc.Name, mc.State)
 	}
-	elapsed := int(time.Since(*mc.StartedAt) / time.Second)
-	mc.TTLSeconds = elapsed + ttlSeconds
+	ahora := time.Now()
+	mc.TTLAt = &ahora
+	mc.TTLSeconds = ttlSeconds
 	m.persist()
 	c := *mc
 	return &c, nil

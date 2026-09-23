@@ -444,12 +444,15 @@ kling images toolchain                          # an image with node, npm, pytho
 kling sandbox create -image toolchain -name sb  # ~5 s cold
 kling cp ./analysis.py sb:/tmp/
 kling exec sb -- python3 /tmp/analysis.py       # output arrives as it is produced
+kling shell sb                                  # or an interactive terminal inside
 kling cp sb:/tmp/result.json .
 kling sandbox rm sb
 ```
 
-`kling exec` exits with the remote exit code, separates stdout from stderr, takes stdin
-with `-i` and kills the whole process group on `-timeout`. Prepare a template once
+`kling shell sb` opens a real terminal inside, with `vim`, history and Ctrl-C
+interrupting what runs inside instead of the session. `kling exec` exits with the remote
+exit code, separates stdout from stderr, takes stdin with `-i` and kills the whole
+process group on `-timeout`. Prepare a template once
 (`kling run -allow-exec`, install what you need, `kling commit`) and every sandbox
 created with `-from` starts in **~300 ms** with it already inside — five in parallel took
 0.57 s in the lab.

@@ -94,6 +94,35 @@ kling exec [-i] [-e K=V] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] 
 - Una máquina congelada se descongela sola; una recién arrancada se espera hasta
   que su agente escucha.
 
+## kling shell
+
+```sh
+kling shell [-e K=V] [-w DIR] [-t TERM] <máquina|sandbox> [--] [cmd args...]
+```
+
+Una terminal de verdad dentro de la microVM: `vim`, edición de línea, historial,
+colores y control de trabajos. Sin argumentos abre `/bin/sh -l`.
+
+- **Ctrl-C interrumpe lo de dentro, no la sesión.** El CLI apaga las señales de
+  su propia terminal, así que el `^C` viaja como un byte y es el pseudoterminal
+  remoto quien genera la interrupción sobre el proceso en primer plano, como en
+  `ssh`.
+- **Redimensionar la ventana llega al programa de dentro** (`SIGWINCH`).
+- `kling` termina con el código de la shell remota.
+- Sin terminal en la entrada y la salida se niega y remite a `kling exec -i`: una
+  shell sin terminal no es una shell.
+- Misma puerta que exec: solo en máquinas creadas con `allow_exec`.
+
+Por dentro no es una respuesta en streaming sino un cambio de protocolo: la
+petición pide `Upgrade`, el daemon contesta 101 y la conexión pasa a transportar
+tramas en los dos sentidos, como hace `docker exec -it`. Se eligió así porque los
+plazos de lectura del daemon y del agente cortarían una sesión larga, y porque el
+túnel SSH cierra el socket entero en cuanto una de sus dos direcciones termina.
+
+El límite es de 8 sesiones simultáneas por microVM. Al colgar, el agente cierra el
+pseudoterminal, lo que manda `SIGHUP` a la sesión, y dos segundos después se lleva
+lo que siga vivo.
+
 ## kling cp
 
 ```sh
@@ -112,13 +141,37 @@ Las rutas, los límites y el formato del flujo están en [`api.md`](api.md#exec-
 Desde Go, `pkg/api`: `Client.Exec`, `ReadFile`, `WriteFile`, `StatFile`,
 `RemoveFile`, `CreateSandbox`, `Sandboxes`, `RenewSandbox`, `RemoveSandbox`.
 
+## Bajo carga
+
+Medido en el laboratorio (Lima arm64 anidado, 6 vCPU, 8 GiB), con 24 sandboxes de
+una plantilla y 60 ejecuciones a la vez:
+
+| | |
+|---|---|
+| Crear, con el fondo de precalentadas vacío | p50 422 ms, p95 15,6 s |
+| Ejecutar, 60 a la vez sobre 24 sandboxes | p50 3,4 s, p95 12,3 s |
+| Despertar, 24 a la vez | p50 333 ms, p95 373 ms |
+
+Las colas largas son del anfitrión, no del daemon: seis vCPU repartidos entre
+decenas de microVMs que arrancan a la vez. Lo que importa es que no hubo ni una
+ejecución perdida ni un proceso huérfano.
+
+**kindling sobreasigna memoria a propósito.** Una microVM no toca toda la RAM que
+declara, y de ahí sale la densidad. La consecuencia es que en un host saturado el
+rechazo puede no llegar como "no cabe" sino como "el invitado no llegó a
+escuchar": el arranque se comió su plazo compitiendo por CPU. El mensaje lo dice y
+sugiere mirar `kling top`.
+
 ## Lo que hay que saber
 
 - **El TTL no espera a que acabe un comando.** Un sandbox de 10 minutos que ejecuta
   algo de 20 se destruye a los 10. Renuévalo antes, o créalo con más TTL.
 - **Dentro se es root.** La máquina es de usar y tirar y la frontera es el
   hipervisor, no los permisos de dentro.
-- **Imágenes anteriores a v0.7** llevan un agente sin exec en streaming ni
-  ficheros: el daemon contesta `501` y dice que se reconstruya la imagen.
+- **Imágenes anteriores a v0.7** llevan un agente sin exec en streaming, ficheros
+  ni shell: el daemon contesta `501` y dice que se reconstruya la imagen.
+- **La shell abre un pseudoterminal**, y para eso hace falta `devpts` montado en
+  el invitado. El init de las imágenes de kindling no lo monta, así que lo monta
+  el agente la primera vez: no hay que reconstruir nada por este motivo.
 - `kling volume populate` sigue usando la ruta de ejecución agregada de siempre,
   que también entienden los agentes antiguos.

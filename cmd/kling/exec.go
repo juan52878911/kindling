@@ -233,7 +233,8 @@ func sandboxCreate(args []string) error {
 	from := fs.String("from", "", "snapshot made from a machine with -allow-exec")
 	cpus := fs.Int("cpus", 0, "vCPUs (default 1)")
 	mem := fs.Int("mem", 0, "memory in MiB (default 256)")
-	ttl := fs.Duration("ttl", 0, "lifetime; it is destroyed when it runs out (default 10m, max 24h)")
+	ttl := fs.Duration("ttl", 0, "lifetime, or idle time with -on-ttl freeze (default 10m, max 24h)")
+	onTTL := fs.String("on-ttl", "", "when the ttl runs out: remove (default) or freeze (sleeps at zero cost, the next exec wakes it in ms)")
 	egress := fs.String("egress", "", "network egress: none (default) | internet | allowlist")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core")
@@ -246,7 +247,7 @@ func sandboxCreate(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	req := api.SandboxRequest{Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
-		TTLSeconds: int(ttl.Seconds()), Egress: *egress, AllowDomains: splitDomains(*allow),
+		TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Egress: *egress, AllowDomains: splitDomains(*allow),
 		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes)}
 	start := time.Now()
 	mc, err := api.NewClient(hostOf(*host)).CreateSandbox(ctx, req)
@@ -263,9 +264,13 @@ func sandboxCreate(args []string) error {
 	if mc.From != "" {
 		how = "restored from " + mc.From
 	}
-	fmt.Printf("%s  %s  ready in %s (%s), destroyed in %s unless renewed\n",
+	final := "destroyed"
+	if mc.OnTTL == api.OnTTLFreeze {
+		final = "frozen"
+	}
+	fmt.Printf("%s  %s  ready in %s (%s), %s after %s idle\n",
 		mc.ID[:12], mc.Name, time.Since(start).Round(time.Millisecond), how,
-		time.Duration(mc.TTLSeconds)*time.Second)
+		final, time.Duration(mc.TTLSeconds)*time.Second)
 	fmt.Printf("\n  kling exec %s -- uname -a\n  kling cp ./script.py %s:/tmp/\n  kling sandbox rm %s\n",
 		mc.Name, mc.Name, mc.Name)
 	return nil
@@ -284,21 +289,31 @@ func sandboxList(args []string) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tIMAGE\tSTATE\tEGRESS\tEXPIRES IN")
+	fmt.Fprintln(tw, "ID\tNAME\tIMAGE\tSTATE\tEGRESS\tON TTL\tIN")
 	for _, mc := range list {
 		left := "—"
-		if mc.StartedAt != nil && mc.TTLSeconds > 0 {
-			d := time.Until(mc.StartedAt.Add(time.Duration(mc.TTLSeconds) * time.Second)).Round(time.Second)
+		// El reloj del TTL es TTLAt, no StartedAt: un sandbox que durmió y
+		// despertó conserva su cuenta (ver api.Machine.TTLAt).
+		desde := mc.TTLAt
+		if desde == nil {
+			desde = mc.StartedAt
+		}
+		if desde != nil && mc.TTLSeconds > 0 {
+			d := time.Until(desde.Add(time.Duration(mc.TTLSeconds) * time.Second)).Round(time.Second)
 			if d < 0 {
 				d = 0
 			}
 			left = d.String()
 		}
+		fin := "remove"
+		if mc.OnTTL == api.OnTTLFreeze {
+			fin = "freeze"
+		}
 		src := mc.Image
 		if mc.From != "" {
 			src = mc.From + " (snapshot)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", mc.ID[:12], mc.Name, src, mc.State, mc.Egress, left)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", mc.ID[:12], mc.Name, src, mc.State, mc.Egress, fin, left)
 	}
 	return tw.Flush()
 }
@@ -319,8 +334,12 @@ func sandboxRenew(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  expires at %s\n", mc.Name,
-		mc.StartedAt.Add(time.Duration(mc.TTLSeconds)*time.Second).Local().Format("15:04:05"))
+	desde := mc.TTLAt
+	if desde == nil {
+		desde = mc.StartedAt
+	}
+	fmt.Printf("%s  %s at %s\n", mc.Name, map[bool]string{true: "freezes", false: "expires"}[mc.OnTTL == api.OnTTLFreeze],
+		desde.Add(time.Duration(mc.TTLSeconds)*time.Second).Local().Format("15:04:05"))
 	return nil
 }
 

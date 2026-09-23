@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -110,6 +110,7 @@ func (s *Server) routes() http.Handler {
 
 	// Ejecución y ficheros (solo máquinas con allow_exec) y sandboxes.
 	mux.HandleFunc("POST /machines/{ref}/exec", s.handleExec)
+	mux.HandleFunc("POST /machines/{ref}/shell", s.handleShell)
 	mux.HandleFunc("GET /machines/{ref}/files", s.handleFiles)
 	mux.HandleFunc("PUT /machines/{ref}/files", s.handleFiles)
 	mux.HandleFunc("DELETE /machines/{ref}/files", s.handleFiles)

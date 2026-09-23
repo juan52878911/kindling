@@ -243,6 +243,25 @@ if $KLING sandbox create -image "$IMGVOL" -name "$SB" -ttl 5m -q >/dev/null 2>&1
   $KLING exec -timeout 2s "$SB" -- sleep 30 >/dev/null 2>&1; code=$?
   [ "$code" = "137" ] && ok "el plazo mata el comando (137)" || bad "exec -timeout" "137" "$code"
 
+  # Shell interactiva. Necesita un terminal, así que se le pone uno falso con
+  # `script`: sin él, `kling shell` se niega a propósito.
+  if command -v script >/dev/null 2>&1; then
+    out=$(printf 'tty; stty size; exit 5\n' | script -qec "$KLING shell $SB" /dev/null 2>&1 | tr -d '\r')
+    contiene "$out" "/dev/pts/" && ok "shell: hay un pseudoterminal de verdad dentro" \
+      || bad "kling shell" "un /dev/pts/N" "$out"
+    # El código de la shell remota tiene que llegar al proceso local.
+    printf 'exit 5\n' | script -qec "$KLING shell $SB" /dev/null >/dev/null 2>&1
+    # `script` devuelve el código del comando que envuelve.
+    code=$?
+    [ "$code" = "5" ] && ok "shell: el código de salida remoto llega al local" \
+      || bad "código de kling shell" "5" "$code"
+    out=$($KLING shell "$SB" </dev/null 2>&1)
+    contiene "$out" "needs a terminal" && ok "shell: se niega sin terminal, y lo explica" \
+      || bad "kling shell sin tty" "un rechazo explicando" "$out"
+  else
+    echo "  (sin util-linux script: me salto la shell interactiva)"
+  fi
+
   tmp=$(mktemp); echo "print(6*7)" > "$tmp"
   if $KLING cp "$tmp" "$SB:/tmp/e2e.py" >/dev/null 2>&1; then
     out=$($KLING exec "$SB" -- python3 /tmp/e2e.py 2>&1)

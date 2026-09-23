@@ -109,6 +109,7 @@ func TestRutasDeExecYSandboxSinMaquina(t *testing.T) {
 		{"POST", "/sandboxes", `{"image":"a","from":"b"}`, 400},
 		{"POST", "/sandboxes", `{"image":"a","ttl_seconds":999999}`, 400},
 		{"POST", "/sandboxes", `{"image":"no-existe"}`, 400},
+		{"POST", "/sandboxes", `{"image":"a","on_ttl":"apagar"}`, 400},
 		{"GET", "/sandboxes/nada", "", 404},
 		{"POST", "/sandboxes/nada/renew", `{}`, 404},
 		{"DELETE", "/sandboxes/nada", "", 404},

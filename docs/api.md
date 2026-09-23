@@ -21,6 +21,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `store` | v0.5 | `GET /store/{ns}`, `GET/PUT/DELETE /store/{ns}/{key}` |
 | `builders` | v0.5 | `POST /images` con `builder` y `spec` |
 | `image-files` | v0.5 | `GET/PUT /images/{name}/files` |
+| `shell` | v0.7 | `POST /machines/{ref}/shell` (protocolo `kling-shell/1`) |
 | `exec` | v0.7 | `POST /machines/{ref}/exec`, `GET/PUT/DELETE /machines/{ref}/files`, `allow_exec` y `on_ttl` en `POST /machines` |
 | `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
 
@@ -154,6 +155,32 @@ hay exactamente un evento final. Cerrar la conexión mata el comando.
 El último componente de la ruta no se sigue si es un enlace simbólico. `501`
 significa que el agente de la imagen es anterior a v0.7.
 
+### `POST /machines/{ref}/shell`
+
+La shell interactiva. No es una respuesta en streaming: la petición pide
+`Connection: Upgrade` y `Upgrade: kling-shell/1`, el daemon contesta `101` y a
+partir de ahí la conexión transporta tramas binarias en los dos sentidos. Sin las
+cabeceras de upgrade, `426`.
+
+El cuerpo es `{"cmd": [...], "dir": "...", "env": [...], "term": "xterm-256color",
+"rows": 40, "cols": 120}`; todo opcional (sin `cmd`, `/bin/sh -l`).
+
+Cada trama es `tipo (1 byte) | longitud (4 bytes, big-endian) | carga`, con la
+carga acotada a 64 KiB:
+
+| Tipo | Sentido | Carga |
+|---|---|---|
+| `0` data | los dos | bytes de entrada, o salida del pseudoterminal |
+| `1` resize | hacia dentro | `rows uint16`, `cols uint16` |
+| `2` signal | hacia dentro | número de señal, al grupo en primer plano |
+| `3` exit | hacia fuera | código `int32`; siempre la última |
+| `4` error | hacia fuera | texto; también la última |
+| `5` ping | hacia fuera | vacía, cada 30 s: detecta clientes muertos |
+
+El daemon no reenvía a ciegas: comprueba que el tipo tiene sentido en esa
+dirección y descarta lo demás. Un invitado no puede mandarle al cliente tramas de
+redimensionado ni de señal.
+
 ## Sandboxes
 
 `POST /sandboxes` crea una máquina con `allow_exec`, egress `none` por defecto,
@@ -165,7 +192,10 @@ escucha:
 ```
 
 `image` o `from` (un snapshot hecho con `allow_exec`; si no lo es, `409`), no los
-dos. TTL por defecto 600 s, máximo 86400. También admite `name`, `vcpus`,
+dos. TTL por defecto 600 s, máximo 86400. `on_ttl` decide qué pasa al vencer:
+`remove` (por defecto) lo destruye y `freeze` lo duerme a coste cero, con el
+siguiente exec despertándolo; con `freeze` el TTL cuenta INACTIVIDAD y usar el
+sandbox lo reinicia. También admite `name`, `vcpus`,
 `cpu_pct`, `allow_domains`, `volumes` y `labels`.
 
 | Ruta | Qué hace |

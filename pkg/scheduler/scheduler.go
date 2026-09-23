@@ -396,7 +396,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
 	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
 	// falta varias—, y rendirse tras la primera dejaba el 502 igual que antes.
-	for api.IsInsufficientMemory(err) {
+	for api.IsInsufficientMemory(err) || api.IsMachineLimit(err) {
 		// No cabe: se hace sitio en vez de rendirse.
 		//
 		// Un anfitrión justo no puede tener todos los servicios despiertos a la
@@ -408,13 +408,30 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		// Se congela el más antiguo SIN trabajo en vuelo. Congelar cuesta un par
 		// de segundos y descongelar 25 ms, así que la instancia sacrificada
 		// vuelve barata; el que espera, en cambio, no tenía alternativa.
+		//
+		// El tope de máquinas del daemon no se arregla congelando: una máquina
+		// congelada sigue contando. Lo único que baja el contador es destruir, y
+		// lo que se puede destruir sin perder trabajo de nadie es el fondo de
+		// precalentadas.
+		if api.IsMachineLimit(err) {
+			if g.pool == nil || !g.pool.evictOne(ctx) {
+				break
+			}
+			log.Printf("%s: at the daemon's machine limit; dropped a prewarmed instance", service)
+			mc, err = g.acquire(ctx, service, fresh)
+			continue
+		}
 		victima := g.evictLRU(ctx, service, tnt.name)
 		if victima == "" {
 			// No queda nada ocioso que sacrificar: ahora sí hay que rendirse, y
 			// el error de falta de memoria explica por qué.
 			break
 		}
-		log.Printf("%s: didn't fit; froze %s to make room", service, victima)
+		if victima == evictedPool {
+			log.Printf("%s: didn't fit; dropped a prewarmed instance to make room", service)
+		} else {
+			log.Printf("%s: didn't fit; froze %s to make room", service, victima)
+		}
 		mc, err = g.acquire(ctx, service, fresh)
 	}
 	if err != nil {
@@ -1006,6 +1023,11 @@ func (g *Scheduler) ensureLock(service string) *sync.Mutex {
 // desaloja el trabajo de otro mientras aún le quede algo propio ocioso que ceder.
 // No aísla nada —todo comparte daemon y bridge— pero evita el accidente de que un
 // cliente activo eche a los demás de la memoria.
+// evictedPool es lo que devuelve evictLRU cuando lo que liberó fue una instancia
+// del fondo de precalentadas y no un servicio. No es un nombre de servicio, y
+// por eso no puede confundirse con uno: los nombres válidos no llevan espacios.
+const evictedPool = "(warm pool)"
+
 func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
 	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
@@ -1107,6 +1129,20 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			continue
 		}
 		return elegido
+	}
+
+	// Segundo escalón: el fondo de precalentadas. Son máquinas restauradas que
+	// no atienden a nadie, así que su RAM es la más barata de recuperar, pero
+	// hasta ahora nadie la pedía: evictOne existía, con sus tests, y no se
+	// llamaba desde ningún sitio. El resultado era un 507 al cliente teniendo
+	// memoria perfectamente liberable dormida en el fondo.
+	//
+	// Va después de las instancias de servicio y no antes a propósito: retirar
+	// una precalentada le cuesta un arranque en frío a la SIGUIENTE petición de
+	// ese servicio, mientras que congelar una instancia ociosa solo le cuesta un
+	// thaw de milisegundos a la suya.
+	if g.pool != nil && g.pool.evictOne(ctx) {
+		return evictedPool
 	}
 	return ""
 }

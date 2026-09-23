@@ -330,6 +330,15 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			"Any image with the guest agent works: kling images toolchain builds one with node and python"))
 		return
 	}
+	onTTL := req.OnTTL
+	switch onTTL {
+	case "", api.OnTTLRemove:
+		onTTL = api.OnTTLRemove
+	case api.OnTTLFreeze:
+	default:
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLRemove, api.OnTTLFreeze))
+		return
+	}
 	egress := req.Egress
 	if egress == "" {
 		// Sin red por defecto: lo que corre en un sandbox lo escribió un agente, y
@@ -359,7 +368,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, Image: req.Image, From: req.From,
 		VCPUs: req.VCPUs, MemMiB: req.MemMiB, CPUPct: req.CPUPct,
 		Egress: egress, AllowDomains: req.AllowDomains,
-		TTLSeconds: ttl, OnTTL: api.OnTTLRemove,
+		TTLSeconds: ttl, OnTTL: onTTL,
 		Volumes: req.Volumes, Labels: labels,
 		AllowExec: true,
 	})
@@ -374,9 +383,14 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	// Se devuelve cuando el agente ya escucha: quien crea un sandbox va a
 	// ejecutar algo acto seguido, y un "connection refused" en la primera
 	// llamada sería culpa nuestra.
-	if err := waitPort(r.Context(), net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort)), 60*time.Second); err != nil {
+	// 2 minutos y no 1: con el host cargado —decenas de microVMs arrancando a la
+	// vez— el invitado tarda más en llegar a escuchar, y rendirse antes destruye
+	// una máquina que iba a funcionar. Medido con 36 sandboxes de 1,5 GiB
+	// arrancando en ráfaga.
+	if err := waitPort(r.Context(), net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort)), 2*time.Minute); err != nil {
 		_ = s.mgr.Remove(mc.ID)
-		fail(w, http.StatusGatewayTimeout, fmt.Errorf("the sandbox booted but its guest agent never listened: %w", err))
+		fail(w, http.StatusGatewayTimeout, fmt.Errorf("the sandbox booted but its guest agent never answered in 2m: %w.\n"+
+			"The host is probably saturated: check `kling top` and `kling ps`, and give it fewer or smaller sandboxes", err))
 		return
 	}
 	writeJSON(w, http.StatusCreated, mc)
