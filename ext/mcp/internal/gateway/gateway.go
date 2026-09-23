@@ -18,13 +18,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/http/pprof"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,8 +78,13 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	//
 	// Una precalentada se entrega con la sesión MCP ya abierta: el initialize
 	// se paga al calentarla, no cuando llega la petición.
-	g.Prepare = func(ctx context.Context, ip string) (string, error) {
-		return mcpInit(ctx, "http://"+net.JoinHostPort(ip, strconv.Itoa(GuestPort)))
+	//
+	// PrepareAddr (no Prepare): en macOS la IP del invitado no se alcanza desde
+	// el host y solo la dirección con el reenvío sirve (ver docs/backend-vz.md
+	// §3). PrepareAddr gana a Prepare en pkg/scheduler, así que basta con fijar
+	// este.
+	g.PrepareAddr = func(ctx context.Context, addr string) (string, error) {
+		return mcpInit(ctx, "http://"+addr)
 	}
 	// Los servicios con estado no se precalientan: su instancia es persistente.
 	g.Skip = mcp.Stateful
@@ -176,8 +179,10 @@ func (g *Gateway) handleServices(w http.ResponseWriter, r *http.Request) {
 			status = fmt.Sprintf("%d prewarmed instance(s)", st.Prewarmed)
 		}
 		if st.Warm {
+			// st.Addr (host:puerto real) en vez de st.IP: en macOS la IP del
+			// invitado es la misma para todas las instancias y no dice nada.
 			status = fmt.Sprintf("warm at %s · %d session(s) · idle %s",
-				st.IP, st.Sessions, st.Idle.Round(time.Second))
+				st.Addr, st.Sessions, st.Idle.Round(time.Second))
 		}
 		fmt.Fprintf(w, "%-24s snapshot=%-20s %s\n", name, s.Name, status)
 	}
@@ -290,7 +295,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// GATEWAY la retirara (ya no aparece por machineID) o que el DAEMON la
 			// congelara por TTL (aún figura, pero el invitado no responde). Lo
 			// segundo solo se ve comprobando vida.
-			if e == nil || !scheduler.Alive(rt.IP(), GuestPort) {
+			if e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort)) {
 				// Se invalida la instancia congelada (si aún figura) para que
 				// ensure la reconstruya en vez de devolverla tal cual, y se
 				// reconstruye la primaria del servicio.

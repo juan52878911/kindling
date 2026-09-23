@@ -216,7 +216,9 @@ func mcpImport(args []string) error {
 		fmt.Println("✗")
 		return fmt.Errorf("couldn't start the template: %w", err)
 	}
-	fmt.Printf("✓ %s at %s\n", mc.ID[:8], mc.IP)
+	// mc.Addr, no mc.IP: en macOS la IP del invitado (172.16.0.2) no dice nada,
+	// lo que hay que enseñar es la dirección real (el reenvío, si lo hay).
+	fmt.Printf("✓ %s at %s\n", mc.ID[:8], mc.Addr(api.GuestPort))
 
 	cleanup := func() {
 		if !*keep {

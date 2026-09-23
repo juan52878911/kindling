@@ -552,7 +552,8 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	a.gw.Begin(e)
 	defer a.gw.End(e)
 	dEnsure := time.Since(tEnsure)
-	base := "http://" + e.IP() + ":" + fmt.Sprint(GuestPort)
+	// e.Addr resuelve el reenvío de macOS; en Linux es e.IP()+puerto de siempre.
+	base := "http://" + e.Addr(GuestPort)
 
 	// Una sesión por servicio y por conversación: el estado del servidor MCP debe
 	// persistir entre llamadas del mismo cliente.

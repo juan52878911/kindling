@@ -5,9 +5,20 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 
 | kindling-mcp | kindling |
 |---|---|
+| v0.4.x | v0.9.x |
 | v0.3.x | v0.8.x |
 | v0.2.x | v0.7.x |
 | v0.1.x | v0.6.x, v0.7.x |
+
+## Unreleased
+
+- **Funciona sobre el backend nativo de macOS** (`kling-vz`, kindling v0.9).
+  Allí todos los invitados comparten la misma IP interna y no es alcanzable
+  desde el host: se llega a cada uno por el puerto que reenvía en loopback
+  (`api.Machine.Forwards`). El gateway, el agregador, el modo efímero y el
+  informe HTML dejan de construir `IP:puerto` a mano y usan `Machine.Addr` /
+  `scheduler.Instance.Addr` en su lugar, que en Linux se comporta exactamente
+  igual que antes. Requiere kindling v0.9.0.
 
 ## v0.3.0 — 2026-09-23
 

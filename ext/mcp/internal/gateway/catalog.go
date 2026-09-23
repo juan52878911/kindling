@@ -207,7 +207,9 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	// la instancia a mitad y dejar el fetch a medias.
 	c.gw.Begin(e)
 	defer c.gw.End(e)
-	base := "http://" + e.IP() + ":" + fmt.Sprint(GuestPort)
+	// e.Addr resuelve el reenvío de macOS cuando lo hay; en Linux es lo mismo
+	// que e.IP()+puerto de siempre (ver docs/backend-vz.md §3).
+	base := "http://" + e.Addr(GuestPort)
 
 	sid, err := mcpInit(ctx, base)
 	if err != nil {
