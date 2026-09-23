@@ -180,17 +180,27 @@ func estadisticasDesconocidas(s *fc.BalloonStats) bool {
 	return s.FreeMemory == 0 && s.AvailableMemory == 0 && s.TotalMemory == 0
 }
 
-// esperarHuellaEstable espera, como mucho 3 s, a que la memoria del VMM en el
-// host deje de bajar tras inflar el globo.
+// esperarHuellaEstable espera, como mucho 5 s, a que la memoria del VMM en el
+// host deje de bajar tras inflar el globo. El invitado tarda en empezar a
+// soltar: la primera muestra suele ser igual a la de antes, y rendirse en ella
+// medía un apretón de 0 MiB que 250 ms después era de 500. Por eso hace falta
+// al menos 1 s y dos muestras seguidas sin bajar.
 func esperarHuellaEstable(ctx context.Context, pid int, sock string) {
+	const paso = 250 * time.Millisecond
+	t0 := time.Now()
 	antes := rssVMM(pid, sock)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && ctx.Err() == nil {
-		time.Sleep(250 * time.Millisecond)
+	quietas := 0
+	for time.Since(t0) < 5*time.Second && ctx.Err() == nil {
+		time.Sleep(paso)
 		ahora := rssVMM(pid, sock)
-		if ahora >= antes {
-			return
+		if ahora < antes {
+			quietas = 0
+		} else {
+			quietas++
 		}
 		antes = ahora
+		if quietas >= 2 && time.Since(t0) >= time.Second {
+			return
+		}
 	}
 }

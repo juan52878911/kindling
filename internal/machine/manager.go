@@ -1289,6 +1289,10 @@ const balloonStatsPollSec = 1
 // del OOM justo después.
 const balloonSqueezeMarginMiB = 128
 
+// squeezeMinRetenerMiB: por debajo de esto, en macOS, el apretón no ha devuelto
+// nada que valga la pena retener y el globo vuelve a la línea base.
+const squeezeMinRetenerMiB = 16
+
 // Squeeze aprieta el globo de una instancia running para devolver al host la RAM
 // que el invitado tiene LIBRE, sin congelarla.
 //
@@ -1376,20 +1380,31 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 		// VMM en el host, que deja de bajar.
 		esperarHuellaEstable(ctx, pid, sock)
 	}
+	rssAfter := rssVMM(pid, sock)
+	reclaimed := rssBefore - rssAfter
+	if reclaimed < 0 {
+		reclaimed = 0
+	}
+
 	// Desinflar: la RAM ya se reclamó al inflar; esto solo devuelve el presupuesto
 	// al invitado. Con contexto sin cancelar para que no se quede inflado si el
 	// cliente abandonó.
 	// A la línea base, no a 0: en una máquina con techo el globo retiene la
 	// diferencia entre el techo y su memoria, y desinflarlo del todo le daría
 	// el techo entero.
-	if err := c.PatchBalloon(context.WithoutCancel(ctx), globoBase(cur)); err != nil {
-		log.Printf("warning: could not deflate the balloon for %s: %v", id, err)
-	}
-
-	rssAfter := rssVMM(pid, sock)
-	reclaimed := rssBefore - rssAfter
-	if reclaimed < 0 {
-		reclaimed = 0
+	//
+	// En macOS NO se desinfla si el apretón devolvió algo: al desinflar,
+	// Virtualization.framework vuelve a poblar las páginas y la huella regresa
+	// entera en ~3 s (medido: 1123 -> 620 -> 1132 MiB), así que "apretar y
+	// soltar" no deja nada. El globo se queda inflado; deflate_on_oom (que se
+	// configura al arrancar) deja al invitado recuperarlo si de verdad lo
+	// necesita, y `kling resize` o el siguiente squeeze lo recolocan. Si no
+	// devolvió nada (una máquina arrancada en frío: ahí el framework no suelta
+	// las páginas del globo) retenerlo solo le quitaría memoria al invitado.
+	if !sinEstadisticas || reclaimed < squeezeMinRetenerMiB {
+		if err := c.PatchBalloon(context.WithoutCancel(ctx), globoBase(cur)); err != nil {
+			log.Printf("warning: could not deflate the balloon for %s: %v", id, err)
+		}
 	}
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFrozen, ID: id, Name: cur.Name,

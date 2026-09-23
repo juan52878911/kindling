@@ -70,7 +70,7 @@ diga que `kling-vz` no lo implementa.
 | `PUT /entropy` | virtio-rng. |
 | `PUT /balloon` `{amount_mib, deflate_on_oom, stats_polling_interval_s}` | Globo tradicional. `amount_mib` es lo INFLADO, como en Firecracker: el objetivo del framework es `mem_size_mib - amount_mib`. |
 | `PATCH /balloon` `{amount_mib}` | Mueve el globo en caliente. |
-| `GET /balloon/statistics` | `{target_mib, actual_mib, free_memory, available_memory, total_memory}`. El framework no da estadísticas del invitado: `target_mib` y `actual_mib` son lo pedido y los tres de memoria van a 0, que el núcleo lee como "desconocido": `squeeze` aprieta entonces hasta dejar al invitado la mitad de su memoria (mínimo 128 MiB) y mide lo devuelto con `GET /kling/stats`. |
+| `GET /balloon/statistics` | `{target_mib, actual_mib, free_memory, available_memory, total_memory}`. El framework no da estadísticas del invitado: `target_mib` y `actual_mib` son lo pedido y los tres de memoria van a 0, que el núcleo lee como "desconocido": `squeeze` aprieta entonces hasta dejar al invitado la mitad de su memoria (mínimo 128 MiB), mide lo devuelto con `GET /kling/stats` y, si devolvió algo, deja el globo inflado (desinflar repuebla las páginas). |
 | `PUT /mmds/config` `{version, ipv4_address, network_interfaces}` | Activa MMDS en esa dirección (siempre `169.254.169.254`, versión `V2`). |
 | `PUT /mmds` (cualquier JSON) | Sustituye el almacén de MMDS. |
 | `PUT /actions` `{"action_type": "InstanceStart"}` | Crea y arranca la VM con lo configurado. |

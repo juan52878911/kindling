@@ -106,7 +106,14 @@ func servirVZFalso(sock, logPath string) {
 			return
 		case "/kling/stats":
 			apuntar(linea)
-			_, _ = io.WriteString(w, `{"footprint_mib": 321}`)
+			huella := 321
+			if os.Getenv(envFakeVZLibera) != "" {
+				// Como una máquina restaurada: lo inflado deja de ocupar.
+				mu.Lock()
+				huella = 1100 - globo
+				mu.Unlock()
+			}
+			fmt.Fprintf(w, `{"footprint_mib": %d}`, huella)
 			return
 		case "/balloon/statistics":
 			// Lo que da kling-vz: lo pedido, y la memoria del invitado a 0.
@@ -390,9 +397,34 @@ func TestVZBootConRaizLarga(t *testing.T) {
 	}
 }
 
+// envFakeVZLibera hace que la huella del falso baje con lo inflado.
+const envFakeVZLibera = "KLING_FAKE_VZ_LIBERA"
+
 // Sin estadísticas del invitado, squeeze aprieta hasta la mitad de su memoria
-// y vuelve a la línea base, en vez de no reclamar nada.
+// y, si no devolvió nada (la huella no bajó), vuelve a la línea base.
 func TestVZSqueezeSinEstadisticas(t *testing.T) {
+	patches, _ := squeezeVZ(t, false)
+	if len(patches) != 2 || patches[0] != "PATCH /balloon amount=512" || patches[1] != "PATCH /balloon amount=0" {
+		t.Fatalf("globo = %v", patches)
+	}
+}
+
+// Si el apretón devolvió memoria, en macOS el globo se queda inflado: al
+// desinflar, el framework repuebla las páginas y la huella vuelve entera.
+func TestVZSqueezeRetieneElGlobo(t *testing.T) {
+	patches, res := squeezeVZ(t, true)
+	if len(patches) != 1 || patches[0] != "PATCH /balloon amount=512" {
+		t.Fatalf("globo = %v; quería inflado a 512 y sin desinflar", patches)
+	}
+	if res.ReclaimedMiB != 512 || res.RSSMiB != 588 {
+		t.Fatalf("resultado = %+v; quería 512 devueltos y 588 de huella", res)
+	}
+}
+
+func squeezeVZ(t *testing.T, libera bool) ([]string, *api.SqueezeResult) {
+	if libera {
+		t.Setenv(envFakeVZLibera, "1")
+	}
 	m, logPath := managerVZ(t)
 	id := "dd11ee22ff33aa44"
 	if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
@@ -409,7 +441,8 @@ func TestVZSqueezeSinEstadisticas(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.byID[id].State, m.byID[id].PID = api.StateRunning, pid
-	if _, err := m.Squeeze(ctx, id); err != nil {
+	res, err := m.Squeeze(ctx, id)
+	if err != nil {
 		t.Fatalf("squeeze: %v", err)
 	}
 	ls := llamadas(t, logPath)
@@ -419,7 +452,5 @@ func TestVZSqueezeSinEstadisticas(t *testing.T) {
 			patches = append(patches, l)
 		}
 	}
-	if len(patches) != 2 || patches[0] != "PATCH /balloon amount=512" || patches[1] != "PATCH /balloon amount=0" {
-		t.Fatalf("globo = %v", patches)
-	}
+	return patches, res
 }
