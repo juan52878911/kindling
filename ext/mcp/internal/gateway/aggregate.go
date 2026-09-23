@@ -232,7 +232,12 @@ func (a *aggregator) instructions(ctx context.Context, s *aggSession) string {
 
 // ── modo proxy: cuatro meta-herramientas ──────────────────────────────────────
 
-func (a *aggregator) metaTools() []map[string]any {
+func (a *aggregator) metaTools() []map[string]any { return metaToolsList() }
+
+// metaToolsList es una función de paquete (no un método) para que Router pueda
+// ofrecer las mismas tres meta-herramientas en /mcp/_all sin necesitar un
+// *aggregator de ningún host en particular.
+func metaToolsList() []map[string]any {
 	// Tres, no cuatro: el inventario va en las instrucciones del initialize, así
 	// que `list_services` sobraba y obligaba a una llamada de más.
 	return []map[string]any{

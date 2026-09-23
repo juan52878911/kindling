@@ -98,6 +98,20 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 // sin autenticación sea una decisión explícita de quien compone el servidor: el
 // compilador obliga a escribir algo, aunque sea la cadena vacía.
 func (g *Gateway) Handler(token string) http.Handler {
+	// El registro va POR FUERA de la autenticación: los 401 son justo lo que
+	// hay que poder ver cuando alguien sondea el puerto. AuthHandler resuelve
+	// el token a un tenant (el único = "default") y lo cuelga del contexto
+	// para que handleProxy pueda aplicar las cuotas.
+	return logging(g.AuthHandler(g.routes(), token))
+}
+
+// routes construye el mux SIN autenticación ni registro.
+//
+// Separado de Handler para que Router (multi-host) pueda reutilizar las rutas
+// de cada host tal cual —proxy, cuotas, sesiones pegajosas, todo lo que ya
+// tenía un solo host— y envolver el token UNA sola vez él mismo, en vez de una
+// vez por host.
+func (g *Gateway) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -132,11 +146,7 @@ func (g *Gateway) Handler(token string) http.Handler {
 		mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	}
 
-	// El registro va POR FUERA de la autenticación: los 401 son justo lo que
-	// hay que poder ver cuando alguien sondea el puerto. authHandler resuelve el
-	// token a un tenant (el único = "default") y lo cuelga del contexto para que
-	// handleProxy pueda aplicar las cuotas.
-	return logging(g.AuthHandler(mux, token))
+	return mux
 }
 
 func logging(h http.Handler) http.Handler {

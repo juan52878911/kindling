@@ -653,6 +653,24 @@ persisten, y un éxito posterior recupera el servicio. Esto existe porque nueve 
 pasaron una vez 26 horas caídos mientras `status` decía «✓ 9»: informaba del inventario,
 y se leía como salud.
 
+### Varios hosts
+
+Un snapshot no viaja entre daemons: un servicio vive en el host donde se importó.
+`-hosts` (o la clave de configuración `mcp.hosts`, mismo formato) apunta un gateway a
+varios a la vez, en vez de a uno solo:
+
+```sh
+kling gateway -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
+```
+
+`/mcp/<servicio>` va al host que lo tiene en su catálogo; si lo tienen varios, al que
+reporte más memoria disponible, con reintento en el siguiente si ese no tiene sitio (507)
+o llegó a su tope de máquinas (409). `/mcp/_all` combina el catálogo de todos los hosts y
+enruta cada `call_tool` a su dueño — un host que no contesta se salta, sin tumbar a los
+demás. El token, los tenants y las cuotas siguen funcionando igual, comprobados una sola
+vez en el enrutador que va delante de todos. **Sin `-hosts`/`mcp.hosts`, nada cambia**: un
+solo host, el del contexto activo, como siempre.
+
 ## Autocuración: `kling mcp heal`
 
 Un reinicio del host invalida **todos** los snapshots dorados a la vez — Firecracker los
