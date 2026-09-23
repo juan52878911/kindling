@@ -567,7 +567,8 @@ func (m *Manager) waitShares(ctx context.Context, id string, timeout time.Durati
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("shared folder %d was not attached within %s: %s", t.tag, timeout, t.get())
+			return fmt.Errorf("shared folder %d was not attached within %s (%s); does the image have a guest agent (kling-guest)?",
+				t.tag, timeout, t.get())
 		}
 	}
 	return nil
@@ -696,7 +697,8 @@ func (m *Manager) attachOnce(ctx context.Context, mc *api.Machine, s api.ShareAt
 		// escuche, y se reintenta.
 		if resp.Header.Get(share.HeaderAgent) == "" && resp.StatusCode < 500 {
 			return errPermanente{fmt.Errorf("the guest agent in image %q is too old for live shares (kindling v0.10); "+
-				"rebuild the image (kling images toolchain, or kling images build -builder base)", mc.Image)}
+				"rebuild the image with a current agent (kling images toolchain, kling images build -builder base, "+
+				"or kindling-mcp for MCP images), or use mode copy", mc.Image)}
 		}
 		switch resp.StatusCode {
 		case http.StatusNotImplemented:

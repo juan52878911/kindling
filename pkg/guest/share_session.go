@@ -90,13 +90,21 @@ func (s *shareSession) alive() bool {
 	}
 }
 
+// errnoRetry es la respuesta interna de call cuando la operación NO llegó a
+// salir: la sesión ya estaba cerrada o la escritura falló. El daemon no la vio,
+// así que se puede repetir con la sesión siguiente sin riesgo de hacerla dos
+// veces. Nunca llega al kernel.
+const errnoRetry uint32 = 1<<32 - 1
+
 // call manda una operación y espera su respuesta. build escribe los argumentos.
+// Si la sesión se corta con la operación ya enviada, EIO: no se sabe si el
+// daemon la hizo, y repetir un rename o un write a ciegas no es seguro.
 func (s *shareSession) call(op byte, build func(*share.Enc)) (uint32, *share.Dec) {
 	ch := make(chan callResult, 1)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return share.EIO, nil
+		return errnoRetry, nil
 	}
 	s.next++
 	id := s.next
@@ -111,8 +119,11 @@ func (s *shareSession) call(op byte, build func(*share.Enc)) (uint32, *share.Dec
 	err := share.WriteFrame(s.rw, e.B)
 	s.wmu.Unlock()
 	if err != nil {
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
 		s.close()
-		return share.EIO, nil
+		return errnoRetry, nil
 	}
 	r := <-ch
 	if r.errno != 0 {

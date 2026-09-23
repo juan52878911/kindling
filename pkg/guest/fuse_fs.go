@@ -109,13 +109,19 @@ func (fs *fuseFS) attach(s *shareSession) {
 	}
 	go func() {
 		<-s.done
-		fs.smu.Lock()
-		if fs.sess == s {
-			fs.sess = nil
-			fs.ready = make(chan struct{})
-		}
-		fs.smu.Unlock()
+		fs.dropSession(s)
 	}()
+}
+
+// dropSession retira s si sigue siendo la sesión actual: quien espere una
+// sesión espera a la siguiente.
+func (fs *fuseFS) dropSession(s *shareSession) {
+	fs.smu.Lock()
+	defer fs.smu.Unlock()
+	if fs.sess == s {
+		fs.sess = nil
+		fs.ready = make(chan struct{})
+	}
 }
 
 // attached dice si hay sesión viva ahora mismo.
@@ -132,8 +138,14 @@ func (fs *fuseFS) session() *shareSession {
 		fs.smu.Lock()
 		s, ready := fs.sess, fs.ready
 		fs.smu.Unlock()
-		if s != nil && s.alive() {
-			return s
+		if s != nil {
+			if s.alive() {
+				return s
+			}
+			// Muerta pero aún puesta: se retira aquí, o se esperaría sobre un
+			// ready ya cerrado dando vueltas hasta que lo hiciera su vigilante.
+			fs.dropSession(s)
+			continue
 		}
 		left := time.Until(deadline)
 		if left <= 0 {
@@ -150,12 +162,32 @@ func (fs *fuseFS) session() *shareSession {
 
 // call manda una operación por la sesión viva.
 func (fs *fuseFS) call(op byte, build func(*share.Enc)) (uint32, *share.Dec) {
-	s := fs.session()
-	if s == nil {
-		return share.EIO, nil
-	}
-	return s.call(op, build)
+	e, d, _ := fs.callS(op, build)
+	return e, d
 }
+
+// callS es call devolviendo además la sesión que contestó (un handle abierto
+// solo vale en ella). Si la operación no llegó a salir porque la sesión acababa
+// de morir, espera a la siguiente y la repite.
+func (fs *fuseFS) callS(op byte, build func(*share.Enc)) (uint32, *share.Dec, *shareSession) {
+	for retries := 0; retries < maxRetries; retries++ {
+		s := fs.session()
+		if s == nil {
+			return share.EIO, nil, nil
+		}
+		e, d := s.call(op, build)
+		if e == errnoRetry {
+			fs.dropSession(s)
+			continue
+		}
+		return e, d, s
+	}
+	return share.EIO, nil, nil
+}
+
+// maxRetries acota las repeticiones de una operación que no llegó a salir: con
+// sesiones que mueren nada más nacer, mejor EIO que un bucle.
+const maxRetries = 8
 
 // ── bucle ───────────────────────────────────────────────────────────────────
 
@@ -452,11 +484,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if !ok {
 			return fail(share.ENOENT)
 		}
-		s := fs.session()
-		if s == nil {
-			return fail(share.EIO)
-		}
-		errno, d := s.call(share.OpOpen, func(e *share.Enc) { e.Str(p); e.U32(flags) })
+		errno, d, s := fs.callS(share.OpOpen, func(e *share.Enc) { e.Str(p); e.U32(flags) })
 		if errno != 0 {
 			return fail(errno)
 		}
@@ -494,11 +522,7 @@ func (fs *fuseFS) handle(req fuseReq) []byte {
 		if e != 0 {
 			return fail(e)
 		}
-		s := fs.session()
-		if s == nil {
-			return fail(share.EIO)
-		}
-		errno, d := s.call(share.OpCreate, func(e *share.Enc) { e.Str(p); e.U32(flags); e.U32(mode & 0o7777) })
+		errno, d, s := fs.callS(share.OpCreate, func(e *share.Enc) { e.Str(p); e.U32(flags); e.U32(mode & 0o7777) })
 		if errno != 0 {
 			return fail(errno)
 		}
@@ -900,7 +924,7 @@ func (fs *fuseFS) handleCall(h *fileHandle, op byte, args func(*share.Enc)) (uin
 }
 
 func (fs *fuseFS) handleCallRaw(h *fileHandle, do func(*shareSession, uint64) (uint32, *share.Dec)) (uint32, *share.Dec) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt, retries := 0, 0; attempt < 2 && retries < maxRetries; retries++ {
 		s := fs.session()
 		if s == nil {
 			return share.EIO, nil
@@ -909,12 +933,23 @@ func (fs *fuseFS) handleCallRaw(h *fileHandle, do func(*shareSession, uint64) (u
 		if h.sess != s {
 			if e := fs.reopenLocked(h, s); e != 0 {
 				h.mu.Unlock()
+				if e == errnoRetry {
+					fs.dropSession(s)
+					continue
+				}
 				return e, nil
 			}
 		}
 		dh := h.dh
 		h.mu.Unlock()
 		errno, d := do(s, dh)
+		if errno == errnoRetry {
+			// No salió: la sesión acababa de morir. Con la siguiente, y sin
+			// gastar intento.
+			fs.dropSession(s)
+			continue
+		}
+		attempt++
 		if errno != share.ESTALE {
 			return errno, d
 		}
