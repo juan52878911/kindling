@@ -60,7 +60,8 @@ enlace; ni nombres repetidos. Tamaño acotado (`daemon.share_copy_max_mib`, 1 Gi
 por defecto) y número de entradas acotado (1 048 576). Cualquier violación
 rechaza la subida entera con un 400: una copia a medias es peor que ninguna.
 
-Un id de subida se consume al arrancar la máquina. Los que nadie usa se borran
+La copia trae además un `lost+found` vacío: lo crea `mke2fs` y no se puede
+evitar. Un id de subida se consume al arrancar la máquina. Los que nadie usa se borran
 a la hora; como mucho hay 8 pendientes a la vez.
 
 ## Modos ro y rw: FUSE sin dependencias
@@ -126,9 +127,9 @@ READLINK, STATFS. Los flags de apertura viajan en bits propios del protocolo
 
 La conexión muere al congelar: el VMM desaparece. Por eso:
 
-- **freeze** cierra antes de pausar las conexiones de sus carpetas vivas (y las
-  del host que tuvieran ficheros abiertos). Lo que estuviera en vuelo recibe
-  `EIO`; lo que llegue después espera.
+- **freeze** cierra las conexiones de sus carpetas vivas antes de pausar, y con
+  ellas los ficheros que el daemon tenía abiertos para el invitado. Lo que
+  estuviera en vuelo recibe `EIO`; lo que llegue después espera.
 - **thaw** vuelve a hacer attach en cuanto la máquina corre. El agente reconoce
   el montaje por su tag, cambia de sesión y sigue: el mismo punto de montaje,
   los mismos ids de nodo. Los ficheros que el invitado tenía abiertos se
@@ -145,6 +146,20 @@ rechaza con 409: la memoria volcada llevaría un montaje que apunta a un
 directorio de un host concreto, y un disco de copia que no viaja con el
 snapshot. Por lo mismo, `run -from` no acepta `shares` (400): las carpetas se
 piden al arrancar en frío. freeze/thaw de la misma máquina sí está soportado.
+
+### Por qué la tabla de nodos vive en el invitado
+
+El daemon podría llevar él la tabla (id de nodo → ruta) y hablar FUSE con el
+agente como mero relé. Se descartó por dos razones: la tabla se perdería al
+reiniciar el daemon —y el kernel del invitado sigue nombrando esos ids—, y sería
+estado del lado del host que un invitado hostil puede hacer crecer. Con rutas,
+el daemon no guarda nada por nodo: solo ficheros abiertos, acotados y de la
+sesión viva.
+
+`os.Root` no tiene `Rename` ni `Readlink` hasta Go 1.25, y el núcleo se compila
+con 1.24: esas dos van con `renameat`/`readlinkat` sobre el descriptor del padre
+que da `os.Root`. En Linux, del paquete `syscall`; en macOS, que no las trae, con
+sus números de llamada de XNU.
 
 ### Qué valida cada lado
 
@@ -207,6 +222,23 @@ Agente (`pkg/guest`):
 - Caudal: la conexión pasa por la interfaz de red del invitado, que en
   Firecracker tiene un limitador de 16 MiB/s por sentido. Es el techo de lectura
   y escritura secuencial de una carpeta viva.
+
+### Medidas
+
+Con `dd` de 200 MiB (vaciando la caché del invitado antes de leer) y un script
+que crea, consulta y borra 1000 ficheros de 1 KiB:
+
+| | lectura sec. | escritura sec. | crear | `stat` | borrar |
+|---|---|---|---|---|---|
+| Linux, Firecracker anidado (laboratorio arm64 sobre un Mac M4) | 13–18 MB/s | 12–17 MB/s | ~210–245/s | ~1250/s | ~400–500/s |
+| macOS, kling-vz (M4) | ~490 MB/s | ~190 MB/s | ~1230/s | ~10 200/s | ~4 000/s |
+| disco de la propia máquina (referencia, macOS) | 1,9 GB/s | 880 MB/s | ~80 000/s | — | — |
+
+En Linux el techo es el limitador de red de la microVM (16 MiB/s por sentido) y
+la latencia de ida y vuelta de la virtualización anidada (~0,8 ms por
+operación). `npm install express` dentro de la carpeta tardó 56 s frente a 45 s
+en el disco de la máquina (la red domina); extraer el paquete npm entero (1284
+ficheros) en la carpeta, 20 s en el laboratorio y 3 s en macOS.
 
 ## Configuración
 

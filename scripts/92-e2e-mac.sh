@@ -45,6 +45,9 @@ export KLING_HOST="unix://$SOCK"
 # contexto activo...) no cambie lo que se mide: una configuración vacía.
 export KLING_CONFIG="${TMPBASE}/kling-e2e-mac-config-$$.json"
 export KLING_MAX_PARALLEL_BOOT="${KLING_MAX_PARALLEL_BOOT:-4}"
+# Carpetas compartidas vivas: el daemon de la prueba solo sirve las de aquí.
+SHARES="$TMPBASE/kling-e2e-mac/shares-$$"
+export KLING_SHARE_ROOTS="$SHARES"
 
 pass=0; fail=0
 ok()   { printf "  \033[32mok\033[0m    %s\n" "$1"; pass=$((pass+1)); }
@@ -120,6 +123,7 @@ cleanup() {
   stop_daemon
   pkill -KILL -f "kling-vz --api-sock $ROOT/" 2>/dev/null
   rm -f "$KLING_CONFIG"
+  rm -rf "$SHARES"
 }
 trap cleanup EXIT
 
@@ -339,6 +343,66 @@ contiene "$out" "s3cr3t-$$" && ok "MMDS v2 from inside, with egress none" || bad
 out=$(k freeze "$mm" 2>&1); contiene "$out" "cannot be frozen" && ok "a machine with MMDS secrets refuses to freeze" || bad "freeze with mmds" "refused" "$out"
 k rm "$P-eg-internet" >/dev/null 2>&1
 
+# ── 6b. carpetas compartidas ─────────────────────────────────────────────────
+# La copia (un ext4 construido con el mke2fs que haya) y la viva en escritura,
+# servida desde APFS por el daemon sin privilegios. Ver docs/compartir.md.
+step "6b. shared folders (copy, rw)"
+mkdir -p "$SHARES/rw" "$SHARES/src/sub"
+echo "copied" > "$SHARES/src/a.txt"; ln -s a.txt "$SHARES/src/link"; ln -s /etc/passwd "$SHARES/src/abs"
+echo "host secret" > "$SHARES/secret"; ln -s ../secret "$SHARES/rw/up"; ln -s "$SHARES/secret" "$SHARES/rw/abs"
+echo one > "$SHARES/rw/host.txt"
+S="$P-sh"
+out=$(k run -name "$S" -image "$IMG" -mem "$MEM" -allow-exec -share "$SHARES/src:/work" -share "$SHARES/rw:/w:rw" 2>&1); rc=$?
+if [ $rc -eq 0 ] && contiene "$out" "booted cold"; then
+  contiene "$out" "skipped abs" && ok "copy: the absolute symlink is skipped, and said" || bad "copy skip notice" "skipped abs" "$out"
+  out=$(k exec "$S" -- sh -c 'cat /work/a.txt /work/link; touch /work/x 2>&1; true' 2>&1)
+  contiene "$out" "copied
+copied" && contiene "$out" "Read-only" && ok "copy: contents inside, read-only" || bad "copy" "copied x2 + Read-only" "$out"
+  out=$(k exec "$S" -- sh -c 'cat /w/host.txt; cd /w && echo g > g && mkdir -p d/e && mv g d/e/g2 && echo more >> d/e/g2 && ln -s x y 2>&1; cat /w/up /w/abs 2>&1; true' 2>&1)
+  host=$(cat "$SHARES/rw/d/e/g2" 2>&1)
+  contiene "$out" "one" && [ "$host" = "g
+more" ] && contiene "$out" "not permitted" && ! contiene "$out" "host secret" \
+    && ok "rw: both ways, rename and mkdir reach APFS; no symlinks; host secret unreadable" \
+    || bad "rw" "one / g+more on the host / not permitted / no secret" "$out // host: $host"
+  echo two > "$SHARES/rw/host.txt"; sleep 1.5
+  out=$(k exec "$S" -- cat /w/host.txt 2>&1)
+  [ "$out" = "two" ] && ok "rw: a host edit shows up inside" || bad "host edit" "two" "$out"
+  out=$(k exec -timeout 5m "$S" -- sh -c 'dd if=/dev/zero of=/w/big bs=1M count=200 conv=fsync 2>&1 | tail -1; echo 3 > /proc/sys/vm/drop_caches; dd if=/w/big of=/dev/null bs=1M 2>&1 | tail -1; rm /w/big' 2>&1)
+  SH_W=$(echo "$out" | sed -n 1p | grep -o '[0-9.]*[MG]B/s' || true); SH_R=$(echo "$out" | sed -n 2p | grep -o '[0-9.]*[MG]B/s' || true)
+  [ -n "$SH_W" ] && [ -n "$SH_R" ] && ok "rw: sequential write $SH_W, read $SH_R" || bad "throughput" "two dd results" "$out"
+  SH_SMALL=$(k exec -timeout 5m "$S" -- python3 -c '
+import os, time
+d="/w/small"; os.makedirs(d); N=1000
+t=time.time()
+for i in range(N): open(f"{d}/f{i}","w").write("x"*1024)
+c=time.time()-t; t=time.time()
+for i in range(N): os.stat(f"{d}/f{i}")
+s=time.time()-t; t=time.time()
+for i in range(N): os.unlink(f"{d}/f{i}")
+u=time.time()-t
+print(f"create {N/c:.0f}/s stat {N/s:.0f}/s unlink {N/u:.0f}/s")' 2>&1)
+  contiene "$SH_SMALL" "create" && ok "rw: small files: $SH_SMALL" || bad "small files" "ops/s" "$SH_SMALL"
+  # Congelar y descongelar con un proceso escribiendo por un fichero abierto.
+  k exec "$S" -- sh -c 'setsid python3 -c "
+import time
+f=open(\"/w/log\",\"a\",buffering=1)
+while True:
+    f.write(str(time.time())+chr(10)); time.sleep(0.1)
+" >/tmp/writer.err 2>&1 </dev/null &' >/dev/null 2>&1
+  sleep 2
+  k freeze "$S" >/dev/null 2>&1 && k thaw "$S" >/dev/null 2>&1
+  n1=$(wc -l < "$SHARES/rw/log" | tr -d ' '); sleep 2; n2=$(wc -l < "$SHARES/rw/log" | tr -d ' ')
+  out=$(k exec "$S" -- cat /tmp/writer.err 2>&1)
+  [ "${n2:-0}" -gt "${n1:-0}" ] && [ -z "$out" ] \
+    && ok "rw: freeze -> thaw keeps the mount and the open file ($n1 -> $n2 lines)" \
+    || bad "freeze/thaw with a live share" "the log grows, no errors" "$n1 -> $n2 $out"
+  out=$(k commit "$S" "$P-shsnap" 2>&1)
+  contiene "$out" "cannot be committed" && ok "commit with shares refused" || bad "commit with shares" "refused" "$out"
+else
+  bad "run -share" "booted cold" "$out"
+fi
+k rm "$S" >/dev/null 2>&1
+
 # ── 7. reinicio del daemon y kill -9 ─────────────────────────────────────────
 step "7. daemon restart, SIGKILL of a kling-vz"
 pid_before=$(machine_field "$P-r3" pid)
@@ -435,6 +499,7 @@ info "exec round trip:        p50 ${EXEC_P50} ms"
 info "footprint running:      ${FP_RUN} MiB (mem ${MEM})"
 info "footprint thawed:       ${FP_THAW} MiB, replica ${FP_RESTORED} MiB, squeezed ${FP_SQUEEZED} MiB"
 info "burst of $BURST:           p50 ${BURST_P50} ms, p95 ${BURST_P95} ms, peak ${peak} MiB"
+info "live share (rw):        write ${SH_W:-?}, read ${SH_R:-?}; ${SH_SMALL:-?}"
 
 printf "\n\033[1m%d ok · %d failed\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
