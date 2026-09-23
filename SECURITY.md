@@ -110,6 +110,29 @@ Mitigación: cada microVM lleva un **virtio-rng**, y el kernel invitado tiene
 > El dispositivo de entropía debe estar presente **antes** de congelar: tras cargar un
 > snapshot ya no se pueden añadir dispositivos.
 
+Eso vale en Linux con Firecracker. En macOS, Virtualization.framework **no tiene VMGenID**:
+dos réplicas del mismo snapshot devolvían los mismos bytes de `getrandom()` —el smoke test
+del gateway vio `Mcp-Session-Id` idénticos en microVMs independientes— y el reloj de pared
+seguía en la hora del volcado. Desde v0.9.1, en los dos sistemas, el daemon llama tras cada
+restauración a `POST /resync` del agente con la hora del host y 64 bytes de `crypto/rand`;
+el agente pone el reloj, mezcla la entropía acreditándola (`RNDADDENTROPY`) y fuerza la
+resiembra (`RNDRESEEDCRNG`) antes de que la máquina se entregue.
+
+Quién puede llamar a `/resync`: quien alcanza el puerto del agente. Eso es el host —el
+daemon y los clientes de su socket, que ya mandan sobre todo— y **no** otros invitados (la
+red privada y el loopback del host están bloqueados, ver 3). El propio invitado tampoco gana
+nada: ya es root dentro. Lo que sí la alcanzaría es un proxy que reenvíe rutas de terceros al
+puerto del agente, como el gateway de kindling-mcp; por eso `pkg/guest` exporta
+`IsControlPath` y el gateway corta `/resync`, `/volume/*`, `/exec`, `/files` y `/dns`. Aun
+así el agente valida: cuerpo de 4 KiB como mucho, entre 32 y 512 bytes de entropía y una hora
+plausible. Mezclar bytes conocidos no resta entropía al pool (el kernel los combina con un
+hash), así que lo peor que podría hacer un llamante indebido es mover el reloj.
+
+Lo que no arregla: el estado aleatorio que un proceso ya sacó al espacio de usuario antes del
+snapshot —el DRBG de OpenSSL de un `node` en marcha, el `random` de Python— sigue siendo el
+mismo en todas las réplicas. Por eso los identificadores que importan para enrutar no se
+toman del invitado: el gateway acuña los suyos (kindling-mcp v0.4).
+
 ### 6. Validación de entradas
 
 Los nombres de snapshot llegan por la URL y se usan para construir rutas. Se validan contra

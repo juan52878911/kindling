@@ -27,6 +27,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `exec` | v0.7 | `POST /machines/{ref}/exec`, `GET/PUT/DELETE /machines/{ref}/files`, `allow_exec` y `on_ttl` en `POST /machines` |
 | `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
 | `image-blobs` | v0.9 | `GET/HEAD/PUT /images/{name}/blob` |
+| `guest-resync` | v0.9.1 | ninguna: el daemon resincroniza reloj y entropía del invitado tras cada restauración (ver abajo) |
 
 ## Rutas
 
@@ -285,6 +286,33 @@ espera a que el puerto abra; `probe_only` se conforma con eso.
 `path` es obligatorio salvo con `probe_only`: una petición sin él (la de un
 cliente v0.4, que contaba con los valores de MCP que el daemon ponía entonces)
 recibe `400`.
+
+## Tras restaurar: reloj y entropía del invitado
+
+Todas las instancias de un mismo snapshot despiertan con la misma memoria: el
+reloj de pared parado en el instante del volcado y el estado del generador
+aleatorio del kernel copiado. Desde v0.9.1 (capacidad `guest-resync`), justo
+después de cada `thaw` y de cada `POST /machines` con `from`, y antes de
+devolver la máquina como `running`, el daemon llama al agente del invitado:
+
+```
+POST /resync   {"unix_nano": <hora del host>, "entropy": "<64 bytes en base64>"}
+→ 200 {"skew_ms": <desfase corregido>}
+```
+
+El agente (`pkg/guest`, en `kling-guest` y en el puente de kindling-mcp) pone el
+reloj (`settimeofday`), mezcla la entropía acreditándola (`RNDADDENTROPY`) y
+fuerza la resiembra del CRNG (`RNDRESEEDCRNG`). Cuesta unos milisegundos; el
+evento `machine.thawed`/`machine.started` dice cuántos.
+
+Un agente anterior (404, o el 400 de un puente viejo) o una máquina sin agente no
+hacen fallar la restauración: la máquina queda como antes —reloj parado,
+aleatorios compartidos con sus hermanas— y el daemon avisa una vez por imagen.
+`kling images refresh` pone un agente actual.
+
+Solo el host debe llamar a `/resync` (o a `/volume/*`, `/exec`, `/files`): quien
+reenvíe peticiones de terceros al puerto del agente tiene que cortar esas rutas
+(`guest.IsControlPath`). Ver SECURITY.md.
 
 ## Rutas retiradas en v0.6
 
