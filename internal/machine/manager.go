@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -643,6 +644,9 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// y no allí, donde se ve como un pánico del kernel.
 	if layer != "" {
 		switch ok, cerr := m.baseSupportsLayers(ctx, src); {
+		case errors.Is(cerr, ErrNoDebugfs):
+			// Un Mac sin e2fsprogs de Homebrew: se sabe desde el arranque del
+			// daemon (ya lo avisa) y repetirlo en cada run solo ensucia el log.
 		case cerr != nil:
 			// Sin poder comprobarlo se sigue: convertir una comprobación de
 			// diagnóstico en una dependencia de arranque sería peor que el problema.
