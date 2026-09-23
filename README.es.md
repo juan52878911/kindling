@@ -807,6 +807,17 @@ misma página compartida N veces y exagera el uso una barbaridad. El gateway exp
 páginas que no está usando de verdad vuelvan al host — útil tras el pico de arranque de
 un servicio, cuando su régimen permanente es mucho menor que su pico.
 
+```sh
+kling run -image toolchain -mem 512 -mem-max 2048 -name trabajo
+kling resize trabajo -mem 1536   # sube o baja, sin reiniciar
+```
+
+Firecracker no puede añadir memoria a una VM en marcha, así que la elasticidad funciona
+al revés: la máquina arranca con el techo y el globo retiene la diferencia. Medido en el
+laboratorio, la memoria disponible del invitado pasó de 399 a 1.398 MiB y bajó a 270 MiB
+sin reiniciar. El daemon, además, aprieta los globos por su cuenta antes de rechazar una
+máquina nueva por falta de memoria.
+
 ## Despertares más rápidos: hijo caliente · bundle · techo de CPU
 
 Tres palancas medidas, del trabajo de rendimiento de v0.3–v0.4:

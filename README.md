@@ -795,7 +795,18 @@ with the same accounting, including the shared `mem.file`.
 
 `kling squeeze` inflates the balloon device inside a running guest so the pages it is not
 actually using go back to the host — useful after a service's startup spike, when its
-steady state is much smaller than its peak.
+steady state is much smaller than its peak. The daemon also does it on its own before
+refusing a new machine for lack of memory.
+
+```sh
+kling run -image toolchain -mem 512 -mem-max 2048 -name job
+kling resize job -mem 1536   # up or down, without restarting
+```
+
+Firecracker cannot add memory to a running VM, so elasticity works the other way round:
+the machine boots with the ceiling and the balloon holds back the difference. Measured in
+the lab, the guest's available memory went from 399 to 1,398 MiB and back down to 270 MiB
+without a restart.
 
 ## Faster wake-ups: warm child · bundle · CPU ceiling
 
