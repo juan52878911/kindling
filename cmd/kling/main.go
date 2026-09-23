@@ -943,6 +943,11 @@ func cmdTopo(args []string) error {
 				mbranch = "└──"
 			}
 			ip := mc.IP
+			// En macOS la IP es la misma para todos los invitados: lo que
+			// distingue a cada uno es su reenvío en loopback.
+			if len(mc.Forwards) > 0 {
+				ip = mc.Addr(api.GuestPort)
+			}
 			if mc.State != api.StateRunning || ip == "" {
 				ip = "—"
 			}

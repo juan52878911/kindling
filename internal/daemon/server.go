@@ -527,7 +527,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, errors.New("that machine doesn't exist"))
 		return
 	}
-	if mc.State != api.StateRunning || mc.IP == "" {
+	if mc.State != api.StateRunning || !mc.Reachable() {
 		fail(w, http.StatusConflict, fmt.Errorf("the machine is %s, not accepting calls", mc.State))
 		return
 	}
@@ -546,7 +546,7 @@ func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 			port, mc.Name, api.GuestPort, api.LabelPorts))
 		return
 	}
-	addr := net.JoinHostPort(mc.IP, strconv.Itoa(port))
+	addr := mc.Addr(port)
 	out, code, err := proxyGuest(r.Context(), addr, req)
 	if err != nil {
 		fail(w, code, err)

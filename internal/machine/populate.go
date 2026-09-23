@@ -21,9 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -84,7 +82,7 @@ func (m *Manager) PopulateVolume(ctx context.Context, req api.PopulateRequest) (
 	// señalaría a esta función por ningún lado.
 	defer func() { _ = m.Remove(mc.ID) }()
 
-	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort))
+	base := "http://" + mc.Addr(api.GuestPort)
 	if err := waitGuest(ctx, base, 60*time.Second); err != nil {
 		return nil, fmt.Errorf("installation microVM did not start listening: %w", err)
 	}

@@ -61,6 +61,13 @@ type Machine struct {
 	NetIndex int    `json:"net_index,omitempty"`
 	Egress   string `json:"egress,omitempty"`
 
+	// Forwards traduce un puerto del invitado a la dirección del host por la que
+	// se alcanza ("8080" -> "127.0.0.1:61234"). Solo lo rellena el backend de
+	// macOS: allí todos los invitados comparten IP y no hay ruta hacia ella, así
+	// que cada uno se alcanza por puertos que su ayudante abre en loopback. En
+	// Linux va vacío e IP basta. No leerlo a mano: usar Addr.
+	Forwards map[string]string `json:"forwards,omitempty"`
+
 	// AllowDomains son los dominios permitidos con egress "allowlist". Viajan con
 	// la máquina para que descongelarla rehaga el mismo filtro (ver thaw).
 	AllowDomains []string `json:"allow_domains,omitempty"`
@@ -449,6 +456,10 @@ type Info struct {
 	// EncryptedAtRest dice si Root está sobre un disco cifrado (dm-crypt). nil =
 	// no se sabe (daemon anterior, u otro sistema). Ver docs/cifrado.md.
 	EncryptedAtRest *bool `json:"encrypted_at_rest,omitempty"`
+	// Backend es el VMM con el que el daemon arranca las microVMs: "firecracker"
+	// en Linux, "vz" en macOS (kling-vz). Vacío = daemon anterior, que siempre
+	// era firecracker.
+	Backend string `json:"backend,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

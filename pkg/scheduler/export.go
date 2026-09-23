@@ -53,8 +53,19 @@ type Instance = entry
 // MachineID es el id de la máquina en el daemon.
 func (e *entry) MachineID() string { return e.machineID }
 
-// IP es la dirección del invitado en la red del host.
+// IP es la dirección del invitado en la red del host. En macOS es la IP interna
+// del invitado, que el host no alcanza: para conectar, usar Addr.
 func (e *entry) IP() string { return e.ip }
+
+// Addr es la dirección host:puerto por la que se alcanza el puerto port del
+// invitado (ver api.Machine.Addr).
+func (e *entry) Addr(port int) string { return addrDe(e.ip, e.fwd, port) }
+
+// addrDe resuelve una dirección con la misma regla que api.Machine.Addr, para
+// no duplicarla en cada tipo que guarda IP y reenvíos.
+func addrDe(ip string, fwd map[string]string, port int) string {
+	return (&api.Machine{IP: ip, Forwards: fwd}).Addr(port)
+}
 
 // Proxy reenvía una petición HTTP al agente del invitado. No lleva la
 // credencial del gateway: la quita antes de salir.
@@ -100,6 +111,7 @@ type ServiceStatus struct {
 	Prewarmed int           // precalentadas listas en el pool
 	Warm      bool          // tiene instancia primaria despierta
 	IP        string        // de la primaria
+	Addr      string        // host:puerto del agente de la primaria (ver Addr)
 	Sessions  int           // sesiones fijadas al servicio
 	Idle      time.Duration // desde el último uso de la primaria
 }
@@ -110,7 +122,7 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if e, ok := g.services[service]; ok {
-		st.Warm, st.IP, st.Idle = true, e.ip, time.Since(e.lastUse)
+		st.Warm, st.IP, st.Addr, st.Idle = true, e.ip, e.Addr(GuestPort), time.Since(e.lastUse)
 		for _, rt := range g.routes {
 			if rt.service == service {
 				st.Sessions++
@@ -128,6 +140,7 @@ type Route = sessionRoute
 func (rt *sessionRoute) Service() string                                  { return rt.service }
 func (rt *sessionRoute) MachineID() string                                { return rt.machineID }
 func (rt *sessionRoute) IP() string                                       { return rt.ip }
+func (rt *sessionRoute) Addr(port int) string                             { return addrDe(rt.ip, rt.fwd, port) }
 func (rt *sessionRoute) Proxy() *httputil.ReverseProxy                    { return rt.proxy }
 func (rt *sessionRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) { rt.proxy.ServeHTTP(w, r) }
 
@@ -149,9 +162,12 @@ func (g *Scheduler) Forget(key string) { g.forget(key) }
 // Warm es una instancia restaurada y preparada (Prepare) que espera trabajo.
 type Warm = warmVM
 
-func (w *warmVM) ID() string    { return w.id }
-func (w *warmVM) IP() string    { return w.ip }
-func (w *warmVM) Token() string { return w.session }
+func (w *warmVM) ID() string { return w.id }
+func (w *warmVM) IP() string { return w.ip }
+
+// Addr es la dirección host:puerto del puerto port del invitado.
+func (w *warmVM) Addr(port int) string { return addrDe(w.ip, w.fwd, port) }
+func (w *warmVM) Token() string        { return w.session }
 
 // TakeWarm saca una instancia precalentada del servicio, o nil si no hay. No
 // bloquea nunca.
@@ -208,6 +224,15 @@ func Alive(ip string, port int) bool { return alive(ip, port) }
 // WaitReady espera a que algo escuche en ip:port, o se rinde al agotar timeout.
 func WaitReady(ctx context.Context, ip string, port int, timeout time.Duration) error {
 	return waitReady(ctx, ip, port, timeout)
+}
+
+// AliveAddr es Alive sobre una dirección host:puerto (api.Machine.Addr). Es la
+// que vale también en macOS, donde la IP del invitado no se alcanza.
+func AliveAddr(addr string) bool { return aliveAddr(addr) }
+
+// WaitReadyAddr es WaitReady sobre una dirección host:puerto.
+func WaitReadyAddr(ctx context.Context, addr string, timeout time.Duration) error {
+	return waitReadyAddr(ctx, addr, timeout)
 }
 
 // ReadyTimeout es lo que el planificador espera a que una instancia nueva escuche.

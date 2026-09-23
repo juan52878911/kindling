@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -540,7 +539,7 @@ func (m *Manager) releaseVolumes(mc *api.Machine) error {
 // directorio del overlay que muere con la máquina, y eso no da ni un aviso hasta
 // que alguien busca lo que guardó.
 func (m *Manager) acquireVolumes(mc *api.Machine) error {
-	if mc == nil || mc.IP == "" || len(mc.Volumes) == 0 {
+	if mc == nil || !mc.Reachable() || len(mc.Volumes) == 0 {
 		return nil
 	}
 	// Se espera a que conteste antes de pedírselo. Tras un Resume el invitado
@@ -549,7 +548,7 @@ func (m *Manager) acquireVolumes(mc *api.Machine) error {
 	// fallida por una carrera de milisegundos.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	base := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort))
+	base := "http://" + mc.Addr(api.GuestPort)
 	if err := waitGuest(ctx, base, 20*time.Second); err != nil {
 		return fmt.Errorf("guest did not start listening to mount its volumes: %w", err)
 	}
@@ -557,12 +556,12 @@ func (m *Manager) acquireVolumes(mc *api.Machine) error {
 }
 
 func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration) error {
-	if mc == nil || mc.IP == "" || len(mc.Volumes) == 0 {
+	if mc == nil || !mc.Reachable() || len(mc.Volumes) == 0 {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
-	url := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort)) + "/volume/" + op
+	url := "http://" + mc.Addr(api.GuestPort) + "/volume/" + op
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return err
@@ -587,7 +586,7 @@ func (m *Manager) guestVolumeOp(mc *api.Machine, op string, limit time.Duration)
 }
 
 func (m *Manager) flushVolume(mc *api.Machine) {
-	if mc == nil || mc.IP == "" || mc.State != api.StateRunning {
+	if mc == nil || !mc.Reachable() || mc.State != api.StateRunning {
 		return
 	}
 	// Solo si hay algo que pueda haberse escrito. Un invitado con únicamente
@@ -605,7 +604,7 @@ func (m *Manager) flushVolume(mc *api.Machine) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	url := "http://" + net.JoinHostPort(mc.IP, strconv.Itoa(api.GuestPort)) + "/volume/sync"
+	url := "http://" + mc.Addr(api.GuestPort) + "/volume/sync"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return

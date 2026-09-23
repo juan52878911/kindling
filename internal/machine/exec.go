@@ -53,7 +53,7 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 		}
 		mc = thawed
 	}
-	if mc.State != api.StateRunning || mc.IP == "" {
+	if mc.State != api.StateRunning || !mc.Reachable() {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, mc.Name, mc.State)
 	}
 	return mc, nil
