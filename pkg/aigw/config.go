@@ -72,6 +72,12 @@ type TaskConfig struct {
 	// {fields} y {candidates} (el top-3 de JEV con su probabilidad).
 	System string `json:"system,omitempty"`
 	Prompt string `json:"prompt,omitempty"`
+	// TopK > 0 convierte a VON en un reordenador: en una escalada solo puede
+	// elegir entre las K etiquetas más probables según JEV (la pregunta y la
+	// gramática llevan solo esas). Un LLM diminuto elige mejor entre tres que
+	// entre diez, y el top-3 de JEV suele contener la buena aunque la primera
+	// no lo sea. 0 = todas las etiquetas.
+	TopK int `json:"top_k,omitempty"`
 	// Thresholds sustituye el umbral τ de JEV para las clases que nombra
 	// (p. ej. subirlo en una clase que se equivoca más de lo prometido).
 	Thresholds map[string]float64 `json:"thresholds,omitempty"`
@@ -239,6 +245,9 @@ func (c *Config) Validate() error {
 		}
 		if t.Samples < 0 || t.Samples > maxSamples {
 			errs = append(errs, fmt.Errorf("task %q: samples must be 0..%d", n, maxSamples))
+		}
+		if t.TopK < 0 || t.TopK > maxLabels || (t.TopK > 0 && t.JEV == "") {
+			errs = append(errs, fmt.Errorf("task %q: top_k needs a jev model and must be 0..%d", n, maxLabels))
 		}
 		if t.MaxTokens < 0 || t.MaxTokens > maxTokensCap {
 			errs = append(errs, fmt.Errorf("task %q: max_tokens must be 0..%d", n, maxTokensCap))

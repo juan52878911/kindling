@@ -400,10 +400,20 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		resp.JEV.Candidates = topN(full.Probs, 3)
 	}
 
+	// Con top_k, VON solo elige entre los candidatos de JEV. No en mode=von,
+	// que existe para medir a VON solo.
+	allowed := labels
+	if tc.TopK > 0 && m != nil && req.Mode != "von" && tc.TopK < len(labels) {
+		allowed = make([]string, 0, tc.TopK)
+		for _, c := range topN(p.Probs, tc.TopK) {
+			allowed = append(allowed, c.Label)
+		}
+	}
+
 	t1 := time.Now()
 	vctx, cancel := context.WithTimeout(ctx, g.opts.VONTimeout)
 	defer cancel()
-	ans, err := g.askVON(vctx, cfg.Models[tc.VON].Snapshot, g.chatFor(tc, labels, in, p.Probs))
+	ans, err := g.askVON(vctx, cfg.Models[tc.VON].Snapshot, g.chatFor(tc, allowed, in, p.Probs))
 	if err != nil {
 		var we *wakeError
 		reason := "request"
@@ -420,7 +430,7 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		resp.Degraded = "von did not answer: " + truncUTF8(err.Error(), 200)
 		return finish()
 	}
-	label := parseLabel(ans, labels)
+	label := parseLabel(ans, allowed)
 	resp.VON = &VONAnswer{Model: tc.VON, Answer: truncUTF8(ans, maxAnswerShown), LatencyMS: float64(time.Since(t1).Microseconds()) / 1000}
 	resp.Label, resp.Source = label, "von"
 	if label == Unknown {

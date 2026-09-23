@@ -66,6 +66,18 @@ func TestCascada(t *testing.T) {
 		t.Fatalf("an unknown answer was recorded as a sample")
 	}
 
+	// Con top_k, la gramática y la pregunta solo llevan los candidatos de JEV.
+	g.config().Tasks["kind"].TopK = 2
+	ll.set("bug")
+	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic segfault"}))
+	gram, _ = ll.last()["grammar"].(string)
+	if strings.Count(gram, "|") != 1 || !strings.Contains(gram, `"bug"`) || r.Label != "bug" {
+		t.Fatalf("top_k grammar = %q, answer %+v", gram, r)
+	}
+	g.config().Tasks["kind"].TopK = 0
+	g.rings["kind"] = newRing(10)
+	g.rings["kind"].add(sample{pred: "bug", prob: 0.5, teacher: "docs", weight: 1})
+
 	// /v1/decide es lo mismo con decision.
 	ll.set("feat")
 	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/decide", "", map[string]any{"task": "kind", "text": "x"}))
@@ -77,11 +89,11 @@ func TestCascada(t *testing.T) {
 	m := do(t, h, "GET", "/metrics", "", nil).Body.String()
 	for _, want := range []string{
 		`kling_ai_requests_total{endpoint="classify",task="kind",source="jev"} 1`,
-		`kling_ai_requests_total{endpoint="classify",task="kind",source="von"} 2`,
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="von"} 3`,
 		`kling_ai_von_unknown_total{task="kind"} 1`,
-		`kling_ai_jev_coverage{task="kind"} 0.25`,
-		`kling_ai_escalation_rate{task="kind"} 0.75`,
-		`kling_ai_latency_seconds_count{task="kind",source="von"} 3`,
+		`kling_ai_jev_coverage{task="kind"} 0.2`,
+		`kling_ai_escalation_rate{task="kind"} 0.8`,
+		`kling_ai_latency_seconds_count{task="kind",source="von"} 4`,
 		`kling_ai_samples{task="kind"} 2`,
 		`kling_ai_jev_models_loaded 1`,
 	} {
