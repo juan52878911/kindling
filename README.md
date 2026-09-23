@@ -80,6 +80,7 @@ sections:
 · [Volumes](#volumes-what-outlives-the-microvm)
 · [A shared package library](#a-shared-package-library)
 · [Sharing a host folder](#sharing-a-host-folder)
+· [Small LLMs on demand (VON)](#small-llms-on-demand-von)
 · [What persists and what does not](#what-persists-and-what-does-not)
 
 **Performance and density**
@@ -691,6 +692,25 @@ shares cannot be committed. Live shares go through the guest's network device, c
 16 MiB/s per direction on Firecracker. Design, limits and threat model:
 [`docs/compartir.md`](docs/compartir.md).
 
+## Small LLMs on demand (VON)
+
+`kling models` serves small instruct models (SmolLM2-360M, Qwen2.5-0.5B) from microVMs with
+llama.cpp's OpenAI-compatible `llama-server`, frozen in a golden snapshot **after** the model is
+loaded and warmed:
+
+```sh
+kling models add von-smol -model smollm2-360m-instruct     # image + golden snapshot, one command
+kling run -from von-smol -name smol-1                      # a replica, model already in memory
+kling models ask smol-1 "What is a microVM?"               # answer + tokens/s
+curl http://$(kling inspect smol-1 | jq -r .ip):8000/v1/chat/completions -d '{...}'
+```
+
+Weights and llama.cpp are pinned by revision and sha256. On Linux the replicas of one golden
+share the weights in the host page cache: four SmolLM2 replicas measured **461 MiB PSS** in
+total (sum of RSS 1715 MiB), ~12 MiB per extra replica. On a Mac (`vz`), a replica answers its
+first token ~0.8 s after `run -from` and generates ~140 tok/s. Numbers, the nested-lab caveat and
+the GPU plan: [`docs/von.md`](docs/von.md).
+
 ## What persists and what does not
 
 Worth being clear about, because it is not obvious:
@@ -1056,7 +1076,9 @@ instances share pages.
 | `scripts/50-prepare-image.sh` | Injects `overlay-init` and registers the base image |
 | `scripts/70-build-minimal-image.sh` | Builds the `min` base image, or a runtime-family base (`node`, `python`) |
 | `scripts/71-build-glibc-base.sh` | Builds the glibc base with `chrome-headless-shell` (35% less disk, 3.4× faster startup than Alpine Chromium) |
-| `scripts/81-base-image.sh` | The `base` image builder: a layer with packages and the generic guest agent (`kling images build -builder base`) |
+| `scripts/81-base-image.sh` | The `base` image builder: a layer with packages and the generic guest agent (`kling images build -builder base`); also the layer engine of the `llm` builder |
+| `scripts/builders/llm` | The `llm` image builder behind `kling models add`: llama.cpp + a pinned GGUF on a Debian trixie base |
+| `scripts/96-von-bench.sh` | Benchmarks a VON model: cold and thaw to first token, tokens/s, memory of N replicas, seeds |
 
 ## Documentation map
 
@@ -1066,6 +1088,7 @@ instances share pages.
 | [`docs/extensions.md`](docs/extensions.md) | The extension protocol: manifest, dispatch, hooks, units |
 | [`docs/api.md`](docs/api.md) | The daemon HTTP API that extensions build on |
 | [`docs/exec-sandbox.md`](docs/exec-sandbox.md) | Sandboxes, streaming exec and file copy for code agents |
+| [`docs/von.md`](docs/von.md) | Small LLMs from golden snapshots: usage, design, benchmarks, GPU plan |
 | [`SECURITY.md`](SECURITY.md) | Threat model, barriers, and what is NOT solved |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-version changes; release notes for [v0.2.0](docs/RELEASE-v0.2.0.md) and [v0.3.0](docs/RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: the Lima recipe, limits, and cold-start levers |
