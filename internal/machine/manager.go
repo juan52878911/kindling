@@ -1785,6 +1785,9 @@ func (m *Manager) Remove(ref string) error {
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
+	// Su enlace corto en /tmp/kling-<uid> (macOS) ya no apunta a nada; el
+	// vigilante lo barrería en la siguiente vuelta, pero así no queda ni ese rato.
+	fc.BarrerEnlaces(m.root)
 	m.mu.Lock()
 	delete(m.byID, mc.ID)
 	delete(m.socket, mc.ID)
