@@ -1,0 +1,284 @@
+package von
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
+)
+
+// API COMPATIBLE CON OPENAI, LO JUSTO.
+//
+// Solo los campos que usan el CLI y el calentamiento. El gateway que venga
+// después reenvía el cuerpo tal cual y no necesita más tipos que estos para
+// leer lo que le interese (uso de tokens, tiempos).
+
+// Message es un mensaje de chat.
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ChatRequest es el cuerpo de POST /v1/chat/completions.
+type ChatRequest struct {
+	Model       string    `json:"model,omitempty"`
+	Messages    []Message `json:"messages"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Temperature *float64  `json:"temperature,omitempty"`
+	// Seed fija la semilla. Sin ella llama-server saca una nueva por petición
+	// (ver docs/von.md sobre réplicas restauradas del mismo dorado).
+	Seed   *int64 `json:"seed,omitempty"`
+	Stream bool   `json:"stream,omitempty"`
+}
+
+// Timings es la extensión de llama-server con los tiempos de la petición: la
+// forma más honrada de medir, porque no incluye red ni proxy.
+type Timings struct {
+	PromptN            int     `json:"prompt_n"`
+	PromptMS           float64 `json:"prompt_ms"`
+	PromptPerSecond    float64 `json:"prompt_per_second"`
+	PredictedN         int     `json:"predicted_n"`
+	PredictedMS        float64 `json:"predicted_ms"`
+	PredictedPerSecond float64 `json:"predicted_per_second"`
+	CacheN             int     `json:"cache_n"`
+}
+
+// ChatResponse es la respuesta (sin streaming).
+type ChatResponse struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Index        int     `json:"index"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Timings *Timings `json:"timings,omitempty"`
+}
+
+// Text es el contenido de la primera elección.
+func (r *ChatResponse) Text() string {
+	if len(r.Choices) == 0 {
+		return ""
+	}
+	return r.Choices[0].Message.Content
+}
+
+// ErrLoading es la respuesta de /health mientras llama-server carga el modelo.
+var ErrLoading = errors.New("llama-server is still loading the model")
+
+// Health pregunta a llama-server, por el proxy del daemon, si está listo.
+// Devuelve nil (200), ErrLoading (503: cargando) u otro error.
+func Health(ctx context.Context, c *api.Client, ref string) error {
+	resp, err := c.Guest(ctx, ref, api.GuestRequest{Port: Port, Path: "/health", Method: http.MethodGet})
+	if err != nil {
+		return err
+	}
+	switch resp.Status {
+	case http.StatusOK:
+		return nil
+	case http.StatusServiceUnavailable:
+		return ErrLoading
+	default:
+		return fmt.Errorf("/health answered %d: %s", resp.Status, recortar(resp.Body))
+	}
+}
+
+// WaitReady espera a que llama-server conteste 200 en /health: primero a que
+// el puerto abra (lo espera el daemon, en la red que ve al invitado) y luego a
+// que termine de cargar el modelo. Sondea cada 50 ms porque lo que se mide
+// después (arranque en frío hasta el primer token) no debe llevar la mitad de
+// un intervalo de sondeo de propina.
+func WaitReady(ctx context.Context, c *api.Client, ref string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	if _, err := c.Guest(ctx, ref, api.GuestRequest{
+		Port: Port, WaitMS: int(timeout / time.Millisecond), ProbeOnly: true,
+	}); err != nil {
+		return fmt.Errorf("llama-server did not open port %d: %w", Port, err)
+	}
+	var last error
+	for time.Now().Before(deadline) {
+		last = Health(ctx, c, ref)
+		if last == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("llama-server not ready after %s: %w", timeout, last)
+}
+
+// Chat manda una petición de chat por el proxy del daemon y devuelve la
+// respuesta y lo que tardó de punta a punta vista desde aquí.
+func Chat(ctx context.Context, c *api.Client, ref string, req ChatRequest) (*ChatResponse, time.Duration, error) {
+	if req.Stream {
+		return nil, 0, fmt.Errorf("streaming does not go through the daemon proxy: talk to the machine's address directly")
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	t0 := time.Now()
+	resp, err := c.Guest(ctx, ref, api.GuestRequest{
+		Port: Port, Path: "/v1/chat/completions", Method: http.MethodPost, Body: string(body),
+	})
+	dur := time.Since(t0)
+	if err != nil {
+		return nil, dur, err
+	}
+	if resp.Status != http.StatusOK {
+		return nil, dur, fmt.Errorf("chat completion answered %d: %s", resp.Status, recortar(resp.Body))
+	}
+	var out ChatResponse
+	if err := json.Unmarshal([]byte(resp.Body), &out); err != nil {
+		return nil, dur, fmt.Errorf("chat completion: %w", err)
+	}
+	return &out, dur, nil
+}
+
+// Warm calienta un llama-server recién cargado con una respuesta corta.
+//
+// Cargar no basta para un dorado bueno: llama-server hace una pasada vacía al
+// arrancar, pero la primera petición de verdad todavía toca páginas de pesos
+// que la pasada no leyó, crea los hilos de OpenMP y reserva los búferes de
+// cálculo del tamaño real de un lote. Todo eso, hecho ANTES de congelar, queda
+// dentro del snapshot y ninguna réplica lo vuelve a pagar.
+func Warm(ctx context.Context, c *api.Client, ref string) (*ChatResponse, error) {
+	cero := 0.0
+	r, _, err := Chat(ctx, c, ref, ChatRequest{
+		Messages:    []Message{{Role: "user", Content: "Say hello in one word."}},
+		MaxTokens:   8,
+		Temperature: &cero,
+	})
+	return r, err
+}
+
+// GoldenOptions es cómo crear el dorado de un modelo.
+type GoldenOptions struct {
+	Image    string // imagen construida con el constructor llm
+	Snapshot string // nombre del dorado
+	Ref      string // valor de von.model
+	VCPUs    int
+	MemMiB   int
+	// CPUPct es el techo de CPU (% de un core) que el dorado graba y sus
+	// réplicas heredan. 0 = un core entero por vCPU. El del daemon por defecto
+	// (50 %, pensado para herramientas MCP que esperan casi siempre) deja a un
+	// modelo de 2 vCPU a una cuarta parte de su velocidad.
+	CPUPct int
+	// AllowExec deja exec y cp en el dorado y en sus réplicas (depurar).
+	AllowExec bool
+	Replace   bool
+	// Wait es cuánto esperar a que el modelo cargue.
+	Wait time.Duration
+	// Labels extra; las de VON (von.model, kling.ports, service) se añaden.
+	Labels map[string]string
+	// Log recibe el progreso, línea a línea. Puede ser nil.
+	Log func(format string, args ...any)
+}
+
+// GoldenResult es lo que costó cada paso, para contarlo.
+type GoldenResult struct {
+	Snapshot *api.Snapshot
+	BootMS   int64         // arranque de la microVM (lo dice el daemon)
+	LoadTime time.Duration // de arrancada a /health 200
+	Warm     *ChatResponse
+}
+
+// Labels son las etiquetas de una máquina VON: el modelo, el puerto que el
+// proxy del daemon y el backend de macOS tienen que dejar pasar, y el servicio.
+func Labels(ref, service string, extra map[string]string) map[string]string {
+	out := api.MergeLabels(extra, map[string]string{
+		LabelModel:     ref,
+		api.LabelPorts: strconv.Itoa(Port),
+	})
+	if service != "" {
+		out[api.LabelService] = service
+	}
+	return out
+}
+
+// MakeGolden arranca una microVM de la imagen, espera a que el modelo cargue,
+// la calienta, la congela como dorado y la borra. Es lo que hace `kling models
+// add` tras construir la imagen, y lo que hará un gateway que (re)cree
+// dorados: por ejemplo tras reiniciar el host, que invalida los snapshots.
+func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenResult, error) {
+	logf := o.Log
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	if o.Wait == 0 {
+		o.Wait = 5 * time.Minute
+	}
+	if o.CPUPct == 0 {
+		o.CPUPct = 100 * max(o.VCPUs, 1)
+	}
+	// La plantilla lleva nombre propio y aleatorio: dos `models add` a la vez
+	// del mismo modelo no deben pisarse la máquina.
+	name := fmt.Sprintf("%s-golden-%s", o.Snapshot, strconv.FormatInt(time.Now().UnixNano()%1_000_000, 36))
+	mc, err := c.Run(ctx, api.RunRequest{
+		Name: name, Image: o.Image, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
+		CPUPct:    o.CPUPct,
+		Egress:    "none",
+		Labels:    Labels(o.Ref, o.Snapshot, o.Labels),
+		AllowExec: o.AllowExec,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("booting %s: %w", o.Image, err)
+	}
+	res := &GoldenResult{BootMS: mc.BootMS}
+	// Pase lo que pase, la plantilla no se queda: lo que vale es el dorado.
+	defer func() {
+		rc, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = c.Remove(rc, mc.ID)
+	}()
+	logf("booted %s in %d ms; loading the model...", mc.Name, mc.BootMS)
+
+	t0 := time.Now()
+	if err := WaitReady(ctx, c, mc.ID, o.Wait); err != nil {
+		return nil, fmt.Errorf("%w\nsee the server log with:  kling exec %s -- tail -50 /var/log/service.log", err, mc.Name)
+	}
+	res.LoadTime = time.Since(t0)
+	logf("model loaded in %s; warming up...", res.LoadTime.Round(time.Millisecond))
+
+	w, err := Warm(ctx, c, mc.ID)
+	if err != nil {
+		return nil, fmt.Errorf("warm-up: %w", err)
+	}
+	res.Warm = w
+	logf("warm-up answered %q", w.Text())
+
+	// Devolver al host lo reclamable (memoria libre y caché de páginas limpia)
+	// ANTES de congelar: el globo deja esas páginas a cero, el commit las
+	// convierte en huecos del mem.file y el dorado ocupa solo lo que el modelo
+	// usa de verdad. Si la máquina no tiene globo, se congela igual.
+	if sq, err := c.Squeeze(ctx, mc.ID); err == nil {
+		logf("returned %d MiB of free memory to the host before freezing", sq.ReclaimedMiB)
+	}
+
+	snap, err := c.Commit(ctx, mc.ID, o.Snapshot, o.Replace)
+	if err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	res.Snapshot = snap
+	return res, nil
+}
+
+func recortar(s string) string {
+	if len(s) > 300 {
+		return s[:300] + "..."
+	}
+	return s
+}
