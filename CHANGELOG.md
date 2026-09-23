@@ -4,6 +4,49 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.10.0 — sin publicar
+
+### Carpetas compartidas
+
+`kling run -share SRC:DST[:copy|ro|rw]` (repetible; también en `kling sandbox
+create`, en `POST /machines` y en `POST /sandboxes`). Diseño, límites y modelo de
+amenaza en [docs/compartir.md](docs/compartir.md).
+
+- **copy** (por defecto): el CLI empaqueta la carpeta local en un tar y la sube
+  (`POST /shares/uploads`, también por SSH); el daemon valida cada entrada
+  (nada de rutas absolutas, `..`, enlaces que salgan o atraviesen otros, enlaces
+  duros, dispositivos ni FIFOs; tamaño acotado por `daemon.share_copy_max_mib`,
+  1 GiB por defecto), construye un ext4 de solo lectura con `mke2fs -d` y lo
+  engancha como un volumen de solo lectura más. Lo monta hasta un agente
+  anterior.
+- **ro / rw**: la carpeta del host del daemon, en vivo. El agente de invitado
+  habla él mismo el protocolo FUSE del kernel (sin libfuse ni cgo) y pide cada
+  operación por ruta al daemon por una conexión que abre el daemon
+  (`POST /share/attach`, `Upgrade: kling-share/1`); el daemon la sirve con
+  `os.Root`, así que ni `..` ni un enlace sacan nada de la carpeta. `ro` lo impone
+  el daemon (`EROFS`). Sin enlaces simbólicos, duros ni nodos nuevos; todo es de
+  root para el invitado y lo que crea se entrega al dueño de la carpeta.
+  Funciona con `egress none`, sobrevive a `freeze`/`thaw` (los ficheros abiertos
+  se reabren solos) y a reiniciar el daemon. Solo carpetas bajo
+  `daemon.share_roots` (o `KLING_SHARE_ROOTS`), vacío por defecto.
+- `commit` de una máquina con carpetas: `409`. `run -from` con carpetas: `400`.
+  Una imagen sin agente, o con uno anterior, lo dice claro.
+- `kling ps` enseña la columna `SHARES` si alguna máquina tiene; `kling inspect
+  <ref>` nuevo, con el estado de cada carpeta viva; `kling info` dice las raíces
+  permitidas. Capacidades `shares-copy` y `shares-live`.
+- Medido en el laboratorio (Firecracker anidado en un Mac, arm64): lectura y
+  escritura secuencial ~12–18 MB/s (el techo es el limitador de 16 MiB/s de la
+  red del invitado), ~200–250 creaciones/s y ~1250 `stat`/s de ficheros pequeños;
+  `npm install express` en la carpeta, 56 s frente a 45 s en el disco de la
+  máquina.
+
+### Arreglos
+
+- **El daemon de systemd lee la configuración de root.** Sin `$HOME` (un
+  servicio sin `User=`), la ruta de la configuración salía relativa a `/` y el
+  daemon no veía lo que `sudo kling config set` escribía en `/root/.config`.
+  Ahora se busca el directorio del usuario en la base de usuarios.
+
 ## v0.9.1 — 2026-09-23
 
 ### Reloj y entropía propios tras restaurar

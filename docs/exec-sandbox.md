@@ -52,6 +52,23 @@ La imagen tiene que llevar el agente de invitado (`kling-guest`): la de
 `kling images toolchain`, o cualquiera construida con
 `kling images build -builder base`. El daemon lo comprueba antes de arrancar.
 
+### Con una carpeta del host dentro
+
+`-share SRC:DST[:copy|ro|rw]`, igual que en `kling run`
+([compartir.md](compartir.md)):
+
+```sh
+kling sandbox create -image toolchain -name sb -share ./repo:/work       # copia de solo lectura
+kling exec sb -w /work -- python3 -m pytest -q
+kling sandbox create -image toolchain -name sb2 -share /srv/code/app:/src:rw   # en vivo
+```
+
+La copia sube la carpeta local (sirve con un daemon remoto); `ro`/`rw` sirven una
+carpeta del host del daemon bajo `daemon.share_roots`. Con `-from` no se admiten: las
+carpetas se piden al arrancar en frío, y una plantilla no puede llevarlas (una máquina
+con carpetas no se convierte en snapshot). Un sandbox con carpeta viva se puede congelar
+por TTL (`-on-ttl freeze`) y al despertar sigue con la misma carpeta montada.
+
 ### Plantillas: preparar una vez, restaurar muchas
 
 Instalar dependencias en cada sandbox es lento. Se prepara una máquina, se

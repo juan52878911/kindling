@@ -192,6 +192,50 @@ El daemon rechaza máquinas nuevas cuando queda poco disco bajo `$KLING_ROOT` o
 cuando el host está bajo presión de memoria según PSI, antes de arrancarlas. Un
 invitado no puede llenar el disco del host a base de que se creen máquinas.
 
+### 13. Carpetas compartidas: el host sirve, el invitado es hostil
+
+`kling run -share` mete un directorio del host dentro de una microVM (diseño en
+[docs/compartir.md](docs/compartir.md)). Dos modos, dos superficies:
+
+- **copy** no abre nada nuevo: el daemon valida un tar (solo directorios,
+  ficheros regulares y enlaces relativos que no salen del árbol ni atraviesan
+  otros enlaces; ni rutas absolutas, ni `..`, ni enlaces duros, dispositivos o
+  FIFOs; tamaño y número de entradas acotados), lo extrae en un directorio
+  privado, construye un ext4 y lo engancha de SOLO LECTURA al VMM, como un volumen
+  compartido.
+- **ro/rw** sirve un directorio del host en vivo. El kernel del invitado habla
+  FUSE con el agente, y el agente pide operaciones por ruta al daemon. El agente
+  corre dentro, así que la frontera es el daemon (`internal/share`):
+  - Solo se sirve lo que el operador permitió: `daemon.share_roots` vacío (el
+    defecto) desactiva las carpetas vivas; la ruta se compara resuelta, y nunca
+    una que contenga la raíz de datos de kindling.
+  - Todo acceso al disco va por `os.Root` (`openat`): ni `..` ni un enlace
+    simbólico sacan una operación de la carpeta. Unlink, rmdir, rename y readlink
+    trabajan con `*at` sobre el directorio padre abierto por `os.Root`, sin seguir
+    el último componente; `open` exige que lo abierto sea un fichero regular. Los
+    enlaces del host se leen, pero el host no los sigue nunca: los resuelve el
+    kernel del invitado dentro de su propio árbol.
+  - Dispositivos, FIFOs y sockets del host no existen para el invitado. SYMLINK,
+    LINK y MKNOD se rechazan: un enlace plantado por el invitado sería un arma
+    contra lo que el host haga luego con esa carpeta.
+  - Cada campo se valida: rutas (relativas, limpias, componente ≤ 255, total ≤
+    4096), tamaños (lectura y escritura ≤ 128 KiB, tramas ≤ 144 KiB), offsets,
+    handles (con la época de su sesión). Por sesión, 16 operaciones en vuelo y
+    1024 ficheros abiertos; 16384 en todo el daemon.
+  - `ro` se impone en el daemon (`EROFS`), no en el montaje del invitado.
+  - Para el invitado todo es de root; no ve uid/gid del host, `chown` no hace
+    nada y los modos se recortan a `0777` (sin setuid/setgid/sticky). Lo que crea
+    se entrega al dueño de la carpeta.
+  - `/share/attach` solo la abre el host: el agente la rechaza si viene de
+    loopback o de la propia IP del invitado, y el gateway MCP no la reenvía.
+  - Una máquina con carpetas no se convierte en snapshot (409).
+
+Lo que queda: el invitado rw puede escribir cualquier cosa DENTRO de la carpeta
+(incluidos ficheros que el host luego ejecute: compartir un directorio en rw es
+darle esa confianza); un enlace duro que ya existiera en la carpeta hacia fuera
+se sirve como el fichero que es; y el daemon, si es root, lee con sus
+permisos lo que haya bajo la carpeta.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

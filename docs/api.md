@@ -28,6 +28,8 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `sandboxes` | v0.7 | `POST/GET /sandboxes`, `GET/DELETE /sandboxes/{ref}`, `POST /sandboxes/{ref}/renew` |
 | `image-blobs` | v0.9 | `GET/HEAD/PUT /images/{name}/blob` |
 | `guest-resync` | v0.9.1 | ninguna: el daemon resincroniza reloj y entropía del invitado tras cada restauración (ver abajo) |
+| `shares-copy` | v0.10 | `POST /shares/uploads`, `shares` con `mode: copy` en `POST /machines` y `POST /sandboxes` |
+| `shares-live` | v0.10 | `shares` con `mode: ro\|rw` (directorio del host del daemon, bajo `share_roots`); `share_roots` en `GET /info` |
 
 ## Rutas
 
@@ -35,7 +37,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9) y `arch` (GOARCH del host) |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host) y `share_roots` (desde v0.10) |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
@@ -45,13 +47,13 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | Ruta | Qué hace |
 |---|---|
 | `GET /machines` | lista |
-| `POST /machines` | crea y arranca (`RunRequest`: imagen o `from` un snapshot, vCPUs, memoria, egress y dominios, TTL, techo de CPU, volúmenes, etiquetas) |
+| `POST /machines` | crea y arranca (`RunRequest`: imagen o `from` un snapshot, vCPUs, memoria, egress y dominios, TTL, techo de CPU, volúmenes, carpetas compartidas, etiquetas) |
 | `GET /machines/{ref}` | una máquina |
 | `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida |
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
 | `PUT /machines/{ref}/labels` | reetiqueta |
-| `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable |
+| `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas) |
 | `GET /machines/{ref}/logs?tail=N` | consola serie |
 | `POST /machines/{ref}/guest` | reenvía una petición HTTP al invitado (ver abajo) |
 | `DELETE /machines/{ref}` | la borra |
@@ -241,7 +243,8 @@ dos. TTL por defecto 600 s, máximo 86400. `on_ttl` decide qué pasa al vencer:
 `remove` (por defecto) lo destruye y `freeze` lo duerme a coste cero, con el
 siguiente exec despertándolo; con `freeze` el TTL cuenta INACTIVIDAD y usar el
 sandbox lo reinicia. También admite `name`, `vcpus`,
-`cpu_pct`, `allow_domains`, `volumes` y `labels`.
+`cpu_pct`, `allow_domains`, `volumes`, `shares` (ver más abajo; no con `from`) y
+`labels`.
 
 | Ruta | Qué hace |
 |---|---|
@@ -258,6 +261,56 @@ Estas rutas solo tocan máquinas con `kind=sandbox`.
 del snapshot, y pedirla sobre uno que no la tiene es `409`. `on_ttl` decide qué pasa
 al vencer `ttl_seconds`: `freeze` (por defecto) o `remove`. `commit` graba
 `allow_exec` en el snapshot.
+
+## Carpetas compartidas
+
+Un directorio del host dentro de la máquina. El diseño, los límites y el modelo
+de amenaza están en [compartir.md](compartir.md).
+
+`POST /machines` (y `POST /sandboxes`) aceptan `shares`, una lista en orden:
+
+```json
+{"image": "toolchain", "shares": [
+  {"mode": "copy", "mount": "/work", "upload": "3f1c…", "source": "/Users/juan/repo"},
+  {"mode": "rw",   "mount": "/src",  "source": "/srv/code/repo"}
+]}
+```
+
+- `mode: copy` (por defecto): una copia de solo lectura. `upload` es el id que
+  devolvió `POST /shares/uploads`; se consume al arrancar. `source` solo se
+  guarda para enseñarlo.
+- `mode: ro | rw`: el directorio vivo. `source` es una ruta absoluta EN EL HOST
+  DEL DAEMON, bajo algún `daemon.share_roots`; sin raíces configuradas, `400`
+  diciendo cómo permitirlo. La petición vuelve cuando la carpeta ya está
+  montada dentro; si el agente de la imagen es anterior a v0.10, la máquina se
+  destruye y el error lo dice.
+- `mount`: absoluto, limpio, sin espacios, comas ni dos puntos; ni `/` ni
+  debajo de `/proc`, `/sys`, `/dev`, `/run`, `/bin`, `/sbin`, `/lib`, `/usr` o
+  `/etc`; ni repetido, ni anidado con otra carpeta o un volumen.
+- Como mucho 8 carpetas, y 8 discos entre volúmenes y copias. Con `from`, `400`:
+  las carpetas se piden al arrancar en frío.
+
+`GET /machines/{ref}` las devuelve en `shares`, con `status` (`attached`,
+`detached` o `error: …`) en las vivas e `image_bytes` en las copias.
+
+### `POST /shares/uploads`
+
+El cuerpo es un tar (`application/x-tar`) con el contenido de la carpeta.
+Contesta `201` con `{"id", "bytes", "files", "dirs", "symlinks",
+"image_bytes"}` cuando el ext4 está construido. Solo se aceptan directorios,
+ficheros regulares y enlaces simbólicos relativos que no salgan del árbol ni
+atraviesen otros enlaces; nada de rutas absolutas, `..`, enlaces duros,
+dispositivos o FIFOs (`400`, y la subida entera se descarta). El contenido
+está acotado por `daemon.share_copy_max_mib` (1024 por defecto; más, `413`), y
+como mucho hay 8 subidas pendientes; las que nadie usa se borran a la hora.
+
+### Del lado del invitado: `POST /share/attach`
+
+La abre el daemon contra el agente con `Upgrade: kling-share/1` y un cuerpo
+`{"tag", "mount", "mode"}`; tras el `101` la conexión transporta el protocolo
+descrito en compartir.md. El agente pone `X-Kling-Share` en todas sus
+respuestas a esa ruta (también en los errores): así se distingue de un agente
+anterior. Es una ruta de control (`guest.IsControlPath`).
 
 ## El proxy al invitado
 

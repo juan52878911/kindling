@@ -79,6 +79,7 @@ sections:
 **Storage**
 · [Volumes](#volumes-what-outlives-the-microvm)
 · [A shared package library](#a-shared-package-library)
+· [Sharing a host folder](#sharing-a-host-folder)
 · [What persists and what does not](#what-persists-and-what-does-not)
 
 **Performance and density**
@@ -661,6 +662,34 @@ data volume does not end up in `PYTHONPATH`, because a `json.py` sitting in it w
 the standard library module and the failure would surface nowhere near its cause. Whatever
 the image already has installed comes **first**: updating the volume must not silently change
 the version a service that already worked is using.
+
+## Sharing a host folder
+
+`-share SRC:DST[:copy|ro|rw]` puts a host folder inside a machine (`kling run` and
+`kling sandbox create`, repeatable):
+
+```sh
+kling run -image toolchain -share ./repo:/work              # copy: a read-only snapshot
+kling -H ssh://lab run -share ./repo:/work                  # ... uploaded from your laptop
+sudo kling config set daemon.share_roots /srv/code          # on the daemon host, once
+kling run -image toolchain -share /srv/code/app:/src:rw     # live, read-write
+```
+
+- **copy** (default): the CLI tars the folder, the daemon checks every entry and builds a
+  read-only ext4 attached like a volume. Works with any daemon, local or over SSH; changes
+  on your side are not seen afterwards.
+- **ro / rw**: the folder *on the daemon host* is served live. The guest agent speaks FUSE
+  itself and the daemon serves each operation through `os.Root`, so nothing escapes the
+  folder — not `..`, not a symlink. Host edits show up within a second; `ro` is enforced by
+  the daemon, not just the mount. It survives `freeze`/`thaw` and daemon restarts, and
+  works with `egress none`. Only folders under `daemon.share_roots` (empty by default)
+  can be shared live.
+
+The guest cannot create symlinks, hard links or device nodes in a live share
+(`npm install --no-bin-links` works), sees everything as owned by root, and a machine with
+shares cannot be committed. Live shares go through the guest's network device, capped at
+16 MiB/s per direction on Firecracker. Design, limits and threat model:
+[`docs/compartir.md`](docs/compartir.md).
 
 ## What persists and what does not
 
