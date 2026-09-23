@@ -419,13 +419,37 @@ func (m *Manager) sweep() {
 	var died []*api.Machine
 	live := make(map[string]bool)
 
-	m.mu.Lock()
+	// adopt va fuera del candado: en macOS lanza un ps por máquina, y hacerlo
+	// con m.mu tomado congelaba ps, run y thaw en cada vuelta del vigilante.
+	// Se comprueba sobre una copia y, al volver a tomar el candado, solo se
+	// marca la que sigue running con el mismo PID (entre medias pudo pararse,
+	// congelarse o relanzarse).
+	type vista struct {
+		mc  *api.Machine
+		pid int
+	}
+	var vistas []vista
+	m.mu.RLock()
 	for _, mc := range m.byID {
-		if mc.State != api.StateRunning {
+		if mc.State == api.StateRunning {
+			vistas = append(vistas, vista{mc, mc.PID})
+		}
+	}
+	m.mu.RUnlock()
+	var muertas []vista
+	for _, v := range vistas {
+		c := api.Machine{ID: v.mc.ID, PID: v.pid}
+		if _, ok := m.adopt(&c); ok {
+			live["kl-"+v.mc.ID[:8]] = true
 			continue
 		}
-		if _, ok := m.adopt(mc); ok {
-			live["kl-"+mc.ID[:8]] = true
+		muertas = append(muertas, v)
+	}
+
+	m.mu.Lock()
+	for _, v := range muertas {
+		mc := v.mc
+		if mc.State != api.StateRunning || mc.PID != v.pid || m.byID[mc.ID] != mc {
 			continue
 		}
 		now := time.Now()
