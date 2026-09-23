@@ -29,13 +29,13 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
   `refresh-bridge` idempotente y `mcp link`/`unlink` contra un `kling-bridge`
   local.
 
-## Sin publicar — v0.2.0
+## v0.2.0 — 2026-09-23
 
 - Sube la dependencia a kindling v0.7. El puente embebe el agente de invitado nuevo
   (exec en streaming y ficheros), aunque en una microVM de servicio siguen sin
   existir: solo se encienden con `allow_exec`, y un servicio no lo lleva nunca.
 
-## v0.1.0 — sin publicar
+## v0.1.0 — 2026-09-23
 
 Primera versión por separado. Es la mitad MCP de kindling v0.4/v0.5, sacada del
 núcleo sin cambiar lo que se teclea: con kindling-mcp instalado, `kling mcp`,
