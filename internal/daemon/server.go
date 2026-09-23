@@ -59,17 +59,23 @@ type Server struct {
 	socketUser string // a quién se cede el socket (vacío = a quien invocó sudo)
 
 	store *store
+	lock  *os.File // cerrojo de la raíz (ver bloquearRaiz); abierto mientras viva
 }
 
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
+	lock, err := bloquearRaiz(root)
+	if err != nil {
+		return nil, err
+	}
 	bus := events.New()
 	mgr, err := machine.NewManager(root, fcBin, runAs, bus)
 	if err != nil {
+		lock.Close()
 		return nil, err
 	}
 	st := &store{dir: filepath.Join(root, "store")}
 	migrateLinks(root, st)
-	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st}, nil
+	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock}, nil
 }
 
 func (s *Server) routes() http.Handler {
