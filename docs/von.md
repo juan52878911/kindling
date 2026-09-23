@@ -87,7 +87,7 @@ curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 |---|---|---|---|---|
 | `smollm2-360m-instruct` | `q8_0` (defecto) | 369 MiB | 2 / 768 MiB | HuggingFaceTB, rev `593b5a2e` |
 | `smollm2-360m-instruct` | `q4_k_m` | 258 MiB | 2 / 640 MiB | bartowski, rev `7be6f65f` |
-| `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1024 MiB | Qwen, rev `9217f5db` |
+| `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1152 MiB | Qwen, rev `9217f5db` |
 | `qwen2.5-0.5b-instruct` | `q4_k_m` | 469 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` |
 
 Cada entrada lleva revisión de Hugging Face (commit, no rama) y sha256; el
@@ -181,7 +181,7 @@ una semilla fija (la API la acepta).
 |---|---|---|---|
 | SmolLM2-360M Q8_0 | 768 MiB | 527 / 456 MiB | pesos reempaquetados 369 MiB + KV 80 MiB + cálculo |
 | Qwen2.5-0.5B Q4_K_M | 896 MiB | 602 MiB / 528 MiB | KV pequeña (2 cabezas KV); búfer de cálculo grande (vocabulario de 152k) |
-| Qwen2.5-0.5B Q8_0 | 1024 MiB | 871 MiB / 800 MiB | el más justo: `-mem 1152` si se sube `-ctx` |
+| Qwen2.5-0.5B Q8_0 | 1152 MiB | 871 MiB / 800 MiB | el más justo: a 1024 medía 871 MiB (153 libres para la caché KV y los búferes del vocabulario de 152k si se sube `-ctx`); memoria por defecto subida a 1152 |
 
 En Linux la memoria de la VM que no se toca no cuesta: el `mem.file` es disperso y
 lo no escrito son huecos. En macOS sí: `vz` restaura copiando la memoria del
@@ -215,16 +215,18 @@ Equipos:
 | `mem.file` del dorado | 527 MiB | 602 MiB | 871 MiB |
 | capa de la imagen en disco | 402 MiB | 502 MiB | 678 MiB |
 | crear el dorado (`models add`, imagen en caché) | 5 min 36 s (carga 3 min) | 6 min 6 s (carga 4 min 18 s) | 12 min 49 s (carga 8 min 37 s) |
-| arranque en frío → primer token | ~5,5 min | — | — |
-| thaw (`thaw_ms` del daemon) | 223 ms (213–358) | 267 ms (249–529) | pendiente |
-| `run -from` → primer token | 4,3 s (4,2–5,5) | 4,0 s (3,9–5,5) | pendiente |
-| prompt, tok/s | 12 (10–44) | 29 (22–38) | pendiente |
-| generación, tok/s | 8,8 (0,8–9) | 13,3 (4,5–13,5) | pendiente |
+| arranque en frío → primer token | 4 min 3 s (`COLD=1`: ~192 s arranque+carga, ~51 s la primera petición) | — | — |
+| thaw (`thaw_ms` del daemon) | 223 ms (213–358) | 267 ms (249–529) | 254 ms (245–278, n=3) |
+| `run -from` → primer token | 4,3 s (4,2–5,5) | 4,0 s (3,9–5,5) | 5,0 s (4,7–5,9, n=3) |
+| prompt, tok/s | 12 (10–44) | 29 (22–38) | 22 (21–51, n=3) |
+| generación, tok/s | 8,8 (0,8–9) | 13,3 (4,5–13,5) | 13 (3,3–14,1, n=3) |
 
 Referencia en el mismo host Linux, **sin microVM** (`llama-server` de la misma
 versión, mismos argumentos, 2 hilos, el GGUF en la caché de páginas): listo en
 0,6–1,2 s, primer token en **0,66–1,24 s**, **534 MiB de RSS por proceso**;
 `llama-bench` da 731 tok/s de prompt y **151 tok/s** de generación.
+
+**Qué domina el arranque en frío**: de los 4 min 3 s (`COLD=1`, SmolLM2 Q8_0), ~192 s son arrancar la microVM y cargar el GGUF —leerlo entero por `O_DIRECT` (no hay caché de páginas de por medio) y reempaquetar los pesos a instrucciones i8mm, una transformación de CPU, no de E/S— hasta que `/health` responde 200; los ~51 s restantes son la primera petición en sí, muy por encima de los ~4 s de una réplica recién restaurada de un dorado (tabla de arriba). La diferencia es el calentamiento: el dorado se congela **después** de una respuesta de prueba (`MakeGolden`), así que el hilo de OpenMP y el grafo de cómputo de `llama-server` ya están creados en el volcado; un arranque en frío desde la imagen los crea de cero en su primera petición. Las dos cifras están además infladas por el anidamiento (15–20× más lento, sección siguiente); en hierro debería dominar solo la carga del GGUF.
 
 **Memoria de N réplicas del mismo dorado** (SmolLM2-360M Q8_0):
 
@@ -372,51 +374,3 @@ propio si no viene, la cascada JEV → VON, y ttl/escala a cero por modelo.
   tokens por conversación.
 - El log de `llama-server` (`/var/log/service.log`) crece sin rotar en el disco de
   la réplica; en réplicas efímeras no importa.
-
-## Estado (pausa 2026-09-23)
-
-**Hecho y en commits** (rama `claude/von`, sin empujar): `pkg/von` (catálogo fijado,
-spec, cliente, `MakeGolden`, tests), constructor `llm` + `kling models ls|add|ask|rm`
-(con `-build-only`), `81-base-image.sh` con `ROOTFS_DIR`/`SERVICE`, `make deploy`
-instala el constructor, `run -from` hereda `cpu_pct` (verificado en el laboratorio:
-`cpu.max` 200000 sin pasar `-cpu-pct`), el daemon deja legible la base que cree un
-constructor, `scripts/96-von-bench.sh`, este documento, README y CHANGELOG.
-`make test`: todo verde salvo un fallo de tiempo en `pkg/plugin` (TestDescubrimiento,
-"took more than 1s" con el Mac cargado); pasa al repetirlo. Cross-compila
-linux/amd64, linux/arm64 y darwin/arm64.
-
-**Medido** (las tablas de arriba): los tres modelos en macOS completos; en Linux,
-SmolLM2 Q8_0 y Qwen2.5 Q4_K_M completos (incluida la compartición: 4 réplicas de
-Qwen Q4 = 480 MiB de PSS frente a 1769 de RSS, +12 MiB por réplica), la referencia
-de `llama-server` sin microVM y la prueba del cómputo anidado.
-
-**A medias**: la fila Linux de Qwen2.5 Q8_0 (thaw, primer token, tok/s,
-réplicas): el dorado está hecho (871 MiB), la medición se cortó. El arranque en
-frío → primer token en Linux solo está como "~5,5 min" (sale de crear el dorado de
-SmolLM2), no con `COLD=1`. Nada probado en x86_64 (el catálogo de llama.cpp de x64
-está fijado pero sin arrancar).
-
-**Siguientes pasos exactos**:
-1. En el laboratorio: `sudo RUNS=3 REPLICAS=4 bash /tmp/von-probe/96-von-bench.sh von-qwen-q8`
-   y pasar las cifras a la tabla de Linux (las casillas "pendiente").
-2. Repetir la tabla de Linux en hierro x86 con KVM nativo (el CT 105 de pve no
-   contestaba por SSH): primer token de un dorado sin anidar.
-3. `verificador-kindling` sobre la rama; luego PR.
-4. Considerar subir `-mem` por defecto de Qwen Q8_0 a 1152 MiB (usa 871 de 1024 en Linux).
-
-**Qué hay en el laboratorio** (Lima `kling-arm`):
-- Conservar: imágenes `glibc-trixie` (base), `von-smol`, `von-qwen-q4`, `von-qwen-q8`;
-  dorados `von-smol`, `von-qwen-q4`, `von-qwen-q8`; caché `/var/lib/kindling/cache/von`.
-- Cambiado en el host: `/usr/local/bin/kling` es el de esta rama (`0.11.0-von-dev`;
-  el anterior quedó en `/usr/local/lib/kindling/kling.0.10.0-dev.bak`), instalados
-  `71-build-glibc-base.sh`, `minimal-init.sh`, `builders/llm` y el paquete
-  `debootstrap`.
-- Limpiar: `/tmp/von-probe/` (tarball de llama.cpp, copia del GGUF, scripts y
-  resultados `bench-lab-*.txt`); cualquier máquina `von-bench-*` o `von-*-golden-*`
-  que quede en `kling ps -a` (la medición se cortó en seco).
-
-**En el Mac**: daemon de pruebas (`kling daemon -root …/scratchpad/mac-e2e/root
--socket /tmp/von-kl.sock`, binarios en `…/scratchpad/von/mac/`) con las imágenes y
-dorados `von-smol`, `von-qwen-q4`, `von-qwen-q8` y la base `glibc-trixie` en esa
-raíz. Hay que pararlo (`pkill -TERM -f "kling daemon -root .*mac-e2e/root -socket /tmp/von-kl.sock"`),
-borrar `/tmp/von-kl.sock` y, si no se van a usar, esos dorados e imágenes.
