@@ -95,3 +95,17 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 	}
 	return sock, true
 }
+
+// socketDe es el socket de la API de un VMM que sigue vivo tras reiniciar el
+// daemon: el del chroot si corre dentro de jailer, el de su directorio si no.
+//
+// Readoptar SIEMPRE con el del directorio dejaba a las máquinas jailed con un
+// socket que no existe: seguían corriendo, pero congelarlas o pararlas fallaba
+// con "dial unix .../fc.sock: no such file or directory" hasta destruirlas.
+// Solo lee /proc: vale bajo m.mu.
+func (m *Manager) socketDe(id string, pid int) string {
+	if sock, ok := m.adopt(&api.Machine{ID: id, PID: pid}); ok {
+		return sock
+	}
+	return m.dir(id) + "/fc.sock"
+}

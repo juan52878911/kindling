@@ -66,6 +66,13 @@ kling cp ./a.ts sb:/tmp/
 kling exec sb -- sh -c 'cd /tmp && tsc a.ts && node a.js'
 ```
 
+Cada sandbox restaurado despierta con la hora del host y su propia entropía,
+no con las de la plantilla: el daemon las resincroniza antes de devolverlo (ver
+[api.md](api.md#tras-restaurar-reloj-y-entropía-del-invitado)). Lo que un
+proceso de la plantilla ya hubiera sacado de su generador en espacio de usuario
+—el pool de OpenSSL de un node ya arrancado, por ejemplo— sí se comparte:
+arranca esos procesos después de restaurar si necesitan aleatorios propios.
+
 Medido en el laboratorio (Lima arm64 con virtualización anidada):
 
 | | |

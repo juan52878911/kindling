@@ -82,6 +82,17 @@ La memoria de un snapshot es un único fichero que todas las réplicas LEEN; nad
 lo escribe tras crearlo. Eso preserva el modelo del snapshot dorado aunque el
 framework copie el estado a memoria al restaurar en vez de mapearlo.
 
+**Sin VMGenID.** Firecracker da al invitado un VMGenID que cambia en cada
+restauración y el kernel resiembra solo su generador; Virtualization.framework
+no tiene nada parecido. Dos réplicas restauradas del mismo snapshot sacaban los
+mismos bytes de `getrandom()` —y con ellos los mismos ids de sesión— y el reloj
+de pared seguía en el instante del volcado. Por eso el núcleo, tras el `PATCH /vm
+Resumed` (o la carga con `resume_vm: true`) y la apertura de reenvíos, llama a
+`POST /resync` del agente con la hora del host y 64 bytes de entropía antes de
+dar la máquina por arrancada (ver [api.md](api.md#tras-restaurar-reloj-y-entropía-del-invitado)).
+Lo hace igual en Linux, donde VMGenID resiembra pero el reloj también se queda
+parado.
+
 ## 3. Rutas propias (solo `kling-vz`)
 
 El núcleo las llama únicamente en macOS.

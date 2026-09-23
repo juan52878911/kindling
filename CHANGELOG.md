@@ -4,6 +4,52 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.9.1 — 2026-09-23
+
+### Reloj y entropía propios tras restaurar
+
+- **`POST /resync` en el agente de invitado** (`pkg/guest`, así que lo tienen
+  `kling-guest` y el puente de kindling-mcp en cuanto se recompilan): recibe la
+  hora del host y entropía fresca, pone el reloj de pared y mezcla la entropía
+  acreditándola y forzando la resiembra del CRNG (`RNDADDENTROPY` +
+  `RNDRESEEDCRNG`). Cuerpo acotado y validado.
+- **El daemon lo llama tras cada restauración** —`thaw` y `run -from`, en los
+  dos backends— antes de dar la máquina por arrancada. En macOS, donde
+  Virtualization.framework no tiene VMGenID, dos réplicas del mismo snapshot
+  sacaban los mismos aleatorios (ids de sesión MCP idénticos) y el reloj se
+  quedaba en la hora del volcado; en Linux VMGenID ya resembraba, pero el reloj
+  también se quedaba parado. Un agente anterior o una máquina sin agente no
+  hacen fallar la restauración: se avisa una vez por imagen. Capacidad
+  `guest-resync`; el evento de thaw dice cuánto costó.
+- `guest.IsControlPath`: las rutas del agente que solo debe usar el host, para
+  que un proxy que reenvía peticiones de terceros (el gateway MCP) las corte.
+- Medido: 1–2 ms por restauración en macOS. En Firecracker (laboratorio anidado)
+  el resync es la primera petición al invitado restaurado y se lleva los
+  ~150–250 ms que antes pagaba el primer cliente; la siguiente va como siempre.
+  Para que una máquina sin agente no pague segundos en cada restauración,
+  `freeze` sondea el puerto del agente antes de pausar (el `thaw` no lo intenta
+  si nadie escuchaba) y un snapshot sin agente se recuerda 10 minutos.
+
+### Arreglos
+
+- **Tras reiniciar el daemon, las máquinas en jail se readoptan con el socket
+  de su chroot.** Se readoptaban con el de su directorio, que no existe:
+  seguían corriendo, pero `freeze`, `stop` y el resto de llamadas a su VMM
+  fallaban con `dial unix .../fc.sock: no such file or directory` hasta
+  destruirlas. Lo mismo al descongelar una máquina que ya corría.
+
+### Planificador
+
+- **`Bind` ya no pisa una sesión fijada a otra instancia.** El mapa de rutas
+  está indexado por la clave de sesión, y con el id del invitado como clave dos
+  clientes que recibían el mismo id acababan en la misma ruta: el segundo
+  reapuntaba en silencio la sesión del primero a su microVM. Ahora se niega y lo
+  registra.
+- **`BindGuest(clave, idInvitado, ...)`**, `Route.GuestSID()`,
+  `NewSessionKey()` y `ErrSessionTaken`: quien enruta acuña su propia clave
+  (128 bits de `crypto/rand`) y guarda aparte el id del invitado para traducir
+  entre los dos. La API anterior sigue compilando.
+
 ## v0.9.0 — 2026-09-23
 
 kindling corre nativo en macOS: el daemon, en un Mac con Apple Silicon, arranca

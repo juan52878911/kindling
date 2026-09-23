@@ -832,6 +832,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err := m.abrirReenvios(ctx, c, id); err != nil {
 		return abortar(err)
 	}
+	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
+	// este dorado despertó con la memoria de todas las demás. Síncrono y
+	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
+	resyncT, resyncOK := m.resyncGuest(ctx, id, claveSnapshot(snap))
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -865,7 +869,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	m.mu.Unlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
-		Message: fmt.Sprintf("instantiated from %s in %d ms", req.From, elapsed)})
+		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resyncT, resyncOK))})
 	return &out, nil
 }
 

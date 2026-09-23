@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httputil"
 	"time"
@@ -138,6 +140,7 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 type Route = sessionRoute
 
 func (rt *sessionRoute) Service() string                                  { return rt.service }
+func (rt *sessionRoute) GuestSID() string                                 { return rt.guestSID }
 func (rt *sessionRoute) MachineID() string                                { return rt.machineID }
 func (rt *sessionRoute) IP() string                                       { return rt.ip }
 func (rt *sessionRoute) Addr(port int) string                             { return addrDe(rt.ip, rt.fwd, port) }
@@ -148,8 +151,32 @@ func (rt *sessionRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) { rt.p
 // uso de la sesión y de su instancia.
 func (g *Scheduler) Route(key string) *Route { return g.route(key) }
 
-// Bind fija la sesión key a la instancia e del servicio.
-func (g *Scheduler) Bind(key, service string, e *Instance) { g.bind(key, service, e) }
+// Bind fija la sesión key a la instancia e del servicio. La clave es el id que
+// dio el propio invitado. Si key ya está fijada a OTRA instancia no la mueve
+// (lo registra): para saberlo, y para no fiarse del id del invitado, usar
+// BindGuest.
+func (g *Scheduler) Bind(key, service string, e *Instance) { _ = g.bind(key, "", service, e) }
+
+// ErrSessionTaken es el error de BindGuest cuando la clave ya está fijada a
+// otra instancia.
+var ErrSessionTaken = errSessionTaken
+
+// BindGuest fija la clave key —acuñada por quien enruta, ver NewSessionKey— a
+// la instancia e, recordando el id de sesión que dio el invitado (Route.GuestSID)
+// para traducir entre uno y otro. Nunca pisa una clave fijada a otra instancia:
+// devuelve ErrSessionTaken.
+func (g *Scheduler) BindGuest(key, guestSID, service string, e *Instance) error {
+	return g.bind(key, guestSID, service, e)
+}
+
+// NewSessionKey acuña una clave de sesión: 128 bits de crypto/rand en hex. Es
+// la que se da al cliente en lugar del id del invitado, que puede repetirse
+// entre réplicas o ser inventado por un invitado hostil.
+func NewSessionKey() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // Rebind mueve una sesión existente a otra instancia (la anterior murió).
 func (g *Scheduler) Rebind(key string, e *Instance) { g.rebind(key, e) }

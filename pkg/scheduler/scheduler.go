@@ -248,7 +248,15 @@ func (g *Scheduler) end(e *entry) {
 
 // sessionRoute recuerda a qué instancia pertenece cada sesión MCP.
 type sessionRoute struct {
-	service   string
+	service string
+	// guestSID es el id de sesión que dio el INVITADO, cuando quien enruta
+	// acuña su propia clave (BindGuest). Vacío si la clave es la del invitado.
+	//
+	// Se separan porque el id del invitado no es de fiar: sale de un proceso
+	// que este proyecto trata como hostil, y dos réplicas del mismo snapshot
+	// llegaron a dar ids idénticos (CSPRNG copiado en la restauración). Usarlo
+	// como clave de un mapa global dejaba que una sesión pisara a otra.
+	guestSID  string
 	machineID string
 	ip        string
 	fwd       map[string]string
@@ -357,14 +365,28 @@ func (g *Scheduler) route(sid string) *sessionRoute {
 	return rt
 }
 
-func (g *Scheduler) bind(sid, service string, e *entry) {
+// errSessionTaken: la clave ya está fijada a OTRA instancia viva.
+var errSessionTaken = errors.New("session key already bound to another instance")
+
+// bind fija la sesión sid a e. Si sid ya estaba fijada a otra instancia NO la
+// pisa y devuelve errSessionTaken: antes se sobrescribía a ciegas, y dos
+// clientes que recibían el mismo id del invitado acababan con la sesión del
+// primero apuntando a la microVM del segundo. Volver a fijarla a la MISMA
+// instancia sí vale (actualiza guestSID).
+func (g *Scheduler) bind(sid, guestSID, service string, e *entry) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if prev, ok := g.routes[sid]; ok && (prev.service != service || prev.machineID != e.machineID) {
+		log.Printf("%s: session %s is already bound to another instance (%s); refusing to re-point it",
+			service, short(sid), short(prev.machineID))
+		return errSessionTaken
+	}
 	g.routes[sid] = &sessionRoute{
-		service: service, machineID: e.machineID, ip: e.ip, fwd: e.fwd,
+		service: service, guestSID: guestSID, machineID: e.machineID, ip: e.ip, fwd: e.fwd,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
-	log.Printf("%s: session %s bound to %s", service, short(sid), e.ip)
+	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(GuestPort))
+	return nil
 }
 
 // rebind reapunta una sesión a la instancia actual de su servicio, conservando
