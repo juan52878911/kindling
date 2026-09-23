@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -140,7 +141,7 @@ func managerVZ(t *testing.T, largo ...bool) (*Manager, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(base) })
+	t.Cleanup(func() { os.RemoveAll(base); fc.BarrerEnlaces(base) })
 	root := base
 	if len(largo) > 0 && largo[0] {
 		root = filepath.Join(base, "Library", "Application Support", strings.Repeat("k", 50))

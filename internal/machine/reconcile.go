@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 
@@ -110,6 +111,7 @@ func (m *Manager) reconcile() {
 
 	m.sweepMachineDirs()
 	m.killOrphanVMMs()
+	fc.BarrerEnlaces(m.root)
 }
 
 // killOrphanVMMs mata los procesos de firecracker cuya microVM ya no existe o
@@ -398,6 +400,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				m.sweepSnapshotLeftovers()
 				m.mu.Unlock()
 				m.vaciarPapelera()
+				// Los enlaces cortos a sockets de máquinas que ya no existen
+				// (macOS, rutas largas: ver fc.BarrerEnlaces).
+				fc.BarrerEnlaces(m.root)
 				// Y, si el disco aprieta, recuperar espacio eliminando instancias
 				// dormidas que se pueden recrear desde su snapshot.
 				m.gcDisk(ctx)

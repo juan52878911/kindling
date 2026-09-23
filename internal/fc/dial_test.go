@@ -18,6 +18,9 @@ func TestDialSocketConRutaLarga(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Al acabar, fuera también su enlace en /tmp/kling-<uid>: si no, cada
+	// pasada de los tests dejaba uno colgando.
+	defer BarrerEnlaces(base)
 	defer os.RemoveAll(base)
 	dir := filepath.Join(base, strings.Repeat("a", 60), strings.Repeat("b", 40))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -78,5 +81,35 @@ func TestEnlaceCortoRechazaDirectorioAjeno(t *testing.T) {
 	}
 	if dst, _ := os.Readlink(a); dst != "/x/uno.sock" {
 		t.Fatalf("destino = %q", dst)
+	}
+}
+
+// Solo se barren los enlaces de esta raíz cuyo directorio ya no existe: el de
+// una máquina congelada (directorio vivo, sin socket) se queda.
+func TestBarrerEnlacesSoloLosDeMaquinasBorradas(t *testing.T) {
+	links := t.TempDir()
+	raiz := t.TempDir()
+	viva := filepath.Join(raiz, "machines", "viva")
+	if err := os.MkdirAll(viva, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(nombre, destino string) string {
+		p := filepath.Join(links, nombre)
+		if err := os.Symlink(destino, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	borrada := mk("a.sock", filepath.Join(raiz, "machines", "borrada", "fc.sock"))
+	congelada := mk("b.sock", filepath.Join(viva, "fc.sock"))
+	ajena := mk("c.sock", "/otra/raiz/machines/x/fc.sock")
+	barrerEnlaces(links, raiz)
+	if _, err := os.Lstat(borrada); !os.IsNotExist(err) {
+		t.Fatal("el enlace de una máquina borrada sigue ahí")
+	}
+	for _, p := range []string{congelada, ajena} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s no debía borrarse: %v", p, err)
+		}
 	}
 }

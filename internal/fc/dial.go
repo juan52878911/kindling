@@ -17,11 +17,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -82,4 +84,31 @@ func enlaceCorto(dir, destino string) (string, error) {
 		return "", err
 	}
 	return link, nil
+}
+
+// BarrerEnlaces borra los enlaces cortos que apuntan dentro de raiz a un
+// directorio que ya no existe: los de máquinas borradas. Sin esto
+// /tmp/kling-<uid> acumulaba un enlace por cada máquina que existió. Se mira
+// el directorio y no el socket porque una máquina congelada no tiene socket
+// (su VMM no corre) y su enlace volverá a servir al descongelarla.
+func BarrerEnlaces(raiz string) {
+	barrerEnlaces(dirEnlaces(), raiz)
+}
+
+func barrerEnlaces(dir, raiz string) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	pre := filepath.Clean(raiz) + string(filepath.Separator)
+	for _, e := range ents {
+		link := filepath.Join(dir, e.Name())
+		destino, err := os.Readlink(link)
+		if err != nil || !strings.HasPrefix(destino, pre) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Dir(destino)); errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(link)
+		}
+	}
 }
