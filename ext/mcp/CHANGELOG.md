@@ -9,7 +9,7 @@ microVMs de [kindling](https://github.com/juan52878911/kindling).
 | v0.2.x | v0.7.x |
 | v0.1.x | v0.6.x, v0.7.x |
 
-## Sin publicar — v0.3.0
+## v0.3.0 — 2026-09-23
 
 - **Un `kling mcp link` recién hecho funciona a la primera.** El gateway guarda
   los enlaces 30 s en caché, y hasta que caducaba la primera petición al
