@@ -133,6 +133,7 @@ SMALL MODELS (JEV, runs locally, no daemon)
                                                    JEV intent + slots, or escalate
   domotica eval -data t.jsonl [-challenge]         accuracy, slot F1, exact match, latency
   domotica train-slots -data d.jsonl -o m.jevs     trains the slot tagger (docs/domotica.md)
+  domotica templates [-lang L]                     lists the predefined demo commands
 
 `
 
