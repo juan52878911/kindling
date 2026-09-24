@@ -696,7 +696,8 @@ shares cannot be committed. Live shares go through the guest's network device, c
 
 ## Small LLMs on demand (VON)
 
-`kling models` serves small instruct models (SmolLM2-360M, Qwen2.5-0.5B) from microVMs with
+`kling models` serves small instruct models (SmolLM2-360M, Qwen2.5 0.5B and 1.5B; only
+Apache-2.0/MIT weights in the default catalog) from microVMs with
 llama.cpp's OpenAI-compatible `llama-server`, frozen in a golden snapshot **after** the model is
 loaded and warmed:
 
@@ -734,23 +735,30 @@ real commits, including where the thresholds stop holding:
 
 ## AI gateway: many models ready, none running 24/7
 
-`kling ai serve` puts JEV and VON behind one API. A **task** is a cascade: JEV
-(in-process) answers when its calibrated probability clears the class threshold,
-otherwise the request escalates to a VON model, whose replica is thawed on the first
-request, scaled out under concurrency and frozen again when idle (`pkg/scheduler`).
-`POST /v1/classify` and `/v1/decide` return `{label, prob, source: jev|von, latency_ms,
-evidence}`; `/v1/chat/completions` and `/v1/models` are OpenAI-compatible, with
-streaming. It listens on a 0600 Unix socket by default and on TCP only with `-listen`
-and a token; `/metrics` reports coverage, escalation rate, thaws and cold starts.
+`kling ai serve` puts JEV and VON behind one API, each doing its own job: **JEV
+classifies, routes and filters** (in-process, microseconds), **VON generates**
+(summaries, drafts, answers) from replicas that are thawed on the first request,
+scaled out under concurrency and frozen again when idle (`pkg/scheduler`).
+`POST /v1/classify` and `/v1/decide` return JEV's label with `escalate: true` when it
+is unsure, so the caller decides; `POST /v1/generate` fills a per-task prompt template;
+`/v1/chat/completions` and `/v1/models` are OpenAI-compatible, with streaming.
+Chaining the two (a **cascade**: VON answers what JEV doubts) is opt-in per task and
+**only enabled when `kling ai eval` shows, on that task's labelled data, that it beats
+JEV alone** (McNemar test, same models and settings); otherwise the gateway refuses it
+unless `escalate_force`. It listens on a 0600 Unix socket by default and on TCP only
+with `-listen` and a token.
 
 ```sh
 kling ai serve                                  # registry in ~/.config/kling/ai.json
 kling ai test commit-type "fix crash when the cache is cold"
-kling ai calibrate commit-type -dry-run         # re-tune JEV thresholds on VON's answers
+kling ai generate summarize "fix(parser): handle empty input"
+kling ai eval commit-type -data test.jsonl -von qwen   # gates escalate_to
 ```
 
-Measured on commit classification, JEV alone answers in 6 µs at 0.64 accuracy, while the tiny VON models tested there are worse (0.06–0.24), so the cascade must be measured per task before enabling it. Design, API, recalibration and its limits:
-[`docs/ai-gateway.md`](docs/ai-gateway.md).
+Measured on commit classification (861 held-out commits), JEV alone is 0.640 accurate in
+6 µs; no cascade reached it — Qwen2.5 0.5B 0.429, 1.5B 0.520, 3B 0.540 — so the gate
+refused them all. On a Mac, a warm generation answers in 9 ms, a frozen replica in
+~1.5 s. Design, API, numbers and limits: [`docs/ai-gateway.md`](docs/ai-gateway.md).
 
 ## What persists and what does not
 
@@ -1136,7 +1144,7 @@ instances share pages.
 | [`docs/three-layers.md`](docs/three-layers.md) | Layered images: design, measurements, runtime families |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, the tiny linear classifier: features, `.jev` format, cascade; its evaluation on real commits |
-| [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: JEV → VON cascade, scale to zero, OpenAI API, recalibration, measured numbers |
+| [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: JEV classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |
 | [`docs/releases.md`](docs/releases.md) | How releases are built and published |

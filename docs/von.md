@@ -1,6 +1,6 @@
 # VON: modelos de lenguaje pequeños bajo demanda
 
-VON son LLM *instruct* pequeños —SmolLM2-360M, Qwen2.5-0.5B— servidos desde
+VON son LLM *instruct* pequeños —SmolLM2-360M, Qwen2.5-0.5B y 1.5B— servidos desde
 microVMs de kindling con la API compatible con OpenAI de `llama-server`
 (llama.cpp), que escalan a cero y vuelven desde un **snapshot dorado congelado con
 el modelo ya cargado y caliente**. Es la mitad "generativa" de la cascada que
@@ -83,15 +83,31 @@ curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 
 ### Catálogo y mandos
 
-| Modelo (`-model`) | `-quant` | GGUF | vCPU / memoria por defecto | Origen fijado |
-|---|---|---|---|---|
-| `smollm2-360m-instruct` | `q8_0` (defecto) | 369 MiB | 2 / 768 MiB | HuggingFaceTB, rev `593b5a2e` |
-| `smollm2-360m-instruct` | `q4_k_m` | 258 MiB | 2 / 640 MiB | bartowski, rev `7be6f65f` |
-| `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1152 MiB | Qwen, rev `9217f5db` |
-| `qwen2.5-0.5b-instruct` | `q4_k_m` | 469 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` |
+| Modelo (`-model`) | `-quant` | GGUF | vCPU / memoria por defecto | Origen fijado | Licencia |
+|---|---|---|---|---|---|
+| `smollm2-360m-instruct` | `q8_0` (defecto) | 369 MiB | 2 / 768 MiB | HuggingFaceTB, rev `593b5a2e` | Apache-2.0 |
+| `smollm2-360m-instruct` | `q4_k_m` | 258 MiB | 2 / 640 MiB | bartowski, rev `7be6f65f` | Apache-2.0 |
+| `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1152 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
+| `qwen2.5-0.5b-instruct` | `q4_k_m` | 469 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
+| `qwen2.5-1.5b-instruct` | `q8_0` | 1807 MiB | 4 / 2304 MiB | Qwen, rev `91cad511` | Apache-2.0 |
+| `qwen2.5-1.5b-instruct` | `q4_k_m` | 1066 MiB | 4 / 1536 MiB | Qwen, rev `91cad511` | Apache-2.0 |
+| `qwen2.5-3b-instruct` | `q4_k_m` (única) | 2007 MiB | 4 / 2816 MiB | Qwen, rev `7dabda4d` | **Qwen Research** (no comercial): fuera del catálogo por defecto |
 
-Cada entrada lleva revisión de Hugging Face (commit, no rama) y sha256; el
-constructor verifica el hash antes de meter nada en la imagen. Un GGUF propio:
+Cada entrada lleva revisión de Hugging Face (commit, no rama), sha256, licencia
+y dónde leerla (`pkg/von`, `kling models ls`); el constructor verifica el hash
+antes de meter nada en la imagen.
+
+**Licencias.** En el catálogo por defecto solo entran modelos que se pueden usar
+**y redistribuir** libremente, también con fines comerciales (Apache-2.0, MIT):
+un dorado es una copia de los pesos que viaja entre daemons con `images copy`.
+Qwen2.5-3B-Instruct está bajo la Qwen Research License (ficha de Hugging Face:
+`license: other`, `license_name: qwen-research`): no sale en la lista de modelos y
+`models add` la rechaza salvo que se acepte a propósito, con su identificador
+exacto: `-accept-license qwen-research` (imprime la licencia y su enlace). Está
+en el catálogo para evaluar ([ai-gateway.md](ai-gateway.md)), no para servir.
+Candidatos abiertos por medir: Qwen2.5-7B-Instruct (Apache-2.0, ~4,7 GB en
+Q4_K_M: no cabe al lado de la VM de Lima en un Mac de 16 GiB) y los Qwen3
+pequeños (0.6B, 1.7B, 4B; Apache-2.0). Un GGUF propio:
 `-url https://huggingface.co/<org>/<repo>/resolve/<commit>/<fichero>.gguf -sha256
 <hash>` (solo Hugging Face y solo por commit, por la misma razón).
 
@@ -103,6 +119,8 @@ constructor verifica el hash antes de meter nada en la imagen. Un GGUF propio:
 | `-cpus`, `-mem` | los del catálogo | tamaño de la microVM; con un GGUF propio, 2 y 1024 |
 | `-cpu-pct` | 100 × vCPU | techo de CPU que graba el dorado y heredan las réplicas |
 | `-build-only` | — | solo la imagen (para copiarla a un Mac) |
+| `-accept-license` | — | construir un modelo del catálogo que no es de licencia abierta (su identificador) |
+| `-wait` | 5m | cuánto esperar a que el modelo cargue, y a que conteste el calentamiento (que se reintenta si el proxy del daemon se cansa antes) |
 | `-rebuild`, `-replace` | — | rehacer la imagen / pisar el dorado |
 
 ## Cómo está hecho
@@ -182,6 +200,9 @@ una semilla fija (la API la acepta).
 | SmolLM2-360M Q8_0 | 768 MiB | 527 / 456 MiB | pesos reempaquetados 369 MiB + KV 80 MiB + cálculo |
 | Qwen2.5-0.5B Q4_K_M | 896 MiB | 602 MiB / 528 MiB | KV pequeña (2 cabezas KV); búfer de cálculo grande (vocabulario de 152k) |
 | Qwen2.5-0.5B Q8_0 | 1152 MiB | 871 MiB / 800 MiB | el más justo: a 1024 medía 871 MiB (153 libres para la caché KV y los búferes del vocabulario de 152k si se sube `-ctx`); memoria por defecto subida a 1152 |
+| Qwen2.5-1.5B Q4_K_M | 1536 MiB | 1286 MiB / 1184 MiB | 4 vCPU; KV ~28 KiB/token (56 MiB a 2048) |
+| Qwen2.5-1.5B Q8_0 | 2304 MiB | — / 2048 MiB | en el laboratorio anidado no terminó de cargar en 2 h (abajo) |
+| Qwen2.5-3B Q4_K_M | 2816 MiB | — / 2176 MiB | KV ~36 KiB/token; licencia no abierta (arriba) |
 
 En Linux la memoria de la VM que no se toca no cuesta: el `mem.file` es disperso y
 lo no escrito son huecos. En macOS sí: `vz` restaura copiando la memoria del
@@ -255,6 +276,33 @@ en la caché de páginas del host (el `mem.file` del dorado) y cada réplica añ
 | generación (128 tokens), tok/s | **139** (133–144) | 87 (82–91) | **112** (108–114) |
 | memoria por réplica (`phys_footprint`) | 1298 MiB | 1435 MiB | 1691 MiB |
 | 1 → N réplicas | 1298 → 5155 MiB (4) | 1435 → 4309 MiB (3) | 1691 → 5075 MiB (3) |
+
+Los de 1,5B y 3B (4 vCPU; medidos con la VM de Lima —8 GiB— cargando modelos al
+lado, así que los tiempos de thaw son pesimistas):
+
+| | Qwen2.5-1.5B Q4_K_M | Qwen2.5-1.5B Q8_0 | Qwen2.5-3B Q4_K_M |
+|---|---|---|---|
+| `mem.file` del dorado | 1184 MiB | 2048 MiB | 2176 MiB |
+| crear el dorado (imagen copiada) | 6 s | 20 s (carga 3,6 s) | 10 s (carga 4,4 s) |
+| arranque en frío → primer token | 2,67 s | 4,45 s | 4,00 s |
+| thaw (`thaw_ms`) | 1688 ms (1389–4591) | 8491 ms (7515–8962) | 2334 ms (2265–8015) |
+| `run -from` → primer token | **1,97 s** (1,67–5,25) | 8,96 s (8,05–9,79) | **2,66 s** (2,50–8,62) |
+| de ello, la petición de 1 token | 267 ms | 434 ms | 291 ms |
+| prompt (61 tokens), tok/s | 177 (171–180) | 291 (279–316) | 91 (85–96) |
+| generación (128 tokens), tok/s | **60** (60–62) | 46 (43–48) | 34 (33–34) |
+| memoria por réplica (`phys_footprint`) | 2640 MiB | 4025 MiB | 4833 MiB |
+| 1 → N réplicas | 2640 → 5196 MiB (2) | 4025 → 7960 MiB (2) | una (cabe una al lado de Lima) |
+
+- A partir de 1,5B, **en el Mac el dorado casi no gana al arranque en frío**, y el
+  Q8_0 pierde: restaurar copia la memoria entera (2 GiB en 8,5 s con el Mac
+  apretado de memoria) y cargar el GGUF desde la caché de páginas cuesta 3–4 s.
+  El dorado sigue ganando en Linux, donde la memoria se mapea perezosamente.
+- Q4_K_M genera más rápido que Q8_0 a este tamaño (60 frente a 46 tok/s: la
+  generación la limita el ancho de banda de memoria), pero evalúa el prompt más
+  despacio (177 frente a 291): para respuestas cortas con prompt largo (una
+  clasificación con ejemplos) gana Q8_0; para generar, Q4_K_M.
+- Cada réplica pesa en el Mac bastante más que su VM (el proceso de
+  Virtualization.framework y el ayudante): 2,6 GiB una de 1,5 GiB.
 
 Lecturas:
 
@@ -341,22 +389,15 @@ vGPU con licencia) dentro de una microVM con su driver.
 El orden razonable: runner de host detrás del mismo gateway, y VFIO solo si
 aparece la necesidad de GPU aislada.
 
-## Lo que falta para el gateway
+## El gateway
 
-`pkg/von` ya tiene lo que el gateway necesita del lado VON:
-
-- descubrir modelos: snapshots con la etiqueta `von.model`; el puerto es `von.Port`
-  (8000, también en `kling.ports`);
-- despertar y repartir réplicas: `pkg/scheduler` (ya hereda `cpu_pct`, egress y
-  etiquetas del snapshot);
-- hablar con una réplica: `api.Machine.Addr(von.Port)` —vale en Linux y en macOS—
-  y la API de OpenAI tal cual; streaming directo a esa dirección (el proxy del
-  daemon no hace streaming);
-- (re)crear un dorado: `von.MakeGolden`, por ejemplo tras reiniciar el host, que
-  invalida los snapshots.
-
-Por hacer en el gateway: `/v1/models` agregado, enrutar por `model`, mandar `seed`
-propio si no viene, la cascada JEV → VON, y ttl/escala a cero por modelo.
+`kling ai serve` ([ai-gateway.md](ai-gateway.md)) sirve estos modelos para
+generar (`/v1/generate` con plantilla por tarea, y la API de OpenAI), con
+`pkg/scheduler` para despertarlos por petición y congelarlos al quedarse
+ociosos. Descubre los dorados por `von.model`, habla con cada réplica en
+`api.Machine.Addr(von.Port)` (streaming directo, sin el proxy del daemon) y manda
+una semilla propia por petición. Como clasificadores detrás de JEV (la cascada)
+no ganaron en la tarea medida, ni con 1,5B ni con 3B: allí están las cifras.
 
 ## Límites conocidos
 
