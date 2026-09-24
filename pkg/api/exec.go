@@ -137,7 +137,9 @@ const (
 	SandboxMaxTTL     = 24 * 3600
 )
 
-// RenewRequest alarga la vida de un sandbox: vence TTLSeconds a partir de ahora.
+// RenewRequest renueva el TTL de un sandbox (POST /sandboxes/{ref}/renew) o de
+// una máquina (POST /machines/{ref}/renew): vence TTLSeconds a partir de ahora.
+// En la de máquinas, 0 conserva el plazo que tenía y solo reinicia el reloj.
 type RenewRequest struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 }
@@ -290,6 +292,13 @@ func (c *Client) CreateSandbox(ctx context.Context, r SandboxRequest) (*Machine,
 func (c *Client) Sandboxes(ctx context.Context) ([]*Machine, error) {
 	var out []*Machine
 	return out, c.do(ctx, http.MethodGet, "/sandboxes", nil, &out)
+}
+
+// Renew reinicia el reloj del TTL de una máquina que no es un sandbox (capacidad
+// "renew"). ttlSeconds 0 conserva el plazo que ya tenía.
+func (c *Client) Renew(ctx context.Context, ref string, ttlSeconds int) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+url.PathEscape(ref)+"/renew", RenewRequest{TTLSeconds: ttlSeconds}, &m)
 }
 
 // RenewSandbox alarga la vida de un sandbox.

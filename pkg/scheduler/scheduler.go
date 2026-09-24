@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -144,6 +145,9 @@ type Scheduler struct {
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
 	freezeFn func(id string) error
+	// renewCap dice si el daemon sabe renovar TTLs (capacidad "renew"): 0 aún
+	// no se sabe, 1 sí, 2 no. Ver renovarTTL.
+	renewCap atomic.Int32
 	mu       sync.Mutex
 	services map[string]*entry        // servicio -> instancia "por defecto" (primaria)
 	extra    map[string][]*entry      // servicio -> RÉPLICAS de scale-out (además de la primaria)
@@ -199,6 +203,10 @@ type entry struct {
 
 	// checkedAt es cuándo se confirmó por última vez que la instancia vive.
 	checkedAt time.Time
+
+	// renewedAt es cuándo se renovó por última vez el TTL de la máquina en el
+	// daemon (ver renovarTTL). Se toca con g.mu.
+	renewedAt time.Time
 
 	// tenant es a quién se atribuye esta instancia despierta: el primer tenant
 	// que la despertó o creó. Guía la cuota de instancias y el fairness de
@@ -560,7 +568,8 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		fwd:         mc.Forwards,
 		lastUse:     time.Now(),
 		checkedAt:   time.Now(),
-		tenant:      tnt.name, // quien la despertó es su dueño para cuota y fairness
+		renewedAt:   time.Now(), // acquire la renovó, o runFresh la acaba de crear
+		tenant:      tnt.name,   // quien la despertó es su dueño para cuota y fairness
 		maxSessions: gwMaxSessions(mc.MemMiB),
 		proxy:       proxyInvitado(target),
 	}
@@ -761,15 +770,21 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*a
 		return m.Service() == service || m.From == service
 	}
 
-	// 1) alguna ya en marcha
+	// 1) alguna ya en marcha. Puede traer el reloj del TTL a punto de vencer
+	// (la dejó otro gateway, o este antes de reiniciarse): se renueva al
+	// adoptarla.
 	for _, m := range machines {
 		if match(m) && m.State == api.StateRunning && m.Reachable() {
+			g.renovarTTL(ctx, m.ID)
 			return m, nil
 		}
 	}
-	// 2) alguna congelada: ~30 ms
+	// 2) alguna congelada: ~30 ms. El TTL se renueva ANTES de despertarla: una
+	// vuelta del vigilante del daemon entre el thaw y la renovación la volvería
+	// a congelar, y una congelada también se puede renovar.
 	for _, m := range machines {
 		if match(m) && m.State == api.StateWarm {
+			g.renovarTTL(ctx, m.ID)
 			log.Printf("%s: thawing %s", service, m.Name)
 			return g.client.Thaw(ctx, m.ID)
 		}
@@ -798,8 +813,58 @@ func (g *Scheduler) runFresh(ctx context.Context, service string) (*api.Machine,
 		// arrancaba estrangulado. 0 (snapshots viejos) deja que el daemon decida.
 		CPUPct:     snap.CPUPct,
 		Labels:     map[string]string{api.LabelService: service},
-		TTLSeconds: int(g.idle.Seconds()) * 2, // red de seguridad si el gateway muere
+		TTLSeconds: g.ttlSeconds(), // red de seguridad si el gateway muere
 	})
+}
+
+// ttlSeconds es el TTL de las instancias del planificador: 2×idle.
+func (g *Scheduler) ttlSeconds() int { return int(g.idle.Seconds()) * 2 }
+
+// renovarTTL reinicia en el daemon el reloj del TTL de una instancia que el
+// planificador está usando.
+//
+// Quien congela por inactividad es el segador; el TTL (2×idle) es solo la red de
+// seguridad por si el gateway muere. Pero el daemon lo cuenta desde que creó la
+// máquina, y ni despertarla ni el tráfico HTTP que atiende lo reinician
+// —despertar no debe alargar la vida de un sandbox—. Sin renovarlo, una
+// instancia creada hace más de 2×idle, congelada por el segador y despertada por
+// una petición, volvía a congelarse en la siguiente vuelta del vigilante del
+// daemon (~10 s) con la petición a medias; y una que atendía sin parar se
+// congelaba al cumplir 2×idle. Renovándolo al despertarla y en cada vuelta del
+// segador (ver reapOnce), el TTL pasa a ser un arrendamiento: dura mientras el
+// gateway viva, y si muere, vence.
+//
+// Contra un daemon sin la capacidad "renew" no hace nada: queda lo de antes.
+func (g *Scheduler) renovarTTL(ctx context.Context, id string) {
+	if g.client == nil || !g.sabeRenovar(ctx) {
+		return
+	}
+	if _, err := g.client.Renew(ctx, id, g.ttlSeconds()); err != nil {
+		log.Printf("renew ttl %s: %v", short(id), err)
+	}
+}
+
+// sabeRenovar pregunta UNA vez al daemon si anuncia la capacidad "renew". Si no
+// contesta, no se apunta nada y se vuelve a preguntar la próxima vez.
+func (g *Scheduler) sabeRenovar(ctx context.Context) bool {
+	switch g.renewCap.Load() {
+	case 1:
+		return true
+	case 2:
+		return false
+	}
+	info, err := g.client.Info(ctx)
+	if err != nil {
+		return false
+	}
+	if info.Has("renew") {
+		g.renewCap.Store(1)
+		return true
+	}
+	if g.renewCap.CompareAndSwap(0, 2) {
+		log.Printf("the daemon can't renew machine TTLs (no \"renew\" capability): an instance may be frozen by its TTL while in use; upgrade kindling")
+	}
+	return false
 }
 
 func (g *Scheduler) snapshotFor(ctx context.Context, service string) (*api.Snapshot, error) {
@@ -1091,6 +1156,25 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			delete(g.routes, sid)
 		}
 	}
+	// Latido del TTL de las que siguen despiertas (ver renovarTTL). El segador
+	// pasa cada idle/3 y el TTL es 2×idle: renovando lo que lleva más de idle/2
+	// sin renovar, entre dos renovaciones nunca pasa más de ~idle, y no se
+	// molesta al daemon en cada vuelta por cada instancia.
+	var renovar []string
+	marcar := func(e *entry) {
+		if time.Since(e.renewedAt) >= g.idle/2 {
+			e.renewedAt = time.Now()
+			renovar = append(renovar, e.machineID)
+		}
+	}
+	for _, e := range g.services {
+		marcar(e)
+	}
+	for _, es := range g.extra {
+		for _, e := range es {
+			marcar(e)
+		}
+	}
 	g.mu.Unlock()
 
 	for _, v := range victims {
@@ -1099,6 +1183,9 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			continue
 		}
 		log.Printf("%s: frozen due to inactivity", v.service)
+	}
+	for _, id := range renovar {
+		g.renovarTTL(ctx, id)
 	}
 }
 
