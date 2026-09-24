@@ -54,7 +54,15 @@ if p.Confident {
 return escalar(msg, m.PredictFull(jev.Input{Text: msg}, 5)) // pasa probs y evidencia como pista
 ```
 
-## Cómo lo usará el gateway (JEV → VON)
+## Cómo lo usa el gateway
+
+En `kling ai serve` ([ai-gateway.md](ai-gateway.md)) JEV contesta las
+clasificaciones; cuando duda, la respuesta sale igual con `escalate: true` y
+quien llama decide. Lo de abajo, escalar a VON, es la **cascada**, y solo se
+activa por tarea si `kling ai eval` demuestra que gana a JEV solo: en commits no
+ganó con ningún LLM de 0,5B a 3B.
+
+### La cascada (JEV → VON)
 
 1. La petición llega al gateway. Se extrae `text` (y `fields` si los hay: servicio,
    nivel, herramienta pedida…).

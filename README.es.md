@@ -84,6 +84,7 @@ enlazadas:
 · [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
 · [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
 · [JEV: un clasificador diminuto para decisiones pequeñas](#jev-un-clasificador-diminuto-para-decisiones-pequeñas)
+· [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -703,7 +704,7 @@ modelo de amenaza: [`docs/compartir.md`](docs/compartir.md).
 
 ## LLM pequeños bajo demanda (VON)
 
-`kling models` sirve modelos *instruct* pequeños (SmolLM2-360M, Qwen2.5-0.5B) desde microVMs
+`kling models` sirve modelos *instruct* pequeños (SmolLM2-360M, Qwen2.5 0.5B y 1.5B; en el catálogo por defecto solo pesos Apache-2.0/MIT) desde microVMs
 con `llama-server` de llama.cpp y su API compatible con OpenAI, congelados en un snapshot
 dorado **después** de cargar y calentar el modelo:
 
@@ -738,6 +739,34 @@ kling jev predict -model eventos.jev -text "panic in the parser" -fields '{"serv
 Diseño y formato: [`docs/jev.md`](docs/jev.md). Una evaluación honesta con 4 304
 commits reales, incluido dónde dejan de valer los umbrales:
 [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
+
+## Gateway de IA: muchos modelos listos, ninguno encendido 24/7
+
+`kling ai serve` pone JEV y VON detrás de una misma API, cada uno a lo suyo: **JEV
+clasifica, enruta y filtra** (dentro del proceso, microsegundos) y **VON genera**
+(resúmenes, borradores, respuestas) desde réplicas que se descongelan con la primera
+petición, se multiplican con la concurrencia y se vuelven a congelar al quedarse
+ociosas (`pkg/scheduler`). `POST /v1/classify` y `/v1/decide` devuelven la etiqueta de
+JEV con `escalate: true` cuando duda, y quien llama decide; `POST /v1/generate` rellena
+una plantilla por tarea; `/v1/chat/completions` y `/v1/models` son compatibles con
+OpenAI, con streaming. Encadenarlos (una **cascada**: VON contesta lo que JEV duda) es
+opcional por tarea y **solo se activa si `kling ai eval` demuestra, con datos
+etiquetados de esa tarea, que gana a JEV solo** (prueba de McNemar, mismos modelos y
+ajustes); si no, el gateway se niega salvo `escalate_force`. Escucha en un socket Unix
+0600 por defecto y en TCP solo con `-listen` y token.
+
+```sh
+kling ai serve                                  # registro en ~/.config/kling/ai.json
+kling ai test commit-type "fix crash when the cache is cold"
+kling ai generate summarize "fix(parser): handle empty input"
+kling ai eval commit-type -data test.jsonl -von qwen   # decide si escalate_to se activa
+```
+
+Medido en clasificación de commits (861 de prueba): JEV solo acierta el 0,640 en 6 µs y
+ninguna cascada llegó —Qwen2.5 0.5B 0,429, 1.5B 0,520, 3B 0,540—, así que la puerta las
+rechazó todas. En un Mac, una generación con la réplica caliente contesta en 9 ms y con
+la réplica congelada en ~1,5 s. Diseño, API, cifras y límites:
+[`docs/ai-gateway.md`](docs/ai-gateway.md).
 
 ## Qué persiste y qué no
 
@@ -1130,6 +1159,7 @@ permite que N instancias compartan páginas.
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención JEV + JEV-slots, datos libres con su licencia, y su evaluación |
+| [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: JEV clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
 | [`docs/releases.md`](docs/releases.md) | Cómo se construyen y publican las releases |

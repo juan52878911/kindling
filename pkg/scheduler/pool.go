@@ -169,10 +169,10 @@ func (p *pool) fillN(ctx context.Context, service, snapshot string, want int) {
 func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, error) {
 	mc, err := p.gw.client.Run(ctx, api.RunRequest{
 		From: snapshot,
-		Labels: map[string]string{
+		Labels: api.MergeLabels(p.gw.MachineLabels, map[string]string{
 			api.LabelService: service,
 			"pool":           "true",
-		},
+		}),
 		// Red de seguridad para si el gateway muriera: el daemon las congela en
 		// vez de dejarlas vivas para siempre.
 		//
@@ -197,7 +197,7 @@ func (p *pool) warm(ctx context.Context, service, snapshot string) (*warmVM, err
 	var sid string
 	switch {
 	case p.gw.PrepareAddr != nil:
-		sid, err = p.gw.PrepareAddr(ctx, mc.Addr(GuestPort))
+		sid, err = p.gw.PrepareAddr(ctx, mc.Addr(p.gw.port()))
 	case p.gw.Prepare != nil:
 		sid, err = p.gw.Prepare(ctx, mc.IP)
 	}

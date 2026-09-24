@@ -28,6 +28,7 @@ var coreSubcommands = [][2]string{
 	{"models", "ls add ask rm"},
 	{"jev", "train eval predict inspect"},
 	{"domotica", "decide eval train-slots templates"},
+	{"ai", "serve ls test generate eval calibrate reload"},
 }
 
 // machineArgs son los comandos del núcleo que reciben un id de máquina.

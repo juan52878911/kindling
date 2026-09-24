@@ -54,10 +54,24 @@ type Model struct {
 	// MemMiB y VCPUs son el tamaño por defecto de la microVM. La memoria sale de
 	// medir (docs/von.md): pesos + caché KV de DefaultCtx + búfer de cálculo +
 	// kernel y agente, con margen. Se puede cambiar con -mem.
-	MemMiB  int
-	VCPUs   int
-	License string
+	MemMiB int
+	VCPUs  int
+	// License es el identificador de la licencia de los pesos (el de la
+	// ficha de Hugging Face) y LicenseURL dónde leerla, en la misma revisión:
+	// el LICENSE del repositorio o, si no lo trae (SmolLM2), su ficha.
+	License    string
+	LicenseURL string
 }
+
+// openLicenses son las licencias con las que un modelo entra en el catálogo por
+// defecto: permiten usarlo Y redistribuirlo, también con fines comerciales. Un
+// dorado es una copia de los pesos que viaja entre daemons (images copy), así
+// que "solo para investigar" no basta.
+var openLicenses = map[string]bool{"apache-2.0": true, "mit": true}
+
+// Open dice si el modelo está en el catálogo por defecto. Los demás solo se
+// construyen aceptando su licencia a propósito (Spec.AcceptLicense).
+func (m Model) Open() bool { return openLicenses[m.License] }
 
 // Ref es el nombre completo del modelo en una etiqueta: ID:cuantización.
 func (m Model) Ref() string { return m.ID + ":" + m.Quant }
@@ -78,6 +92,7 @@ var Catalog = []Model{
 		File:     "smollm2-360m-instruct-q8_0.gguf",
 		SHA256:   "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201",
 		Size:     386404992, MemMiB: 768, VCPUs: 2, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/blob/593b5a2e04c8f3e4ee880263f93e0bd2901ad47f/README.md",
 	},
 	{
 		ID: "smollm2-360m-instruct", Quant: "q4_k_m",
@@ -86,6 +101,7 @@ var Catalog = []Model{
 		File:     "SmolLM2-360M-Instruct-Q4_K_M.gguf",
 		SHA256:   "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2",
 		Size:     270590880, MemMiB: 640, VCPUs: 2, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/blob/7be6f65f1db715fe5dc5a4634c0d459b4eed42ec/README.md",
 	},
 	{
 		ID: "qwen2.5-0.5b-instruct", Quant: "q4_k_m",
@@ -94,6 +110,7 @@ var Catalog = []Model{
 		File:     "qwen2.5-0.5b-instruct-q4_k_m.gguf",
 		SHA256:   "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
 		Size:     491400032, MemMiB: 896, VCPUs: 2, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/blob/9217f5db79a29953eb74d5343926648285ec7e67/LICENSE",
 	},
 	{
 		// MemMiB en 1152, no 1024: medido en el dorado (docs/von.md, Dimensionado),
@@ -106,6 +123,47 @@ var Catalog = []Model{
 		File:     "qwen2.5-0.5b-instruct-q8_0.gguf",
 		SHA256:   "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e",
 		Size:     675710816, MemMiB: 1152, VCPUs: 2, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/blob/9217f5db79a29953eb74d5343926648285ec7e67/LICENSE",
+	},
+	// 1,5B y 3B: el escalón en el que un modelo instruct empieza a seguir una
+	// plantilla de pocos ejemplos en vez de contestar siempre lo mismo (los de
+	// 360M y 0,5B colapsan a una o dos etiquetas; docs/ai-gateway.md). 4 vCPU y
+	// no 2: con estos tamaños la evaluación del prompt, que es casi todo el
+	// coste de una respuesta corta, escala con los hilos. La memoria sale de
+	// medir el dorado (docs/von.md, Dimensionado): pesos reempaquetados + KV de
+	// DefaultCtx (~28 KiB/token en 1,5B, ~36 KiB/token en 3B) + el búfer de
+	// cálculo del vocabulario de 152k + kernel y agente, con margen.
+	{
+		ID: "qwen2.5-1.5b-instruct", Quant: "q4_k_m",
+		Repo:     "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+		Revision: "91cad51170dc346986eccefdc2dd33a9da36ead9",
+		File:     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+		SHA256:   "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+		Size:     1117320736, MemMiB: 1536, VCPUs: 4, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/91cad51170dc346986eccefdc2dd33a9da36ead9/LICENSE",
+	},
+	{
+		ID: "qwen2.5-1.5b-instruct", Quant: "q8_0",
+		Repo:     "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+		Revision: "91cad51170dc346986eccefdc2dd33a9da36ead9",
+		File:     "qwen2.5-1.5b-instruct-q8_0.gguf",
+		SHA256:   "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
+		Size:     1894532128, MemMiB: 2304, VCPUs: 4, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/91cad51170dc346986eccefdc2dd33a9da36ead9/LICENSE",
+	},
+	{
+		// FUERA del catálogo por defecto: el 3B no es Apache como el 0,5B y el
+		// 1,5B, es la Qwen Research License (sin uso comercial). Está para
+		// evaluar (docs/ai-gateway.md) y solo se construye con
+		// -accept-license qwen-research. Solo Q4_K_M: el Q8_0 son 3,4 GiB de
+		// pesos, más de lo que cabe al lado de la VM de Lima en un Mac de 16 GiB.
+		ID: "qwen2.5-3b-instruct", Quant: "q4_k_m",
+		Repo:     "Qwen/Qwen2.5-3B-Instruct-GGUF",
+		Revision: "7dabda4d13d513e3e842b20f0d435c732f172cbe",
+		File:     "qwen2.5-3b-instruct-q4_k_m.gguf",
+		SHA256:   "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+		Size:     2104932768, MemMiB: 2816, VCPUs: 4, License: "qwen-research",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/blob/7dabda4d13d513e3e842b20f0d435c732f172cbe/LICENSE",
 	},
 }
 
@@ -124,18 +182,29 @@ func Find(id, quant string) (Model, error) {
 		id, quant = i, q
 	}
 	quant = strings.ToLower(strings.TrimSpace(quant))
-	if quant == "" {
+	porDefecto := quant == ""
+	if porDefecto {
 		quant = defaultQuant
 	}
 	var quants []string
-	for _, m := range Catalog {
+	var primera *Model
+	for i, m := range Catalog {
 		if m.ID != id {
 			continue
 		}
 		if m.Quant == quant {
 			return m, nil
 		}
+		if primera == nil {
+			primera = &Catalog[i]
+		}
 		quants = append(quants, m.Quant)
+	}
+	// Sin cuantización pedida y sin Q8_0 en el catálogo (el 3B solo tiene
+	// Q4_K_M), la única que hay es la que se quería: fallar obligaría a
+	// escribir -quant para decir lo obvio.
+	if porDefecto && primera != nil {
+		return *primera, nil
 	}
 	if len(quants) > 0 {
 		sort.Strings(quants)
@@ -144,12 +213,13 @@ func Find(id, quant string) (Model, error) {
 	return Model{}, fmt.Errorf("unknown model %q; available: %s", id, strings.Join(IDs(), ", "))
 }
 
-// IDs son los modelos del catálogo, sin repetir y en el orden del catálogo.
+// IDs son los modelos del catálogo por defecto (licencia abierta), sin repetir
+// y en el orden del catálogo.
 func IDs() []string {
 	var out []string
 	visto := map[string]bool{}
 	for _, m := range Catalog {
-		if !visto[m.ID] {
+		if m.Open() && !visto[m.ID] {
 			visto[m.ID] = true
 			out = append(out, m.ID)
 		}

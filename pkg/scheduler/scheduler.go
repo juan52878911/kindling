@@ -105,11 +105,11 @@ func waitReadyAddr(ctx context.Context, addr string, timeout time.Duration) erro
 func (g *Scheduler) esperarListo(ctx context.Context, mc *api.Machine, timeout time.Duration) error {
 	if len(mc.Forwards) > 0 && g.client != nil {
 		_, err := g.client.Guest(ctx, mc.ID, api.GuestRequest{
-			Port: GuestPort, ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
+			Port: g.port(), ProbeOnly: true, WaitMS: int(timeout / time.Millisecond),
 		})
 		return err
 	}
-	return waitReadyAddr(ctx, mc.Addr(GuestPort), timeout)
+	return waitReadyAddr(ctx, mc.Addr(g.port()), timeout)
 }
 
 // Scheduler mantiene instancias calientes por servicio: las despierta al llegar
@@ -141,6 +141,41 @@ type Scheduler struct {
 	// MaxReplicas acota cuántas instancias puede tener un servicio al escalar
 	// por carga. 0 = sin tope (el límite lo pone la memoria del host).
 	MaxReplicas int
+	// MaxReplicasFor, si está, da el tope de instancias de UN servicio (0 =
+	// MaxReplicas). El gateway de IA lo usa para que cada modelo tenga el suyo:
+	// una réplica de un modelo grande cuesta el doble que una de uno pequeño.
+	MaxReplicasFor func(service string) int
+
+	// Port es el puerto del invitado al que se espera que escuche el servicio y
+	// al que apunta el proxy de cada instancia. 0 = GuestPort (el puente MCP).
+	// Un modelo VON sirve en von.Port (8000).
+	Port int
+	// MachineLabels se añaden a las máquinas que crea el planificador y, si hay
+	// alguna, son condición para ADOPTAR una máquina existente: dos productos
+	// que comparten daemon (el gateway MCP y el de IA, o un humano con `kling
+	// run -from`) no deben congelarse las máquinas el uno al otro.
+	MachineLabels map[string]string
+	// NamePrefix, si no está vacío, da nombre a las máquinas nuevas:
+	// <prefijo><servicio>-<aleatorio>. Vacío = el daemon elige.
+	NamePrefix string
+	// MachineTTL es el TTL de red de seguridad que se pone a las máquinas
+	// nuevas por si el planificador muriera. 0 = 2 × idle (lo de siempre);
+	// negativo = ninguno. Contra un daemon con la capacidad "renew" es un
+	// arrendamiento (ver renovarTTL): se renueva al adoptar, antes de cada
+	// thaw y en cada vuelta del segador. Sin ella, el daemon lo cuenta desde
+	// que creó la máquina y un thaw no lo reinicia, así que una instancia
+	// vieja que se despierta vuelve a congelarse aunque esté atendiendo.
+	MachineTTL time.Duration
+	// OnAcquire, si está, se llama cada vez que una instancia pasa a estar
+	// lista: how es "adopt" (ya corría), "thaw" (estaba congelada) o
+	// "restore" (nueva desde el snapshot), y d lo que costó hasta que el
+	// puerto aceptó. Es la métrica de arranques en frío del gateway de IA.
+	OnAcquire func(service, how string, d time.Duration)
+	// adquiriendo son las máquinas elegidas por un acquire que aún no están
+	// registradas como instancia: sin esto, dos acquire concurrentes (un
+	// ensure y un scale-out) podían descongelar o adoptar la MISMA máquina y
+	// acabar con dos entradas sobre ella. Se toca con mu.
+	adquiriendo map[string]bool
 	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
@@ -305,6 +340,12 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	if elegida != nil {
 		return elegida, nil
 	}
+	tope := g.MaxReplicas
+	if g.MaxReplicasFor != nil {
+		if n := g.MaxReplicasFor(service); n > 0 {
+			tope = n
+		}
+	}
 
 	// Todas las que tienen hueco están saturadas de trabajo. Contar solo
 	// sesiones dejaba a una réplica con una sesión y veinte llamadas en vuelo
@@ -312,7 +353,7 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	// tope, y si no se puede se usa la menos cargada: una sesión atendida lenta
 	// es mejor que una rechazada.
 	if libre != nil {
-		if g.MaxReplicas > 0 && replicas >= g.MaxReplicas {
+		if tope > 0 && replicas >= tope {
 			return libre, nil
 		}
 		e, err := g.scaleOut(ctx, service, tnt)
@@ -393,7 +434,7 @@ func (g *Scheduler) bind(sid, guestSID, service string, e *entry) error {
 		service: service, guestSID: guestSID, machineID: e.machineID, ip: e.ip, fwd: e.fwd,
 		proxy: e.proxy, lastUse: time.Now(),
 	}
-	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(GuestPort))
+	log.Printf("%s: session %s bound to %s", service, short(sid), e.Addr(g.port()))
 	return nil
 }
 
@@ -478,6 +519,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 	}
 	g.mu.Lock()
 	g.services[service] = e
+	delete(g.adquiriendo, e.machineID)
 	g.mu.Unlock()
 	return e, nil
 }
@@ -499,7 +541,8 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		}
 	}
 
-	mc, err := g.acquire(ctx, service, fresh)
+	t0 := time.Now()
+	mc, how, err := g.acquire(ctx, service, fresh)
 	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
 	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
 	// falta varias—, y rendirse tras la primera dejaba el 502 igual que antes.
@@ -525,7 +568,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 				break
 			}
 			log.Printf("%s: at the daemon's machine limit; dropped a prewarmed instance", service)
-			mc, err = g.acquire(ctx, service, fresh)
+			mc, how, err = g.acquire(ctx, service, fresh)
 			continue
 		}
 		victima := g.evictLRU(ctx, service, tnt.name)
@@ -539,11 +582,21 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		} else {
 			log.Printf("%s: didn't fit; froze %s to make room", service, victima)
 		}
-		mc, err = g.acquire(ctx, service, fresh)
+		mc, how, err = g.acquire(ctx, service, fresh)
 	}
 	if err != nil {
 		return nil, err
 	}
+	// Desde aquí la máquina está marcada como "adquiriéndose": si algo falla
+	// antes de registrarla, se desmarca para que otro acquire pueda usarla.
+	registrada := false
+	defer func() {
+		if !registrada {
+			g.mu.Lock()
+			delete(g.adquiriendo, mc.ID)
+			g.mu.Unlock()
+		}
+	}()
 
 	// Tener la microVM en marcha no significa que la herramienta escuche ya. Tras
 	// un thaw el proceso está listo casi al instante, pero en frío el invitado aún
@@ -560,8 +613,11 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	if d := time.Since(wr0); d > 500*time.Millisecond {
 		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
 	}
+	if g.OnAcquire != nil {
+		g.OnAcquire(service, how, time.Since(t0))
+	}
 
-	target, _ := url.Parse("http://" + mc.Addr(GuestPort))
+	target, _ := url.Parse("http://" + mc.Addr(g.port()))
 	e := &entry{
 		machineID:   mc.ID,
 		ip:          mc.IP,
@@ -604,7 +660,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		// Se sondea SIEMPRE que el fallo sea de dial, no solo cuando toca
 		// reintentar: la respuesta distingue dos situaciones muy distintas —el
 		// invitado esta ahi y no acepto esa conexion, o el invitado YA NO EXISTE.
-		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(GuestPort), 3*time.Second) == nil
+		vivo := esDial && waitReadyAddr(r.Context(), e.Addr(g.port()), 3*time.Second) == nil
 
 		if vivo && !retried(r) && r.GetBody != nil {
 			body, berr := r.GetBody()
@@ -638,6 +694,9 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		http.Error(w, fmt.Sprintf("tool %q did not respond: %v", service, err), http.StatusBadGateway)
 	}
 
+	// Quien llama la registra (primaria o réplica) y la desmarca con el mismo
+	// candado; hasta entonces sigue marcada y ningún otro acquire la toca.
+	registrada = true
 	return e, nil
 }
 
@@ -737,6 +796,7 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 	}
 	g.mu.Lock()
 	g.extra[service] = append(g.extra[service], e)
+	delete(g.adquiriendo, e.machineID)
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
 	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
@@ -749,13 +809,14 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 // es lo que necesita el scale-out, porque reutilizar la instancia llena sería
 // volver a chocar con su tope de sesiones. Con fresh=false (la primaria) reutiliza
 // por orden de coste.
-func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*api.Machine, error) {
-	if fresh {
-		return g.runFresh(ctx, service)
-	}
+//
+// Devuelve también CÓMO la consiguió ("adopt", "thaw" o "restore"), que es lo
+// que distingue un arranque en frío de un thaw en las métricas. La máquina
+// elegida queda marcada en g.adquiriendo hasta que quien llama la registra.
+func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*api.Machine, string, error) {
 	machines, err := g.client.List(ctx)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	match := func(m *api.Machine) bool {
@@ -767,30 +828,86 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*a
 		if m.Labels["pool"] == "true" || m.Labels["ephemeral"] == "true" {
 			return false
 		}
+		// Con etiquetas propias, solo lo que lleva todas es nuestro.
+		for k, v := range g.MachineLabels {
+			if m.Labels[k] != v {
+				return false
+			}
+		}
 		return m.Service() == service || m.From == service
 	}
 
-	// 1) alguna ya en marcha. Puede traer el reloj del TTL a punto de vencer
-	// (la dejó otro gateway, o este antes de reiniciarse): se renueva al
-	// adoptarla.
-	for _, m := range machines {
-		if match(m) && m.State == api.StateRunning && m.Reachable() {
+	// La elección y la marca van juntas bajo g.mu (sin E/S: la lista ya se
+	// leyó): así dos acquire concurrentes nunca eligen la misma máquina, y
+	// ninguno adopta una que ya es instancia de este servicio.
+	pick := func(state api.State) *api.Machine {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		for _, m := range machines {
+			if !match(m) || m.State != state || g.adquiriendo[m.ID] || g.entryByMachineLocked(service, m.ID) != nil {
+				continue
+			}
+			if state == api.StateRunning && !m.Reachable() {
+				continue
+			}
+			if g.adquiriendo == nil {
+				g.adquiriendo = map[string]bool{}
+			}
+			g.adquiriendo[m.ID] = true
+			return m
+		}
+		return nil
+	}
+
+	// 1) alguna ya en marcha. Con fresh (scale-out) NO: una réplica nueva
+	// tiene que ser otra máquina, y lo que corre ya es instancia de alguien.
+	// Puede traer el reloj del TTL a punto de vencer (la dejó otro gateway, o
+	// este antes de reiniciarse): se renueva al adoptarla.
+	if !fresh {
+		if m := pick(api.StateRunning); m != nil {
 			g.renovarTTL(ctx, m.ID)
-			return m, nil
+			return m, "adopt", nil
 		}
 	}
-	// 2) alguna congelada: ~30 ms. El TTL se renueva ANTES de despertarla: una
-	// vuelta del vigilante del daemon entre el thaw y la renovación la volvería
-	// a congelar, y una congelada también se puede renovar.
-	for _, m := range machines {
-		if match(m) && m.State == api.StateWarm {
-			g.renovarTTL(ctx, m.ID)
-			log.Printf("%s: thawing %s", service, m.Name)
-			return g.client.Thaw(ctx, m.ID)
+	// 2) alguna congelada: ~30 ms. También para el scale-out: una réplica que
+	// el segador congeló vuelve mucho más barata que una restauración nueva,
+	// y sin esto cada ráfaga dejaba otra máquina congelada en disco para
+	// siempre (cada una con su fichero de memoria entero en macOS). El TTL se
+	// renueva ANTES de despertarla: una vuelta del vigilante del daemon entre
+	// el thaw y la renovación la volvería a congelar, y una congelada también
+	// se puede renovar.
+	if m := pick(api.StateWarm); m != nil {
+		g.renovarTTL(ctx, m.ID)
+		log.Printf("%s: thawing %s", service, m.Name)
+		th, err := g.client.Thaw(ctx, m.ID)
+		if err != nil {
+			g.mu.Lock()
+			delete(g.adquiriendo, m.ID)
+			g.mu.Unlock()
+			return nil, "", err
 		}
+		return th, "thaw", nil
 	}
 	// 3) instanciar del snapshot dorado
-	return g.runFresh(ctx, service)
+	mc, err := g.runFresh(ctx, service)
+	if err != nil {
+		return nil, "", err
+	}
+	g.mu.Lock()
+	if g.adquiriendo == nil {
+		g.adquiriendo = map[string]bool{}
+	}
+	g.adquiriendo[mc.ID] = true
+	g.mu.Unlock()
+	return mc, "restore", nil
+}
+
+// port es el puerto del invitado al que se habla (ver Port).
+func (g *Scheduler) port() int {
+	if g.Port > 0 {
+		return g.Port
+	}
+	return GuestPort
 }
 
 // runFresh crea una instancia NUEVA del servicio desde su snapshot dorado. Cada
@@ -802,7 +919,12 @@ func (g *Scheduler) runFresh(ctx context.Context, service string) (*api.Machine,
 		return nil, err
 	}
 	log.Printf("%s: instantiating from snapshot %s", service, snap.Name)
+	var name string
+	if g.NamePrefix != "" {
+		name = g.NamePrefix + service + "-" + NewSessionKey()[:6]
+	}
 	return g.client.Run(ctx, api.RunRequest{
+		Name: name,
 		From: snap.Name,
 		// La política de salida viaja con el snapshot. Sin esto, un servicio
 		// importado con -egress internet despierta sin red y cada llamada suya
@@ -812,13 +934,22 @@ func (g *Scheduler) runFresh(ctx context.Context, service string) (*api.Machine,
 		// caía al defaultCPUPct=50 del daemon y un servicio importado con más CPU
 		// arrancaba estrangulado. 0 (snapshots viejos) deja que el daemon decida.
 		CPUPct:     snap.CPUPct,
-		Labels:     map[string]string{api.LabelService: service},
-		TTLSeconds: g.ttlSeconds(), // red de seguridad si el gateway muere
+		Labels:     api.MergeLabels(g.MachineLabels, map[string]string{api.LabelService: service}),
+		TTLSeconds: g.ttlSeconds(), // red de seguridad si el planificador muere
 	})
 }
 
-// ttlSeconds es el TTL de las instancias del planificador: 2×idle.
-func (g *Scheduler) ttlSeconds() int { return int(g.idle.Seconds()) * 2 }
+// ttlSeconds es el TTL de las instancias del planificador: MachineTTL si se
+// fijó, 2×idle si no, y 0 (ninguno) con MachineTTL negativo.
+func (g *Scheduler) ttlSeconds() int {
+	switch {
+	case g.MachineTTL > 0:
+		return int(g.MachineTTL.Seconds())
+	case g.MachineTTL < 0:
+		return 0
+	}
+	return int(g.idle.Seconds()) * 2
+}
 
 // renovarTTL reinicia en el daemon el reloj del TTL de una instancia que el
 // planificador está usando.
@@ -836,7 +967,9 @@ func (g *Scheduler) ttlSeconds() int { return int(g.idle.Seconds()) * 2 }
 //
 // Contra un daemon sin la capacidad "renew" no hace nada: queda lo de antes.
 func (g *Scheduler) renovarTTL(ctx context.Context, id string) {
-	if g.client == nil || !g.sabeRenovar(ctx) {
+	// Sin TTL (MachineTTL negativo) no hay reloj que renovar: renovar con 0
+	// solo le costaría al daemon una llamada por instancia en cada vuelta.
+	if g.client == nil || g.ttlSeconds() == 0 || !g.sabeRenovar(ctx) {
 		return
 	}
 	if _, err := g.client.Renew(ctx, id, g.ttlSeconds()); err != nil {
@@ -1226,10 +1359,17 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	// Latido del TTL de las que siguen despiertas (ver renovarTTL). El segador
 	// pasa cada idle/3 y el TTL es 2×idle: renovando lo que lleva más de idle/2
 	// sin renovar, entre dos renovaciones nunca pasa más de ~idle, y no se
-	// molesta al daemon en cada vuelta por cada instancia.
+	// molesta al daemon en cada vuelta por cada instancia. Con un MachineTTL
+	// más corto que 2×idle el umbral baja a TTL/3; aun así el segador no pasa
+	// más a menudo que cada idle/3, así que un TTL por debajo de ~idle no se
+	// sostiene. Sin TTL no hay latido (ver renovarTTL).
+	umbral := g.idle / 2
+	if ttl := time.Duration(g.ttlSeconds()) * time.Second; ttl > 0 && ttl/3 < umbral {
+		umbral = ttl / 3
+	}
 	var renovar []string
 	marcar := func(e *entry) {
-		if time.Since(e.renewedAt) >= g.idle/2 {
+		if g.ttlSeconds() > 0 && time.Since(e.renewedAt) >= umbral {
 			e.renewedAt = time.Now()
 			renovar = append(renovar, e.machineID)
 		}

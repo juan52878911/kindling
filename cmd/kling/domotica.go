@@ -167,13 +167,6 @@ func cmdDomoticaDecide(args []string) error {
 	return nil
 }
 
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
-}
-
 func readRowsFile(path string) ([]domotica.Row, string, error) {
 	f, err := os.Open(path)
 	if err != nil {

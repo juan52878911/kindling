@@ -188,7 +188,7 @@ func TestDespertarUnaInstanciaViejaRenuevaSuTTL(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}}
 	g := conDaemonFalso(t, d)
 
-	mc, err := g.acquire(context.Background(), "svc", false)
+	mc, _, err := g.acquire(context.Background(), "svc", false)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestAdoptarUnaInstanciaEnMarchaRenuevaSuTTL(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": vieja}}
 	g := conDaemonFalso(t, d)
 
-	if _, err := g.acquire(context.Background(), "svc", false); err != nil {
+	if _, _, err := g.acquire(context.Background(), "svc", false); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	d.vigilar()
@@ -272,13 +272,54 @@ func TestElSegadorRenuevaElTTLDeLasDespiertas(t *testing.T) {
 	}
 }
 
+// Un scale-out (fresh) también reutiliza una réplica que el segador congeló, y
+// también le renueva el TTL antes de despertarla: una réplica vieja es justo la
+// que trae el reloj vencido.
+func TestScaleOutDespiertaUnaReplicaViejaYRenuevaSuTTL(t *testing.T) {
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}}
+	g := conDaemonFalso(t, d)
+
+	mc, how, err := g.acquire(context.Background(), "svc", true)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if mc.ID != "m1" || how != "thaw" {
+		t.Fatalf("acquire = %s (%s); quería despertar m1", mc.ID, how)
+	}
+	d.vigilar()
+	if s := d.estado("m1"); s != api.StateRunning {
+		t.Fatalf("la réplica despertada se congeló (%s): su TTL no se renovó", s)
+	}
+}
+
+// Con MachineTTL negativo (sin TTL) no hay reloj que renovar: ni al despertar
+// ni en el latido del segador se molesta al daemon.
+func TestSinTTLNoSeRenueva(t *testing.T) {
+	sinTTL := instanciaVieja("m1")
+	sinTTL.TTLSeconds = 0
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": sinTTL}}
+	g := conDaemonFalso(t, d)
+	g.MachineTTL = -1
+
+	if _, _, err := g.acquire(context.Background(), "svc", false); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	g.mu.Lock()
+	g.services["svc"] = &entry{machineID: "m1", lastUse: time.Now(), inflight: 1, renewedAt: time.Now().Add(-time.Hour)}
+	g.mu.Unlock()
+	g.reapOnce(context.Background())
+	if n := d.visto("POST /machines/m1/renew"); n != 0 {
+		t.Errorf("pidió %d renovaciones de una máquina sin TTL", n)
+	}
+}
+
 // Contra un daemon sin la capacidad, el planificador sigue funcionando como
 // antes: despierta sin renovar y no insiste.
 func TestSinCapacidadRenewSeDespiertaIgual(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}, sinRenew: true}
 	g := conDaemonFalso(t, d)
 
-	mc, err := g.acquire(context.Background(), "svc", false)
+	mc, _, err := g.acquire(context.Background(), "svc", false)
 	if err != nil || mc.State != api.StateRunning {
 		t.Fatalf("acquire = %v, %v; quería despertarla aunque el daemon no sepa renovar", mc, err)
 	}

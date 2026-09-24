@@ -73,7 +73,11 @@ func modelsList(args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "CATALOG\tQUANT\tGGUF\tDEFAULT CPU/MEM\tLICENSE")
 	for _, m := range von.Catalog {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, human(m.Size), m.VCPUs, m.MemMiB, m.License)
+		lic := m.License
+		if !m.Open() {
+			lic += " (not free to use and redistribute: needs -accept-license " + m.License + ")"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, human(m.Size), m.VCPUs, m.MemMiB, lic)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -108,6 +112,7 @@ func modelsAdd(args []string) error {
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
 	allowExec := fs.Bool("allow-exec", true, "keep kling exec/cp working in the model's machines (debugging)")
 	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
+	acceptLicense := fs.String("accept-license", "", "build a catalog model outside the default catalog, accepting its license (give its id)")
 	buildOnly := fs.Bool("build-only", false, "build the image and stop: e.g. to copy it to a macOS daemon, which cannot build")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -117,10 +122,14 @@ func modelsAdd(args []string) error {
 	}
 	name := fs.Arg(0)
 	spec := von.Spec{Model: *model, Quant: *quant, URL: *url, SHA256: *sum,
-		Ctx: *ctxSize, Parallel: *parallel, Threads: *threads}
+		Ctx: *ctxSize, Parallel: *parallel, Threads: *threads, AcceptLicense: *acceptLicense}
 	res, err := spec.Resolve()
 	if err != nil {
 		return err
+	}
+	if res.Model != nil && !res.Model.Open() {
+		fmt.Printf("License of %s: %s (%s), accepted with -accept-license. It does not allow free use and redistribution: check it before serving or copying this image.\n",
+			res.Ref, res.Model.License, res.Model.LicenseURL)
 	}
 	vcpus, memMiB := *cpus, *mem
 	if res.Model != nil {
@@ -198,6 +207,9 @@ func modelFlags(s von.Spec) string {
 	if s.URL != "" {
 		out = append(out, "-url "+s.URL, "-sha256 "+s.SHA256)
 	}
+	if s.AcceptLicense != "" {
+		out = append(out, "-accept-license "+s.AcceptLicense)
+	}
 	if s.Ctx != 0 {
 		out = append(out, fmt.Sprintf("-ctx %d", s.Ctx))
 	}
@@ -228,6 +240,9 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 			if rec, err := c.ImageRecipe(ctx, name); err == nil && rec.Builder != "" {
 				var prev von.Spec
 				_ = json.Unmarshal(rec.Spec, &prev)
+				// La aceptación de la licencia es de quien construye ahora, no
+				// de la receta: una imagen hecha antes de existir el flag vale.
+				prev.AcceptLicense = spec.AcceptLicense
 				pr, perr := prev.Resolve()
 				if rec.Builder != "llm" || perr != nil || pr.Ref != res.Ref || pr.Ctx != res.Ctx ||
 					pr.Parallel != res.Parallel || pr.Threads != res.Threads {

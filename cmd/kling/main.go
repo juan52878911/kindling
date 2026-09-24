@@ -136,7 +136,21 @@ SMALL MODELS (JEV, runs locally, no daemon)
 
 `
 
-const usageTail = `DAEMON
+const usageTail = `AI GATEWAY (JEV classifies, VON generates, models on demand; docs/ai-gateway.md)
+  ai serve [-config ai.json] [-socket S]           serves /v1/classify, /v1/decide,
+      [-listen ADDR] [-idle 2m] [-max-replicas 2]  /v1/generate and an OpenAI API; replicas
+      [-keepwarm N] [-jev-mem MiB]                 wake per request and freeze when idle
+  ai ls [-json]                                    models, tasks, cascades, samples
+  ai test <task> [-mode cascade|jev] <text>        classifies one text through the gateway
+  ai generate <task> [-var k=v] [<input>]          runs a generation task (stdin if no input)
+  ai eval <task> -data t.jsonl [-von M]            JEV alone vs the JEV -> VON cascade on
+                                                   labelled data; the record gates escalate_to
+  ai calibrate <task> [-target P] [-dry-run]       re-tunes JEV thresholds on recent VON
+                                                   answers; writes only if it improves
+  ai reload                                        rereads the registry (says which cascades
+                                                   are on, forced or refused)
+
+DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,
                                                    or $KLING_VMM with a name or a path)
 
@@ -260,6 +274,8 @@ func main() {
 		err = cmdJev(args)
 	case "domotica":
 		err = cmdDomotica(args)
+	case "ai":
+		err = cmdAI(args)
 	case "builder": // lo ejecuta el daemon como root; ver builder.go
 		err = cmdBuilder(args)
 	case "-h", "--help", "help":
