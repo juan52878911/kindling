@@ -107,6 +107,41 @@ var Catalog = []Model{
 		SHA256:   "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e",
 		Size:     675710816, MemMiB: 1152, VCPUs: 2, License: "apache-2.0",
 	},
+	// 1,5B y 3B: el escalón en el que un modelo instruct empieza a seguir una
+	// plantilla de pocos ejemplos en vez de contestar siempre lo mismo (los de
+	// 360M y 0,5B colapsan a una o dos etiquetas; docs/ai-gateway.md). 4 vCPU y
+	// no 2: con estos tamaños la evaluación del prompt, que es casi todo el
+	// coste de una respuesta corta, escala con los hilos. La memoria sale de
+	// medir el dorado (docs/von.md, Dimensionado): pesos reempaquetados + KV de
+	// DefaultCtx (~28 KiB/token en 1,5B, ~36 KiB/token en 3B) + el búfer de
+	// cálculo del vocabulario de 152k + kernel y agente, con margen.
+	{
+		ID: "qwen2.5-1.5b-instruct", Quant: "q4_k_m",
+		Repo:     "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+		Revision: "91cad51170dc346986eccefdc2dd33a9da36ead9",
+		File:     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+		SHA256:   "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+		Size:     1117320736, MemMiB: 1536, VCPUs: 4, License: "apache-2.0",
+	},
+	{
+		ID: "qwen2.5-1.5b-instruct", Quant: "q8_0",
+		Repo:     "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+		Revision: "91cad51170dc346986eccefdc2dd33a9da36ead9",
+		File:     "qwen2.5-1.5b-instruct-q8_0.gguf",
+		SHA256:   "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
+		Size:     1894532128, MemMiB: 2304, VCPUs: 4, License: "apache-2.0",
+	},
+	{
+		// Solo Q4_K_M: el Q8_0 son 3,4 GiB de pesos, más de lo que cabe al lado
+		// de la VM de Lima en un Mac de 16 GiB. Ojo con la licencia: la de 3B
+		// NO es Apache, es la Qwen Research License (uso no comercial).
+		ID: "qwen2.5-3b-instruct", Quant: "q4_k_m",
+		Repo:     "Qwen/Qwen2.5-3B-Instruct-GGUF",
+		Revision: "7dabda4d13d513e3e842b20f0d435c732f172cbe",
+		File:     "qwen2.5-3b-instruct-q4_k_m.gguf",
+		SHA256:   "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+		Size:     2104932768, MemMiB: 2816, VCPUs: 4, License: "qwen-research",
+	},
 }
 
 // defaultQuant es la cuantización que se usa si no se pide ninguna: Q8_0, que
@@ -124,18 +159,29 @@ func Find(id, quant string) (Model, error) {
 		id, quant = i, q
 	}
 	quant = strings.ToLower(strings.TrimSpace(quant))
-	if quant == "" {
+	porDefecto := quant == ""
+	if porDefecto {
 		quant = defaultQuant
 	}
 	var quants []string
-	for _, m := range Catalog {
+	var primera *Model
+	for i, m := range Catalog {
 		if m.ID != id {
 			continue
 		}
 		if m.Quant == quant {
 			return m, nil
 		}
+		if primera == nil {
+			primera = &Catalog[i]
+		}
 		quants = append(quants, m.Quant)
+	}
+	// Sin cuantización pedida y sin Q8_0 en el catálogo (el 3B solo tiene
+	// Q4_K_M), la única que hay es la que se quería: fallar obligaría a
+	// escribir -quant para decir lo obvio.
+	if porDefecto && primera != nil {
+		return *primera, nil
 	}
 	if len(quants) > 0 {
 		sort.Strings(quants)

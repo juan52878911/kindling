@@ -48,6 +48,13 @@ func TestFind(t *testing.T) {
 	if _, err := Find("smollm2-360m-instruct", "q2_k"); err == nil || !strings.Contains(err.Error(), "q4_k_m, q8_0") {
 		t.Fatalf("una cuantización que no hay debería listar las que sí: %v", err)
 	}
+	// Sin Q8_0 en el catálogo, sin -quant vale la que hay.
+	if m, err := Find("qwen2.5-3b-instruct", ""); err != nil || m.Quant != "q4_k_m" {
+		t.Fatalf("3b sin -quant: %+v %v", m, err)
+	}
+	if _, err := Find("qwen2.5-3b-instruct", "q8_0"); err == nil {
+		t.Fatal("pedir q8_0 del 3b a propósito debería fallar")
+	}
 	if _, err := Find("llama-70b", ""); err == nil {
 		t.Fatal("un modelo desconocido debería fallar")
 	}
