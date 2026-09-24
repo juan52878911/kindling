@@ -844,6 +844,73 @@ func (g *Scheduler) renovarTTL(ctx context.Context, id string) {
 	}
 }
 
+// mantenerTTL renueva el TTL de una máquina que no es del planificador —una del
+// fondo o una efímera, que destruye quien la usa— mientras dure una llamada
+// sobre ella.
+//
+// El segador solo late por las instancias de g.services y g.extra (ver
+// reapOnce), y el tráfico HTTP no toca el reloj del daemon. Así, una del fondo
+// sacada cerca de su edad máxima (TTL 2×idle+2m, retirada a los 2×idle) o una
+// efímera del camino lento (TTL fijo) se congelaban debajo de una acción larga,
+// y el cliente veía la llamada colgada sin causa aparente.
+//
+// La primera renovación es SÍNCRONA: a una del fondo le puede quedar menos de
+// una vuelta del vigilante del daemon, y renovar en segundo plano dejaría esa
+// carrera abierta. Después late cada TTL/3 hasta release, que lo corta y espera
+// a que pare —quien llama destruye la máquina justo después—. Renueva con
+// ttl_seconds 0: reinicia el reloj sin cambiar el plazo, así que si el gateway
+// muere a media llamada la red de seguridad vence igual que antes.
+//
+// Un sandbox no se alarga por aquí: el daemon rechaza la renovación (tiene su
+// propia ruta, con su tope), y ante un rechazo el latido para. Contra un daemon
+// sin la capacidad "renew" no hace nada, como renovarTTL.
+func (g *Scheduler) mantenerTTL(ctx context.Context, id string) (release func()) {
+	nada := func() {}
+	if g.client == nil || !g.sabeRenovar(ctx) {
+		return nada
+	}
+	mc, err := g.client.Renew(ctx, id, 0)
+	if err != nil {
+		log.Printf("renew ttl %s: %v", short(id), err)
+		return nada
+	}
+	if mc.TTLSeconds <= 0 {
+		return nada // sin TTL no hay nada que se pueda vencer
+	}
+	cada := time.Duration(mc.TTLSeconds) * time.Second / 3
+
+	lctx, cancel := context.WithCancel(ctx)
+	parado := make(chan struct{})
+	go func() {
+		defer close(parado)
+		t := time.NewTicker(cada)
+		defer t.Stop()
+		for {
+			select {
+			case <-lctx.Done():
+				return
+			case <-t.C:
+			}
+			if _, err := g.client.Renew(lctx, id, 0); err != nil {
+				if lctx.Err() != nil {
+					return
+				}
+				log.Printf("renew ttl %s: %v", short(id), err)
+				// Un 4xx no se arregla insistiendo: la máquina ya no existe o
+				// es un sandbox. Un fallo del daemon sí puede ser pasajero.
+				var se *api.StatusError
+				if errors.As(err, &se) && se.Code < 500 {
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-parado
+	}
+}
+
 // sabeRenovar pregunta UNA vez al daemon si anuncia la capacidad "renew". Si no
 // contesta, no se apunta nada y se vuelve a preguntar la próxima vez.
 func (g *Scheduler) sabeRenovar(ctx context.Context) bool {

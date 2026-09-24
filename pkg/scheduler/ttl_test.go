@@ -72,6 +72,11 @@ func (d *daemonFalso) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		// Como handleRenew: un sandbox tiene su propia ruta, con su tope.
+		if mc.Labels[api.LabelKind] == api.KindSandbox {
+			http.Error(w, `{"error":"is a sandbox"}`, http.StatusConflict)
+			return
+		}
 		var req api.RenewRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.TTLSeconds > 0 {
@@ -99,6 +104,29 @@ func (d *daemonFalso) vigilar() {
 			mc.State = api.StateWarm
 		}
 	}
+}
+
+// vigilarCada corre vigilar en segundo plano, como el bucle del daemon, hasta
+// que acabe el test. El de verdad pasa cada ~10 s; aquí más a menudo para no
+// alargar los tests.
+func (d *daemonFalso) vigilarCada(t *testing.T, cada time.Duration) {
+	t.Helper()
+	fin := make(chan struct{})
+	hecho := make(chan struct{})
+	go func() {
+		defer close(hecho)
+		tk := time.NewTicker(cada)
+		defer tk.Stop()
+		for {
+			select {
+			case <-fin:
+				return
+			case <-tk.C:
+				d.vigilar()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(fin); <-hecho })
 }
 
 func (d *daemonFalso) estado(id string) api.State {
@@ -260,5 +288,113 @@ func TestSinCapacidadRenewSeDespiertaIgual(t *testing.T) {
 	g.acquire(context.Background(), "svc", false)
 	if n := d.visto("GET /info"); n != 1 {
 		t.Errorf("preguntó %d veces por las capacidades; basta una", n)
+	}
+}
+
+// UNA LLAMADA EN VUELO SOBRE UNA MÁQUINA DEL FONDO O EFÍMERA.
+//
+// Las del fondo y las efímeras no son del planificador —las destruye quien las
+// usa—, así que el segador no las renueva. Su TTL es solo la red de seguridad
+// por si el gateway muere, pero el daemon lo cuenta desde que las creó y el
+// tráfico HTTP no lo reinicia: una llamada larga podía quedarse con la microVM
+// congelada debajo.
+
+// Una del fondo se crea con TTL 2×idle+2m y se retira a los 2×idle de edad (con
+// la holgura de una vuelta del segador). Si se saca justo antes, le queda poco
+// TTL: una acción larga sobre ella se congelaba a media llamada.
+func TestUnaDelFondoCercaDeSuTTLAguantaLaLlamada(t *testing.T) {
+	t.Parallel()
+	// idle de un minuto: TTL de las del fondo 2×1m+2m = 240 s, del que le
+	// quedan 200 ms.
+	casiVencido := time.Now().Add(-240*time.Second + 200*time.Millisecond)
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"p1": {
+		ID: "p1", Name: "p1", State: api.StateRunning, IP: "10.0.0.3",
+		Labels:     map[string]string{api.LabelService: "svc", "pool": "true"},
+		TTLSeconds: 240, TTLAt: &casiVencido, StartedAt: &casiVencido,
+	}}}
+	g := conDaemonFalso(t, d)
+	g.pool.ready["svc"] = []*warmVM{{id: "p1", ip: "10.0.0.3", born: casiVencido}}
+	d.vigilarCada(t, 20*time.Millisecond)
+
+	// Lo que hace el gateway MCP en el camino rápido del modo efímero.
+	vm := g.TakeWarm("svc")
+	if vm == nil {
+		t.Fatal("el fondo estaba vacío")
+	}
+	release := g.HoldTTL(context.Background(), vm.ID())
+	time.Sleep(600 * time.Millisecond) // la llamada tarda más que el TTL que le quedaba
+	if s := d.estado("p1"); s != api.StateRunning {
+		t.Fatalf("la del fondo se congeló a media llamada (%s): no se renovó su TTL al sacarla", s)
+	}
+	release()
+}
+
+// Una efímera del camino lento nace con un TTL fijo (120 s), pero una acción
+// puede tardar más. Mientras la llamada siga en vuelo, el TTL se renueva como
+// un latido; al soltarla, el latido para y la red de seguridad vuelve a valer.
+// Aquí con un TTL de 1 s para no esperar dos minutos: el latido va a TTL/3.
+func TestUnaLlamadaMasLargaQueElTTLNoSeCongela(t *testing.T) {
+	t.Parallel()
+	ahora := time.Now()
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"e1": {
+		ID: "e1", Name: "e1", State: api.StateRunning, IP: "10.0.0.4",
+		Labels:     map[string]string{api.LabelService: "svc", "ephemeral": "true"},
+		TTLSeconds: 1, TTLAt: &ahora, StartedAt: &ahora,
+	}}}
+	g := conDaemonFalso(t, d)
+	d.vigilarCada(t, 20*time.Millisecond)
+
+	release := g.HoldTTL(context.Background(), "e1")
+	time.Sleep(2500 * time.Millisecond) // más de dos veces el TTL
+	if s := d.estado("e1"); s != api.StateRunning {
+		t.Fatalf("la efímera se congeló a media llamada (%s): su TTL no se renovó mientras seguía en vuelo", s)
+	}
+	release()
+
+	// Soltada, nadie la renueva: si el gateway no llegara a destruirla, el
+	// daemon la congela al vencer.
+	renovaciones := d.visto("POST /machines/e1/renew")
+	time.Sleep(1300 * time.Millisecond)
+	if n := d.visto("POST /machines/e1/renew"); n != renovaciones {
+		t.Errorf("siguió renovando tras soltarla: %d renovaciones más", n-renovaciones)
+	}
+	if s := d.estado("e1"); s != api.StateWarm {
+		t.Errorf("soltada y vencido su TTL sigue %s; la red de seguridad debía congelarla", s)
+	}
+}
+
+// El TTL de un sandbox tiene su propia ruta y su tope: HoldTTL no lo alarga, y
+// ante el rechazo del daemon no insiste en cada latido.
+func TestHoldTTLNoAlargaUnSandbox(t *testing.T) {
+	t.Parallel()
+	ahora := time.Now()
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"s1": {
+		ID: "s1", Name: "s1", State: api.StateRunning, IP: "10.0.0.5",
+		Labels:     map[string]string{api.LabelKind: api.KindSandbox},
+		TTLSeconds: 1, TTLAt: &ahora, StartedAt: &ahora,
+	}}}
+	g := conDaemonFalso(t, d)
+
+	release := g.HoldTTL(context.Background(), "s1")
+	defer release()
+	time.Sleep(1100 * time.Millisecond)
+	d.vigilar()
+	if s := d.estado("s1"); s != api.StateWarm {
+		t.Errorf("el sandbox sigue %s pasado su TTL: HoldTTL lo alargó", s)
+	}
+	if n := d.visto("POST /machines/s1/renew"); n > 1 {
+		t.Errorf("pidió %d renovaciones de un sandbox; tras el primer rechazo sobra insistir", n)
+	}
+}
+
+// Contra un daemon sin la capacidad "renew", HoldTTL no hace nada.
+func TestHoldTTLSinCapacidadRenew(t *testing.T) {
+	t.Parallel()
+	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}, sinRenew: true}
+	g := conDaemonFalso(t, d)
+
+	g.HoldTTL(context.Background(), "m1")()
+	if n := d.visto("POST /machines/m1/renew"); n != 0 {
+		t.Errorf("pidió %d renovaciones a un daemon que no las anuncia", n)
 	}
 }
