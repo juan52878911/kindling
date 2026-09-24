@@ -31,6 +31,10 @@ type Spec struct {
 	Parallel int `json:"parallel,omitempty"`
 	// Threads son los hilos de cálculo. 0 = uno por vCPU (nproc en el invitado).
 	Threads int `json:"threads,omitempty"`
+	// AcceptLicense es el identificador de licencia que quien construye acepta
+	// para un modelo del catálogo que no es de licencia abierta (Model.Open).
+	// Tiene que ser exactamente el suyo: aceptar "lo que sea" no es aceptar.
+	AcceptLicense string `json:"accept_license,omitempty"`
 }
 
 // Resolved es un Spec validado y completo: lo que el constructor necesita.
@@ -68,6 +72,10 @@ func (s Spec) Resolve() (Resolved, error) {
 		m, err := Find(s.Model, s.Quant)
 		if err != nil {
 			return r, err
+		}
+		if !m.Open() && s.AcceptLicense != m.License {
+			return r, fmt.Errorf("%s is not in the default catalog: its license is %q (%s), which does not allow free use and redistribution; "+
+				"read it, and if it fits what you do, pass -accept-license %s", m.Ref(), m.License, m.LicenseURL, m.License)
 		}
 		r = Resolved{Ref: m.Ref(), URL: m.URL(), SHA256: m.SHA256, File: m.File, Size: m.Size, Model: &m}
 	case s.URL != "":
