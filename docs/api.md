@@ -30,6 +30,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `guest-resync` | v0.9.1 | ninguna: el daemon resincroniza reloj y entropía del invitado tras cada restauración (ver abajo) |
 | `shares-copy` | v0.10 | `POST /shares/uploads`, `shares` con `mode: copy` en `POST /machines` y `POST /sandboxes` |
 | `shares-live` | v0.10 | `shares` con `mode: ro\|rw` (directorio del host del daemon, bajo `share_roots`); `share_roots` en `GET /info` |
+| `renew` | v0.11 | `POST /machines/{ref}/renew` |
 
 ## Rutas
 
@@ -50,6 +51,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `POST /machines` | crea y arranca (`RunRequest`: imagen o `from` un snapshot, vCPUs, memoria, egress y dominios, TTL, techo de CPU, volúmenes, carpetas compartidas, etiquetas) |
 | `GET /machines/{ref}` | una máquina |
 | `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida |
+| `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
 | `PUT /machines/{ref}/labels` | reetiqueta |
@@ -261,6 +263,20 @@ Estas rutas solo tocan máquinas con `kind=sandbox`.
 del snapshot, y pedirla sobre uno que no la tiene es `409`. `on_ttl` decide qué pasa
 al vencer `ttl_seconds`: `freeze` (por defecto) o `remove`. `commit` graba
 `allow_exec` en el snapshot.
+
+### Renovar el TTL de una máquina
+
+El TTL se cuenta desde que se creó la máquina (o desde su última renovación), y
+`thaw` no lo reinicia: un sandbox no alarga su vida por despertarse. Quien gestiona
+una máquina con TTL y la despierta o la usa más allá de ese plazo tiene que
+renovarlo con `POST /machines/{ref}/renew` y `{"ttl_seconds": N}`: vence N segundos
+a partir de ahora. Sin cuerpo, o con `0`, conserva el plazo que tenía y solo
+reinicia el reloj; sobre una máquina sin TTL no hace nada. Vale también con la
+máquina congelada. Un sandbox da `409`: se renueva por su ruta, que aplica su tope.
+
+El planificador del gateway lo usa como arrendamiento: sus instancias nacen con
+TTL 2×idle por si el gateway muere, y lo renueva al despertarlas o adoptarlas y en
+cada vuelta del segador mientras siguen despiertas.
 
 ## Carpetas compartidas
 

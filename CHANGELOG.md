@@ -82,6 +82,19 @@ los lee de `EnvironmentFile=-/etc/default/kling` (opcional), y `make deploy`
 crea ese fichero solo la primera vez, con `KLING_SOCKET_USER` a partir del
 usuario de `HOST`; en los redespliegues siguientes no lo toca.
 
+### Arreglos
+
+- **El daemon ya no congela una instancia del gateway a media petición.** Las
+  instancias nacen con TTL 2×idle como red de seguridad, pero el daemon lo cuenta
+  desde la creación y ni `thaw` ni el tráfico HTTP lo reinician. Una instancia
+  creada hace más de 2×idle, congelada por ociosa y despertada por una petición,
+  volvía a congelarse en ~10 s con la petición en curso; y una que atendía sin
+  parar se congelaba al cumplir 2×idle. Ahora el planificador renueva el TTL
+  antes de despertarla, al adoptarla y en cada vuelta del segador, con la ruta
+  nueva `POST /machines/{ref}/renew` (capacidad `renew`). Un sandbox sigue sin
+  renovarse al despertar y no se puede renovar por esa ruta. Contra un daemon
+  anterior el planificador se comporta como antes.
+
 ## v0.10.0 — 2026-09-23
 
 ### Carpetas compartidas

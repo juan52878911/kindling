@@ -186,6 +186,47 @@ func TestRenewReiniciaElRelojYValeCongelada(t *testing.T) {
 	}
 }
 
+// Una instancia del gateway creada hace más de su TTL, congelada por ociosa y
+// despertada por una petición: despertar no reinicia el reloj (es lo que quiere
+// un sandbox), así que el vigilante la vuelve a dar por vencida al instante. Lo
+// que la salva es que el planificador la renueve; con ttl 0 se conserva el
+// plazo que tenía y solo se reinicia el reloj.
+func TestUnaDespertadaVenceSalvoQueSeRenueve(t *testing.T) {
+	m := newTestManager(t)
+	hace10m := time.Now().Add(-10 * time.Minute)
+	ahora := time.Now()
+	mc := m.addForTest("gw00000000000001")
+	m.mu.Lock()
+	mc.TTLSeconds = 120
+	mc.TTLAt = &hace10m
+	mc.StartedAt = &ahora // recién despertada
+	m.mu.Unlock()
+
+	if v := m.ttlVencidas(); len(v) != 1 || v[0] != mc.ID {
+		t.Fatalf("vencidas = %v; una despertada con el reloj viejo debe vencer", v)
+	}
+
+	out, err := m.Renew(mc.ID, 0)
+	if err != nil {
+		t.Fatalf("renew con ttl 0: %v", err)
+	}
+	if out.TTLSeconds != 120 {
+		t.Errorf("ttl = %d, want 120: con 0 se conserva el plazo", out.TTLSeconds)
+	}
+	if v := m.ttlVencidas(); len(v) != 0 {
+		t.Fatalf("vencidas = %v; tras renovar no debe vencer", v)
+	}
+
+	// Sin TTL, renovar con 0 no se inventa uno.
+	sin := m.addForTest("gw00000000000002")
+	if out, err := m.Renew(sin.ID, 0); err != nil || out.TTLSeconds != 0 || out.TTLAt != nil {
+		t.Fatalf("renew de una sin TTL = %+v, %v; no debía tocarla", out, err)
+	}
+	if _, err := m.Renew(sin.ID, -1); err == nil {
+		t.Error("aceptó un ttl negativo")
+	}
+}
+
 // Una máquina con un secreto inyectado no se puede congelar nunca, así que su
 // TTL generaba una negativa cada 10 s para siempre. Ahora se retira el TTL, una
 // vez y diciéndolo.

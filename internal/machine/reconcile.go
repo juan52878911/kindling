@@ -511,6 +511,28 @@ func ttlDesde(mc *api.Machine) time.Time {
 // Congelar, no matar: es la diferencia entre serverless y apagar cosas. La
 // herramienta deja de costar CPU y RAM, pero vuelve en ~30 ms cuando haga falta.
 func (m *Manager) expireTTL(ctx context.Context) {
+	for _, id := range m.ttlVencidas() {
+		// Con on_ttl=remove la máquina se destruye en vez de congelarse: es lo
+		// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué
+		// seguir existiendo, y congelarlo guardaría en disco una memoria que
+		// nadie va a volver a usar.
+		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
+			if err := m.Remove(id); err != nil {
+				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
+			}
+			continue
+		}
+		if _, err := m.Freeze(ctx, id); err != nil {
+			m.handleFreezeFailure(id, err)
+			continue
+		}
+		m.clearFreezeFailures(id)
+	}
+}
+
+// ttlVencidas son las máquinas a las que expireTTL tiene que aplicar su TTL
+// ahora. Aparte para poder probar la decisión sin un VMM que congelar.
+func (m *Manager) ttlVencidas() []string {
 	var due []string
 
 	m.mu.RLock()
@@ -540,24 +562,7 @@ func (m *Manager) expireTTL(ctx context.Context) {
 		}
 	}
 	m.mu.RUnlock()
-
-	for _, id := range due {
-		// Con on_ttl=remove la máquina se destruye en vez de congelarse: es lo
-		// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué
-		// seguir existiendo, y congelarlo guardaría en disco una memoria que
-		// nadie va a volver a usar.
-		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
-			if err := m.Remove(id); err != nil {
-				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
-			}
-			continue
-		}
-		if _, err := m.Freeze(ctx, id); err != nil {
-			m.handleFreezeFailure(id, err)
-			continue
-		}
-		m.clearFreezeFailures(id)
-	}
+	return due
 }
 
 // maxFreezeFailures es cuántos fallos CONSECUTIVOS de congelación por TTL se
