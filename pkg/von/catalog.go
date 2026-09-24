@@ -61,6 +61,22 @@ type Model struct {
 	// el LICENSE del repositorio o, si no lo trae (SmolLM2), su ficha.
 	License    string
 	LicenseURL string
+
+	// Kind es "" para un modelo instruct (chat) y KindEmbed para un
+	// codificador de frases (llama-server --embeddings). Ver embed.go.
+	Kind string
+	// Pooling, Prefix y Dim son de los codificadores: cómo se resume la frase
+	// (mean), qué se antepone a cada texto (e5 se entrenó con «query: ») y
+	// la dimensión del vector.
+	Pooling string
+	Prefix  string
+	Dim     int
+	// Source y SourceRevision son los pesos originales cuando nadie de
+	// confianza publica el GGUF y kindling lo convierte (scripts/encoder-gguf.sh,
+	// reproducible y verificado contra SHA256). Entonces Repo va vacío: no hay
+	// nada que descargar y el constructor lo toma de su caché por hash.
+	Source         string
+	SourceRevision string
 }
 
 // openLicenses son las licencias con las que un modelo entra en el catálogo por
@@ -78,6 +94,9 @@ func (m Model) Ref() string { return m.ID + ":" + m.Quant }
 
 // URL es la descarga fijada a la revisión, no a main.
 func (m Model) URL() string {
+	if m.Repo == "" {
+		return "" // convertido por kindling (Source): no se descarga
+	}
 	return "https://huggingface.co/" + m.Repo + "/resolve/" + m.Revision + "/" + m.File
 }
 

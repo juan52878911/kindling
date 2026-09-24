@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -25,7 +26,7 @@ import (
 
 func cmdModels(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling models <ls|add|ask|rm> [...]")
+		return fmt.Errorf("usage: kling models <ls|add|ask|embed|rm> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -34,10 +35,12 @@ func cmdModels(args []string) error {
 		return modelsAdd(args[1:])
 	case "ask":
 		return modelsAsk(args[1:])
+	case "embed":
+		return modelsEmbed(args[1:])
 	case "rm", "remove":
 		return modelsRm(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, add, ask or rm", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, add, ask, embed or rm", args[0])
 	}
 }
 
@@ -71,13 +74,17 @@ func modelsList(args []string) error {
 		})
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "CATALOG\tQUANT\tGGUF\tDEFAULT CPU/MEM\tLICENSE")
+	fmt.Fprintln(tw, "CATALOG\tQUANT\tKIND\tGGUF\tDEFAULT CPU/MEM\tLICENSE")
 	for _, m := range von.Catalog {
 		lic := m.License
 		if !m.Open() {
 			lic += " (not free to use and redistribute: needs -accept-license " + m.License + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, human(m.Size), m.VCPUs, m.MemMiB, lic)
+		kind := "chat"
+		if m.Kind != "" {
+			kind = m.Kind
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, kind, human(m.Size), m.VCPUs, m.MemMiB, lic)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -89,7 +96,11 @@ func modelsList(args []string) error {
 	}
 	fmt.Fprintln(tw, "NAME\tMODEL\tCPU/MEM\tSNAPSHOT\tINSTANCES")
 	for _, s := range mine {
-		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%d\n", s.Name, s.Labels[von.LabelModel], s.VCPUs, s.MemMiB, human(s.MemBytes), s.Instances)
+		ref := s.Labels[von.LabelModel]
+		if k := s.Labels[von.LabelKind]; k != "" {
+			ref += " (" + k + ")"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%d\n", s.Name, ref, s.VCPUs, s.MemMiB, human(s.MemBytes), s.Instances)
 	}
 	return tw.Flush()
 }
@@ -177,8 +188,13 @@ func modelsAdd(args []string) error {
 
 	fmt.Printf("Making the golden snapshot (%d vCPU, %d MiB)...\n", vcpus, memMiB)
 	t0 := time.Now()
+	var labels map[string]string
+	if res.Kind != "" {
+		labels = map[string]string{von.LabelKind: res.Kind}
+	}
 	g, err := von.MakeGolden(ctx, c, von.GoldenOptions{
 		Image: name, Snapshot: name, Ref: res.Ref, VCPUs: vcpus, MemMiB: memMiB, CPUPct: *cpuPct,
+		Kind: res.Kind, Labels: labels,
 		AllowExec: *allowExec, Replace: *replace, Wait: *wait,
 		Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
@@ -190,6 +206,11 @@ func modelsAdd(args []string) error {
 	fmt.Println()
 	fmt.Println("Serve it:")
 	fmt.Printf("  kling run -from %s -name %s-1\n", name, name)
+	if res.Kind == von.KindEmbed {
+		fmt.Printf("  kling models embed %s-1 \"turn on the lights\"\n", name)
+		fmt.Printf("Embeddings API (POST /v1/embeddings) on port %d of each replica.\n", von.Port)
+		return nil
+	}
 	fmt.Printf("  kling models ask %s-1 \"What is a microVM?\"\n", name)
 	fmt.Printf("OpenAI-compatible API on port %d of each replica (kling inspect <ref> for the address).\n", von.Port)
 	return nil
@@ -244,7 +265,7 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 				// de la receta: una imagen hecha antes de existir el flag vale.
 				prev.AcceptLicense = spec.AcceptLicense
 				pr, perr := prev.Resolve()
-				if rec.Builder != "llm" || perr != nil || pr.Ref != res.Ref || pr.Ctx != res.Ctx ||
+				if rec.Builder != "llm" || perr != nil || pr.Ref != res.Ref || pr.Ctx != res.Ctx || pr.Kind != res.Kind ||
 					pr.Parallel != res.Parallel || pr.Threads != res.Threads {
 					return fmt.Errorf("image %q exists but was built for something else (builder %q, model %q): use another name or -rebuild",
 						name, rec.Builder, pr.Ref)
@@ -337,6 +358,40 @@ func modelsAsk(args []string) error {
 		fmt.Fprintf(os.Stderr, "\n[%s: prompt %d tok at %.0f tok/s, generated %d tok at %.1f tok/s, %d ms end to end]\n",
 			resp.Model, t.PromptN, t.PromptPerSecond, t.PredictedN, t.PredictedPerSecond, dur.Milliseconds())
 	}
+	return nil
+}
+
+// modelsEmbed pide el vector de un texto a un codificador (kind embed) y
+// enseña su tamaño, su norma y lo que tardó: para comprobar una réplica, no
+// para usar los vectores (eso es pkg/codificador).
+func modelsEmbed(args []string) error {
+	fs := flag.NewFlagSet("models embed", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "print the full response and the wall time as JSON")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return fmt.Errorf("usage: kling models embed <machine> <text...>")
+	}
+	ref, text := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	resp, dur, err := von.Embed(ctx, api.NewClient(hostOf(*host)), ref, []string{text})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"response": resp, "request_ms": dur.Milliseconds()})
+	}
+	v := resp.Data[0].Embedding
+	norm := 0.0
+	for _, x := range v {
+		norm += x * x
+	}
+	head := v[:min(4, len(v))]
+	fmt.Printf("%s: %d dimensions, norm %.4f, %d tokens, %.1f ms end to end\nfirst values: %v\n",
+		resp.Model, len(v), math.Sqrt(norm), resp.Usage.PromptTokens, float64(dur.Microseconds())/1000, head)
 	return nil
 }
 
