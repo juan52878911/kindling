@@ -82,6 +82,7 @@ enlazadas:
 · [Volúmenes](#volúmenes-lo-que-sobrevive-a-la-microvm)
 · [Una biblioteca de paquetes compartida](#una-biblioteca-de-paquetes-compartida)
 · [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
+· [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
 · [JEV: un clasificador diminuto para decisiones pequeñas](#jev-un-clasificador-diminuto-para-decisiones-pequeñas)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
@@ -700,6 +701,25 @@ con carpetas no se puede convertir en snapshot. Las carpetas vivas pasan por la 
 red del invitado, con un techo de 16 MiB/s por sentido en Firecracker. Diseño, límites y
 modelo de amenaza: [`docs/compartir.md`](docs/compartir.md).
 
+## LLM pequeños bajo demanda (VON)
+
+`kling models` sirve modelos *instruct* pequeños (SmolLM2-360M, Qwen2.5-0.5B) desde microVMs
+con `llama-server` de llama.cpp y su API compatible con OpenAI, congelados en un snapshot
+dorado **después** de cargar y calentar el modelo:
+
+```sh
+kling models add von-smol -model smollm2-360m-instruct     # imagen + dorado, una orden
+kling run -from von-smol -name smol-1                      # una réplica, el modelo ya en memoria
+kling models ask smol-1 "What is a microVM?"               # respuesta + tokens/s
+curl http://$(kling inspect smol-1 | jq -r .ip):8000/v1/chat/completions -d '{...}'
+```
+
+Pesos y llama.cpp van fijados por revisión y sha256. En Linux las réplicas de un dorado
+comparten los pesos en la caché de páginas del host: cuatro réplicas de SmolLM2 midieron
+**461 MiB de PSS** en total (suma de RSS 1715 MiB), ~12 MiB por réplica de más. En un Mac
+(`vz`), una réplica da su primer token ~0,8 s después de `run -from` y genera a ~140 tok/s.
+Cifras, la salvedad del laboratorio anidado y el plan de GPU: [`docs/von.md`](docs/von.md).
+
 ## JEV: un clasificador diminuto para decisiones pequeñas
 
 `kling jev` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
@@ -1090,7 +1110,9 @@ permite que N instancias compartan páginas.
 | `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
 | `scripts/70-build-minimal-image.sh` | Construye la imagen base `min`, o una base de familia de runtime (`node`, `python`) |
 | `scripts/71-build-glibc-base.sh` | Construye la base glibc con `chrome-headless-shell` (35% menos disco, arranque 3,4× más rápido que el Chromium de Alpine) |
-| `scripts/81-base-image.sh` | El constructor de imágenes `base`: una capa con paquetes y el agente de invitado genérico (`kling images build -builder base`) |
+| `scripts/81-base-image.sh` | El constructor de imágenes `base`: una capa con paquetes y el agente de invitado genérico (`kling images build -builder base`); también el motor de capas del constructor `llm` |
+| `scripts/builders/llm` | El constructor `llm` de `kling models add`: llama.cpp + un GGUF fijado sobre una base Debian trixie |
+| `scripts/96-von-bench.sh` | Mide un modelo VON: frío y thaw hasta el primer token, tokens/s, memoria de N réplicas, semillas |
 
 ## Mapa de la documentación
 
@@ -1100,6 +1122,7 @@ permite que N instancias compartan páginas.
 | [`docs/extensions.md`](docs/extensions.md) | El protocolo de extensiones: manifiesto, despacho, ganchos, unidades |
 | [`docs/api.md`](docs/api.md) | El API HTTP del daemon sobre el que se construyen las extensiones |
 | [`docs/exec-sandbox.md`](docs/exec-sandbox.md) | Sandboxes, exec en streaming y copia de ficheros para agentes de código |
+| [`docs/von.md`](docs/von.md) | LLM pequeños desde snapshots dorados: uso, diseño, cifras, plan de GPU |
 | [`SECURITY.md`](SECURITY.md) | Modelo de amenaza, barreras, y lo que NO está resuelto |
 | [`CHANGELOG.md`](CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](docs/RELEASE-v0.2.0.md) y [v0.3.0](docs/RELEASE-v0.3.0.md) |
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |

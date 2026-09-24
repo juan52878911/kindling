@@ -87,7 +87,7 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | Ruta | Qué hace |
 |---|---|
 | `GET /images` | lista, con receta y snapshots que salen de cada una |
-| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base` y kindling-mcp instala `mcp` |
+| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base` y `llm` (modelos VON, [`von.md`](von.md)) y kindling-mcp instala `mcp` |
 | `GET /images/{name}/recipe` | cómo se construyó |
 | `GET /images/{name}/files?path=/p[&max=N]` | el contenido de un fichero de dentro (1 MiB por defecto, hasta 64) |
 | `GET /images/{name}/files?path=/p&stat=1` | `{exists, size, sha256}` |

@@ -6,6 +6,41 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## v0.11.0 — sin publicar
 
+### Modelos VON: LLM pequeños bajo demanda (`kling models`)
+
+Diseño, uso y cifras en [docs/von.md](docs/von.md).
+
+- **`kling models add <nombre> -model <id> [-quant q8_0]`** construye con una
+  orden la imagen de un modelo —`llama-server` de llama.cpp y el GGUF, como capa
+  sobre una base Debian trixie— y su **snapshot dorado**, congelado con el modelo
+  ya cargado y caliente. `kling run -from <nombre>` da réplicas que contestan en
+  cuanto termina el thaw, con la API compatible con OpenAI en el puerto 8000
+  (`/v1/chat/completions`, `/v1/models`, `/health`, `/metrics`). También
+  `models ls`, `models ask <réplica> <prompt>` (respuesta y tokens/s) y `models rm`.
+- Catálogo fijado por revisión y sha256: `smollm2-360m-instruct` (Q8_0, Q4_K_M) y
+  `qwen2.5-0.5b-instruct` (Q8_0, Q4_K_M); o un GGUF propio de Hugging Face con
+  `-url …/resolve/<commit>/<fichero>.gguf -sha256 …`. llama.cpp `b11147`, binarios
+  oficiales con todas las variantes de CPU, verificados por sha256. Mandos:
+  `-ctx` (2048 por defecto), `-parallel`, `-threads`, `-cpus`, `-mem`, `-cpu-pct`.
+- **Constructor `llm`** (`kling builder llm`, instalado por `make deploy`): descarga
+  y verifica en Go, cachea por hash en `$KLING_ROOT/cache/von` y se hace su base
+  glibc (`glibc-trixie`, con `71-build-glibc-base.sh`) la primera vez; necesita
+  `debootstrap` en el host. `models add -build-only` construye solo la imagen,
+  para copiarla a un daemon de macOS y hacer allí el dorado.
+- El dorado se hace con un core por vCPU (`cpu_pct` 100 × vCPU) y devuelve al
+  host lo reclamable (`squeeze`) antes de congelar. Las réplicas del mismo dorado
+  muestrean con semillas distintas (medido).
+- `pkg/von`: catálogo, validación, cliente mínimo de la API y `MakeGolden`, para
+  el gateway que encadene JEV → VON.
+- `81-base-image.sh` acepta `ROOTFS_DIR` (ficheros que copiar a la imagen) y
+  `SERVICE` (un ejecutable que el entrypoint arranca y relanza antes del agente).
+- `scripts/96-von-bench.sh`: arranque en frío y thaw hasta el primer token,
+  tokens/s, memoria de 1..N réplicas y semillas.
+- Arreglos de camino: `kling run -from` hereda el `cpu_pct` del snapshot (antes
+  caía al 50 % de un core salvo que lo pasara quien llamaba, como hace el
+  planificador), y el daemon deja legible para el VMM la base que un constructor
+  cree (antes solo la imagen construida).
+
 ### JEV: un clasificador lineal diminuto
 
 `kling jev train|eval|predict|inspect` y los paquetes `pkg/jev` (características,
@@ -36,6 +71,16 @@ dependencias ni cgo; corre en local, sin daemon. Diseño en
   de unas reglas y 0,32 de la clase mayoritaria; pero la precisión prometida por
   los umbrales cae de 0,95 a 0,77–0,85 con el cambio temporal y a 0,58 entre
   repos. Opt-in hasta que cada tarea tenga su evaluación.
+
+### Despliegue: la unidad de systemd ya no lleva valores de un host concreto
+
+`packaging/kling.service` traía grabado `KLING_SOCKET_USER=juan`: en cualquier
+otro host, `make deploy` volvía a instalar la unidad y pisaba en silencio lo
+que ese host hubiera configurado, dejando el CLI sin acceso al socket (pasó en
+el laboratorio). Ahora la unidad no lleva ningún valor propio de una máquina:
+los lee de `EnvironmentFile=-/etc/default/kling` (opcional), y `make deploy`
+crea ese fichero solo la primera vez, con `KLING_SOCKET_USER` a partir del
+usuario de `HOST`; en los redespliegues siguientes no lo toca.
 
 ### Arreglos
 

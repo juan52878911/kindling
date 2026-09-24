@@ -540,6 +540,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			req.AllowDomains = snap.AllowDomains
 		}
 	}
+	// El techo de CPU, igual. El planificador ya lo pasaba a mano, pero `kling
+	// run -from` no: la réplica caía al 50 % de un core del daemon aunque el
+	// dorado se hubiera hecho con más. Para un modelo VON de 2 vCPU eso es
+	// cuatro veces más lento, y el síntoma —un modelo que genera a paso de
+	// tortuga— no apunta al snapshot.
+	if req.CPUPct <= 0 {
+		req.CPUPct = snap.CPUPct
+	}
 
 	id := newID()
 	if req.Name == "" {

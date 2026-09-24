@@ -106,6 +106,15 @@ GOLDEN SNAPSHOTS
   snapshots                                        lists the snapshots
   rmi <name>                                       removes a snapshot
 
+MODELS (VON: small LLMs, OpenAI-compatible API on port 8000)
+  models ls [-json]                                catalog and the models on this daemon
+  models add <name> -model ID [-quant Q]           builds the image (llama.cpp + GGUF) and a
+      [-ctx N] [-cpus N] [-mem MiB] [-replace]     golden snapshot with the model loaded and
+      [-url HF_URL -sha256 H] [-rebuild]           warm; serve it with run -from <name>
+      [-build-only]                                only the image (to copy it to macOS)
+  models ask <ref> [-max-tokens N] <prompt...>     asks a replica, prints answer and tok/s
+  models rm <name> [-keep-image]                   removes its snapshot and image
+
 OBSERVATION
   topo                                             ASCII diagram of everything
   top [-watch DUR] [-json]                         memory per microVM (PSS) and
@@ -218,6 +227,8 @@ func main() {
 		err = cmdCommit(args)
 	case "snapshots":
 		err = cmdSnapshots(args)
+	case "models":
+		err = cmdModels(args)
 	case "images":
 		err = cmdImages(args)
 	case "rmi":

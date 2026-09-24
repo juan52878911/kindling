@@ -1,0 +1,3 @@
+#!/bin/sh
+# Constructor "llm" del núcleo: modelos VON (llama-server + un GGUF). Ver docs/von.md.
+exec /usr/local/bin/kling builder llm "$@"

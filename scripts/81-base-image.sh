@@ -11,6 +11,14 @@
 #   NAME        nombre de la imagen            BASE   imagen base (min por defecto)
 #   GROW        MiB reservados para la capa    PKGS   paquetes apk/apt, separados por espacios
 #   AGENT       ruta del kling-guest a meter   ENV_FILE  líneas KEY=VALUE a exportar
+#   ROOTFS_DIR  (opcional) árbol de ficheros que se copia tal cual a la raíz
+#   SERVICE     (opcional) ruta absoluta, dentro de la imagen, de un ejecutable
+#               que el entrypoint arranca en segundo plano y relanza si muere,
+#               antes de ceder el PID 1 al agente. Su salida: /var/log/service.log
+#
+# ROOTFS_DIR y SERVICE los usa el constructor "llm" (llama-server + un GGUF, ver
+# docs/von.md), pero no saben nada de modelos: sirven a cualquier imagen que sea
+# "el agente de siempre más un servidor propio".
 #
 # El motor de capas (overlay sobre la base, e2fsck, encogido) es el mismo que el
 # de 80-mcp-image.sh; ver docs/three-layers.md.
@@ -23,10 +31,19 @@ GROW="${GROW:-0}"
 PKGS="${PKGS:-}"
 AGENT="${AGENT:?falta AGENT}"
 ENV_FILE="${ENV_FILE:-}"
+ROOTFS_DIR="${ROOTFS_DIR:-}"
+SERVICE="${SERVICE:-}"
 
 [ "$(id -u)" -eq 0 ] || { echo "ejecútalo como root" >&2; exit 1; }
 BASE_IMG="$ROOT/images/$BASE.ext4"
 [ -f "$BASE_IMG" ] || { echo "falta la imagen base '$BASE'" >&2; exit 1; }
+if [ -n "$ROOTFS_DIR" ] && [ ! -d "$ROOTFS_DIR" ]; then
+  echo "ROOTFS_DIR $ROOTFS_DIR is not a directory" >&2; exit 1
+fi
+case "$SERVICE" in
+  ""|/*) ;;
+  *) echo "SERVICE must be an absolute path inside the image: $SERVICE" >&2; exit 1 ;;
+esac
 [ "$(head -c4 "$AGENT" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || {
   echo "$AGENT no es un binario ELF: compila kling-guest para linux (make guest)" >&2; exit 1; }
 
@@ -79,6 +96,16 @@ fi
 
 install -Dm755 "$AGENT" "$mnt/usr/local/bin/kling-guest"
 
+if [ -n "$ROOTFS_DIR" ]; then
+  # -a para conservar los enlaces simbólicos de las bibliotecas (libfoo.so.0 ->
+  # libfoo.so.0.1.2) en vez de duplicar cada una. Lo prepara root, así que la
+  # propiedad que se conserva es la buena.
+  cp -a "$ROOTFS_DIR/." "$mnt/"
+fi
+if [ -n "$SERVICE" ] && [ ! -x "$mnt$SERVICE" ]; then
+  echo "SERVICE $SERVICE is not an executable inside the image" >&2; exit 1
+fi
+
 {
   echo '#!/bin/sh'
   echo '# Generado por el constructor base de kindling: el agente de invitado es PID 1.'
@@ -89,6 +116,13 @@ install -Dm755 "$AGENT" "$mnt/usr/local/bin/kling-guest"
       [ -n "$kv" ] || continue
       printf 'export %s=%s\n' "${kv%%=*}" "$(sq "${kv#*=}")"
     done < "$ENV_FILE"
+  fi
+  if [ -n "$SERVICE" ]; then
+    # El servicio arranca ANTES que el agente y en segundo plano: el agente es
+    # PID 1 (recoge huérfanos, monta volúmenes, sirve exec) y el servicio queda
+    # como su hijo. El bucle lo relanza si muere, que un servidor caído en una
+    # réplica restaurada no tiene a nadie más que lo levante.
+    echo "( while :; do $(sq "$SERVICE"); echo \"service exited with \$?, restarting in 1s\"; sleep 1; done ) </dev/null >>/var/log/service.log 2>&1 &"
   fi
   echo 'exec /usr/local/bin/kling-guest -listen :8080'
 } > "$mnt/entrypoint"
