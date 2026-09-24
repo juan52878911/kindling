@@ -8,9 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
@@ -169,5 +173,65 @@ func TestProxySoloAPuertosDeclarados(t *testing.T) {
 	}
 	if puertoPermitido(&api.Machine{Name: "sin"}, 22) {
 		t.Error("sin etiqueta solo vale el puerto del agente")
+	}
+}
+
+// POST /machines/{ref}/renew renueva el TTL de cualquier máquina menos de un
+// sandbox, que tiene su ruta con su tope. Las máquinas se siembran en el
+// state.json antes de arrancar el Manager: congeladas, que es donde un thaw no
+// renueva y quien las gestiona tiene que hacerlo a mano.
+func TestRenewDeMaquina(t *testing.T) {
+	root := t.TempDir()
+	hace1h := time.Now().Add(-time.Hour)
+	sembradas := []*api.Machine{
+		{ID: "a1a1a1a1a1a1a1a1", Name: "svc", State: api.StateWarm,
+			Labels: map[string]string{api.LabelService: "svc"}, TTLSeconds: 120, TTLAt: &hace1h},
+		{ID: "b2b2b2b2b2b2b2b2", Name: "caja", State: api.StateWarm, OnTTL: api.OnTTLRemove,
+			Labels: map[string]string{api.LabelKind: api.KindSandbox}, TTLSeconds: 120, TTLAt: &hace1h},
+	}
+	b, _ := json.Marshal(sembradas)
+	if err := os.WriteFile(filepath.Join(root, "state.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bus := events.New()
+	mgr, err := machine.NewManager(root, "", "", bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mgr.Close)
+	h := (&Server{mgr: mgr, root: root, bus: bus}).routes()
+
+	rr := call(t, h, "POST", "/machines/svc/renew", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("renew sin cuerpo: %d %s", rr.Code, rr.Body.String())
+	}
+	var out api.Machine
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.TTLSeconds != 120 || out.TTLAt == nil || time.Since(*out.TTLAt) > time.Minute {
+		t.Fatalf("renew = ttl %d desde %v; quería el mismo plazo con el reloj a cero", out.TTLSeconds, out.TTLAt)
+	}
+	if rr := call(t, h, "POST", "/machines/svc/renew", `{"ttl_seconds":300}`); rr.Code != http.StatusOK ||
+		!strings.Contains(rr.Body.String(), `"ttl_seconds":300`) {
+		t.Fatalf("renew con plazo: %d %s", rr.Code, rr.Body.String())
+	}
+
+	cases := []struct {
+		path, body string
+		want       int
+	}{
+		{"/machines/nada/renew", "", 404},
+		{"/machines/svc/renew", `{"ttl_seconds":-1}`, 400},
+		// Un sandbox no se renueva por aquí: se saltaría SandboxMaxTTL.
+		{"/machines/caja/renew", `{"ttl_seconds":999999}`, 409},
+	}
+	for _, c := range cases {
+		if rr := call(t, h, "POST", c.path, c.body); rr.Code != c.want {
+			t.Errorf("POST %s %s: %d (%s), want %d", c.path, c.body, rr.Code, strings.TrimSpace(rr.Body.String()), c.want)
+		}
+	}
+	if mc, _ := mgr.Get("caja"); mc.TTLSeconds != 120 || !mc.TTLAt.Equal(hace1h) {
+		t.Errorf("el sandbox cambió: ttl %d desde %v", mc.TTLSeconds, mc.TTLAt)
 	}
 }
