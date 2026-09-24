@@ -84,6 +84,7 @@ enlazadas:
 · [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
 · [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
 · [JEV: un clasificador diminuto para decisiones pequeñas](#jev-un-clasificador-diminuto-para-decisiones-pequeñas)
+· [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -739,6 +740,27 @@ Diseño y formato: [`docs/jev.md`](docs/jev.md). Una evaluación honesta con 4 3
 commits reales, incluido dónde dejan de valer los umbrales:
 [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
 
+## Gateway de IA: muchos modelos listos, ninguno encendido 24/7
+
+`kling ai serve` pone JEV y VON detrás de una misma API. Una **tarea** es una cascada:
+JEV (dentro del proceso) contesta si su probabilidad calibrada supera el umbral de la
+clase; si no, la petición escala a un modelo VON, cuya réplica se descongela con la
+primera petición, se multiplica con la concurrencia y se vuelve a congelar al quedarse
+ociosa (`pkg/scheduler`). `POST /v1/classify` y `/v1/decide` devuelven `{label, prob,
+source: jev|von, latency_ms, evidence}`; `/v1/chat/completions` y `/v1/models` son
+compatibles con OpenAI, con streaming. Escucha en un socket Unix 0600 por defecto y en
+TCP solo con `-listen` y token; `/metrics` da cobertura, escalado, thaws y arranques en
+frío.
+
+```sh
+kling ai serve                                  # registro en ~/.config/kling/ai.json
+kling ai test commit-type "fix crash when the cache is cold"
+kling ai calibrate commit-type -dry-run         # reajusta los umbrales de JEV con lo que dice VON
+```
+
+Medido en clasificación de commits: JEV solo contesta en 6 µs con 0,64 de exactitud y los VON diminutos probados son peores (0,06–0,24), así que la cascada se mide por tarea antes de activarla. Diseño, API, recalibración y sus límites:
+[`docs/ai-gateway.md`](docs/ai-gateway.md).
+
 ## Qué persiste y qué no
 
 Conviene tenerlo claro, porque no es obvio:
@@ -1129,6 +1151,7 @@ permite que N instancias compartan páginas.
 | [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
+| [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: cascada JEV → VON, escala a cero, API de OpenAI, recalibración, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
 | [`docs/releases.md`](docs/releases.md) | Cómo se construyen y publican las releases |
