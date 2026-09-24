@@ -262,6 +262,25 @@ La diferencia entre las dos columnas es lo compartido: los pesos viven **una vez
 en la caché de páginas del host (el `mem.file` del dorado) y cada réplica añade
 ~11–14 MiB. Cuatro `llama-server` sueltos serían 4 × 534 = 2136 MiB.
 
+**Qwen2.5-1.5B Q4_K_M** (4 vCPU, 1536 MiB) en el mismo laboratorio: el dorado
+tardó 37 min en crearse (21 min de carga del GGUF y tres reintentos del
+calentamiento, cuya primera respuesta pasó de los 5 min del proxy del daemon);
+`mem.file` de 1286 MiB. Thaw en **360 ms** (241–361, n=3), pero el primer token
+llega a los **29 s** (27–33 s): la primera petición trae ~1,2 GiB de pesos a
+base de fallos de página de ~1 ms. Una generación de 128 tokens no terminó en
+5 min (la velocidad del anidado, abajo). La memoria sí vale, y se comparte igual:
+
+| réplicas | PSS total | PSS de cada una | suma de RSS |
+|---|---|---|---|
+| 1 | 1011 MiB | 1011 | 1010 MiB |
+| 2 | 1030 MiB | 514, 516 | 2023 MiB |
+| 3 | **1049 MiB** | 351, 348, 350 | 3036 MiB |
+
+~19 MiB por réplica de más. El Q8_0 no terminó de cargar en 2 h en el
+laboratorio y el 3B cargó en 41 min en un intento y no acabó en 80 en otro: con
+KVM anidado, un modelo de 2 GiB está en el límite de lo medible. Sus cifras son
+las del Mac.
+
 ### macOS (`vz`, sin anidar)
 
 | | SmolLM2-360M Q8_0 | Qwen2.5-0.5B Q4_K_M | Qwen2.5-0.5B Q8_0 |
