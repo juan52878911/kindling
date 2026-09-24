@@ -96,12 +96,16 @@ var Catalog = []Model{
 		Size:     491400032, MemMiB: 896, VCPUs: 2, License: "apache-2.0",
 	},
 	{
+		// MemMiB en 1152, no 1024: medido en el dorado (docs/von.md, Dimensionado),
+		// usa 871 MiB en Linux con el -ctx por defecto, así que a 1024 quedan solo
+		// 153 MiB libres para la caché KV y los búferes de cálculo del vocabulario
+		// de 152k; subir -ctx con el tamaño por defecto se quedaba corto.
 		ID: "qwen2.5-0.5b-instruct", Quant: "q8_0",
 		Repo:     "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
 		Revision: "9217f5db79a29953eb74d5343926648285ec7e67",
 		File:     "qwen2.5-0.5b-instruct-q8_0.gguf",
 		SHA256:   "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e",
-		Size:     675710816, MemMiB: 1024, VCPUs: 2, License: "apache-2.0",
+		Size:     675710816, MemMiB: 1152, VCPUs: 2, License: "apache-2.0",
 	},
 }
 

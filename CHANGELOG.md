@@ -40,6 +40,7 @@ Diseño, uso y cifras en [docs/von.md](docs/von.md).
   caía al 50 % de un core salvo que lo pasara quien llamaba, como hace el
   planificador), y el daemon deja legible para el VMM la base que un constructor
   cree (antes solo la imagen construida).
+
 ### JEV: un clasificador lineal diminuto
 
 `kling jev train|eval|predict|inspect` y los paquetes `pkg/jev` (características,
@@ -70,6 +71,29 @@ dependencias ni cgo; corre en local, sin daemon. Diseño en
   de unas reglas y 0,32 de la clase mayoritaria; pero la precisión prometida por
   los umbrales cae de 0,95 a 0,77–0,85 con el cambio temporal y a 0,58 entre
   repos. Opt-in hasta que cada tarea tenga su evaluación.
+
+### Despliegue: la unidad de systemd ya no lleva valores de un host concreto
+
+`packaging/kling.service` traía grabado `KLING_SOCKET_USER=juan`: en cualquier
+otro host, `make deploy` volvía a instalar la unidad y pisaba en silencio lo
+que ese host hubiera configurado, dejando el CLI sin acceso al socket (pasó en
+el laboratorio). Ahora la unidad no lleva ningún valor propio de una máquina:
+los lee de `EnvironmentFile=-/etc/default/kling` (opcional), y `make deploy`
+crea ese fichero solo la primera vez, con `KLING_SOCKET_USER` a partir del
+usuario de `HOST`; en los redespliegues siguientes no lo toca.
+
+### Arreglos
+
+- **El daemon ya no congela una instancia del gateway a media petición.** Las
+  instancias nacen con TTL 2×idle como red de seguridad, pero el daemon lo cuenta
+  desde la creación y ni `thaw` ni el tráfico HTTP lo reinician. Una instancia
+  creada hace más de 2×idle, congelada por ociosa y despertada por una petición,
+  volvía a congelarse en ~10 s con la petición en curso; y una que atendía sin
+  parar se congelaba al cumplir 2×idle. Ahora el planificador renueva el TTL
+  antes de despertarla, al adoptarla y en cada vuelta del segador, con la ruta
+  nueva `POST /machines/{ref}/renew` (capacidad `renew`). Un sandbox sigue sin
+  renovarse al despertar y no se puede renovar por esa ruta. Contra un daemon
+  anterior el planificador se comporta como antes.
 
 ## v0.10.0 — 2026-09-23
 

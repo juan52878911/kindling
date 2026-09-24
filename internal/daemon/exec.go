@@ -454,6 +454,43 @@ func (s *Server) handleRenewSandbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleRenew reinicia el reloj del TTL de cualquier máquina que no sea un
+// sandbox. Es lo que usa el planificador del gateway: despertar no renueva el
+// TTL (un sandbox no debe alargar su vida por despertarse), así que quien
+// gestiona la máquina lo renueva de forma explícita al despertarla y mientras
+// la use. ttl_seconds 0 (o sin cuerpo) conserva el plazo que ya tenía.
+//
+// Un sandbox tiene su propia ruta, con su tope: por aquí se saltaría
+// SandboxMaxTTL.
+func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
+	mc, ok := s.mgr.Get(r.PathValue("ref"))
+	if !ok {
+		fail(w, http.StatusNotFound, fmt.Errorf("no machine %q", r.PathValue("ref")))
+		return
+	}
+	if mc.Labels[api.LabelKind] == api.KindSandbox {
+		fail(w, http.StatusConflict, fmt.Errorf("%s is a sandbox; renew it with POST /sandboxes/%s/renew", mc.Name, mc.Name))
+		return
+	}
+	var req api.RenewRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			fail(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if req.TTLSeconds < 0 {
+		fail(w, http.StatusBadRequest, fmt.Errorf("ttl_seconds can't be negative"))
+		return
+	}
+	out, err := s.mgr.Renew(mc.ID, req.TTLSeconds)
+	if err != nil {
+		fail(w, execStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleRemoveSandbox(w http.ResponseWriter, r *http.Request) {
 	mc, ok := s.sandbox(w, r.PathValue("ref"))
 	if !ok {

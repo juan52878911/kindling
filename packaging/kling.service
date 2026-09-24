@@ -7,13 +7,20 @@ ConditionPathExists=/dev/kvm
 [Service]
 Type=simple
 # Necesita root: abre /dev/kvm, monta rootfs y lanza procesos firecracker.
-# KLING_SOCKET_USER cede el socket al usuario con el que entra el CLI por SSH,
-# para no tener que ejecutar todo el cliente con sudo.
-Environment=KLING_SOCKET_USER=juan
-# Firecracker corre con este usuario sin privilegios, no como root. Créalo con:
+#
+# KLING_SOCKET_USER (cede el socket al usuario que entra por SSH, para no
+# ejecutar el CLI con sudo) y KLING_RUN_AS (usuario sin privilegios con el que
+# corre Firecracker) cambian de máquina en máquina. Por eso NO van grabados
+# aquí con Environment=: esta unidad la reinstala `make deploy` en cada
+# despliegue, y un valor de aquí pisaría lo que cada host configuró. Van en
+# /etc/default/kling, que `make deploy` solo crea la primera vez (nunca lo
+# pisa) y el "-" de abajo hace opcional, para que la unidad funcione con los
+# valores por defecto del binario aunque el fichero no exista todavía.
+#
+# Para crear el usuario sin privilegios de KLING_RUN_AS (por defecto "kindling"):
 #   useradd --system --no-create-home --shell /usr/sbin/nologin kindling
 #   usermod -aG kvm kindling
-Environment=KLING_RUN_AS=kindling
+EnvironmentFile=-/etc/default/kling
 ExecStart=/usr/local/bin/kling daemon
 Restart=on-failure
 RestartSec=2

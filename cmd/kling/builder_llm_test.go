@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func tarball(t *testing.T, entries []tar.Header, bodies map[string]string) string {
@@ -125,5 +126,45 @@ func TestFetchVerified(t *testing.T) {
 	}
 	if _, err := os.Stat(otro + ".part"); err == nil {
 		t.Fatal("quedó el .part")
+	}
+}
+
+// TestFetchVerifiedStalledDownload comprueba que una descarga que deja de
+// mandar bytes a mitad de camino se corta sola en vez de colgar el builder
+// para siempre (era el bug: http.Get sin ningún timeout).
+func TestFetchVerifiedStalledDownload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("first bytes, then silence"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Simula un HuggingFace/GitHub que se cuelga a mitad de descarga: no
+		// manda nada más hasta mucho después de que el test se dé por vencido.
+		// Si el cliente cancela antes (que es justo lo que probamos), el
+		// contexto de la petición se cierra y el handler no se queda esperando
+		// los 2s completos.
+		select {
+		case <-time.After(2 * time.Second):
+			_, _ = w.Write([]byte("bytes that arrive too late"))
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	dst := filepath.Join(t.TempDir(), "stalled.gguf")
+	start := time.Now()
+	err := fetchVerifiedTimeout(srv.URL, strings.Repeat("0", 64), dst, 200*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "stalled") {
+		t.Fatalf("err = %v, quería un error de estancamiento", err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("tardó %s en cortar: el detector de estancamiento no actuó a tiempo", elapsed)
+	}
+	if _, err := os.Stat(dst); err == nil {
+		t.Fatal("una descarga estancada no debe dejar el fichero final")
+	}
+	if _, err := os.Stat(dst + ".part"); err == nil {
+		t.Fatal("quedó el .part de una descarga estancada")
 	}
 }

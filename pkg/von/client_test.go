@@ -18,12 +18,14 @@ import (
 // daemonFalso es un daemon de mentira por un socket Unix: lo justo del API
 // (run, guest, commit, rm) para probar el flujo del dorado sin microVMs.
 type daemonFalso struct {
-	mu         sync.Mutex
-	cargando   int // respuestas 503 de /health antes del 200
-	run        api.RunRequest
-	commit     api.CommitRequest
-	borradas   []string
-	peticiones []string
+	mu          sync.Mutex
+	cargando    int // respuestas 503 de /health antes del 200
+	run         api.RunRequest
+	commit      api.CommitRequest
+	borradas    []string
+	peticiones  []string
+	warmFalla   bool // el /v1/chat/completions del calentamiento responde 500
+	commitFalla bool // el /commit responde 500
 }
 
 func (d *daemonFalso) servir(t *testing.T) *api.Client {
@@ -67,6 +69,10 @@ func (d *daemonFalso) servir(t *testing.T) *api.Client {
 		case g.Path == "/health":
 			out = api.GuestResponse{Status: 200, Body: `{"status":"ok"}`}
 		case g.Path == "/v1/chat/completions":
+			if d.warmFalla {
+				out = api.GuestResponse{Status: 500, Body: `{"error":{"code":500,"message":"boom"}}`}
+				break
+			}
 			var req ChatRequest
 			_ = json.Unmarshal([]byte(g.Body), &req)
 			if req.MaxTokens == 0 || len(req.Messages) == 0 {
@@ -84,6 +90,10 @@ func (d *daemonFalso) servir(t *testing.T) *api.Client {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		_ = json.NewDecoder(r.Body).Decode(&d.commit)
+		if d.commitFalla {
+			http.Error(w, `{"error":{"code":500,"message":"boom"}}`, http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(api.Snapshot{Name: d.commit.Name, MemBytes: 500 << 20, Labels: d.run.Labels})
 	})
 	mux.HandleFunc("DELETE /machines/{ref}", func(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +151,89 @@ func TestWaitReadyAgotaPlazo(t *testing.T) {
 	err := WaitReady(context.Background(), c, "m1", 300*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "still loading") {
 		t.Fatalf("debería rendirse diciendo que sigue cargando: %v", err)
+	}
+}
+
+// Los tres siguientes prueban que, pase lo que pase en el camino, MakeGolden
+// deja el error subir Y borra la plantilla igual: el defer de client.go que
+// hace el Remove no depende de en qué paso se rompió.
+
+func TestMakeGoldenErrorWaitReady(t *testing.T) {
+	// cargando altísimo: /health nunca contesta 200 antes de que el Wait
+	// (deliberadamente corto) se agote.
+	d := &daemonFalso{cargando: 1 << 30}
+	c := d.servir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	g, err := MakeGolden(ctx, c, GoldenOptions{
+		Image: "von-smol", Snapshot: "von-smol", Ref: "smollm2-360m-instruct:q8_0",
+		VCPUs: 1, MemMiB: 256, Wait: 200 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "still loading") {
+		t.Fatalf("err = %v, quería que siguiera diciendo que carga", err)
+	}
+	if g != nil {
+		t.Fatalf("resultado = %+v, quería nil", g)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.borradas) != 1 || d.borradas[0] != "m1" {
+		t.Fatalf("borradas = %v: la plantilla debe borrarse aunque WaitReady falle", d.borradas)
+	}
+	if d.commit.Name != "" {
+		t.Fatalf("no debería haber llegado a hacer commit: %+v", d.commit)
+	}
+}
+
+func TestMakeGoldenErrorWarm(t *testing.T) {
+	// El modelo carga bien (cargando: 0), pero el calentamiento revienta.
+	d := &daemonFalso{warmFalla: true}
+	c := d.servir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	g, err := MakeGolden(ctx, c, GoldenOptions{
+		Image: "von-smol", Snapshot: "von-smol", Ref: "smollm2-360m-instruct:q8_0",
+		VCPUs: 1, MemMiB: 256, Wait: 5 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "warm-up") {
+		t.Fatalf("err = %v, quería un error de warm-up", err)
+	}
+	if g != nil {
+		t.Fatalf("resultado = %+v, quería nil", g)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.borradas) != 1 || d.borradas[0] != "m1" {
+		t.Fatalf("borradas = %v: la plantilla debe borrarse aunque el calentamiento falle", d.borradas)
+	}
+	if d.commit.Name != "" {
+		t.Fatalf("no debería haber llegado a hacer commit: %+v", d.commit)
+	}
+}
+
+func TestMakeGoldenErrorCommit(t *testing.T) {
+	// Carga y calentamiento bien, pero el commit (congelar el dorado) revienta.
+	d := &daemonFalso{commitFalla: true}
+	c := d.servir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	g, err := MakeGolden(ctx, c, GoldenOptions{
+		Image: "von-smol", Snapshot: "von-smol", Ref: "smollm2-360m-instruct:q8_0",
+		VCPUs: 1, MemMiB: 256, Wait: 5 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("err = %v, quería un error de commit", err)
+	}
+	if g != nil {
+		t.Fatalf("resultado = %+v, quería nil", g)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.borradas) != 1 || d.borradas[0] != "m1" {
+		t.Fatalf("borradas = %v: la plantilla debe borrarse aunque el commit falle", d.borradas)
 	}
 }
 

@@ -205,6 +205,13 @@ func (w *warmVM) Token() string        { return w.session }
 // bloquea nunca.
 func (g *Scheduler) TakeWarm(service string) *Warm { return g.pool.take(service) }
 
+// HoldTTL mantiene vivo el TTL de una máquina mientras el llamador la usa: una
+// precalentada recién sacada con TakeWarm o una efímera creada para una sola
+// llamada. Hay que llamar a la función que devuelve al terminar. Ver mantenerTTL.
+func (g *Scheduler) HoldTTL(ctx context.Context, id string) (release func()) {
+	return g.mantenerTTL(ctx, id)
+}
+
 // FillPool repone en segundo plano las precalentadas del servicio.
 func (g *Scheduler) FillPool(ctx context.Context, service, snapshot string) {
 	g.pool.fill(ctx, service, snapshot)

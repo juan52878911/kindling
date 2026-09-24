@@ -79,9 +79,12 @@ func (m *Manager) touchTTL(id string) {
 // Renovar es poner el reloj del TTL (TTLAt) a ahora. Una máquina congelada
 // también se puede renovar: un sandbox dormido vence igual, y quien lo quiere
 // conservar no debería tener que despertarlo para pedirlo.
+//
+// ttlSeconds 0 conserva el plazo que ya tenía y solo reinicia el reloj; sobre
+// una máquina sin TTL no hace nada.
 func (m *Manager) Renew(ref string, ttlSeconds int) (*api.Machine, error) {
-	if ttlSeconds <= 0 {
-		return nil, fmt.Errorf("ttl must be positive")
+	if ttlSeconds < 0 {
+		return nil, fmt.Errorf("ttl can't be negative")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -98,10 +101,15 @@ func (m *Manager) Renew(ref string, ttlSeconds int) (*api.Machine, error) {
 	if mc.State != api.StateRunning && mc.State != api.StateWarm {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, mc.Name, mc.State)
 	}
-	ahora := time.Now()
-	mc.TTLAt = &ahora
-	mc.TTLSeconds = ttlSeconds
-	m.persist()
+	if ttlSeconds == 0 {
+		ttlSeconds = mc.TTLSeconds
+	}
+	if ttlSeconds > 0 {
+		ahora := time.Now()
+		mc.TTLAt = &ahora
+		mc.TTLSeconds = ttlSeconds
+		m.persist()
+	}
 	c := *mc
 	return &c, nil
 }
