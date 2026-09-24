@@ -1,0 +1,180 @@
+{"text": "tengo las manos heladas", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/1", "split": "train"}
+{"text": "estoy tiritando", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/2", "split": "train"}
+{"text": "qué rasca hace en el dormitorio", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "bedroom"}, "source": "indirect", "family": "indirect/3", "split": "train"}
+{"text": "me estoy congelando en la oficina", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "office"}, "source": "indirect", "family": "indirect/4", "split": "train"}
+{"text": "necesito una manta, qué fresco", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/5", "split": "train"}
+{"text": "se me han quedado los pies fríos", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/6", "split": "valid"}
+{"text": "hace un frío que pela en la cocina", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "kitchen"}, "source": "indirect", "family": "indirect/7", "split": "valid"}
+{"text": "estoy helado en el salón", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "living_room"}, "source": "indirect", "family": "indirect/8", "split": "test"}
+{"text": "qué destemplado está esto", "lang": "es", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/9", "split": "test"}
+{"text": "my hands are ice cold", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/10", "split": "train"}
+{"text": "i'm shivering over here", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/11", "split": "train"}
+{"text": "the bedroom is chilly", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "bedroom"}, "source": "indirect", "family": "indirect/12", "split": "train"}
+{"text": "brr, it's so cold in the office", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "office"}, "source": "indirect", "family": "indirect/13", "split": "train"}
+{"text": "i need a blanket, it's nippy", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/14", "split": "train"}
+{"text": "my feet are frozen", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/15", "split": "valid"}
+{"text": "the kitchen feels like a fridge", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "kitchen"}, "source": "indirect", "family": "indirect/16", "split": "valid"}
+{"text": "i'm cold in the living room", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat", "area": "living_room"}, "source": "indirect", "family": "indirect/17", "split": "test"}
+{"text": "it's a bit too cool for me", "lang": "en", "intent": "temperature_up", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/18", "split": "test"}
+{"text": "me estoy asando", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/19", "split": "train"}
+{"text": "estoy sudando la gota gorda", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/20", "split": "train"}
+{"text": "qué bochorno en el dormitorio", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "bedroom"}, "source": "indirect", "family": "indirect/21", "split": "train"}
+{"text": "aquí dentro se ahoga uno de calor", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/22", "split": "train"}
+{"text": "la oficina es un horno", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "office"}, "source": "indirect", "family": "indirect/23", "split": "train"}
+{"text": "me derrito en la cocina", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "kitchen"}, "source": "indirect", "family": "indirect/24", "split": "valid"}
+{"text": "estoy acalorado", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/25", "split": "valid"}
+{"text": "el salón está sofocante", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "living_room"}, "source": "indirect", "family": "indirect/26", "split": "test"}
+{"text": "qué calorazo tengo", "lang": "es", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/27", "split": "test"}
+{"text": "i'm roasting in here", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/28", "split": "train"}
+{"text": "i'm sweating buckets", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/29", "split": "train"}
+{"text": "the bedroom is stuffy and warm", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "bedroom"}, "source": "indirect", "family": "indirect/30", "split": "train"}
+{"text": "it's boiling inside", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/31", "split": "train"}
+{"text": "the office is like an oven", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "office"}, "source": "indirect", "family": "indirect/32", "split": "train"}
+{"text": "i'm melting in the kitchen", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "kitchen"}, "source": "indirect", "family": "indirect/33", "split": "valid"}
+{"text": "it's too warm for me", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/34", "split": "valid"}
+{"text": "the living room is sweltering", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat", "area": "living_room"}, "source": "indirect", "family": "indirect/35", "split": "test"}
+{"text": "i'm overheating", "lang": "en", "intent": "temperature_down", "slots": {"device": "thermostat"}, "source": "indirect", "family": "indirect/36", "split": "test"}
+{"text": "está todo en penumbra", "lang": "es", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/37", "split": "train"}
+{"text": "no distingo nada en el pasillo", "lang": "es", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/38", "split": "train"}
+{"text": "me voy a tropezar, qué oscuridad", "lang": "es", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/39", "split": "train"}
+{"text": "el baño está a oscuras", "lang": "es", "intent": "turn_on", "slots": {"device": "light", "area": "bathroom"}, "source": "indirect", "family": "indirect/40", "split": "train"}
+{"text": "no veo lo que estoy leyendo", "lang": "es", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/41", "split": "train"}
+{"text": "aquí no se ve ni torta", "lang": "es", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/42", "split": "valid"}
+{"text": "la oficina está oscurísima", "lang": "es", "intent": "turn_on", "slots": {"device": "light", "area": "office"}, "source": "indirect", "family": "indirect/43", "split": "valid"}
+{"text": "estamos a oscuras en la cocina", "lang": "es", "intent": "turn_on", "slots": {"device": "light", "area": "kitchen"}, "source": "indirect", "family": "indirect/44", "split": "test"}
+{"text": "no encuentro nada con esta oscuridad", "lang": "es", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/45", "split": "test"}
+{"text": "it's pitch black in here", "lang": "en", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/46", "split": "train"}
+{"text": "i can barely see a thing", "lang": "en", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/47", "split": "train"}
+{"text": "i keep bumping into stuff in the dark", "lang": "en", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/48", "split": "train"}
+{"text": "the bathroom is dark", "lang": "en", "intent": "turn_on", "slots": {"device": "light", "area": "bathroom"}, "source": "indirect", "family": "indirect/49", "split": "train"}
+{"text": "i can't read in this darkness", "lang": "en", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/50", "split": "train"}
+{"text": "it's way too dim to see", "lang": "en", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/51", "split": "valid"}
+{"text": "the office is completely dark", "lang": "en", "intent": "turn_on", "slots": {"device": "light", "area": "office"}, "source": "indirect", "family": "indirect/52", "split": "valid"}
+{"text": "we're in the dark in the kitchen", "lang": "en", "intent": "turn_on", "slots": {"device": "light", "area": "kitchen"}, "source": "indirect", "family": "indirect/53", "split": "test"}
+{"text": "i can't find anything, it's so dark", "lang": "en", "intent": "turn_on", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/54", "split": "test"}
+{"text": "me deslumbra la lámpara", "lang": "es", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/55", "split": "train"}
+{"text": "la luz me molesta en los ojos", "lang": "es", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/56", "split": "train"}
+{"text": "hay muchísima claridad en el salón", "lang": "es", "intent": "brightness_down", "slots": {"device": "light", "area": "living_room"}, "source": "indirect", "family": "indirect/57", "split": "train"}
+{"text": "está todo demasiado iluminado", "lang": "es", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/58", "split": "train"}
+{"text": "qué luz tan fuerte", "lang": "es", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/59", "split": "train"}
+{"text": "esta luz me ciega", "lang": "es", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/60", "split": "valid"}
+{"text": "la luz de la oficina es demasiado intensa", "lang": "es", "intent": "brightness_down", "slots": {"device": "light", "area": "office"}, "source": "indirect", "family": "indirect/61", "split": "valid"}
+{"text": "me duelen los ojos de tanta luz", "lang": "es", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/62", "split": "test"}
+{"text": "está muy brillante el dormitorio", "lang": "es", "intent": "brightness_down", "slots": {"device": "light", "area": "bedroom"}, "source": "indirect", "family": "indirect/63", "split": "test"}
+{"text": "the lamp is blinding me", "lang": "en", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/64", "split": "train"}
+{"text": "the light is hurting my eyes", "lang": "en", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/65", "split": "train"}
+{"text": "the living room is way too bright", "lang": "en", "intent": "brightness_down", "slots": {"device": "light", "area": "living_room"}, "source": "indirect", "family": "indirect/66", "split": "train"}
+{"text": "everything is too brightly lit", "lang": "en", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/67", "split": "train"}
+{"text": "this light is so harsh", "lang": "en", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/68", "split": "train"}
+{"text": "that light is dazzling me", "lang": "en", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/69", "split": "valid"}
+{"text": "the office light is too intense", "lang": "en", "intent": "brightness_down", "slots": {"device": "light", "area": "office"}, "source": "indirect", "family": "indirect/70", "split": "valid"}
+{"text": "my eyes hurt from all this light", "lang": "en", "intent": "brightness_down", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/71", "split": "test"}
+{"text": "the bedroom is too bright", "lang": "en", "intent": "brightness_down", "slots": {"device": "light", "area": "bedroom"}, "source": "indirect", "family": "indirect/72", "split": "test"}
+{"text": "buenas noches, a dormir", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/73", "split": "train"}
+{"text": "ya es hora de acostarse", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/74", "split": "train"}
+{"text": "me acuesto ya", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/75", "split": "train"}
+{"text": "me meto en la cama", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/76", "split": "train"}
+{"text": "hora de irse a la cama", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/77", "split": "train"}
+{"text": "se acabó el día, a descansar", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/78", "split": "valid"}
+{"text": "ya nos vamos a la cama", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/79", "split": "valid"}
+{"text": "me retiro a dormir", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/80", "split": "test"}
+{"text": "voy a echarme a dormir", "lang": "es", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/81", "split": "test"}
+{"text": "good night, time to sleep", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/82", "split": "train"}
+{"text": "it's bedtime", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/83", "split": "train"}
+{"text": "i'm turning in for the night", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/84", "split": "train"}
+{"text": "i'm getting into bed now", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/85", "split": "train"}
+{"text": "time to hit the sack", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/86", "split": "train"}
+{"text": "that's it for today, off to sleep", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/87", "split": "valid"}
+{"text": "we're heading to bed", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/88", "split": "valid"}
+{"text": "i'm calling it a night", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/89", "split": "test"}
+{"text": "going to sleep now", "lang": "en", "intent": "turn_off", "slots": {"device": "light"}, "source": "indirect", "family": "indirect/90", "split": "test"}
+{"text": "no se entiende lo que dicen", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/91", "split": "train"}
+{"text": "apenas se oye", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/92", "split": "train"}
+{"text": "casi no escucho la música", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/93", "split": "train"}
+{"text": "habla muy bajito la película", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/94", "split": "train"}
+{"text": "no me entero de nada, suena flojo", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/95", "split": "train"}
+{"text": "no oigo bien los diálogos", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/96", "split": "valid"}
+{"text": "esto se oye demasiado bajo", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/97", "split": "valid"}
+{"text": "apenas oigo la canción", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/98", "split": "test"}
+{"text": "suena muy flojito", "lang": "es", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/99", "split": "test"}
+{"text": "i can barely hear it", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/100", "split": "train"}
+{"text": "what are they saying, it's too quiet", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/101", "split": "train"}
+{"text": "the music is so faint", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/102", "split": "train"}
+{"text": "the movie is way too quiet", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/103", "split": "train"}
+{"text": "i can't make out the dialogue", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/104", "split": "train"}
+{"text": "it's hard to hear anything", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/105", "split": "valid"}
+{"text": "this is too soft", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/106", "split": "valid"}
+{"text": "i can hardly hear the song", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/107", "split": "test"}
+{"text": "it's barely audible", "lang": "en", "intent": "volume_up", "slots": {}, "source": "indirect", "family": "indirect/108", "split": "test"}
+{"text": "me va a estallar la cabeza con este ruido", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/109", "split": "train"}
+{"text": "está atronando", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/110", "split": "train"}
+{"text": "los vecinos se van a quejar del ruido", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/111", "split": "train"}
+{"text": "esto retumba muchísimo", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/112", "split": "train"}
+{"text": "qué escándalo", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/113", "split": "train"}
+{"text": "me duelen los oídos", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/114", "split": "valid"}
+{"text": "está a todo trapo", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/115", "split": "valid"}
+{"text": "suena demasiado fuerte", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/116", "split": "test"}
+{"text": "no se puede hablar con este volumen", "lang": "es", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/117", "split": "test"}
+{"text": "this noise is giving me a headache", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/118", "split": "train"}
+{"text": "it's deafening", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/119", "split": "train"}
+{"text": "the neighbours will complain about the noise", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/120", "split": "train"}
+{"text": "everything is booming", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/121", "split": "train"}
+{"text": "what a racket", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/122", "split": "train"}
+{"text": "my ears hurt", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/123", "split": "valid"}
+{"text": "it's blasting", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/124", "split": "valid"}
+{"text": "that's much too loud", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/125", "split": "test"}
+{"text": "i can't hear myself think", "lang": "en", "intent": "volume_down", "slots": {}, "source": "indirect", "family": "indirect/126", "split": "test"}
+{"text": "el sol me da en la pantalla", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/127", "split": "train"}
+{"text": "me deslumbra el sol del atardecer", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/128", "split": "train"}
+{"text": "entra un solazo en el dormitorio", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds", "area": "bedroom"}, "source": "indirect", "family": "indirect/129", "split": "train"}
+{"text": "los vecinos nos ven desde enfrente", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/130", "split": "train"}
+{"text": "el sol me está cegando", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/131", "split": "train"}
+{"text": "no se ve la tele por los reflejos del sol", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/132", "split": "valid"}
+{"text": "da el sol de lleno en la oficina", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds", "area": "office"}, "source": "indirect", "family": "indirect/133", "split": "valid"}
+{"text": "el sol pega fuerte en el salón", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds", "area": "living_room"}, "source": "indirect", "family": "indirect/134", "split": "test"}
+{"text": "tanto sol me molesta", "lang": "es", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/135", "split": "test"}
+{"text": "the sun is glaring on my screen", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/136", "split": "train"}
+{"text": "the evening sun is blinding me", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/137", "split": "train"}
+{"text": "so much sunlight in the bedroom", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds", "area": "bedroom"}, "source": "indirect", "family": "indirect/138", "split": "train"}
+{"text": "the neighbours can see right in", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/139", "split": "train"}
+{"text": "the sun is dazzling me", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/140", "split": "train"}
+{"text": "there's glare all over the tv", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/141", "split": "valid"}
+{"text": "the office is getting full sun", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds", "area": "office"}, "source": "indirect", "family": "indirect/142", "split": "valid"}
+{"text": "the sun is beating down on the living room", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds", "area": "living_room"}, "source": "indirect", "family": "indirect/143", "split": "test"}
+{"text": "too much sun coming in", "lang": "en", "intent": "cover_close", "slots": {"device": "blinds"}, "source": "indirect", "family": "indirect/144", "split": "test"}
+{"text": "nos vamos de vacaciones", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/145", "split": "train"}
+{"text": "salgo a trabajar", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/146", "split": "train"}
+{"text": "me marcho, hasta luego", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/147", "split": "train"}
+{"text": "no hay nadie en casa hasta la noche", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/148", "split": "train"}
+{"text": "salimos todos a cenar", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/149", "split": "train"}
+{"text": "me voy a la oficina", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/150", "split": "valid"}
+{"text": "cerramos y nos vamos", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/151", "split": "valid"}
+{"text": "me voy fuera el fin de semana", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/152", "split": "test"}
+{"text": "salgo un rato, la casa se queda sola", "lang": "es", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/153", "split": "test"}
+{"text": "we're off on holiday", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/154", "split": "train"}
+{"text": "i'm leaving for work", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/155", "split": "train"}
+{"text": "bye, i'm out", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/156", "split": "train"}
+{"text": "nobody will be home until tonight", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/157", "split": "train"}
+{"text": "we're all going out for dinner", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/158", "split": "train"}
+{"text": "i'm off to the office", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/159", "split": "valid"}
+{"text": "locking up and leaving", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/160", "split": "valid"}
+{"text": "i'll be away for the weekend", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/161", "split": "test"}
+{"text": "stepping out, the house will be empty", "lang": "en", "intent": "alarm_arm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/162", "split": "test"}
+{"text": "ya estoy en casa", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/163", "split": "train"}
+{"text": "hola, he llegado", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/164", "split": "train"}
+{"text": "acabo de entrar por la puerta", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/165", "split": "train"}
+{"text": "ya hemos vuelto", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/166", "split": "train"}
+{"text": "estoy de vuelta", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/167", "split": "train"}
+{"text": "ya llegué del trabajo", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/168", "split": "valid"}
+{"text": "hemos vuelto de vacaciones", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/169", "split": "valid"}
+{"text": "acabamos de llegar a casa", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/170", "split": "test"}
+{"text": "ya estoy dentro", "lang": "es", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/171", "split": "test"}
+{"text": "i'm home", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/172", "split": "train"}
+{"text": "hi, i just got back", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/173", "split": "train"}
+{"text": "just walked in the door", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/174", "split": "train"}
+{"text": "we're back", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/175", "split": "train"}
+{"text": "i've returned", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/176", "split": "train"}
+{"text": "home from work", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/177", "split": "valid"}
+{"text": "we're back from holiday", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/178", "split": "valid"}
+{"text": "we just got home", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/179", "split": "test"}
+{"text": "i'm inside now", "lang": "en", "intent": "alarm_disarm", "slots": {"device": "alarm"}, "source": "indirect", "family": "indirect/180", "split": "test"}
