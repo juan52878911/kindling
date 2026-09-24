@@ -253,9 +253,26 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	res.LoadTime = time.Since(t0)
 	logf("model loaded in %s; warming up...", res.LoadTime.Round(time.Millisecond))
 
-	w, err := Warm(ctx, c, mc.ID)
-	if err != nil {
-		return nil, fmt.Errorf("warm-up: %w", err)
+	// La primera respuesta puede tardar más que el plazo de cabeceras del
+	// proxy del daemon (5 min): en el laboratorio anidado, un 1,5B o un 3B
+	// trae sus pesos a base de fallos de página de ~1 ms. llama-server sigue
+	// con ella aunque el proxy se canse, así que se reintenta mientras quede
+	// Wait: el reintento espera en su cola y sale en cuanto la primera acaba.
+	warmHasta := time.Now().Add(o.Wait)
+	var w *ChatResponse
+	for {
+		if w, err = Warm(ctx, c, mc.ID); err == nil {
+			break
+		}
+		if ctx.Err() != nil || time.Now().After(warmHasta) {
+			return nil, fmt.Errorf("warm-up: %w", err)
+		}
+		logf("warm-up not answered yet (%v); retrying", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 	res.Warm = w
 	logf("warm-up answered %q", w.Text())

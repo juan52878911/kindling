@@ -48,6 +48,34 @@ func TestFind(t *testing.T) {
 	if _, err := Find("smollm2-360m-instruct", "q2_k"); err == nil || !strings.Contains(err.Error(), "q4_k_m, q8_0") {
 		t.Fatalf("una cuantización que no hay debería listar las que sí: %v", err)
 	}
+	// Los modelos fuera del catálogo por defecto (licencia no abierta) no
+	// salen en IDs y solo se resuelven aceptando SU licencia.
+	for _, id := range IDs() {
+		if id == "qwen2.5-3b-instruct" {
+			t.Fatal("a qwen-research model listed in the default catalog")
+		}
+	}
+	if _, err := (Spec{Model: "qwen2.5-3b-instruct"}).Resolve(); err == nil || !strings.Contains(err.Error(), "-accept-license qwen-research") {
+		t.Fatalf("3b without accepting its license: %v", err)
+	}
+	if _, err := (Spec{Model: "qwen2.5-3b-instruct", AcceptLicense: "apache-2.0"}).Resolve(); err == nil {
+		t.Fatal("accepting another license must not do")
+	}
+	if _, err := (Spec{Model: "qwen2.5-3b-instruct", AcceptLicense: "qwen-research"}).Resolve(); err != nil {
+		t.Fatalf("3b accepting its license: %v", err)
+	}
+	for _, m := range Catalog {
+		if m.License == "" || !strings.HasPrefix(m.LicenseURL, "https://huggingface.co/"+m.Repo+"/blob/"+m.Revision+"/") {
+			t.Errorf("%s: license %q at %q", m.Ref(), m.License, m.LicenseURL)
+		}
+	}
+	// Sin Q8_0 en el catálogo, sin -quant vale la que hay.
+	if m, err := Find("qwen2.5-3b-instruct", ""); err != nil || m.Quant != "q4_k_m" {
+		t.Fatalf("3b sin -quant: %+v %v", m, err)
+	}
+	if _, err := Find("qwen2.5-3b-instruct", "q8_0"); err == nil {
+		t.Fatal("pedir q8_0 del 3b a propósito debería fallar")
+	}
 	if _, err := Find("llama-70b", ""); err == nil {
 		t.Fatal("un modelo desconocido debería fallar")
 	}

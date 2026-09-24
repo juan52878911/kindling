@@ -4,7 +4,7 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
-## v0.11.0 — sin publicar
+## v0.11.0 — 2026-09-24
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)
 
@@ -17,8 +17,9 @@ Diseño, uso y cifras en [docs/von.md](docs/von.md).
   cuanto termina el thaw, con la API compatible con OpenAI en el puerto 8000
   (`/v1/chat/completions`, `/v1/models`, `/health`, `/metrics`). También
   `models ls`, `models ask <réplica> <prompt>` (respuesta y tokens/s) y `models rm`.
-- Catálogo fijado por revisión y sha256: `smollm2-360m-instruct` (Q8_0, Q4_K_M) y
-  `qwen2.5-0.5b-instruct` (Q8_0, Q4_K_M); o un GGUF propio de Hugging Face con
+- Catálogo fijado por revisión y sha256: `smollm2-360m-instruct` (Q8_0, Q4_K_M),
+  `qwen2.5-0.5b-instruct` y `qwen2.5-1.5b-instruct` (Q8_0, Q4_K_M; los de 1,5B con
+  4 vCPU); o un GGUF propio de Hugging Face con
   `-url …/resolve/<commit>/<fichero>.gguf -sha256 …`. llama.cpp `b11147`, binarios
   oficiales con todas las variantes de CPU, verificados por sha256. Mandos:
   `-ctx` (2048 por defecto), `-parallel`, `-threads`, `-cpus`, `-mem`, `-cpu-pct`.
@@ -30,8 +31,13 @@ Diseño, uso y cifras en [docs/von.md](docs/von.md).
 - El dorado se hace con un core por vCPU (`cpu_pct` 100 × vCPU) y devuelve al
   host lo reclamable (`squeeze`) antes de congelar. Las réplicas del mismo dorado
   muestrean con semillas distintas (medido).
-- `pkg/von`: catálogo, validación, cliente mínimo de la API y `MakeGolden`, para
-  el gateway que encadene JEV → VON.
+- **Solo licencias abiertas en el catálogo por defecto** (Apache-2.0, MIT): cada
+  entrada lleva su licencia y dónde leerla (`kling models ls`). `qwen2.5-3b-instruct`
+  (Q4_K_M, Qwen Research License, no comercial) está para evaluar y solo se
+  construye con `-accept-license qwen-research`.
+- `pkg/von`: catálogo, validación, cliente mínimo de la API y `MakeGolden`. El
+  calentamiento del dorado se reintenta mientras quede `-wait`: en un host lento
+  la primera respuesta de un 1,5B pasa del plazo de 5 min del proxy del daemon.
 - `81-base-image.sh` acepta `ROOTFS_DIR` (ficheros que copiar a la imagen) y
   `SERVICE` (un ejecutable que el entrypoint arranca y relanza antes del agente).
 - `scripts/96-von-bench.sh`: arranque en frío y thaw hasta el primer token,
@@ -71,6 +77,47 @@ dependencias ni cgo; corre en local, sin daemon. Diseño en
   de unas reglas y 0,32 de la clase mayoritaria; pero la precisión prometida por
   los umbrales cae de 0,95 a 0,77–0,85 con el cambio temporal y a 0,58 entre
   repos. Opt-in hasta que cada tarea tenga su evaluación.
+
+### Gateway de IA (`kling ai`)
+
+Diseño, API y cifras en [docs/ai-gateway.md](docs/ai-gateway.md).
+
+- **`kling ai serve`**: JEV y VON detrás de una API. JEV clasifica, enruta y
+  filtra dentro del proceso (`POST /v1/classify`, `/v1/decide`; cuando duda,
+  contesta con `escalate: true` y quien llama decide); VON genera
+  (`POST /v1/generate` con plantilla por tarea, y `/v1/chat/completions`,
+  `/v1/completions`, `/v1/models` compatibles con OpenAI, con streaming). Registro
+  de modelos y tareas en `~/.config/kling/ai.json`; `SIGHUP` o `kling ai reload` lo
+  releen sin cortar nada.
+- **La cascada JEV → VON solo con pruebas**: `escalate_to` en una tarea se activa
+  únicamente si `kling ai eval <tarea> -data test.jsonl` muestra, con datos
+  etiquetados de la tarea, que gana a JEV solo (McNemar exacta, p < 0,05) con los
+  mismos modelos (sha256 del `.jev`, dorado) y ajustes que se sirven; el registro
+  se guarda en `ai-evals/<tarea>.json`. Si no, el gateway la rechaza y dice por
+  qué, salvo `escalate_force`. Con la cascada apagada nunca se llama a VON a
+  escondidas. `-von-alone` mide también a VON solo.
+- Medido en commits (861 de prueba): JEV solo 0,640; cascadas con Qwen2.5 0.5B
+  0,429, 1.5B 0,520 (Q4_K_M) / 0,498 (Q8_0), 3B 0,540: la puerta las rechaza todas.
+- Escala a cero con `pkg/scheduler`: réplicas `gw-<dorado>-*` con la etiqueta
+  `ai.gateway=<id>`, thaw al llegar, freeze al quedarse ociosas, réplicas por
+  concurrencia con tope por modelo, `-keepwarm` por popularidad. En un Mac, una
+  generación caliente contesta en 9 ms y una réplica congelada en ~1,5 s.
+- `kling ai calibrate`: recalibra los umbrales de JEV con lo que VON contestó en lo
+  escalado y en auditorías (`audit`), con mitad de evaluación; solo escribe si
+  mejora, y se niega si JEV dejaría de contestar. Recalibrar invalida la
+  evaluación de la cascada.
+- Seguridad: socket Unix 0600 por defecto; TCP solo con `-listen` y token
+  (fichero 0600 o `$KLING_AI_TOKEN`); tokens con nombre y cuota; rutas
+  `/v1/admin/*` solo con el token principal; cuerpos acotados y JSON estricto; el
+  invitado no es de fiar (plazos, topes de respuesta, sin reenviar cabeceras ni
+  rutas de control); semilla del host por petición.
+- `/metrics` en formato Prometheus: cobertura y escalado de JEV, latencias por
+  fuente, thaws y arranques en frío por modelo, réplicas por estado.
+- `pkg/scheduler`: puerto del invitado configurable, etiquetas y prefijo propios
+  (solo adopta lo suyo), `MachineTTL` (con la capacidad `renew`, un arrendamiento
+  que se renueva también antes del thaw de un scale-out), el scale-out reutiliza
+  réplicas congeladas en vez de dejarlas en disco, marca contra adopciones
+  dobles, tope de réplicas por servicio y `OnAcquire` para medir los arranques.
 
 ### Despliegue: la unidad de systemd ya no lleva valores de un host concreto
 
