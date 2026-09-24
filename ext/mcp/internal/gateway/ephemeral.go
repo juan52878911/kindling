@@ -34,6 +34,13 @@ import (
 // fin: instanciar, llamar y destruir.
 const ephemeralTimeout = 90 * time.Second
 
+// ephemeralTTL es la red de seguridad de una efímera del camino lento: si el
+// gateway muriera antes de destruirla, el daemon la congela sola al vencer en
+// vez de dejarla corriendo para siempre. Mientras la llamada sigue en vuelo se
+// renueva (HoldTTL), así que no acota lo que puede durar una acción. Variable
+// para que los tests no tengan que esperar dos minutos.
+var ephemeralTTL = 120 * time.Second
+
 // callEphemeral ejecuta una herramienta en una microVM de un solo uso.
 func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMessage) (any, *rpcFault) {
 	ctx, cancel := context.WithTimeout(ctx, ephemeralTimeout)
@@ -51,8 +58,16 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 	// daemon puede haber congelado por TTL desde debajo. Entregar una congelada
 	// hacía que el fallo llegara al cliente sin reintento, y un dial a una VM
 	// viva cuesta un milisegundo — no se nota en el camino rápido.
+	//
+	// El TTL se renueva al sacarla y mientras dure la llamada: el fondo la retira
+	// a los 2×idle de edad y su TTL es 2×idle+2m, así que una sacada justo antes
+	// de la purga se congelaba debajo de una acción larga. Se renueva ANTES de
+	// comprobar que responde, para no dejar una vuelta del vigilante del daemon
+	// entre la comprobación y la renovación.
 	for vm := a.gw.TakeWarm(t.Service); vm != nil; vm = a.gw.TakeWarm(t.Service) {
+		release := a.gw.HoldTTL(ctx, vm.ID())
 		if err := scheduler.WaitReadyAddr(ctx, vm.Addr(GuestPort), time.Second); err != nil {
+			release()
 			log.Printf("pool: %s not responding (%v); removing it and trying the next one", vm.ID()[:8], err)
 			go a.gw.Client().Remove(context.WithoutCancel(ctx), vm.ID())
 			continue
@@ -70,6 +85,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 				a.gw.FillPool(bg, t.Service, snap)
 			}()
 		}()
+		defer release() // antes que el Remove de arriba: los defer van al revés
 		res, fault := a.invoke(ctx, "http://"+vm.Addr(GuestPort), vm.Token(), t, args)
 		log.Printf("ephemeral %s: %s in %s (from pool)", vm.ID()[:8], t.Qualified,
 			time.Since(start).Round(time.Millisecond))
@@ -86,9 +102,7 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 			"ephemeral":      "true",
 			"tool":           t.Name,
 		},
-		// Red de seguridad: si el gateway muriera antes de destruirla, el daemon
-		// la congela sola en vez de dejarla corriendo para siempre.
-		TTLSeconds: 120,
+		TTLSeconds: int(ephemeralTTL.Seconds()),
 	})
 	if err != nil {
 		return nil, &rpcFault{-32000, fmt.Sprintf("could not instantiate %s: %v", t.Service, err)}
@@ -102,6 +116,11 @@ func (a *aggregator) callEphemeral(ctx context.Context, t *Tool, args json.RawMe
 			}
 		}()
 	}()
+	// Una acción puede durar más que su TTL (semgrep sobre un repo grande pasa
+	// del minuto): mientras siga en vuelo, se renueva como un latido. Se suelta
+	// antes del Remove.
+	release := a.gw.HoldTTL(ctx, mc.ID)
+	defer release()
 
 	base := "http://" + mc.Addr(GuestPort)
 	if err := scheduler.WaitReadyAddr(ctx, mc.Addr(GuestPort), scheduler.ReadyTimeout); err != nil {
