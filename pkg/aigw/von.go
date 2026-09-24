@@ -124,7 +124,10 @@ type chatReq struct {
 	Temperature float64       `json:"temperature"`
 	Seed        int64         `json:"seed"`
 	Grammar     string        `json:"grammar,omitempty"`
-	Stream      bool          `json:"stream"`
+	// JSONSchema es la extensión de llama-server que convierte un esquema en
+	// una gramática: la salida solo puede ser JSON que lo cumple.
+	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
+	Stream     bool            `json:"stream"`
 }
 
 // maxChatAnswerBytes acota la respuesta (sin streaming) de una escalada o una
