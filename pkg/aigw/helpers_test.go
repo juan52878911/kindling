@@ -151,7 +151,9 @@ func newTestGateway(t *testing.T, mut func(*Config)) (*Gateway, *fakeLlama, *fak
 			"smol":    {Kind: KindVON, Snapshot: "von-smol"},
 		},
 		Tasks: map[string]*TaskConfig{
-			"kind": {JEV: "commits", VON: "smol"},
+			// Cascada forzada: aquí se prueba lo que hace, no la puerta que
+			// la activa (eso es eval_test.go).
+			"kind": {JEV: "commits", EscalateTo: "smol", EscalateForce: true},
 		},
 	}
 	if mut != nil {
@@ -160,7 +162,7 @@ func newTestGateway(t *testing.T, mut func(*Config)) (*Gateway, *fakeLlama, *fak
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	g, err := New(Options{Config: cfg, Replicas: reps})
+	g, err := New(Options{Config: cfg, Replicas: reps, EvalDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -141,7 +141,7 @@ func TestEscalaACero(t *testing.T) {
 			"commits": {Kind: KindJEV, Path: trainedModel(t)},
 			"smol":    {Kind: KindVON, Snapshot: "von-smol"},
 		},
-		Tasks: map[string]*TaskConfig{"kind": {JEV: "commits", VON: "smol",
+		Tasks: map[string]*TaskConfig{"kind": {JEV: "commits", EscalateTo: "smol", EscalateForce: true,
 			Thresholds: map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}}},
 	}
 	g, err := New(Options{Client: client, Config: cfg, Idle: 300 * time.Millisecond, MaxReplicas: 2, MaxInflight: 1})

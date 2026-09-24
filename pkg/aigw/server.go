@@ -31,9 +31,11 @@ func (g *Gateway) Handler(token string) http.Handler {
 	mux.HandleFunc("POST /v1/completions", g.handleProxy)
 	mux.HandleFunc("POST /v1/classify", g.handleClassify("classify"))
 	mux.HandleFunc("POST /v1/decide", g.handleClassify("decide"))
+	mux.HandleFunc("POST /v1/generate", g.handleGenerate)
 	mux.HandleFunc("GET /v1/tasks", g.handleTasks)
 	mux.HandleFunc("POST /v1/admin/calibrate", g.admin(g.handleCalibrate))
 	mux.HandleFunc("POST /v1/admin/reload", g.admin(g.handleReload))
+	mux.HandleFunc("POST /v1/admin/eval", g.admin(g.handleEval))
 	return g.sched.AuthHandler(g.limits(mux), token)
 }
 
@@ -47,7 +49,13 @@ func (g *Gateway) limits(h http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, g.opts.MaxBody)
+		limit := g.opts.MaxBody
+		if r.URL.Path == "/v1/admin/eval" {
+			// Un conjunto etiquetado entero; solo el token principal llega a
+			// leerlo (admin rechaza antes de tocar el cuerpo).
+			limit = maxEvalBody
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			t := scheduler.TenantFrom(r.Context())
 			if !g.sched.TenantBegin(t) {
@@ -62,6 +70,9 @@ func (g *Gateway) limits(h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
+
+// maxEvalBody acota el cuerpo de /v1/admin/eval: ~100k commits de ejemplo.
+const maxEvalBody = 64 << 20
 
 // admin deja pasar solo al tenant por defecto (el token principal, o el socket
 // Unix): un token con nombre es para usar tareas, no para reescribir modelos.
@@ -142,6 +153,32 @@ func (g *Gateway) handleClassify(endpoint string) http.HandlerFunc {
 	}
 }
 
+func (g *Gateway) handleGenerate(w http.ResponseWriter, r *http.Request) {
+	var req GenerateRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	resp, err := g.Generate(r.Context(), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, resp)
+}
+
+func (g *Gateway) handleEval(w http.ResponseWriter, r *http.Request) {
+	var req EvalRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	rec, err := g.Eval(r.Context(), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"record": rec, "cascade": g.cascade(req.Task)})
+}
+
 // handleModels lista los modelos VON del registro sin despertar nada: una
 // consulta de catálogo no debe costar un thaw.
 func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
@@ -164,14 +201,16 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 
 // TaskInfo es una tarea tal como la ve `kling ai ls`.
 type TaskInfo struct {
-	Name       string    `json:"name"`
-	JEV        string    `json:"jev,omitempty"`
-	VON        string    `json:"von,omitempty"`
-	Labels     []string  `json:"labels,omitempty"`
-	Thresholds []float64 `json:"thresholds,omitempty"` // los efectivos, si el modelo está cargado
-	Loaded     bool      `json:"jev_loaded"`
-	Audit      float64   `json:"audit,omitempty"`
-	Samples    int       `json:"samples"`
+	Name       string        `json:"name"`
+	Kind       string        `json:"kind"` // classify | generate
+	JEV        string        `json:"jev,omitempty"`
+	VON        string        `json:"von,omitempty"` // el de una generación
+	Cascade    *CascadeState `json:"cascade,omitempty"`
+	Labels     []string      `json:"labels,omitempty"`
+	Thresholds []float64     `json:"thresholds,omitempty"` // los efectivos, si el modelo está cargado
+	Loaded     bool          `json:"jev_loaded"`
+	Audit      float64       `json:"audit,omitempty"`
+	Samples    int           `json:"samples"`
 }
 
 func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
@@ -179,7 +218,13 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 	out := []TaskInfo{}
 	for _, n := range sortedKeys(cfg.Tasks) {
 		t := cfg.Tasks[n]
-		ti := TaskInfo{Name: n, JEV: t.JEV, VON: t.VON, Labels: t.Labels, Audit: t.Audit}
+		ti := TaskInfo{Name: n, Kind: "classify", JEV: t.JEV, VON: t.VON, Labels: t.Labels, Audit: t.Audit}
+		if t.IsGenerate() {
+			ti.Kind = "generate"
+		} else {
+			c := g.cascade(n)
+			ti.Cascade = &c
+		}
 		if t.JEV != "" {
 			// Solo si ya está cargado: listar no carga modelos.
 			g.jev.mu.Lock()
@@ -213,11 +258,12 @@ func (g *Gateway) handleCalibrate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleReload(w http.ResponseWriter, _ *http.Request) {
-	if err := g.Reload(); err != nil {
+	notes, err := g.Reload()
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"reloaded": true})
+	writeJSON(w, map[string]any{"reloaded": true, "cascades": notes})
 }
 
 func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {

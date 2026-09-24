@@ -36,7 +36,7 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <serve|ls|test|calibrate|reload> [...]")
+		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload> [...]")
 	}
 	switch args[0] {
 	case "serve":
@@ -45,12 +45,16 @@ func cmdAI(args []string) error {
 		return aiList(args[1:])
 	case "test":
 		return aiTest(args[1:])
+	case "generate", "gen":
+		return aiGenerate(args[1:])
+	case "eval":
+		return aiEval(args[1:])
 	case "calibrate":
 		return aiCalibrate(args[1:])
 	case "reload":
 		return aiReload(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, calibrate or reload", args[0])
+		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate or reload", args[0])
 	}
 }
 
@@ -154,10 +158,14 @@ func aiServe(args []string) error {
 	defer signal.Stop(hup)
 	go func() {
 		for range hup {
-			if err := g.Reload(); err != nil {
+			notes, err := g.Reload()
+			if err != nil {
 				log.Printf("reload: %v", err)
-			} else {
-				log.Printf("registry reloaded")
+				continue
+			}
+			log.Printf("registry reloaded")
+			for _, n := range notes {
+				log.Print(n)
 			}
 		}
 	}()
@@ -180,6 +188,9 @@ func aiServe(args []string) error {
 	fmt.Printf("AI gateway on %s (%s); daemon %s\n", where, auth, client.Endpoint())
 	fmt.Printf("  %d model(s), %d task(s); idle freeze after %s, up to %d replica(s) per model\n",
 		len(cfg.Models), len(cfg.Tasks), *idle, *maxReplicas)
+	for _, n := range aigw.CascadeNotes(g.Cascades()) {
+		fmt.Println("  " + n)
+	}
 	err = srv.Serve(ln)
 	// Al salir no queda ninguna réplica corriendo: se congelan todas.
 	cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -379,17 +390,32 @@ func aiList(args []string) error {
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n, m.Kind, src, reps)
 	}
-	fmt.Fprintln(tw, "\nTASK\tJEV\tVON\tAUDIT\tSAMPLES")
+	fmt.Fprintln(tw, "\nTASK\tKIND\tMODEL\tCASCADE\tSAMPLES")
+	var notes []string
 	for _, n := range sortedNames(cfg.Tasks) {
 		t := cfg.Tasks[n]
-		samples := "-"
+		samples, kind, model, casc := "-", "classify", t.JEV, "-"
+		if t.IsGenerate() {
+			kind, model = "generate", t.VON
+		} else if t.EscalateTo != "" {
+			casc = "-> " + t.EscalateTo
+		}
 		if lt, ok := byName[n]; ok {
 			samples = fmt.Sprint(lt.Samples)
+			if lt.Cascade != nil && lt.Cascade.Status != "off" {
+				casc = lt.Cascade.Status + " -> " + lt.Cascade.To
+				if lt.Cascade.Reason != "" {
+					notes = append(notes, fmt.Sprintf("task %s: %s", n, lt.Cascade.Reason))
+				}
+			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%g\t%s\n", n, orDash(t.JEV), orDash(t.VON), t.Audit, samples)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n, kind, model, casc, samples)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
+	}
+	for _, n := range notes {
+		fmt.Println(n)
 	}
 	if !running {
 		fmt.Println("\n(gateway not running: start it with kling ai serve)")
@@ -415,7 +441,7 @@ func sortedNames[V any](m map[string]V) []string {
 
 func aiTest(args []string) error {
 	fs := flag.NewFlagSet("ai test", flag.ExitOnError)
-	mode := fs.String("mode", "", "cascade (default), jev or von")
+	mode := fs.String("mode", "", "cascade (default: JEV, and VON where it is unsure if the task's cascade is on) or jev")
 	fields := fs.String("fields", "", `structured fields as JSON, e.g. {"service":"api"}`)
 	asJSON := fs.Bool("json", false, "print the full JSON answer")
 	explain := fs.Bool("explain", false, "include JEV's evidence also when it answers")
@@ -443,7 +469,11 @@ func aiTest(args []string) error {
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(resp)
 	}
-	fmt.Printf("%s  (source %s, p=%.3f, %.2f ms)\n", resp.Label, resp.Source, resp.Prob, resp.LatencyMS)
+	esc := ""
+	if resp.Escalate && resp.Source == "jev" {
+		esc = ", escalate: JEV is unsure and the cascade is off"
+	}
+	fmt.Printf("%s  (source %s, p=%.3f, %.2f ms%s)\n", resp.Label, resp.Source, resp.Prob, resp.LatencyMS, esc)
 	if resp.JEV != nil {
 		fmt.Printf("  jev: %s p=%.3f threshold=%.3f -> %s\n", resp.JEV.Label, resp.JEV.Prob, resp.JEV.Threshold, resp.JEV.Decision)
 	}
@@ -508,7 +538,172 @@ func aiCalibrate(args []string) error {
 		fmt.Println("nothing written")
 	}
 	fmt.Println("note:", rep.TeacherErr)
+	if rep.Cascade != "" {
+		fmt.Println(rep.Cascade)
+	}
 	return nil
+}
+
+func aiGenerate(args []string) error {
+	fs := flag.NewFlagSet("ai generate", flag.ExitOnError)
+	var vars kvFlag
+	fs.Var(&vars, "var", "template variable name=value (repeatable)")
+	maxTokens := fs.Int("max-tokens", 0, "at most the task's max_tokens")
+	temp := fs.Float64("temperature", -1, "sampling temperature (default: the task's)")
+	asJSON := fs.Bool("json", false, "print the full JSON answer")
+	mk := aiClientFlags(fs)
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: kling ai generate <task> [-var k=v] <input...>   (no input: read stdin)")
+	}
+	input := strings.Join(fs.Args()[1:], " ")
+	if fs.NArg() == 1 {
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 64<<10+1))
+		if err != nil {
+			return err
+		}
+		input = string(b)
+	}
+	req := aigw.GenerateRequest{Task: fs.Arg(0), Input: input, Vars: map[string]string(vars), MaxTokens: *maxTokens}
+	if *temp >= 0 {
+		req.Temperature = temp
+	}
+	c, err := mk()
+	if err != nil {
+		return err
+	}
+	var resp aigw.GenerateResponse
+	if err := c.do(http.MethodPost, "/v1/generate", req, &resp); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(resp)
+	}
+	fmt.Println(strings.TrimSpace(resp.Output))
+	fmt.Fprintf(os.Stderr, "(%s: %d+%d tokens, %.0f ms, %s)\n", resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.LatencyMS, resp.FinishReason)
+	return nil
+}
+
+// kvFlag es un -var k=v repetible.
+type kvFlag map[string]string
+
+func (k *kvFlag) String() string { return fmt.Sprint(map[string]string(*k)) }
+
+func (k *kvFlag) Set(v string) error {
+	name, val, ok := strings.Cut(v, "=")
+	if !ok || name == "" {
+		return fmt.Errorf("want name=value, got %q", v)
+	}
+	if *k == nil {
+		*k = kvFlag{}
+	}
+	(*k)[name] = val
+	return nil
+}
+
+// aiEval pasa un conjunto etiquetado por JEV solo y por la cascada, y guarda
+// el resultado con la tarea: es lo que decide si escalate_to se puede activar.
+func aiEval(args []string) error {
+	fs := flag.NewFlagSet("ai eval", flag.ExitOnError)
+	data := fs.String("data", "", "labelled JSONL ({\"text\", \"fields\", \"label\"}) NOT used to train the JEV model")
+	vonModel := fs.String("von", "", "candidate von model (default: the task's escalate_to)")
+	conc := fs.Int("concurrency", 1, "escalations in flight at once (more wakes more replicas)")
+	alone := fs.Bool("von-alone", false, "also measure VON alone on every example (all labels, no JEV hints)")
+	dry := fs.Bool("dry-run", false, "report only; don't store the record")
+	asJSON := fs.Bool("json", false, "JSON output")
+	mk := aiClientFlags(fs)
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *data == "" {
+		return fmt.Errorf("usage: kling ai eval <task> -data test.jsonl [-von <model>] [-concurrency N] [-von-alone] [-dry-run]")
+	}
+	exs, err := readEvalData(*data)
+	if err != nil {
+		return err
+	}
+	c, err := mk()
+	if err != nil {
+		return err
+	}
+	c.http.Timeout = 0 // cientos de escaladas: minutos; el servidor corta si el cliente se va
+	fmt.Fprintf(os.Stderr, "evaluating %d examples on task %s...\n", len(exs), fs.Arg(0))
+	var out struct {
+		Record  aigw.EvalRecord   `json:"record"`
+		Cascade aigw.CascadeState `json:"cascade"`
+	}
+	if err := c.do(http.MethodPost, "/v1/admin/eval", aigw.EvalRequest{
+		Task: fs.Arg(0), VON: *vonModel, Data: filepath.Base(*data), Examples: exs,
+		Concurrency: *conc, VONAlone: *alone, DryRun: *dry,
+	}, &out); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	r, res := out.Record, out.Record.Results
+	fmt.Printf("task %s: jev %s, candidate von %s (%s), %d examples\n", r.Task, r.JEV.Model, r.VON.Model, r.VON.Snapshot, res.Examples)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintf(tw, "JEV alone\t%.3f\n", res.JEVAccuracy)
+	fmt.Fprintf(tw, "cascade\t%.3f\n", res.CascadeAccuracy)
+	if res.VONAloneAccuracy != nil {
+		fmt.Fprintf(tw, "VON alone\t%.3f\n", *res.VONAloneAccuracy)
+	}
+	fmt.Fprintf(tw, "JEV confident\t%.3f of the examples, %.3f right\n", res.Coverage, res.ConfidentAccuracy)
+	fmt.Fprintf(tw, "escalated (%d)\tJEV right %.3f, VON right %.3f (%d unknown, %d errors)\n",
+		res.Escalated, res.JEVAccuracyEscalated, res.VONAccuracyEscalated, res.VONUnknown, res.VONErrors)
+	fmt.Fprintf(tw, "disagreements\tJEV only right %d, cascade only right %d (McNemar p=%.2g)\n", res.JEVOnlyRight, res.VONOnlyRight, res.PValue)
+	fmt.Fprintf(tw, "VON latency\tp50 %.0f ms, p95 %.0f ms (%.0f s in total)\n", res.VONLatencyP50MS, res.VONLatencyP95MS, res.DurationS)
+	_ = tw.Flush()
+	if res.UnseenLabels > 0 {
+		fmt.Printf("warning: %d examples have a label the JEV model doesn't know\n", res.UnseenLabels)
+	}
+	fmt.Println(r.Verdict)
+	if r.Stored != "" {
+		fmt.Printf("stored in %s\n", r.Stored)
+	} else {
+		fmt.Println("dry run: nothing stored")
+	}
+	switch out.Cascade.Status {
+	case "on":
+		fmt.Printf("cascade to %s: on\n", out.Cascade.To)
+	case "forced", "refused":
+		fmt.Println(out.Cascade.Reason)
+	default:
+		if r.BeatsJEV && r.Stored != "" {
+			fmt.Printf("to use it, set \"escalate_to\": %q in the task and run kling ai reload\n", r.VON.Model)
+		}
+	}
+	return nil
+}
+
+// readEvalData lee un JSONL etiquetado (el mismo formato que kling jev train).
+func readEvalData(path string) ([]aigw.EvalExample, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []aigw.EvalExample
+	dec := json.NewDecoder(io.LimitReader(f, 64<<20))
+	for {
+		var ex aigw.EvalExample
+		if err := dec.Decode(&ex); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("%s: example %d: %w", path, len(out)+1, err)
+		}
+		if ex.Label == "" {
+			return nil, fmt.Errorf("%s: example %d has no label", path, len(out)+1)
+		}
+		out = append(out, ex)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s: no examples", path)
+	}
+	return out, nil
 }
 
 func tau(v float64) string {
@@ -528,9 +723,15 @@ func aiReload(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.do(http.MethodPost, "/v1/admin/reload", nil, nil); err != nil {
+	var out struct {
+		Cascades []string `json:"cascades"`
+	}
+	if err := c.do(http.MethodPost, "/v1/admin/reload", nil, &out); err != nil {
 		return err
 	}
 	fmt.Println("registry reloaded")
+	for _, n := range out.Cascades {
+		fmt.Println("  " + n)
+	}
 	return nil
 }

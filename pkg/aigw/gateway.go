@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -43,6 +44,10 @@ type Options struct {
 	MaxBody        int64         // cuerpo de una petición; 1 MiB
 	MaxProxyBytes  int64         // respuesta de una réplica por el proxy; 32 MiB
 	PopularityFile string        // "" = solo en memoria
+	// EvalDir guarda los registros de `kling ai eval` (uno por tarea). Vacío =
+	// ai-evals/ junto al registro; sin registro en disco, ninguno (y ninguna
+	// cascada respaldada).
+	EvalDir string
 }
 
 func (o *Options) withDefaults() {
@@ -76,6 +81,9 @@ func (o *Options) withDefaults() {
 	if o.MaxProxyBytes <= 0 {
 		o.MaxProxyBytes = 32 << 20
 	}
+	if o.EvalDir == "" && o.ConfigPath != "" {
+		o.EvalDir = filepath.Join(filepath.Dir(o.ConfigPath), "ai-evals")
+	}
 }
 
 // Gateway es el gateway de IA.
@@ -86,9 +94,10 @@ type Gateway struct {
 	jev      *jevCache
 	met      *metrics
 
-	cfgMu sync.RWMutex
-	cfg   *Config
-	rings map[string]*ring // tarea -> muestras; bajo cfgMu
+	cfgMu    sync.RWMutex
+	cfg      *Config
+	rings    map[string]*ring        // tarea -> muestras; bajo cfgMu
+	cascades map[string]CascadeState // tarea -> cascada activa o no, y por qué; bajo cfgMu
 
 	auditSem chan struct{} // auditorías en vuelo (una): nunca compiten en masa con el tráfico
 	calMu    sync.Mutex    // una recalibración a la vez
@@ -116,10 +125,11 @@ func New(o Options) (*Gateway, error) {
 	s.Port = von.Port
 	s.MachineLabels = map[string]string{LabelGateway: o.ID}
 	s.NamePrefix = o.NamePrefix
-	// Sin TTL de red de seguridad: el daemon lo cuenta desde la creación y un
-	// thaw no lo reinicia, así que una réplica vieja se re-congelaría bajo
-	// tráfico. A cambio, Start congela lo que un gateway anterior dejó
-	// corriendo, y Close congela lo suyo al salir.
+	// Sin TTL de red de seguridad hasta saber si el daemon sabe renovarlo
+	// (Start): sin la capacidad "renew" lo cuenta desde la creación y un thaw
+	// no lo reinicia, así que una réplica vieja se re-congelaría bajo tráfico.
+	// Con ella, el planificador lo renueva y el TTL pasa a ser un
+	// arrendamiento: si el gateway muere, sus réplicas se congelan solas.
 	s.MachineTTL = -1
 	s.MaxInflight = o.MaxInflight
 	s.MaxReplicas = o.MaxReplicas
@@ -166,9 +176,12 @@ func (g *Gateway) config() *Config {
 	return g.cfg
 }
 
-// setConfig instala un registro. Las muestras de las tareas que siguen
-// existiendo se conservan (se copian si cambió el tamaño del anillo).
-func (g *Gateway) setConfig(c *Config) {
+// setConfig instala un registro y decide qué cascadas se activan. Las muestras
+// de las tareas que siguen existiendo se conservan (se copian si cambió el
+// tamaño del anillo). Devuelve las notas de las cascadas (activas, forzadas,
+// rechazadas).
+func (g *Gateway) setConfig(c *Config) []string {
+	st := g.gates(c) // lee ficheros: fuera del candado
 	g.cfgMu.Lock()
 	defer g.cfgMu.Unlock()
 	old := g.rings
@@ -191,17 +204,20 @@ func (g *Gateway) setConfig(c *Config) {
 		g.rings[name] = r
 	}
 	g.cfg = c
+	g.cascades = st
+	return CascadeNotes(st)
 }
 
 // Reload relee el registro del disco. Los modelos JEV se vuelven a leer en su
-// siguiente uso (el fichero pudo cambiar).
-func (g *Gateway) Reload() error {
+// siguiente uso (el fichero pudo cambiar). Devuelve las notas de las cascadas:
+// quien activa escalate_to sin una evaluación que la respalde se entera aquí.
+func (g *Gateway) Reload() ([]string, error) {
 	if g.opts.ConfigPath == "" {
-		return errors.New("no config file to reload")
+		return nil, errors.New("no config file to reload")
 	}
 	c, err := LoadConfig(g.opts.ConfigPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	old := g.config()
 	for _, m := range old.Models {
@@ -209,8 +225,7 @@ func (g *Gateway) Reload() error {
 			g.jev.drop(m.Path)
 		}
 	}
-	g.setConfig(c)
-	return nil
+	return g.setConfig(c), nil
 }
 
 // Start pone en marcha el segador (congela réplicas ociosas, mantiene el
@@ -219,6 +234,9 @@ func (g *Gateway) Reload() error {
 func (g *Gateway) Start(ctx context.Context) {
 	if g.opts.Client == nil {
 		return
+	}
+	if info, err := g.opts.Client.Info(ctx); err == nil && info.Has("renew") {
+		g.sched.MachineTTL = 0 // 2 × idle, renovado mientras el gateway viva
 	}
 	if n := g.freezeOwn(ctx); n > 0 {
 		log.Printf("froze %d replica(s) left running by a previous gateway %q", n, g.opts.ID)
@@ -257,15 +275,16 @@ func (g *Gateway) freezeOwn(ctx context.Context) int {
 	return n
 }
 
-// ---- la cascada
+// ---- clasificación (JEV, y la cascada si está respaldada)
 
 // ClassifyRequest es el cuerpo de /v1/classify y /v1/decide.
 type ClassifyRequest struct {
 	Task   string         `json:"task"`
 	Text   string         `json:"text"`
 	Fields map[string]any `json:"fields,omitempty"`
-	// Mode: "cascade" (por defecto), "jev" (solo JEV, aunque dude) o "von"
-	// (siempre VON). Los dos últimos son para medir y comparar.
+	// Mode: "cascade" (por defecto: JEV, y VON en lo que duda si la cascada de
+	// la tarea está activa) o "jev" (solo JEV, aunque dude y aunque la cascada
+	// esté activa).
 	Mode string `json:"mode,omitempty"`
 	// Explain añade la evidencia también a las respuestas confiadas de JEV
 	// (cuesta reservas de memoria; en las escaladas va siempre).
@@ -274,16 +293,20 @@ type ClassifyRequest struct {
 
 // ClassifyResponse es la respuesta.
 type ClassifyResponse struct {
-	Task      string         `json:"task"`
-	Label     string         `json:"label"`
-	Decision  string         `json:"decision,omitempty"` // /v1/decide: la misma etiqueta
-	Prob      float64        `json:"prob"`               // probabilidad calibrada de JEV para Label (0 si no hay JEV o es unknown)
-	Source    string         `json:"source"`             // jev | von
+	Task     string `json:"task"`
+	Label    string `json:"label"`
+	Decision string `json:"decision,omitempty"` // /v1/decide: la misma etiqueta
+	// Escalate: JEV no llegó a su umbral. Con la cascada activa la etiqueta es
+	// la de VON (source von); si no, es la de JEV y quien llama decide qué
+	// hacer con la duda. Nunca se pregunta a VON a escondidas.
+	Escalate  bool           `json:"escalate,omitempty"`
+	Prob      float64        `json:"prob"`   // probabilidad calibrada de JEV para Label (0 si es unknown)
+	Source    string         `json:"source"` // jev | von
 	LatencyMS float64        `json:"latency_ms"`
 	Evidence  []jev.Evidence `json:"evidence,omitempty"`
 	JEV       *JEVAnswer     `json:"jev,omitempty"`
 	VON       *VONAnswer     `json:"von,omitempty"`
-	Degraded  string         `json:"degraded,omitempty"` // por qué contestó JEV sin llegar a su umbral
+	Degraded  string         `json:"degraded,omitempty"` // la cascada estaba activa y VON no contestó
 }
 
 // JEVAnswer es lo que dijo JEV, conteste él o no.
@@ -318,7 +341,38 @@ func statusf(code int, format string, a ...any) error {
 // formas; esto evita guardar y copiar megas por petición.
 const maxText = 64 << 10
 
-// Classify es la cascada JEV → VON.
+// jevDecide es la predicción de JEV con los umbrales de la tarea: la etiqueta,
+// su umbral efectivo y si contesta confiado. full pide la distribución y la
+// evidencia (hace falta para escalar o explicar).
+func jevDecide(m *jev.Model, tc *TaskConfig, in jev.Input, full bool) (jev.Prediction, float64, bool) {
+	var p jev.Prediction
+	if full {
+		p = m.PredictFull(in, 5)
+	} else {
+		p = m.Predict(in)
+	}
+	tau := p.Threshold
+	if v, ok := tc.Thresholds[p.Label]; ok {
+		tau = v
+	}
+	return p, tau, p.Prob >= tau
+}
+
+// escalation arma la pregunta a VON de una escalada: con top_k, VON solo elige
+// entre los candidatos de JEV. p tiene que traer la distribución (PredictFull).
+func (g *Gateway) escalation(tc *TaskConfig, m *jev.Model, in jev.Input, p jev.Prediction) ([]string, chatReq) {
+	allowed := m.Labels
+	if tc.TopK > 0 && tc.TopK < len(allowed) {
+		allowed = make([]string, 0, tc.TopK)
+		for _, c := range topN(p.Probs, tc.TopK) {
+			allowed = append(allowed, c.Label)
+		}
+	}
+	return allowed, g.chatFor(tc, allowed, in, p.Probs)
+}
+
+// Classify es la decisión de JEV y, si la cascada de la tarea está activa, la
+// escalada a VON de lo que duda.
 func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyRequest) (*ClassifyResponse, error) {
 	t0 := time.Now()
 	cfg := g.config()
@@ -326,19 +380,16 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	if tc == nil {
 		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
 	}
+	if tc.JEV == "" {
+		return nil, statusf(http.StatusBadRequest, "task %q is a generation task: use POST /v1/generate", req.Task)
+	}
 	if len(req.Text) > maxText {
 		return nil, statusf(http.StatusRequestEntityTooLarge, "text larger than %d bytes", maxText)
 	}
 	switch req.Mode {
-	case "", "cascade", "jev", "von":
+	case "", "cascade", "jev":
 	default:
-		return nil, statusf(http.StatusBadRequest, "mode must be cascade, jev or von")
-	}
-	if req.Mode == "jev" && tc.JEV == "" {
-		return nil, statusf(http.StatusBadRequest, "task %q has no jev model", req.Task)
-	}
-	if req.Mode == "von" && tc.VON == "" {
-		return nil, statusf(http.StatusBadRequest, "task %q has no von model", req.Task)
+		return nil, statusf(http.StatusBadRequest, "mode must be cascade or jev (VON alone is measured with kling ai eval -von-alone)")
 	}
 	in := jev.Input{Text: req.Text, Fields: req.Fields}
 	resp := &ClassifyResponse{Task: req.Task}
@@ -348,103 +399,81 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		if endpoint == "decide" {
 			resp.Decision = resp.Label
 		}
-		g.met.answer(endpoint, req.Task, resp.Source, d)
+		src := resp.Source
+		if resp.Escalate && src == "jev" {
+			src = "escalated" // contestó JEV sin llegar a su umbral
+		}
+		g.met.answer(endpoint, req.Task, src, d)
 		return resp, nil
 	}
 
-	labels := tc.Labels
-	var m *jev.Model
-	var p jev.Prediction
-	if tc.JEV != "" {
-		var err error
-		if m, err = g.jev.get(cfg.Models[tc.JEV].Path); err != nil {
-			log.Printf("task %s: loading jev model: %v", req.Task, err)
-			return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable", tc.JEV)
+	m, err := g.jev.get(cfg.Models[tc.JEV].Path)
+	if err != nil {
+		log.Printf("task %s: loading jev model: %v", req.Task, err)
+		return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable", tc.JEV)
+	}
+	casc := g.cascade(req.Task)
+	escalar := casc.On() && req.Mode != "jev"
+	p, tau, confident := jevDecide(m, tc, in, req.Explain)
+	dec := jev.DecisionEscalate
+	if confident {
+		dec = jev.DecisionConfident
+	}
+	resp.JEV = &JEVAnswer{Label: p.Label, Prob: p.Prob, Threshold: tau, Decision: dec}
+	resp.Label, resp.Prob, resp.Source, resp.Evidence = p.Label, p.Prob, "jev", p.Evidence
+	if confident {
+		if escalar {
+			g.maybeAudit(req.Task, tc, cfg, m.Labels, in, p)
 		}
-		labels = m.Labels
-		if req.Mode != "von" {
-			if req.Explain {
-				p = m.PredictFull(in, 5)
-			} else {
-				p = m.Predict(in)
-			}
-			tau := p.Threshold
-			if v, ok := tc.Thresholds[p.Label]; ok {
-				tau = v
-			}
-			confident := p.Prob >= tau
-			dec := jev.DecisionEscalate
-			if confident {
-				dec = jev.DecisionConfident
-			}
-			resp.JEV = &JEVAnswer{Label: p.Label, Prob: p.Prob, Threshold: tau, Decision: dec}
-			if confident || req.Mode == "jev" || tc.VON == "" {
-				resp.Label, resp.Prob, resp.Source, resp.Evidence = p.Label, p.Prob, "jev", p.Evidence
-				if !confident && req.Mode != "jev" {
-					resp.Degraded = "no von model for this task: jev answered below its threshold"
-				}
-				if confident && req.Mode != "jev" {
-					g.maybeAudit(req.Task, tc, cfg, labels, in, p)
-				}
-				return finish()
-			}
-		}
-		// Escala: la distribución completa y la evidencia van en la respuesta
-		// y, si la plantilla las usa, en la pregunta.
-		full := m.PredictFull(in, 5)
-		p = full
-		resp.Evidence = full.Evidence
-		if resp.JEV == nil {
-			resp.JEV = &JEVAnswer{Label: full.Label, Prob: full.Prob, Threshold: full.Threshold, Decision: full.Decision}
-		}
-		resp.JEV.Candidates = topN(full.Probs, 3)
+		return finish()
 	}
 
-	// Con top_k, VON solo elige entre los candidatos de JEV. No en mode=von,
-	// que existe para medir a VON solo.
-	allowed := labels
-	if tc.TopK > 0 && m != nil && req.Mode != "von" && tc.TopK < len(labels) {
-		allowed = make([]string, 0, tc.TopK)
-		for _, c := range topN(p.Probs, tc.TopK) {
-			allowed = append(allowed, c.Label)
-		}
+	// JEV duda: la distribución completa y la evidencia van en la respuesta
+	// (y en la pregunta a VON, si la plantilla las usa).
+	resp.Escalate = true
+	if !req.Explain {
+		p = m.PredictFull(in, 5)
+	}
+	resp.Evidence = p.Evidence
+	resp.JEV.Candidates = topN(p.Probs, 3)
+	if !escalar {
+		return finish()
 	}
 
+	allowed, chat := g.escalation(tc, m, in, p)
 	t1 := time.Now()
 	vctx, cancel := context.WithTimeout(ctx, g.opts.VONTimeout)
 	defer cancel()
-	ans, err := g.askVON(vctx, cfg.Models[tc.VON].Snapshot, g.chatFor(tc, allowed, in, p.Probs))
+	ans, err := g.askVON(vctx, cfg.Models[tc.EscalateTo].Snapshot, chat)
 	if err != nil {
 		var we *wakeError
 		reason := "request"
 		if errors.As(err, &we) {
 			reason = "wake"
 		}
-		g.met.vonErr(tc.VON, reason)
-		log.Printf("task %s: von %s: %v", req.Task, tc.VON, err)
-		if m == nil || tc.OnVONError == "error" || req.Mode == "von" {
-			return nil, &StatusError{Code: http.StatusServiceUnavailable, Msg: fmt.Sprintf("von model %q did not answer: %v", tc.VON, err)}
+		g.met.vonErr(tc.EscalateTo, reason)
+		log.Printf("task %s: von %s: %v", req.Task, tc.EscalateTo, err)
+		if tc.OnVONError == "error" {
+			return nil, &StatusError{Code: http.StatusServiceUnavailable, Msg: fmt.Sprintf("von model %q did not answer: %v", tc.EscalateTo, err)}
 		}
 		g.met.inc(g.met.degraded, req.Task)
-		resp.Label, resp.Prob, resp.Source = p.Label, p.Prob, "jev"
 		resp.Degraded = "von did not answer: " + truncUTF8(err.Error(), 200)
 		return finish()
 	}
 	label := parseLabel(ans, allowed)
-	resp.VON = &VONAnswer{Model: tc.VON, Answer: truncUTF8(ans, maxAnswerShown), LatencyMS: float64(time.Since(t1).Microseconds()) / 1000}
-	resp.Label, resp.Source = label, "von"
+	resp.VON = &VONAnswer{Model: tc.EscalateTo, Answer: truncUTF8(ans, maxAnswerShown), LatencyMS: float64(time.Since(t1).Microseconds()) / 1000}
+	resp.Label, resp.Source, resp.Prob = label, "von", 0
 	if label == Unknown {
 		g.met.inc(g.met.unknown, req.Task)
-	} else if m != nil {
+	} else {
 		resp.Prob = probOf(p.Probs, label)
-		// Muestra para recalibrar: lo escalado entra siempre (peso 1), y con
-		// mode=von también todo lo demás (peso 1: no hay selección).
+		// Muestra para recalibrar: lo escalado entra siempre, con peso 1.
 		g.record(req.Task, sample{pred: p.Label, prob: p.Prob, teacher: label, weight: 1, at: time.Now()})
 	}
 	return finish()
 }
 
-// chatFor arma la pregunta a VON de una tarea.
+// chatFor arma la pregunta a VON de una escalada.
 func (g *Gateway) chatFor(tc *TaskConfig, labels []string, in jev.Input, cands []jev.ClassProb) chatReq {
 	sys := tc.System
 	if sys == "" {
@@ -468,9 +497,10 @@ func (g *Gateway) chatFor(tc *TaskConfig, labels []string, in jev.Input, cands [
 // maybeAudit pregunta a VON, en segundo plano, por una fracción de lo que JEV
 // contestó confiado. Solo sirve a la recalibración; el cliente ya tiene su
 // respuesta. Una a la vez: si ya hay una en vuelo, se descarta (y se cuenta),
-// porque una auditoría no debe provocar réplicas ni colas.
+// porque una auditoría no debe provocar réplicas ni colas. Solo con la cascada
+// activa (quien llama lo comprueba): con ella apagada, VON no se toca.
 func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []string, in jev.Input, p jev.Prediction) {
-	if tc.Audit <= 0 || tc.VON == "" || rand.Float64() >= tc.Audit {
+	if tc.Audit <= 0 || tc.EscalateTo == "" || rand.Float64() >= tc.Audit {
 		return
 	}
 	select {
@@ -482,7 +512,7 @@ func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []
 	g.met.inc(g.met.audits, task, "sent")
 	// El texto se copia: el de la petición muere con ella.
 	in = jev.Input{Text: string([]byte(in.Text)), Fields: in.Fields}
-	snap := cfg.Models[tc.VON].Snapshot
+	snap := cfg.Models[tc.EscalateTo].Snapshot
 	req := g.chatFor(tc, labels, in, nil)
 	w := 1 / tc.Audit
 	go func() {
@@ -491,13 +521,128 @@ func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []
 		defer cancel()
 		ans, err := g.askVON(ctx, snap, req)
 		if err != nil {
-			g.met.vonErr(tc.VON, "audit")
+			g.met.vonErr(tc.EscalateTo, "audit")
 			return
 		}
 		if l := parseLabel(ans, labels); l != Unknown {
 			g.record(task, sample{pred: p.Label, prob: p.Prob, teacher: l, weight: w, at: time.Now()})
 		}
 	}()
+}
+
+// ---- generación (VON)
+
+// GenerateRequest es el cuerpo de /v1/generate: una tarea de generación y lo
+// que va en su plantilla.
+type GenerateRequest struct {
+	Task  string `json:"task"`
+	Input string `json:"input"`
+	// Vars son variables extra de la plantilla ({nombre}).
+	Vars map[string]string `json:"vars,omitempty"`
+	// MaxTokens y Temperature sustituyen a los de la tarea; max_tokens no
+	// puede pasar del de la tarea.
+	MaxTokens   int      `json:"max_tokens,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	Seed        *int64   `json:"seed,omitempty"`
+}
+
+// GenerateResponse es la respuesta.
+type GenerateResponse struct {
+	Task         string  `json:"task"`
+	Model        string  `json:"model"`
+	Output       string  `json:"output"`
+	FinishReason string  `json:"finish_reason,omitempty"`
+	Usage        Usage   `json:"usage"`
+	LatencyMS    float64 `json:"latency_ms"`
+}
+
+// Usage son los tokens de una generación.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}
+
+// Límites de las variables de una plantilla: van dentro del prompt, que tiene
+// el contexto de la réplica (2048 tokens por defecto).
+const (
+	maxVars     = 16
+	maxVarBytes = 4 << 10
+)
+
+// Generate rellena la plantilla de una tarea de generación y pregunta a VON.
+func (g *Gateway) Generate(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
+	t0 := time.Now()
+	cfg := g.config()
+	tc := cfg.Tasks[req.Task]
+	if tc == nil {
+		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
+	}
+	if !tc.IsGenerate() {
+		return nil, statusf(http.StatusBadRequest, "task %q is a classification task: use POST /v1/classify", req.Task)
+	}
+	if len(req.Input) > maxText {
+		return nil, statusf(http.StatusRequestEntityTooLarge, "input larger than %d bytes", maxText)
+	}
+	if len(req.Vars) > maxVars {
+		return nil, statusf(http.StatusBadRequest, "at most %d vars", maxVars)
+	}
+	for k, v := range req.Vars {
+		if !nameRE.MatchString(k) || k == "input" || len(v) > maxVarBytes {
+			return nil, statusf(http.StatusBadRequest, "var %q: names are lowercase letters, digits, . _ - (not \"input\"), values up to %d bytes", k, maxVarBytes)
+		}
+	}
+	mt := tc.MaxTokens
+	if mt == 0 {
+		mt = 256
+	}
+	if req.MaxTokens < 0 || req.MaxTokens > mt {
+		return nil, statusf(http.StatusBadRequest, "max_tokens must be 0..%d (the task's)", mt)
+	}
+	if req.MaxTokens > 0 {
+		mt = req.MaxTokens
+	}
+	temp := 0.7
+	if tc.Temperature != nil {
+		temp = *tc.Temperature
+	}
+	if req.Temperature != nil {
+		if !(*req.Temperature >= 0 && *req.Temperature <= 2) {
+			return nil, statusf(http.StatusBadRequest, "temperature must be in [0,2]")
+		}
+		temp = *req.Temperature
+	}
+	sd := seed()
+	if req.Seed != nil {
+		sd = *req.Seed
+	}
+	var msgs []von.Message
+	if tc.System != "" {
+		msgs = append(msgs, von.Message{Role: "system", Content: tc.System})
+	}
+	msgs = append(msgs, von.Message{Role: "user", Content: renderGenerate(tc.Prompt, req.Input, req.Vars)})
+	chat := chatReq{Messages: msgs, MaxTokens: mt, Temperature: temp, Seed: sd}
+
+	vctx, cancel := context.WithTimeout(ctx, g.opts.ProxyTimeout)
+	defer cancel()
+	out, err := g.chatVON(vctx, cfg.Models[tc.VON].Snapshot, chat)
+	if err != nil {
+		var we *wakeError
+		if errors.As(err, &we) {
+			g.met.vonErr(tc.VON, "wake")
+			return nil, &StatusError{Code: http.StatusServiceUnavailable, Msg: err.Error()}
+		}
+		g.met.vonErr(tc.VON, "request")
+		return nil, &StatusError{Code: http.StatusBadGateway, Msg: fmt.Sprintf("von model %q did not answer: %v", tc.VON, err)}
+	}
+	resp := &GenerateResponse{Task: req.Task, Model: tc.VON, Output: out.Text(),
+		Usage: Usage{PromptTokens: out.Usage.PromptTokens, CompletionTokens: out.Usage.CompletionTokens}}
+	if len(out.Choices) > 0 {
+		resp.FinishReason = out.Choices[0].FinishReason
+	}
+	d := time.Since(t0)
+	resp.LatencyMS = float64(d.Microseconds()) / 1000
+	g.met.answer("generate", req.Task, "von", d)
+	return resp, nil
 }
 
 func (g *Gateway) record(task string, s sample) {
@@ -538,8 +683,8 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	if tc == nil {
 		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
 	}
-	if tc.JEV == "" || tc.VON == "" {
-		return nil, statusf(http.StatusBadRequest, "task %q needs both a jev and a von model to recalibrate", req.Task)
+	if tc.JEV == "" || tc.EscalateTo == "" {
+		return nil, statusf(http.StatusBadRequest, "task %q needs a jev model and escalate_to (the teacher) to recalibrate", req.Task)
 	}
 	path := cfg.Models[tc.JEV].Path
 	m, err := g.jev.get(path)
@@ -584,7 +729,7 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	}
 	nm.Thresholds = nuevo
 	nm.Meta.Notes = fmt.Sprintf("%s[recalibrated %s by kling ai calibrate: %d samples, VON %q as teacher, target agreement %.2f] ",
-		nm.Meta.Notes, time.Now().UTC().Format(time.RFC3339), rep.Samples, tc.VON, target)
+		nm.Meta.Notes, time.Now().UTC().Format(time.RFC3339), rep.Samples, tc.EscalateTo, target)
 	nb, err := nm.Marshal()
 	if err != nil {
 		return nil, err
@@ -602,5 +747,13 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	g.jev.put(path, nm)
 	rep.Written, rep.Backup = path, backup
 	log.Printf("task %s: recalibrated %s (%s)", req.Task, path, rep.Reason)
+	// Umbrales nuevos = otro reparto entre lo que contesta JEV y lo que
+	// escala: la evaluación que respaldaba la cascada ya no describe lo que se
+	// sirve. Se vuelve a decidir (con escalate_force sigue activa).
+	before := g.cascade(req.Task)
+	g.regate()
+	if after := g.cascade(req.Task); before.On() && !after.On() {
+		rep.Cascade = "the cascade is off until it is evaluated again: " + after.Reason
+	}
 	return rep, nil
 }

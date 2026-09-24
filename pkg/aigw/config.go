@@ -11,10 +11,12 @@
 //     primera petición, lo congela al quedarse ocioso (0 CPU; en Linux su
 //     memoria vuelve al fichero) y añade réplicas si no da abasto.
 //
-// Una tarea une los dos en CASCADA: JEV contesta si está seguro (su
-// probabilidad calibrada supera el umbral de la clase) y escala a VON si no.
-// Lo que VON contesta en lo escalado se guarda (acotado) para recalibrar los
-// umbrales de JEV con el tráfico real, a petición: `kling ai calibrate`.
+// Cada uno a lo suyo: JEV clasifica, enruta y filtra; VON genera (resume,
+// redacta, contesta). Una tarea de clasificación puede además escalar lo que
+// JEV duda a un VON (la cascada), pero solo si una evaluación con datos de la
+// tarea muestra que acierta más que JEV solo (ver eval.go). Lo que VON contesta
+// en lo escalado se guarda (acotado) para recalibrar los umbrales de JEV con el
+// tráfico real, a petición: `kling ai calibrate`.
 package aigw
 
 import (
@@ -60,16 +62,38 @@ type ModelConfig struct {
 	MaxReplicas int `json:"max_replicas,omitempty"`
 }
 
-// TaskConfig es una decisión con nombre: qué JEV contesta primero, a qué VON se
-// escala y cómo se le pregunta.
+// TaskConfig es una tarea con nombre, de una de dos clases:
+//
+//   - CLASIFICACIÓN (jev): JEV decide —clasificar, enrutar, filtrar—. Cuando
+//     duda, la respuesta sale igual con escalate: true y quien llama decide.
+//     Con escalate_to, la duda la resuelve un modelo VON (la cascada), pero
+//     solo si un registro de evaluación (`kling ai eval`) muestra que la
+//     cascada acierta más que JEV solo en los datos de esa tarea; si no, el
+//     gateway se niega a activarla salvo escalate_force.
+//   - GENERACIÓN (von): VON resume, redacta, contesta. La pregunta sale de una
+//     plantilla con {input} y las variables que mande el cliente.
+//
+// Por qué la cascada no va sola: medido en la clasificación de commits
+// (docs/ai-gateway.md), la cascada JEV → LLM de 0,5B acertaba MENOS que JEV
+// solo (0,43 frente a 0,64). Un LLM pequeño no mejora a un clasificador
+// entrenado por serlo; hay que demostrarlo tarea a tarea.
 type TaskConfig struct {
+	// JEV es el modelo de una tarea de clasificación.
 	JEV string `json:"jev,omitempty"`
+	// EscalateTo es el modelo VON al que la cascada manda lo que JEV duda.
+	EscalateTo string `json:"escalate_to,omitempty"`
+	// EscalateForce activa la cascada aunque su evaluación no la respalde (o
+	// no la haya). Es el -force de la decisión: queda escrito en el registro.
+	EscalateForce bool `json:"escalate_force,omitempty"`
+	// VON es el modelo de una tarea de generación.
 	VON string `json:"von,omitempty"`
-	// Labels son las etiquetas válidas. Con JEV salen del modelo y, si se dan
-	// aquí también, tienen que ser las mismas; sin JEV son obligatorias.
+
+	// Labels son las etiquetas válidas; salen del modelo JEV y, si se dan
+	// aquí también, tienen que ser las mismas.
 	Labels []string `json:"labels,omitempty"`
-	// System y Prompt son la pregunta a VON. Variables: {labels}, {text},
-	// {fields} y {candidates} (el top-3 de JEV con su probabilidad).
+	// System y Prompt son la pregunta a VON. En una escalada, variables
+	// {labels}, {text}, {fields} y {candidates} (el top-3 de JEV con su
+	// probabilidad); en una generación, {input} y las de "vars".
 	System string `json:"system,omitempty"`
 	Prompt string `json:"prompt,omitempty"`
 	// TopK > 0 convierte a VON en un reordenador: en una escalada solo puede
@@ -87,12 +111,17 @@ type TaskConfig struct {
 	// Audit es la fracción de respuestas CONFIADAS de JEV que se preguntan
 	// también a VON en segundo plano, solo para la recalibración: sin ellas la
 	// muestra solo tendría lo que JEV escaló y no se podría saber si los
-	// umbrales prometen de más.
+	// umbrales prometen de más. Solo con la cascada activa.
 	Audit float64 `json:"audit,omitempty"`
 	// Samples es el tamaño del anillo de muestras (0 = 2000).
 	Samples int `json:"samples,omitempty"`
-	// MaxTokens de la respuesta de VON (0 = 16: una etiqueta).
+	// MaxTokens de la respuesta de VON: 16 por defecto en una escalada (una
+	// etiqueta), 256 en una generación, que es también el tope que puede
+	// pedir un cliente.
 	MaxTokens int `json:"max_tokens,omitempty"`
+	// Temperature de una generación (nil = 0,7; un cliente puede cambiarla).
+	// Las escaladas van siempre a 0.
+	Temperature *float64 `json:"temperature,omitempty"`
 	// Grammar restringe la salida de VON a exactamente una etiqueta con una
 	// gramática de llama-server (nil = sí). Un modelo de 360M parámetros
 	// divaga; con la gramática no puede.
@@ -101,6 +130,9 @@ type TaskConfig struct {
 	// como degradada si VON no responde; "error" devuelve 503.
 	OnVONError string `json:"on_von_error,omitempty"`
 }
+
+// IsGenerate dice si la tarea es de generación (VON) y no de clasificación.
+func (t *TaskConfig) IsGenerate() bool { return t.VON != "" }
 
 // TenantConfig es un token con nombre y sus cuotas.
 type TenantConfig struct {
@@ -119,7 +151,8 @@ const (
 	maxPromptBytes = 16 << 10
 	maxLabels      = 256
 	maxSamples     = 100_000
-	maxTokensCap   = 256
+	maxTokensCap   = 256  // de una escalada: una etiqueta
+	maxGenTokens   = 4096 // de una generación
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -207,8 +240,12 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("task %q: empty", n))
 			continue
 		}
-		if t.JEV == "" && t.VON == "" {
-			errs = append(errs, fmt.Errorf("task %q: needs a jev model, a von model or both", n))
+		gen := t.VON != ""
+		switch {
+		case t.JEV == "" && t.VON == "":
+			errs = append(errs, fmt.Errorf("task %q: needs a jev model (classification) or a von model (generation)", n))
+		case t.JEV != "" && t.VON != "":
+			errs = append(errs, fmt.Errorf("task %q: jev and von together: a classification task escalates with \"escalate_to\", and \"von\" is for generation tasks", n))
 		}
 		if t.JEV != "" && (c.Models[t.JEV] == nil || c.Models[t.JEV].Kind != KindJEV) {
 			errs = append(errs, fmt.Errorf("task %q: %q is not a jev model", n, t.JEV))
@@ -216,8 +253,35 @@ func (c *Config) Validate() error {
 		if t.VON != "" && (c.Models[t.VON] == nil || c.Models[t.VON].Kind != KindVON) {
 			errs = append(errs, fmt.Errorf("task %q: %q is not a von model", n, t.VON))
 		}
-		if t.JEV == "" && len(t.Labels) == 0 {
-			errs = append(errs, fmt.Errorf("task %q: without a jev model, labels are required", n))
+		if t.EscalateTo != "" && (t.JEV == "" || c.Models[t.EscalateTo] == nil || c.Models[t.EscalateTo].Kind != KindVON) {
+			errs = append(errs, fmt.Errorf("task %q: escalate_to needs a jev task and a von model, and %q is not one", n, t.EscalateTo))
+		}
+		if t.EscalateForce && t.EscalateTo == "" {
+			errs = append(errs, fmt.Errorf("task %q: escalate_force without escalate_to", n))
+		}
+		if gen {
+			// Lo que solo tiene sentido al clasificar no se acepta en una
+			// generación: una clave que no hace nada es un error que no se ve.
+			if len(t.Labels) > 0 || t.TopK != 0 || len(t.Thresholds) > 0 || t.Precision != 0 || t.Audit != 0 ||
+				t.Samples != 0 || t.Grammar != nil || t.OnVONError != "" {
+				errs = append(errs, fmt.Errorf("task %q: labels, top_k, thresholds, precision, audit, samples, grammar and on_von_error are for classification tasks", n))
+			}
+			if t.MaxTokens < 0 || t.MaxTokens > maxGenTokens {
+				errs = append(errs, fmt.Errorf("task %q: max_tokens must be 0..%d", n, maxGenTokens))
+			}
+			if t.Temperature != nil && !(*t.Temperature >= 0 && *t.Temperature <= 2) {
+				errs = append(errs, fmt.Errorf("task %q: temperature must be in [0,2]", n))
+			}
+		} else {
+			if t.Temperature != nil {
+				errs = append(errs, fmt.Errorf("task %q: temperature is for generation tasks (escalations answer at 0)", n))
+			}
+			if t.MaxTokens < 0 || t.MaxTokens > maxTokensCap {
+				errs = append(errs, fmt.Errorf("task %q: max_tokens must be 0..%d", n, maxTokensCap))
+			}
+			if t.Audit > 0 && t.EscalateTo == "" {
+				errs = append(errs, fmt.Errorf("task %q: audit asks the escalate_to model; set it or drop audit", n))
+			}
 		}
 		if len(t.Labels) > maxLabels {
 			errs = append(errs, fmt.Errorf("task %q: at most %d labels", n, maxLabels))
@@ -246,11 +310,8 @@ func (c *Config) Validate() error {
 		if t.Samples < 0 || t.Samples > maxSamples {
 			errs = append(errs, fmt.Errorf("task %q: samples must be 0..%d", n, maxSamples))
 		}
-		if t.TopK < 0 || t.TopK > maxLabels || (t.TopK > 0 && t.JEV == "") {
-			errs = append(errs, fmt.Errorf("task %q: top_k needs a jev model and must be 0..%d", n, maxLabels))
-		}
-		if t.MaxTokens < 0 || t.MaxTokens > maxTokensCap {
-			errs = append(errs, fmt.Errorf("task %q: max_tokens must be 0..%d", n, maxTokensCap))
+		if t.TopK < 0 || t.TopK > maxLabels {
+			errs = append(errs, fmt.Errorf("task %q: top_k must be 0..%d", n, maxLabels))
 		}
 		switch t.OnVONError {
 		case "", "jev", "error":

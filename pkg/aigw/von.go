@@ -117,7 +117,7 @@ type wakeError struct{ err error }
 func (e *wakeError) Error() string { return "no replica available: " + e.err.Error() }
 func (e *wakeError) Unwrap() error { return e.err }
 
-// chatReq es lo que el gateway pregunta a VON en una escalada.
+// chatReq es lo que el gateway pregunta a VON: una escalada o una generación.
 type chatReq struct {
 	Messages    []von.Message `json:"messages"`
 	MaxTokens   int           `json:"max_tokens"`
@@ -127,35 +127,46 @@ type chatReq struct {
 	Stream      bool          `json:"stream"`
 }
 
-// maxChatAnswerBytes acota la respuesta (sin streaming) de una escalada: una
-// etiqueta cabe de sobra, y un invitado hostil no puede hinchar la memoria.
+// maxChatAnswerBytes acota la respuesta (sin streaming) de una escalada o una
+// generación: 4096 tokens caben de sobra, y un invitado hostil no puede
+// hinchar la memoria.
 const maxChatAnswerBytes = 1 << 20
 
 // askVON pregunta a una réplica y devuelve el texto de la respuesta.
 func (g *Gateway) askVON(ctx context.Context, snap string, req chatReq) (string, error) {
-	body, err := json.Marshal(req)
+	out, err := g.chatVON(ctx, snap, req)
 	if err != nil {
 		return "", err
 	}
+	return out.Text(), nil
+}
+
+// chatVON manda una petición de chat (sin streaming) a una réplica del dorado
+// snap y devuelve la respuesta entera, acotada.
+func (g *Gateway) chatVON(ctx context.Context, snap string, req chatReq) (*von.ChatResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
 	resp, rep, err := g.postGuest(ctx, snap, "/v1/chat/completions", body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer rep.Release()
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxChatAnswerBytes+1))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(b) > maxChatAnswerBytes {
-		return "", fmt.Errorf("replica answer larger than %d bytes", maxChatAnswerBytes)
+		return nil, fmt.Errorf("replica answer larger than %d bytes", maxChatAnswerBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("replica answered %d: %s", resp.StatusCode, truncUTF8(string(b), 200))
+		return nil, fmt.Errorf("replica answered %d: %s", resp.StatusCode, truncUTF8(string(b), 200))
 	}
 	var out von.ChatResponse
 	if err := json.Unmarshal(b, &out); err != nil {
-		return "", fmt.Errorf("replica answer is not a chat completion: %w", err)
+		return nil, fmt.Errorf("replica answer is not a chat completion: %w", err)
 	}
-	return out.Text(), nil
+	return &out, nil
 }

@@ -122,7 +122,8 @@ type CalibrateReport struct {
 	Written    string     `json:"written,omitempty"`
 	Backup     string     `json:"backup,omitempty"`
 	Reason     string     `json:"reason"`
-	TeacherErr string     `json:"teacher_warning"` // el límite que no se corrige
+	TeacherErr string     `json:"teacher_warning"`   // el límite que no se corrige
+	Cascade    string     `json:"cascade,omitempty"` // si recalibrar apagó la cascada
 }
 
 // chooseWeighted es jev.ChooseThresholds con pesos: el menor corte por clase

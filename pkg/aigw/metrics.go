@@ -126,17 +126,21 @@ func (m *metrics) write(w io.Writer, js jevStats, samples map[string]int, replic
 		}
 	}
 
-	counter("kling_ai_requests_total", "Answers by endpoint, task and source (jev or von).", m.requests, "endpoint", "task", "source")
+	counter("kling_ai_requests_total", "Answers by endpoint, task and source: jev (confident), escalated (JEV unsure, answered by JEV with escalate: true) or von (the cascade, or a generation).", m.requests, "endpoint", "task", "source")
 
-	// Cobertura y escalado por tarea, derivados de los contadores: lo que
-	// cuesta la cascada se lee de un vistazo sin escribir PromQL.
+	// Cobertura y escalado por tarea de clasificación, derivados de los
+	// contadores: lo que JEV contesta seguro y lo que duda se lee de un
+	// vistazo sin escribir PromQL. Las generaciones no cuentan: no hay JEV.
 	jevN, vonN := map[string]uint64{}, map[string]uint64{}
 	for k, v := range m.requests {
 		p := strings.Split(k, "|")
+		if p[0] == "generate" {
+			continue
+		}
 		switch p[2] {
 		case "jev":
 			jevN[p[1]] += v
-		case "von":
+		case "von", "escalated":
 			vonN[p[1]] += v
 		}
 	}
@@ -147,16 +151,16 @@ func (m *metrics) write(w io.Writer, js jevStats, samples map[string]int, replic
 	for t := range vonN {
 		tasks[t] = true
 	}
-	fmt.Fprintf(w, "# HELP kling_ai_jev_coverage Fraction of answers given by JEV (since start).\n# TYPE kling_ai_jev_coverage gauge\n")
+	fmt.Fprintf(w, "# HELP kling_ai_jev_coverage Fraction of classifications JEV answered confidently (since start).\n# TYPE kling_ai_jev_coverage gauge\n")
 	for _, t := range sortedKeys(tasks) {
 		fmt.Fprintf(w, "kling_ai_jev_coverage{task=%q} %g\n", t, float64(jevN[t])/float64(jevN[t]+vonN[t]))
 	}
-	fmt.Fprintf(w, "# HELP kling_ai_escalation_rate Fraction of answers escalated to VON (since start).\n# TYPE kling_ai_escalation_rate gauge\n")
+	fmt.Fprintf(w, "# HELP kling_ai_escalation_rate Fraction of classifications where JEV was unsure: sent to VON by an active cascade, or returned with escalate: true (since start).\n# TYPE kling_ai_escalation_rate gauge\n")
 	for _, t := range sortedKeys(tasks) {
 		fmt.Fprintf(w, "kling_ai_escalation_rate{task=%q} %g\n", t, float64(vonN[t])/float64(jevN[t]+vonN[t]))
 	}
 
-	hist("kling_ai_latency_seconds", "End-to-end latency of classify/decide by task and source.", m.latency, "task", "source")
+	hist("kling_ai_latency_seconds", "End-to-end latency by task and source.", m.latency, "task", "source")
 	counter("kling_ai_von_unknown_total", "VON answers that were not exactly one of the labels.", m.unknown, "task")
 	counter("kling_ai_degraded_total", "Escalations answered by JEV because VON failed.", m.degraded, "task")
 	counter("kling_ai_audits_total", "Confident JEV answers double-checked by VON in the background.", m.audits, "task", "outcome")

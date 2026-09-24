@@ -53,6 +53,20 @@ func renderPrompt(tmpl string, labels []string, in jev.Input, cands []jev.ClassP
 	).Replace(tmpl)
 }
 
+// renderGenerate rellena la plantilla de una generación: {input} y las
+// variables del cliente, en un solo pase (lo que traiga el texto del usuario
+// no se vuelve a expandir). Sin plantilla, la pregunta es el input tal cual.
+func renderGenerate(tmpl, input string, vars map[string]string) string {
+	if tmpl == "" {
+		tmpl = "{input}"
+	}
+	pairs := []string{"{input}", truncUTF8(input, maxText)}
+	for _, k := range sortedKeys(vars) {
+		pairs = append(pairs, "{"+k+"}", vars[k])
+	}
+	return strings.NewReplacer(pairs...).Replace(tmpl)
+}
+
 // parseLabel convierte la respuesta de VON en una de las etiquetas, o Unknown.
 //
 // Estricto a propósito: primera línea, sin espacios ni la puntuación que un

@@ -103,26 +103,56 @@ func TestCascada(t *testing.T) {
 	}
 }
 
-// Los modos jev y von sirven para medir cada escalón por separado.
+// mode=jev contesta JEV aunque dude y aunque la cascada esté activa; VON solo
+// ya no es un modo de clasificar (se mide con kling ai eval -von-alone).
 func TestModos(t *testing.T) {
 	g, ll, _ := newTestGateway(t, func(c *Config) {
 		c.Tasks["kind"].Thresholds = map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}
 	})
 	h := g.Handler("")
 	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic", "mode": "jev"}))
-	if r.Source != "jev" || r.Label != "bug" || r.Degraded != "" || ll.calls.Load() != 0 {
+	if r.Source != "jev" || r.Label != "bug" || !r.Escalate || r.Degraded != "" || ll.calls.Load() != 0 {
 		t.Fatalf("mode jev = %+v (von calls %d)", r, ll.calls.Load())
 	}
-	ll.set("chore")
-	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic", "mode": "von"}))
-	if r.Source != "von" || r.Label != "chore" {
-		t.Fatalf("mode von = %+v", r)
-	}
-	if rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "x", "mode": "nope"}); rec.Code != 400 {
-		t.Fatalf("bad mode: %d", rec.Code)
+	for _, mode := range []string{"von", "nope"} {
+		if rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "x", "mode": mode}); rec.Code != 400 {
+			t.Fatalf("mode %s: %d", mode, rec.Code)
+		}
 	}
 	if rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "nope", "text": "x"}); rec.Code != 404 {
 		t.Fatalf("unknown task: %d", rec.Code)
+	}
+}
+
+// Sin cascada (sin escalate_to) la duda de JEV vuelve al cliente marcada
+// escalate: true, con los candidatos y la evidencia para decidir; VON no se
+// toca, ni para auditar.
+func TestSinCascadaLaDudaVuelveAlCliente(t *testing.T) {
+	g, ll, reps := newTestGateway(t, func(c *Config) {
+		c.Tasks["kind"] = &TaskConfig{JEV: "commits", Thresholds: map[string]float64{"bug": 2}}
+	})
+	h := g.Handler("")
+	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic segfault"}))
+	if r.Source != "jev" || r.Label != "bug" || !r.Escalate || r.VON != nil || r.Degraded != "" ||
+		len(r.JEV.Candidates) == 0 || len(r.Evidence) == 0 {
+		t.Fatalf("unsure answer without a cascade = %+v", r)
+	}
+	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "readme typo documentation"}))
+	if r.Escalate || r.Label != "docs" {
+		t.Fatalf("confident answer = %+v", r)
+	}
+	if ll.calls.Load() != 0 || reps.acquired.Load() != 0 {
+		t.Fatalf("VON was called %d times without a cascade", ll.calls.Load())
+	}
+	m := do(t, h, "GET", "/metrics", "", nil).Body.String()
+	for _, want := range []string{
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="escalated"} 1`,
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="jev"} 1`,
+		`kling_ai_escalation_rate{task="kind"} 0.5`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("metrics lack %q", want)
+		}
 	}
 }
 
@@ -153,6 +183,7 @@ func TestVONCaido(t *testing.T) {
 func TestAuthYCuotas(t *testing.T) {
 	g, _, _ := newTestGateway(t, func(c *Config) {
 		c.Tenants = []TenantConfig{{Name: "bot", Token: "tenant-token-0123456789", MaxInflight: 1}}
+		c.Tasks["kind"].Thresholds = map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}
 	})
 	h := g.Handler("main-token-0123456789")
 	if rec := do(t, h, "GET", "/v1/models", "", nil); rec.Code != 401 {
@@ -178,7 +209,7 @@ func TestAuthYCuotas(t *testing.T) {
 	g.replicas = &fakeReplicas{addr: strings.TrimPrefix(fl.srv.URL, "http://")}
 	done := make(chan int)
 	go func() {
-		done <- do(t, h, "POST", "/v1/classify", "tenant-token-0123456789", map[string]any{"task": "kind", "text": "x", "mode": "von"}).Code
+		done <- do(t, h, "POST", "/v1/classify", "tenant-token-0123456789", map[string]any{"task": "kind", "text": "crash"}).Code
 	}()
 	<-fl.entered
 	if rec := do(t, h, "GET", "/v1/tasks", "tenant-token-0123456789", nil); rec.Code != 429 {
@@ -299,9 +330,19 @@ func TestConfig(t *testing.T) {
 		`{"models":{"A":{"kind":"jev","path":"x"}}}`,
 		`{"models":{"a":{"kind":"von"}}}`,
 		`{"models":{"a":{"kind":"jev","path":"x"}},"tasks":{"t":{"von":"a"}}}`,
-		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v"}}}`,
-		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","labels":["a","a"]}}}`,
-		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","labels":["a"],"audit":2}}}`,
+		`{"models":{"a":{"kind":"jev","path":"x"}},"tasks":{"t":{}}}`,
+		// jev y von juntos: la escalada es escalate_to, von es para generar.
+		`{"models":{"j":{"kind":"jev","path":"x"},"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"jev":"j","von":"v"}}}`,
+		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","escalate_to":"j"}}}`,
+		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","escalate_force":true}}}`,
+		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","audit":0.1}}}`,
+		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","labels":["a","a"]}}}`,
+		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","temperature":0.5}}}`,
+		// Lo de clasificar no vale en una generación.
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","labels":["a"]}}}`,
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","top_k":3}}}`,
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","max_tokens":5000}}}`,
+		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","temperature":3}}}`,
 		`{"models":{},"typo":1}`,
 		`{"tenants":[{"name":"x","token":"short"}]}`,
 		`{"tenants":[{"name":"default","token":"0123456789abcdefgh"}]}`,
@@ -314,7 +355,7 @@ func TestConfig(t *testing.T) {
 	dir := t.TempDir()
 	p := dir + "/ai.json"
 	_ = os.WriteFile(p, []byte(`{"models":{"j":{"kind":"jev","path":"m.jev"},"v":{"kind":"von","snapshot":"von-smol"}},
-		"tasks":{"t":{"jev":"j","von":"v"}}}`), 0o600)
+		"tasks":{"t":{"jev":"j","escalate_to":"v","top_k":3},"sum":{"von":"v","prompt":"Summarize:\n{input}","max_tokens":200,"temperature":0.2}}}`), 0o600)
 	c, err := LoadConfig(p)
 	if err != nil {
 		t.Fatal(err)
@@ -324,6 +365,9 @@ func TestConfig(t *testing.T) {
 	}
 	if n, m := c.vonModel("von-smol"); n != "v" || m == nil {
 		t.Fatal("von model not found by snapshot")
+	}
+	if !c.Tasks["sum"].IsGenerate() || c.Tasks["t"].IsGenerate() {
+		t.Fatal("task kinds")
 	}
 }
 
