@@ -4,6 +4,33 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.12.0 — sin publicar
+
+### Domótica: capas rápidas de decisión (`kling domotica`)
+
+Diseño en [docs/domotica.md](docs/domotica.md), datos y licencias en
+[docs/domotica-datos.md](docs/domotica-datos.md), cifras en
+[docs/DOMOTICA-EVAL.md](docs/DOMOTICA-EVAL.md).
+
+- **`kling domotica decide "<texto>"`** decide qué hace la habitación de demo
+  (luces, termostato, persianas, tele, cerradura, alarma, ventilador, altavoz,
+  enchufe) en español o inglés: `{intent, slots, layer, confident, latency_us}`.
+  Capa 1, órdenes de la demo por coincidencia normalizada (1,5 µs, sin
+  reservas); capa 2, intención JEV + huecos JEV-slots (~5 µs la cascada). Lo
+  indirecto, lo fuera de ámbito, las órdenes múltiples o incompletas escalan
+  (`escalate: "encoder"`). También `eval` (frente a plantillas y reglas, con
+  frases de reto), `train-slots` y `templates`.
+- **JEV-slots** (`pkg/jev/slots`): etiquetador de secuencias lineal
+  (perceptrón estructurado promediado + Viterbi BIO) sobre características
+  hasheadas, pesos int16, determinista; formato `.jevs` con el endurecimiento
+  del `.jev` (topes antes de reservar, CRC-32C, `FuzzLoad`).
+- `pkg/domotica`: taxonomía de 28 intenciones, léxico es/en, números con
+  palabras y unidades, plantillas estilo hassil, emparejador, cascada.
+- `tools/domotica-data`: descarga fijada por sha256 de Amazon MASSIVE 1.0 y
+  home-assistant/intents (ambos CC BY 4.0, atribución en `NOTICE`) y los
+  convierte a un esquema único con repartos sin fugas.
+- `jev.FoldRune` se exporta para que otros extractores plieguen igual que JEV.
+
 ## v0.11.0 — 2026-09-24
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)

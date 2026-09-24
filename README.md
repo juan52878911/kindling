@@ -1144,6 +1144,7 @@ instances share pages.
 | [`docs/three-layers.md`](docs/three-layers.md) | Layered images: design, measurements, runtime families |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, the tiny linear classifier: features, `.jev` format, cascade; its evaluation on real commits |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Smart-home decisions (`kling domotica`): demo templates → JEV intent + JEV-slots, free datasets and their licenses, evaluation (Spanish) |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: JEV classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |

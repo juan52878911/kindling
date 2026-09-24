@@ -560,3 +560,15 @@ func asciiLower(s string) string {
 	}
 	return string(b)
 }
+
+// Resultados especiales de FoldRune.
+const (
+	FoldSep  = foldSep  // la runa separa tokens
+	FoldSkip = foldSkip // la runa desaparece (marca combinante)
+)
+
+// FoldRune es el plegado de caracteres del tokenizador de JEV: minúscula,
+// acentos latinos fuera, ancho completo a ASCII. Devuelve FoldSep o FoldSkip
+// para separadores y marcas. Se exporta para que otros extractores (el
+// etiquetador de pkg/jev/slots) normalicen exactamente igual que el clasificador.
+func FoldRune(r rune) rune { return foldRune(r) }

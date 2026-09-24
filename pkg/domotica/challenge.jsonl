@@ -1,0 +1,54 @@
+{"text":"aquí hace frío","lang":"es","intent":"temperature_up","slots":{"device":"thermostat"},"source":"challenge","class":"indirect"}
+{"text":"hace muchísimo calor en el salón","lang":"es","intent":"temperature_down","slots":{"device":"thermostat","area":"living_room"},"source":"challenge","class":"indirect"}
+{"text":"no veo nada","lang":"es","intent":"turn_on","slots":{"device":"light"},"source":"challenge","class":"indirect"}
+{"text":"hay demasiada luz","lang":"es","intent":"brightness_down","slots":{"device":"light"},"source":"challenge","class":"indirect"}
+{"text":"me voy a dormir","lang":"es","intent":"turn_off","slots":{"device":"light"},"source":"challenge","class":"indirect"}
+{"text":"no oigo la tele","lang":"es","intent":"volume_up","slots":{"device":"tv"},"source":"challenge","class":"indirect"}
+{"text":"la música está demasiado alta","lang":"es","intent":"volume_down","slots":{},"source":"challenge","class":"indirect"}
+{"text":"entra mucho sol por la ventana","lang":"es","intent":"cover_close","slots":{"device":"blinds"},"source":"challenge","class":"indirect"}
+{"text":"me voy de casa","lang":"es","intent":"alarm_arm","slots":{"device":"alarm"},"source":"challenge","class":"indirect"}
+{"text":"está muy oscuro en la cocina","lang":"es","intent":"turn_on","slots":{"device":"light","area":"kitchen"},"source":"challenge","class":"indirect"}
+{"text":"it's freezing in here","lang":"en","intent":"temperature_up","slots":{"device":"thermostat"},"source":"challenge","class":"indirect"}
+{"text":"it's way too hot in the bedroom","lang":"en","intent":"temperature_down","slots":{"device":"thermostat","area":"bedroom"},"source":"challenge","class":"indirect"}
+{"text":"i can't see anything","lang":"en","intent":"turn_on","slots":{"device":"light"},"source":"challenge","class":"indirect"}
+{"text":"the sun is in my eyes","lang":"en","intent":"cover_close","slots":{"device":"blinds"},"source":"challenge","class":"indirect"}
+{"text":"i can't hear the tv","lang":"en","intent":"volume_up","slots":{"device":"tv"},"source":"challenge","class":"indirect"}
+{"text":"this is way too loud","lang":"en","intent":"volume_down","slots":{},"source":"challenge","class":"indirect"}
+{"text":"i'm going to bed","lang":"en","intent":"turn_off","slots":{"device":"light"},"source":"challenge","class":"indirect"}
+{"text":"i'm heading out for the day","lang":"en","intent":"alarm_arm","slots":{"device":"alarm"},"source":"challenge","class":"indirect"}
+{"text":"enciende la luz y baja la persiana","lang":"es","intent":"turn_on","slots":{"device":"light"},"source":"challenge","class":"multi"}
+{"text":"apaga la tele y enciende la luz del salón","lang":"es","intent":"turn_off","slots":{"device":"tv"},"source":"challenge","class":"multi"}
+{"text":"sube la temperatura y cierra las persianas","lang":"es","intent":"temperature_up","slots":{"device":"thermostat"},"source":"challenge","class":"multi"}
+{"text":"cierra la puerta con llave y activa la alarma","lang":"es","intent":"lock","slots":{"device":"lock"},"source":"challenge","class":"multi"}
+{"text":"pon la luz al cincuenta por ciento y luego pausa la película","lang":"es","intent":"set_brightness","slots":{"device":"light","value":50,"unit":"%"},"source":"challenge","class":"multi"}
+{"text":"turn off the lights and lock the door","lang":"en","intent":"turn_off","slots":{"device":"light"},"source":"challenge","class":"multi"}
+{"text":"open the blinds and turn on the fan","lang":"en","intent":"cover_open","slots":{"device":"blinds"},"source":"challenge","class":"multi"}
+{"text":"pause the tv then dim the lights","lang":"en","intent":"media_pause","slots":{"device":"tv"},"source":"challenge","class":"multi"}
+{"text":"set the heating to 21 degrees and close the curtains","lang":"en","intent":"set_temperature","slots":{"device":"thermostat","value":21,"unit":"°C"},"source":"challenge","class":"multi"}
+{"text":"pon una alarma a las siete","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"despiértame mañana a las ocho","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"pon música de jazz en el salón","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"qué tiempo hará mañana","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"enciende la cafetera","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"pon un temporizador de diez minutos","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"¿está encendida la luz de la cocina?","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"abre la puerta del garaje","lang":"es","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"set an alarm for 7 am","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"play some jazz in the kitchen","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"turn on the coffee maker","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"what's the weather like tomorrow","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"start the vacuum in the living room","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"is the front door locked","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"order a pizza","lang":"en","intent":"out_of_scope","slots":{},"source":"challenge","class":"oos_near"}
+{"text":"quiero la persiana a la mitad","lang":"es","intent":"cover_set_position","slots":{"device":"blinds","value":50,"unit":"%"},"source":"challenge","class":"paraphrase"}
+{"text":"¿puedes poner el salón en azul?","lang":"es","intent":"set_color","slots":{"device":"light","area":"living_room","color":"blue"},"source":"challenge","class":"paraphrase"}
+{"text":"calefacción a veintiuno","lang":"es","intent":"set_temperature","slots":{"device":"thermostat","value":21,"unit":"°C"},"source":"challenge","class":"paraphrase"}
+{"text":"deja la casa a oscuras","lang":"es","intent":"turn_off","slots":{"device":"light","area":"house"},"source":"challenge","class":"paraphrase"}
+{"text":"dale caña al volumen","lang":"es","intent":"volume_up","slots":{},"source":"challenge","class":"paraphrase"}
+{"text":"echa la persiana del dormitorio","lang":"es","intent":"cover_close","slots":{"device":"blinds","area":"bedroom"},"source":"challenge","class":"paraphrase"}
+{"text":"kill the lights","lang":"en","intent":"turn_off","slots":{"device":"light"},"source":"challenge","class":"paraphrase"}
+{"text":"crank up the volume","lang":"en","intent":"volume_up","slots":{},"source":"challenge","class":"paraphrase"}
+{"text":"lights to 30 percent in the bedroom","lang":"en","intent":"set_brightness","slots":{"device":"light","area":"bedroom","value":30,"unit":"%"},"source":"challenge","class":"paraphrase"}
+{"text":"make the kitchen blue","lang":"en","intent":"set_color","slots":{"device":"light","area":"kitchen","color":"blue"},"source":"challenge","class":"paraphrase"}
+{"text":"heat to 22 please","lang":"en","intent":"set_temperature","slots":{"device":"thermostat","value":22,"unit":"°C"},"source":"challenge","class":"paraphrase"}
+{"text":"shut the curtains in the bedroom","lang":"en","intent":"cover_close","slots":{"device":"blinds","area":"bedroom"},"source":"challenge","class":"paraphrase"}

@@ -1158,6 +1158,7 @@ permite que N instancias compartan páginas.
 | [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención JEV + JEV-slots, datos libres con su licencia, y su evaluación |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: JEV clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
