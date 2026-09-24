@@ -129,6 +129,10 @@ SMALL MODELS (JEV, runs locally, no daemon)
   jev predict -model m.jev [-text T] [-top N]      label, calibrated p, confident or
                                                    escalate, evidence (docs/jev.md)
   jev inspect <m.jev> [-json]                      spec, labels, thresholds, metadata
+  domotica decide [-lang L] "<text>"               smart-home decision: demo templates →
+                                                   JEV intent + slots, or escalate
+  domotica eval -data t.jsonl [-challenge]         accuracy, slot F1, exact match, latency
+  domotica train-slots -data d.jsonl -o m.jevs     trains the slot tagger (docs/domotica.md)
 
 `
 
@@ -254,6 +258,8 @@ func main() {
 		err = cmdPlugins(args)
 	case "jev":
 		err = cmdJev(args)
+	case "domotica":
+		err = cmdDomotica(args)
 	case "builder": // lo ejecuta el daemon como root; ver builder.go
 		err = cmdBuilder(args)
 	case "-h", "--help", "help":
