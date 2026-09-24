@@ -32,14 +32,17 @@ type Options struct {
 	// Replicas sustituye a pkg/scheduler (tests).
 	Replicas Replicas
 
-	ID             string        // valor de LabelGateway; "default"
-	NamePrefix     string        // prefijo de las máquinas; "gw-"
-	Idle           time.Duration // sin peticiones antes de congelar una réplica; 2 min
-	MaxReplicas    int           // por modelo, salvo max_replicas en el registro; 2
-	MaxInflight    int           // peticiones por réplica antes de pedir otra; 1
-	KeepWarm       int           // N modelos populares siempre despiertos; 0
-	JEVBudget      int64         // bytes de modelos JEV cargados; 256 MiB
-	VONTimeout     time.Duration // plazo de una escalada; 60 s
+	ID          string        // valor de LabelGateway; "default"
+	NamePrefix  string        // prefijo de las máquinas; "gw-"
+	Idle        time.Duration // sin peticiones antes de congelar una réplica; 2 min
+	MaxReplicas int           // por modelo, salvo max_replicas en el registro; 2
+	MaxInflight int           // peticiones por réplica antes de pedir otra; 1
+	KeepWarm    int           // N modelos populares siempre despiertos; 0
+	JEVBudget   int64         // bytes de modelos JEV cargados; 256 MiB
+	VONTimeout  time.Duration // plazo de una escalada; 60 s
+	// EncoderTimeout es el plazo de la capa 3 de una tarea de domótica,
+	// despertar la réplica incluido; 5 s. Pasado, la decisión escala a VON.
+	EncoderTimeout time.Duration
 	ProxyTimeout   time.Duration // plazo de una petición OpenAI; 5 min
 	MaxBody        int64         // cuerpo de una petición; 1 MiB
 	MaxProxyBytes  int64         // respuesta de una réplica por el proxy; 32 MiB
@@ -72,6 +75,9 @@ func (o *Options) withDefaults() {
 	if o.VONTimeout <= 0 {
 		o.VONTimeout = 60 * time.Second
 	}
+	if o.EncoderTimeout <= 0 {
+		o.EncoderTimeout = 5 * time.Second
+	}
 	if o.ProxyTimeout <= 0 {
 		o.ProxyTimeout = 5 * time.Minute
 	}
@@ -92,6 +98,7 @@ type Gateway struct {
 	sched    *scheduler.Scheduler
 	replicas Replicas
 	jev      *jevCache
+	domo     domoFiles // .jevs y .jenc de las tareas de domótica
 	met      *metrics
 
 	cfgMu    sync.RWMutex
@@ -136,7 +143,7 @@ func New(o Options) (*Gateway, error) {
 	s.KeepWarm = o.KeepWarm
 	s.SetPopularityFile(o.PopularityFile)
 	s.MaxReplicasFor = func(snap string) int {
-		if _, m := g.config().vonModel(snap); m != nil {
+		if _, m := g.config().replicaModel(snap); m != nil {
 			return m.MaxReplicas
 		}
 		return 0
@@ -144,11 +151,11 @@ func New(o Options) (*Gateway, error) {
 	// El keepwarm recorre TODOS los snapshots del daemon: solo los dorados
 	// registrados como modelos VON son de este gateway.
 	s.Skip = func(sn *api.Snapshot) bool {
-		_, m := g.config().vonModel(sn.Name)
+		_, m := g.config().replicaModel(sn.Name)
 		return m == nil
 	}
 	s.OnAcquire = func(snap, how string, d time.Duration) {
-		name, _ := g.config().vonModel(snap)
+		name, _ := g.config().replicaModel(snap)
 		if name == "" {
 			name = snap
 		}
@@ -225,6 +232,7 @@ func (g *Gateway) Reload() ([]string, error) {
 			g.jev.drop(m.Path)
 		}
 	}
+	g.domo.reset()
 	return g.setConfig(c), nil
 }
 
@@ -289,6 +297,8 @@ type ClassifyRequest struct {
 	// Explain añade la evidencia también a las respuestas confiadas de JEV
 	// (cuesta reservas de memoria; en las escaladas va siempre).
 	Explain bool `json:"explain,omitempty"`
+	// Lang es el idioma de una orden de domótica (es, en, auto).
+	Lang string `json:"lang,omitempty"`
 }
 
 // ClassifyResponse es la respuesta.
@@ -379,6 +389,9 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	tc := cfg.Tasks[req.Task]
 	if tc == nil {
 		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
+	}
+	if tc.Domotica != nil {
+		return nil, statusf(http.StatusBadRequest, "task %q is a domotica task: use POST /v1/decide", req.Task)
 	}
 	if tc.JEV == "" {
 		return nil, statusf(http.StatusBadRequest, "task %q is a generation task: use POST /v1/generate", req.Task)

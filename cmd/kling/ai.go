@@ -381,7 +381,7 @@ func aiList(args []string) error {
 	for _, n := range sortedNames(cfg.Models) {
 		m := cfg.Models[n]
 		src, reps := m.Path, "-"
-		if m.Kind == aigw.KindVON {
+		if m.Kind == aigw.KindVON || m.Kind == aigw.KindEmbed {
 			src = m.Snapshot
 			reps = "default"
 			if m.MaxReplicas > 0 {
@@ -395,7 +395,12 @@ func aiList(args []string) error {
 	for _, n := range sortedNames(cfg.Tasks) {
 		t := cfg.Tasks[n]
 		samples, kind, model, casc := "-", "classify", t.JEV, "-"
-		if t.IsGenerate() {
+		if t.Domotica != nil {
+			kind, model = "domotica", t.Domotica.Intent
+			if t.Domotica.Encoder != "" {
+				casc = "-> " + t.Domotica.Encoder
+			}
+		} else if t.IsGenerate() {
 			kind, model = "generate", t.VON
 		} else if t.EscalateTo != "" {
 			casc = "-> " + t.EscalateTo
@@ -445,6 +450,7 @@ func aiTest(args []string) error {
 	fields := fs.String("fields", "", `structured fields as JSON, e.g. {"service":"api"}`)
 	asJSON := fs.Bool("json", false, "print the full JSON answer")
 	explain := fs.Bool("explain", false, "include JEV's evidence also when it answers")
+	fs.String("lang", "", "language of a domotica command (es, en; default auto)")
 	mk := aiClientFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -452,6 +458,7 @@ func aiTest(args []string) error {
 	if fs.NArg() < 2 {
 		return fmt.Errorf("usage: kling ai test <task> [-mode M] [-fields JSON] <text...>")
 	}
+	lang := fs.Lookup("lang").Value.String()
 	req := aigw.ClassifyRequest{Task: fs.Arg(0), Text: strings.Join(fs.Args()[1:], " "), Mode: *mode, Explain: *explain}
 	if *fields != "" {
 		if err := json.Unmarshal([]byte(*fields), &req.Fields); err != nil {
@@ -461,6 +468,32 @@ func aiTest(args []string) error {
 	c, err := mk()
 	if err != nil {
 		return err
+	}
+	if isDomoticaTask(c, req.Task) {
+		req.Lang = lang
+		var d aigw.DecideResponse
+		if err := c.do(http.MethodPost, "/v1/decide", req, &d); err != nil {
+			return err
+		}
+		if *asJSON {
+			return json.NewEncoder(os.Stdout).Encode(d)
+		}
+		sl, _ := json.Marshal(d.Slots)
+		status := "confident"
+		if !d.Confident {
+			status = "escalate → " + d.Escalate + " (" + d.Reason + ")"
+		}
+		fmt.Printf("%s %s  (layer %s, p=%.3f, %s, %.2f ms)\n", orDash(d.Intent), sl, d.Layer, d.Prob, status, d.LatencyMS)
+		if d.FastIntent != "" {
+			fmt.Printf("  fast layers said %s p=%.3f; encoder %.1f ms\n", d.FastIntent, d.FastProb, d.EncoderUS/1000)
+		}
+		if d.EncoderError != "" {
+			fmt.Printf("  encoder error: %s\n", d.EncoderError)
+		}
+		if d.Encoder != nil && d.Encoder.Status != "on" {
+			fmt.Printf("  %s\n", d.Encoder.Reason)
+		}
+		return nil
 	}
 	var resp aigw.ClassifyResponse
 	if err := c.do(http.MethodPost, "/v1/classify", req, &resp); err != nil {
@@ -620,11 +653,14 @@ func aiEval(args []string) error {
 	if fs.NArg() != 1 || *data == "" {
 		return fmt.Errorf("usage: kling ai eval <task> -data test.jsonl [-von <model>] [-concurrency N] [-von-alone] [-dry-run]")
 	}
-	exs, err := readEvalData(*data)
+	c, err := mk()
 	if err != nil {
 		return err
 	}
-	c, err := mk()
+	if isDomoticaTask(c, fs.Arg(0)) {
+		return aiEvalDomotica(c, fs.Arg(0), *data, *dry, *asJSON)
+	}
+	exs, err := readEvalData(*data)
 	if err != nil {
 		return err
 	}
