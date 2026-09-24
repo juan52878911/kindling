@@ -4,7 +4,7 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
-## v0.11.0 — sin publicar
+## v0.11.0 — 2026-09-24
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)
 
