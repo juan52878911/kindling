@@ -38,6 +38,14 @@ const LabelModel = "von.model"
 // réplica y del dorado. Estos modelos no aprovechan contextos largos.
 const DefaultCtx = 2048
 
+// DefaultCacheRAM son los MiB de la caché de prompts de llama-server por
+// defecto (Spec.CacheRAM). Con la caché KV de Qwen2.5-1.5B (~28 KiB/token)
+// caben ~2300 tokens: el prefijo de dos o tres tareas de ~800 tokens; con la de
+// Qwen2.5-0.5B (~12 KiB/token), más de 5000. Es memoria que la microVM tiene
+// que tener de más (se suma a MemMiB) y, en macOS, que cada réplica paga
+// entera; por eso no más.
+const DefaultCacheRAM = 64
+
 // Model es un GGUF fijado: repositorio, revisión (commit de Hugging Face) y
 // sha256 del fichero. Sin revisión y hash, "el mismo modelo" podría ser otro el
 // día que el autor suba una versión nueva, y el dorado dejaría de ser

@@ -2,11 +2,15 @@ package von
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -165,6 +169,51 @@ func Warm(ctx context.Context, c *api.Client, ref string) (*ChatResponse, error)
 	return r, err
 }
 
+// Prefix es el principio fijo de las peticiones de una tarea: su system prompt
+// y, si la plantilla del usuario empieza con texto fijo, ese texto. Es lo que
+// el dorado deja ya evaluado (en la ranura y en la caché de prompts) para que
+// una réplica recién restaurada solo evalúe lo que cambia en cada petición.
+type Prefix struct {
+	System string `json:"system,omitempty"`
+	User   string `json:"user,omitempty"`
+}
+
+// Messages es la conversación con la que se calienta el prefijo. Sin texto de
+// usuario va uno neutro: la plantilla de chat pide un turno del usuario, y lo
+// que se aprovecha luego es lo común con la petición real (el system prompt y
+// el principio del turno), no la respuesta.
+func (p Prefix) Messages() []Message {
+	var out []Message
+	if p.System != "" {
+		out = append(out, Message{Role: "system", Content: p.System})
+	}
+	u := p.User
+	if u == "" {
+		u = "Hi"
+	}
+	return append(out, Message{Role: "user", Content: u})
+}
+
+// LabelPrefixes es la etiqueta de un dorado con prefijos precalculados: su
+// PrefixesHash. Dice si el dorado está al día con las tareas que lo usan.
+const LabelPrefixes = "von.prefixes"
+
+// PrefixesHash identifica un conjunto de prefijos, sin importar el orden (12
+// hex del sha256). Vacío si no hay ninguno.
+func PrefixesHash(ps []Prefix) string {
+	if len(ps) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(ps))
+	for _, p := range ps {
+		b, _ := json.Marshal(p)
+		keys = append(keys, string(b))
+	}
+	sort.Strings(keys)
+	h := sha256.Sum256([]byte(strings.Join(keys, "\n")))
+	return hex.EncodeToString(h[:6])
+}
+
 // GoldenOptions es cómo crear el dorado de un modelo.
 type GoldenOptions struct {
 	Image    string // imagen construida con el constructor llm
@@ -182,6 +231,11 @@ type GoldenOptions struct {
 	Replace   bool
 	// Wait es cuánto esperar a que el modelo cargue.
 	Wait time.Duration
+	// Prefixes son los prefijos de las tareas que se dejan evaluados en el
+	// dorado, en este orden, después del calentamiento. El último queda en la
+	// ranura; los demás, en la caché de prompts de llama-server (Spec.CacheRAM:
+	// sin ella solo sobrevive el último).
+	Prefixes []Prefix
 	// Labels extra; las de VON (von.model, kling.ports, service) se añaden.
 	Labels map[string]string
 	// Log recibe el progreso, línea a línea. Puede ser nil.
@@ -194,6 +248,8 @@ type GoldenResult struct {
 	BootMS   int64         // arranque de la microVM (lo dice el daemon)
 	LoadTime time.Duration // de arrancada a /health 200
 	Warm     *ChatResponse
+	// PrefixTokens son los tokens de cada prefijo precalculado.
+	PrefixTokens []int
 }
 
 // Labels son las etiquetas de una máquina VON: el modelo, el puerto que el
@@ -227,11 +283,16 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	// La plantilla lleva nombre propio y aleatorio: dos `models add` a la vez
 	// del mismo modelo no deben pisarse la máquina.
 	name := fmt.Sprintf("%s-golden-%s", o.Snapshot, strconv.FormatInt(time.Now().UnixNano()%1_000_000, 36))
+	labels := Labels(o.Ref, o.Snapshot, o.Labels)
+	delete(labels, LabelPrefixes)
+	if h := PrefixesHash(o.Prefixes); h != "" {
+		labels[LabelPrefixes] = h
+	}
 	mc, err := c.Run(ctx, api.RunRequest{
 		Name: name, Image: o.Image, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
 		CPUPct:    o.CPUPct,
 		Egress:    "none",
-		Labels:    Labels(o.Ref, o.Snapshot, o.Labels),
+		Labels:    labels,
 		AllowExec: o.AllowExec,
 	})
 	if err != nil {
@@ -276,6 +337,23 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	}
 	res.Warm = w
 	logf("warm-up answered %q", w.Text())
+
+	// Los prefijos de las tareas, evaluados antes de congelar: una respuesta de
+	// un token a temperatura 0 basta para que su caché KV quede en la ranura
+	// (y, al llegar el siguiente, en la caché de prompts). Medido en
+	// docs/von-cpu.md: la primera petición de una tarea con ~800 tokens de
+	// system prompt pasa de 4,7 s a 0,4 s en Qwen2.5-1.5B.
+	cero := 0.0
+	for i, p := range o.Prefixes {
+		r, _, err := Chat(ctx, c, mc.ID, ChatRequest{Messages: p.Messages(), MaxTokens: 1, Temperature: &cero})
+		if err != nil {
+			return nil, fmt.Errorf("prefix %d: %w", i+1, err)
+		}
+		res.PrefixTokens = append(res.PrefixTokens, r.Usage.PromptTokens)
+		if r.Timings != nil {
+			logf("prefix %d of %d: %d tokens evaluated in %.0f ms", i+1, len(o.Prefixes), r.Timings.PromptN, r.Timings.PromptMS)
+		}
+	}
 
 	// Devolver al host lo reclamable (memoria libre y caché de páginas limpia)
 	// ANTES de congelar: el globo deja esas páginas a cero, el commit las
