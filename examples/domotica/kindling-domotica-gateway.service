@@ -1,0 +1,24 @@
+# El gateway de IA de la demo: capas 1-3 (/v1/decide) y 4 (/v1/generate) sobre
+# el daemon de kindling del host. Socket 0600 del usuario; nada en la red.
+[Unit]
+Description=kindling AI gateway for the smart-home demo
+After=kling.service
+Requires=kling.service
+
+[Service]
+User=juan
+WorkingDirectory=/home/juan/domotica
+ExecStart=/home/juan/domotica/kling ai serve -config /home/juan/domotica/ai.json -socket /home/juan/domotica/ai.sock -id domotica -idle 2m -max-replicas 1
+Restart=on-failure
+RestartSec=5
+# Al parar congela sus réplicas: dale tiempo.
+TimeoutStopSec=90
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# ~/.config/kling guarda la popularidad de los modelos; «-»: si no existe, no
+# impide arrancar (créala con mkdir -p para que se guarde).
+ReadWritePaths=/home/juan/domotica -/home/juan/.config/kling
+
+[Install]
+WantedBy=multi-user.target

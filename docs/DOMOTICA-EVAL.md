@@ -269,3 +269,148 @@ Lo que la capa 3 **no** arregla y sigue siendo de VON: lo indirecto, lo fuera de
 ámbito (se escala por política), las órdenes múltiples, lo casi fuera de ámbito,
 relativo frente a absoluto y los conflictos de taxonomía de MASSIVE. Los dos
 errores confiados que quedan son de Chispa y la capa 3 no llega a verlos.
+
+## Capa 4: el LLM (VON)
+
+Qué hace la capa 4 con lo que las capas rápidas escalan, comparada con lo que
+pasaría sin ella: **escalar y no hacer nada**. Diseño en
+[domotica.md](domotica.md#capa-4-un-llm-con-salida-json); la demo que la usa,
+en [examples/domotica](../examples/domotica/README.md).
+
+### Montaje
+
+- Modelo: **Qwen2.5-1.5B-Instruct Q4_K_M** (Apache-2.0), dorado VON con el
+  prompt de la capa 4 ya evaluado (`-prefix`), una réplica, Mac mini M4
+  (`vz`, 4 vCPU), por el mismo camino que en producción: la tarea de
+  generación `room-llm` de `kling ai serve` (`POST /v1/generate`, esquema
+  JSON en `json_schema`, temperatura 0). Capas 1–2 por `/v1/decide` (tarea
+  `room`, sin codificador).
+- Datos: las 440 órdenes de MASSIVE del test y **una muestra determinista de
+  200 de sus 5 508 frases fuera de ámbito** (100 por idioma, por hash del
+  texto), que cuentan con su peso (×27,5) al sumar la cascada entera: en
+  MASSIVE hay 12,5 frases que no son para la habitación por cada orden, y es
+  ahí donde un LLM que actúa de más hace daño. Aparte, las 54 frases de reto
+  (se enseñan; no deciden).
+- `kling domotica eval-llm -gateway … -llm-task room-llm -decide-task room
+  -data test.jsonl`. Se le pregunta al LLM por **todo** lo que escala y se
+  calculan dos alcances: `all` (la capa 4 contesta a todo lo escalado) y
+  `uncertain` (solo a lo que Chispa duda: probabilidad baja, varias órdenes,
+  falta un valor; lo que da por fuera de ámbito no se le pregunta).
+- Métrica: la **orden completa** (todas las acciones, sin ninguna de más;
+  intención y huecos), como `exact` arriba. En multimedia sin dispositivo en
+  el oro vale cualquier reproductor. Las 9 frases de reto con dos órdenes se
+  puntúan contra sus dos acciones.
+- **La puerta**: (1) en lo escalado, gana a «no hacer nada» con McNemar de una
+  cola, p < 0,05 (victoria: acierta una orden que se quedaba sin hacer;
+  derrota: actúa donde no había que hacer nada), y (2) la cascada entera,
+  ponderada, acierta más con la capa 4 que sin ella. La (2) es la que cuenta
+  los errores confiados que añade fuera de lo que venía a resolver.
+
+### Resultado: se activa, solo donde Chispa duda
+
+| MASSIVE (5 948 ponderadas) | exact de la cascada | errores confiados | victorias / derrotas | puerta |
+|---|---:|---:|---:|---|
+| sin capa 4 (escalar y nada) | 0,963 | 1,7 % | — | — |
+| capa 4, alcance `all` | 0,955 | 3,3 % | 32 / 3 (p = 2·10⁻⁷) | **no pasa**: la cascada empeora |
+| **capa 4, alcance `uncertain`** | **0,968** | **1,9 %** | **31 / 0** (p = 5·10⁻¹⁰) | **pasa** |
+
+- En `all`, la capa 4 acierta 32 órdenes que se quedaban sin hacer, pero
+  **actúa en 3 de las 200 frases fuera de ámbito de la muestra (1,5 %)**, que
+  ponderadas son 82: pierde más de lo que gana. Lo que Chispa da por fuera de
+  ámbito es casi siempre charla que no es para la habitación; ahí están
+  también las órdenes indirectas, pero son pocas en MASSIVE (1 de 28 filas de
+  orden escaladas así la acierta el LLM).
+- En `uncertain` no se le pregunta por eso, y contesta bien 31 de las 91
+  órdenes que Chispa dudaba (34 %): 28 de 53 con probabilidad baja, 3 de 36
+  con un hueco que falta, 0 de 2 dobles. Pide aclaración en 45 (su respuesta
+  no pasa la validación) y **se equivoca en 15** (16 %): los errores confiados
+  pasan del 1,7 al 1,9 %. Muchos son del oro de MASSIVE («establece las luces
+  del salón al cincuenta por ciento» etiquetada `set_color`; ver Clases de
+  error), pero no todos: «no puedo encender las luces» → apagar.
+- Chispa escala 119 órdenes de las 440; la capa 4 convierte en órdenes bien
+  hechas el 26 % de ellas (31) sin tocar lo que no es para la habitación.
+
+Por grupo (alcance `all`, las 354 llamadas):
+
+| grupo | escaladas | «nada» acierta | LLM acierta | actúa mal | no actúa | inválida |
+|---|---:|---:|---:|---:|---:|---:|
+| MASSIVE es (órdenes) | 59 | 0 % | 23,7 % | 10 | 35 | 26 |
+| MASSIVE en (órdenes) | 60 | 0 % | 30,0 % | 6 | 36 | 31 |
+| MASSIVE es (fuera de ámbito, muestra) | 99 | 100 % | 97,0 % | 3 | — | 54 |
+| MASSIVE en (fuera de ámbito, muestra) | 99 | 100 % | 100 % | 0 | — | 49 |
+
+### Frases de reto
+
+| clase | escaladas | alcance `all`: bien / actúa mal | alcance `uncertain`: bien / actúa mal |
+|---|---:|---|---|
+| varias órdenes | 9 | **8 / 0** | **8 / 0** |
+| paráfrasis | 3 | 2 / 0 | 2 / 0 |
+| indirecta | 10 | 1 / 4 | 1 / 1 |
+| casi fuera de ámbito | 15 | — / 2 | — / 2 |
+
+- **Varias órdenes en una frase** es lo que mejor hace: 8 de 9 («turn off the
+  lights and lock the door» → dos acciones). La novena la valida mal
+  («sube la temperatura y cierra las persianas»: sin valor y con
+  `set_temperature`) y pregunta.
+- **Lo indirecto no lo resuelve un 1,5B**: confunde el sentido («it's
+  freezing in here» → encender la luz; «entra mucho sol» → abrir la
+  persiana; «no oigo la tele» → silenciar), aun con la regla en el prompt y
+  un ejemplo por sentido. Es la mitad de lo que se esperaba de esta capa y no
+  llega; queda para un LLM mayor (Qwen2.5-3B no es de licencia abierta) o para
+  una capa 3 que aprenda lo indirecto.
+- Los dos errores de «casi fuera de ámbito»: «¿está encendida la luz de la
+  cocina?» → encenderla, y «abre la puerta del garaje» → abrir la persiana del
+  garaje (que la habitación no tiene: el simulador lo dice y no hace nada).
+
+### Lo que la hizo pasar
+
+Medido en este orden sobre las frases de reto y luego en MASSIVE (el test de
+MASSIVE se miró tras cada cambio; son reglas de validación, no ajuste de
+pesos, pero la cifra es optimista en esa medida):
+
+1. **`kind` y `reply` antes que las acciones** en el esquema. llama-server
+   genera en el orden del esquema: clasificar la frase primero llevó las
+   órdenes dobles de 0 a 7 de 9, y con la frase de vuelta antes de las
+   acciones (al final, el modelo escribía «bajo el volumen» junto a
+   `volume_up`), a 8.
+2. **Veto de lo que Chispa sabe**: si Chispa da «fuera de ámbito» con
+   confianza, el LLM solo puede proponer una situación (`kind: situation`) sin
+   verbo de orden. En «casi fuera de ámbito» («pon una alarma a las siete» →
+   armar la alarma) los errores bajaron de 10 de 15 a 2.
+3. **Anclar a la frase**: zona que la frase no nombra, se quita («me voy a
+   dormir» → solo el dormitorio); color o número que no dice, se pregunta
+   («cambia el color de la luz» → azul). Errores confiados en órdenes de
+   MASSIVE: 36 → 16.
+4. **Sin estado de la habitación en el prompt**: con él, el modelo rellenaba
+   zonas con las de la habitación.
+
+### Latencia (Mac mini M4, `vz`, por el gateway)
+
+| | |
+|---|---|
+| una decisión con la réplica despierta (alcance `uncertain`, 107 llamadas) | p50 **2,4 s**, p90 3,8 s |
+| todas (354; lo fuera de ámbito contesta corto) | p50 1,7 s, p90 3,2 s, p99 4,8 s |
+| primera llamada tras restaurar del dorado (con el prompt ya evaluado) | 6,4–6,9 s (restaurar 3,4–3,9 s); sin prefijo, 10,7–12,3 s |
+| réplica congelada por inactividad → descongelada y decidida | 5–8,5 s (descongelar 3,1–3,7 s: `vz` copia 1,2 GiB) |
+| memoria de la réplica despierta (`phys_footprint`) | ~2,7 GiB |
+
+Con el prefijo en el dorado, 1 144 de 1 154 tokens del prompt vienen de la
+caché (77 ms de prompt frente a 6–19 s sin ella). La cascada entera por el
+gateway: plantillas y Chispa, 0,2–1 ms de punta a punta; la capa 4, segundos.
+### En el servidor x86 (i7-8700T, Firecracker sin anidar), con el codificador delante
+
+La misma evaluación en el CT 105, con la capa 3 encendida en la tarea `room`
+(su puerta pasa allí: +104 órdenes contestadas bien, p = 5·10⁻³²), así que a la
+capa 4 le llega algo menos (113 órdenes escaladas de 440 en vez de 119):
+
+| MASSIVE (5 948 ponderadas) | exact | errores confiados | victorias / derrotas | puerta |
+|---|---:|---:|---:|---|
+| sin capa 4 | 0,964 | 1,7 % | — | — |
+| alcance `all` | 0,960 | 2,9 % | 30 / 2 | no pasa |
+| **alcance `uncertain`** | **0,969** | **2,0 %** | **30 / 0** (p = 9·10⁻¹⁰) | **pasa** |
+
+En las frases de reto, 12 bien y 1 mal donde antes no se hacía nada. Latencia
+con la réplica despierta: p50 2,3 s, p90 4,1 s (la CPU del CT genera más
+despacio que el M4). Pero **descongelar la réplica cuesta 134 ms** (la memoria
+se mapea perezosamente desde el dorado) frente a 3,1–3,7 s en el Mac, y la del
+codificador 141 ms; restaurar desde el dorado, 1,4 s y 0,23 s.
