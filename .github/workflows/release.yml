@@ -90,6 +90,17 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" \
             -o dist/kling-guest-${{ matrix.target.ext }} ./cmd/kling-guest
 
+      - name: build kling-chispa (linux only, estático)
+        if: matrix.target.os == 'linux'
+        env:
+          GOOS:   linux
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: '0'
+          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
+        run: |
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o dist/kling-chispa-${{ matrix.target.ext }} ./cmd/kling-chispa
+
       - name: checksum
         working-directory: dist
         run: |
@@ -154,6 +165,7 @@ jobs:
           #   release/kling-<plat>                  (CLI)
           #   release/kling-linux-<arch>            (daemon, solo linux)
           #   release/kling-guest-linux-<arch>      (agente de invitado, solo linux)
+          #   release/kling-chispa-linux-<arch>     (invitado de Chispa serverless, solo linux)
           for d in artifacts/*; do
             cp -v "$d"/* release/ 2>/dev/null || true
           done
@@ -222,6 +234,8 @@ jobs:
             release/kling-vz-darwin-arm64
             release/kling-guest-linux-amd64
             release/kling-guest-linux-arm64
+            release/kling-chispa-linux-amd64
+            release/kling-chispa-linux-arm64
             release/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
