@@ -36,7 +36,7 @@ cliente ──HTTP──> kling ai serve ── /v1/classify ──┬── bac
 
 | | `inprocess` (por defecto) | `microvm` |
 |---|---|---|
-| Latencia | 1-15 µs | red + microVM: cientos de µs a milisegundos si está despierta; ~130-140 ms si hay que despertarla (medido abajo) |
+| Latencia | 1-15 µs | red + microVM: cientos de µs a milisegundos si está despierta; ~27 ms si hay que despertarla congelada y ~2,5 ms si estaba pausada (ver [Latencia de despertar](#latencia-de-despertar)) |
 | Aislamiento | Ninguno: todas las tareas comparten proceso y el presupuesto `-chispa-mem` | Total: cada tarea es su propia microVM, su propia memoria, su propio `mem.file` |
 | Empaquetado | Un `.chispa` más en el registro | Una imagen propia (el modelo horneado dentro, como el GGUF de un VON) |
 | Coste ocioso | Un modelo cargado ocupa RAM del gateway hasta que el LRU lo saca | Cero: congelada, la réplica no gasta CPU (y en Linux su memoria vuelve al fichero) |
@@ -150,7 +150,7 @@ memoria, igual de grande da igual el corpus de entrenamiento).
 | Dorado (`mem.file` + metadatos) | 45 MB |
 | `kling chispa deploy` de punta a punta | ~4 s (arranque 46 ms + kling-chispa listo 2,06 s + calentamiento + congelar) |
 | Primer arranque desde el dorado, sin réplica (`restore`) | 1,41 s |
-| **Thaw de una réplica congelada + primera decisión** | **135-140 ms** (tres medidas: 135, 138, 140 ms, vistas por el cliente HTTP, congelando cada vez con `-idle 15s`) |
+| **Thaw de una réplica congelada + primera decisión** | **135-140 ms** (tres medidas: 135, 138, 140 ms, vistas por el cliente HTTP, congelando cada vez con `-idle 15s`); hoy 27 ms, ver abajo |
 | Réplica despierta, cliente serie (`kling_ai_latency_seconds`) | ver la tabla de concurrencia |
 
 Decisiones/segundo por el gateway (HTTP + socket Unix + un salto de red hasta
@@ -247,6 +247,24 @@ del orden de los ~3,4 M/s de [chispa.md](chispa.md)). La diferencia entre esto y
 113 000/s de la tabla de arriba es JSON + HTTP + el socket Unix, no Chispa: por
 eso un cliente que puede permitirse hablar Go directo con `pkg/chispa`
 (embebiéndolo, no por HTTP) sigue siendo la opción más barata de todas.
+
+## Latencia de despertar
+
+Los 135-140 ms de arriba no eran el thaw (`LoadSnapshot`, 2-3 ms): eran montar
+la red otra vez (47 ms), leer la memoria del disco a golpe de fallo de página
+(54 ms de resync más 12 de primera petición), esperar el socket del VMM con
+pasos de 10 ms y moverlo a su cgroup. Instrumentado por fases y atacado palanca
+a palanca en [despertar.md](despertar.md), en el mismo i7-8700T y con una tarea
+de 128 MiB:
+
+| Réplica dormida → decisión (cliente, p50) | Antes | Ahora |
+|---|---|---|
+| Congelada (warm) | 152 ms | **27 ms** |
+| Pausada (nivel nuevo, `kling ai serve -paused-mib`, 256 MiB por defecto) | — | **2,5 ms**, a cambio de ~36 MiB de RSS por réplica |
+
+Con el nivel pausada, una tarea Chispa pequeña y popular vuelve a estar en el
+orden de milisegundos aunque lleve minutos sin usarse; el segador reparte el
+presupuesto por popularidad / memoria, así que un VON grande no se lo come.
 
 ## Lo que falta (pendiente de este trabajo)
 
