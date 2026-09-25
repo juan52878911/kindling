@@ -68,6 +68,17 @@ Diseño en [docs/domotica.md](docs/domotica.md), datos y licencias en
   convierte a un esquema único con repartos sin fugas.
 - `jev.FoldRune` se exporta para que otros extractores plieguen igual que JEV.
 
+### VON en hierro x86, sin anidar
+
+- Primeras medidas de VON y JEV en x86 bare metal (i7-8700T, Firecracker sobre
+  KVM nativo, sin la virtualización anidada del laboratorio Lima): thaw y
+  primer token bajan a milisegundos y la generación llega a la velocidad real
+  de la CPU (48 tok/s en SmolLM2-360M, frente a 8,8 anidado); el binario
+  oficial de llama.cpp para amd64 funcionó a la primera. Palancas de
+  `llama-server` medidas sin código nuevo de kindling (`-threads`,
+  `--cache-type-k`, decodificación especulativa, `--slot-save-path`, Q4_0);
+  cifras y método en [docs/von.md](docs/von.md#x86-sin-anidar-i7-8700t).
+
 ### Domótica: capa 3, el codificador de frases
 
 Diseño, cifras y la receta del ajuste fino en
