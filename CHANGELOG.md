@@ -439,6 +439,11 @@ usuario de `HOST`; en los redespliegues siguientes no lo toca.
   montada), se encoge una copia que solo se acepta si `e2fsck` no encuentra
   nada (su código de salida con `-n` no basta: 1.47.0 da 0 tras contestar «no»),
   y si no se puede encoger queda entera y sana.
+- El mismo riesgo estaba en `70-build-minimal-image.sh` y
+  `71-build-glibc-base.sh`: creaban la imagen base con `resize_inode` y le
+  hacían `resize2fs -M` directo, sin comprobar el resultado. Ahora usan el
+  mismo encogido seguro que `81-base-image.sh`, factorizado en
+  `scripts/lib-ext4-shrink.sh`.
 - Tests: los de `GET /images` del daemon cerraban mal su `Manager`, y la
   escritura de estado pendiente caía sobre el TempDir mientras se borraba.
 
