@@ -1,0 +1,27 @@
+:root { --bg:#fbfbfa; --fg:#1d1f21; --muted:#6b6f75; --line:#e4e4e1; --hit:#fff1c2; --chunk:#ffd966; --accent:#2f6fde; --bad:#b3261e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#16171a; --fg:#e6e6e3; --muted:#9a9ea4; --line:#2a2c30; --hit:#3a3314; --chunk:#6b5412; --accent:#7aa7ff; --bad:#ff8a80; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; }
+header, main { max-width: 1200px; margin: 0 auto; padding: 16px 24px; }
+h1 { margin: 8px 0 4px; font-size: 22px; }
+header p { color: var(--muted); margin: 0; max-width: 80ch; }
+textarea { width:100%; height: 180px; font: 12px/1.4 ui-monospace, monospace; background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.row { display:flex; gap: 12px; align-items:center; margin: 10px 0; flex-wrap: wrap; }
+button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 16px; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: .5; cursor: wait; }
+select, input[type=text], #note { background: transparent; color: var(--fg); border:1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+#note { width: 26ch; }
+#status { color: var(--muted); }
+#status.err, #saved.err { color: var(--bad); }
+#verdict { border:1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+.big { font-size: 22px; font-weight: 700; display:flex; gap: 10px; align-items: center; }
+.tag { font-size: 12px; font-weight: 600; border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; color: var(--muted); }
+#why, #timing { color: var(--muted); font-size: 13px; margin-top: 4px; }
+#summary { margin-top: 8px; }
+#lines { font: 12px/1.5 ui-monospace, monospace; border:1px solid var(--line); border-radius: 8px; max-height: 70vh; overflow: auto; }
+.l { display:flex; white-space: pre; }
+.l .n { color: var(--muted); width: 7ch; text-align: right; padding-right: 10px; flex: none; user-select: none; }
+.l .s { width: 5ch; color: var(--muted); flex: none; }
+.l.hit { background: var(--hit); }
+.l.chunk { background: var(--chunk); }
+.gap { color: var(--muted); padding: 2px 12px; border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); }

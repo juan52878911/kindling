@@ -32,3 +32,19 @@ Copyright the contributors of https://github.com/OHF-Voice/intents
 commit 4af16c0ccc6f0567654c04554833fe3e5e7467ba.
 License: Creative Commons Attribution 4.0 International (CC BY 4.0)
 https://creativecommons.org/licenses/by/4.0/
+
+--------------------------------------------------------------------------------
+LogChunks 1.0.0
+Carolin Brandt, Annibale Panichella and Moritz Beller (Delft University of
+Technology), "LogChunks: A Data Set for Build Log Analysis", MSR 2020.
+https://doi.org/10.5281/zenodo.3632351
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+
+Used by the CI triage example (examples/ci-triage), which downloads it
+(pinned by sha256) and never redistributes it. Changes made: the annotated
+chunks are matched to the rendered log lines to label each line; logs are
+split by repository; each chunk gets a failure category, from rules on the
+training and validation sets and checked by hand on the test set
+(examples/ci-triage/data/test-categories.tsv, derived from LogChunks, same
+license). Details: docs/CI-TRIAGE-EVAL.md.

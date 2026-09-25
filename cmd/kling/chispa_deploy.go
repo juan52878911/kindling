@@ -54,6 +54,7 @@ func cmdChispaDeploy(args []string) error {
 	warmText := fs.String("warm-text", "hello world", "text sent once before freezing, to touch the model's pages")
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
 	rebuild := fs.Bool("rebuild", false, "rebuild the image even if one with this name exists")
+	reuse := fs.Bool("reuse-image", false, "the image already exists with this same -model (built on a Linux host and brought with `kling images copy`): make only the golden snapshot")
 	allowExec := fs.Bool("allow-exec", false, "keep kling exec/cp working in this task's machines (debugging)")
 	wait := fs.Duration("wait", 2*time.Minute, "how long to wait for kling-chispa to answer /healthz")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -78,7 +79,7 @@ func cmdChispaDeploy(args []string) error {
 	c := api.NewClient(hostOf(*host))
 	if err := chispaDeploy(ctx, c, chispaDeployOptions{
 		Name: name, Model: modelBytes, ModelName: *modelPath, Slots: slotsBytes, MemMiB: *mem, VCPUs: *vcpus,
-		WarmText: *warmText, Replace: *replace, Rebuild: *rebuild, AllowExec: *allowExec, Wait: *wait,
+		WarmText: *warmText, Replace: *replace, Rebuild: *rebuild, Reuse: *reuse, AllowExec: *allowExec, Wait: *wait,
 	}); err != nil {
 		return err
 	}
@@ -99,6 +100,7 @@ type chispaDeployOptions struct {
 	MemMiB, VCPUs    int
 	WarmText         string
 	Replace, Rebuild bool
+	Reuse            bool // la imagen ya existe con este mismo Model; solo el dorado
 	AllowExec        bool
 	Wait             time.Duration
 }
@@ -130,20 +132,36 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 		}
 	}
 
-	if !o.Rebuild {
-		if imgs, err := c.Images(ctx); err == nil {
-			for _, img := range imgs {
-				if img.Name == name {
-					return fmt.Errorf("image %q already exists (use -rebuild to build it again with this model)", name)
-				}
-			}
+	if o.Reuse && o.Rebuild {
+		return fmt.Errorf("-reuse-image and -rebuild exclude each other")
+	}
+	exists := false
+	if imgs, err := c.Images(ctx); err == nil {
+		for _, img := range imgs {
+			exists = exists || img.Name == name
 		}
 	}
+	switch {
+	case o.Reuse && !exists:
+		return fmt.Errorf("-reuse-image: there is no image %q on this daemon (kling images copy %s -from <linux host>)", name, name)
+	case exists && !o.Rebuild && !o.Reuse:
+		return fmt.Errorf("image %q already exists (use -rebuild to build it again with this model, or -reuse-image if it already has it)", name)
+	}
 
-	fmt.Printf("Building image %q (kling-chispa + %s)...\n", name, o.ModelName)
-	specJSON, _ := json.Marshal(spec)
-	if _, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Base: "min", Builder: "chispa", Spec: specJSON}); err != nil {
-		return err
+	if o.Reuse {
+		// Un daemon de macOS no construye imágenes (loop y chroot son de
+		// Linux): la imagen se construye en un Linux y se trae. No hay forma
+		// de mirar dentro qué .chispa lleva, así que se confía en quien lo
+		// dice; el registro de despliegue de abajo graba el sha256 de -model,
+		// y si no casa con el de la imagen la réplica contestará etiquetas que
+		// el gateway rechaza (502), no decisiones equivocadas en silencio.
+		fmt.Printf("Reusing image %q (it must carry %s)...\n", name, o.ModelName)
+	} else {
+		fmt.Printf("Building image %q (kling-chispa + %s)...\n", name, o.ModelName)
+		specJSON, _ := json.Marshal(spec)
+		if _, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Base: "min", Builder: "chispa", Spec: specJSON}); err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("Making the golden snapshot (%d vCPU, %d MiB)...\n", o.VCPUs, o.MemMiB)
