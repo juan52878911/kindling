@@ -355,7 +355,13 @@ type DomoticaEvalRecord struct {
 
 // domoIdentity son los hashes de lo que sirve una tarea de domótica.
 func domoIdentity(cfg *Config, d *DomoticaConfig) (intent, slotsSum, head string, err error) {
-	if intent, err = fileSHA256(cfg.Models[d.Intent].Path); err != nil {
+	im := cfg.Models[d.Intent]
+	if im.Backend == BackendMicroVM {
+		// Sin .chispa local que hashear (el modelo vive horneado en el dorado):
+		// el nombre del dorado es su identidad, igual que ya hace el codificador
+		// (Encoder.Snapshot) más abajo.
+		intent = "snapshot:" + im.Snapshot
+	} else if intent, err = fileSHA256(im.Path); err != nil {
 		return
 	}
 	if d.Slots != "" {

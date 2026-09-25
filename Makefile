@@ -132,7 +132,7 @@ deploy: daemon guest chispa-guest
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	$(eval HOST_USER := $(if $(findstring @,$(TARGET)),$(firstword $(subst @, ,$(TARGET))),))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-guest kling-chispa scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh $(TARGET):/tmp/
+	scp -q kling-guest kling-chispa scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh scripts/lib-ext4-shrink.sh $(TARGET):/tmp/
 	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
 	scp -q scripts/builders/llm $(TARGET):/tmp/builder-llm
 	scp -q scripts/builders/chispa $(TARGET):/tmp/builder-chispa
@@ -145,6 +145,7 @@ deploy: daemon guest chispa-guest
 		sudo install -m755 /tmp/81-base-image.sh /usr/local/lib/kindling/81-base-image.sh && \
 		sudo install -m755 /tmp/71-build-glibc-base.sh /usr/local/lib/kindling/71-build-glibc-base.sh && \
 		sudo install -m755 /tmp/minimal-init.sh /usr/local/lib/kindling/minimal-init.sh && \
+		sudo install -m755 /tmp/lib-ext4-shrink.sh /usr/local/lib/kindling/lib-ext4-shrink.sh && \
 		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
 		sudo install -m755 /tmp/builder-llm /usr/local/lib/kindling/builders/llm && \
 		sudo install -m755 /tmp/builder-chispa /usr/local/lib/kindling/builders/chispa && \
