@@ -31,10 +31,26 @@ type Spec struct {
 	Parallel int `json:"parallel,omitempty"`
 	// Threads son los hilos de cálculo. 0 = uno por vCPU (nproc en el invitado).
 	Threads int `json:"threads,omitempty"`
+	// CacheRAM es la caché de prompts de llama-server en RAM, en MiB
+	// (--cache-ram). nil = DefaultCacheRAM; 0 = sin caché. Con ella la réplica
+	// guarda el estado (la caché KV) de los prompts que ha visto y, cuando
+	// llega uno que empieza igual, parte de ahí: el prefijo largo y fijo de una
+	// tarea (su system prompt) se evalúa una vez y no en cada petición, y
+	// cambiar de tarea no tira el de la anterior. El dorado se congela con los
+	// prefijos de sus tareas ya en esta caché (GoldenOptions.Prefixes), así que
+	// ni la primera petición de una réplica recién restaurada los paga. Medido
+	// en docs/von-cpu.md. Es un puntero para distinguir "no lo dijo" (el
+	// defecto) de 0, y porque las recetas de antes de v0.12 no lo llevan: sus
+	// imágenes arrancan con --cache-ram 0.
+	CacheRAM *int `json:"cache_ram,omitempty"`
 	// AcceptLicense es el identificador de licencia que quien construye acepta
 	// para un modelo del catálogo que no es de licencia abierta (Model.Open).
 	// Tiene que ser exactamente el suyo: aceptar "lo que sea" no es aceptar.
 	AcceptLicense string `json:"accept_license,omitempty"`
+	// Kind y Pooling hacen de un GGUF propio (URL) un codificador de frases:
+	// Kind "embed" y Pooling mean, cls o last. Los del catálogo ya los traen.
+	Kind    string `json:"kind,omitempty"`
+	Pooling string `json:"pooling,omitempty"`
 }
 
 // Resolved es un Spec validado y completo: lo que el constructor necesita.
@@ -47,8 +63,12 @@ type Resolved struct {
 	Ctx      int
 	Parallel int
 	Threads  int
+	CacheRAM int // MiB de la caché de prompts; 0 = sin ella
 	// Model es la entrada del catálogo, si viene de él.
 	Model *Model
+	// Kind y Pooling: ver Spec. Kind vacío = modelo instruct.
+	Kind    string
+	Pooling string
 }
 
 var (
@@ -102,6 +122,9 @@ func (s Spec) Resolve() (Resolved, error) {
 	if r.Parallel == 0 {
 		r.Parallel = 1
 	}
+	if err := resolveEmbed(&r, s); err != nil {
+		return r, err
+	}
 	if r.Ctx < 256 || r.Ctx > 131072 {
 		return r, fmt.Errorf("ctx out of range: %d (256..131072)", r.Ctx)
 	}
@@ -113,6 +136,25 @@ func (s Spec) Resolve() (Resolved, error) {
 	}
 	if r.Threads < 0 || r.Threads > 64 {
 		return r, fmt.Errorf("threads out of range: %d (0 = one per vCPU, up to 64)", r.Threads)
+	}
+	if r.Kind == KindEmbed {
+		// Un codificador no genera texto de a poco a partir de un prompt largo
+		// y fijo: cada petición es una frase corta y distinta, así que no hay
+		// prefijo que reutilizar. La caché de prompts se queda a 0 siempre (ni
+		// entra en la memoria de la microVM) y pedirla explícitamente es un
+		// error, no un valor que se ignora en silencio.
+		if s.CacheRAM != nil && *s.CacheRAM != 0 {
+			return r, fmt.Errorf("cache-ram only applies to instruct models: %s is an encoder (kind %s) and never uses the prompt cache", r.Ref, KindEmbed)
+		}
+		r.CacheRAM = 0
+		return r, nil
+	}
+	r.CacheRAM = DefaultCacheRAM
+	if s.CacheRAM != nil {
+		r.CacheRAM = *s.CacheRAM
+	}
+	if r.CacheRAM < 0 || r.CacheRAM > 4096 {
+		return r, fmt.Errorf("cache-ram out of range: %d MiB (0 = off, up to 4096)", r.CacheRAM)
 	}
 	return r, nil
 }
@@ -135,8 +177,10 @@ func (r Resolved) LayerMiB(modelBytes int64) int {
 //     hay nada (egress none y el proxy del daemon solo deja kling.ports).
 //   - --no-webui: la interfaz web no sirve de nada detrás de una API y engorda
 //     la memoria del dorado.
-//   - --cache-ram 0: la caché de prompts en RAM viene a 8 GiB por defecto;
+//   - --cache-ram N: la caché de prompts en RAM viene a 8 GiB por defecto;
 //     en una microVM de 768 MiB acabaría en el OOM killer al primer uso real.
+//     Se acota a CacheRAM (64 MiB por defecto), que el tamaño de la microVM
+//     suma a lo del modelo (MemMiB).
 //   - --fit off: con el contexto fijado, que llama.cpp no reajuste nada según
 //     la memoria libre; el dorado tiene que ser el mismo en cada construcción.
 //   - --metrics: /metrics de Prometheus, para que el gateway vea colas y ritmo.
@@ -160,7 +204,7 @@ func (r Resolved) ServerArgs() []string {
 		"--parallel", strconv.Itoa(r.Parallel),
 		"--threads", "$THREADS",
 		"--no-webui",
-		"--cache-ram", "0",
+		"--cache-ram", strconv.Itoa(r.CacheRAM),
 		"--fit", "off",
 		"--metrics",
 		"--load-mode", "dio",
@@ -182,7 +226,7 @@ func (r Resolved) RunScript() string {
 		b.WriteString("THREADS=$(nproc)\n")
 	}
 	b.WriteString("exec /opt/llama.cpp/llama-server")
-	for _, a := range r.ServerArgs() {
+	for _, a := range append(r.ServerArgs(), r.EmbedArgs()...) {
 		if a == "$THREADS" {
 			b.WriteString(` "$THREADS"`)
 			continue

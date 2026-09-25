@@ -1,0 +1,81 @@
+{
+    "type": "object",
+    "properties": {
+        "actions": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "device": {
+                        "enum": [
+                            "light.kitchen",
+                            "light.living_main",
+                            "light.living_lamp",
+                            "light.dining",
+                            "light.bedroom",
+                            "light.bathroom",
+                            "light.hallway",
+                            "light.garden",
+                            "light.porch",
+                            "climate.living",
+                            "climate.bedroom",
+                            "cover.living_blinds",
+                            "cover.bedroom_blinds",
+                            "cover.garage_door",
+                            "lock.front_door",
+                            "media.living_tv",
+                            "media.kitchen_speaker",
+                            "switch.coffee_machine",
+                            "switch.dishwasher",
+                            "switch.garden_sprinklers",
+                            "vacuum.robot",
+                            "alarm.house"
+                        ]
+                    },
+                    "action": {
+                        "enum": [
+                            "on",
+                            "off",
+                            "set",
+                            "open",
+                            "close",
+                            "lock",
+                            "unlock",
+                            "start",
+                            "stop",
+                            "dock",
+                            "play",
+                            "pause",
+                            "arm_home",
+                            "arm_away",
+                            "disarm"
+                        ]
+                    },
+                    "value": {
+                        "type": [
+                            "number",
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "device",
+                    "action",
+                    "value"
+                ],
+                "additionalProperties": false
+            }
+        },
+        "reply": {
+            "type": "string",
+            "maxLength": 160
+        }
+    },
+    "required": [
+        "actions",
+        "reply"
+    ],
+    "additionalProperties": false
+}

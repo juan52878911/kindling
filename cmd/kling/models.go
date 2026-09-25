@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -25,7 +26,7 @@ import (
 
 func cmdModels(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling models <ls|add|ask|rm> [...]")
+		return fmt.Errorf("usage: kling models <ls|add|ask|embed|rm> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -34,10 +35,12 @@ func cmdModels(args []string) error {
 		return modelsAdd(args[1:])
 	case "ask":
 		return modelsAsk(args[1:])
+	case "embed":
+		return modelsEmbed(args[1:])
 	case "rm", "remove":
 		return modelsRm(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use ls, add, ask or rm", args[0])
+		return fmt.Errorf("unknown subcommand %q: use ls, add, ask, embed or rm", args[0])
 	}
 }
 
@@ -71,13 +74,17 @@ func modelsList(args []string) error {
 		})
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "CATALOG\tQUANT\tGGUF\tDEFAULT CPU/MEM\tLICENSE")
+	fmt.Fprintln(tw, "CATALOG\tQUANT\tKIND\tGGUF\tDEFAULT CPU/MEM\tLICENSE")
 	for _, m := range von.Catalog {
 		lic := m.License
 		if !m.Open() {
 			lic += " (not free to use and redistribute: needs -accept-license " + m.License + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, human(m.Size), m.VCPUs, m.MemMiB, lic)
+		kind := "chat"
+		if m.Kind != "" {
+			kind = m.Kind
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%dMiB\t%s\n", m.ID, m.Quant, kind, human(m.Size), m.VCPUs, m.MemMiB, lic)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -87,9 +94,17 @@ func modelsList(args []string) error {
 		fmt.Println("No models on this daemon yet. Add one:  kling models add von-smol -model smollm2-360m-instruct")
 		return nil
 	}
-	fmt.Fprintln(tw, "NAME\tMODEL\tCPU/MEM\tSNAPSHOT\tINSTANCES")
+	fmt.Fprintln(tw, "NAME\tMODEL\tCPU/MEM\tSNAPSHOT\tPREFIXES\tINSTANCES")
 	for _, s := range mine {
-		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%d\n", s.Name, s.Labels[von.LabelModel], s.VCPUs, s.MemMiB, human(s.MemBytes), s.Instances)
+		ref := s.Labels[von.LabelModel]
+		if k := s.Labels[von.LabelKind]; k != "" {
+			ref += " (" + k + ")"
+		}
+		pf := s.Labels[von.LabelPrefixes]
+		if pf == "" {
+			pf = "—"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\n", s.Name, ref, s.VCPUs, s.MemMiB, human(s.MemBytes), pf, s.Instances)
 	}
 	return tw.Flush()
 }
@@ -114,18 +129,44 @@ func modelsAdd(args []string) error {
 	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
 	acceptLicense := fs.String("accept-license", "", "build a catalog model outside the default catalog, accepting its license (give its id)")
 	buildOnly := fs.Bool("build-only", false, "build the image and stop: e.g. to copy it to a macOS daemon, which cannot build")
+	cacheRAM := fs.Int("cache-ram", -1, fmt.Sprintf("MiB of llama-server's prompt cache, added to the memory (default %d; 0 = off)", von.DefaultCacheRAM))
+	var prefixes stringsFlag
+	fs.Var(&prefixes, "prefix", "file with a task's system prompt to leave evaluated in the golden snapshot (repeatable)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling models add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB]")
+		return fmt.Errorf("usage: kling models add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB] [-prefix system.txt]...")
 	}
 	name := fs.Arg(0)
 	spec := von.Spec{Model: *model, Quant: *quant, URL: *url, SHA256: *sum,
 		Ctx: *ctxSize, Parallel: *parallel, Threads: *threads, AcceptLicense: *acceptLicense}
+	if *cacheRAM >= 0 {
+		spec.CacheRAM = cacheRAM
+	}
 	res, err := spec.Resolve()
 	if err != nil {
 		return err
+	}
+	if res.Kind == von.KindEmbed && len(prefixes) > 0 {
+		return fmt.Errorf("-prefix only applies to instruct models: %s is an encoder (kind embed) and has no system prompt to cache", name)
+	}
+	// La receta guarda la caché de prompts siempre, también la de por defecto:
+	// así una imagen dice con qué --cache-ram arranca aunque el defecto cambie.
+	spec.CacheRAM = &res.CacheRAM
+	var pre []von.Prefix
+	for _, f := range prefixes {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if len(b) == 0 || len(b) > 64<<10 {
+			return fmt.Errorf("-prefix %s: must hold a system prompt of 1 byte to 64 KiB", f)
+		}
+		pre = append(pre, von.Prefix{System: string(b)})
+	}
+	if len(pre) > 1 && res.CacheRAM == 0 {
+		fmt.Println("Note: without a prompt cache (-cache-ram 0) only the last -prefix stays evaluated in the golden.")
 	}
 	if res.Model != nil && !res.Model.Open() {
 		fmt.Printf("License of %s: %s (%s), accepted with -accept-license. It does not allow free use and redistribution: check it before serving or copying this image.\n",
@@ -137,7 +178,10 @@ func modelsAdd(args []string) error {
 			vcpus = res.Model.VCPUs
 		}
 		if memMiB == 0 {
-			memMiB = res.Model.MemMiB
+			// La caché de prompts va aparte de lo medido para el modelo: sin
+			// sumarla, un dorado de 1,5B en 1536 MiB se quedaba sin memoria al
+			// llenarla (docs/von-cpu.md).
+			memMiB = res.Model.MemMiB + res.CacheRAM
 		}
 	}
 	if vcpus == 0 {
@@ -146,7 +190,7 @@ func modelsAdd(args []string) error {
 	if memMiB == 0 {
 		// Un GGUF propio: no se sabe su tamaño hasta bajarlo. 1 GiB cubre hasta
 		// ~0.5B parámetros en Q8_0; para algo mayor, -mem.
-		memMiB = 1024
+		memMiB = 1024 + res.CacheRAM
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -169,6 +213,9 @@ func modelsAdd(args []string) error {
 		return err
 	}
 	if *buildOnly {
+		if len(pre) > 0 {
+			fmt.Printf("Warning: -prefix is not applied with -build-only (no golden snapshot is made here); pass -prefix again in the kling models add below.\n")
+		}
 		fmt.Println("Copy it to another daemon and make the golden snapshot there:")
 		fmt.Printf("  kling images copy %s -from <this daemon> -to <that daemon>\n", name)
 		fmt.Printf("  kling models add -H <that daemon> %s %s\n", name, modelFlags(spec))
@@ -177,9 +224,14 @@ func modelsAdd(args []string) error {
 
 	fmt.Printf("Making the golden snapshot (%d vCPU, %d MiB)...\n", vcpus, memMiB)
 	t0 := time.Now()
+	var labels map[string]string
+	if res.Kind != "" {
+		labels = map[string]string{von.LabelKind: res.Kind}
+	}
 	g, err := von.MakeGolden(ctx, c, von.GoldenOptions{
 		Image: name, Snapshot: name, Ref: res.Ref, VCPUs: vcpus, MemMiB: memMiB, CPUPct: *cpuPct,
-		AllowExec: *allowExec, Replace: *replace, Wait: *wait,
+		Kind: res.Kind, Labels: labels,
+		AllowExec: *allowExec, Replace: *replace, Wait: *wait, Prefixes: pre,
 		Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {
@@ -187,9 +239,18 @@ func modelsAdd(args []string) error {
 	}
 	fmt.Printf("✓ %s  golden snapshot of %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, res.Ref, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+	if len(pre) > 0 {
+		fmt.Printf("  %d task prefix(es) already evaluated (%v tokens): the first request of those tasks only evaluates its own text.\n",
+			len(pre), g.PrefixTokens)
+	}
 	fmt.Println()
 	fmt.Println("Serve it:")
 	fmt.Printf("  kling run -from %s -name %s-1\n", name, name)
+	if res.Kind == von.KindEmbed {
+		fmt.Printf("  kling models embed %s-1 \"turn on the lights\"\n", name)
+		fmt.Printf("Embeddings API (POST /v1/embeddings) on port %d of each replica.\n", von.Port)
+		return nil
+	}
 	fmt.Printf("  kling models ask %s-1 \"What is a microVM?\"\n", name)
 	fmt.Printf("OpenAI-compatible API on port %d of each replica (kling inspect <ref> for the address).\n", von.Port)
 	return nil
@@ -219,6 +280,9 @@ func modelFlags(s von.Spec) string {
 	if s.Threads != 0 {
 		out = append(out, fmt.Sprintf("-threads %d", s.Threads))
 	}
+	if s.CacheRAM != nil && *s.CacheRAM != von.DefaultCacheRAM {
+		out = append(out, fmt.Sprintf("-cache-ram %d", *s.CacheRAM))
+	}
 	return strings.Join(out, " ")
 }
 
@@ -243,8 +307,17 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 				// La aceptación de la licencia es de quien construye ahora, no
 				// de la receta: una imagen hecha antes de existir el flag vale.
 				prev.AcceptLicense = spec.AcceptLicense
+				if prev.CacheRAM == nil {
+					// Receta de antes de v0.12: su run.sh lleva --cache-ram 0.
+					cero := 0
+					prev.CacheRAM = &cero
+				}
 				pr, perr := prev.Resolve()
-				if rec.Builder != "llm" || perr != nil || pr.Ref != res.Ref || pr.Ctx != res.Ctx ||
+				if perr == nil && rec.Builder == "llm" && pr.Ref == res.Ref && pr.CacheRAM != res.CacheRAM {
+					return fmt.Errorf("image %q was built with a %d MiB prompt cache, not %d: pass -cache-ram %d to reuse it, or -rebuild",
+						name, pr.CacheRAM, res.CacheRAM, pr.CacheRAM)
+				}
+				if rec.Builder != "llm" || perr != nil || pr.Ref != res.Ref || pr.Ctx != res.Ctx || pr.Kind != res.Kind ||
 					pr.Parallel != res.Parallel || pr.Threads != res.Threads {
 					return fmt.Errorf("image %q exists but was built for something else (builder %q, model %q): use another name or -rebuild",
 						name, rec.Builder, pr.Ref)
@@ -337,6 +410,40 @@ func modelsAsk(args []string) error {
 		fmt.Fprintf(os.Stderr, "\n[%s: prompt %d tok at %.0f tok/s, generated %d tok at %.1f tok/s, %d ms end to end]\n",
 			resp.Model, t.PromptN, t.PromptPerSecond, t.PredictedN, t.PredictedPerSecond, dur.Milliseconds())
 	}
+	return nil
+}
+
+// modelsEmbed pide el vector de un texto a un codificador (kind embed) y
+// enseña su tamaño, su norma y lo que tardó: para comprobar una réplica, no
+// para usar los vectores (eso es pkg/codificador).
+func modelsEmbed(args []string) error {
+	fs := flag.NewFlagSet("models embed", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "print the full response and the wall time as JSON")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return fmt.Errorf("usage: kling models embed <machine> <text...>")
+	}
+	ref, text := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	resp, dur, err := von.Embed(ctx, api.NewClient(hostOf(*host)), ref, []string{text})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"response": resp, "request_ms": dur.Milliseconds()})
+	}
+	v := resp.Data[0].Embedding
+	norm := 0.0
+	for _, x := range v {
+		norm += x * x
+	}
+	head := v[:min(4, len(v))]
+	fmt.Printf("%s: %d dimensions, norm %.4f, %d tokens, %.1f ms end to end\nfirst values: %v\n",
+		resp.Model, len(v), math.Sqrt(norm), resp.Usage.PromptTokens, float64(dur.Microseconds())/1000, head)
 	return nil
 }
 

@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -119,52 +116,34 @@ func TestLLMSchema(t *testing.T) {
 	}
 }
 
-func fakeLLM(t *testing.T, content string, check func(map[string]any)) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]any
-		b, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(b, &req); err != nil {
-			t.Errorf("request: %v", err)
-		}
+func fakeGen(out string, err error, check func(string)) Generator {
+	return func(_ context.Context, input string) (string, string, error) {
 		if check != nil {
-			check(req)
+			check(input)
 		}
-		out, _ := json.Marshal(map[string]any{
-			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": content}}},
-			"usage":   map[string]any{"prompt_tokens": 900, "completion_tokens": 40},
-			"timings": map[string]any{"cache_n": 880, "prompt_ms": 12.5, "predicted_ms": 300},
-		})
-		_, _ = w.Write(out)
-	}))
+		return out, "m", err
+	}
 }
 
 func TestVONLayer(t *testing.T) {
-	srv := fakeLLM(t, `{"kind":"situation","reply":"Subo la temperatura.","actions":[{"intent":"temperature_up","device":null,"area":null,"value":null,"color":null}]}`,
-		func(req map[string]any) {
-			if req["json_schema"] == nil || req["temperature"] != 0.0 || req["model"] != "m" {
-				t.Errorf("request without schema/temperature/model: %v", req)
+	v := &VON{Generate: fakeGen(`{"kind":"situation","reply":"Subo la temperatura.","actions":[{"intent":"temperature_up","device":null,"area":null,"value":null,"color":null}]}`, nil,
+		func(in string) {
+			if in != "Request: aquí hace frío" {
+				t.Errorf("input %q", in)
 			}
-			msgs := req["messages"].([]any)
-			if msgs[0].(map[string]any)["content"] != LLMSystemPrompt {
-				t.Error("system prompt must be the fixed one (prefix cache)")
-			}
-		})
-	defer srv.Close()
-	v := &VON{Endpoint: srv.URL, Model: "m"}
+		})}
 	d, err := v.Decide(context.Background(), "aquí hace frío", "es")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Confident || d.Intent != "temperature_up" || d.Layer != LayerVON || d.LLM == nil || d.LLM.CachedTokens != 880 {
+	if !d.Confident || d.Intent != "temperature_up" || d.Layer != LayerVON || d.Model != "m" || d.LLM == nil {
 		t.Fatalf("got %+v", d)
 	}
 
 	// JEV dio «fuera de ámbito» a una frase en imperativo: el LLM no la
 	// convierte en una orden de la habitación.
-	srv2 := fakeLLM(t, `{"kind":"command","reply":"Alarma puesta.","actions":[{"intent":"alarm_arm","device":null,"area":null,"value":null,"color":null}]}`, nil)
-	defer srv2.Close()
-	v2 := &VON{Endpoint: srv2.URL}
+	cmd := `{"kind":"command","reply":"Alarma puesta.","actions":[{"intent":"alarm_arm","device":null,"area":null,"value":null,"color":null}]}`
+	v2 := &VON{Generate: fakeGen(cmd, nil, nil)}
 	prev := Decision{Layer: LayerJEV, Intent: OutOfScope, Reason: ReasonOutOfScope}
 	d, err = v2.Decide(WithPrev(context.Background(), prev), "pon una alarma a las siete", "es")
 	if err != nil || !d.Confident || len(d.ActionList()) != 0 || d.Reason != ReasonVetoedByJEV {
@@ -176,31 +155,33 @@ func TestVONLayer(t *testing.T) {
 	if len(d.ActionList()) != 0 {
 		t.Fatalf("kind command on a JEV out-of-scope phrase must be vetoed: %+v", d)
 	}
-	srv3 := fakeLLM(t, `{"kind":"situation","reply":"Activo la alarma.","actions":[{"intent":"alarm_arm","device":null,"area":null,"value":null,"color":null}]}`, nil)
-	defer srv3.Close()
-	d, _ = (&VON{Endpoint: srv3.URL}).Decide(WithPrev(context.Background(), prev), "me voy de casa", "es")
+	sit := `{"kind":"situation","reply":"Activo la alarma.","actions":[{"intent":"alarm_arm","device":null,"area":null,"value":null,"color":null}]}`
+	d, _ = (&VON{Generate: fakeGen(sit, nil, nil)}).Decide(WithPrev(context.Background(), prev), "me voy de casa", "es")
 	if len(d.ActionList()) != 1 {
 		t.Fatalf("indirect vetoed: %+v", d)
+	}
+	// Lo que JEV dudaba (no «fuera de ámbito») no tiene veto.
+	d, _ = v2.Decide(WithPrev(context.Background(), Decision{Reason: ReasonLowProb}), "pon la alarma", "es")
+	if len(d.ActionList()) != 1 {
+		t.Fatalf("low-probability escalation vetoed: %+v", d)
 	}
 }
 
 func TestVONLayerErrors(t *testing.T) {
 	if _, err := (&VON{}).Decide(context.Background(), "x", "es"); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("no endpoint: %v", err)
+		t.Fatalf("no generator: %v", err)
 	}
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "no replica", http.StatusServiceUnavailable)
-	}))
-	defer bad.Close()
-	if _, err := (&VON{Endpoint: bad.URL}).Decide(context.Background(), "x", "es"); err == nil {
-		t.Fatal("503 must be an error")
+	if _, err := (&VON{Generate: fakeGen("", errors.New("503 no replica"), nil)}).Decide(context.Background(), "x", "es"); err == nil {
+		t.Fatal("a failed call is an error of the layer")
 	}
-	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("x", maxLLMBody+10)))
-	}))
-	defer huge.Close()
-	if _, err := (&VON{Endpoint: huge.URL}).Decide(context.Background(), "x", "es"); err == nil || !strings.Contains(err.Error(), "over") {
-		t.Fatalf("unbounded body: %v", err)
+	// JSON inválido: la capa contesta, pero no hace nada y pregunta.
+	d, err := (&VON{Generate: fakeGen("", ErrInvalidJSON, nil)}).Decide(context.Background(), "x", "es")
+	if err != nil || d.Confident || d.Reason != ReasonInvalidOutput || d.Reply == "" {
+		t.Fatalf("invalid json: %+v %v", d, err)
+	}
+	d, _ = (&VON{Generate: fakeGen(strings.Repeat("x", maxLLMOutput+1), nil, nil)}).Decide(context.Background(), "x", "es")
+	if d.Confident {
+		t.Fatal("an oversized answer is not parsed")
 	}
 }
 
@@ -221,8 +202,7 @@ func TestCascade(t *testing.T) {
 		})
 	}
 	von := Decision{Confident: true, Intent: "temperature_up", Actions: []Action{{Intent: "temperature_up", Slots: Slots{Device: DevThermostat}}}}
-	c := &Cascade{Fast: fast, Slow: []NamedLayer{
-		{Name: LayerEncoder, Layer: mock("encoder", Decision{}, ErrUnavailable)},
+	c := &Cascade{Fast: InProcess(fast), Slow: []NamedLayer{
 		{Name: LayerVON, Layer: mock("von", von, nil)},
 	}}
 
@@ -230,31 +210,68 @@ func TestCascade(t *testing.T) {
 	if tr.Decided != LayerTemplate || len(tr.Steps) != 1 || len(called) != 0 || len(tr.Actions) != 1 {
 		t.Fatalf("template: %+v called=%v", tr, called)
 	}
+	status := func(tr Trace) string {
+		var out []string
+		for _, s := range tr.Steps {
+			out = append(out, s.Layer+":"+s.Status)
+		}
+		return strings.Join(out, " ")
+	}
 	tr = c.Decide(context.Background(), "aquí hace frío", "es")
-	if tr.Decided != LayerVON || len(tr.Steps) != 3 || tr.Steps[1].Status != StepUnavailable || tr.Actions[0].Intent != "temperature_up" {
-		t.Fatalf("von: %+v", tr)
+	if got := status(tr); tr.Decided != LayerVON || got != "template:nomatch jev:unavailable encoder:unavailable von:answered" || tr.Actions[0].Intent != "temperature_up" {
+		t.Fatalf("von: %s %+v", got, tr)
 	}
 
 	// Capa 4 apagada por su evaluación: no hace nada, y la traza lo dice.
-	called = nil
-	c.Slow[1].Layer = Disabled
+	c.Slow[0].Layer = Disabled
 	tr = c.Decide(context.Background(), "aquí hace frío", "es")
-	if tr.Decided != "none" || len(tr.Actions) != 0 || tr.Steps[2].Status != StepDisabled {
+	if tr.Decided != "none" || len(tr.Actions) != 0 || tr.Steps[3].Status != StepDisabled {
 		t.Fatalf("disabled: %+v", tr)
 	}
-
-	// Una capa que salta las órdenes múltiples.
-	c.Slow[0].Skip = func(prev Decision) bool { return true }
+	// Fuera de su alcance: ni se llama.
+	called = nil
+	c.Slow[0] = NamedLayer{Name: LayerVON, Layer: mock("von", von, nil), Skip: func(Decision) bool { return true }}
 	tr = c.Decide(context.Background(), "aquí hace frío", "es")
-	if tr.Steps[1].Status != StepSkipped {
+	if tr.Steps[3].Status != StepSkipped || len(called) != 0 {
 		t.Fatalf("skip: %+v", tr)
 	}
-	// Un error de una capa no para la cascada.
-	c.Slow[0] = NamedLayer{Name: LayerEncoder, Layer: mock("encoder", Decision{}, errors.New("boom"))}
-	c.Slow[1].Layer = mock("von", von, nil)
+	// Un error de la capa: no se hace nada.
+	c.Slow[0] = NamedLayer{Name: LayerVON, Layer: mock("von", Decision{}, errors.New("boom"))}
 	tr = c.Decide(context.Background(), "aquí hace frío", "es")
-	if tr.Steps[1].Status != StepError || tr.Decided != LayerVON {
+	if tr.Steps[3].Status != StepError || tr.Decided != "none" {
 		t.Fatalf("error: %+v", tr)
+	}
+	// Sin capas rápidas (el gateway no contesta): nada, con el error.
+	c.Fast = func(context.Context, string, string) (Decision, error) { return Decision{}, errors.New("gateway down") }
+	tr = c.Decide(context.Background(), "enciende la luz", "es")
+	if tr.Decided != "none" || tr.Steps[0].Status != StepError {
+		t.Fatalf("fast error: %+v", tr)
+	}
+}
+
+// FastSteps reparte en pasos lo que devuelve /v1/decide con el codificador.
+func TestFastStepsEncoder(t *testing.T) {
+	d := Decision{Layer: LayerEncoder, Intent: "temperature_up", Confident: true, Prob: 0.9, FastIntent: OutOfScope, FastProb: 0.97,
+		LatencyUS: 12000, EncoderUS: 11000}
+	s := FastSteps(d, true)
+	if len(s) != 3 || s[0].Status != StepNoMatch || s[1].Layer != LayerJEV || s[1].Status != StepEscalated || s[1].LatencyUS != 1000 ||
+		s[2].Layer != LayerEncoder || s[2].Status != StepAnswered || s[2].LatencyUS != 11000 {
+		t.Fatalf("%+v", s)
+	}
+	// El codificador duda: sigue la conjetura del modelo rápido y escala.
+	d = Decision{Layer: LayerJEV, Intent: "turn_on", Reason: ReasonLowProb, LatencyUS: 9000, EncoderUS: 8000}
+	if s := FastSteps(d, true); s[1].Status != StepEscalated || s[2].Status != StepEscalated {
+		t.Fatalf("%+v", s)
+	}
+	// JEV confiado: el codificador no hizo falta.
+	if s := FastSteps(Decision{Layer: LayerJEV, Intent: "turn_on", Confident: true}, true); s[2].Status != StepNotReached {
+		t.Fatalf("%+v", s)
+	}
+	if s := FastSteps(Decision{Layer: LayerJEV, Reason: ReasonMultiCommand}, true); s[2].Status != StepSkipped {
+		t.Fatalf("%+v", s)
+	}
+	if s := FastSteps(Decision{Layer: LayerJEV, EncoderError: "timeout", EncoderUS: 2e6}, true); s[2].Status != StepError {
+		t.Fatalf("%+v", s)
 	}
 }
 

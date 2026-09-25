@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,48 +23,44 @@ import (
 	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
-// La capa 4 (VON) desde la CLI: `kling domotica eval-llm` la evalúa contra
-// «escalar y no hacer nada», `cascade` pasa una orden por la cascada entera y
-// `demo` la usa. VON se alcanza de dos formas:
+// `kling domotica eval-llm`: la capa 4 (un LLM VON con salida JSON) frente a
+// «escalar y no hacer nada» en lo que las capas rápidas escalan. Pregunta al
+// LLM por el mismo camino que en producción, una tarea de generación del
+// gateway de IA (POST /v1/generate) con el prompt y el esquema de
+// pkg/domotica:
 //
-//   - -von <dorado>: un gateway de IA en el propio proceso (pkg/aigw) sobre el
-//     daemon de -H. Despierta la réplica con la primera orden, la congela al
-//     quedarse ociosa y al salir. Nada escucha en la red: el cliente HTTP le
-//     habla al handler en memoria.
-//   - -ai <socket|URL> -von <modelo>: un `kling ai serve` que ya corre.
+//   - -gateway <socket|URL> -llm-task T [-decide-task D]: un `kling ai serve`
+//     que ya corre (las capas 1–3 por /v1/decide si se da -decide-task; si no,
+//     en el proceso).
+//   - -von <dorado>: un gateway en el propio proceso sobre el daemon de -H,
+//     con esa tarea creada al vuelo. Nada escucha en la red.
+//
+// El registro que escribe es la puerta de la capa 4: quien la use (la demo de
+// examples/domotica) solo la enciende si la evaluación la respalda.
 
-type vonOpts struct {
-	host    *string
-	von     *string
-	ai      *string
-	idle    *time.Duration
-	timeout *time.Duration
-	force   *bool
+// llmTaskName es la tarea de generación del gateway en el proceso.
+const llmTaskName = "room-llm"
+
+// LLMTaskConfig es la tarea de generación de la capa 4 en el registro del
+// gateway (ai.json): el prompt y el esquema de pkg/domotica, temperatura 0.
+func llmTaskConfig(model string) *aigw.TaskConfig {
+	zero := 0.0
+	return &aigw.TaskConfig{VON: model, System: domotica.LLMSystemPrompt, Prompt: "{input}",
+		JSONSchema: domotica.LLMSchema, MaxTokens: 200, Temperature: &zero}
 }
 
-func vonFlags(fs *flag.FlagSet) *vonOpts {
-	return &vonOpts{
-		host:    hostFlag(fs),
-		von:     fs.String("von", "", "layer 4: VON golden snapshot (or the model name on -ai); empty = layer 4 unavailable"),
-		ai:      fs.String("ai", "", "use a running `kling ai serve` (socket path or http://host:port) instead of an in-process gateway"),
-		idle:    fs.Duration("von-idle", 2*time.Minute, "freeze the VON replica after this long without commands"),
-		timeout: fs.Duration("von-timeout", 60*time.Second, "deadline of one layer-4 decision (includes waking the replica)"),
-		force:   fs.Bool("von-force", false, "enable layer 4 even without an eval record that backs it"),
-	}
+// llmConn es la capa 4 conectada y cómo cerrarla.
+type llmConn struct {
+	gw     *domotica.GatewayClient
+	task   string
+	id     string // clave del registro: el dorado o la tarea del gateway
+	desc   string
+	inproc *aigw.Gateway
+	client *api.Client
+	cancel context.CancelFunc
 }
 
-// vonConn es la capa 4 conectada, con lo que la demo enseña de ella.
-type vonConn struct {
-	Layer   *domotica.VON
-	Desc    string
-	golden  string
-	gw      *aigw.Gateway
-	handler http.Handler
-	client  *api.Client
-	cancel  context.CancelFunc
-}
-
-// memTransport lleva una petición al handler del gateway sin red.
+// memTransport lleva una petición al handler del gateway del proceso sin red.
 type memTransport struct{ h http.Handler }
 
 func (t memTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -78,176 +72,95 @@ func (t memTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rec.Result(), nil
 }
 
-func (o *vonOpts) connect(ctx context.Context) (*vonConn, error) {
-	if *o.von == "" {
-		return nil, nil
+// gatewayClient abre un `kling ai serve` por socket Unix o URL, con el token de
+// ai.token (o $KLING_AI_TOKEN) si lo hay.
+func gatewayClient(addr string, timeout time.Duration) *domotica.GatewayClient {
+	c := &domotica.GatewayClient{Base: strings.TrimRight(addr, "/"), Client: &http.Client{Timeout: timeout}}
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		sock := addr
+		c.Client.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		}}
+		c.Base = "http://ai"
 	}
-	c := &vonConn{golden: *o.von}
-	lay := &domotica.VON{Model: *o.von, Timeout: *o.timeout}
-	if *o.ai != "" {
-		hc := &http.Client{Timeout: *o.timeout + 5*time.Second}
-		base := strings.TrimRight(*o.ai, "/")
-		if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-			sock := base
-			hc.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-			}}
-			base = "http://ai"
-		}
-		if t, err := aiToken(aiDefault("ai.token"), false); err == nil {
-			lay.Header = http.Header{"Authorization": {"Bearer " + t}}
-		}
-		lay.Endpoint, lay.Client = base+"/v1/chat/completions", hc
-		c.Layer, c.Desc = lay, "gateway "+*o.ai+", model "+*o.von
-		return c, nil
+	if t, err := aiToken(aiDefault("ai.token"), false); err == nil {
+		c.Token = t
 	}
-	cfg := &aigw.Config{Models: map[string]*aigw.ModelConfig{
-		*o.von: {Kind: aigw.KindVON, Snapshot: *o.von, MaxReplicas: 1},
-	}}
+	return c
+}
+
+func connectLLM(ctx context.Context, host, golden, gateway, task string, timeout time.Duration) (*llmConn, error) {
+	if gateway != "" {
+		if task == "" {
+			return nil, errors.New("-gateway needs -llm-task (the generation task of layer 4 in ai.json)")
+		}
+		return &llmConn{gw: gatewayClient(gateway, timeout), task: task, id: task, desc: "gateway " + gateway + ", task " + task}, nil
+	}
+	if golden == "" {
+		return nil, errors.New("give -von <golden> (in-process gateway) or -gateway <addr> -llm-task <task>")
+	}
+	cfg := &aigw.Config{
+		Models: map[string]*aigw.ModelConfig{golden: {Kind: aigw.KindVON, Snapshot: golden, MaxReplicas: 1}},
+		Tasks:  map[string]*aigw.TaskConfig{llmTaskName: llmTaskConfig(golden)},
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	c.client = api.NewClient(hostOf(*o.host))
+	c := &llmConn{task: llmTaskName, id: golden, client: api.NewClient(hostOf(host))}
 	sn, err := c.client.Snapshots(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("layer 4 needs a daemon: %w", err)
 	}
 	found := false
 	for _, s := range sn {
-		found = found || s.Name == *o.von
+		found = found || s.Name == golden
 	}
 	if !found {
 		return nil, fmt.Errorf("the daemon at %s has no golden snapshot %q (kling models add %s -model qwen2.5-1.5b-instruct -quant q4_k_m)",
-			c.client.Endpoint(), *o.von, *o.von)
+			c.client.Endpoint(), golden, golden)
 	}
-	g, err := aigw.New(aigw.Options{Client: c.client, Config: cfg, ID: "domotica", NamePrefix: "dom-",
-		Idle: *o.idle, MaxReplicas: 1, VONTimeout: *o.timeout})
+	g, err := aigw.New(aigw.Options{Client: c.client, Config: cfg, ID: "domotica-eval", NamePrefix: "dom-",
+		Idle: 10 * time.Minute, MaxReplicas: 1, VONTimeout: timeout})
 	if err != nil {
 		return nil, err
 	}
 	gctx, cancel := context.WithCancel(context.Background())
 	g.Start(gctx)
-	c.gw, c.cancel, c.handler = g, cancel, g.Handler("")
-	lay.Endpoint, lay.Client = "http://ai/v1/chat/completions", &http.Client{Transport: memTransport{c.handler}}
-	c.Layer, c.Desc = lay, "in-process gateway on "+c.client.Endpoint()+", golden "+*o.von
+	c.inproc, c.cancel = g, cancel
+	c.gw = &domotica.GatewayClient{Base: "http://ai", Client: &http.Client{Transport: memTransport{g.Handler("")}}}
+	c.desc = "in-process gateway on " + c.client.Endpoint() + ", golden " + golden
 	return c, nil
 }
 
-// Close congela la réplica y borra las máquinas del gateway del proceso: la
-// demo no deja nada corriendo ni en disco.
-func (c *vonConn) Close() {
-	if c == nil || c.gw == nil {
+// Close congela la réplica del gateway del proceso y borra sus máquinas: la
+// evaluación no deja nada corriendo ni en disco.
+func (c *llmConn) Close() {
+	if c == nil || c.inproc == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	c.gw.Close(ctx)
+	c.inproc.Close(ctx)
 	c.cancel()
 	if ms, err := c.client.List(ctx); err == nil {
 		for _, m := range ms {
-			if m.Labels[aigw.LabelGateway] == "domotica" {
+			if m.Labels[aigw.LabelGateway] == "domotica-eval" {
 				_ = c.client.Remove(ctx, m.ID)
 			}
 		}
 	}
 }
 
-// VONStats es lo que la demo enseña del gateway: despertares y réplicas.
-type VONStats struct {
-	Thaws    int     `json:"thaws"`
-	Restores int     `json:"restores"`
-	WakeMS   float64 `json:"wake_ms_avg"`
-	Running  int     `json:"running"`
-	Warm     int     `json:"warm"`
-	MemMiB   int64   `json:"mem_mib,omitempty"` // del daemon, si lo sabe medir
-}
-
-// Stats lee /metrics del gateway (en proceso o remoto) y /procstats del daemon.
-func (c *vonConn) Stats(ctx context.Context) (*VONStats, error) {
-	if c == nil {
-		return nil, nil
-	}
-	var body []byte
-	if c.handler != nil {
-		rec := httptest.NewRecorder()
-		c.handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil).WithContext(ctx))
-		body = rec.Body.Bytes()
-	} else {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.Layer.Endpoint, "/v1/chat/completions")+"/metrics", nil)
-		if err != nil {
-			return nil, err
-		}
-		for k, v := range c.Layer.Header {
-			req.Header[k] = v
-		}
-		resp, err := c.Layer.Client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		if body, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20)); err != nil {
-			return nil, err
-		}
-	}
-	st := parseVONMetrics(body, c.golden)
-	if c.client != nil {
-		if ps, err := c.client.ProcStats(ctx); err == nil {
-			for _, m := range ps.Machines {
-				if m.From == c.golden {
-					st.MemMiB += m.PSSMiB
-				}
-			}
-		}
-	}
-	return st, nil
-}
-
-func parseVONMetrics(b []byte, model string) *VONStats {
-	st := &VONStats{}
-	var wakeSum float64
-	q := `model="` + model + `"`
-	sc := bufio.NewScanner(strings.NewReader(string(b)))
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.Contains(line, q) {
-			continue
-		}
-		i := strings.LastIndexByte(line, ' ')
-		if i < 0 {
-			continue
-		}
-		v, err := strconv.ParseFloat(line[i+1:], 64)
-		if err != nil {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(line, "kling_ai_von_wake_seconds_count") && strings.Contains(line, `how="thaw"`):
-			st.Thaws = int(v)
-		case strings.HasPrefix(line, "kling_ai_von_wake_seconds_count") && strings.Contains(line, `how="restore"`):
-			st.Restores = int(v)
-		case strings.HasPrefix(line, "kling_ai_von_wake_seconds_sum"):
-			wakeSum += v
-		case strings.HasPrefix(line, "kling_ai_von_replicas") && strings.Contains(line, `state="running"`):
-			st.Running = int(v)
-		case strings.HasPrefix(line, "kling_ai_von_replicas") && strings.Contains(line, `state="warm"`):
-			st.Warm = int(v)
-		}
-	}
-	if n := st.Thaws + st.Restores; n > 0 {
-		st.WakeMS = 1000 * wakeSum / float64(n)
-	}
-	return st
-}
-
 // ── registro de la evaluación (la puerta de la capa 4) ──────────────────────
 
-// layer4Record es lo que guarda `eval-llm`. La capa 4 solo se enciende si hay
-// uno que la respalde para el MISMO dorado, prompt y modelos rápidos: si
-// cambian, lo que escala cambia y la evaluación ya no vale.
+// Layer4Record es lo que guarda `eval-llm` y lee la demo. La capa 4 solo se
+// enciende con uno del mismo modelo (dorado o tarea), prompt y validación
+// (PromptID) y capas rápidas (FastID): si cambian, lo que escala cambia y la
+// evaluación ya no vale.
 type layer4Record struct {
-	Golden     string               `json:"golden"`
+	ID         string               `json:"id"` // dorado (en el proceso) o tarea del gateway
 	PromptID   string               `json:"prompt_id"`
-	FastSHA    string               `json:"fast_sha256"`
+	FastID     string               `json:"fast_id"`
 	Data       string               `json:"data"` // sobre qué se decidió: MASSIVE (si se dio) o las frases de reto
 	Scopes     map[string]scopeGate `json:"scopes"`
 	LatencyP50 float64              `json:"latency_p50_ms"`
@@ -264,12 +177,13 @@ type scopeGate struct {
 	Total domotica.L4Total `json:"total"`
 }
 
-func layer4RecordPath(golden string) string {
-	return filepath.Join(domoticaModelsDir(), "layer4-"+golden+".json")
+func layer4RecordPath(id string) string {
+	return filepath.Join(domoticaModelsDir(), "layer4-"+id+".json")
 }
 
-// fastSHA resume los modelos rápidos cargados (los que deciden qué escala).
-func fastSHA(intentPath, slotsPath string) string {
+// fastID resume las capas del proceso que deciden qué escala (el sha256 de
+// sus modelos). Con -decide-task es domotica.FastID de la tarea del gateway.
+func fastID(intentPath, slotsPath string) string {
 	h := sha256.New()
 	for _, p := range []string{resolveModel(intentPath, "intent.jev"), resolveModel(slotsPath, "slots.jevs")} {
 		if p == "" {
@@ -297,53 +211,26 @@ func resolveModel(p, def string) string {
 	return ""
 }
 
-// layer4Backed dice con qué alcance respalda su evaluación a la capa 4: el
-// más amplio que pasó la puerta (all antes que uncertain), o "" y por qué no.
-func layer4Backed(golden, intentPath, slotsPath string) (scope, why string) {
-	b, err := os.ReadFile(layer4RecordPath(golden))
-	if err != nil {
-		return "", "no eval record (run `kling domotica eval-llm -von " + golden + " -data test.jsonl`)"
-	}
-	var r layer4Record
-	if err := json.Unmarshal(b, &r); err != nil {
-		return "", "unreadable eval record: " + err.Error()
-	}
-	switch {
-	case r.Golden != golden || r.PromptID != domotica.PromptID():
-		return "", "the eval record is for another golden or prompt"
-	case r.FastSHA != fastSHA(intentPath, slotsPath):
-		return "", "the eval record is for other fast-layer models"
-	}
-	for _, sc := range []string{domotica.ScopeAll, domotica.ScopeUncertain} {
-		if g, ok := r.Scopes[sc]; ok && g.Pass {
-			return sc, g.Why
-		}
-	}
-	return "", "its eval does not back it: " + r.Scopes[domotica.ScopeAll].Why
-}
-
 // ── kling domotica eval-llm ─────────────────────────────────────────────────
 
 func cmdDomoticaEvalLLM(args []string) error {
 	fs := flag.NewFlagSet("domotica eval-llm", flag.ExitOnError)
-	vo := vonFlags(fs)
+	host := hostFlag(fs)
+	golden := fs.String("von", "", "VON golden for an in-process gateway on the daemon of -H")
+	gateway := fs.String("gateway", "", "a running `kling ai serve` (socket path or http://host:port) instead")
+	llmTask := fs.String("llm-task", "", "with -gateway: the generation task of layer 4 (see llm-task.json in examples/domotica)")
+	decideTask := fs.String("decide-task", "", "with -gateway: the domotica task that serves layers 1-3 (default: in-process layers 1-2)")
+	timeout := fs.Duration("von-timeout", 60*time.Second, "deadline of one layer-4 decision (includes waking the replica)")
 	data := fs.String("data", "", "unified JSONL test data; its MASSIVE rows are used")
-	intentPath := fs.String("intent", "", "intent model (.jev)")
-	slotsPath := fs.String("slots", "", "slot model (.jevs)")
+	intentPath := fs.String("intent", "", "intent model (.jev), in-process layers")
+	slotsPath := fs.String("slots", "", "slot model (.jevs), in-process layers")
 	oosPer := fs.Int("oos-sample", 100, "out-of-scope MASSIVE rows sampled per language (deterministic); they are weighted back")
 	challenge := fs.Bool("challenge", true, "also score the built-in challenge set")
 	conc := fs.Int("concurrency", 1, "parallel requests to VON")
 	nerr := fs.Int("errors", 0, "print this many layer-4 errors")
-	save := fs.Bool("save", true, "write the eval record that enables layer 4 in the demo")
+	save := fs.Bool("save", true, "write the eval record that enables layer 4")
 	dump := fs.String("dump", "", "write every escalated row with VON's answer to this JSONL file")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-	if *vo.von == "" {
-		return errors.New("-von <golden> is required")
-	}
-	d, err := loadDecider(*intentPath, *slotsPath)
-	if err != nil {
 		return err
 	}
 	var rows []domotica.L4Row
@@ -364,39 +251,104 @@ func cmdDomoticaEvalLLM(args []string) error {
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
-	vc, err := vo.connect(ctx)
+	lc, err := connectLLM(ctx, *host, *golden, *gateway, *llmTask, *timeout)
 	if err != nil {
 		return err
 	}
-	defer vc.Close()
-	fmt.Printf("layer 4: %s (prompt %s)\n", vc.Desc, domotica.PromptID())
-	// Primera llamada aparte: mide el despertar (thaw o restore) y no lo mezcla
-	// con la latencia en caliente.
-	t0 := time.Now()
-	if _, err := vc.Layer.Decide(ctx, "enciende la luz", "es"); err != nil {
-		return fmt.Errorf("layer 4 first call: %w", err)
-	}
-	fmt.Printf("first call (wake + prompt): %s\n", time.Since(t0).Round(time.Millisecond))
-	rep := domotica.EvaluateLayer4(ctx, d, vc.Layer, rows, *conc)
-	domotica.WriteLayer4(os.Stdout, rep)
-	if *dump != "" {
-		f, err := os.Create(*dump)
+	defer lc.Close()
+	var fast domotica.FastFunc
+	fid := fastID(*intentPath, *slotsPath)
+	if *decideTask != "" {
+		if *gateway == "" {
+			return errors.New("-decide-task needs -gateway")
+		}
+		tasks, err := lc.gw.Tasks(ctx)
 		if err != nil {
 			return err
 		}
-		enc := json.NewEncoder(f)
-		for _, r := range rep.Rows {
-			_ = enc.Encode(r)
+		fid = ""
+		for _, t := range tasks {
+			if t.Name == *decideTask && t.Kind == "domotica" {
+				fid = domotica.FastID(t)
+			}
 		}
-		if err := f.Close(); err != nil {
+		if fid == "" {
+			return fmt.Errorf("the gateway has no domotica task %q", *decideTask)
+		}
+		fast = lc.gw.Fast(*decideTask)
+	} else {
+		d, err := loadDecider(*intentPath, *slotsPath)
+		if err != nil {
+			return err
+		}
+		fast = domotica.InProcess(d)
+	}
+	layer := &domotica.VON{Generate: lc.gw.Generator(lc.task), Timeout: *timeout}
+	fmt.Printf("layer 4: %s (prompt %s)\n", lc.desc, domotica.PromptID())
+	// Primera llamada aparte: mide el despertar (thaw o restore) y no lo mezcla
+	// con la latencia en caliente.
+	t0 := time.Now()
+	if _, err := layer.Decide(ctx, "enciende la luz", "es"); err != nil {
+		return fmt.Errorf("layer 4 first call: %w", err)
+	}
+	fmt.Printf("first call (wake + prompt): %s\n", time.Since(t0).Round(time.Millisecond))
+	rep, err := domotica.EvaluateLayer4(ctx, fast, layer, rows, *conc)
+	if err != nil {
+		return err
+	}
+	domotica.WriteLayer4(os.Stdout, rep)
+	if *dump != "" {
+		if err := writeDump(*dump, rep.Rows); err != nil {
 			return err
 		}
 	}
 	fmt.Printf("\nVON latency (warm): p50 %.0f ms  p90 %.0f ms  p99 %.0f ms  (%d calls)\n",
 		rep.Percentile(0.5), rep.Percentile(0.9), rep.Percentile(0.99), len(rep.Latency))
-	if st, err := vc.Stats(ctx); err == nil && st != nil {
-		fmt.Printf("replica wakes: %d restore, %d thaw (avg %.0f ms)\n", st.Restores, st.Thaws, st.WakeMS)
+	if m, err := lc.gw.Metrics(ctx); err == nil {
+		for k, w := range domotica.ParseWakes(m) {
+			if w.N > 0 {
+				fmt.Printf("replica wakes %s: %d (avg %.0f ms)\n", k, w.N, 1000*w.Sum/float64(w.N))
+			}
+		}
 	}
+	gates, decideOn := printGates(rep, *challenge)
+	for i, e := range rep.Errors {
+		if i >= *nerr {
+			break
+		}
+		fmt.Println("  " + e)
+	}
+	if *save {
+		rec := layer4Record{ID: lc.id, PromptID: rep.PromptID, FastID: fid, Data: decideOn, Scopes: gates,
+			LatencyP50: rep.Percentile(0.5), LatencyP90: rep.Percentile(0.9), At: time.Now().UTC()}
+		b, _ := json.MarshalIndent(rec, "", "  ")
+		p := layer4RecordPath(lc.id)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(p, append(b, '\n'), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("eval record: %s\n", p)
+	}
+	return nil
+}
+
+func writeDump(path string, rows []domotica.L4Result) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	for _, r := range rows {
+		_ = enc.Encode(r)
+	}
+	return f.Close()
+}
+
+// printGates enseña la puerta por conjunto (MASSIVE decide; las frases de reto
+// se enseñan) y alcance, y devuelve la del conjunto que decide.
+func printGates(rep *domotica.Layer4Report, challenge bool) (map[string]scopeGate, string) {
 	groupsWith := func(prefix string) []string {
 		var out []string
 		for n := range rep.Groups {
@@ -408,7 +360,7 @@ func cmdDomoticaEvalLLM(args []string) error {
 		return out
 	}
 	// MASSIVE: sus órdenes y la muestra de lo que no es de la habitación, con
-	// su peso. Es el conjunto que decide; las frases de reto se enseñan.
+	// su peso.
 	sets := []struct {
 		name   string
 		groups []string
@@ -442,36 +394,16 @@ func cmdDomoticaEvalLLM(args []string) error {
 	case gates[domotica.ScopeAll].Pass:
 		verdict = "ENABLED for every escalation"
 	case gates[domotica.ScopeUncertain].Pass:
-		verdict = "ENABLED only where JEV is unsure (not on its out-of-scope)"
+		verdict = "ENABLED only where the fast model is unsure (not on its out-of-scope)"
 	}
 	fmt.Printf("\ngate on %s: layer 4 %s\n  all: %s\n  uncertain: %s\n", decideOn, verdict, gates[domotica.ScopeAll].Why, gates[domotica.ScopeUncertain].Why)
-	for i, e := range rep.Errors {
-		if i >= *nerr {
-			break
-		}
-		fmt.Println("  " + e)
-	}
-	if *save && *vo.ai == "" {
-		rec := layer4Record{Golden: *vo.von, PromptID: rep.PromptID, FastSHA: fastSHA(*intentPath, *slotsPath), Data: decideOn, Scopes: gates,
-			LatencyP50: rep.Percentile(0.5), LatencyP90: rep.Percentile(0.9), At: time.Now().UTC()}
-		b, _ := json.MarshalIndent(rec, "", "  ")
-		p := layer4RecordPath(*vo.von)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(p, append(b, '\n'), 0o644); err != nil {
-			return err
-		}
-		fmt.Printf("eval record: %s\n", p)
-	}
-	return nil
+	return gates, decideOn
 }
 
 // massiveL4Rows: todas las órdenes de MASSIVE y una muestra determinista de lo
 // que no es de la habitación, con el peso que la devuelve a su proporción.
 func massiveL4Rows(all []domotica.Row, oosPer int) []domotica.L4Row {
-	type key struct{ lang string }
-	oos := map[key][]domotica.Row{}
+	oos := map[string][]domotica.Row{}
 	var out []domotica.L4Row
 	for _, r := range all {
 		if r.Source != "massive" {
@@ -481,15 +413,19 @@ func massiveL4Rows(all []domotica.Row, oosPer int) []domotica.L4Row {
 			out = append(out, domotica.L4Row{Row: r, Group: "massive/" + r.Lang, Weight: 1})
 			continue
 		}
-		oos[key{r.Lang}] = append(oos[key{r.Lang}], r)
+		oos[r.Lang] = append(oos[r.Lang], r)
 	}
-	for k, rs := range oos {
+	for _, lang := range []string{"en", "es"} {
+		rs := oos[lang]
+		if len(rs) == 0 {
+			continue
+		}
 		// Muestra por hash del texto: estable entre ejecuciones y máquinas.
 		sort.Slice(rs, func(i, j int) bool { return textHash(rs[i].Text) < textHash(rs[j].Text) })
 		n := min(oosPer, len(rs))
 		w := float64(len(rs)) / float64(max(n, 1))
 		for _, r := range rs[:n] {
-			out = append(out, domotica.L4Row{Row: r, Group: "massive-oos/" + k.lang, Weight: w})
+			out = append(out, domotica.L4Row{Row: r, Group: "massive-oos/" + lang, Weight: w})
 		}
 	}
 	return out
@@ -498,81 +434,4 @@ func massiveL4Rows(all []domotica.Row, oosPer int) []domotica.L4Row {
 func textHash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:8])
-}
-
-// ── kling domotica cascade ──────────────────────────────────────────────────
-
-func cmdDomoticaCascade(args []string) error {
-	fs := flag.NewFlagSet("domotica cascade", flag.ExitOnError)
-	vo := vonFlags(fs)
-	lang := fs.String("lang", "auto", "language: es, en or auto")
-	intentPath := fs.String("intent", "", "intent model (.jev)")
-	slotsPath := fs.String("slots", "", "slot model (.jevs)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-	if fs.NArg() == 0 {
-		return errors.New("usage: kling domotica cascade [-von golden] \"<text>\"")
-	}
-	d, err := loadDecider(*intentPath, *slotsPath)
-	if err != nil {
-		return err
-	}
-	ctx, stop := ctxWithSignals()
-	defer stop()
-	vc, err := vo.connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer vc.Close()
-	c := buildCascade(d, vc, *vo.force, *intentPath, *slotsPath)
-	tr := c.cascade.Decide(ctx, strings.Join(fs.Args(), " "), *lang)
-	b, _ := json.MarshalIndent(tr, "", "  ")
-	fmt.Println(string(b))
-	if c.note != "" {
-		fmt.Fprintln(os.Stderr, c.note)
-	}
-	return nil
-}
-
-type builtCascade struct {
-	cascade *domotica.Cascade
-	von     string // "on", "forced", "off: <por qué>", "unavailable"
-	scope   string // alcance de la capa 4 cuando está encendida
-	note    string
-}
-
-// buildCascade monta la cascada: capas rápidas → codificador (hueco hasta que
-// llegue el real) → VON si está conectado y respaldado por su evaluación, con
-// el alcance que la evaluación respalda. -von-force la enciende para todo.
-func buildCascade(d *domotica.Decider, vc *vonConn, force bool, intentPath, slotsPath string) builtCascade {
-	b := builtCascade{cascade: &domotica.Cascade{Fast: d}, von: "unavailable"}
-	b.cascade.Slow = append(b.cascade.Slow, domotica.NamedLayer{
-		Name: domotica.LayerEncoder, Layer: domotica.Unavailable,
-		// El codificador devuelve una sola intención: las órdenes múltiples
-		// van directas a la capa que sabe devolver varias.
-		Skip: func(prev domotica.Decision) bool { return prev.Reason == domotica.ReasonMultiCommand },
-	})
-	var l4 domotica.Layer = domotica.Unavailable
-	if vc != nil {
-		scope, why := layer4Backed(vc.golden, intentPath, slotsPath)
-		switch {
-		case scope != "":
-			b.von, b.scope, b.note = "on", scope, "layer 4 enabled ("+scope+"): "+why
-		case force:
-			b.von, b.scope, b.note = "forced", domotica.ScopeAll, "layer 4 FORCED without backing: "+why
-		default:
-			b.von, b.note = "off: "+why, "layer 4 disabled: "+why+" (-von-force to enable it anyway)"
-		}
-		l4 = domotica.Disabled
-		if b.scope != "" {
-			l4 = vc.Layer
-		}
-	}
-	sc := b.scope
-	b.cascade.Slow = append(b.cascade.Slow, domotica.NamedLayer{Name: domotica.LayerVON, Layer: l4,
-		// Fuera de su alcance ni se llama al LLM: no cuesta segundos ni despierta
-		// la réplica por una frase que no es de la habitación.
-		Skip: func(prev domotica.Decision) bool { return sc != "" && !domotica.InScope(sc, prev.Reason) }})
-	return b
 }

@@ -35,18 +35,21 @@ const domoticaUsage = `usage: kling domotica <command> [options]
                                                 confident threshold, latency, per layer
   train-slots -data train.jsonl -o m.jevs       trains the slot tagger (JEV-slots)
        [-valid valid.jsonl] [-test t.jsonl]
+  embed -url http://host:port -model <encoder>  embeds the texts of JSONL files with a
+       -data a.jsonl,b.jsonl -o cache.jemb      sentence encoder replica, into a cache
+  train-encoder -data train.jsonl -valid v.jsonl   trains the layer-3 head on cached
+       -cache c.jemb -o head.jenc [-hidden N]   encoder vectors
   templates [-lang es|en]                       the demo commands the template layer knows
-  cascade [-von golden] "<text>"                the whole cascade (templates, JEV, encoder, VON)
-                                                with its trace, as JSON
-  eval-llm -von golden [-data test.jsonl]       layer 4 (VON) on what the fast layers escalate,
-                                                against doing nothing; writes the eval record
-                                                that enables it
-  demo [-listen 127.0.0.1:8088] [-von golden]   the demo room: a web page with the devices,
-                                                voice commands and the trace of each decision
+  eval-llm -von golden [-data test.jsonl]       layer 4 (a VON LLM with JSON output) on what
+     | -gateway G -llm-task T [-decide-task D]  the fast layers escalate, against doing
+                                                nothing; writes the record that enables it
 
-Layer 4 runs through an in-process AI gateway on the daemon of -H (or a running
-` + "`kling ai serve`" + ` with -ai) and is enabled only if its eval record backs it
-(-von-force overrides; docs/demo-domotica.md).
+eval-llm asks the LLM through a generation task of the AI gateway: an in-process
+one on the daemon of -H with -von, or a running ` + "`kling ai serve`" + ` with -gateway
+(docs/domotica.md; the demo room that uses it is examples/domotica).
+
+decide and eval take the layer-3 encoder with -encoder head.jenc plus -embed-url
+http://host:port (a replica) and/or -embed-cache c.jemb (docs/codificador.md).
 
 Models default to $KLING_DOMOTICA_MODELS (or the user cache dir)/intent.jev and
 slots.jevs; without them only the demo templates answer. Data: go run
@@ -65,14 +68,14 @@ func cmdDomotica(args []string) error {
 		return cmdDomoticaEval(args[1:])
 	case "train-slots":
 		return cmdDomoticaTrainSlots(args[1:])
+	case "embed":
+		return cmdDomoticaEmbed(args[1:])
+	case "train-encoder":
+		return cmdDomoticaTrainEncoder(args[1:])
 	case "templates":
 		return cmdDomoticaTemplates(args[1:])
 	case "eval-llm":
 		return cmdDomoticaEvalLLM(args[1:])
-	case "cascade":
-		return cmdDomoticaCascade(args[1:])
-	case "demo":
-		return cmdDomoticaDemo(args[1:])
 	}
 	return fmt.Errorf("unknown domotica command %q\n\n%s", args[0], domoticaUsage)
 }
@@ -147,12 +150,20 @@ func cmdDomoticaDecide(args []string) error {
 	intentPath := fs.String("intent", "", "intent model (.jev)")
 	slotsPath := fs.String("slots", "", "slot model (.jevs)")
 	asJSON := fs.Bool("json", false, "one JSON object per line")
+	encPath := fs.String("encoder", "", "layer-3 head (.jenc)")
+	embedURL := fs.String("embed-url", "", "the head's encoder: http://host:port of a replica")
+	embedCache := fs.String("embed-cache", "", "embedding cache (.jemb) to look up first")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	d, err := loadDecider(*intentPath, *slotsPath)
 	if err != nil {
 		return err
+	}
+	if enc, err := loadEncoder(*encPath, *embedCache, *embedURL); err != nil {
+		return err
+	} else if enc != nil {
+		d.Encoder = enc
 	}
 	show := func(text string) {
 		dec := d.Decide(text, *lang)
@@ -205,10 +216,17 @@ func cmdDomoticaEval(args []string) error {
 	slotsPath := fs.String("slots", "", "slot model (.jevs)")
 	challenge := fs.Bool("challenge", true, "also score the built-in challenge set (indirect, multi-command, near out-of-scope)")
 	errs := fs.Int("errors", 0, "print this many confident errors per system")
+	encPath := fs.String("encoder", "", "layer-3 head (.jenc): adds the encoder alone and the cascade with it")
+	embedURL := fs.String("embed-url", "", "the head's encoder: http://host:port of a replica")
+	embedCache := fs.String("embed-cache", "", "embedding cache (.jemb) to look up first (reproducible, no replica needed)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	d, err := loadDecider(*intentPath, *slotsPath)
+	if err != nil {
+		return err
+	}
+	enc, err := loadEncoder(*encPath, *embedCache, *embedURL)
 	if err != nil {
 		return err
 	}
@@ -253,6 +271,7 @@ func cmdDomoticaEval(args []string) error {
 		}
 		systems = append(systems, named{"jev", jevOnly.Decide}, named{"cascade", d.Decide},
 			named{"cascade, OOS final", final.Decide})
+		systems = append(systems, encoderSystems(d, enc)...)
 	} else {
 		fmt.Println("(no intent model: only template and keyword baselines)")
 	}
@@ -306,6 +325,19 @@ func cmdDomoticaEval(args []string) error {
 		}
 	}
 	if *challenge {
+		ind := domotica.Indirect("test")
+		fmt.Printf("\n== indirect commands, held-out split (%d hand-written rows; see docs/codificador.md) ==\n", len(ind))
+		fmt.Printf("%-22s %4s %10s %10s %10s\n", "system", "n", "right", "escalated", "WRONG")
+		for _, s := range systems {
+			res, wrong := domotica.EvaluateChallenge(s.sys, ind)
+			x := res["indirect"]
+			fmt.Printf("%-22s %4d %10d %10d %10d\n", s.name, x.N, x.ConfidentRight, x.Escalated, x.ConfidentWrong)
+			if *errs > 0 {
+				for _, w := range wrong {
+					fmt.Println("    " + w)
+				}
+			}
+		}
 		ch := domotica.Challenge()
 		fmt.Printf("\n== challenge set (%d hand-written rows) ==\n", len(ch))
 		fmt.Printf("%-22s %-11s %4s %10s %10s %10s\n", "system", "class", "n", "right", "escalated", "WRONG")

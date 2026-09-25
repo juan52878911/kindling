@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -30,6 +31,7 @@ var webFS embed.FS
 type LayerInfo struct {
 	Name   string `json:"name"`   // template | jev | encoder | von
 	Status string `json:"status"` // on | unavailable | off | forced
+	Where  string `json:"where"`  // gateway | microvm | process
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -40,16 +42,37 @@ type Preset struct {
 	Group string `json:"group"` // direct | paraphrase | indirect | oos
 }
 
+// LayerWake es el despertar de la microVM de una capa durante una orden.
+type LayerWake struct {
+	Layer string `json:"layer"`
+	domotica.Wake
+}
+
+// Decided es lo que devuelve Decide: la traza y qué microVMs despertó.
+type Decided struct {
+	Trace domotica.Trace
+	Wakes []LayerWake
+}
+
+// Machine es una microVM de una capa, para el panel de máquinas.
+type Machine struct {
+	Name   string `json:"name"`
+	Layer  string `json:"layer"`
+	State  string `json:"state"` // running | warm (congelada) | stopped …
+	MemMiB int64  `json:"mem_mib"`
+	From   string `json:"from,omitempty"`
+}
+
 // Options monta el servidor.
 type Options struct {
 	// Decide pasa una orden por la cascada.
-	Decide func(ctx context.Context, text, lang string) domotica.Trace
+	Decide func(ctx context.Context, text, lang string) Decided
 	Layers []LayerInfo
-	// ExtraStats, si no es nil, añade números de fuera (el gateway de VON):
-	// se llama cada pocos segundos y su resultado va tal cual en /api/stats.
-	ExtraStats func(ctx context.Context) any
-	Presets    []Preset
-	// MaxInflight: órdenes a la vez (una escalada a VON tarda segundos). 2.
+	// Machines, si no es nil, lista las microVMs de las capas (el daemon).
+	Machines func(ctx context.Context) ([]Machine, error)
+	Presets  []Preset
+	// MaxInflight: órdenes a la vez. 1 por defecto: la demo es de una persona
+	// y así los despertares de cada orden se atribuyen sin dudas.
 	MaxInflight int
 	// LoopbackOnly rechaza peticiones cuyo Host no sea de loopback: sin eso,
 	// una web cualquiera podría usar la demo con DNS rebinding.
@@ -64,12 +87,20 @@ type Server struct {
 	hubMu sync.Mutex
 	subs  map[chan []byte]struct{}
 
-	stMu    sync.Mutex
-	byLayer map[string]int
-	lat     map[string][]float64 // µs de las últimas órdenes por capa que decidió
-	all     []float64
-	total   int
-	extra   any
+	stMu     sync.Mutex
+	byLayer  map[string]int
+	lat      map[string][]float64 // µs de las últimas órdenes por capa que decidió
+	all      []float64
+	total    int
+	wakes    map[string]map[string]*wakeAcc // capa → how → acumulado
+	machines []Machine
+	machErr  string
+	last     []CommandResp // las últimas decisiones: quien abre la página las ve
+}
+
+type wakeAcc struct {
+	N  int     `json:"n"`
+	MS float64 `json:"ms_avg"`
 }
 
 // Topes.
@@ -78,26 +109,27 @@ const (
 	maxText     = 300 // runas
 	maxSubs     = 32
 	latWindow   = 256
-	statsPeriod = 3 * time.Second
+	machPeriod  = 2 * time.Second
+	machTimeout = 3 * time.Second
 )
 
 // NewServer crea la demo con la habitación en su estado inicial.
 func NewServer(o Options) *Server {
 	if o.MaxInflight <= 0 {
-		o.MaxInflight = 2
+		o.MaxInflight = 1
 	}
 	return &Server{o: o, room: New(), sem: make(chan struct{}, o.MaxInflight), subs: map[chan []byte]struct{}{},
-		byLayer: map[string]int{}, lat: map[string][]float64{}}
+		byLayer: map[string]int{}, lat: map[string][]float64{}, wakes: map[string]map[string]*wakeAcc{}}
 }
 
 // Room da acceso a la habitación (tests).
 func (s *Server) Room() *Room { return s.room }
 
-// Run mueve el termostato y refresca los números de fuera hasta que ctx acabe.
+// Run mueve el termostato y refresca el panel de máquinas hasta que ctx acabe.
 func (s *Server) Run(ctx context.Context) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	last := time.Time{}
+	var last time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -106,28 +138,58 @@ func (s *Server) Run(ctx context.Context) {
 			if s.room.Tick() {
 				s.broadcast("state", s.room.Snapshot())
 			}
-			if s.o.ExtraStats != nil && now.Sub(last) >= statsPeriod {
+			if s.o.Machines != nil && now.Sub(last) >= machPeriod {
 				last = now
-				ectx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				x := s.o.ExtraStats(ectx)
-				cancel()
-				s.stMu.Lock()
-				s.extra = x
-				s.stMu.Unlock()
-				s.broadcast("stats", s.stats())
+				s.refreshMachines(ctx)
 			}
 		}
 	}
+}
+
+func (s *Server) refreshMachines(ctx context.Context) {
+	mctx, cancel := context.WithTimeout(ctx, machTimeout)
+	ms, err := s.o.Machines(mctx)
+	cancel()
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
+	s.stMu.Lock()
+	changed := !reflect.DeepEqual(ms, s.machines) || errMsg != s.machErr
+	if err == nil {
+		s.machines = ms
+	}
+	s.machErr = errMsg
+	s.stMu.Unlock()
+	if changed {
+		s.broadcast("machines", s.machinesResp())
+	}
+}
+
+type machinesResp struct {
+	Machines []Machine `json:"machines"`
+	Error    string    `json:"error,omitempty"`
+	Enabled  bool      `json:"enabled"`
+}
+
+func (s *Server) machinesResp() machinesResp {
+	s.stMu.Lock()
+	defer s.stMu.Unlock()
+	ms := s.machines
+	if ms == nil {
+		ms = []Machine{}
+	}
+	return machinesResp{Machines: ms, Error: s.machErr, Enabled: s.o.Machines != nil}
 }
 
 // Handler devuelve la página y la API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	sub, _ := fs.Sub(webFS, "web")
-	static := http.FileServer(http.FS(sub))
-	mux.Handle("GET /", static)
+	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("GET /api/stats", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.stats()) })
+	mux.HandleFunc("GET /api/machines", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.machinesResp()) })
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("POST /api/command", s.handleCommand)
 	mux.HandleFunc("POST /api/reset", s.handleReset)
@@ -192,14 +254,20 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 }
 
 type stateResp struct {
-	State   State       `json:"state"`
-	Layers  []LayerInfo `json:"layers"`
-	Presets []Preset    `json:"presets"`
-	Stats   Stats       `json:"stats"`
+	State    State         `json:"state"`
+	Layers   []LayerInfo   `json:"layers"`
+	Presets  []Preset      `json:"presets"`
+	Stats    Stats         `json:"stats"`
+	Machines machinesResp  `json:"machines"`
+	Recent   []CommandResp `json:"recent"` // de la más nueva a la más vieja
 }
 
 func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, stateResp{State: s.room.Snapshot(), Layers: s.o.Layers, Presets: s.o.Presets, Stats: s.stats()})
+	s.stMu.Lock()
+	recent := append([]CommandResp{}, s.last...)
+	s.stMu.Unlock()
+	writeJSON(w, stateResp{State: s.room.Snapshot(), Layers: s.o.Layers, Presets: s.o.Presets, Stats: s.stats(),
+		Machines: s.machinesResp(), Recent: recent})
 }
 
 type commandReq struct {
@@ -210,6 +278,7 @@ type commandReq struct {
 // CommandResp es la respuesta de /api/command (y el evento "decision").
 type CommandResp struct {
 	Trace   domotica.Trace `json:"trace"`
+	Wakes   []LayerWake    `json:"wakes"`
 	Effects []Effect       `json:"effects"`
 	State   State          `json:"state"`
 }
@@ -247,15 +316,23 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "busy: another command is still being decided")
 		return
 	}
-	tr := s.o.Decide(r.Context(), text, lang)
-	effects, st := s.room.Apply(tr.Actions)
+	d := s.o.Decide(r.Context(), text, lang)
+	effects, st := s.room.Apply(d.Trace.Actions)
 	if effects == nil {
 		effects = []Effect{}
 	}
-	s.record(tr)
-	resp := CommandResp{Trace: tr, Effects: effects, State: st}
+	if d.Wakes == nil {
+		d.Wakes = []LayerWake{}
+	}
+	resp := CommandResp{Trace: d.Trace, Wakes: d.Wakes, Effects: effects, State: st}
+	s.record(d, resp)
 	s.broadcast("decision", resp)
 	s.broadcast("stats", s.stats())
+	if s.o.Machines != nil {
+		// Justo después de una orden cambian las máquinas (una se descongeló):
+		// el panel no espera al siguiente sondeo.
+		go s.refreshMachines(context.Background())
+	}
 	writeJSON(w, resp)
 }
 
@@ -266,7 +343,7 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"state": st})
 }
 
-// handleEvents es el canal SSE: estado, decisiones y números.
+// handleEvents es el canal SSE: estado, decisiones, números y máquinas.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -334,18 +411,26 @@ func (s *Server) broadcast(event string, v any) {
 
 // Stats son los contadores de la página.
 type Stats struct {
-	Total     int                `json:"total"`
-	ByLayer   map[string]int     `json:"by_layer"`
-	P50US     float64            `json:"p50_us"`
-	P50ByUS   map[string]float64 `json:"p50_by_layer_us"`
-	GoHeapMiB float64            `json:"go_heap_mib"`
-	GoSysMiB  float64            `json:"go_sys_mib"`
-	Extra     any                `json:"extra,omitempty"`
+	Total     int                            `json:"total"`
+	ByLayer   map[string]int                 `json:"by_layer"`
+	P50US     float64                        `json:"p50_us"`
+	P50ByUS   map[string]float64             `json:"p50_by_layer_us"`
+	Wakes     map[string]map[string]*wakeAcc `json:"wakes"` // capa → thaw|restore → n y media
+	GoHeapMiB float64                        `json:"go_heap_mib"`
+	GoSysMiB  float64                        `json:"go_sys_mib"`
 }
 
-func (s *Server) record(tr domotica.Trace) {
+// maxRecent: decisiones que se guardan para quien abre la página.
+const maxRecent = 30
+
+func (s *Server) record(d Decided, resp CommandResp) {
 	s.stMu.Lock()
 	defer s.stMu.Unlock()
+	s.last = append([]CommandResp{resp}, s.last...)
+	if len(s.last) > maxRecent {
+		s.last = s.last[:maxRecent]
+	}
+	tr := d.Trace
 	s.total++
 	s.byLayer[tr.Decided]++
 	push := func(xs []float64, v float64) []float64 {
@@ -357,6 +442,20 @@ func (s *Server) record(tr domotica.Trace) {
 	}
 	s.lat[tr.Decided] = push(s.lat[tr.Decided], tr.TotalUS)
 	s.all = push(s.all, tr.TotalUS)
+	for _, w := range d.Wakes {
+		m := s.wakes[w.Layer]
+		if m == nil {
+			m = map[string]*wakeAcc{}
+			s.wakes[w.Layer] = m
+		}
+		a := m[w.How]
+		if a == nil {
+			a = &wakeAcc{}
+			m[w.How] = a
+		}
+		a.MS = (a.MS*float64(a.N) + w.MS*float64(w.N)) / float64(a.N+w.N)
+		a.N += w.N
+	}
 }
 
 func p50(xs []float64) float64 {
@@ -374,12 +473,19 @@ func (s *Server) stats() Stats {
 	s.stMu.Lock()
 	defer s.stMu.Unlock()
 	st := Stats{Total: s.total, ByLayer: map[string]int{}, P50US: p50(s.all), P50ByUS: map[string]float64{},
-		GoHeapMiB: float64(ms.HeapAlloc) / (1 << 20), GoSysMiB: float64(ms.Sys) / (1 << 20), Extra: s.extra}
+		Wakes: map[string]map[string]*wakeAcc{}, GoHeapMiB: float64(ms.HeapAlloc) / (1 << 20), GoSysMiB: float64(ms.Sys) / (1 << 20)}
 	for k, v := range s.byLayer {
 		st.ByLayer[k] = v
 	}
 	for k, v := range s.lat {
 		st.P50ByUS[k] = p50(v)
+	}
+	for l, m := range s.wakes {
+		st.Wakes[l] = map[string]*wakeAcc{}
+		for h, a := range m {
+			c := *a
+			st.Wakes[l][h] = &c
+		}
 	}
 	return st
 }

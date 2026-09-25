@@ -13,18 +13,25 @@ const I18N = {
     traceEmpty: "Elige una orden y verás qué capa la decide, con qué confianza y en cuánto tiempo.",
     jsonActions: "Acción JSON", rawLLM: "Respuesta del LLM", numbers: "Números", history: "Últimas órdenes",
     stateText: "Estado de los dispositivos",
-    foot: "Plantillas y JEV corren en el proceso; el codificador y VON, en microVMs de kindling que se despiertan con la orden y se congelan al quedarse ociosas.",
-    groups: { direct: "Directas · plantillas", paraphrase: "Con otras palabras · JEV", indirect: "Indirectas y varias a la vez · capas 3–4", oos: "Fuera de la habitación" },
-    layers: { template: "Plantillas", jev: "JEV", encoder: "Codificador", von: "VON (LLM)", none: "Nadie" },
+    foot: "Todo pasa por el gateway de IA de kindling: plantillas y Chispa en su proceso, el codificador y el LLM en microVMs que se despiertan con la orden y se congelan al quedarse ociosas.",
+    groups: { direct: "Directas · plantillas", paraphrase: "Con otras palabras · Chispa", indirect: "Indirectas y varias a la vez · capas 3–4", oos: "Fuera de la habitación" },
+    layers: { template: "Plantillas", jev: "Chispa", encoder: "Codificador", von: "LLM", none: "Nadie" },
     lstatus: { on: "activa", unavailable: "no disponible", off: "apagada", forced: "forzada" },
+    where: { gateway: "gateway", microvm: "microVM", process: "proceso" },
+    machines: "MicroVMs de las capas", machinesHelp: "Cada capa lenta vive en una microVM de kindling: congelada (0 CPU) hasta que una orden la necesita, descongelada en milisegundos y congelada otra vez al quedarse ociosa.",
+    mstate: { running: "despierta", warm: "congelada", stopped: "parada", created: "creada" },
+    noMachines: "Ninguna microVM de las capas todavía: se crean con la primera orden que las necesita.",
+    noDaemon: "Sin daemon (-H): no se ven las máquinas.", wake: { thaw: "descongelada", restore: "creada del dorado", adopt: "adoptada" }, warmNow: "ya despierta",
     st: { answered: "decidió", escalated: "escala", unavailable: "no disponible", disabled: "apagada por su evaluación",
       skipped: "saltada", notreached: "no hizo falta", error: "error", nomatch: "sin coincidencia" },
     nothing: "No hago nada.", nothingWhy: "Ninguna capa disponible supo qué hacer con esa orden.",
-    llmSays: "VON dice", conf: "p", rooms: { living_room: "Salón", kitchen: "Cocina", hallway: "Pasillo", bedroom: "Dormitorio" },
+    llmSays: "El LLM dice", conf: "p", rooms: { living_room: "Salón", kitchen: "Cocina", hallway: "Pasillo", bedroom: "Dormitorio" },
     dev: { light: "Luz", thermostat: "Termostato", blinds: "Persiana", tv: "Tele", speaker: "Altavoz", lock: "Puerta", alarm: "Alarma", fan: "Ventilador", plug: "Enchufe" },
     on: "encendida", off: "apagada", locked: "cerrada con llave", unlocked: "abierta", armed: "activada", disarmed: "desactivada",
     playing: "reproduciendo", paused: "en pausa", muted: "silencio", open: "abierta",
-    s: { total: "Órdenes", p50: "p50 total", p50l: "p50", wakes: "Despertares VON", replicas: "Réplicas VON", vonmem: "Memoria VON", mem: "Memoria del proceso" },
+    colors: { white: "blanca", warm: "cálida", cool: "fría", red: "roja", orange: "naranja", yellow: "amarilla", green: "verde",
+      blue: "azul", purple: "morada", pink: "rosa", cyan: "cian", brown: "marrón", black: "negra" },
+    s: { total: "Órdenes", p50: "p50 total", p50l: "p50", wakes: "Despertares", mem: "Memoria de la demo" },
     busy: "Hay otra orden decidiéndose; espera un momento.", error: "Error",
   },
   en: {
@@ -36,18 +43,23 @@ const I18N = {
     traceEmpty: "Pick a command to see which layer decides it, how confident it is and how long it takes.",
     jsonActions: "JSON action", rawLLM: "LLM answer", numbers: "Numbers", history: "Recent commands",
     stateText: "Device state",
-    foot: "Templates and JEV run in-process; the encoder and VON run in kindling microVMs that wake up with the command and freeze when idle.",
-    groups: { direct: "Direct · templates", paraphrase: "In other words · JEV", indirect: "Indirect and several at once · layers 3–4", oos: "Not for this room" },
-    layers: { template: "Templates", jev: "JEV", encoder: "Encoder", von: "VON (LLM)", none: "Nobody" },
+    foot: "Everything goes through kindling's AI gateway: templates and Chispa in its process, the encoder and the LLM in microVMs that wake up with the command and freeze when idle.",
+    groups: { direct: "Direct · templates", paraphrase: "In other words · Chispa", indirect: "Indirect and several at once · layers 3–4", oos: "Not for this room" },
+    layers: { template: "Templates", jev: "Chispa", encoder: "Encoder", von: "LLM", none: "Nobody" },
     lstatus: { on: "on", unavailable: "unavailable", off: "off", forced: "forced" },
+    where: { gateway: "gateway", microvm: "microVM", process: "process" },
+    machines: "The layers' microVMs", machinesHelp: "Each slow layer lives in a kindling microVM: frozen (0 CPU) until a command needs it, thawed in milliseconds and frozen again when idle.",
+    mstate: { running: "awake", warm: "frozen", stopped: "stopped", created: "created" },
+    noMachines: "No layer microVMs yet: they are created by the first command that needs them.",
+    noDaemon: "No daemon (-H): machines are not shown.", wake: { thaw: "thawed", restore: "restored from golden", adopt: "adopted" }, warmNow: "already awake",
     st: { answered: "decided", escalated: "escalates", unavailable: "unavailable", disabled: "off by its eval",
       skipped: "skipped", notreached: "not needed", error: "error", nomatch: "no match" },
     nothing: "Doing nothing.", nothingWhy: "No available layer knew what to do with that command.",
-    llmSays: "VON says", conf: "p", rooms: { living_room: "Living room", kitchen: "Kitchen", hallway: "Hallway", bedroom: "Bedroom" },
+    llmSays: "The LLM says", conf: "p", rooms: { living_room: "Living room", kitchen: "Kitchen", hallway: "Hallway", bedroom: "Bedroom" },
     dev: { light: "Light", thermostat: "Thermostat", blinds: "Blinds", tv: "TV", speaker: "Speaker", lock: "Door", alarm: "Alarm", fan: "Fan", plug: "Plug" },
     on: "on", off: "off", locked: "locked", unlocked: "unlocked", armed: "armed", disarmed: "disarmed",
-    playing: "playing", paused: "paused", muted: "muted", open: "open",
-    s: { total: "Commands", p50: "p50 total", p50l: "p50", wakes: "VON wake-ups", replicas: "VON replicas", vonmem: "VON memory", mem: "Process memory" },
+    playing: "playing", paused: "paused", muted: "muted", open: "open", colors: {},
+    s: { total: "Commands", p50: "p50 total", p50l: "p50", wakes: "Wake-ups", mem: "Demo memory" },
     busy: "Another command is being decided; wait a moment.", error: "Error",
   },
 };
@@ -105,13 +117,16 @@ function setLang(l) {
   if (data.stats) renderStats(data.stats);
   if (lastResp) renderTrace(lastResp);
   renderHistory();
+  renderMachines(data.machines);
 }
 
 // ── cabecera ──────────────────────────────────────────────────────────────
 function renderLayers() {
   const ul = $("layers"); ul.replaceChildren();
   for (const L of data.layers) {
-    const li = el("li", { "data-layer": L.name, title: L.detail || "" }, el("b", { text: t().layers[L.name] || L.name }), " " + (t().lstatus[L.status] || L.status));
+    const where = (t().where[L.where] || L.where || "");
+    const li = el("li", { "data-layer": L.name, title: L.detail || "" }, el("b", { text: t().layers[L.name] || L.name }),
+      " " + (t().lstatus[L.status] || L.status) + (where ? " · " + where : ""));
     if (L.status !== "on" && L.status !== "forced") li.classList.add("off");
     ul.append(li);
   }
@@ -188,7 +203,7 @@ function renderState(s, changed) {
 function renderDevList(s, changed) {
   const T = t(), ul = $("devlist"), rows = [];
   const onoff = (b) => (b ? T.on : T.off);
-  for (const L of s.lights) rows.push(["light." + L.area, `${T.dev.light} · ${T.rooms[L.area]}`, L.on ? `${L.brightness}% · ${L.color}` : T.off]);
+  for (const L of s.lights) rows.push(["light." + L.area, `${T.dev.light} · ${T.rooms[L.area]}`, L.on ? `${L.brightness}% · ${T.colors[L.color] || L.color}` : T.off]);
   rows.push(["thermostat", T.dev.thermostat, `${s.thermostat.current.toFixed(1)}° → ${s.thermostat.target.toFixed(1)}° · ${onoff(s.thermostat.on)}`]);
   for (const B of s.blinds) rows.push(["blind." + B.area, `${T.dev.blinds} · ${T.rooms[B.area]}`, B.position + "% " + T.open]);
   const pl = (p) => (p.on ? `${p.playing ? T.playing : T.paused} · ${p.muted ? T.muted : p.volume + "%"}` : T.off);
@@ -202,18 +217,16 @@ function renderDevList(s, changed) {
 function nodes(tr) {
   const by = {};
   for (const L of LAYERS) by[L] = { status: "notreached" };
-  const steps = tr.steps || [];
-  const first = steps[0];
-  if (first) {
-    if (first.layer === "template") by.template = first;
-    else {
-      by.template = { status: "nomatch" };
-      by.jev = first.layer === "none" ? { status: "unavailable" } : first;
-      if (first.layer === "none") by.jev.latency_us = first.latency_us;
-    }
-  }
-  for (const s of steps.slice(1)) by[s.layer] = s;
+  for (const s of tr.steps || []) by[s.layer] = s;
   return by;
+}
+
+// El despertar de la microVM de cada capa en esta orden (de /metrics del
+// gateway): descongelada, creada del dorado… o ninguno si ya estaba despierta.
+function wakesByLayer(resp) {
+  const out = {};
+  for (const w of resp.wakes || []) out[w.layer] = w;
+  return out;
 }
 
 function renderTrace(resp) {
@@ -222,7 +235,8 @@ function renderTrace(resp) {
   $("trace-empty").hidden = true; $("trace").hidden = false;
   $("t-text").textContent = tr.text;
   $("t-lang").textContent = tr.lang;
-  const by = nodes(tr), pipe = $("pipe");
+  const by = nodes(tr), wk = wakesByLayer(resp), pipe = $("pipe");
+  const onMicroVM = Object.fromEntries((data.layers || []).map((l) => [l.name, l.where === "microvm"]));
   pipe.replaceChildren();
   for (const L of LAYERS) {
     const n = by[L];
@@ -230,6 +244,12 @@ function renderTrace(resp) {
       el("span", { class: "ln", text: T.layers[L] }),
       el("span", { class: "st", text: T.st[n.status] || n.status }));
     if (n.latency_us) li.append(el("span", { class: "lat", text: fmtLat(n.latency_us) }));
+    const w = wk[L];
+    if (w) {
+      li.append(el("span", { class: "wake " + w.how, text: `${T.wake[w.how] || w.how} · ${fmtLat(w.ms * 1000)}` }));
+    } else if (onMicroVM[L] && (n.status === "answered" || n.status === "escalated")) {
+      li.append(el("span", { class: "wake warm", text: T.warmNow }));
+    }
     const bits = [];
     if (n.intent) bits.push(n.intent);
     if (n.prob) bits.push(T.conf + "=" + n.prob.toFixed(2));
@@ -254,10 +274,7 @@ function renderTrace(resp) {
   $("t-json").textContent = JSON.stringify(tr.actions, null, 1).replace(/\n\s*/g, (m) => (m.length > 2 ? "\n  " : "\n"));
   const raw = fin.llm && fin.llm.raw;
   $("raw-wrap").hidden = !raw;
-  if (raw) {
-    const l = fin.llm;
-    $("t-raw").textContent = raw + `\n\n// prompt ${l.prompt_tokens} tok (${l.cached_tokens} cached) · ${l.prompt_ms.toFixed(0)} ms · ${l.completion_tokens} tok · ${l.predicted_ms.toFixed(0)} ms`;
-  }
+  if (raw) $("t-raw").textContent = raw + (fin.model ? `\n\n// ${fin.model}` : "");
 }
 
 // ── números ───────────────────────────────────────────────────────────────
@@ -281,13 +298,40 @@ function renderStats(st) {
     const c = (st.by_layer || {})[L];
     if (c) item(`${T.layers[L]} · ${T.s.p50l}`, fmtLat((st.p50_by_layer_us || {})[L]), L, "×" + c);
   }
-  const x = st.extra;
-  if (x) {
-    item(T.s.wakes, String((x.thaws || 0) + (x.restores || 0)), "von", `${x.thaws || 0} thaw · ${x.restores || 0} restore${x.wake_ms_avg ? " · " + Math.round(x.wake_ms_avg) + " ms" : ""}`);
-    item(T.s.replicas, String(x.running || 0), "von", `+${x.warm || 0} frozen`);
-    if (x.mem_mib) item(T.s.vonmem, x.mem_mib + " MiB", "von");
+  for (const [L, hows] of Object.entries(st.wakes || {})) {
+    const parts = Object.entries(hows).map(([h, a]) => `${a.n} ${T.wake[h] || h} · ${fmtLat(a.ms_avg * 1000)}`);
+    const n = Object.values(hows).reduce((s, a) => s + a.n, 0);
+    item(`${T.s.wakes} · ${T.layers[L] || L}`, String(n), L, parts.join(" · "));
   }
   item(T.s.mem, Math.round(st.go_sys_mib || 0) + " MiB", null, `heap ${(st.go_heap_mib || 0).toFixed(1)}`);
+}
+
+// ── microVMs de las capas ─────────────────────────────────────────────────
+function renderMachines(m) {
+  if (!m) return;
+  data.machines = m;
+  const T = t(), box = $("mach"), sum = $("mach-sum");
+  box.replaceChildren();
+  if (!m.enabled) { box.append(el("p", { class: "muted small", text: T.noDaemon })); sum.textContent = ""; return; }
+  if (m.error) box.append(el("p", { class: "muted small", text: "⚠ " + m.error }));
+  const ms = m.machines || [];
+  if (!ms.length) box.append(el("p", { class: "muted small", text: T.noMachines }));
+  let running = 0, frozen = 0, mem = 0;
+  for (const L of LAYERS) {
+    const mine = ms.filter((x) => x.layer === L);
+    if (!mine.length) continue;
+    const rows = mine.map((x) => {
+      if (x.state === "running") running++; else if (x.state === "warm") frozen++;
+      mem += x.mem_mib || 0;
+      return el("li", { class: "m " + x.state },
+        el("span", { class: "dot", "aria-hidden": "true" }),
+        el("span", { class: "mn", text: x.name, title: x.from || "" }),
+        el("span", { class: "ms", text: T.mstate[x.state] || x.state }),
+        el("span", { class: "mm", text: x.state === "running" && x.mem_mib ? x.mem_mib + " MiB" : x.state === "warm" ? "0 CPU" : "—" }));
+    });
+    box.append(el("div", { class: "mgroup", "data-layer": L }, el("h3", { text: T.layers[L] }), el("ul", {}, ...rows)));
+  }
+  sum.textContent = ms.length ? `${running} ${T.mstate.running} · ${frozen} ${T.mstate.warm}${mem ? " · " + mem + " MiB" : ""}` : "";
 }
 
 function renderHistory() {
@@ -349,6 +393,7 @@ function connect() {
   es.onerror = () => { $("live").classList.remove("on"); $("live").textContent = t().offline; };
   es.addEventListener("state", (ev) => renderState(JSON.parse(ev.data), []));
   es.addEventListener("stats", (ev) => renderStats(JSON.parse(ev.data)));
+  es.addEventListener("machines", (ev) => renderMachines(JSON.parse(ev.data)));
   es.addEventListener("decision", (ev) => {
     const d = JSON.parse(ev.data);
     if (suppress && suppress.text === d.trace.text && suppress.total_us === d.trace.total_us) { suppress = null; return; }
@@ -365,6 +410,10 @@ async function init() {
     const r = await fetch("api/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     if (r.ok) renderState((await r.json()).state, []);
   });
+  // Quien abre la página ve lo último que se decidió (y su historial).
+  const recent = data.recent || [];
+  for (const r of recent.slice().reverse()) history.unshift({ text: r.trace.text, layer: r.trace.decided_by, us: r.trace.total_us, stamp: r.trace });
+  if (recent.length) lastResp = recent[0];
   const qs = new URLSearchParams(location.search).get("lang");
   setLang(qs || load("room.lang") || (navigator.language || "es").slice(0, 2));
   renderStats(data.stats);

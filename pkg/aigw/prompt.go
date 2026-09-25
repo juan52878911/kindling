@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/von"
 )
 
 // Unknown es la etiqueta cuando la respuesta de VON no es exactamente una de
@@ -135,4 +136,49 @@ func truncUTF8(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// Prefixes son los prefijos fijos de las tareas que preguntan al modelo VON
+// model (por su nombre en el registro): el system prompt de cada una y el texto
+// fijo con el que empieza su plantilla, hasta la primera variable. Es lo que
+// `kling ai prime` deja evaluado en el dorado del modelo, para que la primera
+// petición de cada tarea en una réplica recién restaurada solo evalúe lo que
+// cambia (docs/von-cpu.md). Sin repetir y en orden de nombre de tarea.
+func (c *Config) Prefixes(model string) []von.Prefix {
+	var out []von.Prefix
+	seen := map[von.Prefix]bool{}
+	for _, n := range sortedKeys(c.Tasks) {
+		t := c.Tasks[n]
+		var p von.Prefix
+		switch {
+		case t.VON == model:
+			p = von.Prefix{System: t.System, User: staticPrefix(t.Prompt)}
+		case t.EscalateTo == model:
+			// Una escalada lleva siempre system (el suyo o el de por defecto).
+			p = von.Prefix{System: t.System, User: staticPrefix(t.Prompt)}
+			if p.System == "" {
+				p.System = defaultSystem
+			}
+			if t.Prompt == "" {
+				p.User = staticPrefix(defaultPrompt)
+			}
+		default:
+			continue
+		}
+		if (p.System == "" && p.User == "") || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// staticPrefix es el texto de una plantilla hasta su primera variable: lo que
+// todas las peticiones de la tarea comparten en el turno del usuario.
+func staticPrefix(tmpl string) string {
+	if i := strings.IndexByte(tmpl, '{'); i >= 0 {
+		return tmpl[:i]
+	}
+	return tmpl
 }

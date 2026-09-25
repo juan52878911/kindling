@@ -123,9 +123,9 @@ type L4Row struct {
 	Weight float64
 }
 
-// EvaluateLayer4 pasa las filas por la cascada rápida y, lo que escala, por
-// llm. concurrency > 1 usa varias réplicas si el gateway las tiene.
-func EvaluateLayer4(ctx context.Context, fast *Decider, llm Layer, rows []L4Row, concurrency int) *Layer4Report {
+// EvaluateLayer4 pasa las filas por las capas 1–3 (fast) y, lo que escala,
+// por llm. concurrency > 1 usa varias réplicas si el gateway las tiene.
+func EvaluateLayer4(ctx context.Context, fast FastFunc, llm Layer, rows []L4Row, concurrency int) (*Layer4Report, error) {
 	rep := &Layer4Report{PromptID: PromptID(), Groups: map[string]*L4Group{}}
 	type res struct {
 		i   int
@@ -136,7 +136,14 @@ func EvaluateLayer4(ctx context.Context, fast *Decider, llm Layer, rows []L4Row,
 	fastD := make([]Decision, len(rows))
 	var todo []int
 	for i, r := range rows {
-		fastD[i] = fast.Decide(r.Row.Text, r.Row.Lang)
+		d, err := fast(ctx, r.Row.Text, r.Row.Lang)
+		if err != nil {
+			return nil, fmt.Errorf("fast layers on %q: %w", r.Row.Text, err)
+		}
+		if d.Lang == "" {
+			d.Lang = r.Row.Lang
+		}
+		fastD[i] = d
 		if !fastD[i].Confident {
 			todo = append(todo, i)
 		}
@@ -233,7 +240,7 @@ func EvaluateLayer4(ctx context.Context, fast *Decider, llm Layer, rows []L4Row,
 		}
 	}
 	sort.Float64s(rep.Latency)
-	return rep
+	return rep, ctx.Err()
 }
 
 func fmtActions(as []Action) string {

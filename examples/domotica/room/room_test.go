@@ -92,8 +92,20 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &domotica.Cascade{Fast: &domotica.Decider{Matcher: m}, Slow: []domotica.NamedLayer{{Name: domotica.LayerVON, Layer: domotica.Unavailable}}}
-	s := NewServer(Options{Decide: c.Decide, Presets: Presets, LoopbackOnly: true,
+	c := &domotica.Cascade{Fast: domotica.InProcess(&domotica.Decider{Matcher: m}),
+		Slow: []domotica.NamedLayer{{Name: domotica.LayerVON, Layer: domotica.Unavailable}}}
+	decide := func(ctx context.Context, text, lang string) Decided {
+		d := Decided{Trace: c.Decide(ctx, text, lang)}
+		if text == "aquí hace frío" {
+			// Como si la capa 4 hubiera descongelado su microVM.
+			d.Wakes = []LayerWake{{Layer: "von", Wake: domotica.Wake{Model: "q", How: "thaw", N: 1, MS: 180}}}
+		}
+		return d
+	}
+	machines := func(context.Context) ([]Machine, error) {
+		return []Machine{{Name: "gw-q-1", Layer: "von", State: "warm", MemMiB: 0}}, nil
+	}
+	s := NewServer(Options{Decide: decide, Presets: Presets, LoopbackOnly: true, Machines: machines,
 		Layers: []LayerInfo{{Name: "template", Status: "on"}, {Name: "von", Status: "unavailable"}}})
 	hs := httptest.NewServer(s.Handler())
 	t.Cleanup(hs.Close)
@@ -131,8 +143,18 @@ func TestServerCommand(t *testing.T) {
 	resp = post(t, hs.URL+"/api/command", "application/json", `{"text":"aquí hace frío"}`)
 	_ = json.NewDecoder(resp.Body).Decode(&cr)
 	resp.Body.Close()
-	if cr.Trace.Decided != "none" || len(cr.Effects) != 0 || cr.Trace.Steps[1].Status != domotica.StepUnavailable {
+	if cr.Trace.Decided != "none" || len(cr.Effects) != 0 || cr.Trace.Steps[3].Status != domotica.StepUnavailable {
 		t.Fatalf("%+v", cr.Trace)
+	}
+	if len(cr.Wakes) != 1 || cr.Wakes[0].How != "thaw" {
+		t.Fatalf("wakes %+v", cr.Wakes)
+	}
+	if st := s.stats(); st.Wakes["von"]["thaw"].N != 1 || st.Wakes["von"]["thaw"].MS != 180 {
+		t.Fatalf("wake stats %+v", st.Wakes)
+	}
+	s.refreshMachines(context.Background())
+	if m := s.machinesResp(); !m.Enabled || len(m.Machines) != 1 || m.Machines[0].State != "warm" {
+		t.Fatalf("machines %+v", m)
 	}
 }
 

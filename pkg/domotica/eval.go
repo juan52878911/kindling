@@ -25,6 +25,34 @@ func Challenge() []Row {
 	return rows
 }
 
+// Órdenes indirectas escritas a mano para la capa 3 («estoy tiritando» →
+// subir la temperatura): 9 intenciones × 2 idiomas × 9 frases, repartidas
+// 5/2/2 en train/valid/test (campo split). Los datos de las fuentes casi no
+// traen lenguaje indirecto, y un codificador congelado solo aprende de él con
+// ejemplos (el pocos-ejemplos de SetFit). Ninguna frase coincide con las de
+// reto, y se escribieron evitando sus palabras clave; aun así son del mismo
+// proyecto: docs/codificador.md dice qué cifras dependen de ellas.
+//
+//go:embed indirect.jsonl
+var indirectData []byte
+
+// Indirect devuelve las órdenes indirectas de un reparto (train, valid, test;
+// "" = todas), con Class "indirect".
+func Indirect(split string) []Row {
+	rows, err := ReadRows(bytes.NewReader(indirectData))
+	if err != nil {
+		panic("domotica: indirect.jsonl: " + err.Error())
+	}
+	out := rows[:0]
+	for _, r := range rows {
+		if split == "" || r.Split == split {
+			r.Class = "indirect"
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // System es una forma de decidir que se evalúa.
 type System func(text, lang string) Decision
 

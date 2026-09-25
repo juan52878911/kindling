@@ -16,11 +16,9 @@ import (
 // ellas para entrar en la Cascade; así el codificador real (otra rama) se
 // enchufa sin tocar la cascada ni la demo.
 
-// Nombres de las capas lentas (Decision.Layer).
-const (
-	LayerEncoder = "encoder" // capa 3: codificador de frases + cabeza de intención
-	LayerVON     = "von"     // capa 4: LLM pequeño con salida JSON restringida
-)
+// LayerVON es la capa 4 (Decision.Layer): un LLM pequeño con salida JSON
+// restringida. La 3 es LayerEncoder (decide.go).
+const LayerVON = "von"
 
 // ReasonInvalidOutput: la respuesta del LLM no pasó la validación estricta
 // contra la taxonomía. Se trata como «no hago nada» y se pide aclaración.
@@ -149,6 +147,8 @@ const (
 	StepError       = "error"
 	StepSkipped     = "skipped"
 	StepDisabled    = "disabled"
+	StepNoMatch     = "nomatch"    // la plantilla no encajó
+	StepNotReached  = "notreached" // una capa anterior ya decidió
 )
 
 // Trace es el recorrido de una orden por la cascada.
@@ -172,20 +172,49 @@ type NamedLayer struct {
 	Skip func(prev Decision) bool
 }
 
-// Cascade encadena las capas rápidas (Decider) con las lentas. Para en la
+// FastFunc son las capas 1 a 3 (plantillas, modelo rápido y codificador): en
+// el proceso (InProcess) o por el gateway de IA (/v1/decide).
+type FastFunc func(ctx context.Context, text, lang string) (Decision, error)
+
+// InProcess usa un Decider del proceso (con su codificador, si lo tiene).
+func InProcess(d *Decider) FastFunc {
+	return func(ctx context.Context, text, lang string) (Decision, error) {
+		return d.DecideContext(ctx, text, lang), nil
+	}
+}
+
+// Cascade encadena las capas 1–3 (Fast) con las lentas (la 4). Para en la
 // primera respuesta confiada. Si ninguna lo es, la decisión final es la última
 // no confiada y la habitación no hace nada: lo mismo que «escalar y ya».
 type Cascade struct {
-	Fast *Decider
-	Slow []NamedLayer
+	Fast FastFunc
+	// HasEncoder dice si Fast lleva la capa 3 (para la traza: «no disponible»
+	// frente a «no hizo falta»).
+	HasEncoder bool
+	Slow       []NamedLayer
 }
 
 // Decide pasa text por la cascada.
 func (c *Cascade) Decide(ctx context.Context, text, lang string) Trace {
 	t0 := time.Now()
-	fast := c.Fast.Decide(text, lang)
-	lang = fast.Lang
-	tr := Trace{Text: text, Lang: lang, Steps: []Step{stepOf(fast)}}
+	if lang == "" || lang == "auto" {
+		lang = DetectLang(text)
+	}
+	tr := Trace{Text: text, Lang: lang}
+	fast, err := c.Fast(ctx, text, lang)
+	if err != nil {
+		// Sin las capas rápidas (el gateway no contesta) no se hace nada.
+		tr.Steps = []Step{{Layer: LayerTemplate, Status: StepError, Error: err.Error()}}
+		tr.Final = Decision{Lang: lang, Layer: LayerNone, Reason: "fast_layers_error"}
+		tr.Actions, tr.Decided = []Action{}, "none"
+		tr.TotalUS = float64(time.Since(t0).Nanoseconds()) / 1e3
+		return tr
+	}
+	if fast.Lang != "" {
+		lang = fast.Lang
+		tr.Lang = lang
+	}
+	tr.Steps = FastSteps(fast, c.HasEncoder)
 	final := fast
 	if !fast.Confident {
 		prev := fast
@@ -234,6 +263,54 @@ func (c *Cascade) Decide(ctx context.Context, text, lang string) Trace {
 	}
 	tr.TotalUS = float64(time.Since(t0).Nanoseconds()) / 1e3
 	return tr
+}
+
+// FastSteps reparte la decisión de las capas 1–3 en un paso por capa. La
+// decisión trae lo que hace falta: la capa que contestó, lo que dijo el modelo
+// rápido cuando preguntó al codificador (FastIntent, FastProb) y lo que tardó
+// este (EncoderUS).
+func FastSteps(d Decision, hasEncoder bool) []Step {
+	if d.Layer == LayerTemplate {
+		return []Step{stepOf(d)}
+	}
+	steps := []Step{{Layer: LayerTemplate, Status: StepNoMatch}}
+	asked := d.EncoderUS > 0 || d.EncoderError != ""
+	fastUS := d.LatencyUS - d.EncoderUS
+	switch {
+	case d.Layer == LayerNone && d.Reason == ReasonNoModel:
+		steps = append(steps, Step{Layer: LayerJEV, Status: StepUnavailable})
+	case d.Layer == LayerEncoder:
+		// Decidió (o dudó) el codificador: el modelo rápido había escalado.
+		steps = append(steps, Step{Layer: LayerJEV, Status: StepEscalated, Intent: d.FastIntent, Prob: d.FastProb, LatencyUS: fastUS})
+	default:
+		s := stepOf(d)
+		s.Layer = LayerJEV
+		s.LatencyUS = fastUS
+		if asked {
+			s.Status = StepEscalated
+		}
+		steps = append(steps, s)
+	}
+	switch {
+	case d.EncoderError != "":
+		steps = append(steps, Step{Layer: LayerEncoder, Status: StepError, Error: d.EncoderError, LatencyUS: d.EncoderUS})
+	case d.Layer == LayerEncoder:
+		s := stepOf(d)
+		s.LatencyUS = d.EncoderUS
+		steps = append(steps, s)
+	case asked:
+		// Contestó «fuera de ámbito» o dudó y la conjetura que sigue es la del
+		// modelo rápido.
+		steps = append(steps, Step{Layer: LayerEncoder, Status: StepEscalated, Reason: d.Reason, LatencyUS: d.EncoderUS})
+	case !hasEncoder:
+		steps = append(steps, Step{Layer: LayerEncoder, Status: StepUnavailable})
+	case d.Confident:
+		steps = append(steps, Step{Layer: LayerEncoder, Status: StepNotReached})
+	default:
+		// Las órdenes múltiples no pasan por el codificador.
+		steps = append(steps, Step{Layer: LayerEncoder, Status: StepSkipped})
+	}
+	return steps
 }
 
 func stepOf(d Decision) Step {

@@ -85,6 +85,7 @@ enlazadas:
 · [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
 · [JEV: un clasificador diminuto para decisiones pequeñas](#jev-un-clasificador-diminuto-para-decisiones-pequeñas)
 · [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
+· [Demo: una habitación](#demo-una-habitación-con-modelos-serverless)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -768,6 +769,29 @@ rechazó todas. En un Mac, una generación con la réplica caliente contesta en 
 la réplica congelada en ~1,5 s. Diseño, API, cifras y límites:
 [`docs/ai-gateway.md`](docs/ai-gateway.md).
 
+## Demo: una habitación con modelos serverless
+
+[`examples/domotica`](examples/domotica/README.md) es una aplicación aparte que
+*usa* kindling: una página web con una habitación simulada (luces, termostato,
+persianas, tele, altavoz, cerradura, alarma, ventilador, enchufe) que se maneja
+con órdenes de voz como texto, en español o inglés. Cada orden pasa por `kling ai
+serve`: las plantillas de la demo y el modelo rápido Chispa contestan en su
+proceso en microsegundos; lo que dudan va a un codificador de frases y luego a un
+LLM pequeño (Qwen2.5-1.5B con salida JSON restringida por un esquema y validada
+contra la taxonomía de la habitación), cada uno en una microVM que la orden
+descongela y que se congela otra vez al quedarse ociosa. La página enseña qué
+capa decidió, con qué confianza y en cuánto, si su microVM se descongeló (y en
+cuánto) y las microVMs de cada capa (despiertas o congeladas, memoria). La capa 4
+solo se enciende donde su evaluación muestra que gana a «escalar y no hacer
+nada»: con el 1.5B, en lo que el modelo rápido duda (31 órdenes más de MASSIVE
+bien, ninguna acción fuera de ámbito), no en todo (actuaría en el 1,5 % de la
+charla que no es para la habitación). Guía: [`docs/demo-domotica.md`](docs/demo-domotica.md).
+
+```sh
+kling ai serve -config examples/domotica/ai.json &     # con las rutas y dorados de tu host
+go run ./examples/domotica                            # http://127.0.0.1:8088/
+```
+
 ## Qué persiste y qué no
 
 Conviene tenerlo claro, porque no es obvio:
@@ -1159,6 +1183,7 @@ permite que N instancias compartan páginas.
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención JEV + JEV-slots, datos libres con su licencia, y su evaluación |
+| [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: JEV clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |

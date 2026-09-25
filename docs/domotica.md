@@ -10,8 +10,8 @@ solo entra si su evaluación mejora la anterior.
 |---|---|---|---|
 | 1 | emparejador de las órdenes de la demo (`Matcher`) | ~1,5 µs | aquí |
 | 2 | JEV: intención (`pkg/jev`) + huecos (`pkg/jev/slots`, JEV-slots) | ~3–5 µs | aquí |
-| 3 | codificador de frases (MiniLM / e5-small con embeddings de llama.cpp) | ~10 ms | fase siguiente |
-| 4 | LLM pequeño (VON) con salida JSON restringida, para lo indirecto | cientos de ms | fase siguiente |
+| 3 | codificador de frases (multilingual-e5-small, embeddings de llama.cpp en una microVM) + cabeza `.jenc` | ~3 ms | [codificador.md](codificador.md) |
+| 4 | LLM pequeño (VON, Qwen2.5-1.5B) con salida JSON restringida y validada: varias órdenes en una, valores relativos, paráfrasis | 1–3 s | [abajo](#capa-4-un-llm-con-salida-json) |
 
 Esta fase deja las capas 1 y 2 como bibliotecas (`pkg/domotica`,
 `pkg/jev/slots`) y una CLI (`kling domotica`) que el gateway de IA podrá
@@ -75,7 +75,10 @@ La salida `-json` es la que consumirá el gateway:
 ```
 
 `confident: false` trae `reason` (`low_probability`, `missing_slot`,
-`multi_command`, `out_of_scope`, `no_model`) y `escalate: "encoder"`.
+`multi_command`, `out_of_scope`, `no_model`) y `escalate: "encoder"`. Con la
+capa 3 (`-encoder head.jenc -embed-url …`, [codificador.md](codificador.md)),
+lo que tampoco resuelve el codificador sale con `escalate: "von"` (y
+`encoder_error` si la réplica no contestó).
 
 ## Cómo decide (`Decider.Decide`)
 
@@ -102,6 +105,56 @@ La salida `-json` es la que consumirá el gateway:
    dos verbos de orden) o si JEV dice `out_of_scope`: lo indirecto («aquí hace
    frío») cae justamente ahí, y solo una capa mayor puede decidir que de verdad
    no hay nada que hacer. `Decider.FinalOOS` cambia esa política.
+
+## Capa 4: un LLM con salida JSON
+
+Lo que las capas 1–3 escalan puede ir a un LLM instruct pequeño servido por
+kindling: la tarea de generación del gateway de IA (`POST /v1/generate`) con el
+prompt y el esquema de `pkg/domotica` (`LLMSystemPrompt`, `LLMSchema`; la
+tarea lista para `ai.json` está en
+[examples/domotica/ai.json](../examples/domotica/ai.json)).
+
+- **Esquema JSON** que llama-server convierte en gramática: `{"kind":
+  command|situation|other, "reply": "…", "actions": [{"intent", "device",
+  "area", "value", "color"}]}`, con la intención entre las 27 de la
+  taxonomía, dispositivo, zona y color entre los canónicos, y como mucho 4
+  acciones. El orden importa: clasificar la frase y escribir la frase de vuelta
+  antes de las acciones hace que estas sigan a aquella.
+- **Validación estricta** en quien ejecuta (`ParseLLM`), porque el invitado no
+  es de fiar: JSON sin campos de más, intención conocida, dispositivo que puede
+  hacerla, valor en rango (0–100 %, 5–35 °C), huecos obligatorios. Además, la
+  respuesta se **ancla a la frase**: una zona que la frase no nombra se quita,
+  un color o un número que no dice invalida la respuesta, y abrir la puerta o
+  desarmar la alarma exige nombrarlas. Si algo falla no se ejecuta nada y se
+  pide aclaración (`reason: invalid_output`).
+- **Veto** (`Veto`): si Chispa dio «fuera de ámbito» con confianza, el LLM solo
+  puede proponer una situación (`kind: situation`) sin verbo de orden: lo
+  indirecto. Una frase en imperativo que Chispa no reconoce («pon una alarma a
+  las siete») no es de esta habitación.
+- **Puerta y alcance**: `kling domotica eval-llm` compara la capa 4 con
+  «escalar y no hacer nada» en lo que escala (McNemar) y en la cascada entera
+  ponderada, en dos alcances: `all` (todo lo escalado) y `uncertain` (solo lo
+  que Chispa duda; lo que da por fuera de ámbito ni se le pregunta). Escribe
+  `layer4-<tarea>.json`, atado al prompt, la validación (`PromptID`) y las
+  capas rápidas (`FastID`); quien la usa enciende el alcance más amplio que
+  pasó. Con Qwen2.5-1.5B pasa `uncertain` y no `all`
+  ([DOMOTICA-EVAL.md](DOMOTICA-EVAL.md#capa-4-el-llm-von)).
+
+```sh
+# contra un gateway que ya sirve las tareas room (capas 1–3) y room-llm (capa 4)
+kling domotica eval-llm -gateway ~/.config/kling/ai.sock -llm-task room-llm -decide-task room \
+    -data $D/test.jsonl -errors 20 -dump escalated.jsonl
+# o con un gateway en el propio proceso sobre el daemon (capas 1–2 aquí)
+kling domotica eval-llm -von von-qwen15-dom -data $D/test.jsonl
+```
+
+En Go, la cascada entera es `domotica.Cascade{Fast, Slow}`: `Fast` son las
+capas 1–3 (`InProcess(decider)` o `GatewayClient.Fast(tarea)`, que llama a
+`/v1/decide`) y `Slow` las lentas (`&VON{Generate: gw.Generator("room-llm")}`),
+cada una una `Layer` (`Decide(ctx, text, lang) (Decision, error)`). La traza
+(`Trace`) dice qué hizo cada capa; `Decision.Actions` trae todas las acciones.
+La habitación de demo que lo enseña todo es un ejemplo aparte:
+[examples/domotica](../examples/domotica/README.md).
 
 ## JEV-slots (`pkg/jev/slots`)
 
@@ -161,4 +214,8 @@ distintas se rechazan en vez de dar huecos basura. `FuzzLoad` lo prueba.
 | `pkg/domotica/eval.go`, `challenge.jsonl` | métricas y frases de reto |
 | `pkg/jev/slots` | JEV-slots: tokenizador, modelo, `.jevs`, entrenamiento |
 | `tools/domotica-data` | descarga, YAML, MASSIVE, Home Assistant, repartos |
-| `cmd/kling/domotica.go` | `kling domotica` |
+| `pkg/domotica/layer.go` | `Layer`, `Cascade`, `Trace`, `Action`: la cascada con capas enchufables |
+| `pkg/domotica/llm.go` | capa 4: prompt, esquema, `ParseLLM`, `Veto`, `VON` |
+| `pkg/domotica/gateway.go` | las capas por el gateway: `/v1/decide`, `/v1/generate`, `/metrics` |
+| `pkg/domotica/layer4eval.go` | evaluación y puerta de la capa 4 |
+| `cmd/kling/domotica.go`, `domotica_llm.go` | `kling domotica`, `eval-llm` |

@@ -1,78 +1,59 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/pkg/aigw"
 	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
-func TestParseVONMetrics(t *testing.T) {
-	m := `# HELP kling_ai_von_wake_seconds x
-kling_ai_von_wake_seconds_sum{model="g",how="restore"} 3.5
-kling_ai_von_wake_seconds_count{model="g",how="restore"} 1
-kling_ai_von_wake_seconds_sum{model="g",how="thaw"} 1.5
-kling_ai_von_wake_seconds_count{model="g",how="thaw"} 2
-kling_ai_von_wake_seconds_count{model="other",how="thaw"} 9
-kling_ai_von_replicas{model="g",state="running"} 1
-kling_ai_von_replicas{model="g",state="warm"} 0
-`
-	st := parseVONMetrics([]byte(m), "g")
-	if st.Restores != 1 || st.Thaws != 2 || st.Running != 1 || st.Warm != 0 || st.WakeMS < 1666 || st.WakeMS > 1667 {
-		t.Fatalf("%+v", st)
+// La tarea de generación de la capa 4 tiene que ser válida para el gateway
+// (es la que se copia a ai.json).
+func TestLLMTaskConfigValid(t *testing.T) {
+	cfg := &aigw.Config{
+		Models: map[string]*aigw.ModelConfig{"g": {Kind: aigw.KindVON, Snapshot: "g"}},
+		Tasks:  map[string]*aigw.TaskConfig{llmTaskName: llmTaskConfig("g")},
 	}
-}
-
-// La capa 4 solo se enciende con un registro del mismo dorado, prompt y
-// modelos rápidos, y con el alcance más amplio que pasó.
-func TestLayer4Backed(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("KLING_DOMOTICA_MODELS", dir)
-	if sc, why := layer4Backed("g", "", ""); sc != "" || !strings.Contains(why, "no eval record") {
-		t.Fatal(sc, why)
-	}
-	rec := layer4Record{Golden: "g", PromptID: domotica.PromptID(), FastSHA: fastSHA("", ""), Scopes: map[string]scopeGate{
-		domotica.ScopeAll:       {Pass: false, Why: "no"},
-		domotica.ScopeUncertain: {Pass: true, Why: "yes"},
-	}}
-	write := func() {
-		b, _ := json.Marshal(rec)
-		if err := os.WriteFile(filepath.Join(dir, "layer4-g.json"), b, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write()
-	if sc, _ := layer4Backed("g", "", ""); sc != domotica.ScopeUncertain {
-		t.Fatalf("scope %q", sc)
-	}
-	rec.Scopes[domotica.ScopeAll] = scopeGate{Pass: true}
-	write()
-	if sc, _ := layer4Backed("g", "", ""); sc != domotica.ScopeAll {
-		t.Fatalf("scope %q", sc)
-	}
-	rec.PromptID = "other"
-	write()
-	if sc, _ := layer4Backed("g", "", ""); sc != "" {
-		t.Fatal("a record for another prompt must not back it")
-	}
-	rec.PromptID = domotica.PromptID()
-	rec.FastSHA = "x"
-	write()
-	if sc, _ := layer4Backed("g", "", ""); sc != "" {
-		t.Fatal("a record for other fast models must not back it")
-	}
-}
-
-func TestBuildCascadeWithoutVON(t *testing.T) {
-	m, err := demoMatcher()
-	if err != nil {
+	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	b := buildCascade(&domotica.Decider{Matcher: m}, nil, false, "", "")
-	if b.von != "unavailable" || len(b.cascade.Slow) != 2 {
-		t.Fatalf("%+v", b)
+	if *cfg.Tasks[llmTaskName].Temperature != 0 || !strings.Contains(string(cfg.Tasks[llmTaskName].JSONSchema), `"kind"`) {
+		t.Fatal("temperature 0 and the domotica schema")
+	}
+}
+
+// Las órdenes de MASSIVE van todas; lo fuera de ámbito, en una muestra
+// determinista con el peso que la devuelve a su proporción.
+func TestMassiveL4Rows(t *testing.T) {
+	var all []domotica.Row
+	for i := 0; i < 10; i++ {
+		all = append(all, domotica.Row{Text: "oos " + string(rune('a'+i)), Lang: "es", Intent: domotica.OutOfScope, Source: "massive"})
+	}
+	all = append(all, domotica.Row{Text: "enciende", Lang: "es", Intent: "turn_on", Source: "massive"},
+		domotica.Row{Text: "ha", Lang: "es", Intent: "turn_on", Source: "ha"})
+	rows := massiveL4Rows(all, 4)
+	var in, oos int
+	for _, r := range rows {
+		switch r.Group {
+		case "massive/es":
+			in++
+		case "massive-oos/es":
+			oos++
+			if r.Weight != 2.5 {
+				t.Fatalf("weight %v", r.Weight)
+			}
+		default:
+			t.Fatalf("group %s", r.Group)
+		}
+	}
+	if in != 1 || oos != 4 {
+		t.Fatalf("in %d oos %d", in, oos)
+	}
+	again := massiveL4Rows(all, 4)
+	for i := range rows {
+		if rows[i].Row.Text != again[i].Row.Text {
+			t.Fatal("the sample must be deterministic")
+		}
 	}
 }

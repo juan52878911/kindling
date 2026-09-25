@@ -6,6 +6,43 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## v0.12.0 — sin publicar
 
+### VON más rápido en CPU
+
+Cada cambio con su banco de pruebas y su puerta (entra solo si mejora lo medido
+sin empeorar la calidad); lo que no funcionó, también contado. Todo en
+[docs/von-cpu.md](docs/von-cpu.md).
+
+- **Prefijos de tarea precalculados en el dorado.** Las imágenes de `kling
+  models add` arrancan `llama-server` con una caché de prompts de 64 MiB
+  (`-cache-ram`, que se suma a la memoria de la VM; 0 la quita), y el dorado se
+  congela con el system prompt de cada tarea ya evaluado: `kling models add
+  -prefix system.txt` (repetible) o **`kling ai prime`**, que los saca del
+  registro del gateway (el `system` de cada tarea y el texto fijo de su plantilla)
+  y rehace el dorado de cada modelo VON (etiqueta `von.prefixes`; sin cambios, no
+  hace nada). Medido con un system prompt de ~800 tokens: la primera petición de
+  una réplica recién restaurada pasa de 4,7 s a 0,38 s en Qwen2.5-1.5B y de 1,7 s
+  a 0,17 s en Qwen2.5-0.5B; alternar dos tareas en la misma réplica, de 2,8 s a
+  0,11 s por petición. Una imagen anterior se reutiliza con `-cache-ram 0` (solo
+  queda el último prefijo). No aplica a los codificadores (kind `embed`,
+  [docs/codificador.md](docs/codificador.md)): cada petición es una frase
+  corta y distinta, así que su spec fija `-cache-ram 0` siempre y `kling models
+  add -prefix` / `kling ai prime` los rechazan con un mensaje claro.
+- **`json_schema` por tarea** en las generaciones del gateway: la salida de VON
+  se restringe a JSON que cumple el esquema (de 19/21 a 21/21 respuestas válidas
+  en Qwen2.5-1.5B, de 11/21 a 21/21 en 0.5B), y el gateway contesta 502 si aun así
+  no es JSON (p. ej. cortada por `max_tokens`).
+- **Q4_0 en el catálogo** para `qwen2.5-0.5b-instruct` y `qwen2.5-1.5b-instruct`:
+  en ARM llama.cpp la reempaqueta para i8mm y evalúa el prompt ~1,8× más rápido
+  que Q4_K_M (1,5B) o genera ~35 % más rápido que Q8_0 (0,5B), sin acertar menos.
+  La cuantización por defecto no cambia (x86 sin medir).
+- `scripts/97-von-cpu-bench.sh` y `scripts/von-bench/`: el banco (tarea de
+  domótica con respuestas esperadas, primer token, cambio de tarea, tok/s,
+  aceptación del borrador, validez del JSON).
+- **No entró**: la decodificación especulativa (borrador Qwen2.5-0.5B para 1.5B,
+  SmolLM2-135M para 360M y 1.7B, y n-gramas) fue igual o más lenta en todas las
+  configuraciones medidas, incluso con un 96 % de aceptación; tampoco hilos
+  distintos del número de vCPU, `--poll 0`, lotes mayores ni la caché KV en Q8_0.
+
 ### Domótica: capas rápidas de decisión (`kling domotica`)
 
 Diseño en [docs/domotica.md](docs/domotica.md), datos y licencias en
@@ -30,6 +67,90 @@ Diseño en [docs/domotica.md](docs/domotica.md), datos y licencias en
   home-assistant/intents (ambos CC BY 4.0, atribución en `NOTICE`) y los
   convierte a un esquema único con repartos sin fugas.
 - `jev.FoldRune` se exporta para que otros extractores plieguen igual que JEV.
+
+### VON en hierro x86, sin anidar
+
+- Primeras medidas de VON y JEV en x86 bare metal (i7-8700T, Firecracker sobre
+  KVM nativo, sin la virtualización anidada del laboratorio Lima): thaw y
+  primer token bajan a milisegundos y la generación llega a la velocidad real
+  de la CPU (48 tok/s en SmolLM2-360M, frente a 8,8 anidado); el binario
+  oficial de llama.cpp para amd64 funcionó a la primera. Palancas de
+  `llama-server` medidas sin código nuevo de kindling (`-threads`,
+  `--cache-type-k`, decodificación especulativa, `--slot-save-path`, Q4_0);
+  cifras y método en [docs/von.md](docs/von.md#x86-sin-anidar-i7-8700t).
+
+### Domótica: capa 3, el codificador de frases
+
+Diseño, cifras y la receta del ajuste fino en
+[docs/codificador.md](docs/codificador.md); evaluación en
+[docs/DOMOTICA-EVAL.md](docs/DOMOTICA-EVAL.md#capa-3-el-codificador).
+
+- **Codificadores en el catálogo de VON** (kind `embed`):
+  `multilingual-e5-small` (MIT) y `paraphrase-multilingual-minilm-l12-v2`
+  (Apache-2.0), Q8_0. `kling models add enc-e5 -model multilingual-e5-small`
+  construye con el mismo constructor `llm` (`llama-server --embeddings
+  --pooling mean`) y congela un dorado calentado con frases reales; `kling
+  models embed <réplica> "<texto>"`. Réplica de 512 MiB: ~3 ms por orden en un
+  Mac M4; en Linux, +10 MiB de PSS por réplica de más.
+- **`scripts/encoder-gguf.sh`**: nadie de confianza publica su GGUF, así que se
+  convierten con el conversor de llama.cpp b11147, todo fijado (pesos por
+  sha256, código, `uv`, paquetes) y reproducible bit a bit; validado contra
+  transformers (coseno 1,00000 en F16, ≥ 0,999 en Q8_0). El constructor toma un
+  GGUF convertido de su caché por hash.
+- **`pkg/codificador`**: cabeza (regresión logística o una capa oculta) sobre
+  los vectores congelados, en Go puro, determinista, int16, calibrada con la
+  temperatura y los umbrales por clase de JEV; formato `.jenc` endurecido
+  (`FuzzUnmarshal`), caché de vectores `.jemb`, cliente de `/v1/embeddings`
+  acotado, k-NN de comparación.
+- **Cascada**: `Decider.Encoder` (capa 3) y `DecideContext`; lo que el
+  codificador tampoco resuelve escala a `"von"`. `kling domotica embed`,
+  `train-encoder`, y `-encoder`/`-embed-url`/`-embed-cache` en `decide` y
+  `eval`. Bate la marca: MASSIVE exact 0,745 es / 0,800 en (0,718 / 0,782), 2
+  errores confiados en el reto; lo indirecto sigue siendo de VON.
+- **Gateway**: tareas `domotica` en `/v1/decide`, modelos `kind: "embed"`
+  despertados y congelados por `pkg/scheduler`, y `kling ai eval` de la tarea,
+  cuyo registro enciende la capa 3 solo si contesta bien más órdenes sin más
+  errores confiados.
+- `pkg/domotica/indirect.jsonl`: 180 órdenes indirectas escritas a mano con
+  reparto train/valid/test (`train-encoder -indirect`, y el test en `eval`).
+- `scripts/98-encoder-bench.sh` (latencia y memoria de un codificador) y
+  `scripts/encoder-setfit/` (ajuste fino contrastivo con GPU: receta sin
+  ejecutar).
+- **Mejora futura, no aplicada:** el ajuste fino con GPU de arriba resolvería
+  el lenguaje indirecto dentro de la capa 3 en vez de escalarlo a VON; decisión
+  de no lanzarlo por ahora y detalle (coste, tiempo, alternativa en Mac con
+  MPS) en [docs/codificador.md](docs/codificador.md#mejora-futura-no-aplicada-ajuste-fino-con-gpu).
+
+### Domótica: capa 4 (un LLM con salida JSON) y la habitación de demo
+
+Diseño en [docs/domotica.md](docs/domotica.md#capa-4-un-llm-con-salida-json),
+cifras en [docs/DOMOTICA-EVAL.md](docs/DOMOTICA-EVAL.md#capa-4-el-llm-von), la
+demo en [docs/demo-domotica.md](docs/demo-domotica.md).
+
+- **Capa 4** (`pkg/domotica`): lo que las capas 1–3 escalan va a un LLM VON por
+  una tarea de generación del gateway (`POST /v1/generate`) con un esquema JSON
+  (`kind`, `reply` y hasta 4 `actions` con intención, dispositivo, zona, valor
+  y color de la taxonomía). La respuesta se valida estrictamente y se ancla a
+  la frase (zona, color y número que la frase nombra; nunca abrir la puerta ni
+  desarmar la alarma sin decirlo); si algo falla, no se hace nada y se pide
+  aclaración. Un veto no deja convertir en orden lo que el modelo rápido da por
+  fuera de ámbito, salvo lo indirecto. Varias órdenes en una frase: 8 de 9 bien.
+- **`kling domotica eval-llm`** compara la capa 4 con «escalar y no hacer nada»
+  (McNemar y la cascada entera ponderada con lo que no es para la habitación),
+  en dos alcances, y escribe el registro que la enciende. Con
+  Qwen2.5-1.5B Q4_K_M pasa solo donde el modelo rápido duda: 31 órdenes más
+  bien en MASSIVE, ninguna acción fuera de ámbito (errores confiados 1,7 → 1,9 %);
+  preguntándole por todo, actúa en el 1,5 % de la charla y empeora la cascada.
+- `domotica.Cascade` con capas enchufables (`Layer`, `FastFunc`), su traza por
+  capa (`Trace`) y los adaptadores al gateway (`GatewayClient`: `/v1/decide`,
+  `/v1/generate`, `/v1/tasks`, despertares de `/metrics`).
+- **La habitación de demo** es un ejemplo aparte, [`examples/domotica`](examples/domotica/README.md):
+  página embebida (sin CDN) con el plano en SVG, órdenes de ejemplo y texto
+  libre, traza por capa con latencia y el despertar de cada microVM, panel de
+  microVMs por capa con su memoria (del daemon) y contadores; simulador de
+  dispositivos en Go con SSE; español e inglés, claro y oscuro, accesible;
+  loopback por defecto, cuerpos acotados, CSP estricta. Registro de ejemplo del
+  gateway (`ai.json`) y unidades de systemd para el servidor x86.
 
 ## v0.11.0 — 2026-09-24
 

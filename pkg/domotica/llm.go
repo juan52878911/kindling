@@ -1,16 +1,13 @@
 package domotica
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -23,8 +20,9 @@ import (
 //
 // Lo indirecto («aquí hace frío»), varias órdenes en una frase y los valores
 // relativos («a la mitad») los escala la cascada rápida. Aquí se le pregunta a
-// un LLM instruct de 0,5–1,5B parámetros servido por kindling (API de OpenAI de
-// llama-server) con dos seguros:
+// un LLM instruct de 0,5–1,5B parámetros servido por kindling (la tarea de
+// generación del gateway de IA, POST /v1/generate, que despierta la réplica)
+// con dos seguros:
 //
 //  1. Un esquema JSON que llama-server convierte en gramática: la salida es,
 //     por construcción, {"actions":[{"intent","device","area","value",
@@ -40,47 +38,51 @@ import (
 // la caché KV del prefijo común, así que en caliente solo se evalúan los
 // tokens del estado y de la orden.
 
-// LLMStats son los números de una llamada al LLM (de los `timings` de
-// llama-server cuando los manda).
+// LLMStats es lo que se guarda de la llamada al LLM para la traza.
 type LLMStats struct {
-	PromptTokens     int     `json:"prompt_tokens"`
-	CachedTokens     int     `json:"cached_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	PromptMS         float64 `json:"prompt_ms"`
-	PredictedMS      float64 `json:"predicted_ms"`
-	Raw              string  `json:"raw,omitempty"` // la respuesta tal cual, recortada (para la traza)
+	Raw string `json:"raw,omitempty"` // la respuesta tal cual, recortada
 }
 
-// VON es la capa 4. Habla con una API /v1/chat/completions: el gateway de IA
-// (`kling ai serve`, o uno en el proceso), que despierta la réplica.
+// Generator pide una generación al LLM: la tarea de generación del gateway de
+// IA (POST /v1/generate), con LLMSystemPrompt como sistema, "{input}" como
+// plantilla, LLMSchema como json_schema y temperatura 0. Devuelve el texto y
+// el modelo que contestó. ErrInvalidJSON dice que el modelo no devolvió JSON
+// (el gateway lo comprueba): cuenta como una respuesta inválida, no como un
+// fallo de la capa.
+type Generator func(ctx context.Context, input string) (output, model string, err error)
+
+// ErrInvalidJSON: el LLM contestó, pero no con JSON.
+var ErrInvalidJSON = errors.New("the LLM did not return valid JSON")
+
+// VON es la capa 4.
 type VON struct {
-	// Endpoint es la URL de chat completions («http://ai/v1/chat/completions»).
-	Endpoint string
-	Client   *http.Client
-	// Header se añade a cada petición (Authorization de un gateway por TCP).
-	Header http.Header
-	// Model es el nombre del modelo en el gateway (registro o dorado).
-	Model string
+	Generate Generator
 	// State describe el estado de la habitación para el prompt; nil = sin
-	// estado.
+	// estado (lo evaluado: con estado, el modelo inventa zonas).
 	State func() string
 	// Timeout de una decisión (incluye despertar la réplica). 0 = 60 s.
 	Timeout time.Duration
-	// MaxTokens de la respuesta. 0 = 200.
-	MaxTokens int
 }
 
-// Topes: la respuesta de la réplica se lee con límite (el invitado no es de
-// fiar) y la frase de vuelta se recorta.
+// LLMInput es el mensaje del usuario para una orden: lo que va en {input}.
+func LLMInput(text, state string) string {
+	in := "Request: " + text
+	if state != "" {
+		in = "Room state: " + state + "\n" + in
+	}
+	return in
+}
+
+// Topes de la respuesta que se valida y de la frase de vuelta.
 const (
-	maxLLMBody   = 256 << 10
+	maxLLMOutput = 16 << 10
 	maxReplyRune = 200
 	maxActions   = 4
 )
 
 // Decide implementa Layer.
 func (v *VON) Decide(ctx context.Context, text, lang string) (Decision, error) {
-	if v == nil || v.Endpoint == "" {
+	if v == nil || v.Generate == nil {
 		return Decision{}, ErrUnavailable
 	}
 	if lang == "" || lang == "auto" {
@@ -91,127 +93,47 @@ func (v *VON) Decide(ctx context.Context, text, lang string) (Decision, error) {
 	if to <= 0 {
 		to = 60 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, to)
+	gctx, cancel := context.WithTimeout(ctx, to)
 	defer cancel()
 	state := ""
 	if v.State != nil {
 		state = v.State()
 	}
-	body, err := json.Marshal(v.request(text, state))
-	if err != nil {
+	out, model, err := v.Generate(gctx, LLMInput(text, state))
+	switch {
+	case errors.Is(err, ErrInvalidJSON):
+		out = ""
+	case err != nil:
 		return Decision{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.Endpoint, bytes.NewReader(body))
-	if err != nil {
-		return Decision{}, err
+	if len(out) > maxLLMOutput {
+		out = ""
 	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, vs := range v.Header {
-		for _, x := range vs {
-			req.Header.Add(k, x)
-		}
+	d := ParseLLM(out, text, lang)
+	d.Layer, d.Lang, d.Model = LayerVON, lang, model
+	d.LLM = &LLMStats{Raw: clip(out, 600)}
+	if prev, ok := PrevFrom(ctx); ok {
+		d = Veto(prev, d, text, lang)
 	}
-	cl := v.Client
-	if cl == nil {
-		cl = http.DefaultClient
-	}
-	resp, err := cl.Do(req)
-	if err != nil {
-		return Decision{}, err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxLLMBody+1))
-	if err != nil {
-		return Decision{}, err
-	}
-	if len(raw) > maxLLMBody {
-		return Decision{}, fmt.Errorf("von answer over %d bytes", maxLLMBody)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return Decision{}, fmt.Errorf("von answered %d: %s", resp.StatusCode, clip(string(raw), 200))
-	}
-	var cr chatResponse
-	if err := json.Unmarshal(raw, &cr); err != nil {
-		return Decision{}, fmt.Errorf("von: bad chat response: %w", err)
-	}
-	if len(cr.Choices) == 0 {
-		return Decision{}, errors.New("von: no choices in the answer")
-	}
-	content := cr.Choices[0].Message.Content
-	d := ParseLLM(content, text, lang)
-	d.Layer, d.Lang, d.Model = LayerVON, lang, v.Model
-	if prev, ok := PrevFrom(ctx); ok && prev.Reason == ReasonOutOfScope && len(d.Actions) > 0 && (d.Kind != KindSituation || hasCommandVerb(text)) {
-		// JEV reconoce las órdenes directas de la habitación con un 99 % de
-		// acierto. Si da «fuera de ámbito» con confianza, aquí solo cabe lo
-		// indirecto: una frase que describe cómo está algo («aquí hace frío»),
-		// sin verbo de orden. Una en imperativo («pon una alarma a las siete»,
-		// «enciende la cafetera») es una orden, pero no de esta habitación, y
-		// el LLM pequeño tiende a encajarla en la intención más parecida.
-		// Medido en MASSIVE: sin este veto actúa en un 10 % de lo que no es de
-		// la habitación.
-		d = Decision{Layer: LayerVON, Lang: lang, Model: v.Model, Confident: true, Intent: OutOfScope, Actions: []Action{},
-			Reason: ReasonVetoedByJEV, Kind: d.Kind, Reply: cannot(lang), LLM: d.LLM}
-	}
-	st := &LLMStats{PromptTokens: cr.Usage.PromptTokens, CompletionTokens: cr.Usage.CompletionTokens, Raw: clip(content, 600)}
-	if cr.Timings != nil {
-		st.CachedTokens = cr.Timings.CacheN
-		st.PromptMS, st.PredictedMS = cr.Timings.PromptMS, cr.Timings.PredictedMS
-	}
-	d.LLM = st
 	d.LatencyUS = float64(time.Since(t0).Nanoseconds()) / 1e3
 	return d, nil
 }
 
-type chatResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
-	Timings *struct {
-		CacheN      int     `json:"cache_n"`
-		PromptMS    float64 `json:"prompt_ms"`
-		PredictedMS float64 `json:"predicted_ms"`
-	} `json:"timings"`
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatRequest struct {
-	Model       string          `json:"model,omitempty"`
-	Messages    []chatMessage   `json:"messages"`
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature float64         `json:"temperature"`
-	CachePrompt bool            `json:"cache_prompt"`
-	JSONSchema  json.RawMessage `json:"json_schema"`
-}
-
-func (v *VON) request(text, state string) chatRequest {
-	mt := v.MaxTokens
-	if mt <= 0 {
-		mt = 200
+// Veto aplica a la respuesta del LLM lo que ya sabían las capas anteriores.
+//
+// JEV reconoce las órdenes directas de la habitación con un 99 % de acierto.
+// Si dio «fuera de ámbito» con confianza, aquí solo cabe lo indirecto: una
+// frase que describe cómo está algo («aquí hace frío»), sin verbo de orden.
+// Una en imperativo («pon una alarma a las siete», «enciende la cafetera») es
+// una orden, pero no de esta habitación, y el LLM pequeño tiende a encajarla
+// en la intención más parecida. Medido en MASSIVE: sin este veto actúa en un
+// 10 % de lo que no es de la habitación.
+func Veto(prev, d Decision, text, lang string) Decision {
+	if prev.Reason != ReasonOutOfScope || len(d.Actions) == 0 || (d.Kind == KindSituation && !hasCommandVerb(text)) {
+		return d
 	}
-	user := "Request: " + text
-	if state != "" {
-		user = "Room state: " + state + "\n" + user
-	}
-	// json_schema va tal cual en el cuerpo: llama-server lo convierte en
-	// gramática, y el proxy del gateway reenvía el cuerpo sin tocarlo.
-	return chatRequest{
-		Model:       v.Model,
-		Messages:    []chatMessage{{Role: "system", Content: LLMSystemPrompt}, {Role: "user", Content: user}},
-		MaxTokens:   mt,
-		Temperature: 0,
-		CachePrompt: true,
-		JSONSchema:  LLMSchema,
-	}
+	return Decision{Layer: d.Layer, Lang: lang, Model: d.Model, Confident: true, Intent: OutOfScope, Actions: []Action{},
+		Reason: ReasonVetoedByJEV, Kind: d.Kind, Reply: cannot(lang), LLM: d.LLM}
 }
 
 // ParseLLM valida la respuesta del LLM contra la taxonomía. Una respuesta

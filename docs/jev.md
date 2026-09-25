@@ -170,6 +170,15 @@ Sobre los commits reales de la evaluación (asunto + hasta 300 bytes de cuerpo),
 n-gramas de caracteres, incluida la contabilidad de métricas. `Model` es
 inmutable; los búferes de cada llamada salen de un `sync.Pool`.
 
+Lo mismo en x86 (i7-8700T, bare metal, docs/von.md#x86-sin-anidar-i7-8700t):
+~2× más lento por predicción a un núcleo (3095-11 919 ns/op según
+características) y, con solo 4 núcleos frente a los 10 del M4, el paralelo
+agregado llega a 785 000 decisiones/s en vez de ~3,4 M/s. Con los modelos
+reales de domótica (`intent.jev` + `slots.jevs`, `kling domotica eval`,
+9794 filas): cascada plantillas→JEV a 9,74 µs p50 (~103 000 decisiones/s de
+un núcleo) y 82 MiB de pico de RSS con ambos modelos cargados. Tabla completa
+en docs/von.md.
+
 ## Formato del fichero `.jev`
 
 Todo little-endian:
@@ -235,3 +244,13 @@ están acotadas (líneas de 1 MiB, 4 GiB, 5 M de ejemplos).
   entre versiones de Go (no entre plataformas).
 - La evidencia son pesos de un modelo lineal: dice qué empujó, no por qué. Con
   pocos datos aparecen palabras vacías («w:el», «w:que») como evidencia.
+
+## Mejoras futuras
+
+JEV en CPU es el objetivo: rápido, barato y bajo demanda. Cuando JEV duda, la
+cascada puede escalar a capas más caras y opcionales (el codificador de
+frases, VON) solo si una evaluación muestra que hacen falta. Una de esas
+mejoras está documentada pero no aplicada: el [ajuste fino del codificador con
+GPU](codificador.md#mejora-futura-no-aplicada-ajuste-fino-con-gpu), que
+resolvería el lenguaje indirecto en la capa 3 (~3 ms) en vez de escalarlo a
+VON.
