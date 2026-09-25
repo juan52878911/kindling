@@ -35,6 +35,10 @@ import (
 const (
 	KindJEV = "jev"
 	KindVON = "von"
+	// KindEmbed es un codificador de frases servido como un VON (dorado de
+	// `kling models add` con kind embed): la capa 3 de las tareas de
+	// domótica (domotica.go).
+	KindEmbed = "embed"
 )
 
 // Config es el registro de modelos y tareas (un fichero JSON, ai.json).
@@ -56,7 +60,7 @@ type ModelConfig struct {
 	Kind string `json:"kind"` // jev | von
 	// Path es el .jev (kind jev). Relativo = relativo al fichero de config.
 	Path string `json:"path,omitempty"`
-	// Snapshot es el dorado de `kling models add` (kind von).
+	// Snapshot es el dorado de `kling models add` (kind von o embed).
 	Snapshot string `json:"snapshot,omitempty"`
 	// MaxReplicas acota las réplicas de este modelo (0 = la del gateway).
 	MaxReplicas int `json:"max_replicas,omitempty"`
@@ -87,6 +91,10 @@ type TaskConfig struct {
 	EscalateForce bool `json:"escalate_force,omitempty"`
 	// VON es el modelo de una tarea de generación.
 	VON string `json:"von,omitempty"`
+	// Domotica hace de la tarea una DECISIÓN de domótica (domotica.go):
+	// plantillas → JEV + huecos → codificador, con /v1/decide. Excluye todo
+	// lo demás de la tarea.
+	Domotica *DomoticaConfig `json:"domotica,omitempty"`
 
 	// Labels son las etiquetas válidas; salen del modelo JEV y, si se dan
 	// aquí también, tienen que ser las mismas.
@@ -126,6 +134,13 @@ type TaskConfig struct {
 	// gramática de llama-server (nil = sí). Un modelo de 360M parámetros
 	// divaga; con la gramática no puede.
 	Grammar *bool `json:"grammar,omitempty"`
+	// JSONSchema restringe la salida de una generación a JSON que cumple este
+	// esquema (el json_schema de llama-server, que lo convierte en una
+	// gramática). Medido en docs/von-cpu.md: sin él, Qwen2.5-1.5B devolvía
+	// JSON inválido en 2 de 21 respuestas de la tarea de domótica; con él, en
+	// ninguna, a cambio de ~10 % de velocidad de generación. El gateway
+	// comprueba además que la salida sea JSON: el invitado no es de fiar.
+	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
 	// OnVONError: "jev" (por defecto) contesta con la etiqueta de JEV marcada
 	// como degradada si VON no responde; "error" devuelve 503.
 	OnVONError string `json:"on_von_error,omitempty"`
@@ -171,6 +186,15 @@ func LoadConfig(path string) (*Config, error) {
 	for _, m := range c.Models {
 		if m.Kind == KindJEV && !filepath.IsAbs(m.Path) {
 			m.Path = filepath.Join(filepath.Dir(path), m.Path)
+		}
+	}
+	for _, t := range c.Tasks {
+		if d := t.Domotica; d != nil {
+			for _, p := range []*string{&d.Slots, &d.Head} {
+				if *p != "" && !filepath.IsAbs(*p) {
+					*p = filepath.Join(filepath.Dir(path), *p)
+				}
+			}
 		}
 	}
 	return c, nil
@@ -220,12 +244,12 @@ func (c *Config) Validate() error {
 			if m.Path == "" || m.Snapshot != "" {
 				errs = append(errs, fmt.Errorf("model %q: a jev model needs path (and no snapshot)", n))
 			}
-		case KindVON:
+		case KindVON, KindEmbed:
 			if m.Snapshot == "" || m.Path != "" {
-				errs = append(errs, fmt.Errorf("model %q: a von model needs snapshot (and no path)", n))
+				errs = append(errs, fmt.Errorf("model %q: a %s model needs snapshot (and no path)", n, m.Kind))
 			}
 		default:
-			errs = append(errs, fmt.Errorf("model %q: kind must be jev or von, not %q", n, m.Kind))
+			errs = append(errs, fmt.Errorf("model %q: kind must be jev, von or embed, not %q", n, m.Kind))
 		}
 		if m.MaxReplicas < 0 || m.MaxReplicas > 64 {
 			errs = append(errs, fmt.Errorf("model %q: max_replicas must be 0..64", n))
@@ -238,6 +262,10 @@ func (c *Config) Validate() error {
 		}
 		if t == nil {
 			errs = append(errs, fmt.Errorf("task %q: empty", n))
+			continue
+		}
+		if t.Domotica != nil {
+			errs = append(errs, c.validateDomotica(n, t)...)
 			continue
 		}
 		gen := t.VON != ""
@@ -272,7 +300,16 @@ func (c *Config) Validate() error {
 			if t.Temperature != nil && !(*t.Temperature >= 0 && *t.Temperature <= 2) {
 				errs = append(errs, fmt.Errorf("task %q: temperature must be in [0,2]", n))
 			}
+			if len(t.JSONSchema) > 0 {
+				var obj map[string]any
+				if len(t.JSONSchema) > maxPromptBytes || json.Unmarshal(t.JSONSchema, &obj) != nil {
+					errs = append(errs, fmt.Errorf("task %q: json_schema must be a JSON object of at most %d bytes", n, maxPromptBytes))
+				}
+			}
 		} else {
+			if len(t.JSONSchema) > 0 {
+				errs = append(errs, fmt.Errorf("task %q: json_schema is for generation tasks (a classification answers one label, with its own grammar)", n))
+			}
 			if t.Temperature != nil {
 				errs = append(errs, fmt.Errorf("task %q: temperature is for generation tasks (escalations answer at 0)", n))
 			}
@@ -337,6 +374,20 @@ func (c *Config) vonModel(name string) (string, *ModelConfig) {
 	}
 	for _, n := range sortedKeys(c.Models) {
 		if m := c.Models[n]; m.Kind == KindVON && m.Snapshot == name {
+			return n, m
+		}
+	}
+	return "", nil
+}
+
+// replicaModel es vonModel para todo lo que se sirve con réplicas (VON y
+// codificadores): lo que el planificador despierta, congela y cuenta.
+func (c *Config) replicaModel(name string) (string, *ModelConfig) {
+	if m := c.Models[name]; m != nil && (m.Kind == KindVON || m.Kind == KindEmbed) {
+		return name, m
+	}
+	for _, n := range sortedKeys(c.Models) {
+		if m := c.Models[n]; (m.Kind == KindVON || m.Kind == KindEmbed) && m.Snapshot == name {
 			return n, m
 		}
 	}

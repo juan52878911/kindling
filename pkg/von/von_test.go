@@ -16,6 +16,9 @@ func TestCatalogoFijado(t *testing.T) {
 			t.Errorf("%s repetido", m.Ref())
 		}
 		visto[m.Ref()] = true
+		if m.Source != "" {
+			continue // convertido por kindling: lo comprueba TestCatalogoEmbed
+		}
 		if !hex40.MatchString(m.Revision) || !reSHA256.MatchString(m.SHA256) {
 			t.Errorf("%s sin fijar: revisión %q, sha256 %q", m.Ref(), m.Revision, m.SHA256)
 		}
@@ -65,6 +68,9 @@ func TestFind(t *testing.T) {
 		t.Fatalf("3b accepting its license: %v", err)
 	}
 	for _, m := range Catalog {
+		if m.Source != "" {
+			continue
+		}
 		if m.License == "" || !strings.HasPrefix(m.LicenseURL, "https://huggingface.co/"+m.Repo+"/blob/"+m.Revision+"/") {
 			t.Errorf("%s: license %q at %q", m.Ref(), m.License, m.LicenseURL)
 		}
@@ -86,7 +92,7 @@ func TestResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Ctx != DefaultCtx || r.Parallel != 1 || r.Threads != 0 || r.Ref != "smollm2-360m-instruct:q8_0" {
+	if r.Ctx != DefaultCtx || r.Parallel != 1 || r.Threads != 0 || r.Ref != "smollm2-360m-instruct:q8_0" || r.CacheRAM != DefaultCacheRAM {
 		t.Fatalf("valores por defecto: %+v", r)
 	}
 	if r.ModelPath() != "/models/smollm2-360m-instruct-q8_0.gguf" {
@@ -118,11 +124,27 @@ func TestResolve(t *testing.T) {
 		{Model: "smollm2-360m-instruct", Parallel: 17},
 		{Model: "smollm2-360m-instruct", Ctx: 512, Parallel: 4},
 		{Model: "smollm2-360m-instruct", Threads: -1},
+		{Model: "smollm2-360m-instruct", CacheRAM: ptr(-1)},
+		{Model: "smollm2-360m-instruct", CacheRAM: ptr(5000)},
 	}
 	for _, s := range malos {
 		if _, err := s.Resolve(); err == nil {
 			t.Errorf("debería fallar: %+v", s)
 		}
+	}
+}
+
+func ptr(n int) *int { return &n }
+
+func TestCacheRAM(t *testing.T) {
+	// 0 es "sin caché", no "el defecto": por eso es un puntero.
+	r, err := Spec{Model: "smollm2-360m-instruct", CacheRAM: ptr(0)}.Resolve()
+	if err != nil || r.CacheRAM != 0 || !strings.Contains(r.RunScript(), `'--cache-ram' '0'`) {
+		t.Fatalf("sin caché: %+v %v", r, err)
+	}
+	r, err = Spec{Model: "smollm2-360m-instruct", CacheRAM: ptr(128)}.Resolve()
+	if err != nil || !strings.Contains(r.RunScript(), `'--cache-ram' '128'`) {
+		t.Fatalf("128: %+v %v", r, err)
 	}
 }
 
@@ -136,7 +158,7 @@ func TestRunScript(t *testing.T) {
 		"#!/bin/sh\n",
 		"THREADS=$(nproc)\n",
 		`exec /opt/llama.cpp/llama-server '--model' '/models/qwen2.5-0.5b-instruct-q4_k_m.gguf'`,
-		`'--port' '8000'`, `'--ctx-size' '2048'`, `'--threads' "$THREADS"`, `'--cache-ram' '0'`,
+		`'--port' '8000'`, `'--ctx-size' '2048'`, `'--threads' "$THREADS"`, `'--cache-ram' '64'`,
 		`'--alias' 'qwen2.5-0.5b-instruct:q4_k_m'`,
 	} {
 		if !strings.Contains(s, want) {

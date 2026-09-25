@@ -85,6 +85,31 @@ curl -H "Authorization: Bearer $(cat ~/.config/kling/ai.token)" \
 `SIGHUP` o `kling ai reload` releen el registro sin cortar nada, y dicen qué
 cascadas quedan activas, forzadas o rechazadas.
 
+### Prefijos precalculados: `kling ai prime`
+
+El `system` de una tarea (y el texto fijo con el que empieza su `prompt`,
+hasta la primera variable) es igual en todas sus peticiones, y en un modelo
+pequeño en CPU evaluarlo es casi todo el coste de una respuesta corta: con un
+system prompt de ~800 tokens, la primera petición de una réplica recién
+restaurada de Qwen2.5-1.5B tarda 4,7 s, de los que ~4,5 son ese prefijo.
+
+```sh
+kling ai prime                 # todos los modelos VON del registro
+kling ai prime qwen -dry-run   # qué haría
+```
+
+`ai prime` rehace el dorado de cada modelo VON con los prefijos de sus tareas
+ya evaluados dentro: una réplica restaurada los tiene en la caché de prompts de
+`llama-server` (`--cache-ram`, [von.md](von.md)) y solo evalúa lo que cambia.
+Medido: la primera petición de la tarea pasa de 4,7 s a 0,4 s, y cambiar de
+una tarea a otra en la misma réplica, de 2,8 s a 0,1 s ([von-cpu.md](von-cpu.md)).
+El dorado lleva la etiqueta `von.prefixes` con el hash de sus prefijos: repetir
+`ai prime` sin cambios en las tareas no hace nada (`-force` lo rehace igual).
+No es automático: rehacer un dorado cuesta lo que cargar el modelo, y el daemon
+no reemplaza un dorado con réplicas vivas (hay que quitarlas antes: `kling ps`,
+`kling rm`). Un prefijo que cambia después solo pierde la ventaja: esa petición evalúa
+el prefijo entero, como antes, y desde ahí queda en la caché de la réplica.
+
 ### Tareas
 
 Una tarea es de **clasificación** (lleva `jev`) o de **generación** (lleva
@@ -106,6 +131,7 @@ al revés, porque una clave que no hace nada es un error que no se ve.
 | `temperature` | generación | 0,7 por defecto; el cliente puede cambiarla en [0, 2] |
 | `system`, `prompt` | las dos | la pregunta a VON. En una escalada: `{labels}`, `{text}`, `{fields}`, `{candidates}` (top-3 de JEV). En una generación: `{input}` y las `vars` del cliente. Un solo pase: lo que traiga el texto del usuario no se vuelve a expandir |
 | `max_tokens` | las dos | 16 en una escalada (una etiqueta); 256 en una generación, y es el tope que puede pedir un cliente (máx. 4096) |
+| `json_schema` | generación | un esquema JSON (objeto, hasta 16 KiB): la salida de VON se restringe a JSON que lo cumple (el `json_schema` de `llama-server`, que lo convierte en gramática). El gateway comprueba además que la salida sea JSON; si no (una respuesta cortada por `max_tokens`), 502 con el `finish_reason`. Medido en [von-cpu.md](von-cpu.md): de 19/21 a 21/21 respuestas válidas, ~10 % más lento al generar |
 
 ### La cascada, solo con pruebas
 
@@ -144,12 +170,55 @@ Una evaluación nueva que gane activa la cascada en caliente si la tarea ya
 tenía `escalate_to`. Nunca hay una llamada a VON escondida: con la cascada
 apagada, ni las escaladas ni las auditorías tocan VON.
 
+### Tareas de domótica: `/v1/decide` con la capa 3
+
+Una tarea con un bloque `domotica` es la decisión de la habitación de demo
+([domotica.md](domotica.md)): plantillas → JEV + huecos en proceso y, para lo
+que dudan, el **codificador de frases** ([codificador.md](codificador.md)): un
+modelo `kind: "embed"` (el dorado de `kling models add enc-e5 -model
+multilingual-e5-small`) que `pkg/scheduler` despierta y congela como a un VON, y
+la cabeza `.jenc` que clasifica su vector aquí mismo.
+
+```json
+{
+  "models": {
+    "intent": {"kind": "jev", "path": "intent.jev"},
+    "enc":    {"kind": "embed", "snapshot": "enc-e5", "max_replicas": 1}
+  },
+  "tasks": {
+    "home": {"domotica": {"intent": "intent", "slots": "slots.jevs", "encoder": "enc", "head": "head.jenc"}}
+  }
+}
+```
+
+```sh
+kling ai test home "subir persiana habitación"
+# cover_open {"device":"blinds","area":"room"}  (layer encoder, p=0.996, confident, 3.32 ms)
+#   fast layers said cover_open p=0.957; encoder 3.3 ms
+kling ai eval home -data test.jsonl       # filas del JSONL unificado: texto, idioma, intención y huecos
+```
+
+`POST /v1/decide` con `{"task", "text", "lang"?}` devuelve la decisión entera
+(`decision` = `intent`, `slots`, `layer`, `confident`, `escalate`, `reason`,
+`fast_intent`, `encoder_us`, `encoder_error`) y `encoder`, el estado de la capa
+3. La capa 3 se enciende **solo con una evaluación que la respalde**, como la
+cascada: `kling ai eval <tarea>` pasa las filas por la cascada sin y con el
+codificador y el registro (`ai-evals/<tarea>.json`, `kind: "domotica"`) la
+enciende si contesta bien **más órdenes completas** donde discrepan (McNemar,
+p < 0,05) sin más errores confiados que uno por cada cien ganadas, con los
+mismos `.jev`, `.jevs`, `.jenc` (por su sha256) y dorado. Si no, las capas
+rápidas contestan y escalan a `"encoder"`; con ella, lo que tampoco resuelve
+sale con `escalate: "von"`. `encoder_force` la enciende sin respaldo. Si la
+réplica no contesta en 5 s (despertarla incluido), la decisión escala a VON
+con `encoder_error`. Medido en el Mac: 3,1–3,3 ms por `/v1/decide` con la
+réplica caliente, 981 ms si estaba congelada por inactividad.
+
 ## API
 
 | Ruta | Qué hace |
 |---|---|
 | `POST /v1/classify` | `{task, text, fields?, mode?, explain?}` → `{label, prob, escalate, source, latency_ms, evidence, jev, von, degraded}` |
-| `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny` |
+| `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny`. En una tarea de domótica, la decisión de la habitación (arriba) |
 | `POST /v1/generate` | `{task, input, vars?, max_tokens?, temperature?, seed?}` → `{output, model, finish_reason, usage, latency_ms}` |
 | `POST /v1/chat/completions`, `POST /v1/completions` | API de OpenAI hacia una réplica del modelo que nombra `model` (nombre del registro o del dorado), con streaming |
 | `GET /v1/models` | los modelos VON del registro, sin despertar nada |

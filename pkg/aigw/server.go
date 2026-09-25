@@ -144,6 +144,15 @@ func (g *Gateway) handleClassify(endpoint string) http.HandlerFunc {
 		if !decodeBody(w, r, &req) {
 			return
 		}
+		if tc := g.config().Tasks[req.Task]; endpoint == "decide" && tc != nil && tc.Domotica != nil {
+			resp, err := g.Decide(r.Context(), req)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
 		resp, err := g.Classify(r.Context(), endpoint, req)
 		if err != nil {
 			writeErr(w, err)
@@ -169,6 +178,15 @@ func (g *Gateway) handleGenerate(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleEval(w http.ResponseWriter, r *http.Request) {
 	var req EvalRequest
 	if !decodeBody(w, r, &req) {
+		return
+	}
+	if tc := g.config().Tasks[req.Task]; tc != nil && tc.Domotica != nil {
+		rec, err := g.evalDomotica(r.Context(), req)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"record": rec, "cascade": g.cascade(req.Task)})
 		return
 	}
 	rec, err := g.Eval(r.Context(), req)
@@ -202,7 +220,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 // TaskInfo es una tarea tal como la ve `kling ai ls`.
 type TaskInfo struct {
 	Name       string        `json:"name"`
-	Kind       string        `json:"kind"` // classify | generate
+	Kind       string        `json:"kind"` // classify | generate | domotica
 	JEV        string        `json:"jev,omitempty"`
 	VON        string        `json:"von,omitempty"` // el de una generación
 	Cascade    *CascadeState `json:"cascade,omitempty"`
@@ -219,7 +237,11 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 	for _, n := range sortedKeys(cfg.Tasks) {
 		t := cfg.Tasks[n]
 		ti := TaskInfo{Name: n, Kind: "classify", JEV: t.JEV, VON: t.VON, Labels: t.Labels, Audit: t.Audit}
-		if t.IsGenerate() {
+		if t.Domotica != nil {
+			ti.Kind, ti.JEV = "domotica", t.Domotica.Intent
+			c := g.cascade(n)
+			ti.Cascade = &c
+		} else if t.IsGenerate() {
 			ti.Kind = "generate"
 		} else {
 			c := g.cascade(n)

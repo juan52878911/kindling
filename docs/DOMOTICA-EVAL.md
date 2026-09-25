@@ -197,3 +197,75 @@ Que aún se cuela con confianza y la capa 3 debería atrapar:
 Para la fase 3: el codificador tendría que batir estas cifras en MASSIVE
 (exact 0,72 es / 0,78 en) y en las frases de reto (2 errores confiados de 54)
 para ganarse su sitio entre JEV y VON.
+
+## Capa 3: el codificador
+
+Diseño, modelo y cifras de latencia y memoria en [codificador.md](codificador.md).
+Aquí, lo que cambia en la evaluación: multilingual-e5-small (MIT) congelado,
+Q8_0, con una cabeza de una capa oculta (256) entrenada en train y calibrada
+en validación, solo sobre lo que las capas rápidas escalan. Mismo test, mismos
+modelos de las capas 1 y 2; `kling domotica eval -encoder head.jenc
+-embed-cache e5.jemb`.
+
+**La marca queda batida**: MASSIVE exact **0,745 es / 0,800 en** (0,718 / 0,782)
+y **2** errores confiados en las frases de reto (los mismos dos de JEV). Pero
+la mejora en MASSIVE está dentro del ruido de 220 frases por idioma, y el
+codificador congelado no resuelve lo indirecto.
+
+| sistema | grupo | intent | slotF1 | **exact** | cover | prec@c |
+|---|---|---:|---:|---:|---:|---:|
+| cascada (capas 1–2) | dentro de ámbito | 0,960 | 0,992 | 0,947 | 88,1 % | 0,976 |
+| **cascada + codificador** | dentro de ámbito | 0,968 | 0,993 | **0,956** | **90,7 %** | 0,976 |
+| | es | 0,956 | 0,991 | 0,939 | 88,2 % | 0,964 |
+| | en | 0,978 | 0,994 | 0,969 | 92,7 % | 0,985 |
+| | MASSIVE es | 0,832 | 0,924 | **0,745** | 73,6 % | 0,840 |
+| | MASSIVE en | 0,873 | 0,930 | **0,800** | 74,1 % | 0,877 |
+| | Home Assistant | 0,982 | 0,998 | 0,979 | 92,0 % | 0,987 |
+| | demo | 1,000 | 1,000 | 1,000 | 100 % | 1,000 |
+| | fuera de ámbito | 0,990 | — | 0,990 | 0,4 % | — |
+| | todo | 0,982 | 0,993 | 0,977 | 33,1 % | 0,968 |
+| codificador solo | dentro de ámbito | 0,926 | 0,992 | 0,913 | 16,4 % | 0,924 |
+| | MASSIVE es / en | 0,814 / 0,877 | | 0,723 / 0,800 | 12 % | 0,56 |
+
+Comparaciones (test; lo elegido se eligió en validación):
+
+- **Regresión logística** en vez de la capa oculta: MASSIVE 0,755 / 0,814,
+  dentro de ámbito 0,957. En test sale un pelo mejor; en validación, peor
+  (0,963 frente a 0,969). Ruido en los dos sentidos.
+- **paraphrase-multilingual-MiniLM-L12-v2** (Apache-2.0), misma cabeza:
+  MASSIVE 0,745 / 0,805, dentro de ámbito 0,954; intención de la cabeza 0,949
+  frente a 0,961.
+- **k-NN** (k=10, coseno) sobre los mismos vectores: intención 0,914 (la cabeza,
+  0,961).
+
+Frases de reto (bien / escala / MAL):
+
+| clase | cascada | **cascada + codificador** | codificador solo |
+|---|---|---|---|
+| indirecta (18) | 7 / 10 / 1 | 7 / 10 / **1** | 0 / 15 / 3 |
+| varias órdenes (9) | 0 / 9 / 0 | 0 / 9 / 0 | 0 / 9 / 0 |
+| casi fuera de ámbito (15) | 0 / 15 / 0 | 0 / 15 / 0 | 12 / 3 / 0 |
+| paráfrasis directa (12) | 8 / 3 / 1 | 8 / 3 / **1** | 3 / 9 / 0 |
+
+Qué contesta de verdad la capa 3: de las 6 648 frases de test que le llegan,
+94 con confianza (93 bien), casi todas `cover_open` y `cover_set_position` que
+JEV dudaba. 23 de las 28 clases no tienen umbral (en validación no hay bastantes
+filas escaladas de esas clases para prometer 0,90), así que en el resto su papel
+es la conjetura que acompaña a la escalada. Por eso la puerta del gateway cuenta
+órdenes **contestadas** bien (+93, McNemar p = 1e-28, 105 errores confiados
+frente a 104): contando también las conjeturas, +12 no es significativo
+(p = 0,097).
+
+**Indirectas nuevas** (40 escritas a mano para este trabajo, reparto de test de
+`pkg/domotica/indirect.jsonl`; optimistas, son del mismo proyecto): la cascada
+con codificador contesta 2 bien, escala 37 y falla 1 (una de JEV). Con los
+ejemplos de train de ese fichero (`train-encoder -indirect`), la intención que
+propone la cabeza acierta el 60 % de esas indirectas (17,5 % sin ellos; en las
+18 del reto, 61 % frente a 39 %), pero ninguna llega al umbral y la precisión
+de lo confiado baja de 0,968 a 0,963: queda como opción, y como punto de
+partida del ajuste fino con GPU (receta en codificador.md).
+
+Lo que la capa 3 **no** arregla y sigue siendo de VON: lo indirecto, lo fuera de
+ámbito (se escala por política), las órdenes múltiples, lo casi fuera de ámbito,
+relativo frente a absoluto y los conflictos de taxonomía de MASSIVE. Los dos
+errores confiados que quedan son de JEV y la capa 3 no llega a verlos.

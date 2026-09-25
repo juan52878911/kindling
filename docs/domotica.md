@@ -10,7 +10,7 @@ solo entra si su evaluación mejora la anterior.
 |---|---|---|---|
 | 1 | emparejador de las órdenes de la demo (`Matcher`) | ~1,5 µs | aquí |
 | 2 | JEV: intención (`pkg/jev`) + huecos (`pkg/jev/slots`, JEV-slots) | ~3–5 µs | aquí |
-| 3 | codificador de frases (MiniLM / e5-small con embeddings de llama.cpp) | ~10 ms | fase siguiente |
+| 3 | codificador de frases (multilingual-e5-small, embeddings de llama.cpp en una microVM) + cabeza `.jenc` | ~3 ms | [codificador.md](codificador.md) |
 | 4 | LLM pequeño (VON) con salida JSON restringida, para lo indirecto | cientos de ms | fase siguiente |
 
 Esta fase deja las capas 1 y 2 como bibliotecas (`pkg/domotica`,
@@ -75,7 +75,10 @@ La salida `-json` es la que consumirá el gateway:
 ```
 
 `confident: false` trae `reason` (`low_probability`, `missing_slot`,
-`multi_command`, `out_of_scope`, `no_model`) y `escalate: "encoder"`.
+`multi_command`, `out_of_scope`, `no_model`) y `escalate: "encoder"`. Con la
+capa 3 (`-encoder head.jenc -embed-url …`, [codificador.md](codificador.md)),
+lo que tampoco resuelve el codificador sale con `escalate: "von"` (y
+`encoder_error` si la réplica no contestó).
 
 ## Cómo decide (`Decider.Decide`)
 
