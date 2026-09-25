@@ -53,24 +53,24 @@ Diseño en [docs/domotica.md](docs/domotica.md), datos y licencias en
   (luces, termostato, persianas, tele, cerradura, alarma, ventilador, altavoz,
   enchufe) en español o inglés: `{intent, slots, layer, confident, latency_us}`.
   Capa 1, órdenes de la demo por coincidencia normalizada (1,5 µs, sin
-  reservas); capa 2, intención JEV + huecos JEV-slots (~5 µs la cascada). Lo
+  reservas); capa 2, intención Chispa + huecos Chispa-slots (~5 µs la cascada). Lo
   indirecto, lo fuera de ámbito, las órdenes múltiples o incompletas escalan
   (`escalate: "encoder"`). También `eval` (frente a plantillas y reglas, con
   frases de reto), `train-slots` y `templates`.
-- **JEV-slots** (`pkg/jev/slots`): etiquetador de secuencias lineal
+- **Chispa-slots** (`pkg/chispa/slots`): etiquetador de secuencias lineal
   (perceptrón estructurado promediado + Viterbi BIO) sobre características
-  hasheadas, pesos int16, determinista; formato `.jevs` con el endurecimiento
-  del `.jev` (topes antes de reservar, CRC-32C, `FuzzLoad`).
+  hasheadas, pesos int16, determinista; formato `.chispas` con el endurecimiento
+  del `.chispa` (topes antes de reservar, CRC-32C, `FuzzLoad`).
 - `pkg/domotica`: taxonomía de 28 intenciones, léxico es/en, números con
   palabras y unidades, plantillas estilo hassil, emparejador, cascada.
 - `tools/domotica-data`: descarga fijada por sha256 de Amazon MASSIVE 1.0 y
   home-assistant/intents (ambos CC BY 4.0, atribución en `NOTICE`) y los
   convierte a un esquema único con repartos sin fugas.
-- `jev.FoldRune` se exporta para que otros extractores plieguen igual que JEV.
+- `chispa.FoldRune` se exporta para que otros extractores plieguen igual que Chispa.
 
 ### VON en hierro x86, sin anidar
 
-- Primeras medidas de VON y JEV en x86 bare metal (i7-8700T, Firecracker sobre
+- Primeras medidas de VON y Chispa en x86 bare metal (i7-8700T, Firecracker sobre
   KVM nativo, sin la virtualización anidada del laboratorio Lima): thaw y
   primer token bajan a milisegundos y la generación llega a la velocidad real
   de la CPU (48 tok/s en SmolLM2-360M, frente a 8,8 anidado); el binario
@@ -99,7 +99,7 @@ Diseño, cifras y la receta del ajuste fino en
   GGUF convertido de su caché por hash.
 - **`pkg/codificador`**: cabeza (regresión logística o una capa oculta) sobre
   los vectores congelados, en Go puro, determinista, int16, calibrada con la
-  temperatura y los umbrales por clase de JEV; formato `.jenc` endurecido
+  temperatura y los umbrales por clase de Chispa; formato `.jenc` endurecido
   (`FuzzUnmarshal`), caché de vectores `.jemb`, cliente de `/v1/embeddings`
   acotado, k-NN de comparación.
 - **Cascada**: `Decider.Encoder` (capa 3) y `DecideContext`; lo que el
@@ -120,20 +120,20 @@ Diseño, cifras y la receta del ajuste fino en
   el lenguaje indirecto dentro de la capa 3 en vez de escalarlo a VON; decisión
   de no lanzarlo por ahora y detalle (coste, tiempo, alternativa en Mac con
   MPS) en [docs/codificador.md](docs/codificador.md#mejora-futura-no-aplicada-ajuste-fino-con-gpu).
-### JEV serverless: tareas en microVMs congeladas (`kling jev deploy`)
+### Chispa serverless: tareas en microVMs congeladas (`kling chispa deploy`)
 
-Hasta ahora JEV solo vivía dentro del proceso del gateway (`kind: "jev"`,
+Hasta ahora Chispa solo vivía dentro del proceso del gateway (`kind: "chispa"`,
 microsegundos, sin daemon). Ahora es también una tarea serverless de kindling,
-igual que un VON: `kling jev deploy <tarea> -model m.jev [-slots s.jevs] [-mem
-64] [-vcpus 1]` empaqueta el `.jev` con un invitado nuevo, estático y sin cgo,
-`cmd/kling-jev` (carga el modelo al arrancar y sirve `/v1/classify` y
-`/healthz`), y congela un dorado con el constructor `jev` nuevo (mismo motor que
+igual que un VON: `kling chispa deploy <tarea> -model m.chispa [-slots s.chispas] [-mem
+64] [-vcpus 1]` empaqueta el `.chispa` con un invitado nuevo, estático y sin cgo,
+`cmd/kling-chispa` (carga el modelo al arrancar y sirve `/v1/classify` y
+`/healthz`), y congela un dorado con el constructor `chispa` nuevo (mismo motor que
 `llm`: capa sobre la base `min`, sin nada que descargar). En el registro del
 gateway, `"backend": "microvm"` en vez de `"path"` hace que la tarea la sirva
 esa réplica —despertada y congelada por `pkg/scheduler`, como a un VON— en vez
 de este proceso; `"backend": "inprocess"` (o nada) sigue siendo la opción de
 siempre. Detalle, diagrama y cifras en
-[docs/jev-serverless.md](docs/jev-serverless.md).
+[docs/chispa-serverless.md](docs/chispa-serverless.md).
 
 - Medido en un i7-8700T (Proxmox CT 105, KVM sin anidar, backend Firecracker):
   imagen de 13 MB en disco (capa sobre `min`), dorado de 45 MB; primer arranque
@@ -142,21 +142,19 @@ siempre. Detalle, diagrama y cifras en
   concurrencia y hasta 4231 decisiones/s a 16 clientes por el gateway (HTTP +
   microVM). El mismo modelo en proceso, en el mismo host: mediana 91-123 µs y
   hasta 26 924 decisiones/s a 4 clientes.
-- **Carga bajo demanda de modelos JEV en proceso, medida** (Mac M4): RSS ocioso
+- **Carga bajo demanda de modelos Chispa en proceso, medida** (Mac M4): RSS ocioso
   con 0/10/100 modelos en el registro (nada cargado todavía) 15,5/18,3/28,3 MiB;
-  con un presupuesto de memoria (`-jev-mem`), el LRU desaloja de verdad (20
+  con un presupuesto de memoria (`-chispa-mem`), el LRU desaloja de verdad (20
   modelos usados, presupuesto de 8 MiB → 5 quedan cargados); hasta 113 000
   decisiones/s agregadas a 32 clientes por el mismo camino HTTP en proceso.
 - `pkg/aigw`: `ModelConfig.Backend` (`inprocess` | `microvm`), validado; la
-  cascada JEV → VON funciona igual desde una réplica microvm (candidatos y
+  cascada Chispa → VON funciona igual desde una réplica microvm (candidatos y
   evidencia enteros, no un top-3, para que `top_k` no pierda etiquetas).
 - **No entró de esta rama:** el barrido de 1/10/50 tareas microvm simultáneas en
   el backend `vz` del Mac y la comprobación de compartición de páginas entre
   réplicas del mismo dorado en Linux se quedan pendientes (requieren volver a
-  entrar en el host de pruebas; ver docs/jev-serverless.md).
+  entrar en el host de pruebas; ver docs/chispa-serverless.md).
 
-
-## v0.11.0 — 2026-09-24
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)
 
@@ -199,12 +197,12 @@ Diseño, uso y cifras en [docs/von.md](docs/von.md).
   planificador), y el daemon deja legible para el VMM la base que un constructor
   cree (antes solo la imagen construida).
 
-### JEV: un clasificador lineal diminuto
+### Chispa: un clasificador lineal diminuto
 
-`kling jev train|eval|predict|inspect` y los paquetes `pkg/jev` (características,
-formato, inferencia, calibración) y `pkg/jev/train` (entrenador). Go puro, sin
+`kling chispa train|eval|predict|inspect` y los paquetes `pkg/chispa` (características,
+formato, inferencia, calibración) y `pkg/chispa/train` (entrenador). Go puro, sin
 dependencias ni cgo; corre en local, sin daemon. Diseño en
-[docs/jev.md](docs/jev.md), evaluación en [docs/JEV-EVAL.md](docs/JEV-EVAL.md).
+[docs/chispa.md](docs/chispa.md), evaluación en [docs/CHISPA-EVAL.md](docs/CHISPA-EVAL.md).
 
 - Características: palabras y bigramas normalizados (minúsculas Unicode, acentos
   latinos plegados, CJK por carácter), n-gramas de caracteres opcionales y campos
@@ -217,15 +215,15 @@ dependencias ni cgo; corre en local, sin daemon. Diseño en
 - Cada predicción trae etiqueta, probabilidad calibrada (temperatura), umbral τ de
   su clase elegido para una precisión objetivo (0,95), decisión `confident` /
   `escalate` y, si se pide, la evidencia (características por w·x): lo que
-  necesita la cascada JEV → VON.
+  necesita la cascada Chispa → VON.
 - Inferencia entera y sin FMA: mismos bits en amd64 y arm64. 1,5 µs por texto de
   200 caracteres (6 µs con n-gramas) en un M4, sin reservas, segura en
   concurrencia.
-- Fichero `.jev`: magia, versión, especificación y su hash, pesos densos o
+- Fichero `.chispa`: magia, versión, especificación y su hash, pesos densos o
   dispersos (1,1 MB para 10 clases), CRC-32C; el cargador acota lecturas y
   reservas y rechaza ficheros corruptos sin pánico (`FuzzLoad`).
 - Evaluación real con 4 304 commits convencionales de repos locales
-  (`tools/jev-commits`, `scripts/jev-eval.sh`): exactitud 0,64–0,67 frente a 0,55
+  (`tools/chispa-commits`, `scripts/chispa-eval.sh`): exactitud 0,64–0,67 frente a 0,55
   de unas reglas y 0,32 de la clase mayoritaria; pero la precisión prometida por
   los umbrales cae de 0,95 a 0,77–0,85 con el cambio temporal y a 0,58 entre
   repos. Opt-in hasta que cada tarea tenga su evaluación.
@@ -234,36 +232,36 @@ dependencias ni cgo; corre en local, sin daemon. Diseño en
 
 Diseño, API y cifras en [docs/ai-gateway.md](docs/ai-gateway.md).
 
-- **`kling ai serve`**: JEV y VON detrás de una API. JEV clasifica, enruta y
+- **`kling ai serve`**: Chispa y VON detrás de una API. Chispa clasifica, enruta y
   filtra dentro del proceso (`POST /v1/classify`, `/v1/decide`; cuando duda,
   contesta con `escalate: true` y quien llama decide); VON genera
   (`POST /v1/generate` con plantilla por tarea, y `/v1/chat/completions`,
   `/v1/completions`, `/v1/models` compatibles con OpenAI, con streaming). Registro
   de modelos y tareas en `~/.config/kling/ai.json`; `SIGHUP` o `kling ai reload` lo
   releen sin cortar nada.
-- **La cascada JEV → VON solo con pruebas**: `escalate_to` en una tarea se activa
+- **La cascada Chispa → VON solo con pruebas**: `escalate_to` en una tarea se activa
   únicamente si `kling ai eval <tarea> -data test.jsonl` muestra, con datos
-  etiquetados de la tarea, que gana a JEV solo (McNemar exacta, p < 0,05) con los
-  mismos modelos (sha256 del `.jev`, dorado) y ajustes que se sirven; el registro
+  etiquetados de la tarea, que gana a Chispa solo (McNemar exacta, p < 0,05) con los
+  mismos modelos (sha256 del `.chispa`, dorado) y ajustes que se sirven; el registro
   se guarda en `ai-evals/<tarea>.json`. Si no, el gateway la rechaza y dice por
   qué, salvo `escalate_force`. Con la cascada apagada nunca se llama a VON a
   escondidas. `-von-alone` mide también a VON solo.
-- Medido en commits (861 de prueba): JEV solo 0,640; cascadas con Qwen2.5 0.5B
+- Medido en commits (861 de prueba): Chispa solo 0,640; cascadas con Qwen2.5 0.5B
   0,429, 1.5B 0,520 (Q4_K_M) / 0,498 (Q8_0), 3B 0,540: la puerta las rechaza todas.
 - Escala a cero con `pkg/scheduler`: réplicas `gw-<dorado>-*` con la etiqueta
   `ai.gateway=<id>`, thaw al llegar, freeze al quedarse ociosas, réplicas por
   concurrencia con tope por modelo, `-keepwarm` por popularidad. En un Mac, una
   generación caliente contesta en 9 ms y una réplica congelada en ~1,5 s.
-- `kling ai calibrate`: recalibra los umbrales de JEV con lo que VON contestó en lo
+- `kling ai calibrate`: recalibra los umbrales de Chispa con lo que VON contestó en lo
   escalado y en auditorías (`audit`), con mitad de evaluación; solo escribe si
-  mejora, y se niega si JEV dejaría de contestar. Recalibrar invalida la
+  mejora, y se niega si Chispa dejaría de contestar. Recalibrar invalida la
   evaluación de la cascada.
 - Seguridad: socket Unix 0600 por defecto; TCP solo con `-listen` y token
   (fichero 0600 o `$KLING_AI_TOKEN`); tokens con nombre y cuota; rutas
   `/v1/admin/*` solo con el token principal; cuerpos acotados y JSON estricto; el
   invitado no es de fiar (plazos, topes de respuesta, sin reenviar cabeceras ni
   rutas de control); semilla del host por petición.
-- `/metrics` en formato Prometheus: cobertura y escalado de JEV, latencias por
+- `/metrics` en formato Prometheus: cobertura y escalado de Chispa, latencias por
   fuente, thaws y arranques en frío por modelo, réplicas por estado.
 - `pkg/scheduler`: puerto del invitado configurable, etiquetas y prefijo propios
   (solo adopta lo suyo), `MachineTTL` (con la capacidad `renew`, un arrendamiento
