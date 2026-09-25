@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Reproduce docs/JEV-EVAL.md: construye el conjunto de commits a partir de los
-# repos locales, calcula las líneas base y entrena/evalúa las variantes de JEV.
+# Reproduce docs/CHISPA-EVAL.md: construye el conjunto de commits a partir de los
+# repos locales, calcula las líneas base y entrena/evalúa las variantes de Chispa.
 #
-#   scripts/jev-eval.sh OUT_DIR REPO...
-#   scripts/jev-eval.sh /tmp/jev ~/Documents/GitHub/* ~/Github/*
+#   scripts/chispa-eval.sh OUT_DIR REPO...
+#   scripts/chispa-eval.sh /tmp/chispa ~/Documents/GitHub/* ~/Github/*
 #
 # Los datos se quedan en OUT_DIR (no en el repo). Variables: HOLDOUT (repo que se
 # guarda entero para la prueba entre repos, OpenWA por defecto), TRAIN_PCT y
@@ -11,35 +11,35 @@
 # validación no hay bastantes ejemplos para fijar τ por clase; ver el informe).
 set -euo pipefail
 
-out=${1:?usage: scripts/jev-eval.sh OUT_DIR REPO...}
+out=${1:?usage: scripts/chispa-eval.sh OUT_DIR REPO...}
 shift
-[ $# -gt 0 ] || { echo "usage: scripts/jev-eval.sh OUT_DIR REPO..." >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: scripts/chispa-eval.sh OUT_DIR REPO..." >&2; exit 2; }
 root=$(cd "$(dirname "$0")/.." && pwd)
 holdout=${HOLDOUT:-OpenWA}
 mkdir -p "$out"
 export SOURCE_DATE_EPOCH=0 # modelos reproducibles byte a byte
 
-(cd "$root" && go build -o "$out/kling" ./cmd/kling && go build -o "$out/jev-commits" ./tools/jev-commits)
+(cd "$root" && go build -o "$out/kling" ./cmd/kling && go build -o "$out/chispa-commits" ./tools/chispa-commits)
 k=$out/kling
 
 echo "### dataset"
-"$out/jev-commits" build -out "$out" -holdout "$holdout" \
+"$out/chispa-commits" build -out "$out" -holdout "$holdout" \
 	-train-pct "${TRAIN_PCT:-60}" -valid-pct "${VALID_PCT:-20}" "$@"
 
 section() { echo; echo "### $*"; }
 
 section "baselines (temporal split)"
-"$out/jev-commits" baseline -train "$out/train.jsonl" -test "$out/test.jsonl"
+"$out/chispa-commits" baseline -train "$out/train.jsonl" -test "$out/test.jsonl"
 
 section "baselines (cross-repo: $holdout held out)"
-"$out/jev-commits" baseline -train "$out/xrepo-train.jsonl" -test "$out/xrepo-test.jsonl"
+"$out/chispa-commits" baseline -train "$out/xrepo-train.jsonl" -test "$out/xrepo-test.jsonl"
 
 train() { # nombre, split (vacío = temporal, xrepo- = entre repos), opciones...
 	local name=$1 split=$2
 	shift 2
-	section "jev $name (${split:-temporal})"
-	"$k" jev train -data "$out/${split}train.jsonl" -valid "$out/${split}valid.jsonl" \
-		-test "$out/${split}test.jsonl" -o "$out/$name.jev" "$@"
+	section "chispa $name (${split:-temporal})"
+	"$k" chispa train -data "$out/${split}train.jsonl" -valid "$out/${split}valid.jsonl" \
+		-test "$out/${split}test.jsonl" -o "$out/$name.chispa" "$@"
 }
 
 train words-fields ""
@@ -52,4 +52,4 @@ train xrepo-words-only xrepo- -fields=false
 train fix-vs-rest "" -one-vs-rest fix
 
 section "inspect"
-"$k" jev inspect "$out/words-fields.jev"
+"$k" chispa inspect "$out/words-fields.chispa"

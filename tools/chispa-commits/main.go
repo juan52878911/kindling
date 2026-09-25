@@ -1,11 +1,11 @@
-// jev-commits construye un conjunto de datos de evaluación para JEV a partir
+// chispa-commits construye un conjunto de datos de evaluación para Chispa a partir
 // del historial de git de repositorios locales, usando el prefijo de
 // Conventional Commits (feat, fix, docs…) como etiqueta débil, y calcula las
 // líneas base con las que compararlo. Nada se descarga: los datos salen de los
 // repos que ya hay en la máquina y no se guardan en este repositorio.
 //
-//	go run ./tools/jev-commits build -out DIR REPO...
-//	go run ./tools/jev-commits baseline -train DIR/train.jsonl -test DIR/test.jsonl
+//	go run ./tools/chispa-commits build -out DIR REPO...
+//	go run ./tools/chispa-commits baseline -train DIR/train.jsonl -test DIR/test.jsonl
 //
 // El prefijo (con su ámbito) se QUITA del texto: si no, el problema es leer las
 // cuatro primeras letras. También se quitan de los cuerpos las líneas que
@@ -34,7 +34,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 var types = []string{"build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"}
@@ -79,8 +79,8 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  jev-commits build -out DIR [-min 50] [-body 300] [-holdout NAME] REPO...
-  jev-commits baseline -train train.jsonl -test test.jsonl [-json]
+  chispa-commits build -out DIR [-min 50] [-body 300] [-holdout NAME] REPO...
+  chispa-commits baseline -train train.jsonl -test test.jsonl [-json]
 `)
 	os.Exit(2)
 }
@@ -95,7 +95,7 @@ func cmdBuild(args []string) error {
 	validPct := fs.Int("valid-pct", 10, "next percent used for validation (early stopping, calibration, τ); the rest is test")
 	fs.Parse(args)
 	if *out == "" || fs.NArg() == 0 {
-		return errors.New("usage: jev-commits build -out DIR REPO...")
+		return errors.New("usage: chispa-commits build -out DIR REPO...")
 	}
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		return err
@@ -325,7 +325,7 @@ func printStats(w io.Writer, files map[string][]row) {
 // Línea base de palabras clave: la regla que escribiría alguien en diez
 // minutos. Se evalúa en orden y la primera que casa gana; si ninguna casa, se
 // predice la clase mayoritaria y cuenta como «escalado» (así se compara la
-// cobertura de las reglas con la de JEV).
+// cobertura de las reglas con la de Chispa).
 var keywordRules = []struct {
 	label string
 	words []string
@@ -366,7 +366,7 @@ func cmdBaseline(args []string) error {
 	asJSON := fs.Bool("json", false, "JSON output")
 	fs.Parse(args)
 	if *trainPath == "" || *testPath == "" {
-		return errors.New("usage: jev-commits baseline -train train.jsonl -test test.jsonl")
+		return errors.New("usage: chispa-commits baseline -train train.jsonl -test test.jsonl")
 	}
 	trainEx, err := readFile(*trainPath)
 	if err != nil {
@@ -399,19 +399,19 @@ func cmdBaseline(args []string) error {
 		}
 		return -1
 	}
-	var majRows, kwRows []jev.Scored
+	var majRows, kwRows []chispa.Scored
 	for _, ex := range testEx {
 		g := gold(ex.Label)
-		majRows = append(majRows, jev.Scored{Gold: g, Pred: maj, Confident: true})
+		majRows = append(majRows, chispa.Scored{Gold: g, Pred: maj, Confident: true})
 		p, ok := maj, false
 		if l, hit := keywordPredict(ex.Text); hit {
 			p, ok = idx[l], true
 		}
-		kwRows = append(kwRows, jev.Scored{Gold: g, Pred: p, Confident: ok})
+		kwRows = append(kwRows, chispa.Scored{Gold: g, Pred: p, Confident: ok})
 	}
-	reports := map[string]*jev.Report{
-		"majority": jev.Score(labels, majRows, nil, false),
-		"keywords": jev.Score(labels, kwRows, nil, false),
+	reports := map[string]*chispa.Report{
+		"majority": chispa.Score(labels, majRows, nil, false),
+		"keywords": chispa.Score(labels, kwRows, nil, false),
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(reports)
@@ -423,11 +423,11 @@ func cmdBaseline(args []string) error {
 	return nil
 }
 
-func readFile(path string) ([]jev.Example, error) {
+func readFile(path string) ([]chispa.Example, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return jev.ReadExamples(f, 0, true)
+	return chispa.ReadExamples(f, 0, true)
 }

@@ -34,7 +34,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets guest jev-guest deploy deploy-mac vz test clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets guest chispa-guest deploy deploy-mac vz test clean fmt
 
 all: build
 
@@ -69,13 +69,13 @@ guest:
 		-ldflags "$(LDFLAGS)" -o kling-guest ./cmd/kling-guest
 	@echo "kling-guest  ($(VERSION), linux/$(GOARCH))"
 
-## jev-guest — el invitado de una tarea JEV serverless (cmd/kling-jev): carga
-## un .jev (y su .jevs opcional) al arrancar y sirve /v1/classify. Estático,
-## sin cgo: es lo que empaqueta el constructor "jev" (kling jev deploy).
-jev-guest:
+## chispa-guest — el invitado de una tarea Chispa serverless (cmd/kling-chispa): carga
+## un .chispa (y su .chispas opcional) al arrancar y sirve /v1/classify. Estático,
+## sin cgo: es lo que empaqueta el constructor "chispa" (kling chispa deploy).
+chispa-guest:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
-		-ldflags "$(LDFLAGS)" -o kling-jev ./cmd/kling-jev
-	@echo "kling-jev  ($(VERSION), linux/$(GOARCH))"
+		-ldflags "$(LDFLAGS)" -o kling-chispa ./cmd/kling-chispa
+	@echo "kling-chispa  ($(VERSION), linux/$(GOARCH))"
 
 ## daemon — compila el binario del host con KVM (linux/$(GOARCH), amd64 por defecto)
 daemon:
@@ -126,28 +126,28 @@ daemon-full: assets
 ## se rellena con el usuario de HOST (ssh://usuario@maquina): es quien entra por
 ## SSH a usar el CLI, así que es la mejor primera suposición de a quién cederle
 ## el socket.
-deploy: daemon guest jev-guest
+deploy: daemon guest chispa-guest
 	@# --now no reinicia lo que ya corre: hace falta restart explícito.
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	$(eval HOST_USER := $(if $(findstring @,$(TARGET)),$(firstword $(subst @, ,$(TARGET))),))
 	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-guest kling-jev scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh $(TARGET):/tmp/
+	scp -q kling-guest kling-chispa scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh $(TARGET):/tmp/
 	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
 	scp -q scripts/builders/llm $(TARGET):/tmp/builder-llm
-	scp -q scripts/builders/jev $(TARGET):/tmp/builder-jev
+	scp -q scripts/builders/chispa $(TARGET):/tmp/builder-chispa
 	scp -q packaging/$(BIN).service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
 		sudo install -m755 /tmp/kling-guest /usr/local/lib/kindling/kling-guest && \
-		sudo install -m755 /tmp/kling-jev /usr/local/lib/kindling/kling-jev && \
+		sudo install -m755 /tmp/kling-chispa /usr/local/lib/kindling/kling-chispa && \
 		sudo install -d -m755 /usr/local/lib/kindling/builders && \
 		sudo install -m755 /tmp/81-base-image.sh /usr/local/lib/kindling/81-base-image.sh && \
 		sudo install -m755 /tmp/71-build-glibc-base.sh /usr/local/lib/kindling/71-build-glibc-base.sh && \
 		sudo install -m755 /tmp/minimal-init.sh /usr/local/lib/kindling/minimal-init.sh && \
 		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
 		sudo install -m755 /tmp/builder-llm /usr/local/lib/kindling/builders/llm && \
-		sudo install -m755 /tmp/builder-jev /usr/local/lib/kindling/builders/jev && \
+		sudo install -m755 /tmp/builder-chispa /usr/local/lib/kindling/builders/chispa && \
 		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
 		if [ ! -f /etc/default/kling ]; then \
 			printf "%s\n" "# Config de kling propia de este host; make deploy la crea una vez y no la vuelve a tocar." "KLING_SOCKET_USER=$(HOST_USER)" "#KLING_RUN_AS=kindling" | sudo tee /etc/default/kling >/dev/null && \
@@ -157,11 +157,11 @@ deploy: daemon guest jev-guest
 		sudo systemctl restart $(BIN) && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
-	@echo "  agentes de invitado (kling-guest, kling-jev) y constructores base, llm y jev en /usr/local/lib/kindling"
+	@echo "  agentes de invitado (kling-guest, kling-chispa) y constructores base, llm y chispa en /usr/local/lib/kindling"
 	@echo "  config por host en /etc/default/kling (make deploy no la pisa en redespliegues)"
 	@echo
 	@echo "Imagen de herramientas para poblar volúmenes:  kling images toolchain"
-	@echo "Tarea JEV serverless:  kling jev deploy <task> -model m.jev"
+	@echo "Tarea Chispa serverless:  kling chispa deploy <task> -model m.chispa"
 	@echo "Servidores MCP:  despliega kindling-mcp (make deploy HOST=$(HOST) en su repositorio)"
 
 ## deploy-mac — atajo para desplegar a una VM Linux arm64 desde un Mac Apple Silicon.
@@ -200,4 +200,4 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-jev
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa

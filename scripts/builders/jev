@@ -1,4 +1,0 @@
-#!/bin/sh
-# Constructor "jev" del núcleo: modelos JEV como tarea serverless (kling jev
-# deploy). Ver docs/jev-serverless.md.
-exec /usr/local/bin/kling builder jev "$@"
