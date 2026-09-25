@@ -763,6 +763,19 @@ Measured on commit classification (861 held-out commits), Chispa alone is 0.640 
 refused them all. On a Mac, a warm generation answers in 9 ms, a frozen replica in
 ~1.5 s. Design, API, numbers and limits: [`docs/ai-gateway.md`](docs/ai-gateway.md).
 
+### Example: CI failure triage
+
+[`examples/ci-triage`](examples/ci-triage/README.md) is a separate program that
+uses the gateway: Chispa scores every line of a failed CI log (~1 µs a line, 25 ms
+per log through the gateway) and picks the few that explain the failure; a second
+Chispa model names the category; VON (Qwen2.5-1.5B) only reads that ~400-token
+chunk when Chispa is unsure; a local page lets a person confirm or correct it and
+exports the label for retraining. On 160 held-out LogChunks logs (Travis, CC BY 4.0)
+the chunk hits the hand-annotated lines in 70 % of logs vs 54 % for the last 30 lines
+and 38 % for an error regex; categories are harder (Chispa 0.52, with VON 0.56, not
+significant). On 34 real GitHub Actions failures it only ties the tail of the log
+(56 %): a new CI needs its own labels. [`docs/CI-TRIAGE-EVAL.md`](docs/CI-TRIAGE-EVAL.md).
+
 ## What persists and what does not
 
 Worth being clear about, because it is not obvious:

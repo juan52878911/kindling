@@ -771,6 +771,20 @@ rechazó todas. En un Mac, una generación con la réplica caliente contesta en 
 la réplica congelada en ~1,5 s. Diseño, API, cifras y límites:
 [`docs/ai-gateway.md`](docs/ai-gateway.md).
 
+### Ejemplo: triaje de fallos de CI
+
+[`examples/ci-triage`](examples/ci-triage/README.md) es un programa aparte que usa
+el gateway: Chispa puntúa cada línea de un log de CI fallido (~1 µs por línea, 25 ms
+por log por el gateway) y elige las pocas que explican el fallo; otro modelo Chispa
+le pone categoría; VON (Qwen2.5-1.5B) solo lee ese trozo de ~400 tokens cuando Chispa
+duda; una página local deja confirmarlo o corregirlo y exporta la etiqueta para
+reentrenar. En 160 logs de LogChunks no vistos (Travis, CC BY 4.0) el trozo toca las
+líneas anotadas a mano en el 70 % de los logs frente al 54 % de las últimas 30 líneas
+y el 38 % de una regex de errores; la categoría es más difícil (Chispa 0,52, con VON
+0,56, no significativo). En 34 fallos reales de GitHub Actions solo empata con la cola
+del log (56 %): un CI nuevo necesita sus propias etiquetas.
+[`docs/CI-TRIAGE-EVAL.md`](docs/CI-TRIAGE-EVAL.md).
+
 ## Qué persiste y qué no
 
 Conviene tenerlo claro, porque no es obvio:

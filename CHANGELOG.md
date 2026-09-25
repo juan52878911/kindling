@@ -6,6 +6,33 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## v0.12.0 — sin publicar
 
+### Ejemplo: triaje de fallos de CI (`examples/ci-triage`)
+
+- **Programa aparte** que usa kindling solo por fuera (`kling chispa train` y
+  el gateway por HTTP): Chispa puntúa cada línea de un log de CI fallido
+  (Travis, `gh run view --log-failed` o texto), elige el trozo que explica el
+  fallo y le pone categoría; VON solo lee ese trozo, con `json_schema`
+  (`{category, summary, next_step}`), y solo cuando Chispa duda. `analyze`,
+  una página local (`serve`) para confirmar o corregir, `eval` con líneas base
+  y logs propios anotados a mano (`lines`, `-manifest`), y `export` de las
+  confirmaciones (`ci-triage.feedback/v1`) para `kling chispa train` o la
+  importación de etiquetas humanas de la mejora continua. Logs acotados (la
+  cola de 16 MiB, 100 000 líneas).
+- **Datos**: LogChunks (MSR 2020, CC BY 4.0), descargado por
+  `examples/ci-triage/build-data.sh` y fijado por sha256; reparto por
+  repositorio; categorías de reglas en entrenamiento y revisadas a mano en
+  prueba (`data/test-categories.tsv`); modelos idénticos byte a byte.
+- **Cifras** ([docs/CI-TRIAGE-EVAL.md](docs/CI-TRIAGE-EVAL.md)): en 160 logs de
+  16 repos no vistos, el trozo de Chispa toca el fallo anotado en el 70 % de los
+  logs (últimas 30 líneas: 54 %; regex: 38 %), a 25 ms de mediana por log y
+  ~1 µs por línea; categoría 0,52 (VON Qwen2.5-1.5B 0,56, no significativo;
+  0,5B empeora a 0,43). Fuera de dominio (34 fallos reales de GitHub Actions)
+  empata con la cola del log (56 %). En microVM, 7,6× más lento que en
+  proceso y sin keep-alive agota los puertos del Mac: por línea, en proceso.
+- `kling chispa deploy -reuse-image`: hace el dorado de una imagen que ya
+  existe (en macOS, la construida en Linux y traída con `kling images copy`),
+  en vez de negarse.
+
 ### VON más rápido en CPU
 
 Cada cambio con su banco de pruebas y su puerta (entra solo si mejora lo medido
