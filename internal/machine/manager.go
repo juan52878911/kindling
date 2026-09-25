@@ -1172,13 +1172,27 @@ func (m *Manager) spawn(id, sock string, n *knet.Net) (int, error) {
 	return cmd.Process.Pid, nil
 }
 
+// precargaMaxBytes es hasta qué tamaño (bloques asignados) se precarga el
+// mem.file de una máquina al descongelarla.
+const precargaMaxBytes = 512 << 20
+
+// waitSocket espera a que el socket de la API de un VMM recién lanzado
+// conteste. El VMM tarda unos pocos milisegundos en abrirlo: se sondea cada
+// milisegundo los primeros 200 ms (un Ping a un socket Unix cuesta decenas de
+// µs) y cada 10 ms después. Con un paso fijo de 10 ms cada thaw pagaba un paso
+// entero de espera (10,7 ms medidos) para un socket listo en ~1 ms.
 func waitSocket(ctx context.Context, c *fc.Client) error {
-	deadline := time.Now().Add(5 * time.Second)
+	start := time.Now()
+	deadline := start.Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if c.Ping(ctx) == nil {
 			return nil
 		}
-		time.Sleep(10 * time.Millisecond)
+		paso := time.Millisecond
+		if time.Since(start) > 200*time.Millisecond {
+			paso = 10 * time.Millisecond
+		}
+		time.Sleep(paso)
 	}
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
@@ -1667,6 +1681,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := volcadoValido(dir); err != nil {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
+	}
+	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
+	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
+	// invitado no toca todo al despertar, y leerla entera competiría con el
+	// resto del host por el disco.
+	if allocatedBytes(memPath) <= precargaMaxBytes {
+		go precargar(memPath)
 	}
 
 	// Puerta de arranque: descongelar es cargar un snapshot en KVM —mapear su

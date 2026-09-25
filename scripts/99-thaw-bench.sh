@@ -111,7 +111,13 @@ if mode == "daemon":
         pass
     m = call(sock, "POST", "/machines", {"name": name, "from": snap})
     ip = m["ip"]
-    guest(ip)  # warm the path once
+    # A fresh restore may take a moment to listen; warm the path once.
+    for _ in range(100):
+        try:
+            guest(ip)
+            break
+        except OSError:
+            time.sleep(0.05)
     thaw, first, e2e, phases = [], [], [], {k: [] for k in PH}
     tier = "?"
     for i in range(n):
