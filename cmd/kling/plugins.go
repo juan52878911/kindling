@@ -18,7 +18,7 @@ import (
 // coreCommands son los comandos del núcleo. Ganan siempre: una extensión que
 // declare uno de estos no lo recibe.
 var coreCommands = []string{
-	"up", "status", "run", "ps", "logs", "freeze", "thaw", "stop", "rm", "squeeze",
+	"up", "status", "run", "ps", "logs", "freeze", "thaw", "pause", "stop", "rm", "squeeze",
 	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
 	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
 	"exec", "shell", "cp", "sandbox", "sandboxes", "resize", "models",

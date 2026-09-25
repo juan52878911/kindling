@@ -26,13 +26,13 @@ var coreSubcommands = [][2]string{
 	{"plugins", "ls"},
 	{"sandbox|sandboxes", "create ls renew rm"},
 	{"models", "ls add ask rm"},
-	{"chispa", "train eval predict inspect"},
-	{"domotica", "decide eval train-slots templates"},
-	{"ai", "serve ls test generate eval calibrate reload"},
+	{"chispa", "train eval predict inspect deploy ls rm"},
+	{"domotica", "decide eval train-slots templates eval-llm"},
+	{"ai", "serve ls test generate eval calibrate reload prime review feedback retrain rollback"},
 }
 
 // machineArgs son los comandos del núcleo que reciben un id de máquina.
-const machineArgs = "logs|freeze|thaw|stop|rm|top|commit|mmds|squeeze|exec|shell|resize|inspect"
+const machineArgs = "logs|freeze|thaw|pause|stop|rm|top|commit|mmds|squeeze|exec|shell|resize|inspect"
 
 func cmdCompletion(args []string) error {
 	if len(args) < 1 {

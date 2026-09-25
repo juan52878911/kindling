@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/codificador"
 	"github.com/juan52878911/kindling/pkg/domotica"
@@ -220,6 +221,8 @@ func (g *Gateway) decider(cfg *Config, d *DomoticaConfig, withEncoder bool) (*do
 // decisión de pkg/domotica, con la intención también como "decision" (lo que
 // devuelve /v1/decide en las tareas de clasificación).
 type DecideResponse struct {
+	// ID identifica la respuesta para /v1/feedback; solo en tareas con "learn".
+	ID    string `json:"id,omitempty"`
 	Task  string `json:"task"`
 	Label string `json:"decision"`
 	domotica.Decision
@@ -263,6 +266,14 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 	resp := &DecideResponse{Task: req.Task, Label: d.Intent, Decision: d}
 	if tc.Domotica.Encoder != "" {
 		resp.Encoder = &casc
+	}
+	if ls, ok := g.learnFor(req.Task); ok {
+		resp.ID = g.learn.newID()
+		fast := d.Confident && (d.Layer == domotica.LayerTemplate || d.Layer == domotica.LayerChispa)
+		g.met.learnAnswer(req.Task, ls.version, fast, ls.cfg.WindowMinutes)
+		if !fast && d.Layer != domotica.LayerTemplate && ls.cfg.capturing() {
+			g.captureDecide(ls, cfg, tc, req.Task, resp.ID, req.Text, d)
+		}
 	}
 	el := time.Since(t0)
 	resp.LatencyMS = float64(el.Microseconds()) / 1000
@@ -577,4 +588,26 @@ func (g *Gateway) saveRecord(task string, v any) error {
 		return err
 	}
 	return nil
+}
+
+// captureDecide guarda una orden que las capas rápidas escalaron por culpa de
+// la INTENCIÓN (Chispa dudó, o dijo «fuera de ámbito», que es donde caen las
+// órdenes indirectas); las que escalaron por un hueco que falta o por ser
+// dos órdenes no enseñan nada al modelo de intención. Si la capa del
+// codificador contestó confiada, su respuesta va como voto de maestro.
+func (g *Gateway) captureDecide(ls learnState, cfg *Config, tc *TaskConfig, task, id, text string, d domotica.Decision) {
+	im, err := g.chispa.get(cfg.Models[tc.Domotica.Intent].Path)
+	if err != nil {
+		return
+	}
+	in := chispa.Input{Text: text, Fields: map[string]any{"lang": d.Lang}}
+	p := im.PredictFull(in, 0)
+	if p.Confident && p.Label != domotica.OutOfScope {
+		return
+	}
+	var votes []TeacherVote
+	if d.Layer == domotica.LayerEncoder && d.Confident && d.Intent != "" {
+		votes = []TeacherVote{{Name: tc.Domotica.Encoder, Label: d.Intent, Conf: round4(d.Prob)}}
+	}
+	g.captureEscalation(ls, task, id, "escalated", in, p, votes)
 }

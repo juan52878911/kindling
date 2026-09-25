@@ -199,7 +199,7 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 		total += allocatedBytes(filepath.Join(m.snapDir(snap), "mem.file"))
 	}
 	for _, mc := range m.byID {
-		if mc.State != api.StateRunning {
+		if mc.State != api.StateRunning && mc.State != api.StatePaused {
 			continue
 		}
 		count(mc.From)

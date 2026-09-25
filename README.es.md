@@ -85,6 +85,7 @@ enlazadas:
 · [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
 · [Chispa: un clasificador diminuto para decisiones pequeñas](#chispa-un-clasificador-diminuto-para-decisiones-pequeñas)
 · [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
+· [Demo: una habitación](#demo-una-habitación-con-modelos-serverless)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -785,6 +786,29 @@ y el 38 % de una regex de errores; la categoría es más difícil (Chispa 0,52, 
 del log (56 %): un CI nuevo necesita sus propias etiquetas.
 [`docs/CI-TRIAGE-EVAL.md`](docs/CI-TRIAGE-EVAL.md).
 
+## Demo: una habitación con modelos serverless
+
+[`examples/domotica`](examples/domotica/README.md) es una aplicación aparte que
+*usa* kindling: una página web con una habitación simulada (luces, termostato,
+persianas, tele, altavoz, cerradura, alarma, ventilador, enchufe) que se maneja
+con órdenes de voz como texto, en español o inglés. Cada orden pasa por `kling ai
+serve`: las plantillas de la demo y el modelo rápido Chispa contestan en su
+proceso en microsegundos; lo que dudan va a un codificador de frases y luego a un
+LLM pequeño (Qwen2.5-1.5B con salida JSON restringida por un esquema y validada
+contra la taxonomía de la habitación), cada uno en una microVM que la orden
+descongela y que se congela otra vez al quedarse ociosa. La página enseña qué
+capa decidió, con qué confianza y en cuánto, si su microVM se descongeló (y en
+cuánto) y las microVMs de cada capa (despiertas o congeladas, memoria). La capa 4
+solo se enciende donde su evaluación muestra que gana a «escalar y no hacer
+nada»: con el 1.5B, en lo que el modelo rápido duda (31 órdenes más de MASSIVE
+bien, ninguna acción fuera de ámbito), no en todo (actuaría en el 1,5 % de la
+charla que no es para la habitación). Guía: [`docs/demo-domotica.md`](docs/demo-domotica.md).
+
+```sh
+kling ai serve -config examples/domotica/ai.json &     # con las rutas y dorados de tu host
+go run ./examples/domotica                            # http://127.0.0.1:8088/
+```
+
 ## Qué persiste y qué no
 
 Conviene tenerlo claro, porque no es obvio:
@@ -1177,6 +1201,7 @@ permite que N instancias compartan páginas.
 | [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
 | [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling chispa deploy`, thaw y rendimiento medidos frente a en proceso |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
+| [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |

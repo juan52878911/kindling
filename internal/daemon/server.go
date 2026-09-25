@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause"}
 
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
@@ -91,6 +91,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /machines/{ref}", s.handleGet)
 	mux.HandleFunc("POST /machines/{ref}/freeze", s.handleFreeze)
 	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
+	mux.HandleFunc("POST /machines/{ref}/pause", s.handlePause)
 	mux.HandleFunc("POST /machines/{ref}/squeeze", s.handleSqueeze)
 	mux.HandleFunc("POST /machines/{ref}/resize", s.handleResize)
 	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
@@ -345,6 +346,15 @@ func runStatus(err error) int {
 
 func (s *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.Freeze(r.Context(), r.PathValue("ref"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	mc, err := s.mgr.Pause(r.Context(), r.PathValue("ref"))
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return

@@ -37,7 +37,7 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload|prime> [...]")
+		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback> [...]")
 	}
 	switch args[0] {
 	case "serve":
@@ -56,8 +56,16 @@ func cmdAI(args []string) error {
 		return aiReload(args[1:])
 	case "prime":
 		return aiPrime(args[1:])
+	case "review":
+		return aiReview(args[1:])
+	case "feedback":
+		return aiFeedback(args[1:])
+	case "retrain":
+		return aiRetrain(args[1:])
+	case "rollback":
+		return aiRollback(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate, reload or prime", args[0])
+		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain or rollback", args[0])
 	}
 }
 
@@ -75,10 +83,13 @@ func aiServe(args []string) error {
 	tokenFile := fs.String("token-file", aiDefault("ai.token"), "token for -listen (generated 0600 if missing; $KLING_AI_TOKEN wins)")
 	noAuth := fs.Bool("no-auth", false, "no token on -listen; development only, loopback only")
 	id := fs.String("id", "default", "gateway id: label of its machines (ai.gateway=<id>)")
+	namePrefix := fs.String("name-prefix", "gw-", "prefix of the replica machines' names")
 	idle := fs.Duration("idle", 2*time.Minute, "time without requests before a replica is frozen")
 	maxReplicas := fs.Int("max-replicas", 2, "replicas per model (max_replicas in the registry wins)")
 	maxInflight := fs.Int("max-inflight", 1, "requests per replica before asking for another")
 	keepwarm := fs.Int("keepwarm", 0, "N most used models kept awake (0 = pure scale to zero)")
+	pausedMiB := fs.Int("paused-mib", 256, "MiB of idle replicas kept paused instead of frozen, small and popular first (0 = always freeze; docs/despertar.md)")
+	pausedFor := fs.Duration("paused-for", 0, "how long a paused replica waits before it is frozen (0 = 10 × -idle)")
 	chispaMem := fs.Int("chispa-mem", 256, "MiB of Chispa models kept loaded (LRU)")
 	vonTimeout := fs.Duration("von-timeout", 60*time.Second, "deadline of an escalation to VON")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -124,8 +135,9 @@ func aiServe(args []string) error {
 	defer stop()
 	client := api.NewClient(hostOf(*host))
 	g, err := aigw.New(aigw.Options{
-		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id,
+		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id, NamePrefix: *namePrefix,
 		Idle: *idle, MaxReplicas: *maxReplicas, MaxInflight: *maxInflight, KeepWarm: *keepwarm,
+		PausedMiB: *pausedMiB, PausedFor: *pausedFor,
 		ChispaBudget: int64(*chispaMem) << 20, VONTimeout: *vonTimeout,
 		PopularityFile: aiDefault("ai-popularity-" + *id + ".json"),
 	})
@@ -425,6 +437,7 @@ func aiList(args []string) error {
 	for _, n := range notes {
 		fmt.Println(n)
 	}
+	printLearn(live.Tasks)
 	if !running {
 		fmt.Println("\n(gateway not running: start it with kling ai serve)")
 	}
@@ -510,6 +523,9 @@ func aiTest(args []string) error {
 		esc = ", escalate: Chispa is unsure and the cascade is off"
 	}
 	fmt.Printf("%s  (source %s, p=%.3f, %.2f ms%s)\n", resp.Label, resp.Source, resp.Prob, resp.LatencyMS, esc)
+	if resp.ID != "" {
+		fmt.Printf("  id %s (kling ai feedback %s -id %s -label <right label>)\n", resp.ID, req.Task, resp.ID)
+	}
 	if resp.Chispa != nil {
 		fmt.Printf("  chispa: %s p=%.3f threshold=%.3f -> %s\n", resp.Chispa.Label, resp.Chispa.Prob, resp.Chispa.Threshold, resp.Chispa.Decision)
 	}

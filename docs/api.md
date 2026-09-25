@@ -31,6 +31,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `shares-copy` | v0.10 | `POST /shares/uploads`, `shares` con `mode: copy` en `POST /machines` y `POST /sandboxes` |
 | `shares-live` | v0.10 | `shares` con `mode: ro\|rw` (directorio del host del daemon, bajo `share_roots`); `share_roots` en `GET /info` |
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
+| `pause` | v0.12 | `POST /machines/{ref}/pause` |
 
 ## Rutas
 
@@ -51,6 +52,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `POST /machines` | crea y arranca (`RunRequest`: imagen o `from` un snapshot, vCPUs, memoria, egress y dominios, TTL, techo de CPU, volúmenes, carpetas compartidas, etiquetas) |
 | `GET /machines/{ref}` | una máquina |
 | `POST /machines/{ref}/freeze` · `/thaw` · `/stop` | ciclo de vida |
+| `POST /machines/{ref}/pause` | pausa una máquina en marcha sin volcarla (ver abajo) |
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
@@ -122,6 +124,18 @@ permisos `0600` porque el spec puede llevar secretos.
 | `POST /volumes` | crea (`name`, `size_mib`) |
 | `POST /volumes/{name}/populate` | instala paquetes dentro con una microVM de un solo uso |
 | `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no) |
+
+### `POST /machines/{ref}/pause`
+
+Pausa una máquina running sin volcarla: el VMM sigue vivo con el invitado
+parado (`PATCH /vm` `Paused` de Firecracker), sin gastar CPU pero reteniendo la
+RAM que ya tocó. `thaw` la reanuda con un simple `Resume`, sin `LoadSnapshot`
+ni resincronización: ~0,3 ms. Cuenta como viva para el vigilante, el TTL y la
+reconciliación, así que sobrevive a un reinicio del daemon igual que una
+running. Pausar una máquina que ya está pausada es un no-op (devuelve su
+estado tal cual); pausar una que no está `running`, o que tiene carpetas
+compartidas en vivo (no contestarían pausada y su sesión caería por
+keepalive: usa `freeze` en su lugar), da `400`.
 
 ### `POST /machines/{ref}/resize`
 

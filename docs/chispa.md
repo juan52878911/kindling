@@ -89,8 +89,11 @@ ganó con ningún LLM de 0,5B a 3B.
 3. Si `decision == "escalate"`, la petición va a VON. `PredictFull` da las
    probabilidades y la evidencia para acotar la pregunta («duda entre fix y
    test; pesan `w:assert`, `f:ext=.ts`»).
-4. Las respuestas de VON en lo escalado son etiquetas nuevas: el siguiente
-   `kling chispa train` las incluye. Chispa aprende de lo que antes escalaba.
+4. Lo escalado, con lo que contestó VON (o el codificador, o una persona), se
+   puede capturar y reentrenar con `kling ai retrain`, que solo promociona un
+   Chispa nuevo si gana en un conjunto de confianza: ver
+   [mejora-continua.md](mejora-continua.md). Chispa aprende de lo que antes
+   escalaba, sin fiarse de un maestro que no se haya validado.
 
 Las cifras que decide la cascada son las que imprime `kling chispa eval`:
 **cobertura** (qué fracción contesta Chispa), **precisión en lo confiado** (lo que
@@ -244,6 +247,10 @@ kling chispa eval -model m.chispa -data t.jsonl [-json]
 kling chispa predict -model m.chispa [-text T] [-fields JSON] [-top 5] [-json]
 kling chispa inspect <m.chispa> [-json]
 ```
+
+Cada línea puede llevar `"weight"` (0 o ausente = 1, como mucho 100): pesa el
+ejemplo dentro de su clase (el bucle de mejora continua da 0,5 a lo que
+etiqueta un maestro automático).
 
 Sin `-valid`, se aparta un 10 % por hash del contenido (estable aunque cambie el
 orden del fichero). Con datos con orden temporal, mejor un `-valid` con lo más

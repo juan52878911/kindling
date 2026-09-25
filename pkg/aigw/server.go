@@ -36,6 +36,11 @@ func (g *Gateway) Handler(token string) http.Handler {
 	mux.HandleFunc("POST /v1/admin/calibrate", g.admin(g.handleCalibrate))
 	mux.HandleFunc("POST /v1/admin/reload", g.admin(g.handleReload))
 	mux.HandleFunc("POST /v1/admin/eval", g.admin(g.handleEval))
+	mux.HandleFunc("POST /v1/feedback", g.handleFeedback)
+	mux.HandleFunc("POST /v1/admin/review", g.admin(g.handleReview))
+	mux.HandleFunc("POST /v1/admin/retrain", g.admin(g.handleRetrain))
+	mux.HandleFunc("POST /v1/admin/promote", g.admin(g.handlePromote))
+	mux.HandleFunc("POST /v1/admin/rollback", g.admin(g.handleRollback))
 	return g.sched.AuthHandler(g.limits(mux), token)
 }
 
@@ -50,7 +55,7 @@ func (g *Gateway) limits(h http.Handler) http.Handler {
 			return
 		}
 		limit := g.opts.MaxBody
-		if r.URL.Path == "/v1/admin/eval" {
+		if r.URL.Path == "/v1/admin/eval" || r.URL.Path == "/v1/admin/retrain" {
 			// Un conjunto etiquetado entero; solo el token principal llega a
 			// leerlo (admin rechaza antes de tocar el cuerpo).
 			limit = maxEvalBody
@@ -229,6 +234,7 @@ type TaskInfo struct {
 	Loaded     bool          `json:"chispa_loaded"`
 	Audit      float64       `json:"audit,omitempty"`
 	Samples    int           `json:"samples"`
+	Learn      *LearnInfo    `json:"learn,omitempty"`
 }
 
 func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
@@ -261,6 +267,7 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 			ti.Samples = r.len()
 		}
 		g.cfgMu.RUnlock()
+		ti.Learn = g.learnInfo(n)
 		out = append(out, ti)
 	}
 	writeJSON(w, map[string]any{"tasks": out})
@@ -297,7 +304,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	g.cfgMu.RUnlock()
 	reps := g.replicaCounts(r.Context())
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	g.met.write(w, g.chispa.stats(), samples, reps)
+	g.met.write(w, g.chispa.stats(), samples, reps, g.learnSnapshot())
 }
 
 // replicaCounts cuenta las réplicas de cada modelo por estado, preguntando al

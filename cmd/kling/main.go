@@ -75,6 +75,7 @@ MACHINES
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
+  pause <ref>                                      pauses it without dumping (thaw resumes it in ~1 ms)
   stop <ref>                                       terminates the machine
   rm <ref>                                         removes machine and snapshot
   resize <ref> -mem MiB                            changes its memory without restarting,
@@ -135,6 +136,8 @@ SMALL MODELS (Chispa, runs locally, no daemon)
   domotica eval -data t.jsonl [-challenge]         accuracy, slot F1, exact match, latency
   domotica train-slots -data d.jsonl -o m.chispas  trains the slot tagger (docs/domotica.md)
   domotica templates [-lang L]                     lists the predefined demo commands
+  domotica eval-llm -von G -data t.jsonl           layer 4 (VON LLM) vs doing nothing on what
+                                                   escalates; its record enables layer 4
 
 `
 
@@ -153,6 +156,14 @@ const usageTail = `AI GATEWAY (Chispa classifies, VON generates, models on deman
                                                    are on, forced or refused)
   ai prime [<model>...] [-dry-run]                 remakes each VON golden snapshot with its
                                                    tasks' prompt prefixes already evaluated
+  ai review <task> [-n 20] [-i]                    captured escalations a person should
+                                                   confirm or correct (docs/mejora-continua.md)
+  ai feedback <task> -id ID -label L               records a human label (or -discard,
+      [-teacher NAME] [-import labels.jsonl]       a teacher's answer, or a batch)
+  ai retrain <task> [-dry-run] [-rule R]           trains a shadow Chispa on gold + human +
+                                                   validated teachers; promotes it only if it
+                                                   wins on the trusted held-out set
+  ai rollback <task> [-to vN]                      serves the previous (or given) version
 
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,
@@ -237,7 +248,7 @@ func main() {
 		err = cmdPS(args)
 	case "logs":
 		err = cmdLogs(args)
-	case "freeze", "thaw", "stop", "rm":
+	case "freeze", "thaw", "pause", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
 	case "squeeze":
 		err = cmdSqueeze(args)
@@ -873,6 +884,8 @@ func cmdLifecycle(op string, args []string) error {
 			mc, err = c.Freeze(ctx, ref)
 		case "thaw":
 			mc, err = c.Thaw(ctx, ref)
+		case "pause":
+			mc, err = c.Pause(ctx, ref)
 		case "stop":
 			mc, err = c.Stop(ctx, ref)
 		case "rm":
@@ -887,7 +900,7 @@ func cmdLifecycle(op string, args []string) error {
 		case op == "freeze":
 			fmt.Printf("%s  warm  (%d ms, %d MiB on disk)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
 		case op == "thaw":
-			fmt.Printf("%s  running  (%d ms)\n", mc.ID[:12], mc.ThawMS)
+			fmt.Printf("%s  running  (%d ms)%s\n", mc.ID[:12], mc.ThawMS, wakeNote(mc.Wake))
 		default:
 			fmt.Printf("%s  %s\n", mc.ID[:12], mc.State)
 		}
@@ -1239,4 +1252,15 @@ func cmdResize(args []string) error {
 	}
 	fmt.Printf("%s  %d MiB (ceiling %d)\n", mc.Name, mc.MemMiB, mc.MemMaxMiB)
 	return nil
+}
+
+// wakeNote es el desglose de un despertar para `kling thaw`: el total que
+// esperó la llamada y sus fases más caras (docs/despertar.md).
+func wakeNote(p *api.WakePhases) string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf("  %s wake %.1f ms: net %.1f, spawn %.1f, socket %.1f, load %.1f, resync %.1f, other %.1f",
+		p.Tier, p.TotalMS, p.NetMS, p.SpawnMS, p.SocketMS, p.LoadMS, p.ResyncMS,
+		p.WaitMS+p.CheckMS+p.ForwardsMS+p.CgroupMS+p.FinishMS)
 }

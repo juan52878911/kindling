@@ -8,6 +8,7 @@ package net
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -31,10 +32,10 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := run("ip", "netns", "add", n.NS); err != nil {
 		return err
 	}
-	if err := run("ip", "link", "add", n.HostIf, "type", "veth", "peer", "name", n.NSIf); err != nil {
-		return err
-	}
-	if err := run("ip", "link", "set", n.NSIf, "netns", n.NS); err != nil {
+	// El extremo del namespace nace ya dentro de él. Crearlo fuera y moverlo
+	// después (`ip link set ... netns`) espera un periodo de gracia de RCU en
+	// el kernel: 14 ms medidos en un i7-8700T, un tercio de todo el montaje.
+	if err := run("ip", "link", "add", n.HostIf, "type", "veth", "peer", "name", n.NSIf, "netns", n.NS); err != nil {
 		return err
 	}
 
@@ -47,6 +48,12 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	}
 
 	ns := func(args ...string) error {
+		// `ip -n NS ...` entra en el namespace dentro del propio ip: un
+		// proceso en vez de dos (`ip netns exec NS ip ...`). Lo demás
+		// (iptables, sh) no sabe entrar solo y va con netns exec.
+		if args[0] == "ip" {
+			return run(append([]string{"ip", "-n", n.NS}, args[1:]...)...)
+		}
 		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
 	}
 
@@ -72,7 +79,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := ns("ip", "addr", "add", GuestGW+"/30", "dev", TapName); err != nil {
 		return err
 	}
-	if err := ns("ip", "link", "set", TapName, "up"); err != nil {
+	if err := ns("ip", "link", "set", TapName, "address", TapMAC, "up"); err != nil {
 		return err
 	}
 	if err := ns("ip", "route", "add", "default", "via", n.HostIP); err != nil {
@@ -84,8 +91,16 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 
 	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
 	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
-	if err := ns("iptables", "-t", "nat", "-A", "PREROUTING",
-		"-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP); err != nil {
+	dnat := []string{"-t", "nat", "-A", "PREROUTING", "-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP}
+	// none e internet van en UN iptables-restore con todas sus reglas: cada
+	// iptables por separado es un proceso que relee el conjunto de reglas (~3
+	// ms cada uno). allowlist sigue su camino (ipset, resolver).
+	if egress != EgressAllowlist {
+		if _, err := exec.LookPath("iptables-restore"); err == nil {
+			return n.restoreRules(append([][]string{dnat}, n.egressRules(egress)...))
+		}
+	}
+	if err := ns(append([]string{"iptables"}, dnat...)...); err != nil {
 		return err
 	}
 	return n.applyEgress(egress, domains)
@@ -99,6 +114,16 @@ func (n *Net) Teardown() {
 	stopResolver(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
+}
+
+// Exists dice si el namespace y el veth del lado del host siguen ahí: lo que
+// deja montado un Setup. Solo mira el sistema de ficheros, sin procesos.
+func (n *Net) Exists() bool {
+	if _, err := os.Stat("/var/run/netns/" + n.NS); err != nil {
+		return false
+	}
+	_, err := os.Stat("/sys/class/net/" + n.HostIf)
+	return err == nil
 }
 
 // StartAllowlistResolver revive el resolver dinámico de una microVM en modo

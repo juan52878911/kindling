@@ -40,6 +40,13 @@ const domoticaUsage = `usage: kling domotica <command> [options]
   train-encoder -data train.jsonl -valid v.jsonl   trains the layer-3 head on cached
        -cache c.jemb -o head.jenc [-hidden N]   encoder vectors
   templates [-lang es|en]                       the demo commands the template layer knows
+  eval-llm -von golden [-data test.jsonl]       layer 4 (a VON LLM with JSON output) on what
+     | -gateway G -llm-task T [-decide-task D]  the fast layers escalate, against doing
+                                                nothing; writes the record that enables it
+
+eval-llm asks the LLM through a generation task of the AI gateway: an in-process
+one on the daemon of -H with -von, or a running ` + "`kling ai serve`" + ` with -gateway
+(docs/domotica.md; the demo room that uses it is examples/domotica).
 
 decide and eval take the layer-3 encoder with -encoder head.jenc plus -embed-url
 http://host:port (a replica) and/or -embed-cache c.jemb (docs/codificador.md).
@@ -67,6 +74,8 @@ func cmdDomotica(args []string) error {
 		return cmdDomoticaTrainEncoder(args[1:])
 	case "templates":
 		return cmdDomoticaTemplates(args[1:])
+	case "eval-llm":
+		return cmdDomoticaEvalLLM(args[1:])
 	}
 	return fmt.Errorf("unknown domotica command %q\n\n%s", args[0], domoticaUsage)
 }

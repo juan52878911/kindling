@@ -662,12 +662,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 
 	netcfg := knet.Plan(m.allocNetIndex(), id)
-	if err := netcfg.Setup(egress, req.AllowDomains, m.priv.UID); err != nil {
+	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("setting up network: %w", err)
 	}
 	if err := m.priv.Own(dir, overlay); err != nil {
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, id)
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -698,7 +698,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// la cola, se deshace lo ya montado igual que un fallo de spawn.
 	release, glErr := m.enterLaunch(ctx)
 	if glErr != nil {
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, id)
 		m.fail(mc, glErr)
 		return nil, glErr
 	}
@@ -725,7 +725,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, id)
 		m.fail(mc, err)
 		return nil, err
 	}
@@ -734,7 +734,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		// que va a abrir tiene que estar replicado dentro del jail EN SU RUTA
 		// ABSOLUTA, porque LoadSnapshot abre cada drive con el path que quedó
 		// grabado —comprobado en el laboratorio—.
-		pid, sock, err = m.spawnJailed(id, netcfg)
+		pid, sock, _, err = m.spawnJailed(id, netcfg, nil)
 		if err != nil {
 			return abortar(err)
 		}
@@ -777,7 +777,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	} else {
 		sock = filepath.Join(dir, "fc.sock")
 		_ = os.Remove(sock)
-		pid, err = m.spawn(id, sock, netcfg)
+		pid, _, err = m.spawn(id, sock, netcfg, nil)
 		if err != nil {
 			return abortar(err)
 		}
