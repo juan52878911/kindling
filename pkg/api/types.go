@@ -19,6 +19,10 @@ const (
 	StateCreated State = "created"
 	StateRunning State = "running"
 	StateWarm    State = "warm"
+	// StatePaused: el VMM sigue vivo con el invitado en pausa (sin volcar
+	// nada a disco). Despertarla es solo reanudar: ~1 ms, pero retiene su RAM.
+	// Es el nivel "pausada" del planificador (docs/despertar.md).
+	StatePaused State = "paused"
 	StateStopped State = "stopped"
 	StateFailed  State = "failed"
 )

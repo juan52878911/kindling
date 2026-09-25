@@ -75,6 +75,7 @@ MACHINES
   logs <ref> [-tail N]                             microVM serial console
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
+  pause <ref>                                      pauses it without dumping (thaw resumes it in ~1 ms)
   stop <ref>                                       terminates the machine
   rm <ref>                                         removes machine and snapshot
   resize <ref> -mem MiB                            changes its memory without restarting,
@@ -237,7 +238,7 @@ func main() {
 		err = cmdPS(args)
 	case "logs":
 		err = cmdLogs(args)
-	case "freeze", "thaw", "stop", "rm":
+	case "freeze", "thaw", "pause", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
 	case "squeeze":
 		err = cmdSqueeze(args)
@@ -873,6 +874,8 @@ func cmdLifecycle(op string, args []string) error {
 			mc, err = c.Freeze(ctx, ref)
 		case "thaw":
 			mc, err = c.Thaw(ctx, ref)
+		case "pause":
+			mc, err = c.Pause(ctx, ref)
 		case "stop":
 			mc, err = c.Stop(ctx, ref)
 		case "rm":

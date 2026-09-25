@@ -1247,6 +1247,15 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateWarm {
 		return cur, nil
 	}
+	// Una pausada se reanuda antes: hay que vaciar sus volúmenes y preguntar
+	// por su agente, y un invitado pausado no contesta a nada.
+	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StatePaused {
+		r, err := m.reanudarLocked(ctx, cur, nil)
+		if err != nil {
+			return nil, err
+		}
+		mc = r
+	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be frozen (it is %s)", mc.State)
 	}
@@ -1688,11 +1697,33 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono.marca(&crono.p.WaitMS)
 
 	// Otra llamada pudo descongelarla mientras esperábamos el candado.
-	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateRunning {
+	cur, ok := m.Get(mc.ID)
+	if ok && cur.State == api.StateRunning {
 		return cur, nil
 	}
+	// Pausada: solo reanudar (ver pausa.go).
+	if ok && cur.State == api.StatePaused {
+		crono.p.Tier = "paused"
+		out, err := m.reanudarLocked(ctx, cur, crono)
+		if err != nil {
+			return nil, err
+		}
+		fases := crono.cerrar()
+		out.Wake = fases
+		m.mu.Lock()
+		if l := m.byID[mc.ID]; l != nil {
+			l.Wake = fases
+		}
+		m.mu.Unlock()
+		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
+			Message: "resumed" + notaFases(fases)})
+		return out, nil
+	}
+	if ok {
+		mc = cur
+	}
 	if mc.State != api.StateWarm {
-		return nil, fmt.Errorf("only a warm machine can be thawed (it is %s)", mc.State)
+		return nil, fmt.Errorf("only a warm or paused machine can be thawed (it is %s)", mc.State)
 	}
 
 	dir := m.dir(mc.ID)
@@ -1893,7 +1924,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono.marca(&crono.p.CgroupMS)
 
 	m.mu.Lock()
-	cur := m.byID[mc.ID]
+	cur = m.byID[mc.ID]
 	if cur == nil {
 		delete(m.socket, mc.ID)
 		m.mu.Unlock()
@@ -2055,7 +2086,8 @@ func (m *Manager) killMachine(id string, flush bool) {
 	if mc == nil || mc.PID == 0 {
 		return
 	}
-	if flush {
+	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
+	if flush && mc.State != api.StatePaused {
 		m.flushVolume(mc)
 	}
 	_ = syscall.Kill(mc.PID, syscall.SIGKILL)

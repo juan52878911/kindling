@@ -48,7 +48,7 @@ func (m *Manager) ExecTarget(ctx context.Context, ref string) (*api.Machine, err
 	if mc.OnTTL != api.OnTTLRemove {
 		m.touchTTL(mc.ID)
 	}
-	if mc.State == api.StateWarm {
+	if mc.State == api.StateWarm || mc.State == api.StatePaused {
 		thawed, err := m.Thaw(ctx, mc.ID)
 		if err != nil {
 			return nil, fmt.Errorf("thawing %s: %w", mc.Name, err)
@@ -98,7 +98,7 @@ func (m *Manager) Renew(ref string, ttlSeconds int) (*api.Machine, error) {
 	if mc == nil {
 		return nil, ErrNoMachine
 	}
-	if mc.State != api.StateRunning && mc.State != api.StateWarm {
+	if mc.State != api.StateRunning && mc.State != api.StateWarm && mc.State != api.StatePaused {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, mc.Name, mc.State)
 	}
 	if ttlSeconds == 0 {
