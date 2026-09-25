@@ -135,6 +135,7 @@ h1 .k { font-family: var(--mono); font-weight: 600; color: var(--accent); }
 .m.running { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
 .wake { font: 600 10.5px var(--mono); border-radius: 5px; padding: 1px 5px; justify-self: start; margin-top: 2px; }
 .wake.thaw { background: color-mix(in srgb, #38bdf8 22%, transparent); color: var(--ink); }
+.wake.resume { background: color-mix(in srgb, #a78bfa 22%, transparent); color: var(--ink); }
 .wake.restore { background: color-mix(in srgb, var(--warn) 25%, transparent); color: var(--ink); }
 .wake.warm { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ink); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; min-width: 0; }

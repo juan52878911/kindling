@@ -506,36 +506,17 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	if mc.Backend == BackendMicroVM {
 		gp, gl, err := g.classifyGuest(ctx, mc.Snapshot, in, req.Explain)
 		if err != nil {
-			var we *wakeError
-			var dle *deployLookupError
-			var gie *guestInvalidError
-			reason, code, verb := "request", http.StatusServiceUnavailable, "unavailable"
-			switch {
-			case errors.As(err, &we):
-				reason = "wake"
-			case errors.As(err, &dle):
-				reason = "labels"
-			case errors.As(err, &gie):
-				// El invitado SÍ contestó, pero con algo que no es de fiar
-				// (chispaguest.go): no es que no haya réplica, es que mintió o se
-				// desincronizó con el registro de despliegue. 502, no 503:
-				// reintentar no arregla una respuesta que no pasa validación.
-				reason, code, verb = "invalid", http.StatusBadGateway, "sent an invalid answer"
-			}
+			reason, code, verb := guestErrReason(err)
 			g.met.vonErr("chispa:"+tc.Chispa, reason)
 			log.Printf("task %s: chispa %s (microvm): %v", req.Task, tc.Chispa, err)
 			return nil, statusf(code, "chispa model %q (backend microvm) %s: %v", tc.Chispa, verb, err)
 		}
 		p = gp
-		tau = p.Threshold
-		if v, ok := tc.Thresholds[p.Label]; ok {
-			tau = v
-		}
 		// confident se recalcula aquí, del prob ya validado y el umbral del
 		// lado del gateway: la respuesta del invitado puede traer su propio
 		// campo "confident", pero no es de fiar (chispaguest.go), así que se
 		// ignora y se decide con los mismos datos que un modelo en proceso.
-		confident = p.Prob >= tau
+		tau, confident = guestConfident(p, tc.Thresholds)
 		labels = gl
 	} else {
 		m, err := g.chispa.get(mc.Path)

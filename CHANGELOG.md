@@ -4,7 +4,7 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
-## v0.12.0 — sin publicar
+## v0.12.0 — 2026-09-25
 
 ### Ejemplo: triaje de fallos de CI (`examples/ci-triage`)
 
@@ -32,6 +32,26 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 - `kling chispa deploy -reuse-image`: hace el dorado de una imagen que ya
   existe (en macOS, la construida en Linux y traída con `kling images copy`),
   en vez de negarse.
+
+### Domótica: Chispa serverless en la capa 2
+
+- La tarea de domótica (`/v1/decide`) acepta un modelo de intención
+  `"backend": "microvm"`: la capa 2 pregunta a la réplica de `kling chispa
+  deploy` por el mismo camino validado que `/v1/classify` (etiquetas del
+  registro de despliegue, confianza del lado del gateway). En proceso sigue
+  igual.
+- `kling chispa deploy -slots` graba también los huecos del `.chispas` en el
+  registro; la réplica marca los huecos en la misma ida y vuelta y el gateway
+  los valida (nombre, posición dentro del texto, orden, tope) y rehace su
+  texto. Sin huecos en el registro se ignoran y los marca el `.chispas` local.
+- La decisión trae `chispa_replica` (`frozen`/`paused`/`warm`/`new`,
+  `wake_ms`, `request_ms`) y la traza de la demo lo enseña en el paso de
+  Chispa; un fallo de la réplica escala con `reason: "chispa_error"`.
+  `/v1/tasks` dice `chispa_backend`.
+- `examples/domotica/ai.json` sirve la capa 2 serverless (la variante en
+  proceso, en su README). Medido en el CT 105: congelada 34 ms (thaw 29 ms),
+  pausada 3,6 ms (resume 0,8 ms), despierta 0,6–0,9 ms en `/v1/decide`;
+  mismas cifras de `kling ai eval room` que en proceso.
 
 ### Despertar más rápido: de 152 a 27 ms congelada, 2,2 ms pausada
 

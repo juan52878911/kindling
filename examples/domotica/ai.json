@@ -1,8 +1,9 @@
 {
   "models": {
     "chispa-room": {
+      "backend": "microvm",
       "kind": "chispa",
-      "path": "domotica/intent.chispa"
+      "snapshot": "chispa-room"
     },
     "encoder": {
       "kind": "embed",
@@ -19,8 +20,7 @@
       "domotica": {
         "encoder": "encoder",
         "head": "domotica/head.jenc",
-        "intent": "chispa-room",
-        "slots": "domotica/slots.chispas"
+        "intent": "chispa-room"
       }
     },
     "room-llm": {

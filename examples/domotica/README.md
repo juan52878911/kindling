@@ -9,16 +9,19 @@ página enseña, orden a orden:
 
 - qué capa decidió (plantillas, Chispa, codificador o LLM), con su confianza y
   su latencia (µs las rápidas, ms el codificador, segundos el LLM);
-- si la microVM de esa capa estaba **congelada y se descongeló** (y cuánto
-  tardó), se creó desde su dorado o ya estaba despierta;
+- si la microVM de esa capa estaba **congelada y se descongeló**, pausada y se
+  reanudó (y cuánto tardó), se creó desde su dorado o ya estaba despierta —
+  también la de Chispa, que en este registro es **serverless**: una microVM
+  congelada para ella sola que la orden descongela en milisegundos;
 - el panel de **microVMs de cada capa**: despiertas o congeladas (0 CPU) y la
   memoria que usan, leído del daemon;
 - la acción en JSON y lo que haría la habitación, animado en el plano.
 
 ```
-navegador ──HTTP/SSE──> examples/domotica ──/v1/decide───> kling ai serve ──> plantillas + Chispa (en su proceso, µs)
- (la habitación)        (simulador + página)  /v1/generate      │                └─> codificador: microVM, dorado kind embed (ms)
-                              │                /metrics         └─> LLM (VON): microVM, dorado con el prompt ya evaluado (s)
+navegador ──HTTP/SSE──> examples/domotica ──/v1/decide───> kling ai serve ──> plantillas (en su proceso, µs)
+ (la habitación)        (simulador + página)  /v1/generate      │                ├─> Chispa + huecos: microVM, dorado de kling chispa deploy (<1 ms despierta)
+                              │                /metrics         │                └─> codificador: microVM, dorado kind embed (ms)
+                              │                                 └─> LLM (VON): microVM, dorado con el prompt ya evaluado (s)
                               └──── pkg/api ───────────────> daemon de kindling: máquinas (despiertas/congeladas) y memoria
 ```
 
@@ -27,7 +30,7 @@ navegador ──HTTP/SSE──> examples/domotica ──/v1/decide───> kli
 | capa | dónde | qué decide | cuándo entra |
 |---|---|---|---|
 | 1. plantillas | proceso del gateway | las órdenes de la demo, exactas (`kling domotica templates`) | siempre primero |
-| 2. Chispa | proceso del gateway | intención + huecos de lo que se parece a una orden | si no encaja una plantilla |
+| 2. Chispa | microVM (`kling chispa deploy`, backend `microvm`), o el proceso del gateway | intención + huecos de lo que se parece a una orden | si no encaja una plantilla |
 | 3. codificador | microVM (`kind embed`) | intención de frases que Chispa duda | si su evaluación la respalda (`kling ai eval room`) |
 | 4. LLM | microVM (VON) | varias órdenes en una, valores relativos, paráfrasis raras | si su evaluación la respalda (`kling domotica eval-llm`), y **solo con el alcance que respalda** |
 
@@ -38,6 +41,32 @@ puede hacerla, valor en rango, zona, color y número que la frase **nombra**
 (si no, se quitan o se pregunta), y nunca abrir la puerta ni desarmar la
 alarma sin que la frase lo diga. Si algo falla, no hace nada y pide
 aclaración. Las cifras, en [docs/DOMOTICA-EVAL.md](../../docs/DOMOTICA-EVAL.md#capa-4-el-llm-von).
+
+**Chispa serverless o en proceso.** [`ai.json`](ai.json) sirve la capa 2 como
+tarea serverless: el modelo `chispa-room` es `"backend": "microvm"` y apunta al
+dorado que hace `kling chispa deploy chispa-room -model intent.chispa -slots
+slots.chispas` (una microVM de 128 MiB con `kling-chispa`, el `.chispa` y el
+`.chispas` horneados dentro). El gateway la despierta con la primera orden que
+no es una plantilla, la pausa al quedarse ociosa (`-idle`), la congela después
+y valida lo que contesta contra el registro que `deploy` grabó en el dorado
+(etiquetas y huecos). La traza de cada orden dice en el paso de Chispa si su
+microVM estaba **congelada**, **pausada** o **despierta** y cuánto costó
+despertarla. La variante en proceso (Chispa dentro del gateway, µs, sin
+daemon para esta capa) es cambiar el modelo por un fichero y devolver los
+huecos a la tarea:
+
+```json
+"chispa-room": {"kind": "chispa", "path": "domotica/intent.chispa"},
+...
+"room": {"domotica": {"intent": "chispa-room", "slots": "domotica/slots.chispas", "encoder": "encoder", "head": "domotica/head.jenc"}}
+```
+
+Las dos dan las mismas decisiones (mismos pesos; en el servidor, `kling ai
+eval room` da las mismas cifras con las dos). La puerta de la capa 3 guarda la
+identidad del modelo de intención (el sha256 del fichero, o el nombre del
+dorado), así que al cambiar de una a otra hay que repetir `kling ai eval room`.
+Con la mejora continua (`learn`) en una intención microvm, deja `"slots"` en la
+tarea: `kling ai retrain` redespliega el dorado sin `.chispas`.
 
 **Lo que dice la evaluación y enseña la demo**: con Qwen2.5-1.5B Q4_K_M, la
 capa 4 **gana** a «escalar y no hacer nada» en lo que Chispa duda (31 órdenes
@@ -56,16 +85,19 @@ aprenda lo indirecto o haya un LLM mejor. `-layer4-force` la enciende para todo.
 kling models add von-qwen15-dom -model qwen2.5-1.5b-instruct -quant q4_k_m \
     -prefix <(jq -r '.tasks["room-llm"].system' examples/domotica/ai.json)   # el prompt, ya evaluado en el dorado
 
-# 2. el registro del gateway: ai.json de este directorio, con las rutas y los dorados de tu host
-mkdir -p ~/.config/kling/domotica && cp intent.chispa slots.chispas ~/.config/kling/domotica/
+# 2. Chispa serverless (en macOS: la imagen se construye en un Linux y se trae, ver docs/chispa-serverless.md)
+kling chispa deploy chispa-room -model intent.chispa -slots slots.chispas
+
+# 3. el registro del gateway: ai.json de este directorio, con las rutas y los dorados de tu host
+mkdir -p ~/.config/kling/domotica && cp head.jenc ~/.config/kling/domotica/
 cp examples/domotica/ai.json ~/.config/kling/ai.json     # quita "encoder"/"head" si no tienes codificador
 kling ai serve &                                          # socket 0600 en ~/.config/kling/ai.sock
 
-# 3. la puerta de la capa 4 (10 min en un M4): escribe layer4-room-llm.json
+# 4. la puerta de la capa 4 (10 min en un M4): escribe layer4-room-llm.json
 kling domotica eval-llm -gateway ~/.config/kling/ai.sock -llm-task room-llm -decide-task room \
     -data ~/Library/Caches/kindling/domotica/data/test.jsonl
 
-# 4. la demo
+# 5. la demo
 go run ./examples/domotica                                # http://127.0.0.1:8088/
 ```
 
@@ -97,6 +129,9 @@ Medido allí (i7-8700T, 4 núcleos del CT, Firecracker sin anidar):
 | | |
 |---|---|
 | plantilla | 0,3 ms de punta a punta (navegador → demo → gateway) |
+| Chispa serverless congelada → descongelada → decide | 34 ms en el gateway (descongelar 29 ms) |
+| Chispa serverless pausada → reanudada → decide | 3,6 ms (reanudar 0,8 ms) |
+| Chispa serverless despierta | 0,6–0,9 ms en el gateway (en proceso: 0,2–0,4 ms); tabla en [docs/chispa-serverless.md](../../docs/chispa-serverless.md#domótica-la-capa-2-serverless) |
 | codificador congelado → descongelado → decide | 240 ms (descongelar 141 ms) |
 | codificador despierto | 18 ms (p50 del codificador en la evaluación: 9,3 ms) |
 | LLM congelado → descongelado → decide (dos órdenes) | 6,9 s (descongelar **134 ms**; el resto, generar ~70 tokens) |
@@ -137,6 +172,9 @@ sudo rm -rf ~/.cache/kindling/encoder-gguf
 ./kling domotica train-encoder -data data/train.jsonl -valid data/valid.jsonl -cache models/e5.jemb \
     -o models/head.jenc -intent models/intent.chispa -slots models/slots.chispas
 ./kling rm enc-train
+
+# Chispa serverless: su dorado (128 MiB, 75 MiB en disco), con los huecos dentro
+./kling chispa deploy chispa-room -model models/intent.chispa -slots models/slots.chispas -warm-text "enciende la luz de la cocina"
 
 # el registro: rutas relativas a él; los dorados de este host
 sed -i 's#"domotica/#"models/#' ai.json

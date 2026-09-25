@@ -35,6 +35,7 @@ const (
 	ReasonNoModel        = "no_model"        // no hay modelo Chispa cargado
 	ReasonOutOfScope     = "out_of_scope"    // Chispa no ve una orden directa; que lo mire el LLM
 	ReasonEncoderError   = "encoder_error"   // el codificador no contestó (se escala igual)
+	ReasonChispaError    = "chispa_error"    // la microVM de Chispa no contestó o mintió (se escala igual)
 )
 
 // Decision es lo que devuelve Decide: qué hacer, con qué, qué capa lo decidió
@@ -56,6 +57,13 @@ type Decision struct {
 	FastProb     float64 `json:"fast_prob,omitempty"`
 	EncoderUS    float64 `json:"encoder_us,omitempty"`
 	EncoderError string  `json:"encoder_error,omitempty"`
+	// ChispaReplica es cómo estaba la microVM de Chispa cuando la capa 2 se
+	// sirve serverless (RemoteIntent): congelada, pausada o despierta, y lo
+	// que costó despertarla. Nil con Chispa en el proceso.
+	ChispaReplica *ReplicaInfo `json:"chispa_replica,omitempty"`
+	// ChispaError: la microVM de Chispa no contestó (o contestó algo que no
+	// pasa la validación del gateway); la orden escala como si dudara.
+	ChispaError string `json:"chispa_error,omitempty"`
 	// Actions: la lista de acciones cuando la capa sabe devolver varias (la 4:
 	// «apaga la luz y cierra la puerta»). Vacía en las capas de una intención;
 	// Intent/Slots son entonces la primera.
@@ -67,6 +75,54 @@ type Decision struct {
 	Model string    `json:"model,omitempty"`
 	Kind  string    `json:"kind,omitempty"` // capa 4: command | situation | other
 	LLM   *LLMStats `json:"llm,omitempty"`
+
+	// remoteSpans son los huecos que la réplica de Chispa marcó aunque dijera
+	// «fuera de ámbito» (kling-chispa los manda siempre): la capa 3 los usa si
+	// cambia la intención, sin volver a preguntar. No salen en el JSON.
+	remoteSpans []slots.Span
+}
+
+// Estados de la microVM de una capa al llegar una orden (ReplicaInfo.State).
+const (
+	ReplicaFrozen = "frozen" // congelada en disco: se descongeló (thaw)
+	ReplicaPaused = "paused" // pausada en memoria: se reanudó (resume)
+	ReplicaWarm   = "warm"   // ya estaba despierta
+	ReplicaNew    = "new"    // no había ninguna: se restauró del dorado
+)
+
+// ReplicaInfo es cómo estaba la microVM que sirvió una capa y lo que costó
+// tenerla lista: la traza de la demo lo enseña junto a la latencia de la capa.
+type ReplicaInfo struct {
+	// Model es el modelo del registro del gateway.
+	Model string `json:"model"`
+	// State: frozen | paused | warm | new.
+	State string `json:"state"`
+	// WakeMS es lo que tardó en estar lista (0 si ya lo estaba).
+	WakeMS float64 `json:"wake_ms,omitempty"`
+	// RequestMS es la petición a la réplica ya despierta, ida y vuelta.
+	RequestMS float64 `json:"request_ms"`
+}
+
+// RemoteAnswer es lo que contesta una Chispa servida en una microVM, ya
+// validado por quien la llama (pkg/aigw): etiqueta y probabilidad del
+// registro de despliegue, confianza calculada del lado del gateway y huecos
+// dentro del texto.
+type RemoteAnswer struct {
+	Label     string
+	Prob      float64
+	Confident bool
+	// HasSlots dice si la réplica lleva modelo de huecos (kling chispa deploy
+	// -slots); entonces Spans son sus huecos (quizá ninguno).
+	HasSlots bool
+	Spans    []slots.Span
+	Replica  *ReplicaInfo
+}
+
+// RemoteIntent es la capa 2 servida serverless: una réplica de kling-chispa
+// en una microVM que el planificador despierta con la orden (backend
+// "microvm" en el registro del gateway, docs/chispa-serverless.md).
+type RemoteIntent interface {
+	ClassifyIntent(ctx context.Context, text, lang string) (RemoteAnswer, error)
 }
 
 // IntentEncoder es la capa 3: la intención de una frase según un codificador
@@ -81,7 +137,11 @@ type IntentEncoder interface {
 type Decider struct {
 	Matcher *Matcher
 	Intent  *chispa.Model
-	Slots   *slots.Model
+	// Remote es la capa 2 en una microVM, en vez de Intent en el proceso
+	// (Intent gana si están los dos). Sus huecos se usan si Slots es nil y la
+	// réplica los trae.
+	Remote RemoteIntent
+	Slots  *slots.Model
 	// NoTemplate salta la capa 1 (para evaluar Chispa sola).
 	NoTemplate bool
 	// FinalOOS da por buena una predicción «fuera de ámbito» confiada. Por
@@ -119,7 +179,7 @@ func (d *Decider) DecideContext(ctx context.Context, text, lang string) Decision
 	if d.OnlyEncoder {
 		out = Decision{Layer: LayerNone, Reason: ReasonNoModel, Escalate: EscalateTo}
 	} else {
-		out = d.decide(text, lang)
+		out = d.decide(ctx, text, lang)
 	}
 	if !out.Confident && d.Encoder != nil {
 		out = d.encode(ctx, text, out)
@@ -129,22 +189,49 @@ func (d *Decider) DecideContext(ctx context.Context, text, lang string) Decision
 	return out
 }
 
-func (d *Decider) decide(text, lang string) Decision {
+func (d *Decider) decide(ctx context.Context, text, lang string) Decision {
 	if !d.NoTemplate {
 		if m := d.Matcher.Match(text); m.OK {
 			return Decision{Intent: m.Intent, Slots: m.Slots, Layer: LayerTemplate, Confident: true, Prob: 1}
 		}
 	}
-	if d.Intent == nil {
+	var (
+		p      chispa.Prediction
+		out    Decision
+		remote *RemoteAnswer
+	)
+	switch {
+	case d.Intent != nil:
+		p = d.Intent.Predict(chispa.Input{Text: text, Fields: langFields[lang]})
+	case d.Remote != nil:
+		a, err := d.Remote.ClassifyIntent(ctx, text, lang)
+		if err != nil {
+			return Decision{Layer: LayerNone, Reason: ReasonChispaError, Escalate: EscalateTo,
+				ChispaError: err.Error(), ChispaReplica: a.Replica}
+		}
+		remote = &a
+		p = chispa.Prediction{Label: a.Label, Prob: a.Prob, Confident: a.Confident}
+		out.ChispaReplica = a.Replica
+	default:
 		return Decision{Layer: LayerNone, Reason: ReasonNoModel, Escalate: EscalateTo}
 	}
-	p := d.Intent.Predict(chispa.Input{Text: text, Fields: langFields[lang]})
-	out := Decision{Intent: p.Label, Layer: LayerChispa, Prob: p.Prob, Confident: p.Confident}
+	out.Intent, out.Layer, out.Prob, out.Confident = p.Label, LayerChispa, p.Prob, p.Confident
 	if !p.Confident {
 		out.Reason = ReasonLowProb
 	}
-	if p.Label != OutOfScope && d.Slots != nil {
-		out.Spans = d.Slots.Tag(text, nil)
+	switch {
+	case d.Slots != nil:
+		if p.Label != OutOfScope {
+			out.Spans = d.Slots.Tag(text, nil)
+		}
+	case remote != nil && remote.HasSlots:
+		if p.Label != OutOfScope {
+			out.Spans = remote.Spans
+		} else {
+			out.remoteSpans = remote.Spans
+		}
+	}
+	if out.Spans != nil {
 		out.Slots = SlotsFromSpans(text, out.Spans)
 	}
 	out.Slots = Resolve(out.Intent, out.Slots)
@@ -226,7 +313,8 @@ func (d *Decider) encode(ctx context.Context, text string, fast Decision) Decisi
 		return fast
 	}
 	out := Decision{Intent: intent, Layer: LayerEncoder, Prob: prob, Confident: confident,
-		FastIntent: fast.Intent, FastProb: fast.Prob, EncoderUS: us}
+		FastIntent: fast.Intent, FastProb: fast.Prob, EncoderUS: us,
+		ChispaReplica: fast.ChispaReplica, ChispaError: fast.ChispaError}
 	if intent == OutOfScope {
 		if confident && d.FinalOOS {
 			return out
@@ -243,8 +331,12 @@ func (d *Decider) encode(ctx context.Context, text string, fast Decision) Decisi
 	// Los huecos los sigue marcando Chispa-slots (F1 0,99 en lo generado por
 	// gramática); si Chispa dijo «fuera de ámbito» no los había buscado.
 	out.Spans = fast.Spans
-	if out.Spans == nil && d.Slots != nil {
+	switch {
+	case out.Spans != nil:
+	case d.Slots != nil:
 		out.Spans = d.Slots.Tag(text, nil)
+	case fast.remoteSpans != nil:
+		out.Spans = fast.remoteSpans
 	}
 	out.Slots = Resolve(intent, SlotsFromSpans(text, out.Spans))
 	switch {

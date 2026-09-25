@@ -213,6 +213,20 @@ réplica no contesta en 5 s (despertarla incluido), la decisión escala a VON
 con `encoder_error`. Medido en el Mac: 3,1–3,3 ms por `/v1/decide` con la
 réplica caliente, 981 ms si estaba congelada por inactividad.
 
+**La capa 2 también puede ser serverless.** Si el modelo de `intent` es
+`"backend": "microvm"` (un dorado de `kling chispa deploy`, ver
+[chispa-serverless.md](chispa-serverless.md#domótica-la-capa-2-serverless)),
+`/v1/decide` le pregunta a su réplica por el mismo camino que `/v1/classify`
+de una tarea microvm: etiquetas y huecos validados contra el registro de
+despliegue del dorado, confianza decidida del lado del gateway. Si el dorado
+se desplegó con `-slots`, los huecos también los marca la réplica (una sola
+ida y vuelta) y `"slots"` sobra en la tarea; si la tarea lo pone, gana el
+`.chispas` local, en proceso. La respuesta trae `chispa_replica`
+(`{"model", "state": "frozen" | "paused" | "warm" | "new", "wake_ms",
+"request_ms"}`) y, si la réplica no contesta o su respuesta no pasa la
+validación, la orden escala como una duda con `reason: "chispa_error"` y
+`chispa_error` (las plantillas siguen contestando sin tocar la microVM).
+
 ## API
 
 | Ruta | Qué hace |
