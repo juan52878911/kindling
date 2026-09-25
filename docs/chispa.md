@@ -1,13 +1,13 @@
-# JEV — un clasificador lineal diminuto para decisiones pequeñas
+# Chispa — un clasificador lineal diminuto para decisiones pequeñas
 
-JEV es un modelo lineal (regresión logística) que se entrena fuera, pesa uno o
+Chispa es un modelo lineal (regresión logística) que se entrena fuera, pesa uno o
 dos megas y responde en microsegundos. Sirve para las decisiones pequeñas que no
 merecen un modelo de lenguaje: de qué tipo es este evento, a qué herramienta va
 esta petición de un agente, si esta entrada se filtra o pasa. Vive en el núcleo
-de kindling (`pkg/jev`, `pkg/jev/train`, `kling jev`), en Go puro, sin cgo ni
+de kindling (`pkg/chispa`, `pkg/chispa/train`, `kling chispa`), en Go puro, sin cgo ni
 dependencias externas.
 
-Su razón de ser es la **cascada**: el gateway le pregunta primero a JEV; si JEV
+Su razón de ser es la **cascada**: el gateway le pregunta primero a Chispa; si Chispa
 está seguro (su probabilidad calibrada supera el umbral de esa clase), contesta
 él; si no, **escala** a un modelo mayor (VON, modelos pequeños en microVMs). Todo
 el diseño —probabilidades calibradas, umbral por clase, evidencia— está pensado
@@ -20,7 +20,7 @@ para que esa decisión sea fiable y barata.
 | Regresión logística sobre texto hasheado + campos estructurados | Un modelo de lenguaje: no entiende, cuenta palabras |
 | Determinista: mismos bits en amd64/arm64, macOS/Linux | Un sustituto de reglas duras cuando existen (si el dato trae la etiqueta, úsala) |
 | ~1,5 µs por predicción (texto de 200 caracteres, M4), 0 reservas | Bueno con clases de un puñado de ejemplos: con menos de ~30 por clase, no aprende esa clase |
-| Honesto sobre su duda: `escalate` cuando no llega al umbral | Robusto a un cambio de distribución: los umbrales valen para datos como los de validación (ver [JEV-EVAL.md](JEV-EVAL.md)) |
+| Honesto sobre su duda: `escalate` cuando no llega al umbral | Robusto a un cambio de distribución: los umbrales valen para datos como los de validación (ver [CHISPA-EVAL.md](CHISPA-EVAL.md)) |
 
 ## Uso rápido
 
@@ -28,10 +28,10 @@ para que esa decisión sea fiable y barata.
 # datos: JSONL, una línea por ejemplo
 {"text": "panic in the parser when the cache is cold", "label": "fix", "fields": {"service": "api", "files": 3}}
 
-kling jev train -data train.jsonl -valid valid.jsonl -o eventos.jev
-kling jev eval -model eventos.jev -data test.jsonl
-kling jev predict -model eventos.jev -text "segfault resolving symlinks" -fields '{"ext":".zig"}'
-kling jev inspect eventos.jev
+kling chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
+kling chispa eval -model eventos.chispa -data test.jsonl
+kling chispa predict -model eventos.chispa -text "segfault resolving symlinks" -fields '{"ext":".zig"}'
+kling chispa inspect eventos.chispa
 ```
 
 `predict` sin `-text` lee JSONL de stdin (`{"text":…, "fields":…}`) y escribe una
@@ -46,41 +46,41 @@ respuesta JSON por línea: es la forma de usarlo desde otro proceso.
 Desde Go:
 
 ```go
-m, err := jev.LoadFile("eventos.jev")
-p := m.Predict(jev.Input{Text: msg, Fields: fields}) // sin reservas, concurrente
+m, err := chispa.LoadFile("eventos.chispa")
+p := m.Predict(chispa.Input{Text: msg, Fields: fields}) // sin reservas, concurrente
 if p.Confident {
-	return p.Label // JEV contesta
+	return p.Label // Chispa contesta
 }
-return escalar(msg, m.PredictFull(jev.Input{Text: msg}, 5)) // pasa probs y evidencia como pista
+return escalar(msg, m.PredictFull(chispa.Input{Text: msg}, 5)) // pasa probs y evidencia como pista
 ```
 
 ## Cómo lo usa el gateway
 
-En `kling ai serve` ([ai-gateway.md](ai-gateway.md)) JEV contesta las
+En `kling ai serve` ([ai-gateway.md](ai-gateway.md)) Chispa contesta las
 clasificaciones; cuando duda, la respuesta sale igual con `escalate: true` y
 quien llama decide.
 
 ### Modo sin daemon, y el backend serverless
 
-Un registro que solo tiene modelos JEV en proceso (`kind: "jev"`, sin
+Un registro que solo tiene modelos Chispa en proceso (`kind: "chispa"`, sin
 `backend` o con `"inprocess"`) **no necesita daemon ni KVM/vz para nada**:
 `kling ai serve` arranca y sirve igual en un portátil donde solo está
 instalado el binario `kling`. Si el registro trae además un modelo VON, un
-codificador, o una tarea JEV con `"backend": "microvm"`, y el daemon no
+codificador, o una tarea Chispa con `"backend": "microvm"`, y el daemon no
 contesta, el gateway avisa una vez con claridad al arrancar y sigue: las
-tareas JEV en proceso no se enteran. `kling jev train|eval|predict|inspect` no
-tocan el daemon nunca: son CLI pura sobre el fichero `.jev`.
+tareas Chispa en proceso no se enteran. `kling chispa train|eval|predict|inspect` no
+tocan el daemon nunca: son CLI pura sobre el fichero `.chispa`.
 
-JEV también se puede desplegar como una tarea **serverless**, empaquetada en
+Chispa también se puede desplegar como una tarea **serverless**, empaquetada en
 su propia microVM y despertada bajo demanda —el mismo modelo operativo que
-VON—, con `kling jev deploy` y `"backend": "microvm"` en el registro. Cuándo
+VON—, con `kling chispa deploy` y `"backend": "microvm"` en el registro. Cuándo
 compensa cada opción, cómo desplegarla y las cifras (thaw, latencia,
 decisiones/s con y sin microVM) están en
-[jev-serverless.md](jev-serverless.md). Lo de abajo, escalar a VON, es la **cascada**, y solo se
-activa por tarea si `kling ai eval` demuestra que gana a JEV solo: en commits no
+[chispa-serverless.md](chispa-serverless.md). Lo de abajo, escalar a VON, es la **cascada**, y solo se
+activa por tarea si `kling ai eval` demuestra que gana a Chispa solo: en commits no
 ganó con ningún LLM de 0,5B a 3B.
 
-### La cascada (JEV → VON)
+### La cascada (Chispa → VON)
 
 1. La petición llega al gateway. Se extrae `text` (y `fields` si los hay: servicio,
    nivel, herramienta pedida…).
@@ -90,10 +90,10 @@ ganó con ningún LLM de 0,5B a 3B.
    probabilidades y la evidencia para acotar la pregunta («duda entre fix y
    test; pesan `w:assert`, `f:ext=.ts`»).
 4. Las respuestas de VON en lo escalado son etiquetas nuevas: el siguiente
-   `kling jev train` las incluye. JEV aprende de lo que antes escalaba.
+   `kling chispa train` las incluye. Chispa aprende de lo que antes escalaba.
 
-Las cifras que decide la cascada son las que imprime `kling jev eval`:
-**cobertura** (qué fracción contesta JEV), **precisión en lo confiado** (lo que
+Las cifras que decide la cascada son las que imprime `kling chispa eval`:
+**cobertura** (qué fracción contesta Chispa), **precisión en lo confiado** (lo que
 promete el umbral), **ECE** (si «0,9» significa acertar 9 de 10) y la
 **exactitud en lo escalado** (si es alta, los umbrales son demasiado prudentes).
 La precisión objetivo se elige al entrenar (`-precision`, 0,95 por defecto).
@@ -102,7 +102,7 @@ Aviso importante, medido: el umbral garantiza la precisión **sobre datos como l
 de validación**. Si la distribución cambia (otro repo, otra época), la precisión
 real baja —en la evaluación de commits, de 0,95 a 0,58–0,85—. El gateway debe
 recalibrar con datos recientes de su propio tráfico, no fiarse del modelo de otro
-sitio. Detalle en [JEV-EVAL.md](JEV-EVAL.md).
+sitio. Detalle en [CHISPA-EVAL.md](CHISPA-EVAL.md).
 
 ## Características
 
@@ -146,7 +146,7 @@ solo se usa con la extracción con la que se entrenó.
 - **Determinista con la semilla**: barajado con splitmix64 propio, características
   ordenadas y la misma aritmética sin FMA que la inferencia. El mismo corpus y la
   misma semilla dan los mismos pesos también en otra arquitectura (test dorado), y
-  con `SOURCE_DATE_EPOCH` el `.jev` sale idéntico byte a byte.
+  con `SOURCE_DATE_EPOCH` el `.chispa` sale idéntico byte a byte.
 - **Cuantización**: int16 con una escala por salida (`max|w| / 32767`). La
   concordancia int16/float se mide en validación (va a los metadatos) y, con
   `-test`, en prueba: 100 % en todos los conjuntos de la evaluación.
@@ -173,7 +173,7 @@ versiones propias (`detExp`, `detLog`) hechas solo de operaciones IEEE. Los test
 dorados de hash, extracción, entrenamiento y probabilidades (bit a bit) pasan
 igual en arm64 nativo y con `GOARCH=amd64` (Rosetta).
 
-Medido en un Apple M4 (`go test ./pkg/jev -bench Predict`), texto de 200
+Medido en un Apple M4 (`go test ./pkg/chispa -bench Predict`), texto de 200
 caracteres, modelo de 10 clases a 2^18 cubos:
 
 | Características | ns/predicción | reservas |
@@ -184,7 +184,7 @@ caracteres, modelo de 10 clases a 2^18 cubos:
 | palabras, 10 goroutines en paralelo | 290 (por op., agregado) | 0 |
 
 Sobre los commits reales de la evaluación (asunto + hasta 300 bytes de cuerpo),
-`kling jev eval` mide 4,9 µs por ejemplo con palabras+campos y 12,7 µs con
+`kling chispa eval` mide 4,9 µs por ejemplo con palabras+campos y 12,7 µs con
 n-gramas de caracteres, incluida la contabilidad de métricas. `Model` es
 inmutable; los búferes de cada llamada salen de un `sync.Pool`.
 
@@ -192,19 +192,19 @@ Lo mismo en x86 (i7-8700T, bare metal, docs/von.md#x86-sin-anidar-i7-8700t):
 ~2× más lento por predicción a un núcleo (3095-11 919 ns/op según
 características) y, con solo 4 núcleos frente a los 10 del M4, el paralelo
 agregado llega a 785 000 decisiones/s en vez de ~3,4 M/s. Con los modelos
-reales de domótica (`intent.jev` + `slots.jevs`, `kling domotica eval`,
-9794 filas): cascada plantillas→JEV a 9,74 µs p50 (~103 000 decisiones/s de
+reales de domótica (`intent.chispa` + `slots.chispas`, `kling domotica eval`,
+9794 filas): cascada plantillas→Chispa a 9,74 µs p50 (~103 000 decisiones/s de
 un núcleo) y 82 MiB de pico de RSS con ambos modelos cargados. Tabla completa
 en docs/von.md.
 
-## Formato del fichero `.jev`
+## Formato del fichero `.chispa`
 
 Todo little-endian:
 
 | Campo | Tamaño |
 |---|---|
-| magia `\x89JEV\r\n\x1a\n` (como PNG: detecta transferencias en modo texto) | 8 |
-| versión del formato (1) | u16 |
+| magia `\x89CHI\r\n\x1a\n` (como PNG: detecta transferencias en modo texto) | 8 |
+| versión del formato (2) | u16 |
 | banderas: bit0 binario, bit1 pesos dispersos | u16 |
 | longitud de la cabecera JSON (≤ 1 MiB) | u32 |
 | cabecera JSON: `spec`, `labels`, `meta` (fecha, SHA-256 del conjunto, recuentos, hiperparámetros, métricas de validación, concordancia int16) | variable |
@@ -230,19 +230,19 @@ sesgos, temperatura y umbrales son finitos y razonables, y recalcula el hash de 
 especificación. Un fichero corrupto u hostil da error, nunca pánico: lo prueban un
 test de truncados y bytes cambiados (también con el CRC recalculado, para que no
 baste el CRC) y `FuzzLoad` (11 M de ejecuciones sin fallo en la sesión en que se
-escribió; `go test ./pkg/jev -run X -fuzz FuzzLoad -fuzztime 30s`).
+escribió; `go test ./pkg/chispa -run X -fuzz FuzzLoad -fuzztime 30s`).
 
 ## CLI
 
 ```
-kling jev train -data train.jsonl -o m.jev [-valid v.jsonl] [-test t.jsonl]
+kling chispa train -data train.jsonl -o m.chispa [-valid v.jsonl] [-test t.jsonl]
     [-buckets 18] [-unigrams] [-bigrams] [-char 3-5] [-fields] [-max-text 4096]
     [-epochs 30] [-patience 3] [-lr 0.05] [-l2 1e-4] [-class-weight balanced|sqrt|none]
     [-seed 1] [-valid-frac 0.1] [-precision 0.95] [-min-support 10]
     [-one-vs-rest LABEL] [-v]
-kling jev eval -model m.jev -data t.jsonl [-json]
-kling jev predict -model m.jev [-text T] [-fields JSON] [-top 5] [-json]
-kling jev inspect <m.jev> [-json]
+kling chispa eval -model m.chispa -data t.jsonl [-json]
+kling chispa predict -model m.chispa [-text T] [-fields JSON] [-top 5] [-json]
+kling chispa inspect <m.chispa> [-json]
 ```
 
 Sin `-valid`, se aparta un 10 % por hash del contenido (estable aunque cambie el
@@ -265,7 +265,7 @@ están acotadas (líneas de 1 MiB, 4 GiB, 5 M de ejemplos).
 
 ## Mejoras futuras
 
-JEV en CPU es el objetivo: rápido, barato y bajo demanda. Cuando JEV duda, la
+Chispa en CPU es el objetivo: rápido, barato y bajo demanda. Cuando Chispa duda, la
 cascada puede escalar a capas más caras y opcionales (el codificador de
 frases, VON) solo si una evaluación muestra que hacen falta. Una de esas
 mejoras está documentada pero no aplicada: el [ajuste fino del codificador con
