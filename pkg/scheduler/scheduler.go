@@ -174,6 +174,18 @@ type Scheduler struct {
 	// OnWake, si está, se llama junto a OnAcquire con el desglose por fases
 	// de ese despertar (ver WakeTrace).
 	OnWake func(service string, t *WakeTrace)
+	// PausedMiB es el presupuesto del nivel "pausada" (ver pausa.go), en MiB de
+	// mem_mib configurada: 0 = nunca se pausa, todo se congela.
+	PausedMiB int
+	// PausedFor es cuánto dura una pausada sin uso antes de congelarse de
+	// verdad. 0 = 10 × idle.
+	PausedFor time.Duration
+	// pausadas son las instancias pausadas por el segador. Se toca con mu.
+	pausadas map[string]pausada
+	// pauseFn sustituye la llamada al daemon en los tests, como freezeFn.
+	pauseFn func(id string) error
+	// pauseCap: 0 no se sabe, 1 el daemon sabe pausar, 2 no.
+	pauseCap atomic.Int32
 	// adquiriendo son las máquinas elegidas por un acquire que aún no están
 	// registradas como instancia: sin esto, dos acquire concurrentes (un
 	// ensure y un scale-out) podían descongelar o adoptar la MISMA máquina y
@@ -269,6 +281,9 @@ type entry struct {
 	// gateway crea RÉPLICAS (g.extra) y reparte: es lo que permite usar la misma
 	// herramienta en paralelo. Se fija al crear la instancia y no cambia.
 	maxSessions int
+
+	// memMiB es la memoria configurada de la máquina: el coste de pausarla.
+	memMiB int
 
 	// wake es el desglose del despertar que dejó lista esta instancia, hasta
 	// que la primera petición lo recoge (TakeWake).
@@ -641,6 +656,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		renewedAt:   time.Now(), // acquire la renovó, o runFresh la acaba de crear
 		tenant:      tnt.name,   // quien la despertó es su dueño para cuota y fairness
 		maxSessions: gwMaxSessions(mc.MemMiB),
+		memMiB:      mc.MemMiB,
 		proxy:       proxyInvitado(target),
 	}
 	e.wake.Store(tr)
@@ -891,7 +907,31 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 			return m, "adopt", nil
 		}
 	}
-	// 2) alguna congelada: ~30 ms. También para el scale-out: una réplica que
+	// 2) alguna pausada: ~1 ms, solo reanudarla (ver pausa.go).
+	if m := pick(api.StatePaused); m != nil {
+		g.mu.Lock()
+		delete(g.pausadas, m.ID)
+		g.mu.Unlock()
+		t := time.Now()
+		th, err := g.client.Thaw(ctx, m.ID)
+		tr.Wake += time.Since(t)
+		if th != nil {
+			tr.Daemon = th.Wake
+		}
+		if err != nil {
+			g.mu.Lock()
+			delete(g.adquiriendo, m.ID)
+			g.mu.Unlock()
+			return nil, "", err
+		}
+		// El TTL se renueva después: una pausada cuenta como viva para el
+		// vigilante del daemon, que la congelaría si vence, no la perdería.
+		t = time.Now()
+		g.renovarTTL(ctx, m.ID)
+		tr.Renew += time.Since(t)
+		return th, "resume", nil
+	}
+	// 3) alguna congelada: ~30 ms. También para el scale-out: una réplica que
 	// el segador congeló vuelve mucho más barata que una restauración nueva,
 	// y sin esto cada ráfaga dejaba otra máquina congelada en disco para
 	// siempre (cada una con su fichero de memoria entero en macOS). El TTL se
@@ -917,7 +957,7 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		}
 		return th, "thaw", nil
 	}
-	// 3) instanciar del snapshot dorado
+	// 4) instanciar del snapshot dorado
 	t := time.Now()
 	mc, err := g.runFresh(ctx, service)
 	tr.Wake += time.Since(t)
@@ -1355,7 +1395,7 @@ func (g *Scheduler) Drain(ctx context.Context) {
 }
 
 func (g *Scheduler) reapOnce(ctx context.Context) {
-	type victim struct{ service, id string }
+	type victim = dormida
 	var victims []victim
 
 	g.mu.Lock()
@@ -1367,13 +1407,13 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	// recorre g.extra.
 	for svc, e := range g.services {
 		if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
-			victims = append(victims, victim{svc, e.machineID})
+			victims = append(victims, victim{svc, e.machineID, e.memMiB})
 		}
 	}
 	for svc, es := range g.extra {
 		for _, e := range es {
 			if e.inflight == 0 && time.Since(e.lastUse) > g.idle {
-				victims = append(victims, victim{svc, e.machineID})
+				victims = append(victims, victim{svc, e.machineID, e.memMiB})
 			}
 		}
 	}
@@ -1415,13 +1455,8 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	g.mu.Unlock()
 
-	for _, v := range victims {
-		if _, err := g.client.Freeze(ctx, v.id); err != nil {
-			log.Printf("reap %s: %v", v.service, err)
-			continue
-		}
-		log.Printf("%s: frozen due to inactivity", v.service)
-	}
+	g.dormir(ctx, victims)
+	g.enfriarPausadas(ctx)
 	for _, id := range renovar {
 		g.renovarTTL(ctx, id)
 	}
@@ -1454,6 +1489,11 @@ func (g *Scheduler) ensureLock(service string) *sync.Mutex {
 const evictedPool = "(warm pool)"
 
 func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
+	// Antes que nada despierto, lo pausado: retiene RAM sin atender a nadie, y
+	// congelarlo solo cuesta que su próximo despertar sea un thaw.
+	if id, svc := g.pausadaMasVieja(); id != "" && g.congelarPausada(ctx, id) {
+		return svc
+	}
 	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
 	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
 	// los demás.

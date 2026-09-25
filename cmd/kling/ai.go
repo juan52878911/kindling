@@ -80,6 +80,8 @@ func aiServe(args []string) error {
 	maxReplicas := fs.Int("max-replicas", 2, "replicas per model (max_replicas in the registry wins)")
 	maxInflight := fs.Int("max-inflight", 1, "requests per replica before asking for another")
 	keepwarm := fs.Int("keepwarm", 0, "N most used models kept awake (0 = pure scale to zero)")
+	pausedMiB := fs.Int("paused-mib", 256, "MiB of idle replicas kept paused instead of frozen, small and popular first (0 = always freeze; docs/despertar.md)")
+	pausedFor := fs.Duration("paused-for", 0, "how long a paused replica waits before it is frozen (0 = 10 × -idle)")
 	chispaMem := fs.Int("chispa-mem", 256, "MiB of Chispa models kept loaded (LRU)")
 	vonTimeout := fs.Duration("von-timeout", 60*time.Second, "deadline of an escalation to VON")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -127,6 +129,7 @@ func aiServe(args []string) error {
 	g, err := aigw.New(aigw.Options{
 		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id, NamePrefix: *namePrefix,
 		Idle: *idle, MaxReplicas: *maxReplicas, MaxInflight: *maxInflight, KeepWarm: *keepwarm,
+		PausedMiB: *pausedMiB, PausedFor: *pausedFor,
 		ChispaBudget: int64(*chispaMem) << 20, VONTimeout: *vonTimeout,
 		PopularityFile: aiDefault("ai-popularity-" + *id + ".json"),
 	})

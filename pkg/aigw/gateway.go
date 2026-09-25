@@ -39,6 +39,8 @@ type Options struct {
 	MaxReplicas  int           // por modelo, salvo max_replicas en el registro; 2
 	MaxInflight  int           // peticiones por réplica antes de pedir otra; 1
 	KeepWarm     int           // N modelos populares siempre despiertos; 0
+	PausedMiB    int           // presupuesto del nivel "pausada" (docs/despertar.md); 0 = no se pausa
+	PausedFor    time.Duration // cuánto dura una pausada sin uso antes de congelarse; 0 = 10 × idle
 	ChispaBudget int64         // bytes de modelos Chispa cargados; 256 MiB
 	VONTimeout   time.Duration // plazo de una escalada; 60 s
 	// EncoderTimeout es el plazo de la capa 3 de una tarea de domótica,
@@ -153,6 +155,8 @@ func New(o Options) (*Gateway, error) {
 	s.MaxInflight = o.MaxInflight
 	s.MaxReplicas = o.MaxReplicas
 	s.KeepWarm = o.KeepWarm
+	s.PausedMiB = o.PausedMiB
+	s.PausedFor = o.PausedFor
 	s.SetPopularityFile(o.PopularityFile)
 	s.MaxReplicasFor = func(snap string) int {
 		if _, m := g.config().replicaModel(snap); m != nil {

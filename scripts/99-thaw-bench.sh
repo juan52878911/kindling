@@ -12,7 +12,7 @@
 #            /v1/classify from the client, and read the per-phase histograms
 #            (kling_ai_wake_phase_seconds) from the gateway's /metrics.
 #   paused   like gateway, with -paused-mib so the reaper pauses instead of
-#            freezing (the paused tier).
+#            freezing (the paused tier); prints the replica's RSS while paused.
 #
 #   sudo SNAP=lat-chispa ./99-thaw-bench.sh daemon
 #   sudo SNAP=lat-chispa N=20 ./99-thaw-bench.sh gateway
@@ -216,8 +216,9 @@ gateway|paused)
 {"models": {"lat": {"kind": "chispa", "backend": "microvm", "snapshot": "$SNAP", "max_replicas": 1}},
  "tasks": {"lat": {"chispa": "lat"}}}
 EOF
-  extra=()
-  [ "$MODE" = "paused" ] && extra=(-paused-mib "${PAUSED_MIB:-512}")
+  # gateway measures the frozen tier (no pausing); paused, the paused tier.
+  extra=(-paused-mib 0)
+  [ "$MODE" = "paused" ] && extra=(-paused-mib "${PAUSED_MIB:-256}")
   "$KLING" ai serve -config "$WORK/ai.json" -socket "$GWSOCK" -id lat -name-prefix lat-gw- \
     -idle "$IDLE" "${extra[@]}" >"$WORK/gw.log" 2>&1 &
   GWPID=$!
