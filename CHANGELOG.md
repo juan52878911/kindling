@@ -4,6 +4,42 @@ Todas las novedades relevantes de kindling. Los binarios pre-compilados están
 en [Releases](https://github.com/juan52878911/kindling/releases) para
 linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
+## v0.12.0 — sin publicar
+
+### VON más rápido en CPU
+
+Cada cambio con su banco de pruebas y su puerta (entra solo si mejora lo medido
+sin empeorar la calidad); lo que no funcionó, también contado. Todo en
+[docs/von-cpu.md](docs/von-cpu.md).
+
+- **Prefijos de tarea precalculados en el dorado.** Las imágenes de `kling
+  models add` arrancan `llama-server` con una caché de prompts de 64 MiB
+  (`-cache-ram`, que se suma a la memoria de la VM; 0 la quita), y el dorado se
+  congela con el system prompt de cada tarea ya evaluado: `kling models add
+  -prefix system.txt` (repetible) o **`kling ai prime`**, que los saca del
+  registro del gateway (el `system` de cada tarea y el texto fijo de su plantilla)
+  y rehace el dorado de cada modelo VON (etiqueta `von.prefixes`; sin cambios, no
+  hace nada). Medido con un system prompt de ~800 tokens: la primera petición de
+  una réplica recién restaurada pasa de 4,7 s a 0,38 s en Qwen2.5-1.5B y de 1,7 s
+  a 0,17 s en Qwen2.5-0.5B; alternar dos tareas en la misma réplica, de 2,8 s a
+  0,11 s por petición. Una imagen anterior se reutiliza con `-cache-ram 0` (solo
+  queda el último prefijo).
+- **`json_schema` por tarea** en las generaciones del gateway: la salida de VON
+  se restringe a JSON que cumple el esquema (de 19/21 a 21/21 respuestas válidas
+  en Qwen2.5-1.5B, de 11/21 a 21/21 en 0.5B), y el gateway contesta 502 si aun así
+  no es JSON (p. ej. cortada por `max_tokens`).
+- **Q4_0 en el catálogo** para `qwen2.5-0.5b-instruct` y `qwen2.5-1.5b-instruct`:
+  en ARM llama.cpp la reempaqueta para i8mm y evalúa el prompt ~1,8× más rápido
+  que Q4_K_M (1,5B) o genera ~35 % más rápido que Q8_0 (0,5B), sin acertar menos.
+  La cuantización por defecto no cambia (x86 sin medir).
+- `scripts/97-von-cpu-bench.sh` y `scripts/von-bench/`: el banco (tarea de
+  domótica con respuestas esperadas, primer token, cambio de tarea, tok/s,
+  aceptación del borrador, validez del JSON).
+- **No entró**: la decodificación especulativa (borrador Qwen2.5-0.5B para 1.5B,
+  SmolLM2-135M para 360M y 1.7B, y n-gramas) fue igual o más lenta en todas las
+  configuraciones medidas, incluso con un 96 % de aceptación; tampoco hilos
+  distintos del número de vCPU, `--poll 0`, lotes mayores ni la caché KV en Q8_0.
+
 ## v0.11.0 — 2026-09-24
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)

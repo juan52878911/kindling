@@ -85,6 +85,31 @@ curl -H "Authorization: Bearer $(cat ~/.config/kling/ai.token)" \
 `SIGHUP` o `kling ai reload` releen el registro sin cortar nada, y dicen qué
 cascadas quedan activas, forzadas o rechazadas.
 
+### Prefijos precalculados: `kling ai prime`
+
+El `system` de una tarea (y el texto fijo con el que empieza su `prompt`,
+hasta la primera variable) es igual en todas sus peticiones, y en un modelo
+pequeño en CPU evaluarlo es casi todo el coste de una respuesta corta: con un
+system prompt de ~800 tokens, la primera petición de una réplica recién
+restaurada de Qwen2.5-1.5B tarda 4,7 s, de los que ~4,5 son ese prefijo.
+
+```sh
+kling ai prime                 # todos los modelos VON del registro
+kling ai prime qwen -dry-run   # qué haría
+```
+
+`ai prime` rehace el dorado de cada modelo VON con los prefijos de sus tareas
+ya evaluados dentro: una réplica restaurada los tiene en la caché de prompts de
+`llama-server` (`--cache-ram`, [von.md](von.md)) y solo evalúa lo que cambia.
+Medido: la primera petición de la tarea pasa de 4,7 s a 0,4 s, y cambiar de
+una tarea a otra en la misma réplica, de 2,8 s a 0,1 s ([von-cpu.md](von-cpu.md)).
+El dorado lleva la etiqueta `von.prefixes` con el hash de sus prefijos: repetir
+`ai prime` sin cambios en las tareas no hace nada (`-force` lo rehace igual).
+No es automático: rehacer un dorado cuesta lo que cargar el modelo, y el daemon
+no reemplaza un dorado con réplicas vivas (hay que quitarlas antes: `kling ps`,
+`kling rm`). Un prefijo que cambia después solo pierde la ventaja: esa petición evalúa
+el prefijo entero, como antes, y desde ahí queda en la caché de la réplica.
+
 ### Tareas
 
 Una tarea es de **clasificación** (lleva `jev`) o de **generación** (lleva
@@ -106,6 +131,7 @@ al revés, porque una clave que no hace nada es un error que no se ve.
 | `temperature` | generación | 0,7 por defecto; el cliente puede cambiarla en [0, 2] |
 | `system`, `prompt` | las dos | la pregunta a VON. En una escalada: `{labels}`, `{text}`, `{fields}`, `{candidates}` (top-3 de JEV). En una generación: `{input}` y las `vars` del cliente. Un solo pase: lo que traiga el texto del usuario no se vuelve a expandir |
 | `max_tokens` | las dos | 16 en una escalada (una etiqueta); 256 en una generación, y es el tope que puede pedir un cliente (máx. 4096) |
+| `json_schema` | generación | un esquema JSON (objeto, hasta 16 KiB): la salida de VON se restringe a JSON que lo cumple (el `json_schema` de `llama-server`, que lo convierte en gramática). El gateway comprueba además que la salida sea JSON; si no (una respuesta cortada por `max_tokens`), 502 con el `finish_reason`. Medido en [von-cpu.md](von-cpu.md): de 19/21 a 21/21 respuestas válidas, ~10 % más lento al generar |
 
 ### La cascada, solo con pruebas
 
