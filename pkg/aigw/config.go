@@ -394,6 +394,19 @@ func (c *Config) replicaModel(name string) (string, *ModelConfig) {
 	return "", nil
 }
 
+// NeedsDaemon dice si el registro tiene algun modelo VON o embed: son los
+// unicos que despierta el daemon (una replica en una microVM). Un registro
+// solo con modelos JEV no necesita daemon ni KVM/vz para nada: JEV vive dentro
+// de este mismo proceso.
+func (c *Config) NeedsDaemon() bool {
+	for _, m := range c.Models {
+		if m.Kind == KindVON || m.Kind == KindEmbed {
+			return true
+		}
+	}
+	return false
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

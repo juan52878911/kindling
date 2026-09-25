@@ -240,23 +240,44 @@ func (g *Gateway) Reload() ([]string, error) {
 // Start pone en marcha el segador (congela réplicas ociosas, mantiene el
 // keepwarm) y congela lo que un gateway anterior con el mismo id dejara
 // corriendo sin nadie que lo vigile. Vuelve enseguida; el segador para con ctx.
+//
+// El daemon solo hace falta para los modelos VON y embed (una réplica en una
+// microVM): un registro que solo tiene JEV nunca lo marca ni lo llama, así que
+// arranca y sirve igual sin daemon, sin KVM ni sin vz. Si el registro SÍ trae
+// un modelo VON o embed pero el daemon no contesta, se avisa una vez, con
+// claridad, y el gateway sigue: las tareas JEV siguen funcionando, las que
+// necesitan VON fallarán hasta que el daemon esté.
 func (g *Gateway) Start(ctx context.Context) {
 	if g.opts.Client == nil {
 		return
 	}
-	if info, err := g.opts.Client.Info(ctx); err == nil && info.Has("renew") {
-		g.sched.MachineTTL = 0 // 2 × idle, renovado mientras el gateway viva
+	if g.config().NeedsDaemon() {
+		if info, err := g.opts.Client.Info(ctx); err != nil {
+			log.Printf("warning: no jev-only registry: this one has a von or embed model, but the daemon at %s is not reachable (%v); jev tasks work fine, but any task with von, escalate_to or a domotica encoder will fail until the daemon is up (kling daemon) and reachable (-host)",
+				g.opts.Client.Endpoint(), err)
+		} else {
+			if info.Has("renew") {
+				g.sched.MachineTTL = 0 // 2 × idle, renovado mientras el gateway viva
+			}
+			if n := g.freezeOwn(ctx); n > 0 {
+				log.Printf("froze %d replica(s) left running by a previous gateway %q", n, g.opts.ID)
+			}
+		}
 	}
-	if n := g.freezeOwn(ctx); n > 0 {
-		log.Printf("froze %d replica(s) left running by a previous gateway %q", n, g.opts.ID)
-	}
+	// El segador no llama al daemon si no hay ninguna réplica VON/embed
+	// registrada (reapOnce solo toca lo que el planificador llegó a
+	// despertar), así que dejarlo corriendo no exige un daemon presente: si
+	// uno aparece más tarde (kling ai reload con un modelo VON nuevo), ya
+	// está listo.
 	go g.sched.Reap(ctx)
 }
 
 // Close congela las réplicas de este gateway que sigan corriendo: al salir no
-// queda nada gastando CPU ni RAM, y la próxima vez vuelven con un thaw.
+// queda nada gastando CPU ni RAM, y la próxima vez vuelven con un thaw. Sin
+// modelos VON/embed en el registro, o sin daemon, no hay nada que congelar y
+// no se intenta hablar con él.
 func (g *Gateway) Close(ctx context.Context) {
-	if g.opts.Client == nil {
+	if g.opts.Client == nil || !g.config().NeedsDaemon() {
 		return
 	}
 	if n := g.freezeOwn(ctx); n > 0 {
