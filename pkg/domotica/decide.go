@@ -18,8 +18,12 @@ const (
 	EscalateTo = "encoder"
 )
 
-// Motivos por los que una decisión no es confiada.
+// Motivos por los que una decisión no es confiada (o, en la capa 4, por los
+// que no hace nada).
 const (
+	// ReasonVetoedByJEV: JEV dijo con confianza «no es una orden directa que
+	// conozca» y el LLM propone una orden directa: gana JEV (ver VON.Decide).
+	ReasonVetoedByJEV  = "jev_veto"
 	ReasonLowProb      = "low_probability" // JEV por debajo del umbral de su clase
 	ReasonMissingSlot  = "missing_slot"    // intención clara pero falta el valor o el color
 	ReasonMultiCommand = "multi_command"   // «enciende la luz y baja la persiana»
@@ -40,6 +44,17 @@ type Decision struct {
 	Escalate  string       `json:"escalate,omitempty"`
 	LatencyUS float64      `json:"latency_us"`
 	Spans     []slots.Span `json:"spans,omitempty"`
+	// Actions: la lista de acciones cuando la capa sabe devolver varias (la 4:
+	// «apaga la luz y cierra la puerta»). Vacía en las capas de una intención;
+	// Intent/Slots son entonces la primera.
+	Actions []Action `json:"actions,omitempty"`
+	// Reply es la frase corta que la capa 4 propone decir de vuelta (o la
+	// pregunta de aclaración cuando no entendió).
+	Reply string `json:"reply,omitempty"`
+	// Model es el modelo que decidió en las capas lentas.
+	Model string    `json:"model,omitempty"`
+	Kind  string    `json:"kind,omitempty"` // capa 4: command | situation | other
+	LLM   *LLMStats `json:"llm,omitempty"`
 }
 
 // Decider encadena las capas rápidas. Matcher es obligatorio; Intent y Slots

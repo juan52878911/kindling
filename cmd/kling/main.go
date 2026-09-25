@@ -134,6 +134,11 @@ SMALL MODELS (JEV, runs locally, no daemon)
   domotica eval -data t.jsonl [-challenge]         accuracy, slot F1, exact match, latency
   domotica train-slots -data d.jsonl -o m.jevs     trains the slot tagger (docs/domotica.md)
   domotica templates [-lang L]                     lists the predefined demo commands
+  domotica cascade [-von G] "<text>"               the whole cascade with its trace (JSON)
+  domotica eval-llm -von G -data t.jsonl           layer 4 (VON) vs doing nothing on what
+                                                   escalates; its record enables layer 4
+  domotica demo [-listen A] [-von G]               the demo room: web page, devices, trace
+                                                   (docs/demo-domotica.md)
 
 `
 

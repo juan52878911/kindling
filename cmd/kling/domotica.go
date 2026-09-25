@@ -36,6 +36,17 @@ const domoticaUsage = `usage: kling domotica <command> [options]
   train-slots -data train.jsonl -o m.jevs       trains the slot tagger (JEV-slots)
        [-valid valid.jsonl] [-test t.jsonl]
   templates [-lang es|en]                       the demo commands the template layer knows
+  cascade [-von golden] "<text>"                the whole cascade (templates, JEV, encoder, VON)
+                                                with its trace, as JSON
+  eval-llm -von golden [-data test.jsonl]       layer 4 (VON) on what the fast layers escalate,
+                                                against doing nothing; writes the eval record
+                                                that enables it
+  demo [-listen 127.0.0.1:8088] [-von golden]   the demo room: a web page with the devices,
+                                                voice commands and the trace of each decision
+
+Layer 4 runs through an in-process AI gateway on the daemon of -H (or a running
+` + "`kling ai serve`" + ` with -ai) and is enabled only if its eval record backs it
+(-von-force overrides; docs/demo-domotica.md).
 
 Models default to $KLING_DOMOTICA_MODELS (or the user cache dir)/intent.jev and
 slots.jevs; without them only the demo templates answer. Data: go run
@@ -56,6 +67,12 @@ func cmdDomotica(args []string) error {
 		return cmdDomoticaTrainSlots(args[1:])
 	case "templates":
 		return cmdDomoticaTemplates(args[1:])
+	case "eval-llm":
+		return cmdDomoticaEvalLLM(args[1:])
+	case "cascade":
+		return cmdDomoticaCascade(args[1:])
+	case "demo":
+		return cmdDomoticaDemo(args[1:])
 	}
 	return fmt.Errorf("unknown domotica command %q\n\n%s", args[0], domoticaUsage)
 }
