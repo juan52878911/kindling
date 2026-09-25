@@ -36,7 +36,7 @@ cliente ──HTTP──> kling ai serve ── /v1/classify ──┬── bac
 
 | | `inprocess` (por defecto) | `microvm` |
 |---|---|---|
-| Latencia | 1-15 µs | red + microVM: cientos de µs a milisegundos si está despierta; ~27 ms si hay que despertarla congelada y ~2,5 ms si estaba pausada (ver [Latencia de despertar](#latencia-de-despertar)) |
+| Latencia | 1-15 µs | red + microVM: cientos de µs a milisegundos si está despierta; ~27 ms si hay que despertarla congelada y ~2,2 ms si estaba pausada (ver [Latencia de despertar](#latencia-de-despertar)) |
 | Aislamiento | Ninguno: todas las tareas comparten proceso y el presupuesto `-chispa-mem` | Total: cada tarea es su propia microVM, su propia memoria, su propio `mem.file` |
 | Empaquetado | Un `.chispa` más en el registro | Una imagen propia (el modelo horneado dentro, como el GGUF de un VON) |
 | Coste ocioso | Un modelo cargado ocupa RAM del gateway hasta que el LRU lo saca | Cero: congelada, la réplica no gasta CPU (y en Linux su memoria vuelve al fichero) |
@@ -260,7 +260,7 @@ de 128 MiB:
 | Réplica dormida → decisión (cliente, p50) | Antes | Ahora |
 |---|---|---|
 | Congelada (warm) | 152 ms | **27 ms** |
-| Pausada (nivel nuevo, `kling ai serve -paused-mib`, 256 MiB por defecto) | — | **2,5 ms**, a cambio de ~36 MiB de RSS por réplica |
+| Pausada (nivel nuevo, `kling ai serve -paused-mib`, 256 MiB por defecto) | — | **2,2 ms**, a cambio de ~36 MiB de RSS por réplica |
 
 Con el nivel pausada, una tarea Chispa pequeña y popular vuelve a estar en el
 orden de milisegundos aunque lleve minutos sin usarse; el segador reparte el

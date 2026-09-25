@@ -13,7 +13,7 @@ depuración.
 | [`releases.md`](releases.md) | Cómo se compilan, verifican y publican los binarios; cómo crear una release nueva | mantienes el proyecto o quieres compilar desde fuentes |
 | [`exec-sandbox.md`](exec-sandbox.md) | Sandboxes para agentes de código: `kling sandbox`, `kling exec` en streaming, `kling cp`, plantillas desde snapshot y la puerta `allow_exec` | quieres ejecutar código de un agente sin tocar tu máquina |
 | [`von.md`](von.md) | LLM pequeños (SmolLM2, Qwen2.5) servidos desde snapshots dorados con `kling models`: uso, diseño, semillas, cifras en Linux y macOS, y el plan de GPU | quieres servir un modelo pequeño con escala a cero |
-| [`despertar.md`](despertar.md) | De réplica dormida a primera respuesta, fase por fase: 152 → 27 ms congelada y 2,5 ms con el nivel pausada, cada palanca con su medida | quieres saber dónde se va el tiempo de un thaw o activar el nivel pausada |
+| [`despertar.md`](despertar.md) | De réplica dormida a primera respuesta, fase por fase: 152 → 27 ms congelada y 2,2 ms con el nivel pausada, cada palanca con su medida | quieres saber dónde se va el tiempo de un thaw o activar el nivel pausada |
 | [`densidad-zram.md`](densidad-zram.md) | Swap comprimido en RAM para densificar el host: cuándo ayuda, cuándo estorba, y el plan de medición antes/después | quieres más microVMs co-residentes sin más RAM |
 
 ## Para quien amplía kindling

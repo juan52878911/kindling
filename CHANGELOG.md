@@ -6,7 +6,7 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## v0.12.0 — sin publicar
 
-### Despertar más rápido: de 152 a 27 ms congelada, 2,5 ms pausada
+### Despertar más rápido: de 152 a 27 ms congelada, 2,2 ms pausada
 
 Medido fase por fase en un i7-8700T (KVM sin anidar, jailer) con una tarea
 Chispa de 128 MiB detrás de `kling ai serve`; cada palanca con su antes/después
@@ -35,7 +35,7 @@ y lo que no funcionó, en [docs/despertar.md](docs/despertar.md).
   en vez de congelar las réplicas ociosas que mejor puntúan por popularidad /
   memoria mientras quepan, congela de verdad las que pasan `-paused-for` (10 ×
   idle) sin uso, y las sacrifica primero si falta memoria. Réplica pausada →
-  decisión: 2,5 ms, con ~36 MiB de RSS por réplica Chispa.
+  decisión: 2,2 ms, con ~36 MiB de RSS por réplica Chispa.
 - `kling ai serve -name-prefix` para el nombre de las réplicas.
 - Arreglo: el cliente de la API de Firecracker dejaba una conexión abierta por
   llamada; con varias pausas sobre el mismo VMM su API acababa rechazando la

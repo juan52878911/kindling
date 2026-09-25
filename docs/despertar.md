@@ -15,26 +15,26 @@ etiquetas (`kling chispa deploy -mem 128 -vcpus 1`, dorado de ~70 MiB) detrás d
 
 | | Antes | Congelada (warm) | Pausada |
 |---|---|---|---|
-| **Réplica dormida → decisión, visto por el cliente (p50)** | **152 ms** | **27 ms** | **2,5 ms** |
+| **Réplica dormida → decisión, visto por el cliente (p50)** | **152 ms** | **26-27 ms** | **2,2 ms** |
 | RAM mientras duerme | 0 (en disco) | 0 (en disco) | 36 MiB de RSS (32 de ellos caché del `mem.file`) |
 
 Desglose (media de `kling_ai_wake_phase_seconds`, ms):
 
 | Fase | Antes | Congelada | Pausada | Qué es |
 |---|---|---|---|---|
-| list | 0,45 | 0,44 | 0,47 | `List` de la flota para elegir máquina |
+| list | 0,45 | 0,44 | 0,45 | `List` de la flota para elegir máquina |
 | renew | 0,30 | 0,27 | 0 (en segundo plano) | renovar el TTL |
 | daemon: wait | 0,08 | 0,09 | 0 | candado de la máquina y puerta de arranque |
 | daemon: check | 0,41 | 0,47 | 0 | ¿queda un VMM vivo? (escaneo de `/proc`) |
 | daemon: net | **47,3** | 0,02 | 0 | namespace, veth, tap, reglas |
 | daemon: spawn | 13,6 | 9,7 | 0 | lanzar jailer + preparar el chroot |
 | daemon: socket | 10,7 | 4,5 | 0 | esperar al socket de la API del VMM |
-| daemon: load | 2,6 | 2,6 | 0,3 | `LoadSnapshot` (lo que mide `thaw_ms`) / `Resume` |
+| daemon: load | 2,6 | 2,6 | 0,32 | `LoadSnapshot` (lo que mide `thaw_ms`) / `Resume` |
 | daemon: resync | **54,2** | 5,7 | 0 | reloj y entropía del invitado |
 | daemon: cgroup | 8,2 | 0 | 0 | meter el VMM en su cgroup |
 | ready | 0,29 | 0,25 | 0 (no hace falta) | sondeo del puerto del invitado |
-| primera petición | 14,0 | 2,5 | 0,5 | `POST /v1/classify` a la réplica |
-| **total** | **152,6** | **26,8** | **~2** | |
+| primera petición | 14,0 | 2,5 | 0,7 | `POST /v1/classify` a la réplica |
+| **total** | **152,6** | **26,8** | **1,7** | |
 
 `thaw_ms` (`LoadSnapshot`) nunca fue el problema: 2-3 ms de 150.
 
@@ -57,7 +57,7 @@ que movió.
 | 8 | MAC fija del tap0 (`06:00:AC:10:00:01`) para que la caché ARP congelada siga valiendo | primera petición tras rehacer la red: 2,3-2,5 ms con MAC aleatoria, 2,2-2,6 con fija: **sin diferencia** (la ARP del host al invitado ya le corrige la entrada en la misma vuelta). Se queda porque no cuesta nada (va en el mismo `ip link set`) | sin ganancia |
 | 9 | Rehacer la red más barato (solo tras reiniciar el daemon o pasados 30 min): el veth nace en su namespace (moverlo costaba 14 ms de RCU), `ip -n` en vez de `ip netns exec ip`, y las reglas de none/internet en un solo `iptables-restore` | net (rehecha) 47 → 23 | sí |
 | 10 | **Nivel pausada** (`kling pause`, `-paused-mib`) | 27 → 2,5 ms | sí |
-| 11 | Tras reanudar, sin sondeo de puerto y con la renovación del TTL en segundo plano | ready 0,2 → 0, renew 0,2 → 0 | sí |
+| 11 | Tras reanudar, sin sondeo de puerto y con la renovación del TTL en segundo plano | ready 0,2 → 0, renew 0,2 → 0; pausada → decisión 2,5 → 2,2 ms | sí |
 | — | Filtrar `List` por etiqueta en el daemon | 0,45 ms con 10 máquinas: no merece otra ruta de API | no |
 | — | Keep-alive del gateway hacia las réplicas | ≤ 0,2 ms; y una conexión reutilizada hacia una réplica congelada y rehecha falla al escribir, no al conectar, que es lo único que `postGuest` reintenta | no |
 
