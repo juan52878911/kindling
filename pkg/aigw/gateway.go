@@ -391,9 +391,11 @@ func jevDecide(m *jev.Model, tc *TaskConfig, in jev.Input, full bool) (jev.Predi
 }
 
 // escalation arma la pregunta a VON de una escalada: con top_k, VON solo elige
-// entre los candidatos de JEV. p tiene que traer la distribución (PredictFull).
-func (g *Gateway) escalation(tc *TaskConfig, m *jev.Model, in jev.Input, p jev.Prediction) ([]string, chatReq) {
-	allowed := m.Labels
+// entre los candidatos de JEV. p tiene que traer la distribución (PredictFull),
+// y labels todas las etiquetas del modelo (jev.Model.Labels en proceso; en una
+// tarea con backend microvm, las de p.Probs, que kling-jev manda enteras).
+func (g *Gateway) escalation(tc *TaskConfig, labels []string, in jev.Input, p jev.Prediction) ([]string, chatReq) {
+	allowed := labels
 	if tc.TopK > 0 && tc.TopK < len(allowed) {
 		allowed = make([]string, 0, tc.TopK)
 		for _, c := range topN(p.Probs, tc.TopK) {
@@ -442,14 +444,47 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		return resp, nil
 	}
 
-	m, err := g.jev.get(cfg.Models[tc.JEV].Path)
-	if err != nil {
-		log.Printf("task %s: loading jev model: %v", req.Task, err)
-		return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable", tc.JEV)
-	}
+	mc := cfg.Models[tc.JEV]
 	casc := g.cascade(req.Task)
 	escalar := casc.On() && req.Mode != "jev"
-	p, tau, confident := jevDecide(m, tc, in, req.Explain)
+
+	// La predicción sale de dos sitios: dentro de este proceso (jevCache, el
+	// camino de siempre) o de una réplica en una microVM (kling jev deploy,
+	// docs/jev-serverless.md). A partir de aquí el resto de la función no sabe
+	// cuál fue: p, tau, confident y labels ya bastan.
+	var p jev.Prediction
+	var tau float64
+	var confident bool
+	var labels []string
+	if mc.Backend == BackendMicroVM {
+		gp, err := g.classifyGuest(ctx, mc.Snapshot, in, req.Explain)
+		if err != nil {
+			var we *wakeError
+			reason := "request"
+			if errors.As(err, &we) {
+				reason = "wake"
+			}
+			g.met.vonErr("jev:"+tc.JEV, reason)
+			log.Printf("task %s: jev %s (microvm): %v", req.Task, tc.JEV, err)
+			return nil, statusf(http.StatusServiceUnavailable, "jev model %q (backend microvm) unavailable: %v", tc.JEV, err)
+		}
+		p = gp
+		tau = p.Threshold
+		if v, ok := tc.Thresholds[p.Label]; ok {
+			tau = v
+		}
+		confident = p.Prob >= tau
+		labels = candidateLabels(p.Probs)
+	} else {
+		m, err := g.jev.get(mc.Path)
+		if err != nil {
+			log.Printf("task %s: loading jev model: %v", req.Task, err)
+			return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable", tc.JEV)
+		}
+		p, tau, confident = jevDecide(m, tc, in, req.Explain)
+		labels = m.Labels
+	}
+
 	dec := jev.DecisionEscalate
 	if confident {
 		dec = jev.DecisionConfident
@@ -458,15 +493,22 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	resp.Label, resp.Prob, resp.Source, resp.Evidence = p.Label, p.Prob, "jev", p.Evidence
 	if confident {
 		if escalar {
-			g.maybeAudit(req.Task, tc, cfg, m.Labels, in, p)
+			g.maybeAudit(req.Task, tc, cfg, labels, in, p)
 		}
 		return finish()
 	}
 
 	// JEV duda: la distribución completa y la evidencia van en la respuesta
-	// (y en la pregunta a VON, si la plantilla las usa).
+	// (y en la pregunta a VON, si la plantilla las usa). En proceso hace falta
+	// pedirla aparte si no se pidió ya con Explain; una réplica en microvm ya
+	// la manda siempre que duda (ver cmd/kling-jev), así que aquí no hay
+	// segunda vuelta que dar.
 	resp.Escalate = true
-	if !req.Explain {
+	if mc.Backend != BackendMicroVM && !req.Explain {
+		m, err := g.jev.get(mc.Path)
+		if err != nil {
+			return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable", tc.JEV)
+		}
 		p = m.PredictFull(in, 5)
 	}
 	resp.Evidence = p.Evidence
@@ -475,7 +517,7 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		return finish()
 	}
 
-	allowed, chat := g.escalation(tc, m, in, p)
+	allowed, chat := g.escalation(tc, labels, in, p)
 	t1 := time.Now()
 	vctx, cancel := context.WithTimeout(ctx, g.opts.VONTimeout)
 	defer cancel()

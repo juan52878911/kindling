@@ -58,7 +58,25 @@ return escalar(msg, m.PredictFull(jev.Input{Text: msg}, 5)) // pasa probs y evid
 
 En `kling ai serve` ([ai-gateway.md](ai-gateway.md)) JEV contesta las
 clasificaciones; cuando duda, la respuesta sale igual con `escalate: true` y
-quien llama decide. Lo de abajo, escalar a VON, es la **cascada**, y solo se
+quien llama decide.
+
+### Modo sin daemon, y el backend serverless
+
+Un registro que solo tiene modelos JEV en proceso (`kind: "jev"`, sin
+`backend` o con `"inprocess"`) **no necesita daemon ni KVM/vz para nada**:
+`kling ai serve` arranca y sirve igual en un portátil donde solo está
+instalado el binario `kling`. Si el registro trae además un modelo VON, un
+codificador, o una tarea JEV con `"backend": "microvm"`, y el daemon no
+contesta, el gateway avisa una vez con claridad al arrancar y sigue: las
+tareas JEV en proceso no se enteran. `kling jev train|eval|predict|inspect` no
+tocan el daemon nunca: son CLI pura sobre el fichero `.jev`.
+
+JEV también se puede desplegar como una tarea **serverless**, empaquetada en
+su propia microVM y despertada bajo demanda —el mismo modelo operativo que
+VON—, con `kling jev deploy` y `"backend": "microvm"` en el registro. Cuándo
+compensa cada opción, cómo desplegarla y las cifras (thaw, latencia,
+decisiones/s con y sin microVM) están en
+[jev-serverless.md](jev-serverless.md). Lo de abajo, escalar a VON, es la **cascada**, y solo se
 activa por tarea si `kling ai eval` demuestra que gana a JEV solo: en commits no
 ganó con ningún LLM de 0,5B a 3B.
 

@@ -385,7 +385,7 @@ func (g *Gateway) Eval(ctx context.Context, req EvalRequest) (*EvalRecord, error
 	ask := func(i int, alone bool) {
 		ex := req.Examples[i]
 		in := jev.Input{Text: ex.Text, Fields: ex.Fields}
-		allowed, chat := g.escalation(tc, m, in, preds[i])
+		allowed, chat := g.escalation(tc, m.Labels, in, preds[i])
 		if alone {
 			allowed = m.Labels
 			chat = g.chatFor(tc, allowed, in, nil)

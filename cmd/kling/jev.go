@@ -35,8 +35,17 @@ const jevUsage = `usage: kling jev <command> [options]
           [-fields JSON] [-top N] [-json]    (one JSON result per line)
   inspect <model.jev> [-json]                format, feature spec, labels, τ, metadata
 
+  deploy  <task> -model m.jev [-slots s.jevs] serverless: packages the model as a
+          [-mem 64] [-vcpus 1]               microVM image and freezes a golden
+                                              snapshot (needs a daemon; docs/jev-serverless.md)
+  ls      [-json]                            deployed jev tasks (golden snapshots)
+  rm      <task> [-keep-image]               removes a deployed task's snapshot (and image)
+
 Data is JSONL: {"text": "...", "label": "...", "fields": {"service": "api"}}
 Run 'kling jev <command> -h' for the options of each command.
+
+deploy/ls/rm need a kindling daemon (a golden snapshot lives in a microVM);
+train/eval/predict/inspect never do: JEV runs in this process alone.
 `
 
 func cmdJev(args []string) error {
@@ -53,6 +62,12 @@ func cmdJev(args []string) error {
 		return cmdJevPredict(args[1:])
 	case "inspect":
 		return cmdJevInspect(args[1:])
+	case "deploy":
+		return cmdJevDeploy(args[1:])
+	case "ls", "list":
+		return cmdJevLs(args[1:])
+	case "rm", "remove":
+		return cmdJevRm(args[1:])
 	}
 	return fmt.Errorf("unknown jev command %q\n\n%s", args[0], jevUsage)
 }

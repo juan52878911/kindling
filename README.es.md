@@ -738,7 +738,10 @@ kling jev predict -model eventos.jev -text "panic in the parser" -fields '{"serv
 
 Diseño y formato: [`docs/jev.md`](docs/jev.md). Una evaluación honesta con 4 304
 commits reales, incluido dónde dejan de valer los umbrales:
-[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
+[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md). JEV también se puede desplegar **serverless**,
+una tarea por dorado congelado en su propia microVM despertada bajo demanda (el mismo
+modelo que VON, más abajo): `kling jev deploy`, cifras de thaw y rendimiento medidas en
+[`docs/jev-serverless.md`](docs/jev-serverless.md).
 
 ## Gateway de IA: muchos modelos listos, ninguno encendido 24/7
 
@@ -1158,6 +1161,7 @@ permite que N instancias compartan páginas.
 | [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
+| [`docs/jev-serverless.md`](docs/jev-serverless.md) | JEV como tarea serverless de kindling: un dorado congelado por tarea, `kling jev deploy`, thaw y rendimiento medidos frente a en proceso |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención JEV + JEV-slots, datos libres con su licencia, y su evaluación |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: JEV clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |

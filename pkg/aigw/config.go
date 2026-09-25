@@ -58,13 +58,28 @@ type Config struct {
 // ModelConfig es un modelo con nombre.
 type ModelConfig struct {
 	Kind string `json:"kind"` // jev | von
-	// Path es el .jev (kind jev). Relativo = relativo al fichero de config.
+	// Path es el .jev (kind jev, backend inprocess). Relativo = relativo al
+	// fichero de config.
 	Path string `json:"path,omitempty"`
-	// Snapshot es el dorado de `kling models add` (kind von o embed).
+	// Snapshot es el dorado de `kling models add` (kind von o embed) o de
+	// `kling jev deploy` (kind jev, backend microvm).
 	Snapshot string `json:"snapshot,omitempty"`
+	// Backend dice DÓNDE vive un modelo jev: "" o "inprocess" (por defecto,
+	// dentro de este proceso, µs, sin daemon) o "microvm" (una réplica de
+	// kling-jev en una microVM, despertada y congelada por pkg/scheduler como
+	// a un VON; docs/jev-serverless.md). Solo se usa con kind "jev"; von y
+	// embed siempre son una réplica.
+	Backend string `json:"backend,omitempty"`
 	// MaxReplicas acota las réplicas de este modelo (0 = la del gateway).
+	// Solo aplica a von, embed y jev con backend microvm.
 	MaxReplicas int `json:"max_replicas,omitempty"`
 }
+
+// Backends de un modelo jev.
+const (
+	BackendInProcess = "inprocess"
+	BackendMicroVM   = "microvm"
+)
 
 // TaskConfig es una tarea con nombre, de una de dos clases:
 //
@@ -184,7 +199,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	for _, m := range c.Models {
-		if m.Kind == KindJEV && !filepath.IsAbs(m.Path) {
+		if m.Kind == KindJEV && m.Path != "" && !filepath.IsAbs(m.Path) {
 			m.Path = filepath.Join(filepath.Dir(path), m.Path)
 		}
 	}
@@ -241,12 +256,24 @@ func (c *Config) Validate() error {
 		}
 		switch m.Kind {
 		case KindJEV:
-			if m.Path == "" || m.Snapshot != "" {
-				errs = append(errs, fmt.Errorf("model %q: a jev model needs path (and no snapshot)", n))
+			switch m.Backend {
+			case "", BackendInProcess:
+				if m.Path == "" || m.Snapshot != "" {
+					errs = append(errs, fmt.Errorf("model %q: a jev model needs path (and no snapshot)", n))
+				}
+			case BackendMicroVM:
+				if m.Snapshot == "" || m.Path != "" {
+					errs = append(errs, fmt.Errorf("model %q: a jev model with backend microvm needs snapshot (and no path), from kling jev deploy", n))
+				}
+			default:
+				errs = append(errs, fmt.Errorf("model %q: backend must be inprocess or microvm, not %q", n, m.Backend))
 			}
 		case KindVON, KindEmbed:
 			if m.Snapshot == "" || m.Path != "" {
 				errs = append(errs, fmt.Errorf("model %q: a %s model needs snapshot (and no path)", n, m.Kind))
+			}
+			if m.Backend != "" {
+				errs = append(errs, fmt.Errorf("model %q: backend only applies to kind jev (a %s model is always a replica)", n, m.Kind))
 			}
 		default:
 			errs = append(errs, fmt.Errorf("model %q: kind must be jev, von or embed, not %q", n, m.Kind))
@@ -380,27 +407,34 @@ func (c *Config) vonModel(name string) (string, *ModelConfig) {
 	return "", nil
 }
 
-// replicaModel es vonModel para todo lo que se sirve con réplicas (VON y
-// codificadores): lo que el planificador despierta, congela y cuenta.
+// isReplica dice si m es un modelo servido por una réplica (una microVM que
+// pkg/scheduler despierta y congela) y no dentro de este proceso.
+func (m *ModelConfig) isReplica() bool {
+	return m.Kind == KindVON || m.Kind == KindEmbed || (m.Kind == KindJEV && m.Backend == BackendMicroVM)
+}
+
+// replicaModel es vonModel para todo lo que se sirve con réplicas (VON,
+// codificadores y JEV con backend microvm): lo que el planificador despierta,
+// congela y cuenta.
 func (c *Config) replicaModel(name string) (string, *ModelConfig) {
-	if m := c.Models[name]; m != nil && (m.Kind == KindVON || m.Kind == KindEmbed) {
+	if m := c.Models[name]; m != nil && m.isReplica() {
 		return name, m
 	}
 	for _, n := range sortedKeys(c.Models) {
-		if m := c.Models[n]; (m.Kind == KindVON || m.Kind == KindEmbed) && m.Snapshot == name {
+		if m := c.Models[n]; m.isReplica() && m.Snapshot == name {
 			return n, m
 		}
 	}
 	return "", nil
 }
 
-// NeedsDaemon dice si el registro tiene algun modelo VON o embed: son los
-// unicos que despierta el daemon (una replica en una microVM). Un registro
-// solo con modelos JEV no necesita daemon ni KVM/vz para nada: JEV vive dentro
-// de este mismo proceso.
+// NeedsDaemon dice si el registro tiene algún modelo que despierte el daemon:
+// VON, embed o JEV con backend microvm. Un registro solo con JEV en proceso
+// no necesita daemon ni KVM/vz para nada: JEV vive dentro de este mismo
+// proceso.
 func (c *Config) NeedsDaemon() bool {
 	for _, m := range c.Models {
-		if m.Kind == KindVON || m.Kind == KindEmbed {
+		if m.isReplica() {
 			return true
 		}
 	}
