@@ -22,10 +22,16 @@ type Client struct {
 
 func New(socketPath string) *Client {
 	return &Client{http: &http.Client{
+		// Sin keep-alive: cada Client es de usar y tirar, y la conexión ociosa
+		// que dejaría cada uno se quedaría abierta contra el VMM. El servidor
+		// de API de Firecracker admite pocas a la vez: tras unos cuantos
+		// ciclos pause/resume sobre el MISMO proceso rechazaba la siguiente
+		// ("write: broken pipe"). Conectar a un socket Unix cuesta µs.
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialUnix(ctx, socketPath)
 			},
+			DisableKeepAlives: true,
 		},
 		Timeout: 30 * time.Second,
 	}}
