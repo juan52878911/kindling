@@ -105,15 +105,35 @@ func (f *domoFiles) reset() {
 	f.mu.Unlock()
 }
 
+// loadSlotsFn y loadHeadFn se sustituyen en los tests.
+var (
+	loadSlotsFn = slots.LoadFile
+	loadHeadFn  = codificador.LoadFile
+)
+
+// getSlots y getHead leen el fichero FUERA del candado, como pkg/aigw/jevcache.go:
+// una tarea cuyo .jevs o .jenc tarda en leerse (o cuyo disco anda lento) no
+// para las decisiones de las demás tareas, que solo tocan el candado para un
+// mapa ya en memoria. Dos peticiones que piden a la vez el mismo fichero
+// pueden leerlo dos veces (son pocos, de ~100 KB: no compensa la coordinación
+// de jevcache), pero la segunda comprobación bajo el candado asegura que solo
+// una entrada gana y todo el mundo ve la misma.
+
 func (f *domoFiles) getSlots(p string) (*slots.Model, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if m := f.slots[p]; m != nil {
+	m := f.slots[p]
+	f.mu.Unlock()
+	if m != nil {
 		return m, nil
 	}
-	m, err := slots.LoadFile(p)
+	m, err := loadSlotsFn(p)
 	if err != nil {
 		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if existing := f.slots[p]; existing != nil {
+		return existing, nil
 	}
 	if f.slots == nil {
 		f.slots = map[string]*slots.Model{}
@@ -124,13 +144,19 @@ func (f *domoFiles) getSlots(p string) (*slots.Model, error) {
 
 func (f *domoFiles) getHead(p string) (*codificador.Head, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if h := f.heads[p]; h != nil {
+	h := f.heads[p]
+	f.mu.Unlock()
+	if h != nil {
 		return h, nil
 	}
-	h, err := codificador.LoadFile(p)
+	h, err := loadHeadFn(p)
 	if err != nil {
 		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if existing := f.heads[p]; existing != nil {
+		return existing, nil
 	}
 	if f.heads == nil {
 		f.heads = map[string]*codificador.Head{}
