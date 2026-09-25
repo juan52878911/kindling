@@ -198,6 +198,11 @@ func viaGateway(ctx context.Context, f flags) (room.Options, error) {
 		{Name: domotica.LayerTemplate, Status: "on", Where: "gateway", Detail: fmt.Sprintf("%d templates, task %s", len(domotica.DemoTemplates), f.decideTask)},
 		{Name: domotica.LayerChispa, Status: "on", Where: "gateway", Detail: "model " + decide.Chispa},
 	}
+	if decide.ChispaBackend == "microvm" {
+		// Serverless: una microVM por tarea que se descongela con la orden (la
+		// traza trae su estado y su despertar en el paso de Chispa).
+		layers[1].Where, layers[1].Detail = "microvm", "model "+decide.Chispa+" (serverless, kling chispa deploy)"
+	}
 	enc := room.LayerInfo{Name: domotica.LayerEncoder, Status: "unavailable", Where: "microvm", Detail: "the task has no encoder"}
 	hasEncoder := false
 	if c := decide.Cascade; c != nil && c.To != "" {

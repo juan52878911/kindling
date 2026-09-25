@@ -19,6 +19,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 )
 
 // `kling chispa deploy|ls|rm`: Chispa como tarea serverless de kindling
@@ -115,8 +116,17 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	}
 	modelSHA256 := sha256.Sum256(o.Model)
 	spec := ChispaSpec{ModelB64: base64.StdEncoding.EncodeToString(o.Model)}
+	rec := aigw.ChispaDeployRecord{Labels: model.Labels, Sha256: hex.EncodeToString(modelSHA256[:])}
 	if len(o.Slots) > 0 {
+		sm, err := slots.Load(bytes.NewReader(o.Slots))
+		if err != nil {
+			return fmt.Errorf("the slot model does not load as a .chispas: %w", err)
+		}
 		spec.SlotsB64 = base64.StdEncoding.EncodeToString(o.Slots)
+		sum := sha256.Sum256(o.Slots)
+		// Los huecos también van al registro: el gateway valida contra ellos
+		// los que mande la réplica (pkg/aigw/chispaguest.go).
+		rec.Slots, rec.SlotsSha256 = sm.SlotNames(), hex.EncodeToString(sum[:])
 	}
 	if o.WarmText == "" {
 		o.WarmText = "hello world"
@@ -182,7 +192,6 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	// puede fiarse de las etiquetas que le mande el propio invitado
 	// (pkg/aigw/chispaguest.go): se graban aquí, en el dorado, como la fuente de
 	// verdad que classifyGuest valida contra la respuesta de la réplica.
-	rec := aigw.ChispaDeployRecord{Labels: model.Labels, Sha256: hex.EncodeToString(modelSHA256[:])}
 	if _, err := c.SetAnnotation(ctx, name, aigw.ChispaDeployAnnotation, rec); err != nil {
 		return fmt.Errorf("recording %s on the snapshot (needed by the gateway to trust replica answers): %w", aigw.ChispaDeployAnnotation, err)
 	}

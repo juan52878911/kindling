@@ -20,12 +20,15 @@ import (
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/codificador"
 	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // TAREAS DE DOMÓTICA: /v1/decide para la habitación de demo.
 //
 // La decisión es la cascada de pkg/domotica: plantillas de la demo (capa 1),
-// Chispa + Chispa-slots (capa 2, en proceso, microsegundos) y, para lo que esas
+// Chispa + Chispa-slots (capa 2: en proceso, microsegundos; o serverless, una
+// réplica de `kling chispa deploy` que se despierta con la orden si el modelo
+// de intención es backend "microvm", ver guestIntent) y, para lo que esas
 // dudan, el codificador de frases (capa 3): una réplica de un dorado kind
 // embed que pkg/scheduler despierta con la primera petición y congela al
 // quedarse ociosa, igual que un VON, y la cabeza .jenc que clasifica su
@@ -188,6 +191,58 @@ func (e replicaEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	return codificador.ParseEmbeddings(resp.StatusCode, resp.Body, len(texts), e.dim)
 }
 
+// guestIntent es la capa 2 servida serverless: el mismo camino que una tarea
+// de clasificación con backend microvm (askChispaGuest: etiquetas y huecos
+// validados contra el registro de despliegue, confianza del lado del
+// gateway), más cómo estaba la microVM para la traza.
+type guestIntent struct {
+	g     *Gateway
+	model string
+	snap  string
+}
+
+func (r guestIntent) ClassifyIntent(ctx context.Context, text, lang string) (domotica.RemoteAnswer, error) {
+	var fields map[string]any
+	if lang == "es" || lang == "en" {
+		fields = map[string]any{"lang": lang}
+	}
+	a, err := r.g.askChispaGuest(ctx, r.snap, chispa.Input{Text: text, Fields: fields}, false)
+	out := domotica.RemoteAnswer{Replica: replicaInfo(r.model, a.Wake, a.Request)}
+	if err != nil {
+		reason, _, _ := guestErrReason(err)
+		r.g.met.vonErr("chispa:"+r.model, reason)
+		if a.Wake == nil && a.Request == 0 {
+			out.Replica = nil // no llegó a haber réplica
+		}
+		return out, err
+	}
+	_, out.Confident = guestConfident(a.Pred, nil)
+	out.Label, out.Prob, out.HasSlots, out.Spans = a.Pred.Label, a.Pred.Prob, a.HasSlots, a.Spans
+	return out, nil
+}
+
+// replicaInfo traduce el despertar del planificador al estado de la traza:
+// thaw = estaba congelada, resume = pausada, restore = no había (del dorado),
+// y sin despertar (o adopt, ya corría) = despierta.
+func replicaInfo(model string, w *scheduler.WakeTrace, req time.Duration) *domotica.ReplicaInfo {
+	ri := &domotica.ReplicaInfo{Model: model, State: domotica.ReplicaWarm, RequestMS: msOf(req)}
+	if w == nil {
+		return ri
+	}
+	switch w.How {
+	case "thaw":
+		ri.State = domotica.ReplicaFrozen
+	case "resume":
+		ri.State = domotica.ReplicaPaused
+	case "restore":
+		ri.State = domotica.ReplicaNew
+	}
+	ri.WakeMS = msOf(w.Total)
+	return ri
+}
+
+func msOf(d time.Duration) float64 { return math.Round(float64(d.Microseconds())/10) / 100 }
+
 // decider arma la cascada de una tarea. withEncoder añade la capa 3 (si la
 // tarea la tiene), esté o no encendida: la evaluación la necesita apagada y
 // encendida.
@@ -196,11 +251,12 @@ func (g *Gateway) decider(cfg *Config, d *DomoticaConfig, withEncoder bool) (*do
 	if err != nil {
 		return nil, err
 	}
-	im, err := g.chispa.get(cfg.Models[d.Intent].Path)
-	if err != nil {
+	dec := &domotica.Decider{Matcher: mt, FinalOOS: d.FinalOOS}
+	if mc := cfg.Models[d.Intent]; mc.Backend == BackendMicroVM {
+		dec.Remote = guestIntent{g: g, model: d.Intent, snap: mc.Snapshot}
+	} else if dec.Intent, err = g.chispa.get(mc.Path); err != nil {
 		return nil, fmt.Errorf("intent model: %w", err)
 	}
-	dec := &domotica.Decider{Matcher: mt, Intent: im, FinalOOS: d.FinalOOS}
 	if d.Slots != "" {
 		if dec.Slots, err = g.domo.getSlots(d.Slots); err != nil {
 			return nil, fmt.Errorf("slot model: %w", err)
@@ -258,6 +314,10 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 		return nil, statusf(http.StatusServiceUnavailable, "task %q: %v", req.Task, err)
 	}
 	d := dec.DecideContext(ctx, req.Text, req.Lang)
+	if d.ChispaError != "" {
+		g.met.inc(g.met.degraded, req.Task)
+		log.Printf("task %s: chispa %s (microvm): %s", req.Task, tc.Domotica.Intent, d.ChispaError)
+	}
 	if d.EncoderError != "" {
 		g.met.vonErr(tc.Domotica.Encoder, "encoder")
 		g.met.inc(g.met.degraded, req.Task)
@@ -272,7 +332,7 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 		fast := d.Confident && (d.Layer == domotica.LayerTemplate || d.Layer == domotica.LayerChispa)
 		g.met.learnAnswer(req.Task, ls.version, fast, ls.cfg.WindowMinutes)
 		if !fast && d.Layer != domotica.LayerTemplate && ls.cfg.capturing() {
-			g.captureDecide(ls, cfg, tc, req.Task, resp.ID, req.Text, d)
+			g.captureDecide(ctx, ls, cfg, tc, req.Task, resp.ID, req.Text, d)
 		}
 	}
 	el := time.Since(t0)
@@ -601,13 +661,25 @@ func (g *Gateway) saveRecord(task string, v any) error {
 // órdenes indirectas); las que escalaron por un hueco que falta o por ser
 // dos órdenes no enseñan nada al modelo de intención. Si la capa del
 // codificador contestó confiada, su respuesta va como voto de maestro.
-func (g *Gateway) captureDecide(ls learnState, cfg *Config, tc *TaskConfig, task, id, text string, d domotica.Decision) {
-	im, err := g.chispa.get(cfg.Models[tc.Domotica.Intent].Path)
-	if err != nil {
-		return
-	}
+func (g *Gateway) captureDecide(ctx context.Context, ls learnState, cfg *Config, tc *TaskConfig, task, id, text string, d domotica.Decision) {
 	in := chispa.Input{Text: text, Fields: map[string]any{"lang": d.Lang}}
-	p := im.PredictFull(in, 0)
+	var p chispa.Prediction
+	if mc := cfg.Models[tc.Domotica.Intent]; mc.Backend == BackendMicroVM {
+		// La réplica acaba de contestar esta orden (está despierta): se le
+		// pide la distribución entera, que sin explain solo manda si duda.
+		a, err := g.askChispaGuest(ctx, mc.Snapshot, in, true)
+		if err != nil {
+			return
+		}
+		p = a.Pred
+		_, p.Confident = guestConfident(p, nil)
+	} else {
+		im, err := g.chispa.get(mc.Path)
+		if err != nil {
+			return
+		}
+		p = im.PredictFull(in, 0)
+	}
 	if p.Confident && p.Label != domotica.OutOfScope {
 		return
 	}

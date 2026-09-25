@@ -13,7 +13,7 @@ const I18N = {
     traceEmpty: "Elige una orden y verás qué capa la decide, con qué confianza y en cuánto tiempo.",
     jsonActions: "Acción JSON", rawLLM: "Respuesta del LLM", numbers: "Números", history: "Últimas órdenes",
     stateText: "Estado de los dispositivos",
-    foot: "Todo pasa por el gateway de IA de kindling: plantillas y Chispa en su proceso, el codificador y el LLM en microVMs que se despiertan con la orden y se congelan al quedarse ociosas.",
+    foot: "Todo pasa por el gateway de IA de kindling: plantillas en su proceso; Chispa (si es serverless), el codificador y el LLM en microVMs que se despiertan con la orden y se congelan al quedarse ociosas.",
     groups: { direct: "Directas · plantillas", paraphrase: "Con otras palabras · Chispa", indirect: "Indirectas y varias a la vez · capas 3–4", oos: "Fuera de la habitación" },
     layers: { template: "Plantillas", chispa: "Chispa", encoder: "Codificador", von: "LLM", none: "Nadie" },
     lstatus: { on: "activa", unavailable: "no disponible", off: "apagada", forced: "forzada" },
@@ -21,7 +21,7 @@ const I18N = {
     machines: "MicroVMs de las capas", machinesHelp: "Cada capa lenta vive en una microVM de kindling: congelada (0 CPU) hasta que una orden la necesita, descongelada en milisegundos y congelada otra vez al quedarse ociosa.",
     mstate: { running: "despierta", warm: "congelada", stopped: "parada", created: "creada" },
     noMachines: "Ninguna microVM de las capas todavía: se crean con la primera orden que las necesita.",
-    noDaemon: "Sin daemon (-H): no se ven las máquinas.", wake: { thaw: "descongelada", restore: "creada del dorado", adopt: "adoptada" }, warmNow: "ya despierta",
+    noDaemon: "Sin daemon (-H): no se ven las máquinas.", wake: { thaw: "descongelada", resume: "reanudada (pausada)", restore: "creada del dorado", adopt: "adoptada" }, warmNow: "ya despierta",
     st: { answered: "decidió", escalated: "escala", unavailable: "no disponible", disabled: "apagada por su evaluación",
       skipped: "saltada", notreached: "no hizo falta", error: "error", nomatch: "sin coincidencia" },
     nothing: "No hago nada.", nothingWhy: "Ninguna capa disponible supo qué hacer con esa orden.",
@@ -43,7 +43,7 @@ const I18N = {
     traceEmpty: "Pick a command to see which layer decides it, how confident it is and how long it takes.",
     jsonActions: "JSON action", rawLLM: "LLM answer", numbers: "Numbers", history: "Recent commands",
     stateText: "Device state",
-    foot: "Everything goes through kindling's AI gateway: templates and Chispa in its process, the encoder and the LLM in microVMs that wake up with the command and freeze when idle.",
+    foot: "Everything goes through kindling's AI gateway: templates in its process; Chispa (when serverless), the encoder and the LLM in microVMs that wake up with the command and freeze when idle.",
     groups: { direct: "Direct · templates", paraphrase: "In other words · Chispa", indirect: "Indirect and several at once · layers 3–4", oos: "Not for this room" },
     layers: { template: "Templates", chispa: "Chispa", encoder: "Encoder", von: "LLM", none: "Nobody" },
     lstatus: { on: "on", unavailable: "unavailable", off: "off", forced: "forced" },
@@ -51,7 +51,7 @@ const I18N = {
     machines: "The layers' microVMs", machinesHelp: "Each slow layer lives in a kindling microVM: frozen (0 CPU) until a command needs it, thawed in milliseconds and frozen again when idle.",
     mstate: { running: "awake", warm: "frozen", stopped: "stopped", created: "created" },
     noMachines: "No layer microVMs yet: they are created by the first command that needs them.",
-    noDaemon: "No daemon (-H): machines are not shown.", wake: { thaw: "thawed", restore: "restored from golden", adopt: "adopted" }, warmNow: "already awake",
+    noDaemon: "No daemon (-H): machines are not shown.", wake: { thaw: "thawed", resume: "resumed (paused)", restore: "restored from golden", adopt: "adopted" }, warmNow: "already awake",
     st: { answered: "decided", escalated: "escalates", unavailable: "unavailable", disabled: "off by its eval",
       skipped: "skipped", notreached: "not needed", error: "error", nomatch: "no match" },
     nothing: "Doing nothing.", nothingWhy: "No available layer knew what to do with that command.",
@@ -244,8 +244,13 @@ function renderTrace(resp) {
       el("span", { class: "ln", text: T.layers[L] }),
       el("span", { class: "st", text: T.st[n.status] || n.status }));
     if (n.latency_us) li.append(el("span", { class: "lat", text: fmtLat(n.latency_us) }));
-    const w = wk[L];
-    if (w) {
+    // La réplica que sirvió la capa, si el gateway la trae en la traza (Chispa
+    // serverless): congelada, pausada, nueva o ya despierta, y su despertar.
+    const r = n.replica, how = r && { frozen: "thaw", paused: "resume", new: "restore" }[r.state];
+    const w = r ? (how ? { how, ms: r.wake_ms } : null) : wk[L];
+    if (r && !how) {
+      li.append(el("span", { class: "wake warm", text: T.warmNow }));
+    } else if (w) {
       li.append(el("span", { class: "wake " + w.how, text: `${T.wake[w.how] || w.how} · ${fmtLat(w.ms * 1000)}` }));
     } else if (onMicroVM[L] && (n.status === "answered" || n.status === "escalated")) {
       li.append(el("span", { class: "wake warm", text: T.warmNow }));

@@ -137,6 +137,9 @@ type Step struct {
 	Reason    string  `json:"reason,omitempty"`
 	Error     string  `json:"error,omitempty"`
 	LatencyUS float64 `json:"latency_us"`
+	// Replica es cómo estaba la microVM de la capa (hoy, la de Chispa cuando
+	// se sirve serverless) y lo que costó despertarla.
+	Replica *ReplicaInfo `json:"replica,omitempty"`
 }
 
 // Estados de un paso.
@@ -277,6 +280,8 @@ func FastSteps(d Decision, hasEncoder bool) []Step {
 	asked := d.EncoderUS > 0 || d.EncoderError != ""
 	fastUS := d.LatencyUS - d.EncoderUS
 	switch {
+	case d.ChispaError != "":
+		steps = append(steps, Step{Layer: LayerChispa, Status: StepError, Error: d.ChispaError, LatencyUS: fastUS})
 	case d.Layer == LayerNone && d.Reason == ReasonNoModel:
 		steps = append(steps, Step{Layer: LayerChispa, Status: StepUnavailable})
 	case d.Layer == LayerEncoder:
@@ -291,6 +296,7 @@ func FastSteps(d Decision, hasEncoder bool) []Step {
 		}
 		steps = append(steps, s)
 	}
+	steps[1].Replica = d.ChispaReplica
 	switch {
 	case d.EncoderError != "":
 		steps = append(steps, Step{Layer: LayerEncoder, Status: StepError, Error: d.EncoderError, LatencyUS: d.EncoderUS})

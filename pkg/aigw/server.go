@@ -224,17 +224,19 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 
 // TaskInfo es una tarea tal como la ve `kling ai ls`.
 type TaskInfo struct {
-	Name       string        `json:"name"`
-	Kind       string        `json:"kind"` // classify | generate | domotica
-	Chispa     string        `json:"chispa,omitempty"`
-	VON        string        `json:"von,omitempty"` // el de una generación
-	Cascade    *CascadeState `json:"cascade,omitempty"`
-	Labels     []string      `json:"labels,omitempty"`
-	Thresholds []float64     `json:"thresholds,omitempty"` // los efectivos, si el modelo está cargado
-	Loaded     bool          `json:"chispa_loaded"`
-	Audit      float64       `json:"audit,omitempty"`
-	Samples    int           `json:"samples"`
-	Learn      *LearnInfo    `json:"learn,omitempty"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"` // classify | generate | domotica
+	Chispa string `json:"chispa,omitempty"`
+	// ChispaBackend es dónde vive ese modelo: inprocess o microvm.
+	ChispaBackend string        `json:"chispa_backend,omitempty"`
+	VON           string        `json:"von,omitempty"` // el de una generación
+	Cascade       *CascadeState `json:"cascade,omitempty"`
+	Labels        []string      `json:"labels,omitempty"`
+	Thresholds    []float64     `json:"thresholds,omitempty"` // los efectivos, si el modelo está cargado
+	Loaded        bool          `json:"chispa_loaded"`
+	Audit         float64       `json:"audit,omitempty"`
+	Samples       int           `json:"samples"`
+	Learn         *LearnInfo    `json:"learn,omitempty"`
 }
 
 func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
@@ -267,6 +269,12 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 			ti.Samples = r.len()
 		}
 		g.cfgMu.RUnlock()
+		if m := cfg.Models[ti.Chispa]; m != nil {
+			ti.ChispaBackend = BackendInProcess
+			if m.Backend == BackendMicroVM {
+				ti.ChispaBackend = BackendMicroVM
+			}
+		}
 		ti.Learn = g.learnInfo(n)
 		out = append(out, ti)
 	}

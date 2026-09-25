@@ -12,6 +12,8 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // TAREAS Chispa CON BACKEND "microvm": la misma predicción que en proceso, pero
@@ -57,6 +59,8 @@ type chispaGuestResponse struct {
 	Decision   string             `json:"decision"`
 	Candidates []chispa.ClassProb `json:"candidates,omitempty"`
 	Evidence   []chispa.Evidence  `json:"evidence,omitempty"`
+	// Slots son los huecos, si el dorado se desplegó con -slots.
+	Slots []slots.Span `json:"slots,omitempty"`
 }
 
 // maxChispaGuestAnswerBytes acota la respuesta de una réplica Chispa: unas cuantas
@@ -82,6 +86,11 @@ const ChispaDeployAnnotation = "chispa.deploy"
 type ChispaDeployRecord struct {
 	Labels []string `json:"labels"`
 	Sha256 string   `json:"sha256"`
+	// Slots son los huecos del .chispas horneado con -slots (vacío: la
+	// réplica no lleva modelo de huecos y no puede mandar ninguno), y
+	// SlotsSha256 su sha256.
+	Slots       []string `json:"slots,omitempty"`
+	SlotsSha256 string   `json:"slots_sha256,omitempty"`
 }
 
 // chispaDeployLookup consulta ChispaDeployAnnotation de un dorado. La de verdad
@@ -126,20 +135,20 @@ type deployCacheEntry struct {
 // clasificación; este plazo acota cuánto tarda el gateway en enterarse de uno.
 const deployCacheTTL = 30 * time.Second
 
-// deployLabels da las etiquetas válidas de un modelo chispa backend microvm,
-// cacheadas deployCacheTTL. Es la única fuente de verdad que classifyGuest usa
-// para validar lo que manda la réplica.
-func (g *Gateway) deployLabels(ctx context.Context, snapshot string) ([]string, error) {
+// deployRecord da el registro de despliegue de un modelo chispa backend
+// microvm (etiquetas y huecos válidos), cacheado deployCacheTTL. Es la única
+// fuente de verdad que askChispaGuest usa para validar lo que manda la réplica.
+func (g *Gateway) deployRecord(ctx context.Context, snapshot string) (ChispaDeployRecord, error) {
 	g.deployMu.Lock()
 	if e, ok := g.deployCache[snapshot]; ok && time.Since(e.at) < deployCacheTTL {
 		g.deployMu.Unlock()
-		return e.rec.Labels, nil
+		return e.rec, nil
 	}
 	g.deployMu.Unlock()
 
 	rec, err := g.deploy.chispaLabels(ctx, snapshot)
 	if err != nil {
-		return nil, &deployLookupError{err}
+		return ChispaDeployRecord{}, &deployLookupError{err}
 	}
 
 	g.deployMu.Lock()
@@ -148,7 +157,13 @@ func (g *Gateway) deployLabels(ctx context.Context, snapshot string) ([]string, 
 	}
 	g.deployCache[snapshot] = deployCacheEntry{rec: rec, at: time.Now()}
 	g.deployMu.Unlock()
-	return rec.Labels, nil
+	return rec, nil
+}
+
+// deployLabels son las etiquetas válidas del registro de despliegue.
+func (g *Gateway) deployLabels(ctx context.Context, snapshot string) ([]string, error) {
+	rec, err := g.deployRecord(ctx, snapshot)
+	return rec.Labels, err
 }
 
 // deployLookupError es no haber podido conseguir el registro de despliegue
@@ -171,6 +186,28 @@ type guestInvalidError struct{ err error }
 
 func (e *guestInvalidError) Error() string { return "invalid reply: " + e.err.Error() }
 func (e *guestInvalidError) Unwrap() error { return e.err }
+
+// guestErrReason clasifica un fallo de una réplica de Chispa: el motivo para
+// las métricas, el código HTTP y cómo decirlo.
+func guestErrReason(err error) (reason string, code int, verb string) {
+	var we *wakeError
+	var dle *deployLookupError
+	var gie *guestInvalidError
+	reason, code, verb = "request", http.StatusServiceUnavailable, "unavailable"
+	switch {
+	case errors.As(err, &we):
+		reason = "wake"
+	case errors.As(err, &dle):
+		reason = "labels"
+	case errors.As(err, &gie):
+		// El invitado SÍ contestó, pero con algo que no es de fiar: no es que
+		// no haya réplica, es que mintió o se desincronizó con el registro de
+		// despliegue. 502, no 503: reintentar no arregla una respuesta que no
+		// pasa validación.
+		reason, code, verb = "invalid", http.StatusBadGateway, "sent an invalid answer"
+	}
+	return reason, code, verb
+}
 
 // finite01 dice si f es un número (no NaN/Inf) en [0,1]: el rango válido de
 // toda probabilidad que Chispa calcula, calibrada o no.
@@ -251,44 +288,130 @@ func validateGuestReply(labels []string, gr chispaGuestResponse) (chispa.Predict
 	}, nil
 }
 
+// maxGuestSpans acota los huecos que acepta el gateway de una réplica: una
+// orden tiene unos pocos, y un invitado hostil no debería poder mandar miles.
+const maxGuestSpans = 64
+
+// validateGuestSpans comprueba los huecos de una réplica contra los del
+// registro de despliegue (allowed, no vacío) y el texto que se le mandó:
+// nombre conocido, posiciones dentro del texto y en orden. El Text de cada
+// hueco se rehace del texto de la petición: el del invitado no se usa.
+func validateGuestSpans(allowed []string, text string, sp []slots.Span) ([]slots.Span, error) {
+	if len(sp) == 0 {
+		return nil, nil
+	}
+	if len(sp) > maxGuestSpans {
+		return nil, fmt.Errorf("%d slots, more than %d", len(sp), maxGuestSpans)
+	}
+	ok := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		ok[a] = true
+	}
+	out := make([]slots.Span, len(sp))
+	prev := 0
+	for i, s := range sp {
+		if !ok[s.Slot] {
+			return nil, fmt.Errorf("unknown slot %q", truncUTF8(s.Slot, 64))
+		}
+		if s.Start < prev || s.End <= s.Start || s.End > len(text) {
+			return nil, fmt.Errorf("slot %q at [%d,%d) is outside the text or out of order", s.Slot, s.Start, s.End)
+		}
+		prev = s.End
+		out[i] = slots.Span{Slot: s.Slot, Start: s.Start, End: s.End, Text: text[s.Start:s.End]}
+	}
+	return out, nil
+}
+
+// guestAnswer es lo que contestó una réplica de Chispa, ya validado.
+type guestAnswer struct {
+	Pred   chispa.Prediction
+	Labels []string
+	// HasSlots: el dorado lleva modelo de huecos; Spans son los suyos.
+	HasSlots bool
+	Spans    []slots.Span
+	// Wake es el despertar que pagó esta petición (nil: ya estaba despierta)
+	// y Request lo que tardó la petición a la réplica ya lista.
+	Wake    *scheduler.WakeTrace
+	Request time.Duration
+}
+
+// guestConfident decide del lado del gateway si una predicción de réplica es
+// confiada: el umbral de la clase (el del modelo, o el de la tarea si lo
+// sobrescribe) contra la probabilidad ya validada. El "confident" que mande
+// el invitado no se mira nunca.
+func guestConfident(p chispa.Prediction, thresholds map[string]float64) (tau float64, confident bool) {
+	tau = p.Threshold
+	if v, ok := thresholds[p.Label]; ok {
+		tau = v
+	}
+	return tau, p.Prob >= tau
+}
+
 // classifyGuest pregunta a una réplica del dorado snap (kling chispa deploy),
 // valida su respuesta contra el registro de despliegue y devuelve la
 // predicción en la misma forma que chispa.Model.Predict/PredictFull, más las
 // etiquetas válidas del modelo (para escalar), para que Classify no tenga que
 // distinguir después de dónde vino ni volver a mirar el registro.
 func (g *Gateway) classifyGuest(ctx context.Context, snap string, in chispa.Input, explain bool) (chispa.Prediction, []string, error) {
-	labels, err := g.deployLabels(ctx, snap)
+	a, err := g.askChispaGuest(ctx, snap, in, explain)
+	return a.Pred, a.Labels, err
+}
+
+// askChispaGuest es classifyGuest con todo lo que trae la réplica: también
+// sus huecos (validados) y cómo estaba (el despertar que pagó la petición).
+// Es el camino de /v1/classify y de la capa 2 de /v1/decide.
+func (g *Gateway) askChispaGuest(ctx context.Context, snap string, in chispa.Input, explain bool) (guestAnswer, error) {
+	rec, err := g.deployRecord(ctx, snap)
 	if err != nil {
-		return chispa.Prediction{}, nil, err
+		return guestAnswer{}, err
 	}
 
 	body, err := json.Marshal(chispaGuestRequest{Text: in.Text, Fields: in.Fields, Explain: explain})
 	if err != nil {
-		return chispa.Prediction{}, nil, err
+		return guestAnswer{}, err
 	}
+	t0 := time.Now()
 	resp, rep, err := g.postGuest(ctx, snap, "/v1/classify", body)
 	if err != nil {
-		return chispa.Prediction{}, nil, err
+		return guestAnswer{}, err
 	}
 	defer rep.Release()
 	defer resp.Body.Close()
+	a := guestAnswer{Wake: rep.Wake, HasSlots: len(rec.Slots) > 0}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxChispaGuestAnswerBytes+1))
+	a.Request = time.Since(t0)
+	if rep.Wake != nil {
+		// Lo que tardó despertarla va aparte: aquí solo la petición.
+		a.Request -= rep.Wake.Total
+		if a.Request < 0 {
+			a.Request = 0
+		}
+	}
 	if err != nil {
-		return chispa.Prediction{}, nil, err
+		return a, err
 	}
 	if len(b) > maxChispaGuestAnswerBytes {
-		return chispa.Prediction{}, nil, fmt.Errorf("replica answer larger than %d bytes", maxChispaGuestAnswerBytes)
+		return a, fmt.Errorf("replica answer larger than %d bytes", maxChispaGuestAnswerBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return chispa.Prediction{}, nil, fmt.Errorf("replica answered %d: %s", resp.StatusCode, truncUTF8(string(b), 200))
+		return a, fmt.Errorf("replica answered %d: %s", resp.StatusCode, truncUTF8(string(b), 200))
 	}
 	var gr chispaGuestResponse
 	if err := json.Unmarshal(b, &gr); err != nil {
-		return chispa.Prediction{}, nil, fmt.Errorf("replica answer is not a classify response: %w", err)
+		return a, fmt.Errorf("replica answer is not a classify response: %w", err)
 	}
-	p, err := validateGuestReply(labels, gr)
+	p, err := validateGuestReply(rec.Labels, gr)
 	if err != nil {
-		return chispa.Prediction{}, nil, &guestInvalidError{err}
+		return a, &guestInvalidError{err}
 	}
-	return p, labels, nil
+	// Sin huecos en el registro (desplegado sin -slots, o antes de que el
+	// registro los guardara) lo que mande la réplica no tiene con qué
+	// validarse: se ignora, como si no los hubiera.
+	if a.HasSlots {
+		if a.Spans, err = validateGuestSpans(rec.Slots, in.Text, gr.Slots); err != nil {
+			return a, &guestInvalidError{err}
+		}
+	}
+	a.Pred, a.Labels = p, rec.Labels
+	return a, nil
 }
