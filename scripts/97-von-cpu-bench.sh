@@ -35,7 +35,9 @@
 #
 # Lo que se mide va directo a la réplica (su dirección: el reenvío de kling-vz
 # en macOS, la IP en Linux), sin el proxy del daemon, y los tiempos de
-# llama-server (`timings`) se leen de la respuesta.
+# llama-server (`timings`) se leen de la respuesta. Por eso se corre en el host
+# del daemon (KLING_HOST o el contexto de kling apuntan al daemon; la IP de una
+# microVM de Linux solo se alcanza desde su host).
 
 set -o pipefail
 

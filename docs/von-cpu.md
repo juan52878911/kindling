@@ -93,7 +93,7 @@ Se midieron tres variantes contra el dorado actual (el que se calienta con un
 | (b) un dorado por modelo + `--slot-save-path`, restaurando la ranura de la tarea (`POST /slots/0?action=restore`) antes de la petición | 338 ms (234–468), de ellos 65 ms la restauración | 1645 ms | 22 MiB de fichero por tarea (806 tokens × ~28 KiB) dentro del dorado; **una llamada más por petición** y el gateway tiene que saber qué ranura tiene cada réplica |
 | (c) un dorado por modelo + `--cache-ram 64`, congelado tras evaluar los prefijos de **todas** sus tareas | **381 ms** (329–501), evalúa 20 | 2105 ms | +32 MiB en el dorado con dos prefijos; +64 MiB de memoria en la VM |
 
-Repetido al final de la sesión con la guarda de ruido (abajo), dorado actual y
+Repetido al final de la sesión con la guarda de ruido (arriba), dorado actual y
 (c) intercalados, n=3 cada serie: 5628 ms (5268–6545) frente a **476 ms**
 (461–604), y en otra pareja 205 ms para (c) (la del dorado actual de esa pareja,
 18,8 s, coincidió con presión de memoria en el Mac y no cuenta).
