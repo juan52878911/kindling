@@ -1,0 +1,22 @@
+# La habitación de demo, en la LAN: http://<host>:8088. Solo mueve dispositivos
+# simulados; habla con el gateway por su socket y con el daemon para el panel
+# de máquinas.
+[Unit]
+Description=kindling smart-home demo room
+After=kindling-domotica-gateway.service
+Requires=kindling-domotica-gateway.service
+
+[Service]
+User=juan
+Environment=KLING_DOMOTICA_MODELS=/home/juan/domotica/models
+ExecStart=/home/juan/domotica/domotica-demo -listen 0.0.0.0:8088 -gateway /home/juan/domotica/ai.sock
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

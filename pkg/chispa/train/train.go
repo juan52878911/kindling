@@ -147,6 +147,7 @@ type dataset struct {
 	idx   []uint32  // cubo
 	x     []float64 // valor (ya normalizado)
 	y     []int     // etiqueta; -1 si no está en el entrenamiento
+	w     []float64 // peso del ejemplo (Example.Weight; 0 = 1)
 }
 
 func (d *dataset) n() int { return len(d.y) }
@@ -173,6 +174,11 @@ func buildDataset(spec chispa.FeatureSpec, exs []chispa.Example, labelIdx map[st
 			y = -1
 		}
 		d.y = append(d.y, y)
+		w := ex.Weight
+		if w == 0 {
+			w = 1
+		}
+		d.w = append(d.w, w)
 	}
 	return d
 }
@@ -241,9 +247,23 @@ func Train(trainEx, validEx []chispa.Example, cfg Config) (*Result, error) {
 	}
 
 	// Etiquetas ordenadas: el índice de cada una no depende del orden del fichero.
+	// wcounts y wtotal son lo mismo ponderado por Example.Weight: con todos los
+	// pesos a 1 son enteros exactos en float64 y el peso por clase sale
+	// idéntico bit a bit al de antes (el test dorado lo comprueba).
 	counts := map[string]int{}
+	wcounts := map[string]float64{}
+	wtotal := 0.0
 	for _, ex := range trainEx {
+		if !(ex.Weight >= 0 && ex.Weight <= chispa.MaxWeight) {
+			return nil, fmt.Errorf("example weight %v out of [0,%d]", ex.Weight, chispa.MaxWeight)
+		}
+		w := ex.Weight
+		if w == 0 {
+			w = 1
+		}
 		counts[ex.Label]++
+		wcounts[ex.Label] += w
+		wtotal += w
 	}
 	labels := make([]string, 0, len(counts))
 	for l := range counts {
@@ -276,7 +296,7 @@ func Train(trainEx, validEx []chispa.Example, cfg Config) (*Result, error) {
 	for c, l := range labels {
 		w := 1.0
 		if cfg.ClassWeight != "none" {
-			w = float64(len(trainEx)) / float64(len(labels)*counts[l])
+			w = wtotal / (float64(len(labels)) * wcounts[l])
 			if cfg.ClassWeight == "sqrt" {
 				w = math.Sqrt(w)
 			}
@@ -369,10 +389,13 @@ func Train(trainEx, validEx []chispa.Example, cfg Config) (*Result, error) {
 		for _, i := range order {
 			y := tr.y[i]
 			forward(tr, i, W, bias)
-			tl += float64(cw[y] * loss(y))
-			tw += cw[y]
+			// El peso del ejemplo multiplica al de su clase; con peso 1, wy ==
+			// cw[y] exactamente y el entrenamiento es el de siempre.
+			wy := float64(cw[y] * tr.w[i])
+			tl += float64(wy * loss(y))
+			tw += wy
 			for k := range g {
-				g[k] = float64(g[k] * cw[y])
+				g[k] = float64(g[k] * wy)
 			}
 			for j := tr.start[i]; j < tr.start[i+1]; j++ {
 				base := int(tr.idx[j]) * K

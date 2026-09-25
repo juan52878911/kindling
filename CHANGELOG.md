@@ -41,6 +41,40 @@ y lo que no funcionó, en [docs/despertar.md](docs/despertar.md).
   llamada; con varias pausas sobre el mismo VMM su API acababa rechazando la
   siguiente (`write: broken pipe`).
 
+### Mejora continua: Chispa aprende lo que escalaba (`kling ai retrain`)
+
+Diseño, puertas y cifras en [docs/mejora-continua.md](docs/mejora-continua.md).
+
+- **Captura opt-in por tarea** (bloque `learn` del registro): cada respuesta
+  lleva un `id`, y lo que Chispa escala se guarda con su texto filtrado de
+  secretos (o solo su hash), el top-k de Chispa, la versión que lo dijo y los
+  votos de quien contestó después (VON en la cascada, con `von_votes` de
+  autoconsistencia; el codificador en domótica). Escritor en segundo plano,
+  sin bloquear la petición; almacén acotado por tamaño y días.
+- **`POST /v1/feedback` y `kling ai feedback`**: etiquetas humanas (confirmar,
+  corregir, descartar; solo el token principal habla como persona) y votos de
+  maestros externos (`ext:<nombre>`, nunca verdad por sí solos); `-import`
+  para lotes JSONL de otras herramientas.
+- **`kling ai review`**: la cola para una persona, con una auditoría al azar
+  (20 % de las capturas por hash) que es lo único que valida a los maestros, y
+  lo más informativo primero; `-i` interactivo.
+- **`kling ai retrain`**: oro entero + humano + lo de maestros validados que
+  pasa el filtro de acuerdo (con peso y tope por clase), sombra con los mismos
+  hiperparámetros, y promoción solo si gana en el conjunto de confianza
+  (McNemar sobre «contesta bien», precisión confiada sin bajar). Guarda de
+  fugas, versiones `@vN.chispa` con `.prev` y swap atómico; en microvm, un
+  dorado `<snapshot>-vN` verificado por sha256. Vuelve a evaluar la cascada si
+  estaba activa. **`kling ai rollback`** vuelve al instante.
+- **Métricas**: cobertura por versión en vivo, tasa de escalado en ventana,
+  cobertura y precisión por versión en el conjunto de confianza, escaladas y
+  tiempo ahorrados (estimados); sección nueva en `kling ai ls`.
+- `kling chispa train`: campo **`weight`** por ejemplo en el JSONL.
+- Medido con el gateway real y maestros simulados en los datos de domótica:
+  cobertura en el conjunto de confianza de 0,588 a 0,689 en cuatro rondas con
+  la precisión confiada plana (0,976–0,981) y 750 etiquetas humanas; un LLM
+  malo forzado como maestro da un modelo peor (contesta bien 0,676 → 0,625) y
+  la puerta lo rechaza (en las tres semillas medidas).
+
 ### VON más rápido en CPU
 
 Cada cambio con su banco de pruebas y su puerta (entra solo si mejora lo medido
@@ -190,6 +224,36 @@ siempre. Detalle, diagrama y cifras en
   réplicas del mismo dorado en Linux se quedan pendientes (requieren volver a
   entrar en el host de pruebas; ver docs/chispa-serverless.md).
 
+### Domótica: capa 4 (un LLM con salida JSON) y la habitación de demo
+
+Diseño en [docs/domotica.md](docs/domotica.md#capa-4-un-llm-con-salida-json),
+cifras en [docs/DOMOTICA-EVAL.md](docs/DOMOTICA-EVAL.md#capa-4-el-llm-von), la
+demo en [docs/demo-domotica.md](docs/demo-domotica.md).
+
+- **Capa 4** (`pkg/domotica`): lo que las capas 1–3 escalan va a un LLM VON por
+  una tarea de generación del gateway (`POST /v1/generate`) con un esquema JSON
+  (`kind`, `reply` y hasta 4 `actions` con intención, dispositivo, zona, valor
+  y color de la taxonomía). La respuesta se valida estrictamente y se ancla a
+  la frase (zona, color y número que la frase nombra; nunca abrir la puerta ni
+  desarmar la alarma sin decirlo); si algo falla, no se hace nada y se pide
+  aclaración. Un veto no deja convertir en orden lo que el modelo rápido da por
+  fuera de ámbito, salvo lo indirecto. Varias órdenes en una frase: 8 de 9 bien.
+- **`kling domotica eval-llm`** compara la capa 4 con «escalar y no hacer nada»
+  (McNemar y la cascada entera ponderada con lo que no es para la habitación),
+  en dos alcances, y escribe el registro que la enciende. Con
+  Qwen2.5-1.5B Q4_K_M pasa solo donde el modelo rápido duda: 31 órdenes más
+  bien en MASSIVE, ninguna acción fuera de ámbito (errores confiados 1,7 → 1,9 %);
+  preguntándole por todo, actúa en el 1,5 % de la charla y empeora la cascada.
+- `domotica.Cascade` con capas enchufables (`Layer`, `FastFunc`), su traza por
+  capa (`Trace`) y los adaptadores al gateway (`GatewayClient`: `/v1/decide`,
+  `/v1/generate`, `/v1/tasks`, despertares de `/metrics`).
+- **La habitación de demo** es un ejemplo aparte, [`examples/domotica`](examples/domotica/README.md):
+  página embebida (sin CDN) con el plano en SVG, órdenes de ejemplo y texto
+  libre, traza por capa con latencia y el despertar de cada microVM, panel de
+  microVMs por capa con su memoria (del daemon) y contadores; simulador de
+  dispositivos en Go con SSE; español e inglés, claro y oscuro, accesible;
+  loopback por defecto, cuerpos acotados, CSP estricta. Registro de ejemplo del
+  gateway (`ai.json`) y unidades de systemd para el servidor x86.
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)
 

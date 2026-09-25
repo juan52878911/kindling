@@ -23,14 +23,18 @@ const (
 	EscalateVON = "von"
 )
 
-// Motivos por los que una decisión no es confiada.
+// Motivos por los que una decisión no es confiada (o, en la capa 4, por los
+// que no hace nada).
 const (
-	ReasonLowProb      = "low_probability" // Chispa por debajo del umbral de su clase
-	ReasonMissingSlot  = "missing_slot"    // intención clara pero falta el valor o el color
-	ReasonMultiCommand = "multi_command"   // «enciende la luz y baja la persiana»
-	ReasonNoModel      = "no_model"        // no hay modelo Chispa cargado
-	ReasonOutOfScope   = "out_of_scope"    // Chispa no ve una orden directa; que lo mire el LLM
-	ReasonEncoderError = "encoder_error"   // el codificador no contestó (se escala igual)
+	// ReasonVetoedByChispa: Chispa dijo con confianza «no es una orden directa
+	// que conozca» y el LLM propone una orden directa: gana Chispa (ver VON.Decide).
+	ReasonVetoedByChispa = "chispa_veto"
+	ReasonLowProb        = "low_probability" // Chispa por debajo del umbral de su clase
+	ReasonMissingSlot    = "missing_slot"    // intención clara pero falta el valor o el color
+	ReasonMultiCommand   = "multi_command"   // «enciende la luz y baja la persiana»
+	ReasonNoModel        = "no_model"        // no hay modelo Chispa cargado
+	ReasonOutOfScope     = "out_of_scope"    // Chispa no ve una orden directa; que lo mire el LLM
+	ReasonEncoderError   = "encoder_error"   // el codificador no contestó (se escala igual)
 )
 
 // Decision es lo que devuelve Decide: qué hacer, con qué, qué capa lo decidió
@@ -52,6 +56,17 @@ type Decision struct {
 	FastProb     float64 `json:"fast_prob,omitempty"`
 	EncoderUS    float64 `json:"encoder_us,omitempty"`
 	EncoderError string  `json:"encoder_error,omitempty"`
+	// Actions: la lista de acciones cuando la capa sabe devolver varias (la 4:
+	// «apaga la luz y cierra la puerta»). Vacía en las capas de una intención;
+	// Intent/Slots son entonces la primera.
+	Actions []Action `json:"actions,omitempty"`
+	// Reply es la frase corta que la capa 4 propone decir de vuelta (o la
+	// pregunta de aclaración cuando no entendió).
+	Reply string `json:"reply,omitempty"`
+	// Model es el modelo que decidió en las capas lentas.
+	Model string    `json:"model,omitempty"`
+	Kind  string    `json:"kind,omitempty"` // capa 4: command | situation | other
+	LLM   *LLMStats `json:"llm,omitempty"`
 }
 
 // IntentEncoder es la capa 3: la intención de una frase según un codificador

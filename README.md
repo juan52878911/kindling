@@ -83,6 +83,7 @@ sections:
 · [Small LLMs on demand (VON)](#small-llms-on-demand-von)
 · [Chispa: a tiny classifier for small decisions](#chispa-a-tiny-classifier-for-small-decisions)
 · [AI gateway](#ai-gateway-many-models-ready-none-running-247)
+· [Demo: a smart-home room](#demo-a-smart-home-room-on-serverless-models)
 · [What persists and what does not](#what-persists-and-what-does-not)
 
 **Performance and density**
@@ -763,6 +764,28 @@ Measured on commit classification (861 held-out commits), Chispa alone is 0.640 
 refused them all. On a Mac, a warm generation answers in 9 ms, a frozen replica in
 ~1.5 s. Design, API, numbers and limits: [`docs/ai-gateway.md`](docs/ai-gateway.md).
 
+## Demo: a smart-home room on serverless models
+
+[`examples/domotica`](examples/domotica/README.md) is a separate app that *uses*
+kindling: a web page with a simulated room (lights, thermostat, blinds, TV,
+speaker, lock, alarm, fan, plug) driven by voice commands as text, in Spanish or
+English. Each command goes through `kling ai serve`: demo templates and the fast
+Chispa model answer in-process in microseconds; what they doubt goes to a
+sentence encoder and then to a small LLM (Qwen2.5-1.5B with JSON-schema output,
+validated against the room's taxonomy), each in a microVM that is thawed by the
+command and frozen again when idle. The page shows which layer decided, its
+confidence and latency, whether its microVM was thawed (and how long that took),
+and every layer's microVMs (awake or frozen, memory). Layer 4 is only enabled
+where its eval shows it beats "escalate and do nothing": with the 1.5B model,
+on what the fast model is unsure about (31 more MASSIVE commands right, none
+acted on out of scope), not on everything (it would act on 1.5 % of the chatter
+that is not for the room). Guide: [`docs/demo-domotica.md`](docs/demo-domotica.md).
+
+```sh
+kling ai serve -config examples/domotica/ai.json &     # after adapting paths and goldens
+go run ./examples/domotica                            # http://127.0.0.1:8088/
+```
+
 ## What persists and what does not
 
 Worth being clear about, because it is not obvious:
@@ -1149,6 +1172,7 @@ instances share pages.
 | [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, the tiny linear classifier: features, `.chispa` format, cascade; its evaluation on real commits |
 | [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa as a serverless kindling task: one frozen golden snapshot per task, `kling chispa deploy`, measured thaw and throughput vs. in-process |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Smart-home decisions (`kling domotica`): demo templates → Chispa intent + Chispa-slots, free datasets and their licenses, evaluation (Spanish) |
+| [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | The demo room: layer 4 (LLM with JSON output) and the web page that shows every layer's decision and microVM (Spanish) |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: Chispa classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |

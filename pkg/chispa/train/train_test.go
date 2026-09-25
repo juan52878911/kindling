@@ -175,3 +175,37 @@ func TestSplitValidationStable(t *testing.T) {
 		t.Errorf("validation fraction %.3f, want ~0.2", f)
 	}
 }
+
+// El peso de un ejemplo cuenta dentro de su clase: la misma frase etiquetada
+// dos veces, "bug" con peso 1 y "docs" con peso 0,05 (una etiqueta de un
+// maestro poco fiable frente a una de oro), se aprende como "bug"; con los
+// pesos al revés, como "docs". Y un peso fuera de rango es un error.
+func TestExampleWeight(t *testing.T) {
+	base := synth(800, 3)
+	const phrase = "zqxj flurble wibble"
+	with := func(bugW, docsW float64) string {
+		exs := append([]chispa.Example(nil), base...)
+		for i := 0; i < 20; i++ {
+			exs = append(exs, chispa.Example{Text: phrase, Label: "bug", Weight: bugW}, chispa.Example{Text: phrase, Label: "docs", Weight: docsW})
+		}
+		res, err := Train(exs, synth(200, 4), smallCfg())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Model.Predict(chispa.Input{Text: phrase}).Label
+	}
+	if l := with(1, 0.05); l != "bug" {
+		t.Errorf("heavier bug labels learned %q", l)
+	}
+	if l := with(0.05, 1); l != "docs" {
+		t.Errorf("heavier docs labels learned %q", l)
+	}
+	bad := append([]chispa.Example(nil), base...)
+	bad[0].Weight = -1
+	if _, err := Train(bad, nil, smallCfg()); err == nil {
+		t.Error("negative weight accepted")
+	}
+	if _, err := chispa.ReadExamples(bytes.NewReader([]byte(`{"text":"a","label":"b","weight":1000}`)), 0, true); err == nil {
+		t.Error("ReadExamples accepted weight 1000")
+	}
+}
