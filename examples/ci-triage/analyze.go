@@ -14,6 +14,9 @@ import (
 	"github.com/juan52878911/kindling/examples/ci-triage/triage"
 )
 
+// maxFeedbackBytes acota el fichero de confirmaciones (unas 20 000).
+const maxFeedbackBytes = 64 << 20
+
 // gwFlags son las banderas comunes para hablar con el gateway.
 type gwFlags struct {
 	addr, tokenFile             string
@@ -67,6 +70,9 @@ func cmdAnalyze(args []string) error {
 	gw := gatewayFlags(fs)
 	workers := fs.Int("workers", 8, "classify requests in flight")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
+	confirm := fs.String("confirm", "", "record the right category for this log in -feedback: \"ok\" accepts the result, or a category ("+strings.Join(triage.HumanCategories, ", ")+")")
+	note := fs.String("note", "", "with -confirm: a short note for the record")
+	fbPath := fs.String("feedback", "ci-triage-feedback.jsonl", "with -confirm: JSONL file the confirmations are appended to (trainable by `kling chispa train`)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: ci-triage analyze [flags] <logfile|->")
@@ -103,9 +109,31 @@ func cmdAnalyze(args []string) error {
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(res)
+		if err := enc.Encode(res); err != nil {
+			return err
+		}
+	} else {
+		printResult(res)
 	}
-	printResult(res)
+	if *confirm == "" {
+		return nil
+	}
+	label := *confirm
+	if label == "ok" {
+		label = res.Category
+	}
+	fb, err := triage.NewFeedback(res, res.Fields, triage.HashLog(lg), label, *note)
+	if err != nil {
+		return err
+	}
+	fl, err := triage.NewFeedbackLog(*fbPath, maxFeedbackBytes)
+	if err != nil {
+		return err
+	}
+	if err := fl.Append(fb); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "recorded %s (agreed: %v) in %s\n", label, fb.Agreed, *fbPath)
 	return nil
 }
 

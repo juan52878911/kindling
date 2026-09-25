@@ -23,6 +23,9 @@ type ChunkOptions struct {
 	Gap       int     // líneas flojas seguidas que se toleran dentro de un tramo
 }
 
+// maxChunkLine es lo que entra de cada línea en el texto del trozo.
+const maxChunkLine = 240
+
 // MaxChunkBytes es el texto que ven la categoría y VON: ~500 tokens.
 const MaxChunkBytes = 2000
 
@@ -105,7 +108,13 @@ func ChunkText(lg *Log, cs []Chunk, maxBytes int) string {
 			b.WriteString("…\n")
 		}
 		for j := c.Start; j <= c.End && j < len(lg.Lines); j++ {
+			// Una línea muy larga (una ruta de 300 caracteres, un volcado) se
+			// recorta para que quepan más líneas del trozo: lo que explica
+			// el fallo suele estar en su principio.
 			t := lg.Lines[j].Text
+			if len(t) > maxChunkLine {
+				t = truncUTF8(t, maxChunkLine) + "…"
+			}
 			if b.Len()+len(t)+1 > maxBytes {
 				b.WriteString(truncUTF8(t, max(0, maxBytes-b.Len())))
 				return b.String()

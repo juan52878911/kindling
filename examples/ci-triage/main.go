@@ -36,6 +36,8 @@ func main() {
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "analyze":
 		err = cmdAnalyze(args)
+	case "serve":
+		err = cmdServe(args)
 	case "eval":
 		err = cmdEval(args)
 	case "data":

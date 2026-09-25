@@ -57,23 +57,27 @@ type VONAnswer struct {
 
 // Result es el triaje de un log.
 type Result struct {
-	Format     string      `json:"format"`
-	Lines      int         `json:"lines"`
-	Scored     int         `json:"lines_classified"`
-	Truncated  bool        `json:"truncated,omitempty"`
-	Chunks     []ChunkOut  `json:"chunks"`
-	Chunk      string      `json:"chunk"`
-	Category   string      `json:"category"`
-	Prob       float64     `json:"confidence"`       // probabilidad calibrada de Chispa para Category
-	Confident  bool        `json:"chispa_confident"` // Chispa llegó a su umbral
-	Layer      string      `json:"decided_by"`       // chispa | von | chispa-unsure
-	Candidates []ClassProb `json:"candidates,omitempty"`
-	VON        *VONAnswer  `json:"von,omitempty"`
-	VONError   string      `json:"von_error,omitempty"`
-	Timing     Timing      `json:"timing"`
+	Format      string      `json:"format"`
+	Lines       int         `json:"lines"`
+	Scored      int         `json:"lines_classified"`
+	Truncated   bool        `json:"truncated,omitempty"`
+	Chunks      []ChunkOut  `json:"chunks"`
+	Chunk       string      `json:"chunk"`
+	Category    string      `json:"category"`
+	ChispaLabel string      `json:"chispa_category"`  // lo que dijo Chispa, aunque decidiera VON
+	Prob        float64     `json:"confidence"`       // probabilidad calibrada de Chispa para Category
+	Confident   bool        `json:"chispa_confident"` // Chispa llegó a su umbral
+	Layer       string      `json:"decided_by"`       // chispa | von | chispa-unsure
+	Candidates  []ClassProb `json:"candidates,omitempty"`
+	VON         *VONAnswer  `json:"von,omitempty"`
+	VONError    string      `json:"von_error,omitempty"`
+	Timing      Timing      `json:"timing"`
 	// Scores es P(explains) de cada línea (0 las vacías): la página los usa
 	// para resaltar. No va en el JSON de analyze.
 	Scores []float64 `json:"-"`
+	// Fields son los campos con los que se clasificó el trozo (van a la
+	// confirmación, para que el reentreno vea lo mismo que vio Chispa).
+	Fields map[string]any `json:"-"`
 }
 
 // Analyze hace el triaje de un log ya leído: las tres capas.
@@ -109,6 +113,8 @@ func Analyze(ctx context.Context, g *Gateway, lg *Log, o Options) (*Result, erro
 	}
 	r.Timing.Category = ms(time.Since(tk))
 	r.Category, r.Prob, r.Confident, r.Layer = c.Label, round3(c.Prob), !c.Escalate, "chispa"
+	r.ChispaLabel = c.Label
+	r.Fields = CategoryFields(lg, cs)
 	if c.Chispa != nil {
 		r.Candidates = c.Chispa.Candidates
 	}
