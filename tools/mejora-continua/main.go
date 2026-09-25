@@ -279,7 +279,7 @@ func run(args []string) error {
 		}
 		row := Round{Round: round, Served: served, Teachers: fmt.Sprintf("%s %.0f%% + %s %.0f%%", ta.name, ta.errRate*100, tb.name, tb.errRate*100)}
 		if isNoisy {
-			row.Teachers += " (forced)"
+			row.Teachers = fmt.Sprintf("noisy LLM %.0f%% x2 samples (forced)", *noisy*100)
 		}
 		// Tráfico: lo que Chispa escala se captura; los maestros contestan
 		// (como haría el cliente con su capa lenta) por /v1/feedback.
@@ -302,9 +302,16 @@ func run(args []string) error {
 			if resp.Chispa != nil {
 				top = resp.Chispa.Candidates
 			}
+			la, lb := ta.answer(&r, ex.Label, top, m.Labels), tb.answer(&r, ex.Label, top, m.Labels)
+			if isNoisy && r.float() < 0.9 {
+				// Los ruidosos son dos muestras del MISMO modelo malo (la
+				// autoconsistencia de un LLM que se equivoca): coinciden casi
+				// siempre, también en el error, y el filtro de acuerdo no los para.
+				lb = la
+			}
 			items = append(items,
-				aigw.FeedbackItem{ID: resp.ID, Teacher: ta.name, Label: ta.answer(&r, ex.Label, top, m.Labels)},
-				aigw.FeedbackItem{ID: resp.ID, Teacher: tb.name, Label: tb.answer(&r, ex.Label, top, m.Labels)})
+				aigw.FeedbackItem{ID: resp.ID, Teacher: ta.name, Label: la},
+				aigw.FeedbackItem{ID: resp.ID, Teacher: tb.name, Label: lb})
 		}
 		row.LiveCoverage = ratio(conf, row.Traffic)
 		for len(items) > 0 {
