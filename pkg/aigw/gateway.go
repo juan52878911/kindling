@@ -111,6 +111,7 @@ type Gateway struct {
 	chispa   *chispaCache
 	domo     domoFiles // .chispas y .jenc de las tareas de domótica
 	met      *metrics
+	guests   *guestPool // conexiones reutilizables a las réplicas (guestpool.go)
 
 	cfgMu    sync.RWMutex
 	cfg      *Config                 // el efectivo: con los dorados de versions.json (learn_retrain.go)
@@ -151,7 +152,7 @@ func New(o Options) (*Gateway, error) {
 		}
 	}
 	g := &Gateway{
-		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), auditSem: make(chan struct{}, 1),
+		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), guests: newGuestPool(o.Idle), auditSem: make(chan struct{}, 1),
 		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
 		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
 	}
@@ -185,6 +186,9 @@ func New(o Options) (*Gateway, error) {
 		_, m := g.config().replicaModel(sn.Name)
 		return m == nil
 	}
+	// Una réplica que se duerme se lleva sus conexiones: las del pool hacia
+	// ella no sobreviven a un congelar/despertar (guestpool.go).
+	s.OnSleep = func(_, addr string) { g.guests.forget(addr) }
 	s.OnAcquire = func(snap, how string, d time.Duration) {
 		name, _ := g.config().replicaModel(snap)
 		if name == "" {

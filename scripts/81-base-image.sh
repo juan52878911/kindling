@@ -24,6 +24,9 @@
 # de 80-mcp-image.sh; ver docs/three-layers.md.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib-ext4-shrink.sh"
+
 ROOT="${KLING_ROOT:-/var/lib/kindling}"
 NAME="${NAME:?falta NAME}"
 BASE="${BASE:-min}"
@@ -62,10 +65,17 @@ pkg_add() {
 }
 
 LAYER="$ROOT/images/$NAME.layer.ext4"
+SHRUNK="$LAYER.shrink" # la copia que se encoge (ver más abajo)
 [ "$GROW" -gt 0 ] || GROW=256
 rm -f "$LAYER"
 truncate -s "${GROW}M" "$LAYER"
-mkfs.ext4 -q -F -O '^has_journal' -E nodiscard "$LAYER"
+# Sin resize_inode: ese inodo solo sirve para crecer EN CALIENTE (montado), y
+# una capa no se monta en escritura más que aquí y, sin montar, en un refresco
+# (crecerImagen), donde resize2fs crece igual sin él. Con él, `resize2fs -M` de
+# una capa pequeña y casi llena (un Chispa: GROW ≈ contenido + 24 MiB) la dejaba
+# con «Resize inode not valid» en e2fsprogs 1.47.0 (Ubuntu 24.04), medido en
+# la VM de Lima: todas las capas por debajo de ~60 MiB.
+mkfs.ext4 -q -F -O '^has_journal,^resize_inode' -E nodiscard "$LAYER"
 
 mnt="$(mktemp -d)"; base_mnt="$(mktemp -d)"; layer_mnt="$(mktemp -d)"
 ov_up() {
@@ -81,7 +91,7 @@ ov_down() {
   umount "$layer_mnt" 2>/dev/null || true
   umount "$base_mnt"  2>/dev/null || true
 }
-cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
+cleanup() { ov_down; rm -f "$SHRUNK"; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
 trap cleanup EXIT
 ov_up
 
@@ -139,16 +149,9 @@ rm -rf "$layer_mnt/work"
 umount "$layer_mnt"
 sync
 
-# Comprobar ANTES de encoger: resize2fs se niega a tocar un fs sin comprobar.
-if ! e2fsck -fp "$LAYER" >/dev/null 2>&1; then
-  e2fsck -fy "$LAYER" >/dev/null 2>&1 || { echo "ERROR: la capa quedó irreparable" >&2; exit 1; }
-fi
-if resize2fs -M "$LAYER" >/dev/null 2>&1; then
-  blocks=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2); print $2}')
-  bsize=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
-  [ -n "$blocks" ] && [ -n "$bsize" ] && truncate -s "$((blocks * bsize))" "$LAYER"
-  e2fsck -fp "$LAYER" >/dev/null 2>&1 || { echo "ERROR: la capa quedó dañada al encogerla" >&2; exit 1; }
-else
-  echo "AVISO: no se pudo encoger la capa; ocupará más disco del necesario" >&2
-fi
+# El encogido seguro (copiar, encoger la copia, adoptarla solo si sale
+# sana de e2fsck) vive en lib-ext4-shrink.sh, compartido con
+# 70-build-minimal-image.sh y 71-build-glibc-base.sh.
+ext4_shrink_safe "$LAYER"
+
 echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales)"

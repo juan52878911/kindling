@@ -84,3 +84,29 @@ func TestPausadasSeEnfrianYSonLasPrimerasEnCaer(t *testing.T) {
 		t.Errorf("no debía tocar la despierta")
 	}
 }
+
+// El segador avisa (OnSleep) de cada instancia que duerme, con su dirección,
+// ANTES de congelarla: el gateway de IA cierra ahí las conexiones que tenga
+// hacia ella, que no sobreviven a un despertar. Las que siguen trabajando no.
+func TestReapAvisaOnSleep(t *testing.T) {
+	g, _, congeladas := gwPausas(0)
+	g.MachineTTL = -1
+	g.Port = 8000
+	var avisos []string
+	g.OnSleep = func(svc, addr string) {
+		if congeladas["m-vieja"] {
+			t.Error("OnSleep llegó después de congelar")
+		}
+		avisos = append(avisos, svc+" "+addr)
+	}
+	viejo := time.Now().Add(-time.Hour)
+	g.services["a"] = &entry{machineID: "m-vieja", ip: "10.0.0.2", lastUse: viejo}
+	g.extra["a"] = []*entry{{machineID: "m-ocupada", ip: "10.0.0.3", lastUse: viejo, inflight: 1}}
+	g.reapOnce(context.Background())
+	if len(avisos) != 1 || avisos[0] != "a 10.0.0.2:8000" {
+		t.Fatalf("avisos = %v; quería solo la ociosa, con su dirección", avisos)
+	}
+	if !congeladas["m-vieja"] || congeladas["m-ocupada"] {
+		t.Fatalf("congeladas = %v", congeladas)
+	}
+}

@@ -171,6 +171,11 @@ type Scheduler struct {
 	// "restore" (nueva desde el snapshot), y d lo que costó hasta que el
 	// puerto aceptó. Es la métrica de arranques en frío del gateway de IA.
 	OnAcquire func(service, how string, d time.Duration)
+	// OnSleep, si está, se llama con el servicio y la dirección (Addr del
+	// puerto Port) de cada instancia que se va a congelar o pausar (segador o
+	// desalojo), justo antes de hacerlo. El gateway de IA cierra ahí sus
+	// conexiones reutilizables hacia ella: no sobreviven a un despertar.
+	OnSleep func(service, addr string)
 	// OnWake, si está, se llama junto a OnAcquire con el desglose por fases
 	// de ese despertar (ver WakeTrace).
 	OnWake func(service string, t *WakeTrace)
@@ -186,11 +191,18 @@ type Scheduler struct {
 	pauseFn func(id string) error
 	// pauseCap: 0 no se sabe, 1 el daemon sabe pausar, 2 no.
 	pauseCap atomic.Int32
+	// creando cuenta, por servicio, las réplicas de scale-out que están
+	// naciendo: cuentan para el tope de réplicas igual que las ya registradas
+	// (ver scaleOut). Se toca con mu.
+	creando map[string]int
 	// adquiriendo son las máquinas elegidas por un acquire que aún no están
 	// registradas como instancia: sin esto, dos acquire concurrentes (un
 	// ensure y un scale-out) podían descongelar o adoptar la MISMA máquina y
 	// acabar con dos entradas sobre ella. Se toca con mu.
 	adquiriendo map[string]bool
+	// buildFn sustituye a buildEntry en el scale-out de los tests: crear una
+	// réplica de verdad necesita un daemon con KVM/vz.
+	buildFn func(ctx context.Context, service string, tnt *tenant, fresh bool) (*entry, error)
 	// freezeFn sustituye la llamada al daemon en los tests. En producción es nil
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
@@ -357,16 +369,9 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	}
 	g.mu.Lock()
 	elegida, libre := elegirInstancia(g.entriesLocked(service), g.sessionCountLocked, g.MaxInflight)
-	replicas := len(g.entriesLocked(service))
 	g.mu.Unlock()
 	if elegida != nil {
 		return elegida, nil
-	}
-	tope := g.MaxReplicas
-	if g.MaxReplicasFor != nil {
-		if n := g.MaxReplicasFor(service); n > 0 {
-			tope = n
-		}
 	}
 
 	// Todas las que tienen hueco están saturadas de trabajo. Contar solo
@@ -374,17 +379,21 @@ func (g *Scheduler) pickInstance(ctx context.Context, service string, tnt *tenan
 	// sirviéndolo todo mientras sobraban recursos para otra. Se escala, con
 	// tope, y si no se puede se usa la menos cargada: una sesión atendida lenta
 	// es mejor que una rechazada.
-	if libre != nil {
-		if tope > 0 && replicas >= tope {
-			return libre, nil
-		}
-		e, err := g.scaleOut(ctx, service, tnt)
-		if err != nil {
-			return libre, nil
-		}
-		return e, nil
+	e, err := g.scaleOut(ctx, service, tnt)
+	if err != nil && libre != nil {
+		return libre, nil
 	}
-	return g.scaleOut(ctx, service, tnt)
+	return e, err
+}
+
+// topeReplicas es el máximo de instancias del servicio (0 = sin tope).
+func (g *Scheduler) topeReplicas(service string) int {
+	if g.MaxReplicasFor != nil {
+		if n := g.MaxReplicasFor(service); n > 0 {
+			return n
+		}
+	}
+	return g.MaxReplicas
 }
 
 // sinCredencialDelGateway quita la cabecera Authorization antes de reenviar.
@@ -827,11 +836,40 @@ func (g *Scheduler) removeEntryLocked(service, machineID string) {
 // a la suya. NO toma el candado por-servicio de ensure: queremos que varias
 // réplicas puedan nacer a la vez para sesiones concurrentes.
 func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (*entry, error) {
-	e, err := g.buildEntry(ctx, service, tnt, true)
+	// El tope se comprueba y la plaza se RESERVA con el mismo candado. Antes se
+	// contaban las instancias en pickInstance, se soltaba el candado y se
+	// creaba: N peticiones concurrentes leían todas "hay menos que el tope" y
+	// cada una creaba la suya (max_replicas 2 y 8 réplicas bajo un conjunto de
+	// CI). Las que están naciendo cuentan como si ya existieran.
+	tope := g.topeReplicas(service) // fuera de g.mu: MaxReplicasFor es del producto
+	g.mu.Lock()
+	actuales := len(g.entriesLocked(service)) + g.creando[service]
+	if tope > 0 && actuales >= tope {
+		g.mu.Unlock()
+		return nil, fmt.Errorf("%w: service %q has %d instance(s) awake or starting (max %d)",
+			ErrMaxReplicas, service, actuales, tope)
+	}
+	if g.creando == nil {
+		g.creando = map[string]int{}
+	}
+	g.creando[service]++
+	g.mu.Unlock()
+
+	build := g.buildEntry
+	if g.buildFn != nil {
+		build = g.buildFn
+	}
+	e, err := build(ctx, service, tnt, true)
+	g.mu.Lock()
+	// La plaza reservada pasa a ser la instancia registrada (o se libera si no
+	// nació) en el mismo paso, para que nadie la vea contada dos veces ni cero.
+	if g.creando[service]--; g.creando[service] <= 0 {
+		delete(g.creando, service)
+	}
 	if err != nil {
+		g.mu.Unlock()
 		return nil, err
 	}
-	g.mu.Lock()
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
 	total := 1 + len(g.extra[service])
@@ -1422,7 +1460,15 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			}
 		}
 	}
+	// Las direcciones se resuelven antes de quitarlas del mapa: después ya no
+	// queda la entrada de la que sacarlas.
+	var dormidas []dormida
+	var addrs []string
 	for _, v := range victims {
+		if e := g.entryByMachineLocked(v.service, v.id); e != nil {
+			dormidas = append(dormidas, v)
+			addrs = append(addrs, e.Addr(g.port()))
+		}
 		g.removeEntryLocked(v.service, v.id)
 	}
 	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
@@ -1460,6 +1506,14 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	g.mu.Unlock()
 
+	// Antes de dormirlas, con el invitado aún corriendo: así el cierre de sus
+	// conexiones ociosas llega a él y el volcado no guarda conexiones a medias
+	// que al despertar el host ya no reconoce.
+	if g.OnSleep != nil {
+		for i, v := range dormidas {
+			g.OnSleep(v.service, addrs[i])
+		}
+	}
 	g.dormir(ctx, victims)
 	g.enfriarPausadas(ctx)
 	for _, id := range renovar {
@@ -1591,6 +1645,9 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			continue // esa esta ocupada; se prueba otra
 		}
 
+		if g.OnSleep != nil && victima != nil {
+			g.OnSleep(elegido, victima.Addr(g.port()))
+		}
 		err := freeze(id)
 		vlock.Unlock()
 		if err != nil {

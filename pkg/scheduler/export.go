@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"time"
@@ -276,3 +277,8 @@ func WaitReadyAddr(ctx context.Context, addr string, timeout time.Duration) erro
 
 // ReadyTimeout es lo que el planificador espera a que una instancia nueva escuche.
 const ReadyTimeout = readyTimeout
+
+// ErrMaxReplicas es el error de PickInstance/ScaleOut cuando el servicio ya
+// tiene (o está creando) todas las réplicas que permite su tope y ninguna
+// puede atender una sesión más.
+var ErrMaxReplicas = errors.New("at the replica cap")

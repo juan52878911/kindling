@@ -17,6 +17,7 @@ ROOT="${KLING_ROOT:-/var/lib/kindling}"
 SIZE="${SIZE:-256M}"
 PKGS="${PKGS:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib-ext4-shrink.sh"
 BRIDGE="${BRIDGE:-./kling-bridge}"
 
 # FAMILIAS DE RUNTIME CON NOMBRE. Todo el ahorro de las imágenes por capas sale
@@ -67,7 +68,7 @@ DEST="$ROOT/images/$NAME.ext4"
 # Disperso: el tamaño lógico es un techo, no una reserva.
 rm -f "$DEST"
 truncate -s "$SIZE" "$DEST"
-mkfs.ext4 -q -F -E nodiscard "$DEST"
+ext4_mkfs_sin_resize_inode "$DEST"
 mount -o loop "$DEST" "$mnt"
 
 echo "extrayendo..."
@@ -120,8 +121,7 @@ else
 fi
 
 umount "$mnt"
-e2fsck -fp "$DEST" >/dev/null 2>&1 || true
-resize2fs -M "$DEST" >/dev/null 2>&1 || true   # encoge al contenido real
+ext4_shrink_safe "$DEST"
 
 echo
 echo "imagen '$NAME' lista:"

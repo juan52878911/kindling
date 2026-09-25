@@ -417,6 +417,35 @@ usuario de `HOST`; en los redespliegues siguientes no lo toca.
   nueva `POST /machines/{ref}/renew` (capacidad `renew`). Un sandbox sigue sin
   renovarse al despertar y no se puede renovar por esa ruta. Contra un daemon
   anterior el planificador se comporta como antes.
+- **El gateway de IA ya no agota los puertos efímeros del host.** Cada decisión
+  contra una réplica (Chispa `backend: microvm`, VON, codificadores) abría una
+  conexión TCP nueva; un conjunto de CI entero dejaba decenas de miles en
+  `TIME_WAIT` y en el Mac acababa en `can't assign requested address` y 503.
+  Ahora hay un transporte con keep-alive y tope (64) por réplica; sus
+  conexiones se cierran al congelarla o pausarla (`Scheduler.OnSleep`) y tras
+  despertarla, y una reutilizada que muere sin respuesta se repite una vez.
+  Contra una réplica falsa: de ~30 000 a ~85 000 decisiones/s y de una conexión
+  por decisión a 8 (60 000 seguidas ya no fallan).
+- **`max_replicas` es un tope duro.** Bajo concurrencia, cada petición veía
+  menos réplicas que el tope y creaba la suya: con `max_replicas: 2`, 8
+  réplicas. Ahora el scale-out reserva la plaza con el candado tomado y cuenta
+  las que están naciendo; lo que no cabe se reparte entre las que hay, y si
+  ninguna puede atender, `scheduler.ErrMaxReplicas` (503 en el gateway).
+- **Encoger una capa ya no la corrompe.** `81-base-image.sh` (constructores
+  base, llm y chispa) creaba la capa con `resize_inode`, y `resize2fs -M` dejaba
+  las capas pequeñas y casi llenas (toda capa de Chispa, por debajo de ~60 MiB)
+  con «Resize inode not valid» en e2fsprogs 1.47.0: el constructor chispa
+  fallaba. Ahora la capa nace sin `resize_inode` (solo sirve para crecer
+  montada), se encoge una copia que solo se acepta si `e2fsck` no encuentra
+  nada (su código de salida con `-n` no basta: 1.47.0 da 0 tras contestar «no»),
+  y si no se puede encoger queda entera y sana.
+- El mismo riesgo estaba en `70-build-minimal-image.sh` y
+  `71-build-glibc-base.sh`: creaban la imagen base con `resize_inode` y le
+  hacían `resize2fs -M` directo, sin comprobar el resultado. Ahora usan el
+  mismo encogido seguro que `81-base-image.sh`, factorizado en
+  `scripts/lib-ext4-shrink.sh`.
+- Tests: los de `GET /images` del daemon cerraban mal su `Manager`, y la
+  escritura de estado pendiente caía sobre el TempDir mientras se borraba.
 
 ## v0.10.0 — 2026-09-23
 

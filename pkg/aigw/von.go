@@ -57,18 +57,6 @@ func (r schedReplicas) Acquire(ctx context.Context, snap string) (*Replica, erro
 	}, nil
 }
 
-// guestClient habla con las réplicas. El invitado no es de fiar: conectar
-// tiene plazo corto, las cabeceras tienen tope, y el cuerpo lo acota quien lee.
-// Sin keep-alive: una conexión ociosa hacia una réplica que el segador congela
-// y otra petición descongela es una conexión muerta que el transporte
-// reutilizaría; abrir una nueva hacia el host local cuesta microsegundos.
-var guestClient = &http.Client{Transport: &http.Transport{
-	DialContext:            (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-	MaxResponseHeaderBytes: 64 << 10,
-	DisableCompression:     true,
-	DisableKeepAlives:      true,
-}}
-
 // isDialError dice si err es no haber podido conectar: lo único que se
 // reintenta, porque la petición no llegó a salir y repetirla no duplica nada.
 func isDialError(err error) bool {
@@ -85,11 +73,15 @@ func seed() int64 {
 	return int64(binary.LittleEndian.Uint64(b[:]) >> 1)
 }
 
-// postGuest manda body a path de una réplica del dorado snap. Si no se pudo
-// conectar, olvida esa réplica y lo intenta una vez más con otra: es lo que
-// pasa cuando el daemon congeló o retiró la máquina por debajo.
+// postGuest manda body a path de una réplica del dorado snap, por las
+// conexiones reutilizables de g.guests (guestpool.go). Dos fallos se repiten,
+// cada uno una vez: no haber podido conectar (olvida esa réplica y prueba con
+// otra: el daemon la congeló o la retiró por debajo) y una conexión reutilizada
+// que muere sin respuesta (la dejó muerta un congelar/despertar; se repite por
+// una conexión nueva). En ninguno de los dos la réplica llegó a contestar.
 func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte) (*http.Response, *Replica, error) {
-	for intento := 0; ; intento++ {
+	var dialRetried, staleRetried bool
+	for {
 		rep, err := g.replicas.Acquire(ctx, snap)
 		if err != nil {
 			return nil, nil, &wakeError{err}
@@ -101,8 +93,13 @@ func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
+		if rep.Wake != nil {
+			// Se acaba de despertar: lo que hubiera en el pool hacia esta
+			// dirección es de antes de dormirse (ver guestpool.go).
+			g.guests.closeIdle(rep.Addr)
+		}
 		t0 := time.Now()
-		resp, err := guestClient.Do(req)
+		resp, reused, err := g.guests.do(rep.Addr, req)
 		if err == nil {
 			if rep.Wake != nil {
 				g.primeraPeticion(snap, rep.Wake, time.Since(t0))
@@ -110,8 +107,16 @@ func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte)
 			return resp, rep, nil
 		}
 		rep.Release()
-		if isDialError(err) && intento == 0 {
+		if staleConn(ctx, reused, err) && !staleRetried {
+			staleRetried = true
+			g.met.vonErr(snap, "stale")
+			g.guests.closeIdle(rep.Addr)
+			continue
+		}
+		if isDialError(err) && !dialRetried {
+			dialRetried = true
 			g.met.vonErr(snap, "dial")
+			g.guests.forget(rep.Addr)
 			rep.Drop()
 			continue
 		}
