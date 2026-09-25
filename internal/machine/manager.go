@@ -1366,6 +1366,11 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
 	// aún corriendo, que era el único momento posible.
 	m.killPaused(mc.ID)
+	// El chroot del jail ya no sirve: se borra aquí, en segundo plano del
+	// despertar, y no al principio del siguiente thaw (3,3 ms medidos ahí).
+	if jailed {
+		_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
+	}
 	// La red se queda montada: Thaw la reutiliza (ver red.go), y el vigilante
 	// la desmonta si la máquina pasa mucho tiempo congelada. El cgroup no hace
 	// nada sin proceso; Thaw lo recrea.
