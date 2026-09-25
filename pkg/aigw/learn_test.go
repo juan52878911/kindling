@@ -374,15 +374,22 @@ func TestLearnGateRejectsNoisyTeacher(t *testing.T) {
 // y lo suyo entra sin revisión (con su peso y dentro del tope por clase).
 func TestLearnTeacherValidatedByReviews(t *testing.T) {
 	f := newLearnGateway(t, nil)
-	ids := f.stream(t, f.traffic[:300])
+	ids := f.stream(t, f.traffic[:400])
 	var items []FeedbackItem
 	n := 0
+	caps, _ := f.g.learn.readCaptures("kind", 1<<24)
+	audited := map[string]bool{}
+	for _, c := range caps {
+		if _, in := auditKey(&learnCase{Captured: true, TextSHA: c.TextSHA256}); in {
+			audited[c.ID] = true
+		}
+	}
 	for id, l := range ids {
 		items = append(items, FeedbackItem{ID: id, Teacher: "a", Label: l}, FeedbackItem{ID: id, Teacher: "b", Label: l})
-		if n < 60 {
+		if audited[id] {
 			items = append(items, FeedbackItem{ID: id, Label: l})
+			n++
 		}
-		n++
 	}
 	if _, err := f.g.Feedback(FeedbackRequest{Task: "kind", Items: items}, true, "default"); err != nil {
 		t.Fatal(err)
@@ -397,17 +404,17 @@ func TestLearnTeacherValidatedByReviews(t *testing.T) {
 			a = tt
 		}
 	}
-	if !a.Validated || a.Source != "reviews" || a.Checks != 60 {
+	if n < 30 || !a.Validated || a.Source != "reviews" || a.Checks != n {
 		t.Fatalf("teacher a = %+v", a)
 	}
-	if rv.Acceptable == 0 || rv.Reviewed != 60 {
+	if rv.Acceptable == 0 || rv.Reviewed != n {
 		t.Fatalf("review = pending %d acceptable %d reviewed %d", rv.Pending, rv.Acceptable, rv.Reviewed)
 	}
 	rep, err := f.g.Retrain(context.Background(), RetrainRequest{Task: "kind", DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Data.Accepted == 0 || rep.Data.Human != 60 || rep.Promoted {
+	if rep.Data.Accepted == 0 || rep.Data.Human != n || rep.Promoted {
 		t.Fatalf("dry run = %+v", rep.Data)
 	}
 }
@@ -437,17 +444,20 @@ func TestLearnReviewOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rv.Cases) != 10 || rv.Cases[0].Reason != reasonDisagree || disagree == "" {
-		t.Fatalf("first case = %+v", rv.Cases[0])
-	}
-	spots := 0
+	audits := 0
+	firstPriority := ""
 	for _, c := range rv.Cases {
-		if c.SpotCheck {
-			spots++
+		if c.Audit {
+			audits++
+		} else if firstPriority == "" {
+			firstPriority = c.Reason
 		}
 	}
-	if spots != 2 {
-		t.Errorf("spot checks = %d, want 2 of 10", spots)
+	if len(rv.Cases) != 10 || firstPriority != reasonDisagree || disagree == "" {
+		t.Fatalf("cases = %+v", rv.Cases)
+	}
+	if audits < 1 || audits > 4 {
+		t.Errorf("audit cases = %d, want 1..4 of 10", audits)
 	}
 	if _, err := f.g.Review(context.Background(), ReviewRequest{Task: "kind", N: 501}); err == nil {
 		t.Error("n over the cap accepted")

@@ -65,25 +65,60 @@ func cmdChispaDeploy(args []string) error {
 	if err != nil {
 		return err
 	}
-	model, err := chispa.Load(bytes.NewReader(modelBytes))
-	if err != nil {
-		return fmt.Errorf("%s does not load as a .chispa: %w", *modelPath, err)
-	}
-	modelSHA256 := sha256.Sum256(modelBytes)
-	spec := ChispaSpec{ModelB64: base64.StdEncoding.EncodeToString(modelBytes)}
+	var slotsBytes []byte
 	if *slotsPath != "" {
-		sb, err := os.ReadFile(*slotsPath)
-		if err != nil {
+		if slotsBytes, err = os.ReadFile(*slotsPath); err != nil {
 			return err
 		}
-		spec.SlotsB64 = base64.StdEncoding.EncodeToString(sb)
 	}
-
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	c := api.NewClient(hostOf(*host))
+	if err := chispaDeploy(ctx, c, chispaDeployOptions{
+		Name: name, Model: modelBytes, ModelName: *modelPath, Slots: slotsBytes, MemMiB: *mem, VCPUs: *vcpus,
+		WarmText: *warmText, Replace: *replace, Rebuild: *rebuild, AllowExec: *allowExec, Wait: *wait,
+	}); err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("Add it to the ai gateway's registry (docs/ai-gateway.md) as a microvm-backed model:")
+	fmt.Printf("  {\"models\": {%q: {\"kind\": \"chispa\", \"backend\": \"microvm\", \"snapshot\": %q}}}\n", name, name)
+	return nil
+}
 
-	if !*replace {
+// chispaDeployOptions es lo que necesita un despliegue: lo usan `kling chispa
+// deploy` y `kling ai retrain` (una versión nueva de una tarea microvm es un
+// dorado nuevo, <snapshot>-vN).
+type chispaDeployOptions struct {
+	Name             string
+	Model            []byte
+	ModelName        string // para los mensajes
+	Slots            []byte
+	MemMiB, VCPUs    int
+	WarmText         string
+	Replace, Rebuild bool
+	AllowExec        bool
+	Wait             time.Duration
+}
+
+// chispaDeploy construye la imagen (kling-chispa + el .chispa), hace el dorado
+// y graba en él el registro de despliegue (etiquetas y sha256).
+func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) error {
+	name := o.Name
+	model, err := chispa.Load(bytes.NewReader(o.Model))
+	if err != nil {
+		return fmt.Errorf("%s does not load as a .chispa: %w", o.ModelName, err)
+	}
+	modelSHA256 := sha256.Sum256(o.Model)
+	spec := ChispaSpec{ModelB64: base64.StdEncoding.EncodeToString(o.Model)}
+	if len(o.Slots) > 0 {
+		spec.SlotsB64 = base64.StdEncoding.EncodeToString(o.Slots)
+	}
+	if o.WarmText == "" {
+		o.WarmText = "hello world"
+	}
+
+	if !o.Replace {
 		if snaps, err := c.Snapshots(ctx); err == nil {
 			for _, s := range snaps {
 				if s.Name == name {
@@ -93,7 +128,7 @@ func cmdChispaDeploy(args []string) error {
 		}
 	}
 
-	if !*rebuild {
+	if !o.Rebuild {
 		if imgs, err := c.Images(ctx); err == nil {
 			for _, img := range imgs {
 				if img.Name == name {
@@ -103,17 +138,17 @@ func cmdChispaDeploy(args []string) error {
 		}
 	}
 
-	fmt.Printf("Building image %q (kling-chispa + %s)...\n", name, *modelPath)
+	fmt.Printf("Building image %q (kling-chispa + %s)...\n", name, o.ModelName)
 	specJSON, _ := json.Marshal(spec)
 	if _, err := c.BuildImage(ctx, api.BuildImageRequest{Name: name, Base: "min", Builder: "chispa", Spec: specJSON}); err != nil {
 		return err
 	}
 
-	fmt.Printf("Making the golden snapshot (%d vCPU, %d MiB)...\n", *vcpus, *mem)
+	fmt.Printf("Making the golden snapshot (%d vCPU, %d MiB)...\n", o.VCPUs, o.MemMiB)
 	t0 := time.Now()
 	g, err := makeChispaGolden(ctx, c, chispaGoldenOptions{
-		Image: name, Snapshot: name, VCPUs: *vcpus, MemMiB: *mem,
-		AllowExec: *allowExec, Replace: *replace, Wait: *wait, WarmText: *warmText,
+		Image: name, Snapshot: name, VCPUs: o.VCPUs, MemMiB: o.MemMiB,
+		AllowExec: o.AllowExec, Replace: o.Replace, Wait: o.Wait, WarmText: o.WarmText,
 		Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {
@@ -131,10 +166,6 @@ func cmdChispaDeploy(args []string) error {
 	if _, err := c.SetAnnotation(ctx, name, aigw.ChispaDeployAnnotation, rec); err != nil {
 		return fmt.Errorf("recording %s on the snapshot (needed by the gateway to trust replica answers): %w", aigw.ChispaDeployAnnotation, err)
 	}
-
-	fmt.Println()
-	fmt.Println("Add it to the ai gateway's registry (docs/ai-gateway.md) as a microvm-backed model:")
-	fmt.Printf("  {\"models\": {%q: {\"kind\": \"chispa\", \"backend\": \"microvm\", \"snapshot\": %q}}}\n", name, name)
 	return nil
 }
 

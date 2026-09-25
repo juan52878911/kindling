@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/chispa"
@@ -20,19 +21,27 @@ import (
 //   - descartado por una persona: no entra nunca;
 //   - aceptado sin revisión: solo si pasa el FILTRO DE ACUERDO con maestros
 //     VALIDADOS (abajo), con peso teacher_weight y un tope por clase;
-//   - pendiente: lo demás, que `kling ai review` enseña a una persona, primero
-//     lo más informativo (maestros que discrepan, una etiqueta que Chispa ni
-//     consideraba) y una parte de comprobaciones al azar de lo que se habría
-//     aceptado, que es lo que mide si el filtro es de fiar.
+//   - pendiente: lo demás, que `kling ai review` enseña a una persona.
+//
+// La cola mezcla dos cosas a propósito. Una parte es lo más informativo para
+// entrenar (maestros que discrepan, una etiqueta que Chispa ni consideraba).
+// La otra es una AUDITORÍA al azar: un 20 % fijo de las capturas, elegido por
+// el hash del texto (independiente de todo lo demás), que solo se revisa por
+// este camino y en orden de hash. Solo la auditoría mide a los maestros: si
+// se midieran en los casos elegidos por discrepar, cada maestro parecería peor
+// de lo que es (una discrepancia entre dos maestros tiene siempre uno que se
+// equivoca). Medido en la simulación de docs/mejora-continua.md: con la
+// muestra sesgada, un maestro del 20 % de error entraba y salía de la
+// validación de una ronda a otra.
 //
 // Un maestro está validado si (a) un registro de `kling ai eval` de la tarea
 // dice que su capa gana a Chispa sobre etiquetas de verdad (la cascada con ese
-// VON, o la capa del codificador en domótica), o (b) en los casos que una
-// persona revisó y en los que votó, acierta más que Chispa (McNemar de una
-// cola, p < 0,05, con al menos min_checks casos) Y lo que el filtro de acuerdo
-// habría aceptado con su voto acierta al menos accept_precision (estimado
-// como aciertos/(n+1), con al menos 10). Las dos cosas se miden contra la
-// persona, nunca contra otro maestro: la lección de `kling ai calibrate`.
+// VON, o la capa del codificador en domótica), o (b) en los casos auditados
+// con su voto acierta más que Chispa (McNemar de una cola, p < 0,05, con al
+// menos min_checks casos) Y lo que el filtro de acuerdo habría aceptado con su
+// voto acierta al menos accept_precision (estimado como aciertos/(n+1), con al
+// menos 10). Las dos cosas se miden contra la persona, nunca contra otro
+// maestro: la lección de `kling ai calibrate`.
 
 // learnCase es un caso con todo lo que se sabe de él.
 type learnCase struct {
@@ -48,6 +57,23 @@ type learnCase struct {
 	Human     string // etiqueta humana ("" = ninguna)
 	Discarded bool
 	Captured  bool // false = llegó solo por /v1/feedback, con su texto
+}
+
+// auditPct es el tanto por ciento de capturas que forman la auditoría.
+const auditPct = 20
+
+// auditKey es la posición de un caso en la auditoría (su hash) y si está en
+// ella: solo las capturas, por el sha256 de su texto, que no depende de nada
+// que el bucle mire.
+func auditKey(c *learnCase) (uint64, bool) {
+	if !c.Captured || len(c.TextSHA) < 16 {
+		return 0, false
+	}
+	h, err := strconv.ParseUint(c.TextSHA[:16], 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return h, h%100 < auditPct
 }
 
 func textKey(s string) string {
@@ -249,7 +275,7 @@ func validateTeachers(cases []*learnCase, lc LearnConfig, labels map[string]bool
 		for _, v := range c.Votes {
 			get(v.Name)
 		}
-		if c.Human == "" || !c.HasChispa {
+		if _, audit := auditKey(c); c.Human == "" || !c.HasChispa || !audit {
 			continue
 		}
 		label, pass, _ := agreement(c, lc, labels, nil)
@@ -302,26 +328,38 @@ func validateTeachers(cases []*learnCase, lc LearnConfig, labels map[string]bool
 		}
 		byReviews := t.Checks >= lc.MinChecks && t.TeacherOnly > t.ChispaOnly && t.PValue < 0.05 &&
 			t.AcceptChecks >= minAcceptChecks && t.AcceptPrecision >= lc.AcceptPrecision
+		var why string
+		switch {
+		case byReviews:
+			why = fmt.Sprintf("beats Chispa on %d audited cases (%d vs %d, McNemar p=%.2g); what the agreement filter accepts is right %.3f (%d checks)",
+				t.Checks, t.TeacherOnly, t.ChispaOnly, t.PValue, t.AcceptPrecision, t.AcceptChecks)
+		case t.Checks < lc.MinChecks:
+			why = fmt.Sprintf("only %d audited cases with its answer (need %d): review more with kling ai review", t.Checks, lc.MinChecks)
+		case !(t.TeacherOnly > t.ChispaOnly && t.PValue < 0.05):
+			why = fmt.Sprintf("does not beat Chispa on the audited cases (right %d vs Chispa %d; %d vs %d where they differ, McNemar p=%.2g)",
+				t.TeacherRight, t.ChispaRight, t.TeacherOnly, t.ChispaOnly, t.PValue)
+		case t.AcceptChecks < minAcceptChecks:
+			why = fmt.Sprintf("only %d audited cases of what it would add (need %d)", t.AcceptChecks, minAcceptChecks)
+		default:
+			why = fmt.Sprintf("what the agreement filter would accept from it is right only %.3f (need %.2f)", t.AcceptPrecision, lc.AcceptPrecision)
+		}
 		switch {
 		case forced[n]:
+			// Forzado se usa igual, pero el informe dice lo que las revisiones
+			// opinan de él: forzar no es a ciegas.
 			t.Validated, t.Source = true, "forced"
-			t.Reason = "forced (trust_teachers) without validation"
+			if !byReviews {
+				t.Reason = "forced (trust_teachers) without validation; reviews say: " + why
+			} else {
+				t.Reason = "forced (trust_teachers); reviews would validate it anyway: " + why
+			}
 		case evalOK[n] != "":
 			t.Validated, t.Source = true, "eval"
 			t.Reason = "backed by the task's eval record: " + evalOK[n]
 		case byReviews:
-			t.Validated, t.Source = true, "reviews"
-			t.Reason = fmt.Sprintf("beats Chispa on %d reviewed cases (%d vs %d, McNemar p=%.2g); what the agreement filter accepts is right %.3f (%d checks)",
-				t.Checks, t.TeacherOnly, t.ChispaOnly, t.PValue, t.AcceptPrecision, t.AcceptChecks)
-		case t.Checks < lc.MinChecks:
-			t.Reason = fmt.Sprintf("only %d reviewed cases with its answer (need %d): review more with kling ai review", t.Checks, lc.MinChecks)
-		case !(t.TeacherOnly > t.ChispaOnly && t.PValue < 0.05):
-			t.Reason = fmt.Sprintf("does not beat Chispa on the reviewed cases (right %d vs Chispa %d; %d vs %d where they differ, McNemar p=%.2g)",
-				t.TeacherRight, t.ChispaRight, t.TeacherOnly, t.ChispaOnly, t.PValue)
-		case t.AcceptChecks < minAcceptChecks:
-			t.Reason = fmt.Sprintf("only %d spot checks of what it would add (need %d)", t.AcceptChecks, minAcceptChecks)
+			t.Validated, t.Source, t.Reason = true, "reviews", why
 		default:
-			t.Reason = fmt.Sprintf("what the agreement filter would accept from it is right only %.3f (need %.2f)", t.AcceptPrecision, lc.AcceptPrecision)
+			t.Reason = why
 		}
 		out = append(out, *t)
 	}
@@ -398,7 +436,7 @@ type ReviewCase struct {
 	Teachers  []TeacherVote  `json:"teachers,omitempty"`
 	Proposed  string         `json:"proposed"`
 	Reason    string         `json:"reason"`
-	SpotCheck bool           `json:"spot_check,omitempty"` // se habría aceptado solo: comprobación al azar
+	Audit     bool           `json:"audit,omitempty"` // de la auditoría al azar: mide a los maestros
 	RareClass bool           `json:"rare_class,omitempty"` // la clase propuesta no tiene umbral (siempre escala)
 }
 
@@ -450,10 +488,10 @@ func (g *Gateway) Review(ctx context.Context, req ReviewRequest) (*ReviewRespons
 		why  string
 		prop string
 		rare bool
-		spot bool
-		key  string
+		pri  int
+		key  uint64
 	}
-	var pend, spot []cand
+	var pend, audit []cand
 	for _, c := range lt.cases {
 		if c.Human != "" || c.Discarded {
 			resp.Reviewed++
@@ -469,24 +507,30 @@ func (g *Gateway) Review(ctx context.Context, req ReviewRequest) (*ReviewRespons
 		if prop == "" {
 			prop = c.Chispa.Label
 		}
-		k := cand{c: c, why: why, prop: prop, rare: lt.never[prop], key: textKey(c.ID)}
+		k := cand{c: c, why: why, prop: prop, rare: lt.never[prop], pri: reviewPriority(why)}
+		if would {
+			k.why, k.pri = "the agreement filter would accept it once its teachers are validated", 4
+			if okNow {
+				k.why = "accepted without review (validated teachers agree)"
+			}
+		}
 		if okNow {
 			resp.Acceptable++
 		} else {
 			resp.Pending++
 			resp.Reasons[whyNow]++
 		}
-		if would {
-			k.why, k.spot = "spot check: the agreement filter would accept it", true
-			spot = append(spot, k)
-		} else {
+		if h, in := auditKey(c); in {
+			k.key, k.why = h, "random audit (measures the teachers): "+k.why
+			audit = append(audit, k)
+		} else if !okNow {
 			pend = append(pend, k)
 		}
 	}
 	sort.SliceStable(pend, func(i, j int) bool {
 		a, b := pend[i], pend[j]
-		if pa, pb := reviewPriority(a.why), reviewPriority(b.why); pa != pb {
-			return pa < pb
+		if a.pri != b.pri {
+			return a.pri < b.pri
 		}
 		if a.rare != b.rare {
 			return a.rare
@@ -496,21 +540,19 @@ func (g *Gateway) Review(ctx context.Context, req ReviewRequest) (*ReviewRespons
 		}
 		return a.c.TS.After(b.c.TS)
 	})
-	// Comprobaciones al azar, pero estables: el orden sale del hash del id, así
-	// que dos llamadas seguidas enseñan los mismos casos hasta que se revisen.
-	sort.SliceStable(spot, func(i, j int) bool { return spot[i].key < spot[j].key })
-	nSpot := 0
-	if len(spot) > 0 {
-		nSpot = min(len(spot), max(1, n/5))
-		if len(pend) < n-nSpot {
-			nSpot = min(len(spot), n-len(pend))
-		}
+	// La auditoría va en orden de hash: al azar, pero estable (dos llamadas
+	// seguidas enseñan lo mismo hasta que se revise) y sin mirar el contenido.
+	sort.SliceStable(audit, func(i, j int) bool { return audit[i].key < audit[j].key })
+	nAudit := min(len(audit), max(1, n*2/5))
+	if len(pend) < n-nAudit {
+		nAudit = min(len(audit), n-len(pend))
 	}
-	pick := append(append([]cand(nil), pend[:min(len(pend), n-nSpot)]...), spot[:nSpot]...)
+	pick := append(append([]cand(nil), audit[:nAudit]...), pend[:min(len(pend), n-nAudit)]...)
 	for _, k := range pick {
+		_, in := auditKey(k.c)
 		resp.Cases = append(resp.Cases, ReviewCase{
 			ID: k.c.ID, TS: k.c.TS, Text: k.c.Text, Fields: k.c.Fields, Chispa: k.c.Chispa, Teachers: k.c.Votes,
-			Proposed: k.prop, Reason: k.why, SpotCheck: k.spot, RareClass: k.rare,
+			Proposed: k.prop, Reason: k.why, Audit: in, RareClass: k.rare,
 		})
 	}
 	g.learn.mu.Lock()

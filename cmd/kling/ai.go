@@ -37,7 +37,7 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload|prime> [...]")
+		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback> [...]")
 	}
 	switch args[0] {
 	case "serve":
@@ -56,8 +56,16 @@ func cmdAI(args []string) error {
 		return aiReload(args[1:])
 	case "prime":
 		return aiPrime(args[1:])
+	case "review":
+		return aiReview(args[1:])
+	case "feedback":
+		return aiFeedback(args[1:])
+	case "retrain":
+		return aiRetrain(args[1:])
+	case "rollback":
+		return aiRollback(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate, reload or prime", args[0])
+		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain or rollback", args[0])
 	}
 }
 
@@ -425,6 +433,7 @@ func aiList(args []string) error {
 	for _, n := range notes {
 		fmt.Println(n)
 	}
+	printLearn(live.Tasks)
 	if !running {
 		fmt.Println("\n(gateway not running: start it with kling ai serve)")
 	}
@@ -510,6 +519,9 @@ func aiTest(args []string) error {
 		esc = ", escalate: Chispa is unsure and the cascade is off"
 	}
 	fmt.Printf("%s  (source %s, p=%.3f, %.2f ms%s)\n", resp.Label, resp.Source, resp.Prob, resp.LatencyMS, esc)
+	if resp.ID != "" {
+		fmt.Printf("  id %s (kling ai feedback %s -id %s -label <right label>)\n", resp.ID, req.Task, resp.ID)
+	}
 	if resp.Chispa != nil {
 		fmt.Printf("  chispa: %s p=%.3f threshold=%.3f -> %s\n", resp.Chispa.Label, resp.Chispa.Prob, resp.Chispa.Threshold, resp.Chispa.Decision)
 	}
