@@ -89,9 +89,17 @@ curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 | `smollm2-360m-instruct` | `q4_k_m` | 258 MiB | 2 / 640 MiB | bartowski, rev `7be6f65f` | Apache-2.0 |
 | `qwen2.5-0.5b-instruct` | `q8_0` | 644 MiB | 2 / 1152 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
 | `qwen2.5-0.5b-instruct` | `q4_k_m` | 469 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
+| `qwen2.5-0.5b-instruct` | `q4_0` | 409 MiB | 2 / 896 MiB | Qwen, rev `9217f5db` | Apache-2.0 |
 | `qwen2.5-1.5b-instruct` | `q8_0` | 1807 MiB | 4 / 2304 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-1.5b-instruct` | `q4_k_m` | 1066 MiB | 4 / 1536 MiB | Qwen, rev `91cad511` | Apache-2.0 |
+| `qwen2.5-1.5b-instruct` | `q4_0` | 1017 MiB | 4 / 1536 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-3b-instruct` | `q4_k_m` (única) | 2007 MiB | 4 / 2816 MiB | Qwen, rev `7dabda4d` | **Qwen Research** (no comercial): fuera del catálogo por defecto |
+
+La memoria de la tabla es la del modelo; `models add` le suma la caché de
+prompts (`-cache-ram`, 64 MiB). En ARM, Q4_0 es la más rápida de las
+cuantizaciones de 4 bits (llama.cpp la reempaqueta para i8mm, como Q8_0, y
+Q4_K_M no): [von-cpu.md](von-cpu.md) tiene las cifras y la configuración
+recomendada por modelo.
 
 Cada entrada lleva revisión de Hugging Face (commit, no rama), sha256, licencia
 y dónde leerla (`pkg/von`, `kling models ls`); el constructor verifica el hash
@@ -118,6 +126,8 @@ pequeños (0.6B, 1.7B, 4B; Apache-2.0). Un GGUF propio:
 | `-threads` | nº de vCPU | hilos de cálculo |
 | `-cpus`, `-mem` | los del catálogo | tamaño de la microVM; con un GGUF propio, 2 y 1024 |
 | `-cpu-pct` | 100 × vCPU | techo de CPU que graba el dorado y heredan las réplicas |
+| `-cache-ram` | 64 | MiB de la caché de prompts de `llama-server`, que se suman a la memoria de la VM. Guarda la caché KV de los prompts vistos: el prefijo de una tarea se evalúa una vez y cambiar de tarea no lo tira ([von-cpu.md](von-cpu.md)). 0 = sin ella (lo de antes de v0.12) |
+| `-prefix` | — | fichero con el system prompt de una tarea que el dorado deja ya evaluado (repetible); con el gateway, `kling ai prime` los saca del registro |
 | `-build-only` | — | solo la imagen (para copiarla a un Mac) |
 | `-accept-license` | — | construir un modelo del catálogo que no es de licencia abierta (su identificador) |
 | `-wait` | 5m | cuánto esperar a que el modelo cargue, y a que conteste el calentamiento (que se reintenta si el proxy del daemon se cansa antes) |
@@ -144,14 +154,16 @@ exec`/`cp` siguen funcionando (`-allow-exec` por defecto en los modelos). El log
 del servidor: `kling exec <réplica> -- tail /var/log/service.log`.
 
 **Argumentos de `llama-server` que importan**: `--load-mode dio` (abajo),
-`--cache-ram 0` (la caché de prompts en RAM viene a 8 GiB por defecto: en una
-microVM de 768 MiB es el OOM killer esperando), `--fit off` (que no reajuste nada
+`--cache-ram 64` (la caché de prompts en RAM viene a 8 GiB por defecto: en una
+microVM de 768 MiB es el OOM killer esperando; acotada, es la que hace que el
+prefijo de una tarea no se evalúe en cada petición, [von-cpu.md](von-cpu.md)), `--fit off` (que no reajuste nada
 según la memoria libre), `--no-webui`, `--metrics`, `--alias <modelo:quant>`.
 
 **El dorado** (`von.MakeGolden`): arranca sin red (`egress none`), espera a
 `/health` 200, calienta con una respuesta de 8 tokens a temperatura 0 —lo que la
 pasada vacía del arranque no toca: páginas de pesos, hilos de OpenMP, búferes del
-tamaño de un lote real—, aprieta el globo (`squeeze`) para que lo libre acabe en
+tamaño de un lote real—, evalúa los prefijos de tareas que se le den (`-prefix`,
+`kling ai prime`; etiqueta `von.prefixes`), aprieta el globo (`squeeze`) para que lo libre acabe en
 huecos del `mem.file`, congela y borra la plantilla. Etiquetas: `von.model`
 (`smollm2-360m-instruct:q8_0`), `kling.ports=8000` y `service`. Un gateway
 descubre los modelos listando snapshots con `von.model`.
@@ -407,6 +419,15 @@ vGPU con licencia) dentro de una microVM con su driver.
 
 El orden razonable: runner de host detrás del mismo gateway, y VFIO solo si
 aparece la necesidad de GPU aislada.
+
+## Más rápido en CPU
+
+[von-cpu.md](von-cpu.md): qué se midió para que estos modelos contesten antes
+sin GPU y qué entró por defecto. Lo que más cuenta en un gateway que escala a
+cero es el prefijo de cada tarea precalculado en el dorado (la primera petición
+de una réplica restaurada, de 4,7 s a 0,4 s en Qwen2.5-1.5B), luego `json_schema`
+para las salidas JSON y Q4_0 en ARM. La decodificación especulativa no ganó en
+ninguna configuración.
 
 ## El gateway
 

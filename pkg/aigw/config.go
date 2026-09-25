@@ -126,6 +126,13 @@ type TaskConfig struct {
 	// gramática de llama-server (nil = sí). Un modelo de 360M parámetros
 	// divaga; con la gramática no puede.
 	Grammar *bool `json:"grammar,omitempty"`
+	// JSONSchema restringe la salida de una generación a JSON que cumple este
+	// esquema (el json_schema de llama-server, que lo convierte en una
+	// gramática). Medido en docs/von-cpu.md: sin él, Qwen2.5-1.5B devolvía
+	// JSON inválido en 2 de 21 respuestas de la tarea de domótica; con él, en
+	// ninguna, a cambio de ~10 % de velocidad de generación. El gateway
+	// comprueba además que la salida sea JSON: el invitado no es de fiar.
+	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
 	// OnVONError: "jev" (por defecto) contesta con la etiqueta de JEV marcada
 	// como degradada si VON no responde; "error" devuelve 503.
 	OnVONError string `json:"on_von_error,omitempty"`
@@ -272,7 +279,16 @@ func (c *Config) Validate() error {
 			if t.Temperature != nil && !(*t.Temperature >= 0 && *t.Temperature <= 2) {
 				errs = append(errs, fmt.Errorf("task %q: temperature must be in [0,2]", n))
 			}
+			if len(t.JSONSchema) > 0 {
+				var obj map[string]any
+				if len(t.JSONSchema) > maxPromptBytes || json.Unmarshal(t.JSONSchema, &obj) != nil {
+					errs = append(errs, fmt.Errorf("task %q: json_schema must be a JSON object of at most %d bytes", n, maxPromptBytes))
+				}
+			}
 		} else {
+			if len(t.JSONSchema) > 0 {
+				errs = append(errs, fmt.Errorf("task %q: json_schema is for generation tasks (a classification answers one label, with its own grammar)", n))
+			}
 			if t.Temperature != nil {
 				errs = append(errs, fmt.Errorf("task %q: temperature is for generation tasks (escalations answer at 0)", n))
 			}

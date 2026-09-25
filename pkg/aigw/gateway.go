@@ -2,6 +2,7 @@ package aigw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -620,7 +621,7 @@ func (g *Gateway) Generate(ctx context.Context, req GenerateRequest) (*GenerateR
 		msgs = append(msgs, von.Message{Role: "system", Content: tc.System})
 	}
 	msgs = append(msgs, von.Message{Role: "user", Content: renderGenerate(tc.Prompt, req.Input, req.Vars)})
-	chat := chatReq{Messages: msgs, MaxTokens: mt, Temperature: temp, Seed: sd}
+	chat := chatReq{Messages: msgs, MaxTokens: mt, Temperature: temp, Seed: sd, JSONSchema: tc.JSONSchema}
 
 	vctx, cancel := context.WithTimeout(ctx, g.opts.ProxyTimeout)
 	defer cancel()
@@ -638,6 +639,15 @@ func (g *Gateway) Generate(ctx context.Context, req GenerateRequest) (*GenerateR
 		Usage: Usage{PromptTokens: out.Usage.PromptTokens, CompletionTokens: out.Usage.CompletionTokens}}
 	if len(out.Choices) > 0 {
 		resp.FinishReason = out.Choices[0].FinishReason
+	}
+	// Con esquema, la gramática de llama-server ya obliga a que sea JSON; se
+	// comprueba igual porque el invitado no es de fiar, y porque una respuesta
+	// cortada por max_tokens es JSON a medias: mejor un error que lo diga que
+	// un 200 que el cliente no puede leer.
+	if len(tc.JSONSchema) > 0 && !json.Valid([]byte(resp.Output)) {
+		g.met.vonErr(tc.VON, "invalid_json")
+		return nil, &StatusError{Code: http.StatusBadGateway,
+			Msg: fmt.Sprintf("von model %q did not return valid JSON for the task's json_schema (finish_reason %q; raise max_tokens if it is \"length\")", tc.VON, resp.FinishReason)}
 	}
 	d := time.Since(t0)
 	resp.LatencyMS = float64(d.Microseconds()) / 1000

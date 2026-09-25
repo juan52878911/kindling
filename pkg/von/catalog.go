@@ -38,6 +38,14 @@ const LabelModel = "von.model"
 // réplica y del dorado. Estos modelos no aprovechan contextos largos.
 const DefaultCtx = 2048
 
+// DefaultCacheRAM son los MiB de la caché de prompts de llama-server por
+// defecto (Spec.CacheRAM). Con la caché KV de Qwen2.5-1.5B (~28 KiB/token)
+// caben ~2300 tokens: el prefijo de dos o tres tareas de ~800 tokens; con la de
+// Qwen2.5-0.5B (~12 KiB/token), más de 5000. Es memoria que la microVM tiene
+// que tener de más (se suma a MemMiB) y, en macOS, que cada réplica paga
+// entera; por eso no más.
+const DefaultCacheRAM = 64
+
 // Model es un GGUF fijado: repositorio, revisión (commit de Hugging Face) y
 // sha256 del fichero. Sin revisión y hash, "el mismo modelo" podría ser otro el
 // día que el autor suba una versión nueva, y el dorado dejaría de ser
@@ -113,6 +121,18 @@ var Catalog = []Model{
 		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/blob/9217f5db79a29953eb74d5343926648285ec7e67/LICENSE",
 	},
 	{
+		// Q4_0 reempaquetado para i8mm (ver el de 1,5B): en un M4, misma
+		// velocidad de prompt que Q8_0, generación ~35 % más rápida y el mismo
+		// acierto o mejor en la tarea de referencia (docs/von-cpu.md).
+		ID: "qwen2.5-0.5b-instruct", Quant: "q4_0",
+		Repo:     "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+		Revision: "9217f5db79a29953eb74d5343926648285ec7e67",
+		File:     "qwen2.5-0.5b-instruct-q4_0.gguf",
+		SHA256:   "7671c0c304e6ce5a7fc577bcb12aba01e2c155cc2efd29b2213c95b18edaf6ed",
+		Size:     428730208, MemMiB: 896, VCPUs: 2, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/blob/9217f5db79a29953eb74d5343926648285ec7e67/LICENSE",
+	},
+	{
 		// MemMiB en 1152, no 1024: medido en el dorado (docs/von.md, Dimensionado),
 		// usa 871 MiB en Linux con el -ctx por defecto, así que a 1024 quedan solo
 		// 153 MiB libres para la caché KV y los búferes de cálculo del vocabulario
@@ -140,6 +160,20 @@ var Catalog = []Model{
 		File:     "qwen2.5-1.5b-instruct-q4_k_m.gguf",
 		SHA256:   "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
 		Size:     1117320736, MemMiB: 1536, VCPUs: 4, License: "apache-2.0",
+		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/91cad51170dc346986eccefdc2dd33a9da36ead9/LICENSE",
+	},
+	{
+		// Q4_0: llama.cpp reempaqueta sus pesos (como los de Q8_0) al formato de
+		// las instrucciones i8mm de ARM, y los de Q4_K_M no. Medido en un M4
+		// (docs/von-cpu.md): prompt ~1,8× más rápido y generación ~10 % más que
+		// Q4_K_M, con el mismo acierto en la tarea de referencia con esquema.
+		// En x86 el reempaquetado es otro y no está medido.
+		ID: "qwen2.5-1.5b-instruct", Quant: "q4_0",
+		Repo:     "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+		Revision: "91cad51170dc346986eccefdc2dd33a9da36ead9",
+		File:     "qwen2.5-1.5b-instruct-q4_0.gguf",
+		SHA256:   "dcd819ff094852c38faba6873d8ff0c9d51eadb2844539e52042ae5d647bbfdb",
+		Size:     1066227232, MemMiB: 1536, VCPUs: 4, License: "apache-2.0",
 		LicenseURL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/91cad51170dc346986eccefdc2dd33a9da36ead9/LICENSE",
 	},
 	{
