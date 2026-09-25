@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -24,6 +25,9 @@ type Replica struct {
 	Addr    string
 	Release func()
 	Drop    func()
+	// Wake es el desglose del despertar que la dejó lista si esta es la
+	// primera petición que la usa desde entonces; nil si ya estaba despierta.
+	Wake *scheduler.WakeTrace
 }
 
 // Replicas reparte réplicas de un dorado VON. La de verdad es pkg/scheduler;
@@ -49,6 +53,7 @@ func (r schedReplicas) Acquire(ctx context.Context, snap string) (*Replica, erro
 		Addr:    e.Addr(von.Port),
 		Release: func() { r.s.End(e) },
 		Drop:    func() { r.s.DropInstance(snap, id) },
+		Wake:    e.TakeWake(),
 	}, nil
 }
 
@@ -96,8 +101,12 @@ func (g *Gateway) postGuest(ctx context.Context, snap, path string, body []byte)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
+		t0 := time.Now()
 		resp, err := guestClient.Do(req)
 		if err == nil {
+			if rep.Wake != nil {
+				g.primeraPeticion(snap, rep.Wake, time.Since(t0))
+			}
 			return resp, rep, nil
 		}
 		rep.Release()
@@ -172,4 +181,17 @@ func (g *Gateway) chatVON(ctx context.Context, snap string, req chatReq) (*von.C
 		return nil, fmt.Errorf("replica answer is not a chat completion: %w", err)
 	}
 	return &out, nil
+}
+
+// primeraPeticion cierra el desglose de un despertar con la petición que lo
+// pagó: la registra en las métricas y deja una línea de log con todas las
+// fases, que es de donde sale la tabla de docs/despertar.md.
+func (g *Gateway) primeraPeticion(snap string, t *scheduler.WakeTrace, first time.Duration) {
+	name, _ := g.config().replicaModel(snap)
+	if name == "" {
+		name = snap
+	}
+	g.met.wakePhases(name, t, first)
+	log.Printf("%s: replica ready (%s), first request %.1f ms, total %.1f ms", name, t,
+		float64(first.Microseconds())/1000, float64((t.Total+first).Microseconds())/1000)
 }

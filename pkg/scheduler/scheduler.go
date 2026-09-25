@@ -171,6 +171,9 @@ type Scheduler struct {
 	// "restore" (nueva desde el snapshot), y d lo que costó hasta que el
 	// puerto aceptó. Es la métrica de arranques en frío del gateway de IA.
 	OnAcquire func(service, how string, d time.Duration)
+	// OnWake, si está, se llama junto a OnAcquire con el desglose por fases
+	// de ese despertar (ver WakeTrace).
+	OnWake func(service string, t *WakeTrace)
 	// adquiriendo son las máquinas elegidas por un acquire que aún no están
 	// registradas como instancia: sin esto, dos acquire concurrentes (un
 	// ensure y un scale-out) podían descongelar o adoptar la MISMA máquina y
@@ -266,6 +269,10 @@ type entry struct {
 	// gateway crea RÉPLICAS (g.extra) y reparte: es lo que permite usar la misma
 	// herramienta en paralelo. Se fija al crear la instancia y no cambia.
 	maxSessions int
+
+	// wake es el desglose del despertar que dejó lista esta instancia, hasta
+	// que la primera petición lo recoge (TakeWake).
+	wake atomic.Pointer[WakeTrace]
 }
 
 // begin y end marcan el trabajo en vuelo de una instancia.
@@ -542,7 +549,8 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	}
 
 	t0 := time.Now()
-	mc, how, err := g.acquire(ctx, service, fresh)
+	tr := &WakeTrace{}
+	mc, how, err := g.acquire(ctx, service, fresh, tr)
 	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
 	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
 	// falta varias—, y rendirse tras la primera dejaba el 502 igual que antes.
@@ -568,7 +576,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 				break
 			}
 			log.Printf("%s: at the daemon's machine limit; dropped a prewarmed instance", service)
-			mc, how, err = g.acquire(ctx, service, fresh)
+			mc, how, err = g.acquire(ctx, service, fresh, tr)
 			continue
 		}
 		victima := g.evictLRU(ctx, service, tnt.name)
@@ -582,7 +590,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		} else {
 			log.Printf("%s: didn't fit; froze %s to make room", service, victima)
 		}
-		mc, how, err = g.acquire(ctx, service, fresh)
+		mc, how, err = g.acquire(ctx, service, fresh, tr)
 	}
 	if err != nil {
 		return nil, err
@@ -606,6 +614,9 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
 		return nil, fmt.Errorf("tool did not start listening: %w", err)
 	}
+	tr.Ready = time.Since(wr0)
+	tr.Total = time.Since(t0)
+	tr.How = how
 	// Cuánto tardó el 8080 en aceptar es la métrica que discrimina el cuello de
 	// botella del arranque (ver docs de rendimiento en Mac): un thaw acepta casi al
 	// instante, un arranque en frío bajo KVM anidado tarda segundos. Se registra solo
@@ -614,7 +625,10 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
 	}
 	if g.OnAcquire != nil {
-		g.OnAcquire(service, how, time.Since(t0))
+		g.OnAcquire(service, how, tr.Total)
+	}
+	if g.OnWake != nil {
+		g.OnWake(service, tr)
 	}
 
 	target, _ := url.Parse("http://" + mc.Addr(g.port()))
@@ -629,6 +643,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		maxSessions: gwMaxSessions(mc.MemMiB),
 		proxy:       proxyInvitado(target),
 	}
+	e.wake.Store(tr)
 	// El dial es corto —o hay alguien escuchando o no lo hay— pero la ESPERA A
 	// LA RESPUESTA es larga a propósito: al otro lado hay una herramienta, y una
 	// herramienta puede tardar. Un escaneo de semgrep sobre un repo pasa del
@@ -813,8 +828,13 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 // Devuelve también CÓMO la consiguió ("adopt", "thaw" o "restore"), que es lo
 // que distingue un arranque en frío de un thaw en las métricas. La máquina
 // elegida queda marcada en g.adquiriendo hasta que quien llama la registra.
-func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*api.Machine, string, error) {
+func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr *WakeTrace) (*api.Machine, string, error) {
+	if tr == nil {
+		tr = &WakeTrace{}
+	}
+	t0 := time.Now()
 	machines, err := g.client.List(ctx)
+	tr.List += time.Since(t0)
 	if err != nil {
 		return nil, "", err
 	}
@@ -865,7 +885,9 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*a
 	// este antes de reiniciarse): se renueva al adoptarla.
 	if !fresh {
 		if m := pick(api.StateRunning); m != nil {
+			t := time.Now()
 			g.renovarTTL(ctx, m.ID)
+			tr.Renew += time.Since(t)
 			return m, "adopt", nil
 		}
 	}
@@ -877,9 +899,16 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*a
 	// el thaw y la renovación la volvería a congelar, y una congelada también
 	// se puede renovar.
 	if m := pick(api.StateWarm); m != nil {
+		t := time.Now()
 		g.renovarTTL(ctx, m.ID)
+		tr.Renew += time.Since(t)
 		log.Printf("%s: thawing %s", service, m.Name)
+		t = time.Now()
 		th, err := g.client.Thaw(ctx, m.ID)
+		tr.Wake += time.Since(t)
+		if th != nil {
+			tr.Daemon = th.Wake
+		}
 		if err != nil {
 			g.mu.Lock()
 			delete(g.adquiriendo, m.ID)
@@ -889,7 +918,9 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool) (*a
 		return th, "thaw", nil
 	}
 	// 3) instanciar del snapshot dorado
+	t := time.Now()
 	mc, err := g.runFresh(ctx, service)
+	tr.Wake += time.Since(t)
 	if err != nil {
 		return nil, "", err
 	}

@@ -188,7 +188,7 @@ func TestDespertarUnaInstanciaViejaRenuevaSuTTL(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}}
 	g := conDaemonFalso(t, d)
 
-	mc, _, err := g.acquire(context.Background(), "svc", false)
+	mc, _, err := g.acquire(context.Background(), "svc", false, nil)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestAdoptarUnaInstanciaEnMarchaRenuevaSuTTL(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": vieja}}
 	g := conDaemonFalso(t, d)
 
-	if _, _, err := g.acquire(context.Background(), "svc", false); err != nil {
+	if _, _, err := g.acquire(context.Background(), "svc", false, nil); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	d.vigilar()
@@ -279,7 +279,7 @@ func TestScaleOutDespiertaUnaReplicaViejaYRenuevaSuTTL(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}}
 	g := conDaemonFalso(t, d)
 
-	mc, how, err := g.acquire(context.Background(), "svc", true)
+	mc, how, err := g.acquire(context.Background(), "svc", true, nil)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestSinTTLNoSeRenueva(t *testing.T) {
 	g := conDaemonFalso(t, d)
 	g.MachineTTL = -1
 
-	if _, _, err := g.acquire(context.Background(), "svc", false); err != nil {
+	if _, _, err := g.acquire(context.Background(), "svc", false, nil); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	g.mu.Lock()
@@ -319,14 +319,14 @@ func TestSinCapacidadRenewSeDespiertaIgual(t *testing.T) {
 	d := &daemonFalso{maquinas: map[string]*api.Machine{"m1": instanciaVieja("m1")}, sinRenew: true}
 	g := conDaemonFalso(t, d)
 
-	mc, _, err := g.acquire(context.Background(), "svc", false)
+	mc, _, err := g.acquire(context.Background(), "svc", false, nil)
 	if err != nil || mc.State != api.StateRunning {
 		t.Fatalf("acquire = %v, %v; quería despertarla aunque el daemon no sepa renovar", mc, err)
 	}
 	if n := d.visto("POST /machines/m1/renew"); n != 0 {
 		t.Errorf("pidió %d renovaciones a un daemon que no las anuncia", n)
 	}
-	g.acquire(context.Background(), "svc", false)
+	g.acquire(context.Background(), "svc", false, nil)
 	if n := d.visto("GET /info"); n != 1 {
 		t.Errorf("preguntó %d veces por las capacidades; basta una", n)
 	}

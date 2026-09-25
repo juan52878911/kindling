@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // Métricas en texto de Prometheus, escritas a mano: el núcleo no tiene
@@ -46,6 +48,7 @@ type metrics struct {
 	audits    map[string]uint64     // task|outcome (sent, dropped)
 	vonErrors map[string]uint64     // model|reason
 	wakes     map[string]*histogram // model|how
+	phases    map[string]*histogram // model|how|phase
 	proxy     map[string]uint64     // model|code
 	inflight  int64
 }
@@ -54,7 +57,7 @@ func newMetrics() *metrics {
 	return &metrics{
 		requests: map[string]uint64{}, latency: map[string]*histogram{}, unknown: map[string]uint64{},
 		degraded: map[string]uint64{}, audits: map[string]uint64{}, vonErrors: map[string]uint64{},
-		wakes: map[string]*histogram{}, proxy: map[string]uint64{},
+		wakes: map[string]*histogram{}, phases: map[string]*histogram{}, proxy: map[string]uint64{},
 	}
 }
 
@@ -89,6 +92,39 @@ func (m *metrics) wake(model, how string, d time.Duration) {
 	}
 	h.observe(d.Seconds())
 	m.mu.Unlock()
+}
+
+// wakePhases apunta el desglose de un despertar por fases (ver
+// docs/despertar.md): las del planificador, las del daemon (prefijo daemon_)
+// y la primera petición que lo pagó.
+func (m *metrics) wakePhases(model string, t *scheduler.WakeTrace, first time.Duration) {
+	obs := func(phase string, secs float64) {
+		k := key(model, t.How, phase)
+		h := m.phases[k]
+		if h == nil {
+			h = &histogram{}
+			m.phases[k] = h
+		}
+		h.observe(secs)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	obs("list", t.List.Seconds())
+	obs("renew", t.Renew.Seconds())
+	obs("wake", t.Wake.Seconds())
+	obs("ready", t.Ready.Seconds())
+	obs("first_request", first.Seconds())
+	obs("total", (t.Total + first).Seconds())
+	if p := t.Daemon; p != nil {
+		for _, f := range []struct {
+			n string
+			v float64
+		}{{"wait", p.WaitMS}, {"check", p.CheckMS}, {"net", p.NetMS}, {"spawn", p.SpawnMS},
+			{"socket", p.SocketMS}, {"load", p.LoadMS}, {"resync", p.ResyncMS}, {"cgroup", p.CgroupMS},
+			{"finish", p.FinishMS}, {"total", p.TotalMS}} {
+			obs("daemon_"+f.n, f.v/1000)
+		}
+	}
 }
 
 func (m *metrics) addInflight(d int64) {
@@ -166,6 +202,7 @@ func (m *metrics) write(w io.Writer, js chispaStats, samples map[string]int, rep
 	counter("kling_ai_audits_total", "Confident Chispa answers double-checked by VON in the background.", m.audits, "task", "outcome")
 	counter("kling_ai_von_errors_total", "Errors talking to VON replicas.", m.vonErrors, "model", "reason")
 	hist("kling_ai_von_wake_seconds", "Time to get a replica ready: thaw (was frozen), restore (cold start from the golden snapshot) or adopt.", m.wakes, "model", "how")
+	hist("kling_ai_wake_phase_seconds", "Wake-up of a replica by phase: list, renew, wake, ready and first_request in the gateway, daemon_* inside the daemon's thaw; total = wake-up plus the first request.", m.phases, "model", "how", "phase")
 	counter("kling_ai_proxy_requests_total", "OpenAI-compatible requests proxied to VON, by status code.", m.proxy, "model", "code")
 
 	fmt.Fprintf(w, "# HELP kling_ai_von_replicas VON replicas of this gateway by state.\n# TYPE kling_ai_von_replicas gauge\n")

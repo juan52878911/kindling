@@ -110,6 +110,42 @@ type Machine struct {
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`
 	ThawMS   int64 `json:"thaw_ms,omitempty"`
+
+	// Wake desglosa el último despertar (thaw o reanudación) por fases. ThawMS
+	// es solo la carga del snapshot; Wake.TotalMS es lo que de verdad esperó
+	// quien pidió el thaw (ver docs/despertar.md).
+	Wake *WakePhases `json:"wake,omitempty"`
+}
+
+// WakePhases es el desglose de un despertar en el daemon, en milisegundos.
+// Cada campo es el tiempo de pared de esa fase; TotalMS los suma todos más lo
+// que quede entre ellos.
+type WakePhases struct {
+	// Tier es de dónde se despertó: "frozen" (snapshot en disco: VMM nuevo y
+	// LoadSnapshot) o "paused" (VMM vivo en pausa: solo Resume).
+	Tier string `json:"tier"`
+	// WaitMS es la espera del candado de la máquina y de la puerta de arranque.
+	WaitMS float64 `json:"wait_ms"`
+	// CheckMS es comprobar que no quede ya un VMM vivo de esta máquina.
+	CheckMS float64 `json:"check_ms"`
+	// NetMS es montar (o comprobar) el namespace, el veth, el tap y las reglas.
+	NetMS float64 `json:"net_ms"`
+	// SpawnMS es lanzar el VMM (firecracker o jailer) y preparar su jaula.
+	SpawnMS float64 `json:"spawn_ms"`
+	// SocketMS es esperar a que su socket de API conteste.
+	SocketMS float64 `json:"socket_ms"`
+	// LoadMS es LoadSnapshot con reanudación (lo que siempre midió ThawMS), o
+	// el Resume de una pausada.
+	LoadMS float64 `json:"load_ms"`
+	// ForwardsMS es abrir los reenvíos de puertos (solo macOS).
+	ForwardsMS float64 `json:"forwards_ms,omitempty"`
+	// ResyncMS es la resincronización de reloj y entropía del invitado.
+	ResyncMS float64 `json:"resync_ms"`
+	// CgroupMS es volver a meter el VMM en su cgroup con techo de CPU.
+	CgroupMS float64 `json:"cgroup_ms"`
+	// FinishMS es apuntar el estado y el resto hasta contestar.
+	FinishMS float64 `json:"finish_ms"`
+	TotalMS  float64 `json:"total_ms"`
 }
 
 // RunRequest crea y arranca una microVM.

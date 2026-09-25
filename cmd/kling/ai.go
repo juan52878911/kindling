@@ -75,6 +75,7 @@ func aiServe(args []string) error {
 	tokenFile := fs.String("token-file", aiDefault("ai.token"), "token for -listen (generated 0600 if missing; $KLING_AI_TOKEN wins)")
 	noAuth := fs.Bool("no-auth", false, "no token on -listen; development only, loopback only")
 	id := fs.String("id", "default", "gateway id: label of its machines (ai.gateway=<id>)")
+	namePrefix := fs.String("name-prefix", "gw-", "prefix of the replica machines' names")
 	idle := fs.Duration("idle", 2*time.Minute, "time without requests before a replica is frozen")
 	maxReplicas := fs.Int("max-replicas", 2, "replicas per model (max_replicas in the registry wins)")
 	maxInflight := fs.Int("max-inflight", 1, "requests per replica before asking for another")
@@ -124,7 +125,7 @@ func aiServe(args []string) error {
 	defer stop()
 	client := api.NewClient(hostOf(*host))
 	g, err := aigw.New(aigw.Options{
-		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id,
+		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id, NamePrefix: *namePrefix,
 		Idle: *idle, MaxReplicas: *maxReplicas, MaxInflight: *maxInflight, KeepWarm: *keepwarm,
 		ChispaBudget: int64(*chispaMem) << 20, VONTimeout: *vonTimeout,
 		PopularityFile: aiDefault("ai-popularity-" + *id + ".json"),

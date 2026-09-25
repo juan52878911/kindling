@@ -1609,11 +1609,13 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	crono := nuevoCrono("frozen")
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
+	crono.marca(&crono.p.WaitMS)
 
 	// Otra llamada pudo descongelarla mientras esperábamos el candado.
 	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateRunning {
@@ -1635,7 +1637,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// adelante arrancaría un SEGUNDO firecracker sobre el mismo overlay.ext4:
 	// dos VMMs escribiendo el mismo sistema de ficheros es corrupción, y del
 	// tipo que no se nota hasta mucho después.
-	if live := m.liveVMs(); live[mc.ID] > 0 {
+	live := m.liveVMs()
+	crono.marca(&crono.p.CheckMS)
+	if live[mc.ID] > 0 {
 		pid := live[mc.ID]
 		log.Printf("thaw: %s (%s) was already running (pid %d); re-adopting it instead of starting another",
 			mc.Name, mc.ID[:8], pid)
@@ -1675,6 +1679,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, glErr
 	}
 	defer release()
+	crono.marca(&crono.p.WaitMS)
 
 	_ = os.Remove(sock)
 
@@ -1685,6 +1690,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := netcfg.Setup(egress, mc.AllowDomains, m.priv.UID); err != nil {
 		return nil, fmt.Errorf("rebuilding the network: %w", err)
 	}
+	crono.marca(&crono.p.NetMS)
 	var pid int
 	var c *fc.Client
 	var err error
@@ -1714,10 +1720,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err != nil {
 			return abortar(err)
 		}
+		crono.marca(&crono.p.SpawnMS)
 		c = fc.New(sock)
 		if err := waitSocket(ctx, c); err != nil {
 			return abortar(err)
 		}
+		crono.marca(&crono.p.SocketMS)
 		// La imagen se resuelve igual que en runFrom: una imagen por capas no
 		// tiene $NAME.ext4, tiene su capa y la base de su familia. Enlazar la
 		// ruta monolítica fallaba con "no such file" en cuanto la imagen era por
@@ -1734,21 +1742,25 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if err := m.prepareJail(mc.ID, toLink...); err != nil {
 			return abortar(err)
 		}
+		crono.marca(&crono.p.SpawnMS)
 	} else {
 		pid, err = m.spawn(mc.ID, sock, netcfg)
 		if err != nil {
 			return abortar(err)
 		}
+		crono.marca(&crono.p.SpawnMS)
 		c = fc.New(sock)
 		if err := waitSocket(ctx, c); err != nil {
 			return abortar(err)
 		}
+		crono.marca(&crono.p.SocketMS)
 	}
 
 	// macOS: la política de salida viaja con la instancia, no con el snapshot.
 	if err := m.redAntesDeArrancar(ctx, c, mc.ID); err != nil {
 		return abortar(err)
 	}
+	crono.marca(&crono.p.NetMS)
 	start := time.Now()
 	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
@@ -1759,9 +1771,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 				"  and start it again (kling run -from <snapshot>, or a cold boot from its image)"))
 	}
 	elapsed := time.Since(start).Milliseconds()
+	crono.marca(&crono.p.LoadMS)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
 	}
+	crono.marca(&crono.p.ForwardsMS)
 	// El invitado despierta con el reloj del momento en que se congeló, y si
 	// otras máquinas salieron del mismo estado, con su mismo CSPRNG. Se corrige
 	// antes de devolverla como running (ver resync.go).
@@ -1770,6 +1784,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if _, sinAgente := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID)); !sinAgente {
 		resyncT, resyncOK = m.resyncGuest(ctx, mc.ID, "")
 	}
+	crono.marca(&crono.p.ResyncMS)
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -1783,10 +1798,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
+	crono.marca(&crono.p.CgroupMS)
 
 	m.mu.Lock()
-	live := m.byID[mc.ID]
-	if live == nil {
+	cur := m.byID[mc.ID]
+	if cur == nil {
 		delete(m.socket, mc.ID)
 		m.mu.Unlock()
 		// Acabamos de arrancar un VMM para una maquina que ya no existe. Hay que
@@ -1800,14 +1816,14 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
 	}
 	now := time.Now()
-	live.State = api.StateRunning
-	live.StartedAt = &now
-	live.FrozenAt = nil
-	live.ThawMS = elapsed
-	live.PID = pid
+	cur.State = api.StateRunning
+	cur.StartedAt = &now
+	cur.FrozenAt = nil
+	cur.ThawMS = elapsed
+	cur.PID = pid
 	m.socket[mc.ID] = sock
 	m.persist()
-	out := *live
+	out := *cur
 	m.mu.Unlock()
 
 	out.DiskBytes = m.touchDisk(mc.ID)
@@ -1817,8 +1833,16 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// pida mientras tanto espera a la sesión.
 	m.startShares(mc.ID)
 
+	fases := crono.cerrar()
+	out.Wake = fases
+	m.mu.Lock()
+	if cur := m.byID[mc.ID]; cur != nil {
+		cur.Wake = fases
+	}
+	m.mu.Unlock()
+
 	m.bus.Publish(api.Event{Time: now, Type: api.EvThawed, ID: mc.ID, Name: mc.Name,
-		Message: fmt.Sprintf("thawed in %d ms%s", elapsed, resyncNota(resyncT, resyncOK))})
+		Message: fmt.Sprintf("thawed in %d ms%s%s", elapsed, resyncNota(resyncT, resyncOK), notaFases(fases))})
 	return &out, nil
 }
 

@@ -172,7 +172,6 @@ func New(o Options) (*Gateway, error) {
 			name = snap
 		}
 		g.met.wake(name, how, d)
-		log.Printf("von %s: replica ready (%s) in %s", name, how, d.Round(time.Millisecond))
 	}
 	if len(cfg.Tenants) > 0 {
 		ts := make([]scheduler.TenantLimit, len(cfg.Tenants))
