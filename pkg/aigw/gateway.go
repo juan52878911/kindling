@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,10 @@ type Options struct {
 	// ai-evals/ junto al registro; sin registro en disco, ninguno (y ninguna
 	// cascada respaldada).
 	EvalDir string
+	// DataDir guarda lo de la mejora continua (learn.go): capturas, etiquetas
+	// humanas y versiones de Chispa, un directorio por tarea. Vacío = ai-data/
+	// junto al registro; sin registro en disco, ninguno (y sin "learn").
+	DataDir string
 }
 
 func (o *Options) withDefaults() {
@@ -91,6 +96,9 @@ func (o *Options) withDefaults() {
 	if o.EvalDir == "" && o.ConfigPath != "" {
 		o.EvalDir = filepath.Join(filepath.Dir(o.ConfigPath), "ai-evals")
 	}
+	if o.DataDir == "" && o.ConfigPath != "" {
+		o.DataDir = filepath.Join(filepath.Dir(o.ConfigPath), "ai-data")
+	}
 }
 
 // Gateway es el gateway de IA.
@@ -103,9 +111,15 @@ type Gateway struct {
 	met      *metrics
 
 	cfgMu    sync.RWMutex
-	cfg      *Config
+	cfg      *Config                 // el efectivo: con los dorados de versions.json (learn_retrain.go)
+	rawCfg   *Config                 // el registro tal cual
 	rings    map[string]*ring        // tarea -> muestras; bajo cfgMu
 	cascades map[string]CascadeState // tarea -> cascada activa o no, y por qué; bajo cfgMu
+	// learnStates es la mejora continua de cada tarea con "learn": captura y
+	// versión servida; bajo cfgMu.
+	learnStates map[string]learnState
+	learn       *learner
+	voteSem     chan struct{} // respuestas extra de VON para la autoconsistencia (una a la vez)
 
 	auditSem chan struct{} // auditorías en vuelo (una): nunca compiten en masa con el tráfico
 	calMu    sync.Mutex    // una recalibración a la vez
@@ -137,6 +151,7 @@ func New(o Options) (*Gateway, error) {
 	g := &Gateway{
 		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), auditSem: make(chan struct{}, 1),
 		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
+		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
 	}
 	g.setConfig(cfg)
 
@@ -200,7 +215,8 @@ func (g *Gateway) config() *Config {
 // tamaño del anillo). Devuelve las notas de las cascadas (activas, forzadas,
 // rechazadas).
 func (g *Gateway) setConfig(c *Config) []string {
-	st := g.gates(c) // lee ficheros: fuera del candado
+	eff, ls := g.learnView(c) // lee ficheros: fuera del candado
+	st := g.gates(eff)
 	g.cfgMu.Lock()
 	defer g.cfgMu.Unlock()
 	old := g.rings
@@ -222,8 +238,9 @@ func (g *Gateway) setConfig(c *Config) []string {
 		}
 		g.rings[name] = r
 	}
-	g.cfg = c
+	g.cfg, g.rawCfg = eff, c
 	g.cascades = st
+	g.learnStates = ls
 	return CascadeNotes(st)
 }
 
@@ -288,6 +305,9 @@ func (g *Gateway) Start(ctx context.Context) {
 // modelos VON/embed en el registro, o sin daemon, no hay nada que congelar y
 // no se intenta hablar con él.
 func (g *Gateway) Close(ctx context.Context) {
+	// Lo capturado que quede en la cola se escribe antes de salir.
+	g.learn.flush()
+	g.learn.close()
 	if g.opts.Client == nil || !g.config().NeedsDaemon() {
 		return
 	}
@@ -336,6 +356,8 @@ type ClassifyRequest struct {
 
 // ClassifyResponse es la respuesta.
 type ClassifyResponse struct {
+	// ID identifica la respuesta para /v1/feedback; solo en tareas con "learn".
+	ID       string `json:"id,omitempty"`
 	Task     string `json:"task"`
 	Label    string `json:"label"`
 	Decision string `json:"decision,omitempty"` // /v1/decide: la misma etiqueta
@@ -442,6 +464,10 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	}
 	in := chispa.Input{Text: req.Text, Fields: req.Fields}
 	resp := &ClassifyResponse{Task: req.Task}
+	ls, hasLearn := g.learnFor(req.Task)
+	if hasLearn {
+		resp.ID = g.learn.newID()
+	}
 	finish := func() (*ClassifyResponse, error) {
 		d := time.Since(t0)
 		resp.LatencyMS = float64(d.Microseconds()) / 1000
@@ -453,9 +479,11 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 			src = "escalated" // contestó Chispa sin llegar a su umbral
 		}
 		g.met.answer(endpoint, req.Task, src, d)
+		if hasLearn {
+			g.met.learnAnswer(req.Task, ls.version, resp.Chispa != nil && resp.Chispa.Decision == chispa.DecisionConfident, ls.cfg.WindowMinutes)
+		}
 		return resp, nil
 	}
-
 	mc := cfg.Models[tc.Chispa]
 	casc := g.cascade(req.Task)
 	escalar := casc.On() && req.Mode != "chispa"
@@ -520,7 +548,7 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	resp.Label, resp.Prob, resp.Source, resp.Evidence = p.Label, p.Prob, "chispa", p.Evidence
 	if confident {
 		if escalar {
-			g.maybeAudit(req.Task, tc, cfg, labels, in, p)
+			g.maybeAudit(req.Task, tc, cfg, labels, in, p, ls, hasLearn)
 		}
 		return finish()
 	}
@@ -541,6 +569,11 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	resp.Evidence = p.Evidence
 	resp.Chispa.Candidates = topN(p.Probs, 3)
 	if !escalar {
+		if hasLearn {
+			// Sin cascada, quien llama decide: la captura queda sin voto y lo
+			// puede traer él (/v1/feedback con "teacher") o una persona.
+			g.captureEscalation(ls, req.Task, resp.ID, "escalated", in, p, nil)
+		}
 		return finish()
 	}
 
@@ -562,6 +595,9 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		}
 		g.met.inc(g.met.degraded, req.Task)
 		resp.Degraded = "von did not answer: " + truncUTF8(err.Error(), 200)
+		if hasLearn {
+			g.captureEscalation(ls, req.Task, resp.ID, "escalated", in, p, nil)
+		}
 		return finish()
 	}
 	label := parseLabel(ans, allowed)
@@ -573,6 +609,13 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 		resp.Prob = probOf(p.Probs, label)
 		// Muestra para recalibrar: lo escalado entra siempre, con peso 1.
 		g.record(req.Task, sample{pred: p.Label, prob: p.Prob, teacher: label, weight: 1, at: time.Now()})
+	}
+	if hasLearn {
+		var votes []TeacherVote
+		if label != Unknown {
+			votes = []TeacherVote{{Name: tc.EscalateTo, Label: label}}
+		}
+		g.captureWithVotes(ls, req.Task, resp.ID, tc, cfg, allowed, in, p, votes)
 	}
 	return finish()
 }
@@ -603,7 +646,7 @@ func (g *Gateway) chatFor(tc *TaskConfig, labels []string, in chispa.Input, cand
 // respuesta. Una a la vez: si ya hay una en vuelo, se descarta (y se cuenta),
 // porque una auditoría no debe provocar réplicas ni colas. Solo con la cascada
 // activa (quien llama lo comprueba): con ella apagada, VON no se toca.
-func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []string, in chispa.Input, p chispa.Prediction) {
+func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []string, in chispa.Input, p chispa.Prediction, ls learnState, hasLearn bool) {
 	if tc.Audit <= 0 || tc.EscalateTo == "" || rand.Float64() >= tc.Audit {
 		return
 	}
@@ -630,7 +673,58 @@ func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []
 		}
 		if l := parseLabel(ans, labels); l != Unknown {
 			g.record(task, sample{pred: p.Label, prob: p.Prob, teacher: l, weight: w, at: time.Now()})
+			if hasLearn {
+				// Una auditoría es lo único que dice algo de lo que Chispa
+				// contesta CONFIADO: si VON discrepa, la revisión lo enseña.
+				full := p
+				if len(full.Probs) == 0 {
+					full.Probs = []chispa.ClassProb{{Label: p.Label, Prob: p.Prob}}
+				}
+				g.captureEscalation(ls, task, g.learn.newID(), "audit", in, full, []TeacherVote{{Name: tc.EscalateTo, Label: l}})
+			}
 		}
+	}()
+}
+
+// captureWithVotes captura una escalada que VON contestó. Con von_votes,
+// antes le pregunta a VON otras veces (T=0,4, semillas nuevas), en segundo
+// plano y una a la vez: la autoconsistencia es lo que cuenta como segundo
+// voto cuando no hay otro maestro. Si ya hay una en vuelo, se captura con el
+// único voto (y se cuenta): nunca provoca réplicas ni colas.
+func (g *Gateway) captureWithVotes(ls learnState, task, id string, tc *TaskConfig, cfg *Config, allowed []string, in chispa.Input, p chispa.Prediction, votes []TeacherVote) {
+	if !ls.cfg.capturing() {
+		return
+	}
+	if ls.cfg.VONVotes == 0 || len(votes) == 0 {
+		g.captureEscalation(ls, task, id, "escalated", in, p, votes)
+		return
+	}
+	select {
+	case g.voteSem <- struct{}{}:
+	default:
+		g.learn.count(task, "votes_dropped")
+		g.captureEscalation(ls, task, id, "escalated", in, p, votes)
+		return
+	}
+	in = chispa.Input{Text: strings.Clone(in.Text), Fields: copyFields(in.Fields)}
+	snap := cfg.Models[tc.EscalateTo].Snapshot
+	go func() {
+		defer func() { <-g.voteSem }()
+		for i := 0; i < ls.cfg.VONVotes; i++ {
+			chat := g.chatFor(tc, allowed, in, p.Probs)
+			chat.Temperature = 0.4
+			ctx, cancel := context.WithTimeout(context.Background(), g.opts.VONTimeout)
+			ans, err := g.askVON(ctx, snap, chat)
+			cancel()
+			if err != nil {
+				g.met.vonErr(tc.EscalateTo, "vote")
+				break
+			}
+			if l := parseLabel(ans, allowed); l != Unknown {
+				votes = append(votes, TeacherVote{Name: tc.EscalateTo, Label: l})
+			}
+		}
+		g.captureEscalation(ls, task, id, "escalated", in, p, votes)
 	}()
 }
 
