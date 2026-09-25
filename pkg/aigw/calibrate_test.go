@@ -1,6 +1,8 @@
 package aigw
 
 import (
+	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -100,6 +102,28 @@ func TestCalibrarSinMuestras(t *testing.T) {
 	}
 	if _, err := g.Calibrate(CalibrateRequest{Task: "nope"}); err == nil {
 		t.Fatal("unknown task accepted")
+	}
+}
+
+// TestCalibrarRechazaMicroVM comprueba que calibrar una tarea con un modelo
+// jev backend microvm falla con un mensaje claro (reentrenar y volver a
+// desplegar) en vez del "unavailable" genérico de intentar cargar un Path
+// vacío: un modelo microvm no tiene .jev local que reescribir (docs/jev-serverless.md).
+func TestCalibrarRechazaMicroVM(t *testing.T) {
+	cfg := microVMConfig(t,
+		&ModelConfig{Kind: KindJEV, Backend: BackendMicroVM, Snapshot: "jev-commits"},
+		&TaskConfig{JEV: "commits", EscalateTo: "smol", EscalateForce: true})
+	g, err := New(Options{Config: cfg, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = g.Calibrate(CalibrateRequest{Task: "kind"})
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "kling jev deploy") || !strings.Contains(err.Error(), "retraining") {
+		t.Fatalf("error should point at retrain+redeploy: %v", err)
 	}
 }
 

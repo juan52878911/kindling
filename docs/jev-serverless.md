@@ -96,6 +96,16 @@ arrancar y sirve:
   `jev.Model.PredictFull` en proceso, sin perder etiquetas cuando `top_k` no
   acota la escalada.
 
+El invitado no es de fiar: el gateway (`pkg/aigw/jevguest.go`) valida cada
+campo de esa respuesta (etiqueta dentro del modelo, probabilidades y umbral
+finitos y en rango, número de candidatos y de evidencia acotado) antes de
+usarla, y nunca se fía del `"confident"` que mande kling-jev —lo recalcula del
+`prob` ya validado y el umbral del lado del gateway—. Para saber cuáles son
+las etiquetas válidas sin necesitar el `.jev` de origen (que puede vivir en
+otra máquina), `kling jev deploy` graba las etiquetas del modelo y su sha256
+como anotación del dorado; una respuesta que no encaja con ese registro es un
+502, no una decisión.
+
 ## Registrarla en el gateway
 
 ```json
@@ -116,8 +126,10 @@ réplica). Sin `backend`, o con `"inprocess"`, es el `path` de siempre. Con
 `"microvm"` hace falta `snapshot` (y ningún `path`); el gateway la despierta,
 la congela y la escala igual que a un modelo VON —réplicas por concurrencia,
 TTL de red de seguridad, todo lo de [ai-gateway.md](ai-gateway.md#cómo-está-hecho)—.
-Si el daemon no contesta, `/v1/classify` de esa tarea da 503 con un mensaje
-claro (`jev model "commits" (backend microvm) unavailable: ...`); las tareas
+Si el daemon no contesta (o no hay registro de despliegue que validar, ver
+arriba), `/v1/classify` de esa tarea da 503 con un mensaje claro (`jev model
+"commits" (backend microvm) unavailable: ...`); si la réplica contesta pero no
+pasa la validación, da 502 (`... sent an invalid answer: ...`). Las tareas
 `inprocess` del mismo registro siguen funcionando (ver
 [jev.md](jev.md#modo-sin-daemon) sobre cuándo hace falta daemon y cuándo no).
 
@@ -251,7 +263,14 @@ eso un cliente que puede permitirse hablar Go directo con `pkg/jev`
 - La medida de concurrencia con backend microvm se quedó en 16 clientes: con
   más réplicas por tarea (`max_replicas`) la cola de p99 debería acortarse;
   no medido.
-- Recalibración en línea (`kling ai calibrate`) y auditoría contra VON no se
-  probaron con un modelo `backend: microvm`: deberían funcionar igual (el
-  gateway solo ve un `jev.Prediction`, venga de donde venga), pero no hay una
-  medida que lo confirme todavía.
+- **Auditoría contra VON** (`audit` en la tarea) funciona igual con los dos
+  backends: solo necesita el `jev.Prediction` que ya sale de `Classify`, venga
+  de `jevCache` o de una réplica.
+- **Recalibración en línea (`kling ai calibrate`) NO funciona con un modelo
+  `backend: microvm`**: calibrar reescribe el `.jev` en disco (guarda
+  `<ruta>.prev` y escribe el nuevo), y un modelo microvm no tiene ese fichero
+  en la máquina del gateway —vive horneado dentro de la imagen de la réplica,
+  que puede correr en otro host—. `kling ai calibrate` de esa tarea falla con
+  un mensaje claro en vez de intentarlo a medias; la manera de recalibrar es
+  reentrenar y volver a desplegar:
+  `kling jev train ... -o new.jev && kling jev deploy <tarea> -model new.jev -replace`.

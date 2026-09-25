@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/jev"
 )
@@ -62,9 +65,11 @@ func cmdJevDeploy(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := jev.Load(bytes.NewReader(modelBytes)); err != nil {
+	model, err := jev.Load(bytes.NewReader(modelBytes))
+	if err != nil {
 		return fmt.Errorf("%s does not load as a .jev: %w", *modelPath, err)
 	}
+	modelSHA256 := sha256.Sum256(modelBytes)
 	spec := JEVSpec{ModelB64: base64.StdEncoding.EncodeToString(modelBytes)}
 	if *slotsPath != "" {
 		sb, err := os.ReadFile(*slotsPath)
@@ -116,6 +121,17 @@ func cmdJevDeploy(args []string) error {
 	}
 	fmt.Printf("✓ %s  golden snapshot of task %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, name, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+
+	// El gateway no tiene el .jev de origen a mano (puede vivir en otra
+	// máquina, o el daemon estar al otro lado de un SSH) y, sobre todo, no
+	// puede fiarse de las etiquetas que le mande el propio invitado
+	// (pkg/aigw/jevguest.go): se graban aquí, en el dorado, como la fuente de
+	// verdad que classifyGuest valida contra la respuesta de la réplica.
+	rec := aigw.JEVDeployRecord{Labels: model.Labels, Sha256: hex.EncodeToString(modelSHA256[:])}
+	if _, err := c.SetAnnotation(ctx, name, aigw.JEVDeployAnnotation, rec); err != nil {
+		return fmt.Errorf("recording %s on the snapshot (needed by the gateway to trust replica answers): %w", aigw.JEVDeployAnnotation, err)
+	}
+
 	fmt.Println()
 	fmt.Println("Add it to the ai gateway's registry (docs/ai-gateway.md) as a microvm-backed model:")
 	fmt.Printf("  {\"models\": {%q: {\"kind\": \"jev\", \"backend\": \"microvm\", \"snapshot\": %q}}}\n", name, name)

@@ -113,6 +113,14 @@ type Gateway struct {
 	repMu    sync.Mutex // caché de réplicas por modelo para /metrics
 	repAt    time.Time
 	repCache map[string]replicaCount
+
+	// deploy consulta JEVDeployAnnotation (el registro de `kling jev deploy`):
+	// la fuente de verdad de las etiquetas de un modelo jev backend microvm, ya
+	// que el invitado no es de fiar (jevguest.go). deployMu/deployCache lo
+	// cachean deployCacheTTL para no preguntar al daemon en cada clasificación.
+	deploy      jevDeployLookup
+	deployMu    sync.Mutex
+	deployCache map[string]deployCacheEntry
 }
 
 // New crea el gateway. No habla con el daemon hasta Start o la primera
@@ -126,7 +134,10 @@ func New(o Options) (*Gateway, error) {
 			return nil, err
 		}
 	}
-	g := &Gateway{opts: o, jev: newJEVCache(o.JEVBudget), met: newMetrics(), auditSem: make(chan struct{}, 1)}
+	g := &Gateway{
+		opts: o, jev: newJEVCache(o.JEVBudget), met: newMetrics(), auditSem: make(chan struct{}, 1),
+		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
+	}
 	g.setConfig(cfg)
 
 	s := scheduler.New(o.Client, o.Idle, false, 0)
@@ -393,7 +404,8 @@ func jevDecide(m *jev.Model, tc *TaskConfig, in jev.Input, full bool) (jev.Predi
 // escalation arma la pregunta a VON de una escalada: con top_k, VON solo elige
 // entre los candidatos de JEV. p tiene que traer la distribución (PredictFull),
 // y labels todas las etiquetas del modelo (jev.Model.Labels en proceso; en una
-// tarea con backend microvm, las de p.Probs, que kling-jev manda enteras).
+// tarea con backend microvm, las del registro de `kling jev deploy`, no las
+// que mande el invitado: ver jevguest.go).
 func (g *Gateway) escalation(tc *TaskConfig, labels []string, in jev.Input, p jev.Prediction) ([]string, chatReq) {
 	allowed := labels
 	if tc.TopK > 0 && tc.TopK < len(allowed) {
@@ -457,24 +469,39 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	var confident bool
 	var labels []string
 	if mc.Backend == BackendMicroVM {
-		gp, err := g.classifyGuest(ctx, mc.Snapshot, in, req.Explain)
+		gp, gl, err := g.classifyGuest(ctx, mc.Snapshot, in, req.Explain)
 		if err != nil {
 			var we *wakeError
-			reason := "request"
-			if errors.As(err, &we) {
+			var dle *deployLookupError
+			var gie *guestInvalidError
+			reason, code, verb := "request", http.StatusServiceUnavailable, "unavailable"
+			switch {
+			case errors.As(err, &we):
 				reason = "wake"
+			case errors.As(err, &dle):
+				reason = "labels"
+			case errors.As(err, &gie):
+				// El invitado SÍ contestó, pero con algo que no es de fiar
+				// (jevguest.go): no es que no haya réplica, es que mintió o se
+				// desincronizó con el registro de despliegue. 502, no 503:
+				// reintentar no arregla una respuesta que no pasa validación.
+				reason, code, verb = "invalid", http.StatusBadGateway, "sent an invalid answer"
 			}
 			g.met.vonErr("jev:"+tc.JEV, reason)
 			log.Printf("task %s: jev %s (microvm): %v", req.Task, tc.JEV, err)
-			return nil, statusf(http.StatusServiceUnavailable, "jev model %q (backend microvm) unavailable: %v", tc.JEV, err)
+			return nil, statusf(code, "jev model %q (backend microvm) %s: %v", tc.JEV, verb, err)
 		}
 		p = gp
 		tau = p.Threshold
 		if v, ok := tc.Thresholds[p.Label]; ok {
 			tau = v
 		}
+		// confident se recalcula aquí, del prob ya validado y el umbral del
+		// lado del gateway: la respuesta del invitado puede traer su propio
+		// campo "confident", pero no es de fiar (jevguest.go), así que se
+		// ignora y se decide con los mismos datos que un modelo en proceso.
 		confident = p.Prob >= tau
-		labels = candidateLabels(p.Probs)
+		labels = gl
 	} else {
 		m, err := g.jev.get(mc.Path)
 		if err != nil {
@@ -772,7 +799,24 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	if tc.JEV == "" || tc.EscalateTo == "" {
 		return nil, statusf(http.StatusBadRequest, "task %q needs a jev model and escalate_to (the teacher) to recalibrate", req.Task)
 	}
-	path := cfg.Models[tc.JEV].Path
+	mc := cfg.Models[tc.JEV]
+	if mc.Backend == BackendMicroVM {
+		// Recalibrar reescribe el .jev en disco (más abajo: Marshal, guardar
+		// <ruta>.prev, Save) y lo hace con el mismo *jev.Model que sirve las
+		// peticiones (g.jev.get(path)): un modelo backend microvm no tiene
+		// "path" (Validate lo exige vacío, config.go) porque vive horneado
+		// DENTRO de la imagen de una réplica, que puede correr en otra máquina
+		// o al otro lado de un SSH. No hay fichero local que reescribir ni
+		// dorado que journal actualizar in situ, así que en vez de fallar con
+		// el "unavailable" genérico de un Path vacío (g.jev.get("")), se
+		// rechaza aquí con lo único que sí funciona hoy: reentrenar y volver a
+		// desplegar.
+		return nil, statusf(http.StatusBadRequest,
+			"task %q: jev model %q has backend microvm; calibrate needs the model file, and a microvm model has none locally (it lives baked into the replica's image). "+
+				"Recalibrate by retraining and redeploying: kling jev train ... -o new.jev && kling jev deploy %s -model new.jev -replace",
+			req.Task, tc.JEV, tc.JEV)
+	}
+	path := mc.Path
 	m, err := g.jev.get(path)
 	if err != nil {
 		return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable: %v", tc.JEV, err)
