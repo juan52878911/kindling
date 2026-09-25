@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // Head es la cabeza de clasificación sobre los embeddings congelados:
@@ -15,7 +15,7 @@ import (
 //	z = S2 · W2·(h o x) + B2
 //	p = softmax(z / Temperature)
 //
-// Los pesos son int16 con una escala por capa (como JEV): 384×28 pesos son
+// Los pesos son int16 con una escala por capa (como Chispa): 384×28 pesos son
 // 21 KB y el producto es exacto en cualquier máquina. Las sumas van en orden
 // fijo y cada producto se redondea antes de sumarlo (float64(a*b)): Go puede
 // fundir a*b+c en una FMA en arm64 y no en amd64, y entonces la misma frase
@@ -37,7 +37,7 @@ type Head struct {
 	B2 []float64
 
 	Temperature float64
-	Thresholds  []float64 // τ por etiqueta (jev.NeverConfident = escala siempre)
+	Thresholds  []float64 // τ por etiqueta (chispa.NeverConfident = escala siempre)
 }
 
 // Meta es lo que acompaña a la cabeza: con qué codificador se entrenó (otro
@@ -74,8 +74,8 @@ type Prediction struct {
 func (h *Head) Validate() error {
 	K, D, H := len(h.Labels), h.Dim, h.Hidden
 	switch {
-	case K < 2 || K > jev.MaxLabels:
-		return fmt.Errorf("need between 2 and %d labels, got %d", jev.MaxLabels, K)
+	case K < 2 || K > chispa.MaxLabels:
+		return fmt.Errorf("need between 2 and %d labels, got %d", chispa.MaxLabels, K)
 	case D < 1 || D > MaxDim:
 		return fmt.Errorf("bad dimension %d", D)
 	case H < 0 || H > maxHidden:
@@ -117,7 +117,7 @@ func (h *Head) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, l := range h.Labels {
-		if l == "" || len(l) > jev.MaxLabelBytes || seen[l] {
+		if l == "" || len(l) > chispa.MaxLabelBytes || seen[l] {
 			return fmt.Errorf("invalid or repeated label %q", l)
 		}
 		seen[l] = true
@@ -194,7 +194,7 @@ func standardize(v, mean, inv []float32, x []float64) {
 	}
 }
 
-// softmaxT es la softmax de z/T con la exponencial reproducible de JEV. En
+// softmaxT es la softmax de z/T con la exponencial reproducible de Chispa. En
 // empate gana el índice menor.
 func softmaxT(z []float64, T float64, p []float64) int {
 	best := 0
@@ -206,7 +206,7 @@ func softmaxT(z []float64, T float64, p []float64) int {
 	m := z[best]
 	sum := 0.0
 	for k, v := range z {
-		p[k] = jev.DetExp(float64(v-m) / T)
+		p[k] = chispa.DetExp(float64(v-m) / T)
 		sum += p[k]
 	}
 	for k := range p {

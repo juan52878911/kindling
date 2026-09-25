@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/domotica"
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
 )
 
 // finishRow deja una fila lista: fuera de ámbito no lleva huecos; dentro, se
@@ -46,7 +46,7 @@ func finishRow(r *domotica.Row, defaultDevice string) {
 }
 
 func seedOf(family string, i int) uint64 {
-	return jev.FNV1a64(fmt.Sprintf("%s#%d", family, i)) | 1
+	return chispa.FNV1a64(fmt.Sprintf("%s#%d", family, i)) | 1
 }
 
 // splitPattern reparte las familias de un grupo (misma fuente e intención),
@@ -69,7 +69,7 @@ func assignSplits(rows []domotica.Row) {
 		}
 		seenFam[r.Family] = true
 		g := r.Source + "/" + r.Intent
-		groups[g] = append(groups[g], fam{r.Family, jev.FNV1a64("split:" + r.Family)})
+		groups[g] = append(groups[g], fam{r.Family, chispa.FNV1a64("split:" + r.Family)})
 	}
 	split := map[string]string{}
 	for _, fs := range groups {
@@ -215,7 +215,7 @@ func cmdBuild(args []string) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Join(*outDir, "jev"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(*outDir, "chispa"), 0o755); err != nil {
 		return err
 	}
 	counts := map[string]map[string]int{} // split → source/lang → n
@@ -225,7 +225,7 @@ func cmdBuild(args []string) error {
 		if err != nil {
 			return err
 		}
-		jf, err := os.Create(filepath.Join(*outDir, "jev", split+".jsonl"))
+		jf, err := os.Create(filepath.Join(*outDir, "chispa", split+".jsonl"))
 		if err != nil {
 			return err
 		}
@@ -242,7 +242,7 @@ func cmdBuild(args []string) error {
 			if err := ue.Encode(r); err != nil {
 				return err
 			}
-			if err := je.Encode(jev.Example{Text: r.Text, Label: r.Intent, Fields: map[string]any{"lang": r.Lang}}); err != nil {
+			if err := je.Encode(chispa.Example{Text: r.Text, Label: r.Intent, Fields: map[string]any{"lang": r.Lang}}); err != nil {
 				return err
 			}
 			counts[split][r.Source+"/"+r.Lang]++

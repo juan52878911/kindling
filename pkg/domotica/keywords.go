@@ -1,7 +1,7 @@
 package domotica
 
 import (
-	"github.com/juan52878911/kindling/pkg/jev/slots"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 )
 
 // Línea base de reglas por palabras clave: lo que se escribiría a mano en una

@@ -80,8 +80,8 @@ Una línea JSON por frase:
 - `spans`: huecos sobre el texto, **en bytes** (UTF-8), no en caracteres. Es lo
   que aprende el etiquetador.
 - `source`: `massive`, `ha` o `demo`. `family`: grupo que no cruza de reparto.
-- Además se escribe `jev/{train,valid,test}.jsonl` en el formato de
-  `kling jev train` (`{"text", "label", "fields": {"lang"}}`).
+- Además se escribe `chispa/{train,valid,test}.jsonl` en el formato de
+  `kling chispa train` (`{"text", "label", "fields": {"lang"}}`).
 
 ## Taxonomía de la habitación de demo
 

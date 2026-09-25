@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/von"
 )
 
@@ -29,7 +29,7 @@ const (
 // renderPrompt rellena la plantilla. Un solo pase de strings.Replacer: lo que
 // traiga el texto del usuario ("{labels}", por ejemplo) no se vuelve a
 // expandir.
-func renderPrompt(tmpl string, labels []string, in jev.Input, cands []jev.ClassProb) string {
+func renderPrompt(tmpl string, labels []string, in chispa.Input, cands []chispa.ClassProb) string {
 	if tmpl == "" {
 		tmpl = defaultPrompt
 	}
@@ -108,7 +108,7 @@ func grammarFor(labels []string) string {
 
 // gbnfString escribe s como literal de GBNF: comillas y barras escapadas, y los
 // caracteres de control como \xHH para que una etiqueta rara no rompa la
-// gramática (las del registro no los admiten; las de un .jev, en teoría sí).
+// gramática (las del registro no los admiten; las de un .chispa, en teoría sí).
 func gbnfString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')

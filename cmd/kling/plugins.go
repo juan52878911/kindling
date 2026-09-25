@@ -22,7 +22,7 @@ var coreCommands = []string{
 	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
 	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
 	"exec", "shell", "cp", "sandbox", "sandboxes", "resize", "models",
-	"completion", "version", "help", "jev", "ai", "domotica",
+	"completion", "version", "help", "chispa", "ai", "domotica",
 }
 
 var (

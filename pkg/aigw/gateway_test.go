@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
-// Si JEV está seguro contesta él y VON ni se entera; si duda, contesta VON y
-// su respuesta se traduce a una etiqueta del conjunto de JEV.
+// Si Chispa está seguro contesta él y VON ni se entera; si duda, contesta VON y
+// su respuesta se traduce a una etiqueta del conjunto de Chispa.
 func TestCascada(t *testing.T) {
 	g, ll, reps := newTestGateway(t, nil)
 	h := g.Handler("")
@@ -22,7 +22,7 @@ func TestCascada(t *testing.T) {
 		t.Fatalf("classify: %d %s", rec.Code, rec.Body)
 	}
 	r := decode[ClassifyResponse](t, rec)
-	if r.Source != "jev" || r.Label != "bug" || r.JEV == nil || r.JEV.Decision != jev.DecisionConfident {
+	if r.Source != "chispa" || r.Label != "bug" || r.Chispa == nil || r.Chispa.Decision != chispa.DecisionConfident {
 		t.Fatalf("confident answer = %+v", r)
 	}
 	if n := ll.calls.Load(); n != 0 {
@@ -34,10 +34,10 @@ func TestCascada(t *testing.T) {
 	ll.set("Docs.")
 	rec = do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash the parser segfault"})
 	r = decode[ClassifyResponse](t, rec)
-	if r.Source != "von" || r.Label != "docs" || r.VON == nil || r.JEV.Decision != jev.DecisionEscalate {
+	if r.Source != "von" || r.Label != "docs" || r.VON == nil || r.Chispa.Decision != chispa.DecisionEscalate {
 		t.Fatalf("escalated answer = %+v", r)
 	}
-	if len(r.JEV.Candidates) == 0 || len(r.Evidence) == 0 {
+	if len(r.Chispa.Candidates) == 0 || len(r.Evidence) == 0 {
 		t.Fatalf("escalation without candidates/evidence: %+v", r)
 	}
 	if reps.acquired.Load() != 1 || reps.released.Load() != 1 {
@@ -66,7 +66,7 @@ func TestCascada(t *testing.T) {
 		t.Fatalf("an unknown answer was recorded as a sample")
 	}
 
-	// Con top_k, la gramática y la pregunta solo llevan los candidatos de JEV.
+	// Con top_k, la gramática y la pregunta solo llevan los candidatos de Chispa.
 	g.config().Tasks["kind"].TopK = 2
 	ll.set("bug")
 	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic segfault"}))
@@ -88,14 +88,14 @@ func TestCascada(t *testing.T) {
 	// Métricas: requests por fuente, cobertura, escalado.
 	m := do(t, h, "GET", "/metrics", "", nil).Body.String()
 	for _, want := range []string{
-		`kling_ai_requests_total{endpoint="classify",task="kind",source="jev"} 1`,
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="chispa"} 1`,
 		`kling_ai_requests_total{endpoint="classify",task="kind",source="von"} 3`,
 		`kling_ai_von_unknown_total{task="kind"} 1`,
-		`kling_ai_jev_coverage{task="kind"} 0.2`,
+		`kling_ai_chispa_coverage{task="kind"} 0.2`,
 		`kling_ai_escalation_rate{task="kind"} 0.8`,
 		`kling_ai_latency_seconds_count{task="kind",source="von"} 4`,
 		`kling_ai_samples{task="kind"} 2`,
-		`kling_ai_jev_models_loaded 1`,
+		`kling_ai_chispa_models_loaded 1`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("metrics lack %q", want)
@@ -103,16 +103,16 @@ func TestCascada(t *testing.T) {
 	}
 }
 
-// mode=jev contesta JEV aunque dude y aunque la cascada esté activa; VON solo
+// mode=chispa contesta Chispa aunque dude y aunque la cascada esté activa; VON solo
 // ya no es un modo de clasificar (se mide con kling ai eval -von-alone).
 func TestModos(t *testing.T) {
 	g, ll, _ := newTestGateway(t, func(c *Config) {
 		c.Tasks["kind"].Thresholds = map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}
 	})
 	h := g.Handler("")
-	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic", "mode": "jev"}))
-	if r.Source != "jev" || r.Label != "bug" || !r.Escalate || r.Degraded != "" || ll.calls.Load() != 0 {
-		t.Fatalf("mode jev = %+v (von calls %d)", r, ll.calls.Load())
+	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic", "mode": "chispa"}))
+	if r.Source != "chispa" || r.Label != "bug" || !r.Escalate || r.Degraded != "" || ll.calls.Load() != 0 {
+		t.Fatalf("mode chispa = %+v (von calls %d)", r, ll.calls.Load())
 	}
 	for _, mode := range []string{"von", "nope"} {
 		if rec := do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "x", "mode": mode}); rec.Code != 400 {
@@ -124,17 +124,17 @@ func TestModos(t *testing.T) {
 	}
 }
 
-// Sin cascada (sin escalate_to) la duda de JEV vuelve al cliente marcada
+// Sin cascada (sin escalate_to) la duda de Chispa vuelve al cliente marcada
 // escalate: true, con los candidatos y la evidencia para decidir; VON no se
 // toca, ni para auditar.
 func TestSinCascadaLaDudaVuelveAlCliente(t *testing.T) {
 	g, ll, reps := newTestGateway(t, func(c *Config) {
-		c.Tasks["kind"] = &TaskConfig{JEV: "commits", Thresholds: map[string]float64{"bug": 2}}
+		c.Tasks["kind"] = &TaskConfig{Chispa: "commits", Thresholds: map[string]float64{"bug": 2}}
 	})
 	h := g.Handler("")
 	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash panic segfault"}))
-	if r.Source != "jev" || r.Label != "bug" || !r.Escalate || r.VON != nil || r.Degraded != "" ||
-		len(r.JEV.Candidates) == 0 || len(r.Evidence) == 0 {
+	if r.Source != "chispa" || r.Label != "bug" || !r.Escalate || r.VON != nil || r.Degraded != "" ||
+		len(r.Chispa.Candidates) == 0 || len(r.Evidence) == 0 {
 		t.Fatalf("unsure answer without a cascade = %+v", r)
 	}
 	r = decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "readme typo documentation"}))
@@ -147,7 +147,7 @@ func TestSinCascadaLaDudaVuelveAlCliente(t *testing.T) {
 	m := do(t, h, "GET", "/metrics", "", nil).Body.String()
 	for _, want := range []string{
 		`kling_ai_requests_total{endpoint="classify",task="kind",source="escalated"} 1`,
-		`kling_ai_requests_total{endpoint="classify",task="kind",source="jev"} 1`,
+		`kling_ai_requests_total{endpoint="classify",task="kind",source="chispa"} 1`,
 		`kling_ai_escalation_rate{task="kind"} 0.5`,
 	} {
 		if !strings.Contains(m, want) {
@@ -156,7 +156,7 @@ func TestSinCascadaLaDudaVuelveAlCliente(t *testing.T) {
 	}
 }
 
-// Si VON no contesta, la cascada responde con JEV marcado como degradado, o
+// Si VON no contesta, la cascada responde con Chispa marcado como degradado, o
 // con 503 si la tarea lo pide.
 func TestVONCaido(t *testing.T) {
 	g, _, reps := newTestGateway(t, func(c *Config) {
@@ -165,7 +165,7 @@ func TestVONCaido(t *testing.T) {
 	reps.fail = errors.New("insufficient memory")
 	h := g.Handler("")
 	r := decode[ClassifyResponse](t, do(t, h, "POST", "/v1/classify", "", map[string]any{"task": "kind", "text": "crash"}))
-	if r.Source != "jev" || r.Label != "bug" || !strings.Contains(r.Degraded, "insufficient memory") {
+	if r.Source != "chispa" || r.Label != "bug" || !strings.Contains(r.Degraded, "insufficient memory") {
 		t.Fatalf("degraded = %+v", r)
 	}
 	g.config().Tasks["kind"].OnVONError = "error"
@@ -293,15 +293,15 @@ func TestProxyOpenAI(t *testing.T) {
 	}
 }
 
-// La caché de JEV respeta el presupuesto: al cargar un segundo modelo con el
+// La caché de Chispa respeta el presupuesto: al cargar un segundo modelo con el
 // presupuesto de uno, el primero sale.
-func TestCacheJEV(t *testing.T) {
+func TestCacheChispa(t *testing.T) {
 	p1, p2 := trainedModel(t), trainedModel(t)
-	m, err := jev.LoadFile(p1)
+	m, err := chispa.LoadFile(p1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := newJEVCache(modelBytes(m) + 10)
+	c := newChispaCache(modelBytes(m) + 10)
 	if _, err := c.get(p1); err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestCacheJEV(t *testing.T) {
 	if c.stats().Loads != 3 {
 		t.Fatal("evicted model was not reloaded")
 	}
-	if _, err := c.get("/no/such.jev"); err == nil || c.stats().Failures != 1 {
+	if _, err := c.get("/no/such.chispa"); err == nil || c.stats().Failures != 1 {
 		t.Fatal("missing model did not fail")
 	}
 	_ = os.Remove(p2)
@@ -327,17 +327,17 @@ func TestCacheJEV(t *testing.T) {
 func TestConfig(t *testing.T) {
 	bad := []string{
 		`{"models":{"a":{"kind":"gpt"}}}`,
-		`{"models":{"A":{"kind":"jev","path":"x"}}}`,
+		`{"models":{"A":{"kind":"chispa","path":"x"}}}`,
 		`{"models":{"a":{"kind":"von"}}}`,
-		`{"models":{"a":{"kind":"jev","path":"x"}},"tasks":{"t":{"von":"a"}}}`,
-		`{"models":{"a":{"kind":"jev","path":"x"}},"tasks":{"t":{}}}`,
-		// jev y von juntos: la escalada es escalate_to, von es para generar.
-		`{"models":{"j":{"kind":"jev","path":"x"},"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"jev":"j","von":"v"}}}`,
-		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","escalate_to":"j"}}}`,
-		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","escalate_force":true}}}`,
-		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","audit":0.1}}}`,
-		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","labels":["a","a"]}}}`,
-		`{"models":{"j":{"kind":"jev","path":"x"}},"tasks":{"t":{"jev":"j","temperature":0.5}}}`,
+		`{"models":{"a":{"kind":"chispa","path":"x"}},"tasks":{"t":{"von":"a"}}}`,
+		`{"models":{"a":{"kind":"chispa","path":"x"}},"tasks":{"t":{}}}`,
+		// chispa y von juntos: la escalada es escalate_to, von es para generar.
+		`{"models":{"j":{"kind":"chispa","path":"x"},"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"chispa":"j","von":"v"}}}`,
+		`{"models":{"j":{"kind":"chispa","path":"x"}},"tasks":{"t":{"chispa":"j","escalate_to":"j"}}}`,
+		`{"models":{"j":{"kind":"chispa","path":"x"}},"tasks":{"t":{"chispa":"j","escalate_force":true}}}`,
+		`{"models":{"j":{"kind":"chispa","path":"x"}},"tasks":{"t":{"chispa":"j","audit":0.1}}}`,
+		`{"models":{"j":{"kind":"chispa","path":"x"}},"tasks":{"t":{"chispa":"j","labels":["a","a"]}}}`,
+		`{"models":{"j":{"kind":"chispa","path":"x"}},"tasks":{"t":{"chispa":"j","temperature":0.5}}}`,
 		// Lo de clasificar no vale en una generación.
 		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","labels":["a"]}}}`,
 		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","top_k":3}}}`,
@@ -354,13 +354,13 @@ func TestConfig(t *testing.T) {
 	}
 	dir := t.TempDir()
 	p := dir + "/ai.json"
-	_ = os.WriteFile(p, []byte(`{"models":{"j":{"kind":"jev","path":"m.jev"},"v":{"kind":"von","snapshot":"von-smol"}},
-		"tasks":{"t":{"jev":"j","escalate_to":"v","top_k":3},"sum":{"von":"v","prompt":"Summarize:\n{input}","max_tokens":200,"temperature":0.2}}}`), 0o600)
+	_ = os.WriteFile(p, []byte(`{"models":{"j":{"kind":"chispa","path":"m.chispa"},"v":{"kind":"von","snapshot":"von-smol"}},
+		"tasks":{"t":{"chispa":"j","escalate_to":"v","top_k":3},"sum":{"von":"v","prompt":"Summarize:\n{input}","max_tokens":200,"temperature":0.2}}}`), 0o600)
 	c, err := LoadConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Models["j"].Path != dir+"/m.jev" {
+	if c.Models["j"].Path != dir+"/m.chispa" {
 		t.Fatalf("relative path = %q", c.Models["j"].Path)
 	}
 	if n, m := c.vonModel("von-smol"); n != "v" || m == nil {
@@ -393,7 +393,7 @@ func TestParseLabel(t *testing.T) {
 		t.Errorf("grammar = %s", g)
 	}
 	// Lo que trae el texto no se vuelve a expandir.
-	got := renderPrompt("{labels}|{text}", []string{"x"}, jev.Input{Text: "{labels}"}, nil)
+	got := renderPrompt("{labels}|{text}", []string{"x"}, chispa.Input{Text: "{labels}"}, nil)
 	if got != "x|{labels}" {
 		t.Errorf("prompt = %q", got)
 	}

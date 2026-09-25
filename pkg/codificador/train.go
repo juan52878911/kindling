@@ -6,7 +6,7 @@ import (
 	"io"
 	"math"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // TrainConfig es cómo entrenar una cabeza.
@@ -17,11 +17,11 @@ type TrainConfig struct {
 	L2     float64 // decaimiento de los pesos (no de los sesgos)
 	Batch  int
 	Seed   uint64
-	// ClassWeight: "sqrt" (por defecto: 1/√frecuencia, como JEV) o "none".
+	// ClassWeight: "sqrt" (por defecto: 1/√frecuencia, como Chispa) o "none".
 	ClassWeight string
 	Patience    int
 	// TargetPrecision y MinSupport eligen el umbral τ de cada clase en
-	// validación (jev.ChooseThresholds).
+	// validación (chispa.ChooseThresholds).
 	TargetPrecision float64
 	MinSupport      int
 	// ThresholdMask, si no es nil, dice qué filas de validación cuentan para
@@ -75,7 +75,7 @@ type TrainResult struct {
 	Agreement     float64 // argmax cuantizado = argmax en float, en validación
 }
 
-// splitmix64: el generador de JEV. Determinista y el mismo en todas partes.
+// splitmix64: el generador de Chispa. Determinista y el mismo en todas partes.
 type splitmix struct{ s uint64 }
 
 func (r *splitmix) next() uint64 {
@@ -176,7 +176,7 @@ func (p *params) forward(x []float64) {
 // de un ejemplo ya pasado por forward.
 func (p *params) backward(x []float64, y int, w float64) float64 {
 	softmaxT(p.z, 1, p.p)
-	loss := -w * jev.DetLog(math.Max(p.p[y], 1e-300))
+	loss := -w * chispa.DetLog(math.Max(p.p[y], 1e-300))
 	for k := range p.dz {
 		g := p.p[k]
 		if k == y {
@@ -412,7 +412,7 @@ func Train(labels []string, train, valid Dataset, cfg TrainConfig) (*TrainResult
 			agree++
 		}
 	}
-	h.Temperature = jev.FitTemperature(logits, valid.Y)
+	h.Temperature = chispa.FitTemperature(logits, valid.Y)
 	pred, prob := make([]int, 0, len(logits)), make([]float64, 0, len(logits))
 	gold := make([]int, 0, len(logits))
 	predAll := make([]int, len(logits))
@@ -425,7 +425,7 @@ func Train(labels []string, train, valid Dataset, cfg TrainConfig) (*TrainResult
 		}
 		pred, prob, gold = append(pred, b), append(prob, pp[b]), append(gold, valid.Y[i])
 	}
-	h.Thresholds = jev.ChooseThresholds(K, pred, gold, prob, jev.ThresholdParams{
+	h.Thresholds = chispa.ChooseThresholds(K, pred, gold, prob, chispa.ThresholdParams{
 		TargetPrecision: cfg.TargetPrecision, MinSupport: cfg.MinSupport})
 	h.Meta.TargetPrecision = cfg.TargetPrecision
 	acc, f1 := accF1(predAll, valid.Y, K)

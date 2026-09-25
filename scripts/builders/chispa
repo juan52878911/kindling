@@ -1,0 +1,4 @@
+#!/bin/sh
+# Constructor "chispa" del núcleo: modelos Chispa como tarea serverless (kling chispa
+# deploy). Ver docs/chispa-serverless.md.
+exec /usr/local/bin/kling builder chispa "$@"

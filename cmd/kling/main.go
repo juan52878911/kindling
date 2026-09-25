@@ -123,31 +123,31 @@ OBSERVATION
   events                                           stream of daemon events
   info [-json]                                     daemon status
 
-SMALL MODELS (JEV, runs locally, no daemon)
-  jev train -data d.jsonl -o m.jev [-valid v]      tiny linear classifier: trains,
+SMALL MODELS (Chispa, runs locally, no daemon)
+  chispa train -data d.jsonl -o m.chispa [-valid v]  tiny linear classifier: trains,
                                                    quantizes, calibrates, picks τ
-  jev eval -model m.jev -data t.jsonl [-json]      accuracy, F1, ECE, coverage at τ
-  jev predict -model m.jev [-text T] [-top N]      label, calibrated p, confident or
-                                                   escalate, evidence (docs/jev.md)
-  jev inspect <m.jev> [-json]                      spec, labels, thresholds, metadata
+  chispa eval -model m.chispa -data t.jsonl [-json]  accuracy, F1, ECE, coverage at τ
+  chispa predict -model m.chispa [-text T] [-top N]  label, calibrated p, confident or
+                                                   escalate, evidence (docs/chispa.md)
+  chispa inspect <m.chispa> [-json]                spec, labels, thresholds, metadata
   domotica decide [-lang L] "<text>"               smart-home decision: demo templates →
-                                                   JEV intent + slots, or escalate
+                                                   Chispa intent + slots, or escalate
   domotica eval -data t.jsonl [-challenge]         accuracy, slot F1, exact match, latency
-  domotica train-slots -data d.jsonl -o m.jevs     trains the slot tagger (docs/domotica.md)
+  domotica train-slots -data d.jsonl -o m.chispas  trains the slot tagger (docs/domotica.md)
   domotica templates [-lang L]                     lists the predefined demo commands
 
 `
 
-const usageTail = `AI GATEWAY (JEV classifies, VON generates, models on demand; docs/ai-gateway.md)
+const usageTail = `AI GATEWAY (Chispa classifies, VON generates, models on demand; docs/ai-gateway.md)
   ai serve [-config ai.json] [-socket S]           serves /v1/classify, /v1/decide,
       [-listen ADDR] [-idle 2m] [-max-replicas 2]  /v1/generate and an OpenAI API; replicas
-      [-keepwarm N] [-jev-mem MiB]                 wake per request and freeze when idle
+      [-keepwarm N] [-chispa-mem MiB]              wake per request and freeze when idle
   ai ls [-json]                                    models, tasks, cascades, samples
-  ai test <task> [-mode cascade|jev] <text>        classifies one text through the gateway
+  ai test <task> [-mode cascade|chispa] <text>     classifies one text through the gateway
   ai generate <task> [-var k=v] [<input>]          runs a generation task (stdin if no input)
-  ai eval <task> -data t.jsonl [-von M]            JEV alone vs the JEV -> VON cascade on
+  ai eval <task> -data t.jsonl [-von M]            Chispa alone vs the Chispa -> VON cascade on
                                                    labelled data; the record gates escalate_to
-  ai calibrate <task> [-target P] [-dry-run]       re-tunes JEV thresholds on recent VON
+  ai calibrate <task> [-target P] [-dry-run]       re-tunes Chispa thresholds on recent VON
                                                    answers; writes only if it improves
   ai reload                                        rereads the registry (says which cascades
                                                    are on, forced or refused)
@@ -274,8 +274,8 @@ func main() {
 		return
 	case "plugins":
 		err = cmdPlugins(args)
-	case "jev":
-		err = cmdJev(args)
+	case "chispa":
+		err = cmdChispa(args)
 	case "domotica":
 		err = cmdDomotica(args)
 	case "ai":

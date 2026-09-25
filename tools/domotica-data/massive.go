@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/domotica"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
 )
 
 // Mapeo de MASSIVE a la taxonomía. Lo que no está aquí es out_of_scope: la

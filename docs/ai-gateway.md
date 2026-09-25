@@ -3,7 +3,7 @@
 `kling ai serve` sirve dos clases de modelo detrás de una API, cada una para lo
 suyo:
 
-- **JEV** ([jev.md](jev.md)) **clasifica, enruta y filtra**: un clasificador
+- **Chispa** ([chispa.md](chispa.md)) **clasifica, enruta y filtra**: un clasificador
   lineal de ~1 MB que vive **dentro** del proceso del gateway y contesta en
   microsegundos, con una probabilidad calibrada y un umbral por clase.
 - **VON** ([von.md](von.md)) **genera**: resume, redacta, contesta. Un LLM de
@@ -11,15 +11,15 @@ suyo:
   modelo ya cargado. Se despierta con la primera petición y se **congela al
   quedarse ocioso** (0 CPU; en Linux su memoria vuelve a su fichero).
 
-Cuando JEV duda, la respuesta sale igual, marcada `escalate: true`, y **quien
-llama decide**. Encadenar JEV → VON (la **cascada**: lo que JEV duda lo contesta
+Cuando Chispa duda, la respuesta sale igual, marcada `escalate: true`, y **quien
+llama decide**. Encadenar Chispa → VON (la **cascada**: lo que Chispa duda lo contesta
 VON) existe, pero es opcional por tarea y **solo se activa si una evaluación con
-datos de esa tarea demuestra que acierta más que JEV solo** (`kling ai eval`). Por
+datos de esa tarea demuestra que acierta más que Chispa solo** (`kling ai eval`). Por
 qué: medido en la clasificación de commits, ninguna cascada probada —con LLM de
-0,5B, 1,5B ni 3B— igualó a JEV solo ([Cifras](#cifras-mac-mini-m4-backend-vz)).
+0,5B, 1,5B ni 3B— igualó a Chispa solo ([Cifras](#cifras-mac-mini-m4-backend-vz)).
 
 ```
-cliente ──HTTP──> kling ai serve ──┬── /v1/classify, /v1/decide ── JEV (en proceso, µs)
+cliente ──HTTP──> kling ai serve ──┬── /v1/classify, /v1/decide ── Chispa (en proceso, µs)
                                    │        seguro → respuesta
                                    │        duda   → escalate: true (o VON, si la
                                    │                 cascada de la tarea está respaldada)
@@ -36,11 +36,11 @@ El registro es un fichero JSON (`~/.config/kling/ai.json` por defecto):
 ```json
 {
   "models": {
-    "commits": {"kind": "jev", "path": "commits.jev"},
+    "commits": {"kind": "chispa", "path": "commits.chispa"},
     "qwen":    {"kind": "von", "snapshot": "von-qwen15", "max_replicas": 2}
   },
   "tasks": {
-    "commit-type": {"jev": "commits"},
+    "commit-type": {"chispa": "commits"},
     "summarize": {
       "von": "qwen", "max_tokens": 64, "temperature": 0.2,
       "system": "You write very short summaries.",
@@ -52,7 +52,7 @@ El registro es un fichero JSON (`~/.config/kling/ai.json` por defecto):
 
 ```sh
 kling models add von-qwen15 -model qwen2.5-1.5b-instruct -quant q4_k_m   # el dorado (von.md)
-kling jev train -data train.jsonl -valid valid.jsonl -o commits.jev
+kling chispa train -data train.jsonl -valid valid.jsonl -o commits.chispa
 
 kling ai serve                          # socket Unix 0600 en ~/.config/kling/ai.sock
 kling ai test commit-type "fix crash when the cache is cold"
@@ -78,7 +78,7 @@ curl -H "Authorization: Bearer $(cat ~/.config/kling/ai.token)" \
 | `-max-replicas` | 2 | réplicas por modelo (`max_replicas` del registro manda) |
 | `-max-inflight` | 1 | peticiones por réplica antes de pedir otra (`llama-server` atiende una a la vez con `-parallel 1`) |
 | `-keepwarm` | 0 | N modelos más usados siempre despiertos (0 = escala a cero pura) |
-| `-jev-mem` | 256 | MiB de modelos JEV cargados (LRU) |
+| `-chispa-mem` | 256 | MiB de modelos Chispa cargados (LRU) |
 | `-von-timeout` | 60s | plazo de una escalada |
 | `-id` | `default` | etiqueta `ai.gateway=<id>` de sus máquinas |
 
@@ -112,57 +112,57 @@ el prefijo entero, como antes, y desde ahí queda en la caché de la réplica.
 
 ### Tareas
 
-Una tarea es de **clasificación** (lleva `jev`) o de **generación** (lleva
+Una tarea es de **clasificación** (lleva `chispa`) o de **generación** (lleva
 `von`), nunca las dos cosas: lo de clasificar no se acepta en una generación y
 al revés, porque una clave que no hace nada es un error que no se ve.
 
 | Campo | Clase | Qué es |
 |---|---|---|
-| `jev` | clasificación | el modelo JEV |
+| `chispa` | clasificación | el modelo Chispa |
 | `escalate_to` | clasificación | el modelo VON de la cascada; solo se activa con una evaluación que la respalde (abajo) |
 | `escalate_force` | clasificación | activa la cascada sin ese respaldo; queda escrito en el registro y el gateway lo dice al arrancar |
-| `labels` | clasificación | opcional; salen del modelo JEV |
+| `labels` | clasificación | opcional; salen del modelo Chispa |
 | `thresholds` | clasificación | umbral τ por clase que sustituye al del modelo (2 = esa clase escala siempre) |
-| `top_k` | clasificación | en una escalada, VON solo elige entre las K etiquetas más probables según JEV (un **reordenador**) |
+| `top_k` | clasificación | en una escalada, VON solo elige entre las K etiquetas más probables según Chispa (un **reordenador**) |
 | `grammar` | clasificación | por defecto `true`: la salida de VON se restringe con una gramática GBNF de `llama-server` a exactamente una etiqueta |
 | `audit`, `samples`, `precision` | clasificación | muestras para recalibrar (ver abajo); `audit` exige `escalate_to` |
-| `on_von_error` | clasificación | con la cascada activa y VON caído: `jev` (por defecto: contesta JEV marcado `degraded`) o `error` (503) |
+| `on_von_error` | clasificación | con la cascada activa y VON caído: `chispa` (por defecto: contesta Chispa marcado `degraded`) o `error` (503) |
 | `von` | generación | el modelo VON |
 | `temperature` | generación | 0,7 por defecto; el cliente puede cambiarla en [0, 2] |
-| `system`, `prompt` | las dos | la pregunta a VON. En una escalada: `{labels}`, `{text}`, `{fields}`, `{candidates}` (top-3 de JEV). En una generación: `{input}` y las `vars` del cliente. Un solo pase: lo que traiga el texto del usuario no se vuelve a expandir |
+| `system`, `prompt` | las dos | la pregunta a VON. En una escalada: `{labels}`, `{text}`, `{fields}`, `{candidates}` (top-3 de Chispa). En una generación: `{input}` y las `vars` del cliente. Un solo pase: lo que traiga el texto del usuario no se vuelve a expandir |
 | `max_tokens` | las dos | 16 en una escalada (una etiqueta); 256 en una generación, y es el tope que puede pedir un cliente (máx. 4096) |
 | `json_schema` | generación | un esquema JSON (objeto, hasta 16 KiB): la salida de VON se restringe a JSON que lo cumple (el `json_schema` de `llama-server`, que lo convierte en gramática). El gateway comprueba además que la salida sea JSON; si no (una respuesta cortada por `max_tokens`), 502 con el `finish_reason`. Medido en [von-cpu.md](von-cpu.md): de 19/21 a 21/21 respuestas válidas, ~10 % más lento al generar |
 
 ### La cascada, solo con pruebas
 
 ```sh
-kling ai eval commit-type -data test.jsonl -von qwen      # JSONL etiquetado que JEV NO vio al entrenar
+kling ai eval commit-type -data test.jsonl -von qwen      # JSONL etiquetado que Chispa NO vio al entrenar
 ```
 
-`kling ai eval` pasa el conjunto por JEV solo y por la cascada con el VON
-candidato (una sola pasada: JEV cuesta µs y solo lo escalado se pregunta a VON;
+`kling ai eval` pasa el conjunto por Chispa solo y por la cascada con el VON
+candidato (una sola pasada: Chispa cuesta µs y solo lo escalado se pregunta a VON;
 `-concurrency N` para usar varias réplicas, `-von-alone` para medir también a VON
 solo), imprime las cifras y guarda el registro en `ai-evals/<tarea>.json`, junto
 al registro de modelos. El gateway activa `escalate_to` solo si ese registro:
 
-- dice que la cascada **gana**: la cascada y JEV solo contestan lo mismo en todo
-  lo que JEV no escala, así que la diferencia sale entera de lo escalado; se
-  cuentan las discrepancias (JEV acierta y la cascada no, o al revés) y gana si
+- dice que la cascada **gana**: la cascada y Chispa solo contestan lo mismo en todo
+  lo que Chispa no escala, así que la diferencia sale entera de lo escalado; se
+  cuentan las discrepancias (Chispa acierta y la cascada no, o al revés) y gana si
   acierta más veces donde discrepan con la **prueba de McNemar** exacta de una
   cola, p < 0,05. Con pocos datos no se puede demostrar nada, y eso también es
   una respuesta;
 - es de **lo mismo que se va a servir**: el mismo modelo VON y dorado, el mismo
-  `.jev` (por su sha256: reentrenar o recalibrar lo invalida) y los mismos
+  `.chispa` (por su sha256: reentrenar o recalibrar lo invalida) y los mismos
   ajustes de la escalada (`system`, `prompt`, `top_k`, `grammar`, `max_tokens`,
   `thresholds`, `on_von_error`).
 
-Si no, la tarea sigue funcionando con JEV y `escalate: true`, y el gateway lo
+Si no, la tarea sigue funcionando con Chispa y `escalate: true`, y el gateway lo
 explica al arrancar, en `kling ai reload`, en `kling ai ls` y en `GET /v1/tasks`:
 
 ```
-task commit-type: escalate_to "qwen" refused: its eval does not show it beats JEV alone
-  (cascade 0.520 vs JEV alone 0.640 on 861 examples: JEV alone is as good or better);
-  JEV answers with escalate: true instead (run `kling ai eval commit-type -data <held-out.jsonl>`,
+task commit-type: escalate_to "qwen" refused: its eval does not show it beats Chispa alone
+  (cascade 0.520 vs Chispa alone 0.640 on 861 examples: Chispa alone is as good or better);
+  Chispa answers with escalate: true instead (run `kling ai eval commit-type -data <held-out.jsonl>`,
   or set "escalate_force": true to enable it anyway)
 ```
 
@@ -173,7 +173,7 @@ apagada, ni las escaladas ni las auditorías tocan VON.
 ### Tareas de domótica: `/v1/decide` con la capa 3
 
 Una tarea con un bloque `domotica` es la decisión de la habitación de demo
-([domotica.md](domotica.md)): plantillas → JEV + huecos en proceso y, para lo
+([domotica.md](domotica.md)): plantillas → Chispa + huecos en proceso y, para lo
 que dudan, el **codificador de frases** ([codificador.md](codificador.md)): un
 modelo `kind: "embed"` (el dorado de `kling models add enc-e5 -model
 multilingual-e5-small`) que `pkg/scheduler` despierta y congela como a un VON, y
@@ -182,11 +182,11 @@ la cabeza `.jenc` que clasifica su vector aquí mismo.
 ```json
 {
   "models": {
-    "intent": {"kind": "jev", "path": "intent.jev"},
+    "intent": {"kind": "chispa", "path": "intent.chispa"},
     "enc":    {"kind": "embed", "snapshot": "enc-e5", "max_replicas": 1}
   },
   "tasks": {
-    "home": {"domotica": {"intent": "intent", "slots": "slots.jevs", "encoder": "enc", "head": "head.jenc"}}
+    "home": {"domotica": {"intent": "intent", "slots": "slots.chispas", "encoder": "enc", "head": "head.jenc"}}
   }
 }
 ```
@@ -206,7 +206,7 @@ cascada: `kling ai eval <tarea>` pasa las filas por la cascada sin y con el
 codificador y el registro (`ai-evals/<tarea>.json`, `kind: "domotica"`) la
 enciende si contesta bien **más órdenes completas** donde discrepan (McNemar,
 p < 0,05) sin más errores confiados que uno por cada cien ganadas, con los
-mismos `.jev`, `.jevs`, `.jenc` (por su sha256) y dorado. Si no, las capas
+mismos `.chispa`, `.chispas`, `.jenc` (por su sha256) y dorado. Si no, las capas
 rápidas contestan y escalan a `"encoder"`; con ella, lo que tampoco resuelve
 sale con `escalate: "von"`. `encoder_force` la enciende sin respaldo. Si la
 réplica no contesta en 5 s (despertarla incluido), la decisión escala a VON
@@ -217,7 +217,7 @@ réplica caliente, 981 ms si estaba congelada por inactividad.
 
 | Ruta | Qué hace |
 |---|---|
-| `POST /v1/classify` | `{task, text, fields?, mode?, explain?}` → `{label, prob, escalate, source, latency_ms, evidence, jev, von, degraded}` |
+| `POST /v1/classify` | `{task, text, fields?, mode?, explain?}` → `{label, prob, escalate, source, latency_ms, evidence, chispa, von, degraded}` |
 | `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny`. En una tarea de domótica, la decisión de la habitación (arriba) |
 | `POST /v1/generate` | `{task, input, vars?, max_tokens?, temperature?, seed?}` → `{output, model, finish_reason, usage, latency_ms}` |
 | `POST /v1/chat/completions`, `POST /v1/completions` | API de OpenAI hacia una réplica del modelo que nombra `model` (nombre del registro o del dorado), con streaming |
@@ -229,32 +229,32 @@ réplica caliente, 981 ms si estaba congelada por inactividad.
 | `GET /metrics` | Prometheus |
 | `GET /healthz` | sin token |
 
-Una clasificación en la que JEV duda, sin cascada:
+Una clasificación en la que Chispa duda, sin cascada:
 
 ```json
-{"task":"commit-type","label":"fix","escalate":true,"prob":0.262,"source":"jev","latency_ms":0.07,
+{"task":"commit-type","label":"fix","escalate":true,"prob":0.262,"source":"chispa","latency_ms":0.07,
  "evidence":[{"feature":"w:crash","weight":0.31}, …],
- "jev":{"label":"fix","prob":0.262,"threshold":0.517,"decision":"escalate",
+ "chispa":{"label":"fix","prob":0.262,"threshold":0.517,"decision":"escalate",
         "candidates":[{"label":"fix","prob":0.262},{"label":"feat","prob":0.19},{"label":"test","prob":0.12}]}}
 ```
 
-- `escalate: true` es «JEV no llegó a su umbral». Con la cascada activa la
+- `escalate: true` es «Chispa no llegó a su umbral». Con la cascada activa la
   etiqueta es la de VON (`source: von`, y `von` con su respuesta); si no, es la de
-  JEV, con los candidatos y la evidencia para decidir.
-- `prob` es la probabilidad calibrada de **JEV** para la etiqueta devuelta (0 si
+  Chispa, con los candidatos y la evidencia para decidir.
+- `prob` es la probabilidad calibrada de **Chispa** para la etiqueta devuelta (0 si
   es `unknown`).
 - **Mapeo estricto** de la respuesta de VON: su primera línea, sin espacios ni la
   puntuación de alrededor y sin un `label:` delante, tiene que ser una etiqueta
   **entera** (sin distinguir mayúsculas); si no, `unknown`. Con la gramática ya
   es exacta; el mapeo es la defensa porque el invitado no es de fiar.
-- `mode: "jev"` contesta con JEV aunque dude y aunque la cascada esté activa. VON
+- `mode: "chispa"` contesta con Chispa aunque dude y aunque la cascada esté activa. VON
   solo, como clasificador, se mide con `kling ai eval -von-alone`, no se sirve.
-- `evidence` va siempre que JEV duda; en las respuestas confiadas, con
+- `evidence` va siempre que Chispa duda; en las respuestas confiadas, con
   `explain: true` (cuesta reservas de memoria, y lo confiado es el camino de µs).
 
 Métricas (`GET /metrics`): `kling_ai_requests_total{endpoint,task,source}` con
-`source` = `jev` (confiado), `escalated` (JEV dudó y contestó él, con `escalate:
-true`) o `von` (la cascada, o una generación); `kling_ai_jev_coverage{task}` y
+`source` = `chispa` (confiado), `escalated` (Chispa dudó y contestó él, con `escalate:
+true`) o `von` (la cascada, o una generación); `kling_ai_chispa_coverage{task}` y
 `kling_ai_escalation_rate{task}` (clasificaciones, desde el arranque),
 `kling_ai_latency_seconds{task,source}` (histograma de 10 µs a 60 s),
 `kling_ai_von_wake_seconds{model,how}` con `how` = `thaw` (estaba congelada),
@@ -263,7 +263,7 @@ true`) o `von` (la cascada, o una generación); `kling_ai_jev_coverage{task}` y
 mucho cada 5 s), `kling_ai_von_errors_total{model,reason}`,
 `kling_ai_von_unknown_total`, `kling_ai_degraded_total`, `kling_ai_audits_total`,
 `kling_ai_samples`, `kling_ai_proxy_requests_total{model,code}` y las de la caché
-de JEV (`kling_ai_jev_models_loaded`, `_bytes`, `_loads_total`, `_evictions_total`).
+de Chispa (`kling_ai_chispa_models_loaded`, `_bytes`, `_loads_total`, `_evictions_total`).
 Las etiquetas salen del registro: un cliente no crea series nuevas con nombres
 inventados.
 
@@ -278,9 +278,9 @@ el tope del modelo (y si no cabe, la cola la hace `llama-server` en la menos
 cargada); el segador congela las que llevan `-idle` sin peticiones **y sin nada
 en vuelo**. Un 507 del daemon (no cabe) hace que el planificador congele lo
 ocioso y reintente; si aun así no cabe, una generación contesta 503 con
-`Retry-After`, y una escalada, JEV marcado `degraded` (o 503). Los modelos JEV
+`Retry-After`, y una escalada, Chispa marcado `degraded` (o 503). Los modelos Chispa
 cuestan 1–5 MB y no se congelan: se cargan la primera vez que se usan y salen por
-LRU al pasar de `-jev-mem`.
+LRU al pasar de `-chispa-mem`.
 
 Cambios que hicieron falta en `pkg/scheduler` (sirven también al gateway MCP):
 
@@ -330,24 +330,24 @@ código.
 
 ## Recalibración en línea (VON como maestro)
 
-[JEV-EVAL.md](JEV-EVAL.md) midió que los umbrales prometen en validación una
+[CHISPA-EVAL.md](CHISPA-EVAL.md) midió que los umbrales prometen en validación una
 precisión (0,95) que el tráfico real no cumple cuando la distribución cambia
 (0,58–0,85). La cascada tiene algo con qué corregirlo: lo que VON contesta.
 
 Solo con la cascada activa (respaldada o forzada): sin ella VON no se toca.
 
-1. Cada escalada con respuesta válida guarda `(etiqueta de JEV, su probabilidad,
+1. Cada escalada con respuesta válida guarda `(etiqueta de Chispa, su probabilidad,
    etiqueta de VON)` en un anillo por tarea (2000). No se guarda el texto.
 2. Con `audit` > 0 y la cascada activa, esa fracción de las respuestas
    **confiadas** también se pregunta a VON en segundo plano (una a la vez; si hay otra en vuelo se descarta
-   y se cuenta). Sin esto la muestra solo tendría lo que JEV escaló y no diría nada
+   y se cuenta). Sin esto la muestra solo tendría lo que Chispa escaló y no diría nada
    de si lo confiado está bien. Cada muestra pesa 1/probabilidad de haber entrado:
    1 lo escalado, 1/audit lo auditado.
 3. `kling ai calibrate <tarea>` parte la muestra en dos mitades alternas, elige
    con la primera el umbral por clase igual que al entrenar (el menor corte cuya
    concordancia ponderada, estimada como aciertos/(n+1), llega al objetivo, con al
    menos `-min-support` muestras) y mide en la segunda la cobertura y la
-   concordancia con los umbrales viejos y los nuevos. **Solo escribe** el `.jev`
+   concordancia con los umbrales viejos y los nuevos. **Solo escribe** el `.chispa`
    (dejando el anterior en `<ruta>.prev`, y sirviendo el nuevo sin reiniciar) si
    la concordancia sube cuando estaba bajo el objetivo, o si se mantiene sobre él
    y la cobertura sube. `-dry-run` solo informa. Nunca es automático.
@@ -356,13 +356,13 @@ Límites, dichos claros:
 
 - **VON también se equivoca.** Lo que se mide es *concordancia con VON*, no
   acierto. Si VON acierta el 60 %, «95 % de concordancia» no es 95 % de aciertos.
-  Lo que garantiza es que JEV solo conteste donde habría dicho lo mismo que el
+  Lo que garantiza es que Chispa solo conteste donde habría dicho lo mismo que el
   modelo al que escalaría: la cascada no empeora a VON, pero tampoco lo mejora.
   Por eso la puerta de la cascada se decide contra etiquetas de verdad
   (`kling ai eval`), no contra VON.
 - Solo se tocan los umbrales, no los pesos ni la temperatura: la muestra está
   sesgada hacia lo dudoso y reentrenar con ella necesitaría textos, que no se
-  guardan. Reentrenar sigue siendo `kling jev train` con datos etiquetados.
+  guardan. Reentrenar sigue siendo `kling chispa train` con datos etiquetados.
 - La muestra vive en memoria: reiniciar el gateway la vacía.
 - Si una auditoría se descarta por haber otra en vuelo, la probabilidad real de
   entrar es menor que `audit` y el peso la sobreestima un poco.
@@ -371,16 +371,16 @@ Límites, dichos claros:
 
 ## Cifras (Mac mini M4, backend `vz`)
 
-Conjunto: el reparto temporal de [JEV-EVAL.md](JEV-EVAL.md) (861 commits de prueba
-que JEV no vio, 10 clases), modelo `words-fields.jev`. Cascadas medidas con
+Conjunto: el reparto temporal de [CHISPA-EVAL.md](CHISPA-EVAL.md) (861 commits de prueba
+que Chispa no vio, 10 clases), modelo `words-fields.chispa`. Cascadas medidas con
 `kling ai eval` sobre el gateway (gramática activada; prompt de pocos ejemplos,
 el mismo para todos los modelos); `top_k: 3` = VON elige entre los tres
-candidatos de JEV. En todas, JEV contesta confiado el 23,5 % (acierta ahí el
-85,2 %) y escala 659 commits, en los que JEV acierta el **57,5 %**.
+candidatos de Chispa. En todas, Chispa contesta confiado el 23,5 % (acierta ahí el
+85,2 %) y escala 659 commits, en los que Chispa acierta el **57,5 %**.
 
-| VON candidato (licencia) | `top_k` | Cascada | VON acierta en lo escalado | Solo JEV acierta / solo la cascada | VON solo | Latencia VON p50 / p95 | La puerta |
+| VON candidato (licencia) | `top_k` | Cascada | VON acierta en lo escalado | Solo Chispa acierta / solo la cascada | VON solo | Latencia VON p50 / p95 | La puerta |
 |---|---|---|---|---|---|---|---|
-| — (JEV solo) | — | **0,640** | — | — | — | JEV: p50 6 µs, p95 10 µs | — |
+| — (Chispa solo) | — | **0,640** | — | — | — | Chispa: p50 6 µs, p95 10 µs | — |
 | SmolLM2-360M Q8_0 (Apache) | — | 0,231 | — | — | 0,056 | 218 / 322 ms | (medida antes de la puerta) |
 | SmolLM2-360M Q8_0 | 3 | 0,368 | — | — | — | 376 / 474 ms | |
 | Qwen2.5-0.5B Q8_0 (Apache) | 3 | 0,429 | 0,299 | 235 / 53 | 0,237 | 333 / 399 ms | rechazada |
@@ -389,10 +389,10 @@ candidatos de JEV. En todas, JEV contesta confiado el 23,5 % (acierta ahí el
 | Qwen2.5-1.5B Q8_0 (Apache) | 3 | 0,498 | 0,390 | 171 / 49 | — | 725 / 1075 ms | rechazada |
 | Qwen2.5-3B Q4_K_M (Qwen Research, no comercial) | 3 | **0,540** | 0,445 | 167 / 81 | 0,335 | 2351 / 2900 ms | rechazada |
 
-Lectura honesta: **ninguna cascada llega a JEV solo** en esta tarea, y la puerta
-las rechaza todas (McNemar p = 1: donde discrepan, acierta más JEV). Subir de
+Lectura honesta: **ninguna cascada llega a Chispa solo** en esta tarea, y la puerta
+las rechaza todas (McNemar p = 1: donde discrepan, acierta más Chispa). Subir de
 0,5B a 1,5B y a 3B mejora a VON en lo escalado (0,30 → 0,42 → 0,45) pero sigue por
-debajo del 0,575 de JEV ahí, y cuesta de 4 a 7 veces más por escalada. El
+debajo del 0,575 de Chispa ahí, y cuesta de 4 a 7 veces más por escalada. El
 reordenador (`top_k: 3`) es imprescindible: sin él, el 1,5B baja a 0,35. Con
 todas las etiquetas, los LLM de este tamaño colapsan a pocas etiquetas (SmolLM2
 contestaba `chore` en el 96 % sin gramática ni ejemplos). La latencia del 1,5B
@@ -403,9 +403,9 @@ la VM de Lima cargando modelos al lado: las latencias son pesimistas, los
 aciertos no cambian. Una evaluación del 3B con todas las etiquetas quedó sin
 terminar.
 
-La conclusión de diseño es la del principio: JEV decide, VON genera, y la
+La conclusión de diseño es la del principio: Chispa decide, VON genera, y la
 cascada queda para tareas en las que se demuestre (p. ej. etiquetas que dependen
-de entender el texto y no de sus palabras, o un JEV con pocos datos).
+de entender el texto y no de sus palabras, o un Chispa con pocos datos).
 
 ### Escala a cero
 
@@ -434,7 +434,7 @@ errores.
 
 | | n | Cliente p50 / p95 / p99 / máx | Servidor p50 / p95 |
 |---|---|---|---|
-| clasificación (JEV) | 5585 | 0,48 / 0,78 / 1,03 / 21 ms | **33 / 72 µs** |
+| clasificación (Chispa) | 5585 | 0,48 / 0,78 / 1,03 / 21 ms | **33 / 72 µs** |
 | generación (VON) | 98 | 349 / 602 / 2270 / 2732 ms | 349 / 602 ms |
 
 La cola de las generaciones (p99 2,3 s) es el thaw de la primera petición de
@@ -451,26 +451,26 @@ cada fase. Memoria de las réplicas en el tiempo:
 | 194– | silencio | 0 / 3 | **0** |
 
 (La tercera congelada es una réplica de Qwen2.5-0.5B de una prueba anterior.)
-Las clasificaciones no notan nada de esto: JEV no tiene réplicas.
+Las clasificaciones no notan nada de esto: Chispa no tiene réplicas.
 
 ### Recalibración: una demostración real
 
 Tarea con la cascada **forzada** (`escalate_force`) a Qwen2.5-1.5B Q4_K_M
 (`top_k: 3`) y `audit: 0.1`; tráfico: los 861 commits de validación (acierto de
-la cascada ahí, 0,664). Muestras: 563 (532 escaladas, 31 auditadas); JEV coincide
+la cascada ahí, 0,664). Muestras: 563 (532 escaladas, 31 auditadas); Chispa coincide
 con VON en el 48,7 %.
 
 - `kling ai calibrate -dry-run` (objetivo 0,95): **se niega** — con ese objetivo
-  JEV no contestaría nunca. Con el maestro de 0,5B pasaba lo mismo (concordancia
+  Chispa no contestaría nunca. Con el maestro de 0,5B pasaba lo mismo (concordancia
   12,8 %, se niega también a 0,80).
 - `-target 0.8`: concordancia en la mitad de evaluación 0,714 → 0,788, cobertura
-  0,344 → 0,128. **Escribe** el `.jev` (y `.prev`).
-- Contra las etiquetas de verdad del conjunto de prueba (`kling jev eval`), el
+  0,344 → 0,128. **Escribe** el `.chispa` (y `.prev`).
+- Contra las etiquetas de verdad del conjunto de prueba (`kling chispa eval`), el
   recalibrado **es peor**: cobertura 23,5 % → 12,3 %, precisión en lo confiado
   0,851 → 0,783 (la exactitud total no cambia: 0,640).
 
 Es el límite que la sección de recalibración avisa: la concordancia se mide
-contra VON, y aquí VON acierta menos que JEV en lo que duda. Recalibrar con un
+contra VON, y aquí VON acierta menos que Chispa en lo que duda. Recalibrar con un
 maestro peor que el alumno empeora al alumno. Solo tiene sentido con un maestro
 que la puerta haya validado contra etiquetas de verdad.
 
@@ -479,8 +479,8 @@ que la puerta haya validado contra etiquetas de verdad.
 `probe.sh` con el binario de esta rama en la VM de Lima `kling-arm` (Firecracker
 1.16.1 bajo KVM anidado; `-idle 20s`, SmolLM2-360M Q8_0), sin nada más corriendo:
 
-- Clasificación confiada: `docs` en 48 ms la primera (carga del `.jev`), después
-  µs; una en la que JEV duda, con la cascada rechazada por falta de evaluación:
+- Clasificación confiada: `docs` en 48 ms la primera (carga del `.chispa`), después
+  µs; una en la que Chispa duda, con la cascada rechazada por falta de evaluación:
   `escalate: true` en 0,02 ms y ninguna llamada a VON.
 - La réplica nace con **TTL 40 s** (2 × idle): el daemon anuncia `renew` y el
   planificador lo renueva como arrendamiento. El segador la congela a los ~20 s
@@ -496,12 +496,12 @@ que la puerta haya validado contra etiquetas de verdad.
 
 - **La cascada no ganó en la única tarea medida** (commits), ni con 3B. La puerta
   lo impide sola, pero el valor de la cascada está sin demostrar: hace falta una
-  tarea en la que VON acierte más que JEV en lo que JEV duda.
+  tarea en la que VON acierte más que Chispa en lo que Chispa duda.
 - La puerta compara contra las etiquetas del conjunto que se le pase: si ese
-  conjunto se usó para entrenar o calibrar JEV, JEV parecerá mejor de lo que es y
+  conjunto se usó para entrenar o calibrar Chispa, Chispa parecerá mejor de lo que es y
   la cascada peor. El registro guarda el sha256 de los datos para poder
   comprobarlo, no lo impide.
-- Recalibrar con VON como maestro solo mejora a JEV si VON acierta más que JEV
+- Recalibrar con VON como maestro solo mejora a Chispa si VON acierta más que Chispa
   en lo que duda; con los modelos medidos lo empeoró (arriba).
 - En macOS cada réplica congelada guarda su memoria entera en disco y el thaw la
   copia: a partir de 1,5B el thaw cuesta lo que un arranque en frío (2–9 s), y

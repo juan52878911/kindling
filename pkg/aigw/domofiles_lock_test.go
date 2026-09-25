@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/codificador"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
 )
 
 // getSlots (y getHead) tienen que leer el fichero FUERA de f.mu: una carga

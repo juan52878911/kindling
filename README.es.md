@@ -83,7 +83,7 @@ enlazadas:
 · [Una biblioteca de paquetes compartida](#una-biblioteca-de-paquetes-compartida)
 · [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
 · [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
-· [JEV: un clasificador diminuto para decisiones pequeñas](#jev-un-clasificador-diminuto-para-decisiones-pequeñas)
+· [Chispa: un clasificador diminuto para decisiones pequeñas](#chispa-un-clasificador-diminuto-para-decisiones-pequeñas)
 · [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
@@ -721,40 +721,40 @@ comparten los pesos en la caché de páginas del host: cuatro réplicas de SmolL
 (`vz`), una réplica da su primer token ~0,8 s después de `run -from` y genera a ~140 tok/s.
 Cifras, la salvedad del laboratorio anidado y el plan de GPU: [`docs/von.md`](docs/von.md).
 
-## JEV: un clasificador diminuto para decisiones pequeñas
+## Chispa: un clasificador diminuto para decisiones pequeñas
 
-`kling jev` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
+`kling chispa` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
 estructurados; pesos int16; ~1 MB) para las decisiones que no merecen un modelo de
 lenguaje: clasificar un evento, enrutar la petición de un agente, filtrar una entrada.
 Corre en local, sin daemon, contesta en 1,5–6 µs sin reservar memoria y da los mismos
 bits en amd64 y arm64. Cada predicción trae una probabilidad calibrada y la decisión
 frente al umbral de su clase, `confident` o `escalate`, para que un gateway conteste con
-JEV y pase el resto a un modelo mayor.
+Chispa y pase el resto a un modelo mayor.
 
 ```sh
-kling jev train -data train.jsonl -valid valid.jsonl -o eventos.jev
-kling jev predict -model eventos.jev -text "panic in the parser" -fields '{"service":"api"}'
+kling chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
+kling chispa predict -model eventos.chispa -text "panic in the parser" -fields '{"service":"api"}'
 ```
 
-Diseño y formato: [`docs/jev.md`](docs/jev.md). Una evaluación honesta con 4 304
+Diseño y formato: [`docs/chispa.md`](docs/chispa.md). Una evaluación honesta con 4 304
 commits reales, incluido dónde dejan de valer los umbrales:
-[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md). JEV también se puede desplegar **serverless**,
+[`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md). Chispa también se puede desplegar **serverless**,
 una tarea por dorado congelado en su propia microVM despertada bajo demanda (el mismo
-modelo que VON, más abajo): `kling jev deploy`, cifras de thaw y rendimiento medidas en
-[`docs/jev-serverless.md`](docs/jev-serverless.md).
+modelo que VON, más abajo): `kling chispa deploy`, cifras de thaw y rendimiento medidas en
+[`docs/chispa-serverless.md`](docs/chispa-serverless.md).
 
 ## Gateway de IA: muchos modelos listos, ninguno encendido 24/7
 
-`kling ai serve` pone JEV y VON detrás de una misma API, cada uno a lo suyo: **JEV
+`kling ai serve` pone Chispa y VON detrás de una misma API, cada uno a lo suyo: **Chispa
 clasifica, enruta y filtra** (dentro del proceso, microsegundos) y **VON genera**
 (resúmenes, borradores, respuestas) desde réplicas que se descongelan con la primera
 petición, se multiplican con la concurrencia y se vuelven a congelar al quedarse
 ociosas (`pkg/scheduler`). `POST /v1/classify` y `/v1/decide` devuelven la etiqueta de
-JEV con `escalate: true` cuando duda, y quien llama decide; `POST /v1/generate` rellena
+Chispa con `escalate: true` cuando duda, y quien llama decide; `POST /v1/generate` rellena
 una plantilla por tarea; `/v1/chat/completions` y `/v1/models` son compatibles con
-OpenAI, con streaming. Encadenarlos (una **cascada**: VON contesta lo que JEV duda) es
+OpenAI, con streaming. Encadenarlos (una **cascada**: VON contesta lo que Chispa duda) es
 opcional por tarea y **solo se activa si `kling ai eval` demuestra, con datos
-etiquetados de esa tarea, que gana a JEV solo** (prueba de McNemar, mismos modelos y
+etiquetados de esa tarea, que gana a Chispa solo** (prueba de McNemar, mismos modelos y
 ajustes); si no, el gateway se niega salvo `escalate_force`. Escucha en un socket Unix
 0600 por defecto y en TCP solo con `-listen` y token.
 
@@ -765,7 +765,7 @@ kling ai generate summarize "fix(parser): handle empty input"
 kling ai eval commit-type -data test.jsonl -von qwen   # decide si escalate_to se activa
 ```
 
-Medido en clasificación de commits (861 de prueba): JEV solo acierta el 0,640 en 6 µs y
+Medido en clasificación de commits (861 de prueba): Chispa solo acierta el 0,640 en 6 µs y
 ninguna cascada llegó —Qwen2.5 0.5B 0,429, 1.5B 0,520, 3B 0,540—, así que la puerta las
 rechazó todas. En un Mac, una generación con la réplica caliente contesta en 9 ms y con
 la réplica congelada en ~1,5 s. Diseño, API, cifras y límites:
@@ -1160,10 +1160,10 @@ permite que N instancias compartan páginas.
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
 | [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
-| [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, el clasificador lineal diminuto: características, formato `.jev`, cascada; y su evaluación con commits reales |
-| [`docs/jev-serverless.md`](docs/jev-serverless.md) | JEV como tarea serverless de kindling: un dorado congelado por tarea, `kling jev deploy`, thaw y rendimiento medidos frente a en proceso |
-| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención JEV + JEV-slots, datos libres con su licencia, y su evaluación |
-| [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: JEV clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
+| [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
+| [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling chispa deploy`, thaw y rendimiento medidos frente a en proceso |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
+| [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
 | [`docs/releases.md`](docs/releases.md) | Cómo se construyen y publican las releases |

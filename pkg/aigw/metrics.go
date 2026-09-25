@@ -18,7 +18,7 @@ import (
 // crear series nuevas mandando nombres inventados, porque una tarea que no
 // existe se rechaza antes de contar nada.
 
-// latencyBuckets van de 10 µs (JEV) a 60 s (un arranque en frío con carga).
+// latencyBuckets van de 10 µs (Chispa) a 60 s (un arranque en frío con carga).
 var latencyBuckets = []float64{1e-5, 2.5e-5, 5e-5, 1e-4, 2.5e-4, 5e-4, 1e-3, 5e-3, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
 
 type histogram struct {
@@ -102,7 +102,7 @@ type replicaCount struct{ running, warm int }
 
 // write vuelca todo. replicas y extra los calcula quien llama (sin el candado
 // de las métricas: preguntar al daemon no puede ocurrir con él tomado).
-func (m *metrics) write(w io.Writer, js jevStats, samples map[string]int, replicas map[string]replicaCount) {
+func (m *metrics) write(w io.Writer, js chispaStats, samples map[string]int, replicas map[string]replicaCount) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -126,44 +126,44 @@ func (m *metrics) write(w io.Writer, js jevStats, samples map[string]int, replic
 		}
 	}
 
-	counter("kling_ai_requests_total", "Answers by endpoint, task and source: jev (confident), escalated (JEV unsure, answered by JEV with escalate: true) or von (the cascade, or a generation).", m.requests, "endpoint", "task", "source")
+	counter("kling_ai_requests_total", "Answers by endpoint, task and source: chispa (confident), escalated (Chispa unsure, answered by Chispa with escalate: true) or von (the cascade, or a generation).", m.requests, "endpoint", "task", "source")
 
 	// Cobertura y escalado por tarea de clasificación, derivados de los
-	// contadores: lo que JEV contesta seguro y lo que duda se lee de un
-	// vistazo sin escribir PromQL. Las generaciones no cuentan: no hay JEV.
-	jevN, vonN := map[string]uint64{}, map[string]uint64{}
+	// contadores: lo que Chispa contesta seguro y lo que duda se lee de un
+	// vistazo sin escribir PromQL. Las generaciones no cuentan: no hay Chispa.
+	chispaN, vonN := map[string]uint64{}, map[string]uint64{}
 	for k, v := range m.requests {
 		p := strings.Split(k, "|")
 		if p[0] == "generate" {
 			continue
 		}
 		switch p[2] {
-		case "jev":
-			jevN[p[1]] += v
+		case "chispa":
+			chispaN[p[1]] += v
 		case "von", "escalated":
 			vonN[p[1]] += v
 		}
 	}
 	tasks := map[string]bool{}
-	for t := range jevN {
+	for t := range chispaN {
 		tasks[t] = true
 	}
 	for t := range vonN {
 		tasks[t] = true
 	}
-	fmt.Fprintf(w, "# HELP kling_ai_jev_coverage Fraction of classifications JEV answered confidently (since start).\n# TYPE kling_ai_jev_coverage gauge\n")
+	fmt.Fprintf(w, "# HELP kling_ai_chispa_coverage Fraction of classifications Chispa answered confidently (since start).\n# TYPE kling_ai_chispa_coverage gauge\n")
 	for _, t := range sortedKeys(tasks) {
-		fmt.Fprintf(w, "kling_ai_jev_coverage{task=%q} %g\n", t, float64(jevN[t])/float64(jevN[t]+vonN[t]))
+		fmt.Fprintf(w, "kling_ai_chispa_coverage{task=%q} %g\n", t, float64(chispaN[t])/float64(chispaN[t]+vonN[t]))
 	}
-	fmt.Fprintf(w, "# HELP kling_ai_escalation_rate Fraction of classifications where JEV was unsure: sent to VON by an active cascade, or returned with escalate: true (since start).\n# TYPE kling_ai_escalation_rate gauge\n")
+	fmt.Fprintf(w, "# HELP kling_ai_escalation_rate Fraction of classifications where Chispa was unsure: sent to VON by an active cascade, or returned with escalate: true (since start).\n# TYPE kling_ai_escalation_rate gauge\n")
 	for _, t := range sortedKeys(tasks) {
-		fmt.Fprintf(w, "kling_ai_escalation_rate{task=%q} %g\n", t, float64(vonN[t])/float64(jevN[t]+vonN[t]))
+		fmt.Fprintf(w, "kling_ai_escalation_rate{task=%q} %g\n", t, float64(vonN[t])/float64(chispaN[t]+vonN[t]))
 	}
 
 	hist("kling_ai_latency_seconds", "End-to-end latency by task and source.", m.latency, "task", "source")
 	counter("kling_ai_von_unknown_total", "VON answers that were not exactly one of the labels.", m.unknown, "task")
-	counter("kling_ai_degraded_total", "Escalations answered by JEV because VON failed.", m.degraded, "task")
-	counter("kling_ai_audits_total", "Confident JEV answers double-checked by VON in the background.", m.audits, "task", "outcome")
+	counter("kling_ai_degraded_total", "Escalations answered by Chispa because VON failed.", m.degraded, "task")
+	counter("kling_ai_audits_total", "Confident Chispa answers double-checked by VON in the background.", m.audits, "task", "outcome")
 	counter("kling_ai_von_errors_total", "Errors talking to VON replicas.", m.vonErrors, "model", "reason")
 	hist("kling_ai_von_wake_seconds", "Time to get a replica ready: thaw (was frozen), restore (cold start from the golden snapshot) or adopt.", m.wakes, "model", "how")
 	counter("kling_ai_proxy_requests_total", "OpenAI-compatible requests proxied to VON, by status code.", m.proxy, "model", "code")
@@ -178,11 +178,11 @@ func (m *metrics) write(w io.Writer, js jevStats, samples map[string]int, replic
 		fmt.Fprintf(w, "kling_ai_samples{task=%q} %d\n", t, samples[t])
 	}
 	fmt.Fprintf(w, "# TYPE kling_ai_inflight gauge\nkling_ai_inflight %d\n", m.inflight)
-	fmt.Fprintf(w, "# TYPE kling_ai_jev_models_loaded gauge\nkling_ai_jev_models_loaded %d\n", js.Loaded)
-	fmt.Fprintf(w, "# TYPE kling_ai_jev_bytes gauge\nkling_ai_jev_bytes %d\n", js.Bytes)
-	fmt.Fprintf(w, "# TYPE kling_ai_jev_loads_total counter\nkling_ai_jev_loads_total %d\n", js.Loads)
-	fmt.Fprintf(w, "# TYPE kling_ai_jev_evictions_total counter\nkling_ai_jev_evictions_total %d\n", js.Evictions)
-	fmt.Fprintf(w, "# TYPE kling_ai_jev_load_failures_total counter\nkling_ai_jev_load_failures_total %d\n", js.Failures)
+	fmt.Fprintf(w, "# TYPE kling_ai_chispa_models_loaded gauge\nkling_ai_chispa_models_loaded %d\n", js.Loaded)
+	fmt.Fprintf(w, "# TYPE kling_ai_chispa_bytes gauge\nkling_ai_chispa_bytes %d\n", js.Bytes)
+	fmt.Fprintf(w, "# TYPE kling_ai_chispa_loads_total counter\nkling_ai_chispa_loads_total %d\n", js.Loads)
+	fmt.Fprintf(w, "# TYPE kling_ai_chispa_evictions_total counter\nkling_ai_chispa_evictions_total %d\n", js.Evictions)
+	fmt.Fprintf(w, "# TYPE kling_ai_chispa_load_failures_total counter\nkling_ai_chispa_load_failures_total %d\n", js.Failures)
 }
 
 func labelPairs(names []string, k string) string {
