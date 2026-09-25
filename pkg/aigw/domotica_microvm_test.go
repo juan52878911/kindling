@@ -265,6 +265,10 @@ func TestValidateGuestSpans(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	// "salón": la ó ocupa los bytes 10 y 11; cortar en el 11 parte el carácter.
+	if _, err := validateGuestSpans(ok, "pon el salón", []slots.Span{{Slot: "device", Start: 7, End: 11}}); err == nil {
+		t.Error("a span that splits a UTF-8 character was accepted")
+	}
 	got, err := validateGuestSpans(ok, text, []slots.Span{{Slot: "device", Start: 7, End: 10, Text: "mentira"}})
 	if err != nil || got[0].Text != "luz" {
 		t.Fatalf("got %+v %v", got, err)

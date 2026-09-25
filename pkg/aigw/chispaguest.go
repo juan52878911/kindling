@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/chispa"
@@ -315,6 +316,11 @@ func validateGuestSpans(allowed []string, text string, sp []slots.Span) ([]slots
 		}
 		if s.Start < prev || s.End <= s.Start || s.End > len(text) {
 			return nil, fmt.Errorf("slot %q at [%d,%d) is outside the text or out of order", s.Slot, s.Start, s.End)
+		}
+		// Los límites vienen del invitado y son bytes: uno que caiga a mitad de
+		// un carácter multibyte daría un hueco con texto roto ("sal\xc3").
+		if !utf8.RuneStart(text[s.Start]) || (s.End < len(text) && !utf8.RuneStart(text[s.End])) {
+			return nil, fmt.Errorf("slot %q at [%d,%d) splits a UTF-8 character", s.Slot, s.Start, s.End)
 		}
 		prev = s.End
 		out[i] = slots.Span{Slot: s.Slot, Start: s.Start, End: s.End, Text: text[s.Start:s.End]}
