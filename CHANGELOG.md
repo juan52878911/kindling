@@ -6,6 +6,40 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## v0.12.0 — sin publicar
 
+### Mejora continua: Chispa aprende lo que escalaba (`kling ai retrain`)
+
+Diseño, puertas y cifras en [docs/mejora-continua.md](docs/mejora-continua.md).
+
+- **Captura opt-in por tarea** (bloque `learn` del registro): cada respuesta
+  lleva un `id`, y lo que Chispa escala se guarda con su texto filtrado de
+  secretos (o solo su hash), el top-k de Chispa, la versión que lo dijo y los
+  votos de quien contestó después (VON en la cascada, con `von_votes` de
+  autoconsistencia; el codificador en domótica). Escritor en segundo plano,
+  sin bloquear la petición; almacén acotado por tamaño y días.
+- **`POST /v1/feedback` y `kling ai feedback`**: etiquetas humanas (confirmar,
+  corregir, descartar; solo el token principal habla como persona) y votos de
+  maestros externos (`ext:<nombre>`, nunca verdad por sí solos); `-import`
+  para lotes JSONL de otras herramientas.
+- **`kling ai review`**: la cola para una persona, con una auditoría al azar
+  (20 % de las capturas por hash) que es lo único que valida a los maestros, y
+  lo más informativo primero; `-i` interactivo.
+- **`kling ai retrain`**: oro entero + humano + lo de maestros validados que
+  pasa el filtro de acuerdo (con peso y tope por clase), sombra con los mismos
+  hiperparámetros, y promoción solo si gana en el conjunto de confianza
+  (McNemar sobre «contesta bien», precisión confiada sin bajar). Guarda de
+  fugas, versiones `@vN.chispa` con `.prev` y swap atómico; en microvm, un
+  dorado `<snapshot>-vN` verificado por sha256. Vuelve a evaluar la cascada si
+  estaba activa. **`kling ai rollback`** vuelve al instante.
+- **Métricas**: cobertura por versión en vivo, tasa de escalado en ventana,
+  cobertura y precisión por versión en el conjunto de confianza, escaladas y
+  tiempo ahorrados (estimados); sección nueva en `kling ai ls`.
+- `kling chispa train`: campo **`weight`** por ejemplo en el JSONL.
+- Medido con el gateway real y maestros simulados en los datos de domótica:
+  cobertura en el conjunto de confianza de 0,588 a 0,689 en cuatro rondas con
+  la precisión confiada plana (0,976–0,981) y 750 etiquetas humanas; un LLM
+  malo forzado como maestro da un modelo peor (contesta bien 0,676 → 0,625) y
+  la puerta lo rechaza (en las tres semillas medidas).
+
 ### VON más rápido en CPU
 
 Cada cambio con su banco de pruebas y su puerta (entra solo si mejora lo medido
