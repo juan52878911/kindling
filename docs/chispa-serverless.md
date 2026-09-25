@@ -135,6 +135,57 @@ pasa la validación, da 502 (`... sent an invalid answer: ...`). Las tareas
 `inprocess` del mismo registro siguen funcionando (ver
 [chispa.md](chispa.md#modo-sin-daemon) sobre cuándo hace falta daemon y cuándo no).
 
+## Domótica: la capa 2 serverless
+
+La tarea de domótica del gateway (`/v1/decide`, [domotica.md](domotica.md))
+usa el mismo camino: si su `intent` es un modelo `"backend": "microvm"`, la
+capa 2 pregunta a la réplica del dorado (`askChispaGuest` en
+`pkg/aigw/chispaguest.go`, lo mismo que `/v1/classify`: etiquetas validadas
+contra el registro de despliegue, confianza recalculada en el gateway). Con
+`kling chispa deploy <tarea> -model intent.chispa -slots slots.chispas` el
+registro guarda también los huecos del `.chispas` (y su sha256), y la réplica
+marca los huecos en la misma ida y vuelta: el gateway comprueba cada uno
+(nombre conocido, dentro del texto, en orden, como mucho 64) y rehace su
+texto del de la petición. Un dorado sin huecos en el registro (sin `-slots`,
+o desplegado antes) no puede mandar ninguno; entonces los marca el `.chispas`
+de `"slots"` de la tarea, en proceso. Si la tarea pone `"slots"`, gana ese.
+
+La decisión trae `chispa_replica`: `state` (`frozen` = se descongeló,
+`paused` = se reanudó, `warm` = ya estaba despierta, `new` = se restauró del
+dorado), `wake_ms` y `request_ms`; la habitación de demo lo enseña en el paso
+de Chispa de la traza. Si la réplica no contesta o miente, la orden escala
+como una duda (`reason: "chispa_error"`), no da un 503.
+
+Medido en el CT 105 (i7-8700T, KVM sin anidar), la habitación de demo desde
+el Mac por la red de casa: 11 órdenes, dos pasadas. «Chispa» es el paso de la
+capa 2 visto desde el gateway (despertar incluido); «gateway» es
+`/v1/decide` entero más la capa 4 si hizo falta; «Mac» es de punta a punta
+(la red de casa añade 8–25 ms).
+
+| orden | capa | Chispa | estado (despertar) | gateway | Mac |
+|---|---|---|---|---|---|
+| enciende la luz del salón | plantilla | — | no la toca | 0,22 ms | 12,5 ms |
+| baja un poco las persianas del salón | Chispa | 34,0 ms | **congelada** (thaw 29,1 ms) | 34,3 ms | 44,4 ms |
+| ¿puedes poner el salón en azul? | Chispa | 0,70 ms | despierta | 0,92 ms | 8,9 ms |
+| calefacción a veintiuno | Chispa | 0,65 ms | despierta | 0,85 ms | 8,6 ms |
+| kill the lights | Chispa | 0,61 ms | despierta | 0,84 ms | 8,2 ms |
+| crank up the volume | Chispa | 0,59 ms | despierta | 0,76 ms | 9,9 ms |
+| heat to 22 please | LLM (escala) | 0,57 ms | despierta | 4 676 ms | 4 689 ms |
+| no veo nada | Chispa | 0,54 ms | despierta | 0,72 ms | 18,2 ms |
+| pon una alarma a las siete | nadie (escala) | 0,65 ms | despierta | 10,5 ms | 25,1 ms |
+| order a pizza | nadie (escala) | 0,42 ms | despierta | 7,1 ms | 19,9 ms |
+| put the blinds halfway | LLM (escala) | 0,81 ms | despierta | 3 454 ms | 4 049 ms |
+| *tras 3 min ociosa:* baja un poco las persianas del salón | Chispa | 3,34 ms | **pausada** (resume 0,76 ms) | 3,58 ms | 15,8 ms |
+
+Con Chispa en proceso las mismas órdenes daban 0,02–0,07 ms en la capa 2 y
+0,2–0,4 ms en `/v1/decide`: la microVM despierta cuesta ~0,4–0,6 ms más por
+orden (la ida y vuelta HTTP a la réplica), congelada ~30 ms la primera. Las
+decisiones son las mismas: `kling ai eval room` sobre las 9 794 filas de
+prueba da exactamente las mismas cifras con los dos backends (contestadas
+bien 0,311 → 0,321 con el codificador, +104, McNemar p = 4,9·10⁻³²). Ociosa,
+`kling ps` la enseña `paused` (a los 2 min de `-idle`) y luego `warm`
+(congelada, a los 10 × `-idle`); el dorado ocupa 75 MiB en disco.
+
 ## Cifras
 
 Medido en dos sitios muy distintos: un Intel **i7-8700T** de verdad (Proxmox
