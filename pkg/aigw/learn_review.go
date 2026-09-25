@@ -436,7 +436,7 @@ type ReviewCase struct {
 	Teachers  []TeacherVote  `json:"teachers,omitempty"`
 	Proposed  string         `json:"proposed"`
 	Reason    string         `json:"reason"`
-	Audit     bool           `json:"audit,omitempty"` // de la auditoría al azar: mide a los maestros
+	Audit     bool           `json:"audit,omitempty"`      // de la auditoría al azar: mide a los maestros
 	RareClass bool           `json:"rare_class,omitempty"` // la clase propuesta no tiene umbral (siempre escala)
 }
 
