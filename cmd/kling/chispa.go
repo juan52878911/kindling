@@ -16,80 +16,80 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/train"
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/train"
 )
 
-// kling jev: el clasificador lineal diminuto (pkg/jev). Es del núcleo porque no
+// kling chispa: el clasificador lineal diminuto (pkg/chispa). Es del núcleo porque no
 // necesita daemon ni microVM: entrena y predice en la máquina donde corre el
-// CLI, y el gateway futuro lo usará como primer escalón de la cascada JEV → VON.
-// Ver docs/jev.md.
+// CLI, y el gateway futuro lo usará como primer escalón de la cascada Chispa → VON.
+// Ver docs/chispa.md.
 
-const jevUsage = `usage: kling jev <command> [options]
+const chispaUsage = `usage: kling chispa <command> [options]
 
-  train   -data train.jsonl -o model.jev     trains, quantizes, calibrates and
+  train   -data train.jsonl -o model.chispa  trains, quantizes, calibrates and
           [-valid v.jsonl] [-test t.jsonl]   picks per-class thresholds
-  eval    -model m.jev -data test.jsonl      accuracy, macro-F1, per-class metrics,
+  eval    -model m.chispa -data test.jsonl   accuracy, macro-F1, per-class metrics,
           [-json]                            confusion, ECE, coverage at τ
-  predict -model m.jev [-text T]             one prediction, or JSONL from stdin
+  predict -model m.chispa [-text T]          one prediction, or JSONL from stdin
           [-fields JSON] [-top N] [-json]    (one JSON result per line)
-  inspect <model.jev> [-json]                format, feature spec, labels, τ, metadata
+  inspect <model.chispa> [-json]             format, feature spec, labels, τ, metadata
 
-  deploy  <task> -model m.jev [-slots s.jevs] serverless: packages the model as a
+  deploy  <task> -model m.chispa [-slots s.chispas]  serverless: packages the model as a
           [-mem 64] [-vcpus 1]               microVM image and freezes a golden
-                                              snapshot (needs a daemon; docs/jev-serverless.md)
-  ls      [-json]                            deployed jev tasks (golden snapshots)
+                                              snapshot (needs a daemon; docs/chispa-serverless.md)
+  ls      [-json]                            deployed chispa tasks (golden snapshots)
   rm      <task> [-keep-image]               removes a deployed task's snapshot (and image)
 
 Data is JSONL: {"text": "...", "label": "...", "fields": {"service": "api"}}
-Run 'kling jev <command> -h' for the options of each command.
+Run 'kling chispa <command> -h' for the options of each command.
 
 deploy/ls/rm need a kindling daemon (a golden snapshot lives in a microVM);
-train/eval/predict/inspect never do: JEV runs in this process alone.
+train/eval/predict/inspect never do: Chispa runs in this process alone.
 `
 
-func cmdJev(args []string) error {
+func cmdChispa(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Print(jevUsage)
+		fmt.Print(chispaUsage)
 		return nil
 	}
 	switch args[0] {
 	case "train":
-		return cmdJevTrain(args[1:])
+		return cmdChispaTrain(args[1:])
 	case "eval":
-		return cmdJevEval(args[1:])
+		return cmdChispaEval(args[1:])
 	case "predict":
-		return cmdJevPredict(args[1:])
+		return cmdChispaPredict(args[1:])
 	case "inspect":
-		return cmdJevInspect(args[1:])
+		return cmdChispaInspect(args[1:])
 	case "deploy":
-		return cmdJevDeploy(args[1:])
+		return cmdChispaDeploy(args[1:])
 	case "ls", "list":
-		return cmdJevLs(args[1:])
+		return cmdChispaLs(args[1:])
 	case "rm", "remove":
-		return cmdJevRm(args[1:])
+		return cmdChispaRm(args[1:])
 	}
-	return fmt.Errorf("unknown jev command %q\n\n%s", args[0], jevUsage)
+	return fmt.Errorf("unknown chispa command %q\n\n%s", args[0], chispaUsage)
 }
 
-// readJSONL lee ejemplos de un fichero (con topes, ver jev.ReadExamples) y
+// readJSONL lee ejemplos de un fichero (con topes, ver chispa.ReadExamples) y
 // devuelve también el SHA-256 de lo leído, que va a los metadatos del modelo.
-func readJSONL(path string, needLabel bool) ([]jev.Example, string, error) {
+func readJSONL(path string, needLabel bool) ([]chispa.Example, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	exs, err := jev.ReadExamples(io.TeeReader(f, h), 0, needLabel)
+	exs, err := chispa.ReadExamples(io.TeeReader(f, h), 0, needLabel)
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: %w", path, err)
 	}
 	return exs, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func cmdJevTrain(args []string) error {
-	fs := flag.NewFlagSet("jev train", flag.ExitOnError)
+func cmdChispaTrain(args []string) error {
+	fs := flag.NewFlagSet("chispa train", flag.ExitOnError)
 	data := fs.String("data", "", "training JSONL (required)")
 	valid := fs.String("valid", "", "validation JSONL for early stopping, calibration and τ (default: hold out -valid-frac of -data)")
 	test := fs.String("test", "", "optional test JSONL: evaluated after training")
@@ -99,7 +99,7 @@ func cmdJevTrain(args []string) error {
 	bi := fs.Bool("bigrams", true, "word bigrams")
 	char := fs.String("char", "", "character n-grams as MIN-MAX (e.g. 3-5); empty = off")
 	fields := fs.Bool("fields", true, "structured field features")
-	maxText := fs.Int("max-text", jev.DefaultMaxTextBytes, "bytes of text considered")
+	maxText := fs.Int("max-text", chispa.DefaultMaxTextBytes, "bytes of text considered")
 	epochs := fs.Int("epochs", 30, "maximum epochs")
 	patience := fs.Int("patience", 3, "epochs without validation improvement before stopping")
 	lr := fs.Float64("lr", 0.05, "AdaGrad learning rate")
@@ -115,12 +115,12 @@ func cmdJevTrain(args []string) error {
 		return err
 	}
 	if *data == "" || *out == "" {
-		return errors.New("usage: kling jev train -data train.jsonl -o model.jev [options]")
+		return errors.New("usage: kling chispa train -data train.jsonl -o model.chispa [options]")
 	}
 	if *bucketsLog < 4 || *bucketsLog > 22 {
 		return errors.New("-buckets must be between 4 and 22 (log2)")
 	}
-	spec := jev.FeatureSpec{Buckets: 1 << *bucketsLog, Unigrams: *uni, Bigrams: *bi, Fields: *fields, MaxTextBytes: *maxText}
+	spec := chispa.FeatureSpec{Buckets: 1 << *bucketsLog, Unigrams: *uni, Bigrams: *bi, Fields: *fields, MaxTextBytes: *maxText}
 	if *char != "" {
 		lo, hi, ok := strings.Cut(*char, "-")
 		a, err1 := strconv.Atoi(lo)
@@ -142,7 +142,7 @@ func cmdJevTrain(args []string) error {
 	if err != nil {
 		return err
 	}
-	var validEx, testEx []jev.Example
+	var validEx, testEx []chispa.Example
 	if *valid != "" {
 		if validEx, _, err = readJSONL(*valid, true); err != nil {
 			return err
@@ -154,7 +154,7 @@ func cmdJevTrain(args []string) error {
 		}
 	}
 	// SOURCE_DATE_EPOCH: la convención de builds reproducibles. Con ella el
-	// .jev sale idéntico byte a byte en cada entrenamiento con la misma semilla.
+	// .chispa sale idéntico byte a byte en cada entrenamiento con la misma semilla.
 	created := time.Now().UTC().Format(time.RFC3339)
 	if s := os.Getenv("SOURCE_DATE_EPOCH"); s != "" {
 		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
@@ -192,14 +192,14 @@ func cmdJevTrain(args []string) error {
 		v.Accuracy, v.MacroF1, v.ECE, 100*v.Coverage, v.ConfidentPrecision)
 	if len(testEx) > 0 {
 		fmt.Printf("\n== test (%s) ==\n", *test)
-		jev.Evaluate(m, testEx).WriteText(os.Stdout)
+		chispa.Evaluate(m, testEx).WriteText(os.Stdout)
 		fmt.Printf("\nint16 vs float agreement (test): %.4f\n", res.Agreement(testEx))
 	}
 	return nil
 }
 
-func cmdJevEval(args []string) error {
-	fs := flag.NewFlagSet("jev eval", flag.ExitOnError)
+func cmdChispaEval(args []string) error {
+	fs := flag.NewFlagSet("chispa eval", flag.ExitOnError)
 	model := fs.String("model", "", "model file (required)")
 	data := fs.String("data", "", "labelled JSONL (required)")
 	asJSON := fs.Bool("json", false, "JSON output")
@@ -207,9 +207,9 @@ func cmdJevEval(args []string) error {
 		return err
 	}
 	if *model == "" || *data == "" {
-		return errors.New("usage: kling jev eval -model m.jev -data test.jsonl [-json]")
+		return errors.New("usage: kling chispa eval -model m.chispa -data test.jsonl [-json]")
 	}
-	m, err := jev.LoadFile(*model)
+	m, err := chispa.LoadFile(*model)
 	if err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func cmdJevEval(args []string) error {
 		return err
 	}
 	t0 := time.Now()
-	rep := jev.Evaluate(m, exs)
+	rep := chispa.Evaluate(m, exs)
 	took := time.Since(t0)
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -233,8 +233,8 @@ func cmdJevEval(args []string) error {
 	return nil
 }
 
-func cmdJevPredict(args []string) error {
-	fs := flag.NewFlagSet("jev predict", flag.ExitOnError)
+func cmdChispaPredict(args []string) error {
+	fs := flag.NewFlagSet("chispa predict", flag.ExitOnError)
 	model := fs.String("model", "", "model file (required)")
 	text := fs.String("text", "", "text to classify; without it, JSONL inputs are read from stdin")
 	fieldsJSON := fs.String("fields", "", `structured fields as a JSON object, e.g. '{"level":"error"}'`)
@@ -244,16 +244,16 @@ func cmdJevPredict(args []string) error {
 		return err
 	}
 	if *model == "" {
-		return errors.New("usage: kling jev predict -model m.jev [-text T] [-fields JSON] [-top N] [-json]")
+		return errors.New("usage: kling chispa predict -model m.chispa [-text T] [-fields JSON] [-top N] [-json]")
 	}
-	m, err := jev.LoadFile(*model)
+	m, err := chispa.LoadFile(*model)
 	if err != nil {
 		return err
 	}
 	if *text == "" && *fieldsJSON == "" {
 		return predictStream(m, os.Stdin, os.Stdout, *top)
 	}
-	in := jev.Input{Text: *text}
+	in := chispa.Input{Text: *text}
 	if *fieldsJSON != "" {
 		if err := json.Unmarshal([]byte(*fieldsJSON), &in.Fields); err != nil {
 			return fmt.Errorf("-fields: %w", err)
@@ -277,11 +277,11 @@ func cmdJevPredict(args []string) error {
 }
 
 // predictStream clasifica JSONL de r, una respuesta JSON por línea. Las
-// líneas se leen con tope (jev.MaxLineBytes): una entrada sin saltos de línea
+// líneas se leen con tope (chispa.MaxLineBytes): una entrada sin saltos de línea
 // no se come la memoria.
-func predictStream(m *jev.Model, r io.Reader, w io.Writer, top int) error {
+func predictStream(m *chispa.Model, r io.Reader, w io.Writer, top int) error {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64<<10), jev.MaxLineBytes)
+	sc.Buffer(make([]byte, 64<<10), chispa.MaxLineBytes)
 	bw := bufio.NewWriter(w)
 	defer bw.Flush()
 	enc := json.NewEncoder(bw)
@@ -292,7 +292,7 @@ func predictStream(m *jev.Model, r io.Reader, w io.Writer, top int) error {
 		if len(strings.TrimSpace(string(b))) == 0 {
 			continue
 		}
-		var in jev.Input
+		var in chispa.Input
 		if err := json.Unmarshal(b, &in); err != nil {
 			return fmt.Errorf("stdin line %d: %w", line, err)
 		}
@@ -304,23 +304,23 @@ func predictStream(m *jev.Model, r io.Reader, w io.Writer, top int) error {
 }
 
 func fmtTau(t float64) string {
-	if t >= jev.NeverConfident {
+	if t >= chispa.NeverConfident {
 		return "never"
 	}
 	return fmt.Sprintf("%.3f", t)
 }
 
-func cmdJevInspect(args []string) error {
-	fs := flag.NewFlagSet("jev inspect", flag.ExitOnError)
+func cmdChispaInspect(args []string) error {
+	fs := flag.NewFlagSet("chispa inspect", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling jev inspect <model.jev> [-json]")
+		return errors.New("usage: kling chispa inspect <model.chispa> [-json]")
 	}
 	path := fs.Arg(0)
-	m, err := jev.LoadFile(path)
+	m, err := chispa.LoadFile(path)
 	if err != nil {
 		return err
 	}
@@ -344,18 +344,18 @@ func cmdJevInspect(args []string) error {
 		TrainN    int     `json:"train_examples"`
 	}
 	info := struct {
-		File          string          `json:"file"`
-		Bytes         int64           `json:"bytes"`
-		FormatVersion int             `json:"format_version"`
-		Spec          jev.FeatureSpec `json:"spec"`
-		SpecHash      string          `json:"spec_hash"`
-		Binary        bool            `json:"binary"`
-		Outputs       int             `json:"outputs"`
-		NonzeroRows   int             `json:"nonzero_buckets"`
-		Temperature   float64         `json:"temperature"`
-		Labels        []labelInfo     `json:"labels"`
-		Meta          jev.Meta        `json:"meta"`
-	}{path, st.Size(), jev.FormatVersion, m.Spec, fmt.Sprintf("%016x", m.SpecHash), m.Binary, K, rows, m.Temperature, nil, m.Meta}
+		File          string             `json:"file"`
+		Bytes         int64              `json:"bytes"`
+		FormatVersion int                `json:"format_version"`
+		Spec          chispa.FeatureSpec `json:"spec"`
+		SpecHash      string             `json:"spec_hash"`
+		Binary        bool               `json:"binary"`
+		Outputs       int                `json:"outputs"`
+		NonzeroRows   int                `json:"nonzero_buckets"`
+		Temperature   float64            `json:"temperature"`
+		Labels        []labelInfo        `json:"labels"`
+		Meta          chispa.Meta        `json:"meta"`
+	}{path, st.Size(), chispa.FormatVersion, m.Spec, fmt.Sprintf("%016x", m.SpecHash), m.Binary, K, rows, m.Temperature, nil, m.Meta}
 	for c, l := range m.Labels {
 		info.Labels = append(info.Labels, labelInfo{l, m.Thresholds[c], m.Meta.ClassCounts[l]})
 	}
@@ -376,7 +376,7 @@ func cmdJevInspect(args []string) error {
 	if s.CharMin > 0 {
 		char = fmt.Sprintf("%d-%d", s.CharMin, s.CharMax)
 	}
-	fmt.Printf("file:        %s (%s, format v%d)\n", path, human(st.Size()), jev.FormatVersion)
+	fmt.Printf("file:        %s (%s, format v%d)\n", path, human(st.Size()), chispa.FormatVersion)
 	fmt.Printf("model:       %s, %d outputs, temperature %.3f\n", mode, K, m.Temperature)
 	fmt.Printf("features:    2^%d buckets (%d non-zero), unigrams=%v bigrams=%v char=%s fields=%v max-text=%d\n",
 		log2(s.Buckets), rows, s.Unigrams, s.Bigrams, char, s.Fields, s.MaxTextBytes)

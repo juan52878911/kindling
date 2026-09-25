@@ -46,15 +46,15 @@ var (
 
 func cmdBuilder(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: kling builder base|llm|jev <workdir>  (the daemon runs it; see docs/api.md)")
+		return fmt.Errorf("usage: kling builder base|llm|chispa <workdir>  (the daemon runs it; see docs/api.md)")
 	}
 	switch args[0] {
 	case "base":
 		return builderBase(args[1])
 	case "llm":
 		return builderLLM(args[1])
-	case "jev":
-		return builderJEV(args[1])
+	case "chispa":
+		return builderChispa(args[1])
 	default:
 		return fmt.Errorf("unknown builder %q", args[0])
 	}

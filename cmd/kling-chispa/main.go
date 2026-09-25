@@ -1,16 +1,16 @@
-// kling-jev es el servicio de JEV dentro de una microVM: carga un .jev (y,
-// opcional, un .jevs de huecos) al arrancar y sirve POST /v1/classify y
+// kling-chispa es el servicio de Chispa dentro de una microVM: carga un .chispa (y,
+// opcional, un .chispas de huecos) al arrancar y sirve POST /v1/classify y
 // GET /healthz en el puerto del invitado.
 //
 // No es el PID 1 de la microVM —eso lo sigue siendo kling-guest, que lo
 // arranca y lo relanza si muere (SERVICE de scripts/81-base-image.sh, ver
-// cmd/kling/builder_jev.go)—: kling-jev solo sabe de JEV, igual que
+// cmd/kling/builder_chispa.go)—: kling-chispa solo sabe de Chispa, igual que
 // llama-server solo sabe de generar texto en una imagen VON. Así el dorado
 // congelado de una tarea es exactamente eso: un proceso con el modelo ya
 // cargado, listo para que `kling ai serve` lo despierte con la primera
-// petición (docs/jev-serverless.md).
+// petición (docs/chispa-serverless.md).
 //
-// Estático, sin cgo ni dependencias externas (igual que pkg/jev): un solo
+// Estático, sin cgo ni dependencias externas (igual que pkg/chispa): un solo
 // binario por arquitectura basta para la imagen mínima.
 package main
 
@@ -26,8 +26,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 )
 
 // Version se fija al compilar: -ldflags "-X main.Version=..."
@@ -40,11 +40,11 @@ const maxBody = 64 << 10
 
 func main() {
 	listen := flag.String("listen", ":8000", "where to listen (the guest port the daemon proxies)")
-	modelPath := flag.String("model", "/models/task.jev", "path to the .jev model")
-	slotsPath := flag.String("slots", "", "optional path to a .jevs slot model")
+	modelPath := flag.String("model", "/models/task.chispa", "path to the .chispa model")
+	slotsPath := flag.String("slots", "", "optional path to a .chispas slot model")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kling-jev — a JEV model as a kindling guest service\n\n  kling-jev -model m.jev [-slots s.jevs] [-listen :8000]\n\nOptions:\n")
+		fmt.Fprintf(os.Stderr, "kling-chispa — a Chispa model as a kindling guest service\n\n  kling-chispa -model m.chispa [-slots s.chispas] [-listen :8000]\n\nOptions:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -53,7 +53,7 @@ func main() {
 		return
 	}
 
-	m, err := jev.LoadFile(*modelPath)
+	m, err := chispa.LoadFile(*modelPath)
 	if err != nil {
 		log.Fatalf("loading %s: %v", *modelPath, err)
 	}
@@ -67,7 +67,7 @@ func main() {
 	if sm != nil {
 		note = fmt.Sprintf(" + slots %s (%d tags)", *slotsPath, len(sm.SlotNames()))
 	}
-	log.Printf("kling-jev %s: loaded %s (%d labels)%s", Version, *modelPath, len(m.Labels), note)
+	log.Printf("kling-chispa %s: loaded %s (%d labels)%s", Version, *modelPath, len(m.Labels), note)
 
 	srv := &server{model: m, slots: sm}
 	mux := http.NewServeMux()
@@ -95,7 +95,7 @@ func main() {
 		close(done)
 	}()
 
-	log.Printf("kling-jev %s listening on %s", Version, *listen)
+	log.Printf("kling-chispa %s listening on %s", Version, *listen)
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -103,9 +103,9 @@ func main() {
 }
 
 // server sirve las peticiones de clasificación. m es inmutable tras cargarlo
-// (pkg/jev.Model), así que no hace falta ningún candado.
+// (pkg/chispa.Model), así que no hace falta ningún candado.
 type server struct {
-	model *jev.Model
+	model *chispa.Model
 	slots *slots.Model
 }
 
@@ -114,37 +114,37 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // classifyRequest es el cuerpo de POST /v1/classify: el mismo esquema que
-// pkg/aigw.ClassifyRequest usa para hablar con JEV (text, fields), para que el
+// pkg/aigw.ClassifyRequest usa para hablar con Chispa (text, fields), para que el
 // gateway pueda reenviar la petición tal cual cuando la tarea vive en una
 // microVM en vez de en su propio proceso.
 type classifyRequest struct {
 	Text   string         `json:"text"`
 	Fields map[string]any `json:"fields,omitempty"`
-	// Explain pide la distribución completa y la evidencia también cuando JEV
+	// Explain pide la distribución completa y la evidencia también cuando Chispa
 	// contesta seguro (cuesta reservas de memoria); el gateway la usa para
 	// depurar o cuando el cliente pide explain=true (pkg/aigw.ClassifyRequest).
 	Explain bool `json:"explain,omitempty"`
 }
 
-// classifyResponse es la respuesta: la predicción de JEV, y los huecos si hay
+// classifyResponse es la respuesta: la predicción de Chispa, y los huecos si hay
 // modelo de huecos. La cascada (escalar a VON, aplicar umbrales por tarea) la
 // decide quien llama —el gateway—, no esta réplica: aquí solo se sirve lo que
 // dice el modelo.
 //
 // Candidates trae SIEMPRE la distribución ENTERA (no un top-N) cuando va: es
-// lo mismo que pkg/jev.Model.PredictFull da en proceso, para que el gateway
+// lo mismo que pkg/chispa.Model.PredictFull da en proceso, para que el gateway
 // pueda tratar una tarea con backend "microvm" exactamente igual que una en
 // proceso (top_k, la plantilla de la cascada, etc. sin perder etiquetas).
 type classifyResponse struct {
-	Label      string          `json:"label"`
-	Prob       float64         `json:"prob"`
-	Threshold  float64         `json:"threshold"`
-	Confident  bool            `json:"confident"`
-	Decision   string          `json:"decision"`
-	Candidates []jev.ClassProb `json:"candidates,omitempty"`
-	Evidence   []jev.Evidence  `json:"evidence,omitempty"`
-	Slots      []slots.Span    `json:"slots,omitempty"`
-	LatencyUS  float64         `json:"latency_us"`
+	Label      string             `json:"label"`
+	Prob       float64            `json:"prob"`
+	Threshold  float64            `json:"threshold"`
+	Confident  bool               `json:"confident"`
+	Decision   string             `json:"decision"`
+	Candidates []chispa.ClassProb `json:"candidates,omitempty"`
+	Evidence   []chispa.Evidence  `json:"evidence,omitempty"`
+	Slots      []slots.Span       `json:"slots,omitempty"`
+	LatencyUS  float64            `json:"latency_us"`
 }
 
 func (s *server) handleClassify(w http.ResponseWriter, r *http.Request) {
@@ -166,9 +166,9 @@ func (s *server) handleClassify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	in := jev.Input{Text: req.Text, Fields: req.Fields}
+	in := chispa.Input{Text: req.Text, Fields: req.Fields}
 	// Camino rápido: Predict no reserva memoria. Solo se pide la distribución
-	// completa (PredictFull, con reservas) cuando JEV duda o el cliente pide
+	// completa (PredictFull, con reservas) cuando Chispa duda o el cliente pide
 	// explain: es la misma regla que sigue el gateway en proceso
 	// (pkg/aigw.Classify), en una sola vuelta en vez de dos.
 	p := s.model.Predict(in)

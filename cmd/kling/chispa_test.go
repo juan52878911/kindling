@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-// Prueba de extremo a extremo de `kling jev`: compila el binario de verdad y
+// Prueba de extremo a extremo de `kling chispa`: compila el binario de verdad y
 // recorre train → eval → predict → inspect sobre un conjunto diminuto.
 
-func writeJevData(t *testing.T, path string, n, seed int) {
+func writeChispaData(t *testing.T, path string, n, seed int) {
 	t.Helper()
 	vocab := map[string][]string{
 		"bug":  {"crash", "panic", "broken", "segfault", "regression"},
@@ -48,7 +48,7 @@ func writeJevData(t *testing.T, path string, n, seed int) {
 	}
 }
 
-func TestJevCLI(t *testing.T) {
+func TestChispaCLI(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the kling binary")
 	}
@@ -62,9 +62,9 @@ func TestJevCLI(t *testing.T) {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 	p := func(name string) string { return filepath.Join(dir, name) }
-	writeJevData(t, p("train.jsonl"), 400, 1)
-	writeJevData(t, p("valid.jsonl"), 150, 2)
-	writeJevData(t, p("test.jsonl"), 150, 3)
+	writeChispaData(t, p("train.jsonl"), 400, 1)
+	writeChispaData(t, p("valid.jsonl"), 150, 2)
+	writeChispaData(t, p("test.jsonl"), 150, 3)
 
 	run := func(stdin string, args ...string) (string, error) {
 		cmd := exec.Command(kling, args...)
@@ -82,23 +82,23 @@ func TestJevCLI(t *testing.T) {
 		return out
 	}
 
-	trainArgs := []string{"jev", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"),
+	trainArgs := []string{"chispa", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"),
 		"-buckets", "12", "-min-support", "5"}
-	out := mustRun("", append(trainArgs, "-test", p("test.jsonl"), "-o", p("a.jev"))...)
+	out := mustRun("", append(trainArgs, "-test", p("test.jsonl"), "-o", p("a.chispa"))...)
 	for _, want := range []string{"trained", "3 labels", "int16 vs float agreement (test)", "confusion"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("train output lacks %q:\n%s", want, out)
 		}
 	}
 	// Misma semilla y SOURCE_DATE_EPOCH: el fichero sale idéntico byte a byte.
-	mustRun("", append(trainArgs, "-o", p("b.jev"))...)
-	a, _ := os.ReadFile(p("a.jev"))
-	b, _ := os.ReadFile(p("b.jev"))
+	mustRun("", append(trainArgs, "-o", p("b.chispa"))...)
+	a, _ := os.ReadFile(p("a.chispa"))
+	b, _ := os.ReadFile(p("b.chispa"))
 	if !bytes.Equal(a, b) {
 		t.Error("two trainings with the same seed produced different files")
 	}
 
-	out = mustRun("", "jev", "eval", "-model", p("a.jev"), "-data", p("test.jsonl"))
+	out = mustRun("", "chispa", "eval", "-model", p("a.chispa"), "-data", p("test.jsonl"))
 	for _, want := range []string{"accuracy:", "macro-F1:", "ECE:", "confident:", "precision on confident", "confusion"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("eval output lacks %q:\n%s", want, out)
@@ -109,7 +109,7 @@ func TestJevCLI(t *testing.T) {
 		Accuracy float64 `json:"accuracy"`
 		Coverage float64 `json:"coverage"`
 	}
-	if err := json.Unmarshal([]byte(mustRun("", "jev", "eval", "-json", "-model", p("a.jev"), "-data", p("test.jsonl"))), &rep); err != nil {
+	if err := json.Unmarshal([]byte(mustRun("", "chispa", "eval", "-json", "-model", p("a.chispa"), "-data", p("test.jsonl"))), &rep); err != nil {
 		t.Fatal(err)
 	}
 	if rep.N != 150 || rep.Accuracy < 0.9 {
@@ -125,7 +125,7 @@ func TestJevCLI(t *testing.T) {
 		Probs     []any   `json:"probs"`
 		Confident *bool   `json:"confident"`
 	}
-	out = mustRun("", "jev", "predict", "-model", p("a.jev"), "-text", "segfault crash in the parser", "-json", "-top", "3")
+	out = mustRun("", "chispa", "predict", "-model", p("a.chispa"), "-text", "segfault crash in the parser", "-json", "-top", "3")
 	if err := json.Unmarshal([]byte(out), &pred); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
@@ -133,31 +133,31 @@ func TestJevCLI(t *testing.T) {
 		(pred.Decision != "confident" && pred.Decision != "escalate") || pred.Threshold <= 0 {
 		t.Errorf("predict -json: %s", out)
 	}
-	out = mustRun("", "jev", "predict", "-model", p("a.jev"), "-text", "readme typo", "-fields", `{"ext":".md"}`)
+	out = mustRun("", "chispa", "predict", "-model", p("a.chispa"), "-text", "readme typo", "-fields", `{"ext":".md"}`)
 	if !strings.HasPrefix(out, "docs") || !strings.Contains(out, "evidence:") {
 		t.Errorf("predict text output:\n%s", out)
 	}
 	out = mustRun("{\"text\":\"add support for option\"}\n\n{\"text\":\"panic\",\"fields\":{\"ext\":\".go\"}}\n",
-		"jev", "predict", "-model", p("a.jev"))
+		"chispa", "predict", "-model", p("a.chispa"))
 	if lines := strings.Split(strings.TrimSpace(out), "\n"); len(lines) != 2 || !strings.Contains(lines[0], `"label":"feat"`) {
 		t.Errorf("predict from stdin:\n%s", out)
 	}
 
-	out = mustRun("", "jev", "inspect", p("a.jev"))
+	out = mustRun("", "chispa", "inspect", p("a.chispa"))
 	for _, want := range []string{"spec hash:", "2^12 buckets", "multinomial", "adagrad", "LABEL"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("inspect output lacks %q:\n%s", want, out)
 		}
 	}
-	out = mustRun("", "jev", "inspect", "-json", p("a.jev"))
+	out = mustRun("", "chispa", "inspect", "-json", p("a.chispa"))
 	var info map[string]any
 	if err := json.Unmarshal([]byte(out), &info); err != nil || info["spec_hash"] == nil {
 		t.Errorf("inspect -json: %v\n%s", err, out)
 	}
 
 	// Binario uno-contra-resto a partir de los mismos datos multiclase.
-	out = mustRun("", "jev", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"), "-buckets", "12",
-		"-one-vs-rest", "bug", "-o", p("bug.jev"), "-test", p("test.jsonl"))
+	out = mustRun("", "chispa", "train", "-data", p("train.jsonl"), "-valid", p("valid.jsonl"), "-buckets", "12",
+		"-one-vs-rest", "bug", "-o", p("bug.chispa"), "-test", p("test.jsonl"))
 	if !strings.Contains(out, "2 labels") || !strings.Contains(out, "not-bug") {
 		t.Errorf("one-vs-rest:\n%s", out)
 	}
@@ -166,15 +166,15 @@ func TestJevCLI(t *testing.T) {
 	// mensaje útil, no con un pánico.
 	bad := append([]byte(nil), a...)
 	bad[len(bad)/2] ^= 0xff
-	os.WriteFile(p("bad.jev"), bad, 0o644)
-	if out, err := run("", "jev", "eval", "-model", p("bad.jev"), "-data", p("test.jsonl")); err == nil || !strings.Contains(out, "checksum") {
+	os.WriteFile(p("bad.chispa"), bad, 0o644)
+	if out, err := run("", "chispa", "eval", "-model", p("bad.chispa"), "-data", p("test.jsonl")); err == nil || !strings.Contains(out, "checksum") {
 		t.Errorf("corrupt model: err=%v\n%s", err, out)
 	}
 	os.WriteFile(p("broken.jsonl"), []byte("{\"text\":\"a\",\"label\":\"x\"}\n{nope\n"), 0o644)
-	if out, err := run("", "jev", "eval", "-model", p("a.jev"), "-data", p("broken.jsonl")); err == nil || !strings.Contains(out, "line 2") {
+	if out, err := run("", "chispa", "eval", "-model", p("a.chispa"), "-data", p("broken.jsonl")); err == nil || !strings.Contains(out, "line 2") {
 		t.Errorf("broken JSONL: err=%v\n%s", err, out)
 	}
-	if out, err := run("", "jev", "bogus"); err == nil || !strings.Contains(out, "unknown jev command") {
+	if out, err := run("", "chispa", "bogus"); err == nil || !strings.Contains(out, "unknown chispa command") {
 		t.Errorf("unknown subcommand: %v\n%s", err, out)
 	}
 }
