@@ -24,6 +24,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/scheduler"
+	"github.com/juan52878911/kindling/pkg/von"
 )
 
 // GATEWAY DE IA: `kling ai`.
@@ -36,7 +37,7 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload> [...]")
+		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload|prime> [...]")
 	}
 	switch args[0] {
 	case "serve":
@@ -53,8 +54,10 @@ func cmdAI(args []string) error {
 		return aiCalibrate(args[1:])
 	case "reload":
 		return aiReload(args[1:])
+	case "prime":
+		return aiPrime(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate or reload", args[0])
+		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate, reload or prime", args[0])
 	}
 }
 
@@ -770,4 +773,115 @@ func aiReload(args []string) error {
 		fmt.Println("  " + n)
 	}
 	return nil
+}
+
+// aiPrime rehace el dorado de cada modelo VON del registro con los prefijos
+// fijos de sus tareas (system prompt y principio de la plantilla) ya evaluados
+// dentro: la primera petición de una tarea en una réplica recién restaurada
+// solo evalúa su propio texto. Medido en docs/von-cpu.md: con ~800 tokens de
+// system prompt, de 4,7 s a 0,4 s en Qwen2.5-1.5B y de 1,7 s a 0,17 s en
+// Qwen2.5-0.5B. Los prefijos quedan en la caché de prompts de llama-server
+// (-cache-ram de `kling models add`); sin ella solo el último.
+//
+// No es automático: rehacer un dorado cuesta lo que cargar el modelo, y solo
+// hace falta cuando cambian los prompts de las tareas. La etiqueta von.prefixes
+// del dorado dice con qué prefijos se hizo, así que repetirlo sin cambios no
+// hace nada.
+func aiPrime(args []string) error {
+	fs := flag.NewFlagSet("ai prime", flag.ExitOnError)
+	host := hostFlag(fs)
+	cfgPath := fs.String("config", aiDefault("ai.json"), "model and task registry")
+	dryRun := fs.Bool("dry-run", false, "only say what would be done")
+	force := fs.Bool("force", false, "remake the golden snapshot even if its prefixes are up to date")
+	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	cfg, err := aigw.LoadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	models := fs.Args()
+	if len(models) == 0 {
+		for _, n := range sortedNames(cfg.Models) {
+			if cfg.Models[n].Kind == aigw.KindVON {
+				models = append(models, n)
+			}
+		}
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+	byName := map[string]*api.Snapshot{}
+	for _, s := range snaps {
+		byName[s.Name] = s
+	}
+	var errs []error
+	for _, name := range models {
+		m := cfg.Models[name]
+		if m == nil || m.Kind != aigw.KindVON {
+			errs = append(errs, fmt.Errorf("%s: not a von model of the registry", name))
+			continue
+		}
+		s := byName[m.Snapshot]
+		if s == nil || s.Labels[von.LabelModel] == "" {
+			errs = append(errs, fmt.Errorf("%s: golden snapshot %q not found on the daemon (kling models add)", name, m.Snapshot))
+			continue
+		}
+		pre := cfg.Prefixes(name)
+		if len(pre) == 0 {
+			fmt.Printf("%s: its tasks have no fixed prefix (no system prompt nor fixed template text); nothing to do\n", name)
+			continue
+		}
+		h := von.PrefixesHash(pre)
+		if s.Labels[von.LabelPrefixes] == h && !*force {
+			fmt.Printf("%s: %s already has the %d prefix(es) of its tasks (%s)\n", name, s.Name, len(pre), h)
+			continue
+		}
+		if *dryRun {
+			fmt.Printf("%s: would remake %s with %d task prefix(es) (%s)\n", name, s.Name, len(pre), h)
+			continue
+		}
+		// Rehacer pasa por reemplazar el dorado, y el daemon no borra uno con
+		// réplicas vivas (seguirían mapeando su memoria): mejor decirlo antes
+		// de cargar el modelo que después.
+		if s.Instances > 0 {
+			errs = append(errs, fmt.Errorf("%s: %s has %d machine(s) restored from it (the gateway's replicas): remove them first (kling ps; kling rm <ref>)",
+				name, s.Name, s.Instances))
+			continue
+		}
+		// Sin caché de prompts en la imagen (las de antes de v0.12, o
+		// -cache-ram 0) solo sobrevive el último prefijo: se hace igual, pero
+		// se dice.
+		if rec, err := c.ImageRecipe(ctx, s.Image); err == nil && len(pre) > 1 {
+			var sp von.Spec
+			if json.Unmarshal(rec.Spec, &sp) == nil && (sp.CacheRAM == nil || *sp.CacheRAM == 0) {
+				fmt.Printf("  note: image %s has no prompt cache (built before v0.12 or with -cache-ram 0): only the last of the %d prefixes stays evaluated; rebuild it to keep them all\n",
+					s.Image, len(pre))
+			}
+		}
+		extra := map[string]string{}
+		for k, v := range s.Labels {
+			extra[k] = v
+		}
+		fmt.Printf("%s: remaking %s with %d task prefix(es)...\n", name, s.Name, len(pre))
+		t0 := time.Now()
+		g, err := von.MakeGolden(ctx, c, von.GoldenOptions{
+			Image: s.Image, Snapshot: s.Name, Ref: s.Labels[von.LabelModel],
+			VCPUs: s.VCPUs, MemMiB: s.MemMiB, CPUPct: s.CPUPct, AllowExec: s.AllowExec,
+			Replace: true, Wait: *wait, Prefixes: pre, Labels: extra,
+			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		fmt.Printf("✓ %s  %d prefix(es), %v tokens, %s of memory, %s\n", g.Snapshot.Name, len(pre), g.PrefixTokens,
+			human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+	}
+	return errors.Join(errs...)
 }

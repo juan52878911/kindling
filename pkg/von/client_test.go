@@ -20,6 +20,7 @@ import (
 type daemonFalso struct {
 	mu          sync.Mutex
 	cargando    int // respuestas 503 de /health antes del 200
+	chats       []ChatRequest
 	run         api.RunRequest
 	commit      api.CommitRequest
 	borradas    []string
@@ -75,6 +76,7 @@ func (d *daemonFalso) servir(t *testing.T) *api.Client {
 			}
 			var req ChatRequest
 			_ = json.Unmarshal([]byte(g.Body), &req)
+			d.chats = append(d.chats, req)
 			if req.MaxTokens == 0 || len(req.Messages) == 0 {
 				out = api.GuestResponse{Status: 400, Body: "bad"}
 				break
@@ -250,5 +252,52 @@ func TestChat(t *testing.T) {
 	}
 	if _, _, err := Chat(context.Background(), c, "m1", ChatRequest{Stream: true}); err == nil {
 		t.Fatal("stream por el proxy debería rechazarse")
+	}
+}
+
+func TestMakeGoldenPrefijos(t *testing.T) {
+	d := &daemonFalso{}
+	c := d.servir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pre := []Prefix{{System: "You control a smart home."}, {System: "You triage tickets.", User: "Ticket:"}}
+	g, err := MakeGolden(ctx, c, GoldenOptions{
+		Image: "q", Snapshot: "q", Ref: "q:q8_0", VCPUs: 2, MemMiB: 1024, Wait: 5 * time.Second,
+		Prefixes: pre, Labels: map[string]string{LabelPrefixes: "viejo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// El calentamiento y después cada prefijo, en orden, con un token a
+	// temperatura 0; el último es el que queda en la ranura.
+	if len(d.chats) != 3 || len(g.PrefixTokens) != 2 {
+		t.Fatalf("peticiones: %+v, tokens %v", d.chats, g.PrefixTokens)
+	}
+	for i, p := range pre {
+		r := d.chats[i+1]
+		if r.MaxTokens != 1 || r.Temperature == nil || *r.Temperature != 0 ||
+			r.Messages[0].Content != p.System || r.Messages[len(r.Messages)-1].Role != "user" {
+			t.Fatalf("prefijo %d: %+v", i, r)
+		}
+	}
+	if d.chats[2].Messages[1].Content != "Ticket:" || d.chats[1].Messages[1].Content != "Hi" {
+		t.Fatalf("turno del usuario: %+v", d.chats)
+	}
+	// La etiqueta dice qué prefijos lleva el dorado; la que venía se pisa.
+	if d.run.Labels[LabelPrefixes] != PrefixesHash(pre) || PrefixesHash(pre) == "" {
+		t.Fatalf("etiqueta: %v", d.run.Labels)
+	}
+}
+
+func TestPrefixesHash(t *testing.T) {
+	a := []Prefix{{System: "a"}, {System: "b", User: "u"}}
+	b := []Prefix{{System: "b", User: "u"}, {System: "a"}}
+	if PrefixesHash(a) != PrefixesHash(b) || len(PrefixesHash(a)) != 12 {
+		t.Fatalf("el orden no cuenta: %s %s", PrefixesHash(a), PrefixesHash(b))
+	}
+	if PrefixesHash(nil) != "" || PrefixesHash(a) == PrefixesHash(a[:1]) {
+		t.Fatal("conjuntos distintos, hashes distintos; ninguno, vacío")
 	}
 }

@@ -112,6 +112,7 @@ MODELS (VON: small LLMs, OpenAI-compatible API on port 8000)
       [-ctx N] [-cpus N] [-mem MiB] [-replace]     golden snapshot with the model loaded and
       [-url HF_URL -sha256 H] [-rebuild]           warm; serve it with run -from <name>
       [-build-only]                                only the image (to copy it to macOS)
+      [-prefix system.txt]... [-cache-ram MiB]     leaves task prompts evaluated in the golden
   models ask <ref> [-max-tokens N] <prompt...>     asks a replica, prints answer and tok/s
   models rm <name> [-keep-image]                   removes its snapshot and image
 
@@ -150,6 +151,8 @@ const usageTail = `AI GATEWAY (JEV classifies, VON generates, models on demand; 
                                                    answers; writes only if it improves
   ai reload                                        rereads the registry (says which cascades
                                                    are on, forced or refused)
+  ai prime [<model>...] [-dry-run]                 remakes each VON golden snapshot with its
+                                                   tasks' prompt prefixes already evaluated
 
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,

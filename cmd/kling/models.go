@@ -94,13 +94,17 @@ func modelsList(args []string) error {
 		fmt.Println("No models on this daemon yet. Add one:  kling models add von-smol -model smollm2-360m-instruct")
 		return nil
 	}
-	fmt.Fprintln(tw, "NAME\tMODEL\tCPU/MEM\tSNAPSHOT\tINSTANCES")
+	fmt.Fprintln(tw, "NAME\tMODEL\tCPU/MEM\tSNAPSHOT\tPREFIXES\tINSTANCES")
 	for _, s := range mine {
 		ref := s.Labels[von.LabelModel]
 		if k := s.Labels[von.LabelKind]; k != "" {
 			ref += " (" + k + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%d\n", s.Name, ref, s.VCPUs, s.MemMiB, human(s.MemBytes), s.Instances)
+		pf := s.Labels[von.LabelPrefixes]
+		if pf == "" {
+			pf = "—"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\n", s.Name, ref, s.VCPUs, s.MemMiB, human(s.MemBytes), pf, s.Instances)
 	}
 	return tw.Flush()
 }
@@ -125,18 +129,41 @@ func modelsAdd(args []string) error {
 	wait := fs.Duration("wait", 5*time.Minute, "how long to wait for the model to load")
 	acceptLicense := fs.String("accept-license", "", "build a catalog model outside the default catalog, accepting its license (give its id)")
 	buildOnly := fs.Bool("build-only", false, "build the image and stop: e.g. to copy it to a macOS daemon, which cannot build")
+	cacheRAM := fs.Int("cache-ram", -1, fmt.Sprintf("MiB of llama-server's prompt cache, added to the memory (default %d; 0 = off)", von.DefaultCacheRAM))
+	var prefixes stringsFlag
+	fs.Var(&prefixes, "prefix", "file with a task's system prompt to leave evaluated in the golden snapshot (repeatable)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling models add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB]")
+		return fmt.Errorf("usage: kling models add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB] [-prefix system.txt]...")
 	}
 	name := fs.Arg(0)
 	spec := von.Spec{Model: *model, Quant: *quant, URL: *url, SHA256: *sum,
 		Ctx: *ctxSize, Parallel: *parallel, Threads: *threads, AcceptLicense: *acceptLicense}
+	if *cacheRAM >= 0 {
+		spec.CacheRAM = cacheRAM
+	}
 	res, err := spec.Resolve()
 	if err != nil {
 		return err
+	}
+	// La receta guarda la caché de prompts siempre, también la de por defecto:
+	// así una imagen dice con qué --cache-ram arranca aunque el defecto cambie.
+	spec.CacheRAM = &res.CacheRAM
+	var pre []von.Prefix
+	for _, f := range prefixes {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if len(b) == 0 || len(b) > 64<<10 {
+			return fmt.Errorf("-prefix %s: must hold a system prompt of 1 byte to 64 KiB", f)
+		}
+		pre = append(pre, von.Prefix{System: string(b)})
+	}
+	if len(pre) > 1 && res.CacheRAM == 0 {
+		fmt.Println("Note: without a prompt cache (-cache-ram 0) only the last -prefix stays evaluated in the golden.")
 	}
 	if res.Model != nil && !res.Model.Open() {
 		fmt.Printf("License of %s: %s (%s), accepted with -accept-license. It does not allow free use and redistribution: check it before serving or copying this image.\n",
@@ -148,7 +175,10 @@ func modelsAdd(args []string) error {
 			vcpus = res.Model.VCPUs
 		}
 		if memMiB == 0 {
-			memMiB = res.Model.MemMiB
+			// La caché de prompts va aparte de lo medido para el modelo: sin
+			// sumarla, un dorado de 1,5B en 1536 MiB se quedaba sin memoria al
+			// llenarla (docs/von-cpu.md).
+			memMiB = res.Model.MemMiB + res.CacheRAM
 		}
 	}
 	if vcpus == 0 {
@@ -157,7 +187,7 @@ func modelsAdd(args []string) error {
 	if memMiB == 0 {
 		// Un GGUF propio: no se sabe su tamaño hasta bajarlo. 1 GiB cubre hasta
 		// ~0.5B parámetros en Q8_0; para algo mayor, -mem.
-		memMiB = 1024
+		memMiB = 1024 + res.CacheRAM
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -195,7 +225,7 @@ func modelsAdd(args []string) error {
 	g, err := von.MakeGolden(ctx, c, von.GoldenOptions{
 		Image: name, Snapshot: name, Ref: res.Ref, VCPUs: vcpus, MemMiB: memMiB, CPUPct: *cpuPct,
 		Kind: res.Kind, Labels: labels,
-		AllowExec: *allowExec, Replace: *replace, Wait: *wait,
+		AllowExec: *allowExec, Replace: *replace, Wait: *wait, Prefixes: pre,
 		Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {
@@ -203,6 +233,10 @@ func modelsAdd(args []string) error {
 	}
 	fmt.Printf("✓ %s  golden snapshot of %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, res.Ref, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+	if len(pre) > 0 {
+		fmt.Printf("  %d task prefix(es) already evaluated (%v tokens): the first request of those tasks only evaluates its own text.\n",
+			len(pre), g.PrefixTokens)
+	}
 	fmt.Println()
 	fmt.Println("Serve it:")
 	fmt.Printf("  kling run -from %s -name %s-1\n", name, name)
@@ -240,6 +274,9 @@ func modelFlags(s von.Spec) string {
 	if s.Threads != 0 {
 		out = append(out, fmt.Sprintf("-threads %d", s.Threads))
 	}
+	if s.CacheRAM != nil && *s.CacheRAM != von.DefaultCacheRAM {
+		out = append(out, fmt.Sprintf("-cache-ram %d", *s.CacheRAM))
+	}
 	return strings.Join(out, " ")
 }
 
@@ -264,7 +301,16 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 				// La aceptación de la licencia es de quien construye ahora, no
 				// de la receta: una imagen hecha antes de existir el flag vale.
 				prev.AcceptLicense = spec.AcceptLicense
+				if prev.CacheRAM == nil {
+					// Receta de antes de v0.12: su run.sh lleva --cache-ram 0.
+					cero := 0
+					prev.CacheRAM = &cero
+				}
 				pr, perr := prev.Resolve()
+				if perr == nil && rec.Builder == "llm" && pr.Ref == res.Ref && pr.CacheRAM != res.CacheRAM {
+					return fmt.Errorf("image %q was built with a %d MiB prompt cache, not %d: pass -cache-ram %d to reuse it, or -rebuild",
+						name, pr.CacheRAM, res.CacheRAM, pr.CacheRAM)
+				}
 				if rec.Builder != "llm" || perr != nil || pr.Ref != res.Ref || pr.Ctx != res.Ctx || pr.Kind != res.Kind ||
 					pr.Parallel != res.Parallel || pr.Threads != res.Threads {
 					return fmt.Errorf("image %q exists but was built for something else (builder %q, model %q): use another name or -rebuild",

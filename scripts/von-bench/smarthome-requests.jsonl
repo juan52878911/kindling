@@ -1,0 +1,21 @@
+{"text": "turn off the kitchen lights and set the living room to 21 degrees", "expect": [{"device": "light.kitchen", "action": "off", "value": null}, {"device": "climate.living", "action": "set", "value": 21}]}
+{"text": "dim the living room lamp to 30 percent", "expect": [{"device": "light.living_lamp", "action": "set", "value": 30}]}
+{"text": "lock the front door and arm the alarm, we are leaving", "expect": [{"device": "lock.front_door", "action": "lock", "value": null}, {"device": "alarm.house", "action": "arm_away", "value": null}]}
+{"text": "start the robot vacuum", "expect": [{"device": "vacuum.robot", "action": "start", "value": null}]}
+{"text": "open the garage door", "expect": [{"device": "cover.garage_door", "action": "open", "value": null}]}
+{"text": "switch on the coffee machine and open the living room blinds", "expect": [{"device": "switch.coffee_machine", "action": "on", "value": null}, {"device": "cover.living_blinds", "action": "open", "value": null}]}
+{"text": "turn off every light in the bedroom", "expect": [{"device": "light.bedroom", "action": "off", "value": null}]}
+{"text": "pause the TV", "expect": [{"device": "media.living_tv", "action": "pause", "value": null}]}
+{"text": "turn on the garden sprinklers and the porch light", "expect": [{"device": "switch.garden_sprinklers", "action": "on", "value": null}, {"device": "light.porch", "action": "on", "value": null}]}
+{"text": "close all the blinds", "expect": [{"device": "cover.living_blinds", "action": "close", "value": null}, {"device": "cover.bedroom_blinds", "action": "close", "value": null}]}
+{"text": "make the living room light blue", "expect": [{"device": "light.living_main", "action": "set", "value": "blue"}]}
+{"text": "turn off the dishwasher", "expect": [{"device": "switch.dishwasher", "action": "off", "value": null}]}
+{"text": "turn the kitchen speaker volume down to 15", "expect": [{"device": "media.kitchen_speaker", "action": "set", "value": 15}]}
+{"text": "turn on the hallway light", "expect": [{"device": "light.hallway", "action": "on", "value": null}]}
+{"text": "set the bedroom blinds to 50 percent", "expect": [{"device": "cover.bedroom_blinds", "action": "set", "value": 50}]}
+{"text": "unlock the front door", "expect": [{"device": "lock.front_door", "action": "unlock", "value": null}]}
+{"text": "turn off the TV and the living room lights", "expect": [{"device": "media.living_tv", "action": "off", "value": null}, {"device": "light.living_main", "action": "off", "value": null}, {"device": "light.living_lamp", "action": "off", "value": null}]}
+{"text": "send the vacuum back to its dock", "expect": [{"device": "vacuum.robot", "action": "dock", "value": null}]}
+{"text": "set the bedroom thermostat to 19", "expect": [{"device": "climate.bedroom", "action": "set", "value": 19}]}
+{"text": "turn on the bathroom light", "expect": [{"device": "light.bathroom", "action": "on", "value": null}]}
+{"text": "order a pizza", "expect": []}
