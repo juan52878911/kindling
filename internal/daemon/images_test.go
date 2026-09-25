@@ -23,15 +23,44 @@ func indexOf(xs []string, s string) int {
 	return -1
 }
 
+// nuevoManager crea un Manager sobre root y lo cierra al acabar el test.
+//
+// Cerrarlo no es cortesía: NewManager ya deja una escritura de state.json
+// pendiente (reconcile), y persistLoop la hace hasta 250 ms después. Sin
+// Close, esa escritura caía en el TempDir mientras el test lo borraba
+// ("TempDir RemoveAll cleanup: directory not empty") o ya borrado ("state:
+// could not persist it: no such file or directory", en el log de otro test).
+// Close vuelca lo pendiente y espera a persistLoop; t.Cleanup corre en orden
+// inverso, así que va antes que el borrado del TempDir creado primero.
+func nuevoManager(t *testing.T, root string) *machine.Manager {
+	t.Helper()
+	mgr, err := machine.NewManager(root, "", "", events.New())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+	return mgr
+}
+
+// TestManagerNoEscribeTrasElTest: cuando un test que usa nuevoManager acaba,
+// el estado ya está en disco y no queda ninguna escritura en vuelo que pueda
+// caer sobre su TempDir mientras se borra.
+func TestManagerNoEscribeTrasElTest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "daemon")
+	t.Run("usa", func(t *testing.T) { nuevoManager(t, root) })
+	// Las limpiezas del subtest ya corrieron: si la escritura de reconcile
+	// siguiera pendiente, state.json aún no existiría.
+	if _, err := os.Stat(filepath.Join(root, "state.json")); err != nil {
+		t.Fatalf("state.json not flushed before the test's cleanup: %v", err)
+	}
+}
+
 // TestHandleImages cubre GET /images: enumera los .ext4 (menos overlay-template),
 // marca cuáles tienen receta y cuenta los snapshots dorados que salen de cada
 // imagen (el dato que dice cuál se puede retirar sin dejar servicios sin base).
 func TestHandleImages(t *testing.T) {
 	root := t.TempDir()
-	mgr, err := machine.NewManager(root, "", "", events.New())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	mgr := nuevoManager(t, root)
 	imgs := filepath.Join(root, "images")
 
 	// foo (con receta) y bar (sin); overlay-template debe quedar fuera.
@@ -106,10 +135,7 @@ func TestHandleImages(t *testing.T) {
 // apoyan en ella, que es lo que dice si se puede retirar.
 func TestHandleImagesPorCapas(t *testing.T) {
 	root := t.TempDir()
-	mgr, err := machine.NewManager(root, "", "", events.New())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+	mgr := nuevoManager(t, root)
 	imgs := filepath.Join(root, "images")
 
 	// La base, y dos servicios que solo guardan su delta encima.
