@@ -626,8 +626,14 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	// arranca. Sin esperar aquí, la primera petición se comería un "connection
 	// refused" que el cliente MCP interpretaría como que la herramienta no existe.
 	wr0 := time.Now()
-	if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
-		return nil, fmt.Errorf("tool did not start listening: %w", err)
+	// Una reanudada escuchaba cuando se pausó y su VMM no se ha movido: el
+	// sondeo sería una vuelta más (0,2 ms de 2) para nada. Si por lo que sea
+	// no contestara, la primera petición falla al conectar y postGuest/el
+	// proxy ya reintentan con otra.
+	if how != "resume" {
+		if err := g.esperarListo(ctx, mc, readyTimeout); err != nil {
+			return nil, fmt.Errorf("tool did not start listening: %w", err)
+		}
 	}
 	tr.Ready = time.Since(wr0)
 	tr.Total = time.Since(t0)
@@ -924,11 +930,10 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 			g.mu.Unlock()
 			return nil, "", err
 		}
-		// El TTL se renueva después: una pausada cuenta como viva para el
-		// vigilante del daemon, que la congelaría si vence, no la perdería.
-		t = time.Now()
-		g.renovarTTL(ctx, m.ID)
-		tr.Renew += time.Since(t)
+		// El TTL se renueva después y en segundo plano: una pausada cuenta como
+		// viva para el vigilante del daemon, que la congelaría si vence, no la
+		// perdería; y no hay por qué esperar esa vuelta (0,2 ms de 2 medidos).
+		go g.renovarTTL(context.WithoutCancel(ctx), m.ID)
 		return th, "resume", nil
 	}
 	// 3) alguna congelada: ~30 ms. También para el scale-out: una réplica que

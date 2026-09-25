@@ -188,6 +188,26 @@ for i in range(n):
     ms, r = classify()
     e2e.append(ms)
 after = metrics()
+if mode == "paused":
+    # What a paused replica keeps: its VMM's memory (the cost of the tier).
+    t = time.time()
+    while time.time() - t < 60:
+        rs = [m for m in replicas() if m["state"] == "paused"]
+        if rs:
+            break
+        time.sleep(0.2)
+    for m in rs:
+        pid = m.get("pid", 0)
+        kv = {}
+        for f in (f"/proc/{pid}/status", f"/proc/{pid}/smaps_rollup"):
+            try:
+                for line in open(f):
+                    k, _, v = line.partition(":")
+                    kv[k] = v.strip()
+            except OSError:
+                pass
+        print(f"{mode}: paused replica {m['name']} (mem_mib {m['mem_mib']}): RSS {kv.get('VmRSS','?')} "
+              f"(anon {kv.get('RssAnon','?')}, file {kv.get('RssFile','?')}), PSS {kv.get('Pss','?')}")
 print(f"{mode}: {n} cycles, replica state before each call: {sorted(set(states))}; ms")
 print(" client view (HTTP to kling ai serve)")
 row("down -> decision", e2e)
