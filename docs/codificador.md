@@ -267,13 +267,29 @@ De lo que la cascada con codificador escala en test (6 554 filas) y en el reto:
    la persiana a la mitad» → `cover_close`. Arreglarlos es reentrenar JEV (con
    indirectas) o subir su umbral en esas clases.
 
-## Ajuste fino con GPU (receta, sin ejecutar)
+## Mejora futura (no aplicada): ajuste fino con GPU
+
+**Decisión: no se ejecuta por ahora.** El objetivo del producto es que JEV
+corra en máquinas de CPU corrientes, con eficacia y bajo demanda; el
+codificador (capa 3) y VON (capa 4) son capas opcionales que se encienden solo
+cuando una evaluación muestra que hacen falta. El ajuste fino de abajo mejora
+justo la capa 3, no ese objetivo, y tiene un coste y un riesgo (los datos
+indirectos son pocos y de una sola persona) que no compensan ahora mismo. Se
+deja documentado, con receta y coste, para retomarlo si el lenguaje indirecto
+se vuelve un problema real de tráfico.
+
+Lo que ganaría: resolver el lenguaje indirecto («hace muchísimo calor en el
+salón», «no oigo la tele») **dentro de la capa 3** (~3 ms), en vez de escalar
+esas órdenes a VON (cientos de milisegundos y una réplica despierta). Es la
+laguna descrita en "Qué sigue necesitando VON" más arriba: el punto 1, la más
+frecuente en el reto (10 de 18 escaladas).
 
 El paso que falta para que la capa 3 entienda lo indirecto es el de SetFit:
 ajustar el **cuerpo** del codificador con pares de frases (misma intención =
 cerca, distinta = lejos; pérdida de coseno) a partir de pocos ejemplos por
 intención, y entrenar después la cabeza de siempre sobre sus vectores. En CPU
-no es razonable; **no se ha lanzado ninguna instancia**.
+no es razonable; **no se ha lanzado ninguna instancia, y la receta de abajo no
+se ha probado** (ni el ajuste en GPU ni la conversión de sus pesos).
 
 Ficheros: `scripts/encoder-setfit/finetune.py` (sentence-transformers, pares
 estilo SetFit: por frase, 20 positivos y 20 negativos), `requirements.txt`

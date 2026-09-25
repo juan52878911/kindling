@@ -23,7 +23,10 @@ sin empeorar la calidad); lo que no funcionó, también contado. Todo en
   una réplica recién restaurada pasa de 4,7 s a 0,38 s en Qwen2.5-1.5B y de 1,7 s
   a 0,17 s en Qwen2.5-0.5B; alternar dos tareas en la misma réplica, de 2,8 s a
   0,11 s por petición. Una imagen anterior se reutiliza con `-cache-ram 0` (solo
-  queda el último prefijo).
+  queda el último prefijo). No aplica a los codificadores (kind `embed`,
+  [docs/codificador.md](docs/codificador.md)): cada petición es una frase
+  corta y distinta, así que su spec fija `-cache-ram 0` siempre y `kling models
+  add -prefix` / `kling ai prime` los rechazan con un mensaje claro.
 - **`json_schema` por tarea** en las generaciones del gateway: la salida de VON
   se restringe a JSON que cumple el esquema (de 19/21 a 21/21 respuestas válidas
   en Qwen2.5-1.5B, de 11/21 a 21/21 en 0.5B), y el gateway contesta 502 si aun así
@@ -102,6 +105,10 @@ Diseño, cifras y la receta del ajuste fino en
 - `scripts/98-encoder-bench.sh` (latencia y memoria de un codificador) y
   `scripts/encoder-setfit/` (ajuste fino contrastivo con GPU: receta sin
   ejecutar).
+- **Mejora futura, no aplicada:** el ajuste fino con GPU de arriba resolvería
+  el lenguaje indirecto dentro de la capa 3 en vez de escalarlo a VON; decisión
+  de no lanzarlo por ahora y detalle (coste, tiempo, alternativa en Mac con
+  MPS) en [docs/codificador.md](docs/codificador.md#mejora-futura-no-aplicada-ajuste-fino-con-gpu).
 
 ## v0.11.0 — 2026-09-24
 

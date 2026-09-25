@@ -235,3 +235,13 @@ están acotadas (líneas de 1 MiB, 4 GiB, 5 M de ejemplos).
   entre versiones de Go (no entre plataformas).
 - La evidencia son pesos de un modelo lineal: dice qué empujó, no por qué. Con
   pocos datos aparecen palabras vacías («w:el», «w:que») como evidencia.
+
+## Mejoras futuras
+
+JEV en CPU es el objetivo: rápido, barato y bajo demanda. Cuando JEV duda, la
+cascada puede escalar a capas más caras y opcionales (el codificador de
+frases, VON) solo si una evaluación muestra que hacen falta. Una de esas
+mejoras está documentada pero no aplicada: el [ajuste fino del codificador con
+GPU](codificador.md#mejora-futura-no-aplicada-ajuste-fino-con-gpu), que
+resolvería el lenguaje indirecto en la capa 3 (~3 ms) en vez de escalarlo a
+VON.
