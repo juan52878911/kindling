@@ -1,0 +1,34 @@
+kindling
+Copyright the kindling authors.
+
+This repository does not ship third-party datasets. The tool in
+tools/domotica-data downloads the following datasets, converts them and uses
+them to train the smart-home models described in docs/domotica.md. Data and
+models derived from them must carry these attributions (CC BY 4.0, section
+3(a)). Changes made: only the es/en portions are used; intents are relabeled to
+the demo-room taxonomy; slots are trimmed and normalized; Home Assistant
+templates are expanded into sentences with the demo room's areas and devices.
+Details: docs/domotica-datos.md.
+
+--------------------------------------------------------------------------------
+MASSIVE 1.0
+Copyright Amazon.com Inc. or its affiliates.
+FitzGerald et al., "MASSIVE: A 1M-Example Multilingual Natural Language
+Understanding Dataset with 51 Typologically-Diverse Languages", 2022.
+https://github.com/alexa/massive
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+
+MASSIVE includes and is derived from SLURP:
+Bastianelli, Vanzo, Swietojanski and Rieser, "SLURP: A Spoken Language
+Understanding Resource Package", EMNLP 2020.
+https://github.com/pswietojanski/slurp
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+--------------------------------------------------------------------------------
+Home Assistant intents (sentence templates, rules and lists)
+Copyright the contributors of https://github.com/OHF-Voice/intents
+(formerly https://github.com/home-assistant/intents), tag 2026.9.17,
+commit 4af16c0ccc6f0567654c04554833fe3e5e7467ba.
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
