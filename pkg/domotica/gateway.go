@@ -230,9 +230,9 @@ func WakesBetween(before, after map[string]*WakeCount) []Wake {
 // TaskInfo es lo que se usa de GET /v1/tasks.
 type TaskInfo struct {
 	Name    string `json:"name"`
-	Kind    string `json:"kind"` // classify | generate | domotica
+	Kind    string `json:"kind"`   // classify | generate | domotica
 	Chispa  string `json:"chispa"` // modelo rápido de una tarea domotica
-	VON     string `json:"von"`  // LLM de una generación
+	VON     string `json:"von"`    // LLM de una generación
 	Cascade *struct {
 		Status string `json:"status"` // capa 3 de una tarea domotica: on | forced | refused | off
 		To     string `json:"to"`     // su codificador

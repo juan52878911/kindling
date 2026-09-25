@@ -30,11 +30,11 @@ const (
 	// que conozca» y el LLM propone una orden directa: gana Chispa (ver VON.Decide).
 	ReasonVetoedByChispa = "chispa_veto"
 	ReasonLowProb        = "low_probability" // Chispa por debajo del umbral de su clase
-	ReasonMissingSlot  = "missing_slot"    // intención clara pero falta el valor o el color
-	ReasonMultiCommand = "multi_command"   // «enciende la luz y baja la persiana»
-	ReasonNoModel      = "no_model"        // no hay modelo Chispa cargado
-	ReasonOutOfScope   = "out_of_scope"    // Chispa no ve una orden directa; que lo mire el LLM
-	ReasonEncoderError = "encoder_error"   // el codificador no contestó (se escala igual)
+	ReasonMissingSlot    = "missing_slot"    // intención clara pero falta el valor o el color
+	ReasonMultiCommand   = "multi_command"   // «enciende la luz y baja la persiana»
+	ReasonNoModel        = "no_model"        // no hay modelo Chispa cargado
+	ReasonOutOfScope     = "out_of_scope"    // Chispa no ve una orden directa; que lo mire el LLM
+	ReasonEncoderError   = "encoder_error"   // el codificador no contestó (se escala igual)
 )
 
 // Decision es lo que devuelve Decide: qué hacer, con qué, qué capa lo decidió
