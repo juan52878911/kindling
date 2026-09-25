@@ -24,6 +24,9 @@
 # de 80-mcp-image.sh; ver docs/three-layers.md.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib-ext4-shrink.sh"
+
 ROOT="${KLING_ROOT:-/var/lib/kindling}"
 NAME="${NAME:?falta NAME}"
 BASE="${BASE:-min}"
@@ -146,40 +149,9 @@ rm -rf "$layer_mnt/work"
 umount "$layer_mnt"
 sync
 
-# fs_sano dice si el ext4 está limpio sin tocarlo. No basta el código de salida
-# de `e2fsck -fn`: e2fsprogs 1.47.0 sale con 0 aunque haya contestado «no» a
-# «Resize inode not valid. Recreate?», así que también cuenta cualquier
-# pregunta que se quedó sin arreglar.
-fs_sano() {
-  local out
-  out=$(e2fsck -fn "$1" 2>&1) || return 1
-  ! printf '%s\n' "$out" | grep -q '? no$'
-}
+# El encogido seguro (copiar, encoger la copia, adoptarla solo si sale
+# sana de e2fsck) vive en lib-ext4-shrink.sh, compartido con
+# 70-build-minimal-image.sh y 71-build-glibc-base.sh.
+ext4_shrink_safe "$LAYER"
 
-# Comprobar ANTES de encoger: resize2fs se niega a tocar un fs sin comprobar, y
-# encoger uno con errores los empeora.
-e2fsck -fy "$LAYER" >/dev/null 2>&1 || [ $? -lt 4 ] || { echo "ERROR: la capa quedó irreparable" >&2; exit 1; }
-fs_sano "$LAYER" || { echo "ERROR: la capa quedó irreparable" >&2; exit 1; }
-
-# Se encoge una COPIA y solo se da por buena si sale sana: encoger es un
-# ahorro de disco, nunca una razón para perder la capa. La copia es dispersa,
-# así que cuesta lo que ocupa de verdad, no GROW.
-rm -f "$SHRUNK"
-cp --sparse=always "$LAYER" "$SHRUNK"
-encogida=0
-if resize2fs -M "$SHRUNK" >/dev/null 2>&1; then
-  blocks=$(dumpe2fs -h "$SHRUNK" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2); print $2}')
-  bsize=$(dumpe2fs -h "$SHRUNK" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
-  if [ -n "$blocks" ] && [ -n "$bsize" ]; then
-    truncate -s "$((blocks * bsize))" "$SHRUNK"
-    fs_sano "$SHRUNK" && encogida=1
-  fi
-fi
-if [ "$encogida" = 1 ]; then
-  mv -f "$SHRUNK" "$LAYER"
-else
-  rm -f "$SHRUNK"
-  echo "AVISO: no se pudo encoger la capa sin dañarla; ocupará más disco del necesario" >&2
-fi
-fs_sano "$LAYER" || { echo "ERROR: la capa no pasa e2fsck" >&2; exit 1; }
 echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales)"

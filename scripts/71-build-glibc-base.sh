@@ -26,6 +26,7 @@ SUITE="${SUITE:-bookworm}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 PKGS="${PKGS:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib-ext4-shrink.sh"
 BRIDGE="${BRIDGE:-./kling-bridge}"
 
 # Familias con nombre, igual que en la base de Alpine: el operador no tiene que
@@ -80,7 +81,7 @@ mkdir -p "$ROOT/images"
 DEST="$ROOT/images/$NAME.ext4"
 rm -f "$DEST"
 truncate -s "$SIZE" "$DEST"
-mkfs.ext4 -q -F -E nodiscard "$DEST"
+ext4_mkfs_sin_resize_inode "$DEST"
 mount -o loop "$DEST" "$mnt"
 
 echo "debootstrap $SUITE/$DEB_ARCH (tarda unos minutos)..."
@@ -194,8 +195,7 @@ else
 fi
 
 umount "$mnt"
-e2fsck -fp "$DEST" >/dev/null 2>&1 || true
-resize2fs -M "$DEST" >/dev/null 2>&1 || true
+ext4_shrink_safe "$DEST"
 
 # HOLGURA. resize2fs -M deja la imagen ajustada al byte, y entonces no cabe ni
 # su propio recambio del puente: sustituirlo escribe al lado y renombra, asi que
