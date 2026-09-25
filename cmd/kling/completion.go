@@ -26,8 +26,8 @@ var coreSubcommands = [][2]string{
 	{"plugins", "ls"},
 	{"sandbox|sandboxes", "create ls renew rm"},
 	{"models", "ls add ask rm"},
-	{"chispa", "train eval predict inspect"},
-	{"domotica", "decide eval train-slots templates"},
+	{"chispa", "train eval predict inspect deploy ls rm"},
+	{"domotica", "decide eval train-slots templates eval-llm"},
 	{"ai", "serve ls test generate eval calibrate reload prime review feedback retrain rollback"},
 }
 

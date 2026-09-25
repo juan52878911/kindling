@@ -189,6 +189,36 @@ siempre. Detalle, diagrama y cifras en
   réplicas del mismo dorado en Linux se quedan pendientes (requieren volver a
   entrar en el host de pruebas; ver docs/chispa-serverless.md).
 
+### Domótica: capa 4 (un LLM con salida JSON) y la habitación de demo
+
+Diseño en [docs/domotica.md](docs/domotica.md#capa-4-un-llm-con-salida-json),
+cifras en [docs/DOMOTICA-EVAL.md](docs/DOMOTICA-EVAL.md#capa-4-el-llm-von), la
+demo en [docs/demo-domotica.md](docs/demo-domotica.md).
+
+- **Capa 4** (`pkg/domotica`): lo que las capas 1–3 escalan va a un LLM VON por
+  una tarea de generación del gateway (`POST /v1/generate`) con un esquema JSON
+  (`kind`, `reply` y hasta 4 `actions` con intención, dispositivo, zona, valor
+  y color de la taxonomía). La respuesta se valida estrictamente y se ancla a
+  la frase (zona, color y número que la frase nombra; nunca abrir la puerta ni
+  desarmar la alarma sin decirlo); si algo falla, no se hace nada y se pide
+  aclaración. Un veto no deja convertir en orden lo que el modelo rápido da por
+  fuera de ámbito, salvo lo indirecto. Varias órdenes en una frase: 8 de 9 bien.
+- **`kling domotica eval-llm`** compara la capa 4 con «escalar y no hacer nada»
+  (McNemar y la cascada entera ponderada con lo que no es para la habitación),
+  en dos alcances, y escribe el registro que la enciende. Con
+  Qwen2.5-1.5B Q4_K_M pasa solo donde el modelo rápido duda: 31 órdenes más
+  bien en MASSIVE, ninguna acción fuera de ámbito (errores confiados 1,7 → 1,9 %);
+  preguntándole por todo, actúa en el 1,5 % de la charla y empeora la cascada.
+- `domotica.Cascade` con capas enchufables (`Layer`, `FastFunc`), su traza por
+  capa (`Trace`) y los adaptadores al gateway (`GatewayClient`: `/v1/decide`,
+  `/v1/generate`, `/v1/tasks`, despertares de `/metrics`).
+- **La habitación de demo** es un ejemplo aparte, [`examples/domotica`](examples/domotica/README.md):
+  página embebida (sin CDN) con el plano en SVG, órdenes de ejemplo y texto
+  libre, traza por capa con latencia y el despertar de cada microVM, panel de
+  microVMs por capa con su memoria (del daemon) y contadores; simulador de
+  dispositivos en Go con SSE; español e inglés, claro y oscuro, accesible;
+  loopback por defecto, cuerpos acotados, CSP estricta. Registro de ejemplo del
+  gateway (`ai.json`) y unidades de systemd para el servidor x86.
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)
 
