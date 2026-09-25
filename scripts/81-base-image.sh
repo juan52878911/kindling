@@ -62,10 +62,17 @@ pkg_add() {
 }
 
 LAYER="$ROOT/images/$NAME.layer.ext4"
+SHRUNK="$LAYER.shrink" # la copia que se encoge (ver más abajo)
 [ "$GROW" -gt 0 ] || GROW=256
 rm -f "$LAYER"
 truncate -s "${GROW}M" "$LAYER"
-mkfs.ext4 -q -F -O '^has_journal' -E nodiscard "$LAYER"
+# Sin resize_inode: ese inodo solo sirve para crecer EN CALIENTE (montado), y
+# una capa no se monta en escritura más que aquí y, sin montar, en un refresco
+# (crecerImagen), donde resize2fs crece igual sin él. Con él, `resize2fs -M` de
+# una capa pequeña y casi llena (un Chispa: GROW ≈ contenido + 24 MiB) la dejaba
+# con «Resize inode not valid» en e2fsprogs 1.47.0 (Ubuntu 24.04), medido en
+# la VM de Lima: todas las capas por debajo de ~60 MiB.
+mkfs.ext4 -q -F -O '^has_journal,^resize_inode' -E nodiscard "$LAYER"
 
 mnt="$(mktemp -d)"; base_mnt="$(mktemp -d)"; layer_mnt="$(mktemp -d)"
 ov_up() {
@@ -81,7 +88,7 @@ ov_down() {
   umount "$layer_mnt" 2>/dev/null || true
   umount "$base_mnt"  2>/dev/null || true
 }
-cleanup() { ov_down; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
+cleanup() { ov_down; rm -f "$SHRUNK"; rmdir "$mnt" "$layer_mnt" "$base_mnt" 2>/dev/null || true; }
 trap cleanup EXIT
 ov_up
 
@@ -139,16 +146,40 @@ rm -rf "$layer_mnt/work"
 umount "$layer_mnt"
 sync
 
-# Comprobar ANTES de encoger: resize2fs se niega a tocar un fs sin comprobar.
-if ! e2fsck -fp "$LAYER" >/dev/null 2>&1; then
-  e2fsck -fy "$LAYER" >/dev/null 2>&1 || { echo "ERROR: la capa quedó irreparable" >&2; exit 1; }
+# fs_sano dice si el ext4 está limpio sin tocarlo. No basta el código de salida
+# de `e2fsck -fn`: e2fsprogs 1.47.0 sale con 0 aunque haya contestado «no» a
+# «Resize inode not valid. Recreate?», así que también cuenta cualquier
+# pregunta que se quedó sin arreglar.
+fs_sano() {
+  local out
+  out=$(e2fsck -fn "$1" 2>&1) || return 1
+  ! printf '%s\n' "$out" | grep -q '? no$'
+}
+
+# Comprobar ANTES de encoger: resize2fs se niega a tocar un fs sin comprobar, y
+# encoger uno con errores los empeora.
+e2fsck -fy "$LAYER" >/dev/null 2>&1 || [ $? -lt 4 ] || { echo "ERROR: la capa quedó irreparable" >&2; exit 1; }
+fs_sano "$LAYER" || { echo "ERROR: la capa quedó irreparable" >&2; exit 1; }
+
+# Se encoge una COPIA y solo se da por buena si sale sana: encoger es un
+# ahorro de disco, nunca una razón para perder la capa. La copia es dispersa,
+# así que cuesta lo que ocupa de verdad, no GROW.
+rm -f "$SHRUNK"
+cp --sparse=always "$LAYER" "$SHRUNK"
+encogida=0
+if resize2fs -M "$SHRUNK" >/dev/null 2>&1; then
+  blocks=$(dumpe2fs -h "$SHRUNK" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2); print $2}')
+  bsize=$(dumpe2fs -h "$SHRUNK" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
+  if [ -n "$blocks" ] && [ -n "$bsize" ]; then
+    truncate -s "$((blocks * bsize))" "$SHRUNK"
+    fs_sano "$SHRUNK" && encogida=1
+  fi
 fi
-if resize2fs -M "$LAYER" >/dev/null 2>&1; then
-  blocks=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2); print $2}')
-  bsize=$(dumpe2fs -h "$LAYER" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2); print $2}')
-  [ -n "$blocks" ] && [ -n "$bsize" ] && truncate -s "$((blocks * bsize))" "$LAYER"
-  e2fsck -fp "$LAYER" >/dev/null 2>&1 || { echo "ERROR: la capa quedó dañada al encogerla" >&2; exit 1; }
+if [ "$encogida" = 1 ]; then
+  mv -f "$SHRUNK" "$LAYER"
 else
-  echo "AVISO: no se pudo encoger la capa; ocupará más disco del necesario" >&2
+  rm -f "$SHRUNK"
+  echo "AVISO: no se pudo encoger la capa sin dañarla; ocupará más disco del necesario" >&2
 fi
+fs_sano "$LAYER" || { echo "ERROR: la capa no pasa e2fsck" >&2; exit 1; }
 echo "imagen '$NAME' lista — capa sobre base '$BASE' ($(du -h "$LAYER" | cut -f1) reales)"
