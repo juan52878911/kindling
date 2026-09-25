@@ -171,6 +171,11 @@ type Scheduler struct {
 	// "restore" (nueva desde el snapshot), y d lo que costó hasta que el
 	// puerto aceptó. Es la métrica de arranques en frío del gateway de IA.
 	OnAcquire func(service, how string, d time.Duration)
+	// OnSleep, si está, se llama con el servicio y la dirección (Addr del
+	// puerto Port) de cada instancia que se va a congelar o pausar (segador o
+	// desalojo), justo antes de hacerlo. El gateway de IA cierra ahí sus
+	// conexiones reutilizables hacia ella: no sobreviven a un despertar.
+	OnSleep func(service, addr string)
 	// OnWake, si está, se llama junto a OnAcquire con el desglose por fases
 	// de ese despertar (ver WakeTrace).
 	OnWake func(service string, t *WakeTrace)
@@ -1422,7 +1427,15 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 			}
 		}
 	}
+	// Las direcciones se resuelven antes de quitarlas del mapa: después ya no
+	// queda la entrada de la que sacarlas.
+	var dormidas []dormida
+	var addrs []string
 	for _, v := range victims {
+		if e := g.entryByMachineLocked(v.service, v.id); e != nil {
+			dormidas = append(dormidas, v)
+			addrs = append(addrs, e.Addr(g.port()))
+		}
 		g.removeEntryLocked(v.service, v.id)
 	}
 	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
@@ -1460,6 +1473,14 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	g.mu.Unlock()
 
+	// Antes de dormirlas, con el invitado aún corriendo: así el cierre de sus
+	// conexiones ociosas llega a él y el volcado no guarda conexiones a medias
+	// que al despertar el host ya no reconoce.
+	if g.OnSleep != nil {
+		for i, v := range dormidas {
+			g.OnSleep(v.service, addrs[i])
+		}
+	}
 	g.dormir(ctx, victims)
 	g.enfriarPausadas(ctx)
 	for _, id := range renovar {
@@ -1591,6 +1612,9 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 			continue // esa esta ocupada; se prueba otra
 		}
 
+		if g.OnSleep != nil && victima != nil {
+			g.OnSleep(elegido, victima.Addr(g.port()))
+		}
 		err := freeze(id)
 		vlock.Unlock()
 		if err != nil {
