@@ -159,6 +159,10 @@ type TaskConfig struct {
 	// OnVONError: "chispa" (por defecto) contesta con la etiqueta de Chispa marcada
 	// como degradada si VON no responde; "error" devuelve 503.
 	OnVONError string `json:"on_von_error,omitempty"`
+	// Learn activa la mejora continua de la tarea (learn.go): capturar lo que
+	// Chispa escala, etiquetas humanas por /v1/feedback, `kling ai review` y
+	// `kling ai retrain` con puerta. Clasificación y domótica.
+	Learn *LearnConfig `json:"learn,omitempty"`
 }
 
 // IsGenerate dice si la tarea es de generación (VON) y no de clasificación.
@@ -203,7 +207,17 @@ func LoadConfig(path string) (*Config, error) {
 			m.Path = filepath.Join(filepath.Dir(path), m.Path)
 		}
 	}
+	rel := func(p *string) {
+		if *p != "" && !filepath.IsAbs(*p) {
+			*p = filepath.Join(filepath.Dir(path), *p)
+		}
+	}
 	for _, t := range c.Tasks {
+		if l := t.Learn; l != nil {
+			rel(&l.Gold)
+			rel(&l.Heldout)
+			rel(&l.Valid)
+		}
 		if d := t.Domotica; d != nil {
 			for _, p := range []*string{&d.Slots, &d.Head} {
 				if *p != "" && !filepath.IsAbs(*p) {
@@ -290,6 +304,13 @@ func (c *Config) Validate() error {
 		if t == nil {
 			errs = append(errs, fmt.Errorf("task %q: empty", n))
 			continue
+		}
+		if t.Learn != nil {
+			if t.VON != "" {
+				errs = append(errs, fmt.Errorf("task %q: learn is for classification and domotica tasks (a generation has no Chispa to teach)", n))
+			} else {
+				errs = append(errs, validateLearn(n, t.Learn, t.EscalateTo)...)
+			}
 		}
 		if t.Domotica != nil {
 			errs = append(errs, c.validateDomotica(n, t)...)

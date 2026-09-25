@@ -155,6 +155,14 @@ const usageTail = `AI GATEWAY (Chispa classifies, VON generates, models on deman
                                                    are on, forced or refused)
   ai prime [<model>...] [-dry-run]                 remakes each VON golden snapshot with its
                                                    tasks' prompt prefixes already evaluated
+  ai review <task> [-n 20] [-i]                    captured escalations a person should
+                                                   confirm or correct (docs/mejora-continua.md)
+  ai feedback <task> -id ID -label L               records a human label (or -discard,
+      [-teacher NAME] [-import labels.jsonl]       a teacher's answer, or a batch)
+  ai retrain <task> [-dry-run] [-rule R]           trains a shadow Chispa on gold + human +
+                                                   validated teachers; promotes it only if it
+                                                   wins on the trusted held-out set
+  ai rollback <task> [-to vN]                      serves the previous (or given) version
 
 DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,

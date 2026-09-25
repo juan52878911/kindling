@@ -226,6 +226,8 @@ réplica caliente, 981 ms si estaba congelada por inactividad.
 | `POST /v1/admin/eval` | la evaluación de `kling ai eval` (cuerpo de hasta 64 MiB); solo el token principal |
 | `POST /v1/admin/calibrate` | recalibración (`kling ai calibrate`); solo el token principal |
 | `POST /v1/admin/reload` | relee el registro; solo el token principal |
+| `POST /v1/feedback` | etiqueta humana (token principal) o voto de un maestro externo para una respuesta (`id`) o un texto ([mejora-continua.md](mejora-continua.md)) |
+| `POST /v1/admin/review`, `/retrain`, `/promote`, `/rollback` | la mejora continua: cola de revisión, reentreno con puerta, promoción de una versión microvm y vuelta atrás |
 | `GET /metrics` | Prometheus |
 | `GET /healthz` | sin token |
 
@@ -491,6 +493,11 @@ que la puerta haya validado contra etiquetas de verdad.
   uno) y con la réplica caliente 5,7–10 s; en el Mac, 0,35 s. Un primer intento
   con un dorado de 1,5B cargándose al lado pasó de los 5 min del plazo del
   proxy y dio 502, como debe.
+
+La recalibración de umbrales con VON sigue existiendo, pero lo que la
+sustituye es el reentreno con puerta de [mejora-continua.md](mejora-continua.md):
+maestros validados contra etiquetas de verdad, texto, el oro siempre dentro y
+promoción solo si gana en un conjunto de confianza.
 
 ## Límites conocidos
 
