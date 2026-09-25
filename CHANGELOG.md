@@ -120,6 +120,41 @@ Diseño, cifras y la receta del ajuste fino en
   el lenguaje indirecto dentro de la capa 3 en vez de escalarlo a VON; decisión
   de no lanzarlo por ahora y detalle (coste, tiempo, alternativa en Mac con
   MPS) en [docs/codificador.md](docs/codificador.md#mejora-futura-no-aplicada-ajuste-fino-con-gpu).
+### JEV serverless: tareas en microVMs congeladas (`kling jev deploy`)
+
+Hasta ahora JEV solo vivía dentro del proceso del gateway (`kind: "jev"`,
+microsegundos, sin daemon). Ahora es también una tarea serverless de kindling,
+igual que un VON: `kling jev deploy <tarea> -model m.jev [-slots s.jevs] [-mem
+64] [-vcpus 1]` empaqueta el `.jev` con un invitado nuevo, estático y sin cgo,
+`cmd/kling-jev` (carga el modelo al arrancar y sirve `/v1/classify` y
+`/healthz`), y congela un dorado con el constructor `jev` nuevo (mismo motor que
+`llm`: capa sobre la base `min`, sin nada que descargar). En el registro del
+gateway, `"backend": "microvm"` en vez de `"path"` hace que la tarea la sirva
+esa réplica —despertada y congelada por `pkg/scheduler`, como a un VON— en vez
+de este proceso; `"backend": "inprocess"` (o nada) sigue siendo la opción de
+siempre. Detalle, diagrama y cifras en
+[docs/jev-serverless.md](docs/jev-serverless.md).
+
+- Medido en un i7-8700T (Proxmox CT 105, KVM sin anidar, backend Firecracker):
+  imagen de 13 MB en disco (capa sobre `min`), dorado de 45 MB; primer arranque
+  desde el dorado (`restore`) 1,41 s, **thaw de una réplica congelada + primera
+  decisión, 135-140 ms**; con la réplica ya despierta, mediana 0,57-3 ms según
+  concurrencia y hasta 4231 decisiones/s a 16 clientes por el gateway (HTTP +
+  microVM). El mismo modelo en proceso, en el mismo host: mediana 91-123 µs y
+  hasta 26 924 decisiones/s a 4 clientes.
+- **Carga bajo demanda de modelos JEV en proceso, medida** (Mac M4): RSS ocioso
+  con 0/10/100 modelos en el registro (nada cargado todavía) 15,5/18,3/28,3 MiB;
+  con un presupuesto de memoria (`-jev-mem`), el LRU desaloja de verdad (20
+  modelos usados, presupuesto de 8 MiB → 5 quedan cargados); hasta 113 000
+  decisiones/s agregadas a 32 clientes por el mismo camino HTTP en proceso.
+- `pkg/aigw`: `ModelConfig.Backend` (`inprocess` | `microvm`), validado; la
+  cascada JEV → VON funciona igual desde una réplica microvm (candidatos y
+  evidencia enteros, no un top-3, para que `top_k` no pierda etiquetas).
+- **No entró de esta rama:** el barrido de 1/10/50 tareas microvm simultáneas en
+  el backend `vz` del Mac y la comprobación de compartición de páginas entre
+  réplicas del mismo dorado en Linux se quedan pendientes (requieren volver a
+  entrar en el host de pruebas; ver docs/jev-serverless.md).
+
 
 ## v0.11.0 — 2026-09-24
 

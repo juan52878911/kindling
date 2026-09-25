@@ -19,6 +19,14 @@ const (
 // encontró un corte que diera la precisión pedida: siempre escala.
 const NeverConfident = 2.0
 
+// GuestPort es el puerto en el que kling-jev (cmd/kling-jev) sirve
+// /v1/classify dentro de una microVM, cuando una tarea se despliega como
+// backend "microvm" (docs/jev-serverless.md) en vez de en el propio proceso
+// del gateway. Es el mismo número que von.Port: los puertos de una microVM no
+// chocan entre máquinas distintas, así que cualquier invitado puede usar 8000
+// sin coordinarse con los demás.
+const GuestPort = 8000
+
 // Model es un clasificador lineal cuantizado. Es inmutable tras cargarlo o
 // construirlo, así que Predict se puede llamar desde muchas goroutines a la vez.
 type Model struct {

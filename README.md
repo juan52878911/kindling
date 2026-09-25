@@ -731,7 +731,10 @@ kling jev predict -model events.jev -text "panic in the parser" -fields '{"servi
 
 Design and file format: [`docs/jev.md`](docs/jev.md). An honest evaluation on 4,304
 real commits, including where the thresholds stop holding:
-[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
+[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md). JEV can also run **serverless**, one task per
+frozen microVM golden snapshot woken on demand (the same model as VON below):
+`kling jev deploy`, measured thaw and throughput numbers in
+[`docs/jev-serverless.md`](docs/jev-serverless.md).
 
 ## AI gateway: many models ready, none running 24/7
 
@@ -1144,6 +1147,7 @@ instances share pages.
 | [`docs/three-layers.md`](docs/three-layers.md) | Layered images: design, measurements, runtime families |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
 | [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, the tiny linear classifier: features, `.jev` format, cascade; its evaluation on real commits |
+| [`docs/jev-serverless.md`](docs/jev-serverless.md) | JEV as a serverless kindling task: one frozen golden snapshot per task, `kling jev deploy`, measured thaw and throughput vs. in-process |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Smart-home decisions (`kling domotica`): demo templates → JEV intent + JEV-slots, free datasets and their licenses, evaluation (Spanish) |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: JEV classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
