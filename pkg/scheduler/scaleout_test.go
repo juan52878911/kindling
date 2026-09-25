@@ -1,6 +1,14 @@
 package scheduler
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // La fórmula de capacidad debe coincidir con deriveMaxSessions del puente: si
 // diverge, el gateway escala de más o de menos (el 400 lo salva, pero mal).
@@ -100,5 +108,75 @@ func TestElegirInstanciaPorCarga(t *testing.T) {
 	llenas := func(string) int { return 8 }
 	if e, libre := elegirInstancia([]*entry{a, b}, llenas, 4); e != nil || libre != nil {
 		t.Fatalf("sin sesiones libres: %v, %v", e, libre)
+	}
+}
+
+// max_replicas es un tope DURO aunque lleguen muchas peticiones a la vez. Antes
+// cada goroutine leía "hay menos réplicas que el tope" y salía a crear la suya
+// sin contar las que otras ya estaban creando: con max_replicas 2 y una tarea
+// Chispa bajo un conjunto de CI arrancaban 8 réplicas. Ahora las que están
+// naciendo cuentan, y lo que no cabe se reparte entre las que hay.
+func TestMaxReplicasBajoConcurrencia(t *testing.T) {
+	var creadas atomic.Int64
+	g := &Scheduler{
+		services:    map[string]*entry{},
+		extra:       map[string][]*entry{},
+		routes:      map[string]*sessionRoute{},
+		MaxInflight: 1,
+		MaxReplicas: 2,
+	}
+	g.services["chispa"] = &entry{machineID: "m-0", maxSessions: 32, checkedAt: time.Now(), lastUse: time.Now()}
+	g.buildFn = func(ctx context.Context, service string, _ *tenant, _ bool) (*entry, error) {
+		n := creadas.Add(1)
+		time.Sleep(20 * time.Millisecond) // lo que tarda un restore: la ventana de la carrera
+		return &entry{machineID: fmt.Sprintf("m-%d", n), maxSessions: 32, lastUse: time.Now()}, nil
+	}
+
+	const peticiones = 64
+	var wg sync.WaitGroup
+	errs := make(chan error, peticiones)
+	for i := 0; i < peticiones; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e, err := g.pickInstance(context.Background(), "chispa", tenantFrom(context.Background()))
+			if err != nil {
+				errs <- err
+				return
+			}
+			g.begin(e) // sigue en vuelo: satura su instancia para las demás
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("pickInstance: %v (below the cap a request is served, not rejected)", err)
+	}
+	g.mu.Lock()
+	total := len(g.entriesLocked("chispa"))
+	g.mu.Unlock()
+	if total > 2 || creadas.Load() > 1 {
+		t.Fatalf("max_replicas 2: %d instances, %d scale-outs; want at most 2 instances and 1 scale-out", total, creadas.Load())
+	}
+}
+
+// Sin hueco en ninguna instancia (todas llenas de sesiones) y en el tope, el
+// error lo dice: no se crea otra réplica por encima de max_replicas.
+func TestMaxReplicasSinHuecoDaError(t *testing.T) {
+	g := &Scheduler{
+		services:    map[string]*entry{},
+		extra:       map[string][]*entry{},
+		routes:      map[string]*sessionRoute{},
+		MaxReplicas: 1,
+	}
+	g.services["svc"] = &entry{machineID: "m-0", maxSessions: 1, checkedAt: time.Now()}
+	g.routes["s1"] = &sessionRoute{service: "svc", machineID: "m-0"}
+	g.buildFn = func(context.Context, string, *tenant, bool) (*entry, error) {
+		t.Fatal("scale-out beyond max_replicas")
+		return nil, nil
+	}
+	_, err := g.pickInstance(context.Background(), "svc", tenantFrom(context.Background()))
+	if !errors.Is(err, ErrMaxReplicas) {
+		t.Fatalf("err = %v; want ErrMaxReplicas", err)
 	}
 }
