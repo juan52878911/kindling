@@ -107,6 +107,16 @@ SRC="src/$MODEL"
 echo "$FILES" | while read -r sum f; do
 	[ -n "$f" ] && fetch "https://huggingface.co/$REPO/resolve/$REV/$f" "$sum" "$SRC/$f"
 done
+# SRC_DIR: los pesos de un ajuste fino (scripts/encoder-setfit) en vez de los
+# publicados. Solo cambian los pesos: tokenizador, configuración y resumen son
+# los de la revisión fijada. Sin sha256 esperado hasta que el modelo se gane
+# su sitio (entonces se fija en el catálogo).
+if [ -n "${SRC_DIR:-}" ]; then
+	SRC="src/$MODEL-tuned"
+	rm -rf "$SRC" && mkdir -p "$SRC" && cp -r "src/$MODEL/." "$SRC/"
+	cp "$SRC_DIR/model.safetensors" "$SRC/model.safetensors"
+	WANT=""
+fi
 
 # El conversor lee config.json y ve "BertModel": con eso buscaría un
 # vocabulario WordPiece, y estos modelos usan el SentencePiece de XLM-RoBERTa.
@@ -118,7 +128,7 @@ done
 # (docs/codificador.md).
 CONV="conv/$MODEL"
 rm -rf "$CONV" && mkdir -p "$CONV"
-for f in "$SRC"/*; do [ -f "$f" ] && ln -s "$PWD/$f" "$CONV/"; done
+for f in "$SRC"/*; do if [ -f "$f" ]; then ln -s "$PWD/$f" "$CONV/"; fi; done
 ln -s "$PWD/$SRC/1_Pooling" "$CONV/1_Pooling"
 rm "$CONV/config.json"
 venv/bin/python - "$SRC/config.json" "$CONV/config.json" <<'EOF'

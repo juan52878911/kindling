@@ -31,6 +31,44 @@ Diseño en [docs/domotica.md](docs/domotica.md), datos y licencias en
   convierte a un esquema único con repartos sin fugas.
 - `jev.FoldRune` se exporta para que otros extractores plieguen igual que JEV.
 
+### Domótica: capa 3, el codificador de frases
+
+Diseño, cifras y la receta del ajuste fino en
+[docs/codificador.md](docs/codificador.md); evaluación en
+[docs/DOMOTICA-EVAL.md](docs/DOMOTICA-EVAL.md#capa-3-el-codificador).
+
+- **Codificadores en el catálogo de VON** (kind `embed`):
+  `multilingual-e5-small` (MIT) y `paraphrase-multilingual-minilm-l12-v2`
+  (Apache-2.0), Q8_0. `kling models add enc-e5 -model multilingual-e5-small`
+  construye con el mismo constructor `llm` (`llama-server --embeddings
+  --pooling mean`) y congela un dorado calentado con frases reales; `kling
+  models embed <réplica> "<texto>"`. Réplica de 512 MiB: ~3 ms por orden en un
+  Mac M4; en Linux, +10 MiB de PSS por réplica de más.
+- **`scripts/encoder-gguf.sh`**: nadie de confianza publica su GGUF, así que se
+  convierten con el conversor de llama.cpp b11147, todo fijado (pesos por
+  sha256, código, `uv`, paquetes) y reproducible bit a bit; validado contra
+  transformers (coseno 1,00000 en F16, ≥ 0,999 en Q8_0). El constructor toma un
+  GGUF convertido de su caché por hash.
+- **`pkg/codificador`**: cabeza (regresión logística o una capa oculta) sobre
+  los vectores congelados, en Go puro, determinista, int16, calibrada con la
+  temperatura y los umbrales por clase de JEV; formato `.jenc` endurecido
+  (`FuzzUnmarshal`), caché de vectores `.jemb`, cliente de `/v1/embeddings`
+  acotado, k-NN de comparación.
+- **Cascada**: `Decider.Encoder` (capa 3) y `DecideContext`; lo que el
+  codificador tampoco resuelve escala a `"von"`. `kling domotica embed`,
+  `train-encoder`, y `-encoder`/`-embed-url`/`-embed-cache` en `decide` y
+  `eval`. Bate la marca: MASSIVE exact 0,745 es / 0,800 en (0,718 / 0,782), 2
+  errores confiados en el reto; lo indirecto sigue siendo de VON.
+- **Gateway**: tareas `domotica` en `/v1/decide`, modelos `kind: "embed"`
+  despertados y congelados por `pkg/scheduler`, y `kling ai eval` de la tarea,
+  cuyo registro enciende la capa 3 solo si contesta bien más órdenes sin más
+  errores confiados.
+- `pkg/domotica/indirect.jsonl`: 180 órdenes indirectas escritas a mano con
+  reparto train/valid/test (`train-encoder -indirect`, y el test en `eval`).
+- `scripts/98-encoder-bench.sh` (latencia y memoria de un codificador) y
+  `scripts/encoder-setfit/` (ajuste fino contrastivo con GPU: receta sin
+  ejecutar).
+
 ## v0.11.0 — 2026-09-24
 
 ### Modelos VON: LLM pequeños bajo demanda (`kling models`)

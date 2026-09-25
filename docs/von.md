@@ -92,6 +92,15 @@ curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 | `qwen2.5-1.5b-instruct` | `q8_0` | 1807 MiB | 4 / 2304 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-1.5b-instruct` | `q4_k_m` | 1066 MiB | 4 / 1536 MiB | Qwen, rev `91cad511` | Apache-2.0 |
 | `qwen2.5-3b-instruct` | `q4_k_m` (única) | 2007 MiB | 4 / 2816 MiB | Qwen, rev `7dabda4d` | **Qwen Research** (no comercial): fuera del catálogo por defecto |
+| `multilingual-e5-small` (codificador, kind `embed`) | `q8_0` | 126 MiB | 2 / 512 MiB | intfloat, rev `614241f6`, **convertido por kindling** | MIT |
+| `paraphrase-multilingual-minilm-l12-v2` (codificador) | `q8_0` | 126 MiB | 2 / 512 MiB | sentence-transformers, rev `e8f8c211`, convertido | Apache-2.0 |
+
+Los **codificadores de frases** (kind `embed`) se sirven con la misma
+maquinaria: `llama-server --embeddings`, `POST /v1/embeddings`, dorado
+calentado con frases reales, `kling models embed <réplica> "<texto>"`. Nadie de
+confianza publica su GGUF, así que se convierten de los pesos fijados con
+`scripts/encoder-gguf.sh` (reproducible bit a bit) y el constructor los toma de
+su caché por hash. Son la capa 3 de la domótica: [codificador.md](codificador.md).
 
 Cada entrada lleva revisión de Hugging Face (commit, no rama), sha256, licencia
 y dónde leerla (`pkg/von`, `kling models ls`); el constructor verifica el hash
