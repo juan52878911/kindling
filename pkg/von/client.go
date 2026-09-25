@@ -240,6 +240,9 @@ type GoldenOptions struct {
 	Labels map[string]string
 	// Log recibe el progreso, línea a línea. Puede ser nil.
 	Log func(format string, args ...any)
+	// Kind es el de la imagen (KindEmbed para un codificador): decide cómo se
+	// calienta. Quien llama añade LabelKind a Labels.
+	Kind string
 }
 
 // GoldenResult es lo que costó cada paso, para contarlo.
@@ -322,7 +325,7 @@ func MakeGolden(ctx context.Context, c *api.Client, o GoldenOptions) (*GoldenRes
 	warmHasta := time.Now().Add(o.Wait)
 	var w *ChatResponse
 	for {
-		if w, err = Warm(ctx, c, mc.ID); err == nil {
+		if w, err = warm(ctx, c, mc.ID, o.Kind); err == nil {
 			break
 		}
 		if ctx.Err() != nil || time.Now().After(warmHasta) {

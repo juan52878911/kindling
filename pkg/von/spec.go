@@ -47,6 +47,10 @@ type Spec struct {
 	// para un modelo del catálogo que no es de licencia abierta (Model.Open).
 	// Tiene que ser exactamente el suyo: aceptar "lo que sea" no es aceptar.
 	AcceptLicense string `json:"accept_license,omitempty"`
+	// Kind y Pooling hacen de un GGUF propio (URL) un codificador de frases:
+	// Kind "embed" y Pooling mean, cls o last. Los del catálogo ya los traen.
+	Kind    string `json:"kind,omitempty"`
+	Pooling string `json:"pooling,omitempty"`
 }
 
 // Resolved es un Spec validado y completo: lo que el constructor necesita.
@@ -62,6 +66,9 @@ type Resolved struct {
 	CacheRAM int // MiB de la caché de prompts; 0 = sin ella
 	// Model es la entrada del catálogo, si viene de él.
 	Model *Model
+	// Kind y Pooling: ver Spec. Kind vacío = modelo instruct.
+	Kind    string
+	Pooling string
 }
 
 var (
@@ -115,6 +122,9 @@ func (s Spec) Resolve() (Resolved, error) {
 	if r.Parallel == 0 {
 		r.Parallel = 1
 	}
+	if err := resolveEmbed(&r, s); err != nil {
+		return r, err
+	}
 	if r.Ctx < 256 || r.Ctx > 131072 {
 		return r, fmt.Errorf("ctx out of range: %d (256..131072)", r.Ctx)
 	}
@@ -126,6 +136,18 @@ func (s Spec) Resolve() (Resolved, error) {
 	}
 	if r.Threads < 0 || r.Threads > 64 {
 		return r, fmt.Errorf("threads out of range: %d (0 = one per vCPU, up to 64)", r.Threads)
+	}
+	if r.Kind == KindEmbed {
+		// Un codificador no genera texto de a poco a partir de un prompt largo
+		// y fijo: cada petición es una frase corta y distinta, así que no hay
+		// prefijo que reutilizar. La caché de prompts se queda a 0 siempre (ni
+		// entra en la memoria de la microVM) y pedirla explícitamente es un
+		// error, no un valor que se ignora en silencio.
+		if s.CacheRAM != nil && *s.CacheRAM != 0 {
+			return r, fmt.Errorf("cache-ram only applies to instruct models: %s is an encoder (kind %s) and never uses the prompt cache", r.Ref, KindEmbed)
+		}
+		r.CacheRAM = 0
+		return r, nil
 	}
 	r.CacheRAM = DefaultCacheRAM
 	if s.CacheRAM != nil {
@@ -204,7 +226,7 @@ func (r Resolved) RunScript() string {
 		b.WriteString("THREADS=$(nproc)\n")
 	}
 	b.WriteString("exec /opt/llama.cpp/llama-server")
-	for _, a := range r.ServerArgs() {
+	for _, a := range append(r.ServerArgs(), r.EmbedArgs()...) {
 		if a == "$THREADS" {
 			b.WriteString(` "$THREADS"`)
 			continue

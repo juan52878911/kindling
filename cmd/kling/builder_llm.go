@@ -132,7 +132,19 @@ func builderLLM(dir string) error {
 	// 3. El GGUF, verificado. En la caché va por hash: el nombre del fichero no
 	// identifica nada (dos repos pueden llamar igual a dos ficheros distintos).
 	cached := filepath.Join(cache, "models", res.SHA256+".gguf")
-	if err := fetchVerified(res.URL, res.SHA256, cached); err != nil {
+	if res.URL == "" {
+		// Un GGUF que convierte kindling (los codificadores): no hay nada que
+		// descargar, tiene que estar ya en la caché, y con su hash.
+		if got, err := sha256File(cached); err != nil || got != res.SHA256 {
+			// URL vacía solo sale de una entrada del catálogo convertida: Model
+			// no es nil (Spec.Resolve exige URL a un GGUF propio).
+			m := res.Model
+			return fmt.Errorf("model %s is converted from %s by kindling, not downloaded: run\n"+
+				"  sudo scripts/encoder-gguf.sh %s -install\n"+
+				"on this host (it converts the pinned weights with llama.cpp %s's converter and checks sha256 %s)",
+				res.Ref, m.Source+"@"+m.SourceRevision[:12], m.ID, von.LlamaTag, res.SHA256[:12])
+		}
+	} else if err := fetchVerified(res.URL, res.SHA256, cached); err != nil {
 		return fmt.Errorf("model %s: %w", res.Ref, err)
 	}
 	st, err := os.Stat(cached)
@@ -165,6 +177,7 @@ func builderLLM(dir string) error {
 		"model": res.Ref, "file": res.File, "sha256": res.SHA256, "url": res.URL,
 		"ctx": res.Ctx, "parallel": res.Parallel, "threads": res.Threads,
 		"port": von.Port, "llama_cpp": von.LlamaTag, "api": "openai",
+		"kind": res.Kind, "pooling": res.Pooling,
 	}, "", "  ")
 	if err := os.WriteFile(filepath.Join(etc, "model.json"), append(manifest, '\n'), 0o644); err != nil {
 		return err

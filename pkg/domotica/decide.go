@@ -1,6 +1,7 @@
 package domotica
 
 import (
+	"context"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/jev"
@@ -12,10 +13,14 @@ const (
 	LayerTemplate = "template" // emparejador de órdenes de la demo
 	LayerJEV      = "jev"      // intención JEV + huecos JEV-slots
 	LayerNone     = "none"     // ninguna capa rápida contesta
-	// EscalateTo es la capa siguiente, que aún no existe aquí: un codificador
-	// de frases (MiniLM/e5-small) y detrás un LLM pequeño (VON) con salida
-	// JSON. Decision.Escalate la nombra para que el gateway sepa a dónde ir.
+	LayerEncoder  = "encoder"  // capa 3: codificador de frases + cabeza (pkg/codificador)
+	// EscalateTo es la capa siguiente a las rápidas: el codificador de frases
+	// (capa 3). Decision.Escalate la nombra para que el gateway sepa a dónde ir.
 	EscalateTo = "encoder"
+	// EscalateVON es la capa 4, un LLM pequeño con salida JSON: a donde va lo
+	// que tampoco resuelve el codificador (o lo que no es para él, como dos
+	// órdenes en una frase).
+	EscalateVON = "von"
 )
 
 // Motivos por los que una decisión no es confiada.
@@ -25,6 +30,7 @@ const (
 	ReasonMultiCommand = "multi_command"   // «enciende la luz y baja la persiana»
 	ReasonNoModel      = "no_model"        // no hay modelo JEV cargado
 	ReasonOutOfScope   = "out_of_scope"    // JEV no ve una orden directa; que lo mire el LLM
+	ReasonEncoderError = "encoder_error"   // el codificador no contestó (se escala igual)
 )
 
 // Decision es lo que devuelve Decide: qué hacer, con qué, qué capa lo decidió
@@ -40,6 +46,19 @@ type Decision struct {
 	Escalate  string       `json:"escalate,omitempty"`
 	LatencyUS float64      `json:"latency_us"`
 	Spans     []slots.Span `json:"spans,omitempty"`
+	// Lo que dijeron las capas rápidas cuando decidió (o se consultó) la capa
+	// 3, y lo que tardó el codificador: para leer una decisión sin repetirla.
+	FastIntent   string  `json:"fast_intent,omitempty"`
+	FastProb     float64 `json:"fast_prob,omitempty"`
+	EncoderUS    float64 `json:"encoder_us,omitempty"`
+	EncoderError string  `json:"encoder_error,omitempty"`
+}
+
+// IntentEncoder es la capa 3: la intención de una frase según un codificador
+// de frases y su cabeza (pkg/codificador.Layer). confident es su umbral por
+// clase, elegido en validación como el de JEV.
+type IntentEncoder interface {
+	ClassifyIntent(ctx context.Context, text string) (intent string, prob float64, confident bool, err error)
 }
 
 // Decider encadena las capas rápidas. Matcher es obligatorio; Intent y Slots
@@ -54,6 +73,12 @@ type Decider struct {
 	// defecto no: escala, porque las órdenes indirectas caen ahí (ver
 	// docs/DOMOTICA-EVAL.md, frases de reto).
 	FinalOOS bool
+	// Encoder es la capa 3 (nil = no hay: lo no confiado escala a
+	// "encoder"). Con ella, lo que tampoco resuelve escala a "von".
+	Encoder IntentEncoder
+	// OnlyEncoder salta las capas 1 y 2 y pregunta siempre al codificador
+	// (para evaluarlo solo).
+	OnlyEncoder bool
 }
 
 // Campos de JEV por idioma, compartidos y de solo lectura: construir el mapa
@@ -65,11 +90,25 @@ var langFields = map[string]map[string]any{
 
 // Decide decide qué hacer con text. lang "" o "auto" lo detecta.
 func (d *Decider) Decide(text, lang string) Decision {
+	return d.DecideContext(context.Background(), text, lang)
+}
+
+// DecideContext es Decide con un contexto para la capa 3, que es una
+// petición a una réplica (las capas rápidas no lo miran).
+func (d *Decider) DecideContext(ctx context.Context, text, lang string) Decision {
 	t0 := time.Now()
 	if lang == "" || lang == "auto" {
 		lang = DetectLang(text)
 	}
-	out := d.decide(text, lang)
+	var out Decision
+	if d.OnlyEncoder {
+		out = Decision{Layer: LayerNone, Reason: ReasonNoModel, Escalate: EscalateTo}
+	} else {
+		out = d.decide(text, lang)
+	}
+	if !out.Confident && d.Encoder != nil {
+		out = d.encode(ctx, text, out)
+	}
 	out.Lang = lang
 	out.LatencyUS = float64(time.Since(t0).Nanoseconds()) / 1e3
 	return out
@@ -144,4 +183,72 @@ func MultiCommand(text string) bool {
 		}
 	}
 	return false
+}
+
+// encode es la capa 3 sobre una decisión no confiada de las rápidas.
+//
+// Qué se le pregunta y qué no: dos órdenes en una frase no las arregla un
+// clasificador de una etiqueta, así que van directas a VON sin gastar los
+// milisegundos del codificador. Todo lo demás (JEV por debajo de su umbral,
+// «fuera de ámbito», un hueco que falta porque quizá la intención era otra)
+// pasa por él. Si contesta confiado una orden de la habitación, con sus
+// huecos completos, esa es la decisión; si no, escala a VON con la mejor
+// conjetura de las dos capas.
+func (d *Decider) encode(ctx context.Context, text string, fast Decision) Decision {
+	fast.Escalate = EscalateVON
+	if fast.Reason == ReasonMultiCommand {
+		return fast
+	}
+	t0 := time.Now()
+	intent, prob, confident, err := d.Encoder.ClassifyIntent(ctx, text)
+	us := float64(time.Since(t0).Nanoseconds()) / 1e3
+	fast.EncoderUS = us
+	if err != nil {
+		fast.EncoderError = err.Error()
+		if fast.Reason == "" || fast.Reason == ReasonNoModel {
+			fast.Reason = ReasonEncoderError
+		}
+		return fast
+	}
+	out := Decision{Intent: intent, Layer: LayerEncoder, Prob: prob, Confident: confident,
+		FastIntent: fast.Intent, FastProb: fast.Prob, EncoderUS: us}
+	if intent == OutOfScope {
+		if confident && d.FinalOOS {
+			return out
+		}
+		// Igual que en JEV: «fuera de ámbito» es «no es una orden que
+		// conozca», y ahí están las indirectas. Lo decide VON.
+		out.Confident, out.Reason, out.Escalate = false, ReasonOutOfScope, EscalateVON
+		// La conjetura que queda es la de las rápidas si veían una orden.
+		if fast.Intent != "" && fast.Intent != OutOfScope {
+			out.Intent, out.Slots, out.Spans, out.Prob = fast.Intent, fast.Slots, fast.Spans, fast.Prob
+		}
+		return out
+	}
+	// Los huecos los sigue marcando JEV-slots (F1 0,99 en lo generado por
+	// gramática); si JEV dijo «fuera de ámbito» no los había buscado.
+	out.Spans = fast.Spans
+	if out.Spans == nil && d.Slots != nil {
+		out.Spans = d.Slots.Tag(text, nil)
+	}
+	out.Slots = Resolve(intent, SlotsFromSpans(text, out.Spans))
+	switch {
+	case !confident:
+		out.Reason = ReasonLowProb
+	case MultiCommand(text):
+		out.Confident, out.Reason = false, ReasonMultiCommand
+	case !Complete(out.Intent, out.Slots):
+		out.Confident, out.Reason = false, ReasonMissingSlot
+	}
+	if !out.Confident {
+		out.Escalate = EscalateVON
+		// La conjetura que se escala es la de la capa más segura de las dos:
+		// elegido en validación frente a «siempre la del codificador» y
+		// «siempre la de JEV» (docs/codificador.md). Con la del codificador
+		// siempre, lo fuera de ámbito que JEV acierta se convertía en órdenes.
+		if fast.Intent != "" && fast.Prob > out.Prob {
+			out.Intent, out.Slots, out.Spans, out.Prob = fast.Intent, fast.Slots, fast.Spans, fast.Prob
+		}
+	}
+	return out
 }

@@ -16,6 +16,9 @@ func TestCatalogoFijado(t *testing.T) {
 			t.Errorf("%s repetido", m.Ref())
 		}
 		visto[m.Ref()] = true
+		if m.Source != "" {
+			continue // convertido por kindling: lo comprueba TestCatalogoEmbed
+		}
 		if !hex40.MatchString(m.Revision) || !reSHA256.MatchString(m.SHA256) {
 			t.Errorf("%s sin fijar: revisión %q, sha256 %q", m.Ref(), m.Revision, m.SHA256)
 		}
@@ -65,6 +68,9 @@ func TestFind(t *testing.T) {
 		t.Fatalf("3b accepting its license: %v", err)
 	}
 	for _, m := range Catalog {
+		if m.Source != "" {
+			continue
+		}
 		if m.License == "" || !strings.HasPrefix(m.LicenseURL, "https://huggingface.co/"+m.Repo+"/blob/"+m.Revision+"/") {
 			t.Errorf("%s: license %q at %q", m.Ref(), m.License, m.LicenseURL)
 		}

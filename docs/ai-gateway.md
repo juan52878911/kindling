@@ -170,12 +170,55 @@ Una evaluación nueva que gane activa la cascada en caliente si la tarea ya
 tenía `escalate_to`. Nunca hay una llamada a VON escondida: con la cascada
 apagada, ni las escaladas ni las auditorías tocan VON.
 
+### Tareas de domótica: `/v1/decide` con la capa 3
+
+Una tarea con un bloque `domotica` es la decisión de la habitación de demo
+([domotica.md](domotica.md)): plantillas → JEV + huecos en proceso y, para lo
+que dudan, el **codificador de frases** ([codificador.md](codificador.md)): un
+modelo `kind: "embed"` (el dorado de `kling models add enc-e5 -model
+multilingual-e5-small`) que `pkg/scheduler` despierta y congela como a un VON, y
+la cabeza `.jenc` que clasifica su vector aquí mismo.
+
+```json
+{
+  "models": {
+    "intent": {"kind": "jev", "path": "intent.jev"},
+    "enc":    {"kind": "embed", "snapshot": "enc-e5", "max_replicas": 1}
+  },
+  "tasks": {
+    "home": {"domotica": {"intent": "intent", "slots": "slots.jevs", "encoder": "enc", "head": "head.jenc"}}
+  }
+}
+```
+
+```sh
+kling ai test home "subir persiana habitación"
+# cover_open {"device":"blinds","area":"room"}  (layer encoder, p=0.996, confident, 3.32 ms)
+#   fast layers said cover_open p=0.957; encoder 3.3 ms
+kling ai eval home -data test.jsonl       # filas del JSONL unificado: texto, idioma, intención y huecos
+```
+
+`POST /v1/decide` con `{"task", "text", "lang"?}` devuelve la decisión entera
+(`decision` = `intent`, `slots`, `layer`, `confident`, `escalate`, `reason`,
+`fast_intent`, `encoder_us`, `encoder_error`) y `encoder`, el estado de la capa
+3. La capa 3 se enciende **solo con una evaluación que la respalde**, como la
+cascada: `kling ai eval <tarea>` pasa las filas por la cascada sin y con el
+codificador y el registro (`ai-evals/<tarea>.json`, `kind: "domotica"`) la
+enciende si contesta bien **más órdenes completas** donde discrepan (McNemar,
+p < 0,05) sin más errores confiados que uno por cada cien ganadas, con los
+mismos `.jev`, `.jevs`, `.jenc` (por su sha256) y dorado. Si no, las capas
+rápidas contestan y escalan a `"encoder"`; con ella, lo que tampoco resuelve
+sale con `escalate: "von"`. `encoder_force` la enciende sin respaldo. Si la
+réplica no contesta en 5 s (despertarla incluido), la decisión escala a VON
+con `encoder_error`. Medido en el Mac: 3,1–3,3 ms por `/v1/decide` con la
+réplica caliente, 981 ms si estaba congelada por inactividad.
+
 ## API
 
 | Ruta | Qué hace |
 |---|---|
 | `POST /v1/classify` | `{task, text, fields?, mode?, explain?}` → `{label, prob, escalate, source, latency_ms, evidence, jev, von, degraded}` |
-| `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny` |
+| `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny`. En una tarea de domótica, la decisión de la habitación (arriba) |
 | `POST /v1/generate` | `{task, input, vars?, max_tokens?, temperature?, seed?}` → `{output, model, finish_reason, usage, latency_ms}` |
 | `POST /v1/chat/completions`, `POST /v1/completions` | API de OpenAI hacia una réplica del modelo que nombra `model` (nombre del registro o del dorado), con streaming |
 | `GET /v1/models` | los modelos VON del registro, sin despertar nada |
