@@ -363,9 +363,206 @@ de CPU, y el mismo `llama-server` da ~150 tok/s en este mismo core fuera de la
 microVM. **Las cifras de memoria del laboratorio sí valen**: la compartición de
 páginas no depende de la velocidad.
 
-Pendiente: repetir la tabla de Linux en hierro (x86 con KVM nativo) para tener el
-primer token de un dorado sin anidar; ahí la tesis predice ~0,2 s de thaw más la
-primera petición a velocidad de CPU.
+Repetido en hierro sin anidar: sección siguiente.
+
+## x86 sin anidar (i7-8700T)
+
+La tabla anterior quedaba pendiente de repetir sobre KVM nativo, sin la
+virtualización anidada de por medio. Medido en Proxmox CT 105 (`fc-test`,
+Debian 12 bookworm, contenedor LXC **privilegiado** sobre el kernel del host,
+Firecracker bajo KVM **sin anidar**): un Intel **i7-8700T** (Coffee Lake,
+2,4 GHz base, **AVX2 pero sin AVX-512 ni VNNI**), el contenedor con 4 vCPU y un
+tope de 8 GiB en su cgroup, pero el Proxmox real detrás solo tenía ~5,3-7,4 GiB
+libres de verdad (comparte host con el router de casa): los dorados de este
+apartado se hicieron con ese margen vigilado, no con los 8 GiB nominales. Es la
+misma CPU del banco de VibeVoice. El binario de llama.cpp para amd64
+(`llama-b11147-bin-ubuntu-x64.tar.gz`, la variante `haswell`/AVX2 de
+`GGML_CPU_ALL_VARIANTS`) **nunca se había ejecutado** hasta este banco: arrancó
+a la primera, sin nada que arreglar.
+
+### Los cuatro dorados, en la microVM
+
+Método: `scripts/96-von-bench.sh`, igual que en el laboratorio anidado, sin
+adaptar (jq y perl ya estaban en el CT). Medianas con (mín-máx, n).
+
+| | SmolLM2-360M Q8_0 | Qwen2.5-0.5B Q4_K_M | Qwen2.5-0.5B Q8_0 | Qwen2.5-1.5B Q4_K_M |
+|---|---|---|---|---|
+| `mem.file` del dorado | 473 MiB | 608 MiB | 785 MiB | 1226 MiB |
+| capa de la imagen en disco | 413 MiB | 513 MiB | 689 MiB | 1110 MiB |
+| crear el dorado (`models add`, en frío) | 53 s (carga 2,5 s) | 18 s (carga 3,7 s) | 25,5 s (carga 4,9 s) | 34 s (carga 8,5 s) |
+| arranque en frío → primer token (`COLD=1`) | 2,94 s | — | — | 9,1 s |
+| thaw (`thaw_ms`), p50 | 15 ms (13-67, n=5) | 11 ms (11-62, n=5) | 14 ms (11-74, n=5) | 16 ms (11-60, n=3) |
+| `run -from` → primer token, p50 | 276 ms (261-1993) | 283 ms (273-2103) | 326 ms (308-2221) | 406 ms (378-2427) |
+| de ello, la petición de 1 token | 167 ms | 176 ms | 218 ms | 285 ms |
+| prompt (61-62 tokens), tok/s | 174 (171-176, n=3) | 122 (121-123) | 153 (147-156) | 79 (77-80) |
+| generación (128 tokens), tok/s | 48,3 (47,9-49) | 39,7 (39,4-40,5) | 38,2 (37,7-38,4) | 22,4 (22,4-22,6) |
+
+Frente al laboratorio anidado (mismo SmolLM2 Q8_0): el thaw baja de 223 ms a
+**15 ms** (sin segunda tabla de páginas de por medio) y el primer token de
+4,3 s a **276 ms**; la generación pasa de 8,8 a **48,3 tok/s**, 5,5×. La tesis
+del documento se confirma: en hierro, un dorado despierta y contesta en el
+orden de **una décima de segundo**, y **no hay que restarle nada al invitado**:
+la sección siguiente lo mide.
+
+**Memoria de N réplicas del mismo dorado** (tras una petición en cada una; PSS
+de `kling top`, RSS sumado del propio Linux):
+
+| réplicas | SmolLM2-360M Q8_0 (PSS total / c.u. / ΣRSS) | Qwen2.5-0.5B Q4_K_M | Qwen2.5-0.5B Q8_0 |
+|---|---|---|---|
+| 1 | 431 / 431 / 430 MiB | 446 / 446 / 446 MiB | 576 / 576 / 576 MiB |
+| 2 | 446 / 223,223 / 861 MiB | 462 / 231,231 / 892 MiB | 596 / 299,297 / 1154 MiB |
+| 3 | 459 / 153×3 / 1292 MiB | 478 / 160,159,159 / 1338 MiB | 614 / 205,204,205 / 1730 MiB |
+| 4 | 472 / 118×4 / 1723 MiB | — | — |
+
+Igual que en el laboratorio: cada réplica de más cuesta ~13-18 MiB (SmolLM2) o
+~16-18 MiB (Qwen 0.5B), el resto son páginas de pesos compartidas en la caché
+del host. El Q4_K_M pesa un poco más de PSS por réplica que el Q8_0 pese a un
+GGUF más pequeño: su vocabulario de 152k reserva el mismo búfer de cálculo, y
+el modelo entero cabe igual de "de sobra" en ambos casos. El 1,5B se dejó en
+una sola réplica (memoria del CT compartida con el router: ver arriba).
+
+### Referencia sin microVM, en el mismo host
+
+`llama-server` de la misma versión (`b11147`, binario oficial amd64), mismos
+GGUF, arrancado directo en el CT (sin Firecracker), con el GGUF ya en la caché
+de páginas del host (medidas en caliente, no de disco frío): tiempo hasta
+`/health` 200, primer token (`max_tokens:1`) y RSS del proceso.
+
+| | SmolLM2-360M Q8_0 | Qwen2.5-0.5B Q4_K_M | Qwen2.5-0.5B Q8_0 | Qwen2.5-1.5B Q4_K_M |
+|---|---|---|---|---|
+| hilos | 2 | 2 | 2 | 4 |
+| listo (`/health` 200) | 524 ms | 992 ms | 995 ms | 1644 ms |
+| primer token | 721 ms | 1246 ms | 1194 ms | 2082 ms |
+| de ello, la petición | 198 ms | 254 ms | 199 ms | 438 ms |
+| RSS del proceso | 487 MiB | 587 MiB | 735 MiB | 1788 MiB |
+| `llama-bench`, prompt tok/s | 169 | 125 | 162 | 81 (83,7 a 3 hilos) |
+| `llama-bench`, generación tok/s | 53,8 | 43,2 | 41,0 | 23,6-24,1 |
+
+La fila de prompt de `llama-bench` (sin microVM) y la de `96-von-bench.sh`
+(dentro de la microVM, tabla anterior) coinciden dentro del margen de medida:
+**la microVM no le resta nada a la CPU** en este host. Es la diferencia
+central con el laboratorio anidado (15-20× más lento): con KVM nativo,
+Firecracker es indistinguible del `llama-server` suelto en cómputo, y el coste
+entero de kindling es el thaw (milisegundos) más los fallos de página de la
+primera petición. El "listo" y "primer token" de esta tabla no son
+comparables 1:1 con el arranque en frío de la microVM (`COLD=1` arriba): ahí
+se mide con el GGUF *sin* caché de páginas (la imagen se lee de disco con
+`O_DIRECT`, `--load-mode dio`), aquí con el GGUF ya caliente; por eso el
+"arranque en frío" de la microVM tarda más para SmolLM2 (2,94 s) que "listo"
+sin microVM (524 ms) pese a hacer menos trabajo.
+
+### Las palancas de `llama-server` (sin código nuevo de kindling)
+
+Medidas fuera de la microVM (mismo binario, mismos GGUF), para aislar lo que
+depende solo de llama.cpp. La rama hermana `claude/von-cpu` mide las mismas
+palancas en un Mac M4 (`docs/von-cpu.md`); aquí la columna x86.
+
+**`-threads`, Qwen2.5-1.5B Q4_K_M** (`llama-bench`, prompt 62 / gen 128 tokens):
+
+| hilos | prompt tok/s | generación tok/s |
+|---|---|---|
+| 4 | 81,0 | 23,6-23,8 |
+| 3 | 83,7 | 24,1 |
+| 2 | 56,8 | 20,3 |
+
+La diferencia entre 3 y 4 hilos es ruido de medida (el CT tiene 4 vCPU
+nominales pero comparte zócalo con el resto del host); bajar a 2 sí cuesta
+~30 % en ambas métricas. Con 4 vCPU en el catálogo, `-threads` por defecto
+(= vCPU) sigue siendo razonable; pedir 3 aparte no compensa la complejidad.
+
+**`--cache-type-k q8_0` (y `-ctv` a juego), Qwen2.5-1.5B Q4_K_M, contexto 2048**:
+sin diferencia de velocidad medible (81,3/23,8 tok/s con `f16` frente a
+79,8/23,5 con `q8_0`, dentro del ruido), y **26 MiB menos** de RSS al arrancar
+con el contexto reservado entero (1783 → 1757 MiB, ~1,4 %). Esperable: estos
+modelos usan `-ctx 2048` a propósito (ver Dimensionado), así que la caché KV ya
+es pequeña frente a los pesos; la palanca vale más en contextos largos, que VON
+no usa.
+
+**Decodificación especulativa** (borrador Qwen2.5-0.5B Q4_0, objetivo
+Qwen2.5-1.5B Q4_K_M, `--spec-type draft-simple`, 4 hilos + 2 del borrador):
+**pierde**, igual que en el M4 de `claude/von-cpu`. A temperatura 0: 23,2 tok/s
+sin borrador frente a 16,8 tok/s con él (aceptación 81/135, 60 %); a
+temperatura 0,7: 23,4 frente a 13,2 tok/s (aceptación 71/168, 42 %). Con solo 4
+vCPU el borrador compite por los mismos núcleos que el modelo grande —
+verificar k tokens candidatos cuesta casi lo mismo que generar uno propio—, y
+la ganancia de acertar no cubre ese coste. Con menos hilos para el borrador
+(`-td 1`) empeora todavía más (12,6-13,0 tok/s): la tesis del Mac se sostiene
+en x86, y con menos núcleos, peor.
+
+**`--slot-save-path`** (Qwen2.5-1.5B Q4_K_M, prefijo de 368-371 tokens): guardar
+la ranura cuesta 3 ms (fichero de 10,2 MiB) y restaurarla, 1,7 ms de servidor
+(8,4 ms de pared, con la vuelta HTTP); la petición siguiente reutiliza 367/368
+tokens de caché y contesta en 44 ms. Reprocesar el mismo prefijo desde cero
+tarda **4,4 s**. Para un prefijo fijo por tarea (un system prompt, ejemplos),
+restaurar la ranura es **~100× más rápido** que reevaluarlo: el mecanismo que
+`claude/von-cpu` usa para hornear el prefijo en el propio dorado (así no hace
+falta ni restaurar una ranura) tiene sentido también aquí.
+
+**Q4_0 frente a Q4_K_M y Q8_0** (`llama-bench`, sin microVM): en ARM, Q4_0 gana
+porque llama.cpp lo reempaqueta para las instrucciones i8mm; en x86 no hay ese
+reempaquetado y aun así **Q4_0 gana igual**:
+
+| | Q4_0 | Q4_K_M | Q8_0 |
+|---|---|---|---|
+| Qwen2.5-0.5B, prompt tok/s | 188,2 | 124,9 | 162,2 |
+| Qwen2.5-0.5B, generación tok/s | 56,9 | 43,2 | 41,0 |
+| Qwen2.5-1.5B, prompt tok/s | 82,0 | 81,0-83,7 | — |
+| Qwen2.5-1.5B, generación tok/s | 25,4 | 23,6-24,1 | — |
+
+En el 0,5B la ventaja es grande (prompt +51 %, generación +32 % frente a
+Q4_K_M); en el 1,5B se estrecha a un ~5 % — el mismo patrón de "la ventaja de
+Q4_0 encoge con el tamaño" que ya se veía en Mac, aunque ahí la causa sea el
+repaquetado i8mm y aquí otra cosa (sin perfilar: candidato a mirar con
+`perf stat`). El catálogo de kindling sigue sirviendo Q8_0 por defecto por
+calidad, no por velocidad; `claude/von-cpu` decide si Q4_0 entra al catálogo.
+
+### JEV en x86
+
+`pkg/jev`, `pkg/jev/slots` y `pkg/domotica` no dependen de VON ni de una
+microVM: corren en el proceso del CLI. Medido en el mismo i7-8700T
+(`go test -bench=. -run=^$ -cpu=1,4`, cross-compilado a linux/amd64), frente a
+la tabla del M4 en [jev.md](jev.md#inferencia-y-determinismo):
+
+| Predict (texto de la tarea de dominio) | 1 núcleo | 4 núcleos |
+|---|---|---|
+| palabras + bigramas | 3095 ns/op | 3122 ns/op |
+| + campos | 3335 ns/op | 3418 ns/op |
+| + n-gramas de caracteres 3-5 | 11 919 ns/op | 12 288 ns/op |
+| en paralelo (`BenchmarkPredictParallel`) | 3645 ns/op (274 000/s) | 1274 ns/op (785 000/s agregado) |
+
+`BenchmarkTag` (JEV-slots) y `BenchmarkMatch` (plantillas de domótica) salen
+igual a 1 y 4 núcleos (2910-2916 y 3739-3985 ns/op): son bucles secuenciales
+sobre una entrada, sin `RunParallel`, así que no hay nada que escalar.
+
+Frente al M4 (1540-6200 ns/op según características, 290 ns/op agregado a 10
+hilos): el i7-8700T tarda **~2×** por predicción a un núcleo — coherente con
+ser una CPU portátil de bajo consumo (2,4 GHz base) más vieja, no con nada de
+JEV — y con solo 4 núcleos el paralelo agregado llega a 785 000/s en vez de a
+los ~3,4 M/s que darían 10 núcleos del M4 a este ritmo por núcleo.
+
+Con los modelos reales de la evaluación (`intent.jev` + `slots.jevs`,
+`kling domotica eval` sobre 9794 filas, cascada plantillas → JEV): p50 de
+9,74 µs y p99 de 30,29 µs por decisión (bucle secuencial: ~103 000
+decisiones/s de un núcleo). El proceso entero, modelos cargados y evaluando
+las 9794 filas, llega a un pico de RSS de **82 MiB** (`/usr/bin/time -v`).
+
+### Qué se aprendió
+
+- **La hipótesis del documento se confirma en hierro**: sin anidar, thaw y
+  primer token bajan a milisegundos y la generación a la velocidad real de la
+  CPU (48 tok/s en un core de 2,4 GHz para SmolLM2, frente a 8,8 tok/s
+  anidado); la microVM no resta nada frente al mismo `llama-server` suelto.
+- **El binario oficial de amd64 nunca se había probado y funcionó a la
+  primera**: mismo mecanismo que arm64 (`GGML_CPU_ALL_VARIANTS`), sin tocar
+  código de kindling.
+- **De las palancas de `llama-server`, la que más rinde en un CT de 4 vCPU es
+  `--slot-save-path`** (~100× en el primer token de un prefijo repetido);
+  `--cache-type-k` ahorra poca memoria a este tamaño de contexto, `-threads`
+  se aplana en 3-4, y la decodificación especulativa pierde por falta de
+  núcleos de sobra — igual que en el Mac.
+- **Q4_0 gana en velocidad también en AVX2**, sin el repaquetado i8mm que lo
+  explica en ARM: la ventaja no es solo del formato de instrucciones de Apple
+  Silicon.
 
 ## GPU (diseño, sin implementar)
 
