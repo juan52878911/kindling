@@ -29,7 +29,7 @@ var webFS embed.FS
 
 // LayerInfo describe una capa para la cabecera de la página.
 type LayerInfo struct {
-	Name   string `json:"name"`   // template | jev | encoder | von
+	Name   string `json:"name"`   // template | chispa | encoder | von
 	Status string `json:"status"` // on | unavailable | off | forced
 	Where  string `json:"where"`  // gateway | microvm | process
 	Detail string `json:"detail,omitempty"`

@@ -185,7 +185,7 @@ func layer4RecordPath(id string) string {
 // sus modelos). Con -decide-task es domotica.FastID de la tarea del gateway.
 func fastID(intentPath, slotsPath string) string {
 	h := sha256.New()
-	for _, p := range []string{resolveModel(intentPath, "intent.jev"), resolveModel(slotsPath, "slots.jevs")} {
+	for _, p := range []string{resolveModel(intentPath, "intent.chispa"), resolveModel(slotsPath, "slots.chispas")} {
 		if p == "" {
 			h.Write([]byte("none\x00"))
 			continue
@@ -222,8 +222,8 @@ func cmdDomoticaEvalLLM(args []string) error {
 	decideTask := fs.String("decide-task", "", "with -gateway: the domotica task that serves layers 1-3 (default: in-process layers 1-2)")
 	timeout := fs.Duration("von-timeout", 60*time.Second, "deadline of one layer-4 decision (includes waking the replica)")
 	data := fs.String("data", "", "unified JSONL test data; its MASSIVE rows are used")
-	intentPath := fs.String("intent", "", "intent model (.jev), in-process layers")
-	slotsPath := fs.String("slots", "", "slot model (.jevs), in-process layers")
+	intentPath := fs.String("intent", "", "intent model (.chispa), in-process layers")
+	slotsPath := fs.String("slots", "", "slot model (.chispas), in-process layers")
 	oosPer := fs.Int("oos-sample", 100, "out-of-scope MASSIVE rows sampled per language (deterministic); they are weighted back")
 	challenge := fs.Bool("challenge", true, "also score the built-in challenge set")
 	conc := fs.Int("concurrency", 1, "parallel requests to VON")

@@ -12,7 +12,7 @@
 //
 // El paquete no tiene dependencias fuera de la biblioteca estándar y de pkg/api:
 // lo usan el CLI (`kling models`), el constructor "llm" que corre como root en
-// el host del daemon, y lo usará el gateway que encadene JEV → VON.
+// el host del daemon, y lo usará el gateway que encadene Chispa → VON.
 package von
 
 import (

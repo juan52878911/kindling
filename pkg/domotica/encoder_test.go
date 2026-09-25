@@ -31,7 +31,7 @@ func TestEncoderLayer(t *testing.T) {
 		t.Fatalf("template answer went to the encoder: %+v (%d calls)", got, enc.calls)
 	}
 
-	// Sin JEV todo lo demás llega; confiado y completo, contesta la capa 3.
+	// Sin Chispa todo lo demás llega; confiado y completo, contesta la capa 3.
 	got := d.DecideContext(ctx, "no veo nada", "es")
 	if !got.Confident || got.Layer != LayerEncoder || got.Intent != "turn_on" || got.Slots.Device != DevLight || got.Escalate != "" {
 		t.Fatalf("confident encoder answer: %+v", got)
@@ -40,7 +40,7 @@ func TestEncoderLayer(t *testing.T) {
 	// Dos órdenes no se le preguntan: van a VON.
 	enc.calls = 0
 	d2 := &Decider{Matcher: m, Encoder: enc}
-	fast := Decision{Intent: "turn_on", Prob: 0.9, Reason: ReasonMultiCommand, Layer: LayerJEV}
+	fast := Decision{Intent: "turn_on", Prob: 0.9, Reason: ReasonMultiCommand, Layer: LayerChispa}
 	if got := d2.encode(ctx, "enciende la luz y baja la persiana", fast); enc.calls != 0 || got.Escalate != EscalateVON {
 		t.Fatalf("multi-command: %+v (%d calls)", got, enc.calls)
 	}
@@ -57,7 +57,7 @@ func TestEncoderLayer(t *testing.T) {
 
 	// Sin confianza escala con la conjetura más probable de las dos capas.
 	enc.intent, enc.prob, enc.confident = "volume_up", 0.4, false
-	fast = Decision{Intent: "volume_down", Prob: 0.6, Layer: LayerJEV, Reason: ReasonLowProb}
+	fast = Decision{Intent: "volume_down", Prob: 0.6, Layer: LayerChispa, Reason: ReasonLowProb}
 	if got := d.encode(ctx, "esto suena rarísimo", fast); got.Intent != "volume_down" || got.Escalate != EscalateVON || got.FastIntent != "volume_down" {
 		t.Fatalf("guess: %+v", got)
 	}

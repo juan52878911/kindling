@@ -266,11 +266,11 @@ type L4Total struct {
 
 // Alcances de la capa 4: a qué escaladas contesta.
 const (
-	// ScopeAll: a todo lo que escala, también a lo que JEV da por «fuera de
+	// ScopeAll: a todo lo que escala, también a lo que Chispa da por «fuera de
 	// ámbito» (ahí está lo indirecto), con el veto de VON.Decide.
 	ScopeAll = "all"
-	// ScopeUncertain: solo a lo que JEV duda (probabilidad baja, varias
-	// órdenes, falta un valor). Lo que JEV da por fuera de ámbito se queda sin
+	// ScopeUncertain: solo a lo que Chispa duda (probabilidad baja, varias
+	// órdenes, falta un valor). Lo que Chispa da por fuera de ámbito se queda sin
 	// hacer, sin llamar al LLM: lo indirecto lo tendrá que decidir la capa 3.
 	ScopeUncertain = "uncertain"
 )

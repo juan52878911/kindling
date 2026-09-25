@@ -221,12 +221,12 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 type TaskInfo struct {
 	Name       string        `json:"name"`
 	Kind       string        `json:"kind"` // classify | generate | domotica
-	JEV        string        `json:"jev,omitempty"`
+	Chispa     string        `json:"chispa,omitempty"`
 	VON        string        `json:"von,omitempty"` // el de una generación
 	Cascade    *CascadeState `json:"cascade,omitempty"`
 	Labels     []string      `json:"labels,omitempty"`
 	Thresholds []float64     `json:"thresholds,omitempty"` // los efectivos, si el modelo está cargado
-	Loaded     bool          `json:"jev_loaded"`
+	Loaded     bool          `json:"chispa_loaded"`
 	Audit      float64       `json:"audit,omitempty"`
 	Samples    int           `json:"samples"`
 }
@@ -236,9 +236,9 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 	out := []TaskInfo{}
 	for _, n := range sortedKeys(cfg.Tasks) {
 		t := cfg.Tasks[n]
-		ti := TaskInfo{Name: n, Kind: "classify", JEV: t.JEV, VON: t.VON, Labels: t.Labels, Audit: t.Audit}
+		ti := TaskInfo{Name: n, Kind: "classify", Chispa: t.Chispa, VON: t.VON, Labels: t.Labels, Audit: t.Audit}
 		if t.Domotica != nil {
-			ti.Kind, ti.JEV = "domotica", t.Domotica.Intent
+			ti.Kind, ti.Chispa = "domotica", t.Domotica.Intent
 			c := g.cascade(n)
 			ti.Cascade = &c
 		} else if t.IsGenerate() {
@@ -247,14 +247,14 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 			c := g.cascade(n)
 			ti.Cascade = &c
 		}
-		if t.JEV != "" {
+		if t.Chispa != "" {
 			// Solo si ya está cargado: listar no carga modelos.
-			g.jev.mu.Lock()
-			if el, ok := g.jev.items[cfg.Models[t.JEV].Path]; ok {
-				m := el.Value.(*jevItem).model
+			g.chispa.mu.Lock()
+			if el, ok := g.chispa.items[cfg.Models[t.Chispa].Path]; ok {
+				m := el.Value.(*chispaItem).model
 				ti.Loaded, ti.Labels, ti.Thresholds = true, m.Labels, effective(m, t.Thresholds)
 			}
-			g.jev.mu.Unlock()
+			g.chispa.mu.Unlock()
 		}
 		g.cfgMu.RLock()
 		if r := g.rings[n]; r != nil {
@@ -297,7 +297,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	g.cfgMu.RUnlock()
 	reps := g.replicaCounts(r.Context())
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	g.met.write(w, g.jev.stats(), samples, reps)
+	g.met.write(w, g.chispa.stats(), samples, reps)
 }
 
 // replicaCounts cuenta las réplicas de cada modelo por estado, preguntando al

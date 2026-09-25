@@ -1,8 +1,8 @@
 {
   "models": {
     "chispa-room": {
-      "kind": "jev",
-      "path": "domotica/intent.jev"
+      "kind": "chispa",
+      "path": "domotica/intent.chispa"
     },
     "encoder": {
       "kind": "embed",
@@ -20,7 +20,7 @@
         "encoder": "encoder",
         "head": "domotica/head.jenc",
         "intent": "chispa-room",
-        "slots": "domotica/slots.jevs"
+        "slots": "domotica/slots.chispas"
       }
     },
     "room-llm": {

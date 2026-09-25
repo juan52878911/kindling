@@ -11,7 +11,7 @@ import (
 func TestPrefixes(t *testing.T) {
 	c := &Config{
 		Models: map[string]*ModelConfig{
-			"j": {Kind: KindJEV, Path: "m.jev"},
+			"j": {Kind: KindChispa, Path: "m.chispa"},
 			"q": {Kind: KindVON, Snapshot: "von-q"},
 			"s": {Kind: KindVON, Snapshot: "von-s"},
 		},
@@ -19,7 +19,7 @@ func TestPrefixes(t *testing.T) {
 			"home":  {VON: "q", System: "You control a smart home.", Prompt: "Request: {input}"},
 			"home2": {VON: "q", System: "You control a smart home.", Prompt: "Request: {input}"}, // repetido
 			"bare":  {VON: "q"},                                                                  // nada fijo
-			"kind":  {JEV: "j", EscalateTo: "q"},
+			"kind":  {Chispa: "j", EscalateTo: "q"},
 			"other": {VON: "s", System: "Other model."},
 		},
 	}
@@ -43,7 +43,7 @@ func TestJSONSchema(t *testing.T) {
 	for _, b := range []string{
 		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","json_schema":[1]}}}`,
 		`{"models":{"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"von":"v","json_schema":"x"}}}`,
-		`{"models":{"j":{"kind":"jev","path":"x"},"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"jev":"j","json_schema":{}}}}`,
+		`{"models":{"j":{"kind":"chispa","path":"x"},"v":{"kind":"von","snapshot":"s"}},"tasks":{"t":{"chispa":"j","json_schema":{}}}}`,
 	} {
 		if _, err := ParseConfig(strings.NewReader(b)); err == nil {
 			t.Errorf("accepted %s", b)

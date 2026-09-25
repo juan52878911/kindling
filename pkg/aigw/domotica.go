@@ -16,21 +16,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/codificador"
 	"github.com/juan52878911/kindling/pkg/domotica"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
 )
 
 // TAREAS DE DOMÓTICA: /v1/decide para la habitación de demo.
 //
 // La decisión es la cascada de pkg/domotica: plantillas de la demo (capa 1),
-// JEV + JEV-slots (capa 2, en proceso, microsegundos) y, para lo que esas
+// Chispa + Chispa-slots (capa 2, en proceso, microsegundos) y, para lo que esas
 // dudan, el codificador de frases (capa 3): una réplica de un dorado kind
 // embed que pkg/scheduler despierta con la primera petición y congela al
 // quedarse ociosa, igual que un VON, y la cabeza .jenc que clasifica su
 // vector aquí mismo. Lo que tampoco resuelve sale con escalate: "von".
 //
-// La capa 3 se enciende como la cascada JEV → VON: solo si un registro de
+// La capa 3 se enciende como la cascada Chispa → VON: solo si un registro de
 // evaluación (`kling ai eval <tarea> -data test.jsonl`) muestra que la cascada
 // con el codificador acierta la orden COMPLETA (intención y huecos) más veces
 // que sin él (McNemar, p < 0,05), con los mismos modelos que se sirven. Si no,
@@ -38,9 +38,9 @@ import (
 
 // DomoticaConfig es una tarea de domótica.
 type DomoticaConfig struct {
-	// Intent es el modelo JEV de intención (kind jev).
+	// Intent es el modelo Chispa de intención (kind chispa).
 	Intent string `json:"intent"`
-	// Slots es el etiquetador de huecos (.jevs); relativo al registro.
+	// Slots es el etiquetador de huecos (.chispas); relativo al registro.
 	Slots string `json:"slots,omitempty"`
 	// Encoder es el codificador (kind embed) y Head la cabeza entrenada sobre
 	// SUS vectores (.jenc, relativa al registro). Los dos o ninguno.
@@ -56,13 +56,13 @@ type DomoticaConfig struct {
 func (c *Config) validateDomotica(n string, t *TaskConfig) []error {
 	var errs []error
 	d := t.Domotica
-	if t.JEV != "" || t.VON != "" || t.EscalateTo != "" || t.EscalateForce || len(t.Labels) > 0 || t.System != "" ||
+	if t.Chispa != "" || t.VON != "" || t.EscalateTo != "" || t.EscalateForce || len(t.Labels) > 0 || t.System != "" ||
 		t.Prompt != "" || t.TopK != 0 || len(t.Thresholds) > 0 || t.Precision != 0 || t.Audit != 0 || t.Samples != 0 ||
 		t.MaxTokens != 0 || t.Temperature != nil || t.Grammar != nil || t.OnVONError != "" {
 		errs = append(errs, fmt.Errorf("task %q: a domotica task takes only its \"domotica\" block", n))
 	}
-	if m := c.Models[d.Intent]; m == nil || m.Kind != KindJEV {
-		errs = append(errs, fmt.Errorf("task %q: domotica.intent %q is not a jev model", n, d.Intent))
+	if m := c.Models[d.Intent]; m == nil || m.Kind != KindChispa {
+		errs = append(errs, fmt.Errorf("task %q: domotica.intent %q is not a chispa model", n, d.Intent))
 	}
 	if (d.Encoder == "") != (d.Head == "") {
 		errs = append(errs, fmt.Errorf("task %q: domotica.encoder and domotica.head go together", n))
@@ -91,7 +91,7 @@ func demoMatcher() (*domotica.Matcher, error) {
 	return matcherVal, matcherErr
 }
 
-// domoFiles guarda los .jevs y .jenc cargados (pocos, y de ~100 KB: sin
+// domoFiles guarda los .chispas y .jenc cargados (pocos, y de ~100 KB: sin
 // presupuesto). Reload los olvida.
 type domoFiles struct {
 	mu    sync.Mutex
@@ -111,12 +111,12 @@ var (
 	loadHeadFn  = codificador.LoadFile
 )
 
-// getSlots y getHead leen el fichero FUERA del candado, como pkg/aigw/jevcache.go:
-// una tarea cuyo .jevs o .jenc tarda en leerse (o cuyo disco anda lento) no
+// getSlots y getHead leen el fichero FUERA del candado, como pkg/aigw/chispacache.go:
+// una tarea cuyo .chispas o .jenc tarda en leerse (o cuyo disco anda lento) no
 // para las decisiones de las demás tareas, que solo tocan el candado para un
 // mapa ya en memoria. Dos peticiones que piden a la vez el mismo fichero
 // pueden leerlo dos veces (son pocos, de ~100 KB: no compensa la coordinación
-// de jevcache), pero la segunda comprobación bajo el candado asegura que solo
+// de chispacache), pero la segunda comprobación bajo el candado asegura que solo
 // una entrada gana y todo el mundo ve la misma.
 
 func (f *domoFiles) getSlots(p string) (*slots.Model, error) {
@@ -195,7 +195,7 @@ func (g *Gateway) decider(cfg *Config, d *DomoticaConfig, withEncoder bool) (*do
 	if err != nil {
 		return nil, err
 	}
-	im, err := g.jev.get(cfg.Models[d.Intent].Path)
+	im, err := g.chispa.get(cfg.Models[d.Intent].Path)
 	if err != nil {
 		return nil, fmt.Errorf("intent model: %w", err)
 	}
@@ -277,7 +277,7 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 // ---- la puerta de la capa 3
 
 // DomoticaEvalResults son las cifras de la evaluación de una tarea de
-// domótica: la cascada sin la capa 3 (plantillas → JEV) y con ella.
+// domótica: la cascada sin la capa 3 (plantillas → Chispa) y con ella.
 type DomoticaEvalResults struct {
 	Examples int `json:"examples"`
 	// Orden completa bien (intención y huecos), cubierta confiada y acierto

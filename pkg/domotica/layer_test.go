@@ -140,27 +140,27 @@ func TestVONLayer(t *testing.T) {
 		t.Fatalf("got %+v", d)
 	}
 
-	// JEV dio «fuera de ámbito» a una frase en imperativo: el LLM no la
+	// Chispa dio «fuera de ámbito» a una frase en imperativo: el LLM no la
 	// convierte en una orden de la habitación.
 	cmd := `{"kind":"command","reply":"Alarma puesta.","actions":[{"intent":"alarm_arm","device":null,"area":null,"value":null,"color":null}]}`
 	v2 := &VON{Generate: fakeGen(cmd, nil, nil)}
-	prev := Decision{Layer: LayerJEV, Intent: OutOfScope, Reason: ReasonOutOfScope}
+	prev := Decision{Layer: LayerChispa, Intent: OutOfScope, Reason: ReasonOutOfScope}
 	d, err = v2.Decide(WithPrev(context.Background(), prev), "pon una alarma a las siete", "es")
-	if err != nil || !d.Confident || len(d.ActionList()) != 0 || d.Reason != ReasonVetoedByJEV {
+	if err != nil || !d.Confident || len(d.ActionList()) != 0 || d.Reason != ReasonVetoedByChispa {
 		t.Fatalf("veto: %+v %v", d, err)
 	}
 	// Una situación sin verbo de orden (lo indirecto) pasa; si el LLM la
 	// llama orden, no.
 	d, _ = v2.Decide(WithPrev(context.Background(), prev), "me voy de casa", "es")
 	if len(d.ActionList()) != 0 {
-		t.Fatalf("kind command on a JEV out-of-scope phrase must be vetoed: %+v", d)
+		t.Fatalf("kind command on a Chispa out-of-scope phrase must be vetoed: %+v", d)
 	}
 	sit := `{"kind":"situation","reply":"Activo la alarma.","actions":[{"intent":"alarm_arm","device":null,"area":null,"value":null,"color":null}]}`
 	d, _ = (&VON{Generate: fakeGen(sit, nil, nil)}).Decide(WithPrev(context.Background(), prev), "me voy de casa", "es")
 	if len(d.ActionList()) != 1 {
 		t.Fatalf("indirect vetoed: %+v", d)
 	}
-	// Lo que JEV dudaba (no «fuera de ámbito») no tiene veto.
+	// Lo que Chispa dudaba (no «fuera de ámbito») no tiene veto.
 	d, _ = v2.Decide(WithPrev(context.Background(), Decision{Reason: ReasonLowProb}), "pon la alarma", "es")
 	if len(d.ActionList()) != 1 {
 		t.Fatalf("low-probability escalation vetoed: %+v", d)
@@ -190,7 +190,7 @@ func TestCascade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fast := &Decider{Matcher: m} // sin JEV: lo que no es de la demo escala
+	fast := &Decider{Matcher: m} // sin Chispa: lo que no es de la demo escala
 	var called []string
 	mock := func(name string, d Decision, err error) Layer {
 		return LayerFunc(func(ctx context.Context, text, lang string) (Decision, error) {
@@ -218,7 +218,7 @@ func TestCascade(t *testing.T) {
 		return strings.Join(out, " ")
 	}
 	tr = c.Decide(context.Background(), "aquí hace frío", "es")
-	if got := status(tr); tr.Decided != LayerVON || got != "template:nomatch jev:unavailable encoder:unavailable von:answered" || tr.Actions[0].Intent != "temperature_up" {
+	if got := status(tr); tr.Decided != LayerVON || got != "template:nomatch chispa:unavailable encoder:unavailable von:answered" || tr.Actions[0].Intent != "temperature_up" {
 		t.Fatalf("von: %s %+v", got, tr)
 	}
 
@@ -254,23 +254,23 @@ func TestFastStepsEncoder(t *testing.T) {
 	d := Decision{Layer: LayerEncoder, Intent: "temperature_up", Confident: true, Prob: 0.9, FastIntent: OutOfScope, FastProb: 0.97,
 		LatencyUS: 12000, EncoderUS: 11000}
 	s := FastSteps(d, true)
-	if len(s) != 3 || s[0].Status != StepNoMatch || s[1].Layer != LayerJEV || s[1].Status != StepEscalated || s[1].LatencyUS != 1000 ||
+	if len(s) != 3 || s[0].Status != StepNoMatch || s[1].Layer != LayerChispa || s[1].Status != StepEscalated || s[1].LatencyUS != 1000 ||
 		s[2].Layer != LayerEncoder || s[2].Status != StepAnswered || s[2].LatencyUS != 11000 {
 		t.Fatalf("%+v", s)
 	}
 	// El codificador duda: sigue la conjetura del modelo rápido y escala.
-	d = Decision{Layer: LayerJEV, Intent: "turn_on", Reason: ReasonLowProb, LatencyUS: 9000, EncoderUS: 8000}
+	d = Decision{Layer: LayerChispa, Intent: "turn_on", Reason: ReasonLowProb, LatencyUS: 9000, EncoderUS: 8000}
 	if s := FastSteps(d, true); s[1].Status != StepEscalated || s[2].Status != StepEscalated {
 		t.Fatalf("%+v", s)
 	}
-	// JEV confiado: el codificador no hizo falta.
-	if s := FastSteps(Decision{Layer: LayerJEV, Intent: "turn_on", Confident: true}, true); s[2].Status != StepNotReached {
+	// Chispa confiado: el codificador no hizo falta.
+	if s := FastSteps(Decision{Layer: LayerChispa, Intent: "turn_on", Confident: true}, true); s[2].Status != StepNotReached {
 		t.Fatalf("%+v", s)
 	}
-	if s := FastSteps(Decision{Layer: LayerJEV, Reason: ReasonMultiCommand}, true); s[2].Status != StepSkipped {
+	if s := FastSteps(Decision{Layer: LayerChispa, Reason: ReasonMultiCommand}, true); s[2].Status != StepSkipped {
 		t.Fatalf("%+v", s)
 	}
-	if s := FastSteps(Decision{Layer: LayerJEV, EncoderError: "timeout", EncoderUS: 2e6}, true); s[2].Status != StepError {
+	if s := FastSteps(Decision{Layer: LayerChispa, EncoderError: "timeout", EncoderUS: 2e6}, true); s[2].Status != StepError {
 		t.Fatalf("%+v", s)
 	}
 }
@@ -311,7 +311,7 @@ func TestGateWeighsFalseActions(t *testing.T) {
 		"in":  {N: 20, Weight: 1, Escalated: 20},
 		"oos": {N: 50, Weight: 20, Escalated: 50, NothingOK: 50},
 	}}
-	// 15 órdenes que JEV dudaba y VON acierta.
+	// 15 órdenes que Chispa dudaba y VON acierta.
 	for i := 0; i < 15; i++ {
 		r.Rows = append(r.Rows, L4Result{Group: "in", Gold: on, Pred: on, OK: true, FastReason: ReasonLowProb})
 	}
@@ -326,7 +326,7 @@ func TestGateWeighsFalseActions(t *testing.T) {
 	if g := r.Gate(nil, ScopeAll); g.P >= 0.05 || g.Pass || g.Win != 15 || g.Loss != 2 {
 		t.Fatalf("15 wins beat 2 losses, but 2 losses weigh 40 rows: %+v", g)
 	}
-	// Sin llamar a VON en lo que JEV da por fuera de ámbito, pasa.
+	// Sin llamar a VON en lo que Chispa da por fuera de ámbito, pasa.
 	if g := r.Gate(nil, ScopeUncertain); !g.Pass || g.Loss != 0 || g.Total.WithWrong != 0 {
 		t.Fatalf("uncertain scope: %+v", g)
 	}

@@ -33,8 +33,8 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/domotica"
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
@@ -65,8 +65,8 @@ func parseFlags() flags {
 	flag.StringVar(&f.record, "layer4-record", "", "eval record that enables layer 4 (default: layer4-<llm-task>.json in the domotica models dir)")
 	flag.BoolVar(&f.force, "layer4-force", false, "enable layer 4 for every escalation even without an eval record that backs it")
 	flag.BoolVar(&f.offline, "offline", false, "no gateway: layers 1-2 in this process (-intent, -slots), the rest unavailable")
-	flag.StringVar(&f.intent, "intent", "", "with -offline: intent model (.jev)")
-	flag.StringVar(&f.slotsPath, "slots", "", "with -offline: slot model (.jevs)")
+	flag.StringVar(&f.intent, "intent", "", "with -offline: intent model (.chispa)")
+	flag.StringVar(&f.slotsPath, "slots", "", "with -offline: slot model (.chispas)")
 	flag.DurationVar(&f.timeout, "timeout", 60*time.Second, "deadline of one command (includes waking microVMs)")
 	flag.Parse()
 	return f
@@ -193,10 +193,10 @@ func viaGateway(ctx context.Context, f flags) (room.Options, error) {
 		return room.Options{}, fmt.Errorf("the gateway has no domotica task %q (see ai.json in examples/domotica)", f.decideTask)
 	}
 	// Qué modelo es de qué capa, para atribuir los despertares de /metrics.
-	modelLayer := map[string]string{decide.JEV: domotica.LayerJEV}
+	modelLayer := map[string]string{decide.Chispa: domotica.LayerChispa}
 	layers := []room.LayerInfo{
 		{Name: domotica.LayerTemplate, Status: "on", Where: "gateway", Detail: fmt.Sprintf("%d templates, task %s", len(domotica.DemoTemplates), f.decideTask)},
-		{Name: domotica.LayerJEV, Status: "on", Where: "gateway", Detail: "model " + decide.JEV},
+		{Name: domotica.LayerChispa, Status: "on", Where: "gateway", Detail: "model " + decide.Chispa},
 	}
 	enc := room.LayerInfo{Name: domotica.LayerEncoder, Status: "unavailable", Where: "microvm", Detail: "the task has no encoder"}
 	hasEncoder := false
@@ -323,15 +323,15 @@ func offline(f flags) (room.Options, error) {
 	d := &domotica.Decider{Matcher: m}
 	ip, sp := f.intent, f.slotsPath
 	if ip == "" {
-		ip = filepath.Join(modelsDir(), "intent.jev")
+		ip = filepath.Join(modelsDir(), "intent.chispa")
 	}
 	if sp == "" {
-		sp = filepath.Join(modelsDir(), "slots.jevs")
+		sp = filepath.Join(modelsDir(), "slots.chispas")
 	}
-	jevInfo := room.LayerInfo{Name: domotica.LayerJEV, Status: "unavailable", Where: "process", Detail: "no " + ip}
-	if im, err := jev.LoadFile(ip); err == nil {
+	chispaInfo := room.LayerInfo{Name: domotica.LayerChispa, Status: "unavailable", Where: "process", Detail: "no " + ip}
+	if im, err := chispa.LoadFile(ip); err == nil {
 		d.Intent = im
-		jevInfo.Status, jevInfo.Detail = "on", ip
+		chispaInfo.Status, chispaInfo.Detail = "on", ip
 		if sm, err := slots.LoadFile(sp); err == nil {
 			d.Slots = sm
 		}
@@ -345,7 +345,7 @@ func offline(f flags) (room.Options, error) {
 		},
 		Layers: []room.LayerInfo{
 			{Name: domotica.LayerTemplate, Status: "on", Where: "process", Detail: fmt.Sprintf("%d templates", len(domotica.DemoTemplates))},
-			jevInfo,
+			chispaInfo,
 			{Name: domotica.LayerEncoder, Status: "unavailable", Where: "microvm", Detail: "offline mode"},
 			{Name: domotica.LayerVON, Status: "unavailable", Where: "microvm", Detail: "offline mode"},
 		},
@@ -379,7 +379,7 @@ func machines(ctx context.Context, c *api.Client) ([]room.Machine, error) {
 
 // layerOf reconoce la capa de una microVM por sus etiquetas: los dorados de
 // VON llevan von.model, los codificadores además von.kind=embed, y los del
-// modelo rápido servido como microVM se llaman chispa-* o jev-*.
+// modelo rápido servido como microVM se llaman chispa-*.
 func layerOf(m *api.Machine) string {
 	switch {
 	case m.Labels["von.kind"] == "embed":
@@ -388,8 +388,8 @@ func layerOf(m *api.Machine) string {
 		return domotica.LayerVON
 	}
 	for _, s := range []string{m.Name, m.From, m.Labels[api.LabelService]} {
-		if strings.HasPrefix(s, "chispa") || strings.HasPrefix(s, "jev") {
-			return domotica.LayerJEV
+		if strings.HasPrefix(s, "chispa") {
+			return domotica.LayerChispa
 		}
 	}
 	return ""

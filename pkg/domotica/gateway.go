@@ -231,7 +231,7 @@ func WakesBetween(before, after map[string]*WakeCount) []Wake {
 type TaskInfo struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"` // classify | generate | domotica
-	JEV     string `json:"jev"`  // modelo rápido de una tarea domotica
+	Chispa  string `json:"chispa"` // modelo rápido de una tarea domotica
 	VON     string `json:"von"`  // LLM de una generación
 	Cascade *struct {
 		Status string `json:"status"` // capa 3 de una tarea domotica: on | forced | refused | off
@@ -257,5 +257,5 @@ func FastID(t TaskInfo) string {
 	if t.Cascade != nil && t.Cascade.To != "" {
 		enc = t.Cascade.To + ":" + t.Cascade.Status
 	}
-	return "gateway:" + t.Name + "|fast=" + t.JEV + "|encoder=" + enc
+	return "gateway:" + t.Name + "|fast=" + t.Chispa + "|encoder=" + enc
 }

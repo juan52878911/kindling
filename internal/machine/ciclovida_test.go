@@ -115,3 +115,21 @@ func TestStopDeAlgoQueDesaparecioNoTumbaNada(t *testing.T) {
 	}
 	// Un error tambien vale —ya no existe—; lo que no vale es un panico.
 }
+
+// `kling rm` no tiene bandera -f: Remove ya para la máquina (m.kill) antes de
+// borrar su directorio, así que quitar una running no exige pararla antes a
+// mano. Esta prueba fija ese comportamiento para que nadie añada una bandera
+// -f redundante ni, al revés, rompa el caso sin darse cuenta.
+func TestRemoveDeUnaRunningNoNecesitaPararlaAntes(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	mc := m.addForTest(newID())
+	mc.State = api.StateRunning
+
+	if err := m.Remove(mc.ID); err != nil {
+		t.Fatalf("Remove de una running: %v", err)
+	}
+	if _, sigue := m.byID[mc.ID]; sigue {
+		t.Error("la máquina sigue en byID tras Remove")
+	}
+}

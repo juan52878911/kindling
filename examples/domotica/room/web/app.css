@@ -20,7 +20,7 @@
   --warn: #b45309;
   /* capas */
   --l-template: #0f766e;
-  --l-jev: #4f46e5;
+  --l-chispa: #4f46e5;
   --l-encoder: #b45309;
   --l-von: #a21caf;
   --l-none: #78716c;
@@ -50,7 +50,7 @@
     --bad: #f87171;
     --warn: #fbbf24;
     --l-template: #2dd4bf;
-    --l-jev: #818cf8;
+    --l-chispa: #818cf8;
     --l-encoder: #fbbf24;
     --l-von: #e879f9;
     --l-none: #a8a29e;
@@ -171,7 +171,7 @@ h1 .k { font-family: var(--mono); font-weight: 600; color: var(--accent); }
 .tv-beam.on { opacity: .18; }
 .spk { fill: var(--wall); }
 .spk-cone { fill: var(--panel-2); }
-.waves path { fill: none; stroke: var(--l-jev); stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.waves path { fill: none; stroke: var(--l-chispa); stroke-width: 3; stroke-linecap: round; opacity: 0; }
 .waves.on path { animation: wave 1.2s infinite ease-out; }
 .waves.on path:nth-child(2) { animation-delay: .3s; }
 .plug { fill: var(--panel); stroke: var(--wall); stroke-width: 2; transition: fill .3s; }
@@ -283,7 +283,7 @@ h1 .k { font-family: var(--mono); font-weight: 600; color: var(--accent); }
 .foot { max-width: 1400px; margin: 0 auto; padding: 0 24px 28px; color: var(--ink-3); font-size: 12.5px; }
 
 [data-layer="template"] { --c: var(--l-template); }
-[data-layer="jev"] { --c: var(--l-jev); }
+[data-layer="chispa"] { --c: var(--l-chispa); }
 [data-layer="encoder"] { --c: var(--l-encoder); }
 [data-layer="von"] { --c: var(--l-von); }
 [data-layer="none"] { --c: var(--l-none); }

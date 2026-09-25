@@ -4,7 +4,7 @@ VON son LLM *instruct* pequeños —SmolLM2-360M, Qwen2.5-0.5B y 1.5B— servido
 microVMs de kindling con la API compatible con OpenAI de `llama-server`
 (llama.cpp), que escalan a cero y vuelven desde un **snapshot dorado congelado con
 el modelo ya cargado y caliente**. Es la mitad "generativa" de la cascada que
-vendrá: un clasificador lineal diminuto (JEV) contesta lo fácil y lo demás pasa a
+vendrá: un clasificador lineal diminuto (Chispa) contesta lo fácil y lo demás pasa a
 VON, detrás de un gateway con API de OpenAI.
 
 ## La tesis, y qué dicen los números
@@ -537,12 +537,12 @@ repaquetado i8mm y aquí otra cosa (sin perfilar: candidato a mirar con
 `perf stat`). El catálogo de kindling sigue sirviendo Q8_0 por defecto por
 calidad, no por velocidad; `claude/von-cpu` decide si Q4_0 entra al catálogo.
 
-### JEV en x86
+### Chispa en x86
 
-`pkg/jev`, `pkg/jev/slots` y `pkg/domotica` no dependen de VON ni de una
+`pkg/chispa`, `pkg/chispa/slots` y `pkg/domotica` no dependen de VON ni de una
 microVM: corren en el proceso del CLI. Medido en el mismo i7-8700T
 (`go test -bench=. -run=^$ -cpu=1,4`, cross-compilado a linux/amd64), frente a
-la tabla del M4 en [jev.md](jev.md#inferencia-y-determinismo):
+la tabla del M4 en [chispa.md](chispa.md#inferencia-y-determinismo):
 
 | Predict (texto de la tarea de dominio) | 1 núcleo | 4 núcleos |
 |---|---|---|
@@ -551,18 +551,18 @@ la tabla del M4 en [jev.md](jev.md#inferencia-y-determinismo):
 | + n-gramas de caracteres 3-5 | 11 919 ns/op | 12 288 ns/op |
 | en paralelo (`BenchmarkPredictParallel`) | 3645 ns/op (274 000/s) | 1274 ns/op (785 000/s agregado) |
 
-`BenchmarkTag` (JEV-slots) y `BenchmarkMatch` (plantillas de domótica) salen
+`BenchmarkTag` (Chispa-slots) y `BenchmarkMatch` (plantillas de domótica) salen
 igual a 1 y 4 núcleos (2910-2916 y 3739-3985 ns/op): son bucles secuenciales
 sobre una entrada, sin `RunParallel`, así que no hay nada que escalar.
 
 Frente al M4 (1540-6200 ns/op según características, 290 ns/op agregado a 10
 hilos): el i7-8700T tarda **~2×** por predicción a un núcleo — coherente con
 ser una CPU portátil de bajo consumo (2,4 GHz base) más vieja, no con nada de
-JEV — y con solo 4 núcleos el paralelo agregado llega a 785 000/s en vez de a
+Chispa — y con solo 4 núcleos el paralelo agregado llega a 785 000/s en vez de a
 los ~3,4 M/s que darían 10 núcleos del M4 a este ritmo por núcleo.
 
-Con los modelos reales de la evaluación (`intent.jev` + `slots.jevs`,
-`kling domotica eval` sobre 9794 filas, cascada plantillas → JEV): p50 de
+Con los modelos reales de la evaluación (`intent.chispa` + `slots.chispas`,
+`kling domotica eval` sobre 9794 filas, cascada plantillas → Chispa): p50 de
 9,74 µs y p99 de 30,29 µs por decisión (bucle secuencial: ~103 000
 decisiones/s de un núcleo). El proceso entero, modelos cargados y evaluando
 las 9794 filas, llega a un pico de RSS de **82 MiB** (`/usr/bin/time -v`).
@@ -642,7 +642,7 @@ generar (`/v1/generate` con plantilla por tarea, y la API de OpenAI), con
 `pkg/scheduler` para despertarlos por petición y congelarlos al quedarse
 ociosos. Descubre los dorados por `von.model`, habla con cada réplica en
 `api.Machine.Addr(von.Port)` (streaming directo, sin el proxy del daemon) y manda
-una semilla propia por petición. Como clasificadores detrás de JEV (la cascada)
+una semilla propia por petición. Como clasificadores detrás de Chispa (la cascada)
 no ganaron en la tarea medida, ni con 1,5B ni con 3B: allí están las cifras.
 
 ## Límites conocidos

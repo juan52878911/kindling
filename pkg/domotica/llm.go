@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/juan52878911/kindling/pkg/jev/slots"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 )
 
 // CAPA 4: UN LLM PEQUEÑO (VON) PARA LO QUE LAS CAPAS RÁPIDAS NO SABEN.
@@ -121,7 +121,7 @@ func (v *VON) Decide(ctx context.Context, text, lang string) (Decision, error) {
 
 // Veto aplica a la respuesta del LLM lo que ya sabían las capas anteriores.
 //
-// JEV reconoce las órdenes directas de la habitación con un 99 % de acierto.
+// Chispa reconoce las órdenes directas de la habitación con un 99 % de acierto.
 // Si dio «fuera de ámbito» con confianza, aquí solo cabe lo indirecto: una
 // frase que describe cómo está algo («aquí hace frío»), sin verbo de orden.
 // Una en imperativo («pon una alarma a las siete», «enciende la cafetera») es
@@ -133,7 +133,7 @@ func Veto(prev, d Decision, text, lang string) Decision {
 		return d
 	}
 	return Decision{Layer: d.Layer, Lang: lang, Model: d.Model, Confident: true, Intent: OutOfScope, Actions: []Action{},
-		Reason: ReasonVetoedByJEV, Kind: d.Kind, Reply: cannot(lang), LLM: d.LLM}
+		Reason: ReasonVetoedByChispa, Kind: d.Kind, Reply: cannot(lang), LLM: d.LLM}
 }
 
 // ParseLLM valida la respuesta del LLM contra la taxonomía. Una respuesta

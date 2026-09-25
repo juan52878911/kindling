@@ -16,24 +16,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/domotica"
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/slots"
 )
 
 // kling domotica: la decisión de la habitación de demo (pkg/domotica) desde la
-// CLI, sin daemon. Plantillas de la demo → JEV (intención) + JEV-slots
+// CLI, sin daemon. Plantillas de la demo → Chispa (intención) + Chispa-slots
 // (huecos); lo que no es confiado dice a qué capa escalar. Ver docs/domotica.md.
 
 const domoticaUsage = `usage: kling domotica <command> [options]
 
-  decide [-lang es|en|auto] [-intent m.jev]     decides one command: intent, slots, layer,
-         [-slots m.jevs] [-json] "<text>"       confidence and latency (JSONL from stdin
+  decide [-lang es|en|auto] [-intent m.chispa]  decides one command: intent, slots, layer,
+         [-slots m.chispas] [-json] "<text>"    confidence and latency (JSONL from stdin
                                                 when no text is given)
-  eval -data test.jsonl [-intent m.jev]         intent accuracy / macro-F1, slot F1, exact
-       [-slots m.jevs] [-challenge]             match, coverage and precision at the
+  eval -data test.jsonl [-intent m.chispa]      intent accuracy / macro-F1, slot F1, exact
+       [-slots m.chispas] [-challenge]          match, coverage and precision at the
                                                 confident threshold, latency, per layer
-  train-slots -data train.jsonl -o m.jevs       trains the slot tagger (JEV-slots)
+  train-slots -data train.jsonl -o m.chispas    trains the slot tagger (Chispa-slots)
        [-valid valid.jsonl] [-test t.jsonl]
   embed -url http://host:port -model <encoder>  embeds the texts of JSONL files with a
        -data a.jsonl,b.jsonl -o cache.jemb      sentence encoder replica, into a cache
@@ -51,8 +51,8 @@ one on the daemon of -H with -von, or a running ` + "`kling ai serve`" + ` with 
 decide and eval take the layer-3 encoder with -encoder head.jenc plus -embed-url
 http://host:port (a replica) and/or -embed-cache c.jemb (docs/codificador.md).
 
-Models default to $KLING_DOMOTICA_MODELS (or the user cache dir)/intent.jev and
-slots.jevs; without them only the demo templates answer. Data: go run
+Models default to $KLING_DOMOTICA_MODELS (or the user cache dir)/intent.chispa and
+slots.chispas; without them only the demo templates answer. Data: go run
 ./tools/domotica-data fetch && go run ./tools/domotica-data build (docs/domotica-datos.md).
 `
 
@@ -112,17 +112,17 @@ func loadDecider(intentPath, slotsPath string) (*domotica.Decider, error) {
 	d := &domotica.Decider{Matcher: m}
 	dir := domoticaModelsDir()
 	if intentPath == "" && dir != "" {
-		if p := filepath.Join(dir, "intent.jev"); regularFile(p) {
+		if p := filepath.Join(dir, "intent.chispa"); regularFile(p) {
 			intentPath = p
 		}
 	}
 	if slotsPath == "" && dir != "" {
-		if p := filepath.Join(dir, "slots.jevs"); regularFile(p) {
+		if p := filepath.Join(dir, "slots.chispas"); regularFile(p) {
 			slotsPath = p
 		}
 	}
 	if intentPath != "" {
-		if d.Intent, err = jev.LoadFile(intentPath); err != nil {
+		if d.Intent, err = chispa.LoadFile(intentPath); err != nil {
 			return nil, err
 		}
 	}
@@ -147,8 +147,8 @@ type decideOut struct {
 func cmdDomoticaDecide(args []string) error {
 	fs := flag.NewFlagSet("domotica decide", flag.ExitOnError)
 	lang := fs.String("lang", "auto", "language: es, en or auto")
-	intentPath := fs.String("intent", "", "intent model (.jev)")
-	slotsPath := fs.String("slots", "", "slot model (.jevs)")
+	intentPath := fs.String("intent", "", "intent model (.chispa)")
+	slotsPath := fs.String("slots", "", "slot model (.chispas)")
 	asJSON := fs.Bool("json", false, "one JSON object per line")
 	encPath := fs.String("encoder", "", "layer-3 head (.jenc)")
 	embedURL := fs.String("embed-url", "", "the head's encoder: http://host:port of a replica")
@@ -184,7 +184,7 @@ func cmdDomoticaDecide(args []string) error {
 		show(strings.Join(fs.Args(), " "))
 		return nil
 	}
-	rows, err := jev.ReadExamples(os.Stdin, 0, false)
+	rows, err := chispa.ReadExamples(os.Stdin, 0, false)
 	if err != nil {
 		return err
 	}
@@ -212,8 +212,8 @@ func readRowsFile(path string) ([]domotica.Row, string, error) {
 func cmdDomoticaEval(args []string) error {
 	fs := flag.NewFlagSet("domotica eval", flag.ExitOnError)
 	data := fs.String("data", "", "unified JSONL test data (tools/domotica-data build)")
-	intentPath := fs.String("intent", "", "intent model (.jev)")
-	slotsPath := fs.String("slots", "", "slot model (.jevs)")
+	intentPath := fs.String("intent", "", "intent model (.chispa)")
+	slotsPath := fs.String("slots", "", "slot model (.chispas)")
 	challenge := fs.Bool("challenge", true, "also score the built-in challenge set (indirect, multi-command, near out-of-scope)")
 	errs := fs.Int("errors", 0, "print this many confident errors per system")
 	encPath := fs.String("encoder", "", "layer-3 head (.jenc): adds the encoder alone and the cascade with it")
@@ -258,18 +258,18 @@ func cmdDomoticaEval(args []string) error {
 		}},
 	}
 	if d.Intent != nil {
-		// «jev» es el clasificador solo, con su «fuera de ámbito» como
+		// «chispa» es el clasificador solo, con su «fuera de ámbito» como
 		// respuesta final; la cascada es la política del producto: primero
 		// las plantillas y lo fuera de ámbito escala. «cascade, OOS final»
 		// muestra lo que cambia esa política.
-		jevOnly, final := *d, *d
-		jevOnly.NoTemplate, jevOnly.FinalOOS = true, true
+		chispaOnly, final := *d, *d
+		chispaOnly.NoTemplate, chispaOnly.FinalOOS = true, true
 		final.FinalOOS = true
 		type named = struct {
 			name string
 			sys  domotica.System
 		}
-		systems = append(systems, named{"jev", jevOnly.Decide}, named{"cascade", d.Decide},
+		systems = append(systems, named{"chispa", chispaOnly.Decide}, named{"cascade", d.Decide},
 			named{"cascade, OOS final", final.Decide})
 		systems = append(systems, encoderSystems(d, enc)...)
 	} else {
@@ -374,7 +374,7 @@ func cmdDomoticaTrainSlots(args []string) error {
 	data := fs.String("data", "", "unified JSONL training data (required)")
 	valid := fs.String("valid", "", "unified JSONL validation data (early stopping)")
 	test := fs.String("test", "", "optional unified JSONL test data")
-	out := fs.String("o", "", "output model (.jevs, required)")
+	out := fs.String("o", "", "output model (.chispas, required)")
 	bucketsLog := fs.Int("buckets", 17, "log2 of the number of hash buckets")
 	window := fs.Int("window", 2, "neighbour words on each side")
 	affix := fs.Int("affix", 3, "prefix/suffix runes (0 = off)")
@@ -386,7 +386,7 @@ func cmdDomoticaTrainSlots(args []string) error {
 		return err
 	}
 	if *data == "" || *out == "" {
-		return errors.New("usage: kling domotica train-slots -data train.jsonl -o slots.jevs [-valid v.jsonl]")
+		return errors.New("usage: kling domotica train-slots -data train.jsonl -o slots.chispas [-valid v.jsonl]")
 	}
 	if *bucketsLog < 4 || *bucketsLog > 22 {
 		return errors.New("-buckets must be between 4 and 22 (log2)")

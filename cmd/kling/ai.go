@@ -79,7 +79,7 @@ func aiServe(args []string) error {
 	maxReplicas := fs.Int("max-replicas", 2, "replicas per model (max_replicas in the registry wins)")
 	maxInflight := fs.Int("max-inflight", 1, "requests per replica before asking for another")
 	keepwarm := fs.Int("keepwarm", 0, "N most used models kept awake (0 = pure scale to zero)")
-	jevMem := fs.Int("jev-mem", 256, "MiB of JEV models kept loaded (LRU)")
+	chispaMem := fs.Int("chispa-mem", 256, "MiB of Chispa models kept loaded (LRU)")
 	vonTimeout := fs.Duration("von-timeout", 60*time.Second, "deadline of an escalation to VON")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -126,7 +126,7 @@ func aiServe(args []string) error {
 	g, err := aigw.New(aigw.Options{
 		Client: client, ConfigPath: *cfgPath, Config: cfg, ID: *id,
 		Idle: *idle, MaxReplicas: *maxReplicas, MaxInflight: *maxInflight, KeepWarm: *keepwarm,
-		JEVBudget: int64(*jevMem) << 20, VONTimeout: *vonTimeout,
+		ChispaBudget: int64(*chispaMem) << 20, VONTimeout: *vonTimeout,
 		PopularityFile: aiDefault("ai-popularity-" + *id + ".json"),
 	})
 	if err != nil {
@@ -397,7 +397,7 @@ func aiList(args []string) error {
 	var notes []string
 	for _, n := range sortedNames(cfg.Tasks) {
 		t := cfg.Tasks[n]
-		samples, kind, model, casc := "-", "classify", t.JEV, "-"
+		samples, kind, model, casc := "-", "classify", t.Chispa, "-"
 		if t.Domotica != nil {
 			kind, model = "domotica", t.Domotica.Intent
 			if t.Domotica.Encoder != "" {
@@ -449,10 +449,10 @@ func sortedNames[V any](m map[string]V) []string {
 
 func aiTest(args []string) error {
 	fs := flag.NewFlagSet("ai test", flag.ExitOnError)
-	mode := fs.String("mode", "", "cascade (default: JEV, and VON where it is unsure if the task's cascade is on) or jev")
+	mode := fs.String("mode", "", "cascade (default: Chispa, and VON where it is unsure if the task's cascade is on) or chispa")
 	fields := fs.String("fields", "", `structured fields as JSON, e.g. {"service":"api"}`)
 	asJSON := fs.Bool("json", false, "print the full JSON answer")
-	explain := fs.Bool("explain", false, "include JEV's evidence also when it answers")
+	explain := fs.Bool("explain", false, "include Chispa's evidence also when it answers")
 	fs.String("lang", "", "language of a domotica command (es, en; default auto)")
 	mk := aiClientFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -506,12 +506,12 @@ func aiTest(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(resp)
 	}
 	esc := ""
-	if resp.Escalate && resp.Source == "jev" {
-		esc = ", escalate: JEV is unsure and the cascade is off"
+	if resp.Escalate && resp.Source == "chispa" {
+		esc = ", escalate: Chispa is unsure and the cascade is off"
 	}
 	fmt.Printf("%s  (source %s, p=%.3f, %.2f ms%s)\n", resp.Label, resp.Source, resp.Prob, resp.LatencyMS, esc)
-	if resp.JEV != nil {
-		fmt.Printf("  jev: %s p=%.3f threshold=%.3f -> %s\n", resp.JEV.Label, resp.JEV.Prob, resp.JEV.Threshold, resp.JEV.Decision)
+	if resp.Chispa != nil {
+		fmt.Printf("  chispa: %s p=%.3f threshold=%.3f -> %s\n", resp.Chispa.Label, resp.Chispa.Prob, resp.Chispa.Threshold, resp.Chispa.Decision)
 	}
 	if resp.VON != nil {
 		fmt.Printf("  von %s: %q in %.0f ms\n", resp.VON.Model, resp.VON.Answer, resp.VON.LatencyMS)
@@ -548,9 +548,9 @@ func aiCalibrate(args []string) error {
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(rep)
 	}
-	fmt.Printf("task %s (jev %s): %d samples with a VON answer (%d escalated, %d audited)\n",
+	fmt.Printf("task %s (chispa %s): %d samples with a VON answer (%d escalated, %d audited)\n",
 		rep.Task, rep.Model, rep.Samples, rep.Escalated, rep.Audited)
-	fmt.Printf("JEV agrees with VON on %.3f of the sample (weighted)\n", rep.Overall)
+	fmt.Printf("Chispa agrees with VON on %.3f of the sample (weighted)\n", rep.Overall)
 	fmt.Printf("held-out half, target agreement %.2f:\n", rep.Target)
 	fmt.Printf("  before: coverage %.3f, agreement %.3f (%d confident)\n", rep.Before.Coverage, rep.Before.Agreement, rep.Before.Confident)
 	fmt.Printf("  after:  coverage %.3f, agreement %.3f (%d confident)\n", rep.After.Coverage, rep.After.Agreement, rep.After.Confident)
@@ -639,14 +639,14 @@ func (k *kvFlag) Set(v string) error {
 	return nil
 }
 
-// aiEval pasa un conjunto etiquetado por JEV solo y por la cascada, y guarda
+// aiEval pasa un conjunto etiquetado por Chispa solo y por la cascada, y guarda
 // el resultado con la tarea: es lo que decide si escalate_to se puede activar.
 func aiEval(args []string) error {
 	fs := flag.NewFlagSet("ai eval", flag.ExitOnError)
-	data := fs.String("data", "", "labelled JSONL ({\"text\", \"fields\", \"label\"}) NOT used to train the JEV model")
+	data := fs.String("data", "", "labelled JSONL ({\"text\", \"fields\", \"label\"}) NOT used to train the Chispa model")
 	vonModel := fs.String("von", "", "candidate von model (default: the task's escalate_to)")
 	conc := fs.Int("concurrency", 1, "escalations in flight at once (more wakes more replicas)")
-	alone := fs.Bool("von-alone", false, "also measure VON alone on every example (all labels, no JEV hints)")
+	alone := fs.Bool("von-alone", false, "also measure VON alone on every example (all labels, no Chispa hints)")
 	dry := fs.Bool("dry-run", false, "report only; don't store the record")
 	asJSON := fs.Bool("json", false, "JSON output")
 	mk := aiClientFlags(fs)
@@ -683,21 +683,21 @@ func aiEval(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(out)
 	}
 	r, res := out.Record, out.Record.Results
-	fmt.Printf("task %s: jev %s, candidate von %s (%s), %d examples\n", r.Task, r.JEV.Model, r.VON.Model, r.VON.Snapshot, res.Examples)
+	fmt.Printf("task %s: chispa %s, candidate von %s (%s), %d examples\n", r.Task, r.Chispa.Model, r.VON.Model, r.VON.Snapshot, res.Examples)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintf(tw, "JEV alone\t%.3f\n", res.JEVAccuracy)
+	fmt.Fprintf(tw, "Chispa alone\t%.3f\n", res.ChispaAccuracy)
 	fmt.Fprintf(tw, "cascade\t%.3f\n", res.CascadeAccuracy)
 	if res.VONAloneAccuracy != nil {
 		fmt.Fprintf(tw, "VON alone\t%.3f\n", *res.VONAloneAccuracy)
 	}
-	fmt.Fprintf(tw, "JEV confident\t%.3f of the examples, %.3f right\n", res.Coverage, res.ConfidentAccuracy)
-	fmt.Fprintf(tw, "escalated (%d)\tJEV right %.3f, VON right %.3f (%d unknown, %d errors)\n",
-		res.Escalated, res.JEVAccuracyEscalated, res.VONAccuracyEscalated, res.VONUnknown, res.VONErrors)
-	fmt.Fprintf(tw, "disagreements\tJEV only right %d, cascade only right %d (McNemar p=%.2g)\n", res.JEVOnlyRight, res.VONOnlyRight, res.PValue)
+	fmt.Fprintf(tw, "Chispa confident\t%.3f of the examples, %.3f right\n", res.Coverage, res.ConfidentAccuracy)
+	fmt.Fprintf(tw, "escalated (%d)\tChispa right %.3f, VON right %.3f (%d unknown, %d errors)\n",
+		res.Escalated, res.ChispaAccuracyEscalated, res.VONAccuracyEscalated, res.VONUnknown, res.VONErrors)
+	fmt.Fprintf(tw, "disagreements\tChispa only right %d, cascade only right %d (McNemar p=%.2g)\n", res.ChispaOnlyRight, res.VONOnlyRight, res.PValue)
 	fmt.Fprintf(tw, "VON latency\tp50 %.0f ms, p95 %.0f ms (%.0f s in total)\n", res.VONLatencyP50MS, res.VONLatencyP95MS, res.DurationS)
 	_ = tw.Flush()
 	if res.UnseenLabels > 0 {
-		fmt.Printf("warning: %d examples have a label the JEV model doesn't know\n", res.UnseenLabels)
+		fmt.Printf("warning: %d examples have a label the Chispa model doesn't know\n", res.UnseenLabels)
 	}
 	fmt.Println(r.Verdict)
 	if r.Stored != "" {
@@ -711,14 +711,14 @@ func aiEval(args []string) error {
 	case "forced", "refused":
 		fmt.Println(out.Cascade.Reason)
 	default:
-		if r.BeatsJEV && r.Stored != "" {
+		if r.BeatsChispa && r.Stored != "" {
 			fmt.Printf("to use it, set \"escalate_to\": %q in the task and run kling ai reload\n", r.VON.Model)
 		}
 	}
 	return nil
 }
 
-// readEvalData lee un JSONL etiquetado (el mismo formato que kling jev train).
+// readEvalData lee un JSONL etiquetado (el mismo formato que kling chispa train).
 func readEvalData(path string) ([]aigw.EvalExample, error) {
 	f, err := os.Open(path)
 	if err != nil {

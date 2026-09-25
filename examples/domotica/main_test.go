@@ -44,7 +44,7 @@ func TestLayerOf(t *testing.T) {
 	cases := map[string]*api.Machine{
 		domotica.LayerEncoder: {Name: "gw-enc-1", Labels: map[string]string{"von.kind": "embed", "von.model": "e5"}},
 		domotica.LayerVON:     {Name: "gw-llm-1", Labels: map[string]string{"von.model": "qwen"}},
-		domotica.LayerJEV:     {Name: "chispa-room-1", From: "chispa-room"},
+		domotica.LayerChispa:  {Name: "chispa-room-1", From: "chispa-room"},
 		"":                    {Name: "other"},
 	}
 	for want, m := range cases {

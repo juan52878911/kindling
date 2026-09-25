@@ -1,21 +1,23 @@
 package aigw
 
 import (
+	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // Con umbrales que prometen de más (0 = todo confiado) y un VON que solo
-// coincide con JEV cuando este está muy seguro, calibrar sube el umbral, mejora
-// la concordancia en la mitad de evaluación y escribe el .jev (con copia).
+// coincide con Chispa cuando este está muy seguro, calibrar sube el umbral, mejora
+// la concordancia en la mitad de evaluación y escribe el .chispa (con copia).
 func TestCalibrarMejoraYEscribe(t *testing.T) {
 	g, _, _ := newTestGateway(t, nil)
 	path := g.config().Models["commits"].Path
-	m, err := jev.LoadFile(path)
+	m, err := chispa.LoadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +61,7 @@ func TestCalibrarMejoraYEscribe(t *testing.T) {
 	if rep.Written != path || rep.Backup != path+".prev" {
 		t.Fatalf("not written: %+v", rep)
 	}
-	nm, err := jev.LoadFile(path)
+	nm, err := chispa.LoadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,14 +69,14 @@ func TestCalibrarMejoraYEscribe(t *testing.T) {
 	if nm.Thresholds[bug] < 0.75 || nm.Thresholds[bug] > 0.9 {
 		t.Fatalf("new bug threshold = %v", nm.Thresholds[bug])
 	}
-	if nm.Thresholds[nm.GoldIndex("feat")] != jev.NeverConfident {
+	if nm.Thresholds[nm.GoldIndex("feat")] != chispa.NeverConfident {
 		t.Fatalf("a class without samples should never be confident: %v", nm.Thresholds)
 	}
 	if _, err := os.Stat(path + ".prev"); err != nil {
 		t.Fatal(err)
 	}
 	// La caché sirve ya el nuevo sin releer.
-	cm, _ := g.jev.get(path)
+	cm, _ := g.chispa.get(path)
 	if cm.Thresholds[bug] != nm.Thresholds[bug] {
 		t.Fatal("cache still serves the old thresholds")
 	}
@@ -103,9 +105,31 @@ func TestCalibrarSinMuestras(t *testing.T) {
 	}
 }
 
+// TestCalibrarRechazaMicroVM comprueba que calibrar una tarea con un modelo
+// chispa backend microvm falla con un mensaje claro (reentrenar y volver a
+// desplegar) en vez del "unavailable" genérico de intentar cargar un Path
+// vacío: un modelo microvm no tiene .chispa local que reescribir (docs/chispa-serverless.md).
+func TestCalibrarRechazaMicroVM(t *testing.T) {
+	cfg := microVMConfig(t,
+		&ModelConfig{Kind: KindChispa, Backend: BackendMicroVM, Snapshot: "chispa-commits"},
+		&TaskConfig{Chispa: "commits", EscalateTo: "smol", EscalateForce: true})
+	g, err := New(Options{Config: cfg, Replicas: &fakeReplicas{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = g.Calibrate(CalibrateRequest{Task: "kind"})
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "kling chispa deploy") || !strings.Contains(err.Error(), "retraining") {
+		t.Fatalf("error should point at retrain+redeploy: %v", err)
+	}
+}
+
 // Si VON discrepa de todo, "no contestar nunca" cumpliría el objetivo sin
 // prometer nada: no se escribe.
-func TestCalibrarNoApagaJEV(t *testing.T) {
+func TestCalibrarNoApagaChispa(t *testing.T) {
 	g, _, _ := newTestGateway(t, nil)
 	r := g.rings["kind"]
 	for i := 0; i < 400; i++ {

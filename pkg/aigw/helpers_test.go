@@ -14,12 +14,12 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/train"
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/train"
 )
 
 // corpus es un conjunto sintético con cuatro clases fáciles de separar.
-func corpus(n int, seed uint64) []jev.Example {
+func corpus(n int, seed uint64) []chispa.Example {
 	vocab := map[string][]string{
 		"bug":   {"crash", "panic", "null", "overflow", "segfault", "broken"},
 		"feat":  {"add", "support", "new", "implement", "introduce", "option"},
@@ -29,14 +29,14 @@ func corpus(n int, seed uint64) []jev.Example {
 	labels := []string{"bug", "chore", "docs", "feat"}
 	s := seed
 	next := func() uint64 { s = s*6364136223846793005 + 1442695040888963407; return s >> 33 }
-	out := make([]jev.Example, n)
+	out := make([]chispa.Example, n)
 	for i := range out {
 		l := labels[next()%4]
 		var b strings.Builder
 		for j := 0; j < 3; j++ {
 			b.WriteString(vocab[l][next()%6] + " the parser ")
 		}
-		out[i] = jev.Example{Text: b.String(), Label: l}
+		out[i] = chispa.Example{Text: b.String(), Label: l}
 	}
 	return out
 }
@@ -44,13 +44,13 @@ func corpus(n int, seed uint64) []jev.Example {
 // trainedModel entrena (una vez por test) un modelo pequeño y lo guarda.
 func trainedModel(t *testing.T) string {
 	t.Helper()
-	cfg := train.Config{Spec: jev.DefaultSpec(), Seed: 1}
+	cfg := train.Config{Spec: chispa.DefaultSpec(), Seed: 1}
 	cfg.Spec.Buckets = 1 << 12
 	res, err := train.Train(corpus(600, 1), corpus(200, 2), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(t.TempDir(), "m.jev")
+	p := filepath.Join(t.TempDir(), "m.chispa")
 	if err := res.Model.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -140,20 +140,20 @@ func (f *fakeReplicas) Acquire(ctx context.Context, snap string) (*Replica, erro
 	return &Replica{Addr: f.addr, Release: func() { f.released.Add(1) }, Drop: func() {}}, nil
 }
 
-// newTestGateway arma un gateway con un modelo JEV entrenado y el llama falso.
+// newTestGateway arma un gateway con un modelo Chispa entrenado y el llama falso.
 func newTestGateway(t *testing.T, mut func(*Config)) (*Gateway, *fakeLlama, *fakeReplicas) {
 	t.Helper()
 	ll := newFakeLlama(t)
 	reps := &fakeReplicas{addr: strings.TrimPrefix(ll.srv.URL, "http://")}
 	cfg := &Config{
 		Models: map[string]*ModelConfig{
-			"commits": {Kind: KindJEV, Path: trainedModel(t)},
+			"commits": {Kind: KindChispa, Path: trainedModel(t)},
 			"smol":    {Kind: KindVON, Snapshot: "von-smol"},
 		},
 		Tasks: map[string]*TaskConfig{
 			// Cascada forzada: aquí se prueba lo que hace, no la puerta que
 			// la activa (eso es eval_test.go).
-			"kind": {JEV: "commits", EscalateTo: "smol", EscalateForce: true},
+			"kind": {Chispa: "commits", EscalateTo: "smol", EscalateForce: true},
 		},
 	}
 	if mut != nil {

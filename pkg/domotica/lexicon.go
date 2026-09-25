@@ -4,14 +4,14 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juan52878911/kindling/pkg/jev/slots"
+	"github.com/juan52878911/kindling/pkg/chispa/slots"
 )
 
 // Léxico de la habitación de demo: nombres canónicos de zonas, dispositivos y
 // colores con sus sinónimos en español e inglés. Es la normalización de
 // valores (lo que convierte «las luces del salón» en device=light,
 // area=living_room) y, aplanado a tokens sueltos, el léxico que ve el
-// etiquetador como característica. Si se toca, cambia el hash del .jevs y hay
+// etiquetador como característica. Si se toca, cambia el hash del .chispas y hay
 // que reentrenar: a propósito, para no mezclar léxicos en silencio.
 
 // Dispositivos canónicos de la habitación.

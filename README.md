@@ -81,7 +81,7 @@ sections:
 · [A shared package library](#a-shared-package-library)
 · [Sharing a host folder](#sharing-a-host-folder)
 · [Small LLMs on demand (VON)](#small-llms-on-demand-von)
-· [JEV: a tiny classifier for small decisions](#jev-a-tiny-classifier-for-small-decisions)
+· [Chispa: a tiny classifier for small decisions](#chispa-a-tiny-classifier-for-small-decisions)
 · [AI gateway](#ai-gateway-many-models-ready-none-running-247)
 · [Demo: a smart-home room](#demo-a-smart-home-room-on-serverless-models)
 · [What persists and what does not](#what-persists-and-what-does-not)
@@ -715,37 +715,40 @@ total (sum of RSS 1715 MiB), ~12 MiB per extra replica. On a Mac (`vz`), a repli
 first token ~0.8 s after `run -from` and generates ~140 tok/s. Numbers, the nested-lab caveat and
 the GPU plan: [`docs/von.md`](docs/von.md).
 
-## JEV: a tiny classifier for small decisions
+## Chispa: a tiny classifier for small decisions
 
-`kling jev` trains and serves a linear model (hashed words, bigrams and structured
+`kling chispa` trains and serves a linear model (hashed words, bigrams and structured
 fields; int16 weights; ~1 MB) for decisions that do not deserve a language model:
 classify an event, route an agent request, filter an input. It runs locally, needs no
 daemon, answers in 1.5–6 µs with zero allocations, and is bit-identical across
 amd64/arm64. Every prediction carries a calibrated probability and a per-class
-threshold decision, `confident` or `escalate`, so a gateway can answer with JEV and
+threshold decision, `confident` or `escalate`, so a gateway can answer with Chispa and
 hand the rest to a bigger model.
 
 ```sh
-kling jev train -data train.jsonl -valid valid.jsonl -o events.jev
-kling jev predict -model events.jev -text "panic in the parser" -fields '{"service":"api"}'
+kling chispa train -data train.jsonl -valid valid.jsonl -o events.chispa
+kling chispa predict -model events.chispa -text "panic in the parser" -fields '{"service":"api"}'
 ```
 
-Design and file format: [`docs/jev.md`](docs/jev.md). An honest evaluation on 4,304
+Design and file format: [`docs/chispa.md`](docs/chispa.md). An honest evaluation on 4,304
 real commits, including where the thresholds stop holding:
-[`docs/JEV-EVAL.md`](docs/JEV-EVAL.md).
+[`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md). Chispa can also run **serverless**, one task per
+frozen microVM golden snapshot woken on demand (the same model as VON below):
+`kling chispa deploy`, measured thaw and throughput numbers in
+[`docs/chispa-serverless.md`](docs/chispa-serverless.md).
 
 ## AI gateway: many models ready, none running 24/7
 
-`kling ai serve` puts JEV and VON behind one API, each doing its own job: **JEV
+`kling ai serve` puts Chispa and VON behind one API, each doing its own job: **Chispa
 classifies, routes and filters** (in-process, microseconds), **VON generates**
 (summaries, drafts, answers) from replicas that are thawed on the first request,
 scaled out under concurrency and frozen again when idle (`pkg/scheduler`).
-`POST /v1/classify` and `/v1/decide` return JEV's label with `escalate: true` when it
+`POST /v1/classify` and `/v1/decide` return Chispa's label with `escalate: true` when it
 is unsure, so the caller decides; `POST /v1/generate` fills a per-task prompt template;
 `/v1/chat/completions` and `/v1/models` are OpenAI-compatible, with streaming.
-Chaining the two (a **cascade**: VON answers what JEV doubts) is opt-in per task and
+Chaining the two (a **cascade**: VON answers what Chispa doubts) is opt-in per task and
 **only enabled when `kling ai eval` shows, on that task's labelled data, that it beats
-JEV alone** (McNemar test, same models and settings); otherwise the gateway refuses it
+Chispa alone** (McNemar test, same models and settings); otherwise the gateway refuses it
 unless `escalate_force`. It listens on a 0600 Unix socket by default and on TCP only
 with `-listen` and a token.
 
@@ -756,7 +759,7 @@ kling ai generate summarize "fix(parser): handle empty input"
 kling ai eval commit-type -data test.jsonl -von qwen   # gates escalate_to
 ```
 
-Measured on commit classification (861 held-out commits), JEV alone is 0.640 accurate in
+Measured on commit classification (861 held-out commits), Chispa alone is 0.640 accurate in
 6 µs; no cascade reached it — Qwen2.5 0.5B 0.429, 1.5B 0.520, 3B 0.540 — so the gate
 refused them all. On a Mac, a warm generation answers in 9 ms, a frozen replica in
 ~1.5 s. Design, API, numbers and limits: [`docs/ai-gateway.md`](docs/ai-gateway.md).
@@ -1166,10 +1169,11 @@ instances share pages.
 | [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: the Lima recipe, limits, and cold-start levers |
 | [`docs/three-layers.md`](docs/three-layers.md) | Layered images: design, measurements, runtime families |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
-| [`docs/jev.md`](docs/jev.md) · [`docs/JEV-EVAL.md`](docs/JEV-EVAL.md) | JEV, the tiny linear classifier: features, `.jev` format, cascade; its evaluation on real commits |
-| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Smart-home decisions (`kling domotica`): demo templates → JEV intent + JEV-slots, free datasets and their licenses, evaluation (Spanish) |
+| [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, the tiny linear classifier: features, `.chispa` format, cascade; its evaluation on real commits |
+| [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa as a serverless kindling task: one frozen golden snapshot per task, `kling chispa deploy`, measured thaw and throughput vs. in-process |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Smart-home decisions (`kling domotica`): demo templates → Chispa intent + Chispa-slots, free datasets and their licenses, evaluation (Spanish) |
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | The demo room: layer 4 (LLM with JSON output) and the web page that shows every layer's decision and microVM (Spanish) |
-| [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: JEV classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
+| [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: Chispa classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |
 | [`docs/releases.md`](docs/releases.md) | How releases are built and published |

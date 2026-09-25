@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 	"github.com/juan52878911/kindling/pkg/von"
 )
@@ -33,14 +33,14 @@ type Options struct {
 	// Replicas sustituye a pkg/scheduler (tests).
 	Replicas Replicas
 
-	ID          string        // valor de LabelGateway; "default"
-	NamePrefix  string        // prefijo de las máquinas; "gw-"
-	Idle        time.Duration // sin peticiones antes de congelar una réplica; 2 min
-	MaxReplicas int           // por modelo, salvo max_replicas en el registro; 2
-	MaxInflight int           // peticiones por réplica antes de pedir otra; 1
-	KeepWarm    int           // N modelos populares siempre despiertos; 0
-	JEVBudget   int64         // bytes de modelos JEV cargados; 256 MiB
-	VONTimeout  time.Duration // plazo de una escalada; 60 s
+	ID           string        // valor de LabelGateway; "default"
+	NamePrefix   string        // prefijo de las máquinas; "gw-"
+	Idle         time.Duration // sin peticiones antes de congelar una réplica; 2 min
+	MaxReplicas  int           // por modelo, salvo max_replicas en el registro; 2
+	MaxInflight  int           // peticiones por réplica antes de pedir otra; 1
+	KeepWarm     int           // N modelos populares siempre despiertos; 0
+	ChispaBudget int64         // bytes de modelos Chispa cargados; 256 MiB
+	VONTimeout   time.Duration // plazo de una escalada; 60 s
 	// EncoderTimeout es el plazo de la capa 3 de una tarea de domótica,
 	// despertar la réplica incluido; 5 s. Pasado, la decisión escala a VON.
 	EncoderTimeout time.Duration
@@ -70,8 +70,8 @@ func (o *Options) withDefaults() {
 	if o.MaxInflight <= 0 {
 		o.MaxInflight = 1
 	}
-	if o.JEVBudget == 0 {
-		o.JEVBudget = 256 << 20
+	if o.ChispaBudget == 0 {
+		o.ChispaBudget = 256 << 20
 	}
 	if o.VONTimeout <= 0 {
 		o.VONTimeout = 60 * time.Second
@@ -98,8 +98,8 @@ type Gateway struct {
 	opts     Options
 	sched    *scheduler.Scheduler
 	replicas Replicas
-	jev      *jevCache
-	domo     domoFiles // .jevs y .jenc de las tareas de domótica
+	chispa   *chispaCache
+	domo     domoFiles // .chispas y .jenc de las tareas de domótica
 	met      *metrics
 
 	cfgMu    sync.RWMutex
@@ -113,6 +113,14 @@ type Gateway struct {
 	repMu    sync.Mutex // caché de réplicas por modelo para /metrics
 	repAt    time.Time
 	repCache map[string]replicaCount
+
+	// deploy consulta ChispaDeployAnnotation (el registro de `kling chispa deploy`):
+	// la fuente de verdad de las etiquetas de un modelo chispa backend microvm, ya
+	// que el invitado no es de fiar (chispaguest.go). deployMu/deployCache lo
+	// cachean deployCacheTTL para no preguntar al daemon en cada clasificación.
+	deploy      chispaDeployLookup
+	deployMu    sync.Mutex
+	deployCache map[string]deployCacheEntry
 }
 
 // New crea el gateway. No habla con el daemon hasta Start o la primera
@@ -126,7 +134,10 @@ func New(o Options) (*Gateway, error) {
 			return nil, err
 		}
 	}
-	g := &Gateway{opts: o, jev: newJEVCache(o.JEVBudget), met: newMetrics(), auditSem: make(chan struct{}, 1)}
+	g := &Gateway{
+		opts: o, chispa: newChispaCache(o.ChispaBudget), met: newMetrics(), auditSem: make(chan struct{}, 1),
+		deploy: clientDeployLookup{o.Client}, deployCache: map[string]deployCacheEntry{},
+	}
 	g.setConfig(cfg)
 
 	s := scheduler.New(o.Client, o.Idle, false, 0)
@@ -216,7 +227,7 @@ func (g *Gateway) setConfig(c *Config) []string {
 	return CascadeNotes(st)
 }
 
-// Reload relee el registro del disco. Los modelos JEV se vuelven a leer en su
+// Reload relee el registro del disco. Los modelos Chispa se vuelven a leer en su
 // siguiente uso (el fichero pudo cambiar). Devuelve las notas de las cascadas:
 // quien activa escalate_to sin una evaluación que la respalde se entera aquí.
 func (g *Gateway) Reload() ([]string, error) {
@@ -229,8 +240,8 @@ func (g *Gateway) Reload() ([]string, error) {
 	}
 	old := g.config()
 	for _, m := range old.Models {
-		if m.Kind == KindJEV {
-			g.jev.drop(m.Path)
+		if m.Kind == KindChispa {
+			g.chispa.drop(m.Path)
 		}
 	}
 	g.domo.reset()
@@ -240,23 +251,44 @@ func (g *Gateway) Reload() ([]string, error) {
 // Start pone en marcha el segador (congela réplicas ociosas, mantiene el
 // keepwarm) y congela lo que un gateway anterior con el mismo id dejara
 // corriendo sin nadie que lo vigile. Vuelve enseguida; el segador para con ctx.
+//
+// El daemon solo hace falta para los modelos VON y embed (una réplica en una
+// microVM): un registro que solo tiene Chispa nunca lo marca ni lo llama, así que
+// arranca y sirve igual sin daemon, sin KVM ni sin vz. Si el registro SÍ trae
+// un modelo VON o embed pero el daemon no contesta, se avisa una vez, con
+// claridad, y el gateway sigue: las tareas Chispa siguen funcionando, las que
+// necesitan VON fallarán hasta que el daemon esté.
 func (g *Gateway) Start(ctx context.Context) {
 	if g.opts.Client == nil {
 		return
 	}
-	if info, err := g.opts.Client.Info(ctx); err == nil && info.Has("renew") {
-		g.sched.MachineTTL = 0 // 2 × idle, renovado mientras el gateway viva
+	if g.config().NeedsDaemon() {
+		if info, err := g.opts.Client.Info(ctx); err != nil {
+			log.Printf("warning: no chispa-only registry: this one has a von or embed model, but the daemon at %s is not reachable (%v); chispa tasks work fine, but any task with von, escalate_to or a domotica encoder will fail until the daemon is up (kling daemon) and reachable (-host)",
+				g.opts.Client.Endpoint(), err)
+		} else {
+			if info.Has("renew") {
+				g.sched.MachineTTL = 0 // 2 × idle, renovado mientras el gateway viva
+			}
+			if n := g.freezeOwn(ctx); n > 0 {
+				log.Printf("froze %d replica(s) left running by a previous gateway %q", n, g.opts.ID)
+			}
+		}
 	}
-	if n := g.freezeOwn(ctx); n > 0 {
-		log.Printf("froze %d replica(s) left running by a previous gateway %q", n, g.opts.ID)
-	}
+	// El segador no llama al daemon si no hay ninguna réplica VON/embed
+	// registrada (reapOnce solo toca lo que el planificador llegó a
+	// despertar), así que dejarlo corriendo no exige un daemon presente: si
+	// uno aparece más tarde (kling ai reload con un modelo VON nuevo), ya
+	// está listo.
 	go g.sched.Reap(ctx)
 }
 
 // Close congela las réplicas de este gateway que sigan corriendo: al salir no
-// queda nada gastando CPU ni RAM, y la próxima vez vuelven con un thaw.
+// queda nada gastando CPU ni RAM, y la próxima vez vuelven con un thaw. Sin
+// modelos VON/embed en el registro, o sin daemon, no hay nada que congelar y
+// no se intenta hablar con él.
 func (g *Gateway) Close(ctx context.Context) {
-	if g.opts.Client == nil {
+	if g.opts.Client == nil || !g.config().NeedsDaemon() {
 		return
 	}
 	if n := g.freezeOwn(ctx); n > 0 {
@@ -284,18 +316,18 @@ func (g *Gateway) freezeOwn(ctx context.Context) int {
 	return n
 }
 
-// ---- clasificación (JEV, y la cascada si está respaldada)
+// ---- clasificación (Chispa, y la cascada si está respaldada)
 
 // ClassifyRequest es el cuerpo de /v1/classify y /v1/decide.
 type ClassifyRequest struct {
 	Task   string         `json:"task"`
 	Text   string         `json:"text"`
 	Fields map[string]any `json:"fields,omitempty"`
-	// Mode: "cascade" (por defecto: JEV, y VON en lo que duda si la cascada de
-	// la tarea está activa) o "jev" (solo JEV, aunque dude y aunque la cascada
+	// Mode: "cascade" (por defecto: Chispa, y VON en lo que duda si la cascada de
+	// la tarea está activa) o "chispa" (solo Chispa, aunque dude y aunque la cascada
 	// esté activa).
 	Mode string `json:"mode,omitempty"`
-	// Explain añade la evidencia también a las respuestas confiadas de JEV
+	// Explain añade la evidencia también a las respuestas confiadas de Chispa
 	// (cuesta reservas de memoria; en las escaladas va siempre).
 	Explain bool `json:"explain,omitempty"`
 	// Lang es el idioma de una orden de domótica (es, en, auto).
@@ -307,26 +339,26 @@ type ClassifyResponse struct {
 	Task     string `json:"task"`
 	Label    string `json:"label"`
 	Decision string `json:"decision,omitempty"` // /v1/decide: la misma etiqueta
-	// Escalate: JEV no llegó a su umbral. Con la cascada activa la etiqueta es
-	// la de VON (source von); si no, es la de JEV y quien llama decide qué
+	// Escalate: Chispa no llegó a su umbral. Con la cascada activa la etiqueta es
+	// la de VON (source von); si no, es la de Chispa y quien llama decide qué
 	// hacer con la duda. Nunca se pregunta a VON a escondidas.
-	Escalate  bool           `json:"escalate,omitempty"`
-	Prob      float64        `json:"prob"`   // probabilidad calibrada de JEV para Label (0 si es unknown)
-	Source    string         `json:"source"` // jev | von
-	LatencyMS float64        `json:"latency_ms"`
-	Evidence  []jev.Evidence `json:"evidence,omitempty"`
-	JEV       *JEVAnswer     `json:"jev,omitempty"`
-	VON       *VONAnswer     `json:"von,omitempty"`
-	Degraded  string         `json:"degraded,omitempty"` // la cascada estaba activa y VON no contestó
+	Escalate  bool              `json:"escalate,omitempty"`
+	Prob      float64           `json:"prob"`   // probabilidad calibrada de Chispa para Label (0 si es unknown)
+	Source    string            `json:"source"` // chispa | von
+	LatencyMS float64           `json:"latency_ms"`
+	Evidence  []chispa.Evidence `json:"evidence,omitempty"`
+	Chispa    *ChispaAnswer     `json:"chispa,omitempty"`
+	VON       *VONAnswer        `json:"von,omitempty"`
+	Degraded  string            `json:"degraded,omitempty"` // la cascada estaba activa y VON no contestó
 }
 
-// JEVAnswer es lo que dijo JEV, conteste él o no.
-type JEVAnswer struct {
-	Label      string          `json:"label"`
-	Prob       float64         `json:"prob"`
-	Threshold  float64         `json:"threshold"`
-	Decision   string          `json:"decision"`
-	Candidates []jev.ClassProb `json:"candidates,omitempty"`
+// ChispaAnswer es lo que dijo Chispa, conteste él o no.
+type ChispaAnswer struct {
+	Label      string             `json:"label"`
+	Prob       float64            `json:"prob"`
+	Threshold  float64            `json:"threshold"`
+	Decision   string             `json:"decision"`
+	Candidates []chispa.ClassProb `json:"candidates,omitempty"`
 }
 
 // VONAnswer es lo que dijo VON.
@@ -348,15 +380,15 @@ func statusf(code int, format string, a ...any) error {
 	return &StatusError{Code: code, Msg: fmt.Sprintf(format, a...)}
 }
 
-// maxText acota el texto a clasificar. JEV lo recorta a su max_text de todas
+// maxText acota el texto a clasificar. Chispa lo recorta a su max_text de todas
 // formas; esto evita guardar y copiar megas por petición.
 const maxText = 64 << 10
 
-// jevDecide es la predicción de JEV con los umbrales de la tarea: la etiqueta,
+// chispaDecide es la predicción de Chispa con los umbrales de la tarea: la etiqueta,
 // su umbral efectivo y si contesta confiado. full pide la distribución y la
 // evidencia (hace falta para escalar o explicar).
-func jevDecide(m *jev.Model, tc *TaskConfig, in jev.Input, full bool) (jev.Prediction, float64, bool) {
-	var p jev.Prediction
+func chispaDecide(m *chispa.Model, tc *TaskConfig, in chispa.Input, full bool) (chispa.Prediction, float64, bool) {
+	var p chispa.Prediction
 	if full {
 		p = m.PredictFull(in, 5)
 	} else {
@@ -370,9 +402,12 @@ func jevDecide(m *jev.Model, tc *TaskConfig, in jev.Input, full bool) (jev.Predi
 }
 
 // escalation arma la pregunta a VON de una escalada: con top_k, VON solo elige
-// entre los candidatos de JEV. p tiene que traer la distribución (PredictFull).
-func (g *Gateway) escalation(tc *TaskConfig, m *jev.Model, in jev.Input, p jev.Prediction) ([]string, chatReq) {
-	allowed := m.Labels
+// entre los candidatos de Chispa. p tiene que traer la distribución (PredictFull),
+// y labels todas las etiquetas del modelo (chispa.Model.Labels en proceso; en una
+// tarea con backend microvm, las del registro de `kling chispa deploy`, no las
+// que mande el invitado: ver chispaguest.go).
+func (g *Gateway) escalation(tc *TaskConfig, labels []string, in chispa.Input, p chispa.Prediction) ([]string, chatReq) {
+	allowed := labels
 	if tc.TopK > 0 && tc.TopK < len(allowed) {
 		allowed = make([]string, 0, tc.TopK)
 		for _, c := range topN(p.Probs, tc.TopK) {
@@ -382,7 +417,7 @@ func (g *Gateway) escalation(tc *TaskConfig, m *jev.Model, in jev.Input, p jev.P
 	return allowed, g.chatFor(tc, allowed, in, p.Probs)
 }
 
-// Classify es la decisión de JEV y, si la cascada de la tarea está activa, la
+// Classify es la decisión de Chispa y, si la cascada de la tarea está activa, la
 // escalada a VON de lo que duda.
 func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyRequest) (*ClassifyResponse, error) {
 	t0 := time.Now()
@@ -394,18 +429,18 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	if tc.Domotica != nil {
 		return nil, statusf(http.StatusBadRequest, "task %q is a domotica task: use POST /v1/decide", req.Task)
 	}
-	if tc.JEV == "" {
+	if tc.Chispa == "" {
 		return nil, statusf(http.StatusBadRequest, "task %q is a generation task: use POST /v1/generate", req.Task)
 	}
 	if len(req.Text) > maxText {
 		return nil, statusf(http.StatusRequestEntityTooLarge, "text larger than %d bytes", maxText)
 	}
 	switch req.Mode {
-	case "", "cascade", "jev":
+	case "", "cascade", "chispa":
 	default:
-		return nil, statusf(http.StatusBadRequest, "mode must be cascade or jev (VON alone is measured with kling ai eval -von-alone)")
+		return nil, statusf(http.StatusBadRequest, "mode must be cascade or chispa (VON alone is measured with kling ai eval -von-alone)")
 	}
-	in := jev.Input{Text: req.Text, Fields: req.Fields}
+	in := chispa.Input{Text: req.Text, Fields: req.Fields}
 	resp := &ClassifyResponse{Task: req.Task}
 	finish := func() (*ClassifyResponse, error) {
 		d := time.Since(t0)
@@ -414,47 +449,102 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 			resp.Decision = resp.Label
 		}
 		src := resp.Source
-		if resp.Escalate && src == "jev" {
-			src = "escalated" // contestó JEV sin llegar a su umbral
+		if resp.Escalate && src == "chispa" {
+			src = "escalated" // contestó Chispa sin llegar a su umbral
 		}
 		g.met.answer(endpoint, req.Task, src, d)
 		return resp, nil
 	}
 
-	m, err := g.jev.get(cfg.Models[tc.JEV].Path)
-	if err != nil {
-		log.Printf("task %s: loading jev model: %v", req.Task, err)
-		return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable", tc.JEV)
-	}
+	mc := cfg.Models[tc.Chispa]
 	casc := g.cascade(req.Task)
-	escalar := casc.On() && req.Mode != "jev"
-	p, tau, confident := jevDecide(m, tc, in, req.Explain)
-	dec := jev.DecisionEscalate
-	if confident {
-		dec = jev.DecisionConfident
+	escalar := casc.On() && req.Mode != "chispa"
+
+	// La predicción sale de dos sitios: dentro de este proceso (chispaCache, el
+	// camino de siempre) o de una réplica en una microVM (kling chispa deploy,
+	// docs/chispa-serverless.md). A partir de aquí el resto de la función no sabe
+	// cuál fue: p, tau, confident y labels ya bastan.
+	var p chispa.Prediction
+	var tau float64
+	var confident bool
+	var labels []string
+	if mc.Backend == BackendMicroVM {
+		gp, gl, err := g.classifyGuest(ctx, mc.Snapshot, in, req.Explain)
+		if err != nil {
+			var we *wakeError
+			var dle *deployLookupError
+			var gie *guestInvalidError
+			reason, code, verb := "request", http.StatusServiceUnavailable, "unavailable"
+			switch {
+			case errors.As(err, &we):
+				reason = "wake"
+			case errors.As(err, &dle):
+				reason = "labels"
+			case errors.As(err, &gie):
+				// El invitado SÍ contestó, pero con algo que no es de fiar
+				// (chispaguest.go): no es que no haya réplica, es que mintió o se
+				// desincronizó con el registro de despliegue. 502, no 503:
+				// reintentar no arregla una respuesta que no pasa validación.
+				reason, code, verb = "invalid", http.StatusBadGateway, "sent an invalid answer"
+			}
+			g.met.vonErr("chispa:"+tc.Chispa, reason)
+			log.Printf("task %s: chispa %s (microvm): %v", req.Task, tc.Chispa, err)
+			return nil, statusf(code, "chispa model %q (backend microvm) %s: %v", tc.Chispa, verb, err)
+		}
+		p = gp
+		tau = p.Threshold
+		if v, ok := tc.Thresholds[p.Label]; ok {
+			tau = v
+		}
+		// confident se recalcula aquí, del prob ya validado y el umbral del
+		// lado del gateway: la respuesta del invitado puede traer su propio
+		// campo "confident", pero no es de fiar (chispaguest.go), así que se
+		// ignora y se decide con los mismos datos que un modelo en proceso.
+		confident = p.Prob >= tau
+		labels = gl
+	} else {
+		m, err := g.chispa.get(mc.Path)
+		if err != nil {
+			log.Printf("task %s: loading chispa model: %v", req.Task, err)
+			return nil, statusf(http.StatusServiceUnavailable, "chispa model %q unavailable", tc.Chispa)
+		}
+		p, tau, confident = chispaDecide(m, tc, in, req.Explain)
+		labels = m.Labels
 	}
-	resp.JEV = &JEVAnswer{Label: p.Label, Prob: p.Prob, Threshold: tau, Decision: dec}
-	resp.Label, resp.Prob, resp.Source, resp.Evidence = p.Label, p.Prob, "jev", p.Evidence
+
+	dec := chispa.DecisionEscalate
+	if confident {
+		dec = chispa.DecisionConfident
+	}
+	resp.Chispa = &ChispaAnswer{Label: p.Label, Prob: p.Prob, Threshold: tau, Decision: dec}
+	resp.Label, resp.Prob, resp.Source, resp.Evidence = p.Label, p.Prob, "chispa", p.Evidence
 	if confident {
 		if escalar {
-			g.maybeAudit(req.Task, tc, cfg, m.Labels, in, p)
+			g.maybeAudit(req.Task, tc, cfg, labels, in, p)
 		}
 		return finish()
 	}
 
-	// JEV duda: la distribución completa y la evidencia van en la respuesta
-	// (y en la pregunta a VON, si la plantilla las usa).
+	// Chispa duda: la distribución completa y la evidencia van en la respuesta
+	// (y en la pregunta a VON, si la plantilla las usa). En proceso hace falta
+	// pedirla aparte si no se pidió ya con Explain; una réplica en microvm ya
+	// la manda siempre que duda (ver cmd/kling-chispa), así que aquí no hay
+	// segunda vuelta que dar.
 	resp.Escalate = true
-	if !req.Explain {
+	if mc.Backend != BackendMicroVM && !req.Explain {
+		m, err := g.chispa.get(mc.Path)
+		if err != nil {
+			return nil, statusf(http.StatusServiceUnavailable, "chispa model %q unavailable", tc.Chispa)
+		}
 		p = m.PredictFull(in, 5)
 	}
 	resp.Evidence = p.Evidence
-	resp.JEV.Candidates = topN(p.Probs, 3)
+	resp.Chispa.Candidates = topN(p.Probs, 3)
 	if !escalar {
 		return finish()
 	}
 
-	allowed, chat := g.escalation(tc, m, in, p)
+	allowed, chat := g.escalation(tc, labels, in, p)
 	t1 := time.Now()
 	vctx, cancel := context.WithTimeout(ctx, g.opts.VONTimeout)
 	defer cancel()
@@ -488,7 +578,7 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 }
 
 // chatFor arma la pregunta a VON de una escalada.
-func (g *Gateway) chatFor(tc *TaskConfig, labels []string, in jev.Input, cands []jev.ClassProb) chatReq {
+func (g *Gateway) chatFor(tc *TaskConfig, labels []string, in chispa.Input, cands []chispa.ClassProb) chatReq {
 	sys := tc.System
 	if sys == "" {
 		sys = defaultSystem
@@ -508,12 +598,12 @@ func (g *Gateway) chatFor(tc *TaskConfig, labels []string, in jev.Input, cands [
 	return r
 }
 
-// maybeAudit pregunta a VON, en segundo plano, por una fracción de lo que JEV
+// maybeAudit pregunta a VON, en segundo plano, por una fracción de lo que Chispa
 // contestó confiado. Solo sirve a la recalibración; el cliente ya tiene su
 // respuesta. Una a la vez: si ya hay una en vuelo, se descarta (y se cuenta),
 // porque una auditoría no debe provocar réplicas ni colas. Solo con la cascada
 // activa (quien llama lo comprueba): con ella apagada, VON no se toca.
-func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []string, in jev.Input, p jev.Prediction) {
+func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []string, in chispa.Input, p chispa.Prediction) {
 	if tc.Audit <= 0 || tc.EscalateTo == "" || rand.Float64() >= tc.Audit {
 		return
 	}
@@ -525,7 +615,7 @@ func (g *Gateway) maybeAudit(task string, tc *TaskConfig, cfg *Config, labels []
 	}
 	g.met.inc(g.met.audits, task, "sent")
 	// El texto se copia: el de la petición muere con ella.
-	in = jev.Input{Text: string([]byte(in.Text)), Fields: in.Fields}
+	in = chispa.Input{Text: string([]byte(in.Text)), Fields: in.Fields}
 	snap := cfg.Models[tc.EscalateTo].Snapshot
 	req := g.chatFor(tc, labels, in, nil)
 	w := 1 / tc.Audit
@@ -677,14 +767,14 @@ func (g *Gateway) record(task string, s sample) {
 	}
 }
 
-func topN(ps []jev.ClassProb, n int) []jev.ClassProb {
+func topN(ps []chispa.ClassProb, n int) []chispa.ClassProb {
 	if len(ps) > n {
 		ps = ps[:n]
 	}
 	return ps
 }
 
-func probOf(ps []jev.ClassProb, label string) float64 {
+func probOf(ps []chispa.ClassProb, label string) float64 {
 	for _, c := range ps {
 		if c.Label == label {
 			return c.Prob
@@ -695,7 +785,7 @@ func probOf(ps []jev.ClassProb, label string) float64 {
 
 // ---- recalibración
 
-// Calibrate reajusta los umbrales de la tarea con sus muestras. Escribe un .jev
+// Calibrate reajusta los umbrales de la tarea con sus muestras. Escribe un .chispa
 // nuevo (guardando el anterior en <ruta>.prev) solo si mejora la promesa en la
 // mitad de evaluación y no es DryRun.
 func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
@@ -706,13 +796,30 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	if tc == nil {
 		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
 	}
-	if tc.JEV == "" || tc.EscalateTo == "" {
-		return nil, statusf(http.StatusBadRequest, "task %q needs a jev model and escalate_to (the teacher) to recalibrate", req.Task)
+	if tc.Chispa == "" || tc.EscalateTo == "" {
+		return nil, statusf(http.StatusBadRequest, "task %q needs a chispa model and escalate_to (the teacher) to recalibrate", req.Task)
 	}
-	path := cfg.Models[tc.JEV].Path
-	m, err := g.jev.get(path)
+	mc := cfg.Models[tc.Chispa]
+	if mc.Backend == BackendMicroVM {
+		// Recalibrar reescribe el .chispa en disco (más abajo: Marshal, guardar
+		// <ruta>.prev, Save) y lo hace con el mismo *chispa.Model que sirve las
+		// peticiones (g.chispa.get(path)): un modelo backend microvm no tiene
+		// "path" (Validate lo exige vacío, config.go) porque vive horneado
+		// DENTRO de la imagen de una réplica, que puede correr en otra máquina
+		// o al otro lado de un SSH. No hay fichero local que reescribir ni
+		// dorado que journal actualizar in situ, así que en vez de fallar con
+		// el "unavailable" genérico de un Path vacío (g.chispa.get("")), se
+		// rechaza aquí con lo único que sí funciona hoy: reentrenar y volver a
+		// desplegar.
+		return nil, statusf(http.StatusBadRequest,
+			"task %q: chispa model %q has backend microvm; calibrate needs the model file, and a microvm model has none locally (it lives baked into the replica's image). "+
+				"Recalibrate by retraining and redeploying: kling chispa train ... -o new.chispa && kling chispa deploy %s -model new.chispa -replace",
+			req.Task, tc.Chispa, tc.Chispa)
+	}
+	path := mc.Path
+	m, err := g.chispa.get(path)
 	if err != nil {
-		return nil, statusf(http.StatusServiceUnavailable, "jev model %q unavailable: %v", tc.JEV, err)
+		return nil, statusf(http.StatusServiceUnavailable, "chispa model %q unavailable: %v", tc.Chispa, err)
 	}
 	target := req.Target
 	if target == 0 {
@@ -735,7 +842,7 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	r := g.rings[req.Task]
 	g.cfgMu.RUnlock()
 	rep, nuevo := calibrate(m, r.snapshot(), tc.Thresholds, target, ms)
-	rep.Task, rep.Model = req.Task, tc.JEV
+	rep.Task, rep.Model = req.Task, tc.Chispa
 	if !rep.Improved || req.DryRun {
 		return rep, nil
 	}
@@ -746,7 +853,7 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	nm, err := jev.Unmarshal(b)
+	nm, err := chispa.Unmarshal(b)
 	if err != nil {
 		return nil, err
 	}
@@ -757,7 +864,7 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	if nm, err = jev.Unmarshal(nb); err != nil { // lo que se sirve es lo que se leería del disco
+	if nm, err = chispa.Unmarshal(nb); err != nil { // lo que se sirve es lo que se leería del disco
 		return nil, err
 	}
 	backup := path + ".prev"
@@ -767,10 +874,10 @@ func (g *Gateway) Calibrate(req CalibrateRequest) (*CalibrateReport, error) {
 	if err := nm.Save(path); err != nil {
 		return nil, err
 	}
-	g.jev.put(path, nm)
+	g.chispa.put(path, nm)
 	rep.Written, rep.Backup = path, backup
 	log.Printf("task %s: recalibrated %s (%s)", req.Task, path, rep.Reason)
-	// Umbrales nuevos = otro reparto entre lo que contesta JEV y lo que
+	// Umbrales nuevos = otro reparto entre lo que contesta Chispa y lo que
 	// escala: la evaluación que respaldaba la cascada ya no describe lo que se
 	// sirve. Se vuelve a decidir (con escalate_force sigue activa).
 	before := g.cascade(req.Task)

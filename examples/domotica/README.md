@@ -57,7 +57,7 @@ kling models add von-qwen15-dom -model qwen2.5-1.5b-instruct -quant q4_k_m \
     -prefix <(jq -r '.tasks["room-llm"].system' examples/domotica/ai.json)   # el prompt, ya evaluado en el dorado
 
 # 2. el registro del gateway: ai.json de este directorio, con las rutas y los dorados de tu host
-mkdir -p ~/.config/kling/domotica && cp intent.jev slots.jevs ~/.config/kling/domotica/
+mkdir -p ~/.config/kling/domotica && cp intent.chispa slots.chispas ~/.config/kling/domotica/
 cp examples/domotica/ai.json ~/.config/kling/ai.json     # quita "encoder"/"head" si no tienes codificador
 kling ai serve &                                          # socket 0600 en ~/.config/kling/ai.sock
 
@@ -70,7 +70,7 @@ go run ./examples/domotica                                # http://127.0.0.1:808
 ```
 
 Sin gateway, `-offline` sirve las capas 1 y 2 en el propio proceso (con
-`intent.jev` y `slots.jevs` de la carpeta de modelos): las demás salen «no
+`intent.chispa` y `slots.chispas` de la carpeta de modelos): las demás salen «no
 disponible».
 
 | flag | por defecto | qué hace |
@@ -110,7 +110,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/kling ./cmd/kling
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/domotica-demo ./examples/domotica
 ssh ct105 'mkdir -p ~/domotica/models ~/domotica/data'
 scp /tmp/kling /tmp/domotica-demo examples/domotica/ai.json ct105:domotica/
-scp $M/intent.jev $M/slots.jevs ct105:domotica/models/        # M: carpeta de modelos de domótica
+scp $M/intent.chispa $M/slots.chispas ct105:domotica/models/        # M: carpeta de modelos de domótica
 scp $D/train.jsonl $D/valid.jsonl $D/test.jsonl ct105:domotica/data/
 
 # en el CT: el LLM, con el prompt de la capa 4 ya evaluado en el dorado. Sin
@@ -135,7 +135,7 @@ sudo rm -rf ~/.cache/kindling/encoder-gguf
 ./kling domotica embed -url http://$A:8000 -model multilingual-e5-small \
     -data data/train.jsonl,data/valid.jsonl,data/test.jsonl -o models/e5.jemb
 ./kling domotica train-encoder -data data/train.jsonl -valid data/valid.jsonl -cache models/e5.jemb \
-    -o models/head.jenc -intent models/intent.jev -slots models/slots.jevs
+    -o models/head.jenc -intent models/intent.chispa -slots models/slots.chispas
 ./kling rm enc-train
 
 # el registro: rutas relativas a él; los dorados de este host
@@ -152,7 +152,7 @@ sudo systemctl enable --now kindling-domotica                                   
 
 Los dos servicios: [`kindling-domotica-gateway.service`](kindling-domotica-gateway.service)
 y [`kindling-domotica.service`](kindling-domotica.service). La demo escucha en
-`0.0.0.0:8088` a propósito: **http://192.168.2.61:8088** desde cualquier
+`0.0.0.0:8088` a propósito: **http://192.168.2.66:8088** desde cualquier
 navegador de la red de casa. Solo mueve dispositivos simulados, pero cada
 orden puede despertar una microVM: no la publiques fuera de la LAN. El socket
 del daemon y el del gateway no salen del host (0600).

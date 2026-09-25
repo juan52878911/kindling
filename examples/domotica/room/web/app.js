@@ -15,7 +15,7 @@ const I18N = {
     stateText: "Estado de los dispositivos",
     foot: "Todo pasa por el gateway de IA de kindling: plantillas y Chispa en su proceso, el codificador y el LLM en microVMs que se despiertan con la orden y se congelan al quedarse ociosas.",
     groups: { direct: "Directas · plantillas", paraphrase: "Con otras palabras · Chispa", indirect: "Indirectas y varias a la vez · capas 3–4", oos: "Fuera de la habitación" },
-    layers: { template: "Plantillas", jev: "Chispa", encoder: "Codificador", von: "LLM", none: "Nadie" },
+    layers: { template: "Plantillas", chispa: "Chispa", encoder: "Codificador", von: "LLM", none: "Nadie" },
     lstatus: { on: "activa", unavailable: "no disponible", off: "apagada", forced: "forzada" },
     where: { gateway: "gateway", microvm: "microVM", process: "proceso" },
     machines: "MicroVMs de las capas", machinesHelp: "Cada capa lenta vive en una microVM de kindling: congelada (0 CPU) hasta que una orden la necesita, descongelada en milisegundos y congelada otra vez al quedarse ociosa.",
@@ -45,7 +45,7 @@ const I18N = {
     stateText: "Device state",
     foot: "Everything goes through kindling's AI gateway: templates and Chispa in its process, the encoder and the LLM in microVMs that wake up with the command and freeze when idle.",
     groups: { direct: "Direct · templates", paraphrase: "In other words · Chispa", indirect: "Indirect and several at once · layers 3–4", oos: "Not for this room" },
-    layers: { template: "Templates", jev: "Chispa", encoder: "Encoder", von: "LLM", none: "Nobody" },
+    layers: { template: "Templates", chispa: "Chispa", encoder: "Encoder", von: "LLM", none: "Nobody" },
     lstatus: { on: "on", unavailable: "unavailable", off: "off", forced: "forced" },
     where: { gateway: "gateway", microvm: "microVM", process: "process" },
     machines: "The layers' microVMs", machinesHelp: "Each slow layer lives in a kindling microVM: frozen (0 CPU) until a command needs it, thawed in milliseconds and frozen again when idle.",
@@ -64,7 +64,7 @@ const I18N = {
   },
 };
 
-const LAYERS = ["template", "jev", "encoder", "von"];
+const LAYERS = ["template", "chispa", "encoder", "von"];
 const COLORS = {
   white: "#fff4d6", warm: "#ffc978", cool: "#cfe6ff", red: "#ef4444", orange: "#fb923c", yellow: "#facc15", green: "#4ade80",
   blue: "#60a5fa", purple: "#a78bfa", pink: "#f472b6", cyan: "#22d3ee", brown: "#b45309", black: "#555",
@@ -134,7 +134,7 @@ function renderLayers() {
 
 function renderPresets() {
   const box = $("presets"); box.replaceChildren();
-  const groups = { direct: "template", paraphrase: "jev", indirect: "von", oos: "none" };
+  const groups = { direct: "template", paraphrase: "chispa", indirect: "von", oos: "none" };
   for (const [g, layer] of Object.entries(groups)) {
     const items = data.presets.filter((p) => p.lang === lang && p.group === g);
     if (!items.length) continue;

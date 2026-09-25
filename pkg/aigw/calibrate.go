@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // RECALIBRACIÓN CON VON COMO MAESTRO.
 //
-// docs/JEV-EVAL.md midió que los umbrales de JEV prometen una precisión (0,95
+// docs/CHISPA-EVAL.md midió que los umbrales de Chispa prometen una precisión (0,95
 // en validación) que el tráfico real no cumple cuando la distribución cambia
 // (0,58–0,85). El remedio honrado es recalibrar con tráfico reciente del mismo
 // sitio. Aquí no hay etiquetas de verdad, pero hay algo parecido: lo que VON
@@ -22,7 +22,7 @@ import (
 // Dos sesgos que se corrigen, y uno que no:
 //
 //  1. Solo lo escalado tendría respuesta de VON, así que la muestra no diría
-//     nada de si lo que JEV contesta confiado está bien. Por eso existe
+//     nada de si lo que Chispa contesta confiado está bien. Por eso existe
 //     "audit": una fracción de las respuestas confiadas también se pregunta a
 //     VON (en segundo plano, sin retrasar al cliente). Cada muestra lleva un
 //     peso = 1/probabilidad de haber entrado en la muestra (1 lo escalado,
@@ -31,12 +31,12 @@ import (
 //     la mitad y se decide con la otra mitad.
 //  3. VON también se equivoca. La precisión que se mide es CONCORDANCIA con
 //     VON, no acierto. Si VON acierta un 60 %, un umbral "al 95 % de
-//     concordancia" no da un 95 % de aciertos. Lo que sí da es que JEV solo
+//     concordancia" no da un 95 % de aciertos. Lo que sí da es que Chispa solo
 //     contesta donde habría dicho lo mismo que el modelo al que escalaría, que
 //     es lo que se le pide a una cascada. Por eso nunca es automático.
 
 type sample struct {
-	pred    string  // etiqueta de JEV
+	pred    string  // etiqueta de Chispa
 	prob    float64 // su probabilidad calibrada
 	teacher string  // lo que contestó VON (nunca Unknown: esas no se guardan)
 	weight  float64 // 1/probabilidad de entrar en la muestra
@@ -101,7 +101,7 @@ type ClassCal struct {
 
 // CalEval es la cascada medida en la mitad de evaluación con unos umbrales.
 type CalEval struct {
-	Coverage  float64 `json:"coverage"`  // fracción (ponderada) que JEV contestaría
+	Coverage  float64 `json:"coverage"`  // fracción (ponderada) que Chispa contestaría
 	Agreement float64 `json:"agreement"` // de eso, fracción en que coincide con VON
 	Confident int     `json:"confident_samples"`
 }
@@ -117,7 +117,7 @@ type CalibrateReport struct {
 	Before     CalEval    `json:"before"`            // mitad de evaluación, umbrales actuales
 	After      CalEval    `json:"after"`             // mitad de evaluación, umbrales nuevos
 	Classes    []ClassCal `json:"classes"`           // umbrales por clase
-	Overall    float64    `json:"overall_agreement"` // JEV = VON en toda la muestra (ponderada)
+	Overall    float64    `json:"overall_agreement"` // Chispa = VON en toda la muestra (ponderada)
 	Improved   bool       `json:"improved"`          // si los nuevos mejoran la promesa
 	Written    string     `json:"written,omitempty"`
 	Backup     string     `json:"backup,omitempty"`
@@ -126,7 +126,7 @@ type CalibrateReport struct {
 	Cascade    string     `json:"cascade,omitempty"` // si recalibrar apagó la cascada
 }
 
-// chooseWeighted es jev.ChooseThresholds con pesos: el menor corte por clase
+// chooseWeighted es chispa.ChooseThresholds con pesos: el menor corte por clase
 // cuya concordancia ponderada, estimada como aciertos/(n+1) igual que al
 // entrenar (conservador con poca muestra), llega al objetivo con al menos
 // minSupport muestras sin ponderar.
@@ -146,7 +146,7 @@ func chooseWeighted(nLabels int, pred, gold []int, prob, w []float64, target flo
 		}
 		counts[c] = len(rows)
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].p > rows[j].p })
-		out[c] = jev.NeverConfident
+		out[c] = chispa.NeverConfident
 		var tp, n float64
 		for i, r := range rows {
 			if r.ok {
@@ -190,9 +190,9 @@ func evalCascade(pred, gold []int, prob, w, tau []float64) CalEval {
 
 // calibrate calcula los umbrales nuevos de una tarea sobre su muestra. No
 // escribe nada: eso lo decide quien llama según Improved y DryRun.
-func calibrate(m *jev.Model, samples []sample, overrides map[string]float64, target float64, minSupport int) (*CalibrateReport, []float64) {
+func calibrate(m *chispa.Model, samples []sample, overrides map[string]float64, target float64, minSupport int) (*CalibrateReport, []float64) {
 	rep := &CalibrateReport{Target: target,
-		TeacherErr: "agreement is measured against VON, which can be wrong too: it bounds how often JEV disagrees with the model it would escalate to, not how often it is right"}
+		TeacherErr: "agreement is measured against VON, which can be wrong too: it bounds how often Chispa disagrees with the model it would escalate to, not how often it is right"}
 	var pred, gold []int
 	var prob, w []float64
 	for _, s := range samples {
@@ -224,12 +224,12 @@ func calibrate(m *jev.Model, samples []sample, overrides map[string]float64, tar
 	old := effective(m, overrides)
 	nuevo, counts := chooseWeighted(len(m.Labels), tp, tg, tpr, tw, target, minSupport)
 	// Un umbral forzado en la tarea sigue mandando al servir: se informa, y el
-	// .jev guarda el calculado.
+	// .chispa guarda el calculado.
 	for c, l := range m.Labels {
 		_, forced := overrides[l]
 		rep.Classes = append(rep.Classes, ClassCal{Label: l, Old: old[c], New: nuevo[c], Tuned: counts[c], Forced: forced})
 	}
-	servir := effective(&jev.Model{Labels: m.Labels, Thresholds: nuevo}, overrides)
+	servir := effective(&chispa.Model{Labels: m.Labels, Thresholds: nuevo}, overrides)
 	rep.Before = evalCascade(ep, eg, epr, ew, old)
 	rep.After = evalCascade(ep, eg, epr, ew, servir)
 	var agree, tot float64
@@ -247,11 +247,11 @@ func calibrate(m *jev.Model, samples []sample, overrides map[string]float64, tar
 	case len(ep) < minSupport:
 		rep.Reason = fmt.Sprintf("not enough samples: %d in the evaluation half, need at least %d", len(ep), minSupport)
 	case rep.After.Confident == 0 && rep.Before.Confident > 0:
-		// Que JEV no conteste nunca "cumple" cualquier objetivo sin prometer
+		// Que Chispa no conteste nunca "cumple" cualquier objetivo sin prometer
 		// nada, y mandaría todo a VON. Si VON discrepa tanto, lo primero es
-		// saber cuál de los dos acierta (mode=jev|von contra datos etiquetados):
+		// saber cuál de los dos acierta (mode=chispa|von contra datos etiquetados):
 		// un maestro peor que el alumno empeoraría la cascada. No se escribe.
-		rep.Reason = fmt.Sprintf("at target %.2f JEV would never answer (it agrees with VON on %.3f of the sample): "+
+		rep.Reason = fmt.Sprintf("at target %.2f Chispa would never answer (it agrees with VON on %.3f of the sample): "+
 			"measure which of the two is right on labelled data before trusting VON as the teacher", target, rep.Overall)
 	case rep.Before.Agreement < target && rep.After.Agreement > rep.Before.Agreement:
 		rep.Improved = true
@@ -268,7 +268,7 @@ func calibrate(m *jev.Model, samples []sample, overrides map[string]float64, tar
 
 // effective son los umbrales con los que se sirve: los del modelo, salvo los
 // que la tarea fuerza.
-func effective(m *jev.Model, overrides map[string]float64) []float64 {
+func effective(m *chispa.Model, overrides map[string]float64) []float64 {
 	out := append([]float64(nil), m.Thresholds...)
 	for c, l := range m.Labels {
 		if v, ok := overrides[l]; ok && !math.IsNaN(v) {

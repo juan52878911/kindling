@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // ejemplos pasa el corpus sintético a ejemplos de evaluación; con relabel, todos
-// llevan esa etiqueta (JEV, que ve el texto, se equivoca en casi todos).
+// llevan esa etiqueta (Chispa, que ve el texto, se equivoca en casi todos).
 func ejemplos(n int, seed uint64, relabel string) []EvalExample {
 	var out []EvalExample
 	for _, e := range corpus(n, seed) {
@@ -24,13 +24,13 @@ func ejemplos(n int, seed uint64, relabel string) []EvalExample {
 	return out
 }
 
-// La puerta de la cascada: escalate_to sin evaluación se rechaza (JEV contesta
+// La puerta de la cascada: escalate_to sin evaluación se rechaza (Chispa contesta
 // con escalate: true y VON no se toca); una evaluación en la que la cascada no
 // gana la deja rechazada; una en la que gana la activa; cambiar lo evaluado
-// (ajustes, modelo JEV) la vuelve a rechazar; escalate_force la activa igual.
+// (ajustes, modelo Chispa) la vuelve a rechazar; escalate_force la activa igual.
 func TestPuertaDeLaCascada(t *testing.T) {
 	g, ll, _ := newTestGateway(t, func(c *Config) {
-		c.Tasks["kind"] = &TaskConfig{JEV: "commits", EscalateTo: "smol",
+		c.Tasks["kind"] = &TaskConfig{Chispa: "commits", EscalateTo: "smol",
 			Thresholds: map[string]float64{"bug": 2, "chore": 2, "docs": 2, "feat": 2}}
 	})
 	h := g.Handler("")
@@ -42,25 +42,25 @@ func TestPuertaDeLaCascada(t *testing.T) {
 	if st.Status != "refused" || !strings.Contains(st.Reason, "kling ai eval kind") || !strings.Contains(st.Reason, "escalate_force") {
 		t.Fatalf("without an eval = %+v", st)
 	}
-	if r := ask(); r.Source != "jev" || !r.Escalate || ll.calls.Load() != 0 {
+	if r := ask(); r.Source != "chispa" || !r.Escalate || ll.calls.Load() != 0 {
 		t.Fatalf("refused cascade answered %+v, von calls %d", r, ll.calls.Load())
 	}
 
-	// VON contesta "feat" a todo en datos bien etiquetados: JEV gana.
+	// VON contesta "feat" a todo en datos bien etiquetados: Chispa gana.
 	ll.set("feat")
 	rec, err := g.Eval(context.Background(), EvalRequest{Task: "kind", Examples: ejemplos(40, 3, ""), Data: "test.jsonl"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	res := rec.Results
-	if rec.BeatsJEV || res.JEVAccuracy < 0.9 || res.Escalated != 40 || res.JEVOnlyRight < 25 || rec.Stored == "" {
+	if rec.BeatsChispa || res.ChispaAccuracy < 0.9 || res.Escalated != 40 || res.ChispaOnlyRight < 25 || rec.Stored == "" {
 		t.Fatalf("losing eval = %+v", rec)
 	}
 	if st := g.cascade("kind"); st.Status != "refused" || !strings.Contains(st.Reason, "does not show") {
 		t.Fatalf("after a losing eval = %+v", st)
 	}
 
-	// Datos en los que JEV se equivoca y VON acierta: la cascada gana.
+	// Datos en los que Chispa se equivoca y VON acierta: la cascada gana.
 	ll.set("docs")
 	calls := ll.calls.Load()
 	rec, err = g.Eval(context.Background(), EvalRequest{Task: "kind", Examples: ejemplos(40, 4, "docs"), Concurrency: 4})
@@ -68,7 +68,7 @@ func TestPuertaDeLaCascada(t *testing.T) {
 		t.Fatal(err)
 	}
 	res = rec.Results
-	if !rec.BeatsJEV || res.CascadeAccuracy != 1 || res.PValue > 0.001 || ll.calls.Load()-calls != 40 {
+	if !rec.BeatsChispa || res.CascadeAccuracy != 1 || res.PValue > 0.001 || ll.calls.Load()-calls != 40 {
 		t.Fatalf("winning eval = %+v (von calls %d)", rec, ll.calls.Load()-calls)
 	}
 	if st := g.cascade("kind"); st.Status != "on" || !strings.Contains(st.Verdict, "the cascade wins") {
@@ -78,7 +78,7 @@ func TestPuertaDeLaCascada(t *testing.T) {
 		t.Fatalf("active cascade answered %+v", r)
 	}
 	on, _ := os.ReadFile(g.evalPath("kind"))
-	if !strings.Contains(string(on), `"beats_jev": true`) {
+	if !strings.Contains(string(on), `"beats_chispa": true`) {
 		t.Fatalf("stored record = %s", on)
 	}
 
@@ -94,9 +94,9 @@ func TestPuertaDeLaCascada(t *testing.T) {
 		t.Fatalf("prompt restored = %+v", st)
 	}
 
-	// Ni otro modelo JEV (reentrenado o recalibrado).
+	// Ni otro modelo Chispa (reentrenado o recalibrado).
 	path := g.config().Models["commits"].Path
-	m, err := jev.LoadFile(path)
+	m, err := chispa.LoadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestPuertaDeLaCascada(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.regate()
-	if st := g.cascade("kind"); st.Status != "refused" || !strings.Contains(st.Reason, "jev model changed") {
+	if st := g.cascade("kind"); st.Status != "refused" || !strings.Contains(st.Reason, "chispa model changed") {
 		t.Fatalf("after retraining = %+v", st)
 	}
 

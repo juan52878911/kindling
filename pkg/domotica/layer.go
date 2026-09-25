@@ -47,7 +47,7 @@ var Disabled Layer = LayerFunc(func(context.Context, string, string) (Decision, 
 type prevKey struct{}
 
 // WithPrev lleva a una capa la decisión de la anterior: la capa 4 la usa para
-// no contradecir a JEV donde JEV es fuerte (ver VON.Decide).
+// no contradecir a Chispa donde Chispa es fuerte (ver VON.Decide).
 func WithPrev(ctx context.Context, prev Decision) context.Context {
 	return context.WithValue(ctx, prevKey{}, prev)
 }
@@ -278,13 +278,13 @@ func FastSteps(d Decision, hasEncoder bool) []Step {
 	fastUS := d.LatencyUS - d.EncoderUS
 	switch {
 	case d.Layer == LayerNone && d.Reason == ReasonNoModel:
-		steps = append(steps, Step{Layer: LayerJEV, Status: StepUnavailable})
+		steps = append(steps, Step{Layer: LayerChispa, Status: StepUnavailable})
 	case d.Layer == LayerEncoder:
 		// Decidió (o dudó) el codificador: el modelo rápido había escalado.
-		steps = append(steps, Step{Layer: LayerJEV, Status: StepEscalated, Intent: d.FastIntent, Prob: d.FastProb, LatencyUS: fastUS})
+		steps = append(steps, Step{Layer: LayerChispa, Status: StepEscalated, Intent: d.FastIntent, Prob: d.FastProb, LatencyUS: fastUS})
 	default:
 		s := stepOf(d)
-		s.Layer = LayerJEV
+		s.Layer = LayerChispa
 		s.LatencyUS = fastUS
 		if asked {
 			s.Status = StepEscalated

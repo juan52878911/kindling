@@ -1,7 +1,7 @@
 # Capa 3: el codificador de frases
 
 La tercera capa de la decisión de domótica ([domotica.md](domotica.md)): lo que
-las plantillas y JEV no contestan con confianza pasa por un **codificador de
+las plantillas y Chispa no contestan con confianza pasa por un **codificador de
 frases** pequeño —un BERT de 118 M de parámetros que convierte la orden en un
 vector de 384 números— y una **cabeza** entrenada sobre esos vectores que
 decide la intención. Tarda ~3 ms en un Mac M4, frente a los ~5 µs de las capas
@@ -9,14 +9,14 @@ rápidas y los cientos de milisegundos de un LLM. Lo que tampoco resuelve escala
 a la capa 4 (VON) con `escalate: "von"`.
 
 ```
-orden ─► plantillas (1,5 µs) ─► JEV + JEV-slots (5 µs) ─► codificador + cabeza (~3 ms) ─► VON
+orden ─► plantillas (1,5 µs) ─► Chispa + Chispa-slots (5 µs) ─► codificador + cabeza (~3 ms) ─► VON
               confiada: fin          confiada: fin          confiada: fin          (capa 4)
 ```
 
 **Resumen honesto.** Bate la marca de [DOMOTICA-EVAL.md](DOMOTICA-EVAL.md) en
 el mismo test: orden completa bien en MASSIVE **0,745 es / 0,800 en** (la
 cascada sin él, 0,718 / 0,782) y **2 errores confiados** en las 54 frases de reto
-(los mismos dos de JEV; el codificador no añade ninguno). Dentro de ámbito
+(los mismos dos de Chispa; el codificador no añade ninguno). Dentro de ámbito
 contesta confiado un 2,6 % más de órdenes (88,1 % → 90,7 %) con la misma
 precisión (0,976). Pero no hace lo que más se le pedía: **no entiende el
 lenguaje indirecto** («hace muchísimo calor en el salón»). Congelado y con los
@@ -98,16 +98,16 @@ regresión logística multinomial (`-hidden 0`), en Go puro, sin dependencias:
   desviación de train (los codificadores de frases dejan todas las frases en un
   cono estrecho; estandarizar deja un problema bien condicionado).
 - **Entrenamiento** determinista (splitmix64, Adam, pesos por clase
-  1/√frecuencia como JEV, parada temprana por macro-F1 de validación); los
+  1/√frecuencia como Chispa, parada temprana por macro-F1 de validación); los
   productos se redondean antes de sumar (`float64(a*b)`) para que arm64 y amd64
   den los mismos bits. Dos entrenamientos iguales dan el mismo fichero.
 - **Cuantizada a int16** con una escala por capa; acuerdo int16/float 1,000.
-- **Calibrada** con la temperatura de JEV (`jev.FitTemperature`) sobre la
-  cabeza ya cuantizada, y con un **umbral por clase** (`jev.ChooseThresholds`,
+- **Calibrada** con la temperatura de Chispa (`chispa.FitTemperature`) sobre la
+  cabeza ya cuantizada, y con un **umbral por clase** (`chispa.ChooseThresholds`,
   precisión 0,90, mínimo 3 apoyos) elegido **solo con las filas de validación
   que las capas rápidas escalan**: lo que la capa 3 ve de verdad, más difícil
   que la media. Con 0,95 y 5 apoyos casi ninguna clase llegaba a contestar.
-- **Formato `.jenc`**, hermano del `.jev`: magia, versión, cabecera JSON
+- **Formato `.jenc`**, hermano del `.chispa`: magia, versión, cabecera JSON
   (etiquetas, codificador y su sha256, prefijo, métricas), pesos, CRC-32C. El
   cargador lee como mucho 64 MiB, comprueba el CRC antes de interpretar nada y
   valida cada tamaño antes de reservar (`FuzzUnmarshal`). 212 KB con la capa
@@ -121,7 +121,7 @@ D=~/Library/Caches/kindling/domotica/data M=~/Library/Caches/kindling/domotica/m
 kling domotica embed -url http://<réplica>:8000 -model multilingual-e5-small \
     -data $D/train.jsonl,$D/valid.jsonl,$D/test.jsonl -o $M/e5.jemb      # ~300 frases/s
 kling domotica train-encoder -data $D/train.jsonl -valid $D/valid.jsonl -cache $M/e5.jemb \
-    -o $M/head.jenc -intent $M/intent.jev -slots $M/slots.jevs            # 40 s
+    -o $M/head.jenc -intent $M/intent.chispa -slots $M/slots.chispas            # 40 s
 kling domotica eval -data $D/test.jsonl -encoder $M/head.jenc -embed-cache $M/e5.jemb
 kling domotica decide -encoder $M/head.jenc -embed-url http://<réplica>:8000 "subir persiana habitación"
 ```
@@ -141,13 +141,13 @@ mejor que votarlos.
   en una frase van directas a VON: un clasificador de una etiqueta no las
   arregla y así no gastan los milisegundos.
 - Si contesta confiada una orden de la habitación, los **huecos** los sigue
-  poniendo JEV-slots (F1 0,99; el codificador no mejoraría eso) y se exige,
-  como en JEV, que no falte un valor obligatorio.
-- «Fuera de ámbito» confiado **escala** (a VON), por la misma razón que en JEV:
+  poniendo Chispa-slots (F1 0,99; el codificador no mejoraría eso) y se exige,
+  como en Chispa, que no falte un valor obligatorio.
+- «Fuera de ámbito» confiado **escala** (a VON), por la misma razón que en Chispa:
   ahí caen las órdenes indirectas. `FinalOOS` lo cambia.
 - Sin confianza, escala con la conjetura de la capa **más segura** de las dos
   (elegido en validación: con la del codificador siempre, lo fuera de ámbito
-  que JEV acierta se convertía en órdenes; exact de toda la validación 0,972
+  que Chispa acierta se convertía en órdenes; exact de toda la validación 0,972
   frente a 0,984).
 - Si la réplica no contesta en `EncoderTimeout` (5 s, despertar incluido),
   escala a VON con `reason: encoder_error`.
@@ -174,9 +174,9 @@ hay que saber para leerlo:
 - **Contesta poco**: 94 órdenes confiadas de las 6 648 que le llegan en test,
   93 bien. 23 de las 28 clases **nunca** llegan al umbral (en validación no hay
   bastantes filas escaladas de esas clases para prometer 0,90), así que casi
-  todo lo que contesta es `cover_open` y `cover_set_position` que JEV dudaba.
+  todo lo que contesta es `cover_open` y `cover_set_position` que Chispa dudaba.
 - **Lo indirecto no lo resuelve**: en las 18 indirectas del reto, 0 bien, 10
-  escaladas (bien: lo decide VON) y 1 mal, la de JEV. Solo, sin capas rápidas,
+  escaladas (bien: lo decide VON) y 1 mal, la de Chispa. Solo, sin capas rápidas,
   se equivoca con confianza en 3.
 
 ### La puerta del gateway
@@ -262,14 +262,14 @@ De lo que la cascada con codificador escala en test (6 554 filas) y en el reto:
 4. **Casi fuera de ámbito** («pon una alarma a las 7»: 15 de 15 escaladas).
 5. **Relativo frente a absoluto y taxonomía** (MASSIVE): «baja el volumen al
    cincuenta por ciento», «apaga la alarma» (despertador en MASSIVE).
-6. Los **dos errores confiados** que quedan son de JEV (capa 2) y la capa 3
+6. Los **dos errores confiados** que quedan son de Chispa (capa 2) y la capa 3
    nunca los ve: «hace muchísimo calor en el salón» → `get_temperature`, «quiero
-   la persiana a la mitad» → `cover_close`. Arreglarlos es reentrenar JEV (con
+   la persiana a la mitad» → `cover_close`. Arreglarlos es reentrenar Chispa (con
    indirectas) o subir su umbral en esas clases.
 
 ## Mejora futura (no aplicada): ajuste fino con GPU
 
-**Decisión: no se ejecuta por ahora.** El objetivo del producto es que JEV
+**Decisión: no se ejecuta por ahora.** El objetivo del producto es que Chispa
 corra en máquinas de CPU corrientes, con eficacia y bajo demanda; el
 codificador (capa 3) y VON (capa 4) son capas opcionales que se encienden solo
 cuando una evaluación muestra que hacen falta. El ajuste fino de abajo mejora
