@@ -206,3 +206,28 @@ func TestFeedback(t *testing.T) {
 		t.Errorf("mode %v", st.Mode())
 	}
 }
+
+// BenchmarkFeatures mide lo que cuesta preparar las líneas para Chispa (el
+// resto del camino es Chispa, ~1 µs por línea, y el transporte).
+func BenchmarkFeatures(b *testing.B) {
+	var sb strings.Builder
+	for i := range 2000 {
+		switch i % 50 {
+		case 7:
+			sb.WriteString("\x1b[31mAssertionError: expected 1 to equal 2\x1b[0m\n")
+		case 8:
+			sb.WriteString("    at Context.<anonymous> (test/unit/parser.test.js:42:17)\n")
+		default:
+			sb.WriteString("Downloading https://registry.npmjs.org/some-package/-/some-package-1.2.3.tgz (12 kB)\n")
+		}
+	}
+	lg, err := Read(strings.NewReader(sb.String()), DefaultLimits)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		Features(lg)
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(lg.Lines)), "ns/line")
+}

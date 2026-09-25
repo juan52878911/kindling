@@ -10,7 +10,7 @@
     },
     "ci-von": {
       "kind": "von",
-      "snapshot": "von-qwen-q8",
+      "snapshot": "von-qwen15-q4",
       "max_replicas": 1
     }
   },
