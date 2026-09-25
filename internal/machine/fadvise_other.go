@@ -6,3 +6,6 @@ package machine
 // pero el paquete debe compilar en el resto de plataformas para poder
 // desarrollarlo desde un Mac.
 func dropCache(path string) {}
+
+// precargar no hace nada fuera de Linux (ver fadvise_linux.go).
+func precargar(path string) {}

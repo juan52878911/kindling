@@ -28,7 +28,14 @@ const (
 	GuestGW  = "172.16.0.1"
 	GuestNM  = "255.255.255.252"
 	GuestMAC = "06:00:AC:10:00:02"
-	TapName  = "tap0"
+	// TapMAC es la MAC del tap0 del lado del host, la que el invitado tiene
+	// en su caché ARP para GuestGW. Fija por la misma razón que GuestMAC: la
+	// caché ARP viaja congelada en la memoria del snapshot, y con una MAC
+	// aleatoria por namespace cada restauración (o cada red rehecha tras un
+	// thaw) despertaba con una entrada que apuntaba a un dispositivo que ya
+	// no existe. Cada tap0 vive en su propio namespace: repetirla no choca.
+	TapMAC  = "06:00:AC:10:00:01"
+	TapName = "tap0"
 
 	// Rango del host para los enlaces punto a punto con cada namespace.
 	hostPrefix = "172.30"

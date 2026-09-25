@@ -32,7 +32,7 @@ var coreSubcommands = [][2]string{
 }
 
 // machineArgs son los comandos del núcleo que reciben un id de máquina.
-const machineArgs = "logs|freeze|thaw|stop|rm|top|commit|mmds|squeeze|exec|shell|resize|inspect"
+const machineArgs = "logs|freeze|thaw|pause|stop|rm|top|commit|mmds|squeeze|exec|shell|resize|inspect"
 
 func cmdCompletion(args []string) error {
 	if len(args) < 1 {

@@ -54,7 +54,9 @@ func (m *Manager) reconcile() {
 		if pid, alive := live[mc.ID]; alive {
 			// Está viva: se readopta y NO se toca nada suyo.
 			m.socket[mc.ID] = m.socketDe(mc.ID, pid)
-			if mc.State != api.StateRunning {
+			// Una pausada sigue pausada: su VMM vive, pero el invitado no
+			// corre, y marcarla running la dejaría sorda figurando despierta.
+			if mc.State != api.StateRunning && mc.State != api.StatePaused {
 				log.Printf("reconcile: %s (%s) is still alive (pid %d) even though the state said %q; readopting it",
 					mc.Name, mc.ID[:8], pid, mc.State)
 				mc.State = api.StateRunning
@@ -73,7 +75,7 @@ func (m *Manager) reconcile() {
 		}
 
 		switch mc.State {
-		case api.StateRunning:
+		case api.StateRunning, api.StatePaused:
 			// Su proceso ya no está. Si dejó un snapshot completo está WARM, no
 			// parada: decir "stopped" deja el snapshot varado, porque Thaw se
 			// niega a descongelar lo que no esté warm y habría que editar el
@@ -87,13 +89,13 @@ func (m *Manager) reconcile() {
 				mc.State = api.StateStopped
 			}
 			mc.PID = 0
-			knet.Plan(mc.NetIndex, mc.ID).Teardown()
+			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 			m.releaseCPU(mc.ID)
 
 		case api.StateWarm, api.StateStopped, api.StateFailed:
 			// Sin proceso: ni namespace ni cgroup hacen nada. Se recrean al
 			// arrancarla o descongelarla.
-			knet.Plan(mc.NetIndex, mc.ID).Teardown()
+			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 			m.releaseCPU(mc.ID)
 		}
 	}
@@ -131,7 +133,7 @@ func (m *Manager) killOrphanVMMs() {
 	for id, pid := range m.liveVMs() {
 		mc := m.byID[id]
 		// Vivo y debería estarlo: no se toca.
-		if mc != nil && mc.State == api.StateRunning {
+		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused) {
 			continue
 		}
 		// O no está registrado, o su estado dice que no corre: el proceso sobra.
@@ -174,7 +176,8 @@ func (m *Manager) sweepOrphanVMMs() {
 		if m.reserved[id] {
 			continue
 		}
-		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StateCreated || mc.State == api.StateWarm) {
+		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused ||
+			mc.State == api.StateCreated || mc.State == api.StateWarm) {
 			delete(m.orphanSeen, id)
 			continue
 		}
@@ -391,6 +394,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// para poder diagnosticarla, y después se recoge sola. Sin esto se
 				// acumulaban indefinidamente, una por intento fallido.
 				m.gcFailed()
+				// La red que Freeze dejó montada, en las que llevan mucho
+				// tiempo congeladas (ver red.go).
+				m.soltarRedesDormidas()
 				// Procesos de firecracker que ya no son de nadie. Hasta ahora esto
 				// solo corría al arrancar el daemon, así que un VMM huérfano
 				// —cada restauración fallida dejaba uno— retenía su RAM hasta el
@@ -435,7 +441,7 @@ func (m *Manager) sweep() {
 	var vistas []vista
 	m.mu.RLock()
 	for _, mc := range m.byID {
-		if mc.State == api.StateRunning {
+		if mc.State == api.StateRunning || mc.State == api.StatePaused {
 			vistas = append(vistas, vista{mc, mc.PID})
 		}
 	}
@@ -453,7 +459,7 @@ func (m *Manager) sweep() {
 	m.mu.Lock()
 	for _, v := range muertas {
 		mc := v.mc
-		if mc.State != api.StateRunning || mc.PID != v.pid || m.byID[mc.ID] != mc {
+		if (mc.State != api.StateRunning && mc.State != api.StatePaused) || mc.PID != v.pid || m.byID[mc.ID] != mc {
 			continue
 		}
 		now := time.Now()
@@ -474,7 +480,7 @@ func (m *Manager) sweep() {
 
 	// Fuera del mutex: publicar eventos y liberar red puede tardar.
 	for _, mc := range died {
-		knet.Plan(mc.NetIndex, mc.ID).Teardown()
+		m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 		m.releaseCPU(mc.ID)
 		m.bus.Publish(api.Event{
 			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
@@ -545,7 +551,7 @@ func (m *Manager) ttlVencidas() []string {
 		// reclama sí debe desaparecer, o dormir sería una forma de no morir
 		// nunca.
 		switch mc.State {
-		case api.StateRunning:
+		case api.StateRunning, api.StatePaused:
 		case api.StateWarm:
 			if mc.OnTTL != api.OnTTLRemove {
 				continue

@@ -188,6 +188,13 @@ func (c *Client) Freeze(ctx context.Context, ref string) (*Machine, error) {
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/freeze", nil, &m)
 }
 
+// Pause pausa una máquina running sin volcarla (nivel "pausada"; capacidad
+// "pause"). Thaw la reanuda.
+func (c *Client) Pause(ctx context.Context, ref string) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/pause", nil, &m)
+}
+
 func (c *Client) Thaw(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/thaw", nil, &m)

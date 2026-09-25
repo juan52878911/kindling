@@ -27,7 +27,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// que un scrape no vea "desaparecer" una serie cuando el contador cae a cero.
 	fmt.Fprintln(w, "# HELP kling_machines Number of microVMs by state.")
 	fmt.Fprintln(w, "# TYPE kling_machines gauge")
-	for _, st := range []api.State{api.StateRunning, api.StateWarm, api.StateCreated, api.StateStopped, api.StateFailed} {
+	for _, st := range []api.State{api.StateRunning, api.StatePaused, api.StateWarm, api.StateCreated, api.StateStopped, api.StateFailed} {
 		fmt.Fprintf(w, "kling_machines{state=%q} %d\n", st, ps.ByState[string(st)])
 	}
 

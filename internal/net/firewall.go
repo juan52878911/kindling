@@ -116,6 +116,49 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 	return ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE")
 }
 
+// egressRules son las reglas de salida de none e internet, en el mismo orden
+// que las pone applyEgress, como argumentos de iptables (con -t si no es
+// filter). Ver applyEgress para el porqué de cada una.
+func (n *Net) egressRules(e Egress) [][]string {
+	rules := [][]string{{"-A", "FORWARD", "-i", TapName,
+		"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}}
+	if e == EgressNone {
+		return append(rules, []string{"-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+			"-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"})
+	}
+	for _, cidr := range blocked {
+		rules = append(rules, []string{"-A", "FORWARD", "-i", TapName, "-d", cidr, "-j", "DROP"})
+	}
+	return append(rules, []string{"-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE"})
+}
+
+// restoreRules añade reglas dentro del namespace con un solo iptables-restore
+// --noflush: todas o ninguna, y un proceso en vez de uno por regla.
+func (n *Net) restoreRules(rules [][]string) error {
+	tablas := map[string][]string{}
+	var orden []string
+	for _, r := range rules {
+		tabla := "filter"
+		if len(r) >= 2 && r[0] == "-t" {
+			tabla, r = r[1], r[2:]
+		}
+		if _, ok := tablas[tabla]; !ok {
+			orden = append(orden, tabla)
+		}
+		tablas[tabla] = append(tablas[tabla], strings.Join(r, " "))
+	}
+	var b strings.Builder
+	for _, t := range orden {
+		fmt.Fprintf(&b, "*%s\n%s\nCOMMIT\n", t, strings.Join(tablas[t], "\n"))
+	}
+	cmd := exec.Command("ip", "netns", "exec", n.NS, "iptables-restore", "--noflush")
+	cmd.Stdin = strings.NewReader(b.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("iptables-restore in %s: %v: %s", n.NS, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // setName es el nombre del ipset de dominios permitidos de este namespace. El
 // ipset es POR namespace (los comandos corren dentro de él), así que basta con
 // un nombre estable; al borrar el netns en Teardown, su ipset se va con él.

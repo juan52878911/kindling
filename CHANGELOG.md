@@ -6,6 +6,41 @@ linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64.
 
 ## v0.12.0 — sin publicar
 
+### Despertar más rápido: de 152 a 27 ms congelada, 2,2 ms pausada
+
+Medido fase por fase en un i7-8700T (KVM sin anidar, jailer) con una tarea
+Chispa de 128 MiB detrás de `kling ai serve`; cada palanca con su antes/después
+y lo que no funcionó, en [docs/despertar.md](docs/despertar.md).
+
+- **Desglose por fases**: `thaw` devuelve `wake` (`api.WakePhases`: wait, check,
+  net, spawn, socket, load, resync, cgroup, total) y `kling thaw` y `kling
+  events` lo enseñan; el planificador lo completa (`scheduler.WakeTrace`: list,
+  renew, wake, ready) y el gateway de IA añade la primera petición, en su log y
+  en `/metrics` (`kling_ai_wake_phase_seconds{model,how,phase}`).
+  `scripts/99-thaw-bench.sh daemon|gateway|paused` lo mide.
+- **La red sobrevive al freeze**: namespace, veth, tap y reglas se quedan
+  montados y el thaw los reutiliza (47 → 0 ms); el vigilante los suelta pasados
+  30 min y un reinicio del daemon, como siempre. Cuando hay que rehacerla, cuesta
+  la mitad (el veth nace en su namespace, `ip -n`, reglas en un solo
+  `iptables-restore`). La MAC del tap0 es fija.
+- **La memoria no se lee a golpe de fallo de página**: freeze deja en la caché
+  el volcado de las máquinas pequeñas (≤ 128 MiB) y thaw lee en segundo plano el
+  de las de hasta 512 MiB (resync 54 → 6 ms, primera petición 14 → 2,5 ms).
+- El VMM nace ya en su cgroup (`CLONE_INTO_CGROUP`, 8 → 0 ms), el socket de su
+  API se sondea cada milisegundo (11 → 4 ms) y el chroot del jail se borra al
+  congelar, no al descongelar.
+- **Nivel pausada**: `kling pause` / `POST /machines/{ref}/pause` (capacidad
+  `pause`) deja el VMM vivo con el invitado parado; `thaw` lo reanuda en ~0,3
+  ms. `kling ai serve -paused-mib 256` (por defecto; 0 = congelar siempre) pausa
+  en vez de congelar las réplicas ociosas que mejor puntúan por popularidad /
+  memoria mientras quepan, congela de verdad las que pasan `-paused-for` (10 ×
+  idle) sin uso, y las sacrifica primero si falta memoria. Réplica pausada →
+  decisión: 2,2 ms, con ~36 MiB de RSS por réplica Chispa.
+- `kling ai serve -name-prefix` para el nombre de las réplicas.
+- Arreglo: el cliente de la API de Firecracker dejaba una conexión abierta por
+  llamada; con varias pausas sobre el mismo VMM su API acababa rechazando la
+  siguiente (`write: broken pipe`).
+
 ### Mejora continua: Chispa aprende lo que escalaba (`kling ai retrain`)
 
 Diseño, puertas y cifras en [docs/mejora-continua.md](docs/mejora-continua.md).
