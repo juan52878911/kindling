@@ -127,6 +127,12 @@ type Manager struct {
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
 
+	// redMontada son las máquinas cuya red (namespace, veth, tap y reglas)
+	// montó ESTE proceso del daemon y sigue en pie. Freeze ya no la desmonta:
+	// Thaw la reutiliza si está aquí y el namespace sigue existiendo, y se
+	// ahorra la docena de ip/iptables de montarla (ver red.go).
+	redMontada sync.Map
+
 	// pendingMiB es la memoria de las microVMs que están ARRANCANDO ahora mismo,
 	// aún sin proceso que la ocupe. checkHostMemory la resta de lo disponible:
 	// sin esto, dos arranques concurrentes ven los dos la misma memoria libre,
@@ -811,7 +817,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		return abandonar(err)
 	}
 	netcfg := knet.Plan(m.allocNetIndex(), id)
-	if err := netcfg.Setup(egress, req.AllowDomains, m.priv.UID); err != nil {
+	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
 		return abandonar(fmt.Errorf("mounting the network: %w", err))
 	}
 	// Bajo el candado: mc ya está en byID, y List()/Get()/persist() la copian
@@ -824,7 +830,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	// El VMM solo puede escribir en lo suyo: su directorio y su overlay.
 	if err := m.priv.Own(dir, overlay); err != nil {
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, id)
 		return abandonar(err)
 	}
 
@@ -839,7 +845,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, id)
 		m.fail(mc, err)
 		return nil, err
 	}
@@ -1001,7 +1007,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 		// Arranque en frío dentro del jail. A diferencia de la restauración, aquí
 		// firecracker abre el KERNEL (SetBootSource) y los discos por su API, así
 		// que también hay que replicar el kernel dentro del chroot.
-		pid, sock, err = m.spawnJailed(id, n)
+		pid, sock, _, err = m.spawnJailed(id, n, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -1017,7 +1023,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	} else {
 		sock = filepath.Join(m.dir(id), "fc.sock")
 		_ = os.Remove(sock)
-		pid, err = m.spawn(id, sock, n)
+		pid, _, err = m.spawn(id, sock, n, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -1149,10 +1155,14 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 }
 
 // spawn arranca firecracker desacoplado del daemon y devuelve su PID.
-func (m *Manager) spawn(id, sock string, n *knet.Net) (int, error) {
+//
+// cg, si no es nil, es el cgroup en el que nace el proceso (cgroupParaLanzar);
+// enCg dice si de verdad nació dentro. Si el kernel no lo admite, se lanza
+// fuera y quien llama lo mete con limitCPU.
+func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enCg bool, err error) {
 	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	// Firecracker corre DENTRO del namespace de la microVM: es donde vive su tap0.
 	// Orden: primero el namespace (necesita privilegios), después soltarlos.
@@ -1160,17 +1170,45 @@ func (m *Manager) spawn(id, sock string, n *knet.Net) (int, error) {
 	if n != nil {
 		argv = n.Wrap(argv[0], argv[1:]...)
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	cmd, enCg, err := arrancarEnCgroup(argv, logf, cg)
+	if err != nil {
 		logf.Close()
-		return 0, fmt.Errorf("launching firecracker: %w", err)
+		return 0, false, fmt.Errorf("launching firecracker: %w", err)
 	}
 	// Sin Wait() el proceso quedaría zombi al terminar.
 	go func() { _ = cmd.Wait(); logf.Close() }()
-	return cmd.Process.Pid, nil
+	return cmd.Process.Pid, enCg, nil
 }
+
+// arrancarEnCgroup lanza argv desacoplado (setsid) con su salida en logf,
+// dentro del cgroup cg si se puede. Si el kernel rechaza nacer en el cgroup
+// (sin CLONE_INTO_CGROUP, o el cgroup no admite procesos), lo lanza fuera y lo
+// dice: el proceso importa más que ahorrarse la migración.
+func arrancarEnCgroup(argv []string, logf *os.File, cg *os.File) (*exec.Cmd, bool, error) {
+	nuevo := func() *exec.Cmd {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Stdout, cmd.Stderr = logf, logf
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		return cmd
+	}
+	if cg != nil {
+		cmd := nuevo()
+		enCgroup(cmd.SysProcAttr, cg)
+		if err := cmd.Start(); err == nil {
+			return cmd, true, nil
+		}
+	}
+	cmd := nuevo()
+	if err := cmd.Start(); err != nil {
+		return nil, false, err
+	}
+	return cmd, false, nil
+}
+
+// cacheTibiaMaxBytes es hasta qué tamaño (bloques asignados) se deja en la caché
+// de página el mem.file de una máquina recién congelada. Una tarea Chispa pesa
+// ~70 MiB; un VON, más de un GiB, y ese sí se suelta al congelar.
+const cacheTibiaMaxBytes = 128 << 20
 
 // precargaMaxBytes es hasta qué tamaño (bloques asignados) se precarga el
 // mem.file de una máquina al descongelarla.
@@ -1328,9 +1366,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// no puede contestar. Los volúmenes ya se vaciaron arriba, con la máquina
 	// aún corriendo, que era el único momento posible.
 	m.killPaused(mc.ID)
-	// Y su namespace y su cgroup tampoco hacen nada mientras está congelada.
-	// Thaw los recrea.
-	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	// La red se queda montada: Thaw la reutiliza (ver red.go), y el vigilante
+	// la desmonta si la máquina pasa mucho tiempo congelada. El cgroup no hace
+	// nada sin proceso; Thaw lo recrea.
 	m.releaseCPU(mc.ID)
 
 	// Firecracker vuelca la memoria entera, pero en una microVM recién arrancada
@@ -1344,7 +1382,20 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// El fichero de memoria queda entero en caché tras escribirlo y releerlo para
 	// perforarlo, y no se volverá a tocar hasta que alguien descongele ESTA
 	// máquina. Se suelta: es la principal fuente de caché acumulada del host.
-	dropCache(memPath)
+	//
+	// Salvo si es pequeño: entonces se deja ENTERO en la caché mientras dure
+	// la red conservada (redDormidaMax; soltarRedesDormidas lo suelta con
+	// ella), y el thaw no lee nada del disco. Hay que leerlo aquí: tras el
+	// volcado y el perforado casi nada queda en caché (medido: 832 KiB de 71
+	// MiB). Y con la red conservada no queda tiempo para que la precarga del
+	// thaw termine antes de que el invitado despierte (medido: 19 ms de resync
+	// con la caché fría frente a 5 ms con ella caliente). Esto va en el
+	// congelado, que corre en segundo plano, y no en el despertar.
+	if allocatedBytes(memPath) > cacheTibiaMaxBytes {
+		dropCache(memPath)
+	} else {
+		precargar(memPath)
+	}
 
 	size := allocatedBytes(memPath) + allocatedBytes(snapPath)
 
@@ -1706,15 +1757,30 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 	// El namespace pudo desaparecer con un reinicio del host; lo rehacemos con el
 	// mismo índice para que la máquina conserve su IP.
+	// La red suele seguir montada desde el Freeze (ver red.go); si no —un
+	// reinicio del daemon o del host, o el vigilante la soltó—, se rehace con
+	// el mismo índice para que la máquina conserve su IP.
 	egress, _ := knet.ParseEgress(mc.Egress)
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
-	if err := netcfg.Setup(egress, mc.AllowDomains, m.priv.UID); err != nil {
-		return nil, fmt.Errorf("rebuilding the network: %w", err)
+	if !m.redLista(netcfg, mc.ID) {
+		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
+			return nil, fmt.Errorf("rebuilding the network: %w", err)
+		}
 	}
 	crono.marca(&crono.p.NetMS)
 	var pid int
 	var c *fc.Client
 	var err error
+
+	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar).
+	if mc.CPUPct <= 0 {
+		mc.CPUPct = defaultCPUPct
+	}
+	cg := m.cgroupParaLanzar(mc.ID, mc.CPUPct)
+	if cg != nil {
+		defer cg.Close()
+	}
+	var enCg bool
 
 	// abortar es la única salida de error a partir de aquí.
 	//
@@ -1729,7 +1795,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, mc.ID)
 		return nil, err
 	}
 
@@ -1737,7 +1803,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		// El warm también se descongela dentro de un jail, o el aislamiento se
 		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
 		// Mismo patrón que runFrom: poblar el chroot antes de cargar.
-		pid, sock, err = m.spawnJailed(mc.ID, netcfg)
+		pid, sock, enCg, err = m.spawnJailed(mc.ID, netcfg, cg)
 		if err != nil {
 			return abortar(err)
 		}
@@ -1765,7 +1831,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		}
 		crono.marca(&crono.p.SpawnMS)
 	} else {
-		pid, err = m.spawn(mc.ID, sock, netcfg)
+		pid, enCg, err = m.spawn(mc.ID, sock, netcfg, cg)
 		if err != nil {
 			return abortar(err)
 		}
@@ -1812,12 +1878,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// freeze→thaw. Sin esto una microVM descongelada corría en el cgroup del daemon,
 	// SIN límite —hueco de aislamiento— y, además, se saltaba el cpu_pct que viaja
 	// con el snapshot justo en el camino de thaw, que es el habitual del gateway.
-	// Mismo patrón que Run (boot) y runFrom.
-	if mc.CPUPct <= 0 {
-		mc.CPUPct = defaultCPUPct
-	}
-	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
-		log.Printf("warning: %s: %s", mc.Name, warn)
+	// Mismo patrón que Run (boot) y runFrom. Si ya nació dentro, no hay nada
+	// que mover.
+	if !enCg {
+		if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+			log.Printf("warning: %s: %s", mc.Name, warn)
+		}
 	}
 	crono.marca(&crono.p.CgroupMS)
 
@@ -1833,7 +1899,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
-		netcfg.Teardown()
+		m.desmontarRed(netcfg, mc.ID)
 		return nil, fmt.Errorf("machine %q was removed while it was being thawed", mc.Name)
 	}
 	now := time.Now()
@@ -1900,7 +1966,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
-	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
 
 	m.mu.Lock()
@@ -1937,7 +2003,7 @@ func (m *Manager) Remove(ref string) error {
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.
 	defer m.lock(mc.ID)()
 	m.kill(mc.ID)
-	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
 	// El chroot del jail vive aparte del directorio de la máquina: se limpia
 	// también, o cada restauración jailed deja un árbol huérfano.
@@ -2022,7 +2088,7 @@ func waitGone(pid int, timeout time.Duration) {
 
 func (m *Manager) fail(mc *api.Machine, err error) {
 	m.kill(mc.ID)
-	knet.Plan(mc.NetIndex, mc.ID).Teardown()
+	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
 	m.mu.Lock()
 	now := time.Now()

@@ -19,6 +19,9 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error { return n
 // Teardown no desmonta nada: la red muere con el proceso del ayudante.
 func (n *Net) Teardown() {}
 
+// Exists: en macOS no hay nada montado en el host que conservar.
+func (n *Net) Exists() bool { return false }
+
 // StartAllowlistResolver no hace falta: el DNS de la lista lo sirve kling-vz.
 func (n *Net) StartAllowlistResolver(domains []string) error { return nil }
 

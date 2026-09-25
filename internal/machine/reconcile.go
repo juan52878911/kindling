@@ -87,13 +87,13 @@ func (m *Manager) reconcile() {
 				mc.State = api.StateStopped
 			}
 			mc.PID = 0
-			knet.Plan(mc.NetIndex, mc.ID).Teardown()
+			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 			m.releaseCPU(mc.ID)
 
 		case api.StateWarm, api.StateStopped, api.StateFailed:
 			// Sin proceso: ni namespace ni cgroup hacen nada. Se recrean al
 			// arrancarla o descongelarla.
-			knet.Plan(mc.NetIndex, mc.ID).Teardown()
+			m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 			m.releaseCPU(mc.ID)
 		}
 	}
@@ -391,6 +391,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// para poder diagnosticarla, y después se recoge sola. Sin esto se
 				// acumulaban indefinidamente, una por intento fallido.
 				m.gcFailed()
+				// La red que Freeze dejó montada, en las que llevan mucho
+				// tiempo congeladas (ver red.go).
+				m.soltarRedesDormidas()
 				// Procesos de firecracker que ya no son de nadie. Hasta ahora esto
 				// solo corría al arrancar el daemon, así que un VMM huérfano
 				// —cada restauración fallida dejaba uno— retenía su RAM hasta el
@@ -474,7 +477,7 @@ func (m *Manager) sweep() {
 
 	// Fuera del mutex: publicar eventos y liberar red puede tardar.
 	for _, mc := range died {
-		knet.Plan(mc.NetIndex, mc.ID).Teardown()
+		m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 		m.releaseCPU(mc.ID)
 		m.bus.Publish(api.Event{
 			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,

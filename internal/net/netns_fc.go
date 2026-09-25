@@ -8,6 +8,7 @@ package net
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -72,7 +73,7 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := ns("ip", "addr", "add", GuestGW+"/30", "dev", TapName); err != nil {
 		return err
 	}
-	if err := ns("ip", "link", "set", TapName, "up"); err != nil {
+	if err := ns("ip", "link", "set", TapName, "address", TapMAC, "up"); err != nil {
 		return err
 	}
 	if err := ns("ip", "route", "add", "default", "via", n.HostIP); err != nil {
@@ -99,6 +100,16 @@ func (n *Net) Teardown() {
 	stopResolver(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
+}
+
+// Exists dice si el namespace y el veth del lado del host siguen ahí: lo que
+// deja montado un Setup. Solo mira el sistema de ficheros, sin procesos.
+func (n *Net) Exists() bool {
+	if _, err := os.Stat("/var/run/netns/" + n.NS); err != nil {
+		return false
+	}
+	_, err := os.Stat("/sys/class/net/" + n.HostIf)
+	return err == nil
 }
 
 // StartAllowlistResolver revive el resolver dinámico de una microVM en modo

@@ -66,20 +66,54 @@ func (m *Manager) limitCPU(id string, pid int, quotaPct int) string {
 	if m.cgroupRoot == "" {
 		return "" // ya se avisó al arrancar; no repetirlo en cada máquina
 	}
-	dir := filepath.Join(m.cgroupRoot, "kl-"+id[:8])
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Sprintf("could not create cgroup: %v", err)
-	}
-	// cpu.max = "<cuota> <periodo>" en microsegundos; 100000 = un core completo.
-	if err := os.WriteFile(filepath.Join(dir, "cpu.max"),
-		[]byte(fmt.Sprintf("%d 100000", quotaPct*1000)), 0o644); err != nil {
-		return fmt.Sprintf("could not set cpu.max: %v", err)
+	dir, warn := m.crearCgroup(id, quotaPct)
+	if warn != "" {
+		return warn
 	}
 	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"),
 		[]byte(strconv.Itoa(pid)), 0o644); err != nil {
 		return fmt.Sprintf("could not move process to cgroup: %v", err)
 	}
 	return ""
+}
+
+// crearCgroup crea el cgroup de una microVM con su techo de CPU, sin meter
+// ningún proceso. Devuelve su directorio, o el aviso si no se pudo.
+func (m *Manager) crearCgroup(id string, quotaPct int) (string, string) {
+	dir := filepath.Join(m.cgroupRoot, "kl-"+id[:8])
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Sprintf("could not create cgroup: %v", err)
+	}
+	// cpu.max = "<cuota> <periodo>" en microsegundos; 100000 = un core completo.
+	if err := os.WriteFile(filepath.Join(dir, "cpu.max"),
+		[]byte(fmt.Sprintf("%d 100000", quotaPct*1000)), 0o644); err != nil {
+		return "", fmt.Sprintf("could not set cpu.max: %v", err)
+	}
+	return dir, ""
+}
+
+// cgroupParaLanzar prepara el cgroup de una microVM ANTES de lanzar su VMM y
+// devuelve su directorio abierto, para que spawn lo cree ya dentro
+// (CLONE_INTO_CGROUP, ver enCgroup). nil si no hay cgroups o no se pudo: quien
+// llama cae entonces en limitCPU tras el arranque, como siempre.
+//
+// Por qué: mover un proceso ya vivo escribiendo su PID en cgroup.procs toma
+// el candado de escritura de los grupos de hilos del kernel, que espera un
+// periodo de gracia de RCU: 4-13 ms medidos por thaw en un i7-8700T, y hasta
+// 30 ms con el host ocupado. Nacer dentro solo toma el de lectura.
+func (m *Manager) cgroupParaLanzar(id string, quotaPct int) *os.File {
+	if m.cgroupRoot == "" || !cloneEnCgroup {
+		return nil
+	}
+	dir, warn := m.crearCgroup(id, quotaPct)
+	if warn != "" {
+		return nil
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	return f
 }
 
 // releaseCPU borra el cgroup de una microVM que ya no corre.

@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 
 	knet "github.com/juan52878911/kindling/internal/net"
 )
@@ -194,7 +193,9 @@ func (m *Manager) jailerArgv(id string, netnsPath string) ([]string, error) {
 // El socket lo crea jailer, así que hay que esperar a que aparezca antes de
 // devolverlo: a diferencia del camino normal, aquí el fichero no existe hasta
 // que jailer ha hecho su preparación.
-func (m *Manager) spawnJailed(id string, n *knet.Net) (int, string, error) {
+//
+// cg es como en spawn: el cgroup en el que nace el proceso, si se puede.
+func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string, bool, error) {
 	// jailer se queja si su directorio ya existe de una ejecución anterior que
 	// no se limpió. Se borra: el estado que importa (snapshot, overlay) vive en
 	// machines/, no aquí.
@@ -202,7 +203,7 @@ func (m *Manager) spawnJailed(id string, n *knet.Net) (int, string, error) {
 
 	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
 	if err != nil {
-		return 0, "", err
+		return 0, "", false, err
 	}
 
 	var netnsPath string
@@ -212,16 +213,14 @@ func (m *Manager) spawnJailed(id string, n *knet.Net) (int, string, error) {
 	argv, err := m.jailerArgv(id, netnsPath)
 	if err != nil {
 		logf.Close()
-		return 0, "", err
+		return 0, "", false, err
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	cmd, enCg, err := arrancarEnCgroup(argv, logf, cg)
+	if err != nil {
 		logf.Close()
-		return 0, "", fmt.Errorf("launching jailer: %w", err)
+		return 0, "", false, fmt.Errorf("launching jailer: %w", err)
 	}
 	go func() { _ = cmd.Wait(); logf.Close() }()
 
-	return cmd.Process.Pid, m.jailSock(id), nil
+	return cmd.Process.Pid, m.jailSock(id), enCg, nil
 }
