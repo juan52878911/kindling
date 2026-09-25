@@ -144,7 +144,7 @@ func FuzzLoad(f *testing.F) {
 	}
 	f.Add(good)
 	f.Add(good[:len(good)/2])
-	f.Add([]byte("\x89JVS\r\n\x1a\n"))
+	f.Add([]byte("\x89CHS\r\n\x1a\n"))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, d := range [][]byte{data, fixCRC(append(append([]byte(nil), data...), 0, 0, 0, 0))} {

@@ -1,11 +1,11 @@
-// Package slots es el extractor de huecos de JEV: un etiquetador de
+// Package slots es el extractor de huecos de Chispa: un etiquetador de
 // secuencias lineal (perceptrón estructurado promediado con Viterbi) sobre
 // características de token hasheadas, con pesos int16. Es a los huecos
-// («device», «area», «value»…) lo que pkg/jev es a la intención: pequeño,
+// («device», «area», «value»…) lo que pkg/chispa es a la intención: pequeño,
 // determinista, de microsegundos y sin dependencias. Ver docs/domotica.md.
 //
-// Garantías, como en pkg/jev:
-//   - Determinismo: hash propio, pesos enteros, suma entera; el mismo .jevs y
+// Garantías, como en pkg/chispa:
+//   - Determinismo: hash propio, pesos enteros, suma entera; el mismo .chispas y
 //     el mismo texto dan los mismos huecos en amd64 y arm64.
 //   - La etiqueta es BIO restringida: Viterbi nunca produce un I-x que no siga
 //     a B-x o I-x, así que todo hueco devuelto está bien formado.
@@ -33,11 +33,11 @@ const (
 	MaxLexKey      = 64
 	MaxWindow      = 3
 	MaxAffix       = 5
-	specPrefix     = "jevs-spec-v1;tok=t1"
+	specPrefix     = "chispas-spec-v1;tok=t1"
 )
 
 // Spec dice cómo se convierte cada token en características. Va dentro del
-// .jevs y su hash (junto con las etiquetas y el léxico) se comprueba al cargar.
+// .chispas y su hash (junto con las etiquetas y el léxico) se comprueba al cargar.
 type Spec struct {
 	Buckets      uint32 `json:"buckets"`
 	Window       int    `json:"window"`  // palabras vecinas a cada lado
@@ -547,7 +547,7 @@ func runeSuffix(b []byte, n int) int {
 	return i
 }
 
-// FNV-1a + finalizador de murmur3, como pkg/jev (ver su hash.go): trivial de
+// FNV-1a + finalizador de murmur3, como pkg/chispa (ver su hash.go): trivial de
 // reproducir en otro lenguaje y con los bits bajos bien mezclados.
 const (
 	fnvOffset uint64 = 0xcbf29ce484222325

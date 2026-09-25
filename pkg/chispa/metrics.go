@@ -1,4 +1,4 @@
-package jev
+package chispa
 
 import (
 	"fmt"
@@ -33,7 +33,7 @@ type ClassReport struct {
 }
 
 // Report es la evaluación completa. Las cuatro cifras de la cascada son
-// Coverage, ConfidentPrecision, EscalatedN y ECE: cuánto contesta JEV solo, con
+// Coverage, ConfidentPrecision, EscalatedN y ECE: cuánto contesta Chispa solo, con
 // qué precisión, cuánto le pasa al modelo mayor y si sus probabilidades
 // significan lo que dicen.
 type Report struct {
@@ -48,7 +48,7 @@ type Report struct {
 	HasProb   bool    `json:"has_prob"`
 	ECE       float64 `json:"ece"`
 	// Coverage: fracción contestada con confianza. ConfidentPrecision: su
-	// exactitud. EscalatedAccuracy: lo que acertaría JEV en lo que escala
+	// exactitud. EscalatedAccuracy: lo que acertaría Chispa en lo que escala
 	// (informativo: si es alto, los umbrales son demasiado prudentes).
 	Coverage           float64  `json:"coverage"`
 	ConfidentN         int      `json:"confident_n"`

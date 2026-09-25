@@ -1,4 +1,4 @@
-package jev
+package chispa
 
 import (
 	"errors"
@@ -26,12 +26,12 @@ const (
 	maxTokenBytes       = 40   // un token más largo es ruido (base64, rutas…)
 	numTokenBytes       = 5    // un token con dígitos de esta longitud es un número
 	normVersion         = "n1" // sube si cambia la normalización: cambia el hash
-	specPrefix          = "jev-spec-v1"
+	specPrefix          = "chispa-spec-v1"
 	charNgramMax        = 6
 )
 
 // FeatureSpec dice cómo se convierte una entrada en características. Va dentro
-// del fichero .jev junto a su hash: un modelo solo tiene sentido con la misma
+// del fichero .chispa junto a su hash: un modelo solo tiene sentido con la misma
 // extracción con la que se entrenó.
 type FeatureSpec struct {
 	Buckets      uint32 `json:"buckets"`        // potencia de dos
@@ -45,7 +45,7 @@ type FeatureSpec struct {
 
 // DefaultSpec es el punto de partida: palabras y bigramas, campos, sin
 // n-gramas de caracteres (más lentos y, en la evaluación de commits, sin
-// ganancia clara; ver docs/JEV-EVAL.md).
+// ganancia clara; ver docs/CHISPA-EVAL.md).
 func DefaultSpec() FeatureSpec {
 	return FeatureSpec{
 		Buckets:      DefaultBuckets,
@@ -57,7 +57,7 @@ func DefaultSpec() FeatureSpec {
 }
 
 // Validate comprueba que la especificación es coherente y está dentro de los
-// topes. La llama el cargador: un .jev manipulado no pasa de aquí.
+// topes. La llama el cargador: un .chispa manipulado no pasa de aquí.
 func (s FeatureSpec) Validate() error {
 	if s.Buckets < MinBuckets || s.Buckets > MaxBuckets || s.Buckets&(s.Buckets-1) != 0 {
 		return fmt.Errorf("buckets must be a power of two in [%d, %d], got %d", MinBuckets, MaxBuckets, s.Buckets)
@@ -567,8 +567,8 @@ const (
 	FoldSkip = foldSkip // la runa desaparece (marca combinante)
 )
 
-// FoldRune es el plegado de caracteres del tokenizador de JEV: minúscula,
+// FoldRune es el plegado de caracteres del tokenizador de Chispa: minúscula,
 // acentos latinos fuera, ancho completo a ASCII. Devuelve FoldSep o FoldSkip
 // para separadores y marcas. Se exporta para que otros extractores (el
-// etiquetador de pkg/jev/slots) normalicen exactamente igual que el clasificador.
+// etiquetador de pkg/chispa/slots) normalicen exactamente igual que el clasificador.
 func FoldRune(r rune) rune { return foldRune(r) }

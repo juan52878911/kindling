@@ -1,4 +1,4 @@
-package jev_test
+package chispa_test
 
 import (
 	"bytes"
@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/train"
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/train"
 )
 
 type rng struct{ s uint64 }
@@ -32,11 +32,11 @@ var classes = []string{"build", "chore", "ci", "docs", "feat", "fix", "perf", "r
 
 // corpus: diez clases con vocabulario propio y ruido común, 10 % de etiquetas
 // cambiadas. Solo para ejercitar la maquinaria; los números reales están en
-// docs/JEV-EVAL.md.
-func corpus(n int, seed uint64) []jev.Example {
+// docs/CHISPA-EVAL.md.
+func corpus(n int, seed uint64) []chispa.Example {
 	noise := strings.Fields("the a in for of to with on when from parser server client cache config bundler runtime module api")
 	r := rng{s: seed}
-	out := make([]jev.Example, n)
+	out := make([]chispa.Example, n)
 	for i := range out {
 		c := r.next() % uint64(len(classes))
 		var words []string
@@ -47,7 +47,7 @@ func corpus(n int, seed uint64) []jev.Example {
 		if r.next()%10 == 0 {
 			label = r.pick(classes)
 		}
-		out[i] = jev.Example{Text: strings.Join(words, " "), Label: label,
+		out[i] = chispa.Example{Text: strings.Join(words, " "), Label: label,
 			Fields: map[string]any{"files": float64(r.next() % 30), "ext": r.pick([]string{".go", ".md", ".ts"})}}
 	}
 	return out
@@ -55,16 +55,16 @@ func corpus(n int, seed uint64) []jev.Example {
 
 var (
 	modelOnce sync.Once
-	testModel *jev.Model
+	testModel *chispa.Model
 	modelErr  error
 )
 
 // trained devuelve un modelo de 10 clases a 2^18 cubos (el tamaño por
 // defecto), entrenado una vez para todo el paquete.
-func trained(t testing.TB) *jev.Model {
+func trained(t testing.TB) *chispa.Model {
 	t.Helper()
 	modelOnce.Do(func() {
-		cfg := train.Config{Spec: jev.DefaultSpec(), Seed: 3, MinSupport: 5}
+		cfg := train.Config{Spec: chispa.DefaultSpec(), Seed: 3, MinSupport: 5}
 		cfg.Spec.CharMin, cfg.Spec.CharMax = 3, 5
 		res, err := train.Train(corpus(3000, 1), corpus(600, 2), cfg)
 		if err != nil {
@@ -104,7 +104,7 @@ func TestFitTemperature(t *testing.T) {
 		logits = append(logits, z)
 		gold = append(gold, g)
 	}
-	if T := jev.FitTemperature(logits, gold); T < 1.8 || T > 2.2 {
+	if T := chispa.FitTemperature(logits, gold); T < 1.8 || T > 2.2 {
 		t.Errorf("fitted temperature %.3f, want ~2", T)
 	}
 }
@@ -124,22 +124,22 @@ func TestChooseThresholds(t *testing.T) {
 		}
 		pred, prob, gold = append(pred, 1), append(prob, p), append(gold, 0)
 	}
-	th := jev.ChooseThresholds(2, pred, gold, prob, jev.ThresholdParams{TargetPrecision: 0.95, MinSupport: 5})
+	th := chispa.ChooseThresholds(2, pred, gold, prob, chispa.ThresholdParams{TargetPrecision: 0.95, MinSupport: 5})
 	if th[0] < 0.79 || th[0] > 0.82 {
 		t.Errorf("τ for the separable class = %.3f, want ~0.8", th[0])
 	}
-	if th[1] != jev.NeverConfident {
+	if th[1] != chispa.NeverConfident {
 		t.Errorf("τ for a class that is always wrong = %.3f, want NeverConfident", th[1])
 	}
 	// Con soporte insuficiente no se fía aunque acierte todo.
-	th = jev.ChooseThresholds(1, []int{0, 0, 0}, []int{0, 0, 0}, []float64{0.99, 0.98, 0.97},
-		jev.ThresholdParams{TargetPrecision: 0.5, MinSupport: 10})
-	if th[0] != jev.NeverConfident {
+	th = chispa.ChooseThresholds(1, []int{0, 0, 0}, []int{0, 0, 0}, []float64{0.99, 0.98, 0.97},
+		chispa.ThresholdParams{TargetPrecision: 0.5, MinSupport: 10})
+	if th[0] != chispa.NeverConfident {
 		t.Errorf("τ with 3 examples and MinSupport 10 = %v", th[0])
 	}
 }
 
-var probeInputs = []jev.Input{
+var probeInputs = []chispa.Input{
 	{Text: "fix0 crash in the parser when cache is cold"},
 	{Text: "doc2 doc3 readme for the api", Fields: map[string]any{"ext": ".md", "files": 1.0}},
 	{Text: "tes1 tes4 flaky module", Fields: map[string]any{"files": 12.0}},
@@ -147,7 +147,7 @@ var probeInputs = []jev.Input{
 	{Text: "Übergrößenträger 日本語 ok", Fields: map[string]any{"ext": ".go"}},
 }
 
-func probDigest(m *jev.Model) string {
+func probDigest(m *chispa.Model) string {
 	h := sha256.New()
 	for _, in := range probeInputs {
 		p := m.PredictFull(in, 0)
@@ -176,7 +176,7 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m2, err := jev.Unmarshal(b)
+	m2, err := chispa.Unmarshal(b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,16 +195,16 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestDenseRoundTrip(t *testing.T) {
-	spec := jev.DefaultSpec()
+	spec := chispa.DefaultSpec()
 	spec.Buckets = 16
 	r := rng{s: 4}
 	w := make([]int16, 16*3)
 	for i := range w {
 		w[i] = int16(r.next()%2000) - 1000
 	}
-	m := &jev.Model{Spec: spec, SpecHash: spec.Hash(), Labels: []string{"a", "b", "c"},
+	m := &chispa.Model{Spec: spec, SpecHash: spec.Hash(), Labels: []string{"a", "b", "c"},
 		Scales: []float64{1e-3, 2e-3, 3e-3}, Bias: []float64{0, 0.1, -0.1}, W: w,
-		Temperature: 1.5, Thresholds: []float64{0.5, 0.6, jev.NeverConfident}}
+		Temperature: 1.5, Thresholds: []float64{0.5, 0.6, chispa.NeverConfident}}
 	if err := m.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestDenseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m2, err := jev.Unmarshal(b)
+	m2, err := chispa.Unmarshal(b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,14 +237,14 @@ func TestLoadRejectsCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 	for n := 0; n < len(good); n += 1 + n/7 {
-		if _, err := jev.Unmarshal(good[:n]); err == nil {
+		if _, err := chispa.Unmarshal(good[:n]); err == nil {
 			t.Fatalf("truncated to %d bytes: accepted", n)
 		}
 	}
 	for i := 0; i < len(good); i += 1 + i/5 {
 		bad := append([]byte(nil), good...)
 		bad[i] ^= 0x40
-		if _, err := jev.Unmarshal(bad); err == nil {
+		if _, err := chispa.Unmarshal(bad); err == nil {
 			t.Fatalf("flipped byte %d: accepted", i)
 		}
 	}
@@ -266,11 +266,11 @@ func TestLoadRejectsCorrupt(t *testing.T) {
 	} {
 		bad := append([]byte(nil), good...)
 		copy(bad[c.off:], c.val)
-		if _, err := jev.Unmarshal(fixCRC(bad)); err == nil {
+		if _, err := chispa.Unmarshal(fixCRC(bad)); err == nil {
 			t.Errorf("%s tampered: accepted", c.name)
 		}
 	}
-	if _, err := jev.Load(bytes.NewReader(make([]byte, jev.MaxFileBytes+10))); err == nil {
+	if _, err := chispa.Load(bytes.NewReader(make([]byte, chispa.MaxFileBytes+10))); err == nil {
 		t.Error("oversized file accepted")
 	}
 }
@@ -278,9 +278,9 @@ func TestLoadRejectsCorrupt(t *testing.T) {
 // FuzzLoad: ningún fichero hace que el cargador entre en pánico, y lo que
 // carga se puede usar para predecir sin pánico.
 func FuzzLoad(f *testing.F) {
-	spec := jev.DefaultSpec()
+	spec := chispa.DefaultSpec()
 	spec.Buckets = 16
-	m := &jev.Model{Spec: spec, SpecHash: spec.Hash(), Labels: []string{"a", "b"}, Binary: true,
+	m := &chispa.Model{Spec: spec, SpecHash: spec.Hash(), Labels: []string{"a", "b"}, Binary: true,
 		Scales: []float64{1e-3}, Bias: []float64{0}, W: make([]int16, 16),
 		Temperature: 1, Thresholds: []float64{0.9, 0.9}}
 	m.W[3] = 100
@@ -290,14 +290,14 @@ func FuzzLoad(f *testing.F) {
 	}
 	f.Add(good)
 	f.Add(good[:len(good)/2])
-	f.Add([]byte("\x89JEV\r\n\x1a\n"))
+	f.Add([]byte("\x89CHI\r\n\x1a\n"))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, d := range [][]byte{data, fixCRC(append(append([]byte(nil), data...), 0, 0, 0, 0))} {
 			if len(d) > 1<<20 {
 				continue
 			}
-			m, err := jev.Unmarshal(d)
+			m, err := chispa.Unmarshal(d)
 			if err != nil {
 				continue
 			}
@@ -313,16 +313,16 @@ func FuzzLoad(f *testing.F) {
 
 func TestPredictAPI(t *testing.T) {
 	m := trained(t)
-	p := m.PredictFull(jev.Input{Text: "fix1 fix2 fix3 crash in the cache", Fields: map[string]any{"ext": ".go"}}, 5)
+	p := m.PredictFull(chispa.Input{Text: "fix1 fix2 fix3 crash in the cache", Fields: map[string]any{"ext": ".go"}}, 5)
 	if p.Label != "fix" {
 		t.Errorf("label %q, want fix", p.Label)
 	}
 	if p.Threshold != m.Thresholds[p.Index] || p.Confident != (p.Prob >= p.Threshold) {
 		t.Errorf("inconsistent decision: %+v", p)
 	}
-	want := jev.DecisionEscalate
+	want := chispa.DecisionEscalate
 	if p.Confident {
-		want = jev.DecisionConfident
+		want = chispa.DecisionConfident
 	}
 	if p.Decision != want {
 		t.Errorf("decision %q, want %q", p.Decision, want)
@@ -337,12 +337,12 @@ func TestPredictAPI(t *testing.T) {
 	if len(p.Evidence) == 0 || !strings.HasPrefix(p.Evidence[0].Feature, "w:fix") && !strings.HasPrefix(p.Evidence[0].Feature, "c:") {
 		t.Errorf("evidence %+v", p.Evidence)
 	}
-	short := m.Predict(jev.Input{Text: "fix1 fix2 fix3 crash in the cache", Fields: map[string]any{"ext": ".go"}})
+	short := m.Predict(chispa.Input{Text: "fix1 fix2 fix3 crash in the cache", Fields: map[string]any{"ext": ".go"}})
 	if short.Label != p.Label || short.Prob != p.Prob {
 		t.Error("Predict and PredictFull disagree")
 	}
 	// Un texto sin nada conocido no puede ser confiado.
-	if q := m.Predict(jev.Input{Text: "zzz qqq"}); q.Confident {
+	if q := m.Predict(chispa.Input{Text: "zzz qqq"}); q.Confident {
 		t.Errorf("unknown input answered confidently: %+v", q)
 	}
 }
@@ -350,7 +350,7 @@ func TestPredictAPI(t *testing.T) {
 func TestPredictConcurrent(t *testing.T) {
 	m := trained(t)
 	inputs := corpus(200, 77)
-	want := make([]jev.Prediction, len(inputs))
+	want := make([]chispa.Prediction, len(inputs))
 	for i, ex := range inputs {
 		want[i] = m.Predict(ex.Input())
 	}
@@ -386,15 +386,15 @@ func TestPredictZeroAlloc(t *testing.T) {
 		t.Skip("the race detector allocates")
 	}
 	m := trained(t)
-	in := jev.Input{Text: text200, Fields: map[string]any{"files": 3.0, "ext": ".ts"}}
+	in := chispa.Input{Text: text200, Fields: map[string]any{"files": 3.0, "ext": ".ts"}}
 	m.Predict(in)
 	if a := testing.AllocsPerRun(200, func() { m.Predict(in) }); a != 0 {
 		t.Errorf("Predict allocates %.1f times per call", a)
 	}
 }
 
-func benchModel(b *testing.B, char bool) *jev.Model {
-	cfg := train.Config{Spec: jev.DefaultSpec(), Seed: 3, MinSupport: 5}
+func benchModel(b *testing.B, char bool) *chispa.Model {
+	cfg := train.Config{Spec: chispa.DefaultSpec(), Seed: 3, MinSupport: 5}
 	if char {
 		cfg.Spec.CharMin, cfg.Spec.CharMax = 3, 5
 	}
@@ -416,7 +416,7 @@ func BenchmarkPredict(b *testing.B) {
 		{"words+char3-5", true, nil},
 	} {
 		m := benchModel(b, c.char)
-		in := jev.Input{Text: text200, Fields: c.fields}
+		in := chispa.Input{Text: text200, Fields: c.fields}
 		b.Run(c.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -428,7 +428,7 @@ func BenchmarkPredict(b *testing.B) {
 
 func BenchmarkPredictParallel(b *testing.B) {
 	m := benchModel(b, false)
-	in := jev.Input{Text: text200}
+	in := chispa.Input{Text: text200}
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {

@@ -1,5 +1,5 @@
 //go:build !race
 
-package jev_test
+package chispa_test
 
 const raceEnabled = false

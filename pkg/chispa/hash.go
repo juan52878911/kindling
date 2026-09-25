@@ -1,22 +1,22 @@
-// Package jev es un clasificador lineal diminuto para decisiones pequeñas:
+// Package chispa es un clasificador lineal diminuto para decisiones pequeñas:
 // clasificar eventos, enrutar peticiones de agentes, filtrar entradas. Se
-// entrena fuera (pkg/jev/train, `kling jev train`) y se sirve aquí con
-// inferencia entera en microsegundos. Ver docs/jev.md.
+// entrena fuera (pkg/chispa/train, `kling chispa train`) y se sirve aquí con
+// inferencia entera en microsegundos. Ver docs/chispa.md.
 //
 // Lo que este paquete garantiza y por qué importa:
-//   - Determinismo: el mismo fichero .jev y la misma entrada dan los mismos bits
+//   - Determinismo: el mismo fichero .chispa y la misma entrada dan los mismos bits
 //     en amd64 y arm64, macOS y Linux. Por eso el hash es propio (no el de los
 //     mapas de Go, que es aleatorio por proceso), los pesos son int16 con
 //     acumulación entera, y la poca aritmética en coma flotante del final está
 //     escrita para que el compilador no la funda en FMA (ver detExp).
 //   - Cascada: cada predicción trae etiqueta, probabilidad calibrada, la
 //     decisión frente al umbral de su clase (confident / escalate) y, si se
-//     pide, la evidencia. Un gateway responde con JEV cuando está seguro y
+//     pide, la evidencia. Un gateway responde con Chispa cuando está seguro y
 //     escala a un modelo mayor cuando no.
 //   - Cargar un fichero hostil no revienta ni reserva memoria sin tope.
 //
 // Solo depende de la biblioteca estándar: sin cgo ni módulos externos.
-package jev
+package chispa
 
 // FNV-1a de 64 bits con un finalizador de murmur3. FNV-1a es trivial de
 // reimplementar igual en cualquier lenguaje (el entrenador y un cliente futuro

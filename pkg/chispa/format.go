@@ -1,4 +1,4 @@
-package slots
+package chispa
 
 import (
 	"bytes"
@@ -12,70 +12,83 @@ import (
 	"os"
 )
 
-// Formato del fichero .jevs (little-endian), hermano del .jev:
+// Formato del fichero .chispa (todo little-endian):
 //
-//	[8]  magia "\x89JVS\r\n\x1a\n"
-//	u16  versión (1)
-//	u16  banderas: bit1 = pesos dispersos
+//	[8]  magia "\x89CHI\r\n\x1a\n" (como PNG: detecta transferencias en modo texto)
+//	u16  versión del formato (2)
+//	u16  banderas: bit0 = binario, bit1 = pesos dispersos
 //	u32  longitud de la cabecera JSON (<= MaxHeaderBytes)
-//	...  cabecera JSON: {spec, tags, lexicon, meta}
-//	u64  hash de spec + etiquetas + léxico
-//	u32  cubos (= spec.buckets)
-//	u32  etiquetas (= len(tags))
-//	f64  escala
-//	i16  × (etiquetas+1) × etiquetas: transiciones (fila 0 = inicio)
-//	pesos densos:    cubos × etiquetas × i16
-//	pesos dispersos: u32 filas; filas × (u32 cubo, etiquetas × i16), cubos crecientes
+//	...  cabecera JSON: {spec, labels, meta}
+//	u64  hash de la especificación de características
+//	u32  cubos (debe coincidir con spec.buckets)
+//	u32  salidas (1 en binario, nº de etiquetas si no)
+//	f64  temperatura
+//	f64  × salidas: escala por salida
+//	f64  × salidas: sesgo por salida
+//	f64  × etiquetas: umbral τ por etiqueta
+//	pesos densos:    cubos × salidas × i16, ordenados por cubo
+//	pesos dispersos: u32 filas; filas × (u32 cubo, salidas × i16), cubos crecientes
 //	u32  CRC-32C de todo lo anterior
 //
-// El léxico va en la cabecera porque es parte de la extracción: sin él las
-// características «l0=area» no significan nada.
+// La cabecera es JSON porque es lo que evoluciona (metadatos, métricas) y lo que
+// una persona quiere leer; lo numérico va en binario para que sea exacto.
 
 const (
-	FormatVersion  = 1
-	MaxHeaderBytes = 4 << 20
+	FormatVersion  = 2
+	MaxLabels      = 256
+	MaxLabelBytes  = 128
+	MaxHeaderBytes = 1 << 20
+	// MaxWeightBytes acota la tabla de pesos en memoria: un fichero hostil no
+	// puede pedir más que esto aunque declare cubos y salidas enormes.
 	MaxWeightBytes = 64 << 20
 	MaxFileBytes   = MaxWeightBytes + MaxHeaderBytes + 1<<20
-	flagSparse     = 1 << 1
+
+	flagBinary = 1 << 0
+	flagSparse = 1 << 1
 )
 
-var magic = [8]byte{0x89, 'J', 'V', 'S', '\r', '\n', 0x1a, '\n'}
+var magic = [8]byte{0x89, 'C', 'H', 'I', '\r', '\n', 0x1a, '\n'}
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 type header struct {
-	Spec    Spec              `json:"spec"`
-	Tags    []string          `json:"tags"`
-	Lexicon map[string]string `json:"lexicon,omitempty"`
-	Meta    Meta              `json:"meta"`
+	Spec   FeatureSpec `json:"spec"`
+	Labels []string    `json:"labels"`
+	Meta   Meta        `json:"meta"`
 }
 
-// Marshal serializa el modelo (disperso si ocupa menos).
+// Marshal serializa el modelo. Elige pesos dispersos si ocupan menos: con
+// pocos datos de entrenamiento la mayoría de los cubos quedan a cero.
 func (m *Model) Marshal() ([]byte, error) {
 	if err := m.Init(); err != nil {
 		return nil, err
 	}
-	hdr, err := json.Marshal(header{Spec: m.Spec, Tags: m.Tags, Lexicon: m.Lexicon, Meta: m.Meta})
+	hdr, err := json.Marshal(header{Spec: m.Spec, Labels: m.Labels, Meta: m.Meta})
 	if err != nil {
 		return nil, err
 	}
 	if len(hdr) > MaxHeaderBytes {
 		return nil, errors.New("header too large")
 	}
-	T, B := m.nT, int(m.Spec.Buckets)
+	K, B := m.nOut, int(m.Spec.Buckets)
 	rows := 0
 	for b := 0; b < B; b++ {
-		if !zeroRow(m.W[b*T : b*T+T]) {
+		if !zeroRow(m.W[b*K : b*K+K]) {
 			rows++
 		}
 	}
-	sparse := 4+rows*(4+2*T) < B*T*2
+	sparse := 4+rows*(4+2*K) < B*K*2
 	var flags uint16
+	if m.Binary {
+		flags |= flagBinary
+	}
 	if sparse {
 		flags |= flagSparse
 	}
+
 	var buf bytes.Buffer
-	w := func(v any) { _ = binary.Write(&buf, binary.LittleEndian, v) }
+	le := binary.LittleEndian
+	w := func(v any) { _ = binary.Write(&buf, le, v) } // bytes.Buffer no falla
 	buf.Write(magic[:])
 	w(uint16(FormatVersion))
 	w(flags)
@@ -83,13 +96,16 @@ func (m *Model) Marshal() ([]byte, error) {
 	buf.Write(hdr)
 	w(m.SpecHash)
 	w(m.Spec.Buckets)
-	w(uint32(T))
-	w(m.Scale)
-	w(m.Trans)
+	w(uint32(K))
+	w(m.Temperature)
+	w(m.Scales)
+	w(m.Bias)
+	w(m.Thresholds)
 	if sparse {
 		w(uint32(rows))
 		for b := 0; b < B; b++ {
-			if row := m.W[b*T : b*T+T]; !zeroRow(row) {
+			row := m.W[b*K : b*K+K]
+			if !zeroRow(row) {
 				w(uint32(b))
 				w(row)
 			}
@@ -110,7 +126,8 @@ func zeroRow(r []int16) bool {
 	return true
 }
 
-// Save escribe de forma atómica (temporal + rename).
+// Save escribe el modelo en path de forma atómica (temporal + rename): un
+// servicio que recargue el modelo nunca ve un fichero a medias.
 func (m *Model) Save(path string) error {
 	b, err := m.Marshal()
 	if err != nil {
@@ -123,7 +140,7 @@ func (m *Model) Save(path string) error {
 	return os.Rename(tmp, path)
 }
 
-// LoadFile carga un .jevs.
+// LoadFile carga un .chispa del disco.
 func LoadFile(path string) (*Model, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -137,7 +154,10 @@ func LoadFile(path string) (*Model, error) {
 	return m, nil
 }
 
-// Load lee como mucho MaxFileBytes y valida (ver Unmarshal).
+// Load lee y valida un modelo. Lee como mucho MaxFileBytes, comprueba el CRC
+// antes de interpretar nada y valida cada longitud contra los topes ANTES de
+// reservar: un fichero corrupto u hostil devuelve error, nunca pánico ni una
+// reserva desmedida.
 func Load(r io.Reader) (*Model, error) {
 	data, err := io.ReadAll(io.LimitReader(r, MaxFileBytes+1))
 	if err != nil {
@@ -149,11 +169,10 @@ func Load(r io.Reader) (*Model, error) {
 	return Unmarshal(data)
 }
 
-// Unmarshal comprueba el CRC antes de interpretar nada y cada longitud contra
-// los topes ANTES de reservar: un fichero hostil da error, no pánico.
+// Unmarshal interpreta un modelo ya leído. Ver Load.
 func Unmarshal(data []byte) (*Model, error) {
 	if len(data) < len(magic)+8+4 || !bytes.Equal(data[:len(magic)], magic[:]) {
-		return nil, errors.New("not a JEV slots model (bad magic)")
+		return nil, errors.New("not a Chispa model (bad magic)")
 	}
 	body, sum := data[:len(data)-4], binary.LittleEndian.Uint32(data[len(data)-4:])
 	if crc32.Checksum(body, crcTable) != sum {
@@ -162,9 +181,9 @@ func Unmarshal(data []byte) (*Model, error) {
 	rd := &reader{b: body[len(magic):]}
 	ver, flags := rd.u16(), rd.u16()
 	if rd.err == nil && ver != FormatVersion {
-		return nil, fmt.Errorf("unsupported slots format version %d (this build reads %d)", ver, FormatVersion)
+		return nil, fmt.Errorf("unsupported model format version %d (this build reads %d)", ver, FormatVersion)
 	}
-	if flags&^uint16(flagSparse) != 0 {
+	if flags&^(flagBinary|flagSparse) != 0 {
 		return nil, fmt.Errorf("unknown flags %#x", flags)
 	}
 	hlen := rd.u32()
@@ -172,8 +191,9 @@ func Unmarshal(data []byte) (*Model, error) {
 		return nil, errors.New("header too large")
 	}
 	var h header
-	if raw := rd.take(int(hlen)); rd.err == nil {
-		if err := json.Unmarshal(raw, &h); err != nil {
+	if raw := rd.bytes(int(hlen)); rd.err == nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		if err := dec.Decode(&h); err != nil {
 			return nil, fmt.Errorf("bad header: %w", err)
 		}
 	}
@@ -183,34 +203,40 @@ func Unmarshal(data []byte) (*Model, error) {
 	if err := h.Spec.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateTags(h.Tags); err != nil {
-		return nil, err
+	if len(h.Labels) < 2 || len(h.Labels) > MaxLabels {
+		return nil, fmt.Errorf("need between 2 and %d labels, got %d", MaxLabels, len(h.Labels))
 	}
-	m := &Model{Spec: h.Spec, Tags: h.Tags, Lexicon: h.Lexicon, Meta: h.Meta}
+	m := &Model{Spec: h.Spec, Labels: h.Labels, Meta: h.Meta, Binary: flags&flagBinary != 0}
 	m.SpecHash = rd.u64()
-	buckets, T := rd.u32(), int(rd.u32())
+	buckets, K := rd.u32(), int(rd.u32())
 	if rd.err != nil {
 		return nil, rd.err
 	}
-	if buckets != h.Spec.Buckets || T != len(h.Tags) {
-		return nil, errors.New("buckets/tags in body do not match header")
+	want := len(h.Labels)
+	if m.Binary {
+		want = 1
 	}
-	if int64(buckets)*int64(T)*2 > MaxWeightBytes {
+	if buckets != h.Spec.Buckets || K != want {
+		return nil, errors.New("buckets/outputs in body do not match header")
+	}
+	if int64(buckets)*int64(K)*2 > MaxWeightBytes {
 		return nil, fmt.Errorf("weight table larger than %d bytes", MaxWeightBytes)
 	}
-	m.Scale = math.Float64frombits(rd.u64())
-	m.Trans = make([]int16, (T+1)*T) // T <= MaxTags: tope pequeño
-	rd.i16s(m.Trans)
+	m.Temperature = rd.f64()
+	m.Scales = rd.f64s(K)
+	m.Bias = rd.f64s(K)
+	m.Thresholds = rd.f64s(len(h.Labels))
 	if rd.err != nil {
 		return nil, rd.err
 	}
 	B := int(buckets)
 	if flags&flagSparse != 0 {
 		rows := int(rd.u32())
-		if rd.err != nil || rows > B || rows*(4+2*T) != len(rd.b) {
+		// Cada fila ocupa 4+2K bytes: si no caben en lo que queda, mienten.
+		if rd.err != nil || rows > B || rows*(4+2*K) != len(rd.b) {
 			return nil, errors.New("sparse weights: bad row count")
 		}
-		m.W = make([]int16, B*T)
+		m.W = make([]int16, B*K)
 		prev := -1
 		for i := 0; i < rows; i++ {
 			b := int(rd.u32())
@@ -218,13 +244,13 @@ func Unmarshal(data []byte) (*Model, error) {
 				return nil, errors.New("sparse weights: bucket out of order or range")
 			}
 			prev = b
-			rd.i16s(m.W[b*T : b*T+T])
+			rd.i16s(m.W[b*K : b*K+K])
 		}
 	} else {
-		if len(rd.b) != B*T*2 {
+		if len(rd.b) != B*K*2 {
 			return nil, errors.New("dense weights: wrong size")
 		}
-		m.W = make([]int16, B*T)
+		m.W = make([]int16, B*K)
 		rd.i16s(m.W)
 	}
 	if rd.err != nil {
@@ -239,6 +265,8 @@ func Unmarshal(data []byte) (*Model, error) {
 	return m, nil
 }
 
+// reader es un lector de bytes que recuerda el primer error: si falta algo,
+// todas las lecturas siguientes devuelven cero y el llamador mira err una vez.
 type reader struct {
 	b   []byte
 	err error
@@ -255,6 +283,8 @@ func (r *reader) take(n int) []byte {
 	r.b = r.b[n:]
 	return out
 }
+
+func (r *reader) bytes(n int) []byte { return r.take(n) }
 
 func (r *reader) u16() uint16 {
 	if b := r.take(2); b != nil {
@@ -275,6 +305,21 @@ func (r *reader) u64() uint64 {
 		return binary.LittleEndian.Uint64(b)
 	}
 	return 0
+}
+
+func (r *reader) f64() float64 { return math.Float64frombits(r.u64()) }
+
+// f64s lee n float64 comprobando antes que caben: n viene del propio fichero.
+func (r *reader) f64s(n int) []float64 {
+	if r.err != nil || n < 0 || n*8 > len(r.b) {
+		r.err = errShort
+		return nil
+	}
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = r.f64()
+	}
+	return out
 }
 
 func (r *reader) i16s(dst []int16) {

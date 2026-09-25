@@ -1,6 +1,6 @@
-// Package train entrena modelos JEV. Vive aparte de pkg/jev para que quien solo
+// Package train entrena modelos Chispa. Vive aparte de pkg/chispa para que quien solo
 // sirve (un gateway, un daemon) no arrastre el entrenador, pero usa la MISMA
-// extracción de características (jev.FeatureSpec.Extract): si el entrenador
+// extracción de características (chispa.FeatureSpec.Extract): si el entrenador
 // tokenizara por su cuenta, cualquier diferencia sería deriva silenciosa.
 //
 // Optimizador: AdaGrad por ejemplo (SGD con paso adaptativo por parámetro),
@@ -15,7 +15,7 @@
 //
 // Determinista con la semilla: el barajado usa un splitmix64 propio, las
 // características salen ordenadas, y toda la aritmética evita FMA (ver
-// pkg/jev/detmath.go), así que el mismo corpus y la misma semilla dan los
+// pkg/chispa/detmath.go), así que el mismo corpus y la misma semilla dan los
 // mismos pesos también en otra arquitectura.
 package train
 
@@ -27,12 +27,12 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // Config son los hiperparámetros. Los ceros toman el valor por defecto.
 type Config struct {
-	Spec      jev.FeatureSpec
+	Spec      chispa.FeatureSpec
 	MaxEpochs int // 30
 	Patience  int // épocas sin mejorar antes de parar: 3
 	// LearningRate: paso de AdaGrad, 0.05. Ojo: el primer paso de AdaGrad mide
@@ -56,7 +56,7 @@ type Config struct {
 
 func (c *Config) defaults() {
 	if c.Spec.Buckets == 0 {
-		c.Spec = jev.DefaultSpec()
+		c.Spec = chispa.DefaultSpec()
 	}
 	if c.MaxEpochs <= 0 {
 		c.MaxEpochs = 30
@@ -101,13 +101,13 @@ type EpochStat struct {
 
 // Result es lo que devuelve Train.
 type Result struct {
-	Model     *jev.Model
+	Model     *chispa.Model
 	BestEpoch int
 	Epochs    []EpochStat
 	// QuantAgreement: fracción de validación en la que el modelo int16 predice
 	// la misma etiqueta que el float64 del que sale.
 	QuantAgreement float64
-	Valid          *jev.Report
+	Valid          *chispa.Report
 
 	// Los pesos en float64 antes de cuantizar, para medir la concordancia en
 	// cualquier conjunto (Agreement).
@@ -117,7 +117,7 @@ type Result struct {
 
 // Agreement es la fracción de exs en la que el modelo cuantizado (int16, el que
 // se sirve) predice la misma etiqueta que el float64 del que sale.
-func (r *Result) Agreement(exs []jev.Example) float64 {
+func (r *Result) Agreement(exs []chispa.Example) float64 {
 	if len(exs) == 0 {
 		return 1
 	}
@@ -151,7 +151,7 @@ type dataset struct {
 
 func (d *dataset) n() int { return len(d.y) }
 
-func buildDataset(spec jev.FeatureSpec, exs []jev.Example, labelIdx map[string]int) *dataset {
+func buildDataset(spec chispa.FeatureSpec, exs []chispa.Example, labelIdx map[string]int) *dataset {
 	d := &dataset{start: make([]int, 1, len(exs)+1)}
 	for _, ex := range exs {
 		feats, nText := spec.Extract(ex.Input())
@@ -199,10 +199,10 @@ func (r *splitmix) shuffle(p []int) {
 // SplitValidation separa una fracción de validación por hash del contenido:
 // estable aunque cambie el orden del fichero, y un duplicado exacto cae
 // siempre del mismo lado.
-func SplitValidation(exs []jev.Example, frac float64, seed uint64) (train, valid []jev.Example) {
+func SplitValidation(exs []chispa.Example, frac float64, seed uint64) (train, valid []chispa.Example) {
 	cut := uint64(frac * 10000)
 	for _, ex := range exs {
-		h := jev.FNV1a64(ex.Label + "\x00" + ex.Text)
+		h := chispa.FNV1a64(ex.Label + "\x00" + ex.Text)
 		r := splitmix{s: h ^ seed}
 		if r.next()%10000 < cut {
 			valid = append(valid, ex)
@@ -215,7 +215,7 @@ func SplitValidation(exs []jev.Example, frac float64, seed uint64) (train, valid
 
 // Train entrena, cuantiza, calibra y elige umbrales. validEx puede ir vacío: se
 // separa cfg.ValidFraction del entrenamiento.
-func Train(trainEx, validEx []jev.Example, cfg Config) (*Result, error) {
+func Train(trainEx, validEx []chispa.Example, cfg Config) (*Result, error) {
 	cfg.defaults()
 	if err := cfg.Spec.Validate(); err != nil {
 		return nil, err
@@ -253,8 +253,8 @@ func Train(trainEx, validEx []jev.Example, cfg Config) (*Result, error) {
 	if len(labels) < 2 {
 		return nil, errors.New("need at least 2 distinct labels")
 	}
-	if len(labels) > jev.MaxLabels {
-		return nil, fmt.Errorf("too many labels: %d (max %d)", len(labels), jev.MaxLabels)
+	if len(labels) > chispa.MaxLabels {
+		return nil, fmt.Errorf("too many labels: %d (max %d)", len(labels), chispa.MaxLabels)
 	}
 	labelIdx := make(map[string]int, len(labels))
 	for i, l := range labels {
@@ -422,18 +422,18 @@ func Train(trainEx, validEx []jev.Example, cfg Config) (*Result, error) {
 	res := &Result{BestEpoch: bestEpoch, Epochs: stats, QuantAgreement: float64(agree) / float64(va.n()),
 		floatW: bestW, floatB: bestB, labelIdx: labelIdx}
 
-	m.Temperature = jev.FitTemperature(raw, gold)
+	m.Temperature = chispa.FitTemperature(raw, gold)
 	pred := make([]int, va.n())
 	prob := make([]float64, va.n())
 	for i := range validEx {
 		pr := m.Predict(validEx[i].Input())
 		pred[i], prob[i] = pr.Index, pr.Prob
 	}
-	m.Thresholds = jev.ChooseThresholds(len(labels), pred, gold, prob,
-		jev.ThresholdParams{TargetPrecision: cfg.TargetPrecision, MinSupport: cfg.MinSupport})
-	res.Valid = jev.Evaluate(m, validEx)
+	m.Thresholds = chispa.ChooseThresholds(len(labels), pred, gold, prob,
+		chispa.ThresholdParams{TargetPrecision: cfg.TargetPrecision, MinSupport: cfg.MinSupport})
+	res.Valid = chispa.Evaluate(m, validEx)
 
-	m.Meta = jev.Meta{
+	m.Meta = chispa.Meta{
 		CreatedAt:       cfg.CreatedAt,
 		OneVsRest:       cfg.OneVsRest,
 		DatasetSHA256:   cfg.DatasetSHA256,
@@ -473,7 +473,7 @@ func Train(trainEx, validEx []jev.Example, cfg Config) (*Result, error) {
 // quantize pasa los pesos a int16 con una escala por salida: s_k = max|w_k| /
 // 32767. Por salida y no global porque las clases tienen magnitudes muy
 // distintas y una escala común dejaría a la pequeña con pocos niveles.
-func quantize(W, bias []float64, B, K int, labels []string, binary bool, spec jev.FeatureSpec) (*jev.Model, error) {
+func quantize(W, bias []float64, B, K int, labels []string, binary bool, spec chispa.FeatureSpec) (*chispa.Model, error) {
 	for _, w := range W {
 		if math.IsNaN(w) || math.IsInf(w, 0) {
 			return nil, errors.New("training diverged (non-finite weights): lower the learning rate")
@@ -498,9 +498,9 @@ func quantize(W, bias []float64, B, K int, labels []string, binary bool, spec je
 	}
 	th := make([]float64, len(labels))
 	for i := range th {
-		th[i] = jev.NeverConfident
+		th[i] = chispa.NeverConfident
 	}
-	m := &jev.Model{
+	m := &chispa.Model{
 		Spec: spec, SpecHash: spec.Hash(), Labels: labels, Binary: binary,
 		Scales: scales, Bias: append([]float64(nil), bias...), W: q,
 		Temperature: 1, Thresholds: th,
@@ -537,17 +537,17 @@ func sigmoid(x float64) float64 {
 }
 
 func safeLog(p float64) float64 {
-	return jev.DetLog(math.Max(p, 1e-15))
+	return chispa.DetLog(math.Max(p, 1e-15))
 }
 
-func detExpF(x float64) float64 { return jev.DetExp(x) }
+func detExpF(x float64) float64 { return chispa.DetExp(x) }
 
 // relabel copia exs con toda etiqueta distinta de pos cambiada a RestLabel(pos).
-func relabel(exs []jev.Example, pos string) []jev.Example {
-	out := make([]jev.Example, len(exs))
+func relabel(exs []chispa.Example, pos string) []chispa.Example {
+	out := make([]chispa.Example, len(exs))
 	for i, ex := range exs {
 		if ex.Label != pos {
-			ex.Label = jev.RestLabel(pos)
+			ex.Label = chispa.RestLabel(pos)
 		}
 		out[i] = ex
 	}

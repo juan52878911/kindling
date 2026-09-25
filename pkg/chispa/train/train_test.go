@@ -8,13 +8,13 @@ import (
 	"math"
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // synth genera un corpus sintético reproducible: cada clase tiene su
 // vocabulario, todas comparten ruido, y un 8 % de las etiquetas están
 // cambiadas para que el problema no sea trivial y la calibración tenga trabajo.
-func synth(n int, seed uint64) []jev.Example {
+func synth(n int, seed uint64) []chispa.Example {
 	vocab := map[string][]string{
 		"bug":   {"crash", "panic", "null", "overflow", "segfault", "wrong", "broken", "regression"},
 		"feat":  {"add", "support", "new", "implement", "introduce", "option", "flag", "api"},
@@ -24,7 +24,7 @@ func synth(n int, seed uint64) []jev.Example {
 	labels := []string{"bug", "chore", "docs", "feat"}
 	noise := []string{"the", "in", "for", "parser", "server", "client", "cache", "config", "when", "with", "on", "of"}
 	r := splitmix{s: seed}
-	out := make([]jev.Example, n)
+	out := make([]chispa.Example, n)
 	for i := range out {
 		l := labels[r.next()%uint64(len(labels))]
 		var b bytes.Buffer
@@ -42,18 +42,18 @@ func synth(n int, seed uint64) []jev.Example {
 		if l == "docs" && r.next()%2 == 0 {
 			fields["ext"] = ".md"
 		}
-		out[i] = jev.Example{Text: b.String(), Label: gold, Fields: fields}
+		out[i] = chispa.Example{Text: b.String(), Label: gold, Fields: fields}
 	}
 	return out
 }
 
 func smallCfg() Config {
-	spec := jev.DefaultSpec()
+	spec := chispa.DefaultSpec()
 	spec.Buckets = 1 << 12
 	return Config{Spec: spec, Seed: 7, MinSupport: 5}
 }
 
-func modelDigest(t *testing.T, m *jev.Model) string {
+func modelDigest(t *testing.T, m *chispa.Model) string {
 	t.Helper()
 	var b bytes.Buffer
 	binary.Write(&b, binary.LittleEndian, m.W)
@@ -70,7 +70,7 @@ func TestTrainLearnsAndCalibrates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep := jev.Evaluate(res.Model, te)
+	rep := chispa.Evaluate(res.Model, te)
 	t.Logf("test acc %.3f macroF1 %.3f ece %.3f coverage %.3f conf-prec %.3f T=%.3f quant-agree %.4f epochs %d",
 		rep.Accuracy, rep.MacroF1, rep.ECE, rep.Coverage, rep.ConfidentPrecision, res.Model.Temperature, res.QuantAgreement, res.BestEpoch)
 	// Con 8 % de etiquetas cambiadas al azar (2 % caen en la misma), el techo
@@ -95,7 +95,7 @@ func TestTrainLearnsAndCalibrates(t *testing.T) {
 
 // El mismo corpus y la misma semilla dan exactamente los mismos pesos; otra
 // semilla, otros. El valor dorado se comprueba también con GOARCH=amd64 (ver
-// docs/jev.md): si el compilador fundiera alguna operación en FMA en una
+// docs/chispa.md): si el compilador fundiera alguna operación en FMA en una
 // arquitectura, este hash cambiaría allí.
 func TestTrainDeterministic(t *testing.T) {
 	tr, va := synth(800, 11), synth(200, 12)
@@ -127,7 +127,7 @@ func TestTrainDeterministic(t *testing.T) {
 }
 
 func TestBinaryMode(t *testing.T) {
-	var tr, va []jev.Example
+	var tr, va []chispa.Example
 	for _, ex := range synth(1500, 21) {
 		if ex.Label != "bug" {
 			ex.Label = "other"
@@ -148,7 +148,7 @@ func TestBinaryMode(t *testing.T) {
 	if !m.Binary || m.NumOutputs() != 1 {
 		t.Fatalf("2 labels should train a binary model, got binary=%v outputs=%d", m.Binary, m.NumOutputs())
 	}
-	p := m.PredictFull(jev.Input{Text: "segfault crash in parser"}, 3)
+	p := m.PredictFull(chispa.Input{Text: "segfault crash in parser"}, 3)
 	if p.Label != "bug" {
 		t.Errorf("predicted %q for an obvious bug", p.Label)
 	}
@@ -163,7 +163,7 @@ func TestBinaryMode(t *testing.T) {
 func TestSplitValidationStable(t *testing.T) {
 	exs := synth(1000, 5)
 	tr1, va1 := SplitValidation(exs, 0.2, 3)
-	rev := make([]jev.Example, len(exs))
+	rev := make([]chispa.Example, len(exs))
 	for i := range exs {
 		rev[len(exs)-1-i] = exs[i]
 	}

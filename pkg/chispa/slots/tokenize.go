@@ -3,7 +3,7 @@ package slots
 import (
 	"unicode/utf8"
 
-	"github.com/juan52878911/kindling/pkg/jev"
+	"github.com/juan52878911/kindling/pkg/chispa"
 )
 
 // Topes del tokenizador: una entrada hostil cuesta lo mismo que una normal.
@@ -37,7 +37,7 @@ type tokenizer struct {
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
-// run normaliza y parte text. Es el plegado de JEV (jev.FoldRune) con tres
+// run normaliza y parte text. Es el plegado de Chispa (chispa.FoldRune) con tres
 // diferencias que importan a los huecos y no al clasificador: «%» y «°» son
 // tokens propios (son la unidad del valor), un decimal «21,5» o «21.5» es un
 // solo token (normalizado a «21.5»), y se recuerda la posición original.
@@ -99,11 +99,11 @@ func (t *tokenizer) run(text string, maxBytes, maxToks int) {
 				continue
 			}
 		}
-		c := jev.FoldRune(r)
+		c := chispa.FoldRune(r)
 		switch {
-		case c == jev.FoldSkip:
+		case c == chispa.FoldSkip:
 			continue
-		case c == jev.FoldSep:
+		case c == chispa.FoldSep:
 			closeTok(start)
 			continue
 		}

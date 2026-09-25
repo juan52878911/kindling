@@ -1,4 +1,4 @@
-package jev
+package chispa
 
 import (
 	"crypto/sha256"
@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// Valores dorados: si cambian, cambia el hashing y todo .jev existente deja de
+// Valores dorados: si cambian, cambia el hashing y todo .chispa existente deja de
 // servir. Los de FNV-1a son los de la especificación de referencia.
 func TestHashGolden(t *testing.T) {
 	for s, want := range map[string]uint64{
@@ -33,7 +33,7 @@ func TestHashGolden(t *testing.T) {
 
 // Los dorados de arriba, en constantes para poder regenerarlos a mano.
 const (
-	SpecHashGolden = 0xf766b1cdcf72e998
+	SpecHashGolden = 0xd1833c12899d948f
 	BucketGolden   = 136605
 	SignGolden     = -1
 )

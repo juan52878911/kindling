@@ -15,7 +15,7 @@ type Sentence struct {
 }
 
 // TrainConfig son los mandos del entrenamiento. Con la misma semilla y los
-// mismos datos el .jevs sale idéntico.
+// mismos datos el .chispas sale idéntico.
 type TrainConfig struct {
 	Spec          Spec
 	Lexicon       map[string]string // token normalizado → clase
@@ -447,7 +447,7 @@ func identity(n int) []int {
 	return p
 }
 
-// splitmix64: el PRNG del entrenador de pkg/jev; igual en todas partes.
+// splitmix64: el PRNG del entrenador de pkg/chispa; igual en todas partes.
 type splitmix struct{ s uint64 }
 
 func (r *splitmix) next() uint64 {

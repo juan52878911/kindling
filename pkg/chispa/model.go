@@ -1,4 +1,4 @@
-package jev
+package chispa
 
 import (
 	"errors"
@@ -11,7 +11,7 @@ import (
 // Decisiones frente al umbral. Son cadenas porque viajan tal cual en JSON al
 // gateway de la cascada.
 const (
-	DecisionConfident = "confident" // p >= τ de la clase: JEV contesta
+	DecisionConfident = "confident" // p >= τ de la clase: Chispa contesta
 	DecisionEscalate  = "escalate"  // p < τ: que decida un modelo mayor
 )
 
@@ -19,9 +19,9 @@ const (
 // encontró un corte que diera la precisión pedida: siempre escala.
 const NeverConfident = 2.0
 
-// GuestPort es el puerto en el que kling-jev (cmd/kling-jev) sirve
+// GuestPort es el puerto en el que kling-chispa (cmd/kling-chispa) sirve
 // /v1/classify dentro de una microVM, cuando una tarea se despliega como
-// backend "microvm" (docs/jev-serverless.md) en vez de en el propio proceso
+// backend "microvm" (docs/chispa-serverless.md) en vez de en el propio proceso
 // del gateway. Es el mismo número que von.Port: los puertos de una microVM no
 // chocan entre máquinas distintas, así que cualquier invitado puede usar 8000
 // sin coordinarse con los demás.
@@ -54,7 +54,7 @@ type Model struct {
 }
 
 // Meta es lo que se sabe del entrenamiento. No afecta a la inferencia; se
-// guarda para que `kling jev inspect` pueda contar de dónde sale un modelo.
+// guarda para que `kling chispa inspect` pueda contar de dónde sale un modelo.
 type Meta struct {
 	CreatedAt       string             `json:"created_at,omitempty"`
 	DatasetSHA256   string             `json:"dataset_sha256,omitempty"`
@@ -171,7 +171,7 @@ func (m *Model) getScratch() *scratch {
 	}
 }
 
-// Prediction es la respuesta de JEV, pensada para la cascada: si Confident, el
+// Prediction es la respuesta de Chispa, pensada para la cascada: si Confident, el
 // gateway usa Label; si no, escala con la entrada (y puede pasar Probs y
 // Evidence como pista al modelo mayor).
 type Prediction struct {
