@@ -211,6 +211,7 @@ func cmdEval(args []string) error {
 	vonMax := fs.Int("von-max", 0, "call VON on at most this many logs (0 = no cap)")
 	out := fs.String("out", "", "write one JSON line per log here")
 	quiet := fs.Bool("q", false, "no per-log progress")
+	maxLogs := fs.Int("max-logs", 0, "evaluate only the first N logs (0 = all)")
 	sweep := fs.Bool("sweep", false, "also try a grid of chunk options on the same scores (how the defaults were chosen, on valid)")
 	misses := fs.Bool("misses", false, "print the gold and the chosen lines of every log the locator missed")
 	_ = fs.Parse(args)
@@ -225,6 +226,9 @@ func cmdEval(args []string) error {
 	recs, err := readRecords(path)
 	if err != nil {
 		return err
+	}
+	if *maxLogs > 0 && *maxLogs < len(recs) {
+		recs = recs[:*maxLogs]
 	}
 	g, err := gw.dial(*workers)
 	if err != nil {
