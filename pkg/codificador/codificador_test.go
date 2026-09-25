@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // datos sintéticos: K nubes en D dimensiones, deterministas. Los centros son
@@ -229,6 +231,52 @@ func TestLayer(t *testing.T) {
 	if _, _, _, err := l.ClassifyIntent(context.Background(), "otra"); err == nil {
 		t.Fatal("un texto sin vector debería fallar")
 	}
+}
+
+// bloqueaEmbedder no contesta nunca por su cuenta: solo vuelve cuando el
+// contexto que le pasan termina, para probar el plazo de Layer con un plazo
+// de verdad (context.DeadlineExceeded) y no uno simulado.
+type bloqueaEmbedder struct{}
+
+func (bloqueaEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestLayerTimeout(t *testing.T) {
+	head := entrenar(t, 0).Head
+	l := &Layer{Head: head, Embedder: bloqueaEmbedder{}, Timeout: 10 * time.Millisecond}
+	t0 := time.Now()
+	_, _, _, err := l.ClassifyIntent(context.Background(), "algo")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("esperaba context.DeadlineExceeded, got %v", err)
+	}
+	if el := time.Since(t0); el < l.Timeout || el > 2*time.Second {
+		t.Fatalf("el plazo tardó %v, esperaba ~%v", el, l.Timeout)
+	}
+	// El plazo por defecto (Timeout 0) es 2 s: sin uno explícito no se puede
+	// esperar 2 s de verdad en un test, pero sí comprobar que Classify lo pone
+	// en el contexto que le llega al codificador.
+	var got time.Duration
+	deadline := deadlineCatcher(func(ctx context.Context) {
+		if dl, ok := ctx.Deadline(); ok {
+			got = time.Until(dl)
+		}
+	})
+	l2 := &Layer{Head: head, Embedder: deadline}
+	_, _ = l2.Classify(context.Background(), "algo")
+	if got <= 0 || got > 2*time.Second {
+		t.Fatalf("plazo por defecto: %v, esperaba algo <= 2s", got)
+	}
+}
+
+// deadlineCatcher es un Embedder que le pasa su contexto a fn y devuelve un
+// error (no hace falta un vector de verdad: la prueba solo mira el plazo).
+type deadlineCatcher func(ctx context.Context)
+
+func (d deadlineCatcher) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	d(ctx)
+	return nil, errors.New("solo para inspeccionar el plazo")
 }
 
 func TestKNN(t *testing.T) {
