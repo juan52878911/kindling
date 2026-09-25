@@ -23,6 +23,7 @@ type Feedback struct {
 	Fields map[string]any `json:"fields,omitempty"`
 
 	Source      string     `json:"source"`    // "human"
+	By          string     `json:"by"`        // quién etiqueta: "ci-triage"
 	Agreed      bool       `json:"agreed"`    // la persona confirmó lo que salió
 	Predicted   string     `json:"predicted"` // la categoría final del triaje
 	DecidedBy   string     `json:"decided_by"`
@@ -50,7 +51,7 @@ func NewFeedback(r *Result, fields map[string]any, logHash, label, note string) 
 		return nil, fmt.Errorf("unknown category %q", label)
 	}
 	fb := &Feedback{
-		Schema: FeedbackSchema, Text: r.Chunk, Label: label, Fields: fields, Source: "human",
+		Schema: FeedbackSchema, Text: r.Chunk, Label: label, Fields: fields, Source: "human", By: "ci-triage",
 		Agreed: label == r.Category, Predicted: r.Category, DecidedBy: r.Layer,
 		ChispaProb: r.Prob, ChispaSure: r.Confident, Chunks: r.Chunks,
 		LogSHA256: logHash, LogLines: r.Lines, Note: truncUTF8(note, maxNote), Time: time.Now().UTC(),

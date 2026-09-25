@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,5 +77,35 @@ func TestServeGuards(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "CI triage") || w.Header().Get("Content-Security-Policy") == "" {
 		t.Fatalf("page: %d", w.Code)
+	}
+}
+
+// export deja una etiqueta por log (gana la última confirmación) y fuera lo
+// que no es del formato o es flaky.
+func TestExport(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/fb.jsonl"
+	lines := []string{
+		`{"schema":"ci-triage.feedback/v1","text":"FAIL a","label":"test","log_sha256":"h1"}`,
+		`{"schema":"ci-triage.feedback/v1","text":"FAIL a","label":"infra","log_sha256":"h1","fields":{"sec":"script"}}`,
+		`{"schema":"ci-triage.feedback/v1","text":"FAIL b","label":"flaky","log_sha256":"h2"}`,
+		`{"schema":"other","text":"x","label":"test"}`,
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+	err := cmdExport([]string{p})
+	w.Close()
+	os.Stdout = old
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(r)
+	want := `{"text":"FAIL a","fields":{"sec":"script"},"label":"infra","by":"ci-triage"}` + "\n"
+	if string(b) != want {
+		t.Fatalf("got %s", b)
 	}
 }

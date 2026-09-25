@@ -22,6 +22,7 @@ const usage = `usage: ci-triage <command> [flags]
   serve   [-gateway G] [-listen A]   local web page: paste a log, see the lines that explain it, confirm the category
   data    -logchunks DIR -out DIR    build the train/valid/test sets from LogChunks
   eval    -data DIR [-gateway G]     measure the locator, the category and the baselines
+  export  <feedback.jsonl>           one clean label per log, for kling chispa train or kling ai feedback -import
   lines   <logfile>                  print a log as ci-triage sees it (to annotate your own logs)
 
 Run "ci-triage <command> -h" for its flags.
@@ -37,6 +38,8 @@ func main() {
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "analyze":
 		err = cmdAnalyze(args)
+	case "export":
+		err = cmdExport(args)
 	case "lines":
 		err = cmdLines(args)
 	case "serve":
