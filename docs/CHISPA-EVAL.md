@@ -35,7 +35,7 @@ convencionales:
 |---|---|---|---|---|
 | bun | 17 678 | 2 345 | 2 344 | inglés |
 | OpenWA | 1 738 | 1 715 | 1 715 | inglés |
-| CRM_Aura | 876 | 247 | 245 | español |
+| repo privado (es) | 876 | 247 | 245 | español |
 
 Los demás (kindling, Portafolio, rustworkx, dobla…) tienen menos de 50 y se
 descartan. Total: 4 304 ejemplos.
@@ -45,8 +45,8 @@ descartan. Total: 4 304 ejemplos.
 - **Temporal, por repo**: en orden de fecha, el tramo más antiguo entrena, el
   siguiente valida (parada temprana, temperatura y umbrales) y el 20 % más
   reciente se evalúa. Se probó 70/10/20 y 60/20/20 (ver más abajo por qué).
-- **Entre repos**: OpenWA entero solo en prueba; bun y CRM_Aura entrenan (90 %
-  más antiguo) y validan (10 % más reciente).
+- **Entre repos**: OpenWA entero solo en prueba; bun y el repo privado (es)
+  entrenan (90 % más antiguo) y validan (10 % más reciente).
 
 Distribución por etiqueta (reparto 60/20/20):
 
@@ -130,8 +130,8 @@ Por clase (palabras + campos, 60/20/20):
 | Chispa palabras + campos | 0,464 | 0,310 | 0,143 | 15,8 % | **0,583** |
 | Chispa solo texto | 0,471 | 0,241 | 0,050 | 0,2 % | 0,000 (3 ejemplos) |
 
-Entre repos, Chispa apenas mejora a las reglas, y los umbrales aprendidos en bun y
-CRM_Aura **no valen** en OpenWA: `docs` (τ 0,665) contesta 239 veces con precisión
+Entre repos, Chispa apenas mejora a las reglas, y los umbrales aprendidos en bun
+y el repo privado (es) **no valen** en OpenWA: `docs` (τ 0,665) contesta 239 veces con precisión
 0,586, porque en OpenWA muchos `fix` y `chore` tocan ficheros `.md` y el campo
 `f:ext=.md` que en bun delataba a `docs` aquí engaña. Sin campos la calibración es
 mejor (ECE 0,050) pero el modelo casi nunca se atreve (3 respuestas).
@@ -170,8 +170,8 @@ discriminación, umbral optimista bajo el cambio de distribución.
    README's MCP posture» es `docs` y se lee como `fix`. De los 30 errores
    confiados (de 202 respuestas confiadas), 30 son predicciones `fix`: `test`→`fix`
    12, `feat`→`fix` 6, `docs`→`fix` 5. `fix` es el cajón de sastre del corpus.
-4. **Evidencia pobre con pocos datos**: en commits en español (CRM_Aura, 245
-   ejemplos) la evidencia de un error confiado era `w:el`, `w:que`, `w:rol`:
+4. **Evidencia pobre con pocos datos**: en commits en español (repo privado
+   (es), 245 ejemplos) la evidencia de un error confiado era `w:el`, `w:que`, `w:rol`:
    palabras vacías que correlacionan con `fix` solo porque ese repo es casi todo
    `fix`.
 5. **Los n-gramas de caracteres no ayudan aquí** (0,627 frente a 0,640) y cuestan
