@@ -3,14 +3,14 @@
 // servidos con los embeddings de llama.cpp desde una microVM) y, encima, una
 // cabeza de clasificación entrenada sobre los embeddings congelados.
 //
-// Por qué una capa entre JEV y el LLM: JEV (n-gramas hasheados) solo sabe de
+// Por qué una capa entre Chispa y el LLM: Chispa (n-gramas hasheados) solo sabe de
 // las palabras que vio; un codificador de frases pone cerca «apaga las luces»
 // y «kill the lights» aunque no compartan ni una palabra, y lo hace en
 // milisegundos en CPU, dos órdenes de magnitud menos que un LLM. La cabeza es
 // lo único que se entrena aquí (el codificador va congelado): una regresión
 // logística multinomial, o un perceptrón de una capa oculta, en Go puro,
 // determinista y cuantizada a int16, en un fichero .jenc endurecido como el
-// .jev.
+// .chispa.
 //
 // Nada de este paquete habla con el daemon: el codificador es una URL
 // (llama-server con --embeddings) o una caché de embeddings ya calculados, que

@@ -12,7 +12,7 @@ import (
 	"os"
 )
 
-// Formato del fichero .jenc, hermano del .jev (little-endian):
+// Formato del fichero .jenc, hermano del .chispa (little-endian):
 //
 //	[8]  magia "\x89JEC\r\n\x1a\n"
 //	u16  versión (1)            u16 banderas (0)
