@@ -823,8 +823,12 @@ func aiPrime(args []string) error {
 	var errs []error
 	for _, name := range models {
 		m := cfg.Models[name]
-		if m == nil || m.Kind != aigw.KindVON {
+		if m == nil || (m.Kind != aigw.KindVON && m.Kind != aigw.KindEmbed) {
 			errs = append(errs, fmt.Errorf("%s: not a von model of the registry", name))
+			continue
+		}
+		if m.Kind == aigw.KindEmbed {
+			errs = append(errs, fmt.Errorf("%s: is an encoder (kind embed); it never uses the prompt cache, so priming does not apply", name))
 			continue
 		}
 		s := byName[m.Snapshot]

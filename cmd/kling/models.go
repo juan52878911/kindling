@@ -148,6 +148,9 @@ func modelsAdd(args []string) error {
 	if err != nil {
 		return err
 	}
+	if res.Kind == von.KindEmbed && len(prefixes) > 0 {
+		return fmt.Errorf("-prefix only applies to instruct models: %s is an encoder (kind embed) and has no system prompt to cache", name)
+	}
 	// La receta guarda la caché de prompts siempre, también la de por defecto:
 	// así una imagen dice con qué --cache-ram arranca aunque el defecto cambie.
 	spec.CacheRAM = &res.CacheRAM
@@ -210,6 +213,9 @@ func modelsAdd(args []string) error {
 		return err
 	}
 	if *buildOnly {
+		if len(pre) > 0 {
+			fmt.Printf("Warning: -prefix is not applied with -build-only (no golden snapshot is made here); pass -prefix again in the kling models add below.\n")
+		}
 		fmt.Println("Copy it to another daemon and make the golden snapshot there:")
 		fmt.Printf("  kling images copy %s -from <this daemon> -to <that daemon>\n", name)
 		fmt.Printf("  kling models add -H <that daemon> %s %s\n", name, modelFlags(spec))

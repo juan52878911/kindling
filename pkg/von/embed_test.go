@@ -45,6 +45,11 @@ func TestResolveEmbed(t *testing.T) {
 	if r.Kind != KindEmbed || r.Pooling != "mean" || r.Ctx != DefaultEmbedCtx || r.URL != "" || r.Model.Prefix != "query: " {
 		t.Fatalf("e5: %+v", r)
 	}
+	// Un codificador nunca lleva caché de prompts: cada petición es una frase
+	// corta y distinta, no un prompt largo y fijo que reutilizar.
+	if r.CacheRAM != 0 || !strings.Contains(r.RunScript(), `'--cache-ram' '0'`) {
+		t.Fatalf("e5 con caché de prompts: CacheRAM=%d\n%s", r.CacheRAM, r.RunScript())
+	}
 	s := r.RunScript()
 	for _, want := range []string{`'--embeddings'`, `'--pooling' 'mean'`, `'--ubatch-size' '512'`, `'--batch-size' '512'`, `'--ctx-size' '512'`} {
 		if !strings.Contains(s, want) {
@@ -67,11 +72,13 @@ func TestResolveEmbed(t *testing.T) {
 		t.Errorf("con 2 ranuras el lote es el contexto de una: %s", a)
 	}
 	malos := []Spec{
-		{Model: "multilingual-e5-small", Pooling: "cls"},         // el catálogo manda
-		{Model: "smollm2-360m-instruct", Kind: KindEmbed},        // no es un codificador
-		{URL: url, SHA256: sum, Pooling: "mean"},                 // pooling sin kind
-		{URL: url, SHA256: sum, Kind: "rerank"},                  // kind desconocido
-		{URL: url, SHA256: sum, Kind: KindEmbed, Pooling: "max"}, // pooling desconocido
+		{Model: "multilingual-e5-small", Pooling: "cls"},           // el catálogo manda
+		{Model: "smollm2-360m-instruct", Kind: KindEmbed},          // no es un codificador
+		{URL: url, SHA256: sum, Pooling: "mean"},                   // pooling sin kind
+		{URL: url, SHA256: sum, Kind: "rerank"},                    // kind desconocido
+		{URL: url, SHA256: sum, Kind: KindEmbed, Pooling: "max"},   // pooling desconocido
+		{Model: "multilingual-e5-small", CacheRAM: ptr(64)},        // sin caché de prompts
+		{URL: url, SHA256: sum, Kind: KindEmbed, CacheRAM: ptr(1)}, // ídem, con un GGUF propio
 	}
 	for _, s := range malos {
 		if _, err := s.Resolve(); err == nil {

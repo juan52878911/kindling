@@ -137,6 +137,18 @@ func (s Spec) Resolve() (Resolved, error) {
 	if r.Threads < 0 || r.Threads > 64 {
 		return r, fmt.Errorf("threads out of range: %d (0 = one per vCPU, up to 64)", r.Threads)
 	}
+	if r.Kind == KindEmbed {
+		// Un codificador no genera texto de a poco a partir de un prompt largo
+		// y fijo: cada petición es una frase corta y distinta, así que no hay
+		// prefijo que reutilizar. La caché de prompts se queda a 0 siempre (ni
+		// entra en la memoria de la microVM) y pedirla explícitamente es un
+		// error, no un valor que se ignora en silencio.
+		if s.CacheRAM != nil && *s.CacheRAM != 0 {
+			return r, fmt.Errorf("cache-ram only applies to instruct models: %s is an encoder (kind %s) and never uses the prompt cache", r.Ref, KindEmbed)
+		}
+		r.CacheRAM = 0
+		return r, nil
+	}
 	r.CacheRAM = DefaultCacheRAM
 	if s.CacheRAM != nil {
 		r.CacheRAM = *s.CacheRAM
