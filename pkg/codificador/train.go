@@ -97,20 +97,20 @@ func (r *splitmix) shuffle(p []int) {
 
 // params son los pesos en float64 durante el entrenamiento.
 type params struct {
-	D, H, K    int
-	W1, B1     []float64
-	W2, B2     []float64
-	mW1, vW1   []float64 // momentos de Adam
-	mB1, vB1   []float64
-	mW2, vW2   []float64
-	mB2, vB2   []float64
-	gW1, gB1   []float64
-	gW2, gB2   []float64
-	hid, dhid  []float64
-	z, p, dz   []float64
-	in         int
-	adamT      int
-	lr, l2, b1 float64
+	D, H, K   int
+	W1, B1    []float64
+	W2, B2    []float64
+	mW1, vW1  []float64 // momentos de Adam
+	mB1, vB1  []float64
+	mW2, vW2  []float64
+	mB2, vB2  []float64
+	gW1, gB1  []float64
+	gW2, gB2  []float64
+	hid, dhid []float64
+	z, p, dz  []float64
+	in        int
+	adamT     int
+	lr, l2    float64
 }
 
 func newParams(D, H, K int, rng *splitmix, lr, l2 float64) *params {
