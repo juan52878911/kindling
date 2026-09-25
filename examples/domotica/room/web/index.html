@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>kindling · Habitación</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%23f2a93b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#cmd-input" data-i18n="skip">Ir a las órdenes</a>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1><span class="k">kindling</span> <span data-i18n="title">Habitación</span></h1>
+      <p class="sub" data-i18n="subtitle">Órdenes de voz decididas por una cascada de modelos: microsegundos cuando basta, un LLM solo cuando hace falta.</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <ul class="layers" id="layers" aria-label="Capas"></ul>
+    <div class="lang" role="group" aria-label="Idioma / Language">
+      <button type="button" data-lang="es" aria-pressed="true">ES</button>
+      <button type="button" data-lang="en" aria-pressed="false">EN</button>
+    </div>
+    <button type="button" class="ghost" id="reset" data-i18n="reset">Reiniciar</button>
+  </div>
+</header>
+
+<main class="grid">
+  <div class="col">
+  <section class="plan-card card" aria-labelledby="plan-h">
+    <div class="card-head">
+      <h2 id="plan-h" data-i18n="room">La habitación</h2>
+      <span class="live-dot" id="live" data-i18n="live">en directo</span>
+    </div>
+    <svg id="plan" viewBox="0 0 800 520" role="img" aria-labelledby="plan-title plan-desc">
+      <title id="plan-title">Plano</title>
+      <desc id="plan-desc">Salón, cocina, pasillo y dormitorio con sus dispositivos. El estado en texto está debajo.</desc>
+      <defs>
+        <radialGradient id="g-living_room" cx="0.5" cy="0.45" r="0.65"><stop offset="0" class="gs0"/><stop offset="1" class="gs1"/></radialGradient>
+        <radialGradient id="g-kitchen" cx="0.5" cy="0.5" r="0.7"><stop offset="0" class="gs0"/><stop offset="1" class="gs1"/></radialGradient>
+        <radialGradient id="g-bedroom" cx="0.5" cy="0.5" r="0.7"><stop offset="0" class="gs0"/><stop offset="1" class="gs1"/></radialGradient>
+        <linearGradient id="sun-l" x1="0" y1="0" x2="1" y2="0"><stop offset="0" class="sun0"/><stop offset="1" class="sun1"/></linearGradient>
+        <linearGradient id="sun-b" x1="0" y1="1" x2="0" y2="0"><stop offset="0" class="sun0"/><stop offset="1" class="sun1"/></linearGradient>
+        <pattern id="tiles" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" class="tile"/></pattern>
+        <pattern id="boards" width="80" height="16" patternUnits="userSpaceOnUse"><path d="M0 16H80M40 0V16" class="tile"/></pattern>
+      </defs>
+
+      <!-- suelos -->
+      <rect class="floor" x="20" y="20" width="450" height="480" fill="url(#boards)"/>
+      <rect class="floor" x="470" y="20" width="310" height="210" fill="url(#tiles)"/>
+      <rect class="floor hall" x="470" y="230" width="310" height="70"/>
+      <rect class="floor" x="470" y="300" width="310" height="200" fill="url(#boards)"/>
+
+      <!-- sol por las ventanas (según las persianas) -->
+      <polygon id="sun-living_room" class="sun" points="20,150 20,350 300,420 300,110" fill="url(#sun-l)"/>
+      <polygon id="sun-bedroom" class="sun" points="560,500 720,500 760,330 520,330" fill="url(#sun-b)"/>
+
+      <!-- luz de cada zona -->
+      <rect id="glow-living_room" class="glow" x="20" y="20" width="450" height="480" fill="url(#g-living_room)"/>
+      <rect id="glow-kitchen" class="glow" x="470" y="20" width="310" height="210" fill="url(#g-kitchen)"/>
+      <rect id="glow-bedroom" class="glow" x="470" y="300" width="310" height="200" fill="url(#g-bedroom)"/>
+
+      <!-- muebles, a trazo -->
+      <g class="furniture" aria-hidden="true">
+        <rect x="90" y="330" width="220" height="70" rx="14"/><rect x="90" y="330" width="220" height="22" rx="10"/>
+        <rect x="150" y="235" width="110" height="56" rx="8"/>
+        <rect x="490" y="36" width="270" height="40" rx="4"/><circle cx="540" cy="56" r="11"/><circle cx="580" cy="56" r="11"/>
+        <rect x="560" y="120" width="120" height="70" rx="8"/>
+        <rect x="600" y="360" width="150" height="120" rx="10"/><rect x="610" y="366" width="60" height="28" rx="6"/><rect x="680" y="366" width="60" height="28" rx="6"/>
+      </g>
+
+      <!-- paredes -->
+      <g class="walls" aria-hidden="true">
+        <rect x="20" y="20" width="760" height="480" fill="none"/>
+        <path d="M470 20V120M470 180V300M470 360V500M470 230H600M660 230H780M470 300H540M600 300H780"/>
+      </g>
+      <!-- ventanas -->
+      <g class="window" aria-hidden="true"><path d="M20 150V350"/><path d="M560 500H720"/><path d="M780 70V180"/></g>
+
+      <!-- persianas -->
+      <g class="dev" data-dev="blind.living_room">
+        <rect class="blind-slat" id="blind-living_room" x="14" y="150" width="14" height="0"/>
+        <text class="tag" x="36" y="144" id="blind-living_room-t">100%</text>
+      </g>
+      <g class="dev" data-dev="blind.bedroom">
+        <rect class="blind-slat" id="blind-bedroom" x="560" y="492" width="0" height="14"/>
+        <text class="tag" x="560" y="484" id="blind-bedroom-t">100%</text>
+      </g>
+
+      <!-- lámparas -->
+      <g class="dev" data-dev="light.living_room"><circle class="bulb" id="bulb-living_room" cx="245" cy="170" r="16"/><circle class="bulb-core" cx="245" cy="170" r="5"/></g>
+      <g class="dev" data-dev="light.kitchen"><circle class="bulb" id="bulb-kitchen" cx="625" cy="150" r="14"/><circle class="bulb-core" cx="625" cy="150" r="4.5"/></g>
+      <g class="dev" data-dev="light.bedroom"><circle class="bulb" id="bulb-bedroom" cx="560" cy="420" r="14"/><circle class="bulb-core" cx="560" cy="420" r="4.5"/></g>
+
+      <!-- tele -->
+      <g class="dev" data-dev="tv">
+        <rect class="tv-body" x="150" y="30" width="180" height="16" rx="3"/>
+        <rect class="tv-screen" id="tv-screen" x="154" y="33" width="172" height="10" rx="2"/>
+        <polygon class="tv-beam" id="tv-beam" points="154,46 326,46 380,140 100,140"/>
+        <text class="tag" x="240" y="68" text-anchor="middle" id="tv-t">TV</text>
+      </g>
+
+      <!-- altavoz -->
+      <g class="dev" data-dev="speaker" transform="translate(720 150)">
+        <rect class="spk" x="-14" y="-20" width="28" height="40" rx="7"/><circle class="spk-cone" cx="0" cy="5" r="7"/>
+        <g class="waves" id="spk-waves"><path d="M20 -10a16 16 0 0 1 0 20"/><path d="M27 -17a26 26 0 0 1 0 34"/></g>
+        <text class="tag" x="0" y="38" text-anchor="middle" id="spk-t">30%</text>
+      </g>
+
+      <!-- enchufe -->
+      <g class="dev" data-dev="plug" transform="translate(500 110)">
+        <rect class="plug" x="-12" y="-12" width="24" height="24" rx="6"/><circle class="plug-hole" cx="-4" cy="0" r="2"/><circle class="plug-hole" cx="4" cy="0" r="2"/>
+      </g>
+
+      <!-- termostato -->
+      <g class="dev" data-dev="thermostat" transform="translate(420 260)">
+        <circle class="thermo" r="34"/>
+        <circle class="thermo-arc" id="thermo-arc" r="28" pathLength="100"/>
+        <text class="thermo-cur" id="thermo-cur" y="4" text-anchor="middle">19.5°</text>
+        <text class="thermo-tgt" id="thermo-tgt" y="20" text-anchor="middle">→ 21°</text>
+      </g>
+
+      <!-- ventilador -->
+      <g class="dev" data-dev="fan" transform="translate(700 430)">
+        <circle class="fan-ring" r="30"/>
+        <g class="fan-blades" id="fan-blades"><path d="M0 0C6 -10 6 -24 0 -26C-6 -24 -6 -10 0 0Z"/><path d="M0 0C6 -10 6 -24 0 -26C-6 -24 -6 -10 0 0Z" transform="rotate(120)"/><path d="M0 0C6 -10 6 -24 0 -26C-6 -24 -6 -10 0 0Z" transform="rotate(240)"/></g>
+        <circle class="fan-hub" r="4"/>
+        <text class="tag" x="0" y="46" text-anchor="middle" id="fan-t">0%</text>
+      </g>
+
+      <!-- puerta, cerradura y alarma -->
+      <g class="dev" data-dev="lock" transform="translate(780 265)">
+        <path class="door" id="door" d="M0 -22V22"/>
+        <g transform="translate(-26 0)" id="lock-ico">
+          <path class="shackle" id="shackle" d="M-6 -2V-8a6 6 0 0 1 12 0V-2"/>
+          <rect class="lock-body" x="-9" y="-3" width="18" height="14" rx="3"/>
+        </g>
+      </g>
+      <g class="dev" data-dev="alarm" transform="translate(700 265)">
+        <circle class="alarm-ring" id="alarm-ring" r="18"/>
+        <path class="shield" id="shield" d="M0 -12L10 -8V0C10 7 5 11 0 13C-5 11 -10 7 -10 0V-8Z"/>
+      </g>
+
+      <!-- nombres -->
+      <g class="room-names" aria-hidden="true">
+        <text x="40" y="490" id="n-living_room">Salón</text>
+        <text x="490" y="222" id="n-kitchen">Cocina</text>
+        <text x="490" y="292" id="n-hallway">Pasillo</text>
+        <text x="490" y="324" id="n-bedroom">Dormitorio</text>
+      </g>
+    </svg>
+    <h3 class="sr-only" data-i18n="stateText">Estado de los dispositivos</h3>
+    <ul class="devlist" id="devlist" aria-live="off"></ul>
+  </section>
+
+  <section class="card mach-card" aria-labelledby="mach-h">
+    <div class="card-head">
+      <h2 id="mach-h" data-i18n="machines">MicroVMs de las capas</h2>
+      <span class="muted small" id="mach-sum"></span>
+    </div>
+    <p class="muted small" data-i18n="machinesHelp">Cada capa lenta vive en una microVM de kindling: congelada (0 CPU) hasta que una orden la necesita, descongelada en milisegundos y congelada otra vez al quedarse ociosa.</p>
+    <div id="mach" class="mach"></div>
+  </section>
+  </div>
+
+  <section class="side">
+    <section class="card cmd-card" aria-labelledby="cmd-h">
+      <h2 id="cmd-h" data-i18n="say">Di una orden</h2>
+      <form id="cmd-form" class="cmd-form" autocomplete="off">
+        <label for="cmd-input" class="sr-only" data-i18n="cmdLabel">Orden</label>
+        <input id="cmd-input" name="text" maxlength="300" required spellcheck="false" placeholder="aquí hace frío">
+        <button type="submit" id="send" class="primary" data-i18n="send">Enviar</button>
+      </form>
+      <div id="presets" class="presets"></div>
+    </section>
+
+    <section class="card trace-card" aria-labelledby="trace-h">
+      <div class="card-head">
+        <h2 id="trace-h" data-i18n="trace">Cómo se decidió</h2>
+        <span id="busy" class="busy" hidden data-i18n="deciding">decidiendo…</span>
+      </div>
+      <p id="trace-empty" class="muted" data-i18n="traceEmpty">Elige una orden y verás qué capa la decide, con qué confianza y en cuánto tiempo.</p>
+      <div id="trace" hidden>
+        <p class="said"><q id="t-text"></q> <span class="lang-tag" id="t-lang"></span></p>
+        <ol class="pipe" id="pipe"></ol>
+        <div class="reply" id="t-reply" role="status" aria-live="polite"></div>
+        <details class="json" open>
+          <summary data-i18n="jsonActions">Acción JSON</summary>
+          <pre id="t-json"></pre>
+        </details>
+        <details class="json" id="raw-wrap" hidden>
+          <summary data-i18n="rawLLM">Respuesta del LLM</summary>
+          <pre id="t-raw"></pre>
+        </details>
+      </div>
+    </section>
+
+    <section class="card stats-card" aria-labelledby="stats-h">
+      <h2 id="stats-h" data-i18n="numbers">Números</h2>
+      <div class="bars" id="bars" aria-hidden="true"></div>
+      <dl class="stats" id="stats"></dl>
+      <h3 class="hist-h" data-i18n="history">Últimas órdenes</h3>
+      <ol class="history" id="history"></ol>
+    </section>
+  </section>
+</main>
+<footer class="foot"><span data-i18n="foot">Todo pasa por el gateway de IA de kindling: plantillas y Chispa en su proceso, el codificador y el LLM en microVMs que se despiertan con la orden y se congelan al quedarse ociosas.</span></footer>
+</body>
+</html>

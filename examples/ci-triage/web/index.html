@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CI triage</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>CI triage</h1>
+  <p>Paste a failed CI log. Chispa scores every line in microseconds and picks the few that explain the failure; it names the category, and VON (a small LLM that sleeps when idle) only steps in when Chispa is unsure. Confirm or correct the category: it is saved for the next training run.</p>
+</header>
+<main>
+  <section id="input">
+    <textarea id="log" spellcheck="false" placeholder="Paste a CI log here (Travis, GitHub Actions `gh run view --log-failed`, or plain text)…"></textarea>
+    <div class="row">
+      <input type="file" id="file" aria-label="Load a log file">
+      <button id="go">Analyze</button>
+      <span id="status" role="status"></span>
+    </div>
+  </section>
+  <section id="result" hidden>
+    <div id="verdict">
+      <div class="big"><span id="category"></span><span id="layer" class="tag"></span></div>
+      <div id="why"></div>
+      <div id="summary"></div>
+      <div id="timing"></div>
+      <div class="row" id="confirm">
+        <label>Right category: <select id="choice"></select></label>
+        <input id="note" maxlength="500" placeholder="note (optional)">
+        <button id="save">Save</button>
+        <span id="saved" role="status"></span>
+      </div>
+    </div>
+    <div id="lines" aria-label="The log, with the lines Chispa chose highlighted"></div>
+  </section>
+</main>
+</body>
+</html>

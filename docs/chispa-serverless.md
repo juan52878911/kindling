@@ -75,7 +75,9 @@ kling chispa rm commits          # borra el dorado y la imagen (-keep-image: sol
 `deploy` necesita un daemon (construir la imagen monta un loopback y hace
 `chroot`: en Linux, como root; en macOS hay que traer la imagen ya construida
 con `kling images copy <name> -from ssh://usuario@host-linux` y hacer el
-dorado ahí, igual que con un modelo VON). El `.chispa` (y el `.chispas` de huecos,
+dorado ahí con `kling chispa deploy <name> -model m.chispa -reuse-image`, igual
+que con un modelo VON; `-reuse-image` no puede mirar dentro de la imagen, así
+que el `-model` tiene que ser el mismo con el que se construyó). El `.chispa` (y el `.chispas` de huecos,
 opcional) viajan dentro de la petición al constructor `chispa`: no hace falta que
 el daemon vea el disco de quien manda la orden, así que un daemon remoto por
 SSH funciona igual. `-model`/`-slots` se validan (`chispa.Load`/`slots.Load`)

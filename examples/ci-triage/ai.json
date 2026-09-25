@@ -1,0 +1,64 @@
+{
+  "models": {
+    "ci-lines": {
+      "kind": "chispa",
+      "path": "ci-triage/lines.chispa"
+    },
+    "ci-category": {
+      "kind": "chispa",
+      "path": "ci-triage/category.chispa"
+    },
+    "ci-von": {
+      "kind": "von",
+      "snapshot": "von-qwen15-q4",
+      "max_replicas": 1
+    }
+  },
+  "tasks": {
+    "ci-lines": {
+      "chispa": "ci-lines"
+    },
+    "ci-category": {
+      "chispa": "ci-category"
+    },
+    "ci-summary": {
+      "von": "ci-von",
+      "system": "You triage failed CI builds. You get the few log lines that explain the failure (not the whole log) and the guess of a fast classifier. Answer with a JSON object: the failure category, a one or two sentence summary of what failed, and the most useful next step for the developer.\n\nCategories (exact names):\n- test: a test or assertion failed (expected vs actual, FAILED test names, test crashed)\n- build: the code does not compile or link (syntax, types, missing symbols, compiler or bundler errors)\n- lint: style, formatting, static analysis, broken links, generated files not committed, docs checks\n- dependency: installing or resolving packages failed (version not found, module not installed, resolver conflict)\n- config: the CI setup itself is wrong (missing script or file, bad option, permissions, missing secret or credential)\n- infra: network, external services, Docker registry, TLS, ports, runners disconnecting\n- timeout: the job or test suite ran out of time\n- resources: out of memory, disk full, process killed\n- other: none of the above\n\nRules:\n1. Decide from the log lines, not from the classifier guess; the guess only helps when the lines are ambiguous.\n2. summary names what failed (test, file, package, host) using words from the lines. Do not invent names.\n3. next_step is one concrete action (a command to run locally, a file to fix, a version to pin, rerun if it looks transient).\n4. Keep both fields short: at most 200 characters each.",
+      "prompt": "Classifier guess: {hint}\n\nLog lines:\n{input}",
+      "json_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "summary",
+          "next_step"
+        ],
+        "properties": {
+          "category": {
+            "enum": [
+              "test",
+              "build",
+              "lint",
+              "dependency",
+              "config",
+              "infra",
+              "timeout",
+              "resources",
+              "other"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "next_step": {
+            "type": "string",
+            "maxLength": 240
+          }
+        }
+      },
+      "max_tokens": 200,
+      "temperature": 0
+    }
+  }
+}
