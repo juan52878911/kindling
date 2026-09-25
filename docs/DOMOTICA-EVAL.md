@@ -397,6 +397,20 @@ pesos, pero la cifra es optimista en esa medida):
 Con el prefijo en el dorado, 1 144 de 1 154 tokens del prompt vienen de la
 caché (77 ms de prompt frente a 6–19 s sin ella). La cascada entera por el
 gateway: plantillas y Chispa, 0,2–1 ms de punta a punta; la capa 4, segundos.
-En Linux el dorado se mapea perezosamente y descongelar es más barato
-([von.md](von.md)); las cifras del servidor x86 van en la guía de la demo
-cuando se midan allí.
+### En el servidor x86 (i7-8700T, Firecracker sin anidar), con el codificador delante
+
+La misma evaluación en el CT 105, con la capa 3 encendida en la tarea `room`
+(su puerta pasa allí: +104 órdenes contestadas bien, p = 5·10⁻³²), así que a la
+capa 4 le llega algo menos (113 órdenes escaladas de 440 en vez de 119):
+
+| MASSIVE (5 948 ponderadas) | exact | errores confiados | victorias / derrotas | puerta |
+|---|---:|---:|---:|---|
+| sin capa 4 | 0,964 | 1,7 % | — | — |
+| alcance `all` | 0,960 | 2,9 % | 30 / 2 | no pasa |
+| **alcance `uncertain`** | **0,969** | **2,0 %** | **30 / 0** (p = 9·10⁻¹⁰) | **pasa** |
+
+En las frases de reto, 12 bien y 1 mal donde antes no se hacía nada. Latencia
+con la réplica despierta: p50 2,3 s, p90 4,1 s (la CPU del CT genera más
+despacio que el M4). Pero **descongelar la réplica cuesta 134 ms** (la memoria
+se mapea perezosamente desde el dorado) frente a 3,1–3,7 s en el Mac, y la del
+codificador 141 ms; restaurar desde el dorado, 1,4 s y 0,23 s.

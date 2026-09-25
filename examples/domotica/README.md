@@ -88,9 +88,21 @@ disponible».
 El daemon ya corre como `kling.service`. Todo lo de la demo vive en
 `~/domotica` del usuario `juan` y no toca el binario del sistema; el gateway y
 la demo son dos servicios de systemd. Presupuesto de memoria (el host también
-es el router de casa): gateway y demo ~40 MiB; codificador despierto ~330 MiB
-(PSS); LLM despierto ~1,6 GiB; congelados, nada. Con `-idle 2m` casi siempre
-están congelados.
+es el router de casa), medido: gateway y demo ~40 MiB; codificador despierto
+317 MiB (PSS); LLM despierto 1 053–1 089 MiB; congelados, nada. Con `-idle 2m`
+casi siempre están congelados.
+
+Medido allí (i7-8700T, 4 núcleos del CT, Firecracker sin anidar):
+
+| | |
+|---|---|
+| plantilla | 0,3 ms de punta a punta (navegador → demo → gateway) |
+| codificador congelado → descongelado → decide | 240 ms (descongelar 141 ms) |
+| codificador despierto | 18 ms (p50 del codificador en la evaluación: 9,3 ms) |
+| LLM congelado → descongelado → decide (dos órdenes) | 6,9 s (descongelar **134 ms**; el resto, generar ~70 tokens) |
+| LLM despierto | p50 2,3 s, p90 4,1 s |
+| puerta de la capa 3 (`kling ai eval room`) | pasa: +104 órdenes contestadas bien, p = 5·10⁻³² |
+| puerta de la capa 4 (`eval-llm`, con el codificador delante) | `uncertain` pasa (30 / 0, p = 9·10⁻¹⁰; exact 0,964 → 0,969); `all` no (0,960) |
 
 ```sh
 # desde el Mac: binarios linux/amd64 y datos
@@ -101,13 +113,23 @@ scp /tmp/kling /tmp/domotica-demo examples/domotica/ai.json ct105:domotica/
 scp $M/intent.jev $M/slots.jevs ct105:domotica/models/        # M: carpeta de modelos de domótica
 scp $D/train.jsonl $D/valid.jsonl $D/test.jsonl ct105:domotica/data/
 
-# en el CT: el LLM, con el prompt de la capa 4 ya evaluado en el dorado
+# en el CT: el LLM, con el prompt de la capa 4 ya evaluado en el dorado. Sin
+# imagen nueva: una réplica del dorado x86-qwen15-q4, una petición con el prompt
+# (1 155 tokens, 15 s en frío) y commit. (`kling models add … -prefix system.txt`
+# hace lo mismo, pero construye otra imagen de 1,1 GB.)
 cd ~/domotica
-jq -r '.tasks["room-llm"].system' ai.json > system.txt
-./kling models add x86-qwen15-dom -model qwen2.5-1.5b-instruct -quant q4_k_m -prefix system.txt
+./kling run -from x86-qwen15-q4 -name dom-warm
+IP=$(./kling inspect dom-warm | jq -r .ip)
+jq '{messages:[{role:"system",content:.tasks["room-llm"].system},{role:"user",content:"Request: enciende la luz"}],
+     max_tokens:200,temperature:0,json_schema:.tasks["room-llm"].json_schema}' ai.json > body.json
+curl -s http://$IP:8000/v1/chat/completions -H 'Content-Type: application/json' -d @body.json >/dev/null
+./kling squeeze dom-warm && ./kling commit -replace dom-warm x86-qwen15-dom && ./kling rm dom-warm
 
-# el codificador: GGUF convertido y verificado (necesita python3 y red; ~1,5 GB en ~/.cache, bórralo después)
-sudo UV_SHA256_X86=<sha256 de uv 0.12.18 x86_64> scripts/encoder-gguf.sh multilingual-e5-small -install
+# el codificador: GGUF convertido y verificado (python3 y red; ~1,8 GB en WORK, bórralo después).
+# UV_SHA256_X86: el .sha256 del release de uv 0.12.18 en GitHub.
+sudo env UV_SHA256_X86=89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16 \
+    WORK=$HOME/.cache/kindling/encoder-gguf scripts/encoder-gguf.sh multilingual-e5-small -install
+sudo rm -rf ~/.cache/kindling/encoder-gguf
 ./kling models add x86-enc-e5 -model multilingual-e5-small
 ./kling run -from x86-enc-e5 -name enc-train && A=$(./kling inspect enc-train | jq -r .ip)
 ./kling domotica embed -url http://$A:8000 -model multilingual-e5-small \
@@ -117,17 +139,19 @@ sudo UV_SHA256_X86=<sha256 de uv 0.12.18 x86_64> scripts/encoder-gguf.sh multili
 ./kling rm enc-train
 
 # el registro: rutas relativas a él; los dorados de este host
-sed -i 's#domotica/#models/#' ai.json
-./kling ai serve -config ai.json -socket ~/domotica/ai.sock -id domotica -idle 2m &
+sed -i 's#"domotica/#"models/#' ai.json
+mkdir -p ~/.config/kling
+sudo cp kindling-domotica-gateway.service kindling-domotica.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now kindling-domotica-gateway
 ./kling ai eval room -data data/test.jsonl -socket ~/domotica/ai.sock              # la puerta de la capa 3
+./kling ai reload -socket ~/domotica/ai.sock
 KLING_DOMOTICA_MODELS=~/domotica/models ./kling domotica eval-llm \
-    -gateway ~/domotica/ai.sock -llm-task room-llm -decide-task room -data data/test.jsonl  # la de la capa 4
+    -gateway ~/domotica/ai.sock -llm-task room-llm -decide-task room -data data/test.jsonl  # la de la capa 4 (~20 min)
+sudo systemctl enable --now kindling-domotica                                      # lee el registro al arrancar
 ```
 
-Los dos servicios (`/etc/systemd/system/`, con `sudo systemctl daemon-reload
-&& sudo systemctl enable --now kindling-domotica-gateway kindling-domotica`):
-[`kindling-domotica-gateway.service`](kindling-domotica-gateway.service) y
-[`kindling-domotica.service`](kindling-domotica.service). La demo escucha en
+Los dos servicios: [`kindling-domotica-gateway.service`](kindling-domotica-gateway.service)
+y [`kindling-domotica.service`](kindling-domotica.service). La demo escucha en
 `0.0.0.0:8088` a propósito: **http://192.168.2.61:8088** desde cualquier
 navegador de la red de casa. Solo mueve dispositivos simulados, pero cada
 orden puede despertar una microVM: no la publiques fuera de la LAN. El socket
