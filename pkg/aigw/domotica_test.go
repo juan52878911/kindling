@@ -11,37 +11,37 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/chispa/train"
 	"github.com/juan52878911/kindling/pkg/codificador"
 	"github.com/juan52878911/kindling/pkg/domotica"
-	"github.com/juan52878911/kindling/pkg/jev"
-	"github.com/juan52878911/kindling/pkg/jev/train"
 )
 
-// Una tarea de domótica diminuta: JEV sabe «enciende/apaga …» y todo lo demás
+// Una tarea de domótica diminuta: Chispa sabe «enciende/apaga …» y todo lo demás
 // es fuera de ámbito; el codificador falso pone «oscuro» cerca de turn_on.
 
-func domoJEV(t *testing.T) string {
+func domoChispa(t *testing.T) string {
 	t.Helper()
-	var exs []jev.Example
+	var exs []chispa.Example
 	things := []string{"la lámpara", "el foco", "la bombilla", "el flexo", "la tira", "el aplique"}
 	for i := 0; i < 240; i++ {
 		th := things[i%len(things)]
 		switch i % 3 {
 		case 0:
-			exs = append(exs, jev.Example{Text: "enciende " + th, Label: "turn_on"})
+			exs = append(exs, chispa.Example{Text: "enciende " + th, Label: "turn_on"})
 		case 1:
-			exs = append(exs, jev.Example{Text: "apaga " + th, Label: "turn_off"})
+			exs = append(exs, chispa.Example{Text: "apaga " + th, Label: "turn_off"})
 		default:
-			exs = append(exs, jev.Example{Text: []string{"qué hora es", "cuéntame un chiste", "pon una alarma", "llama a mamá"}[i%4] + " " + th, Label: domotica.OutOfScope})
+			exs = append(exs, chispa.Example{Text: []string{"qué hora es", "cuéntame un chiste", "pon una alarma", "llama a mamá"}[i%4] + " " + th, Label: domotica.OutOfScope})
 		}
 	}
-	cfg := train.Config{Spec: jev.DefaultSpec(), Seed: 1}
+	cfg := train.Config{Spec: chispa.DefaultSpec(), Seed: 1}
 	cfg.Spec.Buckets = 1 << 12
 	res, err := train.Train(exs, exs[:60], cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(t.TempDir(), "intent.jev")
+	p := filepath.Join(t.TempDir(), "intent.chispa")
 	if err := res.Model.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func newDomoGateway(t *testing.T, force bool) (*Gateway, *fakeReplicas, *atomic.
 	reps := &fakeReplicas{addr: strings.TrimPrefix(srv.URL, "http://")}
 	cfg := &Config{
 		Models: map[string]*ModelConfig{
-			"intent": {Kind: KindJEV, Path: domoJEV(t)},
+			"intent": {Kind: KindChispa, Path: domoChispa(t)},
 			"enc":    {Kind: KindEmbed, Snapshot: "enc-e5"},
 		},
 		Tasks: map[string]*TaskConfig{
@@ -121,14 +121,14 @@ func newDomoGateway(t *testing.T, force bool) (*Gateway, *fakeReplicas, *atomic.
 }
 
 func TestDomoticaConfig(t *testing.T) {
-	jv := &ModelConfig{Kind: KindJEV, Path: "x.jev"}
+	jv := &ModelConfig{Kind: KindChispa, Path: "x.chispa"}
 	emb := &ModelConfig{Kind: KindEmbed, Snapshot: "enc-e5"}
 	for name, task := range map[string]*TaskConfig{
-		"jev too":        {JEV: "intent", Domotica: &DomoticaConfig{Intent: "intent"}},
-		"not jev":        {Domotica: &DomoticaConfig{Intent: "enc"}},
-		"head alone":     {Domotica: &DomoticaConfig{Intent: "intent", Head: "h.jenc"}},
-		"encoder is jev": {Domotica: &DomoticaConfig{Intent: "intent", Encoder: "intent", Head: "h.jenc"}},
-		"force alone":    {Domotica: &DomoticaConfig{Intent: "intent", EncoderForce: true}},
+		"chispa too":        {Chispa: "intent", Domotica: &DomoticaConfig{Intent: "intent"}},
+		"not chispa":        {Domotica: &DomoticaConfig{Intent: "enc"}},
+		"head alone":        {Domotica: &DomoticaConfig{Intent: "intent", Head: "h.jenc"}},
+		"encoder is chispa": {Domotica: &DomoticaConfig{Intent: "intent", Encoder: "intent", Head: "h.jenc"}},
+		"force alone":       {Domotica: &DomoticaConfig{Intent: "intent", EncoderForce: true}},
 	} {
 		c := &Config{Models: map[string]*ModelConfig{"intent": jv, "enc": emb}, Tasks: map[string]*TaskConfig{"t": task}}
 		if err := c.Validate(); err == nil {
@@ -160,7 +160,7 @@ func TestDomoticaDecideAndGate(t *testing.T) {
 		t.Fatalf("classify on a domotica task: %d", rec.Code)
 	}
 
-	// La evaluación: la capa 3 contesta bien lo oscuro, que JEV no sabe.
+	// La evaluación: la capa 3 contesta bien lo oscuro, que Chispa no sabe.
 	rows := []domotica.Row{}
 	for i := 0; i < 12; i++ {
 		rows = append(rows,

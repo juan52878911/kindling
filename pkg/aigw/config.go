@@ -3,7 +3,7 @@
 //
 // Dos clases de modelo detrás de una misma API:
 //
-//   - JEV (pkg/jev): un clasificador lineal de 1–5 MB que vive DENTRO de este
+//   - Chispa (pkg/chispa): un clasificador lineal de 1–5 MB que vive DENTRO de este
 //     proceso. Se carga la primera vez que se usa y se descarta por LRU cuando
 //     los cargados pasan del presupuesto de memoria. Contesta en microsegundos.
 //   - VON (pkg/von): un LLM pequeño en una microVM, restaurado de un dorado
@@ -11,11 +11,11 @@
 //     primera petición, lo congela al quedarse ocioso (0 CPU; en Linux su
 //     memoria vuelve al fichero) y añade réplicas si no da abasto.
 //
-// Cada uno a lo suyo: JEV clasifica, enruta y filtra; VON genera (resume,
+// Cada uno a lo suyo: Chispa clasifica, enruta y filtra; VON genera (resume,
 // redacta, contesta). Una tarea de clasificación puede además escalar lo que
-// JEV duda a un VON (la cascada), pero solo si una evaluación con datos de la
-// tarea muestra que acierta más que JEV solo (ver eval.go). Lo que VON contesta
-// en lo escalado se guarda (acotado) para recalibrar los umbrales de JEV con el
+// Chispa duda a un VON (la cascada), pero solo si una evaluación con datos de la
+// tarea muestra que acierta más que Chispa solo (ver eval.go). Lo que VON contesta
+// en lo escalado se guarda (acotado) para recalibrar los umbrales de Chispa con el
 // tráfico real, a petición: `kling ai calibrate`.
 package aigw
 
@@ -33,8 +33,8 @@ import (
 
 // Tipos de modelo.
 const (
-	KindJEV = "jev"
-	KindVON = "von"
+	KindChispa = "chispa"
+	KindVON    = "von"
 	// KindEmbed es un codificador de frases servido como un VON (dorado de
 	// `kling models add` con kind embed): la capa 3 de las tareas de
 	// domótica (domotica.go).
@@ -43,7 +43,7 @@ const (
 
 // Config es el registro de modelos y tareas (un fichero JSON, ai.json).
 //
-// Es un fichero y no el store del daemon a propósito: los .jev son rutas del
+// Es un fichero y no el store del daemon a propósito: los .chispa son rutas del
 // host donde corre el gateway, que puede no ser el del daemon (el daemon puede
 // estar al otro lado de un SSH), y un fichero se versiona, se revisa y se
 // despliega como cualquier otra configuración.
@@ -57,25 +57,25 @@ type Config struct {
 
 // ModelConfig es un modelo con nombre.
 type ModelConfig struct {
-	Kind string `json:"kind"` // jev | von
-	// Path es el .jev (kind jev, backend inprocess). Relativo = relativo al
+	Kind string `json:"kind"` // chispa | von
+	// Path es el .chispa (kind chispa, backend inprocess). Relativo = relativo al
 	// fichero de config.
 	Path string `json:"path,omitempty"`
 	// Snapshot es el dorado de `kling models add` (kind von o embed) o de
-	// `kling jev deploy` (kind jev, backend microvm).
+	// `kling chispa deploy` (kind chispa, backend microvm).
 	Snapshot string `json:"snapshot,omitempty"`
-	// Backend dice DÓNDE vive un modelo jev: "" o "inprocess" (por defecto,
+	// Backend dice DÓNDE vive un modelo chispa: "" o "inprocess" (por defecto,
 	// dentro de este proceso, µs, sin daemon) o "microvm" (una réplica de
-	// kling-jev en una microVM, despertada y congelada por pkg/scheduler como
-	// a un VON; docs/jev-serverless.md). Solo se usa con kind "jev"; von y
+	// kling-chispa en una microVM, despertada y congelada por pkg/scheduler como
+	// a un VON; docs/chispa-serverless.md). Solo se usa con kind "chispa"; von y
 	// embed siempre son una réplica.
 	Backend string `json:"backend,omitempty"`
 	// MaxReplicas acota las réplicas de este modelo (0 = la del gateway).
-	// Solo aplica a von, embed y jev con backend microvm.
+	// Solo aplica a von, embed y chispa con backend microvm.
 	MaxReplicas int `json:"max_replicas,omitempty"`
 }
 
-// Backends de un modelo jev.
+// Backends de un modelo chispa.
 const (
 	BackendInProcess = "inprocess"
 	BackendMicroVM   = "microvm"
@@ -83,23 +83,23 @@ const (
 
 // TaskConfig es una tarea con nombre, de una de dos clases:
 //
-//   - CLASIFICACIÓN (jev): JEV decide —clasificar, enrutar, filtrar—. Cuando
+//   - CLASIFICACIÓN (chispa): Chispa decide —clasificar, enrutar, filtrar—. Cuando
 //     duda, la respuesta sale igual con escalate: true y quien llama decide.
 //     Con escalate_to, la duda la resuelve un modelo VON (la cascada), pero
 //     solo si un registro de evaluación (`kling ai eval`) muestra que la
-//     cascada acierta más que JEV solo en los datos de esa tarea; si no, el
+//     cascada acierta más que Chispa solo en los datos de esa tarea; si no, el
 //     gateway se niega a activarla salvo escalate_force.
 //   - GENERACIÓN (von): VON resume, redacta, contesta. La pregunta sale de una
 //     plantilla con {input} y las variables que mande el cliente.
 //
 // Por qué la cascada no va sola: medido en la clasificación de commits
-// (docs/ai-gateway.md), la cascada JEV → LLM de 0,5B acertaba MENOS que JEV
+// (docs/ai-gateway.md), la cascada Chispa → LLM de 0,5B acertaba MENOS que Chispa
 // solo (0,43 frente a 0,64). Un LLM pequeño no mejora a un clasificador
 // entrenado por serlo; hay que demostrarlo tarea a tarea.
 type TaskConfig struct {
-	// JEV es el modelo de una tarea de clasificación.
-	JEV string `json:"jev,omitempty"`
-	// EscalateTo es el modelo VON al que la cascada manda lo que JEV duda.
+	// Chispa es el modelo de una tarea de clasificación.
+	Chispa string `json:"chispa,omitempty"`
+	// EscalateTo es el modelo VON al que la cascada manda lo que Chispa duda.
 	EscalateTo string `json:"escalate_to,omitempty"`
 	// EscalateForce activa la cascada aunque su evaluación no la respalde (o
 	// no la haya). Es el -force de la decisión: queda escrito en el registro.
@@ -107,33 +107,33 @@ type TaskConfig struct {
 	// VON es el modelo de una tarea de generación.
 	VON string `json:"von,omitempty"`
 	// Domotica hace de la tarea una DECISIÓN de domótica (domotica.go):
-	// plantillas → JEV + huecos → codificador, con /v1/decide. Excluye todo
+	// plantillas → Chispa + huecos → codificador, con /v1/decide. Excluye todo
 	// lo demás de la tarea.
 	Domotica *DomoticaConfig `json:"domotica,omitempty"`
 
-	// Labels son las etiquetas válidas; salen del modelo JEV y, si se dan
+	// Labels son las etiquetas válidas; salen del modelo Chispa y, si se dan
 	// aquí también, tienen que ser las mismas.
 	Labels []string `json:"labels,omitempty"`
 	// System y Prompt son la pregunta a VON. En una escalada, variables
-	// {labels}, {text}, {fields} y {candidates} (el top-3 de JEV con su
+	// {labels}, {text}, {fields} y {candidates} (el top-3 de Chispa con su
 	// probabilidad); en una generación, {input} y las de "vars".
 	System string `json:"system,omitempty"`
 	Prompt string `json:"prompt,omitempty"`
 	// TopK > 0 convierte a VON en un reordenador: en una escalada solo puede
-	// elegir entre las K etiquetas más probables según JEV (la pregunta y la
+	// elegir entre las K etiquetas más probables según Chispa (la pregunta y la
 	// gramática llevan solo esas). Un LLM diminuto elige mejor entre tres que
-	// entre diez, y el top-3 de JEV suele contener la buena aunque la primera
+	// entre diez, y el top-3 de Chispa suele contener la buena aunque la primera
 	// no lo sea. 0 = todas las etiquetas.
 	TopK int `json:"top_k,omitempty"`
-	// Thresholds sustituye el umbral τ de JEV para las clases que nombra
+	// Thresholds sustituye el umbral τ de Chispa para las clases que nombra
 	// (p. ej. subirlo en una clase que se equivoca más de lo prometido).
 	Thresholds map[string]float64 `json:"thresholds,omitempty"`
 	// Precision es la precisión objetivo al recalibrar (0 = la del modelo, o
 	// 0,95).
 	Precision float64 `json:"precision,omitempty"`
-	// Audit es la fracción de respuestas CONFIADAS de JEV que se preguntan
+	// Audit es la fracción de respuestas CONFIADAS de Chispa que se preguntan
 	// también a VON en segundo plano, solo para la recalibración: sin ellas la
-	// muestra solo tendría lo que JEV escaló y no se podría saber si los
+	// muestra solo tendría lo que Chispa escaló y no se podría saber si los
 	// umbrales prometen de más. Solo con la cascada activa.
 	Audit float64 `json:"audit,omitempty"`
 	// Samples es el tamaño del anillo de muestras (0 = 2000).
@@ -156,7 +156,7 @@ type TaskConfig struct {
 	// ninguna, a cambio de ~10 % de velocidad de generación. El gateway
 	// comprueba además que la salida sea JSON: el invitado no es de fiar.
 	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
-	// OnVONError: "jev" (por defecto) contesta con la etiqueta de JEV marcada
+	// OnVONError: "chispa" (por defecto) contesta con la etiqueta de Chispa marcada
 	// como degradada si VON no responde; "error" devuelve 503.
 	OnVONError string `json:"on_von_error,omitempty"`
 }
@@ -199,7 +199,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	for _, m := range c.Models {
-		if m.Kind == KindJEV && m.Path != "" && !filepath.IsAbs(m.Path) {
+		if m.Kind == KindChispa && m.Path != "" && !filepath.IsAbs(m.Path) {
 			m.Path = filepath.Join(filepath.Dir(path), m.Path)
 		}
 	}
@@ -255,15 +255,15 @@ func (c *Config) Validate() error {
 			continue
 		}
 		switch m.Kind {
-		case KindJEV:
+		case KindChispa:
 			switch m.Backend {
 			case "", BackendInProcess:
 				if m.Path == "" || m.Snapshot != "" {
-					errs = append(errs, fmt.Errorf("model %q: a jev model needs path (and no snapshot)", n))
+					errs = append(errs, fmt.Errorf("model %q: a chispa model needs path (and no snapshot)", n))
 				}
 			case BackendMicroVM:
 				if m.Snapshot == "" || m.Path != "" {
-					errs = append(errs, fmt.Errorf("model %q: a jev model with backend microvm needs snapshot (and no path), from kling jev deploy", n))
+					errs = append(errs, fmt.Errorf("model %q: a chispa model with backend microvm needs snapshot (and no path), from kling chispa deploy", n))
 				}
 			default:
 				errs = append(errs, fmt.Errorf("model %q: backend must be inprocess or microvm, not %q", n, m.Backend))
@@ -273,10 +273,10 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("model %q: a %s model needs snapshot (and no path)", n, m.Kind))
 			}
 			if m.Backend != "" {
-				errs = append(errs, fmt.Errorf("model %q: backend only applies to kind jev (a %s model is always a replica)", n, m.Kind))
+				errs = append(errs, fmt.Errorf("model %q: backend only applies to kind chispa (a %s model is always a replica)", n, m.Kind))
 			}
 		default:
-			errs = append(errs, fmt.Errorf("model %q: kind must be jev, von or embed, not %q", n, m.Kind))
+			errs = append(errs, fmt.Errorf("model %q: kind must be chispa, von or embed, not %q", n, m.Kind))
 		}
 		if m.MaxReplicas < 0 || m.MaxReplicas > 64 {
 			errs = append(errs, fmt.Errorf("model %q: max_replicas must be 0..64", n))
@@ -297,19 +297,19 @@ func (c *Config) Validate() error {
 		}
 		gen := t.VON != ""
 		switch {
-		case t.JEV == "" && t.VON == "":
-			errs = append(errs, fmt.Errorf("task %q: needs a jev model (classification) or a von model (generation)", n))
-		case t.JEV != "" && t.VON != "":
-			errs = append(errs, fmt.Errorf("task %q: jev and von together: a classification task escalates with \"escalate_to\", and \"von\" is for generation tasks", n))
+		case t.Chispa == "" && t.VON == "":
+			errs = append(errs, fmt.Errorf("task %q: needs a chispa model (classification) or a von model (generation)", n))
+		case t.Chispa != "" && t.VON != "":
+			errs = append(errs, fmt.Errorf("task %q: chispa and von together: a classification task escalates with \"escalate_to\", and \"von\" is for generation tasks", n))
 		}
-		if t.JEV != "" && (c.Models[t.JEV] == nil || c.Models[t.JEV].Kind != KindJEV) {
-			errs = append(errs, fmt.Errorf("task %q: %q is not a jev model", n, t.JEV))
+		if t.Chispa != "" && (c.Models[t.Chispa] == nil || c.Models[t.Chispa].Kind != KindChispa) {
+			errs = append(errs, fmt.Errorf("task %q: %q is not a chispa model", n, t.Chispa))
 		}
 		if t.VON != "" && (c.Models[t.VON] == nil || c.Models[t.VON].Kind != KindVON) {
 			errs = append(errs, fmt.Errorf("task %q: %q is not a von model", n, t.VON))
 		}
-		if t.EscalateTo != "" && (t.JEV == "" || c.Models[t.EscalateTo] == nil || c.Models[t.EscalateTo].Kind != KindVON) {
-			errs = append(errs, fmt.Errorf("task %q: escalate_to needs a jev task and a von model, and %q is not one", n, t.EscalateTo))
+		if t.EscalateTo != "" && (t.Chispa == "" || c.Models[t.EscalateTo] == nil || c.Models[t.EscalateTo].Kind != KindVON) {
+			errs = append(errs, fmt.Errorf("task %q: escalate_to needs a chispa task and a von model, and %q is not one", n, t.EscalateTo))
 		}
 		if t.EscalateForce && t.EscalateTo == "" {
 			errs = append(errs, fmt.Errorf("task %q: escalate_force without escalate_to", n))
@@ -361,7 +361,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("task %q: system/prompt larger than %d bytes", n, maxPromptBytes))
 		}
 		for l, v := range t.Thresholds {
-			if !(v >= 0 && v <= 2) { // 2 = jev.NeverConfident: la clase escala siempre
+			if !(v >= 0 && v <= 2) { // 2 = chispa.NeverConfident: la clase escala siempre
 				errs = append(errs, fmt.Errorf("task %q: threshold for %q must be in [0,2]", n, l))
 			}
 		}
@@ -378,9 +378,9 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("task %q: top_k must be 0..%d", n, maxLabels))
 		}
 		switch t.OnVONError {
-		case "", "jev", "error":
+		case "", "chispa", "error":
 		default:
-			errs = append(errs, fmt.Errorf("task %q: on_von_error must be jev or error", n))
+			errs = append(errs, fmt.Errorf("task %q: on_von_error must be chispa or error", n))
 		}
 	}
 	for i, tn := range c.Tenants {
@@ -410,11 +410,11 @@ func (c *Config) vonModel(name string) (string, *ModelConfig) {
 // isReplica dice si m es un modelo servido por una réplica (una microVM que
 // pkg/scheduler despierta y congela) y no dentro de este proceso.
 func (m *ModelConfig) isReplica() bool {
-	return m.Kind == KindVON || m.Kind == KindEmbed || (m.Kind == KindJEV && m.Backend == BackendMicroVM)
+	return m.Kind == KindVON || m.Kind == KindEmbed || (m.Kind == KindChispa && m.Backend == BackendMicroVM)
 }
 
 // replicaModel es vonModel para todo lo que se sirve con réplicas (VON,
-// codificadores y JEV con backend microvm): lo que el planificador despierta,
+// codificadores y Chispa con backend microvm): lo que el planificador despierta,
 // congela y cuenta.
 func (c *Config) replicaModel(name string) (string, *ModelConfig) {
 	if m := c.Models[name]; m != nil && m.isReplica() {
@@ -429,8 +429,8 @@ func (c *Config) replicaModel(name string) (string, *ModelConfig) {
 }
 
 // NeedsDaemon dice si el registro tiene algún modelo que despierte el daemon:
-// VON, embed o JEV con backend microvm. Un registro solo con JEV en proceso
-// no necesita daemon ni KVM/vz para nada: JEV vive dentro de este mismo
+// VON, embed o Chispa con backend microvm. Un registro solo con Chispa en proceso
+// no necesita daemon ni KVM/vz para nada: Chispa vive dentro de este mismo
 // proceso.
 func (c *Config) NeedsDaemon() bool {
 	for _, m := range c.Models {
