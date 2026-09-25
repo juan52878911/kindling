@@ -27,8 +27,10 @@ bench-*.json
 /kling-bridge-local
 /kling-linux-amd64
 
-# Informes generados
+# Informes generados (las páginas de los ejemplos sí se versionan: van
+# embebidas en sus binarios y sin ellas el ejemplo no compila su interfaz)
 *.html
+!examples/**/*.html
 
 # Restos de herramientas ajenas
 .utm-workspace/
