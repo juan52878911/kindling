@@ -47,7 +47,9 @@ func cmdChispaDeploy(args []string) error {
 	host := hostFlag(fs)
 	modelPath := fs.String("model", "", "the .chispa to deploy (required)")
 	slotsPath := fs.String("slots", "", "optional .chispas (slots, docs/domotica.md)")
-	mem := fs.Int("mem", 64, "microVM memory in MiB (32-64 is usually enough; see docs/chispa-serverless.md)")
+	// 128 y no 64: un modelo de 28 etiquetas tardaba 1,96 s en calentar y, tras
+	// el thaw, rechazaba conexiones con 64 MiB (se quedaba corto de memoria).
+	mem := fs.Int("mem", 128, "microVM memory in MiB (64-128 is usually enough; see docs/chispa-serverless.md)")
 	vcpus := fs.Int("vcpus", 1, "microVM vCPUs")
 	warmText := fs.String("warm-text", "hello world", "text sent once before freezing, to touch the model's pages")
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
@@ -58,7 +60,7 @@ func cmdChispaDeploy(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 || *modelPath == "" {
-		return fmt.Errorf("usage: kling chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 64] [-vcpus 1]")
+		return fmt.Errorf("usage: kling chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 128] [-vcpus 1]")
 	}
 	name := fs.Arg(0)
 	modelBytes, err := os.ReadFile(*modelPath)

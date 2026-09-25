@@ -67,10 +67,11 @@ Y dos cosas encontradas por el camino:
   llamada.** Con máquinas que mueren al congelar no se notaba; con pausar y
   reanudar el MISMO VMM, a la quinta vuelta su API rechazaba la siguiente
   (`write: broken pipe`). `internal/fc` ya no usa keep-alive.
-- **`kling chispa deploy -mem 64` (el valor por defecto) no basta para un
-  modelo de 28 etiquetas con 2^18 cubos**: el calentamiento tardó 1,96 s y las
-  réplicas rechazaban conexiones durante segundos tras cada thaw. Con `-mem 128`,
-  110 µs. Un modelo de pocas etiquetas sí cabe en 64.
+- **`kling chispa deploy -mem 64` (el valor por defecto de antes) no basta para
+  un modelo de 28 etiquetas con 2^18 cubos**: el calentamiento tardó 1,96 s y
+  las réplicas rechazaban conexiones durante segundos tras cada thaw. Con
+  `-mem 128`, 110 µs. Un modelo de pocas etiquetas sí cabe en 64; el nuevo
+  valor por defecto es 128.
 
 ## Cómo está hecho
 
