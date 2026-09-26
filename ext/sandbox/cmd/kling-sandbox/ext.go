@@ -12,7 +12,9 @@ import (
 // El comando es `sbx` y no `sandbox` a propósito: `kling sandbox` es del núcleo
 // —crea una microVM de usar y tirar contra el daemon local— y los comandos del
 // núcleo ganan siempre. Esto es otra cosa: habla con un FRONTAL, que a su vez
-// reparte entre varios daemons, con plantillas, inquilinos y cuotas.
+// reparte entre varios daemons, con plantillas, inquilinos y cuotas. Por eso
+// `sbx` se promueve a primer nivel (TopLevel): bajo el nombre de la extensión
+// sería `kling sandbox ...`, que es del núcleo.
 func extension() *plugin.Builtin {
 	return &plugin.Builtin{
 		Manifest: plugin.Manifest{
@@ -21,10 +23,12 @@ func extension() *plugin.Builtin {
 			Version:         strings.TrimPrefix(Version, "v"),
 			MinKling:        "0.7.0",
 			Summary:         "sandboxes for code agents: templates, tenants and several hosts",
+			HelpGroup:       "SERVE",
 			Commands: []plugin.Command{{
-				Name:    "sbx",
-				Group:   "SANDBOX FLEET",
-				Summary: "sandboxes served by a gateway (templates, tenants, several hosts)",
+				Name:     "sbx",
+				TopLevel: true,
+				Group:    "SANDBOX FLEET",
+				Summary:  "sandboxes served by a gateway (templates, tenants, several hosts)",
 				Usage: "  sbx gateway [-listen :8090]                      serves the sandbox API\n" +
 					"  sbx template apply -f tpl.json | ls | rebuild N  recipes that become golden snapshots\n" +
 					"  sbx new -template T [-ttl 10m] | ls | rm ID      sandboxes through the gateway\n" +
