@@ -1,4 +1,4 @@
-package main
+package tools
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/pkg/codificador"
-	"github.com/juan52878911/kindling/pkg/domotica"
 	"github.com/juan52878911/kindling/pkg/von"
 )
 
@@ -46,7 +46,7 @@ func cmdDomoticaEmbed(args []string) error {
 		return err
 	}
 	if *url == "" || *out == "" {
-		return errors.New("usage: kling domotica embed -url http://host:port -model <encoder> -data a.jsonl,b.jsonl -o cache.jemb")
+		return errors.New("usage: kindling-domotica embed -url http://host:port -model <encoder> -data a.jsonl,b.jsonl -o cache.jemb")
 	}
 	m, err := encoderModel(*model)
 	if err != nil {
@@ -156,7 +156,7 @@ func encoderDataset(rows []domotica.Row, cache *codificador.Cache, prefix string
 	for _, r := range rows {
 		v, ok := cache.Get(prefix + r.Text)
 		if !ok {
-			return ds, fmt.Errorf("%q is not in the embedding cache: run kling domotica embed on its file first", r.Text)
+			return ds, fmt.Errorf("%q is not in the embedding cache: run kindling-domotica embed on its file first", r.Text)
 		}
 		y, ok := idx[r.Intent]
 		if !ok {
@@ -172,7 +172,7 @@ func cmdDomoticaTrainEncoder(args []string) error {
 	data := fs.String("data", "", "unified JSONL training data (required)")
 	valid := fs.String("valid", "", "unified JSONL validation data (required: early stopping, temperature, thresholds)")
 	test := fs.String("test", "", "optional unified JSONL test data (reported, not used)")
-	cachePath := fs.String("cache", "", "embedding cache with every text (kling domotica embed)")
+	cachePath := fs.String("cache", "", "embedding cache with every text (kindling-domotica embed)")
 	out := fs.String("o", "", "output head (.jenc)")
 	hidden := fs.Int("hidden", 256, "hidden units (0 = multinomial logistic regression)")
 	epochs := fs.Int("epochs", 40, "maximum epochs")
@@ -195,7 +195,7 @@ func cmdDomoticaTrainEncoder(args []string) error {
 		return err
 	}
 	if *data == "" || *valid == "" || *cachePath == "" || *out == "" {
-		return errors.New("usage: kling domotica train-encoder -data train.jsonl -valid valid.jsonl -cache c.jemb -o head.jenc")
+		return errors.New("usage: kindling-domotica train-encoder -data train.jsonl -valid valid.jsonl -cache c.jemb -o head.jenc")
 	}
 	cache, err := codificador.LoadCache(*cachePath)
 	if err != nil {

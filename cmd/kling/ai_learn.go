@@ -261,7 +261,7 @@ func aiRetrain(args []string) error {
 	rule := fs.String("rule", "mcnemar", "promotion rule: mcnemar (significant win) or no-regression")
 	tol := fs.Float64("precision-tolerance", 0.005, "how much confident precision on the held-out set may drop")
 	current := fs.String("current", "", "microvm task without versions yet: the .chispa it serves now")
-	evalData := fs.String("eval", "", "data to re-evaluate the cascade after promoting (default: learn.heldout; domotica: rows JSONL)")
+	evalData := fs.String("eval", "", "data to re-evaluate the cascade after promoting (default: learn.heldout; intent task: rows JSONL)")
 	noEval := fs.Bool("no-eval", false, "don't re-evaluate the cascade: it stays off until kling ai eval")
 	host := hostFlag(fs)
 	mem := fs.Int("mem", 64, "microvm task: memory of the new version's golden snapshot (MiB)")
@@ -287,7 +287,7 @@ func aiRetrain(args []string) error {
 		}
 	}
 	if *evalData != "" {
-		if isDomoticaTask(c, task) {
+		if isIntentTask(c, task) {
 			if req.EvalRows, _, err = readRowsFile(*evalData); err != nil {
 				return err
 			}

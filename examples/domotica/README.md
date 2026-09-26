@@ -222,4 +222,4 @@ del daemon y el del gateway no salen del host (0600).
 | `room/server.go` | API JSON + SSE (`/api/state`, `/api/command`, `/api/events`, `/api/machines`) |
 | `room/web/` | la página: plano en SVG, traza por capas, números; es/en, claro/oscuro, accesible |
 | `room/presets.json` | los botones de órdenes (los «direct» son plantillas; un test lo comprueba) |
-| `ai.json` | registro de ejemplo del gateway: tarea `room` (capas 1–3) y `room-llm` (capa 4, con el prompt y el esquema de `pkg/domotica`; un test lo comprueba) |
+| `ai.json` | registro de ejemplo del gateway: tarea `room` (capas 1–3) y `room-llm` (capa 4, con el prompt y el esquema de `internal/domotica`; un test lo comprueba) |

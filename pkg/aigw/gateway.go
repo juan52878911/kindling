@@ -16,6 +16,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/intent"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 	"github.com/juan52878911/kindling/pkg/von"
 )
@@ -44,7 +45,7 @@ type Options struct {
 	PausedFor    time.Duration // cuánto dura una pausada sin uso antes de congelarse; 0 = 10 × idle
 	ChispaBudget int64         // bytes de modelos Chispa cargados; 256 MiB
 	VONTimeout   time.Duration // plazo de una escalada; 60 s
-	// EncoderTimeout es el plazo de la capa 3 de una tarea de domótica,
+	// EncoderTimeout es el plazo de la capa 3 de una tarea de intención,
 	// despertar la réplica incluido; 5 s. Pasado, la decisión escala a VON.
 	EncoderTimeout time.Duration
 	ProxyTimeout   time.Duration // plazo de una petición OpenAI; 5 min
@@ -59,6 +60,10 @@ type Options struct {
 	// humanas y versiones de Chispa, un directorio por tarea. Vacío = ai-data/
 	// junto al registro; sin registro en disco, ninguno (y sin "learn").
 	DataDir string
+	// Domains son los dominios en Go que las tareas de intención pueden
+	// nombrar con "domain" (intent.go): los pone el programa que embebe el
+	// gateway. `kling ai serve` no trae ninguno; sus tareas usan "schema".
+	Domains map[string]intent.Domain
 }
 
 func (o *Options) withDefaults() {
@@ -109,7 +114,7 @@ type Gateway struct {
 	sched    *scheduler.Scheduler
 	replicas Replicas
 	chispa   *chispaCache
-	domo     domoFiles // .chispas y .jenc de las tareas de domótica
+	files    intentFiles // .chispas, .jenc y esquemas de las tareas de intención
 	met      *metrics
 	guests   *guestPool // conexiones reutilizables a las réplicas (guestpool.go)
 
@@ -268,7 +273,7 @@ func (g *Gateway) Reload() ([]string, error) {
 			g.chispa.drop(m.Path)
 		}
 	}
-	g.domo.reset()
+	g.files.reset()
 	return g.setConfig(c), nil
 }
 
@@ -288,7 +293,7 @@ func (g *Gateway) Start(ctx context.Context) {
 	}
 	if g.config().NeedsDaemon() {
 		if info, err := g.opts.Client.Info(ctx); err != nil {
-			log.Printf("warning: no chispa-only registry: this one has a von or embed model, but the daemon at %s is not reachable (%v); chispa tasks work fine, but any task with von, escalate_to or a domotica encoder will fail until the daemon is up (kling daemon) and reachable (-host)",
+			log.Printf("warning: no chispa-only registry: this one has a von or embed model, but the daemon at %s is not reachable (%v); chispa tasks work fine, but any task with von, escalate_to or an intent encoder will fail until the daemon is up (kling daemon) and reachable (-host)",
 				g.opts.Client.Endpoint(), err)
 		} else {
 			if info.Has("renew") {
@@ -357,7 +362,7 @@ type ClassifyRequest struct {
 	// Explain añade la evidencia también a las respuestas confiadas de Chispa
 	// (cuesta reservas de memoria; en las escaladas va siempre).
 	Explain bool `json:"explain,omitempty"`
-	// Lang es el idioma de una orden de domótica (es, en, auto).
+	// Lang es el idioma de la orden de una tarea de intención (es, en…, auto).
 	Lang string `json:"lang,omitempty"`
 }
 
@@ -455,8 +460,8 @@ func (g *Gateway) Classify(ctx context.Context, endpoint string, req ClassifyReq
 	if tc == nil {
 		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
 	}
-	if tc.Domotica != nil {
-		return nil, statusf(http.StatusBadRequest, "task %q is a domotica task: use POST /v1/decide", req.Task)
+	if tc.Intent != nil {
+		return nil, statusf(http.StatusBadRequest, "task %q is an intent task: use POST /v1/decide", req.Task)
 	}
 	if tc.Chispa == "" {
 		return nil, statusf(http.StatusBadRequest, "task %q is a generation task: use POST /v1/generate", req.Task)

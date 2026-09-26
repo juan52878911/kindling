@@ -60,14 +60,14 @@ func TestPrintError(t *testing.T) {
 }
 
 func TestMovedError(t *testing.T) {
-	err := movedError("domotica", "domotica")
+	err := movedError("gateway", "mcp")
 	if codigoDeSalida(err) != 2 {
 		t.Fatalf("código %d", codigoDeSalida(err))
 	}
-	if hintFor(err) != "kling plugins install domotica" {
+	if hintFor(err) != "kling plugins install mcp" {
 		t.Fatalf("pista %q", hintFor(err))
 	}
-	if movedToExtension["gateway"] != "mcp" || movedToExtension["domotica"] != "domotica" {
+	if movedToExtension["gateway"] != "mcp" {
 		t.Fatal("tabla de comandos movidos")
 	}
 }

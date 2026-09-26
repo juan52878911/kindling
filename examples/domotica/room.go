@@ -1,17 +1,17 @@
-// Command domotica es la habitación de demo de kindling: una página web con
-// luces, termostato, persianas, tele, altavoz, cerradura, alarma, ventilador
-// y enchufe simulados, que se manejan con órdenes de voz (como texto) en
+package main
+
+// kindling-domotica room: la habitación de demo, una página web con luces,
+// termostato, persianas, tele, altavoz, cerradura, alarma, ventilador y
+// enchufe simulados, que se manejan con órdenes de voz (como texto) en
 // español o inglés.
 //
-// No decide nada por sí misma: cada orden va al gateway de IA de kindling
-// (`kling ai serve`), que la pasa por las capas —plantillas y el modelo
-// rápido Chispa en su proceso, el codificador de frases y el LLM (VON) en
-// microVMs que se descongelan con la orden y se congelan al quedarse
-// ociosas— y la página enseña qué capa decidió, en cuánto, qué microVM tuvo
-// que despertar y cuánta memoria usan. Ver README.md.
-//
-//	go run ./examples/domotica -gateway ~/.config/kling/ai.sock -H unix:///run/kling/kling.sock
-package main
+// No decide nada por sí misma: cada orden va al gateway de IA (el de
+// `kindling-domotica gateway`, que es el de kindling con el dominio de la
+// habitación dentro), que la pasa por las capas —plantillas y el modelo
+// rápido Chispa, el codificador de frases y el LLM (VON) en microVMs que se
+// descongelan con la orden y se congelan al quedarse ociosas— y la página
+// enseña qué capa decidió, en cuánto, qué microVM tuvo que despertar y
+// cuánta memoria usan. Ver README.md.
 
 import (
 	"context"
@@ -19,7 +19,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -29,21 +28,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/examples/domotica/room"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/config"
-	"github.com/juan52878911/kindling/pkg/domotica"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
-
-func main() {
-	log.SetFlags(0)
-	if err := run(); err != nil {
-		log.Fatal("domotica: ", err)
-	}
-}
 
 type flags struct {
 	listen, gateway, tokenFile, host string
@@ -53,34 +45,34 @@ type flags struct {
 	timeout                          time.Duration
 }
 
-func parseFlags() flags {
+func parseRoomFlags(args []string) (flags, error) {
 	dir := filepath.Dir(config.Path())
 	var f flags
-	flag.StringVar(&f.listen, "listen", "127.0.0.1:8088", "address of the web page (loopback by default; 0.0.0.0:8088 to reach it from the LAN)")
-	flag.StringVar(&f.gateway, "gateway", filepath.Join(dir, "ai.sock"), "the AI gateway: its socket or http://host:port")
-	flag.StringVar(&f.tokenFile, "token-file", filepath.Join(dir, "ai.token"), "gateway token for http:// ($KLING_AI_TOKEN wins)")
-	flag.StringVar(&f.host, "H", "", "kindling daemon (socket or ssh://) for the machines panel; empty = the configured one, \"none\" = no panel")
-	flag.StringVar(&f.decideTask, "decide-task", "room", "the gateway's domotica task: layers 1-3 (POST /v1/decide)")
-	flag.StringVar(&f.llmTask, "llm-task", "room-llm", "the gateway's generation task of layer 4 (POST /v1/generate); empty = no layer 4")
-	flag.StringVar(&f.record, "layer4-record", "", "eval record that enables layer 4 (default: layer4-<llm-task>.json in the domotica models dir)")
-	flag.BoolVar(&f.force, "layer4-force", false, "enable layer 4 for every escalation even without an eval record that backs it")
-	flag.BoolVar(&f.offline, "offline", false, "no gateway: layers 1-2 in this process (-intent, -slots), the rest unavailable")
-	flag.StringVar(&f.intent, "intent", "", "with -offline: intent model (.chispa)")
-	flag.StringVar(&f.slotsPath, "slots", "", "with -offline: slot model (.chispas)")
-	flag.DurationVar(&f.timeout, "timeout", 60*time.Second, "deadline of one command (includes waking microVMs)")
-	flag.Parse()
-	return f
+	fs := flag.NewFlagSet("room", flag.ContinueOnError)
+	fs.StringVar(&f.listen, "listen", "127.0.0.1:8088", "address of the web page (loopback by default; 0.0.0.0:8088 to reach it from the LAN)")
+	fs.StringVar(&f.gateway, "gateway", filepath.Join(dir, "ai.sock"), "the AI gateway (kindling-domotica gateway): its socket or http://host:port")
+	fs.StringVar(&f.tokenFile, "token-file", filepath.Join(dir, "ai.token"), "gateway token for http:// ($KLING_AI_TOKEN wins)")
+	fs.StringVar(&f.host, "H", "", "kindling daemon (socket or ssh://) for the machines panel; empty = the configured one, \"none\" = no panel")
+	fs.StringVar(&f.decideTask, "decide-task", "room", "the gateway's intent task: layers 1-3 (POST /v1/decide)")
+	fs.StringVar(&f.llmTask, "llm-task", "room-llm", "the gateway's generation task of layer 4 (POST /v1/generate); empty = no layer 4")
+	fs.StringVar(&f.record, "layer4-record", "", "eval record that enables layer 4 (default: layer4-<llm-task>.json in the models dir)")
+	fs.BoolVar(&f.force, "layer4-force", false, "enable layer 4 for every escalation even without an eval record that backs it")
+	fs.BoolVar(&f.offline, "offline", false, "no gateway: layers 1-2 in this process (-intent, -slots), the rest unavailable")
+	fs.StringVar(&f.intent, "intent", "", "with -offline: intent model (.chispa)")
+	fs.StringVar(&f.slotsPath, "slots", "", "with -offline: slot model (.chispas)")
+	fs.DurationVar(&f.timeout, "timeout", 60*time.Second, "deadline of one command (includes waking microVMs)")
+	return f, fs.Parse(args)
 }
 
-func run() error {
-	f := parseFlags()
+func runRoom(args []string) error {
+	f, err := parseRoomFlags(args)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var (
-		opts room.Options
-		err  error
-	)
+	var opts room.Options
 	if f.offline {
 		opts, err = offline(f)
 	} else {
@@ -178,7 +170,7 @@ func viaGateway(ctx context.Context, f flags) (room.Options, error) {
 	defer cancel()
 	tasks, err := gw.Tasks(tctx)
 	if err != nil {
-		return room.Options{}, fmt.Errorf("the gateway at %s does not answer (is `kling ai serve` running? or use -offline): %w", f.gateway, err)
+		return room.Options{}, fmt.Errorf("the gateway at %s does not answer (is `kindling-domotica gateway` running? or use -offline): %w", f.gateway, err)
 	}
 	var decide, llm *domotica.TaskInfo
 	for i := range tasks {
@@ -189,8 +181,8 @@ func viaGateway(ctx context.Context, f flags) (room.Options, error) {
 			llm = t
 		}
 	}
-	if decide == nil || decide.Kind != "domotica" {
-		return room.Options{}, fmt.Errorf("the gateway has no domotica task %q (see ai.json in examples/domotica)", f.decideTask)
+	if decide == nil || decide.Kind != "intent" {
+		return room.Options{}, fmt.Errorf("the gateway has no intent task %q (see ai.json in examples/domotica)", f.decideTask)
 	}
 	// Qué modelo es de qué capa, para atribuir los despertares de /metrics.
 	modelLayer := map[string]string{decide.Chispa: domotica.LayerChispa}
@@ -264,7 +256,7 @@ func viaGateway(ctx context.Context, f flags) (room.Options, error) {
 	return room.Options{Decide: decideFn, Layers: layers}, nil
 }
 
-// layer4Record es lo que escribe `kling domotica eval-llm` (los campos que
+// layer4Record es lo que escribe `kindling-domotica eval-llm` (los campos que
 // hacen falta aquí).
 type layer4Record struct {
 	ID       string `json:"id"`
@@ -286,7 +278,7 @@ func backed(f flags, fastID string) (string, string) {
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return "", "no eval record " + p + " (kling domotica eval-llm -gateway … -llm-task " + f.llmTask + " -decide-task " + f.decideTask + " -data test.jsonl)"
+		return "", "no eval record " + p + " (kindling-domotica eval-llm -gateway … -llm-task " + f.llmTask + " -decide-task " + f.decideTask + " -data test.jsonl)"
 	}
 	var r layer4Record
 	if err := json.Unmarshal(b, &r); err != nil {

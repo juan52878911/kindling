@@ -102,6 +102,5 @@ var movedToExtension = func() map[string]string {
 	for _, c := range []string{"mcp", "add", "search", "connect", "export", "memory", "migrate", "gateway"} {
 		m[c] = "mcp"
 	}
-	m["domotica"] = "domotica"
 	return m
 }()

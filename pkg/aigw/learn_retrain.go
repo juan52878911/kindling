@@ -19,7 +19,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/train"
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/pkg/intent"
 )
 
 // REENTRENO CON PUERTA Y VERSIONES.
@@ -32,7 +32,7 @@ import (
 // discrepan, con McNemar de una cola p < 0,05 (o, con la regla
 // "no-regression", sin contestar bien menos ni acertar menos), y su precisión
 // en lo confiado no baja más que la tolerancia. Es la misma forma de puerta
-// que la de la capa del codificador en domótica (domotica.go).
+// que la de la capa del codificador de las tareas de intención (intent.go).
 //
 // La promoción es atómica y versionada. En proceso: el .chispa nuevo se
 // guarda como ai-data/<tarea>/versions/<modelo>@vN.chispa, el que se servía
@@ -48,7 +48,7 @@ import (
 // modelo nuevo apaga una cascada respaldada hasta que se vuelva a evaluar. El
 // reentreno lo hace explícito: si la cascada estaba activa, vuelve a correr
 // `kling ai eval` con learn.heldout (o con los datos que se le pasen) y dice
-// cómo queda; si no puede (VON caído, domótica sin filas), lo dice.
+// cómo queda; si no puede (VON caído, intención sin filas), lo dice.
 
 // HeldoutMetrics es un modelo medido en el conjunto de confianza.
 type HeldoutMetrics struct {
@@ -104,12 +104,12 @@ type RetrainRequest struct {
 	// contra el sha256 del registro de despliegue del dorado.
 	CurrentModel []byte `json:"current_model,omitempty"`
 	// Datos para volver a evaluar la cascada tras promocionar (vacío = el
-	// learn.heldout en una tarea de clasificación; en domótica hacen falta
+	// learn.heldout en una tarea de clasificación; en una de intención hacen falta
 	// filas). NoEval lo salta: la cascada queda apagada hasta evaluarla.
-	EvalExamples []EvalExample  `json:"eval_examples,omitempty"`
-	EvalRows     []domotica.Row `json:"eval_rows,omitempty"`
-	NoEval       bool           `json:"no_eval,omitempty"`
-	Seed         uint64         `json:"seed,omitempty"`
+	EvalExamples []EvalExample `json:"eval_examples,omitempty"`
+	EvalRows     []intent.Row  `json:"eval_rows,omitempty"`
+	NoEval       bool          `json:"no_eval,omitempty"`
+	Seed         uint64        `json:"seed,omitempty"`
 }
 
 // RetrainReport es lo que se midió y lo que se hizo.
@@ -307,8 +307,8 @@ func sha256Hex(b []byte) string {
 
 // learnModel es el modelo Chispa que aprende una tarea.
 func learnModel(tc *TaskConfig) string {
-	if tc.Domotica != nil {
-		return tc.Domotica.Intent
+	if tc.Intent != nil {
+		return tc.Intent.Model
 	}
 	return tc.Chispa
 }
@@ -508,9 +508,9 @@ func (g *Gateway) evalTeachers(task string, tc *TaskConfig) map[string]string {
 	if err != nil {
 		return out
 	}
-	if tc.Domotica != nil {
-		var r DomoticaEvalRecord
-		if json.Unmarshal(b, &r) == nil && r.Kind == "domotica" && r.BeatsFast {
+	if tc.Intent != nil {
+		var r IntentEvalRecord
+		if json.Unmarshal(b, &r) == nil && r.Kind == "intent" && r.BeatsFast {
 			out[r.Encoder.Model] = r.Verdict
 		}
 		return out
@@ -940,11 +940,11 @@ func (g *Gateway) reEvaluate(ctx context.Context, lt *learnTask, before CascadeS
 	if req.NoEval {
 		return off("run kling ai eval " + lt.task + " -data <held-out>")
 	}
-	if lt.tc.Domotica != nil {
+	if lt.tc.Intent != nil {
 		if len(req.EvalRows) == 0 {
-			return off("a domotica task needs rows: kling ai retrain -eval rows.jsonl, or kling ai eval " + lt.task + " -data rows.jsonl")
+			return off("an intent task needs rows: kling ai retrain -eval rows.jsonl, or kling ai eval " + lt.task + " -data rows.jsonl")
 		}
-		rec, err := g.evalDomotica(ctx, EvalRequest{Task: lt.task, Data: "after retrain", Rows: req.EvalRows})
+		rec, err := g.evalIntent(ctx, EvalRequest{Task: lt.task, Data: "after retrain", Rows: req.EvalRows})
 		if err != nil {
 			return off(err.Error())
 		}
@@ -968,7 +968,7 @@ func (g *Gateway) reEvaluate(ctx context.Context, lt *learnTask, before CascadeS
 }
 
 func layerName(tc *TaskConfig) string {
-	if tc.Domotica != nil {
+	if tc.Intent != nil {
 		return "encoder layer"
 	}
 	return "cascade"

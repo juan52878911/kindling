@@ -1,4 +1,4 @@
-package main
+package tools
 
 import (
 	"context"
@@ -18,18 +18,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/pkg/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
-// `kling domotica eval-llm`: la capa 4 (un LLM VON con salida JSON) frente a
+// `kindling-domotica eval-llm`: la capa 4 (un LLM VON con salida JSON) frente a
 // «escalar y no hacer nada» en lo que las capas rápidas escalan. Pregunta al
 // LLM por el mismo camino que en producción, una tarea de generación del
 // gateway de IA (POST /v1/generate) con el prompt y el esquema de
-// pkg/domotica:
+// internal/domotica:
 //
-//   - -gateway <socket|URL> -llm-task T [-decide-task D]: un `kling ai serve`
+//   - -gateway <socket|URL> -llm-task T [-decide-task D]: un `kindling-domotica gateway`
 //     que ya corre (las capas 1–3 por /v1/decide si se da -decide-task; si no,
 //     en el proceso).
 //   - -von <dorado>: un gateway en el propio proceso sobre el daemon de -H,
@@ -42,7 +42,7 @@ import (
 const llmTaskName = "room-llm"
 
 // LLMTaskConfig es la tarea de generación de la capa 4 en el registro del
-// gateway (ai.json): el prompt y el esquema de pkg/domotica, temperatura 0.
+// gateway (ai.json): el prompt y el esquema de internal/domotica, temperatura 0.
 func llmTaskConfig(model string) *aigw.TaskConfig {
 	zero := 0.0
 	return &aigw.TaskConfig{VON: model, System: domotica.LLMSystemPrompt, Prompt: "{input}",
@@ -72,7 +72,7 @@ func (t memTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rec.Result(), nil
 }
 
-// gatewayClient abre un `kling ai serve` por socket Unix o URL, con el token de
+// gatewayClient abre un `kindling-domotica gateway` por socket Unix o URL, con el token de
 // ai.token (o $KLING_AI_TOKEN) si lo hay.
 func gatewayClient(addr string, timeout time.Duration) *domotica.GatewayClient {
 	c := &domotica.GatewayClient{Base: strings.TrimRight(addr, "/"), Client: &http.Client{Timeout: timeout}}
@@ -211,13 +211,13 @@ func resolveModel(p, def string) string {
 	return ""
 }
 
-// ── kling domotica eval-llm ─────────────────────────────────────────────────
+// ── kindling-domotica eval-llm ─────────────────────────────────────────────────
 
 func cmdDomoticaEvalLLM(args []string) error {
 	fs := flag.NewFlagSet("domotica eval-llm", flag.ExitOnError)
 	host := hostFlag(fs)
 	golden := fs.String("von", "", "VON golden for an in-process gateway on the daemon of -H")
-	gateway := fs.String("gateway", "", "a running `kling ai serve` (socket path or http://host:port) instead")
+	gateway := fs.String("gateway", "", "a running `kindling-domotica gateway` (socket path or http://host:port) instead")
 	llmTask := fs.String("llm-task", "", "with -gateway: the generation task of layer 4 (see llm-task.json in examples/domotica)")
 	decideTask := fs.String("decide-task", "", "with -gateway: the domotica task that serves layers 1-3 (default: in-process layers 1-2)")
 	timeout := fs.Duration("von-timeout", 60*time.Second, "deadline of one layer-4 decision (includes waking the replica)")
@@ -268,12 +268,12 @@ func cmdDomoticaEvalLLM(args []string) error {
 		}
 		fid = ""
 		for _, t := range tasks {
-			if t.Name == *decideTask && t.Kind == "domotica" {
+			if t.Name == *decideTask && t.Kind == "intent" {
 				fid = domotica.FastID(t)
 			}
 		}
 		if fid == "" {
-			return fmt.Errorf("the gateway has no domotica task %q", *decideTask)
+			return fmt.Errorf("the gateway has no intent task %q", *decideTask)
 		}
 		fast = lc.gw.Fast(*decideTask)
 	} else {

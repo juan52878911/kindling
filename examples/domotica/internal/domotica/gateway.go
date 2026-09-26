@@ -22,7 +22,7 @@ import (
 // del LLM se hace aquí, en quien la va a ejecutar, no en el gateway: el
 // gateway no sabe qué dispositivos hay.
 
-// GatewayClient habla con un `kling ai serve`.
+// GatewayClient habla con el gateway de IA (kindling-domotica gateway).
 type GatewayClient struct {
 	// Base es la URL del gateway («http://127.0.0.1:18080»; con un socket
 	// Unix, cualquier host y un Client que marque ese socket).

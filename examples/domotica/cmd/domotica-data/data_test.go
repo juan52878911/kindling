@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 )
 
 func TestYAML(t *testing.T) {

@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/chispa"
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/pkg/intent"
 )
 
 // LA CASCADA, RESPALDADA POR DATOS.
@@ -64,9 +64,9 @@ type EvalRequest struct {
 	VONAlone bool `json:"von_alone,omitempty"`
 	// DryRun no guarda el registro.
 	DryRun bool `json:"dry_run,omitempty"`
-	// Rows son las filas etiquetadas de una tarea de domótica (texto, idioma,
-	// intención y huecos): la orden entera, no solo una etiqueta.
-	Rows []domotica.Row `json:"rows,omitempty"`
+	// Rows son las filas etiquetadas de una tarea de intención (texto,
+	// idioma, intención y huecos): la orden entera, no solo una etiqueta.
+	Rows []intent.Row `json:"rows,omitempty"`
 }
 
 // EvalResults son las cifras.
@@ -215,8 +215,8 @@ func (c CascadeState) On() bool { return c.Status == "on" || c.Status == "forced
 
 // gate decide si la cascada de una tarea puede activarse.
 func (g *Gateway) gate(cfg *Config, name string, tc *TaskConfig) CascadeState {
-	if tc.Domotica != nil {
-		return g.gateDomotica(cfg, name, tc)
+	if tc.Intent != nil {
+		return g.gateIntent(cfg, name, tc)
 	}
 	if tc.EscalateTo == "" || tc.Chispa == "" {
 		return CascadeState{Status: "off"}

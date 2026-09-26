@@ -2,7 +2,7 @@
 // secuencias lineal (perceptrón estructurado promediado con Viterbi) sobre
 // características de token hasheadas, con pesos int16. Es a los huecos
 // («device», «area», «value»…) lo que pkg/chispa es a la intención: pequeño,
-// determinista, de microsegundos y sin dependencias. Ver docs/domotica.md.
+// determinista, de microsegundos y sin dependencias. Ver docs/intent.md.
 //
 // Garantías, como en pkg/chispa:
 //   - Determinismo: hash propio, pesos enteros, suma entera; el mismo .chispas y
@@ -47,8 +47,8 @@ type Spec struct {
 	MaxTokens    int    `json:"max_tokens"`
 }
 
-// DefaultSpec es la especificación con la que se evaluó el etiquetador de
-// domótica (docs/DOMOTICA-EVAL.md).
+// DefaultSpec es la especificación con la que se evaluó el etiquetador
+// (docs/intent.md).
 func DefaultSpec() Spec {
 	return Spec{Buckets: DefaultBuckets, Window: 2, Affix: 3, Lexicon: true,
 		MaxTextBytes: DefaultMaxTextBytes, MaxTokens: DefaultMaxTokens}

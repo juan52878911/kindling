@@ -14,7 +14,7 @@ import (
 // lenta de una tarea no puede parar las de las demás, que solo tocan un mapa
 // ya en memoria. Este test deja la carga de una ruta bloqueada a propósito y
 // comprueba que otra ruta no espera a que termine.
-func TestDomoFilesGetSlotsCargaFueraDelCandado(t *testing.T) {
+func TestIntentFilesGetSlotsCargaFueraDelCandado(t *testing.T) {
 	orig := loadSlotsFn
 	t.Cleanup(func() { loadSlotsFn = orig })
 
@@ -28,7 +28,7 @@ func TestDomoFilesGetSlotsCargaFueraDelCandado(t *testing.T) {
 		return &slots.Model{}, nil
 	}
 
-	f := &domoFiles{}
+	f := &intentFiles{}
 	done := make(chan struct{})
 	go func() {
 		if _, err := f.getSlots("lenta"); err != nil {
@@ -57,7 +57,7 @@ func TestDomoFilesGetSlotsCargaFueraDelCandado(t *testing.T) {
 // La misma carga a la vez, dos veces: la segunda comprobación bajo el
 // candado asegura que solo una entrada gana y todas las llamadas concurrentes
 // terminan viendo el mismo modelo.
-func TestDomoFilesGetSlotsDobleComprobacion(t *testing.T) {
+func TestIntentFilesGetSlotsDobleComprobacion(t *testing.T) {
 	orig := loadSlotsFn
 	t.Cleanup(func() { loadSlotsFn = orig })
 
@@ -68,7 +68,7 @@ func TestDomoFilesGetSlotsDobleComprobacion(t *testing.T) {
 		return &slots.Model{}, nil
 	}
 
-	f := &domoFiles{}
+	f := &intentFiles{}
 	const n = 8
 	results := make([]*slots.Model, n)
 	var wg sync.WaitGroup
@@ -95,7 +95,7 @@ func TestDomoFilesGetSlotsDobleComprobacion(t *testing.T) {
 }
 
 // getHead tiene el mismo candado, comprobado dos veces: mismo diseño.
-func TestDomoFilesGetHeadCargaFueraDelCandado(t *testing.T) {
+func TestIntentFilesGetHeadCargaFueraDelCandado(t *testing.T) {
 	orig := loadHeadFn
 	t.Cleanup(func() { loadHeadFn = orig })
 
@@ -109,7 +109,7 @@ func TestDomoFilesGetHeadCargaFueraDelCandado(t *testing.T) {
 		return &codificador.Head{}, nil
 	}
 
-	f := &domoFiles{}
+	f := &intentFiles{}
 	done := make(chan struct{})
 	go func() {
 		if _, err := f.getHead("lenta"); err != nil {

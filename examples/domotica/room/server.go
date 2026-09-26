@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 )
 
 // La página es un solo documento con su CSS y su JS al lado, sin CDN ni nada

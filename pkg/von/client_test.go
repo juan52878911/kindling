@@ -260,7 +260,7 @@ func TestMakeGoldenPrefijos(t *testing.T) {
 	c := d.servir(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pre := []Prefix{{System: "You control a smart home."}, {System: "You triage tickets.", User: "Ticket:"}}
+	pre := []Prefix{{System: "You answer support tickets."}, {System: "You triage tickets.", User: "Ticket:"}}
 	g, err := MakeGolden(ctx, c, GoldenOptions{
 		Image: "q", Snapshot: "q", Ref: "q:q8_0", VCPUs: 2, MemMiB: 1024, Wait: 5 * time.Second,
 		Prefixes: pre, Labels: map[string]string{LabelPrefixes: "viejo"},

@@ -28,7 +28,7 @@ import (
 // MEJORA CONTINUA: que Chispa aprenda lo que otros resolvieron por él.
 //
 // Cuando Chispa duda, alguien más lento contesta: VON en la cascada, el
-// codificador en una tarea de domótica, el propio cliente (escalate: true y
+// codificador en una tarea de intención, el propio cliente (escalate: true y
 // «quien llama decide») o una persona. Este fichero guarda esos casos, opt-in
 // por tarea, para que `kling ai retrain` entrene un Chispa nuevo con ellos y
 // solo lo promocione si gana en un conjunto de CONFIANZA (docs/mejora-continua.md).
@@ -52,7 +52,7 @@ import (
 //  4. Solo se movían umbrales, sin texto. Aquí se guarda el texto (opt-in,
 //     acotado, con un filtro de secretos) o solo su hash.
 
-// LearnConfig es el bloque "learn" de una tarea de clasificación o de domótica.
+// LearnConfig es el bloque "learn" de una tarea de clasificación o de intención.
 type LearnConfig struct {
 	// Capture guarda las escaladas: "text" (el texto, pasado por un filtro de
 	// secretos), "hash" (solo su sha256: nada legible en disco, y entonces
@@ -158,7 +158,7 @@ func (l LearnConfig) capturing() bool {
 var teacherRE = regexp.MustCompile(`^(ext:)?[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // validateLearn comprueba el bloque learn de una tarea (de clasificación o de
-// domótica; quien llama ya rechazó las de generación).
+// intención; quien llama ya rechazó las de generación).
 func validateLearn(task string, l *LearnConfig, escalateTo string) []error {
 	var errs []error
 	bad := func(f string, a ...any) {

@@ -412,10 +412,10 @@ func aiList(args []string) error {
 	for _, n := range sortedNames(cfg.Tasks) {
 		t := cfg.Tasks[n]
 		samples, kind, model, casc := "-", "classify", t.Chispa, "-"
-		if t.Domotica != nil {
-			kind, model = "domotica", t.Domotica.Intent
-			if t.Domotica.Encoder != "" {
-				casc = "-> " + t.Domotica.Encoder
+		if t.Intent != nil {
+			kind, model = "intent", t.Intent.Model
+			if t.Intent.Encoder != "" {
+				casc = "-> " + t.Intent.Encoder
 			}
 		} else if t.IsGenerate() {
 			kind, model = "generate", t.VON
@@ -468,7 +468,7 @@ func aiTest(args []string) error {
 	fields := fs.String("fields", "", `structured fields as JSON, e.g. {"service":"api"}`)
 	asJSON := fs.Bool("json", false, "print the full JSON answer")
 	explain := fs.Bool("explain", false, "include Chispa's evidence also when it answers")
-	fs.String("lang", "", "language of a domotica command (es, en; default auto)")
+	fs.String("lang", "", "language of an intent task's command (es, en…; default auto)")
 	mk := aiClientFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -487,7 +487,7 @@ func aiTest(args []string) error {
 	if err != nil {
 		return err
 	}
-	if isDomoticaTask(c, req.Task) {
+	if isIntentTask(c, req.Task) {
 		req.Lang = lang
 		var d aigw.DecideResponse
 		if err := c.do(http.MethodPost, "/v1/decide", req, &d); err != nil {
@@ -678,8 +678,8 @@ func aiEval(args []string) error {
 	if err != nil {
 		return err
 	}
-	if isDomoticaTask(c, fs.Arg(0)) {
-		return aiEvalDomotica(c, fs.Arg(0), *data, *dry, *asJSON)
+	if isIntentTask(c, fs.Arg(0)) {
+		return aiEvalIntent(c, fs.Arg(0), *data, *dry, *asJSON)
 	}
 	exs, err := readEvalData(*data)
 	if err != nil {
