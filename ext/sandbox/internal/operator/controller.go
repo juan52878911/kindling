@@ -250,10 +250,28 @@ func (c *Controller) snapshot() []*Sandbox {
 // el mismo puntero que vive en la caché mientras otra goroutine lo lee): todo
 // cambio se hace sobre una copia local que, si algo se escribió de verdad en
 // Kubernetes, se guarda de vuelta en la caché con remember. reconcileMu
-// asegura que dos llamadas (una de watch, una de resync) no se crucen.
+// asegura que dos llamadas (una de watch, una de resync) no se crucen, y sb
+// solo dice QUÉ Sandbox reconciliar: el estado se relee de la caché dentro
+// del candado.
 func (c *Controller) reconcile(ctx context.Context, sb *Sandbox) {
 	c.reconcileMu.Lock()
 	defer c.reconcileMu.Unlock()
+
+	// sb se leyó de la caché ANTES de tomar reconcileMu, y mientras se
+	// esperaba el candado otra reconciliación pudo avanzar este mismo
+	// Sandbox: el resync, por ejemplo, fotografía la caché con "finalizer
+	// puesto, aún sin crear" justo cuando la reconciliación del watch está
+	// creándolo, y al entrar después volvería a ver status.id vacío y lo
+	// crearía dos veces. Así que se reconcilia lo más nuevo que la caché
+	// conoce ya dentro del candado; si ya no está (un DELETED lo sacó), no
+	// queda nada que hacer.
+	latest := c.lookup(sb.Key())
+	if latest == nil {
+		return
+	}
+	if rvOf(latest) >= rvOf(sb) {
+		sb = latest
+	}
 
 	cur := *sb
 	ns, name := cur.Metadata.Namespace, cur.Metadata.Name
