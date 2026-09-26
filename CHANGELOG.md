@@ -8,7 +8,7 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
-## v0.13.0 — sin publicar
+## v0.13.0 — 2026-09-26
 
 **Un repositorio, una release.** kindling-mcp y kindling-sandbox entran en este
 repositorio como extensiones, en `ext/mcp` y `ext/sandbox`, con su historial, y
