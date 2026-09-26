@@ -502,6 +502,47 @@ func TestReconcile_NoDuplicateCreation(t *testing.T) {
 	}
 }
 
+// TestReconcile_StaleSnapshotDoesNotRecreate fija, sin depender de tiempos,
+// la carrera que TestReconcile_NoDuplicateCreation solo pilla de vez en
+// cuando: el resync fotografía la caché (snapshot) cuando el Sandbox aún no
+// tiene status.id y, antes de que le toque reconciliarlo, otra reconciliación
+// (la del watch) lo crea. La foto vieja no debe provocar un segundo create.
+func TestReconcile_StaleSnapshotDoesNotRecreate(t *testing.T) {
+	k8s := newFakeK8s(t)
+	fr := newFakeFrontal(t)
+	k8s.seed(newTestSandbox("default", "stale"))
+
+	ctrl := NewController(k8s.client(), fr.client(), nil)
+	ctx := testCtx(t)
+	list, err := ctrl.Kube.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 sandbox in the list, got %d", len(list.Items))
+	}
+	ctrl.remember(&list.Items[0])
+
+	// La foto del resync, tomada antes de que nadie reconcilie.
+	stale := ctrl.snapshot()[0]
+
+	// La reconciliación del watch llega primero: pone el finalizer y crea.
+	ctrl.reconcile(ctx, ctrl.lookup(stale.Key()))
+	if got := fr.createdCount(); got != 1 {
+		t.Fatalf("expected 1 create after the first reconcile, got %d", got)
+	}
+
+	// Ahora el resync procesa su foto vieja (sin finalizer, sin status.id).
+	ctrl.reconcile(ctx, stale)
+	if got := fr.createdCount(); got != 1 {
+		t.Fatalf("stale snapshot created the sandbox again: expected 1 create, got %d", got)
+	}
+	sb, _ := k8s.get("default/stale")
+	if sb.Status.ID == "" {
+		t.Fatalf("expected status.id to be set, got %+v", sb.Status)
+	}
+}
+
 func TestReconcile_DeleteCallsFrontalAndRemovesFinalizer(t *testing.T) {
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)

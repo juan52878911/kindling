@@ -157,6 +157,10 @@ v0.2.2.
   `make -C ext/sandbox operator-image`). La guía pasa a
   [`docs/kubernetes.md`](docs/kubernetes.md).
 - El repo kindling-sandbox queda archivado, con sus releases.
+- El operador ya no crea dos veces el mismo sandbox en el frontal cuando el
+  resync reconciliaba una foto de la caché tomada antes de que la
+  reconciliación del watch terminara de crearlo: `reconcile` relee el Sandbox
+  de la caché ya dentro de su candado.
 
 ### Ejemplos
 
