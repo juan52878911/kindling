@@ -1,0 +1,81 @@
+# Comprobaciones en cada push. Separado de release.yml, que solo corre con tags.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: vet, fmt y test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # El checkout del núcleo es para el test que ata las familias de runtime
+      # de `kling add` con 70-build-minimal-image.sh (vive en kindling). La
+      # compilación usa la versión de kindling que fija go.mod, no esta copia.
+      - uses: actions/checkout@v4
+        with:
+          repository: juan52878911/kindling
+          path: .kindling
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l $(git ls-files '*.go'))"
+          if [ -n "$out" ]; then
+            echo "estos ficheros no están formateados:" >&2
+            echo "$out" >&2
+            gofmt -d $out >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        env:
+          KINDLING_DIR: ${{ github.workspace }}/.kindling
+        run: go test -race ./...
+
+      # kling-mcp corre en el portátil (macOS o Linux) y en el host del daemon;
+      # el puente, dentro de microVMs Linux y también en local.
+      - name: cross-compile
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/kling-mcp
+          GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-mcp
+          GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling-mcp
+          CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-bridge
+          CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling-bridge
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/kling-bridge
+
+  # Aviso temprano de que el núcleo en main rompe algo de lo que usa la
+  # extensión. No bloquea: lo que se publica es contra la versión de go.mod.
+  kindling-main:
+    name: contra kindling@main
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: juan52878911/kindling
+          path: .kindling
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: go test con go.work
+        env:
+          KINDLING_DIR: ${{ github.workspace }}/.kindling
+        run: |
+          go work init . ./.kindling
+          go vet ./cmd/... ./internal/...
+          go test ./cmd/... ./internal/...

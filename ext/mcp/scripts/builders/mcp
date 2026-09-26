@@ -1,0 +1,3 @@
+#!/bin/sh
+# Constructor "mcp" de kindling-mcp: el daemon de kindling lo ejecuta como root.
+exec /usr/local/bin/kling-mcp builder mcp "$@"
