@@ -8,9 +8,11 @@
 BIN     := kling
 PKG     := ./cmd/kling
 
-# La extensión de la demo domótica: vive en examples/ pero es del módulo raíz
-# (no tiene dependencias) y se publica como kling-domotica-<os>-<arch>.
-DOMOTICA_PKG := ./examples/domotica/cmd/kling-domotica
+# El ejemplo grande (la habitación domótica de demo): un programa aparte,
+# kindling-domotica, que usa kindling como cualquier aplicación. Es del módulo
+# raíz (no tiene dependencias) pero no es parte de kling: ni se instala con
+# `make install` ni se publica en la release; `make domotica` lo compila.
+DOMOTICA_PKG := ./examples/domotica
 
 # Plataformas que publica la release (Windows no: el código usa syscalls POSIX).
 CROSS_PLATS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
@@ -87,12 +89,13 @@ chispa-guest:
 		-ldflags "$(LDFLAGS)" -o kling-chispa ./cmd/kling-chispa
 	@echo "kling-chispa  ($(VERSION), linux/$(GOARCH))"
 
-## domotica — la extensión kling-domotica (examples/domotica/cmd/kling-domotica),
-## para tu máquina. Es del módulo raíz porque no tiene dependencias; kling la
-## descubre por su nombre, igual que la instalaría `kling plugins install domotica`.
+## domotica — el ejemplo kindling-domotica (examples/domotica: gateway de IA con
+## el dominio de la habitación, la página y sus herramientas), para tu máquina
+## (GOOS/GOARCH para otra). No es una extensión: kling no lo descubre ni lo
+## instala; se copia y se ejecuta como cualquier programa (examples/domotica/README.md).
 domotica:
-	go build -trimpath -ldflags "$(LDFLAGS)" -o kling-domotica $(DOMOTICA_PKG)
-	@echo "kling-domotica  ($(VERSION))"
+	go build -trimpath -ldflags "$(LDFLAGS)" -o kindling-domotica $(DOMOTICA_PKG)
+	@echo "kindling-domotica  ($(VERSION))"
 
 ## daemon — compila el binario del host con KVM (linux/$(GOARCH), amd64 por defecto)
 daemon:
@@ -217,7 +220,8 @@ test:
 ## cross — las compilaciones cruzadas de lo que publica la release desde este
 ## módulo, sin escribir nada (-o /dev/null). kling en las cuatro plataformas
 ## (en darwin es el CLI; en linux, CLI y daemon), los invitados solo en linux
-## porque son el PID 1 de las microVMs, y kling-domotica en las cuatro. Sin cgo,
+## porque son el PID 1 de las microVMs, y el ejemplo kindling-domotica en las
+## cuatro (no se publica, pero tiene que seguir compilando). Sin cgo,
 ## como en la release: que el núcleo compile así es parte del contrato.
 cross:
 	@set -e; for p in $(CROSS_PLATS); do \
@@ -225,7 +229,7 @@ cross:
 	  echo "  kling $$os/$$arch"; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null $(PKG); \
 	  if [ -d $(DOMOTICA_PKG) ]; then \
-	    echo "  kling-domotica $$os/$$arch"; \
+	    echo "  kindling-domotica (example) $$os/$$arch"; \
 	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null $(DOMOTICA_PKG); \
 	  fi; \
 	  if [ $$os = linux ]; then \
@@ -248,4 +252,4 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa kling-domotica
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa kindling-domotica

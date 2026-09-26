@@ -4,7 +4,7 @@
 # USO
 #   curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --tag v0.13.0 --prefix ~/.local/bin
-#   curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox,domotica
+#   curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 #   curl -fsSL .../install.sh | sh -s -- --dry-run
 #
 # Comportamiento:
@@ -14,7 +14,7 @@
 #     mover nada a su sitio.
 #   - Si se pasa --prefix DIR, instala en DIR; por defecto ~/.local/bin
 #     (crea el directorio si no existe, sin pedir sudo si es del usuario).
-#   - --with mcp,sandbox,domotica baja además esas extensiones de LA MISMA
+#   - --with mcp,sandbox baja además esas extensiones de LA MISMA
 #     release (todo lo de una release es compatible entre sí), las verifica con
 #     el mismo SHA256SUMS y las deja en el directorio de extensiones, igual que
 #     `kling plugins install <n>`: primer directorio de $KLING_PLUGIN_PATH; si
@@ -57,7 +57,7 @@ Uso: install.sh [opciones]
   --prefix DIR       directorio destino (por defecto: ~/.local/bin)
   --repo OWNER/NAME  repo de GitHub (por defecto: juan52878911/kindling)
   --with LISTA       instala también estas extensiones de la misma release,
-                     separadas por comas: mcp, sandbox, domotica
+                     separadas por comas: mcp, sandbox
   --plugin-dir DIR   dónde dejar las extensiones (por defecto el directorio de
                      extensiones de kling: ~/.local/share/kling/plugins)
   --skip-kling       no instala kling: solo las extensiones de --with
@@ -127,8 +127,8 @@ detect_platform
 EXTS=""
 for e in $(printf '%s' "$WITH" | tr ',' ' '); do
     case "$e" in
-        mcp|sandbox|domotica) ;;
-        *) echo "extensión desconocida en --with: $e (válidas: mcp, sandbox, domotica)" >&2; exit 2 ;;
+        mcp|sandbox) ;;
+        *) echo "extensión desconocida en --with: $e (válidas: mcp, sandbox)" >&2; exit 2 ;;
     esac
     # Sin repetidas: --bridge y --with mcp a la vez no la instalan dos veces.
     case " $EXTS " in *" $e "*) ;; *) EXTS="${EXTS:+$EXTS }$e" ;; esac
