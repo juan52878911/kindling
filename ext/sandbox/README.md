@@ -1,7 +1,14 @@
-# kindling-sandbox
+# kling-sandbox
+
+> Parte de **kindling v0.13.0** (sin publicar). Hasta v0.2.2 esto era el
+> repositorio aparte kindling-sandbox (archivado; sus releases siguen allí); desde
+> kindling v0.13.0 vive en `ext/sandbox` del repositorio de kindling y sale en la
+> misma release que el núcleo, con la misma versión. Las novedades van al
+> [CHANGELOG de la raíz](../../CHANGELOG.md); el [antiguo](CHANGELOG.md) está
+> congelado.
 
 Sandboxes para agentes de código sobre las microVMs Firecracker de
-[kindling](https://github.com/juan52878911/kindling), servidos por un frontal con
+[kindling](../../README.es.md), servidos por un frontal con
 plantillas, inquilinos y varios hosts detrás.
 
 kindling ya sabe crear un sandbox: `kling sandbox create` levanta una microVM de
@@ -10,7 +17,7 @@ esto es lo que el núcleo no debe llevar:
 
 - **Un extremo en la red con autenticación.** El daemon de kindling escucha solo
   en un socket Unix y equivale a root en su host; no se le pone un token, se le
-  pone un frontal delante. Es el mismo patrón del gateway de kindling-mcp.
+  pone un frontal delante. Es el mismo patrón del gateway de [kling-mcp](../mcp/README.es.md).
 - **Plantillas como receta.** Se declara de qué imagen partir y qué instalar; de
   ahí sale un snapshot dorado del que los sandboxes nacen en milisegundos. Es una
   receta y no un artefacto porque los snapshots están atados a su host: un
@@ -32,13 +39,24 @@ contabilidad. Quien necesite aislamiento fuerte, hosts separados.
 
 ## Instalación
 
-Primero kindling (v0.7 o posterior), y esto encima:
+Primero kindling, y esta extensión encima, de la misma release:
 
 ```sh
-make install                          # kling-sandbox en tu máquina
-kling plugins                         # debería salir sandbox
+kling plugins install sandbox         # kling-sandbox en tu máquina (o: install.sh --with sandbox)
+kling plugins ls                      # debería salir sandbox con estado ok
+```
+
+El frontal corre como servicio en el host del daemon: la unidad viene en
+`kindling-sandbox-host.tar.gz` de cada release o, desde un clon de kindling:
+
+```sh
+cd ext/sandbox
+make install                          # compila e instala kling-sandbox desde fuentes
 make deploy HOST=ssh://juan@lab       # el frontal, como servicio, en el host del daemon
 ```
+
+Los objetivos de `make` y las rutas `cmd/…`, `deploy/…` de esta guía son
+relativos a `ext/sandbox`.
 
 ## Uso
 
@@ -82,11 +100,13 @@ curl -H "Authorization: Bearer $TOK" http://gateway:8090/v1/templates  # qué ha
 y un operador fino y sin dependencias externas lo crea, lo mantiene y lo
 borra hablando con este mismo frontal por HTTP. Las microVMs siguen sin vivir
 dentro de ningún clúster; Kubernetes solo hace de plano de control. Ver
-[`docs/kubernetes.md`](docs/kubernetes.md).
+[`docs/kubernetes.md`](../../docs/kubernetes.md). La imagen es
+`ghcr.io/juan52878911/kindling-operator:<versión de kindling>` y los manifiestos
+salen también como `kindling-operator-deploy.tar.gz` en cada release.
 
 ## Compatibilidad
 
-| kindling-sandbox | kindling |
-|---|---|
-| v0.2.x | v0.8.x |
-| v0.1.x | v0.7.x |
+Todos los binarios de una release de kindling son compatibles entre sí: usa
+`kling-sandbox` y `kindling-operator` de la misma versión que tu `kling`. La
+tabla histórica, de cuando eran repos aparte, está en el
+[CHANGELOG congelado](CHANGELOG.md).

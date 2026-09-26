@@ -1,49 +1,46 @@
-# kindling-mcp
+# kling-mcp
 
-Serverless MCP tools on [kindling](https://github.com/juan52878911/kindling)'s
-Firecracker microVMs. Take any open source MCP server and turn it automatically into a
+Serverless MCP tools on [kindling](../../README.md)'s Firecracker microVMs. Take any open source MCP server and turn it automatically into a
 service that comes up on demand, in milliseconds, with kernel-level isolation.
 
-kindling-mcp is an **extension of `kling`**: it does not add a new command to learn. Once
+kling-mcp is an **extension of `kling`**: it does not add a new command to learn. Once
 installed, `kling mcp`, `kling add`, `kling search`, `kling connect`, `kling gateway`,
 `kling export`, `kling memory` and `kling migrate` appear in the same `kling` you already
 use, in its help and in its shell completion.
 
-> Status: **v0.1.0** — the MCP half of kindling v0.4/v0.5, now on its own on top of the
-> kindling v0.6 core. Nothing changes for whoever used it: the same commands, the same
-> snapshots (migrated in place by the daemon), the same gateway.
+> Status: part of **kindling v0.13.0** (unreleased). Until v0.4.0 this was the separate
+> kindling-mcp repository (archived; its releases are still there); since kindling
+> v0.13.0 it lives in `ext/mcp` of the kindling repository and ships in the same release
+> as the core, with the same version. Every binary in a release is compatible with every
+> other. Changes go to the [root CHANGELOG](../../CHANGELOG.md); the
+> [old one](CHANGELOG.md) is frozen.
 
 **The guest is assumed hostile**: there is no telling which MCP server will end up being
-hosted. See kindling's [SECURITY.md](https://github.com/juan52878911/kindling/blob/main/SECURITY.md).
+hosted. See kindling's [SECURITY.md](../../SECURITY.md).
 
 ## Installation
 
-kindling first — the core with the daemon — and this extension on top:
+kindling first — the core with the daemon — and this extension on top, from the same
+release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling-mcp/main/scripts/install.sh | sh
-kling plugins                 # kling-mcp should be listed
+kling plugins install mcp     # or: install.sh --with mcp
+kling plugins ls              # mcp should be listed as ok
 ```
 
-That installs `kling-mcp` and `kling-bridge` on your machine. The host with the daemon
-needs its half too — the gateway, self-healing, the packager and the bridge that goes
-inside every image:
+That installs `kling-mcp` and its companion `kling-bridge` on your machine, both checked
+against the release's `SHA256SUMS`. The host with the daemon needs its half too — the
+gateway, self-healing, the packager and the bridge that goes inside every image. It ships
+as `kindling-mcp-host.tar.gz` in every release, or, from a checkout of kindling:
 
 ```sh
+cd ext/mcp
 make deploy HOST=ssh://juan@192.168.2.60   # after kindling's own make deploy
 make deploy-mac HOST=ssh://user@lima-vm    # arm64 Linux VM on Apple Silicon
 ```
 
-| kindling | kindling-mcp |
-|---|---|
-| v0.6.x | v0.1.x |
-| v0.7.x | v0.1.x, v0.2.x |
-| v0.8.x | v0.3.x |
-| v0.9.x | v0.4.x — needed for the native macOS backend (`kling-vz`) |
-
-The installer refuses to install next to a `kling` older than the minimum the extension
-declares.
+Every `make` target and `./scripts/…` path in this guide is relative to `ext/mcp`.
 
 ## Upgrading from kindling v0.5 or earlier
 
@@ -210,11 +207,11 @@ local model   ──>  gateway  ──>  microVM  ──>  MCP server
  (your Mac)       (Proxmox)     (Firecracker)   (stdio or HTTP)
 ```
 
-[examples/agent/agent.py](examples/agent/agent.py) closes it: an MCP client plus a
+[examples/mcp/agent.py](../../examples/mcp/agent.py) closes it: an MCP client plus a
 tool-calling loop against ollama.
 
 ```
-$ python3 examples/agent/agent.py "usa echo para decir hola"
+$ python3 examples/mcp/agent.py "usa echo para decir hola"
 → kindling-echo v1.0.0  sesión b2787e00
 → herramientas: echo, session_info
 → llamando echo({"text": "hola"})

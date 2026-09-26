@@ -1,50 +1,49 @@
-# kindling-mcp
+# kling-mcp
 
 Herramientas MCP serverless sobre las microVMs Firecracker de
-[kindling](https://github.com/juan52878911/kindling). Coge cualquier servidor MCP de código
+[kindling](../../README.es.md). Coge cualquier servidor MCP de código
 abierto y conviértelo automáticamente en un servicio que se levanta bajo demanda, en
 milisegundos, con aislamiento a nivel de kernel.
 
-kindling-mcp es una **extensión de `kling`**: no añade un comando nuevo que aprender. Una
+kling-mcp es una **extensión de `kling`**: no añade un comando nuevo que aprender. Una
 vez instalada, `kling mcp`, `kling add`, `kling search`, `kling connect`, `kling gateway`,
 `kling export`, `kling memory` y `kling migrate` aparecen en el mismo `kling` que ya usas,
 en su ayuda y en su completado.
 
-> Estado: **v0.1.0** — la mitad MCP de kindling v0.4/v0.5, ahora por su cuenta encima del
-> núcleo kindling v0.6. Para quien ya lo usaba no cambia nada: los mismos comandos, los
-> mismos snapshots (el daemon los migra en su sitio), el mismo gateway.
+> Estado: parte de **kindling v0.13.0** (sin publicar). Hasta v0.4.0 esto era el
+> repositorio aparte kindling-mcp (archivado; sus releases siguen allí); desde kindling
+> v0.13.0 vive en `ext/mcp` del repositorio de kindling y sale en la misma release que el
+> núcleo, con la misma versión. Todos los binarios de una release son compatibles entre
+> sí. Las novedades van al [CHANGELOG de la raíz](../../CHANGELOG.md); el
+> [antiguo](CHANGELOG.md) está congelado.
 
 **El invitado se asume hostil**: no se sabe qué servidor MCP acabará alojado. Mira el
-[SECURITY.md](https://github.com/juan52878911/kindling/blob/main/SECURITY.md) de kindling.
+[SECURITY.md](../../SECURITY.md) de kindling.
 
 ## Instalación
 
-Primero kindling — el núcleo con el daemon — y esta extensión encima:
+Primero kindling — el núcleo con el daemon — y esta extensión encima, de la misma
+release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling-mcp/main/scripts/install.sh | sh
-kling plugins                 # debería salir kling-mcp
+kling plugins install mcp     # o: install.sh --with mcp
+kling plugins ls              # debería salir mcp con estado ok
 ```
 
-Eso instala `kling-mcp` y `kling-bridge` en tu máquina. El host del daemon necesita su
-mitad — el gateway, la autocuración, el empaquetador y el puente que va dentro de cada
-imagen:
+Eso instala `kling-mcp` y su compañero `kling-bridge` en tu máquina, los dos verificados
+contra el `SHA256SUMS` de la release. El host del daemon necesita su mitad — el gateway,
+la autocuración, el empaquetador y el puente que va dentro de cada imagen. Sale como
+`kindling-mcp-host.tar.gz` en cada release o, desde un clon de kindling:
 
 ```sh
+cd ext/mcp
 make deploy HOST=ssh://juan@192.168.2.60   # después del make deploy de kindling
 make deploy-mac HOST=ssh://usuario@vm-lima # VM Linux arm64 en Apple Silicon
 ```
 
-| kindling | kindling-mcp |
-|---|---|
-| v0.6.x | v0.1.x |
-| v0.7.x | v0.1.x, v0.2.x |
-| v0.8.x | v0.3.x |
-| v0.9.x | v0.4.x — necesaria para el backend nativo de macOS (`kling-vz`) |
-
-El instalador se niega a instalar junto a un `kling` más viejo que el mínimo que declara
-la extensión.
+Todos los objetivos de `make` y las rutas `./scripts/…` de esta guía son relativos a
+`ext/mcp`.
 
 ## Si vienes de kindling v0.5 o anterior
 
@@ -213,11 +212,11 @@ modelo local  ──>  gateway  ──>  microVM  ──>  servidor MCP
   (tu Mac)        (Proxmox)     (Firecracker)   (stdio o HTTP)
 ```
 
-[examples/agent/agent.py](examples/agent/agent.py) lo cierra: un cliente MCP más un bucle
+[examples/mcp/agent.py](../../examples/mcp/agent.py) lo cierra: un cliente MCP más un bucle
 de tool-calling contra ollama.
 
 ```
-$ python3 examples/agent/agent.py "usa echo para decir hola"
+$ python3 examples/mcp/agent.py "usa echo para decir hola"
 → kindling-echo v1.0.0  sesión b2787e00
 → herramientas: echo, session_info
 → llamando echo({"text": "hola"})

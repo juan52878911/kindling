@@ -1,7 +1,16 @@
-# Changelog
+# Changelog de kindling-sandbox (congelado)
 
-Novedades de kindling-sandbox, el frontal de sandboxes para agentes de código
-sobre las microVMs de [kindling](https://github.com/juan52878911/kindling).
+> **Este fichero ya no se actualiza.** Desde kindling v0.13.0, kindling-sandbox vive en
+> `ext/sandbox` del repositorio de kindling y sale en la misma release que el núcleo.
+> Las novedades nuevas están en el [CHANGELOG de la raíz](../../CHANGELOG.md),
+> subsección `### kling-sandbox y operador`. Todos los binarios de una release son compatibles
+> entre sí, así que la tabla de abajo es solo historia.
+>
+> Lo que sigue es el historial de kindling-sandbox hasta v0.2.2, cuando era un repositorio
+> aparte (<https://github.com/juan52878911/kindling-sandbox>, archivado; sus releases
+> siguen allí).
+
+Compatibilidad histórica:
 
 | kindling-sandbox | kindling |
 |---|---|
