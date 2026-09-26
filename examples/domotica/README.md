@@ -3,9 +3,25 @@
 Una página web con una habitación dibujada —luces por zona con brillo y color,
 termostato, persianas, tele, altavoz, cerradura, alarma, ventilador y enchufe—
 que se maneja con órdenes de voz (como texto) en español o inglés. Es un
-**ejemplo que usa kindling**, no parte de él: no decide nada por sí mismo. Cada
-orden va al gateway de IA (`kling ai serve`), que la pasa por las capas, y la
-página enseña, orden a orden:
+**ejemplo que usa kindling**, no parte de él: un programa aparte,
+`kindling-domotica`, que kling ni instala ni publica ni descubre como
+extensión (`make domotica` lo compila). Tiene tres piezas:
+
+- `kindling-domotica gateway`: el gateway de IA **de kindling** (`pkg/aigw`,
+  el mismo que `kling ai serve`) con el dominio de la habitación dentro. Las
+  tareas de intención de kindling ([docs/intent.md](../../docs/intent.md))
+  toman su dominio de un esquema JSON o de un `intent.Domain` en Go; la
+  habitación necesita el segundo (plantillas con gramática, números en
+  palabras, léxico de zonas y colores), así que este programa lo registra como
+  `smart-room` y [`ai.json`](ai.json) lo nombra. Lo demás —réplicas
+  serverless, puertas, `kling ai eval`/`reload`/`retrain` contra su socket— es
+  kindling tal cual.
+- `kindling-domotica room`: la página. No decide nada por sí misma: cada
+  orden va al gateway, que la pasa por las capas.
+- `kindling-domotica decide|eval|train-slots|embed|train-encoder|templates|eval-llm`:
+  las herramientas para entrenar y evaluar las capas ([docs/domotica.md](../../docs/domotica.md)).
+
+La página enseña, orden a orden:
 
 - qué capa decidió (plantillas, Chispa, codificador o LLM), con su confianza y
   su latencia (µs las rápidas, ms el codificador, segundos el LLM);
@@ -18,7 +34,7 @@ página enseña, orden a orden:
 - la acción en JSON y lo que haría la habitación, animado en el plano.
 
 ```
-navegador ──HTTP/SSE──> examples/domotica ──/v1/decide───> kling ai serve ──> plantillas (en su proceso, µs)
+navegador ──HTTP/SSE──> kindling-domotica room ──/v1/decide───> kindling-domotica gateway ──> plantillas (en su proceso, µs)
  (la habitación)        (simulador + página)  /v1/generate      │                ├─> Chispa + huecos: microVM, dorado de kling chispa deploy (<1 ms despierta)
                               │                /metrics         │                └─> codificador: microVM, dorado kind embed (ms)
                               │                                 └─> LLM (VON): microVM, dorado con el prompt ya evaluado (s)
@@ -29,10 +45,10 @@ navegador ──HTTP/SSE──> examples/domotica ──/v1/decide───> kli
 
 | capa | dónde | qué decide | cuándo entra |
 |---|---|---|---|
-| 1. plantillas | proceso del gateway | las órdenes de la demo, exactas (`kling domotica templates`) | siempre primero |
+| 1. plantillas | proceso del gateway | las órdenes de la demo, exactas (`kindling-domotica templates`) | siempre primero |
 | 2. Chispa | microVM (`kling chispa deploy`, backend `microvm`), o el proceso del gateway | intención + huecos de lo que se parece a una orden | si no encaja una plantilla |
 | 3. codificador | microVM (`kind embed`) | intención de frases que Chispa duda | si su evaluación la respalda (`kling ai eval room`) |
-| 4. LLM | microVM (VON) | varias órdenes en una, valores relativos, paráfrasis raras | si su evaluación la respalda (`kling domotica eval-llm`), y **solo con el alcance que respalda** |
+| 4. LLM | microVM (VON) | varias órdenes en una, valores relativos, paráfrasis raras | si su evaluación la respalda (`kindling-domotica eval-llm`), y **solo con el alcance que respalda** |
 
 La capa 4 contesta con JSON restringido por un esquema (`{"kind", "reply",
 "actions":[{"intent","device","area","value","color"}]}`) y la demo lo valida
@@ -58,7 +74,7 @@ huecos a la tarea:
 ```json
 "chispa-room": {"kind": "chispa", "path": "domotica/intent.chispa"},
 ...
-"room": {"domotica": {"intent": "chispa-room", "slots": "domotica/slots.chispas", "encoder": "encoder", "head": "domotica/head.jenc"}}
+"room": {"intent": {"model": "chispa-room", "domain": "smart-room", "slots": "domotica/slots.chispas", "encoder": "encoder", "head": "domotica/head.jenc"}}
 ```
 
 Las dos dan las mismas decisiones (mismos pesos; en el servidor, `kling ai
@@ -81,8 +97,8 @@ aprenda lo indirecto o haya un LLM mejor. `-layer4-force` la enciende para todo.
 ## En el Mac o en un Linux, para probar
 
 ```sh
-# 0. la extensión que sirve `kling domotica` (fuera del núcleo desde v0.13.0)
-kling plugins install domotica        # o: go build -o ~/.local/share/kling/plugins/kling-domotica ./examples/domotica/cmd/kling-domotica
+# 0. el programa (desde la raíz del repo)
+make domotica                         # → ./kindling-domotica; ponlo en tu PATH si quieres
 
 # 1. modelos de las capas rápidas (docs/domotica.md) y el LLM
 kling models add von-qwen15-dom -model qwen2.5-1.5b-instruct -quant q4_k_m \
@@ -94,17 +110,20 @@ kling chispa deploy chispa-room -model intent.chispa -slots slots.chispas
 # 3. el registro del gateway: ai.json de este directorio, con las rutas y los dorados de tu host
 mkdir -p ~/.config/kling/domotica && cp head.jenc ~/.config/kling/domotica/
 cp examples/domotica/ai.json ~/.config/kling/ai.json     # quita "encoder"/"head" si no tienes codificador
-kling ai serve &                                          # socket 0600 en ~/.config/kling/ai.sock
+kindling-domotica gateway &                               # el gateway con el dominio smart-room; socket 0600 en ~/.config/kling/ai.sock
+kling ai eval room -data ~/Library/Caches/kindling/domotica/data/test.jsonl   # la puerta de la capa 3 (con codificador)
 
 # 4. la puerta de la capa 4 (10 min en un M4): escribe layer4-room-llm.json
-kling domotica eval-llm -gateway ~/.config/kling/ai.sock -llm-task room-llm -decide-task room \
+kindling-domotica eval-llm -gateway ~/.config/kling/ai.sock -llm-task room-llm -decide-task room \
     -data ~/Library/Caches/kindling/domotica/data/test.jsonl
 
 # 5. la demo
-go run ./examples/domotica                                # http://127.0.0.1:8088/
+kindling-domotica room                                    # http://127.0.0.1:8088/
 ```
 
-Sin gateway, `-offline` sirve las capas 1 y 2 en el propio proceso (con
+Los flags de `kindling-domotica room` (los de `gateway` son un subconjunto de
+los de `kling ai serve`: `-config`, `-socket`, `-listen`, `-H`, `-id`, `-idle`,
+`-max-replicas`…). Sin gateway, `-offline` sirve las capas 1 y 2 en el propio proceso (con
 `intent.chispa` y `slots.chispas` de la carpeta de modelos): las demás salen «no
 disponible».
 
@@ -145,11 +164,10 @@ Medido allí (i7-8700T, 4 núcleos del CT, Firecracker sin anidar):
 ```sh
 # desde el Mac: binarios linux/amd64 y datos
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/kling ./cmd/kling
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/domotica-demo ./examples/domotica
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/kling-domotica ./examples/domotica/cmd/kling-domotica
-ssh ct105 'mkdir -p ~/domotica/models ~/domotica/data ~/.local/share/kling/plugins'
-scp /tmp/kling /tmp/domotica-demo examples/domotica/ai.json ct105:domotica/
-scp /tmp/kling-domotica ct105:.local/share/kling/plugins/          # la extensión de `kling domotica`
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/kindling-domotica ./examples/domotica
+ssh ct105 'mkdir -p ~/domotica/models ~/domotica/data'
+scp /tmp/kling /tmp/kindling-domotica examples/domotica/ai.json ct105:domotica/
+scp examples/domotica/*.service ct105:domotica/
 scp $M/intent.chispa $M/slots.chispas ct105:domotica/models/        # M: carpeta de modelos de domótica
 scp $D/train.jsonl $D/valid.jsonl $D/test.jsonl ct105:domotica/data/
 
@@ -172,9 +190,9 @@ sudo env UV_SHA256_X86=89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a
 sudo rm -rf ~/.cache/kindling/encoder-gguf
 ./kling models add x86-enc-e5 -model multilingual-e5-small
 ./kling run -from x86-enc-e5 -name enc-train && A=$(./kling inspect enc-train | jq -r .ip)
-./kling domotica embed -url http://$A:8000 -model multilingual-e5-small \
+./kindling-domotica embed -url http://$A:8000 -model multilingual-e5-small \
     -data data/train.jsonl,data/valid.jsonl,data/test.jsonl -o models/e5.jemb
-./kling domotica train-encoder -data data/train.jsonl -valid data/valid.jsonl -cache models/e5.jemb \
+./kindling-domotica train-encoder -data data/train.jsonl -valid data/valid.jsonl -cache models/e5.jemb \
     -o models/head.jenc -intent models/intent.chispa -slots models/slots.chispas
 ./kling rm enc-train
 
@@ -188,7 +206,7 @@ sudo cp kindling-domotica-gateway.service kindling-domotica.service /etc/systemd
 sudo systemctl daemon-reload && sudo systemctl enable --now kindling-domotica-gateway
 ./kling ai eval room -data data/test.jsonl -socket ~/domotica/ai.sock              # la puerta de la capa 3
 ./kling ai reload -socket ~/domotica/ai.sock
-KLING_DOMOTICA_MODELS=~/domotica/models ./kling domotica eval-llm \
+KLING_DOMOTICA_MODELS=~/domotica/models ./kindling-domotica eval-llm \
     -gateway ~/domotica/ai.sock -llm-task room-llm -decide-task room -data data/test.jsonl  # la de la capa 4 (~20 min)
 sudo systemctl enable --now kindling-domotica                                      # lee el registro al arrancar
 ```
@@ -216,8 +234,12 @@ del daemon y el del gateway no salen del host (0600).
 
 | fichero | qué |
 |---|---|
-| `main.go` | flags, cliente del gateway, puerta de la capa 4, panel de máquinas (pkg/api) |
-| `cmd/kling-domotica/` | la extensión que sirve `kling domotica` (`plugin.Main`): decidir, evaluar y entrenar las capas; `eval-llm` escribe el registro de la capa 4 |
+| `main.go` | `kindling-domotica`: despacha los subcomandos |
+| `gateway.go` | `kindling-domotica gateway`: el gateway de kindling (`pkg/aigw`) con el dominio `smart-room` registrado |
+| `room.go` | `kindling-domotica room`: flags, cliente del gateway, puerta de la capa 4, panel de máquinas (pkg/api) |
+| `internal/domotica/` | lo que sabe de la habitación: plantillas, léxico, números, taxonomía (su `intent.Domain`), capa 4 y evaluaciones |
+| `internal/tools/` | `decide`, `eval`, `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm` (escribe el registro de la capa 4) |
+| `cmd/domotica-data/` | descarga y conversión de los datos libres ([docs/domotica-datos.md](../../docs/domotica-datos.md)) |
 | `room/sim.go` | el simulador de dispositivos y lo que hace cada intención |
 | `room/server.go` | API JSON + SSE (`/api/state`, `/api/command`, `/api/events`, `/api/machines`) |
 | `room/web/` | la página: plano en SVG, traza por capas, números; es/en, claro/oscuro, accesible |

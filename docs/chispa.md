@@ -195,7 +195,7 @@ Lo mismo en x86 (i7-8700T, bare metal, docs/von.md#x86-sin-anidar-i7-8700t):
 ~2× más lento por predicción a un núcleo (3095-11 919 ns/op según
 características) y, con solo 4 núcleos frente a los 10 del M4, el paralelo
 agregado llega a 785 000 decisiones/s en vez de ~3,4 M/s. Con los modelos
-reales de domótica (`intent.chispa` + `slots.chispas`, `kling domotica eval`,
+reales de domótica (`intent.chispa` + `slots.chispas`, `kindling-domotica eval`,
 9794 filas): cascada plantillas→Chispa a 9,74 µs p50 (~103 000 decisiones/s de
 un núcleo) y 82 MiB de pico de RSS con ambos modelos cargados. Tabla completa
 en docs/von.md.

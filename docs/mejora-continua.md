@@ -1,7 +1,7 @@
 # Mejora continua: que Chispa aprenda lo que otros resolvieron por él
 
 Cuando Chispa duda, alguien más lento contesta: VON en la cascada, el
-codificador en una tarea de domótica, la capa lenta del propio cliente
+codificador en una tarea de intención, la capa lenta del propio cliente
 (`escalate: true`, «quien llama decide») o una persona. El bucle de mejora
 continua guarda esos casos, entrena un Chispa nuevo con ellos y **solo lo pone
 a servir si gana en un conjunto de confianza**. La siguiente vez, Chispa
@@ -81,7 +81,7 @@ Cuatro causas, y lo que hace este bucle con cada una:
 | `window_minutes` | 60 | ventana de la tasa de escalado de `/metrics` |
 
 Vale para tareas de clasificación (con o sin cascada, en proceso o
-[microvm](chispa-serverless.md)) y de [domótica](domotica.md) (el modelo que
+[microvm](chispa-serverless.md)) y de [intención](intent.md) (el modelo que
 aprende es el de intención; se capturan las escaladas por intención —Chispa
 dudó o dijo «fuera de ámbito»—, no las de huecos o de órdenes múltiples).
 
@@ -238,7 +238,7 @@ por clase (lo más reciente primero). Lo demás espera a una persona.
 **La cascada**: su registro de evaluación va atado al sha256 del `.chispa`,
 así que un modelo nuevo **apaga** una cascada respaldada. El reentreno lo hace
 explícito: si estaba activa, vuelve a correr `kling ai eval` con
-`learn.heldout` (o con `-eval datos.jsonl`; en domótica hacen falta filas) y
+`learn.heldout` (o con `-eval datos.jsonl`; en una tarea de intención hacen falta filas) y
 dice cómo queda; con `-no-eval` o si falla (VON caído), dice que queda apagada
 hasta evaluarla. Volver con `rollback` al modelo evaluado la reactiva sola.
 

@@ -13,47 +13,48 @@ solo entra si su evaluación mejora la anterior.
 | 3 | codificador de frases (multilingual-e5-small, embeddings de llama.cpp en una microVM) + cabeza `.jenc` | ~3 ms | [codificador.md](codificador.md) |
 | 4 | LLM pequeño (VON, Qwen2.5-1.5B) con salida JSON restringida y validada: varias órdenes en una, valores relativos, paráfrasis | 1–3 s | [abajo](#capa-4-un-llm-con-salida-json) |
 
-Esta fase deja las capas 1 y 2 como bibliotecas (`pkg/domotica`,
-`pkg/chispa/slots`) y una CLI (`kling domotica`) que el gateway de IA podrá
-llamar después. Nada necesita daemon ni microVM.
+**Esto es un ejemplo, no parte de kindling.** Todo lo de la habitación vive en
+[examples/domotica](../examples/domotica/README.md) y se compila como un
+programa aparte, `kindling-domotica` (`make domotica`), que usa kindling como
+cualquier aplicación: kling no tiene un subcomando `domotica` ni lo instala ni
+lo publica. Lo que sí es de kindling es lo genérico que la demo usa: la cascada
+de intención y huecos ([pkg/intent](../pkg/intent), tareas `"intent"` del
+gateway, [intent.md](intent.md)), Chispa y Chispa-slots, el codificador y el
+gateway de IA. La habitación es un `intent.Domain` en Go
+(`examples/domotica/internal/domotica`: plantillas, léxico, taxonomía) y
+`kindling-domotica gateway` es el gateway de kindling con ese dominio dentro.
 
-Desde v0.13.0 `kling domotica` no viene en el núcleo: lo sirve la extensión
-`kling-domotica` ([examples/domotica/cmd/kling-domotica](../examples/domotica/cmd/kling-domotica)),
-porque son herramientas de la demo y el binario de quien solo usa sandboxes no
-las necesita. `pkg/domotica` sigue en el núcleo (el gateway lo usa para
-`/v1/decide`), y también `kling ai eval` de una tarea de domótica. Sin la
-extensión, `kling domotica` dice cómo instalarla. Datos y licencias en
+Las capas 1 y 2 funcionan también sin daemon ni microVM, en el propio proceso
+(`kindling-domotica decide`, `eval`). Datos y licencias en
 [domotica-datos.md](domotica-datos.md); resultados en
 [DOMOTICA-EVAL.md](DOMOTICA-EVAL.md).
 
 ## Uso
 
 ```sh
-# la extensión (una vez): de la release de tu kling, verificada por sha256…
-kling plugins install domotica
-# …o compilada desde el repo
-go build -o ~/.local/share/kling/plugins/kling-domotica ./examples/domotica/cmd/kling-domotica
-kling help domotica                         # los siete subcomandos
+# el programa (una vez), desde la raíz del repo
+make domotica                               # → ./kindling-domotica (o: go build -o kindling-domotica ./examples/domotica)
+kindling-domotica help                      # sus subcomandos
 
 # datos (una vez): descarga fijada por sha256 y conversión al esquema único
-go run ./tools/domotica-data fetch
-go run ./tools/domotica-data build          # → <cache>/kindling/domotica/data
+go run ./examples/domotica/cmd/domotica-data fetch
+go run ./examples/domotica/cmd/domotica-data build          # → <cache>/kindling/domotica/data
 
 # modelos
 D=~/Library/Caches/kindling/domotica/data   # ~/.cache/... en Linux
 M=~/Library/Caches/kindling/domotica/models && mkdir -p $M
 kling chispa train -data $D/chispa/train.jsonl -valid $D/chispa/valid.jsonl -o $M/intent.chispa \
     -char 3-5 -class-weight sqrt -lr 0.2 -epochs 100
-kling domotica train-slots -data $D/train.jsonl -valid $D/valid.jsonl -o $M/slots.chispas
+kindling-domotica train-slots -data $D/train.jsonl -valid $D/valid.jsonl -o $M/slots.chispas
 
 # decidir
-kling domotica decide "pon la temperatura del salón a veintidós grados"
-kling domotica decide -json "turn the bedroom lights on"
-echo '{"text":"baja un poco las persianas"}' | kling domotica decide     # JSONL in/out
+kindling-domotica decide "pon la temperatura del salón a veintidós grados"
+kindling-domotica decide -json "turn the bedroom lights on"
+echo '{"text":"baja un poco las persianas"}' | kindling-domotica decide     # JSONL in/out
 
 # evaluar
-kling domotica eval -data $D/test.jsonl -errors 10
-kling domotica templates -lang es           # las órdenes que conoce la capa 1
+kindling-domotica eval -data $D/test.jsonl -errors 10
+kindling-domotica templates -lang es           # las órdenes que conoce la capa 1
 ```
 
 Los modelos se buscan en `$KLING_DOMOTICA_MODELS` (o la carpeta de caché de
@@ -61,15 +62,15 @@ arriba); `-intent` y `-slots` los fijan. Sin modelos contesta solo la capa 1 y
 todo lo demás escala.
 
 ```
-$ kling domotica decide "pon la temperatura del salón a veintidós grados"
+$ kindling-domotica decide "pon la temperatura del salón a veintidós grados"
 intent: set_temperature  slots: {"device":"thermostat","area":"living_room","value":22,"unit":"°C"}
 layer: template  lang: es  p=1.000  confident  14.0 µs
 
-$ kling domotica decide "baja un poco las persianas del dormitorio"
+$ kindling-domotica decide "baja un poco las persianas del dormitorio"
 intent: cover_close  slots: {"device":"blinds","area":"bedroom"}
 layer: chispa  lang: es  p=0.903  confident  90.7 µs
 
-$ kling domotica decide "enciende la luz y baja la persiana"
+$ kindling-domotica decide "enciende la luz y baja la persiana"
 intent: cover_close  slots: {"device":"light"}
 layer: chispa  lang: es  p=0.938  escalate → encoder (multi_command)  53.5 µs
 ```
@@ -123,7 +124,7 @@ lo que tampoco resuelve el codificador sale con `escalate: "von"` (y
 
 Lo que las capas 1–3 escalan puede ir a un LLM instruct pequeño servido por
 kindling: la tarea de generación del gateway de IA (`POST /v1/generate`) con el
-prompt y el esquema de `pkg/domotica` (`LLMSystemPrompt`, `LLMSchema`; la
+prompt y el esquema de `examples/domotica/internal/domotica` (`LLMSystemPrompt`, `LLMSchema`; la
 tarea lista para `ai.json` está en
 [examples/domotica/ai.json](../examples/domotica/ai.json)).
 
@@ -144,7 +145,7 @@ tarea lista para `ai.json` está en
   puede proponer una situación (`kind: situation`) sin verbo de orden: lo
   indirecto. Una frase en imperativo que Chispa no reconoce («pon una alarma a
   las siete») no es de esta habitación.
-- **Puerta y alcance**: `kling domotica eval-llm` compara la capa 4 con
+- **Puerta y alcance**: `kindling-domotica eval-llm` compara la capa 4 con
   «escalar y no hacer nada» en lo que escala (McNemar) y en la cascada entera
   ponderada, en dos alcances: `all` (todo lo escalado) y `uncertain` (solo lo
   que Chispa duda; lo que da por fuera de ámbito ni se le pregunta). Escribe
@@ -154,11 +155,11 @@ tarea lista para `ai.json` está en
   ([DOMOTICA-EVAL.md](DOMOTICA-EVAL.md#capa-4-el-llm-von)).
 
 ```sh
-# contra un gateway que ya sirve las tareas room (capas 1–3) y room-llm (capa 4)
-kling domotica eval-llm -gateway ~/.config/kling/ai.sock -llm-task room-llm -decide-task room \
+# contra un kindling-domotica gateway que ya sirve las tareas room (capas 1–3) y room-llm (capa 4)
+kindling-domotica eval-llm -gateway ~/.config/kling/ai.sock -llm-task room-llm -decide-task room \
     -data $D/test.jsonl -errors 20 -dump escalated.jsonl
 # o con un gateway en el propio proceso sobre el daemon (capas 1–2 aquí)
-kling domotica eval-llm -von von-qwen15-dom -data $D/test.jsonl
+kindling-domotica eval-llm -von von-qwen15-dom -data $D/test.jsonl
 ```
 
 En Go, la cascada entera es `domotica.Cascade{Fast, Slow}`: `Fast` son las
@@ -217,19 +218,19 @@ distintas se rechazan en vez de dar huecos basura. `FuzzLoad` lo prueba.
 
 | fichero | qué |
 |---|---|
-| `pkg/domotica/taxonomy.go` | intenciones, dispositivos implícitos, unidades, `Resolve`, `Complete` |
-| `pkg/domotica/lexicon.go` | zonas, dispositivos y colores canónicos con sinónimos es/en; `FindSpans`; léxico del etiquetador; detección de idioma |
-| `pkg/domotica/numbers.go` | números con palabras es/en, unidades |
-| `pkg/domotica/template.go` | analizador y expansor de plantillas estilo hassil (muestreo determinista y enumeración) |
-| `pkg/domotica/demo.go`, `matcher.go` | órdenes de la demo y capa 1 |
-| `pkg/domotica/decide.go` | la cascada rápida y su política de escalado |
-| `pkg/domotica/keywords.go` | línea base de reglas (solo para evaluar) |
-| `pkg/domotica/eval.go`, `challenge.jsonl` | métricas y frases de reto |
+| `examples/domotica/internal/domotica/taxonomy.go` | intenciones, dispositivos implícitos, unidades, `Resolve`, `Complete` |
+| `examples/domotica/internal/domotica/lexicon.go` | zonas, dispositivos y colores canónicos con sinónimos es/en; `FindSpans`; léxico del etiquetador; detección de idioma |
+| `examples/domotica/internal/domotica/numbers.go` | números con palabras es/en, unidades |
+| `examples/domotica/internal/domotica/template.go` | analizador y expansor de plantillas estilo hassil (muestreo determinista y enumeración) |
+| `examples/domotica/internal/domotica/demo.go`, `matcher.go` | órdenes de la demo y capa 1 |
+| `examples/domotica/internal/domotica/decide.go` | la habitación como `intent.Domain` y su `Decision`; la cascada y su política de escalado son las de `pkg/intent` |
+| `examples/domotica/internal/domotica/keywords.go` | línea base de reglas (solo para evaluar) |
+| `examples/domotica/internal/domotica/eval.go`, `challenge.jsonl` | métricas y frases de reto |
 | `pkg/chispa/slots` | Chispa-slots: tokenizador, modelo, `.chispas`, entrenamiento |
-| `tools/domotica-data` | descarga, YAML, MASSIVE, Home Assistant, repartos |
-| `pkg/domotica/layer.go` | `Layer`, `Cascade`, `Trace`, `Action`: la cascada con capas enchufables |
-| `pkg/domotica/llm.go` | capa 4: prompt, esquema, `ParseLLM`, `Veto`, `VON` |
-| `pkg/domotica/gateway.go` | las capas por el gateway: `/v1/decide`, `/v1/generate`, `/metrics` |
-| `pkg/domotica/layer4eval.go` | evaluación y puerta de la capa 4 |
-| `examples/domotica/cmd/kling-domotica` | la extensión: `kling domotica` (`decide`, `eval`, `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm`) |
-| `cmd/kling/domotica_ai.go` | `kling ai eval` de una tarea de domótica (núcleo) |
+| `examples/domotica/cmd/domotica-data` | descarga, YAML, MASSIVE, Home Assistant, repartos |
+| `examples/domotica/internal/domotica/layer.go` | `Layer`, `Cascade`, `Trace`, `Action`: la cascada con capas enchufables |
+| `examples/domotica/internal/domotica/llm.go` | capa 4: prompt, esquema, `ParseLLM`, `Veto`, `VON` |
+| `examples/domotica/internal/domotica/gateway.go` | las capas por el gateway: `/v1/decide`, `/v1/generate`, `/metrics` |
+| `examples/domotica/internal/domotica/layer4eval.go` | evaluación y puerta de la capa 4 |
+| `examples/domotica` | el programa `kindling-domotica`: `gateway` (el de kindling con el dominio `smart-room`), `room` (la página) y las herramientas en `internal/tools` (`decide`, `eval`, `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm`) |
+| `pkg/intent`, `pkg/aigw/intent.go` | lo genérico del núcleo: la cascada, la tarea `"intent"` de `/v1/decide`, su puerta y `kling ai eval` ([intent.md](intent.md)) |

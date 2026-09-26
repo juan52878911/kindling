@@ -11,11 +11,12 @@ kling mcp import eco   →   kling busca quién sirve "mcp"   →   exec kling-m
 ```
 
 Las extensiones oficiales viven en este mismo repositorio y salen en cada
-release: `kling plugins install mcp`, `kling plugins install sandbox`,
-`kling plugins install domotica`. Este documento enseña a escribir otra. La
-mínima es [`examples/hello-extension`](../examples/hello-extension); la de
-referencia, con varios subcomandos de verdad, es
-[`examples/domotica/cmd/kling-domotica`](../examples/domotica/cmd/kling-domotica).
+release: `kling plugins install mcp` y `kling plugins install sandbox`. Este
+documento enseña a escribir otra; el ejemplo es
+[`examples/hello-extension`](../examples/hello-extension). (La demo de
+domótica de [`examples/domotica`](../examples/domotica) ya no es una extensión:
+es un programa aparte, `kindling-domotica`, que usa kindling sin añadirle
+subcomandos.)
 
 ## 1. El código (2 minutos)
 
@@ -285,7 +286,7 @@ kling plugins install hello -from https://github.com/<tú>/kling-hola/releases/d
 `-sha256`. Si la extensión trae companions, publícalos en la misma release con
 el mismo patrón de nombre (`<companion>-<os>-<arch>`).
 
-Las extensiones del repo (`mcp`, `sandbox`, `domotica`) salen en cada release de
+Las extensiones del repo (`mcp`, `sandbox`) salen en cada release de
 kindling con la misma versión que el núcleo, así que todos los binarios de una
 release son compatibles entre sí ([`releases.md`](releases.md)).
 

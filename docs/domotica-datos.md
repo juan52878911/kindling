@@ -1,9 +1,9 @@
 # Datos de la tarea de domótica
 
-Qué datos usa la decisión de domótica (`pkg/domotica`, `kling domotica`), de
+Qué datos usa la decisión de domótica (`examples/domotica/internal/domotica`, `kindling-domotica`), de
 dónde salen, con qué licencia, cómo se convierten a un esquema único y cómo se
 reparten sin fugas. Los datos **no** están en el repositorio: los descarga y
-genera `tools/domotica-data` en una caché. Aquí viven la herramienta, la
+genera `examples/domotica/cmd/domotica-data` en una caché. Aquí viven la herramienta, la
 taxonomía y la atribución (también en [`NOTICE`](../NOTICE)).
 
 Regla de la fase: solo datos que se pueden usar **y redistribuir** libremente,
@@ -15,8 +15,8 @@ con la licencia comprobada en la propia fuente.
 |---|---|---|---|
 | Amazon **MASSIVE** 1.0 | `amazon-massive-dataset-1.0.tar.gz`, sha256 `7df623fd2d300a4d235d6ee5bd396c9a28258d3a0ccb29abdb054506eba153f8` | **CC BY 4.0** — fichero `1.0/LICENSE` del propio archivo («Copyright Amazon.com Inc. or its affiliates. Attribution 4.0 International»). `1.0/NOTICE.md` añade que parte del texto viene de **SLURP**, también CC BY 4.0 | `es-ES` y `en-US`, 16 520 frases cada uno, repartos oficiales |
 | **home-assistant/intents** (hoy `OHF-Voice/intents`; GitHub redirige) | etiqueta `2026.9.17` = commit `4af16c0ccc6f0567654c04554833fe3e5e7467ba`; tarball de codeload sha256 `3da1f44c65ea06232712adb714af91d55b794a939d4506bc7977f700a1b9e2be` | **CC BY 4.0** — `LICENSE.md` del repositorio («Attribution 4.0 International») y la API de GitHub (`license.spdx_id = CC-BY-4.0`) | plantillas de `sentences/{es,en}`, reglas `rules/{es,en}`, listas `lists/`, `lists/{es,en}` |
-| órdenes de la demo | `pkg/domotica/demo.go` | la del proyecto | plantillas escritas para la habitación |
-| frases de reto | `pkg/domotica/challenge.jsonl` | la del proyecto | 54 frases escritas a mano (indirectas, varias órdenes, casi-fuera-de-ámbito, paráfrasis) |
+| órdenes de la demo | `examples/domotica/internal/domotica/demo.go` | la del proyecto | plantillas escritas para la habitación |
+| frases de reto | `examples/domotica/internal/domotica/challenge.jsonl` | la del proyecto | 54 frases escritas a mano (indirectas, varias órdenes, casi-fuera-de-ámbito, paráfrasis) |
 
 Nota sobre home-assistant/intents: el paquete de PyPI `home-assistant-intents`
 (que trae las mismas frases ya compiladas a JSON) declara Apache-2.0 en sus
@@ -44,8 +44,8 @@ Atribución requerida (la misma que en `NOTICE`):
 ## Uso
 
 ```sh
-go run ./tools/domotica-data fetch            # descarga (con tope de tamaño) y comprueba sha256
-go run ./tools/domotica-data build            # escribe CACHE/data/{train,valid,test}.jsonl
+go run ./examples/domotica/cmd/domotica-data fetch            # descarga (con tope de tamaño) y comprueba sha256
+go run ./examples/domotica/cmd/domotica-data build            # escribe CACHE/data/{train,valid,test}.jsonl
 ```
 
 La caché es `$KLING_DOMOTICA_CACHE` o `<user cache dir>/kindling/domotica`
@@ -54,7 +54,7 @@ la cambian. `fetch` descarga a un `.part`, limita los bytes y solo renombra
 si el sha256 coincide; `build` vuelve a comprobar el sha256 antes de abrir
 nada, y lee los `.tar.gz` con topes por entrada y por total descomprimido.
 Sin dependencias: el YAML de Home Assistant se lee con un analizador propio
-del subconjunto que usan esos ficheros (`tools/domotica-data/yaml.go`).
+del subconjunto que usan esos ficheros (`examples/domotica/cmd/domotica-data/yaml.go`).
 
 `build` es determinista: dos ejecuciones dan ficheros idénticos byte a byte
 (semillas fijas por plantilla, splitmix64). Mandos: `-ha-k` (frases por

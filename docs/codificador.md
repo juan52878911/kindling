@@ -1,6 +1,7 @@
 # Capa 3: el codificador de frases
 
-La tercera capa de la decisión de domótica ([domotica.md](domotica.md)): lo que
+La tercera capa de las tareas de intención ([intent.md](intent.md)), medida en
+la decisión de domótica del ejemplo ([domotica.md](domotica.md)): lo que
 las plantillas y Chispa no contestan con confianza pasa por un **codificador de
 frases** pequeño —un BERT de 118 M de parámetros que convierte la orden en un
 vector de 384 números— y una **cabeza** entrenada sobre esos vectores que
@@ -118,12 +119,12 @@ regresión logística multinomial (`-hidden 0`), en Go puro, sin dependencias:
 
 ```sh
 D=~/Library/Caches/kindling/domotica/data M=~/Library/Caches/kindling/domotica/models
-kling domotica embed -url http://<réplica>:8000 -model multilingual-e5-small \
+kindling-domotica embed -url http://<réplica>:8000 -model multilingual-e5-small \
     -data $D/train.jsonl,$D/valid.jsonl,$D/test.jsonl -o $M/e5.jemb      # ~300 frases/s
-kling domotica train-encoder -data $D/train.jsonl -valid $D/valid.jsonl -cache $M/e5.jemb \
+kindling-domotica train-encoder -data $D/train.jsonl -valid $D/valid.jsonl -cache $M/e5.jemb \
     -o $M/head.jenc -intent $M/intent.chispa -slots $M/slots.chispas            # 40 s
-kling domotica eval -data $D/test.jsonl -encoder $M/head.jenc -embed-cache $M/e5.jemb
-kling domotica decide -encoder $M/head.jenc -embed-url http://<réplica>:8000 "subir persiana habitación"
+kindling-domotica eval -data $D/test.jsonl -encoder $M/head.jenc -embed-cache $M/e5.jemb
+kindling-domotica decide -encoder $M/head.jenc -embed-url http://<réplica>:8000 "subir persiana habitación"
 ```
 
 Elegido en validación (el test solo se miró una vez antes, con una primera
@@ -201,7 +202,7 @@ por cada cien ganadas). Contando también las conjeturas, la diferencia (+12)
 
 ## Órdenes indirectas escritas a mano
 
-`pkg/domotica/indirect.jsonl`: 180 órdenes (9 intenciones × 2 idiomas × 9),
+`examples/domotica/internal/domotica/indirect.jsonl`: 180 órdenes (9 intenciones × 2 idiomas × 9),
 repartidas 5/2/2 en train/valid/test. Escritas para este trabajo, sin repetir
 ninguna frase de reto y evitando sus palabras clave («tengo las manos
 heladas», «i'm roasting in here», «nos vamos de vacaciones»). Son del mismo
@@ -300,7 +301,7 @@ modelos × tres semillas, y la conversión con el mismo `encoder-gguf.sh`,
 
 ```sh
 # 1. instancia: g5.xlarge (1× NVIDIA A10G 24 GB, 4 vCPU, 16 GiB), Deep Learning Base AMI (Ubuntu 22.04)
-scp $D/train.jsonl pkg/domotica/indirect.jsonl scripts/encoder-setfit/* scripts/encoder-gguf.sh ubuntu@<ip>:
+scp $D/train.jsonl examples/domotica/internal/domotica/indirect.jsonl scripts/encoder-setfit/* scripts/encoder-gguf.sh ubuntu@<ip>:
 ssh ubuntu@<ip> ./run.sh                 # ajuste + conversión de 6 variantes
 scp 'ubuntu@<ip>:work/*.gguf' .          # 126 MiB cada una; APAGAR la instancia
 # 2. de vuelta en el laboratorio: cada GGUF a la caché del constructor, dorado,
@@ -335,10 +336,10 @@ disco para el entorno de Python.
 | `cmd/kling/builder_llm.go` | un GGUF convertido se toma de la caché por hash (no se descarga) |
 | `scripts/encoder-gguf.sh` | conversión reproducible y fijada; `-install` a la caché del constructor |
 | `pkg/codificador` | cliente de embeddings (acotado), caché `.jemb`, cabeza, `.jenc`, entrenamiento, k-NN, `Layer` |
-| `pkg/domotica/decide.go` | capa 3 en la cascada (`IntentEncoder`, `DecideContext`) |
-| `pkg/domotica/indirect.jsonl` | órdenes indirectas escritas a mano, con reparto |
-| `examples/domotica/cmd/kling-domotica/domotica_encoder.go` | `kling domotica embed`, `train-encoder`; `-encoder` en `decide` y `eval` (extensión `kling-domotica`) |
-| `cmd/kling/domotica_ai.go` | `kling ai eval` de una tarea de domótica (núcleo) |
-| `pkg/aigw/domotica.go` | tareas de domótica en `/v1/decide`, la réplica del codificador por `pkg/scheduler`, su evaluación y su puerta |
+| `pkg/intent/intent.go` | capa 3 en la cascada (`Encoder`, `DecideContext`) |
+| `examples/domotica/internal/domotica/indirect.jsonl` | órdenes indirectas escritas a mano, con reparto |
+| `examples/domotica/internal/tools/encoder.go` | `kindling-domotica embed`, `train-encoder`; `-encoder` en `decide` y `eval` |
+| `cmd/kling/ai_intent.go` | `kling ai eval` de una tarea de intención |
+| `pkg/aigw/intent.go` | tareas de intención en `/v1/decide`, la réplica del codificador por `pkg/scheduler`, su evaluación y su puerta |
 | `scripts/98-encoder-bench.sh` | las cifras de latencia y memoria |
 | `scripts/encoder-setfit/` | la receta del ajuste fino (sin ejecutar) |

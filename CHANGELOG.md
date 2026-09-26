@@ -8,6 +8,44 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## Sin publicar
+
+### Núcleo
+
+- **Tareas de intención genéricas en el gateway de IA.** El bloque `"domotica"`
+  de `ai.json` y el tipo de tarea `domotica` desaparecen del núcleo: en su lugar,
+  una tarea `"intent"` (`/v1/decide`, `kling ai test|eval|retrain`) con la
+  misma cascada —plantillas → Chispa + Chispa-slots (en proceso o serverless) →
+  codificador con puerta de McNemar → `escalate: "von"`— y la misma mejora
+  continua, pero sin vocabulario de ningún dominio: la cascada vive en el paquete
+  nuevo `pkg/intent` y lo que sabe el dominio (plantillas, valores de los huecos,
+  qué necesita cada intención) sale de un esquema JSON (`"schema"`) o de un
+  `intent.Domain` en Go que registra el programa que embebe `pkg/aigw`
+  (`"domain"`, `aigw.Options.Domains`). Guía en `docs/intent.md`.
+- **Cambio incompatible** para quien tenga una tarea `domotica`: el bloque pasa a
+  `"intent": {"model": …, "domain" | "schema": …, "slots", "encoder", "head",
+  "encoder_force", "final_oos"}` (`intent` → `model`); `kind` de `/v1/tasks` y
+  del registro de evaluación es `"intent"`, y un registro `kind: "domotica"` ya
+  no enciende la capa 3: hay que repetir `kling ai eval <tarea>`.
+- Fuera `pkg/domotica` y la pista «`kling plugins install domotica`».
+
+### Ejemplos
+
+- **La demo de domótica es un programa aparte, `kindling-domotica`**, y no una
+  extensión de kling: sin subcomando `kling domotica`, sin asset
+  `kling-domotica-<os>-<arch>` en la release ni `install.sh --with domotica`.
+  Todo lo de la habitación (taxonomía, léxico, plantillas, simulador,
+  validación del LLM, datos) vive en `examples/domotica`
+  (`internal/domotica`, `internal/tools`, `cmd/domotica-data`, antes
+  `pkg/domotica` y `tools/domotica-data`). Subcomandos: `gateway` (el gateway
+  de kindling con el dominio `smart-room` registrado), `room` (la página, antes
+  `domotica-demo`) y las herramientas `decide`, `eval`, `train-slots`, `embed`,
+  `train-encoder`, `templates`, `eval-llm`. `make domotica` lo compila; los
+  servicios de systemd de `examples/domotica` arrancan `kindling-domotica
+  gateway` y `kindling-domotica room`. Las decisiones y las cifras de
+  `docs/DOMOTICA-EVAL.md` no cambian (`kindling-domotica eval` da la misma
+  tabla, y `/v1/decide` la misma respuesta en las 9 794 frases del test).
+
 ## v0.13.0 — 2026-09-26
 
 **Un repositorio, una release.** kindling-mcp y kindling-sandbox entran en este

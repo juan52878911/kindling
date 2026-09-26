@@ -16,16 +16,16 @@ cifra honesta de lo que Chispa sabe de verdad, y la razón de las capas 3 y 4.
 
 ## Montaje
 
-- Datos: `tools/domotica-data build` con los valores por defecto (test: 9 794
+- Datos: `examples/domotica/cmd/domotica-data build` con los valores por defecto (test: 9 794
   frases, 3 541 dentro de ámbito). Los repartos no comparten familias ni
   frases normalizadas (ver domotica-datos.md).
 - Intención: `kling chispa train -char 3-5 -class-weight sqrt -lr 0.2 -epochs 100`
   (elegido por el macro-F1 de **validación** entre seis configuraciones; el de
   test no se miró para elegir). 28 etiquetas, 5,3 MB, temperatura 0,687, acuerdo
   int16/float 1,000.
-- Huecos: `kling domotica train-slots` por defecto (2^17 cubos, ventana 2,
+- Huecos: `kindling-domotica train-slots` por defecto (2^17 cubos, ventana 2,
   afijos 3, léxico). 101 KB, acuerdo int16/float 1,000.
-- `kling domotica eval -data test.jsonl`, Apple M4, Go 1.27.1, un hilo.
+- `kindling-domotica eval -data test.jsonl`, Apple M4, Go 1.27.1, un hilo.
 - Métricas: *intent* = acierto de intención; *mF1* = macro-F1 de intención;
   *slotF1* = F1 de pares hueco=valor normalizados (zona, dispositivo, valor,
   unidad, color; implícitos completados igual en oro y predicción); **exact** =
@@ -86,7 +86,7 @@ indirectas («it's freezing in here», «me voy de casa») se quedarían en «no
 nada» con toda confianza; escalándolo, solo 1. El precio es que todo lo que no
 es de la habitación pasa por la capa siguiente; en una demo donde casi todo lo
 que se dice es una orden, compensa. `Decider.FinalOOS` es la otra política
-(fila «cascade, OOS final» de `kling domotica eval`: cubre el 95,7 % con
+(fila «cascade, OOS final» de `kindling-domotica eval`: cubre el 95,7 % con
 precisión 0,985, pero comete esos 8 errores).
 
 ## Huecos: el etiquetador solo (F1 de huecos exactos)
@@ -114,7 +114,7 @@ ejecutar) en MASSIVE es 0,91–0,93.
 | palabras clave (línea base) | 3,6 µs | 11 µs | varias |
 | **cascada completa** (plantillas → Chispa + huecos + normalización) | **4,7 µs** | **13 µs** | pocas (normalizar huecos reserva) |
 
-Medido por frase sobre las 9 794 del test (`kling domotica eval`) y con
+Medido por frase sobre las 9 794 del test (`kindling-domotica eval`) y con
 `go test -bench` (`BenchmarkMatch` 1,6 µs, `BenchmarkTag` 1,4 µs, ambos sin
 reservas). Una llamada suelta desde la CLI tarda 15–90 µs porque paga el
 arranque en frío. La capa 3 (~10 ms) es 2 000 veces más cara.
@@ -204,7 +204,7 @@ Diseño, modelo y cifras de latencia y memoria en [codificador.md](codificador.m
 Aquí, lo que cambia en la evaluación: multilingual-e5-small (MIT) congelado,
 Q8_0, con una cabeza de una capa oculta (256) entrenada en train y calibrada
 en validación, solo sobre lo que las capas rápidas escalan. Mismo test, mismos
-modelos de las capas 1 y 2; `kling domotica eval -encoder head.jenc
+modelos de las capas 1 y 2; `kindling-domotica eval -encoder head.jenc
 -embed-cache e5.jemb`.
 
 **La marca queda batida**: MASSIVE exact **0,745 es / 0,800 en** (0,718 / 0,782)
@@ -257,7 +257,7 @@ frente a 104): contando también las conjeturas, +12 no es significativo
 (p = 0,097).
 
 **Indirectas nuevas** (40 escritas a mano para este trabajo, reparto de test de
-`pkg/domotica/indirect.jsonl`; optimistas, son del mismo proyecto): la cascada
+`examples/domotica/internal/domotica/indirect.jsonl`; optimistas, son del mismo proyecto): la cascada
 con codificador contesta 2 bien, escala 37 y falla 1 (una de Chispa). Con los
 ejemplos de train de ese fichero (`train-encoder -indirect`), la intención que
 propone la cabeza acierta el 60 % de esas indirectas (17,5 % sin ellos; en las
@@ -282,7 +282,8 @@ en [examples/domotica](../examples/domotica/README.md).
 - Modelo: **Qwen2.5-1.5B-Instruct Q4_K_M** (Apache-2.0), dorado VON con el
   prompt de la capa 4 ya evaluado (`-prefix`), una réplica, Mac mini M4
   (`vz`, 4 vCPU), por el mismo camino que en producción: la tarea de
-  generación `room-llm` de `kling ai serve` (`POST /v1/generate`, esquema
+  generación `room-llm` del gateway de IA (entonces `kling ai serve`; hoy
+  `kindling-domotica gateway`, el mismo gateway) (`POST /v1/generate`, esquema
   JSON en `json_schema`, temperatura 0). Capas 1–2 por `/v1/decide` (tarea
   `room`, sin codificador).
 - Datos: las 440 órdenes de MASSIVE del test y **una muestra determinista de
@@ -291,7 +292,7 @@ en [examples/domotica](../examples/domotica/README.md).
   MASSIVE hay 12,5 frases que no son para la habitación por cada orden, y es
   ahí donde un LLM que actúa de más hace daño. Aparte, las 54 frases de reto
   (se enseñan; no deciden).
-- `kling domotica eval-llm -gateway … -llm-task room-llm -decide-task room
+- `kindling-domotica eval-llm -gateway … -llm-task room-llm -decide-task room
   -data test.jsonl`. Se le pregunta al LLM por **todo** lo que escala y se
   calculan dos alcances: `all` (la capa 4 contesta a todo lo escalado) y
   `uncertain` (solo a lo que Chispa duda: probabilidad baja, varias órdenes,
