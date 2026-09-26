@@ -18,14 +18,14 @@ milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detr�
 al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
 extensiones.
 
-> Estado: **v0.7.0 — sandboxes para agentes de código.** `kling` gestiona microVMs con
-> red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por capas, eventos,
-> constructores de imágenes, un API del daemon documentado y sandboxes de usar y tirar
-> con exec en streaming. Alojar servidores MCP bajo
-> demanda — el uso para el que nació kindling — vive ahora en la extensión
-> **[kindling-mcp](https://github.com/juan52878911/kindling-mcp)**, que añade `kling mcp`,
-> `kling add`, `kling connect`, `kling gateway` y el resto al mismo comando `kling`. En el
-> [CHANGELOG](CHANGELOG.md) está lo que trajo cada versión.
+> Estado: **v0.13.0 (sin publicar) — un repositorio, una release.** `kling` gestiona
+> microVMs con red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por
+> capas, eventos, constructores de imágenes, un API del daemon documentado y sandboxes de
+> usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
+> que nació kindling — y los sandboxes multiinquilino son **extensiones** que viven en
+> este mismo repositorio ([`ext/mcp`](ext/mcp), [`ext/sandbox`](ext/sandbox)) y salen en
+> la misma release: `kling plugins install mcp`. Todos los binarios de una release son
+> compatibles entre sí. En el [CHANGELOG](CHANGELOG.md) está lo que trajo cada versión.
 
 **El invitado se asume hostil**: no se sabe qué código acabará corriendo dentro. En
 [SECURITY.md](SECURITY.md) están el modelo de amenaza, las barreras que hay y — sobre
@@ -59,6 +59,7 @@ enlazadas:
 
 **Primeros pasos**
 · [Instalación](#instalación)
+· [Primeros comandos](#primeros-comandos)
 · [Dejar el runtime listo](#dejar-el-runtime-listo--kling-up)
 · [Conectar con el daemon](#conexión)
 · [Configuración](#configuración)
@@ -75,7 +76,8 @@ enlazadas:
 
 **Extensiones**
 · [Extensiones: servidores MCP y más](#extensiones)
-· [kindling-mcp](#kindling-mcp-servidores-mcp-bajo-demanda)
+· [kling-mcp](#kling-mcp-servidores-mcp-bajo-demanda)
+· [kling-sandbox](#kling-sandbox-sandboxes-multiinquilino)
 · [Escribir una extensión](#escribir-una-extensión)
 
 **Almacenamiento**
@@ -182,11 +184,11 @@ opcional; es lo que sostiene todo lo demás.
 # macOS / Linux — una línea, sin dependencias
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 
-# Servidores MCP: instala encima la extensión kindling-mcp
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling-mcp/main/scripts/install.sh | sh
+# Con extensiones de la misma release (servidores MCP, sandboxes, la demo de domótica):
+curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox,domotica
 
 # Versión concreta (por defecto instala la última release):
-curl -fsSL .../install.sh | sh -s -- --tag v0.4.0
+curl -fsSL .../install.sh | sh -s -- --tag v0.13.0
 
 # Prefijo personalizado:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -217,6 +219,31 @@ arquitectura con `GOARCH`: para desplegar a un host arm64, `make deploy GOARCH=a
 HOST=ssh://...` (el binario sale como `kling-linux-arm64`).
 
 Detalles del ciclo de releases: [`docs/releases.md`](docs/releases.md).
+
+## Primeros comandos
+
+```sh
+kling doctor                      # daemon, versión del CLI y del daemon, extensiones, completado: cada ✗ con su arreglo
+kling try -- uname -a             # sandbox de usar y tirar: crea, ejecuta, devuelve su código y lo borra
+kling try -image toolchain        # sin comando: una shell interactiva, borrada al salir (-keep la conserva)
+kling ai up                       # gateway de IA con ./ai.json o ~/.config/kling/ai.json en 127.0.0.1:8080
+```
+
+`kling doctor` sale con 0 si todo está ✓ y con 1 si queda algo pendiente, así que sirve
+también en scripts. `kling ai up` imprime la URL y un `curl` para probarlo antes de
+empezar a servir. Cuando un comando falla, el error trae una segunda línea, `try: …`,
+con el siguiente comando que ejecutar (`kling doctor`, `kling ps -a`,
+`kling images ls`…).
+
+Otros de uso diario:
+
+```sh
+kling help run                    # solo la ayuda de un comando
+kling logs -f <máquina>           # sigue la consola hasta que deja de correr
+kling snapshots ls | inspect <nombre> | rm <nombre>
+kling version                     # versión del CLI y del daemon (-json)
+kling completion install          # escribe el script de completado y dice qué línea añadir al rc
+```
 
 ## Dejar el runtime listo — `kling up`
 
@@ -491,25 +518,39 @@ tiene, y un snapshot sin ella no puede convertirse en sandbox. Guía:
 # Extensiones
 
 `kling` es el único comando que tecleas. Lo que no es del núcleo de microVMs llega como
-**extensión**: un ejecutable llamado `kling-<nombre>` en tu `PATH` que declara qué
-subcomandos añade. `kling` lo descubre, lo enseña en `kling help` y en el completado de la
-shell, y le pasa el control cuando tecleas uno de sus comandos — códigos de salida,
-señales y terminal incluidos. Los comandos del núcleo ganan siempre.
+**extensión**: un ejecutable llamado `kling-<nombre>` que declara qué subcomandos añade.
+`kling` lo descubre, lo enseña en `kling help` y en el completado de la shell, y le pasa
+el control cuando tecleas uno de sus comandos — códigos de salida, señales y terminal
+incluidos. Los comandos del núcleo ganan siempre.
+
+Las extensiones oficiales viven en este repositorio y salen en cada release, con la
+misma versión que el núcleo:
 
 ```sh
-kling plugins                   # qué hay instalado, qué añade, y por qué no si no puede
-source <(kling completion zsh)  # recarga el completado tras instalar una
+kling plugins install mcp        # servidores MCP bajo demanda (trae kling-bridge con ella)
+kling plugins install sandbox    # sandboxes multiinquilino: gateway, plantillas, fondo precalentado
+kling plugins install domotica   # las herramientas de la demo de domótica: kling domotica decide/eval/…
+kling plugins ls                 # qué hay instalado, de dónde (ruta + sha256) y su estado
+kling plugins disable ai         # apaga una sin desinstalarla; vale también para las incorporadas
+kling completion install         # recarga el completado tras instalar una
 ```
 
-## kindling-mcp: servidores MCP bajo demanda
+`kling plugins install` baja `kling-<nombre>-<os>-<arch>` de la release que corresponde a
+tu `kling`, **lo verifica contra el `SHA256SUMS` de la release antes de escribirlo**,
+comprueba su manifiesto y lo deja en `~/.local/share/kling/plugins` (o en el primer
+directorio de `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` y `-file RUTA` eligen
+otro origen; `kling plugins rm <nombre>` la quita. `ai`, `chispa` y `models` son
+**extensiones incorporadas**: viven dentro del binario de `kling`, pero se listan, se
+documentan y se apagan igual.
+
+## kling-mcp: servidores MCP bajo demanda
 
 Coge cualquier servidor MCP de código abierto — de npm o de PyPI, hable stdio o
 Streamable HTTP nativo — y conviértelo en un servicio que despierta bajo demanda desde un
-snapshot dorado. Es para lo que se construyó kindling, y vive en su propio repositorio:
-**[juan52878911/kindling-mcp](https://github.com/juan52878911/kindling-mcp)**.
+snapshot dorado. Es para lo que se construyó kindling; vive en [`ext/mcp`](ext/mcp).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling-mcp/main/scripts/install.sh | sh
+kling plugins install mcp
 kling mcp search filesystem
 kling add io.github.domdomegg/filesystem-mcp
 kling connect -all -install all
@@ -517,20 +558,33 @@ kling connect -all -install all
 
 Trae el catálogo, el puente stdio→HTTP, el gateway con sesiones, réplicas y modo efímero,
 la entrada única `_all`, la reparación de tipos, la autocuración y la conexión con tu
-agente de IA. Los números medidos de arriba se tomaron con ella.
-
-| kindling | kindling-mcp |
-|---|---|
-| v0.6.x, v0.7.x | v0.1.x |
+agente de IA. Los números medidos de arriba se tomaron con ella. Su guía es
+[`ext/mcp/README.es.md`](ext/mcp/README.es.md).
 
 Si vienes de v0.5 o anterior: el daemon migra en su sitio snapshots, catálogos, salud y
-links; instala kindling-mcp y todos los comandos que usabas siguen funcionando.
+links; instala la extensión y todos los comandos que usabas siguen funcionando.
+
+## kling-sandbox: sandboxes multiinquilino
+
+[`ext/sandbox`](ext/sandbox) pone un gateway delante de `kling sandbox`: inquilinos con
+token y cuotas, plantillas y un fondo de sandboxes precalentados que se reclaman en
+milisegundos en vez de crearse. Trae también `kindling-operator`, que hace lo mismo desde
+Kubernetes ([`docs/kubernetes.md`](docs/kubernetes.md)).
+
+```sh
+kling plugins install sandbox
+```
 
 ## Escribir una extensión
 
+La versión de diez minutos está en [`docs/extensions.md`](docs/extensions.md), alrededor
+de [`examples/hello-extension`](examples/hello-extension): un `main.go` con
+`plugin.Main`, `go build -o ~/.local/share/kling/plugins/kling-hello`, y `kling hello`
+funciona, con su ayuda, su completado y su clave de configuración.
+
 Una extensión responde a `--kling-manifest` con un manifiesto JSON (nombre, versión,
 versión mínima del núcleo, comandos, claves de configuración tipadas, ganchos para
-`kling status` y `kling up`, unidades de systemd) y después recibe sus comandos. Habla con
+`kling status` y `kling up`, unidades de systemd, ejecutables compañeros) y después recibe sus comandos. Habla con
 el daemon solo por su API HTTP: las anotaciones de snapshots, un almacén clave-valor, los
 constructores de imágenes con nombre y los ficheros dentro de imágenes están para que una
 extensión nunca toque las tripas del daemon. Las extensiones en Go lo tienen todo en
@@ -791,8 +845,8 @@ del log (56 %): un CI nuevo necesita sus propias etiquetas.
 [`examples/domotica`](examples/domotica/README.md) es una aplicación aparte que
 *usa* kindling: una página web con una habitación simulada (luces, termostato,
 persianas, tele, altavoz, cerradura, alarma, ventilador, enchufe) que se maneja
-con órdenes de voz como texto, en español o inglés. Cada orden pasa por `kling ai
-serve`: las plantillas de la demo y el modelo rápido Chispa contestan en su
+con órdenes de voz como texto, en español o inglés. Cada orden pasa por el gateway de IA
+(`kling ai up`): las plantillas de la demo y el modelo rápido Chispa contestan en su
 proceso en microsegundos; lo que dudan va a un codificador de frases y luego a un
 LLM pequeño (Qwen2.5-1.5B con salida JSON restringida por un esquema y validada
 contra la taxonomía de la habitación), cada uno en una microVM que la orden
@@ -805,8 +859,9 @@ bien, ninguna acción fuera de ámbito), no en todo (actuaría en el 1,5 % de la
 charla que no es para la habitación). Guía: [`docs/demo-domotica.md`](docs/demo-domotica.md).
 
 ```sh
-kling ai serve -config examples/domotica/ai.json &     # con las rutas y dorados de tu host
+kling ai up -config examples/domotica/ai.json &       # con las rutas y dorados de tu host
 go run ./examples/domotica                            # http://127.0.0.1:8088/
+kling plugins install domotica                        # opcional: kling domotica decide/eval/…
 ```
 
 ## Qué persiste y qué no
@@ -827,7 +882,7 @@ manual, `kling rm`, reinstalar el servicio — el estado de su **overlay** se va
 
 Para datos que deben sobrevivir a todo, dale al servicio un
 [volumen](#volúmenes-lo-que-sobrevive-a-la-microvm) al importarlo, o apunta las
-herramientas al [servicio de memoria enlazado](https://github.com/juan52878911/kindling-mcp/blob/main/README.es.md#traer-tu-propio-servicio-de-memoria)
+herramientas al [servicio de memoria enlazado](ext/mcp/README.es.md#traer-tu-propio-servicio-de-memoria)
 compartido por todas.
 
 ---
@@ -1189,7 +1244,9 @@ permite que N instancias compartan páginas.
 | Documento | Qué cubre |
 |---|---|
 | [`docs/README.md`](docs/README.md) | Índice de todo lo que hay bajo `docs/` |
-| [`docs/extensions.md`](docs/extensions.md) | El protocolo de extensiones: manifiesto, despacho, ganchos, unidades |
+| [`docs/extensions.md`](docs/extensions.md) | Escribe una extensión en 10 minutos: `examples/hello-extension`, el manifiesto campo a campo, `kling plugins install` |
+| [`ext/mcp/README.es.md`](ext/mcp/README.es.md) · [`ext/sandbox/README.md`](ext/sandbox/README.md) | Las extensiones de MCP y de sandboxes |
+| [`docs/kubernetes.md`](docs/kubernetes.md) | `kindling-operator`: sandboxes desde Kubernetes |
 | [`docs/api.md`](docs/api.md) | El API HTTP del daemon sobre el que se construyen las extensiones |
 | [`docs/exec-sandbox.md`](docs/exec-sandbox.md) | Sandboxes, exec en streaming y copia de ficheros para agentes de código |
 | [`docs/von.md`](docs/von.md) | LLM pequeños desde snapshots dorados: uso, diseño, cifras, plan de GPU |
@@ -1200,12 +1257,12 @@ permite que N instancias compartan páginas.
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
 | [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling chispa deploy`, thaw y rendimiento medidos frente a en proceso |
-| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`, de la extensión `domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
-| [`docs/releases.md`](docs/releases.md) | Cómo se construyen y publican las releases |
+| [`docs/releases.md`](docs/releases.md) | Una etiqueta, una release: todos los assets, `SHA256SUMS`, cómo publicar |
 
 ## Hoja de ruta
 

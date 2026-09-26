@@ -1,7 +1,16 @@
-# Changelog
+# Changelog de kindling-mcp (congelado)
 
-Novedades de kindling-mcp, la extensión de `kling` que aloja servidores MCP en las
-microVMs de [kindling](https://github.com/juan52878911/kindling).
+> **Este fichero ya no se actualiza.** Desde kindling v0.13.0, kindling-mcp vive en
+> `ext/mcp` del repositorio de kindling y sale en la misma release que el núcleo.
+> Las novedades nuevas están en el [CHANGELOG de la raíz](../../CHANGELOG.md),
+> subsección `### kling-mcp`. Todos los binarios de una release son compatibles
+> entre sí, así que la tabla de abajo es solo historia.
+>
+> Lo que sigue es el historial de kindling-mcp hasta v0.4.0, cuando era un repositorio
+> aparte (<https://github.com/juan52878911/kindling-mcp>, archivado; sus releases
+> siguen allí).
+
+Compatibilidad histórica:
 
 | kindling-mcp | kindling |
 |---|---|
