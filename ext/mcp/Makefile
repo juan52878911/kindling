@@ -6,7 +6,9 @@
 #
 # Necesita kindling ya instalado: kling-mcp no hace nada por su cuenta, añade
 # comandos a `kling` (kling mcp, kling add, kling connect, kling gateway...) y
-# habla con el daemon de kindling por su API.
+# habla con el daemon de kindling por su API. Es un módulo aparte dentro del repo
+# de kindling (ext/mcp): su go.mod apunta al núcleo del mismo commit con
+# replace ../.., así que todo esto funciona igual con go.work que sin él.
 
 BIN     := kling-mcp
 PKG     := ./cmd/kling-mcp
@@ -27,11 +29,10 @@ LDFLAGS := -s -w -X main.Version=$(VERSION)
 # activo de kling.
 HOST ?= $(shell kling config show 2>/dev/null | awk '/^contexto:|^context:/{print $$2}')
 
-# Checkout de kindling para el test que ata las familias de runtime con
-# 70-build-minimal-image.sh. Sin él ese test se salta.
-KINDLING_DIR ?= $(wildcard ../kindling)
+# Plataformas que publica la release (ver .github/workflows/release.yml).
+CROSS_PLATS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: all build install uninstall bridge bridge-local linux deploy deploy-mac test clean fmt
+.PHONY: all build install uninstall bridge bridge-local linux deploy deploy-mac test cross clean fmt
 
 all: build
 
@@ -86,7 +87,7 @@ linux:
 ## Va kling-mcp (lo usan el gateway, el heal y el constructor), el puente y
 ## 80-mcp-image.sh, que el constructor "mcp" ejecuta como root porque construir
 ## una imagen monta un loopback y hace chroot. El daemon de kindling tiene que
-## estar ya desplegado (make deploy en kindling).
+## estar ya desplegado (make deploy en la raíz del repo).
 deploy: linux bridge
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
@@ -132,11 +133,25 @@ deploy: linux bridge
 deploy-mac:
 	@$(MAKE) deploy GOARCH=arm64 HOST="$(HOST)"
 
-## test — lo mismo que corre el CI
+## test — lo mismo que corre el CI. El test que ata las familias de runtime con
+## 70-build-minimal-image.sh encuentra el núcleo en ../.. ($KINDLING_DIR lo
+## sobrescribe si hiciera falta).
 test:
 	gofmt -l . | tee /dev/stderr | (! read)
 	go vet ./...
-	KINDLING_DIR="$(abspath $(KINDLING_DIR))" go test -race ./...
+	go test -race ./...
+
+## cross — compilaciones cruzadas de lo que publica la release desde este módulo,
+## sin escribir nada: kling-mcp va en el portátil y en el host del daemon, y el
+## puente dentro de las microVMs (linux) y en local para `kling mcp link`.
+## Estáticos, sin cgo, como en la release.
+cross:
+	@set -e; for p in $(CROSS_PLATS); do \
+	  os=$${p%/*}; arch=$${p#*/}; \
+	  echo "  kling-mcp kling-bridge $$os/$$arch"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null $(PKG); \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null ./cmd/kling-bridge; \
+	done
 
 fmt:
 	gofmt -l -w .

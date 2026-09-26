@@ -1,4 +1,9 @@
-# Imagen del operador de Kubernetes (cmd/kindling-operator).
+# Imagen del operador de Kubernetes (ext/sandbox/cmd/kindling-operator).
+#
+# Se construye desde la RAÍZ del repo:
+#   docker build -f ext/sandbox/Dockerfile.operator .
+# porque el go.mod de ext/sandbox tiene replace ../.. y compila contra el núcleo
+# del mismo commit; con el contexto en ext/sandbox el núcleo no estaría.
 #
 # Estática y sin shell: el operador es un binario Go sin cgo que solo habla HTTP
 # con el API de Kubernetes y con el frontal. distroless/static trae los
@@ -6,11 +11,18 @@
 # privilegios, y nada más que se pueda explotar.
 FROM golang:1.24 AS build
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
+# Sin workspace: go.work cita ./vz y ./ext/mcp, que no se copian. El replace
+# ../.. basta. Y sin bajarse otra toolchain por su cuenta.
+ENV GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0
+# Solo lo que el operador compila: el go.mod del núcleo, su pkg/ (lo único del
+# núcleo que importa ext/sandbox) y la extensión. Copiar el repo entero metería
+# en la capa vz/, prototypes/ y docs/ para nada. Si ext/sandbox empieza a
+# importar algo de internal/ del núcleo, el build falla aquí y hay que añadirlo.
+COPY go.mod ./
+COPY pkg/ pkg/
+COPY ext/sandbox/ ext/sandbox/
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+RUN go -C ext/sandbox build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
       -o /kindling-operator ./cmd/kindling-operator
 
 FROM gcr.io/distroless/static:nonroot

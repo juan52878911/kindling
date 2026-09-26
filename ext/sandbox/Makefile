@@ -4,8 +4,11 @@
 #   make install                       kling-sandbox en tu máquina
 #   make deploy HOST=ssh://juan@lab    el frontal en el host del daemon
 #
-# Necesita kindling >= v0.7 instalado: esto no hace nada por su cuenta, añade
-# `kling sbx` y habla con uno o varios daemons de kindling por su API.
+# Necesita kling instalado (de la misma release): esto no hace nada por su
+# cuenta, añade `kling sbx` y habla con uno o varios daemons de kindling por su
+# API. Es un módulo aparte dentro del repo de kindling (ext/sandbox): su go.mod
+# apunta al núcleo del mismo commit con un replace a ../.. (sin workspace
+# también vale).
 
 BIN     := kling-sandbox
 PKG     := ./cmd/kling-sandbox
@@ -14,9 +17,11 @@ PREFIX  ?= $(shell for d in "$$HOME/.local" "$$HOME/go" /opt/homebrew /usr/local
              [ -w "$$d/bin" ] && echo "$$d" && exit; done; echo "$$HOME/.local")
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
+# Plataformas que publica la release (ver .github/workflows/release.yml).
+CROSS_PLATS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 HOST ?= $(shell kling config show 2>/dev/null | awk '/^contexto:|^context:/{print $$2}')
 
-.PHONY: all build install uninstall linux deploy test fmt clean
+.PHONY: all build install uninstall linux deploy test cross operator-image fmt clean
 
 all: build
 
@@ -63,10 +68,32 @@ deploy: linux
 	@echo "  kling config set sandbox.token \\"
 	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/sandbox.env')"
 
+## test — lo mismo que corre el CI
 test:
 	gofmt -l . | tee /dev/stderr | (! read)
 	go vet ./...
 	go test -race ./...
+
+## cross — compilaciones cruzadas de lo que publica la release desde este módulo,
+## sin escribir nada: kling-sandbox en las cuatro plataformas (cliente en el
+## portátil, frontal en el host del daemon) y el operador solo en linux, que es
+## donde corre un clúster.
+cross:
+	@set -e; for p in $(CROSS_PLATS); do \
+	  os=$${p%/*}; arch=$${p#*/}; \
+	  echo "  kling-sandbox $$os/$$arch"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null $(PKG); \
+	  if [ $$os = linux ]; then \
+	    echo "  kindling-operator $$os/$$arch"; \
+	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null ./cmd/kindling-operator; \
+	  fi; \
+	done
+
+## operator-image — la imagen del operador. El contexto es la raíz del repo: el
+## replace ../.. necesita el núcleo del mismo commit.
+operator-image:
+	docker build -f Dockerfile.operator --build-arg VERSION=$(VERSION) \
+		-t ghcr.io/juan52878911/kindling-operator:$(VERSION) ../..
 
 fmt:
 	gofmt -l -w .

@@ -1,3 +1,12 @@
+# Publica una release a partir de una etiqueta vX.Y.Z.
+#
+# Desde v0.13.0 una sola etiqueta publica TODO lo del repo: el núcleo (kling,
+# kling-guest, kling-chispa, kling-vz), las extensiones (kling-mcp y su puente,
+# kling-sandbox, kling-domotica), el operador de Kubernetes y los tar de lo que
+# se instala en el host del daemon, con UN único SHA256SUMS. Antes cada repo
+# tenía su release y su SHA256SUMS y había que cruzar tablas de compatibilidad;
+# ahora todo lo de una release es compatible entre sí, y `kling plugins install`
+# baja kling-<n>-<os>-<arch> de la misma etiqueta que el kling que lo pide.
 name: release
 
 on:
@@ -7,112 +16,95 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'tag a publicar (ej. v0.1.0). Si vacío usa el último tag.'
-        required: false
+        # Obligatoria: sin ella GITHUB_REF_NAME sería el nombre de una rama y la
+        # release saldría con ese nombre.
+        description: 'tag a publicar (ej. v0.13.0); tiene que existir ya'
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: build ${{ matrix.target.os }}/${{ matrix.target.arch }}
+    name: build ${{ matrix.os }}/${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - { os: linux,   arch: amd64, ext: linux-amd64,   artifact: kling-linux-amd64   }
-          - { os: linux,   arch: arm64, ext: linux-arm64,   artifact: kling-linux-arm64   }
-          - { os: darwin,  arch: amd64, ext: darwin-amd64,  artifact: kling-darwin-amd64  }
-          - { os: darwin,  arch: arm64, ext: darwin-arm64,  artifact: kling-darwin-arm64  }
-          # Windows queda fuera: internal/machine usa syscall.Kill, Setsid y
-          # Stat_t que son POSIX. Un binario para Windows sería humo.
+        os: [linux, darwin]
+        arch: [amd64, arm64]
+        # Windows queda fuera: internal/machine usa syscall.Kill, Setsid y
+        # Stat_t que son POSIX. Un binario para Windows sería humo.
+    env:
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
+      # Cada módulo por su replace ../.., sin workspace: es como compila el
+      # Dockerfile del operador y como lo haría quien clona la etiqueta.
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: true
+          cache-dependency-path: |
+            go.mod
+            ext/*/go.mod
 
       - name: compute version
         id: ver
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            VERSION="${{ inputs.tag }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
-          fi
-          # Limpia prefijo v para ldflags -X main.Version
-          LDVER="${VERSION#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "ldver=${LDVER}"     >> "$GITHUB_OUTPUT"
+          VERSION="${{ inputs.tag }}"
+          [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME}"
+          # Sin la v para -X main.Version: todos los binarios informan igual.
+          echo "version=${VERSION}"  >> "$GITHUB_OUTPUT"
+          echo "ldver=${VERSION#v}"  >> "$GITHUB_OUTPUT"
 
-      - name: build CLI (${{ matrix.target.os }}/${{ matrix.target.arch }})
+      # Un solo paso con una función: los nueve binarios se compilan igual y así
+      # no hay nueve bloques que se desincronicen. `go -C` entra en el módulo de
+      # cada extensión; por eso la salida va con ruta absoluta.
+      - name: build
+        shell: bash
         env:
-          GOOS:   ${{ matrix.target.os }}
-          GOARCH: ${{ matrix.target.arch }}
-          CGO_ENABLED: '0'
-          VERSION: ${{ steps.ver.outputs.ldver }}
           LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
         run: |
+          set -euo pipefail
           mkdir -p dist
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o dist/${{ matrix.target.artifact }} ./cmd/kling
-
-      - name: build daemon linux/${{ matrix.target.arch }} only
-        if: matrix.target.os == 'linux'
-        env:
-          GOOS:   ${{ matrix.target.os }}
-          GOARCH: ${{ matrix.target.arch }}
-          CGO_ENABLED: '0'
-          VERSION: ${{ steps.ver.outputs.ldver }}
-          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
-        run: |
-          # El daemon siempre linux/amd64 o linux/arm64 según matriz.
-          # Es el mismo binario que el CLI; el unit systemd lo invoca con
-          # `kling daemon`. El nombre lleva el sufijo por consistencia con
-          # otros binarios y para que el daemon se pueda bajar de la release.
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o dist/kling-${{ matrix.target.ext }} ./cmd/kling
-
-      - name: build kling-guest (linux only, estático)
-        if: matrix.target.os == 'linux'
-        env:
-          GOOS:   linux
-          GOARCH: ${{ matrix.target.arch }}
-          CGO_ENABLED: '0'
-          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
-        run: |
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o dist/kling-guest-${{ matrix.target.ext }} ./cmd/kling-guest
-
-      - name: build kling-chispa (linux only, estático)
-        if: matrix.target.os == 'linux'
-        env:
-          GOOS:   linux
-          GOARCH: ${{ matrix.target.arch }}
-          CGO_ENABLED: '0'
-          LDFLAGS: -s -w -X main.Version=${{ steps.ver.outputs.ldver }}
-        run: |
-          go build -trimpath -ldflags "$LDFLAGS" \
-            -o dist/kling-chispa-${{ matrix.target.ext }} ./cmd/kling-chispa
-
-      - name: checksum
-        working-directory: dist
-        run: |
-          # Calcula SHA256SUMS en la primera matriz linux (no duplica).
-          if [ "${{ matrix.target.os }}" = "linux" ] && [ "${{ matrix.target.arch }}" = "amd64" ]; then
-            sha256sum * > SHA256SUMS
+          DIST="$PWD/dist"
+          plat="${GOOS}-${GOARCH}"
+          b() { # b <módulo> <paquete> <nombre>
+            echo "  $3-$plat"
+            go -C "$1" build -trimpath -ldflags "$LDFLAGS" -o "$DIST/$3-$plat" "$2"
+          }
+          # CLI y daemon son el mismo binario (el unit de systemd lo invoca con
+          # `kling daemon`), así que kling-linux-<arch> sirve para las dos cosas.
+          b .           ./cmd/kling                              kling
+          b ext/mcp     ./cmd/kling-mcp                          kling-mcp
+          # El puente va dentro de las microVMs (linux) y en local para
+          # `kling mcp link` (también darwin).
+          b ext/mcp     ./cmd/kling-bridge                       kling-bridge
+          b ext/sandbox ./cmd/kling-sandbox                      kling-sandbox
+          b .           ./examples/domotica/cmd/kling-domotica   kling-domotica
+          if [ "$GOOS" = linux ]; then
+            # Invitados de las microVMs y el operador, que solo corre en un clúster.
+            b .           ./cmd/kling-guest                      kling-guest
+            b .           ./cmd/kling-chispa                     kling-chispa
+            b ext/sandbox ./cmd/kindling-operator                kindling-operator
           fi
+          ls -la dist/
 
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kling-${{ matrix.target.ext }}
+          name: bin-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
@@ -125,6 +117,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: vz/go.mod
@@ -132,11 +126,8 @@ jobs:
       - name: build y firma
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            VERSION="${{ inputs.tag }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
-          fi
+          VERSION="${{ inputs.tag }}"
+          [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME}"
           cd vz && OUT=dist/kling-vz-darwin-arm64 VERSION="$VERSION" ./build.sh
           codesign -d --entitlements - dist/kling-vz-darwin-arm64 2>&1 | grep -q com.apple.security.virtualization
       - uses: actions/upload-artifact@v4
@@ -149,72 +140,97 @@ jobs:
     name: release
     needs: [build, vz]
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: compute version
+        id: ver
+        shell: bash
+        run: |
+          VERSION="${{ inputs.tag }}"
+          [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: release
+          # Todos los binarios sueltos en release/, sin un directorio por job.
+          merge-multiple: true
 
-      - name: consolidate binaries
+      # Lo que `make deploy` instala en el host del daemon, para quien no clona
+      # el repo. Las rutas dentro de cada tar son las mismas que tenían en los
+      # repos kindling-mcp y kindling-sandbox (scripts/, packaging/, deploy/),
+      # así que las recetas que ya los desempaquetaban siguen valiendo.
+      - name: tar del host y del operador
         run: |
-          mkdir -p release
-          # Junta los binarios de cada plataforma en un solo directorio.
-          # Estructura final por plataforma:
-          #   release/kling-<plat>                  (CLI)
-          #   release/kling-linux-<arch>            (daemon, solo linux)
-          #   release/kling-guest-linux-<arch>      (agente de invitado, solo linux)
-          #   release/kling-chispa-linux-<arch>     (invitado de Chispa serverless, solo linux)
-          for d in artifacts/*; do
-            cp -v "$d"/* release/ 2>/dev/null || true
-          done
-          ls -la release/
+          set -eu
+          tar -czf release/kindling-mcp-host.tar.gz -C ext/mcp \
+            scripts/80-mcp-image.sh scripts/builders/mcp packaging/
+          tar -czf release/kindling-sandbox-host.tar.gz -C ext/sandbox packaging/
+          tar -czf release/kindling-operator-deploy.tar.gz -C ext/sandbox deploy/
 
-      - name: compute final version
-        id: ver
+      # La lista del contrato de assets, escrita una vez: si un binario falta
+      # (un paso que no compiló, un nombre cambiado) la release no sale a
+      # medias, y si sobra algo tampoco se publica sin que nadie lo decida.
+      - name: comprobar la lista de assets
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            VERSION="${{ inputs.tag }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
+          set -euo pipefail
+          want=()
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              for n in kling kling-mcp kling-bridge kling-sandbox kling-domotica; do
+                want+=("$n-$os-$arch")
+              done
+            done
+          done
+          for arch in amd64 arm64; do
+            want+=("kling-guest-linux-$arch" "kling-chispa-linux-$arch" "kindling-operator-linux-$arch")
+          done
+          want+=(kling-vz-darwin-arm64 kindling-mcp-host.tar.gz kindling-sandbox-host.tar.gz kindling-operator-deploy.tar.gz)
+          printf '%s\n' "${want[@]}" | sort > want.txt
+          (cd release && ls -1) | sort > have.txt
+          if ! diff -u want.txt have.txt; then
+            echo "los assets no coinciden con el contrato (- falta, + sobra)" >&2
+            exit 1
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "${#want[@]} assets"
 
-      - name: compute SHA256SUMS (multi-plataforma)
+      - name: compute SHA256SUMS
         working-directory: release
         run: |
-          sha256sum kling-* > SHA256SUMS
+          # Un solo SHA256SUMS para toda la release: install.sh y
+          # `kling plugins install` verifican contra él antes de escribir nada.
+          sha256sum * > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
           cat SHA256SUMS
 
       - name: generate release notes
-        id: notes
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          # Notas: prioriza el primer bloque CHANGELOG/RELEASES desde el repo,
-          # si existe; si no, autogenera un resumen a partir de los commits
-          # entre el tag anterior y este.
-          if [ -f CHANGELOG.md ]; then
-            awk -v ver="${VERSION#v}" '
-              /^## / { if (seen) exit; if ($0 ~ ver || index($0, ver)) seen=1 }
-              seen { print }
-            ' CHANGELOG.md > notes.md
-          fi
+          # El bloque de esta versión del CHANGELOG; si no lo hay, unas notas
+          # mínimas con la instalación.
+          awk -v ver="${VERSION#v}" '
+            /^## / { if (seen) exit; if (index($0, ver)) seen=1 }
+            seen { print }
+          ' CHANGELOG.md > notes.md
           if [ ! -s notes.md ]; then
             {
               echo "## ${VERSION}"
               echo ""
-              echo "Binarios pre-compilados para Linux (amd64, arm64), macOS (amd64, arm64) y Windows (amd64)."
-              echo ""
-              echo "### Instalación rápida"
+              echo "Binarios para Linux y macOS (amd64, arm64). Todos los de esta release son compatibles entre sí."
               echo ""
               echo '```sh'
               echo "curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh"
+              echo "# con extensiones:"
+              echo "curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh -s -- --with mcp,sandbox"
               echo '```'
-              echo ""
-              echo "Ver [README](https://github.com/juan52878911/kindling#instalación) para más opciones."
             } > notes.md
           fi
           cat notes.md
@@ -226,16 +242,51 @@ jobs:
           name: ${{ steps.ver.outputs.version }}
           body_path: notes.md
           fail_on_unmatched_files: true
-          files: |
-            release/kling-linux-amd64
-            release/kling-linux-arm64
-            release/kling-darwin-amd64
-            release/kling-darwin-arm64
-            release/kling-vz-darwin-arm64
-            release/kling-guest-linux-amd64
-            release/kling-guest-linux-arm64
-            release/kling-chispa-linux-amd64
-            release/kling-chispa-linux-arm64
-            release/SHA256SUMS
+          # La lista ya se comprobó arriba contra el contrato.
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # La imagen del operador en GHCR, para las dos arquitecturas: es la que
+  # referencia ext/sandbox/deploy/deployment.yaml. La ruta no cambia con la
+  # unificación porque la imagen se llama por el paquete, no por el repo.
+  imagen:
+    # Después de la release: si fallan los binarios o la release, no se publica
+    # una imagen de una versión que no existe.
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: versión
+        id: ver
+        shell: bash
+        run: |
+          VERSION="${{ needs.release.outputs.version }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "ldver=${VERSION#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          # Contexto en la raíz: el go.mod de ext/sandbox tiene replace ../.. y
+          # necesita el núcleo del mismo commit.
+          context: .
+          file: ext/sandbox/Dockerfile.operator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Sin la v, como en los binarios sueltos: el mismo operador informa de
+          # la misma versión venga de donde venga.
+          build-args: VERSION=${{ steps.ver.outputs.ldver }}
+          tags: |
+            ghcr.io/juan52878911/kindling-operator:${{ steps.ver.outputs.version }}
+            ghcr.io/juan52878911/kindling-operator:latest

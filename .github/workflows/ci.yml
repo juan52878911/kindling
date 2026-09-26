@@ -4,6 +4,11 @@
 # ejecutaba: `make test` era vet + build, y el workflow de release ni eso. Los dos
 # peores fallos que se encontraron revisando la rama de rendimiento eran carreras
 # de datos — exactamente lo que `-race` habría cazado el mismo día.
+#
+# Desde v0.13.0 el repo tiene varios módulos (núcleo, ext/mcp, ext/sandbox y vz).
+# Cada uno trae su Makefile con `test` (gofmt + vet + test -race) y `cross` (sus
+# compilaciones cruzadas): el CI solo los llama, para que lo que corre aquí sea
+# exactamente lo que cualquiera corre en local antes de empujar.
 name: ci
 
 on:
@@ -13,46 +18,89 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    name: vet, fmt y test -race
+  modulo:
+    name: make test cross (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [., ext/mcp, ext/sandbox]
+    env:
+      # Sin workspace: así compila quien clona sin go.work, el Dockerfile del
+      # operador y `go install`. Los ext/* llegan al núcleo por su replace ../..,
+      # y con el go.work puesto un replace roto pasaría desapercibido. El camino
+      # con workspace lo comprueba el job `workspace`.
+      GOWORK: 'off'
+      # Que Go no se baje otra toolchain por su cuenta: la 1.24 es la que
+      # declaran los go.mod y es el mínimo que prometemos.
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v4
 
       - name: set up Go
         uses: actions/setup-go@v5
         with:
-          # La misma que declara go.mod, para no depender de que Go se descargue
-          # una toolchain por su cuenta.
           go-version: '1.24'
           cache: true
+          cache-dependency-path: ${{ matrix.dir }}/go.mod
 
-      - name: gofmt
+      - name: make test cross
+        run: make -C "${{ matrix.dir }}" test cross
+
+  # El go.mod del núcleo no tiene dependencias ni cgo, y es una promesa: el
+  # binario se instala copiándolo, y cualquier require nuevo lo tiene que decidir
+  # alguien a propósito, no colarse con un `go get`. Los ext/* sí podrían tener
+  # dependencias, pero su replace al núcleo del mismo commit es obligatorio.
+  raiz-sin-deps:
+    name: núcleo sin dependencias ni cgo
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: go.mod sin require ni replace
         run: |
-          out="$(gofmt -l .)"
-          if [ -n "$out" ]; then
-            echo "estos ficheros no están formateados:" >&2
-            echo "$out" >&2
-            gofmt -d $out >&2
+          if grep -nE '^\s*(require|replace)' go.mod; then
+            echo "el go.mod raíz no puede tener require ni replace" >&2
             exit 1
           fi
 
-      - name: go vet
-        run: go vet ./...
+      - name: CGO_ENABLED=0 go build ./...
+        run: CGO_ENABLED=0 go build ./...
 
-      # -race es el punto de todo esto: el daemon maneja microVMs desde varias
-      # goroutines y el puente reparte respuestas entre sesiones concurrentes.
-      - name: go test -race
-        run: go test -race ./...
-
-      # El daemon solo se compila para linux, pero el CLI se instala en macOS:
-      # que compile cruzado es parte del contrato.
-      - name: cross-compile
+      - name: ext/* apuntan al núcleo del mismo commit
         run: |
-          GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/kling
-          GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling
-          GOOS=linux  GOARCH=amd64 go build -o /dev/null ./cmd/kling-guest
-          GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/kling-guest
+          for m in ext/*/go.mod; do
+            grep -qE '^replace github.com/juan52878911/kindling => \.\./\.\.$' "$m" || {
+              echo "$m: falta 'replace github.com/juan52878911/kindling => ../..'" >&2
+              exit 1
+            }
+          done
+
+  # El go.work comiteado es la comodidad de local: un cambio en pkg/api rompe
+  # ext/mcp en el mismo `go build`. Si go.work o go.work.sum se quedan atrás (un
+  # módulo nuevo sin `use`, una suma que falta), aquí se ve.
+  workspace:
+    name: go.work
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # go.work declara la versión que exige vz/go.mod.
+          go-version-file: go.work
+          cache: false
+      # vz queda fuera del build: es cgo y solo de macOS (lo compila el job vz).
+      # Su go.mod sí entra en el grafo del workspace, así que de paso se
+      # comprueba que sus sumas estén en go.work.sum.
+      - run: go build ./... ./ext/mcp/... ./ext/sandbox/...
+      - run: go vet ./ext/mcp/... ./ext/sandbox/...
 
   # kling-vz es un módulo aparte con cgo: `./...` en la raíz no entra en vz/, y
   # solo compila de verdad en macOS. Sus tests no arrancan ninguna VM (la VM es
