@@ -37,7 +37,7 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <up|serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback> [...]")
+		return fmt.Errorf("usage: kling ai <up|serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback|model|chispa> [...]")
 	}
 	switch args[0] {
 	case "up":
@@ -66,8 +66,14 @@ func cmdAI(args []string) error {
 		return aiRetrain(args[1:])
 	case "rollback":
 		return aiRollback(args[1:])
+	case "model", "models":
+		// VON: LLMs pequeños (antes `kling models`).
+		return cmdModels(args[1:])
+	case "chispa":
+		// Clasificadores (antes `kling chispa`).
+		return cmdChispa(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use up, serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain or rollback", args[0])
+		return fmt.Errorf("unknown subcommand %q: use up, serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain, rollback, model or chispa", args[0])
 	}
 }
 
@@ -736,7 +742,7 @@ func aiEval(args []string) error {
 	return nil
 }
 
-// readEvalData lee un JSONL etiquetado (el mismo formato que kling chispa train).
+// readEvalData lee un JSONL etiquetado (el mismo formato que kling ai chispa train).
 func readEvalData(path string) ([]aigw.EvalExample, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -799,7 +805,7 @@ func aiReload(args []string) error {
 // solo evalúa su propio texto. Medido en docs/von-cpu.md: con ~800 tokens de
 // system prompt, de 4,7 s a 0,4 s en Qwen2.5-1.5B y de 1,7 s a 0,17 s en
 // Qwen2.5-0.5B. Los prefijos quedan en la caché de prompts de llama-server
-// (-cache-ram de `kling models add`); sin ella solo el último.
+// (-cache-ram de `kling ai model add`); sin ella solo el último.
 //
 // No es automático: rehacer un dorado cuesta lo que cargar el modelo, y solo
 // hace falta cuando cambian los prompts de las tareas. La etiqueta von.prefixes
@@ -851,7 +857,7 @@ func aiPrime(args []string) error {
 		}
 		s := byName[m.Snapshot]
 		if s == nil || s.Labels[von.LabelModel] == "" {
-			errs = append(errs, fmt.Errorf("%s: golden snapshot %q not found on the daemon (kling models add)", name, m.Snapshot))
+			errs = append(errs, fmt.Errorf("%s: golden snapshot %q not found on the daemon (kling ai model add)", name, m.Snapshot))
 			continue
 		}
 		pre := cfg.Prefixes(name)

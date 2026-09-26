@@ -12,7 +12,7 @@ import (
 
 // imagesBuild construye una imagen con un constructor instalado en el daemon.
 //
-//	kling images build <name> -builder <b> [-spec spec.json|-] [-base B] [-grow MiB]
+//	kling image build <name> -builder <b> [-spec spec.json|-] [-base B] [-grow MiB]
 func imagesBuild(args []string) error {
 	fs := flag.NewFlagSet("images build", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -24,7 +24,7 @@ func imagesBuild(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 || *builder == "" {
-		return fmt.Errorf("usage: kling images build <name> -builder <builder> [-spec spec.json|-] [-base B] [-grow MiB]")
+		return fmt.Errorf("usage: kling image build <name> -builder <builder> [-spec spec.json|-] [-base B] [-grow MiB]")
 	}
 	req := api.BuildImageRequest{Name: fs.Arg(0), Builder: *builder, Base: *base, GrowMB: *grow}
 	if *specFile != "" {
@@ -66,7 +66,7 @@ func imagesCat(args []string) error {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: kling images cat <image> </path/inside> [-stat]")
+		return fmt.Errorf("usage: kling image cat <image> </path/inside> [-stat]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -103,7 +103,7 @@ func imagesPut(args []string) error {
 		return err
 	}
 	if fs.NArg() != 2 || (*file == "") == (*fromHost == "") {
-		return fmt.Errorf("usage: kling images put <image> </path/inside> (-file local | -from-host name) [-mode 0755] [-create]")
+		return fmt.Errorf("usage: kling image put <image> </path/inside> (-file local | -from-host name) [-mode 0755] [-create]")
 	}
 	req := api.PutImageFileRequest{Path: fs.Arg(1), Mode: *mode, FromHost: *fromHost, Create: *create}
 	if *file != "" {

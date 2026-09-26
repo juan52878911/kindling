@@ -14,14 +14,13 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-// kling snapshots ls|rm|inspect.
+// kling template ls|rm|inspect.
 //
-// Los snapshots eran el único sustantivo sin la forma de los demás: se creaban
-// con commit, se listaban con `snapshots` y se borraban con `rmi`. Ahora siguen
-// el ls/rm de volume, images o sandbox; `snapshots` a secas sigue listando y
-// `rmi` se conserva como alias de `snapshots rm` para no romper scripts.
+// "Plantilla" es el nombre público del snapshot dorado: lo que `save` crea y
+// `run -from` instancia en milisegundos. `snapshots` y `rmi` siguen
+// funcionando como alias (tree.go).
 
-func cmdSnapshots(args []string) error {
+func cmdTemplate(args []string) error {
 	sub := "ls"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
@@ -30,20 +29,18 @@ func cmdSnapshots(args []string) error {
 	case "ls", "list":
 		return snapshotsList(args)
 	case "rm", "remove":
-		return snapshotsRemove("snapshots rm", args)
+		return snapshotsRemove("template rm", args)
 	case "inspect", "show":
 		return snapshotsInspect(args)
 	}
 	return fmt.Errorf("unknown subcommand %q: use ls, rm or inspect", sub)
 }
 
-// cmdRmi es el alias histórico de `snapshots rm`.
-func cmdRmi(args []string) error { return snapshotsRemove("rmi", args) }
-
 func snapshotsList(args []string) error {
-	fs := flag.NewFlagSet("snapshots ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("template ls", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
+	quiet := fs.Bool("q", false, "print only names (for scripting)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -52,6 +49,12 @@ func snapshotsList(args []string) error {
 	list, err := api.NewClient(hostOf(*host)).Snapshots(ctx)
 	if err != nil {
 		return err
+	}
+	if *quiet {
+		for _, s := range list {
+			fmt.Fprintln(os.Stdout, s.Name)
+		}
+		return nil
 	}
 	return writeSnapshots(os.Stdout, list, *asJSON)
 }
@@ -78,11 +81,15 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 func snapshotsRemove(name string, args []string) error {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	host := hostFlag(fs)
+	force := fs.Bool("f", false, "do not ask for confirmation")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling %s <snapshot>...", name)
+		return fmt.Errorf("usage: kling %s <template>...", name)
+	}
+	if !*force && !confirmMany("template", fs.Args()) {
+		return errAborted
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -97,14 +104,14 @@ func snapshotsRemove(name string, args []string) error {
 }
 
 func snapshotsInspect(args []string) error {
-	fs := flag.NewFlagSet("snapshots inspect", flag.ExitOnError)
+	fs := flag.NewFlagSet("template inspect", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling snapshots inspect <snapshot> [-json]")
+		return errors.New("usage: kling template inspect <template> [-json]")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()

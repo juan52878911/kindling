@@ -32,9 +32,9 @@ var hints = []hint{
 	{[]string{"cannot talk to the daemon"}, "kling doctor"},
 	{[]string{"launching ssh to"}, "kling doctor"},
 	{[]string{"machine ", " does not exist"}, "kling ps -a"},
-	{[]string{"snapshot ", " does not exist"}, "kling snapshots ls"},
-	{[]string{`image "toolchain" does not exist`}, "kling images toolchain   (builds it)"},
-	{[]string{"image ", " does not exist"}, "kling images ls"},
+	{[]string{"snapshot ", " does not exist"}, "kling template ls"},
+	{[]string{`image "toolchain" does not exist`}, "kling image toolchain   (builds it)"},
+	{[]string{"image ", " does not exist"}, "kling image ls"},
 	{[]string{"volume ", " not found"}, "kling volume ls"},
 	{[]string{"context ", " does not exist"}, "kling context ls"},
 	{[]string{"404 page not found"}, "kling version   (the daemon may be older than this kling)"},
@@ -94,14 +94,11 @@ func printError(w io.Writer, err error) {
 	}
 }
 
-// movedToExtension son comandos que antes traía el núcleo y ahora aporta una
-// extensión. Quien actualiza sin instalarla teclea lo de siempre, y volcarle la
-// ayuda entera no le dice qué le falta: se le dice qué instalar.
-var movedToExtension = func() map[string]string {
-	m := map[string]string{}
-	for _, c := range []string{"mcp", "add", "search", "connect", "export", "memory", "migrate", "gateway"} {
-		m[c] = "mcp"
-	}
-	m["domotica"] = "domotica"
-	return m
-}()
+// movedToExtension son palabras de primer nivel que aporta una extensión.
+// Quien teclea `kling mcp add` (o el alias `kling add`) sin tenerla instalada
+// no necesita la ayuda entera: se le dice qué instalar.
+var movedToExtension = map[string]string{
+	"mcp":      "mcp",
+	"connect":  "mcp",
+	"domotica": "domotica",
+}

@@ -25,7 +25,7 @@ import (
 // CLI, y el gateway futuro lo usará como primer escalón de la cascada Chispa → VON.
 // Ver docs/chispa.md.
 
-const chispaUsage = `usage: kling chispa <command> [options]
+const chispaUsage = `usage: kling ai chispa <command> [options]
 
   train   -data train.jsonl -o model.chispa  trains, quantizes, calibrates and
           [-valid v.jsonl] [-test t.jsonl]   picks per-class thresholds
@@ -42,7 +42,7 @@ const chispaUsage = `usage: kling chispa <command> [options]
   rm      <task> [-keep-image]               removes a deployed task's snapshot (and image)
 
 Data is JSONL: {"text": "...", "label": "...", "fields": {"service": "api"}}
-Run 'kling chispa <command> -h' for the options of each command.
+Run 'kling ai chispa <command> -h' for the options of each command.
 
 deploy/ls/rm need a kindling daemon (a golden snapshot lives in a microVM);
 train/eval/predict/inspect never do: Chispa runs in this process alone.
@@ -115,7 +115,7 @@ func cmdChispaTrain(args []string) error {
 		return err
 	}
 	if *data == "" || *out == "" {
-		return errors.New("usage: kling chispa train -data train.jsonl -o model.chispa [options]")
+		return errors.New("usage: kling ai chispa train -data train.jsonl -o model.chispa [options]")
 	}
 	if *bucketsLog < 4 || *bucketsLog > 22 {
 		return errors.New("-buckets must be between 4 and 22 (log2)")
@@ -207,7 +207,7 @@ func cmdChispaEval(args []string) error {
 		return err
 	}
 	if *model == "" || *data == "" {
-		return errors.New("usage: kling chispa eval -model m.chispa -data test.jsonl [-json]")
+		return errors.New("usage: kling ai chispa eval -model m.chispa -data test.jsonl [-json]")
 	}
 	m, err := chispa.LoadFile(*model)
 	if err != nil {
@@ -244,7 +244,7 @@ func cmdChispaPredict(args []string) error {
 		return err
 	}
 	if *model == "" {
-		return errors.New("usage: kling chispa predict -model m.chispa [-text T] [-fields JSON] [-top N] [-json]")
+		return errors.New("usage: kling ai chispa predict -model m.chispa [-text T] [-fields JSON] [-top N] [-json]")
 	}
 	m, err := chispa.LoadFile(*model)
 	if err != nil {
@@ -317,7 +317,7 @@ func cmdChispaInspect(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: kling chispa inspect <model.chispa> [-json]")
+		return errors.New("usage: kling ai chispa inspect <model.chispa> [-json]")
 	}
 	path := fs.Arg(0)
 	m, err := chispa.LoadFile(path)

@@ -110,7 +110,7 @@ func checksMac(p probeMac) []check {
 	if macOS == "" {
 		macOS = "unknown version"
 	}
-	copyHint := "kling images copy min -from ssh://user@linux-arm64-host   # also copies the kernel"
+	copyHint := "kling image copy min -from ssh://user@linux-arm64-host   # also copies the kernel"
 	return []check{
 		{
 			label: "Apple Silicon", ok: p.arch == "arm64", fatal: true,

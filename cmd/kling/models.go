@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/units"
 	"github.com/juan52878911/kindling/pkg/von"
 )
 
-// MODELOS VON: `kling models`.
+// MODELOS VON: `kling ai model` (antes `kling models`).
 //
 // Un modelo es una imagen construida con el constructor "llm" (llama-server y
 // un GGUF fijado) y un snapshot dorado del mismo nombre, congelado con el
@@ -26,7 +27,7 @@ import (
 
 func cmdModels(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling models <ls|add|ask|embed|rm> [...]")
+		return fmt.Errorf("usage: kling ai model <ls|add|ask|embed|rm> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -91,7 +92,7 @@ func modelsList(args []string) error {
 	}
 	fmt.Println()
 	if len(mine) == 0 {
-		fmt.Println("No models on this daemon yet. Add one:  kling models add von-smol -model smollm2-360m-instruct")
+		fmt.Println("No models on this daemon yet. Add one:  kling ai model add von-smol -model smollm2-360m-instruct")
 		return nil
 	}
 	fmt.Fprintln(tw, "NAME\tMODEL\tCPU/MEM\tSNAPSHOT\tPREFIXES\tINSTANCES")
@@ -121,7 +122,7 @@ func modelsAdd(args []string) error {
 	parallel := fs.Int("parallel", 0, "requests a replica serves at once (default 1; prefer more replicas)")
 	threads := fs.Int("threads", 0, "compute threads (default: one per vCPU)")
 	cpus := fs.Int("cpus", 0, "vCPUs of the microVM (default: the model's)")
-	mem := fs.Int("mem", 0, "memory in MiB (default: the model's)")
+	mem := units.MiBVar(fs, "mem", 0, "memory: 2G, 4096M (bare number = MiB; default: the model's)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core, kept by the snapshot (default: 100 per vCPU)")
 	rebuild := fs.Bool("rebuild", false, "rebuild the image even if it exists")
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
@@ -136,7 +137,7 @@ func modelsAdd(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling models add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB] [-prefix system.txt]...")
+		return fmt.Errorf("usage: kling ai model add <name> -model <id> [-quant q8_0] [-ctx N] [-cpus N] [-mem MiB] [-prefix system.txt]...")
 	}
 	name := fs.Arg(0)
 	spec := von.Spec{Model: *model, Quant: *quant, URL: *url, SHA256: *sum,
@@ -203,7 +204,7 @@ func modelsAdd(args []string) error {
 		if snaps, err := c.Snapshots(ctx); err == nil {
 			for _, s := range snaps {
 				if s.Name == name {
-					return fmt.Errorf("snapshot %q already exists (use -replace, or kling models rm %s)", name, name)
+					return fmt.Errorf("snapshot %q already exists (use -replace, or kling ai model rm %s)", name, name)
 				}
 			}
 		}
@@ -214,11 +215,11 @@ func modelsAdd(args []string) error {
 	}
 	if *buildOnly {
 		if len(pre) > 0 {
-			fmt.Printf("Warning: -prefix is not applied with -build-only (no golden snapshot is made here); pass -prefix again in the kling models add below.\n")
+			fmt.Printf("Warning: -prefix is not applied with -build-only (no golden snapshot is made here); pass -prefix again in the kling ai model add below.\n")
 		}
 		fmt.Println("Copy it to another daemon and make the golden snapshot there:")
-		fmt.Printf("  kling images copy %s -from <this daemon> -to <that daemon>\n", name)
-		fmt.Printf("  kling models add -H <that daemon> %s %s\n", name, modelFlags(spec))
+		fmt.Printf("  kling image copy %s -from <this daemon> -to <that daemon>\n", name)
+		fmt.Printf("  kling ai model add -H <that daemon> %s %s\n", name, modelFlags(spec))
 		return nil
 	}
 
@@ -237,8 +238,9 @@ func modelsAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ %s  golden snapshot of %s  (%s of memory, %s in total)\n",
+	fmt.Printf("✓ %s  template of %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, res.Ref, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+	next("kling run -from %s", name)
 	if len(pre) > 0 {
 		fmt.Printf("  %d task prefix(es) already evaluated (%v tokens): the first request of those tasks only evaluates its own text.\n",
 			len(pre), g.PrefixTokens)
@@ -247,11 +249,11 @@ func modelsAdd(args []string) error {
 	fmt.Println("Serve it:")
 	fmt.Printf("  kling run -from %s -name %s-1\n", name, name)
 	if res.Kind == von.KindEmbed {
-		fmt.Printf("  kling models embed %s-1 \"turn on the lights\"\n", name)
+		fmt.Printf("  kling ai model embed %s-1 \"turn on the lights\"\n", name)
 		fmt.Printf("Embeddings API (POST /v1/embeddings) on port %d of each replica.\n", von.Port)
 		return nil
 	}
-	fmt.Printf("  kling models ask %s-1 \"What is a microVM?\"\n", name)
+	fmt.Printf("  kling ai model ask %s-1 \"What is a microVM?\"\n", name)
 	fmt.Printf("OpenAI-compatible API on port %d of each replica (kling inspect <ref> for the address).\n", von.Port)
 	return nil
 }
@@ -341,7 +343,7 @@ func ensureModelImage(ctx context.Context, c *api.Client, name string, spec von.
 			// 412: un daemon Linux sin el constructor instalado. 501: macOS, que
 			// no construye imágenes. En los dos casos, el camino es el mismo.
 			return fmt.Errorf("%w\nbuild the image on a Linux daemon (the llm builder ships with it: make deploy) and copy it here:\n"+
-				"  kling models add -H ssh://<linux host> %s %s -build-only\n  kling images copy %s -from ssh://<linux host>",
+				"  kling ai model add -H ssh://<linux host> %s %s -build-only\n  kling image copy %s -from ssh://<linux host>",
 				err, name, modelFlags(spec), name)
 		}
 		return err
@@ -371,7 +373,7 @@ func modelsAsk(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling models ask <machine> [-max-tokens N] <prompt...>")
+		return fmt.Errorf("usage: kling ai model ask <machine> [-max-tokens N] <prompt...>")
 	}
 	ref, prompt := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
 
@@ -424,7 +426,7 @@ func modelsEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling models embed <machine> <text...>")
+		return fmt.Errorf("usage: kling ai model embed <machine> <text...>")
 	}
 	ref, text := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
 	ctx, stop := ctxWithSignals()
@@ -457,7 +459,7 @@ func modelsRm(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling models rm <name> [-keep-image]")
+		return fmt.Errorf("usage: kling ai model rm <name> [-keep-image]")
 	}
 	name := fs.Arg(0)
 	ctx, stop := ctxWithSignals()

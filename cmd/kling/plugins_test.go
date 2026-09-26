@@ -32,16 +32,12 @@ func TestKnownFlags(t *testing.T) {
 // El núcleo no trae MCP: sin extensiones, la ayuda y el completado solo tienen
 // lo suyo. Con una extensión instalada, lo que ella declara aparece en los dos.
 func TestAyudaYCompletadoConUnaExtension(t *testing.T) {
-	reset := func() { extOnce = sync.Once{}; extReg = nil }
-	t.Cleanup(reset)
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("sin go en el PATH no se puede compilar la extensión de prueba")
 	}
-
-	t.Setenv("KLING_PLUGIN_PATH", t.TempDir())
-	t.Setenv("PATH", "/usr/bin:/bin") // que no encuentre extensiones reales del usuario
-	reset()
+	hermetic(t) // que no encuentre extensiones reales del usuario
+	reset := func() { extOnce = sync.Once{}; extReg = nil }
 	var b strings.Builder
 	printUsage(&b)
 	for _, no := range []string{"MCP SERVICES", "mcp import", "CONNECT YOUR AGENT"} {
@@ -51,7 +47,7 @@ func TestAyudaYCompletadoConUnaExtension(t *testing.T) {
 	}
 	for _, c := range coreCommands {
 		switch c {
-		case "mcp", "add", "search", "connect", "migrate", "memory", "gateway", "export":
+		case "mcp", "connect":
 			t.Errorf("%q es de kindling-mcp, no del núcleo", c)
 		}
 	}
@@ -71,8 +67,13 @@ func TestAyudaYCompletadoConUnaExtension(t *testing.T) {
 	reset()
 	b.Reset()
 	printUsage(&b)
-	if !strings.Contains(b.String(), "HELLO") || !strings.Contains(b.String(), "says hello") {
+	if !strings.Contains(b.String(), "hello") || !strings.Contains(b.String(), "says hello") {
 		t.Errorf("la ayuda no incluye la extensión instalada:\n%s", b.String())
+	}
+	b.Reset()
+	printUsageAll(&b)
+	if !strings.Contains(b.String(), "HELLO\n") || !strings.Contains(b.String(), "  fail ") {
+		t.Errorf("help all no incluye los verbos promovidos de la extensión:\n%s", b.String())
 	}
 	for _, zsh := range []bool{false, true} {
 		if s := completionScript(zsh); !strings.Contains(s, " hello") || !strings.Contains(s, "world") {

@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/units"
 )
 
 // cmdVolume gestiona el almacenamiento que sobrevive a las microVMs.
@@ -61,9 +62,8 @@ func volumeCreate(args []string) error {
 		return err
 	}
 	fmt.Printf("%s  created  (%s logical, %s on disk)\n", v.Name, human(v.SizeBytes), human(v.UsedBytes))
-	fmt.Printf("\nIt's sparse: it only uses what gets written inside.\n")
-	fmt.Printf("Mount it in a microVM (or a service, with kindling-mcp's -volume):\n")
-	fmt.Printf("  kling run -image <image> -volume %s\n", v.Name)
+	fmt.Printf("It's sparse: it only uses what gets written inside.\n")
+	next("kling run -image <image> -volume %s   (or kling mcp add <server> -volume %s)", v.Name, v.Name)
 	return nil
 }
 
@@ -71,6 +71,7 @@ func volumeList(args []string) error {
 	fs := flag.NewFlagSet("volume ls", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
+	quiet := fs.Bool("q", false, "print only names (for scripting)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -80,6 +81,12 @@ func volumeList(args []string) error {
 	vols, err := api.NewClient(hostOf(*host)).Volumes(ctx)
 	if err != nil {
 		return err
+	}
+	if *quiet {
+		for _, v := range vols {
+			fmt.Println(v.Name)
+		}
+		return nil
 	}
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(vols)
@@ -103,19 +110,26 @@ func volumeList(args []string) error {
 func volumeRemove(args []string) error {
 	fs := flag.NewFlagSet("volume rm", flag.ExitOnError)
 	host := hostFlag(fs)
+	force := fs.Bool("f", false, "do not ask for confirmation")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling volume rm <name>")
+		return fmt.Errorf("usage: kling volume rm <name>...")
+	}
+	if !*force && !confirmMany("volume", fs.Args()) {
+		return errAborted
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	if err := api.NewClient(hostOf(*host)).RemoveVolume(ctx, fs.Arg(0)); err != nil {
-		return err
+	c := api.NewClient(hostOf(*host))
+	for _, name := range fs.Args() {
+		if err := c.RemoveVolume(ctx, name); err != nil {
+			return err
+		}
+		fmt.Printf("%s removed\n", name)
 	}
-	fmt.Printf("%s removed\n", fs.Arg(0))
 	return nil
 }
 
@@ -153,7 +167,7 @@ func volumePopulate(args []string) error {
 	host := hostFlag(fs)
 	image := fs.String("image", ToolchainImage, "image that provides the installer (npm, pip...)")
 	mount := fs.String("mount", "/data", "where the volume is mounted inside the microVM")
-	mem := fs.Int("mem", 0, "memory in MiB for the installation microVM")
+	mem := units.MiBVar(fs, "mem", 0, "memory for the installation microVM: 512M, 1G (bare number = MiB)")
 
 	// El "--" se separa ANTES de parsear, y no se deja en manos de flag.
 	//
@@ -175,7 +189,7 @@ func volumePopulate(args []string) error {
 		return fmt.Errorf("usage: kling volume populate <name> [-image IMG] -- <command>\n" +
 			"  e.g.:  kling volume populate libs -- \\\n" +
 			"             npm install --prefix /data --ignore-scripts lodash zod\n" +
-			"  (uses the `toolchain` image by default: build it with `kling images toolchain`)")
+			"  (uses the `toolchain` image by default: build it with `kling image toolchain`)")
 	}
 	name := fs.Arg(0)
 	if *image == "" {

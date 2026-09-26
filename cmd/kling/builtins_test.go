@@ -11,84 +11,126 @@ import (
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
-// Cada incorporada tiene un manifiesto válido, un solo comando con su nombre en
-// el grupo AI, y cada subcomando del completado aparece en su ayuda: si alguien
+// La incorporada `ai` tiene un manifiesto válido, un comando por cada
+// subcomando del dispatcher, y cada uno con su bloque de ayuda: si alguien
 // añade uno al dispatcher y no a la ayuda (o al revés), este test lo dice.
 func TestBuiltinManifests(t *testing.T) {
-	want := map[string][]string{
-		"ai":     {"up", "serve", "ls", "test", "generate", "eval", "calibrate", "reload", "prime", "review", "feedback", "retrain", "rollback"},
-		"chispa": {"train", "eval", "predict", "inspect", "deploy", "ls", "rm"},
-		"models": {"ls", "add", "ask", "embed", "rm"},
-	}
+	want := []string{"up", "serve", "ls", "test", "generate", "eval", "calibrate", "reload",
+		"prime", "review", "feedback", "retrain", "rollback", "model", "chispa"}
 	bs := builtinExtensions()
-	if len(bs) != len(want) {
-		t.Fatalf("%d builtins, want %d", len(bs), len(want))
+	if len(bs) != 1 || bs[0].Manifest.Name != "ai" {
+		t.Fatalf("builtins: %+v", bs)
 	}
-	for _, b := range bs {
-		m := b.Manifest
-		if err := m.Validate(); err != nil {
-			t.Errorf("%s: invalid manifest: %v", m.Name, err)
+	m := bs[0].Manifest
+	if err := m.Validate(); err != nil {
+		t.Fatalf("invalid manifest: %v", err)
+	}
+	if m.HelpGroup != "SERVE" || m.Summary == "" {
+		t.Errorf("group %q, summary %q", m.HelpGroup, m.Summary)
+	}
+	var names []string
+	for _, c := range m.Commands {
+		names = append(names, c.Name)
+		if c.Usage == "" || c.Summary == "" || !strings.Contains(c.Usage, "  ai "+c.Name) {
+			t.Errorf("%s: summary %q, usage %q", c.Name, c.Summary, c.Usage)
 		}
-		subs, ok := want[m.Name]
-		if !ok {
-			t.Errorf("unexpected builtin %q", m.Name)
-			continue
+		if bs[0].Commands[c.Name] == nil {
+			t.Errorf("%s: declared but not implemented", c.Name)
 		}
-		if len(m.Commands) != 1 || m.Commands[0].Name != m.Name {
-			t.Fatalf("%s: want one command named like the extension, got %+v", m.Name, m.Commands)
-		}
-		c := m.Commands[0]
-		if c.Group != "AI" || c.Summary == "" || c.Usage == "" {
-			t.Errorf("%s: group %q, summary %q, usage empty %v", m.Name, c.Group, c.Summary, c.Usage == "")
-		}
-		if strings.Join(c.Subcommands, " ") != strings.Join(subs, " ") {
-			t.Errorf("%s: subcommands %v, want %v", m.Name, c.Subcommands, subs)
+		if m.IsTopLevel(&c) {
+			t.Errorf("%s: must live under `kling ai`", c.Name)
 		}
 		for _, s := range c.Subcommands {
-			if !strings.Contains(c.Usage, "  "+m.Name+" "+s) && !strings.Contains(c.Usage, "| "+s+" ") {
-				t.Errorf("%s: subcommand %q missing from its help", m.Name, s)
+			if !strings.Contains(c.Usage, "  ai "+c.Name+" "+s) {
+				t.Errorf("ai %s: subcommand %q missing from its help", c.Name, s)
 			}
 		}
-		if b.Commands[m.Name] == nil {
-			t.Errorf("%s: declares its command but does not implement it", m.Name)
-		}
+	}
+	if strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Errorf("commands %v, want %v", names, want)
 	}
 }
 
-// Descubiertas junto a las externas, las tres salen como incorporadas, sirven
-// su comando y aportan su subcomando al completado.
+// Descubierta junto a las externas, `ai` es un espacio de nombres: sirve
+// `kling ai up` y aporta sus comandos al completado y a la ayuda.
 func TestBuiltinsDiscovered(t *testing.T) {
 	reg := plugin.Discover(context.Background(), plugin.Options{
 		Core:     []string{"ps", "run"},
 		Builtins: builtinExtensions(),
 		Path:     []string{t.TempDir()},
 	})
-	for _, n := range []string{"ai", "chispa", "models"} {
-		p := reg.Lookup(n)
-		if p == nil || p.Builtin == nil || p.Err != nil {
-			t.Fatalf("%s: not served by a usable builtin: %+v", n, p)
-		}
+	p := reg.Lookup("ai")
+	if p == nil || p.Builtin == nil || p.Err != nil || !reg.IsNamespace("ai") {
+		t.Fatalf("ai: not served by a usable builtin: %+v", p)
+	}
+	if _, argv := reg.Resolve("ai", []string{"model", "ls"}); strings.Join(argv, " ") != "model ls" {
+		t.Fatalf("resolve: %v", argv)
 	}
 	var help bytes.Buffer
-	plugin.WriteHelp(&help, reg.Commands())
-	for _, s := range []string{"AI\n", "  ai up ", "  chispa train ", "  models embed "} {
+	plugin.WriteNamespace(&help, "kling ai", *p.Manifest)
+	for _, s := range []string{"kling ai — ", "GATEWAY\n", "  ai up ", "  ai chispa train ", "  ai model embed "} {
 		if !strings.Contains(help.String(), s) {
 			t.Errorf("help lacks %q:\n%s", s, help.String())
 		}
 	}
+	cmds := reg.Commands()
+	if len(cmds) != 1 || cmds[0].Name != "ai" || !contains(cmds[0].Subcommands, "model") {
+		t.Fatalf("top level: %+v", cmds)
+	}
 }
 
-// `kling help ai` llega como `ai -h`: imprime la ayuda del manifiesto sin
-// tocar el daemon.
-func TestBuiltinHelp(t *testing.T) {
-	var buf bytes.Buffer
-	writeBuiltinHelp(&buf, "ai", "sum", aiHelp)
-	if !strings.HasPrefix(buf.String(), "kling ai - sum\n\nUSAGE\n  ai up ") {
-		t.Fatalf("help:\n%s", buf.String())
+// El árbol del núcleo: bloques por subcomando, alias y qué es una petición
+// de ayuda.
+func TestTree(t *testing.T) {
+	hermetic(t)
+	for _, name := range []string{"run", "save", "template", "image", "volume", "machine", "plugin", "help", "try"} {
+		if coreCommand(name) == nil {
+			t.Errorf("%s missing from the tree", name)
+		}
 	}
-	for _, a := range []string{"-h", "--help", "help"} {
-		if !isHelpArg(a) {
-			t.Errorf("%q is not taken as help", a)
+	if b := subBlock(coreCommand("template"), "rm"); !strings.HasPrefix(b, "  template rm ") || strings.Contains(b, "template ls") {
+		t.Errorf("subBlock: %q", b)
+	}
+	for in, want := range map[string]string{
+		"add x": "mcp add x", "gateway -listen :1": "mcp serve -listen :1", "models add m": "ai model add m",
+		"chispa train": "ai chispa train", "commit a b": "save a b", "rmi x": "template rm x",
+		"snapshots ls": "template ls", "plugins": "plugin", "info -json": "status -v -json",
+		"mmds x": "machine secret x", "ps -a": "ps -a",
+	} {
+		f := strings.Fields(in)
+		c, a := resolveAlias(f[0], f[1:])
+		if got := strings.Join(append([]string{c}, a...), " "); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+	for _, a := range []string{"commit", "snapshots", "plugins", "models"} {
+		if !contains(coreCommands, a) {
+			t.Errorf("alias %q must be reserved to the core", a)
+		}
+	}
+	if contains(coreCommands, "add") {
+		t.Error("`add` must stay available to a 0.13 kling-mcp")
+	}
+	for in, want := range map[string]bool{
+		"run -h": true, "template rm -h": true, "ai model -h": true, "ai model add -h": true,
+		"exec box -h": false, "exec box ls -h": false, "run -name x -h": false, "nope -h": false,
+		"ai zzz -h": false, "help": false,
+	} {
+		f := strings.Fields(in)
+		if _, ok := helpRequest(f[0], f[1:]); ok != want {
+			t.Errorf("helpRequest(%q) = %v, want %v", in, ok, want)
+		}
+	}
+	var b bytes.Buffer
+	printUsage(&b)
+	if !strings.Contains(b.String(), "START HERE") || !strings.Contains(b.String(), "kling help all") || strings.Contains(b.String(), "mmds") {
+		t.Errorf("default screen:\n%s", b.String())
+	}
+	b.Reset()
+	printUsageAll(&b)
+	for _, s := range []string{"START HERE\n", "ADVANCED\n", "  machine resize ", "AI — ", "  ai model add ", "CONNECTION\n"} {
+		if !strings.Contains(b.String(), s) {
+			t.Errorf("help all lacks %q", s)
 		}
 	}
 }

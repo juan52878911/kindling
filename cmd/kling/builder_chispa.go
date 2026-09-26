@@ -56,7 +56,7 @@ func builderChispa(dir string) error {
 		return err
 	}
 	if spec.ModelB64 == "" {
-		return fmt.Errorf("the chispa builder needs model_b64 (kling chispa deploy reads it from your -model file)")
+		return fmt.Errorf("the chispa builder needs model_b64 (kling ai chispa deploy reads it from your -model file)")
 	}
 	modelBytes, err := base64.StdEncoding.DecodeString(spec.ModelB64)
 	if err != nil {

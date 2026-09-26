@@ -50,7 +50,7 @@ func TestDoctorProblemas(t *testing.T) {
 			{Name: "old", Path: "/x/kling-old", Err: errors.New("needs kling 9.0.0 or newer (this is 0.13.0)")},
 			{Name: "off", Path: "/x/kling-off", Disabled: true, Err: &plugin.DisabledError{Name: "off"}},
 		},
-		extDir: "/h/p", extDirOK: true,
+		extDir: "/h/p", extDirOK: true, companions: []string{"kling-bridge"}, shell: "zsh",
 	}
 	cs := doctorChecks(in)
 	if d := findCheck(cs, "daemon"); d == nil || d.State != doctorFail || !strings.Contains(d.Fix, "KLING_SOCKET_USER") {
@@ -65,9 +65,20 @@ func TestDoctorProblemas(t *testing.T) {
 	if c := findCheck(cs, "extension off"); c.State != doctorOK {
 		t.Fatalf("desactivada es una decisión, no una avería: %+v", c)
 	}
-	if c := findCheck(cs, "completion"); c.State != doctorWarn || c.Fix != "kling completion install" {
+	if c := findCheck(cs, "completion"); c.State != doctorWarn || !strings.HasPrefix(c.Fix, "kling completion install") || !strings.Contains(c.Fix, "~/.zshrc") {
 		t.Fatalf("%+v", c)
 	}
+	// Sin compañeros en el directorio no hay nada que avisar del PATH.
+	in.companions = nil
+	if c := findCheck(doctorChecks(in), "extensions dir"); c.State != doctorOK {
+		t.Fatalf("sin compañeros: %+v", c)
+	}
+	// El completado instalado en el rc cuenta aunque esta shell no lo cargue.
+	in.completionRC = true
+	if c := findCheck(doctorChecks(in), "completion"); c.State != doctorOK || !strings.Contains(c.Detail, "next shell") {
+		t.Fatalf("instalado en el rc: %+v", c)
+	}
+	in.completionRC = false
 	if c := findCheck(cs, "extensions dir"); c.State != doctorWarn || !strings.Contains(c.Fix, `export PATH="/h/p:$PATH"`) {
 		t.Fatalf("%+v", c)
 	}
@@ -75,6 +86,13 @@ func TestDoctorProblemas(t *testing.T) {
 	writeDoctor(&b, cs)
 	if !strings.Contains(b.String(), "✗ daemon") || !strings.Contains(b.String(), "fix: kling completion install") ||
 		!strings.Contains(b.String(), "2 problem(s)") {
+		t.Fatal(b.String())
+	}
+	// NO_COLOR: marcas ASCII.
+	t.Setenv("NO_COLOR", "1")
+	b.Reset()
+	writeDoctor(&b, cs)
+	if strings.Contains(b.String(), "✗") || !strings.Contains(b.String(), "xx daemon") {
 		t.Fatal(b.String())
 	}
 }

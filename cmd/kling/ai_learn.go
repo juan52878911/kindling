@@ -359,7 +359,7 @@ func printRetrain(rep *aigw.RetrainReport) {
 	case rep.Pending:
 		fmt.Printf("%s passed the gate; making its golden snapshot %s...\n", rep.Version, rep.Snapshot)
 	case rep.Candidate != "":
-		fmt.Printf("not promoted; the new model is in %s (kling chispa eval -model %s -data <file>)\n", rep.Candidate, rep.Candidate)
+		fmt.Printf("not promoted; the new model is in %s (kling ai chispa eval -model %s -data <file>)\n", rep.Candidate, rep.Candidate)
 	}
 	if rep.Note != "" {
 		fmt.Println(rep.Note)

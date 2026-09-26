@@ -18,9 +18,9 @@ func TestHintFor(t *testing.T) {
 		{errors.New(`Get "http://kling/machines": cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: no such file or directory`), "kling doctor"},
 		{errors.New(`cannot talk to the daemon at /run/kling.sock: dial unix /run/kling.sock: connect: permission denied`), "KLING_SOCKET_USER"},
 		{errors.New(`machine "web" does not exist`), "kling ps -a"},
-		{errors.New(`snapshot "tpl" does not exist`), "kling snapshots ls"},
-		{errors.New(`image "foo" does not exist`), "kling images ls"},
-		{errors.New(`image "toolchain" does not exist`), "kling images toolchain"},
+		{errors.New(`snapshot "tpl" does not exist`), "kling template ls"},
+		{errors.New(`image "foo" does not exist`), "kling image ls"},
+		{errors.New(`image "toolchain" does not exist`), "kling image toolchain"},
 		{errors.New(`context "lab" does not exist`), "kling context ls"},
 		{errors.New(`Post "http://kling/machines": EOF`), "kling doctor"},
 		{&api.StatusError{Code: 404, Message: "404 page not found"}, "kling version"},
@@ -64,10 +64,10 @@ func TestMovedError(t *testing.T) {
 	if codigoDeSalida(err) != 2 {
 		t.Fatalf("código %d", codigoDeSalida(err))
 	}
-	if hintFor(err) != "kling plugins install domotica" {
+	if hintFor(err) != "kling plugin install domotica" {
 		t.Fatalf("pista %q", hintFor(err))
 	}
-	if movedToExtension["gateway"] != "mcp" || movedToExtension["domotica"] != "domotica" {
+	if movedToExtension["mcp"] != "mcp" || movedToExtension["connect"] != "mcp" || movedToExtension["domotica"] != "domotica" {
 		t.Fatal("tabla de comandos movidos")
 	}
 }

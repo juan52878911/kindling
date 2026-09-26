@@ -44,13 +44,14 @@ func TestPluginsInstallLsDisableRm(t *testing.T) {
 	t.Cleanup(func() { plugin.ManifestTimeout = previo })
 
 	dir := t.TempDir()
+	hermetic(t)
 	t.Setenv("KLING_PLUGIN_PATH", dir)
 	t.Setenv("KLING_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("PATH", "/usr/bin:/bin")
 
 	src := t.TempDir()
 	suffix := "-" + runtime.GOOS + "-" + runtime.GOARCH
-	manifest := `{"manifest_version":1,"name":"demo","version":"2.0.0","commands":[{"name":"demo"},{"name":"ps"}],"companions":["kling-demo-helper"]}`
+	manifest := `{"manifest_version":1,"name":"demo","version":"2.0.0","commands":[{"name":"demo"},{"name":"ps","top_level":true}],"companions":["kling-demo-helper"]}`
 	os.WriteFile(filepath.Join(src, "kling-demo"+suffix),
 		[]byte("#!/bin/sh\nif [ \"$1\" = --kling-manifest ]; then echo '"+manifest+"'; fi\n"), 0o644)
 	os.WriteFile(filepath.Join(src, "kling-demo-helper"+suffix), []byte("#!/bin/sh\n"), 0o644)

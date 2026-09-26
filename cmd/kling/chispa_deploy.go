@@ -20,9 +20,10 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
+	"github.com/juan52878911/kindling/pkg/units"
 )
 
-// `kling chispa deploy|ls|rm`: Chispa como tarea serverless de kindling
+// `kling ai chispa deploy|ls|rm`: Chispa como tarea serverless de kindling
 // (docs/chispa-serverless.md), la alternativa a servirlo en proceso dentro de
 // `kling ai serve`. Cada tarea es su PROPIA imagen (el .chispa va horneado
 // dentro, como el GGUF de un modelo VON) y su propio dorado congelado: el
@@ -32,7 +33,7 @@ import (
 // de Chispa.
 
 // LabelTask marca el dorado y sus réplicas con el nombre de la tarea, para
-// `kling chispa ls` y para que un humano que mire `kling ps` sepa qué es.
+// `kling ai chispa ls` y para que un humano que mire `kling ps` sepa qué es.
 const chispaLabelTask = "chispa.task"
 
 func chispaLabels(name string, extra map[string]string) map[string]string {
@@ -50,19 +51,27 @@ func cmdChispaDeploy(args []string) error {
 	slotsPath := fs.String("slots", "", "optional .chispas (slots, docs/domotica.md)")
 	// 128 y no 64: un modelo de 28 etiquetas tardaba 1,96 s en calentar y, tras
 	// el thaw, rechazaba conexiones con 64 MiB (se quedaba corto de memoria).
-	mem := fs.Int("mem", 128, "microVM memory in MiB (64-128 is usually enough; see docs/chispa-serverless.md)")
-	vcpus := fs.Int("vcpus", 1, "microVM vCPUs")
+	mem := units.MiBVar(fs, "mem", 128, "microVM memory: 64M, 128M (bare number = MiB; 64-128 is usually enough; see docs/chispa-serverless.md)")
+	cpus := fs.Int("cpus", 1, "microVM vCPUs")
+	vcpusOld := fs.Int("vcpus", 0, "deprecated alias of -cpus")
 	warmText := fs.String("warm-text", "hello world", "text sent once before freezing, to touch the model's pages")
 	replace := fs.Bool("replace", false, "replace the golden snapshot if it exists")
 	rebuild := fs.Bool("rebuild", false, "rebuild the image even if one with this name exists")
-	reuse := fs.Bool("reuse-image", false, "the image already exists with this same -model (built on a Linux host and brought with `kling images copy`): make only the golden snapshot")
+	reuse := fs.Bool("reuse-image", false, "the image already exists with this same -model (built on a Linux host and brought with `kling image copy`): make only the golden snapshot")
 	allowExec := fs.Bool("allow-exec", false, "keep kling exec/cp working in this task's machines (debugging)")
 	wait := fs.Duration("wait", 2*time.Minute, "how long to wait for kling-chispa to answer /healthz")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *modelPath == "" {
-		return fmt.Errorf("usage: kling chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 128] [-vcpus 1]")
+		return fmt.Errorf("usage: kling ai chispa deploy <task> -model m.chispa [-slots s.chispas] [-mem 128M] [-cpus 1]")
+	}
+	vcpus := cpus
+	if *vcpusOld > 0 {
+		// -cpus es el nombre en todos los demás comandos; -vcpus era el único
+		// disidente.
+		fmt.Fprintln(os.Stderr, "warning: -vcpus is deprecated; use -cpus")
+		vcpus = vcpusOld
 	}
 	name := fs.Arg(0)
 	modelBytes, err := os.ReadFile(*modelPath)
@@ -136,7 +145,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 		if snaps, err := c.Snapshots(ctx); err == nil {
 			for _, s := range snaps {
 				if s.Name == name {
-					return fmt.Errorf("snapshot %q already exists (use -replace, or kling chispa rm %s)", name, name)
+					return fmt.Errorf("snapshot %q already exists (use -replace, or kling ai chispa rm %s)", name, name)
 				}
 			}
 		}
@@ -153,7 +162,7 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	}
 	switch {
 	case o.Reuse && !exists:
-		return fmt.Errorf("-reuse-image: there is no image %q on this daemon (kling images copy %s -from <linux host>)", name, name)
+		return fmt.Errorf("-reuse-image: there is no image %q on this daemon (kling image copy %s -from <linux host>)", name, name)
 	case exists && !o.Rebuild && !o.Reuse:
 		return fmt.Errorf("image %q already exists (use -rebuild to build it again with this model, or -reuse-image if it already has it)", name)
 	}
@@ -184,8 +193,9 @@ func chispaDeploy(ctx context.Context, c *api.Client, o chispaDeployOptions) err
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ %s  golden snapshot of task %s  (%s of memory, %s in total)\n",
+	fmt.Printf("✓ %s  template of task %s  (%s of memory, %s in total)\n",
 		g.Snapshot.Name, name, human(g.Snapshot.MemBytes), time.Since(t0).Round(time.Second))
+	next("kling run -from %s", name)
 
 	// El gateway no tiene el .chispa de origen a mano (puede vivir en otra
 	// máquina, o el daemon estar al otro lado de un SSH) y, sobre todo, no
@@ -222,7 +232,7 @@ func cmdChispaLs(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(tasks)
 	}
 	if len(tasks) == 0 {
-		fmt.Println("no chispa tasks deployed (kling chispa deploy <task> -model m.chispa)")
+		fmt.Println("no chispa tasks deployed (kling ai chispa deploy <task> -model m.chispa)")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
@@ -241,7 +251,7 @@ func cmdChispaRm(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: kling chispa rm <task> [-keep-image]")
+		return fmt.Errorf("usage: kling ai chispa rm <task> [-keep-image]")
 	}
 	name := fs.Arg(0)
 	ctx, stop := ctxWithSignals()

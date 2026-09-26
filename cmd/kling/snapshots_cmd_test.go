@@ -73,7 +73,7 @@ func TestSnapshotsInspectContraUnDaemonFalso(t *testing.T) {
 		t.Fatalf("%v %+v", err, s)
 	}
 	_, err = c.Snapshot(t.Context(), "nope")
-	if err == nil || hintFor(err) != "kling snapshots ls" {
+	if err == nil || hintFor(err) != "kling template ls" {
 		t.Fatalf("%v / %q", err, hintFor(err))
 	}
 }

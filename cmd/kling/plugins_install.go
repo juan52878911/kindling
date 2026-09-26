@@ -15,7 +15,7 @@ import (
 )
 
 // parseInterspersed parsea fs dejando que los flags vayan antes o después de
-// los argumentos: `kling plugins install mcp -from URL` es lo que teclea la
+// los argumentos: `kling plugin install mcp -from URL` es lo que teclea la
 // gente, y flag.Parse se detiene en el primer argumento que no es un flag.
 func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	var pos []string
@@ -35,7 +35,7 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// pluginsInstall es `kling plugins install <nombre>[@vX.Y.Z]`.
+// pluginsInstall es `kling plugin install <nombre>[@vX.Y.Z]`.
 func pluginsInstall(args []string) error {
 	fs := flag.NewFlagSet("plugins install", flag.ExitOnError)
 	from := fs.String("from", "", "https URL of the extension binary (its SHA256SUMS is looked up next to it)")
@@ -43,7 +43,7 @@ func pluginsInstall(args []string) error {
 	sum := fs.String("sha256", "", "expected sha256 of the binary")
 	dir := fs.String("dir", "", "install into this directory instead of the extensions directory")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: kling plugins install <name>[@vX.Y.Z] [-from URL] [-file PATH] [-sha256 H] [-dir DIR]")
+		fmt.Fprintln(fs.Output(), "usage: kling plugin install <name>[@vX.Y.Z] [-from URL] [-file PATH] [-sha256 H] [-dir DIR]")
 		fs.PrintDefaults()
 	}
 	pos, err := parseInterspersed(fs, args)
@@ -118,9 +118,9 @@ func pluginsInstall(args []string) error {
 		fmt.Printf("\nnote: %s is not where kling looks for extensions; add it to $KLING_PLUGIN_PATH\n", filepath.Dir(res.Path))
 	}
 	if c, err := config.Load(); err == nil && c.PluginDisabled(name) {
-		fmt.Printf("\nnote: %s is disabled; turn it on with: kling plugins enable %s\n", name, name)
+		fmt.Printf("\nnote: %s is disabled; turn it on with: kling plugin enable %s\n", name, name)
 	}
-	fmt.Println("\nReload shell completion to pick up the new commands:  source <(kling completion zsh)")
+	fmt.Println("\nReload shell completion to pick up the new commands:  " + reloadHint(""))
 	return nil
 }
 
@@ -134,7 +134,7 @@ func inSearchPath(dir string) bool {
 	return false
 }
 
-// pluginsRm es `kling plugins rm <nombre>`: solo borra lo que está en el
+// pluginsRm es `kling plugin rm <nombre>`: solo borra lo que está en el
 // directorio de extensiones.
 func pluginsRm(args []string) error {
 	fs := flag.NewFlagSet("plugins rm", flag.ExitOnError)
@@ -144,7 +144,7 @@ func pluginsRm(args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: kling plugins rm <name> [-dir DIR]")
+		return errors.New("usage: kling plugin rm <name> [-dir DIR]")
 	}
 	name := strings.TrimPrefix(pos[0], "kling-")
 	if !plugin.ValidName(name) {
@@ -152,7 +152,7 @@ func pluginsRm(args []string) error {
 	}
 	for _, p := range extensions().Plugins {
 		if p.Name == name && p.Builtin != nil {
-			return fmt.Errorf("%s is built into kling and cannot be removed; turn it off with: kling plugins disable %s", name, name)
+			return fmt.Errorf("%s is built into kling and cannot be removed; turn it off with: kling plugin disable %s", name, name)
 		}
 	}
 	d := *dir
@@ -171,7 +171,7 @@ func pluginsRm(args []string) error {
 	return nil
 }
 
-// pluginsEnable es `kling plugins enable|disable <nombre>`: edita
+// pluginsEnable es `kling plugin enable|disable <nombre>`: edita
 // plugins.disabled en config.json. Desactivar es la única forma de quitar de
 // en medio una incorporada, y la forma rápida de probar sin una externa.
 func pluginsEnable(args []string, enable bool) error {
@@ -180,7 +180,7 @@ func pluginsEnable(args []string, enable bool) error {
 		verb = "enable"
 	}
 	if len(args) != 1 {
-		return fmt.Errorf("usage: kling plugins %s <name>", verb)
+		return fmt.Errorf("usage: kling plugin %s <name>", verb)
 	}
 	name := strings.TrimPrefix(args[0], "kling-")
 	if !plugin.ValidName(name) {
@@ -206,7 +206,7 @@ func pluginsEnable(args []string, enable bool) error {
 	if enable {
 		fmt.Printf("%s enabled\n", name)
 	} else {
-		fmt.Printf("%s disabled: its commands and hooks are off until `kling plugins enable %s`\n", name, name)
+		fmt.Printf("%s disabled: its commands and hooks are off until `kling plugin enable %s`\n", name, name)
 	}
 	if !known && !enable {
 		fmt.Printf("note: no extension named %s is installed right now; the setting is kept for when it is\n", name)

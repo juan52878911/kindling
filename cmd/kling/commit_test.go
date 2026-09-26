@@ -11,11 +11,11 @@ import "testing"
 func TestElRechazoDeCommitExplicaLaCadena(t *testing.T) {
 	msg := mensajeNoSirve("det1", "30s")
 	for _, quiero := range []string{
-		"not serving",         // que pasa ahora
-		"tool did not start",  // que pasaria despues
-		"kling logs det1",     // como diagnosticar
-		"kling commit -force", // como seguir si se quiere igual
-		"30s",                 // cuanto se espero
+		"not serving",        // que pasa ahora
+		"tool did not start", // que pasaria despues
+		"kling logs det1",    // como diagnosticar
+		"kling save -force",  // como seguir si se quiere igual
+		"30s",                // cuanto se espero
 	} {
 		if !contiene(msg, quiero) {
 			t.Errorf("el rechazo no menciona %q:\n%s", quiero, msg)
