@@ -162,6 +162,9 @@ func New(o Options) (*Gateway, error) {
 		learn: newLearner(o.DataDir), voteSem: make(chan struct{}, 1),
 	}
 	g.setConfig(cfg)
+	for _, n := range g.domainNotes(cfg) {
+		log.Print("warning: " + n)
+	}
 
 	s := scheduler.New(o.Client, o.Idle, false, 0)
 	s.Port = von.Port
@@ -253,7 +256,20 @@ func (g *Gateway) setConfig(c *Config) []string {
 	g.cfg, g.rawCfg = eff, c
 	g.cascades = st
 	g.learnStates = ls
-	return CascadeNotes(st)
+	return append(CascadeNotes(st), g.domainNotes(c)...)
+}
+
+// domainNotes avisa de las tareas de intención que nombran un dominio en Go
+// que este gateway no trae: contestarán 503 hasta que lo sirva el programa
+// que lo registra.
+func (g *Gateway) domainNotes(c *Config) []string {
+	var out []string
+	for _, name := range sortedKeys(c.Tasks) {
+		if d := c.Tasks[name].Intent; d != nil && d.Domain != "" && g.opts.Domains[d.Domain] == nil {
+			out = append(out, fmt.Sprintf("task %s: domain %q is not built into this gateway: /v1/decide answers 503 (use \"schema\", or the program that registers that domain)", name, d.Domain))
+		}
+	}
+	return out
 }
 
 // Reload relee el registro del disco. Los modelos Chispa se vuelven a leer en su
