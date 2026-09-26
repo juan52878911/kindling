@@ -83,7 +83,7 @@ func gatewayClient(addr string, timeout time.Duration) *domotica.GatewayClient {
 		}}
 		c.Base = "http://ai"
 	}
-	if t, err := aiToken(aiDefault("ai.token"), false); err == nil {
+	if t, err := aiToken(aiDefault("ai.token")); err == nil {
 		c.Token = t
 	}
 	return c
