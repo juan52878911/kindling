@@ -44,7 +44,53 @@ type Config struct {
 	// solo lo convierte al tipo que declara el manifiesto al escribirlo.
 	Extensions map[string]map[string]json.RawMessage `json:"extensions,omitempty"`
 
+	// Plugins decide qué extensiones se usan. Va aparte de Extensions porque
+	// no es configuración de una extensión, sino del núcleo sobre ellas.
+	Plugins Plugins `json:"plugins,omitempty"`
+
 	path string
+}
+
+// Plugins es la sección plugins.* de la configuración.
+type Plugins struct {
+	// Disabled son extensiones apagadas: se listan pero no reciben comandos
+	// ni ganchos. Vale también para las incorporadas, que no se pueden
+	// desinstalar y por eso necesitan otra forma de quitarlas de en medio.
+	Disabled []string `json:"disabled,omitempty"`
+}
+
+// PluginDisabled dice si la extensión name está desactivada.
+func (c *Config) PluginDisabled(name string) bool {
+	for _, d := range c.Plugins.Disabled {
+		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
+// SetPluginDisabled activa o desactiva la extensión name y dice si cambió
+// algo. No guarda: eso lo hace Save, para que quien llama decida.
+func (c *Config) SetPluginDisabled(name string, disabled bool) bool {
+	if c.PluginDisabled(name) == disabled {
+		return false
+	}
+	if disabled {
+		c.Plugins.Disabled = append(c.Plugins.Disabled, name)
+		sort.Strings(c.Plugins.Disabled)
+		return true
+	}
+	out := c.Plugins.Disabled[:0]
+	for _, d := range c.Plugins.Disabled {
+		if d != name {
+			out = append(out, d)
+		}
+	}
+	c.Plugins.Disabled = out
+	if len(out) == 0 {
+		c.Plugins.Disabled = nil
+	}
+	return true
 }
 
 type Context struct {
