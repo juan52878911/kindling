@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling-mcp/internal/mcp"
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 )
 
 func catalogo(nombres ...string) []mcp.ToolSpec {

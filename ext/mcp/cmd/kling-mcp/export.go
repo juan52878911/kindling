@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/juan52878911/kindling-mcp/internal/mcp"
-	"github.com/juan52878911/kindling-mcp/internal/report"
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/ext/mcp/internal/report"
 	"github.com/juan52878911/kindling/pkg/api"
 	"os"
 	"os/exec"

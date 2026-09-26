@@ -1,6 +1,6 @@
 [Unit]
 Description=Comprobar y curar los dorados de kling
-Documentation=https://github.com/juan52878911/kindling-mcp
+Documentation=https://github.com/juan52878911/kindling/tree/main/ext/mcp
 
 [Timer]
 Unit=kling-heal.service

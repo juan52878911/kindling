@@ -13,7 +13,7 @@ el operador lo crea, lo mantiene y lo borra hablando con el frontal por HTTP.
 - Un **operador fino**: un solo binario, sin dependencias externas (nada de
   client-go ni controller-runtime), que habla el API de Kubernetes por HTTP
   igual que hablaría con cualquier otro servicio. Ver
-  `internal/operator/kube.go`.
+  `ext/sandbox/internal/operator/kube.go`.
 - **Idempotente y resistente a reinicios**: si el operador se cae y vuelve,
   relista todos los `Sandbox`, no crea dos veces uno que ya tiene
   `status.id`, y sigue intentando borrar los que se quedaron a medias (el
@@ -48,17 +48,17 @@ Requiere un frontal de kindling-sandbox ya desplegado (ver el README de este
 repositorio) y un token de tenant para el operador.
 
 ```sh
-kubectl apply -f deploy/namespace.yaml
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/rbac.yaml
+kubectl apply -f ext/sandbox/deploy/namespace.yaml
+kubectl apply -f ext/sandbox/deploy/crd.yaml
+kubectl apply -f ext/sandbox/deploy/rbac.yaml
 
 # El token de un tenant del frontal, no una contraseña de Kubernetes.
 kubectl create secret generic kindling-operator-frontal \
   --namespace kindling-system \
   --from-literal=token='<token del tenant>'
 
-# Edita deploy/deployment.yaml: la imagen y KLING_SANDBOX_URL.
-kubectl apply -f deploy/deployment.yaml
+# Edita ext/sandbox/deploy/deployment.yaml: la imagen y KLING_SANDBOX_URL.
+kubectl apply -f ext/sandbox/deploy/deployment.yaml
 ```
 
 Fuera de un clúster (para probar contra un `kubectl proxy` local, por
@@ -103,7 +103,7 @@ Cambiar `spec.ttlSeconds` en un `Sandbox` vivo renueva el TTL en el frontal
 (`kubectl edit` o un `apply` con el campo distinto). Cambiar cualquier otro
 campo de `spec` no falla, pero tampoco hace nada: el frontal fija red,
 memoria y política de TTL al crear, y no los cambia en caliente (ver
-`internal/frontal/sandboxes.go`, `puedeReclamar`); para eso hay que borrar el
+`ext/sandbox/internal/frontal/sandboxes.go`, `puedeReclamar`); para eso hay que borrar el
 `Sandbox` y crear uno nuevo.
 
 ## `status`
@@ -140,7 +140,7 @@ memoria y política de TTL al crear, y no los cambia en caliente (ver
 ## Probado contra un clúster real
 
 Hasta la v0.2.1 esto solo se había probado contra el API de Kubernetes falso
-de `internal/operator/controller_test.go`. `scripts/93-e2e-k8s.sh` lo prueba
+de `ext/sandbox/internal/operator/controller_test.go`. `ext/sandbox/scripts/93-e2e-k8s.sh` lo prueba
 contra un **k3s real** (`v1.36.4+k3s1`, instalado con `--disable
 traefik,servicelb,metrics-server` para no gastar RAM de más en un laboratorio
 que también corre kindling) y un frontal real: plantilla e imagen, exec por
@@ -148,7 +148,7 @@ que también corre kindling) y un frontal real: plantilla e imagen, exec por
 mano en el frontal (`gone`, sin recrear), reinicio del operador (sin
 duplicar), frontal caído y recuperado, watch interrumpido, CRD `oneOf`, y
 RBAC. Se ejecuta a mano, no en CI (necesita un daemon de kindling con KVM
-detrás, igual que `scripts/90-e2e.sh`).
+detrás, igual que `ext/sandbox/scripts/90-e2e.sh`).
 
 Dos cosas que el falso API nunca hubiera podido enseñar, porque son
 comportamiento del **API server de verdad**, no del operador:
@@ -159,7 +159,7 @@ comportamiento del **API server de verdad**, no del operador:
   fecha de EXPIRACIÓN: con una marca en el futuro, la resta da negativo y el
   formateador de Kubernetes la imprime como `<invalid>`, siempre, sin
   excepción — con cualquier `expiresAt` válido, no solo con el de este
-  operador. `deploy/crd.yaml` usa `type: string` ahora, que muestra la fecha
+  operador. `ext/sandbox/deploy/crd.yaml` usa `type: string` ahora, que muestra la fecha
   tal cual.
 - **`status.message` no se limpiaba nunca tras una caída del frontal.**
   `PatchStatus` manda un merge patch a partir de un `SandboxStatus` a medio
@@ -167,7 +167,7 @@ comportamiento del **API server de verdad**, no del operador:
   \`json:"message,omitempty"\``, un mensaje vacío (recuperado, sin error)
   jamás sale en el JSON —omitempty lo quita del todo— así que el merge patch
   nunca tocaba esa clave y el mensaje de la última caída se quedaba para
-  siempre. `internal/operator/types.go` usa ahora `*string`: `nil` sigue
+  siempre. `ext/sandbox/internal/operator/types.go` usa ahora `*string`: `nil` sigue
   significando "no toques este campo", y un puntero a `""` lo limpia de
   verdad. Cubierto además por
   `TestReconcile_MessageClearsAfterFrontalRecovers`, que sí lo detecta contra
@@ -179,7 +179,7 @@ clúster (ver "Qué NO es" arriba), así que un Service normal no sirve. Lo que
 hace falta es que el Pod pueda alcanzar por red al host donde corre el
 frontal — la IP del nodo (o de la máquina donde esté desplegado, si es otra),
 nunca `127.0.0.1` ni `localhost`, y con el frontal escuchando en `0.0.0.0`
-(o esa IP en concreto), no solo en loopback. `scripts/93-e2e-k8s.sh` detecta
+(o esa IP en concreto), no solo en loopback. `ext/sandbox/scripts/93-e2e-k8s.sh` detecta
 esa IP con `ip route get 8.8.8.8` (la fuente de la ruta por defecto) en vez
 de la primera dirección "global" que encuentre: en un host que también corre
 kindling, `ip addr` lista una dirección `172.30.x.x` por cada microVM viva

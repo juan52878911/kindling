@@ -21,8 +21,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juan52878911/kindling-mcp/internal/mcp"
-	"github.com/juan52878911/kindling-mcp/internal/registry"
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/ext/mcp/internal/registry"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )

@@ -1,6 +1,6 @@
 [Unit]
 Description=kling heal — rehace los dorados que no sobrevivieron al reinicio del anfitrión
-Documentation=https://github.com/juan52878911/kindling-mcp
+Documentation=https://github.com/juan52878911/kindling/tree/main/ext/mcp
 After=kling.service
 Requires=kling.service
 

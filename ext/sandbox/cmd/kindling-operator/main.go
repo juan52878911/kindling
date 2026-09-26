@@ -1,5 +1,5 @@
 // Comando kindling-operator: un operador fino de Kubernetes para sandboxes de
-// kindling-sandbox. Ver internal/operator para el bucle y docs/kubernetes.md
+// kindling-sandbox. Ver internal/operator para el bucle y docs/kubernetes.md de la raíz
 // para qué es y qué NO es.
 package main
 
@@ -12,7 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/juan52878911/kindling-sandbox/internal/operator"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/operator"
 )
 
 // Version se fija al compilar:  -ldflags "-X main.Version=..."

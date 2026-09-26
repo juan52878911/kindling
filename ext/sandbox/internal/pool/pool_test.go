@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/juan52878911/kindling-sandbox/internal/plantilla"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/plantilla"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 

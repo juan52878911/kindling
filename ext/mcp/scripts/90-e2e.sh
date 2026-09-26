@@ -290,7 +290,10 @@ if [ -n "${BRIDGE_BIN:-}" ] && [ -n "${STDIO_BIN:-}" ]; then
 elif command -v go >/dev/null 2>&1; then
   BRIDGE_BIN=$(mktemp /tmp/e2e-kling-bridge.XXXXXX)
   STDIO_BIN=$(mktemp /tmp/e2e-stdio-server.XXXXXX)
-  if go build -o "$STDIO_BIN" "$ROOT/examples/stdio-server" 2>/tmp/e2e-build.log \
+  # El servidor de ejemplo vive en examples/mcp del módulo raíz (dos niveles
+  # arriba): se compila desde allí porque, con GOWORK=off, go build no acepta
+  # un directorio de otro módulo.
+  if go -C "$ROOT/../.." build -o "$STDIO_BIN" ./examples/mcp/stdio-server 2>/tmp/e2e-build.log \
      && go build -o "$BRIDGE_BIN" "$ROOT/cmd/kling-bridge" 2>>/tmp/e2e-build.log; then
     ok "built kling-bridge and the example stdio server"
     COMPILADOS=1

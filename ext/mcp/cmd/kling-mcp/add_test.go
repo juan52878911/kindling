@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/juan52878911/kindling-mcp/internal/registry"
+	"github.com/juan52878911/kindling/ext/mcp/internal/registry"
 )
 
 // planFor decide el runtime completo a partir del tipo de paquete: apk, canal
@@ -69,13 +69,14 @@ func TestPlanFor(t *testing.T) {
 // `min` sin avisar y una capa 5 veces más gorda. Este test ata los extremos,
 // igual que TestInitScriptsReadLayerParam ata kling.layer.
 //
-// El script vive en el repositorio de kindling: se busca en $KINDLING_DIR, que la
-// CI apunta a un checkout del núcleo. Sin él se salta, en vez de adivinar una
-// ruta y comparar contra una copia vieja.
+// El script vive en el núcleo, que desde la unificación está en el mismo repo:
+// por defecto se busca en ../.. del módulo (el test corre en cmd/kling-mcp, de
+// ahí los cuatro niveles), así se compara siempre contra el script del mismo
+// commit. $KINDLING_DIR sigue valiendo para apuntar a otro checkout.
 func TestFamiliasDeRuntimeCasanConElScriptDeBase(t *testing.T) {
 	dir := os.Getenv("KINDLING_DIR")
 	if dir == "" {
-		t.Skip("KINDLING_DIR no está puesto: apúntalo a un checkout de kindling para atar las familias")
+		dir = filepath.Join("..", "..", "..", "..")
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "scripts", "70-build-minimal-image.sh"))
 	if err != nil {

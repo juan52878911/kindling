@@ -33,7 +33,7 @@
 # Ejemplos:
 #   sudo ./80-mcp-image.sh stdio files -p "nodejs npm" \
 #        -n "@modelcontextprotocol/server-filesystem" -- mcp-server-filesystem /data
-#   sudo ./80-mcp-image.sh stdio eco -d ./examples/stdio-server-bin -- /opt/mcp/server
+#   sudo ./80-mcp-image.sh stdio eco -d ./examples/mcp/stdio-server-bin -- /opt/mcp/server
 #   sudo ./80-mcp-image.sh http everything -p "nodejs npm" \
 #        -n "@modelcontextprotocol/server-everything" -- mcp-server-everything streamableHttp
 #   sudo ./80-mcp-image.sh http legacy ./mi-servidor-http

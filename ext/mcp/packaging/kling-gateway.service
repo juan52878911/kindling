@@ -1,6 +1,6 @@
 [Unit]
 Description=kling gateway — enruta llamadas MCP a microVMs bajo demanda
-Documentation=https://github.com/juan52878911/kindling-mcp
+Documentation=https://github.com/juan52878911/kindling/tree/main/ext/mcp
 After=network-online.target kling.service
 Wants=network-online.target
 Requires=kling.service

@@ -1,6 +1,6 @@
 [Unit]
 Description=kling sandbox gateway — sandboxes de agentes de código sobre microVMs
-Documentation=https://github.com/juan52878911/kindling-sandbox
+Documentation=https://github.com/juan52878911/kindling/tree/main/ext/sandbox
 After=network-online.target kling.service
 Wants=network-online.target
 Requires=kling.service

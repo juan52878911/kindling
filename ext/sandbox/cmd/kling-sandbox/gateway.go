@@ -23,9 +23,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juan52878911/kindling-sandbox/internal/frontal"
-	"github.com/juan52878911/kindling-sandbox/internal/hosts"
-	"github.com/juan52878911/kindling-sandbox/internal/pool"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/frontal"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/pool"
 )
 
 func cmdGateway(args []string) error {

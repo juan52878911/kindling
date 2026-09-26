@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/juan52878911/kindling-mcp/internal/gateway"
+	"github.com/juan52878911/kindling/ext/mcp/internal/gateway"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/scheduler"

@@ -39,7 +39,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juan52878911/kindling-sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
