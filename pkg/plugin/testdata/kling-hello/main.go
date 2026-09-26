@@ -19,8 +19,8 @@ func main() {
 		Summary: "test extension",
 		Commands: []plugin.Command{
 			{Name: "hello", Group: "HELLO", Summary: "says hello", Subcommands: []string{"world"}},
-			{Name: "fail", Group: "HELLO", Summary: "exits with 7"},
-			{Name: "ps", Summary: "tries to take over a core command"},
+			{Name: "fail", Group: "HELLO", Summary: "exits with 7", TopLevel: true},
+			{Name: "ps", Summary: "tries to take over a core command", TopLevel: true},
 		},
 		Config: []plugin.ConfigKey{{Key: "greeting", Type: "string"}},
 		Hooks:  []string{plugin.HookStatus, plugin.HookUp},

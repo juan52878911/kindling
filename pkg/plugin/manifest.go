@@ -29,9 +29,19 @@ import (
 	"strings"
 )
 
-// ManifestVersion es la versión del formato del manifiesto que entiende este
-// núcleo.
-const ManifestVersion = 1
+// ManifestVersion es la versión del formato del manifiesto que escriben las
+// extensiones compiladas con este paquete.
+//
+//   - 1 (hasta kling 0.13): cada comando es de primer nivel (`kling add`).
+//   - 2 (desde 0.14): los comandos viven bajo el nombre de la extensión
+//     (`kling mcp add`) salvo los que se promueven con top_level.
+//
+// El núcleo entiende las dos: una extensión de 0.13 sigue funcionando como
+// entonces.
+const ManifestVersion = 2
+
+// minManifestVersion es la más antigua que el núcleo sigue leyendo.
+const minManifestVersion = 1
 
 // APIVersion es la versión del protocolo (entorno y argumentos) que el núcleo
 // ofrece a las extensiones. Viaja en KLING_PLUGIN_API.
@@ -61,6 +71,10 @@ type Manifest struct {
 	// daemon si están instaladas.
 	Units []string `json:"units,omitempty"`
 
+	// Group es la sección de `kling help` donde sale la extensión (con sus
+	// comandos bajo su nombre). Vacío = "EXTENSIONS".
+	HelpGroup string `json:"group,omitempty"`
+
 	// Companions son otros ejecutables que la extensión necesita a su lado
 	// (p. ej. "kling-bridge" para mcp). `kling plugins install` los baja de la
 	// misma release con el mismo control de sha256 y `kling plugins rm` los
@@ -68,20 +82,73 @@ type Manifest struct {
 	Companions []string `json:"companions,omitempty"`
 }
 
-// Command es un subcomando de primer nivel que la extensión añade a `kling`.
+// Command es un comando que la extensión añade a `kling`.
+//
+// Por defecto vive bajo el nombre de la extensión: el comando "add" de
+// kling-mcp se teclea `kling mcp add`, y la extensión lo recibe como
+// `kling-mcp add`. Así la ayuda de `kling` no crece un verbo suelto por cada
+// extensión. Promoverlo a primer nivel (`kling connect`) es explícito, con
+// TopLevel, y debería ser raro: solo el verbo que ES el producto.
+//
+// Un comando que se llama como la extensión (el "hello" de kling-hello) es de
+// primer nivel aunque no lo diga: es lo que siempre fue, y `kling hello hello`
+// no tendría sentido.
 type Command struct {
 	Name string `json:"name"`
-	// Group es la sección de `kling help` donde aparece (p. ej. "MCP SERVICES").
+	// Group es la sección de la ayuda de la extensión donde aparece (p. ej.
+	// "CATALOG"). Vacío = sin secciones.
 	Group   string `json:"group,omitempty"`
 	Summary string `json:"summary,omitempty"`
-	// Usage es el bloque que se imprime en `kling help`, ya con su formato de
-	// columnas. Vacío = una línea con Name y Summary.
+	// Usage es el bloque que se imprime en la ayuda, ya con su formato de
+	// columnas (dos espacios, el comando, la descripción en la columna 52).
+	// Vacío = una línea con Name y Summary.
 	Usage string `json:"usage,omitempty"`
 	// Subcommands alimentan el completado de la shell.
 	Subcommands []string `json:"subcommands,omitempty"`
 	// MachineArgs pide que el completado ofrezca ids de máquinas tras estos
 	// subcomandos ("" = tras el comando mismo).
 	MachineArgs []string `json:"machine_args,omitempty"`
+	// TopLevel lo saca del espacio de la extensión: se teclea `kling <name>`.
+	TopLevel bool `json:"top_level,omitempty"`
+	// Hidden lo deja fuera de la ayuda y del completado (alias, internos),
+	// pero se puede teclear.
+	Hidden bool `json:"hidden,omitempty"`
+}
+
+// Group devuelve la sección de la ayuda del núcleo donde va la extensión.
+func (m *Manifest) Group() string {
+	if m.HelpGroup != "" {
+		return m.HelpGroup
+	}
+	return "EXTENSIONS"
+}
+
+// IsTopLevel dice si el comando c de la extensión m se teclea sin el nombre de
+// la extensión delante. En un manifiesto de versión 1 lo son todos.
+func (m *Manifest) IsTopLevel(c *Command) bool {
+	return m.ManifestVersion < 2 || c.TopLevel || c.Name == m.Name
+}
+
+// Namespaced son los comandos que se teclean como `kling <ext> <comando>`.
+func (m *Manifest) Namespaced() []Command {
+	var out []Command
+	for i := range m.Commands {
+		if !m.IsTopLevel(&m.Commands[i]) {
+			out = append(out, m.Commands[i])
+		}
+	}
+	return out
+}
+
+// Promoted son los comandos de primer nivel.
+func (m *Manifest) Promoted() []Command {
+	var out []Command
+	for i := range m.Commands {
+		if m.IsTopLevel(&m.Commands[i]) {
+			out = append(out, m.Commands[i])
+		}
+	}
+	return out
 }
 
 // ConfigKey es una clave de configuración que la extensión declara. Se guarda en
@@ -109,8 +176,8 @@ func ValidName(name string) bool { return reName.MatchString(name) }
 // Validate comprueba que el manifiesto se puede usar. Un manifiesto inválido no
 // rompe `kling`: la extensión aparece en `kling plugins` con su error y ya.
 func (m *Manifest) Validate() error {
-	if m.ManifestVersion != ManifestVersion {
-		return fmt.Errorf("manifest_version %d; this kling understands %d", m.ManifestVersion, ManifestVersion)
+	if m.ManifestVersion < minManifestVersion || m.ManifestVersion > ManifestVersion {
+		return fmt.Errorf("manifest_version %d; this kling understands %d to %d", m.ManifestVersion, minManifestVersion, ManifestVersion)
 	}
 	if !reName.MatchString(m.Name) {
 		return fmt.Errorf("invalid extension name %q", m.Name)
@@ -124,6 +191,11 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("command %q declared twice", c.Name)
 		}
 		seen[c.Name] = true
+	}
+	// Con un comando que se llama como la extensión, `kling <name> x` es ese
+	// comando con el argumento x: no queda sitio para comandos bajo el nombre.
+	if m.ManifestVersion >= 2 && m.Command(m.Name) != nil && len(m.Namespaced()) > 0 {
+		return fmt.Errorf("command %q is named like the extension, so the other commands must be top_level", m.Name)
 	}
 	for _, h := range m.Hooks {
 		if h != HookStatus && h != HookUp {
