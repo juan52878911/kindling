@@ -105,8 +105,8 @@ func printTop(ps *api.ProcStats, endpoint string, at time.Time) {
 	}
 
 	// Estados que no aparecen en la tabla (warm/stopped) sí cuentan para el resumen.
-	fmt.Printf("\n%d alive · %d warm · total PSS %d MiB\n",
-		len(live), ps.ByState[string(api.StateWarm)], ps.TotalPSSMiB)
+	fmt.Printf("\n%d alive · %d frozen · total PSS %d MiB\n",
+		len(live), ps.ByState[string(api.StateWarm)]+ps.ByState[api.StateWarmLegacy], ps.TotalPSSMiB)
 	if ps.AvailableMiB > 0 || ps.FreeMiB > 0 {
 		fmt.Printf("host: MemAvailable %d MiB · MemFree %d MiB\n", ps.AvailableMiB, ps.FreeMiB)
 	} else {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
@@ -347,9 +348,9 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 		}
 		c := out[name]
 		switch m.State {
-		case "running":
+		case api.StateRunning:
 			c.running++
-		case "warm":
+		case api.StateWarm:
 			c.warm++
 		}
 		out[name] = c
