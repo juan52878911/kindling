@@ -26,6 +26,7 @@ bench-*.json
 /kling-bridge
 /kling-bridge-local
 /kling-linux-amd64
+/kindling-domotica
 
 # Informes generados (las páginas de los ejemplos sí se versionan: van
 # embebidas en sus binarios y sin ellas el ejemplo no compila su interfaz)

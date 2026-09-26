@@ -1,11 +1,11 @@
-// Package codificador es la capa 3 de la decisión de domótica: un codificador
+// Package codificador es la capa 3 de la decisión de intención (pkg/intent): un codificador
 // de frases pequeño (multilingual-e5-small o paraphrase-multilingual-MiniLM,
 // servidos con los embeddings de llama.cpp desde una microVM) y, encima, una
 // cabeza de clasificación entrenada sobre los embeddings congelados.
 //
 // Por qué una capa entre Chispa y el LLM: Chispa (n-gramas hasheados) solo sabe de
-// las palabras que vio; un codificador de frases pone cerca «apaga las luces»
-// y «kill the lights» aunque no compartan ni una palabra, y lo hace en
+// las palabras que vio; un codificador de frases pone cerca «cancela mi pedido»
+// y «I don't want the order anymore» aunque no compartan ni una palabra, y lo hace en
 // milisegundos en CPU, dos órdenes de magnitud menos que un LLM. La cabeza es
 // lo único que se entrena aquí (el codificador va congelado): una regresión
 // logística multinomial, o un perceptrón de una capa oculta, en Go puro,

@@ -10,7 +10,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Unreleased — v0.14.0
 
-**La CLI, ordenada.** Tres sustantivos —imagen (rootfs, arranca en frío) →
+**La CLI, ordenada, y el gateway de IA sin dominio.** Tres sustantivos —imagen (rootfs, arranca en frío) →
 plantilla (snapshot dorado, arranca en ms) → máquina— y doce verbos de uso
 diario en primer nivel; lo demás vive bajo su sustantivo o bajo la extensión
 que lo aporta. Todos los nombres de antes siguen funcionando como alias
@@ -80,6 +80,23 @@ silenciosos.
   línea que lo carga y el PATH de `--prefix` si faltaba, para que
   `kling doctor` salga en verde nada más instalar.
 
+- **Tareas de intención genéricas en el gateway de IA.** El bloque `"domotica"`
+  de `ai.json` y el tipo de tarea `domotica` desaparecen del núcleo: en su lugar,
+  una tarea `"intent"` (`/v1/decide`, `kling ai test|eval|retrain`) con la
+  misma cascada —plantillas → Chispa + Chispa-slots (en proceso o serverless) →
+  codificador con puerta de McNemar → `escalate: "von"`— y la misma mejora
+  continua, pero sin vocabulario de ningún dominio: la cascada vive en el paquete
+  nuevo `pkg/intent` y lo que sabe el dominio (plantillas, valores de los huecos,
+  qué necesita cada intención) sale de un esquema JSON (`"schema"`) o de un
+  `intent.Domain` en Go que registra el programa que embebe `pkg/aigw`
+  (`"domain"`, `aigw.Options.Domains`). Guía en `docs/intent.md`.
+- **Cambio incompatible** para quien tenga una tarea `domotica`: el bloque pasa a
+  `"intent": {"model": …, "domain" | "schema": …, "slots", "encoder", "head",
+  "encoder_force", "final_oos"}` (`intent` → `model`); `kind` de `/v1/tasks` y
+  del registro de evaluación es `"intent"`, y un registro `kind: "domotica"` ya
+  no enciende la capa 3: hay que repetir `kling ai eval <tarea>`.
+- Fuera `pkg/domotica` y la pista «`kling plugin install domotica`».
+
 ### kling-mcp
 
 - Comandos bajo `kling mcp`: `search`, `add`, `import`, `ls` (con `-q`),
@@ -94,6 +111,23 @@ silenciosos.
 - `sbx` se promueve explícitamente (`top_level`): bajo el nombre de la
   extensión sería `kling sandbox …`, que es del núcleo. El operador y el
   frontal leen `frozen` (y `warm` de un daemon anterior).
+
+### Ejemplos
+
+- **La demo de domótica es un programa aparte, `kindling-domotica`**, y no una
+  extensión de kling: sin subcomando `kling domotica`, sin asset
+  `kling-domotica-<os>-<arch>` en la release ni `install.sh --with domotica`.
+  Todo lo de la habitación (taxonomía, léxico, plantillas, simulador,
+  validación del LLM, datos) vive en `examples/domotica`
+  (`internal/domotica`, `internal/tools`, `cmd/domotica-data`, antes
+  `pkg/domotica` y `tools/domotica-data`). Subcomandos: `gateway` (el gateway
+  de kindling con el dominio `smart-room` registrado), `room` (la página, antes
+  `domotica-demo`) y las herramientas `decide`, `eval`, `train-slots`, `embed`,
+  `train-encoder`, `templates`, `eval-llm`. `make domotica` lo compila; los
+  servicios de systemd de `examples/domotica` arrancan `kindling-domotica
+  gateway` y `kindling-domotica room`. Las decisiones y las cifras de
+  `docs/DOMOTICA-EVAL.md` no cambian (`kindling-domotica eval` da la misma
+  tabla, y `/v1/decide` la misma respuesta en las 9 794 frases del test).
 
 ### Docs
 

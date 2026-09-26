@@ -182,8 +182,8 @@ what holds everything else up.
 # macOS / Linux — one line, no dependencies
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 
-# With extensions from the same release (MCP servers, sandboxes, the smart-home demo):
-curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox,domotica
+# With extensions from the same release (MCP servers, sandboxes):
+curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # A specific version (it installs the latest release by default):
 curl -fsSL .../install.sh | sh -s -- --tag v0.13.0
@@ -527,7 +527,6 @@ version as the core:
 ```sh
 kling plugin install mcp        # MCP servers on demand (brings kling-bridge along)
 kling plugin install sandbox    # multi-tenant sandboxes: gateway, templates, prewarmed pool
-kling plugin install domotica   # the smart-home demo tools: kling domotica decide/eval/…
 kling plugin ls                 # what is installed, where from (path + sha256), and its status
 kling plugin disable ai         # switch one off without removing it; also for built-ins
 kling completion install         # reload completion after installing one
@@ -813,6 +812,13 @@ Chispa alone** (McNemar test, same models and settings); otherwise the gateway r
 unless `escalate_force`. It listens on a 0600 Unix socket by default and on TCP only
 with `-listen` and a token.
 
+An **intent task** (`"intent"` in the registry) turns a short command into an intent plus
+slots with the same layered idea: exact templates, then Chispa and a Chispa-slots tagger,
+then a sentence encoder whose layer is gated by `kling ai eval` (McNemar on whole
+commands), and escalates the rest. What the domain knows — templates, slot values, which
+slots an intent needs — comes from a JSON schema file, or from a Go `intent.Domain` that a
+program embedding `pkg/aigw` registers. Guide: [`docs/intent.md`](docs/intent.md).
+
 ```sh
 kling ai serve                                  # registry in ~/.config/kling/ai.json
 kling ai test commit-type "fix crash when the cache is cold"
@@ -843,7 +849,8 @@ significant). On 34 real GitHub Actions failures it only ties the tail of the lo
 [`examples/domotica`](examples/domotica/README.md) is a separate app that *uses*
 kindling: a web page with a simulated room (lights, thermostat, blinds, TV,
 speaker, lock, alarm, fan, plug) driven by voice commands as text, in Spanish or
-English. Each command goes through the AI gateway (`kling ai up`): demo templates and the fast
+English. Each command goes through the AI gateway — kindling's, embedded by the demo program
+with its room domain (`kindling-domotica gateway`), as an intent task: demo templates and the fast
 Chispa model answer in-process in microseconds; what they doubt goes to a
 sentence encoder and then to a small LLM (Qwen2.5-1.5B with JSON-schema output,
 validated against the room's taxonomy), each in a microVM that is thawed by the
@@ -856,9 +863,10 @@ acted on out of scope), not on everything (it would act on 1.5 % of the chatter
 that is not for the room). Guide: [`docs/demo-domotica.md`](docs/demo-domotica.md).
 
 ```sh
-kling ai up -config examples/domotica/ai.json &       # after adapting paths and goldens
-go run ./examples/domotica                            # http://127.0.0.1:8088/
-kling plugin install domotica                        # optional: kling domotica decide/eval/…
+make domotica                                         # builds ./kindling-domotica (not installed, not released)
+./kindling-domotica gateway -config examples/domotica/ai.json &   # after adapting paths and goldens
+./kindling-domotica room                              # http://127.0.0.1:8088/
+./kindling-domotica decide "pon la luz del salón en azul"          # layers 1-2 in-process, no daemon
 ```
 
 ## What persists and what does not
@@ -1248,7 +1256,8 @@ instances share pages.
 | [`docs/estabilidad.md`](docs/estabilidad.md) | The stability & determinism audit: root causes, before/after numbers |
 | [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, the tiny linear classifier: features, `.chispa` format, cascade; its evaluation on real commits |
 | [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa as a serverless kindling task: one frozen golden snapshot per task, `kling ai chispa deploy`, measured thaw and throughput vs. in-process |
-| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Smart-home decisions (`kling domotica`, from the `domotica` extension): demo templates → Chispa intent + Chispa-slots, free datasets and their licenses, evaluation (Spanish) |
+| [`docs/intent.md`](docs/intent.md) | Intent tasks of the AI gateway: templates → Chispa intent + Chispa-slots → encoder, gated; domain as a JSON schema or a Go `intent.Domain` (Spanish) |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | The smart-home example's decisions (`kindling-domotica`, a separate program in `examples/domotica`): demo templates → Chispa intent + Chispa-slots, free datasets and their licenses, evaluation (Spanish) |
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | The demo room: layer 4 (LLM with JSON output) and the web page that shows every layer's decision and microVM (Spanish) |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: Chispa classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |

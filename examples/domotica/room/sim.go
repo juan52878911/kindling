@@ -1,7 +1,7 @@
 // Package room es la habitación de la demo: un simulador pequeño de sus
 // dispositivos (luces, termostato, persianas, tele, altavoz, cerradura, alarma,
 // ventilador y enchufe) y un servidor web que la dibuja, recibe órdenes, las
-// pasa por la cascada de pkg/domotica y enseña qué capa decidió y cuánto tardó.
+// pasa por la cascada de internal/domotica y enseña qué capa decidió y cuánto tardó.
 // Ver docs/demo-domotica.md.
 package room
 
@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 )
 
 // Zonas de la habitación. Una orden a otra zona («la luz del garaje») no

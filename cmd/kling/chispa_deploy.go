@@ -48,7 +48,7 @@ func cmdChispaDeploy(args []string) error {
 	fs := flag.NewFlagSet("chispa deploy", flag.ExitOnError)
 	host := hostFlag(fs)
 	modelPath := fs.String("model", "", "the .chispa to deploy (required)")
-	slotsPath := fs.String("slots", "", "optional .chispas (slots, docs/domotica.md)")
+	slotsPath := fs.String("slots", "", "optional .chispas (slots, docs/intent.md)")
 	// 128 y no 64: un modelo de 28 etiquetas tardaba 1,96 s en calentar y, tras
 	// el thaw, rechazaba conexiones con 64 MiB (se quedaba corto de memoria).
 	mem := units.MiBVar(fs, "mem", 128, "microVM memory: 64M, 128M (bare number = MiB; 64-128 is usually enough; see docs/chispa-serverless.md)")

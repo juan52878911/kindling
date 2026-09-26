@@ -98,7 +98,6 @@ func printError(w io.Writer, err error) {
 // Quien teclea `kling mcp add` (o el alias `kling add`) sin tenerla instalada
 // no necesita la ayuda entera: se le dice qué instalar.
 var movedToExtension = map[string]string{
-	"mcp":      "mcp",
-	"connect":  "mcp",
-	"domotica": "domotica",
+	"mcp":     "mcp",
+	"connect": "mcp",
 }

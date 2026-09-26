@@ -15,7 +15,7 @@ import (
 //	{lista:hueco}  valor de una lista que rellena otro hueco
 //
 // La misma sintaxis sirve para expandir las plantillas de Home Assistant en
-// frases de entrenamiento (tools/domotica-data) y para las órdenes de la demo
+// frases de entrenamiento (cmd/domotica-data) y para las órdenes de la demo
 // del emparejador (demo.go): una sola implementación, probada una vez.
 
 type nodeKind int

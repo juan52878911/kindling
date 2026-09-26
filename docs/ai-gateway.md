@@ -170,14 +170,18 @@ Una evaluación nueva que gane activa la cascada en caliente si la tarea ya
 tenía `escalate_to`. Nunca hay una llamada a VON escondida: con la cascada
 apagada, ni las escaladas ni las auditorías tocan VON.
 
-### Tareas de domótica: `/v1/decide` con la capa 3
+### Tareas de intención: `/v1/decide` con la capa 3
 
-Una tarea con un bloque `domotica` es la decisión de la habitación de demo
-([domotica.md](domotica.md)): plantillas → Chispa + huecos en proceso y, para lo
+Una tarea con un bloque `intent` decide una orden corta como intención y huecos
+([intent.md](intent.md)): plantillas → Chispa + huecos y, para lo
 que dudan, el **codificador de frases** ([codificador.md](codificador.md)): un
 modelo `kind: "embed"` (el dorado de `kling ai model add enc-e5 -model
 multilingual-e5-small`) que `pkg/scheduler` despierta y congela como a un VON, y
-la cabeza `.jenc` que clasifica su vector aquí mismo.
+la cabeza `.jenc` que clasifica su vector aquí mismo. Lo que sabe del dominio
+(plantillas, valores de los huecos, qué necesita cada intención) sale de un
+esquema JSON (`"schema"`) o de un `intent.Domain` en Go que registra el programa
+que embebe el gateway (`"domain"`; el ejemplo es la habitación de
+[examples/domotica](../examples/domotica/README.md)).
 
 ```json
 {
@@ -186,16 +190,16 @@ la cabeza `.jenc` que clasifica su vector aquí mismo.
     "enc":    {"kind": "embed", "snapshot": "enc-e5", "max_replicas": 1}
   },
   "tasks": {
-    "home": {"domotica": {"intent": "intent", "slots": "slots.chispas", "encoder": "enc", "head": "head.jenc"}}
+    "tickets": {"intent": {"model": "intent", "schema": "tickets.json", "slots": "slots.chispas", "encoder": "enc", "head": "head.jenc"}}
   }
 }
 ```
 
 ```sh
-kling ai test home "subir persiana habitación"
-# cover_open {"device":"blinds","area":"room"}  (layer encoder, p=0.996, confident, 3.32 ms)
-#   fast layers said cover_open p=0.957; encoder 3.3 ms
-kling ai eval home -data test.jsonl       # filas del JSONL unificado: texto, idioma, intención y huecos
+kling ai test tickets "the invoices people need a new case"
+# open_ticket {"priority":"normal","queue":"billing"}  (layer encoder, p=0.996, confident, 3.32 ms)
+#   fast layers said other p=0.957; encoder 3.3 ms
+kling ai eval tickets -data test.jsonl    # filas {"text","lang","intent","slots"}: la orden entera
 ```
 
 `POST /v1/decide` con `{"task", "text", "lang"?}` devuelve la decisión entera
@@ -203,17 +207,17 @@ kling ai eval home -data test.jsonl       # filas del JSONL unificado: texto, id
 `fast_intent`, `encoder_us`, `encoder_error`) y `encoder`, el estado de la capa
 3. La capa 3 se enciende **solo con una evaluación que la respalde**, como la
 cascada: `kling ai eval <tarea>` pasa las filas por la cascada sin y con el
-codificador y el registro (`ai-evals/<tarea>.json`, `kind: "domotica"`) la
+codificador y el registro (`ai-evals/<tarea>.json`, `kind: "intent"`) la
 enciende si contesta bien **más órdenes completas** donde discrepan (McNemar,
 p < 0,05) sin más errores confiados que uno por cada cien ganadas, con los
-mismos `.chispa`, `.chispas`, `.jenc` (por su sha256) y dorado. Si no, las capas
+mismos dominio, `.chispa`, `.chispas`, `.jenc` (por su sha256) y dorado. Si no, las capas
 rápidas contestan y escalan a `"encoder"`; con ella, lo que tampoco resuelve
 sale con `escalate: "von"`. `encoder_force` la enciende sin respaldo. Si la
 réplica no contesta en 5 s (despertarla incluido), la decisión escala a VON
 con `encoder_error`. Medido en el Mac: 3,1–3,3 ms por `/v1/decide` con la
 réplica caliente, 981 ms si estaba congelada por inactividad.
 
-**La capa 2 también puede ser serverless.** Si el modelo de `intent` es
+**La capa 2 también puede ser serverless.** Si el modelo de la tarea (`model`) es
 `"backend": "microvm"` (un dorado de `kling ai chispa deploy`, ver
 [chispa-serverless.md](chispa-serverless.md#domótica-la-capa-2-serverless)),
 `/v1/decide` le pregunta a su réplica por el mismo camino que `/v1/classify`
@@ -232,7 +236,7 @@ validación, la orden escala como una duda con `reason: "chispa_error"` y
 | Ruta | Qué hace |
 |---|---|
 | `POST /v1/classify` | `{task, text, fields?, mode?, explain?}` → `{label, prob, escalate, source, latency_ms, evidence, chispa, von, degraded}` |
-| `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny`. En una tarea de domótica, la decisión de la habitación (arriba) |
+| `POST /v1/decide` | lo mismo, con `decision` (= `label`): para rutas de agentes o `allow`/`deny`. En una tarea de intención, la intención con sus huecos (arriba) |
 | `POST /v1/generate` | `{task, input, vars?, max_tokens?, temperature?, seed?}` → `{output, model, finish_reason, usage, latency_ms}` |
 | `POST /v1/chat/completions`, `POST /v1/completions` | API de OpenAI hacia una réplica del modelo que nombra `model` (nombre del registro o del dorado), con streaming |
 | `GET /v1/models` | los modelos VON del registro, sin despertar nada |

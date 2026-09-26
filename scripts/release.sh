@@ -3,7 +3,7 @@
 # detecta el tag, compila los binarios y publica la release.
 #
 # Una etiqueta publica todo el repo: el núcleo, kling-vz, las extensiones de
-# ext/ (kling-mcp, kling-bridge, kling-sandbox), kling-domotica, el operador
+# ext/ (kling-mcp, kling-bridge, kling-sandbox), el operador
 # (binarios e imagen GHCR) y los tar del host, con un único SHA256SUMS.
 #
 # USO

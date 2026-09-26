@@ -39,9 +39,8 @@ func TestEncoderLayer(t *testing.T) {
 
 	// Dos órdenes no se le preguntan: van a VON.
 	enc.calls = 0
-	d2 := &Decider{Matcher: m, Encoder: enc}
-	fast := Decision{Intent: "turn_on", Prob: 0.9, Reason: ReasonMultiCommand, Layer: LayerChispa}
-	if got := d2.encode(ctx, "enciende la luz y baja la persiana", fast); enc.calls != 0 || got.Escalate != EscalateVON {
+	d2 := &Decider{Matcher: m, Encoder: enc, Remote: &fakeRemote{ans: RemoteAnswer{Label: "turn_on", Prob: 0.9, Confident: true}}}
+	if got := d2.DecideContext(ctx, "enciende la luz y baja la persiana", "es"); enc.calls != 0 || got.Escalate != EscalateVON || got.Reason != ReasonMultiCommand {
 		t.Fatalf("multi-command: %+v (%d calls)", got, enc.calls)
 	}
 
@@ -57,12 +56,12 @@ func TestEncoderLayer(t *testing.T) {
 
 	// Sin confianza escala con la conjetura más probable de las dos capas.
 	enc.intent, enc.prob, enc.confident = "volume_up", 0.4, false
-	fast = Decision{Intent: "volume_down", Prob: 0.6, Layer: LayerChispa, Reason: ReasonLowProb}
-	if got := d.encode(ctx, "esto suena rarísimo", fast); got.Intent != "volume_down" || got.Escalate != EscalateVON || got.FastIntent != "volume_down" {
+	unsure := &Decider{Matcher: m, Encoder: enc, Remote: &fakeRemote{ans: RemoteAnswer{Label: "volume_down", Prob: 0.6}}}
+	if got := unsure.DecideContext(ctx, "esto suena rarísimo", "es"); got.Intent != "volume_down" || got.Escalate != EscalateVON || got.FastIntent != "volume_down" {
 		t.Fatalf("guess: %+v", got)
 	}
 	enc.prob = 0.7
-	if got := d.encode(ctx, "esto suena rarísimo", fast); got.Intent != "volume_up" {
+	if got := unsure.DecideContext(ctx, "esto suena rarísimo", "es"); got.Intent != "volume_up" {
 		t.Fatalf("guess, encoder more sure: %+v", got)
 	}
 

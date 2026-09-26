@@ -1,9 +1,10 @@
 kindling
 Copyright the kindling authors.
 
-This repository does not ship third-party datasets. The tool in
-tools/domotica-data downloads the following datasets, converts them and uses
-them to train the smart-home models described in docs/domotica.md. Data and
+This repository does not ship third-party datasets. The tool of the
+smart-home example, examples/domotica/cmd/domotica-data, downloads the
+following datasets, converts them and uses them to train the models described
+in docs/domotica.md. Data and
 models derived from them must carry these attributions (CC BY 4.0, section
 3(a)). Changes made: only the es/en portions are used; intents are relabeled to
 the demo-room taxonomy; slots are trimmed and normalized; Home Assistant

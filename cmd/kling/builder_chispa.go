@@ -35,7 +35,7 @@ import (
 type ChispaSpec struct {
 	// ModelB64 es el contenido del .chispa, en base64.
 	ModelB64 string `json:"model_b64"`
-	// SlotsB64 es el .chispas opcional (huecos, docs/domotica.md), en base64.
+	// SlotsB64 es el .chispas opcional (huecos, docs/intent.md), en base64.
 	SlotsB64 string `json:"slots_b64,omitempty"`
 }
 

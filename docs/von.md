@@ -539,7 +539,7 @@ calidad, no por velocidad; `claude/von-cpu` decide si Q4_0 entra al catálogo.
 
 ### Chispa en x86
 
-`pkg/chispa`, `pkg/chispa/slots` y `pkg/domotica` no dependen de VON ni de una
+`pkg/chispa`, `pkg/chispa/slots` y `examples/domotica/internal/domotica` no dependen de VON ni de una
 microVM: corren en el proceso del CLI. Medido en el mismo i7-8700T
 (`go test -bench=. -run=^$ -cpu=1,4`, cross-compilado a linux/amd64), frente a
 la tabla del M4 en [chispa.md](chispa.md#inferencia-y-determinismo):
@@ -562,7 +562,7 @@ Chispa — y con solo 4 núcleos el paralelo agregado llega a 785 000/s en vez d
 los ~3,4 M/s que darían 10 núcleos del M4 a este ritmo por núcleo.
 
 Con los modelos reales de la evaluación (`intent.chispa` + `slots.chispas`,
-`kling domotica eval` sobre 9794 filas, cascada plantillas → Chispa): p50 de
+`kindling-domotica eval` sobre 9794 filas, cascada plantillas → Chispa): p50 de
 9,74 µs y p99 de 30,29 µs por decisión (bucle secuencial: ~103 000
 decisiones/s de un núcleo). El proceso entero, modelos cargados y evaluando
 las 9794 filas, llega a un pico de RSS de **82 MiB** (`/usr/bin/time -v`).

@@ -184,8 +184,8 @@ opcional; es lo que sostiene todo lo demás.
 # macOS / Linux — una línea, sin dependencias
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 
-# Con extensiones de la misma release (servidores MCP, sandboxes, la demo de domótica):
-curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox,domotica
+# Con extensiones de la misma release (servidores MCP, sandboxes):
+curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # Versión concreta (por defecto instala la última release):
 curl -fsSL .../install.sh | sh -s -- --tag v0.13.0
@@ -529,7 +529,6 @@ misma versión que el núcleo:
 ```sh
 kling plugin install mcp        # servidores MCP bajo demanda (trae kling-bridge con ella)
 kling plugin install sandbox    # sandboxes multiinquilino: gateway, plantillas, fondo precalentado
-kling plugin install domotica   # las herramientas de la demo de domótica: kling domotica decide/eval/…
 kling plugin ls                 # qué hay instalado, de dónde (ruta + sha256) y su estado
 kling plugin disable ai         # apaga una sin desinstalarla; vale también para las incorporadas
 kling completion install         # recarga el completado tras instalar una
@@ -820,6 +819,14 @@ etiquetados de esa tarea, que gana a Chispa solo** (prueba de McNemar, mismos mo
 ajustes); si no, el gateway se niega salvo `escalate_force`. Escucha en un socket Unix
 0600 por defecto y en TCP solo con `-listen` y token.
 
+Una **tarea de intención** (`"intent"` en el registro) convierte una orden corta en una
+intención con sus huecos con la misma idea por capas: plantillas exactas, luego Chispa y
+un etiquetador Chispa-slots, luego un codificador de frases cuya capa enciende `kling ai
+eval` (McNemar sobre la orden completa), y escala el resto. Lo que sabe el dominio
+—plantillas, valores de los huecos, qué huecos necesita cada intención— sale de un
+esquema JSON, o de un `intent.Domain` en Go que registra el programa que embebe
+`pkg/aigw`. Guía: [`docs/intent.md`](docs/intent.md).
+
 ```sh
 kling ai serve                                  # registro en ~/.config/kling/ai.json
 kling ai test commit-type "fix crash when the cache is cold"
@@ -853,7 +860,8 @@ del log (56 %): un CI nuevo necesita sus propias etiquetas.
 *usa* kindling: una página web con una habitación simulada (luces, termostato,
 persianas, tele, altavoz, cerradura, alarma, ventilador, enchufe) que se maneja
 con órdenes de voz como texto, en español o inglés. Cada orden pasa por el gateway de IA
-(`kling ai up`): las plantillas de la demo y el modelo rápido Chispa contestan en su
+—el de kindling, que el programa de la demo embebe con el dominio de la habitación
+(`kindling-domotica gateway`), como tarea de intención—: las plantillas de la demo y el modelo rápido Chispa contestan en su
 proceso en microsegundos; lo que dudan va a un codificador de frases y luego a un
 LLM pequeño (Qwen2.5-1.5B con salida JSON restringida por un esquema y validada
 contra la taxonomía de la habitación), cada uno en una microVM que la orden
@@ -866,9 +874,10 @@ bien, ninguna acción fuera de ámbito), no en todo (actuaría en el 1,5 % de la
 charla que no es para la habitación). Guía: [`docs/demo-domotica.md`](docs/demo-domotica.md).
 
 ```sh
-kling ai up -config examples/domotica/ai.json &       # con las rutas y dorados de tu host
-go run ./examples/domotica                            # http://127.0.0.1:8088/
-kling plugin install domotica                        # opcional: kling domotica decide/eval/…
+make domotica                                         # compila ./kindling-domotica (ni se instala ni se publica)
+./kindling-domotica gateway -config examples/domotica/ai.json &   # con las rutas y dorados de tu host
+./kindling-domotica room                              # http://127.0.0.1:8088/
+./kindling-domotica decide "pon la luz del salón en azul"          # capas 1-2 en el proceso, sin daemon
 ```
 
 ## Qué persiste y qué no
@@ -1264,7 +1273,8 @@ permite que N instancias compartan páginas.
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
 | [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling ai chispa deploy`, thaw y rendimiento medidos frente a en proceso |
-| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`, de la extensión `domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
+| [`docs/intent.md`](docs/intent.md) | Tareas de intención del gateway de IA: plantillas → intención Chispa + Chispa-slots → codificador, con puerta; el dominio como esquema JSON o `intent.Domain` en Go |
+| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Las decisiones del ejemplo de domótica (`kindling-domotica`, un programa aparte en `examples/domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |

@@ -4,13 +4,14 @@ La demo de producto de kindling es una habitación manejada con órdenes de voz
 (como texto, en español o inglés) cuyas decisiones toman modelos que viven en
 microVMs **serverless**: congelados a coste cero, descongelados en
 milisegundos por la orden que los necesita y congelados otra vez al quedarse
-ociosos. Es un ejemplo que usa kindling, con su propio `main`:
-[examples/domotica](../examples/domotica/README.md) (cómo montarla en un Mac o
-en el servidor x86, sus servicios de systemd y sus flags). Las herramientas
-para entrenar y evaluar sus capas (`kling domotica …`) son una extensión
-aparte desde v0.13.0: `kling plugins install domotica`, o
-`go build -o ~/.local/share/kling/plugins/kling-domotica ./examples/domotica/cmd/kling-domotica`
-([docs/domotica.md](domotica.md#uso)).
+ociosos. Es un ejemplo que usa kindling, no parte de él: un programa aparte,
+`kindling-domotica` ([examples/domotica](../examples/domotica/README.md): cómo
+montarla en un Mac o en el servidor x86, sus servicios de systemd y sus
+flags), que embebe el gateway de IA de kindling con el dominio de la
+habitación (`kindling-domotica gateway`), sirve la página (`kindling-domotica
+room`) y trae las herramientas para entrenar y evaluar sus capas
+(`kindling-domotica decide|eval|…`, [docs/domotica.md](domotica.md#uso)).
+`make domotica` lo compila; kling no lo instala ni lo publica.
 
 ## Qué enseña
 
@@ -32,8 +33,8 @@ aparte desde v0.13.0: `kling plugins install domotica`, o
 ## Cómo está hecha
 
 ```
-navegador ──HTTP/SSE──> examples/domotica ──POST /v1/decide────> kling ai serve
-                         room/: simulador,     (capas 1–3)          ├─ plantillas + Chispa: en su proceso (µs)
+navegador ──HTTP/SSE──> kindling-domotica  ──POST /v1/decide────> kindling-domotica gateway (pkg/aigw + dominio smart-room)
+                         room: simulador,      (capas 1–3)          ├─ plantillas + Chispa: en su proceso (µs) o serverless (ms)
                          API JSON + SSE,     ──POST /v1/generate──>  ├─ codificador: réplica de un dorado kind embed (ms)
                          página embebida        (capa 4)            └─ LLM: réplica de un dorado VON (s)
                                │             ──GET /metrics──────>     (despertares por modelo: thaw / restore)
@@ -42,7 +43,7 @@ navegador ──HTTP/SSE──> examples/domotica ──POST /v1/decide───
 
 - La demo **no carga modelos**: pregunta al gateway (capas 1–3 en
   `/v1/decide`, la 4 en `/v1/generate`) y valida la respuesta del LLM contra
-  la taxonomía antes de ejecutar nada (`pkg/domotica`: `ParseLLM`, `Veto`).
+  la taxonomía antes de ejecutar nada (`examples/domotica/internal/domotica`: `ParseLLM`, `Veto`).
   Con `-offline` sirve las capas 1 y 2 en su proceso, como reserva.
 - Qué microVM despertó cada orden sale de comparar `/metrics` del gateway
   antes y después (`kling_ai_von_wake_seconds` por modelo y cómo): con una

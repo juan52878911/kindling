@@ -54,8 +54,8 @@ def pairs(rows, iters, rng):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="multilingual-e5-small", choices=sorted(MODELS))
-    ap.add_argument("--train", required=True, help="unified JSONL (tools/domotica-data build)")
-    ap.add_argument("--indirect", help="pkg/domotica/indirect.jsonl: its train split is always used, whole")
+    ap.add_argument("--train", required=True, help="unified JSONL (examples/domotica/cmd/domotica-data build)")
+    ap.add_argument("--indirect", help="examples/domotica/internal/domotica/indirect.jsonl: its train split is always used, whole")
     ap.add_argument("--per-class", type=int, default=64, help="sentences sampled per intent (the few-shot of SetFit)")
     ap.add_argument("--iters", type=int, default=20, help="positive and negative pairs per sentence")
     ap.add_argument("--epochs", type=int, default=1)

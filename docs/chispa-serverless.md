@@ -137,8 +137,9 @@ pasa la validación, da 502 (`... sent an invalid answer: ...`). Las tareas
 
 ## Domótica: la capa 2 serverless
 
-La tarea de domótica del gateway (`/v1/decide`, [domotica.md](domotica.md))
-usa el mismo camino: si su `intent` es un modelo `"backend": "microvm"`, la
+Una tarea de intención del gateway (`/v1/decide`, [intent.md](intent.md); la
+de la habitación de demo, [domotica.md](domotica.md)) usa el mismo camino: si
+su `model` es un modelo `"backend": "microvm"`, la
 capa 2 pregunta a la réplica del dorado (`askChispaGuest` en
 `pkg/aigw/chispaguest.go`, lo mismo que `/v1/classify`: etiquetas validadas
 contra el registro de despliegue, confianza recalculada en el gateway). Con
