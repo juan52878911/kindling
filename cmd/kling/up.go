@@ -118,6 +118,8 @@ func upHere(root string, checkOnly bool) error {
 	fmt.Println()
 	fmt.Println("Next step:")
 	fmt.Println("  kling status                     checks that everything responds")
+	fmt.Println("  kling doctor                     the same, plus versions, extensions and completion")
+	fmt.Println("  kling try -- uname -a            runs a command in a throwaway sandbox")
 	fmt.Println("  kling plugins                    what the installed extensions add (kling-mcp: MCP servers)")
 	return nil
 }
