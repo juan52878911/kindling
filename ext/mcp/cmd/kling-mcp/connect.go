@@ -105,7 +105,7 @@ func cmdConnect(args []string) error {
 	if info, tools, err := probeMCP(url, token); err != nil {
 		fmt.Printf("Status:    ✗ %v\n\n", err)
 		fmt.Println("Start the gateway on the daemon host:")
-		fmt.Println("  kling gateway -listen 0.0.0.0:8080")
+		fmt.Println("  kling mcp serve -listen 0.0.0.0:8080")
 	} else {
 		fmt.Printf("Status:    ✓ %s · %d tool(s): %s\n", info, len(tools), strings.Join(tools, ", "))
 	}
@@ -426,7 +426,7 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 		fmt.Println("   sudo ./scripts/80-mcp-image.sh stdio files -p \"nodejs npm\" -- \\")
 		fmt.Println("        npx -y @modelcontextprotocol/server-filesystem /data")
 		fmt.Println("   kling run -name files-tmpl -image files -service files")
-		fmt.Println("   kling commit files-tmpl files && kling stop files-tmpl")
+		fmt.Println("   kling save files-tmpl files && kling stop files-tmpl")
 		fmt.Println()
 		fmt.Println("2. Then come back here:  kling connect files")
 		return nil
@@ -442,7 +442,7 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 	}
 	fmt.Printf("\nGateway: %s\n", gw)
 	fmt.Println("  If it's not running yet, on the daemon host:")
-	fmt.Println("    kling gateway -listen 0.0.0.0:8080")
+	fmt.Println("    kling mcp serve -listen 0.0.0.0:8080")
 	if list := detectedClients(); len(list) > 0 {
 		fmt.Printf("\nAgents detected here: %s\n", labels(list))
 	}

@@ -1,5 +1,5 @@
 [Unit]
-Description=kling gateway — enruta llamadas MCP a microVMs bajo demanda
+Description=kling mcp serve — enruta llamadas MCP a microVMs bajo demanda
 Documentation=https://github.com/juan52878911/kindling/tree/main/ext/mcp
 After=network-online.target kling.service
 Wants=network-online.target
@@ -27,7 +27,7 @@ Group=juan
 # un token que no persiste cambiaría en cada reinicio, dejando fuera a todos los
 # agentes ya configurados.
 EnvironmentFile=-/etc/kling/gateway.env
-ExecStart=/usr/local/bin/kling-mcp gateway -listen 0.0.0.0:8080 -idle 5m
+ExecStart=/usr/local/bin/kling-mcp serve -listen 0.0.0.0:8080 -idle 5m
 
 Restart=on-failure
 RestartSec=3

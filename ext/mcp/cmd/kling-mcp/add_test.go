@@ -65,7 +65,7 @@ func TestPlanFor(t *testing.T) {
 // Los nombres de familia que pickBase busca en el daemon ("node", "python")
 // tienen que ser los MISMOS que 70-build-minimal-image.sh acepta como preset.
 // Los dos extremos están en lenguajes distintos y renombrar en uno no rompe el
-// otro en compilación: se rompería como un `kling add` que empaqueta sobre
+// otro en compilación: se rompería como un `kling mcp add` que empaqueta sobre
 // `min` sin avisar y una capa 5 veces más gorda. Este test ata los extremos,
 // igual que TestInitScriptsReadLayerParam ata kling.layer.
 //

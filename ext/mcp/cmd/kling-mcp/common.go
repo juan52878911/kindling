@@ -238,7 +238,7 @@ func servicesLine(url, token string) string {
 		}
 	}
 	if len(names) == 0 {
-		return "✓ none yet — package one with:  kling add <server>"
+		return "✓ none yet — package one with:  kling mcp add <server>"
 	}
 	return fmt.Sprintf("✓ %d: %s", len(names), strings.Join(names, ", "))
 }

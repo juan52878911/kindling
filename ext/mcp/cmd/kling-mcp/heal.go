@@ -211,8 +211,8 @@ func mcpHeal(args []string) error {
 		}
 		if s.Service() == "" {
 			// Un dorado sin servicio no se reimporta: se rehace con
-			// `kling commit -replace`, que necesita una maquina viva.
-			fmt.Fprintf(tw, "  %s\t✗ stale, but it isn't an MCP service: kling commit -replace <machine> %s\n", nombre, s.Name)
+			// `kling save -replace`, que necesita una maquina viva.
+			fmt.Fprintf(tw, "  %s\t✗ stale, but it isn't an MCP service: kling save -replace <machine> %s\n", nombre, s.Name)
 			continue
 		}
 

@@ -4,7 +4,7 @@
 #
 # Los tests de Go (internal/gateway/*_test.go) cubren la lógica del gateway con
 # daemons falsos sobre socket unix, pero no pueden cubrir lo que de verdad
-# importa aquí: que `kling add` traiga un servidor del registro y lo deje
+# importa aquí: que `kling mcp add` traiga un servidor del registro y lo deje
 # importado de verdad, que el gateway conteste con el token correcto y rechace
 # sin él, que `heal`/`health` salgan con código 0 contra snapshots reales, y que
 # enlazar un servidor externo funcione de punta a punta. El e2e del NÚCLEO
@@ -57,7 +57,7 @@ need "$KLING"; need curl; need python3
 # ── token del gateway ─────────────────────────────────────────────────────────
 #
 # Nunca por flag ni por argv (ver resolveGatewayToken en cmd/kling-mcp/gateway.go):
-# se lee de la variable de entorno, o del fichero 0600 que `kling gateway` deja
+# se lee de la variable de entorno, o del fichero 0600 que `kling mcp serve` deja
 # en el host del daemon.
 if [ -n "${KLING_GATEWAY_TOKEN:-}" ]; then
   TOKEN="$KLING_GATEWAY_TOKEN"
@@ -88,8 +88,8 @@ cleanup() {
   for m in $($KLING ps -a 2>/dev/null | awk -v n="$SVC" '$0 ~ n {print $1}'); do
     $KLING rm "$m" >/dev/null 2>&1
   done
-  $KLING rmi "$SVC" >/dev/null 2>&1
-  $KLING images rm "$SVC" >/dev/null 2>&1
+  $KLING template rm "$SVC" >/dev/null 2>&1
+  $KLING image rm -f "$SVC" >/dev/null 2>&1
   # Solo se borran si los compiló esta prueba: los que vienen de fuera son de
   # quien los pasó.
   if [ "${COMPILADOS:-0}" = "1" ]; then
@@ -151,22 +151,22 @@ print(node if node is not None else "")
 
 # ── 1. la extensión está instalada ───────────────────────────────────────────
 step "1. Extension"
-plugins=$($KLING plugins 2>&1) || { echo "$plugins"; echo "could not reach kling"; exit 1; }
-contiene "$plugins" "mcp" && ok "kling-mcp appears in kling plugins" \
-  || bad "kling plugins" "mcp listed" "$plugins"
+plugins=$($KLING plugin 2>&1) || { echo "$plugins"; echo "could not reach kling"; exit 1; }
+contiene "$plugins" "mcp" && ok "kling-mcp appears in kling plugin" \
+  || bad "kling plugin" "mcp listed" "$plugins"
 
 # ── 2. catálogo: kling add trae un servidor del registro ─────────────────────
-step "2. Catalog: kling add"
-out=$($KLING add io.github.domdomegg/filesystem-mcp -as "$SVC" -arg /tmp 2>&1)
+step "2. Catalog: kling mcp add"
+out=$($KLING mcp add io.github.domdomegg/filesystem-mcp -as "$SVC" -arg /tmp 2>&1)
 if contiene "$out" "Done."; then
-  ok "kling add packaged and imported $SVC"
+  ok "kling mcp add packaged and imported $SVC"
 else
-  bad "kling add io.github.domdomegg/filesystem-mcp" "\"Done.\"" "$out"
+  bad "kling mcp add io.github.domdomegg/filesystem-mcp" "\"Done.\"" "$out"
 fi
 
-out=$($KLING mcp list 2>&1)
-contiene "$out" "$SVC" && ok "the catalog kept it: kling mcp list shows $SVC" \
-  || bad "kling mcp list" "a line for $SVC" "$out"
+out=$($KLING mcp ls 2>&1)
+contiene "$out" "$SVC" && ok "the catalog kept it: kling mcp ls shows $SVC" \
+  || bad "kling mcp ls" "a line for $SVC" "$out"
 
 # ── 3. gateway con token: initialize + tools/list + tools/call ───────────────
 step "3. Gateway with token"
@@ -324,9 +324,9 @@ if [ -x "$BRIDGE_BIN" ] && [ -x "$STDIO_BIN" ]; then
   contiene "$out" "$LINKSVC" && ok "kling mcp link registered $LINKSVC" \
     || bad "kling mcp link" "confirmation naming $LINKSVC" "$out"
 
-  out=$($KLING mcp list 2>&1)
-  contiene "$out" "$LINKSVC" && ok "the link shows up in kling mcp list" \
-    || bad "kling mcp list (after link)" "a line for $LINKSVC" "$out"
+  out=$($KLING mcp ls 2>&1)
+  contiene "$out" "$LINKSVC" && ok "the link shows up in kling mcp ls" \
+    || bad "kling mcp ls (after link)" "a line for $LINKSVC" "$out"
 
   # A través del gateway: /mcp/<link> se enruta al servidor externo, sin pasar
   # por ninguna microVM.
@@ -343,11 +343,11 @@ if [ -x "$BRIDGE_BIN" ] && [ -x "$STDIO_BIN" ]; then
   contiene "$out" "$LINKSVC" && ok "kling mcp unlink removed $LINKSVC" \
     || bad "kling mcp unlink" "confirmation naming $LINKSVC" "$out"
 
-  out=$($KLING mcp list 2>&1)
+  out=$($KLING mcp ls 2>&1)
   if contiene "$out" "$LINKSVC"; then
-    bad "kling mcp list (after unlink)" "$LINKSVC gone" "still listed: $out"
+    bad "kling mcp ls (after unlink)" "$LINKSVC gone" "still listed: $out"
   else
-    ok "the link is gone from kling mcp list"
+    ok "the link is gone from kling mcp ls"
   fi
 
   kill "$BRIDGE_PID" >/dev/null 2>&1

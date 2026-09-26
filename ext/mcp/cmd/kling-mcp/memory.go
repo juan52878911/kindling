@@ -38,7 +38,7 @@ func cmdMemory(args []string) error {
 	case "install-service":
 		return memoryInstallService(rest)
 	default:
-		return fmt.Errorf("usage: kling memory [status|enable|disable|install-service]")
+		return fmt.Errorf("usage: kling mcp memory [status|enable|disable|install-service]")
 	}
 }
 
@@ -58,8 +58,8 @@ func memoryStatus(args []string) error {
 		fmt.Println("and uses that history to rank later searches better.")
 		fmt.Println()
 		fmt.Println("Enable it with:")
-		fmt.Println("  kling memory enable                 uses engram, which ships with kling")
-		fmt.Println("  kling memory enable -service <svc>  uses another already-linked service")
+		fmt.Println("  kling mcp memory enable                 uses engram, which ships with kling")
+		fmt.Println("  kling mcp memory enable -service <svc>  uses another already-linked service")
 		return nil
 	}
 
@@ -121,19 +121,19 @@ func memoryEnable(args []string) error {
 	name := strings.Fields(*cmdline)[0]
 	if _, err := exec.LookPath(name); err != nil {
 		return fmt.Errorf("can't find %q in PATH.\n"+
-			"Install it, or use another server:  kling memory enable -service <svc> -cmd '<command>'", name)
+			"Install it, or use another server:  kling mcp memory enable -service <svc> -cmd '<command>'", name)
 	}
 
 	fmt.Printf("To expose it over HTTP, leave this running in another terminal:\n\n")
 	fmt.Printf("  %s -listen %s -- %s\n\n", bin, *listen, *cmdline)
 	if runtime.GOOS == "darwin" {
 		fmt.Printf("Or install it as a permanent service:\n")
-		fmt.Printf("  kling memory install-service\n\n")
+		fmt.Printf("  kling mcp memory install-service\n\n")
 	}
 	ip := localIP()
 	fmt.Printf("Then link it and enable it:\n")
 	fmt.Printf("  kling mcp link %s http://%s:%s/mcp\n", *service, ip, portOf(*listen))
-	fmt.Printf("  kling memory enable\n")
+	fmt.Printf("  kling mcp memory enable\n")
 	return nil
 }
 
@@ -246,7 +246,7 @@ func warnIfExposed(listen string) {
 // bridgePath busca el puente allí donde lo deja la instalación.
 func bridgePath() string {
 	home, _ := os.UserHomeDir()
-	// Primero junto a este binario: `kling plugins install mcp` deja el puente
+	// Primero junto a este binario: `kling plugin install mcp` deja el puente
 	// (su companion) en el mismo directorio de extensiones que kling-mcp.
 	junto := ""
 	if exe, err := os.Executable(); err == nil {
