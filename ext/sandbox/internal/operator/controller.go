@@ -22,11 +22,9 @@ import (
 // frontal y se reintenta lo que hubiera fallado (crear, borrar, renovar).
 const DefaultResync = 30 * time.Second
 
-// backoffBase es el primer plazo de espera al reconectar tras un list o un
-// watch fallidos. Variable (no const) para que los tests de este mismo
-// paquete puedan encogerlo y no esperar segundos de verdad por cada
-// reconexión simulada.
-var backoffBase = time.Second
+// defaultBackoffBase es el primer plazo de espera al reconectar tras un list
+// o un watch fallidos.
+const defaultBackoffBase = time.Second
 
 // Controller reconcilia los Sandbox del clúster contra el frontal.
 type Controller struct {
@@ -35,6 +33,11 @@ type Controller struct {
 	Log     *log.Logger
 	// Resync es el periodo del resync; 0 usa DefaultResync.
 	Resync time.Duration
+	// BackoffBase es el primer plazo de espera al reconectar; 0 usa
+	// defaultBackoffBase. Campo (no variable de paquete) para que los tests
+	// puedan encogerlo por instancia sin un global mutable que una
+	// reconciliación en marcha de otro test pudiera leer a la vez.
+	BackoffBase time.Duration
 
 	// reconcileMu serializa TODA reconciliación (venga de un evento de watch
 	// o del resync): es lo único que impide crear dos veces el mismo sandbox
@@ -61,13 +64,22 @@ func (c *Controller) resync() time.Duration {
 	return DefaultResync
 }
 
+// backoffBase da el plazo inicial de reconexión configurado, o el valor por
+// defecto si no se fijó ninguno.
+func (c *Controller) backoffBase() time.Duration {
+	if c.BackoffBase > 0 {
+		return c.BackoffBase
+	}
+	return defaultBackoffBase
+}
+
 // Run bloquea hasta que ctx se cancele. list, luego watch desde el
 // resourceVersion de la lista; si el watch se corta, reconecta desde el
 // último resourceVersion visto; si el API server contesta 410 (el
 // resourceVersion ya no está en su histórico), relista desde cero.
 func (c *Controller) Run(ctx context.Context) error {
 	go c.resyncLoop(ctx)
-	backoff := backoffBase
+	backoff := c.backoffBase()
 	for ctx.Err() == nil {
 		rv, err := c.relist(ctx)
 		if err != nil {
@@ -78,7 +90,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			backoff = nextBackoff(backoff)
 			continue
 		}
-		backoff = backoffBase
+		backoff = c.backoffBase()
 		c.watchUntilGone(ctx, rv)
 	}
 	return ctx.Err()
@@ -118,7 +130,7 @@ func (c *Controller) relist(ctx context.Context) (string, error) {
 // watchUntilGone mantiene el watch abierto, reconectando con backoff cuando
 // se corta, hasta que ctx se cancele o el server pida un relist (410).
 func (c *Controller) watchUntilGone(ctx context.Context, rv string) {
-	backoff := backoffBase
+	backoff := c.backoffBase()
 	for ctx.Err() == nil {
 		abierto := time.Now()
 		err := c.Kube.Watch(ctx, rv, func(kind string, sb *Sandbox) {
@@ -155,7 +167,7 @@ func (c *Controller) watchUntilGone(ctx context.Context, rv string) {
 		// arrastrar el backoff de fallos anteriores solo retrasaría el
 		// siguiente sin motivo.
 		if time.Since(abierto) > time.Minute {
-			backoff = backoffBase
+			backoff = c.backoffBase()
 		}
 		if !sleepCtx(ctx, backoff) {
 			return

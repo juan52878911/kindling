@@ -422,25 +422,45 @@ func testCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-func shrinkBackoff(t *testing.T) {
+func shrinkBackoff(ctrl *Controller) {
+	ctrl.BackoffBase = 10 * time.Millisecond
+}
+
+// runController arranca ctrl.Run en su propia goroutine y, al terminar el
+// test, cancela el contexto Y espera a que Run haya vuelto de verdad antes de
+// seguir con la limpieza. Sin ese wait, Run podía seguir leyendo el estado
+// del controlador (por ejemplo su plazo de backoff) después de que el test
+// ya se diera por terminado y el siguiente test empezara a mutarlo: la carrera
+// de datos que hacía saltar -race.
+func runController(t *testing.T, ctrl *Controller) context.Context {
 	t.Helper()
-	old := backoffBase
-	backoffBase = 10 * time.Millisecond
-	t.Cleanup(func() { backoffBase = old })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ctrl.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("ctrl.Run no volvió tras cancelar el contexto")
+		}
+	})
+	return ctx
 }
 
 // ---- tests ----
 
 func TestReconcile_CreatesFinalizerAndStatus(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 	k8s.seed(newTestSandbox("default", "one"))
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
 
 	waitFor(t, "status.id to be set", func() bool {
 		sb, ok := k8s.get("default/one")
@@ -460,16 +480,14 @@ func TestReconcile_CreatesFinalizerAndStatus(t *testing.T) {
 }
 
 func TestReconcile_NoDuplicateCreation(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 	k8s.seed(newTestSandbox("default", "two"))
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
+	shrinkBackoff(ctrl)
 	ctrl.Resync = 20 * time.Millisecond // resync agresivo a propósito
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	runController(t, ctrl)
 
 	waitFor(t, "status.id to be set", func() bool {
 		sb, ok := k8s.get("default/two")
@@ -485,7 +503,6 @@ func TestReconcile_NoDuplicateCreation(t *testing.T) {
 }
 
 func TestReconcile_DeleteCallsFrontalAndRemovesFinalizer(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 
@@ -503,9 +520,8 @@ func TestReconcile_DeleteCallsFrontalAndRemovesFinalizer(t *testing.T) {
 	k8s.seed(sb)
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
 
 	waitFor(t, "the object to be gone (finalizer removed)", func() bool {
 		_, ok := k8s.get("default/three")
@@ -519,7 +535,6 @@ func TestReconcile_DeleteCallsFrontalAndRemovesFinalizer(t *testing.T) {
 func TestReconcile_DeleteMissingInFrontalStillRemovesFinalizer(t *testing.T) {
 	// El frontal ya no lo tiene (lo borró la limpieza por abandono): un 404
 	// al borrar cuenta como hecho, y el finalizer se quita igualmente.
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 
@@ -531,9 +546,8 @@ func TestReconcile_DeleteMissingInFrontalStillRemovesFinalizer(t *testing.T) {
 	k8s.seed(sb)
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
 
 	waitFor(t, "the object to be gone despite the frontal 404", func() bool {
 		_, ok := k8s.get("default/four")
@@ -542,15 +556,13 @@ func TestReconcile_DeleteMissingInFrontalStillRemovesFinalizer(t *testing.T) {
 }
 
 func TestWatch_ReconnectsAfterDrop(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 	k8s.dropWatches = 2 // las dos primeras conexiones se cortan sin avisar
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
 
 	k8s.waitForWatcher(t) // hasta que sobrevive una conexión de verdad
 	k8s.seed(newTestSandbox("default", "five"))
@@ -563,15 +575,13 @@ func TestWatch_ReconnectsAfterDrop(t *testing.T) {
 }
 
 func TestWatch_RelistsOn410(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 	k8s.triggerGone = true // el primer watch después del list arranca con un 410
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
 
 	// El 410 fuerza un relist; solo después de relistar aparece un watcher
 	// de verdad. Si el operador se quedara reintentando el watch con el
@@ -589,7 +599,6 @@ func TestWatch_RelistsOn410(t *testing.T) {
 }
 
 func TestReconcile_TTLChangeRenews(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 
@@ -605,9 +614,8 @@ func TestReconcile_TTLChangeRenews(t *testing.T) {
 	k8s.seed(sb)
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	shrinkBackoff(ctrl)
+	runController(t, ctrl)
 
 	waitFor(t, "observedGeneration to catch up after a renew", func() bool {
 		got, ok := k8s.get("default/seven")
@@ -628,7 +636,6 @@ func TestReconcile_TTLChangeRenews(t *testing.T) {
 // terminaba), así que hacía falta mirar el objeto tal y como lo sirve el
 // falso API de Kubernetes, no solo lo que el operador cree que escribió.
 func TestReconcile_MessageClearsAfterFrontalRecovers(t *testing.T) {
-	shrinkBackoff(t)
 	k8s := newFakeK8s(t)
 	fr := newFakeFrontal(t)
 
@@ -646,10 +653,9 @@ func TestReconcile_MessageClearsAfterFrontalRecovers(t *testing.T) {
 	fr.setDown(true)
 
 	ctrl := NewController(k8s.client(), fr.client(), nil)
+	shrinkBackoff(ctrl)
 	ctrl.Resync = 20 * time.Millisecond // resync agresivo: sin esperar 30s de verdad
-	ctx, cancel := testContext(t)
-	defer cancel()
-	go ctrl.Run(ctx)
+	runController(t, ctrl)
 
 	waitFor(t, "status.message to be set while the frontal is down", func() bool {
 		got, ok := k8s.get("default/eight")
