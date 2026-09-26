@@ -5,7 +5,7 @@ las pocas que explican el fallo y decide de qué tipo es (un test, una
 dependencia, la red, el lint…). Este ejemplo lo hace en tres capas sobre el
 gateway de IA de kindling (`kling ai serve`), y es un **programa aparte que usa
 kindling**, no parte de él: habla con el gateway por HTTP y entrena con
-`kling chispa train`.
+`kling ai chispa train`.
 
 ```
 log (miles de líneas) ──> Chispa por línea (µs): ¿explica el fallo?     tarea ci-lines
@@ -15,7 +15,7 @@ log (miles de líneas) ──> Chispa por línea (µs): ¿explica el fallo?     
                                duda   → VON (LLM pequeño en microVM, json_schema)   tarea ci-summary
                                         {category, summary, next_step}; solo ve el trozo
                           ──> una persona confirma o corrige → ci-triage-feedback.jsonl
-                                        (ci-triage export → kling chispa train / kling ai feedback -import)
+                                        (ci-triage export → kling ai chispa train / kling ai feedback -import)
 ```
 
 Las cifras (LogChunks, 160 logs de 16 repos que no se vieron al entrenar, y un
@@ -32,7 +32,7 @@ examples/ci-triage/build-data.sh /tmp/ci-triage
 mkdir -p ~/.config/kling/ci-triage
 cp /tmp/ci-triage/lines.chispa /tmp/ci-triage/category.chispa ~/.config/kling/ci-triage/
 cp examples/ci-triage/ai.json ~/.config/kling/ai.json     # o fusiona sus models y tasks con los tuyos
-kling models add von-qwen15-q4 -model qwen2.5-1.5b-instruct -quant q4_k_m   # VON (opcional)
+kling ai model add von-qwen15-q4 -model qwen2.5-1.5b-instruct -quant q4_k_m   # VON (opcional)
 kling ai serve &
 
 # 3. un log
@@ -112,7 +112,7 @@ vuelo al gateway).
    no contesta, queda la de Chispa marcada como insegura.
 4. **Confirmación**: `ci-triage-feedback.jsonl`, una línea por confirmación
    (`schema: ci-triage.feedback/v1`) con el trozo, la categoría confirmada,
-   lo que dijo cada capa y el sha256 del log (nunca el log). `kling chispa
+   lo que dijo cada capa y el sha256 del log (nunca el log). `kling ai chispa
    train` la acepta tal cual; `ci-triage export` deja una etiqueta por log
    para la importación de etiquetas humanas de la mejora continua.
 

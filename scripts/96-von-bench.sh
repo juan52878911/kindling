@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mide un modelo VON (kling models add) en el daemon al que apunte kling: lo que
+# Mide un modelo VON (kling ai model add) en el daemon al que apunte kling: lo que
 # docs/von.md cuenta en sus tablas.
 #
 #   ./96-von-bench.sh von-smol                 dorado ya hecho
@@ -25,7 +25,7 @@
 set -uo pipefail
 
 KLING="${KLING:-kling}"
-SNAP="${1:?usage: 96-von-bench.sh <golden snapshot> (made with kling models add)}"
+SNAP="${1:?usage: 96-von-bench.sh <template> (made with kling ai model add)}"
 RUNS="${RUNS:-5}"
 REPLICAS="${REPLICAS:-4}"
 COLD="${COLD:-0}"

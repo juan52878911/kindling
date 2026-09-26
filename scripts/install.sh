@@ -17,7 +17,7 @@
 #   - --with mcp,sandbox,domotica baja además esas extensiones de LA MISMA
 #     release (todo lo de una release es compatible entre sí), las verifica con
 #     el mismo SHA256SUMS y las deja en el directorio de extensiones, igual que
-#     `kling plugins install <n>`: primer directorio de $KLING_PLUGIN_PATH; si
+#     `kling plugin install <n>`: primer directorio de $KLING_PLUGIN_PATH; si
 #     no, $XDG_DATA_HOME/kling/plugins; si no, ~/.local/share/kling/plugins.
 #     Junto a cada una escribe kling-<n>.json con de dónde salió.
 #     Los ejecutables compañeros (kling-bridge para mcp) van junto a kling en
@@ -28,12 +28,23 @@
 #   - darwin/amd64 (solo CLI) y darwin/arm64 (CLI y daemon con kling-vz)
 #   - Windows: NO soportado (el código usa syscall.Kill, Setsid, Stat_t que son POSIX).
 #
+# Cada binario se escribe en un fichero temporal DEL MISMO DIRECTORIO y se
+# renombra encima (rename es atómico): sobrescribir un kling en marcha en su
+# sitio lo mataba en macOS (la firma de código deja de cuadrar con el fichero
+# abierto) y dejaba a medias a quien actualizaba desde una shell con kling
+# corriendo.
+#
+# Al final deja `kling doctor` en verde: instala el completado de tu shell y,
+# salvo --no-rc, añade a tu rc la línea que lo carga y el PATH de --prefix si
+# faltaba (una sola vez, bajo un comentario "# kling").
+#
 # Variables de entorno respetadas:
 #   KLING_VERSION   versión a instalar (ej. v0.1.0). Por defecto: última estable.
 #   KLING_PREFIX    directorio de instalación. Por defecto: ~/.local/bin
 #   KLING_REPO      repo de donde descargar. Por defecto: juan52878911/kindling
 #   KLING_WITH      extensiones a instalar, como --with (ej. mcp,sandbox)
 #   KLING_PLUGIN_PATH  su primer directorio es donde van las extensiones
+#   KLING_NO_RC     =1 no toca tu rc (como --no-rc)
 
 set -u
 # NOTA: usamos `set -u` pero NO `set -e`. Los tests `[ ... ]` que comparan
@@ -48,6 +59,7 @@ WITH="${KLING_WITH:-}"
 PLUGIN_DIR=""
 SKIP_KLING=0
 NO_COMPANIONS=0
+NO_RC="${KLING_NO_RC:-0}"
 
 usage() {
     cat <<EOF
@@ -62,6 +74,7 @@ Uso: install.sh [opciones]
                      extensiones de kling: ~/.local/share/kling/plugins)
   --skip-kling       no instala kling: solo las extensiones de --with
   --no-companions    no instala los compañeros de las extensiones (kling-bridge)
+  --no-rc            no añade nada a tu rc (completado y PATH): lo imprime y ya
   --dry-run          muestra lo que haría sin descargar ni instalar nada
   -h, --help         muestra esta ayuda
 
@@ -83,6 +96,7 @@ while [ $# -gt 0 ]; do
         --plugin-dir) PLUGIN_DIR="$2"; shift 2 ;;
         --skip-kling) SKIP_KLING=1; shift ;;
         --no-companions) NO_COMPANIONS=1; shift ;;
+        --no-rc)     NO_RC=1; shift ;;
         --dry-run)   DRY_RUN=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           echo "opción desconocida: $1" >&2; usage >&2; exit 2 ;;
@@ -123,7 +137,7 @@ detect_platform
 # ── extensiones pedidas con --with ──────────────────────────────────────────
 # El catálogo es corto y fijo a propósito: son las extensiones que publica esta
 # misma release (kling-<n>-<os>-<arch>). Una de fuera se instala con
-# `kling plugins install <n> -from URL`.
+# `kling plugin install <n> -from URL`.
 EXTS=""
 for e in $(printf '%s' "$WITH" | tr ',' ' '); do
     case "$e" in
@@ -147,7 +161,7 @@ companions_of() {
     esac
 }
 
-# El directorio de extensiones, en el mismo orden que `kling plugins install`.
+# El directorio de extensiones, en el mismo orden que `kling plugin install`.
 if [ -z "$PLUGIN_DIR" ]; then
     if [ -n "${KLING_PLUGIN_PATH:-}" ]; then
         PLUGIN_DIR="${KLING_PLUGIN_PATH%%:*}"
@@ -251,6 +265,19 @@ verify() {
     [ "$EXPECTED" = "$ACTUAL" ] || fail "checksum de $1 no coincide (esperaba $EXPECTED, obtuve $ACTUAL)"
 }
 
+# place ORIGEN DESTINO: deja ORIGEN en DESTINO sin tocar el fichero que ya
+# hubiera hasta el último instante. Copia a un temporal del mismo directorio y
+# lo renombra encima: rename(2) es atómico, y el kling que estuviera corriendo
+# sigue con su inodo viejo en vez de ver cómo le cambian el contenido debajo
+# (en macOS eso lo mata: "Killed: 9" por la firma de código).
+place() {
+    DEST_DIR="$(dirname "$2")"
+    TMP="$DEST_DIR/.$(basename "$2").tmp.$$"
+    cp "$1" "$TMP" 2>/dev/null || return 1
+    chmod +x "$TMP"
+    mv -f "$TMP" "$2" || { rm -f "$TMP"; return 1; }
+}
+
 # get NOMBRE: descarga y verifica. Nada sale de $WORK sin pasar por aquí.
 get() {
     info "descargando $1"
@@ -318,8 +345,7 @@ if [ ! -d "$PREFIX" ]; then
 fi
 
 if [ "$SKIP_KLING" != "1" ]; then
-    chmod +x "$WORK/$BIN_NAME"
-    mv "$WORK/$BIN_NAME" "$PREFIX/kling" || fail "no puedo escribir en $PREFIX"
+    place "$WORK/$BIN_NAME" "$PREFIX/kling" || fail "no puedo escribir en $PREFIX"
     ok "instalado en $PREFIX/kling"
 
     # En un Mac Apple Silicon el daemon arranca las microVMs con kling-vz, que
@@ -328,9 +354,8 @@ if [ "$SKIP_KLING" != "1" ]; then
     # así que se quita.
     if [ "$PLAT" = "darwin-arm64" ]; then
         VZ_NAME="kling-vz-darwin-arm64"
-        chmod +x "$WORK/$VZ_NAME"
         xattr -d com.apple.quarantine "$WORK/$VZ_NAME" 2>/dev/null || true
-        mv "$WORK/$VZ_NAME" "$PREFIX/kling-vz" || fail "no puedo escribir en $PREFIX"
+        place "$WORK/$VZ_NAME" "$PREFIX/kling-vz" || fail "no puedo escribir en $PREFIX"
         ok "instalado en $PREFIX/kling-vz (backend nativo de macOS)"
     fi
 fi
@@ -343,8 +368,8 @@ fi
 for e in $EXTS; do
     ASSET="kling-${e}-${PLAT}"
     SUM="$(sha256_of "$WORK/$ASSET")"
-    mv "$WORK/$ASSET" "$PLUGIN_DIR/kling-$e" || fail "no puedo escribir en $PLUGIN_DIR"
-    # Lo mismo que deja `kling plugins install`: de dónde salió y con qué suma.
+    place "$WORK/$ASSET" "$PLUGIN_DIR/kling-$e" || fail "no puedo escribir en $PLUGIN_DIR"
+    # Lo mismo que deja `kling plugin install`: de dónde salió y con qué suma.
     # Empieza por kling- pero acaba en .json, así que el descubrimiento de
     # extensiones no lo confunde con un ejecutable.
     printf '{"name":"%s","version":"%s","url":"%s","sha256":"%s","installed":"%s"}\n' \
@@ -353,26 +378,86 @@ for e in $EXTS; do
     ok "instalado en $PLUGIN_DIR/kling-$e"
     if [ "$NO_COMPANIONS" != "1" ]; then
         for c in $(companions_of "$e"); do
-            chmod +x "$WORK/${c}-${PLAT}"
-            mv "$WORK/${c}-${PLAT}" "$PREFIX/$c" || fail "no puedo escribir en $PREFIX"
+            place "$WORK/${c}-${PLAT}" "$PREFIX/$c" || fail "no puedo escribir en $PREFIX"
             ok "instalado en $PREFIX/$c"
         done
     fi
 done
 
+# ── shell: completado y PATH, para que `kling doctor` salga en verde ─────────
+# La shell de quien instala, por $SHELL (el instalador suele correr bajo sh).
+USER_SHELL="$(basename "${SHELL:-}")"
+case "$USER_SHELL" in
+    bash) RC="$HOME/.bashrc"; RELOAD="source <(kling completion bash)" ;;
+    zsh)  RC="$HOME/.zshrc";  RELOAD="source <(kling completion zsh)" ;;
+    fish) RC="$HOME/.config/fish/config.fish"; RELOAD="kling completion fish | source" ;;
+    *)    RC=""; RELOAD="source <(kling completion bash|zsh)   # or: kling completion fish | source" ;;
+esac
+
+# add_rc LINEA: la añade al rc una sola vez, bajo "# kling".
+add_rc() {
+    [ -n "$RC" ] || return 1
+    if [ -f "$RC" ] && grep -Fq -- "$1" "$RC"; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$RC")" 2>/dev/null
+    if [ -f "$RC" ] && grep -q "^# kling$" "$RC"; then
+        printf "%s\n" "$1" >> "$RC" || return 1
+    else
+        printf "\n# kling\n%s\n" "$1" >> "$RC" || return 1
+    fi
+    ok "añadido a $RC: $1"
+}
+
+KLING_BIN="$PREFIX/kling"
+[ -x "$KLING_BIN" ] || KLING_BIN="$(command -v kling 2>/dev/null || true)"
+
+PATH_LINE=""
+case ":$PATH:" in
+    *":$PREFIX:"*) ;;
+    *)
+        if [ "$USER_SHELL" = "fish" ]; then
+            PATH_LINE="fish_add_path $PREFIX"
+        else
+            PATH_LINE="export PATH=\"$PREFIX:\$PATH\""
+        fi
+        ;;
+esac
+
+COMPLETION_LINE=""
+if [ -n "$KLING_BIN" ] && [ -n "$RC" ]; then
+    # `kling completion install` escribe ~/.config/kling/completion.<shell> y
+    # dice qué línea lo carga; nos la quedamos de su salida.
+    COMPLETION_LINE="$("$KLING_BIN" completion install "$USER_SHELL" 2>/dev/null | sed -n '/^Add this line/{n;s/^  //;p;}')"
+fi
+
+if [ "$NO_RC" != "1" ]; then
+    [ -n "$PATH_LINE" ] && add_rc "$PATH_LINE"
+    [ -n "$COMPLETION_LINE" ] && add_rc "$COMPLETION_LINE"
+fi
+
+echo
+if [ -n "$PATH_LINE" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
 cat <<EOF
+  Para usar kling desde una shell abierta, añade a tu rc:
 
-  Para usar kling desde una shell abierta, asegúrate de que $PREFIX
-  está en tu PATH. Si no lo está, añade:
+      $PATH_LINE
 
-      export PATH="$PREFIX:\$PATH"
+EOF
+fi
+if [ -n "$COMPLETION_LINE" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
+cat <<EOF
+  Completado de la shell (una vez, en tu rc):
 
-  a tu ~/.zshrc o ~/.bashrc y abre un terminal nuevo.
+      $COMPLETION_LINE
 
-  Comprobar:
+EOF
+fi
+cat <<EOF
+  Comprobar (en una shell nueva, o tras 'source ${RC:-tu rc}'):
 
-      kling version
-      kling --help
+      kling doctor
+      kling try -- uname -a
 
   Para conectar con un daemon remoto:
 
@@ -384,11 +469,11 @@ if [ -n "$EXTS" ]; then
 cat <<EOF
   Extensiones instaladas en $PLUGIN_DIR:
 
-      kling plugins ls
+      kling plugin ls
 
-  Recarga el completado de la shell para ver los comandos nuevos:
+  En una shell ya abierta, recarga el completado para ver sus comandos:
 
-      source <(kling completion zsh)
+      $RELOAD
 
 EOF
 fi

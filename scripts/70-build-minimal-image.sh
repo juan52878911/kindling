@@ -26,7 +26,7 @@ BRIDGE="${BRIDGE:-./kling-bridge}"
 # bases se construyen UNA vez por host, y con nombre fijo por dos razones:
 #   - el operador no tiene que recordar la lista de paquetes de cada runtime, y
 #     dos operadores no acaban con dos bases "python" distintas;
-#   - `kling add` busca una base que se llame COMO LA FAMILIA (node, python)
+#   - `kling mcp add` busca una base que se llame COMO LA FAMILIA (node, python)
 #     para elegirla sola cuando no se le pasa -base. Renombrarlas aquí rompe
 #     esa detección (hay un test que ata los dos extremos).
 # PKGS explícito gana, para poder añadir extras sobre el preset.
@@ -103,7 +103,7 @@ mkdir -p "$mnt/overlay" "$mnt/rom" "$mnt/run"
 #
 # El puente es el PID 1 de los servicios stdio y hasta ahora viajaba dentro de
 # cada imagen: actualizarlo eran N ficheros, uno por servicio, y cada uno exigía
-# montar su ext4. Horneado aquí es UNO —`kling images refresh min`— y todas las
+# montar su ext4. Horneado aquí es UNO —`kling mcp refresh-bridge min`— y todas las
 # capas que se apoyen en esta base lo heredan sin tocarlas.
 #
 # 80-mcp-image.sh sigue metiéndolo en la capa cuando el binario que trae la base

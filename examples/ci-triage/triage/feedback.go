@@ -12,7 +12,7 @@ import (
 )
 
 // Feedback es una línea del fichero de confirmaciones: la exportación que
-// consume la mejora continua. Es a la vez un ejemplo que `kling chispa train`
+// consume la mejora continua. Es a la vez un ejemplo que `kling ai chispa train`
 // acepta tal cual (text, label, fields; las demás claves las ignora), y lleva
 // lo necesario para auditarlo o reentrenar con criterio: qué dijo cada capa,
 // con qué confianza, qué líneas se eligieron y el hash del log (nunca el log).

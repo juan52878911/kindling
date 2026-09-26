@@ -4,9 +4,9 @@
 // LLM pequeño en una microVM que se congela al quedarse ocioso) solo entra
 // cuando Chispa duda, y solo ve el trozo elegido, no el log entero. Una
 // persona confirma o corrige la categoría y eso queda en un JSONL que
-// `kling chispa train` acepta tal cual. Ver README.md.
+// `kling ai chispa train` acepta tal cual. Ver README.md.
 //
-// Usa kindling solo por fuera: `kling chispa train|eval` para entrenar y el
+// Usa kindling solo por fuera: `kling ai chispa train|eval` para entrenar y el
 // gateway de IA (`kling ai serve`) por HTTP para decidir.
 package main
 
@@ -22,7 +22,7 @@ const usage = `usage: ci-triage <command> [flags]
   serve   [-gateway G] [-listen A]   local web page: paste a log, see the lines that explain it, confirm the category
   data    -logchunks DIR -out DIR    build the train/valid/test sets from LogChunks
   eval    -data DIR [-gateway G]     measure the locator, the category and the baselines
-  export  <feedback.jsonl>           one clean label per log, for kling chispa train or kling ai feedback -import
+  export  <feedback.jsonl>           one clean label per log, for kling ai chispa train or kling ai feedback -import
   lines   <logfile>                  print a log as ci-triage sees it (to annotate your own logs)
 
 Run "ci-triage <command> -h" for its flags.

@@ -17,14 +17,14 @@
 #   sudo SNAP=lat-chispa ./99-thaw-bench.sh daemon
 #   sudo SNAP=lat-chispa N=20 ./99-thaw-bench.sh gateway
 #
-# Env: SNAP (golden snapshot of a Chispa task, required), N (iterations, 10),
+# Env: SNAP (template of a Chispa task, required), N (iterations, 10),
 # KLING (kling binary), SOCK (daemon socket, /run/kling.sock), PORT (guest
 # port, 8000), TEXT (text to classify), IDLE (gateway -idle, 3s), KEEP=1 (do
 # not remove the lat- machines at the end).
 set -uo pipefail
 
 MODE="${1:-daemon}"
-SNAP="${SNAP:?set SNAP to the golden snapshot of a Chispa task (kling chispa deploy)}"
+SNAP="${SNAP:?set SNAP to the template of a Chispa task (kling ai chispa deploy)}"
 N="${N:-10}"
 KLING="${KLING:-kling}"
 SOCK="${SOCK:-/run/kling.sock}"
@@ -170,7 +170,7 @@ def replicas():
     return [m for m in ms if (m.get("labels") or {}).get("ai.gateway") == "lat"]
 
 lat, _ = classify()
-print(f"{mode}: first call (cold start from the golden snapshot) {lat:.1f} ms")
+print(f"{mode}: first call (cold start from the template) {lat:.1f} ms")
 before = metrics()
 e2e, states = [], []
 for i in range(n):
