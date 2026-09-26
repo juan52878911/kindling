@@ -24,7 +24,7 @@ extensiones.
 > usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
 > que nació kindling — y los sandboxes multiinquilino son **extensiones** que viven en
 > este mismo repositorio ([`ext/mcp`](ext/mcp), [`ext/sandbox`](ext/sandbox)) y salen en
-> la misma release: `kling plugins install mcp`. Todos los binarios de una release son
+> la misma release: `kling plugin install mcp`. Todos los binarios de una release son
 > compatibles entre sí. En el [CHANGELOG](CHANGELOG.md) está lo que trajo cada versión.
 
 **El invitado se asume hostil**: no se sabe qué código acabará corriendo dentro. En
@@ -41,7 +41,7 @@ enlazadas:
 | Descongelar una herramienta | **~30 ms** — imperceptible dentro de una llamada |
 | Acción efímera, de punta a punta | **19 ms** (2 ms de ejecución real) |
 | Llamada a herramienta, en caliente | **9 ms** |
-| RAM de una máquina `warm` | **0** — es un fichero en disco, no un proceso |
+| RAM de una máquina `frozen` | **0** — es un fichero en disco, no un proceso |
 | Densidad | **142 microVMs en 3,9 GB** de RAM del host |
 | 10 instancias de un mismo dorado | **+68 MiB** en total (12× más denso que arrancar en frío) |
 | Disco por servicio, con imágenes por capas | **1300 MiB → 433 MiB** en un parque de 7 servicios |
@@ -233,14 +233,14 @@ kling ai up                       # gateway de IA con ./ai.json o ~/.config/klin
 no cuentan), así que sirve también en scripts. `kling ai up` imprime la URL y un `curl` para probarlo antes de
 empezar a servir. Cuando un comando falla, el error trae una segunda línea, `try: …`,
 con el siguiente comando que ejecutar (`kling doctor`, `kling ps -a`,
-`kling images ls`…).
+`kling image ls`…).
 
 Otros de uso diario:
 
 ```sh
 kling help run                    # solo la ayuda de un comando
 kling logs -f <máquina>           # sigue la consola hasta que deja de correr
-kling snapshots ls | inspect <nombre> | rm <nombre>
+kling template ls | inspect <nombre> | rm <nombre>
 kling version                     # versión del CLI y del daemon (-json)
 kling completion install          # escribe el script de completado y dice qué línea añadir al rc
 ```
@@ -316,7 +316,7 @@ El autocompletado viene con el binario: `source <(kling completion bash)` o
 **Nativo (v0.9, macOS 14+):** el daemon corre en el propio Mac con el backend `vz` —un
 ayudante `kling-vz` por microVM que habla el API de Firecracker sobre
 Virtualization.framework—. Sin root y sin VM Linux. Las imágenes se construyen en un
-host Linux arm64 y se traen con `kling images copy <nombre> -from ssh://usuario@host`.
+host Linux arm64 y se traen con `kling image copy <nombre> -from ssh://usuario@host`.
 Cada restauración cuesta ~350 MiB (no se comparte la memoria del dorado), y no hay
 construcción de imágenes, techo de CPU ni jailer. Instalación, agente de launchd y
 límites: [`docs/mac.md`](docs/mac.md).
@@ -324,7 +324,7 @@ límites: [`docs/mac.md`](docs/mac.md).
 ```sh
 make install && make vz && brew install e2fsprogs
 kling up -check
-kling images copy min -from ssh://usuario@host-linux-arm64
+kling image copy min -from ssh://usuario@host-linux-arm64
 ```
 
 **Dentro de una VM Linux:** Firecracker no corre nativo en macOS. En un **M3 o superior** con macOS 15+ corre dentro
@@ -351,7 +351,7 @@ modo http-proxy) — está en [`docs/mac-arm64.md`](docs/mac-arm64.md).
 > herramienta imprime de verdad (el CLI habla inglés).
 
 ```
-$ kling info
+$ kling status -v
 endpoint:     ssh://juan@192.168.2.60
 daemon:       0.1.0
 root:         /var/lib/kindling
@@ -373,7 +373,7 @@ $ kling thaw mcp-demo
 efad9e5f7003  running  (22 ms)
 ```
 
-El estado **`warm`** es lo que separa a kindling de un runtime de contenedores: la
+El estado **`frozen`** es lo que separa a kindling de un runtime de contenedores: la
 máquina está congelada en disco, no quema ni CPU ni RAM, y despierta en decenas de
 milisegundos.
 
@@ -382,14 +382,14 @@ milisegundos.
 Congela una máquina una vez e instancia N copias que **comparten su memoria**:
 
 ```
-$ kling commit plantilla golden
+$ kling save plantilla golden
 golden  golden snapshot  (80M of memory)
 instantiate with:  kling run -from golden
 
 $ kling run -from golden -name g1
 a3f9...  g1  instantiated from golden in 34 ms
 
-$ kling snapshots
+$ kling template
 NAME     IMAGE     CPU/MEM    MEMORY   DISK   INSTANCES   AGE
 golden   default   1/256MiB   80M      80M    10          21s
 
@@ -398,7 +398,7 @@ $ kling events
 23:52:20  machine.thawed   mcp-demo  thawed in 22 ms
 ```
 
-`kling commit` **exige que el invitado esté sirviendo** antes de congelar un dorado
+`kling save` **exige que el invitado esté sirviendo** antes de congelar un dorado
 (`-wait`, 60 s por defecto). Un snapshot tomado antes de tiempo restaura en 26 ms y luego
 no contesta — minutos u horas después, con un error que no menciona el commit. Si el
 invitado no sirve, commit se niega y explica la cadena entera; `-force` salta la
@@ -407,7 +407,7 @@ comprobación y `-replace` sustituye un snapshot existente de forma atómica.
 Por defecto el snapshot se congela con un **hijo caliente sin ligar** dentro, así que el
 dorado no paga el arranque del runtime al restaurar (arrancar `node` son 300-500 ms de
 cualquier despertar). Eso triplica aproximadamente el coste en disco del snapshot — 39 MB
-→ 120 MB en un servicio node — así que `kling commit -warm=false` cambia latencia de
+→ 120 MB en un servicio node — así que `kling save -warm=false` cambia latencia de
 despertar por disco cuando alojas muchos servicios.
 
 ## Ciclo de vida y robustez
@@ -491,7 +491,7 @@ que se pida, transmite la salida de lo que se le mande ejecutar y se destruye so
 vencer su tiempo de vida.
 
 ```sh
-kling images toolchain                          # una imagen con node, npm, python3 y pip
+kling image toolchain                          # una imagen con node, npm, python3 y pip
 kling sandbox create -image toolchain -name sb  # ~5 s en frío
 kling cp ./analisis.py sb:/tmp/
 kling exec sb -- python3 /tmp/analisis.py       # la salida llega según sale
@@ -504,7 +504,7 @@ kling sandbox rm sb
 interrumpiendo lo de dentro y no la sesión. `kling exec` termina con el código del
 comando remoto, separa stdout de stderr, acepta stdin con `-i` y con `-timeout` mata al
 grupo de procesos entero. Prepara una plantilla una
-vez (`kling run -allow-exec`, instala lo que haga falta, `kling commit`) y cada sandbox
+vez (`kling run -allow-exec`, instala lo que haga falta, `kling save`) y cada sandbox
 creado con `-from` arranca en **~300 ms** con todo dentro — cinco en paralelo tardaron
 0,57 s en el laboratorio.
 
@@ -527,21 +527,28 @@ Las extensiones oficiales viven en este repositorio y salen en cada release, con
 misma versión que el núcleo:
 
 ```sh
-kling plugins install mcp        # servidores MCP bajo demanda (trae kling-bridge con ella)
-kling plugins install sandbox    # sandboxes multiinquilino: gateway, plantillas, fondo precalentado
-kling plugins install domotica   # las herramientas de la demo de domótica: kling domotica decide/eval/…
-kling plugins ls                 # qué hay instalado, de dónde (ruta + sha256) y su estado
-kling plugins disable ai         # apaga una sin desinstalarla; vale también para las incorporadas
+kling plugin install mcp        # servidores MCP bajo demanda (trae kling-bridge con ella)
+kling plugin install sandbox    # sandboxes multiinquilino: gateway, plantillas, fondo precalentado
+kling plugin install domotica   # las herramientas de la demo de domótica: kling domotica decide/eval/…
+kling plugin ls                 # qué hay instalado, de dónde (ruta + sha256) y su estado
+kling plugin disable ai         # apaga una sin desinstalarla; vale también para las incorporadas
 kling completion install         # recarga el completado tras instalar una
 ```
 
-`kling plugins install` baja `kling-<nombre>-<os>-<arch>` de la release que corresponde a
+`kling plugin install` baja `kling-<nombre>-<os>-<arch>` de la release que corresponde a
 tu `kling`, **lo verifica contra el `SHA256SUMS` de la release antes de escribirlo**,
 comprueba su manifiesto y lo deja en `~/.local/share/kling/plugins` (o en el primer
 directorio de `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` y `-file RUTA` eligen
-otro origen; `kling plugins rm <nombre>` la quita. `ai`, `chispa` y `models` son
-**extensiones incorporadas**: viven dentro del binario de `kling`, pero se listan, se
-documentan y se apagan igual.
+otro origen; `kling plugin rm <nombre>` la quita. `ai` es una **extensión incorporada**
+(`kling ai model`, `kling ai chispa`, el gateway de IA): vive dentro del binario de
+`kling`, pero se lista, se documenta y se apaga igual.
+
+Desde 0.14 los comandos de una extensión viven **bajo su nombre**: `kling mcp add`,
+`kling mcp serve`, `kling sbx ls`. Solo `connect` está en primer nivel. Los verbos sueltos
+de antes (`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`,
+`kling snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) siguen
+funcionando como alias silenciosos; en 0.15 avisarán una vez por proceso y en 0.16 se
+retiran los de extensiones. `commit`, `snapshots` y `plugins` se quedan para siempre.
 
 ## kling-mcp: servidores MCP bajo demanda
 
@@ -550,9 +557,9 @@ Streamable HTTP nativo — y conviértelo en un servicio que despierta bajo dema
 snapshot dorado. Es para lo que se construyó kindling; vive en [`ext/mcp`](ext/mcp).
 
 ```sh
-kling plugins install mcp
+kling plugin install mcp
 kling mcp search filesystem
-kling add io.github.domdomegg/filesystem-mcp
+kling mcp add io.github.domdomegg/filesystem-mcp
 kling connect -all -install all
 ```
 
@@ -572,7 +579,7 @@ milisegundos en vez de crearse. Trae también `kindling-operator`, que hace lo m
 Kubernetes ([`docs/kubernetes.md`](docs/kubernetes.md)).
 
 ```sh
-kling plugins install sandbox
+kling plugin install sandbox
 ```
 
 ## Escribir una extensión
@@ -605,7 +612,7 @@ que persiste.
 
 ```sh
 kling volume create notas -size 2G
-kling mcp import notas-mcp -volume notas          # o: kling add <servidor> ...
+kling mcp import notas-mcp -volume notas          # o: kling mcp add <servidor> ...
 kling run -name apuntes -volume notas:/data       # o una microVM a mano
 kling volume ls
 ```
@@ -661,7 +668,7 @@ Es lo que permite no duplicar las mismas dependencias en cada imagen:
 kling volume create libs -size 2G
 
 # la imagen con los instaladores, una vez:
-kling images toolchain
+kling image toolchain
 
 # poblarla DENTRO de una microVM de un solo uso, que se destruye al terminar:
 kling volume populate libs -- npm install --prefix /data --ignore-scripts lodash axios zod
@@ -759,14 +766,14 @@ modelo de amenaza: [`docs/compartir.md`](docs/compartir.md).
 
 ## LLM pequeños bajo demanda (VON)
 
-`kling models` sirve modelos *instruct* pequeños (SmolLM2-360M, Qwen2.5 0.5B y 1.5B; en el catálogo por defecto solo pesos Apache-2.0/MIT) desde microVMs
+`kling ai model` sirve modelos *instruct* pequeños (SmolLM2-360M, Qwen2.5 0.5B y 1.5B; en el catálogo por defecto solo pesos Apache-2.0/MIT) desde microVMs
 con `llama-server` de llama.cpp y su API compatible con OpenAI, congelados en un snapshot
 dorado **después** de cargar y calentar el modelo:
 
 ```sh
-kling models add von-smol -model smollm2-360m-instruct     # imagen + dorado, una orden
+kling ai model add von-smol -model smollm2-360m-instruct     # imagen + dorado, una orden
 kling run -from von-smol -name smol-1                      # una réplica, el modelo ya en memoria
-kling models ask smol-1 "What is a microVM?"               # respuesta + tokens/s
+kling ai model ask smol-1 "What is a microVM?"               # respuesta + tokens/s
 curl http://$(kling inspect smol-1 | jq -r .ip):8000/v1/chat/completions -d '{...}'
 ```
 
@@ -778,7 +785,7 @@ Cifras, la salvedad del laboratorio anidado y el plan de GPU: [`docs/von.md`](do
 
 ## Chispa: un clasificador diminuto para decisiones pequeñas
 
-`kling chispa` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
+`kling ai chispa` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
 estructurados; pesos int16; ~1 MB) para las decisiones que no merecen un modelo de
 lenguaje: clasificar un evento, enrutar la petición de un agente, filtrar una entrada.
 Corre en local, sin daemon, contesta en 1,5–6 µs sin reservar memoria y da los mismos
@@ -787,15 +794,15 @@ frente al umbral de su clase, `confident` o `escalate`, para que un gateway cont
 Chispa y pase el resto a un modelo mayor.
 
 ```sh
-kling chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
-kling chispa predict -model eventos.chispa -text "panic in the parser" -fields '{"service":"api"}'
+kling ai chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
+kling ai chispa predict -model eventos.chispa -text "panic in the parser" -fields '{"service":"api"}'
 ```
 
 Diseño y formato: [`docs/chispa.md`](docs/chispa.md). Una evaluación honesta con 4 304
 commits reales, incluido dónde dejan de valer los umbrales:
 [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md). Chispa también se puede desplegar **serverless**,
 una tarea por dorado congelado en su propia microVM despertada bajo demanda (el mismo
-modelo que VON, más abajo): `kling chispa deploy`, cifras de thaw y rendimiento medidas en
+modelo que VON, más abajo): `kling ai chispa deploy`, cifras de thaw y rendimiento medidas en
 [`docs/chispa-serverless.md`](docs/chispa-serverless.md).
 
 ## Gateway de IA: muchos modelos listos, ninguno encendido 24/7
@@ -861,7 +868,7 @@ charla que no es para la habitación). Guía: [`docs/demo-domotica.md`](docs/dem
 ```sh
 kling ai up -config examples/domotica/ai.json &       # con las rutas y dorados de tu host
 go run ./examples/domotica                            # http://127.0.0.1:8088/
-kling plugins install domotica                        # opcional: kling domotica decide/eval/…
+kling plugin install domotica                        # opcional: kling domotica decide/eval/…
 ```
 
 ## Qué persiste y qué no
@@ -900,13 +907,13 @@ por `/sbin/overlay-init` dentro del invitado.
 | Imagen base `min` (Alpine), compartida | **17 MB**, una vez |
 | Imagen base `default` (Ubuntu), compartida | 386 MB |
 | Por máquina en marcha | **~8 MB** |
-| Por máquina `warm`, imagen `min` | **~35 MB** |
-| Por máquina `warm`, imagen `default` | ~82 MB |
+| Por máquina `frozen`, imagen `min` | **~35 MB** |
+| Por máquina `frozen`, imagen `default` | ~82 MB |
 
 Antes de los overlays, cada máquina copiaba los 800 MB completos: tres máquinas costaban
 2,4 GB; ahora cuestan 386 MB + 25 MB.
 
-**Una máquina `warm` no consume RAM.** `freeze` mata el proceso de Firecracker; lo que
+**Una máquina `frozen` no consume RAM.** `freeze` mata el proceso de Firecracker; lo que
 queda es un fichero. Su coste es disco, no memoria.
 
 Firecracker vuelca la memoria entera al congelar, pero casi todo son páginas a cero.
@@ -951,8 +958,8 @@ mismo modelo de las imágenes OCI, construido con whiteouts de overlayfs.
 sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh node     # base con nodejs+npm
 sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh python   # base con python3+pip
 
-kling add <servidor>              # elige la base 'node'/'python' solo
-kling add <servidor> -base min    # fuerza la base mínima (capa estilo monolítico)
+kling mcp add <servidor>              # elige la base 'node'/'python' solo
+kling mcp add <servidor> -base min    # fuerza la base mínima (capa estilo monolítico)
 ```
 
 El parque real, reimportado por capas sobre la base `node`:
@@ -972,8 +979,8 @@ El parque real, reimportado por capas sobre la base `node`:
 horneado en la base, así que actualizarlo es **un** fichero (`kling mcp refresh-bridge min`)
 en vez de N. El diseño completo, mediciones y trampas: [`docs/three-layers.md`](docs/three-layers.md).
 
-`kling images ls` enseña la columna `BASE` y cuenta cada base una vez en el total;
-`kling images rm` se niega a retirar una imagen que sea base de otra capa, respalde un
+`kling image ls` enseña la columna `BASE` y cuenta cada base una vez en el total;
+`kling image rm` se niega a retirar una imagen que sea base de otra capa, respalde un
 dorado o tenga una máquina viva.
 
 ## Densidad: por qué el snapshot dorado lo cambia todo
@@ -1009,20 +1016,20 @@ medida en [`docs/densidad-zram.md`](docs/densidad-zram.md).
 
 ```sh
 kling top                # PSS por microVM y del host; -watch 2s para refrescar
-kling squeeze <ref>...   # globo: reclama la memoria libre del invitado para el host
+kling machine squeeze <ref>...   # globo: reclama la memoria libre del invitado para el host
 ```
 
 `kling top` informa de **PSS**, no RSS — con instancias copy-on-write, el RSS cuenta la
 misma página compartida N veces y exagera el uso una barbaridad. El gateway expone además
 `/metrics` con la misma contabilidad, incluido el `mem.file` compartido.
 
-`kling squeeze` infla el dispositivo balloon dentro de un invitado en marcha para que las
+`kling machine squeeze` infla el dispositivo balloon dentro de un invitado en marcha para que las
 páginas que no está usando de verdad vuelvan al host — útil tras el pico de arranque de
 un servicio, cuando su régimen permanente es mucho menor que su pico.
 
 ```sh
 kling run -image toolchain -mem 512 -mem-max 2048 -name trabajo
-kling resize trabajo -mem 1536   # sube o baja, sin reiniciar
+kling machine resize trabajo -mem 1536   # sube o baja, sin reiniciar
 ```
 
 Firecracker no puede añadir memoria a una VM en marcha, así que la elasticidad funciona
@@ -1041,11 +1048,11 @@ Tres palancas medidas, del trabajo de rendimiento de v0.3–v0.4:
 - **El veredicto de integridad se recuerda.** Un dorado es inmutable desde que se
   congela; hashear su overlay de 512 MiB en cada instanciación era el 67% del despertar.
   Se verifica una vez por vida del daemon (y se re-verifica si cambian tamaño o fecha).
-- **En Mac/arm64**: `kling add -bundle` (esbuild, 1205 ficheros → 1) y
+- **En Mac/arm64**: `kling mcp add -bundle` (esbuild, 1205 ficheros → 1) y
   `kling mcp import -cpu-pct 100` se acumulan para llevar un `initialize` en frío de
   ~16 s a ~2,5 s. El desglose está en [`docs/mac-arm64.md`](docs/mac-arm64.md).
 
-Para los servicios populares, `kling gateway -keepwarm N` mantiene caliente la instancia
+Para los servicios populares, `kling mcp serve -keepwarm N` mantiene caliente la instancia
 primaria de los N servicios persistentes más usados, sacando el arranque en frío del
 camino crítico del todo.
 
@@ -1098,7 +1105,7 @@ equivocado para una clave de API. Los secretos se inyectan en la microVM **viva*
 través del MMDS de Firecracker (el servicio de metadatos de la microVM):
 
 ```sh
-kling mmds <ref> -f store.json     # o el JSON por stdin
+kling machine secret <ref> -f store.json     # o el JSON por stdin
 ```
 
 El almacén lleva variables comunes y secretos por sesión indexados por `Mcp-Session-Id`;
@@ -1113,7 +1120,7 @@ de un fichero de snapshot.
 ## Informe de topología
 
 ```sh
-kling export -o topologia.html
+kling mcp export -o topologia.html
 ```
 
 Autocontenido: sin CDN, sin fuentes remotas, sin peticiones al abrirlo — describe la
@@ -1235,8 +1242,8 @@ permite que N instancias compartan páginas.
 | `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
 | `scripts/70-build-minimal-image.sh` | Construye la imagen base `min`, o una base de familia de runtime (`node`, `python`) |
 | `scripts/71-build-glibc-base.sh` | Construye la base glibc con `chrome-headless-shell` (35% menos disco, arranque 3,4× más rápido que el Chromium de Alpine) |
-| `scripts/81-base-image.sh` | El constructor de imágenes `base`: una capa con paquetes y el agente de invitado genérico (`kling images build -builder base`); también el motor de capas del constructor `llm` |
-| `scripts/builders/llm` | El constructor `llm` de `kling models add`: llama.cpp + un GGUF fijado sobre una base Debian trixie |
+| `scripts/81-base-image.sh` | El constructor de imágenes `base`: una capa con paquetes y el agente de invitado genérico (`kling image build -builder base`); también el motor de capas del constructor `llm` |
+| `scripts/builders/llm` | El constructor `llm` de `kling ai model add`: llama.cpp + un GGUF fijado sobre una base Debian trixie |
 | `scripts/96-von-bench.sh` | Mide un modelo VON: frío y thaw hasta el primer token, tokens/s, memoria de N réplicas, semillas |
 
 ## Mapa de la documentación
@@ -1244,7 +1251,7 @@ permite que N instancias compartan páginas.
 | Documento | Qué cubre |
 |---|---|
 | [`docs/README.md`](docs/README.md) | Índice de todo lo que hay bajo `docs/` |
-| [`docs/extensions.md`](docs/extensions.md) | Escribe una extensión en 10 minutos: `examples/hello-extension`, el manifiesto campo a campo, `kling plugins install` |
+| [`docs/extensions.md`](docs/extensions.md) | Escribe una extensión en 10 minutos: `examples/hello-extension`, el manifiesto campo a campo, `kling plugin install` |
 | [`ext/mcp/README.es.md`](ext/mcp/README.es.md) · [`ext/sandbox/README.md`](ext/sandbox/README.md) | Las extensiones de MCP y de sandboxes |
 | [`docs/kubernetes.md`](docs/kubernetes.md) | `kindling-operator`: sandboxes desde Kubernetes |
 | [`docs/api.md`](docs/api.md) | El API HTTP del daemon sobre el que se construyen las extensiones |
@@ -1256,7 +1263,7 @@ permite que N instancias compartan páginas.
 | [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
 | [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
 | [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
-| [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling chispa deploy`, thaw y rendimiento medidos frente a en proceso |
+| [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling ai chispa deploy`, thaw y rendimiento medidos frente a en proceso |
 | [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Decisiones de domótica (`kling domotica`, de la extensión `domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |

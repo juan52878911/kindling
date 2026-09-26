@@ -116,7 +116,7 @@ pone en `kling.layer`.
 - `handleImages`: `api.Image` gana `Base` (sobre qué se apoya) y `Layers` (cuántas
   se apoyan en ella). Los tamaños de una imagen por capas miden LA CAPA: la base
   no es suya, y sumársela a cada una haría creer que el disco está N veces más
-  lleno de lo que está. `kling images ls` añade columna BASE y un total al pie —la
+  lleno de lo que está. `kling image ls` añade columna BASE y un total al pie —la
   cifra que justifica todo esto, con cada base contada UNA vez—.
 - Protección de la base: no hay endpoint de borrado (las imágenes se quitan a mano
   del host), así que la protección es lo que `images ls` enseña antes del `rm`:
@@ -130,7 +130,7 @@ pone en `kling.layer`.
 - **Bonus hecho — el puente, horneado en la base.** `70-build-minimal-image.sh` lo
   instala en la base, y `80-mcp-image.sh` (`install_bridge`) NO lo copia a la capa
   si el binario que ya se ve es idéntico. Así actualizarlo son ~8 MiB menos por
-  servicio y **un** fichero (`kling images refresh min`) en vez de N. Una capa sin
+  servicio y **un** fichero (`kling image refresh min`) en vez de N. Una capa sin
   puente propio no se reporta como "no es una imagen de servicio" sino como *"its
   bridge comes from base X"*. Si la base no lo trae, la capa se lleva el suyo y
   todo sigue igual: lo que está en la capa gana por ir de lower delante.
@@ -193,7 +193,7 @@ node: 500 × 130 MiB ≈ **65 GB** monolítico contra 113 MiB + 500 × 25 MiB �
 **13 GB** — que es la cifra que prometía el plan, pero solo por esta vía.
 
 Consecuencia práctica: **hace falta una base por familia de runtime** (una `node`,
-una `python`…). `kling add -base node` ya existe para elegirla; sin ese flag, todo
+una `python`…). `kling mcp add -base node` ya existe para elegirla; sin ese flag, todo
 lo que se empaquetara por el camino cómodo caía sobre `min` y no ahorraba nada.
 `nodejs`/`npm` se piden igual aunque la base ya los traiga: apk sobre lo instalado
 no engorda la capa (medido: 28 MiB contra 31) y así el flag vale con cualquier
@@ -206,7 +206,7 @@ Las bases de familia se construyen POR NOMBRE, sin recordar listas de paquetes:
     sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh node     # nodejs npm
     sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh python   # python3 py3-pip
 
-El nombre no es cosmético: `kling add` sin `-base` busca en el daemon una base
+El nombre no es cosmético: `kling mcp add` sin `-base` busca en el daemon una base
 que se llame **como la familia del runtime del paquete** (`node`, `python`) y la
 usa sola; si no está, avisa de que la capa cargará con el runtime entero y dice
 qué construir. `-base` explícito sigue mandando (`-base min` fuerza la mínima).
@@ -225,7 +225,7 @@ Dos diferencias con npm que hay que conocer:
   caza el propio build: `80-mcp-image.sh` comprueba con `chroot ... command -v`
   que el comando exista dentro de la imagen y falla ANTES de importar, no en el
   import como "el servidor no abrió el puerto".
-- **`kling add -env KEY=value`** hornea variables de entorno en el entrypoint
+- **`kling mcp add -env KEY=value`** hornea variables de entorno en el entrypoint
   (en texto plano: para interruptores, no para secretos). Existía `-e` en el
   script y ningún camino del CLI llegaba a él.
 
@@ -236,7 +236,7 @@ El `semgrep` que corre en producción NO trae semgrep dentro de la imagen: hace
 vez tiran la máquina por OOM. Reimportado por capas queda horneado y sin
 phone-home (que con el egress cerrado costaba ~2 min de timeout por arranque):
 
-    kling add semgrep \
+    kling mcp add semgrep \
       -env SEMGREP_SEND_METRICS=off -env SEMGREP_ENABLE_VERSION_CHECK=0
 
 (la base `python` la encuentra sola si existe; las ruedas de semgrep pesan
@@ -244,7 +244,7 @@ phone-home (que con el egress cerrado costaba ~2 min de timeout por arranque):
 
 ### El encogido de la capa nunca se ejecutaba
 
-Salió al empaquetar una calculadora con `kling add`: **451 MiB de capa para
+Salió al empaquetar una calculadora con `kling mcp add`: **451 MiB de capa para
 73 MiB de contenido**. El sistema de ficheros seguía a 805 MiB con 716 libres
 dentro — `resize2fs -M` no había corrido nunca.
 
@@ -330,15 +330,15 @@ disco de la VM del 89% al 81%.
 - [x] Stage 3 — snapshot/thaw.
 - [x] Stage 4 — accounting + bridge en base.
 - [x] **Validación en fc-test** — las cinco pruebas pasan; ver arriba.
-- [x] Flag `-base` en `kling add`, probado de punta a punta: construye por capas,
+- [x] Flag `-base` en `kling mcp add`, probado de punta a punta: construye por capas,
   importa, congela y responde `tools/call` por el gateway.
 - [x] El encogido de la capa, que no se ejecutaba nunca (451 MiB → 75 MiB).
 - [x] Reimportar el parque: los 7 servicios node, hechos y verificados (ver arriba).
-- [x] Python de primera: familias de runtime con nombre en 70-build, `kling add`
+- [x] Python de primera: familias de runtime con nombre en 70-build, `kling mcp add`
   para PyPI (base automática, pip, ejecutable por convención + comprobación en
   el build, `-env`). Ver "Familias de runtime y servidores de Python".
 - [x] Base `python` construida en fc-test (75 MiB) y camino PyPI validado de punta
-  a punta con `mcp-sqlite3`: `kling add` elige la base sola, construye por capas,
+  a punta con `mcp-sqlite3`: `kling mcp add` elige la base sola, construye por capas,
   importa y responde `tools/list` por el gateway (37 herramientas).
 - [x] semgrep por capas (679 → 585 MiB). Resultó ser un servicio node, no python:
   ver arriba.

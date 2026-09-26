@@ -34,12 +34,12 @@ dorado comparten las páginas de los pesos** que ninguna ha escrito. Lo medido:
 ### Linux (Firecracker)
 
 ```sh
-kling models add von-smol -model smollm2-360m-instruct          # Q8_0 por defecto
-kling models add von-qwen -model qwen2.5-0.5b-instruct -quant q8_0
-kling models ls
+kling ai model add von-smol -model smollm2-360m-instruct          # Q8_0 por defecto
+kling ai model add von-qwen -model qwen2.5-0.5b-instruct -quant q8_0
+kling ai model ls
 
 kling run -from von-smol -name smol-1                             # una réplica
-kling models ask smol-1 "What is a microVM? One sentence."
+kling ai model ask smol-1 "What is a microVM? One sentence."
 ```
 
 `models add` construye la imagen (llama.cpp + el GGUF) con el constructor `llm`
@@ -74,9 +74,9 @@ Un daemon de macOS no construye imágenes. Se construye en un Linux arm64, se co
 y el dorado se hace en el Mac (un dorado es de su backend y de su host):
 
 ```sh
-kling models add -H ssh://lab von-smol -model smollm2-360m-instruct -build-only
-kling images copy von-smol -from ssh://lab
-kling models add von-smol -model smollm2-360m-instruct    # reutiliza la imagen
+kling ai model add -H ssh://lab von-smol -model smollm2-360m-instruct -build-only
+kling image copy von-smol -from ssh://lab
+kling ai model add von-smol -model smollm2-360m-instruct    # reutiliza la imagen
 kling run -from von-smol -name smol-1
 curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 ```
@@ -99,7 +99,7 @@ curl -s http://$(kling inspect smol-1 | jq -r '.forwards["8000"]')/v1/models
 
 Los **codificadores de frases** (kind `embed`) se sirven con la misma
 maquinaria: `llama-server --embeddings`, `POST /v1/embeddings`, dorado
-calentado con frases reales, `kling models embed <réplica> "<texto>"`. Nadie de
+calentado con frases reales, `kling ai model embed <réplica> "<texto>"`. Nadie de
 confianza publica su GGUF, así que se convierten de los pesos fijados con
 `scripts/encoder-gguf.sh` (reproducible bit a bit) y el constructor los toma de
 su caché por hash. Son la capa 3 de la domótica: [codificador.md](codificador.md).
@@ -111,7 +111,7 @@ Q4_K_M no): [von-cpu.md](von-cpu.md) tiene las cifras y la configuración
 recomendada por modelo.
 
 Cada entrada lleva revisión de Hugging Face (commit, no rama), sha256, licencia
-y dónde leerla (`pkg/von`, `kling models ls`); el constructor verifica el hash
+y dónde leerla (`pkg/von`, `kling ai model ls`); el constructor verifica el hash
 antes de meter nada en la imagen.
 
 **Licencias.** En el catálogo por defecto solo entran modelos que se pueden usar

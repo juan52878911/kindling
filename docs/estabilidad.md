@@ -43,7 +43,7 @@ cierre de la función anterior; repuestas.
 4. **resetear el estado post-handshake**,
 5. congelar.
 
-**`kling commit` a secas no hacía nada de eso** — y es el camino documentado para
+**`kling save` a secas no hacía nada de eso** — y es el camino documentado para
 crear dorados a mano.
 
 El resultado es un snapshot que **restaura perfectamente en 26 ms y luego no
@@ -81,7 +81,7 @@ Todos observados, todos con test que se pone rojo al romper el código.
 | 1 | Una máquina reintentando congelarse **cada 10 s durante 260 h** | El segador no distinguía el fallo estructural (socket desaparecido) del transitorio, y nunca se rendía |
 | 2 | **Nueve máquinas `failed`** acumuladas en 21 h | Nadie las recogía; `failed` es terminal, así que sólo eran basura |
 | 3 | Arranque rechazado con **3,4 GB reclamables** | El guardián descartaba `MemAvailable` entero asumiendo que toda la caché eran `mem.file` vivos. Con **una** microVM viva eso era falso |
-| 4 | Snapshot caducado imposible de reemplazar | `kling commit` no tenía forma de forzar, y los dorados se invalidan en cada reinicio |
+| 4 | Snapshot caducado imposible de reemplazar | `kling save` no tenía forma de forzar, y los dorados se invalidan en cada reinicio |
 | 5 | **Nueve servicios caídos 26 h** con `status` diciendo «✓ 9» | `services: ✓ 9` informaba del inventario y se leía como salud |
 | 6 | `Could not set TSC scaling` | Los snapshots quedan atados a la frecuencia del TSC del anfitrión; un reinicio los invalida **todos a la vez** |
 
@@ -106,7 +106,7 @@ laboratorio sobre `sequentialthinking`:
 | Del cual, el invitado abre el puerto | ~7,8 s | **~0,3 s** |
 
 El lado del invitado —que era el objetivo— es **26× más rápido**. El coste del
-arranque del runtime se movió del despertar al momento de congelar: `kling commit`
+arranque del runtime se movió del despertar al momento de congelar: `kling save`
 pasó de ~6 s a ~14 s, y el dorado de 39 MB a 120 MB de memoria. Es el intercambio
 correcto: se paga una vez al construir, no en cada despertar.
 
@@ -363,7 +363,7 @@ tapaba el hasheo.
 
 ## 8. Los cuatro pendientes, cerrados
 
-### `kling commit -warm=false`
+### `kling save -warm=false`
 
 El hijo caliente vive **dentro** del dorado y lo engorda: 39 MB → 120 MB en un
 servicio de node. A 150 servicios son 12 GB. Sigue activo por defecto —el caso

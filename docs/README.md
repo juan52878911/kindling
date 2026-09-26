@@ -13,7 +13,7 @@ depuración.
 | [`releases.md`](releases.md) | Una etiqueta, una release: todos los assets (núcleo y extensiones), el `SHA256SUMS` único, los módulos del repo y cómo crear una release | mantienes el proyecto o quieres compilar desde fuentes |
 | [`kubernetes.md`](kubernetes.md) | `kindling-operator`: sandboxes de `ext/sandbox` gestionados desde Kubernetes, con su CRD y su despliegue | quieres pedir sandboxes con `kubectl` |
 | [`exec-sandbox.md`](exec-sandbox.md) | Sandboxes para agentes de código: `kling sandbox`, `kling exec` en streaming, `kling cp`, plantillas desde snapshot y la puerta `allow_exec` | quieres ejecutar código de un agente sin tocar tu máquina |
-| [`von.md`](von.md) | LLM pequeños (SmolLM2, Qwen2.5) servidos desde snapshots dorados con `kling models`: uso, diseño, semillas, cifras en Linux y macOS, y el plan de GPU | quieres servir un modelo pequeño con escala a cero |
+| [`von.md`](von.md) | LLM pequeños (SmolLM2, Qwen2.5) servidos desde snapshots dorados con `kling ai model`: uso, diseño, semillas, cifras en Linux y macOS, y el plan de GPU | quieres servir un modelo pequeño con escala a cero |
 | [`despertar.md`](despertar.md) | De réplica dormida a primera respuesta, fase por fase: 152 → 27 ms congelada y 2,2 ms con el nivel pausada, cada palanca con su medida | quieres saber dónde se va el tiempo de un thaw o activar el nivel pausada |
 | [`densidad-zram.md`](densidad-zram.md) | Swap comprimido en RAM para densificar el host: cuándo ayuda, cuándo estorba, y el plan de medición antes/después | quieres más microVMs co-residentes sin más RAM |
 
@@ -21,8 +21,8 @@ depuración.
 
 | Documento | Qué cubre | Léelo si… |
 |---|---|---|
-| [`extensions.md`](extensions.md) | Escribe una extensión en 10 minutos con [`examples/hello-extension`](../examples/hello-extension): el manifiesto campo a campo (con `companions`), descubrimiento, ganchos, cómo publicarla para `kling plugins install` y lo que el núcleo ofrece | vas a escribir una extensión o quieres entender cómo llega `kling mcp` a su código |
-| [`../ext/mcp/README.es.md`](../ext/mcp/README.es.md) · [`../ext/sandbox/README.md`](../ext/sandbox/README.md) | Las extensiones oficiales: servidores MCP bajo demanda y sandboxes multiinquilino | usas `kling plugins install mcp` o `sandbox` |
+| [`extensions.md`](extensions.md) | Escribe una extensión en 10 minutos con [`examples/hello-extension`](../examples/hello-extension): el manifiesto campo a campo (con `companions`), descubrimiento, ganchos, cómo publicarla para `kling plugin install` y lo que el núcleo ofrece | vas a escribir una extensión o quieres entender cómo llega `kling mcp` a su código |
+| [`../ext/mcp/README.es.md`](../ext/mcp/README.es.md) · [`../ext/sandbox/README.md`](../ext/sandbox/README.md) | Las extensiones oficiales: servidores MCP bajo demanda y sandboxes multiinquilino | usas `kling plugin install mcp` o `sandbox` |
 | [`api.md`](api.md) | Todas las rutas del daemon, las capacidades, el protocolo de los constructores de imágenes y el proxy al invitado | vas a hablar con el daemon desde otro programa |
 
 ## Diseño y auditorías
@@ -31,7 +31,7 @@ depuración.
 |---|---|---|
 | [`three-layers.md`](three-layers.md) | Imágenes por capas (base por familia de runtime + capa de servicio + overlay): diseño, decisiones, y el parque real reimportado — 1300 → 433 MiB | quieres entender `-base`, las familias `node`/`python` o el camino PyPI |
 | [`estabilidad.md`](estabilidad.md) | La auditoría de estabilidad y determinismo sobre el sistema vivo: el commit prematuro, los seis fallos de robustez, el hasheo que costaba el 67% del despertar, y la prueba de estrés de 142 microVMs | quieres saber por qué v0.4 es 9,5× más rápida bajo carga, o cómo se depuró |
-| [`chispa.md`](chispa.md) | Chispa, el clasificador lineal diminuto de `kling chispa`: características hasheadas, pesos int16, calibración y umbral por clase, formato `.chispa`, y cómo lo usará la cascada Chispa → VON | quieres clasificar o enrutar algo en microsegundos sin un modelo de lenguaje |
+| [`chispa.md`](chispa.md) | Chispa, el clasificador lineal diminuto de `kling ai chispa`: características hasheadas, pesos int16, calibración y umbral por clase, formato `.chispa`, y cómo lo usará la cascada Chispa → VON | quieres clasificar o enrutar algo en microsegundos sin un modelo de lenguaje |
 | [`codificador.md`](codificador.md) | La capa 3 de la domótica: un codificador de frases (multilingual-e5-small, MIT) servido como un VON (kind `embed`), la cabeza `.jenc` en Go, su evaluación honesta, latencia y memoria, y la mejora futura (no aplicada) del ajuste fino con GPU | vas a tocar la capa entre Chispa y el LLM, o a servir embeddings |
 | [`CHISPA-EVAL.md`](CHISPA-EVAL.md) | La evaluación de Chispa con 4 304 commits reales frente a la clase mayoritaria y unas reglas: exactitud, macro-F1, ECE, cobertura, y dónde fallan los umbrales | vas a fiarte de un umbral de Chispa |
 | [`domotica.md`](domotica.md) · [`domotica-datos.md`](domotica-datos.md) · [`DOMOTICA-EVAL.md`](DOMOTICA-EVAL.md) | La decisión de domótica de `kling domotica` (extensión `domotica`): plantillas de la demo → Chispa + Chispa-slots (`.chispas`), los datos libres (MASSIVE, Home Assistant) con su licencia y taxonomía, y su evaluación honesta | vas a tocar la demo de la habitación o la cascada de decisión |

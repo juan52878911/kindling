@@ -4,7 +4,7 @@ Chispa es un modelo lineal (regresión logística) que se entrena fuera, pesa un
 dos megas y responde en microsegundos. Sirve para las decisiones pequeñas que no
 merecen un modelo de lenguaje: de qué tipo es este evento, a qué herramienta va
 esta petición de un agente, si esta entrada se filtra o pasa. Vive en el núcleo
-de kindling (`pkg/chispa`, `pkg/chispa/train`, `kling chispa`), en Go puro, sin cgo ni
+de kindling (`pkg/chispa`, `pkg/chispa/train`, `kling ai chispa`), en Go puro, sin cgo ni
 dependencias externas.
 
 Su razón de ser es la **cascada**: el gateway le pregunta primero a Chispa; si Chispa
@@ -28,10 +28,10 @@ para que esa decisión sea fiable y barata.
 # datos: JSONL, una línea por ejemplo
 {"text": "panic in the parser when the cache is cold", "label": "fix", "fields": {"service": "api", "files": 3}}
 
-kling chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
-kling chispa eval -model eventos.chispa -data test.jsonl
-kling chispa predict -model eventos.chispa -text "segfault resolving symlinks" -fields '{"ext":".zig"}'
-kling chispa inspect eventos.chispa
+kling ai chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
+kling ai chispa eval -model eventos.chispa -data test.jsonl
+kling ai chispa predict -model eventos.chispa -text "segfault resolving symlinks" -fields '{"ext":".zig"}'
+kling ai chispa inspect eventos.chispa
 ```
 
 `predict` sin `-text` lee JSONL de stdin (`{"text":…, "fields":…}`) y escribe una
@@ -68,12 +68,12 @@ Un registro que solo tiene modelos Chispa en proceso (`kind: "chispa"`, sin
 instalado el binario `kling`. Si el registro trae además un modelo VON, un
 codificador, o una tarea Chispa con `"backend": "microvm"`, y el daemon no
 contesta, el gateway avisa una vez con claridad al arrancar y sigue: las
-tareas Chispa en proceso no se enteran. `kling chispa train|eval|predict|inspect` no
+tareas Chispa en proceso no se enteran. `kling ai chispa train|eval|predict|inspect` no
 tocan el daemon nunca: son CLI pura sobre el fichero `.chispa`.
 
 Chispa también se puede desplegar como una tarea **serverless**, empaquetada en
 su propia microVM y despertada bajo demanda —el mismo modelo operativo que
-VON—, con `kling chispa deploy` y `"backend": "microvm"` en el registro. Cuándo
+VON—, con `kling ai chispa deploy` y `"backend": "microvm"` en el registro. Cuándo
 compensa cada opción, cómo desplegarla y las cifras (thaw, latencia,
 decisiones/s con y sin microVM) están en
 [chispa-serverless.md](chispa-serverless.md). Lo de abajo, escalar a VON, es la **cascada**, y solo se
@@ -95,7 +95,7 @@ ganó con ningún LLM de 0,5B a 3B.
    [mejora-continua.md](mejora-continua.md). Chispa aprende de lo que antes
    escalaba, sin fiarse de un maestro que no se haya validado.
 
-Las cifras que decide la cascada son las que imprime `kling chispa eval`:
+Las cifras que decide la cascada son las que imprime `kling ai chispa eval`:
 **cobertura** (qué fracción contesta Chispa), **precisión en lo confiado** (lo que
 promete el umbral), **ECE** (si «0,9» significa acertar 9 de 10) y la
 **exactitud en lo escalado** (si es alta, los umbrales son demasiado prudentes).
@@ -187,7 +187,7 @@ caracteres, modelo de 10 clases a 2^18 cubos:
 | palabras, 10 goroutines en paralelo | 290 (por op., agregado) | 0 |
 
 Sobre los commits reales de la evaluación (asunto + hasta 300 bytes de cuerpo),
-`kling chispa eval` mide 4,9 µs por ejemplo con palabras+campos y 12,7 µs con
+`kling ai chispa eval` mide 4,9 µs por ejemplo con palabras+campos y 12,7 µs con
 n-gramas de caracteres, incluida la contabilidad de métricas. `Model` es
 inmutable; los búferes de cada llamada salen de un `sync.Pool`.
 
@@ -238,14 +238,14 @@ escribió; `go test ./pkg/chispa -run X -fuzz FuzzLoad -fuzztime 30s`).
 ## CLI
 
 ```
-kling chispa train -data train.jsonl -o m.chispa [-valid v.jsonl] [-test t.jsonl]
+kling ai chispa train -data train.jsonl -o m.chispa [-valid v.jsonl] [-test t.jsonl]
     [-buckets 18] [-unigrams] [-bigrams] [-char 3-5] [-fields] [-max-text 4096]
     [-epochs 30] [-patience 3] [-lr 0.05] [-l2 1e-4] [-class-weight balanced|sqrt|none]
     [-seed 1] [-valid-frac 0.1] [-precision 0.95] [-min-support 10]
     [-one-vs-rest LABEL] [-v]
-kling chispa eval -model m.chispa -data t.jsonl [-json]
-kling chispa predict -model m.chispa [-text T] [-fields JSON] [-top 5] [-json]
-kling chispa inspect <m.chispa> [-json]
+kling ai chispa eval -model m.chispa -data t.jsonl [-json]
+kling ai chispa predict -model m.chispa [-text T] [-fields JSON] [-top 5] [-json]
+kling ai chispa inspect <m.chispa> [-json]
 ```
 
 Cada línea puede llevar `"weight"` (0 o ausente = 1, como mucho 100): pesa el

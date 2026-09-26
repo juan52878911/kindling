@@ -112,7 +112,7 @@ memoria y política de TTL al crear, y no los cambia en caliente (ver
 |-----------------------|---------------|
 | `id`                  | Id compuesto del frontal (`host/máquina`). Vacío hasta que se crea. |
 | `host`                | El host del id, para lectura humana. |
-| `state`               | `running`, `warm`, o `gone` — un estado que pone el operador, no el frontal, cuando el sandbox ya no aparece allí (lo borró la limpieza por abandono, o alguien a mano). El operador NO recrea un sandbox `gone`: `status.id` ya no está vacío, y por diseño eso basta para no volver a crear nada. |
+| `state`               | `running`, `frozen`, o `gone` — un estado que pone el operador, no el frontal, cuando el sandbox ya no aparece allí (lo borró la limpieza por abandono, o alguien a mano). El operador NO recrea un sandbox `gone`: `status.id` ya no está vacío, y por diseño eso basta para no volver a crear nada. |
 | `expiresAt`           | Cuándo actúa `onTTL` si nadie lo usa ni lo renueva antes. |
 | `message`             | El último error, si lo hay (cuota agotada, plantilla inexistente...). Vacío cuando todo va bien. |
 | `observedGeneration`  | La `generation` de `spec` ya aplicada; sirve para ver si un cambio de `ttlSeconds` todavía está en camino. |

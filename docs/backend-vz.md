@@ -154,5 +154,5 @@ del namespace de Linux, para que un snapshot sirva igual en los dos sistemas:
 | barrido de huérfanos por `/proc` | por la tabla de procesos del sistema |
 | raíz `/var/lib/kindling`, daemon como root | raíz en el directorio del usuario, daemon sin root |
 | `mkfs.ext4`, `debugfs` de e2fsprogs | los mismos, de Homebrew (`brew install e2fsprogs`) |
-| construir imágenes (`POST /images`) | no disponible (501): se construyen en Linux y se copian (`kling images copy`, `GET/PUT /images/{name}/blob`) |
+| construir imágenes (`POST /images`) | no disponible (501): se construyen en Linux y se copian (`kling image copy`, `GET/PUT /images/{name}/blob`) |
 | arranques simultáneos: 2 anidado, núcleos/2 en hierro | 4 (`KLING_MAX_PARALLEL_BOOT`) |

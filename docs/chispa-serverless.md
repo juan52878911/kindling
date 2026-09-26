@@ -50,10 +50,10 @@ réplica `microvm` contesta con la misma forma (etiqueta, probabilidad,
 umbral, distribución completa y evidencia cuando duda) que `chispa.Model` en
 proceso.
 
-## `kling chispa deploy`
+## `kling ai chispa deploy`
 
 ```sh
-kling chispa deploy commits -model commits.chispa -mem 64 -vcpus 1
+kling ai chispa deploy commits -model commits.chispa -mem 64 -vcpus 1
 # Building image "commits" (kling-chispa + commits.chispa)...
 # Making the golden snapshot (1 vCPU, 64 MiB)...
 #   booted commits-golden-2yek in 46 ms; waiting for kling-chispa...
@@ -65,17 +65,17 @@ kling chispa deploy commits -model commits.chispa -mem 64 -vcpus 1
 # Add it to the ai gateway's registry as a microvm-backed model:
 #   {"models": {"commits": {"kind": "chispa", "backend": "microvm", "snapshot": "commits"}}}
 
-kling chispa ls
+kling ai chispa ls
 # TASK      SNAPSHOT   MEMORY   REPLICAS RUNNING
 # commits   commits    44M      0
 
-kling chispa rm commits          # borra el dorado y la imagen (-keep-image: solo el dorado)
+kling ai chispa rm commits          # borra el dorado y la imagen (-keep-image: solo el dorado)
 ```
 
 `deploy` necesita un daemon (construir la imagen monta un loopback y hace
 `chroot`: en Linux, como root; en macOS hay que traer la imagen ya construida
-con `kling images copy <name> -from ssh://usuario@host-linux` y hacer el
-dorado ahí con `kling chispa deploy <name> -model m.chispa -reuse-image`, igual
+con `kling image copy <name> -from ssh://usuario@host-linux` y hacer el
+dorado ahí con `kling ai chispa deploy <name> -model m.chispa -reuse-image`, igual
 que con un modelo VON; `-reuse-image` no puede mirar dentro de la imagen, así
 que el `-model` tiene que ser el mismo con el que se construyó). El `.chispa` (y el `.chispas` de huecos,
 opcional) viajan dentro de la petición al constructor `chispa`: no hace falta que
@@ -104,7 +104,7 @@ finitos y en rango, número de candidatos y de evidencia acotado) antes de
 usarla, y nunca se fía del `"confident"` que mande kling-chispa —lo recalcula del
 `prob` ya validado y el umbral del lado del gateway—. Para saber cuáles son
 las etiquetas válidas sin necesitar el `.chispa` de origen (que puede vivir en
-otra máquina), `kling chispa deploy` graba las etiquetas del modelo y su sha256
+otra máquina), `kling ai chispa deploy` graba las etiquetas del modelo y su sha256
 como anotación del dorado; una respuesta que no encaja con ese registro es un
 502, no una decisión.
 
@@ -142,7 +142,7 @@ usa el mismo camino: si su `intent` es un modelo `"backend": "microvm"`, la
 capa 2 pregunta a la réplica del dorado (`askChispaGuest` en
 `pkg/aigw/chispaguest.go`, lo mismo que `/v1/classify`: etiquetas validadas
 contra el registro de despliegue, confianza recalculada en el gateway). Con
-`kling chispa deploy <tarea> -model intent.chispa -slots slots.chispas` el
+`kling ai chispa deploy <tarea> -model intent.chispa -slots slots.chispas` el
 registro guarda también los huecos del `.chispas` (y su sha256), y la réplica
 marca los huecos en la misma ida y vuelta: el gateway comprueba cada uno
 (nombre conocido, dentro del texto, en orden, como mucho 64) y rehace su
@@ -183,7 +183,7 @@ orden (la ida y vuelta HTTP a la réplica), congelada ~30 ms la primera. Las
 decisiones son las mismas: `kling ai eval room` sobre las 9 794 filas de
 prueba da exactamente las mismas cifras con los dos backends (contestadas
 bien 0,311 → 0,321 con el codificador, +104, McNemar p = 4,9·10⁻³²). Ociosa,
-`kling ps` la enseña `paused` (a los 2 min de `-idle`) y luego `warm`
+`kling ps` la enseña `paused` (a los 2 min de `-idle`) y luego `frozen`
 (congelada, a los 10 × `-idle`); el dorado ocupa 75 MiB en disco.
 
 ## Cifras
@@ -201,7 +201,7 @@ memoria, igual de grande da igual el corpus de entrenamiento).
 |---|---|
 | Imagen en disco (capa sobre `min`) | 13 MB (24 MB lógicos) |
 | Dorado (`mem.file` + metadatos) | 45 MB |
-| `kling chispa deploy` de punta a punta | ~4 s (arranque 46 ms + kling-chispa listo 2,06 s + calentamiento + congelar) |
+| `kling ai chispa deploy` de punta a punta | ~4 s (arranque 46 ms + kling-chispa listo 2,06 s + calentamiento + congelar) |
 | Primer arranque desde el dorado, sin réplica (`restore`) | 1,41 s |
 | **Thaw de una réplica congelada + primera decisión** | **135-140 ms** (tres medidas: 135, 138, 140 ms, vistas por el cliente HTTP, congelando cada vez con `-idle 15s`); hoy 27 ms, ver abajo |
 | Réplica despierta, cliente serie (`kling_ai_latency_seconds`) | ver la tabla de concurrencia |
@@ -344,4 +344,4 @@ presupuesto por popularidad / memoria, así que un VON grande no se lo come.
   que puede correr en otro host—. `kling ai calibrate` de esa tarea falla con
   un mensaje claro en vez de intentarlo a medias; la manera de recalibrar es
   reentrenar y volver a desplegar:
-  `kling chispa train ... -o new.chispa && kling chispa deploy <tarea> -model new.chispa -replace`.
+  `kling ai chispa train ... -o new.chispa && kling ai chispa deploy <tarea> -model new.chispa -replace`.

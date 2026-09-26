@@ -16,7 +16,7 @@ extensiones de ARMv8 es poco frente a la latencia del disco.
 ## Cómo saber si lo está
 
 ```sh
-kling info
+kling status -v
 ```
 
 La línea `at rest:` dice `encrypted (dm-crypt)` si `$KLING_ROOT` está sobre un
@@ -39,7 +39,7 @@ sudo rsync -a /var/lib/kindling/ /mnt/
 sudo umount /mnt
 sudo mount /dev/mapper/kindling /var/lib/kindling
 sudo systemctl start kling kling-gateway
-kling info | grep 'at rest'
+kling status -v | grep 'at rest'
 ```
 
 Para que se abra al arrancar hay que añadirlo a `/etc/crypttab` y `/etc/fstab`,

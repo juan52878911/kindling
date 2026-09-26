@@ -15,7 +15,7 @@ v0.2.2) siguen en sus repos archivados.
 1. **Binarios pre-compilados** de
    [Releases](https://github.com/juan52878911/kindling/releases), que compila
    GitHub Actions al empujar una etiqueta `vX.Y.Z`. Es lo que usa la gente, vía
-   `scripts/install.sh` y `kling plugins install`.
+   `scripts/install.sh` y `kling plugin install`.
 2. **Desde fuentes** (`make install`, `go build`), para quien quiere lo último
    entre releases o desarrolla el proyecto.
 
@@ -56,8 +56,8 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 curl -fsSL .../install.sh | sh -s -- --tag v0.13.0 --with mcp,sandbox,domotica
 
 # o las extensiones después, desde el propio kling
-kling plugins install mcp
-kling plugins install sandbox@v0.13.0
+kling plugin install mcp
+kling plugin install sandbox@v0.13.0
 kling doctor
 ```
 
@@ -65,7 +65,7 @@ kling doctor
 hash **antes** de tocar el disco y deja los binarios en `--prefix` (por defecto
 `~/.local/bin`).
 
-`kling plugins install <n>` baja
+`kling plugin install <n>` baja
 `https://github.com/juan52878911/kindling/releases/download/<tag>/kling-<n>-<os>-<arch>`
 (con `<tag>` la versión del propio `kling`, o la de `@vX`), lo verifica contra el
 `SHA256SUMS` de la misma release antes de escribirlo, comprueba su manifiesto,

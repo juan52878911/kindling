@@ -72,7 +72,7 @@ Cuatro causas, y lo que hace este bucle con cada una:
 | `valid` | 10 % del oro | validación para la temperatura y los umbrales (más un 20 % estable de lo humano) |
 | `min_votes` | 2 | votos de maestros validados, todos de acuerdo, para entrar sin revisión |
 | `top_k` | 3 | la etiqueta del maestro tiene que estar entre las K de Chispa |
-| `teacher_weight` | 0,5 | peso de una muestra de maestro (oro y humano pesan 1; `weight` nuevo del JSONL de `kling chispa train`) |
+| `teacher_weight` | 0,5 | peso de una muestra de maestro (oro y humano pesan 1; `weight` nuevo del JSONL de `kling ai chispa train`) |
 | `max_per_class` | máx(50, oro de la clase) | muestras de maestros por clase y reentreno |
 | `min_checks`, `accept_precision` | 30, 0,9 | lo que exige la validación de un maestro (abajo) |
 | `trust_teachers` | — | maestros forzados sin validar: queda escrito y cada informe dice qué opinan de ellos las revisiones |
@@ -226,9 +226,9 @@ por clase (lo más reciente primero). Lo demás espera a una persona.
   ve el fichero viejo o el nuevo, nunca medio), y la caché del gateway se
   actualiza sin reiniciar. Se conservan los ficheros de v1, la servida, la
   anterior y las 10 últimas. La sombra rechazada queda en `@shadow.chispa`
-  para inspeccionarla (`kling chispa eval`).
+  para inspeccionarla (`kling ai chispa eval`).
 - *microvm*: el gateway no construye imágenes. La versión queda **pendiente**
-  y el CLI hace `kling chispa deploy` como el dorado `<snapshot>-vN`, y lo
+  y el CLI hace `kling ai chispa deploy` como el dorado `<snapshot>-vN`, y lo
   confirma con `/v1/admin/promote`, que comprueba que el sha256 del registro
   de despliegue del dorado es el de la versión. La tarea pasa a apuntar a ese
   dorado (`versions.json` manda sobre el `snapshot` del registro, que no se
@@ -290,7 +290,7 @@ entero (9 794, 28 intenciones, 64 % «fuera de ámbito»). v1:
 
 ```sh
 go run ./tools/mejora-continua prepare -data <datos> -out mc     # gold / valid / traffic / heldout
-kling chispa train -data mc/gold.jsonl -valid mc/valid.jsonl -o mc/intent.chispa
+kling ai chispa train -data mc/gold.jsonl -valid mc/valid.jsonl -o mc/intent.chispa
 #   26 labels, 2000 train / 1000 valid; valid: accuracy 0.817, confident 64.5% at precision 0.988
 go run ./tools/mejora-continua run -out mc -seed 7
 ```

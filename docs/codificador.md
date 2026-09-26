@@ -67,9 +67,9 @@ como pide RoBERTa, y estos modelos son BERT (posiciones desde 0).
 ```sh
 # en el host Linux del daemon (necesita python3 y red; ~1,5 GB en ~/.cache, bórralo después)
 sudo scripts/encoder-gguf.sh multilingual-e5-small -install   # deja el GGUF en la caché del constructor
-kling models add enc-e5 -model multilingual-e5-small          # imagen + dorado (-mem 512 por defecto)
+kling ai model add enc-e5 -model multilingual-e5-small          # imagen + dorado (-mem 512 por defecto)
 kling run -from enc-e5 -name enc-e5-1
-kling models embed enc-e5-1 "turn on the lights"
+kling ai model embed enc-e5-1 "turn on the lights"
 ```
 
 ### Servirlo: un VON más

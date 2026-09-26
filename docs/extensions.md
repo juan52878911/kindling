@@ -7,12 +7,18 @@ subcomandos añade. `kling` lo encuentra, lo pone en su ayuda y en el completado
 y cuando alguien teclea uno de esos subcomandos le pasa el control.
 
 ```
-kling mcp import eco   →   kling busca quién sirve "mcp"   →   exec kling-mcp mcp import eco
+kling mcp import eco   →   kling busca quién sirve "mcp"   →   exec kling-mcp import eco
 ```
 
+Los comandos de una extensión viven **bajo su nombre** (`kling mcp import`,
+`kling mcp add`): así la ayuda de `kling` no crece un verbo suelto por cada
+extensión instalada. Promover uno a primer nivel (`kling connect`) es explícito
+(`top_level`) y debería ser raro. Una extensión cuyo único comando se llama
+como ella (`kling hello`) es de primer nivel sin decir nada.
+
 Las extensiones oficiales viven en este mismo repositorio y salen en cada
-release: `kling plugins install mcp`, `kling plugins install sandbox`,
-`kling plugins install domotica`. Este documento enseña a escribir otra. La
+release: `kling plugin install mcp`, `kling plugin install sandbox`,
+`kling plugin install domotica`. Este documento enseña a escribir otra. La
 mínima es [`examples/hello-extension`](../examples/hello-extension); la de
 referencia, con varios subcomandos de verdad, es
 [`examples/domotica/cmd/kling-domotica`](../examples/domotica/cmd/kling-domotica).
@@ -100,7 +106,7 @@ No hay que registrar nada: el nombre del fichero es el registro.
 ## 3. Probarla (2 minutos)
 
 ```sh
-kling plugins ls                 # hello  0.1.0  ok  ~/.local/share/kling/plugins/kling-hello
+kling plugin ls                 # hello  0.1.0  ok  ~/.local/share/kling/plugins/kling-hello
 kling hello -name Ada            # hello, Ada!
 kling config set hello.greeting hola
 kling hello                      # hola, world!
@@ -111,11 +117,16 @@ source <(kling completion zsh)   # recarga el completado: ahora ofrece "hello"
 
 `kling doctor` también la revisa: si su manifiesto no valida o pide un
 `min_kling` mayor que el núcleo, aparece con ✗ y el motivo. Y se puede apagar
-sin desinstalarla: `kling plugins disable hello` (sale como `disabled` en
-`kling plugins ls` y deja de recibir comandos) y `kling plugins enable hello`.
+sin desinstalarla: `kling plugin disable hello` (sale como `disabled` en
+`kling plugin ls` y deja de recibir comandos) y `kling plugin enable hello`.
 
 La extensión funciona también sola, sin `kling` delante: `kling-hello hello`
 hace lo mismo que `kling hello`, y `kling-hello` sin argumentos imprime su ayuda.
+La ayuda tiene el mismo formato en el núcleo y en las extensiones —sinopsis,
+`USAGE`, `FLAGS`, `See also`—: `kling help mcp` la genera del manifiesto sin
+ejecutar nada, y `kling help mcp add` (o `kling mcp add -h`) añade los flags
+pidiéndoselos al propio comando en otro proceso (`plugin.FlagHelp`, que
+exporta `KLING_FLAG_HELP=1` para que no se intercepte otra vez).
 
 ### Un test del manifiesto
 
@@ -136,19 +147,29 @@ menos de 2 segundos. Uno parecido al de la extensión de MCP, recortado:
 
 ```json
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "name": "mcp",
-  "version": "0.13.0",
-  "min_kling": "0.6.0",
+  "version": "0.14.0",
+  "min_kling": "0.14.0",
   "summary": "hosts MCP servers on demand in microVMs",
+  "group": "SERVE",
   "commands": [
     {
-      "name": "mcp",
-      "group": "MCP SERVICES",
-      "summary": "import, list, verify, heal, link",
+      "name": "import",
+      "group": "SERVICES",
+      "summary": "turns an MCP server image into a frozen service",
       "usage": "  mcp import <service> -image <img>   turns an MCP server into a service\n",
-      "subcommands": ["import", "list", "verify", "heal", "link", "unlink"],
-      "machine_args": ["verify"]
+      "machine_args": [""]
+    },
+    {
+      "name": "memory",
+      "group": "GATEWAY",
+      "subcommands": ["status", "enable", "disable"]
+    },
+    {
+      "name": "connect",
+      "top_level": true,
+      "summary": "connects your AI agent to the gateway"
     }
   ],
   "config": [
@@ -162,24 +183,27 @@ menos de 2 segundos. Uno parecido al de la extensión de MCP, recortado:
 
 | Campo | Obligatorio | Para qué |
 |---|---|---|
-| `manifest_version` | sí | formato del manifiesto; hoy `1`. `plugin.Main` lo rellena si lo dejas a cero |
+| `manifest_version` | sí | `2` desde kling 0.14 (comandos bajo el nombre de la extensión); `1` hasta 0.13 (todos de primer nivel). El núcleo lee las dos: una extensión de 0.13 sigue funcionando como entonces. `plugin.Main` lo rellena si lo dejas a cero |
 | `name` | sí | `[a-z][a-z0-9-]{0,31}`; tiene que coincidir con el `<nombre>` de `kling-<nombre>` |
-| `version` | sí | la de la extensión; sale en `kling plugins ls` y `kling doctor` |
+| `version` | sí | la de la extensión; sale en `kling plugin ls` y `kling doctor` |
 | `min_kling` | no | versión mínima del núcleo. Si el núcleo es más viejo, la extensión se lista con el motivo y no se ejecuta |
-| `summary` | no | una línea para `kling plugins ls` y la cabecera de su ayuda |
-| `commands[].name` | sí | subcomando de primer nivel que recibe; mismo patrón que `name` |
-| `commands[].group` | no | sección de `kling help` donde aparece (`MCP SERVICES`, `EXAMPLES`…) |
+| `summary` | no | una línea para `kling plugin ls`, la pantalla de `kling` y la cabecera de su ayuda |
+| `group` | no | sección de la pantalla de `kling` donde sale la extensión (`SERVE` para las de casa; vacío = `EXTENSIONS`) |
+| `commands[].name` | sí | comando que recibe; mismo patrón que `name`. Se teclea `kling <nombre> <comando>` y llega como `kling-<nombre> <comando>` |
+| `commands[].top_level` | no | `true` lo saca del espacio de la extensión: se teclea `kling <comando>` (solo `connect` lo merece). Un comando llamado como la extensión lo es siempre, y entonces no puede haber otros bajo el nombre |
+| `commands[].hidden` | no | no sale en la ayuda ni en el completado (alias, internos), pero se puede teclear |
+| `commands[].group` | no | sección de la ayuda de la extensión (`kling help mcp`) donde aparece (`CATALOG`, `GATEWAY`…) |
 | `commands[].summary` | no | la línea de la ayuda si no hay `usage` |
-| `commands[].usage` | no | el bloque que imprimen `kling help` y `kling help <cmd>`, ya con su formato de columnas |
+| `commands[].usage` | no | el bloque que imprimen `kling help all` y `kling help <ext> <cmd>`, con el formato de columnas del núcleo: dos espacios, `<ext> <cmd> [flags]`, la descripción en la columna 52. Sin él, una línea con `name` y `summary` |
 | `commands[].subcommands` | no | alimentan el completado de la shell |
 | `commands[].machine_args` | no | tras qué subcomandos el completado ofrece ids de máquinas (`""` = tras el comando mismo) |
 | `config[]` | no | claves que se tocan con `kling config set <nombre>.<clave> <valor>` y se guardan en `config.json` bajo `extensions.<nombre>.<clave>`. `type` es `string`, `bool`, `int` o `secret` (se muestra enmascarado) |
 | `hooks` | no | `status` y/o `up` (ver más abajo) |
 | `units` | no | unidades de systemd que la extensión instala en el host del daemon; `kling up` las arranca si están instaladas |
-| `companions` | no | ejecutables que se instalan **junto a** la extensión y no son extensiones: `kling plugins install` los baja de la misma release, con la misma verificación, y `kling plugins rm` los borra con ella. La de MCP declara `kling-bridge` |
+| `companions` | no | ejecutables que se instalan **junto a** la extensión y no son extensiones: `kling plugin install` los baja de la misma release, con la misma verificación, y `kling plugin rm` los borra con ella. La de MCP declara `kling-bridge` |
 
 Un manifiesto roto, lento o que dice ser de otra extensión no rompe `kling`: la
-extensión aparece en `kling plugins ls` con `STATUS error: …` y ya.
+extensión aparece en `kling plugin ls` con `STATUS error: …` y ya.
 
 ### Códigos de salida
 
@@ -226,31 +250,48 @@ orden, y la primera que aparece con un nombre gana:
 4. el `PATH`.
 
 Los ficheros con punto o extensión (`kling-hello.json`) no se consideran, y
-`kling-bridge`, `kling-bridge-local` y `kling-guest` nunca se ejecutan como
-extensión. `kling` solo busca cuando le hace falta: ante un comando que no es
+los ejecutables que acompañan a kindling sin ser extensiones —`kling-bridge`,
+`kling-bridge-local`, `kling-guest`, `kling-vz`, `kling-chispa`— nunca se
+ejecutan como tal, ni los `companions` que declaran las extensiones
+instaladas. `kling` solo busca cuando le hace falta: ante un comando que no es
 del núcleo, y en `help`, `completion`, `status`, `config`, `doctor` y
 `plugins`; `kling ps` no ejecuta nada de nadie.
 
 Los comandos del núcleo ganan siempre: una extensión que declare `ps` no lo
-recibe y `kling plugins ls` lo marca. Entre dos extensiones gana la primera.
+recibe y `kling plugin ls` lo marca. Entre dos extensiones gana la primera.
 
-`ai`, `chispa` y `models` son **extensiones incorporadas** (`plugin.Builtin`):
-viven dentro del binario de `kling`, pero su ayuda, completado y ganchos salen
-de un manifiesto como los de cualquier otra, `kling plugins ls` las lista como
-`built in` y `kling plugins disable ai` las apaga igual.
+`ai` es una **extensión incorporada** (`plugin.Builtin`): vive dentro del
+binario de `kling`, pero su ayuda, completado y ganchos salen de un manifiesto
+como los de cualquier otra (`kling ai model`, `kling ai chispa`…),
+`kling plugin ls` la lista como `built in` y `kling plugin disable ai` la apaga
+igual.
 
-## 5. Publicarla para `kling plugins install` (5 minutos)
+### Alias de los nombres de antes
 
-`kling plugins install <nombre>` baja un ejecutable **verificado por sha256
+Hasta 0.13 kling-mcp añadía verbos sueltos (`kling add`, `kling gateway`…) y
+`models` y `chispa` eran extensiones aparte. Los nombres viejos siguen
+funcionando como **alias silenciosos** (no salen en la ayuda ni en el
+completado): `add search gateway export memory migrate` → `mcp …`, `models` →
+`ai model`, `chispa` → `ai chispa`, `commit` → `save`, `snapshots` →
+`template`, `rmi` → `template rm`, `images` → `image`, `plugins` → `plugin`,
+`info` → `status -v`, `resize squeeze mmds` → `machine …`. Los de kling-mcp
+solo se traducen si ninguna extensión instalada sirve ya esa palabra: una
+kling-mcp de 0.13 (manifiesto v1) sigue recibiéndolos tal cual. Plan: en 0.15
+avisan una vez por proceso en stderr; en 0.16 se retiran los de extensiones;
+`commit`, `snapshots` y `plugins` se quedan para siempre.
+
+## 5. Publicarla para `kling plugin install` (5 minutos)
+
+`kling plugin install <nombre>` baja un ejecutable **verificado por sha256
 antes de escribirlo**:
 
 ```sh
-kling plugins install hello                          # de la release de kindling de este kling
-kling plugins install hello@v0.13.0                  # de una release concreta
-kling plugins install hello -from https://example.com/releases/v0.1.0/
-kling plugins install hello -file ./kling-hello      # un binario local
-kling plugins install hello -from https://… -sha256 <hash>
-kling plugins install hello -dir /opt/kling/plugins  # otro directorio de instalación
+kling plugin install hello                          # de la release de kindling de este kling
+kling plugin install hello@v0.13.0                  # de una release concreta
+kling plugin install hello -from https://example.com/releases/v0.1.0/
+kling plugin install hello -file ./kling-hello      # un binario local
+kling plugin install hello -from https://… -sha256 <hash>
+kling plugin install hello -dir /opt/kling/plugins  # otro directorio de instalación
 ```
 
 Por defecto baja
@@ -260,7 +301,7 @@ con `<tag>` la versión del propio `kling` (un `kling` de desarrollo exige
 misma release. Después ejecuta `--kling-manifest` y rechaza el binario si no
 valida; baja los `companions` del mismo sitio con el mismo control; y deja al
 lado `kling-<nombre>.json` con `{name, version, url, sha256, installed}`, que es
-lo que `kling plugins ls` enseña como origen.
+lo que `kling plugin ls` enseña como origen.
 
 Para publicar una extensión propia fuera de este repo basta con reproducir esa
 forma en cualquier servidor HTTPS:
@@ -278,7 +319,7 @@ gh release create $V dist/*          # o súbelo a donde quieras
 y quien la use:
 
 ```sh
-kling plugins install hello -from https://github.com/<tú>/kling-hola/releases/download/v0.1.0/
+kling plugin install hello -from https://github.com/<tú>/kling-hola/releases/download/v0.1.0/
 ```
 
 `-from` solo acepta `https://` y exige un `SHA256SUMS` junto al asset o
@@ -289,14 +330,14 @@ Las extensiones del repo (`mcp`, `sandbox`, `domotica`) salen en cada release de
 kindling con la misma versión que el núcleo, así que todos los binarios de una
 release son compatibles entre sí ([`releases.md`](releases.md)).
 
-Para quitarla: `kling plugins rm hello` borra el binario, su `.json` y sus
+Para quitarla: `kling plugin rm hello` borra el binario, su `.json` y sus
 companions del directorio de extensiones. Si está en otro sitio del `PATH`, lo
 dice y no toca nada.
 
 No hay marketplace ni permisos por extensión: una extensión corre como el
 usuario que la ejecuta, y quien habla con el socket del daemon tiene lo mismo
 que root en ese host. La garantía es el sha256, un origen que eliges tú y
-`kling plugins ls` mostrando la ruta y el hash de cada una.
+`kling plugin ls` mostrando la ruta y el hash de cada una.
 
 ## 6. Lo que el núcleo ofrece a una extensión
 

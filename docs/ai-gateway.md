@@ -51,8 +51,8 @@ El registro es un fichero JSON (`~/.config/kling/ai.json` por defecto):
 ```
 
 ```sh
-kling models add von-qwen15 -model qwen2.5-1.5b-instruct -quant q4_k_m   # el dorado (von.md)
-kling chispa train -data train.jsonl -valid valid.jsonl -o commits.chispa
+kling ai model add von-qwen15 -model qwen2.5-1.5b-instruct -quant q4_k_m   # el dorado (von.md)
+kling ai chispa train -data train.jsonl -valid valid.jsonl -o commits.chispa
 
 kling ai serve                          # socket Unix 0600 en ~/.config/kling/ai.sock
 kling ai test commit-type "fix crash when the cache is cold"
@@ -175,7 +175,7 @@ apagada, ni las escaladas ni las auditorías tocan VON.
 Una tarea con un bloque `domotica` es la decisión de la habitación de demo
 ([domotica.md](domotica.md)): plantillas → Chispa + huecos en proceso y, para lo
 que dudan, el **codificador de frases** ([codificador.md](codificador.md)): un
-modelo `kind: "embed"` (el dorado de `kling models add enc-e5 -model
+modelo `kind: "embed"` (el dorado de `kling ai model add enc-e5 -model
 multilingual-e5-small`) que `pkg/scheduler` despierta y congela como a un VON, y
 la cabeza `.jenc` que clasifica su vector aquí mismo.
 
@@ -214,7 +214,7 @@ con `encoder_error`. Medido en el Mac: 3,1–3,3 ms por `/v1/decide` con la
 réplica caliente, 981 ms si estaba congelada por inactividad.
 
 **La capa 2 también puede ser serverless.** Si el modelo de `intent` es
-`"backend": "microvm"` (un dorado de `kling chispa deploy`, ver
+`"backend": "microvm"` (un dorado de `kling ai chispa deploy`, ver
 [chispa-serverless.md](chispa-serverless.md#domótica-la-capa-2-serverless)),
 `/v1/decide` le pregunta a su réplica por el mismo camino que `/v1/classify`
 de una tarea microvm: etiquetas y huecos validados contra el registro de
@@ -275,7 +275,7 @@ true`) o `von` (la cascada, o una generación); `kling_ai_chispa_coverage{task}`
 `kling_ai_latency_seconds{task,source}` (histograma de 10 µs a 60 s),
 `kling_ai_von_wake_seconds{model,how}` con `how` = `thaw` (estaba congelada),
 `restore` (desde el dorado: el arranque en frío) o `adopt`,
-`kling_ai_von_replicas{model,state}` (running/warm, preguntando al daemon como
+`kling_ai_von_replicas{model,state}` (running/frozen, preguntando al daemon como
 mucho cada 5 s), `kling_ai_von_errors_total{model,reason}`,
 `kling_ai_von_unknown_total`, `kling_ai_degraded_total`, `kling_ai_audits_total`,
 `kling_ai_samples`, `kling_ai_proxy_requests_total{model,code}` y las de la caché
@@ -378,7 +378,7 @@ Límites, dichos claros:
   (`kling ai eval`), no contra VON.
 - Solo se tocan los umbrales, no los pesos ni la temperatura: la muestra está
   sesgada hacia lo dudoso y reentrenar con ella necesitaría textos, que no se
-  guardan. Reentrenar sigue siendo `kling chispa train` con datos etiquetados.
+  guardan. Reentrenar sigue siendo `kling ai chispa train` con datos etiquetados.
 - La muestra vive en memoria: reiniciar el gateway la vacía.
 - Si una auditoría se descarta por haber otra en vuelo, la probabilidad real de
   entrar es menor que `audit` y el peso la sobreestima un poco.
@@ -481,7 +481,7 @@ con VON en el 48,7 %.
   12,8 %, se niega también a 0,80).
 - `-target 0.8`: concordancia en la mitad de evaluación 0,714 → 0,788, cobertura
   0,344 → 0,128. **Escribe** el `.chispa` (y `.prev`).
-- Contra las etiquetas de verdad del conjunto de prueba (`kling chispa eval`), el
+- Contra las etiquetas de verdad del conjunto de prueba (`kling ai chispa eval`), el
   recalibrado **es peor**: cobertura 23,5 % → 12,3 %, precisión en lo confiado
   0,851 → 0,783 (la exactitud total no cambia: 0,640).
 

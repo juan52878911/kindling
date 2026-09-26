@@ -25,7 +25,7 @@ para kindling-sandbox, con `<x>` = `sandbox`:
 **Movido a `kindling/ext/<x>` desde kindling v0.13.0; las releases anteriores siguen aquí.**
 
 - Código, issues y releases nuevas: https://github.com/juan52878911/kindling/tree/main/ext/<x>
-- Instalación: `kling plugins install <x>` (o `install.sh --with <x>` de kindling).
+- Instalación: `kling plugin install <x>` (o `install.sh --with <x>` de kindling).
 - Novedades: https://github.com/juan52878911/kindling/blob/main/CHANGELOG.md
 
 Todos los binarios de una release de kindling son compatibles entre sí: ya no hay

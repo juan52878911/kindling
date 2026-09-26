@@ -18,11 +18,11 @@ compatibilidad limitada y honesta sobre sus límites.
 | | v0.2.0 | v0.3.0 |
 |---|---|---|
 | Misma herramienta en paralelo | 1 sesión (la topaba el cap del puente) | **réplicas por servicio**: N sesiones concurrentes |
-| Migrar un MCP existente | reimportar y reconfigurar clientes | **`kling migrate`**: conserva nombre y herramientas, sin tocar skills |
+| Migrar un MCP existente | reimportar y reconfigurar clientes | **`kling mcp migrate`**: conserva nombre y herramientas, sin tocar skills |
 | Secretos | horneados en imagen/snapshot | **por sesión vía MMDS**, inyectados en máquina viva |
 | Salida a internet | on/off | tercer modo: **allowlist de dominios** (fail-closed, DNS→ipset) |
 | Reparto entre tenants | — | **cuotas por token/tenant** en el gateway |
-| RAM ociosa | retenida | **balloon/`kling squeeze`** la devuelve al host; `/metrics`, `kling top` con PSS |
+| RAM ociosa | retenida | **balloon/`kling machine squeeze`** la devuelve al host; `/metrics`, `kling top` con PSS |
 | Densidad | mem compartido (COW) | + **zram opt-in** en el host |
 | Servidores MCP soportados | stdio | + **HTTP/SSE nativo** (modo proxy del puente) |
 | Capacidades (navegador/internet/nativo) | a mano | **auto-detección**; Chromium compartido por sesión |
@@ -42,9 +42,9 @@ pegajosas a una única instancia y el paralelismo lo topaba el cap de sesión de
 réplica desde el snapshot dorado (COW, comparte el `mem.file`) y rutea cada conversación a
 la suya. Reactivo, pegajoso y barato.
 
-### `kling migrate`: mover un MCP sin reescribir las skills
+### `kling mcp migrate`: mover un MCP sin reescribir las skills
 
-Si tenías una skill apuntando a un MCP y lo pasas a kindling, `kling migrate` **conserva
+Si tenías una skill apuntando a un MCP y lo pasas a kindling, `kling mcp migrate` **conserva
 el nombre de la entrada y los nombres de las herramientas 1:1** (endpoint per-servicio,
 no el agregado). La skill sigue funcionando igual; no hay que tocar una línea.
 
@@ -61,7 +61,7 @@ resolver dinámico traduce DNS→ipset y siembra el conjunto de forma estática 
 
 ### Devolver la RAM: balloon, `squeeze`, métricas
 
-`kling squeeze` reclama con virtio-balloon la memoria **disponible** (libre + caché), no
+`kling machine squeeze` reclama con virtio-balloon la memoria **disponible** (libre + caché), no
 solo la libre. `/metrics` y `kling top` (con PSS real) hacen visible cuánto pesa de verdad
 cada microVM, contando el `mem.file` compartido entre copias de un snapshot.
 
@@ -108,7 +108,7 @@ Mac. Receta completa y límites en [`docs/mac-arm64.md`](docs/mac-arm64.md).
 
 ## Actualizar desde v0.2.0
 
-- Corre `kling images refresh`: el puente vive dentro de cada imagen y trae el modo proxy
+- Corre `kling image refresh`: el puente vive dentro de cada imagen y trae el modo proxy
   y la inyección de secretos por sesión.
 - Para usar la misma herramienta en paralelo no hace falta nada: el gateway crea réplicas
   solo. Ajusta las cuotas por tenant si repartes un mismo token.
