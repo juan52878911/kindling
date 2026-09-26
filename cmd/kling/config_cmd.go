@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -17,13 +19,13 @@ import (
 // ── contextos ─────────────────────────────────────────────────────────────────
 
 func cmdContext(args []string) error {
-	if len(args) == 0 {
-		return contextList()
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return contextList(args)
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "ls", "list":
-		return contextList()
+		return contextList(rest)
 	case "use":
 		return contextUse(rest)
 	case "add", "set":
@@ -35,10 +37,18 @@ func cmdContext(args []string) error {
 	}
 }
 
-func contextList() error {
+func contextList(args []string) error {
+	fs := flag.NewFlagSet("context ls", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return writeContextsJSON(os.Stdout, cfg)
 	}
 	if len(cfg.Contexts) == 0 {
 		fmt.Println("No contexts. Add one with:")
@@ -64,6 +74,27 @@ func contextList() error {
 		fmt.Printf("\nNOTE: $KLING_HOST=%s takes priority over the active context.\n", v)
 	}
 	return nil
+}
+
+// writeContextsJSON lista los contextos con el que está activo marcado, y el
+// endpoint que se usaría de verdad (que $KLING_HOST puede cambiar).
+func writeContextsJSON(w io.Writer, cfg *config.Config) error {
+	type row struct {
+		Name        string `json:"name"`
+		Host        string `json:"host"`
+		Description string `json:"description,omitempty"`
+		Current     bool   `json:"current"`
+	}
+	out := struct {
+		Current  string `json:"current"`
+		Endpoint string `json:"endpoint"`
+		Contexts []row  `json:"contexts"`
+	}{Current: cfg.CurrentContext, Endpoint: cfg.Host(""), Contexts: []row{}}
+	for _, n := range cfg.ContextNames() {
+		c := cfg.Contexts[n]
+		out.Contexts = append(out.Contexts, row{n, c.Host, c.Description, n == cfg.CurrentContext})
+	}
+	return json.NewEncoder(w).Encode(out)
 }
 
 func contextUse(args []string) error {
@@ -206,12 +237,12 @@ func reorderFor(fs *flag.FlagSet, args []string) []string {
 // ── configuración general ─────────────────────────────────────────────────────
 
 func cmdConfig(args []string) error {
-	if len(args) == 0 {
-		return configShow()
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return configShow(args)
 	}
 	switch args[0] {
 	case "show", "get":
-		return configShow()
+		return configShow(args[1:])
 	case "path":
 		fmt.Println(config.Path())
 		return nil
@@ -284,10 +315,18 @@ func valueOf(cfg *config.Config, key string) string {
 	return ""
 }
 
-func configShow() error {
+func configShow(args []string) error {
+	fs := flag.NewFlagSet("config show", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "JSON output (secrets masked, as in the table)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return writeConfigJSON(os.Stdout, cfg)
 	}
 	fmt.Printf("file:     %s\n", config.Path())
 	if _, err := os.Stat(config.Path()); os.IsNotExist(err) {
@@ -327,4 +366,31 @@ func configShow() error {
 		}
 	}
 	return tw.Flush()
+}
+
+// writeConfigJSON es `config show -json`: las mismas claves que la tabla, con
+// los secretos enmascarados por Keys(), y las de las extensiones. Un valor
+// vacío sale como "" (no "-"): en JSON el guion sería un valor más.
+func writeConfigJSON(w io.Writer, cfg *config.Config) error {
+	keys := map[string]string{}
+	for _, kv := range cfg.Keys() {
+		keys[kv[0]] = kv[1]
+	}
+	for _, p := range extensions().Plugins {
+		if p.Err != nil || p.Manifest == nil {
+			continue
+		}
+		for _, ck := range p.Manifest.Config {
+			keys[p.Name+"."+ck.Key] = cfg.ExtensionValue(p.Name, ck.Key, ck.Type)
+		}
+	}
+	_, statErr := os.Stat(config.Path())
+	out := struct {
+		File       string            `json:"file"`
+		Exists     bool              `json:"exists"`
+		Context    string            `json:"context"`
+		DefaultVMM string            `json:"default_vmm"`
+		Keys       map[string]string `json:"keys"`
+	}{config.Path(), statErr == nil, cfg.CurrentContext, config.DefaultVMM(runtime.GOOS), keys}
+	return json.NewEncoder(w).Encode(out)
 }

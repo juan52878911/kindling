@@ -40,6 +40,12 @@ GETTING STARTED
                                                    nftables, user, images,
                                                    daemon and extension units
   status [-json]                                   which piece is up and which is missing
+  doctor [-json]                                   checks runtime, daemon, versions, extensions
+                                                   and completion; prints the fix for each ✗
+  try [-image I | -from S] [-mem MiB]              runs a command in a throwaway sandbox and
+      [-egress none|internet|allowlist] [-keep]    removes it (no command: a shell); exits
+      [--] [cmd [args...]]                         with the command's exit code
+  help <command>                                   help for one command, with its flags
 
 VOLUMES
   volume create <name> [-size 2G]                  storage that survives
@@ -72,7 +78,7 @@ MACHINES
                                                    (default), or live (docs/compartir.md)
   ps [-a] [-q] [-json]                             lists the machines
   inspect <ref>                                    a machine in JSON, shares included
-  logs <ref> [-tail N]                             microVM serial console
+  logs [-f] <ref> [-tail N]                        microVM serial console (-f: follow it)
   freeze <ref>                                     freezes into a snapshot -> warm
   thaw <ref>                                       restores from snapshot (~ms)
   pause <ref>                                      pauses it without dumping (thaw resumes it in ~1 ms)
@@ -92,7 +98,8 @@ SANDBOXES AND EXEC
       [-on-ttl remove|freeze]                      it is destroyed, or frozen at zero
       [-mem MiB] [-cpus N] [-volume ...] [-q]      cost and woken by the next exec
       [-share SRC:DST[:copy|ro|rw]]                host folder inside, as in run
-  sandbox ls | renew <sb> [-ttl D] | rm <sb>...    list / extend / destroy
+  sandbox ls [-json] | renew <sb> [-ttl D]        list / extend / destroy
+      | rm <sb>...
   exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming its
       <ref> [--] <cmd> [args...]                   output; exits with its exit code
   cp <local|-> <ref>:<path>                        copies a file into a machine
@@ -104,8 +111,10 @@ GOLDEN SNAPSHOTS
   commit [-replace] <ref> <name>                   freezes a machine as a
                                                    reusable snapshot
   run -from <name>                                 instantiates from the snapshot
-  snapshots                                        lists the snapshots
-  rmi <name>                                       removes a snapshot
+  snapshots [ls] [-json]                           lists the snapshots
+  snapshots inspect <name> [-json]                 one snapshot, with its annotations
+  snapshots rm <name>...                           removes snapshots
+  rmi <name>...                                    alias of snapshots rm
 
 MODELS (VON: small LLMs, OpenAI-compatible API on port 8000)
   models ls [-json]                                catalog and the models on this daemon
@@ -170,14 +179,16 @@ DAEMON
                                                    or $KLING_VMM with a name or a path)
 
 CONFIGURATION
-  context [ls]                                     lists known daemons
+  context [ls] [-json]                             lists known daemons
   context add <name> <host>                        adds one and activates it
   context use <name>                               switches daemon
   context rm <name>                                removes it
-  config [show|path]                               current configuration
+  config [show [-json]|path]                       current configuration
   config set <key> <value>                         e.g. defaults.image min
-  completion [bash|zsh]                            shell completion script
-  version                                          CLI version
+  completion bash|zsh|fish                         shell completion script
+  completion install [shell]                       writes it to ~/.config/kling and prints
+                                                   the line for your shell's rc
+  version [-json]                                  CLI version, and the daemon's if it answers
 
 EXTENSIONS
   plugins [ls] [-json]                             installed extensions (kling-<name>
@@ -211,6 +222,18 @@ func main() {
 		err = cmdUp(args)
 	case "status":
 		err = cmdStatus(args)
+	case "doctor":
+		err = cmdDoctor(args)
+	case "try":
+		// Como exec: termina con el código del comando de dentro.
+		code, xerr := cmdTry(args)
+		if xerr != nil {
+			printError(os.Stderr, xerr)
+			if code == 0 {
+				code = 1
+			}
+		}
+		os.Exit(code)
 	case "volume", "volumes":
 		err = cmdVolume(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
@@ -222,7 +245,7 @@ func main() {
 		// un 1 de grep no es un fallo de kling.
 		code, xerr := cmdExec(args)
 		if xerr != nil {
-			fmt.Fprintln(os.Stderr, "error:", xerr)
+			printError(os.Stderr, xerr)
 			if code == 0 {
 				code = 1
 			}
@@ -232,7 +255,7 @@ func main() {
 		// Como exec: el código es el de la shell remota.
 		code, xerr := cmdShell(args)
 		if xerr != nil {
-			fmt.Fprintln(os.Stderr, "error:", xerr)
+			printError(os.Stderr, xerr)
 			if code == 0 {
 				code = 1
 			}
@@ -281,8 +304,7 @@ func main() {
 	case "completion":
 		err = cmdCompletion(args)
 	case "version", "--version", "-v":
-		fmt.Printf("kling %s\n", Version)
-		return
+		err = cmdVersion(args)
 	case "plugins":
 		err = cmdPlugins(args)
 	case "chispa":
@@ -295,7 +317,7 @@ func main() {
 		err = cmdBuilder(args)
 	case "-h", "--help", "help":
 		if len(args) > 0 {
-			err = helpFor(args[0])
+			err = cmdHelp(args[0])
 			break
 		}
 		printUsage(os.Stdout)
@@ -307,17 +329,17 @@ func main() {
 			err = plugin.Exec(p, cmd, args, config.Path())
 			break
 		}
-		if hint, ok := movedToExtension[cmd]; ok {
-			fmt.Fprintf(os.Stderr, "kling %s %s\n", cmd, hint)
-			os.Exit(2)
+		if ext, ok := movedToExtension[cmd]; ok {
+			err = movedError(cmd, ext)
+			break
 		}
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		printUsage(os.Stderr)
-		os.Exit(2)
+		// Sin volcar la ayuda entera: tapa el error, que es lo que hay que leer.
+		err = &errConCodigo{code: 2, err: &errWithHint{
+			err: fmt.Errorf("unknown command %q", cmd), hint: "kling help"}}
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		printError(os.Stderr, err)
 		os.Exit(codigoDeSalida(err))
 	}
 }
@@ -583,28 +605,6 @@ func (l labelFlag) merge(service string) map[string]string {
 	return out
 }
 
-func cmdLogs(args []string) error {
-	fs := flag.NewFlagSet("logs", flag.ExitOnError)
-	host := hostFlag(fs)
-	tail := fs.Int("tail", 200, "last N lines (0 = all)")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling logs <ref> [-tail N]")
-	}
-
-	ctx, stop := ctxWithSignals()
-	defer stop()
-
-	out, err := api.NewClient(hostOf(*host)).Logs(ctx, fs.Arg(0), *tail)
-	if err != nil {
-		return err
-	}
-	fmt.Print(out)
-	return nil
-}
-
 func cmdCommit(args []string) error {
 	fs := flag.NewFlagSet("commit", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -694,58 +694,6 @@ func mensajeNoSirve(ref, espera string) string {
 		"fails on wake with \"tool did not start listening\".\n"+
 		"Check it with:  kling logs %s\n"+
 		"Or freeze anyway with:  kling commit -force ...", espera, ref)
-}
-
-func cmdSnapshots(args []string) error {
-	fs := flag.NewFlagSet("snapshots", flag.ExitOnError)
-	host := hostFlag(fs)
-	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-
-	ctx, stop := ctxWithSignals()
-	defer stop()
-
-	list, err := api.NewClient(hostOf(*host)).Snapshots(ctx)
-	if err != nil {
-		return err
-	}
-	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(list)
-	}
-
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tIMAGE\tCPU/MEM\tMEMORY\tDISK\tINSTANCES\tAGE")
-	for _, s := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
-			s.Name, s.Image, s.VCPUs, s.MemMiB,
-			human(s.MemBytes), human(s.DiskBytes), s.Instances, since(s.CreatedAt))
-	}
-	return tw.Flush()
-}
-
-func cmdRmi(args []string) error {
-	fs := flag.NewFlagSet("rmi", flag.ExitOnError)
-	host := hostFlag(fs)
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling rmi <snapshot-name>")
-	}
-
-	ctx, stop := ctxWithSignals()
-	defer stop()
-
-	c := api.NewClient(hostOf(*host))
-	for _, n := range fs.Args() {
-		if err := c.RemoveSnapshot(ctx, n); err != nil {
-			return err
-		}
-		fmt.Println(n)
-	}
-	return nil
 }
 
 func cmdPS(args []string) error {
@@ -1218,19 +1166,6 @@ func cmdInfo(args []string) error {
 	}
 	return nil
 }
-
-// movedToExtension son comandos que hasta v0.5 traía el núcleo y ahora aporta
-// una extensión. Quien actualiza kindling sin instalarla teclea lo de siempre, y
-// volcarle la ayuda entera no le dice qué le falta.
-var movedToExtension = func() map[string]string {
-	const mcp = "is provided by the kindling-mcp extension since kindling v0.6. Install it with:\n" +
-		"  curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling-mcp/main/scripts/install.sh | sh"
-	m := map[string]string{}
-	for _, c := range []string{"mcp", "add", "search", "connect", "export", "memory", "migrate", "gateway"} {
-		m[c] = mcp
-	}
-	return m
-}()
 
 // cmdResize es `kling resize <ref> -mem N`: sube o baja la memoria de una
 // máquina sin reiniciarla, dentro del techo con el que arrancó.
