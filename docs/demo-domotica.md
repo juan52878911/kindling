@@ -6,7 +6,11 @@ microVMs **serverless**: congelados a coste cero, descongelados en
 milisegundos por la orden que los necesita y congelados otra vez al quedarse
 ociosos. Es un ejemplo que usa kindling, con su propio `main`:
 [examples/domotica](../examples/domotica/README.md) (cómo montarla en un Mac o
-en el servidor x86, sus servicios de systemd y sus flags).
+en el servidor x86, sus servicios de systemd y sus flags). Las herramientas
+para entrenar y evaluar sus capas (`kling domotica …`) son una extensión
+aparte desde v0.13.0: `kling plugins install domotica`, o
+`go build -o ~/.local/share/kling/plugins/kling-domotica ./examples/domotica/cmd/kling-domotica`
+([docs/domotica.md](domotica.md#uso)).
 
 ## Qué enseña
 

@@ -2,6 +2,10 @@
 # release.sh — crea un tag anotado y lo pushea. El workflow de GitHub Actions
 # detecta el tag, compila los binarios y publica la release.
 #
+# Una etiqueta publica todo el repo: el núcleo, kling-vz, las extensiones de
+# ext/ (kling-mcp, kling-bridge, kling-sandbox), kling-domotica, el operador
+# (binarios e imagen GHCR) y los tar del host, con un único SHA256SUMS.
+#
 # USO
 #   ./scripts/release.sh                        # tag v0.1.0 (lee VERSION del env o del último tag)
 #   VERSION=v0.2.0 ./scripts/release.sh        # tag explícito
@@ -14,9 +18,10 @@
 #
 # Lo que hace:
 #   1. Verifica que el working tree esté limpio
-#   2. Crea un tag anotado vX.Y.Z con mensaje corto
-#   3. Push del tag → activa .github/workflows/release.yml
-#   4. (Opcional) espera a que el workflow termine y abre la release en el browser
+#   2. Verifica que ext/*/go.mod requieran kindling en esa misma versión
+#   3. Crea un tag anotado vX.Y.Z con mensaje corto
+#   4. Push del tag → activa .github/workflows/release.yml
+#   5. (Opcional) espera a que el workflow termine y abre la release en el browser
 
 set -u
 
@@ -89,6 +94,19 @@ if [ "$DRY_RUN" = "0" ]; then
     fi
 fi
 
+# ext/*/go.mod citan en su require la etiqueta que se va a publicar. Con el
+# replace ../.. nunca se descarga, pero quien use una extensión como módulo sin
+# el replace (go get .../ext/mcp@vX) tiraría de ese require: si se queda en la
+# versión anterior, la extensión de vX compilaría contra el núcleo de vX-1.
+for m in ext/*/go.mod; do
+    [ -f "$m" ] || continue
+    REQ=$(awk '$1=="require" && $2=="github.com/juan52878911/kindling" {print $3}' "$m")
+    if [ "$REQ" != "$VERSION" ]; then
+        echo "$m requiere kindling ${REQ:-(nada)}, no $VERSION. Actualízalo antes de etiquetar." >&2
+        [ "$DRY_RUN" = "1" ] || exit 1
+    fi
+done
+
 # main al día
 LOCAL=$(git rev-parse --verify main 2>/dev/null || git rev-parse --verify HEAD)
 REMOTE=$(git rev-parse --verify origin/main 2>/dev/null || echo "")
@@ -104,7 +122,8 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "(dry-run) haría:"
     echo "  git tag -a $VERSION -m \"$MSG\""
     echo "  git push origin $VERSION"
-    echo "  GitHub Actions compila y publica la release con los binarios."
+    echo "  GitHub Actions compila y publica la release con los binarios,"
+    echo "  las extensiones de ext/ y la imagen del operador."
     exit 0
 fi
 

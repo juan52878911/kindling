@@ -8,6 +8,16 @@
 BIN     := kling
 PKG     := ./cmd/kling
 
+# La extensión de la demo domótica: vive en examples/ pero es del módulo raíz
+# (no tiene dependencias) y se publica como kling-domotica-<os>-<arch>.
+DOMOTICA_PKG := ./examples/domotica/cmd/kling-domotica
+
+# Plataformas que publica la release (Windows no: el código usa syscalls POSIX).
+CROSS_PLATS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+
+# Extensiones que viven en este repo, cada una con su go.mod y su Makefile.
+EXT_DIRS := ext/mcp ext/sandbox
+
 # Arquitectura de los binarios del daemon y del agente que se compilan para Linux.
 # Por defecto amd64 (el laboratorio habitual). Para desplegar a una VM Linux
 # arm64 (p.ej. Lima vz+nested en un Mac Apple Silicon):
@@ -34,7 +44,7 @@ FC_DIR     ?= /opt/fc
 IMAGES_DIR ?= /var/lib/kindling/images
 BLOBS      := internal/assets/blobs
 
-.PHONY: all build install uninstall daemon daemon-full assets guest chispa-guest deploy deploy-mac vz test clean fmt
+.PHONY: all build install uninstall daemon daemon-full assets guest chispa-guest domotica deploy deploy-mac vz test cross test-all cross-all clean fmt
 
 all: build
 
@@ -54,8 +64,8 @@ install: build
 	@echo "Apúntalo a tu daemon:"
 	@echo "  $(BIN) context add lab ssh://usuario@host"
 	@echo
-	@echo "Para alojar servidores MCP, instala la extensión kindling-mcp:"
-	@echo "  https://github.com/juan52878911/kindling-mcp"
+	@echo "Para alojar servidores MCP, instala la extensión (vive en ext/mcp):"
+	@echo "  kling plugins install mcp      o, desde este repo,  make -C ext/mcp install"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN) 2>/dev/null || sudo rm -f $(PREFIX)/bin/$(BIN)
@@ -76,6 +86,13 @@ chispa-guest:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
 		-ldflags "$(LDFLAGS)" -o kling-chispa ./cmd/kling-chispa
 	@echo "kling-chispa  ($(VERSION), linux/$(GOARCH))"
+
+## domotica — la extensión kling-domotica (examples/domotica/cmd/kling-domotica),
+## para tu máquina. Es del módulo raíz porque no tiene dependencias; kling la
+## descubre por su nombre, igual que la instalaría `kling plugins install domotica`.
+domotica:
+	go build -trimpath -ldflags "$(LDFLAGS)" -o kling-domotica $(DOMOTICA_PKG)
+	@echo "kling-domotica  ($(VERSION))"
 
 ## daemon — compila el binario del host con KVM (linux/$(GOARCH), amd64 por defecto)
 daemon:
@@ -118,7 +135,7 @@ daemon-full: assets
 ## Y el constructor "llm" (modelos VON, docs/von.md), con el script de la base
 ## glibc y el init mínimo que esa base lleva dentro: la primera vez que se añade
 ## un modelo, el constructor se hace su base Debian trixie.
-## Lo de MCP (puente, empaquetador, gateway) lo despliega kindling-mcp.
+## Lo de MCP (puente, empaquetador, gateway) lo despliega ext/mcp (make -C ext/mcp deploy).
 ##
 ## /etc/default/kling (KLING_SOCKET_USER y compañía, ver packaging/kling.service)
 ## se crea SOLO si no existe todavía: es lo que cambia de host en host, y un
@@ -163,7 +180,7 @@ deploy: daemon guest chispa-guest
 	@echo
 	@echo "Imagen de herramientas para poblar volúmenes:  kling images toolchain"
 	@echo "Tarea Chispa serverless:  kling chispa deploy <task> -model m.chispa"
-	@echo "Servidores MCP:  despliega kindling-mcp (make deploy HOST=$(HOST) en su repositorio)"
+	@echo "Servidores MCP:  make -C ext/mcp deploy HOST=$(HOST)"
 
 ## deploy-mac — atajo para desplegar a una VM Linux arm64 desde un Mac Apple Silicon.
 ##
@@ -197,8 +214,38 @@ test:
 	go vet ./...
 	go test -race ./...
 
+## cross — las compilaciones cruzadas de lo que publica la release desde este
+## módulo, sin escribir nada (-o /dev/null). kling en las cuatro plataformas
+## (en darwin es el CLI; en linux, CLI y daemon), los invitados solo en linux
+## porque son el PID 1 de las microVMs, y kling-domotica en las cuatro. Sin cgo,
+## como en la release: que el núcleo compile así es parte del contrato.
+cross:
+	@set -e; for p in $(CROSS_PLATS); do \
+	  os=$${p%/*}; arch=$${p#*/}; \
+	  echo "  kling $$os/$$arch"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null $(PKG); \
+	  if [ -d $(DOMOTICA_PKG) ]; then \
+	    echo "  kling-domotica $$os/$$arch"; \
+	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null $(DOMOTICA_PKG); \
+	  fi; \
+	  if [ $$os = linux ]; then \
+	    echo "  kling-guest kling-chispa $$os/$$arch"; \
+	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null ./cmd/kling-guest; \
+	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o /dev/null ./cmd/kling-chispa; \
+	  fi; \
+	done
+
+## test-all / cross-all — los mismos objetivos en el núcleo y en cada extensión
+## de ext/ (cada una es un módulo con su Makefile). vz queda fuera: es cgo y
+## solo de macOS (make vz).
+test-all: test
+	@for d in $(EXT_DIRS); do $(MAKE) -C $$d test || exit 1; done
+
+cross-all: cross
+	@for d in $(EXT_DIRS); do $(MAKE) -C $$d cross || exit 1; done
+
 fmt:
 	gofmt -l -w .
 
 clean:
-	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa
+	rm -f $(BIN) $(BIN)-linux-amd64 $(BIN)-linux-arm64 kling-guest kling-chispa kling-domotica

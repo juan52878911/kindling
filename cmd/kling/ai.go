@@ -37,9 +37,11 @@ import (
 
 func cmdAI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling ai <serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback> [...]")
+		return fmt.Errorf("usage: kling ai <up|serve|ls|test|generate|eval|calibrate|reload|prime|review|feedback|retrain|rollback> [...]")
 	}
 	switch args[0] {
+	case "up":
+		return aiUp(args[1:])
 	case "serve":
 		return aiServe(args[1:])
 	case "ls", "list":
@@ -65,7 +67,7 @@ func cmdAI(args []string) error {
 	case "rollback":
 		return aiRollback(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q: use serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain or rollback", args[0])
+		return fmt.Errorf("unknown subcommand %q: use up, serve, ls, test, generate, eval, calibrate, reload, prime, review, feedback, retrain or rollback", args[0])
 	}
 }
 

@@ -4,6 +4,7 @@ package main
 // mover ficheros, que es lo que necesita un agente de código.
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -210,7 +211,8 @@ func baseName(p string) string {
 // cmdSandbox es `kling sandbox create|ls|renew|rm`.
 func cmdSandbox(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: kling sandbox <create|ls|renew|rm> [...]")
+		return &errWithHint{err: errors.New("usage: kling sandbox <create|ls|renew|rm> [...]"),
+			hint: "kling try -- <cmd>   (create, run and remove in one go)"}
 	}
 	switch args[0] {
 	case "create", "new":
@@ -287,7 +289,8 @@ func sandboxCreate(args []string) error {
 func sandboxList(args []string) error {
 	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	asJSON := fs.Bool("json", false, "JSON output (same shape as ps -json)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	ctx, stop := ctxWithSignals()
@@ -295,6 +298,12 @@ func sandboxList(args []string) error {
 	list, err := api.NewClient(hostOf(*host)).Sandboxes(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		if list == nil {
+			list = []*api.Machine{} // [] y no null: más fácil para jq
+		}
+		return json.NewEncoder(os.Stdout).Encode(list)
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tIMAGE\tSTATE\tEGRESS\tON TTL\tIN")

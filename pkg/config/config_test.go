@@ -246,3 +246,38 @@ func TestSetDaemonVMM(t *testing.T) {
 		t.Fatal("vaciarlo vuelve al defecto")
 	}
 }
+
+// plugins.disabled sobrevive a Save/Load y no se duplica al desactivar dos
+// veces: es lo que editan `kling plugins enable|disable`.
+func TestPluginsDesactivadosSeGuardan(t *testing.T) {
+	enUnaConfigTemporal(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.SetPluginDisabled("mcp", true) || !c.SetPluginDisabled("ai", true) {
+		t.Fatal("desactivar la primera vez tiene que cambiar algo")
+	}
+	if c.SetPluginDisabled("mcp", true) {
+		t.Fatal("desactivar dos veces no cambia nada")
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Plugins.Disabled, ","); got != "ai,mcp" {
+		t.Fatalf("plugins.disabled = %q", got)
+	}
+	if !c.PluginDisabled("ai") || c.PluginDisabled("sandbox") {
+		t.Fatal("PluginDisabled no refleja lo guardado")
+	}
+	if !c.SetPluginDisabled("ai", false) || !c.SetPluginDisabled("mcp", false) {
+		t.Fatal("activar tiene que cambiar algo")
+	}
+	if c.Plugins.Disabled != nil {
+		t.Fatalf("sin desactivadas la lista queda vacía: %q", c.Plugins.Disabled)
+	}
+}

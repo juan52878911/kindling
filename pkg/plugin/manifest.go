@@ -60,6 +60,12 @@ type Manifest struct {
 	// daemon (p. ej. "kling-gateway.service"). `kling up` las arranca junto al
 	// daemon si están instaladas.
 	Units []string `json:"units,omitempty"`
+
+	// Companions son otros ejecutables que la extensión necesita a su lado
+	// (p. ej. "kling-bridge" para mcp). `kling plugins install` los baja de la
+	// misma release con el mismo control de sha256 y `kling plugins rm` los
+	// quita; el descubrimiento no los trata como extensiones.
+	Companions []string `json:"companions,omitempty"`
 }
 
 // Command es un subcomando de primer nivel que la extensión añade a `kling`.
@@ -92,7 +98,13 @@ var (
 	reCommand = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	reKey     = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`)
 	reUnit    = regexp.MustCompile(`^[a-zA-Z0-9@_.-]+\.(service|timer|socket|path)$`)
+	// Un companion acaba siendo un nombre de fichero y parte de una URL: nada
+	// de barras, puntos ni mayúsculas que permitan salirse del directorio.
+	reCompanion = regexp.MustCompile(`^kling-[a-z][a-z0-9-]{0,40}$`)
 )
+
+// ValidName dice si name sirve como nombre de extensión (kling-<name>).
+func ValidName(name string) bool { return reName.MatchString(name) }
 
 // Validate comprueba que el manifiesto se puede usar. Un manifiesto inválido no
 // rompe `kling`: la extensión aparece en `kling plugins` con su error y ya.
@@ -121,6 +133,14 @@ func (m *Manifest) Validate() error {
 	for _, u := range m.Units {
 		if !reUnit.MatchString(u) {
 			return fmt.Errorf("invalid systemd unit %q", u)
+		}
+	}
+	for _, c := range m.Companions {
+		if !reCompanion.MatchString(c) {
+			return fmt.Errorf("invalid companion %q (must be kling-<name>)", c)
+		}
+		if c == "kling-"+m.Name {
+			return fmt.Errorf("companion %q is the extension itself", c)
 		}
 	}
 	for _, k := range m.Config {

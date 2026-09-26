@@ -55,6 +55,9 @@ type Plugin struct {
 	// Shadowed son los comandos que declara y que ya tiene el núcleo u otra
 	// extensión anterior: no se le enrutan.
 	Shadowed []string
+	// Disabled es que la apagó el usuario (plugins.disabled). Va con Err, para
+	// que todo lo que ya salta las extensiones con error la salte también.
+	Disabled bool
 }
 
 // Registry es el conjunto de extensiones que ve este kling.
@@ -73,6 +76,17 @@ type Options struct {
 	Builtins []*Builtin
 	// Path son los directorios donde buscar kling-*; nil = SearchPath().
 	Path []string
+	// Disabled son las extensiones apagadas por el usuario: se listan, pero
+	// no reciben comandos ni ganchos. A una externa apagada ni siquiera se le
+	// pide el manifiesto: apagarla es no ejecutar nada suyo.
+	Disabled []string
+}
+
+// DisabledError es el Err de una extensión apagada.
+type DisabledError struct{ Name string }
+
+func (e *DisabledError) Error() string {
+	return fmt.Sprintf("disabled (kling plugins enable %s)", e.Name)
 }
 
 // SearchPath es dónde se buscan extensiones, en orden: $KLING_PLUGIN_PATH, el
@@ -118,11 +132,19 @@ func Discover(ctx context.Context, o Options) *Registry {
 		}
 	}
 
+	off := map[string]bool{}
+	for _, d := range o.Disabled {
+		off[d] = true
+	}
+
 	seen := map[string]bool{}
 	for _, b := range o.Builtins {
 		m := b.Manifest
 		p := &Plugin{Name: m.Name, Manifest: &m, Builtin: b}
 		p.Err = m.Validate()
+		if off[m.Name] {
+			p.Err, p.Disabled = &DisabledError{m.Name}, true
+		}
 		seen[m.Name] = true
 		r.Plugins = append(r.Plugins, p)
 		claim(p)
@@ -137,9 +159,10 @@ func Discover(ctx context.Context, o Options) *Registry {
 		if err != nil {
 			continue
 		}
+		companions := companionsIn(dir)
 		for _, e := range entries {
 			name, ok := strings.CutPrefix(e.Name(), "kling-")
-			if !ok || notPlugins[e.Name()] || strings.ContainsAny(name, ".") || seen[name] {
+			if !ok || notPlugins[e.Name()] || companions[e.Name()] || strings.ContainsAny(name, ".") || seen[name] {
 				continue
 			}
 			full := filepath.Join(dir, e.Name())
@@ -148,6 +171,11 @@ func Discover(ctx context.Context, o Options) *Registry {
 			}
 			seen[name] = true
 			p := &Plugin{Name: name, Path: full}
+			if off[name] {
+				p.Err, p.Disabled = &DisabledError{name}, true
+				r.Plugins = append(r.Plugins, p)
+				continue
+			}
 			p.Manifest, p.Err = loadManifest(ctx, full)
 			if p.Err == nil && p.Manifest.Name != name {
 				p.Err = fmt.Errorf("its manifest says it is %q, but the binary is kling-%s", p.Manifest.Name, name)
@@ -197,6 +225,38 @@ func loadManifest(ctx context.Context, path string) (*Manifest, error) {
 // Lookup devuelve la extensión que sirve el comando, o nil.
 func (r *Registry) Lookup(cmd string) *Plugin {
 	return r.owner[cmd]
+}
+
+// DisabledFor devuelve la extensión apagada que serviría cmd, o nil, para que
+// el núcleo diga "está desactivada" en vez de "comando desconocido". De una
+// externa apagada no se conoce el manifiesto: se supone que su comando es su
+// nombre, que es lo habitual.
+func (r *Registry) DisabledFor(cmd string) *Plugin {
+	for _, p := range r.Plugins {
+		if !p.Disabled {
+			continue
+		}
+		if p.Name == cmd || (p.Manifest != nil && p.Manifest.Command(cmd) != nil) {
+			return p
+		}
+	}
+	return nil
+}
+
+// companionsIn son los ejecutables que las extensiones instaladas en dir
+// declararon como compañeros (leídos de sus kling-<n>.json): no son
+// extensiones y no se les pide manifiesto.
+func companionsIn(dir string) map[string]bool {
+	out := map[string]bool{}
+	matches, _ := filepath.Glob(filepath.Join(dir, "kling-*.json"))
+	for _, m := range matches {
+		if s, err := readSidecar(m); err == nil {
+			for _, c := range s.Companions {
+				out[c] = true
+			}
+		}
+	}
+	return out
 }
 
 // Commands son los comandos que aportan las extensiones utilizables, en orden

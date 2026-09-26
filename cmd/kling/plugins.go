@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -21,8 +22,8 @@ var coreCommands = []string{
 	"up", "status", "run", "ps", "logs", "freeze", "thaw", "pause", "stop", "rm", "squeeze",
 	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
 	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
-	"exec", "shell", "cp", "sandbox", "sandboxes", "resize", "models",
-	"completion", "version", "help", "chispa", "ai", "domotica",
+	"exec", "shell", "cp", "sandbox", "sandboxes", "resize",
+	"completion", "version", "help", "doctor", "try",
 }
 
 var (
@@ -36,9 +37,18 @@ var (
 func extensions() *plugin.Registry {
 	extOnce.Do(func() {
 		plugin.SetCoreVersion(strings.TrimPrefix(Version, "v"))
+		// Una configuración ilegible no puede dejar a kling sin extensiones:
+		// sin ella no hay ninguna desactivada, y el error ya lo dará quien
+		// la necesite de verdad.
+		var disabled []string
+		if c, err := config.Load(); err == nil {
+			disabled = c.Plugins.Disabled
+		}
 		extReg = plugin.Discover(context.Background(), plugin.Options{
-			Core:    coreCommands,
-			Version: strings.TrimPrefix(Version, "v"),
+			Core:     coreCommands,
+			Version:  strings.TrimPrefix(Version, "v"),
+			Disabled: disabled,
+			Builtins: builtinExtensions(),
 		})
 	})
 	return extReg
@@ -52,87 +62,137 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, usageTail)
 }
 
-// helpFor es `kling help <comando>`: el de una extensión se lo pregunta a ella.
-func helpFor(cmd string) error {
-	if p := extensions().Lookup(cmd); p != nil {
-		return plugin.Exec(p, cmd, []string{"-h"}, config.Path())
+// cmdPlugins gestiona las extensiones: listarlas, instalarlas desde una
+// release, quitarlas y apagarlas o encenderlas.
+func cmdPlugins(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "ls", "list":
+			return pluginsLs(args[1:])
+		case "install":
+			return pluginsInstall(args[1:])
+		case "rm", "remove", "uninstall":
+			return pluginsRm(args[1:])
+		case "enable":
+			return pluginsEnable(args[1:], true)
+		case "disable":
+			return pluginsEnable(args[1:], false)
+		}
+		if !strings.HasPrefix(args[0], "-") {
+			return fmt.Errorf("unknown plugins subcommand %q: use ls, install, rm, enable or disable", args[0])
+		}
 	}
-	printUsage(os.Stdout)
-	return nil
+	return pluginsLs(args)
 }
 
-// cmdPlugins lista las extensiones: qué aportan, de dónde salen y por qué no se
-// pueden usar si es el caso.
-func cmdPlugins(args []string) error {
-	if len(args) > 0 && (args[0] == "ls" || args[0] == "list") {
-		args = args[1:]
+// pluginRow es una extensión tal como la enseña `plugins ls`.
+type pluginRow struct {
+	Name      string   `json:"name"`
+	Version   string   `json:"version,omitempty"`
+	Status    string   `json:"status"` // ok | disabled | error: ...
+	Path      string   `json:"path,omitempty"`
+	Builtin   bool     `json:"builtin"`
+	Disabled  bool     `json:"disabled"`
+	Commands  []string `json:"commands,omitempty"`
+	Hooks     []string `json:"hooks,omitempty"`
+	Shadowed  []string `json:"shadowed,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	SHA256    string   `json:"sha256,omitempty"`
+	URL       string   `json:"url,omitempty"`
+	Installed string   `json:"installed,omitempty"`
+	// Modified es que el binario ya no tiene el sha256 con el que se instaló.
+	Modified bool `json:"modified,omitempty"`
+}
+
+func pluginRows(reg *plugin.Registry) []pluginRow {
+	out := []pluginRow{}
+	for _, p := range reg.Plugins {
+		r := pluginRow{Name: p.Name, Path: p.Path, Builtin: p.Builtin != nil, Disabled: p.Disabled,
+			Shadowed: p.Shadowed, Status: "ok"}
+		if p.Manifest != nil {
+			r.Version, r.Hooks = p.Manifest.Version, p.Manifest.Hooks
+			for _, c := range p.Manifest.Commands {
+				if reg.Lookup(c.Name) == p {
+					r.Commands = append(r.Commands, c.Name)
+				}
+			}
+		}
+		switch {
+		case p.Disabled:
+			r.Status = "disabled"
+		case p.Err != nil:
+			r.Status, r.Error = "error: "+p.Err.Error(), p.Err.Error()
+		}
+		// El .json dice de dónde salió; el hash se recalcula para que lo que
+		// se enseña sea lo que hay en disco y no lo que hubo.
+		if p.Path != "" {
+			if sc, err := plugin.ReadSidecar(p.Path); err == nil {
+				r.SHA256, r.URL = sc.SHA256, sc.URL
+				if !sc.Installed.IsZero() {
+					r.Installed = sc.Installed.Format(time.RFC3339)
+				}
+				if h, err := plugin.FileSHA256(p.Path); err == nil && h != sc.SHA256 {
+					r.SHA256, r.Modified = h, true
+				}
+			}
+		}
+		out = append(out, r)
 	}
-	fs := flag.NewFlagSet("plugins", flag.ExitOnError)
+	return out
+}
+
+// pluginsLs lista las extensiones: qué aportan, de dónde salen y por qué no se
+// pueden usar si es el caso.
+func pluginsLs(args []string) error {
+	fs := flag.NewFlagSet("plugins ls", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	reg := extensions()
-
+	rows := pluginRows(extensions())
 	if *asJSON {
-		type row struct {
-			Name     string   `json:"name"`
-			Version  string   `json:"version,omitempty"`
-			Path     string   `json:"path,omitempty"`
-			Builtin  bool     `json:"builtin"`
-			Commands []string `json:"commands,omitempty"`
-			Hooks    []string `json:"hooks,omitempty"`
-			Shadowed []string `json:"shadowed,omitempty"`
-			Error    string   `json:"error,omitempty"`
-		}
-		out := []row{}
-		for _, p := range reg.Plugins {
-			r := row{Name: p.Name, Path: p.Path, Builtin: p.Builtin != nil, Shadowed: p.Shadowed}
-			if p.Manifest != nil {
-				r.Version, r.Hooks = p.Manifest.Version, p.Manifest.Hooks
-				for _, c := range p.Manifest.Commands {
-					if reg.Lookup(c.Name) == p {
-						r.Commands = append(r.Commands, c.Name)
-					}
-				}
-			}
-			if p.Err != nil {
-				r.Error = p.Err.Error()
-			}
-			out = append(out, r)
-		}
-		return json.NewEncoder(os.Stdout).Encode(out)
+		return json.NewEncoder(os.Stdout).Encode(rows)
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tVERSION\tCOMMANDS\tSOURCE")
-	for _, p := range reg.Plugins {
-		src := p.Path
-		if p.Builtin != nil {
+	fmt.Fprintln(tw, "NAME\tVERSION\tSTATUS\tCOMMANDS\tSOURCE")
+	for _, r := range rows {
+		src := r.Path
+		switch {
+		case r.Builtin:
 			src = "built in"
+		case r.Modified:
+			src += fmt.Sprintf(" (sha256 %s, changed since install)", shortSHA(r.SHA256))
+		case r.SHA256 != "":
+			src += fmt.Sprintf(" (sha256 %s)", shortSHA(r.SHA256))
 		}
-		if p.Err != nil {
-			fmt.Fprintf(tw, "%s\t—\t✗ %v\t%s\n", p.Name, p.Err, src)
-			continue
+		version := r.Version
+		if version == "" {
+			version = "—"
 		}
-		var cmds []string
-		for _, c := range p.Manifest.Commands {
-			if reg.Lookup(c.Name) == p {
-				cmds = append(cmds, c.Name)
-			}
+		line := strings.Join(r.Commands, " ")
+		if len(r.Shadowed) > 0 {
+			line += fmt.Sprintf("  (ignored, already taken: %s)", strings.Join(r.Shadowed, " "))
 		}
-		line := strings.Join(cmds, " ")
-		if len(p.Shadowed) > 0 {
-			line += fmt.Sprintf("  (ignored, already taken: %s)", strings.Join(p.Shadowed, " "))
+		if line == "" {
+			line = "—"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.Name, p.Manifest.Version, line, src)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Name, version, r.Status, line, src)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 	fmt.Println("\nAn extension is any executable named kling-<name> on your PATH or in")
-	fmt.Println("$KLING_PLUGIN_PATH. After installing one, reload completion:  source <(kling completion zsh)")
+	fmt.Println("$KLING_PLUGIN_PATH. Install one from this release:  kling plugins install <name>")
+	fmt.Println("After installing one, reload completion:  source <(kling completion zsh)")
 	return nil
+}
+
+func shortSHA(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 // knownFlags deja en args solo los flags que fs conoce (con su valor), para
