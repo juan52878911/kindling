@@ -81,6 +81,9 @@ aprenda lo indirecto o haya un LLM mejor. `-layer4-force` la enciende para todo.
 ## En el Mac o en un Linux, para probar
 
 ```sh
+# 0. la extensión que sirve `kling domotica` (fuera del núcleo desde v0.13.0)
+kling plugins install domotica        # o: go build -o ~/.local/share/kling/plugins/kling-domotica ./examples/domotica/cmd/kling-domotica
+
 # 1. modelos de las capas rápidas (docs/domotica.md) y el LLM
 kling models add von-qwen15-dom -model qwen2.5-1.5b-instruct -quant q4_k_m \
     -prefix <(jq -r '.tasks["room-llm"].system' examples/domotica/ai.json)   # el prompt, ya evaluado en el dorado
@@ -143,8 +146,10 @@ Medido allí (i7-8700T, 4 núcleos del CT, Firecracker sin anidar):
 # desde el Mac: binarios linux/amd64 y datos
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/kling ./cmd/kling
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/domotica-demo ./examples/domotica
-ssh ct105 'mkdir -p ~/domotica/models ~/domotica/data'
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/kling-domotica ./examples/domotica/cmd/kling-domotica
+ssh ct105 'mkdir -p ~/domotica/models ~/domotica/data ~/.local/share/kling/plugins'
 scp /tmp/kling /tmp/domotica-demo examples/domotica/ai.json ct105:domotica/
+scp /tmp/kling-domotica ct105:.local/share/kling/plugins/          # la extensión de `kling domotica`
 scp $M/intent.chispa $M/slots.chispas ct105:domotica/models/        # M: carpeta de modelos de domótica
 scp $D/train.jsonl $D/valid.jsonl $D/test.jsonl ct105:domotica/data/
 
@@ -212,6 +217,7 @@ del daemon y el del gateway no salen del host (0600).
 | fichero | qué |
 |---|---|
 | `main.go` | flags, cliente del gateway, puerta de la capa 4, panel de máquinas (pkg/api) |
+| `cmd/kling-domotica/` | la extensión que sirve `kling domotica` (`plugin.Main`): decidir, evaluar y entrenar las capas; `eval-llm` escribe el registro de la capa 4 |
 | `room/sim.go` | el simulador de dispositivos y lo que hace cada intención |
 | `room/server.go` | API JSON + SSE (`/api/state`, `/api/command`, `/api/events`, `/api/machines`) |
 | `room/web/` | la página: plano en SVG, traza por capas, números; es/en, claro/oscuro, accesible |

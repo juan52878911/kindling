@@ -15,13 +15,26 @@ solo entra si su evaluación mejora la anterior.
 
 Esta fase deja las capas 1 y 2 como bibliotecas (`pkg/domotica`,
 `pkg/chispa/slots`) y una CLI (`kling domotica`) que el gateway de IA podrá
-llamar después. Nada necesita daemon ni microVM. Datos y licencias en
+llamar después. Nada necesita daemon ni microVM.
+
+Desde v0.13.0 `kling domotica` no viene en el núcleo: lo sirve la extensión
+`kling-domotica` ([examples/domotica/cmd/kling-domotica](../examples/domotica/cmd/kling-domotica)),
+porque son herramientas de la demo y el binario de quien solo usa sandboxes no
+las necesita. `pkg/domotica` sigue en el núcleo (el gateway lo usa para
+`/v1/decide`), y también `kling ai eval` de una tarea de domótica. Sin la
+extensión, `kling domotica` dice cómo instalarla. Datos y licencias en
 [domotica-datos.md](domotica-datos.md); resultados en
 [DOMOTICA-EVAL.md](DOMOTICA-EVAL.md).
 
 ## Uso
 
 ```sh
+# la extensión (una vez): de la release de tu kling, verificada por sha256…
+kling plugins install domotica
+# …o compilada desde el repo
+go build -o ~/.local/share/kling/plugins/kling-domotica ./examples/domotica/cmd/kling-domotica
+kling help domotica                         # los siete subcomandos
+
 # datos (una vez): descarga fijada por sha256 y conversión al esquema único
 go run ./tools/domotica-data fetch
 go run ./tools/domotica-data build          # → <cache>/kindling/domotica/data
@@ -218,4 +231,5 @@ distintas se rechazan en vez de dar huecos basura. `FuzzLoad` lo prueba.
 | `pkg/domotica/llm.go` | capa 4: prompt, esquema, `ParseLLM`, `Veto`, `VON` |
 | `pkg/domotica/gateway.go` | las capas por el gateway: `/v1/decide`, `/v1/generate`, `/metrics` |
 | `pkg/domotica/layer4eval.go` | evaluación y puerta de la capa 4 |
-| `cmd/kling/domotica.go`, `domotica_llm.go` | `kling domotica`, `eval-llm` |
+| `examples/domotica/cmd/kling-domotica` | la extensión: `kling domotica` (`decide`, `eval`, `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm`) |
+| `cmd/kling/domotica_ai.go` | `kling ai eval` de una tarea de domótica (núcleo) |
