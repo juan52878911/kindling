@@ -229,8 +229,8 @@ kling try -image toolchain        # sin comando: una shell interactiva, borrada 
 kling ai up                       # gateway de IA con ./ai.json o ~/.config/kling/ai.json en 127.0.0.1:8080
 ```
 
-`kling doctor` sale con 0 si todo está ✓ y con 1 si queda algo pendiente, así que sirve
-también en scripts. `kling ai up` imprime la URL y un `curl` para probarlo antes de
+`kling doctor` sale con 1 solo si algo falla (los avisos, como el completado sin cargar,
+no cuentan), así que sirve también en scripts. `kling ai up` imprime la URL y un `curl` para probarlo antes de
 empezar a servir. Cuando un comando falla, el error trae una segunda línea, `try: …`,
 con el siguiente comando que ejecutar (`kling doctor`, `kling ps -a`,
 `kling images ls`…).

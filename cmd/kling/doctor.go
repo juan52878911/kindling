@@ -176,7 +176,7 @@ func doctorChecks(in doctorInput) []doctorCheck {
 			src = "built in"
 		}
 		switch {
-		case p.Err != nil && strings.HasPrefix(p.Err.Error(), "disabled"):
+		case p.Disabled:
 			// Desactivarla es una decisión, no una avería.
 			c.State, c.Detail = doctorOK, "disabled"
 			c.Fix = ""
@@ -263,22 +263,15 @@ func writeDoctor(w io.Writer, checks []doctorCheck) {
 	}
 }
 
-// extensionsDir es donde `kling plugins install` deja las extensiones: el
-// primer directorio de $KLING_PLUGIN_PATH, si no $XDG_DATA_HOME/kling/plugins,
-// si no ~/.local/share/kling/plugins (contrato plugin-dirs).
+// extensionsDir es donde `kling plugins install` deja las extensiones; la
+// regla (contrato plugin-dirs) vive en pkg/plugin para que install y doctor no
+// puedan discrepar.
 func extensionsDir() string {
-	if v := os.Getenv("KLING_PLUGIN_PATH"); v != "" {
-		if first := filepath.SplitList(v)[0]; first != "" {
-			return first
-		}
+	d, err := plugin.InstallDir()
+	if err != nil {
+		return ""
 	}
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return filepath.Join(d, "kling", "plugins")
-	}
-	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".local", "share", "kling", "plugins")
-	}
-	return ""
+	return d
 }
 
 // captureStdout ejecuta fn con os.Stdout apuntando a una tubería y devuelve lo

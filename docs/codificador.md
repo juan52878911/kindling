@@ -337,7 +337,8 @@ disco para el entorno de Python.
 | `pkg/codificador` | cliente de embeddings (acotado), caché `.jemb`, cabeza, `.jenc`, entrenamiento, k-NN, `Layer` |
 | `pkg/domotica/decide.go` | capa 3 en la cascada (`IntentEncoder`, `DecideContext`) |
 | `pkg/domotica/indirect.jsonl` | órdenes indirectas escritas a mano, con reparto |
-| `cmd/kling/domotica_encoder.go` | `kling domotica embed`, `train-encoder`; `-encoder` en `decide` y `eval`; `kling ai eval` de domótica |
+| `examples/domotica/cmd/kling-domotica/domotica_encoder.go` | `kling domotica embed`, `train-encoder`; `-encoder` en `decide` y `eval` (extensión `kling-domotica`) |
+| `cmd/kling/domotica_ai.go` | `kling ai eval` de una tarea de domótica (núcleo) |
 | `pkg/aigw/domotica.go` | tareas de domótica en `/v1/decide`, la réplica del codificador por `pkg/scheduler`, su evaluación y su puerta |
 | `scripts/98-encoder-bench.sh` | las cifras de latencia y memoria |
 | `scripts/encoder-setfit/` | la receta del ajuste fino (sin ejecutar) |

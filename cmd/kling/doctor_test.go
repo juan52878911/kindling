@@ -48,7 +48,7 @@ func TestDoctorProblemas(t *testing.T) {
 		infoErr: errors.New("cannot talk to the daemon at /run/kling.sock: dial unix: connect: permission denied"),
 		plugins: []*plugin.Plugin{
 			{Name: "old", Path: "/x/kling-old", Err: errors.New("needs kling 9.0.0 or newer (this is 0.13.0)")},
-			{Name: "off", Path: "/x/kling-off", Err: errors.New("disabled (kling plugins enable off)")},
+			{Name: "off", Path: "/x/kling-off", Disabled: true, Err: &plugin.DisabledError{Name: "off"}},
 		},
 		extDir: "/h/p", extDirOK: true,
 	}

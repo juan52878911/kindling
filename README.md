@@ -227,8 +227,8 @@ kling try -image toolchain        # no command: an interactive shell, deleted on
 kling ai up                       # AI gateway with ./ai.json or ~/.config/kling/ai.json on 127.0.0.1:8080
 ```
 
-`kling doctor` exits 0 when everything is ✓ and 1 when something is pending, so it also
-works in scripts. `kling ai up` prints the URL and a `curl` to try it before it starts
+`kling doctor` exits 1 only when something fails (warnings, such as completion not being
+loaded, do not count), so it also works in scripts. `kling ai up` prints the URL and a `curl` to try it before it starts
 serving. When a command fails, the error comes with a second line, `try: …`, with the
 next command to run (`kling doctor`, `kling ps -a`, `kling images ls`…).
 

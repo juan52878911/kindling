@@ -55,18 +55,20 @@ v0.2.2.
   `-from` solo acepta `https://`. Un `kling` de desarrollo exige `@vX`, `-from`
   o `-file`. Solo biblioteca estándar.
 - **`kling plugins ls [-json] | rm <n> | enable <n> | disable <n>`**: `ls` enseña
-  `STATUS` (`ok`, `disabled`, `error: …`) y el origen con ruta y sha256 corto;
+  `STATUS` (`ok`, `disabled`, `error: …`) y el origen con ruta y sha256 corto
+  (y avisa si el binario cambió después de instalarlo);
   `rm` borra binario, `.json` y companions del directorio de extensiones (y no
   toca nada fuera de él); `disable` apaga una extensión sin desinstalarla
   (`"plugins": {"disabled": [...]}` en `config.json`): se lista pero no recibe
   comandos. Vale también para las incorporadas.
-- **Manifiesto 1.1: `companions`**, ejecutables que se instalan y se borran
+- **Manifiesto: nuevo campo opcional `companions`** (`manifest_version` sigue
+  en 1), ejecutables que se instalan y se borran
   junto a la extensión sin ser extensiones (`kling-bridge` para `mcp`). El resto
   del manifiesto no cambia.
 - **`ai`, `chispa` y `models` son extensiones incorporadas** (`plugin.Builtin`):
   siguen dentro del binario, pero su ayuda y su completado salen de un
   manifiesto, `kling plugins ls` las lista como `built in` y
-  `kling plugins disable ai` las apaga.
+  `kling plugins disable ai` las apaga (cada una por su nombre).
 - **`kling domotica` sale del núcleo**: sus subcomandos (`decide`, `eval`,
   `train-slots`, `embed`, `train-encoder`, `templates`, `eval-llm`) los sirve
   la extensión `kling-domotica` tras `kling plugins install domotica`, con la
@@ -75,14 +77,16 @@ v0.2.2.
 - **Comandos nuevos para el día a día:**
   - `kling doctor [-json]`: daemon, versión del CLI frente a la del daemon,
     cada extensión con su estado y su `min_kling`, si el completado está
-    cargado y si el directorio de extensiones está a mano. Sale con 0 si todo
-    está bien y con 1 si queda algo, y cada ✗ trae el comando que lo arregla.
+    cargado y si el directorio de extensiones está a mano, además del runtime
+    (`up -check`). Cada ✗ trae el comando que lo arregla. Sale con 1 solo si hay
+    fallos: los avisos (completado sin cargar, versiones distintas) no cuentan.
   - `kling try [-image I] [-from S] [-mem MiB] [-egress …] [-keep] [--] <cmd…>`:
     crea un sandbox, ejecuta el comando en streaming, devuelve su código de
-    salida y lo borra; sin comando abre una shell; `-keep` lo conserva e
-    imprime su id.
+    salida y lo borra, también con Ctrl-C; sin comando abre una shell; `-keep`
+    lo conserva e imprime su id. Sin `-image` ni `-from` usa la imagen
+    `toolchain`.
   - `kling logs -f <ref>`: sigue la consola hasta Ctrl-C o hasta que la máquina
-    deja de estar `running`.
+    deja de estar `running`; funciona también contra daemons anteriores.
   - `kling snapshots ls|rm|inspect <n> [-json]`: los snapshots tienen por fin
     los mismos verbos que `volume`, `images` o `sandbox`; `inspect` los enseña
     con sus anotaciones. `kling rmi` queda como alias.
@@ -99,7 +103,26 @@ v0.2.2.
   una segunda línea `try: …` (`kling doctor` si el daemon no responde,
   `kling ps -a` ante una máquina desconocida, `kling images ls`,
   `kling snapshots ls`, `KLING_SOCKET_USER` si el socket no deja entrar,
-  `kling plugins install <x>` ante un comando que se mudó a una extensión).
+  `kling plugins install <x>` ante un comando que se mudó a una extensión,
+  `kling plugins enable <x>` ante uno de una extensión desactivada). Un comando
+  desconocido ya no vuelca la ayuda entera.
+- El completado gana `ai up`, `models embed`, `domotica embed` y
+  `domotica train-encoder`, que faltaban, y los subcomandos de
+  `plugins`, `snapshots` y `completion`.
+- **`scripts/install.sh --with mcp,sandbox,domotica`** baja las extensiones de
+  la misma release, verificadas contra su `SHA256SUMS` antes de mover nada, al
+  directorio de extensiones con su `kling-<n>.json`. Opciones nuevas:
+  `--skip-kling`, `--plugin-dir` y `--no-companions`; `--bridge` pasa a ser
+  `--with mcp`.
+- **CI en matriz** (raíz, `ext/mcp`, `ext/sandbox`), cada módulo con
+  `make test cross` sin workspace (`GOWORK=off`, Go 1.24), más comprobaciones
+  de que el `go.mod` raíz no tiene dependencias ni cgo, de que `ext/*` conservan
+  `replace => ../..` y de que el `go.work` compila. Antes de publicar, la
+  release compara sus ficheros con la lista fija de assets; una ejecución
+  manual exige la etiqueta.
+- `make cross`, `make test-all`, `make cross-all` y `make domotica` en la raíz;
+  `scripts/release.sh` se niega a etiquetar si algún `ext/*/go.mod` no pide el
+  núcleo en la versión que se etiqueta.
 
 ### kling-mcp
 
@@ -112,6 +135,11 @@ v0.2.2.
 - Sus versiones van con las de kindling: esta es kling-mcp v0.13.0. El repo
   kindling-mcp queda archivado, con sus releases
   ([`docs/archivo-repos.md`](docs/archivo-repos.md)).
+- Su manifiesto declara `kling-bridge` como companion, y `kling mcp link`
+  busca el puente primero junto a `kling-mcp`, que es donde lo deja
+  `kling plugins install`.
+- `ext/mcp/scripts/install.sh` delega en el instalador del núcleo
+  (`--skip-kling --with mcp`) y conserva sus opciones antiguas.
 - Los tests que buscaban un clon de kindling en `KINDLING_DIR` usan `../..` por
   defecto y ya no se saltan.
 
@@ -124,7 +152,9 @@ v0.2.2.
 - `kindling-operator` se publica como binario Linux, como
   `kindling-operator-deploy.tar.gz` con los manifiestos de `ext/sandbox/deploy/`
   y como imagen `ghcr.io/juan52878911/kindling-operator:v0.13.0` y `:latest`,
-  construida desde la raíz del repo. La guía pasa a
+  construida desde la raíz del repo
+  (`docker build -f ext/sandbox/Dockerfile.operator .` o
+  `make -C ext/sandbox operator-image`). La guía pasa a
   [`docs/kubernetes.md`](docs/kubernetes.md).
 - El repo kindling-sandbox queda archivado, con sus releases.
 

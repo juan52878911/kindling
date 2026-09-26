@@ -22,8 +22,8 @@ var coreCommands = []string{
 	"up", "status", "run", "ps", "logs", "freeze", "thaw", "pause", "stop", "rm", "squeeze",
 	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
 	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
-	"exec", "shell", "cp", "sandbox", "sandboxes", "resize", "models",
-	"completion", "version", "help", "chispa", "ai", "domotica",
+	"exec", "shell", "cp", "sandbox", "sandboxes", "resize",
+	"completion", "version", "help", "doctor", "try",
 }
 
 var (
@@ -48,6 +48,7 @@ func extensions() *plugin.Registry {
 			Core:     coreCommands,
 			Version:  strings.TrimPrefix(Version, "v"),
 			Disabled: disabled,
+			Builtins: builtinExtensions(),
 		})
 	})
 	return extReg
@@ -59,15 +60,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, usageHead)
 	plugin.WriteHelp(w, extensions().Commands())
 	fmt.Fprint(w, usageTail)
-}
-
-// helpFor es `kling help <comando>`: el de una extensión se lo pregunta a ella.
-func helpFor(cmd string) error {
-	if p := extensions().Lookup(cmd); p != nil {
-		return plugin.Exec(p, cmd, []string{"-h"}, config.Path())
-	}
-	printUsage(os.Stdout)
-	return nil
 }
 
 // cmdPlugins gestiona las extensiones: listarlas, instalarlas desde una

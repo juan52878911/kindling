@@ -28,6 +28,8 @@ func mcpExtension() *plugin.Builtin {
 			Hooks:    []string{plugin.HookStatus},
 			// kling up las arranca junto al daemon si están instaladas.
 			Units: []string{"kling-gateway.service", "kling-heal.timer"},
+			// `kling plugins install mcp` baja y borra el puente con ella.
+			Companions: []string{"kling-bridge"},
 			Config: []plugin.ConfigKey{
 				{Key: "memory.enabled", Type: "bool", Help: "the gateway records which tool resolved each request"},
 				{Key: "memory.service", Type: "string", Help: "linked MCP service used as usage memory (default engram)"},

@@ -75,9 +75,16 @@ func TestPluginsInstallLsDisableRm(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var rows []pluginRow
-		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		var all, rows []pluginRow
+		if err := json.Unmarshal([]byte(out), &all); err != nil {
 			t.Fatalf("%v\n%s", err, out)
+		}
+		// Las incorporadas (ai, chispa, models) salen siempre; aquí solo
+		// interesan las instaladas.
+		for _, r := range all {
+			if !r.Builtin {
+				rows = append(rows, r)
+			}
 		}
 		return rows
 	}

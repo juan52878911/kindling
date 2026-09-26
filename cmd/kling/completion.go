@@ -33,14 +33,10 @@ var coreSubcommands = [][2]string{
 	{"snapshots", "ls rm inspect"},
 	{"context", "ls use add rm"},
 	{"config", "show path set"},
-	{"plugins", "ls"},
+	{"plugins", "ls install rm enable disable"},
 	{"sandbox|sandboxes", "create ls renew rm"},
 	{"completion", "bash zsh fish install"},
 	{"help", ""}, // se rellena con los comandos: ver completionScript
-	{"models", "ls add ask rm"},
-	{"chispa", "train eval predict inspect deploy ls rm"},
-	{"domotica", "decide eval train-slots templates eval-llm"},
-	{"ai", "serve ls test generate eval calibrate reload prime review feedback retrain rollback"},
 }
 
 // cliCommands son comandos del núcleo que también han de estar en

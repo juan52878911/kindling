@@ -116,16 +116,6 @@ GOLDEN SNAPSHOTS
   snapshots rm <name>...                           removes snapshots
   rmi <name>...                                    alias of snapshots rm
 
-MODELS (VON: small LLMs, OpenAI-compatible API on port 8000)
-  models ls [-json]                                catalog and the models on this daemon
-  models add <name> -model ID [-quant Q]           builds the image (llama.cpp + GGUF) and a
-      [-ctx N] [-cpus N] [-mem MiB] [-replace]     golden snapshot with the model loaded and
-      [-url HF_URL -sha256 H] [-rebuild]           warm; serve it with run -from <name>
-      [-build-only]                                only the image (to copy it to macOS)
-      [-prefix system.txt]... [-cache-ram MiB]     leaves task prompts evaluated in the golden
-  models ask <ref> [-max-tokens N] <prompt...>     asks a replica, prints answer and tok/s
-  models rm <name> [-keep-image]                   removes its snapshot and image
-
 OBSERVATION
   topo                                             ASCII diagram of everything
   top [-watch DUR] [-json]                         memory per microVM (PSS) and
@@ -133,48 +123,9 @@ OBSERVATION
   events                                           stream of daemon events
   info [-json]                                     daemon status
 
-SMALL MODELS (Chispa, runs locally, no daemon)
-  chispa train -data d.jsonl -o m.chispa [-valid v]  tiny linear classifier: trains,
-                                                   quantizes, calibrates, picks τ
-  chispa eval -model m.chispa -data t.jsonl [-json]  accuracy, F1, ECE, coverage at τ
-  chispa predict -model m.chispa [-text T] [-top N]  label, calibrated p, confident or
-                                                   escalate, evidence (docs/chispa.md)
-  chispa inspect <m.chispa> [-json]                spec, labels, thresholds, metadata
-  domotica decide [-lang L] "<text>"               smart-home decision: demo templates →
-                                                   Chispa intent + slots, or escalate
-  domotica eval -data t.jsonl [-challenge]         accuracy, slot F1, exact match, latency
-  domotica train-slots -data d.jsonl -o m.chispas  trains the slot tagger (docs/domotica.md)
-  domotica templates [-lang L]                     lists the predefined demo commands
-  domotica eval-llm -von G -data t.jsonl           layer 4 (VON LLM) vs doing nothing on what
-                                                   escalates; its record enables layer 4
-
 `
 
-const usageTail = `AI GATEWAY (Chispa classifies, VON generates, models on demand; docs/ai-gateway.md)
-  ai serve [-config ai.json] [-socket S]           serves /v1/classify, /v1/decide,
-      [-listen ADDR] [-idle 2m] [-max-replicas 2]  /v1/generate and an OpenAI API; replicas
-      [-keepwarm N] [-chispa-mem MiB]              wake per request and freeze when idle
-  ai ls [-json]                                    models, tasks, cascades, samples
-  ai test <task> [-mode cascade|chispa] <text>     classifies one text through the gateway
-  ai generate <task> [-var k=v] [<input>]          runs a generation task (stdin if no input)
-  ai eval <task> -data t.jsonl [-von M]            Chispa alone vs the Chispa -> VON cascade on
-                                                   labelled data; the record gates escalate_to
-  ai calibrate <task> [-target P] [-dry-run]       re-tunes Chispa thresholds on recent VON
-                                                   answers; writes only if it improves
-  ai reload                                        rereads the registry (says which cascades
-                                                   are on, forced or refused)
-  ai prime [<model>...] [-dry-run]                 remakes each VON golden snapshot with its
-                                                   tasks' prompt prefixes already evaluated
-  ai review <task> [-n 20] [-i]                    captured escalations a person should
-                                                   confirm or correct (docs/mejora-continua.md)
-  ai feedback <task> -id ID -label L               records a human label (or -discard,
-      [-teacher NAME] [-import labels.jsonl]       a teacher's answer, or a batch)
-  ai retrain <task> [-dry-run] [-rule R]           trains a shadow Chispa on gold + human +
-                                                   validated teachers; promotes it only if it
-                                                   wins on the trusted held-out set
-  ai rollback <task> [-to vN]                      serves the previous (or given) version
-
-DAEMON
+const usageTail = `DAEMON
   daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,
                                                    or $KLING_VMM with a name or a path)
 
@@ -191,8 +142,11 @@ CONFIGURATION
   version [-json]                                  CLI version, and the daemon's if it answers
 
 EXTENSIONS
-  plugins [ls] [-json]                             installed extensions (kling-<name>
-                                                   binaries) and what they add
+  plugins [ls] [-json]                             installed extensions, their status and source
+  plugins install <name>[@vX.Y.Z]                  download from the kindling release (sha256-checked)
+          [-from URL] [-file PATH] [-sha256 H] [-dir DIR]
+  plugins rm <name>                                remove one installed by ` + "`plugins install`" + `
+  plugins enable|disable <name>                    turn an extension (also a built-in one) on or off
 
 CONNECTION
   Precedence:  -H  >  $KLING_HOST  >  active context  >  local socket
@@ -283,8 +237,6 @@ func main() {
 		err = cmdCommit(args)
 	case "snapshots":
 		err = cmdSnapshots(args)
-	case "models":
-		err = cmdModels(args)
 	case "images":
 		err = cmdImages(args)
 	case "rmi":
@@ -307,12 +259,6 @@ func main() {
 		err = cmdVersion(args)
 	case "plugins":
 		err = cmdPlugins(args)
-	case "chispa":
-		err = cmdChispa(args)
-	case "domotica":
-		err = cmdDomotica(args)
-	case "ai":
-		err = cmdAI(args)
 	case "builder": // lo ejecuta el daemon como root; ver builder.go
 		err = cmdBuilder(args)
 	case "-h", "--help", "help":
@@ -327,6 +273,12 @@ func main() {
 		// aquí mismo; una externa reemplaza este proceso y no vuelve.
 		if p := extensions().Lookup(cmd); p != nil {
 			err = plugin.Exec(p, cmd, args, config.Path())
+			break
+		}
+		if p := extensions().DisabledFor(cmd); p != nil {
+			err = &errConCodigo{code: 2, err: &errWithHint{
+				err:  fmt.Errorf("kling %s comes from extension %q, which is disabled", cmd, p.Name),
+				hint: "kling plugins enable " + p.Name}}
 			break
 		}
 		if ext, ok := movedToExtension[cmd]; ok {

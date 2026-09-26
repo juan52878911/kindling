@@ -246,12 +246,22 @@ func warnIfExposed(listen string) {
 // bridgePath busca el puente allí donde lo deja la instalación.
 func bridgePath() string {
 	home, _ := os.UserHomeDir()
+	// Primero junto a este binario: `kling plugins install mcp` deja el puente
+	// (su companion) en el mismo directorio de extensiones que kling-mcp.
+	junto := ""
+	if exe, err := os.Executable(); err == nil {
+		junto = filepath.Join(filepath.Dir(exe), "kling-bridge")
+	}
 	for _, p := range []string{
+		junto,
 		filepath.Join(home, ".local", "bin", "kling-bridge"),
 		filepath.Join(home, "go", "bin", "kling-bridge"),
 		"/usr/local/bin/kling-bridge",
 		"./kling-bridge-local",
 	} {
+		if p == "" {
+			continue
+		}
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			// Absoluta SIEMPRE. El ultimo candidato es relativo —es donde lo deja
 			// `make bridge-local`— y devolverlo tal cual mete "./kling-bridge-local"
