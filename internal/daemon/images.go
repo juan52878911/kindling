@@ -16,7 +16,6 @@ package daemon
 // directorio. Se valida con lista blanca, que es la única que no se queda corta.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -63,8 +62,8 @@ func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req api.BuildImageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	if req.Builder == "" {

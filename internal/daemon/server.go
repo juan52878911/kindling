@@ -36,6 +36,56 @@ var Version = "dev"
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
 var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause"}
 
+// guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
+// respuesta del invitado: se renueva con cada Read que devuelve datos, así
+// que una respuesta larga pero que progresa (el streaming de /exec, una
+// descarga real) no expira, y un invitado que calla a medio cuerpo —o que
+// gotea 1 byte cada minuto solo para mantener viva una goroutine, un FD y
+// hasta GuestMaxBodyCap de búfer del daemon— sí (D-01).
+//
+// Deliberadamente NO toca la espera de las CABECERAS: eso sigue siendo
+// ResponseHeaderTimeout en guestClient, generoso a propósito porque una
+// herramienta dentro del invitado (un escaneo de semgrep, por ejemplo) puede
+// tardar lo suyo en tener algo que contestar. Es la lectura del cuerpo, una
+// vez que ya se sabe que hay alguien al otro lado, la que no debe poder
+// colgarse para siempre.
+//
+// Variable y no const solo para que los tests puedan acortarla; nada más la
+// cambia en el proceso real.
+var guestProgressTimeout = 60 * time.Second
+
+// progressBody envuelve el cuerpo de una respuesta del invitado (resp.Body) y
+// corta la lectura si un solo Read no vuelve en guestProgressTimeout. Cerrar
+// el cuerpo desde el lado del daemon hace que el Read bloqueado en la
+// conexión real también se destrabe con un error, así que la goroutine que lo
+// espera no se queda huérfana.
+type progressBody struct {
+	body io.ReadCloser
+}
+
+// wrapGuestBody es cómo se usa progressBody: se llama justo tras
+// guestClient.Do, sobre resp.Body, antes de pasarlo a quien vaya a leerlo
+// (LeerCuerpo, io.Copy, el escáner de /exec/stream).
+func wrapGuestBody(body io.ReadCloser) io.ReadCloser { return &progressBody{body: body} }
+
+func (p *progressBody) Read(b []byte) (int, error) {
+	type resultado struct {
+		n   int
+		err error
+	}
+	ch := make(chan resultado, 1)
+	go func() { n, err := p.body.Read(b); ch <- resultado{n, err} }()
+	select {
+	case r := <-ch:
+		return r.n, r.err
+	case <-time.After(guestProgressTimeout):
+		_ = p.body.Close() // destraba el Read de la goroutine de arriba
+		return 0, fmt.Errorf("the guest agent stopped answering (no data for %s)", guestProgressTimeout)
+	}
+}
+
+func (p *progressBody) Close() error { return p.body.Close() }
+
 // guestClient reenvía peticiones al servidor dentro de la microVM. Es un
 // singleton a nivel de paquete para que http.Client reúse sus conexiones
 // entre llamadas al mismo invitado — recrearlo en cada request() obligaba a
@@ -43,7 +93,8 @@ var Capabilities = []string{"annotations", "store", "builders", "image-files", "
 // Timeout global NO: acota la petición entera, y al otro lado hay una microVM
 // que puede estar descongelándose y una herramienta que puede tardar lo suyo
 // —un escaneo de semgrep sobre un repo, por ejemplo—. Se acota la espera a las
-// CABECERAS, que es lo que separa "está trabajando" de "no hay nadie".
+// CABECERAS, que es lo que separa "está trabajando" de "no hay nadie"; una vez
+// que llegan, wrapGuestBody acota por su cuenta el progreso del CUERPO.
 var guestClient = &http.Client{Transport: &http.Transport{
 	ResponseHeaderTimeout: 5 * time.Minute,
 	MaxIdleConnsPerHost:   8,
@@ -60,6 +111,12 @@ type Server struct {
 
 	store *store
 	lock  *os.File // cerrojo de la raíz (ver bloquearRaiz); abierto mientras viva
+
+	// fcVersion es la primera línea de `firecracker --version`, calculada una
+	// vez al arrancar (D-02): GET /info la recalculaba en cada llamada con un
+	// exec de más, y nada la cambia dentro de la vida del proceso —un binario
+	// distinto en disco necesita un daemon nuevo para tenerse en cuenta.
+	fcVersion string
 }
 
 // SetShareConfig fija de dónde lee el daemon su configuración de carpetas
@@ -80,7 +137,21 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	}
 	st := &store{dir: filepath.Join(root, "store")}
 	migrateLinks(root, st)
-	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock}, nil
+	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
+		fcVersion: firecrackerVersion(fcBin)}, nil
+}
+
+// firecrackerVersion ejecuta `firecracker --version` una vez. Si el binario
+// no está (daemon con AVISO de host, ver comprobarHost) o no contesta lo que
+// se espera, devuelve "": GET /info sencillamente omite el campo, igual que
+// antes.
+func firecrackerVersion(bin string) string {
+	out, err := exec.Command(bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	line, _, _ := bytes.Cut(out, []byte{'\n'})
+	return string(line)
 }
 
 func (s *Server) routes() http.Handler {
@@ -283,6 +354,31 @@ func fail(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, api.Error{Message: err.Error()})
 }
 
+// jsonMaxBody es el tope de los handlers que decodifican JSON directo del
+// cuerpo (D-05). El socket ya equivale a root en este host, así que el riesgo
+// es bajo, pero varios handlers no tenían NINGÚN tope mientras otros (MMDS,
+// resize, ficheros) sí lo llevan: la inconsistencia es la que se corrige.
+const jsonMaxBody = 1 << 20 // 1 MiB
+
+// decodeJSON decodifica el cuerpo de r como JSON en v, acotado a jsonMaxBody.
+// Pasarse el tope no trunca en silencio: http.MaxBytesReader hace que el
+// Decode falle con un *http.MaxBytesError, que jsonBodyStatus traduce a 413.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, jsonMaxBody)
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// jsonBodyStatus traduce un error de decodeJSON a su código HTTP: 413 si fue
+// el tope de tamaño el que lo cortó, 400 para cualquier otro (JSON inválido,
+// campo con el tipo que no toca, etc).
+func jsonBodyStatus(err error) int {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	_, kvmErr := os.Stat("/dev/kvm")
 	info := api.Info{
@@ -298,10 +394,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
 	}
-	if out, err := exec.Command(s.fcBin, "--version").Output(); err == nil {
-		if line, _, _ := bytes.Cut(out, []byte{'\n'}); len(line) > 0 {
-			info.Firecrack = string(line)
-		}
+	if s.fcVersion != "" {
+		info.Firecrack = s.fcVersion
 	}
 	writeJSON(w, http.StatusOK, info)
 }
@@ -320,15 +414,27 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	var req api.RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
+	decodeMS := time.Since(start).Milliseconds()
 	mc, err := s.mgr.Run(r.Context(), req)
 	if err != nil {
 		fail(w, runStatus(err), err)
 		return
+	}
+	// Un log barato por creación (A4): el daemon solo puede medir, sin abrir
+	// el manager, cuánto costó decodificar el cuerpo y cuánto la llamada a
+	// Run() entera. BootMS, si lo hay, es el desglose de esa llamada para el
+	// arranque en frío (runFrom, al restaurar un snapshot, no lo rellena).
+	total := time.Since(start).Milliseconds()
+	if mc.BootMS > 0 {
+		log.Printf("created %s in %d ms (decode %d ms, boot %d ms)", mc.Name, total, decodeMS, mc.BootMS)
+	} else {
+		log.Printf("created %s in %d ms (decode %d ms)", mc.Name, total, decodeMS)
 	}
 	writeJSON(w, http.StatusCreated, mc)
 }
@@ -453,8 +559,8 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	var labels map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&labels); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &labels); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	if err := s.mgr.SetLabels(r.PathValue("ref"), labels); err != nil {
@@ -466,8 +572,8 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	var req api.CommitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name, req.Replace)
@@ -551,8 +657,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // queda colgado hasta agotar el plazo. El daemon sí está en la red buena.
 func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	var req api.GuestRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	mc, ok := s.mgr.Get(r.PathValue("ref"))
@@ -653,7 +759,9 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 
 	// El límite evita que un invitado que se desmadre agote la memoria del
 	// daemon. Se falla en vez de truncar: una respuesta a medias parece buena.
-	body, err := api.LeerCuerpo(resp.Body, maxBody)
+	// wrapGuestBody (D-01) acota, además, el PROGRESO: un cuerpo que gotea un
+	// byte cada minuto no debe poder tener esto leyendo para siempre.
+	body, err := api.LeerCuerpo(wrapGuestBody(resp.Body), maxBody)
 	if err != nil {
 		return api.GuestResponse{}, http.StatusBadGateway, err
 	}
@@ -698,6 +806,13 @@ func (s *Server) esperarPuerto(ctx context.Context, mc *api.Machine, port int, t
 func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last error
+	// Backoff corto (A4): 200 ms fijos entre sondeos son 200 ms de más en el
+	// caso común, un agente que ya escucha para la segunda o tercera vuelta.
+	// Arranca en 5 ms y dobla hasta un tope de 50 ms, para no convertir la
+	// espera larga (un host cargado, el invitado aún descongelándose) en un
+	// busy-loop.
+	wait := 5 * time.Millisecond
+	const maxWait = 50 * time.Millisecond
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -708,7 +823,10 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 			return nil
 		}
 		last = err
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(wait)
+		if wait *= 2; wait > maxWait {
+			wait = maxWait
+		}
 	}
 	return fmt.Errorf("nobody opened %s: %w", addr, last)
 }

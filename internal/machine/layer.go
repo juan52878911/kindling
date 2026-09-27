@@ -239,6 +239,12 @@ func (m *Manager) RemoveImage(name string) error {
 		} else if !os.IsNotExist(err) {
 			return err
 		}
+		// El sidecar de sha256 cacheado del daemon (D-03) no es parte del
+		// contrato de la imagen: si no existe o falla al borrarse no es
+		// motivo para fallar el borrado en sí, o dejaría el .ext4 huérfano
+		// mientras un .sha256 sigue en disco reclamando el mismo tamaño y
+		// mtime que ya no existen.
+		_ = os.Remove(ruta + ".sha256")
 	}
 	if !borrado {
 		return fmt.Errorf("image %q does not exist", name)
