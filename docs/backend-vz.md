@@ -104,6 +104,7 @@ El núcleo las llama únicamente en macOS.
 | `PUT /kling/forwards` `{"ports": [8080, ...]}` | Abre un puerto en `127.0.0.1` (elegido por el sistema) por cada puerto del invitado y contesta `{"forwards": {"8080": "127.0.0.1:61234", ...}}`. Se puede llamar en cualquier momento tras crear la red; repetir un puerto devuelve la misma dirección. |
 | `GET /kling/probe?port=N` | `{"open": bool}`: si algo acepta conexiones en ese puerto DENTRO del invitado (conecta por la pila de usuario, espera ≤1 s al SYN). El reenvío no sirve para saberlo: el puerto de loopback lo abre el ayudante y acepta siempre. El núcleo lo usa para esperar al agente, `wait_ms` y `probe_only`. |
 | `GET /kling/stats` | `{"footprint_mib": N}`: memoria que ocupa esta máquina en el host, sumando el `phys_footprint` del ayudante y del proceso auxiliar `com.apple.Virtualization.VirtualMachine` que la aloja. Es lo que en Linux es el RSS de firecracker. |
+| `PUT /kling/cpu` `{"pct": N}` | Techo de CPU de la máquina en porcentaje de un núcleo (0 lo quita): lo que en Linux es el cgroup. El núcleo lo manda tras abrir los reenvíos, con `cpu_pct` o el valor por defecto. `kling-vz` mide cada 100 ms la CPU del auxiliar de Apple y pausa la VM lo justo; no regula hasta que el agente escucha. `GET /kling/cpu` da `{"pct", "throttled_ms"}`. |
 
 ### Por qué puertos en loopback y no la IP del invitado
 
@@ -113,8 +114,16 @@ invitados tienen la misma IP y viven en redes de espacio de usuario separadas. E
 host los alcanza por los puertos que abre su ayudante en `127.0.0.1`, que el núcleo
 guarda en `Machine.Forwards` y resuelve con `Machine.Addr(puerto)`. Quien hoy
 construye `mc.IP + ":" + puerto` (el proxy del daemon, exec, shell, el scheduler y
-kindling-mcp) pasa a usar `Addr`, que en Linux sigue devolviendo `IP:puerto`. Es
-el mismo alcance que ya tiene la ruta al veth en Linux: cualquiera en el host.
+kindling-mcp) pasa a usar `Addr`, que en Linux sigue devolviendo `IP:puerto`.
+
+En `127.0.0.1` de un Mac puede conectar cualquier usuario del Mac, y detrás del
+puerto 8080 está el agente del invitado, con exec y ficheros. Por eso `kling-vz`
+solo acepta en un reenvío las conexiones que abre un proceso **de su mismo
+usuario**: macOS no da las credenciales del otro extremo de un socket TCP, así que
+busca con `libproc`, entre los procesos de su usuario, cuál tiene abierto ese
+socket, y si ninguno lo tiene corta la conexión (`vz/internal/peercred`). Cuesta
+~0,15 ms la primera vez, ~5 µs después (recuerda los últimos procesos dueños,
+normalmente el daemon) y ~2,5 ms en el peor caso con 800 procesos.
 
 Los puertos que se reenvían son `api.GuestPort` más los de la etiqueta
 `kling.ports`. Se piden tras cada arranque o descongelación, porque un proceso
@@ -147,7 +156,7 @@ del namespace de Linux, para que un snapshot sirva igual en los dos sistemas:
 | `firecracker` (o `jailer`) | `kling-vz`, buscado junto a `kling` o en el `PATH` (`KLING_VMM` lo fuerza; `daemon.vmm` elige el backend) |
 | netns + veth + tap + iptables (`internal/net`) | `PUT /kling/network` al ayudante; sin red en el host |
 | `Machine.IP` = IP del veth | `Machine.IP` = `172.16.0.2` (informativa) y `Machine.Forwards` |
-| cgroups, jailer, bajada de privilegios | no existen; el aislamiento es el proceso auxiliar de Apple |
+| jailer, bajada de privilegios | el invitado vive en el proceso auxiliar de Apple; `kling-vz` se encierra en su perfil de sandbox (`kling-vz.sb`) al crear la VM, con la raíz que el daemon le pasa en `KLING_VZ_CONFINE_ROOT` |
 | RSS de `/proc/<pid>` | `GET /kling/stats` |
 | clon del overlay con `cp --reflink` | `clonefile` de APFS (`cp -c`) |
 | admisión por PSI (`/proc/pressure/memory`) | presión de memoria del sistema (`kern.memorystatus_level`) |

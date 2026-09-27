@@ -1,0 +1,42 @@
+;; Perfil de sandbox de kling-vz. Lo aplica el propio proceso (confine_darwin.go)
+;; justo antes de crear o restaurar la VM. kling-vz procesa dentro de sí el
+;; tráfico del invitado (pila de red de usuario, DNS, MMDS): si un invitado hostil
+;; encontrara un fallo ahí, esto es lo que puede tocar. Parámetros:
+;;   ROOT  la raíz de datos de kindling
+;;   MDIR  el directorio de esta máquina
+;;   NET   "1" si la máquina tiene salida (egress distinto de none)
+(version 1)
+(deny default)
+(import "system.sb")
+
+;; Lo que el proceso y Virtualization.framework necesitan para funcionar.
+(allow process-info* (target self))
+(allow process-info-listpids)
+(allow process-info-pidinfo)
+(allow process-info-pidfdinfo)
+(allow process-info-rusage)
+(allow sysctl-read)
+(allow mach-lookup)
+(allow iokit-open)
+(allow ipc-posix-shm-read* ipc-posix-shm-write-data)
+(allow file-read-metadata)
+
+;; Ficheros: leer la raíz de kindling (kernel, imágenes, dorados) y el
+;; resolv.conf del Mac; escribir solo lo de esta máquina, los snapshots y los
+;; volúmenes. Nada más del disco: ni el HOME, ni las claves SSH.
+(allow file-read*
+  (subpath (param "ROOT"))
+  (literal "/etc/resolv.conf")
+  (literal "/private/etc/resolv.conf"))
+(allow file-read* file-write* file-ioctl
+  (subpath (param "MDIR"))
+  (subpath (string-append (param "ROOT") "/snapshots"))
+  (subpath (string-append (param "ROOT") "/volumes")))
+
+;; Red: su API (socket Unix en el directorio de la máquina) y los reenvíos en
+;; loopback siempre; salida al exterior, solo si la máquina la tiene.
+(allow network-bind network-inbound (local unix-socket (subpath (param "MDIR"))))
+(allow network-bind network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+(if (string=? (param "NET") "1")
+  (allow network-outbound (remote ip "*:*")))

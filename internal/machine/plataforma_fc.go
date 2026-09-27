@@ -77,3 +77,7 @@ func rssVMM(pid int, sock string) int { return procRSSMiB(pid) }
 
 // memoriaHost es la memoria disponible y libre del anfitrión, en MiB.
 func memoriaHost() (available, free int64) { return hostMemMiB() }
+
+// entornoVMM: Firecracker no necesita nada más que el entorno del daemon (su
+// confinamiento es el jailer).
+func (m *Manager) entornoVMM() []string { return nil }

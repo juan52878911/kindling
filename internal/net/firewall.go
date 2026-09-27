@@ -5,6 +5,7 @@ import (
 	"fmt"
 	stdnet "net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -364,6 +365,47 @@ func HostEgressRules(bridge string) [][]string {
 // HostSubnet es el rango que kindling usa para los enlaces con los namespaces.
 const HostSubnet = hostPrefix + ".0.0/16"
 
+// HostInputRules son las reglas de la cadena INPUT del host para lo que llega
+// desde los namespaces (por los veth vh-*), en el orden en que tienen que
+// quedar.
+//
+// Sin ellas, un invitado con salida (internet o allowlist) llegaba a los
+// servicios del propio host atados a 0.0.0.0 —sshd, un gateway, la interfaz de
+// Proxmox— por la IP PÚBLICA del host: dentro del namespace el destino no está
+// en ningún rango bloqueado, el paquete se enmascara, y en el host el destino es
+// local, así que va a INPUT, donde nadie lo paraba. En allowlist bastaba un
+// dominio permitido que resolviera a esa IP. La red privada del host ya la
+// cortan las reglas del namespace; esto cubre sus IPs públicas.
+//
+// Pasa solo lo legítimo: las respuestas a conexiones que abre el host (agente,
+// exec, carpetas compartidas, resync) y el resolver DNS del modo allowlist en
+// el lado host de cada veth.
+func HostInputRules() [][]string {
+	base := []string{"iptables", "-I", "INPUT", "1", "-i", "vh-+", "-s", HostSubnet}
+	regla := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
+	return [][]string{
+		regla("-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
+		regla("-d", HostSubnet, "-p", "udp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
+		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
+		regla("-j", "DROP"),
+	}
+}
+
+// sinPosicion es la regla con -I INPUT 1 convertida a la acción dada (-C para
+// comprobarla, -D para borrarla), que no llevan posición.
+func sinPosicion(r []string, accion string) []string {
+	out := make([]string, 0, len(r))
+	for i := 0; i < len(r); i++ {
+		if r[i] == "-I" {
+			out = append(out, accion, r[i+1])
+			i += 2 // la cadena ya va; se salta la posición
+			continue
+		}
+		out = append(out, r[i])
+	}
+	return out
+}
+
 // SetupHost prepara el host una sola vez: reenvío y reglas de barrera.
 func SetupHost() error {
 	if err := run("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"); err != nil {
@@ -381,6 +423,39 @@ func SetupHost() error {
 			continue
 		}
 		if err := run(r...); err != nil {
+			return err
+		}
+	}
+	return setupHostInput()
+}
+
+// setupHostInput instala HostInputRules al principio de INPUT, delante de lo
+// que tenga el host (un ACCEPT de un cortafuegos local no debe adelantarse al
+// DROP). Si ya están todas, no se toca nada; si falta alguna, se quitan las que
+// haya y se insertan de nuevo en orden, para no dejar el DROP delante de los
+// ACCEPT.
+func setupHostInput() error {
+	reglas := HostInputRules()
+	todas := true
+	for _, r := range reglas {
+		if !exec_ok(sinPosicion(r, "-C")) {
+			todas = false
+			break
+		}
+	}
+	if todas {
+		return nil
+	}
+	for _, r := range reglas {
+		for exec_ok(sinPosicion(r, "-C")) {
+			if err := run(sinPosicion(r, "-D")...); err != nil {
+				break
+			}
+		}
+	}
+	// -I INPUT 1 en orden inverso: la primera de la lista acaba la primera.
+	for i := len(reglas) - 1; i >= 0; i-- {
+		if err := run(reglas[i]...); err != nil {
 			return err
 		}
 	}

@@ -87,6 +87,8 @@ func servirVZFalso(sock, logPath string) {
 		fmt.Fprintln(f, linea)
 		_ = f.Sync()
 	}
+	// Lo que el daemon le pasa para confinarse (ver entornoVMM).
+	apuntar("ENV KLING_VZ_CONFINE_ROOT=" + os.Getenv("KLING_VZ_CONFINE_ROOT"))
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		if r.Method == http.MethodGet && r.URL.Path == "/" {
@@ -113,6 +115,14 @@ func servirVZFalso(sock, logPath string) {
 			apuntar(linea)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"forwards": fwd})
+			return
+		case "/kling/cpu":
+			var c struct {
+				Pct int `json:"pct"`
+			}
+			_ = json.Unmarshal(body, &c)
+			apuntar(linea + " pct=" + strconv.Itoa(c.Pct))
+			w.WriteHeader(http.StatusNoContent)
 			return
 		case "/kling/stats":
 			apuntar(linea)
@@ -238,6 +248,15 @@ func TestVZBootMandaRedAntesDeArrancarYReenviaDespues(t *testing.T) {
 	if !strings.HasSuffix(ls[red], "egress=internet") {
 		t.Fatalf("la política de salida no viajó: %q", ls[red])
 	}
+	// El techo de CPU va tras los reenvíos (en macOS no hay cgroup: lo aplica
+	// kling-vz), con el de por defecto si la máquina no pidió otro.
+	if cpu := indice(ls, "PUT /kling/cpu"); cpu < fwd || !strings.HasSuffix(ls[cpu], "pct="+strconv.Itoa(defaultCPUPct)) {
+		t.Fatalf("el techo de CPU no llegó a kling-vz tras los reenvíos:\n%s", strings.Join(ls, "\n"))
+	}
+	// Y kling-vz recibe la raíz con la que se confina.
+	if indice(ls, "ENV KLING_VZ_CONFINE_ROOT="+m.root) < 0 {
+		t.Fatalf("kling-vz no recibió la raíz para confinarse:\n%s", strings.Join(ls, "\n"))
+	}
 	if indice(ls, "PUT /boot-source") > red || indice(ls, "PUT /drives/rootfs") > red {
 		t.Fatalf("la red va tras configurar la máquina:\n%s", strings.Join(ls, "\n"))
 	}
@@ -342,8 +361,10 @@ func TestVZSinJailerNiCgroupsNiPrivilegios(t *testing.T) {
 	if jailed, _, _ := decidirJailer(jailerPosible, "1", true, true, "", false); jailed {
 		t.Fatal("macOS no tiene jailer, aunque se pida (y aunque binario y usuario estén listos)")
 	}
-	if _, err := delegacionCgroups(); err == nil || !strings.Contains(err.Error(), "cgroups") {
-		t.Fatalf("delegacionCgroups = %v", err)
+	// Sin cgroups, pero sin aviso: el techo de CPU lo aplica kling-vz (PUT
+	// /kling/cpu desde abrirReenvios), no el cgroup.
+	if cg, err := delegacionCgroups(); cg != "" || err != nil {
+		t.Fatalf("delegacionCgroups = %q, %v; quería sin cgroups y sin aviso", cg, err)
 	}
 	if p, warn := privilegiosPlataforma("kindling"); p.Enabled || warn != "" {
 		t.Fatal("en macOS no se bajan privilegios")

@@ -73,9 +73,10 @@ y cada petición rechazada queda también en el log con el prefijo `kling-vz:`.
 | Petición | Qué hace |
 |---|---|
 | `GET /kling/info` | `{"backend": "vz", "version": "x.y.z"}` |
-| `PUT /kling/network` | `{"egress": "none"\|"internet"\|"allowlist", "allow_domains": [...]}`. Se puede cambiar en caliente. |
+| `PUT /kling/network` | `{"egress": "none"\|"internet"\|"allowlist", "allow_domains": [...]}`. Se puede cambiar en caliente, salvo ampliar a `internet` o `allowlist` una VM que se creó con `none`: el sandbox ya no le deja salir y la petición da 400. |
 | `PUT /kling/forwards` | `{"ports": [8080]}` → `{"forwards": {"8080": "127.0.0.1:61234"}}`. Repetir un puerto devuelve la misma dirección. |
 | `GET /kling/stats` | `{"footprint_mib": N}`: `phys_footprint` del ayudante más el del auxiliar de Apple que aloja la VM. |
+| `PUT /kling/cpu` | `{"pct": N}`: techo de CPU en porcentaje de un núcleo, como `cpu_pct` (0 lo quita). Regula pausando la VM por ventanas de 100 ms, desde que el agente del invitado escucha. `GET /kling/cpu` da el techo y cuánto lleva en pausa. |
 
 ## Snapshots
 
@@ -233,3 +234,22 @@ Resultado en un Mac M4 (16 GiB, macOS 26.5.1), 1 vCPU y 256 MiB, 2026-09-23:
 | Huella en marcha | 94–95 MiB |
 | Huella restaurada | 379–382 MiB |
 | Huella restaurada con 128 MiB inflados | 261 MiB |
+
+## Confinamiento
+
+`kling-vz` procesa dentro de sí el tráfico del invitado (la pila de red, el DNS,
+MMDS). Para que un fallo ahí no llegue al resto del Mac, al crear o restaurar la
+VM se encierra en `cmd/kling-vz/kling-vz.sb` con `sandbox_init_with_parameters`:
+
+- lee bajo la raíz de kindling (kernel, imágenes, dorados) y `/etc/resolv.conf`;
+- escribe solo en el directorio de su máquina, `snapshots/` y `volumes/`;
+- escucha en su socket y en loopback, y sale a la red solo si la máquina tiene
+  egress distinto de `none`.
+
+La raíz la pasa el daemon en `KLING_VZ_CONFINE_ROOT`; sin ella (lanzado a mano)
+no se confina y lo dice en el log. `KLING_VZ_NO_SANDBOX=1` lo apaga para
+diagnosticar un perfil que una versión nueva de macOS rompa. Probado en macOS
+26.5 con arranque, exec, snapshot, restauración y egress `none`/`internet`.
+
+Los reenvíos en loopback, además, solo aceptan conexiones de procesos del mismo
+usuario (`internal/peercred`).

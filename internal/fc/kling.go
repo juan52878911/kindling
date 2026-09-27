@@ -103,6 +103,12 @@ func (c *Client) KlingForwards(ctx context.Context, ports []int) (map[string]str
 	return r.Forwards, nil
 }
 
+// KlingCPU fija el techo de CPU de la máquina en kling-vz, en porcentaje de
+// un núcleo (como cpu_pct). Es el cgroup de macOS: ver vz/internal/server/cpu.go.
+func (c *Client) KlingCPU(ctx context.Context, pct int) error {
+	return c.do(ctx, http.MethodPut, "/kling/cpu", map[string]int{"pct": pct})
+}
+
 // KlingFootprintMiB es la memoria que ocupa la máquina en el host: el
 // equivalente en macOS del RSS de firecracker.
 func (c *Client) KlingFootprintMiB(ctx context.Context) (int64, error) {

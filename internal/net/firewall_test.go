@@ -133,3 +133,43 @@ func TestHostEgressRulesNieganLaRedPrivadaMenosElRangoPropio(t *testing.T) {
 		}
 	}
 }
+
+// Las reglas de INPUT: solo para lo que entra por los veth de kindling y desde
+// su rango, con los ACCEPT (respuestas y DNS del allowlist) delante del DROP.
+// Sin ellas, un invitado con salida llegaba a los servicios del host por su IP
+// pública.
+func TestHostInputRulesAceptanLoLegitimoYDescartanElResto(t *testing.T) {
+	reglas := HostInputRules()
+	if len(reglas) == 0 {
+		t.Fatal("sin reglas de INPUT")
+	}
+	for _, r := range reglas {
+		l := strings.Join(r, " ")
+		if !strings.Contains(l, "-I INPUT 1 -i vh-+ -s "+HostSubnet) {
+			t.Errorf("regla sin acotar a los veth y al rango de kindling: %s", l)
+		}
+	}
+	ultima := strings.Join(reglas[len(reglas)-1], " ")
+	if !strings.HasSuffix(ultima, "-j DROP") {
+		t.Errorf("la última regla tiene que ser el DROP: %s", ultima)
+	}
+	junto := ""
+	for _, r := range reglas[:len(reglas)-1] {
+		junto += strings.Join(r, " ") + "\n"
+	}
+	for _, want := range []string{"ESTABLISHED,RELATED -j ACCEPT", "-p udp --dport 5333 -j ACCEPT", "-p tcp --dport 5333 -j ACCEPT"} {
+		if !strings.Contains(junto, want) {
+			t.Errorf("falta %q antes del DROP:\n%s", want, junto)
+		}
+	}
+}
+
+func TestSinPosicionQuitaElNumeroDeLinea(t *testing.T) {
+	r := []string{"iptables", "-I", "INPUT", "1", "-i", "vh-+", "-j", "DROP"}
+	if got := strings.Join(sinPosicion(r, "-C"), " "); got != "iptables -C INPUT -i vh-+ -j DROP" {
+		t.Errorf("sinPosicion(-C) = %q", got)
+	}
+	if got := strings.Join(sinPosicion(r, "-D"), " "); got != "iptables -D INPUT -i vh-+ -j DROP" {
+		t.Errorf("sinPosicion(-D) = %q", got)
+	}
+}

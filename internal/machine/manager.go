@@ -1322,7 +1322,7 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 	if n != nil {
 		argv = n.Wrap(argv[0], argv[1:]...)
 	}
-	cmd, enCg, err := arrancarEnCgroup(argv, logf, cg)
+	cmd, enCg, err := arrancarEnCgroup(argv, logf, cg, m.entornoVMM()...)
 	if err != nil {
 		logf.Close()
 		return 0, false, fmt.Errorf("launching firecracker: %w", err)
@@ -1336,9 +1336,12 @@ func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enC
 // dentro del cgroup cg si se puede. Si el kernel rechaza nacer en el cgroup
 // (sin CLONE_INTO_CGROUP, o el cgroup no admite procesos), lo lanza fuera y lo
 // dice: el proceso importa más que ahorrarse la migración.
-func arrancarEnCgroup(argv []string, logf *os.File, cg *os.File) (*exec.Cmd, bool, error) {
+func arrancarEnCgroup(argv []string, logf *os.File, cg *os.File, entorno ...string) (*exec.Cmd, bool, error) {
 	nuevo := func() *exec.Cmd {
 		cmd := exec.Command(argv[0], argv[1:]...)
+		if len(entorno) > 0 {
+			cmd.Env = append(os.Environ(), entorno...)
+		}
 		cmd.Stdout, cmd.Stderr = logf, logf
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		return cmd
