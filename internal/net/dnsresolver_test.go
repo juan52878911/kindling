@@ -2,7 +2,11 @@ package net
 
 import (
 	"encoding/binary"
+	stdnet "net"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Estos tests ejercen SOLO el parseo DNS a mano y la lógica de allowlist: son
@@ -148,5 +152,241 @@ func TestNormalizeDomains(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("normalizeDomains = %v, quería %v", got, want)
 		}
+	}
+}
+
+// Tests de N4 (resolver acotado): en-vuelo, dedupe del sembrado, y el filtro
+// txid+pregunta sobre la respuesta upstream. No necesitan root ni netns: el
+// "upstream" es un servidor UDP de juguete en localhost y `ejecutar` se
+// sustituye por un fake, así que nunca se llama a `ip`/`ipset` de verdad.
+
+// buildAnswerFor fabrica una respuesta con un único A que casa (mismo txid,
+// misma pregunta) con query, o con un txid/pregunta distintos si se le pasa
+// una query ya alterada, para probar responseMatches.
+func buildAnswerFor(query []byte, ip string, ttl uint32) []byte {
+	id := binary.BigEndian.Uint16(query[0:2])
+	name, qtype, ok := parseQuestion(query)
+	if !ok {
+		return nil
+	}
+	msg := buildQuery(id, name, qtype)
+	msg[2] |= 0x80                          // QR: es una respuesta
+	binary.BigEndian.PutUint16(msg[6:8], 1) // ANCOUNT = 1
+	msg = append(msg, 0xC0, 12)             // puntero al nombre de la pregunta
+	var h [10]byte
+	binary.BigEndian.PutUint16(h[0:2], 1) // TYPE A
+	binary.BigEndian.PutUint16(h[2:4], 1) // CLASS IN
+	binary.BigEndian.PutUint32(h[4:8], ttl)
+	ip4 := stdnet.ParseIP(ip).To4()
+	binary.BigEndian.PutUint16(h[8:10], uint16(len(ip4)))
+	msg = append(msg, h[:]...)
+	msg = append(msg, ip4...)
+	return msg
+}
+
+// fakeUpstream levanta un servidor UDP de juguete en localhost que responde
+// con lo que devuelva handle. Sirve de "upstream" para process()/forward() sin
+// tocar la red real ni depender de resolvers públicos.
+func fakeUpstream(t *testing.T, handle func(query []byte) []byte) (addr string, closeFn func()) {
+	t.Helper()
+	conn, err := stdnet.ListenUDP("udp4", &stdnet.UDPAddr{IP: stdnet.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("fakeUpstream: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				select {
+				case <-done:
+				default:
+				}
+				return
+			}
+			q := append([]byte(nil), buf[:n]...)
+			go func() {
+				resp := handle(q)
+				if resp != nil {
+					_, _ = conn.WriteToUDP(resp, from)
+				}
+			}()
+		}
+	}()
+	return conn.LocalAddr().String(), func() {
+		close(done)
+		conn.Close()
+	}
+}
+
+func newTestResolver(upstream string) *dnsResolver {
+	return &dnsResolver{
+		ns:       "kl-test",
+		set:      "kl-test",
+		allowed:  normalizeDomains([]string{"example.com"}),
+		upstream: upstream,
+		sem:      make(chan struct{}, dnsMaxInFlight),
+		limiter:  newTokenBucket(1e6, 1e6), // sin límite de tasa en estos tests
+		seeded:   make(map[string]time.Time),
+	}
+}
+
+// fakeEjecutar sustituye ejecutar por un no-op contador de llamadas y
+// devuelve la función de restauración; el test debe defer-earla.
+func fakeEjecutar(calls *int32) func() {
+	old := ejecutar
+	ejecutar = func(args ...string) error {
+		if calls != nil {
+			atomic.AddInt32(calls, 1)
+		}
+		return nil
+	}
+	return func() { ejecutar = old }
+}
+
+// TestProcessInFlightBounded lanza muchas más consultas concurrentes que
+// dnsMaxInFlight contra un upstream que tarda en responder; comprueba que
+// nunca hay más de dnsMaxInFlight forwards a la vez y que el resto recibe
+// SERVFAIL en el sitio, sin llegar a tocar el upstream.
+func TestProcessInFlightBounded(t *testing.T) {
+	var inFlight, maxSeen, upstreamHits int32
+	addr, closeFn := fakeUpstream(t, func(q []byte) []byte {
+		atomic.AddInt32(&upstreamHits, 1)
+		n := atomic.AddInt32(&inFlight, 1)
+		for {
+			old := atomic.LoadInt32(&maxSeen)
+			if n <= old {
+				break
+			}
+			if atomic.CompareAndSwapInt32(&maxSeen, old, n) {
+				break
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+		atomic.AddInt32(&inFlight, -1)
+		return buildAnswerFor(q, "1.2.3.4", 300)
+	})
+	defer closeFn()
+	restore := fakeEjecutar(nil)
+	defer restore()
+
+	r := newTestResolver(addr)
+
+	const total = dnsMaxInFlight * 4
+	var wg sync.WaitGroup
+	var servfail int32
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(id uint16) {
+			defer wg.Done()
+			q := buildQuery(id, "example.com", 1)
+			resp := r.process(q, false)
+			if resp != nil && len(resp) >= 4 && resp[3]&0x0F == 2 {
+				atomic.AddInt32(&servfail, 1)
+			}
+		}(uint16(i))
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&maxSeen); got > dnsMaxInFlight {
+		t.Fatalf("en-vuelo máximo observado = %d, quería <= %d", got, dnsMaxInFlight)
+	}
+	if atomic.LoadInt32(&servfail) == 0 {
+		t.Fatal("esperaba SERVFAIL para el exceso de consultas por encima del semáforo")
+	}
+	if hits := atomic.LoadInt32(&upstreamHits); hits > total {
+		t.Fatalf("el upstream vio %d peticiones, más que las %d lanzadas", hits, total)
+	}
+}
+
+// TestSeedDedupe comprueba que sembrar la misma IP vigente no repite el
+// fork+exec, y que sí lo repite una vez caduca en el caché en memoria.
+func TestSeedDedupe(t *testing.T) {
+	var calls int32
+	restore := fakeEjecutar(&calls)
+	defer restore()
+
+	r := newTestResolver("")
+	r.seed("1.2.3.4", 300)
+	r.seed("1.2.3.4", 300) // misma IP, sigue vigente: no debe volver a llamar a ejecutar
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("llamadas a ejecutar tras sembrar dos veces la misma IP vigente = %d, quería 1", got)
+	}
+
+	// Forzar la caducidad en memoria: debe volver a sembrar.
+	r.seedMu.Lock()
+	r.seeded["1.2.3.4"] = time.Now().Add(-time.Second)
+	r.seedMu.Unlock()
+	r.seed("1.2.3.4", 300)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("llamadas a ejecutar tras caducar el caché = %d, quería 2", got)
+	}
+
+	// Una IP distinta siempre siembra.
+	r.seed("5.6.7.8", 300)
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("llamadas a ejecutar para una IP nueva = %d, quería 3", got)
+	}
+}
+
+// TestResponseMatches cubre N-02: mismo txid + misma pregunta casa; un txid
+// distinto o una pregunta distinta no casan.
+func TestResponseMatches(t *testing.T) {
+	q := buildQuery(0x1234, "example.com", 1)
+	good := buildAnswerFor(q, "1.2.3.4", 300)
+	if !responseMatches(q, good) {
+		t.Fatal("una respuesta con el mismo txid y la misma pregunta debería casar")
+	}
+
+	otroTxid := buildQuery(0x9999, "example.com", 1)
+	respOtroTxid := buildAnswerFor(otroTxid, "1.2.3.4", 300)
+	if responseMatches(q, respOtroTxid) {
+		t.Fatal("un txid distinto no debería casar")
+	}
+
+	otraPregunta := buildQuery(0x1234, "evil.io", 1)
+	respOtraPregunta := buildAnswerFor(otraPregunta, "1.2.3.4", 300)
+	if responseMatches(q, respOtraPregunta) {
+		t.Fatal("una pregunta distinta no debería casar aunque el txid coincida")
+	}
+}
+
+// TestProcessRejectsMismatchedAnswer verifica el camino completo: si el
+// upstream responde algo que no casa con la consulta (txid ajeno), process
+// devuelve SERVFAIL y NO siembra el ipset con esa IP.
+func TestProcessRejectsMismatchedAnswer(t *testing.T) {
+	addr, closeFn := fakeUpstream(t, func(q []byte) []byte {
+		ajena := buildQuery(0xFFFF, "example.com", 1) // txid que no es el de la consulta real
+		return buildAnswerFor(ajena, "9.9.9.9", 300)
+	})
+	defer closeFn()
+	var calls int32
+	restore := fakeEjecutar(&calls)
+	defer restore()
+
+	r := newTestResolver(addr)
+	resp := r.process(buildQuery(0x1234, "example.com", 1), false)
+	if resp == nil || len(resp) < 4 || resp[3]&0x0F != 2 {
+		t.Fatalf("esperaba SERVFAIL ante una respuesta que no casa, obtuve %v", resp)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("no debería sembrar el ipset con una respuesta que no casa; llamadas = %d", got)
+	}
+}
+
+// TestTokenBucketAllow comprueba el cubo de tokens en isolamiento: agota la
+// ráfaga, deniega, y tras esperar recupera al menos un token.
+func TestTokenBucketAllow(t *testing.T) {
+	b := newTokenBucket(100, 2) // 100 tok/s, ráfaga 2
+	if !b.allow() || !b.allow() {
+		t.Fatal("los primeros allow() dentro de la ráfaga deberían pasar")
+	}
+	if b.allow() {
+		t.Fatal("agotada la ráfaga, el siguiente allow() debería denegar")
+	}
+	time.Sleep(30 * time.Millisecond) // a 100 tok/s, sobran ~3 tokens en 30ms
+	if !b.allow() {
+		t.Fatal("tras esperar debería haber recuperado al menos un token")
 	}
 }
