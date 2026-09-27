@@ -46,6 +46,10 @@ func TestSubidaDeCarpetaCodigos(t *testing.T) {
 }
 
 func TestRunConCarpetasCodigos(t *testing.T) {
+	// Run se niega con jailer bloqueado ANTES de validar nada (no deja rastro
+	// en byID); aquí se prueban los códigos de la validación, así que se
+	// apaga a propósito en este host de pruebas sin jailer.
+	t.Setenv("KLING_JAILER", "0")
 	s, _ := servidorBlobs(t)
 	h := s.routes()
 	run := func(req api.RunRequest) *httptest.ResponseRecorder {
