@@ -65,6 +65,24 @@ const dnsPort = 5333
 // DNS y el SYN del invitado, cerrando en falso una conexión legítima.
 const dnsMinTTL = 60
 
+// dnsMaxInFlight acota cuántas consultas de ESTE resolver pueden estar a la vez
+// esperando al upstream (socket abierto + goroutine bloqueada en Read). Sin
+// tope, un invitado hostil lanzando miles de queries/s hace que el DAEMON abra
+// miles de sockets efímeros y —peor— haga un fork+exec de ipset por cada A
+// devuelto (ver seed). Por encima del tope respondemos SERVFAIL en el sitio, sin
+// tocar la red ni el ipset.
+const dnsMaxInFlight = 32
+
+// dnsRate y dnsBurst son el cubo de tokens por resolver: ~200 consultas/s en
+// régimen, ráfaga de hasta 400 antes de empezar a devolver SERVFAIL. Es
+// independiente del semáforo de en-vuelo: aquí limitamos la TASA aunque cada
+// consulta responda rapidísimo (el semáforo por sí solo no frenaría a un
+// invitado que dispara y no espera).
+const (
+	dnsRate  = 200
+	dnsBurst = 400
+)
+
 // registro de resolvers vivos, por netns. La vida del resolver se ata a la de la
 // microVM: Teardown/TeardownNamespace lo paran, Setup (o StartAllowlistResolver
 // tras un reinicio del daemon) lo arrancan.
@@ -82,6 +100,12 @@ type dnsResolver struct {
 	tcp      *stdnet.TCPListener
 	wg       sync.WaitGroup
 	quit     chan struct{}
+
+	sem     chan struct{} // semáforo de en-vuelo, capacidad dnsMaxInFlight
+	limiter *tokenBucket  // cubo de tokens, tasa dnsRate / ráfaga dnsBurst
+
+	seedMu sync.Mutex
+	seeded map[string]time.Time // ip -> caducidad; evita re-sembrar (fork+exec) dentro del TTL
 }
 
 // startDNSResolver arranca (idempotente) el resolver del netns de n. Devuelve
@@ -118,6 +142,9 @@ func startDNSResolver(n *Net, domains []string) error {
 		udp:      udp,
 		tcp:      tcp,
 		quit:     make(chan struct{}),
+		sem:      make(chan struct{}, dnsMaxInFlight),
+		limiter:  newTokenBucket(dnsRate, dnsBurst),
+		seeded:   make(map[string]time.Time),
 	}
 	r.wg.Add(2)
 	go r.serveUDP()
@@ -218,6 +245,16 @@ func (r *dnsResolver) handleTCP(conn stdnet.Conn) {
 }
 
 // process es el corazón: decide, reenvía, siembra y devuelve la respuesta cruda.
+//
+// ACOTADO (N-01): antes de tocar la red hacia el upstream, dos guardas
+// independientes pueden cortar aquí mismo con SERVFAIL, sin abrir socket ni
+// gastar una plaza del semáforo en vano:
+//   - dnsRate/dnsBurst: limita la TASA de consultas que se reenvían.
+//   - dnsMaxInFlight: limita cuántas quedan A LA VEZ esperando al upstream.
+//
+// Ambas son baratas (ni forks ni I/O), así que un invitado que dispare a saco
+// gasta CPU del resolver pero no fondos de sockets efímeros del host ni forks
+// de ipset.
 func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 	name, _, ok := parseQuestion(query)
 	if !ok {
@@ -229,16 +266,81 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 		// subdominios de un dominio suyo hacia un NS del atacante).
 		return respondError(query, 5) // REFUSED
 	}
+	if !r.limiter.allow() {
+		// Ráfaga por encima del cubo de tokens: SERVFAIL inline, sin reenviar.
+		return respondError(query, 2) // SERVFAIL
+	}
+	if !r.acquire() {
+		// Ya hay dnsMaxInFlight consultas esperando al upstream: SERVFAIL inline
+		// en vez de apilar un socket más.
+		return respondError(query, 2) // SERVFAIL
+	}
+	defer r.release()
+
 	resp, err := r.forward(query, viaTCP)
 	if err != nil || len(resp) < 12 {
 		return respondError(query, 2) // SERVFAIL
 	}
+	if !responseMatches(query, resp) {
+		// N-02: el txid o la pregunta no casan con esta consulta. Con el socket
+		// UDP conectado (forwardUDP) esto ya limita el spoofing a on-path, pero
+		// verificarlo aquí es gratis y evita sembrar el ipset con basura si el
+		// upstream (o alguien en camino) devuelve una respuesta que no pedimos.
+		return respondError(query, 2) // SERVFAIL
+	}
 	// Sembrar el ipset con las IPv4 que vamos a devolver, ANTES de responder: así
 	// la IP que el invitado usará ya está permitida cuando abra la conexión.
+	// Se siembran TODOS los A de la respuesta, no solo los cuyo owner == qname:
+	// restringir por owner rompería CNAME hacia un CDN (hallazgo #4 del plan),
+	// donde el A real cuelga del nombre canónico, no del que preguntamos.
 	for _, rec := range extractA(resp) {
 		r.seed(rec.ip, rec.ttl)
 	}
 	return resp
+}
+
+// acquire intenta tomar una plaza del semáforo de en-vuelo sin bloquear: si
+// está lleno, el llamador debe responder SERVFAIL en el sitio en vez de
+// esperar (esperar aquí es exactamente el "goroutine que se aparca 3-5s" que
+// permitía la explosión de en-vuelo).
+func (r *dnsResolver) acquire() bool {
+	select {
+	case r.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *dnsResolver) release() {
+	<-r.sem
+}
+
+// responseMatches verifica que resp es la respuesta a query: mismo ID de
+// transacción y misma pregunta (nombre + qtype). Es la comprobación mínima de
+// N-02; no sustituye DNSSEC, pero cierra el caso barato de aceptar cualquier
+// paquete que llegue al socket como si fuera la respuesta esperada.
+func responseMatches(query, resp []byte) bool {
+	if len(query) < 12 || len(resp) < 12 {
+		return false
+	}
+	if binary.BigEndian.Uint16(query[0:2]) != binary.BigEndian.Uint16(resp[0:2]) {
+		return false // txid distinto
+	}
+	qName, qType, ok := parseQuestion(query)
+	if !ok {
+		return false
+	}
+	rName, rType, ok := parseQuestion(resp)
+	if !ok {
+		return false
+	}
+	if qType != rType {
+		return false
+	}
+	qName = strings.TrimSuffix(strings.ToLower(qName), ".")
+	rName = strings.TrimSuffix(strings.ToLower(rName), ".")
+	return qName == rName
 }
 
 func (r *dnsResolver) forward(query []byte, viaTCP bool) ([]byte, error) {
@@ -294,13 +396,80 @@ func (r *dnsResolver) forwardTCP(query []byte) ([]byte, error) {
 // seed mete una IP en el ipset de esta microVM con el TTL real (con suelo). El
 // ipset se creó con la opción timeout activada (ver applyAllowlist), así que el
 // add por-entrada con timeout caduca solo cuando expira el registro.
+//
+// DEDUPE (N-01): si ya sembramos esta IP y su caducidad en memoria sigue
+// vigente, no volvemos a hacer el fork+exec de ipset. Sin esto, un dominio
+// consultado a ráfaga re-siembra (con un fork por query) una IP que YA está en
+// el ipset con el mismo timeout: coste de proceso sin ningún beneficio.
 func (r *dnsResolver) seed(ip string, ttl uint32) {
 	to := int(ttl)
 	if to < dnsMinTTL {
 		to = dnsMinTTL
 	}
-	_ = run("ip", "netns", "exec", r.ns, "ipset", "add", r.set, ip,
+	expira := time.Now().Add(time.Duration(to) * time.Second)
+
+	r.seedMu.Lock()
+	if vence, ok := r.seeded[ip]; ok && time.Now().Before(vence) {
+		r.seedMu.Unlock()
+		return // ya sembrada y sigue vigente en el ipset: no repetir el fork
+	}
+	if len(r.seeded) >= dnsSeedCacheSweep {
+		r.sweepSeeded()
+	}
+	r.seeded[ip] = expira
+	r.seedMu.Unlock()
+
+	_ = ejecutar("ip", "netns", "exec", r.ns, "ipset", "add", r.set, ip,
 		"timeout", fmt.Sprintf("%d", to), "-exist")
+}
+
+// sweepSeeded quita del caché en memoria las entradas ya caducadas. Se llama
+// con seedMu tomado y solo cuando el mapa crece por encima de
+// dnsSeedCacheSweep, para que un resolver de larga vida con muchos dominios
+// distintos no acumule memoria indefinidamente.
+func (r *dnsResolver) sweepSeeded() {
+	now := time.Now()
+	for ip, vence := range r.seeded {
+		if now.After(vence) {
+			delete(r.seeded, ip)
+		}
+	}
+}
+
+// dnsSeedCacheSweep es el tamaño del caché ip->caducidad a partir del cual
+// probamos a limpiar entradas caducadas antes de seguir creciendo.
+const dnsSeedCacheSweep = 4096
+
+// tokenBucket es un cubo de tokens sencillo, protegido por mutex: rate tokens
+// por segundo, hasta burst acumulados. allow() consume uno si hay disponible.
+type tokenBucket struct {
+	mu     sync.Mutex
+	rate   float64
+	burst  float64
+	tokens float64
+	last   time.Time
+}
+
+func newTokenBucket(rate, burst float64) *tokenBucket {
+	return &tokenBucket{rate: rate, burst: burst, tokens: burst, last: time.Now()}
+}
+
+func (b *tokenBucket) allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
+		b.tokens += elapsed * b.rate
+		if b.tokens > b.burst {
+			b.tokens = b.burst
+		}
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 func (r *dnsResolver) isAllowed(name string) bool {

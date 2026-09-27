@@ -65,6 +65,11 @@ func run(args ...string) error {
 	return nil
 }
 
+// ejecutar es run detrás de una variable: dnsresolver.go la llama en vez de
+// run directamente para que sus tests puedan sustituirla por un fake y probar
+// el sembrado del ipset sin invocar `ip`/`ipset` de verdad (sin root, sin netns).
+var ejecutar = run
+
 // quiet ejecuta ignorando el error; para limpiezas donde "no existe" es válido.
 func quiet(args ...string) { _ = exec.Command(args[0], args[1:]...).Run() }
 
