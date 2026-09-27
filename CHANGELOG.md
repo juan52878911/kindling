@@ -8,7 +8,10 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
-## Unreleased
+## v0.16.0 — 2026-09-27
+
+Cierra lo que la auditoría del núcleo dejó abierto tras v0.15.0, y el tope de CPU llega a macOS.
+Sin cambios de formato en `state.json`, `meta.json` ni la firma de los snapshots.
 
 ### Seguridad
 
