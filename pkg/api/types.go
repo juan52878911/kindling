@@ -441,11 +441,10 @@ type Snapshot struct {
 	// Campo nuevo y opcional: los snapshots anteriores a K1 (kernel propio) no
 	// lo llevan y siguen restaurándose igual, sin comprobación.
 	//
-	// Un dorado no contiene su kernel — comparte el vmlinux del host, que
-	// K1 puede reconstruir con otra configuración. Sin este campo, restaurar
-	// sobre un kernel distinto del que se congeló fallaba de forma críptica (o
-	// no fallaba en absoluto y el invitado se comportaba raro), sin nada que
-	// señalara al kernel como causa. Ver Manager.comprobarKernel.
+	// Es diagnóstico: restaurar no usa vmlinux (el kernel del invitado va en
+	// mem.file con el resto de su memoria), así que un kernel distinto no
+	// impide restaurar; solo se avisa en el log, porque el siguiente arranque
+	// en frío de esa plantilla sí usaría el nuevo. Ver Manager.avisoKernel.
 	//
 	// DELIBERADAMENTE fuera de Signature (ver contenidoFirmado en firma.go):
 	// incluirlo en el HMAC habría invalidado la firma de todo snapshot anterior

@@ -1933,16 +1933,10 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
 	}
-	// KERNEL (K2), como runFrom con los dorados: descongelar sobre un vmlinux
-	// distinto del que había al congelar (K1 lo reconstruye) falla de forma
-	// críptica o peor. Un sello sin el campo (anterior a esto) se acepta.
-	if err := m.kernelIgual(kernelDelVolcado(dir)); err != nil {
-		if errors.Is(err, errKernelCambiado) {
-			return nil, fmt.Errorf("machine %q can't be thawed: the kernel changed (it was frozen with a "+
-				"different kernel than the one installed on this host now). Remove it (kling rm %s) "+
-				"and start it again", mc.Name, mc.Name)
-		}
-		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+	// KERNEL (K2), como runFrom con los dorados: solo se avisa, porque
+	// descongelar no usa vmlinux (ver avisoKernel).
+	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
+		log.Print(aviso)
 	}
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el

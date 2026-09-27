@@ -79,10 +79,9 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
 - **Ronda de verificación.** Con jailer bloqueado, `run`, restaurar y `thaw` se niegan
   antes de reservar nada (antes cada intento dejaba una máquina `failed` que contaba para
   el tope), y el error dice la causa real: daemon sin root, `-run-as` vacío, usuario
-  inexistente, sin grupo `kvm` o sin binario `jailer`. `thaw` de una máquina warm
-  comprueba también el kernel (`kernel_sha256` opcional en el sello del volcado; los
-  volcados anteriores siguen funcionando) y falla con "the kernel changed" en vez de un
-  error críptico. El resolver DNS acota a 64 las conexiones TCP simultáneas y reintenta
+  inexistente, sin grupo `kvm` o sin binario `jailer`. El sello del volcado de
+  una máquina warm guarda también `kernel_sha256` (opcional; los volcados anteriores
+  siguen funcionando). El resolver DNS acota a 64 las conexiones TCP simultáneas y reintenta
   sembrar una IP si `ipset` falla. La cuota por tenant del scheduler ya no tiene una
   ventana en la que la instancia recién creada no cuenta. Además: la caché del tamaño de
   los `mem.file` dorados ya no hace un `stat` por acierto, borrar una imagen barre los
@@ -104,9 +103,11 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
   módulo (`=m`) ni opción prohibida se cuele. `KERNEL_SOURCE=build` en
   `scripts/30-fetch-artifacts.sh` lo usa en vez del kernel de CI de Firecracker
   (por defecto sigue siendo `ci`). Los snapshots dorados llevan ahora un
-  `kernel_sha256` opcional en `meta.json`: restaurar uno sobre un host cuyo kernel cambió
-  desde que se hizo el snapshot falla rápido con "rebuild the template", en vez de un
-  fallo críptico dentro del invitado.
+  `kernel_sha256` opcional en `meta.json`, y las máquinas congeladas en su sello:
+  restaurar o descongelar sobre un host cuyo kernel cambió deja un aviso en el log del
+  daemon. No se niega: ni restaurar ni descongelar usan `vmlinux` (el kernel del invitado
+  va en su memoria); el aviso es para el siguiente arranque en frío, que sí usaría el
+  kernel nuevo.
 - **Arranque más rápido**: la línea de arranque del kernel incluye `quiet` y, en amd64,
   desactiva la emulación i8042 (PS/2); una máquina que arranca o se restaura corre a
   `max(cpu_pct, 100)` (hasta un núcleo entero) hasta que el agente invitado contesta (como
