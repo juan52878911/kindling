@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
@@ -15,16 +14,6 @@ import (
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
-
-// coreCommands son los comandos del núcleo. Ganan siempre: una extensión que
-// declare uno de estos no lo recibe.
-var coreCommands = []string{
-	"up", "status", "run", "ps", "logs", "freeze", "thaw", "pause", "stop", "rm", "squeeze",
-	"mmds", "commit", "snapshots", "images", "rmi", "topo", "top", "events", "info",
-	"context", "config", "volume", "volumes", "daemon", "dial-stdio", "builder", "plugins",
-	"exec", "shell", "cp", "sandbox", "sandboxes", "resize",
-	"completion", "version", "help", "doctor", "try",
-}
 
 var (
 	extOnce sync.Once
@@ -52,14 +41,6 @@ func extensions() *plugin.Registry {
 		})
 	})
 	return extReg
-}
-
-// printUsage imprime la ayuda del núcleo con las secciones que aportan las
-// extensiones en medio, como si fueran suyas.
-func printUsage(w io.Writer) {
-	fmt.Fprint(w, usageHead)
-	plugin.WriteHelp(w, extensions().Commands())
-	fmt.Fprint(w, usageTail)
 }
 
 // cmdPlugins gestiona las extensiones: listarlas, instalarlas desde una
@@ -144,7 +125,7 @@ func pluginRows(reg *plugin.Registry) []pluginRow {
 // pluginsLs lista las extensiones: qué aportan, de dónde salen y por qué no se
 // pueden usar si es el caso.
 func pluginsLs(args []string) error {
-	fs := flag.NewFlagSet("plugins ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("plugin ls", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -183,8 +164,8 @@ func pluginsLs(args []string) error {
 		return err
 	}
 	fmt.Println("\nAn extension is any executable named kling-<name> on your PATH or in")
-	fmt.Println("$KLING_PLUGIN_PATH. Install one from this release:  kling plugins install <name>")
-	fmt.Println("After installing one, reload completion:  source <(kling completion zsh)")
+	fmt.Println("$KLING_PLUGIN_PATH. Install one from this release:  kling plugin install <name>")
+	fmt.Println("After installing one, reload completion:  " + reloadHint(""))
 	return nil
 }
 

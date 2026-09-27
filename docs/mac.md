@@ -58,7 +58,7 @@ Silicon y `firecracker` exige Linux con KVM, y el error dice cuál vale aquí.
 `KLING_VMM` la sustituye sin tocar el fichero: con un nombre (`vz`,
 `firecracker`) elige el backend; con una ruta, el binario.
 
-`kling info` dice qué backend usa un daemon (`backend: vz`) y su arquitectura.
+`kling status -v` dice qué backend usa un daemon (`backend: vz`) y su arquitectura.
 
 ## Dónde vive
 
@@ -79,8 +79,8 @@ loop y chroot de Linux. `POST /images` contesta 501 y dice qué hacer. Se
 construyen en un host Linux y se **copian**:
 
 ```sh
-kling images copy min  -from ssh://juan@lab-arm64
-kling images copy fetch -from ssh://juan@lab-arm64     # una imagen por capas
+kling image copy min  -from ssh://juan@lab-arm64
+kling image copy fetch -from ssh://juan@lab-arm64     # una imagen por capas
 ```
 
 `copy` mueve lo necesario para que `kling run -image <nombre>` funcione en el
@@ -95,7 +95,7 @@ contexto activo o el socket local). Si tienes un contexto activo que apunta al
 host Linux, di el destino explícitamente o desactívalo:
 
 ```sh
-kling images copy min -from ssh://juan@lab-arm64 -to "unix://$HOME/Library/Application Support/kindling/kling.sock"
+kling image copy min -from ssh://juan@lab-arm64 -to "unix://$HOME/Library/Application Support/kindling/kling.sock"
 # o
 kling context use -
 ```
@@ -169,8 +169,8 @@ y `pkg/scheduler` ya los usan (`api.Machine.Addr`); quien construya
 | | Linux (firecracker) | macOS (vz) |
 |---|---|---|
 | memoria de una restauración | se comparte el `mem.file` del dorado por copia en escritura: una copia más cuesta lo que diverge | **~350 MiB por VM**: el framework copia el estado a memoria al restaurar; la densidad de dorados es mucho menor |
-| construir imágenes | sí (`kling images build`, `toolchain`) | **no**: se copian (`kling images copy`) |
-| `kling images put`, `mcp refresh-bridge` | sí | **no**: montan la imagen con un loop |
+| construir imágenes | sí (`kling image build`, `toolchain`) | **no**: se copian (`kling image copy`) |
+| `kling image put`, `mcp refresh-bridge` | sí | **no**: montan la imagen con un loop |
 | techo de CPU por microVM (`-cpu-pct`) | cgroup v2 | **no se aplica**: no hay cgroups |
 | jailer, bajada de privilegios | sí | **no**: el aislamiento es el proceso auxiliar de Apple que aloja cada VM |
 | admisión por memoria | PSI (`KLING_MAX_MEM_PRESSURE`) | `kern.memorystatus_level`: por debajo del 15 % libre, 507 (`KLING_MIN_MEM_LEVEL`, 0 lo apaga) |

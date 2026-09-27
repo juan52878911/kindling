@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 )
 
 // Los botones «direct» tienen que salir de las plantillas de la demo: los

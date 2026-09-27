@@ -113,7 +113,7 @@ no salen de la máquina donde se evaluó**: aquí solo van cifras agregadas.
 
 - **Chispa, localizador** (`ci-lines`): binario `explains`/`noise`, 2^18
   cubos, palabras + bigramas + campos, pesos `balanced`, lo de por defecto de
-  `kling chispa train` (512 KB). Campos por línea (`triage/features.go`):
+  `kling ai chispa train` (512 KB). Campos por línea (`triage/features.go`):
   marcas (error, fallo, excepción, aserción, tiempo, recursos, «no
   encontrado», salida del proceso, aviso, ok, progreso, resumen) en la línea y
   en sus tres vecinas de cada lado, distancia al error más cercano y a la línea
@@ -231,7 +231,7 @@ para reentrenar (unas decenas por clase, según [CHISPA-EVAL.md](CHISPA-EVAL.md)
 
 | | |
 |---|---|
-| Chispa por línea (`kling chispa eval`, un núcleo) | 1,0 µs |
+| Chispa por línea (`kling ai chispa eval`, un núcleo) | 1,0 µs |
 | Preparar una línea (`BenchmarkFeatures`) | 4,7 µs |
 | Un núcleo, las dos cosas | ~175 000 líneas/s |
 | Por el gateway (socket Unix, 8 peticiones en vuelo) | 76 000-80 000 líneas/s |
@@ -252,7 +252,7 @@ porque la imagen de 1,5B de esta máquina se construyó sin caché de prompts.
 
 ### Chispa en proceso frente a microVM
 
-Los dos modelos desplegados con `kling chispa deploy` (dorados de 16 MiB,
+Los dos modelos desplegados con `kling ai chispa deploy` (dorados de 16 MiB,
 64 MiB de VM) y `"backend": "microvm"` en el registro; los mismos 4 logs de
 prueba (2 245 líneas clasificadas), 8 peticiones en vuelo:
 
@@ -273,7 +273,7 @@ Tres hallazgos de medirlo, para el núcleo:
    lotes en `/v1/classify`.
 2. **`max_replicas` no acotó las réplicas de Chispa**: con `max_replicas: 2`
    en `ci-lines`, la ráfaga de 8 peticiones en vuelo levantó 8 réplicas.
-3. En macOS `kling chispa deploy` se negaba a hacer el dorado de una imagen
+3. En macOS `kling ai chispa deploy` se negaba a hacer el dorado de una imagen
    traída de Linux (la única forma de tenerla en el Mac); ahora lo hace con
    `-reuse-image`. Y el constructor `chispa` falló en la VM de Lima de
    pruebas al encoger la capa (`resize2fs -M` dejó un «Resize inode not
@@ -296,7 +296,7 @@ ci-triage.feedback/v1`:
  "chunks":[{"from":829,"to":831,"score":0.86}],"log_sha256":"…","log_lines":913,"time":"…"}
 ```
 
-- Es un ejemplo de entrenamiento válido tal cual (`kling chispa train` usa
+- Es un ejemplo de entrenamiento válido tal cual (`kling ai chispa train` usa
   `text`, `label`, `fields` e ignora lo demás).
 - Lleva lo que necesita un reentreno con criterio: qué dijo cada capa y con
   qué confianza (para medir a VON como maestro frente a la persona), los

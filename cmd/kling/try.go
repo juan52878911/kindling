@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/units"
 )
 
 // kling try: ejecutar algo aislado en un solo comando.
@@ -20,7 +21,7 @@ import (
 // con -keep lo deja vivo para seguir trabajando en él.
 
 // tryDefaultImage es la imagen si no se da ni -image ni -from: la de
-// `kling images toolchain`, que lleva el agente de invitado (sin él no hay
+// `kling image toolchain`, que lleva el agente de invitado (sin él no hay
 // exec) y además node y python, lo que suele querer probar quien llega.
 const tryDefaultImage = "toolchain"
 
@@ -36,14 +37,14 @@ func cmdTry(args []string) (int, error) {
 	host := hostFlag(fs)
 	image := fs.String("image", "", "image with the guest agent (default: "+tryDefaultImage+")")
 	from := fs.String("from", "", "snapshot made from a machine with -allow-exec (~300 ms instead of a cold boot)")
-	mem := fs.Int("mem", 0, "memory in MiB (default 256)")
+	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default 256)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default 1)")
 	egress := fs.String("egress", "", "network egress: none (default) | internet | allowlist")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
-	ttl := fs.Duration("ttl", 0, "lifetime if kling dies before removing it, or with -keep (default 10m)")
+	ttl := units.DurationVar(fs, "ttl", 0, "lifetime if kling dies before removing it, or with -keep: 10m, 1h (bare number = seconds; default 10m)")
 	keep := fs.Bool("keep", false, "keep the sandbox afterwards and print its id")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling try [-image I | -from S] [-mem MiB] [-egress none|internet|allowlist] [-keep] [--] [cmd [args...]]")
+		fmt.Fprintln(os.Stderr, "usage: kling try [-image I | -from T] [-mem 256M] [-egress none|internet|allowlist] [-keep] [--] [cmd [args...]]")
 		fmt.Fprintln(os.Stderr, "  creates a throwaway sandbox, runs cmd (or opens a shell) and removes it")
 		fs.PrintDefaults()
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/guest"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
@@ -149,7 +150,7 @@ func (g *Gateway) handleClassify(endpoint string) http.HandlerFunc {
 		if !decodeBody(w, r, &req) {
 			return
 		}
-		if tc := g.config().Tasks[req.Task]; endpoint == "decide" && tc != nil && tc.Domotica != nil {
+		if tc := g.config().Tasks[req.Task]; endpoint == "decide" && tc != nil && tc.Intent != nil {
 			resp, err := g.Decide(r.Context(), req)
 			if err != nil {
 				writeErr(w, err)
@@ -185,8 +186,8 @@ func (g *Gateway) handleEval(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if tc := g.config().Tasks[req.Task]; tc != nil && tc.Domotica != nil {
-		rec, err := g.evalDomotica(r.Context(), req)
+	if tc := g.config().Tasks[req.Task]; tc != nil && tc.Intent != nil {
+		rec, err := g.evalIntent(r.Context(), req)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -225,7 +226,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 // TaskInfo es una tarea tal como la ve `kling ai ls`.
 type TaskInfo struct {
 	Name   string `json:"name"`
-	Kind   string `json:"kind"` // classify | generate | domotica
+	Kind   string `json:"kind"` // classify | generate | intent
 	Chispa string `json:"chispa,omitempty"`
 	// ChispaBackend es dónde vive ese modelo: inprocess o microvm.
 	ChispaBackend string        `json:"chispa_backend,omitempty"`
@@ -245,8 +246,8 @@ func (g *Gateway) handleTasks(w http.ResponseWriter, _ *http.Request) {
 	for _, n := range sortedKeys(cfg.Tasks) {
 		t := cfg.Tasks[n]
 		ti := TaskInfo{Name: n, Kind: "classify", Chispa: t.Chispa, VON: t.VON, Labels: t.Labels, Audit: t.Audit}
-		if t.Domotica != nil {
-			ti.Kind, ti.Chispa = "domotica", t.Domotica.Intent
+		if t.Intent != nil {
+			ti.Kind, ti.Chispa = "intent", t.Intent.Model
 			c := g.cascade(n)
 			ti.Cascade = &c
 		} else if t.IsGenerate() {
@@ -347,9 +348,9 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 		}
 		c := out[name]
 		switch m.State {
-		case "running":
+		case api.StateRunning:
 			c.running++
-		case "warm":
+		case api.StateWarm:
 			c.warm++
 		}
 		out[name] = c

@@ -36,7 +36,7 @@ import (
 //
 // Un maestro está validado si (a) un registro de `kling ai eval` de la tarea
 // dice que su capa gana a Chispa sobre etiquetas de verdad (la cascada con ese
-// VON, o la capa del codificador en domótica), o (b) en los casos auditados
+// VON, o la capa del codificador en una tarea de intención), o (b) en los casos auditados
 // con su voto acierta más que Chispa (McNemar de una cola, p < 0,05, con al
 // menos min_checks casos) Y lo que el filtro de acuerdo habría aceptado con su
 // voto acierta al menos accept_precision (estimado como aciertos/(n+1), con al

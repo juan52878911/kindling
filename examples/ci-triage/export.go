@@ -15,7 +15,7 @@ import (
 
 // cmdExport convierte el fichero de confirmaciones en etiquetas limpias, una
 // por log (la última confirmación de cada log gana): {"text", "fields",
-// "label", "by"}. Es lo que aceptan `kling chispa train -data` y la
+// "label", "by"}. Es lo que aceptan `kling ai chispa train -data` y la
 // importación de etiquetas humanas de la mejora continua
 // (`kling ai feedback <tarea> -import`). Por defecto deja fuera "flaky": el
 // modelo de categoría no la puede aprender de un solo log (-flaky la incluye).

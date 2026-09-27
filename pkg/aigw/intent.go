@@ -19,31 +19,43 @@ import (
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
 	"github.com/juan52878911/kindling/pkg/codificador"
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/pkg/intent"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
-// TAREAS DE DOMÓTICA: /v1/decide para la habitación de demo.
+// TAREAS DE INTENCIÓN: /v1/decide para órdenes con intención y huecos.
 //
-// La decisión es la cascada de pkg/domotica: plantillas de la demo (capa 1),
-// Chispa + Chispa-slots (capa 2: en proceso, microsegundos; o serverless, una
-// réplica de `kling chispa deploy` que se despierta con la orden si el modelo
-// de intención es backend "microvm", ver guestIntent) y, para lo que esas
-// dudan, el codificador de frases (capa 3): una réplica de un dorado kind
-// embed que pkg/scheduler despierta con la primera petición y congela al
-// quedarse ociosa, igual que un VON, y la cabeza .jenc que clasifica su
-// vector aquí mismo. Lo que tampoco resuelve sale con escalate: "von".
+// La decisión es la cascada de pkg/intent: las plantillas del dominio
+// (capa 1), Chispa + Chispa-slots (capa 2: en proceso, microsegundos; o
+// serverless, una réplica de `kling chispa deploy` que se despierta con la
+// orden si el modelo de intención es backend "microvm", ver guestIntent) y,
+// para lo que esas dudan, el codificador de frases (capa 3): una réplica de
+// un dorado kind embed que pkg/scheduler despierta con la primera petición y
+// congela al quedarse ociosa, igual que un VON, y la cabeza .jenc que
+// clasifica su vector aquí mismo. Lo que tampoco resuelve sale con escalate:
+// "von".
+//
+// Lo que sabe del dominio (plantillas, cómo se normaliza un hueco, qué
+// necesita cada intención) lo pone un intent.Domain: uno de datos
+// ("schema": un fichero JSON, intent.Schema) o uno en Go que el programa que
+// embebe el gateway registra en Options.Domains ("domain": su nombre).
 //
 // La capa 3 se enciende como la cascada Chispa → VON: solo si un registro de
-// evaluación (`kling ai eval <tarea> -data test.jsonl`) muestra que la cascada
-// con el codificador acierta la orden COMPLETA (intención y huecos) más veces
-// que sin él (McNemar, p < 0,05), con los mismos modelos que se sirven. Si no,
-// la tarea contesta con las capas rápidas y escala a "encoder".
+// evaluación (`kling ai eval <tarea> -data rows.jsonl`) muestra que la
+// cascada con el codificador acierta la orden COMPLETA (intención y huecos)
+// más veces que sin él (McNemar, p < 0,05), con los mismos modelos que se
+// sirven. Si no, la tarea contesta con las capas rápidas y escala a
+// "encoder". Ver docs/intent.md.
 
-// DomoticaConfig es una tarea de domótica.
-type DomoticaConfig struct {
-	// Intent es el modelo Chispa de intención (kind chispa).
-	Intent string `json:"intent"`
+// IntentConfig es una tarea de intención.
+type IntentConfig struct {
+	// Model es el modelo Chispa de intención (kind chispa).
+	Model string `json:"model"`
+	// Domain es el nombre de un dominio en Go registrado en
+	// Options.Domains; Schema, la ruta de un intent.Schema (relativa al
+	// registro). Uno de los dos.
+	Domain string `json:"domain,omitempty"`
+	Schema string `json:"schema,omitempty"`
 	// Slots es el etiquetador de huecos (.chispas); relativo al registro.
 	Slots string `json:"slots,omitempty"`
 	// Encoder es el codificador (kind embed) y Head la cabeza entrenada sobre
@@ -57,23 +69,26 @@ type DomoticaConfig struct {
 	FinalOOS bool `json:"final_oos,omitempty"`
 }
 
-func (c *Config) validateDomotica(n string, t *TaskConfig) []error {
+func (c *Config) validateIntent(n string, t *TaskConfig) []error {
 	var errs []error
-	d := t.Domotica
+	d := t.Intent
 	if t.Chispa != "" || t.VON != "" || t.EscalateTo != "" || t.EscalateForce || len(t.Labels) > 0 || t.System != "" ||
 		t.Prompt != "" || t.TopK != 0 || len(t.Thresholds) > 0 || t.Precision != 0 || t.Audit != 0 || t.Samples != 0 ||
 		t.MaxTokens != 0 || t.Temperature != nil || t.Grammar != nil || t.OnVONError != "" {
-		errs = append(errs, fmt.Errorf("task %q: a domotica task takes only its \"domotica\" block", n))
+		errs = append(errs, fmt.Errorf("task %q: an intent task takes only its \"intent\" block", n))
 	}
-	if m := c.Models[d.Intent]; m == nil || m.Kind != KindChispa {
-		errs = append(errs, fmt.Errorf("task %q: domotica.intent %q is not a chispa model", n, d.Intent))
+	if m := c.Models[d.Model]; m == nil || m.Kind != KindChispa {
+		errs = append(errs, fmt.Errorf("task %q: intent.model %q is not a chispa model", n, d.Model))
+	}
+	if (d.Domain == "") == (d.Schema == "") {
+		errs = append(errs, fmt.Errorf("task %q: intent needs a \"schema\" file or a \"domain\" built into the gateway (one of them)", n))
 	}
 	if (d.Encoder == "") != (d.Head == "") {
-		errs = append(errs, fmt.Errorf("task %q: domotica.encoder and domotica.head go together", n))
+		errs = append(errs, fmt.Errorf("task %q: intent.encoder and intent.head go together", n))
 	}
 	if d.Encoder != "" {
 		if m := c.Models[d.Encoder]; m == nil || m.Kind != KindEmbed {
-			errs = append(errs, fmt.Errorf("task %q: domotica.encoder %q is not an embed model", n, d.Encoder))
+			errs = append(errs, fmt.Errorf("task %q: intent.encoder %q is not an embed model", n, d.Encoder))
 		}
 	}
 	if d.EncoderForce && d.Encoder == "" {
@@ -82,91 +97,86 @@ func (c *Config) validateDomotica(n string, t *TaskConfig) []error {
 	return errs
 }
 
-// ---- modelos de las tareas de domótica
+// ---- lo que usan las tareas de intención
 
-var (
-	matcherOnce sync.Once
-	matcherVal  *domotica.Matcher
-	matcherErr  error
-)
-
-func demoMatcher() (*domotica.Matcher, error) {
-	matcherOnce.Do(func() { matcherVal, matcherErr = domotica.NewMatcher(domotica.DemoTemplates) })
-	return matcherVal, matcherErr
+// intentFiles guarda los .chispas, .jenc y esquemas cargados (pocos y
+// pequeños: sin presupuesto). Reload los olvida.
+type intentFiles struct {
+	mu      sync.Mutex
+	slots   map[string]*slots.Model
+	heads   map[string]*codificador.Head
+	schemas map[string]*intent.Schema
 }
 
-// domoFiles guarda los .chispas y .jenc cargados (pocos, y de ~100 KB: sin
-// presupuesto). Reload los olvida.
-type domoFiles struct {
-	mu    sync.Mutex
-	slots map[string]*slots.Model
-	heads map[string]*codificador.Head
-}
-
-func (f *domoFiles) reset() {
+func (f *intentFiles) reset() {
 	f.mu.Lock()
-	f.slots, f.heads = nil, nil
+	f.slots, f.heads, f.schemas = nil, nil, nil
 	f.mu.Unlock()
 }
 
-// loadSlotsFn y loadHeadFn se sustituyen en los tests.
+// loadSlotsFn, loadHeadFn y loadSchemaFn se sustituyen en los tests.
 var (
-	loadSlotsFn = slots.LoadFile
-	loadHeadFn  = codificador.LoadFile
+	loadSlotsFn  = slots.LoadFile
+	loadHeadFn   = codificador.LoadFile
+	loadSchemaFn = intent.LoadSchema
 )
 
-// getSlots y getHead leen el fichero FUERA del candado, como pkg/aigw/chispacache.go:
-// una tarea cuyo .chispas o .jenc tarda en leerse (o cuyo disco anda lento) no
-// para las decisiones de las demás tareas, que solo tocan el candado para un
-// mapa ya en memoria. Dos peticiones que piden a la vez el mismo fichero
-// pueden leerlo dos veces (son pocos, de ~100 KB: no compensa la coordinación
-// de chispacache), pero la segunda comprobación bajo el candado asegura que solo
+// cached lee el fichero FUERA del candado, como pkg/aigw/chispacache.go: una
+// tarea cuyo fichero tarda en leerse (o cuyo disco anda lento) no para las
+// decisiones de las demás tareas, que solo tocan el candado para un mapa ya
+// en memoria. Dos peticiones que piden a la vez el mismo fichero pueden
+// leerlo dos veces (son pocos y pequeños: no compensa la coordinación de
+// chispacache), pero la segunda comprobación bajo el candado asegura que solo
 // una entrada gana y todo el mundo ve la misma.
-
-func (f *domoFiles) getSlots(p string) (*slots.Model, error) {
-	f.mu.Lock()
-	m := f.slots[p]
-	f.mu.Unlock()
-	if m != nil {
-		return m, nil
+func cached[T any](mu *sync.Mutex, m *map[string]*T, p string, load func(string) (*T, error)) (*T, error) {
+	mu.Lock()
+	v := (*m)[p]
+	mu.Unlock()
+	if v != nil {
+		return v, nil
 	}
-	m, err := loadSlotsFn(p)
+	v, err := load(p)
 	if err != nil {
 		return nil, err
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if existing := f.slots[p]; existing != nil {
+	mu.Lock()
+	defer mu.Unlock()
+	if existing := (*m)[p]; existing != nil {
 		return existing, nil
 	}
-	if f.slots == nil {
-		f.slots = map[string]*slots.Model{}
+	if *m == nil {
+		*m = map[string]*T{}
 	}
-	f.slots[p] = m
-	return m, nil
+	(*m)[p] = v
+	return v, nil
 }
 
-func (f *domoFiles) getHead(p string) (*codificador.Head, error) {
-	f.mu.Lock()
-	h := f.heads[p]
-	f.mu.Unlock()
-	if h != nil {
-		return h, nil
+func (f *intentFiles) getSlots(p string) (*slots.Model, error) {
+	return cached(&f.mu, &f.slots, p, loadSlotsFn)
+}
+
+func (f *intentFiles) getHead(p string) (*codificador.Head, error) {
+	return cached(&f.mu, &f.heads, p, loadHeadFn)
+}
+
+func (f *intentFiles) getSchema(p string) (*intent.Schema, error) {
+	return cached(&f.mu, &f.schemas, p, loadSchemaFn)
+}
+
+// domain es el intent.Domain de una tarea.
+func (g *Gateway) domain(d *IntentConfig) (intent.Domain, error) {
+	if d.Domain != "" {
+		dom := g.opts.Domains[d.Domain]
+		if dom == nil {
+			return nil, fmt.Errorf("domain %q is not built into this gateway (a Go domain comes from the program that embeds pkg/aigw; use \"schema\" for a data file)", d.Domain)
+		}
+		return dom, nil
 	}
-	h, err := loadHeadFn(p)
+	s, err := g.files.getSchema(d.Schema)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("schema: %w", err)
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if existing := f.heads[p]; existing != nil {
-		return existing, nil
-	}
-	if f.heads == nil {
-		f.heads = map[string]*codificador.Head{}
-	}
-	f.heads[p] = h
-	return h, nil
+	return s, nil
 }
 
 // replicaEmbedder pide vectores a una réplica del dorado del codificador,
@@ -201,13 +211,9 @@ type guestIntent struct {
 	snap  string
 }
 
-func (r guestIntent) ClassifyIntent(ctx context.Context, text, lang string) (domotica.RemoteAnswer, error) {
-	var fields map[string]any
-	if lang == "es" || lang == "en" {
-		fields = map[string]any{"lang": lang}
-	}
-	a, err := r.g.askChispaGuest(ctx, r.snap, chispa.Input{Text: text, Fields: fields}, false)
-	out := domotica.RemoteAnswer{Replica: replicaInfo(r.model, a.Wake, a.Request)}
+func (r guestIntent) ClassifyIntent(ctx context.Context, text, lang string) (intent.RemoteAnswer, error) {
+	a, err := r.g.askChispaGuest(ctx, r.snap, chispa.Input{Text: text, Fields: intent.LangFields(lang)}, false)
+	out := intent.RemoteAnswer{Replica: replicaInfo(r.model, a.Wake, a.Request)}
 	if err != nil {
 		reason, _, _ := guestErrReason(err)
 		r.g.met.vonErr("chispa:"+r.model, reason)
@@ -224,18 +230,18 @@ func (r guestIntent) ClassifyIntent(ctx context.Context, text, lang string) (dom
 // replicaInfo traduce el despertar del planificador al estado de la traza:
 // thaw = estaba congelada, resume = pausada, restore = no había (del dorado),
 // y sin despertar (o adopt, ya corría) = despierta.
-func replicaInfo(model string, w *scheduler.WakeTrace, req time.Duration) *domotica.ReplicaInfo {
-	ri := &domotica.ReplicaInfo{Model: model, State: domotica.ReplicaWarm, RequestMS: msOf(req)}
+func replicaInfo(model string, w *scheduler.WakeTrace, req time.Duration) *intent.ReplicaInfo {
+	ri := &intent.ReplicaInfo{Model: model, State: intent.ReplicaWarm, RequestMS: msOf(req)}
 	if w == nil {
 		return ri
 	}
 	switch w.How {
 	case "thaw":
-		ri.State = domotica.ReplicaFrozen
+		ri.State = intent.ReplicaFrozen
 	case "resume":
-		ri.State = domotica.ReplicaPaused
+		ri.State = intent.ReplicaPaused
 	case "restore":
-		ri.State = domotica.ReplicaNew
+		ri.State = intent.ReplicaNew
 	}
 	ri.WakeMS = msOf(w.Total)
 	return ri
@@ -246,24 +252,24 @@ func msOf(d time.Duration) float64 { return math.Round(float64(d.Microseconds())
 // decider arma la cascada de una tarea. withEncoder añade la capa 3 (si la
 // tarea la tiene), esté o no encendida: la evaluación la necesita apagada y
 // encendida.
-func (g *Gateway) decider(cfg *Config, d *DomoticaConfig, withEncoder bool) (*domotica.Decider, error) {
-	mt, err := demoMatcher()
+func (g *Gateway) decider(cfg *Config, d *IntentConfig, withEncoder bool) (*intent.Decider, error) {
+	dom, err := g.domain(d)
 	if err != nil {
 		return nil, err
 	}
-	dec := &domotica.Decider{Matcher: mt, FinalOOS: d.FinalOOS}
-	if mc := cfg.Models[d.Intent]; mc.Backend == BackendMicroVM {
-		dec.Remote = guestIntent{g: g, model: d.Intent, snap: mc.Snapshot}
+	dec := &intent.Decider{Domain: dom, FinalOOS: d.FinalOOS}
+	if mc := cfg.Models[d.Model]; mc.Backend == BackendMicroVM {
+		dec.Remote = guestIntent{g: g, model: d.Model, snap: mc.Snapshot}
 	} else if dec.Intent, err = g.chispa.get(mc.Path); err != nil {
 		return nil, fmt.Errorf("intent model: %w", err)
 	}
 	if d.Slots != "" {
-		if dec.Slots, err = g.domo.getSlots(d.Slots); err != nil {
+		if dec.Slots, err = g.files.getSlots(d.Slots); err != nil {
 			return nil, fmt.Errorf("slot model: %w", err)
 		}
 	}
 	if withEncoder && d.Encoder != "" {
-		h, err := g.domo.getHead(d.Head)
+		h, err := g.files.getHead(d.Head)
 		if err != nil {
 			return nil, fmt.Errorf("encoder head: %w", err)
 		}
@@ -273,22 +279,35 @@ func (g *Gateway) decider(cfg *Config, d *DomoticaConfig, withEncoder bool) (*do
 	return dec, nil
 }
 
-// DecideResponse es la respuesta de /v1/decide en una tarea de domótica: la
-// decisión de pkg/domotica, con la intención también como "decision" (lo que
+// DecideResponse es la respuesta de /v1/decide en una tarea de intención: la
+// decisión de pkg/intent, con la intención también como "decision" (lo que
 // devuelve /v1/decide en las tareas de clasificación).
 type DecideResponse struct {
 	// ID identifica la respuesta para /v1/feedback; solo en tareas con "learn".
 	ID    string `json:"id,omitempty"`
 	Task  string `json:"task"`
 	Label string `json:"decision"`
-	domotica.Decision
+	intent.Decision
 	LatencyMS float64 `json:"latency_ms"`
 	// Encoder dice si la capa 3 estaba encendida y, si no, por qué (el estado
 	// de su evaluación): quien llama no tiene que adivinarlo.
 	Encoder *CascadeState `json:"encoder,omitempty"`
 }
 
-// Decide decide una orden de una tarea de domótica.
+// validLang: "", "auto" o un código corto de letras (es, en, pt-br…).
+func validLang(l string) bool {
+	if len(l) > 8 {
+		return false
+	}
+	for _, c := range l {
+		if !(c >= 'a' && c <= 'z' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// Decide decide una orden de una tarea de intención.
 func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideResponse, error) {
 	t0 := time.Now()
 	cfg := g.config()
@@ -296,19 +315,17 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 	if tc == nil {
 		return nil, statusf(http.StatusNotFound, "unknown task %q", req.Task)
 	}
-	if tc.Domotica == nil {
-		return nil, statusf(http.StatusBadRequest, "task %q is not a domotica task", req.Task)
+	if tc.Intent == nil {
+		return nil, statusf(http.StatusBadRequest, "task %q is not an intent task", req.Task)
 	}
 	if len(req.Text) > maxText {
 		return nil, statusf(http.StatusRequestEntityTooLarge, "text larger than %d bytes", maxText)
 	}
-	switch req.Lang {
-	case "", "auto", "es", "en":
-	default:
-		return nil, statusf(http.StatusBadRequest, "lang must be es, en or auto")
+	if !validLang(req.Lang) {
+		return nil, statusf(http.StatusBadRequest, "lang must be auto or a short language code (es, en…)")
 	}
 	casc := g.cascade(req.Task)
-	dec, err := g.decider(cfg, tc.Domotica, casc.On())
+	dec, err := g.decider(cfg, tc.Intent, casc.On())
 	if err != nil {
 		log.Printf("task %s: %v", req.Task, err)
 		return nil, statusf(http.StatusServiceUnavailable, "task %q: %v", req.Task, err)
@@ -316,23 +333,23 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 	d := dec.DecideContext(ctx, req.Text, req.Lang)
 	if d.ChispaError != "" {
 		g.met.inc(g.met.degraded, req.Task)
-		log.Printf("task %s: chispa %s (microvm): %s", req.Task, tc.Domotica.Intent, d.ChispaError)
+		log.Printf("task %s: chispa %s (microvm): %s", req.Task, tc.Intent.Model, d.ChispaError)
 	}
 	if d.EncoderError != "" {
-		g.met.vonErr(tc.Domotica.Encoder, "encoder")
+		g.met.vonErr(tc.Intent.Encoder, "encoder")
 		g.met.inc(g.met.degraded, req.Task)
-		log.Printf("task %s: encoder %s: %s", req.Task, tc.Domotica.Encoder, d.EncoderError)
+		log.Printf("task %s: encoder %s: %s", req.Task, tc.Intent.Encoder, d.EncoderError)
 	}
 	resp := &DecideResponse{Task: req.Task, Label: d.Intent, Decision: d}
-	if tc.Domotica.Encoder != "" {
+	if tc.Intent.Encoder != "" {
 		resp.Encoder = &casc
 	}
 	if ls, ok := g.learnFor(req.Task); ok {
 		resp.ID = g.learn.newID()
-		fast := d.Confident && (d.Layer == domotica.LayerTemplate || d.Layer == domotica.LayerChispa)
+		fast := d.Confident && (d.Layer == intent.LayerTemplate || d.Layer == intent.LayerChispa)
 		g.met.learnAnswer(req.Task, ls.version, fast, ls.cfg.WindowMinutes)
-		if !fast && d.Layer != domotica.LayerTemplate && ls.cfg.capturing() {
-			g.captureDecide(ctx, ls, cfg, tc, req.Task, resp.ID, req.Text, d)
+		if !fast && d.Layer != intent.LayerTemplate && ls.cfg.capturing() {
+			g.captureDecide(ctx, ls, cfg, tc, req.Task, resp.ID, req.Text, d, dec.Domain.OutOfScope())
 		}
 	}
 	el := time.Since(t0)
@@ -347,9 +364,9 @@ func (g *Gateway) Decide(ctx context.Context, req ClassifyRequest) (*DecideRespo
 
 // ---- la puerta de la capa 3
 
-// DomoticaEvalResults son las cifras de la evaluación de una tarea de
-// domótica: la cascada sin la capa 3 (plantillas → Chispa) y con ella.
-type DomoticaEvalResults struct {
+// IntentEvalResults son las cifras de la evaluación de una tarea de
+// intención: la cascada sin la capa 3 (plantillas → Chispa) y con ella.
+type IntentEvalResults struct {
 	Examples int `json:"examples"`
 	// Orden completa bien (intención y huecos), cubierta confiada y acierto
 	// de lo confiado, sin y con el codificador.
@@ -375,8 +392,8 @@ type DomoticaEvalResults struct {
 	FastOnlyRight    int     `json:"fast_only_right"`
 	CascadeOnlyRight int     `json:"cascade_only_right"`
 	PValue           float64 `json:"p_value"`
-	// Lo mismo contando también la conjetura de lo que escala (el «exact» de
-	// docs/DOMOTICA-EVAL.md): informativo.
+	// Lo mismo contando también la conjetura de lo que escala (el «exact»):
+	// informativo.
 	ExactFastOnlyRight    int     `json:"exact_fast_only_right"`
 	ExactCascadeOnlyRight int     `json:"exact_cascade_only_right"`
 	ExactPValue           float64 `json:"exact_p_value"`
@@ -385,17 +402,19 @@ type DomoticaEvalResults struct {
 	DurationS             float64 `json:"duration_s"`
 }
 
-// DomoticaEvalRecord es lo que se guarda (ai-evals/<tarea>.json) y lo que
+// IntentEvalRecord es lo que se guarda (ai-evals/<tarea>.json) y lo que
 // mira la puerta: la identidad de todo lo que cambia el resultado.
-type DomoticaEvalRecord struct {
+type IntentEvalRecord struct {
 	Task string    `json:"task"`
-	Kind string    `json:"kind"` // "domotica"
+	Kind string    `json:"kind"` // "intent"
 	At   time.Time `json:"at"`
 	Data struct {
 		Name     string `json:"name,omitempty"`
 		SHA256   string `json:"sha256"`
 		Examples int    `json:"examples"`
 	} `json:"data"`
+	// Domain es el dominio: "domain:<nombre>" (Go) o "schema:<sha256>".
+	Domain string `json:"domain"`
 	Intent struct {
 		Model  string `json:"model"`
 		SHA256 string `json:"sha256"`
@@ -406,22 +425,31 @@ type DomoticaEvalRecord struct {
 		Model    string `json:"model"`
 		Snapshot string `json:"snapshot"`
 	} `json:"encoder"`
-	FinalOOS  bool                `json:"final_oos"`
-	Results   DomoticaEvalResults `json:"results"`
-	BeatsFast bool                `json:"beats_fast"`
-	Verdict   string              `json:"verdict"`
-	Stored    string              `json:"stored,omitempty"`
+	FinalOOS  bool              `json:"final_oos"`
+	Results   IntentEvalResults `json:"results"`
+	BeatsFast bool              `json:"beats_fast"`
+	Verdict   string            `json:"verdict"`
+	Stored    string            `json:"stored,omitempty"`
 }
 
-// domoIdentity son los hashes de lo que sirve una tarea de domótica.
-func domoIdentity(cfg *Config, d *DomoticaConfig) (intent, slotsSum, head string, err error) {
-	im := cfg.Models[d.Intent]
+// intentIdentity son los hashes de lo que sirve una tarea de intención.
+func intentIdentity(cfg *Config, d *IntentConfig) (domain, model, slotsSum, head string, err error) {
+	if d.Domain != "" {
+		domain = "domain:" + d.Domain
+	} else {
+		var s string
+		if s, err = fileSHA256(d.Schema); err != nil {
+			return
+		}
+		domain = "schema:" + s
+	}
+	im := cfg.Models[d.Model]
 	if im.Backend == BackendMicroVM {
 		// Sin .chispa local que hashear (el modelo vive horneado en el dorado):
 		// el nombre del dorado es su identidad, igual que ya hace el codificador
 		// (Encoder.Snapshot) más abajo.
-		intent = "snapshot:" + im.Snapshot
-	} else if intent, err = fileSHA256(im.Path); err != nil {
+		model = "snapshot:" + im.Snapshot
+	} else if model, err = fileSHA256(im.Path); err != nil {
 		return
 	}
 	if d.Slots != "" {
@@ -435,9 +463,9 @@ func domoIdentity(cfg *Config, d *DomoticaConfig) (intent, slotsSum, head string
 	return
 }
 
-// gateDomotica decide si la capa 3 de una tarea puede encenderse.
-func (g *Gateway) gateDomotica(cfg *Config, name string, tc *TaskConfig) CascadeState {
-	d := tc.Domotica
+// gateIntent decide si la capa 3 de una tarea puede encenderse.
+func (g *Gateway) gateIntent(cfg *Config, name string, tc *TaskConfig) CascadeState {
+	d := tc.Intent
 	if d.Encoder == "" {
 		return CascadeState{Status: "off"}
 	}
@@ -460,23 +488,23 @@ func (g *Gateway) gateDomotica(cfg *Config, name string, tc *TaskConfig) Cascade
 	if errors.Is(err, os.ErrNotExist) {
 		return refuse("no eval record shows the encoder beats the fast layers on this task")
 	}
-	var rec DomoticaEvalRecord
+	var rec IntentEvalRecord
 	if err == nil {
 		err = json.Unmarshal(b, &rec)
 	}
-	if err != nil || rec.Kind != "domotica" {
-		return refuse(fmt.Sprintf("its eval record is unreadable or not a domotica eval (%v)", err))
+	if err != nil || rec.Kind != "intent" {
+		return refuse(fmt.Sprintf("its eval record is unreadable or not an intent eval (%v)", err))
 	}
 	st.Verdict = rec.Verdict
 	if rec.Encoder.Model != d.Encoder || rec.Encoder.Snapshot != cfg.Models[d.Encoder].Snapshot {
 		return refuse(fmt.Sprintf("the eval was for %s (%s)", rec.Encoder.Model, rec.Encoder.Snapshot))
 	}
-	in, sl, hd, err := domoIdentity(cfg, d)
+	dm, in, sl, hd, err := intentIdentity(cfg, d)
 	if err != nil {
 		return refuse("reading the task's models: " + err.Error())
 	}
-	if in != rec.Intent.SHA256 || sl != rec.SlotsSHA256 || hd != rec.HeadSHA256 || d.FinalOOS != rec.FinalOOS {
-		return refuse("the intent, slot or head model (or final_oos) changed since the eval")
+	if dm != rec.Domain || in != rec.Intent.SHA256 || sl != rec.SlotsSHA256 || hd != rec.HeadSHA256 || d.FinalOOS != rec.FinalOOS {
+		return refuse("the domain, intent, slot or head model (or final_oos) changed since the eval")
 	}
 	if !rec.BeatsFast {
 		return refuse("its eval does not show it beats the fast layers (" + rec.Verdict + ")")
@@ -485,14 +513,14 @@ func (g *Gateway) gateDomotica(cfg *Config, name string, tc *TaskConfig) Cascade
 	return st
 }
 
-// evalDomotica pasa filas etiquetadas por la cascada sin y con la capa 3. Una
+// evalIntent pasa filas etiquetadas por la cascada sin y con la capa 3. Una
 // sola pasada: solo lo que las capas rápidas no contestan confiado va al
 // codificador.
-func (g *Gateway) evalDomotica(ctx context.Context, req EvalRequest) (*DomoticaEvalRecord, error) {
+func (g *Gateway) evalIntent(ctx context.Context, req EvalRequest) (*IntentEvalRecord, error) {
 	t0 := time.Now()
 	cfg := g.config()
 	tc := cfg.Tasks[req.Task]
-	d := tc.Domotica
+	d := tc.Intent
 	if d.Encoder == "" {
 		return nil, statusf(http.StatusBadRequest, "task %q has no encoder layer to evaluate", req.Task)
 	}
@@ -507,18 +535,23 @@ func (g *Gateway) evalDomotica(ctx context.Context, req EvalRequest) (*DomoticaE
 	if err != nil {
 		return nil, statusf(http.StatusServiceUnavailable, "%v", err)
 	}
+	dom := fast.Domain
 	dh := sha256.New()
 	enc := json.NewEncoder(dh)
+	gold := make([]any, len(req.Rows))
 	for i := range req.Rows {
 		if len(req.Rows[i].Text) > maxText {
 			return nil, statusf(http.StatusRequestEntityTooLarge, "row %d: text larger than %d bytes", i+1, maxText)
 		}
+		if gold[i], err = dom.ParseSlots(req.Rows[i].Slots); err != nil {
+			return nil, statusf(http.StatusBadRequest, "row %d: %v", i+1, err)
+		}
 		_ = enc.Encode(req.Rows[i])
 	}
-	exact := func(r domotica.Row, x domotica.Decision) bool {
-		return x.Intent == r.Intent && domotica.SlotsEqual(domotica.Resolve(r.Intent, r.Slots), domotica.Resolve(x.Intent, x.Slots))
+	exact := func(i int, x intent.Decision) bool {
+		return dom.Exact(req.Rows[i].Intent, gold[i], x.Intent, x.Slots)
 	}
-	var res DomoticaEvalResults
+	var res IntentEvalResults
 	res.Examples = len(req.Rows)
 	var fOK, cOK, fConf, cConf, fConfOK, cConfOK int
 	var lat []float64
@@ -534,14 +567,14 @@ func (g *Gateway) evalDomotica(ctx context.Context, req EvalRequest) (*DomoticaE
 			switch {
 			case cd.EncoderError != "":
 				res.EncoderErrors++
-			case cd.Layer == domotica.LayerEncoder && cd.Confident:
+			case cd.Layer == intent.LayerEncoder && cd.Confident:
 				res.EncoderConfident++
 			}
 			if cd.EncoderUS > 0 {
 				lat = append(lat, cd.EncoderUS/1000)
 			}
 		}
-		fr, cr := exact(r, fd), exact(r, cd)
+		fr, cr := exact(i, fd), exact(i, cd)
 		if fr {
 			fOK++
 		}
@@ -592,17 +625,17 @@ func (g *Gateway) evalDomotica(ctx context.Context, req EvalRequest) (*DomoticaE
 	res.EncoderP50MS, res.EncoderP95MS = quantile(lat, 0.5), quantile(lat, 0.95)
 	res.DurationS = math.Round(time.Since(t0).Seconds()*10) / 10
 
-	rec := &DomoticaEvalRecord{Task: req.Task, Kind: "domotica", At: time.Now().UTC().Truncate(time.Second), FinalOOS: d.FinalOOS, Results: res}
+	rec := &IntentEvalRecord{Task: req.Task, Kind: "intent", At: time.Now().UTC().Truncate(time.Second), FinalOOS: d.FinalOOS, Results: res}
 	rec.Data.Name, rec.Data.SHA256, rec.Data.Examples = req.Data, hex.EncodeToString(dh.Sum(nil)), n
-	rec.Intent.Model = d.Intent
-	if rec.Intent.SHA256, rec.SlotsSHA256, rec.HeadSHA256, err = domoIdentity(cfg, d); err != nil {
+	rec.Intent.Model = d.Model
+	if rec.Domain, rec.Intent.SHA256, rec.SlotsSHA256, rec.HeadSHA256, err = intentIdentity(cfg, d); err != nil {
 		return nil, err
 	}
 	rec.Encoder.Model, rec.Encoder.Snapshot = d.Encoder, cfg.Models[d.Encoder].Snapshot
 	// Gana si contesta bien más órdenes donde discrepan (McNemar) y no
 	// comete más errores confiados que el 1 % de lo que gana: una capa que
-	// contesta más pero se equivoca más con confianza haría cosas en la
-	// habitación que nadie pidió.
+	// contesta más pero se equivoca más con confianza ejecutaría órdenes que
+	// nadie pidió.
 	gain := res.CascadeOnlyRight - res.FastOnlyRight
 	extraWrong := res.CascadeConfidentWrong - res.FastConfidentWrong
 	sig := gain > 0 && res.PValue < 0.05
@@ -661,10 +694,10 @@ func (g *Gateway) saveRecord(task string, v any) error {
 // órdenes indirectas); las que escalaron por un hueco que falta o por ser
 // dos órdenes no enseñan nada al modelo de intención. Si la capa del
 // codificador contestó confiada, su respuesta va como voto de maestro.
-func (g *Gateway) captureDecide(ctx context.Context, ls learnState, cfg *Config, tc *TaskConfig, task, id, text string, d domotica.Decision) {
+func (g *Gateway) captureDecide(ctx context.Context, ls learnState, cfg *Config, tc *TaskConfig, task, id, text string, d intent.Decision, oos string) {
 	in := chispa.Input{Text: text, Fields: map[string]any{"lang": d.Lang}}
 	var p chispa.Prediction
-	if mc := cfg.Models[tc.Domotica.Intent]; mc.Backend == BackendMicroVM {
+	if mc := cfg.Models[tc.Intent.Model]; mc.Backend == BackendMicroVM {
 		// La réplica acaba de contestar esta orden (está despierta): se le
 		// pide la distribución entera, que sin explain solo manda si duda.
 		a, err := g.askChispaGuest(ctx, mc.Snapshot, in, true)
@@ -680,12 +713,12 @@ func (g *Gateway) captureDecide(ctx context.Context, ls learnState, cfg *Config,
 		}
 		p = im.PredictFull(in, 0)
 	}
-	if p.Confident && p.Label != domotica.OutOfScope {
+	if p.Confident && p.Label != oos {
 		return
 	}
 	var votes []TeacherVote
-	if d.Layer == domotica.LayerEncoder && d.Confident && d.Intent != "" {
-		votes = []TeacherVote{{Name: tc.Domotica.Encoder, Label: d.Intent, Conf: round4(d.Prob)}}
+	if d.Layer == intent.LayerEncoder && d.Confident && d.Intent != "" {
+		votes = []TeacherVote{{Name: tc.Intent.Encoder, Label: d.Intent, Conf: round4(d.Prob)}}
 	}
 	g.captureEscalation(ls, task, id, "escalated", in, p, votes)
 }

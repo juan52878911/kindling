@@ -8,6 +8,136 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## v0.14.0 — 2026-09-26
+
+**La CLI, ordenada, y el gateway de IA sin dominio.** Tres sustantivos —imagen (rootfs, arranca en frío) →
+plantilla (snapshot dorado, arranca en ms) → máquina— y doce verbos de uso
+diario en primer nivel; lo demás vive bajo su sustantivo o bajo la extensión
+que lo aporta. Todos los nombres de antes siguen funcionando como alias
+silenciosos.
+
+### Núcleo
+
+- **Pantalla `kling`**: sin argumentos (y `kling help`) enseña dónde empezar
+  (`try`, `mcp add`, `connect`), lo de cada día, y a dónde ir a buscar lo
+  demás, en 20 líneas. El volcado completo de siempre es `kling help all`.
+- **Una sola ayuda** (`pkg/plugin/help.go`): `kling help <cmd> [<sub>]` y
+  `kling <cmd> -h` imprimen lo mismo —sinopsis, `USAGE`, `FLAGS`, `See also`—
+  para el núcleo y las extensiones. Arregla `kling help mcp` (daba
+  `unknown subcommand "-h"`), `kling help try` (imprimía la sinopsis dos
+  veces) y el `Usage of add:` crudo de las extensiones.
+- **Estado `frozen`** en `ps`, `inspect`, `topo`, `top` y el API: es lo que
+  produce `kling freeze`; hasta ahora se llamaba `warm`. **Es el único cambio
+  en el JSON**: `state: "warm"` → `"frozen"`. La compatibilidad es de un solo
+  sentido: quien lee con el `pkg/api` de 0.14 acepta también `"warm"`
+  (`api.State.UnmarshalJSON`), así que un CLI 0.14 entiende a un daemon 0.13 y
+  un daemon 0.14 lee el estado que guardó el 0.13; pero un lector de 0.13 (CLI,
+  gateway o consumidor de `-json` propio) que reciba `"frozen"` de un daemon
+  0.14 no lo reconoce como congelado: hay que actualizarlo. `-keepwarm`/
+  `-prewarm` no cambian: describen una política, no un estado.
+- **Nombres nuevos**: `save` (era `commit`), `template ls|inspect|rm` (era
+  `snapshots`, `rmi`), `image …` (era `images`), `plugin …` (era `plugins`),
+  `machine resize|squeeze|secret` (eran `resize`, `squeeze`, `mmds`; ocultos
+  en `kling help`, en `help all` bajo ADVANCED con `topo`, `events`, `daemon`),
+  `status -v` (era `info`). `kling status` sale con 1 si el daemon no contesta.
+- **`ai model` y `ai chispa`**: `models` y `chispa` dejan de ser extensiones
+  sueltas y pasan bajo `ai` (`kling ai model add`, `kling ai chispa train`);
+  una sola incorporada, `ai`, con su manifiesto. `-vcpus` de `chispa deploy`
+  pasa a `-cpus` como en todos los demás (el viejo avisa).
+- **Unidades con sufijo** (`pkg/units`): `-mem 512M|2G`, `-ttl 10m|1h`,
+  `-mem-max 2G`, en `run`, `try`, `sandbox`, `machine resize`, `ai model add`,
+  `ai chispa deploy`, `mcp import`, `mcp verify`. Un entero desnudo vale lo de
+  siempre (MiB, segundos): ningún script cambia de significado.
+- **Listados y borrados iguales**: todo `<noun> ls` acepta `-q` (`template`,
+  `image`, `volume`, `sandbox`, `mcp`); `rm`, `template rm`, `image rm`,
+  `volume rm` y `sandbox rm` aceptan varios nombres, preguntan en una terminal
+  si son más de uno y `-f` lo salta (sin terminal no preguntan). `ps` enseña
+  `IMAGE/TEMPLATE`: una máquina instanciada de una plantilla se identifica por
+  ella.
+- **`next:`** en lo que crea algo (`run`, `save`, `sandbox create`,
+  `volume create`, `ai model add`, `ai chispa deploy`, `up`), como `doctor`
+  imprime `fix:` y los errores `try:`. Va a stderr. `NO_COLOR` vuelve ASCII
+  las marcas ✓/!/✗ de `doctor`.
+- **Extensiones con espacio de nombres** (manifiesto v2): los comandos de una
+  extensión se teclean `kling <ext> <cmd>` y le llegan como `kling-<ext>
+  <cmd>`; `top_level` promueve uno (solo `connect`); `hidden` lo deja fuera de
+  la ayuda; `group` en el manifiesto dice en qué sección de la pantalla sale.
+  Los manifiestos v1 (kling-mcp 0.13) se siguen leyendo con su semántica de
+  antes, y los alias `add/search/gateway/…` solo se traducen si ninguna
+  extensión instalada sirve ya esa palabra. El completado se genera del mismo
+  árbol (`cmd/kling/tree.go`), con tercer nivel para `machine resize <ref>`.
+- **Alias silenciosos** de todos los nombres de antes; plan: en 0.15 avisan una
+  vez por proceso, en 0.16 se retiran los de extensiones; `commit`, `snapshots`
+  y `plugins` se quedan para siempre.
+- **Descubrimiento**: `kling-vz`, `kling-chispa`, `kling-bridge`,
+  `kling-bridge-local`, `kling-guest` y los `companions` de las extensiones
+  instaladas ya no se toman por extensiones (`kling doctor` enseñaba
+  `✗ extension vz`). `doctor` solo avisa del directorio de extensiones fuera
+  del PATH si hay compañeros dentro, y da por bueno el completado instalado en
+  el rc aunque esta shell no lo haya cargado.
+- **`scripts/install.sh`**: escribe cada binario en un temporal del mismo
+  directorio y lo renombra encima (sobrescribir un `kling` en marcha lo mataba
+  en macOS por la firma de código); detecta la shell para la línea de recarga
+  del completado (siempre decía zsh; también en `kling plugin ls|install`);
+  instala el completado y, salvo `--no-rc`/`KLING_NO_RC=1`, añade a tu rc la
+  línea que lo carga y el PATH de `--prefix` si faltaba, para que
+  `kling doctor` salga en verde nada más instalar.
+
+- **Tareas de intención genéricas en el gateway de IA.** El bloque `"domotica"`
+  de `ai.json` y el tipo de tarea `domotica` desaparecen del núcleo: en su lugar,
+  una tarea `"intent"` (`/v1/decide`, `kling ai test|eval|retrain`) con la
+  misma cascada —plantillas → Chispa + Chispa-slots (en proceso o serverless) →
+  codificador con puerta de McNemar → `escalate: "von"`— y la misma mejora
+  continua, pero sin vocabulario de ningún dominio: la cascada vive en el paquete
+  nuevo `pkg/intent` y lo que sabe el dominio (plantillas, valores de los huecos,
+  qué necesita cada intención) sale de un esquema JSON (`"schema"`) o de un
+  `intent.Domain` en Go que registra el programa que embebe `pkg/aigw`
+  (`"domain"`, `aigw.Options.Domains`). Guía en `docs/intent.md`.
+- **Cambio incompatible** para quien tenga una tarea `domotica`: el bloque pasa a
+  `"intent": {"model": …, "domain" | "schema": …, "slots", "encoder", "head",
+  "encoder_force", "final_oos"}` (`intent` → `model`); `kind` de `/v1/tasks` y
+  del registro de evaluación es `"intent"`, y un registro `kind: "domotica"` ya
+  no enciende la capa 3: hay que repetir `kling ai eval <tarea>`.
+- Fuera `pkg/domotica` y la pista «`kling plugin install domotica`».
+
+### kling-mcp
+
+- Comandos bajo `kling mcp`: `search`, `add`, `import`, `ls` (con `-q`),
+  `inspect` (nuevo), `refresh`, `refresh-bridge`, `verify`, `health`, `heal`,
+  `link`, `unlink`, `serve` (era `gateway`), `export`, `memory`, `migrate`;
+  `connect` sigue en primer nivel. `kling-mcp gateway` y `kling-mcp mcp …`
+  siguen funcionando para las units de 0.13; `kling-gateway.service` y
+  `kling-heal.service` usan ya `serve` y `heal`.
+
+### kling-sandbox y operador
+
+- `sbx` se promueve explícitamente (`top_level`): bajo el nombre de la
+  extensión sería `kling sandbox …`, que es del núcleo. El operador y el
+  frontal leen `frozen` (y `warm` de un daemon anterior).
+
+### Ejemplos
+
+- **La demo de domótica es un programa aparte, `kindling-domotica`**, y no una
+  extensión de kling: sin subcomando `kling domotica`, sin asset
+  `kling-domotica-<os>-<arch>` en la release ni `install.sh --with domotica`.
+  Todo lo de la habitación (taxonomía, léxico, plantillas, simulador,
+  validación del LLM, datos) vive en `examples/domotica`
+  (`internal/domotica`, `internal/tools`, `cmd/domotica-data`, antes
+  `pkg/domotica` y `tools/domotica-data`). Subcomandos: `gateway` (el gateway
+  de kindling con el dominio `smart-room` registrado), `room` (la página, antes
+  `domotica-demo`) y las herramientas `decide`, `eval`, `train-slots`, `embed`,
+  `train-encoder`, `templates`, `eval-llm`. `make domotica` lo compila; los
+  servicios de systemd de `examples/domotica` arrancan `kindling-domotica
+  gateway` y `kindling-domotica room`. Las decisiones y las cifras de
+  `docs/DOMOTICA-EVAL.md` no cambian (`kindling-domotica eval` da la misma
+  tabla, y `/v1/decide` la misma respuesta en las 9 794 frases del test).
+
+### Docs
+
+- README, `docs/*.md`, las guías de `ext/mcp` y `ext/sandbox`, los scripts de
+  e2e y los benches usan los nombres nuevos. `docs/extensions.md` describe el
+  manifiesto v2 y el plan de alias.
+
 ## v0.13.0 — 2026-09-26
 
 **Un repositorio, una release.** kindling-mcp y kindling-sandbox entran en este

@@ -72,7 +72,7 @@ func cmdAnalyze(args []string) error {
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	confirm := fs.String("confirm", "", "record the right category for this log in -feedback: \"ok\" accepts the result, or a category ("+strings.Join(triage.HumanCategories, ", ")+")")
 	note := fs.String("note", "", "with -confirm: a short note for the record")
-	fbPath := fs.String("feedback", "ci-triage-feedback.jsonl", "with -confirm: JSONL file the confirmations are appended to (trainable by `kling chispa train`)")
+	fbPath := fs.String("feedback", "ci-triage-feedback.jsonl", "with -confirm: JSONL file the confirmations are appended to (trainable by `kling ai chispa train`)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: ci-triage analyze [flags] <logfile|->")

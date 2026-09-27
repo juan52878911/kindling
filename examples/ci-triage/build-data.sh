@@ -39,9 +39,9 @@ echo "### data"
 
 # Opciones elegidas mirando solo la validación (docs/CI-TRIAGE-EVAL.md).
 echo "### line locator (explains / noise)"
-"$out/kling" chispa train -data "$out/lines-train.jsonl" -valid "$out/lines-valid.jsonl" -o "$out/lines.chispa"
+"$out/kling" ai chispa train -data "$out/lines-train.jsonl" -valid "$out/lines-valid.jsonl" -o "$out/lines.chispa"
 echo "### category"
-"$out/kling" chispa train -data "$out/category-train.jsonl" -valid "$out/category-valid.jsonl" \
+"$out/kling" ai chispa train -data "$out/category-train.jsonl" -valid "$out/category-valid.jsonl" \
 	-o "$out/category.chispa" -precision 0.9 -min-support 5
 
 cat <<EOT

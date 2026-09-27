@@ -6,7 +6,7 @@ snapshot, no tiene red salvo que se pida, ejecuta lo que se le mande con la sali
 en streaming, y se destruye sola al vencer su tiempo de vida.
 
 ```sh
-kling images toolchain                          # una imagen con node, npm, python3 y pip
+kling image toolchain                          # una imagen con node, npm, python3 y pip
 kling sandbox create -image toolchain -name sb  # ~5 s en frío
 kling cp ./analisis.py sb:/tmp/
 kling exec sb -- python3 /tmp/analisis.py       # la salida llega según sale
@@ -49,8 +49,8 @@ congelarse (por defecto 10 minutos, máximo 24 horas).
 | `kling sandbox rm sb` | destruir ya |
 
 La imagen tiene que llevar el agente de invitado (`kling-guest`): la de
-`kling images toolchain`, o cualquiera construida con
-`kling images build -builder base`. El daemon lo comprueba antes de arrancar.
+`kling image toolchain`, o cualquiera construida con
+`kling image build -builder base`. El daemon lo comprueba antes de arrancar.
 
 ### Con una carpeta del host dentro
 
@@ -77,7 +77,7 @@ congela como snapshot y los sandboxes nacen de ella:
 ```sh
 kling run -image toolchain -name plantilla -allow-exec -egress internet -mem 1024
 kling exec plantilla -- npm install -g typescript
-kling commit plantilla ts
+kling save plantilla ts
 kling sandbox create -from ts -name sb            # ~300 ms, tsc ya dentro
 kling cp ./a.ts sb:/tmp/
 kling exec sb -- sh -c 'cd /tmp && tsc a.ts && node a.js'

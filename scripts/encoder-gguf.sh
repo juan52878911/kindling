@@ -15,7 +15,7 @@
 #   scripts/encoder-gguf.sh multilingual-e5-small            # convierte y verifica
 #   sudo scripts/encoder-gguf.sh multilingual-e5-small -install
 #       # además lo deja en $KLING_ROOT/cache/von/models/<sha256>.gguf, donde lo
-#       # busca el constructor llm (kling models add enc-e5 -model multilingual-e5-small)
+#       # busca el constructor llm (kling ai model add enc-e5 -model multilingual-e5-small)
 #
 # Trabaja en $WORK (por defecto ~/.cache/kindling/encoder-gguf, ~1,5 GB con el
 # entorno de Python; bórralo al terminar). Tarda unos minutos, casi todo en
@@ -75,7 +75,7 @@ cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865 sentencepiece.b
 esac
 # El sha256 esperado del GGUF sale del catálogo si no se da a mano.
 if [ -z "$WANT" ] && command -v kling >/dev/null; then
-	WANT=$(kling models ls -json | python3 -c "import json,sys;print(next(m['SHA256'] for m in json.load(sys.stdin)['catalog'] if m['ID']=='$MODEL'))" 2>/dev/null || true)
+	WANT=$(kling ai model ls -json | python3 -c "import json,sys;print(next(m['SHA256'] for m in json.load(sys.stdin)['catalog'] if m['ID']=='$MODEL'))" 2>/dev/null || true)
 fi
 
 fetch() { # url sha256 destino

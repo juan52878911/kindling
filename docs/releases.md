@@ -4,8 +4,9 @@ Cómo se distribuyen los binarios de kindling y cómo se crea una release.
 
 Desde v0.13.0 hay **un repositorio, una etiqueta y una release**: el núcleo
 (`kling`, el daemon, el agente de invitado, Chispa y `kling-vz`) y las
-extensiones oficiales (`mcp`, `sandbox`, `domotica`, el operador de Kubernetes)
-salen juntos con la misma versión. Todos los binarios de una release son
+extensiones oficiales (`mcp`, `sandbox`, el operador de Kubernetes)
+salen juntos con la misma versión. Los ejemplos de `examples/` (como la demo de
+domótica, `kindling-domotica`) no se publican: se compilan desde el repo. Todos los binarios de una release son
 compatibles entre sí; no hay tabla de compatibilidades que consultar. Las
 releases anteriores de kindling-mcp (hasta v0.4.0) y kindling-sandbox (hasta
 v0.2.2) siguen en sus repos archivados.
@@ -15,7 +16,7 @@ v0.2.2) siguen en sus repos archivados.
 1. **Binarios pre-compilados** de
    [Releases](https://github.com/juan52878911/kindling/releases), que compila
    GitHub Actions al empujar una etiqueta `vX.Y.Z`. Es lo que usa la gente, vía
-   `scripts/install.sh` y `kling plugins install`.
+   `scripts/install.sh` y `kling plugin install`.
 2. **Desde fuentes** (`make install`, `go build`), para quien quiere lo último
    entre releases o desarrolla el proyecto.
 
@@ -32,7 +33,6 @@ Con `<os>` ∈ {`linux`, `darwin`} y `<arch>` ∈ {`amd64`, `arm64`}:
 | `kling-mcp-<os>-<arch>` | extensión MCP: `mcp`, `add`, `connect`, `gateway`… | las cuatro |
 | `kling-bridge-<os>-<arch>` | puente stdio↔HTTP; *companion* de `mcp` | las cuatro |
 | `kling-sandbox-<os>-<arch>` | extensión de sandboxes multiinquilino (gateway, plantillas, fondo precalentado) | las cuatro |
-| `kling-domotica-<os>-<arch>` | extensión de la demo de domótica: `kling domotica decide/eval/…` | las cuatro |
 | `kindling-operator-linux-<arch>` | operador de Kubernetes | linux |
 | `kindling-mcp-host.tar.gz` | lo que va en el host del daemon para MCP: unidades de systemd (`kling-gateway`, `kling-heal`), constructores y puente de invitado | — |
 | `kindling-sandbox-host.tar.gz` | unidad `kling-sandbox.service` y lo que necesita en el host | — |
@@ -53,11 +53,11 @@ Windows no está soportado (el código usa `syscall.Kill`, `Setsid`, `Stat_t`).
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 
 # versión concreta y extensiones de una vez
-curl -fsSL .../install.sh | sh -s -- --tag v0.13.0 --with mcp,sandbox,domotica
+curl -fsSL .../install.sh | sh -s -- --tag v0.13.0 --with mcp,sandbox
 
 # o las extensiones después, desde el propio kling
-kling plugins install mcp
-kling plugins install sandbox@v0.13.0
+kling plugin install mcp
+kling plugin install sandbox@v0.13.0
 kling doctor
 ```
 
@@ -65,7 +65,7 @@ kling doctor
 hash **antes** de tocar el disco y deja los binarios en `--prefix` (por defecto
 `~/.local/bin`).
 
-`kling plugins install <n>` baja
+`kling plugin install <n>` baja
 `https://github.com/juan52878911/kindling/releases/download/<tag>/kling-<n>-<os>-<arch>`
 (con `<tag>` la versión del propio `kling`, o la de `@vX`), lo verifica contra el
 `SHA256SUMS` de la misma release antes de escribirlo, comprueba su manifiesto,
@@ -125,7 +125,7 @@ git push origin vX.Y.Z
 `.github/workflows/release.yml`:
 
 1. **build** (matriz os/arch): `kling`, `kling-guest`, `kling-chispa`,
-   `kling-mcp`, `kling-bridge`, `kling-sandbox`, `kling-domotica` y, en Linux,
+   `kling-mcp`, `kling-bridge`, `kling-sandbox` y, en Linux,
    `kindling-operator`; empaqueta los tres `.tar.gz`.
 2. **vz** (macos-14): compila y firma `kling-vz-darwin-arm64`.
 3. **release**: junta todo, genera **un** `SHA256SUMS`, extrae el bloque de

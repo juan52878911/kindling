@@ -1,7 +1,7 @@
 # Mejora continua: que Chispa aprenda lo que otros resolvieron por él
 
 Cuando Chispa duda, alguien más lento contesta: VON en la cascada, el
-codificador en una tarea de domótica, la capa lenta del propio cliente
+codificador en una tarea de intención, la capa lenta del propio cliente
 (`escalate: true`, «quien llama decide») o una persona. El bucle de mejora
 continua guarda esos casos, entrena un Chispa nuevo con ellos y **solo lo pone
 a servir si gana en un conjunto de confianza**. La siguiente vez, Chispa
@@ -72,7 +72,7 @@ Cuatro causas, y lo que hace este bucle con cada una:
 | `valid` | 10 % del oro | validación para la temperatura y los umbrales (más un 20 % estable de lo humano) |
 | `min_votes` | 2 | votos de maestros validados, todos de acuerdo, para entrar sin revisión |
 | `top_k` | 3 | la etiqueta del maestro tiene que estar entre las K de Chispa |
-| `teacher_weight` | 0,5 | peso de una muestra de maestro (oro y humano pesan 1; `weight` nuevo del JSONL de `kling chispa train`) |
+| `teacher_weight` | 0,5 | peso de una muestra de maestro (oro y humano pesan 1; `weight` nuevo del JSONL de `kling ai chispa train`) |
 | `max_per_class` | máx(50, oro de la clase) | muestras de maestros por clase y reentreno |
 | `min_checks`, `accept_precision` | 30, 0,9 | lo que exige la validación de un maestro (abajo) |
 | `trust_teachers` | — | maestros forzados sin validar: queda escrito y cada informe dice qué opinan de ellos las revisiones |
@@ -81,7 +81,7 @@ Cuatro causas, y lo que hace este bucle con cada una:
 | `window_minutes` | 60 | ventana de la tasa de escalado de `/metrics` |
 
 Vale para tareas de clasificación (con o sin cascada, en proceso o
-[microvm](chispa-serverless.md)) y de [domótica](domotica.md) (el modelo que
+[microvm](chispa-serverless.md)) y de [intención](intent.md) (el modelo que
 aprende es el de intención; se capturan las escaladas por intención —Chispa
 dudó o dijo «fuera de ámbito»—, no las de huecos o de órdenes múltiples).
 
@@ -226,9 +226,9 @@ por clase (lo más reciente primero). Lo demás espera a una persona.
   ve el fichero viejo o el nuevo, nunca medio), y la caché del gateway se
   actualiza sin reiniciar. Se conservan los ficheros de v1, la servida, la
   anterior y las 10 últimas. La sombra rechazada queda en `@shadow.chispa`
-  para inspeccionarla (`kling chispa eval`).
+  para inspeccionarla (`kling ai chispa eval`).
 - *microvm*: el gateway no construye imágenes. La versión queda **pendiente**
-  y el CLI hace `kling chispa deploy` como el dorado `<snapshot>-vN`, y lo
+  y el CLI hace `kling ai chispa deploy` como el dorado `<snapshot>-vN`, y lo
   confirma con `/v1/admin/promote`, que comprueba que el sha256 del registro
   de despliegue del dorado es el de la versión. La tarea pasa a apuntar a ese
   dorado (`versions.json` manda sobre el `snapshot` del registro, que no se
@@ -238,7 +238,7 @@ por clase (lo más reciente primero). Lo demás espera a una persona.
 **La cascada**: su registro de evaluación va atado al sha256 del `.chispa`,
 así que un modelo nuevo **apaga** una cascada respaldada. El reentreno lo hace
 explícito: si estaba activa, vuelve a correr `kling ai eval` con
-`learn.heldout` (o con `-eval datos.jsonl`; en domótica hacen falta filas) y
+`learn.heldout` (o con `-eval datos.jsonl`; en una tarea de intención hacen falta filas) y
 dice cómo queda; con `-no-eval` o si falla (VON caído), dice que queda apagada
 hasta evaluarla. Volver con `rollback` al modelo evaluado la reactiva sola.
 
@@ -290,7 +290,7 @@ entero (9 794, 28 intenciones, 64 % «fuera de ámbito»). v1:
 
 ```sh
 go run ./tools/mejora-continua prepare -data <datos> -out mc     # gold / valid / traffic / heldout
-kling chispa train -data mc/gold.jsonl -valid mc/valid.jsonl -o mc/intent.chispa
+kling ai chispa train -data mc/gold.jsonl -valid mc/valid.jsonl -o mc/intent.chispa
 #   26 labels, 2000 train / 1000 valid; valid: accuracy 0.817, confident 64.5% at precision 0.988
 go run ./tools/mejora-continua run -out mc -seed 7
 ```

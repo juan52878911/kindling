@@ -11,7 +11,7 @@
 #   ./97-von-cpu-bench.sh restart <máquina> [args de llama-server...]
 #       relanza llama-server en la máquina con los argumentos de su imagen MÁS
 #       estos (los últimos mandan en llama.cpp). Sin argumentos, los de la imagen.
-#       Necesita una máquina con -allow-exec (las de `kling models add` lo son).
+#       Necesita una máquina con -allow-exec (las de `kling ai model add` lo son).
 #   ./97-von-cpu-bench.sh ttft <máquina>
 #       primer token con el prefijo sin cachear y con el prefijo ya en la caché
 #       de la ranura (lo que ahorra precalcularlo).

@@ -7,7 +7,7 @@ import (
 )
 
 // Layer es la capa 3 lista para la cascada: el codificador (Embedder) y la
-// cabeza entrenada sobre SUS vectores. Implementa domotica.IntentEncoder.
+// cabeza entrenada sobre SUS vectores. Implementa intent.Encoder.
 type Layer struct {
 	Head     *Head
 	Embedder Embedder
@@ -35,7 +35,7 @@ func (l *Layer) Classify(ctx context.Context, text string) (Prediction, error) {
 	return l.Head.Predict(vs[0])
 }
 
-// ClassifyIntent es Classify con tipos sencillos, para que pkg/domotica no
+// ClassifyIntent es Classify con tipos sencillos, para que pkg/intent no
 // dependa de este paquete.
 func (l *Layer) ClassifyIntent(ctx context.Context, text string) (string, float64, bool, error) {
 	p, err := l.Classify(ctx, text)

@@ -38,7 +38,7 @@ func cmdMigrate(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: kling migrate <mcp-name> [-service <service>] -install <client>\n" +
+		return fmt.Errorf("usage: kling mcp migrate <mcp-name> [-service <service>] -install <client>\n" +
 			"  <mcp-name> is how your skills/config reference it; it's kept so they don't need rewriting.\n" +
 			"  -service only if the service was imported into kindling under a DIFFERENT name.")
 	}
@@ -63,7 +63,7 @@ func cmdMigrate(args []string) error {
 		fmt.Printf("Status:    ✗ %v\n\n", err)
 		fmt.Println("Is the service imported and the gateway running on the daemon's host?")
 		fmt.Printf("  kling mcp import %s -image %s\n", svc, svc)
-		fmt.Println("  kling gateway -listen 0.0.0.0:8080")
+		fmt.Println("  kling mcp serve -listen 0.0.0.0:8080")
 		if *install == "" {
 			return nil
 		}
@@ -86,8 +86,8 @@ func cmdMigrate(args []string) error {
 
 	printSnippets(entryName, url, token)
 	fmt.Printf("\nAutomatic installation:\n")
-	fmt.Printf("  kling migrate %s -install all       (all detected clients)\n", mcp)
-	fmt.Printf("  kling migrate %s -install opencode\n", mcp)
+	fmt.Printf("  kling mcp migrate %s -install all       (all detected clients)\n", mcp)
+	fmt.Printf("  kling mcp migrate %s -install opencode\n", mcp)
 	return nil
 }
 

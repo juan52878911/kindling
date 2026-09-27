@@ -12,34 +12,31 @@ import (
 	"text/tabwriter"
 
 	"github.com/juan52878911/kindling/pkg/aigw"
-	"github.com/juan52878911/kindling/pkg/domotica"
+	"github.com/juan52878911/kindling/pkg/intent"
 )
 
-// `kling domotica` se fue a la extensión kling-domotica
-// (examples/domotica/cmd/kling-domotica), pero `kling ai eval` de una tarea de
-// domótica sigue en el núcleo: es la evaluación que enciende la capa 3 de una
-// tarea del gateway, y el gateway (pkg/aigw) es del núcleo. Por eso esto se
-// queda aquí y no en la extensión.
+// `kling ai eval` y `kling ai retrain -eval` de una tarea de intención
+// (pkg/intent, pkg/aigw/intent.go): filas etiquetadas con la orden entera.
 
-// readRowsFile lee el JSONL unificado de domótica y devuelve también su
-// sha256, que queda en el registro de la evaluación.
-func readRowsFile(path string) ([]domotica.Row, string, error) {
+// readRowsFile lee filas JSONL ({"text","lang","intent","slots"}) y devuelve
+// también su sha256.
+func readRowsFile(path string) ([]intent.Row, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	rows, err := domotica.ReadRows(io.TeeReader(f, h))
+	rows, err := intent.ReadRows(io.TeeReader(f, h))
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: %w", path, err)
 	}
 	return rows, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// isDomoticaTask pregunta al gateway si la tarea es de domótica (sin
+// isIntentTask pregunta al gateway si la tarea es de intención (sin
 // gateway, o sin la tarea, no lo es y el camino de siempre da el error).
-func isDomoticaTask(c *aiClient, task string) bool {
+func isIntentTask(c *aiClient, task string) bool {
 	var live struct {
 		Tasks []aigw.TaskInfo `json:"tasks"`
 	}
@@ -48,16 +45,16 @@ func isDomoticaTask(c *aiClient, task string) bool {
 	}
 	for _, t := range live.Tasks {
 		if t.Name == task {
-			return t.Kind == "domotica"
+			return t.Kind == "intent"
 		}
 	}
 	return false
 }
 
-// aiEvalDomotica es `kling ai eval` de una tarea de domótica: filas del JSONL
-// unificado (texto, idioma, intención, huecos) por la cascada sin y con la
+// aiEvalIntent es `kling ai eval` de una tarea de intención: filas
+// etiquetadas (texto, idioma, intención, huecos) por la cascada sin y con la
 // capa 3; el registro enciende (o no) el codificador.
-func aiEvalDomotica(c *aiClient, task, data string, dry, asJSON bool) error {
+func aiEvalIntent(c *aiClient, task, data string, dry, asJSON bool) error {
 	rows, _, err := readRowsFile(data)
 	if err != nil {
 		return err
@@ -65,8 +62,8 @@ func aiEvalDomotica(c *aiClient, task, data string, dry, asJSON bool) error {
 	c.http.Timeout = 0
 	fmt.Fprintf(os.Stderr, "evaluating %d rows on task %s (fast layers vs with the encoder)...\n", len(rows), task)
 	var out struct {
-		Record  aigw.DomoticaEvalRecord `json:"record"`
-		Cascade aigw.CascadeState       `json:"cascade"`
+		Record  aigw.IntentEvalRecord `json:"record"`
+		Cascade aigw.CascadeState     `json:"cascade"`
 	}
 	if err := c.do(http.MethodPost, "/v1/admin/eval", aigw.EvalRequest{
 		Task: task, Data: filepath.Base(data), Rows: rows, DryRun: dry}, &out); err != nil {

@@ -2,7 +2,7 @@
 #
 # Desde v0.13.0 una sola etiqueta publica TODO lo del repo: el núcleo (kling,
 # kling-guest, kling-chispa, kling-vz), las extensiones (kling-mcp y su puente,
-# kling-sandbox, kling-domotica), el operador de Kubernetes y los tar de lo que
+# kling-sandbox), el operador de Kubernetes y los tar de lo que
 # se instala en el host del daemon, con UN único SHA256SUMS. Antes cada repo
 # tenía su release y su SHA256SUMS y había que cruzar tablas de compatibilidad;
 # ahora todo lo de una release es compatible entre sí, y `kling plugins install`
@@ -92,7 +92,6 @@ jobs:
           # `kling mcp link` (también darwin).
           b ext/mcp     ./cmd/kling-bridge                       kling-bridge
           b ext/sandbox ./cmd/kling-sandbox                      kling-sandbox
-          b .           ./examples/domotica/cmd/kling-domotica   kling-domotica
           if [ "$GOOS" = linux ]; then
             # Invitados de las microVMs y el operador, que solo corre en un clúster.
             b .           ./cmd/kling-guest                      kling-guest
@@ -184,7 +183,7 @@ jobs:
           want=()
           for os in linux darwin; do
             for arch in amd64 arm64; do
-              for n in kling kling-mcp kling-bridge kling-sandbox kling-domotica; do
+              for n in kling kling-mcp kling-bridge kling-sandbox; do
                 want+=("$n-$os-$arch")
               done
             done

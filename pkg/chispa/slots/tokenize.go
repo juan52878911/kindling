@@ -147,8 +147,8 @@ func TokenizeN(text string, maxBytes, maxToks int) []Token {
 }
 
 // Tokenizer es el tokenizador reutilizable, para quien quiera trabajar sobre
-// los mismos tokens que el etiquetador (el emparejador de plantillas de
-// pkg/domotica). Reutilizado, no reserva. No es seguro para uso concurrente.
+// los mismos tokens que el etiquetador (un emparejador de plantillas, por
+// ejemplo). Reutilizado, no reserva. No es seguro para uso concurrente.
 type Tokenizer struct{ t tokenizer }
 
 // Run tokeniza text con los topes por defecto.

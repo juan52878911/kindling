@@ -4,7 +4,7 @@
 # Base AMI (Ubuntu 22.04, driver NVIDIA ya instalado). SIN EJECUTAR: pedir
 # aprobación antes de lanzar la instancia.
 #
-#   scp train.jsonl pkg/domotica/indirect.jsonl scripts/encoder-setfit/* scripts/encoder-gguf.sh ubuntu@<ip>:
+#   scp train.jsonl examples/domotica/internal/domotica/indirect.jsonl scripts/encoder-setfit/* scripts/encoder-gguf.sh ubuntu@<ip>:
 #   ssh ubuntu@<ip> ./run.sh
 #   scp ubuntu@<ip>:work/*.gguf .      # 126 MiB por modelo; luego, apagar la instancia
 set -euo pipefail

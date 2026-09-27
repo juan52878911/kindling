@@ -642,7 +642,7 @@ func TestRedact(t *testing.T) {
 			t.Errorf("redact(%q) = %q", in, out)
 		}
 	}
-	for _, keep := range []string{"turn on the living room lights", "internationalization", "sube la persiana 50"} {
+	for _, keep := range []string{"open the quarterly report", "internationalization", "mueve la fila 50"} {
 		if out := redact(keep); out != keep {
 			t.Errorf("redact(%q) = %q", keep, out)
 		}

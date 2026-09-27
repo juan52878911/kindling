@@ -14,16 +14,16 @@ import (
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
+	"github.com/juan52878911/kindling/pkg/units"
 )
 
-// cmdMCP convierte servidores MCP en servicios de kindling.
-//
-//	kling mcp import <servicio> -image <imagen>
-//	kling mcp list
-//	kling mcp refresh <servicio>
+// cmdMCP es el dispatcher de antes de 0.14 (`kling-mcp mcp import ...`): los
+// verbos son ahora comandos de la extensión y el núcleo los enruta directos
+// (`kling mcp import` llega como `import`). Se conserva para la unit
+// kling-heal.service de 0.13 y para quien lo teclee a mano.
 func cmdMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling mcp [import|verify|list|refresh|health|heal]")
+		return fmt.Errorf("usage: kling mcp [import|verify|ls|inspect|refresh|health|heal|link|unlink]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -33,6 +33,8 @@ func cmdMCP(args []string) error {
 		return mcpVerify(rest)
 	case "list", "ls":
 		return mcpList(rest)
+	case "inspect":
+		return mcpInspect(rest)
 	case "refresh-bridge":
 		return imagesRefresh(args[1:])
 	case "refresh":
@@ -46,7 +48,7 @@ func cmdMCP(args []string) error {
 	case "unlink":
 		return mcpUnlink(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use import, verify, list, refresh, health, heal, link, or unlink", sub)
+		return fmt.Errorf("unknown subcommand %q: use import, verify, ls, inspect, refresh, health, heal, link, or unlink", sub)
 	}
 }
 
@@ -64,7 +66,7 @@ func mcpImport(args []string) error {
 	fs := flag.NewFlagSet("mcp import", flag.ExitOnError)
 	host := hostFlag(fs)
 	image := fs.String("image", "", "image to import from (default: the service name)")
-	mem := fs.Int("mem", 0, "template memory in MiB")
+	mem := units.MiBVar(fs, "mem", 0, "template memory: 256M, 1G (bare number = MiB)")
 	// Sin esto solo se podía subir la memoria, y hay servicios cuyo cuello de
 	// botella es la CPU: un analizador estático pasa por cada fichero, y con un
 	// solo vCPU un escaneo se acerca al plazo del cliente MCP. Como la memoria,
@@ -414,10 +416,11 @@ func mcpImport(args []string) error {
 }
 
 func mcpList(args []string) error {
-	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
+	fs := flag.NewFlagSet("mcp ls", flag.ExitOnError)
 	host := hostFlag(fs)
 	verbose := fs.Bool("v", false, "show each tool")
 	asJSON := fs.Bool("json", false, "JSON output (services + external, with tools)")
+	quiet := fs.Bool("q", false, "print only service names (for scripting)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -429,6 +432,16 @@ func mcpList(args []string) error {
 	snaps, err := c.Snapshots(ctx)
 	if err != nil {
 		return err
+	}
+	if *quiet {
+		for _, s := range snaps {
+			n := s.Name
+			if svc := s.Service(); svc != "" {
+				n = svc
+			}
+			fmt.Println(n)
+		}
+		return nil
 	}
 	if *asJSON {
 		// Los links (servicios externos) también son servicios MCP: se emiten
@@ -953,4 +966,58 @@ func labelsFor(service string, stateful bool) map[string]string {
 		l[mcp.LabelStateful] = "true"
 	}
 	return l
+}
+
+// mcpInspect es `kling mcp inspect <service>`: la plantilla de un servicio con
+// su catálogo y su última salud, sin despertarlo.
+func mcpInspect(args []string) error {
+	fs := flag.NewFlagSet("mcp inspect", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output (the template, annotations included)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: kling mcp inspect <service> [-json]")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	c := api.NewClient(hostOf(*host))
+	snaps, err := c.Snapshots(ctx)
+	if err != nil {
+		return err
+	}
+	var s *api.Snapshot
+	for _, x := range snaps {
+		if x.Name == fs.Arg(0) || x.Service() == fs.Arg(0) {
+			s = x
+			break
+		}
+	}
+	if s == nil {
+		return fmt.Errorf("service %q does not exist: kling mcp ls", fs.Arg(0))
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(s)
+	}
+	tools, capturedAt := mcp.ToolsOf(s)
+	fmt.Printf("service:     %s\n", fs.Arg(0))
+	fmt.Printf("template:    %s (image %s, %d/%d MiB, %s of memory)\n", s.Name, s.Image, s.VCPUs, s.MemMiB, human(s.MemBytes))
+	fmt.Printf("instances:   %d\n", s.Instances)
+	fmt.Printf("health:      %s\n", healthCell(s))
+	if capturedAt != nil {
+		fmt.Printf("catalog:     %d tool(s), captured %s ago\n", len(tools), since(*capturedAt))
+	} else {
+		fmt.Printf("catalog:     not captured (kling mcp refresh %s)\n", fs.Arg(0))
+	}
+	for _, t := range tools {
+		d := t.Description
+		if len(d) > 70 {
+			d = d[:69] + "…"
+		}
+		fmt.Printf("  %-32s %s\n", t.Name, d)
+	}
+	return nil
 }

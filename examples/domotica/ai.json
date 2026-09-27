@@ -17,10 +17,11 @@
   },
   "tasks": {
     "room": {
-      "domotica": {
+      "intent": {
+        "domain": "smart-room",
         "encoder": "encoder",
         "head": "domotica/head.jenc",
-        "intent": "chispa-room"
+        "model": "chispa-room"
       }
     },
     "room-llm": {

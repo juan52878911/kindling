@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
-	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
 // finishRow deja una fila lista: fuera de ámbito no lleva huecos; dentro, se

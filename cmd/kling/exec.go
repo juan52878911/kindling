@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/units"
 )
 
 // stringsFlag es un flag repetible.
@@ -234,8 +235,8 @@ func sandboxCreate(args []string) error {
 	image := fs.String("image", "", "image with the guest agent (e.g. toolchain)")
 	from := fs.String("from", "", "snapshot made from a machine with -allow-exec")
 	cpus := fs.Int("cpus", 0, "vCPUs (default 1)")
-	mem := fs.Int("mem", 0, "memory in MiB (default 256)")
-	ttl := fs.Duration("ttl", 0, "lifetime, or idle time with -on-ttl freeze (default 10m, max 24h)")
+	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default 256)")
+	ttl := units.DurationVar(fs, "ttl", 0, "lifetime, or idle time with -on-ttl freeze: 10m, 1h (bare number = seconds; default 10m, max 24h)")
 	onTTL := fs.String("on-ttl", "", "when the ttl runs out: remove (default) or freeze (sleeps at zero cost, the next exec wakes it in ms)")
 	egress := fs.String("egress", "", "network egress: none (default) | internet | allowlist")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
@@ -281,7 +282,7 @@ func sandboxCreate(args []string) error {
 	fmt.Printf("%s  %s  ready in %s (%s), %s after %s idle\n",
 		mc.ID[:12], mc.Name, time.Since(start).Round(time.Millisecond), how,
 		final, time.Duration(mc.TTLSeconds)*time.Second)
-	fmt.Printf("\n  kling exec %s -- uname -a\n  kling cp ./script.py %s:/tmp/\n  kling sandbox rm %s\n",
+	next("kling exec %s -- uname -a   ·   kling cp ./script.py %s:/tmp/   ·   kling sandbox rm %s",
 		mc.Name, mc.Name, mc.Name)
 	return nil
 }
@@ -290,6 +291,7 @@ func sandboxList(args []string) error {
 	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output (same shape as ps -json)")
+	quiet := fs.Bool("q", false, "print only IDs (for scripting)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -305,8 +307,14 @@ func sandboxList(args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(list)
 	}
+	if *quiet {
+		for _, mc := range list {
+			fmt.Println(mc.ID[:12])
+		}
+		return nil
+	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tIMAGE\tSTATE\tEGRESS\tON TTL\tIN")
+	fmt.Fprintln(tw, "ID\tNAME\tIMAGE/TEMPLATE\tSTATE\tEGRESS\tON TTL\tIN")
 	for _, mc := range list {
 		left := "—"
 		// El reloj del TTL es TTLAt, no StartedAt: un sandbox que durmió y
@@ -328,7 +336,7 @@ func sandboxList(args []string) error {
 		}
 		src := mc.Image
 		if mc.From != "" {
-			src = mc.From + " (snapshot)"
+			src = mc.From
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", mc.ID[:12], mc.Name, src, mc.State, mc.Egress, fin, left)
 	}
@@ -338,7 +346,7 @@ func sandboxList(args []string) error {
 func sandboxRenew(args []string) error {
 	fs := flag.NewFlagSet("sandbox renew", flag.ExitOnError)
 	host := hostFlag(fs)
-	ttl := fs.Duration("ttl", 0, "new lifetime from now (default 10m)")
+	ttl := units.DurationVar(fs, "ttl", 0, "new lifetime from now: 10m, 1h (bare number = seconds; default 10m)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -363,11 +371,15 @@ func sandboxRenew(args []string) error {
 func sandboxRemove(args []string) error {
 	fs := flag.NewFlagSet("sandbox rm", flag.ExitOnError)
 	host := hostFlag(fs)
+	force := fs.Bool("f", false, "do not ask for confirmation")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
 		return errors.New("usage: kling sandbox rm <sandbox>...")
+	}
+	if !*force && !confirmMany("sandbox", fs.Args()) {
+		return errAborted
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()

@@ -73,7 +73,7 @@ modelo entrenado con el pasado lo ve venir.
 
 ## Resultados
 
-Configuración por defecto de `kling chispa train` salvo lo indicado: 2^18 cubos,
+Configuración por defecto de `kling ai chispa train` salvo lo indicado: 2^18 cubos,
 palabras + bigramas + campos, AdaGrad `lr` 0,05, L2 1e-4, pesos `balanced`,
 objetivo de precisión 0,95, `min-support` 10, semilla 1. Los hiperparámetros se
 eligieron mirando **solo validación** (barrido de `lr`, L2, pesos por clase,
@@ -151,7 +151,7 @@ discriminación, umbral optimista bajo el cambio de distribución.
   guardado disperso; denso serían 5,2 MB), 1,85 MB con n-gramas, 282 KB el
   binario. Entrenar tarda 0,1–0,4 s.
 - **Latencia** (Apple M4): 4,9 µs por commit real con palabras + campos y 12,7 µs
-  con n-gramas, medidos por `kling chispa eval` incluyendo la contabilidad; en el
+  con n-gramas, medidos por `kling ai chispa eval` incluyendo la contabilidad; en el
   benchmark de 200 caracteres, 1,5 µs / 6 µs, sin reservas de memoria.
 
 ## Dónde falla

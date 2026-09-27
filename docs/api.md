@@ -104,7 +104,7 @@ reservado para el kernel compartido (`part` vacía o `kernel`). "En uso" es lo m
 que impide borrarla: un dorado o una máquina que no esté parada que la usen, o
 capas encima; para el kernel, cualquier máquina que no esté parada. La receta de
 una imagen por capas cuenta como la imagen, porque decide su base. Es lo que usa
-`kling images copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
+`kling image copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
 uno de macOS, donde `POST /images` contesta `501`.
 
 **El protocolo del constructor.** El daemon crea un directorio de trabajo, deja
@@ -402,7 +402,7 @@ En Firecracker la primera petición a un invitado recién restaurado cuesta
 sus páginas); `/resync` es esa primera petición, así que ese coste pasa del
 primer cliente al thaw, y la petición siguiente tarda lo de siempre. En macOS
 (`vz`) el resync cuesta 1–2 ms.
-Reconstruir la imagen con un `kling-guest` actual (`kling images build`) o
+Reconstruir la imagen con un `kling-guest` actual (`kling image build`) o
 refrescar su puente MCP (`kling mcp refresh-bridge`) lo arregla.
 
 Solo el host debe llamar a `/resync` (o a `/volume/*`, `/exec`, `/files`): quien

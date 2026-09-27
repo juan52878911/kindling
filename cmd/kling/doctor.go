@@ -50,10 +50,16 @@ type doctorInput struct {
 	info       *api.Info
 	infoErr    error
 	plugins    []*plugin.Plugin
-	completion bool     // $_KLING_COMPLETION: lo exportan los scripts de completado
-	extDir     string   // directorio donde `kling plugins install` deja las extensiones
-	extDirOK   bool     // existe
-	pathDirs   []string // $PATH partido
+	completion bool // $_KLING_COMPLETION: lo exportan los scripts de completado
+	// completionRC es que el rc de la shell carga el fichero que escribió
+	// `kling completion install`: cargado en la próxima shell aunque no en
+	// esta (la del instalador, por ejemplo).
+	completionRC bool
+	shell        string   // la de quien teclea ("zsh", "bash", "fish" o "")
+	extDir       string   // directorio donde `kling plugin install` deja las extensiones
+	extDirOK     bool     // existe
+	companions   []string // compañeros (kling-bridge…) que viven en extDir
+	pathDirs     []string // $PATH partido
 }
 
 func cmdDoctor(args []string) error {
@@ -88,11 +94,14 @@ func cmdDoctor(args []string) error {
 		cliVersion: Version,
 		plugins:    extensions().Plugins,
 		completion: os.Getenv("_KLING_COMPLETION") != "",
+		shell:      userShell(),
 		extDir:     extensionsDir(),
 		pathDirs:   filepath.SplitList(os.Getenv("PATH")),
 	}
+	in.completionRC = completionInRC(in.shell)
 	if fi, err := os.Stat(in.extDir); err == nil && fi.IsDir() {
 		in.extDirOK = true
+		in.companions = companionsInDir(in.extDir)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	in.info, in.infoErr = api.NewClient(endpoint).Info(ctx)
@@ -182,9 +191,15 @@ func doctorChecks(in doctorInput) []doctorCheck {
 			c.Fix = ""
 		case p.Err != nil:
 			c.State, c.Detail = doctorFail, fmt.Sprintf("%v (%s)", p.Err, src)
-			c.Fix = "kling plugins install " + p.Name
+			c.Fix = "kling plugin install " + p.Name
+			if _, serr := plugin.ReadSidecar(p.Path); p.Path != "" && serr != nil && !strings.Contains(p.Err.Error(), "needs kling") {
+				// Sin .json no la instaló kling: es un kling-* suelto en el
+				// PATH que no contesta al manifiesto, casi siempre un
+				// compañero de otra cosa.
+				c.Fix = fmt.Sprintf("if it is not a kling extension, rename it or move it off PATH; else reinstall: kling plugin install %s", p.Name)
+			}
 			if strings.Contains(p.Err.Error(), "needs kling") {
-				c.Fix = "upgrade kling, or install a matching extension: kling plugins install " + p.Name
+				c.Fix = "upgrade kling, or install a matching extension: kling plugin install " + p.Name
 			}
 		default:
 			ver := ""
@@ -195,31 +210,70 @@ func doctorChecks(in doctorInput) []doctorCheck {
 			if len(p.Shadowed) > 0 {
 				c.State = doctorWarn
 				c.Detail += "; ignored commands already taken: " + strings.Join(p.Shadowed, " ")
-				c.Fix = "remove the older copy (kling plugins ls shows where each one comes from)"
+				c.Fix = "remove the older copy (kling plugin ls shows where each one comes from)"
 			}
 		}
 		out = append(out, c)
 	}
 
 	comp := doctorCheck{Name: "completion", State: doctorOK, Detail: "loaded in this shell"}
-	if !in.completion {
+	switch {
+	case in.completion:
+	case in.completionRC:
+		comp.Detail = "installed for " + in.shell + " (loads in your next shell)"
+	default:
 		comp.State, comp.Detail = doctorWarn, "not loaded in this shell (reload it after installing an extension)"
-		comp.Fix = "kling completion install"
+		comp.Fix = "kling completion install   (then add the line it prints to " + rcFile(in.shell) + ")"
 	}
 	out = append(out, comp)
 
 	dir := doctorCheck{Name: "extensions dir", State: doctorOK, Detail: in.extDir}
 	switch {
 	case !in.extDirOK:
-		dir.Detail += " (does not exist yet; kling plugins install creates it)"
-	case !inDirs(in.extDir, in.pathDirs):
-		// kling la encuentra igual; lo que no se encuentra son los ejecutables
-		// que las acompañan (kling-bridge) si alguien los llama a mano.
+		dir.Detail += " (does not exist yet; kling plugin install creates it)"
+	case len(in.companions) > 0 && !inDirs(in.extDir, in.pathDirs):
+		// kling encuentra las extensiones igual; lo que no se encuentra son los
+		// ejecutables que las acompañan (kling-bridge) si alguien los llama a
+		// mano. Sin compañeros ahí no hay nada que avisar.
 		dir.State = doctorWarn
-		dir.Detail += " (searched by kling, but not on PATH: companions installed there cannot be run by name)"
+		dir.Detail += fmt.Sprintf(" (searched by kling, but not on PATH: %s installed there cannot be run by name)", strings.Join(in.companions, ", "))
 		dir.Fix = fmt.Sprintf(`export PATH="%s:$PATH"`, in.extDir)
 	}
 	out = append(out, dir)
+	return out
+}
+
+// completionInRC dice si el rc de la shell ya carga el completado instalado
+// por `kling completion install` (el fichero existe y el rc lo nombra).
+func completionInRC(shell string) bool {
+	if shell == "" {
+		return false
+	}
+	path, _ := completionInstallPath(shell)
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	rc := filepath.Join(home, strings.TrimPrefix(rcFile(shell), "~/"))
+	b, err := os.ReadFile(rc)
+	return err == nil && bytes.Contains(b, []byte(path))
+}
+
+// companionsInDir son los ejecutables compañeros (declarados en los .json de
+// las extensiones instaladas) que están en dir.
+func companionsInDir(dir string) []string {
+	var out []string
+	for _, c := range plugin.CompanionsIn(dir) {
+		if _, err := os.Stat(filepath.Join(dir, c)); err == nil {
+			out = append(out, c)
+		}
+	}
 	return out
 }
 
@@ -234,7 +288,8 @@ func inDirs(dir string, dirs []string) bool {
 }
 
 func writeDoctor(w io.Writer, checks []doctorCheck) {
-	mark := map[string]string{doctorOK: "✓", doctorWarn: "!", doctorFail: "✗"}
+	m := uiMarks()
+	mark := map[string]string{doctorOK: m.ok, doctorWarn: m.warn, doctorFail: m.fail}
 	width := 0
 	for _, c := range checks {
 		width = max(width, len(c.Name))
@@ -263,7 +318,7 @@ func writeDoctor(w io.Writer, checks []doctorCheck) {
 	}
 }
 
-// extensionsDir es donde `kling plugins install` deja las extensiones; la
+// extensionsDir es donde `kling plugin install` deja las extensiones; la
 // regla (contrato plugin-dirs) vive en pkg/plugin para que install y doctor no
 // puedan discrepar.
 func extensionsDir() string {

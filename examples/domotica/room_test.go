@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/pkg/aigw"
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
 // ai.json es el registro de ejemplo del gateway. Su tarea de la capa 4 tiene
@@ -35,8 +35,8 @@ func TestAIConfig(t *testing.T) {
 	if a.String() != b.String() {
 		t.Fatal("room-llm json_schema differs from domotica.LLMSchema (regenerate ai.json)")
 	}
-	if d := cfg.Tasks["room"].Domotica; d == nil || d.Intent == "" || d.Encoder == "" {
-		t.Fatal("room must be a domotica task with its encoder")
+	if d := cfg.Tasks["room"].Intent; d == nil || d.Model == "" || d.Encoder == "" || d.Domain != DomainName {
+		t.Fatalf("room must be an intent task of the %s domain with its encoder", DomainName)
 	}
 }
 

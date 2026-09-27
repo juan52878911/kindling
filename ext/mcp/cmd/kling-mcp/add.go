@@ -1,6 +1,6 @@
 package main
 
-// `kling search` y `kling add`: traer un servidor MCP del registro oficial y
+// `kling mcp search` y `kling mcp add`: traer un servidor MCP del registro oficial y
 // dejarlo listo como servicio, sin pasar por los scripts a mano.
 //
 // Es un envoltorio fino sobre lo que ya existe. Todo el trabajo real lo hacen
@@ -35,7 +35,7 @@ func cmdSearch(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: kling search <query>")
+		return fmt.Errorf("usage: kling mcp search <query>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -62,7 +62,7 @@ func cmdSearch(args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Name, s.Version, ok, truncate(s.Description, 60))
 	}
 	_ = w.Flush()
-	fmt.Println("\n\"kling add no\" means that server doesn't speak stdio over npm or PyPI,")
+	fmt.Println("\n\"kling mcp add no\" means that server doesn't speak stdio over npm or PyPI,")
 	fmt.Println("which is what kindling knows how to package on its own. See scripts/80-mcp-image.sh.")
 	return nil
 }
@@ -103,8 +103,8 @@ func cmdAdd(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: kling add <server> [-as name] [-arg value]\n" +
-			"     search for it first with:  kling search <query>")
+		return fmt.Errorf("usage: kling mcp add <server> [-as name] [-arg value]\n" +
+			"     search for it first with:  kling mcp search <query>")
 	}
 
 	vols, err := volumeSet(volumes, *mount, *volRO)
@@ -317,7 +317,7 @@ func addOne(ctx context.Context, rc *registry.Client, host, want string, o addOp
 		for _, a := range unmet {
 			fmt.Fprintf(&b, "  %s  %s\n", argLabel(a), truncate(a.Description, 60))
 		}
-		fmt.Fprintf(&b, "\ne.g.:  kling add %s -arg /data", want)
+		fmt.Fprintf(&b, "\ne.g.:  kling mcp add %s -arg /data", want)
 		return fmt.Errorf("%s", b.String())
 	}
 

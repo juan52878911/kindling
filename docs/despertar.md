@@ -8,7 +8,7 @@ sin romper nada); lo que no funcionó también está contado.
 Todo medido en el mismo sitio que [chispa-serverless.md](chispa-serverless.md):
 Intel **i7-8700T**, Proxmox CT 105 (Debian 12, kernel 6.17, KVM sin anidar,
 NVMe), Firecracker 1.17 **con jailer**. La carga es una tarea Chispa de 28
-etiquetas (`kling chispa deploy -mem 128 -vcpus 1`, dorado de ~70 MiB) detrás de
+etiquetas (`kling ai chispa deploy -mem 128 -vcpus 1`, dorado de ~70 MiB) detrás de
 `kling ai serve`, 10 ciclos por medida con `scripts/99-thaw-bench.sh`.
 
 ## Resultado
@@ -67,7 +67,7 @@ Y dos cosas encontradas por el camino:
   llamada.** Con máquinas que mueren al congelar no se notaba; con pausar y
   reanudar el MISMO VMM, a la quinta vuelta su API rechazaba la siguiente
   (`write: broken pipe`). `internal/fc` ya no usa keep-alive.
-- **`kling chispa deploy -mem 64` (el valor por defecto de antes) no basta para
+- **`kling ai chispa deploy -mem 64` (el valor por defecto de antes) no basta para
   un modelo de 28 etiquetas con 2^18 cubos**: el calentamiento tardó 1,96 s y
   las réplicas rechazaban conexiones durante segundos tras cada thaw. Con
   `-mem 128`, 110 µs. Un modelo de pocas etiquetas sí cabe en 64; el nuevo

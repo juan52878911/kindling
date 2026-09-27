@@ -178,7 +178,7 @@ func TestIncorporadas(t *testing.T) {
 	var llamado []string
 	b := &Builtin{
 		Manifest: Manifest{ManifestVersion: 1, Name: "mcp", Version: "0.5.0",
-			Commands: []Command{{Name: "mcp"}, {Name: "run"}}, Hooks: []string{HookStatus}},
+			Commands: []Command{{Name: "mcp"}, {Name: "run", TopLevel: true}}, Hooks: []string{HookStatus}},
 		Commands: map[string]func([]string) error{
 			"mcp": func(a []string) error { llamado = a; return &ExitError{Code: 3} },
 		},
@@ -252,8 +252,10 @@ func TestVersionAtLeast(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	malos := []Manifest{
-		{ManifestVersion: 2, Name: "a"},
+		{ManifestVersion: 3, Name: "a"},
+		{ManifestVersion: 0, Name: "a"},
 		{ManifestVersion: 1, Name: "Mayus"},
+		{ManifestVersion: 2, Name: "a", Commands: []Command{{Name: "a"}, {Name: "x"}}},
 		{ManifestVersion: 1, Name: "a", Commands: []Command{{Name: "x"}, {Name: "x"}}},
 		{ManifestVersion: 1, Name: "a", Hooks: []string{"reboot"}},
 		{ManifestVersion: 1, Name: "a", Config: []ConfigKey{{Key: "k", Type: "float"}}},

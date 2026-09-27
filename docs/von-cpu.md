@@ -118,11 +118,11 @@ varía de 1,3 a 3 s según la presión de memoria). Lo que las separa es el cost
 | `--cache-ram 0` (antes) | 2773 ms (281–4247) | 567 (20–807) |
 | `--cache-ram 64` | **112 ms** (64–354) | 19 (9–25) |
 
-**Decisión: (c).** `kling models add` construye las imágenes con
+**Decisión: (c).** `kling ai model add` construye las imágenes con
 `--cache-ram 64` (`-cache-ram N` lo cambia, 0 lo quita) y suma esos MiB a la
 memoria de la microVM: sin sumarlos, un dorado de 1,5B en 1536 MiB se quedó sin
 memoria dos veces al congelar (el agente dejó de contestar con la caché llena).
-Los prefijos se evalúan al hacer el dorado: `kling models add -prefix
+Los prefijos se evalúan al hacer el dorado: `kling ai model add -prefix
 system.txt` (repetible) o, con el gateway, `kling ai prime`, que saca de cada
 tarea su `system` y el texto fijo de su plantilla hasta la primera variable, y
 rehace el dorado de cada modelo VON (etiqueta `von.prefixes` con el hash; si no
@@ -132,7 +132,7 @@ el mayor. En Qwen2.5-0.5B Q8_0 (2 vCPU, n=5): la primera petición pasa de
 1710 ms (1677–1792) a **168 ms** (161–217), y `run -from` → primer token de
 2657 a 1153 ms.
 
-Las imágenes anteriores (con `--cache-ram 0`) siguen sirviendo: `kling models
+Las imágenes anteriores (con `--cache-ram 0`) siguen sirviendo: `kling ai model
 add` las reutiliza con `-cache-ram 0`, y entonces el dorado conserva solo el
 último prefijo (la variante a, que también vale para un modelo con una sola
 tarea).
@@ -259,7 +259,7 @@ configuración gana**, ni con un 96 % de aceptación. Por qué, en CPU:
   más con su sincronización de hilos.
 
 Con la aceptación baja (párrafos a 0,7: 14–55 %) es peor todavía. La puerta la
-cierra: **no entra, ni como opción de `kling models`**: añadir un segundo GGUF a
+cierra: **no entra, ni como opción de `kling ai model`**: añadir un segundo GGUF a
 la imagen y a la memoria de cada réplica (+145–700 MiB) para ir más lento no
 tiene caso. Queda documentado para repetirlo si cambia el hardware (más núcleos
 que ancho de banda, o x86 con AVX-512) o llega un borrador tipo EAGLE/MTP para
@@ -313,7 +313,7 @@ SmolLM2-360M Q8_0 y la imagen de siempre relanzada con `--cache-ram 64`:
 La construcción de una imagen nueva con `--cache-ram 64` (el constructor `llm`)
 está cubierta por los tests de `pkg/von` (`RunScript`) pero no se hizo en el
 laboratorio: su daemon es compartido y no se le cambió el binario. De punta a
-punta en el Mac sí se probaron `kling models add -prefix`, `kling ai prime`
+punta en el Mac sí se probaron `kling ai model add -prefix`, `kling ai prime`
 (dos tareas; repetirlo no hace nada) y el gateway sirviendo una tarea con
 `json_schema` desde el dorado resultante, con una imagen anterior
 (`-cache-ram 0`, en la que solo queda el último prefijo: el aviso de `ai prime`
@@ -323,7 +323,7 @@ lo dice).
 
 ```sh
 # macOS (vz): imagen construida en un Linux y copiada (von.md), dorado aquí
-kling models add von-qwen15 -model qwen2.5-1.5b-instruct -quant q4_0 -prefix scripts/von-bench/smarthome-system.txt
+kling ai model add von-qwen15 -model qwen2.5-1.5b-instruct -quant q4_0 -prefix scripts/von-bench/smarthome-system.txt
 S=scripts/97-von-cpu-bench.sh
 RUNS=5 $S prefix von-qwen15                     # primera petición en réplicas recién restauradas
 kling run -from von-qwen15 -name q1 && $S switch q1 && $S schema q1 && $S gen q1

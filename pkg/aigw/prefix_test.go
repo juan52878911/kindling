@@ -16,16 +16,16 @@ func TestPrefixes(t *testing.T) {
 			"s": {Kind: KindVON, Snapshot: "von-s"},
 		},
 		Tasks: map[string]*TaskConfig{
-			"home":  {VON: "q", System: "You control a smart home.", Prompt: "Request: {input}"},
-			"home2": {VON: "q", System: "You control a smart home.", Prompt: "Request: {input}"}, // repetido
-			"bare":  {VON: "q"},                                                                  // nada fijo
+			"desk":  {VON: "q", System: "You answer support tickets.", Prompt: "Request: {input}"},
+			"desk2": {VON: "q", System: "You answer support tickets.", Prompt: "Request: {input}"}, // repetido
+			"bare":  {VON: "q"},                                                                    // nada fijo
 			"kind":  {Chispa: "j", EscalateTo: "q"},
 			"other": {VON: "s", System: "Other model."},
 		},
 	}
 	got := c.Prefixes("q")
 	want := []von.Prefix{
-		{System: "You control a smart home.", User: "Request: "},
+		{System: "You answer support tickets.", User: "Request: "},
 		{System: defaultSystem, User: "Labels: "},
 	}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {

@@ -261,7 +261,7 @@ func aiRetrain(args []string) error {
 	rule := fs.String("rule", "mcnemar", "promotion rule: mcnemar (significant win) or no-regression")
 	tol := fs.Float64("precision-tolerance", 0.005, "how much confident precision on the held-out set may drop")
 	current := fs.String("current", "", "microvm task without versions yet: the .chispa it serves now")
-	evalData := fs.String("eval", "", "data to re-evaluate the cascade after promoting (default: learn.heldout; domotica: rows JSONL)")
+	evalData := fs.String("eval", "", "data to re-evaluate the cascade after promoting (default: learn.heldout; intent task: rows JSONL)")
 	noEval := fs.Bool("no-eval", false, "don't re-evaluate the cascade: it stays off until kling ai eval")
 	host := hostFlag(fs)
 	mem := fs.Int("mem", 64, "microvm task: memory of the new version's golden snapshot (MiB)")
@@ -287,7 +287,7 @@ func aiRetrain(args []string) error {
 		}
 	}
 	if *evalData != "" {
-		if isDomoticaTask(c, task) {
+		if isIntentTask(c, task) {
 			if req.EvalRows, _, err = readRowsFile(*evalData); err != nil {
 				return err
 			}
@@ -359,7 +359,7 @@ func printRetrain(rep *aigw.RetrainReport) {
 	case rep.Pending:
 		fmt.Printf("%s passed the gate; making its golden snapshot %s...\n", rep.Version, rep.Snapshot)
 	case rep.Candidate != "":
-		fmt.Printf("not promoted; the new model is in %s (kling chispa eval -model %s -data <file>)\n", rep.Candidate, rep.Candidate)
+		fmt.Printf("not promoted; the new model is in %s (kling ai chispa eval -model %s -data <file>)\n", rep.Candidate, rep.Candidate)
 	}
 	if rep.Note != "" {
 		fmt.Println(rep.Note)

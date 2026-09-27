@@ -15,7 +15,7 @@ import (
 // cmdImages opera sobre las imágenes de rootfs ya construidas.
 func cmdImages(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling images <ls|rm|toolchain|recipe|build|cat|put|copy> [...]")
+		return fmt.Errorf("usage: kling image <ls|rm|toolchain|recipe|build|cat|put|copy> [...]")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -46,9 +46,10 @@ func cmdImages(args []string) error {
 // snapshots dorados que salen de cada una: una imagen con 0 es candidata a
 // retirar; con >0, quitarla dejaría esos servicios sin base.
 func imagesList(args []string) error {
-	fs := flag.NewFlagSet("images ls", flag.ExitOnError)
+	fs := flag.NewFlagSet("image ls", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output")
+	quiet := fs.Bool("q", false, "print only names (for scripting)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -63,8 +64,14 @@ func imagesList(args []string) error {
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(imgs)
 	}
+	if *quiet {
+		for _, im := range imgs {
+			fmt.Println(im.Name)
+		}
+		return nil
+	}
 	if len(imgs) == 0 {
-		fmt.Println("No images built yet. Package one:  kling add <server>")
+		fmt.Println("No images built yet. Package one:  kling mcp add <server>")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
@@ -172,7 +179,7 @@ func imagesRecipe(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling images recipe <image>")
+		return fmt.Errorf("usage: kling image recipe <image>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -220,13 +227,17 @@ func imagesRecipe(args []string) error {
 // imagen de la que cuelga un dorado, no da un error al borrar: da un invitado
 // que no arranca, mucho despues.
 func imagesRm(args []string) error {
-	fs := flag.NewFlagSet("images rm", flag.ExitOnError)
+	fs := flag.NewFlagSet("image rm", flag.ExitOnError)
 	host := hostFlag(fs)
+	force := fs.Bool("f", false, "do not ask for confirmation")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling images rm <image> [<image>...]")
+		return fmt.Errorf("usage: kling image rm <image> [<image>...]")
+	}
+	if !*force && !confirmMany("image", fs.Args()) {
+		return errAborted
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -258,8 +269,8 @@ func imagesCopy(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 || *from == "" {
-		return fmt.Errorf("usage: kling images copy <name> -from <host> [-to <host>]\n" +
-			"  e.g. kling images copy min -from ssh://user@linux-arm64-host")
+		return fmt.Errorf("usage: kling image copy <name> -from <host> [-to <host>]\n" +
+			"  e.g. kling image copy min -from ssh://user@linux-arm64-host")
 	}
 	name := fs.Arg(0)
 	dst := hostOf(*to)

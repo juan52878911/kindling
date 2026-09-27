@@ -17,7 +17,7 @@ Group=juan
 # que reserva su memoria por adelantado: nueve en paralelo competirían justo por
 # la RAM que necesitan para arrancar. Con nueve servicios el peor caso son ~3 min,
 # y el plazo deja margen de sobra sin llegar a colgarse para siempre.
-ExecStart=/usr/local/bin/kling-mcp mcp heal
+ExecStart=/usr/local/bin/kling-mcp heal
 TimeoutStartSec=30min
 
 # Solo el 3, que es el codigo con el que el vigia dice "sonde todo y grabe la

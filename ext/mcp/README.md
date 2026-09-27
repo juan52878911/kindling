@@ -4,8 +4,8 @@ Serverless MCP tools on [kindling](../../README.md)'s Firecracker microVMs. Take
 service that comes up on demand, in milliseconds, with kernel-level isolation.
 
 kling-mcp is an **extension of `kling`**: it does not add a new command to learn. Once
-installed, `kling mcp`, `kling add`, `kling search`, `kling connect`, `kling gateway`,
-`kling export`, `kling memory` and `kling migrate` appear in the same `kling` you already
+installed, `kling mcp`, `kling mcp add`, `kling mcp search`, `kling connect`, `kling mcp serve`,
+`kling mcp export`, `kling mcp memory` and `kling mcp migrate` appear in the same `kling` you already
 use, in its help and in its shell completion.
 
 > Status: part of **kindling v0.13.0** (unreleased). Until v0.4.0 this was the separate
@@ -25,8 +25,8 @@ release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-kling plugins install mcp     # or: install.sh --with mcp
-kling plugins ls              # mcp should be listed as ok
+kling plugin install mcp     # or: install.sh --with mcp
+kling plugin ls              # mcp should be listed as ok
 ```
 
 That installs `kling-mcp` and its companion `kling-bridge` on your machine, both checked
@@ -60,11 +60,11 @@ You don't need to know how to package anything. `kling` talks to the official re
 (`registry.modelcontextprotocol.io`):
 
 ```sh
-kling search filesystem                    # what is out there, and what it can package on its own
-kling add io.github.domdomegg/filesystem-mcp
+kling mcp search filesystem                    # what is out there, and what it can package on its own
+kling mcp add io.github.domdomegg/filesystem-mcp
 ```
 
-`kling add` builds the image, boots a template, asks it what it can do, freezes it as a
+`kling mcp add` builds the image, boots a template, asks it what it can do, freezes it as a
 golden snapshot and stores its catalog. From then on, listing its capabilities **does not
 wake the microVM**.
 
@@ -123,7 +123,7 @@ booting twenty machines.
 With `mcp import`, the catalog lives on disk next to the snapshot:
 
 ```sh
-kling mcp list -v          # every tool, without starting anything
+kling mcp ls -v          # every tool, without starting anything
 kling mcp refresh <svc>    # recapture after updating the server
 ```
 
@@ -163,7 +163,7 @@ sudo ./scripts/80-mcp-image.sh stdio files -p "nodejs npm" -- \
      npx -y @modelcontextprotocol/server-filesystem /data
 
 kling run -name files-tmpl -image files -service files
-kling commit files-tmpl files && kling stop files-tmpl
+kling save files-tmpl files && kling stop files-tmpl
 ```
 
 ### Servers that already speak HTTP
@@ -259,7 +259,7 @@ session 2 (freshly created): pid=309 llamadas_en_esta_sesion=1
 ## Ephemeral mode: one microVM per action
 
 ```sh
-kling gateway -ephemeral -prewarm 3
+kling mcp serve -ephemeral -prewarm 3
 ```
 
 Every call gets **its own microVM**: one is taken from the pool of pre-warmed machines, it
@@ -490,7 +490,7 @@ kling config set gateway.url http://192.168.2.60:8080
 ## Migrating an existing MCP without breaking anything
 
 ```sh
-kling migrate <mcp> -install <client>
+kling mcp migrate <mcp> -install <client>
 ```
 
 `migrate` moves an MCP server you already use into kindling **keeping the entry's name
@@ -537,10 +537,10 @@ Off by default: kindling does not write into anyone's memory unless asked. The b
 binary is always installed, though, so turning it on is one command rather than a project.
 
 ```sh
-kling memory status            # whether it is on and against what
-kling memory install-service   # leaves the local bridge as a permanent service (macOS)
-kling memory enable            # uses engram; -service <svc> for another one
-kling memory disable
+kling mcp memory status            # whether it is on and against what
+kling mcp memory install-service   # leaves the local bridge as a permanent service (macOS)
+kling mcp memory enable            # uses engram; -service <svc> for another one
+kling mcp memory disable
 ```
 
 When it is on, the gateway records in the memory service which tool resolved each request,
@@ -605,7 +605,7 @@ root on its host. The gateway does listen, but all it knows how to do is wake in
 snapshots that already exist.
 
 ```sh
-kling gateway -listen 127.0.0.1:8080 -idle 5m   # generates the token the first time
+kling mcp serve -listen 127.0.0.1:8080 -idle 5m   # generates the token the first time
 
 # The gateway REQUIRES a token: waking a snapshot is running code, and while the
 # daemon protects itself by not listening, the gateway does listen.
@@ -658,7 +658,7 @@ imported. `-hosts` (or the `mcp.hosts` config key, same format) points one gatew
 several of them instead of one:
 
 ```sh
-kling gateway -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
+kling mcp serve -hosts mac=unix:///tmp/kling.sock,lab=ssh://juan@192.168.2.60 -listen 0.0.0.0:8080
 ```
 
 `/mcp/<service>` goes to the host that has it in its catalog; if more than one does, to
@@ -706,8 +706,8 @@ host does **not** update the bridge of services that are already packaged:
 ```sh
 kling mcp refresh-bridge              # all of them
 kling mcp refresh-bridge semgrep      # just one
-kling images rm <image>           # retire an image nothing uses any more
-kling images recipe <image>       # how it was built
+kling image rm <image>           # retire an image nothing uses any more
+kling image recipe <image>       # how it was built
 ```
 
 This is not a missing feature, it is a baffling failure if you forget it: an old bridge does

@@ -1,17 +1,17 @@
 // domotica-data descarga los conjuntos de datos libres para la tarea de
 // domótica de kindling y los convierte a un esquema único con repartos
 // train/valid/test sin fugas. Los datos no van al repositorio: se guardan en
-// una caché; aquí solo viven la herramienta, la taxonomía (pkg/domotica) y la
+// una caché; aquí solo viven la herramienta, la taxonomía (internal/domotica) y la
 // atribución (docs/domotica-datos.md, NOTICE).
 //
-//	go run ./tools/domotica-data fetch [-cache DIR]
-//	go run ./tools/domotica-data build [-cache DIR] [-out DIR]
+//	go run ./examples/domotica/cmd/domotica-data fetch [-cache DIR]
+//	go run ./examples/domotica/cmd/domotica-data build [-cache DIR] [-out DIR]
 //
 // Fuentes (versión fijada y sha256 comprobado ANTES de usar nada):
 //   - Amazon MASSIVE 1.0 (CC BY 4.0): es-ES y en-US, repartos oficiales.
 //   - home-assistant/intents (hoy OHF-Voice/intents, CC BY 4.0), etiqueta
 //     2026.9.17: plantillas es/en expandidas de forma acotada y determinista.
-//   - Las órdenes de la demo (pkg/domotica/demo.go), del propio proyecto.
+//   - Las órdenes de la demo (internal/domotica/demo.go), del propio proyecto.
 package main
 
 import (

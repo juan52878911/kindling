@@ -10,18 +10,18 @@ import (
 )
 
 func TestTokenize(t *testing.T) {
-	got := Tokenize("Pon el salón a 21,5°C y la luz al 50%!")
+	got := Tokenize("Paga en Bogotá 21,5°C y la cuota al 50%!")
 	var norms []string
 	for _, tk := range got {
 		norms = append(norms, tk.Norm)
 	}
-	want := "pon el salon a 21.5 ° c y la luz al 50 %"
+	want := "paga en bogota 21.5 ° c y la cuota al 50 %"
 	if s := strings.Join(norms, " "); s != want {
 		t.Fatalf("tokens %q, want %q", s, want)
 	}
-	text := "Pon el salón a 21,5°C"
+	text := "Paga en Bogotá 21,5°C"
 	for _, tk := range TokenizeN(text, 100, 100) {
-		if tk.Norm == "salon" && text[tk.Start:tk.End] != "salón" {
+		if tk.Norm == "bogota" && text[tk.Start:tk.End] != "Bogotá" {
 			t.Fatalf("offsets point to %q", text[tk.Start:tk.End])
 		}
 	}
@@ -32,17 +32,17 @@ func TestTokenize(t *testing.T) {
 
 // toy genera frases sintéticas con dos huecos, deterministas.
 func toy(n int) []Sentence {
-	areas := []string{"cocina", "salón", "baño", "dormitorio", "kitchen", "living room"}
-	verbs := []string{"enciende la luz de", "apaga la luz del", "turn on the light in the", "pon la temperatura de"}
+	areas := []string{"madrid", "bogotá", "córdoba", "sevilla", "london", "new york"}
+	verbs := []string{"reserva un hotel en", "cancela el vuelo a", "book a room in", "cambia la reserva de"}
 	var out []Sentence
 	for i := 0; i < n; i++ {
 		v := verbs[i%len(verbs)]
 		a := areas[(i/3)%len(areas)]
 		text := v + " " + a
-		sp := []Span{{Slot: "area", Start: len(v) + 1, End: len(text)}}
+		sp := []Span{{Slot: "city", Start: len(v) + 1, End: len(text)}}
 		if i%2 == 0 {
 			num := fmt.Sprint(10 + i%40)
-			text += " a " + num + " grados"
+			text += " a " + num + " euros"
 			st := len(v) + 1 + len(a) + 3
 			sp = append(sp, Span{Slot: "value", Start: st, End: st + len(num)})
 		}
@@ -54,7 +54,7 @@ func toy(n int) []Sentence {
 func trainToy(t testing.TB) *Model {
 	spec := DefaultSpec()
 	spec.Buckets = 1 << 12
-	res, err := Train(toy(200), toy(40), TrainConfig{Spec: spec, Lexicon: map[string]string{"cocina": "area", "kitchen": "area"}})
+	res, err := Train(toy(200), toy(40), TrainConfig{Spec: spec, Lexicon: map[string]string{"madrid": "city", "london": "city"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +63,13 @@ func trainToy(t testing.TB) *Model {
 
 func TestTrainTagRoundTrip(t *testing.T) {
 	m := trainToy(t)
-	text := "enciende la luz de cocina a 25 grados"
+	text := "reserva un hotel en madrid a 25 euros"
 	spans := m.Tag(text, nil)
 	got := map[string]string{}
 	for _, s := range spans {
 		got[s.Slot] = s.Text
 	}
-	if got["area"] != "cocina" || got["value"] != "25" {
+	if got["city"] != "madrid" || got["value"] != "25" {
 		t.Fatalf("spans %+v", spans)
 	}
 	b, err := m.Marshal()
@@ -100,7 +100,7 @@ func TestTagNoAlloc(t *testing.T) {
 	}
 	m := trainToy(t)
 	dst := make([]Span, 0, 8)
-	text := "turn on the light in the kitchen"
+	text := "book a room in london"
 	m.Tag(text, dst)
 	if n := testing.AllocsPerRun(100, func() { m.Tag(text, dst[:0]) }); n != 0 {
 		t.Fatalf("Tag allocates %v times", n)
@@ -133,8 +133,8 @@ func fixCRC(b []byte) []byte {
 func FuzzLoad(f *testing.F) {
 	spec := DefaultSpec()
 	spec.Buckets = 16
-	tags := TagsFor([]string{"area"})
-	m := &Model{Spec: spec, Tags: tags, Lexicon: map[string]string{"cocina": "area"}, Scale: 1,
+	tags := TagsFor([]string{"city"})
+	m := &Model{Spec: spec, Tags: tags, Lexicon: map[string]string{"madrid": "city"}, Scale: 1,
 		W: make([]int16, 16*len(tags)), Trans: make([]int16, (len(tags)+1)*len(tags))}
 	m.W[5] = 300
 	m.SpecHash = Hash(spec, tags, m.Lexicon)
@@ -155,7 +155,7 @@ func FuzzLoad(f *testing.F) {
 			if err != nil {
 				continue
 			}
-			for _, s := range []string{"", "enciende la cocina", strings.Repeat("x", 5000), "50 % °"} {
+			for _, s := range []string{"", "reserva en madrid", strings.Repeat("x", 5000), "50 % °"} {
 				for _, sp := range m.Tag(s, nil) {
 					if sp.Start < 0 || sp.End > len(s) || sp.Start > sp.End {
 						t.Fatalf("bad span %+v", sp)
@@ -169,7 +169,7 @@ func FuzzLoad(f *testing.F) {
 func BenchmarkTag(b *testing.B) {
 	m := trainToy(b)
 	dst := make([]Span, 0, 8)
-	text := "pon la temperatura del salón a 22 grados"
+	text := "cambia la reserva de bogotá a 22 euros"
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		dst = m.Tag(text, dst[:0])

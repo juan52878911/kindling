@@ -21,7 +21,7 @@ VOL2="${VOL2:-e2e-vol2}"
 # Los volúmenes los monta el agente de invitado, y la imagen mínima no lo lleva:
 # el daemon rechaza montarlos ahí a propósito, porque el disco se engancharía y
 # nadie lo montaría. Para los bloques de volúmenes hace falta una imagen con
-# agente: la de herramientas (`kling images toolchain`) lleva kling-guest.
+# agente: la de herramientas (`kling image toolchain`) lleva kling-guest.
 IMGVOL="${IMGVOL:-toolchain}"
 KEEP="${KEEP:-0}"
 
@@ -56,7 +56,7 @@ trap cleanup EXIT
 
 # ── 1. el daemon está y tiene lo que hace falta ───────────────────────────────
 step "1. Daemon"
-info=$($KLING info 2>&1) || { echo "$info"; echo "no alcanzo el daemon"; exit 1; }
+info=$($KLING status -v 2>&1) || { echo "$info"; echo "no alcanzo el daemon"; exit 1; }
 # Los espacios de la tabla son variables, así que se aplasta antes de comparar.
 kvm=$(printf '%s' "$info" | tr -s ' ' | grep -i '^KVM:' || true)
 contiene "$kvm" "yes" && ok "KVM disponible" || bad "KVM" "KVM: yes" "${kvm:-nada}"
@@ -302,7 +302,7 @@ fi
 TPL="e2e-tpl-$$"; SNAP="e2e-exec-snap-$$"
 if $KLING run -name "$TPL" -image "$IMGVOL" -allow-exec >/dev/null 2>&1 \
    && $KLING exec "$TPL" -- sh -c 'echo plantilla > /root/marca' >/dev/null 2>&1 \
-   && $KLING commit "$TPL" "$SNAP" >/dev/null 2>&1; then
+   && $KLING save "$TPL" "$SNAP" >/dev/null 2>&1; then
   out=$($KLING sandbox create -from "$SNAP" -name "$SB-snap" -q 2>&1) \
     && out=$($KLING exec "$SB-snap" -- cat /root/marca 2>&1)
   [ "$out" = "plantilla" ] && ok "sandbox desde un snapshot con exec, con su estado" \
@@ -311,7 +311,7 @@ if $KLING run -name "$TPL" -image "$IMGVOL" -allow-exec >/dev/null 2>&1 \
 else
   bad "snapshot con exec" "run -allow-exec + commit" "falló"
 fi
-$KLING rm "$TPL" >/dev/null 2>&1; $KLING rmi "$SNAP" >/dev/null 2>&1
+$KLING rm "$TPL" >/dev/null 2>&1; $KLING template rm "$SNAP" >/dev/null 2>&1
 
 # Al vencer el TTL, un sandbox se destruye (no se congela).
 if $KLING sandbox create -image "$IMGVOL" -name "$SB-ttl" -ttl 10s -q >/dev/null 2>&1; then
@@ -356,17 +356,17 @@ copied
   contiene "$out" "abs-link" && failE "copy: absolute symlink" "not copied" "$out" || true
   out=$($KLING exec "$SH-copy" -- sh -c 'echo x > /work/new 2>&1; echo rc=$?' 2>&1)
   contiene "$out" "Read-only" && ok "copy: read-only inside" || failE "copy write" "Read-only file system" "$out"
-  out=$($KLING commit "$SH-copy" "$SH-snap" 2>&1)
+  out=$($KLING save "$SH-copy" "$SH-snap" 2>&1)
   contiene "$out" "cannot be committed" && ok "commit of a machine with a share is refused" \
     || failE "commit with a share" "cannot be committed" "$out"
-  $KLING rmi "$SH-snap" >/dev/null 2>&1
+  $KLING template rm "$SH-snap" >/dev/null 2>&1
 else
   failE "run -share (copy)" "a machine" "$out"
 fi
 $KLING rm "$SH-copy" >/dev/null 2>&1
 rm -rf "$src"
 
-roots=$($KLING info 2>&1 | tr -s ' ' | grep '^share roots:' || true)
+roots=$($KLING status -v 2>&1 | tr -s ' ' | grep '^share roots:' || true)
 allowed=0
 for r in $(printf '%s' "${roots#share roots: }" | tr ',' ' '); do
   case "$SHARE_ROOT/" in "$r"/*) allowed=1;; esac

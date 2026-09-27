@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,139 +25,10 @@ import (
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
-	"github.com/juan52878911/kindling/pkg/transport"
-
-	"errors"
 	"github.com/juan52878911/kindling/pkg/plugin"
+	"github.com/juan52878911/kindling/pkg/transport"
+	"github.com/juan52878911/kindling/pkg/units"
 )
-
-const usageHead = `kling - Firecracker microVMs with a docker-style interface
-
-USAGE
-  kling <command> [options]
-
-GETTING STARTED
-  up                                               gets the runtime ready: KVM,
-                                                   nftables, user, images,
-                                                   daemon and extension units
-  status [-json]                                   which piece is up and which is missing
-  doctor [-json]                                   checks runtime, daemon, versions, extensions
-                                                   and completion; prints the fix for each ✗
-  try [-image I | -from S] [-mem MiB]              runs a command in a throwaway sandbox and
-      [-egress none|internet|allowlist] [-keep]    removes it (no command: a shell); exits
-      [--] [cmd [args...]]                         with the command's exit code
-  help <command>                                   help for one command, with its flags
-
-VOLUMES
-  volume create <name> [-size 2G]                  storage that survives
-                                                   the microVM
-  volume ls [-json] | rm <name>                    list / remove
-  volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
-  images ls [-json]                                lists built rootfs images
-  images toolchain                                 builds the image with npm and pip (used by populate)
-  images recipe <image>                            how it was built
-  images build <name> -builder B [-spec f.json]    builds it with a builder installed
-                                                   on the daemon (extensions ship them)
-  images cat <image> <path> [-stat]                prints a file inside an image
-  images put <image> <path> (-file F|-from-host N) puts a file inside a built image
-      [-mode 0755] [-create]
-  images rm <image>                                removes it (refuses if a layer,
-                                                   a golden or a machine uses it)
-  images copy <image> -from H [-to H]              streams an image (and its kernel and
-                                                   base) from one daemon to another
-
-MACHINES
-  run [-name N] [-image I] [-cpus N] [-mem MiB]    creates and starts a microVM
-      [-egress none|internet|allowlist]            network egress (default: none)
-      [-allow dom1,dom2]                           domains allowed with allowlist
-      [-ttl SECONDS] [-cpu-pct PCT]                auto-freeze and CPU ceiling
-      [-service NAME] [-label k=v]                 grouping by service
-      [-volume NAME[:/mount][:ro]] (repeatable)    storage that survives the machine
-      [-allow-exec] [-on-ttl freeze|remove]        accept exec/cp; remove instead of freezing
-      [-mem-max MiB]                               ceiling for kling resize
-      [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only copy
-                                                   (default), or live (docs/compartir.md)
-  ps [-a] [-q] [-json]                             lists the machines
-  inspect <ref>                                    a machine in JSON, shares included
-  logs [-f] <ref> [-tail N]                        microVM serial console (-f: follow it)
-  freeze <ref>                                     freezes into a snapshot -> warm
-  thaw <ref>                                       restores from snapshot (~ms)
-  pause <ref>                                      pauses it without dumping (thaw resumes it in ~1 ms)
-  stop <ref>                                       terminates the machine
-  rm <ref>                                         removes machine and snapshot
-  resize <ref> -mem MiB                            changes its memory without restarting,
-                                                   up to the -mem-max it was started with
-  squeeze <ref>...                                 balloon: returns the guest's
-                                                   free memory to the host
-  mmds <ref> [-f store.json]                       injects a session secret via
-                                                   MMDS (reads stdin if no -f); the
-                                                   machine can no longer be frozen
-
-SANDBOXES AND EXEC
-  sandbox create [-image I | -from S] [-ttl 10m]   a throwaway microVM that runs code:
-      [-egress none|internet|allowlist]            no network by default; when idle
-      [-on-ttl remove|freeze]                      it is destroyed, or frozen at zero
-      [-mem MiB] [-cpus N] [-volume ...] [-q]      cost and woken by the next exec
-      [-share SRC:DST[:copy|ro|rw]]                host folder inside, as in run
-  sandbox ls [-json] | renew <sb> [-ttl D]        list / extend / destroy
-      | rm <sb>...
-  exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming its
-      <ref> [--] <cmd> [args...]                   output; exits with its exit code
-  cp <local|-> <ref>:<path>                        copies a file into a machine
-  cp <ref>:<path> <local|->                        ... or out of it
-  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
-      [--] [cmd [args...]]                         (Ctrl-C reaches the program)
-
-GOLDEN SNAPSHOTS
-  commit [-replace] <ref> <name>                   freezes a machine as a
-                                                   reusable snapshot
-  run -from <name>                                 instantiates from the snapshot
-  snapshots [ls] [-json]                           lists the snapshots
-  snapshots inspect <name> [-json]                 one snapshot, with its annotations
-  snapshots rm <name>...                           removes snapshots
-  rmi <name>...                                    alias of snapshots rm
-
-OBSERVATION
-  topo                                             ASCII diagram of everything
-  top [-watch DUR] [-json]                         memory per microVM (PSS) and
-                                                   the host; snapshot or refresh
-  events                                           stream of daemon events
-  info [-json]                                     daemon status
-
-`
-
-const usageTail = `DAEMON
-  daemon [-socket S] [-root R] [-firecracker BIN]  starts the core (VMM: config daemon.vmm,
-                                                   or $KLING_VMM with a name or a path)
-
-CONFIGURATION
-  context [ls] [-json]                             lists known daemons
-  context add <name> <host>                        adds one and activates it
-  context use <name>                               switches daemon
-  context rm <name>                                removes it
-  config [show [-json]|path]                       current configuration
-  config set <key> <value>                         e.g. defaults.image min
-  completion bash|zsh|fish                         shell completion script
-  completion install [shell]                       writes it to ~/.config/kling and prints
-                                                   the line for your shell's rc
-  version [-json]                                  CLI version, and the daemon's if it answers
-
-EXTENSIONS
-  plugins [ls] [-json]                             installed extensions, their status and source
-  plugins install <name>[@vX.Y.Z]                  download from the kindling release (sha256-checked)
-          [-from URL] [-file PATH] [-sha256 H] [-dir DIR]
-  plugins rm <name>                                remove one installed by ` + "`plugins install`" + `
-  plugins enable|disable <name>                    turn an extension (also a built-in one) on or off
-
-CONNECTION
-  Precedence:  -H  >  $KLING_HOST  >  active context  >  local socket
-
-    kling context add lab ssh://juan@192.168.2.60
-    kling context use lab
-
-  The daemon never listens on a network port: controlling microVMs is
-  equivalent to root on its host, so the only remote access is SSH.
-`
 
 // Version se fija al compilar:  -ldflags "-X main.Version=..."
 var Version = "dev"
@@ -166,7 +38,18 @@ func main() {
 		printUsage(os.Stdout)
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	// Los nombres de antes se traducen en silencio a los de ahora (tree.go).
+	cmd, args := resolveAlias(os.Args[1], os.Args[2:])
+
+	// `kling run -h`, `kling mcp add -h`: la misma ayuda que `kling help ...`,
+	// salvo en el proceso que la genera (plugin.FlagHelp).
+	if words, ok := helpRequest(cmd, args); ok {
+		if err := cmdHelp(words); err != nil {
+			printError(os.Stderr, err)
+			os.Exit(codigoDeSalida(err))
+		}
+		return
+	}
 
 	var err error
 	switch cmd {
@@ -188,7 +71,7 @@ func main() {
 			}
 		}
 		os.Exit(code)
-	case "volume", "volumes":
+	case "volume":
 		err = cmdVolume(args)
 	case "dial-stdio": // extremo remoto del transporte SSH, no para uso manual
 		err = transport.ServeStdio(envOr("KLING_SOCKET", transport.DefaultSocketPath()), os.Stdin, os.Stdout)
@@ -217,7 +100,7 @@ func main() {
 		os.Exit(code)
 	case "cp":
 		err = cmdCp(args)
-	case "sandbox", "sandboxes":
+	case "sandbox":
 		err = cmdSandbox(args)
 	case "inspect":
 		err = cmdInspect(args)
@@ -227,28 +110,20 @@ func main() {
 		err = cmdLogs(args)
 	case "freeze", "thaw", "pause", "stop", "rm":
 		err = cmdLifecycle(cmd, args)
-	case "squeeze":
-		err = cmdSqueeze(args)
-	case "resize":
-		err = cmdResize(args)
-	case "mmds":
-		err = cmdMMDS(args)
-	case "commit":
-		err = cmdCommit(args)
-	case "snapshots":
-		err = cmdSnapshots(args)
-	case "images":
+	case "machine":
+		err = cmdMachine(args)
+	case "save":
+		err = cmdSave(args)
+	case "template":
+		err = cmdTemplate(args)
+	case "image":
 		err = cmdImages(args)
-	case "rmi":
-		err = cmdRmi(args)
 	case "topo":
 		err = cmdTopo(args)
 	case "top":
 		err = cmdTop(args)
 	case "events":
 		err = cmdEvents(args)
-	case "info":
-		err = cmdInfo(args)
 	case "context":
 		err = cmdContext(args)
 	case "config":
@@ -257,28 +132,30 @@ func main() {
 		err = cmdCompletion(args)
 	case "version", "--version", "-v":
 		err = cmdVersion(args)
-	case "plugins":
+	case "plugin":
 		err = cmdPlugins(args)
 	case "builder": // lo ejecuta el daemon como root; ver builder.go
 		err = cmdBuilder(args)
 	case "-h", "--help", "help":
-		if len(args) > 0 {
-			err = cmdHelp(args[0])
-			break
-		}
-		printUsage(os.Stdout)
-		return
+		err = cmdHelp(args)
 	default:
-		// Lo que no es del núcleo lo sirve una extensión: una incorporada corre
-		// aquí mismo; una externa reemplaza este proceso y no vuelve.
-		if p := extensions().Lookup(cmd); p != nil {
-			err = plugin.Exec(p, cmd, args, config.Path())
+		// Lo que no es del núcleo lo sirve una extensión: `kling mcp add x`
+		// llega a kling-mcp como `add x`, y `kling connect` como `connect`.
+		// Una incorporada corre aquí mismo; una externa reemplaza este proceso
+		// y no vuelve.
+		if p, argv := extensions().Resolve(cmd, args); p != nil {
+			if len(argv) == 0 {
+				// `kling mcp` a secas: su ayuda, como `kling` a secas.
+				plugin.WriteNamespace(os.Stdout, "kling "+cmd, *p.Manifest)
+				os.Exit(2)
+			}
+			err = plugin.Exec(p, argv[0], argv[1:], configPath())
 			break
 		}
 		if p := extensions().DisabledFor(cmd); p != nil {
 			err = &errConCodigo{code: 2, err: &errWithHint{
 				err:  fmt.Errorf("kling %s comes from extension %q, which is disabled", cmd, p.Name),
-				hint: "kling plugins enable " + p.Name}}
+				hint: "kling plugin enable " + p.Name}}
 			break
 		}
 		if ext, ok := movedToExtension[cmd]; ok {
@@ -294,6 +171,24 @@ func main() {
 		printError(os.Stderr, err)
 		os.Exit(codigoDeSalida(err))
 	}
+}
+
+// cmdMachine agrupa lo que se hace a una máquina viva y casi nadie teclea:
+// `kling machine resize|squeeze|secret`. Los nombres de antes (resize,
+// squeeze, mmds) son alias.
+func cmdMachine(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: kling machine <resize|squeeze|secret> <ref> [...]")
+	}
+	switch args[0] {
+	case "resize":
+		return cmdResize(args[1:])
+	case "squeeze":
+		return cmdSqueeze(args[1:])
+	case "secret", "mmds":
+		return cmdMMDS(args[1:])
+	}
+	return fmt.Errorf("unknown subcommand %q: use resize, squeeze or secret", args[0])
 }
 
 // errConCodigo deja que un comando pida un codigo de salida concreto.
@@ -452,11 +347,11 @@ func cmdRun(args []string) error {
 	image := fs.String("image", "", "rootfs image (default: defaults.image, or 'default')")
 	from := fs.String("from", "", "instantiate from a golden snapshot (~ms, no cold start)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default: 1)")
-	mem := fs.Int("mem", 0, "memory in MiB (default: 256)")
-	memMax := fs.Int("mem-max", 0, "ceiling for resizing its memory later without restarting (kling resize)")
+	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
+	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
 	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
-	ttl := fs.Int("ttl", 0, "seconds until it freezes itself (0 = never)")
+	ttl := units.SecondsVar(fs, "ttl", 0, "time until it freezes itself: 10m, 1h (bare number = seconds; 0 = never)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core (0 = default)")
 	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
 	service := fs.String("service", "", "service it belongs to (groups machines in topo and metrics)")
@@ -522,6 +417,11 @@ func cmdRun(args []string) error {
 	for _, s := range mc.Shares {
 		fmt.Printf("  %s  %s  (%s)\n", s.Mount, s.Source, s.Mode)
 	}
+	if *allowExec {
+		next("kling exec %s -- <cmd>   ·   kling save %s <name>", mc.ID[:12], mc.ID[:12])
+	} else {
+		next("kling logs %s   ·   kling save %s <name>", mc.ID[:12], mc.ID[:12])
+	}
 	return nil
 }
 
@@ -557,19 +457,21 @@ func (l labelFlag) merge(service string) map[string]string {
 	return out
 }
 
-func cmdCommit(args []string) error {
-	fs := flag.NewFlagSet("commit", flag.ExitOnError)
+// cmdSave es `kling save <ref> <name>` (antes `commit`): una máquina viva se
+// convierte en plantilla de la que `run -from` instancia en milisegundos.
+func cmdSave(args []string) error {
+	fs := flag.NewFlagSet("save", flag.ExitOnError)
 	host := hostFlag(fs)
 	// Reemplazar es opt-in: los snapshots quedan atados al TSC del host y un
 	// reinicio los invalida todos, así que rehacerlos con el mismo nombre es
 	// rutina — pero pisar uno por un nombre repetido sin querer no debe poder
 	// pasar, y por eso no es el comportamiento por defecto.
-	replace := fs.Bool("replace", false, "replace the snapshot if one with this name already exists")
+	replace := fs.Bool("replace", false, "replace the template if one with this name already exists")
 	// Congelar un servidor que no sirve produce un snapshot que NO sirve, y el
 	// fallo no aparece hasta que alguien lo despierta —minutos u horas despues—
 	// con un "tool did not start listening" que no menciona el commit. Por eso
 	// se comprueba antes, y por eso saltarselo es explicito.
-	force := fs.Bool("force", false, "commit even if the guest is not serving (produces a snapshot that may not work)")
+	force := fs.Bool("force", false, "save even if the guest is not serving (produces a template that may not work)")
 	// El hijo caliente vive DENTRO del dorado y lo engorda: medido, 39 MB -> 120 MB
 	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
 	// de unas decenas de servicios la cuenta puede no salir.
@@ -579,7 +481,7 @@ func cmdCommit(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return fmt.Errorf("usage: kling commit [-replace] [-force] [-warm=false] <ref> <snapshot-name>")
+		return fmt.Errorf("usage: kling save [-replace] [-force] [-warm=false] <ref> <template-name>")
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -596,14 +498,14 @@ func cmdCommit(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s  golden snapshot  (%s of memory)\n", snap.Name, human(snap.MemBytes))
-	fmt.Printf("instantiate with:  kling run -from %s\n", snap.Name)
+	fmt.Printf("%s  template  (%s of memory)\n", snap.Name, human(snap.MemBytes))
+	next("kling run -from %s", snap.Name)
 	return nil
 }
 
 // listoParaCongelar exige que el invitado SIRVA antes de convertirse en dorado.
 //
-// `kling mcp import` ya hacia esta danza; `kling commit` a secas no, y es el
+// `kling mcp import` ya hacia esta danza; `kling save` a secas no, y es el
 // camino que documentamos para crear dorados a mano. El resultado era un snapshot
 // que restaura en 26 ms y luego no contesta: la microVM arranca, el proceso del
 // servidor no esta escuchando, y el gateway devuelve 502 tras esperar en balde.
@@ -645,7 +547,7 @@ func mensajeNoSirve(ref, espera string) string {
 		"A golden snapshot of a server that is not listening restores fine and then "+
 		"fails on wake with \"tool did not start listening\".\n"+
 		"Check it with:  kling logs %s\n"+
-		"Or freeze anyway with:  kling commit -force ...", espera, ref)
+		"Or freeze anyway with:  kling save -force ...", espera, ref)
 }
 
 func cmdPS(args []string) error {
@@ -690,7 +592,7 @@ func cmdPS(args []string) error {
 		}
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	head := "ID\tNAME\tIMAGE\tSTATE\tCPU/MEM\tDISK\tEGRESS\tAGE\tLAST OP"
+	head := "ID\tNAME\tIMAGE/TEMPLATE\tSTATE\tCPU/MEM\tDISK\tEGRESS\tAGE\tLAST OP"
 	if conShares {
 		head += "\tSHARES"
 	}
@@ -705,8 +607,14 @@ func cmdPS(args []string) error {
 		if eg == "" {
 			eg = "none"
 		}
+		// Una máquina instanciada de una plantilla se identifica por ella: la
+		// imagen es un detalle de la plantilla, no de la máquina.
+		origin := mc.Image
+		if mc.From != "" {
+			origin = mc.From
+		}
 		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\t%s",
-			mc.ID[:12], mc.Name, mc.Image, mc.State,
+			mc.ID[:12], mc.Name, origin, mc.State,
 			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), eg, since(mc.CreatedAt), lastOp(mc))
 		if conShares {
 			row += "\t" + sharesColumn(mc)
@@ -765,11 +673,18 @@ func since(t time.Time) string {
 func cmdLifecycle(op string, args []string) error {
 	fs := flag.NewFlagSet(op, flag.ExitOnError)
 	host := hostFlag(fs)
+	var force *bool
+	if op == "rm" {
+		force = fs.Bool("f", false, "do not ask for confirmation")
+	}
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling %s <ref>", op)
+		return fmt.Errorf("usage: kling %s <ref>...", op)
+	}
+	if op == "rm" && !*force && !confirmMany("machine", fs.Args()) {
+		return errAborted
 	}
 
 	ctx, stop := ctxWithSignals()
@@ -798,7 +713,7 @@ func cmdLifecycle(op string, args []string) error {
 		case op == "rm":
 			fmt.Println(ref)
 		case op == "freeze":
-			fmt.Printf("%s  warm  (%d ms, %d MiB on disk)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
+			fmt.Printf("%s  frozen  (%d ms, %d MiB on disk)\n", mc.ID[:12], mc.FreezeMS, mc.SnapSize>>20)
 		case op == "thaw":
 			fmt.Printf("%s  running  (%d ms)%s\n", mc.ID[:12], mc.ThawMS, wakeNote(mc.Wake))
 		default:
@@ -818,7 +733,7 @@ func cmdSqueeze(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling squeeze <ref>...")
+		return fmt.Errorf("usage: kling machine squeeze <ref>...")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -834,7 +749,8 @@ func cmdSqueeze(args []string) error {
 	return nil
 }
 
-// cmdMMDS inyecta un secreto de sesión en una microVM viva por MMDS. El store es
+// cmdMMDS es `kling machine secret` (antes `mmds`): inyecta un secreto de
+// sesión en una microVM viva por MMDS. El store es
 // un documento JSON que se lee de -f o de stdin. Es sobre todo para pruebas en el
 // lab: en producción quien inyecta es el gateway al resolver una sesión.
 //
@@ -855,7 +771,7 @@ func cmdMMDS(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling mmds <ref> [-f store.json]  (reads stdin if no -f)")
+		return fmt.Errorf("usage: kling machine secret <ref> [-f store.json]  (reads stdin if no -f)")
 	}
 
 	var raw []byte
@@ -985,7 +901,7 @@ func cmdTopo(args []string) error {
 					snap = s
 				}
 			}
-			fmt.Printf("   %s◆ %-16s golden snapshot · %s shared memory\n",
+			fmt.Printf("   %s◆ %-16s template · %s shared memory\n",
 				branch, g, human(snap.MemBytes))
 		}
 
@@ -1028,7 +944,7 @@ func cmdTopo(args []string) error {
 		}
 	}
 
-	fmt.Printf("\n  %d running · %d warm · %d stopped   disk: %s own + %s shared\n",
+	fmt.Printf("\n  %d running · %d frozen · %d stopped   disk: %s own + %s shared\n",
 		running, warm, stopped, human(diskOwn), human(diskShared))
 	fmt.Printf("  egress:  ⌀ isolated   → internet (private networks are always blocked)\n")
 	return nil
@@ -1055,25 +971,9 @@ func trunc(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-func cmdInfo(args []string) error {
-	fs := flag.NewFlagSet("info", flag.ExitOnError)
-	host := hostFlag(fs)
-	asJSON := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(reorderFor(fs, args)); err != nil {
-		return err
-	}
-
-	ctx, stop := ctxWithSignals()
-	defer stop()
-
-	c := api.NewClient(hostOf(*host))
-	i, err := c.Info(ctx)
-	if err != nil {
-		return err
-	}
-	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(i)
-	}
+// writeInfo son los detalles del daemon: lo que era `kling status -v` y ahora
+// enseña `kling status -v`.
+func writeInfo(c *api.Client, i *api.Info) {
 	kvm := "no"
 	if i.KVM {
 		kvm = "yes"
@@ -1116,20 +1016,19 @@ func cmdInfo(args []string) error {
 			fmt.Printf("at rest:      NOT encrypted: snapshots hold guest memory in clear; see docs/cifrado.md\n")
 		}
 	}
-	return nil
 }
 
-// cmdResize es `kling resize <ref> -mem N`: sube o baja la memoria de una
-// máquina sin reiniciarla, dentro del techo con el que arrancó.
+// cmdResize es `kling machine resize <ref> -mem N`: sube o baja la memoria de
+// una máquina sin reiniciarla, dentro del techo con el que arrancó.
 func cmdResize(args []string) error {
-	fs := flag.NewFlagSet("resize", flag.ExitOnError)
+	fs := flag.NewFlagSet("machine resize", flag.ExitOnError)
 	host := hostFlag(fs)
-	mem := fs.Int("mem", 0, "new memory in MiB")
+	mem := units.MiBVar(fs, "mem", 0, "new memory: 512M, 2G (bare number = MiB)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || *mem <= 0 {
-		return fmt.Errorf("usage: kling resize <machine> -mem MiB")
+		return fmt.Errorf("usage: kling machine resize <machine> -mem 512M")
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()

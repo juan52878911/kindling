@@ -37,7 +37,7 @@ const (
 	KindVON    = "von"
 	// KindEmbed es un codificador de frases servido como un VON (dorado de
 	// `kling models add` con kind embed): la capa 3 de las tareas de
-	// domótica (domotica.go).
+	// intención (intent.go).
 	KindEmbed = "embed"
 )
 
@@ -106,10 +106,10 @@ type TaskConfig struct {
 	EscalateForce bool `json:"escalate_force,omitempty"`
 	// VON es el modelo de una tarea de generación.
 	VON string `json:"von,omitempty"`
-	// Domotica hace de la tarea una DECISIÓN de domótica (domotica.go):
-	// plantillas → Chispa + huecos → codificador, con /v1/decide. Excluye todo
-	// lo demás de la tarea.
-	Domotica *DomoticaConfig `json:"domotica,omitempty"`
+	// Intent hace de la tarea una DECISIÓN de intención y huecos
+	// (intent.go, pkg/intent): plantillas → Chispa + huecos → codificador,
+	// con /v1/decide. Excluye todo lo demás de la tarea.
+	Intent *IntentConfig `json:"intent,omitempty"`
 
 	// Labels son las etiquetas válidas; salen del modelo Chispa y, si se dan
 	// aquí también, tienen que ser las mismas.
@@ -152,7 +152,7 @@ type TaskConfig struct {
 	// JSONSchema restringe la salida de una generación a JSON que cumple este
 	// esquema (el json_schema de llama-server, que lo convierte en una
 	// gramática). Medido en docs/von-cpu.md: sin él, Qwen2.5-1.5B devolvía
-	// JSON inválido en 2 de 21 respuestas de la tarea de domótica; con él, en
+	// JSON inválido en 2 de 21 respuestas de una tarea de acciones; con él, en
 	// ninguna, a cambio de ~10 % de velocidad de generación. El gateway
 	// comprueba además que la salida sea JSON: el invitado no es de fiar.
 	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
@@ -161,7 +161,7 @@ type TaskConfig struct {
 	OnVONError string `json:"on_von_error,omitempty"`
 	// Learn activa la mejora continua de la tarea (learn.go): capturar lo que
 	// Chispa escala, etiquetas humanas por /v1/feedback, `kling ai review` y
-	// `kling ai retrain` con puerta. Clasificación y domótica.
+	// `kling ai retrain` con puerta. Clasificación e intención.
 	Learn *LearnConfig `json:"learn,omitempty"`
 }
 
@@ -218,8 +218,8 @@ func LoadConfig(path string) (*Config, error) {
 			rel(&l.Heldout)
 			rel(&l.Valid)
 		}
-		if d := t.Domotica; d != nil {
-			for _, p := range []*string{&d.Slots, &d.Head} {
+		if d := t.Intent; d != nil {
+			for _, p := range []*string{&d.Slots, &d.Head, &d.Schema} {
 				if *p != "" && !filepath.IsAbs(*p) {
 					*p = filepath.Join(filepath.Dir(path), *p)
 				}
@@ -307,13 +307,13 @@ func (c *Config) Validate() error {
 		}
 		if t.Learn != nil {
 			if t.VON != "" {
-				errs = append(errs, fmt.Errorf("task %q: learn is for classification and domotica tasks (a generation has no Chispa to teach)", n))
+				errs = append(errs, fmt.Errorf("task %q: learn is for classification and intent tasks (a generation has no Chispa to teach)", n))
 			} else {
 				errs = append(errs, validateLearn(n, t.Learn, t.EscalateTo)...)
 			}
 		}
-		if t.Domotica != nil {
-			errs = append(errs, c.validateDomotica(n, t)...)
+		if t.Intent != nil {
+			errs = append(errs, c.validateIntent(n, t)...)
 			continue
 		}
 		gen := t.VON != ""

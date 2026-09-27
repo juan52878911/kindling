@@ -42,8 +42,8 @@ contabilidad. Quien necesite aislamiento fuerte, hosts separados.
 Primero kindling, y esta extensión encima, de la misma release:
 
 ```sh
-kling plugins install sandbox         # kling-sandbox en tu máquina (o: install.sh --with sandbox)
-kling plugins ls                      # debería salir sandbox con estado ok
+kling plugin install sandbox         # kling-sandbox en tu máquina (o: install.sh --with sandbox)
+kling plugin ls                      # debería salir sandbox con estado ok
 ```
 
 El frontal corre como servicio en el host del daemon: la unidad viene en

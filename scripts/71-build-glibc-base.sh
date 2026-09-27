@@ -199,7 +199,7 @@ ext4_shrink_safe "$DEST"
 
 # HOLGURA. resize2fs -M deja la imagen ajustada al byte, y entonces no cabe ni
 # su propio recambio del puente: sustituirlo escribe al lado y renombra, asi que
-# conviven dos copias un instante. `kling images refresh` sabe hacerla crecer,
+# conviven dos copias un instante. `kling mcp refresh-bridge` sabe hacerla crecer,
 # pero dejarla ya con aire ahorra ese ciclo de montaje y resize.
 CUR=$(stat -c%s "$DEST")
 truncate -s $((CUR + 32 * 1024 * 1024)) "$DEST"

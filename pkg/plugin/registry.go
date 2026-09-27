@@ -27,12 +27,22 @@ var HookTimeout = 5 * time.Second
 const waitDelay = 200 * time.Millisecond
 
 // notPlugins son ejecutables kling-* que acompañan a kindling y no son
-// extensiones: nunca se les pide un manifiesto.
+// extensiones: nunca se les pide un manifiesto. Están aquí los que publica la
+// release del núcleo y de sus extensiones; los de una extensión de terceros
+// los declara su manifiesto en Companions y los lee companionsIn.
 var notPlugins = map[string]bool{
 	"kling-bridge":       true,
 	"kling-bridge-local": true,
 	"kling-guest":        true,
+	"kling-vz":           true, // VMM nativo de macOS, junto a kling
+	"kling-chispa":       true, // servidor de clasificadores dentro de la imagen
+	"kling-daemon":       true,
+	"kling-builder":      true,
 }
+
+// IsCompanion dice si el ejecutable name (kling-<algo>) es un compañero
+// conocido y no una extensión.
+func IsCompanion(name string) bool { return notPlugins[name] }
 
 // Builtin es una extensión que vive dentro del binario de kling. Sirve para
 // que lo que todavía no se ha mudado a su propio binario pase ya por el mismo
@@ -52,8 +62,9 @@ type Plugin struct {
 	// Err es por qué no se puede usar (manifiesto roto, versión, ...). Una
 	// extensión con Err se lista pero no se ejecuta.
 	Err error
-	// Shadowed son los comandos que declara y que ya tiene el núcleo u otra
-	// extensión anterior: no se le enrutan.
+	// Shadowed son las palabras de primer nivel que reclama (su nombre, si
+	// tiene comandos bajo él, y sus comandos promovidos) y que ya tiene el
+	// núcleo u otra extensión anterior: no se le enrutan.
 	Shadowed []string
 	// Disabled es que la apagó el usuario (plugins.disabled). Va con Err, para
 	// que todo lo que ya salta las extensiones con error la salte también.
@@ -63,7 +74,10 @@ type Plugin struct {
 // Registry es el conjunto de extensiones que ve este kling.
 type Registry struct {
 	Plugins []*Plugin
-	owner   map[string]*Plugin // comando -> extensión que lo sirve
+	// owner es la palabra de primer nivel -> extensión que la sirve. La
+	// palabra es el nombre de la extensión (espacio de sus comandos) o un
+	// comando promovido.
+	owner map[string]*Plugin
 }
 
 // Options configura el descubrimiento.
@@ -123,12 +137,19 @@ func Discover(ctx context.Context, o Options) *Registry {
 		if p.Err != nil {
 			return
 		}
-		for _, c := range p.Manifest.Commands {
-			if core[c.Name] || r.owner[c.Name] != nil {
-				p.Shadowed = append(p.Shadowed, c.Name)
+		var words []string
+		if len(p.Manifest.Namespaced()) > 0 {
+			words = append(words, p.Manifest.Name)
+		}
+		for _, c := range p.Manifest.Promoted() {
+			words = append(words, c.Name)
+		}
+		for _, w := range words {
+			if core[w] || r.owner[w] != nil {
+				p.Shadowed = append(p.Shadowed, w)
 				continue
 			}
-			r.owner[c.Name] = p
+			r.owner[w] = p
 		}
 	}
 
@@ -222,9 +243,34 @@ func loadManifest(ctx context.Context, path string) (*Manifest, error) {
 	return &m, nil
 }
 
-// Lookup devuelve la extensión que sirve el comando, o nil.
-func (r *Registry) Lookup(cmd string) *Plugin {
-	return r.owner[cmd]
+// Lookup devuelve la extensión que sirve la palabra de primer nivel word (el
+// nombre de una extensión con comandos, o un comando promovido), o nil.
+func (r *Registry) Lookup(word string) *Plugin {
+	return r.owner[word]
+}
+
+// Resolve traduce lo que se tecleó tras `kling` a lo que recibe la extensión.
+// Para `kling mcp add x` devuelve la extensión mcp y ["add", "x"]; para
+// `kling connect -all`, la extensión mcp y ["connect", "-all"]. Sin extensión
+// que sirva word devuelve nil.
+func (r *Registry) Resolve(word string, rest []string) (*Plugin, []string) {
+	p := r.owner[word]
+	if p == nil {
+		return nil, nil
+	}
+	// Un comando promovido que se llama como la extensión (el "hello" de
+	// kling-hello) gana sobre el espacio de nombres: es lo que siempre fue.
+	if p.Manifest.Name == word && p.Manifest.Command(word) == nil {
+		return p, rest
+	}
+	return p, append([]string{word}, rest...)
+}
+
+// IsNamespace dice si word es el nombre de una extensión utilizable con
+// comandos bajo él.
+func (r *Registry) IsNamespace(word string) bool {
+	p := r.owner[word]
+	return p != nil && p.Manifest.Name == word && p.Manifest.Command(word) == nil && len(p.Manifest.Namespaced()) > 0
 }
 
 // DisabledFor devuelve la extensión apagada que serviría cmd, o nil, para que
@@ -259,21 +305,61 @@ func companionsIn(dir string) map[string]bool {
 	return out
 }
 
-// Commands son los comandos que aportan las extensiones utilizables, en orden
-// de grupo y nombre.
+// CompanionsIn son, ordenados, los compañeros que declaran las extensiones
+// instaladas en dir.
+func CompanionsIn(dir string) []string {
+	var out []string
+	for c := range companionsIn(dir) {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Commands son los comandos de primer nivel que aportan las extensiones
+// utilizables (los promovidos, y uno por cada espacio de nombres, que resume la
+// extensión), en orden de grupo y nombre. Es lo que sale en `kling help` y en
+// el primer nivel del completado.
 func (r *Registry) Commands() []Command {
 	var out []Command
+	for _, p := range r.Namespaces() {
+		m := p.Manifest
+		c := Command{Name: m.Name, Group: m.Group(), Summary: m.Summary}
+		for _, sc := range m.Namespaced() {
+			if !sc.Hidden {
+				c.Subcommands = append(c.Subcommands, sc.Name)
+			}
+			for _, ma := range sc.MachineArgs {
+				if ma == "" {
+					c.MachineArgs = append(c.MachineArgs, sc.Name)
+				}
+			}
+		}
+		out = append(out, c)
+	}
 	for _, p := range r.Plugins {
 		if p.Err != nil {
 			continue
 		}
-		for _, c := range p.Manifest.Commands {
-			if r.owner[c.Name] == p {
+		for _, c := range p.Manifest.Promoted() {
+			if r.owner[c.Name] == p && !c.Hidden {
 				out = append(out, c)
 			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Group < out[j].Group })
+	return out
+}
+
+// Namespaces son las extensiones utilizables que tienen comandos bajo su
+// nombre, en orden de descubrimiento.
+func (r *Registry) Namespaces() []*Plugin {
+	var out []*Plugin
+	for _, p := range r.Plugins {
+		if p.Err == nil && r.owner[p.Manifest.Name] == p && len(p.Manifest.Namespaced()) > 0 {
+			out = append(out, p)
+		}
+	}
 	return out
 }
 

@@ -53,7 +53,7 @@ Misma configuración en los dos lados, para que la única variable sea el hiperv
 
 El globo funciona: con dos máquinas que ocupan y liberan 150 MiB en tmpfs, la
 huella pasa de 460 a 151 MiB por máquina al fijar el objetivo en 64 MiB, y el
-invitado sigue respondiendo. Es el equivalente de `kling squeeze`.
+invitado sigue respondiendo. Es el equivalente de `kling machine squeeze`.
 
 ## Servidor MCP real: seqthink (node), `initialize` por HTTP al puente
 
@@ -126,7 +126,7 @@ objetivo principal.
 | `-bundle` (esbuild) | no medible: el bundle de `server-sequential-thinking` muere al arrancar con "Could not locate package.json for server version" | Bug de empaquetado de kindling, no del hipervisor: el servidor busca su `package.json` junto al fichero y `80-mcp-image.sh` no lo copia a `/opt` |
 
 **Lo que cambia la política del Mac.** En Linux, la jerarquía de kindling es
-`running → warm (fichero, 0 RAM, thaw 30 ms)`. En Virtualization.framework el
+`running → frozen (fichero, 0 RAM, thaw 30 ms)`. En Virtualization.framework el
 restore es la operación cara en memoria, así que la jerarquía natural pasa a tener
 un escalón más:
 
@@ -228,7 +228,7 @@ que `phys_footprint`).
 
 - El `min.ext4` de la VM Lima era de agosto y su `overlay-init` ignoraba
   `kling.layer=`; se le instaló el `minimal-init.sh` actual (copia de seguridad en
-  `min.ext4.bak-20260921`). Es lo que hace `kling images refresh`.
+  `min.ext4.bak-20260921`). Es lo que hace `kling image refresh`.
 - El daemon de esa VM es v0.3.0 y no entiende imágenes por capas; por eso la
   comparación de seqthink se hizo con `firecracker --config-file` a mano.
 - El fichero `Image` producido con `llvm-objcopy -O binary` sobre el `vmlinux` no

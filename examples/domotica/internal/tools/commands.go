@@ -1,4 +1,4 @@
-package main
+package tools
 
 import (
 	"crypto/sha256"
@@ -16,18 +16,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/pkg/chispa"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
-	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
-// kling domotica: la decisión de la habitación de demo (pkg/domotica) desde la
-// CLI, sin daemon. Plantillas de la demo → Chispa (intención) + Chispa-slots
-// (huecos); lo que no es confiado dice a qué capa escalar. Ver docs/domotica.md.
+// Los subcomandos de kindling-domotica que trabajan con los modelos de la
+// habitación sin gateway (salvo eval-llm): decidir, evaluar y entrenar las
+// capas. Plantillas de la demo → Chispa (intención) + Chispa-slots (huecos),
+// con la cascada de pkg/intent; lo que no es confiado dice a qué capa
+// escalar. Ver docs/domotica.md.
 
-const domoticaUsage = `usage: kling domotica <command> [options]
-
-  decide [-lang es|en|auto] [-intent m.chispa]  decides one command: intent, slots, layer,
+// Usage son las líneas de estos subcomandos en la ayuda de kindling-domotica.
+const Usage = `  decide [-lang es|en|auto] [-intent m.chispa]  decides one command: intent, slots, layer,
          [-slots m.chispas] [-json] "<text>"    confidence and latency (JSONL from stdin
                                                 when no text is given)
   eval -data test.jsonl [-intent m.chispa]      intent accuracy / macro-F1, slot F1, exact
@@ -45,39 +46,26 @@ const domoticaUsage = `usage: kling domotica <command> [options]
                                                 nothing; writes the record that enables it
 
 eval-llm asks the LLM through a generation task of the AI gateway: an in-process
-one on the daemon of -H with -von, or a running ` + "`kling ai serve`" + ` with -gateway
-(docs/domotica.md; the demo room that uses it is examples/domotica).
+one on the daemon of -H with -von, or a running kindling-domotica gateway with
+-gateway.
 
 decide and eval take the layer-3 encoder with -encoder head.jenc plus -embed-url
 http://host:port (a replica) and/or -embed-cache c.jemb (docs/codificador.md).
 
 Models default to $KLING_DOMOTICA_MODELS (or the user cache dir)/intent.chispa and
 slots.chispas; without them only the demo templates answer. Data: go run
-./tools/domotica-data fetch && go run ./tools/domotica-data build (docs/domotica-datos.md).
+./examples/domotica/cmd/domotica-data fetch && ... build (docs/domotica-datos.md).
 `
 
-func cmdDomotica(args []string) error {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Print(domoticaUsage)
-		return nil
-	}
-	switch args[0] {
-	case "decide":
-		return cmdDomoticaDecide(args[1:])
-	case "eval":
-		return cmdDomoticaEval(args[1:])
-	case "train-slots":
-		return cmdDomoticaTrainSlots(args[1:])
-	case "embed":
-		return cmdDomoticaEmbed(args[1:])
-	case "train-encoder":
-		return cmdDomoticaTrainEncoder(args[1:])
-	case "templates":
-		return cmdDomoticaTemplates(args[1:])
-	case "eval-llm":
-		return cmdDomoticaEvalLLM(args[1:])
-	}
-	return fmt.Errorf("unknown domotica command %q\n\n%s", args[0], domoticaUsage)
+// Commands son los subcomandos, por nombre.
+var Commands = map[string]func([]string) error{
+	"decide":        cmdDomoticaDecide,
+	"eval":          cmdDomoticaEval,
+	"train-slots":   cmdDomoticaTrainSlots,
+	"embed":         cmdDomoticaEmbed,
+	"train-encoder": cmdDomoticaTrainEncoder,
+	"templates":     cmdDomoticaTemplates,
+	"eval-llm":      cmdDomoticaEvalLLM,
 }
 
 func domoticaModelsDir() string {
@@ -211,7 +199,7 @@ func readRowsFile(path string) ([]domotica.Row, string, error) {
 
 func cmdDomoticaEval(args []string) error {
 	fs := flag.NewFlagSet("domotica eval", flag.ExitOnError)
-	data := fs.String("data", "", "unified JSONL test data (tools/domotica-data build)")
+	data := fs.String("data", "", "unified JSONL test data (cmd/domotica-data build)")
 	intentPath := fs.String("intent", "", "intent model (.chispa)")
 	slotsPath := fs.String("slots", "", "slot model (.chispas)")
 	challenge := fs.Bool("challenge", true, "also score the built-in challenge set (indirect, multi-command, near out-of-scope)")
@@ -386,7 +374,7 @@ func cmdDomoticaTrainSlots(args []string) error {
 		return err
 	}
 	if *data == "" || *out == "" {
-		return errors.New("usage: kling domotica train-slots -data train.jsonl -o slots.chispas [-valid v.jsonl]")
+		return errors.New("usage: kindling-domotica train-slots -data train.jsonl -o slots.chispas [-valid v.jsonl]")
 	}
 	if *bucketsLog < 4 || *bucketsLog > 22 {
 		return errors.New("-buckets must be between 4 and 22 (log2)")

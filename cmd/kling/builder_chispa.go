@@ -35,7 +35,7 @@ import (
 type ChispaSpec struct {
 	// ModelB64 es el contenido del .chispa, en base64.
 	ModelB64 string `json:"model_b64"`
-	// SlotsB64 es el .chispas opcional (huecos, docs/domotica.md), en base64.
+	// SlotsB64 es el .chispas opcional (huecos, docs/intent.md), en base64.
 	SlotsB64 string `json:"slots_b64,omitempty"`
 }
 
@@ -56,7 +56,7 @@ func builderChispa(dir string) error {
 		return err
 	}
 	if spec.ModelB64 == "" {
-		return fmt.Errorf("the chispa builder needs model_b64 (kling chispa deploy reads it from your -model file)")
+		return fmt.Errorf("the chispa builder needs model_b64 (kling ai chispa deploy reads it from your -model file)")
 	}
 	modelBytes, err := base64.StdEncoding.DecodeString(spec.ModelB64)
 	if err != nil {

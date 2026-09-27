@@ -116,11 +116,11 @@ func upHere(root string, checkOnly bool) error {
 	}
 
 	fmt.Println()
-	fmt.Println("Next step:")
-	fmt.Println("  kling status                     checks that everything responds")
-	fmt.Println("  kling doctor                     the same, plus versions, extensions and completion")
-	fmt.Println("  kling try -- uname -a            runs a command in a throwaway sandbox")
-	fmt.Println("  kling plugins                    what the installed extensions add (kling-mcp: MCP servers)")
+	fmt.Println("Runtime ready. Try it:")
+	fmt.Println("  kling try -- uname -a            runs a command in a throwaway microVM")
+	fmt.Println("  kling mcp add <server>           hosts an MCP server as a frozen service (needs kling-mcp)")
+	fmt.Println("  kling doctor                     checks daemon, versions, extensions and completion")
+	next("kling try -- uname -a")
 	return nil
 }
 
@@ -547,6 +547,7 @@ func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	host := hostFlag(fs)
 	asJSON := fs.Bool("json", false, "JSON output (the daemon, plus what each extension reports)")
+	verbose := fs.Bool("v", false, "daemon details: root, backend, capabilities, share roots (what `kling status -v` printed)")
 	// Los flags que no son del núcleo (p. ej. -gateway, de la extensión MCP)
 	// se ignoran aquí y llegan intactos a los ganchos.
 	if err := fs.Parse(knownFlags(fs, reorderFor(fs, args))); err != nil {
@@ -563,8 +564,8 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("endpoint:     %s\n", c.Endpoint())
 
-	info, err := c.Info(ctx)
-	if err != nil {
+	info, daemonErr := c.Info(ctx)
+	if err := daemonErr; err != nil {
 		fmt.Printf("daemon:       ✗ not responding (%v)\n", err)
 		fmt.Printf("              diagnose and start it with:  kling up\n")
 		// Sin daemon no se sabe de KVM ni de firecracker: lo reporta él. Se
@@ -574,6 +575,9 @@ func cmdStatus(args []string) error {
 		fmt.Printf("firecracker:  ? (reported by the daemon)\n")
 	} else {
 		fmt.Printf("daemon:       ✓ %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
+		if *verbose {
+			writeInfo(c, info)
+		}
 		if info.Backend == "vz" {
 			// macOS: sin KVM ni firecracker; el VMM es kling-vz.
 			vz := strings.TrimSpace(info.Firecrack)
@@ -604,6 +608,10 @@ func cmdStatus(args []string) error {
 		if err != nil {
 			fmt.Printf("%-13s ? (extension failed: %v)\n", p.Name+":", err)
 		}
+	}
+	if daemonErr != nil {
+		// El informe ya lo dice todo; un script se entera por el código.
+		return &errConCodigo{code: 1, err: errDoctorQuiet}
 	}
 	return nil
 }

@@ -17,7 +17,7 @@ metes servicios de verdad.
 | Instalación | 3 scripts a mano, como root | `kling up` (kernel e imagen dentro del binario) |
 | Gateway | abierto a quien alcance el puerto | token obligatorio, `crypto/subtle` |
 | Clientes de IA | 2 | **7** |
-| Catálogo de servidores MCP | a mano | registro oficial: `kling search` / `kling add` |
+| Catálogo de servidores MCP | a mano | registro oficial: `kling mcp search` / `kling mcp add` |
 | Estado persistente | ninguno | volúmenes con journal, hasta 4 por microVM, compartibles en lectura |
 | Tests | 2 | **80** + 6 benchmarks |
 | Prueba de extremo a extremo | — | `90-e2e.sh`, 21 comprobaciones |
@@ -34,11 +34,11 @@ metes servicios de verdad.
 |---|---|
 | `kling up` | Deja el runtime listo: comprueba KVM, nftables, el usuario `kindling`, artefactos e imágenes, y arranca daemon y gateway. Lo que exige privilegios lo **imprime** en vez de ejecutarlo |
 | `kling status` | Diagnóstico de una pasada: endpoint, daemon, KVM, firecracker, gateway y agentes de IA detectados |
-| `kling search <consulta>` | Busca en `registry.modelcontextprotocol.io` |
-| `kling add <servidor>` | Empaqueta un servidor del registro, lo importa y lo deja congelado como servicio |
+| `kling mcp search <consulta>` | Busca en `registry.modelcontextprotocol.io` |
+| `kling mcp add <servidor>` | Empaqueta un servidor del registro, lo importa y lo deja congelado como servicio |
 | `kling volume create\|ls\|rm` | Almacenamiento que sobrevive a la microVM |
 
-`kling run`, `kling add` y `kling mcp import` aceptan los tres `-volume` y `-mount`.
+`kling run`, `kling mcp add` y `kling mcp import` aceptan los tres `-volume` y `-mount`.
 
 ### Comandos que cambian
 
@@ -205,6 +205,6 @@ está `scripts/90-e2e.sh`, que corre contra un daemon real con KVM:
   empaquetado antes seguirá con el puente viejo. Con volúmenes de solo lectura el síntoma es
   brutal: el puente antiguo no entiende el sufijo `:ro`, intenta montar en escritura un disco
   que no lo admite, muere — y como es PID 1, **el invitado entra en pánico**. Reconstruye con
-  `kling add <servidor> -volume …` los servicios que vayan a usar volúmenes.
+  `kling mcp add <servidor> -volume …` los servicios que vayan a usar volúmenes.
 - **Los volúmenes creados antes de esta versión no tienen journal.** `kling volume ls` los
   sigue mostrando, pero no sobrevivirán bien a un apagado brusco: recréalos.

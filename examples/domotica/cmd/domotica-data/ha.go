@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/juan52878911/kindling/examples/domotica/internal/domotica"
 	"github.com/juan52878911/kindling/pkg/chispa/slots"
-	"github.com/juan52878911/kindling/pkg/domotica"
 )
 
 // Expansión de home-assistant/intents. Cada plantilla es una familia: todas

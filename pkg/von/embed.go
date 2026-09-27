@@ -13,7 +13,7 @@ import (
 
 // CODIFICADORES DE FRASES (kind "embed").
 //
-// La capa 3 de la cascada de domótica (docs/codificador.md) es un codificador
+// La capa 3 de la cascada de intención (pkg/intent, docs/codificador.md) es un codificador
 // de frases: un BERT pequeño que convierte una frase en un vector. Se sirve
 // con la misma maquinaria que un VON —el constructor llm, llama-server y un
 // dorado congelado ya caliente— y solo cambia cómo arranca llama-server
@@ -166,9 +166,9 @@ func warm(ctx context.Context, c *api.Client, ref, kind string) (*ChatResponse, 
 		return Warm(ctx, c, ref)
 	}
 	r, _, err := Embed(ctx, c, ref, []string{
-		"turn on the living room lights",
-		"baja un poco la persiana del dormitorio, por favor",
-		"it's way too hot in here, can you do something about the thermostat in the bedroom",
+		"open a ticket for the billing team",
+		"cancela mi último pedido y devuélveme el dinero, por favor",
+		"the invoice from last month looks wrong, can you check what happened with the March payment",
 	})
 	if err != nil {
 		return nil, err
