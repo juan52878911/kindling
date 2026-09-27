@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -186,6 +187,45 @@ func (g *Scheduler) tenantInstances(name string) int {
 		}
 	}
 	return n
+}
+
+// reservarTenant comprueba la cuota de instancias del tenant y, si cabe,
+// RESERVA el hueco bajo el mismo candado con el que se lee (como g.creando en
+// scaleOut, pero por tenant en vez de por servicio).
+//
+// Sin la reserva, dos buildEntry concurrentes de servicios DISTINTOS del
+// mismo tenant leen tenantInstances() bajo mu, lo sueltan, y cada uno tarda un
+// arranque en frío entero (~ms a segundos) en crear/despertar su instancia
+// antes de registrarla en g.services/g.extra: los dos ven "hay menos que el
+// tope" y ninguno ve al otro, así que juntos lo superan (G-01).
+//
+// Devuelve un error si ya no cabe (el llamador no reserva nada), o una función
+// que libera la reserva cuando buildEntry termina, con éxito o sin él —éxito
+// significa que la instancia pasa a contar por sí misma en
+// g.services/g.extra, y fracaso que nunca llegó a existir—. maxInstances 0 (sin
+// límite) no reserva nada: nunca hay nada que contar.
+func (g *Scheduler) reservarTenant(tnt *tenant) (func(), error) {
+	if tnt.maxInstances <= 0 {
+		return func() {}, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	actuales := g.tenantInstances(tnt.name) + g.tenantCreando[tnt.name]
+	if actuales >= tnt.maxInstances {
+		return nil, fmt.Errorf("%w: %q already has %d instance(s) awake (max %d)",
+			errTenantInstances, tnt.name, actuales, tnt.maxInstances)
+	}
+	if g.tenantCreando == nil {
+		g.tenantCreando = map[string]int{}
+	}
+	g.tenantCreando[tnt.name]++
+	return func() {
+		g.mu.Lock()
+		if g.tenantCreando[tnt.name]--; g.tenantCreando[tnt.name] <= 0 {
+			delete(g.tenantCreando, tnt.name)
+		}
+		g.mu.Unlock()
+	}, nil
 }
 
 // TenantInflight devuelve una foto de las peticiones en vuelo por tenant.

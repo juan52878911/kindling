@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -82,6 +83,52 @@ func TestPausadasSeEnfrianYSonLasPrimerasEnCaer(t *testing.T) {
 	}
 	if congeladas["m-desp"] {
 		t.Errorf("no debía tocar la despierta")
+	}
+}
+
+// G-04: si el freeze de la pausada más vieja falla, no debe perderse del
+// registro — quedaría huérfana, reteniendo su RAM sin que ningún ensure o
+// evictLRU vuelva a verla, hasta que el TTL del daemon (2×idle) la atrapara.
+func TestEnfriarPausadasReponeSiFallaElFreeze(t *testing.T) {
+	g, _, congeladas := gwPausas(512)
+	g.freezeFn = func(id string) error { return errors.New("boom") }
+	original := pausada{service: "a", memMiB: 64, at: time.Now().Add(-time.Hour)}
+	g.pausadas = map[string]pausada{"m-vieja": original}
+
+	g.enfriarPausadas(context.Background())
+
+	if congeladas["m-vieja"] {
+		t.Fatal("freezeFn devuelve error: no debía figurar como congelada")
+	}
+	g.mu.Lock()
+	p, ok := g.pausadas["m-vieja"]
+	g.mu.Unlock()
+	if !ok {
+		t.Fatal("la pausada cuyo freeze falló se perdió del registro; queda huérfana reteniendo RAM")
+	}
+	if p != original {
+		t.Errorf("pausada repuesta = %+v; quería el valor original %+v", p, original)
+	}
+}
+
+// Mismo caso pero por el camino de evictLRU (pausadaMasVieja): si tampoco ahí
+// se puede congelar, tiene que reponerse antes de seguir con otra víctima.
+func TestEvictLRUReponePausadaSiFallaElFreeze(t *testing.T) {
+	g, _, _ := gwPausas(512)
+	g.freezeFn = func(id string) error { return errors.New("boom") }
+	original := pausada{service: "p", memMiB: 64, at: time.Now().Add(-time.Hour)}
+	g.pausadas = map[string]pausada{"m-pausada": original}
+
+	g.evictLRU(context.Background(), "otro", "")
+
+	g.mu.Lock()
+	p, ok := g.pausadas["m-pausada"]
+	g.mu.Unlock()
+	if !ok {
+		t.Fatal("la pausada cuyo freeze falló se perdió: queda huérfana reteniendo RAM sin dueño")
+	}
+	if p != original {
+		t.Errorf("pausada repuesta = %+v; quería %+v", p, original)
 	}
 }
 

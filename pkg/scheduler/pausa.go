@@ -130,38 +130,61 @@ func (g *Scheduler) dormir(ctx context.Context, victims []dormida) {
 // enfriarPausadas congela de verdad las pausadas que llevan más de pausedFor
 // sin usarse.
 func (g *Scheduler) enfriarPausadas(ctx context.Context) {
-	var viejas []string
+	type vieja struct {
+		id string
+		p  pausada
+	}
+	var viejas []vieja
 	g.mu.Lock()
 	for id, p := range g.pausadas {
 		if time.Since(p.at) > g.pausedFor() && !g.adquiriendo[id] {
-			viejas = append(viejas, id)
+			viejas = append(viejas, vieja{id, p})
 			delete(g.pausadas, id)
 		}
 	}
 	g.mu.Unlock()
-	for _, id := range viejas {
-		g.congelarPausada(ctx, id)
+	for _, v := range viejas {
+		if !g.congelarPausada(ctx, v.id) {
+			// El freeze falló: se repone, o se pierde del registro para
+			// siempre reteniendo su RAM sin ningún dueño en el planificador
+			// (G-04) — solo el TTL del daemon (2×idle) acabaría congelándola,
+			// y renovarTTL puede seguir aplazándolo si algo la adopta.
+			g.reponerPausada(v.id, v.p)
+		}
 	}
 }
 
-// pausadaMasVieja saca del registro la pausada más antigua (para evictLRU).
-func (g *Scheduler) pausadaMasVieja() (string, string) {
+// pausadaMasVieja saca del registro la pausada más antigua (para evictLRU),
+// junto con su valor completo: si el freeze acaba fallando, el llamador debe
+// reponerla con reponerPausada en vez de perderla (G-04).
+func (g *Scheduler) pausadaMasVieja() (string, pausada) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	var id, svc string
-	var at time.Time
+	var id string
+	var elegida pausada
 	for k, p := range g.pausadas {
 		if g.adquiriendo[k] {
 			continue
 		}
-		if id == "" || p.at.Before(at) {
-			id, svc, at = k, p.service, p.at
+		if id == "" || p.at.Before(elegida.at) {
+			id, elegida = k, p
 		}
 	}
 	if id != "" {
 		delete(g.pausadas, id)
 	}
-	return id, svc
+	return id, elegida
+}
+
+// reponerPausada repone en el registro una pausada que se sacó para intentar
+// congelarla y no se pudo (ver enfriarPausadas y evictLRU).
+func (g *Scheduler) reponerPausada(id string, p pausada) {
+	g.mu.Lock()
+	if g.pausadas == nil {
+		g.pausadas = map[string]pausada{}
+	}
+	g.pausadas[id] = p
+	g.mu.Unlock()
 }
 
 func (g *Scheduler) congelarPausada(ctx context.Context, id string) bool {
