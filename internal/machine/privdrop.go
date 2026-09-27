@@ -18,27 +18,51 @@ type Privileges struct {
 	UID, GID int
 	KVMGid   int
 	Enabled  bool
+	// Motivo, con Enabled en falso, es la causa REAL de que no haya usuario
+	// sin privilegios (daemon sin root, -run-as vacío, usuario inexistente,
+	// sin grupo kvm), en inglés y con el arreglo. Lo usa el mensaje de
+	// bloqueo de jailer (ver decidirJailer): decir "el usuario no existe"
+	// cuando el problema es que el daemon no es root despista.
+	Motivo string
 }
+
+// geteuid y lookupGroup son variables para que los tests simulen un daemon
+// sin root o un host sin grupo kvm.
+var (
+	geteuid     = os.Geteuid
+	lookupGroup = user.LookupGroup
+)
 
 // resolvePrivileges busca el usuario de servicio. Si no existe, se sigue
 // corriendo como root pero avisando: preferimos funcionar a fallar en silencio.
 func resolvePrivileges(username string) (*Privileges, string) {
-	if username == "" || os.Geteuid() != 0 {
-		return &Privileges{}, ""
+	if username == "" {
+		return &Privileges{Motivo: "no unprivileged user is configured (-run-as/KLING_RUN_AS " +
+			"is empty; set it to the service user, e.g. kindling)"}, ""
+	}
+	if geteuid() != 0 {
+		return &Privileges{Motivo: "the daemon isn't running as root, so it can't run " +
+			"Firecracker as an unprivileged user (start the daemon as root)"}, ""
 	}
 	u, err := user.Lookup(username)
 	if err != nil {
-		return &Privileges{}, fmt.Sprintf("user %q does not exist: Firecracker will run as root", username)
+		motivo := fmt.Sprintf("the unprivileged user %q doesn't exist (sudo useradd --system "+
+			"--no-create-home --shell /usr/sbin/nologin %s && sudo usermod -aG kvm %s, or pass "+
+			"-run-as/KLING_RUN_AS if it's named differently)", username, username, username)
+		return &Privileges{Motivo: motivo}, fmt.Sprintf("user %q does not exist: Firecracker will run as root", username)
 	}
 	uid, _ := strconv.Atoi(u.Uid)
 	gid, _ := strconv.Atoi(u.Gid)
 
 	kvmGid := -1
-	if g, err := user.LookupGroup("kvm"); err == nil {
+	if g, err := lookupGroup("kvm"); err == nil {
 		kvmGid, _ = strconv.Atoi(g.Gid)
 	}
 	if kvmGid < 0 {
-		return &Privileges{}, "can't find kvm group: Firecracker will run as root"
+		motivo := "the host has no kvm group, so the unprivileged user can't open /dev/kvm " +
+			"(load the kvm module so /dev/kvm exists with group kvm, then sudo usermod -aG kvm " +
+			username + ")"
+		return &Privileges{Motivo: motivo}, "can't find kvm group: Firecracker will run as root"
 	}
 	return &Privileges{UID: uid, GID: gid, KVMGid: kvmGid, Enabled: true}, ""
 }

@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"os/exec"
+	"os/user"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestDecidirJailerMacOSNuncaJailaNiAvisa(t *testing.T) {
 	for _, forced := range []string{"", "0", "1"} {
 		for _, binPresent := range []bool{false, true} {
 			for _, userReady := range []bool{false, true} {
-				jailed, blocked, warn := decidirJailer(false, forced, binPresent, userReady)
+				jailed, blocked, warn := decidirJailer(false, forced, binPresent, userReady, "")
 				if jailed || blocked != "" || warn != "" {
 					t.Fatalf("decidirJailer(false, %q, %v, %v) = (%v, %q, %q), quería todo vacío",
 						forced, binPresent, userReady, jailed, blocked, warn)
@@ -37,7 +38,7 @@ func TestDecidirJailerAutomaticoUsaJailerSiHayBinarioYUsuario(t *testing.T) {
 	// El caso "como hoy": nada configurado, y jailer + el usuario sin
 	// privilegios están listos. Se usa sin pedir nada, y no hay ni bloqueo ni
 	// aviso que imprimir.
-	jailed, blocked, warn := decidirJailer(true, "", true, true)
+	jailed, blocked, warn := decidirJailer(true, "", true, true, "")
 	if !jailed || blocked != "" || warn != "" {
 		t.Fatalf("automático con todo listo = (%v, %q, %q), quería (true, \"\", \"\")", jailed, blocked, warn)
 	}
@@ -56,7 +57,7 @@ func TestDecidirJailerAutomaticoSeNiegaSiFaltaAlgo(t *testing.T) {
 	}
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
-			jailed, blocked, warn := decidirJailer(true, "", c.binPresent, c.userOK)
+			jailed, blocked, warn := decidirJailer(true, "", c.binPresent, c.userOK, "")
 			if jailed {
 				t.Fatal("no debería usar jailer si falta algo y nadie forzó nada")
 			}
@@ -85,7 +86,7 @@ func TestDecidirJailerOptOutExplicitoAvisaYNoBloquea(t *testing.T) {
 	// daemon, sin importar si el binario o el usuario estaban listos o no.
 	for _, binPresent := range []bool{false, true} {
 		for _, userReady := range []bool{false, true} {
-			jailed, blocked, warn := decidirJailer(true, "0", binPresent, userReady)
+			jailed, blocked, warn := decidirJailer(true, "0", binPresent, userReady, "")
 			if jailed {
 				t.Fatal("KLING_JAILER=0 nunca debe usar jailer")
 			}
@@ -103,10 +104,10 @@ func TestDecidirJailerForzadoIgnoraElUsuarioPeroNoElBinario(t *testing.T) {
 	// KLING_JAILER=1: se respeta aunque falte el usuario sin privilegios
 	// (jailer cae a --uid/--gid 0, ver jailerArgv), pero sigue sin haber nada
 	// que ejecutar si falta el propio binario.
-	if jailed, blocked, warn := decidirJailer(true, "1", true, false); !jailed || blocked != "" || warn != "" {
+	if jailed, blocked, warn := decidirJailer(true, "1", true, false, ""); !jailed || blocked != "" || warn != "" {
 		t.Fatalf("forzado con binario y sin usuario = (%v, %q, %q), quería (true, \"\", \"\")", jailed, blocked, warn)
 	}
-	jailed, blocked, warn := decidirJailer(true, "1", false, true)
+	jailed, blocked, warn := decidirJailer(true, "1", false, true, "")
 	if jailed {
 		t.Fatal("forzado sin binario no puede arrancar nada")
 	}
@@ -246,5 +247,53 @@ func TestJailerBloqueadoNoDejaRastro(t *testing.T) {
 	}
 	if st := vivaDe(t, m, mc.ID).State; st != api.StateWarm {
 		t.Fatalf("un Thaw bloqueado dejó la máquina %s, quería warm", st)
+	}
+}
+
+// El bloqueo tiene que decir la causa REAL de que no haya usuario sin
+// privilegios: antes siempre decía "el usuario no existe o no tiene kvm",
+// también con el daemon sin root o con -run-as vacío.
+func TestJailerBloqueadoDiceLaCausaReal(t *testing.T) {
+	viejoEuid, viejoGrupo := geteuid, lookupGroup
+	t.Cleanup(func() { geteuid, lookupGroup = viejoEuid, viejoGrupo })
+
+	casos := []struct {
+		nombre, runAs string
+		euid          int
+		sinKVM        bool
+		quiere        string
+	}{
+		{"daemon sin root", "root", 1000, false, "isn't running as root"},
+		{"run-as vacío", "", 0, false, "-run-as/KLING_RUN_AS is empty"},
+		{"usuario inexistente", "kindling-no-existe-xyz", 0, false, `user "kindling-no-existe-xyz" doesn't exist`},
+		{"sin grupo kvm", "root", 0, true, "no kvm group"},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			geteuid = func() int { return c.euid }
+			lookupGroup = func(n string) (*user.Group, error) {
+				if c.sinKVM {
+					return nil, user.UnknownGroupError(n)
+				}
+				return &user.Group{Gid: "36", Name: n}, nil
+			}
+			priv, _ := resolvePrivileges(c.runAs)
+			if priv.Enabled {
+				t.Fatal("resolvePrivileges no debería habilitar el usuario en este caso")
+			}
+			_, blocked, _ := decidirJailer(true, "", true, priv.Enabled, priv.Motivo)
+			if !strings.Contains(blocked, c.quiere) {
+				t.Fatalf("bloqueo = %q, quería que mencionara %q", blocked, c.quiere)
+			}
+			if c.nombre != "usuario inexistente" && strings.Contains(blocked, "doesn't exist") {
+				t.Fatalf("el bloqueo culpa a un usuario inexistente sin serlo: %q", blocked)
+			}
+		})
+	}
+
+	// Sin binario: lo dice, además de la causa del usuario.
+	_, blocked, _ := decidirJailer(true, "", false, false, "the daemon isn't running as root")
+	if !strings.Contains(blocked, "jailer binary isn't on PATH") || !strings.Contains(blocked, "isn't running as root") {
+		t.Fatalf("bloqueo sin binario ni root = %q", blocked)
 	}
 }

@@ -71,7 +71,9 @@ func jailerBinPresent() bool {
 // de esto aplica —ni siquiera el aviso de KLING_JAILER=0—. forced es
 // KLING_JAILER tal cual: "1", "0" o "" (automático). binPresent y userReady
 // son si el binario está en PATH y si el usuario sin privilegios (con el
-// grupo kvm) quedó listo (ver Privileges.Enabled).
+// grupo kvm) quedó listo (ver Privileges.Enabled); userReason es por qué no
+// lo está (Privileges.Motivo), para que el bloqueo diga la causa real. Vacío,
+// se usa un texto genérico.
 //
 // jailed dice si hay que arrancar dentro del jail. blocked, si no está vacío,
 // es el motivo por el que Run, runFrom y Thaw deben NEGARSE a arrancar
@@ -82,7 +84,7 @@ func jailerBinPresent() bool {
 // es el aviso de SEGURIDAD que hay que imprimir UNA VEZ al arrancar el daemon:
 // solo con el opt-out explícito, porque apagar la barrera más fuerte a
 // propósito merece ruido, no una nota discreta en un log que nadie relee.
-func decidirJailer(posible bool, forced string, binPresent, userReady bool) (jailed bool, blocked, startupWarn string) {
+func decidirJailer(posible bool, forced string, binPresent, userReady bool, userReason string) (jailed bool, blocked, startupWarn string) {
 	if !posible {
 		return false, "", ""
 	}
@@ -108,7 +110,9 @@ func decidirJailer(posible bool, forced string, binPresent, userReady bool) (jai
 		missing = append(missing, "the jailer binary isn't on PATH (install it with "+
 			"sudo ./scripts/20-install-firecracker.sh, or point KLING_JAILER_BIN at it)")
 	}
-	if !userReady {
+	if !userReady && userReason != "" {
+		missing = append(missing, userReason)
+	} else if !userReady {
 		missing = append(missing, "the unprivileged user Firecracker runs as doesn't "+
 			"exist or lacks the kvm group (sudo useradd --system --no-create-home "+
 			"--shell /usr/sbin/nologin kindling && sudo usermod -aG kvm kindling, or "+
