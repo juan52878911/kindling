@@ -80,13 +80,11 @@ func (m *Manager) limitCPU(id string, pid int, quotaPct int) string {
 // crearCgroup crea el cgroup de una microVM con su techo de CPU, sin meter
 // ningún proceso. Devuelve su directorio, o el aviso si no se pudo.
 func (m *Manager) crearCgroup(id string, quotaPct int) (string, string) {
-	dir := filepath.Join(m.cgroupRoot, "kl-"+id[:8])
+	dir := m.dirCgroup(id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Sprintf("could not create cgroup: %v", err)
 	}
-	// cpu.max = "<cuota> <periodo>" en microsegundos; 100000 = un core completo.
-	if err := os.WriteFile(filepath.Join(dir, "cpu.max"),
-		[]byte(fmt.Sprintf("%d 100000", quotaPct*1000)), 0o644); err != nil {
+	if err := m.escribirCPUMax(dir, quotaPct); err != nil {
 		return "", fmt.Sprintf("could not set cpu.max: %v", err)
 	}
 	return dir, ""

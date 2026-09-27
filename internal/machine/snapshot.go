@@ -870,6 +870,25 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa).
 	m.persistirYa()
 
+	// El VMM nace ya en su cgroup, como en Thaw, con el techo de ARRANQUE: un
+	// núcleo entero mientras restaura y hasta que contesta su agente (resync);
+	// después, el configurado. El defer lo baja en cualquier salida. Ver
+	// arranque_cpu.go. El techo por defecto, bajo el candado: mc está
+	// publicada desde arriba, y List()/Get()/persist() la copian desde otras
+	// goroutines (M-02).
+	if mc.CPUPct <= 0 {
+		m.mu.Lock()
+		mc.CPUPct = defaultCPUPct
+		m.mu.Unlock()
+	}
+	impulso := m.nuevoImpulso(id, mc.CPUPct)
+	defer impulso.fin()
+	cg := m.cgroupParaLanzar(id, topeArranque(mc.CPUPct))
+	if cg != nil {
+		defer cg.Close()
+	}
+	var enCg bool
+
 	// abortar es la única salida de error a partir de aquí.
 	//
 	// m.fail() llama a kill(), que lee el PID de la MÁQUINA, y ese PID no se
@@ -892,7 +911,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		// que va a abrir tiene que estar replicado dentro del jail EN SU RUTA
 		// ABSOLUTA, porque LoadSnapshot abre cada drive con el path que quedó
 		// grabado —comprobado en el laboratorio—.
-		pid, sock, _, err = m.spawnJailed(id, netcfg, nil)
+		pid, sock, enCg, err = m.spawnJailed(id, netcfg, cg)
 		if err != nil {
 			return abortar(err)
 		}
@@ -935,7 +954,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	} else {
 		sock = filepath.Join(dir, "fc.sock")
 		_ = os.Remove(sock)
-		pid, _, err = m.spawn(id, sock, netcfg, nil)
+		pid, enCg, err = m.spawn(id, sock, netcfg, cg)
 		if err != nil {
 			return abortar(err)
 		}
@@ -1012,6 +1031,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
 	resyncT, resyncOK := m.resyncGuest(ctx, id, claveSnapshot(snap))
+	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
+	impulso.bajar()
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -1026,15 +1047,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	elapsed := time.Since(start).Milliseconds()
 
-	// Bajo el candado: mc está publicada desde arriba, y List()/Get()/persist()
-	// la copian desde otras goroutines (M-02). Igual que en Run.
-	if mc.CPUPct <= 0 {
-		m.mu.Lock()
-		mc.CPUPct = defaultCPUPct
-		m.mu.Unlock()
-	}
-	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
-		log.Printf("warning: %s: %s", mc.Name, warn)
+	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, ya con el
+	// techo configurado (el arranque terminó arriba).
+	if !enCg {
+		if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+			log.Printf("warning: %s: %s", mc.Name, warn)
+		}
 	}
 
 	m.mu.Lock()
