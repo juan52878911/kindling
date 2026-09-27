@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -290,5 +291,73 @@ func TestSoloCuentaLosMemFileDeMaquinasVivas(t *testing.T) {
 	m.byID["bbbb"] = &api.Machine{ID: "bbbb", From: "dorado", State: api.StateRunning}
 	if dos := m.hotMemFilesMiBLocked(); dos != got {
 		t.Errorf("el dorado compartido se conto dos veces: %d -> %d MiB", got, dos)
+	}
+}
+
+// allocatedBytesCachedLocked (M-12) no debe volver a stat-ear el mem.file de
+// un dorado mientras su tamaño lógico y su mtime no cambien: se comprueba
+// vaciando el fichero por debajo (mismo tamaño lógico, disperso de verdad) y
+// devolviéndole a mano el mismo mtime que tenía. Si recalculara, los bytes
+// asignados caerían a casi nada.
+func TestAllocatedBytesCachedLockedUsaLaCache(t *testing.T) {
+	m := newTestManager(t)
+	path := filepath.Join(t.TempDir(), "mem.file")
+	if err := os.WriteFile(path, make([]byte, 4<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	primero := m.allocatedBytesCachedLocked(path, "dorado")
+	if primero <= 0 {
+		t.Fatalf("quería bytes asignados > 0, fue %d", primero)
+	}
+
+	// Mismo tamaño lógico (fi.Size()) pero disperso: sin la caché, los bytes
+	// asignados de verdad caerían a casi nada.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, fi.Size()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	segundo := m.allocatedBytesCachedLocked(path, "dorado")
+	if segundo != primero {
+		t.Errorf("no usó la caché: primero=%d segundo=%d (debían ser iguales)", primero, segundo)
+	}
+
+	// Con un tamaño lógico distinto sí se recalcula, y ahora sí ve el fichero
+	// disperso de verdad.
+	time.Sleep(2 * time.Millisecond)
+	if err := os.Truncate(path, fi.Size()+1); err != nil {
+		t.Fatal(err)
+	}
+	tercero := m.allocatedBytesCachedLocked(path, "dorado")
+	if tercero >= primero {
+		t.Errorf("debía recalcular y ver el fichero disperso (< %d), dio %d", primero, tercero)
+	}
+}
+
+// invalidateSnapCache también olvida el tamaño cacheado del mem.file: un
+// `commit -replace` que reescribe el dorado no puede heredar el tamaño del que
+// reemplazó.
+func TestInvalidateSnapCacheOlvidaElTamanoDeMemoria(t *testing.T) {
+	m := newTestManager(t)
+	m.mu.Lock()
+	m.memAllocCache = map[string]huellaAlloc{"dorado": {tam: 1, fecha: 1, alloc: 99}}
+	m.mu.Unlock()
+
+	m.invalidateSnapCache("dorado")
+
+	m.mu.RLock()
+	_, hay := m.memAllocCache["dorado"]
+	m.mu.RUnlock()
+	if hay {
+		t.Error("invalidateSnapCache no borró la entrada de memAllocCache")
 	}
 }

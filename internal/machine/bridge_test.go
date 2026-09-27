@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -82,6 +83,79 @@ func TestElMoldeDeOverlayNoEsUnaImagen(t *testing.T) {
 	if len(got) != 1 || got[0] != "servicio" {
 		t.Errorf("Images() = %v, quería solo [servicio]", got)
 	}
+}
+
+// imageHasBridgeCached no debe volver a llamar a debugfs por el mismo par
+// (base, capa) mientras ninguno de los dos ficheros cambie (M-14): antes,
+// comprobar el puente de una imagen con volúmenes o carpetas compartidas
+// costaba hasta 4 debugfs en CADA arranque en frío, aunque la imagen no se
+// hubiera tocado desde el arranque anterior.
+func TestImageHasBridgeCacheada(t *testing.T) {
+	m := newTestManager(t)
+	base := filepath.Join(t.TempDir(), "base.ext4")
+	if err := os.WriteFile(base, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	contador := filepath.Join(dir, "llamadas")
+	fakeDebugfs(t, dir, contador)
+
+	// Dos llamadas con el mismo fichero: la segunda tiene que venir de la
+	// caché, sin invocar debugfs otra vez.
+	for i := 0; i < 2; i++ {
+		has, err := m.imageHasBridgeCached(t.Context(), base, "")
+		if err != nil {
+			t.Fatalf("vuelta %d: %v", i, err)
+		}
+		if !has {
+			t.Fatalf("vuelta %d: quería el puente detectado", i)
+		}
+	}
+	if n := contarLlamadas(t, contador); n != 1 {
+		t.Errorf("debugfs se llamó %d veces tras 2 consultas iguales; quería 1", n)
+	}
+
+	// Reescribir el fichero (mtime distinto) invalida la caché: la próxima
+	// consulta vuelve a mirar el disco.
+	time.Sleep(2 * time.Millisecond) // el mtime tiene que avanzar de verdad
+	if err := os.WriteFile(base, []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.imageHasBridgeCached(t.Context(), base, ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := contarLlamadas(t, contador); n != 2 {
+		t.Errorf("debugfs se llamó %d veces tras cambiar el fichero; quería 2 (una por versión)", n)
+	}
+}
+
+// fakeDebugfs pone en el PATH un debugfs falso que anota cada llamada en
+// contador y siempre dice que el fichero preguntado existe.
+func fakeDebugfs(t *testing.T, dir, contador string) {
+	t.Helper()
+	script := "#!/bin/sh\necho x >> " + contador + "\necho 'Inode: 12  Type: regular'\n"
+	if err := os.WriteFile(filepath.Join(dir, "debugfs"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// contarLlamadas cuenta las líneas que fakeDebugfs fue anotando.
+func contarLlamadas(t *testing.T, contador string) int {
+	t.Helper()
+	b, err := os.ReadFile(contador)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return 0
+	}
+	return len(strings.Split(s, "\n"))
 }
 
 // Comparar por CONTENIDO y no por fecha o tamaño: dos puentes distintos pueden

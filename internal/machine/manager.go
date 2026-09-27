@@ -138,6 +138,21 @@ type Manager struct {
 	// entre un arranque del daemon y el siguiente. Ver kernelHash.
 	kernelSHA huellaKernel
 
+	// snapCache memoriza, por nombre de snapshot, el meta.json ya parseado y la
+	// ocupación en disco del directorio (M-08): Snapshots() se llama en cada
+	// tick del reaper del gateway y en cada arranque desde un dorado, y sin
+	// esto cada llamada releía y parseaba TODOS los meta.json y recorría TODOS
+	// los directorios de snapshot. Se invalida a mano en cuanto se escribe el
+	// meta.json (writeMeta) o se borra el directorio (removeSnapshot). Ver
+	// loadSnapshotCached e invalidateSnapCache.
+	snapCache map[string]snapCacheEntry
+
+	// memAllocCache memoriza los bytes REALMENTE asignados del mem.file de cada
+	// snapshot dorado (M-12): es inmutable desde que se congela, así que
+	// stat-earlo bajo m.mu en cada Run/runFrom/Resize (hotMemFilesMiBLocked) no
+	// aporta nada sobre calcularlo una vez. Se invalida junto con snapCache.
+	memAllocCache map[string]huellaAlloc
+
 	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
 	// pasada completa no libera nada, lo que significa que el disco lo llena algo
 	// ajeno a kindling y seguir expulsando solo cuesta warm-pooling.
@@ -157,6 +172,13 @@ type Manager struct {
 	// Es dato de un fichero que no cambia, y preguntarlo cuesta un debugfs en el
 	// camino de arranque en frío. Ver baseSupportsLayers.
 	layerOK sync.Map
+
+	// bridgeOK memoriza qué pares (base, capa) llevan agente de invitado
+	// (M-14), igual que layerOK: la respuesta no cambia mientras ninguno de los
+	// dos ficheros cambie, y preguntarlo cuesta hasta 4 debugfs en el camino de
+	// arranque en frío de cada microVM con volúmenes o carpetas compartidas.
+	// Ver imageHasBridgeCached.
+	bridgeOK sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
@@ -803,7 +825,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
 	// Se comprueba ANTES de crear el directorio, para no tener que limpiarlo.
 	if len(vols) > 0 || len(shares) > 0 {
-		switch has, herr := imageHasBridge(ctx, src, layer); {
+		switch has, herr := m.imageHasBridgeCached(ctx, src, layer); {
 		case herr != nil:
 			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
 			// herramienta de diagnóstico en una dependencia de arranque sería

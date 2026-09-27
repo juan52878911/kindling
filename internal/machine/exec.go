@@ -122,7 +122,7 @@ func (m *Manager) ImageHasAgent(ctx context.Context, image string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	return imageHasBridge(ctx, base, layer)
+	return m.imageHasBridgeCached(ctx, base, layer)
 }
 
 // ProbeGuestPort pregunta al VMM si algo escucha en ese puerto dentro del
