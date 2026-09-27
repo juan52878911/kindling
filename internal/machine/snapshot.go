@@ -59,6 +59,17 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 		return nil, fmt.Errorf("machine %q does not exist", ref)
 	}
 	mc = cur
+	// Como Freeze, y con más razón: el volcado de Commit ES el mem.file del
+	// dorado, el que mapean todas las instancias futuras. Un secreto de sesión
+	// inyectado por MMDS acabaría en todas. Se mira aquí, con el cerrojo
+	// tomado y la máquina releída: un PutMMDS concurrente toma el mismo
+	// cerrojo, así que o ya marcó HasSecrets o espera a que acabe el commit.
+	// Cubre también fork, que pasa por aquí.
+	if mc.HasSecrets {
+		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and can't become "+
+			"a snapshot: its RAM would be shared by every instance. Snapshot a machine that never "+
+			"received secrets", mc.Name)
+	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}

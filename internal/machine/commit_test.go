@@ -475,3 +475,40 @@ func TestPlazoVolcadoCreceConLaMemoria(t *testing.T) {
 		}
 	}
 }
+
+// Un secreto inyectado por MMDS mientras Commit espera el cerrojo (el gateway
+// abriendo sesión justo cuando alguien hace `kling save`, o un fork) no puede
+// acabar en el mem.file del dorado: Commit relee la máquina con el cerrojo y
+// se niega sin tocar el VMM.
+func TestCommitSeNiegaSiLeInyectaronSecretosMientrasEsperaba(t *testing.T) {
+	m := newTestManager(t)
+	id := "c0aa170000000006"
+	falso, _ := plantillaParaCommit(t, m, id)
+
+	soltar := m.lock(id)
+	hecho := make(chan error, 1)
+	go func() {
+		_, err := m.Commit(context.Background(), id, "dorado", false)
+		hecho <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	m.mu.Lock()
+	m.byID[id].HasSecrets = true // lo que hace PutMMDS con el cerrojo tomado
+	m.mu.Unlock()
+	soltar()
+
+	select {
+	case err := <-hecho:
+		if err == nil || !strings.Contains(err.Error(), "secrets") {
+			t.Fatalf("Commit de una máquina con secretos = %v, quería negarse", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Commit no terminó tras soltar el cerrojo")
+	}
+	if ll := falso.todas(); len(ll) != 0 {
+		t.Errorf("Commit habló con el VMM de una máquina con secretos: %+v", ll)
+	}
+	if _, err := os.Stat(m.snapDir("dorado")); !os.IsNotExist(err) {
+		t.Errorf("quedó un directorio de snapshot: %v", err)
+	}
+}
