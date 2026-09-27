@@ -902,8 +902,8 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	// retransmite hasta el RTO inicial de TCP, 1 s. Con un plazo fijo de 1 s,
 	// cada arranque en frío esperaba ese segundo entero aunque el agente ya
 	// escuchara a los ~290 ms. Cortando el intento, el siguiente manda un SYN
-	// nuevo (y el vecino permanente de internal/net evita la otra espera de
-	// 1 s, la del ARP). Crece hasta 1 s para que un host muy cargado, donde
+	// nuevo (y el reintento ARP de 50 ms del tap0, en internal/net, evita la
+	// otra espera de 1 s). Crece hasta 1 s para que un host muy cargado, donde
 	// el SYN-ACK tarda de verdad, no se quede reintentando para siempre.
 	intento := 50 * time.Millisecond
 	const maxIntento = time.Second
