@@ -5,1310 +5,267 @@
 <p align="center">
   <a href="https://github.com/juan52878911/kindling/releases"><img src="https://img.shields.io/github/v/release/juan52878911/kindling?label=release&color=e25822" alt="última release"></a>
   <a href="https://github.com/juan52878911/kindling/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/juan52878911/kindling/ci.yml?label=ci" alt="CI"></a>
-  <img src="https://img.shields.io/badge/plataformas-linux%20amd64%20%7C%20arm64%20·%20macOS-4c8dae" alt="plataformas">
-  <img src="https://img.shields.io/badge/aislamiento-microVMs%20Firecracker-6aa84f" alt="Firecracker">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licencia-Apache--2.0-4c8dae" alt="Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/plataformas-linux%20amd64%20%7C%20arm64%20·%20macOS%20arm64-4c8dae" alt="plataformas">
+  <img src="https://img.shields.io/badge/aislamiento-microVMs%20Firecracker%20%7C%20vz-6aa84f" alt="Firecracker">
 </p>
 
 <p align="center"><a href="README.md">English</a> · <b>Español</b></p>
 
 # kindling
 
-Un runtime de microVMs Firecracker con snapshots dorados: máquinas que despiertan en
-milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detrás de un CLI
-al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
-extensiones.
+**MicroVMs Firecracker que despiertan de un fichero en ~30 ms y cuestan 0 RAM mientras
+duermen — para servidores MCP, sandboxes de agentes y modelos pequeños, en tu propio
+hardware Linux o Apple Silicon.**
 
-> Estado: **v0.14.0 — un repositorio, una release, una CLI más simple.** `kling` gestiona
-> microVMs con red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por
-> capas, eventos, constructores de imágenes, un API del daemon documentado y sandboxes de
-> usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
-> que nació kindling — y los sandboxes multiinquilino son **extensiones** que viven en
-> este mismo repositorio ([`ext/mcp`](ext/mcp), [`ext/sandbox`](ext/sandbox)) y salen en
-> la misma release: `kling plugin install mcp`. Todos los binarios de una release son
-> compatibles entre sí. En el [CHANGELOG](CHANGELOG.md) está lo que trajo cada versión.
+Un solo binario estático, `kling`, con un CLI al estilo de docker. Arrancas una máquina
+una vez, la congelas con su servidor ya escuchando, y el gateway la despierta por cada
+llamada: aislamiento a nivel de kernel para código en el que no confías, al coste en
+reposo de un fichero en disco.
 
-**El invitado se asume hostil**: no se sabe qué código acabará corriendo dentro. En
-[SECURITY.md](SECURITY.md) están el modelo de amenaza, las barreras que hay y — sobre
-todo — lo que NO está resuelto todavía.
+<p align="center">
+  <img src="docs/img/hero.gif" alt="MicroVMs congeladas que despiertan en milisegundos al llegar una petición; Chispa decide en microsegundos" width="360">
+</p>
 
-## De un vistazo
+## Pruébalo en 30 segundos
 
-Cada número de abajo está medido, no estimado — el cómo y el dónde, en las secciones
-enlazadas:
+En un host Linux con KVM (o un Mac con Apple Silicon — ver [Instalación](#instalación)):
 
-| | Medido |
-|---|---|
-| Descongelar una herramienta | **~30 ms** — imperceptible dentro de una llamada |
-| Acción efímera, de punta a punta | **19 ms** (2 ms de ejecución real) |
-| Llamada a herramienta, en caliente | **9 ms** |
-| RAM de una máquina `frozen` | **0** — es un fichero en disco, no un proceso |
-| Densidad | **142 microVMs en 3,9 GB** de RAM del host |
-| 10 instancias de un mismo dorado | **+68 MiB** en total (12× más denso que arrancar en frío) |
-| Disco por servicio, con imágenes por capas | **1300 MiB → 433 MiB** en un parque de 7 servicios |
-| 20 llamadas concurrentes, mismo servicio | p50 **4,66 s** (eran 44 s antes de v0.4) |
-
-## Índice
-
-<details open>
-<summary><b>Desplegar / plegar</b></summary>
-
-**La idea**
-· [Por qué microVMs y no contenedores](#por-qué-microvms-y-no-contenedores)
-· [Arquitectura](#arquitectura)
-· [Números medidos](#números-medidos)
-
-**Primeros pasos**
-· [Instalación](#instalación)
-· [Primeros comandos](#primeros-comandos)
-· [Dejar el runtime listo](#dejar-el-runtime-listo--kling-up)
-· [Conectar con el daemon](#conexión)
-· [Configuración](#configuración)
-· [En un Mac (Apple Silicon)](#en-un-mac-apple-silicon)
-
-**El CLI**
-· [kling](#kling)
-· [Snapshots dorados](#snapshots-dorados)
-· [Ciclo de vida y robustez](#ciclo-de-vida-y-robustez)
-· [Red](#red-un-namespace-por-microvm)
-
-**Sandboxes**
-· [Sandboxes para agentes de código](#sandboxes-para-agentes-de-código)
-
-**Extensiones**
-· [Extensiones: servidores MCP y más](#extensiones)
-· [kling-mcp](#kling-mcp-servidores-mcp-bajo-demanda)
-· [kling-sandbox](#kling-sandbox-sandboxes-multiinquilino)
-· [Escribir una extensión](#escribir-una-extensión)
-
-**Almacenamiento**
-· [Volúmenes](#volúmenes-lo-que-sobrevive-a-la-microvm)
-· [Una biblioteca de paquetes compartida](#una-biblioteca-de-paquetes-compartida)
-· [Compartir una carpeta del host](#compartir-una-carpeta-del-host)
-· [LLM pequeños bajo demanda (VON)](#llm-pequeños-bajo-demanda-von)
-· [Chispa: un clasificador diminuto para decisiones pequeñas](#chispa-un-clasificador-diminuto-para-decisiones-pequeñas)
-· [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
-· [Demo: una habitación](#demo-una-habitación-con-modelos-serverless)
-· [Qué persiste y qué no](#qué-persiste-y-qué-no)
-
-**Rendimiento y densidad**
-· [Coste en disco](#coste-en-disco)
-· [Imágenes por capas](#imágenes-por-capas-una-base-por-familia-de-runtime)
-· [Densidad](#densidad-por-qué-el-snapshot-dorado-lo-cambia-todo)
-· [Devolver la RAM: squeeze, top, /metrics](#devolver-la-ram-squeeze-top-y-metrics)
-· [Despertares más rápidos](#despertares-más-rápidos-hijo-caliente--bundle--techo-de-cpu)
-
-**Seguridad**
-· [Aislamiento](#aislamiento)
-· [Egress: none, internet, allowlist](#egress-none-internet-o-una-allowlist-de-dominios)
-· [Secretos vía MMDS](#secretos-que-nunca-tocan-un-snapshot-mmds)
-
-**Operación**
-· [Informe de topología](#informe-de-topología)
-· [Memoria: real vs caché](#memoria-qué-es-real-y-qué-es-caché)
-
-**Referencia**
-· [Requisitos](#requisitos)
-· [Scripts](#scripts)
-· [Mapa de la documentación](#mapa-de-la-documentación)
-· [Hoja de ruta](#hoja-de-ruta)
-
-</details>
-
-## Por qué microVMs y no contenedores
-
-Un servidor MCP es un proceso de Node o Python de 50-100 MB. Meterlo en una microVM no
-ahorra recursos frente a un contenedor — cuesta más, porque cada microVM arranca su
-propio kernel.
-
-La razón de hacerlo es otra: **una IA local ejecutando herramientas arbitrarias de código
-abierto es código no confiable**. El aislamiento de un contenedor es un namespace del
-kernel compartido; el de una microVM es una frontera de hipervisor. Esa es la única
-justificación honesta del proyecto, y conviene tenerla clara antes de escribir una línea
-más.
-
-## Arquitectura
-
-```mermaid
-flowchart TD
-    A["Tu agente<br/>(Claude Code, opencode, un modelo local…)"] -- "MCP / Streamable HTTP" --> G[gateway]
-    G -- link --> E["servidor externo<br/>(fuera de kindling)"]
-    G -- "restaura (~30 ms) y proxya a :8080/mcp" --> V1["µVM servicio<br/>puente → stdio"]
-    G --> V2["µVM servicio<br/>HTTP nativo"]
-    G --> V3["µVM efímera<br/>muere al terminar"]
-    D[daemon] -. "ciclo de vida · red · snapshots<br/>un namespace de red cada una" .- V1
-    D -.- V2
-    D -.- V3
+```sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
+kling up                       # comprueba KVM, nftables y el usuario kindling; imprime los comandos con privilegios, no los ejecuta
+kling try -- uname -a          # una microVM de usar y tirar: la crea, ejecuta, devuelve el código de salida y la borra
 ```
 
-El **gateway** recibe la llamada, restaura el snapshot que corresponde, proxya la
-petición y siega la microVM cuando expira su TTL. Dentro del invitado llama siempre al
-mismo sitio, `:8080/mcp`, hable el servidor stdio (con `kling-bridge` traduciendo) o
-Streamable HTTP nativo (sin nada en medio).
+Así se ve contra un daemon de verdad (grabado, no tecleado a mano):
 
-El **daemon** gestiona el ciclo de vida y es el único que alcanza a los invitados: sus IP
-solo existen en la red del host. Por eso expone `POST /machines/{ref}/guest`, que reenvía
-una petición HTTP al servidor de dentro. Sin él, `kling mcp import` solo funcionaría
-ejecutando el CLI en el propio host — por SSH la sonda no tiene ruta y agota el tiempo.
+<p align="center">
+  <img src="docs/img/demo-try.gif" alt="kling try ejecutando uname, python3 y un wget dentro de microVMs de usar y tirar" width="820">
+</p>
 
-## Números medidos
+Después, aloja tu primer servidor MCP y conecta tu agente:
 
-Medidos en Proxmox (Intel i7-8700T) con Firecracker v1.16.1 corriendo **anidado** dentro
-de una VM, kernel 6.1.177 y un rootfs Ubuntu 24.04 de 800 MB:
+```sh
+kling plugin install mcp                              # la extensión MCP, de la misma release
+kling mcp add io.github.domdomegg/filesystem-mcp      # lo empaqueta, lo arranca una vez y lo deja congelado como servicio
+kling connect -all -install all                       # Claude Code, opencode, Cursor, VS Code, Windsurf, Cline, Zed
+```
 
-| Operación | Tiempo |
-|---|---|
-| Arranque en frío | **2.643 ms** |
-| Crear el snapshot | 305 ms |
-| **Restaurar desde snapshot** | **~30 ms** |
+## Por qué kindling
 
-Se reproducen con `scripts/40-bench-boot.sh`.
+Cada número está medido en el laboratorio del proyecto y documentado donde se tomó. Nada
+de lo que sigue es una estimación.
 
-**La conclusión que define la arquitectura:** 2,6 s en frío hacen inviable el modelo de
-una-microVM-por-petición. Los 125 ms que anuncia Firecracker asumen un kernel recortado y
-un rootfs mínimo en metal desnudo. Con snapshot/restore, 30 ms son imperceptibles dentro
-de una llamada a herramienta.
+| | Medido | Dónde |
+|---|---|---|
+| Despertar una máquina congelada (thaw) | **~30 ms**, con el servidor ya escuchando | [manual: números medidos](docs/handbook.es.md#números-medidos), `scripts/40-bench-boot.sh` |
+| Despertar una máquina pausada | **~2,2 ms** hasta la primera respuesta, visto por el cliente | [`docs/despertar.md`](docs/despertar.md) |
+| Una máquina congelada mientras duerme | **0 CPU, 0 RAM** — un fichero disperso de 35-82 MB | [manual: coste en disco](docs/handbook.es.md#coste-en-disco) |
+| Densidad desde un snapshot dorado | **142 microVMs en 3,9 GB** de RAM del host (invitados Alpine `min` de 1 vCPU y 64 MiB); 10 copias = **+68 MiB** en total | [`docs/estabilidad.md`](docs/estabilidad.md), [manual: densidad](docs/handbook.es.md#densidad-por-qué-el-snapshot-dorado-lo-cambia-todo) |
+| Acción MCP efímera, de punta a punta | **19 ms** (2 ms de ejecución); llamada a una herramienta caliente **9 ms** | [`ext/mcp/README.es.md`](ext/mcp/README.es.md) |
+| Contexto que paga el agente por tus herramientas | **≈248 tokens** para 3 servicios con las meta-herramientas perezosas frente a **≈4327** con 28 esquemas cargados | [`ext/mcp/README.es.md`](ext/mcp/README.es.md) |
+| Sandbox desde el fondo precalentado | **16 ms** reclamarla frente a 683 ms crearla desde el snapshot | [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md) |
+| Un LLM pequeño (Qwen2.5-1.5B) hasta el primer token | **0,41 s** desde su dorado frente a **9,1 s** en frío, en un i7-8700T | [`docs/von.md`](docs/von.md#x86-sin-anidar-i7-8700t) |
+| Clasificador diminuto (Chispa) por predicción | **1,5-6 µs**, sin daemon, con `confident`/`escalate` calibrado | [`docs/chispa.md`](docs/chispa.md) |
+| Disco de un parque de 7 servicios MCP, imágenes por capas | **1300 MiB → 433 MiB** | [`docs/three-layers.md`](docs/three-layers.md) |
+| Memoria copia-en-escritura en un Mac (laboratorio anidado) | **~40× menos RAM** que procesos nativos para réplicas restauradas | [`docs/mac-arm64.md`](docs/mac-arm64.md) |
 
-Por tanto: **cada herramienta arranca una vez, se congela con el servidor MCP ya
-escuchando, y el gateway la restaura bajo demanda.** El snapshot no es una optimización
-opcional; es lo que sostiene todo lo demás.
+La idea que lo sostiene todo: un arranque en frío de Firecracker con un rootfs real son
+segundos, no los 125 ms del folleto. Así que **cada herramienta arranca una vez, se
+congela con su servidor sirviendo y se restaura bajo demanda**. El snapshot no es una
+optimización; es la arquitectura.
 
----
+## Para qué se usa
 
-# Primeros pasos
+| | Quieres… | Empieza por |
+|---|---|---|
+| **Alojar servidores MCP** | correr cualquier servidor MCP de código abierto (npm o PyPI, stdio o HTTP) en su propia microVM y conectar Claude Code, opencode o Cursor con un comando; secretos inyectados en vivo, nunca en un snapshot | [guía](docs/guides/mcp-servers.md) · [`ext/mcp`](ext/mcp/README.es.md) |
+| **Aislar a un agente de IA** | dejar que un agente ejecute el código que acaba de escribir, sin red salvo que se pida, exec en streaming, copia de ficheros, plantillas que restauran en ~300 ms y N sandboxes en paralelo | [guía](docs/guides/sandboxes-for-agents.md) · [`docs/exec-sandbox.md`](docs/exec-sandbox.md) |
+| **Servir modelos pequeños serverless** | un clasificador Chispa en microsegundos, un LLM local tras un API compatible con OpenAI que despierta por petición y se congela al quedar ocioso, con una cascada que solo se activa cuando una evaluación demuestra que ayuda | [guía](docs/guides/serverless-ai.md) · [`docs/ai-gateway.md`](docs/ai-gateway.md) |
+| **Llevarlo todo desde un portátil** | el daemon en una máquina Linux con KVM manejado por SSH, o nativo en Apple Silicon con el backend `vz` | [daemon remoto](docs/guides/remote-daemon-ssh.md) · [macOS](docs/guides/quickstart-macos.md) |
+| **Pedir sandboxes con kubectl** | un operador fino: objetos `kind: Sandbox`, las microVMs siguen fuera del clúster | [guía](docs/guides/kubernetes-operator.md) |
 
 ## Instalación
 
-**Opción rápida — binarios precompilados (recomendada):**
+**Binarios pre-compilados (recomendado).** linux/amd64, linux/arm64, darwin/amd64 y
+darwin/arm64; cada release trae un `SHA256SUMS` y el instalador lo verifica antes de mover
+nada al disco. Windows no está soportado.
 
 ```sh
-# macOS / Linux — una línea, sin dependencias
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
-
-# Con extensiones de la misma release (servidores MCP, sandboxes):
-curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
-
-# Versión concreta (por defecto instala la última release):
-curl -fsSL .../install.sh | sh -s -- --tag v0.14.0
-
-# Prefijo personalizado:
-curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
+curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox    # extensiones de la misma release
+curl -fsSL .../install.sh | sh -s -- --tag v0.14.0         # una versión concreta
+curl -fsSL .../install.sh | sh -s -- --prefix ~/.local --no-rc   # sin tocar el rc de tu shell
 ```
 
-Los binarios se publican en
-[Releases](https://github.com/juan52878911/kindling/releases) para **linux/amd64**,
-**linux/arm64**, **darwin/amd64** y **darwin/arm64**. Cada release lleva un
-`SHA256SUMS`, y el script de instalación verifica el checksum antes de mover nada al
-disco. **Windows no está soportado** — el código usa syscalls POSIX (`syscall.Kill`,
-`Setsid`, `Stat_t`).
-
-**Desde fuentes — `make`:**
-
-```sh
-make install                              # el CLI en tu máquina
-make deploy HOST=ssh://juan@192.168.2.60  # el daemon en el host con KVM
-```
-
-`make install` elige el primer directorio escribible de tu PATH y **no pide sudo**:
-instalar una herramienta de usuario no debería requerirlo. Fuérzalo con
-`make install PREFIX=/usr/local` si la prefieres de sistema.
-
-`make deploy` compila para `linux/amd64`, copia el binario y la unidad de systemd, y
-arranca el servicio. La unidad entrega el socket al usuario con el que entras por SSH,
-para no tener que correr el cliente entero bajo sudo. La compilación es paramétrica por
-arquitectura con `GOARCH`: para desplegar a un host arm64, `make deploy GOARCH=arm64
-HOST=ssh://...` (el binario sale como `kling-linux-arm64`).
-
-Detalles del ciclo de releases: [`docs/releases.md`](docs/releases.md).
-
-## Primeros comandos
-
-```sh
-kling doctor                      # daemon, versión del CLI y del daemon, extensiones, completado: cada ✗ con su arreglo
-kling try -- uname -a             # sandbox de usar y tirar: crea, ejecuta, devuelve su código y lo borra
-kling try -image toolchain        # sin comando: una shell interactiva, borrada al salir (-keep la conserva)
-kling ai up                       # gateway de IA con ./ai.json o ~/.config/kling/ai.json en 127.0.0.1:8080
-```
-
-`kling doctor` sale con 1 solo si algo falla (los avisos, como el completado sin cargar,
-no cuentan), así que sirve también en scripts. `kling ai up` imprime la URL y un `curl` para probarlo antes de
-empezar a servir. Cuando un comando falla, el error trae una segunda línea, `try: …`,
-con el siguiente comando que ejecutar (`kling doctor`, `kling ps -a`,
-`kling image ls`…).
-
-Otros de uso diario:
-
-```sh
-kling help run                    # solo la ayuda de un comando
-kling logs -f <máquina>           # sigue la consola hasta que deja de correr
-kling template ls | inspect <nombre> | rm <nombre>
-kling version                     # versión del CLI y del daemon (-json)
-kling completion install          # escribe el script de completado y dice qué línea añadir al rc
-```
-
-## Dejar el runtime listo — `kling up`
-
-```sh
-kling up        # comprueba KVM, nftables, el usuario kindling, artefactos e imágenes
-kling status    # diagnóstico de una pasada: daemon, gateway y los agentes que encuentre
-```
-
-`kling up` **imprime** los comandos que necesitan privilegios en vez de ejecutarlos:
-dejar que un instalador toque nftables y cree usuarios de sistema por su cuenta es pedir
-una confianza que no hace falta pedir. El kernel y la imagen base van dentro del binario,
-así que no hay ningún script que correr antes.
-
-Los dos fallos silenciosos que caza — los que cuestan una tarde si se cuelan — son un
-`nft` ausente (las microVMs arrancan sin red) y un usuario `kindling` ausente
-(Firecracker acaba corriendo como root).
-
-## Conexión
-
-El mismo binario es CLI y daemon. `kling daemon` corre donde esté KVM; el CLI le habla
-por un socket Unix, en local o a través de SSH:
-
-```sh
-export KLING_HOST=ssh://juan@192.168.2.60   # daemon remoto
-export KLING_HOST=/run/kling.sock           # daemon local
-```
-
-**El daemon nunca escucha en un puerto de red.** Controlar microVMs equivale a root en su
-host: puede montar discos y arrancar kernels arbitrarios. Exponerlo por TCP repetiría el
-error que le ha costado a Docker una década de servidores comprometidos. Para el acceso
-remoto usa SSH con la misma técnica que `docker context`: en vez de exigir socat o nc al
-otro lado, invoca `kling dial-stdio`, que puentea la tubería SSH con el socket local.
-
-## Configuración
-
-Contextos con nombre, al estilo de `docker context`, para no cargar con `KLING_HOST`:
-
-```sh
-kling context add lab ssh://juan@192.168.2.60 -description "Proxmox de casa"
-kling context use lab
-kling context ls
-```
-
-Y valores por defecto, para no repetir las mismas opciones en cada `run`:
-
-```sh
-kling config set defaults.image min
-kling config set defaults.ttl_seconds 600
-kling config set gateway.idle 5m
-kling config set daemon.vmm vz        # el VMM del daemon local: firecracker (Linux) o vz (macOS)
-kling config show
-```
-
-`daemon.vmm` lo lee el daemon que corre con ese usuario; vacío es el de la plataforma
-(`vz` en macOS, `firecracker` en Linux), y se valida contra la máquina en la que corre.
-`KLING_VMM` lo sustituye con un nombre de backend o la ruta de un binario.
-
-El fichero vive en `~/.config/kling/config.json` — también en macOS: `UserConfigDir()`
-lo pondría bajo `~/Library/Application Support`, que está bien para apps de escritorio
-pero sorprende en un CLI.
-
-**Precedencia:** `-H` > `$KLING_HOST` > contexto activo > socket local. El flag siempre
-gana, así que una invocación puntual no te obliga a cambiar de contexto.
-
-El autocompletado viene con el binario: `source <(kling completion bash)` o
-`source <(kling completion zsh)`.
-
-## En un Mac (Apple Silicon)
-
-**Nativo (v0.9, macOS 14+):** el daemon corre en el propio Mac con el backend `vz` —un
-ayudante `kling-vz` por microVM que habla el API de Firecracker sobre
-Virtualization.framework—. Sin root y sin VM Linux. Las imágenes se construyen en un
-host Linux arm64 y se traen con `kling image copy <nombre> -from ssh://usuario@host`.
-Cada restauración cuesta ~350 MiB (no se comparte la memoria del dorado), y no hay
-construcción de imágenes, techo de CPU ni jailer. Instalación, agente de launchd y
-límites: [`docs/mac.md`](docs/mac.md).
-
-```sh
-make install && make vz && brew install e2fsprogs
-kling up -check
-kling image copy min -from ssh://usuario@host-linux-arm64
-```
-
-**Dentro de una VM Linux:** Firecracker no corre nativo en macOS. En un **M3 o superior** con macOS 15+ corre dentro
-de una VM Linux aarch64 con virtualización anidada — **soportado, con límites**: los
-arranques en frío son más lentos bajo KVM anidado (~16 s por réplica nueva frente a ~3 s
-en Linux nativo, con palancas medidas para bajarlo a ~2,5 s), así que vale para
-desarrollo local y evaluación, no para alta concurrencia.
-
-```sh
-make deploy-mac HOST=ssh://...   # atajo: despliegue GOARCH=arm64 a la VM de Lima
-```
-
-La receta reproducible completa — configuración de Lima, requisitos de nested virt, y
-las tres palancas medidas para acelerar el arranque en frío (`-bundle`, `-cpu-pct 100`,
-modo http-proxy) — está en [`docs/mac-arm64.md`](docs/mac-arm64.md).
-
----
-
-# El CLI
-
-## kling
-
-> Las transcripciones de abajo están reproducidas tal cual: lo que ves aquí es lo que la
-> herramienta imprime de verdad (el CLI habla inglés).
+**Desde Claude Code.** El repositorio es su propio marketplace de plugins;
+`/kindling:setup` pregunta dónde deben correr las microVMs y qué piezas quieres, ejecuta el
+instalador de arriba y termina con `kling doctor`. Desde una terminal, `install.sh --claude`
+hace lo mismo.
 
 ```
-$ kling status -v
-endpoint:     ssh://juan@192.168.2.60
-daemon:       0.1.0
-root:         /var/lib/kindling
-KVM:          yes
-firecracker:  Firecracker v1.16.1
-machines:     7
-
-$ kling run -name mcp-demo
-efad9e5f7003  mcp-demo  booted cold in 54 ms
-
-$ kling freeze mcp-demo
-efad9e5f7003  warm  (754 ms, 256 MiB on disk)
-
-$ kling ps
-ID             NAME       IMAGE     STATE   CPU/MEM    DISK   EGRESS   AGE   LAST OP
-efad9e5f7003   mcp-demo   default   warm    1/256MiB   81M    none     17s   freeze 754ms, 256MiB
-
-$ kling thaw mcp-demo
-efad9e5f7003  running  (22 ms)
+/plugin marketplace add juan52878911/kindling
+/plugin install kindling@kindling
+/kindling:setup
 ```
 
-El estado **`frozen`** es lo que separa a kindling de un runtime de contenedores: la
-máquina está congelada en disco, no quema ni CPU ni RAM, y despierta en decenas de
-milisegundos.
-
-## Snapshots dorados
-
-Congela una máquina una vez e instancia N copias que **comparten su memoria**:
-
-```
-$ kling save plantilla golden
-golden  golden snapshot  (80M of memory)
-instantiate with:  kling run -from golden
-
-$ kling run -from golden -name g1
-a3f9...  g1  instantiated from golden in 34 ms
-
-$ kling template
-NAME     IMAGE     CPU/MEM    MEMORY   DISK   INSTANCES   AGE
-golden   default   1/256MiB   80M      80M    10          21s
-
-$ kling events
-23:52:20  machine.frozen   mcp-demo  frozen in 754 ms (256 MiB on disk)
-23:52:20  machine.thawed   mcp-demo  thawed in 22 ms
-```
-
-`kling save` **exige que el invitado esté sirviendo** antes de congelar un dorado
-(`-wait`, 60 s por defecto). Un snapshot tomado antes de tiempo restaura en 26 ms y luego
-no contesta — minutos u horas después, con un error que no menciona el commit. Si el
-invitado no sirve, commit se niega y explica la cadena entera; `-force` salta la
-comprobación y `-replace` sustituye un snapshot existente de forma atómica.
-
-Por defecto el snapshot se congela con un **hijo caliente sin ligar** dentro, así que el
-dorado no paga el arranque del runtime al restaurar (arrancar `node` son 300-500 ms de
-cualquier despertar). Eso triplica aproximadamente el coste en disco del snapshot — 39 MB
-→ 120 MB en un servicio node — así que `kling save -warm=false` cambia latencia de
-despertar por disco cuando alojas muchos servicios.
-
-## Ciclo de vida y robustez
-
-```sh
-$ kling run -image min -ttl 300 -cpu-pct 25 -egress internet
-$ kling logs <ref> -tail 50        # consola serie: la única ventana hacia dentro
-```
-
-- **`-ttl`** congela la máquina por sí sola pasado ese tiempo. Congela, no mata: deja de
-  costar CPU y RAM, pero vuelve en ~30 ms. Es lo que hace serverless el modelo.
-- **`-cpu-pct`** acota el uso de CPU con su propio cgroup (50% de un core por defecto).
-- **Reconciliación al arrancar**: el daemon compara su estado guardado con la realidad
-  del host, readopta las microVMs que siguen vivas y limpia namespaces y cgroups
-  huérfanos.
-- **Guardián continuo**: cada 10 s comprueba que lo que dice estar `running` corre de
-  verdad. Una máquina cuyo proceso desapareció pasa a `failed` y libera sus recursos.
-- **Los bucles de fondo contienen sus pánicos.** Cada iteración del reconciliador, el
-  segador y el persistidor de estado va envuelta en un `recover()`: un nil-pointer en un
-  bucle de fondo mataba el daemon y dejaba huérfanas todas las microVMs.
-
-**Reiniciar el daemon no mata las microVMs.** La unidad lleva `KillMode=process`; sin
-eso systemd arrastra el cgroup entero y se lleva por delante las máquinas en marcha.
-
-### Medido con 8 instancias
-
-```
-RAM añadida:          113 MiB   (14 MiB por instancia)
-conectividad:         9/9
-VMM sin privilegios:  9/9
-cgroups activos:      9
-```
-
-## Red: un namespace por microVM
-
-```
-$ kling topo
-kindling  ssh://juan@192.168.2.60
-          KVM ok · Firecracker v1.16.1
-
-  host  172.30.0.0/16
-   ├─◆ golden           golden snapshot · 82M shared memory
-   │  ├── g3             running  172.30.0.18     ⌀   384K  thaw 28ms
-   │  ├── g2             running  172.30.0.14     ⌀   384K  thaw 26ms
-   │  └── g1             running  172.30.0.10     ⌀   384K  thaw 41ms
-   │
-   └─◆ (booted cold)
-      └── plantilla      running  172.30.0.6      ⌀     8M  boot 46ms
-
-  4 running · 0 warm · 0 stopped   disk: 9M own + 83M shared
-  egress:  ⌀ isolated   → internet (private networks are always blocked)
-```
-
-**El problema:** un snapshot graba el nombre del dispositivo TAP del host. Si N
-instancias restauran del mismo dorado, las N piden el mismo TAP y chocan. Y no se puede
-reasignar sin más: Firecracker no permite parchear `host_dev_name`.
-
-**La solución:** un namespace de red por microVM. Dentro de cada uno el TAP se llama
-siempre `tap0` y el invitado tiene siempre la misma IP, así que **un snapshot vale para
-todas**. Toda la diferenciación ocurre en el host, al otro lado de un veth:
-
-```
-        host                  │  netns kl-<id>          │  microVM
- vh-<id> 172.30.a.b/30 ◄─veth─► vg-<id> 172.30.a.b+1    │
-                              │ tap0    172.16.0.1/30   ├─ eth0 172.16.0.2
-```
-
-El invitado se configura solo desde el parámetro `ip=` del kernel, sin necesitar
-herramientas de red dentro de la imagen. Desde el host cada máquina es alcanzable en la
-IP de su namespace, que hace DNAT hacia el invitado.
-
-Es el mismo enfoque que usa AWS Lambda, y por la misma razón.
-
----
-
-# Sandboxes para agentes de código
-
-Un agente escribe un script y necesita ejecutarlo sin tocar tu máquina. `kling` le da
-una microVM de usar y tirar: despierta de un snapshot en milisegundos, no tiene red salvo
-que se pida, transmite la salida de lo que se le mande ejecutar y se destruye sola al
-vencer su tiempo de vida.
-
-```sh
-kling image toolchain                          # una imagen con node, npm, python3 y pip
-kling sandbox create -image toolchain -name sb  # ~5 s en frío
-kling cp ./analisis.py sb:/tmp/
-kling exec sb -- python3 /tmp/analisis.py       # la salida llega según sale
-kling shell sb                                  # o una terminal interactiva dentro
-kling cp sb:/tmp/resultado.json .
-kling sandbox rm sb
-```
-
-`kling shell sb` abre una terminal de verdad dentro, con `vim`, historial y Ctrl-C
-interrumpiendo lo de dentro y no la sesión. `kling exec` termina con el código del
-comando remoto, separa stdout de stderr, acepta stdin con `-i` y con `-timeout` mata al
-grupo de procesos entero. Prepara una plantilla una
-vez (`kling run -allow-exec`, instala lo que haga falta, `kling save`) y cada sandbox
-creado con `-from` arranca en **~300 ms** con todo dentro — cinco en paralelo tardaron
-0,57 s en el laboratorio.
-
-La ejecución es **opt-in al arrancar**: viaja en la línea de comandos del kernel, que
-solo escribe el host, y se congela con la memoria. Una microVM de servicio nunca la
-tiene, y un snapshot sin ella no puede convertirse en sandbox. Guía:
-[`docs/exec-sandbox.md`](docs/exec-sandbox.md).
-
----
-
-# Extensiones
-
-`kling` es el único comando que tecleas. Lo que no es del núcleo de microVMs llega como
-**extensión**: un ejecutable llamado `kling-<nombre>` que declara qué subcomandos añade.
-`kling` lo descubre, lo enseña en `kling help` y en el completado de la shell, y le pasa
-el control cuando tecleas uno de sus comandos — códigos de salida, señales y terminal
-incluidos. Los comandos del núcleo ganan siempre.
-
-Las extensiones oficiales viven en este repositorio y salen en cada release, con la
-misma versión que el núcleo:
-
-```sh
-kling plugin install mcp        # servidores MCP bajo demanda (trae kling-bridge con ella)
-kling plugin install sandbox    # sandboxes multiinquilino: gateway, plantillas, fondo precalentado
-kling plugin ls                 # qué hay instalado, de dónde (ruta + sha256) y su estado
-kling plugin disable ai         # apaga una sin desinstalarla; vale también para las incorporadas
-kling completion install         # recarga el completado tras instalar una
-```
-
-`kling plugin install` baja `kling-<nombre>-<os>-<arch>` de la release que corresponde a
-tu `kling`, **lo verifica contra el `SHA256SUMS` de la release antes de escribirlo**,
-comprueba su manifiesto y lo deja en `~/.local/share/kling/plugins` (o en el primer
-directorio de `$KLING_PLUGIN_PATH`). `@v0.13.0`, `-from https://…` y `-file RUTA` eligen
-otro origen; `kling plugin rm <nombre>` la quita. `ai` es una **extensión incorporada**
-(`kling ai model`, `kling ai chispa`, el gateway de IA): vive dentro del binario de
-`kling`, pero se lista, se documenta y se apaga igual.
-
-Desde 0.14 los comandos de una extensión viven **bajo su nombre**: `kling mcp add`,
-`kling mcp serve`, `kling sbx ls`. Solo `connect` está en primer nivel. Los verbos sueltos
-de antes (`kling add`, `kling gateway`, `kling models`, `kling chispa`, `kling commit`,
-`kling snapshots`, `kling rmi`, `kling images`, `kling plugins`, `kling info`) siguen
-funcionando como alias silenciosos; en 0.15 avisarán una vez por proceso y en 0.16 se
-retiran los de extensiones. `commit`, `snapshots` y `plugins` se quedan para siempre.
-
-## kling-mcp: servidores MCP bajo demanda
-
-Coge cualquier servidor MCP de código abierto — de npm o de PyPI, hable stdio o
-Streamable HTTP nativo — y conviértelo en un servicio que despierta bajo demanda desde un
-snapshot dorado. Es para lo que se construyó kindling; vive en [`ext/mcp`](ext/mcp).
-
-```sh
-kling plugin install mcp
-kling mcp search filesystem
-kling mcp add io.github.domdomegg/filesystem-mcp
-kling connect -all -install all
-```
-
-Trae el catálogo, el puente stdio→HTTP, el gateway con sesiones, réplicas y modo efímero,
-la entrada única `_all`, la reparación de tipos, la autocuración y la conexión con tu
-agente de IA. Los números medidos de arriba se tomaron con ella. Su guía es
-[`ext/mcp/README.es.md`](ext/mcp/README.es.md).
-
-Si vienes de v0.5 o anterior: el daemon migra en su sitio snapshots, catálogos, salud y
-links; instala la extensión y todos los comandos que usabas siguen funcionando.
-
-## kling-sandbox: sandboxes multiinquilino
-
-[`ext/sandbox`](ext/sandbox) pone un gateway delante de `kling sandbox`: inquilinos con
-token y cuotas, plantillas y un fondo de sandboxes precalentados que se reclaman en
-milisegundos en vez de crearse. Trae también `kindling-operator`, que hace lo mismo desde
-Kubernetes ([`docs/kubernetes.md`](docs/kubernetes.md)).
-
-```sh
-kling plugin install sandbox
-```
-
-## Escribir una extensión
-
-La versión de diez minutos está en [`docs/extensions.md`](docs/extensions.md), alrededor
-de [`examples/hello-extension`](examples/hello-extension): un `main.go` con
-`plugin.Main`, `go build -o ~/.local/share/kling/plugins/kling-hello`, y `kling hello`
-funciona, con su ayuda, su completado y su clave de configuración.
-
-Una extensión responde a `--kling-manifest` con un manifiesto JSON (nombre, versión,
-versión mínima del núcleo, comandos, claves de configuración tipadas, ganchos para
-`kling status` y `kling up`, unidades de systemd, ejecutables compañeros) y después recibe sus comandos. Habla con
-el daemon solo por su API HTTP: las anotaciones de snapshots, un almacén clave-valor, los
-constructores de imágenes con nombre y los ficheros dentro de imágenes están para que una
-extensión nunca toque las tripas del daemon. Las extensiones en Go lo tienen todo en
-`pkg/plugin`, `pkg/api`, `pkg/config`, `pkg/guest` y `pkg/scheduler`.
-
-El protocolo está en [`docs/extensions.md`](docs/extensions.md) y el API del daemon en
-[`docs/api.md`](docs/api.md).
-
----
-
-# Almacenamiento
-
-## Volúmenes: lo que sobrevive a la microVM
-
-El overlay de cada máquina muere con ella. Un **volumen** es lo contrario: un fichero
-ext4 en el host, enganchado como un disco propio — de `vdc` en adelante, hasta cuatro —
-que persiste.
-
-```sh
-kling volume create notas -size 2G
-kling mcp import notas-mcp -volume notas          # o: kling mcp add <servidor> ...
-kling run -name apuntes -volume notas:/data       # o una microVM a mano
-kling volume ls
-```
-
-```
-NAME     LOGICAL   ON DISK   USED BY
-notas    2.0G      4.0M      notas-a3f9
-```
-
-**Por qué un disco y no un directorio del host.** La petición natural es "monta
-`~/notas` dentro". No se hace: Firecracker no tiene virtio-fs, y más importante, un
-directorio del host montado en escritura le da al invitado — que se asume hostil — un
-canal directo al sistema de ficheros del host. Eso tiraría por la borda justo la frontera
-que justifica usar microVMs en vez de contenedores. El fichero es disperso, así que solo
-ocupa lo que de verdad se escribe.
-
-**Un volumen se declara al importar, no después.** Firecracker no puede añadir discos a
-una VM restaurada, así que el dispositivo tiene que estar presente cuando se congela el
-dorado. Un servicio importado sin volumen no puede ganar uno sin reimportar, y kling lo
-dice exactamente así en vez de fallar dentro del invitado.
-
-**Quién lo monta.** El puente, no el init de la imagen — así ninguna imagen base necesita
-reconstruirse. Los puntos de montaje viajan en la línea de comandos del kernel
-(`kling.volume=/data,/libs:ro`), lo que significa que el mismo dorado funciona con
-volúmenes distintos.
-
-**Un escritor, o muchos lectores.** No es una política, es física: ext4 no tolera dos
-sistemas montándolo en escritura. Cada uno cachea metadatos que el otro no ve, y el
-resultado es corrupción. Leer es otra cosa: si nadie escribe, los bloques no cambian. Así
-que kling permite **un** escritor exclusivo **o** tantos lectores como quieras, y nunca
-ambos a la vez.
-
-La regla se aplica en el camino de arranque, no solo al borrar: quien monta un volumen es
-tan peligroso como quien lo elimina. `kling volume rm` se niega mientras una microVM lo
-tenga montado — borrar el fichero por debajo corrompería su sistema de ficheros — y un
-`run` o un `import` que rompería la regla del único escritor se rechaza igual, nombrando
-la máquina que lo retiene y, cuando leer basta, enseñándote el `-volume <nombre>:ro` que
-sí funcionaría.
-
-**Sobrevive a que maten la máquina.** Parar una microVM es matar el VMM, que desde el
-punto de vista del invitado es indistinguible de un corte de luz. Por eso un volumen se
-formatea **con journal** — a diferencia de los overlays, que son desechables — y por eso
-el daemon pide al invitado que vuelque su caché a disco antes de matarlo. Sin lo primero,
-el sistema de ficheros queda inconsistente y sin nada que reproducir; sin lo segundo,
-pierdes justo lo último escrito. Cada arranque va precedido de un `e2fsck -p`, que en un
-volumen sano cuesta milisegundos.
-
-## Una biblioteca de paquetes compartida
-
-Es lo que permite no duplicar las mismas dependencias en cada imagen:
-
-```sh
-kling volume create libs -size 2G
-
-# la imagen con los instaladores, una vez:
-kling image toolchain
-
-# poblarla DENTRO de una microVM de un solo uso, que se destruye al terminar:
-kling volume populate libs -- npm install --prefix /data --ignore-scripts lodash axios zod
-kling volume populate libs -- pip install --target /data requests
-
-# y consumirla desde tantas microVMs como haga falta:
-kling mcp import mi-servicio -volume libs:/libs:ro
-kling run -name otra -volume libs:/libs:ro
-```
-
-El modo viaja pegado al punto de montaje en la línea de comandos del kernel
-(`kling.volume=/libs:ro`), así que el puente no puede leer uno sin el otro. Dentro se
-monta con `MS_RDONLY` **y** `noload`: sin `noload`, ext4 intentaría reproducir el journal
-al montar — que es una escritura — y varios invitados haciéndolo a la vez contra el mismo
-fichero es precisamente la corrupción que el modo solo-lectura existe para evitar. El
-disco va marcado como solo-lectura también en el propio Firecracker, así que la barrera
-no depende de que el invitado se porte bien: escribir recibe `EROFS`.
-
-**Instalar es ejecutar código de terceros**, así que `volume populate` lo hace dentro de
-una microVM con el volumen montado en escritura y la destruye al terminar — en vez de en
-un chroot en el host, que sacaría esa ejecución fuera de la frontera que justifica el
-proyecto. La capacidad de ejecutar comandos la enciende el kernel (`kling.exec=1`) y solo
-la pone el daemon, solo para esas máquinas: una microVM de servicio ni siquiera tiene esa
-ruta registrada.
-
-### Varios volúmenes en la misma microVM
-
-Los dos usos naturales se estorbaban: un servicio quiere su propio almacenamiento en
-escritura **y** la biblioteca compartida en solo lectura. `-volume` se puede repetir, y
-el orden en que los escribes es el orden de los discos (`vdc`, `vdd`, …):
-
-```sh
-kling mcp import mi-servicio -volume data:/data -volume libs:/libs:ro
-```
-
-```
-NAME     LOGICAL   ON DISK   USED BY
-data     2.0G      97M       mi-servicio-1a98a4 (writing)
-libs     2.0G      109M      mi-servicio-1a98a4, otra-mas
-```
-
-Cuatro es el techo, porque cada uno es un disco y los discos se nombran por letra.
-
-**El conjunto de discos queda fijado al congelar.** Firecracker no añade ni quita discos
-en una VM restaurada — solo deja reapuntar cada uno a otro fichero — así que cambiar
-cuántos volúmenes lleva un servicio significa reimportarlo, y kling lo dice exactamente
-así en vez de fallar dentro del invitado.
-
-### Los paquetes se encuentran solos
-
-Con todo montado, el puente mira dentro de cada volumen y exporta `NODE_PATH` y
-`PYTHONPATH` al servidor MCP:
-
-| Qué contiene el volumen | Qué se exporta |
+**Desde fuentes.** `make install` deja `kling` en el primer directorio escribible de tu
+PATH sin sudo; `make deploy HOST=ssh://usuario@host` compila el daemon para el host con
+KVM, copia el binario y la unidad de systemd y lo arranca ([`docs/releases.md`](docs/releases.md)).
+
+**Kubernetes.** `kindling-operator` se publica como `ghcr.io/juan52878911/kindling-operator:<versión>`
+con sus manifiestos en cada release ([guía](docs/guides/kubernetes-operator.md)).
+
+Tras cualquiera de ellas: `kling doctor` imprime una línea ✓/✗ por pieza, con el arreglo al
+lado de cada ✗.
+
+## Cómo funciona
+
+<p align="center">
+  <img src="docs/img/architecture.svg" alt="Los agentes hablan con un gateway; el gateway con el daemon; el daemon con microVMs Firecracker o vz restauradas de snapshots dorados" width="900">
+</p>
+
+- **El daemon** es dueño de las máquinas y nunca escucha en un puerto de red: socket Unix
+  en local, SSH en remoto (`kling context add lab ssh://usuario@host`). Controlar microVMs
+  es root en su host; kindling no pone eso en TCP.
+- **Los gateways** van delante para las dos cosas que llaman los agentes: `kling mcp serve`
+  enruta llamadas a herramientas MCP (sesiones, réplicas, modo efímero, una sola entrada
+  `_all`) y `kling ai serve` clasifica con Chispa y genera con modelos pequeños.
+- **Tres sustantivos**: una *imagen* (rootfs) arranca en frío una vez; `kling save` convierte
+  esa máquina en una *plantilla* (snapshot dorado); `kling run -from` saca *máquinas* de ella
+  en milisegundos que comparten su memoria. Una máquina está `running`, `paused` (RAM
+  conservada, vuelve en ~2 ms) o `frozen` (un fichero, vuelve en ~30 ms).
+
+<p align="center">
+  <img src="docs/img/lifecycle.svg" alt="imagen → plantilla → máquina; estados running, paused y frozen con su coste" width="900">
+</p>
+
+- **El aislamiento** es una frontera de hipervisor: cada microVM tiene su kernel, su
+  namespace de red, salida `none` por defecto (`internet` nunca llega a redes privadas,
+  `allowlist` cierra por defecto), un VMM sin privilegios con cero capacidades, y secretos
+  entregados por MMDS solo a la máquina viva — una máquina que recibió secretos ya no se
+  puede congelar.
+
+La versión larga, con transcripciones y cada medida: [`docs/handbook.es.md`](docs/handbook.es.md).
+
+## Comparativa
+
+*Septiembre de 2026. Las cifras de terceros salen de su documentación y blogs públicos; las
+de kindling, de este repositorio. La tabla completa con fuentes: [`docs/compare.md`](docs/compare.md).*
+
+kindling toca cuatro categorías a la vez, y cada una tiene un líder que hace esa cosa con
+más pulido: sandboxes hospedados para agentes (E2B, Daytona, Modal, Vercel, Cloudflare,
+Blaxel, Morph), runtimes de microVM auto-alojados (microsandbox, Arrakis, Kata, Apple
+`container`, Docker Sandboxes), gateways MCP (Docker MCP Gateway, ToolHive, Smithery) y
+serving de modelos con escala a cero y enrutado (llama-swap, vLLM semantic-router).
+
+| Elige **kindling** cuando… | Elige otra cosa cuando… |
 |---|---|
-| `<vol>/node_modules` | `NODE_PATH=<vol>/node_modules` |
-| `<vol>/*.dist-info` (`pip install --target`) | `PYTHONPATH=<vol>` |
-| `<vol>/lib/python*/site-packages` (`pip install --prefix`) | esa ruta en `PYTHONPATH` |
+| tus herramientas casi nunca corren y quieres que no cuesten nada mientras esperan — `frozen` es 0 RAM y vuelve en ~30 ms con el estado intacto | quieres un sandbox hospedado hoy y no quieres operar nada: E2B, Vercel Sandbox, Cloudflare |
+| el código de dentro no es de fiar y un kernel compartido no basta: Firecracker/KVM en Linux, `vz` en Apple Silicon | necesitas ramificar un sandbox *vivo* en N copias: Morph (Infinibranch) |
+| alojas servidores MCP para Claude Code, opencode o Cursor y los quieres aislados, conectados con un comando, con secretos que nunca pisan un snapshot | quieres MCP con RBAC de empresa, registro y soporte: ToolHive, Docker MCP Gateway |
+| un binario estático y el mismo modelo *congelar y despertar* para herramientas, sandboxes y modelos pequeños, en tu hardware | necesitas Kubernetes multinodo con scheduler real y alta disponibilidad: Kata Containers |
+| un homelab o una máquina en el borde con KVM, muchas herramientas y datos que no salen de casa | solo quieres contenedores locales con imágenes OCI y sin snapshots: Docker Sandboxes, Apple `container`, microsandbox |
 
-Se calcula al arrancar y no al construir la imagen porque el punto de montaje se decide
-al arrancar: un `NODE_PATH` horneado en la imagen empezaría a mentir en cuanto montaras
-la biblioteca en otro sitio. Y se comprueba que el directorio exista antes de añadirlo —
-un volumen de datos corriente no acaba en `PYTHONPATH`, porque un `json.py` que hubiera
-dentro taparía el módulo de la biblioteca estándar y el fallo afloraría lejísimos de su
-causa. Lo que la imagen ya trae instalado va **primero**: actualizar el volumen no debe
-cambiar en silencio la versión que usa un servicio que ya funcionaba.
+Tres diferenciadores honestos: (1) microVMs que despiertan de un fichero en ~30 ms y
+cuestan 0 RAM dormidas — 142 máquinas (invitados Alpine de 1 vCPU y 64 MiB) en 3,9 GB,
+en tu propio hardware; (2) cualquier servidor MCP, stdio o HTTP, aislado en su microVM y
+conectado a tu agente con un comando, con secretos que nunca tocan el snapshot; (3) un
+binario estático, sin dependencias, el mismo modelo para herramientas, sandboxes y modelos
+pequeños, en Linux/KVM o Apple Silicon nativo.
 
-## Compartir una carpeta del host
+Lo que no es: no es un SaaS, no está medido contra E2B ni Daytona en igualdad de
+condiciones, no está auditado, no es multi-host más allá de un reparto entre daemons por
+hueco libre, y macOS es un entorno de desarrollo (cada restauración cuesta ~350 MiB por VM,
+sin construir imágenes, sin techo de CPU).
 
-`-share SRC:DST[:copy|ro|rw]` mete una carpeta del host dentro de una máquina
-(`kling run` y `kling sandbox create`, repetible):
+## Límites honestos
 
-```sh
-kling run -image toolchain -share ./repo:/work              # copy: una foto de solo lectura
-kling -H ssh://lab run -share ./repo:/work                  # ... subida desde tu portátil
-sudo kling config set daemon.share_roots /srv/code          # en el host del daemon, una vez
-kling run -image toolchain -share /srv/code/app:/src:rw     # en vivo, lectura y escritura
-```
+- **El daemon necesita KVM en Linux**, o Apple Silicon con macOS 14+ para el backend `vz`.
+  Ni Windows, ni Mac Intel, ni VPS sin virtualización anidada.
+- **macOS no es Linux.** Las restauraciones con `vz` copian ~350 MiB por VM (no se comparte
+  la memoria del dorado), no se construyen imágenes (se copian desde un daemon Linux arm64),
+  no hay techo de CPU ni jailer. Bien para desarrollar; Linux para densidad
+  ([`docs/mac.md`](docs/mac.md)).
+- **La virtualización anidada es más lenta.** Arranques en frío medidos en 2,6 s anidado en
+  Proxmox y ~16 s en una VM Lima en Apple Silicon (con palancas hasta ~2,5 s). El thaw sigue
+  en milisegundos en los dos casos.
+- **La seguridad es un modelo de amenaza, no un certificado.** Jailer solo si está
+  instalado, sin autorización por operación en el socket del daemon, cuotas de disco
+  blandas, sin cifrado en reposo por parte de kindling. Todo listado en [SECURITY.md](SECURITY.md).
+- **Un host por daemon.** El reparto entre hosts es una elección por hueco libre en
+  `ext/sandbox`; el operador de Kubernetes es una réplica sin elección de líder.
+- **Un volumen tiene un escritor** (física de ext4); el estado compartido entre servicios va
+  por un servicio de memoria enlazado.
+- **Proyecto joven, un mantenedor.** Medido, documentado y rápido; todavía no lo ha
+  maltratado nadie más que su autor.
 
-- **copy** (por defecto): el CLI empaqueta la carpeta en un tar, el daemon revisa cada
-  entrada y construye un ext4 de solo lectura que se engancha como un volumen. Vale con
-  cualquier daemon, local o por SSH; lo que cambies después en tu lado no se ve.
-- **ro / rw**: se sirve en vivo la carpeta *del host del daemon*. El agente del invitado
-  habla FUSE él mismo y el daemon sirve cada operación a través de `os.Root`, así que nada
-  sale de la carpeta — ni `..` ni un enlace simbólico. Lo que cambies en el host se ve en
-  menos de un segundo; `ro` lo impone el daemon, no solo el montaje. Sobrevive a
-  `freeze`/`thaw` y a reiniciar el daemon, y funciona con `egress none`. Solo se pueden
-  compartir en vivo carpetas bajo `daemon.share_roots` (vacío por defecto).
+## Guías
 
-El invitado no puede crear enlaces simbólicos, enlaces duros ni nodos de dispositivo en una
-carpeta viva (`npm install --no-bin-links` funciona), ve todo como de root, y una máquina
-con carpetas no se puede convertir en snapshot. Las carpetas vivas pasan por la interfaz de
-red del invitado, con un techo de 16 MiB/s por sentido en Firecracker. Diseño, límites y
-modelo de amenaza: [`docs/compartir.md`](docs/compartir.md).
+Las guías están en inglés; el resto de `docs/` mantiene el castellano.
 
-## LLM pequeños bajo demanda (VON)
-
-`kling ai model` sirve modelos *instruct* pequeños (SmolLM2-360M, Qwen2.5 0.5B y 1.5B; en el catálogo por defecto solo pesos Apache-2.0/MIT) desde microVMs
-con `llama-server` de llama.cpp y su API compatible con OpenAI, congelados en un snapshot
-dorado **después** de cargar y calentar el modelo:
-
-```sh
-kling ai model add von-smol -model smollm2-360m-instruct     # imagen + dorado, una orden
-kling run -from von-smol -name smol-1                      # una réplica, el modelo ya en memoria
-kling ai model ask smol-1 "What is a microVM?"               # respuesta + tokens/s
-curl http://$(kling inspect smol-1 | jq -r .ip):8000/v1/chat/completions -d '{...}'
-```
-
-Pesos y llama.cpp van fijados por revisión y sha256. En Linux las réplicas de un dorado
-comparten los pesos en la caché de páginas del host: cuatro réplicas de SmolLM2 midieron
-**461 MiB de PSS** en total (suma de RSS 1715 MiB), ~12 MiB por réplica de más. En un Mac
-(`vz`), una réplica da su primer token ~0,8 s después de `run -from` y genera a ~140 tok/s.
-Cifras, la salvedad del laboratorio anidado y el plan de GPU: [`docs/von.md`](docs/von.md).
-
-## Chispa: un clasificador diminuto para decisiones pequeñas
-
-`kling ai chispa` entrena y sirve un modelo lineal (palabras y bigramas hasheados más campos
-estructurados; pesos int16; ~1 MB) para las decisiones que no merecen un modelo de
-lenguaje: clasificar un evento, enrutar la petición de un agente, filtrar una entrada.
-Corre en local, sin daemon, contesta en 1,5–6 µs sin reservar memoria y da los mismos
-bits en amd64 y arm64. Cada predicción trae una probabilidad calibrada y la decisión
-frente al umbral de su clase, `confident` o `escalate`, para que un gateway conteste con
-Chispa y pase el resto a un modelo mayor.
-
-```sh
-kling ai chispa train -data train.jsonl -valid valid.jsonl -o eventos.chispa
-kling ai chispa predict -model eventos.chispa -text "panic in the parser" -fields '{"service":"api"}'
-```
-
-Diseño y formato: [`docs/chispa.md`](docs/chispa.md). Una evaluación honesta con 4 304
-commits reales, incluido dónde dejan de valer los umbrales:
-[`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md). Chispa también se puede desplegar **serverless**,
-una tarea por dorado congelado en su propia microVM despertada bajo demanda (el mismo
-modelo que VON, más abajo): `kling ai chispa deploy`, cifras de thaw y rendimiento medidas en
-[`docs/chispa-serverless.md`](docs/chispa-serverless.md).
-
-## Gateway de IA: muchos modelos listos, ninguno encendido 24/7
-
-`kling ai serve` pone Chispa y VON detrás de una misma API, cada uno a lo suyo: **Chispa
-clasifica, enruta y filtra** (dentro del proceso, microsegundos) y **VON genera**
-(resúmenes, borradores, respuestas) desde réplicas que se descongelan con la primera
-petición, se multiplican con la concurrencia y se vuelven a congelar al quedarse
-ociosas (`pkg/scheduler`). `POST /v1/classify` y `/v1/decide` devuelven la etiqueta de
-Chispa con `escalate: true` cuando duda, y quien llama decide; `POST /v1/generate` rellena
-una plantilla por tarea; `/v1/chat/completions` y `/v1/models` son compatibles con
-OpenAI, con streaming. Encadenarlos (una **cascada**: VON contesta lo que Chispa duda) es
-opcional por tarea y **solo se activa si `kling ai eval` demuestra, con datos
-etiquetados de esa tarea, que gana a Chispa solo** (prueba de McNemar, mismos modelos y
-ajustes); si no, el gateway se niega salvo `escalate_force`. Escucha en un socket Unix
-0600 por defecto y en TCP solo con `-listen` y token.
-
-Una **tarea de intención** (`"intent"` en el registro) convierte una orden corta en una
-intención con sus huecos con la misma idea por capas: plantillas exactas, luego Chispa y
-un etiquetador Chispa-slots, luego un codificador de frases cuya capa enciende `kling ai
-eval` (McNemar sobre la orden completa), y escala el resto. Lo que sabe el dominio
-—plantillas, valores de los huecos, qué huecos necesita cada intención— sale de un
-esquema JSON, o de un `intent.Domain` en Go que registra el programa que embebe
-`pkg/aigw`. Guía: [`docs/intent.md`](docs/intent.md).
-
-```sh
-kling ai serve                                  # registro en ~/.config/kling/ai.json
-kling ai test commit-type "fix crash when the cache is cold"
-kling ai generate summarize "fix(parser): handle empty input"
-kling ai eval commit-type -data test.jsonl -von qwen   # decide si escalate_to se activa
-```
-
-Medido en clasificación de commits (861 de prueba): Chispa solo acierta el 0,640 en 6 µs y
-ninguna cascada llegó —Qwen2.5 0.5B 0,429, 1.5B 0,520, 3B 0,540—, así que la puerta las
-rechazó todas. En un Mac, una generación con la réplica caliente contesta en 9 ms y con
-la réplica congelada en ~1,5 s. Diseño, API, cifras y límites:
-[`docs/ai-gateway.md`](docs/ai-gateway.md).
-
-### Ejemplo: triaje de fallos de CI
-
-[`examples/ci-triage`](examples/ci-triage/README.md) es un programa aparte que usa
-el gateway: Chispa puntúa cada línea de un log de CI fallido (~1 µs por línea, 25 ms
-por log por el gateway) y elige las pocas que explican el fallo; otro modelo Chispa
-le pone categoría; VON (Qwen2.5-1.5B) solo lee ese trozo de ~400 tokens cuando Chispa
-duda; una página local deja confirmarlo o corregirlo y exporta la etiqueta para
-reentrenar. En 160 logs de LogChunks no vistos (Travis, CC BY 4.0) el trozo toca las
-líneas anotadas a mano en el 70 % de los logs frente al 54 % de las últimas 30 líneas
-y el 38 % de una regex de errores; la categoría es más difícil (Chispa 0,52, con VON
-0,56, no significativo). En 34 fallos reales de GitHub Actions solo empata con la cola
-del log (56 %): un CI nuevo necesita sus propias etiquetas.
-[`docs/CI-TRIAGE-EVAL.md`](docs/CI-TRIAGE-EVAL.md).
-
-## Demo: una habitación con modelos serverless
-
-[`examples/domotica`](examples/domotica/README.md) es una aplicación aparte que
-*usa* kindling: una página web con una habitación simulada (luces, termostato,
-persianas, tele, altavoz, cerradura, alarma, ventilador, enchufe) que se maneja
-con órdenes de voz como texto, en español o inglés. Cada orden pasa por el gateway de IA
-—el de kindling, que el programa de la demo embebe con el dominio de la habitación
-(`kindling-domotica gateway`), como tarea de intención—: las plantillas de la demo y el modelo rápido Chispa contestan en su
-proceso en microsegundos; lo que dudan va a un codificador de frases y luego a un
-LLM pequeño (Qwen2.5-1.5B con salida JSON restringida por un esquema y validada
-contra la taxonomía de la habitación), cada uno en una microVM que la orden
-descongela y que se congela otra vez al quedarse ociosa. La página enseña qué
-capa decidió, con qué confianza y en cuánto, si su microVM se descongeló (y en
-cuánto) y las microVMs de cada capa (despiertas o congeladas, memoria). La capa 4
-solo se enciende donde su evaluación muestra que gana a «escalar y no hacer
-nada»: con el 1.5B, en lo que el modelo rápido duda (31 órdenes más de MASSIVE
-bien, ninguna acción fuera de ámbito), no en todo (actuaría en el 1,5 % de la
-charla que no es para la habitación). Guía: [`docs/demo-domotica.md`](docs/demo-domotica.md).
-
-```sh
-make domotica                                         # compila ./kindling-domotica (ni se instala ni se publica)
-./kindling-domotica gateway -config examples/domotica/ai.json &   # con las rutas y dorados de tu host
-./kindling-domotica room                              # http://127.0.0.1:8088/
-./kindling-domotica decide "pon la luz del salón en azul"          # capas 1-2 en el proceso, sin daemon
-```
-
-## Qué persiste y qué no
-
-Conviene tenerlo claro, porque no es obvio:
-
-| | Sobrevive |
+| Guía | Léela si… |
 |---|---|
-| Estado de un servicio **efímero** | nada: la microVM muere tras cada acción |
-| Estado de un servicio **persistente** | congelados y descongelados de SU instancia |
-| | pero **no** a que esa instancia se borre |
-| Un **volumen** | a todo: stop, rm, reimportar — es un ext4 con journal en el host |
-| Imagen base y snapshot dorado | a todo: son ficheros en el host |
-
-Un servicio persistente conserva su contenido mientras viva su instancia; la instancia se
-congela al quedar ociosa y vuelve intacta. Pero si esa instancia se borra — limpieza
-manual, `kling rm`, reinstalar el servicio — el estado de su **overlay** se va con ella.
-
-Para datos que deben sobrevivir a todo, dale al servicio un
-[volumen](#volúmenes-lo-que-sobrevive-a-la-microvm) al importarlo, o apunta las
-herramientas al [servicio de memoria enlazado](ext/mcp/README.es.md#traer-tu-propio-servicio-de-memoria)
-compartido por todas.
-
----
-
-# Rendimiento y densidad
-
-## Coste en disco
-
-La imagen base **no se copia**: se monta en solo lectura y la comparten todas las
-microVMs. Cada máquina solo carga con su propio overlay disperso, montado con overlayfs
-por `/sbin/overlay-init` dentro del invitado.
-
-| | |
-|---|---|
-| Imagen base `min` (Alpine), compartida | **17 MB**, una vez |
-| Imagen base `default` (Ubuntu), compartida | 386 MB |
-| Por máquina en marcha | **~8 MB** |
-| Por máquina `frozen`, imagen `min` | **~35 MB** |
-| Por máquina `frozen`, imagen `default` | ~82 MB |
-
-Antes de los overlays, cada máquina copiaba los 800 MB completos: tres máquinas costaban
-2,4 GB; ahora cuestan 386 MB + 25 MB.
-
-**Una máquina `frozen` no consume RAM.** `freeze` mata el proceso de Firecracker; lo que
-queda es un fichero. Su coste es disco, no memoria.
-
-Firecracker vuelca la memoria entera al congelar, pero casi todo son páginas a cero.
-kindling las perfora con `fallocate --dig-holes`: el kernel devuelve ceros al leer un
-agujero, que es exactamente lo que había, así que el restore ni se entera.
-
-**256 MB → 81 MB, y el `thaw` sigue siendo ~30 ms.**
-
-### Qué determina ese coste
-
-Dos mediciones que deberían guiar cualquier optimización futura:
-
-| RAM asignada | Coste congelada |
-|---|---|
-| 512 MiB | 86 MB |
-| 256 MiB | 81 MB |
-| 96 MiB | 80 MB |
-
-**Asignar más RAM es casi gratis** una vez el fichero es disperso: lo que se guarda es el
-working set real, no la RAM reservada. Bajar `-mem` no es la palanca.
-
-La palanca es lo que arranca dentro:
-
-| Invitado | Coste congelada |
-|---|---|
-| Ubuntu 24.04 + systemd | 82 MB |
-| Alpine sin systemd (imagen `min`) | **35 MB** |
-
-Casi la mitad del coste era userspace de Ubuntu que una herramienta efímera no toca
-nunca. `scripts/70-build-minimal-image.sh` construye la imagen `min`: Alpine con
-`/sbin/overlay-init` y sin gestor de servicios, arrancando directo en `/entrypoint`.
-
-## Imágenes por capas: una base por familia de runtime
-
-Una imagen monolítica de servicio copia la base entera — y en un servicio node, ~130 MiB
-son nodejs+npm repetidos idénticos en cada imagen. Las imágenes por capas lo separan:
-**una base compartida de solo lectura por familia de runtime + una capa de servicio
-pequeña de solo lectura (solo el delta) + el overlay por máquina que ya existía** — el
-mismo modelo de las imágenes OCI, construido con whiteouts de overlayfs.
-
-```sh
-sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh node     # base con nodejs+npm
-sudo BRIDGE=<ruta> ./scripts/70-build-minimal-image.sh python   # base con python3+pip
-
-kling mcp add <servidor>              # elige la base 'node'/'python' solo
-kling mcp add <servidor> -base min    # fuerza la base mínima (capa estilo monolítico)
-```
-
-El parque real, reimportado por capas sobre la base `node`:
-
-| servicio | antes | después |
-|---|---|---|
-| context7 | 129 MiB | 39 MiB |
-| everything | 134 MiB | 39 MiB |
-| fetch | 164 MiB | 77 MiB |
-| filesystem-mcp | 135 MiB | 36 MiB |
-| memory | 139 MiB | 37 MiB |
-| sequentialthinking | 128 MiB | 38 MiB |
-| wikipedia-mcp-server | 471 MiB | 54 MiB |
-| **total** | **1300 MiB** | **320 MiB** + 113 de base compartida |
-
-**Un 67% menos de disco**, catálogos idénticos, arranque y thaw sin cambios. El puente va
-horneado en la base, así que actualizarlo es **un** fichero (`kling mcp refresh-bridge min`)
-en vez de N. El diseño completo, mediciones y trampas: [`docs/three-layers.md`](docs/three-layers.md).
-
-`kling image ls` enseña la columna `BASE` y cuenta cada base una vez en el total;
-`kling image rm` se niega a retirar una imagen que sea base de otra capa, respalde un
-dorado o tenga una máquina viva.
-
-## Densidad: por qué el snapshot dorado lo cambia todo
-
-Un snapshot dorado es un artefacto **de una imagen, no de una máquina**: congelas una vez
-y N instancias restauran del mismo fichero. Como Firecracker lo **mapea** en vez de
-reservar memoria anónima, el kernel comparte esas páginas entre todas las instancias y
-cada una solo paga lo que escribe.
-
-Medido instanciando de una en una y mirando la RAM del sistema:
-
-| | 10 desde un dorado | 10 en frío |
-|---|---|---|
-| RAM total añadida | **+68 MiB** | +824 MiB |
-| Por máquina | **6,8 MiB** | 82 MiB |
-| Tiempo por máquina | ~40 ms | ~2,6 s hasta userspace |
-
-**12x de densidad.** La prueba de que las páginas se comparten está en el hueco entre dos
-números: la suma de RSS de los diez procesos daba 258 MiB, pero la RAM del sistema solo
-subió 68 MiB. Los 190 MiB de diferencia son páginas compartidas que cada proceso cuenta
-como suyas.
-
-Llevado más lejos en una prueba de estrés sobre un host de 4 GB: **142 microVMs
-simultáneas en 3,9 GB**, con la memoria libre plana mientras el PSS total crecía — y un
-rechazo determinista y explicado en la 143 en vez de un OOM. Detalles en
-[`docs/estabilidad.md`](docs/estabilidad.md).
-
-Si lo que buscas es densidad, hay además una palanca opt-in del lado del host: **zram**
-(swap comprimido en RAM) para las páginas anónimas que divergen entre copias — guía
-medida en [`docs/densidad-zram.md`](docs/densidad-zram.md).
-
-## Devolver la RAM: squeeze, top y /metrics
-
-```sh
-kling top                # PSS por microVM y del host; -watch 2s para refrescar
-kling machine squeeze <ref>...   # globo: reclama la memoria libre del invitado para el host
-```
-
-`kling top` informa de **PSS**, no RSS — con instancias copy-on-write, el RSS cuenta la
-misma página compartida N veces y exagera el uso una barbaridad. El gateway expone además
-`/metrics` con la misma contabilidad, incluido el `mem.file` compartido.
-
-`kling machine squeeze` infla el dispositivo balloon dentro de un invitado en marcha para que las
-páginas que no está usando de verdad vuelvan al host — útil tras el pico de arranque de
-un servicio, cuando su régimen permanente es mucho menor que su pico.
-
-```sh
-kling run -image toolchain -mem 512 -mem-max 2048 -name trabajo
-kling machine resize trabajo -mem 1536   # sube o baja, sin reiniciar
-```
-
-Firecracker no puede añadir memoria a una VM en marcha, así que la elasticidad funciona
-al revés: la máquina arranca con el techo y el globo retiene la diferencia. Medido en el
-laboratorio, la memoria disponible del invitado pasó de 399 a 1.398 MiB y bajó a 270 MiB
-sin reiniciar. El daemon, además, aprieta los globos por su cuenta antes de rechazar una
-máquina nueva por falta de memoria.
-
-## Despertares más rápidos: hijo caliente · bundle · techo de CPU
-
-Tres palancas medidas, del trabajo de rendimiento de v0.3–v0.4:
-
-- **El hijo caliente** (por defecto, [ver commit](#snapshots-dorados)): el dorado se
-  congela con el runtime ya arrancado. El despertar baja de 4.350 ms a **175–202 ms**, y
-  una ráfaga de 20 llamadas concurrentes de 44 s a **4,66 s**.
-- **El veredicto de integridad se recuerda.** Un dorado es inmutable desde que se
-  congela; hashear su overlay de 512 MiB en cada instanciación era el 67% del despertar.
-  Se verifica una vez por vida del daemon (y se re-verifica si cambian tamaño o fecha).
-- **En Mac/arm64**: `kling mcp add -bundle` (esbuild, 1205 ficheros → 1) y
-  `kling mcp import -cpu-pct 100` se acumulan para llevar un `initialize` en frío de
-  ~16 s a ~2,5 s. El desglose está en [`docs/mac-arm64.md`](docs/mac-arm64.md).
-
-Para los servicios populares, `kling mcp serve -keepwarm N` mantiene caliente la instancia
-primaria de los N servicios persistentes más usados, sacando el arranque en frío del
-camino crítico del todo.
-
----
-
-# Seguridad
-
-El invitado es código de terceros: asúmelo hostil. El modelo de amenaza completo —
-incluido **lo que no está resuelto** — está en [SECURITY.md](SECURITY.md).
-
-## Aislamiento
-
-| Barrera | Cómo |
-|---|---|
-| Daemon inalcanzable por red | Solo socket Unix; acceso remoto exclusivamente por SSH |
-| VMM sin privilegios | `setpriv` a un usuario de servicio: **CapEff 0**, `no_new_privs`, solo el grupo `kvm` |
-| Sin acceso a la LAN | Egress `none` por defecto; con `internet`, las redes privadas siguen bloqueadas |
-| Sin degradar a los vecinos | 128 MiB/s de disco y 16 MiB/s de red por máquina; cgroup de CPU por máquina; tope de 256 |
-| Sin claves repetidas | virtio-rng + `CONFIG_VMGENID`: el invitado resiembra al restaurar |
-| Sin secretos en snapshots | los secretos se inyectan por sesión vía MMDS, solo en la máquina viva |
-
-Verificado **desde dentro del invitado**, que es la única medición que cuenta:
-
-```
-RESULT 192.168.2.100:   BLOCKED        (host Proxmox)
-RESULT 192.168.2.1:     BLOCKED        (router de casa)
-RESULT 10.10.10.1:      BLOCKED        (túnel WireGuard)
-RESULT 169.254.169.254: BLOCKED        (metadatos de cloud)
-RESULT 1.1.1.1:         REACHABLE
-```
-
-## Egress: none, internet, o una allowlist de dominios
-
-```sh
-kling run -egress none                          # por defecto: responde a quien la invoca, no inicia nada
-kling run -egress internet                      # sale a internet, nunca a rangos privados
-kling run -egress allowlist -allow api.github.com,pypi.org
-```
-
-El tercer modo es **fail-closed**: solo salen los dominios declarados, resueltos
-dinámicamente (DNS → ipset), y todo lo demás — incluidos todos los rangos privados —
-sigue bloqueado. Un valor de egress desconocido es un **error**, no una caída al modo más
-permisivo. La política viaja con el snapshot del servicio, así que un servicio curado o
-reimportado la conserva.
-
-## Secretos que nunca tocan un snapshot: MMDS
-
-Un snapshot congelado es un fichero en disco que sobrevive a la máquina — el sitio
-equivocado para una clave de API. Los secretos se inyectan en la microVM **viva** a
-través del MMDS de Firecracker (el servicio de metadatos de la microVM):
-
-```sh
-kling machine secret <ref> -f store.json     # o el JSON por stdin
-```
-
-El almacén lleva variables comunes y secretos por sesión indexados por `Mcp-Session-Id`;
-el puente le entrega a cada sesión los suyos. Una máquina que ha recibido secretos **ya
-no puede congelarse** — se impone, no se aconseja — así que ningún secreto acaba dentro
-de un fichero de snapshot.
-
----
-
-# Operación
-
-## Informe de topología
-
-```sh
-kling mcp export -o topologia.html
-```
-
-Autocontenido: sin CDN, sin fuentes remotas, sin peticiones al abrirlo — describe la
-topología de un homelab y no tiene por qué contárselo a nadie. Se genera en **tu**
-máquina, no en el daemon.
-
-Es el mismo árbol de siempre — el host a la izquierda, sus servicios en columna, las
-instancias a la derecha — pero navegable: cada caja con hijos se abre y se cierra, y la
-que elijas se detalla debajo.
-
-```
-                        ┌ eco ──────────┐
-                        │ 2 tools       │  no instances · ~250 ms
-                        └───────────────┘
-                        ┌ engram ───────┐
-                        │ 11 tools      │  doesn't run here
- ┌ host ────────────┐   └───────────────┘
- │ ssh://…2.60    − ├───┌ filesystem ───┐   ┌ fs-66e51d ────┐
- └──────────────────┘   │ 14 tools      ├───┤ 244f32b7      │  172.30.0.54 · thaw 30 ms
-                        └───────────────┘   └───────────────┘
-```
-
-El borde te dice el estado: verde sirviendo, ámbar dormido, gris punteado listo pero sin
-instancia, azul externo. Un servicio punteado no está roto — aparece solo en cuanto
-alguien lo llama, y la anotación gris de la derecha dice cuánto costará.
-
-### Cuatro vistas del mismo sistema
-
-| vista | qué enseña |
-|---|---|
-| **Topología** | el host, sus servicios y las instancias vivas de cada uno |
-| **Capas** | lo que atraviesa una llamada: gateway → agregador → microVM → kernel, rootfs, overlay, puente → servidor MCP |
-| **MCP** | el catálogo completo: cada servicio con sus herramientas, marcando cuáles escriben |
-| **Red** | quién puede salir a internet y quién está aislado, namespace a namespace |
-
-### Profundizar
-
-Pinchar una caja la abre. Si quieres bajar un nivel del todo, el panel ofrece **Drill
-down**: ese nodo pasa a ser la raíz y aparece una miga de pan para volver.
-
-```
-catalog › filesystem
-```
-
-El panel de abajo cambia con lo que selecciones: los datos del nodo, el flujo paso a paso
-de una llamada a ese servicio, y — si escribe algo — dónde acaba lo que escribe.
-
-Los nodos se agrupan por la etiqueta `service`, y en su defecto por su snapshot de
-origen: dos máquinas del mismo snapshot comparten memoria y van juntas aunque nadie las
-etiquetara.
-
-```sh
-kling run -from eco -service eco -label tier=prod
-```
-
-```
-Watch what it writes
-Writes via create_directory, edit_file, move_file, write_file.
-Lives as long as the instance does → save it to engram.
-```
-
-Ese aviso — "ojo con lo que escribe; vive lo que viva la instancia, así que guárdalo en
-engram" — es la regla que más confusión causa: el overlay de una microVM muere con ella.
-Si una herramienta necesita persistir un fichero, una fila de base de datos o cualquier
-otra cosa, el destino correcto es un
-[volumen](#volúmenes-lo-que-sobrevive-a-la-microvm) o el servicio de memoria enlazado,
-no el overlay del invitado. La vista Capas lo marca en el propio nodo del overlay.
-
-## Memoria: qué es real y qué es caché
-
-Tras muchos ciclos de freeze y thaw, el hipervisor puede enseñar la VM del laboratorio al
-80% de memoria. Casi todo es **caché de disco**, no uso real:
-
-```
-Cached:      2.9 GiB    ← lo que ves en el panel
-AnonPages:   273 MiB    ← memoria de procesos, el número real
-```
-
-Se puede comprobar soltándola: la caché cae de 3.098 a 178 MiB, el uso se asienta en
-~600 MiB y las microVMs siguen respondiendo. Es memoria reclamable; el kernel la libera
-bajo presión.
-
-Dos cosas ayudan:
-
-- **`qemu-guest-agent` en la VM del laboratorio.** Sin él, el hipervisor no distingue uso
-  de caché e informa de todo lo que el invitado haya tocado alguna vez. Con él, el panel
-  pasó de 3,26 GiB a 961 MiB para el mismo estado real.
-- **kindling suelta la caché de página del fichero de memoria tras congelar.** Ese
-  fichero se escribe entero y se relee para perforarlo, y luego nadie lo toca hasta que
-  alguien descongele esa máquina concreta. Bajó la acumulación de ~150 MiB a ~54 MiB por
-  ciclo.
-
-Los snapshots **dorados** no se sueltan a propósito: ahí la caché es precisamente lo que
-permite que N instancias compartan páginas.
-
----
-
-# Referencia
-
-## Requisitos
-
-- Un host con KVM y `cpu: host` (o equivalente) para que pasen las extensiones de
-  virtualización
-- Si corre anidado, virtualización anidada activada en el host padre
-- `firecracker` + `jailer`, `e2fsprogs`, `squashfs-tools`, `curl`, `jq`
-- En **macOS**: Apple Silicon M3+ con macOS 15+, vía una VM Linux con virtualización
-  anidada — ver [En un Mac](#en-un-mac-apple-silicon)
-
-## Scripts
-
-| | |
-|---|---|
-| `scripts/install.sh` | Instalador curl-pipe-sh: descarga el binario de la release y verifica SHA256 |
-| `scripts/release.sh` | Crea el tag y lo pushea; dispara el workflow de release |
-| `scripts/10-provision-lab.sh` | Crea la VM del laboratorio en Proxmox |
-| `scripts/20-install-firecracker.sh` | Instala Firecracker y jailer desde la última release |
-| `scripts/30-fetch-artifacts.sh` | Descubre y descarga kernel + rootfs desde CI |
-| `scripts/40-bench-boot.sh` | Mide arranque en frío, snapshot y restore |
-| `scripts/50-prepare-image.sh` | Inyecta `overlay-init` y registra la imagen base |
-| `scripts/70-build-minimal-image.sh` | Construye la imagen base `min`, o una base de familia de runtime (`node`, `python`) |
-| `scripts/71-build-glibc-base.sh` | Construye la base glibc con `chrome-headless-shell` (35% menos disco, arranque 3,4× más rápido que el Chromium de Alpine) |
-| `scripts/81-base-image.sh` | El constructor de imágenes `base`: una capa con paquetes y el agente de invitado genérico (`kling image build -builder base`); también el motor de capas del constructor `llm` |
-| `scripts/builders/llm` | El constructor `llm` de `kling ai model add`: llama.cpp + un GGUF fijado sobre una base Debian trixie |
-| `scripts/96-von-bench.sh` | Mide un modelo VON: frío y thaw hasta el primer token, tokens/s, memoria de N réplicas, semillas |
-
-## Mapa de la documentación
-
-| Documento | Qué cubre |
-|---|---|
-| [`docs/README.md`](docs/README.md) | Índice de todo lo que hay bajo `docs/` |
-| [`docs/extensions.md`](docs/extensions.md) | Escribe una extensión en 10 minutos: `examples/hello-extension`, el manifiesto campo a campo, `kling plugin install` |
-| [`ext/mcp/README.es.md`](ext/mcp/README.es.md) · [`ext/sandbox/README.md`](ext/sandbox/README.md) | Las extensiones de MCP y de sandboxes |
-| [`docs/kubernetes.md`](docs/kubernetes.md) | `kindling-operator`: sandboxes desde Kubernetes |
-| [`docs/api.md`](docs/api.md) | El API HTTP del daemon sobre el que se construyen las extensiones |
-| [`docs/exec-sandbox.md`](docs/exec-sandbox.md) | Sandboxes, exec en streaming y copia de ficheros para agentes de código |
-| [`docs/von.md`](docs/von.md) | LLM pequeños desde snapshots dorados: uso, diseño, cifras, plan de GPU |
-| [`SECURITY.md`](SECURITY.md) | Modelo de amenaza, barreras, y lo que NO está resuelto |
-| [`CHANGELOG.md`](CHANGELOG.md) | Cambios por versión; notas de release de [v0.2.0](docs/RELEASE-v0.2.0.md) y [v0.3.0](docs/RELEASE-v0.3.0.md) |
-| [`docs/mac-arm64.md`](docs/mac-arm64.md) | Apple Silicon: la receta con Lima, límites, y palancas del arranque en frío |
-| [`docs/three-layers.md`](docs/three-layers.md) | Imágenes por capas: diseño, mediciones, familias de runtime |
-| [`docs/estabilidad.md`](docs/estabilidad.md) | La auditoría de estabilidad y determinismo: causas raíz, números antes/después |
-| [`docs/chispa.md`](docs/chispa.md) · [`docs/CHISPA-EVAL.md`](docs/CHISPA-EVAL.md) | Chispa, el clasificador lineal diminuto: características, formato `.chispa`, cascada; y su evaluación con commits reales |
-| [`docs/chispa-serverless.md`](docs/chispa-serverless.md) | Chispa como tarea serverless de kindling: un dorado congelado por tarea, `kling ai chispa deploy`, thaw y rendimiento medidos frente a en proceso |
-| [`docs/intent.md`](docs/intent.md) | Tareas de intención del gateway de IA: plantillas → intención Chispa + Chispa-slots → codificador, con puerta; el dominio como esquema JSON o `intent.Domain` en Go |
-| [`docs/domotica.md`](docs/domotica.md) · [`docs/DOMOTICA-EVAL.md`](docs/DOMOTICA-EVAL.md) | Las decisiones del ejemplo de domótica (`kindling-domotica`, un programa aparte en `examples/domotica`): plantillas de la demo → intención Chispa + Chispa-slots, datos libres con su licencia, y su evaluación |
-| [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
-| [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
-| [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
-| [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
-| [`docs/releases.md`](docs/releases.md) | Una etiqueta, una release: todos los assets, `SHA256SUMS`, cómo publicar |
-
-## Hoja de ruta
-
-- [x] **Fase 1** — Laboratorio: una microVM que arranca, snapshot/restore medido
-- [x] **Fase 1.5** — `kling`: ciclo de vida, estados, eventos, transporte local y SSH
-- [x] **Fase 1.6** — Overlays, snapshots dispersos y dorados con memoria compartida
-- [x] **Fase 2** — Red TAP con un namespace por microVM
-- [x] **Fase 2.5** — Endurecimiento: privilegios soltados, egress filtrado, límites de caudal
-- [x] **Fase 2.6** — Imagen mínima, TTL, cgroups de CPU, reconciliación y guardián
-- [x] **Fase 3** — Un servidor MCP real dentro, hablando Streamable HTTP nativo, sin puente
-- [x] **Fase 4** — Gateway: enrutar llamada → restaurar → proxy → segar al quedar ocioso
-- [x] **Fase 5** — Puente stdio→HTTP: también los servidores que solo hablan por tuberías
-- [x] **v0.2.0** — Instalable y autenticado: `kling up`, token del gateway, volúmenes, catálogo
-- [x] **v0.3.0** — Denso y paralelo: réplicas, capas, secretos MMDS, allowlist, Mac arm64
-- [x] **v0.4.0** — Se recupera solo: `heal`, `verify` de verdad, salud del tráfico, auditoría de supuestos
-
-### Lo que sigue sin resolver
-
-La hoja de ruta está completa; el proyecto no. Lo que queda, ordenado por cuánto duele:
-
-- **Un sistema de ficheros escribible compartido entre microVMs.** Un volumen tiene un
-  solo escritor por la física de ext4; el estado compartido entre servicios sigue
-  pasando por un servicio de memoria enlazado.
-- **Las barreras que faltan** están en [SECURITY.md](SECURITY.md): sin chroot por defecto
-  (el jailer es opt-in), cuota de disco blanda, sin cifrado en reposo, dorados sin firmar.
-- **`playwright` como imagen monolítica de 2,5 GiB** — el navegador merece su propia
-  familia de base ([`docs/three-layers.md`](docs/three-layers.md)).
-
-## Notas de campo
-
-Ver [docs/hallazgos.md](docs/hallazgos.md) — cosas que cuestan horas de descubrir por tu
-cuenta, como que las URLs de artefactos de todos los tutoriales de internet devuelven 404.
+| [Quickstart on Linux](docs/guides/quickstart-linux.md) | tienes una máquina Linux con KVM y 15 minutos |
+| [Quickstart on macOS (vz)](docs/guides/quickstart-macos.md) | tienes un Mac con Apple Silicon y quieres microVMs en él |
+| [Remote daemon over SSH](docs/guides/remote-daemon-ssh.md) | el daemon vive en un servidor y trabajas desde un portátil |
+| [Host MCP servers for Claude Code / opencode / Cursor](docs/guides/mcp-servers.md) | quieres las herramientas de tu agente aisladas y bajo demanda |
+| [Safe sandboxes for AI agents](docs/guides/sandboxes-for-agents.md) | un agente tiene que ejecutar código sin tocar tu máquina |
+| [Serverless AI: Chispa + a local LLM behind `kling ai`](docs/guides/serverless-ai.md) | quieres clasificar en microsegundos y generar con escala a cero |
+| [Kubernetes operator](docs/guides/kubernetes-operator.md) | quieres que `kubectl apply` reparta sandboxes |
+| [Writing an extension](docs/guides/writing-an-extension.md) | quieres `kling loquesea` |
+| [Troubleshooting with `kling doctor`](docs/guides/troubleshooting.md) | algo sale en rojo |
+
+El índice de todo lo que hay en `docs/`, con una tabla de «¿qué guía necesito?»:
+[`docs/README.md`](docs/README.md).
+
+## Preguntas frecuentes
+
+**¿Es un runtime de contenedores?** No. Un contenedor es un namespace de un kernel
+compartido; una microVM tiene su propio kernel detrás de un hipervisor. kindling cuesta más
+que un contenedor por máquina y existe porque el código de dentro se asume hostil.
+
+**¿Por qué no una microVM por petición?** Porque un arranque en frío con un rootfs real son
+segundos. kindling arranca una vez, congela con el servidor sirviendo y restaura en ~30 ms.
+El modo efímero (una microVM por acción) existe y cuesta 19 ms de punta a punta gracias a un
+fondo precalentado.
+
+**¿Una máquina congelada de verdad no cuesta nada?** Cuesta disco: de 35 MB (imagen `min`)
+a ~82 MB (Ubuntu) por máquina, en un fichero disperso. Mientras duerme no existe ningún
+proceso.
+
+**¿Qué sobrevive?** Un volumen sobrevive a todo (ext4 con journal en el host). Un servicio
+persistente sobrevive a sus congelaciones y descongelaciones, pero no al borrado de su
+instancia. Una acción efímera no conserva nada. Detalles en el
+[manual](docs/handbook.es.md#qué-persiste-y-qué-no).
+
+**¿Puedo montar una carpeta del host?** Sí: `-share ORIGEN:DESTINO[:copy|ro|rw]` — una
+copia de solo lectura por defecto, o en vivo a través de un agente FUSE servido con `os.Root`
+para que nada se escape de la carpeta ([`docs/compartir.md`](docs/compartir.md)).
+
+**¿Corre en mi Mac?** Nativo en Apple Silicon con macOS 14+ (backend `vz`), o contra un
+daemon Linux por SSH. Mac Intel y Windows: no.
+
+**¿Qué servidores MCP funcionan?** Cualquiera de npm o PyPI que hable stdio (`kling-bridge`
+lo convierte en HTTP dentro de la VM), cualquiera que hable Streamable HTTP nativo, y
+servidores externos que enlaces con `kling mcp link`. `kling mcp search` te dice qué puede
+empaquetar sin intervención.
+
+**¿Dónde van los secretos?** Por MMDS a la máquina viva (`kling machine secret`), por
+sesión. Nunca a un snapshot: una máquina con secretos se niega a congelarse.
+
+**¿Es código abierto?** Sí, Apache-2.0 ([LICENSE](LICENSE)). Las contribuciones se aceptan
+bajo la misma licencia, sin CLA ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+## Más
+
+- **Documentación**: [`docs/README.md`](docs/README.md) (índice), [`docs/handbook.es.md`](docs/handbook.es.md)
+  (la versión larga), [`docs/api.md`](docs/api.md) (API del daemon), [CHANGELOG](CHANGELOG.md).
+- **Recursos**: benchmarks, ejemplos, releases y comunidad en [`docs/resources.md`](docs/resources.md).
+- **Ejemplos**: [`examples/ci-triage`](examples/ci-triage) (Chispa + VON sobre logs de CI),
+  [`examples/domotica`](examples/domotica) (una habitación domótica sobre modelos serverless;
+  un programa aparte, no un subcomando de `kling`), [`examples/hello-extension`](examples/hello-extension).
+- **Seguridad**: modelo de amenaza, barreras y lo que no está resuelto, en [SECURITY.md](SECURITY.md).
+- **Contribuir**: [CONTRIBUTING.md](CONTRIBUTING.md). Los bugs van con la salida de
+  `kling doctor`: [abrir un issue](https://github.com/juan52878911/kindling/issues/new/choose).
+- **Licencia**: Apache-2.0 — ver [LICENSE](LICENSE) y [NOTICE](NOTICE).
