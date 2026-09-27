@@ -10,6 +10,7 @@ import (
 type Chunk struct {
 	Start, End int
 	Score      float64 // la puntuación de su mejor línea
+	Anchor     int     // esa línea
 }
 
 // ChunkOptions acota lo que sale del localizador: lo que ve la capa siguiente
@@ -86,7 +87,7 @@ func Locate(lg *Log, score []float64, o ChunkOptions) []Chunk {
 				break
 			}
 		}
-		c := Chunk{Start: lo, End: hi, Score: score[a]}
+		c := Chunk{Start: lo, End: hi, Score: score[a], Anchor: a}
 		for j := lo; j <= hi; j++ {
 			used[j] = true
 			if lg != nil {

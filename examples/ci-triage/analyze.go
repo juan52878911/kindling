@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,14 +74,39 @@ func cmdAnalyze(args []string) error {
 	confirm := fs.String("confirm", "", "record the right category for this log in -feedback: \"ok\" accepts the result, or a category ("+strings.Join(triage.HumanCategories, ", ")+")")
 	note := fs.String("note", "", "with -confirm: a short note for the record")
 	fbPath := fs.String("feedback", "ci-triage-feedback.jsonl", "with -confirm: JSONL file the confirmations are appended to (trainable by `kling ai chispa train`)")
+	windows := fs.Bool("windows", false, "score the WHOLE log by windows and pick the best chunks of all of it, instead of only its tail (needs a file, not -)")
+	winLines := fs.Int("window-lines", triage.DefaultWindowOptions.Lines, "with -windows: lines scored per window (what is held in memory)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: ci-triage analyze [flags] <logfile|->")
+	}
+	if *windows && fs.Arg(0) == "-" {
+		return errors.New("-windows reads the log twice: give it a file, not -")
+	}
+	if *windows && *confirm != "" {
+		// La confirmación guarda el hash del log leído; por ventanas no se
+		// guarda el log.
+		return errors.New("-confirm does not work with -windows yet")
 	}
 	switch gw.von {
 	case "escalated", "always", "off":
 	default:
 		return fmt.Errorf("-von-when must be escalated, always or off")
+	}
+	if *windows {
+		g, err := gw.dial(*workers)
+		if err != nil {
+			return err
+		}
+		o := gw.options()
+		o.Workers = *workers
+		wo := triage.DefaultWindowOptions
+		wo.Lines = *winLines
+		res, err := triage.AnalyzeWindows(context.Background(), g, fs.Arg(0), triage.DefaultLimits, wo, o)
+		if err != nil {
+			return err
+		}
+		return emit(res, *asJSON, false)
 	}
 	t0 := time.Now()
 	var lg *triage.Log
@@ -106,14 +132,8 @@ func cmdAnalyze(args []string) error {
 	}
 	res.Timing.Read = read
 	res.Timing.Total += read
-	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(res); err != nil {
-			return err
-		}
-	} else {
-		printResult(res)
+	if err := emit(res, *asJSON, fs.Arg(0) != "-"); err != nil {
+		return err
 	}
 	if *confirm == "" {
 		return nil
@@ -137,48 +157,78 @@ func cmdAnalyze(args []string) error {
 	return nil
 }
 
-func printResult(r *triage.Result) {
-	tr := ""
-	if r.Truncated {
-		tr = ", truncated: only the tail was read"
+// emit escribe el resultado como JSON o como texto; el aviso de recorte va
+// además a stderr, para que no se pierda cuando stdout va a un fichero.
+func emit(res *triage.Result, asJSON, canWindow bool) error {
+	if res.Warning != "" {
+		fmt.Fprintln(os.Stderr, "ci-triage: WARNING: "+res.Warning)
 	}
-	fmt.Printf("log: %d lines (%s%s), %d classified by Chispa\n\n", r.Lines, r.Format, tr, r.Scored)
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+	printResult(os.Stdout, res, canWindow)
+	return nil
+}
+
+// printResult escribe el triaje para una persona. Con canWindow, si el log
+// se recortó, sugiere -windows.
+func printResult(w io.Writer, r *triage.Result, canWindow bool) {
+	p := func(format string, a ...any) { fmt.Fprintf(w, format, a...) }
+	if r.Warning != "" {
+		// Arriba y a la vista: si el fallo estaba en lo descartado, todo lo
+		// que sigue explica otra cosa.
+		p("!! WARNING: %s\n", r.Warning)
+		if canWindow && r.Windows == 0 {
+			p("!!          ci-triage analyze -windows scores the whole log by windows.\n")
+		}
+		p("\n")
+	}
+	how := ""
+	if r.Windows > 0 {
+		how = fmt.Sprintf(", scored in %d windows", r.Windows)
+	}
+	p("log: %d lines (%s%s), %d classified by Chispa\n\n", r.Lines, r.Format, how, r.Scored)
 	if len(r.Chunks) == 0 {
-		fmt.Println("no line looks like it explains a failure")
+		p("no line looks like it explains a failure\n")
 	}
 	for _, c := range r.Chunks {
-		fmt.Printf("lines %d-%d (score %.2f)\n", c.From, c.To, c.Score)
+		p("lines %d-%d (score %.2f)\n", c.From, c.To, c.Score)
 	}
-	fmt.Println()
+	if r.DroppedLines > 0 && r.Windows == 0 {
+		p("(numbered from the first line analyzed; %d lines before it were dropped)\n", r.DroppedLines)
+	}
+	p("\n")
 	for l := range strings.SplitSeq(strings.TrimRight(r.Chunk, "\n"), "\n") {
-		fmt.Println("  │ " + l)
+		p("  │ %s\n", l)
 	}
-	fmt.Println()
+	p("\n")
 	conf := "confident"
 	if !r.Confident {
 		conf = "unsure"
 	}
-	fmt.Printf("category: %s  (decided by %s; Chispa %s, p=%.2f", r.Category, r.Layer, conf, r.Prob)
+	p("category: %s  (decided by %s; Chispa %s, p=%.2f", r.Category, r.Layer, conf, r.Prob)
 	if len(r.Candidates) > 1 {
 		var cs []string
 		for _, c := range r.Candidates {
 			cs = append(cs, fmt.Sprintf("%s %.2f", c.Label, c.Prob))
 		}
-		fmt.Printf("; candidates %s", strings.Join(cs, ", "))
+		p("; candidates %s", strings.Join(cs, ", "))
 	}
-	fmt.Println(")")
+	p(")\n")
 	if r.VON != nil {
-		fmt.Printf("summary:   %s\nnext step: %s\n", r.VON.Summary, r.VON.NextStep)
-		fmt.Printf("           (VON %s said %s: %d prompt + %d generated tokens)\n", r.VON.Model, r.VON.Category, r.VON.PromptTokens, r.VON.CompletionTokens)
+		p("summary:   %s\nnext step: %s\n", r.VON.Summary, r.VON.NextStep)
+		p("           (VON %s said %s: %d prompt + %d generated tokens)\n", r.VON.Model, r.VON.Category, r.VON.PromptTokens, r.VON.CompletionTokens)
 	}
 	if r.VONError != "" {
-		fmt.Printf("VON did not answer: %s\n", r.VONError)
+		p("VON did not answer: %s\n", r.VONError)
 	}
 	t := r.Timing
-	fmt.Printf("\nlatency: read %.1f ms · features %.1f ms · Chispa on %d lines %.1f ms (%.2f ms inside the gateway) · chunk %.2f ms · category %.2f ms",
+	p("\nlatency: read %.1f ms · features %.1f ms · Chispa on %d lines %.1f ms (%.2f ms inside the gateway) · chunk %.2f ms · category %.2f ms",
 		t.Read, t.Features, r.Scored, t.Lines, t.LinesIn, t.Locate, t.Category)
 	if t.VON > 0 {
-		fmt.Printf(" · VON %.0f ms", t.VON)
+		p(" · VON %.0f ms", t.VON)
 	}
-	fmt.Printf(" · total %.1f ms\n", t.Total)
+	p(" · total %.1f ms\n", t.Total)
 }

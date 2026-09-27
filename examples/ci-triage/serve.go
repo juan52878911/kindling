@@ -222,7 +222,7 @@ func shownLines(lg *triage.Log, res *triage.Result) []shownLine {
 		}
 	}
 	var out []shownLine
-	gap := false
+	gap := res.DroppedLines > 0 // lo recortado al leer también es un salto
 	for i, k := range keep {
 		if !k {
 			gap = true

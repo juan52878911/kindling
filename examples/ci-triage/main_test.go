@@ -109,3 +109,38 @@ func TestExport(t *testing.T) {
 		t.Fatalf("got %s", b)
 	}
 }
+
+// Un log recortado lo dice arriba, antes del trozo, con cuántas líneas se
+// descartaron y cómo puntuarlo entero.
+func TestPrintTruncationWarning(t *testing.T) {
+	r := &triage.Result{Format: "plain", Lines: 100000, Scored: 90000, Truncated: true, DroppedLines: 244000,
+		Warning:  "the log was cut: only the last 100000 lines were analyzed; the first 244000 lines (21.3 MiB) were dropped. The failure may be in the part that was not analyzed.",
+		Chunks:   []triage.ChunkOut{{From: 99000, To: 99003, Score: 0.9}},
+		Chunk:    "tail error\n",
+		Category: "test", Layer: "chispa", Confident: true}
+	var b strings.Builder
+	printResult(&b, r, true)
+	out := b.String()
+	first, _, _ := strings.Cut(out, "\n")
+	if !strings.HasPrefix(first, "!! WARNING: the log was cut") || !strings.Contains(first, "244000 lines (21.3 MiB)") {
+		t.Fatalf("first line %q", first)
+	}
+	if !strings.Contains(out, "analyze -windows") || !strings.Contains(out, "244000 lines before it were dropped") {
+		t.Fatalf("%s", out)
+	}
+	if strings.Index(out, "WARNING") > strings.Index(out, "tail error") {
+		t.Fatal("the warning must come before the chunk")
+	}
+	// Sin recorte, nada de avisos.
+	b.Reset()
+	r.Warning, r.Truncated, r.DroppedLines = "", false, 0
+	printResult(&b, r, true)
+	if strings.Contains(b.String(), "WARNING") || strings.Contains(b.String(), "-windows") {
+		t.Fatalf("%s", b.String())
+	}
+	// La página lo recibe en el JSON.
+	js, _ := json.Marshal(&triage.Result{Warning: "cut", DroppedLines: 3})
+	if !strings.Contains(string(js), `"warning":"cut"`) || !strings.Contains(string(js), `"dropped_lines":3`) {
+		t.Fatalf("%s", js)
+	}
+}
