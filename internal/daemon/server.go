@@ -62,6 +62,13 @@ var guestProgressTimeout = 60 * time.Second
 type progressBody struct {
 	body  io.ReadCloser
 	plazo time.Duration
+	// buf es donde lee la goroutine; se copia a b solo si vuelve a tiempo.
+	// Leer directamente en b dejaba que un Read tardío, tras el plazo,
+	// escribiera en un buffer que el llamador ya había reutilizado. Solo hay
+	// una goroutine a la vez: tras un plazo vencido, err queda fijado y no se
+	// lanza ninguna más, así que buf no se comparte nunca.
+	buf []byte
+	err error
 }
 
 // wrapGuestBody es cómo se usa progressBody: se llama justo tras
@@ -80,18 +87,29 @@ func wrapGuestBodyCon(body io.ReadCloser, d time.Duration) io.ReadCloser {
 }
 
 func (p *progressBody) Read(b []byte) (int, error) {
+	if p.err != nil {
+		return 0, p.err
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	if cap(p.buf) < len(b) {
+		p.buf = make([]byte, len(b))
+	}
+	buf := p.buf[:len(b)]
 	type resultado struct {
 		n   int
 		err error
 	}
 	ch := make(chan resultado, 1)
-	go func() { n, err := p.body.Read(b); ch <- resultado{n, err} }()
+	go func() { n, err := p.body.Read(buf); ch <- resultado{n, err} }()
 	select {
 	case r := <-ch:
-		return r.n, r.err
+		return copy(b, buf[:r.n]), r.err
 	case <-time.After(p.plazo):
 		_ = p.body.Close() // destraba el Read de la goroutine de arriba
-		return 0, fmt.Errorf("the guest agent stopped answering (no data for %s)", p.plazo)
+		p.err = fmt.Errorf("the guest agent stopped answering (no data for %s)", p.plazo)
+		return 0, p.err
 	}
 }
 
@@ -621,6 +639,8 @@ func (s *Server) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, err)
 		return
 	}
+	// De paso, los temporales de sidecar que dejó un daemon muerto a medias.
+	barrerSidecarsHuerfanos(filepath.Join(s.root, "images"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

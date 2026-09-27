@@ -224,3 +224,49 @@ func TestHandleRunCuerpoInvalidoSigueSiendo400(t *testing.T) {
 		t.Fatalf("POST /machines con JSON inválido = %d, quería 400: %s", rr.Code, rr.Body)
 	}
 }
+
+// cuerpoTardio escribe en el buffer de Read cuando se le suelta, ignorando
+// que ya lo cerraron: el peor caso de un Read que vuelve tras el plazo.
+type cuerpoTardio struct {
+	soltar chan struct{}
+	hecho  chan struct{}
+}
+
+func (c *cuerpoTardio) Read(p []byte) (int, error) {
+	<-c.soltar
+	n := copy(p, "TARDE")
+	close(c.hecho)
+	return n, nil
+}
+
+func (c *cuerpoTardio) Close() error { return nil }
+
+// Un Read que vuelve DESPUÉS del plazo no escribe en el buffer del llamador
+// (que para entonces puede estar reutilizándolo), y los Read siguientes
+// devuelven el mismo error sin lanzar otra lectura.
+func TestProgressBodyLecturaTardiaNoPisaElBuffer(t *testing.T) {
+	c := &cuerpoTardio{soltar: make(chan struct{}), hecho: make(chan struct{})}
+	pb := wrapGuestBodyCon(c, 20*time.Millisecond)
+
+	b := []byte("-----")
+	if _, err := pb.Read(b); err == nil {
+		t.Fatal("quería el error de plazo vencido")
+	}
+	close(c.soltar)
+	<-c.hecho
+	if string(b) != "-----" {
+		t.Fatalf("la lectura tardía escribió en el buffer del llamador: %q", b)
+	}
+	if _, err := pb.Read(b); err == nil || !strings.Contains(err.Error(), "stopped answering") {
+		t.Fatalf("tras el plazo, Read = %v; quería el mismo error", err)
+	}
+}
+
+// Con datos a tiempo, progressBody los entrega tal cual.
+func TestProgressBodyEntregaLosDatos(t *testing.T) {
+	pb := wrapGuestBodyCon(io.NopCloser(strings.NewReader("hola mundo")), time.Second)
+	got, err := io.ReadAll(pb)
+	if err != nil || string(got) != "hola mundo" {
+		t.Fatalf("ReadAll = %q, %v", got, err)
+	}
+}

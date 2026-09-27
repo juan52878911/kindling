@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
@@ -251,5 +252,47 @@ func TestBuildImageSegunPlataforma(t *testing.T) {
 	}
 	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), "kling images copy") {
 		t.Fatalf("POST /images en macOS = %d %s", rr.Code, rr.Body)
+	}
+}
+
+// Los temporales ".sha256-*" de un writeSidecar interrumpido se barren al
+// borrar una imagen; los recientes (un writeSidecar en curso) y el resto de
+// ficheros se dejan.
+func TestRemoveImageBarreSidecarsHuerfanos(t *testing.T) {
+	s, root := servidorBlobs(t)
+	dir := filepath.Join(root, "images")
+	escribir := func(nombre string, viejo bool) string {
+		t.Helper()
+		p := filepath.Join(dir, nombre)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if viejo {
+			antes := time.Now().Add(-2 * sidecarTmpGracia)
+			if err := os.Chtimes(p, antes, antes); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+	escribir("borrame.ext4", false)
+	huerfano := escribir(".sha256-123456", true)
+	enCurso := escribir(".sha256-789012", false)
+	ajeno := escribir("otra.ext4.sha256", true)
+
+	req := httptest.NewRequest(http.MethodDelete, "/images/borrame", nil)
+	req.SetPathValue("name", "borrame")
+	rec := httptest.NewRecorder()
+	s.handleRemoveImage(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("RemoveImage = %d %s", rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(huerfano); !os.IsNotExist(err) {
+		t.Errorf("el temporal huérfano sigue ahí: %v", err)
+	}
+	for _, p := range []string{enCurso, ajeno} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s no debía borrarse: %v", filepath.Base(p), err)
+		}
 	}
 }

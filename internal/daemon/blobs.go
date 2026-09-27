@@ -135,6 +135,30 @@ func writeSidecar(side string, size, mtimeNS int64, hash string) {
 	_ = os.Rename(tmp.Name(), side)
 }
 
+// sidecarTmpGracia es cuánto tiene que llevar sin tocarse un temporal
+// ".sha256-*" para darlo por huérfano: writeSidecar lo crea y lo renombra en
+// microsegundos, así que uno más viejo es de un daemon que murió en medio.
+const sidecarTmpGracia = time.Minute
+
+// barrerSidecarsHuerfanos borra de dir los temporales ".sha256-*" que dejó un
+// writeSidecar interrumpido (el daemon murió entre CreateTemp y Rename). Nadie
+// más los ve —Images() los ignora— y no se reclamarían nunca. Mejor esfuerzo;
+// los recientes se dejan, pueden ser de un writeSidecar en curso.
+func barrerSidecarsHuerfanos(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), ".sha256-") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > sidecarTmpGracia {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
 // handleGetImageBlob sirve una parte de una imagen, con su sha256 en la
 // cabecera para que el destino verifique lo que recibe. También contesta a
 // HEAD (el patrón GET del mux lo cubre), que es como el CLI pregunta si el

@@ -65,7 +65,8 @@ type machineBudget struct {
 
 // acquireMachineBudget devuelve el presupuesto de id, creándolo si es la
 // primera carpeta de esa máquina. id vacío (tests, o un llamador que no lo
-// sabe) recibe su propio presupuesto de 2048: no comparte con nada.
+// sabe) NO es un presupuesto aparte: todos los Open con "" comparten la misma
+// entrada m[""] y sus 2048 plazas. En producción siempre llega mc.ID.
 func acquireMachineBudget(id string) *machineBudget {
 	machineBudgets.mu.Lock()
 	defer machineBudgets.mu.Unlock()

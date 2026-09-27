@@ -830,7 +830,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// esto, un `kling snapshots rm` durante la copia del overlay o el montaje de
 	// la red —la ventana más ancha del daemon, antes de aparecer en byID— le
 	// quitaba el mem.file a LoadSnapshot (M-15). Se suelta al volver: para
-	// entonces la instancia, si arrancó, ya cuenta como viva en byID.
+	// entonces la instancia, si arrancó, ya cuenta como viva en byID. El
+	// nombre se valida antes: no se reserva "snap:../../etc".
+	if !validName.MatchString(req.From) {
+		return nil, fmt.Errorf("invalid snapshot name: %q", req.From)
+	}
 	defer m.reserveDir(reservaSnapshot(req.From))()
 
 	// Cacheado (M-08): esto se llama en cada instanciación desde este dorado, y
