@@ -66,7 +66,7 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	m.priv.EnsureReadable(m.volumesDir())
+	m.priv.EnsureWritable(m.volumesDir())
 	// El VMM corre sin privilegios y tiene que poder ESCRIBIR aquí: un volumen
 	// de solo lectura no serviría de nada.
 	if m.priv.UID > 0 {
@@ -101,6 +101,9 @@ func (m *Manager) Volumes() []*api.Volume {
 }
 
 func (m *Manager) statVolume(name string) (*api.Volume, error) {
+	if !reVolume.MatchString(name) {
+		return nil, fmt.Errorf("invalid volume name %q", name)
+	}
 	fi, err := os.Stat(m.volumePath(name))
 	if err != nil {
 		return nil, fmt.Errorf("volume %q not found", name)
@@ -261,6 +264,11 @@ func (m *Manager) soltarReservas(id string) {
 // La comprobación no es cortesía: borrar el fichero bajo una microVM que lo
 // tiene montado le corrompe el sistema de ficheros sin avisar.
 func (m *Manager) RemoveVolume(name string) error {
+	// El nombre llega de la URL: sin validarlo, "../images/min" borraba la
+	// imagen base de todas las capas.
+	if !reVolume.MatchString(name) {
+		return fmt.Errorf("invalid volume name %q", name)
+	}
 	// La comprobacion y el borrado van bajo el MISMO cerrojo. Mirar primero y
 	// borrar despues dejaba una ventana en la que una microVM podia empezar a
 	// usar el volumen justo en medio, y borrar el fichero bajo una que lo tiene

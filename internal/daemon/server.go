@@ -54,6 +54,22 @@ var Capabilities = []string{"annotations", "store", "builders", "image-files", "
 // cambia en el proceso real.
 var guestProgressTimeout = 60 * time.Second
 
+// guestProxyIdleTimeout es el plazo de inactividad del cuerpo en POST
+// /machines/{ref}/guest. No puede ser guestProgressTimeout: un servidor MCP
+// Streamable HTTP contesta con cabeceras de text/event-stream enseguida y manda
+// el evento con el resultado cuando la herramienta acaba, y una respuesta de
+// chat/completions sin streaming (pkg/von) puede tardar minutos en un modelo en
+// CPU. Se le da el mismo margen que a las cabeceras (ResponseHeaderTimeout de
+// guestClient): lo que sí sigue acotado es el goteo infinito.
+var guestProxyIdleTimeout = 5 * time.Minute
+
+// guestRequestMaxBody es el tope de la petición a /guest, que lleva dentro el
+// cuerpo entero que se reenvía al invitado (una llamada JSON-RPC con un fichero
+// o una imagen en base64, un prompt largo). Va a la escala de la respuesta que
+// se admite (GuestMaxBodyCap), no al MiB de los demás handlers JSON; el doble
+// porque el cuerpo viaja como cadena JSON escapada.
+const guestRequestMaxBody = 2 * api.GuestMaxBodyCap
+
 // progressBody envuelve el cuerpo de una respuesta del invitado (resp.Body) y
 // corta la lectura si un solo Read no vuelve en su plazo. Cerrar el cuerpo
 // desde el lado del daemon hace que el Read bloqueado en la conexión real
@@ -240,7 +256,25 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /procstats", s.handleProcStats)
-	return mux
+	return sinBarrasEscapadas(mux)
+}
+
+// sinBarrasEscapadas rechaza las rutas con una barra escapada (%2F). El mux
+// desescapa cada segmento ANTES de casarlo con el patrón, así que
+// DELETE /volumes/..%2Fimages%2Fmin llegaba al handler con el nombre
+// "../images/min" y borraba la imagen base, y lo mismo con cualquier {name} o
+// {ref} que acabe en una ruta del disco. Ningún nombre legítimo (máquina,
+// imagen, volumen, snapshot) lleva una barra, así que se corta aquí la clase
+// entera; los nombres se validan además donde se construye la ruta.
+func sinBarrasEscapadas(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if raw := r.URL.RawPath; raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
+			strings.Contains(raw, "%5C") || strings.Contains(raw, "%5c")) {
+			fail(w, http.StatusBadRequest, errors.New("escaped slashes are not allowed in the path: no name contains one"))
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Listen sirve hasta que se cancele el contexto.
@@ -400,7 +434,12 @@ const jsonMaxBody = 1 << 20 // 1 MiB
 // Pasarse el tope no trunca en silencio: http.MaxBytesReader hace que el
 // Decode falle con un *http.MaxBytesError, que jsonBodyStatus traduce a 413.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, jsonMaxBody)
+	return decodeJSONCon(w, r, v, jsonMaxBody)
+}
+
+// decodeJSONCon es decodeJSON con un tope propio.
+func decodeJSONCon(w http.ResponseWriter, r *http.Request, v any, max int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
@@ -701,7 +740,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // queda colgado hasta agotar el plazo. El daemon sí está en la red buena.
 func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	var req api.GuestRequest
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSONCon(w, r, &req, guestRequestMaxBody); err != nil {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
@@ -803,9 +842,10 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 
 	// El límite evita que un invitado que se desmadre agote la memoria del
 	// daemon. Se falla en vez de truncar: una respuesta a medias parece buena.
-	// wrapGuestBody (D-01) acota, además, el PROGRESO: un cuerpo que gotea un
-	// byte cada minuto no debe poder tener esto leyendo para siempre.
-	body, err := api.LeerCuerpo(wrapGuestBody(resp.Body), maxBody)
+	// wrapGuestBodyCon (D-01) acota, además, el PROGRESO: un cuerpo que gotea
+	// un byte cada minuto no debe poder tener esto leyendo para siempre. Con
+	// guestProxyIdleTimeout y no guestProgressTimeout: ver su comentario.
+	body, err := api.LeerCuerpo(wrapGuestBodyCon(resp.Body, guestProxyIdleTimeout), maxBody)
 	if err != nil {
 		return api.GuestResponse{}, http.StatusBadGateway, err
 	}
@@ -857,16 +897,29 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	// busy-loop.
 	wait := 5 * time.Millisecond
 	const maxWait = 50 * time.Millisecond
+	// Cada intento, con su propio plazo corto que crece. El primero sale
+	// cuando el invitado aún no tiene red: su SYN se pierde, y el kernel no lo
+	// retransmite hasta el RTO inicial de TCP, 1 s. Con un plazo fijo de 1 s,
+	// cada arranque en frío esperaba ese segundo entero aunque el agente ya
+	// escuchara a los ~290 ms. Cortando el intento, el siguiente manda un SYN
+	// nuevo (y el reintento ARP de 50 ms del tap0, en internal/net, evita la
+	// otra espera de 1 s). Crece hasta 1 s para que un host muy cargado, donde
+	// el SYN-ACK tarda de verdad, no se quede reintentando para siempre.
+	intento := 50 * time.Millisecond
+	const maxIntento = time.Second
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		conn, err := net.DialTimeout("tcp", addr, intento)
 		if err == nil {
 			conn.Close()
 			return nil
 		}
 		last = err
+		if intento *= 2; intento > maxIntento {
+			intento = maxIntento
+		}
 		time.Sleep(wait)
 		if wait *= 2; wait > maxWait {
 			wait = maxWait

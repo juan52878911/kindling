@@ -8,14 +8,15 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
-## Unreleased
+## v0.15.0 — 2026-09-27
 
 > **⚠ Cambio incompatible: jailer es obligatorio por defecto en Linux.** Tras actualizar,
-> un daemon Linux que no corra como root, sin el usuario de servicio (`kindling`, con el
-> grupo `kvm`) o sin el binario `jailer` **deja de arrancar máquinas nuevas** — arranque en
-> frío, restaurar un snapshot y también `thaw` de las máquinas warm — hasta instalar lo que
-> falta (el error dice exactamente qué y cómo). Para seguir sin jailer a propósito, arranca
-> el daemon con **`KLING_JAILER=0`** (deja un aviso de seguridad en el log). Las máquinas
+> un daemon Linux sin el binario `jailer`, o que no corra como root, **deja de arrancar
+> máquinas nuevas** —arranque en frío, restaurar un snapshot y también `thaw` de las
+> máquinas warm— hasta instalar lo que falta (el error dice exactamente qué y cómo). Un
+> daemon root con `jailer` pero sin el usuario de servicio (`kindling`, con el grupo `kvm`)
+> sigue jaileando como root, con aviso. Para seguir sin jailer a propósito, arranca el
+> daemon con **`KLING_JAILER=0`** (deja un aviso de seguridad en el log). Las máquinas
 > ya en marcha, reanudar una pausada y los comandos de solo lectura no se ven afectados.
 > Detalles en "Cambios incompatibles".
 
@@ -23,6 +24,30 @@ Ronda de remediación de una auditoría completa del núcleo (`internal/machine`
 `internal/net`, `internal/share`, `pkg/scheduler`, el agente invitado y el daemon):
 carreras de verdad bajo `-race`, DoS del host por un invitado hostil, y varias mejoras de
 arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapshots.
+
+### Seguridad
+
+- **Recorrido de rutas en nombres de la URL.** El enrutador de Go desescapa `%2F` antes de
+  casar la ruta, así que `DELETE /volumes/..%2Fimages%2Fmin` borraba la imagen base, y
+  `GET /images/..%2Fvolumes%2Fdatos/files` leía un volumen ajeno. El daemon rechaza ahora
+  con 400 toda ruta con una barra escapada, y los nombres de imagen y volumen (también los
+  que llegan en el cuerpo, como la imagen de `POST /machines`, y la base que declara una
+  receta) se validan donde se construye la ruta.
+- **La memoria de las máquinas congeladas ya no la lee cualquiera.** Firecracker crea
+  `mem.file` y `snap.file` con 0644 dentro de directorios 0755: cualquier cuenta del host
+  leía la RAM del invitado. Los volcados quedan 0640 (también los que ya había, al arrancar
+  el daemon) y `machines/`, `snapshots/`, `volumes/` e `images/` pasan a 0750 con el grupo
+  del VMM, y `jails/` a 0700.
+- **Un VMM comprometido ya no puede reescribir el kernel, las imágenes ni los dorados.**
+  Eran propiedad del usuario del VMM (`kindling`), que es lectura y escritura para él: un
+  Firecracker comprometido podía persistir en todas las microVMs futuras del host. Ahora
+  son de `root` con el grupo del VMM (0640): los lee, no los escribe. Al restaurar un
+  dorado con jailer, la ruta de su overlay dentro del jail lleva la copia propia de la
+  instancia, así que el overlay dorado tampoco se abre nunca en escritura. Los enlaces del
+  jail ya no ceden la propiedad del fichero original, no se siguen enlaces simbólicos al
+  ajustar permisos, y las recetas (que pueden llevar secretos) quedan de `root` con 0600.
+  Sin jailer (`KLING_JAILER=0`) el overlay de los dorados conserva la escritura por grupo,
+  porque ahí Firecracker abre la ruta del host tal cual.
 
 ### Arreglado
 
@@ -79,10 +104,9 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
 - **Ronda de verificación.** Con jailer bloqueado, `run`, restaurar y `thaw` se niegan
   antes de reservar nada (antes cada intento dejaba una máquina `failed` que contaba para
   el tope), y el error dice la causa real: daemon sin root, `-run-as` vacío, usuario
-  inexistente, sin grupo `kvm` o sin binario `jailer`. `thaw` de una máquina warm
-  comprueba también el kernel (`kernel_sha256` opcional en el sello del volcado; los
-  volcados anteriores siguen funcionando) y falla con "the kernel changed" en vez de un
-  error críptico. El resolver DNS acota a 64 las conexiones TCP simultáneas y reintenta
+  inexistente, sin grupo `kvm` o sin binario `jailer`. El sello del volcado de
+  una máquina warm guarda también `kernel_sha256` (opcional; los volcados anteriores
+  siguen funcionando). El resolver DNS acota a 64 las conexiones TCP simultáneas y reintenta
   sembrar una IP si `ipset` falla. La cuota por tenant del scheduler ya no tiene una
   ventana en la que la instancia recién creada no cuenta. Además: la caché del tamaño de
   los `mem.file` dorados ya no hace un `stat` por acierto, borrar una imagen barre los
@@ -104,14 +128,22 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
   módulo (`=m`) ni opción prohibida se cuele. `KERNEL_SOURCE=build` en
   `scripts/30-fetch-artifacts.sh` lo usa en vez del kernel de CI de Firecracker
   (por defecto sigue siendo `ci`). Los snapshots dorados llevan ahora un
-  `kernel_sha256` opcional en `meta.json`: restaurar uno sobre un host cuyo kernel cambió
-  desde que se hizo el snapshot falla rápido con "rebuild the template", en vez de un
-  fallo críptico dentro del invitado.
+  `kernel_sha256` opcional en `meta.json`, y las máquinas congeladas en su sello:
+  restaurar o descongelar sobre un host cuyo kernel cambió deja un aviso en el log del
+  daemon. No se niega: ni restaurar ni descongelar usan `vmlinux` (el kernel del invitado
+  va en su memoria); el aviso es para el siguiente arranque en frío, que sí usaría el
+  kernel nuevo.
 - **Arranque más rápido**: la línea de arranque del kernel incluye `quiet` y, en amd64,
   desactiva la emulación i8042 (PS/2); una máquina que arranca o se restaura corre a
   `max(cpu_pct, 100)` (hasta un núcleo entero) hasta que el agente invitado contesta (como
   mucho 10 s), y luego cae a su `cpu_pct` configurado; el diálogo SSH remoto reutiliza un
-  socket `ControlMaster` (60 s de vida) en vez de abrir una conexión por llamada.
+  socket `ControlMaster` (60 s de vida) en vez de abrir una conexión por llamada. Y el
+  daemon deja de esperar dos segundos muertos al agente: el `tap0` de cada namespace reintenta
+  ARP cada 50 ms en vez de cada segundo y cada intento de conexión tiene un plazo
+  corto y creciente, así que ni la resolución ARP ni el SYN perdido de un invitado que
+  aún arranca esperan su reintento de 1 s. Medido en el lab (i7-8700T, jailer): crear un
+  sandbox de `toolchain` pasa de 2,12 s a 0,27 s en el daemon, y
+  `kling try -- python3 -c 'print(1)'` desde un Mac por `ssh://` de 2,88 s a ~0,55 s.
 - **`LICENSE`** (Apache-2.0) en la raíz del repo, y `NOTICE` la referencia.
 - **`docs/benchmarks.md`** y **`scripts/bench-all.sh`**: cada cifra de rendimiento del
   README con su hardware, fecha aproximada y el script que la reproduce, marcando cuáles
@@ -121,8 +153,10 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
 
 - **Jailer pasa de opcional a obligatorio por defecto en Linux.** `kling run`/
   `kling daemon` se niegan a arrancar una máquina **nueva** (arranque en frío, restaurar
-  un snapshot, `thaw`) si no encuentran el binario `jailer` y el usuario de servicio sin
-  privilegios listos — antes caían en silencio a correr sin jailer. El arreglo es instalar
+  un snapshot, `thaw`) si no encuentran el binario `jailer`, o si el daemon no es root y
+  el usuario de servicio sin privilegios no está listo — antes caían en silencio a correr
+  sin jailer. Un daemon root con `jailer` pero sin el usuario de servicio sigue jaileando
+  como root, igual que antes, con un aviso de seguridad al arrancar. El arreglo es instalar
   jailer y el usuario (el mensaje de error dice los comandos exactos), o fijar
   `KLING_JAILER=0` para seguir sin él a propósito, lo que ahora deja un aviso de seguridad
   en el log del daemon al arrancar. Máquinas ya en marcha y comandos de solo lectura no se

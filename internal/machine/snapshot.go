@@ -341,7 +341,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	if err := m.firmar(snap); err != nil {
 		return nil, err
 	}
+	cerrarVolcado(dir)
 	m.priv.EnsureReadable(dir)
+	m.overlayDoradoSinJailer(dir)
 
 	b, _ := json.MarshalIndent(snap, "", "  ")
 	if err := writeMeta(dir, b); err != nil {
@@ -667,33 +669,44 @@ func (m *Manager) kernelHash() (string, error) {
 	return hash, nil
 }
 
-// comprobarKernel exige que el kernel instalado ahora sea el mismo con el que
-// se congeló el snapshot (K2).
-//
-// K1 permite reconstruir vmlinux con otra configuración; un dorado no lleva su
-// propio kernel dentro, así que restaurarlo sobre uno distinto del que tenía
-// al congelarse dejaría al invitado despertando con código que no es el suyo
-// mapeado en memoria — un pánico, o algo peor: un cuelgue o un fallo sutil que
-// no señala al kernel como causa. Mejor negarse aquí, claro y pronto.
-//
-// recordedSHA vacío es un snapshot anterior a este campo (o a K1): se acepta
-// igual, o desplegar esto rompería de golpe todos los snapshots existentes.
-func (m *Manager) comprobarKernel(recordedSHA, name string) error {
-	if err := m.kernelIgual(recordedSHA); err != nil {
-		if errors.Is(err, errKernelCambiado) {
-			return fmt.Errorf("rebuild the template: the kernel changed (snapshot %q was frozen with a "+
-				"different kernel than the one installed on this host now)", name)
-		}
-		return err
+// overlayDoradoSinJailer deja escribible por el grupo del VMM el overlay de un
+// dorado, SOLO sin jailer (KLING_JAILER=0): ahí Firecracker abre la ruta del
+// host tal cual al cargar el snapshot, en lectura y escritura, y no hay jail
+// donde darle su propia copia bajo esa ruta. Con jailer (el modo por defecto)
+// el dorado queda de solo lectura: ver runFrom.
+func (m *Manager) overlayDoradoSinJailer(snapDir string) {
+	if !m.priv.Enabled || m.jailerJailed {
+		return
 	}
-	return nil
+	_ = os.Chmod(filepath.Join(snapDir, "overlay.ext4"), 0o660)
+}
+
+// avisoKernel dice, para el log, si el kernel instalado ahora no es el mismo
+// con el que se congeló `que` (K2), o "" si lo es o no se sabe.
+//
+// Es un aviso y no un error: ni restaurar un dorado ni descongelar usan
+// vmlinux. El kernel del invitado viaja dentro de mem.file con el resto de su
+// memoria, y Firecracker no vuelve a leer el fichero (runFrom y Thaw ni
+// siquiera lo enlazan en el jail). Negarse dejaba sin servicio todos los
+// dorados y las congeladas tras reconstruir el kernel (K1), y funcionarían
+// perfectamente. Lo que sí usaría el kernel nuevo es el siguiente ARRANQUE EN
+// FRÍO de esa plantilla o máquina: para eso queda el aviso.
+//
+// recordedSHA vacío es anterior a este campo: nada que comparar.
+func (m *Manager) avisoKernel(recordedSHA, que string) string {
+	err := m.kernelIgual(recordedSHA)
+	if !errors.Is(err, errKernelCambiado) {
+		return ""
+	}
+	return fmt.Sprintf("%s was frozen with a different kernel than the one installed now; "+
+		"restoring doesn't use it (the guest kernel lives in its memory), but a cold boot would", que)
 }
 
 // errKernelCambiado es que el kernel instalado no es el grabado al congelar.
 var errKernelCambiado = errors.New("the kernel changed")
 
 // kernelIgual compara recordedSHA con el kernel instalado ahora; vacío se
-// acepta (anterior al campo). Es la parte común de comprobarKernel (dorados)
+// acepta (anterior al campo). Es la parte común de avisoKernel (dorados)
 // y del Thaw de una warm (sello del volcado, ver kernelDelVolcado).
 func (m *Manager) kernelIgual(recordedSHA string) error {
 	if recordedSHA == "" {
@@ -856,12 +869,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	if err := m.verifyIntegrity(snap, m.snapDir(req.From)); err != nil {
 		return nil, err
 	}
-	// KERNEL. Igual de temprano y por la misma razón: un dorado no lleva su
-	// propio vmlinux, y restaurarlo sobre uno distinto del que tenía al
-	// congelarse (K1 reconstruyéndolo con otra configuración) es indistinguible
-	// de una corrupción hasta que el invitado se porta raro (K2).
-	if err := m.comprobarKernel(snap.KernelSHA256, req.From); err != nil {
-		return nil, err
+	// KERNEL (K2): solo se avisa. Ver avisoKernel.
+	if aviso := m.avisoKernel(snap.KernelSHA256, fmt.Sprintf("snapshot %q", req.From)); aviso != "" {
+		log.Print(aviso)
 	}
 
 	// La ejecución se encendió (o no) al arrancar la plantilla, en la línea de
@@ -1148,10 +1158,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			filepath.Join(snapDir, "mem.file"),
 			imgBase,
 			imgLayer,
-			filepath.Join(snapDir, "overlay.ext4"),
 			overlay,
 		}, volPaths...)
 		if err := m.prepareJail(id, toLink...); err != nil {
+			return abortar(err)
+		}
+		// El snapshot grabó la ruta del overlay DEL DORADO, y Firecracker la abre
+		// en lectura y escritura al cargarlo, antes de que el PATCH de abajo la
+		// cambie por la de esta instancia. En esa ruta, dentro del jail, va la
+		// copia propia de la instancia (mismo contenido): el dorado, que es de
+		// root y de solo lectura para el VMM, no se le expone nunca.
+		if err := m.linkComo(id, filepath.Join(snapDir, "overlay.ext4"), overlay); err != nil {
 			return abortar(err)
 		}
 	} else {

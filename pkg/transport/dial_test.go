@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -102,30 +103,103 @@ func TestElDialerNoAbreConexionesDeRed(t *testing.T) {
 	}
 }
 
+// conBases apunta el caché del usuario y /tmp a directorios de la prueba, para
+// no depender (ni ensuciar) el HOME real de quien corre los tests.
+func conBases(t *testing.T, cache, tmp string) {
+	t.Helper()
+	oldCache, oldTmp := userCacheDir, tmpBase
+	t.Cleanup(func() { userCacheDir, tmpBase = oldCache, oldTmp })
+	userCacheDir = func() (string, error) {
+		if cache == "" {
+			return "", errors.New("sin directorio de cache")
+		}
+		return cache, nil
+	}
+	tmpBase = tmp
+}
+
+// dirCorto es un directorio temporal de ruta corta: t.TempDir() en macOS cuelga
+// de /var/folders/... y ya roza el límite de sun_path por sí solo.
+func dirCorto(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "trc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
 // El multiplexado ahorra el apreton de manos SSH en las llamadas siguientes
 // (`kling try` hace varias por invocacion). El directorio del socket de
 // control tiene que ser 0700: si fuera compartido, otro usuario del host
 // podria apuntar su propio ssh al mismo ControlPath y colarse en la conexion
 // ya autenticada.
 func TestSSHMultiplexArgsIncluyeControlMasterConDirectorioPropio(t *testing.T) {
-	args := sshMultiplexArgs()
+	cache := dirCorto(t)
+	conBases(t, cache, dirCorto(t))
+
+	args := sshMultiplexArgs("juan@lab")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"ControlMaster=auto", "ControlPersist=60s", "ControlPath="} {
+	for _, want := range []string{"ControlMaster=auto", "ControlPersist=60s", "ControlPath=" + cache} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("faltan los argumentos de multiplexado (%q): %v", want, args)
 		}
 	}
-
-	dir, err := sshControlDir()
+	info, err := os.Stat(filepath.Join(cache, "kindling", "ssh-control"))
 	if err != nil {
-		t.Fatalf("sshControlDir: %v", err)
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("Stat(%s): %v", dir, err)
+		t.Fatal(err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o700 {
 		t.Errorf("permisos del directorio de control = %o, esperaba 0700", perm)
+	}
+}
+
+// ssh escucha primero en "<ControlPath>.<16 caracteres>": si esa ruta no cabe
+// en sun_path, ssh sale con 255 y la llamada entera falla. Así se rompió kling
+// contra ssh:// en un Mac con el ControlPath en ~/Library/Caches.
+func TestSSHControlPathCabeEnSunPathConElSufijoDeSSH(t *testing.T) {
+	conBases(t, dirCorto(t), dirCorto(t))
+	path := sshControlPath("juan@lab")
+	if path == "" {
+		t.Fatal("con directorios cortos debería multiplexar")
+	}
+	if len(path)+sshTempSuffix >= maxSunPath {
+		t.Errorf("%q + sufijo de ssh = %d bytes, el límite es %d", path, len(path)+sshTempSuffix, maxSunPath)
+	}
+	if otro := sshControlPath("juan@otro"); otro == path {
+		t.Error("dos destinos distintos comparten socket de control")
+	}
+}
+
+// Un caché con una ruta tan larga que el socket no cabe cae a /tmp/kling-<uid>.
+func TestSSHControlPathLargoCaeATmp(t *testing.T) {
+	tmp := dirCorto(t)
+	conBases(t, "/"+strings.Repeat("x", maxSunPath), tmp)
+	path := sshControlPath("juan@lab")
+	if !strings.HasPrefix(path, tmp+"/kling-") {
+		t.Fatalf("sshControlPath = %q, esperaba que cayera a %s", path, tmp)
+	}
+}
+
+// Un directorio de control que otros pueden escribir no vale: se prueba el
+// siguiente, y si no queda ninguno, sin multiplexado.
+func TestSSHControlPathRechazaDirectorioCompartido(t *testing.T) {
+	cache, tmp := dirCorto(t), dirCorto(t)
+	conBases(t, cache, tmp)
+	for _, d := range []string{
+		filepath.Join(cache, "kindling", "ssh-control"),
+		filepath.Join(tmp, fmt.Sprintf("kling-%d", os.Getuid())),
+	} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(d, 0o777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if path := sshControlPath("juan@lab"); path != "" {
+		t.Errorf("sshControlPath = %q con los dos directorios compartidos, esperaba \"\"", path)
 	}
 }
 
@@ -133,42 +207,14 @@ func TestSSHMultiplexArgsIncluyeControlMasterConDirectorioPropio(t *testing.T) {
 // solo lectura...), dialSSH tiene que seguir funcionando: cae al modo de
 // siempre en vez de fallar la conexion entera por no poder multiplexarla.
 func TestSSHMultiplexArgsSinDirectorioCaeAlModoDeSiempre(t *testing.T) {
-	old := userCacheDir
-	defer func() { userCacheDir = old }()
-	userCacheDir = func() (string, error) { return "", errors.New("sin directorio de cache") }
+	conBases(t, "", "/nonexistent/ro")
 
-	args := sshMultiplexArgs()
+	args := sshMultiplexArgs("juan@lab")
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "ControlMaster") {
 		t.Errorf("deberia caer al modo sin multiplexado: %v", args)
 	}
 	if !strings.Contains(joined, "BatchMode=yes") || !strings.Contains(joined, "ConnectTimeout=10") {
 		t.Errorf("perdio los argumentos base al no poder multiplexar: %v", args)
-	}
-}
-
-func TestSSHControlDirEsDelDirectorioDeCacheDelUsuario(t *testing.T) {
-	base, err := os.MkdirTemp("", "tr-cache")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(base)
-
-	old := userCacheDir
-	defer func() { userCacheDir = old }()
-	userCacheDir = func() (string, error) { return base, nil }
-
-	dir, err := sshControlDir()
-	if err != nil {
-		t.Fatalf("sshControlDir: %v", err)
-	}
-	if !strings.HasPrefix(dir, base) {
-		t.Errorf("sshControlDir() = %q, esperaba que colgara de %q", dir, base)
-	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("no creo el directorio: %v", err)
-	}
-	if filepath.Base(dir) != "ssh-control" {
-		t.Errorf("nombre de directorio inesperado: %q", dir)
 	}
 }

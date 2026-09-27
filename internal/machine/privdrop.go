@@ -6,6 +6,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Privileges describe el usuario sin privilegios con el que corre Firecracker.
@@ -100,29 +101,53 @@ func (p *Privileges) Own(paths ...string) error {
 	return nil
 }
 
-// EnsureReadable deja las imágenes accesibles en solo lectura para el VMM —y
-// SOLO para el VMM.
+// EnsureReadable deja un árbol de activos de SOLO LECTURA para el VMM (kernel,
+// imágenes, capas, snapshots dorados): dueño root, grupo el del VMM, 0640 y
+// directorios 0750. El VMM los lee por grupo y no puede reescribirlos.
 //
 // Antes esto era `chmod -R a+rX`, que es una forma cómoda de decir "legible para
 // todo el mundo". Y aquí dentro puede haber secretos: `kling add -env` los hornea
 // como líneas `export CLAVE=valor` en el /entrypoint de la imagen, así que
 // cualquier cuenta del anfitrión los sacaba con `strings *.layer.ext4 | grep
-// export`, sin root y sin montar nada. La incoherencia saltaba a la vista: la
-// receta con esos mismos valores se guarda 0600 y la imagen quedaba 0644.
+// export`, sin root y sin montar nada. Después fue dueño = usuario del VMM, que
+// es lectura Y escritura para él: un Firecracker comprometido podía reescribir
+// el vmlinux, la base o el mem.file de un dorado, y con eso todas las microVMs
+// futuras del host. Con dueño root, no.
 //
-// El VMM corre como el usuario de servicio, así que basta con dárselo a él.
+// Lchown y solo sobre ficheros y directorios: un enlace simbólico plantado en
+// el árbol no puede llevar el chown a un fichero de fuera.
 func (p *Privileges) EnsureReadable(dir string) {
 	if !p.Enabled {
 		return
 	}
+	p.recorrer(dir, 0)
+}
+
+// EnsureWritable es EnsureReadable para datos que el VMM sí escribe (los
+// volúmenes): el dueño es el usuario del VMM.
+func (p *Privileges) EnsureWritable(dir string) {
+	if !p.Enabled {
+		return
+	}
+	p.recorrer(dir, p.UID)
+}
+
+func (p *Privileges) recorrer(dir string, uid int) {
 	_ = filepath.Walk(dir, func(ruta string, fi os.FileInfo, err error) error {
 		if err != nil || fi == nil {
 			return nil // un fichero que desaparece a mitad no es motivo de parada
 		}
-		_ = os.Chown(ruta, p.UID, p.GID)
-		if fi.IsDir() {
+		switch {
+		case fi.Mode().IsRegular() && strings.HasSuffix(fi.Name(), ".recipe.json"):
+			// La receta puede llevar secretos (kling add -env) y el VMM no la
+			// lee nunca: solo root.
+			_ = os.Lchown(ruta, 0, 0)
+			_ = os.Chmod(ruta, 0o600)
+		case fi.IsDir():
+			_ = os.Lchown(ruta, uid, p.GID)
 			_ = os.Chmod(ruta, 0o750)
-		} else if fi.Mode().IsRegular() {
+		case fi.Mode().IsRegular():
+			_ = os.Lchown(ruta, uid, p.GID)
 			_ = os.Chmod(ruta, 0o640)
 		}
 		return nil
@@ -133,15 +158,63 @@ func (p *Privileges) EnsureReadable(dir string) {
 // recién construida (la imagen o su capa), sin tocar la receta, que puede llevar
 // secretos. Lo llama el daemon tras cada construcción: un constructor no tiene
 // por qué saber con qué usuario corre Firecracker, y sin esto la imagen se
-// construye bien y luego no arranca por "permission denied".
+// construye bien y luego no arranca por "permission denied". Dueño root: ver
+// EnsureReadable.
 func (m *Manager) EnsureImageReadable(name string) {
 	if !m.priv.Enabled || !validName.MatchString(name) {
 		return
 	}
 	for _, p := range []string{m.imagePath(name), m.layerPath(name)} {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			_ = os.Chown(p, m.priv.UID, m.priv.GID)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			_ = os.Lchown(p, 0, m.priv.GID)
 			_ = os.Chmod(p, 0o640)
+		}
+	}
+}
+
+// restringirRaiz cierra los directorios de datos a los demás usuarios del
+// host: 0750 con el grupo del VMM (0700 si no hay usuario de servicio) para
+// machines/, snapshots/, volumes/ e images/, y 0700 para jails/ (el VMM entra
+// ya dentro de su chroot y no los recorre). Antes eran 0755: cualquier cuenta
+// local leía el mem.file de una máquina congelada —la RAM del invitado, con lo
+// que tuviera dentro— porque Firecracker lo crea 0644.
+func restringirRaiz(root string, p *Privileges) {
+	modo, gid := os.FileMode(0o700), 0
+	if p.Enabled {
+		modo, gid = 0o750, p.GID
+	}
+	for _, d := range []string{"machines", "snapshots", "volumes", "images"} {
+		ruta := filepath.Join(root, d)
+		if fi, err := os.Lstat(ruta); err == nil && fi.IsDir() {
+			_ = os.Lchown(ruta, 0, gid)
+			_ = os.Chmod(ruta, modo)
+		}
+	}
+	if fi, err := os.Lstat(filepath.Join(root, "jails")); err == nil && fi.IsDir() {
+		_ = os.Chmod(filepath.Join(root, "jails"), 0o700)
+	}
+}
+
+// cerrarVolcado quita la lectura a los demás de un volcado recién escrito
+// (mem.file y snap.file): Firecracker los crea 0644. Sin tocar el dueño.
+func cerrarVolcado(dir string) {
+	for _, f := range []string{"mem.file", "snap.file"} {
+		ruta := filepath.Join(dir, f)
+		if fi, err := os.Lstat(ruta); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o007 != 0 {
+			_ = os.Chmod(ruta, fi.Mode().Perm()&^0o007)
+		}
+	}
+}
+
+// cerrarVolcadosExistentes aplica cerrarVolcado a las máquinas y dorados que ya
+// estaban en disco al arrancar el daemon (los de versiones anteriores).
+func cerrarVolcadosExistentes(root string) {
+	for _, d := range []string{"machines", "snapshots"} {
+		entradas, _ := os.ReadDir(filepath.Join(root, d))
+		for _, e := range entradas {
+			if e.IsDir() {
+				cerrarVolcado(filepath.Join(root, d, e.Name()))
+			}
 		}
 	}
 }

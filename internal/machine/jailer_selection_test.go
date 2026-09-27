@@ -24,9 +24,9 @@ func TestDecidirJailerMacOSNuncaJailaNiAvisa(t *testing.T) {
 	for _, forced := range []string{"", "0", "1"} {
 		for _, binPresent := range []bool{false, true} {
 			for _, userReady := range []bool{false, true} {
-				jailed, blocked, warn := decidirJailer(false, forced, binPresent, userReady, "")
+				jailed, blocked, warn := decidirJailer(false, forced, binPresent, userReady, "", false)
 				if jailed || blocked != "" || warn != "" {
-					t.Fatalf("decidirJailer(false, %q, %v, %v) = (%v, %q, %q), quería todo vacío",
+					t.Fatalf("decidirJailer(false, %q, %v, %v, false) = (%v, %q, %q), quería todo vacío",
 						forced, binPresent, userReady, jailed, blocked, warn)
 				}
 			}
@@ -38,7 +38,7 @@ func TestDecidirJailerAutomaticoUsaJailerSiHayBinarioYUsuario(t *testing.T) {
 	// El caso "como hoy": nada configurado, y jailer + el usuario sin
 	// privilegios están listos. Se usa sin pedir nada, y no hay ni bloqueo ni
 	// aviso que imprimir.
-	jailed, blocked, warn := decidirJailer(true, "", true, true, "")
+	jailed, blocked, warn := decidirJailer(true, "", true, true, "", false)
 	if !jailed || blocked != "" || warn != "" {
 		t.Fatalf("automático con todo listo = (%v, %q, %q), quería (true, \"\", \"\")", jailed, blocked, warn)
 	}
@@ -57,7 +57,7 @@ func TestDecidirJailerAutomaticoSeNiegaSiFaltaAlgo(t *testing.T) {
 	}
 	for _, c := range casos {
 		t.Run(c.nombre, func(t *testing.T) {
-			jailed, blocked, warn := decidirJailer(true, "", c.binPresent, c.userOK, "")
+			jailed, blocked, warn := decidirJailer(true, "", c.binPresent, c.userOK, "", false)
 			if jailed {
 				t.Fatal("no debería usar jailer si falta algo y nadie forzó nada")
 			}
@@ -80,13 +80,29 @@ func TestDecidirJailerAutomaticoSeNiegaSiFaltaAlgo(t *testing.T) {
 	}
 }
 
+// Actualizar un host que corría como root, con jailer pero sin el usuario de
+// servicio: antes de P7 se jaileaba como root, y así sigue, con un aviso que
+// lleva el motivo. Sin binario no hay nada que ejecutar, aun como root.
+func TestDecidirJailerAutomaticoComoRootSinUsuarioJailaYAvisa(t *testing.T) {
+	jailed, blocked, warn := decidirJailer(true, "", true, false, "user kindling doesn't exist", true)
+	if !jailed || blocked != "" {
+		t.Fatalf("binario + root sin usuario = (%v, %q), quería jailear sin bloquear", jailed, blocked)
+	}
+	if !strings.Contains(warn, "ROOT") || !strings.Contains(warn, "user kindling doesn't exist") {
+		t.Errorf("debería avisar de que corre como root, con el motivo: %q", warn)
+	}
+	if jailed, blocked, _ := decidirJailer(true, "", false, false, "", true); jailed || blocked == "" {
+		t.Fatalf("sin binario, aun como root, debe bloquear: (%v, %q)", jailed, blocked)
+	}
+}
+
 func TestDecidirJailerOptOutExplicitoAvisaYNoBloquea(t *testing.T) {
 	// KLING_JAILER=0: nunca hay que negarse a arrancar (el usuario aceptó el
 	// riesgo explícitamente), pero SIEMPRE hay que avisar fuerte al arrancar el
 	// daemon, sin importar si el binario o el usuario estaban listos o no.
 	for _, binPresent := range []bool{false, true} {
 		for _, userReady := range []bool{false, true} {
-			jailed, blocked, warn := decidirJailer(true, "0", binPresent, userReady, "")
+			jailed, blocked, warn := decidirJailer(true, "0", binPresent, userReady, "", false)
 			if jailed {
 				t.Fatal("KLING_JAILER=0 nunca debe usar jailer")
 			}
@@ -104,10 +120,10 @@ func TestDecidirJailerForzadoIgnoraElUsuarioPeroNoElBinario(t *testing.T) {
 	// KLING_JAILER=1: se respeta aunque falte el usuario sin privilegios
 	// (jailer cae a --uid/--gid 0, ver jailerArgv), pero sigue sin haber nada
 	// que ejecutar si falta el propio binario.
-	if jailed, blocked, warn := decidirJailer(true, "1", true, false, ""); !jailed || blocked != "" || warn != "" {
+	if jailed, blocked, warn := decidirJailer(true, "1", true, false, "", false); !jailed || blocked != "" || warn != "" {
 		t.Fatalf("forzado con binario y sin usuario = (%v, %q, %q), quería (true, \"\", \"\")", jailed, blocked, warn)
 	}
-	jailed, blocked, warn := decidirJailer(true, "1", false, true, "")
+	jailed, blocked, warn := decidirJailer(true, "1", false, true, "", false)
 	if jailed {
 		t.Fatal("forzado sin binario no puede arrancar nada")
 	}
@@ -153,6 +169,9 @@ func TestJailerBinPresentSiguelaVariableSustituible(t *testing.T) {
 // verdad en vez de solo en teoría.
 
 func TestNewManagerCableaJailerBlocked(t *testing.T) {
+	if !jailerPosible {
+		t.Skip("jailer solo existe en Linux")
+	}
 	viejo := jailerLookPath
 	t.Cleanup(func() { jailerLookPath = viejo })
 	jailerLookPath = func(file string) (string, error) { return "", exec.ErrNotFound }
@@ -178,6 +197,9 @@ func TestNewManagerCableaJailerBlocked(t *testing.T) {
 }
 
 func TestNewManagerCableaJailerWarningConOptOut(t *testing.T) {
+	if !jailerPosible {
+		t.Skip("jailer solo existe en Linux")
+	}
 	t.Setenv("KLING_JAILER", "0")
 	m, err := NewManager(t.TempDir(), "firecracker", "", events.New())
 	if err != nil {
@@ -281,7 +303,7 @@ func TestJailerBloqueadoDiceLaCausaReal(t *testing.T) {
 			if priv.Enabled {
 				t.Fatal("resolvePrivileges no debería habilitar el usuario en este caso")
 			}
-			_, blocked, _ := decidirJailer(true, "", true, priv.Enabled, priv.Motivo)
+			_, blocked, _ := decidirJailer(true, "", true, priv.Enabled, priv.Motivo, false)
 			if !strings.Contains(blocked, c.quiere) {
 				t.Fatalf("bloqueo = %q, quería que mencionara %q", blocked, c.quiere)
 			}
@@ -292,7 +314,7 @@ func TestJailerBloqueadoDiceLaCausaReal(t *testing.T) {
 	}
 
 	// Sin binario: lo dice, además de la causa del usuario.
-	_, blocked, _ := decidirJailer(true, "", false, false, "the daemon isn't running as root")
+	_, blocked, _ := decidirJailer(true, "", false, false, "the daemon isn't running as root", false)
 	if !strings.Contains(blocked, "jailer binary isn't on PATH") || !strings.Contains(blocked, "isn't running as root") {
 		t.Fatalf("bloqueo sin binario ni root = %q", blocked)
 	}

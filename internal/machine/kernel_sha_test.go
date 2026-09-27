@@ -89,30 +89,24 @@ func TestKernelHashCacheaPorTamañoYFecha(t *testing.T) {
 	}
 }
 
-// comprobarKernel: sin hash grabado (snapshot legacy) se acepta siempre, con
-// el hash correcto se acepta, y con el hash equivocado se niega con un error
-// que dice qué hacer.
-func TestComprobarKernel(t *testing.T) {
+// avisoKernel: sin hash grabado (legacy) o con el correcto no dice nada; con
+// otro, avisa y explica que restaurar no usa el kernel.
+func TestAvisoKernel(t *testing.T) {
 	m := newTestManager(t)
 	h := escribirKernel(t, m, "el kernel de este host")
 
-	if err := m.comprobarKernel("", "svc"); err != nil {
-		t.Errorf("sin hash grabado (legacy) debería aceptarse: %v", err)
+	if aviso := m.avisoKernel("", `snapshot "svc"`); aviso != "" {
+		t.Errorf("sin hash grabado (legacy) no debería avisar: %q", aviso)
 	}
-	if err := m.comprobarKernel(h, "svc"); err != nil {
-		t.Errorf("con el hash correcto debería aceptarse: %v", err)
+	if aviso := m.avisoKernel(h, `snapshot "svc"`); aviso != "" {
+		t.Errorf("con el hash correcto no debería avisar: %q", aviso)
 	}
-	err := m.comprobarKernel(strings.Repeat("f", 64), "svc")
-	if err == nil {
-		t.Fatal("con el hash equivocado debería negarse")
-	}
-	if !strings.Contains(err.Error(), "rebuild the template") || !strings.Contains(err.Error(), "kernel changed") {
-		t.Errorf("mensaje de error = %q, quería mencionar rebuild the template / kernel changed", err.Error())
+	aviso := m.avisoKernel(strings.Repeat("f", 64), `snapshot "svc"`)
+	if !strings.Contains(aviso, "different kernel") || !strings.Contains(aviso, "cold boot") {
+		t.Errorf("aviso = %q, quería mencionar el kernel distinto y el arranque en frío", aviso)
 	}
 }
 
-// Commit graba el kernel_sha256 del vmlinux en uso al congelar. Mismo arnés
-// que TestCommitCompletoDejaSnapshotYPlantillaEnMarcha en commit_test.go.
 func TestCommitGrabaElKernelSHA256(t *testing.T) {
 	if _, err := exec.LookPath("fallocate"); err != nil {
 		t.Skip("sin fallocate no se puede perforar el volcado")
@@ -149,42 +143,21 @@ func TestCommitGrabaElKernelSHA256(t *testing.T) {
 	}
 }
 
-// runFrom se niega a restaurar un snapshot cuyo kernel_sha256 no coincide con
-// el vmlinux instalado ahora, y lo hace ANTES de tocar el disco (ni siquiera
-// llega a copiar el overlay dorado).
-func TestRunFromSeNiegaSiElKernelCambio(t *testing.T) {
+// runFrom NO se niega a restaurar un snapshot cuyo kernel_sha256 no coincide
+// con el vmlinux instalado: restaurar no usa el kernel (va en mem.file). El
+// snapshot de la prueba no tiene ficheros reales, así que runFrom falla más
+// adelante; lo que importa es que no sea por el kernel.
+func TestRunFromNoSeNiegaSiElKernelCambio(t *testing.T) {
 	t.Setenv("KLING_REQUIRE_SIGNED", "")
 	m := newTestManager(t)
 	escribirKernel(t, m, "kernel nuevo, tras reconstruirlo con K1")
-
-	// Legacy en digests (sin RootfsSHA256/SnapSHA256): así verifyIntegrity se
-	// salta sin necesitar overlay.ext4/snap.file de verdad en disco, y lo único
-	// que se ejercita es la comprobación del kernel.
 	escribirSnapshot(t, m, "dorado", api.Snapshot{
 		KernelSHA256: strings.Repeat("a", 64), // el kernel con el que se congeló, ya no es el de hoy
 	})
 
 	_, err := m.runFrom(context.Background(), api.RunRequest{From: "dorado"})
-	if err == nil {
-		t.Fatal("runFrom con el kernel cambiado no devolvió error")
-	}
-	if !strings.Contains(err.Error(), "rebuild the template") {
-		t.Errorf("runFrom con el kernel cambiado: %v, quería 'rebuild the template'", err)
-	}
-	// No debe haber creado el directorio de la instancia: se niega antes de
-	// copiar nada.
-	m.mu.RLock()
-	n := len(m.byID)
-	m.mu.RUnlock()
-	if n != 0 {
-		t.Errorf("runFrom rechazado por el kernel dejó %d máquina(s) registradas", n)
-	}
-	// Y suelta su reserva del snapshot al salir.
-	m.mu.RLock()
-	_, queda := m.reserved[reservaSnapshot("dorado")]
-	m.mu.RUnlock()
-	if queda {
-		t.Error("runFrom rechazado por el kernel no soltó la reserva del snapshot")
+	if err != nil && strings.Contains(err.Error(), "kernel changed") {
+		t.Fatalf("runFrom se negó por el kernel: %v", err)
 	}
 }
 
@@ -207,15 +180,16 @@ func TestRunFromAceptaSnapshotSinKernelSHA256(t *testing.T) {
 	if err == nil {
 		t.Fatal("se esperaba un error (integridad), pero no por el kernel")
 	}
-	if strings.Contains(err.Error(), "rebuild the template") {
+	if strings.Contains(err.Error(), "kernel changed") {
 		t.Errorf("un snapshot sin kernel_sha256 no debería fallar por el kernel: %v", err)
 	}
 }
 
-// K2 para las warm: el sello del volcado lleva el kernel_sha256 y Thaw se
-// niega, con un error claro, si el vmlinux instalado ya no es ese. Un sello
-// sin el campo (anterior a esto) y uno con el kernel correcto pasan.
-func TestThawCompruebaElKernelDelSello(t *testing.T) {
+// K2 para las warm: el sello del volcado lleva el kernel_sha256, y Thaw NO se
+// niega si el vmlinux instalado ya no es ese (descongelar no lo usa): con
+// otro kernel, con el mismo y con un sello legacy llega igual a la puerta de
+// arranque.
+func TestThawNoSeNiegaPorElKernelDelSello(t *testing.T) {
 	m := newTestManager(t)
 	h := escribirKernel(t, m, "el kernel de este host")
 
@@ -246,21 +220,14 @@ func TestThawCompruebaElKernelDelSello(t *testing.T) {
 		return mc
 	}
 
-	// Kernel distinto: se niega antes de la puerta de arranque y de la red.
-	mc := preparar("aaaa000000000001", strings.Repeat("f", 64))
-	_, err := m.Thaw(context.Background(), mc.ID)
-	if err == nil || !strings.Contains(err.Error(), "kernel changed") || !strings.Contains(err.Error(), "kling rm") {
-		t.Fatalf("Thaw con otro kernel = %v, quería el error de kernel cambiado", err)
-	}
-
-	// Kernel correcto y sello legacy: pasan la comprobación y llegan a la
-	// puerta de arranque. Puerta llena y contexto cancelado: se paran ahí,
-	// sin montar red ni lanzar nada.
+	// Puerta llena y contexto cancelado: se paran ahí, sin montar red ni
+	// lanzar nada. Lo que se exige es llegar, no fallar antes por el kernel.
 	m.launchGate = make(chan struct{}, 1)
 	m.launchGate <- struct{}{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, c := range []struct{ id, sha string }{
+		{"aaaa000000000001", strings.Repeat("f", 64)},
 		{"aaaa000000000002", h},
 		{"aaaa000000000003", ""},
 	} {

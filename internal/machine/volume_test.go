@@ -3,6 +3,7 @@ package machine
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -598,5 +599,58 @@ func TestCongelarNoPideNadaAUnInvitadoPausado(t *testing.T) {
 	m.killPaused("p")
 	if d := time.Since(inicio); d > time.Second {
 		t.Errorf("killPaused tardó %v: está hablando con el invitado", d)
+	}
+}
+
+// Defensa en el Manager, además del filtro de %2F del daemon: los nombres que
+// no pasan la validación no llegan a construir una ruta. Por la URL o por el
+// cuerpo JSON (la imagen de POST /machines), "../" salía del directorio.
+func TestNombresConTravesiaNoTocanElDisco(t *testing.T) {
+	m := newTestManager(t)
+	imgs := filepath.Join(m.root, "images")
+	if err := os.MkdirAll(imgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(imgs, "min.ext4")
+	if err := os.WriteFile(base, []byte("base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemoveVolume("../images/min"); err == nil {
+		t.Error("RemoveVolume aceptó un nombre con ../")
+	}
+	if _, err := m.statVolume("../images/min"); err == nil {
+		t.Error("statVolume aceptó un nombre con ../")
+	}
+	if err := m.RemoveImage("../images/min"); err == nil {
+		t.Error("RemoveImage aceptó un nombre con ../")
+	}
+	if _, _, err := m.imageLayer("../machines/x/overlay"); err == nil {
+		t.Error("imageLayer aceptó un nombre con ../")
+	}
+	if _, ok := m.ImageBase("../images/min"); ok {
+		t.Error("ImageBase aceptó un nombre con ../")
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("la imagen base desapareció: %v", err)
+	}
+}
+
+// La base de una imagen por capas sale de su receta, que sube quien sube la
+// imagen: una base "../volumes/x" no puede convertirse en el rootfs.
+func TestRecetaConBaseInvalidaSeRechaza(t *testing.T) {
+	m := newTestManager(t)
+	imgs := filepath.Join(m.root, "images")
+	if err := os.MkdirAll(imgs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.layerPath("svc"), []byte("capa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.recipePath("svc"), []byte(`{"base":"../volumes/ajeno"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := m.imageLayer("svc")
+	if err == nil || !strings.Contains(err.Error(), "invalid base image") {
+		t.Fatalf("imageLayer con base ../ = %v, quería rechazo", err)
 	}
 }

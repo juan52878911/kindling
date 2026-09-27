@@ -85,7 +85,21 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := ns("ip", "route", "add", "default", "via", n.HostIP); err != nil {
 		return err
 	}
-	if err := ns("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"); err != nil {
+	// ARP del tap0 reintentando cada 50 ms en vez de cada 1 s. El daemon sondea
+	// al agente mientras el invitado aún arranca: la primera resolución queda
+	// incompleta y, con el valor por defecto, el kernel no la reintenta hasta
+	// 1 s después por muchos connect nuevos que se lancen. Junto con los
+	// intentos cortos de waitPort (el SYN perdido tampoco se retransmite antes
+	// de 1 s), un sandbox en frío pasó de 1,07 s a 0,44 s en el lab; cada uno
+	// por separado no movía nada.
+	//
+	// NO una entrada ARP permanente para el invitado, aunque su MAC sea fija:
+	// los dorados congelados cuando la MAC del tap0 aún era aleatoria guardan
+	// la vieja en su caché, y lo que se la corrige es justo la petición ARP del
+	// host (despertar.md, palanca 8). Con la entrada permanente el host no
+	// pregunta y esas restauraciones se quedaban sin red.
+	if err := ns("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward; "+
+		"echo 50 > /proc/sys/net/ipv4/neigh/"+TapName+"/retrans_time_ms"); err != nil {
 		return err
 	}
 

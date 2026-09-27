@@ -309,7 +309,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	priv, warn := privilegiosPlataforma(runAs)
-	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled, priv.Motivo)
+	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled, priv.Motivo, os.Geteuid() == 0)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
 		jailerJailed: jailed, JailerBlocked: jailerBlocked, JailerWarning: jailerWarn,
@@ -330,6 +330,16 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	}
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
+	priv.EnsureReadable(filepath.Join(root, "snapshots"))
+	if entradas, err := os.ReadDir(filepath.Join(root, "snapshots")); err == nil {
+		for _, e := range entradas {
+			if e.IsDir() {
+				m.overlayDoradoSinJailer(filepath.Join(root, "snapshots", e.Name()))
+			}
+		}
+	}
+	restringirRaiz(root, priv)
+	cerrarVolcadosExistentes(root)
 	m.load()
 	for _, mc := range m.byID {
 		if mc.NetIndex > m.netCursor {
@@ -1573,6 +1583,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if kerr != nil {
 		log.Printf("warning: %s: could not hash the kernel for the seal: %v", mc.Name, kerr)
 	}
+	cerrarVolcado(dir)
 	if err := sellarVolcado(dir, kernelSHA); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
@@ -1933,16 +1944,10 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
 	}
-	// KERNEL (K2), como runFrom con los dorados: descongelar sobre un vmlinux
-	// distinto del que había al congelar (K1 lo reconstruye) falla de forma
-	// críptica o peor. Un sello sin el campo (anterior a esto) se acepta.
-	if err := m.kernelIgual(kernelDelVolcado(dir)); err != nil {
-		if errors.Is(err, errKernelCambiado) {
-			return nil, fmt.Errorf("machine %q can't be thawed: the kernel changed (it was frozen with a "+
-				"different kernel than the one installed on this host now). Remove it (kling rm %s) "+
-				"and start it again", mc.Name, mc.Name)
-		}
-		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
+	// KERNEL (K2), como runFrom con los dorados: solo se avisa, porque
+	// descongelar no usa vmlinux (ver avisoKernel).
+	if aviso := m.avisoKernel(kernelDelVolcado(dir), fmt.Sprintf("machine %q", mc.Name)); aviso != "" {
+		log.Print(aviso)
 	}
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
