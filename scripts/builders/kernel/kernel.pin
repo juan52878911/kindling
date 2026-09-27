@@ -1,0 +1,13 @@
+# Versión fijada del kernel de invitado. build.sh la lee (no se ejecuta nada más
+# que estas asignaciones). Cambiarla cambia el kernel de TODAS las máquinas y
+# de los snapshots nuevos: los viejos se hicieron con el anterior.
+#
+# El sha256 es el de linux-$KERNEL_VERSION.tar.xz tal como lo sirve kernel.org,
+# y se comprueba contra la lista FIRMADA:
+#   curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc \
+#     | gpg --verify    # claves de autosigner@kernel.org / gregkh
+#   grep " linux-$KERNEL_VERSION.tar.xz" sha256sums.asc
+# Sin sha256 build.sh descarga, calcula y se niega a seguir: fijar es un paso
+# deliberado, no algo que el script haga solo.
+KERNEL_VERSION=6.1.140
+KERNEL_SHA256=
