@@ -1,0 +1,13 @@
+{
+  "name": "kindling",
+  "displayName": "kindling",
+  "version": "0.14.0",
+  "description": "MCP servers that wake in ~30 ms and cost 0 RAM idle, throwaway microVM sandboxes for risky code, and a local AI gateway. /kindling:setup asks what to install, says what each piece buys and costs, and does it.",
+  "author": {
+    "name": "the kindling authors",
+    "url": "https://github.com/juan52878911/kindling"
+  },
+  "homepage": "https://github.com/juan52878911/kindling",
+  "repository": "https://github.com/juan52878911/kindling",
+  "keywords": ["kindling", "kling", "mcp", "sandbox", "microvm", "firecracker", "vz"]
+}

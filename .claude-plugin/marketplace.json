@@ -1,0 +1,18 @@
+{
+  "name": "kindling",
+  "owner": {
+    "name": "the kindling authors",
+    "url": "https://github.com/juan52878911/kindling"
+  },
+  "description": "kindling from Claude Code: frozen MCP servers, throwaway sandboxes and a local AI gateway on microVMs. One plugin, installed with /kindling:setup.",
+  "plugins": [
+    {
+      "name": "kindling",
+      "source": "./plugins/claude-code",
+      "description": "Installs kling and the pieces you pick (MCP hosting, sandboxes, AI gateway, completion) with their measured benefit and cost, and teaches Claude when to use them.",
+      "version": "0.14.0",
+      "category": "devtools",
+      "tags": ["mcp", "sandbox", "microvm", "firecracker", "kindling"]
+    }
+  ]
+}
