@@ -200,6 +200,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 		_ = restaurarPlantilla()
 		if creado && !hecho {
 			os.RemoveAll(dir)
+			m.invalidateSnapCache(name)
 			if jailed {
 				// Las réplicas en el chroot de la plantilla: el volcado y el
 				// overlay dorado que no llegaron a recuperarse.

@@ -128,10 +128,16 @@ func TestPersistAgrupaLasRafagas(t *testing.T) {
 	if _, err := os.Stat(m.statePath()); err == nil {
 		t.Log("aviso: ya había fichero; el debounce puede haber disparado, no es un fallo")
 	}
-	time.Sleep(persistDebounce + 150*time.Millisecond)
-	if got := len(readState(t, m)); got != 20 {
-		t.Errorf("tras la ráfaga el estado tiene %d máquinas, want 20", got)
+	// Sondeo con plazo en vez de una sola lectura: el fsync de un disco
+	// compartido y cargado puede tardar más que el debounce.
+	deadline := time.Now().Add(persistMaxDelay + 2*time.Second)
+	for time.Now().Before(deadline) {
+		if len(readState(t, m)) == 20 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Errorf("tras la ráfaga el estado tiene %d máquinas, want 20", len(readState(t, m)))
 }
 
 // El tope máximo: con avisos constantes el debounce se reinicia siempre, y sin
