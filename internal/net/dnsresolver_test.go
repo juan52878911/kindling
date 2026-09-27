@@ -2,6 +2,8 @@ package net
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	stdnet "net"
 	"sync"
 	"sync/atomic"
@@ -227,6 +229,7 @@ func newTestResolver(upstream string) *dnsResolver {
 		allowed:  normalizeDomains([]string{"example.com"}),
 		upstream: upstream,
 		sem:      make(chan struct{}, dnsMaxInFlight),
+		tcpSem:   make(chan struct{}, dnsMaxTCPConns),
 		limiter:  newTokenBucket(1e6, 1e6), // sin límite de tasa en estos tests
 		seeded:   make(map[string]time.Time),
 	}
@@ -388,5 +391,99 @@ func TestTokenBucketAllow(t *testing.T) {
 	time.Sleep(30 * time.Millisecond) // a 100 tok/s, sobran ~3 tokens en 30ms
 	if !b.allow() {
 		t.Fatal("tras esperar debería haber recuperado al menos un token")
+	}
+}
+
+// Si el ipset add falla, la IP no queda marcada como sembrada: la siguiente
+// respuesta con esa IP vuelve a intentarlo en vez de esperar todo el TTL.
+func TestSeedReintentaSiEjecutarFalla(t *testing.T) {
+	var calls int32
+	old := ejecutar
+	defer func() { ejecutar = old }()
+	falla := true
+	ejecutar = func(args ...string) error {
+		atomic.AddInt32(&calls, 1)
+		if falla {
+			return errors.New("ipset: boom")
+		}
+		return nil
+	}
+
+	r := newTestResolver("")
+	r.seed("1.2.3.4", 300)
+	r.seedMu.Lock()
+	_, marcada := r.seeded["1.2.3.4"]
+	r.seedMu.Unlock()
+	if marcada {
+		t.Fatal("una siembra fallida quedó marcada como hecha")
+	}
+	falla = false
+	r.seed("1.2.3.4", 300)
+	r.seed("1.2.3.4", 300) // ya sí sembrada: dedupe
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("llamadas a ejecutar = %d, quería 2 (fallo + reintento)", got)
+	}
+}
+
+// Por encima de dnsMaxTCPConns conexiones abiertas a la vez, las nuevas se
+// cierran en el acto: un invitado que abre conexiones y no manda nada no
+// acumula sockets ni goroutines en el daemon.
+func TestServeTCPAcotaConexiones(t *testing.T) {
+	ln, err := stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: stdnet.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestResolver("")
+	r.tcp = ln
+	r.quit = make(chan struct{})
+	r.wg.Add(1)
+	go r.serveTCP()
+	defer func() {
+		close(r.quit)
+		ln.Close()
+		r.wg.Wait()
+	}()
+
+	var abiertas []stdnet.Conn
+	defer func() {
+		for _, c := range abiertas {
+			c.Close()
+		}
+	}()
+	for i := 0; i < dnsMaxTCPConns; i++ {
+		c, err := stdnet.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		abiertas = append(abiertas, c)
+	}
+	// Esperar a que el servidor haya aceptado las dnsMaxTCPConns.
+	plazo := time.Now().Add(5 * time.Second)
+	for len(r.tcpSem) < dnsMaxTCPConns && time.Now().Before(plazo) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(r.tcpSem); n != dnsMaxTCPConns {
+		t.Fatalf("conexiones atendidas = %d, quería %d", n, dnsMaxTCPConns)
+	}
+
+	extra, err := stdnet.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	_ = extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("la conexión por encima del tope debía cerrarse en el acto (EOF), fue %v", err)
+	}
+
+	// Al cerrar una de las atendidas, su plaza se libera.
+	abiertas[0].Close()
+	abiertas = abiertas[1:]
+	plazo = time.Now().Add(5 * time.Second)
+	for len(r.tcpSem) >= dnsMaxTCPConns && time.Now().Before(plazo) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(r.tcpSem); n >= dnsMaxTCPConns {
+		t.Fatalf("la plaza de una conexión cerrada no se liberó: %d", n)
 	}
 }

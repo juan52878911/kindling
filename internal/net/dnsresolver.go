@@ -73,6 +73,13 @@ const dnsMinTTL = 60
 // tocar la red ni el ipset.
 const dnsMaxInFlight = 32
 
+// dnsMaxTCPConns acota las conexiones TCP abiertas A LA VEZ contra este
+// resolver. Cada una retiene un socket y una goroutine hasta 5 s (el plazo de
+// handleTCP) aunque no mande nada, y ni el semáforo de en-vuelo ni el cubo
+// de tokens lo ven: solo cuentan consultas ya leídas. Por encima del tope la
+// conexión se cierra en el acto.
+const dnsMaxTCPConns = 64
+
 // dnsRate y dnsBurst son el cubo de tokens por resolver: ~200 consultas/s en
 // régimen, ráfaga de hasta 400 antes de empezar a devolver SERVFAIL. Es
 // independiente del semáforo de en-vuelo: aquí limitamos la TASA aunque cada
@@ -102,6 +109,7 @@ type dnsResolver struct {
 	quit     chan struct{}
 
 	sem     chan struct{} // semáforo de en-vuelo, capacidad dnsMaxInFlight
+	tcpSem  chan struct{} // conexiones TCP abiertas, capacidad dnsMaxTCPConns
 	limiter *tokenBucket  // cubo de tokens, tasa dnsRate / ráfaga dnsBurst
 
 	seedMu sync.Mutex
@@ -143,6 +151,7 @@ func startDNSResolver(n *Net, domains []string) error {
 		tcp:      tcp,
 		quit:     make(chan struct{}),
 		sem:      make(chan struct{}, dnsMaxInFlight),
+		tcpSem:   make(chan struct{}, dnsMaxTCPConns),
 		limiter:  newTokenBucket(dnsRate, dnsBurst),
 		seeded:   make(map[string]time.Time),
 	}
@@ -213,7 +222,15 @@ func (r *dnsResolver) serveTCP() {
 				continue
 			}
 		}
-		go r.handleTCP(conn)
+		select {
+		case r.tcpSem <- struct{}{}:
+			go func() {
+				defer func() { <-r.tcpSem }()
+				r.handleTCP(conn)
+			}()
+		default:
+			conn.Close() // por encima de dnsMaxTCPConns: fuera, sin leer nada
+		}
 	}
 }
 
@@ -419,8 +436,17 @@ func (r *dnsResolver) seed(ip string, ttl uint32) {
 	r.seeded[ip] = expira
 	r.seedMu.Unlock()
 
-	_ = ejecutar("ip", "netns", "exec", r.ns, "ipset", "add", r.set, ip,
-		"timeout", fmt.Sprintf("%d", to), "-exist")
+	if err := ejecutar("ip", "netns", "exec", r.ns, "ipset", "add", r.set, ip,
+		"timeout", fmt.Sprintf("%d", to), "-exist"); err != nil {
+		// No quedó en el ipset: sin olvidarla aquí, el dedupe impediría
+		// reintentarlo durante todo el TTL y el invitado vería cerrada una IP
+		// que su DNS sí resolvió. Solo si la entrada sigue siendo la nuestra.
+		r.seedMu.Lock()
+		if r.seeded[ip].Equal(expira) {
+			delete(r.seeded, ip)
+		}
+		r.seedMu.Unlock()
+	}
 }
 
 // sweepSeeded quita del caché en memoria las entradas ya caducadas. Se llama
