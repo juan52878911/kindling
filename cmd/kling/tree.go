@@ -101,13 +101,15 @@ var coreTree = []section{
 		{Name: "cp", Summary: "copies files in and out of a machine", Usage: `  cp <local|-> <ref>:<path>                        copies a file into a machine
   cp <ref>:<path> <local|->                        ... or out of it
 `},
-		{Name: "sandbox", Summary: "throwaway microVMs that run code", Subcommands: []string{"create", "ls", "renew", "rm"}, MachineArgs: []string{"renew", "rm"}, Usage: `  sandbox create [-image I | -from T] [-ttl 10m]   a throwaway microVM that runs code:
+		{Name: "sandbox", Summary: "throwaway microVMs that run code", Subcommands: []string{"create", "ls", "renew", "fork", "rm"}, MachineArgs: []string{"renew", "fork", "rm"}, Usage: `  sandbox create [-image I | -from T] [-ttl 10m]   a throwaway microVM that runs code:
       [-egress none|internet|allowlist]            no network by default; when idle it
       [-on-ttl remove|freeze] [-q]                 is destroyed, or frozen at zero cost
       [-mem 256M] [-cpus N] [-volume ...]          and woken by the next exec
       [-share SRC:DST[:copy|ro|rw]]                host folder inside, as in run
   sandbox ls [-q] [-json]                          lists them
   sandbox renew <sb> [-ttl 10m]                    extends its lifetime
+  sandbox fork <sb> [-n N] [-ttl 10m]              branches a live one into N copies
+      [-on-ttl remove|freeze] [-q] [-json]         (memory, processes and disk as of now)
   sandbox rm [-f] <sb>...                          destroys them
 `},
 	}},

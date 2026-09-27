@@ -426,6 +426,8 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				m.sweepMachineDirs()
 				m.sweepSnapshotLeftovers()
 				m.mu.Unlock()
+				// Los snapshots temporales de fork sin copias (ver fork.go).
+				m.barrerForks()
 				m.vaciarPapelera()
 				// Los enlaces cortos a sockets de máquinas que ya no existen
 				// (macOS, rutas largas: ver fc.BarrerEnlaces).
