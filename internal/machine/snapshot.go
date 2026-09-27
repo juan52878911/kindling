@@ -805,6 +805,10 @@ func explainRestoreErr(err error, what, remedy string) error {
 // en privado, así que comparten las páginas que no escriben y solo divergen las
 // que tocan. La segunda instancia y las siguientes salen casi gratis en RAM.
 func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	// Antes de reservar el snapshot y de publicar nada (ver Run).
+	if m.JailerBlocked != "" {
+		return nil, errors.New(m.JailerBlocked)
+	}
 	// El snapshot queda RESERVADO mientras dure la restauración, desde antes de
 	// leer su meta.json: RemoveSnapshot se niega a borrarlo mientras tanto. Sin
 	// esto, un `kling snapshots rm` durante la copia del overlay o el montaje de

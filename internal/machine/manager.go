@@ -698,6 +698,13 @@ func newID() string {
 
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	// Jailer bloqueado: lo PRIMERO, antes de reservar ni publicar nada. Más
+	// tarde el abort pasaba por fail() y cada intento dejaba una entrada
+	// fallida en byID que contaba para checkMachineLimit. El check de boot()
+	// se queda como red.
+	if m.JailerBlocked != "" {
+		return nil, errors.New(m.JailerBlocked)
+	}
 	// El tope va ANTES de bifurcar: restaurar desde un snapshot es tan capaz de
 	// agotar el host como arrancar en frío, y es el camino que más rápido crea
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
@@ -1908,6 +1915,12 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		m.mu.Unlock()
 	}
 
+	// Jailer bloqueado: antes de enterLaunch, la red y el cgroup (ver Run). No
+	// antes: reanudar una pausada o readoptar un VMM que ya corre no lanza
+	// ningún firecracker nuevo, y las máquinas vivas siguen funcionando.
+	if m.JailerBlocked != "" {
+		return nil, errors.New(m.JailerBlocked)
+	}
 	// Un volcado a medias no se carga: fallaría con un error de Firecracker que
 	// no señala a ninguna parte, o peor, arrancaría un invitado corrupto.
 	if err := volcadoValido(dir); err != nil {

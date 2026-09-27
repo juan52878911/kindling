@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Pruebas de P7 del plan de remediación: jailer obligatorio por defecto en
@@ -207,5 +208,43 @@ func TestBootSeNiegaSiJailerEstaBloqueado(t *testing.T) {
 	}
 	if err == nil || err.Error() != m.JailerBlocked {
 		t.Fatalf("boot() = %v, quería exactamente el error de JailerBlocked", err)
+	}
+}
+
+// Con jailer bloqueado, Run, runFrom y Thaw se niegan ANTES de publicar,
+// reservar o montar nada: ni una entrada fallida en byID (contaría para
+// checkMachineLimit y se acumularía con cada reintento del gateway) ni una
+// reserva de snapshot colgada.
+func TestJailerBloqueadoNoDejaRastro(t *testing.T) {
+	m := newTestManager(t)
+	m.JailerBlocked = "refusing to start: jailer is required... (test)"
+
+	if _, err := m.Run(context.Background(), api.RunRequest{Name: "bloqueada"}); err == nil || err.Error() != m.JailerBlocked {
+		t.Fatalf("Run() = %v, quería exactamente el error de JailerBlocked", err)
+	}
+	if _, err := m.Run(context.Background(), api.RunRequest{Name: "copia", From: "dorado"}); err == nil || err.Error() != m.JailerBlocked {
+		t.Fatalf("Run(From) = %v, quería exactamente el error de JailerBlocked", err)
+	}
+	m.mu.RLock()
+	n, res := len(m.byID), len(m.reserved)
+	m.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("un Run bloqueado dejó %d entradas en byID, quería 0", n)
+	}
+	if res != 0 {
+		t.Fatalf("un Run bloqueado dejó %d reservas, quería 0", res)
+	}
+
+	// Thaw de una warm: el bloqueo gana al resto de comprobaciones (aquí no
+	// hay volcado, así que sin el check temprano el error sería otro).
+	mc := m.addForTest("deadbeef00000002")
+	m.mu.Lock()
+	m.byID[mc.ID].State = api.StateWarm
+	m.mu.Unlock()
+	if _, err := m.Thaw(context.Background(), mc.ID); err == nil || err.Error() != m.JailerBlocked {
+		t.Fatalf("Thaw() = %v, quería exactamente el error de JailerBlocked", err)
+	}
+	if st := vivaDe(t, m, mc.ID).State; st != api.StateWarm {
+		t.Fatalf("un Thaw bloqueado dejó la máquina %s, quería warm", st)
 	}
 }
