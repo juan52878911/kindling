@@ -23,7 +23,7 @@ type cliente struct {
 
 func servir(t *testing.T, dir string, ro bool) *cliente {
 	t.Helper()
-	srv, err := Open(dir, ro)
+	srv, err := Open(dir, ro, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,11 @@ func (c *cliente) open(p string, flags uint32) (uint32, uint64) {
 }
 
 func (c *cliente) create(p string, mode uint32) (uint32, uint64) {
-	e, d := c.call(proto.OpCreate, func(e *proto.Enc) { e.Str(p); e.U32(proto.FlagRead | proto.FlagWrite | proto.FlagExcl); e.U32(mode) })
+	return c.createFlags(p, proto.FlagRead|proto.FlagWrite|proto.FlagExcl, mode)
+}
+
+func (c *cliente) createFlags(p string, flags, mode uint32) (uint32, uint64) {
+	e, d := c.call(proto.OpCreate, func(e *proto.Enc) { e.Str(p); e.U32(flags); e.U32(mode) })
 	if e != 0 {
 		return e, 0
 	}
@@ -418,6 +422,128 @@ func TestMensajesMalFormados(t *testing.T) {
 	if _, err := proto.ReadFrame(c.conn); err == nil {
 		t.Fatal("the session survived an oversized frame")
 	}
+}
+
+// TestCrearSobreFIFO: OpCreate sobre un FIFO ya existente no lo abre (se
+// bloquearía) ni lo trata como si acabase de crearlo (S-01).
+func TestCrearSobreFIFO(t *testing.T) {
+	dir, _ := arbol(t)
+	must(t, syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o644))
+	c := servir(t, dir, false)
+
+	if e, _ := c.createFlags("fifo", proto.FlagRead|proto.FlagWrite, 0o644); e != proto.EACCES {
+		t.Fatalf("create over an existing FIFO = %d, want EACCES", e)
+	}
+	// Con O_EXCL da igual: el tipo manda antes que la exclusividad.
+	if e, _ := c.createFlags("fifo", proto.FlagRead|proto.FlagWrite|proto.FlagExcl, 0o644); e != proto.EACCES {
+		t.Fatalf("create excl over an existing FIFO = %d, want EACCES", e)
+	}
+}
+
+// TestCrearSobreEnlace: OpCreate sobre un enlace simbólico existente no lo
+// sigue (S-01): ELOOP, como en la ruta sin create.
+func TestCrearSobreEnlace(t *testing.T) {
+	dir, _ := arbol(t)
+	c := servir(t, dir, false)
+
+	// "inside" es un enlace a hello.txt dentro de la propia carpeta (ver arbol).
+	if e, _ := c.createFlags("inside", proto.FlagRead|proto.FlagWrite, 0o644); e != proto.ELOOP {
+		t.Fatalf("create over a symlink = %d, want ELOOP", e)
+	}
+}
+
+// TestCrearSinExclSobreExistente: sin O_EXCL, crear sobre un fichero regular
+// que ya existe lo abre (semántica "crear si falta"); con O_EXCL, EEXIST.
+func TestCrearSinExclSobreExistente(t *testing.T) {
+	dir, _ := arbol(t)
+	c := servir(t, dir, false)
+
+	if e, h := c.createFlags("hello.txt", proto.FlagRead|proto.FlagWrite, 0o644); e != 0 || h == 0 {
+		t.Fatalf("create without excl over an existing regular file = %d", e)
+	}
+	if e, _ := c.createFlags("hello.txt", proto.FlagRead|proto.FlagWrite|proto.FlagExcl, 0o644); e != proto.EEXIST {
+		t.Fatalf("create with excl over an existing regular file = %d, want EEXIST", e)
+	}
+}
+
+// TestPresupuestoPorMaquina: dos sesiones de la MISMA máquina agotan su cupo
+// (maxHandles x2 = maxHandlesPerMachine) antes de tocar el global, y una
+// máquina distinta no se ve afectada (S-03).
+func TestPresupuestoPorMaquina(t *testing.T) {
+	dir, _ := arbol(t)
+	srv, err := Open(dir, true, "maquina-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	nueva := func(s *Server) *cliente {
+		a, b := net.Pipe()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { _ = s.Serve(ctx, a); close(done) }()
+		t.Cleanup(func() {
+			cancel()
+			_ = b.Close()
+			<-done
+		})
+		return &cliente{t: t, conn: b}
+	}
+
+	c1 := nueva(srv)
+	for i := 0; i < maxHandles; i++ {
+		if e, _ := c1.open("hello.txt", proto.FlagRead); e != 0 {
+			t.Fatalf("c1 open %d: %d", i, e)
+		}
+	}
+	c2 := nueva(srv)
+	for i := 0; i < maxHandles; i++ {
+		if e, _ := c2.open("hello.txt", proto.FlagRead); e != 0 {
+			t.Fatalf("c2 open %d: %d", i, e)
+		}
+	}
+	// maxHandles (1024) x2 = maxHandlesPerMachine (2048): una tercera sesión de
+	// la MISMA máquina se queda sin cupo, aunque el respaldo global (16384)
+	// tenga hueco de sobra.
+	c3 := nueva(srv)
+	if e, _ := c3.open("hello.txt", proto.FlagRead); e != proto.EMFILE {
+		t.Fatalf("c3 open past the per-machine budget = %d, want EMFILE", e)
+	}
+
+	// Otra máquina, con su propio presupuesto, no lo nota.
+	srv2, err := Open(dir, true, "maquina-y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv2.Close() })
+	c4 := nueva(srv2)
+	if e, _ := c4.open("hello.txt", proto.FlagRead); e != 0 {
+		t.Fatalf("a different machine was affected by maquina-x's budget: %d", e)
+	}
+}
+
+// TestPresupuestoConContador: acquireMachineBudget/releaseMachineBudget lleva
+// bien las referencias y no comparte presupuesto entre máquinas distintas.
+func TestPresupuestoConContador(t *testing.T) {
+	b1 := acquireMachineBudget("m1")
+	if cap(b1.slots) != maxHandlesPerMachine {
+		t.Fatalf("cap = %d, want %d", cap(b1.slots), maxHandlesPerMachine)
+	}
+	if b2 := acquireMachineBudget("m1"); b2 != b1 {
+		t.Fatal("the same machine id got two different budgets")
+	}
+	if b3 := acquireMachineBudget("m2"); b3 == b1 {
+		t.Fatal("two different machines share a budget")
+	}
+	releaseMachineBudget("m1")
+	releaseMachineBudget("m1")
+	machineBudgets.mu.Lock()
+	_, held := machineBudgets.m["m1"]
+	machineBudgets.mu.Unlock()
+	if held {
+		t.Fatal("the budget was not released after its last reference")
+	}
+	releaseMachineBudget("m2")
 }
 
 func TestErrno(t *testing.T) {
