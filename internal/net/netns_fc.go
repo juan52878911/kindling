@@ -82,6 +82,16 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 	if err := ns("ip", "link", "set", TapName, "address", TapMAC, "up"); err != nil {
 		return err
 	}
+	// Vecino permanente para el invitado: su MAC es fija (GuestMAC), así que
+	// no hace falta preguntarla por ARP. El daemon sondea al agente mientras
+	// el invitado aún arranca: sin esto, la primera resolución queda
+	// incompleta y el kernel no la reintenta hasta 1 s después, por muchos
+	// connect nuevos que se lancen. Junto con los intentos cortos de waitPort
+	// (el SYN perdido tampoco se retransmite antes de 1 s), un sandbox en frío
+	// pasó de 1,07 s a 0,44 s en el lab; cada uno por separado no movía nada.
+	if err := ns("ip", "neigh", "replace", GuestIP, "lladdr", GuestMAC, "dev", TapName, "nud", "permanent"); err != nil {
+		return err
+	}
 	if err := ns("ip", "route", "add", "default", "via", n.HostIP); err != nil {
 		return err
 	}

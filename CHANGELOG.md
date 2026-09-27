@@ -112,7 +112,13 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
   desactiva la emulación i8042 (PS/2); una máquina que arranca o se restaura corre a
   `max(cpu_pct, 100)` (hasta un núcleo entero) hasta que el agente invitado contesta (como
   mucho 10 s), y luego cae a su `cpu_pct` configurado; el diálogo SSH remoto reutiliza un
-  socket `ControlMaster` (60 s de vida) en vez de abrir una conexión por llamada.
+  socket `ControlMaster` (60 s de vida) en vez de abrir una conexión por llamada. Y el
+  daemon deja de esperar dos segundos muertos al agente: el namespace lleva un vecino ARP
+  permanente para el invitado (su MAC es fija) y cada intento de conexión tiene un plazo
+  corto y creciente, así que ni la resolución ARP ni el SYN perdido de un invitado que
+  aún arranca esperan su reintento de 1 s. Medido en el lab (i7-8700T, jailer): crear un
+  sandbox de `toolchain` pasa de 2,12 s a 0,44 s en el daemon, y
+  `kling try -- python3 -c 'print(1)'` desde un Mac por `ssh://` de 2,88 s a ~0,7 s.
 - **`LICENSE`** (Apache-2.0) en la raíz del repo, y `NOTICE` la referencia.
 - **`docs/benchmarks.md`** y **`scripts/bench-all.sh`**: cada cifra de rendimiento del
   README con su hardware, fecha aproximada y el script que la reproduce, marcando cuáles

@@ -879,16 +879,29 @@ func waitPort(ctx context.Context, addr string, timeout time.Duration) error {
 	// busy-loop.
 	wait := 5 * time.Millisecond
 	const maxWait = 50 * time.Millisecond
+	// Cada intento, con su propio plazo corto que crece. El primero sale
+	// cuando el invitado aún no tiene red: su SYN se pierde, y el kernel no lo
+	// retransmite hasta el RTO inicial de TCP, 1 s. Con un plazo fijo de 1 s,
+	// cada arranque en frío esperaba ese segundo entero aunque el agente ya
+	// escuchara a los ~290 ms. Cortando el intento, el siguiente manda un SYN
+	// nuevo (y el vecino permanente de internal/net evita la otra espera de
+	// 1 s, la del ARP). Crece hasta 1 s para que un host muy cargado, donde
+	// el SYN-ACK tarda de verdad, no se quede reintentando para siempre.
+	intento := 50 * time.Millisecond
+	const maxIntento = time.Second
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		conn, err := net.DialTimeout("tcp", addr, intento)
 		if err == nil {
 			conn.Close()
 			return nil
 		}
 		last = err
+		if intento *= 2; intento > maxIntento {
+			intento = maxIntento
+		}
 		time.Sleep(wait)
 		if wait *= 2; wait > maxWait {
 			wait = maxWait
