@@ -103,9 +103,11 @@ type Manager struct {
 	socket map[string]string // id -> ruta del socket de firecracker
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
-	// sin entrada en byID. Ver reserveDir: sin esto el barrido de huérfanos los
-	// borra bajo los pies de quien los está llenando. Se toca bajo mu.
-	reserved map[string]bool
+	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está
+	// escribiendo o una restauración está leyendo. Ver reserveDir: sin esto el
+	// barrido de huérfanos los borra bajo los pies de quien los está llenando.
+	// El valor es cuántos lo tienen reservado a la vez. Se toca bajo mu.
+	reserved map[string]int
 
 	// Dorados cuya integridad ya se comprobó, por huella de sus ficheros. Ver
 	// verifyIntegrity: hashear el overlay cuesta el 67% de una instanciación y
@@ -1395,7 +1397,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if err := c.Pause(ctx); err != nil {
 		return nil, err
 	}
-	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
+	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
+	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).Snapshot(ctx, snapPath, memPath); err != nil {
 		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
 		// para siempre figurando como running: el vigilante no la detecta
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
@@ -1952,7 +1956,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	crono.marca(&crono.p.NetMS)
 	start := time.Now()
-	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.

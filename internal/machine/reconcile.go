@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -173,7 +174,7 @@ func (m *Manager) sweepOrphanVMMs() {
 	}
 	for id, pid := range live {
 		mc := m.byID[id]
-		if m.reserved[id] {
+		if m.reserved[id] > 0 {
 			continue
 		}
 		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused ||
@@ -210,18 +211,30 @@ func estadoDe(mc *api.Machine) string {
 //
 // Devuelve la función que suelta la reserva. Se usa con defer, para que cubra
 // también los caminos de error que borran el directorio a medio hacer.
+//
+// Las reservas se CUENTAN: el mismo nombre lo pueden tener varios a la vez. Con
+// ids de máquina no pasa (cada una tiene el suyo), pero con "snap:<nombre>" sí:
+// cada restauración reserva el snapshot del que lee (M-15), y un commit el que
+// escribe. Con un bool, la primera que terminara borraba la reserva de todas
+// las demás y dejaba al resto sin protección a mitad de su trabajo. La función
+// devuelta es idempotente: soltar dos veces no descuenta la reserva de otro.
 func (m *Manager) reserveDir(id string) func() {
 	m.mu.Lock()
 	if m.reserved == nil {
-		m.reserved = make(map[string]bool)
+		m.reserved = make(map[string]int)
 	}
-	m.reserved[id] = true
+	m.reserved[id]++
 	m.mu.Unlock()
 
+	var una sync.Once
 	return func() {
-		m.mu.Lock()
-		delete(m.reserved, id)
-		m.mu.Unlock()
+		una.Do(func() {
+			m.mu.Lock()
+			if m.reserved[id]--; m.reserved[id] <= 0 {
+				delete(m.reserved, id)
+			}
+			m.mu.Unlock()
+		})
 	}
 }
 
@@ -276,7 +289,7 @@ func (m *Manager) sweepMachineDirs() {
 		if _, conocida := m.byID[e.Name()]; conocida {
 			continue
 		}
-		if m.reserved[e.Name()] {
+		if m.reserved[e.Name()] > 0 {
 			continue
 		}
 		// Recién tocado: o lo está llenando alguien ahora mismo, o acaba de

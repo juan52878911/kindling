@@ -125,3 +125,20 @@ func sha256Fichero(p string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// plazoVolcado es cuánto se le deja a Firecracker para volcar (Snapshot) o
+// cargar (LoadSnapshot) la memoria de una microVM de memMiB: 10 s fijos más
+// 20 s por GiB, y nunca menos de los 30 s que ya tenía toda petición.
+//
+// El tope plano de 30 s del cliente (F-01) cortaba un volcado de 4 GiB sobre
+// un disco lento. Cortar no para a Firecracker: el Freeze se daba por fallido
+// y reanudaba mientras el VMM seguía escribiendo un mem.file que nadie iba a
+// usar, con la marca de volcado en curso puesta hasta el siguiente Remove.
+// 20 s/GiB son ~50 MiB/s, un disco malo; un volcado que no cabe en eso no es
+// lento, está colgado, y ahí sí conviene rendirse.
+//
+// memMiB es el tamaño de la VM tal y como la ve Firecracker: con techo de
+// resize es MemMaxMiB (ver boot), no MemMiB. Quien llama pasa el mayor.
+func plazoVolcado(memMiB int) time.Duration {
+	return max(30*time.Second, 10*time.Second+time.Duration(memMiB)*20*time.Second/1024)
+}
