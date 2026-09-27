@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/juan52878911/kindling/security/advisories/new
+    about: Report privately through a GitHub security advisory, not in a public issue. See SECURITY.md.
+  - name: Which guide do I need?
+    url: https://github.com/juan52878911/kindling/blob/main/docs/README.md
+    about: The index of guides and documents.

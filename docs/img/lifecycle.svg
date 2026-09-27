@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-label="Machine lifecycle in kindling: an image boots cold into a machine; save turns it into a template; run -from a template starts in milliseconds; a machine moves between running, paused and frozen">
+  <defs>
+    <marker id="a-ice" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#78BEF0"/>
+    </marker>
+    <marker id="a-ember" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#FF8C32"/>
+    </marker>
+    <marker id="a-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#9aa4b2"/>
+    </marker>
+    <style>
+      .t { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #e6edf3; }
+      .m { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #e6edf3; }
+      .dim { fill: #9aa4b2; }
+      .ice { fill: #78BEF0; }
+      .ember { fill: #FF8C32; }
+      .box { fill: #161b24; stroke: #2b3442; stroke-width: 1.5; }
+      .run { fill: #1a1410; stroke: #FF8C32; stroke-width: 2; }
+      .pau { fill: #121a26; stroke: #78BEF0; stroke-width: 2; }
+      .fro { fill: #101720; stroke: #78BEF0; stroke-width: 2; stroke-dasharray: 6 4; }
+      .l-ice { stroke: #78BEF0; stroke-width: 2; fill: none; marker-end: url(#a-ice); }
+      .l-ember { stroke: #FF8C32; stroke-width: 2; fill: none; marker-end: url(#a-ember); }
+      .l-dim { stroke: #9aa4b2; stroke-width: 1.5; fill: none; marker-end: url(#a-dim); stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="520" rx="14" fill="#0E1118"/>
+  <text x="40" y="46" class="t" font-size="24" font-weight="600">Three nouns, one loop: image → template → machine</text>
+  <text x="40" y="72" class="t dim" font-size="15">An image boots cold, once. A template is a golden snapshot: every machine made from it wakes in milliseconds and shares its memory.</text>
+
+  <!-- image -->
+  <rect x="40" y="130" width="240" height="120" rx="10" class="box"/>
+  <text x="160" y="160" class="t" font-size="18" font-weight="600" text-anchor="middle">image</text>
+  <text x="160" y="184" class="t dim" font-size="13" text-anchor="middle">rootfs, read-only, shared</text>
+  <text x="160" y="204" class="m dim" font-size="12" text-anchor="middle">min · toolchain · node · python</text>
+  <text x="160" y="228" class="m dim" font-size="12" text-anchor="middle">kling image ls | build | copy</text>
+
+  <!-- template -->
+  <rect x="40" y="330" width="240" height="120" rx="10" class="fro"/>
+  <text x="160" y="360" class="t" font-size="18" font-weight="600" text-anchor="middle">template</text>
+  <text x="160" y="384" class="t dim" font-size="13" text-anchor="middle">golden snapshot: memory + disk,</text>
+  <text x="160" y="402" class="t dim" font-size="13" text-anchor="middle">frozen with the server already serving</text>
+  <text x="160" y="428" class="m dim" font-size="12" text-anchor="middle">kling template ls | inspect | rm</text>
+
+  <!-- machine states -->
+  <rect x="440" y="120" width="720" height="360" rx="12" fill="#0b0f16" stroke="#2b3442" stroke-width="1.5"/>
+  <text x="460" y="150" class="t" font-size="16" font-weight="600">machine</text>
+  <text x="560" y="150" class="t dim" font-size="12">kling ps · logs · exec · shell · cp · stop · rm</text>
+
+  <rect x="470" y="180" width="200" height="110" rx="10" class="run"/>
+  <text x="570" y="208" class="t ember" font-size="18" font-weight="600" text-anchor="middle">running</text>
+  <text x="570" y="232" class="t dim" font-size="12" text-anchor="middle">own kernel, own netns</text>
+  <text x="570" y="250" class="t dim" font-size="12" text-anchor="middle">CPU ceiling (-cpu-pct)</text>
+  <text x="570" y="272" class="m dim" font-size="11" text-anchor="middle">RAM: what it touches</text>
+
+  <rect x="720" y="180" width="200" height="110" rx="10" class="pau"/>
+  <text x="820" y="208" class="t ice" font-size="18" font-weight="600" text-anchor="middle">paused</text>
+  <text x="820" y="232" class="t dim" font-size="12" text-anchor="middle">vCPUs stopped, RAM kept</text>
+  <text x="820" y="250" class="t dim" font-size="12" text-anchor="middle">for the hot path</text>
+  <text x="820" y="272" class="m dim" font-size="11" text-anchor="middle">RAM: same as running</text>
+
+  <rect x="950" y="180" width="190" height="110" rx="10" class="fro"/>
+  <text x="1045" y="208" class="t ice" font-size="18" font-weight="600" text-anchor="middle">frozen</text>
+  <text x="1045" y="232" class="t dim" font-size="12" text-anchor="middle">a sparse file on disk</text>
+  <text x="1045" y="250" class="t dim" font-size="12" text-anchor="middle">state intact</text>
+  <text x="1045" y="272" class="m ice" font-size="11" text-anchor="middle">RAM: 0 · CPU: 0</text>
+
+  <!-- running <-> paused -->
+  <path d="M670 215 L718 215" class="l-ice"/>
+  <text x="694" y="205" class="m" font-size="11" text-anchor="middle">pause</text>
+  <path d="M718 255 L672 255" class="l-ember"/>
+  <text x="694" y="275" class="m ember" font-size="11" text-anchor="middle">thaw ~2 ms</text>
+
+  <!-- paused/running <-> frozen -->
+  <path d="M920 215 L948 215" class="l-ice"/>
+  <text x="934" y="205" class="m" font-size="11" text-anchor="middle">freeze</text>
+  <path d="M1045 290 C 1045 340, 570 340, 570 292" class="l-ember"/>
+  <text x="808" y="350" class="m ember" font-size="12" text-anchor="middle">thaw ~30 ms — restore from the file, server still listening</text>
+
+  <!-- ttl -->
+  <text x="470" y="400" class="t dim" font-size="12">-ttl: idle → freeze on its own (or -on-ttl remove).</text>
+  <text x="470" y="420" class="t dim" font-size="12">Frozen costs disk, not memory: 35 MB (min image) to ~82 MB (Ubuntu) per machine.</text>
+  <text x="470" y="440" class="t dim" font-size="12">A machine that received secrets (MMDS) can no longer be frozen: no secret ever lands in a snapshot.</text>
+  <text x="470" y="460" class="t dim" font-size="12">kling stop kills the VMM; kling rm removes machine and snapshot.</text>
+
+  <!-- image -> running: cold boot -->
+  <path d="M280 205 C 380 205, 380 215, 468 215" class="l-dim"/>
+  <text x="372" y="172" class="m dim" font-size="12" text-anchor="middle">kling run -image</text>
+  <text x="372" y="190" class="t dim" font-size="11" text-anchor="middle">cold boot: seconds</text>
+
+  <!-- running -> template: save -->
+  <path d="M470 270 C 380 270, 380 390, 282 390" class="l-ice"/>
+  <text x="372" y="300" class="m" font-size="12" text-anchor="middle">kling save &lt;ref&gt; &lt;name&gt;</text>
+  <text x="372" y="318" class="t dim" font-size="11" text-anchor="middle">waits until the guest serves</text>
+
+  <!-- template -> running: run -from -->
+  <path d="M280 430 C 360 430, 360 430, 430 430" class="l-ember"/>
+  <text x="355" y="450" class="m ember" font-size="12" text-anchor="middle">kling run -from</text>
+  <text x="355" y="468" class="t dim" font-size="11" text-anchor="middle">~ms; N copies share pages</text>
+  <text x="355" y="486" class="t dim" font-size="11" text-anchor="middle">10 copies = +68 MiB total</text>
+</svg>

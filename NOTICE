@@ -1,5 +1,5 @@
 kindling
-Copyright the kindling authors.
+Copyright 2026 The kindling Authors
 
 This repository does not ship third-party datasets. The tool of the
 smart-home example, examples/domotica/cmd/domotica-data, downloads the
