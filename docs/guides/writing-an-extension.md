@@ -60,7 +60,7 @@ To start yours outside this repository:
 mkdir kling-hola && cd kling-hola
 go mod init example.com/kling-hola
 cp <kindling>/examples/hello-extension/main.go .
-go get github.com/juan52878911/kindling@v0.14.0
+go get github.com/juan52878911/kindling@v0.15.0
 ```
 
 ## 2. Build and install (1 minute)

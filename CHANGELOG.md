@@ -8,8 +8,26 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
-## Unreleased
+## v0.15.0 — 2026-09-27
 
+**Licencia Apache-2.0, documentación nueva y kindling desde Claude Code.**
+
+- **Licencia: Apache-2.0.** `LICENSE` con el texto oficial y `NOTICE` encabezado
+  por "Copyright 2026 The kindling Authors" (conserva las atribuciones de los
+  conjuntos de datos). Contribuir es bajo la misma licencia, sin CLA
+  (`CONTRIBUTING.md`).
+- **README nuevo (EN/ES)** de 261 líneas: promesa, prueba en 30 segundos,
+  cifras medidas con su fuente, usos, instalación (curl, plugin de Claude
+  Code, fuentes, operador), cómo funciona, comparativa honesta fechada en
+  septiembre de 2026 (`docs/compare.md`, con fuentes), límites y FAQ. El
+  material largo de antes vive en `docs/handbook.md`.
+- **Guías** en `docs/guides/` (Linux, macOS, daemon remoto, MCP, sandboxes para
+  agentes, IA serverless, operador de Kubernetes, extensiones, diagnóstico),
+  índice en `docs/README.md`, `docs/resources.md`, diagramas SVG y demos de
+  terminal grabadas con vhs en `docs/img/`, plantillas de issues y aviso de
+  vulnerabilidades en `SECURITY.md`.
+- **`kling status -v`** ya no repite endpoint, daemon, KVM y VMM: solo añade
+  arquitectura, capacidades, carpetas compartidas y cifrado en reposo.
 - **Plugin de Claude Code, desde este mismo repo.** `.claude-plugin/marketplace.json`
   en la raíz hace del repositorio un marketplace y `plugins/claude-code` es el
   plugin `kindling`: `/plugin marketplace add juan52878911/kindling`,

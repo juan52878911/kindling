@@ -93,7 +93,7 @@ moving anything onto disk. Windows is not supported.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox    # extensions from the same release
-curl -fsSL .../install.sh | sh -s -- --tag v0.14.0         # a specific version
+curl -fsSL .../install.sh | sh -s -- --tag v0.15.0         # a specific version
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local --no-rc   # do not touch your shell rc
 ```
 

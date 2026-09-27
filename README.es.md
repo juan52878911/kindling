@@ -94,7 +94,7 @@ nada al disco. Windows no está soportado.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/install.sh | sh
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox    # extensiones de la misma release
-curl -fsSL .../install.sh | sh -s -- --tag v0.14.0         # una versión concreta
+curl -fsSL .../install.sh | sh -s -- --tag v0.15.0         # una versión concreta
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local --no-rc   # sin tocar el rc de tu shell
 ```
 
