@@ -309,6 +309,14 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of state dump: %w", err)
 	}
+	// El kernel con el que se congela (K2): sin él, reconstruirlo con otra
+	// configuración (K1) rompería restauraciones de este dorado sin ninguna
+	// señal de por qué. Cacheado por tamaño+fecha (kernelHash): no es otro
+	// fichero grande que hashear entero en cada commit.
+	kernelSHA, err := m.kernelHash()
+	if err != nil {
+		return nil, fmt.Errorf("computing digest of the kernel: %w", err)
+	}
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
@@ -321,6 +329,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 		AllowExec:    mc.AllowExec,
 		RootfsSHA256: rootfsSHA,
 		SnapSHA256:   snapSHA,
+		KernelSHA256: kernelSHA,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
 		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
@@ -530,6 +539,74 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// huellaKernel es el kernelSHA256 cacheado de Manager.kernelSHA, junto con el
+// tamaño y la fecha del vmlinux que lo produjeron (K2). Igual que huellaSnapshot:
+// basta un stat para saber si sigue valiendo, en vez de volver a hashear.
+type huellaKernel struct {
+	tam   int64
+	fecha int64
+	hash  string
+}
+
+// kernelHash devuelve el sha256 del kernel en uso (KernelPath), cacheado por
+// tamaño+fecha del fichero (K2).
+//
+// Se pide en cada Commit y en cada runFrom, y rehashear un vmlinux de varias
+// decenas de MiB en cada restauración sería justo el tipo de coste que este
+// proyecto existe para evitar. El vmlinux es un fichero compartido por todas
+// las microVMs y solo cambia cuando alguien reconstruye el kernel (K1) o lo
+// reemplaza a mano; entre esos dos momentos, tamaño y fecha no se mueven.
+func (m *Manager) kernelHash() (string, error) {
+	path := m.KernelPath()
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	tam, fecha := st.Size(), st.ModTime().UnixNano()
+
+	m.mu.RLock()
+	h := m.kernelSHA
+	m.mu.RUnlock()
+	if h.hash != "" && h.tam == tam && h.fecha == fecha {
+		return h.hash, nil
+	}
+
+	hash, err := fileSHA256(path)
+	if err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	m.kernelSHA = huellaKernel{tam: tam, fecha: fecha, hash: hash}
+	m.mu.Unlock()
+	return hash, nil
+}
+
+// comprobarKernel exige que el kernel instalado ahora sea el mismo con el que
+// se congeló el snapshot (K2).
+//
+// K1 permite reconstruir vmlinux con otra configuración; un dorado no lleva su
+// propio kernel dentro, así que restaurarlo sobre uno distinto del que tenía
+// al congelarse dejaría al invitado despertando con código que no es el suyo
+// mapeado en memoria — un pánico, o algo peor: un cuelgue o un fallo sutil que
+// no señala al kernel como causa. Mejor negarse aquí, claro y pronto.
+//
+// recordedSHA vacío es un snapshot anterior a este campo (o a K1): se acepta
+// igual, o desplegar esto rompería de golpe todos los snapshots existentes.
+func (m *Manager) comprobarKernel(recordedSHA, name string) error {
+	if recordedSHA == "" {
+		return nil
+	}
+	actual, err := m.kernelHash()
+	if err != nil {
+		return fmt.Errorf("hashing the current kernel: %w", err)
+	}
+	if actual != recordedSHA {
+		return fmt.Errorf("rebuild the template: the kernel changed (snapshot %q was frozen with a "+
+			"different kernel than the one installed on this host now)", name)
+	}
+	return nil
+}
+
 // RemoveSnapshot borra un snapshot dorado, salvo que tenga instancias vivas.
 func (m *Manager) RemoveSnapshot(name string) error { return m.removeSnapshot(name, false) }
 
@@ -661,6 +738,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 	if err := m.verifyIntegrity(snap, m.snapDir(req.From)); err != nil {
+		return nil, err
+	}
+	// KERNEL. Igual de temprano y por la misma razón: un dorado no lleva su
+	// propio vmlinux, y restaurarlo sobre uno distinto del que tenía al
+	// congelarse (K1 reconstruyéndolo con otra configuración) es indistinguible
+	// de una corrupción hasta que el invitado se porta raro (K2).
+	if err := m.comprobarKernel(snap.KernelSHA256, req.From); err != nil {
 		return nil, err
 	}
 

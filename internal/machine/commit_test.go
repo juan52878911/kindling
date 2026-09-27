@@ -39,6 +39,15 @@ func plantillaParaCommit(t *testing.T, m *Manager, id string) (*fcFalso, <-chan 
 	if err := os.WriteFile(filepath.Join(m.dir(id), "overlay.ext4"), make([]byte, 64<<10), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Commit graba kernel_sha256 (K2): en producción Run ya exige que el
+	// vmlinux exista antes de arrancar, pero maquinaCorriendo publica la
+	// máquina directamente sin pasar por Run, así que aquí hay que ponerlo.
+	if err := os.MkdirAll(filepath.Join(m.root, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.KernelPath(), []byte("vmlinux de prueba"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return falso, muerto
 }
 
