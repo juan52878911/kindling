@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // El digest se calcula sobre el contenido: mismos bytes, mismo hash; un byte
@@ -18,19 +19,19 @@ func TestFileSHA256DetectaCambios(t *testing.T) {
 	if err := os.WriteFile(f, []byte("contenido dorado"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h1, err := fileSHA256(f)
+	h1, err := digest.File(f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Releer el mismo fichero da el mismo digest.
-	if h2, _ := fileSHA256(f); h2 != h1 {
+	if h2, _ := digest.File(f); h2 != h1 {
 		t.Fatalf("dos lecturas del mismo fichero dieron hashes distintos: %s vs %s", h1, h2)
 	}
 	// Cambiar un byte cambia el digest.
 	if err := os.WriteFile(f, []byte("contenido doradO"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if h3, _ := fileSHA256(f); h3 == h1 {
+	if h3, _ := digest.File(f); h3 == h1 {
 		t.Fatal("el digest no cambió tras modificar el fichero")
 	}
 }
@@ -47,8 +48,8 @@ func TestVerifyIntegrity(t *testing.T) {
 	if err := os.WriteFile(snapFile, []byte("volcado de estado"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rootfsSHA, _ := fileSHA256(overlay)
-	snapSHA, _ := fileSHA256(snapFile)
+	rootfsSHA, _ := digest.File(overlay)
+	snapSHA, _ := digest.File(snapFile)
 
 	var m Manager // verifyIntegrity no toca el estado del Manager
 	snap := &api.Snapshot{Name: "svc", RootfsSHA256: rootfsSHA, SnapSHA256: snapSHA}
@@ -96,8 +97,8 @@ func TestElVeredictoDeIntegridadSeRecuerdaPeroSeInvalida(t *testing.T) {
 	}
 	escribir(overlay, "rootfs dorado")
 	escribir(snapFile, "volcado")
-	rootfsSHA, _ := fileSHA256(overlay)
-	snapSHA, _ := fileSHA256(snapFile)
+	rootfsSHA, _ := digest.File(overlay)
+	snapSHA, _ := digest.File(snapFile)
 
 	m := &Manager{}
 	snap := &api.Snapshot{Name: "svc", RootfsSHA256: rootfsSHA, SnapSHA256: snapSHA}

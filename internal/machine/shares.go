@@ -25,6 +25,7 @@ import (
 
 	hostshare "github.com/juan52878911/kindling/internal/share"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
 	"github.com/juan52878911/kindling/pkg/share"
 )
 
@@ -169,19 +170,27 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // Sin journal (se monta en solo lectura, y con noload) y del tamaño justo con
 // holgura: lo que ocupan los datos en bloques de 4 KiB, más un 15 % y 16 MiB de
 // metadatos. Si aun así no cabe, se reintenta una vez con el doble.
+//
+// Se construye en un .tmp AL LADO de img y se publica con durable.Renombrar
+// (fsync del fichero + rename + fsync del directorio): sin eso, "el ext4 ya
+// está en img" no implica que esté completo ni que el rename haya llegado a
+// disco, y una carpeta compartida corrupta se monta en modo RO dentro de
+// cada microVM que la use sin un error que señale la causa.
 func buildShareImage(ctx context.Context, tree, img string, st hostshare.CopyStats) error {
 	inodes := int64(st.Entries()) + 256
 	mib := (st.Blocks*4096*115/100 + inodes*256 + 16<<20 + 1<<20 - 1) >> 20
 	if mib < 16 {
 		mib = 16
 	}
+	tmp := img + ".tmp"
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		_ = os.Remove(img)
-		if err := os.WriteFile(img, nil, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		if err := os.WriteFile(tmp, nil, 0o600); err != nil {
 			return err
 		}
-		if err := os.Truncate(img, mib<<20); err != nil {
+		if err := os.Truncate(tmp, mib<<20); err != nil {
+			_ = os.Remove(tmp)
 			return err
 		}
 		// El plazo mata a mke2fs si se atasca: un proceso colgado aquí dejaría
@@ -189,14 +198,19 @@ func buildShareImage(ctx context.Context, tree, img string, st hostshare.CopySta
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		out, err := e2fsCmd(cctx, "mkfs.ext4", "-q", "-F", "-b", "4096", "-I", "256", "-m", "0",
 			"-N", strconv.FormatInt(inodes, 10), "-O", "^has_journal",
-			"-E", "root_owner=0:0,nodiscard", "-L", "kling-share", "-d", tree, img).CombinedOutput()
+			"-E", "root_owner=0:0,nodiscard", "-L", "kling-share", "-d", tree, tmp).CombinedOutput()
 		cancel()
 		if err == nil {
+			if err := durable.Renombrar(tmp, img); err != nil {
+				_ = os.Remove(tmp)
+				return err
+			}
 			return nil
 		}
 		lastErr = fmt.Errorf("building the share image: %v: %s", err, bytes.TrimSpace(out))
 		mib *= 2
 	}
+	_ = os.Remove(tmp)
 	return lastErr
 }
 

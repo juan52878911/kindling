@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // Nunca se toca la imagen base de una microVM viva.
@@ -171,18 +172,18 @@ func TestSeComparaPorContenido(t *testing.T) {
 	if err := os.WriteFile(b, []byte("mismo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	da, err := fileDigest(a)
+	da, err := digest.File(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, _ := fileDigest(b)
+	db, _ := digest.File(b)
 	if da != db {
 		t.Error("dos ficheros idénticos dieron huellas distintas")
 	}
 	if err := os.WriteFile(b, []byte("otro!"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if dc, _ := fileDigest(b); dc == da {
+	if dc, _ := digest.File(b); dc == da {
 		t.Error("dos ficheros distintos del mismo tamaño dieron la misma huella")
 	}
 }

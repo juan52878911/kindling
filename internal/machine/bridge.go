@@ -16,8 +16,6 @@ package machine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +28,7 @@ import (
 	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // errNoBridge marca una imagen que no lleva puente dentro: una base mínima, no
@@ -259,7 +258,7 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	defer desmontar()
 
 	dentro := filepath.Join(mnt, dentroPath)
-	tengo, err := fileDigest(dentro)
+	tengo, err := digest.File(dentro)
 	if os.IsNotExist(err) && !create {
 		// Una imagen SIN puente no es una imagen de servicio: es una base
 		// mínima, cuyo entrypoint no invoca ningún puente. Inyectarle uno no
@@ -305,19 +304,6 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	}
 	desmontar()
 	return true, nil
-}
-
-func fileDigest(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {

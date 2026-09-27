@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // Pruebas de K2: kernel_sha256 en meta.json. runFrom se niega a restaurar un
@@ -28,7 +29,7 @@ func escribirKernel(t *testing.T, m *Manager, contenido string) string {
 	if err := os.WriteFile(m.KernelPath(), []byte(contenido), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h, err := fileSHA256(m.KernelPath())
+	h, err := digest.File(m.KernelPath())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -67,7 +67,7 @@ func (m *Manager) adopt(mc *api.Machine) (string, bool) {
 	if mc.PID <= 0 {
 		return "", false
 	}
-	cmdline, err := os.ReadFile("/proc/" + itoa(mc.PID) + "/cmdline")
+	cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(mc.PID) + "/cmdline")
 	if err != nil {
 		return "", false
 	}

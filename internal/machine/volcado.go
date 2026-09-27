@@ -23,16 +23,14 @@ package machine
 // el tamaño: un volcado truncado es, por definición, más corto.
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/digest"
 	"github.com/juan52878911/kindling/pkg/durable"
 )
 
@@ -57,7 +55,7 @@ func volcadoEnCurso(dir string) error {
 // sellarVolcado escribe el sello cuando snap.file y mem.file ya están completos
 // y en su sitio, y retira la marca de volcado en curso.
 func sellarVolcado(dir string) error {
-	snapSHA, err := sha256Fichero(filepath.Join(dir, "snap.file"))
+	snapSHA, err := digest.File(filepath.Join(dir, "snap.file"))
 	if err != nil {
 		return err
 	}
@@ -103,7 +101,7 @@ func volcadoValido(dir string) error {
 	if fi.Size() != s.MemBytes {
 		return fmt.Errorf("%w: the memory dump is %d bytes and should be %d", errVolcadoIncompleto, fi.Size(), s.MemBytes)
 	}
-	got, err := sha256Fichero(filepath.Join(dir, "snap.file"))
+	got, err := digest.File(filepath.Join(dir, "snap.file"))
 	if err != nil {
 		return err
 	}
@@ -111,19 +109,6 @@ func volcadoValido(dir string) error {
 		return fmt.Errorf("%w: the state file changed after it was frozen", errVolcadoIncompleto)
 	}
 	return nil
-}
-
-func sha256Fichero(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // plazoVolcado es cuánto se le deja a Firecracker para volcar (Snapshot) o

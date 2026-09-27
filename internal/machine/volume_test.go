@@ -10,6 +10,19 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
+// resolveVolumes comprueba sin reservar, tomando el cerrojo para leer.
+//
+// Solo lo usan los tests: es el camino de solo-lectura para validar una
+// peticion sin comprometerse. Arrancar una maquina NO puede usarlo — entre
+// esta comprobacion y la publicacion en byID hay una ventana, y para eso
+// esta reservarVolumenes.
+func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
+	m.mu.RLock()
+	inUse := m.volumeUsersLocked()
+	m.mu.RUnlock()
+	return comprobarVolumenes(m, req, inUse)
+}
+
 // El nombre acaba siendo un componente de ruta: volumes/<nombre>.ext4. Si se
 // cuela un ../, el volumen se crea o se borra fuera de su directorio.
 func TestNombreDeVolumenRechazaTravesias(t *testing.T) {
