@@ -66,7 +66,7 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	m.priv.EnsureReadable(m.volumesDir())
+	m.priv.EnsureWritable(m.volumesDir())
 	// El VMM corre sin privilegios y tiene que poder ESCRIBIR aquí: un volumen
 	// de solo lectura no serviría de nada.
 	if m.priv.UID > 0 {

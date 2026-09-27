@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	knet "github.com/juan52878911/kindling/internal/net"
 )
@@ -178,21 +179,53 @@ func (m *Manager) jailSock(id string) string {
 // caché de páginas —la densidad de 12×— y duplicar 256 MiB por restauración. Un
 // hardlink es el mismo inodo, así que se comparte igual que sin jail.
 func (m *Manager) linkAbs(id, hostPath string) error {
+	return m.linkComo(id, hostPath, hostPath)
+}
+
+// linkComo enlaza src dentro del jail bajo la ruta que tiene hostPath en el
+// host. Con src == hostPath es linkAbs. Sirve para que Firecracker, al abrir
+// una ruta grabada en un snapshot, reciba otro fichero: la copia propia de la
+// instancia en vez del overlay del dorado (ver runFrom).
+func (m *Manager) linkComo(id, hostPath, src string) error {
 	dst := filepath.Join(m.jailRoot(id), hostPath)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
 	_ = os.Remove(dst) // una restauración anterior sin limpiar apuntaría a un inodo viejo
-	if err := os.Link(hostPath, dst); err != nil {
-		return fmt.Errorf("linking %s inside the jail: %w", hostPath, err)
+	if err := os.Link(src, dst); err != nil {
+		return fmt.Errorf("linking %s inside the jail: %w", src, err)
 	}
-	// firecracker corre como el usuario del jail: tiene que poder abrirlo. Chown
-	// del hardlink toca el inodo compartido con el original; para una imagen o
-	// un volumen de solo lectura eso es justo lo que hace falta.
+	hostPath = src
+	// firecracker corre como el usuario del jail: tiene que poder abrirlo. El
+	// hardlink es el MISMO inodo que el original, así que tocarlo es tocar el
+	// original. Antes se le hacía chown al usuario del VMM, y así el kernel, la
+	// base y los dorados acababan siendo SUYOS, escribibles por un Firecracker
+	// comprometido para todas las microVMs futuras. Ahora: lo que ya es del VMM
+	// (su overlay, sus volúmenes, su volcado) se deja; lo demás, que es de solo
+	// lectura, se le da por grupo con dueño root (ver EnsureReadable).
 	if m.priv.Enabled {
-		_ = os.Chown(dst, m.priv.UID, m.priv.GID)
+		darLecturaVMM(hostPath, m.priv)
 	}
 	return nil
+}
+
+// darLecturaVMM hace legible por grupo para el VMM un fichero que no es suyo,
+// sin cederle la propiedad. Sin seguir enlaces simbólicos.
+func darLecturaVMM(ruta string, p *Privileges) {
+	fi, err := os.Lstat(ruta)
+	if err != nil || !fi.Mode().IsRegular() {
+		return
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) == p.UID {
+		return
+	}
+	if int(st.Gid) != p.GID {
+		_ = os.Lchown(ruta, -1, p.GID)
+	}
+	if fi.Mode().Perm()&0o040 == 0 {
+		_ = os.Chmod(ruta, fi.Mode().Perm()|0o040)
+	}
 }
 
 // prepareJail replica dentro del jail todo lo que la restauración va a abrir:

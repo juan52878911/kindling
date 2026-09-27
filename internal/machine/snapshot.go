@@ -341,7 +341,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	if err := m.firmar(snap); err != nil {
 		return nil, err
 	}
+	cerrarVolcado(dir)
 	m.priv.EnsureReadable(dir)
+	m.overlayDoradoSinJailer(dir)
 
 	b, _ := json.MarshalIndent(snap, "", "  ")
 	if err := writeMeta(dir, b); err != nil {
@@ -665,6 +667,18 @@ func (m *Manager) kernelHash() (string, error) {
 	m.kernelSHA = huellaKernel{tam: tam, fecha: fecha, hash: hash}
 	m.mu.Unlock()
 	return hash, nil
+}
+
+// overlayDoradoSinJailer deja escribible por el grupo del VMM el overlay de un
+// dorado, SOLO sin jailer (KLING_JAILER=0): ahí Firecracker abre la ruta del
+// host tal cual al cargar el snapshot, en lectura y escritura, y no hay jail
+// donde darle su propia copia bajo esa ruta. Con jailer (el modo por defecto)
+// el dorado queda de solo lectura: ver runFrom.
+func (m *Manager) overlayDoradoSinJailer(snapDir string) {
+	if !m.priv.Enabled || m.jailerJailed {
+		return
+	}
+	_ = os.Chmod(filepath.Join(snapDir, "overlay.ext4"), 0o660)
 }
 
 // avisoKernel dice, para el log, si el kernel instalado ahora no es el mismo
@@ -1144,10 +1158,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			filepath.Join(snapDir, "mem.file"),
 			imgBase,
 			imgLayer,
-			filepath.Join(snapDir, "overlay.ext4"),
 			overlay,
 		}, volPaths...)
 		if err := m.prepareJail(id, toLink...); err != nil {
+			return abortar(err)
+		}
+		// El snapshot grabó la ruta del overlay DEL DORADO, y Firecracker la abre
+		// en lectura y escritura al cargarlo, antes de que el PATCH de abajo la
+		// cambie por la de esta instancia. En esa ruta, dentro del jail, va la
+		// copia propia de la instancia (mismo contenido): el dorado, que es de
+		// root y de solo lectura para el VMM, no se le expone nunca.
+		if err := m.linkComo(id, filepath.Join(snapDir, "overlay.ext4"), overlay); err != nil {
 			return abortar(err)
 		}
 	} else {

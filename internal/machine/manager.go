@@ -330,6 +330,16 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	}
 
 	priv.EnsureReadable(filepath.Join(root, "images"))
+	priv.EnsureReadable(filepath.Join(root, "snapshots"))
+	if entradas, err := os.ReadDir(filepath.Join(root, "snapshots")); err == nil {
+		for _, e := range entradas {
+			if e.IsDir() {
+				m.overlayDoradoSinJailer(filepath.Join(root, "snapshots", e.Name()))
+			}
+		}
+	}
+	restringirRaiz(root, priv)
+	cerrarVolcadosExistentes(root)
 	m.load()
 	for _, mc := range m.byID {
 		if mc.NetIndex > m.netCursor {
@@ -1573,6 +1583,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if kerr != nil {
 		log.Printf("warning: %s: could not hash the kernel for the seal: %v", mc.Name, kerr)
 	}
+	cerrarVolcado(dir)
 	if err := sellarVolcado(dir, kernelSHA); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
