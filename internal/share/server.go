@@ -30,6 +30,12 @@ const (
 	// maxHandles por sesión: un invitado que abre sin cerrar se queda sin
 	// handles él, no deja al daemon sin descriptores.
 	maxHandles = 1024
+	// maxHandlesPerMachine acota los descriptores abiertos por TODAS las
+	// carpetas de UNA máquina (puede tener hasta 8, ver pkg/share.MaxShares):
+	// sin este tope una sola máquina hostil con 8 carpetas y 1024 handles cada
+	// una (8192) se comería buena parte del presupuesto global y dejaría a las
+	// demás sin descriptores. Ver S-03 en docs/compartir.md.
+	maxHandlesPerMachine = 2048
 	// maxInflight por sesión: operaciones a la vez. La siguiente trama no se
 	// lee hasta que hay hueco, así que la contrapresión llega al invitado por
 	// TCP en vez de acumularse aquí.
@@ -38,29 +44,81 @@ const (
 	maxListBytes = 64 << 10
 )
 
-// globalFDs acota los descriptores abiertos por TODAS las sesiones del daemon.
-// Con 256 máquinas y 8 carpetas cada una, el tope por sesión solo no bastaría.
+// globalFDs acota los descriptores abiertos por TODAS las sesiones del daemon,
+// de respaldo por si el tope por máquina no basta (muchas máquinas a la vez).
+// Con 256 máquinas y 8 carpetas cada una, el tope por máquina solo no bastaría.
 var globalFDs = make(chan struct{}, 16384)
+
+// machineBudgets lleva, por máquina, el presupuesto de descriptores de sus
+// carpetas vivas. Con contador de referencias: la entrada se retira cuando la
+// última carpeta de esa máquina se cierra, igual que shareSup con las
+// conexiones. Ver S-03.
+var machineBudgets = struct {
+	mu sync.Mutex
+	m  map[string]*machineBudget
+}{m: map[string]*machineBudget{}}
+
+type machineBudget struct {
+	slots chan struct{}
+	refs  int
+}
+
+// acquireMachineBudget devuelve el presupuesto de id, creándolo si es la
+// primera carpeta de esa máquina. id vacío (tests, o un llamador que no lo
+// sabe) recibe su propio presupuesto de 2048: no comparte con nada.
+func acquireMachineBudget(id string) *machineBudget {
+	machineBudgets.mu.Lock()
+	defer machineBudgets.mu.Unlock()
+	b := machineBudgets.m[id]
+	if b == nil {
+		b = &machineBudget{slots: make(chan struct{}, maxHandlesPerMachine)}
+		machineBudgets.m[id] = b
+	}
+	b.refs++
+	return b
+}
+
+// releaseMachineBudget suelta la referencia de id; si era la última, retira la
+// entrada (un presupuesto sin dueño no debe quedarse en el mapa para siempre).
+func releaseMachineBudget(id string) {
+	machineBudgets.mu.Lock()
+	defer machineBudgets.mu.Unlock()
+	b := machineBudgets.m[id]
+	if b == nil {
+		return
+	}
+	b.refs--
+	if b.refs <= 0 {
+		delete(machineBudgets.m, id)
+	}
+}
 
 // Server sirve una carpeta del host. Uno por carpeta de cada máquina; cada
 // conexión del agente es una sesión nueva sobre él.
 type Server struct {
-	dir      string
-	root     *os.Root
-	readOnly bool
+	dir       string
+	root      *os.Root
+	readOnly  bool
+	machineID string
+	budget    *machineBudget
 
 	// uid/gid del dueño de la carpeta, a quien se entrega lo que crea el
 	// invitado si el daemon corre como root. -1 = no se toca.
 	uid, gid int
 }
 
-// Open abre la carpeta dir para servirla.
-func Open(dir string, readOnly bool) (*Server, error) {
+// Open abre la carpeta dir para servirla. machineID identifica a la máquina
+// dueña de la carpeta, para el presupuesto de descriptores por máquina
+// (S-03); puede ir vacío si no aplica (tests).
+func Open(dir string, readOnly bool, machineID string) (*Server, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{dir: dir, root: root, readOnly: readOnly, uid: -1, gid: -1}
+	s := &Server{
+		dir: dir, root: root, readOnly: readOnly, uid: -1, gid: -1,
+		machineID: machineID, budget: acquireMachineBudget(machineID),
+	}
 	if os.Geteuid() == 0 {
 		// Si el daemon es root, lo que cree el invitado sería de root en el
 		// host y su dueño no podría ni borrarlo. Se entrega al dueño de la
@@ -74,8 +132,11 @@ func Open(dir string, readOnly bool) (*Server, error) {
 	return s, nil
 }
 
-// Close suelta la carpeta.
-func (s *Server) Close() error { return s.root.Close() }
+// Close suelta la carpeta y el presupuesto de descriptores de su máquina.
+func (s *Server) Close() error {
+	releaseMachineBudget(s.machineID)
+	return s.root.Close()
+}
 
 // session es el estado de UNA conexión: sus ficheros abiertos. Muere con ella.
 type session struct {
@@ -143,6 +204,7 @@ func (ss *session) closeAll() {
 	defer ss.mu.Unlock()
 	for id, h := range ss.files {
 		_ = h.f.Close()
+		<-ss.srv.budget.slots
 		<-globalFDs
 		delete(ss.files, id)
 	}
@@ -420,9 +482,18 @@ func (ss *session) put(f *os.File, write bool) (uint64, uint32) {
 		_ = f.Close()
 		return 0, proto.EMFILE
 	}
+	// Primero el presupuesto de la máquina (S-03): una máquina hostil se queda
+	// sin descriptores ella sola mucho antes de tocar el respaldo global.
+	select {
+	case ss.srv.budget.slots <- struct{}{}:
+	default:
+		_ = f.Close()
+		return 0, proto.EMFILE
+	}
 	select {
 	case globalFDs <- struct{}{}:
 	default:
+		<-ss.srv.budget.slots
 		_ = f.Close()
 		return 0, proto.EMFILE
 	}
@@ -441,6 +512,7 @@ func (ss *session) release(h uint64) {
 	ss.mu.Unlock()
 	if hd != nil {
 		_ = hd.f.Close()
+		<-ss.srv.budget.slots
 		<-globalFDs
 	}
 }
@@ -553,17 +625,44 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 	}
 	// O_APPEND no pasa al host: el kernel del invitado ya manda cada escritura
 	// con su offset, y con O_APPEND Linux ignoraría ese offset en pwrite.
+
+	var f *os.File
+	var err error
 	if create {
-		of |= os.O_CREATE
-		if flags&proto.FlagExcl != 0 {
-			of |= os.O_EXCL
+		// Antes de abrir, igual que en la ruta sin create: mirar qué hay ahí
+		// (Lstat). Si ya existe y no es un fichero regular (FIFO, dispositivo,
+		// socket), se rechaza sin tocarlo: abrir un FIFO existente bloquearía,
+		// y abrir un dispositivo ya le haría algo (S-01).
+		if fi, lerr := s.root.Lstat(p); lerr == nil {
+			switch {
+			case fi.IsDir():
+				return nil, false, proto.EISDIR
+			case fi.Mode()&fs.ModeSymlink != 0:
+				return nil, false, proto.ELOOP
+			case !fi.Mode().IsRegular():
+				return nil, false, proto.EACCES
+			case flags&proto.FlagExcl != 0:
+				return nil, false, proto.EEXIST
+			}
+		} else if !errors.Is(lerr, fs.ErrNotExist) {
+			return nil, false, Errno(lerr)
+		}
+		// O_EXCL en la apertura real, se haya pedido o no: si entre el Lstat de
+		// arriba y aquí alguien puso un FIFO o un enlace en su sitio, el open
+		// falla en vez de abrir lo que sea que haya ahora ahí. Si de verdad lo
+		// creó otro proceso legítimo mientras tanto (mismo EEXIST) y el invitado
+		// no pedía exclusividad, se reintenta una vez como apertura normal; el
+		// chequeo de después de abrir descarta lo que no sea un fichero regular.
+		f, err = s.root.OpenFile(p, of|os.O_CREATE|os.O_EXCL|syscall.O_NONBLOCK, fs.FileMode(mode&0o777))
+		if errors.Is(err, fs.ErrExist) && flags&proto.FlagExcl == 0 {
+			f, err = s.root.OpenFile(p, of|syscall.O_NONBLOCK, fs.FileMode(mode&0o777))
 		}
 	} else {
 		// Antes de abrir: abrir un FIFO bloquea, y abrir un dispositivo ya es
 		// hacerle algo. Solo se abre lo que es un fichero regular.
-		fi, err := s.root.Lstat(p)
-		if err != nil {
-			return nil, false, Errno(err)
+		fi, lerr := s.root.Lstat(p)
+		if lerr != nil {
+			return nil, false, Errno(lerr)
 		}
 		switch {
 		case fi.IsDir():
@@ -573,11 +672,11 @@ func (s *Server) open(p string, flags uint32, create bool, mode uint32) (*os.Fil
 		case !fi.Mode().IsRegular():
 			return nil, false, proto.EACCES
 		}
+		// O_NONBLOCK por si entre la comprobación y la apertura alguien cambió
+		// el fichero por un FIFO: no bloquea al daemon, y la comprobación de
+		// después lo descarta.
+		f, err = s.root.OpenFile(p, of|syscall.O_NONBLOCK, fs.FileMode(mode&0o777))
 	}
-	// O_NONBLOCK por si entre la comprobación y la apertura alguien cambió el
-	// fichero por un FIFO: no bloquea al daemon, y la comprobación de después lo
-	// descarta.
-	f, err := s.root.OpenFile(p, of|syscall.O_NONBLOCK, fs.FileMode(mode&0o777))
 	if err != nil {
 		return nil, false, Errno(err)
 	}

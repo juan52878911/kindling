@@ -198,6 +198,12 @@ type Manager struct {
 	sharesOnce sync.Once
 	shareCfg   func() ShareConfig
 
+	// uploadMu serializa el check-and-reserve del tope de subidas pendientes
+	// (M-19): sin él, N subidas a la vez pasan todas la comprobación antes de
+	// que ninguna termine, y se cuelan hasta N ext4 de sobra en el disco.
+	uploadMu       sync.Mutex
+	uploadReserved int
+
 	// Clave de firma de snapshots (firma.go), cargada una vez.
 	firmaOnce  sync.Once
 	firmaClave []byte

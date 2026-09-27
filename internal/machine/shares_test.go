@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	hostshare "github.com/juan52878911/kindling/internal/share"
@@ -193,5 +194,55 @@ func TestSubidaDeCopia(t *testing.T) {
 	_ = tw.Close()
 	if _, err := m.StageShareUpload(context.Background(), &buf); !errors.Is(err, hostshare.ErrTooLarge) {
 		t.Errorf("oversized upload: %v", err)
+	}
+}
+
+// M-19: muchas subidas a la vez no dejan más ext4 en disco de los que
+// maxPendingUploads permite. Sin el mutex de check-and-reserve, N subidas
+// concurrentes pasarían todas la comprobación antes de que ninguna terminara.
+func TestSubidasConcurrentesRespetanElTope(t *testing.T) {
+	if !E2fsDisponible("mkfs.ext4") && !E2fsDisponible("mke2fs") {
+		t.Skip("no mkfs.ext4 on this host")
+	}
+	m := newTestManager(t)
+
+	tarDeUnByte := func() []byte {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		_ = tw.WriteHeader(&tar.Header{Name: "a.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1})
+		_, _ = tw.Write([]byte("x"))
+		_ = tw.Close()
+		return buf.Bytes()
+	}()
+
+	const intentos = maxPendingUploads * 3
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok := 0
+	start := make(chan struct{})
+	for i := 0; i < intentos; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := m.StageShareUpload(context.Background(), bytes.NewReader(tarDeUnByte))
+			switch {
+			case err == nil:
+				mu.Lock()
+				ok++
+				mu.Unlock()
+			case !errors.Is(err, ErrShareRequest):
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if ok > maxPendingUploads {
+		t.Fatalf("%d uploads accepted at once, the cap is %d", ok, maxPendingUploads)
+	}
+	if n := m.pendingUploads(); n != ok {
+		t.Fatalf("pendingUploads() = %d, want %d (the accepted ones)", n, ok)
 	}
 }

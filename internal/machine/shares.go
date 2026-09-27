@@ -94,11 +94,24 @@ func (m *Manager) StageShareUpload(ctx context.Context, r io.Reader) (*api.Share
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Check-and-reserve bajo un solo cerrojo (M-19): sin esto, N subidas a la
+	// vez leerían todas el mismo recuento antes de que ninguna terminara su
+	// ext4, y las N pasarían el tope. uploadReserved cuenta las que ya pasaron
+	// la comprobación pero aún no tienen fichero (o fallaron y no lo tendrán).
+	m.uploadMu.Lock()
 	m.gcUploads()
-	if n := m.pendingUploads(); n >= maxPendingUploads {
+	if n := m.pendingUploads() + m.uploadReserved; n >= maxPendingUploads {
+		m.uploadMu.Unlock()
 		return nil, fmt.Errorf("%w: %d uploads are waiting to be used; start machines with them or wait for them to expire",
 			ErrShareRequest, n)
 	}
+	m.uploadReserved++
+	m.uploadMu.Unlock()
+	defer func() {
+		m.uploadMu.Lock()
+		m.uploadReserved--
+		m.uploadMu.Unlock()
+	}()
 
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -687,7 +700,7 @@ func (m *Manager) attachOnce(ctx context.Context, mc *api.Machine, s api.ShareAt
 	if !mc.Reachable() {
 		return errors.New("the machine is not reachable yet")
 	}
-	srv, err := hostshare.Open(s.Source, s.Mode == share.ModeRO)
+	srv, err := hostshare.Open(s.Source, s.Mode == share.ModeRO, mc.ID)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", s.Source, err)
 	}
