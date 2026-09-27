@@ -232,3 +232,40 @@ func TestEvictCaeEnAjenoSiNoHayPropio(t *testing.T) {
 		t.Fatalf("sacrificó %q; sin nada propio debería ceder la ajena (svc-b)", got)
 	}
 }
+
+// G-01: la reserva de tenant de buildEntry no se suelta al volver, sino al
+// registrar la entrada y bajo el mismo g.mu. buildFn imita a buildEntry
+// (reserva y entrega la reserva en la entrada); tras el scale-out la reserva
+// ya no cuenta y la réplica sí, sin haber pasado por un momento en que
+// ninguna de las dos contara.
+func TestScaleOutSueltaLaCuotaAlRegistrar(t *testing.T) {
+	g := &Scheduler{
+		services: map[string]*entry{},
+		extra:    map[string][]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	tnt := &tenant{name: "t", maxInstances: 2}
+	g.services["svc"] = &entry{machineID: "m-0", tenant: "t", maxSessions: 1, checkedAt: time.Now()}
+	g.buildFn = func(_ context.Context, _ string, tnt *tenant, _ bool) (*entry, error) {
+		if _, err := g.reservarTenant(tnt); err != nil {
+			return nil, err
+		}
+		return &entry{machineID: "m-1", tenant: tnt.name, cuotaTenant: tnt.name, maxSessions: 1}, nil
+	}
+
+	e, err := g.scaleOut(context.Background(), "svc", tnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n := g.tenantCreando["t"]; n != 0 {
+		t.Fatalf("tras registrar la réplica quedan %d reservas del tenant, quería 0", n)
+	}
+	if e.cuotaTenant != "" {
+		t.Fatalf("la entrada registrada sigue con la reserva %q", e.cuotaTenant)
+	}
+	if n := g.tenantInstances("t"); n != 2 {
+		t.Fatalf("instancias del tenant = %d, quería 2", n)
+	}
+}

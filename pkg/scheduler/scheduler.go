@@ -289,6 +289,11 @@ type entry struct {
 	// dueño conocido (p. ej. adoptada de un arranque anterior). Se toca con g.mu.
 	tenant string
 
+	// cuotaTenant es el tenant cuya reserva de cuota (reservarTenant) sigue
+	// tomada a nombre de esta entrada hasta que se registra; vacío si no hay
+	// ninguna. Ver soltarCuotaLocked. Se toca con g.mu.
+	cuotaTenant string
+
 	// inflight cuenta las peticiones que se están atendiendo AHORA.
 	//
 	// Sin esto, "inactivo" se medía por la LLEGADA de peticiones, y una
@@ -564,6 +569,7 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 	g.mu.Lock()
 	g.services[service] = e
 	delete(g.adquiriendo, e.machineID)
+	g.soltarCuotaLocked(e)
 	g.mu.Unlock()
 	return e, nil
 }
@@ -579,7 +585,14 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	if err != nil {
 		return nil, err
 	}
-	defer liberarCuota()
+	// Si falla, se suelta aquí; si no, viaja en la entrada (cuotaTenant) y la
+	// suelta quien la registra, bajo el mismo g.mu (G-01).
+	cuotaEntregada := false
+	defer func() {
+		if !cuotaEntregada {
+			liberarCuota()
+		}
+	}()
 
 	t0 := time.Now()
 	tr := &WakeTrace{}
@@ -752,6 +765,10 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	// Quien llama la registra (primaria o réplica) y la desmarca con el mismo
 	// candado; hasta entonces sigue marcada y ningún otro acquire la toca.
 	registrada = true
+	if tnt.maxInstances > 0 {
+		e.cuotaTenant = tnt.name
+		cuotaEntregada = true
+	}
 	return e, nil
 }
 
@@ -881,6 +898,7 @@ func (g *Scheduler) scaleOut(ctx context.Context, service string, tnt *tenant) (
 	}
 	g.extra[service] = append(g.extra[service], e)
 	delete(g.adquiriendo, e.machineID)
+	g.soltarCuotaLocked(e)
 	total := 1 + len(g.extra[service])
 	g.mu.Unlock()
 	log.Printf("%s: scale-out — new replica %s (%d instances of the service)", service, short(e.machineID), total)
