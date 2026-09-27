@@ -8,14 +8,15 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
-## Unreleased
+## v0.15.0 — 2026-09-27
 
 > **⚠ Cambio incompatible: jailer es obligatorio por defecto en Linux.** Tras actualizar,
-> un daemon Linux que no corra como root, sin el usuario de servicio (`kindling`, con el
-> grupo `kvm`) o sin el binario `jailer` **deja de arrancar máquinas nuevas** — arranque en
-> frío, restaurar un snapshot y también `thaw` de las máquinas warm — hasta instalar lo que
-> falta (el error dice exactamente qué y cómo). Para seguir sin jailer a propósito, arranca
-> el daemon con **`KLING_JAILER=0`** (deja un aviso de seguridad en el log). Las máquinas
+> un daemon Linux sin el binario `jailer`, o que no corra como root, **deja de arrancar
+> máquinas nuevas** —arranque en frío, restaurar un snapshot y también `thaw` de las
+> máquinas warm— hasta instalar lo que falta (el error dice exactamente qué y cómo). Un
+> daemon root con `jailer` pero sin el usuario de servicio (`kindling`, con el grupo `kvm`)
+> sigue jaileando como root, con aviso. Para seguir sin jailer a propósito, arranca el
+> daemon con **`KLING_JAILER=0`** (deja un aviso de seguridad en el log). Las máquinas
 > ya en marcha, reanudar una pausada y los comandos de solo lectura no se ven afectados.
 > Detalles en "Cambios incompatibles".
 
@@ -23,6 +24,30 @@ Ronda de remediación de una auditoría completa del núcleo (`internal/machine`
 `internal/net`, `internal/share`, `pkg/scheduler`, el agente invitado y el daemon):
 carreras de verdad bajo `-race`, DoS del host por un invitado hostil, y varias mejoras de
 arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapshots.
+
+### Seguridad
+
+- **Recorrido de rutas en nombres de la URL.** El enrutador de Go desescapa `%2F` antes de
+  casar la ruta, así que `DELETE /volumes/..%2Fimages%2Fmin` borraba la imagen base, y
+  `GET /images/..%2Fvolumes%2Fdatos/files` leía un volumen ajeno. El daemon rechaza ahora
+  con 400 toda ruta con una barra escapada, y los nombres de imagen y volumen (también los
+  que llegan en el cuerpo, como la imagen de `POST /machines`, y la base que declara una
+  receta) se validan donde se construye la ruta.
+- **La memoria de las máquinas congeladas ya no la lee cualquiera.** Firecracker crea
+  `mem.file` y `snap.file` con 0644 dentro de directorios 0755: cualquier cuenta del host
+  leía la RAM del invitado. Los volcados quedan 0640 (también los que ya había, al arrancar
+  el daemon) y `machines/`, `snapshots/`, `volumes/` e `images/` pasan a 0750 con el grupo
+  del VMM, y `jails/` a 0700.
+- **Un VMM comprometido ya no puede reescribir el kernel, las imágenes ni los dorados.**
+  Eran propiedad del usuario del VMM (`kindling`), que es lectura y escritura para él: un
+  Firecracker comprometido podía persistir en todas las microVMs futuras del host. Ahora
+  son de `root` con el grupo del VMM (0640): los lee, no los escribe. Al restaurar un
+  dorado con jailer, la ruta de su overlay dentro del jail lleva la copia propia de la
+  instancia, así que el overlay dorado tampoco se abre nunca en escritura. Los enlaces del
+  jail ya no ceden la propiedad del fichero original, no se siguen enlaces simbólicos al
+  ajustar permisos, y las recetas (que pueden llevar secretos) quedan de `root` con 0600.
+  Sin jailer (`KLING_JAILER=0`) el overlay de los dorados conserva la escritura por grupo,
+  porque ahí Firecracker abre la ruta del host tal cual.
 
 ### Arreglado
 
