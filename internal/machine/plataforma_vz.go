@@ -184,3 +184,11 @@ func memoriaFisicaMiB() int64 {
 	}
 	return int64(leerUint64LE(s) >> 20)
 }
+
+// entornoVMM es lo que kling-vz recibe además del entorno del daemon: la raíz
+// de datos, con la que se encierra en su perfil de sandbox al crear la VM
+// (vz/cmd/kling-vz/kling-vz.sb): lee bajo la raíz y escribe solo en su
+// directorio, snapshots/ y volumes/.
+func (m *Manager) entornoVMM() []string {
+	return []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
+}

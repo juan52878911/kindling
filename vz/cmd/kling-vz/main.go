@@ -93,7 +93,13 @@ func run() int {
 	meter := footprint.NewMeter()
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
+	// Nada de lo que crea este proceso (el socket de la API, en particular)
+	// debe nacer legible por otros usuarios, ni siquiera el instante entre
+	// crearlo y el chmod.
+	syscall.Umask(0o077)
+
 	peers := peercred.New()
+	confine := confinamiento(*sock, logf)
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track},
 		NewNet: func(c server.NetConfig) (server.Network, error) {
@@ -114,6 +120,7 @@ func run() int {
 		Logf:      logf,
 		Policy:    policy,
 		Resolver:  resolver,
+		Confine:   confine,
 	})
 
 	// Un socket que sobra de un proceso muerto impediría escuchar. Solo se
@@ -166,4 +173,41 @@ func run() int {
 	}
 	_ = hs.Close()
 	return code
+}
+
+// confinamiento devuelve cómo encerrar este proceso en su sandbox, o nil si no
+// hay que hacerlo. El daemon pasa su raíz de datos en KLING_VZ_CONFINE_ROOT (una
+// variable y no un argumento: un kling-vz anterior la ignora, mientras que un
+// argumento desconocido lo haría salir). KLING_VZ_NO_SANDBOX=1 lo apaga, para
+// diagnosticar un perfil que una versión nueva de macOS rompa.
+//
+// Las rutas se resuelven antes: el sandbox compara rutas reales, y en macOS
+// /tmp es /private/tmp.
+func confinamiento(sock string, logf func(string, ...any)) func(bool) error {
+	root := os.Getenv("KLING_VZ_CONFINE_ROOT")
+	if root == "" {
+		logf("not confined: KLING_VZ_CONFINE_ROOT is not set (the daemon sets it)")
+		return nil
+	}
+	if os.Getenv("KLING_VZ_NO_SANDBOX") == "1" {
+		logf("WARNING: not confined, KLING_VZ_NO_SANDBOX=1")
+		return nil
+	}
+	real := func(p string) string {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return p
+	}
+	root, mdir := real(root), real(filepath.Dir(sock))
+	return func(conRed bool) error {
+		if err := confinar(root, mdir, conRed); err != nil {
+			return err
+		}
+		logf("confined: reads under %s, writes only to %s, snapshots/ and volumes/, network out: %v", root, mdir, conRed)
+		return nil
+	}
 }

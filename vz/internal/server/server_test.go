@@ -540,3 +540,57 @@ func TestShutdown(t *testing.T) {
 		t.Fatal("Shutdown must close the network")
 	}
 }
+
+// El confinamiento se aplica una vez, al crear la VM, con la red que diga la
+// política en ese momento; y después no se puede ampliar el egress a algo que
+// el sandbox ya no deja hacer (estrechar sí).
+func TestConfinarAlCrearYNoAmpliarElEgress(t *testing.T) {
+	r := newRig(t)
+	var llamadas []bool
+	r.srv.d.Confine = func(conRed bool) error { llamadas = append(llamadas, conRed); return nil }
+
+	r.configure(t.TempDir())
+	r.must("PUT", "/kling/network", `{"egress":"none"}`)
+	if len(llamadas) != 0 {
+		t.Fatal("se confinó antes de crear la VM")
+	}
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	if len(llamadas) != 1 || llamadas[0] {
+		t.Fatalf("Confine = %v, quería una llamada sin red", llamadas)
+	}
+	r.mustFail("PUT", "/kling/network", `{"egress":"internet"}`, "can't be enabled")
+	r.mustFail("PUT", "/kling/network", `{"egress":"allowlist","allow_domains":["a.com"]}`, "can't be enabled")
+	r.must("PUT", "/kling/network", `{"egress":"none"}`)
+	if r.srv.d.Policy.Mode() != egress.None {
+		t.Fatal("la política cambió pese al rechazo")
+	}
+}
+
+// Con salida al crear, el sandbox la permite y se puede cambiar de modo.
+func TestConfinarConRed(t *testing.T) {
+	r := newRig(t)
+	var llamadas []bool
+	r.srv.d.Confine = func(conRed bool) error { llamadas = append(llamadas, conRed); return nil }
+	r.configure(t.TempDir())
+	r.must("PUT", "/kling/network", `{"egress":"internet"}`)
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	if len(llamadas) != 1 || !llamadas[0] {
+		t.Fatalf("Confine = %v, quería una llamada con red", llamadas)
+	}
+	r.must("PUT", "/kling/network", `{"egress":"allowlist","allow_domains":["a.com"]}`)
+}
+
+// Si no se puede confinar, la VM no se crea: mejor no arrancar que arrancar
+// sin la barrera.
+func TestSinConfinarNoSeArranca(t *testing.T) {
+	r := newRig(t)
+	r.srv.d.Confine = func(bool) error { return errors.New("perfil roto") }
+	r.configure(t.TempDir())
+	r.mustFail("PUT", "/actions", `{"action_type":"InstanceStart"}`, "perfil roto")
+	r.f.mu.Lock()
+	creadas := len(r.f.vms)
+	r.f.mu.Unlock()
+	if creadas != 0 {
+		t.Fatal("se creó la VM sin confinar")
+	}
+}

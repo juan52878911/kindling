@@ -79,6 +79,12 @@ type Deps struct {
 	// Resolver, si no es nil, siembra la allowlist al recibir la política.
 	Resolver *egress.Resolver
 	Policy   *egress.Policy
+	// Confine, si no es nil, encierra el proceso en su perfil de sandbox
+	// (conRed: si puede abrir conexiones al exterior). Se llama UNA vez, justo
+	// antes de crear o restaurar la VM, que es cuando ya se sabe la política
+	// de salida. Un fallo impide crear la VM: preferimos no arrancar a
+	// arrancar sin la barrera.
+	Confine func(conRed bool) error
 }
 
 type state int
@@ -127,6 +133,9 @@ type Server struct {
 	doneOnce sync.Once
 
 	globoEn []time.Duration // ver reaplicarGlobo; campo para las pruebas
+
+	// confinado: ya se aplicó Deps.Confine; confinadoConRed, con qué red.
+	confinado, confinadoConRed bool
 }
 
 func New(d Deps) *Server {
@@ -749,6 +758,17 @@ func (s *Server) putKlingNetwork(w http.ResponseWriter, r *http.Request) {
 		fault(w, err)
 		return
 	}
+	// Confinado sin red, el sandbox ya no deja abrir conexiones al exterior:
+	// aceptar ahora internet o allowlist sería decir que sí y que el invitado
+	// no llegara a ninguna parte. Estrechar (o repetir none) sí vale.
+	s.mu.Lock()
+	sinRed := s.confinado && !s.confinadoConRed
+	s.mu.Unlock()
+	if sinRed && mode != egress.None {
+		fault(w, fmt.Errorf("egress %s can't be enabled after the VM was created without network: "+
+			"kling-vz is confined and can't open outside connections; set it before InstanceStart or snapshot/load", mode))
+		return
+	}
 	s.d.Policy.Set(mode, n.AllowDomains)
 	if mode == egress.Allowlist && s.d.Resolver != nil {
 		// En segundo plano: resolver N dominios puede tardar segundos y el
@@ -866,12 +886,29 @@ func (s *Server) create() error {
 	if err := s.ensureNet(); err != nil {
 		return err
 	}
+	if err := s.confinar(); err != nil {
+		return err
+	}
 	vm, err := s.d.Factory.Create(s.spec.Clone(), spec.TranslateBootArgs(s.spec.BootSource.BootArgs), s.net)
 	if err != nil {
 		return fmt.Errorf("creating the VM: %w", err)
 	}
 	s.vm = vm
 	go s.watch(vm)
+	return nil
+}
+
+// confinar aplica Deps.Confine la primera vez, con la red que pide la política
+// de salida en ese momento. Se llama con s.mu tomado.
+func (s *Server) confinar() error {
+	if s.d.Confine == nil || s.confinado {
+		return nil
+	}
+	conRed := s.d.Policy.Mode() != egress.None
+	if err := s.d.Confine(conRed); err != nil {
+		return fmt.Errorf("confining kling-vz in its sandbox: %w", err)
+	}
+	s.confinado, s.confinadoConRed = true, conRed
 	return nil
 }
 
