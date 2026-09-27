@@ -73,7 +73,8 @@ func jailerBinPresent() bool {
 // son si el binario está en PATH y si el usuario sin privilegios (con el
 // grupo kvm) quedó listo (ver Privileges.Enabled); userReason es por qué no
 // lo está (Privileges.Motivo), para que el bloqueo diga la causa real. Vacío,
-// se usa un texto genérico.
+// se usa un texto genérico. root es si el daemon corre como root: con el
+// binario, basta para jailear aunque falte el usuario (como antes de P7).
 //
 // jailed dice si hay que arrancar dentro del jail. blocked, si no está vacío,
 // es el motivo por el que Run, runFrom y Thaw deben NEGARSE a arrancar
@@ -84,7 +85,7 @@ func jailerBinPresent() bool {
 // es el aviso de SEGURIDAD que hay que imprimir UNA VEZ al arrancar el daemon:
 // solo con el opt-out explícito, porque apagar la barrera más fuerte a
 // propósito merece ruido, no una nota discreta en un log que nadie relee.
-func decidirJailer(posible bool, forced string, binPresent, userReady bool, userReason string) (jailed bool, blocked, startupWarn string) {
+func decidirJailer(posible bool, forced string, binPresent, userReady bool, userReason string, root bool) (jailed bool, blocked, startupWarn string) {
 	if !posible {
 		return false, "", ""
 	}
@@ -104,6 +105,20 @@ func decidirJailer(posible bool, forced string, binPresent, userReady bool, user
 	}
 	if binPresent && userReady {
 		return true, "", ""
+	}
+	// Binario y root, pero sin usuario de servicio: el daemon de antes de P7
+	// jaileaba igual, como root (ver jailerArgv), y negarse aquí dejaba sin
+	// arrancar ni despertar nada a quien actualizaba ese host. Se sigue
+	// jaileando, con aviso: el chroot sigue ahí; lo que falta es bajar de root.
+	if binPresent && root {
+		motivo := userReason
+		if motivo == "" {
+			motivo = "the unprivileged service user doesn't exist or lacks the kvm group"
+		}
+		return true, "", "jailer runs Firecracker as ROOT, with no privilege drop inside the " +
+			"jail: " + motivo + " (sudo useradd --system --no-create-home --shell " +
+			"/usr/sbin/nologin kindling && sudo usermod -aG kvm kindling, or pass " +
+			"-run-as/KLING_RUN_AS)"
 	}
 	var missing []string
 	if !binPresent {

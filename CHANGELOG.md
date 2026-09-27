@@ -122,8 +122,10 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
 
 - **Jailer pasa de opcional a obligatorio por defecto en Linux.** `kling run`/
   `kling daemon` se niegan a arrancar una máquina **nueva** (arranque en frío, restaurar
-  un snapshot, `thaw`) si no encuentran el binario `jailer` y el usuario de servicio sin
-  privilegios listos — antes caían en silencio a correr sin jailer. El arreglo es instalar
+  un snapshot, `thaw`) si no encuentran el binario `jailer`, o si el daemon no es root y
+  el usuario de servicio sin privilegios no está listo — antes caían en silencio a correr
+  sin jailer. Un daemon root con `jailer` pero sin el usuario de servicio sigue jaileando
+  como root, igual que antes, con un aviso de seguridad al arrancar. El arreglo es instalar
   jailer y el usuario (el mensaje de error dice los comandos exactos), o fijar
   `KLING_JAILER=0` para seguir sin él a propósito, lo que ahora deja un aviso de seguridad
   en el log del daemon al arrancar. Máquinas ya en marcha y comandos de solo lectura no se

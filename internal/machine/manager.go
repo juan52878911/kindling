@@ -309,7 +309,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	priv, warn := privilegiosPlataforma(runAs)
-	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled, priv.Motivo)
+	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled, priv.Motivo, os.Geteuid() == 0)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
 		jailerJailed: jailed, JailerBlocked: jailerBlocked, JailerWarning: jailerWarn,
