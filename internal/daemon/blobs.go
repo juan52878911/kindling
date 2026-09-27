@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // blobTarget es el fichero de una parte de una imagen.
@@ -73,21 +74,6 @@ func (s *Server) resolveBlob(name, part string, write bool) (blobTarget, error) 
 	}
 }
 
-// sha256File calcula el sha256 de un fichero en hexadecimal, leyéndolo
-// entero.
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // blobSidecarPath es dónde vive el sha256 cacheado de un blob de imagen.
 func blobSidecarPath(path string) string { return path + ".sha256" }
 
@@ -112,7 +98,7 @@ func cachedSHA256(path string) (string, error) {
 			return parts[2], nil
 		}
 	}
-	hash, err := sha256File(path)
+	hash, err := digest.File(path)
 	if err != nil {
 		return "", err
 	}

@@ -1032,12 +1032,14 @@ func (m *Manager) overlayTemplatePath() string {
 
 // ensureOverlayTemplate la construye si falta.
 //
-// Se formatea en un .tmp y se renombra, para que EXISTIR IMPLIQUE ESTAR
-// COMPLETA. Comprobar solo la existencia sobre el nombre definitivo sería una
-// trampa: si el daemon muere entre el Truncate y el mkfs queda medio giga de
-// ceros sin sistema de ficheros, y a partir de ahí TODAS las microVMs arrancan
-// con un /dev/vdb que no monta — un fallo que aparece dentro del invitado y no
-// en el log del daemon.
+// Se formatea en un .tmp y se renombra con durable.Renombrar, para que EXISTIR
+// IMPLIQUE ESTAR COMPLETA. Comprobar solo la existencia sobre el nombre
+// definitivo sería una trampa: si el daemon muere entre el Truncate y el mkfs
+// queda medio giga de ceros sin sistema de ficheros, y a partir de ahí TODAS
+// las microVMs arrancan con un /dev/vdb que no monta — un fallo que aparece
+// dentro del invitado y no en el log del daemon. Un rename sin fsync previo
+// del temporal ni del directorio deja la misma trampa abierta tras un corte
+// de luz: el rename puede haber quedado solo en la cache.
 func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 	m.templateMu.Lock()
 	defer m.templateMu.Unlock()
@@ -1052,7 +1054,11 @@ func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := durable.Renombrar(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // newOverlay deja listo el disco escribible de una microVM.

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // FICHEROS DENTRO DE LAS IMÁGENES.
@@ -103,7 +104,7 @@ func (m *Manager) PutImageFile(ctx context.Context, image, p, src string, mode o
 	if err != nil {
 		return res, err
 	}
-	quiero, err := fileDigest(src)
+	quiero, err := digest.File(src)
 	if err != nil {
 		return res, fmt.Errorf("reading %s: %w", src, err)
 	}

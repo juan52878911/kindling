@@ -2,12 +2,9 @@ package machine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +18,7 @@ import (
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 
 	"github.com/juan52878911/kindling/pkg/durable"
 )
@@ -301,11 +299,11 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	// el snap volcado, la memoria perforada). El mem.file se deja fuera a
 	// propósito: es el grande y volver a leerlo entero en cada restauración mataría
 	// los ~30 ms del thaw. Ver verifyIntegrity para el porqué completo.
-	rootfsSHA, err := fileSHA256(goldOverlay)
+	rootfsSHA, err := digest.File(goldOverlay)
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
 	}
-	snapSHA, err := fileSHA256(snapPath)
+	snapSHA, err := digest.File(snapPath)
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of state dump: %w", err)
 	}
@@ -563,7 +561,7 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 		if chk.want == "" {
 			continue
 		}
-		got, err := fileSHA256(filepath.Join(snapDir, chk.file))
+		got, err := digest.File(filepath.Join(snapDir, chk.file))
 		if err != nil {
 			return fmt.Errorf("couldn't read %s to verify its integrity: %w", chk.file, err)
 		}
@@ -626,21 +624,6 @@ func (m *Manager) anotarIntegridad(name, snapDir string) {
 	m.mu.Unlock()
 }
 
-// fileSHA256 devuelve el sha256 de un fichero en hexadecimal. Con crypto/sha256
-// de la stdlib: cero dependencias nuevas.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // huellaKernel es el kernelSHA256 cacheado de Manager.kernelSHA, junto con el
 // tamaño y la fecha del vmlinux que lo produjeron (K2). Igual que huellaSnapshot:
 // basta un stat para saber si sigue valiendo, en vez de volver a hashear.
@@ -673,7 +656,7 @@ func (m *Manager) kernelHash() (string, error) {
 		return h.hash, nil
 	}
 
-	hash, err := fileSHA256(path)
+	hash, err := digest.File(path)
 	if err != nil {
 		return "", err
 	}

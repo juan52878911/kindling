@@ -365,20 +365,6 @@ func (m *Manager) hasSnapshot(id string) bool {
 	return true
 }
 
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [20]byte
-	p := len(b)
-	for i > 0 {
-		p--
-		b[p] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(b[p:])
-}
-
 // watch vigila periódicamente que lo que decimos que corre, corra de verdad.
 //
 // Una microVM puede morir por su cuenta: pánico del kernel invitado, OOM del
