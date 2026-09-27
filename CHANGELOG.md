@@ -8,7 +8,7 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
-## Unreleased — v0.14.0
+## v0.14.0 — 2026-09-26
 
 **La CLI, ordenada, y el gateway de IA sin dominio.** Tres sustantivos —imagen (rootfs, arranca en frío) →
 plantilla (snapshot dorado, arranca en ms) → máquina— y doce verbos de uso

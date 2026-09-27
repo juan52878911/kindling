@@ -17,7 +17,7 @@ A Firecracker microVM runtime with golden snapshots: machines that wake in
 milliseconds from a file on disk, with kernel-level isolation, behind a docker-like CLI
 called `kling`. What runs inside is up to you, and `kling` grows through extensions.
 
-> Status: **v0.13.0 (unreleased) — one repository, one release.** `kling` manages
+> Status: **v0.14.0 — one repository, one release, a simpler CLI.** `kling` manages
 > microVMs with networking, golden snapshots, isolation, persistent volumes, layered
 > images, events, image builders, a documented daemon API and throwaway sandboxes with
 > streaming exec. Hosting MCP servers on demand — the use kindling was born for — and
@@ -186,7 +186,7 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # A specific version (it installs the latest release by default):
-curl -fsSL .../install.sh | sh -s -- --tag v0.13.0
+curl -fsSL .../install.sh | sh -s -- --tag v0.14.0
 
 # Custom prefix:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local

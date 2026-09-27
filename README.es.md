@@ -18,7 +18,7 @@ milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detr�
 al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
 extensiones.
 
-> Estado: **v0.13.0 (sin publicar) — un repositorio, una release.** `kling` gestiona
+> Estado: **v0.14.0 — un repositorio, una release, una CLI más simple.** `kling` gestiona
 > microVMs con red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por
 > capas, eventos, constructores de imágenes, un API del daemon documentado y sandboxes de
 > usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
@@ -188,7 +188,7 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # Versión concreta (por defecto instala la última release):
-curl -fsSL .../install.sh | sh -s -- --tag v0.13.0
+curl -fsSL .../install.sh | sh -s -- --tag v0.14.0
 
 # Prefijo personalizado:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
