@@ -80,7 +80,13 @@ type Config struct {
 	Resolver *egress.Resolver
 	// Dial abre las conexiones de salida en el host. Nil = net.Dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
-	Logf func(format string, args ...any)
+	// PeerAllowed, si no es nil, decide si se acepta una conexión a un
+	// reenvío. Escuchan en 127.0.0.1, donde en macOS conecta cualquier
+	// usuario del Mac, y detrás está el agente del invitado (exec, ficheros)
+	// sin más autenticación: kling-vz la usa para admitir solo a los procesos
+	// de su propio usuario (ver internal/peercred). Nil = se aceptan todas.
+	PeerAllowed func(net.Conn) bool
+	Logf        func(format string, args ...any)
 }
 
 // Net es la red de una máquina.
@@ -489,6 +495,11 @@ func (n *Net) acceptForward(l net.Listener, port uint16) {
 			return
 		}
 		go func() {
+			if n.cfg.PeerAllowed != nil && !n.cfg.PeerAllowed(c) {
+				n.cfg.Logf("forward to guest port %d: refused a connection from %s, not opened by this user", port, c.RemoteAddr())
+				c.Close()
+				return
+			}
 			ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 			gc, err := gonet.DialTCPWithBind(ctx, n.stack,
 				tcpip.FullAddress{NIC: nicID, Addr: tcpip.AddrFrom4(GatewayIP.As4())},

@@ -113,8 +113,16 @@ invitados tienen la misma IP y viven en redes de espacio de usuario separadas. E
 host los alcanza por los puertos que abre su ayudante en `127.0.0.1`, que el núcleo
 guarda en `Machine.Forwards` y resuelve con `Machine.Addr(puerto)`. Quien hoy
 construye `mc.IP + ":" + puerto` (el proxy del daemon, exec, shell, el scheduler y
-kindling-mcp) pasa a usar `Addr`, que en Linux sigue devolviendo `IP:puerto`. Es
-el mismo alcance que ya tiene la ruta al veth en Linux: cualquiera en el host.
+kindling-mcp) pasa a usar `Addr`, que en Linux sigue devolviendo `IP:puerto`.
+
+En `127.0.0.1` de un Mac puede conectar cualquier usuario del Mac, y detrás del
+puerto 8080 está el agente del invitado, con exec y ficheros. Por eso `kling-vz`
+solo acepta en un reenvío las conexiones que abre un proceso **de su mismo
+usuario**: macOS no da las credenciales del otro extremo de un socket TCP, así que
+busca con `libproc`, entre los procesos de su usuario, cuál tiene abierto ese
+socket, y si ninguno lo tiene corta la conexión (`vz/internal/peercred`). Cuesta
+~0,15 ms la primera vez, ~5 µs después (recuerda los últimos procesos dueños,
+normalmente el daemon) y ~2,5 ms en el peor caso con 800 procesos.
 
 Los puertos que se reenvían son `api.GuestPort` más los de la etiqueta
 `kling.ports`. Se piden tras cada arranque o descongelación, porque un proceso

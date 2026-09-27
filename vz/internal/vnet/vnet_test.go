@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -417,5 +418,58 @@ func TestNewCreatesSocketpair(t *testing.T) {
 	st, err := n.VMFile().Stat()
 	if err != nil || st.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("VM file is not a socket: %v %v", st, err)
+	}
+}
+
+// Una conexión al reenvío que PeerAllowed rechaza (otro usuario del Mac) se
+// cierra sin llegar al invitado; las que acepta pasan como siempre.
+func TestForwardRechazaLoQueNoAdmitePeerAllowed(t *testing.T) {
+	r := newRig(t, "")
+	var admitir atomic.Bool
+	var llegaron atomic.Int32
+	r.n.cfg.PeerAllowed = func(net.Conn) bool { return admitir.Load() }
+
+	l, err := gonet.ListenTCP(r.g.s, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(GuestIP.As4()), Port: 8080}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			llegaron.Add(1)
+			go func() {
+				defer c.Close()
+				io.WriteString(c, "hola\n")
+			}()
+		}
+	}()
+	addr, err := r.n.Forward(8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leer := func() string {
+		c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		b, _ := io.ReadAll(c)
+		return string(b)
+	}
+	if got := leer(); got != "" {
+		t.Fatalf("una conexión rechazada recibió %q del invitado", got)
+	}
+	if n := llegaron.Load(); n != 0 {
+		t.Fatalf("la conexión rechazada llegó al invitado (%d)", n)
+	}
+	admitir.Store(true)
+	if got := leer(); got != "hola\n" {
+		t.Fatalf("una conexión admitida recibió %q", got)
 	}
 }

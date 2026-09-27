@@ -21,6 +21,7 @@ import (
 
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
+	"github.com/juan52878911/kindling/vz/internal/peercred"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
 	"github.com/juan52878911/kindling/vz/internal/vzvm"
@@ -92,6 +93,7 @@ func run() int {
 	meter := footprint.NewMeter()
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
+	peers := peercred.New()
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track},
 		NewNet: func(c server.NetConfig) (server.Network, error) {
@@ -102,6 +104,9 @@ func run() int {
 				Policy:   c.Policy,
 				Resolver: c.Resolver,
 				Logf:     logf,
+				// Solo los procesos de este usuario llegan al agente del
+				// invitado por el reenvío (ver internal/peercred).
+				PeerAllowed: peers.Allowed,
 			})
 		},
 		Footprint: meter.Bytes,

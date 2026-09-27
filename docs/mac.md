@@ -164,6 +164,10 @@ piden tras cada arranque y cada descongelación. El proxy del daemon, exec, shel
 y `pkg/scheduler` ya los usan (`api.Machine.Addr`); quien construya
 `IP + ":" + puerto` a mano no llegará en macOS.
 
+Solo los procesos de tu usuario pasan por esos puertos: otra cuenta del Mac que
+conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (ver
+[`backend-vz.md`](backend-vz.md#por-qué-puertos-en-loopback-y-no-la-ip-del-invitado)).
+
 ## Límites frente a Linux
 
 | | Linux (firecracker) | macOS (vz) |
