@@ -37,12 +37,15 @@ cannot work here, say why in one line).
 
 **Question 1 — header "Runtime", single choice.** "Where should microVMs run?"
 
-- **Local daemon (this machine)** — "Microvms here, no server. macOS: Apple
+- **Local daemon (this machine)** — "MicroVMs here, no server. macOS: Apple
   Silicon + macOS 14+, the vz backend ships with kling (`kling-vz`), needs
-  `brew install e2fsprogs`, no root. Linux: needs `/dev/kvm` and nftables;
-  `kling up` prints the sudo commands instead of running them. Cost: 5–10 min
-  once; a frozen machine then costs 0 RAM. Not possible on an Intel Mac or a
-  Linux without KVM."
+  `brew install e2fsprogs`, no root; but macOS builds no images: the kernel,
+  the base image and any MCP image are copied from a Linux arm64 daemon
+  (`kling image copy … -from ssh://…`), so without such a host pick Remote.
+  Linux: needs `/dev/kvm` and nftables; `kling up` prints the sudo commands
+  instead of running them, and builds images itself. Cost: 5–10 min once; a
+  frozen machine then costs 0 RAM. Not possible on an Intel Mac or a Linux
+  without KVM."
 - **Remote daemon over SSH** — "kling talks to a Linux host with KVM through
   `ssh://user@host`, like `docker context`; the daemon never opens a network
   port. Nothing to virtualize here. Cost: a host that already runs `kling
@@ -131,6 +134,11 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
    and `kling up` again. If they prefer not to, `kling daemon` in a terminal
    is enough for now.
 4. `kling status` must show the daemon responding (backend vz).
+5. Images: `kling up -check` will list the guest kernel and `min.ext4` as
+   missing until they are copied from a Linux **arm64** daemon:
+   `kling image copy min -from ssh://user@linux-arm64-host` (streams kernel,
+   base and recipe daemon to daemon; docs/mac.md). Without such a host the
+   Mac daemon cannot run anything yet: say so and offer the Remote runtime.
 
 **Local, Linux with KVM:** `kling up -check`, then `kling up`. It **prints**
 the commands that need root (nftables, the `kindling` user, the systemd
@@ -162,7 +170,10 @@ Needs a reachable daemon (`kling status`). Then:
 2. Add each chosen server: `kling mcp add <registry-id>` (builds the image
    and captures the catalog; 1–3 minutes each, show progress). On Apple
    Silicon add `-bundle` for node servers: it takes a cold `initialize` from
-   ~16 s to ~2.5 s.
+   ~16 s to ~2.5 s. A local macOS daemon cannot build: run `kling mcp add`
+   against the Linux arm64 daemon (`-H ssh://…`), then
+   `kling image copy <service> -from ssh://…` and `kling mcp import <service>
+   -image <service>` on the Mac (docs/mac.md).
 3. `kling mcp ls` — every service with its tool count and health; `kling mcp
    health` probes the ones never probed.
 4. Connect to Claude Code: `kling connect -all -install claude-code`. It
