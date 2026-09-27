@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-label="MCP gateway flow: the agent connects to a single _all entry point with three meta-tools; the gateway routes each call to the right service, thawing its frozen microVM in about 30 ms; inside, kling-bridge turns stdio into HTTP; idle machines freeze again">
+  <defs>
+    <marker id="g-ice" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#78BEF0"/></marker>
+    <marker id="g-ember" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#FF8C32"/></marker>
+    <style>
+      .t { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #e6edf3; }
+      .m { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #e6edf3; }
+      .dim { fill: #9aa4b2; } .ice { fill: #78BEF0; } .ember { fill: #FF8C32; }
+      .box { fill: #161b24; stroke: #2b3442; stroke-width: 1.5; }
+      .vm { fill: #121a26; stroke: #78BEF0; stroke-width: 1.5; }
+      .fro { fill: #101720; stroke: #78BEF0; stroke-width: 1.5; stroke-dasharray: 6 4; }
+      .l-ice { stroke: #78BEF0; stroke-width: 2; fill: none; marker-end: url(#g-ice); }
+      .l-ember { stroke: #FF8C32; stroke-width: 2; fill: none; marker-end: url(#g-ember); }
+    </style>
+  </defs>
+  <rect width="1200" height="560" rx="14" fill="#0E1118"/>
+  <text x="40" y="46" class="t" font-size="24" font-weight="600">A tool call through the MCP gateway</text>
+  <text x="40" y="72" class="t dim" font-size="15">kling mcp add packages the server, boots it once, asks what it can do and freezes it. From then on the gateway wakes it per call.</text>
+
+  <!-- agent -->
+  <rect x="40" y="120" width="240" height="200" rx="10" class="box"/>
+  <text x="160" y="150" class="t" font-size="17" font-weight="600" text-anchor="middle">Agent</text>
+  <text x="160" y="172" class="t dim" font-size="12" text-anchor="middle">Claude Code · opencode · Cursor…</text>
+  <text x="160" y="200" class="m" font-size="12" text-anchor="middle">kling connect -all -install all</text>
+  <text x="160" y="226" class="t dim" font-size="12" text-anchor="middle">one MCP entry, three meta-tools:</text>
+  <text x="160" y="246" class="m ice" font-size="12" text-anchor="middle">find_tools · describe_tool · call_tool</text>
+  <text x="160" y="272" class="t dim" font-size="12" text-anchor="middle">≈248 tokens of context for 3 services</text>
+  <text x="160" y="290" class="t dim" font-size="12" text-anchor="middle">vs ≈4327 with all 28 schemas loaded</text>
+  <text x="160" y="308" class="t dim" font-size="11" text-anchor="middle">(inventory travels in the handshake)</text>
+
+  <path d="M280 220 L358 220" class="l-ice"/>
+  <text x="319" y="208" class="m dim" font-size="11" text-anchor="middle">/mcp/_all</text>
+  <text x="319" y="238" class="t dim" font-size="10" text-anchor="middle">Bearer token</text>
+
+  <!-- gateway -->
+  <rect x="360" y="120" width="280" height="200" rx="10" class="box"/>
+  <text x="500" y="150" class="t" font-size="17" font-weight="600" text-anchor="middle">Gateway</text>
+  <text x="500" y="170" class="m" font-size="12" text-anchor="middle">kling mcp serve</text>
+  <text x="500" y="196" class="t dim" font-size="12" text-anchor="middle">catalog on disk: listing tools wakes nothing</text>
+  <text x="500" y="216" class="t dim" font-size="12" text-anchor="middle">sticky sessions (Mcp-Session-Id minted here)</text>
+  <text x="500" y="236" class="t dim" font-size="12" text-anchor="middle">replicas per service under concurrency</text>
+  <text x="500" y="256" class="t dim" font-size="12" text-anchor="middle">type repair · bilingual search · self-heal</text>
+  <text x="500" y="282" class="m ember" font-size="12" text-anchor="middle">-ephemeral: one microVM per action</text>
+  <text x="500" y="300" class="t dim" font-size="11" text-anchor="middle">19 ms end to end with -prewarm, 2 ms of execution</text>
+
+  <!-- services -->
+  <rect x="700" y="100" width="460" height="330" rx="12" fill="#0b0f16" stroke="#2b3442" stroke-width="1.5"/>
+  <text x="720" y="128" class="t" font-size="15" font-weight="600">services, each in its own microVM</text>
+
+  <rect x="720" y="146" width="200" height="120" rx="10" class="vm"/>
+  <text x="820" y="170" class="t" font-size="14" font-weight="600" text-anchor="middle">filesystem · running</text>
+  <text x="820" y="192" class="m dim" font-size="11" text-anchor="middle">:8080/mcp</text>
+  <text x="820" y="212" class="t dim" font-size="12" text-anchor="middle">kling-bridge → stdio server</text>
+  <text x="820" y="230" class="t dim" font-size="11" text-anchor="middle">one child process per session</text>
+  <text x="820" y="252" class="m ember" font-size="11" text-anchor="middle">tool call, hot: 9 ms</text>
+
+  <rect x="940" y="146" width="200" height="120" rx="10" class="fro"/>
+  <text x="1040" y="170" class="t" font-size="14" font-weight="600" text-anchor="middle">memory · frozen</text>
+  <text x="1040" y="192" class="t dim" font-size="12" text-anchor="middle">0 CPU · 0 RAM</text>
+  <text x="1040" y="212" class="t dim" font-size="12" text-anchor="middle">persistent: state survives</text>
+  <text x="1040" y="230" class="t dim" font-size="11" text-anchor="middle">freeze/thaw of its instance</text>
+  <text x="1040" y="252" class="m ice" font-size="11" text-anchor="middle">thaw ~30 ms on first call</text>
+
+  <rect x="720" y="286" width="200" height="120" rx="10" class="vm"/>
+  <text x="820" y="310" class="t" font-size="14" font-weight="600" text-anchor="middle">everything · native HTTP</text>
+  <text x="820" y="332" class="t dim" font-size="12" text-anchor="middle">no bridge: listens on $PORT</text>
+  <text x="820" y="350" class="t dim" font-size="12" text-anchor="middle">serves the protocol at /mcp</text>
+  <text x="820" y="372" class="m dim" font-size="11" text-anchor="middle">egress none | internet | allowlist</text>
+  <text x="820" y="392" class="m dim" font-size="11" text-anchor="middle">secrets via MMDS, never in a snapshot</text>
+
+  <rect x="940" y="286" width="200" height="120" rx="10" class="box"/>
+  <text x="1040" y="310" class="t" font-size="14" font-weight="600" text-anchor="middle">engram · linked</text>
+  <text x="1040" y="332" class="t dim" font-size="12" text-anchor="middle">an external MCP server</text>
+  <text x="1040" y="350" class="t dim" font-size="12" text-anchor="middle">outside kindling, only routed</text>
+  <text x="1040" y="372" class="m dim" font-size="11" text-anchor="middle">kling mcp link name url</text>
+
+  <path d="M640 200 L718 200" class="l-ember"/>
+  <text x="679" y="188" class="m ember" font-size="11" text-anchor="middle">proxy</text>
+  <path d="M640 230 C 690 230, 690 132, 1040 132 L 1040 144" class="l-ice"/>
+    <path d="M640 260 C 680 260, 680 340, 718 340" class="l-ember"/>
+  <path d="M640 290 C 680 290, 680 418, 1040 418 L 1040 408" class="l-ice"/>
+
+  <!-- footer -->
+  <text x="40" y="380" class="t" font-size="15" font-weight="600">The loop</text>
+  <text x="40" y="404" class="t dim" font-size="13">1. Agent calls <tspan class="m">call_tool memory.create_entities</tspan>. 2. Gateway finds the service; its instance is frozen.</text>
+  <text x="40" y="424" class="t dim" font-size="13">3. The daemon restores it from its snapshot (~30 ms) with the server already listening. 4. Call proxied to <tspan class="m">:8080/mcp</tspan> inside.</text>
+  <text x="40" y="444" class="t dim" font-size="13">5. Answer returns; after <tspan class="m">-idle</tspan> without traffic the instance freezes again: 0 CPU, 0 RAM, state on disk.</text>
+  <text x="40" y="480" class="t dim" font-size="12">Ephemeral vs persistent is inferred from the catalog (does one call's write have to be visible to a later call?) and can be forced.</text>
+  <text x="40" y="500" class="t dim" font-size="12">Numbers: ext/mcp/README.md (tokens, 9 ms, 19 ms, 310 ms cold handshake) and docs/handbook.md (thaw ~30 ms).</text>
+</svg>

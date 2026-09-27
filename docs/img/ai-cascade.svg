@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-label="The AI cascade of kling ai serve: exact templates, then Chispa, a tiny calibrated classifier, then a sentence encoder gated by an evaluation, then a small LLM woken from a frozen microVM; each layer only answers what it is confident about and escalates the rest">
+  <defs>
+    <marker id="c-ice" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#78BEF0"/></marker>
+    <marker id="c-ember" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#FF8C32"/></marker>
+    <style>
+      .t { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #e6edf3; }
+      .m { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #e6edf3; }
+      .dim { fill: #9aa4b2; } .ice { fill: #78BEF0; } .ember { fill: #FF8C32; }
+      .box { fill: #161b24; stroke: #2b3442; stroke-width: 1.5; }
+      .hot { fill: #1a1410; stroke: #FF8C32; stroke-width: 1.5; }
+      .fro { fill: #101720; stroke: #78BEF0; stroke-width: 1.5; stroke-dasharray: 6 4; }
+      .l-ice { stroke: #78BEF0; stroke-width: 2; fill: none; marker-end: url(#c-ice); }
+      .l-ember { stroke: #FF8C32; stroke-width: 2; fill: none; marker-end: url(#c-ember); }
+    </style>
+  </defs>
+  <rect width="1200" height="520" rx="14" fill="#0E1118"/>
+  <text x="40" y="46" class="t" font-size="24" font-weight="600">The AI cascade: cheap layers answer, expensive ones only when they earn it</text>
+  <text x="40" y="72" class="t dim" font-size="15"><tspan class="m">kling ai serve</tspan> — every layer returns a calibrated decision: <tspan class="m">confident</tspan> answers, <tspan class="m">escalate</tspan> hands the request to the next one.</text>
+
+  <!-- request -->
+  <rect x="40" y="130" width="150" height="90" rx="10" class="box"/>
+  <text x="115" y="160" class="t" font-size="15" font-weight="600" text-anchor="middle">request</text>
+  <text x="115" y="182" class="m dim" font-size="11" text-anchor="middle">POST /v1/classify</text>
+  <text x="115" y="200" class="m dim" font-size="11" text-anchor="middle">/v1/decide · /v1/generate</text>
+  <path d="M190 175 L228 175" class="l-ice"/>
+
+  <!-- layer 1 -->
+  <rect x="230" y="120" width="190" height="110" rx="10" class="hot"/>
+  <text x="325" y="146" class="t ember" font-size="12" font-weight="600" text-anchor="middle">LAYER 1 · in process</text>
+  <text x="325" y="170" class="t" font-size="15" font-weight="600" text-anchor="middle">exact templates</text>
+  <text x="325" y="192" class="t dim" font-size="12" text-anchor="middle">intent tasks: known phrasings</text>
+  <text x="325" y="214" class="m ember" font-size="12" text-anchor="middle">microseconds</text>
+  <path d="M420 175 L438 175" class="l-ice"/>
+  <text x="429" y="165" class="t dim" font-size="10" text-anchor="middle">miss</text>
+
+  <!-- layer 2 -->
+  <rect x="440" y="120" width="250" height="110" rx="10" class="hot"/>
+  <text x="565" y="146" class="t ember" font-size="12" font-weight="600" text-anchor="middle">LAYER 2 · in process or serverless</text>
+  <text x="565" y="170" class="t" font-size="15" font-weight="600" text-anchor="middle">Chispa</text>
+  <text x="565" y="192" class="t dim" font-size="11" text-anchor="middle">linear, int16, ~1 MB; calibrated p, τ per class</text>
+  <text x="565" y="214" class="m ember" font-size="11" text-anchor="middle">1.5–6 µs · serverless: thaw ~27 ms</text>
+  <path d="M690 175 L708 175" class="l-ice"/>
+  <text x="699" y="163" class="t dim" font-size="9" text-anchor="middle">escalate</text>
+
+  <!-- layer 3 -->
+  <rect x="710" y="120" width="230" height="110" rx="10" class="fro"/>
+  <text x="825" y="146" class="t ice" font-size="12" font-weight="600" text-anchor="middle">LAYER 3 · microVM, gated</text>
+  <text x="825" y="170" class="t" font-size="15" font-weight="600" text-anchor="middle">sentence encoder</text>
+  <text x="825" y="192" class="t dim" font-size="12" text-anchor="middle">multilingual-e5-small + .jenc head</text>
+  <text x="825" y="214" class="m ice" font-size="11" text-anchor="middle">on only if kling ai eval says so</text>
+  <path d="M940 175 L958 175" class="l-ice"/>
+  <text x="949" y="163" class="t dim" font-size="9" text-anchor="middle">escalate</text>
+
+  <!-- layer 4 -->
+  <rect x="960" y="120" width="200" height="110" rx="10" class="fro"/>
+  <text x="1060" y="146" class="t ice" font-size="12" font-weight="600" text-anchor="middle">LAYER 4 · microVM</text>
+  <text x="1060" y="170" class="t" font-size="15" font-weight="600" text-anchor="middle">VON (small LLM)</text>
+  <text x="1060" y="192" class="t dim" font-size="12" text-anchor="middle">llama-server, OpenAI API</text>
+  <text x="1060" y="214" class="m ice" font-size="11" text-anchor="middle">frozen, weights loaded</text>
+
+  <!-- the gate -->
+  <rect x="230" y="270" width="930" height="90" rx="10" class="box"/>
+  <text x="250" y="296" class="t" font-size="14" font-weight="600">The gate: a layer is enabled per task only when <tspan class="m">kling ai eval</tspan> shows it beats the cheaper layer on labelled data</text>
+  <text x="250" y="318" class="t dim" font-size="12">Same models, same settings, McNemar test. Otherwise the gateway refuses the cascade unless <tspan class="m">escalate_force</tspan>.</text>
+  <text x="250" y="340" class="t dim" font-size="12">Measured on 861 held-out commits: Chispa alone 0.640; Qwen2.5 0.5B 0.429 · 1.5B 0.520 · 3B 0.540 — the gate refused all three (docs/ai-gateway.md).</text>
+
+  <!-- scale to zero -->
+  <rect x="230" y="390" width="930" height="100" rx="10" class="box"/>
+  <text x="250" y="416" class="t" font-size="14" font-weight="600">Scale to zero, per replica</text>
+  <text x="250" y="438" class="t dim" font-size="12">Layers 3 and 4 are golden snapshots: a request thaws a replica, concurrency adds more (<tspan class="m">-max-replicas</tspan>), <tspan class="m">-idle</tspan> freezes them again.</text>
+  <text x="250" y="458" class="t dim" font-size="12">Qwen2.5-1.5B on an i7-8700T: cold start to first token 9.1 s; from its golden snapshot 406 ms p50 (docs/von.md).</text>
+  <text x="250" y="478" class="t dim" font-size="12">Continuous improvement: <tspan class="m">ai review · feedback · retrain · rollback</tspan> promote a new Chispa only if it wins on the trusted held-out set.</text>
+
+  <!-- request column note -->
+  <text x="40" y="300" class="t dim" font-size="12">Chispa needs no daemon:</text>
+  <text x="40" y="318" class="m dim" font-size="11">kling ai chispa train</text>
+  <text x="40" y="336" class="m dim" font-size="11">kling ai chispa predict</text>
+  <text x="40" y="366" class="t dim" font-size="12">Models are templates:</text>
+  <text x="40" y="384" class="m dim" font-size="11">kling ai model add</text>
+  <text x="40" y="402" class="m dim" font-size="11">kling run -from &lt;model&gt;</text>
+  <text x="40" y="420" class="m dim" font-size="11">kling ai model ask</text>
+</svg>

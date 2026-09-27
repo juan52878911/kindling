@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-label="kindling architecture: agents talk to a gateway, the gateway to the daemon, the daemon to Firecracker or vz microVMs restored from golden snapshots on disk">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#78BEF0"/>
+    </marker>
+    <marker id="arrow-ember" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#FF8C32"/>
+    </marker>
+    <style>
+      .t  { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #e6edf3; }
+      .m  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #e6edf3; }
+      .dim { fill: #9aa4b2; }
+      .ice { fill: #78BEF0; }
+      .ember { fill: #FF8C32; }
+      .box { fill: #161b24; stroke: #2b3442; stroke-width: 1.5; }
+      .vm  { fill: #121a26; stroke: #78BEF0; stroke-width: 1.5; }
+      .frozen { fill: #101720; stroke: #78BEF0; stroke-width: 1.5; stroke-dasharray: 6 4; }
+      .link { stroke: #78BEF0; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .link-ember { stroke: #FF8C32; stroke-width: 2; fill: none; marker-end: url(#arrow-ember); }
+    </style>
+  </defs>
+
+  <rect width="1200" height="620" rx="14" fill="#0E1118"/>
+
+  <text x="40" y="46" class="t" font-size="24" font-weight="600">How kindling is put together</text>
+  <text x="40" y="72" class="t dim" font-size="15">one binary, <tspan class="m">kling</tspan>: the CLI, the daemon and the gateways. Extensions add commands under their own name.</text>
+
+  <!-- agents -->
+  <rect x="40" y="120" width="230" height="150" rx="10" class="box"/>
+  <text x="155" y="150" class="t" font-size="17" font-weight="600" text-anchor="middle">Your agent</text>
+  <text x="155" y="176" class="t dim" font-size="13" text-anchor="middle">Claude Code · opencode · Cursor</text>
+  <text x="155" y="196" class="t dim" font-size="13" text-anchor="middle">VS Code · Windsurf · Cline · Zed</text>
+  <text x="155" y="224" class="m dim" font-size="12" text-anchor="middle">MCP over Streamable HTTP</text>
+  <text x="155" y="244" class="m dim" font-size="12" text-anchor="middle">OpenAI-compatible /v1/*</text>
+
+  <rect x="40" y="300" width="230" height="110" rx="10" class="box"/>
+  <text x="155" y="330" class="t" font-size="17" font-weight="600" text-anchor="middle">You, at a terminal</text>
+  <text x="155" y="356" class="m" font-size="13" text-anchor="middle">kling try · run · exec</text>
+  <text x="155" y="378" class="m" font-size="13" text-anchor="middle">kling ps · freeze · thaw</text>
+
+  <!-- gateways -->
+  <rect x="340" y="120" width="250" height="150" rx="10" class="box"/>
+  <text x="465" y="150" class="t" font-size="17" font-weight="600" text-anchor="middle">Gateways</text>
+  <text x="465" y="176" class="m" font-size="13" text-anchor="middle">kling mcp serve</text>
+  <text x="465" y="194" class="t dim" font-size="12" text-anchor="middle">routes tool calls, sessions, replicas</text>
+  <text x="465" y="220" class="m" font-size="13" text-anchor="middle">kling ai serve</text>
+  <text x="465" y="238" class="t dim" font-size="12" text-anchor="middle">Chispa classifies, VON generates</text>
+  <text x="465" y="258" class="t dim" font-size="12" text-anchor="middle">token · TCP only when asked</text>
+
+  <line x1="270" y1="195" x2="338" y2="195" class="link"/>
+
+  <!-- daemon -->
+  <rect x="340" y="300" width="250" height="150" rx="10" class="box"/>
+  <text x="465" y="330" class="t" font-size="17" font-weight="600" text-anchor="middle">Daemon</text>
+  <text x="465" y="356" class="m" font-size="13" text-anchor="middle">kling daemon</text>
+  <text x="465" y="378" class="t dim" font-size="12" text-anchor="middle">lifecycle · network · snapshots</text>
+  <text x="465" y="396" class="t dim" font-size="12" text-anchor="middle">Unix socket only — never a TCP port</text>
+  <text x="465" y="414" class="t dim" font-size="12" text-anchor="middle">remote: ssh://host → kling dial-stdio</text>
+  <text x="465" y="436" class="t dim" font-size="12" text-anchor="middle">documented HTTP API for extensions</text>
+
+  <line x1="270" y1="355" x2="338" y2="355" class="link"/>
+  <line x1="465" y1="270" x2="465" y2="298" class="link"/>
+
+  <!-- host with microVMs -->
+  <rect x="660" y="110" width="500" height="470" rx="12" fill="#0b0f16" stroke="#2b3442" stroke-width="1.5"/>
+  <text x="680" y="140" class="t" font-size="16" font-weight="600">A host with KVM (Linux) — or Apple Silicon (vz)</text>
+  <text x="680" y="160" class="t dim" font-size="12">one network namespace per microVM · guest assumed hostile</text>
+
+  <rect x="680" y="180" width="220" height="118" rx="10" class="vm"/>
+  <text x="790" y="205" class="t" font-size="14" font-weight="600" text-anchor="middle">microVM · running</text>
+  <text x="790" y="226" class="t dim" font-size="12" text-anchor="middle">MCP server behind kling-bridge,</text>
+  <text x="790" y="244" class="t dim" font-size="12" text-anchor="middle">native HTTP, or a llama-server</text>
+  <text x="790" y="266" class="m dim" font-size="11" text-anchor="middle">own kernel · overlay · egress none</text>
+  <text x="790" y="284" class="m ember" font-size="11" text-anchor="middle">TTL idle → freeze</text>
+
+  <rect x="920" y="180" width="220" height="118" rx="10" class="vm"/>
+  <text x="1030" y="205" class="t" font-size="14" font-weight="600" text-anchor="middle">microVM · paused</text>
+  <text x="1030" y="226" class="t dim" font-size="12" text-anchor="middle">vCPUs stopped, RAM kept</text>
+  <text x="1030" y="244" class="t dim" font-size="12" text-anchor="middle">resumes in ~2 ms</text>
+  <text x="1030" y="266" class="m dim" font-size="11" text-anchor="middle">kling pause / thaw</text>
+
+  <rect x="680" y="320" width="220" height="118" rx="10" class="frozen"/>
+  <text x="790" y="345" class="t" font-size="14" font-weight="600" text-anchor="middle">microVM · frozen</text>
+  <text x="790" y="366" class="t dim" font-size="12" text-anchor="middle">a file on disk: 0 CPU, 0 RAM</text>
+  <text x="790" y="384" class="t dim" font-size="12" text-anchor="middle">thaw ~30 ms, state intact</text>
+  <text x="790" y="406" class="m dim" font-size="11" text-anchor="middle">sparse mem.file · shared pages</text>
+  <text x="790" y="424" class="m ice" font-size="11" text-anchor="middle">kling freeze / thaw</text>
+
+  <rect x="920" y="320" width="220" height="118" rx="10" class="frozen"/>
+  <text x="1030" y="345" class="t" font-size="14" font-weight="600" text-anchor="middle">template (golden snapshot)</text>
+  <text x="1030" y="366" class="t dim" font-size="12" text-anchor="middle">frozen once, server already serving</text>
+  <text x="1030" y="384" class="t dim" font-size="12" text-anchor="middle">N copies share its memory</text>
+  <text x="1030" y="406" class="m dim" font-size="11" text-anchor="middle">kling save · run -from</text>
+  <text x="1030" y="424" class="m ice" font-size="11" text-anchor="middle">+6.8 MiB per extra copy</text>
+
+  <rect x="680" y="460" width="220" height="100" rx="10" class="box"/>
+  <text x="790" y="485" class="t" font-size="14" font-weight="600" text-anchor="middle">images (rootfs)</text>
+  <text x="790" y="506" class="t dim" font-size="12" text-anchor="middle">read-only, shared, layered:</text>
+  <text x="790" y="524" class="t dim" font-size="12" text-anchor="middle">base per runtime + small service layer</text>
+  <text x="790" y="546" class="m dim" font-size="11" text-anchor="middle">kling image ls · build · copy</text>
+
+  <rect x="920" y="460" width="220" height="100" rx="10" class="box"/>
+  <text x="1030" y="485" class="t" font-size="14" font-weight="600" text-anchor="middle">volumes · shares</text>
+  <text x="1030" y="506" class="t dim" font-size="12" text-anchor="middle">journaled ext4 that survives the VM;</text>
+  <text x="1030" y="524" class="t dim" font-size="12" text-anchor="middle">host folders as copy / ro / rw</text>
+  <text x="1030" y="546" class="m dim" font-size="11" text-anchor="middle">kling volume · run -share</text>
+
+  <path d="M590 195 C 630 195, 630 239, 678 239" class="link-ember"/>
+  <text x="598" y="185" class="t ember" font-size="11">restores, proxies</text>
+  <path d="M590 375 C 630 375, 630 379, 678 379" class="link"/>
+  <text x="598" y="365" class="t ice" font-size="11">creates, freezes</text>
+
+  <text x="40" y="500" class="t dim" font-size="13">Isolation is a hypervisor boundary, not a namespace of a shared kernel.</text>
+  <text x="40" y="522" class="t dim" font-size="13">The daemon runs where the VMM is; the CLI talks to it locally or over SSH.</text>
+  <text x="40" y="560" class="t dim" font-size="12">Linux: Firecracker under KVM, unprivileged VMM, jailer when installed.</text>
+  <text x="40" y="580" class="t dim" font-size="12">macOS 14+ on Apple Silicon: kling-vz on Virtualization.framework, no root, no Linux VM.</text>
+</svg>
