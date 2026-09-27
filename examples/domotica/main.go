@@ -20,10 +20,14 @@ import (
 	"strings"
 
 	"github.com/juan52878911/kindling/examples/domotica/internal/tools"
+	"github.com/juan52878911/kindling/pkg/buildinfo"
 )
 
-// Version se fija al compilar: -ldflags "-X main.Version=...".
+// Version se fija al compilar: -ldflags "-X main.Version=..." (make domotica
+// lo hace). Sin ella, la que Go grabó en el binario (pkg/buildinfo).
 var Version = "dev"
+
+func init() { Version = buildinfo.Version(Version) }
 
 const usage = `usage: kindling-domotica <command> [options]
 
