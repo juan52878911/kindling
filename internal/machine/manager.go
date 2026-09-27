@@ -198,6 +198,10 @@ type Manager struct {
 	// KVM, red ni firecracker, y comprobar que Stop/Remove esperan a que acabe.
 	pruebaTrasPublicar func(id string) error
 
+	// pruebasCPU sustituye la escritura de cpu.max y la espera al agente del
+	// techo de arranque (arranque_cpu.go). Solo lo ponen las pruebas.
+	pruebasCPU *ganchosCPU
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -283,6 +287,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	m.reconcile()
+	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
+	// se quedó con el techo de arranque (ver arranque_cpu.go).
+	m.reaplicarTopesCPU()
 	// Relleno inicial: DiskBytes no se persiste —es dato derivado— así que sin
 	// esto todas las máquinas cargadas del estado saldrían a 0 en `kling ps`
 	// hasta el primer tic del vigilante.
@@ -910,7 +917,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		mc.CPUPct = defaultCPUPct
 		m.mu.Unlock()
 	}
-	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+	// Un núcleo entero mientras arranca el kernel del invitado, que es lo que
+	// viene ahora (boot() vuelve tras Start); el techo configurado, en cuanto
+	// contesta su agente. El defer lo baja en cualquier salida de aquí en
+	// adelante, salvo la de éxito, que se lo entrega a quien espera al agente.
+	// Ver arranque_cpu.go.
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	defer impulso.fin()
+	if warn := m.limitCPU(mc.ID, pid, topeArranque(mc.CPUPct)); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -945,6 +959,9 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.decorarShares(&out)
 	}
 
+	// Desde aquí baja el techo la goroutine que espera al agente: con carpetas
+	// vivas ya contestó (waitShares) y lo bajará en su primer sondeo.
+	impulso.entregar()
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
@@ -1875,11 +1892,15 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	var c *fc.Client
 	var err error
 
-	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar).
+	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar): el
+	// de arranque, que se baja al configurado en cuanto contesta el agente
+	// (resync) o, en cualquier otra salida, en el defer. Ver arranque_cpu.go.
 	if mc.CPUPct <= 0 {
 		mc.CPUPct = defaultCPUPct
 	}
-	cg := m.cgroupParaLanzar(mc.ID, mc.CPUPct)
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	defer impulso.fin()
+	cg := m.cgroupParaLanzar(mc.ID, topeArranque(mc.CPUPct))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -1975,6 +1996,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		resyncT, resyncOK = m.resyncGuest(ctx, mc.ID, "")
 	}
 	crono.marca(&crono.p.ResyncMS)
+	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
+	impulso.bajar()
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
