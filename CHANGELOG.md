@@ -10,6 +10,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Unreleased
 
+> **⚠ Cambio incompatible: jailer es obligatorio por defecto en Linux.** Tras actualizar,
+> un daemon Linux que no corra como root, sin el usuario de servicio (`kindling`, con el
+> grupo `kvm`) o sin el binario `jailer` **deja de arrancar máquinas nuevas** — arranque en
+> frío, restaurar un snapshot y también `thaw` de las máquinas warm — hasta instalar lo que
+> falta (el error dice exactamente qué y cómo). Para seguir sin jailer a propósito, arranca
+> el daemon con **`KLING_JAILER=0`** (deja un aviso de seguridad en el log). Las máquinas
+> ya en marcha, reanudar una pausada y los comandos de solo lectura no se ven afectados.
+> Detalles en "Cambios incompatibles".
+
 Ronda de remediación de una auditoría completa del núcleo (`internal/machine`,
 `internal/net`, `internal/share`, `pkg/scheduler`, el agente invitado y el daemon):
 carreras de verdad bajo `-race`, DoS del host por un invitado hostil, y varias mejoras de
@@ -67,6 +76,18 @@ arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapsh
 - **Durabilidad**: el overlay de una plantilla, un volumen nuevo y una imagen de carpeta
   compartida se escriben en un temporal, se hace `fsync` y se renombran encima —
   publicación atómica, no una escritura a medias si el proceso muere en mitad de camino.
+- **Ronda de verificación.** Con jailer bloqueado, `run`, restaurar y `thaw` se niegan
+  antes de reservar nada (antes cada intento dejaba una máquina `failed` que contaba para
+  el tope), y el error dice la causa real: daemon sin root, `-run-as` vacío, usuario
+  inexistente, sin grupo `kvm` o sin binario `jailer`. `thaw` de una máquina warm
+  comprueba también el kernel (`kernel_sha256` opcional en el sello del volcado; los
+  volcados anteriores siguen funcionando) y falla con "the kernel changed" en vez de un
+  error críptico. El resolver DNS acota a 64 las conexiones TCP simultáneas y reintenta
+  sembrar una IP si `ipset` falla. La cuota por tenant del scheduler ya no tiene una
+  ventana en la que la instancia recién creada no cuenta. Además: la caché del tamaño de
+  los `mem.file` dorados ya no hace un `stat` por acierto, borrar una imagen barre los
+  temporales `.sha256-*` huérfanos, y una lectura tardía del cuerpo de una respuesta del
+  invitado ya no puede escribir en un buffer que el daemon ya reutilizó.
 
 ### Novedades
 
