@@ -28,10 +28,13 @@ silenciosos.
   veces) y el `Usage of add:` crudo de las extensiones.
 - **Estado `frozen`** en `ps`, `inspect`, `topo`, `top` y el API: es lo que
   produce `kling freeze`; hasta ahora se llamaba `warm`. **Es el único cambio
-  en el JSON**: `state: "warm"` → `"frozen"`. Un CLI nuevo contra un daemon
-  0.13 (y un daemon nuevo leyendo el estado que guardó el 0.13) siguen
-  entendiendo `warm` (`api.State.UnmarshalJSON`). `-keepwarm`/`-prewarm`
-  no cambian: describen una política, no un estado.
+  en el JSON**: `state: "warm"` → `"frozen"`. La compatibilidad es de un solo
+  sentido: quien lee con el `pkg/api` de 0.14 acepta también `"warm"`
+  (`api.State.UnmarshalJSON`), así que un CLI 0.14 entiende a un daemon 0.13 y
+  un daemon 0.14 lee el estado que guardó el 0.13; pero un lector de 0.13 (CLI,
+  gateway o consumidor de `-json` propio) que reciba `"frozen"` de un daemon
+  0.14 no lo reconoce como congelado: hay que actualizarlo. `-keepwarm`/
+  `-prewarm` no cambian: describen una política, no un estado.
 - **Nombres nuevos**: `save` (era `commit`), `template ls|inspect|rm` (era
   `snapshots`, `rmi`), `image …` (era `images`), `plugin …` (era `plugins`),
   `machine resize|squeeze|secret` (eran `resize`, `squeeze`, `mmds`; ocultos

@@ -111,14 +111,20 @@ func TestTree(t *testing.T) {
 	if contains(coreCommands, "add") {
 		t.Error("`add` must stay available to a 0.13 kling-mcp")
 	}
-	for in, want := range map[string]bool{
-		"run -h": true, "template rm -h": true, "ai model -h": true, "ai model add -h": true,
-		"exec box -h": false, "exec box ls -h": false, "run -name x -h": false, "nope -h": false,
-		"ai zzz -h": false, "help": false,
+	// Un -h en cualquier sitio antes de "--" es ayuda y nunca ejecuta el
+	// comando; la ruta es lo que se resuelve en el árbol.
+	for in, want := range map[string]string{
+		"run -h": "run", "run --help": "run", "run -help": "run", "template rm -h": "template rm",
+		"ai model -h": "ai model", "ai model add -h": "ai model add", "ai model zzz -h": "ai model",
+		"exec box -h": "exec", "exec box ls -h": "exec", "run -name x -h": "run", "nope -h": "nope",
+		"ai zzz -h": "ai", "status -v -h": "status", "info -h": "status", "models add -h": "ai model add",
+		"commit -h": "save", "rmi -h": "template rm", "-h": "",
+		"help": "", "exec box -- ls -h": "", "run": "", "ps -a": "",
 	} {
 		f := strings.Fields(in)
-		if _, ok := helpRequest(f[0], f[1:]); ok != want {
-			t.Errorf("helpRequest(%q) = %v, want %v", in, ok, want)
+		path, ok := helpRequest(f[0], f[1:])
+		if got := strings.Join(path, " "); ok != (want != "") || got != want {
+			t.Errorf("helpRequest(%q) = %q, %v; want %q", in, got, ok, want)
 		}
 	}
 	var b bytes.Buffer

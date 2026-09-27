@@ -513,37 +513,67 @@ func unknownHelp(name string) error {
 	return &errConCodigo{code: 2, err: &errWithHint{err: fmt.Errorf("unknown command %q", name), hint: "kling help all"}}
 }
 
-// helpRequest dice si args es `<palabras> -h`: solo palabras (sin flags ni
-// "--") y un -h/--help al final. `kling exec box ls -h` no lo es para
-// nosotros: "box" no es un subcomando, y el -h es del ls de dentro.
+// helpRequest dice si args pide ayuda: un -h, -help o --help en cualquier
+// sitio antes de "--". Devuelve la ruta de ayuda: el comando (alias ya
+// resuelto) y las palabras que le siguen mientras se resuelvan en el árbol o
+// en un manifiesto; lo que no se resuelve se ignora. Nunca se ejecuta el
+// comando: `kling status -v -h`, `kling info -h` y `kling exec box -h` son
+// ayuda. Lo que va tras "--" es del programa de dentro (`exec box -- ls -h`).
+// Con FlagHelpEnv puesto no se intercepta: es el proceso que imprime los
+// flags para la propia ayuda.
 func helpRequest(cmd string, args []string) ([]string, bool) {
-	if os.Getenv(plugin.FlagHelpEnv) != "" || len(args) == 0 || !plugin.IsHelpArg(args[len(args)-1]) || args[len(args)-1] == "help" {
+	if os.Getenv(plugin.FlagHelpEnv) != "" {
 		return nil, false
 	}
-	words := append([]string{cmd}, args[:len(args)-1]...)
-	for _, a := range words[1:] {
-		if strings.HasPrefix(a, "-") {
-			return nil, false
+	asks := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "-h" || a == "-help" || a == "--help" {
+			asks = true
+			break
 		}
 	}
-	// Cada palabra tiene que resolverse en el árbol o en un manifiesto.
-	name, rest := resolveAlias(words[0], words[1:])
+	if !asks {
+		return nil, false
+	}
+	name, rest := resolveAlias(cmd, args)
+	var subs []string
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			break
+		}
+		subs = append(subs, a)
+	}
+	path := []string{name}
 	if c := coreCommand(name); c != nil {
-		return words, len(rest) == 0 || (len(rest) == 1 && hasSub(c, rest[0]))
+		if len(subs) > 0 && hasSub(c, subs[0]) {
+			path = append(path, subs[0])
+		}
+		return path, true
 	}
 	p := extensions().Lookup(name)
 	if p == nil {
-		return nil, false
+		// Desconocido: cmdHelp lo dirá con su pista.
+		return path, true
 	}
+	var c *plugin.Command
 	if extensions().IsNamespace(name) {
-		if len(rest) == 0 {
-			return words, true
+		if len(subs) == 0 {
+			return path, true
 		}
-		c := p.Manifest.Command(rest[0])
-		return words, c != nil && (len(rest) == 1 || (len(rest) == 2 && hasSub(c, rest[1])))
+		if c = p.Manifest.Command(subs[0]); c == nil {
+			return path, true
+		}
+		path, subs = append(path, subs[0]), subs[1:]
+	} else {
+		c = p.Manifest.Command(name)
 	}
-	c := p.Manifest.Command(name)
-	return words, c != nil && (len(rest) == 0 || (len(rest) == 1 && hasSub(c, rest[0])))
+	if c != nil && len(subs) > 0 && hasSub(c, subs[0]) {
+		path = append(path, subs[0])
+	}
+	return path, true
 }
 
 // configPath es la ruta de la configuración que se pasa a las extensiones.

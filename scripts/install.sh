@@ -34,9 +34,10 @@
 # abierto) y dejaba a medias a quien actualizaba desde una shell con kling
 # corriendo.
 #
-# Al final deja `kling doctor` en verde: instala el completado de tu shell y,
-# salvo --no-rc, añade a tu rc la línea que lo carga y el PATH de --prefix si
-# faltaba (una sola vez, bajo un comentario "# kling").
+# Al final deja `kling doctor` en verde: instala el completado de tu shell en
+# ~/.config/kling y añade a tu rc la línea que lo carga y el PATH de --prefix
+# si faltaba (una sola vez, bajo un comentario "# kling"). Con --no-rc no toca
+# nada fuera de --prefix (ni el rc ni ~/.config/kling): imprime las líneas y ya.
 #
 # Variables de entorno respetadas:
 #   KLING_VERSION   versión a instalar (ej. v0.1.0). Por defecto: última estable.
@@ -74,7 +75,8 @@ Uso: install.sh [opciones]
                      extensiones de kling: ~/.local/share/kling/plugins)
   --skip-kling       no instala kling: solo las extensiones de --with
   --no-companions    no instala los compañeros de las extensiones (kling-bridge)
-  --no-rc            no añade nada a tu rc (completado y PATH): lo imprime y ya
+  --no-rc            no toca nada fuera de --prefix: ni tu rc ni el completado
+                     en ~/.config/kling; imprime lo que harías tú
   --dry-run          muestra lo que haría sin descargar ni instalar nada
   -h, --help         muestra esta ayuda
 
@@ -425,13 +427,10 @@ case ":$PATH:" in
 esac
 
 COMPLETION_LINE=""
-if [ -n "$KLING_BIN" ] && [ -n "$RC" ]; then
+if [ "$NO_RC" != "1" ] && [ -n "$KLING_BIN" ] && [ -n "$RC" ]; then
     # `kling completion install` escribe ~/.config/kling/completion.<shell> y
     # dice qué línea lo carga; nos la quedamos de su salida.
     COMPLETION_LINE="$("$KLING_BIN" completion install "$USER_SHELL" 2>/dev/null | sed -n '/^Add this line/{n;s/^  //;p;}')"
-fi
-
-if [ "$NO_RC" != "1" ]; then
     [ -n "$PATH_LINE" ] && add_rc "$PATH_LINE"
     [ -n "$COMPLETION_LINE" ] && add_rc "$COMPLETION_LINE"
 fi
@@ -445,11 +444,11 @@ cat <<EOF
 
 EOF
 fi
-if [ -n "$COMPLETION_LINE" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
+if [ "$NO_RC" = "1" ] || [ -z "$RC" ]; then
 cat <<EOF
-  Completado de la shell (una vez, en tu rc):
+  Completado de la shell: escribe el script y añade a tu rc la línea que imprime:
 
-      $COMPLETION_LINE
+      kling completion install
 
 EOF
 fi
