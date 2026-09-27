@@ -8,6 +8,47 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## Unreleased
+
+- **Plugin de Claude Code, desde este mismo repo.** `.claude-plugin/marketplace.json`
+  en la raíz hace del repositorio un marketplace y `plugins/claude-code` es el
+  plugin `kindling`: `/plugin marketplace add juan52878911/kindling`,
+  `/plugin install kindling@kindling` y `/kindling:setup`, que pregunta con
+  la interfaz de opciones de Claude dónde correrán las microVMs (daemon local
+  en macOS arm64 o Linux con KVM, remoto por `ssh://`, o solo el CLI) y qué
+  instalar (MCP conectado a Claude Code, sandboxes, gateway de IA, completado),
+  con la bondad medida y el coste de cada pieza, y lo hace con
+  `scripts/install.sh` (`--with`, `--no-rc`), `kling up`/`context add`,
+  `kling mcp add`, `kling connect -all -install claude-code` y `kling doctor`.
+  Lo que Claude Code no debe hacer (sudo, un rc gestionado por home-manager) lo
+  imprime como comando. Dos skills más: `/kindling:usage` (cuándo usar un
+  sandbox, entornos paralelos, los MCP alojados vía `find_tools`/
+  `describe_tool`/`call_tool`, `status`/`doctor`) y `/kindling:doctor`. El
+  plugin no lleva `.mcp.json`: el token del gateway sigue en `kling config` y
+  lo escribe `kling connect`, nunca un fichero versionado.
+- **`scripts/install.sh --claude`** (o `KLING_CLAUDE=1`): tras instalar,
+  registra el marketplace e instala el plugin con el CLI `claude`; sin él,
+  imprime los comandos para Claude Code. Y un rc que no es tuyo —de solo
+  lectura, o un enlace a `/nix/store` que genera home-manager— ya no se toca
+  ni hace fallar la instalación: imprime las líneas para que las pongas tú.
+- `make deploy` e `install` (raíz y `ext/mcp`) sugieren los nombres de v0.14
+  (`kling image toolchain`, `kling ai chispa deploy`, `kling plugin …`).
+- `kindling-domotica version` ya no dice `dev` si se compiló sin `make`: lee
+  la versión que Go graba en el binario (`pkg/buildinfo`: la del módulo con
+  `go install …@vX`, o la revisión de git y `-dirty`).
+- **`kling mcp ls` solo lista servicios MCP.** Los dorados que construye
+  `kling ai` (tareas Chispa serverless, `chispa.task`; modelos VON y
+  codificadores, `von.model`) salían como servicios con 0 herramientas en
+  `mcp ls`, `mcp health`, `mcp heal`, `connect`, `mcp export` y en
+  `/services` del gateway; `mcp.Services` los deja fuera por sus etiquetas.
+  `chispa.LabelTask` pasa a `pkg/chispa`.
+- **Gateway de IA: `chispa_replica.state` dice `running`** cuando la réplica
+  ya estaba despierta (era `warm`, que en el daemon de 0.13 significaba justo
+  lo contrario: congelada); `frozen`, `paused` y `new` no cambian. Y
+  `kling_ai_von_replicas{state="warm"}` en `/metrics` pasa a `state="frozen"`,
+  que es el estado que cuenta, como decía ya `docs/ai-gateway.md`. La página
+  de la demo domótica entiende `frozen` (y `warm` de un daemon anterior).
+
 ## v0.14.0 — 2026-09-26
 
 **La CLI, ordenada, y el gateway de IA sin dominio.** Tres sustantivos —imagen (rootfs, arranca en frío) →

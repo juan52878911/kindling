@@ -201,6 +201,24 @@ Los binarios se publican en
 disco. **Windows no está soportado** — el código usa syscalls POSIX (`syscall.Kill`,
 `Setsid`, `Stat_t`).
 
+**Desde Claude Code — el plugin:**
+
+```
+/plugin marketplace add juan52878911/kindling
+/plugin install kindling@kindling
+/kindling:setup
+```
+
+Este repositorio es su propio marketplace de plugins. `/kindling:setup`
+pregunta dónde correrán las microVMs (aquí, en un host por `ssh://`, o más
+tarde) y qué piezas quieres —servidores MCP conectados a Claude Code,
+sandboxes, el gateway de IA, completado— con la bondad medida y el coste de
+cada una, luego ejecuta el instalador de arriba y termina con `kling doctor`.
+El plugin también enseña a Claude cuándo usar un sandbox o los servidores MCP
+alojados (`/kindling:usage`) y cómo diagnosticarlo (`/kindling:doctor`). Desde
+un terminal: `install.sh --claude`. Detalles en
+[`plugins/claude-code/README.md`](plugins/claude-code/README.md).
+
 **Desde fuentes — `make`:**
 
 ```sh
