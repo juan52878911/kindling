@@ -39,7 +39,7 @@ func (m *Manager) snapDir(name string) string {
 // restaurar, el invitado despierta con su estado de montaje en memoria, así que
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
-func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*api.Snapshot, error) {
+func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -47,6 +47,20 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	if !ok {
 		return nil, fmt.Errorf("machine %q does not exist", ref)
 	}
+	// El cerrojo de ciclo de vida de la plantilla, como Freeze, Stop o Remove
+	// (M-04). Commit la pausa, le cambia el disco y la vuelca: sin él, un
+	// Remove concurrente borraba su directorio bajo un VMM pausado, un Freeze
+	// volcaba una máquina cuyo disco era el overlay dorado, y el reapuntado
+	// final fallaba dejándola pausada y listada como running.
+	defer m.lock(mc.ID)()
+
+	// Se vuelve a leer con el cerrojo tomado: mientras lo esperábamos pudo
+	// congelarla, pausarla o borrarla otro.
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("machine %q does not exist", ref)
+	}
+	mc = cur
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}
@@ -86,21 +100,10 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
 		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
 
 	snapPath := filepath.Join(dir, "snap.file")
 	memPath := filepath.Join(dir, "mem.file")
 	goldOverlay := filepath.Join(dir, "overlay.ext4")
-
-	// Quien escribe el snapshot es Firecracker, que corre sin privilegios: el
-	// directorio tiene que ser suyo antes de pedírselo.
-	if err := m.priv.Own(dir); err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-
 	ownOverlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
 
 	// Una plantilla jailed corre chrooteada: no ve snapDir. El overlay dorado y
@@ -111,16 +114,120 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	goldDst := goldOverlay
 	if jailed {
 		goldDst = m.jailPath(mc.ID, goldOverlay)
-		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
+	}
+
+	c := fc.New(sock)
+	// El volcado escribe la memoria entera: con varios GiB no cabe en los 30 s
+	// por defecto del cliente (F-01). Las llamadas de la limpieza usan el mismo
+	// plazo porque pueden llegar con un volcado aún en marcha, y la API de
+	// Firecracker las atiende de una en una: esperan a que acabe.
+	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+
+	// LIMPIEZA. Una sola, diferida, para TODAS las salidas de error (M-05).
+	// Antes cada camino deshacía su parte a mano y varios se olvidaban de algo:
+	// un Pause fallido no devolvía los volúmenes, y un fallo al reapuntar el
+	// disco de vuelta o al perforar la memoria salía sin reanudar y sin borrar
+	// el directorio a medias. La plantilla quedaba pausada figurando como
+	// running —el vigilante no lo ve porque el proceso vive, y el gateway le
+	// sigue enrutando peticiones que nadie contesta—.
+	//
+	// Los flags dicen qué hay que deshacer. Cada uno se marca ANTES de pedir lo
+	// que deshace: una petición que falla, o cuyo ctx se cancela, pudo llegar a
+	// aplicarse, y deshacer algo que no pasó es inocuo (reapuntar al disco
+	// propio, montar un volumen ya montado). El camino feliz los baja al
+	// devolver la plantilla a su estado (restaurarPlantilla), así que la
+	// limpieza solo hace lo que quede pendiente.
+	//
+	// Con context.WithoutCancel: si quien pidió el commit se desconecta a
+	// mitad, su ctx se cancela, y con él se saltaba la reanudación. Deshacer
+	// no es opcional por mucho que ya nadie espere la respuesta.
+	var (
+		creado      bool // el directorio del snapshot es nuestro: borrarlo si no hay meta
+		soltados    bool // se pidió al invitado soltar los volúmenes: devolvérselos
+		pausaPedida bool // se pidió la pausa, aunque fallara: puede estar pausada
+		pausada     bool // la pausa se confirmó: reanudar sí o sí
+		reapuntado  bool // el overlay puede apuntar al dorado: devolverle el suyo
+		hecho       bool // meta.json escrito: el snapshot vale y no se toca
+	)
+	limpio := context.WithoutCancel(ctx)
+
+	// restaurarPlantilla devuelve la plantilla a como estaba: su disco, en
+	// marcha, con sus volúmenes. La llaman el camino feliz, en cuanto termina
+	// el volcado (para que la plantilla esté parada lo menos posible), y la
+	// limpieza. Si devuelve error, la plantilla no era recuperable y ya quedó
+	// marcada fallida.
+	restaurarPlantilla := func() error {
+		if reapuntado {
+			if err := lento.PatchDrive(limpio, "overlay", ownOverlay); err != nil {
+				// No se reanuda: correría escribiendo en el overlay dorado, que
+				// es de otras instancias, y su propio disco se quedaría atrás
+				// para siempre. Mejor muerta y dicho que viva y corrupta.
+				err = fmt.Errorf("returning overlay to machine: %w", err)
+				m.fail(mc, fmt.Errorf("commit could not give the template its own disk back: %w", err))
+				reapuntado, pausaPedida, pausada, soltados = false, false, false, false
+				return err
+			}
+			reapuntado = false
+		}
+		if pausaPedida {
+			if err := lento.Resume(limpio); err != nil {
+				if pausada {
+					// Pausada y sin poder reanudarla: dejarla como running
+					// sería mentir. Igual que Freeze.
+					err = fmt.Errorf("resuming template after commit: %w", err)
+					m.fail(mc, fmt.Errorf("commit paused the template and could not resume it: %w", err))
+					pausaPedida, pausada, soltados = false, false, false
+					return err
+				}
+				// La pausa nunca se confirmó: lo normal es que siga en marcha
+				// y que Firecracker no tenga nada que reanudar.
+				log.Printf("commit %s: resume after a failed pause: %v", mc.Name, err)
+			}
+			pausaPedida, pausada = false, false
+		}
+		if soltados {
+			soltados = false
+			// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay
+			// que devolvérselos, o seguirá corriendo escribiendo en su overlay.
+			if err := m.acquireVolumes(mc); err != nil {
+				log.Printf("warning: template %s ended up without its volumes after commit: %v", mc.Name, err)
+			}
+		}
+		return nil
+	}
+	defer func() {
+		if errOut == nil {
+			return
+		}
+		_ = restaurarPlantilla()
+		if creado && !hecho {
 			os.RemoveAll(dir)
+			if jailed {
+				// Las réplicas en el chroot de la plantilla: el volcado y el
+				// overlay dorado que no llegaron a recuperarse.
+				os.RemoveAll(m.jailPath(mc.ID, dir))
+			}
+		}
+	}()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	creado = true
+
+	// Quien escribe el snapshot es Firecracker, que corre sin privilegios: el
+	// directorio tiene que ser suyo antes de pedírselo.
+	if err := m.priv.Own(dir); err != nil {
+		return nil, err
+	}
+	if jailed {
+		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
 			return nil, err
 		}
 		if m.priv.Enabled {
 			_ = os.Chown(filepath.Dir(goldDst), m.priv.UID, m.priv.GID)
 		}
 	}
-
-	c := fc.New(sock)
 
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
 	// corriendo: un invitado pausado no atiende HTTP.
@@ -129,35 +236,27 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	// mapas de bloques, posición del journal— de un disco que después seguirá
 	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
+	soltados = true
 	if err := m.releaseVolumes(mc); err != nil {
-		os.RemoveAll(dir)
 		return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 	}
 
+	pausaPedida = true
 	if err := c.Pause(ctx); err != nil {
-		os.RemoveAll(dir)
 		return nil, err
 	}
-	abort := func(err error) (*api.Snapshot, error) {
-		os.RemoveAll(dir)
-		_ = c.PatchDrive(ctx, "overlay", ownOverlay)
-		_ = c.Resume(ctx)
-		// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay que
-		// devolvérselos, o seguirá corriendo escribiendo en su overlay.
-		_ = m.acquireVolumes(mc)
-		return nil, err
-	}
+	pausada = true
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
 	if out, err := copiarDisco(ctx, ownOverlay, goldDst); err != nil {
-		return abort(fmt.Errorf("copying overlay: %v: %s", err, out))
+		return nil, fmt.Errorf("copying overlay: %v: %s", err, out)
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
 	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
 	// "Permission denied".
 	if err := m.priv.Own(goldDst); err != nil {
-		return abort(err)
+		return nil, err
 	}
 
 	// CLAVE: se reapunta el disco a la copia dorada ANTES de volcar, para que el
@@ -167,33 +266,29 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	// se elimina la plantilla, restaurar falla con "No such file or directory"
 	// sobre un overlay que ya no existe. El snapshot dorado tiene que ser
 	// autocontenido, porque su razón de ser es sobrevivir a la máquina que lo creó.
+	reapuntado = true
 	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
-		return abort(fmt.Errorf("repointing overlay to golden copy: %w", err))
+		return nil, fmt.Errorf("repointing overlay to golden copy: %w", err)
 	}
-	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
-		return abort(err)
+	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
+		return nil, err
 	}
 	if jailed {
 		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
 		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
 		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
 			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
-				return abort(fmt.Errorf("recovering %s from jail: %w", f, err))
+				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
 			}
 		}
 	}
-	// Se devuelve el disco propio: la plantilla sigue viva y no debe escribir en
-	// el overlay dorado, que a partir de ahora es plantilla de otras instancias.
-	if err := c.PatchDrive(ctx, "overlay", ownOverlay); err != nil {
-		return nil, fmt.Errorf("returning overlay to machine: %w", err)
-	}
-	if err := c.Resume(ctx); err != nil {
-		return nil, err
-	}
-	// La plantilla vuelve a montarlos: sigue viva hasta que la importación la
+	// Se devuelve el disco propio y se reanuda YA: la plantilla no debe escribir
+	// en el overlay dorado, que a partir de ahora es plantilla de otras
+	// instancias, y lo que queda (perforar, hashear) no la necesita parada.
+	// Vuelve a montar sus volúmenes: sigue viva hasta que la importación la
 	// destruya, y con -keep puede quedarse.
-	if err := m.acquireVolumes(mc); err != nil {
-		log.Printf("warning: template %s ended up without its volumes after freeze: %v", mc.Name, err)
+	if err := restaurarPlantilla(); err != nil {
+		return nil, err
 	}
 
 	if out, err := perforarHuecos(ctx, memPath); err != nil {
@@ -244,6 +339,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
+	hecho = true
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
@@ -439,7 +535,20 @@ func (m *Manager) RemoveSnapshot(name string) error { return m.removeSnapshot(na
 
 // removeSnapshot es RemoveSnapshot; propio=true lo llama el commit que TIENE la
 // reserva de ese nombre (el camino de -replace), que no debe toparse con ella.
+//
+// Se niega mientras alguien más tenga reservado el snapshot: un commit que lo
+// está escribiendo o una restauración (runFrom) que lo está leyendo. La
+// restauración reserva ANTES de leer nada y no aparece en byID hasta mucho
+// después —copiar el overlay dorado, montar la red—, así que mirar solo las
+// instancias vivas dejaba borrar el mem.file bajo un LoadSnapshot en curso, que
+// fallaba con un ENOENT crudo (M-15).
+//
+// La comprobación y la retirada del directorio van bajo el MISMO m.mu, y la
+// retirada es un rename a la papelera (instantáneo, como en el barrido): entre
+// "nadie lo usa" y "ya no está" no cabe una reserva nueva. El borrado de verdad,
+// que con un mem.file de GiB tarda, va después y sin cerrojo.
 func (m *Manager) removeSnapshot(name string, propio bool) error {
+	restos := false
 	if _, err := m.loadSnapshot(name); err != nil {
 		// Sin meta.json pero con directorio: son los restos de un commit que se
 		// interrumpió antes de escribirlo (el meta es lo último). Antes esto
@@ -448,27 +557,61 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 		if !restosDeCommit(m.snapDir(name)) {
 			return err
 		}
-		m.mu.RLock()
-		enCurso := m.reserved[reservaSnapshot(name)]
-		m.mu.RUnlock()
-		if enCurso && !propio {
+		restos = true
+	}
+
+	m.mu.Lock()
+	enUso := m.reserved[reservaSnapshot(name)]
+	if propio {
+		enUso-- // la reserva del propio commit que reemplaza
+	}
+	if enUso > 0 {
+		m.mu.Unlock()
+		if restos {
 			return fmt.Errorf("snapshot %q is being committed right now", name)
 		}
-		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
-		return os.RemoveAll(m.snapDir(name))
+		return fmt.Errorf("snapshot %q is in use right now (an instance is being restored from it, "+
+			"or it is being committed); retry in a moment", name)
 	}
-	m.mu.RLock()
-	var users []string
-	for _, mc := range m.byID {
-		if mc.From == name && mc.State != api.StateStopped {
-			users = append(users, mc.Name)
+	if !restos {
+		var users []string
+		for _, mc := range m.byID {
+			if mc.From == name && mc.State != api.StateStopped {
+				users = append(users, mc.Name)
+			}
+		}
+		if len(users) > 0 {
+			m.mu.Unlock()
+			return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
 		}
 	}
-	m.mu.RUnlock()
-	if len(users) > 0 {
-		return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
+	destino, rerr := m.apartarSnapshot(name)
+	m.mu.Unlock()
+
+	if restos {
+		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
 	}
-	return os.RemoveAll(m.snapDir(name))
+	if rerr != nil {
+		// Sin papelera (otro sistema de ficheros, permisos): se borra en su
+		// sitio, como siempre. La ventana vuelve a existir, pero solo aquí.
+		log.Printf("snapshot %q: couldn't move it to the trash (%v); deleting it in place", name, rerr)
+		return os.RemoveAll(m.snapDir(name))
+	}
+	return os.RemoveAll(destino)
+}
+
+// apartarSnapshot mueve el directorio del snapshot a la papelera y devuelve
+// dónde quedó. Solo renombra: se puede (y se debe) llamar con m.mu tomado.
+func (m *Manager) apartarSnapshot(name string) (string, error) {
+	papelera := filepath.Join(m.root, "machines", papeleraDir)
+	if err := os.MkdirAll(papelera, 0o700); err != nil {
+		return "", err
+	}
+	destino := filepath.Join(papelera, fmt.Sprintf("snap-%s-%d", name, time.Now().UnixNano()))
+	if err := os.Rename(m.snapDir(name), destino); err != nil {
+		return "", err
+	}
+	return destino, nil
 }
 
 // explainRestoreErr traduce los fallos de restauración de Firecracker con causa
@@ -496,6 +639,14 @@ func explainRestoreErr(err error, what, remedy string) error {
 // en privado, así que comparten las páginas que no escriben y solo divergen las
 // que tocan. La segunda instancia y las siguientes salen casi gratis en RAM.
 func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	// El snapshot queda RESERVADO mientras dure la restauración, desde antes de
+	// leer su meta.json: RemoveSnapshot se niega a borrarlo mientras tanto. Sin
+	// esto, un `kling snapshots rm` durante la copia del overlay o el montaje de
+	// la red —la ventana más ancha del daemon, antes de aparecer en byID— le
+	// quitaba el mem.file a LoadSnapshot (M-15). Se suelta al volver: para
+	// entonces la instancia, si arrancó, ya cuenta como viva en byID.
+	defer m.reserveDir(reservaSnapshot(req.From))()
+
 	snap, err := m.loadSnapshot(req.From)
 	if err != nil {
 		return nil, err
@@ -799,8 +950,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return abortar(err)
 	}
 	start := time.Now()
-	// Pausada: hay que reapuntar el overlay antes de dejarla correr.
-	if err := c.LoadSnapshot(ctx,
+	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
+	// plazo del volcado y no el de 30 s: cargar también es mover la memoria
+	// entera (F-01).
+	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshot(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false); err != nil {
 		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
@@ -996,7 +1149,7 @@ func (m *Manager) sweepSnapshotLeftovers() {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if m.reserved[reservaSnapshot(e.Name())] || !restosDeCommit(filepath.Join(base, e.Name())) {
+		if m.reserved[reservaSnapshot(e.Name())] > 0 || !restosDeCommit(filepath.Join(base, e.Name())) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < dirGrace {

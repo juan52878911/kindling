@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -132,5 +133,45 @@ func TestUnErrorSinFaultMessageSigueSiendoUnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("el error no menciona el codigo: %v", err)
+	}
+}
+
+// F-01: ConPlazo cambia el tope de las peticiones de la COPIA y deja el del
+// original como estaba. Un volcado de varios GiB necesita mas de 30 s; el resto
+// de llamadas no deben heredar ese plazo por accidente.
+func TestConPlazoAcotaSoloLaCopia(t *testing.T) {
+	// Servidor propio y no firecrackerFalso: aquí hay peticiones solapadas (la
+	// que se corta sigue durmiendo en el servidor), y aquel apunta la última
+	// petición en variables sin cerrojo.
+	dir, err := os.MkdirTemp("", "fc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("no se puede abrir un socket unix aqui: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	c := New(sock)
+
+	corto := c.ConPlazo(50 * time.Millisecond)
+	if err := corto.Snapshot(context.Background(), "/s", "/m"); err == nil {
+		t.Fatal("una peticion de 200 ms cupo en un plazo de 50 ms")
+	}
+	if c.http.Timeout != plazoPorDefecto {
+		t.Errorf("ConPlazo cambio el plazo del original: %v", c.http.Timeout)
+	}
+	if err := c.Snapshot(context.Background(), "/s", "/m"); err != nil {
+		t.Errorf("el original, con su plazo de siempre, fallo: %v", err)
+	}
+	if err := c.ConPlazo(5*time.Second).Snapshot(context.Background(), "/s", "/m"); err != nil {
+		t.Errorf("con un plazo holgado fallo: %v", err)
 	}
 }

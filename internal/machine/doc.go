@@ -15,7 +15,8 @@
 //   - lifecycle(id) (m.lock / m.tryLock, ver cerrojos.go) serializa las
 //     operaciones de ciclo de vida sobre UNA máquina: Run y runFrom desde que
 //     la publican en byID hasta que queda running (o fallida), Freeze, Thaw,
-//     Pause/Resume, Squeeze, Resize, PutMMDS, Stop y Remove. Es el más externo
+//     Pause/Resume, Squeeze, Resize, PutMMDS, Commit (el de la plantilla),
+//     Stop y Remove. Es el más externo
 //     porque se sostiene durante operaciones lentas (arrancar un VMM, volcar la
 //     memoria) en las que se toman y sueltan los demás muchas veces.
 //   - shareSup.mu protege el registro de conexiones de carpetas vivas. Hoy no
@@ -23,7 +24,12 @@
 //     m.get ANTES de tomarlo); si alguna vez hiciera falta, m.mu va dentro.
 //   - m.mu (RWMutex) protege byID, socket, reserved, volReservas, pendingMiB y
 //     demás mapas del Manager, y TODOS los campos de las *api.Machine vivas.
-//     Nunca se sostiene durante E/S lenta ni llamadas al VMM.
+//     Nunca se sostiene durante E/S lenta ni llamadas al VMM; un rename a la
+//     papelera sí (sweepMachineDirs, removeSnapshot), porque es instantáneo y
+//     es lo que hace atómico "nadie lo usa, fuera". Las reservas de
+//     reserveDir se cuentan: "snap:<nombre>" lo tienen a la vez el commit que
+//     lo escribe y cada runFrom que lo lee, y removeSnapshot se niega
+//     mientras haya alguna ajena.
 //   - stateMu protege la foto pendiente de state.json. persist() lo toma con
 //     m.mu ya tomado; writePending lo suelta antes de tomar escrituraMu y de
 //     escribir, así que escrituraMu nunca está dentro de m.mu.

@@ -33,8 +33,28 @@ func New(socketPath string) *Client {
 			},
 			DisableKeepAlives: true,
 		},
-		Timeout: 30 * time.Second,
+		Timeout: plazoPorDefecto,
 	}}
+}
+
+// plazoPorDefecto es el tope de cada petición de un Client recién creado: de
+// sobra para todo lo que la API contesta en milisegundos. Lo que no cabe
+// —volcar o cargar GiB de memoria— pide el suyo con ConPlazo.
+const plazoPorDefecto = 30 * time.Second
+
+// ConPlazo devuelve un Client contra el mismo socket cuyas peticiones pueden
+// durar hasta d, en vez de los 30 s por defecto. El original no cambia.
+//
+// Existe por el volcado (F-01): Snapshot escribe la memoria entera del
+// invitado, y con varios GiB sobre un disco lento no cabe en 30 s. Cortar ahí
+// no para a Firecracker, que sigue escribiendo: quien llama da el volcado por
+// fallido, reanuda, y deja un mem.file a medias creciendo debajo. El plazo lo
+// calcula quien sabe cuánta memoria hay (ver plazoVolcado en internal/machine).
+// d <= 0 quita el tope; el ctx de la petición sigue mandando igual.
+func (c *Client) ConPlazo(d time.Duration) *Client {
+	h := *c.http
+	h.Timeout = max(d, 0)
+	return &Client{http: &h}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) error {
