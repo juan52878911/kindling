@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -206,6 +206,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /sandboxes", s.handleListSandboxes)
 	mux.HandleFunc("GET /sandboxes/{ref}", s.handleGetSandbox)
 	mux.HandleFunc("POST /sandboxes/{ref}/renew", s.handleRenewSandbox)
+	mux.HandleFunc("POST /sandboxes/{ref}/fork", s.handleForkSandbox)
 	mux.HandleFunc("DELETE /sandboxes/{ref}", s.handleRemoveSandbox)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
