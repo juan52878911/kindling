@@ -143,7 +143,11 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		return nil, http.StatusBadGateway, fmt.Errorf("talking to the guest agent: %w", err)
 	}
 	if resp.StatusCode == http.StatusOK {
-		return resp.Body, 0, nil
+		// wrapGuestBody (D-01): el flujo NDJSON de /exec/stream puede tardar
+		// lo suyo entre eventos (un comando real corriendo), pero si el
+		// invitado deja de mandar NADA por guestProgressTimeout, se corta en
+		// vez de dejar el escáner de readExecEvents esperando para siempre.
+		return wrapGuestBody(resp.Body), 0, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -302,14 +306,15 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	// Tope también aquí: el invitado dice lo que quiera en Content-Length.
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, api.FileMaxDownload))
+	// wrapGuestBody (D-01) acota el progreso de la descarga.
+	_, _ = io.Copy(w, io.LimitReader(wrapGuestBody(resp.Body), api.FileMaxDownload))
 }
 
 // handleCreateSandbox sirve POST /sandboxes.
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	var req api.SandboxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	ttl := req.TTLSeconds
@@ -433,8 +438,8 @@ func (s *Server) handleRenewSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	var req api.RenewRequest
 	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, http.StatusBadRequest, err)
+		if err := decodeJSON(w, r, &req); err != nil {
+			fail(w, jsonBodyStatus(err), err)
 			return
 		}
 	}
@@ -474,8 +479,8 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 	var req api.RenewRequest
 	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, http.StatusBadRequest, err)
+		if err := decodeJSON(w, r, &req); err != nil {
+			fail(w, jsonBodyStatus(err), err)
 			return
 		}
 	}
