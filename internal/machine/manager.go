@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,7 +31,19 @@ import (
 // disco propio de cada máquina (/dev/vdb) sobre la imagen base compartida
 // (/dev/vda). Así N microVMs comparten una base de cientos de MB en vez de
 // copiarla N veces.
-const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init"
+const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init quiet"
+
+// archBootArg añade parámetros de kernel específicos de la arquitectura para
+// acortar el arranque. En amd64 apaga la emulación de i8042 (teclado/ratón
+// PS/2): Firecracker no la necesita y el sondeo del controlador cuesta cientos
+// de ms. arm64 no tiene ese controlador que apagar. El backend vz recibe esta
+// misma línea (ver spec.TranslateBootArgs) y no toca estos parámetros.
+func archBootArg() string {
+	if runtime.GOARCH == "amd64" {
+		return " i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
+	}
+	return ""
+}
 
 // bootArgs arma la línea de comandos del kernel del invitado. La red la aplica
 // el propio kernel con el parámetro ip=, sin herramientas dentro de la imagen.
@@ -40,7 +53,7 @@ const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro in
 // vale para layerDev, el disco de la capa de servicio: vacío en las imágenes
 // monolíticas, que siguen arrancando con la línea de siempre.
 func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string) string {
-	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
+	return bootArgsBase + archBootArg() + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser

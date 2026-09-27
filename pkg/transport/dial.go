@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -61,6 +63,48 @@ func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	return c, nil
 }
 
+// userCacheDir es os.UserCacheDir en producción; las pruebas lo sustituyen
+// para forzar el camino sin directorio de control.
+var userCacheDir = os.UserCacheDir
+
+// sshControlDir es el directorio del socket de control que ssh usa para
+// reutilizar la conexión TCP entre invocaciones (`kling try` hace varias por
+// llamada, y cada una paga el apretón de manos SSH entero si no). Va en el
+// caché del usuario y no en /tmp: un directorio temporal compartido con otros
+// usuarios del host dejaría a cualquiera de ellos apuntar su propio ssh al
+// mismo ControlPath y colarse en la conexión ya autenticada.
+func sshControlDir() (string, error) {
+	base, err := userCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "kindling", "ssh-control")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// sshMultiplexArgs arma las opciones de `ssh` para reutilizar la conexión
+// entre llamadas. Si no se puede preparar el directorio del socket de control
+// (sin HOME, sistema de solo lectura, etc.) cae al modo de siempre: una
+// conexión SSH nueva por llamada, sin fallar la llamada en sí.
+func sshMultiplexArgs() []string {
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=10",
+	}
+	dir, err := sshControlDir()
+	if err != nil {
+		return args
+	}
+	return append(args,
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath="+filepath.Join(dir, "kling-%C"),
+		"-o", "ControlPersist=60s",
+	)
+}
+
 // dialSSH levanta `ssh <destino> kling dial-stdio` y envuelve sus tuberías.
 func dialSSH(ctx context.Context, dest string) (net.Conn, error) {
 	target, remoteBin := dest, "kling"
@@ -68,10 +112,8 @@ func dialSSH(ctx context.Context, dest string) (net.Conn, error) {
 		target, remoteBin = dest[:i], dest[i:]
 	}
 
-	cmd := exec.CommandContext(ctx, "ssh",
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=10",
-		target, remoteBin, "dial-stdio")
+	args := append(sshMultiplexArgs(), target, remoteBin, "dial-stdio")
+	cmd := exec.CommandContext(ctx, "ssh", args...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -98,5 +99,76 @@ func TestElDialerNoAbreConexionesDeRed(t *testing.T) {
 	case <-conectado:
 		t.Error("alguien se conecto al puerto TCP: el dialer habla red")
 	default:
+	}
+}
+
+// El multiplexado ahorra el apreton de manos SSH en las llamadas siguientes
+// (`kling try` hace varias por invocacion). El directorio del socket de
+// control tiene que ser 0700: si fuera compartido, otro usuario del host
+// podria apuntar su propio ssh al mismo ControlPath y colarse en la conexion
+// ya autenticada.
+func TestSSHMultiplexArgsIncluyeControlMasterConDirectorioPropio(t *testing.T) {
+	args := sshMultiplexArgs()
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"ControlMaster=auto", "ControlPersist=60s", "ControlPath="} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("faltan los argumentos de multiplexado (%q): %v", want, args)
+		}
+	}
+
+	dir, err := sshControlDir()
+	if err != nil {
+		t.Fatalf("sshControlDir: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", dir, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("permisos del directorio de control = %o, esperaba 0700", perm)
+	}
+}
+
+// Si no se puede preparar el directorio del socket de control (sin HOME, FS de
+// solo lectura...), dialSSH tiene que seguir funcionando: cae al modo de
+// siempre en vez de fallar la conexion entera por no poder multiplexarla.
+func TestSSHMultiplexArgsSinDirectorioCaeAlModoDeSiempre(t *testing.T) {
+	old := userCacheDir
+	defer func() { userCacheDir = old }()
+	userCacheDir = func() (string, error) { return "", errors.New("sin directorio de cache") }
+
+	args := sshMultiplexArgs()
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "ControlMaster") {
+		t.Errorf("deberia caer al modo sin multiplexado: %v", args)
+	}
+	if !strings.Contains(joined, "BatchMode=yes") || !strings.Contains(joined, "ConnectTimeout=10") {
+		t.Errorf("perdio los argumentos base al no poder multiplexar: %v", args)
+	}
+}
+
+func TestSSHControlDirEsDelDirectorioDeCacheDelUsuario(t *testing.T) {
+	base, err := os.MkdirTemp("", "tr-cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+
+	old := userCacheDir
+	defer func() { userCacheDir = old }()
+	userCacheDir = func() (string, error) { return base, nil }
+
+	dir, err := sshControlDir()
+	if err != nil {
+		t.Fatalf("sshControlDir: %v", err)
+	}
+	if !strings.HasPrefix(dir, base) {
+		t.Errorf("sshControlDir() = %q, esperaba que colgara de %q", dir, base)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("no creo el directorio: %v", err)
+	}
+	if filepath.Base(dir) != "ssh-control" {
+		t.Errorf("nombre de directorio inesperado: %q", dir)
 	}
 }
