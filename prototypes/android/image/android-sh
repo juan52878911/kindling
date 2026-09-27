@@ -1,0 +1,94 @@
+#!/bin/bash
+# android-sh: ejecutar algo DENTRO de Android desde la VM (es decir, desde
+# `kling exec`). Hace de `adb shell` sin adb ni puertos abiertos.
+#
+#   kling exec <m> -- android-sh getprop sys.boot_completed
+#   kling exec <m> -- android-sh 'uiautomator dump /data/local/tmp/ui.xml && cat /data/local/tmp/ui.xml'
+#   kling exec <m> -- android-sh screencap -p            > pantalla.png   (binario: exec lo lleva en base64)
+#   kling exec <m> -- android-sh --push /tmp/app.apk /data/local/tmp/app.apk
+#   kling exec <m> -- android-sh --pid                    # PID (en la VM) del init de Android
+#   kling exec <m> -- android-sh --state                  # lo que dejó el lanzador
+#
+# Cómo: busca el init de Android (el hijo del unshare del lanzador), entra en TODOS sus espacios de nombres y en su raíz con nsenter, y
+# ejecuta /system/bin/sh -c "<args>" como root con el entorno de zygote
+# (BOOTCLASSPATH, ANDROID_ROOT...: sin él, uiautomator, am y pm, que arrancan
+# con app_process, no funcionan). Antes de que exista zygote, un entorno
+# mínimo que basta para getprop.
+set -euo pipefail
+
+die() { echo "android-sh: $*" >&2; exit 125; }
+
+# ppid_de PID: el padre, leído de /proc/PID/status (el comm de /proc/PID/stat
+# puede llevar espacios y paréntesis; status no tiene ese problema).
+ppid_de() { sed -n 's/^PPid:[[:space:]]*//p' "/proc/$1/status" 2>/dev/null; }
+
+# hijos_de PID: los PID cuyo padre es PID.
+hijos_de() {
+  local p
+  for p in /proc/[0-9]*; do
+    [ "$(ppid_de "${p#/proc/}")" = "$1" ] && echo "${p#/proc/}"
+  done
+  return 0
+}
+
+# init_pid: el hijo del `unshare` que dejó el lanzador (su PID queda en
+# /run/kindling-android/unshare.pid, porque stage1 hace exec de unshare). Se
+# busca por el árbol de procesos y no por /proc/<pid>/root: ese enlace, visto
+# desde otro espacio de montajes, no es fiable.
+init_pid() {
+  local u c
+  u="$(cat /run/kindling-android/unshare.pid 2>/dev/null)" || return 1
+  [ -n "$u" ] && [ -d "/proc/$u" ] || return 1
+  for c in $(hijos_de "$u"); do
+    if [ "$(cat "/proc/$c/comm" 2>/dev/null)" = init ]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+# zygote_pid: hijo del init de Android cuyo cmdline empieza por zygote64/zygote.
+zygote_pid() {
+  local c cmd
+  for c in $(hijos_de "$1"); do
+    cmd="$(tr '\0' ' ' <"/proc/$c/cmdline" 2>/dev/null || true)"
+    case "$cmd" in zygote64*|zygote\ *) echo "$c"; return 0 ;; esac
+  done
+  return 1
+}
+
+case "${1:-}" in
+  --state)
+    cat /run/kindling-android/state 2>/dev/null || echo "unknown (launcher never ran?)"
+    exit 0 ;;
+  --pid)
+    init_pid || die "Android is not running (android-sh --state; tail /var/log/service.log)"
+    exit 0 ;;
+esac
+
+pid="$(init_pid)" || die "Android is not running ($(cat /run/kindling-android/state 2>/dev/null || echo 'no state')); see /var/log/service.log"
+
+ENV=()
+if zpid="$(zygote_pid "$pid")"; then
+  mapfile -d '' -t ENV <"/proc/$zpid/environ" || ENV=()
+fi
+if [ ${#ENV[@]} -eq 0 ]; then
+  ENV=(PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin
+       ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_STORAGE=/storage)
+fi
+ENV+=(HOME=/ TMPDIR=/data/local/tmp)
+
+# -r/-w: raíz y directorio del init de Android (el chroot). -p: los hijos
+# nacen en su espacio de PIDs (nsenter hace fork).
+NS=(nsenter --target "$pid" --mount --uts --ipc --net --pid --root --wd)
+
+if [ "${1:-}" = "--push" ]; then
+  [ $# -eq 3 ] || die "usage: android-sh --push <file-in-vm> <path-in-android>"
+  [ -f "$2" ] || die "no such file in the VM: $2"
+  # Por la entrada estándar: vale igual si /data está en tmpfs (invisible desde
+  # la VM) que en el overlay. $1 lo expande el sh de Android, no este.
+  # shellcheck disable=SC2016
+  "${NS[@]}" -- /system/bin/env -i "${ENV[@]}" /system/bin/sh -c 'cat > "$1"' sh "$3" <"$2"
+  exit $?
+fi
+
+[ $# -ge 1 ] || die "usage: android-sh <command...> | --push SRC DST | --pid | --state"
+exec "${NS[@]}" -- /system/bin/env -i "${ENV[@]}" /system/bin/sh -c "$*"

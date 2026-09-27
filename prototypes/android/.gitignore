@@ -1,0 +1,6 @@
+# Salidas locales de la fase 0: se envían a mano (resultados.md), no se versionan.
+/results/
+/kernel/out/
+*.apk
+*.tar
+*.tar.sha256

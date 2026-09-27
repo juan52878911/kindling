@@ -1,0 +1,154 @@
+# Fragmento Android del kernel de invitado de kindling (6.1 LTS, arm64), fase 0.
+#
+# Va DETRÁS de config-common + config-arm64 (scripts/builders/kernel/): lo que se
+# repite aquí manda, como en Kconfig. No toca el builder del núcleo:
+# prototypes/android/kernel/build.sh lo concatena a config-arm64 en una copia
+# temporal del builder (ver allí por qué).
+#
+# Fuentes de cada bloque:
+#   [redroid]  redroid-doc, deploy/README.md ("mandatory kernel features":
+#              binderfs, ashmem/memfd, IPv6, ION/DMA-BUF heaps, 4KB pages) y
+#              deploy/centos.md (la lista de CONFIG_ para kernels propios).
+#              Consultado el 2026-09-27.
+#   [aosp]     android-base.config de AOSP (kernel/configs), de memoria y
+#              RECORTADO a lo que usa un Android sin radio ni USB en un
+#              contenedor; NO verificado contra el fichero en esta sesión.
+#   [propio]   lo que pide el lanzador (image/android-launch.sh) o una
+#              comprobación hecha aquí contra el árbol 6.1.140.
+#
+# Todo es "=y": el kernel de kindling no tiene módulos (CONFIG_MODULES off) y
+# scripts/check-kernel-config.sh rechaza cualquier "=m".
+#
+# Lo que NO está y por qué:
+#   - CONFIG_ANDROID, CONFIG_ASHMEM, CONFIG_ION: no existen en 6.1 (retirados en
+#     5.19, 5.18 y 5.11). Comprobado en el árbol v6.1.140: ningún Kconfig los
+#     define. El lanzador pasa androidboot.use_memfd=true para que Redroid use
+#     memfd en vez de ashmem.
+#   - CONFIG_COMPAT (32 bits): los núcleos de Apple Silicon no ejecutan AArch32
+#     en EL0, así que no serviría de nada. Por eso la imagen es la "64only" de
+#     Redroid (image/build-image.sh).
+#   - DRM/FB/GPU: Redroid en modo "guest" pinta por software (SwiftShader) en
+#     memoria; no necesita /dev/dri. Además vz no expone un dispositivo gráfico
+#     (vz/internal/vzvm/vzvm_darwin.go solo engancha consola, disco, red, globo
+#     y entropía).
+#   - SELinux/AUDIT: Redroid corre en anfitriones con AppArmor (Ubuntu) sin
+#     SELinux activo; su init lo tolera. Sin verificar para ESTE kernel.
+
+# ── binder: IPC de Android [redroid] ─────────────────────────────────────────
+# binderfs permite montar una instancia de binder por espacio de nombres IPC;
+# el init de AOSP (Android 12+) monta /dev/binderfs y enlaza /dev/binder,
+# /dev/hwbinder y /dev/vndbinder. Los tres nombres se crean al montar.
+CONFIG_ANDROID_BINDER_IPC=y
+CONFIG_ANDROID_BINDERFS=y
+CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"
+# CONFIG_ANDROID_BINDER_IPC_SELFTEST is not set
+
+# ── memoria compartida sin ashmem [redroid] ──────────────────────────────────
+# memfd_create(2). Es def_bool (TMPFS || HUGETLBFS): no tiene pregunta y ya sale
+# "y" por TMPFS=y en config-common. Se deja escrito para que el comprobador y
+# quien lea sepan que es obligatorio.
+CONFIG_MEMFD_CREATE=y
+
+# ── dma-buf heaps: el sucesor de ION [redroid] ───────────────────────────────
+# codec2 y el asignador gráfico piden /dev/dma_heap/system.
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+# Vallas explícitas (sync_file) entre el compositor y los productores [aosp].
+CONFIG_SYNC_FILE=y
+# udmabuf (dma-buf desde un memfd). Defensivo: algunos asignadores de software
+# lo usan; no hay prueba de que el de Redroid 13 lo necesite [propio].
+CONFIG_UDMABUF=y
+
+# ── presión de memoria: lmkd usa PSI (/proc/pressure/memory) [aosp] ──────────
+CONFIG_PSI=y
+# CONFIG_PSI_DEFAULT_DISABLED is not set
+
+# ── entrada: evdev + uinput [aosp] ───────────────────────────────────────────
+# config-common trae "# CONFIG_INPUT is not set"; aquí se enciende. Sin
+# teclado, ratón ni serio: check-kernel-config.sh sigue prohibiendo
+# SERIO/ATKBD/PS2/MOUSEDEV y allnoconfig los deja en "n".
+CONFIG_INPUT=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_MISC=y
+CONFIG_INPUT_UINPUT=y
+# CONFIG_INPUT_KEYBOARD is not set
+# CONFIG_INPUT_MOUSE is not set
+# CONFIG_INPUT_MOUSEDEV is not set
+# CONFIG_INPUT_JOYSTICK is not set
+# CONFIG_INPUT_TABLET is not set
+# CONFIG_INPUT_TOUCHSCREEN is not set
+# CONFIG_SERIO is not set
+
+# ── llaveros del kernel [aosp] ───────────────────────────────────────────────
+# init y keystore crean llaveros de sesión; sin KEYS lo registran como error.
+# Defensivo.
+CONFIG_KEYS=y
+
+# ── red que netd da por hecha [aosp] ─────────────────────────────────────────
+# Redroid solo documenta IPv6 (ya en config-common), pero netd arranca con
+# iptables-restore, reglas de enrutamiento por políticas y programas BPF (el
+# bpfloader de Android 13 tiene reboot_on_failure). Un Docker normal los tiene
+# porque el kernel del anfitrión es de distribución; el nuestro es allnoconfig.
+# Es superficie DENTRO del invitado, no del anfitrión. Con la red del teléfono
+# aislada (el lanzador usa unshare --net) no sale nada de aquí.
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NETFILTER_XTABLES=y
+CONFIG_NETFILTER_NETLINK_LOG=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_CONNTRACK_MARK=y
+CONFIG_NF_NAT=y
+CONFIG_NETFILTER_XT_MARK=y
+CONFIG_NETFILTER_XT_CONNMARK=y
+CONFIG_NETFILTER_XT_MATCH_BPF=y
+CONFIG_NETFILTER_XT_MATCH_COMMENT=y
+CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+CONFIG_NETFILTER_XT_MATCH_STATE=y
+CONFIG_NETFILTER_XT_MATCH_OWNER=y
+CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
+CONFIG_NETFILTER_XT_MATCH_QUOTA=y
+CONFIG_NETFILTER_XT_MATCH_LENGTH=y
+CONFIG_NETFILTER_XT_MATCH_LIMIT=y
+CONFIG_NETFILTER_XT_MATCH_U32=y
+CONFIG_NETFILTER_XT_TARGET_IDLETIMER=y
+CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
+CONFIG_NETFILTER_XT_TARGET_NFLOG=y
+CONFIG_NETFILTER_XT_TARGET_CT=y
+CONFIG_IP_NF_IPTABLES=y
+CONFIG_IP_NF_FILTER=y
+CONFIG_IP_NF_MANGLE=y
+CONFIG_IP_NF_RAW=y
+CONFIG_IP_NF_NAT=y
+CONFIG_IP_NF_TARGET_REJECT=y
+CONFIG_IP_NF_TARGET_MASQUERADE=y
+CONFIG_IP6_NF_IPTABLES=y
+CONFIG_IP6_NF_FILTER=y
+CONFIG_IP6_NF_MANGLE=y
+CONFIG_IP6_NF_RAW=y
+CONFIG_IP6_NF_TARGET_REJECT=y
+# Enrutamiento por políticas: netd crea una tabla por red (RouteController).
+CONFIG_IP_ADVANCED_ROUTER=y
+CONFIG_IP_MULTIPLE_TABLES=y
+CONFIG_IPV6_MULTIPLE_TABLES=y
+# tc + BPF (clatd, programas schedcls de netd).
+CONFIG_NET_SCHED=y
+CONFIG_NET_CLS_ACT=y
+CONFIG_NET_SCH_INGRESS=y
+CONFIG_NET_CLS_BPF=y
+CONFIG_NET_ACT_BPF=y
+# netd cierra sockets al cambiar de red (SOCK_DESTROY).
+CONFIG_INET_DIAG=y
+CONFIG_INET_TCP_DIAG=y
+CONFIG_INET_UDP_DIAG=y
+CONFIG_INET_DIAG_DESTROY=y
+# VpnService. Defensivo: sin /dev/tun el sistema arranca igual.
+CONFIG_TUN=y
+
+# ── bloque [propio] ──────────────────────────────────────────────────────────
+# apexd monta los APEX que no vienen "aplanados" sobre dispositivos loop. La
+# imagen de Redroid 13 no hereda updatable_apex.mk (device_redroid, redroid.mk),
+# lo que apunta a APEX aplanados y a que esto sobra; image/build-image.sh lo
+# comprueba y avisa. Se deja por si acaso: sin loop, un APEX sin aplanar deja
+# el arranque colgado sin un mensaje claro.
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_BLK_DEV_LOOP_MIN_COUNT=8
