@@ -256,7 +256,25 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /procstats", s.handleProcStats)
-	return mux
+	return sinBarrasEscapadas(mux)
+}
+
+// sinBarrasEscapadas rechaza las rutas con una barra escapada (%2F). El mux
+// desescapa cada segmento ANTES de casarlo con el patrón, así que
+// DELETE /volumes/..%2Fimages%2Fmin llegaba al handler con el nombre
+// "../images/min" y borraba la imagen base, y lo mismo con cualquier {name} o
+// {ref} que acabe en una ruta del disco. Ningún nombre legítimo (máquina,
+// imagen, volumen, snapshot) lleva una barra, así que se corta aquí la clase
+// entera; los nombres se validan además donde se construye la ruta.
+func sinBarrasEscapadas(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if raw := r.URL.RawPath; raw != "" && (strings.Contains(raw, "%2F") || strings.Contains(raw, "%2f") ||
+			strings.Contains(raw, "%5C") || strings.Contains(raw, "%5c")) {
+			fail(w, http.StatusBadRequest, errors.New("escaped slashes are not allowed in the path: no name contains one"))
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Listen sirve hasta que se cancele el contexto.

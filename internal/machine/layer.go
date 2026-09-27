@@ -60,6 +60,12 @@ func (m *Manager) recipePath(image string) string {
 // huérfana cuya base no está en disco —que es peor que no tener nada, porque
 // parece que la imagen existe—.
 func (m *Manager) imageLayer(image string) (base, layer string, err error) {
+	// El nombre llega de la URL o del cuerpo de la petición (run, sandboxes):
+	// sin validarlo, "../machines/<id>/overlay" arrancaba sobre el disco de
+	// otra máquina, y "../volumes/x" leía un volumen ajeno con debugfs.
+	if !validName.MatchString(image) {
+		return "", "", fmt.Errorf("invalid image name %q", image)
+	}
 	mono := m.imagePath(image)
 	if _, err := os.Stat(mono); err == nil {
 		// La imagen monolítica manda: si están las dos, arrancar por el camino
@@ -72,7 +78,12 @@ func (m *Manager) imageLayer(image string) (base, layer string, err error) {
 		return "", "", fmt.Errorf("can't find image %q in %s", image, mono)
 	}
 
+	// La base sale de la receta, que puede haber subido quien subió la
+	// imagen (PUT /images/{name}/blob): se valida igual que un nombre.
 	name := m.recipeBase(image)
+	if !validName.MatchString(name) {
+		return "", "", fmt.Errorf("layered image %q names an invalid base image %q in its recipe", image, name)
+	}
 	base = m.imagePath(name)
 	if _, serr := os.Stat(base); serr != nil {
 		return "", "", fmt.Errorf("layered image %q needs base image %q, which is not in %s: "+
@@ -88,6 +99,9 @@ func (m *Manager) imageLayer(image string) (base, layer string, err error) {
 // fichero no esté, que es justo lo que hay que poder enseñar —una capa cuya base
 // falta es lo que hay que ver en `images ls`, no un hueco—.
 func (m *Manager) ImageBase(image string) (string, bool) {
+	if !validName.MatchString(image) {
+		return "", false
+	}
 	if _, err := os.Stat(m.imagePath(image)); err == nil {
 		return "", false
 	}
@@ -203,6 +217,9 @@ func layerGuestPath(path string) string {
 // base con capas encima o un snapshot dorado que la use se quedan sin su rootfs,
 // y el sintoma no es un error al borrar sino un invitado que no arranca.
 func (m *Manager) RemoveImage(name string) error {
+	if !validName.MatchString(name) {
+		return fmt.Errorf("invalid image name %q", name)
+	}
 	if _, ok := m.ImageBase(name); !ok {
 		// Monolitica: puede ser la BASE de otras capas.
 		for _, otra := range m.Images() {
