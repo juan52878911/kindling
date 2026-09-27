@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -290,5 +291,88 @@ func TestSoloCuentaLosMemFileDeMaquinasVivas(t *testing.T) {
 	m.byID["bbbb"] = &api.Machine{ID: "bbbb", From: "dorado", State: api.StateRunning}
 	if dos := m.hotMemFilesMiBLocked(); dos != got {
 		t.Errorf("el dorado compartido se conto dos veces: %d -> %d MiB", got, dos)
+	}
+}
+
+// allocatedBytesCachedLocked (M-12): un acierto no hace NINGÚN stat (si lo
+// hiciera, la caché costaría lo mismo que no tenerla); solo la invalidación
+// explícita obliga a volver a mirar el disco.
+func TestAllocatedBytesCachedLockedNoHaceStatEnUnAcierto(t *testing.T) {
+	m := newTestManager(t)
+	path := filepath.Join(t.TempDir(), "mem.file")
+	if err := os.WriteFile(path, make([]byte, 4<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	viejo := statMemFile
+	t.Cleanup(func() { statMemFile = viejo })
+	var stats int
+	statMemFile = func(p string) (os.FileInfo, error) { stats++; return os.Stat(p) }
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	primero := m.allocatedBytesCachedLocked(path, "dorado")
+	if primero <= 0 || stats != 1 {
+		t.Fatalf("fallo de caché: alloc=%d stats=%d, quería >0 y 1", primero, stats)
+	}
+	for i := 0; i < 3; i++ {
+		if got := m.allocatedBytesCachedLocked(path, "dorado"); got != primero {
+			t.Fatalf("acierto = %d, quería %d", got, primero)
+		}
+	}
+	if stats != 1 {
+		t.Fatalf("los aciertos hicieron stat: %d stats, quería 1", stats)
+	}
+
+	// Un fichero que no existe no se cachea: la próxima vez se vuelve a mirar.
+	falta := filepath.Join(t.TempDir(), "no-esta")
+	if got := m.allocatedBytesCachedLocked(falta, "fantasma"); got != 0 {
+		t.Fatalf("sin fichero = %d, quería 0", got)
+	}
+	if _, hay := m.memAllocCache["fantasma"]; hay {
+		t.Fatal("un stat fallido quedó cacheado")
+	}
+}
+
+// invalidateSnapCache también olvida el tamaño cacheado del mem.file: un
+// `commit -replace` que reescribe el dorado no puede heredar el tamaño del que
+// reemplazó.
+func TestInvalidateSnapCacheOlvidaElTamanoDeMemoria(t *testing.T) {
+	m := newTestManager(t)
+	m.mu.Lock()
+	m.memAllocCache = map[string]int64{"dorado": 99}
+	m.mu.Unlock()
+
+	m.invalidateSnapCache("dorado")
+
+	m.mu.RLock()
+	_, hay := m.memAllocCache["dorado"]
+	m.mu.RUnlock()
+	if hay {
+		t.Error("invalidateSnapCache no borró la entrada de memAllocCache")
+	}
+}
+
+// El barrido de restos de commit, que aparta el directorio en su sitio con
+// m.mu tomado y sin pasar por removeSnapshot, también olvida lo cacheado.
+func TestSweepSnapshotLeftoversOlvidaLaCache(t *testing.T) {
+	m := newTestManager(t)
+	dir := m.snapDir("amedias")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	viejo := time.Now().Add(-2 * dirGrace)
+	if err := os.Chtimes(dir, viejo, viejo); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.memAllocCache = map[string]int64{"amedias": 99}
+	m.sweepSnapshotLeftovers()
+	_, hay := m.memAllocCache["amedias"]
+	m.mu.Unlock()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("el barrido no apartó los restos: %v", err)
+	}
+	if hay {
+		t.Error("sweepSnapshotLeftovers no olvidó el tamaño cacheado")
 	}
 }

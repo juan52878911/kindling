@@ -1,8 +1,11 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -126,6 +129,95 @@ func TestEvictPrefiereMismoTenant(t *testing.T) {
 	}
 }
 
+// G-01: la cuota de instancias del tenant se comprueba Y RESERVA con el mismo
+// candado. Sin la reserva, dos buildEntry concurrentes de servicios DISTINTOS
+// del mismo tenant leen tenantInstances() (que solo mira g.services/g.extra)
+// como si no hubiera nada en marcha, aunque el otro ya se haya reservado el
+// hueco. La reserva tiene que verse ANTES de que la instancia exista.
+func TestReservarTenantCuentaLoQueEstaEnVuelo(t *testing.T) {
+	g := &Scheduler{services: map[string]*entry{}, extra: map[string][]*entry{}}
+	tnt := &tenant{name: "t", maxInstances: 1}
+
+	liberar1, err := g.reservarTenant(tnt)
+	if err != nil {
+		t.Fatalf("la primera reserva debía caber: %v", err)
+	}
+	// tenantInstances() seguiría diciendo 0 (nada registrado todavía), pero la
+	// reserva en vuelo debe bastar para que la segunda choque con el tope.
+	if _, err := g.reservarTenant(tnt); !errors.Is(err, errTenantInstances) {
+		t.Fatalf("segunda reserva = %v; quería errTenantInstances (la primera sigue en vuelo)", err)
+	}
+	liberar1()
+	// Liberada la primera, vuelve a caber.
+	liberar2, err := g.reservarTenant(tnt)
+	if err != nil {
+		t.Fatalf("tras liberar debía volver a caber: %v", err)
+	}
+	liberar2()
+}
+
+// maxInstances 0 (sin límite) nunca reserva ni rechaza.
+func TestReservarTenantSinLimiteNuncaRechaza(t *testing.T) {
+	g := &Scheduler{services: map[string]*entry{}, extra: map[string][]*entry{}}
+	tnt := &tenant{name: "libre"}
+	for i := 0; i < 50; i++ {
+		liberar, err := g.reservarTenant(tnt)
+		if err != nil {
+			t.Fatalf("sin límite no debería rechazar (i=%d): %v", i, err)
+		}
+		liberar()
+	}
+}
+
+// Bajo carrera de verdad (-race), nunca puede haber más reservas vivas a la
+// vez que el tope del tenant.
+func TestReservarTenantEsSeguroBajoCarrera(t *testing.T) {
+	g := &Scheduler{services: map[string]*entry{}, extra: map[string][]*entry{}}
+	tnt := &tenant{name: "t", maxInstances: 3}
+
+	var mu sync.Mutex
+	var enVuelo, maxVisto int
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			liberar, err := g.reservarTenant(tnt)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			enVuelo++
+			if enVuelo > maxVisto {
+				maxVisto = enVuelo
+			}
+			mu.Unlock()
+			time.Sleep(time.Millisecond)
+			mu.Lock()
+			enVuelo--
+			mu.Unlock()
+			liberar()
+		}()
+	}
+	wg.Wait()
+	if maxVisto > tnt.maxInstances {
+		t.Errorf("a la vez hubo %d reservas vivas; el tope era %d", maxVisto, tnt.maxInstances)
+	}
+}
+
+// buildEntry rechaza por cuota SIN tocar el daemon (client a nil a propósito:
+// si tocara el cliente antes de mirar la cuota, entraría en pánico).
+func TestBuildEntryRechazaPorCuotaSinTocarElCliente(t *testing.T) {
+	g := &Scheduler{services: map[string]*entry{}, extra: map[string][]*entry{}}
+	tnt := &tenant{name: "t", maxInstances: 1}
+	g.services["ya-despierto"] = &entry{tenant: "t"}
+
+	_, err := g.buildEntry(context.Background(), "otro-servicio", tnt, false)
+	if !errors.Is(err, errTenantInstances) {
+		t.Fatalf("err = %v; quería errTenantInstances", err)
+	}
+}
+
 // Cuando el tenant que pide no tiene nada propio ocioso, sí recurre a lo ajeno:
 // hacer sitio importa más que la pureza del reparto.
 func TestEvictCaeEnAjenoSiNoHayPropio(t *testing.T) {
@@ -138,5 +230,42 @@ func TestEvictCaeEnAjenoSiNoHayPropio(t *testing.T) {
 	got := g.evictLRU(t.Context(), "quiere", "A")
 	if got != "svc-b" {
 		t.Fatalf("sacrificó %q; sin nada propio debería ceder la ajena (svc-b)", got)
+	}
+}
+
+// G-01: la reserva de tenant de buildEntry no se suelta al volver, sino al
+// registrar la entrada y bajo el mismo g.mu. buildFn imita a buildEntry
+// (reserva y entrega la reserva en la entrada); tras el scale-out la reserva
+// ya no cuenta y la réplica sí, sin haber pasado por un momento en que
+// ninguna de las dos contara.
+func TestScaleOutSueltaLaCuotaAlRegistrar(t *testing.T) {
+	g := &Scheduler{
+		services: map[string]*entry{},
+		extra:    map[string][]*entry{},
+		routes:   map[string]*sessionRoute{},
+	}
+	tnt := &tenant{name: "t", maxInstances: 2}
+	g.services["svc"] = &entry{machineID: "m-0", tenant: "t", maxSessions: 1, checkedAt: time.Now()}
+	g.buildFn = func(_ context.Context, _ string, tnt *tenant, _ bool) (*entry, error) {
+		if _, err := g.reservarTenant(tnt); err != nil {
+			return nil, err
+		}
+		return &entry{machineID: "m-1", tenant: tnt.name, cuotaTenant: tnt.name, maxSessions: 1}, nil
+	}
+
+	e, err := g.scaleOut(context.Background(), "svc", tnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n := g.tenantCreando["t"]; n != 0 {
+		t.Fatalf("tras registrar la réplica quedan %d reservas del tenant, quería 0", n)
+	}
+	if e.cuotaTenant != "" {
+		t.Fatalf("la entrada registrada sigue con la reserva %q", e.cuotaTenant)
+	}
+	if n := g.tenantInstances("t"); n != 2 {
+		t.Fatalf("instancias del tenant = %d, quería 2", n)
 	}
 }

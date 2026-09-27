@@ -69,7 +69,7 @@ func TestAttachMontaYReconecta(t *testing.T) {
 	defer ts.Close()
 	defer close(dev.in)
 
-	srv, err := hostshare.Open(dir, false)
+	srv, err := hostshare.Open(dir, false, t.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestAttachDesdeDentroSeRechaza(t *testing.T) {
 	mux.HandleFunc(share.AttachPath, s.AttachHandler())
 	ts := httptest.NewServer(mux) // loopback: "desde dentro"
 	defer ts.Close()
-	srv, _ := hostshare.Open(t.TempDir(), true)
+	srv, _ := hostshare.Open(t.TempDir(), true, t.Name())
 	defer srv.Close()
 	if code, _ := attachar(t, ts.URL, share.Attach{Tag: 0, Mount: "/work", Mode: share.ModeRO}, srv); code != http.StatusForbidden {
 		t.Fatalf("attach from loopback = %d, want 403", code)

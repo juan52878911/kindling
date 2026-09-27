@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -14,8 +13,8 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	var req api.CreateVolumeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	// Formatear un ext4 tarda; se acota por el contexto de la petición porque
@@ -41,8 +40,8 @@ func (s *Server) handleRemoveVolume(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePopulateVolume(w http.ResponseWriter, r *http.Request) {
 	var req api.PopulateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	req.Volume = r.PathValue("name")

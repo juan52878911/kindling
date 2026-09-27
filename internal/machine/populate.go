@@ -11,8 +11,8 @@ package machine
 //
 // La microVM se monta con el volumen en ESCRITURA, lo que implica exclusividad:
 // mientras se puebla, nadie más puede montarlo, ni siquiera para leer. Eso lo
-// impone resolveVolumes y es deliberado — actualizar la biblioteca bajo los pies
-// de quien la está leyendo es la corrupción de siempre.
+// impone reservarVolumenes y es deliberado — actualizar la biblioteca bajo los
+// pies de quien la está leyendo es la corrupción de siempre.
 
 import (
 	"bufio"

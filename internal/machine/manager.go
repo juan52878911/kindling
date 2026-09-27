@@ -1,4 +1,3 @@
-// Package machine implementa el ciclo de vida de las microVMs.
 package machine
 
 import (
@@ -12,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +31,19 @@ import (
 // disco propio de cada máquina (/dev/vdb) sobre la imagen base compartida
 // (/dev/vda). Así N microVMs comparten una base de cientos de MB en vez de
 // copiarla N veces.
-const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init"
+const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/sbin/overlay-init quiet"
+
+// archBootArg añade parámetros de kernel específicos de la arquitectura para
+// acortar el arranque. En amd64 apaga la emulación de i8042 (teclado/ratón
+// PS/2): Firecracker no la necesita y el sondeo del controlador cuesta cientos
+// de ms. arm64 no tiene ese controlador que apagar. El backend vz recibe esta
+// misma línea (ver spec.TranslateBootArgs) y no toca estos parámetros.
+func archBootArg() string {
+	if runtime.GOARCH == "amd64" {
+		return " i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
+	}
+	return ""
+}
 
 // bootArgs arma la línea de comandos del kernel del invitado. La red la aplica
 // el propio kernel con el parámetro ip=, sin herramientas dentro de la imagen.
@@ -41,7 +53,7 @@ const bootArgsBase = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro in
 // vale para layerDev, el disco de la capa de servicio: vacío en las imágenes
 // monolíticas, que siguen arrancando con la línea de siempre.
 func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string) string {
-	return bootArgsBase + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
+	return bootArgsBase + archBootArg() + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -79,6 +91,25 @@ type Manager struct {
 	cgroupRoot    string
 	CgroupWarning string
 
+	// jailerJailed dice si las microVMs de este proceso arrancan dentro de
+	// jailer (ver decidirJailer). Se decide UNA vez al construir el Manager y
+	// no cambia en caliente, para que Freeze/Commit puedan preguntar "¿esta
+	// máquina ya viva corre jailed?" sin volver a mirar el entorno.
+	jailerJailed bool
+
+	// JailerBlocked, si no está vacío, es el motivo por el que Run, runFrom y
+	// Thaw se niegan a arrancar máquinas NUEVAS: automático (KLING_JAILER sin
+	// fijar) y falta el binario de jailer o el usuario sin privilegios. Se
+	// imprime una vez al arrancar el daemon (ver internal/daemon) y de ahí en
+	// adelante se devuelve como el error de cada intento de arranque, hasta
+	// reiniciar el daemon con lo que falta instalado o con KLING_JAILER=0.
+	JailerBlocked string
+
+	// JailerWarning es el aviso de SEGURIDAD que hay que imprimir una vez al
+	// arrancar cuando alguien apagó jailer a propósito con KLING_JAILER=0:
+	// las microVMs corren sin la barrera de chroot/pivot_root.
+	JailerWarning string
+
 	bus  *events.Bus
 	mu   sync.RWMutex
 	byID map[string]*api.Machine
@@ -91,14 +122,36 @@ type Manager struct {
 	socket map[string]string // id -> ruta del socket de firecracker
 
 	// reserved son los ids cuyo directorio se está CONSTRUYENDO ahora mismo, aún
-	// sin entrada en byID. Ver reserveDir: sin esto el barrido de huérfanos los
-	// borra bajo los pies de quien los está llenando. Se toca bajo mu.
-	reserved map[string]bool
+	// sin entrada en byID, y los snapshots ("snap:<nombre>") que un commit está
+	// escribiendo o una restauración está leyendo. Ver reserveDir: sin esto el
+	// barrido de huérfanos los borra bajo los pies de quien los está llenando.
+	// El valor es cuántos lo tienen reservado a la vez. Se toca bajo mu.
+	reserved map[string]int
 
 	// Dorados cuya integridad ya se comprobó, por huella de sus ficheros. Ver
 	// verifyIntegrity: hashear el overlay cuesta el 67% de una instanciación y
 	// un dorado no cambia desde que se congela.
 	integridad map[string]huellaSnapshot
+
+	// kernelSHA cachea el sha256 de KernelPath() por tamaño+fecha del fichero
+	// (K2): se pide en cada Commit y en cada runFrom, y el vmlinux no cambia
+	// entre un arranque del daemon y el siguiente. Ver kernelHash.
+	kernelSHA huellaKernel
+
+	// snapCache memoriza, por nombre de snapshot, el meta.json ya parseado y la
+	// ocupación en disco del directorio (M-08): Snapshots() se llama en cada
+	// tick del reaper del gateway y en cada arranque desde un dorado, y sin
+	// esto cada llamada releía y parseaba TODOS los meta.json y recorría TODOS
+	// los directorios de snapshot. Se invalida a mano en cuanto se escribe el
+	// meta.json (writeMeta) o se borra el directorio (removeSnapshot). Ver
+	// loadSnapshotCached e invalidateSnapCache.
+	snapCache map[string]snapCacheEntry
+
+	// memAllocCache memoriza los bytes REALMENTE asignados del mem.file de cada
+	// snapshot dorado (M-12): es inmutable desde que se congela, así que
+	// stat-earlo bajo m.mu en cada Run/runFrom/Resize (hotMemFilesMiBLocked) no
+	// aporta nada sobre calcularlo una vez. Se invalida junto con snapCache.
+	memAllocCache map[string]int64
 
 	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
 	// pasada completa no libera nada, lo que significa que el disco lo llena algo
@@ -119,6 +172,13 @@ type Manager struct {
 	// Es dato de un fichero que no cambia, y preguntarlo cuesta un debugfs en el
 	// camino de arranque en frío. Ver baseSupportsLayers.
 	layerOK sync.Map
+
+	// bridgeOK memoriza qué pares (base, capa) llevan agente de invitado
+	// (M-14), igual que layerOK: la respuesta no cambia mientras ninguno de los
+	// dos ficheros cambie, y preguntarlo cuesta hasta 4 debugfs en el camino de
+	// arranque en frío de cada microVM con volúmenes o carpetas compartidas.
+	// Ver imageHasBridgeCached.
+	bridgeOK sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
@@ -179,6 +239,17 @@ type Manager struct {
 	// ultimo que la usaba. Ver cerrojos.go para por que un sync.Map no bastaba.
 	lifecycle cerrojos
 
+	// pruebaTrasPublicar, si no es nil, se llama en Run justo después de
+	// publicar la máquina en byID, con su cerrojo de ciclo de vida tomado. Un
+	// error la abandona como cualquier otro fallo del arranque. Solo lo ponen
+	// las pruebas: es la única forma de parar un arranque en frío a mitad sin
+	// KVM, red ni firecracker, y comprobar que Stop/Remove esperan a que acabe.
+	pruebaTrasPublicar func(id string) error
+
+	// pruebasCPU sustituye la escritura de cpu.max y la espera al agente del
+	// techo de arranque (arranque_cpu.go). Solo lo ponen las pruebas.
+	pruebasCPU *ganchosCPU
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -198,6 +269,12 @@ type Manager struct {
 	sharesOnce sync.Once
 	shareCfg   func() ShareConfig
 
+	// uploadMu serializa el check-and-reserve del tope de subidas pendientes
+	// (M-19): sin él, N subidas a la vez pasan todas la comprobación antes de
+	// que ninguna termine, y se cuelan hasta N ext4 de sobra en el disco.
+	uploadMu       sync.Mutex
+	uploadReserved int
+
 	// Clave de firma de snapshots (firma.go), cargada una vez.
 	firmaOnce  sync.Once
 	firmaClave []byte
@@ -211,6 +288,17 @@ type Manager struct {
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
 func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
 
+// lockUnaVez es lock con una liberación idempotente: la función devuelta se
+// puede llamar varias veces y solo suelta la primera. La usan Run y runFrom,
+// que la difieren para todos sus returns y además la llaman a mano antes de
+// cualquier operación pública sobre la misma máquina (el cerrojo no es
+// reentrante; ver doc.go).
+func (m *Manager) lockUnaVez(id string) func() {
+	soltar := m.lock(id)
+	var una sync.Once
+	return func() { una.Do(soltar) }
+}
+
 // tryLock es lock sin esperar: (nil, false) si otro tiene la máquina.
 func (m *Manager) tryLock(id string) (func(), bool) { return m.lifecycle.intentar(id) }
 
@@ -221,8 +309,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	priv, warn := privilegiosPlataforma(runAs)
+	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled, priv.Motivo)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
+		jailerJailed: jailed, JailerBlocked: jailerBlocked, JailerWarning: jailerWarn,
 		byID:        make(map[string]*api.Machine),
 		socket:      make(map[string]string),
 		wake:        make(chan struct{}, 1),
@@ -247,6 +337,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	m.reconcile()
+	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
+	// se quedó con el techo de arranque (ver arranque_cpu.go).
+	m.reaplicarTopesCPU()
 	// Relleno inicial: DiskBytes no se persiste —es dato derivado— así que sin
 	// esto todas las máquinas cargadas del estado saldrían a 0 en `kling ps`
 	// hasta el primer tic del vigilante.
@@ -293,15 +386,18 @@ func (m *Manager) load() {
 // máquina podía arrancar, congelarse ni descongelarse. Ahora solo toma la foto y
 // se va; escribirla es cosa de persistLoop.
 //
-// La foto se copia POR VALOR, no por puntero. Es la diferencia entre esto y una
-// carrera de datos: si se guardaran los *api.Machine, json.Marshal los leería
-// fuera del lock mientras otra goroutine les cambia State, PID o los punteros
-// StartedAt/FrozenAt, y el fichero podría acabar describiendo un estado que
-// nunca existió (una máquina "warm" con PID vivo, por ejemplo).
+// La foto es una copia PROFUNDA (Clone), no el puntero ni una copia por valor.
+// Es la diferencia entre esto y una carrera de datos: si se guardaran los
+// *api.Machine, json.Marshal los leería fuera del lock mientras otra goroutine
+// les cambia State, PID o los punteros StartedAt/FrozenAt, y el fichero podría
+// acabar describiendo un estado que nunca existió (una máquina "warm" con PID
+// vivo, por ejemplo). Y una copia por valor no basta: comparte con la viva los
+// arrays de Volumes, Shares o AllowDomains y los mapas de Labels y Forwards, y
+// cualquier escritura en su sitio sobre ellos corre con el Marshal (M-03).
 func (m *Manager) persist() {
 	list := make([]api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
-		list = append(list, *mc)
+		list = append(list, *mc.Clone())
 	}
 
 	m.stateMu.Lock()
@@ -602,6 +698,13 @@ func newID() string {
 
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	// Jailer bloqueado: lo PRIMERO, antes de reservar ni publicar nada. Más
+	// tarde el abort pasaba por fail() y cada intento dejaba una entrada
+	// fallida en byID que contaba para checkMachineLimit. El check de boot()
+	// se queda como red.
+	if m.JailerBlocked != "" {
+		return nil, errors.New(m.JailerBlocked)
+	}
 	// El tope va ANTES de bifurcar: restaurar desde un snapshot es tan capaz de
 	// agotar el host como arrancar en frío, y es el camino que más rápido crea
 	// —gateway, fondo, efímero—. Comprobarlo solo en el arranque en frío lo
@@ -729,7 +832,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// mientras dentro nadie monta nada y todo lo escrito muere con la máquina.
 	// Se comprueba ANTES de crear el directorio, para no tener que limpiarlo.
 	if len(vols) > 0 || len(shares) > 0 {
-		switch has, herr := imageHasBridge(ctx, src, layer); {
+		switch has, herr := m.imageHasBridgeCached(ctx, src, layer); {
 		case herr != nil:
 			// Sin poder comprobarlo se sigue, dejando constancia: convertir una
 			// herramienta de diagnóstico en una dependencia de arranque sería
@@ -792,6 +895,18 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
 		TTLAt: &creada,
 	}
+	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
+	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
+	// gcFailed) veía la máquina en created con PID 0, no mataba nada, borraba
+	// su directorio y su entrada… mientras boot() lanzaba el firecracker: un
+	// VMM huérfano reteniendo RAM, invisible para `kling ps`, y un 201 para
+	// una máquina que ya no existía (M-06). Ahora esperan a que termine.
+	//
+	// Justo antes de publicar y no nada más generar el id: hasta aquí nadie
+	// puede nombrarla, y lo de arriba (checkMachineLimit → gcFailed) sí puede
+	// esperar el cerrojo de OTRA máquina. Ver doc.go.
+	soltarCiclo := m.lockUnaVez(id)
+	defer soltarCiclo()
 	m.mu.Lock()
 	m.byID[id] = mc
 	m.persist()
@@ -810,6 +925,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.mu.Unlock()
 		os.RemoveAll(dir)
 		return nil, err
+	}
+	if prueba := m.pruebaTrasPublicar; prueba != nil {
+		if err := prueba(id); err != nil {
+			return abandonar(err)
+		}
 	}
 
 	egress, err := knet.ParseEgress(req.Egress)
@@ -854,7 +974,14 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		mc.CPUPct = defaultCPUPct
 		m.mu.Unlock()
 	}
-	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+	// Un núcleo entero mientras arranca el kernel del invitado, que es lo que
+	// viene ahora (boot() vuelve tras Start); el techo configurado, en cuanto
+	// contesta su agente. El defer lo baja en cualquier salida de aquí en
+	// adelante, salvo la de éxito, que se lo entrega a quien espera al agente.
+	// Ver arranque_cpu.go.
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	defer impulso.fin()
+	if warn := m.limitCPU(mc.ID, pid, topeArranque(mc.CPUPct)); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
 	}
 
@@ -880,12 +1007,18 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if hasLiveShares(&out) {
 		m.startShares(id)
 		if err := m.waitShares(ctx, id, shareAttachWait); err != nil {
+			// Remove toma el cerrojo de la máquina, que es nuestro: soltarlo
+			// antes o se esperaría a sí mismo para siempre.
+			soltarCiclo()
 			_ = m.Remove(id)
 			return nil, err
 		}
 		m.decorarShares(&out)
 	}
 
+	// Desde aquí baja el techo la goroutine que espera al agente: con carpetas
+	// vivas ya contestó (waitShares) y lo bajará en su primer sondeo.
+	impulso.entregar()
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
@@ -906,12 +1039,14 @@ func (m *Manager) overlayTemplatePath() string {
 
 // ensureOverlayTemplate la construye si falta.
 //
-// Se formatea en un .tmp y se renombra, para que EXISTIR IMPLIQUE ESTAR
-// COMPLETA. Comprobar solo la existencia sobre el nombre definitivo sería una
-// trampa: si el daemon muere entre el Truncate y el mkfs queda medio giga de
-// ceros sin sistema de ficheros, y a partir de ahí TODAS las microVMs arrancan
-// con un /dev/vdb que no monta — un fallo que aparece dentro del invitado y no
-// en el log del daemon.
+// Se formatea en un .tmp y se renombra con durable.Renombrar, para que EXISTIR
+// IMPLIQUE ESTAR COMPLETA. Comprobar solo la existencia sobre el nombre
+// definitivo sería una trampa: si el daemon muere entre el Truncate y el mkfs
+// queda medio giga de ceros sin sistema de ficheros, y a partir de ahí TODAS
+// las microVMs arrancan con un /dev/vdb que no monta — un fallo que aparece
+// dentro del invitado y no en el log del daemon. Un rename sin fsync previo
+// del temporal ni del directorio deja la misma trampa abierta tras un corte
+// de luz: el rename puede haber quedado solo en la cache.
 func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 	m.templateMu.Lock()
 	defer m.templateMu.Unlock()
@@ -926,7 +1061,11 @@ func (m *Manager) ensureOverlayTemplate(ctx context.Context) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := durable.Renombrar(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // newOverlay deja listo el disco escribible de una microVM.
@@ -1003,7 +1142,10 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	var sock string
 	var pid int
 	var err error
-	if jailerEnabled() {
+	if m.JailerBlocked != "" {
+		return 0, errors.New(m.JailerBlocked)
+	}
+	if m.jailerJailed {
 		// Arranque en frío dentro del jail. A diferencia de la restauración, aquí
 		// firecracker abre el KERNEL (SetBootSource) y los discos por su API, así
 		// que también hay que replicar el kernel dentro del chroot.
@@ -1160,7 +1302,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 // enCg dice si de verdad nació dentro. Si el kernel no lo admite, se lanza
 // fuera y quien llama lo mete con limitCPU.
 func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enCg bool, err error) {
-	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
+	logf, err := abrirConsola(m.dir(id))
 	if err != nil {
 		return 0, false, err
 	}
@@ -1243,14 +1385,22 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	}
 	defer m.lock(mc.ID)()
 
-	// Pudo congelarla otro mientras esperábamos.
-	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateWarm {
+	// Se vuelve a leer con el cerrojo tomado: mientras lo esperábamos pudo
+	// congelarla otro, borrarla, o terminar de arrancar (Run lo tiene desde que
+	// la publica hasta que queda running). Seguir con la copia de antes era
+	// rechazar una máquina recién arrancada por estar "created".
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+	}
+	if cur.State == api.StateWarm {
 		return cur, nil
 	}
+	mc = cur
 	// Una pausada se reanuda antes: hay que vaciar sus volúmenes y preguntar
 	// por su agente, y un invitado pausado no contesta a nada.
-	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StatePaused {
-		r, err := m.reanudarLocked(ctx, cur, nil)
+	if mc.State == api.StatePaused {
+		r, err := m.reanudarLocked(ctx, mc, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1288,7 +1438,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// host. Se le pide el volcado en la raíz de su chroot y luego se recupera al
 	// dir real. Mismo filesystem, así que el traslado es un rename atómico y el
 	// mem.file conserva su inodo —y su caché de páginas—.
-	jailed := jailerEnabled() && strings.HasPrefix(sock, m.jailRoot(mc.ID))
+	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	if jailed {
 		snapPath, memPath = "/snap.file", "/mem.file"
 	}
@@ -1328,7 +1478,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if err := c.Pause(ctx); err != nil {
 		return nil, err
 	}
-	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
+	// Con plazo propio: el de 30 s del cliente no alcanza para volcar varios
+	// GiB, y cortarlo no para a Firecracker (F-01, ver plazoVolcado).
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).Snapshot(ctx, snapPath, memPath); err != nil {
 		// Reanudar antes de rendirse. Sin esto la máquina se quedaba PAUSADA
 		// para siempre figurando como running: el vigilante no la detecta
 		// porque el proceso vive, el gateway le sigue enrutando peticiones, y
@@ -1415,7 +1567,13 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 
 	// El sello va cuando los ficheros están completos y en su sitio (tras
 	// sacarlos de la jaula y perforarlos): es lo que dice que este volcado vale.
-	if err := sellarVolcado(dir); err != nil {
+	// Con el kernel instalado (K2): el Thaw lo compara, igual que runFrom con
+	// el de un dorado. Sin él (no se pudo hashear), el sello vale igual.
+	kernelSHA, kerr := m.kernelHash()
+	if kerr != nil {
+		log.Printf("warning: %s: could not hash the kernel for the seal: %v", mc.Name, kerr)
+	}
+	if err := sellarVolcado(dir, kernelSHA); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -1763,11 +1921,28 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		m.mu.Unlock()
 	}
 
+	// Jailer bloqueado: antes de enterLaunch, la red y el cgroup (ver Run). No
+	// antes: reanudar una pausada o readoptar un VMM que ya corre no lanza
+	// ningún firecracker nuevo, y las máquinas vivas siguen funcionando.
+	if m.JailerBlocked != "" {
+		return nil, errors.New(m.JailerBlocked)
+	}
 	// Un volcado a medias no se carga: fallaría con un error de Firecracker que
 	// no señala a ninguna parte, o peor, arrancaría un invitado corrupto.
 	if err := volcadoValido(dir); err != nil {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
+	}
+	// KERNEL (K2), como runFrom con los dorados: descongelar sobre un vmlinux
+	// distinto del que había al congelar (K1 lo reconstruye) falla de forma
+	// críptica o peor. Un sello sin el campo (anterior a esto) se acepta.
+	if err := m.kernelIgual(kernelDelVolcado(dir)); err != nil {
+		if errors.Is(err, errKernelCambiado) {
+			return nil, fmt.Errorf("machine %q can't be thawed: the kernel changed (it was frozen with a "+
+				"different kernel than the one installed on this host now). Remove it (kling rm %s) "+
+				"and start it again", mc.Name, mc.Name)
+		}
+		return nil, fmt.Errorf("machine %q can't be thawed: %w", mc.Name, err)
 	}
 	// La memoria, a la caché ya: la E/S corre mientras se monta la red y se
 	// lanza el VMM (ver precargar). Solo las pequeñas: en una grande el
@@ -1808,11 +1983,15 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	var c *fc.Client
 	var err error
 
-	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar).
+	// El VMM nace ya en su cgroup con techo de CPU (ver cgroupParaLanzar): el
+	// de arranque, que se baja al configurado en cuanto contesta el agente
+	// (resync) o, en cualquier otra salida, en el defer. Ver arranque_cpu.go.
 	if mc.CPUPct <= 0 {
 		mc.CPUPct = defaultCPUPct
 	}
-	cg := m.cgroupParaLanzar(mc.ID, mc.CPUPct)
+	impulso := m.nuevoImpulso(mc.ID, mc.CPUPct)
+	defer impulso.fin()
+	cg := m.cgroupParaLanzar(mc.ID, topeArranque(mc.CPUPct))
 	if cg != nil {
 		defer cg.Close()
 	}
@@ -1835,7 +2014,10 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, err
 	}
 
-	if jailerEnabled() {
+	if m.JailerBlocked != "" {
+		return abortar(errors.New(m.JailerBlocked))
+	}
+	if m.jailerJailed {
 		// El warm también se descongela dentro de un jail, o el aislamiento se
 		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
 		// Mismo patrón que runFrom: poblar el chroot antes de cargar.
@@ -1885,7 +2067,7 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	}
 	crono.marca(&crono.p.NetMS)
 	start := time.Now()
-	if err := c.LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
+	if err := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB))).LoadSnapshot(ctx, snapPath, memPath, true); err != nil {
 		// Mismo motivo que en runFrom: si la causa es el TSC de un host
 		// reiniciado, el error crudo de Firecracker no le dice a nadie qué
 		// hacer, y este texto es lo que verá quien despierte la máquina.
@@ -1908,6 +2090,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		resyncT, resyncOK = m.resyncGuest(ctx, mc.ID, "")
 	}
 	crono.marca(&crono.p.ResyncMS)
+	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
+	impulso.bajar()
 
 	// Reaplicar el techo de CPU: el firecracker de una máquina descongelada es un
 	// proceso NUEVO (spawn), así que su pertenencia al cgroup no sobrevive al ciclo
@@ -1944,6 +2128,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.FrozenAt = nil
 	cur.ThawMS = elapsed
 	cur.PID = pid
+	// El techo por defecto se decidió sobre la copia (arriba); se anota en la
+	// viva para que state.json y `kling ps` digan el que de verdad se aplicó.
+	cur.CPUPct = mc.CPUPct
 	m.socket[mc.ID] = sock
 	m.persist()
 	out := *cur
@@ -2000,6 +2187,12 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	// el namespace de red POR DEBAJO del thaw: la maquina queda "running" y sin
 	// red, y el gateway ve timeouts que no apuntan a nada.
 	defer m.lock(mc.ID)()
+	// Lo que vio Get antes de esperar el cerrojo puede no valer ya: si la
+	// máquina estaba arrancando, su NetIndex era aún el de antes de montar la
+	// red, y desmontar con él dejaba la red de verdad montada.
+	if cur, ok := m.get(mc.ID); ok {
+		mc = cur
+	}
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
@@ -2038,6 +2231,11 @@ func (m *Manager) Remove(ref string) error {
 	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.
 	defer m.lock(mc.ID)()
+	// Releer con el cerrojo: si estaba arrancando, Run lo tenía y la copia de
+	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
+	if cur, ok := m.get(mc.ID); ok {
+		mc = cur
+	}
 	m.kill(mc.ID)
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -2123,19 +2321,45 @@ func waitGone(pid int, timeout time.Duration) {
 	}
 }
 
+// fail da una máquina por perdida: mata su VMM, desmonta su red y su cgroup y
+// la marca failed con el error.
+//
+// mc puede ser el puntero vivo o una COPIA (lo que devuelve Get): se escribe
+// siempre en la entrada viva de byID. Antes se escribía en mc, y con una copia
+// —Freeze, al no poder reanudar tras un volcado fallido— el VMM moría pero la
+// máquina seguía "running" con un PID muerto: el gateway le enrutaba hasta que
+// el vigilante, 10 s después, la relabelaba con "the microVM process
+// disappeared", perdiendo el error real (M-01). Solo si ya no está registrada
+// (la borraron, o Run la abandonó) se escribe en mc, que entonces no ve nadie.
 func (m *Manager) fail(mc *api.Machine, err error) {
-	m.kill(mc.ID)
-	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
-	m.releaseCPU(mc.ID)
+	id := mc.ID
+	m.kill(id)
+
+	// El índice de red, de la viva: el de una copia tomada antes de esperar el
+	// cerrojo puede ser anterior a montar la red.
+	m.mu.RLock()
+	netIndex := mc.NetIndex
+	if live := m.byID[id]; live != nil {
+		netIndex = live.NetIndex
+	}
+	m.mu.RUnlock()
+	m.desmontarRed(knet.Plan(netIndex, id), id)
+	m.releaseCPU(id)
+
 	m.mu.Lock()
+	destino := m.byID[id]
+	if destino == nil {
+		destino = mc
+	}
 	now := time.Now()
-	mc.State = api.StateFailed
-	mc.LastErr = err.Error()
-	mc.Forwards = nil
+	destino.State = api.StateFailed
+	destino.LastErr = err.Error()
+	destino.Forwards = nil
 	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
 	// se quedaba en la lista para siempre (ver gcFailed).
-	mc.FailedAt = &now
+	destino.FailedAt = &now
+	name := destino.Name
 	m.persist()
 	m.mu.Unlock()
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name, Message: err.Error()})
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error()})
 }

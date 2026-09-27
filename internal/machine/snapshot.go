@@ -2,12 +2,9 @@ package machine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +18,7 @@ import (
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 
 	"github.com/juan52878911/kindling/pkg/durable"
 )
@@ -39,7 +37,7 @@ func (m *Manager) snapDir(name string) string {
 // restaurar, el invitado despierta con su estado de montaje en memoria, así que
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
-func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*api.Snapshot, error) {
+func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -47,6 +45,20 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	if !ok {
 		return nil, fmt.Errorf("machine %q does not exist", ref)
 	}
+	// El cerrojo de ciclo de vida de la plantilla, como Freeze, Stop o Remove
+	// (M-04). Commit la pausa, le cambia el disco y la vuelca: sin él, un
+	// Remove concurrente borraba su directorio bajo un VMM pausado, un Freeze
+	// volcaba una máquina cuyo disco era el overlay dorado, y el reapuntado
+	// final fallaba dejándola pausada y listada como running.
+	defer m.lock(mc.ID)()
+
+	// Se vuelve a leer con el cerrojo tomado: mientras lo esperábamos pudo
+	// congelarla, pausarla o borrarla otro.
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("machine %q does not exist", ref)
+	}
+	mc = cur
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}
@@ -86,41 +98,135 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
 		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
 
 	snapPath := filepath.Join(dir, "snap.file")
 	memPath := filepath.Join(dir, "mem.file")
 	goldOverlay := filepath.Join(dir, "overlay.ext4")
-
-	// Quien escribe el snapshot es Firecracker, que corre sin privilegios: el
-	// directorio tiene que ser suyo antes de pedírselo.
-	if err := m.priv.Own(dir); err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-
 	ownOverlay := filepath.Join(m.dir(mc.ID), "overlay.ext4")
 
 	// Una plantilla jailed corre chrooteada: no ve snapDir. El overlay dorado y
 	// el volcado se escriben en el jail (en su path absoluto) y se recuperan al
 	// host después. goldDst es dónde se copia el overlay para que firecracker lo
 	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot.
-	jailed := jailerEnabled() && strings.HasPrefix(sock, m.jailRoot(mc.ID))
+	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	goldDst := goldOverlay
 	if jailed {
 		goldDst = m.jailPath(mc.ID, goldOverlay)
-		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
+	}
+
+	c := fc.New(sock)
+	// El volcado escribe la memoria entera: con varios GiB no cabe en los 30 s
+	// por defecto del cliente (F-01). Las llamadas de la limpieza usan el mismo
+	// plazo porque pueden llegar con un volcado aún en marcha, y la API de
+	// Firecracker las atiende de una en una: esperan a que acabe.
+	lento := c.ConPlazo(plazoVolcado(max(mc.MemMiB, mc.MemMaxMiB)))
+
+	// LIMPIEZA. Una sola, diferida, para TODAS las salidas de error (M-05).
+	// Antes cada camino deshacía su parte a mano y varios se olvidaban de algo:
+	// un Pause fallido no devolvía los volúmenes, y un fallo al reapuntar el
+	// disco de vuelta o al perforar la memoria salía sin reanudar y sin borrar
+	// el directorio a medias. La plantilla quedaba pausada figurando como
+	// running —el vigilante no lo ve porque el proceso vive, y el gateway le
+	// sigue enrutando peticiones que nadie contesta—.
+	//
+	// Los flags dicen qué hay que deshacer. Cada uno se marca ANTES de pedir lo
+	// que deshace: una petición que falla, o cuyo ctx se cancela, pudo llegar a
+	// aplicarse, y deshacer algo que no pasó es inocuo (reapuntar al disco
+	// propio, montar un volumen ya montado). El camino feliz los baja al
+	// devolver la plantilla a su estado (restaurarPlantilla), así que la
+	// limpieza solo hace lo que quede pendiente.
+	//
+	// Con context.WithoutCancel: si quien pidió el commit se desconecta a
+	// mitad, su ctx se cancela, y con él se saltaba la reanudación. Deshacer
+	// no es opcional por mucho que ya nadie espere la respuesta.
+	var (
+		creado      bool // el directorio del snapshot es nuestro: borrarlo si no hay meta
+		soltados    bool // se pidió al invitado soltar los volúmenes: devolvérselos
+		pausaPedida bool // se pidió la pausa, aunque fallara: puede estar pausada
+		pausada     bool // la pausa se confirmó: reanudar sí o sí
+		reapuntado  bool // el overlay puede apuntar al dorado: devolverle el suyo
+		hecho       bool // meta.json escrito: el snapshot vale y no se toca
+	)
+	limpio := context.WithoutCancel(ctx)
+
+	// restaurarPlantilla devuelve la plantilla a como estaba: su disco, en
+	// marcha, con sus volúmenes. La llaman el camino feliz, en cuanto termina
+	// el volcado (para que la plantilla esté parada lo menos posible), y la
+	// limpieza. Si devuelve error, la plantilla no era recuperable y ya quedó
+	// marcada fallida.
+	restaurarPlantilla := func() error {
+		if reapuntado {
+			if err := lento.PatchDrive(limpio, "overlay", ownOverlay); err != nil {
+				// No se reanuda: correría escribiendo en el overlay dorado, que
+				// es de otras instancias, y su propio disco se quedaría atrás
+				// para siempre. Mejor muerta y dicho que viva y corrupta.
+				err = fmt.Errorf("returning overlay to machine: %w", err)
+				m.fail(mc, fmt.Errorf("commit could not give the template its own disk back: %w", err))
+				reapuntado, pausaPedida, pausada, soltados = false, false, false, false
+				return err
+			}
+			reapuntado = false
+		}
+		if pausaPedida {
+			if err := lento.Resume(limpio); err != nil {
+				if pausada {
+					// Pausada y sin poder reanudarla: dejarla como running
+					// sería mentir. Igual que Freeze.
+					err = fmt.Errorf("resuming template after commit: %w", err)
+					m.fail(mc, fmt.Errorf("commit paused the template and could not resume it: %w", err))
+					pausaPedida, pausada, soltados = false, false, false
+					return err
+				}
+				// La pausa nunca se confirmó: lo normal es que siga en marcha
+				// y que Firecracker no tenga nada que reanudar.
+				log.Printf("commit %s: resume after a failed pause: %v", mc.Name, err)
+			}
+			pausaPedida, pausada = false, false
+		}
+		if soltados {
+			soltados = false
+			// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay
+			// que devolvérselos, o seguirá corriendo escribiendo en su overlay.
+			if err := m.acquireVolumes(mc); err != nil {
+				log.Printf("warning: template %s ended up without its volumes after commit: %v", mc.Name, err)
+			}
+		}
+		return nil
+	}
+	defer func() {
+		if errOut == nil {
+			return
+		}
+		_ = restaurarPlantilla()
+		if creado && !hecho {
 			os.RemoveAll(dir)
+			m.invalidateSnapCache(name)
+			if jailed {
+				// Las réplicas en el chroot de la plantilla: el volcado y el
+				// overlay dorado que no llegaron a recuperarse.
+				os.RemoveAll(m.jailPath(mc.ID, dir))
+			}
+		}
+	}()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	creado = true
+
+	// Quien escribe el snapshot es Firecracker, que corre sin privilegios: el
+	// directorio tiene que ser suyo antes de pedírselo.
+	if err := m.priv.Own(dir); err != nil {
+		return nil, err
+	}
+	if jailed {
+		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
 			return nil, err
 		}
 		if m.priv.Enabled {
 			_ = os.Chown(filepath.Dir(goldDst), m.priv.UID, m.priv.GID)
 		}
 	}
-
-	c := fc.New(sock)
 
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
 	// corriendo: un invitado pausado no atiende HTTP.
@@ -129,35 +235,27 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	// mapas de bloques, posición del journal— de un disco que después seguirá
 	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
+	soltados = true
 	if err := m.releaseVolumes(mc); err != nil {
-		os.RemoveAll(dir)
 		return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
 	}
 
+	pausaPedida = true
 	if err := c.Pause(ctx); err != nil {
-		os.RemoveAll(dir)
 		return nil, err
 	}
-	abort := func(err error) (*api.Snapshot, error) {
-		os.RemoveAll(dir)
-		_ = c.PatchDrive(ctx, "overlay", ownOverlay)
-		_ = c.Resume(ctx)
-		// La plantilla sigue viva y se quedó sin volúmenes al soltarlos: hay que
-		// devolvérselos, o seguirá corriendo escribiendo en su overlay.
-		_ = m.acquireVolumes(mc)
-		return nil, err
-	}
+	pausada = true
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
 	if out, err := copiarDisco(ctx, ownOverlay, goldDst); err != nil {
-		return abort(fmt.Errorf("copying overlay: %v: %s", err, out))
+		return nil, fmt.Errorf("copying overlay: %v: %s", err, out)
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
 	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
 	// "Permission denied".
 	if err := m.priv.Own(goldDst); err != nil {
-		return abort(err)
+		return nil, err
 	}
 
 	// CLAVE: se reapunta el disco a la copia dorada ANTES de volcar, para que el
@@ -167,33 +265,29 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	// se elimina la plantilla, restaurar falla con "No such file or directory"
 	// sobre un overlay que ya no existe. El snapshot dorado tiene que ser
 	// autocontenido, porque su razón de ser es sobrevivir a la máquina que lo creó.
+	reapuntado = true
 	if err := c.PatchDrive(ctx, "overlay", goldOverlay); err != nil {
-		return abort(fmt.Errorf("repointing overlay to golden copy: %w", err))
+		return nil, fmt.Errorf("repointing overlay to golden copy: %w", err)
 	}
-	if err := c.Snapshot(ctx, snapPath, memPath); err != nil {
-		return abort(err)
+	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
+		return nil, err
 	}
 	if jailed {
 		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
 		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
 		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
 			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
-				return abort(fmt.Errorf("recovering %s from jail: %w", f, err))
+				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
 			}
 		}
 	}
-	// Se devuelve el disco propio: la plantilla sigue viva y no debe escribir en
-	// el overlay dorado, que a partir de ahora es plantilla de otras instancias.
-	if err := c.PatchDrive(ctx, "overlay", ownOverlay); err != nil {
-		return nil, fmt.Errorf("returning overlay to machine: %w", err)
-	}
-	if err := c.Resume(ctx); err != nil {
-		return nil, err
-	}
-	// La plantilla vuelve a montarlos: sigue viva hasta que la importación la
+	// Se devuelve el disco propio y se reanuda YA: la plantilla no debe escribir
+	// en el overlay dorado, que a partir de ahora es plantilla de otras
+	// instancias, y lo que queda (perforar, hashear) no la necesita parada.
+	// Vuelve a montar sus volúmenes: sigue viva hasta que la importación la
 	// destruya, y con -keep puede quedarse.
-	if err := m.acquireVolumes(mc); err != nil {
-		log.Printf("warning: template %s ended up without its volumes after freeze: %v", mc.Name, err)
+	if err := restaurarPlantilla(); err != nil {
+		return nil, err
 	}
 
 	if out, err := perforarHuecos(ctx, memPath); err != nil {
@@ -206,13 +300,21 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	// el snap volcado, la memoria perforada). El mem.file se deja fuera a
 	// propósito: es el grande y volver a leerlo entero en cada restauración mataría
 	// los ~30 ms del thaw. Ver verifyIntegrity para el porqué completo.
-	rootfsSHA, err := fileSHA256(goldOverlay)
+	rootfsSHA, err := digest.File(goldOverlay)
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
 	}
-	snapSHA, err := fileSHA256(snapPath)
+	snapSHA, err := digest.File(snapPath)
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of state dump: %w", err)
+	}
+	// El kernel con el que se congela (K2): sin él, reconstruirlo con otra
+	// configuración (K1) rompería restauraciones de este dorado sin ninguna
+	// señal de por qué. Cacheado por tamaño+fecha (kernelHash): no es otro
+	// fichero grande que hashear entero en cada commit.
+	kernelSHA, err := m.kernelHash()
+	if err != nil {
+		return nil, fmt.Errorf("computing digest of the kernel: %w", err)
 	}
 
 	snap := &api.Snapshot{
@@ -226,6 +328,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 		AllowExec:    mc.AllowExec,
 		RootfsSHA256: rootfsSHA,
 		SnapSHA256:   snapSHA,
+		KernelSHA256: kernelSHA,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
 		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
@@ -244,6 +347,11 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (*
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
+	// El directorio (mem.file, overlay.ext4...) ya estaba en su forma final
+	// antes de este writeMeta; lo que hace falta olvidar es lo que -replace
+	// pudo dejar cacheado con el mismo nombre (M-08, M-12).
+	m.invalidateSnapCache(name)
+	hecho = true
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})
@@ -271,16 +379,114 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 		if !e.IsDir() {
 			continue
 		}
-		s, err := m.loadSnapshot(e.Name())
+		s, disco, err := m.loadSnapshotCached(e.Name())
 		if err != nil {
 			continue
 		}
-		s.DiskBytes = diskUsage(m.snapDir(e.Name()))
+		s.DiskBytes = disco
 		s.Instances = live[e.Name()]
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// snapCacheEntry es lo que loadSnapshotCached recuerda de un dorado: el
+// snapshot ya parseado y su ocupación en disco, con la huella (mtime de
+// meta.json y del directorio) con la que se calcularon. snap NUNCA se entrega
+// a quien llama: se clona (ver cloneSnapshot), para que nadie pueda pisar lo
+// cacheado escribiendo en DiskBytes/Instances o anotando el que recibió.
+type snapCacheEntry struct {
+	metaMod int64
+	dirMod  int64
+	snap    *api.Snapshot
+	disco   int64
+}
+
+// loadSnapshotCached es loadSnapshot + diskUsage con caché por mtime de
+// meta.json y del directorio (M-08).
+//
+// Antes, Snapshots() releía y parseaba el meta.json y recorría el directorio
+// entero de CADA dorado en CADA llamada: el gateway llama a Snapshots() en
+// cada tick del reaper y en cada arranque en frío desde un snapshot (runFrom),
+// así que con unas pocas decenas de servicios eso es E/S de fondo constante.
+// Un dorado no cambia salvo por una anotación o un `commit -replace` con el
+// mismo nombre — los dos pasan por writeMeta/removeSnapshot, que invalidan
+// esta entrada (ver invalidateSnapCache) — así que memorizar el resultado
+// hasta que eso ocurra no pierde ninguna actualización real.
+//
+// La huella (mtime de meta.json + mtime del directorio) es un cinturón además
+// del tirante de la invalidación explícita: cubre cambios que no pasan por
+// esas dos funciones, como restaurar un directorio desde la papelera a mano.
+func (m *Manager) loadSnapshotCached(name string) (*api.Snapshot, int64, error) {
+	dir := m.snapDir(name)
+	metaFi, err := os.Stat(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+	}
+	dirFi, err := os.Stat(dir)
+	if err != nil {
+		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+	}
+	metaMod, dirMod := metaFi.ModTime().UnixNano(), dirFi.ModTime().UnixNano()
+
+	m.mu.RLock()
+	entry, hay := m.snapCache[name]
+	m.mu.RUnlock()
+	if hay && entry.metaMod == metaMod && entry.dirMod == dirMod {
+		return cloneSnapshot(entry.snap), entry.disco, nil
+	}
+
+	snap, err := m.loadSnapshot(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	disco := diskUsage(dir)
+
+	m.mu.Lock()
+	if m.snapCache == nil {
+		m.snapCache = map[string]snapCacheEntry{}
+	}
+	m.snapCache[name] = snapCacheEntry{metaMod: metaMod, dirMod: dirMod, snap: snap, disco: disco}
+	m.mu.Unlock()
+	return cloneSnapshot(snap), disco, nil
+}
+
+// invalidateSnapCache olvida todo lo cacheado sobre un dorado: el snapshot
+// parseado y su disco (loadSnapshotCached), y el tamaño asignado de su
+// mem.file (hotMemFilesMiBLocked, M-12). Se llama justo después de escribir su
+// meta.json (writeMeta, en Commit y en editMeta) o de apartar su directorio
+// (removeSnapshot): la próxima lectura vuelve a mirar el disco en vez de
+// servir un dorado que ya no es el que hay ahí.
+func (m *Manager) invalidateSnapCache(name string) {
+	m.mu.Lock()
+	delete(m.snapCache, name)
+	delete(m.memAllocCache, name)
+	m.mu.Unlock()
+}
+
+// cloneSnapshot copia un *api.Snapshot para que quien lo recibe pueda pisar
+// DiskBytes o Instances —o anotarlo— sin tocar al que vive en snapCache ni al
+// que puede estar leyendo otro goroutine a la vez (mismo motivo que M-03 con
+// api.Machine: compartir el slice/map de otro y escribir en el sitio es una
+// carrera de datos, no solo un bug de lógica).
+func cloneSnapshot(s *api.Snapshot) *api.Snapshot {
+	c := *s
+	c.Volumes = append([]api.VolumeAttachment(nil), s.Volumes...)
+	c.AllowDomains = append([]string(nil), s.AllowDomains...)
+	if s.Labels != nil {
+		c.Labels = make(map[string]string, len(s.Labels))
+		for k, v := range s.Labels {
+			c.Labels[k] = v
+		}
+	}
+	if s.Annotations != nil {
+		c.Annotations = make(map[string]json.RawMessage, len(s.Annotations))
+		for k, v := range s.Annotations {
+			c.Annotations[k] = v
+		}
+	}
+	return &c
 }
 
 func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
@@ -356,7 +562,7 @@ func (m *Manager) verifyIntegrity(snap *api.Snapshot, snapDir string) error {
 		if chk.want == "" {
 			continue
 		}
-		got, err := fileSHA256(filepath.Join(snapDir, chk.file))
+		got, err := digest.File(filepath.Join(snapDir, chk.file))
 		if err != nil {
 			return fmt.Errorf("couldn't read %s to verify its integrity: %w", chk.file, err)
 		}
@@ -419,19 +625,88 @@ func (m *Manager) anotarIntegridad(name, snapDir string) {
 	m.mu.Unlock()
 }
 
-// fileSHA256 devuelve el sha256 de un fichero en hexadecimal. Con crypto/sha256
-// de la stdlib: cero dependencias nuevas.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
+// huellaKernel es el kernelSHA256 cacheado de Manager.kernelSHA, junto con el
+// tamaño y la fecha del vmlinux que lo produjeron (K2). Igual que huellaSnapshot:
+// basta un stat para saber si sigue valiendo, en vez de volver a hashear.
+type huellaKernel struct {
+	tam   int64
+	fecha int64
+	hash  string
+}
+
+// kernelHash devuelve el sha256 del kernel en uso (KernelPath), cacheado por
+// tamaño+fecha del fichero (K2).
+//
+// Se pide en cada Commit y en cada runFrom, y rehashear un vmlinux de varias
+// decenas de MiB en cada restauración sería justo el tipo de coste que este
+// proyecto existe para evitar. El vmlinux es un fichero compartido por todas
+// las microVMs y solo cambia cuando alguien reconstruye el kernel (K1) o lo
+// reemplaza a mano; entre esos dos momentos, tamaño y fecha no se mueven.
+func (m *Manager) kernelHash() (string, error) {
+	path := m.KernelPath()
+	st, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	tam, fecha := st.Size(), st.ModTime().UnixNano()
+
+	m.mu.RLock()
+	h := m.kernelSHA
+	m.mu.RUnlock()
+	if h.hash != "" && h.tam == tam && h.fecha == fecha {
+		return h.hash, nil
+	}
+
+	hash, err := digest.File(path)
+	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	m.mu.Lock()
+	m.kernelSHA = huellaKernel{tam: tam, fecha: fecha, hash: hash}
+	m.mu.Unlock()
+	return hash, nil
+}
+
+// comprobarKernel exige que el kernel instalado ahora sea el mismo con el que
+// se congeló el snapshot (K2).
+//
+// K1 permite reconstruir vmlinux con otra configuración; un dorado no lleva su
+// propio kernel dentro, así que restaurarlo sobre uno distinto del que tenía
+// al congelarse dejaría al invitado despertando con código que no es el suyo
+// mapeado en memoria — un pánico, o algo peor: un cuelgue o un fallo sutil que
+// no señala al kernel como causa. Mejor negarse aquí, claro y pronto.
+//
+// recordedSHA vacío es un snapshot anterior a este campo (o a K1): se acepta
+// igual, o desplegar esto rompería de golpe todos los snapshots existentes.
+func (m *Manager) comprobarKernel(recordedSHA, name string) error {
+	if err := m.kernelIgual(recordedSHA); err != nil {
+		if errors.Is(err, errKernelCambiado) {
+			return fmt.Errorf("rebuild the template: the kernel changed (snapshot %q was frozen with a "+
+				"different kernel than the one installed on this host now)", name)
+		}
+		return err
+	}
+	return nil
+}
+
+// errKernelCambiado es que el kernel instalado no es el grabado al congelar.
+var errKernelCambiado = errors.New("the kernel changed")
+
+// kernelIgual compara recordedSHA con el kernel instalado ahora; vacío se
+// acepta (anterior al campo). Es la parte común de comprobarKernel (dorados)
+// y del Thaw de una warm (sello del volcado, ver kernelDelVolcado).
+func (m *Manager) kernelIgual(recordedSHA string) error {
+	if recordedSHA == "" {
+		return nil
+	}
+	actual, err := m.kernelHash()
+	if err != nil {
+		return fmt.Errorf("hashing the current kernel: %w", err)
+	}
+	if actual != recordedSHA {
+		return errKernelCambiado
+	}
+	return nil
 }
 
 // RemoveSnapshot borra un snapshot dorado, salvo que tenga instancias vivas.
@@ -439,7 +714,20 @@ func (m *Manager) RemoveSnapshot(name string) error { return m.removeSnapshot(na
 
 // removeSnapshot es RemoveSnapshot; propio=true lo llama el commit que TIENE la
 // reserva de ese nombre (el camino de -replace), que no debe toparse con ella.
+//
+// Se niega mientras alguien más tenga reservado el snapshot: un commit que lo
+// está escribiendo o una restauración (runFrom) que lo está leyendo. La
+// restauración reserva ANTES de leer nada y no aparece en byID hasta mucho
+// después —copiar el overlay dorado, montar la red—, así que mirar solo las
+// instancias vivas dejaba borrar el mem.file bajo un LoadSnapshot en curso, que
+// fallaba con un ENOENT crudo (M-15).
+//
+// La comprobación y la retirada del directorio van bajo el MISMO m.mu, y la
+// retirada es un rename a la papelera (instantáneo, como en el barrido): entre
+// "nadie lo usa" y "ya no está" no cabe una reserva nueva. El borrado de verdad,
+// que con un mem.file de GiB tarda, va después y sin cerrojo.
 func (m *Manager) removeSnapshot(name string, propio bool) error {
+	restos := false
 	if _, err := m.loadSnapshot(name); err != nil {
 		// Sin meta.json pero con directorio: son los restos de un commit que se
 		// interrumpió antes de escribirlo (el meta es lo último). Antes esto
@@ -448,27 +736,65 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 		if !restosDeCommit(m.snapDir(name)) {
 			return err
 		}
-		m.mu.RLock()
-		enCurso := m.reserved[reservaSnapshot(name)]
-		m.mu.RUnlock()
-		if enCurso && !propio {
+		restos = true
+	}
+
+	m.mu.Lock()
+	enUso := m.reserved[reservaSnapshot(name)]
+	if propio {
+		enUso-- // la reserva del propio commit que reemplaza
+	}
+	if enUso > 0 {
+		m.mu.Unlock()
+		if restos {
 			return fmt.Errorf("snapshot %q is being committed right now", name)
 		}
-		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
-		return os.RemoveAll(m.snapDir(name))
+		return fmt.Errorf("snapshot %q is in use right now (an instance is being restored from it, "+
+			"or it is being committed); retry in a moment", name)
 	}
-	m.mu.RLock()
-	var users []string
-	for _, mc := range m.byID {
-		if mc.From == name && mc.State != api.StateStopped {
-			users = append(users, mc.Name)
+	if !restos {
+		var users []string
+		for _, mc := range m.byID {
+			if mc.From == name && mc.State != api.StateStopped {
+				users = append(users, mc.Name)
+			}
+		}
+		if len(users) > 0 {
+			m.mu.Unlock()
+			return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
 		}
 	}
-	m.mu.RUnlock()
-	if len(users) > 0 {
-		return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
+	destino, rerr := m.apartarSnapshot(name)
+	m.mu.Unlock()
+	// El directorio ya no está donde estaba (o está a punto de dejar de
+	// estarlo): lo que loadSnapshotCached/hotMemFilesMiBLocked recordaban de
+	// este nombre ya no vale (M-08, M-12).
+	m.invalidateSnapCache(name)
+
+	if restos {
+		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
 	}
-	return os.RemoveAll(m.snapDir(name))
+	if rerr != nil {
+		// Sin papelera (otro sistema de ficheros, permisos): se borra en su
+		// sitio, como siempre. La ventana vuelve a existir, pero solo aquí.
+		log.Printf("snapshot %q: couldn't move it to the trash (%v); deleting it in place", name, rerr)
+		return os.RemoveAll(m.snapDir(name))
+	}
+	return os.RemoveAll(destino)
+}
+
+// apartarSnapshot mueve el directorio del snapshot a la papelera y devuelve
+// dónde quedó. Solo renombra: se puede (y se debe) llamar con m.mu tomado.
+func (m *Manager) apartarSnapshot(name string) (string, error) {
+	papelera := filepath.Join(m.root, "machines", papeleraDir)
+	if err := os.MkdirAll(papelera, 0o700); err != nil {
+		return "", err
+	}
+	destino := filepath.Join(papelera, fmt.Sprintf("snap-%s-%d", name, time.Now().UnixNano()))
+	if err := os.Rename(m.snapDir(name), destino); err != nil {
+		return "", err
+	}
+	return destino, nil
 }
 
 // explainRestoreErr traduce los fallos de restauración de Firecracker con causa
@@ -496,7 +822,25 @@ func explainRestoreErr(err error, what, remedy string) error {
 // en privado, así que comparten las páginas que no escriben y solo divergen las
 // que tocan. La segunda instancia y las siguientes salen casi gratis en RAM.
 func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
-	snap, err := m.loadSnapshot(req.From)
+	// Antes de reservar el snapshot y de publicar nada (ver Run).
+	if m.JailerBlocked != "" {
+		return nil, errors.New(m.JailerBlocked)
+	}
+	// El snapshot queda RESERVADO mientras dure la restauración, desde antes de
+	// leer su meta.json: RemoveSnapshot se niega a borrarlo mientras tanto. Sin
+	// esto, un `kling snapshots rm` durante la copia del overlay o el montaje de
+	// la red —la ventana más ancha del daemon, antes de aparecer en byID— le
+	// quitaba el mem.file a LoadSnapshot (M-15). Se suelta al volver: para
+	// entonces la instancia, si arrancó, ya cuenta como viva en byID. El
+	// nombre se valida antes: no se reserva "snap:../../etc".
+	if !validName.MatchString(req.From) {
+		return nil, fmt.Errorf("invalid snapshot name: %q", req.From)
+	}
+	defer m.reserveDir(reservaSnapshot(req.From))()
+
+	// Cacheado (M-08): esto se llama en cada instanciación desde este dorado, y
+	// el meta.json no cambia entre una y la siguiente.
+	snap, _, err := m.loadSnapshotCached(req.From)
 	if err != nil {
 		return nil, err
 	}
@@ -510,6 +854,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 	if err := m.verifyIntegrity(snap, m.snapDir(req.From)); err != nil {
+		return nil, err
+	}
+	// KERNEL. Igual de temprano y por la misma razón: un dorado no lleva su
+	// propio vmlinux, y restaurarlo sobre uno distinto del que tenía al
+	// congelarse (K1 reconstruyéndolo con otra configuración) es indistinguible
+	// de una corrupción hasta que el invitado se porta raro (K2).
+	if err := m.comprobarKernel(snap.KernelSHA256, req.From); err != nil {
 		return nil, err
 	}
 
@@ -686,6 +1037,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
+	// El cerrojo de ciclo de vida, igual que en Run y por lo mismo (M-06): sin
+	// él, un Remove concurrente veía la máquina en created con PID 0, borraba
+	// su directorio y su entrada, y esta función seguía restaurando un VMM que
+	// acababa huérfano. Justo antes de publicarla: hasta aquí nadie puede
+	// nombrarla (ver doc.go).
+	soltarCiclo := m.lockUnaVez(id)
+	defer soltarCiclo()
 	m.mu.Lock()
 	m.byID[id] = mc
 	m.persist()
@@ -712,6 +1070,25 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// La máquina queda en disco ANTES de que exista su VMM (ver persistirYa).
 	m.persistirYa()
 
+	// El VMM nace ya en su cgroup, como en Thaw, con el techo de ARRANQUE: un
+	// núcleo entero mientras restaura y hasta que contesta su agente (resync);
+	// después, el configurado. El defer lo baja en cualquier salida. Ver
+	// arranque_cpu.go. El techo por defecto, bajo el candado: mc está
+	// publicada desde arriba, y List()/Get()/persist() la copian desde otras
+	// goroutines (M-02).
+	if mc.CPUPct <= 0 {
+		m.mu.Lock()
+		mc.CPUPct = defaultCPUPct
+		m.mu.Unlock()
+	}
+	impulso := m.nuevoImpulso(id, mc.CPUPct)
+	defer impulso.fin()
+	cg := m.cgroupParaLanzar(id, topeArranque(mc.CPUPct))
+	if cg != nil {
+		defer cg.Close()
+	}
+	var enCg bool
+
 	// abortar es la única salida de error a partir de aquí.
 	//
 	// m.fail() llama a kill(), que lee el PID de la MÁQUINA, y ese PID no se
@@ -729,12 +1106,15 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		m.fail(mc, err)
 		return nil, err
 	}
-	if jailerEnabled() {
+	if m.JailerBlocked != "" {
+		return abortar(errors.New(m.JailerBlocked))
+	}
+	if m.jailerJailed {
 		// Restauración dentro de un jail: firecracker corre chrooteado. Todo lo
 		// que va a abrir tiene que estar replicado dentro del jail EN SU RUTA
 		// ABSOLUTA, porque LoadSnapshot abre cada drive con el path que quedó
 		// grabado —comprobado en el laboratorio—.
-		pid, sock, _, err = m.spawnJailed(id, netcfg, nil)
+		pid, sock, enCg, err = m.spawnJailed(id, netcfg, cg)
 		if err != nil {
 			return abortar(err)
 		}
@@ -777,7 +1157,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	} else {
 		sock = filepath.Join(dir, "fc.sock")
 		_ = os.Remove(sock)
-		pid, _, err = m.spawn(id, sock, netcfg, nil)
+		pid, enCg, err = m.spawn(id, sock, netcfg, cg)
 		if err != nil {
 			return abortar(err)
 		}
@@ -792,8 +1172,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return abortar(err)
 	}
 	start := time.Now()
-	// Pausada: hay que reapuntar el overlay antes de dejarla correr.
-	if err := c.LoadSnapshot(ctx,
+	// Pausada: hay que reapuntar el overlay antes de dejarla correr. Con el
+	// plazo del volcado y no el de 30 s: cargar también es mover la memoria
+	// entera (F-01).
+	if err := c.ConPlazo(plazoVolcado(max(snap.MemMiB, snap.MemMaxMiB))).LoadSnapshot(ctx,
 		filepath.Join(snapDir, "snap.file"),
 		filepath.Join(snapDir, "mem.file"), false); err != nil {
 		// Con causa conocida (TSC tras reiniciar el host) se traduce ANTES de
@@ -838,7 +1220,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// próximo commit lo escriba en su meta y la cadena se auto-repare: la
 	// generación siguiente ya no necesita heurística ni reintento.
 	m.mu.Lock()
-	withDriveIDs(mc.Volumes, usados)
+	mc.Volumes = withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
@@ -852,6 +1234,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
 	resyncT, resyncOK := m.resyncGuest(ctx, id, claveSnapshot(snap))
+	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
+	impulso.bajar()
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
 	// invitado los monta. Se congelaron desmontados a propósito, para que su
 	// memoria no llevara dentro la caché de un ext4 que después cambia.
@@ -866,11 +1250,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	elapsed := time.Since(start).Milliseconds()
 
-	if mc.CPUPct <= 0 {
-		mc.CPUPct = defaultCPUPct
-	}
-	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
-		log.Printf("warning: %s: %s", mc.Name, warn)
+	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, ya con el
+	// techo configurado (el arranque terminó arriba).
+	if !enCg {
+		if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
+			log.Printf("warning: %s: %s", mc.Name, warn)
+		}
 	}
 
 	m.mu.Lock()
@@ -939,15 +1324,23 @@ func (m *Manager) patchVolumeDrive(ctx context.Context, c *fc.Client,
 	return "", err
 }
 
-// withDriveIDs deja en los adjuntos el nombre de disco que REALMENTE funcionó,
-// para que el próximo commit lo escriba en su meta y la cadena se auto-repare.
+// withDriveIDs devuelve los adjuntos con el nombre de disco que REALMENTE
+// funcionó, para que el próximo commit lo escriba en su meta y la cadena se
+// auto-repare.
+//
+// Devuelve un slice NUEVO y no toca vols. Antes escribía en su sitio, y vols
+// es el de una máquina ya publicada: cualquier copia por valor tomada antes
+// (List, Get, la foto de persist) compartía ese mismo array, y json.Marshal lo
+// leía fuera del lock mientras esto lo escribía (M-03). Quien llama asigna el
+// resultado bajo m.mu.
 func withDriveIDs(vols []api.VolumeAttachment, ids []string) []api.VolumeAttachment {
-	for i := range vols {
+	out := append([]api.VolumeAttachment(nil), vols...)
+	for i := range out {
 		if i < len(ids) && ids[i] != "" {
-			vols[i].DriveID = ids[i]
+			out[i].DriveID = ids[i]
 		}
 	}
-	return vols
+	return out
 }
 
 // reservaSnapshot es la clave con la que un commit en curso reserva su
@@ -977,7 +1370,7 @@ func (m *Manager) sweepSnapshotLeftovers() {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if m.reserved[reservaSnapshot(e.Name())] || !restosDeCommit(filepath.Join(base, e.Name())) {
+		if m.reserved[reservaSnapshot(e.Name())] > 0 || !restosDeCommit(filepath.Join(base, e.Name())) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < dirGrace {
@@ -992,6 +1385,9 @@ func (m *Manager) sweepSnapshotLeftovers() {
 			log.Printf("reconcile: couldn't move the leftovers of snapshot %q: %v", e.Name(), err)
 			continue
 		}
+		// Ya con m.mu tomado: se olvida en su sitio (ver invalidateSnapCache).
+		delete(m.snapCache, e.Name())
+		delete(m.memAllocCache, e.Name())
 		log.Printf("reconcile: snapshot %q was an interrupted commit; its leftovers go to the trash", e.Name())
 	}
 }

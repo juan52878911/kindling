@@ -436,6 +436,26 @@ type Snapshot struct {
 	// Ver Manager.verifyIntegrity.
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 	SnapSHA256   string `json:"snap_sha256,omitempty"`
+
+	// KernelSHA256 es el sha256 del vmlinux con el que se congeló el snapshot.
+	// Campo nuevo y opcional: los snapshots anteriores a K1 (kernel propio) no
+	// lo llevan y siguen restaurándose igual, sin comprobación.
+	//
+	// Un dorado no contiene su kernel — comparte el vmlinux del host, que
+	// K1 puede reconstruir con otra configuración. Sin este campo, restaurar
+	// sobre un kernel distinto del que se congeló fallaba de forma críptica (o
+	// no fallaba en absoluto y el invitado se comportaba raro), sin nada que
+	// señalara al kernel como causa. Ver Manager.comprobarKernel.
+	//
+	// DELIBERADAMENTE fuera de Signature (ver contenidoFirmado en firma.go):
+	// incluirlo en el HMAC habría invalidado la firma de todo snapshot anterior
+	// a este campo, porque el contenido firmado cambiaría de forma para un
+	// snapshot cuyo firmar() original nunca lo vio. Y no hace falta cubrirlo:
+	// no decide cómo nace la instancia (eso ya lo cubren Rootfs/Snap/la
+	// política), es una comprobación de compatibilidad, no un límite de
+	// seguridad.
+	KernelSHA256 string `json:"kernel_sha256,omitempty"`
+
 	// Signature es el HMAC-SHA256, con la clave del host, de los hashes y la
 	// política del snapshot. Detecta manipulación y snapshots traídos de otro
 	// host, que los sha256 solos no detectan.

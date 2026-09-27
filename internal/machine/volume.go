@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/durable"
 )
 
 // reVolume acota el nombre: es un componente de ruta.
@@ -50,16 +51,18 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 		return nil, fmt.Errorf("volume %q already exists", name)
 	}
 
-	// Se construye en .tmp y se renombra: existir tiene que implicar estar
-	// formateado. Un fichero a medias se montaría mal dentro del invitado y el
-	// fallo aparecería allí, no aquí.
+	// Se construye en .tmp y se renombra con durable.Renombrar (fsync del
+	// fichero + rename + fsync del directorio): existir tiene que implicar
+	// estar formateado Y en disco. Un fichero a medias se montaría mal dentro
+	// del invitado y el fallo aparecería allí, no aquí; y un rename sin fsync
+	// puede no sobrevivir a un corte de luz aunque parezca que ya ocurrió.
 	tmp := path + ".tmp"
 	_ = os.Remove(tmp)
 	if err := createVolumeImage(ctx, tmp, sizeMiB); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("formatting volume: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := durable.Renombrar(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return nil, err
 	}
@@ -225,18 +228,6 @@ func (m *Manager) reservarVolumenes(req api.RunRequest, id, nombre string) ([]re
 			reservaVolumen{maquina: id, nombre: nombre, soloLect: v.readOnly})
 	}
 	return vols, nil
-}
-
-// resolveVolumes comprueba sin reservar, tomando el cerrojo para leer.
-//
-// Es el camino de solo-lectura: sirve para validar una peticion sin
-// comprometerse. Arrancar una maquina NO puede usarlo — entre esta comprobacion
-// y la publicacion en byID hay una ventana, y para eso esta reservarVolumenes.
-func (m *Manager) resolveVolumes(req api.RunRequest) ([]resolvedVolume, error) {
-	m.mu.RLock()
-	inUse := m.volumeUsersLocked()
-	m.mu.RUnlock()
-	return comprobarVolumenes(m, req, inUse)
 }
 
 // soltarReservas quita lo reservado por una maquina.

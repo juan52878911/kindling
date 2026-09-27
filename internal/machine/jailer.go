@@ -1,18 +1,30 @@
 package machine
 
-// Aislamiento con jailer para el camino de restauración (runFrom).
+// Aislamiento con jailer para TODOS los caminos que arrancan un firecracker
+// (Run en frío, runFrom al restaurar, Thaw al descongelar): chroot,
+// pivot_root y namespaces de PID y de montaje propios, de modo que un
+// invitado que escapara de Firecracker no vería el disco del host, solo un
+// directorio con los ficheros que su microVM necesita —y nada más—.
+// Complementa a setpriv/netns (ver privdrop.go y red.go), que ya bajan
+// privilegios y aíslan la red pero comparten el filesystem del anfitrión.
 //
-// Hoy Firecracker corre con setpriv dentro del netns de su microVM: sin
-// privilegios y en su red propia, pero compartiendo el sistema de ficheros del
-// anfitrión. jailer añade la capa que falta: chroot, pivot_root y un namespace
-// de PID y de montaje propios, de modo que un invitado que escapara de
-// Firecracker no vería el disco del host, solo un directorio con los ficheros
-// que su microVM necesita —y nada más—.
+// POR DEFECTO en Linux (P7 del plan de remediación: "hostil por defecto"). Si
+// el binario jailer y el usuario sin privilegios (con el grupo kvm) existen,
+// se usa sin configurar nada. Si falta alguno de los dos, el daemon se NIEGA
+// a arrancar máquinas NUEVAS (Run, runFrom, el Thaw de una congelada) con un
+// error que explica qué falta y cómo arreglarlo; las máquinas ya vivas y los
+// comandos de solo lectura siguen funcionando igual. Antes jailer era
+// opcional por defecto, y eso dejaba la barrera más fuerte apagada justo en
+// las instalaciones donde nadie se había leído SECURITY.md.
 //
-// Va OPT-IN y solo en runFrom, a propósito. runFrom es el 95% de las máquinas en
-// producción (el gateway despierta servicios restaurando), así que es donde el
-// aislamiento rinde; y arrancar en frío (Run) es un camino distinto que no se
-// toca hasta que este demuestre estar sólido. Se enciende con KLING_JAILER=1.
+// KLING_JAILER=0 apaga la barrera a propósito, para el host que todavía no
+// puede instalar jailer o el usuario de servicio: el daemon arranca máquinas
+// igual que si jailer no existiera, pero avisa una vez y bien alto en el log
+// al arrancar (ver JailerWarning), porque apagar la barrera más fuerte a
+// propósito no debería pasar desapercibida. KLING_JAILER=1 la fuerza aunque
+// falte el usuario —jailer exige uid/gid: sin usuario de servicio se le da
+// root explícito, igual que antes—, pero si falta el propio binario sigue sin
+// haber nada que ejecutar.
 //
 // El chroot exige que TODO lo que Firecracker abre esté dentro: kernel,
 // snapshot, overlay y volúmenes. Se enlazan con HARDLINK, no copia: el mem.file
@@ -26,53 +38,94 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"sync"
+	"strings"
 
 	knet "github.com/juan52878911/kindling/internal/net"
 )
 
-// jailerEnabled indica si se restaura dentro de un jail. Se lee una vez.
-// jailerEnabled dice si las microVMs corren dentro de jailer (chroot, espacio de
-// nombres de montaje y usuario sin privilegios propios de Firecracker).
-//
-// KLING_JAILER=1 lo fuerza y KLING_JAILER=0 lo apaga. Sin configurar, se usa si
-// el binario está: antes era opcional por defecto, y eso dejaba la barrera más
-// fuerte apagada justo en las instalaciones donde nadie se había leído
-// SECURITY.md. Se mira una vez por proceso.
-func jailerEnabled() bool {
-	if !jailerPosible {
-		return false // macOS: ni jailer ni root
-	}
-	switch os.Getenv("KLING_JAILER") {
-	case "1":
-		return true
-	case "0":
-		return false
-	}
-	jailerAutoOnce.Do(func() {
-		bin := os.Getenv("KLING_JAILER_BIN")
-		if bin == "" {
-			bin = "jailer"
-		}
-		_, err := exec.LookPath(bin)
-		jailerAuto = err == nil && os.Geteuid() == 0
-	})
-	return jailerAuto
-}
-
-var (
-	jailerAutoOnce sync.Once
-	jailerAuto     bool
-)
-
-// jailerBin es el binario de jailer. Junto a firecracker en las instalaciones
-// que lo traen.
-func (m *Manager) jailerBin() string {
+// jailerBinName es el binario de jailer a buscar: KLING_JAILER_BIN si está, o
+// "jailer" a secas —junto a firecracker en las instalaciones que lo traen—.
+func jailerBinName() string {
 	if p := os.Getenv("KLING_JAILER_BIN"); p != "" {
 		return p
 	}
 	return "jailer"
 }
+
+// jailerLookPath resuelve jailerBinName() en PATH. Variable y no una llamada
+// directa a exec.LookPath para que los tests simulen "no está instalado" sin
+// tocar el PATH real del proceso.
+var jailerLookPath = exec.LookPath
+
+// jailerBinPresent dice si el binario de jailer se puede ejecutar.
+func jailerBinPresent() bool {
+	_, err := jailerLookPath(jailerBinName())
+	return err == nil
+}
+
+// decidirJailer es la selección de jailer en sí, aislada de leer el entorno y
+// el sistema (variable de entorno, PATH, usuario del sistema) para poder
+// testear las combinaciones sin binarios, usuarios ni permisos reales.
+//
+// posible es jailerPosible: falso en macOS/vz, donde jailer no existe y nada
+// de esto aplica —ni siquiera el aviso de KLING_JAILER=0—. forced es
+// KLING_JAILER tal cual: "1", "0" o "" (automático). binPresent y userReady
+// son si el binario está en PATH y si el usuario sin privilegios (con el
+// grupo kvm) quedó listo (ver Privileges.Enabled); userReason es por qué no
+// lo está (Privileges.Motivo), para que el bloqueo diga la causa real. Vacío,
+// se usa un texto genérico.
+//
+// jailed dice si hay que arrancar dentro del jail. blocked, si no está vacío,
+// es el motivo por el que Run, runFrom y Thaw deben NEGARSE a arrancar
+// máquinas nuevas: solo en automático, y solo si falta el binario o el
+// usuario —forzarlo con KLING_JAILER=1 es una decisión explícita y se
+// respeta aunque falte el usuario (ver jailerArgv), aunque no si falta el
+// propio binario, que no hay cómo ejecutar—. startupWarn, si no está vacío,
+// es el aviso de SEGURIDAD que hay que imprimir UNA VEZ al arrancar el daemon:
+// solo con el opt-out explícito, porque apagar la barrera más fuerte a
+// propósito merece ruido, no una nota discreta en un log que nadie relee.
+func decidirJailer(posible bool, forced string, binPresent, userReady bool, userReason string) (jailed bool, blocked, startupWarn string) {
+	if !posible {
+		return false, "", ""
+	}
+	switch forced {
+	case "1":
+		if !binPresent {
+			return false, "jailer forced with KLING_JAILER=1 but its binary isn't on " +
+				"PATH: install it (sudo ./scripts/20-install-firecracker.sh) or point " +
+				"KLING_JAILER_BIN at it", ""
+		}
+		return true, "", ""
+	case "0":
+		return false, "", "jailer disabled by KLING_JAILER=0: microVMs run WITHOUT the " +
+			"jailer chroot/pivot_root isolation (SECURITY.md §11). A guest that escaped " +
+			"Firecracker would reach the host filesystem, not just a jail. Meant for " +
+			"hosts that can't install jailer or the unprivileged user yet."
+	}
+	if binPresent && userReady {
+		return true, "", ""
+	}
+	var missing []string
+	if !binPresent {
+		missing = append(missing, "the jailer binary isn't on PATH (install it with "+
+			"sudo ./scripts/20-install-firecracker.sh, or point KLING_JAILER_BIN at it)")
+	}
+	if !userReady && userReason != "" {
+		missing = append(missing, userReason)
+	} else if !userReady {
+		missing = append(missing, "the unprivileged user Firecracker runs as doesn't "+
+			"exist or lacks the kvm group (sudo useradd --system --no-create-home "+
+			"--shell /usr/sbin/nologin kindling && sudo usermod -aG kvm kindling, or "+
+			"pass -run-as/KLING_RUN_AS if it's named differently)")
+	}
+	return false, fmt.Sprintf("refusing to start: jailer is required by default on "+
+		"Linux (SECURITY.md §11) and %s; opt out explicitly with KLING_JAILER=0 if "+
+		"you accept running without it for now", strings.Join(missing, ", and ")), ""
+}
+
+// jailerBin es el binario de jailer. Junto a firecracker en las instalaciones
+// que lo traen.
+func (m *Manager) jailerBin() string { return jailerBinName() }
 
 // jailRoot es el chroot de una microVM: <root>/jails/firecracker/<id>/root.
 //
@@ -201,7 +254,7 @@ func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string,
 	// machines/, no aquí.
 	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", id))
 
-	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
+	logf, err := abrirConsola(m.dir(id))
 	if err != nil {
 		return 0, "", false, err
 	}

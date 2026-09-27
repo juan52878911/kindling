@@ -1,0 +1,70 @@
+# Fragmento amd64 del kernel de invitado de kindling (6.1 LTS), sobre config-common.
+# Lo que se repite aquí manda sobre config-common (va después).
+#
+# Firecracker en x86_64: arranca el vmlinux ELF (por PVH si el kernel lo trae),
+# describe los virtio-mmio en la línea de comandos (y en el DSDT con ACPI), la
+# consola es un 8250 en 0x3f8 y el reloj es kvm-clock. Sin PCI: la línea de
+# comandos de kindling lleva pci=off (internal/machine/manager.go).
+
+CONFIG_64BIT=y
+CONFIG_X86_MPPARSE=y
+CONFIG_X86_X2APIC=y
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_PARAVIRT_SPINLOCKS=y
+CONFIG_KVM_GUEST=y
+CONFIG_PVH=y
+# CONFIG_XEN is not set
+# CONFIG_HYPERV is not set
+# CONFIG_JAILHOUSE_GUEST is not set
+# CONFIG_ACRN_GUEST is not set
+# CONFIG_X86_EXTENDED_PLATFORM is not set
+# CONFIG_X86_MCE is not set
+# CONFIG_MICROCODE is not set
+# CONFIG_X86_MSR is not set
+# CONFIG_X86_CPUID is not set
+# CONFIG_X86_5LEVEL is not set
+# CONFIG_NUMA is not set
+CONFIG_MTRR=y
+CONFIG_X86_PAT=y
+# CONFIG_X86_16BIT is not set
+# CONFIG_IA32_EMULATION is not set
+# CONFIG_X86_X32_ABI is not set
+# CONFIG_X86_VSYSCALL_EMULATION is not set
+CONFIG_LEGACY_VSYSCALL_NONE=y
+
+# ACPI como en la config de Firecracker (CPUs y vmgenid), sin nada de energía.
+CONFIG_ACPI=y
+# CONFIG_ACPI_AC is not set
+# CONFIG_ACPI_BATTERY is not set
+# CONFIG_ACPI_BUTTON is not set
+# CONFIG_ACPI_FAN is not set
+# CONFIG_ACPI_THERMAL is not set
+# CONFIG_ACPI_PROCESSOR is not set
+# CONFIG_ACPI_NUMA is not set
+CONFIG_VMGENID=y
+
+# Sin PCI: los virtio van por MMIO y Firecracker los declara en la cmdline.
+# CONFIG_PCI is not set
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+
+# KASLR completo.
+CONFIG_RANDOMIZE_MEMORY=y
+
+# Mitigaciones de ejecución especulativa (nombres de 6.1). allnoconfig las
+# apagaría todas: tienen pregunta y valen "y" por defecto.
+CONFIG_SPECULATION_MITIGATIONS=y
+CONFIG_PAGE_TABLE_ISOLATION=y
+CONFIG_RETPOLINE=y
+CONFIG_RETHUNK=y
+CONFIG_CPU_UNRET_ENTRY=y
+CONFIG_CPU_IBPB_ENTRY=y
+CONFIG_CPU_IBRS_ENTRY=y
+CONFIG_CPU_SRSO=y
+CONFIG_SLS=y
+
+# Fuera: i8042 y PS/2. reboot=k no los necesita: el reinicio por el controlador
+# de teclado es un outb directo a 0x64 (arch/x86/kernel/reboot.c).
+# CONFIG_SERIO_I8042 is not set
+# CONFIG_KEYBOARD_ATKBD is not set
+# CONFIG_MOUSE_PS2 is not set

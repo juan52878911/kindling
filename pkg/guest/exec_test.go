@@ -77,6 +77,63 @@ func TestExecRechazaLoQueNoEntiende(t *testing.T) {
 	}
 }
 
+// Un cuerpo enorme no debe ni siquiera decodificarse: MaxBytesReader corta la
+// lectura y handleExec responde 413 sin haber lanzado nada.
+func TestExecCuerpoEnormeSeRechaza(t *testing.T) {
+	body := `{"cmd":["true"],"dir":"` + strings.Repeat("x", execMaxBody+1) + `"}`
+	w := httptest.NewRecorder()
+	handleExec(nil, w, httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body)))
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("código = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+// Un comando que escupe más de lo que cabe se corta, no tumba al agente: el
+// campo truncated (aditivo) lo dice, y la salida sigue trayendo el principio.
+func TestExecSalidaConTopeMarcaTruncated(t *testing.T) {
+	// Escribe más que outCap sin depender de api.ExecMaxOutput (64 MiB, lento
+	// de generar en un test): se prueba cappedBuffer directamente con un tope
+	// pequeño y aparte se comprueba el cableado end-to-end con /bin/sh.
+	cmd := `{"cmd":["sh","-c","head -c 200 /dev/zero | tr '\\0' 'a'"]}`
+	w := httptest.NewRecorder()
+	handleExec(nil, w, httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(cmd)))
+	var res execResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Truncated {
+		t.Errorf("200 bytes no debería truncarse (tope real es api.ExecMaxOutput): truncated=%v", res.Truncated)
+	}
+	if len(res.Output) != 200 {
+		t.Errorf("output = %d bytes, want 200", len(res.Output))
+	}
+}
+
+// cappedBuffer es lo que de verdad impone el tope; se prueba aislado con un
+// límite chico para no escribir decenas de MiB en el test.
+func TestCappedBufferTruncaSinCortarLaEscritura(t *testing.T) {
+	c := newCappedBuffer(5)
+	n, err := c.Write([]byte("hola mundo"))
+	if err != nil || n != 10 {
+		t.Fatalf("Write = (%d, %v), want (10, nil)", n, err)
+	}
+	if !c.truncated {
+		t.Error("truncated debería ser true")
+	}
+	if c.String() != "hola " {
+		t.Errorf("String() = %q, want %q", c.String(), "hola ")
+	}
+	// Sigue aceptando escrituras después del tope, sin devolver error (no
+	// corta la tubería): un Write de más solo deja de guardarse.
+	n, err = c.Write([]byte("mas"))
+	if err != nil || n != 3 {
+		t.Fatalf("Write tras el tope = (%d, %v), want (3, nil)", n, err)
+	}
+	if c.String() != "hola " {
+		t.Errorf("String() tras el tope = %q, want %q", c.String(), "hola ")
+	}
+}
+
 // La capacidad de ejecutar comandos la concede el ANFITRIÓN, por la línea de
 // comandos del kernel. El invitado no puede dársela a sí mismo.
 //

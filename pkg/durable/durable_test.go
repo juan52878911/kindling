@@ -82,3 +82,33 @@ func TestEscribirQueFallaNoDestruyeLoQueHabia(t *testing.T) {
 		t.Errorf("el fichero anterior quedo en %q; una escritura fallida no debe tocarlo", b)
 	}
 }
+
+func TestRenombrarPublicaElContenidoDelTemporal(t *testing.T) {
+	dir := t.TempDir()
+	tmp := filepath.Join(dir, "img.ext4.tmp")
+	destino := filepath.Join(dir, "img.ext4")
+
+	if err := os.WriteFile(tmp, []byte("contenido"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Renombrar(tmp, destino); err != nil {
+		t.Fatalf("Renombrar: %v", err)
+	}
+	b, err := os.ReadFile(destino)
+	if err != nil {
+		t.Fatalf("no llego a destino: %v", err)
+	}
+	if string(b) != "contenido" {
+		t.Errorf("contenido = %q", b)
+	}
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Error("el temporal debería haber desaparecido tras el rename")
+	}
+}
+
+func TestRenombrarSinTemporalFalla(t *testing.T) {
+	dir := t.TempDir()
+	if err := Renombrar(filepath.Join(dir, "no-existe.tmp"), filepath.Join(dir, "destino")); err == nil {
+		t.Error("esperaba un error si el temporal no existe")
+	}
+}

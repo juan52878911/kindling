@@ -285,7 +285,7 @@ func TestVZThawMandaRedAntesDeCargarYReenviaDespues(t *testing.T) {
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := sellarVolcado(dir); err != nil {
+	if err := sellarVolcado(dir, ""); err != nil {
 		t.Fatal(err)
 	}
 	m.byID[id] = &api.Machine{ID: id, Name: "vz-warm", State: api.StateWarm, Egress: "none",
@@ -339,9 +339,8 @@ func TestVZCopiarDiscoClona(t *testing.T) {
 }
 
 func TestVZSinJailerNiCgroupsNiPrivilegios(t *testing.T) {
-	t.Setenv("KLING_JAILER", "1")
-	if jailerEnabled() {
-		t.Fatal("macOS no tiene jailer, aunque se pida")
+	if jailed, _, _ := decidirJailer(jailerPosible, "1", true, true, ""); jailed {
+		t.Fatal("macOS no tiene jailer, aunque se pida (y aunque binario y usuario estén listos)")
 	}
 	if _, err := delegacionCgroups(); err == nil || !strings.Contains(err.Error(), "cgroups") {
 		t.Fatalf("delegacionCgroups = %v", err)
@@ -499,7 +498,7 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := sellarVolcado(dir); err != nil {
+	if err := sellarVolcado(dir, ""); err != nil {
 		t.Fatal(err)
 	}
 	m.byID[id] = &api.Machine{ID: id, Name: "vz-resync", State: api.StateWarm, Egress: "none",

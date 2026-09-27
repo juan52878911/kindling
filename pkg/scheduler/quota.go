@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -186,6 +187,63 @@ func (g *Scheduler) tenantInstances(name string) int {
 		}
 	}
 	return n
+}
+
+// reservarTenant comprueba la cuota de instancias del tenant y, si cabe,
+// RESERVA el hueco bajo el mismo candado con el que se lee (como g.creando en
+// scaleOut, pero por tenant en vez de por servicio).
+//
+// Sin la reserva, dos buildEntry concurrentes de servicios DISTINTOS del
+// mismo tenant leen tenantInstances() bajo mu, lo sueltan, y cada uno tarda un
+// arranque en frío entero (~ms a segundos) en crear/despertar su instancia
+// antes de registrarla en g.services/g.extra: los dos ven "hay menos que el
+// tope" y ninguno ve al otro, así que juntos lo superan (G-01).
+//
+// Devuelve un error si ya no cabe (el llamador no reserva nada), o una función
+// que libera la reserva. buildEntry la llama si falla (la instancia nunca
+// llegó a existir); si tiene éxito, la reserva viaja en la entrada y la suelta
+// quien la registra, en el mismo paso (ver soltarCuotaLocked). maxInstances 0 (sin
+// límite) no reserva nada: nunca hay nada que contar.
+func (g *Scheduler) reservarTenant(tnt *tenant) (func(), error) {
+	if tnt.maxInstances <= 0 {
+		return func() {}, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	actuales := g.tenantInstances(tnt.name) + g.tenantCreando[tnt.name]
+	if actuales >= tnt.maxInstances {
+		return nil, fmt.Errorf("%w: %q already has %d instance(s) awake (max %d)",
+			errTenantInstances, tnt.name, actuales, tnt.maxInstances)
+	}
+	if g.tenantCreando == nil {
+		g.tenantCreando = map[string]int{}
+	}
+	g.tenantCreando[tnt.name]++
+	return func() {
+		g.mu.Lock()
+		g.soltarTenantLocked(tnt.name)
+		g.mu.Unlock()
+	}, nil
+}
+
+// soltarTenantLocked libera una reserva de reservarTenant. Se llama con g.mu
+// tomado.
+func (g *Scheduler) soltarTenantLocked(name string) {
+	if g.tenantCreando[name]--; g.tenantCreando[name] <= 0 {
+		delete(g.tenantCreando, name)
+	}
+}
+
+// soltarCuotaLocked libera la reserva de tenant que buildEntry dejó en e, si
+// la hay. Quien registra e (ensure en g.services, scaleOut en g.extra) la
+// llama bajo el MISMO g.mu con que la registra: soltarla antes —al volver
+// buildEntry— dejaba una ventana en la que ni la reserva ni la entrada
+// contaban para la cuota (G-01).
+func (g *Scheduler) soltarCuotaLocked(e *entry) {
+	if e.cuotaTenant != "" {
+		g.soltarTenantLocked(e.cuotaTenant)
+		e.cuotaTenant = ""
+	}
 }
 
 // TenantInflight devuelve una foto de las peticiones en vuelo por tenant.

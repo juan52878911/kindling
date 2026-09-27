@@ -58,3 +58,37 @@ func Escribir(ruta string, datos []byte, perm os.FileMode) error {
 	}
 	return nil
 }
+
+// Renombrar mueve `tmp` a `destino` de forma durable: fsync del FICHERO
+// primero (por lo mismo que en Escribir: sin él el rename acaba apuntando a
+// contenido que todavia vive en la cache), rename, y fsync del DIRECTORIO
+// despues (o el rename mismo puede no haber llegado al disco).
+//
+// A diferencia de Escribir, aqui el contenido ya esta en disco de antemano
+// —tipicamente un fichero grande construido por otro proceso (mkfs.ext4,
+// dd)— y lo unico que falta es publicarlo de forma que EXISTIR EN destino
+// IMPLIQUE ESTAR COMPLETO. `tmp` y `destino` deben estar en el MISMO
+// directorio: el rename solo es atomico dentro del mismo sistema de ficheros.
+func Renombrar(tmp, destino string) error {
+	f, err := os.Open(tmp)
+	if err != nil {
+		return fmt.Errorf("opening %s to fsync before rename: %w", tmp, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("fsync %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, destino); err != nil {
+		return err
+	}
+	// Ver el comentario equivalente en Escribir: el rename ya ocurrio, asi que
+	// no fallar aqui no esconde nada.
+	if d, err := os.Open(filepath.Dir(destino)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}

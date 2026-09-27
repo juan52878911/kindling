@@ -16,8 +16,6 @@ package machine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +28,7 @@ import (
 	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // errNoBridge marca una imagen que no lleva puente dentro: una base mínima, no
@@ -259,7 +258,7 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	defer desmontar()
 
 	dentro := filepath.Join(mnt, dentroPath)
-	tengo, err := fileDigest(dentro)
+	tengo, err := digest.File(dentro)
 	if os.IsNotExist(err) && !create {
 		// Una imagen SIN puente no es una imagen de servicio: es una base
 		// mínima, cuyo entrypoint no invoca ningún puente. Inyectarle uno no
@@ -305,19 +304,6 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	}
 	desmontar()
 	return true, nil
-}
-
-func fileDigest(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
@@ -372,6 +358,43 @@ func imageHasBridge(ctx context.Context, base, layer string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// bridgeFingerprint identifica un fichero por su ruta, tamaño y fecha, para no
+// repetir un debugfs caro mientras no cambie ninguno de los dos — igual que la
+// clave de baseSupportsLayers. "" (imagen monolítica, sin capa) es su propia
+// huella válida: layer siempre es "" para ese caso, así que no colisiona con
+// ninguna ruta real.
+func bridgeFingerprint(path string) string {
+	if path == "" {
+		return ""
+	}
+	if fi, err := os.Stat(path); err == nil {
+		return fmt.Sprintf("%s|%d|%d", path, fi.Size(), fi.ModTime().UnixNano())
+	}
+	return path
+}
+
+// imageHasBridgeCached es imageHasBridge con caché por (base, capa) — igual
+// que baseSupportsLayers cachea layerOK (M-14): la respuesta no cambia
+// mientras ninguno de los dos ficheros cambie, y preguntarla cuesta hasta 4
+// debugfs en el camino de arranque en frío de cada microVM con volúmenes o
+// carpetas compartidas.
+//
+// El error de imageHasBridge NO se cachea a propósito, igual que en
+// baseSupportsLayers: "no lo sé" (sin debugfs) no debe convertirse en un "no
+// lo lleva" permanente, y debugfs puede aparecer más tarde en el PATH.
+func (m *Manager) imageHasBridgeCached(ctx context.Context, base, layer string) (bool, error) {
+	key := bridgeFingerprint(base) + "\x00" + bridgeFingerprint(layer)
+	if v, ok := m.bridgeOK.Load(key); ok {
+		return v.(bool), nil
+	}
+	has, err := imageHasBridge(ctx, base, layer)
+	if err != nil {
+		return has, err
+	}
+	m.bridgeOK.Store(key, has)
+	return has, nil
 }
 
 // guestAgentPath es donde vive el agente genérico de invitado en una imagen.

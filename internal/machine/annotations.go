@@ -10,16 +10,25 @@ import (
 
 // Snapshot devuelve un snapshot por nombre, con los mismos campos calculados
 // (disco, instancias vivas) que el listado.
+//
+// Antes esto llamaba a Snapshots() y buscaba el nombre en la lista entera: para
+// enseñar UN snapshot, releía y recorría TODOS (M-08). Carga solo el suyo
+// (cacheado, ver loadSnapshotCached) y cuenta sus propias instancias vivas sin
+// mirar las de los demás.
 func (m *Manager) Snapshot(name string) (*api.Snapshot, error) {
-	if _, err := m.loadSnapshot(name); err != nil {
+	s, disco, err := m.loadSnapshotCached(name)
+	if err != nil {
 		return nil, err
 	}
-	for _, s := range m.Snapshots() {
-		if s.Name == name {
-			return s, nil
+	s.DiskBytes = disco
+	m.mu.RLock()
+	for _, mc := range m.byID {
+		if mc.From == name && mc.State == api.StateRunning {
+			s.Instances++
 		}
 	}
-	return nil, fmt.Errorf("snapshot %q does not exist", name)
+	m.mu.RUnlock()
+	return s, nil
 }
 
 // SetAnnotation guarda value como la anotación key del snapshot name.
@@ -87,6 +96,9 @@ func (m *Manager) editMeta(name string, edit func(*api.Snapshot) (string, error)
 	if err := writeMeta(m.snapDir(name), b); err != nil {
 		return nil, err
 	}
+	// El meta.json que loadSnapshotCached recordaba ya no es el que hay en
+	// disco (M-08).
+	m.invalidateSnapCache(name)
 	m.priv.EnsureReadable(m.snapDir(name))
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvAnnotated, Name: name, Message: msg})

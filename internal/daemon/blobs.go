@@ -25,9 +25,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // blobTarget es el fichero de una parte de una imagen.
@@ -72,18 +74,89 @@ func (s *Server) resolveBlob(name, part string, write bool) (blobTarget, error) 
 	}
 }
 
-// sha256File calcula el sha256 de un fichero en hexadecimal.
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
+// blobSidecarPath es dónde vive el sha256 cacheado de un blob de imagen.
+func blobSidecarPath(path string) string { return path + ".sha256" }
+
+// cachedSHA256 devuelve el sha256 de path, releyéndolo entero solo si su
+// tamaño o su mtime cambiaron desde la última vez que se calculó (D-03).
+//
+// Sin esto, GET y HEAD de /images/{name}/blob hasheaban el fichero entero en
+// cada llamada — varios GiB para una imagen normal — antes de contestar
+// siquiera las cabeceras. `kling images copy` hace un HEAD y luego un GET, así
+// que cada copia pagaba dos lecturas completas solo para el sha256 que ya
+// tenía calculado un segundo antes.
+func cachedSHA256(path string) (string, error) {
+	fi, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	side := blobSidecarPath(path)
+	if b, err := os.ReadFile(side); err == nil {
+		if parts := strings.SplitN(strings.TrimSpace(string(b)), ":", 3); len(parts) == 3 &&
+			parts[0] == strconv.FormatInt(fi.Size(), 10) &&
+			parts[1] == strconv.FormatInt(fi.ModTime().UnixNano(), 10) {
+			return parts[2], nil
+		}
+	}
+	hash, err := digest.File(path)
+	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	writeSidecar(side, fi.Size(), fi.ModTime().UnixNano(), hash)
+	return hash, nil
+}
+
+// cacheSHA256 escribe el sidecar de path con un hash ya conocido (por
+// ejemplo, el que se acaba de comprobar al recibir un PUT), sin releer el
+// fichero para confirmarlo.
+func cacheSHA256(path, hash string) {
+	if fi, err := os.Stat(path); err == nil {
+		writeSidecar(blobSidecarPath(path), fi.Size(), fi.ModTime().UnixNano(), hash)
+	}
+}
+
+// writeSidecar escribe "size:mtime_ns:hash" en side de forma atómica
+// (temporal + rename). Mejor esfuerzo: el sidecar es una caché, no una
+// fuente de verdad — si falla al escribirse, la próxima lectura simplemente
+// vuelve a hashear el fichero.
+func writeSidecar(side string, size, mtimeNS int64, hash string) {
+	tmp, err := os.CreateTemp(filepath.Dir(side), ".sha256-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(tmp.Name()) // no-op si el rename de abajo tuvo éxito
+	if _, err := fmt.Fprintf(tmp, "%d:%d:%s\n", size, mtimeNS, hash); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tmp.Name(), side)
+}
+
+// sidecarTmpGracia es cuánto tiene que llevar sin tocarse un temporal
+// ".sha256-*" para darlo por huérfano: writeSidecar lo crea y lo renombra en
+// microsegundos, así que uno más viejo es de un daemon que murió en medio.
+const sidecarTmpGracia = time.Minute
+
+// barrerSidecarsHuerfanos borra de dir los temporales ".sha256-*" que dejó un
+// writeSidecar interrumpido (el daemon murió entre CreateTemp y Rename). Nadie
+// más los ve —Images() los ignora— y no se reclamarían nunca. Mejor esfuerzo;
+// los recientes se dejan, pueden ser de un writeSidecar en curso.
+func barrerSidecarsHuerfanos(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), ".sha256-") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > sidecarTmpGracia {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // handleGetImageBlob sirve una parte de una imagen, con su sha256 en la
@@ -107,21 +180,19 @@ func (s *Server) handleGetImageBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, fmt.Errorf("%s of %q is not a regular file", t.part, t.name))
 		return
 	}
-	// El hash se calcula entero ANTES de mandar nada: va en una cabecera, y las
-	// cabeceras salen antes que el cuerpo. Leer dos veces cuesta, pero la
-	// alternativa —un trailer— no la ven los clientes HTTP corrientes.
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	// El hash va en una cabecera, y las cabeceras salen antes que el cuerpo:
+	// hace falta ANTES de mandar nada. cachedSHA256 (D-03) evita releer el
+	// fichero entero cuando ya se hasheó con este mismo tamaño y mtime — la
+	// alternativa a tenerlo por delante, un trailer, no la ven los clientes
+	// HTTP corrientes.
+	hash, err := cachedSHA256(t.path)
+	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
-	w.Header().Set(api.HeaderSha256, hex.EncodeToString(h.Sum(nil)))
+	w.Header().Set(api.HeaderSha256, hash)
 	w.Header().Set(api.HeaderBlobPart, t.part)
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
@@ -208,7 +279,7 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := api.BlobPutResult{Name: t.name, Part: t.part, Size: n, Sha256: got}
-	if prev, err := sha256File(t.path); err == nil {
+	if prev, err := cachedSHA256(t.path); err == nil {
 		if prev == got {
 			// Idéntico: no se toca, y así no importa que esté en uso.
 			_ = os.Remove(tmp)
@@ -239,6 +310,10 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	// El sidecar ya con el hash que se acaba de verificar (`got`): evita que
+	// el primer GET tras subir tenga que releer el fichero entero para el
+	// mismo dato que este PUT ya comprobó byte a byte.
+	cacheSHA256(t.path, got)
 	// En Linux el VMM corre sin privilegios y tiene que poder leer la imagen.
 	if t.part != api.BlobRecipe && t.part != api.BlobKernel {
 		s.mgr.EnsureImageReadable(t.name)

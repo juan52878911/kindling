@@ -128,6 +128,23 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// execBodyGrace es el margen, sobre el timeout del comando, que se espera al
+// flujo de /exec/stream antes de darlo por muerto: cubre matar el proceso y
+// mandar el evento final. Variable y no const solo para que los tests puedan
+// acortarla.
+var execBodyGrace = 30 * time.Second
+
+// execBodyTimeout es el plazo de inactividad para el cuerpo de /exec/stream de
+// req: su timeout (el mismo que aplica el agente) más execBodyGrace. Si req no
+// es válido —handleExec ya lo rechaza antes— se usa el tope, ExecMaxTimeout.
+func execBodyTimeout(req api.ExecRequest) time.Duration {
+	timeout, _, err := req.Limits()
+	if err != nil || timeout <= 0 {
+		timeout = api.ExecMaxTimeout
+	}
+	return timeout + execBodyGrace
+}
+
 // openGuestExec pide al agente del invitado en base que ejecute req y devuelve
 // su flujo NDJSON. Si falla, code es el estado HTTP con el que contestar (501:
 // el agente no conoce la ruta).
@@ -143,7 +160,13 @@ func openGuestExec(ctx context.Context, base string, req api.ExecRequest) (io.Re
 		return nil, http.StatusBadGateway, fmt.Errorf("talking to the guest agent: %w", err)
 	}
 	if resp.StatusCode == http.StatusOK {
-		return resp.Body, 0, nil
+		// D-01: si el invitado deja de mandar NADA, se corta en vez de dejar
+		// el escáner de readExecEvents esperando para siempre. Pero el plazo
+		// NO es guestProgressTimeout: un comando silencioso (`sleep 120`, una
+		// compilación, `npm ci`) puede callar legítimamente hasta su propio
+		// timeout, y el agente ya lo mata al llegar ahí y manda el evento
+		// final. Se le da ese timeout más execBodyGrace de margen.
+		return wrapGuestBodyCon(resp.Body, execBodyTimeout(req)), 0, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -302,14 +325,15 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	// Tope también aquí: el invitado dice lo que quiera en Content-Length.
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, api.FileMaxDownload))
+	// wrapGuestBody (D-01) acota el progreso de la descarga.
+	_, _ = io.Copy(w, io.LimitReader(wrapGuestBody(resp.Body), api.FileMaxDownload))
 }
 
 // handleCreateSandbox sirve POST /sandboxes.
 func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	var req api.SandboxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, err)
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
 		return
 	}
 	ttl := req.TTLSeconds
@@ -433,8 +457,8 @@ func (s *Server) handleRenewSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	var req api.RenewRequest
 	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, http.StatusBadRequest, err)
+		if err := decodeJSON(w, r, &req); err != nil {
+			fail(w, jsonBodyStatus(err), err)
 			return
 		}
 	}
@@ -474,8 +498,8 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 	var req api.RenewRequest
 	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fail(w, http.StatusBadRequest, err)
+		if err := decodeJSON(w, r, &req); err != nil {
+			fail(w, jsonBodyStatus(err), err)
 			return
 		}
 	}

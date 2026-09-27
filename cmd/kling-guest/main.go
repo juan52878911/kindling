@@ -51,10 +51,14 @@ func main() {
 	agent.Register(mux)
 
 	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       120 * time.Second,
+		Addr:    *listen,
+		Handler: mux,
+		// ReadHeaderTimeout y no ReadTimeout: éste corta la conexión entera
+		// (headers + cuerpo) a los 120 s, y una subida de PUT /files por un
+		// túnel lento pide 15 minutos propios (ver files.go). Sin límite en la
+		// cabecera, un cliente que abre la conexión y nunca la termina se queda
+		// con una goroutine y un FD para siempre.
+		ReadHeaderTimeout: 120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// Sin WriteTimeout, como el puente: un /exec puede tardar minutos con
 		// toda legitimidad y cortarlo a medias es peor que esperar.

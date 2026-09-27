@@ -209,10 +209,10 @@ func baseName(p string) string {
 	return p
 }
 
-// cmdSandbox es `kling sandbox create|ls|renew|rm`.
+// cmdSandbox es `kling sandbox create|ls|renew|fork|rm`.
 func cmdSandbox(args []string) error {
 	if len(args) == 0 {
-		return &errWithHint{err: errors.New("usage: kling sandbox <create|ls|renew|rm> [...]"),
+		return &errWithHint{err: errors.New("usage: kling sandbox <create|ls|renew|fork|rm> [...]"),
 			hint: "kling try -- <cmd>   (create, run and remove in one go)"}
 	}
 	switch args[0] {
@@ -222,10 +222,12 @@ func cmdSandbox(args []string) error {
 		return sandboxList(args[1:])
 	case "renew":
 		return sandboxRenew(args[1:])
+	case "fork":
+		return sandboxFork(args[1:])
 	case "rm", "remove":
 		return sandboxRemove(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use create, ls, renew or rm", args[0])
+	return fmt.Errorf("unknown subcommand %q: use create, ls, renew, fork or rm", args[0])
 }
 
 func sandboxCreate(args []string) error {

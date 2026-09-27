@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -173,7 +174,7 @@ func (m *Manager) sweepOrphanVMMs() {
 	}
 	for id, pid := range live {
 		mc := m.byID[id]
-		if m.reserved[id] {
+		if m.reserved[id] > 0 {
 			continue
 		}
 		if mc != nil && (mc.State == api.StateRunning || mc.State == api.StatePaused ||
@@ -210,18 +211,30 @@ func estadoDe(mc *api.Machine) string {
 //
 // Devuelve la función que suelta la reserva. Se usa con defer, para que cubra
 // también los caminos de error que borran el directorio a medio hacer.
+//
+// Las reservas se CUENTAN: el mismo nombre lo pueden tener varios a la vez. Con
+// ids de máquina no pasa (cada una tiene el suyo), pero con "snap:<nombre>" sí:
+// cada restauración reserva el snapshot del que lee (M-15), y un commit el que
+// escribe. Con un bool, la primera que terminara borraba la reserva de todas
+// las demás y dejaba al resto sin protección a mitad de su trabajo. La función
+// devuelta es idempotente: soltar dos veces no descuenta la reserva de otro.
 func (m *Manager) reserveDir(id string) func() {
 	m.mu.Lock()
 	if m.reserved == nil {
-		m.reserved = make(map[string]bool)
+		m.reserved = make(map[string]int)
 	}
-	m.reserved[id] = true
+	m.reserved[id]++
 	m.mu.Unlock()
 
+	var una sync.Once
 	return func() {
-		m.mu.Lock()
-		delete(m.reserved, id)
-		m.mu.Unlock()
+		una.Do(func() {
+			m.mu.Lock()
+			if m.reserved[id]--; m.reserved[id] <= 0 {
+				delete(m.reserved, id)
+			}
+			m.mu.Unlock()
+		})
 	}
 }
 
@@ -276,7 +289,7 @@ func (m *Manager) sweepMachineDirs() {
 		if _, conocida := m.byID[e.Name()]; conocida {
 			continue
 		}
-		if m.reserved[e.Name()] {
+		if m.reserved[e.Name()] > 0 {
 			continue
 		}
 		// Recién tocado: o lo está llenando alguien ahora mismo, o acaba de
@@ -352,20 +365,6 @@ func (m *Manager) hasSnapshot(id string) bool {
 	return true
 }
 
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [20]byte
-	p := len(b)
-	for i > 0 {
-		p--
-		b[p] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(b[p:])
-}
-
 // watch vigila periódicamente que lo que decimos que corre, corra de verdad.
 //
 // Una microVM puede morir por su cuenta: pánico del kernel invitado, OOM del
@@ -403,12 +402,18 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// siguiente reinicio, invisible para `kling ps` y para la
 				// contabilidad de memoria que decide si cabe la siguiente microVM.
 				m.sweepOrphanVMMs()
+				// Consolas serie que se han pasado de consolaMaxBytes (M-07): un
+				// invitado hostil escribiendo a /dev/ttyS0 sin tope llenaría el
+				// disco y degradaría a las demás microVMs (SECURITY.md §4).
+				m.rotarConsolas()
 				// Barrer directorios huérfanos también en marcha: no solo aparecen
 				// al arrancar. Bajo el lock, como reconcile.
 				m.mu.Lock()
 				m.sweepMachineDirs()
 				m.sweepSnapshotLeftovers()
 				m.mu.Unlock()
+				// Los snapshots temporales de fork sin copias (ver fork.go).
+				m.barrerForks()
 				m.vaciarPapelera()
 				// Los enlaces cortos a sockets de máquinas que ya no existen
 				// (macOS, rutas largas: ver fc.BarrerEnlaces).

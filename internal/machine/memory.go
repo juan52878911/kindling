@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"os"
@@ -196,14 +197,18 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 			return
 		}
 		snapSeen[snap] = true
-		total += allocatedBytes(filepath.Join(m.snapDir(snap), "mem.file"))
+		// El mem.file de un dorado es INMUTABLE desde que se congela: cachear su
+		// tamaño asignado evita un stat por snapshot en cada Run/runFrom/Resize,
+		// bajo el candado global (M-12). Ver allocatedBytesCachedLocked.
+		total += m.allocatedBytesCachedLocked(filepath.Join(m.snapDir(snap), "mem.file"), snap)
 	}
 	for _, mc := range m.byID {
 		if mc.State != api.StateRunning && mc.State != api.StatePaused {
 			continue
 		}
 		count(mc.From)
-		// Una máquina descongelada mapea su propio volcado, no el dorado.
+		// Una máquina descongelada mapea su propio volcado, no el dorado: éste SÍ
+		// cambia con lo que el invitado va escribiendo, así que no se cachea.
 		total += allocatedBytes(filepath.Join(m.dir(mc.ID), "mem.file"))
 	}
 	// Los que están arrancando aún no figuran RUNNING pero ya mapean su dorado.
@@ -211,6 +216,41 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 		count(snap)
 	}
 	return int(total >> 20)
+}
+
+// statMemFile es os.Stat, en variable para que los tests comprueben que un
+// acierto de allocatedBytesCachedLocked no toca el disco.
+var statMemFile = os.Stat
+
+// allocatedBytesCachedLocked es allocatedBytes con caché para el mem.file
+// INMUTABLE de un snapshot dorado (M-12). key es el nombre del snapshot.
+//
+// Un acierto NO hace stat: validar por tamaño+fecha costaba exactamente el
+// stat que la caché pretendía ahorrar bajo m.mu. Se confía en la
+// invalidación explícita: todo lo que cambia o retira el mem.file de un
+// dorado pasa por invalidateSnapCache (Commit tras writeMeta, editMeta,
+// removeSnapshot) o lo borra en su sitio con m.mu tomado
+// (sweepSnapshotLeftovers). Un fallo del stat no se cachea: la próxima vez
+// se vuelve a mirar.
+//
+// Se llama con m.mu YA tomado, desde hotMemFilesMiBLocked.
+func (m *Manager) allocatedBytesCachedLocked(path, key string) int64 {
+	if alloc, ok := m.memAllocCache[key]; ok {
+		return alloc
+	}
+	fi, err := statMemFile(path)
+	if err != nil {
+		return 0
+	}
+	alloc := fi.Size()
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		alloc = st.Blocks * 512
+	}
+	if m.memAllocCache == nil {
+		m.memAllocCache = map[string]int64{}
+	}
+	m.memAllocCache[key] = alloc
+	return alloc
 }
 
 // effectiveAvailMiB es la memoria con la que de verdad se puede contar: de
