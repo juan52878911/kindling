@@ -1,6 +1,9 @@
 kindling
 Copyright the kindling authors.
 
+Licensed under the Apache License, Version 2.0. See the LICENSE file at the
+root of this repository, or http://www.apache.org/licenses/LICENSE-2.0.
+
 This repository does not ship third-party datasets. The tool of the
 smart-home example, examples/domotica/cmd/domotica-data, downloads the
 following datasets, converts them and uses them to train the models described

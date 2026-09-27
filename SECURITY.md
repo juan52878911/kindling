@@ -270,3 +270,10 @@ kling topo           # de qué snapshot salió cada instancia
 
 Si se sospecha del snapshot dorado, revisar las instancias antes de borrarlo: `kling rmi` se
 niega si quedan vivas.
+
+## Reportar una vulnerabilidad
+
+Si encuentras un problema de seguridad en kindling, repórtalo en privado desde la pestaña
+**Security** del repositorio (`juan52878911/kindling`) → **Report a vulnerability**
+(GitHub Private Vulnerability Reporting). No abras un issue público: eso expone el
+problema antes de que haya un arreglo.
