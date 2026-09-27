@@ -401,6 +401,7 @@ if k status >/dev/null 2>&1; then
   log "ya hay un daemon en $SOCK; se reutiliza (no se parará al final)"
   k ps -json >"$OUT/raw/ps-previo.json"
   if [ -n "$(json_names_prefix "$OUT/raw/ps-previo.json" "" 2>/dev/null)" ]; then
+    KEEP=1 # el daemon no es nuestro: la limpieza no debe tocar sus máquinas
     die "the private daemon at $SOCK has machines; remove them (KLING_HOST=$KLING_HOST kling ps) or use another -root"
   fi
 fi
@@ -432,7 +433,10 @@ log "imagen $IMAGE y kernel instalados en $PRIV_ROOT/images"
 
 if ! k status >/dev/null 2>&1; then
   log "arrancando el daemon privado (raíz $PRIV_ROOT)"
-  nohup "$KLING" daemon -root "$PRIV_ROOT" -socket "$SOCK" >"$OUT/raw/daemon.log" 2>&1 &
+  # Fuera del SIGINT del terminal: Go reactiva SIGINT aunque bash lo ignore en
+  # hijos asíncronos, y un Ctrl-C mataría al daemon antes de que `limpiar`
+  # borre las VMs de varios GiB.
+  ( trap '' INT; exec nohup "$KLING" daemon -root "$PRIV_ROOT" -socket "$SOCK" ) >"$OUT/raw/daemon.log" 2>&1 &
   DAEMON_PID=$!
   for _ in $(seq 1 60); do k status >/dev/null 2>&1 && break; sleep 0.5; done
   k status >/dev/null 2>&1 || die "the private daemon did not come up (raw/daemon.log)"
@@ -627,7 +631,17 @@ put footprint_cold_mib "$(json_mem_of "$OUT/raw/top-cold.json" "$COLD")"
 log "footprint de $COLD: $(m footprint_cold_mib) MiB"
 log "kling save $COLD → $GOLDEN"
 t0="$(now)"
-k save -replace "$COLD" "$GOLDEN" >"$OUT/raw/save.txt" 2>&1 || { cat "$OUT/raw/save.txt"; die "kling save failed"; }
+if ! k save -replace "$COLD" "$GOLDEN" >"$OUT/raw/save.txt" 2>&1; then
+  # El cliente corto corta a los 60 s esperando cabeceras, pero el daemon
+  # puede seguir guardando un dorado grande: esperarlo antes de rendirse.
+  log "kling save no respondió a tiempo; esperando al dorado hasta 3 min"
+  hecho=0
+  for _ in $(seq 1 90); do
+    if k template ls -q 2>/dev/null | grep -qx "$GOLDEN"; then hecho=1; break; fi
+    sleep 2
+  done
+  [ "$hecho" = 1 ] || { cat "$OUT/raw/save.txt"; die "kling save failed"; }
+fi
 put save_s "$(secs "$t0" "$(now)")"
 cat "$OUT/raw/save.txt"
 [ -d "$PRIV_ROOT/snapshots/$GOLDEN" ] && put golden_disk_mib "$(( $(du -sk "$PRIV_ROOT/snapshots/$GOLDEN" | cut -f1) / 1024 ))"

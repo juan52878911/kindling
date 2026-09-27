@@ -100,14 +100,16 @@ imagen ~10 min; fase 0 ~15–30 min).
 - **Una VM Linux arm64** para construir. Sirve la de
   [`docs/mac-arm64.md`](../../docs/mac-arm64.md) (`kindling-arm`), pero **sin**
   `nestedVirtualization` también vale (no se usa KVM ni el daemon): funciona en
-  M1/M2. ~15 GiB libres dentro. Su home del Mac va montado en solo lectura:
+  M1/M2. Ojo: la receta de `docs/mac-arm64.md` trae `nestedVirtualization: true`,
+  que solo funciona en M3+ con macOS 15; en M1/M2 **borra esa línea** del yaml o
+  `limactl start` falla. ~15 GiB libres dentro. Su home del Mac va montado en solo lectura:
   las salidas van a `/var/tmp` y se sacan con `limactl copy`.
 
 ```sh
 limactl shell kindling-arm
 sudo apt-get update
 sudo apt-get install -y build-essential flex bison bc libelf-dev xz-utils curl gnupg \
-                        debootstrap e2fsprogs python3
+                        debootstrap debian-archive-keyring e2fsprogs python3
 ```
 
 ### 1. El kernel (dentro de Lima)
@@ -148,8 +150,14 @@ cd <kindling> && make guest GOARCH=arm64     # deja ./kling-guest (linux/arm64, 
 
 ```sh
 cd /Users/<tú>/<ruta>/kindling
-sudo prototypes/android/image/build-image.sh
+sudo DATA_MODE=tmpfs DATA_SIZE=1G prototypes/android/image/build-image.sh
 ```
+
+**Recomendado: `DATA_MODE=tmpfs`.** El disco escribible de cada máquina está
+fijo en 512 MiB (`defaultOverlayMiB`), y el primer arranque de Android más el APK
+de prueba y su extracción se acercan a ese límite
+(`INSTALL_FAILED_INSUFFICIENT_STORAGE`). Con tmpfs, `/data` vive en la RAM del
+invitado y se congela con el snapshot.
 
 Descarga 640 MiB de Docker Hub (verificados por sha256), construye la base
 Debian con `debootstrap` (unos minutos, solo la primera vez) y deja
@@ -202,6 +210,15 @@ Manda `results/<fecha>/resultados.md`. Si algo falló, también
 PNG pesa poco).
 
 ## Criterios go/no-go (propuesta §4, ajustados al Mac)
+
+> **Lo que la fase 0 en el Mac NO decide: la densidad.** En `vz`, restaurar copia
+> toda la RAM del invitado (`vz/internal/vzvm/vzvm_darwin.go`,
+> `docs/vz-mac-prototipo.md`): cada clon de 3 GiB cuesta ~3,2 GiB de footprint,
+> así que en 16 GiB caben 2–3 teléfonos, 5–6 en 32 GiB. El criterio 3 es solo
+> informativo aquí; la puerta de densidad de la propuesta (páginas compartidas
+> entre clones) sigue necesitando Linux/Firecracker. Para meter más teléfonos en
+> el Mac: `-mem 2G`, `squeeze` tras restaurar y teléfonos pausados en vez de
+> restauraciones.
 
 | # | Criterio | Umbral | Por qué así en el Mac |
 |---|---|---|---|
