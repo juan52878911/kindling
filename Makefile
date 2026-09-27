@@ -67,7 +67,7 @@ install: build
 	@echo "  $(BIN) context add lab ssh://usuario@host"
 	@echo
 	@echo "Para alojar servidores MCP, instala la extensión (vive en ext/mcp):"
-	@echo "  kling plugins install mcp      o, desde este repo,  make -C ext/mcp install"
+	@echo "  kling plugin install mcp       o, desde este repo,  make -C ext/mcp install"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN) 2>/dev/null || sudo rm -f $(PREFIX)/bin/$(BIN)
@@ -83,7 +83,7 @@ guest:
 
 ## chispa-guest — el invitado de una tarea Chispa serverless (cmd/kling-chispa): carga
 ## un .chispa (y su .chispas opcional) al arrancar y sirve /v1/classify. Estático,
-## sin cgo: es lo que empaqueta el constructor "chispa" (kling chispa deploy).
+## sin cgo: es lo que empaqueta el constructor "chispa" (kling ai chispa deploy).
 chispa-guest:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath \
 		-ldflags "$(LDFLAGS)" -o kling-chispa ./cmd/kling-chispa
@@ -181,8 +181,8 @@ deploy: daemon guest chispa-guest
 	@echo "  agentes de invitado (kling-guest, kling-chispa) y constructores base, llm y chispa en /usr/local/lib/kindling"
 	@echo "  config por host en /etc/default/kling (make deploy no la pisa en redespliegues)"
 	@echo
-	@echo "Imagen de herramientas para poblar volúmenes:  kling images toolchain"
-	@echo "Tarea Chispa serverless:  kling chispa deploy <task> -model m.chispa"
+	@echo "Imagen de herramientas para poblar volúmenes:  kling image toolchain"
+	@echo "Tarea Chispa serverless:  kling ai chispa deploy <task> -model m.chispa"
 	@echo "Servidores MCP:  make -C ext/mcp deploy HOST=$(HOST)"
 
 ## deploy-mac — atajo para desplegar a una VM Linux arm64 desde un Mac Apple Silicon.

@@ -56,7 +56,7 @@ install: build bridge-local
 	  echo "AVISO: no encuentro kling. kling-mcp es una extensión: instala kindling primero."; }
 	@echo
 	@echo "Comprueba que kling la ve:"
-	@echo "  kling plugins"
+	@echo "  kling plugin ls"
 	@echo "  kling mcp search github"
 
 uninstall:
