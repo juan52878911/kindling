@@ -42,6 +42,10 @@ $('go').addEventListener('click', async () => {
 function render(b) {
   const r = b.result;
   $('result').hidden = false;
+  // Si el log se recortó, el trozo puede explicar otra cosa: el aviso va
+  // arriba, antes que la categoría.
+  $('warning').hidden = !r.warning;
+  $('warning').textContent = r.warning ? 'Warning: ' + r.warning : '';
   $('category').textContent = r.category;
   const layers = { chispa: 'Chispa, confident', von: 'VON (Chispa was unsure)', 'chispa-unsure': 'Chispa, unsure' };
   $('layer').textContent = layers[r.decided_by] || r.decided_by;

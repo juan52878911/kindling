@@ -101,6 +101,16 @@ type LineInput struct {
 // vacías no se clasifican: nunca explican nada y son el 10-20 % de un log).
 func Features(lg *Log) []LineInput {
 	n := len(lg.Lines)
+	return features(lg, 0, n, 0, n)
+}
+
+// features es Features para las líneas [lo, hi) de lg cuando lg es solo un
+// trozo de un log más largo (una ventana): su línea 0 es la base-ésima de un
+// log de total líneas. Las vecinas, las distancias y las repeticiones se miran
+// dentro de lg; la posición y la distancia al final, en el log entero, que es
+// lo que vio Chispa al entrenar.
+func features(lg *Log, lo, hi, base, total int) []LineInput {
+	n := len(lg.Lines)
 	infos := make([]lineInfo, n)
 	counts := make(map[string]int, n)
 	for i, l := range lg.Lines {
@@ -131,15 +141,15 @@ func Features(lg *Log) []LineInput {
 		nextExit[i] = nx - i
 	}
 
-	out := make([]LineInput, 0, n)
-	for i, l := range lg.Lines {
-		inf := infos[i]
+	out := make([]LineInput, 0, hi-lo)
+	for i := lo; i < hi; i++ {
+		l, inf := lg.Lines[i], infos[i]
 		if inf.blank {
 			continue
 		}
 		f := map[string]any{
-			"end": n - 1 - i,
-			"pos": decile(i, n),
+			"end": total - 1 - (base + i),
+			"pos": decile(base+i, total),
 			"red": l.Red,
 		}
 		if l.Yellow {

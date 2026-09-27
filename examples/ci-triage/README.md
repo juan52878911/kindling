@@ -68,6 +68,16 @@ next step: Ensure the required dotnet SDK is installed and add it to the PATH.
 latency: read 0.8 ms · features 9.8 ms · Chispa on 863 lines 18.6 ms (4.52 ms inside the gateway) · chunk 0.23 ms · category 0.47 ms · VON 3514 ms · total 3544.1 ms
 ```
 
+Si el log no se leyó entero, lo primero que imprime es un aviso (también a
+stderr, y en `-json` como `warning`, `dropped_lines` y `dropped_bytes`):
+
+```
+!! WARNING: the log was cut: only the last 100000 lines were analyzed; the first 244000 lines (22.9 MiB) were dropped. The failure may be in the part that was not analyzed.
+!!          ci-triage analyze -windows scores the whole log by windows.
+```
+
+La página muestra el mismo aviso en rojo encima de la categoría.
+
 (Un log de PowerShell del conjunto de prueba, en un Mac mini M4 con Qwen2.5-1.5B
 despierto. VON acierta la categoría donde Chispa dudaba, pero su resumen se
 inventa la causa: el error es un tipo que no se encuentra, no el SDK. Es lo
@@ -79,6 +89,7 @@ resumen es una pista, no un veredicto.)
 | comando | qué hace |
 |---|---|
 | `analyze [-json] [-confirm ok\|CATEGORÍA] <log\|->` | el triaje de un log; con `-confirm`, añade la confirmación a `-feedback` |
+| `analyze -windows [-window-lines 25000] <log>` | el triaje del log ENTERO, puntuado por ventanas (ver abajo) |
 | `serve [-listen 127.0.0.1:8089]` | la página: pegar un log, ver las líneas resaltadas, confirmar o corregir |
 | `data -logchunks DIR -out DIR [-labels …]` | los conjuntos de LogChunks, repartidos por repositorio |
 | `eval -data DIR [-set test] [-von escalated] [-manifest m.jsonl]` | localizador, categoría y líneas base; `-manifest` para logs propios anotados a mano |
@@ -116,11 +127,42 @@ vuelo al gateway).
    train` la acepta tal cual; `ci-triage export` deja una etiqueta por log
    para la importación de etiquetas humanas de la mejora continua.
 
+## Logs largos: la cola o el log entero por ventanas
+
+Por defecto `analyze` se queda con la cola del log (16 MiB y 100 000 líneas):
+lo que explica un fallo casi siempre está al final. Casi: en una matriz de
+trabajos, o si el log sigue imprimiendo después del fallo, el tramo bueno
+puede estar a mitad, y la cola explica otra cosa. Por eso el recorte nunca es
+silencioso: el resultado dice cuántas líneas y bytes se descartaron (exactos;
+«at least» si el salto pasaba de 1 GiB y no se contó entero), y también si
+un flujo por stdin pasó de 1 GiB y lo que no se leyó fue el final.
+
+Con `-windows` se puntúa el log entero con memoria acotada: se lee el fichero
+dos veces (una para contar sus líneas, porque la posición y la distancia al
+final que ve Chispa son las del log entero), se puntúa por ventanas de
+`-window-lines` líneas con 400 de contexto a cada lado (vecinas, distancias,
+que un tramo crezca por encima del borde, el comando de Travis detrás del
+tramo), cada ventana propone sus mejores tramos y al final se eligen los
+mejores de todo el log con las mismas reglas que el localizador. Los números
+de línea son los del log entero.
+
+Cuesta lo que Chispa por línea: 344 000 líneas (32 MiB, el fallo en la
+170 001) son 6,5 s del lado de `ci-triage` contra un gateway falso por TCP
+local, casi todo JSON y HTTP, y encuentra el tramo; leyendo la cola, el
+mismo log avisa de que se descartaron 244 000 líneas. Límites: necesita un
+fichero (no `-`), lee hasta 1 GiB (de más, la cola, con aviso), las
+repeticiones de una línea (`dup`) se cuentan dentro de su ventana y
+`-confirm` aún no funciona con `-windows` (la confirmación guarda el sha256
+del log leído, y por ventanas el log no se guarda). La página no lo usa: un
+log pegado pesa como mucho 8 MiB y solo puede recortarlo el tope de líneas,
+que avisa igual.
+
 ## Seguridad y topes
 
 - Logs acotados: se guarda como mucho la cola de 16 MiB y 100 000 líneas (de un
-  fichero se salta directamente a la cola; de stdin se lee hasta 1 GiB con
-  memoria acotada), líneas de 2 KiB como mucho, 320 bytes por línea a Chispa y
+  fichero se salta a la cola contando al pasar las líneas saltadas; de stdin
+  se lee hasta 1 GiB con memoria acotada), siempre con aviso si se recorta;
+  con `-windows`, ventanas de 25 000 líneas sobre hasta 1 GiB de fichero; líneas de 2 KiB como mucho, 320 bytes por línea a Chispa y
   2 000 bytes de trozo a VON.
 - La página solo escucha en loopback (no tiene usuarios), rechaza un `Host`
   que no sea de loopback (DNS rebinding), exige JSON o su cabecera propia en
@@ -137,6 +179,7 @@ vuelo al gateway).
 | `triage/logread.go` | lectura acotada; Travis (`\r`, plegados), GitHub Actions (`gh run view --log-failed`, `##[group]`, `##[error]`), ANSI |
 | `triage/features.go` | lo que ve Chispa de cada línea |
 | `triage/locate.go` | de puntuaciones por línea a tramos; el texto y los campos de la categoría |
+| `triage/windows.go` | el log entero por ventanas (`analyze -windows`) |
 | `triage/pipeline.go`, `gateway.go` | las tres capas por el gateway |
 | `triage/rules.go` | categorías, reglas de etiquetado débil (también la línea base) |
 | `triage/feedback.go` | la exportación de confirmaciones |

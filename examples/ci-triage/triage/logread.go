@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -48,14 +49,71 @@ type Line struct {
 	Red     bool   // el runner la pintó en rojo: así marcan muchos errores
 	Yellow  bool
 	Marked  bool // GitHub Actions la marcó como ##[error]
+	size    int  // bytes en bruto (con el salto): para contar lo que se descarta
 }
 
 // Log es un log leído.
 type Log struct {
 	Lines     []Line
 	Format    string // travis | github | plain
-	Truncated bool   // se quedó solo la cola
-	Skipped   int64  // bytes que se saltaron del principio
+	Truncated bool   // no se leyó entero: se quedó solo la cola, o el flujo pasó de MaxStream
+	Skipped   int64  // bytes que se saltaron del principio (tope de bytes)
+	// DroppedLines son las líneas del principio que no están en Lines: las de
+	// los bytes saltados más las que quitó el tope de líneas. Con
+	// DroppedAtLeast es un mínimo: el salto era mayor que MaxStream y no se
+	// contó entero (contar obliga a leer, y un fichero de gigas no se lee).
+	DroppedLines   int
+	DroppedAtLeast bool
+	// DroppedBytes son los bytes de esas líneas: Skipped más lo que ocupaban
+	// en bruto las que quitó el tope de líneas.
+	DroppedBytes int64
+	// TailUnread: el flujo pasó de MaxStream y lo que venía detrás (el final
+	// del log, justo lo que suele explicar el fallo) no se leyó.
+	TailUnread bool
+}
+
+// Warning explica en una frase para una persona qué parte del log se quedó
+// sin leer, o "" si se leyó entero. Recortar es silencioso por naturaleza (lo
+// descartado no deja rastro en el resultado), así que quien muestre un
+// triaje tiene que enseñar esto al lado: si el fallo estaba en lo descartado,
+// el trozo elegido explica otra cosa.
+func (lg *Log) Warning() string { return lg.warning(len(lg.Lines)) }
+
+// warning es Warning cuando se analizaron kept líneas que no están en Lines
+// (el análisis por ventanas no las guarda).
+func (lg *Log) warning(kept int) string {
+	var parts []string
+	if lg.DroppedLines > 0 || lg.DroppedBytes > 0 {
+		atLeast := ""
+		if lg.DroppedAtLeast {
+			atLeast = "at least "
+		}
+		parts = append(parts, fmt.Sprintf("only the last %d lines were analyzed; the first %s%d lines (%s) were dropped",
+			kept, atLeast, lg.DroppedLines, fmtBytes(lg.DroppedBytes)))
+	}
+	if lg.TailUnread {
+		parts = append(parts, "the input went past the read limit and its end was not read")
+	}
+	if len(parts) == 0 {
+		if lg.Truncated {
+			return "the log was cut: part of it was not analyzed"
+		}
+		return ""
+	}
+	return "the log was cut: " + strings.Join(parts, "; ") + ". The failure may be in the part that was not analyzed."
+}
+
+// fmtBytes: 1536 → "1.5 KiB".
+func fmtBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d bytes", n)
 }
 
 // ReadFile lee un fichero de log. Si pesa más de MaxBytes salta directamente
@@ -71,9 +129,11 @@ func ReadFile(path string, lim Limits) (*Log, error) {
 		return nil, err
 	}
 	var skipped int64
+	var head int
+	var atLeast bool
 	if st.Mode().IsRegular() && st.Size() > lim.MaxBytes {
 		skipped = st.Size() - lim.MaxBytes
-		if _, err := f.Seek(skipped, io.SeekStart); err != nil {
+		if head, atLeast, err = skipHead(f, skipped, streamLimit(lim)); err != nil {
 			return nil, err
 		}
 	}
@@ -83,8 +143,49 @@ func ReadFile(path string, lim Limits) (*Log, error) {
 	}
 	if skipped > 0 {
 		lg.Truncated, lg.Skipped = true, lg.Skipped+skipped
+		lg.DroppedLines += head
+		lg.DroppedBytes += skipped
+		lg.DroppedAtLeast = atLeast
 	}
 	return lg, nil
+}
+
+// streamLimit es MaxStream, o MaxBytes si no se dio.
+func streamLimit(lim Limits) int64 {
+	if lim.MaxStream <= 0 {
+		return lim.MaxBytes
+	}
+	return lim.MaxStream
+}
+
+// skipHead deja f en el byte n contando los saltos de línea de lo que se
+// salta, para poder decir cuántas líneas se descartaron. Solo cuenta hasta
+// max bytes: más allá devuelve un mínimo (atLeast) y salta sin leer.
+func skipHead(f *os.File, n, max int64) (lines int, atLeast bool, err error) {
+	lines, err = countLines(io.LimitReader(f, min(n, max)))
+	if err != nil {
+		return 0, false, err
+	}
+	if _, err := f.Seek(n, io.SeekStart); err != nil {
+		return 0, false, err
+	}
+	return lines, n > max, nil
+}
+
+// countLines cuenta los '\n' de r: a velocidad de memoria, sin guardar nada.
+func countLines(r io.Reader) (int, error) {
+	buf := make([]byte, 256<<10)
+	n := 0
+	for {
+		k, err := r.Read(buf)
+		n += bytes.Count(buf[:k], []byte{'\n'})
+		if err == io.EOF {
+			return n, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
 }
 
 // Read lee un log de un flujo guardando como mucho MaxBytes de la cola.
@@ -94,31 +195,43 @@ func read(r io.Reader, lim Limits, midLine bool) (*Log, error) {
 	if lim.MaxBytes <= 0 || lim.MaxLines <= 0 || lim.MaxLineBytes <= 0 {
 		return nil, errors.New("triage: limits must be positive")
 	}
-	if lim.MaxStream <= 0 {
-		lim.MaxStream = lim.MaxBytes
-	}
-	data, skipped, err := readTail(io.LimitReader(r, lim.MaxStream), lim.MaxBytes)
+	lim.MaxStream = streamLimit(lim)
+	data, skipped, dropped, err := readTail(io.LimitReader(r, lim.MaxStream), lim.MaxBytes)
 	if err != nil {
 		return nil, err
+	}
+	// Si se leyó justo MaxStream, puede que el flujo siga: un byte más lo dice.
+	// Lo que viene detrás no se va a leer, y es el final del log.
+	unread := false
+	if skipped+int64(len(data)) == lim.MaxStream {
+		var b [1]byte
+		k, _ := io.ReadFull(r, b[:])
+		unread = k > 0
 	}
 	if skipped > 0 || midLine {
 		// La primera línea de la cola está cortada por la mitad: fuera.
 		if i := bytes.IndexByte(data, '\n'); i >= 0 {
 			skipped += int64(i + 1)
+			dropped++
 			data = data[i+1:]
 		}
 	}
 	lg := parse(data, lim)
 	lg.Skipped = skipped
-	lg.Truncated = skipped > 0 || lg.Truncated
+	lg.DroppedLines += dropped
+	lg.DroppedBytes += skipped
+	lg.TailUnread = unread
+	lg.Truncated = skipped > 0 || lg.Truncated || unread
 	return lg, nil
 }
 
 // readTail lee todo r y devuelve sus últimos max bytes, con memoria acotada a
-// 2×max: un búfer que se compacta cuando se llena.
-func readTail(r io.Reader, max int64) ([]byte, int64, error) {
+// 2×max: un búfer que se compacta cuando se llena. Devuelve también los bytes
+// descartados y cuántos saltos de línea había en ellos.
+func readTail(r io.Reader, max int64) ([]byte, int64, int, error) {
 	buf := make([]byte, 0, min(max, 1<<20))
 	var skipped int64
+	lines := 0
 	chunk := make([]byte, 64<<10)
 	for {
 		n, err := r.Read(chunk)
@@ -126,21 +239,23 @@ func readTail(r io.Reader, max int64) ([]byte, int64, error) {
 		if int64(len(buf)) > 2*max {
 			drop := int64(len(buf)) - max
 			skipped += drop
+			lines += bytes.Count(buf[:drop], []byte{'\n'})
 			buf = append(buf[:0], buf[drop:]...)
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 	}
 	if int64(len(buf)) > max {
 		drop := int64(len(buf)) - max
 		skipped += drop
+		lines += bytes.Count(buf[:drop], []byte{'\n'})
 		buf = buf[drop:]
 	}
-	return buf, skipped, nil
+	return buf, skipped, lines, nil
 }
 
 // maxRawLine: una línea en bruto más larga se parte en trozos (bufio fallaría
@@ -157,11 +272,47 @@ func parse(data []byte, lim Limits) *Log {
 		p.line(sc.Bytes(), lim, lg)
 	}
 	if len(lg.Lines) > lim.MaxLines {
-		lg.Lines = lg.Lines[len(lg.Lines)-lim.MaxLines:]
-		lg.Truncated = true
+		dropLines(lg, len(lg.Lines)-lim.MaxLines)
 	}
 	lg.Format = p.format()
 	return lg
+}
+
+// dropLines quita las n primeras líneas y lo apunta.
+func dropLines(lg *Log, n int) {
+	for _, l := range lg.Lines[:n] {
+		lg.DroppedBytes += int64(l.size)
+	}
+	lg.DroppedLines += n
+	lg.Lines = append(lg.Lines[:0], lg.Lines[n:]...)
+	lg.Truncated = true
+}
+
+// scanLines lee r línea a línea con el mismo intérprete que Read, sin
+// guardarlas: fn recibe cada una. Es lo que usa el análisis por ventanas para
+// recorrer un log entero con memoria acotada. Con skipFirst la primera línea
+// en bruto (cortada por un salto a mitad de fichero) no se interpreta; su
+// tamaño se devuelve para contarla como descartada.
+func scanLines(r io.Reader, lim Limits, skipFirst bool, fn func(Line) error) (format string, firstSize int, err error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), maxRawLine)
+	sc.Split(splitLines)
+	var p parser
+	one := &Log{}
+	for sc.Scan() {
+		if skipFirst {
+			skipFirst, firstSize = false, len(sc.Bytes())+1
+			continue
+		}
+		one.Lines = one.Lines[:0]
+		p.line(sc.Bytes(), lim, one)
+		for _, l := range one.Lines {
+			if err := fn(l); err != nil {
+				return "", 0, err
+			}
+		}
+	}
+	return p.format(), firstSize, sc.Err()
 }
 
 // splitLines es bufio.ScanLines, pero corta en seco las líneas que no caben
@@ -281,14 +432,13 @@ func (p *parser) line(raw []byte, lim Limits, lg *Log) {
 			sec = p.ghGroup
 		}
 	}
-	lg.Lines = append(lg.Lines, Line{Text: visible, Section: sec, Job: job, Red: red, Yellow: yellow, Marked: marked})
+	lg.Lines = append(lg.Lines, Line{Text: visible, Section: sec, Job: job, Red: red, Yellow: yellow, Marked: marked, size: len(raw) + 1})
 	if endFold {
 		p.travisSection = ""
 	}
 	// Tope de memoria mientras se lee: si pasa del doble, se queda la cola.
 	if len(lg.Lines) > 2*lim.MaxLines {
-		lg.Lines = append(lg.Lines[:0], lg.Lines[len(lg.Lines)-lim.MaxLines:]...)
-		lg.Truncated = true
+		dropLines(lg, len(lg.Lines)-lim.MaxLines)
 	}
 }
 

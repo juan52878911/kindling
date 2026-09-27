@@ -57,21 +57,28 @@ type VONAnswer struct {
 
 // Result es el triaje de un log.
 type Result struct {
-	Format      string      `json:"format"`
-	Lines       int         `json:"lines"`
-	Scored      int         `json:"lines_classified"`
-	Truncated   bool        `json:"truncated,omitempty"`
-	Chunks      []ChunkOut  `json:"chunks"`
-	Chunk       string      `json:"chunk"`
-	Category    string      `json:"category"`
-	ChispaLabel string      `json:"chispa_category"`  // lo que dijo Chispa, aunque decidiera VON
-	Prob        float64     `json:"confidence"`       // probabilidad calibrada de Chispa para Category
-	Confident   bool        `json:"chispa_confident"` // Chispa llegó a su umbral
-	Layer       string      `json:"decided_by"`       // chispa | von | chispa-unsure
-	Candidates  []ClassProb `json:"candidates,omitempty"`
-	VON         *VONAnswer  `json:"von,omitempty"`
-	VONError    string      `json:"von_error,omitempty"`
-	Timing      Timing      `json:"timing"`
+	Format    string `json:"format"`
+	Lines     int    `json:"lines"`
+	Scored    int    `json:"lines_classified"`
+	Truncated bool   `json:"truncated,omitempty"`
+	// Warning dice qué parte del log no se analizó (vacío si se analizó
+	// entero). Va siempre a la vista: es lo que evita fiarse de un trozo que
+	// explica otra cosa porque el fallo estaba en lo descartado.
+	Warning      string      `json:"warning,omitempty"`
+	DroppedLines int         `json:"dropped_lines,omitempty"`
+	DroppedBytes int64       `json:"dropped_bytes,omitempty"`
+	Windows      int         `json:"windows,omitempty"` // ventanas, si se puntuó el log entero por ventanas
+	Chunks       []ChunkOut  `json:"chunks"`
+	Chunk        string      `json:"chunk"`
+	Category     string      `json:"category"`
+	ChispaLabel  string      `json:"chispa_category"`  // lo que dijo Chispa, aunque decidiera VON
+	Prob         float64     `json:"confidence"`       // probabilidad calibrada de Chispa para Category
+	Confident    bool        `json:"chispa_confident"` // Chispa llegó a su umbral
+	Layer        string      `json:"decided_by"`       // chispa | von | chispa-unsure
+	Candidates   []ClassProb `json:"candidates,omitempty"`
+	VON          *VONAnswer  `json:"von,omitempty"`
+	VONError     string      `json:"von_error,omitempty"`
+	Timing       Timing      `json:"timing"`
 	// Scores es P(explains) de cada línea (0 las vacías): la página los usa
 	// para resaltar. No va en el JSON de analyze.
 	Scores []float64 `json:"-"`
@@ -83,7 +90,8 @@ type Result struct {
 // Analyze hace el triaje de un log ya leído: las tres capas.
 func Analyze(ctx context.Context, g *Gateway, lg *Log, o Options) (*Result, error) {
 	t0 := time.Now()
-	r := &Result{Format: lg.Format, Lines: len(lg.Lines), Truncated: lg.Truncated}
+	r := &Result{Format: lg.Format, Lines: len(lg.Lines)}
+	r.setDropped(lg, len(lg.Lines))
 
 	tf := time.Now()
 	in := Features(lg)
@@ -106,15 +114,32 @@ func Analyze(ctx context.Context, g *Gateway, lg *Log, o Options) (*Result, erro
 	r.Chunk = ChunkText(lg, cs, MaxChunkBytes)
 	r.Timing.Locate = ms(time.Since(tc))
 
+	if err := decide(ctx, g, r, lg, cs, o); err != nil {
+		return nil, err
+	}
+	r.Timing.Total = ms(time.Since(t0))
+	return r, nil
+}
+
+// setDropped copia al resultado lo que se descartó al leer.
+// kept son las líneas que sí se analizaron.
+func (r *Result) setDropped(lg *Log, kept int) {
+	r.Truncated, r.Warning = lg.Truncated, lg.warning(kept)
+	r.DroppedLines, r.DroppedBytes = lg.DroppedLines, lg.DroppedBytes
+}
+
+// decide son las capas 2 y 3 sobre el trozo ya elegido (r.Chunk y los tramos
+// cs de lg): la categoría de Chispa y, si hace falta, VON.
+func decide(ctx context.Context, g *Gateway, r *Result, lg *Log, cs []Chunk, o Options) error {
 	tk := time.Now()
-	c, err := g.Classify(ctx, o.CategoryTask, r.Chunk, CategoryFields(lg, cs))
+	r.Fields = CategoryFields(lg, cs)
+	c, err := g.Classify(ctx, o.CategoryTask, r.Chunk, r.Fields)
 	if err != nil {
-		return nil, fmt.Errorf("task %s: %w", o.CategoryTask, err)
+		return fmt.Errorf("task %s: %w", o.CategoryTask, err)
 	}
 	r.Timing.Category = ms(time.Since(tk))
 	r.Category, r.Prob, r.Confident, r.Layer = c.Label, round3(c.Prob), !c.Escalate, "chispa"
 	r.ChispaLabel = c.Label
-	r.Fields = CategoryFields(lg, cs)
 	if c.Chispa != nil {
 		r.Candidates = c.Chispa.Candidates
 	}
@@ -138,8 +163,7 @@ func Analyze(ctx context.Context, g *Gateway, lg *Log, o Options) (*Result, erro
 			}
 		}
 	}
-	r.Timing.Total = ms(time.Since(t0))
-	return r, nil
+	return nil
 }
 
 // maxVONText acota lo que se acepta de VON en cada campo: el invitado no es de

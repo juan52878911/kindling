@@ -25,6 +25,9 @@ func cmdLines(args []string) error {
 		return err
 	}
 	fmt.Printf("# %d lines, format %s, truncated %v\n", len(lg.Lines), lg.Format, lg.Truncated)
+	if w := lg.Warning(); w != "" {
+		fmt.Printf("# WARNING: %s\n", w)
+	}
 	end := len(lg.Lines)
 	if *n > 0 {
 		end = min(end, *from+*n)
