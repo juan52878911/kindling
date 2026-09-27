@@ -543,10 +543,16 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	tail := 200
+	// Un tail que no se puede parsear no debe caer callado al defecto: eso
+	// esconde un error de quien llama (una `-tail` mal pasada) detrás de una
+	// respuesta 200 que no es la que se pidió.
 	if v := r.URL.Query().Get("tail"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			tail = n
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			fail(w, http.StatusBadRequest, fmt.Errorf("invalid tail %q: must be a non-negative integer", v))
+			return
 		}
+		tail = n
 	}
 	out, err := s.mgr.Logs(r.PathValue("ref"), tail)
 	if err != nil {

@@ -231,6 +231,13 @@ func (c *Client) Remove(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
 }
 
+// maxLogsResponse acota lo que Logs() lee de la respuesta del daemon. El
+// daemon ya acota firecracker.log por su lado (logMaxBytes, logMaxLines en
+// internal/machine/logs.go), pero sin este segundo tope una CLI o SDK contra
+// un daemon viejo o comprometido cargaría la respuesta entera en memoria
+// (D-04/A-01: el lado cliente del mismo M-07).
+const maxLogsResponse = 8 << 20
+
 // Logs trae la consola serie. Se devuelve texto plano, no JSON: es para leer.
 func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -243,7 +250,7 @@ func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error)
 		return "", err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxLogsResponse))
 	if err != nil {
 		return "", err
 	}

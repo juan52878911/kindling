@@ -201,7 +201,7 @@ func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string,
 	// machines/, no aquí.
 	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", id))
 
-	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
+	logf, err := abrirConsola(m.dir(id))
 	if err != nil {
 		return 0, "", false, err
 	}
