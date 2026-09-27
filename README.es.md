@@ -7,6 +7,7 @@
   <a href="https://github.com/juan52878911/kindling/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/juan52878911/kindling/ci.yml?label=ci" alt="CI"></a>
   <img src="https://img.shields.io/badge/plataformas-linux%20amd64%20%7C%20arm64%20·%20macOS-4c8dae" alt="plataformas">
   <img src="https://img.shields.io/badge/aislamiento-microVMs%20Firecracker-6aa84f" alt="Firecracker">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licencia-Apache%202.0-blue" alt="licencia"></a>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <b>Español</b></p>
@@ -161,7 +162,10 @@ de una VM, kernel 6.1.177 y un rootfs Ubuntu 24.04 de 800 MB:
 | Crear el snapshot | 305 ms |
 | **Restaurar desde snapshot** | **~30 ms** |
 
-Se reproducen con `scripts/40-bench-boot.sh`.
+Se reproducen con `scripts/40-bench-boot.sh` (o `scripts/bench-all.sh` para todos los
+benchmarks en una sola pasada). Cada cifra de este README, su hardware, y cuáles quedan
+obsoletas por las últimas mejoras de arranque: [`docs/benchmarks.md`](docs/benchmarks.md)
+(inglés).
 
 **La conclusión que define la arquitectura:** 2,6 s en frío hacen inviable el modelo de
 una-microVM-por-petición. Los 125 ms que anuncia Firecracker asumen un kernel recortado y
@@ -499,6 +503,9 @@ kling shell sb                                  # o una terminal interactiva den
 kling cp sb:/tmp/resultado.json .
 kling sandbox rm sb
 ```
+
+`kling sandbox fork sb -n 3` ramifica un sandbox vivo en 3 copias independientes (pausa,
+snapshot y N restauraciones) sin tocar `sb`, que sigue corriendo.
 
 `kling shell sb` abre una terminal de verdad dentro, con `vim`, historial y Ctrl-C
 interrumpiendo lo de dentro y no la sesión. `kling exec` termina con el código del
@@ -1303,8 +1310,9 @@ La hoja de ruta está completa; el proyecto no. Lo que queda, ordenado por cuán
 - **Un sistema de ficheros escribible compartido entre microVMs.** Un volumen tiene un
   solo escritor por la física de ext4; el estado compartido entre servicios sigue
   pasando por un servicio de memoria enlazado.
-- **Las barreras que faltan** están en [SECURITY.md](SECURITY.md): sin chroot por defecto
-  (el jailer es opt-in), cuota de disco blanda, sin cifrado en reposo, dorados sin firmar.
+- **Las barreras que faltan** están en [SECURITY.md](SECURITY.md): el jailer se niega a
+  arrancar sin él por defecto en Linux, pero `KLING_JAILER=0` lo evita a propósito; cuota
+  de disco blanda, sin cifrado en reposo.
 - **`playwright` como imagen monolítica de 2,5 GiB** — el navegador merece su propia
   familia de base ([`docs/three-layers.md`](docs/three-layers.md)).
 
