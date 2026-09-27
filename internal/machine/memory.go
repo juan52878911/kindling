@@ -218,43 +218,38 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 	return int(total >> 20)
 }
 
-// huellaAlloc es lo que allocatedBytesCachedLocked recuerda de un mem.file:
-// los bytes que devolvió allocatedBytes junto con el tamaño y la fecha del
-// fichero con los que se calcularon — igual que huellaKernel/huellaSnapshot.
-type huellaAlloc struct {
-	tam   int64
-	fecha int64
-	alloc int64
-}
+// statMemFile es os.Stat, en variable para que los tests comprueben que un
+// acierto de allocatedBytesCachedLocked no toca el disco.
+var statMemFile = os.Stat
 
-// allocatedBytesCachedLocked es allocatedBytes con caché por tamaño+fecha,
-// para el mem.file INMUTABLE de un snapshot dorado (M-12). key es el nombre
-// del snapshot; se invalida junto con el resto de lo cacheado sobre él (ver
-// invalidateSnapCache en snapshot.go).
+// allocatedBytesCachedLocked es allocatedBytes con caché para el mem.file
+// INMUTABLE de un snapshot dorado (M-12). key es el nombre del snapshot.
+//
+// Un acierto NO hace stat: validar por tamaño+fecha costaba exactamente el
+// stat que la caché pretendía ahorrar bajo m.mu. Se confía en la
+// invalidación explícita: todo lo que cambia o retira el mem.file de un
+// dorado pasa por invalidateSnapCache (Commit tras writeMeta, editMeta,
+// removeSnapshot) o lo borra en su sitio con m.mu tomado
+// (sweepSnapshotLeftovers). Un fallo del stat no se cachea: la próxima vez
+// se vuelve a mirar.
 //
 // Se llama con m.mu YA tomado, desde hotMemFilesMiBLocked.
 func (m *Manager) allocatedBytesCachedLocked(path, key string) int64 {
-	fi, err := os.Stat(path)
+	if alloc, ok := m.memAllocCache[key]; ok {
+		return alloc
+	}
+	fi, err := statMemFile(path)
 	if err != nil {
-		// Sin fichero no hay nada que recordar; si había algo cacheado con este
-		// nombre ya no vale (el snapshot se borró bajo nuestros pies).
-		delete(m.memAllocCache, key)
 		return 0
 	}
-	tam, fecha := fi.Size(), fi.ModTime().UnixNano()
-	if h, ok := m.memAllocCache[key]; ok && h.tam == tam && h.fecha == fecha {
-		return h.alloc
-	}
-	var alloc int64
+	alloc := fi.Size()
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		alloc = st.Blocks * 512
-	} else {
-		alloc = fi.Size()
 	}
 	if m.memAllocCache == nil {
-		m.memAllocCache = map[string]huellaAlloc{}
+		m.memAllocCache = map[string]int64{}
 	}
-	m.memAllocCache[key] = huellaAlloc{tam: tam, fecha: fecha, alloc: alloc}
+	m.memAllocCache[key] = alloc
 	return alloc
 }
 

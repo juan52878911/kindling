@@ -294,52 +294,42 @@ func TestSoloCuentaLosMemFileDeMaquinasVivas(t *testing.T) {
 	}
 }
 
-// allocatedBytesCachedLocked (M-12) no debe volver a stat-ear el mem.file de
-// un dorado mientras su tamaño lógico y su mtime no cambien: se comprueba
-// vaciando el fichero por debajo (mismo tamaño lógico, disperso de verdad) y
-// devolviéndole a mano el mismo mtime que tenía. Si recalculara, los bytes
-// asignados caerían a casi nada.
-func TestAllocatedBytesCachedLockedUsaLaCache(t *testing.T) {
+// allocatedBytesCachedLocked (M-12): un acierto no hace NINGÚN stat (si lo
+// hiciera, la caché costaría lo mismo que no tenerla); solo la invalidación
+// explícita obliga a volver a mirar el disco.
+func TestAllocatedBytesCachedLockedNoHaceStatEnUnAcierto(t *testing.T) {
 	m := newTestManager(t)
 	path := filepath.Join(t.TempDir(), "mem.file")
 	if err := os.WriteFile(path, make([]byte, 4<<20), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	viejo := statMemFile
+	t.Cleanup(func() { statMemFile = viejo })
+	var stats int
+	statMemFile = func(p string) (os.FileInfo, error) { stats++; return os.Stat(p) }
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	primero := m.allocatedBytesCachedLocked(path, "dorado")
-	if primero <= 0 {
-		t.Fatalf("quería bytes asignados > 0, fue %d", primero)
+	if primero <= 0 || stats != 1 {
+		t.Fatalf("fallo de caché: alloc=%d stats=%d, quería >0 y 1", primero, stats)
+	}
+	for i := 0; i < 3; i++ {
+		if got := m.allocatedBytesCachedLocked(path, "dorado"); got != primero {
+			t.Fatalf("acierto = %d, quería %d", got, primero)
+		}
+	}
+	if stats != 1 {
+		t.Fatalf("los aciertos hicieron stat: %d stats, quería 1", stats)
 	}
 
-	// Mismo tamaño lógico (fi.Size()) pero disperso: sin la caché, los bytes
-	// asignados de verdad caerían a casi nada.
-	if err := os.Truncate(path, 0); err != nil {
-		t.Fatal(err)
+	// Un fichero que no existe no se cachea: la próxima vez se vuelve a mirar.
+	falta := filepath.Join(t.TempDir(), "no-esta")
+	if got := m.allocatedBytesCachedLocked(falta, "fantasma"); got != 0 {
+		t.Fatalf("sin fichero = %d, quería 0", got)
 	}
-	if err := os.Truncate(path, fi.Size()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	segundo := m.allocatedBytesCachedLocked(path, "dorado")
-	if segundo != primero {
-		t.Errorf("no usó la caché: primero=%d segundo=%d (debían ser iguales)", primero, segundo)
-	}
-
-	// Con un tamaño lógico distinto sí se recalcula, y ahora sí ve el fichero
-	// disperso de verdad.
-	time.Sleep(2 * time.Millisecond)
-	if err := os.Truncate(path, fi.Size()+1); err != nil {
-		t.Fatal(err)
-	}
-	tercero := m.allocatedBytesCachedLocked(path, "dorado")
-	if tercero >= primero {
-		t.Errorf("debía recalcular y ver el fichero disperso (< %d), dio %d", primero, tercero)
+	if _, hay := m.memAllocCache["fantasma"]; hay {
+		t.Fatal("un stat fallido quedó cacheado")
 	}
 }
 
@@ -349,7 +339,7 @@ func TestAllocatedBytesCachedLockedUsaLaCache(t *testing.T) {
 func TestInvalidateSnapCacheOlvidaElTamanoDeMemoria(t *testing.T) {
 	m := newTestManager(t)
 	m.mu.Lock()
-	m.memAllocCache = map[string]huellaAlloc{"dorado": {tam: 1, fecha: 1, alloc: 99}}
+	m.memAllocCache = map[string]int64{"dorado": 99}
 	m.mu.Unlock()
 
 	m.invalidateSnapCache("dorado")
@@ -359,5 +349,30 @@ func TestInvalidateSnapCacheOlvidaElTamanoDeMemoria(t *testing.T) {
 	m.mu.RUnlock()
 	if hay {
 		t.Error("invalidateSnapCache no borró la entrada de memAllocCache")
+	}
+}
+
+// El barrido de restos de commit, que aparta el directorio en su sitio con
+// m.mu tomado y sin pasar por removeSnapshot, también olvida lo cacheado.
+func TestSweepSnapshotLeftoversOlvidaLaCache(t *testing.T) {
+	m := newTestManager(t)
+	dir := m.snapDir("amedias")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	viejo := time.Now().Add(-2 * dirGrace)
+	if err := os.Chtimes(dir, viejo, viejo); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.memAllocCache = map[string]int64{"amedias": 99}
+	m.sweepSnapshotLeftovers()
+	_, hay := m.memAllocCache["amedias"]
+	m.mu.Unlock()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("el barrido no apartó los restos: %v", err)
+	}
+	if hay {
+		t.Error("sweepSnapshotLeftovers no olvidó el tamaño cacheado")
 	}
 }

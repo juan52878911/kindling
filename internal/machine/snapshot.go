@@ -1364,6 +1364,9 @@ func (m *Manager) sweepSnapshotLeftovers() {
 			log.Printf("reconcile: couldn't move the leftovers of snapshot %q: %v", e.Name(), err)
 			continue
 		}
+		// Ya con m.mu tomado: se olvida en su sitio (ver invalidateSnapCache).
+		delete(m.snapCache, e.Name())
+		delete(m.memAllocCache, e.Name())
 		log.Printf("reconcile: snapshot %q was an interrupted commit; its leftovers go to the trash", e.Name())
 	}
 }

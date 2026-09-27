@@ -151,7 +151,7 @@ type Manager struct {
 	// snapshot dorado (M-12): es inmutable desde que se congela, así que
 	// stat-earlo bajo m.mu en cada Run/runFrom/Resize (hotMemFilesMiBLocked) no
 	// aporta nada sobre calcularlo una vez. Se invalida junto con snapCache.
-	memAllocCache map[string]huellaAlloc
+	memAllocCache map[string]int64
 
 	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
 	// pasada completa no libera nada, lo que significa que el disco lo llena algo
