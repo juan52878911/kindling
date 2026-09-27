@@ -1,0 +1,23 @@
+name: Feature request
+description: Something kindling should do, or do differently
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what gets in the way today. A command line you wish worked is the best description.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour, the command, the flag. If it changes the CLI, say how it fits `kling help`.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Which use case (MCP hosting, sandboxes, models, operating the daemon), which platform, and whether you have read the related section of docs/handbook.md or docs/compare.md.

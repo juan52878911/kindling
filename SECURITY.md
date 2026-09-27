@@ -270,3 +270,15 @@ kling topo           # de qué snapshot salió cada instancia
 
 Si se sospecha del snapshot dorado, revisar las instancias antes de borrarlo: `kling rmi` se
 niega si quedan vivas.
+
+## Avisar de una vulnerabilidad
+
+Si crees haber encontrado una vulnerabilidad en kindling, no la publiques en un issue.
+Ábrela como **aviso de seguridad privado** en GitHub:
+<https://github.com/juan52878911/kindling/security/advisories/new>. Incluye la versión
+(`kling version`), la plataforma (Linux con KVM, macOS con `vz`) y los pasos para
+reproducirla. Se responde en ese mismo hilo; no hay programa de recompensas.
+
+Lo que NO es una vulnerabilidad de kindling, porque está documentado como límite en este
+mismo fichero: que quien alcanza el socket del daemon pueda con todo, que los snapshots
+guarden la memoria del invitado en claro, o que el puente local no autentique.
