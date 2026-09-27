@@ -6,6 +6,7 @@
 #   curl -fsSL .../install.sh | sh -s -- --tag v0.13.0 --prefix ~/.local/bin
 #   curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 #   curl -fsSL .../install.sh | sh -s -- --dry-run
+#   curl -fsSL .../install.sh | sh -s -- --claude          # y el plugin de Claude Code
 #
 # Comportamiento:
 #   - Detecta OS (linux/darwin) y arch (amd64/arm64).
@@ -38,6 +39,14 @@
 # ~/.config/kling y añade a tu rc la línea que lo carga y el PATH de --prefix
 # si faltaba (una sola vez, bajo un comentario "# kling"). Con --no-rc no toca
 # nada fuera de --prefix (ni el rc ni ~/.config/kling): imprime las líneas y ya.
+# Un rc que no se puede escribir (un enlace de solo lectura a /nix/store, como
+# deja home-manager) no es un error: se imprimen las líneas para que las pongas
+# donde configures tu shell.
+#
+# Con --claude registra además este repo como marketplace de plugins de Claude
+# Code e instala el plugin "kindling" (plugins/claude-code): /kindling:setup
+# pregunta qué instalar y lo hace. Si `claude` no está en el PATH, imprime los
+# dos comandos para teclearlos dentro de Claude Code.
 #
 # Variables de entorno respetadas:
 #   KLING_VERSION   versión a instalar (ej. v0.1.0). Por defecto: última estable.
@@ -46,6 +55,7 @@
 #   KLING_WITH      extensiones a instalar, como --with (ej. mcp,sandbox)
 #   KLING_PLUGIN_PATH  su primer directorio es donde van las extensiones
 #   KLING_NO_RC     =1 no toca tu rc (como --no-rc)
+#   KLING_CLAUDE    =1 instala el plugin de Claude Code (como --claude)
 
 set -u
 # NOTA: usamos `set -u` pero NO `set -e`. Los tests `[ ... ]` que comparan
@@ -61,6 +71,7 @@ PLUGIN_DIR=""
 SKIP_KLING=0
 NO_COMPANIONS=0
 NO_RC="${KLING_NO_RC:-0}"
+CLAUDE="${KLING_CLAUDE:-0}"
 
 usage() {
     cat <<EOF
@@ -75,6 +86,8 @@ Uso: install.sh [opciones]
                      extensiones de kling: ~/.local/share/kling/plugins)
   --skip-kling       no instala kling: solo las extensiones de --with
   --no-companions    no instala los compañeros de las extensiones (kling-bridge)
+  --claude           registra este repo como marketplace de Claude Code e
+                     instala su plugin (luego, en Claude Code: /kindling:setup)
   --no-rc            no toca nada fuera de --prefix: ni tu rc ni el completado
                      en ~/.config/kling; imprime lo que harías tú
   --dry-run          muestra lo que haría sin descargar ni instalar nada
@@ -99,6 +112,7 @@ while [ $# -gt 0 ]; do
         --skip-kling) SKIP_KLING=1; shift ;;
         --no-companions) NO_COMPANIONS=1; shift ;;
         --no-rc)     NO_RC=1; shift ;;
+        --claude)    CLAUDE=1; shift ;;
         --dry-run)   DRY_RUN=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           echo "opción desconocida: $1" >&2; usage >&2; exit 2 ;;
@@ -253,6 +267,9 @@ if [ "$DRY_RUN" = "1" ]; then
             done
         fi
     done
+    if [ "$CLAUDE" = "1" ]; then
+        info "claude plugin marketplace add $REPO && claude plugin install kindling@kindling"
+    fi
     exit 0
 fi
 
@@ -396,17 +413,23 @@ case "$USER_SHELL" in
     *)    RC=""; RELOAD="source <(kling completion bash|zsh)   # or: kling completion fish | source" ;;
 esac
 
-# add_rc LINEA: la añade al rc una sola vez, bajo "# kling".
+# add_rc LINEA: la añade al rc una sola vez, bajo "# kling". Devuelve 1 si no
+# puede (rc de solo lectura, p. ej. gestionado por home-manager): quien llama
+# imprime la línea para que la pongas tú.
 add_rc() {
     [ -n "$RC" ] || return 1
     if [ -f "$RC" ] && grep -Fq -- "$1" "$RC"; then
         return 0
     fi
+    if [ -e "$RC" ] && [ ! -w "$RC" ]; then
+        warn "no puedo escribir en $RC (solo lectura: ¿lo gestiona home-manager o nix?)"
+        return 1
+    fi
     mkdir -p "$(dirname "$RC")" 2>/dev/null
     if [ -f "$RC" ] && grep -q "^# kling$" "$RC"; then
-        printf "%s\n" "$1" >> "$RC" || return 1
+        printf "%s\n" "$1" >> "$RC" 2>/dev/null || return 1
     else
-        printf "\n# kling\n%s\n" "$1" >> "$RC" || return 1
+        printf "\n# kling\n%s\n" "$1" >> "$RC" 2>/dev/null || return 1
     fi
     ok "añadido a $RC: $1"
 }
@@ -427,15 +450,26 @@ case ":$PATH:" in
 esac
 
 COMPLETION_LINE=""
+RC_MANUAL=0   # 1 si alguna línea no cupo en el rc: se imprime al final
 if [ "$NO_RC" != "1" ] && [ -n "$KLING_BIN" ] && [ -n "$RC" ]; then
     # `kling completion install` escribe ~/.config/kling/completion.<shell> y
     # dice qué línea lo carga; nos la quedamos de su salida.
     COMPLETION_LINE="$("$KLING_BIN" completion install "$USER_SHELL" 2>/dev/null | sed -n '/^Add this line/{n;s/^  //;p;}')"
-    [ -n "$PATH_LINE" ] && add_rc "$PATH_LINE"
-    [ -n "$COMPLETION_LINE" ] && add_rc "$COMPLETION_LINE"
+    if [ -n "$PATH_LINE" ]; then add_rc "$PATH_LINE" || RC_MANUAL=1; fi
+    if [ -n "$COMPLETION_LINE" ]; then add_rc "$COMPLETION_LINE" || RC_MANUAL=1; fi
 fi
 
 echo
+if [ "$RC_MANUAL" = "1" ]; then
+cat <<EOF
+  No he podido escribir en $RC. Añade tú estas líneas donde configures tu shell
+  (en home-manager, programs.zsh.initContent o el equivalente de tu shell):
+
+EOF
+    [ -n "$PATH_LINE" ] && printf '      %s\n' "$PATH_LINE"
+    [ -n "$COMPLETION_LINE" ] && printf '      %s\n' "$COMPLETION_LINE"
+    echo
+fi
 if [ -n "$PATH_LINE" ] && { [ "$NO_RC" = "1" ] || [ -z "$RC" ]; }; then
 cat <<EOF
   Para usar kling desde una shell abierta, añade a tu rc:
@@ -475,6 +509,32 @@ cat <<EOF
       $RELOAD
 
 EOF
+fi
+
+# ── plugin de Claude Code ──────────────────────────────────────────────────
+# El marketplace es este mismo repo (.claude-plugin/marketplace.json) y el
+# plugin, plugins/claude-code. `claude plugin marketplace add` falla si ya
+# estaba: no es un error, se sigue con la instalación.
+if [ "$CLAUDE" = "1" ]; then
+    if command -v claude >/dev/null 2>&1; then
+        claude plugin marketplace add "$REPO" >/dev/null 2>&1 \
+            || claude plugin marketplace update kindling >/dev/null 2>&1 \
+            || warn "no pude registrar el marketplace $REPO; prueba a mano:  claude plugin marketplace add $REPO"
+        if claude plugin install kindling@kindling; then
+            ok "plugin de Claude Code instalado: en Claude Code, teclea /kindling:setup"
+        else
+            warn "no pude instalar el plugin; dentro de Claude Code:  /plugin marketplace add $REPO  y  /plugin install kindling@kindling"
+        fi
+    else
+cat <<EOF
+  No encuentro \`claude\` en el PATH. Dentro de Claude Code, teclea:
+
+      /plugin marketplace add $REPO
+      /plugin install kindling@kindling
+      /kindling:setup
+
+EOF
+    fi
 fi
 
 ok "listo"
