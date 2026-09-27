@@ -124,7 +124,7 @@ type montaje struct {
 
 func montar(t *testing.T, dir string, ro bool) *montaje {
 	t.Helper()
-	srv, err := hostshare.Open(dir, ro)
+	srv, err := hostshare.Open(dir, ro, t.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
