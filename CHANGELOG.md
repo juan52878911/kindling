@@ -8,6 +8,39 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## Unreleased
+
+### Seguridad
+
+- **Un invitado ya no alcanza los servicios del host por su IP pública.** Con salida
+  (`internet` o `allowlist`), el tráfico de un invitado hacia una IP del propio host
+  entraba por la cadena `INPUT`, que nadie filtraba: `sshd`, un gateway en `0.0.0.0`, la
+  interfaz de Proxmox. En allowlist bastaba un dominio permitido que resolviera a esa IP.
+  El daemon instala al principio de `INPUT`, para los veth `vh-*`, reglas que solo dejan
+  pasar las respuestas a lo que abre el host y el DNS del allowlist. Reproducido y
+  verificado en el lab con una IP pública de prueba.
+- **`kling save` y `fork` se niegan con secretos inyectados.** Un secreto de sesión (MMDS)
+  inyectado mientras se hacía un `save` o un `fork` acababa en el `mem.file` del dorado,
+  el que mapean todas las instancias. `Commit` lo comprueba ahora con el cerrojo de la
+  máquina tomado.
+- **macOS: solo tu usuario llega al agente de un sandbox.** Los reenvíos de `kling-vz`
+  escuchan en `127.0.0.1`, donde cualquier cuenta del Mac puede conectar, y detrás está el
+  agente del invitado con exec y ficheros. `kling-vz` busca con `libproc` qué proceso
+  tiene el otro extremo de cada conexión y corta las que no son de su usuario (~5 µs con
+  caché, ~2,5 ms en el peor caso).
+- **macOS: `kling-vz` se encierra en un perfil de sandbox** al crear o restaurar la VM:
+  lee bajo la raíz de kindling, escribe solo en su máquina, `snapshots/` y `volumes/`, y
+  sale a la red solo si la máquina tiene egress. Es el proceso que procesa el tráfico del
+  invitado (pila de red, DNS, MMDS). `KLING_VZ_NO_SANDBOX=1` lo apaga para diagnosticar.
+  Además nace con `umask 077`.
+
+### Novedades
+
+- **Tope de CPU en macOS.** `-cpu-pct` ya se aplica con el backend `vz`: `kling-vz` mide
+  cada 100 ms la CPU del auxiliar de Apple donde corre la VM y la pausa lo justo para que
+  la media quede en el techo, a partir de que el agente del invitado escucha. Medido en un
+  M4 con un bucle infinito dentro: 96 % sin techo, 50 % con `-cpu-pct 50`, 25 % con 25.
+
 ## v0.15.0 — 2026-09-27
 
 > **⚠ Cambio incompatible: jailer es obligatorio por defecto en Linux.** Tras actualizar,
