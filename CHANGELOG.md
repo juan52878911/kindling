@@ -8,6 +8,123 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## Unreleased
+
+Ronda de remediación de una auditoría completa del núcleo (`internal/machine`,
+`internal/net`, `internal/share`, `pkg/scheduler`, el agente invitado y el daemon):
+carreras de verdad bajo `-race`, DoS del host por un invitado hostil, y varias mejoras de
+arranque. Sin cambios en el formato de `state.json` ni en la firma de los snapshots.
+
+### Arreglado
+
+- **Ciclo de vida de una máquina.** `fail()` escribía el error en una copia y la entrada
+  viva se quedaba "running" con el PID muerto durante ~10 s hasta que el vigilante lo
+  notaba. `rm`/`stop`/`freeze`, y la expiración por TTL, sobre una máquina que todavía
+  está arrancando ahora **esperan a que termine de arrancar y actúan sobre el resultado**;
+  antes `rm` podía dejar un VMM huérfano corriendo y el cliente igual recibía un 201. Una
+  `Freeze` cuyo volcado falla y cuyo resume también falla ahora marca la máquina fallida
+  al momento con el error real, en vez de quedarse "running" con un PID muerto y perder el
+  error.
+- **`kling save` (Commit) espera el cerrojo de la máquina** y tiene una única ruta de
+  limpieza que corre en todo error (incluida una desconexión del cliente a media
+  operación): la plantilla siempre acaba resumida y apuntando a su propio overlay, o
+  marcada fallida — nunca pausada mirando al overlay dorado.
+- **`snapshots rm`** puede responder ahora "in use right now … retry in a moment" mientras
+  una instancia se está restaurando desde ese snapshot, en vez de dejar que la borradura
+  y la restauración se pisen.
+- **Los plazos de Firecracker para volcar/restaurar memoria** ya no son fijos a 30 s:
+  escalan con la memoria (`10 s + 20 s/GiB`, nunca menos de 30 s). `Freeze`, `Thaw`,
+  restaurar y `save` de máquinas grandes ya no expiran a media operación.
+- **Consola serie acotada.** `firecracker.log` rota en el sitio al pasar de 16 MiB
+  (conserva el último 1 MiB en `firecracker.log.1`); ya no puede llenar el disco del host.
+  `kling logs` lee como mucho 4 MiB desde el final y nunca más de 10 000 líneas, sea lo que
+  sea lo que pida `-tail`; el daemon rechaza con 400 un `-tail` que no sea un número o sea
+  negativo, y el SDK acota su lado a 8 MiB de respuesta.
+- **Resolver DNS del modo `allowlist` acotado**: como máximo 32 consultas a la vez y
+  ~200/s (ráfaga 400) por microVM; por encima, SERVFAIL en el sitio, sin fork ni socket
+  al upstream. La respuesta del upstream se valida (id de transacción + pregunta) antes de
+  sembrar el ipset con ella.
+- **Tope de descriptores por máquina en carpetas compartidas**: 2048 descriptores por
+  máquina (repartidos entre todas sus carpetas vivas), respaldados por el tope global de
+  16384 de siempre. Crear un fichero en una carpeta compartida comprueba primero con
+  `Lstat` que no exista ya como directorio/enlace/FIFO/dispositivo y pide `O_EXCL` siempre.
+  Subir varias copias en paralelo (`StageShareUpload`) ya no puede superar el tope de
+  subidas pendientes por una carrera de comprobación-luego-reserva.
+- **`/exec` legado del agente invitado**: cuerpo acotado a 1 MiB (413 si se pasa) y la
+  salida combinada acotada a 64 MiB con un campo nuevo `truncated` (aditivo, no rompe
+  clientes viejos) en vez de crecer sin límite en memoria. `PUT /files` ya no lo corta el
+  timeout de lectura del servidor entero; tiene su propio plazo de 15 min, igual que el
+  daemon.
+- **Caches**: metadatos de snapshot, si una imagen soporta capas y el tamaño reservado de
+  los `mem.file` inmutables de los snapshots dorados ya no se releen/recalculan en cada
+  arranque o cada tick del vigilante.
+- **Scheduler** (`pkg/scheduler`, usado por `ext/sandbox`): la cuota de instancias por
+  tenant se reserva bajo el mismo cerrojo que la comprueba (dos arranques concurrentes ya
+  no pueden pasar los dos la comprobación); `alive` consulta una instancia en vez de listar
+  toda la flota; una instancia pausada cuya congelación falla al desalojarla vuelve al
+  pool en vez de perderse; `KeepWarmAll` ya no apila una goroutine de más por tick por
+  servicio frío.
+- **Durabilidad**: el overlay de una plantilla, un volumen nuevo y una imagen de carpeta
+  compartida se escriben en un temporal, se hace `fsync` y se renombran encima —
+  publicación atómica, no una escritura a medias si el proceso muere en mitad de camino.
+
+### Novedades
+
+- **`kling sandbox fork <sb> [-n N] [-ttl D] [-on-ttl remove|freeze]`**: ramifica un
+  sandbox vivo en N copias independientes a partir de un snapshot temporal (pausa + dump +
+  N restauraciones). Todo o nada: si una restauración falla, se deshace todo y el origen
+  sigue corriendo. Nueva ruta `POST /sandboxes/{ref}/fork` y capacidad `fork` en
+  `GET /info`.
+- **Jailer obligatorio por defecto en Linux** (con salida explícita): ver "Cambios
+  incompatibles".
+- **Kernel mínimo propio**: `scripts/builders/kernel/build.sh` compila un kernel 6.1
+  reproducible a partir de fragmentos Kconfig acotados (`config-common`,
+  `config-amd64`/`config-arm64`) y `scripts/check-kernel-config.sh` verifica que ningún
+  módulo (`=m`) ni opción prohibida se cuele. `KERNEL_SOURCE=build` en
+  `scripts/30-fetch-artifacts.sh` lo usa en vez del kernel de CI de Firecracker
+  (por defecto sigue siendo `ci`). Los snapshots dorados llevan ahora un
+  `kernel_sha256` opcional en `meta.json`: restaurar uno sobre un host cuyo kernel cambió
+  desde que se hizo el snapshot falla rápido con "rebuild the template", en vez de un
+  fallo críptico dentro del invitado.
+- **Arranque más rápido**: la línea de arranque del kernel incluye `quiet` y, en amd64,
+  desactiva la emulación i8042 (PS/2); una máquina que arranca o se restaura corre a
+  `max(cpu_pct, 100)` (hasta un núcleo entero) hasta que el agente invitado contesta (como
+  mucho 10 s), y luego cae a su `cpu_pct` configurado; el diálogo SSH remoto reutiliza un
+  socket `ControlMaster` (60 s de vida) en vez de abrir una conexión por llamada.
+- **`LICENSE`** (Apache-2.0) en la raíz del repo, y `NOTICE` la referencia.
+- **`docs/benchmarks.md`** y **`scripts/bench-all.sh`**: cada cifra de rendimiento del
+  README con su hardware, fecha aproximada y el script que la reproduce, marcando cuáles
+  quedan obsoletas por los cambios de arranque de más arriba.
+
+### Cambios incompatibles
+
+- **Jailer pasa de opcional a obligatorio por defecto en Linux.** `kling run`/
+  `kling daemon` se niegan a arrancar una máquina **nueva** (arranque en frío, restaurar
+  un snapshot, `thaw`) si no encuentran el binario `jailer` y el usuario de servicio sin
+  privilegios listos — antes caían en silencio a correr sin jailer. El arreglo es instalar
+  jailer y el usuario (el mensaje de error dice los comandos exactos), o fijar
+  `KLING_JAILER=0` para seguir sin él a propósito, lo que ahora deja un aviso de seguridad
+  en el log del daemon al arrancar. Máquinas ya en marcha y comandos de solo lectura no se
+  ven afectados. `KLING_JAILER=1` sigue forzando jailer, pero ahora falla con un error
+  claro si el binario no está, en vez de un fallo de `exec` críptico.
+- **`kling logs`** (y `Manager.Logs`/`Client.Logs`) ya no puede devolver más de 4 MiB /
+  10 000 líneas aunque se pida `-tail 0` ("todo") o un `-tail` mayor que el tope; antes
+  `-tail 0` leía el fichero entero sin condición.
+- **`rm`/`stop`/`freeze` y la expiración por TTL** sobre una máquina que todavía está
+  arrancando ahora bloquean hasta que el arranque termina (hasta ~2 min si esa máquina
+  tiene carpetas compartidas en vivo que tardan en enganchar) en vez de devolver de
+  inmediato sobre un estado a medio construir.
+- **El resolver DNS de `allowlist`** puede responder SERVFAIL a un invitado que dispare
+  ráfagas de más de 32 consultas simultáneas o más de ~200/s; antes no había tope y todo se
+  reenviaba.
+- **El tope efectivo de descriptores abiertos por máquina en carpetas compartidas** baja
+  de hasta 8192 (8 carpetas × 1024 cada una) a 2048 compartidos entre todas las carpetas
+  de esa misma máquina; el respaldo global de 16384 no cambia.
+- **`snapshots rm`** puede fallar con "in use … retry" mientras algo se restaura desde ese
+  snapshot; antes no lo comprobaba.
+- Ninguno de estos cambios toca el formato de `state.json`, `meta.json` (el
+  `kernel_sha256` nuevo es opcional y aditivo) ni la firma de los snapshots.
+
 ## v0.14.0 — 2026-09-26
 
 **La CLI, ordenada, y el gateway de IA sin dominio.** Tres sustantivos —imagen (rootfs, arranca en frío) →

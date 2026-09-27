@@ -7,6 +7,7 @@
   <a href="https://github.com/juan52878911/kindling/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/juan52878911/kindling/ci.yml?label=ci" alt="CI"></a>
   <img src="https://img.shields.io/badge/platforms-linux%20amd64%20%7C%20arm64%20·%20macOS-4c8dae" alt="platforms">
   <img src="https://img.shields.io/badge/isolation-Firecracker%20microVMs-6aa84f" alt="Firecracker">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="license"></a>
 </p>
 
 <p align="center"><b>English</b> · <a href="README.es.md">Español</a></p>
@@ -160,7 +161,9 @@ VM, kernel 6.1.177 and an 800 MB Ubuntu 24.04 rootfs:
 | Snapshot creation | 305 ms |
 | **Restore from snapshot** | **~30 ms** |
 
-Reproduce them with `scripts/40-bench-boot.sh`.
+Reproduce them with `scripts/40-bench-boot.sh` (or `scripts/bench-all.sh` for every bench
+in one run). Every number in this README, its hardware, and which ones are stale after
+the latest boot-latency work: [`docs/benchmarks.md`](docs/benchmarks.md).
 
 **The conclusion that defines the architecture:** 2.6 s cold makes the one-microVM-per-request
 model unworkable. The 125 ms Firecracker advertises assume a trimmed kernel and a minimal
@@ -498,6 +501,9 @@ kling shell sb                                  # or an interactive terminal ins
 kling cp sb:/tmp/result.json .
 kling sandbox rm sb
 ```
+
+`kling sandbox fork sb -n 3` branches a live sandbox into 3 independent copies (pause,
+snapshot, restore N times) without disturbing `sb`, which keeps running.
 
 `kling shell sb` opens a real terminal inside, with `vim`, history and Ctrl-C
 interrupting what runs inside instead of the session. `kling exec` exits with the remote
@@ -1285,8 +1291,9 @@ The roadmap is complete; the project is not. What remains, ordered by how much i
 
 - **A shared writable filesystem across microVMs.** A volume has one writer by ext4's
   physics; state shared across services still goes through a linked memory service.
-- **The missing barriers** are listed in [SECURITY.md](SECURITY.md): no chroot by default
-  (jailer is opt-in), soft disk quotas, no encryption at rest, unsigned golden snapshots.
+- **The missing barriers** are listed in [SECURITY.md](SECURITY.md): jailer refuses to
+  start a machine without it by default on Linux, but `KLING_JAILER=0` opts out; soft
+  disk quotas, no encryption at rest.
 - **`playwright` as a monolithic 2.5 GiB image** — the browser deserves its own base
   family ([`docs/three-layers.md`](docs/three-layers.md)).
 

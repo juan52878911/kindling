@@ -61,6 +61,15 @@ Cada máquina vive en su propio namespace de red. La política por defecto es **
 Un valor de egress desconocido es un **error**, no una caída al modo más permisivo, y la
 política viaja con el snapshot del servicio: reimportar o curar un servicio la conserva.
 
+El resolver de `allowlist` está acotado: como máximo 32 consultas a la vez y ~200/s (ráfaga
+400) por microVM; por encima de eso responde SERVFAIL en el sitio, sin abrir un socket al
+upstream ni lanzar el `ip netns exec ... ipset add` que sembraría la ruta. Antes, un
+invitado que repitiera una consulta A miles de veces por segundo hacía que el host abriera
+igual número de sockets y forkeara igual número de procesos — un DoS del host, no de la
+microVM. La respuesta del upstream también se valida (id de transacción y pregunta) antes de
+sembrar el ipset con ella, para que una respuesta falsificada no abra una ruta que nadie
+declaró.
+
 Bloqueado siempre, incluso con `internet`:
 
 ```
@@ -97,6 +106,12 @@ RESULTADO 1.1.1.1:       ALCANZABLE
 - **RAM fija** por microVM; el invitado no puede pedir más.
 - En el gateway, **cuotas por token/tenant**: varios clientes sobre un mismo token se
   reparten la capacidad en vez de matarse de hambre.
+- **Consola serie acotada**: `firecracker.log` rota en el sitio (sin recrear el fichero, el
+  VMM sigue escribiendo en el mismo descriptor) al pasar de 16 MiB, conservando el último
+  1 MiB en `firecracker.log.1`. Un invitado que inunde su propia consola ya no puede llenar
+  el disco del host; antes el fichero crecía sin tope mientras la microVM viviera.
+  `kling logs` lee como mucho 4 MiB desde el final y nunca devuelve más de 10 000 líneas,
+  con independencia de lo que pida `-tail`.
 
 ### 5. Aleatoriedad
 
@@ -179,12 +194,21 @@ que la máquina declare en su etiqueta `kling.ports`. Antes llegaba a cualquier
 puerto, y con él a servicios internos de la microVM que nadie había decidido
 exponer.
 
-### 11. Jailer por defecto cuando está instalado
+### 11. Jailer obligatorio por defecto en Linux
 
-Si el binario `jailer` está y el daemon corre como root, las microVMs corren
-dentro de él sin configurar nada; `KLING_JAILER=0` lo apaga. Antes había que
-pedirlo, y la barrera más fuerte quedaba apagada justo donde nadie había leído
-esto.
+En Linux, `kling run`/`kling daemon` **se niegan a arrancar una máquina nueva** si no
+encuentran el binario `jailer` y el usuario de servicio sin privilegios (con el grupo
+`kvm`) listos, en vez de arrancar sin jailer en silencio como hacía antes. El mensaje de
+error dice exactamente qué falta y cómo arreglarlo
+(`scripts/20-install-firecracker.sh`, o crear el usuario/grupo). `KLING_JAILER=0` sigue
+existiendo como salida explícita — el daemon avisa **una vez, en el log de arranque**
+("SECURITY WARNING") cuando se usa — y `KLING_JAILER=1` fuerza jailer y da un error claro
+si falta el binario en vez de un fallo de `exec` críptico. La decisión se toma una vez por
+proceso al arrancar el daemon: instalar jailer o crear el usuario con el daemon ya en
+marcha no lo destraba hasta reiniciarlo. Solo afecta a arranques **nuevos**
+(`run`, restaurar un snapshot, `thaw`); una máquina ya en marcha, en pausa o congelada no
+se ve afectada, ni tampoco los comandos de solo lectura (`ps`, `logs`, …). macOS/`kling-vz`
+no usa jailer y no se ve afectado por nada de esto.
 
 ### 12. Admisión por disco y por presión de memoria
 
@@ -221,7 +245,17 @@ invitado no puede llenar el disco del host a base de que se creen máquinas.
   - Cada campo se valida: rutas (relativas, limpias, componente ≤ 255, total ≤
     4096), tamaños (lectura y escritura ≤ 128 KiB, tramas ≤ 144 KiB), offsets,
     handles (con la época de su sesión). Por sesión, 16 operaciones en vuelo y
-    1024 ficheros abiertos; 16384 en todo el daemon.
+    1024 ficheros abiertos. Por encima de eso hay un **tope de 2048 descriptores
+    por máquina** (compartido entre todas las carpetas vivas de esa misma
+    máquina, así que 8 carpetas ya no llegan a 8192 entre todas) y un
+    respaldo global de 16384 en todo el daemon; una máquina hostil agota su
+    propio tope mucho antes de tocar el de las demás.
+  - Crear un fichero dentro de la carpeta comprueba primero, con `Lstat`, que no
+    exista ya como directorio, enlace simbólico, FIFO o dispositivo (antes solo
+    se comprobaba en la ruta sin crear); la creación real siempre pide
+    `O_EXCL`, aunque el invitado no lo haya pedido, así que no puede plantar un
+    nombre y hacer que una escritura futura del host caiga en algo que no es
+    un fichero regular.
   - `ro` se impone en el daemon (`EROFS`), no en el montaje del invitado.
   - Para el invitado todo es de root; no ve uid/gid del host, `chown` no hace
     nada y los modos se recortan a `0777` (sin setuid/setgid/sticky). Lo que crea
@@ -240,9 +274,10 @@ permisos lo que haya bajo la carpeta.
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
 
-- **Jailer solo si está instalado.** Desde v0.8 se usa por defecto cuando el binario
-  existe (ver 11); en un host sin él, el VMM ve el sistema de ficheros del host con los
-  permisos de su usuario.
+- **Jailer con salida explícita.** Desde este cambio es obligatorio por defecto en Linux
+  (ver 11): arrancar sin él exige `KLING_JAILER=0` a propósito, y eso deja un aviso en el
+  log. Quien lo pone y no lo lee sigue corriendo el VMM con el sistema de ficheros del
+  host y los permisos de su usuario.
 - **Cuota de disco por overlay, no por host.** Cada overlay son 512 MiB lógicos; la
   admisión por disco (ver 12) impide crear máquinas nuevas con el disco casi lleno, pero
   las que ya corren pueden seguir llenando los suyos.
