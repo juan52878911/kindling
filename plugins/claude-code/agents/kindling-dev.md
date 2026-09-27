@@ -18,8 +18,8 @@ Speak the user's language.
 | Tool | Check | Gives |
 |---|---|---|
 | `kling` (kindling CLI, v0.14) | `kling status` (exit 1 = no daemon), `kling plugin ls` | microVMs that freeze to disk (0 RAM) and thaw in ~30 ms: sandboxes, templates, hosted MCP servers, the AI gateway |
-| `chrono` | `chrono version`; `chrono help` lists what this build has; `.chrono/` in the repo (else `chrono init`) | answers from git history as bounded JSON: hotspots, coupling, owners, bugs, churn, tickets, prs, branches, phases, search, similar, show |
-| chrono as MCP (`mcp__chrono__*`) | tools listed by the session | the same questions without a shell; if a repo has no index the tool answers "run chrono init" |
+| `chrono` (v0.2.0+) | `chrono version`; `.chrono/` in the repo (else `chrono init <dir>`) | answers from git history as bounded JSON: hotspots, coupling, owners, bugs, churn, tickets, prs, branches, phases, search, similar, `export-dataset` |
+| chrono as MCP (`mcp__chrono__*`, or `chrono.*` through the gateway) | the `repos` tool | the same questions without a shell; one server serves many repos (`chrono mcp -repos DIR` / `CHRONO_REPOS`); every tool takes an optional `repo` (`name`, `name@branch`, absolute path); every answer carries `"repo": "name@branch"`; a missing index is an `isError` result whose text is the fix (`chrono init <dir>`) |
 | kindling gateway MCP (`mcp__kindling__*`: `find_tools`, `describe_tool`, `call_tool`) | its `initialize` instructions list the hosted services; `kling mcp ls` | every server hosted in a microVM, plus the UltraMemory layers when they are hosted there |
 | UltraMemory layers, through the gateway | `find_tools` for `codegraph`, `graphify`, `engram`, `vault`, `sesiones`, `chrono` | `codegraph` structure (who calls X, source of a symbol), `graphify` relations and hubs across repos, `engram` past decisions, `vault` the user's notes, `sesiones` the reasoning behind past changes, `chrono` history |
 
@@ -28,12 +28,20 @@ came back empty; `engram` filters by project, pass `project` or
 `all_projects`; if a layer is not hosted, say "layer X not available" once
 and move on. Nothing here is required to do the job.
 
+chrono's contract (its `docs/CONTRACTS.md`) lines the layers up: the repo
+label `name@branch` is the same UltraMemory uses for codegraph and graphify,
+and the entity key is `path` or `path#symbol`, so a codegraph id goes
+straight into chrono's `coupling` (`file`) and `owners` (`path`). Results are
+objects keyed like the CLI (`{"hotspots": [...]}`, `{"coupling": ...}`); with
+chrono 0.1.x there is no `repo` argument, no `repos` tool and no
+`export-dataset`: say so and use the single-repo commands.
+
 ## Workflow 1 — before editing a file
 
 Goal: know the risk before touching it, in one or two calls per file.
 
-1. History: `chrono hotspots --json` (is the file in the top?), `chrono coupling <file> --json` (what changes with it: `support`, `confidence`), `chrono owners <dir> --json` (who to ask; `bus_factor` 1 means one person knows it). `chrono bugs --since <date> --json` if the area smells. With the MCP server: the `hotspots`, `coupling`, `owners`, `bugs` tools with the same arguments. The index must be fresh: `chrono sync` costs milliseconds.
-2. Structure: callers of the symbols you will change, from `codegraph` through the gateway (`call_tool` `codegraph.codegraph_explore` with the project path the layer expects) or, natively, `grep -rn`. Prefer the graph when the symbol is exported or used across packages.
+1. History: `chrono hotspots --json` (is the file in the top?), `chrono coupling <file> --json` (what changes with it: `support`, `confidence`), `chrono owners <dir> --json` (who to ask; `bus_factor` 1 means one person knows it). `chrono bugs --since <date> --json` if the area smells. With the MCP server: `repos` first if you do not know the label, then `hotspots`, `coupling`, `owners`, `bugs` with `repo` set to the tree you are editing (`kindling@claude/fix-x` for a branch worktree; absent = the server's own repo), e.g. `call_tool` `chrono.coupling` `{"repo": "kindling@main", "file": "pkg/aigw/gateway.go#Serve"}`. The index must be fresh: `chrono sync` costs milliseconds.
+2. Structure: callers of the symbols you will change, from `codegraph` through the gateway (`call_tool` `codegraph.codegraph_explore` with the project path the layer expects) or, natively, `grep -rn`. Prefer the graph when the symbol is exported or used across packages. Join chrono and codegraph by the label and the `path#symbol` key.
 3. Say the risk in three lines: hotspot rank, the coupled files you must also look at, the owner to consult. Then edit natively.
 
 If chrono is absent, do steps 2–3 with `git log --oneline -- <file>` and `git log --format=%an -- <file> | sort | uniq -c`; say it is a rougher signal.
@@ -107,14 +115,17 @@ bit-identical across machines (README, docs/chispa.md). Use it for decisions
 that repeat thousands of times (commit type, issue triage, "is this a fix",
 which queue a ticket goes to), never for one-off judgement.
 
-1. Data: a JSONL with `text` and `label`. From chrono: `chrono prs --json`
-   (label from `is_bug`/labels), `chrono bugs --json` (categories and example
-   SHAs), `chrono search <term> --json` + `git show -s --format=%s` for the
-   subjects; `chrono tickets <id>` links commits to tickets. If this chrono
-   build has `export-dataset` (see `chrono help`; it is planned in the
-   `claude/contratos-kindling` branch together with a `repo` argument
-   `name@branch` and a `repos` tool), use it instead of assembling by hand.
-   Hold out a test split that the model never sees.
+1. Data: `chrono export-dataset --out commits.jsonl [--since DATE] [--body N]`
+   (chrono ≥ 0.2.0) writes the JSONL `kling ai chispa train|eval` read as-is:
+   one line per commit with `text` (subject without its conventional prefix,
+   plus up to `--body` bytes of body without trailers), `label` (forge bug
+   label, revert, conventional prefix or `fix_keywords`, in that order;
+   commits with no signal are not exported), `fields` (`files`, `churn`,
+   `ext`, `dir`) and audit keys Chispa ignores (`id`, `repo`, `time`,
+   `label_source`). It is ordered oldest first, so a leak-free temporal split
+   is `head` for training and `tail` for the held-out test. For issue triage
+   build the JSONL yourself from `chrono prs --json` / `chrono tickets <id>`.
+   On chrono 0.1.x assemble it by hand from `prs`, `bugs`, `search`.
 2. Train and measure: `kling ai chispa train -data train.jsonl -o m.chispa
    [-valid valid.jsonl]` (quantizes, calibrates, picks τ), `kling ai chispa
    eval -model m.chispa -data test.jsonl -json` (accuracy, F1, ECE, coverage
@@ -156,8 +167,12 @@ version` (CLI vs daemon) → `kling context ls`. Machines: `kling ps -a`,
 health`, `kling mcp heal`, `kling connect <service>` (probes with the real
 token and says why it fails). Never print a gateway token; the fix for a
 mismatch is the user running `kling config set gateway.token …` themselves.
-chrono: `chrono init` when there is no `.chrono/`, `chrono sync` when the
-answer looks stale, `chrono bench` for latencies of this index.
+chrono: `chrono init <dir>` when a tool answers `isError` "no chrono index",
+`chrono sync` when the answer looks stale, `repos` to see which labels exist
+and which are not `indexed`; a `repo` name with `/` or `..` is refused
+(names never escape the root); Go and Rust indexes are not interchangeable
+(index and serve with the same binary); `chrono version` < 0.2.0 means no
+multi-repo and no `export-dataset`.
 
 ## How you report
 

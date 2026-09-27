@@ -83,10 +83,12 @@ cannot work here, say why in one line).
   dangerous to touch', 'what changes together with this file', 'who owns
   this' as small deterministic JSON, instantly, instead of an AI reading
   thousands of commits; `chrono sync` updates in milliseconds; MCP server
-  over stdio for Claude (`chrono mcp`, serverless, dies with the session).
-  The `kindling-dev` agent uses it before editing. Cost: ~6.7 MB binary, an
-  index of a few MB per repo, `gh` only if you want PRs; no server, no
-  network."
+  over stdio for Claude (`chrono mcp`, serverless, dies with the session);
+  from v0.2.0 one server serves many repos (`-repos DIR`, a `repo` argument
+  `name@branch` on every tool) and `chrono export-dataset` writes the JSONL
+  that `kling ai chispa train` reads. The `kindling-dev` agent uses it before
+  editing. Cost: ~6.7 MB binary, an index of a few MB per repo, `gh` only if
+  you want PRs; no server, no network."
 - **Shell completion** — "`kling completion` for zsh/bash/fish, loaded from
   your rc. Cost: one line in your rc; if the rc is managed (home-manager) or
   read-only the installer prints the line instead of editing."
@@ -223,14 +225,31 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh
 chrono version
 ```
 
-Skip it if preflight already found `chrono`. Then, in the repo the user works
-in: `chrono init` (once; `chrono init --symbols` also indexes functions) and
-register its MCP server in Claude Code at user scope so every project sees
-it: `claude mcp add --scope user chrono -- chrono mcp`. Without the `claude`
-CLI, show the snippet chrono's README documents for a project `.mcp.json`:
-`{"mcpServers": {"chrono": {"command": "chrono", "args": ["mcp"]}}}`. Tell
-the user `/mcp` reconnects; if a repo has no index the tools answer "run
-chrono init". Docs: https://github.com/juan52878911/chrono (README).
+Skip the download if preflight already found `chrono`; still check the
+version: the multi-repo server (`-repos`, `repo` argument, `repos` tool) and
+`export-dataset` need **chrono ≥ v0.2.0**. On 0.1.x everything below still
+works for one repo per server; say so, and offer to rerun the installer
+(`VERSION=v0.2.0` pins it once released; without a pin it takes the latest
+release).
+
+Then, in the repo the user works in: `chrono init` (once; `.chrono/` is
+git-ignored) and register its MCP server in Claude Code at user scope so
+every project sees it. Ask which shape:
+
+- **One server for all their repos (≥ 0.2.0)**: a directory that contains
+  the repos (or symlinks to them), e.g. `~/Github`:
+  `claude mcp add --scope user chrono -- chrono mcp -repos "$HOME/Github"`.
+  Each repo still needs its own `chrono init <dir>`; the `repos` tool lists
+  which are `indexed`. Answers carry `"repo": "name@branch"`.
+- **The current repo only**: `claude mcp add --scope user chrono -- chrono mcp`
+  (index found upward from the working directory, as on 0.1.x).
+
+Without the `claude` CLI, show the project `.mcp.json` snippet from chrono's
+README: `{"mcpServers": {"chrono": {"command": "chrono", "args": ["mcp"]}}}`
+(add `"-repos", "<dir>"` to `args` for the multi-repo shape). Tell the user
+`/mcp` reconnects; a repo without an index gets an `isError` answer that
+says `chrono init <dir>`. Docs: https://github.com/juan52878911/chrono
+(README, `docs/CONTRACTS.md`).
 
 ### 2.7 Doctor
 

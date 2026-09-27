@@ -42,7 +42,10 @@ claude plugin marketplace add juan52878911/kindling && claude plugin install kin
 Setup also offers **chrono** (https://github.com/juan52878911/chrono): git
 history as instant, bounded JSON; installed with chrono's own `install.sh`
 (SHA-256 verified) and registered with `claude mcp add --scope user chrono --
-chrono mcp`.
+chrono mcp [-repos DIR]`. Multi-repo serving (`repo: "name@branch"` on every
+tool, `repos`), `path#symbol` entity keys and `export-dataset` (the JSONL
+`kling ai chispa train` reads) need chrono ≥ v0.2.0 (its `docs/CONTRACTS.md`);
+setup checks the version and degrades to single-repo on 0.1.x.
 
 `scripts/preflight.sh` (read-only) tells setup what is already there;
 `scripts/launchd-plist.sh` prints the launchd agent that starts the daemon at

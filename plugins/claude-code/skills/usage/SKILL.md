@@ -78,8 +78,10 @@ it knows the playbook — risk before editing (chrono hotspots/coupling/owners
 parallel sandboxes from a template, hosted MCP through the gateway's
 meta-tools, Chispa classifiers trained from chrono data with the evaluation
 gate, and the UltraMemory layers (codegraph, graphify, engram, vault,
-sesiones, chrono) when the gateway hosts them. It says when native is
-faster and cites the docs for every number.
+sesiones, chrono) when the gateway hosts them. chrono (≥ 0.2.0) answers for
+any repo with `repo: "name@branch"` and accepts codegraph ids
+(`path#symbol`); `chrono export-dataset` feeds `kling ai chispa train`. It
+says when native is faster and cites the docs for every number.
 
 ## When it fails
 
