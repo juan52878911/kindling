@@ -114,6 +114,11 @@ type Manager struct {
 	// un dorado no cambia desde que se congela.
 	integridad map[string]huellaSnapshot
 
+	// kernelSHA cachea el sha256 de KernelPath() por tamaño+fecha del fichero
+	// (K2): se pide en cada Commit y en cada runFrom, y el vmlinux no cambia
+	// entre un arranque del daemon y el siguiente. Ver kernelHash.
+	kernelSHA huellaKernel
+
 	// gcPausadoHasta: hasta cuando NO se expulsa por disco. Se pone cuando una
 	// pasada completa no libera nada, lo que significa que el disco lo llena algo
 	// ajeno a kindling y seguir expulsando solo cuesta warm-pooling.

@@ -13,7 +13,10 @@ package machine
 // lee root. Cubre lo que decide cómo nace una instancia: los hashes de los
 // ficheros y la política (exec, red, dominios, volúmenes). NO cubre las
 // anotaciones, que cambian después del commit por diseño y no deciden nada de
-// eso.
+// eso. Tampoco cubre KernelSHA256 (K2): es una comprobación de compatibilidad
+// entre el snapshot y el vmlinux instalado, no una decisión de arranque, y
+// cubrirla habría invalidado la firma de todo snapshot anterior a ese campo
+// (ver el comentario de KernelSHA256 en pkg/api/types.go).
 
 import (
 	"crypto/hmac"
@@ -75,6 +78,9 @@ func (m *Manager) claveFirma() ([]byte, error) {
 }
 
 // contenidoFirmado es lo que cubre la firma, en un orden fijo.
+//
+// s.KernelSHA256 queda fuera A PROPÓSITO (K2): ver la nota de arriba y el
+// comentario del campo en pkg/api/types.go.
 func contenidoFirmado(s *api.Snapshot) []byte {
 	vols := make([]string, 0, len(s.Volumes))
 	for _, v := range s.Volumes {

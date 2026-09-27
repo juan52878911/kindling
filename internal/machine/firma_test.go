@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -51,6 +52,15 @@ func TestFirmaDeSnapshots(t *testing.T) {
 	c.Annotations = map[string]json.RawMessage{"mcp.tools": json.RawMessage("[]")}
 	if err := m.comprobarFirma(&c); err != nil {
 		t.Errorf("una anotación invalidó la firma: %v", err)
+	}
+
+	// KernelSHA256 (K2) tampoco: es una comprobación de compatibilidad con el
+	// vmlinux instalado, no una decisión de arranque, y cubrirla habría roto la
+	// firma de todo snapshot anterior a este campo.
+	k := *s
+	k.KernelSHA256 = strings.Repeat("f", 64)
+	if err := m.comprobarFirma(&k); err != nil {
+		t.Errorf("KernelSHA256 invalidó la firma: %v", err)
 	}
 
 	// Otro host (otra clave) no la reconoce.
