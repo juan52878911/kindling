@@ -1,4 +1,3 @@
-// Package machine implementa el ciclo de vida de las microVMs.
 package machine
 
 import (
@@ -179,6 +178,13 @@ type Manager struct {
 	// ultimo que la usaba. Ver cerrojos.go para por que un sync.Map no bastaba.
 	lifecycle cerrojos
 
+	// pruebaTrasPublicar, si no es nil, se llama en Run justo después de
+	// publicar la máquina en byID, con su cerrojo de ciclo de vida tomado. Un
+	// error la abandona como cualquier otro fallo del arranque. Solo lo ponen
+	// las pruebas: es la única forma de parar un arranque en frío a mitad sin
+	// KVM, red ni firecracker, y comprobar que Stop/Remove esperan a que acabe.
+	pruebaTrasPublicar func(id string) error
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -210,6 +216,17 @@ type Manager struct {
 
 // lock serializa las operaciones de ciclo de vida de una máquina concreta.
 func (m *Manager) lock(id string) func() { return m.lifecycle.tomar(id) }
+
+// lockUnaVez es lock con una liberación idempotente: la función devuelta se
+// puede llamar varias veces y solo suelta la primera. La usan Run y runFrom,
+// que la difieren para todos sus returns y además la llaman a mano antes de
+// cualquier operación pública sobre la misma máquina (el cerrojo no es
+// reentrante; ver doc.go).
+func (m *Manager) lockUnaVez(id string) func() {
+	soltar := m.lock(id)
+	var una sync.Once
+	return func() { una.Do(soltar) }
+}
 
 // tryLock es lock sin esperar: (nil, false) si otro tiene la máquina.
 func (m *Manager) tryLock(id string) (func(), bool) { return m.lifecycle.intentar(id) }
@@ -293,15 +310,18 @@ func (m *Manager) load() {
 // máquina podía arrancar, congelarse ni descongelarse. Ahora solo toma la foto y
 // se va; escribirla es cosa de persistLoop.
 //
-// La foto se copia POR VALOR, no por puntero. Es la diferencia entre esto y una
-// carrera de datos: si se guardaran los *api.Machine, json.Marshal los leería
-// fuera del lock mientras otra goroutine les cambia State, PID o los punteros
-// StartedAt/FrozenAt, y el fichero podría acabar describiendo un estado que
-// nunca existió (una máquina "warm" con PID vivo, por ejemplo).
+// La foto es una copia PROFUNDA (Clone), no el puntero ni una copia por valor.
+// Es la diferencia entre esto y una carrera de datos: si se guardaran los
+// *api.Machine, json.Marshal los leería fuera del lock mientras otra goroutine
+// les cambia State, PID o los punteros StartedAt/FrozenAt, y el fichero podría
+// acabar describiendo un estado que nunca existió (una máquina "warm" con PID
+// vivo, por ejemplo). Y una copia por valor no basta: comparte con la viva los
+// arrays de Volumes, Shares o AllowDomains y los mapas de Labels y Forwards, y
+// cualquier escritura en su sitio sobre ellos corre con el Marshal (M-03).
 func (m *Manager) persist() {
 	list := make([]api.Machine, 0, len(m.byID))
 	for _, mc := range m.byID {
-		list = append(list, *mc)
+		list = append(list, *mc.Clone())
 	}
 
 	m.stateMu.Lock()
@@ -792,6 +812,18 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		AllowExec: req.AllowExec, OnTTL: req.OnTTL,
 		TTLAt: &creada,
 	}
+	// El cerrojo de ciclo de vida, desde ANTES de publicarla hasta que queda
+	// running o fallida. Sin él, un Remove (un `rm`, el TTL con on_ttl=remove,
+	// gcFailed) veía la máquina en created con PID 0, no mataba nada, borraba
+	// su directorio y su entrada… mientras boot() lanzaba el firecracker: un
+	// VMM huérfano reteniendo RAM, invisible para `kling ps`, y un 201 para
+	// una máquina que ya no existía (M-06). Ahora esperan a que termine.
+	//
+	// Justo antes de publicar y no nada más generar el id: hasta aquí nadie
+	// puede nombrarla, y lo de arriba (checkMachineLimit → gcFailed) sí puede
+	// esperar el cerrojo de OTRA máquina. Ver doc.go.
+	soltarCiclo := m.lockUnaVez(id)
+	defer soltarCiclo()
 	m.mu.Lock()
 	m.byID[id] = mc
 	m.persist()
@@ -810,6 +842,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 		m.mu.Unlock()
 		os.RemoveAll(dir)
 		return nil, err
+	}
+	if prueba := m.pruebaTrasPublicar; prueba != nil {
+		if err := prueba(id); err != nil {
+			return abandonar(err)
+		}
 	}
 
 	egress, err := knet.ParseEgress(req.Egress)
@@ -880,6 +917,9 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if hasLiveShares(&out) {
 		m.startShares(id)
 		if err := m.waitShares(ctx, id, shareAttachWait); err != nil {
+			// Remove toma el cerrojo de la máquina, que es nuestro: soltarlo
+			// antes o se esperaría a sí mismo para siempre.
+			soltarCiclo()
 			_ = m.Remove(id)
 			return nil, err
 		}
@@ -1243,14 +1283,22 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	}
 	defer m.lock(mc.ID)()
 
-	// Pudo congelarla otro mientras esperábamos.
-	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StateWarm {
+	// Se vuelve a leer con el cerrojo tomado: mientras lo esperábamos pudo
+	// congelarla otro, borrarla, o terminar de arrancar (Run lo tiene desde que
+	// la publica hasta que queda running). Seguir con la copia de antes era
+	// rechazar una máquina recién arrancada por estar "created".
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+	}
+	if cur.State == api.StateWarm {
 		return cur, nil
 	}
+	mc = cur
 	// Una pausada se reanuda antes: hay que vaciar sus volúmenes y preguntar
 	// por su agente, y un invitado pausado no contesta a nada.
-	if cur, ok := m.Get(mc.ID); ok && cur.State == api.StatePaused {
-		r, err := m.reanudarLocked(ctx, cur, nil)
+	if mc.State == api.StatePaused {
+		r, err := m.reanudarLocked(ctx, mc, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1944,6 +1992,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	cur.FrozenAt = nil
 	cur.ThawMS = elapsed
 	cur.PID = pid
+	// El techo por defecto se decidió sobre la copia (arriba); se anota en la
+	// viva para que state.json y `kling ps` digan el que de verdad se aplicó.
+	cur.CPUPct = mc.CPUPct
 	m.socket[mc.ID] = sock
 	m.persist()
 	out := *cur
@@ -2000,6 +2051,12 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	// el namespace de red POR DEBAJO del thaw: la maquina queda "running" y sin
 	// red, y el gateway ve timeouts que no apuntan a nada.
 	defer m.lock(mc.ID)()
+	// Lo que vio Get antes de esperar el cerrojo puede no valer ya: si la
+	// máquina estaba arrancando, su NetIndex era aún el de antes de montar la
+	// red, y desmontar con él dejaba la red de verdad montada.
+	if cur, ok := m.get(mc.ID); ok {
+		mc = cur
+	}
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
@@ -2038,6 +2095,11 @@ func (m *Manager) Remove(ref string) error {
 	// Sin retirar nada a mano: el registro lo hace solo cuando sale el ultimo.
 	// Borrar la entrada desde aqui era justo lo que abria la ventana.
 	defer m.lock(mc.ID)()
+	// Releer con el cerrojo: si estaba arrancando, Run lo tenía y la copia de
+	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
+	if cur, ok := m.get(mc.ID); ok {
+		mc = cur
+	}
 	m.kill(mc.ID)
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -2123,19 +2185,45 @@ func waitGone(pid int, timeout time.Duration) {
 	}
 }
 
+// fail da una máquina por perdida: mata su VMM, desmonta su red y su cgroup y
+// la marca failed con el error.
+//
+// mc puede ser el puntero vivo o una COPIA (lo que devuelve Get): se escribe
+// siempre en la entrada viva de byID. Antes se escribía en mc, y con una copia
+// —Freeze, al no poder reanudar tras un volcado fallido— el VMM moría pero la
+// máquina seguía "running" con un PID muerto: el gateway le enrutaba hasta que
+// el vigilante, 10 s después, la relabelaba con "the microVM process
+// disappeared", perdiendo el error real (M-01). Solo si ya no está registrada
+// (la borraron, o Run la abandonó) se escribe en mc, que entonces no ve nadie.
 func (m *Manager) fail(mc *api.Machine, err error) {
-	m.kill(mc.ID)
-	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
-	m.releaseCPU(mc.ID)
+	id := mc.ID
+	m.kill(id)
+
+	// El índice de red, de la viva: el de una copia tomada antes de esperar el
+	// cerrojo puede ser anterior a montar la red.
+	m.mu.RLock()
+	netIndex := mc.NetIndex
+	if live := m.byID[id]; live != nil {
+		netIndex = live.NetIndex
+	}
+	m.mu.RUnlock()
+	m.desmontarRed(knet.Plan(netIndex, id), id)
+	m.releaseCPU(id)
+
 	m.mu.Lock()
+	destino := m.byID[id]
+	if destino == nil {
+		destino = mc
+	}
 	now := time.Now()
-	mc.State = api.StateFailed
-	mc.LastErr = err.Error()
-	mc.Forwards = nil
+	destino.State = api.StateFailed
+	destino.LastErr = err.Error()
+	destino.Forwards = nil
 	// La hora del fallo es lo que permite recogerla luego: una failed sin fecha
 	// se quedaba en la lista para siempre (ver gcFailed).
-	mc.FailedAt = &now
+	destino.FailedAt = &now
+	name := destino.Name
 	m.persist()
 	m.mu.Unlock()
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name, Message: err.Error()})
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error()})
 }

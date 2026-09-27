@@ -686,6 +686,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
+	// El cerrojo de ciclo de vida, igual que en Run y por lo mismo (M-06): sin
+	// él, un Remove concurrente veía la máquina en created con PID 0, borraba
+	// su directorio y su entrada, y esta función seguía restaurando un VMM que
+	// acababa huérfano. Justo antes de publicarla: hasta aquí nadie puede
+	// nombrarla (ver doc.go).
+	soltarCiclo := m.lockUnaVez(id)
+	defer soltarCiclo()
 	m.mu.Lock()
 	m.byID[id] = mc
 	m.persist()
@@ -838,7 +845,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// próximo commit lo escriba en su meta y la cadena se auto-repare: la
 	// generación siguiente ya no necesita heurística ni reintento.
 	m.mu.Lock()
-	withDriveIDs(mc.Volumes, usados)
+	mc.Volumes = withDriveIDs(mc.Volumes, usados)
 	m.mu.Unlock()
 	if err := c.Resume(ctx); err != nil {
 		return abortar(err)
@@ -866,8 +873,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	elapsed := time.Since(start).Milliseconds()
 
+	// Bajo el candado: mc está publicada desde arriba, y List()/Get()/persist()
+	// la copian desde otras goroutines (M-02). Igual que en Run.
 	if mc.CPUPct <= 0 {
+		m.mu.Lock()
 		mc.CPUPct = defaultCPUPct
+		m.mu.Unlock()
 	}
 	if warn := m.limitCPU(mc.ID, pid, mc.CPUPct); warn != "" {
 		log.Printf("warning: %s: %s", mc.Name, warn)
@@ -939,15 +950,23 @@ func (m *Manager) patchVolumeDrive(ctx context.Context, c *fc.Client,
 	return "", err
 }
 
-// withDriveIDs deja en los adjuntos el nombre de disco que REALMENTE funcionó,
-// para que el próximo commit lo escriba en su meta y la cadena se auto-repare.
+// withDriveIDs devuelve los adjuntos con el nombre de disco que REALMENTE
+// funcionó, para que el próximo commit lo escriba en su meta y la cadena se
+// auto-repare.
+//
+// Devuelve un slice NUEVO y no toca vols. Antes escribía en su sitio, y vols
+// es el de una máquina ya publicada: cualquier copia por valor tomada antes
+// (List, Get, la foto de persist) compartía ese mismo array, y json.Marshal lo
+// leía fuera del lock mientras esto lo escribía (M-03). Quien llama asigna el
+// resultado bajo m.mu.
 func withDriveIDs(vols []api.VolumeAttachment, ids []string) []api.VolumeAttachment {
-	for i := range vols {
+	out := append([]api.VolumeAttachment(nil), vols...)
+	for i := range out {
 		if i < len(ids) && ids[i] != "" {
-			vols[i].DriveID = ids[i]
+			out[i].DriveID = ids[i]
 		}
 	}
-	return vols
+	return out
 }
 
 // reservaSnapshot es la clave con la que un commit en curso reserva su
