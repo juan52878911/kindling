@@ -1,0 +1,73 @@
+# Fragmento arm64 del kernel de invitado de kindling (6.1 LTS), sobre config-common.
+# Lo que se repite aquí manda sobre config-common (va después).
+#
+# Sirve a dos VMMs con el mismo Image:
+#   - Firecracker (Graviton): todo por device tree, GICv3, 8250 MMIO como
+#     ttyS0, RTC PL031 y virtio-mmio;
+#   - Virtualization.framework (backend vz, macOS): virtio por PCI (host ECAM
+#     genérico) y consola virtio en hvc0. Por eso aquí PCI SÍ va; en amd64 no.
+#     vz/internal/spec/spec.go (TranslateBootArgs) quita pci=off y cambia la
+#     consola por eso mismo.
+
+CONFIG_ARM64_4K_PAGES=y
+CONFIG_ARM64_VA_BITS_48=y
+# CONFIG_ARM64_PA_BITS_52 is not set
+# CONFIG_COMPAT is not set
+# CONFIG_NUMA is not set
+# CONFIG_ACPI is not set
+CONFIG_OF=y
+
+# Extensiones de CPU. Tienen pregunta y "y" por defecto: allnoconfig las apagaría.
+CONFIG_ARM64_USE_LSE_ATOMICS=y
+CONFIG_ARM64_LSE_ATOMICS=y
+CONFIG_ARM64_PAN=y
+CONFIG_ARM64_SVE=y
+CONFIG_ARM64_PTR_AUTH=y
+CONFIG_ARM64_PTR_AUTH_KERNEL=y
+CONFIG_ARM64_BTI=y
+CONFIG_ARM64_BTI_KERNEL=y
+CONFIG_ARM64_E0PD=y
+CONFIG_ARM64_CNP=y
+CONFIG_ARM64_TLB_RANGE=y
+CONFIG_RODATA_FULL_DEFAULT_ENABLED=y
+
+# Mitigaciones (nombres de 6.1).
+CONFIG_UNMAP_KERNEL_AT_EL0=y
+CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y
+CONFIG_ARM64_SW_TTBR0_PAN=y
+
+# Erratas de los núcleos donde corre Firecracker (Graviton2 = Neoverse N1,
+# Graviton3 = V1, Graviton4 = V2) y de los que emulan. También tienen pregunta
+# con "y" por defecto. Las que no existan en la versión fijada solo avisan.
+CONFIG_ARM64_ERRATUM_1165522=y
+CONFIG_ARM64_ERRATUM_1286807=y
+CONFIG_ARM64_ERRATUM_1418040=y
+CONFIG_ARM64_ERRATUM_1463225=y
+CONFIG_ARM64_ERRATUM_1508412=y
+CONFIG_ARM64_ERRATUM_1542419=y
+CONFIG_ARM64_ERRATUM_2441007=y
+CONFIG_ARM64_ERRATUM_2441009=y
+CONFIG_ARM64_ERRATUM_2658417=y
+CONFIG_ARM64_ERRATUM_2645198=y
+CONFIG_ARM64_ERRATUM_2966298=y
+CONFIG_ARM64_ERRATUM_3194386=y
+
+# Consola: 8250 descrito en el device tree (Firecracker) y hvc0 (vz).
+CONFIG_SERIAL_OF_PLATFORM=y
+CONFIG_VIRTIO_CONSOLE=y
+
+# Reloj de pared: Firecracker arm64 lo expone con un PL031.
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_DRV_PL031=y
+
+# PCI mínimo para vz: host ECAM genérico y virtio-pci. Ningún driver PCI más.
+CONFIG_PCI=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_VIRTIO_PCI=y
+# CONFIG_VIRTIO_PCI_LEGACY is not set
+# CONFIG_PCIEPORTBUS is not set
+CONFIG_PCI_MSI=y
+
+# CONFIG_KEYBOARD_ATKBD is not set
+# CONFIG_MOUSE_PS2 is not set
