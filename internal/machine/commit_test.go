@@ -29,7 +29,9 @@ import (
 // overlay propio en disco, que es lo que Commit copia con cp antes de volcar.
 func plantillaParaCommit(t *testing.T, m *Manager, id string) (*fcFalso, <-chan struct{}) {
 	t.Helper()
-	t.Setenv("KLING_JAILER", "0")
+	// m viene de newTestManager, que arma el Manager a mano sin pasar por
+	// NewManager: m.jailerJailed se queda en su cero (false), así que esta
+	// plantilla nunca corre "jailed" sin que haga falta tocar KLING_JAILER.
 	if _, err := exec.LookPath("cp"); err != nil {
 		t.Skip("sin cp no se puede copiar el overlay")
 	}

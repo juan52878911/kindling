@@ -291,6 +291,12 @@ func (s *Server) Listen(ctx context.Context) error {
 	if s.mgr.CgroupWarning != "" {
 		log.Printf("WARNING: no CPU limit per microVM: %s", s.mgr.CgroupWarning)
 	}
+	if s.mgr.JailerWarning != "" {
+		log.Printf("SECURITY WARNING: %s", s.mgr.JailerWarning)
+	}
+	if s.mgr.JailerBlocked != "" {
+		log.Printf("WARNING: %s", s.mgr.JailerBlocked)
+	}
 	log.Printf("kling daemon %s listening on %s (root=%s)", Version, s.socket, s.root)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

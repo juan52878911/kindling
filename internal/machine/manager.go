@@ -91,6 +91,25 @@ type Manager struct {
 	cgroupRoot    string
 	CgroupWarning string
 
+	// jailerJailed dice si las microVMs de este proceso arrancan dentro de
+	// jailer (ver decidirJailer). Se decide UNA vez al construir el Manager y
+	// no cambia en caliente, para que Freeze/Commit puedan preguntar "¿esta
+	// máquina ya viva corre jailed?" sin volver a mirar el entorno.
+	jailerJailed bool
+
+	// JailerBlocked, si no está vacío, es el motivo por el que Run, runFrom y
+	// Thaw se niegan a arrancar máquinas NUEVAS: automático (KLING_JAILER sin
+	// fijar) y falta el binario de jailer o el usuario sin privilegios. Se
+	// imprime una vez al arrancar el daemon (ver internal/daemon) y de ahí en
+	// adelante se devuelve como el error de cada intento de arranque, hasta
+	// reiniciar el daemon con lo que falta instalado o con KLING_JAILER=0.
+	JailerBlocked string
+
+	// JailerWarning es el aviso de SEGURIDAD que hay que imprimir una vez al
+	// arrancar cuando alguien apagó jailer a propósito con KLING_JAILER=0:
+	// las microVMs corren sin la barrera de chroot/pivot_root.
+	JailerWarning string
+
 	bus  *events.Bus
 	mu   sync.RWMutex
 	byID map[string]*api.Machine
@@ -268,8 +287,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	priv, warn := privilegiosPlataforma(runAs)
+	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled)
 	m := &Manager{
 		root: root, fcBin: fcBin, bus: bus, priv: priv, PrivWarning: warn,
+		jailerJailed: jailed, JailerBlocked: jailerBlocked, JailerWarning: jailerWarn,
 		byID:        make(map[string]*api.Machine),
 		socket:      make(map[string]string),
 		wake:        make(chan struct{}, 1),
@@ -1086,7 +1107,10 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	var sock string
 	var pid int
 	var err error
-	if jailerEnabled() {
+	if m.JailerBlocked != "" {
+		return 0, errors.New(m.JailerBlocked)
+	}
+	if m.jailerJailed {
 		// Arranque en frío dentro del jail. A diferencia de la restauración, aquí
 		// firecracker abre el KERNEL (SetBootSource) y los discos por su API, así
 		// que también hay que replicar el kernel dentro del chroot.
@@ -1379,7 +1403,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// host. Se le pide el volcado en la raíz de su chroot y luego se recupera al
 	// dir real. Mismo filesystem, así que el traslado es un rename atómico y el
 	// mem.file conserva su inodo —y su caché de páginas—.
-	jailed := jailerEnabled() && strings.HasPrefix(sock, m.jailRoot(mc.ID))
+	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	if jailed {
 		snapPath, memPath = "/snap.file", "/mem.file"
 	}
@@ -1932,7 +1956,10 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 		return nil, err
 	}
 
-	if jailerEnabled() {
+	if m.JailerBlocked != "" {
+		return abortar(errors.New(m.JailerBlocked))
+	}
+	if m.jailerJailed {
 		// El warm también se descongela dentro de un jail, o el aislamiento se
 		// perdería justo en las descongelaciones —que son la mayoría del ciclo—.
 		// Mismo patrón que runFrom: poblar el chroot antes de cargar.

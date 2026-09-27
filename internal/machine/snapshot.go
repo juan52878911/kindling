@@ -110,7 +110,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	// el volcado se escriben en el jail (en su path absoluto) y se recuperan al
 	// host después. goldDst es dónde se copia el overlay para que firecracker lo
 	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot.
-	jailed := jailerEnabled() && strings.HasPrefix(sock, m.jailRoot(mc.ID))
+	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	goldDst := goldOverlay
 	if jailed {
 		goldDst = m.jailPath(mc.ID, goldOverlay)
@@ -990,7 +990,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		m.fail(mc, err)
 		return nil, err
 	}
-	if jailerEnabled() {
+	if m.JailerBlocked != "" {
+		return abortar(errors.New(m.JailerBlocked))
+	}
+	if m.jailerJailed {
 		// Restauración dentro de un jail: firecracker corre chrooteado. Todo lo
 		// que va a abrir tiene que estar replicado dentro del jail EN SU RUTA
 		// ABSOLUTA, porque LoadSnapshot abre cada drive con el path que quedó

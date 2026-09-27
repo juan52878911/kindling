@@ -18,7 +18,7 @@ import (
 const backendVMM = BackendFirecracker
 
 // jailerPosible dice si esta plataforma tiene jailer. En Linux lo decide
-// jailerEnabled según haya binario y root.
+// decidirJailer según haya binario y usuario sin privilegios (ver jailer.go).
 const jailerPosible = true
 
 // globoSinEstadisticas: Firecracker sí da las estadísticas del invitado.
