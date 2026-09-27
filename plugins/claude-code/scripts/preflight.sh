@@ -55,6 +55,7 @@ if [ -n "$rc" ]; then
 fi
 case ":$PATH:" in *":$HOME/.local/bin:"*) echo "path: ~/.local/bin is in PATH" ;; *) echo "path: ~/.local/bin is NOT in PATH" ;; esac
 
+if command -v chrono >/dev/null 2>&1; then echo "chrono: $(command -v chrono) $(chrono version 2>/dev/null | head -1)"; else echo "chrono: not installed"; fi
 if command -v claude >/dev/null 2>&1; then echo "claude: $(command -v claude)"; else echo "claude: not in PATH (kling connect will patch ~/.claude.json directly)"; fi
 command -v curl >/dev/null 2>&1 || echo "curl: not found (the installer needs curl or wget)"
 exit 0

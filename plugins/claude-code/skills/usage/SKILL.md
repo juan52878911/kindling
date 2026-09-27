@@ -70,6 +70,17 @@ small LLMs on demand. `kling ai ls` lists tasks; `kling ai test <task>
 "text"` classifies one; `kling ai up` serves `/v1/classify` and
 `/v1/decide`. Use it when the user has trained a task; do not invent one.
 
+## The `kindling-dev` agent
+
+For anything longer than one command, delegate to `@kindling:kindling-dev`:
+it knows the playbook — risk before editing (chrono hotspots/coupling/owners
++ codegraph callers), untrusted code in `kling try`, tests and N variants in
+parallel sandboxes from a template, hosted MCP through the gateway's
+meta-tools, Chispa classifiers trained from chrono data with the evaluation
+gate, and the UltraMemory layers (codegraph, graphify, engram, vault,
+sesiones, chrono) when the gateway hosts them. It says when native is
+faster and cites the docs for every number.
+
 ## When it fails
 
 - `kling status` (exit 1 = no daemon), `kling status -v`, `kling doctor`

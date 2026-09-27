@@ -3,7 +3,7 @@ name: setup
 description: Installs kindling (the kling CLI) and the pieces the user picks — a local or remote daemon, MCP servers hosted as frozen microVMs and connected to Claude Code, sandboxes, the AI gateway, shell completion — asking first, with the measured benefit and the cost of each option. Use when the user runs /kindling:setup or asks to install, set up or reconfigure kindling.
 disable-model-invocation: true
 argument-hint: "[ssh://user@host] [all]"
-allowed-tools: AskUserQuestion Bash(sh *preflight.sh*) Bash(kling doctor*) Bash(kling status*) Bash(kling version*) Bash(kling plugin ls*) Bash(kling context ls*) Bash(kling mcp ls*) Bash(kling mcp search*) Bash(kling ai ls*) Bash(kling config show*)
+allowed-tools: AskUserQuestion Bash(sh *preflight.sh*) Bash(kling doctor*) Bash(kling status*) Bash(kling version*) Bash(kling plugin ls*) Bash(kling context ls*) Bash(kling mcp ls*) Bash(kling mcp search*) Bash(kling ai ls*) Bash(kling config show*) Bash(chrono version*) Bash(chrono help*)
 ---
 
 # kindling setup
@@ -77,6 +77,16 @@ cannot work here, say why in one line).
   small LLMs (VON) and serverless Chispa replicas wake on demand and freeze
   when idle. Cost: an `ai.json` with your tasks and labelled data to train
   (`kling ai chispa train`); serving models needs a daemon."
+- **chrono (git history as answers)** — "A separate one-binary tool by the
+  same author: it indexes the repo's commits, PRs and authors once
+  (`chrono init`, `.chrono/` in the repo, git-ignored) and answers 'what is
+  dangerous to touch', 'what changes together with this file', 'who owns
+  this' as small deterministic JSON, instantly, instead of an AI reading
+  thousands of commits; `chrono sync` updates in milliseconds; MCP server
+  over stdio for Claude (`chrono mcp`, serverless, dies with the session).
+  The `kindling-dev` agent uses it before editing. Cost: ~6.7 MB binary, an
+  index of a few MB per repo, `gh` only if you want PRs; no server, no
+  network."
 - **Shell completion** — "`kling completion` for zsh/bash/fish, loaded from
   your rc. Cost: one line in your rc; if the rc is managed (home-manager) or
   read-only the installer prints the line instead of editing."
@@ -202,7 +212,27 @@ train -data d.jsonl -o m.chispa` then `kling ai chispa predict -model m.chispa
 -text "…"`. With a daemon, `kling ai up` serves `/v1/classify` and
 `/v1/decide` on 127.0.0.1:8080 from `./ai.json` or `~/.config/kling/ai.json`.
 
-### 2.6 Doctor
+### 2.6 chrono
+
+Its own installer, from its repo (it detects the platform, downloads the
+release binary and verifies its SHA-256 before installing, to `/usr/local/bin`
+if writable else `~/.local/bin`; `PREFIX=…` overrides, `VERSION=vX.Y.Z` pins):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/juan52878911/chrono/main/install.sh | PREFIX="$HOME/.local/bin" sh
+chrono version
+```
+
+Skip it if preflight already found `chrono`. Then, in the repo the user works
+in: `chrono init` (once; `chrono init --symbols` also indexes functions) and
+register its MCP server in Claude Code at user scope so every project sees
+it: `claude mcp add --scope user chrono -- chrono mcp`. Without the `claude`
+CLI, show the snippet chrono's README documents for a project `.mcp.json`:
+`{"mcpServers": {"chrono": {"command": "chrono", "args": ["mcp"]}}}`. Tell
+the user `/mcp` reconnects; if a repo has no index the tools answer "run
+chrono init". Docs: https://github.com/juan52878911/chrono (README).
+
+### 2.7 Doctor
 
 Always finish with `kling doctor`. It prints a `fix:` line for every ✗; run
 the fixes you can (no sudo, no rc edits) and hand the rest to the user as
@@ -214,5 +244,8 @@ End with a short summary: what got installed and where, what runs (daemon,
 gateway, services), what the user still has to do by hand (sudo commands, rc
 lines, token copy), and the three commands they will use most:
 `kling try -- <cmd>`, `kling mcp ls`, `kling doctor`. Mention that
-`/kindling:usage` tells Claude when to reach for kindling and
-`/kindling:doctor` diagnoses it.
+`/kindling:usage` tells Claude when to reach for kindling,
+`/kindling:doctor` diagnoses it, and the `kindling-dev` agent
+(`@kindling:kindling-dev`) runs the playbook: risk before editing (chrono +
+codegraph), sandboxes for risky code and parallel tests, hosted MCP, Chispa
+decisions.

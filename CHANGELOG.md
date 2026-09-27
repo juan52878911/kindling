@@ -23,7 +23,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   Lo que Claude Code no debe hacer (sudo, un rc gestionado por home-manager) lo
   imprime como comando. Dos skills más: `/kindling:usage` (cuándo usar un
   sandbox, entornos paralelos, los MCP alojados vía `find_tools`/
-  `describe_tool`/`call_tool`, `status`/`doctor`) y `/kindling:doctor`. El
+  `describe_tool`/`call_tool`, `status`/`doctor`) y `/kindling:doctor`, y el
+  agente `kindling-dev` (`plugins/claude-code/agents`): un manual de uso con
+  los comandos de v0.14 —riesgo antes de editar con chrono
+  (`hotspots`/`coupling`/`owners`) y codegraph, código no fiable en `kling
+  try`, tests y N variantes en sandboxes paralelos desde una plantilla, MCP
+  alojados vía los meta-tools del gateway, Chispa entrenada con datos de
+  chrono tras la puerta de evaluación, y las capas de UltraMemory si el
+  gateway las aloja—. `setup` ofrece también chrono (instalador propio con
+  SHA-256 y `claude mcp add --scope user chrono -- chrono mcp`). El
   plugin no lleva `.mcp.json`: el token del gateway sigue en `kling config` y
   lo escribe `kling connect`, nunca un fichero versionado.
 - **`scripts/install.sh --claude`** (o `KLING_CLAUDE=1`): tras instalar,

@@ -215,7 +215,9 @@ tarde) y qué piezas quieres —servidores MCP conectados a Claude Code,
 sandboxes, el gateway de IA, completado— con la bondad medida y el coste de
 cada una, luego ejecuta el instalador de arriba y termina con `kling doctor`.
 El plugin también enseña a Claude cuándo usar un sandbox o los servidores MCP
-alojados (`/kindling:usage`) y cómo diagnosticarlo (`/kindling:doctor`). Desde
+alojados (`/kindling:usage`), cómo diagnosticarlo (`/kindling:doctor`), y
+trae el agente `kindling-dev` (riesgo antes de editar con chrono, sandboxes,
+MCP alojados, decisiones con Chispa). Desde
 un terminal: `install.sh --claude`. Detalles en
 [`plugins/claude-code/README.md`](plugins/claude-code/README.md).
 

@@ -37,6 +37,13 @@ claude plugin marketplace add juan52878911/kindling && claude plugin install kin
 | `/kindling:usage` | Claude, when the task fits | when to use a throwaway sandbox (`kling try`), parallel environments from templates, the hosted MCP servers through `find_tools` / `describe_tool` / `call_tool`, and `status` / `doctor` when something fails |
 | `/kindling:doctor` | you or Claude | runs `kling doctor`, `kling status -v`, `kling version`, explains each ✗ and applies or hands over the fix |
 
+| `@kindling:kindling-dev` (agent) | Claude delegates, or you mention it | a playbook agent: risk before editing (chrono `hotspots`/`coupling`/`owners` + codegraph callers), untrusted code in `kling try`, tests and N variants in parallel sandboxes from a template, MCP servers through the gateway's `_all` meta-tools, Chispa classifiers trained from chrono data behind the evaluation gate (`kling ai eval`, McNemar for encoders), and the UltraMemory layers (codegraph, graphify, engram, vault, sesiones, chrono) when the gateway hosts them; optional tools degrade gracefully |
+
+Setup also offers **chrono** (https://github.com/juan52878911/chrono): git
+history as instant, bounded JSON; installed with chrono's own `install.sh`
+(SHA-256 verified) and registered with `claude mcp add --scope user chrono --
+chrono mcp`.
+
 `scripts/preflight.sh` (read-only) tells setup what is already there;
 `scripts/launchd-plist.sh` prints the launchd agent that starts the daemon at
 login on macOS.

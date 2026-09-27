@@ -212,8 +212,9 @@ microVMs should run (here, on a host over `ssh://`, or later) and which pieces
 you want — MCP hosting connected to Claude Code, sandboxes, the AI gateway,
 completion — with the measured benefit and the cost of each, then runs the
 installer above and ends with `kling doctor`. The plugin also teaches Claude
-when to use a sandbox or the hosted MCP servers (`/kindling:usage`) and how to
-diagnose it (`/kindling:doctor`). From a terminal: `install.sh --claude`.
+when to use a sandbox or the hosted MCP servers (`/kindling:usage`), how to
+diagnose it (`/kindling:doctor`), and ships the `kindling-dev` agent (risk
+before editing with chrono, sandboxes, hosted MCP, Chispa decisions). From a terminal: `install.sh --claude`.
 Details in [`plugins/claude-code/README.md`](plugins/claude-code/README.md).
 
 **From source — `make`:**
