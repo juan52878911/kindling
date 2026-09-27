@@ -971,34 +971,12 @@ func trunc(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-// writeInfo son los detalles del daemon: lo que era `kling status -v` y ahora
-// enseña `kling status -v`.
-func writeInfo(c *api.Client, i *api.Info) {
-	kvm := "no"
-	if i.KVM {
-		kvm = "yes"
-	}
-	fmt.Printf("endpoint:     %s\n", c.Endpoint())
-	fmt.Printf("daemon:       %s\n", i.Version)
-	fmt.Printf("root:         %s\n", i.Root)
-	backend := i.Backend
-	if backend == "" {
-		backend = "firecracker" // daemon anterior a v0.9: siempre lo era
-	}
-	fmt.Printf("backend:      %s\n", backend)
+// writeInfo es lo que `kling status -v` añade a las líneas de status: lo que
+// status no dice ya (endpoint, versión, máquinas, raíz y VMM van arriba).
+func writeInfo(i *api.Info) {
 	if i.Arch != "" {
 		fmt.Printf("arch:         %s\n", i.Arch)
 	}
-	if backend == "firecracker" {
-		fmt.Printf("KVM:          %s\n", kvm)
-	}
-	// El campo se llama firecracker por historia; es la versión del VMM, sea cual sea.
-	vmm := strings.TrimSpace(i.Firecrack)
-	if vmm == "" {
-		vmm = "(not found: the daemon could not run it)"
-	}
-	fmt.Printf("%-14s%s\n", backend+":", vmm)
-	fmt.Printf("machines:     %d\n", i.Machines)
 	if len(i.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(i.Capabilities, ", "))
 	}

@@ -576,7 +576,7 @@ func cmdStatus(args []string) error {
 	} else {
 		fmt.Printf("daemon:       ✓ %s · %d machine(s) · root %s\n", info.Version, info.Machines, info.Root)
 		if *verbose {
-			writeInfo(c, info)
+			writeInfo(info)
 		}
 		if info.Backend == "vz" {
 			// macOS: sin KVM ni firecracker; el VMM es kling-vz.
