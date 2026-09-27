@@ -80,6 +80,7 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	seen := map[string]bool{}
+	snaps = mcp.Services(snaps)
 	var out []string
 	for _, s := range snaps {
 		n := s.Name

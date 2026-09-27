@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -261,8 +262,8 @@ func mcpStatusHook(args []string, w io.Writer) error {
 
 	// Solo si el daemon contesta: sin él no hay snapshots que leer, y la línea
 	// del daemon ya dijo por qué.
-	if snaps, err := c.Snapshots(ctx); err == nil && len(snaps) > 0 {
-		fmt.Fprintf(w, "mcp health:   %s\n", mcpHealthLine(snaps))
+	if snaps, err := c.Snapshots(ctx); err == nil && len(mcp.Services(snaps)) > 0 {
+		fmt.Fprintf(w, "mcp health:   %s\n", mcpHealthLine(mcp.Services(snaps)))
 	}
 
 	det := detectedClients()

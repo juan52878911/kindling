@@ -27,6 +27,12 @@ const NeverConfident = 2.0
 // sin coordinarse con los demás.
 const GuestPort = 8000
 
+// LabelTask es la etiqueta con la que `kling ai chispa deploy` marca el dorado
+// de una tarea y sus réplicas: su valor es el nombre de la tarea. Sirve para
+// `kling ai chispa ls`, para que quien mire `kling ps` sepa qué es, y para que
+// quien liste servicios MCP (kling-mcp) sepa que ese snapshot no es uno.
+const LabelTask = "chispa.task"
+
 // Model es un clasificador lineal cuantizado. Es inmutable tras cargarlo o
 // construirlo, así que Predict se puede llamar desde muchas goroutines a la vez.
 type Model struct {

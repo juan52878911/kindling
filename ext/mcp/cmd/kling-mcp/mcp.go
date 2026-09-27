@@ -433,6 +433,7 @@ func mcpList(args []string) error {
 	if err != nil {
 		return err
 	}
+	snaps = mcp.Services(snaps)
 	if *quiet {
 		for _, s := range snaps {
 			n := s.Name
@@ -597,6 +598,7 @@ func mcpHealth(args []string) error {
 	if err != nil {
 		return err
 	}
+	snaps = mcp.Services(snaps)
 	var targets []objetivo
 	for _, s := range snaps {
 		n := s.Name

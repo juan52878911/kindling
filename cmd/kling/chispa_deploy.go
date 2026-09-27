@@ -32,9 +32,10 @@ import (
 // el invitado es kling-chispa (cmd/kling-chispa), un binario estático que solo sabe
 // de Chispa.
 
-// LabelTask marca el dorado y sus réplicas con el nombre de la tarea, para
-// `kling ai chispa ls` y para que un humano que mire `kling ps` sepa qué es.
-const chispaLabelTask = "chispa.task"
+// chispaLabelTask marca el dorado y sus réplicas con el nombre de la tarea
+// (chispa.LabelTask): para `kling ai chispa ls`, para que un humano que mire
+// `kling ps` sepa qué es, y para que kling-mcp no lo liste como servicio MCP.
+const chispaLabelTask = chispa.LabelTask
 
 func chispaLabels(name string, extra map[string]string) map[string]string {
 	return api.MergeLabels(extra, map[string]string{

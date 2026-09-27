@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/gateway"
+	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 )
@@ -419,6 +420,7 @@ func connectGuide(ctx context.Context, daemonHost, gw string) error {
 		fmt.Println("   Check the context:  kling context ls")
 		return nil
 	}
+	snaps = mcp.Services(snaps)
 	if len(snaps) == 0 {
 		fmt.Println("1. There's no service yet. Create one:")
 		fmt.Println()

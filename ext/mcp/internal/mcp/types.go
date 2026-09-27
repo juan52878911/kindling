@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/chispa"
+	"github.com/juan52878911/kindling/pkg/von"
 )
 
 // ToolSpec describe una herramienta tal y como la declaró su servidor MCP.
@@ -119,6 +121,33 @@ type Health struct {
 // Los servicios marcados así usan una instancia persistente, que se congela al
 // quedar ociosa y vuelve en milisegundos conservando lo que tenía.
 const LabelStateful = "stateful"
+
+// Services deja solo los snapshots que son servicios MCP: quita los dorados
+// que construye `kling ai` (una tarea Chispa serverless lleva chispa.task; un
+// modelo VON o un codificador, von.model), que viven en el mismo daemon y
+// salían en `kling mcp ls`, `mcp health`, `connect` y en /services del
+// gateway como servicios con 0 herramientas. No mira el catálogo: un servicio
+// importado cuya captura falló sigue siendo un servicio (sale como "not
+// captured", con su remedio).
+func Services(snaps []*api.Snapshot) []*api.Snapshot {
+	out := snaps[:0:0]
+	for _, s := range snaps {
+		if IsService(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// IsService dice si el snapshot es un servicio MCP y no un dorado de la IA.
+func IsService(s *api.Snapshot) bool {
+	if s == nil {
+		return false
+	}
+	_, chispaTask := s.Labels[chispa.LabelTask]
+	_, vonModel := s.Labels[von.LabelModel]
+	return !chispaTask && !vonModel
+}
 
 // Stateful indica si el servicio del snapshot debe conservar estado entre
 // llamadas.

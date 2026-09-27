@@ -167,6 +167,7 @@ func mcpHeal(args []string) error {
 	if err != nil {
 		return err
 	}
+	snaps = mcp.Services(snaps)
 	if len(snaps) == 0 {
 		fmt.Println("No services to probe. Import one:  kling mcp import <name> -image <image>")
 		return nil

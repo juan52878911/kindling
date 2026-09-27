@@ -41,6 +41,7 @@ func cmdExport(args []string) error {
 	if err != nil {
 		return err
 	}
+	snaps = mcp.Services(snaps)
 
 	// El HTML se construye aquí, en la máquina del CLI: el fichero acaba donde
 	// trabajas aunque el daemon esté al otro lado de un SSH.
