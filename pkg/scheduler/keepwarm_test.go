@@ -20,3 +20,27 @@ func TestKeepWarmAll_DesactivadoNoTocaElDaemon(t *testing.T) {
 	// No debe entrar en pánico ni bloquear: retorna de inmediato por el corte.
 	g.KeepWarmAll(context.Background())
 }
+
+// G-05: mientras un ensure lanzado por KeepWarmAll sigue en vuelo, una pasada
+// siguiente del mismo servicio no debe apilar otro. keepwarmEnVuelo/
+// keepwarmListo son el candado de esa reserva; se prueban directamente porque
+// KeepWarmAll en sí necesita un daemon (Snapshots) para tener algo que hacer.
+func TestKeepwarmEnVueloNoApilaEnsures(t *testing.T) {
+	g := &Scheduler{}
+
+	if !g.keepwarmEnVuelo("svc") {
+		t.Fatal("la primera reserva de 'svc' debía conseguirse")
+	}
+	if g.keepwarmEnVuelo("svc") {
+		t.Fatal("una segunda pasada no debe poder apilar otro ensure del mismo servicio")
+	}
+	// Otro servicio no se ve afectado por la reserva de "svc".
+	if !g.keepwarmEnVuelo("otro") {
+		t.Fatal("un servicio distinto no debía chocar con la reserva de 'svc'")
+	}
+
+	g.keepwarmListo("svc")
+	if !g.keepwarmEnVuelo("svc") {
+		t.Fatal("liberada la reserva, la siguiente pasada debe poder volver a intentarlo")
+	}
+}

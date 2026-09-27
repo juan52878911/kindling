@@ -200,6 +200,19 @@ type Scheduler struct {
 	// ensure y un scale-out) podían descongelar o adoptar la MISMA máquina y
 	// acabar con dos entradas sobre ella. Se toca con mu.
 	adquiriendo map[string]bool
+	// tenantCreando cuenta, por tenant, las instancias que se están
+	// creando/despertando pero aún no están registradas en g.services/g.extra:
+	// sin esto, dos buildEntry concurrentes de SERVICIOS DISTINTOS del mismo
+	// tenant leían ambos "hay menos que el tope" (ver reservarTenant/G-01). Se
+	// toca con mu, no con tenantMu: hay que leerlo junto con tenantInstances(),
+	// que ya recorre g.services/g.extra bajo mu.
+	tenantCreando map[string]int
+	// keepwarming son los servicios con un ensure en vuelo lanzado por
+	// KeepWarmAll de una pasada anterior: sin esto, cada vuelta del segador
+	// (idle/3) mientras un servicio arranca en frío apilaba otra goroutine
+	// bloqueada en el mismo candado de ensureLock, todas cargando el ctx del
+	// segador para nada (G-05). Se toca con mu.
+	keepwarming map[string]bool
 	// buildFn sustituye a buildEntry en el scale-out de los tests: crear una
 	// réplica de verdad necesita un daemon con KVM/vz.
 	buildFn func(ctx context.Context, service string, tnt *tenant, fresh bool) (*entry, error)
@@ -562,15 +575,11 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 // —el camino de reutilizar una instancia caliente retorna antes de llegar aquí—.
 func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant, fresh bool) (*entry, error) {
 	// Cuota de instancias del tenant: reparto justo, no seguridad (ver quota.go).
-	if tnt.maxInstances > 0 {
-		g.mu.Lock()
-		actuales := g.tenantInstances(tnt.name)
-		g.mu.Unlock()
-		if actuales >= tnt.maxInstances {
-			return nil, fmt.Errorf("%w: %q already has %d instance(s) awake (max %d)",
-				errTenantInstances, tnt.name, actuales, tnt.maxInstances)
-		}
+	liberarCuota, err := g.reservarTenant(tnt)
+	if err != nil {
+		return nil, err
 	}
+	defer liberarCuota()
 
 	t0 := time.Now()
 	tr := &WakeTrace{}
@@ -1194,17 +1203,19 @@ func (g *Scheduler) snapshotFor(ctx context.Context, service string) (*api.Snaps
 	return nil, fmt.Errorf("no snapshot for service %q", service)
 }
 
+// alive comprueba que una instancia concreta sigue viva. Usa Get(id), no
+// List(): List recorre el disco de TODAS las máquinas del daemon para
+// calcular su ocupación, y ensure() lo llamaba aquí en cada thaw de una
+// instancia con caché caducada, bajo el candado del servicio — con 200+
+// máquinas y docenas de servicios era el tráfico dominante del socket del
+// daemon (G-02). Un error (incluido 404: la máquina ya no existe) cuenta
+// como no viva.
 func (g *Scheduler) alive(ctx context.Context, id string) bool {
-	machines, err := g.client.List(ctx)
+	m, err := g.client.Get(ctx, id)
 	if err != nil {
 		return false
 	}
-	for _, m := range machines {
-		if m.ID == id {
-			return m.State == api.StateRunning
-		}
-	}
-	return false
+	return m.State == api.StateRunning
 }
 
 // Reap congela las instancias que llevan demasiado tiempo sin recibir peticiones.
@@ -1388,11 +1399,23 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 			warmed++
 			continue
 		}
+		// ¿Ya hay un ensure de este servicio en vuelo, lanzado por una pasada
+		// anterior? Sin esto, cada vuelta del segador (idle/3) mientras el
+		// servicio arranca en frío (hasta ~16 s bajo KVM anidado) apilaba otra
+		// goroutine bloqueada en el mismo ensureLock, todas cargando el ctx del
+		// segador para nada (G-05). ensure ya es idempotente bajo su candado —lo
+		// que se evita es la ACUMULACIÓN de goroutines esperando en fila, no una
+		// duplicación de instancias.
+		if !g.keepwarmEnVuelo(c.svc) {
+			warmed++
+			continue
+		}
 		// Presupuesto: no despertar una primaria nueva si no cabe. La estimación es
 		// conservadora (mem_mib entero, sin descontar páginas compartidas), igual que
 		// en PrewarmAll; el 507 del daemon sigue siendo la última red.
 		if budget >= 0 && c.mem > 0 {
 			if budget < c.mem {
+				g.keepwarmListo(c.svc)
 				break
 			}
 			budget -= c.mem
@@ -1400,12 +1423,12 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 		// ensure() hace todo el trabajo pesado: candado por servicio, buildEntry y
 		// registro en g.services. En una goroutine para no bloquear el segador ~16 s
 		// por cada servicio en frío; la compuerta de arranque del daemon serializa los
-		// encendidos de verdad, así que disparar varias a la vez es seguro. ensure es
-		// idempotente bajo su candado, de modo que si la siguiente pasada la encuentra
-		// aún arrancando no duplica nada. Contexto de fondo sin tenant: es una acción
-		// del sistema, el primer usuario real la adopta como dueña (ver ensure).
+		// encendidos de verdad, así que disparar varias a la vez es seguro. Contexto de
+		// fondo sin tenant: es una acción del sistema, el primer usuario real la
+		// adopta como dueña (ver ensure).
 		warmed++
 		go func(svc string) {
+			defer g.keepwarmListo(svc)
 			if _, err := g.ensure(ctx, svc); err != nil {
 				log.Printf("keepwarm %s: %v", svc, err)
 				return
@@ -1413,6 +1436,30 @@ func (g *Scheduler) KeepWarmAll(ctx context.Context) {
 			log.Printf("%s: primary kept warm", svc)
 		}(c.svc)
 	}
+}
+
+// keepwarmEnVuelo reserva, para KeepWarmAll, el "en vuelo" de un servicio:
+// devuelve true si lo consigue (nadie lo tenía reservado), en cuyo caso quien
+// llama debe liberarlo con keepwarmListo cuando el ensure termine. false si
+// una pasada anterior ya tiene uno en marcha: no se apila otro (G-05).
+func (g *Scheduler) keepwarmEnVuelo(service string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.keepwarming[service] {
+		return false
+	}
+	if g.keepwarming == nil {
+		g.keepwarming = map[string]bool{}
+	}
+	g.keepwarming[service] = true
+	return true
+}
+
+// keepwarmListo libera la reserva de keepwarmEnVuelo.
+func (g *Scheduler) keepwarmListo(service string) {
+	g.mu.Lock()
+	delete(g.keepwarming, service)
+	g.mu.Unlock()
 }
 
 // prewarmBudget es cuánta memoria del anfitrión se puede dedicar a precalentar,
@@ -1550,8 +1597,14 @@ const evictedPool = "(warm pool)"
 func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 	// Antes que nada despierto, lo pausado: retiene RAM sin atender a nadie, y
 	// congelarlo solo cuesta que su próximo despertar sea un thaw.
-	if id, svc := g.pausadaMasVieja(); id != "" && g.congelarPausada(ctx, id) {
-		return svc
+	if id, p := g.pausadaMasVieja(); id != "" {
+		if g.congelarPausada(ctx, id) {
+			return p.service
+		}
+		// El freeze falló: se repone en vez de perderla del registro
+		// reteniendo RAM sin dueño (G-04); se sigue con el camino normal de
+		// desalojo por si hay algo despierto que sacrificar en su lugar.
+		g.reponerPausada(id, p)
 	}
 	// pick elige la instancia ociosa más antigua, filtrando por tenant: con
 	// mismo=true solo mira las del tenant que pide; con mismo=false, solo las de
