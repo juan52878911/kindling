@@ -85,6 +85,9 @@ type Deps struct {
 	// de salida. Un fallo impide crear la VM: preferimos no arrancar a
 	// arrancar sin la barrera.
 	Confine func(conRed bool) error
+	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
+	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).
+	CPUTime func() (time.Duration, error)
 }
 
 type state int
@@ -136,6 +139,13 @@ type Server struct {
 
 	// confinado: ya se aplicó Deps.Confine; confinadoConRed, con qué red.
 	confinado, confinadoConRed bool
+
+	// Tope de CPU (cpu.go). regulando: la VM está en una pausa del regulador,
+	// que el núcleo no ve (para él sigue running).
+	cpuPct                 int
+	cpuEnMarcha, regulando bool
+	cpuPausado             time.Duration
+	cpuVentana, cpuGracia  time.Duration // para las pruebas; 0 = por defecto
 }
 
 func New(d Deps) *Server {
@@ -204,6 +214,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
 	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
+	mux.HandleFunc("PUT /kling/cpu", s.putKlingCPU)
+	mux.HandleFunc("GET /kling/cpu", s.getKlingCPU)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fault(w, fmt.Errorf("kling-vz does not implement %s %s", r.Method, r.URL.Path))
 	})
@@ -600,6 +612,13 @@ func (s *Server) patchVM(w http.ResponseWriter, r *http.Request) {
 	case "Paused":
 		switch s.st {
 		case stRunning:
+			if s.regulando {
+				// Ya está en pausa por el regulador de CPU: pasa a ser del
+				// núcleo, y el regulador no la reanudará.
+				s.regulando = false
+				s.st = stPaused
+				break
+			}
 			if err = s.vm.Pause(); err == nil {
 				s.st = stPaused
 			}

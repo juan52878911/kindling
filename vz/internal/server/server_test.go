@@ -26,6 +26,31 @@ type fakeVM struct {
 	balloon  []int
 	stopped  chan error
 	failNext string // nombre de la operación que debe fallar
+
+	// Un invitado que quema toda su vCPU mientras no está en pausa: lo que
+	// mide el regulador de CPU.
+	enMarcha bool
+	desde    time.Time
+	corrido  time.Duration
+}
+
+func (v *fakeVM) marcha(on bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.enMarcha {
+		v.corrido += time.Since(v.desde)
+	}
+	v.enMarcha, v.desde = on, time.Now()
+}
+
+// cpu es la CPU que lleva gastada (toda la de cuando no estaba en pausa).
+func (v *fakeVM) cpu() time.Duration {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.enMarcha {
+		return v.corrido + time.Since(v.desde)
+	}
+	return v.corrido
 }
 
 func (v *fakeVM) rec(op string) error {
@@ -39,9 +64,21 @@ func (v *fakeVM) rec(op string) error {
 	return nil
 }
 
-func (v *fakeVM) Start() error  { return v.rec("start") }
-func (v *fakeVM) Pause() error  { return v.rec("pause") }
-func (v *fakeVM) Resume() error { return v.rec("resume") }
+func (v *fakeVM) Start() error { v.marcha(true); return v.rec("start") }
+func (v *fakeVM) Pause() error {
+	err := v.rec("pause")
+	if err == nil {
+		v.marcha(false)
+	}
+	return err
+}
+func (v *fakeVM) Resume() error {
+	err := v.rec("resume")
+	if err == nil {
+		v.marcha(true)
+	}
+	return err
+}
 func (v *fakeVM) Stop() error {
 	err := v.rec("stop")
 	select {
@@ -593,4 +630,72 @@ func TestSinConfinarNoSeArranca(t *testing.T) {
 	if creadas != 0 {
 		t.Fatal("se creó la VM sin confinar")
 	}
+}
+
+// Con un techo del 50 % y un invitado que quema toda su vCPU, el regulador lo
+// deja corriendo más o menos la mitad del tiempo.
+func TestReguladorDeCPUDejaElTecho(t *testing.T) {
+	r := newRig(t)
+	r.srv.cpuVentana, r.srv.cpuGracia = 10*time.Millisecond, time.Millisecond
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	vm, _, _ := r.f.last()
+	r.srv.d.CPUTime = func() (time.Duration, error) { return vm.cpu(), nil }
+
+	r.must("PUT", "/kling/cpu", `{"pct":50}`)
+	inicio, cpu0 := time.Now(), vm.cpu()
+	time.Sleep(1500 * time.Millisecond)
+	frac := float64(vm.cpu()-cpu0) / float64(time.Since(inicio))
+	t.Logf("fracción de CPU con techo 50 %%: %.2f", frac)
+	if frac < 0.35 || frac > 0.65 {
+		t.Fatalf("fracción de CPU = %.2f, quería ~0.50", frac)
+	}
+
+	// Sin techo, vuelve a correr entero.
+	r.must("PUT", "/kling/cpu", `{"pct":0}`)
+	time.Sleep(50 * time.Millisecond)
+	inicio, cpu0 = time.Now(), vm.cpu()
+	time.Sleep(300 * time.Millisecond)
+	if frac := float64(vm.cpu()-cpu0) / float64(time.Since(inicio)); frac < 0.9 {
+		t.Fatalf("sin techo la fracción es %.2f, quería ~1", frac)
+	}
+}
+
+// Si el núcleo pausa la VM justo mientras el regulador la tiene en pausa, la
+// pausa pasa a ser del núcleo: sigue en pausa, el estado es Paused y el
+// regulador no la reanuda.
+func TestPausaDelNucleoDuranteLaDelRegulador(t *testing.T) {
+	r := newRig(t)
+	r.srv.cpuVentana, r.srv.cpuGracia = 10*time.Millisecond, time.Millisecond
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	vm, _, _ := r.f.last()
+	r.srv.d.CPUTime = func() (time.Duration, error) { return vm.cpu(), nil }
+	r.must("PUT", "/kling/cpu", `{"pct":10}`) // pausas largas: fácil caer en una
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r.srv.mu.Lock()
+		reg := r.srv.regulando
+		r.srv.mu.Unlock()
+		if reg {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("el regulador no llegó a pausar")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.must("PATCH", "/vm", `{"state":"Paused"}`)
+	time.Sleep(300 * time.Millisecond) // más que cualquier pausa del regulador con pct 10 y ventana 10 ms
+	if out := r.must("GET", "/", ""); !strings.Contains(out, `"Paused"`) {
+		t.Fatalf("estado tras pausar = %s", out)
+	}
+	vm.mu.Lock()
+	enMarcha := vm.enMarcha
+	vm.mu.Unlock()
+	if enMarcha {
+		t.Fatal("el regulador reanudó una VM que el núcleo había pausado")
+	}
+	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
 }

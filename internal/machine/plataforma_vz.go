@@ -8,8 +8,8 @@ package machine
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"syscall"
 	"time"
@@ -39,9 +39,9 @@ var dirsE2fsExtra = []string{
 // bajar. Ni siquiera con sudo: setpriv y el grupo kvm no existen aquí.
 func privilegiosPlataforma(runAs string) (*Privileges, string) { return &Privileges{}, "" }
 
-func delegacionCgroups() (string, error) {
-	return "", errors.New("macOS has no cgroups: the per-microVM CPU limit (cpu_pct) is not applied")
-}
+// delegacionCgroups: en macOS no hay cgroups; el techo de CPU lo aplica
+// kling-vz (ver abrirReenvios). Sin aviso: el límite sí se aplica.
+func delegacionCgroups() (string, error) { return "", nil }
 
 // redAntesDeArrancar manda la política de salida de la máquina al ayudante.
 // Tiene que llegar antes de InstanceStart o de snapshot/load: sin ella, el
@@ -90,10 +90,21 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 		return fmt.Errorf("opening port forwards: %w", err)
 	}
 	m.mu.Lock()
+	pct := defaultCPUPct
 	if cur := m.byID[id]; cur != nil {
 		cur.Forwards = fwd
+		if cur.CPUPct > 0 {
+			pct = cur.CPUPct
+		}
 	}
 	m.mu.Unlock()
+	// El techo de CPU, que en Linux pone el cgroup. kling-vz no lo aplica
+	// hasta que el agente del invitado escucha, igual que el impulso de
+	// arranque de Linux. Un kling-vz anterior no conoce la ruta: se sigue sin
+	// techo y se avisa, como antes.
+	if err := c.KlingCPU(ctx, pct); err != nil {
+		log.Printf("warning: %s: kling-vz did not take the CPU limit (%v): rebuild kling-vz to apply cpu_pct on macOS", shortID(id), err)
+	}
 	return nil
 }
 

@@ -121,6 +121,7 @@ func run() int {
 		Policy:    policy,
 		Resolver:  resolver,
 		Confine:   confine,
+		CPUTime:   meter.CPUTime,
 	})
 
 	// Un socket que sobra de un proceso muerto impediría escuchar. Solo se

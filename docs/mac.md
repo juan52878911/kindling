@@ -175,7 +175,7 @@ conecte a `127.0.0.1:<puerto>` ve la conexión cerrada sin llegar al invitado (v
 | memoria de una restauración | se comparte el `mem.file` del dorado por copia en escritura: una copia más cuesta lo que diverge | **~350 MiB por VM**: el framework copia el estado a memoria al restaurar; la densidad de dorados es mucho menor |
 | construir imágenes | sí (`kling image build`, `toolchain`) | **no**: se copian (`kling image copy`) |
 | `kling image put`, `mcp refresh-bridge` | sí | **no**: montan la imagen con un loop |
-| techo de CPU por microVM (`-cpu-pct`) | cgroup v2 | **no se aplica**: no hay cgroups |
+| techo de CPU por microVM (`-cpu-pct`) | cgroup v2 | lo aplica `kling-vz`: cada 100 ms mide la CPU del auxiliar de Apple y, si se pasó, pausa la VM lo justo para que la media quede en el techo (medido en un M4 con un bucle infinito dentro: 96 % sin techo, 50 % con `-cpu-pct 50`, 25 % con 25). No regula hasta que el agente del invitado escucha, como el impulso de arranque de Linux |
 | jailer, bajada de privilegios | sí | el invitado vive en el proceso auxiliar de Apple, y `kling-vz` (que procesa su tráfico de red) se encierra en un perfil de sandbox al crear la VM: lee bajo la raíz de kindling, escribe solo en su máquina, `snapshots/` y `volumes/`, y sale a la red solo si la máquina tiene egress. `KLING_VZ_NO_SANDBOX=1` lo apaga para diagnosticar |
 | admisión por memoria | PSI (`KLING_MAX_MEM_PRESSURE`) | `kern.memorystatus_level`: por debajo del 15 % libre, 507 (`KLING_MIN_MEM_LEVEL`, 0 lo apaga) |
 | arranques simultáneos | 2 anidado, núcleos/2 (hasta 8) en hierro | **4** (`KLING_MAX_PARALLEL_BOOT`): el prototipo vio fallos con ~20 restauraciones a la vez |
