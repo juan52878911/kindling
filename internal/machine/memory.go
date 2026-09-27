@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
 	"os"
@@ -196,14 +197,18 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 			return
 		}
 		snapSeen[snap] = true
-		total += allocatedBytes(filepath.Join(m.snapDir(snap), "mem.file"))
+		// El mem.file de un dorado es INMUTABLE desde que se congela: cachear su
+		// tamaño asignado evita un stat por snapshot en cada Run/runFrom/Resize,
+		// bajo el candado global (M-12). Ver allocatedBytesCachedLocked.
+		total += m.allocatedBytesCachedLocked(filepath.Join(m.snapDir(snap), "mem.file"), snap)
 	}
 	for _, mc := range m.byID {
 		if mc.State != api.StateRunning && mc.State != api.StatePaused {
 			continue
 		}
 		count(mc.From)
-		// Una máquina descongelada mapea su propio volcado, no el dorado.
+		// Una máquina descongelada mapea su propio volcado, no el dorado: éste SÍ
+		// cambia con lo que el invitado va escribiendo, así que no se cachea.
 		total += allocatedBytes(filepath.Join(m.dir(mc.ID), "mem.file"))
 	}
 	// Los que están arrancando aún no figuran RUNNING pero ya mapean su dorado.
@@ -211,6 +216,46 @@ func (m *Manager) hotMemFilesMiBLocked() int {
 		count(snap)
 	}
 	return int(total >> 20)
+}
+
+// huellaAlloc es lo que allocatedBytesCachedLocked recuerda de un mem.file:
+// los bytes que devolvió allocatedBytes junto con el tamaño y la fecha del
+// fichero con los que se calcularon — igual que huellaKernel/huellaSnapshot.
+type huellaAlloc struct {
+	tam   int64
+	fecha int64
+	alloc int64
+}
+
+// allocatedBytesCachedLocked es allocatedBytes con caché por tamaño+fecha,
+// para el mem.file INMUTABLE de un snapshot dorado (M-12). key es el nombre
+// del snapshot; se invalida junto con el resto de lo cacheado sobre él (ver
+// invalidateSnapCache en snapshot.go).
+//
+// Se llama con m.mu YA tomado, desde hotMemFilesMiBLocked.
+func (m *Manager) allocatedBytesCachedLocked(path, key string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		// Sin fichero no hay nada que recordar; si había algo cacheado con este
+		// nombre ya no vale (el snapshot se borró bajo nuestros pies).
+		delete(m.memAllocCache, key)
+		return 0
+	}
+	tam, fecha := fi.Size(), fi.ModTime().UnixNano()
+	if h, ok := m.memAllocCache[key]; ok && h.tam == tam && h.fecha == fecha {
+		return h.alloc
+	}
+	var alloc int64
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		alloc = st.Blocks * 512
+	} else {
+		alloc = fi.Size()
+	}
+	if m.memAllocCache == nil {
+		m.memAllocCache = map[string]huellaAlloc{}
+	}
+	m.memAllocCache[key] = huellaAlloc{tam: tam, fecha: fecha, alloc: alloc}
+	return alloc
 }
 
 // effectiveAvailMiB es la memoria con la que de verdad se puede contar: de

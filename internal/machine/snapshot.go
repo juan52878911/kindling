@@ -348,6 +348,10 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
+	// El directorio (mem.file, overlay.ext4...) ya estaba en su forma final
+	// antes de este writeMeta; lo que hace falta olvidar es lo que -replace
+	// pudo dejar cacheado con el mismo nombre (M-08, M-12).
+	m.invalidateSnapCache(name)
 	hecho = true
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
@@ -376,16 +380,114 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 		if !e.IsDir() {
 			continue
 		}
-		s, err := m.loadSnapshot(e.Name())
+		s, disco, err := m.loadSnapshotCached(e.Name())
 		if err != nil {
 			continue
 		}
-		s.DiskBytes = diskUsage(m.snapDir(e.Name()))
+		s.DiskBytes = disco
 		s.Instances = live[e.Name()]
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// snapCacheEntry es lo que loadSnapshotCached recuerda de un dorado: el
+// snapshot ya parseado y su ocupación en disco, con la huella (mtime de
+// meta.json y del directorio) con la que se calcularon. snap NUNCA se entrega
+// a quien llama: se clona (ver cloneSnapshot), para que nadie pueda pisar lo
+// cacheado escribiendo en DiskBytes/Instances o anotando el que recibió.
+type snapCacheEntry struct {
+	metaMod int64
+	dirMod  int64
+	snap    *api.Snapshot
+	disco   int64
+}
+
+// loadSnapshotCached es loadSnapshot + diskUsage con caché por mtime de
+// meta.json y del directorio (M-08).
+//
+// Antes, Snapshots() releía y parseaba el meta.json y recorría el directorio
+// entero de CADA dorado en CADA llamada: el gateway llama a Snapshots() en
+// cada tick del reaper y en cada arranque en frío desde un snapshot (runFrom),
+// así que con unas pocas decenas de servicios eso es E/S de fondo constante.
+// Un dorado no cambia salvo por una anotación o un `commit -replace` con el
+// mismo nombre — los dos pasan por writeMeta/removeSnapshot, que invalidan
+// esta entrada (ver invalidateSnapCache) — así que memorizar el resultado
+// hasta que eso ocurra no pierde ninguna actualización real.
+//
+// La huella (mtime de meta.json + mtime del directorio) es un cinturón además
+// del tirante de la invalidación explícita: cubre cambios que no pasan por
+// esas dos funciones, como restaurar un directorio desde la papelera a mano.
+func (m *Manager) loadSnapshotCached(name string) (*api.Snapshot, int64, error) {
+	dir := m.snapDir(name)
+	metaFi, err := os.Stat(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+	}
+	dirFi, err := os.Stat(dir)
+	if err != nil {
+		return nil, 0, fmt.Errorf("snapshot %q does not exist", name)
+	}
+	metaMod, dirMod := metaFi.ModTime().UnixNano(), dirFi.ModTime().UnixNano()
+
+	m.mu.RLock()
+	entry, hay := m.snapCache[name]
+	m.mu.RUnlock()
+	if hay && entry.metaMod == metaMod && entry.dirMod == dirMod {
+		return cloneSnapshot(entry.snap), entry.disco, nil
+	}
+
+	snap, err := m.loadSnapshot(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	disco := diskUsage(dir)
+
+	m.mu.Lock()
+	if m.snapCache == nil {
+		m.snapCache = map[string]snapCacheEntry{}
+	}
+	m.snapCache[name] = snapCacheEntry{metaMod: metaMod, dirMod: dirMod, snap: snap, disco: disco}
+	m.mu.Unlock()
+	return cloneSnapshot(snap), disco, nil
+}
+
+// invalidateSnapCache olvida todo lo cacheado sobre un dorado: el snapshot
+// parseado y su disco (loadSnapshotCached), y el tamaño asignado de su
+// mem.file (hotMemFilesMiBLocked, M-12). Se llama justo después de escribir su
+// meta.json (writeMeta, en Commit y en editMeta) o de apartar su directorio
+// (removeSnapshot): la próxima lectura vuelve a mirar el disco en vez de
+// servir un dorado que ya no es el que hay ahí.
+func (m *Manager) invalidateSnapCache(name string) {
+	m.mu.Lock()
+	delete(m.snapCache, name)
+	delete(m.memAllocCache, name)
+	m.mu.Unlock()
+}
+
+// cloneSnapshot copia un *api.Snapshot para que quien lo recibe pueda pisar
+// DiskBytes o Instances —o anotarlo— sin tocar al que vive en snapCache ni al
+// que puede estar leyendo otro goroutine a la vez (mismo motivo que M-03 con
+// api.Machine: compartir el slice/map de otro y escribir en el sitio es una
+// carrera de datos, no solo un bug de lógica).
+func cloneSnapshot(s *api.Snapshot) *api.Snapshot {
+	c := *s
+	c.Volumes = append([]api.VolumeAttachment(nil), s.Volumes...)
+	c.AllowDomains = append([]string(nil), s.AllowDomains...)
+	if s.Labels != nil {
+		c.Labels = make(map[string]string, len(s.Labels))
+		for k, v := range s.Labels {
+			c.Labels[k] = v
+		}
+	}
+	if s.Annotations != nil {
+		c.Annotations = make(map[string]json.RawMessage, len(s.Annotations))
+		for k, v := range s.Annotations {
+			c.Annotations[k] = v
+		}
+	}
+	return &c
 }
 
 func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
@@ -664,6 +766,10 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 	}
 	destino, rerr := m.apartarSnapshot(name)
 	m.mu.Unlock()
+	// El directorio ya no está donde estaba (o está a punto de dejar de
+	// estarlo): lo que loadSnapshotCached/hotMemFilesMiBLocked recordaban de
+	// este nombre ya no vale (M-08, M-12).
+	m.invalidateSnapCache(name)
 
 	if restos {
 		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
@@ -724,7 +830,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// entonces la instancia, si arrancó, ya cuenta como viva en byID.
 	defer m.reserveDir(reservaSnapshot(req.From))()
 
-	snap, err := m.loadSnapshot(req.From)
+	// Cacheado (M-08): esto se llama en cada instanciación desde este dorado, y
+	// el meta.json no cambia entre una y la siguiente.
+	snap, _, err := m.loadSnapshotCached(req.From)
 	if err != nil {
 		return nil, err
 	}
