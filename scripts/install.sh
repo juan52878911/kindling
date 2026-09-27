@@ -413,16 +413,25 @@ case "$USER_SHELL" in
     *)    RC=""; RELOAD="source <(kling completion bash|zsh)   # or: kling completion fish | source" ;;
 esac
 
+# rc_managed RC: el rc no es tuyo para tocarlo: es de solo lectura, o lo genera
+# home-manager (un enlace a /nix/store; a veces el fichero de dentro es
+# escribible, pero el siguiente `home-manager switch` lo pisaría).
+rc_managed() {
+    [ -e "$1" ] || return 1
+    [ -w "$1" ] || return 0
+    case "$(readlink "$1" 2>/dev/null)" in /nix/store/*) return 0 ;; esac
+    return 1
+}
+
 # add_rc LINEA: la añade al rc una sola vez, bajo "# kling". Devuelve 1 si no
-# puede (rc de solo lectura, p. ej. gestionado por home-manager): quien llama
-# imprime la línea para que la pongas tú.
+# puede (rc_managed): quien llama imprime la línea para que la pongas tú.
 add_rc() {
     [ -n "$RC" ] || return 1
     if [ -f "$RC" ] && grep -Fq -- "$1" "$RC"; then
         return 0
     fi
-    if [ -e "$RC" ] && [ ! -w "$RC" ]; then
-        warn "no puedo escribir en $RC (solo lectura: ¿lo gestiona home-manager o nix?)"
+    if rc_managed "$RC"; then
+        warn "no toco $RC: es de solo lectura o lo gestiona home-manager (nix)"
         return 1
     fi
     mkdir -p "$(dirname "$RC")" 2>/dev/null
