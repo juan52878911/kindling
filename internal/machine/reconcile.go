@@ -403,6 +403,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// siguiente reinicio, invisible para `kling ps` y para la
 				// contabilidad de memoria que decide si cabe la siguiente microVM.
 				m.sweepOrphanVMMs()
+				// Consolas serie que se han pasado de consolaMaxBytes (M-07): un
+				// invitado hostil escribiendo a /dev/ttyS0 sin tope llenaría el
+				// disco y degradaría a las demás microVMs (SECURITY.md §4).
+				m.rotarConsolas()
 				// Barrer directorios huérfanos también en marcha: no solo aparecen
 				// al arrancar. Bajo el lock, como reconcile.
 				m.mu.Lock()

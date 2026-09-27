@@ -1219,7 +1219,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 // enCg dice si de verdad nació dentro. Si el kernel no lo admite, se lanza
 // fuera y quien llama lo mete con limitCPU.
 func (m *Manager) spawn(id, sock string, n *knet.Net, cg *os.File) (pid int, enCg bool, err error) {
-	logf, err := os.Create(filepath.Join(m.dir(id), "firecracker.log"))
+	logf, err := abrirConsola(m.dir(id))
 	if err != nil {
 		return 0, false, err
 	}
