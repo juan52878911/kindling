@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -95,6 +96,11 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// El plazo de lectura del servidor solo cubre la cabecera
+		// (ReadHeaderTimeout); subir hasta FileMaxUpload por un tunel SSH
+		// lento puede tardar mas, y el daemon ya espera lo mismo por su
+		// lado (internal/daemon/exec.go).
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Minute))
 		st, err := writeFile(p, mode, r.Body)
 		if err != nil {
 			fileError(w, err)
