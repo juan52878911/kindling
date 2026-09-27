@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,5 +209,64 @@ func TestRunFromAceptaSnapshotSinKernelSHA256(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "rebuild the template") {
 		t.Errorf("un snapshot sin kernel_sha256 no debería fallar por el kernel: %v", err)
+	}
+}
+
+// K2 para las warm: el sello del volcado lleva el kernel_sha256 y Thaw se
+// niega, con un error claro, si el vmlinux instalado ya no es ese. Un sello
+// sin el campo (anterior a esto) y uno con el kernel correcto pasan.
+func TestThawCompruebaElKernelDelSello(t *testing.T) {
+	m := newTestManager(t)
+	h := escribirKernel(t, m, "el kernel de este host")
+
+	preparar := func(id, kernelSHA string) *api.Machine {
+		t.Helper()
+		mc := m.addForTest(id)
+		m.mu.Lock()
+		m.byID[id].State = api.StateWarm
+		m.mu.Unlock()
+		dir := m.dir(id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"snap.file", "mem.file"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("volcado "+f), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := volcadoEnCurso(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := sellarVolcado(dir, kernelSHA); err != nil {
+			t.Fatal(err)
+		}
+		if got := kernelDelVolcado(dir); got != kernelSHA {
+			t.Fatalf("kernelDelVolcado = %q, quería %q", got, kernelSHA)
+		}
+		return mc
+	}
+
+	// Kernel distinto: se niega antes de la puerta de arranque y de la red.
+	mc := preparar("aaaa000000000001", strings.Repeat("f", 64))
+	_, err := m.Thaw(context.Background(), mc.ID)
+	if err == nil || !strings.Contains(err.Error(), "kernel changed") || !strings.Contains(err.Error(), "kling rm") {
+		t.Fatalf("Thaw con otro kernel = %v, quería el error de kernel cambiado", err)
+	}
+
+	// Kernel correcto y sello legacy: pasan la comprobación y llegan a la
+	// puerta de arranque. Puerta llena y contexto cancelado: se paran ahí,
+	// sin montar red ni lanzar nada.
+	m.launchGate = make(chan struct{}, 1)
+	m.launchGate <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct{ id, sha string }{
+		{"aaaa000000000002", h},
+		{"aaaa000000000003", ""},
+	} {
+		mc := preparar(c.id, c.sha)
+		if _, err := m.Thaw(ctx, mc.ID); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Thaw con kernel %q = %v, quería llegar a la puerta (context.Canceled)", c.sha, err)
+		}
 	}
 }

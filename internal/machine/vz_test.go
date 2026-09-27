@@ -285,7 +285,7 @@ func TestVZThawMandaRedAntesDeCargarYReenviaDespues(t *testing.T) {
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := sellarVolcado(dir); err != nil {
+	if err := sellarVolcado(dir, ""); err != nil {
 		t.Fatal(err)
 	}
 	m.byID[id] = &api.Machine{ID: id, Name: "vz-warm", State: api.StateWarm, Egress: "none",
@@ -498,7 +498,7 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 	if err := volcadoEnCurso(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := sellarVolcado(dir); err != nil {
+	if err := sellarVolcado(dir, ""); err != nil {
 		t.Fatal(err)
 	}
 	m.byID[id] = &api.Machine{ID: id, Name: "vz-resync", State: api.StateWarm, Egress: "none",

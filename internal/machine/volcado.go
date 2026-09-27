@@ -43,6 +43,10 @@ type sello struct {
 	SnapSHA256 string    `json:"snap_sha256"`
 	MemBytes   int64     `json:"mem_bytes"`
 	At         time.Time `json:"at"`
+	// KernelSHA256 es el vmlinux instalado al congelar (K2, como el de los
+	// dorados en meta.json). Opcional: los sellos anteriores no lo llevan y se
+	// descongelan igual (ver kernelDelVolcado).
+	KernelSHA256 string `json:"kernel_sha256,omitempty"`
 }
 
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
@@ -53,8 +57,9 @@ func volcadoEnCurso(dir string) error {
 }
 
 // sellarVolcado escribe el sello cuando snap.file y mem.file ya están completos
-// y en su sitio, y retira la marca de volcado en curso.
-func sellarVolcado(dir string) error {
+// y en su sitio, y retira la marca de volcado en curso. kernelSHA es el
+// sha256 del vmlinux instalado; vacío, el sello no lo lleva.
+func sellarVolcado(dir, kernelSHA string) error {
 	snapSHA, err := digest.File(filepath.Join(dir, "snap.file"))
 	if err != nil {
 		return err
@@ -63,7 +68,7 @@ func sellarVolcado(dir string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now()})
+	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA})
 	if err := durable.Escribir(filepath.Join(dir, marcaOK), b, 0o600); err != nil {
 		return err
 	}
@@ -109,6 +114,22 @@ func volcadoValido(dir string) error {
 		return fmt.Errorf("%w: the state file changed after it was frozen", errVolcadoIncompleto)
 	}
 	return nil
+}
+
+// kernelDelVolcado es el kernel_sha256 del sello de dir, o "" si el sello no
+// existe, no se lee o es anterior al campo: en todos esos casos no hay nada
+// con qué comparar y el thaw sigue como siempre. Se llama tras volcadoValido,
+// que ya rechazó los sellos ilegibles.
+func kernelDelVolcado(dir string) string {
+	raw, err := os.ReadFile(filepath.Join(dir, marcaOK))
+	if err != nil {
+		return ""
+	}
+	var s sello
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s.KernelSHA256
 }
 
 // plazoVolcado es cuánto se le deja a Firecracker para volcar (Snapshot) o

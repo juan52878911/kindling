@@ -678,6 +678,23 @@ func (m *Manager) kernelHash() (string, error) {
 // recordedSHA vacío es un snapshot anterior a este campo (o a K1): se acepta
 // igual, o desplegar esto rompería de golpe todos los snapshots existentes.
 func (m *Manager) comprobarKernel(recordedSHA, name string) error {
+	if err := m.kernelIgual(recordedSHA); err != nil {
+		if errors.Is(err, errKernelCambiado) {
+			return fmt.Errorf("rebuild the template: the kernel changed (snapshot %q was frozen with a "+
+				"different kernel than the one installed on this host now)", name)
+		}
+		return err
+	}
+	return nil
+}
+
+// errKernelCambiado es que el kernel instalado no es el grabado al congelar.
+var errKernelCambiado = errors.New("the kernel changed")
+
+// kernelIgual compara recordedSHA con el kernel instalado ahora; vacío se
+// acepta (anterior al campo). Es la parte común de comprobarKernel (dorados)
+// y del Thaw de una warm (sello del volcado, ver kernelDelVolcado).
+func (m *Manager) kernelIgual(recordedSHA string) error {
 	if recordedSHA == "" {
 		return nil
 	}
@@ -686,8 +703,7 @@ func (m *Manager) comprobarKernel(recordedSHA, name string) error {
 		return fmt.Errorf("hashing the current kernel: %w", err)
 	}
 	if actual != recordedSHA {
-		return fmt.Errorf("rebuild the template: the kernel changed (snapshot %q was frozen with a "+
-			"different kernel than the one installed on this host now)", name)
+		return errKernelCambiado
 	}
 	return nil
 }
