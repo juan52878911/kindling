@@ -55,18 +55,29 @@ var Capabilities = []string{"annotations", "store", "builders", "image-files", "
 var guestProgressTimeout = 60 * time.Second
 
 // progressBody envuelve el cuerpo de una respuesta del invitado (resp.Body) y
-// corta la lectura si un solo Read no vuelve en guestProgressTimeout. Cerrar
-// el cuerpo desde el lado del daemon hace que el Read bloqueado en la
-// conexión real también se destrabe con un error, así que la goroutine que lo
-// espera no se queda huérfana.
+// corta la lectura si un solo Read no vuelve en su plazo. Cerrar el cuerpo
+// desde el lado del daemon hace que el Read bloqueado en la conexión real
+// también se destrabe con un error, así que la goroutine que lo espera no se
+// queda huérfana.
 type progressBody struct {
-	body io.ReadCloser
+	body  io.ReadCloser
+	plazo time.Duration
 }
 
 // wrapGuestBody es cómo se usa progressBody: se llama justo tras
 // guestClient.Do, sobre resp.Body, antes de pasarlo a quien vaya a leerlo
-// (LeerCuerpo, io.Copy, el escáner de /exec/stream).
-func wrapGuestBody(body io.ReadCloser) io.ReadCloser { return &progressBody{body: body} }
+// (LeerCuerpo, io.Copy). Usa guestProgressTimeout como plazo de inactividad.
+func wrapGuestBody(body io.ReadCloser) io.ReadCloser {
+	return wrapGuestBodyCon(body, guestProgressTimeout)
+}
+
+// wrapGuestBodyCon es wrapGuestBody con un plazo de inactividad propio. Lo usa
+// el flujo de /exec/stream, donde un comando puede pasar legítimamente mucho
+// más de guestProgressTimeout sin escribir nada (`sleep 120`, una compilación,
+// `npm ci`): allí el plazo sale del timeout del propio comando.
+func wrapGuestBodyCon(body io.ReadCloser, d time.Duration) io.ReadCloser {
+	return &progressBody{body: body, plazo: d}
+}
 
 func (p *progressBody) Read(b []byte) (int, error) {
 	type resultado struct {
@@ -78,9 +89,9 @@ func (p *progressBody) Read(b []byte) (int, error) {
 	select {
 	case r := <-ch:
 		return r.n, r.err
-	case <-time.After(guestProgressTimeout):
+	case <-time.After(p.plazo):
 		_ = p.body.Close() // destraba el Read de la goroutine de arriba
-		return 0, fmt.Errorf("the guest agent stopped answering (no data for %s)", guestProgressTimeout)
+		return 0, fmt.Errorf("the guest agent stopped answering (no data for %s)", p.plazo)
 	}
 }
 

@@ -235,3 +235,95 @@ func TestRenewDeMaquina(t *testing.T) {
 		t.Errorf("el sandbox cambió: ttl %d desde %v", mc.TTLSeconds, mc.TTLAt)
 	}
 }
+
+// Un comando que no escribe nada durante más de guestProgressTimeout (p. ej.
+// `sleep 120` con el tope real de 60 s) sigue llegando a su exit: el plazo del
+// flujo de /exec/stream sale del timeout del comando, no de
+// guestProgressTimeout.
+func TestExecSilencioLargoNoSeCorta(t *testing.T) {
+	viejo := guestProgressTimeout
+	guestProgressTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { guestProgressTimeout = viejo })
+
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(4 * 100 * time.Millisecond) // el comando corre en silencio
+		fmt.Fprintln(w, `{"exit":0,"duration_ms":400}`)
+	}))
+	defer g.Close()
+
+	body, code, err := openGuestExec(context.Background(), g.URL, api.ExecRequest{Cmd: []string{"sleep", "1"}})
+	if err != nil {
+		t.Fatalf("%d %v", code, err)
+	}
+	defer body.Close()
+	var last api.ExecEvent
+	for ev := range readExecEvents(body, 1<<20) {
+		last = ev
+	}
+	if last.Error != "" {
+		t.Fatalf("comando silencioso pero vivo fue cortado: %q", last.Error)
+	}
+	if last.Exit == nil || *last.Exit != 0 {
+		t.Fatalf("esperaba exit 0, got %+v", last)
+	}
+}
+
+// Pero un invitado que calla más allá del timeout del comando más
+// execBodyGrace sí se corta (D-01 sigue en pie para /exec/stream).
+func TestExecSilencioTrasElTimeoutSeCorta(t *testing.T) {
+	viejo := execBodyGrace
+	execBodyGrace = 50 * time.Millisecond
+	t.Cleanup(func() { execBodyGrace = viejo })
+
+	listo := make(chan struct{})
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select { // un agente colgado: nunca manda el evento final
+		case <-r.Context().Done():
+		case <-listo:
+		}
+	}))
+	defer g.Close()
+	defer close(listo)
+
+	req := api.ExecRequest{Cmd: []string{"sleep", "60"}, TimeoutSeconds: 1}
+	if got, want := execBodyTimeout(req), time.Second+execBodyGrace; got != want {
+		t.Fatalf("execBodyTimeout = %s, quería %s", got, want)
+	}
+	body, code, err := openGuestExec(context.Background(), g.URL, req)
+	if err != nil {
+		t.Fatalf("%d %v", code, err)
+	}
+	defer body.Close()
+	inicio := time.Now()
+	var last api.ExecEvent
+	for ev := range readExecEvents(body, 1<<20) {
+		last = ev
+	}
+	if d := time.Since(inicio); d > 10*time.Second {
+		t.Fatalf("el flujo tardó %s en cortarse; quería ~%s", d, execBodyTimeout(req))
+	}
+	if !strings.Contains(last.Error, "stopped answering") {
+		t.Fatalf("esperaba un corte por inactividad, got %+v", last)
+	}
+}
+
+// Sin timeout explícito, el plazo es ExecDefaultTimeout más el margen, nunca
+// guestProgressTimeout; una petición inválida (que handleExec ya rechaza)
+// cae en el tope.
+func TestExecBodyTimeout(t *testing.T) {
+	if got, want := execBodyTimeout(api.ExecRequest{Cmd: []string{"true"}}), api.ExecDefaultTimeout+execBodyGrace; got != want {
+		t.Fatalf("por defecto: %s, quería %s", got, want)
+	}
+	if got, want := execBodyTimeout(api.ExecRequest{}), api.ExecMaxTimeout+execBodyGrace; got != want {
+		t.Fatalf("inválida: %s, quería %s", got, want)
+	}
+	if got := execBodyTimeout(api.ExecRequest{Cmd: []string{"true"}}); got <= guestProgressTimeout {
+		t.Fatalf("el plazo de exec (%s) no debe ser menor que guestProgressTimeout (%s)", got, guestProgressTimeout)
+	}
+}
