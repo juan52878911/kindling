@@ -113,11 +113,15 @@ type Decision struct {
 }
 
 // Estados de la microVM de una capa al llegar una orden (ReplicaInfo.State).
+// Son los de la máquina en el daemon (api.State) en ese momento: frozen,
+// paused o running, más new cuando no había ninguna. Hasta 0.14 "running" se
+// decía "warm", que en el daemon de 0.13 significaba justo lo contrario
+// (congelada); por eso cambió.
 const (
-	ReplicaFrozen = "frozen" // congelada en disco: se descongeló (thaw)
-	ReplicaPaused = "paused" // pausada en memoria: se reanudó (resume)
-	ReplicaWarm   = "warm"   // ya estaba despierta
-	ReplicaNew    = "new"    // no había ninguna: se restauró del dorado
+	ReplicaFrozen  = "frozen"  // congelada en disco: se descongeló (thaw)
+	ReplicaPaused  = "paused"  // pausada en memoria: se reanudó (resume)
+	ReplicaRunning = "running" // ya estaba despierta: no hubo que despertarla
+	ReplicaNew     = "new"     // no había ninguna: se restauró del dorado
 )
 
 // ReplicaInfo es cómo estaba la microVM que sirvió una capa y lo que costó
@@ -125,7 +129,7 @@ const (
 type ReplicaInfo struct {
 	// Model es el modelo del registro del gateway.
 	Model string `json:"model"`
-	// State: frozen | paused | warm | new.
+	// State: frozen | paused | running | new.
 	State string `json:"state"`
 	// WakeMS es lo que tardó en estar lista (0 si ya lo estaba).
 	WakeMS float64 `json:"wake_ms,omitempty"`

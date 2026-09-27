@@ -152,7 +152,7 @@ o desplegado antes) no puede mandar ninguno; entonces los marca el `.chispas`
 de `"slots"` de la tarea, en proceso. Si la tarea pone `"slots"`, gana ese.
 
 La decisión trae `chispa_replica`: `state` (`frozen` = se descongeló,
-`paused` = se reanudó, `warm` = ya estaba despierta, `new` = se restauró del
+`paused` = se reanudó, `running` = ya estaba despierta, `new` = se restauró del
 dorado), `wake_ms` y `request_ms`; la habitación de demo lo enseña en el paso
 de Chispa de la traza. Si la réplica no contesta o miente, la orden escala
 como una duda (`reason: "chispa_error"`), no da un 503.
@@ -313,7 +313,7 @@ de 128 MiB:
 
 | Réplica dormida → decisión (cliente, p50) | Antes | Ahora |
 |---|---|---|
-| Congelada (warm) | 152 ms | **27 ms** |
+| Congelada (frozen) | 152 ms | **27 ms** |
 | Pausada (nivel nuevo, `kling ai serve -paused-mib`, 256 MiB por defecto) | — | **2,2 ms**, a cambio de ~36 MiB de RSS por réplica |
 
 Con el nivel pausada, una tarea Chispa pequeña y popular vuelve a estar en el

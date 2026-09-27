@@ -226,7 +226,7 @@ despliegue del dorado, confianza decidida del lado del gateway. Si el dorado
 se desplegó con `-slots`, los huecos también los marca la réplica (una sola
 ida y vuelta) y `"slots"` sobra en la tarea; si la tarea lo pone, gana el
 `.chispas` local, en proceso. La respuesta trae `chispa_replica`
-(`{"model", "state": "frozen" | "paused" | "warm" | "new", "wake_ms",
+(`{"model", "state": "frozen" | "paused" | "running" | "new", "wake_ms",
 "request_ms"}`) y, si la réplica no contesta o su respuesta no pasa la
 validación, la orden escala como una duda con `reason: "chispa_error"` y
 `chispa_error` (las plantillas siguen contestando sin tocar la microVM).

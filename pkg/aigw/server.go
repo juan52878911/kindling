@@ -351,7 +351,7 @@ func (g *Gateway) replicaCounts(ctx context.Context) map[string]replicaCount {
 		case api.StateRunning:
 			c.running++
 		case api.StateWarm:
-			c.warm++
+			c.frozen++
 		}
 		out[name] = c
 	}

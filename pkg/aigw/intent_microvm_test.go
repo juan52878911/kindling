@@ -141,8 +141,8 @@ func TestIntentMicroVMIntentAndSlots(t *testing.T) {
 
 	// Ya despierta: sin despertar.
 	d = decideTicket(t, g, helpText)
-	if d.ChispaReplica == nil || d.ChispaReplica.State != intent.ReplicaWarm || d.ChispaReplica.WakeMS != 0 {
-		t.Fatalf("warm: %+v", d.ChispaReplica)
+	if d.ChispaReplica == nil || d.ChispaReplica.State != intent.ReplicaRunning || d.ChispaReplica.WakeMS != 0 {
+		t.Fatalf("running: %+v", d.ChispaReplica)
 	}
 	// Pausada: se reanuda.
 	reps.wake("resume", 2*time.Millisecond)

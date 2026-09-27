@@ -128,7 +128,7 @@ h1 .k { font-family: var(--mono); font-weight: 600; color: var(--accent); }
 }
 .m .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-3); }
 .m.running .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
-.m.warm .dot { background: #38bdf8; }
+.m.frozen .dot, .m.warm .dot { background: #38bdf8; }
 .m .mn { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .m .ms { color: var(--ink-2); font-size: 12px; }
 .m .mm { font-family: var(--mono); font-size: 12px; min-width: 64px; text-align: right; }

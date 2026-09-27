@@ -229,9 +229,9 @@ func (r guestIntent) ClassifyIntent(ctx context.Context, text, lang string) (int
 
 // replicaInfo traduce el despertar del planificador al estado de la traza:
 // thaw = estaba congelada, resume = pausada, restore = no había (del dorado),
-// y sin despertar (o adopt, ya corría) = despierta.
+// y sin despertar (o adopt, ya corría) = running.
 func replicaInfo(model string, w *scheduler.WakeTrace, req time.Duration) *intent.ReplicaInfo {
-	ri := &intent.ReplicaInfo{Model: model, State: intent.ReplicaWarm, RequestMS: msOf(req)}
+	ri := &intent.ReplicaInfo{Model: model, State: intent.ReplicaRunning, RequestMS: msOf(req)}
 	if w == nil {
 		return ri
 	}

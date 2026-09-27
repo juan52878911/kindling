@@ -19,7 +19,7 @@ const I18N = {
     lstatus: { on: "activa", unavailable: "no disponible", off: "apagada", forced: "forzada" },
     where: { gateway: "gateway", microvm: "microVM", process: "proceso" },
     machines: "MicroVMs de las capas", machinesHelp: "Cada capa lenta vive en una microVM de kindling: congelada (0 CPU) hasta que una orden la necesita, descongelada en milisegundos y congelada otra vez al quedarse ociosa.",
-    mstate: { running: "despierta", warm: "congelada", stopped: "parada", created: "creada" },
+    mstate: { running: "despierta", frozen: "congelada", warm: "congelada", stopped: "parada", created: "creada" },
     noMachines: "Ninguna microVM de las capas todavía: se crean con la primera orden que las necesita.",
     noDaemon: "Sin daemon (-H): no se ven las máquinas.", wake: { thaw: "descongelada", resume: "reanudada (pausada)", restore: "creada del dorado", adopt: "adoptada" }, warmNow: "ya despierta",
     st: { answered: "decidió", escalated: "escala", unavailable: "no disponible", disabled: "apagada por su evaluación",
@@ -49,7 +49,7 @@ const I18N = {
     lstatus: { on: "on", unavailable: "unavailable", off: "off", forced: "forced" },
     where: { gateway: "gateway", microvm: "microVM", process: "process" },
     machines: "The layers' microVMs", machinesHelp: "Each slow layer lives in a kindling microVM: frozen (0 CPU) until a command needs it, thawed in milliseconds and frozen again when idle.",
-    mstate: { running: "awake", warm: "frozen", stopped: "stopped", created: "created" },
+    mstate: { running: "awake", frozen: "frozen", warm: "frozen", stopped: "stopped", created: "created" },
     noMachines: "No layer microVMs yet: they are created by the first command that needs them.",
     noDaemon: "No daemon (-H): machines are not shown.", wake: { thaw: "thawed", resume: "resumed (paused)", restore: "restored from golden", adopt: "adopted" }, warmNow: "already awake",
     st: { answered: "decided", escalated: "escalates", unavailable: "unavailable", disabled: "off by its eval",
@@ -326,17 +326,17 @@ function renderMachines(m) {
     const mine = ms.filter((x) => x.layer === L);
     if (!mine.length) continue;
     const rows = mine.map((x) => {
-      if (x.state === "running") running++; else if (x.state === "warm") frozen++;
+      if (x.state === "running") running++; else if (x.state === "frozen" || x.state === "warm") frozen++;
       mem += x.mem_mib || 0;
       return el("li", { class: "m " + x.state },
         el("span", { class: "dot", "aria-hidden": "true" }),
         el("span", { class: "mn", text: x.name, title: x.from || "" }),
         el("span", { class: "ms", text: T.mstate[x.state] || x.state }),
-        el("span", { class: "mm", text: x.state === "running" && x.mem_mib ? x.mem_mib + " MiB" : x.state === "warm" ? "0 CPU" : "—" }));
+        el("span", { class: "mm", text: x.state === "running" && x.mem_mib ? x.mem_mib + " MiB" : x.state === "frozen" || x.state === "warm" ? "0 CPU" : "—" }));
     });
     box.append(el("div", { class: "mgroup", "data-layer": L }, el("h3", { text: T.layers[L] }), el("ul", {}, ...rows)));
   }
-  sum.textContent = ms.length ? `${running} ${T.mstate.running} · ${frozen} ${T.mstate.warm}${mem ? " · " + mem + " MiB" : ""}` : "";
+  sum.textContent = ms.length ? `${running} ${T.mstate.running} · ${frozen} ${T.mstate.frozen}${mem ? " · " + mem + " MiB" : ""}` : "";
 }
 
 function renderHistory() {

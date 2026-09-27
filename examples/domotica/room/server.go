@@ -58,7 +58,7 @@ type Decided struct {
 type Machine struct {
 	Name   string `json:"name"`
 	Layer  string `json:"layer"`
-	State  string `json:"state"` // running | warm (congelada) | stopped …
+	State  string `json:"state"` // running | frozen (warm en un daemon 0.13) | stopped …
 	MemMiB int64  `json:"mem_mib"`
 	From   string `json:"from,omitempty"`
 }

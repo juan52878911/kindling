@@ -83,10 +83,10 @@ func FromIntent(g intent.Decision) Decision {
 
 // Estados de la microVM de una capa al llegar una orden (ReplicaInfo.State).
 const (
-	ReplicaFrozen = intent.ReplicaFrozen // congelada en disco: se descongeló (thaw)
-	ReplicaPaused = intent.ReplicaPaused // pausada en memoria: se reanudó (resume)
-	ReplicaWarm   = intent.ReplicaWarm   // ya estaba despierta
-	ReplicaNew    = intent.ReplicaNew    // no había ninguna: se restauró del dorado
+	ReplicaFrozen  = intent.ReplicaFrozen  // congelada en disco: se descongeló (thaw)
+	ReplicaPaused  = intent.ReplicaPaused  // pausada en memoria: se reanudó (resume)
+	ReplicaRunning = intent.ReplicaRunning // ya estaba despierta
+	ReplicaNew     = intent.ReplicaNew     // no había ninguna: se restauró del dorado
 )
 
 // Tipos de la cascada genérica.

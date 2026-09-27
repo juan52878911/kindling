@@ -213,7 +213,7 @@ func (m *metrics) addInflight(d int64) {
 }
 
 // replicaCount es cuántas réplicas de un modelo hay en cada estado.
-type replicaCount struct{ running, warm int }
+type replicaCount struct{ running, frozen int }
 
 // write vuelca todo. replicas y extra los calcula quien llama (sin el candado
 // de las métricas: preguntar al daemon no puede ocurrir con él tomado).
@@ -287,7 +287,7 @@ func (m *metrics) write(w io.Writer, js chispaStats, samples map[string]int, rep
 	fmt.Fprintf(w, "# HELP kling_ai_von_replicas VON replicas of this gateway by state.\n# TYPE kling_ai_von_replicas gauge\n")
 	for _, mo := range sortedKeys(replicas) {
 		fmt.Fprintf(w, "kling_ai_von_replicas{model=%q,state=\"running\"} %d\n", mo, replicas[mo].running)
-		fmt.Fprintf(w, "kling_ai_von_replicas{model=%q,state=\"warm\"} %d\n", mo, replicas[mo].warm)
+		fmt.Fprintf(w, "kling_ai_von_replicas{model=%q,state=\"frozen\"} %d\n", mo, replicas[mo].frozen)
 	}
 	fmt.Fprintf(w, "# HELP kling_ai_samples Recorded VON answers available for recalibration.\n# TYPE kling_ai_samples gauge\n")
 	for _, t := range sortedKeys(samples) {

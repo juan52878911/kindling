@@ -63,7 +63,7 @@ func TestRemoteIntent(t *testing.T) {
 func TestRemoteSpansReachEncoder(t *testing.T) {
 	m := newTestMatcher(t)
 	text := "qué oscuro está el pasillo"
-	rep := &ReplicaInfo{Model: "chispa-room", State: ReplicaWarm}
+	rep := &ReplicaInfo{Model: "chispa-room", State: ReplicaRunning}
 	rem := &fakeRemote{ans: RemoteAnswer{Label: OutOfScope, Prob: 0.8, Confident: true, HasSlots: true,
 		Spans: []slots.Span{spanOf(text, SlotArea, "pasillo")}, Replica: rep}}
 	enc := &fakeEncoder{intent: "turn_on", prob: 0.99, confident: true}
