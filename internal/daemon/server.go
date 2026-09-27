@@ -54,6 +54,22 @@ var Capabilities = []string{"annotations", "store", "builders", "image-files", "
 // cambia en el proceso real.
 var guestProgressTimeout = 60 * time.Second
 
+// guestProxyIdleTimeout es el plazo de inactividad del cuerpo en POST
+// /machines/{ref}/guest. No puede ser guestProgressTimeout: un servidor MCP
+// Streamable HTTP contesta con cabeceras de text/event-stream enseguida y manda
+// el evento con el resultado cuando la herramienta acaba, y una respuesta de
+// chat/completions sin streaming (pkg/von) puede tardar minutos en un modelo en
+// CPU. Se le da el mismo margen que a las cabeceras (ResponseHeaderTimeout de
+// guestClient): lo que sí sigue acotado es el goteo infinito.
+var guestProxyIdleTimeout = 5 * time.Minute
+
+// guestRequestMaxBody es el tope de la petición a /guest, que lleva dentro el
+// cuerpo entero que se reenvía al invitado (una llamada JSON-RPC con un fichero
+// o una imagen en base64, un prompt largo). Va a la escala de la respuesta que
+// se admite (GuestMaxBodyCap), no al MiB de los demás handlers JSON; el doble
+// porque el cuerpo viaja como cadena JSON escapada.
+const guestRequestMaxBody = 2 * api.GuestMaxBodyCap
+
 // progressBody envuelve el cuerpo de una respuesta del invitado (resp.Body) y
 // corta la lectura si un solo Read no vuelve en su plazo. Cerrar el cuerpo
 // desde el lado del daemon hace que el Read bloqueado en la conexión real
@@ -400,7 +416,12 @@ const jsonMaxBody = 1 << 20 // 1 MiB
 // Pasarse el tope no trunca en silencio: http.MaxBytesReader hace que el
 // Decode falle con un *http.MaxBytesError, que jsonBodyStatus traduce a 413.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, jsonMaxBody)
+	return decodeJSONCon(w, r, v, jsonMaxBody)
+}
+
+// decodeJSONCon es decodeJSON con un tope propio.
+func decodeJSONCon(w http.ResponseWriter, r *http.Request, v any, max int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
@@ -701,7 +722,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // queda colgado hasta agotar el plazo. El daemon sí está en la red buena.
 func (s *Server) handleGuest(w http.ResponseWriter, r *http.Request) {
 	var req api.GuestRequest
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSONCon(w, r, &req, guestRequestMaxBody); err != nil {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
@@ -803,9 +824,10 @@ func proxyGuest(ctx context.Context, addr string, req api.GuestRequest,
 
 	// El límite evita que un invitado que se desmadre agote la memoria del
 	// daemon. Se falla en vez de truncar: una respuesta a medias parece buena.
-	// wrapGuestBody (D-01) acota, además, el PROGRESO: un cuerpo que gotea un
-	// byte cada minuto no debe poder tener esto leyendo para siempre.
-	body, err := api.LeerCuerpo(wrapGuestBody(resp.Body), maxBody)
+	// wrapGuestBodyCon (D-01) acota, además, el PROGRESO: un cuerpo que gotea
+	// un byte cada minuto no debe poder tener esto leyendo para siempre. Con
+	// guestProxyIdleTimeout y no guestProgressTimeout: ver su comentario.
+	body, err := api.LeerCuerpo(wrapGuestBodyCon(resp.Body, guestProxyIdleTimeout), maxBody)
 	if err != nil {
 		return api.GuestResponse{}, http.StatusBadGateway, err
 	}

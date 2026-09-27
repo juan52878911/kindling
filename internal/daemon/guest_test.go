@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -104,5 +106,70 @@ func TestProxyGuestProbeUsaLaEspera(t *testing.T) {
 		api.GuestRequest{ProbeOnly: true, WaitMS: 100}, nunca)
 	if err == nil || code != http.StatusGatewayTimeout {
 		t.Fatalf("probe_only con el puerto cerrado dentro: code=%d err=%v; quería 504", code, err)
+	}
+}
+
+// invitadoLento contesta con las cabeceras enseguida y el cuerpo tras callar
+// `silencio`: lo que hace un servidor MCP Streamable HTTP (text/event-stream)
+// mientras la herramienta trabaja, o un modelo sin streaming que tarda.
+func invitadoLento(t *testing.T, silencio time.Duration) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(silencio)
+		io.WriteString(w, "data: {\"ok\":true}\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// Una respuesta que calla más de guestProgressTimeout tras las cabeceras no la
+// corta /guest: su plazo de inactividad es guestProxyIdleTimeout. Con el de
+// 60 s, cualquier herramienta MCP o chat/completions de más de un minuto
+// volvía como 502.
+func TestProxyGuestAguantaSilencioMasLargoQueElDeProgreso(t *testing.T) {
+	viejoP, viejoI := guestProgressTimeout, guestProxyIdleTimeout
+	t.Cleanup(func() { guestProgressTimeout, guestProxyIdleTimeout = viejoP, viejoI })
+	guestProgressTimeout, guestProxyIdleTimeout = 30*time.Millisecond, 5*time.Second
+
+	addr := invitadoLento(t, 200*time.Millisecond)
+	out, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/mcp", Body: "{}"}, porDial(addr))
+	if err != nil {
+		t.Fatalf("proxyGuest cortó una respuesta que solo tardaba (código %d): %v", code, err)
+	}
+	if !strings.Contains(out.Body, `"ok":true`) {
+		t.Fatalf("cuerpo = %q", out.Body)
+	}
+}
+
+// Y el goteo infinito sigue acotado: pasado guestProxyIdleTimeout, 502.
+func TestProxyGuestCortaTrasSuPlazoDeInactividad(t *testing.T) {
+	viejo := guestProxyIdleTimeout
+	t.Cleanup(func() { guestProxyIdleTimeout = viejo })
+	guestProxyIdleTimeout = 30 * time.Millisecond
+
+	addr := invitadoLento(t, 500*time.Millisecond)
+	if _, code, err := proxyGuest(context.Background(), addr, api.GuestRequest{Path: "/mcp", Body: "{}"}, porDial(addr)); err == nil || code != http.StatusBadGateway {
+		t.Fatalf("esperaba 502 por inactividad, fue %d, %v", code, err)
+	}
+}
+
+// La petición a /guest lleva dentro el cuerpo que se reenvía: una llamada con
+// un fichero de 2 MiB no puede toparse con el MiB de los demás handlers.
+func TestHandleGuestAdmiteCuerposDeMasDeUnMiB(t *testing.T) {
+	cuerpo, err := json.Marshal(api.GuestRequest{Path: "/mcp", Body: strings.Repeat("a", 2<<20)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req api.GuestRequest
+	r := httptest.NewRequest("POST", "/machines/x/guest", bytes.NewReader(cuerpo))
+	if err := decodeJSONCon(httptest.NewRecorder(), r, &req, guestRequestMaxBody); err != nil {
+		t.Fatalf("con el tope de /guest: %v", err)
+	}
+	r = httptest.NewRequest("POST", "/machines/x/guest", bytes.NewReader(cuerpo))
+	if err := decodeJSON(httptest.NewRecorder(), r, &req); err == nil {
+		t.Fatal("el tope general (1 MiB) debería rechazarlo: si no, este test no prueba nada")
 	}
 }
