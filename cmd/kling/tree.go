@@ -182,7 +182,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "ADVANCED", advanced: true, cmds: []plugin.Command{
-		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret", "credential"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
+		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret", "credential", "audit"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential", "audit"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
                                                    restarting, up to its -mem-max
   machine squeeze <ref>...                         balloon: returns the guest's free
                                                    memory to the host
@@ -200,6 +200,11 @@ var coreTree = []section{
                                                    is a 403 (repeatable; * = a segment,
                                                    final /** = any rest); it goes with
                                                    the key: repeat it when rotating
+  machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
+      [-since 10m] [-tail 200] [-json]             one line per request (method, host,
+                                                   masked path, status, credentials
+                                                   used, ms), never the key, headers,
+                                                   bodies or the query
 `},
 		{Name: "topo", Summary: "ASCII diagram of everything", Usage: `  topo                                             ASCII diagram of everything
 `},
