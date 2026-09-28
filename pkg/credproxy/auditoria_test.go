@@ -462,3 +462,20 @@ func TestAuditoriaConServidorReal(t *testing.T) {
 		t.Fatalf("registro: %+v", recs)
 	}
 }
+
+// Sin Close: con la cola vacía el registro llega al fichero enseguida, antes
+// del vaciado de cada segundo. Es lo que sobrevive a un SIGKILL (kling-vz).
+func TestAuditoriaVaciaSinEsperarAlCierre(t *testing.T) {
+	path := filepath.Join(t.TempDir(), AuditFile)
+	a := NewAuditor(path, nil)
+	defer a.Close()
+	a.Record(Record{Kind: KindHTTP, Path: "/ya"})
+	limite := time.Now().Add(auditCada / 2)
+	for time.Now().Before(limite) {
+		if b, _ := os.ReadFile(path); strings.Contains(string(b), `"/ya"`) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("el registro no llegó al fichero en %v", auditCada/2)
+}

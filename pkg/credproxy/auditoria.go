@@ -9,8 +9,10 @@ package credproxy
 //
 // EL CAMINO CALIENTE no espera al disco: la petición deja su registro en un
 // canal con un envío que no bloquea, y una sola goroutine lo codifica y lo
-// escribe con buffer (se vacía cada segundo o cada auditLote registros, sin
-// fsync: es observabilidad, no un diario transaccional). Si el canal está
+// escribe con buffer (se vacía en cuanto la cola queda vacía, o cada auditLote
+// registros si no para de llegar, y cada segundo por si acaso; sin fsync: es
+// observabilidad, no un diario transaccional, y lo que ya se escribió sobrevive
+// a que maten el proceso). Si el canal está
 // lleno —el disco no da abasto o un invitado dispara a saco— el registro se
 // descarta y se cuenta; la cuenta viaja en el campo dropped del siguiente
 // registro que sí se escriba (o en uno de tipo "dropped" si no llega ninguno),
@@ -180,7 +182,10 @@ func (a *Auditor) bucle() {
 		select {
 		case r := <-a.ch:
 			a.escribir(r)
-			if a.enBuffer >= auditLote {
+			// Con la cola vacía se vacía ya: lo escrito llega al kernel y
+			// sobrevive a un SIGKILL del proceso (el daemon mata así a kling-vz
+			// al congelar o parar). Solo se acumula mientras hay más esperando.
+			if a.enBuffer >= auditLote || len(a.ch) == 0 {
 				a.vaciar()
 			}
 		case <-t.C:
