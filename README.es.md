@@ -1169,11 +1169,18 @@ kling machine credential pagos -domain api.stripe.com -env STRIPE_API_KEY -f cla
 
 El método tiene que coincidir exactamente (`GET` no incluye `HEAD`). La ruta se compara
 después de decodificarla y pasarla por `path.Clean`, así que `/v1/../admin` es `/admin`, y
-al proveedor le llega esa ruta limpia, la misma que se comprobó. La query no se compara.
-Sin `-allow-request` se permite toda petición al dominio, como antes. La lista va con la
-clave: al rotar una clave hay que volver a pasar `-allow-request`, o la nueva queda sin
-restricciones (el CLI dice cuál de los dos casos aplica). `kling template credential` acepta
-el mismo flag.
+al proveedor le llega esa ruta limpia, la misma que se comprobó. La query no se compara, y
+una entrada no puede fijar parámetros de query. Sin `-allow-request` se permite toda
+petición al dominio, como antes. La lista va con la clave: al rotar una clave hay que
+volver a pasar `-allow-request`, o la nueva queda sin restricciones (el CLI dice cuál de
+los dos casos aplica). `kling template credential` acepta el mismo flag.
+
+Con `-allow-request` de por medio, una petición cuya ruta CRUDA sea ambigua —una barra o un
+punto codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
+parámetro de ruta con `;`, o un segmento `.`/`..` sin decodificar— recibe un 403 sin
+normalizarla ni compararla: el proveedor es libre de leer esa ruta cruda de otro modo que
+`path.Clean`, y equivocarse firmaría una petición para una ruta que nunca se llegó a
+comprobar. Sin `-allow-request` esta comprobación no se hace.
 
 Los streams pueden durar mucho. El proxy no tiene un plazo total, solo tres límites: 60 s
 para las cabeceras de la respuesta, 120 s de **inactividad** (cualquier byte en cualquier

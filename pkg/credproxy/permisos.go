@@ -18,7 +18,20 @@ package credproxy
 // antes de comparar, así "/v1/../admin" o "/v1/%2e%2e/admin" se comparan como
 // "/admin". Y para que el proveedor no vea algo distinto de lo que se
 // comprobó, cuando el dominio tiene alguna credencial con Allow el proxy
-// reenvía esa ruta normalizada, no la que mandó el invitado (ver rutaSaliente).
+// reenvía esa ruta normalizada, no la que mandó el invitado (ver urlSaliente).
+//
+// AMBIGÜEDAD: normalizar asume que "/", "." y ".." significan lo mismo para
+// nosotros que para el proveedor, y eso no siempre es así (%2F, ';', barra
+// invertida...). Por eso, cuando el dominio tiene alguna credencial con
+// Allow, ServeHTTP rechaza con 403 —antes de mirar el método o la ruta contra
+// las reglas— cualquier petición cuya ruta CRUDA sea ambigua en ese sentido
+// (ver rutaAmbigua). Sin ninguna credencial con Allow esto no se comprueba: el
+// comportamiento de antes de F1 no cambia.
+//
+// QUERY: no entra en la comparación ni se considera para la ambigüedad; una
+// entrada de Allow no puede acotar parámetros de query. Si algún día hiciera
+// falta, que sea una entrada explícita en el formato, no una regla implícita
+// aquí.
 
 import (
 	"fmt"
@@ -159,4 +172,67 @@ func urlSaliente(u *url.URL) *url.URL {
 		p += "/"
 	}
 	return &url.URL{Path: p, RawQuery: u.RawQuery}
+}
+
+// rutaAmbigua mira la ruta CRUDA de la petición (sin decodificar, tal y como
+// llegó por el cable) y dice, con un motivo, si tiene algo que un proveedor
+// podría leer de otro modo que como la compara Allow: path.Clean asume que
+// "/" separa segmentos y que ".."/"." navegan, pero eso es UNA interpretación,
+// no la única. Un %2F, un %5C o una barra invertida literal pueden ser, para
+// el proveedor, un carácter normal de un segmento en vez de un separador; un
+// ";algo" puede ser un parámetro de ruta que su framework quita antes de
+// enrutar; y una "//" puede colapsar antes o después de mirar el método. Con
+// Allow de por medio no vale la pena intentar adivinar esa interpretación:
+// mejor rechazar la ambigüedad que arriesgarse a firmar algo que el proveedor
+// acaba viendo como una ruta distinta de la que se comprobó.
+//
+// Sin ninguna credencial del dominio con Allow no se llama a esta función: el
+// invitado puede mandar la ruta que quiera y sale tal cual, como antes de que
+// existiera Allow (ver ServeHTTP).
+func rutaAmbigua(u *url.URL) string {
+	crudo := u.EscapedPath()
+	switch {
+	case strings.Contains(crudo, "\\"):
+		return "backslash in the path"
+	case strings.Contains(crudo, "//"):
+		return "double slash in the path"
+	case contieneInsensible(crudo, "%5c"):
+		return "encoded backslash (%5C) in the path"
+	case contieneInsensible(crudo, "%2f"):
+		return "encoded slash (%2F) in the path"
+	}
+	p := strings.TrimPrefix(crudo, "/")
+	for _, seg := range strings.Split(p, "/") {
+		if strings.Contains(seg, ";") {
+			return "path parameter (;) in the path"
+		}
+		if d := decodificarPuntos(seg); d == "." || d == ".." {
+			return "dot segment in the path"
+		}
+	}
+	return ""
+}
+
+// contieneInsensible dice si s contiene tok (en minúsculas) sin mirar
+// mayúsculas: un %2F y un %2f son la misma ambigüedad.
+func contieneInsensible(s, tokMinusculas string) bool {
+	return strings.Contains(strings.ToLower(s), tokMinusculas)
+}
+
+// decodificarPuntos cambia cada %2e/%2E de seg por ".", para reconocer un
+// segmento que codifica (del todo o en parte) "." o ".." aunque no llegue a
+// decodificarse por el camino normal. No toca nada más: no es un decodificador
+// de percent-encoding general, solo lo justo para esta comprobación.
+func decodificarPuntos(seg string) string {
+	var b strings.Builder
+	for i := 0; i < len(seg); {
+		if i+3 <= len(seg) && seg[i] == '%' && seg[i+1] == '2' && (seg[i+2] == 'e' || seg[i+2] == 'E') {
+			b.WriteByte('.')
+			i += 3
+			continue
+		}
+		b.WriteByte(seg[i])
+		i++
+	}
+	return b.String()
 }

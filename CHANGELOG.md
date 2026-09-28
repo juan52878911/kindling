@@ -12,6 +12,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **`-allow-request` rechaza rutas ambiguas en vez de normalizarlas a ciegas.** El proxy
+  comparaba `-allow-request` contra la ruta ya decodificada y limpiada con `path.Clean`,
+  pero eso asume que el proveedor lee `/`, `.` y `..` igual que nosotros. Con alguna
+  credencial del dominio con `Allow`, una petición cuya ruta CRUDA lleve una barra o un
+  punto codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
+  parámetro de ruta con `;` o un segmento `.`/`..` sin decodificar recibe ahora 403 antes de
+  normalizar y comparar, sin leer el cuerpo ni abrir la salida. Sin `-allow-request` no
+  cambia nada.
 - **Secretos por sesión de MMDS (`sessions[<id>]`) retirados.** El id de sesión se
   acuña en el bridge dentro del invitado (PID 1, root) justo al lanzar cada hijo, y
   como el bridge y el servidor MCP corren como root y leen el almacén MMDS completo,

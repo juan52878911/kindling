@@ -228,6 +228,15 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   `pkg/credproxy`, no una reimplementación aparte.
   El 80 y el 443 de la IP del proxy van al proxy: un `https://dominio` desde dentro
   muere en el acto (3 ms medidos) en vez de esperar al plazo del SDK.
+- **Rutas ambiguas, rechazadas antes de normalizar.** Con alguna credencial del dominio
+  con `Allow`, el proxy mira la ruta CRUDA (`r.URL.EscapedPath()`, antes de decodificar)
+  y responde 403 —sin leer el cuerpo ni abrir la salida— si lleva algo que un proveedor
+  podría interpretar distinto de como lo hace `path.Clean`: una barra o un punto
+  codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
+  parámetro de ruta con `;` (tipo `;jsessionid=`), o un segmento `.`/`..` sin decodificar.
+  No intenta adivinar qué haría el proveedor con eso: rechaza la ambigüedad en vez de
+  arriesgarse a firmar una petición para una ruta que nunca se comprobó de verdad. Sin
+  ninguna credencial con `Allow` esto no se mira, igual que antes de este cambio.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
   no es un secreto (la capacidad es la red del netns de esa máquina hacia su proxy, y
   el proxy sustituye por dominio, no por marcador), así que una máquina con
@@ -401,9 +410,11 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   la clave o la saque a otro dominio, no que la use contra el suyo: es un oráculo de
   ella. Lo acota la clave misma (restringida, de solo lectura, con límites de gasto en
   el proveedor). `-allow-request` acota el oráculo a unas rutas, pero no mira la query
-  ni el cuerpo, y lo que no controla es cómo interpreta el proveedor la ruta que recibe:
-  un servidor que trate `;` o `\` como separadores, o `..;` como `..`, ve otra ruta que
-  el proxy. Contra eso, patrones exactos mejor que `/**`. La redacción del eco es defensa
+  ni el cuerpo. Una ruta cruda ambigua (`;`, `\`, `%2F`, `%5C`, `%2E`, `//`, `.`/`..` sin
+  decodificar) se rechaza en vez de normalizarse (ver 4), así que ya no depende de
+  adivinar cómo la lee el proveedor; lo que queda sin cubrir es una ambigüedad que no
+  esté en esa lista —una convención propia de un framework concreto, por ejemplo—, y ahí
+  sigue valiendo usar patrones exactos mejor que `/**`. La redacción del eco es defensa
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
   vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
   mismas reglas antes de reenviar.

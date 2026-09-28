@@ -1152,11 +1152,18 @@ kling machine credential payments -domain api.stripe.com -env STRIPE_API_KEY -f 
 
 The method must match exactly (`GET` does not cover `HEAD`). The path is compared after
 decoding and `path.Clean`, so `/v1/../admin` is `/admin`. The provider then receives that
-cleaned path, the one that was checked. The query is not compared. With no
-`-allow-request`, every request to the domain is allowed, as before. The list belongs to
-the key: when you rotate a key, pass `-allow-request` again, or the new key has no
-restrictions (the CLI prints which one applies). `kling template credential` takes the
-same flag.
+cleaned path, the one that was checked. The query is not compared, and an entry cannot
+pin query parameters. With no `-allow-request`, every request to the domain is allowed, as
+before. The list belongs to the key: when you rotate a key, pass `-allow-request` again, or
+the new key has no restrictions (the CLI prints which one applies). `kling template
+credential` takes the same flag.
+
+With `-allow-request` in place, a request whose **raw** path is ambiguous — an encoded
+slash or dot (`%2F`, `%5C`, `%2E`), a literal backslash, a double slash, a `;`-style path
+parameter, or a `.`/`..` segment before decoding — gets a 403 without being normalized and
+compared: a provider is free to read that raw path differently than `path.Clean` does, and
+guessing wrong would sign a request for a path that was never actually checked. Without
+`-allow-request` this check does not run.
 
 Streams can run long. The proxy has no total deadline, only three limits: 60 s for the
 response headers, 120 s of **inactivity** (renewed by every byte in either direction), and

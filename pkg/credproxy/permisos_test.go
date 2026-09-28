@@ -168,6 +168,16 @@ func TestProxyPermisosPorMetodoYRuta(t *testing.T) {
 		{"POST", "/v1/files/%2e%2e/%2e%2e/admin"},
 		{"POST", "/v1/files/..%2f..%2fadmin"},
 		{"GET", "/admin?x=/v1/balance"},
+		// Ambiguas (rutaAmbigua): con Allow de por medio ni se llega a normalizar
+		// y comparar. "/v1/x/../balance" normalizaría a algo permitido, pero
+		// lleva un segmento ".." en la ruta cruda y se rechaza antes de mirarlo.
+		{"GET", "/v1/x/../balance"},
+		{"GET", "/v1/./balance"},
+		{"POST", "/v1/files%2fa/b.txt"},
+		{"POST", "/v1/files\\a/b.txt"},
+		{"POST", "/v1/files%5ca/b.txt"},
+		{"POST", "/v1//files/a/b.txt"},
+		{"POST", "/v1/files/a;x=1/b.txt"},
 	} {
 		if code, resp := pedir(mal[0], mal[1]); code != http.StatusForbidden {
 			t.Errorf("%s %s: %d, quería 403 (%q)", mal[0], mal[1], code, resp)
@@ -182,8 +192,8 @@ func TestProxyPermisosPorMetodoYRuta(t *testing.T) {
 	mu.Lock()
 	rutas = nil
 	mu.Unlock()
-	if code, _ := pedir("GET", "/v1/x/../balance?q=1"); code != 200 {
-		t.Fatalf("GET /v1/x/../balance: %d", code)
+	if code, _ := pedir("GET", "/v1/balance?q=1"); code != 200 {
+		t.Fatalf("GET /v1/balance?q=1: %d", code)
 	}
 	if code, _ := pedir("POST", "/v1/files/dir/"); code != 200 {
 		t.Fatalf("POST /v1/files/dir/: %d", code)
@@ -192,6 +202,71 @@ func TestProxyPermisosPorMetodoYRuta(t *testing.T) {
 	defer mu.Unlock()
 	if len(rutas) != 2 || rutas[0] != "/v1/balance?q=1" || rutas[1] != "/v1/files/dir/" {
 		t.Errorf("el proveedor vio %q", rutas)
+	}
+}
+
+// Sin ambigüedad de por medio, lo que sale al proveedor es exactamente la
+// ruta cruda que se comparó contra Allow: ni un carácter más ni menos. Cubre
+// "rutaAmbigua deja pasar, y lo que se compara es lo que se reenvía".
+func TestProxyPermisosRutaReenviadaEsLaComparada(t *testing.T) {
+	var vista string
+	srv, _ := proxyCon(t, func(w http.ResponseWriter, r *http.Request) {
+		vista = r.URL.EscapedPath()
+	}, credsConPermisos(false), nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/balance", nil)
+	req.Host = "example.com"
+	req.Header.Set("Authorization", "Bearer "+testPlace)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || vista != "/v1/balance" {
+		t.Fatalf("status %d, el proveedor vio %q", resp.StatusCode, vista)
+	}
+}
+
+// TestRutaAmbigua cubre cada forma de ambigüedad por separado, y que una ruta
+// normal y corriente (sin nada raro) no se marca.
+func TestRutaAmbigua(t *testing.T) {
+	rutaCruda := func(esc string) *url.URL {
+		if esc == "" {
+			return &url.URL{}
+		}
+		u, err := url.ParseRequestURI(esc)
+		if err != nil {
+			t.Fatalf("%q: %v", esc, err)
+		}
+		return u
+	}
+	casos := []struct {
+		ruta    string
+		ambigua bool
+	}{
+		{"/v1/balance", false},
+		{"/v1/files/a/b.txt", false},
+		{"/v1/files/dir/", false},
+		{"/", false},
+		{"", false},
+		{"/v1/file%20con%20espacio", false}, // un %20 no es ninguna de las ambigüedades
+		{"/v1/a%2Fb", true},
+		{"/v1/a%2fb", true},
+		{"/v1\\admin", true},
+		{"/v1/a%5cb", true},
+		{"/v1/a%5Cb", true},
+		{"//v1/balance", true},
+		{"/v1//balance", true},
+		{"/v1/./balance", true},
+		{"/v1/../balance", true},
+		{"/v1/%2e%2e/balance", true},
+		{"/v1/%2E%2E/balance", true},
+		{"/v1/a;jsessionid=x/balance", true},
+	}
+	for _, c := range casos {
+		got := rutaAmbigua(rutaCruda(c.ruta)) != ""
+		if got != c.ambigua {
+			t.Errorf("%q: ambigua=%v, quería %v", c.ruta, got, c.ambigua)
+		}
 	}
 }
 

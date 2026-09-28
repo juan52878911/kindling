@@ -322,11 +322,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Permisos: solo se usan las credenciales que permiten este método y esta
 	// ruta. Si ninguna, 403 aquí: sin leer el cuerpo ni abrir la salida.
-	ruta := rutaNormalizada(r.URL)
-	var cs []Credential
 	restringido := false
 	for _, c := range todas {
-		restringido = restringido || len(c.reglas) > 0
+		if len(c.reglas) > 0 {
+			restringido = true
+			break
+		}
+	}
+	// Con Allow de por medio, antes de normalizar y comparar: una ruta CRUDA
+	// ambigua (ver rutaAmbigua) se rechaza aquí, sin decidir si "casaría" tras
+	// limpiarla. Sin ninguna credencial con Allow no se mira: el invitado manda
+	// lo que quiera, como antes de que existiera Allow.
+	if restringido {
+		if motivo := rutaAmbigua(r.URL); motivo != "" {
+			rechazar(w, "kindling credential proxy: ambiguous path ("+motivo+") for "+host, http.StatusForbidden)
+			return
+		}
+	}
+	ruta := rutaNormalizada(r.URL)
+	var cs []Credential
+	for _, c := range todas {
 		if c.permite(r.Method, ruta) {
 			cs = append(cs, c.Credential)
 		}
