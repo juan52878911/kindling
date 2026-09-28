@@ -49,6 +49,17 @@ func parseHosts(spec string) ([]hostSpec, error) {
 	return out, nil
 }
 
+// defaultMaxReplicas es el tope de instancias por servicio del gateway MCP.
+//
+// Antes no había ninguno (MaxReplicas 0 = sin tope): cada sesión que no cabía
+// en las instancias existentes creaba una réplica, así que 200 sesiones
+// simultáneas contra un servicio de 256 MiB (1 sesión por instancia, ver
+// gwMaxSessions) intentaban 200 microVMs y el único freno era quedarse sin
+// memoria en el host. Con tope, las sesiones que sobran reciben un 503 que el
+// cliente puede reintentar, en vez de llevarse por delante al resto del host.
+// 16 réplicas de un servicio de 2 GiB ya son 512 sesiones (32 por instancia).
+const defaultMaxReplicas = 16
+
 func cmdGateway(args []string) error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	host := hostFlag(fs)
@@ -60,6 +71,7 @@ func cmdGateway(args []string) error {
 	memory := fs.String("memory", "", "MCP service that remembers which tool resolved each request")
 	pprofOn := fs.Bool("pprof", false, "exposes /debug/pprof; temporary diagnostics only, loopback only")
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
+	maxReplicas := fs.Int("max-replicas", defaultMaxReplicas, "max instances per service when scaling out for parallel sessions (0 = unlimited; extra sessions get 503)")
 	hostsFlag := fs.String("hosts", "", "several daemons instead of one: name=endpoint,name2=endpoint2 (default: mcp.hosts, or one host, the active context)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
@@ -77,6 +89,9 @@ func cmdGateway(args []string) error {
 	// escucha fuera de loopback, activarlos regala volcados de goroutines y la
 	// línea de comandos a quien alcance el puerto, y deja que quien llame elija
 	// cuántos segundos de CPU consume /debug/pprof/profile.
+	if *maxReplicas < 0 {
+		return fmt.Errorf("-max-replicas must be >= 0 (0 = unlimited), got %d", *maxReplicas)
+	}
 	if *pprofOn && !scheduler.IsLoopback(addr) {
 		return fmt.Errorf("-pprof requires listening on loopback, and %q is not.\n"+
 			"Diagnose over a tunnel:  ssh -L 8080:127.0.0.1:8080 <host>", addr)
@@ -144,6 +159,7 @@ func cmdGateway(args []string) error {
 		}
 		gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
 		gw.KeepWarm = *keepwarm
+		gw.MaxReplicas = *maxReplicas
 		if len(tenants) > 0 {
 			gw.SetTenants(tenants)
 		}
@@ -232,6 +248,11 @@ func cmdGateway(args []string) error {
 		if *prewarm > 0 {
 			fmt.Printf("  pre-warmed:   %d instance(s) per service, ready to respond\n", *prewarm)
 		}
+	}
+	if *maxReplicas > 0 {
+		fmt.Printf("  max-replicas: %d instance(s) per service; sessions beyond that get 503\n", *maxReplicas)
+	} else {
+		fmt.Printf("  max-replicas: UNLIMITED (-max-replicas 0) — only host memory stops a burst of sessions\n")
 	}
 	if *keepwarm > 0 {
 		fmt.Printf("  keep-warm:    %d popular service(s) with their primary warm (no cold start)\n", *keepwarm)

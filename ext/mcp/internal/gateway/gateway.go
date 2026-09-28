@@ -595,6 +595,14 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, r *http.Request, servic
 		http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusTooManyRequests)
 		return
 	}
+	// El tope de réplicas tampoco es un fallo del servicio: está sano y lleno.
+	// Anotarlo como fallo lo marcaba roto en el meta justo cuando más se usaba,
+	// y un 502 invita a pensar en el invitado. 503: que el cliente reintente.
+	if errors.Is(err, scheduler.ErrMaxReplicas) {
+		http.Error(w, fmt.Sprintf("could not place session for %q: all replicas full (%v)", service, err),
+			http.StatusServiceUnavailable)
+		return
+	}
 	g.anotarFallo(service, err)
 	http.Error(w, fmt.Sprintf("could not prepare %q: %v", service, err), http.StatusBadGateway)
 }
