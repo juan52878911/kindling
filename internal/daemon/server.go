@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -34,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -243,6 +244,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /store/{ns}/{key}", s.handleStoreDelete)
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
 	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
+	mux.HandleFunc("GET /machines/{ref}/credaudit", s.handleCredAudit)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
 	mux.HandleFunc("POST /machines/{ref}/renew", s.handleRenew)
 
@@ -674,6 +676,58 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(out))
+}
+
+// handleCredAudit sirve el registro de auditoría del proxy de credenciales de
+// una máquina como NDJSON (una api.CredAuditRecord por línea). Funciona con la
+// máquina corriendo, congelada o parada: es un fichero de su directorio.
+func (s *Server) handleCredAudit(w http.ResponseWriter, r *http.Request) {
+	q, err := parseCredAuditQuery(r.URL.Query(), time.Now())
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	recs, err := s.mgr.CredAudit(r.PathValue("ref"), q)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	enc := json.NewEncoder(w)
+	for _, rec := range recs {
+		_ = enc.Encode(rec)
+	}
+}
+
+// parseCredAuditQuery lee tail (defecto 200, 0 = todo), denied (booleano) y
+// since (RFC 3339 o una duración hacia atrás desde now, "10m"). Como en
+// handleLogs, un valor que no se entiende es un 400, no el defecto callado.
+func parseCredAuditQuery(v url.Values, now time.Time) (api.CredAuditQuery, error) {
+	q := api.CredAuditQuery{Tail: 200}
+	if t := v.Get("tail"); t != "" {
+		n, err := strconv.Atoi(t)
+		if err != nil || n < 0 {
+			return q, fmt.Errorf("invalid tail %q: must be a non-negative integer", t)
+		}
+		q.Tail = n
+	}
+	if d := v.Get("denied"); d != "" {
+		b, err := strconv.ParseBool(d)
+		if err != nil {
+			return q, fmt.Errorf("invalid denied %q: must be 1, 0, true or false", d)
+		}
+		q.Denied = b
+	}
+	if since := v.Get("since"); since != "" {
+		if ts, err := time.Parse(time.RFC3339, since); err == nil {
+			q.Since = ts
+		} else if d, err := time.ParseDuration(since); err == nil && d > 0 {
+			q.Since = now.Add(-d)
+		} else {
+			return q, fmt.Errorf("invalid since %q: must be an RFC 3339 time or a positive duration like 10m", since)
+		}
+	}
+	return q, nil
 }
 
 func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {

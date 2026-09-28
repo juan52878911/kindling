@@ -79,7 +79,7 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 			return err
 		}
 		if len(creds) > 0 {
-			if err := registrarCredenciales(ctx, c, nil, creds); err != nil {
+			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id)); err != nil {
 				return err
 			}
 		}
@@ -91,8 +91,10 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 // máquina, que sirve el proxy en la pasarela y desvía los dominios en su DNS.
 // La clave sale del daemon y se queda en la memoria de ese proceso (SECURITY.md
 // §7). Con c nil (el daemon se reinició y la máquina siguió viva) no hay nada
-// que hacer: el kling-vz es el mismo y conserva lo que se le dio.
-func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential) error {
+// que hacer: el kling-vz es el mismo y conserva lo que se le dio. auditPath no
+// viaja: kling-vz escribe el registro junto a su socket, que está en el mismo
+// directorio de la máquina (ver vz/cmd/kling-vz).
+func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string) error {
 	if c == nil {
 		return nil
 	}

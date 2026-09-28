@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	stdnet "net"
 	"net/http"
 	"os"
@@ -46,7 +47,11 @@ type credProxy struct {
 // resolver de qué dominios debe desviar hacia él. Solo tiene sentido en modo
 // allowlist, que es donde hay resolver propio. Con la lista vacía el proxy se
 // queda sin credenciales (todo 403) y el resolver deja de desviar nada.
-func SetCredentials(n *Net, creds []credproxy.Credential) error {
+//
+// auditPath es el registro de auditoría de la máquina (una línea por petición,
+// ver pkg/credproxy/auditoria.go); "" = sin registro. Solo cuenta al arrancar
+// el proxy: la máquina es siempre la misma, y su ruta también.
+func SetCredentials(n *Net, creds []credproxy.Credential, auditPath string) error {
 	if err := credproxy.ValidarCredenciales(creds); err != nil {
 		return err
 	}
@@ -56,7 +61,7 @@ func SetCredentials(n *Net, creds []credproxy.Credential) error {
 	if r == nil {
 		return errors.New("credentials need -egress allowlist (the machine has no resolver of its own)")
 	}
-	p, err := startCredProxy(n)
+	p, err := startCredProxy(n, auditPath)
 	if err != nil {
 		return err
 	}
@@ -68,7 +73,7 @@ func SetCredentials(n *Net, creds []credproxy.Credential) error {
 	return nil
 }
 
-func startCredProxy(n *Net) (*credProxy, error) {
+func startCredProxy(n *Net, auditPath string) (*credProxy, error) {
 	credMu.Lock()
 	defer credMu.Unlock()
 	if p, ok := credProxies[n.NS]; ok {
@@ -82,7 +87,7 @@ func startCredProxy(n *Net) (*credProxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("credential proxy: could not listen on %s:%d: %w", n.HostIP, credPort, err)
 	}
-	p := newCredProxy()
+	p := newCredProxy(auditPath)
 	p.srv = credproxy.NewServer(p.proxy)
 	go func() { _ = p.srv.Serve(ln) }()
 	credProxies[n.NS] = p
@@ -92,10 +97,12 @@ func startCredProxy(n *Net) (*credProxy, error) {
 // newCredProxy crea el proxy sin atarlo a ningún socket. Resuelve por el mismo
 // resolver público que siembra el ipset, para que lo que el proxy alcanza sea
 // lo mismo que el modo allowlist dejaría ver.
-func newCredProxy() *credProxy {
+func newCredProxy(auditPath string) *credProxy {
 	return &credProxy{proxy: credproxy.New(credproxy.Options{
-		Lookup:  func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
-		TempDir: credTempDir(),
+		Lookup:    func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
+		TempDir:   credTempDir(),
+		AuditPath: auditPath,
+		Logf:      log.Printf,
 	})}
 }
 
@@ -122,9 +129,15 @@ func stopCredProxy(ns string) {
 	p := credProxies[ns]
 	delete(credProxies, ns)
 	credMu.Unlock()
-	if p != nil && p.srv != nil {
+	if p == nil {
+		return
+	}
+	// Primero el servidor, para que no entren más peticiones; después el
+	// registro, que escribe lo que quede en su cola.
+	if p.srv != nil {
 		_ = p.srv.Close()
 	}
+	_ = p.proxy.Close()
 }
 
 // credPortStr es credPort en texto, para las reglas.

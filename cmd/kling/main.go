@@ -174,11 +174,11 @@ func main() {
 }
 
 // cmdMachine agrupa lo que se hace a una máquina viva y casi nadie teclea:
-// `kling machine resize|squeeze|secret`. Los nombres de antes (resize,
+// `kling machine resize|squeeze|secret|credential|audit`. Los nombres de antes (resize,
 // squeeze, mmds) son alias.
 func cmdMachine(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential> <ref> [...]")
+		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential|audit> <ref> [...]")
 	}
 	switch args[0] {
 	case "resize":
@@ -189,8 +189,10 @@ func cmdMachine(args []string) error {
 		return cmdMMDS(args[1:])
 	case "credential":
 		return cmdCredential(args[1:])
+	case "audit":
+		return cmdCredAudit(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret or credential", args[0])
+	return fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret, credential or audit", args[0])
 }
 
 // errConCodigo deja que un comando pida un codigo de salida concreto.

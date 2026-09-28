@@ -1233,6 +1233,21 @@ them, and they survive a daemon restart — they live encrypted in the machine's
 `state.json`, events or a snapshot. Repeating `-env` with a new key rotates it; the
 placeholder stays, so the running process needs no restart.
 
+Every request through the proxy, and every refusal, is logged in the machine's directory
+(`credaudit.jsonl`, 0600, rotated at 1 MiB):
+
+```sh
+kling machine audit payments            # TIME METHOD HOST PATH STATUS CREDS MS RESULT
+kling machine audit payments -denied -since 1h
+kling machine audit payments -f -json   # follow, one JSON record per line
+```
+
+It records the method, host, status, which credentials were swapped in, bytes and
+duration, and whether policy denied it. It never records the key, the placeholder,
+headers, bodies or the query string (only whether there was one), and the path is masked:
+a segment holding a placeholder or any form of a key becomes `:cred`, a long opaque
+identifier `:tok`. It works on running, frozen and stopped machines.
+
 For an MCP service nobody is there to hand a key to each replica the gateway wakes.
 Tie it to the template instead: every instance born from it gets its own placeholder
 at start, before the first session (the bridge reads MMDS when it spawns a session):

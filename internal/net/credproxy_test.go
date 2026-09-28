@@ -5,8 +5,11 @@ import (
 	"io"
 	stdnet "net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -61,7 +64,7 @@ func TestCredproxyBloqueaLoMismoQueElFirewall(t *testing.T) {
 func TestSetCredentialsSinResolverFalla(t *testing.T) {
 	n := &Net{NS: "kl-test-sinres", HostIP: "127.0.0.1"}
 	creds := []credproxy.Credential{{Domain: "example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s"}}
-	if err := SetCredentials(n, creds); err == nil {
+	if err := SetCredentials(n, creds, ""); err == nil {
 		t.Fatal("debería fallar sin resolver")
 	}
 	credMu.Lock()
@@ -72,7 +75,8 @@ func TestSetCredentialsSinResolverFalla(t *testing.T) {
 }
 
 // Con resolver, SetCredentials arranca el proxy en HostIP:credPort, avisa al
-// resolver con los dominios normalizados y stopCredProxy lo cierra.
+// resolver con los dominios normalizados y stopCredProxy lo cierra, dejando
+// escrito el registro de auditoría.
 func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	const ns = "kl-test-cred"
 	r := newTestResolver("127.0.0.1:1")
@@ -88,7 +92,8 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	}()
 	n := &Net{NS: ns, HostIP: "127.0.0.1"}
 	creds := []credproxy.Credential{{Domain: "API.Example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s"}}
-	if err := SetCredentials(n, creds); err != nil {
+	audit := filepath.Join(t.TempDir(), credproxy.AuditFile)
+	if err := SetCredentials(n, creds, audit); err != nil {
 		t.Skipf("no se pudo escuchar en 127.0.0.1:%d: %v", credPort, err)
 	}
 	defer stopCredProxy(ns)
@@ -110,5 +115,10 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	stopCredProxy(ns)
 	if _, err := http.DefaultClient.Do(req); err == nil {
 		t.Error("el proxy sigue escuchando tras stopCredProxy")
+	}
+	// stopCredProxy cierra el registro: la línea del 403 ya está en disco.
+	b, err := os.ReadFile(audit)
+	if err != nil || !strings.Contains(string(b), `"reason":"no_credential"`) || !strings.Contains(string(b), `"denied":true`) {
+		t.Fatalf("registro tras parar el proxy: %q (%v)", b, err)
 	}
 }

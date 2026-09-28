@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 )
 
 // sustituirQuery devuelve path+query con el marcador cambiado por la clave en
@@ -40,14 +41,22 @@ func sustituirQuery(u *url.URL, cs []Credential) string {
 // (base64 con clave, base64 con marcador) para que el redactor lo reconozca
 // aunque el eco venga sin el prefijo "Basic ".
 func sustituir(k, v string, cs []Credential) (string, [][2]string) {
+	return sustituirMarcando(k, v, cs, nil)
+}
+
+// sustituirMarcando es sustituir anotando en usadas (si no es nil) qué
+// credenciales se cambiaron de verdad: lo que el registro de auditoría llama
+// creds.
+func sustituirMarcando(k, v string, cs []Credential, usadas marcas) (string, [][2]string) {
 	if strings.EqualFold(k, "Authorization") && len(v) > 6 && strings.EqualFold(v[:6], "basic ") {
 		enc := strings.TrimSpace(v[6:])
 		if raw, err := base64.StdEncoding.DecodeString(enc); err == nil {
 			cambiado := false
-			for _, c := range cs {
+			for i, c := range cs {
 				if bytes.Contains(raw, []byte(c.Placeholder)) {
 					raw = bytes.ReplaceAll(raw, []byte(c.Placeholder), []byte(c.Secret))
 					cambiado = true
+					usadas.marcar(i)
 				}
 			}
 			if cambiado {
@@ -56,10 +65,33 @@ func sustituir(k, v string, cs []Credential) (string, [][2]string) {
 			}
 		}
 	}
-	for _, c := range cs {
-		v = strings.ReplaceAll(v, c.Placeholder, c.Secret)
+	for i, c := range cs {
+		if strings.Contains(v, c.Placeholder) {
+			v = strings.ReplaceAll(v, c.Placeholder, c.Secret)
+			usadas.marcar(i)
+		}
 	}
 	return v, nil
+}
+
+// marcas dice, por índice de credencial, cuáles se sustituyeron en una
+// petición. Atómicas: el cuerpo de una subida chunked lo lee el transporte en
+// su propia goroutine mientras el handler ya espera la respuesta. Un valor nil
+// no anota nada.
+type marcas []atomic.Bool
+
+func (m marcas) marcar(i int) {
+	if m != nil {
+		m[i].Store(true)
+	}
+}
+
+// de devuelve la función que marca la credencial i, o nil si no se anota.
+func (m marcas) de(i int) func() {
+	if m == nil {
+		return nil
+	}
+	return func() { m[i].Store(true) }
 }
 
 // variantes son las formas en que un proveedor suele devolver una cadena en
@@ -95,7 +127,12 @@ type redactor struct {
 	tail  []byte
 }
 
-type par struct{ old, new []byte }
+// par es una sustitución old→new. marca, si no es nil, se llama cuando old
+// aparece (el sustituidor la usa para saber qué credencial se usó).
+type par struct {
+	old, new []byte
+	marca    func()
+}
 
 func nuevoRedactor(w io.Writer, cs []Credential) *redactor {
 	r := &redactor{w: w}
@@ -117,7 +154,7 @@ func (r *redactor) par(old, new string) {
 			return
 		}
 	}
-	r.pares = append(r.pares, par{[]byte(old), []byte(new)})
+	r.pares = append(r.pares, par{old: []byte(old), new: []byte(new)})
 }
 
 // texto redacta una cadena suelta (cabeceras, mensajes de error).
@@ -148,6 +185,9 @@ func (r *redactor) retener(buf []byte) int {
 func (r *redactor) Write(p []byte) (int, error) {
 	buf := append(r.tail, p...)
 	for _, pr := range r.pares {
+		if pr.marca != nil && bytes.Contains(buf, pr.old) {
+			pr.marca()
+		}
 		buf = bytes.ReplaceAll(buf, pr.old, pr.new)
 	}
 	keep := r.retener(buf)
@@ -216,10 +256,18 @@ type sustituidor struct {
 }
 
 func nuevoSustituidor(src io.Reader, cs []Credential) *sustituidor {
+	return nuevoSustituidorMarcando(src, cs, nil)
+}
+
+// nuevoSustituidorMarcando es nuevoSustituidor anotando en usadas qué
+// credenciales aparecieron en el cuerpo. Los marcadores son distintos entre sí
+// (ValidarCredenciales) y nunca iguales a su clave, así que cada credencial es
+// exactamente un par.
+func nuevoSustituidorMarcando(src io.Reader, cs []Credential, usadas marcas) *sustituidor {
 	s := &sustituidor{src: src, chunk: make([]byte, sustChunk)}
 	s.red = &redactor{w: &s.out}
-	for _, c := range cs {
-		s.red.par(c.Placeholder, c.Secret)
+	for i, c := range cs {
+		s.red.pares = append(s.red.pares, par{old: []byte(c.Placeholder), new: []byte(c.Secret), marca: usadas.de(i)})
 	}
 	return s
 }
