@@ -632,6 +632,49 @@ print("DRIP", st, len(b), int(time.time() - t0))
     "200 5 "*) ok "un stream de ${drip##* } s (más que el plazo total de antes, 120 s) llega entero" ;;
     *) bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
   esac
+
+  # Registro de auditoría (kling machine audit): una línea por petición que
+  # pasó por el proxy, también las denegadas, con la ruta enmascarada y la
+  # credencial usada; nunca la clave, el marcador ni la query. Todo lo de
+  # arriba pasó por él, antes y después del freeze/thaw y del reinicio del
+  # daemon: las líneas de la primera sonda (/anything) tienen que seguir ahí.
+  out=$($KLING machine audit "$CR" -tail 0 -json 2>&1)
+  contiene "$out" '"path":"/anything"' && contiene "$out" '"creds":["E2E_KEY"]' \
+    && ok "audit: las peticiones de antes del freeze/thaw siguen, con la credencial usada" \
+    || bad "audit tras freeze/thaw" '"path":"/anything" con "creds":["E2E_KEY"]' "$out"
+  contiene "$out" '"reason":"not_allowed","denied":true' && contiene "$out" '"reason":"no_credential","denied":true' \
+    && ok "audit: las denegaciones (-allow-request y otro dominio) quedan registradas" \
+    || bad "audit de denegaciones" "not_allowed y no_credential con denied" "$out"
+  contiene "$out" '"path":"/basic-auth/demo/:cred"' && contiene "$out" '"query":true' \
+    && ok "audit: la clave en la ruta sale como :cred y de la query solo consta que la había" \
+    || bad "audit enmascarado" '/basic-auth/demo/:cred y "query":true' "$out"
+  if contiene "$out" "$PASS" || contiene "$out" "$PASS2" || contiene "$out" "kling-cred-" \
+    || { [ -n "$ph1" ] && contiene "$out" "$ph1"; } || contiene "$out" "duration="; then
+    bad "audit sin secretos" "ni clave, ni marcador, ni query" "$out"
+  else
+    ok "audit: ni la clave, ni el marcador, ni el contenido de la query"
+  fi
+  out=$($KLING machine audit "$CR" -denied -json -tail 0 2>&1)
+  n_todas=$(printf '%s\n' "$out" | grep -c '"kind":"http"')
+  n_den=$(printf '%s\n' "$out" | grep -c '"denied":true')
+  [ "$n_todas" -gt 0 ] && [ "$n_todas" = "$n_den" ] && ok "audit -denied: solo denegadas ($n_den)" \
+    || bad "audit -denied" "todas las líneas http con denied" "$n_todas líneas, $n_den denegadas"
+  out=$($KLING machine audit "$CR" -tail 3 2>&1)
+  contiene "$out" "METHOD" && contiene "$out" "httpbin.org" && ok "audit: la tabla" || bad "audit tabla" "cabecera y filas" "$out"
+  # -f: sigue el registro como `kling logs -f` sigue la consola.
+  seg=$(mktemp)
+  $KLING machine audit "$CR" -f -tail 1 >"$seg" 2>&1 &
+  segpid=$!
+  sleep 2
+  $KLING exec -timeout 30s "$CR" -- python3 -c '
+import http.client
+c = http.client.HTTPConnection("httpbin.org", 80, timeout=10)
+c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' >/dev/null 2>&1
+  sleep 3
+  kill "$segpid" 2>/dev/null; wait "$segpid" 2>/dev/null
+  out=$(cat "$seg"); rm -f "$seg"
+  contiene "$out" "/anything/e2e-follow" && contiene "$out" "DENIED(not_allowed)" \
+    && ok "audit -f: la petición nueva aparece mientras se sigue" || bad "audit -f" "/anything/e2e-follow DENIED(not_allowed)" "$out"
   $KLING rm -f "$CR" >/dev/null 2>&1
 else
   bad "run -egress allowlist" "una máquina" "no arrancó"
