@@ -566,6 +566,68 @@ func TestGatewayPort80WithoutCredentials(t *testing.T) {
 	}
 }
 
+// pgFalso es un proxy de Postgres de mentira: dice si está activo y contesta
+// "pg" a cada conexión que recibe.
+type pgFalso struct {
+	activo atomic.Bool
+	vistas atomic.Int32
+}
+
+func (f *pgFalso) PGActivo() bool { return f.activo.Load() }
+
+func (f *pgFalso) ServePG(_ context.Context, c net.Conn) {
+	defer c.Close()
+	f.vistas.Add(1)
+	_, _ = c.Write([]byte("pg"))
+}
+
+// Con el proxy de Postgres activo, cualquier puerto de la pasarela (menos el
+// 53 y el 80) va a su ServePG sin salir al host; inactivo, se rechaza como
+// antes, al momento.
+func TestPostgresOnGateway(t *testing.T) {
+	pg := &pgFalso{}
+	r := newRig(t, "")
+	r.n.cfg.CredentialsPG = pg
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":5432"); err == nil {
+		conn.Close()
+		t.Fatal("gateway:5432 with the postgres proxy inactive must be refused")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("gateway:5432 took %v to fail; it must be refused at once", d)
+	}
+
+	pg.activo.Store(true)
+	for _, puerto := range []string{"5432", "6543"} {
+		conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":"+puerto)
+		if err != nil {
+			t.Fatalf("gateway:%s: %v", puerto, err)
+		}
+		b, _ := io.ReadAll(conn)
+		conn.Close()
+		if string(b) != "pg" {
+			t.Fatalf("gateway:%s answered %q", puerto, b)
+		}
+	}
+	// Otra IP no es la pasarela: sigue el camino de la política.
+	r.policy.Set(egress.Allowlist, []string{"example.com"})
+	if conn, err := r.g.dialTCP(ctx, "10.0.0.1:5432"); err == nil {
+		conn.Close()
+		t.Fatal("a private IP must still be refused")
+	}
+	if pg.vistas.Load() != 2 {
+		t.Fatalf("ServePG saw %d connections, want 2", pg.vistas.Load())
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dialed) != 0 {
+		t.Fatalf("nothing should have been dialed on the host, got %v", r.dialed)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

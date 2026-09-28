@@ -85,6 +85,13 @@ type Config struct {
 	// (credproxy.Options.Enabled, ver kling-vz), para que cada rechazo quede
 	// en su registro de auditoría.
 	Credentials http.Handler
+	// CredentialsPG, si no es nil, es el mismo proxy en su papel de Postgres:
+	// una conexión TCP del invitado a la pasarela en cualquier puerto que no
+	// sea el 53 ni el 80 (el 5432 de un dominio con credencial Postgres,
+	// normalmente) va a su ServePG, pero solo si PGActivo (allowlist y alguna
+	// credencial Postgres); si no, se rechaza como antes. Es el DNAT
+	// HostIP:* -> 5381 de Linux.
+	CredentialsPG PGProxy
 	// Dial abre las conexiones de salida en el host. Nil = net.Dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// PeerAllowed, si no es nil, decide si se acepta una conexión a un
@@ -94,6 +101,12 @@ type Config struct {
 	// de su propio usuario (ver internal/peercred). Nil = se aceptan todas.
 	PeerAllowed func(net.Conn) bool
 	Logf        func(format string, args ...any)
+}
+
+// PGProxy es lo que la red necesita del proxy de Postgres (*credproxy.Proxy).
+type PGProxy interface {
+	PGActivo() bool
+	ServePG(ctx context.Context, c net.Conn)
 }
 
 // Net es la red de una máquina.
@@ -338,6 +351,17 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		}
 		r.Complete(false)
 		n.serveDNSTCP(gonet.NewTCPConn(&wq, ep))
+		return
+	}
+	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.PGActivo() {
+		var wq waiter.Queue
+		ep, err := r.CreateEndpoint(&wq)
+		if err != nil {
+			r.Complete(true)
+			return
+		}
+		r.Complete(false)
+		n.cfg.CredentialsPG.ServePG(n.ctx, gonet.NewTCPConn(&wq, ep))
 		return
 	}
 	if !n.cfg.Policy.AllowConn(dst) {

@@ -119,6 +119,12 @@ func run() int {
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track},
 		NewNet: func(c server.NetConfig) (server.Network, error) {
+			// Sin proxy, la interfaz queda nil de verdad (no un puntero nil
+			// dentro de ella, que vnet tomaría por un proxy).
+			var pg vnet.PGProxy
+			if c.CredentialsPG != nil {
+				pg = c.CredentialsPG
+			}
 			return vnet.New(vnet.Config{
 				GuestMAC: c.GuestMAC,
 				MMDS:     c.MMDS,
@@ -126,8 +132,9 @@ func run() int {
 				Policy:   c.Policy,
 				Resolver: c.Resolver,
 				// Credentials: el proxy en la pasarela (ver vnet.Config).
-				Credentials: c.Credentials,
-				Logf:        logf,
+				Credentials:   c.Credentials,
+				CredentialsPG: pg,
+				Logf:          logf,
 				// Solo los procesos de este usuario llegan al agente del
 				// invitado por el reenvío (ver internal/peercred).
 				PeerAllowed: peers.Allowed,
