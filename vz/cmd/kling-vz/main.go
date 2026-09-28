@@ -96,7 +96,19 @@ func run() int {
 	resolver := egress.NewResolver(policy)
 	// El proxy de credenciales resuelve por el mismo upstream que el invitado
 	// y con los mismos destinos prohibidos que la red (egress.PublicIPv4).
-	creds := credproxy.New(credproxy.Options{Lookup: resolver.PublicIPv4})
+	// Solo atiende en allowlist: su listener está en la pasarela sea cual sea
+	// el modo, y sin esta barrera un invitado sin salida (none) que conectara
+	// a mano a la pasarela:80 con el Host de un dominio con credencial saldría
+	// a internet a través de él. El rechazo es del proxy, así que queda en su
+	// registro de auditoría, que va junto al socket: el directorio de la
+	// máquina, el mismo machines/<id>/credaudit.jsonl que lee el daemon (y el
+	// único sitio en el que el sandbox deja escribir).
+	creds := credproxy.New(credproxy.Options{
+		Lookup:    resolver.PublicIPv4,
+		Enabled:   func() bool { return policy.Mode() == egress.Allowlist },
+		AuditPath: rutaAuditoria(*sock),
+		Logf:      logf,
+	})
 	// Nada de lo que crea este proceso (el socket de la API, en particular)
 	// debe nacer legible por otros usuarios, ni siquiera el instante entre
 	// crearlo y el chmod.
@@ -183,7 +195,25 @@ func run() int {
 		srv.Shutdown()
 	}
 	_ = hs.Close()
+	// Después de parar la VM (y con ella su red y el servidor del proxy): lo
+	// que quede en la cola del registro llega al disco.
+	_ = creds.Close()
 	return code
+}
+
+// rutaAuditoria es el registro de auditoría del proxy: junto al socket de la
+// API, en el directorio de la máquina. Absoluta y sin enlaces antes de nada:
+// con una ruta de socket larga el proceso cambia de directorio (ver más abajo),
+// y el sandbox compara rutas reales.
+func rutaAuditoria(sock string) string {
+	dir := filepath.Dir(sock)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	return filepath.Join(dir, credproxy.AuditFile)
 }
 
 // confinamiento devuelve cómo encerrar este proceso en su sandbox, o nil si no
