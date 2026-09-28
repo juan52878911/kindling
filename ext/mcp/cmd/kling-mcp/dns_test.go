@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"github.com/juan52878911/kindling/pkg/api"
 	"strings"
 	"testing"
 )
@@ -72,5 +73,43 @@ func TestUnPuenteSinEndpointDeDNSNoEsUnFallo(t *testing.T) {
 	}
 	if err := comprobarDNS(dnsFalso("no soy json", nil)); err != nil {
 		t.Errorf("una respuesta ilegible se reporto como fallo: %v", err)
+	}
+}
+
+// Con allowlist la sonda pregunta por un dominio PERMITIDO: example.com lo
+// rechaza el resolver de la máquina a propósito y marcaba enfermo a cualquier
+// servicio en allowlist. Sin dominios no se juzga el DNS.
+func TestDominioDeSondaRespetaLaAllowlist(t *testing.T) {
+	if h, ok := dominioDeSonda("allowlist", []string{"api.figma.com", "figma.com"}); !ok || h != "api.figma.com" {
+		t.Errorf("allowlist: host %q juzgar %v, quería api.figma.com", h, ok)
+	}
+	if _, ok := dominioDeSonda("allowlist", nil); ok {
+		t.Error("allowlist sin dominios no debería juzgar el DNS")
+	}
+	if h, ok := dominioDeSonda("internet", []string{"x.com"}); !ok || h != "" {
+		t.Errorf("internet: host %q juzgar %v, quería el defecto", h, ok)
+	}
+	var ruta string
+	post := func(metodo, r, cuerpo string) ([]byte, error) {
+		ruta = r
+		return []byte(`{"nameservers":["1.1.1.1"],"resuelve":true}`), nil
+	}
+	if err := comprobarDNSDe(post, "api.figma.com"); err != nil || ruta != "/dns?host=api.figma.com" {
+		t.Errorf("ruta %q err %v, quería /dns?host=api.figma.com", ruta, err)
+	}
+}
+
+// Los modelos de kling ai comparten catálogo con los servicios MCP pero no
+// hablan MCP: health y heal no deben sondearlos.
+func TestEsModeloIA(t *testing.T) {
+	casos := map[string]bool{"von.model": true, "von.kind": true, "chispa.task": true, "service": false}
+	for etiqueta, quiero := range casos {
+		s := &api.Snapshot{Labels: map[string]string{etiqueta: "x"}}
+		if got := esModeloIA(s); got != quiero {
+			t.Errorf("etiqueta %s: esModeloIA=%v, quería %v", etiqueta, got, quiero)
+		}
+	}
+	if esModeloIA(&api.Snapshot{}) {
+		t.Error("un snapshot sin etiquetas no es un modelo")
 	}
 }

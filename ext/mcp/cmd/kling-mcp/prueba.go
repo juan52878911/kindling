@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
@@ -141,8 +142,35 @@ func guestRaw(ctx context.Context, c *api.Client, ref string) posterCrudo {
 //   - la RESOLUCION si depende de que haya salida y de que el resolver conteste.
 //     Se reporta, pero se distingue: culpar al servicio de que un tercero este
 //     caido seria convertir una caida ajena en una alarma tuya.
-func comprobarDNS(post posterCrudo) error {
-	raw, err := post("GET", "/dns", "")
+func comprobarDNS(post posterCrudo) error { return comprobarDNSDe(post, "") }
+
+// dominioDeSonda elige qué nombre pedirle al invitado para juzgar su DNS. Con
+// allowlist el resolver de la máquina contesta REFUSED a todo lo que no esté
+// permitido, a propósito; preguntar por example.com marcaba enfermo a CUALQUIER
+// servicio en allowlist (visto en el e2e con figma). Se pregunta por el primer
+// dominio permitido, y si no hay ninguno no se juzga: ese servicio no debe poder
+// resolver nada. Con internet vale el nombre por defecto del invitado.
+func dominioDeSonda(egress string, permitidos []string) (host string, juzgar bool) {
+	if egress != "allowlist" {
+		return "", true
+	}
+	for _, d := range permitidos {
+		d = strings.TrimSpace(strings.TrimPrefix(d, "*."))
+		if d != "" {
+			return d, true
+		}
+	}
+	return "", false
+}
+
+// comprobarDNSDe es comprobarDNS preguntando por host ("" = el que elija el
+// invitado, example.com).
+func comprobarDNSDe(post posterCrudo, host string) error {
+	ruta := "/dns"
+	if host != "" {
+		ruta += "?host=" + url.QueryEscape(host)
+	}
+	raw, err := post("GET", ruta, "")
 	if err != nil {
 		// Un puente antiguo no tiene /dns. No es un fallo del servicio.
 		return nil
@@ -179,4 +207,20 @@ func comprobarDNS(post posterCrudo) error {
 			strings.Join(info.Nameservers, ", "), info.Probado, info.Error)
 	}
 	return nil
+}
+
+// esModeloIA dice si un snapshot es un modelo de `kling ai` (una réplica de
+// llama-server o una tarea de Chispa) y no un servidor MCP. Comparten el
+// catálogo de snapshots y la etiqueta "service", pero no hablan MCP: pedirles
+// tools/list da un 404 y health/heal los marcaban enfermos a todos (visto en el
+// e2e del lab con chispa-room y los x86-*). Las etiquetas son las que ponen
+// pkg/von (von.model, von.kind) y `kling ai chispa deploy` (chispa.task); se
+// repiten aquí para no atar la extensión a esos paquetes.
+func esModeloIA(s *api.Snapshot) bool {
+	for _, l := range []string{"von.model", "von.kind", "chispa.task"} {
+		if _, ok := s.Labels[l]; ok {
+			return true
+		}
+	}
+	return false
 }

@@ -606,6 +606,13 @@ func mcpHealth(args []string) error {
 		if fs.NArg() >= 1 && n != fs.Arg(0) {
 			continue
 		}
+		if esModeloIA(s) {
+			if fs.NArg() >= 1 {
+				fmt.Printf("  %s is a kling ai model, not an MCP server: nothing to probe here (kling ai ls)\n", n)
+				return nil
+			}
+			continue
+		}
 		targets = append(targets, objetivo{nombre: n, egress: s.Egress})
 	}
 	if fs.NArg() >= 1 && len(targets) == 0 {
@@ -678,8 +685,11 @@ func probeHealth(ctx context.Context, c *api.Client, service string, wait time.D
 	// El DNS solo se juzga si el servicio TIENE salida. Uno con egress:none no
 	// resuelve nombres a proposito, y exigirselo seria inventarse un fallo.
 	if egress != "" && egress != "none" {
-		if err := comprobarDNS(guestRaw(ctx, c, mc.ID)); err != nil {
-			return fmt.Errorf("answers tools/list but its DNS is broken: %w", err)
+		host, juzgar := dominioDeSonda(egress, mc.AllowDomains)
+		if juzgar {
+			if err := comprobarDNSDe(guestRaw(ctx, c, mc.ID), host); err != nil {
+				return fmt.Errorf("answers tools/list but its DNS is broken: %w", err)
+			}
 		}
 	}
 	// Y ahora la parte que SI puede fallar. Ver prueba.go: tools/list lo
