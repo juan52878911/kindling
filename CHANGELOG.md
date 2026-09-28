@@ -59,11 +59,26 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   443 de la IP del proxy también va al proxy, con lo que un `https://dominio` desde
   dentro muere en 3 ms en vez de esperar al plazo del SDK (un REJECT con RST necesitaba
   `xt_REJECT`, que el CT del lab no tiene: la regla fallaba y la máquina no arrancaba).
-- **Pendiente, documentado en SECURITY.md:** el proxy no existe en macOS (backend vz;
-  plan concreto anotado), los secretos por sesión de MMDS siguen sin rellenarse solos, y
-  `kling run -from` manda siempre un egress (`none` por defecto) en vez de dejar que el
-  daemon herede el de la plantilla: una instancia de una plantilla con credenciales
-  necesita `-egress allowlist -allow …` explícito, como hace el gateway.
+- **Proxy de credenciales también en macOS (backend vz).** Lo sirve el `kling-vz` de
+  cada máquina con el mismo `pkg/credproxy`: su DNS contesta el dominio con la pasarela
+  (172.16.0.1) sin reenviar ni sembrar la IP real, un listener en pasarela:80 recoge la
+  conexión antes de la política de salida y el 443 de la pasarela muere con un RST. El
+  daemon le entrega la clave por `PUT /kling/credentials` y se la vuelve a entregar tras
+  un thaw antes de cargar el estado; tras un reinicio del daemon no hace falta, porque
+  el `kling-vz` sigue vivo con ella. Cambia el modelo de confianza: en macOS la clave
+  vive en la memoria del `kling-vz` (mismo usuario que el daemon), el proceso que
+  también termina el tráfico del invitado; SECURITY.md §7 cuenta qué supone. `vz/go.mod`
+  requiere ahora el núcleo con `replace => ..`, como `ext/*`. Verificado en este Mac
+  (M4) con `scripts/92-e2e-mac.sh`, sección 6c: el invitado solo ve el marcador,
+  `httpbin.org` resuelve a la pasarela, basic-auth 200 con la clave real, eco y eco de
+  `Basic` redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no está
+  en el log del daemon ni en el de `kling-vz`, y sigue funcionando tras freeze/thaw
+  (mismo marcador) y tras reiniciar el daemon.
+- **Pendiente, documentado en SECURITY.md:** los secretos por sesión de MMDS siguen sin
+  rellenarse solos, y `kling run -from` manda siempre un egress (`none` por defecto) en
+  vez de dejar que el daemon herede el de la plantilla: una instancia de una plantilla
+  con credenciales necesita `-egress allowlist -allow …` explícito, como hace el
+  gateway.
 
 ### Pruebas
 
@@ -72,6 +87,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   se lanza el e2e: ahora el pseudoterminal lo pone el `pty` de python3. Sección 7 ampliada
   (freeze/thaw, reinicio del daemon, rotación, eco de `Basic`, HTTPS rápido) y nueva 7b
   (credenciales de plantilla). En el lab: 54 ok, 0 fallos.
+- `scripts/92-e2e-mac.sh`: nueva sección 6c (proxy de credenciales en el Mac, con
+  freeze/thaw, reinicio del daemon y `kling-vz` confinado) y la misma corrección de
+  `warm` por `frozen` en la sección 2. En este Mac (M4, `BURST=4`): 72 ok, 0 fallos.
 
 ## v0.16.0 — 2026-09-27
 

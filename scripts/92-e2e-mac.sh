@@ -5,7 +5,8 @@
 # el backend vz, en una raíz de usarse y tirarse, y recorre lo que solo se ve
 # con núcleo y ayudante juntos: arranque, exec, cp, shell, congelar y
 # descongelar, snapshots dorados y sus réplicas por reenvío de loopback, el
-# proxy al invitado, sandboxes, squeeze, resize, egress, MMDS, reinicio del
+# proxy al invitado, sandboxes, squeeze, resize, egress, MMDS, proxy de
+# credenciales, reinicio del
 # daemon con máquinas vivas, un kling-vz muerto de un SIGKILL, y al final una
 # ráfaga corta con la compuerta de arranque. Termina comprobando que no queda
 # ningún proceso ni enlace de la prueba.
@@ -210,7 +211,7 @@ contiene "$out" "listening on :8080" && ok "logs: guest console (agent listening
 
 FP_RUN=$(footprint "$M")
 out=$(k freeze "$M" 2>&1)
-if contiene "$out" "warm"; then FREEZE_MS=$(printf '%s' "$out" | grep -o '[0-9]* ms' | head -1); ok "freeze -> warm ($FREEZE_MS)"; else bad "freeze" "warm" "$out"; fi
+if contiene "$out" "frozen"; then FREEZE_MS=$(printf '%s' "$out" | grep -o '[0-9]* ms' | head -1); ok "freeze -> frozen ($FREEZE_MS)"; else bad "freeze" "frozen" "$out"; fi
 out=$(k thaw "$M" 2>&1)
 if contiene "$out" "running"; then THAW_MS=$(printf '%s' "$out" | grep -o '[0-9]* ms' | head -1); ok "thaw -> running ($THAW_MS)"; else bad "thaw" "running" "$out"; fi
 out=$(k exec "$M" -- cat /tmp/blob 2>/dev/null | wc -c | tr -d ' ')
@@ -403,6 +404,100 @@ else
 fi
 k rm "$S" >/dev/null 2>&1
 
+# ── 6c. proxy de credenciales ────────────────────────────────────────────────
+# Lo mismo que la sección 7 de 90-e2e.sh, en el Mac: aquí el proxy y el DNS los
+# sirve cada kling-vz en la pasarela (172.16.0.1) de su pila de red, y la clave
+# viaja del daemon al ayudante. httpbin.org/basic-auth/<usuario>/<clave>
+# contesta 200 solo si la cabecera Basic trae ESA clave: prueba que al
+# proveedor le llegó la real. Necesita salida a internet desde el Mac.
+step "6c. credential proxy (httpbin.org)"
+CR="$P-cred"
+CRED_PASS="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+# La sonda corre DENTRO del invitado, como root. Recibe la clave real solo para
+# comprobar que no la ve. Una línea por comprobación.
+SONDA='
+import base64, json, socket, sys, time, urllib.request, urllib.error
+real = sys.argv[1]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store)["env"]["E2E_KEY"]
+print("MMDS", "KEY" if real in store else "PLACEHOLDER")
+print("PH", ph)
+def get(url, h):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=15); return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+    except Exception as e:
+        return 0, type(e).__name__
+b64 = lambda s: base64.b64encode(s.encode()).decode()
+print("DNS", socket.gethostbyname("httpbin.org"))
+print("AUTH", get("http://httpbin.org/basic-auth/demo/" + real, {"Authorization": "Basic " + b64("demo:" + ph)})[0])
+if len(sys.argv) > 2 and sys.argv[2] == "short":
+    sys.exit(0)
+st, body = get("http://httpbin.org/anything", {"Authorization": "Bearer " + ph})
+print("ECHO", "KEY" if real in body else "PLACEHOLDER")
+st, body = get("http://httpbin.org/anything", {"Authorization": "Basic " + b64("demo:" + ph)})
+print("ECHOBASIC", "KEY" if (real in body or b64("demo:" + real) in body) else ("PLACEHOLDER" if b64("demo:" + ph) in body else "NONE"))
+t0 = time.time(); st, why = get("https://httpbin.org/get", {})
+print("HTTPS", st, why, int((time.time() - t0) * 1000))
+s = socket.create_connection((socket.gethostbyname("httpbin.org"), 80), timeout=5)
+s.sendall(b"GET / HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n")
+print("OTHER", s.recv(20).decode().split(" ")[1])
+'
+CRED_OK=0
+if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -allow example.org >/dev/null 2>&1; then
+  out=$(printf '%s' "$CRED_PASS" | k machine credential "$CR" -domain httpbin.org -env E2E_KEY 2>&1)
+  contiene "$out" "placeholder" && ok "machine credential: the key goes to the proxy in kling-vz" || bad "machine credential" "placeholder" "$out"
+  out=$(k exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$CRED_PASS" 2>&1)
+  CRED_PH=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+  contiene "$out" "MMDS PLACEHOLDER" && ok "the guest only sees the placeholder" || bad "MMDS" "MMDS PLACEHOLDER" "$out"
+  contiene "$out" "DNS 172.16.0.1" && ok "httpbin.org resolves to the gateway (the proxy)" || bad "DNS diversion" "DNS 172.16.0.1" "$out"
+  if contiene "$out" "AUTH 200"; then ok "the provider gets the real key (httpbin basic-auth 200)"; CRED_OK=1
+  else bad "substitution" "AUTH 200" "$out"; fi
+  contiene "$out" "ECHO PLACEHOLDER" && ok "the echo comes back redacted" || bad "redaction" "ECHO PLACEHOLDER" "$out"
+  contiene "$out" "ECHOBASIC PLACEHOLDER" && ok "the echo of a Basic header (key inside base64) is redacted too" \
+    || bad "Basic redaction" "ECHOBASIC PLACEHOLDER" "$out"
+  https=$(printf '%s\n' "$out" | awk '/^HTTPS /{print $2, $4}')
+  case "$https" in
+    "0 "*) ms=${https#0 }
+           [ "$ms" -lt 2000 ] && ok "direct HTTPS to the domain, bypassing the proxy: refused in ${ms} ms" \
+             || bad "proxy bypass" "a fast refusal (RST)" "blocked, but took ${ms} ms" ;;
+    *) bad "proxy bypass" "HTTPS 0" "$out" ;;
+  esac
+  contiene "$out" "OTHER 403" && ok "the proxy refuses another domain (403)" || bad "other domain" "OTHER 403" "$out"
+  # Ni el log del daemon ni el de kling-vz deben llevar la clave.
+  vlog="$ROOT/machines/$(machine_field "$CR" id)/firecracker.log"
+  if [ ! -f "$vlog" ] || [ ! -f "$LOG" ]; then bad "logs" "daemon and kling-vz logs to search" "missing $LOG or $vlog"
+  elif grep -qF "$CRED_PASS" "$LOG" "$vlog"; then bad "logs" "no key" "the key is in $LOG or $vlog"
+  else ok "the key is in neither the daemon log nor the kling-vz log"; fi
+  # Y todo lo anterior con kling-vz dentro de su perfil de sandbox (TLS al
+  # proveedor incluido): si no, el resultado no vale para producción.
+  vzl=$(cat "$vlog" 2>/dev/null)
+  contiene "$vzl" "confined: " && contiene "$vzl" "network out: true" && ok "with kling-vz confined in its sandbox profile" \
+    || bad "sandbox" "confined: ... network out: true" "$(printf '%s' "$vzl" | grep -i confin)"
+
+  # El kling-vz de una máquina descongelada es nuevo: el daemon le devuelve la
+  # clave antes de cargar el estado, y los marcadores a MMDS.
+  out=$(k freeze "$CR" 2>&1)
+  contiene "$out" "frozen" && ok "a machine with credentials freezes (it only holds placeholders)" || bad "freeze with credentials" "frozen" "$out"
+  k thaw "$CR" >/dev/null 2>&1
+  out=$(k exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$CRED_PASS" short 2>&1)
+  ph2=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+  contiene "$out" "AUTH 200" && [ "$CRED_PH" = "$ph2" ] && ok "after freeze/thaw the credential works with the same placeholder" \
+    || bad "credential after thaw" "AUTH 200, same placeholder" "$out"
+else
+  bad "run -egress allowlist" "running" "failed"
+fi
+if k run -name "$CR-none" -image "$IMG" -mem "$MEM" >/dev/null 2>&1; then
+  out=$(printf 'x' | k machine credential "$CR-none" -domain httpbin.org -env E2E_KEY 2>&1)
+  contiene "$out" "allowlist" && ok "without -egress allowlist, credential is refused and says why" \
+    || bad "credential without allowlist" "a refusal mentioning allowlist" "$out"
+  k rm -f "$CR-none" >/dev/null 2>&1
+fi
+
 # ── 7. reinicio del daemon y kill -9 ─────────────────────────────────────────
 step "7. daemon restart, SIGKILL of a kling-vz"
 pid_before=$(machine_field "$P-r3" pid)
@@ -416,6 +511,14 @@ out=$(k exec "$P-r3" -- cat /root/mark 2>&1)
   && ok "re-adopted after the restart (pid $pid_after) and reachable" || bad "re-adopt" "running, same pid, golden" "$st $pid_before->$pid_after '$out'"
 a=$(k ps -json | pyj "next((m.get('forwards',{}).get('8080','') for m in d if m['name']=='$P-r3'), '')")
 h=$(curl -s -m 5 "http://$a/healthz" 2>&1); [ "$h" = ok ] && ok "its forward $a still works" || bad "forward after restart" ok "$h"
+
+# La máquina con credenciales siguió viva con su kling-vz: la clave también.
+if [ "$CRED_OK" = 1 ]; then
+  out=$(k exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$CRED_PASS" short 2>&1)
+  contiene "$out" "AUTH 200" && ok "after the daemon restart the credential still works" \
+    || bad "credential after daemon restart" "AUTH 200" "$out"
+fi
+k rm -f "$CR" >/dev/null 2>&1
 
 vm_before=$(apple_vms)
 victim=$(machine_field "$P-r2" pid)

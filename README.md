@@ -1166,8 +1166,14 @@ client that opens one TLS connection per request (the proxy reuses its own). Wha
 not prevent: the guest can still **use** the key against its domain; that is bounded by
 the key itself (restricted, read-only, spending limits). Echo redaction is defence in
 depth (serious providers never return the credential); a response in an encoding the
-proxy cannot inspect (brotli, deflate) is refused with 502. Not available on macOS yet:
-the vz backend has no host-side resolver to divert the domain (see SECURITY.md).
+proxy cannot inspect (brotli, deflate) is refused with 502.
+
+On macOS (vz backend) it works the same from the guest's side: each machine's
+`kling-vz` serves the proxy and the DNS diversion on its gateway (172.16.0.1) inside its
+own user-space network. The difference is where the key lives: the daemon hands it to
+that machine's `kling-vz` (same user, over its 0600 API socket), so it sits in the
+process that also handles the guest's network traffic, not in a separate daemon. See
+SECURITY.md, section 7, for what that trade-off means.
 
 ---
 
