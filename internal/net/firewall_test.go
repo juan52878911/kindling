@@ -135,7 +135,8 @@ func TestHostEgressRulesNieganLaRedPrivadaMenosElRangoPropio(t *testing.T) {
 }
 
 // Las reglas de INPUT: solo para lo que entra por los veth de kindling y desde
-// su rango, con los ACCEPT (respuestas y DNS del allowlist) delante del DROP.
+// su rango, con los ACCEPT (respuestas, DNS del allowlist y proxy de
+// credenciales) delante del DROP.
 // Sin ellas, un invitado con salida llegaba a los servicios del host por su IP
 // pública.
 func TestHostInputRulesAceptanLoLegitimoYDescartanElResto(t *testing.T) {
@@ -157,7 +158,8 @@ func TestHostInputRulesAceptanLoLegitimoYDescartanElResto(t *testing.T) {
 	for _, r := range reglas[:len(reglas)-1] {
 		junto += strings.Join(r, " ") + "\n"
 	}
-	for _, want := range []string{"ESTABLISHED,RELATED -j ACCEPT", "-p udp --dport 5333 -j ACCEPT", "-p tcp --dport 5333 -j ACCEPT"} {
+	for _, want := range []string{"ESTABLISHED,RELATED -j ACCEPT", "-p udp --dport 5333 -j ACCEPT", "-p tcp --dport 5333 -j ACCEPT",
+		"-p tcp --dport 5380 -j ACCEPT"} {
 		if !strings.Contains(junto, want) {
 			t.Errorf("falta %q antes del DROP:\n%s", want, junto)
 		}

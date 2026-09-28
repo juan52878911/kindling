@@ -21,6 +21,7 @@ func (m *Manager) Snapshot(name string) (*api.Snapshot, error) {
 		return nil, err
 	}
 	s.DiskBytes = disco
+	m.anotarCredencialesPlantilla(s)
 	m.mu.RLock()
 	for _, mc := range m.byID {
 		if mc.From == name && mc.State == api.StateRunning {

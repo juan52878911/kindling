@@ -227,6 +227,24 @@ func (c *Client) PutMMDS(ctx context.Context, ref string, data any) (*Machine, e
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/mmds", data, &m)
 }
 
+// SetCredentials entrega credenciales al proxy de credenciales de una microVM
+// viva con egress allowlist. La clave no entra en el invitado: recibe un
+// marcador en la variable de entorno pedida. Se fusionan por Env con las que ya
+// tuviera (repetir una la rota). La máquina sigue pudiendo congelarse y las
+// credenciales sobreviven al reinicio del daemon.
+func (c *Client) SetCredentials(ctx context.Context, ref string, req CredentialsRequest) (*Machine, error) {
+	var m Machine
+	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/credentials", req, &m)
+}
+
+// SetSnapshotCredentials ata credenciales a una plantilla: cada instancia que
+// nazca de ella (kling run -from, el gateway MCP) las recibe en su proxy de
+// credenciales al arrancar. Exige que la plantilla tenga egress allowlist.
+func (c *Client) SetSnapshotCredentials(ctx context.Context, name string, req CredentialsRequest) (*Snapshot, error) {
+	var s Snapshot
+	return &s, c.do(ctx, http.MethodPut, "/snapshots/"+name+"/credentials", req, &s)
+}
+
 func (c *Client) Remove(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/machines/"+ref, nil, nil)
 }

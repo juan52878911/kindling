@@ -1858,6 +1858,81 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	return &out, nil
 }
 
+// SetCredentials entrega credenciales al proxy de credenciales de una máquina
+// viva (internal/net/credproxy.go). La clave real se queda en el daemon —en
+// memoria y cifrada en el directorio de la máquina (ver credenciales.go)—; al
+// invitado le llega por MMDS (env) un marcador en la variable que pide cada
+// credencial, y el proxy lo cambia por la clave solo en peticiones a su
+// dominio. Así un servidor comprometido no puede leer la clave, sacarla a otro
+// dominio ni dejarla en un snapshot.
+//
+// Exige egress allowlist: el desvío del dominio al proxy lo hace el resolver
+// propio de la máquina, que solo existe en ese modo.
+//
+// Se FUSIONA con lo que la máquina ya tuviera, por variable: repetir la misma
+// -env con otra clave la rota sin que el proceso del invitado se entere, porque
+// conserva su marcador (el entorno de un proceso no cambia después de exec).
+//
+// A diferencia de PutMMDS, NO marca HasSecrets: lo que hay en la RAM del
+// invitado es el marcador, y el marcador no es un secreto (ver la cabecera de
+// credproxy.go). La máquina se puede congelar, y al descongelarla Thaw vuelve
+// a entregar las credenciales desde su almacén.
+func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.CredentialSpec) (*api.Machine, error) {
+	if sinProxyDeCredenciales {
+		return nil, errSinProxyDeCredenciales
+	}
+	if len(specs) == 0 {
+		return nil, errors.New("no credentials given")
+	}
+	mc, ok := m.Get(ref)
+	if !ok {
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+	}
+	defer m.lock(mc.ID)()
+
+	cur, ok := m.Get(mc.ID)
+	if !ok {
+		return nil, fmt.Errorf("machine %q doesn't exist", ref)
+	}
+	if cur.State != api.StateRunning {
+		return nil, fmt.Errorf("credentials can only be given to a running machine (it is %s)", cur.State)
+	}
+	if cur.Egress != string(knet.EgressAllowlist) {
+		return nil, fmt.Errorf("credentials need -egress allowlist (the machine has %q)", cur.Egress)
+	}
+	m.mu.RLock()
+	sock := m.socket[mc.ID]
+	m.mu.RUnlock()
+	if sock == "" {
+		return nil, fmt.Errorf("no socket for %s", mc.ID)
+	}
+
+	creds, nuevas, err := m.entregarCredenciales(ctx, mc.ID, knet.Plan(cur.NetIndex, cur.ID), fc.New(sock), specs)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	live := m.byID[mc.ID]
+	if live == nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("machine %q no longer exists", ref)
+	}
+	live.CredentialDomains = dominiosDe(creds)
+	m.persist()
+	out := live.Clone()
+	m.mu.Unlock()
+
+	dominios := make([]string, 0, len(specs))
+	for _, s := range specs {
+		dominios = append(dominios, s.Domain)
+	}
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: mc.ID, Name: mc.Name,
+		Message: fmt.Sprintf("credentials handed to the credential proxy for %s (%d new, %d rotated; the guest only sees placeholders)",
+			strings.Join(dominios, ", "), nuevas, len(specs)-nuevas)})
+	return out, nil
+}
+
 // Thaw restaura una máquina warm. Es la operación rápida del proyecto.
 func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono := nuevoCrono("frozen")
@@ -2087,6 +2162,13 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	crono.marca(&crono.p.LoadMS)
 	if err := m.abrirReenvios(ctx, c, mc.ID); err != nil {
 		return abortar(err)
+	}
+	// Sus credenciales (credenciales.go): el proxy y el resolver se rehicieron
+	// con la red si esta se había desmontado, y el VMM es nuevo, así que los
+	// marcadores vuelven a MMDS. Un fallo no tumba el thaw: la máquina sirve y
+	// el dominio con credencial falla cerrado, y queda dicho en el log.
+	if _, err := m.reentregarCredenciales(ctx, mc, c); err != nil {
+		log.Printf("thaw: %s woke up without its credentials: %v", mc.Name, err)
 	}
 	crono.marca(&crono.p.ForwardsMS)
 	// El invitado despierta con el reloj del momento en que se congeló, y si

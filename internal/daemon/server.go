@@ -211,6 +211,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/squeeze", s.handleSqueeze)
 	mux.HandleFunc("POST /machines/{ref}/resize", s.handleResize)
 	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
+	mux.HandleFunc("POST /machines/{ref}/credentials", s.handleCredentials)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
@@ -230,6 +231,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("GET /snapshots/{name}", s.handleSnapshot)
 	mux.HandleFunc("PUT /snapshots/{name}/annotations/{key}", s.handleSetAnnotation)
+	mux.HandleFunc("PUT /snapshots/{name}/credentials", s.handleSnapshotCredentials)
 	mux.HandleFunc("DELETE /snapshots/{name}/annotations/{key}", s.handleRemoveAnnotation)
 	mux.HandleFunc("GET /store/{ns}", s.handleStoreKeys)
 	mux.HandleFunc("GET /store/{ns}/{key}", s.handleStoreGet)
@@ -597,6 +599,38 @@ func (s *Server) handleMMDS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
+	var req api.CredentialsRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256<<10)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+func (s *Server) handleSnapshotCredentials(w http.ResponseWriter, r *http.Request) {
+	var req api.CredentialsRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256<<10)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	snap, err := s.mgr.SetSnapshotCredentials(r.PathValue("name"), req.Credentials, req.Clear)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "does not exist") {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {

@@ -32,8 +32,74 @@ func cmdTemplate(args []string) error {
 		return snapshotsRemove("template rm", args)
 	case "inspect", "show":
 		return snapshotsInspect(args)
+	case "credential":
+		return snapshotsCredential(args)
 	}
-	return fmt.Errorf("unknown subcommand %q: use ls, rm or inspect", sub)
+	return fmt.Errorf("unknown subcommand %q: use ls, rm, inspect or credential", sub)
+}
+
+// snapshotsCredential es `kling template credential`: ata una clave a una
+// plantilla para que cada instancia que nazca de ella (kling run -from, las
+// réplicas del gateway MCP) la reciba en su proxy de credenciales al arrancar.
+// Es el camino para un servicio MCP: nadie está delante para hacer `machine
+// credential` a cada réplica. Como allí, la clave no viaja por la línea de
+// comandos: -f o stdin.
+func snapshotsCredential(args []string) error {
+	fs := flag.NewFlagSet("template credential", flag.ExitOnError)
+	host := hostFlag(fs)
+	domain := fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com")
+	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
+	file := fs.String("f", "", "file with the key (default: stdin)")
+	clear := fs.Bool("clear", false, "remove every credential of the template")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || (!*clear && (*domain == "" || *env == "")) {
+		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-f keyfile]  (reads stdin if no -f)\n" +
+			"       kling template credential <template> -clear")
+	}
+	req := api.CredentialsRequest{Clear: *clear}
+	if !*clear {
+		secret, err := leerClave(*file)
+		if err != nil {
+			return err
+		}
+		req.Credentials = []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret}}
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	s, err := api.NewClient(hostOf(*host)).SetSnapshotCredentials(ctx, fs.Arg(0), req)
+	if err != nil {
+		return err
+	}
+	if *clear {
+		fmt.Printf("%s  no credentials; new instances get none (running ones keep theirs)\n", s.Name)
+		return nil
+	}
+	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to https://%s through its proxy\n",
+		s.Name, *env, strings.ToLower(*domain))
+	fmt.Printf("      point the SDK at http://%s; running instances are not changed (kling machine credential does that)\n",
+		strings.ToLower(*domain))
+	return nil
+}
+
+// leerClave lee la clave de un fichero o de stdin, sin espacios alrededor.
+func leerClave(file string) (string, error) {
+	var raw []byte
+	var err error
+	if file != "" {
+		raw, err = os.ReadFile(file)
+	} else {
+		raw, err = io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
+	}
+	if err != nil {
+		return "", err
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", errors.New("the key is empty")
+	}
+	return secret, nil
 }
 
 func snapshotsList(args []string) error {

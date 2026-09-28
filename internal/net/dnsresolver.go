@@ -114,6 +114,34 @@ type dnsResolver struct {
 
 	seedMu sync.Mutex
 	seeded map[string]time.Time // ip -> caducidad; evita re-sembrar (fork+exec) dentro del TTL
+
+	// Dominios con credencial (credproxy.go): se contestan con credIP, la IP del
+	// proxy en el lado host del veth, sin reenviar ni sembrar la IP real.
+	credMu    sync.RWMutex
+	credHosts map[string]bool
+	credIP    stdnet.IP
+}
+
+// credTTL es el TTL de la respuesta sintética para un dominio con credencial:
+// corto, para que un cambio de credenciales se note pronto.
+const credTTL = 30
+
+// setCredHosts fija los dominios que este resolver desvía al proxy de credenciales.
+func (r *dnsResolver) setCredHosts(domains []string, ip stdnet.IP) {
+	m := map[string]bool{}
+	for _, d := range normalizeDomains(domains) {
+		m[d] = true
+	}
+	r.credMu.Lock()
+	r.credHosts, r.credIP = m, ip.To4()
+	r.credMu.Unlock()
+}
+
+func (r *dnsResolver) isCredHost(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	r.credMu.RLock()
+	defer r.credMu.RUnlock()
+	return r.credHosts[name]
 }
 
 // startDNSResolver arranca (idempotente) el resolver del netns de n. Devuelve
@@ -273,9 +301,23 @@ func (r *dnsResolver) handleTCP(conn stdnet.Conn) {
 // gasta CPU del resolver pero no fondos de sockets efímeros del host ni forks
 // de ipset.
 func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
-	name, _, ok := parseQuestion(query)
+	name, qtype, ok := parseQuestion(query)
 	if !ok {
 		return respondError(query, 1) // FORMERR: no lo entendemos
+	}
+	if r.isCredHost(name) {
+		// Dominio con credencial: la única IP que el invitado debe usar para él es
+		// la del proxy. A se contesta con ella; el resto de tipos (AAAA incluido)
+		// con una respuesta vacía, para que el cliente caiga a IPv4 y no busque
+		// otro camino. No se reenvía ni se siembra nada: la IP real no entra en
+		// el ipset, así que no hay salida directa que esquive al proxy.
+		r.credMu.RLock()
+		ip := r.credIP
+		r.credMu.RUnlock()
+		if qtype == 1 && ip != nil {
+			return respondA(query, ip, credTTL)
+		}
+		return respondError(query, 0) // NOERROR sin respuestas
 	}
 	if !r.isAllowed(name) {
 		// Dominio no listado: ni lo reenviamos. Cierra el DNS-tunneling por
@@ -641,6 +683,36 @@ func extractA(msg []byte) []aRecord {
 		off += rdlen
 	}
 	return out
+}
+
+// respondA fabrica una respuesta con un único registro A para la pregunta de
+// query: cabecera y pregunta copiadas de la consulta (sin su sección adicional,
+// p. ej. el OPT de EDNS) y la respuesta apuntando al nombre por compresión.
+func respondA(query []byte, ip stdnet.IP, ttl uint32) []byte {
+	ip4 := ip.To4()
+	if len(query) < 12 || ip4 == nil {
+		return respondError(query, 2)
+	}
+	_, next, ok := readName(query, 12)
+	if !ok || next+4 > len(query) {
+		return respondError(query, 1)
+	}
+	resp := append([]byte(nil), query[:next+4]...)
+	resp[2] |= 0x80                          // QR=1
+	resp[2] &^= 0x02                         // TC=0
+	resp[3] = 0x80                           // RA=1, RCODE=0
+	binary.BigEndian.PutUint16(resp[4:6], 1) // QDCOUNT
+	binary.BigEndian.PutUint16(resp[6:8], 1) // ANCOUNT
+	binary.BigEndian.PutUint16(resp[8:10], 0)
+	binary.BigEndian.PutUint16(resp[10:12], 0)
+	var rr [16]byte
+	binary.BigEndian.PutUint16(rr[0:2], 0xC00C) // puntero al nombre de la pregunta
+	binary.BigEndian.PutUint16(rr[2:4], 1)      // A
+	binary.BigEndian.PutUint16(rr[4:6], 1)      // IN
+	binary.BigEndian.PutUint32(rr[6:10], ttl)
+	binary.BigEndian.PutUint16(rr[10:12], 4)
+	copy(rr[12:16], ip4)
+	return append(resp, rr[:]...)
 }
 
 // respondError fabrica una respuesta mínima a partir de la consulta: marca QR=1
