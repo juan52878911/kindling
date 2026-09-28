@@ -127,7 +127,9 @@ var coreTree = []section{
                                                    credential)
   template credential <name> -type postgres        the same for a database password
       -domain D -user R [-database B] [-port P]    (see machine credential)
-      [-ca-file ca.pem] -env PGPASSWORD [-f file]
+      [-ca-file ca.pem] [-upstream H:P]
+      [-upstream-tls verify-full|disable]
+      [-tls-server-name N] -env PGPASSWORD [-f file]
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -215,6 +217,12 @@ var coreTree = []section{
                                                    password; the proxy logs in to D:P
                                                    with the real one over verified TLS
                                                    (SCRAM), -ca-file adds a CA
+      [-upstream H:P] [-tls-server-name N]         -upstream: connect to H:P instead of
+      [-upstream-tls verify-full|disable]          D:P (a Docker or LAN database;
+                                                   loopback allowed); -tls-server-name:
+                                                   verify the cert as N; -upstream-tls
+                                                   disable: no TLS, SCRAM-SHA-256 only
+                                                   (see docs/postgres.md)
   machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
       [-since 10m] [-tail 200] [-json]             one line per request (method, host,
                                                    masked path, status, credentials
