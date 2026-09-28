@@ -88,6 +88,10 @@ Dos reglas del núcleo lo deciden, y las dos están en el código:
   volumen, el postmaster tendría los ficheros de datos desmontados debajo.
 - `Fork` (y `sandbox fork`) rechaza las máquinas con un volumen montado en escritura
   (`puedeRamificarse`): solo una máquina a la vez puede escribir en un volumen.
+- `Fork` rechaza también las máquinas con credenciales del proxy
+  (`forkSinCredenciales`): las copias despertarían con marcadores que su proxy no
+  conoce. Para N máquinas con credencial, átala a la plantilla (`kling template
+  credential`) y arranca cada una con `run -from`.
 
 En el overlay, cada copia lleva su propia copia del disco de la máquina, tomada con la
 memoria en el mismo instante: son consistentes entre sí.

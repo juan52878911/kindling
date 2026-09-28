@@ -124,6 +124,9 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	if err := puedeRamificarse(src); err != nil {
 		return "", nil, err
 	}
+	if err := m.forkSinCredenciales(src); err != nil {
+		return "", nil, err
+	}
 
 	name := nombreSnapshotFork(src.ID)
 	// Reservado de principio a fin: entre que Commit termina y la primera
@@ -210,6 +213,37 @@ func puedeRamificarse(src *api.Machine) error {
 		}
 	}
 	return nil
+}
+
+// forkSinCredenciales rechaza el fork de una máquina con credenciales del
+// proxy (credenciales.go).
+//
+// DECISIÓN — rechazar y no reentregar: las copias despiertan con la memoria
+// del original, y con ella los MARCADORES del original en el entorno de sus
+// procesos; el proxy de cada copia es nuevo y no los conoce, así que fallan
+// cerrado (bien) pero rotas y sin decir por qué. Reentregar con marcadores
+// nuevos no lo arregla: van a MMDS, pero un proceso que ya leyó su entorno
+// sigue con el viejo. Reentregar los MISMOS marcadores sí funcionaría, pero
+// multiplicaría la clave por N máquinas sin que nadie lo haya pedido de
+// forma explícita. Lo correcto ya existe: credenciales de plantilla y
+// `run -from`, que da a cada instancia su marcador antes de que arranque nada.
+//
+// Vale igual para las que vinieron de una plantilla: el snapshot temporal del
+// fork no lleva el almacén de la plantilla, así que las copias no recibirían
+// nada. Se mira el almacén además de CredentialDomains: es la fuente de
+// verdad, y state.json podría ir por detrás.
+func (m *Manager) forkSinCredenciales(src *api.Machine) error {
+	_, err := os.Stat(m.credPath(src.ID))
+	if len(src.CredentialDomains) == 0 && err != nil {
+		return nil
+	}
+	dominios := "proxy credentials"
+	if len(src.CredentialDomains) > 0 {
+		dominios = "proxy credentials for " + strings.Join(src.CredentialDomains, ", ")
+	}
+	return fmt.Errorf("%w: %s has %s, and every copy would wake up with placeholders its own proxy doesn't know; "+
+		"attach the credentials to a template instead (kling template credential <template> ...) and start each copy "+
+		"with kling run -from <template>, which gives every instance its own placeholder", ErrFork, src.Name, dominios)
 }
 
 // deshacerFork elimina las copias que llegó a crear un fork fallido (también
