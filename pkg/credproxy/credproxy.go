@@ -68,6 +68,9 @@
 // cada rechazo, con método, host, ruta enmascarada, estado, motivo, qué
 // credenciales se sustituyeron, bytes y duración. Nunca la clave, el marcador,
 // cabeceras, cuerpos ni la query (ver auditoria.go).
+//
+// POSTGRES: una credencial Kind "postgres" no la usa el proxy HTTP sino
+// ServePG, el mismo modelo sobre el protocolo de Postgres (ver postgres.go).
 package credproxy
 
 import (

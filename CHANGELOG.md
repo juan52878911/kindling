@@ -181,6 +181,24 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Novedades
 
+- **Proxy de credenciales de Postgres.** `kling machine credential <ref> -type postgres
+  -domain db.ejemplo.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env
+  PGPASSWORD` (y lo mismo en `kling template credential`; la clave, como siempre, por
+  `-f` o stdin). El invitado conecta en claro al dominio del servidor, en el puerto que
+  quiera, con el marcador como contraseña; el proxy entra en el servidor con la clave
+  real por TLS verificado (SCRAM-SHA-256, con `-PLUS` si se ofrece; o contraseña en
+  claro dentro de ese TLS) y solo entonces le da `AuthenticationOk`. Rol y base de datos
+  atados a la credencial, `CancelRequest` traducido con claves falsas, nada sustituido en
+  el flujo, una línea de auditoría por conexión (`kind: postgres`; `kling machine audit`
+  la pinta como `PG rol@base`). Sin dependencias nuevas. En Linux escucha en
+  `n.HostIP:5381` con un DNAT de todo puerto TCP de la IP del proxy salvo 53/80/443; en
+  macOS lo sirve `kling-vz` en la pasarela, y el daemon exige que su `/kling/info` diga
+  `credential_kinds: postgres` (hay que recompilar `kling-vz`). API: `type`, `port`,
+  `user`, `database` y `ca_pem` en `CredentialSpec`; el almacén cifrado de antes se lee
+  igual. Límites y lo que no resuelve (sin TLS en el tramo del invitado, `ALTER ROLE`,
+  sin lista de SQL, bases en IP privada rechazadas): SECURITY.md §7 y "Lo que NO está
+  resuelto". e2e: sección 7d de `scripts/90-e2e.sh` con `KLING_E2E_PG_URL`; prueba de
+  laboratorio contra un PostgreSQL real con `-tags pglab` (`pkg/credproxy/postgres_lab_test.go`).
 - **Snapshots de volumen y vuelta atrás.** `kling volume snapshot <vol> [nombre]` (por
   defecto la hora UTC), `kling volume snapshots <vol>`, `kling volume restore <vol> <snap>`
   y `kling volume rm <vol>@<snap>`; `volume ls` gana la columna `SNAPS`. Un snapshot solo

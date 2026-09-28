@@ -1257,6 +1257,20 @@ kling mcp import stripe -egress allowlist -allow api.stripe.com
 kling template credential stripe -domain api.stripe.com -env STRIPE_API_KEY -f key.txt
 ```
 
+The same works for a **Postgres password**. The guest connects in plain text to the
+database's host name with the placeholder as its password; the proxy logs in to the real
+server with the real password over verified TLS (SCRAM-SHA-256, `-PLUS` when offered):
+
+```sh
+kling machine credential payments -type postgres -domain db.example.com -user app \
+  -database appdb -env PGPASSWORD -f db-password.txt     # -ca-file ca.pem for a private CA
+# inside: psql "host=db.example.com user=app dbname=appdb sslmode=prefer"
+```
+
+The role and database are pinned to the credential and nothing in the data stream is
+rewritten. The proxy does not look at SQL, so the role's own grants are the limit. A
+database on a private IP is refused, like any other destination. See SECURITY.md §7.
+
 Measured in the lab with a "compromised" server running as root inside:
 
 | What it tries | With MMDS | With the proxy |
