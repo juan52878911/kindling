@@ -145,3 +145,20 @@ Host: _pending_
 | _pending lab run_ | | | | | | | | | | | | | | | | |
 
 Latencies in ms. Raw JSON: `docs/bench-data/thaw-scale-<date>/`.
+
+### Smoke pass (not the matrix)
+
+To check the pipeline end to end, a smoke pass ran on the development lab: a Proxmox LXC
+container (CT 105, nested Firecracker, 8 GiB, ext4, 4 GiB of free disk). It is **not** the
+result of the matrix and must not be quoted as such:
+
+- `NS=1 MS="1 10" R=1 PSI_MAX=20`. `PSI_MAX` was raised because the container reads the
+  pressure of the whole Proxmox host, which sat at 11–15 at rest.
+- N=1, M=1, `rep` variant, frozen: **26 ms** from the first request to the first `tools/call`
+  result, with 1 microVM woken (31 MiB PSS) and back to zero in 11.7 s (`-idle 10s`).
+  The same cell warm took 6 ms, and steady calls took 0.7–0.9 ms.
+- All M=10 cells were **skipped** by the preflight estimate: 10 replicas × 256 MiB of
+  frozen memory files do not fit in 4 GiB of free disk. They show up as `skipped` in the
+  table, as the honesty rules require.
+
+The full matrix needs a host with at least ~40 GiB of free disk for `N=50`.

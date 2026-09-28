@@ -112,8 +112,8 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status %d, quería 403", resp.StatusCode)
 	}
-	// Al lado, el de Postgres: sin credencial Postgres, un arranque con
-	// cualquier contraseña acaba en su ErrorResponse (y en el registro).
+	// Al lado, el de Postgres: escucha, pero sin credencial Postgres cierra
+	// sin leer ni contestar nada (el analizador no queda expuesto).
 	pg, err := stdnet.Dial("tcp", "127.0.0.1:"+strconv.Itoa(pgPort))
 	if err != nil {
 		t.Fatalf("el proxy de Postgres no escucha: %v", err)
@@ -122,8 +122,8 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	pg.Write([]byte("p\x00\x00\x00\x06x\x00"))
 	b, _ := io.ReadAll(pg)
 	pg.Close()
-	if !strings.Contains(string(b), "28P01") {
-		t.Errorf("respuesta del proxy de Postgres: %q", b)
+	if len(b) != 0 {
+		t.Errorf("el proxy de Postgres contestó sin credencial Postgres: %q", b)
 	}
 	stopCredProxy(ns)
 	if _, err := http.DefaultClient.Do(req); err == nil {

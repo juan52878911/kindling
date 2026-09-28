@@ -268,6 +268,14 @@ func (p *Proxy) ServePG(ctx context.Context, conn net.Conn) {
 		s.fatal("28000", "credentials need egress allowlist")
 		return
 	}
+	// Sin ninguna credencial de Postgres (una máquina que solo tiene las de
+	// HTTP también recibe aquí lo que mande a cualquier puerto del host) se
+	// cierra sin leer un byte: el analizador del protocolo no queda expuesto a
+	// quien no tiene nada que pedirle.
+	if !p.PGActivo() {
+		s.rec.Reason, s.rec.Denied = ReasonNoCredential, true
+		return
+	}
 	select {
 	case p.pgSem <- struct{}{}:
 		defer func() { <-p.pgSem }()

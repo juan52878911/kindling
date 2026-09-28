@@ -876,3 +876,31 @@ func TestPGNoSeUsaEnHTTP(t *testing.T) {
 		t.Errorf("HTTP a un dominio solo Postgres: %d", rec.Code)
 	}
 }
+
+// Una máquina con solo credenciales HTTP también manda aquí lo que abra contra
+// cualquier puerto del host: se cierra sin leer nada ni contestar, y queda
+// en el registro como una denegación sin credencial.
+func TestPGSinCredencialPostgresCierraSinLeer(t *testing.T) {
+	e := proxyPG(t, nil, nil)
+	if _, err := e.p.SetCredentials([]Credential{{Env: "API_KEY", Domain: "api.example.com",
+		Placeholder: pgMarca + "h", Secret: pgClave + "h"}}); err != nil {
+		t.Fatal(err)
+	}
+	if e.p.PGActivo() {
+		t.Fatal("PGActivo con solo credenciales HTTP")
+	}
+	k := conectarPG(t, e.addr)
+	k.arranque(0, "user", pgUser)
+	if n, err := k.br.ReadByte(); err == nil {
+		t.Fatalf("el proxy contestó (%#x) sin credencial Postgres", n)
+	}
+	recs, _ := e.registro(t)
+	if len(recs) != 1 || recs[0].Reason != ReasonNoCredential || !recs[0].Denied || recs[0].User != "" {
+		t.Errorf("registro %+v", recs)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.dialed) != 0 {
+		t.Errorf("se marcó hacia fuera: %v", e.dialed)
+	}
+}

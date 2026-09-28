@@ -360,7 +360,9 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 //     hace falta saberlo de antemano. Es una regla fija y no una por
 //     credencial, sin multiport: el orden deja fuera el 53, el 80 y el 443. No
 //     abre nada nuevo: todo lo que llegue ahí lo atiende (y lo rechaza, si no
-//     trae un marcador) el proxy.
+//     trae un marcador) el proxy. El listener existe en cuanto la máquina
+//     tiene cualquier credencial, pero sin una de Postgres cierra cada
+//     conexión sin leerla (ServePG), así que el analizador no queda expuesto.
 func (n *Net) credNATRules() [][]string {
 	var rules [][]string
 	for _, puerto := range []string{"80", "443"} {
