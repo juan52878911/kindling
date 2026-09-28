@@ -922,9 +922,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		return nil, err
 	}
 	if len(credsPlantilla) > 0 && req.Egress != string(knet.EgressAllowlist) {
+		// Los dominios concretos van en el mensaje: "sus dominios" obliga a ir a
+		// buscarlos a otro sitio (snapshots inspect) antes de poder arrancar.
 		return nil, fmt.Errorf("template %s has credentials, which need -egress allowlist (this instance would have %q); "+
-			"run it with -egress allowlist -allow <its domains>, or clear them with kling template credential %s -clear",
-			req.From, req.Egress, req.From)
+			"run it with -egress allowlist -allow %s, or clear them with kling template credential %s -clear",
+			req.From, req.Egress, strings.Join(snap.AllowDomains, ","), req.From)
 	}
 	// El techo de CPU, igual. El planificador ya lo pasaba a mano, pero `kling
 	// run -from` no: la réplica caía al 50 % de un core del daemon aunque el

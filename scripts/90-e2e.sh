@@ -610,8 +610,20 @@ if $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org 
   out=$($KLING template inspect "$TPLC" -json 2>&1)
   contiene "$out" '"credential_domains"' && contiene "$out" "httpbin.org" && ok "la plantilla lista sus dominios con credencial" \
     || bad "template inspect" "credential_domains con httpbin.org" "$out"
-  # El egress va explícito, como lo manda el gateway: el CLI siempre envía uno
-  # (none por defecto) y el daemon solo hereda el de la plantilla si llega vacío.
+  # A2: sin -egress explícito, el CLI manda vacío con -from (egressForRun en
+  # cmd/kling/main.go) y el daemon hereda el allowlist de la plantilla —antes
+  # el CLI mandaba siempre "none" por defecto y esto exigía repetir -egress
+  # allowlist -allow a mano en cada instancia.
+  if $KLING run -from "$TPLC" -name "$TC-noegress" -ttl 5m -on-ttl remove >/dev/null 2>&1; then
+    out=$($KLING exec -timeout 90s "$TC-noegress" -- python3 -c "$SONDA" "$PASS3" corto 2>&1)
+    contiene "$out" "AUTH 200" && ok "run -from sin -egress hereda el allowlist de la plantilla (AUTH 200)" \
+      || bad "herencia de egress sin -egress" "AUTH 200" "$out"
+    $KLING rm -f "$TC-noegress" >/dev/null 2>&1
+  else
+    bad "run -from sin -egress" "una máquina con el allowlist heredado" "no arrancó"
+  fi
+  # Con -egress explícito, en cambio, ese valor manda —como lo hace el
+  # gateway, que siempre lo da— y el daemon no hereda nada.
   if $KLING run -from "$TPLC" -name "$TC-a" -egress allowlist -allow example.org -ttl 10m -on-ttl remove >/dev/null 2>&1; then
     out=$($KLING exec -timeout 90s "$TC-a" -- python3 -c "$SONDA" "$PASS3" corto 2>&1)
     pha=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')

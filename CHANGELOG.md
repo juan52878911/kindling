@@ -60,10 +60,18 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   dentro muere en 3 ms en vez de esperar al plazo del SDK (un REJECT con RST necesitaba
   `xt_REJECT`, que el CT del lab no tiene: la regla fallaba y la máquina no arrancaba).
 - **Pendiente, documentado en SECURITY.md:** el proxy no existe en macOS (backend vz;
-  plan concreto anotado), los secretos por sesión de MMDS siguen sin rellenarse solos, y
-  `kling run -from` manda siempre un egress (`none` por defecto) en vez de dejar que el
-  daemon herede el de la plantilla: una instancia de una plantilla con credenciales
-  necesita `-egress allowlist -allow …` explícito, como hace el gateway.
+  plan concreto anotado) y los secretos por sesión de MMDS siguen sin rellenarse solos.
+
+### Arreglado
+
+- **`kling run -from` hereda el egress de la plantilla si no se pide otro.** Mandaba
+  siempre un egress (`none` por defecto), así que instanciar una plantilla con
+  credenciales (`kling template credential`) exigía repetir `-egress allowlist -allow
+  …` a mano en cada `run -from`, aunque el daemon ya sabe heredarlo del snapshot cuando
+  llega vacío. Ahora, con `-from` y sin `-egress` explícito, el CLI manda vacío y deja
+  que herede; con `-egress` dado, o sin `-from`, no cambia nada. De paso, el error de
+  "necesita allowlist" ya lista los dominios concretos de la plantilla en vez de decir
+  `<its domains>`.
 
 ### Pruebas
 

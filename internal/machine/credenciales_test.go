@@ -331,6 +331,35 @@ func TestCredencialesDePlantilla(t *testing.T) {
 	}
 }
 
+// A2: el error de runFrom cuando el egress pedido no alcanza para las
+// credenciales de la plantilla debe listar sus dominios concretos, no un
+// "<its domains>" que obligue a ir a buscarlos a otro sitio.
+func TestRunFromCredencialesErrorListaDominios(t *testing.T) {
+	m := newTestManager(t)
+	prevSin := sinProxyDeCredenciales
+	sinProxyDeCredenciales = false
+	t.Cleanup(func() { sinProxyDeCredenciales = prevSin })
+	escribirSnapshot(t, m, "svc-al", api.Snapshot{Egress: "allowlist", AllowDomains: []string{"example.org"}})
+	spec := []api.CredentialSpec{{Domain: "api.example.com", Env: "KEY", Secret: credSecreto}}
+	if _, err := m.SetSnapshotCredentials("svc-al", spec, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Egress explícito "none": no debe heredar del snapshot, así que la
+	// comprobación de credenciales tiene que negarse y decir qué dominios hacen
+	// falta.
+	_, err := m.runFrom(context.Background(), api.RunRequest{From: "svc-al", Egress: "none"})
+	if err == nil {
+		t.Fatal("se esperaba un error: egress none con credenciales de plantilla")
+	}
+	if !strings.Contains(err.Error(), "-allow example.org") {
+		t.Errorf("el error no lista los dominios concretos: %v", err)
+	}
+	if strings.Contains(err.Error(), "its domains") {
+		t.Errorf("el error sigue diciendo <its domains> en vez de listarlos: %v", err)
+	}
+}
+
 // entregarCredenciales es lo que runFrom usa con las de plantilla: marcadores
 // nuevos por instancia, almacén propio de la máquina y MMDS con solo marcadores.
 func TestEntregarCredencialesDePlantillaAUnaInstancia(t *testing.T) {
