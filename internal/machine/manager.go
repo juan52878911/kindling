@@ -1859,7 +1859,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 }
 
 // SetCredentials entrega credenciales al proxy de credenciales de una máquina
-// viva (internal/net/credproxy.go). La clave real se queda en el daemon —en
+// viva (pkg/credproxy, servido por internal/net). La clave real se queda en el daemon —en
 // memoria y cifrada en el directorio de la máquina (ver credenciales.go)—; al
 // invitado le llega por MMDS (env) un marcador en la variable que pide cada
 // credencial, y el proxy lo cambia por la clave solo en peticiones a su
@@ -1874,8 +1874,8 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 // conserva su marcador (el entorno de un proceso no cambia después de exec).
 //
 // A diferencia de PutMMDS, NO marca HasSecrets: lo que hay en la RAM del
-// invitado es el marcador, y el marcador no es un secreto (ver la cabecera de
-// credproxy.go). La máquina se puede congelar, y al descongelarla Thaw vuelve
+// invitado es el marcador, y el marcador no es un secreto (ver la documentación de
+// pkg/credproxy). La máquina se puede congelar, y al descongelarla Thaw vuelve
 // a entregar las credenciales desde su almacén.
 func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.CredentialSpec) (*api.Machine, error) {
 	if sinProxyDeCredenciales {

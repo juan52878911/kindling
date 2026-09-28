@@ -11,6 +11,7 @@ import (
 	"github.com/juan52878911/kindling/internal/events"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const (
@@ -20,16 +21,16 @@ const (
 
 // capturarRegistro sustituye knet.SetCredentials por un registro en memoria:
 // en el Mac no hay veth donde escuchar, y lo que se prueba aquí es lo que el
-// manager le entrega, no el proxy (que tiene sus tests en internal/net).
-func capturarRegistro(t *testing.T) *[][]knet.Credential {
+// manager le entrega, no el proxy (que tiene sus tests en pkg/credproxy).
+func capturarRegistro(t *testing.T) *[][]credproxy.Credential {
 	t.Helper()
-	var got [][]knet.Credential
+	var got [][]credproxy.Credential
 	prevSin := sinProxyDeCredenciales
 	sinProxyDeCredenciales = false
 	t.Cleanup(func() { sinProxyDeCredenciales = prevSin })
 	prev := registrarCredenciales
-	registrarCredenciales = func(_ *knet.Net, creds []knet.Credential) error {
-		got = append(got, append([]knet.Credential(nil), creds...))
+	registrarCredenciales = func(_ *knet.Net, creds []credproxy.Credential) error {
+		got = append(got, append([]credproxy.Credential(nil), creds...))
 		return nil
 	}
 	t.Cleanup(func() { registrarCredenciales = prev })
@@ -42,7 +43,7 @@ func TestAlmacenDeCredenciales(t *testing.T) {
 	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	creds := []knet.Credential{{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto}}
+	creds := []credproxy.Credential{{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto}}
 	if err := m.guardarCredenciales("m1", creds); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestSetCredentialsGuardaFusionaYRota(t *testing.T) {
 		t.Fatalf("al proxy llegó %+v", *got)
 	}
 	ph := (*got)[0][0].Placeholder
-	if !strings.HasPrefix(ph, knet.PlaceholderPrefix) {
+	if !strings.HasPrefix(ph, credproxy.PlaceholderPrefix) {
 		t.Fatalf("marcador %q", ph)
 	}
 	patches := falso.llamadasA("PATCH", "/mmds")
@@ -145,7 +146,7 @@ func TestSetCredentialsGuardaFusionaYRota(t *testing.T) {
 	if len(*got) != 2 || len((*got)[1]) != 2 {
 		t.Fatalf("segunda entrega al proxy: %+v", *got)
 	}
-	porEnv := map[string]knet.Credential{}
+	porEnv := map[string]credproxy.Credential{}
 	for _, c := range (*got)[1] {
 		porEnv[c.Env] = c
 	}
@@ -225,7 +226,7 @@ func TestReentregarCredenciales(t *testing.T) {
 	if n, err := m.reentregarCredenciales(ctx, mc, nil); n != 0 || err != nil {
 		t.Fatalf("sin almacén: %d, %v", n, err)
 	}
-	creds := []knet.Credential{
+	creds := []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto},
 		{Env: "ORG", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "org"},
 	}

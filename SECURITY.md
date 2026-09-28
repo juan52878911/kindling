@@ -169,7 +169,7 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   proceso root de dentro, y el servidor MCP corre como root: MMDS evita que el secreto
   acabe en un snapshot, no que el código hostil lo lea y lo saque por un dominio
   permitido.
-- **Proxy de credenciales** (`kling machine credential`, `internal/net/credproxy.go`):
+- **Proxy de credenciales** (`kling machine credential`, `pkg/credproxy`, servido por `internal/net/credproxy.go`):
   la clave se queda en la memoria del daemon y el invitado recibe un marcador. Con
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
   la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
