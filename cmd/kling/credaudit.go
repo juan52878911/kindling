@@ -160,8 +160,23 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 	if creds == "" {
 		creds = "-"
 	}
-	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), printable(r.Method), printable(r.Host),
-		printable(r.Path), fmt.Sprint(r.Status), printable(creds), fmt.Sprint(r.MS), printable(auditResult(r)))
+	method, path, status := r.Method, r.Path, fmt.Sprint(r.Status)
+	if r.Kind == "postgres" {
+		// Una conexión al proxy de Postgres: sin método ni ruta ni estado
+		// HTTP; en su lugar el rol y la base de datos.
+		method, path, status = "PG", r.User, "-"
+		if r.Method == "cancel" {
+			method = "CANCEL"
+		}
+		if r.Database != "" {
+			path += "@" + r.Database
+		}
+		if path == "" {
+			path = "-"
+		}
+	}
+	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), printable(method), printable(r.Host),
+		printable(path), status, printable(creds), fmt.Sprint(r.MS), printable(auditResult(r)))
 	return len(p), nil
 }
 
@@ -185,6 +200,9 @@ func auditResult(r api.CredAuditRecord) string {
 		return "DENIED(" + r.Reason + ")"
 	case r.Reason != "":
 		return r.Reason
+	case r.Auth != "":
+		// Postgres: con qué se autenticó el proxy ante el servidor.
+		return "ok(" + r.Auth + ")"
 	}
 	return "ok"
 }

@@ -921,11 +921,24 @@ func IsInsufficientMemory(err error) bool {
 // segmento, ** al final es cualquier resto). Vacío es todas. Una petición que
 // ninguna credencial del dominio permite recibe 403 sin salir del host. Al
 // rotar (misma Env) se sustituye junto con la clave: hay que repetirlo.
+//
+// Type "postgres" es una credencial de base de datos (ver pkg/credproxy,
+// postgres.go): Secret es la contraseña del rol User en el servidor
+// Domain:Port (5432 por defecto), el invitado recibe el marcador como
+// contraseña (PGPASSWORD) y el proxy sale siempre por TLS verificado contra
+// Domain, con las raíces del sistema más CAPEM si se da. Database, si se da,
+// es la única base a la que se deja conectar. Allow no vale para Postgres. Al
+// rotar, como Allow, todos estos campos se sustituyen con la clave.
 type CredentialSpec struct {
-	Domain string   `json:"domain"`
-	Env    string   `json:"env"`
-	Secret string   `json:"secret"`
-	Allow  []string `json:"allow,omitempty"`
+	Domain   string   `json:"domain"`
+	Env      string   `json:"env"`
+	Secret   string   `json:"secret"`
+	Allow    []string `json:"allow,omitempty"`
+	Type     string   `json:"type,omitempty"`
+	Port     int      `json:"port,omitempty"`
+	User     string   `json:"user,omitempty"`
+	Database string   `json:"database,omitempty"`
+	CAPEM    string   `json:"ca_pem,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de

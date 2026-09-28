@@ -25,6 +25,7 @@ import (
 	"github.com/juan52878911/kindling/internal/machine"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/plugin"
 	"github.com/juan52878911/kindling/pkg/transport"
 	"github.com/juan52878911/kindling/pkg/units"
@@ -843,18 +844,15 @@ func cmdMMDS(args []string) error {
 func cmdCredential(args []string) error {
 	fs := flag.NewFlagSet("credential", flag.ExitOnError)
 	host := hostFlag(fs)
-	domain := fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com")
-	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
-	file := fs.String("f", "", "file with the key (default: stdin)")
-	var allow stringsFlag
-	fs.Var(&allow, "allow-request", allowRequestHelp)
+	cf := credentialFlags(fs)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 || *domain == "" || *env == "" {
-		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)")
+	if fs.NArg() < 1 || *cf.domain == "" || *cf.env == "" {
+		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
+			"       kling machine credential <ref> -type postgres -domain db.example.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env PGPASSWORD [-f passfile]")
 	}
-	secret, err := leerClave(*file)
+	spec, err := cf.spec()
 	if err != nil {
 		return err
 	}
@@ -862,16 +860,23 @@ func cmdCredential(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	mc, err := api.NewClient(hostOf(*host)).SetCredentials(ctx, fs.Arg(0), api.CredentialsRequest{
-		Credentials: []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret, Allow: allow}},
+		Credentials: []api.CredentialSpec{spec},
 	})
 	if err != nil {
 		return err
 	}
+	if spec.Type == credproxy.KindPostgres {
+		fmt.Printf("%s  %s now holds a placeholder; the password only goes to %s over verified TLS through the proxy\n",
+			mc.ID[:12], spec.Env, pgDestino(spec))
+		fmt.Printf("      %s\n", pgConexion(spec))
+		fmt.Printf("      the password survives freeze/thaw and daemon restarts\n")
+		return nil
+	}
 	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
-		mc.ID[:12], *env, strings.ToLower(*domain))
-	fmt.Printf("      %s\n", describirAllow(allow))
+		mc.ID[:12], spec.Env, strings.ToLower(spec.Domain))
+	fmt.Printf("      %s\n", describirAllow(spec.Allow))
 	fmt.Printf("      point the SDK at http://%s (the proxy adds TLS); the key survives freeze/thaw and daemon restarts\n",
-		strings.ToLower(*domain))
+		strings.ToLower(spec.Domain))
 	return nil
 }
 

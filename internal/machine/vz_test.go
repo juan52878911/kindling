@@ -62,6 +62,11 @@ func puertoFalso(p int) string {
 // puerto del agente: la de un agente falso que monta la prueba.
 const envFakeVZGuest = "KLING_FAKE_VZ_GUEST"
 
+// envFakeVZKinds, si está, son los tipos de credencial que el falso dice
+// entender en /kling/info (separados por comas). Sin ella contesta como un
+// kling-vz anterior: sin credential_kinds.
+const envFakeVZKinds = "KLING_FAKE_VZ_KINDS"
+
 func servirVZFalso(sock, logPath string) {
 	// Como kling-vz: una ruta que no cabe en sun_path se ata desde su
 	// directorio con el nombre corto.
@@ -98,6 +103,14 @@ func servirVZFalso(sock, logPath string) {
 		}
 		linea := r.Method + " " + r.URL.Path
 		switch r.URL.Path {
+		case "/kling/info":
+			apuntar(linea)
+			info := map[string]any{"backend": "vz", "version": "fake"}
+			if k := os.Getenv(envFakeVZKinds); k != "" {
+				info["credential_kinds"] = strings.Split(k, ",")
+			}
+			_ = json.NewEncoder(w).Encode(info)
+			return
 		case "/kling/network":
 			var n struct {
 				Egress string `json:"egress"`
@@ -109,8 +122,8 @@ func servirVZFalso(sock, logPath string) {
 			// de llamadas es lo que la prueba lee, y no debe contenerla.
 			var c struct {
 				Credentials []struct {
-					Domain, Secret string
-					Allow          []string
+					Domain, Secret, Kind string
+					Allow                []string
 				} `json:"credentials"`
 			}
 			_ = json.Unmarshal(body, &c)
@@ -122,6 +135,9 @@ func servirVZFalso(sock, logPath string) {
 				}
 				if len(cr.Allow) > 0 {
 					linea += "+allow=" + strings.Join(cr.Allow, ",")
+				}
+				if cr.Kind != "" {
+					linea += "+kind=" + cr.Kind
 				}
 			}
 		case "/kling/forwards":
@@ -675,6 +691,52 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 	i := indice(ls, "PUT /kling/credentials")
 	if i < 0 || !strings.Contains(ls[i], "allow=GET /v1/balance") {
 		t.Fatalf("allow no llegó: %q", ls)
+	}
+}
+
+// Una credencial Postgres solo va a un kling-vz que diga entenderla: uno
+// anterior ignoraría el tipo y la serviría como HTTP. Con kinds, viaja con él.
+func TestVZCredencialPostgresExigeKinds(t *testing.T) {
+	for _, kinds := range []string{"", "http,postgres"} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			id := "aa11bb22cc33dd55"
+			dir := m.dir(id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet"}
+			base := filepath.Join(m.root, "base.ext4")
+			overlay := filepath.Join(dir, "overlay.ext4")
+			for _, f := range []string{base, overlay} {
+				if err := os.WriteFile(f, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false)
+			defer matarVMM(pid)
+			if err != nil {
+				t.Fatalf("boot: %v", err)
+			}
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
+			}, "")
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/credentials")
+			if kinds == "" {
+				if err == nil || !strings.Contains(err.Error(), "does not support postgres") || i >= 0 {
+					t.Fatalf("un kling-vz sin kinds recibió la credencial: err=%v llamadas=%q", err, ls)
+				}
+				return
+			}
+			if err != nil || i < 0 || !strings.Contains(ls[i], "+kind=postgres") {
+				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+		})
 	}
 }
 

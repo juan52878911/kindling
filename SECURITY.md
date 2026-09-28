@@ -325,6 +325,55 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   `Basic` redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no
   aparece en el log del daemon ni en el de `kling-vz`, y sigue funcionando tras
   freeze/thaw y tras reiniciar el daemon.
+- **Proxy de credenciales de Postgres** (`kling machine credential -type postgres`,
+  `pkg/credproxy/postgres.go`, sin publicar). El mismo modelo con una contraseña de base
+  de datos: el invitado recibe el marcador (en `PGPASSWORD`, por ejemplo), su resolver
+  contesta el dominio del servidor con la IP del proxy, y el proxy entra en el servidor
+  con la clave real. Qué hace y qué exige:
+  - **El tramo del invitado va en claro, y es a propósito.** Un `SSLRequest` o
+    `GSSENCRequest` recibe `N` (como un servidor sin TLS; como mucho dos), un ClientHello
+    directo se cierra. Ese tramo no sale de la máquina (el veth de su netns en Linux, la
+    pila gVisor de su `kling-vz` en macOS) y lo que viaja por él es el marcador. El
+    proxy pide la contraseña en claro, la compara en tiempo constante con los marcadores
+    de TODAS las credenciales Postgres de la máquina y así elige la credencial; después
+    exige que el rol sea el de la credencial y, si la credencial fija base de datos, esa.
+    Las conexiones de replicación, los parámetros repetidos y los arranques de más de
+    10000 bytes se rechazan; las opciones `_pq_.` y el protocolo 3.2 se contestan con
+    `NegotiateProtocolVersion` (3.0).
+  - **Hacia el servidor, siempre TLS verificado.** Sale por el mismo dialer de solo IPv4
+    públicas que el proxy HTTP (un servidor en la red privada, en `169.254/16` o en
+    loopback **se rechaza**, como un DNS envenenado), manda `SSLRequest` y lee la
+    respuesta de un byte y sin buffer: una `N` es un fallo, nunca "entonces en claro", y
+    lo que un intermediario inyecte detrás de la `S` no se cuela como si viniera dentro
+    del TLS (CVE-2021-23214). TLS 1.2+, verificado contra el nombre de la credencial con
+    las raíces del sistema más `-ca-file` si se da. La autenticación es SCRAM-SHA-256,
+    con `-PLUS` (`tls-server-end-point`) si el servidor lo ofrece, implementada aquí con
+    la biblioteca estándar: nonce del servidor que alarga el nuestro, iteraciones entre
+    4096 y 1 000 000, y la firma del servidor comprobada antes de dar nada por bueno (un
+    `AuthenticationOk` sin ella se rechaza). La contraseña en claro solo va dentro de
+    ese TLS verificado. MD5, GSS, SSPI y cualquier otro mecanismo se rechazan.
+  - **El invitado no ve la autenticación de verdad.** Recibe `AuthenticationOk` solo
+    tras el del servidor; un error del servidor antes de eso no se reenvía (recibe uno
+    propio, 28P01 u 08006, como mucho con el SQLSTATE del servidor) y el log del host solo
+    lleva ese código. Después el flujo pasa tal cual en los dos sentidos: **no se
+    sustituye nada en él**, ni el marcador ni la clave. La excepción es
+    `BackendKeyData`: la clave de cancelación se cambia por una aleatoria, y un
+    `CancelRequest` con ella se traduce a la real en una conexión nueva con el mismo TLS;
+    uno con una clave que el proxy no dio se cierra sin más.
+  - **Límites**: 32 conexiones a la vez por máquina, 10 s para que el invitado mande
+    arranque y contraseña y 15 s para toda la autenticación; tras ella no hay plazo de
+    inactividad (un pool puede estar horas callado), hay keepalive TCP de 30 s.
+  - **Registro**: una línea por conexión (`kind: postgres`) con dominio, rol, base de
+    datos, método con que se autenticó el proxy (`auth`), motivo si no llegó, bytes y
+    duración. Nunca la clave, el marcador ni el SQL.
+  - **Cómo llega el invitado**: en Linux un DNAT lleva cualquier puerto TCP de la IP del
+    proxy que no sea el 53, el 80 ni el 443 a `n.HostIP:5381` (con su FORWARD e INPUT),
+    así que el cliente usa el puerto de su cadena de conexión. En macOS, `kling-vz` atiende
+    en la pasarela cualquier puerto salvo el 53 y el 80, pero solo en allowlist y con
+    alguna credencial Postgres; si no, se rechaza como antes. El daemon pregunta a
+    `kling-vz` qué tipos entiende (`credential_kinds` en `/kling/info`) y no le manda
+    una credencial Postgres si no dice `postgres`: uno anterior la serviría como HTTP.
+  - La clave tiene que ser ASCII imprimible (SASLprep es la identidad para eso).
 
 ### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
 
@@ -461,6 +510,15 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
   vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
   mismas reglas antes de reenviar.
+- **Postgres: el rol es el límite, no el proxy.** El proxy no mira el SQL: no hay lista
+  de sentencias permitidas y el invitado hace todo lo que el rol puede. Lo que acota el
+  daño es el rol mismo (solo lectura, `GRANT` a lo justo, sin `CREATEROLE`, un
+  `CONNECTION LIMIT`). Si el rol puede, el invitado también puede `ALTER ROLE ... PASSWORD`
+  y cambiar la contraseña: no la leería (la nueva es suya), pero la clave del proxy
+  dejaría de valer. El tramo del invitado va sin TLS dentro de la máquina (ver 7); un
+  cliente con `sslmode=require` o `verify-full`, o con `channel_binding=require`, no
+  conecta: tiene que usar `disable` o `prefer`. Un servidor con IP privada (una base de
+  datos en la LAN o en la VPC) no es alcanzable por el proxy, a propósito.
 - **El registro de auditoría es observabilidad, no prueba.** En Linux el directorio de
   la máquina es del usuario del VMM: un Firecracker comprometido no puede leer el
   registro (0600, de root) ni desviar su escritura (ver 7), pero sí borrarlo o

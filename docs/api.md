@@ -33,6 +33,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
+| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `ca_pem`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
 
@@ -57,7 +58,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
-| `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret","allow"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. `allow` (opcional, hasta 32) limita qué peticiones llevan la clave: `"MÉTODO /ruta"` con método exacto (GET, HEAD, POST, PUT, PATCH, DELETE u OPTIONS), `*` dentro de un segmento y `**` como último segmento para cualquier resto; la ruta de la petición se compara normalizada con `path.Clean`; lo que no casa con ninguna credencial del dominio recibe 403; vacío permite todo. Se fusiona por `env` (repetir una rota la clave, sustituye también su `allow` y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios |
+| `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret","allow"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. `allow` (opcional, hasta 32) limita qué peticiones llevan la clave: `"MÉTODO /ruta"` con método exacto (GET, HEAD, POST, PUT, PATCH, DELETE u OPTIONS), `*` dentro de un segmento y `**` como último segmento para cualquier resto; la ruta de la petición se compara normalizada con `path.Clean`; lo que no casa con ninguna credencial del dominio recibe 403; vacío permite todo. Se fusiona por `env` (repetir una rota la clave, sustituye también su `allow` y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios. Con `"type":"postgres"` es una contraseña de base de datos (ver abajo) |
 | `PUT /machines/{ref}/labels` | reetiqueta |
 | `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas) |
 | `GET /machines/{ref}/logs?tail=N` | consola serie |
@@ -197,7 +198,7 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 
 | Campo | Qué es |
 |---|---|
-| `kind` | `http`; `dropped` es una línea que solo lleva la cuenta de descartados |
+| `kind` | `http`, `postgres` (una conexión, ver abajo); `dropped` es una línea que solo lleva la cuenta de descartados |
 | `path` | ruta normalizada, cortada a 256 bytes; un segmento con un marcador o una forma de una clave sale `:cred`, uno de ≥32 caracteres base64url/hex, `:tok`; los caracteres de control salen como `?` |
 | `query` | si la petición llevaba query (su contenido no se escribe nunca) |
 | `status` | lo que recibió el invitado |
@@ -206,10 +207,45 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 | `creds` | `env` de las credenciales cuyo marcador se sustituyó en esta petición |
 | `req_bytes`, `resp_bytes`, `ms` | cuerpo leído del invitado, cuerpo enviado al invitado, duración |
 | `dropped` | registros descartados antes de este (cola llena o fallo de disco) |
-| `user`, `database`, `auth` | reservados para proxies de otros protocolos |
+| `user`, `database`, `auth` | solo en `kind: postgres` (ver Credenciales de Postgres) |
 
 Nunca lleva la clave, el marcador, cabeceras, cuerpos, la query ni el texto de un
 error del proveedor. Rota a 1 MiB (una generación); `commit` y `fork` no lo copian.
+
+### Credenciales de Postgres
+
+Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
+`PUT /snapshots/{name}/credentials`:
+
+```json
+{"credentials":[{"type":"postgres","domain":"db.example.com","port":5432,"user":"app",
+ "database":"appdb","ca_pem":"-----BEGIN CERTIFICATE-----\n...","env":"PGPASSWORD","secret":"..."}]}
+```
+
+| Campo | Qué es |
+|---|---|
+| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database` y `ca_pem` no valen) |
+| `domain` | nombre del servidor: al que sale el proxy y contra el que verifica el TLS. Tiene que resolver a una IPv4 pública |
+| `port` | puerto del servidor (defecto 5432). El invitado puede usar cualquier puerto: le llega al proxy igual |
+| `user` | rol (obligatorio). El invitado tiene que conectar con él |
+| `database` | opcional: la única base a la que se deja conectar (sin ella, cualquiera; la de por defecto es el rol) |
+| `ca_pem` | opcional, ≤64 KiB: CA en PEM que se añade a las raíces del sistema |
+| `secret` | contraseña del rol, ASCII imprimible |
+| `allow` | no vale para Postgres |
+
+El invitado recibe el marcador en `env` y lo usa como contraseña, sin TLS
+(`sslmode=disable` o `prefer`) contra `domain`. Al rotar (misma `env`) se sustituyen
+todos los campos con la clave. En macOS el daemon lo rechaza si el `kling-vz` de la
+máquina no incluye `postgres` en `credential_kinds` de `GET /kling/info`.
+
+En el registro de auditoría cada conexión es una línea `kind: postgres` con `host`,
+`user`, `database`, `auth` (`scram-sha-256-plus`, `scram-sha-256`, `password` o `trust`:
+cómo se autenticó el proxy ante el servidor), `creds`, bytes y duración; `method` es
+`cancel` en un `CancelRequest`. Sus `reason`: los de arriba (`disabled`, `busy`,
+`no_credential`, `upstream_error`) y `bad_startup`, `timeout`, `bad_placeholder`,
+`user_mismatch`, `database_mismatch`, `replication`, `upstream_tls`, `upstream_auth`,
+`unknown_cancel`; son `denied` `disabled`, `no_credential`, `bad_placeholder`,
+`user_mismatch`, `database_mismatch`, `replication` y `unknown_cancel`.
 
 ### Admisión
 

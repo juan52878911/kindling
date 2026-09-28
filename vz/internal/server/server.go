@@ -69,8 +69,10 @@ type NetConfig struct {
 	Policy   *egress.Policy
 	Resolver *egress.Resolver
 	// Credentials es el proxy de credenciales que la red sirve en la pasarela;
-	// nil si este proceso no lo tiene.
-	Credentials http.Handler
+	// nil si este proceso no lo tiene. CredentialsPG es el mismo proxy en su
+	// papel de Postgres (el resto de puertos TCP de la pasarela).
+	Credentials   http.Handler
+	CredentialsPG *credproxy.Proxy
 }
 
 type Deps struct {
@@ -772,8 +774,17 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 
 // --- rutas propias ---
 
+// credentialKinds son los tipos de credencial que entiende este kling-vz. El
+// daemon lo pregunta antes de mandarle una credencial Postgres: uno anterior
+// ignoraría el tipo y la serviría como HTTP.
+var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres}
+
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]string{"backend": "vz", "version": s.d.Version})
+	info := map[string]any{"backend": "vz", "version": s.d.Version}
+	if s.d.Credentials != nil {
+		info["credential_kinds"] = credentialKinds
+	}
+	writeJSON(w, info)
 }
 
 func (s *Server) putKlingNetwork(w http.ResponseWriter, r *http.Request) {
@@ -829,6 +840,11 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Placeholder string   `json:"placeholder"`
 			Secret      string   `json:"secret"`
 			Allow       []string `json:"allow,omitempty"`
+			Kind        string   `json:"kind,omitempty"`
+			Port        int      `json:"port,omitempty"`
+			User        string   `json:"user,omitempty"`
+			Database    string   `json:"database,omitempty"`
+			CAPEM       string   `json:"ca_pem,omitempty"`
 		} `json:"credentials"`
 	}
 	if err := decode(r, maxCredBody, &body); err != nil {
@@ -851,6 +867,7 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		creds = append(creds, credproxy.Credential{
 			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
 			Allow: c.Allow,
+			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, CAPEM: c.CAPEM,
 		})
 	}
 	doms, err := s.d.Credentials.SetCredentials(creds)
@@ -946,6 +963,7 @@ func (s *Server) ensureNet() error {
 	}
 	if s.d.Credentials != nil {
 		cfg.Credentials = s.d.Credentials
+		cfg.CredentialsPG = s.d.Credentials
 	}
 	if c := s.spec.MMDSConfig; c != nil {
 		cfg.MMDS = s.store.Handler()

@@ -112,12 +112,29 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status %d, quería 403", resp.StatusCode)
 	}
+	// Al lado, el de Postgres: sin credencial Postgres, un arranque con
+	// cualquier contraseña acaba en su ErrorResponse (y en el registro).
+	pg, err := stdnet.Dial("tcp", "127.0.0.1:"+strconv.Itoa(pgPort))
+	if err != nil {
+		t.Fatalf("el proxy de Postgres no escucha: %v", err)
+	}
+	pg.Write([]byte("\x00\x00\x00\x10\x00\x03\x00\x00user\x00u\x00\x00"))
+	pg.Write([]byte("p\x00\x00\x00\x06x\x00"))
+	b, _ := io.ReadAll(pg)
+	pg.Close()
+	if !strings.Contains(string(b), "28P01") {
+		t.Errorf("respuesta del proxy de Postgres: %q", b)
+	}
 	stopCredProxy(ns)
 	if _, err := http.DefaultClient.Do(req); err == nil {
 		t.Error("el proxy sigue escuchando tras stopCredProxy")
 	}
+	if c, err := stdnet.Dial("tcp", "127.0.0.1:"+strconv.Itoa(pgPort)); err == nil {
+		c.Close()
+		t.Error("el proxy de Postgres sigue escuchando tras stopCredProxy")
+	}
 	// stopCredProxy cierra el registro: la línea del 403 ya está en disco.
-	b, err := os.ReadFile(audit)
+	b, err = os.ReadFile(audit)
 	if err != nil || !strings.Contains(string(b), `"reason":"no_credential"`) || !strings.Contains(string(b), `"denied":true`) {
 		t.Fatalf("registro tras parar el proxy: %q (%v)", b, err)
 	}

@@ -68,6 +68,9 @@
 // cada rechazo, con método, host, ruta enmascarada, estado, motivo, qué
 // credenciales se sustituyeron, bytes y duración. Nunca la clave, el marcador,
 // cabeceras, cuerpos ni la query (ver auditoria.go).
+//
+// POSTGRES: una credencial Kind "postgres" no la usa el proxy HTTP sino
+// ServePG, el mismo modelo sobre el protocolo de Postgres (ver postgres.go).
 package credproxy
 
 import (
@@ -117,12 +120,25 @@ const (
 // struct tal cual (sin etiquetas: las claves JSON son los nombres), así que un
 // fichero de antes de Allow se lee con Allow vacío, que es lo que hacía
 // entonces.
+//
+// Kind "postgres" (ver postgres.go) es una credencial de base de datos: el
+// marcador es la contraseña que el invitado manda al proxy de Postgres, y
+// Port, User, Database y CAPEM dicen a qué servidor, con qué rol y contra qué
+// CA se sale. Kind vacío es HTTP, como antes de que hubiera otros; los campos
+// nuevos son omitempty, así que un almacén anterior se lee igual.
 type Credential struct {
 	Env         string
 	Domain      string
 	Placeholder string
 	Secret      string
 	Allow       []string `json:",omitempty"`
+	Kind        string   `json:",omitempty"`
+	Port        int      `json:",omitempty"`
+	User        string   `json:",omitempty"`
+	Database    string   `json:",omitempty"`
+	// CAPEM son certificados de CA en PEM que se AÑADEN a las raíces del
+	// sistema para verificar al servidor (uno autofirmado o de una CA propia).
+	CAPEM string `json:",omitempty"`
 }
 
 var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -176,9 +192,32 @@ func ValidarCredenciales(creds []Credential) error {
 			return fmt.Errorf("credential for %s: duplicate placeholder", d)
 		}
 		vistos[c.Placeholder] = true
+		if err := ValidarTipo(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidarTipo comprueba lo que depende del tipo de la credencial (Allow para
+// HTTP; puerto, rol, base de datos, CA y forma de la clave para Postgres) y
+// pone el puerto por defecto de Postgres. No mira el marcador: lo usa también
+// el manager con lo que llega de la API, que aún no lo tiene. c.Domain debe
+// venir ya normalizado.
+func ValidarTipo(c *Credential) error {
+	d := c.Domain
+	switch c.Kind {
+	case "", KindHTTP:
+		if c.Port != 0 || c.User != "" || c.Database != "" || c.CAPEM != "" {
+			return fmt.Errorf("credential for %s: port, user, database and CA are only for -type postgres", d)
+		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
 		}
+	case KindPostgres:
+		return validarPostgres(c)
+	default:
+		return fmt.Errorf("credential for %s: unknown type %q (http or postgres)", d, c.Kind)
 	}
 	return nil
 }
@@ -213,6 +252,11 @@ type Options struct {
 	// Logf recibe los fallos del registro de auditoría (disco lleno, fichero
 	// que no se puede abrir). Nil = no se avisa, aunque se siguen contando.
 	Logf func(format string, args ...any)
+	// DialPG sustituye al dialer de la salida de Postgres (el de dialPublico,
+	// con Lookup). Solo para tests y el laboratorio (un servidor en
+	// 127.0.0.1): en producción anula la barrera de IPs. La verificación TLS
+	// no cambia: sigue siendo contra el nombre de la credencial.
+	DialPG func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
@@ -233,7 +277,19 @@ type Proxy struct {
 	tempDir string
 	enabled func() bool
 	// aud es el registro de auditoría; nil sin Options.AuditPath.
-	aud *Auditor
+	aud  *Auditor
+	logf func(string, ...any)
+
+	// Postgres (postgres.go): credenciales, conexiones a la vez, salida y
+	// claves de cancelación falsas -> reales.
+	pg     []credPG
+	pgSem  chan struct{}
+	dialPG func(ctx context.Context, network, addr string) (net.Conn, error)
+	// pgPre y pgAuth son los plazos antes de autenticar (invitado y total);
+	// campos para los tests.
+	pgPre, pgAuth time.Duration
+	cancelMu      sync.Mutex
+	cancelaciones map[claveCancel]destinoCancel
 }
 
 // credCompilada es una credencial con su Allow ya partido.
@@ -273,6 +329,18 @@ func New(o Options) *Proxy {
 	if o.AuditPath != "" {
 		aud = NewAuditor(o.AuditPath, o.Logf)
 	}
+	dialPG := o.DialPG
+	if dialPG == nil {
+		lookup := o.Lookup
+		if lookup == nil {
+			lookup = PublicIPv4Lookup(DefaultDNS)
+		}
+		dialPG = dialPublico(lookup, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive})
+	}
+	logf := o.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	return &Proxy{
 		creds: map[string][]credCompilada{},
 		sem:   make(chan struct{}, MaxInFlight),
@@ -289,6 +357,13 @@ func New(o Options) *Proxy {
 		tempDir: tempDir,
 		enabled: o.Enabled,
 		aud:     aud,
+		logf:    logf,
+
+		pgSem:         make(chan struct{}, MaxPGConns),
+		dialPG:        dialPG,
+		pgPre:         pgPreAuth,
+		pgAuth:        pgAuthTotal,
+		cancelaciones: map[claveCancel]destinoCancel{},
 	}
 }
 
@@ -304,7 +379,7 @@ func (p *Proxy) Close() error {
 
 // SetCredentials fija el juego COMPLETO de credenciales (sustituye el
 // anterior) tras validarlo con ValidarCredenciales, que normaliza en el sitio
-// los dominios de creds. Devuelve los dominios distintos, ordenados: los que
+// los dominios de creds. Devuelve los dominios distintos (HTTP y Postgres), ordenados: los que
 // el resolver de la máquina debe desviar hacia el proxy. Con la lista vacía el
 // proxy se queda sin credenciales (todo 403).
 func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
@@ -313,8 +388,23 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	}
 	byDomain := map[string][]credCompilada{}
 	var ocultar []string
+	var pg []credPG
+	vistos := map[string]bool{}
+	var domains []string
 	for _, c := range creds {
 		ocultar = append(ocultar, variantes(c.Secret)...)
+		if !vistos[c.Domain] {
+			vistos[c.Domain] = true
+			domains = append(domains, c.Domain)
+		}
+		if c.Kind == KindPostgres {
+			cp, err := compilarPG(c)
+			if err != nil {
+				return nil, err
+			}
+			pg = append(pg, cp)
+			continue
+		}
 		reglas, err := compilarPermisos(c.Allow)
 		if err != nil {
 			return nil, err
@@ -322,13 +412,9 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 		c.Allow = slices.Clone(c.Allow)
 		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
-	domains := make([]string, 0, len(byDomain))
-	for d := range byDomain {
-		domains = append(domains, d)
-	}
 	sort.Strings(domains)
 	p.mu.Lock()
-	p.creds, p.ocultar = byDomain, ocultar
+	p.creds, p.ocultar, p.pg = byDomain, ocultar, pg
 	p.mu.Unlock()
 	return domains, nil
 }

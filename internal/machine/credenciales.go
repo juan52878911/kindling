@@ -237,11 +237,22 @@ func validarSpecs(specs []api.CredentialSpec) error {
 			return fmt.Errorf("env %s used by two credentials", s.Env)
 		}
 		vistos[s.Env] = true
-		if err := credproxy.ValidarPermisos(s.Allow); err != nil {
-			return fmt.Errorf("credential for %s (%s): %w", d, s.Env, err)
+		// Lo que depende del tipo (Allow, o puerto, rol, base, CA y forma de
+		// la clave para Postgres) lo valida el proxy, que pone además el
+		// puerto por defecto.
+		c := credencialDeSpec(*s)
+		if err := credproxy.ValidarTipo(&c); err != nil {
+			return fmt.Errorf("%w (%s)", err, s.Env)
 		}
+		s.Port = c.Port
 	}
 	return nil
+}
+
+// credencialDeSpec es la credencial del proxy que describe s, sin marcador.
+func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
+	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
+		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, CAPEM: s.CAPEM}
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se
@@ -290,15 +301,20 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 		// Allow va con la clave: rotar sin él la deja sin restricciones, como
 		// una credencial nueva. Es lo que se pidió, y así la API no tiene un
 		// "conservar lo de antes" implícito que nadie ve.
+		// Igual el tipo y sus campos: se sustituyen enteros con la clave.
 		if i, ok := porEnv[s.Env]; ok {
-			creds[i].Domain, creds[i].Secret, creds[i].Allow = s.Domain, s.Secret, s.Allow
+			ph := creds[i].Placeholder
+			creds[i] = credencialDeSpec(s)
+			creds[i].Placeholder = ph
 			continue
 		}
 		ph, err := credproxy.NuevoMarcador()
 		if err != nil {
 			return nil, 0, err
 		}
-		creds = append(creds, credproxy.Credential{Env: s.Env, Domain: s.Domain, Placeholder: ph, Secret: s.Secret, Allow: s.Allow})
+		c := credencialDeSpec(s)
+		c.Placeholder = ph
+		creds = append(creds, c)
 		porEnv[s.Env] = len(creds) - 1
 		nuevas++
 	}
