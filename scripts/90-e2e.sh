@@ -839,6 +839,109 @@ else
   bad "plantilla con allowlist" "run + save" "falló"
 fi
 
+# ── 7d. proxy de credenciales de Postgres ────────────────────────────────────
+# El mismo modelo con una base de datos: el invitado conecta en claro al
+# dominio del servidor (que su resolver contesta con el proxy) con el marcador
+# como contraseña, y el proxy entra en el servidor con la clave real por TLS
+# verificado (SCRAM). Necesita un PostgreSQL con TLS, con IP PÚBLICA (el proxy
+# no sale a la red privada) y un certificado válido para su nombre:
+#
+#   KLING_E2E_PG_URL=postgres://rol:clave@db.ejemplo.com:5432/base
+#   KLING_E2E_PG_CA=/ruta/ca.pem     (opcional: si el certificado no es de una CA pública)
+#
+# La clave va en la URL por comodidad del que prueba; al daemon llega por stdin.
+step "7d. Proxy de credenciales de Postgres"
+if [ -z "${KLING_E2E_PG_URL:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_PG_URL no está (postgres://rol:clave@host:puerto/base): sin servidor que probar\n"
+else
+  PGC="e2e-pgcred-$$"
+  read -r PG_HOST PG_PORT PG_USER PG_DB < <(python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1])
+print(u.hostname, u.port or 5432, urllib.parse.unquote(u.username or ""), (u.path or "/").lstrip("/") or urllib.parse.unquote(u.username or ""))
+' "$KLING_E2E_PG_URL")
+  PG_PASS=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).password or ""))' "$KLING_E2E_PG_URL")
+  ca_args=()
+  [ -n "${KLING_E2E_PG_CA:-}" ] && ca_args=(-ca-file "$KLING_E2E_PG_CA")
+  # La sonda es un cliente mínimo del protocolo v3 (la imagen no trae psql):
+  # SSLRequest (el proxy contesta N), arranque, contraseña en claro (el
+  # marcador), una consulta; y lo mismo con un marcador falso.
+  SONDA_PG='
+import json, socket, struct, sys, urllib.request
+host, port, user, db, real = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store)["env"]["PGPASSWORD"]
+print("MMDS", "CLAVE" if real in store else "MARCADOR")
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def conectar(pw):
+    s = socket.create_connection((host, port), timeout=20)
+    s.sendall(struct.pack("!II", 8, 80877103))
+    ssl = leer(s, 1).decode()
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, ssl, "SINPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(pw)) + pw.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E":
+            code = [f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C"]
+            return s, ssl, "ERROR " + (code[0] if code else "?")
+        if t == b"Z": return s, ssl, "LISTO"
+s, ssl, r = conectar(ph)
+print("SSL", ssl)
+print("LOGIN", r)
+if r == "LISTO":
+    q = b"SELECT current_user\0"
+    s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+    fila = ""
+    while True:
+        t, b = msg(s)
+        if t == b"D": fila = b[6:].decode(errors="replace")
+        if t in (b"Z", b"E"): break
+    print("FILA", fila)
+s.close()
+print("FALSO", conectar("kling-cred-00000000000000000000")[2])
+'
+  if $KLING run -image "$IMGVOL" -name "$PGC" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+    out=$(printf '%s' "$PG_PASS" | $KLING machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -database "$PG_DB" "${ca_args[@]}" -env PGPASSWORD 2>&1)
+    contiene "$out" "verified TLS" && ok "credential -type postgres: la clave queda en el proxy" \
+      || bad "machine credential -type postgres" "verified TLS" "$out"
+    out=$($KLING exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
+    contiene "$out" "MMDS MARCADOR" && ok "el invitado no ve la clave, solo el marcador" || bad "MMDS (postgres)" "MMDS MARCADOR" "$out"
+    contiene "$out" "SSL N" && ok "el tramo del invitado va en claro (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
+    contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA $PG_USER" \
+      && ok "con el marcador el invitado entra y consulta como $PG_USER" || bad "login por el proxy" "LOGIN LISTO y FILA $PG_USER" "$out"
+    contiene "$out" "FALSO ERROR 28P01" && ok "un marcador falso: 28P01 sin llegar al servidor" \
+      || bad "marcador falso" "FALSO ERROR 28P01" "$out"
+    out=$($KLING machine audit "$PGC" -tail 0 -json 2>&1)
+    contiene "$out" '"kind":"postgres"' && contiene "$out" '"auth":"scram-sha-256' \
+      && ok "audit: una línea por conexión, autenticada con SCRAM" || bad "audit postgres" 'kind postgres con auth scram' "$out"
+    contiene "$out" '"reason":"bad_placeholder","denied":true' && ok "audit: el marcador falso queda como denegado" \
+      || bad "audit postgres denegado" "bad_placeholder denied" "$out"
+    if contiene "$out" "$PG_PASS" || contiene "$out" "kling-cred-" || contiene "$out" "current_user"; then
+      bad "audit postgres sin secretos" "ni clave, ni marcador, ni SQL" "$out"
+    else
+      ok "audit: ni la clave, ni el marcador, ni el SQL"
+    fi
+    $KLING rm -f "$PGC" >/dev/null 2>&1
+  else
+    bad "run -egress allowlist (postgres)" "una máquina" "no arrancó"
+  fi
+fi
+
 # ── 7c. IPv6 cerrado ──────────────────────────────────────────────────────────
 # B1: defensa en profundidad, aunque el diagnóstico de A1 no encontrara fuga hoy
 # en este lab (net.ipv6.conf.all.forwarding=0 en el host ya cortaba el paso
