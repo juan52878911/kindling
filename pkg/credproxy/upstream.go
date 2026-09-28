@@ -21,6 +21,34 @@ package credproxy
 // marcar ninguna: un nombre que apunta a los metadatos no es de fiar a medias.
 // "localhost" no se resuelve: es el loopback (RFC 6761).
 //
+// NI LOS REENVÍOS DE KINDLING: en macOS cada kling-vz expone los puertos de su
+// invitado en 127.0.0.1 (api.Machine.Forwards). Un upstream en el loopback
+// que diera con el reenvío de OTRA máquina llevaría la conexión (y, sin TLS,
+// el intercambio SCRAM) al invitado de otro. Los reenvíos se abren SOLO en un
+// rango de puertos reservado (ForwardPortMin-ForwardPortMax) y ningún
+// upstream del loopback puede apuntar a ese rango: ni al validar ni al marcar.
+// El rango es una constante y no una lista de reenvíos vivos a propósito:
+// quien marca (el kling-vz de cada máquina) no conoce los reenvíos de las
+// demás, y una lista consultada al validar se queda vieja en cuanto otra
+// máquina arranca (TOCTOU). Con el rango, lo que se comprueba al marcar es
+// cierto siempre. El precio: un Postgres de Docker publicado en ese rango del
+// loopback no vale como upstream (se publica en otro puerto).
+//
+// Por qué un rango y no otra IP de loopback (127.0.0.2): macOS solo configura
+// 127.0.0.1 en lo0, y dar de alta otra exige root (ifconfig lo0 alias) en cada
+// arranque del Mac; el daemon y kling-vz corren sin privilegios.
+//
+// En Linux no hay reenvíos al loopback: al invitado se llega por la IP del
+// veth (172.30.0.0/16, prohibida arriba), los DNAT de cada netns solo se
+// aplican al tráfico que entra en ESE netns (PREROUTING), no al que el daemon
+// origina en el host, y la API del daemon es un socket Unix. Lo único de
+// kindling que puede escuchar en el loopback del host es opcional y habla
+// HTTP con token (el gateway MCP o `kling ai up`, 127.0.0.1:8080 por defecto);
+// el proxy no le da al invitado ni un byte de esa conexión hasta que el
+// servidor completa SCRAM-SHA-256 (sin TLS) o presenta un certificado válido
+// (verify-full), cosa que un servicio HTTP no hace. El rango reservado se
+// aplica igual en Linux: la regla es la misma en los dos sistemas.
+//
 // DESDE DÓNDE SE MARCA: en Linux el proxy es una goroutine del daemon, en el
 // netns del host (escucha en el lado host del veth, no dentro del netns de la
 // máquina): 127.0.0.1 es el loopback del host. En macOS lo sirve kling-vz con
@@ -60,7 +88,31 @@ const (
 	// credential_kinds cuando entiende Upstream, UpstreamTLS y TLSServerName.
 	// No es un Kind de credencial.
 	CapPostgresUpstream = "postgres-upstream"
+
+	// ForwardPortMin y ForwardPortMax delimitan el rango de puertos del
+	// loopback reservado a los reenvíos de kindling (kling-vz, macOS). Por
+	// debajo del rango efímero de macOS (49152+) y de Linux (32768+), para que
+	// un puerto que el sistema da al azar no caiga dentro. Ver la cabecera.
+	ForwardPortMin = 29000
+	ForwardPortMax = 29999
 )
+
+// PuertoReservado dice si port es del rango de reenvíos de kindling.
+func PuertoReservado(port int) bool {
+	return port >= ForwardPortMin && port <= ForwardPortMax
+}
+
+// errUpstreamReenvio: un upstream del loopback apunta al rango de reenvíos.
+func errUpstreamReenvio(u string) error {
+	return fmt.Errorf("%w: %s is in kindling's reserved forward range (loopback ports %d-%d, where other machines' guests are exposed); publish the database on another port",
+		errUpstreamProhibido, u, ForwardPortMin, ForwardPortMax)
+}
+
+// destinoReenvio dice si marcar ip:port podría llegar al reenvío de un
+// invitado de kindling: loopback y puerto del rango reservado.
+func destinoReenvio(ip netip.Addr, port int) bool {
+	return ip.Unmap().IsLoopback() && PuertoReservado(port)
+}
 
 // upstreamProhibido son los destinos a los que el proxy no marca nunca, ni con
 // un upstream fijado por el operador. Un test de internal/net comprueba que
@@ -139,10 +191,16 @@ func normalizarUpstream(u string) (string, error) {
 		if UpstreamIPProhibida(ip) {
 			return "", fmt.Errorf("upstream %q: %s is a forbidden destination (metadata, link-local, multicast or kindling's own network)", u, ip)
 		}
+		if destinoReenvio(ip, n) {
+			return "", errUpstreamReenvio(u)
+		}
 		return net.JoinHostPort(ip.String(), port), nil
 	}
 	if err := validarNombreHost(host); err != nil {
 		return "", fmt.Errorf("upstream: %w", err)
+	}
+	if host == "localhost" && PuertoReservado(n) {
+		return "", errUpstreamReenvio(u)
 	}
 	return net.JoinHostPort(host, port), nil
 }
@@ -161,6 +219,22 @@ func UpstreamLoopback(u string) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.Unmap().IsLoopback()
+}
+
+// UpstreamPuertoLoopback devuelve el puerto de u ("host:puerto") si u es el
+// loopback del host (ver UpstreamLoopback). El daemon lo cruza con los
+// reenvíos vivos de sus máquinas al validar (el rango reservado lo cubre ya;
+// esto cubre además un kling-vz anterior que abriera puertos fuera de él).
+func UpstreamPuertoLoopback(u string) (int, bool) {
+	if !UpstreamLoopback(u) {
+		return 0, false
+	}
+	_, port, _ := net.SplitHostPort(u)
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // UpstreamNecesitaDNS dice si marcar el upstream u ("host:puerto") exige
@@ -244,6 +318,10 @@ func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, 
 		if err != nil {
 			return nil, err
 		}
+		pn, err := strconv.Atoi(port)
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: bad port", addr)
+		}
 		var ips []netip.Addr
 		if ip, err := netip.ParseAddr(host); err == nil {
 			ips = []netip.Addr{ip}
@@ -266,6 +344,11 @@ func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, 
 		for _, ip := range ips {
 			if UpstreamIPProhibida(ip) {
 				return nil, fmt.Errorf("%w: %s resolves to %s", errUpstreamProhibido, host, ip.Unmap())
+			}
+			// Otra vez aquí, y no solo al validar: un nombre de la LAN puede
+			// resolver al loopback, y es aquí donde se decide a dónde se va.
+			if destinoReenvio(ip, pn) {
+				return nil, errUpstreamReenvio(net.JoinHostPort(ip.Unmap().String(), port))
 			}
 		}
 		var last error

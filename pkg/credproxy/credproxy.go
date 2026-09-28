@@ -245,10 +245,18 @@ func ValidarTipo(c *Credential) error {
 // obligatoria) se lee con AnyDatabase=true, que es lo que permitía entonces.
 // Así una máquina viva o una plantilla guardada sigue cargando. Se llama al
 // descifrar, nunca con lo que llega de la API o del CLI.
-func NormalizarAlmacen(c *Credential) {
-	if c.Kind == KindPostgres && c.Database == "" {
-		c.AnyDatabase = true
+//
+// Recibe los campos sueltos y no una Credential porque la misma regla vale
+// para las credenciales de máquina (Credential) y las de plantilla
+// (api.CredentialSpec). Devuelve true si la promovió: era de un almacén
+// anterior, y quien la carga debe avisar (una credencial nueva sin base ya
+// trae AnyDatabase).
+func NormalizarAlmacen(kind, database string, anyDatabase *bool) bool {
+	if kind != KindPostgres || database != "" || *anyDatabase {
+		return false
 	}
+	*anyDatabase = true
+	return true
 }
 
 // Options configura un Proxy. El valor cero sirve: resuelve por

@@ -133,6 +133,11 @@ type Machine struct {
 	// credenciales (POST /machines/{ref}/credentials). Solo los nombres: la clave
 	// vive en memoria del daemon y el invitado solo ve un marcador.
 	CredentialDomains []string `json:"credential_domains,omitempty"`
+	// CredentialAnyDatabase son las variables (Env) de las credenciales
+	// Postgres que entran en CUALQUIER base del servidor: sin -database, o de
+	// un almacén anterior a que fuese obligatoria. Se ve en `kling inspect`
+	// para que nadie lo descubra por la auditoría.
+	CredentialAnyDatabase []string `json:"credential_any_database,omitempty"`
 
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
@@ -476,6 +481,9 @@ type Snapshot struct {
 	// las recibe en su proxy de credenciales al arrancar. Solo los nombres; la
 	// clave vive cifrada en el daemon. No está en meta.json: se rellena al leer.
 	CredentialDomains []string `json:"credential_domains,omitempty"`
+	// CredentialAnyDatabase: como en Machine, las variables de las
+	// credenciales Postgres de plantilla que entran en cualquier base.
+	CredentialAnyDatabase []string `json:"credential_any_database,omitempty"`
 
 	// INTEGRIDAD. sha256 del overlay dorado (rootfs) y del volcado de estado
 	// (snap.file), calculados al congelar y verificados al restaurar. Detectan que
@@ -976,24 +984,25 @@ type CredentialsRequest struct {
 // proveedor y su respuesta entera al invitado; Denied, que la rechazó la
 // política (sin credencial, Allow, ruta ambigua o proxy inactivo).
 type CredAuditRecord struct {
-	TS        time.Time `json:"ts"`
-	Kind      string    `json:"kind"`
-	Method    string    `json:"method,omitempty"`
-	Host      string    `json:"host,omitempty"`
-	Path      string    `json:"path,omitempty"`
-	Query     bool      `json:"query,omitempty"`
-	Status    int       `json:"status,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	Denied    bool      `json:"denied,omitempty"`
-	Creds     []string  `json:"creds,omitempty"`
-	User      string    `json:"user,omitempty"`
-	Database  string    `json:"database,omitempty"`
-	Auth      string    `json:"auth,omitempty"`
-	Upstream  string    `json:"upstream,omitempty"`
-	ReqBytes  int64     `json:"req_bytes"`
-	RespBytes int64     `json:"resp_bytes"`
-	MS        int64     `json:"ms"`
-	Dropped   uint64    `json:"dropped,omitempty"`
+	TS          time.Time `json:"ts"`
+	Kind        string    `json:"kind"`
+	Method      string    `json:"method,omitempty"`
+	Host        string    `json:"host,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	Query       bool      `json:"query,omitempty"`
+	Status      int       `json:"status,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	Denied      bool      `json:"denied,omitempty"`
+	Creds       []string  `json:"creds,omitempty"`
+	User        string    `json:"user,omitempty"`
+	Database    string    `json:"database,omitempty"`
+	Auth        string    `json:"auth,omitempty"`
+	AnyDatabase bool      `json:"any_database,omitempty"`
+	Upstream    string    `json:"upstream,omitempty"`
+	ReqBytes    int64     `json:"req_bytes"`
+	RespBytes   int64     `json:"resp_bytes"`
+	MS          int64     `json:"ms"`
+	Dropped     uint64    `json:"dropped,omitempty"`
 }
 
 // CredAuditQuery filtra GET /machines/{ref}/credaudit. Tail son las últimas N

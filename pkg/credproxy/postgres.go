@@ -451,7 +451,7 @@ func (s *sesionPG) servir() {
 		s.fatal("28000", "the user does not match the credential")
 		return
 	}
-	s.rec.User = cred.User
+	s.rec.User, s.rec.AnyDatabase = cred.User, cred.AnyDatabase
 	if !cred.AnyDatabase && db != cred.Database {
 		s.rec.Reason, s.rec.Denied = ReasonDatabaseMismatch, true
 		s.fatal("28000", "the database does not match the credential")

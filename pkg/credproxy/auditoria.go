@@ -99,6 +99,9 @@ type Record struct {
 	User     string   `json:"user,omitempty"`
 	Database string   `json:"database,omitempty"`
 	Auth     string   `json:"auth,omitempty"`
+	// AnyDatabase: la credencial usada deja entrar en cualquier base (sin
+	// -database, o de un almacén anterior a que fuese obligatoria).
+	AnyDatabase bool `json:"any_database,omitempty"`
 	// Upstream es la dirección fijada por el operador a la que marcó el
 	// proxy de Postgres (configuración, no un secreto); vacío si marcó el
 	// dominio de la credencial.

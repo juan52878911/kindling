@@ -80,6 +80,11 @@ printf '%s' 'la-clave' | kling machine credential agente -type postgres \
   (en un CT de Proxmox, el del CT). En macOS lo marca `kling-vz` con la pila de red del
   Mac, no con la gVisor del invitado: es el loopback del Mac, donde Docker Desktop
   publica los puertos.
+- **Puertos reservados `29000-29999` del loopback**: en macOS cada `kling-vz` expone
+  los puertos de su invitado en `127.0.0.1` y solo dentro de ese rango. Un `-upstream`
+  del loopback (`127.0.0.0/8`, `::1` o `localhost`) con un puerto del rango se rechaza
+  al darlo y, otra vez, al marcar: así no puede llegar al invitado de otra máquina. La
+  regla es la misma en Linux. Publica la base de datos en otro puerto.
 - En Linux también vale la IP del contenedor en su red (`-upstream 172.17.0.2:5432`):
   la red de Docker no es de kindling. Publicar en `127.0.0.1` es más estable (la IP
   del contenedor cambia al recrearlo).
@@ -241,5 +246,9 @@ Antes, `-database` era opcional y sin ella el rol podía entrar en cualquier bas
 hace falta `-database` o `-any-database` expreso. Los almacenes cifrados anteriores (máquinas
 y plantillas) siguen cargando: una credencial Postgres guardada sin base se lee como
 `any_database: true`, que es lo que permitía entonces, así que ninguna máquina viva se
-rompe. Para acotarla, rota la credencial con `-database`. Un `kling-vz` nuevo con un
+rompe. No es silencioso: el daemon lo avisa una vez por máquina o plantilla y variable
+(`postgres credential PGPASSWORD (db.example.com) loaded as any_database (pre-upgrade
+store); rotate with -database`), `kling inspect` y `kling template inspect` la listan en
+`credential_any_database`, y cada conexión sale en `kling machine audit` con
+`(any_database)` tras `rol@base`. Para acotarla, rota la credencial con `-database`. Un `kling-vz` nuevo con un
 daemon anterior sí rechaza una credencial sin base: actualiza los dos a la vez.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // Pruebas de P3 (`kling sandbox fork`): el Commit es de verdad, contra el
@@ -293,7 +294,7 @@ func TestForkRechazaAntesDePausar(t *testing.T) {
 	cambiar := func(f func(*api.Machine)) {
 		m.mu.Lock()
 		viva := m.byID[id]
-		viva.State, viva.HasSecrets, viva.Volumes, viva.Shares = api.StateRunning, false, nil, nil
+		viva.State, viva.HasSecrets, viva.Volumes, viva.Shares, viva.CredentialDomains = api.StateRunning, false, nil, nil, nil
 		f(viva)
 		m.mu.Unlock()
 	}
@@ -315,12 +316,31 @@ func TestForkRechazaAntesDePausar(t *testing.T) {
 		{"carpeta", "caja", ForkOptions{}, func(v *api.Machine) {
 			v.Shares = []api.ShareAttachment{{Mode: "copy", Mount: "/mnt"}}
 		}, ErrFork},
+		{"credenciales", "caja", ForkOptions{}, func(v *api.Machine) { v.CredentialDomains = []string{"api.example.com"} }, ErrFork},
 	}
 	for _, c := range casos {
 		cambiar(c.cambio)
 		if _, _, err := m.Fork(context.Background(), c.ref, c.opt); !errors.Is(err, c.quiere) {
 			t.Errorf("%s: %v, quería %v", c.nombre, err, c.quiere)
 		}
+	}
+	// El mensaje dice cómo hacerlo bien.
+	cambiar(func(v *api.Machine) { v.CredentialDomains = []string{"api.example.com"} })
+	if _, _, err := m.Fork(context.Background(), "caja", ForkOptions{}); err == nil ||
+		!strings.Contains(err.Error(), "api.example.com") || !strings.Contains(err.Error(), "run -from") {
+		t.Errorf("credenciales: %v", err)
+	}
+	// Con el almacén en disco basta, aunque state.json no lo diga todavía.
+	cambiar(func(*api.Machine) {})
+	if err := m.guardarCredenciales(id, []credproxy.Credential{{Env: "KEY", Domain: "api.example.com",
+		Placeholder: credproxy.PlaceholderPrefix + "aa", Secret: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Fork(context.Background(), "caja", ForkOptions{}); !errors.Is(err, ErrFork) {
+		t.Errorf("almacén sin CredentialDomains: %v", err)
+	}
+	if err := m.guardarCredenciales(id, nil); err != nil {
+		t.Fatal(err)
 	}
 	if n := len(falso.todas()); n != 0 {
 		t.Errorf("se habló %d veces con el VMM para peticiones que había que rechazar antes", n)

@@ -50,12 +50,26 @@ func TestMain(m *testing.M) {
 }
 
 // puertoFalso es el puerto de loopback que el falso "abre" para cada puerto
-// del invitado. Determinista, para poder comprobarlo desde la prueba.
+// del invitado. Determinista, para poder comprobarlo desde la prueba, y dentro
+// del rango reservado, como los de verdad (reenvios.go).
 func puertoFalso(p int) string {
 	if a := os.Getenv(envFakeVZGuest); a != "" && p == api.GuestPort {
 		return a
 	}
-	return "127.0.0.1:" + strconv.Itoa(40000+p%10000)
+	return "127.0.0.1:" + strconv.Itoa(credproxy.ForwardPortMin+p%1000)
+}
+
+// escucharReservado abre un listener en 127.0.0.1 dentro del rango reservado
+// a los reenvíos: el daemon rechaza un reenvío fuera de él.
+func escucharReservado(t *testing.T) net.Listener {
+	t.Helper()
+	for p := credproxy.ForwardPortMax; p >= credproxy.ForwardPortMin; p-- {
+		if l, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
+			return l
+		}
+	}
+	t.Fatal("no free port in the reserved forward range")
+	return nil
 }
 
 // envFakeVZGuest, si está, es la dirección que el falso da como reenvío del
@@ -536,7 +550,7 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 	m, _ := managerVZ(t)
 	var mu sync.Mutex
 	var vistos []api.GuestResync
-	agente := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	agente := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != api.GuestResyncPath {
 			http.NotFound(w, r)
 			return
@@ -548,6 +562,9 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 		mu.Unlock()
 		_, _ = w.Write([]byte(`{"skew_ms":0}`))
 	}))
+	agente.Listener.Close()
+	agente.Listener = escucharReservado(t)
+	agente.Start()
 	defer agente.Close()
 	t.Setenv(envFakeVZGuest, strings.TrimPrefix(agente.URL, "http://"))
 

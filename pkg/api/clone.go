@@ -27,6 +27,7 @@ func (mc *Machine) Clone() *Machine {
 	out.Shares = append([]ShareAttachment(nil), mc.Shares...)
 	out.AllowDomains = append([]string(nil), mc.AllowDomains...)
 	out.CredentialDomains = append([]string(nil), mc.CredentialDomains...)
+	out.CredentialAnyDatabase = append([]string(nil), mc.CredentialAnyDatabase...)
 
 	if mc.Forwards != nil {
 		out.Forwards = make(map[string]string, len(mc.Forwards))

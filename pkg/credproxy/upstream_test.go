@@ -271,6 +271,79 @@ func TestDialFijado(t *testing.T) {
 	}
 }
 
+// El rango reservado a los reenvíos de kindling (macOS: el invitado de cada
+// máquina en 127.0.0.1:<rango>): ningún upstream del loopback puede apuntar
+// ahí, ni al validar ni al marcar, aunque haya alguien escuchando. Fuera del
+// loopback el mismo puerto vale (es una base de datos de la LAN), y fuera del
+// rango el loopback también (Docker).
+func TestUpstreamRangoReenvios(t *testing.T) {
+	var ln net.Listener
+	for p := ForwardPortMin; p <= ForwardPortMax && ln == nil; p++ {
+		ln, _ = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", p))
+	}
+	if ln == nil {
+		t.Skip("no free port in the reserved range")
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	_, puerto, _ := net.SplitHostPort(ln.Addr().String())
+
+	base := func() Credential {
+		return Credential{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave,
+			Kind: KindPostgres, User: pgUser, Database: pgDB}
+	}
+	for _, up := range []string{"127.0.0.1:" + puerto, "localhost:" + puerto, "LOCALHOST.:" + puerto, "[::1]:" + puerto,
+		"127.0.0.2:" + puerto, "[::ffff:127.0.0.1]:" + puerto, fmt.Sprintf("127.0.0.1:%d", ForwardPortMin), fmt.Sprintf("127.0.0.1:%d", ForwardPortMax)} {
+		c := base()
+		c.Upstream = up
+		if err := ValidarCredenciales([]Credential{c}); err == nil || !strings.Contains(err.Error(), "reserved forward range") {
+			t.Errorf("%s: %v", up, err)
+		}
+	}
+	for _, up := range []string{fmt.Sprintf("127.0.0.1:%d", ForwardPortMin-1), fmt.Sprintf("127.0.0.1:%d", ForwardPortMax+1),
+		"10.0.0.5:" + puerto, "db.lan:" + puerto} {
+		c := base()
+		c.Upstream = up
+		if err := ValidarCredenciales([]Credential{c}); err != nil {
+			t.Errorf("%s: %v", up, err)
+		}
+	}
+
+	// Al marcar: un nombre que resuelve al loopback, y las formas literales
+	// (por si llegaran sin pasar por la validación, p. ej. un almacén viejo).
+	lookup := func(_ context.Context, host string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	dial := dialFijado(lookup, &net.Dialer{Timeout: 2 * time.Second})
+	for _, addr := range []string{"db.lan:" + puerto, "127.0.0.1:" + puerto, "localhost:" + puerto} {
+		if c, err := dial(context.Background(), addr); err == nil || !errors.Is(err, errUpstreamProhibido) {
+			if c != nil {
+				c.Close()
+			}
+			t.Errorf("dial %s: %v", addr, err)
+		}
+	}
+
+	for u, want := range map[string]int{"127.0.0.1:5432": 5432, "localhost:29001": 29001, "[::1]:7": 7} {
+		if got, ok := UpstreamPuertoLoopback(u); !ok || got != want {
+			t.Errorf("UpstreamPuertoLoopback(%q) = %d, %v", u, got, ok)
+		}
+	}
+	for _, u := range []string{"", "10.0.0.5:5432", "db.lan:5432"} {
+		if _, ok := UpstreamPuertoLoopback(u); ok {
+			t.Errorf("UpstreamPuertoLoopback(%q) = true", u)
+		}
+	}
+}
+
 // Validación de Upstream, UpstreamTLS y TLSServerName.
 func TestValidarUpstream(t *testing.T) {
 	base := func() Credential {
