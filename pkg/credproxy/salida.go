@@ -75,38 +75,43 @@ func PublicIPv4Lookup(dnsServer string) LookupFunc {
 	}
 }
 
+// dialPublico es el dialer de toda salida del proxy (HTTP y Postgres): resuelve
+// con lookup y se niega a conectar a una IP bloqueada, aunque lookup la
+// devuelva (un DNS envenenado no debe llevar la clave a la LAN ni a los
+// metadatos del cloud). Solo tcp4.
+func dialPublico(lookup LookupFunc, d *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, _, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		var ips []string
+		for _, a := range lookup(ctx, host) {
+			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !IsBlockedIP(ip) {
+				ips = append(ips, ip.String())
+			}
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("credential proxy: %s does not resolve to a public IPv4", host)
+		}
+		var last error
+		for _, ip := range ips {
+			c, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(ip, port))
+			if err == nil {
+				return c, nil
+			}
+			last = err
+		}
+		return nil, last
+	}
+}
+
 // salidaSegura es el transporte hacia el proveedor: TLS con las raíces del
-// sistema y un dialer que resuelve con lookup y se niega a conectar a una IP
-// bloqueada, aunque lookup la devuelva (un DNS envenenado no debe llevar la
-// clave a la LAN ni a los metadatos del cloud).
+// sistema y el dialer de dialPublico.
 func salidaSegura(lookup LookupFunc) *http.Transport {
-	d := &net.Dialer{Timeout: 10 * time.Second}
 	return &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			var ips []string
-			for _, a := range lookup(ctx, host) {
-				if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !IsBlockedIP(ip) {
-					ips = append(ips, ip.String())
-				}
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("credential proxy: %s does not resolve to a public IPv4", host)
-			}
-			var last error
-			for _, ip := range ips {
-				c, err := d.DialContext(ctx, "tcp4", net.JoinHostPort(ip, port))
-				if err == nil {
-					return c, nil
-				}
-				last = err
-			}
-			return nil, last
-		},
+		Proxy:                 nil,
+		DialContext:           dialPublico(lookup, &net.Dialer{Timeout: 10 * time.Second}),
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          16,
