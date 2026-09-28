@@ -102,6 +102,7 @@ enlazadas:
 · [Aislamiento](#aislamiento)
 · [Egress: none, internet, allowlist](#egress-none-internet-o-una-allowlist-de-dominios)
 · [Secretos vía MMDS](#secretos-que-nunca-tocan-un-snapshot-mmds)
+· [Proxy de credenciales](#claves-que-el-invitado-nunca-ve-el-proxy-de-credenciales)
 
 **Operación**
 · [Informe de topología](#informe-de-topología)
@@ -1128,6 +1129,63 @@ El almacén lleva variables comunes y secretos por sesión indexados por `Mcp-Se
 el puente le entrega a cada sesión los suyos. Una máquina que ha recibido secretos **ya
 no puede congelarse** — se impone, no se aconseja — así que ningún secreto acaba dentro
 de un fichero de snapshot.
+
+Lo que MMDS no evita: el código de dentro **lee** el secreto (el servidor MCP corre como
+root en su microVM) y puede sacarlo por un dominio permitido. Para una clave de API hay
+algo mejor.
+
+## Claves que el invitado nunca ve: el proxy de credenciales
+
+Aislar el proceso no limita lo que se hace con la clave que se le entrega. Con
+`-egress allowlist`, la clave puede quedarse en el daemon:
+
+```sh
+kling run -image toolchain -name pagos -egress allowlist -allow example.org
+kling machine credential pagos -domain api.stripe.com -env STRIPE_API_KEY -f clave.txt
+```
+
+El invitado recibe en `STRIPE_API_KEY` un **marcador** (`kling-cred-…`), no la clave. Su
+resolver contesta `api.stripe.com` con la IP de un proxy del host; el SDK habla
+`http://api.stripe.com` (sin TLS hasta el proxy, por el veth local) y el proxy cambia el
+marcador por la clave —en las cabeceras (también dentro de `Authorization: Basic`), en la
+query y en cuerpos de hasta 1 MiB—, sale por HTTPS verificando el certificado y quita la
+clave de cualquier eco en la respuesta. Sin MITM: el invitado no confía en ninguna CA
+nuestra.
+
+El marcador no es un secreto: la capacidad es estar dentro de la red de esa máquina, no
+conocer la cadena. Por eso una máquina con credenciales **sí se congela**, despierta con
+ellas, y sobreviven a un reinicio del daemon: viven cifradas en el directorio de la
+máquina (AES-256-GCM con una clave derivada de `secrets/snapshot.key`, solo de root),
+nunca en `state.json`, en eventos ni en un snapshot. Repetir `-env` con otra clave la
+rota; el marcador se conserva y el proceso no tiene que reiniciarse.
+
+Para un servicio MCP nadie está delante para entregar la clave a cada réplica que el
+gateway despierta. Se ata a la plantilla: cada instancia que nace de ella recibe su propio
+marcador al arrancar, antes de la primera sesión (el puente lee MMDS al lanzar cada una):
+
+```sh
+kling mcp import stripe -egress allowlist -allow api.stripe.com
+kling template credential stripe -domain api.stripe.com -env STRIPE_API_KEY -f clave.txt
+```
+
+Medido en el lab con un servidor «comprometido» que corre como root dentro:
+
+| Qué intenta | Con MMDS | Con el proxy |
+|---|---|---|
+| Leer la clave | la lee | solo ve el marcador |
+| Usarla contra su dominio | sí | sí, a través del proxy |
+| HTTPS directo al dominio, saltándose el proxy | — | bloqueado |
+| Que una respuesta le devuelva la clave en eco | sí | no, llega redactada |
+| Usar el proxy para otro dominio | — | 403 |
+
+El proxy no añade latencia: 90 ms de mediana por petición frente a 363 ms por HTTPS
+directo con un cliente que abre un TLS por petición (el proxy reutiliza el suyo). Lo que
+no evita: el invitado puede seguir **usando** la clave contra su dominio; eso lo acota la
+clave misma (restringida, de solo lectura, con límites de gasto). Redactar el eco es
+defensa en profundidad (un proveedor serio no devuelve la credencial); una respuesta con
+una codificación que el proxy no puede inspeccionar (brotli, deflate) se rechaza con 502.
+En macOS aún no existe: el backend vz no tiene resolver en el host que desvíe el dominio
+(ver SECURITY.md).
 
 ---
 

@@ -8,6 +8,71 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## Sin publicar
+
+### Seguridad
+
+- **Proxy de credenciales: la clave de API ya no entra en el invitado.** Con un secreto
+  por MMDS, un servidor MCP comprometido (corre como root) leía la clave y la sacaba por
+  un dominio permitido: medido en el lab, la leía, la usaba y un eco de `httpbin.org` se
+  la devolvía. `kling machine credential <ref> -domain D -env VAR` deja la clave en el
+  daemon y le da al invitado un marcador; el resolver del modo allowlist desvía `D` a un
+  proxy por máquina en el lado host del veth, que cambia el marcador por la clave solo
+  hacia `https://D` y la redacta de las respuestas. Sin MITM: el SDK usa `http://D`
+  hasta el proxy. Verificado desde dentro del invitado: el invitado solo ve el marcador,
+  el proveedor recibe la clave real (httpbin basic-auth 200), HTTPS directo al dominio
+  queda bloqueado, el eco llega redactado y otro Host recibe 403. Sin latencia añadida:
+  90 ms de mediana frente a 363 ms por HTTPS directo con un cliente sin keep-alive (el
+  proxy reutiliza su TLS). API: `POST /machines/{ref}/credentials`.
+- **Las credenciales sobreviven al reinicio del daemon y al freeze/thaw.** Antes vivían
+  solo en memoria: un reinicio dejaba el dominio sin resolver. Ahora se guardan cifradas
+  en `machines/<id>/credentials.enc` (AES-256-GCM, clave derivada por HKDF de
+  `secrets/snapshot.key`, atadas al id de máquina) y `reconcile` y `Thaw` las vuelven a
+  entregar (proxy, resolver y marcadores en MMDS). Nunca en `state.json`, eventos ni
+  snapshots: `commit` no copia ese fichero. Verificado en el lab: tras `systemctl
+  restart kling` y tras freeze/thaw, el proveedor sigue aceptando la clave y el marcador
+  es el mismo.
+- **Una máquina con credenciales se puede congelar.** El marcador no es un secreto: la
+  capacidad es la red del netns de esa máquina hacia su proxy, y el proxy sustituye por
+  dominio. Ya no marca `HasSecrets`, así que el segador del gateway y el TTL funcionan
+  con ella; MMDS de verdad sigue impidiendo congelar.
+- **Credenciales de plantilla para servicios MCP.** `kling template credential
+  <plantilla> -domain D -env VAR [-f clave | -clear]` ata la clave a la plantilla
+  (`secrets/credentials/<plantilla>.enc`) y el daemon la entrega a cada instancia que
+  nace de ella (`run -from`, réplicas del gateway) antes de devolverla, con un marcador
+  propio por instancia; el puente lee MMDS al lanzar cada sesión, así que el servidor
+  arranca con él en su entorno. Sobrevive a que `kling mcp import` rehaga el snapshot.
+  `run -from` con otro egress se rechaza y dice qué pasar. API: `PUT
+  /snapshots/{name}/credentials`; `Snapshot.credential_domains`. Verificado en el lab:
+  dos instancias de la misma plantilla, cada una con su marcador, las dos con basic-auth
+  200.
+- **Proxy más robusto frente a un invitado hostil.** Se redacta también cada valor de
+  cabecera tal y como salió sustituido —cierra el eco de un `Basic`, donde la clave iba
+  dentro del base64 y el redactor no la veía— y las formas escapadas habituales de la
+  clave (JSON `\/` y `\u00XX`, percent-encoding, entidades HTML); una respuesta con una
+  codificación que no se puede inspeccionar (brotli, deflate) se rechaza con 502; varias
+  credenciales por dominio (antes la segunda pisaba a la primera en silencio); el
+  marcador se sustituye también en la query (`?key=`) y en cuerpos de hasta 1 MiB
+  (`client_secret` de OAuth); el redactor solo retiene del final de cada trozo lo que
+  puede ser el comienzo de la clave, así que un flujo SSE sale evento a evento en vez de
+  con la cola del anterior; repetir `-env` rota la clave conservando el marcador; y el
+  443 de la IP del proxy también va al proxy, con lo que un `https://dominio` desde
+  dentro muere en 3 ms en vez de esperar al plazo del SDK (un REJECT con RST necesitaba
+  `xt_REJECT`, que el CT del lab no tiene: la regla fallaba y la máquina no arrancaba).
+- **Pendiente, documentado en SECURITY.md:** el proxy no existe en macOS (backend vz;
+  plan concreto anotado), los secretos por sesión de MMDS siguen sin rellenarse solos, y
+  `kling run -from` manda siempre un egress (`none` por defecto) en vez de dejar que el
+  daemon herede el de la plantilla: una instancia de una plantilla con credenciales
+  necesita `-egress allowlist -allow …` explícito, como hace el gateway.
+
+### Pruebas
+
+- `scripts/90-e2e.sh`: la sección 2 esperaba `warm` y el CLI dice `frozen`; la sección 5
+  usaba `script -qec` (util-linux), que no existe en el `script` BSD de macOS desde donde
+  se lanza el e2e: ahora el pseudoterminal lo pone el `pty` de python3. Sección 7 ampliada
+  (freeze/thaw, reinicio del daemon, rotación, eco de `Basic`, HTTPS rápido) y nueva 7b
+  (credenciales de plantilla). En el lab: 54 ok, 0 fallos.
+
 ## v0.16.0 — 2026-09-27
 
 Cierra lo que la auditoría del núcleo dejó abierto tras v0.15.0, y el tope de CPU llega a macOS.
