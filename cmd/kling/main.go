@@ -261,6 +261,29 @@ func resolveCPUPct(fs *flag.FlagSet, pct, old int) int {
 	return pct
 }
 
+// egressForRun decide qué egress y qué dominios mandar en la petición de
+// arranque. Con -from y sin -egress explícito en la línea de comandos, se
+// mandan vacíos para que runFrom() (internal/machine/snapshot.go) herede la
+// política de la plantilla: sin esto, una plantilla con credenciales —que
+// exige egress allowlist— obligaba a repetir -egress allowlist -allow a mano
+// en cada instancia, aunque la plantilla ya llevara esos datos consigo.
+// Sin -from, o con -egress dado explícitamente, se mantiene el defecto de
+// siempre: flag > configuración > "none".
+func egressForRun(fs *flag.FlagSet, from, egress, allow string, cfg *config.Config) (string, []string) {
+	if from != "" {
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "egress" {
+				explicit = true
+			}
+		})
+		if !explicit {
+			return "", nil
+		}
+	}
+	return config.Or(egress, cfg.Defaults.Egress, "none"), splitDomains(allow)
+}
+
 // hostOf resuelve a qué daemon hablar.
 func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
@@ -386,6 +409,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	egressReq, allowReq := egressForRun(fs, *from, *egress, *allow, cfg)
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
 		From:  *from,
@@ -395,8 +419,8 @@ func cmdRun(args []string) error {
 		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		MemMiB:       config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		MemMaxMiB:    *memMax,
-		Egress:       config.Or(*egress, cfg.Defaults.Egress, "none"),
-		AllowDomains: splitDomains(*allow),
+		Egress:       egressReq,
+		AllowDomains: allowReq,
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
 		CPUPct:       config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Labels:       labels.merge(*service),

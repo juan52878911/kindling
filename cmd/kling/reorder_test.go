@@ -4,6 +4,8 @@ import (
 	"flag"
 	"reflect"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/config"
 )
 
 // reorderFor es lo que hace que `kling logs mivm -tail 50` respete el -tail en vez
@@ -66,4 +68,51 @@ func TestResolveCPUPct(t *testing.T) {
 	if got := resolveCPUPct(mk([]string{"-cpu-pct", "100", "-cpu", "50"}), 100, 50); got != 100 {
 		t.Errorf("ambos: -cpu-pct debe ganar -> %d, want 100", got)
 	}
+}
+
+// egressForRun: con -from y sin -egress explícito, se manda vacío para que
+// runFrom() herede la política de la plantilla (A2). Sin -from, o con -egress
+// dado, se mantiene el defecto de siempre.
+func TestEgressForRun(t *testing.T) {
+	mk := func(args []string) *flag.FlagSet {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		fs.String("from", "", "")
+		fs.String("egress", "", "")
+		fs.String("allow", "", "")
+		_ = fs.Parse(args)
+		return fs
+	}
+	cfg := &config.Config{}
+
+	t.Run("from sin -egress hereda (vacío)", func(t *testing.T) {
+		fs := mk([]string{"-from", "plantilla"})
+		egress, allow := egressForRun(fs, "plantilla", "", "", cfg)
+		if egress != "" || allow != nil {
+			t.Errorf("egressForRun() = (%q, %v), want (\"\", nil)", egress, allow)
+		}
+	})
+
+	t.Run("from con -egress explícito no hereda", func(t *testing.T) {
+		fs := mk([]string{"-from", "plantilla", "-egress", "allowlist", "-allow", "a.com,b.com"})
+		egress, allow := egressForRun(fs, "plantilla", "allowlist", "a.com,b.com", cfg)
+		if egress != "allowlist" || !reflect.DeepEqual(allow, []string{"a.com", "b.com"}) {
+			t.Errorf("egressForRun() = (%q, %v), want (\"allowlist\", [a.com b.com])", egress, allow)
+		}
+	})
+
+	t.Run("sin -from mantiene el defecto none", func(t *testing.T) {
+		fs := mk(nil)
+		egress, allow := egressForRun(fs, "", "", "", cfg)
+		if egress != "none" || allow != nil {
+			t.Errorf("egressForRun() = (%q, %v), want (\"none\", nil)", egress, allow)
+		}
+	})
+
+	t.Run("sin -from respeta -egress dado", func(t *testing.T) {
+		fs := mk([]string{"-egress", "internet"})
+		egress, allow := egressForRun(fs, "", "internet", "", cfg)
+		if egress != "internet" || allow != nil {
+			t.Errorf("egressForRun() = (%q, %v), want (\"internet\", nil)", egress, allow)
+		}
+	})
 }
