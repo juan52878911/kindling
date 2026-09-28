@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // kling template ls|rm|inspect.
@@ -47,26 +48,24 @@ func cmdTemplate(args []string) error {
 func snapshotsCredential(args []string) error {
 	fs := flag.NewFlagSet("template credential", flag.ExitOnError)
 	host := hostFlag(fs)
-	domain := fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com")
-	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
-	file := fs.String("f", "", "file with the key (default: stdin)")
+	cf := credentialFlags(fs)
 	clear := fs.Bool("clear", false, "remove every credential of the template")
-	var allow stringsFlag
-	fs.Var(&allow, "allow-request", allowRequestHelp)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 || (!*clear && (*domain == "" || *env == "")) {
+	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
 		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
+			"       kling template credential <template> -type postgres -domain db.example.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env PGPASSWORD [-f passfile]\n" +
 			"       kling template credential <template> -clear")
 	}
 	req := api.CredentialsRequest{Clear: *clear}
+	var spec api.CredentialSpec
 	if !*clear {
-		secret, err := leerClave(*file)
-		if err != nil {
+		var err error
+		if spec, err = cf.spec(); err != nil {
 			return err
 		}
-		req.Credentials = []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret, Allow: allow}}
+		req.Credentials = []api.CredentialSpec{spec}
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -78,12 +77,96 @@ func snapshotsCredential(args []string) error {
 		fmt.Printf("%s  no credentials; new instances get none (running ones keep theirs)\n", s.Name)
 		return nil
 	}
+	if spec.Type == credproxy.KindPostgres {
+		fmt.Printf("%s  every new instance gets a placeholder in %s; the password only goes to %s over verified TLS through its proxy\n",
+			s.Name, spec.Env, pgDestino(spec))
+		fmt.Printf("      %s\n", pgConexion(spec))
+		fmt.Printf("      running instances are not changed (kling machine credential does that)\n")
+		return nil
+	}
 	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to https://%s through its proxy\n",
-		s.Name, *env, strings.ToLower(*domain))
-	fmt.Printf("      %s\n", describirAllow(allow))
+		s.Name, spec.Env, strings.ToLower(spec.Domain))
+	fmt.Printf("      %s\n", describirAllow(spec.Allow))
 	fmt.Printf("      point the SDK at http://%s; running instances are not changed (kling machine credential does that)\n",
-		strings.ToLower(*domain))
+		strings.ToLower(spec.Domain))
 	return nil
+}
+
+// credFlags son las banderas de una credencial, iguales en machine credential
+// y template credential. La clave NUNCA va en una bandera: -f o stdin.
+type credFlags struct {
+	domain, env, file, typ, user, database, caFile *string
+	port                                           *int
+	allow                                          *stringsFlag
+}
+
+func credentialFlags(fs *flag.FlagSet) *credFlags {
+	c := &credFlags{allow: &stringsFlag{}}
+	c.domain = fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com (postgres: the database server)")
+	c.env = fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY (postgres: PGPASSWORD)")
+	c.file = fs.String("f", "", "file with the key or password (default: stdin)")
+	c.typ = fs.String("type", "http", "http, or postgres for a database password")
+	c.port = fs.Int("port", 0, "postgres: the server's port (default 5432)")
+	c.user = fs.String("user", "", "postgres: the role the password belongs to (the guest must connect as it)")
+	c.database = fs.String("database", "", "postgres: the only database the guest may connect to (default: any)")
+	c.caFile = fs.String("ca-file", "", "postgres: PEM CA added to the system roots to verify the server")
+	fs.Var(c.allow, "allow-request", allowRequestHelp)
+	return c
+}
+
+// spec lee la clave (de -f o stdin) y la CA, y arma la credencial. Lo que
+// no pega con el tipo se rechaza aquí, antes de leer la clave; el daemon lo
+// valida todo igualmente.
+func (c *credFlags) spec() (api.CredentialSpec, error) {
+	s := api.CredentialSpec{Domain: *c.domain, Env: *c.env, Allow: *c.allow}
+	switch *c.typ {
+	case "", "http":
+		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.caFile != "" {
+			return s, errors.New("-port, -user, -database and -ca-file are only for -type postgres")
+		}
+	case credproxy.KindPostgres:
+		if len(*c.allow) > 0 {
+			return s, errors.New("-allow-request is only for HTTP credentials")
+		}
+		if *c.user == "" {
+			return s, errors.New("-type postgres needs -user (the role the password belongs to)")
+		}
+		s.Type, s.Port, s.User, s.Database = credproxy.KindPostgres, *c.port, *c.user, *c.database
+		if *c.caFile != "" {
+			b, err := os.ReadFile(*c.caFile)
+			if err != nil {
+				return s, err
+			}
+			s.CAPEM = string(b)
+		}
+	default:
+		return s, fmt.Errorf("unknown -type %q (http or postgres)", *c.typ)
+	}
+	secret, err := leerClave(*c.file)
+	if err != nil {
+		return s, err
+	}
+	s.Secret = secret
+	return s, nil
+}
+
+// pgDestino es "servidor:puerto" de una credencial Postgres.
+func pgDestino(s api.CredentialSpec) string {
+	port := s.Port
+	if port == 0 {
+		port = credproxy.PGDefaultPort
+	}
+	return fmt.Sprintf("%s:%d", strings.ToLower(s.Domain), port)
+}
+
+// pgConexion dice cómo tiene que conectar el cliente del invitado.
+func pgConexion(s api.CredentialSpec) string {
+	db := ""
+	if s.Database != "" {
+		db = " dbname=" + s.Database
+	}
+	return fmt.Sprintf("connect with host=%s user=%s%s password=$%s (sslmode disable or prefer: the proxy adds the TLS)",
+		strings.ToLower(s.Domain), s.User, db, s.Env)
 }
 
 // allowRequestHelp es la ayuda de -allow-request, igual en machine y template.

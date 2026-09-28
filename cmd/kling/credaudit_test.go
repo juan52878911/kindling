@@ -50,6 +50,30 @@ func TestAuditWriterTabla(t *testing.T) {
 	}
 }
 
+// Una conexión de Postgres: rol@base en vez de ruta, sin estado HTTP y el
+// método con que el proxy se autenticó ante el servidor.
+func TestAuditWriterPostgres(t *testing.T) {
+	var out, errOut bytes.Buffer
+	w := &auditWriter{out: &out, errOut: &errOut}
+	for _, l := range []string{
+		`{"ts":"2026-09-28T10:00:00Z","kind":"postgres","host":"db.example.com","user":"app","database":"appdb","auth":"scram-sha-256-plus","creds":["PGPASSWORD"],"req_bytes":10,"resp_bytes":20,"ms":5}`,
+		`{"ts":"2026-09-28T10:00:01Z","kind":"postgres","reason":"bad_placeholder","denied":true,"req_bytes":10,"resp_bytes":20,"ms":1}`,
+		`{"ts":"2026-09-28T10:00:02Z","kind":"postgres","method":"cancel","host":"db.example.com","user":"app","creds":["PGPASSWORD"],"req_bytes":16,"resp_bytes":0,"ms":3}`,
+	} {
+		if _, err := w.Write([]byte(l + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], " PG ") || !strings.Contains(lines[0], "app@appdb") ||
+		!strings.HasSuffix(lines[0], "ok(scram-sha-256-plus)") {
+		t.Fatalf("tabla:\n%s", out.String())
+	}
+	if !strings.HasSuffix(lines[1], "DENIED(bad_placeholder)") || !strings.Contains(lines[2], "CANCEL") {
+		t.Errorf("tabla:\n%s", out.String())
+	}
+}
+
 func TestAuditWriterJSON(t *testing.T) {
 	var out, errOut bytes.Buffer
 	w := &auditWriter{out: &out, errOut: &errOut, json: true}

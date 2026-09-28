@@ -125,6 +125,9 @@ var coreTree = []section{
                                                    no -f; -clear removes them all;
                                                    -allow-request as in machine
                                                    credential)
+  template credential <name> -type postgres        the same for a database password
+      -domain D -user R [-database B] [-port P]    (see machine credential)
+      [-ca-file ca.pem] -env PGPASSWORD [-f file]
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -206,6 +209,12 @@ var coreTree = []section{
                                                    is a 403 (repeatable; * = a segment,
                                                    final /** = any rest); it goes with
                                                    the key: repeat it when rotating
+  machine credential <ref> -type postgres          a database password: the guest
+      -domain D -user R [-database B] [-port P]    connects in plain text to D (any
+      [-ca-file ca.pem] -env PGPASSWORD [-f file]  port) as R with the placeholder as
+                                                   password; the proxy logs in to D:P
+                                                   with the real one over verified TLS
+                                                   (SCRAM), -ca-file adds a CA
   machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
       [-since 10m] [-tail 200] [-json]             one line per request (method, host,
                                                    masked path, status, credentials
