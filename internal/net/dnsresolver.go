@@ -31,8 +31,11 @@ package net
 //
 // QUÉ QUEDA PENDIENTE (TODO):
 //   - AAAA / IPv6: solo sembramos A (IPv4). El ipset es hash:ip v4 y las reglas
-//     son iptables v4; cubrir AAAA pide un ipset family inet6 y reglas ip6tables
-//     paralelas. Ver extractA.
+//     son iptables v4; cubrir AAAA con un ipset family inet6 y reglas ip6tables
+//     paralelas seguiría sin uso, porque applyIPv6Barrier (firewall.go) apaga
+//     IPv6 en el namespace del invitado ANTES de que este resolver entre en
+//     juego: no hay AAAA que el invitado pueda usar aunque se la sirviéramos.
+//     Ver extractA.
 //   - Tunneling por SUBDOMINIOS de un dominio permitido: se reenvían (un CDN los
 //     necesita), así que un dominio permitido cuyo NS autoritativo controle el
 //     atacante sigue siendo un canal. Cerrarlo del todo exige un resolver
@@ -638,8 +641,10 @@ type aRecord struct {
 // extractA recorre la sección de respuestas y devuelve los registros A (IPv4)
 // con su TTL. Descarta IP privadas/link-local (resolver upstream envenenado).
 //
-// TODO(AAAA): los registros tipo 28 (IPv6) se ignoran. Sembrarlos exige un ipset
-// family inet6 y reglas ip6tables paralelas que hoy no existen.
+// AAAA (tipo 28) se ignora a propósito, no por un hueco pendiente: el
+// namespace del invitado tiene IPv6 apagado por applyIPv6Barrier
+// (firewall.go) antes de que este resolver reciba una sola consulta, así que
+// sembrar un ipset inet6 en paralelo no le abriría ninguna ruta al invitado.
 func extractA(msg []byte) []aRecord {
 	if len(msg) < 12 {
 		return nil
