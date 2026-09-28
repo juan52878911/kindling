@@ -32,6 +32,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `shares-live` | v0.10 | `shares` con `mode: ro\|rw` (directorio del host del daemon, bajo `share_roots`); `share_roots` en `GET /info` |
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
+| `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
 
 ## Rutas
 
@@ -60,6 +61,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `PUT /machines/{ref}/labels` | reetiqueta |
 | `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas) |
 | `GET /machines/{ref}/logs?tail=N` | consola serie |
+| `GET /machines/{ref}/credaudit?tail=N&denied=1&since=T` | registro de auditoría del proxy de credenciales, NDJSON (ver abajo) |
 | `POST /machines/{ref}/guest` | reenvía una petición HTTP al invitado (ver abajo) |
 | `DELETE /machines/{ref}` | la borra |
 
@@ -146,6 +148,44 @@ entre 128 MiB y el techo con el que arrancó (`mem_max_mib` en `POST /machines`)
 La máquina arranca con el techo y el globo retiene la diferencia; subir es
 desinflarlo y bajar, inflarlo. Una máquina sin techo tiene la memoria fija (400).
 El techo queda en el snapshot al hacer commit.
+
+### `GET /machines/{ref}/credaudit`
+
+El registro de auditoría del proxy de credenciales de la máquina
+(`machines/<id>/credaudit.jsonl` y su rotación `.1`), como NDJSON: una
+`api.CredAuditRecord` por línea, las más antiguas primero. Funciona con la máquina
+corriendo, congelada o parada; sin registro (nunca tuvo credenciales) devuelve `200`
+vacío. Lo usa `kling machine audit`.
+
+| Parámetro | Valor |
+|---|---|
+| `tail` | últimas N líneas tras filtrar (defecto 200; `0` = todo lo que el daemon lee, hasta 4 MiB) |
+| `denied` | `1`/`true`: solo las denegadas por política (las líneas `dropped` salen siempre) |
+| `since` | RFC 3339 (`2026-09-28T10:00:00Z`) o una duración hacia atrás (`10m`, `2h`) |
+
+Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
+
+```json
+{"ts":"2026-09-28T10:00:00.123Z","kind":"http","method":"GET","host":"api.example.com",
+ "path":"/v1/files/:tok","query":true,"status":200,"creds":["API_KEY"],
+ "req_bytes":0,"resp_bytes":512,"ms":84}
+```
+
+| Campo | Qué es |
+|---|---|
+| `kind` | `http`; `dropped` es una línea que solo lleva la cuenta de descartados |
+| `path` | ruta normalizada, cortada a 256 bytes; un segmento con un marcador o una forma de una clave sale `:cred`, uno de ≥32 caracteres base64url/hex, `:tok` |
+| `query` | si la petición llevaba query (su contenido no se escribe nunca) |
+| `status` | lo que recibió el invitado |
+| `reason` | vacío si llegó al proveedor y volvió entera; si no: `disabled`, `busy`, `no_credential`, `connect`, `ambiguous_path`, `not_allowed`, `body_too_large`, `bad_body`, `bad_request`, `upstream_error`, `bad_encoding`, `aborted` |
+| `denied` | la rechazó la política: `disabled`, `no_credential`, `ambiguous_path`, `not_allowed` |
+| `creds` | `env` de las credenciales cuyo marcador se sustituyó en esta petición |
+| `req_bytes`, `resp_bytes`, `ms` | cuerpo leído del invitado, cuerpo enviado al invitado, duración |
+| `dropped` | registros descartados antes de este (cola llena o fallo de disco) |
+| `user`, `database`, `auth` | reservados para proxies de otros protocolos |
+
+Nunca lleva la clave, el marcador, cabeceras, cuerpos, la query ni el texto de un
+error del proveedor. Rota a 1 MiB (una generación); `commit` y `fork` no lo copian.
 
 ### Admisión
 

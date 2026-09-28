@@ -12,6 +12,23 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Registro de auditoría del proxy de credenciales** (`kling machine audit <ref>
+  [-f] [-denied] [-since 10m] [-tail N] [-json]`, `GET /machines/{ref}/credaudit`). Cada
+  petición que pasa por el proxy, también cada rechazo, deja una línea en
+  `machines/<id>/credaudit.jsonl`: método, host, ruta enmascarada (`:cred` donde hubiera
+  un marcador o una forma de la clave, `:tok` en identificadores opacos largos), estado,
+  motivo, si fue una denegación de política, qué credenciales se sustituyeron, bytes y
+  duración. Nunca la clave, el marcador, cabeceras, cuerpos ni la query. 0600, abierto sin
+  seguir enlaces, rota a 1 MiB (una generación); la escritura no bloquea la petición y lo
+  que se descarta con la cola llena se cuenta en la línea siguiente. En Linux lo escribe
+  el daemon, en macOS el `kling-vz` de la máquina (en el mismo directorio, sin RPC
+  nueva); se lee con la máquina corriendo, congelada o parada, y sobrevive a
+  freeze/thaw y a un reinicio del daemon. Son metadatos de tráfico que antes no llegaban
+  a disco: ver SECURITY.md §7.
+- **En macOS el rechazo del proxy fuera de allowlist es del propio proxy**
+  (`credproxy.Options.Enabled`) y no de un envoltorio en `vnet`: cada denegación tiene un
+  solo dueño y queda en el registro. El comportamiento para el invitado no cambia (403).
+
 - **`-allow-request` rechaza rutas ambiguas en vez de normalizarlas a ciegas.** El proxy
   comparaba `-allow-request` contra la ruta ya decodificada y limpiada con `path.Clean`,
   pero eso asume que el proveedor lee `/`, `.` y `..` igual que nosotros. Con alguna

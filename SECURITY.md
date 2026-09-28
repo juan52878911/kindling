@@ -251,6 +251,32 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   No intenta adivinar qué haría el proveedor con eso: rechaza la ambigüedad en vez de
   arriesgarse a firmar una petición para una ruta que nunca se comprobó de verdad. Sin
   ninguna credencial con `Allow` esto no se mira, igual que antes de este cambio.
+- **Registro de auditoría: metadatos del tráfico en disco** (`kling machine audit`,
+  `GET /machines/{ref}/credaudit`, `pkg/credproxy/auditoria.go`). Cada petición que
+  llega al proxy, también cada rechazo, deja una línea JSON en
+  `machines/<id>/credaudit.jsonl` (0600, abierto con `O_APPEND`): hora, método, host,
+  ruta, estado, motivo, si fue una denegación de política, los nombres (`Env`) de las
+  credenciales que se sustituyeron de verdad, bytes y duración. **Esto es nuevo en
+  disco**: antes el proxy no dejaba rastro de qué pedía el invitado; ahora queda qué
+  endpoints de qué dominios usó y cuándo. Lo que NO se escribe nunca: la clave, el
+  marcador, cabeceras, cuerpos, el contenido de la query (solo si la había) ni el texto
+  de un error del proveedor. La ruta va normalizada y enmascarada: un segmento con un
+  marcador (`kling-cred-`, sin mirar mayúsculas) o con cualquier forma escapada de
+  alguna clave de la máquina sale como `:cred` (se busca en la ruta entera antes de
+  partirla, por si la clave lleva `/`), uno de 32 o más caracteres de base64url/hex
+  como `:tok`, y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
+  generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
+  copian y `rm` lo borra con el directorio. La escritura no bloquea la petición: va por
+  una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
+  descarta y se cuenta, y la cuenta viaja en el campo `dropped` del siguiente (o en una
+  línea propia), nunca en silencio. En Linux lo escribe el daemon (root) en el
+  directorio de la máquina, que es del usuario sin privilegios del VMM: se abre con
+  `O_NOFOLLOW` y solo si es un fichero regular, y el daemon lo lee igual, para que un
+  enlace o una FIFO plantados por un VMM comprometido no lleven la escritura ni la
+  lectura a otro fichero. En macOS lo escribe el `kling-vz` de la máquina junto a su
+  socket (el único directorio en que su sandbox le deja escribir) y lo lee el daemon.
+  El rechazo fuera de allowlist en macOS es ahora del propio proxy
+  (`credproxy.Options.Enabled`), para que también quede en el registro.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
   no es un secreto (la capacidad es la red del netns de esa máquina hacia su proxy, y
   el proxy sustituye por dominio, no por marcador), así que una máquina con
@@ -268,7 +294,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   la pasarela (172.16.0.1, TTL 30) sin reenviar ni sembrar la IP real, y AAAA vacío; un
   listener en pasarela:80 recoge la conexión antes de la política de salida (que
   rechazaría 172.16/12); el 443 de la pasarela no tiene listener y muere con un RST. El
-  proxy solo atiende en allowlist (403 en otro modo aunque el invitado conecte a mano),
+  proxy solo atiende en allowlist (403 en otro modo aunque el invitado conecte a mano;
+  lo decide el propio proxy, así que el rechazo queda en su registro de auditoría),
   y su lookup usa el mismo upstream que el invitado y descarta además lo que la red del
   Mac nunca deja alcanzar: 0.0.0.0/8 (que en macOS llega a localhost), multicast,
   reservadas y las IPs del propio Mac.
@@ -432,6 +459,14 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
   vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
   mismas reglas antes de reenviar.
+- **El registro de auditoría es observabilidad, no prueba.** En Linux el directorio de
+  la máquina es del usuario del VMM: un Firecracker comprometido no puede leer el
+  registro (0600, de root) ni desviar su escritura (ver 7), pero sí borrarlo o
+  cambiarlo por otro. En macOS lo escribe `kling-vz`, el proceso que termina el
+  tráfico del invitado. No hay fsync: lo que estaba en el búfer al caer el host se
+  pierde (lo escrito sobrevive a que maten el proceso, que es como el daemon para a
+  `kling-vz`). Si se necesita un registro a prueba de manipulación, hay que sacarlo del
+  host (`kling machine audit -f -json` a un colector).
 - **En macOS la clave vive en un proceso que el invitado alcanza por la red.** Es el
   `kling-vz` de su máquina, que corre como el usuario y procesa su tráfico (ver 7). Un
   fallo explotable en su pila de red, DNS o MMDS que antes daba un proceso sin claves
