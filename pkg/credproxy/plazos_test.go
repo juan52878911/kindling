@@ -76,7 +76,7 @@ func TestProxyCortaUnStreamParadoPorInactividad(t *testing.T) {
 		case <-fin:
 		case <-r.Context().Done():
 		}
-	}, credsUna(), conPlazos(300*time.Millisecond, 10*time.Second))
+	}, credsUna(), conPlazos(500*time.Millisecond, 10*time.Second))
 
 	t0 := time.Now()
 	resp, err := pedirStream(t, srv.URL)
@@ -92,8 +92,12 @@ func TestProxyCortaUnStreamParadoPorInactividad(t *testing.T) {
 	if !strings.Contains(string(body), "data: uno") {
 		t.Errorf("el primer evento debería haber llegado: %q", body)
 	}
-	if dur < 300*time.Millisecond || dur > 3*time.Second {
-		t.Errorf("cortado a los %v; quería ~300ms", dur)
+	// Márgenes anchos a propósito: con -race y la suite entera en paralelo el
+	// planificador puede retrasar el vigía cientos de ms (un fallo en ~5 corridas
+	// con 300 ms y tope de 3 s). El tope sigue muy por debajo del techo de 10 s:
+	// si el plazo de inactividad no funcionara, esto seguiría fallando.
+	if dur < 500*time.Millisecond || dur > 5*time.Second {
+		t.Errorf("cortado a los %v; quería ~500ms (y en ningún caso el techo de 10 s)", dur)
 	}
 }
 
