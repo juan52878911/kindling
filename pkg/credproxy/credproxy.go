@@ -82,6 +82,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -139,6 +140,15 @@ type Credential struct {
 	// CAPEM son certificados de CA en PEM que se AÑADEN a las raíces del
 	// sistema para verificar al servidor (uno autofirmado o de una CA propia).
 	CAPEM string `json:",omitempty"`
+	// Upstream ("host:puerto", IP o nombre) es a dónde marca el proxy en vez
+	// de Domain:Port: una base de datos en el loopback del host o en la LAN,
+	// que el dialer de solo IPs públicas no alcanza. Lo fija solo el operador
+	// (ver upstream.go). UpstreamTLS "" es TLS verificado; "disable", sin TLS
+	// y solo con SCRAM-SHA-256 (exige Upstream). TLSServerName, si no es "",
+	// es el nombre contra el que se verifica el certificado en vez de Domain.
+	Upstream      string `json:",omitempty"`
+	UpstreamTLS   string `json:",omitempty"`
+	TLSServerName string `json:",omitempty"`
 }
 
 var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -208,8 +218,9 @@ func ValidarTipo(c *Credential) error {
 	d := c.Domain
 	switch c.Kind {
 	case "", KindHTTP:
-		if c.Port != 0 || c.User != "" || c.Database != "" || c.CAPEM != "" {
-			return fmt.Errorf("credential for %s: port, user, database and CA are only for -type postgres", d)
+		if c.Port != 0 || c.User != "" || c.Database != "" || c.CAPEM != "" ||
+			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" {
+			return fmt.Errorf("credential for %s: port, user, database, CA, upstream, upstream TLS and TLS server name are only for -type postgres", d)
 		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
@@ -253,9 +264,11 @@ type Options struct {
 	// que no se puede abrir). Nil = no se avisa, aunque se siguen contando.
 	Logf func(format string, args ...any)
 	// DialPG sustituye al dialer de la salida de Postgres (el de dialPublico,
-	// con Lookup). Solo para tests y el laboratorio (un servidor en
-	// 127.0.0.1): en producción anula la barrera de IPs. La verificación TLS
-	// no cambia: sigue siendo contra el nombre de la credencial.
+	// con Lookup) para las credenciales SIN Upstream. Solo para tests y el
+	// laboratorio (un servidor en 127.0.0.1): en producción anula la barrera
+	// de IPs. La verificación TLS no cambia: sigue siendo contra el nombre de
+	// la credencial. Una credencial con Upstream marca siempre con el dialer
+	// de upstream.go, con su propia barrera.
 	DialPG func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
@@ -285,6 +298,10 @@ type Proxy struct {
 	pg     []credPG
 	pgSem  chan struct{}
 	dialPG func(ctx context.Context, network, addr string) (net.Conn, error)
+	// dialUp marca los upstream fijados (upstream.go); lookupUp es su
+	// resolver, campo para que los tests pongan uno falso.
+	dialUp   func(ctx context.Context, addr string) (net.Conn, error)
+	lookupUp lookupUpstream
 	// pgPre y pgAuth son los plazos antes de autenticar (invitado y total);
 	// campos para los tests.
 	pgPre, pgAuth time.Duration
@@ -341,7 +358,7 @@ func New(o Options) *Proxy {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Proxy{
+	p := &Proxy{
 		creds: map[string][]credCompilada{},
 		sem:   make(chan struct{}, MaxInFlight),
 		// Sin Timeout: cortaría a mitad un stream largo. Los plazos van por
@@ -364,7 +381,12 @@ func New(o Options) *Proxy {
 		pgPre:         pgPreAuth,
 		pgAuth:        pgAuthTotal,
 		cancelaciones: map[claveCancel]destinoCancel{},
+		lookupUp:      lookupSistema,
 	}
+	p.dialUp = dialFijado(func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return p.lookupUp(ctx, host)
+	}, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive})
+	return p
 }
 
 // Close escribe y cierra el registro de auditoría. No para al servidor que

@@ -102,17 +102,27 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	}
 	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
 	// trataría una credencial Postgres como HTTP: se pregunta antes qué
-	// tipos entiende y, si no dice postgres, no se le da ninguna.
+	// tipos entiende y, si no dice postgres, no se le da ninguna. Lo mismo
+	// con Upstream: uno que no lo conozca marcaría el dominio en su lugar (y,
+	// con -upstream-tls disable, exigiría TLS a un servidor que no lo tiene),
+	// así que sin "postgres-upstream" no se le da ninguna que lo use.
+	var pg, upstream bool
 	for _, cr := range creds {
 		if cr.Kind == credproxy.KindPostgres {
-			info, err := c.KlingInfo(ctx)
-			if err != nil {
-				return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
-			}
-			if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
-				return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
-			}
-			break
+			pg = true
+			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
+		}
+	}
+	if pg {
+		info, err := c.KlingInfo(ctx)
+		if err != nil {
+			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+		}
+		if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
+			return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+		}
+		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
+			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")
 		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
@@ -121,6 +131,7 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
 			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, CAPEM: cr.CAPEM,
+			Upstream: cr.Upstream, UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 		})
 	}
 	if err := c.SetKlingCredentials(ctx, out); err != nil {

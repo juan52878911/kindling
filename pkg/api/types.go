@@ -939,6 +939,15 @@ type CredentialSpec struct {
 	User     string   `json:"user,omitempty"`
 	Database string   `json:"database,omitempty"`
 	CAPEM    string   `json:"ca_pem,omitempty"`
+	// Upstream, UpstreamTLS y TLSServerName (solo Postgres) fijan a dónde
+	// marca el proxy en vez de Domain:Port ("host:puerto"; loopback y LAN
+	// permitidos, metadatos y la red interna de kindling nunca), si el TLS
+	// hacia él se verifica ("" o "verify-full") o se apaga ("disable": solo
+	// con Upstream y SCRAM-SHA-256), y contra qué nombre se verifica el
+	// certificado (Domain por defecto). Ver docs/postgres.md.
+	Upstream      string `json:"upstream,omitempty"`
+	UpstreamTLS   string `json:"upstream_tls,omitempty"`
+	TLSServerName string `json:"tls_server_name,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de
@@ -976,6 +985,7 @@ type CredAuditRecord struct {
 	User      string    `json:"user,omitempty"`
 	Database  string    `json:"database,omitempty"`
 	Auth      string    `json:"auth,omitempty"`
+	Upstream  string    `json:"upstream,omitempty"`
 	ReqBytes  int64     `json:"req_bytes"`
 	RespBytes int64     `json:"resp_bytes"`
 	MS        int64     `json:"ms"`
