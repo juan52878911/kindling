@@ -1,0 +1,788 @@
+{
+  "schema": 1,
+  "started": "2026-09-28T23:43:05.925566599Z",
+  "finished": "2026-09-28T23:44:00.19349925Z",
+  "host": {
+    "hostname": "fc-test",
+    "kernel": "6.17.2-1-pve",
+    "cpu": "Intel(R) Core(TM) i7-8700T CPU @ 2.40GHz",
+    "cpus": 4,
+    "mem_total_mib": 8192,
+    "nested": false,
+    "container": "lxc",
+    "arch": "amd64",
+    "os": "linux",
+    "kling_version": "kling v0.16.0-76-g7b2c2cc",
+    "docker_version": "20.10.24+dfsg1",
+    "git_sha": "7b2c2cc70e59-dirty"
+  },
+  "config": {
+    "modes": [
+      "template"
+    ],
+    "n": [
+      1,
+      8,
+      32
+    ],
+    "reps": 3,
+    "timeout_s": 90,
+    "docker_image": "postgres:16-alpine",
+    "table": "items",
+    "expect_count": 400000,
+    "seed_sql": "seed-bench.sql",
+    "psi_max": 20
+  },
+  "preflight": [
+    "MemAvailable 7925 MiB",
+    "no -disk-path: disk per copy is not measured and the disk skip rule is off",
+    "PSI some avg10 0.00 (limit 20.00)"
+  ],
+  "rounds": [
+    {
+      "mode": "template",
+      "n": 1,
+      "rep": 1,
+      "status": "ok",
+      "ok": 1,
+      "failed": 0,
+      "latency_ms": {
+        "n": 1,
+        "p50": 275.58,
+        "p95": 275.58,
+        "p99": 275.58,
+        "max": 275.58,
+        "mean": 275.58
+      },
+      "provision_ms": {
+        "n": 1,
+        "p50": 242.11,
+        "p95": 242.11,
+        "p99": 242.11,
+        "max": 242.11,
+        "mean": 242.11
+      },
+      "wall_ms": 275.58,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 275.58,
+          "provision_ms": 242.11
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7871,
+        "min": 7870,
+        "peak_used": 1
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 1,
+      "rep": 2,
+      "status": "ok",
+      "ok": 1,
+      "failed": 0,
+      "latency_ms": {
+        "n": 1,
+        "p50": 229.15,
+        "p95": 229.15,
+        "p99": 229.15,
+        "max": 229.15,
+        "mean": 229.15
+      },
+      "provision_ms": {
+        "n": 1,
+        "p50": 194.12,
+        "p95": 194.12,
+        "p99": 194.12,
+        "max": 194.12,
+        "mean": 194.12
+      },
+      "wall_ms": 229.15,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 229.15,
+          "provision_ms": 194.12
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7873,
+        "min": 7870,
+        "peak_used": 3
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 1,
+      "rep": 3,
+      "status": "ok",
+      "ok": 1,
+      "failed": 0,
+      "latency_ms": {
+        "n": 1,
+        "p50": 201.11,
+        "p95": 201.11,
+        "p99": 201.11,
+        "max": 201.11,
+        "mean": 201.11
+      },
+      "provision_ms": {
+        "n": 1,
+        "p50": 166.9,
+        "p95": 166.9,
+        "p99": 166.9,
+        "max": 166.9,
+        "mean": 166.9
+      },
+      "wall_ms": 201.11,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 201.11,
+          "provision_ms": 166.9
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7873,
+        "min": 7870,
+        "peak_used": 3
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 8,
+      "rep": 1,
+      "status": "ok",
+      "ok": 8,
+      "failed": 0,
+      "latency_ms": {
+        "n": 8,
+        "p50": 1542.57,
+        "p95": 1611.36,
+        "p99": 1611.36,
+        "max": 1611.36,
+        "mean": 1511.87
+      },
+      "provision_ms": {
+        "n": 8,
+        "p50": 1464.02,
+        "p95": 1508.67,
+        "p99": 1508.67,
+        "max": 1508.67,
+        "mean": 1430.81
+      },
+      "wall_ms": 1611.36,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 1589.11,
+          "provision_ms": 1480.73
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 1611.36,
+          "provision_ms": 1508.67
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 1448.51,
+          "provision_ms": 1384.27
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 1542.57,
+          "provision_ms": 1464.02
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 1575.94,
+          "provision_ms": 1494.16
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 1575.93,
+          "provision_ms": 1476.68
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 1431.71,
+          "provision_ms": 1356.37
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 1319.83,
+          "provision_ms": 1281.59
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7872,
+        "min": 7858,
+        "peak_used": 14
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 8,
+      "rep": 2,
+      "status": "ok",
+      "ok": 8,
+      "failed": 0,
+      "latency_ms": {
+        "n": 8,
+        "p50": 1662.39,
+        "p95": 1740.7,
+        "p99": 1740.7,
+        "max": 1740.7,
+        "mean": 1651.35
+      },
+      "provision_ms": {
+        "n": 8,
+        "p50": 1593.33,
+        "p95": 1671.34,
+        "p99": 1671.34,
+        "max": 1671.34,
+        "mean": 1573.17
+      },
+      "wall_ms": 1740.7,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 1567.82,
+          "provision_ms": 1476.57
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 1724.81,
+          "provision_ms": 1639.26
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 1673.09,
+          "provision_ms": 1593.33
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 1547.71,
+          "provision_ms": 1467.84
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 1575.53,
+          "provision_ms": 1486.19
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 1718.76,
+          "provision_ms": 1652.19
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 1662.39,
+          "provision_ms": 1598.65
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 1740.7,
+          "provision_ms": 1671.34
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7873,
+        "min": 7854,
+        "peak_used": 19
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 8,
+      "rep": 3,
+      "status": "ok",
+      "ok": 8,
+      "failed": 0,
+      "latency_ms": {
+        "n": 8,
+        "p50": 1692.88,
+        "p95": 1736.97,
+        "p99": 1736.97,
+        "max": 1736.97,
+        "mean": 1676.71
+      },
+      "provision_ms": {
+        "n": 8,
+        "p50": 1566.92,
+        "p95": 1665.4,
+        "p99": 1665.4,
+        "max": 1665.4,
+        "mean": 1582.94
+      },
+      "wall_ms": 1736.97,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 1697.33,
+          "provision_ms": 1610.51
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 1615.3,
+          "provision_ms": 1525.44
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 1707.35,
+          "provision_ms": 1566.92
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 1736.97,
+          "provision_ms": 1665.4
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 1647.55,
+          "provision_ms": 1539.28
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 1692.88,
+          "provision_ms": 1581.35
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 1728.32,
+          "provision_ms": 1662.54
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 1587.99,
+          "provision_ms": 1512.11
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7871,
+        "min": 7856,
+        "peak_used": 15
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 32,
+      "rep": 1,
+      "status": "DEGRADED",
+      "ok": 19,
+      "failed": 13,
+      "errors": {
+        "provision": 13
+      },
+      "latency_ms": {
+        "n": 19,
+        "p50": 8406.41,
+        "p95": 16256.66,
+        "p99": 16256.66,
+        "max": 16256.66,
+        "mean": 9986.67
+      },
+      "provision_ms": {
+        "n": 19,
+        "p50": 7824.4,
+        "p95": 8424.69,
+        "p99": 8424.69,
+        "max": 8424.69,
+        "mean": 7934.44
+      },
+      "wall_ms": 16256.66,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 8439.84,
+          "provision_ms": 7815.93
+        },
+        {
+          "index": 1,
+          "ok": false,
+          "ms": 8604.09,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 8082.22,
+          "provision_ms": 7824.16
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 8364.57,
+          "provision_ms": 7865.54
+        },
+        {
+          "index": 4,
+          "ok": false,
+          "ms": 8610.79,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 5,
+          "ok": false,
+          "ms": 8608.09,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 8130.96,
+          "provision_ms": 7824
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 8364.49,
+          "provision_ms": 7824.08
+        },
+        {
+          "index": 8,
+          "ok": false,
+          "ms": 8607.93,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 9,
+          "ok": false,
+          "ms": 8574.39,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "ms": 16239.68,
+          "provision_ms": 8424.69
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "ms": 8511.86,
+          "provision_ms": 7969.28
+        },
+        {
+          "index": 12,
+          "ok": false,
+          "ms": 8609.88,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 8406.41,
+          "provision_ms": 8066.14
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "ms": 8491.97,
+          "provision_ms": 7964.61
+        },
+        {
+          "index": 15,
+          "ok": false,
+          "ms": 8603.88,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 16,
+          "ok": false,
+          "ms": 8608.86,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 8242.32,
+          "provision_ms": 8008.53
+        },
+        {
+          "index": 18,
+          "ok": false,
+          "ms": 8612.11,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 8188.78,
+          "provision_ms": 7823.45
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "ms": 8091.37,
+          "provision_ms": 7815.93
+        },
+        {
+          "index": 21,
+          "ok": false,
+          "ms": 8610.19,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 22,
+          "ok": true,
+          "ms": 8443.55,
+          "provision_ms": 7824.4
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 8487.6,
+          "provision_ms": 7824
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 16255.02,
+          "provision_ms": 8110.73
+        },
+        {
+          "index": 25,
+          "ok": true,
+          "ms": 8134.75,
+          "provision_ms": 7823.88
+        },
+        {
+          "index": 26,
+          "ok": false,
+          "ms": 8612.92,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 27,
+          "ok": false,
+          "ms": 8611.66,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 8379.24,
+          "provision_ms": 7824.11
+        },
+        {
+          "index": 29,
+          "ok": false,
+          "ms": 8607.61,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 30,
+          "ok": true,
+          "ms": 16235.52,
+          "provision_ms": 8060.67
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 16256.66,
+          "provision_ms": 8060.17
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7871,
+        "min": 7685,
+        "peak_used": 186
+      },
+      "disk_per_copy_mib": -1,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "template",
+      "n": 32,
+      "rep": 2,
+      "status": "DEGRADED",
+      "ok": 2,
+      "failed": 30,
+      "errors": {
+        "provision": 30
+      },
+      "latency_ms": {
+        "n": 2,
+        "p50": 4111.07,
+        "p95": 5363.16,
+        "p99": 5363.16,
+        "max": 5363.16,
+        "mean": 4737.12
+      },
+      "provision_ms": {
+        "n": 2,
+        "p50": 4042.18,
+        "p95": 5319.78,
+        "p99": 5319.78,
+        "max": 5319.78,
+        "mean": 4680.98
+      },
+      "wall_ms": 5495.01,
+      "copies": [
+        {
+          "index": 0,
+          "ok": false,
+          "ms": 5493.42,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 1,
+          "ok": false,
+          "ms": 5491.1,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 2,
+          "ok": false,
+          "ms": 5486.98,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 3,
+          "ok": false,
+          "ms": 5478.08,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 4,
+          "ok": false,
+          "ms": 5467.78,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 5,
+          "ok": false,
+          "ms": 5483.23,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 6,
+          "ok": false,
+          "ms": 5483.45,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 7,
+          "ok": false,
+          "ms": 5486.76,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 8,
+          "ok": false,
+          "ms": 5488.75,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 9,
+          "ok": false,
+          "ms": 5493.57,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 10,
+          "ok": false,
+          "ms": 5493.6,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "EOF"
+        },
+        {
+          "index": 11,
+   

@@ -1,0 +1,74 @@
+template N=1 rep 1: ok ok=1 failed=0 p50=275.6ms max=275.6ms
+template N=1 rep 2: ok ok=1 failed=0 p50=229.2ms max=229.2ms
+template N=1 rep 3: ok ok=1 failed=0 p50=201.1ms max=201.1ms
+template N=8 rep 1: ok ok=8 failed=0 p50=1542.6ms max=1611.4ms
+template N=8 rep 2: ok ok=8 failed=0 p50=1662.4ms max=1740.7ms
+template N=8 rep 3: ok ok=8 failed=0 p50=1692.9ms max=1737.0ms
+template N=32 rep 1: DEGRADED ok=19 failed=13 p50=8406.4ms max=16256.7ms
+warning: cleanup drop dbb_t0928234305_n32_r2_0: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_1: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_2: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_3: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_4: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_5: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_6: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_7: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_8: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_9: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_10: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_11: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_12: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_13: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_14: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_15: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_16: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_17: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_18: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_19: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_20: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_21: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_22: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_23: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_24: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_25: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_26: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_27: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_28: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_29: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_30: postgres: FATAL 57P03: the database system is in recovery mode
+warning: cleanup drop dbb_t0928234305_n32_r2_31: postgres: FATAL 57P03: the database system is in recovery mode
+template N=32 rep 2: DEGRADED ok=2 failed=30 p50=4111.1ms max=5363.2ms
+warning: cleanup drop dbb_t0928234305_n32_r3_0: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_1: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_2: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_3: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_4: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_5: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_6: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_7: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_8: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_9: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_10: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_11: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_12: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_13: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_14: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_15: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_16: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_17: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_18: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_19: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_20: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_21: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_22: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_23: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_24: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_25: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_26: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_27: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_28: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_29: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_30: postgres: FATAL 57P03: the database system is not yet accepting connections
+warning: cleanup drop dbb_t0928234305_n32_r3_31: postgres: FATAL 57P03: the database system is not yet accepting connections
+template N=32 rep 3: DEGRADED ok=0 failed=32 p50=0.0ms max=0.0ms
+warning: cleanup drop dbb_t0928234305_tpl: dial tcp 127.0.0.1:55499: connect: connection refused
