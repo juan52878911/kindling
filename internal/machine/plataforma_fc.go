@@ -9,7 +9,11 @@ package machine
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -55,6 +59,34 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 // cueste ~8 MB en vez de 512.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
 	return exec.CommandContext(ctx, "cp", "--sparse=always", src, dst).CombinedOutput()
+}
+
+// clonarDisco copia un volumen para un snapshot o un restore y dice cómo:
+// "reflink" si el sistema de ficheros comparte bloques (XFS con reflink, Btrfs),
+// que es instantáneo y no ocupa nada hasta que las copias divergen; "copy" si
+// hubo que copiar entero, disperso.
+//
+// --reflink=always SIN --sparse: GNU cp rechaza --reflink con cualquier
+// --sparse que no sea el de por defecto, y con --sparse=always el primer
+// intento fallaría siempre y todo acabaría en copia completa sin decirlo. Un
+// reflink conserva los huecos igualmente: comparte las extensiones, no las
+// rellena. antesDeCopiar decide si una copia completa cabe; su error es el que
+// se devuelve.
+func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() error) (string, error) {
+	if _, err := exec.CommandContext(ctx, "cp", "--reflink=always", src, dst).CombinedOutput(); err == nil {
+		return "reflink", nil
+	}
+	_ = os.Remove(dst)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := antesDeCopiar(); err != nil {
+		return "", err
+	}
+	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always", src, dst).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("copying %s: %v: %s", filepath.Base(src), err, strings.TrimSpace(string(out)))
+	}
+	return "copy", nil
 }
 
 // perforarHuecos devuelve al disco las páginas a cero de un volcado de

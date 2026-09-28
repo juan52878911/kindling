@@ -132,7 +132,7 @@ func TestNoSeBorraUnVolumenEnUso(t *testing.T) {
 		Volumes: []api.VolumeAttachment{{Name: "notas", Mount: "/data"}}}
 	m.mu.Unlock()
 
-	err := m.RemoveVolume("notas")
+	err := m.RemoveVolume("notas", false)
 	if err == nil {
 		t.Fatal("borró un volumen en uso")
 	}
@@ -147,7 +147,7 @@ func TestNoSeBorraUnVolumenEnUso(t *testing.T) {
 	m.mu.Lock()
 	m.byID["a"].State = api.StateStopped
 	m.mu.Unlock()
-	if err := m.RemoveVolume("notas"); err != nil {
+	if err := m.RemoveVolume("notas", false); err != nil {
 		t.Errorf("con la máquina parada debería poder borrarse: %v", err)
 	}
 }
@@ -615,7 +615,7 @@ func TestNombresConTravesiaNoTocanElDisco(t *testing.T) {
 	if err := os.WriteFile(base, []byte("base"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.RemoveVolume("../images/min"); err == nil {
+	if err := m.RemoveVolume("../images/min", false); err == nil {
 		t.Error("RemoveVolume aceptó un nombre con ../")
 	}
 	if _, err := m.statVolume("../images/min"); err == nil {

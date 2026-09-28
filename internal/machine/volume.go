@@ -66,12 +66,14 @@ func (m *Manager) CreateVolume(ctx context.Context, name string, sizeMiB int) (*
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	m.priv.EnsureWritable(m.volumesDir())
-	// El VMM corre sin privilegios y tiene que poder ESCRIBIR aquí: un volumen
-	// de solo lectura no serviría de nada.
-	if m.priv.UID > 0 {
-		_ = os.Chown(path, m.priv.UID, -1)
-	}
+	// El VMM corre sin privilegios y tiene que poder ESCRIBIR el fichero: un
+	// volumen de solo lectura no serviría de nada.
+	//
+	// Solo el fichero, y no el directorio entero como antes: el recorrido se
+	// llevaba también volumes/ —que restringirRaiz deja de root— y, desde que
+	// existen, volumes/snapshots/, que tiene que seguir siendo solo de root
+	// para que un VMM comprometido no pueda reescribir el pasado de nadie.
+	m.permisosVolumen(path)
 	return m.statVolume(name)
 }
 
@@ -94,6 +96,7 @@ func (m *Manager) Volumes() []*api.Volume {
 			continue
 		}
 		v.UsedBy = inUse[name].all()
+		v.Snapshots = m.contarSnapshots(name)
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -155,6 +158,13 @@ type reservaVolumen struct {
 	maquina  string
 	nombre   string // el nombre legible, para los mensajes de error
 	soloLect bool
+	// desc sustituye a "<nombre> (starting)" en los mensajes. La usan las
+	// reservas sintéticas de snapshot y restore, que no son una máquina.
+	desc string
+	// sinUso: la reserva solo excluye a otras operaciones de snapshot sobre el
+	// volumen y no cuenta como usuaria (borrar un snapshot no toca el disco
+	// que montan las máquinas).
+	sinUso bool
 }
 
 // volumeUsers da los usuarios de cada volumen, tomando el cerrojo.
@@ -189,10 +199,13 @@ func (m *Manager) volumeUsersLocked() map[string]volumeUse {
 	for nombre, rs := range m.volReservas {
 		u := out[nombre]
 		for _, r := range rs {
-			if _, ya := m.byID[r.maquina]; ya {
+			if _, ya := m.byID[r.maquina]; ya || r.sinUso {
 				continue
 			}
 			quien := r.nombre + " (starting)"
+			if r.desc != "" {
+				quien = r.desc
+			}
 			if r.soloLect {
 				u.readers = append(u.readers, quien)
 			} else {
@@ -263,7 +276,10 @@ func (m *Manager) soltarReservas(id string) {
 //
 // La comprobación no es cortesía: borrar el fichero bajo una microVM que lo
 // tiene montado le corrompe el sistema de ficheros sin avisar.
-func (m *Manager) RemoveVolume(name string) error {
+//
+// Con snapshots se niega salvo conSnapshots: son la única copia de su pasado, y
+// perderlos de paso al borrar el volumen es justo lo que no se puede deshacer.
+func (m *Manager) RemoveVolume(name string, conSnapshots bool) error {
 	// El nombre llega de la URL: sin validarlo, "../images/min" borraba la
 	// imagen base de todas las capas.
 	if !reVolume.MatchString(name) {
@@ -279,15 +295,36 @@ func (m *Manager) RemoveVolume(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if op := m.operacionEnCursoLocked(name); op != "" {
+		return &api.StatusError{Code: http.StatusConflict,
+			Message: fmt.Sprintf("volume %q is %s: try again when it finishes", name, op)}
+	}
 	if users := m.volumeUsersLocked()[name].all(); len(users) > 0 {
 		return fmt.Errorf("volume %q is used by %d machine(s): %s",
 			name, len(users), strings.Join(users, ", "))
 	}
-	if err := os.Remove(m.volumePath(name)); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("volume %q not found", name)
+	if n := m.contarSnapshots(name); n > 0 && !conSnapshots {
+		return &api.StatusError{Code: http.StatusConflict, Message: fmt.Sprintf(
+			"volume %q has %d snapshot(s): remove them first (kling volume rm %s@<snapshot>)\n"+
+				"or remove everything with:  kling volume rm -snapshots %s", name, n, name, name)}
+	}
+	errVol := os.Remove(m.volumePath(name))
+	if errVol != nil && !os.IsNotExist(errVol) {
+		return errVol
+	}
+	sinSnaps := true
+	if conSnapshots {
+		// RemoveAll no sigue enlaces simbólicos, y el nombre ya está validado:
+		// no puede salirse de volumes/snapshots/.
+		if _, err := os.Lstat(m.volSnapsDir(name)); err == nil {
+			sinSnaps = false
+			if err := os.RemoveAll(m.volSnapsDir(name)); err != nil {
+				return err
+			}
 		}
-		return err
+	}
+	if os.IsNotExist(errVol) && sinSnaps {
+		return &api.StatusError{Code: http.StatusNotFound, Message: fmt.Sprintf("volume %q not found", name)}
 	}
 	return nil
 }

@@ -10,7 +10,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -158,6 +160,42 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 // copia normal.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
 	return exec.CommandContext(ctx, "cp", "-c", src, dst).CombinedOutput()
+}
+
+// clonarDisco copia un volumen para un snapshot o un restore y dice cómo. En
+// APFS, `cp -c` clona con clonefile: instantáneo y sin ocupar nada hasta que
+// las copias divergen ("clone"). Fuera de APFS cp caería sin avisar a una copia
+// completa, así que se mira antes el sistema de ficheros y, si no es APFS, se
+// pasa por antesDeCopiar como cualquier copia completa ("copy").
+func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() error) (string, error) {
+	modo, args := "clone", []string{"-c", src, dst}
+	if !esAPFS(filepath.Dir(dst)) {
+		if err := antesDeCopiar(); err != nil {
+			return "", err
+		}
+		modo, args = "copy", []string{src, dst}
+	}
+	if out, err := exec.CommandContext(ctx, "cp", args...).CombinedOutput(); err != nil {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("copying %s: %v: %s", filepath.Base(src), err, strings.TrimSpace(string(out)))
+	}
+	return modo, nil
+}
+
+// esAPFS dice si dir está en un volumen APFS, el único donde clonefile clona.
+func esAPFS(dir string) bool {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return false
+	}
+	var b []byte
+	for _, c := range st.Fstypename {
+		if c == 0 {
+			break
+		}
+		b = append(b, byte(c))
+	}
+	return string(b) == "apfs"
 }
 
 // perforarHuecos no hace nada: el mem.file de kling-vz es el estado que
