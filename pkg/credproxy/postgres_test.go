@@ -79,6 +79,11 @@ type servidorPG struct {
 	// manda justo detrás de la 'S', antes del TLS.
 	ssl     byte
 	inyecta []byte
+	// sinTLS: acepta además un StartupMessage directo, sin SSLRequest (un
+	// servidor sin TLS, como un Docker de pruebas).
+	sinTLS bool
+
+	sslVisto atomic.Bool
 
 	mu        sync.Mutex
 	params    map[string]string
@@ -91,11 +96,17 @@ type servidorPG struct {
 
 func nuevoServidorPG(t *testing.T, modo string) *servidorPG {
 	t.Helper()
+	return nuevoServidorPGNombre(t, modo, pgDominio)
+}
+
+// nuevoServidorPGNombre es nuevoServidorPG con un certificado para nombre.
+func nuevoServidorPGNombre(t *testing.T, modo, nombre string) *servidorPG {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, _ := certPG(t, pgDominio)
+	cert, _ := certPG(t, nombre)
 	s := &servidorPG{t: t, ln: ln, cert: cert, modo: modo, ssl: 'S'}
 	t.Cleanup(func() { ln.Close() })
 	go func() {
@@ -114,20 +125,27 @@ func nuevoServidorPG(t *testing.T, modo string) *servidorPG {
 func (s *servidorPG) atender(raw net.Conn) {
 	defer raw.Close()
 	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
-	code, _, err := leerArranque(raw)
-	if err != nil || code != pgSSLRequest {
-		return
-	}
-	raw.Write(append([]byte{s.ssl}, s.inyecta...))
-	if s.ssl != 'S' {
-		return
-	}
-	c := tls.Server(raw, &tls.Config{Certificates: []tls.Certificate{s.cert}})
-	if err := c.Handshake(); err != nil {
-		return
-	}
-	code, cuerpo, err := leerArranque(c)
+	code, cuerpo, err := leerArranque(raw)
 	if err != nil {
+		return
+	}
+	var c net.Conn = raw
+	switch {
+	case code == pgSSLRequest:
+		s.sslVisto.Store(true)
+		raw.Write(append([]byte{s.ssl}, s.inyecta...))
+		if s.ssl != 'S' {
+			return
+		}
+		tc := tls.Server(raw, &tls.Config{Certificates: []tls.Certificate{s.cert}})
+		if err := tc.Handshake(); err != nil {
+			return
+		}
+		c = tc
+		if code, cuerpo, err = leerArranque(c); err != nil {
+			return
+		}
+	case !s.sinTLS:
 		return
 	}
 	if code == pgCancelRequest {
@@ -191,7 +209,8 @@ func (s *servidorPG) atender(raw net.Conn) {
 	}
 }
 
-func (s *servidorPG) autenticar(c *tls.Conn, br *bufio.Reader) bool {
+func (s *servidorPG) autenticar(c net.Conn, br *bufio.Reader) bool {
+	_, conTLS := c.(*tls.Conn)
 	switch s.modo {
 	case "trust":
 		return true
@@ -219,8 +238,11 @@ func (s *servidorPG) autenticar(c *tls.Conn, br *bufio.Reader) bool {
 	}
 	// SCRAM de servidor.
 	mecs := scramSHA256 + "\x00"
-	if s.modo == "scram-plus" {
+	switch s.modo {
+	case "scram-plus":
 		mecs = scramSHA256Plus + "\x00" + mecs
+	case "solo-plus":
+		mecs = scramSHA256Plus + "\x00"
 	}
 	c.Write(mensajePG('R', append([]byte{0, 0, 0, 10}, mecs+"\x00"...)))
 	tipo, msg, err := leerMensaje(br, 4096)
@@ -234,7 +256,13 @@ func (s *servidorPG) autenticar(c *tls.Conn, br *bufio.Reader) bool {
 	if s.modo == "scram-plus" && (mec != scramSHA256Plus || gs2 != "p=tls-server-end-point,,") {
 		return false
 	}
-	if s.modo != "scram-plus" && (mec != scramSHA256 || gs2 != "y,,") {
+	// "y" con TLS (el cliente sabe de channel binding y el servidor no lo
+	// ofrece); sin TLS no hay nada que atar: "n".
+	gs2Esperado := "n,,"
+	if conTLS {
+		gs2Esperado = "y,,"
+	}
+	if s.modo != "scram-plus" && (mec != scramSHA256 || gs2 != gs2Esperado) {
 		return false
 	}
 	cnonce := desnudo[strings.Index(desnudo, "r=")+2:]

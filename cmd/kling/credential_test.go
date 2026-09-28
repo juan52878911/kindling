@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"os"
 	"path/filepath"
@@ -39,7 +40,7 @@ func TestCredentialFlagsSpec(t *testing.T) {
 	if got := pgConexion(s); !strings.Contains(got, "host=db.example.com user=app dbname=appdb password=$PGPASSWORD") {
 		t.Errorf("pgConexion: %q", got)
 	}
-	if got := pgDestino(s); got != "db.example.com:6432" {
+	if got := pgDestino(s); got != "db.example.com:6432 over verified TLS" {
 		t.Errorf("pgDestino: %q", got)
 	}
 
@@ -49,6 +50,12 @@ func TestCredentialFlagsSpec(t *testing.T) {
 		"http con rol":       {"-domain", "api.example.com", "-env", "K", "-user", "a"},
 		"http con CA":        {"-domain", "api.example.com", "-env", "K", "-ca-file", ca},
 		"tipo raro":          {"-type", "mysql", "-domain", "db.example.com", "-env", "P"},
+		"http con upstream":  {"-domain", "api.example.com", "-env", "K", "-upstream", "127.0.0.1:5432"},
+		"http con nombre":    {"-domain", "api.example.com", "-env", "K", "-tls-server-name", "x.example.com"},
+		"disable sin upstream": {"-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "a",
+			"-upstream-tls", "disable"},
+		"tls raro": {"-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "a",
+			"-upstream", "127.0.0.1:5432", "-upstream-tls", "require"},
 	} {
 		cf, err := parse(args...)
 		if err != nil {
@@ -57,5 +64,53 @@ func TestCredentialFlagsSpec(t *testing.T) {
 		if _, err := cf.spec(); err == nil {
 			t.Errorf("%s: aceptada", nombre)
 		}
+	}
+}
+
+// -upstream, -upstream-tls y -tls-server-name: pasan a la credencial y, con
+// disable hacia algo que no es el loopback, avisan por stderr de que las
+// consultas viajan sin cifrar.
+func TestCredentialFlagsUpstream(t *testing.T) {
+	clave := filepath.Join(t.TempDir(), "clave")
+	if err := os.WriteFile(clave, []byte("pw-real\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var avisos bytes.Buffer
+	antes := credAvisos
+	credAvisos = &avisos
+	t.Cleanup(func() { credAvisos = antes })
+	spec := func(args ...string) string {
+		t.Helper()
+		avisos.Reset()
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		cf := credentialFlags(fs)
+		base := []string{"-f", clave, "-type", "postgres", "-domain", "db.example.com", "-env", "PGPASSWORD", "-user", "app"}
+		if err := fs.Parse(append(base, args...)); err != nil {
+			t.Fatal(err)
+		}
+		s, err := cf.spec()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Upstream + "|" + s.UpstreamTLS + "|" + s.TLSServerName + "|" + pgDestino(s)
+	}
+
+	if got := spec("-upstream", "127.0.0.1:5432", "-upstream-tls", "disable"); !strings.HasPrefix(got, "127.0.0.1:5432|disable||") ||
+		!strings.Contains(got, "without TLS") {
+		t.Errorf("loopback + disable: %q", got)
+	}
+	if avisos.Len() != 0 {
+		t.Errorf("aviso con el loopback: %q", avisos.String())
+	}
+	spec("-upstream", "10.0.0.5:5432", "-upstream-tls", "disable")
+	if !strings.Contains(avisos.String(), "traffic to 10.0.0.5:5432, including query data, is unencrypted") {
+		t.Errorf("sin aviso para la LAN: %q", avisos.String())
+	}
+	if got := spec("-upstream", "db.lan:5432", "-tls-server-name", "pg.internal.example.com"); got !=
+		"db.lan:5432||pg.internal.example.com|db.example.com (upstream db.lan:5432) over TLS verified as pg.internal.example.com" {
+		t.Errorf("upstream + nombre TLS: %q", got)
+	}
+	if avisos.Len() != 0 {
+		t.Errorf("aviso con TLS: %q", avisos.String())
 	}
 }

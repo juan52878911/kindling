@@ -52,6 +52,11 @@ type KlingCredential struct {
 	User        string   `json:"user,omitempty"`
 	Database    string   `json:"database,omitempty"`
 	CAPEM       string   `json:"ca_pem,omitempty"`
+	// Upstream, UpstreamTLS y TLSServerName: ver credproxy.Credential. Un
+	// kling-vz que no anuncia credproxy.CapPostgresUpstream los ignoraría.
+	Upstream      string `json:"upstream,omitempty"`
+	UpstreamTLS   string `json:"upstream_tls,omitempty"`
+	TLSServerName string `json:"tls_server_name,omitempty"`
 }
 
 // doOut es do() leyendo además el cuerpo de la respuesta en out (si no es nil).

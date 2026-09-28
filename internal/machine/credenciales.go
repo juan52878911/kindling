@@ -245,6 +245,7 @@ func validarSpecs(specs []api.CredentialSpec) error {
 			return fmt.Errorf("%w (%s)", err, s.Env)
 		}
 		s.Port = c.Port
+		s.Upstream, s.UpstreamTLS, s.TLSServerName = c.Upstream, c.UpstreamTLS, c.TLSServerName
 	}
 	return nil
 }
@@ -252,7 +253,8 @@ func validarSpecs(specs []api.CredentialSpec) error {
 // credencialDeSpec es la credencial del proxy que describe s, sin marcador.
 func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
-		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, CAPEM: s.CAPEM}
+		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, CAPEM: s.CAPEM,
+		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName}
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se

@@ -181,6 +181,27 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Novedades
 
+- **Postgres en Docker o en la LAN/VPC: upstream fijado por el operador.** `kling machine
+  credential` y `kling template credential` ganan `-upstream host:puerto` (a dónde marca
+  el proxy en vez de `dominio:puerto`; IP o nombre, loopback y privadas permitidas),
+  `-upstream-tls verify-full|disable` y `-tls-server-name` (el nombre del certificado si
+  no es el dominio). Sin ellas nada cambia: IPv4 públicas y TLS verificado. Con
+  `-upstream`, nunca se marca a `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`,
+  `fe80::/10`, `fd00:ec2::254` ni a la red de kindling (`172.16.0.0/30`,
+  `172.30.0.0/16`), tampoco si un nombre resuelve a alguna de ellas (en macOS, solo IP o
+  `localhost`: `kling-vz` confinado no llega al resolver del Mac). `disable` exige
+  `-upstream` y solo admite SCRAM-SHA-256 (ni `-PLUS`, ni contraseña en claro, ni md5, ni
+  trust): la contraseña no cruza la red, las consultas sí (la CLI avisa si el upstream no
+  es el loopback). La cancelación va al mismo upstream con el mismo modo, y la auditoría
+  gana `upstream`. En Linux el proxy marca desde el netns del host; en macOS, `kling-vz`
+  desde la pila del Mac (su `127.0.0.1` es donde publica Docker Desktop) y anuncia
+  `postgres-upstream` en `credential_kinds`: sin él, el daemon no le da credenciales con
+  estos campos (hay que recompilar `kling-vz`). API: `upstream`, `upstream_tls` y
+  `tls_server_name` en `CredentialSpec` (omitempty; el almacén cifrado de antes se lee
+  igual). Guía nueva: [docs/postgres.md](docs/postgres.md). e2e: `KLING_E2E_PG_UPSTREAM`,
+  `KLING_E2E_PG_TLS` y `KLING_E2E_PG_SERVERNAME` en la 7d de `scripts/90-e2e.sh` y en la
+  nueva 6e de `scripts/92-e2e-mac.sh`; `pglab`: `KLING_PGLAB_UPSTREAM` y
+  `KLING_PGLAB_TLS=disable`.
 - **Proxy de credenciales de Postgres.** `kling machine credential <ref> -type postgres
   -domain db.ejemplo.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env
   PGPASSWORD` (y lo mismo en `kling template credential`; la clave, como siempre, por

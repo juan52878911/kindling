@@ -124,6 +124,8 @@ func servirVZFalso(sock, logPath string) {
 				Credentials []struct {
 					Domain, Secret, Kind string
 					Allow                []string
+					Upstream             string
+					UpstreamTLS          string `json:"upstream_tls"`
 				} `json:"credentials"`
 			}
 			_ = json.Unmarshal(body, &c)
@@ -138,6 +140,12 @@ func servirVZFalso(sock, logPath string) {
 				}
 				if cr.Kind != "" {
 					linea += "+kind=" + cr.Kind
+				}
+				if cr.Upstream != "" {
+					linea += "+upstream=" + cr.Upstream
+				}
+				if cr.UpstreamTLS != "" {
+					linea += "+upstream_tls=" + cr.UpstreamTLS
 				}
 			}
 		case "/kling/forwards":
@@ -735,6 +743,66 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 			}
 			if err != nil || i < 0 || !strings.Contains(ls[i], "+kind=postgres") {
 				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+		})
+	}
+}
+
+// Una credencial Postgres con upstream fijado solo va a un kling-vz que
+// anuncie "postgres-upstream": uno que no lo conozca marcaría el dominio en su
+// lugar. Con la capacidad, upstream y modo TLS viajan.
+func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
+	for _, kinds := range []string{"http,postgres", "http,postgres,postgres-upstream"} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			id := "aa11bb22cc33dd66"
+			dir := m.dir(id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet"}
+			base := filepath.Join(m.root, "base.ext4")
+			overlay := filepath.Join(dir, "overlay.ext4")
+			for _, f := range []string{base, overlay} {
+				if err := os.WriteFile(f, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false)
+			defer matarVMM(pid)
+			if err != nil {
+				t.Fatalf("boot: %v", err)
+			}
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app",
+					Upstream: "127.0.0.1:5432", UpstreamTLS: credproxy.UpstreamTLSDisable},
+			}, "")
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/credentials")
+			if !strings.Contains(kinds, credproxy.CapPostgresUpstream) {
+				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") || i >= 0 {
+					t.Fatalf("un kling-vz sin postgres-upstream recibió la credencial: err=%v llamadas=%q", err, ls)
+				}
+				return
+			}
+			if err != nil || i < 0 || !strings.Contains(ls[i], "+upstream=127.0.0.1:5432+upstream_tls=disable") {
+				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+			// Un upstream con nombre no se le da: el kling-vz confinado no
+			// llega al resolver del Mac.
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432"},
+			}, "")
+			if err == nil || !strings.Contains(err.Error(), "must be an IP address or localhost") {
+				t.Fatalf("upstream con nombre en macOS: %v", err)
+			}
+			if n := len(llamadas(t, logPath)); n != len(ls) {
+				t.Errorf("con un upstream con nombre se llamó a kling-vz: %q", llamadas(t, logPath)[len(ls):])
 			}
 		})
 	}

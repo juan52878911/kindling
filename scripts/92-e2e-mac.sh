@@ -19,7 +19,8 @@
 # Variables: KLING (binario; kling-vz junto a él o KLING_VMM), ROOT (por defecto
 # una ruta a propósito más larga que sun_path), SOCK, IMG (imagen con agente de
 # invitado, por defecto toolchain), BRIDGE_IMG (imagen con puente MCP en 8080,
-# por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10).
+# por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10),
+# y las KLING_E2E_PG_* de la sección 6e (proxy de Postgres; sin ellas se salta).
 #
 # La salida va en inglés, como el resto de lo que ve el usuario. Un fallo no
 # aborta el resto: saber que fallan tres cosas relacionadas vale más que
@@ -520,6 +521,122 @@ if k run -name "$CR-none" -image "$IMG" -mem "$MEM" >/dev/null 2>&1; then
   contiene "$out" "allowlist" && ok "without -egress allowlist, credential is refused and says why" \
     || bad "credential without allowlist" "a refusal mentioning allowlist" "$out"
   k rm -f "$CR-none" >/dev/null 2>&1
+fi
+
+# ── 6e. proxy de credenciales de Postgres ────────────────────────────────────
+# Lo mismo que la sección 7d de 90-e2e.sh, en el Mac, y con las mismas
+# variables. El proxy lo sirve kling-vz y marca desde la pila de red del Mac:
+# un -upstream 127.0.0.1:PUERTO es el loopback del Mac, donde Docker Desktop
+# publica. Sin KLING_E2E_PG_URL se salta (y lo dice). Un Docker sin TLS:
+#
+#   docker run -d --name pge2e -p 127.0.0.1:55432:5432 -e POSTGRES_USER=kling \
+#     -e POSTGRES_PASSWORD=clave-e2e -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:17
+#   KLING_E2E_PG_URL=postgres://kling:clave-e2e@pg.kindling.test:5432/kling \
+#   KLING_E2E_PG_UPSTREAM=127.0.0.1:55432 KLING_E2E_PG_TLS=disable ./scripts/92-e2e-mac.sh
+#
+# KLING_E2E_PG_CA y KLING_E2E_PG_SERVERNAME, como en 90-e2e.sh, para un
+# servidor con TLS (verify-full).
+step "6e. postgres credential proxy"
+if [ -z "${KLING_E2E_PG_URL:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_PG_URL is not set (postgres://role:password@host:port/db): no server to test\n"
+else
+  PGC="$P-pgcred"
+  read -r PG_HOST PG_PORT PG_USER PG_DB < <(python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1])
+print(u.hostname, u.port or 5432, urllib.parse.unquote(u.username or ""), (u.path or "/").lstrip("/") or urllib.parse.unquote(u.username or ""))
+' "$KLING_E2E_PG_URL")
+  PG_PASS=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).password or ""))' "$KLING_E2E_PG_URL")
+  pg_args=()
+  PG_MODO="over verified TLS"; PG_AUTH='"auth":"scram-sha-256'
+  [ -n "${KLING_E2E_PG_CA:-}" ] && pg_args+=(-ca-file "$KLING_E2E_PG_CA")
+  if [ -n "${KLING_E2E_PG_SERVERNAME:-}" ]; then
+    pg_args+=(-tls-server-name "$KLING_E2E_PG_SERVERNAME"); PG_MODO="over TLS verified as"
+  fi
+  [ -n "${KLING_E2E_PG_UPSTREAM:-}" ] && pg_args+=(-upstream "$KLING_E2E_PG_UPSTREAM")
+  if [ -n "${KLING_E2E_PG_TLS:-}" ]; then
+    pg_args+=(-upstream-tls "$KLING_E2E_PG_TLS")
+    [ "$KLING_E2E_PG_TLS" = disable ] && { PG_MODO="without TLS"; PG_AUTH='"auth":"scram-sha-256"'; }
+  fi
+  # Cliente mínimo del protocolo v3 dentro del invitado (la imagen no trae
+  # psql): el marcador de MMDS como contraseña, una consulta, y un marcador
+  # falso que debe dar 28P01.
+  SONDA_PG='
+import json, socket, struct, sys, urllib.request
+host, port, user, db, real = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store)["env"]["PGPASSWORD"]
+print("MMDS", "KEY" if real in store else "PLACEHOLDER")
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def conectar(pw):
+    s = socket.create_connection((host, port), timeout=20)
+    s.sendall(struct.pack("!II", 8, 80877103))
+    ssl = leer(s, 1).decode()
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, ssl, "NOPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(pw)) + pw.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E":
+            code = [f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C"]
+            return s, ssl, "ERROR " + (code[0] if code else "?")
+        if t == b"Z": return s, ssl, "READY"
+s, ssl, r = conectar(ph)
+print("SSL", ssl)
+print("LOGIN", r)
+if r == "READY":
+    q = b"SELECT current_user\0"
+    s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+    fila = ""
+    while True:
+        t, b = msg(s)
+        if t == b"D": fila = b[6:].decode(errors="replace")
+        if t in (b"Z", b"E"): break
+    print("ROW", fila)
+s.close()
+print("FAKE", conectar("kling-cred-00000000000000000000")[2])
+'
+  if k run -name "$PGC" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -allow example.org >/dev/null 2>&1; then
+    out=$(printf '%s' "$PG_PASS" | k machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -database "$PG_DB" ${pg_args[@]+"${pg_args[@]}"} -env PGPASSWORD 2>&1)
+    contiene "$out" "$PG_MODO" && ok "machine credential -type postgres: the password stays in kling-vz ($PG_MODO)" \
+      || bad "machine credential -type postgres" "$PG_MODO" "$out"
+    out=$(k exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
+    contiene "$out" "MMDS PLACEHOLDER" && ok "the guest only sees the placeholder" || bad "MMDS (postgres)" "MMDS PLACEHOLDER" "$out"
+    contiene "$out" "SSL N" && ok "the guest leg is plain (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
+    contiene "$out" "LOGIN READY" && contiene "$out" "ROW $PG_USER" \
+      && ok "with the placeholder the guest logs in and queries as $PG_USER" || bad "login through the proxy" "LOGIN READY and ROW $PG_USER" "$out"
+    contiene "$out" "FAKE ERROR 28P01" && ok "a fake placeholder: 28P01 without reaching the server" \
+      || bad "fake placeholder" "FAKE ERROR 28P01" "$out"
+    out=$(k machine audit "$PGC" -tail 0 -json 2>&1)
+    contiene "$out" '"kind":"postgres"' && contiene "$out" "$PG_AUTH" \
+      && ok "audit: one line per connection, authenticated with SCRAM" || bad "audit postgres" "kind postgres with $PG_AUTH" "$out"
+    if [ -n "${KLING_E2E_PG_UPSTREAM:-}" ]; then
+      contiene "$out" '"upstream":"' && ok "audit: the line names the upstream the proxy dialed" \
+        || bad "audit postgres upstream" '"upstream":"..."' "$out"
+    fi
+    if contiene "$out" "$PG_PASS" || contiene "$out" "kling-cred-" || contiene "$out" "current_user"; then
+      bad "audit postgres without secrets" "no password, placeholder or SQL" "$out"
+    else
+      ok "audit: neither the password, the placeholder nor the SQL"
+    fi
+    k rm -f "$PGC" >/dev/null 2>&1
+  else
+    bad "run -egress allowlist (postgres)" "running" "failed"
+  fi
 fi
 
 # ── 6d. snapshots de volumen ─────────────────────────────────────────────────
