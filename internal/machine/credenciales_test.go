@@ -513,3 +513,64 @@ func TestCredencialesDePlantillaConAllow(t *testing.T) {
 		t.Errorf("la instancia recibió %+v", (*got)[0][0])
 	}
 }
+
+// Una credencial Postgres viaja de la API al proxy y al almacén con su tipo,
+// puerto por defecto, rol y base; lo que no vale para Postgres se rechaza sin
+// tocar nada; rotar la sustituye entera con el mismo marcador.
+func TestSetCredentialsPostgres(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	got := capturarRegistro(t)
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest("m1")
+	m.mu.Lock()
+	mc.Egress = string(knet.EgressAllowlist)
+	m.socket["m1"] = falso.Sock
+	m.mu.Unlock()
+	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	pg := func(mod func(*api.CredentialSpec)) api.CredentialSpec {
+		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real", Type: "postgres", User: "app"}
+		if mod != nil {
+			mod(&s)
+		}
+		return s
+	}
+	for nombre, mal := range map[string]func(*api.CredentialSpec){
+		"sin rol":      func(s *api.CredentialSpec) { s.User = "" },
+		"no ASCII":     func(s *api.CredentialSpec) { s.Secret = "contraseña" },
+		"con allow":    func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
+		"tipo raro":    func(s *api.CredentialSpec) { s.Type = "mysql" },
+		"CA basura":    func(s *api.CredentialSpec) { s.CAPEM = "x" },
+		"http con rol": func(s *api.CredentialSpec) { s.Type = "" },
+	} {
+		if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(mal)}); err == nil {
+			t.Errorf("%s: aceptada", nombre)
+		}
+	}
+	if len(*got) != 0 {
+		t.Fatalf("un rechazo no debe llegar al proxy: %+v", *got)
+	}
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(nil)}); err != nil {
+		t.Fatal(err)
+	}
+	c := (*got)[0][0]
+	if c.Kind != credproxy.KindPostgres || c.Port != 5432 || c.User != "app" || c.Domain != "db.example.com" || c.Secret != "pw-real" {
+		t.Fatalf("al proxy llegó %+v", c)
+	}
+	back, err := m.cargarCredenciales("m1")
+	if err != nil || back[0].Kind != credproxy.KindPostgres || back[0].User != "app" || back[0].Port != 5432 {
+		t.Fatalf("almacén: %+v, %v", back, err)
+	}
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(func(s *api.CredentialSpec) {
+		s.User, s.Database, s.Port, s.Secret = "ro", "appdb", 6432, "pw-rotada"
+	})}); err != nil {
+		t.Fatal(err)
+	}
+	r := (*got)[1][0]
+	if r.User != "ro" || r.Database != "appdb" || r.Port != 6432 || r.Secret != "pw-rotada" || r.Placeholder != c.Placeholder {
+		t.Errorf("rotación: %+v", r)
+	}
+}

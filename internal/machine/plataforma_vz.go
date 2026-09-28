@@ -8,11 +8,13 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -98,11 +100,27 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	if c == nil {
 		return nil
 	}
+	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
+	// trataría una credencial Postgres como HTTP: se pregunta antes qué
+	// tipos entiende y, si no dice postgres, no se le da ninguna.
+	for _, cr := range creds {
+		if cr.Kind == credproxy.KindPostgres {
+			info, err := c.KlingInfo(ctx)
+			if err != nil {
+				return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+			}
+			if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
+				return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+			}
+			break
+		}
+	}
 	out := make([]fc.KlingCredential, 0, len(creds))
 	for _, cr := range creds {
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
+			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, CAPEM: cr.CAPEM,
 		})
 	}
 	if err := c.SetKlingCredentials(ctx, out); err != nil {
