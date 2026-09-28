@@ -229,6 +229,9 @@ SQL
     dest="/var/lib/dbgolden/in/$(printf '%03d' "$n").sql"
     say "aplicando $(basename "$f")"
     quiet "${K[@]}" cp "$f" "$m:$dest"
+    # kling cp conserva el modo del host (0600 bajo nuestro umask) y el dueño root:
+    # postgres no lo podría leer. Migraciones y seed no son secretos.
+    quiet "${K[@]}" exec "$m" -- chmod 644 "$dest"
     quiet "${K[@]}" exec -timeout 30m "$m" -- su -s /bin/sh postgres -c \
       "$who psql -X -q -v ON_ERROR_STOP=1 -d $db -f $dest"
   done
