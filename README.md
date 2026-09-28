@@ -658,6 +658,19 @@ filesystem is left inconsistent and with nothing to replay; without the second, 
 exactly what was written last. Every boot is preceded by an `e2fsck -p`, which on a healthy
 volume costs milliseconds.
 
+### Cloning a volume
+
+```sh
+kling volume clone notes notes-test      # milliseconds, whatever the size
+```
+
+On XFS, btrfs (Linux) or APFS (macOS) the clone copies nothing: both volumes share blocks
+until one of them writes. On ext4 there is no such thing, and `kling` says so instead of
+quietly copying gigabytes; `-copy` makes the full copy when that is what you want. A volume
+mounted read-write by a live microVM is refused — it would be cloned half-written. `kling
+status -v` shows whether this host can clone, directory by directory: the daemon tests it
+for real rather than guessing from the filesystem type.
+
 ## A shared package library
 
 That is what makes it possible not to duplicate the same dependencies in every image:

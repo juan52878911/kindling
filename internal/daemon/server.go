@@ -34,7 +34,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "volume-clone"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -222,6 +222,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /volumes", s.handleCreateVolume)
 	mux.HandleFunc("DELETE /volumes/{name}", s.handleRemoveVolume)
 	mux.HandleFunc("POST /volumes/{name}/populate", s.handlePopulateVolume)
+	mux.HandleFunc("POST /volumes/{name}/clone", s.handleCloneVolume)
 	mux.HandleFunc("GET /images/{name}/recipe", s.handleImageRecipe)
 	mux.HandleFunc("GET /images/{name}/files", s.handleGetImageFile)
 	mux.HandleFunc("PUT /images/{name}/files", s.handlePutImageFile)
@@ -465,6 +466,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Backend:      s.mgr.Backend(),
 		Arch:         runtime.GOARCH,
 		ShareRoots:   s.mgr.ShareRoots(),
+		Clone:        s.mgr.CloneInfo(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado

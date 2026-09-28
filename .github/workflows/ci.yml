@@ -102,6 +102,48 @@ jobs:
       - run: go build ./... ./ext/mcp/... ./ext/sandbox/...
       - run: go vet ./ext/mcp/... ./ext/sandbox/...
 
+  # El clon de volúmenes (reflink) no se puede probar sobre el ext4 del runner:
+  # ahí solo se ejercita el rechazo. Este job monta un XFS y un btrfs en loop y
+  # corre los tests de clonado CON TMPDIR dentro, para que el FICLONE sea de
+  # verdad y no el doble de los tests. El `-v | grep` exige que el clon real
+  # haya ocurrido: un test que pasa porque el sistema de ficheros "no clona"
+  # aquí sería un falso verde.
+  clon-reflink:
+    name: clon real (${{ matrix.fs }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [xfs, btrfs]
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: montar ${{ matrix.fs }} en loop
+        run: |
+          sudo apt-get install -y -qq xfsprogs btrfs-progs >/dev/null
+          truncate -s 1G "$RUNNER_TEMP/fs.img"
+          if [ "${{ matrix.fs }}" = xfs ]; then
+            mkfs.xfs -q -m reflink=1 "$RUNNER_TEMP/fs.img"
+          else
+            mkfs.btrfs -q "$RUNNER_TEMP/fs.img"
+          fi
+          sudo mkdir -p /mnt/clon
+          sudo mount -o loop "$RUNNER_TEMP/fs.img" /mnt/clon
+          sudo chown "$(id -u):$(id -g)" /mnt/clon
+      - name: tests de clonado sobre ${{ matrix.fs }}
+        run: |
+          set -o pipefail
+          TMPDIR=/mnt/clon go test -count=1 -v -run 'Clon|Clone|Sonda' ./internal/machine/ ./internal/daemon/ | tee clon.log
+          if grep -q 'no clona' clon.log; then echo "el clon real no ocurrió" >&2; exit 1; fi
+          grep -q 'clon real con reflink' clon.log
+          grep -q 'clona con FICLONE' clon.log
+
   # kling-vz es un módulo aparte con cgo: `./...` en la raíz no entra en vz/, y
   # solo compila de verdad en macOS. Sus tests no arrancan ninguna VM (la VM es
   # una interfaz con un doble), así que valen en un runner sin virtualización.
@@ -126,3 +168,22 @@ jobs:
       # lleve es parte del contrato del binario.
       - run: codesign -d --entitlements - bin/kling-vz 2>&1 | grep -q com.apple.security.virtualization
       - run: bin/kling-vz --version
+
+  # El clon en macOS es clonefile de APFS. El disco del runner es APFS, así que
+  # aquí el clon es de verdad.
+  clon-apfs:
+    name: clon real (apfs)
+    runs-on: macos-14
+    env:
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - run: |
+          set -o pipefail
+          go test -count=1 -v -run 'Clon|Clone|Sonda' ./internal/machine/ ./internal/daemon/ | tee clon.log
+          grep -q 'clon real con clonefile' clon.log

@@ -8,6 +8,28 @@ release son compatibles entre sí. Las novedades de kindling-mcp hasta v0.4.0 y 
 kindling-sandbox hasta v0.2.2 están en [`ext/mcp/CHANGELOG.md`](ext/mcp/CHANGELOG.md)
 y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
+## Sin publicar
+
+### Novedades
+
+- **`kling volume clone <origen> <destino>`: clonar un volumen en milisegundos.** Con
+  reflink (XFS, btrfs, bcachefs, ZFS con block cloning) o `clonefile` (APFS) el clon no
+  copia datos: comparte bloques con el origen hasta que uno de los dos escribe, así que
+  cuesta lo mismo con 1 GiB que con 100 GiB. Es la primera pieza para ramificar bases de
+  datos. En ext4 no hay clon posible y el daemon se niega explicando por qué; `-copy`
+  hace entonces una copia completa, que nunca se hace sin pedirla. Un volumen montado en
+  escritura por una microVM viva no se clona (saldría a medio escribir). API:
+  `POST /volumes/{name}/clone`, capacidad `volume-clone`.
+- **El daemon averigua en qué sistemas de ficheros vive, y lo prueba.** `GET /info` trae
+  `clone`: el daemon clona de verdad un fichero de prueba desde `volumes/` a `volumes/`,
+  `machines/`, `snapshots/` y `jails/`, y dice para cada uno el sistema de ficheros y si
+  funcionó o por qué no (`operation not supported`, `invalid cross-device link`). No se
+  deduce de la tabla de tipos porque no basta: un XFS sin `reflink=1`, un ZFS sin block
+  cloning o un directorio montado desde otro disco dicen "no" igual que un ext4. `kling
+  status -v` lo resume en una línea.
+- CI: el clon se prueba sobre XFS y btrfs montados en loop y sobre APFS en macOS, no solo
+  el rechazo en el ext4 del runner.
+
 ## v0.16.0 — 2026-09-27
 
 Cierra lo que la auditoría del núcleo dejó abierto tras v0.15.0, y el tope de CPU llega a macOS.

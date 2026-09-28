@@ -123,7 +123,48 @@ permisos `0600` porque el spec puede llevar secretos.
 | `GET /volumes` | lista |
 | `POST /volumes` | crea (`name`, `size_mib`) |
 | `POST /volumes/{name}/populate` | instala paquetes dentro con una microVM de un solo uso |
+| `POST /volumes/{name}/clone` | lo clona en uno nuevo (`to`, `copy`); capacidad `volume-clone` |
 | `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no) |
+
+#### `POST /volumes/{name}/clone`
+
+```json
+{"to": "notas-prueba", "copy": false}
+```
+
+Crea `to` como **clon** de `{name}`: reflink (`FICLONE`) en Linux, `clonefile`
+en macOS. No copia datos: los dos comparten bloques hasta que uno escribe, y
+cuesta milisegundos sea cual sea el tamaño. Contesta `CloneVolumeResult`:
+
+```json
+{"volume": {"name": "notas-prueba", "size_bytes": 2147483648, "used_bytes": 4194304},
+ "method": "reflink", "filesystem": "xfs", "elapsed_ms": 2}
+```
+
+- **Sin reflink** (ext4, XFS formateado sin `reflink=1`, ZFS sin block cloning,
+  `volumes/` en otro disco): **409** que lo explica. Con `"copy": true` hace una
+  copia completa dispersa (`method: "copy"`), que tarda lo que tarde. Nunca
+  copia sin que se pida.
+- **Origen con un escritor vivo: 409.** Un ext4 montado en escritura se clonaría
+  a medio escribir. Los lectores no molestan. Mientras dura el clon, el origen no
+  se puede montar en escritura ni borrar.
+- **Destino que ya existe: 409.** Nombre inválido u origen inexistente: 400.
+- `used_bytes` cuenta los bloques compartidos como propios: un clon recién hecho
+  parece ocupar lo mismo que su origen aunque no haya costado nada.
+
+`GET /info` trae en `clone` una **sonda real**: el daemon clona un fichero de
+prueba desde `volumes/` a cada uno de `volumes/`, `machines/`, `snapshots/` y
+`jails/` (los que existan) y dice, para cada uno, el sistema de ficheros y si
+el clon salió (`reflink`) o por qué no (`error`). No se deduce del tipo de
+sistema de ficheros: se prueba, porque un mount lo cambia sin reiniciar nada.
+Vale un minuto.
+
+```json
+"clone": {"method": "reflink", "dirs": [
+  {"dir": "volumes",  "filesystem": "xfs", "reflink": true},
+  {"dir": "machines", "filesystem": "xfs", "reflink": true},
+  {"dir": "snapshots","filesystem": "ext4","reflink": false, "error": "invalid cross-device link"}]}
+```
 
 ### `POST /machines/{ref}/pause`
 

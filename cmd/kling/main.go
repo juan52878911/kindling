@@ -1016,6 +1016,33 @@ func writeInfo(c *api.Client, i *api.Info) {
 			fmt.Printf("at rest:      NOT encrypted: snapshots hold guest memory in clear; see docs/cifrado.md\n")
 		}
 	}
+	if i.Clone != nil {
+		fmt.Printf("clone:        %s\n", cloneSummary(i.Clone))
+	}
+}
+
+// cloneSummary resume la sonda de clonado en una línea: con qué se clona y
+// dónde, o por qué no.
+//
+//	reflink · volumes xfs ✓ · machines xfs ✓ · snapshots xfs ✓
+//	none (full copies only) · volumes ext4 ✗ operation not supported
+func cloneSummary(c *api.CloneInfo) string {
+	head := c.Method
+	if head == "" {
+		head = "none (full copies only; XFS or btrfs clone instantly)"
+	}
+	parts := []string{head}
+	for _, d := range c.Dirs {
+		mark := "✓"
+		if !d.Reflink {
+			mark = "✗"
+			if d.Error != "" {
+				mark += " " + d.Error
+			}
+		}
+		parts = append(parts, strings.TrimSpace(d.Dir+" "+d.Filesystem)+" "+mark)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // cmdResize es `kling machine resize <ref> -mem N`: sube o baja la memoria de

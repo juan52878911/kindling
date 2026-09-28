@@ -666,6 +666,19 @@ el sistema de ficheros queda inconsistente y sin nada que reproducir; sin lo seg
 pierdes justo lo último escrito. Cada arranque va precedido de un `e2fsck -p`, que en un
 volumen sano cuesta milisegundos.
 
+### Clonar un volumen
+
+```sh
+kling volume clone notas notas-prueba    # milisegundos, sea cual sea el tamaño
+```
+
+En XFS, btrfs (Linux) o APFS (macOS) el clon no copia nada: los dos volúmenes comparten
+bloques hasta que uno escribe. En ext4 eso no existe, y `kling` lo dice en vez de copiar
+gigas a escondidas; `-copy` hace la copia completa cuando es lo que quieres. Un volumen
+montado en escritura por una microVM viva se rechaza: se clonaría a medio escribir. `kling
+status -v` dice si este host puede clonar, directorio por directorio: el daemon lo prueba de
+verdad en vez de deducirlo del tipo de sistema de ficheros.
+
 ## Una biblioteca de paquetes compartida
 
 Es lo que permite no duplicar las mismas dependencias en cada imagen:

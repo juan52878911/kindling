@@ -357,6 +357,65 @@ type CreateVolumeRequest struct {
 	SizeMiB int    `json:"size_mib,omitempty"`
 }
 
+// CloneVolumeRequest clona un volumen en otro nuevo (POST /volumes/{name}/clone).
+type CloneVolumeRequest struct {
+	// To es el nombre del volumen nuevo. No puede existir.
+	To string `json:"to"`
+	// Copy permite caer a una copia completa si el sistema de ficheros del
+	// host no sabe clonar (ext4). Sin él, un host sin reflink contesta 409:
+	// una copia de 50 GiB no es lo mismo que un clon de milisegundos, y quien
+	// la pide tiene que saberlo.
+	Copy bool `json:"copy,omitempty"`
+}
+
+// CloneVolumeResult es lo que salió del clon.
+type CloneVolumeResult struct {
+	Volume *Volume `json:"volume"`
+	// Method es cómo se hizo: CloneReflink, CloneClonefile o CloneCopy.
+	Method string `json:"method"`
+	// Filesystem es el sistema de ficheros de <root>/volumes (xfs, btrfs,
+	// ext4, apfs…), para que un 409 o una copia lenta se entiendan.
+	Filesystem string `json:"filesystem,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+}
+
+// Métodos de clonado de un disco.
+const (
+	// CloneReflink: FICLONE de Linux (XFS con reflink, btrfs, bcachefs, ZFS
+	// con block cloning). Instantáneo; los bloques se comparten hasta que uno
+	// de los dos escribe.
+	CloneReflink = "reflink"
+	// CloneClonefile: clonefile(2) de APFS en macOS. Lo mismo que reflink.
+	CloneClonefile = "clonefile"
+	// CloneCopy: copia completa (dispersa). Cuesta tiempo y disco
+	// proporcionales al tamaño.
+	CloneCopy = "copy"
+)
+
+// CloneInfo dice, directorio por directorio, si el daemon puede clonar discos
+// desde <root>/volumes. Es una sonda real (un clon de verdad de un fichero de
+// prueba), no una deducción del tipo de sistema de ficheros: ZFS sin block
+// cloning, un XFS formateado sin reflink o un directorio montado desde otro
+// disco dan el mismo "no" que un ext4, y solo probándolo se sabe.
+type CloneInfo struct {
+	// Method es el método que usaría un clon dentro de volumes/, o "" si
+	// ninguno: entonces solo cabe la copia completa.
+	Method string     `json:"method,omitempty"`
+	Dirs   []CloneDir `json:"dirs,omitempty"`
+}
+
+// CloneDir es el resultado de la sonda para un directorio bajo <root>.
+type CloneDir struct {
+	// Dir es el nombre bajo <root>: volumes, machines, snapshots, jails.
+	Dir        string `json:"dir"`
+	Filesystem string `json:"filesystem,omitempty"`
+	// Reflink: un fichero de volumes/ se puede clonar AQUÍ. Exige el mismo
+	// sistema de ficheros que volumes/ y que ese sistema sepa clonar.
+	Reflink bool `json:"reflink"`
+	// Error es por qué no, cuando no (EOPNOTSUPP, EXDEV…).
+	Error string `json:"error,omitempty"`
+}
+
 // Snapshot es una microVM congelada y reutilizable: el artefacto del que se
 // instancian N máquinas.
 //
@@ -554,6 +613,9 @@ type Info struct {
 	// ShareRoots son los directorios del host bajo los que se pueden compartir
 	// carpetas en vivo (daemon.share_roots). Vacío = ninguno.
 	ShareRoots []string `json:"share_roots,omitempty"`
+	// Clone es la sonda de clonado de discos (ver CloneInfo). nil = daemon
+	// anterior a "volume-clone".
+	Clone *CloneInfo `json:"clone,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

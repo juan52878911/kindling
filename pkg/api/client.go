@@ -173,6 +173,13 @@ func (c *Client) PopulateVolume(ctx context.Context, r PopulateRequest) (*Popula
 	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+r.Volume+"/populate", r, &res)
 }
 
+// CloneVolume clona un volumen. Va por el cliente largo: con reflink son
+// milisegundos, pero con Copy puede ser una copia de gigas.
+func (c *Client) CloneVolume(ctx context.Context, name string, r CloneVolumeRequest) (*CloneVolumeResult, error) {
+	var res CloneVolumeResult
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+name+"/clone", r, &res)
+}
+
 func (c *Client) RemoveVolume(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/volumes/"+name, nil, nil)
 }

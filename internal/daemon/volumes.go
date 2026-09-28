@@ -2,7 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"os"
+
+	"github.com/juan52878911/kindling/internal/machine"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -26,6 +30,29 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) handleCloneVolume(w http.ResponseWriter, r *http.Request) {
+	var req api.CloneVolumeRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	// Con reflink son milisegundos. Con copia puede ser mucho, y cortarla a
+	// medias no deja nada: CloneVolume construye en .tmp y lo borra si falla.
+	res, err := s.mgr.CloneVolume(r.Context(), r.PathValue("name"), req.To, req.Copy)
+	if err != nil {
+		// 409: el host no sabe clonar, o el volumen está en uso. Las dos
+		// cosas son estado, no una petición mal formada.
+		code := http.StatusBadRequest
+		if errors.Is(err, machine.ErrSinClon) || errors.Is(err, machine.ErrVolumenEnUso) ||
+			errors.Is(err, os.ErrExist) {
+			code = http.StatusConflict
+		}
+		fail(w, code, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleRemoveVolume(w http.ResponseWriter, r *http.Request) {

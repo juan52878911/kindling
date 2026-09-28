@@ -16,7 +16,7 @@ func TestFishCompletion(t *testing.T) {
 		"complete -c kling -f",
 		"complete -c kling -n __fish_use_subcommand -a \"",
 		"__fish_seen_subcommand_from template' -a \"ls inspect rm\"",
-		"__fish_seen_subcommand_from volume' -a \"create ls rm populate\"",
+		"__fish_seen_subcommand_from volume' -a \"create ls rm populate clone\"",
 		"__fish_seen_subcommand_from ai' -a \"up serve ls test generate eval calibrate reload prime review feedback retrain rollback model chispa\"",
 		"__fish_seen_subcommand_from completion' -a \"bash zsh fish install\"",
 		"(kling ps -q 2>/dev/null)",

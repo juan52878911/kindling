@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -18,9 +20,10 @@ import (
 //	kling volume ls
 //	kling volume rm notas
 //	kling volume populate libs -- npm install --prefix /data lodash
+//	kling volume clone notas notas-prueba
 func cmdVolume(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling volume [create|ls|rm]")
+		return fmt.Errorf("usage: kling volume [create|ls|rm|populate|clone]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -32,8 +35,10 @@ func cmdVolume(args []string) error {
 		return volumeRemove(rest)
 	case "populate", "install":
 		return volumePopulate(rest)
+	case "clone", "cp":
+		return volumeClone(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use create, ls, rm, or populate", sub)
+		return fmt.Errorf("unknown subcommand %q: use create, ls, rm, populate, or clone", sub)
 	}
 }
 
@@ -105,6 +110,63 @@ func volumeList(args []string) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", v.Name, human(v.SizeBytes), human(v.UsedBytes), users)
 	}
 	return tw.Flush()
+}
+
+// volumeClone es `kling volume clone <origen> <destino>`.
+//
+// Con reflink (XFS, btrfs) o clonefile (APFS) el clon es instantáneo y no
+// ocupa nada hasta que uno de los dos escribe. Sin él, el daemon se niega y
+// explica por qué, salvo con -copy, que copia entero: el usuario tiene que
+// elegir esperar, no descubrirlo.
+func volumeClone(args []string) error {
+	fs := flag.NewFlagSet("volume clone", flag.ExitOnError)
+	host := hostFlag(fs)
+	allowCopy := fs.Bool("copy", false, "if the host filesystem cannot clone (ext4), make a full copy instead")
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: kling volume clone <source> <new-name> [-copy]")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	if err := runVolumeClone(ctx, api.NewClient(hostOf(*host)), fs.Arg(0), fs.Arg(1), *allowCopy, *asJSON, os.Stdout); err != nil {
+		return err
+	}
+	if !*asJSON {
+		next("kling run -image <image> -volume %s", fs.Arg(1))
+	}
+	return nil
+}
+
+// runVolumeClone hace el clon e imprime el resultado en w.
+func runVolumeClone(ctx context.Context, c *api.Client, src, dst string, allowCopy, asJSON bool, w io.Writer) error {
+	res, err := c.CloneVolume(ctx, src, api.CloneVolumeRequest{To: dst, Copy: allowCopy})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(w).Encode(res)
+	}
+	v := res.Volume
+	fmt.Fprintf(w, "%s  cloned from %s  (%s, %d ms, %s logical)\n", v.Name, src, res.Method, res.ElapsedMS, human(v.SizeBytes))
+	if res.Method == api.CloneCopy {
+		fmt.Fprintf(w, "It's a full copy: the volumes live on %s, which cannot clone. On XFS or btrfs this is instant.\n",
+			orUnknown(res.Filesystem))
+	} else {
+		// allocatedBytes cuenta los bloques compartidos como propios: "ON DISK"
+		// dirá lo mismo que el origen aunque el clon no haya costado nada.
+		fmt.Fprintf(w, "Its blocks are shared with %s until either one writes: `volume ls` counts them twice.\n", src)
+	}
+	return nil
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 func volumeRemove(args []string) error {
