@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/transport"
@@ -280,6 +282,60 @@ func (c *Client) Logs(ctx context.Context, ref string, tail int) (string, error)
 		return "", fmt.Errorf("%s", resp.Status)
 	}
 	return string(b), nil
+}
+
+// maxCredAuditResponse acota lo que CredAudit lee del daemon, que ya acota por
+// su lado (4 MiB de fichero): mismo motivo que maxLogsResponse.
+const maxCredAuditResponse = 8 << 20
+
+// CredAudit trae el registro de auditoría del proxy de credenciales de una
+// máquina (GET /machines/{ref}/credaudit), filtrado por q, las más antiguas
+// primero. Un daemon anterior no conoce la ruta: el error lo dice.
+func (c *Client) CredAudit(ctx context.Context, ref string, q CredAuditQuery) ([]CredAuditRecord, error) {
+	v := url.Values{}
+	v.Set("tail", strconv.Itoa(q.Tail))
+	if q.Denied {
+		v.Set("denied", "1")
+	}
+	if !q.Since.IsZero() {
+		v.Set("since", q.Since.UTC().Format(time.RFC3339))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://kling/machines/"+url.PathEscape(ref)+"/credaudit?"+v.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body := io.LimitReader(resp.Body, maxCredAuditResponse)
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(body)
+		var e Error
+		if json.Unmarshal(b, &e) == nil && e.Message != "" {
+			return nil, fmt.Errorf("%s", e.Message)
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("the daemon has no credential audit log endpoint: update it")
+		}
+		return nil, fmt.Errorf("%s", resp.Status)
+	}
+	var out []CredAuditRecord
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+			continue
+		}
+		var r CredAuditRecord
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			return nil, fmt.Errorf("credential audit log: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, sc.Err()
 }
 
 // SetLabels reetiqueta una máquina. Se usa al importar, cuando la decisión sobre

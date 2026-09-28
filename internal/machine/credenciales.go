@@ -97,6 +97,13 @@ func (m *Manager) claveCredenciales() ([]byte, error) {
 
 func (m *Manager) credPath(id string) string { return filepath.Join(m.dir(id), credFile) }
 
+// credAuditPath es el registro de auditoría del proxy de la máquina (ver
+// credaudit.go). En Linux lo escribe el proxy del daemon; en macOS, el
+// kling-vz de la máquina, que lo deja en el mismo sitio por su cuenta.
+func (m *Manager) credAuditPath(id string) string {
+	return filepath.Join(m.dir(id), credproxy.AuditFile)
+}
+
 // credSnapPath es el almacén de una plantilla. Bajo secrets/, no bajo el
 // snapshot: sobrevive a que el snapshot se rehaga (ver la cabecera).
 func (m *Manager) credSnapPath(name string) string {
@@ -304,7 +311,7 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return nil, 0, err
 	}
-	if err := registrarCredenciales(ctx, c, netcfg, creds); err != nil {
+	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id)); err != nil {
 		return nil, 0, err
 	}
 	return creds, nuevas, nil
@@ -346,7 +353,7 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 			return 0, err
 		}
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds); err != nil {
+	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID)); err != nil {
 		return 0, err
 	}
 	return len(creds), nil

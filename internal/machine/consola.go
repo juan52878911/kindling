@@ -135,7 +135,12 @@ func leerCola(path string, max int64) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return leerColaDe(f, max)
+}
 
+// leerColaDe es leerCola sobre un fichero ya abierto (credaudit.go lo abre sin
+// seguir enlaces).
+func leerColaDe(f *os.File, max int64) ([]byte, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err

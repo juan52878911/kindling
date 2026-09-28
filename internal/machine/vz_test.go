@@ -668,7 +668,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 	c := fc.New(m.socket[id])
 	if err := registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk", Allow: []string{"GET /v1/balance"}},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatal(err)
 	}
 	ls := llamadas(t, logPath)
@@ -682,7 +682,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 // nadie: el kling-vz es el mismo y conserva las claves.
 func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
 	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
-		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}); err != nil {
+		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}, ""); err != nil {
 		t.Fatal(err)
 	}
 }

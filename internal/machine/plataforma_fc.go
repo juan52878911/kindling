@@ -41,9 +41,10 @@ func delegacionCgroups() (string, error) { return ensureDelegation() }
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
 
 // registrarCredencialesPlataforma: en Linux el proxy y el resolver son del
-// daemon (internal/net); el VMM no interviene, así que c no se usa.
-func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential) error {
-	return knet.SetCredentials(n, creds)
+// daemon (internal/net); el VMM no interviene, así que c no se usa. El proxy
+// escribe su registro de auditoría en auditPath.
+func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential, auditPath string) error {
+	return knet.SetCredentials(n, creds, auditPath)
 }
 
 // abrirReenvios no hace nada en Linux: el host alcanza al invitado por la IP
