@@ -1,6 +1,6 @@
 package machine
 
-// Credenciales del proxy de credenciales (internal/net/credproxy.go): qué
+// Credenciales del proxy de credenciales (pkg/credproxy): qué
 // guarda el daemon de ellas y cómo las entrega y las vuelve a entregar.
 //
 // EL PROBLEMA: el proxy y el resolver son goroutines del daemon. Un reinicio
@@ -26,6 +26,13 @@ package machine
 // máquina sigue viva, su MMDS también; solo hay que rehacer proxy y resolver) y
 // al descongelar (la red pudo desmontarse mientras dormía, y el VMM es nuevo:
 // se rehacen los dos y se reponen los marcadores en MMDS).
+//
+// EN macOS el proxy y el DNS no son del daemon sino de cada kling-vz, que los
+// sirve en la pasarela de su pila de red (vz/internal/vnet). La clave viaja del
+// daemon al ayudante por su socket de API y vive en la memoria de ese proceso,
+// que corre como el mismo usuario que el daemon: es el cambio de modelo que
+// cuenta SECURITY.md §7. Un reinicio del daemon no la pierde (kling-vz sigue
+// vivo); un thaw sí (el kling-vz es nuevo), y por eso se reentrega igual.
 //
 // CREDENCIALES DE PLANTILLA: el caso MCP no entrega claves a una máquina, sino
 // a un SERVICIO: el gateway instancia réplicas del dorado a demanda, las
@@ -53,13 +60,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const (
@@ -69,17 +76,12 @@ const (
 	credInfo = "kindling credential store v1"
 )
 
-// registrarCredenciales es knet.SetCredentials, en variable para que los tests
-// del manager corran sin netns ni veth (en el Mac no hay dónde escuchar).
-var registrarCredenciales = knet.SetCredentials
-
-// sinProxyDeCredenciales: en macOS (backend vz) no hay resolver allowlist en el
-// host ni veth donde escuchar; ver plataforma_vz.go. Variable para que los
-// tests del manager prueben el resto en el Mac.
-var sinProxyDeCredenciales = runtime.GOOS == "darwin"
-
-// errSinProxyDeCredenciales es lo que se dice en macOS.
-var errSinProxyDeCredenciales = errors.New("credentials are not supported on macOS yet (they need the Linux allowlist resolver)")
+// registrarCredenciales entrega el juego completo al proxy de la máquina:
+// en Linux, knet.SetCredentials (proxy y resolver del daemon); en macOS, PUT
+// /kling/credentials a su kling-vz, que sirve el proxy y el DNS dentro de su
+// pila de red (plataforma_vz.go). En variable para que los tests del manager
+// corran sin netns ni veth ni ayudante.
+var registrarCredenciales = registrarCredencialesPlataforma
 
 // reEnvCredencial es el nombre de la variable de entorno que recibe el marcador.
 var reEnvCredencial = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
@@ -167,7 +169,7 @@ func escribirSellado(ruta string, sellado []byte) error {
 
 // guardarCredenciales cifra y escribe el juego completo de credenciales de la
 // máquina id; con la lista vacía borra el fichero.
-func (m *Manager) guardarCredenciales(id string, creds []knet.Credential) error {
+func (m *Manager) guardarCredenciales(id string, creds []credproxy.Credential) error {
 	if len(creds) == 0 {
 		return escribirSellado(m.credPath(id), nil)
 	}
@@ -180,7 +182,7 @@ func (m *Manager) guardarCredenciales(id string, creds []knet.Credential) error 
 
 // cargarCredenciales lee y descifra el almacén de la máquina id. Sin fichero
 // devuelve nil, nil: no tener credenciales no es un error.
-func (m *Manager) cargarCredenciales(id string) ([]knet.Credential, error) {
+func (m *Manager) cargarCredenciales(id string) ([]credproxy.Credential, error) {
 	sellado, err := os.ReadFile(m.credPath(id))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -188,7 +190,7 @@ func (m *Manager) cargarCredenciales(id string) ([]knet.Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	var creds []knet.Credential
+	var creds []credproxy.Credential
 	if err := m.abrir(sellado, id, &creds); err != nil {
 		return nil, err
 	}
@@ -204,15 +206,16 @@ func aeadDe(key []byte) (cipher.AEAD, error) {
 }
 
 // validarSpecs comprueba lo que llega de la API: dominio exacto, nombre de
-// variable válido, clave presente y sin repetir variable. Normaliza el dominio.
+// variable válido, clave presente, sin repetir variable y Allow bien formado.
+// Normaliza el dominio y las entradas de Allow.
 func validarSpecs(specs []api.CredentialSpec) error {
-	if len(specs) > knet.CredMax {
-		return fmt.Errorf("at most %d credentials", knet.CredMax)
+	if len(specs) > credproxy.MaxCredentials {
+		return fmt.Errorf("at most %d credentials", credproxy.MaxCredentials)
 	}
 	vistos := map[string]bool{}
 	for i := range specs {
 		s := &specs[i]
-		d, err := knet.ValidarDominioCredencial(s.Domain)
+		d, err := credproxy.ValidarDominio(s.Domain)
 		if err != nil {
 			return err
 		}
@@ -227,12 +230,15 @@ func validarSpecs(specs []api.CredentialSpec) error {
 			return fmt.Errorf("env %s used by two credentials", s.Env)
 		}
 		vistos[s.Env] = true
+		if err := credproxy.ValidarPermisos(s.Allow); err != nil {
+			return fmt.Errorf("credential for %s (%s): %w", d, s.Env, err)
+		}
 	}
 	return nil
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se
-// sustituye (rotación), las demás se añaden.
+// sustituye entera, Allow incluido (rotación), las demás se añaden.
 func fusionarSpecs(previas, specs []api.CredentialSpec) []api.CredentialSpec {
 	out := append([]api.CredentialSpec(nil), previas...)
 	for _, s := range specs {
@@ -260,10 +266,7 @@ func fusionarSpecs(previas, specs []api.CredentialSpec) []api.CredentialSpec {
 // entrega (o un thaw) la repone; y un marcador sin proxy detrás no vale nada
 // fuera de esta máquina. Devuelve el juego completo y cuántas eran nuevas.
 func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *knet.Net, c *fc.Client,
-	specs []api.CredentialSpec) (creds []knet.Credential, nuevas int, err error) {
-	if sinProxyDeCredenciales {
-		return nil, 0, errSinProxyDeCredenciales
-	}
+	specs []api.CredentialSpec) (creds []credproxy.Credential, nuevas int, err error) {
 	if err := validarSpecs(specs); err != nil {
 		return nil, 0, err
 	}
@@ -271,25 +274,28 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err != nil {
 		return nil, 0, err
 	}
-	creds = append([]knet.Credential(nil), previas...)
+	creds = append([]credproxy.Credential(nil), previas...)
 	porEnv := make(map[string]int, len(creds))
 	for i, cr := range creds {
 		porEnv[cr.Env] = i
 	}
 	for _, s := range specs {
+		// Allow va con la clave: rotar sin él la deja sin restricciones, como
+		// una credencial nueva. Es lo que se pidió, y así la API no tiene un
+		// "conservar lo de antes" implícito que nadie ve.
 		if i, ok := porEnv[s.Env]; ok {
-			creds[i].Domain, creds[i].Secret = s.Domain, s.Secret
+			creds[i].Domain, creds[i].Secret, creds[i].Allow = s.Domain, s.Secret, s.Allow
 			continue
 		}
-		ph, err := knet.NuevoMarcador()
+		ph, err := credproxy.NuevoMarcador()
 		if err != nil {
 			return nil, 0, err
 		}
-		creds = append(creds, knet.Credential{Env: s.Env, Domain: s.Domain, Placeholder: ph, Secret: s.Secret})
+		creds = append(creds, credproxy.Credential{Env: s.Env, Domain: s.Domain, Placeholder: ph, Secret: s.Secret, Allow: s.Allow})
 		porEnv[s.Env] = len(creds) - 1
 		nuevas++
 	}
-	if err := knet.ValidarCredenciales(creds); err != nil {
+	if err := credproxy.ValidarCredenciales(creds); err != nil {
 		return nil, 0, err
 	}
 	if err := m.guardarCredenciales(id, creds); err != nil {
@@ -298,7 +304,7 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return nil, 0, err
 	}
-	if err := registrarCredenciales(netcfg, creds); err != nil {
+	if err := registrarCredenciales(ctx, c, netcfg, creds); err != nil {
 		return nil, 0, err
 	}
 	return creds, nuevas, nil
@@ -307,7 +313,7 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 // ponerMarcadoresMMDS deja en MMDS (clave "env") el marcador de cada
 // credencial. PATCH fusiona con lo que otro inyectara antes; Firecracker lo
 // rechaza si el almacén aún no existe, y entonces se crea con PUT.
-func ponerMarcadoresMMDS(ctx context.Context, c *fc.Client, creds []knet.Credential) error {
+func ponerMarcadoresMMDS(ctx context.Context, c *fc.Client, creds []credproxy.Credential) error {
 	env := make(map[string]string, len(creds))
 	for _, cr := range creds {
 		env[cr.Env] = cr.Placeholder
@@ -326,7 +332,10 @@ func ponerMarcadoresMMDS(ctx context.Context, c *fc.Client, creds []knet.Credent
 // reentregarCredenciales vuelve a registrar en el proxy y el resolver las
 // credenciales guardadas de mc, cuya red acaba de rehacerse (o cuyo daemon
 // acaba de arrancar). Con c distinto de nil repone además los marcadores en
-// MMDS: tras un thaw el VMM es nuevo. Devuelve cuántas credenciales entregó.
+// MMDS: tras un thaw el VMM es nuevo. Con c nil (reinicio del daemon con la
+// máquina viva) en macOS no hay nada que rehacer: el proxy vive en kling-vz,
+// que sobrevive al daemon con sus claves. Devuelve cuántas credenciales
+// entregó.
 func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c *fc.Client) (int, error) {
 	creds, err := m.cargarCredenciales(mc.ID)
 	if err != nil || len(creds) == 0 {
@@ -337,7 +346,7 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 			return 0, err
 		}
 	}
-	if err := registrarCredenciales(knet.Plan(mc.NetIndex, mc.ID), creds); err != nil {
+	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds); err != nil {
 		return 0, err
 	}
 	return len(creds), nil
@@ -345,7 +354,7 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 
 // dominiosDe son los dominios de un juego de credenciales, ordenados y sin
 // repetir: lo único de ellas que va a state.json.
-func dominiosDe(creds []knet.Credential) []string {
+func dominiosDe(creds []credproxy.Credential) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, c := range creds {
@@ -381,9 +390,6 @@ func (m *Manager) cargarCredencialesPlantilla(name string) ([]api.CredentialSpec
 // quita todas). Exige que la plantilla exista y tenga egress allowlist, que es
 // lo que cada instancia necesitará para que se le puedan entregar.
 func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec, clear bool) (*api.Snapshot, error) {
-	if sinProxyDeCredenciales {
-		return nil, errSinProxyDeCredenciales
-	}
 	snap, err := m.loadSnapshot(name)
 	if err != nil {
 		return nil, err
@@ -409,8 +415,8 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 		return nil, err
 	}
 	todas := fusionarSpecs(previas, specs)
-	if len(todas) > knet.CredMax {
-		return nil, fmt.Errorf("at most %d credentials per template", knet.CredMax)
+	if len(todas) > credproxy.MaxCredentials {
+		return nil, fmt.Errorf("at most %d credentials per template", credproxy.MaxCredentials)
 	}
 	sellado, err := m.sellar(todas, "snapshot:"+name)
 	if err != nil {

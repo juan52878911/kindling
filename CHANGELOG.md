@@ -12,6 +12,26 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **`-allow-request` rechaza rutas ambiguas en vez de normalizarlas a ciegas.** El proxy
+  comparaba `-allow-request` contra la ruta ya decodificada y limpiada con `path.Clean`,
+  pero eso asume que el proveedor lee `/`, `.` y `..` igual que nosotros. Con alguna
+  credencial del dominio con `Allow`, una petición cuya ruta CRUDA lleve una barra o un
+  punto codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
+  parámetro de ruta con `;` o un segmento `.`/`..` sin decodificar recibe ahora 403 antes de
+  normalizar y comparar, sin leer el cuerpo ni abrir la salida. Sin `-allow-request` no
+  cambia nada.
+- **Secretos por sesión de MMDS (`sessions[<id>]`) retirados.** El id de sesión se
+  acuña en el bridge dentro del invitado (PID 1, root) justo al lanzar cada hijo, y
+  como el bridge y el servidor MCP corren como root y leen el almacén MMDS completo,
+  una sesión comprometida vería los secretos de todas las otras. El almacén sigue
+  aceptando el campo para atrás-compatibilidad, pero se ignora: el bridge avisa UNA VEZ
+  si está presente. Alternativas seguras: (1) `kling template credential` para secretos
+  comunes en la plantilla; (2) `kling machine credential` (proxy de credenciales) para
+  aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos únicos por
+  sesión. El aviso único, además de en un test unitario, se comprueba ahora de punta a
+  punta en `ext/mcp/scripts/90-e2e.sh`: un kling-bridge real, con un almacén MMDS que
+  trae `sessions` no vacío, avisa una sola vez en sus logs y el hijo arranca igualmente
+  con las claves de `env`.
 - **Proxy de credenciales: la clave de API ya no entra en el invitado.** Con un secreto
   por MMDS, un servidor MCP comprometido (corre como root) leía la clave y la sacaba por
   un dominio permitido: medido en el lab, la leía, la usaba y un eco de `httpbin.org` se
@@ -52,26 +72,120 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   clave (JSON `\/` y `\u00XX`, percent-encoding, entidades HTML); una respuesta con una
   codificación que no se puede inspeccionar (brotli, deflate) se rechaza con 502; varias
   credenciales por dominio (antes la segunda pisaba a la primera en silencio); el
-  marcador se sustituye también en la query (`?key=`) y en cuerpos de hasta 1 MiB
-  (`client_secret` de OAuth); el redactor solo retiene del final de cada trozo lo que
+  marcador se sustituye también en la query (`?key=`) y en el cuerpo (`client_secret`
+  de OAuth; ver más abajo la sustitución en flujo); el redactor solo retiene del final de cada trozo lo que
   puede ser el comienzo de la clave, así que un flujo SSE sale evento a evento en vez de
   con la cola del anterior; repetir `-env` rota la clave conservando el marcador; y el
   443 de la IP del proxy también va al proxy, con lo que un `https://dominio` desde
   dentro muere en 3 ms en vez de esperar al plazo del SDK (un REJECT con RST necesitaba
   `xt_REJECT`, que el CT del lab no tiene: la regla fallaba y la máquina no arrancaba).
-- **Pendiente, documentado en SECURITY.md:** el proxy no existe en macOS (backend vz;
-  plan concreto anotado), los secretos por sesión de MMDS siguen sin rellenarse solos, y
-  `kling run -from` manda siempre un egress (`none` por defecto) en vez de dejar que el
-  daemon herede el de la plantilla: una instancia de una plantilla con credenciales
-  necesita `-egress allowlist -allow …` explícito, como hace el gateway.
+- **El proxy de credenciales ya no corta los streams largos.** Antes cada petición tenía
+  120 s en total (contexto, `http.Client.Timeout` y `ReadTimeout`/`WriteTimeout` del
+  servidor), así que un SSE de un LLM que durase más se cortaba a medias. Ahora hay tres
+  plazos: 60 s hasta las cabeceras, 120 s de inactividad (cada byte en cualquier sentido
+  los renueva) y un techo de 15 min por petición contra un invitado que gotee bytes para
+  retener una plaza. Un corte aborta la conexión, así que el SDK ve un error y no una
+  respuesta truncada que parece entera. Probado en tests con plazos reducidos: un stream
+  de 1,2 s con un plazo de inactividad de 0,4 s llega entero, uno que se para se corta a
+  los 0,3 s y el techo corta a los 0,6 s.
+- **El marcador se sustituye en cualquier cuerpo de petición.** Antes solo en cuerpos de
+  hasta 1 MiB con longitud declarada; uno chunked o mayor se reenviaba sin tocar. Ahora
+  se sustituye en flujo con la ventana del redactor puesta al revés, leyendo el cuerpo a
+  trozos de 4 KiB. Lo retenido EN MEMORIA por petición sigue siendo como mucho 1 MiB: si
+  el cuerpo ya sustituido cabe en él, sale con su `Content-Length`.
+- **Un cuerpo grande con Content-Length ya no sale chunked.** Si tras sustituir el
+  marcador el cuerpo pasa de 1 MiB, antes salía chunked aunque el invitado hubiera
+  declarado `Content-Length`, y hay proveedores de API que rechazan una subida chunked.
+  Ahora, cuando el invitado SÍ declaró `Content-Length` (no llegó chunked), lo que pasa
+  de 1 MiB se derrama a un fichero temporal (nombre aleatorio, 0600, en
+  `$KLING_ROOT/tmp` si el daemon lo tiene o `os.TempDir()` si no, borrado al terminar la
+  petición pase lo que pase) y se reenvía con el `Content-Length` exacto de ese fichero.
+  Sin Content-Length (chunked del invitado) sigue saliendo chunked, que es lo que ya
+  hacía: no hay una longitud que prometer de todos modos. Sin subir la memoria retenida
+  por petición.
+- **Permisos por método y ruta en cada credencial.** `-allow-request 'GET /v1/balance'`
+  (repetible) en `kling machine credential` y `kling template credential`, y `allow` en
+  la API. El método se compara exacto; en la ruta, `*` casa dentro de un segmento y `**`
+  al final casa cualquier resto. La ruta de la petición se normaliza con `path.Clean`
+  antes de comparar, y se reenvía normalizada. Si ninguna credencial del dominio casa, el
+  proxy responde 403 sin leer el cuerpo ni abrir la salida. Sin `-allow-request` todo
+  sigue permitido, y los almacenes cifrados de antes se leen igual.
+- **IPv6 cerrado en los tres modos de egress, como defensa en profundidad.** El filtrado
+  de `internal/net` (ipset, iptables, resolver dinámico) es solo IPv4; un diagnóstico en
+  el lab real no encontró una fuga v6 hoy, pero por una razón incidental del host
+  (`net.ipv6.conf.all.forwarding=0` de fábrica, no de kindling) y no por nada que el
+  código garantizara. Dos capas nuevas, independientes entre sí: `ipv6.disable=1` en la
+  línea de arranque del invitado (solo cubre arranques en frío; un dorado ya congelado
+  no la relee) y, en el namespace del host y para los tres modos (`none`, `internet`,
+  `allowlist`), `sysctl disable_ipv6=1` en `tap0`/veth más `ip6tables FORWARD DROP` como
+  cinturón adicional si `ip6tables` está instalado (si no, se avisa y se sigue: la capa
+  de `sysctl` es la que de verdad cierra el paso).
+- **Proxy de credenciales también en macOS (backend vz), con los mismos permisos por
+  ruta.** Lo sirve el `kling-vz` de cada máquina con el mismo `pkg/credproxy`: su DNS
+  contesta el dominio con la pasarela (172.16.0.1) sin reenviar ni sembrar la IP real,
+  un listener en pasarela:80 recoge la conexión antes de la política de salida y el 443
+  de la pasarela muere con un RST. El daemon le entrega la clave por `PUT
+  /kling/credentials` (incluye `allow`) y se la vuelve a entregar tras un thaw antes de
+  cargar el estado; tras un reinicio del daemon no hace falta, porque el `kling-vz`
+  sigue vivo con ella. Cambia el modelo de confianza: en macOS la clave vive en la
+  memoria del `kling-vz` (mismo usuario que el daemon), el proceso que también termina
+  el tráfico del invitado; SECURITY.md §7 cuenta qué supone. `vz/go.mod` requiere ahora
+  el núcleo con `replace => ..`, como `ext/*`. Verificado en este Mac (M4) con
+  `scripts/92-e2e-mac.sh`, sección 6c: el invitado solo ve el marcador, `httpbin.org`
+  resuelve a la pasarela, basic-auth 200 con la clave real, eco y eco de `Basic`
+  redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no está en el log
+  del daemon ni en el de `kling-vz`, y sigue funcionando tras freeze/thaw (mismo
+  marcador) y tras reiniciar el daemon.
+- **Los dorados congelados antes de la barrera IPv6 avisan solos, en vez de quedar como
+  un límite mudo.** `ipv6.disable=1` (arriba) solo se lee en un arranque en frío: un
+  dorado ya congelado sigue con el módulo IPv6 del kernel del invitado cargado, aunque
+  `applyIPv6Barrier` le cierre el paso igual en el namespace del host. Cada dorado graba
+  ahora si se congeló con la barrera activa (`guest_ipv6_off` en su meta; deliberadamente
+  fuera de la firma, como `kernel_sha256`: cubrirlo invalidaría la de todo dorado
+  anterior al campo). Los anteriores no lo llevan y se leen como "no consta", nunca como
+  "confirmado sin ella" — se heredan al hacer fork de un dorado, para no suponer "ya
+  tiene la barrera" sin haber vuelto a arrancar en frío. `runFrom` avisa UNA VEZ por
+  dorado sin la marca (log y evento `snapshot.guest_ipv6`, con cómo rehacerlo), y
+  `kling snapshots` / `kling template inspect <nombre>` lo señalan.
+- **Pendiente, documentado en SECURITY.md** ("Lo que NO está resuelto"): `-allow-request`
+  no mira la query ni el cuerpo, y depende de que el proveedor interprete la ruta como
+  `path.Clean`; en macOS la clave vive en la memoria de `kling-vz`, que también procesa
+  el tráfico del invitado (cambio de modelo de confianza, aceptado a sabiendas); y los
+  dorados de antes de la barrera IPv6 siguen con el módulo cargado en su kernel (avisado,
+  no bloqueado — la barrera del namespace sí los cubre).
+
+### Arreglado
+
+- **`kling run -from` hereda el egress de la plantilla si no se pide otro.** Mandaba
+  siempre un egress (`none` por defecto), así que instanciar una plantilla con
+  credenciales (`kling template credential`) exigía repetir `-egress allowlist -allow
+  …` a mano en cada `run -from`, aunque el daemon ya sabe heredarlo del snapshot cuando
+  llega vacío. Ahora, con `-from` y sin `-egress` explícito, el CLI manda vacío y deja
+  que herede; con `-egress` dado, o sin `-from`, no cambia nada. De paso, el error de
+  "necesita allowlist" ya lista los dominios concretos de la plantilla en vez de decir
+  `<its domains>`.
+- **El puente ya no pierde en silencio los secretos de MMDS.** `guest.FetchMMDS` devolvía
+  `nil` tanto si el store estaba vacío como si no se podía leer, así que un secreto
+  inyectado que el puente no alcanzaba acababa en una sesión que arrancaba sin él (y
+  adoptando el hijo precalentado) sin dejar rastro. Ahora devuelve el error, el puente lo
+  registra por sesión, y el cliente de MMDS ignora `HTTP_PROXY` del entorno.
 
 ### Pruebas
+
+- `ext/mcp/scripts/90-e2e.sh`: la sección 8 crea su propia instancia del servicio, le
+  inyecta el store y abre la sesión directamente contra su puente, en vez de depender de
+  qué máquina elija el gateway. En el lab, dos pasadas seguidas: 25 ok, 0 fallos.
 
 - `scripts/90-e2e.sh`: la sección 2 esperaba `warm` y el CLI dice `frozen`; la sección 5
   usaba `script -qec` (util-linux), que no existe en el `script` BSD de macOS desde donde
   se lanza el e2e: ahora el pseudoterminal lo pone el `pty` de python3. Sección 7 ampliada
   (freeze/thaw, reinicio del daemon, rotación, eco de `Basic`, HTTPS rápido) y nueva 7b
-  (credenciales de plantilla). En el lab: 54 ok, 0 fallos.
+  (credenciales de plantilla). En el lab: 54 ok, 0 fallos. Nueva 7c: sonda dentro del
+  invitado, en los tres modos de egress, de que no hay dirección ni ruta ni salida IPv6
+  (sin ejecutar aquí — la corre quien tenga el lab a mano).
+- `scripts/92-e2e-mac.sh`: nueva sección 6c (proxy de credenciales en el Mac, con
+  freeze/thaw, reinicio del daemon y `kling-vz` confinado) y la misma corrección de
+  `warm` por `frozen` en la sección 2. En este Mac (M4, `BURST=4`): 72 ok, 0 fallos.
 
 ## v0.16.0 — 2026-09-27
 

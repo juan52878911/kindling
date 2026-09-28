@@ -12,6 +12,8 @@ import (
 	"os/exec"
 
 	"github.com/juan52878911/kindling/internal/fc"
+	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // backendVMM es el VMM con el que arranca este binario.
@@ -37,6 +39,12 @@ func delegacionCgroups() (string, error) { return ensureDelegation() }
 // redAntesDeArrancar no hace nada en Linux: la red ya la montó el namespace
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
+
+// registrarCredencialesPlataforma: en Linux el proxy y el resolver son del
+// daemon (internal/net); el VMM no interviene, así que c no se usa.
+func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential) error {
+	return knet.SetCredentials(n, creds)
+}
 
 // abrirReenvios no hace nada en Linux: el host alcanza al invitado por la IP
 // del veth, sin reenvíos.

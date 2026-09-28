@@ -51,11 +51,13 @@ func snapshotsCredential(args []string) error {
 	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
 	file := fs.String("f", "", "file with the key (default: stdin)")
 	clear := fs.Bool("clear", false, "remove every credential of the template")
+	var allow stringsFlag
+	fs.Var(&allow, "allow-request", allowRequestHelp)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || (!*clear && (*domain == "" || *env == "")) {
-		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-f keyfile]  (reads stdin if no -f)\n" +
+		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling template credential <template> -clear")
 	}
 	req := api.CredentialsRequest{Clear: *clear}
@@ -64,7 +66,7 @@ func snapshotsCredential(args []string) error {
 		if err != nil {
 			return err
 		}
-		req.Credentials = []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret}}
+		req.Credentials = []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret, Allow: allow}}
 	}
 	ctx, stop := ctxWithSignals()
 	defer stop()
@@ -78,9 +80,23 @@ func snapshotsCredential(args []string) error {
 	}
 	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to https://%s through its proxy\n",
 		s.Name, *env, strings.ToLower(*domain))
+	fmt.Printf("      %s\n", describirAllow(allow))
 	fmt.Printf("      point the SDK at http://%s; running instances are not changed (kling machine credential does that)\n",
 		strings.ToLower(*domain))
 	return nil
+}
+
+// allowRequestHelp es la ayuda de -allow-request, igual en machine y template.
+const allowRequestHelp = "only sign requests matching \"METHOD /path\" (repeatable; * is one path segment, a final /** any rest; default: every request)"
+
+// describirAllow dice en una línea qué peticiones firmará el proxy con la
+// clave. Se imprime siempre: rotar sin -allow-request quita las restricciones
+// que hubiera, y eso no debe pasar en silencio.
+func describirAllow(allow []string) string {
+	if len(allow) == 0 {
+		return "every request to that host gets the key (use -allow-request to restrict it)"
+	}
+	return "only these requests get the key, anything else is a 403: " + strings.Join(allow, ", ")
 }
 
 // leerClave lee la clave de un fichero o de stdin, sin espacios alrededor.
@@ -136,12 +152,27 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tIMAGE\tCPU/MEM\tMEMORY\tDISK\tINSTANCES\tAGE")
+	// F2: un asterisco basta aquí; el detalle va en `kling template inspect`.
+	// Evita una columna nueva para un caso que, con el tiempo, desaparece solo
+	// (los dorados viejos se van recongelando).
+	huboSinIPv6 := false
 	for _, s := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
-			s.Name, s.Image, s.VCPUs, s.MemMiB,
+		marca := ""
+		if !s.GuestIPv6Off {
+			marca = "*"
+			huboSinIPv6 = true
+		}
+		fmt.Fprintf(tw, "%s%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
+			s.Name, marca, s.Image, s.VCPUs, s.MemMiB,
 			human(s.MemBytes), human(s.DiskBytes), s.Instances, since(s.CreatedAt))
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if huboSinIPv6 {
+		fmt.Fprintln(w, "\n* frozen before the IPv6 barrier: `kling template inspect <name>` for details")
+	}
+	return nil
 }
 
 func snapshotsRemove(name string, args []string) error {
@@ -206,6 +237,10 @@ func writeSnapshot(w io.Writer, s *api.Snapshot, asJSON bool) error {
 	fmt.Fprintf(w, "cpus/mem:    %d / %s\n", s.VCPUs, mem)
 	fmt.Fprintf(w, "on disk:     %s memory, %s total\n", human(s.MemBytes), human(s.DiskBytes))
 	fmt.Fprintf(w, "instances:   %d\n", s.Instances)
+	if !s.GuestIPv6Off {
+		fmt.Fprintf(w, "guest ipv6:  not confirmed off (frozen before the IPv6 barrier); the host "+
+			"namespace still blocks it, but recommit from a fresh boot to close it in the guest too\n")
+	}
 	for i, v := range s.VolumeSet() {
 		label := "volumes:"
 		if i > 0 {

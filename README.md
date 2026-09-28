@@ -1109,10 +1109,13 @@ API key. Secrets are injected into the **live** microVM through Firecracker's MM
 kling machine secret <ref> -f store.json     # or pipe the JSON through stdin
 ```
 
-The store carries common variables and per-session secrets keyed by `Mcp-Session-Id`;
-the bridge hands each session its own. A machine that has received secrets **can no
-longer be frozen** — that is enforced, not advised — so no secret ever ends up inside a
-snapshot file.
+The store carries **common variables only**; they are shared with all sessions. A machine
+that has received secrets **can no longer be frozen** — that is enforced, not advised —
+so no secret ever ends up inside a snapshot file.
+
+**Per-session secrets are deprecated** (the session ID is chosen inside the guest, so all
+sessions would see all secrets). Use **template credentials** instead for shared secrets,
+or use the **credential proxy** for key isolation.
 
 What MMDS does not prevent: the code inside **reads** the secret (the MCP server runs as
 root in its microVM) and can send it out through an allowed domain. For an API key there
@@ -1132,8 +1135,44 @@ The guest gets a **placeholder** (`kling-cred-…`) in `STRIPE_API_KEY`, not the
 resolver answers `api.stripe.com` with the IP of a proxy on the host; the SDK talks to
 `http://api.stripe.com` (no TLS up to the proxy, over the local veth) and the proxy swaps
 the placeholder for the key — in headers (inside `Authorization: Basic` too), in the query
-string and in request bodies up to 1 MiB —, goes out over HTTPS verifying the certificate,
-and strips the key from any echo in the response. No MITM: the guest trusts no CA of ours.
+string and in request bodies of any size, streamed or not —, goes out over HTTPS verifying
+the certificate, and strips the key from any echo in the response. No MITM: the guest
+trusts no CA of ours. A body that is still under 1 MiB after the swap goes out with its
+`Content-Length` from memory. A bigger one goes out chunked if the guest sent it chunked
+(there's no length to promise either way); if the guest declared a `Content-Length`, it
+is spooled to a private temp file instead and forwarded with that file's exact
+`Content-Length`, since some API providers reject a chunked upload.
+
+The key can also be limited to the requests it is meant for. `-allow-request` (repeatable)
+takes `METHOD /path`; `*` matches within one path segment and a final `/**` matches any
+rest. Anything else sent to that domain gets a 403 from the proxy, before the body is read
+or a connection to the provider is opened:
+
+```sh
+kling machine credential payments -domain api.stripe.com -env STRIPE_API_KEY -f key.txt \
+  -allow-request 'GET /v1/balance' -allow-request 'GET /v1/charges/*'
+```
+
+The method must match exactly (`GET` does not cover `HEAD`). The path is compared after
+decoding and `path.Clean`, so `/v1/../admin` is `/admin`. The provider then receives that
+cleaned path, the one that was checked. The query is not compared, and an entry cannot
+pin query parameters. With no `-allow-request`, every request to the domain is allowed, as
+before. The list belongs to the key: when you rotate a key, pass `-allow-request` again, or
+the new key has no restrictions (the CLI prints which one applies). `kling template
+credential` takes the same flag.
+
+With `-allow-request` in place, a request whose **raw** path is ambiguous — an encoded
+slash or dot (`%2F`, `%5C`, `%2E`), a literal backslash, a double slash, a `;`-style path
+parameter, or a `.`/`..` segment before decoding — gets a 403 without being normalized and
+compared: a provider is free to read that raw path differently than `path.Clean` does, and
+guessing wrong would sign a request for a path that was never actually checked. Without
+`-allow-request` this check does not run.
+
+Streams can run long. The proxy has no total deadline, only three limits: 60 s for the
+response headers, 120 s of **inactivity** (renewed by every byte in either direction), and
+a hard ceiling of 15 min per request. An LLM streaming SSE for five minutes gets through.
+A stalled one, or a guest dripping bytes to hold a slot, is cut off and sees an error, not
+a response that looks complete.
 
 The placeholder is not a secret: the capability is being inside that machine's network,
 not knowing the string. So a machine with credentials **can be frozen**, wakes up with
@@ -1166,8 +1205,14 @@ client that opens one TLS connection per request (the proxy reuses its own). Wha
 not prevent: the guest can still **use** the key against its domain; that is bounded by
 the key itself (restricted, read-only, spending limits). Echo redaction is defence in
 depth (serious providers never return the credential); a response in an encoding the
-proxy cannot inspect (brotli, deflate) is refused with 502. Not available on macOS yet:
-the vz backend has no host-side resolver to divert the domain (see SECURITY.md).
+proxy cannot inspect (brotli, deflate) is refused with 502.
+
+On macOS (vz backend) it works the same from the guest's side: each machine's
+`kling-vz` serves the proxy and the DNS diversion on its gateway (172.16.0.1) inside its
+own user-space network. The difference is where the key lives: the daemon hands it to
+that machine's `kling-vz` (same user, over its 0600 API socket), so it sits in the
+process that also handles the guest's network traffic, not in a separate daemon. See
+SECURITY.md, section 7, for what that trade-off means.
 
 ---
 

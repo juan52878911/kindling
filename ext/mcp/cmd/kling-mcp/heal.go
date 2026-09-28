@@ -179,6 +179,9 @@ func mcpHeal(args []string) error {
 	// memoria por adelantado; en paralelo competirian por la RAM que necesitan
 	// justo para arrancar, y fallarian todas a la vez.
 	for _, s := range snaps {
+		if esModeloIA(s) {
+			continue // no es un servidor MCP: ver esModeloIA
+		}
 		nombre := s.Service()
 		if nombre == "" {
 			nombre = s.Name

@@ -96,6 +96,31 @@ RESULTADO 1.1.1.1:       ALCANZABLE
 > válida es ejecutar el comando **dentro del invitado**, por la consola serie. Nos costó dos
 > falsos positivos aprenderlo.
 
+**IPv6: cerrado, no solo ausente.** Todo lo de arriba (ipset, iptables, resolver dinámico)
+es IPv4. Durante un diagnóstico en el lab real comprobamos que hoy no hay fuga v6 posible,
+pero por una razón incidental: el host tiene `net.ipv6.conf.all.forwarding=0` de fábrica, no
+por ninguna configuración de kindling, y `ip6tables` está vacío (policy `ACCEPT` en todas las
+cadenas). Si ese valor del kernel cambiara algún día, no había nada en el código que
+impidiera la fuga. Se cerró en dos capas independientes, ninguna depende de la otra:
+
+1. `ipv6.disable=1` en la línea de arranque del invitado (`internal/net/net.go`, `BootArg`):
+   el módulo IPv6 del kernel del invitado no carga, así que no hay ni siquiera una dirección
+   link-local. Solo cubre arranques **en frío** — un snapshot dorado ya congelado no relee la
+   línea de arranque al restaurar y sigue con el IPv6 que tenía al congelarse. Los dorados
+   congelados desde este cambio lo saben (`guest_ipv6_off` en su meta) y los anteriores lo
+   avisan solos al instanciarse; ver más abajo, en "Lo que NO está resuelto".
+2. `applyIPv6Barrier` en el namespace del host (`internal/net/firewall.go`), aplicada en los
+   **tres** modos de egress (`none`, `internet`, `allowlist`) y también en snapshots
+   restaurados, no solo en arranques en frío: `sysctl disable_ipv6=1` en `tap0`, en el veth
+   del namespace y en `all`/`default`, más `ip6tables FORWARD DROP` para lo que entre por
+   `tap0` como cinturón adicional. Si `ip6tables` no está instalado en el host se avisa por
+   log y se sigue sin fallar: la capa de `sysctl` es la que de verdad cierra el paso y no
+   depende de ese binario.
+
+En macOS (`kling-vz`) no hace falta nada de esto: `egress.IsBlockedIP` ya trata cualquier
+dirección que no sea IPv4 como bloqueada, porque el invitado nunca ha tenido IPv6 en ese
+backend.
+
 ### 4. Una microVM no puede degradar a las demás
 
 - **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red, con limitadores
@@ -156,9 +181,10 @@ solo al crear: un `../../etc` saldría del directorio de datos.
 
 ### 7. Secretos y credenciales
 
-- **Un snapshot congelado nunca lleva secretos dentro.** Los secretos se inyectan por
-  sesión vía MMDS en la microVM **viva** (`kling mmds`), y una máquina que los ha
-  recibido **ya no puede congelarse** — se impone, no se aconseja.
+- **Un snapshot congelado nunca lleva secretos dentro.** Los secretos comunes se
+  inyectan vía MMDS en la microVM **viva** (`kling machine secret`), y una máquina que
+  los ha recibido **ya no puede congelarse** — se impone, no se aconseja. Los secretos
+  por sesión de MMDS están retirados (ver punto 9 en "Lo que NO está resuelto").
 - **El gateway no reenvía su propio token** ni al invitado ni a URLs de terceros: un
   servidor MCP comprometido no se lleva la credencial del agregador.
 - **Las imágenes no son world-readable.** Contienen los ficheros `-env` de cada
@@ -169,22 +195,62 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   proceso root de dentro, y el servidor MCP corre como root: MMDS evita que el secreto
   acabe en un snapshot, no que el código hostil lo lea y lo saque por un dominio
   permitido.
-- **Proxy de credenciales** (`kling machine credential`, `internal/net/credproxy.go`):
+- **Proxy de credenciales** (`kling machine credential`, `pkg/credproxy`, servido por `internal/net/credproxy.go`):
   la clave se queda en la memoria del daemon y el invitado recibe un marcador. Con
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
   la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
   hay camino directo que lo esquive. El proxy solo acepta el Host de sus credenciales
-  (403 al resto), cambia el marcador por la clave solo en las cabeceras (también dentro
-  de `Authorization: Basic`, en la query y en cuerpos de hasta 1 MiB), sale por HTTPS
+  (403 al resto), cambia el marcador por la clave en las cabeceras (también dentro
+  de `Authorization: Basic`), en la query y en el cuerpo (en flujo, con una ventana del
+  tamaño del marcador: sin límite de tamaño ni de longitud declarada), sale por HTTPS
   verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
   redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
   respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding,
   entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
   cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
   codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
-  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, 120 s por petición.
+  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB del cuerpo
+  ya sustituido retenido EN MEMORIA por petición (`pkg/credproxy/cuerpo.go`). Un cuerpo
+  que, tras sustituir, pasa de 1 MiB sale chunked si el invitado lo mandó chunked (no
+  hay longitud que prometer); pero si el invitado declaró Content-Length, se derrama a
+  un fichero temporal y se reenvía con el Content-Length exacto de ese fichero, porque
+  hay proveedores de API que no aceptan una subida chunked. Ese fichero lleva la clave
+  real mientras dura la petición: nombre aleatorio (`os.CreateTemp`), permisos 0600
+  explícitos y se borra en cuanto la petición termina, la reciba el proveedor o falle a
+  mitad (el borrado va en un `defer`, así que corre también si el invitado corta la
+  conexión o si el plazo de la petición la cancela). El directorio es
+  `$KLING_ROOT/tmp` (0700, solo lo lee el daemon) en Linux; sin `KLING_ROOT` cae en
+  `os.TempDir()`, que en un fichero 0600 de nombre aleatorio no es legible por otro
+  usuario del host sin ser root, aunque conviene el primero cuando se pueda. Plazos:
+  60 s hasta las cabeceras de la respuesta, 120 s de inactividad
+  (cada byte en cualquier sentido los renueva, también el plazo de la conexión del
+  invitado) y un techo de 15 min por petición: un stream largo de un LLM pasa, y un
+  invitado que gotea bytes para retener una plaza no la retiene más de 15 min. Un corte
+  aborta la conexión, así que el invitado ve un error y no una respuesta truncada que
+  parezca completa.
+- **Permisos por método y ruta** (`-allow-request 'GET /v1/balance'`, `Allow` en la API):
+  una credencial con permisos solo se sustituye en las peticiones que casan. Si ninguna
+  credencial del Host casa, el proxy responde 403 y cierra la conexión sin leer el
+  cuerpo ni abrir la salida. El método se compara exacto, contra una lista fija sin
+  CONNECT ni TRACE. La ruta se decodifica y se normaliza con `path.Clean` antes de
+  compararla (`/v1/../admin` y `/v1/%2e%2e/admin` valen `/admin`), y lo que se reenvía
+  al proveedor es esa ruta normalizada: el proveedor ve lo mismo que se comprobó. Los
+  patrones se validan al guardar: tienen que estar limpios, `*` no cruza `/` y `**` solo
+  puede ir como último segmento. Con la lista vacía todo está permitido, igual que
+  antes; un almacén cifrado sin `Allow` se sigue leyendo así. `Allow` viaja igual en
+  macOS: `PUT /kling/credentials` lo lleva y `kling-vz` lo aplica con el mismo
+  `pkg/credproxy`, no una reimplementación aparte.
   El 80 y el 443 de la IP del proxy van al proxy: un `https://dominio` desde dentro
   muere en el acto (3 ms medidos) en vez de esperar al plazo del SDK.
+- **Rutas ambiguas, rechazadas antes de normalizar.** Con alguna credencial del dominio
+  con `Allow`, el proxy mira la ruta CRUDA (`r.URL.EscapedPath()`, antes de decodificar)
+  y responde 403 —sin leer el cuerpo ni abrir la salida— si lleva algo que un proveedor
+  podría interpretar distinto de como lo hace `path.Clean`: una barra o un punto
+  codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
+  parámetro de ruta con `;` (tipo `;jsessionid=`), o un segmento `.`/`..` sin decodificar.
+  No intenta adivinar qué haría el proveedor con eso: rechaza la ambigüedad en vez de
+  arriesgarse a firmar una petición para una ruta que nunca se comprobó de verdad. Sin
+  ninguna credencial con `Allow` esto no se mira, igual que antes de este cambio.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
   no es un secreto (la capacidad es la red del netns de esa máquina hacia su proxy, y
   el proxy sustituye por dominio, no por marcador), así que una máquina con
@@ -196,6 +262,40 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   dominios. Tras un reinicio del daemon `reconcile` rehace proxy y resolver desde el
   almacén; tras un thaw se rehacen y se reponen los marcadores en MMDS. Verificado
   desde dentro del invitado en el lab (`scripts/90-e2e.sh`, secciones 7 y 7b).
+- **En macOS (backend vz) el proxy vive en `kling-vz`, y la clave con él.** No hay
+  veth ni resolver en el host: el mismo `pkg/credproxy` lo sirve cada `kling-vz` dentro
+  de la pila de red gVisor de su máquina. Su DNS contesta el dominio con credencial con
+  la pasarela (172.16.0.1, TTL 30) sin reenviar ni sembrar la IP real, y AAAA vacío; un
+  listener en pasarela:80 recoge la conexión antes de la política de salida (que
+  rechazaría 172.16/12); el 443 de la pasarela no tiene listener y muere con un RST. El
+  proxy solo atiende en allowlist (403 en otro modo aunque el invitado conecte a mano),
+  y su lookup usa el mismo upstream que el invitado y descarta además lo que la red del
+  Mac nunca deja alcanzar: 0.0.0.0/8 (que en macOS llega a localhost), multicast,
+  reservadas y las IPs del propio Mac.
+  **Cambia el modelo de confianza**, y se acepta a sabiendas: en Linux la clave no sale
+  del daemon; en macOS el daemon (que ya corre como el usuario, sin root) se la manda al
+  `kling-vz` de esa máquina por su socket de API (`PUT /kling/credentials`; un socket Unix 0600 en
+  el directorio de la máquina) y queda en la
+  memoria de ese proceso, que corre como el mismo usuario. Lo que eso significa:
+  - Ningún usuario nuevo puede leerla: quien es ese usuario ya leía el almacén cifrado y
+    la clave maestra del daemon.
+  - `kling-vz` es el proceso que termina el tráfico del invitado (pila TCP, DNS, MMDS).
+    Un invitado que encontrara un fallo explotable ahí tendría la clave en la misma
+    memoria; antes de este cambio, ese mismo fallo le daba un proceso sin claves. El
+    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca, pero
+    no protege la memoria del propio proceso.
+  - La memoria del invitado vive en otro proceso (el auxiliar de Apple), así que la clave
+    no entra en su volcado de estado ni en un snapshot. `kling-vz` no la escribe a disco
+    ni a su log.
+  - Un reinicio del daemon no la pierde (el `kling-vz` sigue vivo con ella). Un thaw
+    arranca un `kling-vz` nuevo: el daemon se la entrega tras `PUT /kling/network` y
+    antes de cargar el estado, así que el invitado despierta con el proxy listo.
+  Verificado desde dentro del invitado en un Mac M4 (`scripts/92-e2e-mac.sh`, sección
+  6c, con `kling-vz` confinado en su perfil): solo ve el marcador, el dominio resuelve
+  a la pasarela, el proveedor recibe la clave real (basic-auth 200), eco y eco de
+  `Basic` redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no
+  aparece en el log del daemon ni en el de `kling-vz`, y sigue funcionando tras
+  freeze/thaw y tras reiniciar el daemon.
 
 ### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
 
@@ -323,30 +423,45 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **Una credencial se puede usar, aunque no leer.** El proxy impide que el invitado lea
   la clave o la saque a otro dominio, no que la use contra el suyo: es un oráculo de
   ella. Lo acota la clave misma (restringida, de solo lectura, con límites de gasto en
-  el proveedor). Un cuerpo de más de 1 MiB, o sin longitud declarada, se reenvía sin
-  sustituir el marcador. La redacción del eco es defensa en profundidad y cubre las
-  transformaciones habituales, no todas las imaginables.
-- **El proxy de credenciales no existe en macOS.** El backend vz no tiene resolver
-  allowlist en el host ni veth donde escuchar: la red del invitado es una pila gVisor
-  dentro de `kling-vz`, un proceso sin privilegios por máquina que a propósito no
-  depende del núcleo. Hacerlo allí exige: (1) que `egress.Resolver` conteste el dominio
-  con credencial con la IP de la pasarela (172.16.0.1); (2) interceptar en
-  `vnet.handleTCP` el destino pasarela:80/443 hacia un `http.Server` en proceso sobre
-  `gonet`; (3) un `PUT /kling/credentials` en `kling-vz` y su llamada desde
-  `plataforma_vz.go`; (4) compartir la lógica del proxy (hoy en `internal/net`) sin que
-  `vz/` dependa del núcleo, o duplicarla. Unas 400 líneas más la verificación en Mac, y
-  la clave viajaría al proceso por máquina del usuario en vez de quedarse en un daemon
-  root. Se deja documentado: el caso que lo motiva (servidores MCP en producción) corre
-  en Linux.
-- **Los secretos por sesión de MMDS (`sessions[<id>]`) no se rellenan solos.** El id
-  de sesión lo genera el puente al recibir `initialize` y el gateway no llama a
-  `PutMMDS`: en la práctica solo funciona `env`, común a todas las sesiones de una
-  réplica. Para claves de API el camino es la credencial de plantilla (una por
-  servicio, entregada a cada réplica al nacer); un secreto distinto por sesión MCP
-  sigue abierto.
+  el proveedor). `-allow-request` acota el oráculo a unas rutas, pero no mira la query
+  ni el cuerpo. Una ruta cruda ambigua (`;`, `\`, `%2F`, `%5C`, `%2E`, `//`, `.`/`..` sin
+  decodificar) se rechaza en vez de normalizarse (ver 4), así que ya no depende de
+  adivinar cómo la lee el proveedor; lo que queda sin cubrir es una ambigüedad que no
+  esté en esa lista —una convención propia de un framework concreto, por ejemplo—, y ahí
+  sigue valiendo usar patrones exactos mejor que `/**`. La redacción del eco es defensa
+  en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
+  vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
+  mismas reglas antes de reenviar.
+- **En macOS la clave vive en un proceso que el invitado alcanza por la red.** Es el
+  `kling-vz` de su máquina, que corre como el usuario y procesa su tráfico (ver 7). Un
+  fallo explotable en su pila de red, DNS o MMDS que antes daba un proceso sin claves
+  daría ahora la de esa máquina (solo la de esa: cada máquina tiene su `kling-vz`). En
+  Linux la clave nunca sale del daemon.
+- **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
+  sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el
+  hijo para `initialize`. Como el bridge y el servidor MCP corre como root y lee el
+  almacén MMDS completo, una sesión comprometerida vería los secretos de todas las
+  otras. El almacén sigue aceptando el campo para atrás-compatibilidad, pero se ignora
+  y se avisa si está presente. Alternativas seguras: (1) credencial de plantilla (una
+  por servicio, entregada a cada réplica al nacer); (2) proxy de credenciales para
+  aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos por
+  sesión reales.
 - **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
   en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
   (`-listen 0.0.0.0:9100`) y avisa.
+- **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
+  silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
+  este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del
+  namespace (`applyIPv6Barrier`) no tiene ese límite y cierra el paso igual a esos
+  dorados —esto no reabre una fuga, es defensa en profundidad que falta en una capa—,
+  pero el invitado, si conserva IPv6 vivo, aún podría auto-asignarse una link-local
+  dentro de su propia pila. Cada dorado guarda ahora si se congeló con la barrera activa
+  (`guest_ipv6_off` en su meta; ausente en los anteriores a este cambio, que se leen como
+  "no consta", nunca como "confirmado sin ella"). La primera vez que se instancia un
+  dorado sin esa marca, el daemon avisa una vez (log y evento `snapshot.guest_ipv6`) con
+  cómo rehacerlo, y `kling snapshots` / `kling template inspect <nombre>` lo señalan. Un
+  dorado nuevo, o uno recongelado tras este cambio (`kling commit -replace <máquina>
+  <nombre>`), ya arranca con el módulo descargado y no vuelve a avisar.
 
 ## Ante un incidente
 

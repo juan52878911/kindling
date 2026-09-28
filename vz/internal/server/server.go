@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/mmds"
 	"github.com/juan52878911/kindling/vz/internal/spec"
@@ -67,6 +68,9 @@ type NetConfig struct {
 	MMDSAddr netip.Addr
 	Policy   *egress.Policy
 	Resolver *egress.Resolver
+	// Credentials es el proxy de credenciales que la red sirve en la pasarela;
+	// nil si este proceso no lo tiene.
+	Credentials http.Handler
 }
 
 type Deps struct {
@@ -79,6 +83,11 @@ type Deps struct {
 	// Resolver, si no es nil, siembra la allowlist al recibir la política.
 	Resolver *egress.Resolver
 	Policy   *egress.Policy
+	// Credentials es el proxy de credenciales de la máquina (pkg/credproxy) y
+	// CredIP la IP donde la red lo sirve, con la que el DNS contesta sus
+	// dominios. Con Credentials nil, PUT /kling/credentials se rechaza.
+	Credentials *credproxy.Proxy
+	CredIP      netip.Addr
 	// Confine, si no es nil, encierra el proceso en su perfil de sandbox
 	// (conRed: si puede abrir conexiones al exterior). Se llama UNA vez, justo
 	// antes de crear o restaurar la VM, que es cuando ya se sabe la política
@@ -119,6 +128,9 @@ func (s state) String() string {
 const (
 	maxConfigBody = 64 << 10
 	maxMMDSBody   = 1 << 20
+	// maxCredBody: 16 claves de hasta 4 KiB que el JSON puede escapar con
+	// \uXXXX (seis bytes por uno) caben de sobra.
+	maxCredBody = 1 << 20
 )
 
 type Server struct {
@@ -211,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /snapshot/load", s.putSnapshotLoad)
 	mux.HandleFunc("GET /kling/info", s.getInfo)
 	mux.HandleFunc("PUT /kling/network", s.putKlingNetwork)
+	mux.HandleFunc("PUT /kling/credentials", s.putKlingCredentials)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
 	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
@@ -802,6 +815,53 @@ func (s *Server) putKlingNetwork(w http.ResponseWriter, r *http.Request) {
 	noContent(w)
 }
 
+// putKlingCredentials fija el juego COMPLETO de credenciales del proxy de esta
+// máquina (sustituye el anterior; la lista vacía las quita todas) y desvía sus
+// dominios a la pasarela en el DNS. Las claves se quedan en la memoria de este
+// proceso: ni se escriben a disco ni se registran, y nada del invitado las ve
+// (su memoria vive en otro proceso, el auxiliar de Apple). Es la ruta que en
+// Linux no hace falta porque el proxy es una goroutine del propio daemon.
+func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Credentials []struct {
+			Env         string   `json:"env"`
+			Domain      string   `json:"domain"`
+			Placeholder string   `json:"placeholder"`
+			Secret      string   `json:"secret"`
+			Allow       []string `json:"allow,omitempty"`
+		} `json:"credentials"`
+	}
+	if err := decode(r, maxCredBody, &body); err != nil {
+		fault(w, err)
+		return
+	}
+	if s.d.Credentials == nil || !s.d.CredIP.IsValid() {
+		fault(w, errors.New("this kling-vz has no credential proxy"))
+		return
+	}
+	// Como en Linux: el desvío lo hace el DNS propio de allowlist. En otro
+	// modo el invitado resolvería por su cuenta (internet) o no tendría salida
+	// que el proxy pudiera romper (none).
+	if mode := s.d.Policy.Mode(); len(body.Credentials) > 0 && mode != egress.Allowlist {
+		fault(w, fmt.Errorf("credentials need egress allowlist (this machine has %s)", mode))
+		return
+	}
+	creds := make([]credproxy.Credential, 0, len(body.Credentials))
+	for _, c := range body.Credentials {
+		creds = append(creds, credproxy.Credential{
+			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
+			Allow: c.Allow,
+		})
+	}
+	doms, err := s.d.Credentials.SetCredentials(creds)
+	if err != nil {
+		fault(w, err)
+		return
+	}
+	s.d.Policy.SetCredHosts(doms, s.d.CredIP)
+	writeJSON(w, map[string]any{"domains": doms})
+}
+
 func (s *Server) putForwards(w http.ResponseWriter, r *http.Request) {
 	var f struct {
 		Ports []int `json:"ports"`
@@ -883,6 +943,9 @@ func (s *Server) ensureNet() error {
 		GuestMAC: s.spec.Network.GuestMAC,
 		Policy:   s.d.Policy,
 		Resolver: s.d.Resolver,
+	}
+	if s.d.Credentials != nil {
+		cfg.Credentials = s.d.Credentials
 	}
 	if c := s.spec.MMDSConfig; c != nil {
 		cfg.MMDS = s.store.Handler()

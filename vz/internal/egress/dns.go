@@ -65,9 +65,22 @@ func HostUpstream() string {
 // Process decide, reenvía, siembra y devuelve la respuesta cruda. Nunca
 // devuelve nil salvo que la consulta sea tan corta que no tenga cabecera.
 func (r *Resolver) Process(ctx context.Context, query []byte, viaTCP bool) []byte {
-	name, _, ok := ParseQuestion(query)
+	name, qtype, ok := ParseQuestion(query)
 	if !ok {
 		return RespondError(query, 1) // FORMERR
+	}
+	if ip, ok := r.Policy.CredHost(name); ok {
+		// Dominio con credencial: la única IP que el invitado debe usar para él
+		// es la del proxy (la pasarela). A se contesta con ella; el resto de
+		// tipos, AAAA incluido, con una respuesta vacía para que el cliente use
+		// IPv4 y no busque otro camino. No se reenvía ni se siembra: la IP real
+		// no entra en el conjunto, así que no hay salida directa que esquive al
+		// proxy. Va antes que AllowDNSName, como en el núcleo: el dominio con
+		// credencial no tiene por qué estar además en la lista.
+		if qtype == 1 {
+			return RespondA(query, ip, CredTTL)
+		}
+		return RespondError(query, 0) // NOERROR sin respuestas
 	}
 	if !r.Policy.AllowDNSName(name) {
 		// En none y con dominios no listados se contesta REFUSED en vez de
@@ -88,6 +101,33 @@ func (r *Resolver) Process(ctx context.Context, query []byte, viaTCP bool) []byt
 		}
 	}
 	return resp
+}
+
+// CredTTL es el TTL de la respuesta sintética de un dominio con credencial,
+// el mismo que credTTL del núcleo: corto, para que un cambio se note pronto.
+const CredTTL = 30
+
+// PublicIPv4 resuelve host por el mismo upstream que ve el invitado y devuelve
+// sus IPv4 permitidas como destino. Es el Lookup del proxy de credenciales: lo
+// que el proxy alcanza coincide con lo que el modo allowlist dejaría ver, y
+// ni un upstream envenenado ni uno que conteste 0.0.0.0 (que en macOS llega a
+// localhost) ni una IP del propio Mac llevan la clave a otro sitio.
+func (r *Resolver) PublicIPv4(ctx context.Context, host string) []string {
+	q := BuildQuery(host, 1)
+	if q == nil {
+		return nil
+	}
+	resp, err := r.Exchange(ctx, q, false)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, rec := range ExtractA(resp) {
+		if !IsForbiddenDest(rec.IP) {
+			out = append(out, rec.IP.String())
+		}
+	}
+	return out
 }
 
 // SeedStatic resuelve los dominios de la lista y mete sus IPs públicas como
@@ -287,6 +327,37 @@ func ExtractA(msg []byte) []ARecord {
 		off += rdlen
 	}
 	return out
+}
+
+// RespondA fabrica una respuesta con un único registro A para la pregunta de
+// query, como respondA del núcleo: cabecera y pregunta copiadas (sin la
+// sección adicional, p. ej. el OPT de EDNS) y la respuesta apuntando al nombre
+// por compresión.
+func RespondA(query []byte, ip netip.Addr, ttl uint32) []byte {
+	if len(query) < 12 || !ip.Is4() {
+		return RespondError(query, 2)
+	}
+	_, next, ok := readName(query, 12)
+	if !ok || next+4 > len(query) {
+		return RespondError(query, 1)
+	}
+	resp := append([]byte(nil), query[:next+4]...)
+	resp[2] |= 0x80                          // QR=1
+	resp[2] &^= 0x02                         // TC=0
+	resp[3] = 0x80                           // RA=1, RCODE=0
+	binary.BigEndian.PutUint16(resp[4:6], 1) // QDCOUNT
+	binary.BigEndian.PutUint16(resp[6:8], 1) // ANCOUNT
+	binary.BigEndian.PutUint16(resp[8:10], 0)
+	binary.BigEndian.PutUint16(resp[10:12], 0)
+	var rr [16]byte
+	binary.BigEndian.PutUint16(rr[0:2], 0xC00C) // puntero al nombre de la pregunta
+	binary.BigEndian.PutUint16(rr[2:4], 1)      // A
+	binary.BigEndian.PutUint16(rr[4:6], 1)      // IN
+	binary.BigEndian.PutUint32(rr[6:10], ttl)
+	binary.BigEndian.PutUint16(rr[10:12], 4)
+	ip4 := ip.As4()
+	copy(rr[12:16], ip4[:])
+	return append(resp, rr[:]...)
 }
 
 // RespondError fabrica una respuesta mínima a partir de la consulta con el

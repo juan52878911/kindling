@@ -1125,10 +1125,14 @@ través del MMDS de Firecracker (el servicio de metadatos de la microVM):
 kling machine secret <ref> -f store.json     # o el JSON por stdin
 ```
 
-El almacén lleva variables comunes y secretos por sesión indexados por `Mcp-Session-Id`;
-el puente le entrega a cada sesión los suyos. Una máquina que ha recibido secretos **ya
-no puede congelarse** — se impone, no se aconseja — así que ningún secreto acaba dentro
-de un fichero de snapshot.
+El almacén lleva **solo variables comunes**; se comparten con todas las sesiones. Una
+máquina que ha recibido secretos **ya no puede congelarse** — se impone, no se aconseja
+— así que ningún secreto acaba dentro de un fichero de snapshot.
+
+**Los secretos por sesión están retirados** (el id de sesión se elige dentro del invitado,
+así que todas las sesiones verían todos los secretos). Usa **credenciales de plantilla**
+en cambio para secretos compartidos, o usa el **proxy de credenciales** para aislamiento
+de claves.
 
 Lo que MMDS no evita: el código de dentro **lee** el secreto (el servidor MCP corre como
 root en su microVM) y puede sacarlo por un dominio permitido. Para una clave de API hay
@@ -1148,9 +1152,45 @@ El invitado recibe en `STRIPE_API_KEY` un **marcador** (`kling-cred-…`), no la
 resolver contesta `api.stripe.com` con la IP de un proxy del host; el SDK habla
 `http://api.stripe.com` (sin TLS hasta el proxy, por el veth local) y el proxy cambia el
 marcador por la clave —en las cabeceras (también dentro de `Authorization: Basic`), en la
-query y en cuerpos de hasta 1 MiB—, sale por HTTPS verificando el certificado y quita la
-clave de cualquier eco en la respuesta. Sin MITM: el invitado no confía en ninguna CA
-nuestra.
+query y en el cuerpo, sea del tamaño que sea y venga en flujo o no—, sale por HTTPS
+verificando el certificado y quita la clave de cualquier eco en la respuesta. Sin MITM: el
+invitado no confía en ninguna CA nuestra. Un cuerpo que tras la sustitución sigue por debajo
+de 1 MiB sale desde memoria con su `Content-Length`. Uno mayor sale chunked si el invitado
+lo mandó chunked (no hay longitud que prometer de todos modos); si el invitado declaró
+Content-Length, se derrama a un fichero temporal privado y se reenvía con el
+`Content-Length` exacto de ese fichero, porque hay proveedores de API que no aceptan una
+subida chunked.
+
+Además, la clave se puede limitar a las peticiones para las que existe. `-allow-request`
+(repetible) recibe `MÉTODO /ruta`; `*` casa dentro de un segmento de la ruta y un `/**`
+final casa cualquier resto. Cualquier otra petición a ese dominio recibe un 403 del proxy,
+antes de leer el cuerpo o de abrir conexión con el proveedor:
+
+```sh
+kling machine credential pagos -domain api.stripe.com -env STRIPE_API_KEY -f clave.txt \
+  -allow-request 'GET /v1/balance' -allow-request 'GET /v1/charges/*'
+```
+
+El método tiene que coincidir exactamente (`GET` no incluye `HEAD`). La ruta se compara
+después de decodificarla y pasarla por `path.Clean`, así que `/v1/../admin` es `/admin`, y
+al proveedor le llega esa ruta limpia, la misma que se comprobó. La query no se compara, y
+una entrada no puede fijar parámetros de query. Sin `-allow-request` se permite toda
+petición al dominio, como antes. La lista va con la clave: al rotar una clave hay que
+volver a pasar `-allow-request`, o la nueva queda sin restricciones (el CLI dice cuál de
+los dos casos aplica). `kling template credential` acepta el mismo flag.
+
+Con `-allow-request` de por medio, una petición cuya ruta CRUDA sea ambigua —una barra o un
+punto codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
+parámetro de ruta con `;`, o un segmento `.`/`..` sin decodificar— recibe un 403 sin
+normalizarla ni compararla: el proveedor es libre de leer esa ruta cruda de otro modo que
+`path.Clean`, y equivocarse firmaría una petición para una ruta que nunca se llegó a
+comprobar. Sin `-allow-request` esta comprobación no se hace.
+
+Los streams pueden durar mucho. El proxy no tiene un plazo total, solo tres límites: 60 s
+para las cabeceras de la respuesta, 120 s de **inactividad** (cualquier byte en cualquier
+sentido lo renueva) y un techo de 15 min por petición. Un LLM que emite SSE durante cinco
+minutos pasa. Uno que se atasca, o un invitado que gotea bytes para ocupar una plaza, se
+corta, y quien estaba al otro lado ve un error, no una respuesta que parece completa.
 
 El marcador no es un secreto: la capacidad es estar dentro de la red de esa máquina, no
 conocer la cadena. Por eso una máquina con credenciales **sí se congela**, despierta con
@@ -1184,8 +1224,13 @@ no evita: el invitado puede seguir **usando** la clave contra su dominio; eso lo
 clave misma (restringida, de solo lectura, con límites de gasto). Redactar el eco es
 defensa en profundidad (un proveedor serio no devuelve la credencial); una respuesta con
 una codificación que el proxy no puede inspeccionar (brotli, deflate) se rechaza con 502.
-En macOS aún no existe: el backend vz no tiene resolver en el host que desvíe el dominio
-(ver SECURITY.md).
+
+En macOS (backend vz) funciona igual visto desde el invitado: el `kling-vz` de cada
+máquina sirve el proxy y el desvío del DNS en su pasarela (172.16.0.1), dentro de su red
+de espacio de usuario. Cambia dónde vive la clave: el daemon se la entrega al `kling-vz`
+de esa máquina (mismo usuario, por su socket de API 0600), así que queda en el proceso
+que también maneja el tráfico de red del invitado, no en un daemon aparte. Qué supone
+eso, en SECURITY.md, sección 7.
 
 ---
 

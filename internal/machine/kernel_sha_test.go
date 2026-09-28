@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/digest"
 )
@@ -150,6 +151,9 @@ func TestCommitGrabaElKernelSHA256(t *testing.T) {
 func TestRunFromNoSeNiegaSiElKernelCambio(t *testing.T) {
 	t.Setenv("KLING_REQUIRE_SIGNED", "")
 	m := newTestManager(t)
+	// Sin RootfsSHA256/SnapSHA256 la integridad se salta y runFrom llega hasta
+	// el aviso de F2 (GuestIPv6Off, "no consta" aquí), que publica en el bus.
+	m.bus = events.New()
 	escribirKernel(t, m, "kernel nuevo, tras reconstruirlo con K1")
 	escribirSnapshot(t, m, "dorado", api.Snapshot{
 		KernelSHA256: strings.Repeat("a", 64), // el kernel con el que se congeló, ya no es el de hoy

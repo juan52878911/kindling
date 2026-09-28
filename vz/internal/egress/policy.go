@@ -87,6 +87,10 @@ var (
 	hostAddrsTime time.Time
 )
 
+// IsForbiddenDest es IsBlockedIP más las IPs del propio Mac: lo que ni el
+// invitado ni el proxy de credenciales deben alcanzar jamás.
+func IsForbiddenDest(ip netip.Addr) bool { return IsBlockedIP(ip) || isHostAddr(ip) }
+
 func isHostAddr(ip netip.Addr) bool {
 	hostAddrsMu.Lock()
 	defer hostAddrsMu.Unlock()
@@ -115,6 +119,13 @@ type Policy struct {
 	mode    Mode
 	domains []string
 	set     *IPSet
+
+	// Dominios con credencial (pkg/credproxy): el DNS los contesta con credIP,
+	// la del proxy, sin reenviar ni sembrar la IP real. Es lo que en Linux hace
+	// setCredHosts del resolver del núcleo. Set no los toca: la lista de
+	// dominios y las credenciales llegan por rutas distintas del API.
+	credHosts map[string]bool
+	credIP    netip.Addr
 }
 
 // NewPolicy empieza en none: si el núcleo nunca manda PUT /kling/network, la
@@ -159,7 +170,7 @@ func (p *Policy) AllowConn(dst netip.Addr) bool {
 	p.mu.RLock()
 	mode, set := p.mode, p.set
 	p.mu.RUnlock()
-	if IsBlockedIP(dst) || isHostAddr(dst) {
+	if IsForbiddenDest(dst) {
 		return false
 	}
 	switch mode {
@@ -190,6 +201,32 @@ func (p *Policy) AllowDNSName(name string) bool {
 		}
 	}
 	return false
+}
+
+// SetCredHosts fija los dominios que el DNS desvía al proxy de credenciales,
+// en ip. Sustituye los anteriores; con la lista vacía no se desvía nada.
+func (p *Policy) SetCredHosts(domains []string, ip netip.Addr) {
+	m := map[string]bool{}
+	for _, d := range NormalizeDomains(domains) {
+		m[d] = true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.credHosts, p.credIP = m, ip
+}
+
+// CredHost dice si name (exacto, sin subdominios, como el núcleo) tiene
+// credencial y, si la tiene, a qué IP se desvía. Solo en allowlist: fuera de
+// ese modo no hay proxy que valga, y desviar un nombre a él sería abrir una
+// salida en una máquina que no debe tenerla.
+func (p *Policy) CredHost(name string) (netip.Addr, bool) {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.mode != Allowlist || !p.credHosts[name] || !p.credIP.IsValid() {
+		return netip.Addr{}, false
+	}
+	return p.credIP, true
 }
 
 // NormalizeDomains pasa a minúsculas y quita el punto final y los vacíos.

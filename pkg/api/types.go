@@ -466,6 +466,26 @@ type Snapshot struct {
 	// seguridad.
 	KernelSHA256 string `json:"kernel_sha256,omitempty"`
 
+	// GuestIPv6Off dice si, al congelar este dorado, el kernel del invitado ya
+	// arrancaba con `ipv6.disable=1` (ver knet.BootArg en internal/net/net.go):
+	// es decir, si viene de un arranque en frío o de una cadena de commits que
+	// arranca en uno posterior a esa barrera. Campo nuevo y opcional: los
+	// dorados congelados antes de ella no lo llevan, y se leen como "no
+	// consta" (false), NO como "confirmado que sigue con IPv6 vivo" — no hay
+	// dónde comprobarlo a posteriori, porque la línea de arranque queda dentro
+	// de mem.file, ya congelada.
+	//
+	// Es diagnóstico, no un límite de seguridad: `applyIPv6Barrier` (defensa en
+	// profundidad en el namespace del host) cierra el paso igual a estos
+	// dorados, con o sin este campo. Lo que cambia es si el invitado, dentro de
+	// su propio kernel, todavía tiene el módulo IPv6 cargado. Ver
+	// Manager.avisoIPv6Invitado, que avisa una vez por dorado cuando falta.
+	//
+	// DELIBERADAMENTE fuera de Signature, por la misma razón que KernelSHA256
+	// (ver el comentario de ese campo, arriba, y contenidoFirmado en firma.go):
+	// cubrirlo invalidaría la firma de todo dorado anterior a este campo.
+	GuestIPv6Off bool `json:"guest_ipv6_off,omitempty"`
+
 	// Signature es el HMAC-SHA256, con la clave del host, de los hashes y la
 	// política del snapshot. Detecta manipulación y snapshots traídos de otro
 	// host, que los sha256 solos no detectan.
@@ -511,6 +531,11 @@ const (
 	EvStored    = "store.updated"
 	EvFailed    = "machine.failed"
 	EvResized   = "machine.resized"
+	// EvGuestIPv6 se publica una vez por dorado, la primera vez que se
+	// instancia (runFrom) uno sin GuestIPv6Off: el invitado conserva el
+	// módulo IPv6 de su kernel, aunque el namespace del host lo tenga
+	// bloqueado igual (applyIPv6Barrier). Ver Manager.avisoIPv6Invitado.
+	EvGuestIPv6 = "snapshot.guest_ipv6"
 )
 
 // ProcStat es la foto de recursos de UNA microVM.
@@ -849,10 +874,17 @@ func IsInsufficientMemory(err error) bool {
 // CredentialSpec es una credencial para el proxy de credenciales: la clave real
 // (Secret) se queda en el daemon; el invitado recibe en la variable Env un
 // marcador que el proxy cambia por la clave solo en peticiones a Domain.
+//
+// Allow, opcional, acota además QUÉ peticiones a Domain llevan la clave:
+// entradas "MÉTODO /ruta" ("GET /v1/balance", "POST /v1/files/**"; * es un
+// segmento, ** al final es cualquier resto). Vacío es todas. Una petición que
+// ninguna credencial del dominio permite recibe 403 sin salir del host. Al
+// rotar (misma Env) se sustituye junto con la clave: hay que repetirlo.
 type CredentialSpec struct {
-	Domain string `json:"domain"`
-	Env    string `json:"env"`
-	Secret string `json:"secret"`
+	Domain string   `json:"domain"`
+	Env    string   `json:"env"`
+	Secret string   `json:"secret"`
+	Allow  []string `json:"allow,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de

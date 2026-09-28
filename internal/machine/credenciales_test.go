@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const (
@@ -18,18 +21,16 @@ const (
 	credSecreto2 = "sk_live_LA_CLAVE_ROTADA"
 )
 
-// capturarRegistro sustituye knet.SetCredentials por un registro en memoria:
-// en el Mac no hay veth donde escuchar, y lo que se prueba aquí es lo que el
-// manager le entrega, no el proxy (que tiene sus tests en internal/net).
-func capturarRegistro(t *testing.T) *[][]knet.Credential {
+// capturarRegistro sustituye la entrega al proxy (knet.SetCredentials en
+// Linux, PUT /kling/credentials en macOS) por un registro en memoria: lo que se
+// prueba aquí es lo que el manager le entrega, no el proxy (que tiene sus
+// tests en pkg/credproxy y en vz/).
+func capturarRegistro(t *testing.T) *[][]credproxy.Credential {
 	t.Helper()
-	var got [][]knet.Credential
-	prevSin := sinProxyDeCredenciales
-	sinProxyDeCredenciales = false
-	t.Cleanup(func() { sinProxyDeCredenciales = prevSin })
+	var got [][]credproxy.Credential
 	prev := registrarCredenciales
-	registrarCredenciales = func(_ *knet.Net, creds []knet.Credential) error {
-		got = append(got, append([]knet.Credential(nil), creds...))
+	registrarCredenciales = func(_ context.Context, _ *fc.Client, _ *knet.Net, creds []credproxy.Credential) error {
+		got = append(got, append([]credproxy.Credential(nil), creds...))
 		return nil
 	}
 	t.Cleanup(func() { registrarCredenciales = prev })
@@ -42,7 +43,7 @@ func TestAlmacenDeCredenciales(t *testing.T) {
 	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	creds := []knet.Credential{{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto}}
+	creds := []credproxy.Credential{{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto}}
 	if err := m.guardarCredenciales("m1", creds); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestAlmacenDeCredenciales(t *testing.T) {
 		t.Fatal("el almacén está en claro")
 	}
 	back, err := m.cargarCredenciales("m1")
-	if err != nil || len(back) != 1 || back[0] != creds[0] {
+	if err != nil || len(back) != 1 || !reflect.DeepEqual(back[0], creds[0]) {
 		t.Fatalf("vuelta: %+v, %v", back, err)
 	}
 
@@ -116,7 +117,7 @@ func TestSetCredentialsGuardaFusionaYRota(t *testing.T) {
 		t.Fatalf("al proxy llegó %+v", *got)
 	}
 	ph := (*got)[0][0].Placeholder
-	if !strings.HasPrefix(ph, knet.PlaceholderPrefix) {
+	if !strings.HasPrefix(ph, credproxy.PlaceholderPrefix) {
 		t.Fatalf("marcador %q", ph)
 	}
 	patches := falso.llamadasA("PATCH", "/mmds")
@@ -145,7 +146,7 @@ func TestSetCredentialsGuardaFusionaYRota(t *testing.T) {
 	if len(*got) != 2 || len((*got)[1]) != 2 {
 		t.Fatalf("segunda entrega al proxy: %+v", *got)
 	}
-	porEnv := map[string]knet.Credential{}
+	porEnv := map[string]credproxy.Credential{}
 	for _, c := range (*got)[1] {
 		porEnv[c.Env] = c
 	}
@@ -225,7 +226,7 @@ func TestReentregarCredenciales(t *testing.T) {
 	if n, err := m.reentregarCredenciales(ctx, mc, nil); n != 0 || err != nil {
 		t.Fatalf("sin almacén: %d, %v", n, err)
 	}
-	creds := []knet.Credential{
+	creds := []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto},
 		{Env: "ORG", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "org"},
 	}
@@ -263,9 +264,6 @@ func TestReentregarCredenciales(t *testing.T) {
 // rehace el snapshot: el almacén vive aparte y sobrevive.
 func TestCredencialesDePlantilla(t *testing.T) {
 	m := newTestManager(t)
-	prevSin := sinProxyDeCredenciales
-	sinProxyDeCredenciales = false
-	t.Cleanup(func() { sinProxyDeCredenciales = prevSin })
 	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "none"})
 	escribirSnapshot(t, m, "svc-al", api.Snapshot{Egress: "allowlist", AllowDomains: []string{"example.org"}})
 	spec := []api.CredentialSpec{{Domain: "API.Example.com", Env: "KEY", Secret: credSecreto}}
@@ -331,6 +329,33 @@ func TestCredencialesDePlantilla(t *testing.T) {
 	}
 }
 
+// A2: el error de runFrom cuando el egress pedido no alcanza para las
+// credenciales de la plantilla debe listar sus dominios concretos, no un
+// "<its domains>" que obligue a ir a buscarlos a otro sitio.
+func TestRunFromCredencialesErrorListaDominios(t *testing.T) {
+	m := newTestManager(t)
+	capturarRegistro(t)
+	escribirSnapshot(t, m, "svc-al", api.Snapshot{Egress: "allowlist", AllowDomains: []string{"example.org"}})
+	spec := []api.CredentialSpec{{Domain: "api.example.com", Env: "KEY", Secret: credSecreto}}
+	if _, err := m.SetSnapshotCredentials("svc-al", spec, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Egress explícito "none": no debe heredar del snapshot, así que la
+	// comprobación de credenciales tiene que negarse y decir qué dominios hacen
+	// falta.
+	_, err := m.runFrom(context.Background(), api.RunRequest{From: "svc-al", Egress: "none"})
+	if err == nil {
+		t.Fatal("se esperaba un error: egress none con credenciales de plantilla")
+	}
+	if !strings.Contains(err.Error(), "-allow example.org") {
+		t.Errorf("el error no lista los dominios concretos: %v", err)
+	}
+	if strings.Contains(err.Error(), "its domains") {
+		t.Errorf("el error sigue diciendo <its domains> en vez de listarlos: %v", err)
+	}
+}
+
 // entregarCredenciales es lo que runFrom usa con las de plantilla: marcadores
 // nuevos por instancia, almacén propio de la máquina y MMDS con solo marcadores.
 func TestEntregarCredencialesDePlantillaAUnaInstancia(t *testing.T) {
@@ -349,7 +374,7 @@ func TestEntregarCredencialesDePlantillaAUnaInstancia(t *testing.T) {
 		t.Fatalf("al proxy: %+v", *got)
 	}
 	back, _ := m.cargarCredenciales("i1")
-	if len(back) != 1 || back[0] != creds[0] {
+	if len(back) != 1 || !reflect.DeepEqual(back[0], creds[0]) {
 		t.Fatalf("almacén de la instancia: %+v", back)
 	}
 	// Una segunda instancia recibe OTRO marcador: son por instancia.
@@ -359,5 +384,132 @@ func TestEntregarCredencialesDePlantillaAUnaInstancia(t *testing.T) {
 	creds2, _, err := m.entregarCredenciales(context.Background(), "i2", knet.Plan(2, "i2"), falso.cliente(), specs)
 	if err != nil || creds2[0].Placeholder == creds[0].Placeholder {
 		t.Fatalf("segunda instancia: %+v, %v", creds2, err)
+	}
+}
+
+// Un almacén escrito antes de que existiera Allow (sin la clave en el JSON) se
+// sigue leyendo, con Allow vacío: todo permitido, como entonces. Lo mismo el
+// de una plantilla.
+func TestAlmacenDeAntesDeAllowSeSigueLeyendo(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// El struct tal y como era, sellado igual que lo hacía el daemon.
+	type credencialV1 struct{ Env, Domain, Placeholder, Secret string }
+	sellado, err := m.sellar([]credencialV1{{"KEY", "api.example.com", "kling-cred-aa", credSecreto}}, "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := escribirSellado(m.credPath("m1"), sellado); err != nil {
+		t.Fatal(err)
+	}
+	back, err := m.cargarCredenciales("m1")
+	if err != nil || len(back) != 1 || back[0].Secret != credSecreto || back[0].Allow != nil {
+		t.Fatalf("almacén v1: %+v, %v", back, err)
+	}
+	if err := credproxy.ValidarCredenciales(back); err != nil {
+		t.Fatalf("una credencial v1 debería seguir siendo válida: %v", err)
+	}
+
+	type specV1 struct {
+		Domain string `json:"domain"`
+		Env    string `json:"env"`
+		Secret string `json:"secret"`
+	}
+	sellado, err = m.sellar([]specV1{{"api.example.com", "KEY", credSecreto}}, "snapshot:svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := escribirSellado(m.credSnapPath("svc"), sellado); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := m.cargarCredencialesPlantilla("svc")
+	if err != nil || len(specs) != 1 || specs[0].Allow != nil || specs[0].Secret != credSecreto {
+		t.Fatalf("plantilla v1: %+v, %v", specs, err)
+	}
+}
+
+// Allow viaja de la API al proxy y al almacén, normalizado; rotar sin él lo
+// quita (va con la clave); uno mal formado se rechaza sin tocar nada.
+func TestSetCredentialsConAllow(t *testing.T) {
+	m := newTestManager(t)
+	m.bus = events.New()
+	got := capturarRegistro(t)
+	falso := nuevoFcFalso(t)
+	mc := m.addForTest("m1")
+	m.mu.Lock()
+	mc.Egress = string(knet.EgressAllowlist)
+	m.socket["m1"] = falso.Sock
+	m.mu.Unlock()
+	if err := os.MkdirAll(m.dir("m1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	for _, mal := range [][]string{{"GET v1"}, {"GET /v1/../admin"}, {"CONNECT /"}, {"GET /v1/**/x"}} {
+		if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{
+			{Domain: "api.example.com", Env: "KEY", Secret: credSecreto, Allow: mal},
+		}); err == nil {
+			t.Errorf("Allow %q debería rechazarse", mal)
+		}
+	}
+	if len(*got) != 0 {
+		t.Fatalf("un rechazo no debe llegar al proxy: %+v", *got)
+	}
+
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{
+		{Domain: "api.example.com", Env: "KEY", Secret: credSecreto, Allow: []string{"get /v1/balance", "POST /v1/files/**"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET /v1/balance", "POST /v1/files/**"}
+	if len(*got) != 1 || !reflect.DeepEqual((*got)[0][0].Allow, want) {
+		t.Fatalf("al proxy llegó %+v", *got)
+	}
+	back, err := m.cargarCredenciales("m1")
+	if err != nil || !reflect.DeepEqual(back[0].Allow, want) {
+		t.Fatalf("almacén: %+v, %v", back, err)
+	}
+
+	// Rotar sin Allow: la credencial queda sin restricciones, con el mismo marcador.
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{
+		{Domain: "api.example.com", Env: "KEY", Secret: credSecreto2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c := (*got)[1][0]; c.Allow != nil || c.Secret != credSecreto2 || c.Placeholder != (*got)[0][0].Placeholder {
+		t.Errorf("rotación: %+v", c)
+	}
+}
+
+// Las credenciales de plantilla guardan Allow y cada instancia lo recibe.
+func TestCredencialesDePlantillaConAllow(t *testing.T) {
+	m := newTestManager(t)
+	got := capturarRegistro(t)
+	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "allowlist"})
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{
+		{Domain: "api.example.com", Env: "KEY", Secret: credSecreto, Allow: []string{"get /v1/*"}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{
+		{Domain: "api.example.com", Env: "ORG", Secret: "x", Allow: []string{"GET /v1/../x"}},
+	}, false); err == nil {
+		t.Error("un Allow inválido en plantilla debería rechazarse")
+	}
+	specs, err := m.cargarCredencialesPlantilla("svc")
+	if err != nil || len(specs) != 1 || !reflect.DeepEqual(specs[0].Allow, []string{"GET /v1/*"}) {
+		t.Fatalf("almacén de plantilla: %+v, %v", specs, err)
+	}
+	falso := nuevoFcFalso(t)
+	if err := os.MkdirAll(m.dir("i1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.entregarCredenciales(context.Background(), "i1", knet.Plan(1, "i1"), falso.cliente(), specs); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual((*got)[0][0].Allow, []string{"GET /v1/*"}) {
+		t.Errorf("la instancia recibió %+v", (*got)[0][0])
 	}
 }

@@ -356,6 +356,79 @@ else
   echo "  (skipping link/unlink: no Go here and no BRIDGE_BIN/STDIO_BIN given)"
 fi
 
+# ── 8. MMDS: el aviso de 'sessions' retirado, con un kling-bridge real ───────
+step "8. MMDS: aviso de 'sessions' retirado (e2e)"
+# TestSessionEnvIgnoresSessions (mmds_test.go) prueba la lógica de sessionEnv
+# aislada. Aquí se comprueba de punta a punta con un kling-bridge de verdad: un
+# almacén MMDS que trae "sessions" no vacío avisa UNA sola vez y el hijo arranca
+# igualmente con las claves de "env".
+#
+# NO se pasa por el gateway a propósito: el planificador puede repartir la
+# sesión a otra instancia del servicio, que no tiene el almacén, y la prueba se
+# quedaba sin comprobar nada. Se crea una instancia propia de $SVC (el dorado que
+# importó la sección 2), se le inyecta el MMDS y la sesión MCP se abre contra
+# ESA máquina por su IP: desde el host del daemon directamente, y si el script
+# corre en otra máquina, a través de SSH al host (la IP del invitado solo existe
+# allí).
+M8="e2e-mmds-$$"
+alInvitado() {
+  # alInvitado <ip> <fichero-cuerpo> <fichero-cabeceras>: initialize MCP contra
+  # el puente de la máquina, y el código HTTP por stdout.
+  local ip="$1" bodyfile="$2" headerfile="$3"
+  local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"1"}}}'
+  local code
+  code=$(curl -s -m 5 -D "$headerfile" -o "$bodyfile" -w '%{http_code}' -X POST \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+    -d "$init" "http://$ip:8080/mcp" 2>/dev/null)
+  if [ "$code" != "000" ] || [ -z "${KLING_HOST:-}" ] || [ "${KLING_HOST#ssh://}" = "$KLING_HOST" ]; then
+    echo "$code"; return
+  fi
+  # La IP no se alcanza desde aquí: se repite desde el host del daemon.
+  ssh "${KLING_HOST#ssh://}" "curl -s -m 5 -D - -o /dev/null -w '\n%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -d '$init' http://$ip:8080/mcp" >"$headerfile" 2>/dev/null
+  tail -n1 "$headerfile"
+}
+
+if $KLING run -from "$SVC" -name "$M8" -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+  ip8=$($KLING inspect "$M8" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ip",""))' 2>/dev/null)
+  MARCADOR="e2e-mmds-$$"
+  store8="{\"env\":{\"E2E_MMDS_VAR\":\"$MARCADOR\"},\"sessions\":{\"fake-session\":{\"SECRET\":\"no-me-inyectes\"}}}"
+  out=$(printf '%s' "$store8" | $KLING machine secret "$M8" 2>&1)
+  contiene "$out" "secrets injected" && ok "8: MMDS con env + sessions no vacío inyectado en $M8" \
+    || bad "8: kling machine secret $M8" "\"secrets injected\"" "$out"
+
+  body8=$(mktemp); hdr8=$(mktemp)
+  code=""
+  # El puente puede tardar un momento en escuchar tras el run: unos intentos.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code=$(alInvitado "$ip8" "$body8" "$hdr8")
+    [ "$code" = "200" ] && break
+    sleep 1
+  done
+  sid8=$(sessionOf "$hdr8")
+  if [ "$code" = "200" ] && [ -n "$sid8" ]; then
+    ok "8: sesión MCP abierta directamente contra $M8 ($ip8)"
+  else
+    bad "8: initialize contra $M8" "HTTP 200 con sesión" "HTTP $code"
+  fi
+
+  logs8=$($KLING logs -tail 0 "$M8" 2>&1)
+  avisos=$(printf '%s\n' "$logs8" | grep -c "field 'sessions' is deprecated")
+  if [ "$avisos" = "1" ]; then
+    ok "8: 'sessions' retirado se avisa exactamente una vez en los logs de $M8"
+  else
+    bad "8: aviso de 'sessions' en los logs" "exactamente 1 línea" "$avisos línea(s):\n$logs8"
+  fi
+  contiene "$logs8" "MMDS secret(s) injected into the environment" \
+    && ok "8: el hijo arrancó con el 'env' del MMDS (según el log del bridge)" \
+    || bad "8: inyección de 'env' en el log" "\"MMDS secret(s) injected into the environment\"" "$logs8"
+  rm -f "$body8" "$hdr8"
+  $KLING rm -f "$M8" >/dev/null 2>&1
+else
+  bad "8: run -from $SVC" "una instancia propia" "no arrancó"
+fi
+
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fail(s)\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

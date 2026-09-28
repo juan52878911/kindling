@@ -261,6 +261,29 @@ func resolveCPUPct(fs *flag.FlagSet, pct, old int) int {
 	return pct
 }
 
+// egressForRun decide qué egress y qué dominios mandar en la petición de
+// arranque. Con -from y sin -egress explícito en la línea de comandos, se
+// mandan vacíos para que runFrom() (internal/machine/snapshot.go) herede la
+// política de la plantilla: sin esto, una plantilla con credenciales —que
+// exige egress allowlist— obligaba a repetir -egress allowlist -allow a mano
+// en cada instancia, aunque la plantilla ya llevara esos datos consigo.
+// Sin -from, o con -egress dado explícitamente, se mantiene el defecto de
+// siempre: flag > configuración > "none".
+func egressForRun(fs *flag.FlagSet, from, egress, allow string, cfg *config.Config) (string, []string) {
+	if from != "" {
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "egress" {
+				explicit = true
+			}
+		})
+		if !explicit {
+			return "", nil
+		}
+	}
+	return config.Or(egress, cfg.Defaults.Egress, "none"), splitDomains(allow)
+}
+
 // hostOf resuelve a qué daemon hablar.
 func hostOf(flagValue string) string { return loadConfig().Host(flagValue) }
 
@@ -386,6 +409,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	egressReq, allowReq := egressForRun(fs, *from, *egress, *allow, cfg)
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
 		From:  *from,
@@ -395,8 +419,8 @@ func cmdRun(args []string) error {
 		VCPUs:        config.Or(*cpus, cfg.Defaults.VCPUs, 1),
 		MemMiB:       config.Or(*mem, cfg.Defaults.MemMiB, 256),
 		MemMaxMiB:    *memMax,
-		Egress:       config.Or(*egress, cfg.Defaults.Egress, "none"),
-		AllowDomains: splitDomains(*allow),
+		Egress:       egressReq,
+		AllowDomains: allowReq,
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
 		CPUPct:       config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
 		Labels:       labels.merge(*service),
@@ -751,17 +775,20 @@ func cmdSqueeze(args []string) error {
 	return nil
 }
 
-// cmdMMDS es `kling machine secret` (antes `mmds`): inyecta un secreto de
-// sesión en una microVM viva por MMDS. El store es
-// un documento JSON que se lee de -f o de stdin. Es sobre todo para pruebas en el
-// lab: en producción quien inyecta es el gateway al resolver una sesión.
+// cmdMMDS es `kling machine secret` (antes `mmds`): inyecta secretos comunes
+// en una microVM viva por MMDS. El store es un documento JSON que se lee de -f
+// o de stdin. Es sobre todo para pruebas en el lab: en producción quien inyecta
+// es el gateway al resolver una máquina.
 //
 // Esquema del store (lo entiende el bridge de dentro):
 //
 //	{
-//	  "env": { "VAR_COMUN": "valor" },
-//	  "sessions": { "<Mcp-Session-Id>": { "TOKEN": "secreto-de-esa-sesion" } }
+//	  "env": { "VAR_COMUN": "valor" }
 //	}
+//
+// El campo "sessions" está RETIRADO (no es seguro): se sigue aceptando para
+// atrás-compatibilidad, pero se ignora. Ver pkg/guest/mmds.go para alternativas
+// seguras (credenciales de plantilla, proxy de credenciales, VM efímera).
 //
 // El secreto NO viaja por la línea de comandos (cualquiera lee /proc/<pid>/cmdline):
 // se lee de un fichero o de la entrada estándar.
@@ -817,11 +844,13 @@ func cmdCredential(args []string) error {
 	domain := fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com")
 	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
 	file := fs.String("f", "", "file with the key (default: stdin)")
+	var allow stringsFlag
+	fs.Var(&allow, "allow-request", allowRequestHelp)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || *domain == "" || *env == "" {
-		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-f keyfile]  (reads stdin if no -f)")
+		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)")
 	}
 	secret, err := leerClave(*file)
 	if err != nil {
@@ -831,13 +860,14 @@ func cmdCredential(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	mc, err := api.NewClient(hostOf(*host)).SetCredentials(ctx, fs.Arg(0), api.CredentialsRequest{
-		Credentials: []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret}},
+		Credentials: []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret, Allow: allow}},
 	})
 	if err != nil {
 		return err
 	}
 	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
 		mc.ID[:12], *env, strings.ToLower(*domain))
+	fmt.Printf("      %s\n", describirAllow(allow))
 	fmt.Printf("      point the SDK at http://%s (the proxy adds TLS); the key survives freeze/thaw and daemon restarts\n",
 		strings.ToLower(*domain))
 	return nil

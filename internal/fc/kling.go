@@ -34,6 +34,18 @@ type KlingNetwork struct {
 	AllowDomains []string `json:"allow_domains,omitempty"`
 }
 
+// KlingCredential es una credencial del proxy de credenciales de kling-vz
+// (PUT /kling/credentials). Secret es la clave REAL: viaja por el socket de la
+// API (0600, del usuario) y se queda en la memoria del ayudante, nunca en la
+// del invitado (SECURITY.md §7).
+type KlingCredential struct {
+	Env         string   `json:"env"`
+	Domain      string   `json:"domain"`
+	Placeholder string   `json:"placeholder"`
+	Secret      string   `json:"secret"`
+	Allow       []string `json:"allow,omitempty"`
+}
+
 // doOut es do() leyendo además el cuerpo de la respuesta en out (si no es nil).
 func (c *Client) doOut(ctx context.Context, method, path string, body, out any) error {
 	var buf bytes.Buffer
@@ -82,6 +94,15 @@ func (c *Client) KlingInfo(ctx context.Context) (*KlingInfo, error) {
 // InstanceStart o de snapshot/load: sin ella el ayudante aplica "none".
 func (c *Client) SetKlingNetwork(ctx context.Context, n KlingNetwork) error {
 	return c.doOut(ctx, http.MethodPut, "/kling/network", n, nil)
+}
+
+// SetKlingCredentials fija el juego COMPLETO de credenciales del proxy de la
+// máquina (sustituye el anterior). Exige que la política ya sea allowlist.
+func (c *Client) SetKlingCredentials(ctx context.Context, creds []KlingCredential) error {
+	if creds == nil {
+		creds = []KlingCredential{}
+	}
+	return c.doOut(ctx, http.MethodPut, "/kling/credentials", map[string]any{"credentials": creds}, nil)
 }
 
 // KlingForwards pide un puerto de loopback por cada puerto del invitado y

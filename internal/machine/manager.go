@@ -187,6 +187,12 @@ type Manager struct {
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
 
+	// ipv6Avisado recuerda, por nombre de dorado, si ya se avisó (log + evento)
+	// de que sus instancias conservan el módulo IPv6 del kernel del invitado
+	// (F2: dorados congelados antes de la barrera IPv6, sin GuestIPv6Off). Un
+	// aviso por dorado, no uno por runFrom: igual que resyncAvisado.
+	ipv6Avisado sync.Map
+
 	// redMontada son las máquinas cuya red (namespace, veth, tap y reglas)
 	// montó ESTE proceso del daemon y sigue en pie. Freeze ya no la desmonta:
 	// Thaw la reutiliza si está aquí y el namespace sigue existiendo, y se
@@ -1859,8 +1865,9 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 }
 
 // SetCredentials entrega credenciales al proxy de credenciales de una máquina
-// viva (internal/net/credproxy.go). La clave real se queda en el daemon —en
-// memoria y cifrada en el directorio de la máquina (ver credenciales.go)—; al
+// viva (pkg/credproxy, servido por internal/net en Linux y por su kling-vz en
+// macOS). La clave real se queda en el host —en memoria del daemon (o de
+// kling-vz) y cifrada en el directorio de la máquina (ver credenciales.go)—; al
 // invitado le llega por MMDS (env) un marcador en la variable que pide cada
 // credencial, y el proxy lo cambia por la clave solo en peticiones a su
 // dominio. Así un servidor comprometido no puede leer la clave, sacarla a otro
@@ -1874,13 +1881,10 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 // conserva su marcador (el entorno de un proceso no cambia después de exec).
 //
 // A diferencia de PutMMDS, NO marca HasSecrets: lo que hay en la RAM del
-// invitado es el marcador, y el marcador no es un secreto (ver la cabecera de
-// credproxy.go). La máquina se puede congelar, y al descongelarla Thaw vuelve
+// invitado es el marcador, y el marcador no es un secreto (ver la documentación de
+// pkg/credproxy). La máquina se puede congelar, y al descongelarla Thaw vuelve
 // a entregar las credenciales desde su almacén.
 func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.CredentialSpec) (*api.Machine, error) {
-	if sinProxyDeCredenciales {
-		return nil, errSinProxyDeCredenciales
-	}
 	if len(specs) == 0 {
 		return nil, errors.New("no credentials given")
 	}
