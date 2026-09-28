@@ -625,8 +625,8 @@ kling volume ls
 ```
 
 ```
-NAME     LOGICAL   ON DISK   USED BY
-notas    2.0G      4.0M      notas-a3f9
+NAME     LOGICAL   ON DISK   SNAPS   USED BY
+notas    2.0G      4.0M      0       notas-a3f9
 ```
 
 **Por qué un disco y no un directorio del host.** La petición natural es "monta
@@ -666,6 +666,59 @@ el daemon pide al invitado que vuelque su caché a disco antes de matarlo. Sin l
 el sistema de ficheros queda inconsistente y sin nada que reproducir; sin lo segundo,
 pierdes justo lo último escrito. Cada arranque va precedido de un `e2fsck -p`, que en un
 volumen sano cuesta milisegundos.
+
+## Snapshots y vuelta atrás
+
+Un volumen se puede copiar en un punto con nombre y devolver a él más tarde: antes de una
+migración, antes de soltar a un agente sobre él, antes de actualizar el servidor que lo usa.
+
+```sh
+kling volume snapshot notas antes-de-migrar      # nombre opcional: hora UTC, 20260928-153012
+kling volume snapshots notas
+kling volume restore notas antes-de-migrar       # pregunta antes; -f para no preguntar
+kling volume restore notas undo                  # marcha atrás: vuelve a lo que había
+kling volume rm notas@antes-de-migrar            # borra un snapshot
+```
+
+**Receta de vuelta atrás.** Parar (o `kling rm`) lo que monta el volumen, restaurar y volver a
+arrancar:
+
+```sh
+kling volume snapshot notas pre-upgrade
+# ... la actualización sale mal ...
+kling rm notas-a3f9                              # una congelada sigue teniéndolo montado
+kling volume restore -f notas pre-upgrade
+kling run -name apuntes -volume notas:/data
+```
+
+**Coherente sin congelar el sistema de ficheros.** No hay `fsfreeze` en caliente dentro del
+invitado, así que la misma regla que decide quién monta decide cuándo una copia es segura: un
+snapshot solo se toma sin nadie que **escriba** (los lectores no cambian ningún bloque), y un
+restore solo sin nadie que lo use. Una máquina congelada o warm cuenta: sigue teniendo el
+volumen montado, con la caché de ext4 dentro de la memoria congelada. Mientras dura la copia el
+volumen queda reservado igual que lo reserva una máquina que arranca, así que un `run` que
+llegue a medias se rechaza con "being snapshotted" o "being restored".
+
+**Restore guarda un undo.** Antes de sobrescribir, el contenido actual va al snapshot
+reservado `undo`, así que un restore equivocado se deshace con otro. Solo se guarda el del
+último restore. Hasta 16 snapshots por volumen, más `undo`; el recolector no los toca nunca.
+`kling volume rm <vol>` se niega mientras haya alguno, y `-snapshots` se los lleva también.
+
+**Lo que cuesta un snapshot depende del sistema de ficheros bajo `$KLING_ROOT`.** kling pide
+primero una copia que comparta bloques y dice cuál obtuvo (`reflink`, `clone` o `copy`):
+
+- **XFS** (creado con `reflink=1`, el defecto desde xfsprogs 5.1) y **Btrfs**: `cp --reflink`
+  comparte los bloques, así que el snapshot es instantáneo y no ocupa nada hasta que el
+  volumen diverge de él.
+- **APFS** (macOS): `cp -c` usa clonefile, con el mismo efecto.
+- **ext4**: no hay reflink, así que el snapshot es una copia completa, dispersa, de lo
+  asignado. Antes de hacerla, kling comprueba que cabe: si se comería el suelo de disco libre
+  (`KLING_MIN_FREE_DISK_MIB`) o el hueco hasta la marca alta del recolector, se niega con 507
+  en vez de llenar el disco que necesitan todas las microVMs.
+
+Los snapshots viven en `volumes/snapshots/<vol>/`, de root, con directorios `0700` y ficheros
+`0600`: el VMM no los lee nunca, así que uno comprometido no puede reescribir el pasado al que
+se vuelve. Todavía no hay `run -volume notas@snap`: se restaura y luego se monta.
 
 ## Una biblioteca de paquetes compartida
 
@@ -712,9 +765,9 @@ kling mcp import mi-servicio -volume data:/data -volume libs:/libs:ro
 ```
 
 ```
-NAME     LOGICAL   ON DISK   USED BY
-data     2.0G      97M       mi-servicio-1a98a4 (writing)
-libs     2.0G      109M      mi-servicio-1a98a4, otra-mas
+NAME     LOGICAL   ON DISK   SNAPS   USED BY
+data     2.0G      97M       0       mi-servicio-1a98a4 (writing)
+libs     2.0G      109M      0       mi-servicio-1a98a4, otra-mas
 ```
 
 Cuatro es el techo, porque cada uno es un disco y los discos se nombran por letra.

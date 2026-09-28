@@ -620,8 +620,8 @@ kling volume ls
 ```
 
 ```
-NAME     LOGICAL   ON DISK   USED BY
-notes    2.0G      4.0M      notes-a3f9
+NAME     LOGICAL   ON DISK   SNAPS   USED BY
+notes    2.0G      4.0M      0       notes-a3f9
 ```
 
 **Why a disk and not a host directory.** The natural request is "mount `~/notes` inside".
@@ -658,6 +658,58 @@ asks the guest to flush its cache to disk before killing it. Without the first, 
 filesystem is left inconsistent and with nothing to replay; without the second, you lose
 exactly what was written last. Every boot is preceded by an `e2fsck -p`, which on a healthy
 volume costs milliseconds.
+
+## Snapshots and rollback
+
+A volume can be copied to a named point and brought back to it later: before a migration,
+before letting an agent loose on it, before an upgrade of the server that owns it.
+
+```sh
+kling volume snapshot notes before-migration     # name optional: UTC time, 20260928-153012
+kling volume snapshots notes
+kling volume restore notes before-migration      # asks first; -f to skip
+kling volume restore notes undo                  # changed your mind: back to what it was
+kling volume rm notes@before-migration           # remove one snapshot
+```
+
+**Rollback recipe.** Stop (or `kling rm`) whatever mounts the volume, restore, start it again:
+
+```sh
+kling volume snapshot notes pre-upgrade
+# ... the upgrade goes wrong ...
+kling rm notes-a3f9                              # a frozen machine still has it mounted
+kling volume restore -f notes pre-upgrade
+kling run -name jottings -volume notes:/data
+```
+
+**Consistent without freezing the filesystem.** There is no live `fsfreeze` inside the
+guest, so the same rule that decides who mounts decides when a copy is safe: a snapshot is
+taken only while nobody **writes** (readers are fine, they do not change a block), and a
+restore only while nobody uses the volume at all. A frozen or warm machine counts: it still
+has the volume mounted, with its ext4 cache inside the frozen memory. While the copy runs,
+the volume is reserved the same way a booting machine reserves it, so a `run` that arrives
+halfway is turned down with "being snapshotted" or "being restored".
+
+**Restore keeps an undo.** Before overwriting, the current contents go to the reserved
+snapshot `undo`, so a wrong restore is undone with another one. Only the last restore is kept
+there. Up to 16 snapshots per volume, plus `undo`; the garbage collector never touches them.
+`kling volume rm <vol>` refuses while any exist, and `-snapshots` removes them too.
+
+**What a snapshot costs depends on the filesystem under `$KLING_ROOT`.** kling asks for a
+block-sharing copy first and says which one it got (`reflink`, `clone` or `copy`):
+
+- **XFS** (created with `reflink=1`, the default since xfsprogs 5.1) and **Btrfs**: `cp
+  --reflink` shares the blocks, so the snapshot is instant and costs nothing until the
+  volume diverges from it.
+- **APFS** (macOS): `cp -c` uses clonefile, same effect.
+- **ext4**: there is no reflink, so the snapshot is a full, sparse copy of what is allocated.
+  Before one, kling checks it fits: if the copy would eat into the free-disk floor
+  (`KLING_MIN_FREE_DISK_MIB`) or the gap to the collector's high mark, it refuses with 507
+  instead of filling the disk that every microVM needs.
+
+Snapshots live in `volumes/snapshots/<vol>/`, owned by root with `0700` directories and
+`0600` files: the VMM never reads them, so a compromised one cannot rewrite the past you
+roll back to. There is no `run -volume notes@snap` yet: restore, then mount.
 
 ## A shared package library
 
@@ -703,9 +755,9 @@ kling mcp import my-service -volume data:/data -volume libs:/libs:ro
 ```
 
 ```
-NAME     LOGICAL   ON DISK   USED BY
-data     2.0G      97M       my-service-1a98a4 (writing)
-libs     2.0G      109M      my-service-1a98a4, another-one
+NAME     LOGICAL   ON DISK   SNAPS   USED BY
+data     2.0G      97M       0       my-service-1a98a4 (writing)
+libs     2.0G      109M      0       my-service-1a98a4, another-one
 ```
 
 Four is the ceiling, because each one is a disk and disks are named by letter.

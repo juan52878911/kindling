@@ -498,7 +498,35 @@ if k run -name "$CR-none" -image "$IMG" -mem "$MEM" >/dev/null 2>&1; then
   k rm -f "$CR-none" >/dev/null 2>&1
 fi
 
-# ── 7. reinicio del daemon y kill -9 ─────────────────────────────────────────
+# ── 6d. snapshots de volumen ─────────────────────────────────────────────────
+# En APFS el snapshot es un clonefile (modo "clone"): instantáneo y sin ocupar
+# nada hasta que diverge. Escribir, snapshot, cambiar, restore, leer, undo.
+step "6d. volume snapshots (clonefile)"
+SV="$P-sv"
+if k volume create "$SV" -size 64M >/dev/null 2>&1; then
+  vw() { k run -name "$SV-w" -image "$IMG" -mem "$MEM" -volume "$SV" -allow-exec >/dev/null 2>&1 &&
+    k exec "$SV-w" -- sh -c "echo $1 > /data/f && sync" >/dev/null 2>&1; k rm "$SV-w" >/dev/null 2>&1; }
+  vr() { k run -name "$SV-r" -image "$IMG" -mem "$MEM" -volume "$SV:/data:ro" -allow-exec >/dev/null 2>&1 &&
+    k exec "$SV-r" -- cat /data/f 2>&1; k rm "$SV-r" >/dev/null 2>&1; }
+  vw v1
+  out=$(k volume snapshot "$SV" one 2>&1)
+  contiene "$out" "(clone" && ok "snapshot on APFS is a clone" || bad "volume snapshot" "taken (clone, ...)" "$out"
+  vw v2
+  out=$(k volume restore -f "$SV" one 2>&1)
+  contiene "$out" "restored" && ok "restore" || bad "volume restore" "restored" "$out"
+  out=$(vr); [ "$out" = "v1" ] && ok "guest reads v1 after restore" || bad "restored contents" "v1" "$out"
+  k volume restore -f "$SV" undo >/dev/null 2>&1
+  out=$(vr); [ "$out" = "v2" ] && ok "restoring undo brings v2 back" || bad "undo" "v2" "$out"
+  perms=$(stat -f '%Lp' "$ROOT/volumes/snapshots" "$ROOT/volumes/snapshots/$SV" "$ROOT/volumes/snapshots/$SV/one.ext4" | tr '\n' ' ')
+  [ "$perms" = "700 700 600 " ] && ok "snapshot perms 0700/0700/0600" || bad "snapshot perms" "700 700 600" "$perms"
+  out=$(k volume rm -f "$SV" 2>&1)
+  contiene "$out" "-snapshots" && ok "volume rm refuses while snapshots exist" || bad "volume rm" "refusal naming -snapshots" "$out"
+  k volume rm -f -snapshots "$SV" >/dev/null 2>&1
+else
+  info "skipped: volume create failed (e2fsprogs missing?)"
+fi
+
+# ── 7. reinicio del daemon y kill -9─────────────────────────────────────────
 step "7. daemon restart, SIGKILL of a kling-vz"
 pid_before=$(machine_field "$P-r3" pid)
 stop_daemon
