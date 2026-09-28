@@ -88,8 +88,18 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - **El marcador se sustituye en cualquier cuerpo de petición.** Antes solo en cuerpos de
   hasta 1 MiB con longitud declarada; uno chunked o mayor se reenviaba sin tocar. Ahora
   se sustituye en flujo con la ventana del redactor puesta al revés, leyendo el cuerpo a
-  trozos de 4 KiB. Lo retenido por petición sigue siendo como mucho 1 MiB: si el cuerpo
-  ya sustituido cabe en él, sale con su `Content-Length`; si no, sale chunked.
+  trozos de 4 KiB. Lo retenido EN MEMORIA por petición sigue siendo como mucho 1 MiB: si
+  el cuerpo ya sustituido cabe en él, sale con su `Content-Length`.
+- **Un cuerpo grande con Content-Length ya no sale chunked.** Si tras sustituir el
+  marcador el cuerpo pasa de 1 MiB, antes salía chunked aunque el invitado hubiera
+  declarado `Content-Length`, y hay proveedores de API que rechazan una subida chunked.
+  Ahora, cuando el invitado SÍ declaró `Content-Length` (no llegó chunked), lo que pasa
+  de 1 MiB se derrama a un fichero temporal (nombre aleatorio, 0600, en
+  `$KLING_ROOT/tmp` si el daemon lo tiene o `os.TempDir()` si no, borrado al terminar la
+  petición pase lo que pase) y se reenvía con el `Content-Length` exacto de ese fichero.
+  Sin Content-Length (chunked del invitado) sigue saliendo chunked, que es lo que ya
+  hacía: no hay una longitud que prometer de todos modos. Sin subir la memoria retenida
+  por petición.
 - **Permisos por método y ruta en cada credencial.** `-allow-request 'GET /v1/balance'`
   (repetible) en `kling machine credential` y `kling template credential`, y `allow` en
   la API. El método se compara exacto; en la ruta, `*` casa dentro de un segmento y `**`

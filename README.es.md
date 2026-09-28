@@ -1155,7 +1155,11 @@ marcador por la clave —en las cabeceras (también dentro de `Authorization: Ba
 query y en el cuerpo, sea del tamaño que sea y venga en flujo o no—, sale por HTTPS
 verificando el certificado y quita la clave de cualquier eco en la respuesta. Sin MITM: el
 invitado no confía en ninguna CA nuestra. Un cuerpo que tras la sustitución sigue por debajo
-de 1 MiB sale con su `Content-Length`; uno mayor sale chunked.
+de 1 MiB sale desde memoria con su `Content-Length`. Uno mayor sale chunked si el invitado
+lo mandó chunked (no hay longitud que prometer de todos modos); si el invitado declaró
+Content-Length, se derrama a un fichero temporal privado y se reenvía con el
+`Content-Length` exacto de ese fichero, porque hay proveedores de API que no aceptan una
+subida chunked.
 
 Además, la clave se puede limitar a las peticiones para las que existe. `-allow-request`
 (repetible) recibe `MÉTODO /ruta`; `*` casa dentro de un segmento de la ruta y un `/**`

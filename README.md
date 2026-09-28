@@ -1138,7 +1138,10 @@ the placeholder for the key — in headers (inside `Authorization: Basic` too), 
 string and in request bodies of any size, streamed or not —, goes out over HTTPS verifying
 the certificate, and strips the key from any echo in the response. No MITM: the guest
 trusts no CA of ours. A body that is still under 1 MiB after the swap goes out with its
-`Content-Length`; a bigger one goes out chunked.
+`Content-Length` from memory. A bigger one goes out chunked if the guest sent it chunked
+(there's no length to promise either way); if the guest declared a `Content-Length`, it
+is spooled to a private temp file instead and forwarded with that file's exact
+`Content-Length`, since some API providers reject a chunked upload.
 
 The key can also be limited to the requests it is meant for. `-allow-request` (repeatable)
 takes `METHOD /path`; `*` matches within one path segment and a final `/**` matches any

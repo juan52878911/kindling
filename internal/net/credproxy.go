@@ -16,6 +16,8 @@ import (
 	"fmt"
 	stdnet "net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 
@@ -92,8 +94,27 @@ func startCredProxy(n *Net) (*credProxy, error) {
 // lo mismo que el modo allowlist dejaría ver.
 func newCredProxy() *credProxy {
 	return &credProxy{proxy: credproxy.New(credproxy.Options{
-		Lookup: func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
+		Lookup:  func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
+		TempDir: credTempDir(),
 	})}
+}
+
+// credTempDir es $KLING_ROOT/tmp, creado con permisos 0700 si hace falta: un
+// cuerpo grande con Content-Length se derrama ahí con la clave real dentro
+// (ver pkg/credproxy/cuerpo.go), y ese directorio solo lo lee el daemon (el
+// dueño de KLING_ROOT), a diferencia de un /tmp que comparte con cualquier
+// otra cosa del host. Sin KLING_ROOT, o si no se puede crear, "": el proxy cae
+// en os.TempDir() por su cuenta.
+func credTempDir() string {
+	root := os.Getenv("KLING_ROOT")
+	if root == "" {
+		return ""
+	}
+	dir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	return dir
 }
 
 func stopCredProxy(ns string) {
