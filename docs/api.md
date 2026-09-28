@@ -125,7 +125,31 @@ permisos `0600` porque el spec puede llevar secretos.
 | `GET /volumes` | lista |
 | `POST /volumes` | crea (`name`, `size_mib`) |
 | `POST /volumes/{name}/populate` | instala paquetes dentro con una microVM de un solo uso |
-| `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no) |
+| `DELETE /volumes/{name}` | lo borra si nada lo usa (409 si no); con snapshots, 409 salvo `?snapshots=1`, que se los lleva también |
+| `GET /volumes/{name}/snapshots` | lista sus snapshots, del más antiguo al último (404 si no existe el volumen) |
+| `POST /volumes/{name}/snapshots` | toma uno (`name`, opcional: hora UTC `20260928-153012`) |
+| `POST /volumes/{name}/restore` | lo devuelve a un snapshot (`snapshot`); lo anterior queda en `undo` |
+| `DELETE /volumes/{name}/snapshots/{snap}` | borra un snapshot |
+
+`GET /volumes` trae además `snapshots`, cuántos tiene cada uno (`undo` incluido).
+
+**Snapshots de volumen.** Un snapshot solo se toma sin escritores (los lectores no
+cambian bloques) y un restore solo sin ningún usuario; una máquina congelada o warm
+cuenta, porque sigue teniendo el volumen montado. Mientras dura, el volumen queda
+reservado y un arranque que llegue a medias se rechaza. `POST .../snapshots` devuelve
+el `VolumeSnapshot` (`volume`, `name`, `created_at`, `size_bytes`, `used_bytes`,
+`undo`, `mode`); `POST .../restore` devuelve `{volume, snapshot, mode, undo}`, con
+`undo` el snapshot que guardó el estado previo. `mode` dice cómo se copió: `reflink`
+(XFS/Btrfs), `clone` (APFS) o `copy` (copia completa y dispersa).
+
+Códigos: `400` nombre inválido (los dos siguen la regla de los volúmenes; `undo` está
+reservado para crear), `404` volumen o snapshot inexistente, `409` en uso, otra
+operación en curso sobre el mismo volumen, nombre repetido o tope de 16 snapshots
+(sin contar `undo`), `507` si hace falta una copia completa y no cabe sin comerse el
+suelo de disco libre (`KLING_MIN_FREE_DISK_MIB`) o el hueco hasta la marca alta del
+gc. Los snapshots viven en `volumes/snapshots/<vol>/<snap>.ext4`, de root y `0600`.
+A propósito, ni restore ni el borrado de snapshots se exponen como herramienta MCP:
+son operaciones destructivas del operador, no del agente.
 
 ### `POST /machines/{ref}/pause`
 

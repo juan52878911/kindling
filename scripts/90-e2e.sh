@@ -18,6 +18,7 @@ set -uo pipefail
 KLING="${KLING:-kling}"
 VOL="${VOL:-e2e-vol}"
 VOL2="${VOL2:-e2e-vol2}"
+VOL3="${VOL3:-e2e-vol3}"
 # Los volúmenes los monta el agente de invitado, y la imagen mínima no lo lleva:
 # el daemon rechaza montarlos ahí a propósito, porque el disco se engancharía y
 # nadie lo montaría. Para los bloques de volúmenes hace falta una imagen con
@@ -51,6 +52,7 @@ cleanup() {
   done
   $KLING volume rm "$VOL" >/dev/null 2>&1
   $KLING volume rm "$VOL2" >/dev/null 2>&1
+  $KLING volume rm -f -snapshots "$VOL3" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -201,6 +203,96 @@ out=$($KLING run -name "e2e-choque-$$" -image "$IMGVOL" -volume "$VOL:/x" -volum
 contiene "$out" "would shadow" && ok "rechaza dos volúmenes en el mismo punto" \
   || bad "puntos de montaje repetidos" "un rechazo" "$out"
 $KLING rm "e2e-choque-$$" >/dev/null 2>&1
+
+# ── 3c. snapshots de volumen y restore ───────────────────────────────────────
+# Un snapshot solo sin escritores (los lectores no cambian los bloques) y un
+# restore solo sin nadie; lo anterior al restore queda en <vol>@undo. Se escribe
+# de verdad dentro del invitado y se lee de vuelta: comparar ficheros del host
+# no diría nada de si el ext4 restaurado monta y contiene lo que tenía.
+step "3c. Snapshots de volumen y restore"
+$KLING volume rm -f -snapshots "$VOL3" >/dev/null 2>&1
+$KLING volume create "$VOL3" -size 128M >/dev/null 2>&1
+# escribe_vol <contenido>: una microVM de usar y tirar deja el fichero en /data.
+escribe_vol() {
+  local n="e2e-snap-w-$$"
+  $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3" -allow-exec -ttl 5m >/dev/null 2>&1 || return 1
+  $KLING exec "$n" -- sh -c "echo $1 > /data/f && sync" >/dev/null 2>&1
+  $KLING rm "$n" >/dev/null 2>&1
+}
+lee_vol() {
+  local n="e2e-snap-r-$$" out
+  $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3:/data:ro" -allow-exec -ttl 5m >/dev/null 2>&1 || { echo "no arrancó"; return; }
+  out=$($KLING exec "$n" -- cat /data/f 2>&1)
+  $KLING rm "$n" >/dev/null 2>&1
+  echo "$out"
+}
+if escribe_vol v1; then
+  out=$($KLING volume snapshot "$VOL3" antes 2>&1)
+  if contiene "$out" "taken"; then
+    # El modo es informativo: reflink en XFS/Btrfs, copy en ext4.
+    ok "snapshot tomado: $(printf '%s' "$out" | head -1)"
+  else
+    bad "volume snapshot" "taken" "$out"
+  fi
+  out=$($KLING volume snapshot "$VOL3" undo 2>&1)
+  contiene "$out" "reserved" && ok "undo está reservado" || bad "snapshot undo" "reserved" "$out"
+
+  # Con un escritor dentro, ni snapshot ni restore; congelada sigue contando.
+  n="e2e-snap-busy-$$"
+  if $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3" >/dev/null 2>&1; then
+    out=$($KLING volume snapshot "$VOL3" durante 2>&1)
+    contiene "$out" "WRITE mode" && ok "no hay snapshot con un escritor" || bad "snapshot con escritor" "WRITE mode" "$out"
+    out=$($KLING volume restore -f "$VOL3" antes 2>&1)
+    contiene "$out" "is used by" && ok "no hay restore con la máquina viva" || bad "restore en uso" "is used by" "$out"
+    if $KLING freeze "$n" >/dev/null 2>&1; then
+      out=$($KLING volume snapshot "$VOL3" durante 2>&1)
+      contiene "$out" "WRITE mode" && ok "una congelada cuenta como escritor" || bad "snapshot con congelada" "WRITE mode" "$out"
+    fi
+    $KLING rm "$n" >/dev/null 2>&1
+  else
+    bad "run con volumen (3c)" "una máquina" "no arrancó"
+  fi
+  # Con un lector sí: no cambia los bloques.
+  n="e2e-snap-ro-$$"
+  if $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3:/data:ro" >/dev/null 2>&1; then
+    out=$($KLING volume snapshot "$VOL3" con-lector 2>&1)
+    contiene "$out" "taken" && ok "snapshot con un lector dentro" || bad "snapshot con lector" "taken" "$out"
+    $KLING rm "$n" >/dev/null 2>&1
+  else
+    bad "run -volume :ro (3c)" "una máquina" "no arrancó"
+  fi
+
+  escribe_vol v2
+  out=$($KLING volume restore -f "$VOL3" antes 2>&1)
+  contiene "$out" "restored" && ok "restore" || bad "volume restore" "restored" "$out"
+  out=$(lee_vol)
+  [ "$out" = "v1" ] && ok "tras el restore el invitado lee v1" || bad "contenido restaurado" "v1" "$out"
+  $KLING volume restore -f "$VOL3" undo >/dev/null 2>&1
+  out=$(lee_vol)
+  [ "$out" = "v2" ] && ok "restore de undo deshace el restore (v2)" || bad "undo" "v2" "$out"
+
+  out=$($KLING volume snapshots "$VOL3" -q 2>&1)
+  contiene "$out" "antes" && contiene "$out" "undo" && ok "volume snapshots lista antes y undo" \
+    || bad "volume snapshots" "antes y undo" "$out"
+  out=$($KLING volume ls 2>&1 | grep "$VOL3 " || true)
+  contiene "$out" " 3 " && ok "volume ls cuenta 3 snapshots" || bad "SNAPS" "3" "$out"
+  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+    perms=$(ssh "${KLING_HOST#ssh://}" \
+      "sudo stat -c '%a %U' /var/lib/kindling/volumes/snapshots /var/lib/kindling/volumes/snapshots/$VOL3 /var/lib/kindling/volumes/snapshots/$VOL3/antes.ext4 | tr '\n' ' '")
+    [ "$perms" = "700 root 700 root 600 root " ] && ok "snapshots de root: 0700/0700/0600" \
+      || bad "permisos de snapshots" "700 root 700 root 600 root" "${perms:-no pude leerlo}"
+  fi
+
+  out=$($KLING volume rm -f "$VOL3" 2>&1)
+  contiene "$out" "-snapshots" && ok "no borra un volumen con snapshots sin -snapshots" \
+    || bad "volume rm con snapshots" "un rechazo que diga -snapshots" "$out"
+  out=$($KLING volume rm -f "$VOL3@con-lector" 2>&1)
+  contiene "$out" "removed" && ok "volume rm vol@snap" || bad "rm vol@snap" "removed" "$out"
+  out=$($KLING volume rm -f -snapshots "$VOL3" 2>&1)
+  contiene "$out" "removed" && ok "volume rm -snapshots se lo lleva todo" || bad "rm -snapshots" "removed" "$out"
+else
+  bad "escribir en el volumen (3c)" "una máquina con exec" "no arrancó"
+fi
 
 # ── 4. reconcile no destruye máquinas vivas ──────────────────────────────────
 # El caso que motivó reescribirlo: el daemon se reinicia y una microVM viva NO

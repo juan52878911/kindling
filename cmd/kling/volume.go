@@ -18,9 +18,11 @@ import (
 //	kling volume ls
 //	kling volume rm notas
 //	kling volume populate libs -- npm install --prefix /data lodash
+//	kling volume snapshot notas antes-de-migrar
+//	kling volume restore notas antes-de-migrar
 func cmdVolume(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling volume [create|ls|rm]")
+		return fmt.Errorf("usage: kling volume [create|ls|rm|populate|snapshot|snapshots|restore]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -32,8 +34,14 @@ func cmdVolume(args []string) error {
 		return volumeRemove(rest)
 	case "populate", "install":
 		return volumePopulate(rest)
+	case "snapshot":
+		return volumeSnapshot(rest)
+	case "snapshots":
+		return volumeSnapshots(rest)
+	case "restore":
+		return volumeRestore(rest)
 	default:
-		return fmt.Errorf("unknown subcommand %q: use create, ls, rm, or populate", sub)
+		return fmt.Errorf("unknown subcommand %q: use create, ls, rm, populate, snapshot, snapshots, or restore", sub)
 	}
 }
 
@@ -96,13 +104,13 @@ func volumeList(args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tLOGICAL\tON DISK\tUSED BY")
+	fmt.Fprintln(tw, "NAME\tLOGICAL\tON DISK\tSNAPS\tUSED BY")
 	for _, v := range vols {
 		users := strings.Join(v.UsedBy, ", ")
 		if users == "" {
 			users = "—"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", v.Name, human(v.SizeBytes), human(v.UsedBytes), users)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", v.Name, human(v.SizeBytes), human(v.UsedBytes), v.Snapshots, users)
 	}
 	return tw.Flush()
 }
@@ -111,11 +119,19 @@ func volumeRemove(args []string) error {
 	fs := flag.NewFlagSet("volume rm", flag.ExitOnError)
 	host := hostFlag(fs)
 	force := fs.Bool("f", false, "do not ask for confirmation")
+	snaps := fs.Bool("snapshots", false, "also remove the volume's snapshots (refused otherwise)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling volume rm <name>...")
+		return fmt.Errorf("usage: kling volume rm [-snapshots] <name>... | <name>@<snapshot>...")
+	}
+	// Se valida todo antes de borrar nada: un argumento mal escrito al final
+	// no puede dejar la mitad borrada.
+	for _, a := range fs.Args() {
+		if _, _, err := splitVolumeSnapshot(a); err != nil {
+			return err
+		}
 	}
 	if !*force && !confirmMany("volume", fs.Args()) {
 		return errAborted
@@ -124,12 +140,141 @@ func volumeRemove(args []string) error {
 	defer stop()
 
 	c := api.NewClient(hostOf(*host))
-	for _, name := range fs.Args() {
-		if err := c.RemoveVolume(ctx, name); err != nil {
+	for _, a := range fs.Args() {
+		vol, snap, _ := splitVolumeSnapshot(a)
+		var err error
+		switch {
+		case snap != "":
+			err = c.RemoveVolumeSnapshot(ctx, vol, snap)
+		case *snaps:
+			err = c.RemoveVolumeWithSnapshots(ctx, vol)
+		default:
+			err = c.RemoveVolume(ctx, vol)
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Printf("%s removed\n", name)
+		fmt.Printf("%s removed\n", a)
 	}
+	return nil
+}
+
+// splitVolumeSnapshot separa "vol@snap". Sin @, snap vacío. Un @ sin nada a un
+// lado es un error: "notas@" borraría el volumen entero creyendo borrar un
+// snapshot.
+func splitVolumeSnapshot(a string) (vol, snap string, err error) {
+	vol, snap, found := strings.Cut(a, "@")
+	if vol == "" || (found && snap == "") || strings.Contains(snap, "@") {
+		return "", "", fmt.Errorf("invalid argument %q: use <volume> or <volume>@<snapshot>", a)
+	}
+	return vol, snap, nil
+}
+
+// volumeSnapshot copia un volumen sin escritores.
+func volumeSnapshot(args []string) error {
+	fs := flag.NewFlagSet("volume snapshot", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.NArg() > 2 {
+		return fmt.Errorf("usage: kling volume snapshot <volume> [name]   (default name: UTC time, 20260928-153012)")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	s, err := api.NewClient(hostOf(*host)).SnapshotVolume(ctx, fs.Arg(0), api.SnapshotVolumeRequest{Name: fs.Arg(1)})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(s)
+	}
+	fmt.Printf("%s@%s  taken  (%s, %s on disk)\n", s.Volume, s.Name, s.Mode, human(s.UsedBytes))
+	if s.Mode == "copy" {
+		fmt.Println("It is a full copy: this filesystem cannot share blocks (XFS with reflink or Btrfs can).")
+	}
+	next("kling volume restore %s %s   (to go back to it)", s.Volume, s.Name)
+	return nil
+}
+
+// volumeSnapshots lista los snapshots de un volumen.
+func volumeSnapshots(args []string) error {
+	fs := flag.NewFlagSet("volume snapshots", flag.ExitOnError)
+	host := hostFlag(fs)
+	asJSON := fs.Bool("json", false, "JSON output")
+	quiet := fs.Bool("q", false, "print only names (for scripting)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: kling volume snapshots <volume> [-q] [-json]")
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	l, err := api.NewClient(hostOf(*host)).VolumeSnapshots(ctx, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if *quiet {
+		for _, s := range l {
+			fmt.Println(s.Name)
+		}
+		return nil
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(l)
+	}
+	if len(l) == 0 {
+		fmt.Printf("No snapshots. Take one:  kling volume snapshot %s\n", fs.Arg(0))
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tCREATED (UTC)\tLOGICAL\tON DISK")
+	for _, s := range l {
+		name := s.Name
+		if s.Undo {
+			name += " (before last restore)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, s.CreatedAt.UTC().Format("2006-01-02 15:04:05"),
+			human(s.SizeBytes), human(s.UsedBytes))
+	}
+	return tw.Flush()
+}
+
+// volumeRestore devuelve un volumen a un snapshot. Lo que había queda en
+// <vol>@undo, así que se deshace con `kling volume restore <vol> undo`.
+func volumeRestore(args []string) error {
+	fs := flag.NewFlagSet("volume restore", flag.ExitOnError)
+	host := hostFlag(fs)
+	force := fs.Bool("f", false, "do not ask for confirmation")
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: kling volume restore <volume> <snapshot> [-f]")
+	}
+	vol, snap := fs.Arg(0), fs.Arg(1)
+	if !*force && !confirm(fmt.Sprintf("replace the contents of %s with %s@%s? (the current state is kept in %s@undo)",
+		vol, vol, snap, vol)) {
+		return errAborted
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+
+	res, err := api.NewClient(hostOf(*host)).RestoreVolume(ctx, vol, api.RestoreVolumeRequest{Snapshot: snap})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(res)
+	}
+	fmt.Printf("%s  restored to %s  (%s)\n", res.Volume, res.Snapshot, res.Mode)
+	fmt.Printf("The previous state is in %s@undo; the next restore overwrites it.\n", res.Volume)
+	next("kling volume restore %s undo   (to undo this)", res.Volume)
 	return nil
 }
 

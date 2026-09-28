@@ -177,6 +177,37 @@ func (c *Client) RemoveVolume(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/volumes/"+name, nil, nil)
 }
 
+// RemoveVolumeWithSnapshots borra el volumen Y sus snapshots. Sin esto, un
+// volumen con snapshots no se deja borrar: son la única copia de su pasado.
+func (c *Client) RemoveVolumeWithSnapshots(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/volumes/"+name+"?snapshots=1", nil, nil)
+}
+
+// SnapshotVolume copia un volumen sin escritores. Va por c.long: sin reflink ni
+// clonefile es una copia completa, y un volumen grande pasa del minuto.
+func (c *Client) SnapshotVolume(ctx context.Context, volume string, r SnapshotVolumeRequest) (*VolumeSnapshot, error) {
+	var s VolumeSnapshot
+	return &s, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+volume+"/snapshots", r, &s)
+}
+
+// VolumeSnapshots lista los snapshots de un volumen, del más antiguo al último.
+func (c *Client) VolumeSnapshots(ctx context.Context, volume string) ([]*VolumeSnapshot, error) {
+	var l []*VolumeSnapshot
+	return l, c.do(ctx, http.MethodGet, "/volumes/"+volume+"/snapshots", nil, &l)
+}
+
+// RestoreVolume devuelve el volumen a un snapshot, guardando antes el estado
+// actual en "undo". Por c.long, por lo mismo que SnapshotVolume.
+func (c *Client) RestoreVolume(ctx context.Context, volume string, r RestoreVolumeRequest) (*RestoreVolumeResult, error) {
+	var res RestoreVolumeResult
+	return &res, c.doWith(c.long, ctx, http.MethodPost, "/volumes/"+volume+"/restore", r, &res)
+}
+
+// RemoveVolumeSnapshot borra un snapshot de un volumen.
+func (c *Client) RemoveVolumeSnapshot(ctx context.Context, volume, snapshot string) error {
+	return c.do(ctx, http.MethodDelete, "/volumes/"+volume+"/snapshots/"+snapshot, nil, nil)
+}
+
 // Get devuelve una máquina por id, prefijo o nombre.
 func (c *Client) Get(ctx context.Context, ref string) (*Machine, error) {
 	var m Machine

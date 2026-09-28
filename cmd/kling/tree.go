@@ -145,10 +145,16 @@ var coreTree = []section{
 `},
 	}},
 	{title: "VOLUMES", cmds: []plugin.Command{
-		{Name: "volume", Summary: "storage that survives the microVM", Subcommands: []string{"create", "ls", "rm", "populate"}, Usage: `  volume create <name> [-size 2G]                  storage that survives the microVM
+		{Name: "volume", Summary: "storage that survives the microVM", Subcommands: []string{"create", "ls", "rm", "populate", "snapshot", "snapshots", "restore"}, Usage: `  volume create <name> [-size 2G]                  storage that survives the microVM
   volume ls [-q] [-json]                           lists them
-  volume rm [-f] <name>...                         removes them
+  volume rm [-f] [-snapshots] <name>...            removes them (-snapshots: and theirs)
+  volume rm <name>@<snapshot>...                   removes snapshots
   volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
+  volume snapshot <name> [snap]                    copies it while nothing writes to it
+                                                   (default snap: UTC time)
+  volume snapshots <name> [-q] [-json]             lists its snapshots
+  volume restore [-f] <name> <snap>                goes back to a snapshot; the current
+                                                   state is kept in <name>@undo
 `},
 	}},
 	{title: "OBSERVATION", cmds: []plugin.Command{

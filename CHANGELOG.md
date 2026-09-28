@@ -12,6 +12,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **`kling volume create` ya no le da `volumes/` al usuario del VMM.** Recorría el
+  directorio entero con `EnsureWritable`, que dejaba `volumes/` (y todo lo de dentro) con
+  dueño el usuario sin privilegios del VMM hasta el siguiente reinicio del daemon, cuando
+  `restringirRaiz` lo devolvía a root. Ahora solo cambia el dueño del fichero nuevo. Hacía
+  falta para los snapshots de volumen: con `volumes/` del VMM, un VMM comprometido sin jailer
+  (con jailer ni siquiera ve esa ruta) podía renombrar `volumes/snapshots/` y sustituir
+  el pasado al que se vuelve.
 - **`-allow-request` rechaza rutas ambiguas en vez de normalizarlas a ciegas.** El proxy
   comparaba `-allow-request` contra la ruta ya decodificada y limpiada con `path.Clean`,
   pero eso asume que el proveedor lee `/`, `.` y `..` igual que nosotros. Con alguna
@@ -154,6 +161,25 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   dorados de antes de la barrera IPv6 siguen con el módulo cargado en su kernel (avisado,
   no bloqueado — la barrera del namespace sí los cubre).
 
+### Novedades
+
+- **Snapshots de volumen y vuelta atrás.** `kling volume snapshot <vol> [nombre]` (por
+  defecto la hora UTC), `kling volume snapshots <vol>`, `kling volume restore <vol> <snap>`
+  y `kling volume rm <vol>@<snap>`; `volume ls` gana la columna `SNAPS`. Un snapshot solo
+  se toma sin escritores y un restore solo sin ningún usuario (una máquina congelada
+  cuenta); mientras dura, el volumen queda reservado en `volReservas` y un arranque que
+  llegue a medias se rechaza con "being snapshotted"/"being restored". Restore guarda
+  antes el estado actual en el snapshot reservado `undo`, así que se deshace con
+  `restore <vol> undo`. Hasta 16 por volumen más `undo`; el gc no los toca, y
+  `volume rm <vol>` se niega mientras haya alguno salvo `-snapshots`. La copia es
+  `cp --reflink=always` en Linux (instantánea en XFS/Btrfs) con caída a copia completa
+  dispersa, y `cp -c` (clonefile) en APFS; una copia completa que se comería el suelo de
+  disco libre o el hueco hasta la marca alta del gc se rechaza con 507. Viven en
+  `volumes/snapshots/<vol>/`, de root, `0700`/`0600`. API: `GET`/`POST
+  /volumes/{name}/snapshots`, `POST /volumes/{name}/restore`, `DELETE
+  /volumes/{name}/snapshots/{snap}`, `DELETE /volumes/{name}?snapshots=1`. Receta y
+  nota sobre XFS en el README (Snapshots and rollback). No se expone como herramienta MCP.
+
 ### Arreglado
 
 - **`kling run -from` hereda el egress de la plantilla si no se pide otro.** Mandaba
@@ -186,6 +212,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `scripts/92-e2e-mac.sh`: nueva sección 6c (proxy de credenciales en el Mac, con
   freeze/thaw, reinicio del daemon y `kling-vz` confinado) y la misma corrección de
   `warm` por `frozen` en la sección 2. En este Mac (M4, `BURST=4`): 72 ok, 0 fallos.
+
+- `scripts/90-e2e.sh`: nueva sección 3c (snapshots de volumen: escribe dentro del
+  invitado, snapshot, rechazo con escritor y con congelada, snapshot con lector, restore,
+  undo, permisos en disco y `rm` con y sin `-snapshots`). `scripts/92-e2e-mac.sh`: nueva
+  6d, corta, que comprueba además que en APFS el modo es `clone`. Sin ejecutar aquí.
 
 ## v0.16.0 — 2026-09-27
 

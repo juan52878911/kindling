@@ -354,6 +354,47 @@ type Volume struct {
 	UsedBytes int64 `json:"used_bytes"`
 	// UsedBy son las máquinas que lo tienen montado ahora mismo.
 	UsedBy []string `json:"used_by,omitempty"`
+	// Snapshots cuenta sus copias guardadas, "undo" incluido. Mientras haya
+	// alguna, borrar el volumen exige pedirlo explícitamente.
+	Snapshots int `json:"snapshots,omitempty"`
+}
+
+// VolumeSnapshot es una copia de un volumen tomada sin escritores: el punto al
+// que se puede volver con restore.
+type VolumeSnapshot struct {
+	Volume    string    `json:"volume"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	SizeBytes int64     `json:"size_bytes"`
+	// UsedBytes es lo asignado. Con reflink o clonefile se comparte con el
+	// volumen, así que sumar estas cifras sobrestima lo que ocupa de verdad.
+	UsedBytes int64 `json:"used_bytes"`
+	// Undo marca la copia que restore guarda del estado anterior.
+	Undo bool `json:"undo,omitempty"`
+	// Mode dice cómo se hizo la copia (reflink, clone o copy). Solo viene en
+	// la respuesta de quien la acaba de crear.
+	Mode string `json:"mode,omitempty"`
+}
+
+// VolumeSnapshotUndo es el nombre reservado de la copia previa a un restore.
+const VolumeSnapshotUndo = "undo"
+
+// SnapshotVolumeRequest toma un snapshot; sin nombre, la hora UTC.
+type SnapshotVolumeRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
+// RestoreVolumeRequest devuelve un volumen al contenido de un snapshot.
+type RestoreVolumeRequest struct {
+	Snapshot string `json:"snapshot"`
+}
+
+// RestoreVolumeResult cuenta qué se restauró y dónde quedó lo anterior.
+type RestoreVolumeResult struct {
+	Volume   string          `json:"volume"`
+	Snapshot string          `json:"snapshot"`
+	Mode     string          `json:"mode"`
+	Undo     *VolumeSnapshot `json:"undo"`
 }
 
 // CreateVolumeRequest crea un volumen.
