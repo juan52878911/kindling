@@ -12,6 +12,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Credenciales Postgres: `-database` obligatoria.** `kling machine credential` y
+  `kling template credential` con `-type postgres` exigen `-database B` o, expreso,
+  `-any-database` (nuevo campo `any_database` en la API; el CLI avisa por stderr de que el
+  rol podrá entrar en cualquier base con `CONNECT`). Los almacenes anteriores sin base se
+  leen como `any_database`, así que las máquinas vivas y las plantillas siguen cargando.
+- **Contraseña en claro del servidor Postgres: visible.** Sigue admitida solo dentro de
+  TLS verificado, pero la auditoría anota `auth: password` y el log del host avisa una
+  vez por credencial ("server asked for the password in cleartext inside TLS; prefer SCRAM").
+
 - **`kling volume create` ya no le da `volumes/` al usuario del VMM.** Recorría el
   directorio entero con `EnsureWritable`, que dejaba `volumes/` (y todo lo de dentro) con
   dueño el usuario sin privilegios del VMM hasta el siguiente reinicio del daemon, cuando

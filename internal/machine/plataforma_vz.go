@@ -137,7 +137,7 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
-			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, CAPEM: cr.CAPEM,
+			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
 			Upstream: cr.Upstream, UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 		})
 	}

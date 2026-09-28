@@ -393,7 +393,9 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     inactividad (un pool puede estar horas callado), hay keepalive TCP de 30 s.
   - **Registro**: una línea por conexión (`kind: postgres`) con dominio, rol, base de
     datos, el upstream fijado si lo hay (`upstream`, configuración del operador), método
-    con que se autenticó el proxy (`auth`), motivo si no llegó, bytes y duración. Nunca la clave, el marcador ni el SQL.
+    con que se autenticó el proxy (`auth`: `scram-sha-256(-plus)`, o `password` si el servidor
+    pidió la contraseña en claro dentro de TLS, con un aviso en el log del host una vez por
+    credencial), motivo si no llegó, bytes y duración. Nunca la clave, el marcador ni el SQL.
   - **Cómo llega el invitado**: en Linux un DNAT lleva cualquier puerto TCP de la IP del
     proxy que no sea el 53, el 80 ni el 443 a `n.HostIP:5381` (con su FORWARD e INPUT),
     así que el cliente usa el puerto de su cadena de conexión. En macOS, `kling-vz` atiende
@@ -538,6 +540,9 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
   vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
   mismas reglas antes de reenviar.
+- **Postgres: `-database` es obligatoria.** Sin base fijada el rol entraría en cualquiera
+  con `CONNECT`, así que hace falta `-database` o `-any-database` expreso (el CLI avisa).
+  Los almacenes anteriores, sin base, se leen como `-any-database`: lo que permitían.
 - **Postgres: el rol es el límite, no el proxy.** El proxy no mira el SQL: no hay lista
   de sentencias permitidas y el invitado hace todo lo que el rol puede. Lo que acota el
   daño es el rol mismo (solo lectura, `GRANT` a lo justo, sin `CREATEROLE`, un

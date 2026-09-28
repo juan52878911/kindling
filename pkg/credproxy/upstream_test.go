@@ -275,7 +275,7 @@ func TestDialFijado(t *testing.T) {
 func TestValidarUpstream(t *testing.T) {
 	base := func() Credential {
 		return Credential{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave,
-			Kind: KindPostgres, User: pgUser}
+			Kind: KindPostgres, User: pgUser, Database: pgDB}
 	}
 	for nombre, mod := range map[string]func(*Credential){
 		"disable sin upstream":  func(c *Credential) { c.UpstreamTLS = "disable" },

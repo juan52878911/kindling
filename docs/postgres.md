@@ -47,7 +47,8 @@ su propio marcador).
 | `-type postgres` | credencial de base de datos |
 | `-domain N` | el nombre al que conecta el invitado. Sin `-upstream`, también el servidor al que se sale |
 | `-user R` | el rol; el invitado tiene que conectar con él |
-| `-database B` | opcional: la única base permitida |
+| `-database B` | **obligatoria** salvo `-any-database`: la única base permitida |
+| `-any-database` | en lugar de `-database`: deja entrar en cualquier base a la que el rol tenga `CONNECT`. El CLI avisa por stderr. Son excluyentes |
 | `-port P` | puerto del servidor sin `-upstream` (5432). El invitado puede usar cualquiera |
 | `-ca-file ca.pem` | CA que se añade a las raíces del sistema |
 | `-upstream H:P` | a dónde marca el proxy en vez de `dominio:puerto` (IP o nombre, `[::1]:5432` para IPv6) |
@@ -174,7 +175,7 @@ credencial es una contraseña fija.
 | host | el `-domain` de la credencial |
 | puerto | cualquiera (5432 por costumbre): todos llegan al proxy |
 | usuario | el `-user` de la credencial |
-| base | la de `-database`, si se fijó |
+| base | la de `-database` (con `-any-database`, cualquiera) |
 | contraseña | `$PGPASSWORD` (el marcador) |
 | `sslmode` | `disable` o `prefer`. `require`, `verify-ca` y `verify-full` **no conectan**: el tramo del invitado no tiene TLS (el proxy contesta `N`) |
 | `channel_binding` | `disable` o `prefer`, **nunca** `require` (no hay TLS al que atar) |
@@ -207,7 +208,9 @@ En node-postgres, `ssl: false`; en psycopg, `sslmode="disable"`; en JDBC,
 - Un upstream por credencial: sin varios hosts, sin `target_session_attrs`, sin
   conmutación por error.
 - Autenticación hacia el servidor: SCRAM-SHA-256 (con `-PLUS` sobre TLS) o, solo
-  dentro de TLS verificado, contraseña en claro. Sin md5, GSS/Kerberos, SSPI,
+  dentro de TLS verificado, contraseña en claro (la auditoría anota `auth: password`, no
+  `scram-sha-256`, y el log del host avisa una vez por credencial: "server asked for the
+  password in cleartext inside TLS; prefer SCRAM"). Sin md5, GSS/Kerberos, SSPI,
   certificados de cliente ni tokens IAM.
 - La contraseña, ASCII imprimible. 32 conexiones a la vez por máquina, 10 s para que el
   invitado mande arranque y contraseña, 15 s para toda la autenticación. Sin
@@ -231,3 +234,12 @@ En node-postgres, `ssl: false`; en psycopg, `sslmode="disable"`; en JDBC,
 - Un upstream fijado se resuelve con el resolver del host: si ese DNS miente, el proxy
   marcará a donde diga, salvo a los rangos prohibidos. Si no te fías del DNS de la
   LAN, fija una IP.
+
+## Credenciales guardadas antes de `-database` obligatoria
+
+Antes, `-database` era opcional y sin ella el rol podía entrar en cualquier base. Ahora
+hace falta `-database` o `-any-database` expreso. Los almacenes cifrados anteriores (máquinas
+y plantillas) siguen cargando: una credencial Postgres guardada sin base se lee como
+`any_database: true`, que es lo que permitía entonces, así que ninguna máquina viva se
+rompe. Para acotarla, rota la credencial con `-database`. Un `kling-vz` nuevo con un
+daemon anterior sí rechaza una credencial sin base: actualiza los dos a la vez.

@@ -927,7 +927,8 @@ func IsInsufficientMemory(err error) bool {
 // Domain:Port (5432 por defecto), el invitado recibe el marcador como
 // contraseña (PGPASSWORD) y el proxy sale siempre por TLS verificado contra
 // Domain, con las raíces del sistema más CAPEM si se da. Database, si se da,
-// es la única base a la que se deja conectar. Allow no vale para Postgres. Al
+// es la única base a la que se deja conectar y es obligatoria salvo con
+// AnyDatabase (cualquier base con CONNECT para el rol). Allow no vale para Postgres. Al
 // rotar, como Allow, todos estos campos se sustituyen con la clave.
 type CredentialSpec struct {
 	Domain   string   `json:"domain"`
@@ -938,7 +939,10 @@ type CredentialSpec struct {
 	Port     int      `json:"port,omitempty"`
 	User     string   `json:"user,omitempty"`
 	Database string   `json:"database,omitempty"`
-	CAPEM    string   `json:"ca_pem,omitempty"`
+	// AnyDatabase (solo Postgres) deja entrar en cualquier base del servidor;
+	// sin él, Database es obligatoria.
+	AnyDatabase bool   `json:"any_database,omitempty"`
+	CAPEM       string `json:"ca_pem,omitempty"`
 	// Upstream, UpstreamTLS y TLSServerName (solo Postgres) fijan a dónde
 	// marca el proxy en vez de Domain:Port ("host:puerto"; loopback y LAN
 	// permitidos, metadatos y la red interna de kindling nunca), si el TLS

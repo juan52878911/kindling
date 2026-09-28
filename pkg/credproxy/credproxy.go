@@ -137,6 +137,13 @@ type Credential struct {
 	Port        int      `json:",omitempty"`
 	User        string   `json:",omitempty"`
 	Database    string   `json:",omitempty"`
+	// AnyDatabase permite entrar en cualquier base del servidor (con CONNECT
+	// para el rol). Un postgres sin Database exige AnyDatabase: sin base fijada
+	// y sin pedirlo expresamente, la credencial no vale. COMPATIBILIDAD: un
+	// almacén cifrado anterior a este campo guarda credenciales postgres sin
+	// Database ni AnyDatabase; el manager las lee con AnyDatabase=true al
+	// descifrarlas (ver NormalizarAlmacen), que es lo que hacían entonces.
+	AnyDatabase bool `json:",omitempty"`
 	// CAPEM son certificados de CA en PEM que se AÑADEN a las raíces del
 	// sistema para verificar al servidor (uno autofirmado o de una CA propia).
 	CAPEM string `json:",omitempty"`
@@ -218,9 +225,9 @@ func ValidarTipo(c *Credential) error {
 	d := c.Domain
 	switch c.Kind {
 	case "", KindHTTP:
-		if c.Port != 0 || c.User != "" || c.Database != "" || c.CAPEM != "" ||
+		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.CAPEM != "" ||
 			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" {
-			return fmt.Errorf("credential for %s: port, user, database, CA, upstream, upstream TLS and TLS server name are only for -type postgres", d)
+			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS and TLS server name are only for -type postgres", d)
 		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
@@ -231,6 +238,17 @@ func ValidarTipo(c *Credential) error {
 		return fmt.Errorf("credential for %s: unknown type %q (http or postgres)", d, c.Kind)
 	}
 	return nil
+}
+
+// NormalizarAlmacen adapta lo que se leyó de un almacén antiguo: una credencial
+// postgres sin Database ni AnyDatabase (anterior a que -database fuese
+// obligatoria) se lee con AnyDatabase=true, que es lo que permitía entonces.
+// Así una máquina viva o una plantilla guardada sigue cargando. Se llama al
+// descifrar, nunca con lo que llega de la API o del CLI.
+func NormalizarAlmacen(c *Credential) {
+	if c.Kind == KindPostgres && c.Database == "" {
+		c.AnyDatabase = true
+	}
 }
 
 // Options configura un Proxy. El valor cero sirve: resuelve por

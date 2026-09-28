@@ -33,7 +33,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
-| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
+| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
 
@@ -225,11 +225,12 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 
 | Campo | Qué es |
 |---|---|
-| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database`, `ca_pem`, `upstream`, `upstream_tls` y `tls_server_name` no valen) |
+| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls` y `tls_server_name` no valen) |
 | `domain` | nombre que usa el invitado. Sin `upstream`, es también al que sale el proxy (tiene que resolver a una IPv4 pública); con TLS, contra el que se verifica el certificado salvo `tls_server_name` |
 | `port` | puerto del servidor (defecto 5432). El invitado puede usar cualquier puerto: le llega al proxy igual |
 | `user` | rol (obligatorio). El invitado tiene que conectar con él |
-| `database` | opcional: la única base a la que se deja conectar (sin ella, cualquiera; la de por defecto es el rol) |
+| `database` | la única base a la que se deja conectar; obligatoria salvo `any_database` (la de por defecto de un cliente es el rol) |
+| `any_database` | `true` deja conectar a cualquier base con `CONNECT` para el rol; excluyente con `database`. Un almacén anterior sin base se lee como `true` |
 | `ca_pem` | opcional, ≤64 KiB: CA en PEM que se añade a las raíces del sistema |
 | `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS solo IP o `localhost`, el daemon rechaza un nombre al entregarla. Se devuelve normalizado (minúsculas) |
 | `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |

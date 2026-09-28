@@ -947,6 +947,11 @@ print("FALSO", conectar("kling-cred-00000000000000000000")[2])
       -user "$PG_USER" -database "$PG_DB" "${ca_args[@]}" -env PGPASSWORD 2>&1)
     contiene "$out" "$PG_MODO" && ok "credential -type postgres: la clave queda en el proxy ($PG_MODO)" \
       || bad "machine credential -type postgres" "$PG_MODO" "$out"
+    # -database es obligatoria (o -any-database): sin ella el CLI rechaza antes de leer la clave
+    out=$(printf '%s' "$PG_PASS" | $KLING machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -env PGPASSWORD2 2>&1) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "needs -database"; } && ok "credential -type postgres sin -database: rechazada" \
+      || bad "credential -type postgres sin -database" "error 'needs -database'" "$out"
     out=$($KLING exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
     contiene "$out" "MMDS MARCADOR" && ok "el invitado no ve la clave, solo el marcador" || bad "MMDS (postgres)" "MMDS MARCADOR" "$out"
     contiene "$out" "SSL N" && ok "el tramo del invitado va en claro (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
