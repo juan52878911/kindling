@@ -130,6 +130,9 @@ const (
 type credPG struct {
 	Credential
 	tls *tls.Config
+	// claro hace que el aviso de contraseña en claro salga una vez por
+	// credencial (por juego de credenciales: una rotación lo repone).
+	claro *sync.Once
 }
 
 func compilarPG(c Credential) (credPG, error) {
@@ -148,7 +151,7 @@ func compilarPG(c Credential) (credPG, error) {
 		ServerName: nombre,
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    pool,
-	}}, nil
+	}, claro: new(sync.Once)}, nil
 }
 
 // validarPostgres: ver ValidarTipo.
@@ -169,10 +172,15 @@ func validarPostgres(c *Credential) error {
 	if err := validarNombrePG(c.User); err != nil {
 		return fmt.Errorf("credential for %s: user: %w", d, err)
 	}
-	if c.Database != "" {
+	switch {
+	case c.Database != "" && c.AnyDatabase:
+		return fmt.Errorf("credential for %s: -database and -any-database are mutually exclusive", d)
+	case c.Database != "":
 		if err := validarNombrePG(c.Database); err != nil {
 			return fmt.Errorf("credential for %s: database: %w", d, err)
 		}
+	case !c.AnyDatabase:
+		return fmt.Errorf("credential for %s: a postgres credential needs -database (or -any-database to allow every database the role can connect to)", d)
 	}
 	// ASCII imprimible: SCRAM pide SASLprep, que para esto es la identidad
 	// (ver scram.go), y la contraseña viaja como cadena C.
@@ -444,7 +452,7 @@ func (s *sesionPG) servir() {
 		return
 	}
 	s.rec.User = cred.User
-	if cred.Database != "" && db != cred.Database {
+	if !cred.AnyDatabase && db != cred.Database {
 		s.rec.Reason, s.rec.Denied = ReasonDatabaseMismatch, true
 		s.fatal("28000", "the database does not match the credential")
 		return
@@ -500,6 +508,11 @@ func (s *sesionPG) servir() {
 		return
 	}
 	s.rec.Auth = metodo
+	if metodo == AuthPassword {
+		cred.claro.Do(func() {
+			p.logf("credential proxy postgres %s (%s): server asked for the password in cleartext inside TLS; prefer SCRAM", cred.Domain, cred.destinoPG())
+		})
+	}
 
 	// 4. Autenticado: AuthenticationOk al invitado y a pasar bytes.
 	_ = guest.SetDeadline(time.Time{})

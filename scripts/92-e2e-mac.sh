@@ -614,6 +614,11 @@ print("FAKE", conectar("kling-cred-00000000000000000000")[2])
       -user "$PG_USER" -database "$PG_DB" ${pg_args[@]+"${pg_args[@]}"} -env PGPASSWORD 2>&1)
     contiene "$out" "$PG_MODO" && ok "machine credential -type postgres: the password stays in kling-vz ($PG_MODO)" \
       || bad "machine credential -type postgres" "$PG_MODO" "$out"
+    # -database is mandatory (or -any-database): without it the CLI refuses before reading the key
+    out=$(printf '%s' "$PG_PASS" | k machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -env PGPASSWORD2 2>&1) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "needs -database"; } && ok "machine credential -type postgres without -database: refused" \
+      || bad "machine credential -type postgres without -database" "error 'needs -database'" "$out"
     out=$(k exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
     contiene "$out" "MMDS PLACEHOLDER" && ok "the guest only sees the placeholder" || bad "MMDS (postgres)" "MMDS PLACEHOLDER" "$out"
     contiene "$out" "SSL N" && ok "the guest leg is plain (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"

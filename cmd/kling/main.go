@@ -850,7 +850,7 @@ func cmdCredential(args []string) error {
 	}
 	if fs.NArg() < 1 || *cf.domain == "" || *cf.env == "" {
 		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
-			"       kling machine credential <ref> -type postgres -domain db.example.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]")
+			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]")
 	}
 	spec, err := cf.spec()
 	if err != nil {

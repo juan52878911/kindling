@@ -51,6 +51,7 @@ type KlingCredential struct {
 	Port        int      `json:"port,omitempty"`
 	User        string   `json:"user,omitempty"`
 	Database    string   `json:"database,omitempty"`
+	AnyDatabase bool     `json:"any_database,omitempty"`
 	CAPEM       string   `json:"ca_pem,omitempty"`
 	// Upstream, UpstreamTLS y TLSServerName: ver credproxy.Credential. Un
 	// kling-vz que no anuncia credproxy.CapPostgresUpstream los ignoraría.

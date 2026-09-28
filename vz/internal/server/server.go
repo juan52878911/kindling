@@ -845,6 +845,7 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Port        int      `json:"port,omitempty"`
 			User        string   `json:"user,omitempty"`
 			Database    string   `json:"database,omitempty"`
+			AnyDatabase bool     `json:"any_database,omitempty"`
 			CAPEM       string   `json:"ca_pem,omitempty"`
 			// Upstream fijado por el operador (ver pkg/credproxy/upstream.go):
 			// el proxy marca desde la pila de red del Mac, así que 127.0.0.1
@@ -874,7 +875,7 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		creds = append(creds, credproxy.Credential{
 			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
 			Allow: c.Allow,
-			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, CAPEM: c.CAPEM,
+			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
 			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
 		})
 	}

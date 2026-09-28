@@ -201,6 +201,10 @@ func (m *Manager) cargarCredenciales(id string) ([]credproxy.Credential, error) 
 	if err := m.abrir(sellado, id, &creds); err != nil {
 		return nil, err
 	}
+	// Almacén anterior a -database obligatoria: ver credproxy.NormalizarAlmacen.
+	for i := range creds {
+		credproxy.NormalizarAlmacen(&creds[i])
+	}
 	return creds, nil
 }
 
@@ -253,7 +257,7 @@ func validarSpecs(specs []api.CredentialSpec) error {
 // credencialDeSpec es la credencial del proxy que describe s, sin marcador.
 func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
-		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, CAPEM: s.CAPEM,
+		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, AnyDatabase: s.AnyDatabase, CAPEM: s.CAPEM,
 		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName}
 }
 
@@ -407,6 +411,12 @@ func (m *Manager) cargarCredencialesPlantilla(name string) ([]api.CredentialSpec
 	var specs []api.CredentialSpec
 	if err := m.abrir(sellado, "snapshot:"+name, &specs); err != nil {
 		return nil, err
+	}
+	// Igual que en cargarCredenciales: sin Database es AnyDatabase.
+	for i := range specs {
+		if specs[i].Type == credproxy.KindPostgres && specs[i].Database == "" {
+			specs[i].AnyDatabase = true
+		}
 	}
 	return specs, nil
 }

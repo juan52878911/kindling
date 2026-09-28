@@ -49,6 +49,9 @@ func TestCredentialFlagsSpec(t *testing.T) {
 		"postgres con allow": {"-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "a", "-allow-request", "GET /"},
 		"http con rol":       {"-domain", "api.example.com", "-env", "K", "-user", "a"},
 		"http con CA":        {"-domain", "api.example.com", "-env", "K", "-ca-file", ca},
+		"postgres sin base":  {"-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "a"},
+		"base y any":         {"-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "a", "-database", "d", "-any-database"},
+		"http con any":       {"-domain", "api.example.com", "-env", "K", "-any-database"},
 		"tipo raro":          {"-type", "mysql", "-domain", "db.example.com", "-env", "P"},
 		"http con upstream":  {"-domain", "api.example.com", "-env", "K", "-upstream", "127.0.0.1:5432"},
 		"http con nombre":    {"-domain", "api.example.com", "-env", "K", "-tls-server-name", "x.example.com"},
@@ -84,7 +87,7 @@ func TestCredentialFlagsUpstream(t *testing.T) {
 		avisos.Reset()
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)
 		cf := credentialFlags(fs)
-		base := []string{"-f", clave, "-type", "postgres", "-domain", "db.example.com", "-env", "PGPASSWORD", "-user", "app"}
+		base := []string{"-f", clave, "-type", "postgres", "-domain", "db.example.com", "-env", "PGPASSWORD", "-user", "app", "-database", "appdb"}
 		if err := fs.Parse(append(base, args...)); err != nil {
 			t.Fatal(err)
 		}
@@ -112,5 +115,30 @@ func TestCredentialFlagsUpstream(t *testing.T) {
 	}
 	if avisos.Len() != 0 {
 		t.Errorf("aviso con TLS: %q", avisos.String())
+	}
+}
+
+// -any-database: pasa a la credencial y avisa por stderr; sin él ni -database,
+// el CLI lo rechaza.
+func TestCredentialFlagsAnyDatabase(t *testing.T) {
+	clave := filepath.Join(t.TempDir(), "clave")
+	if err := os.WriteFile(clave, []byte("pw-real\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var avisos bytes.Buffer
+	antes := credAvisos
+	credAvisos = &avisos
+	t.Cleanup(func() { credAvisos = antes })
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cf := credentialFlags(fs)
+	if err := fs.Parse([]string{"-f", clave, "-type", "postgres", "-domain", "db.example.com", "-env", "P", "-user", "app", "-any-database"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := cf.spec()
+	if err != nil || !s.AnyDatabase || s.Database != "" {
+		t.Fatalf("spec %+v, %v", s, err)
+	}
+	if !strings.Contains(avisos.String(), "warning: -any-database") || !strings.Contains(avisos.String(), "CONNECT") {
+		t.Errorf("sin aviso: %q", avisos.String())
 	}
 }

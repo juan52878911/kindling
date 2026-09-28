@@ -532,7 +532,7 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	}
 	ctx := context.Background()
 	pg := func(mod func(*api.CredentialSpec)) api.CredentialSpec {
-		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real", Type: "postgres", User: "app"}
+		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real", Type: "postgres", User: "app", Database: "appdb"}
 		if mod != nil {
 			mod(&s)
 		}
@@ -540,6 +540,8 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	}
 	for nombre, mal := range map[string]func(*api.CredentialSpec){
 		"sin rol":              func(s *api.CredentialSpec) { s.User = "" },
+		"sin base":             func(s *api.CredentialSpec) { s.Database = "" },
+		"base y any":           func(s *api.CredentialSpec) { s.AnyDatabase = true },
 		"no ASCII":             func(s *api.CredentialSpec) { s.Secret = "contraseña" },
 		"con allow":            func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
 		"tipo raro":            func(s *api.CredentialSpec) { s.Type = "mysql" },
@@ -599,5 +601,43 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	}
 	if u := (*got)[3][0]; u.Upstream != "" || u.UpstreamTLS != "" || u.TLSServerName != "pg.lan" {
 		t.Errorf("rotación sin upstream: %+v", u)
+	}
+}
+
+// Un almacén anterior a -database obligatoria (postgres sin base ni
+// AnyDatabase, en la máquina y en la plantilla) sigue cargando y se lee como
+// AnyDatabase, y AnyDatabase viaja de la API al proxy y al almacén.
+func TestAlmacenAntiguoSinDatabase(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.dir("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Se guarda tal cual lo hacía la versión anterior: sin AnyDatabase.
+	antigua := []credproxy.Credential{{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
+		Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app"}}
+	if err := m.guardarCredenciales("v1", antigua); err != nil {
+		t.Fatal(err)
+	}
+	back, err := m.cargarCredenciales("v1")
+	if err != nil || len(back) != 1 || !back[0].AnyDatabase || back[0].Database != "" {
+		t.Fatalf("almacén de máquina: %+v, %v", back, err)
+	}
+	if err := credproxy.ValidarCredenciales(back); err != nil {
+		t.Errorf("la credencial antigua ya no valida: %v", err)
+	}
+
+	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := escribirSellado(m.credSnapPath("svc"), sellado); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := m.cargarCredencialesPlantilla("svc")
+	if err != nil || len(specs) != 1 || !specs[0].AnyDatabase {
+		t.Fatalf("almacén de plantilla: %+v, %v", specs, err)
+	}
+	if err := validarSpecs(specs); err != nil {
+		t.Errorf("la spec antigua ya no valida: %v", err)
 	}
 }

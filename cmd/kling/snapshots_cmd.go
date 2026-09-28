@@ -55,7 +55,7 @@ func snapshotsCredential(args []string) error {
 	}
 	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
 		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
-			"       kling template credential <template> -type postgres -domain db.example.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
+			"       kling template credential <template> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling template credential <template> -clear")
 	}
 	req := api.CredentialsRequest{Clear: *clear}
@@ -100,6 +100,7 @@ var credAvisos io.Writer = os.Stderr
 // y template credential. La clave NUNCA va en una bandera: -f o stdin.
 type credFlags struct {
 	domain, env, file, typ, user, database, caFile *string
+	anyDatabase                                    *bool
 	upstream, upstreamTLS, tlsServerName           *string
 	port                                           *int
 	allow                                          *stringsFlag
@@ -113,7 +114,8 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c.typ = fs.String("type", "http", "http, or postgres for a database password")
 	c.port = fs.Int("port", 0, "postgres: the server's port (default 5432)")
 	c.user = fs.String("user", "", "postgres: the role the password belongs to (the guest must connect as it)")
-	c.database = fs.String("database", "", "postgres: the only database the guest may connect to (default: any)")
+	c.database = fs.String("database", "", "postgres: the only database the guest may connect to (required unless -any-database)")
+	c.anyDatabase = fs.Bool("any-database", false, "postgres: let the guest connect to any database the role has CONNECT on (instead of -database)")
 	c.caFile = fs.String("ca-file", "", "postgres: PEM CA added to the system roots to verify the server")
 	c.upstream = fs.String("upstream", "", "postgres: host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database)")
 	c.upstreamTLS = fs.String("upstream-tls", "", "postgres: verify-full (default) or disable (only with -upstream; SCRAM-SHA-256 only, queries travel unencrypted)")
@@ -129,9 +131,9 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 	s := api.CredentialSpec{Domain: *c.domain, Env: *c.env, Allow: *c.allow}
 	switch *c.typ {
 	case "", "http":
-		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.caFile != "" ||
+		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
 			*c.upstream != "" || *c.upstreamTLS != "" || *c.tlsServerName != "" {
-			return s, errors.New("-port, -user, -database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres")
+			return s, errors.New("-port, -user, -database, -any-database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres")
 		}
 	case credproxy.KindPostgres:
 		if len(*c.allow) > 0 {
@@ -140,7 +142,16 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 		if *c.user == "" {
 			return s, errors.New("-type postgres needs -user (the role the password belongs to)")
 		}
-		s.Type, s.Port, s.User, s.Database = credproxy.KindPostgres, *c.port, *c.user, *c.database
+		switch {
+		case *c.database != "" && *c.anyDatabase:
+			return s, errors.New("-database and -any-database are mutually exclusive")
+		case *c.database == "" && !*c.anyDatabase:
+			return s, errors.New("-type postgres needs -database (the only database the guest may use), or -any-database to allow every database the role can connect to")
+		}
+		if *c.anyDatabase {
+			fmt.Fprintf(credAvisos, "warning: -any-database: the guest may connect to any database on %s that role %s has CONNECT on\n", *c.domain, *c.user)
+		}
+		s.Type, s.Port, s.User, s.Database, s.AnyDatabase = credproxy.KindPostgres, *c.port, *c.user, *c.database, *c.anyDatabase
 		s.Upstream, s.TLSServerName = *c.upstream, *c.tlsServerName
 		switch *c.upstreamTLS {
 		case "", credproxy.UpstreamTLSVerifyFull:

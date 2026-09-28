@@ -126,7 +126,8 @@ var coreTree = []section{
                                                    -allow-request as in machine
                                                    credential)
   template credential <name> -type postgres        the same for a database password
-      -domain D -user R [-database B] [-port P]    (see machine credential)
+      -domain D -user R -database B [-port P]      (see machine credential)
+      (-any-database instead of -database: any base)
       [-ca-file ca.pem] [-upstream H:P]
       [-upstream-tls verify-full|disable]
       [-tls-server-name N] -env PGPASSWORD [-f file]
@@ -212,7 +213,7 @@ var coreTree = []section{
                                                    final /** = any rest); it goes with
                                                    the key: repeat it when rotating
   machine credential <ref> -type postgres          a database password: the guest
-      -domain D -user R [-database B] [-port P]    connects in plain text to D (any
+      -domain D -user R -database B [-port P]      connects in plain text to D (any
       [-ca-file ca.pem] -env PGPASSWORD [-f file]  port) as R with the placeholder as
                                                    password; the proxy logs in to D:P
                                                    with the real one over verified TLS
