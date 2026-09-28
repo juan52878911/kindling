@@ -297,6 +297,13 @@ func (c *Client) PutMMDSData(ctx context.Context, data any) error {
 	return c.do(ctx, http.MethodPut, "/mmds", data)
 }
 
+// PatchMMDSData fusiona data en el almacén MMDS (JSON merge patch) en vez de
+// reemplazarlo: el marcador de una credencial no debe borrar los secretos que
+// otro inyectó antes con PutMMDSData.
+func (c *Client) PatchMMDSData(ctx context.Context, data any) error {
+	return c.do(ctx, http.MethodPatch, "/mmds", data)
+}
+
 // BalloonStats lee las estadísticas del globo del invitado. A diferencia de do(),
 // necesita el cuerpo de la respuesta, así que hace la petición y la decodifica
 // aquí. Devuelve error si el globo no está configurado (imagen anterior al

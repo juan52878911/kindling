@@ -114,9 +114,15 @@ var coreTree = []section{
 `},
 	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
-		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm"}, Usage: `  template ls [-q] [-json]                         lists the templates
+		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential"}, Usage: `  template ls [-q] [-json]                         lists the templates
   template inspect <name> [-json]                  one template, with its annotations
   template rm [-f] <name>...                       removes templates
+  template credential <name> -domain D -env VAR    ties an API key to the template:
+      [-f keyfile] | -clear                        every instance born from it gets a
+                                                   placeholder in VAR that its proxy
+                                                   swaps for the key towards http://D
+                                                   (needs -egress allowlist; stdin if
+                                                   no -f; -clear removes them all)
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -174,13 +180,19 @@ var coreTree = []section{
 `},
 	}},
 	{title: "ADVANCED", advanced: true, cmds: []plugin.Command{
-		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret"}, MachineArgs: []string{"resize", "squeeze", "secret"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
+		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret", "credential"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
                                                    restarting, up to its -mem-max
   machine squeeze <ref>...                         balloon: returns the guest's free
                                                    memory to the host
   machine secret <ref> [-f store.json]             injects a session secret via MMDS
                                                    (stdin if no -f); it can no longer
                                                    be frozen
+  machine credential <ref> -domain D -env VAR      hands an API key to the credential
+      [-f keyfile]                                 proxy: the guest only sees a
+                                                   placeholder in VAR, swapped for the
+                                                   key on requests to http://D (needs
+                                                   -egress allowlist; stdin if no -f;
+                                                   repeat -env to rotate the key)
 `},
 		{Name: "topo", Summary: "ASCII diagram of everything", Usage: `  topo                                             ASCII diagram of everything
 `},

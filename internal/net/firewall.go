@@ -240,16 +240,42 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 		}
 	}
 
+	// Proxy de credenciales (credproxy.go): el resolver contesta con n.HostIP para
+	// un dominio con credencial y el invitado conecta a su puerto 80; se lleva al
+	// puerto del proxy. Si la máquina no tiene credenciales no escucha nadie y la
+	// conexión se rechaza: la regla no abre nada que no sea el propio proxy.
+	//
+	// El 443 también va al proxy, a propósito: un SDK que insista en
+	// https://dominio se encuentra un servidor HTTP plano (o nada, si la
+	// máquina no tiene credenciales) y su handshake TLS muere en el acto con un
+	// error que el operador ve, en vez de esperar al plazo del SDK contra el
+	// DROP de abajo. No abre nada: el proxy no habla TLS y sin credenciales no
+	// escucha nadie. Se hace así y no con REJECT --reject-with tcp-reset
+	// porque ese target necesita xt_REJECT y en un CT sin él la regla falla y
+	// la máquina no arranca (visto en el lab).
+	for _, puerto := range []string{"80", "443"} {
+		if err := ns("iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
+			"-p", "tcp", "-d", n.HostIP, "--dport", puerto, "-j", "DNAT",
+			"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, credPort)); err != nil {
+			return err
+		}
+	}
+
 	// FORWARD, en orden (la primera que casa gana):
 	//   1. DNS hacia nuestro resolver del host: permitido. Tras el DNAT el destino
 	//      es n.HostIP:dnsPort (el lado host del veth), así que el paquete cruza el
-	//      FORWARD del netns antes de llegar al resolver.
+	//      FORWARD del netns antes de llegar al resolver. Lo mismo el proxy de
+	//      credenciales en n.HostIP:credPort.
 	dnsPortStr := fmt.Sprintf("%d", dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
 		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
 			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"); err != nil {
 			return err
 		}
+	}
+	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+		"-p", "tcp", "-d", n.HostIP, "--dport", credPortStr, "-j", "ACCEPT"); err != nil {
+		return err
 	}
 	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas.
 	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
@@ -378,8 +404,8 @@ const HostSubnet = hostPrefix + ".0.0/16"
 // cortan las reglas del namespace; esto cubre sus IPs públicas.
 //
 // Pasa solo lo legítimo: las respuestas a conexiones que abre el host (agente,
-// exec, carpetas compartidas, resync) y el resolver DNS del modo allowlist en
-// el lado host de cada veth.
+// exec, carpetas compartidas, resync), el resolver DNS del modo allowlist y el
+// proxy de credenciales, los dos en el lado host de cada veth.
 func HostInputRules() [][]string {
 	base := []string{"iptables", "-I", "INPUT", "1", "-i", "vh-+", "-s", HostSubnet}
 	regla := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
@@ -387,6 +413,7 @@ func HostInputRules() [][]string {
 		regla("-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "udp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
+		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(credPort), "-j", "ACCEPT"),
 		regla("-j", "DROP"),
 	}
 }

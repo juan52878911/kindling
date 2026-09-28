@@ -129,6 +129,11 @@ type Machine struct {
 	// eso Freeze se niega a congelar una máquina marcada así (ver Freeze).
 	HasSecrets bool `json:"has_secrets,omitempty"`
 
+	// CredentialDomains son los dominios con credencial inyectada por el proxy de
+	// credenciales (POST /machines/{ref}/credentials). Solo los nombres: la clave
+	// vive en memoria del daemon y el invitado solo ve un marcador.
+	CredentialDomains []string `json:"credential_domains,omitempty"`
+
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
 	FreezeMS int64 `json:"freeze_ms,omitempty"`
@@ -424,6 +429,12 @@ type Snapshot struct {
 	// Labels heredadas de la máquina de la que se hizo commit. Las instancias
 	// las reciben salvo que se sobrescriban.
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// CredentialDomains son los dominios con credencial de plantilla
+	// (PUT /snapshots/{name}/credentials): cada instancia que nazca de aquí
+	// las recibe en su proxy de credenciales al arrancar. Solo los nombres; la
+	// clave vive cifrada en el daemon. No está en meta.json: se rellena al leer.
+	CredentialDomains []string `json:"credential_domains,omitempty"`
 
 	// INTEGRIDAD. sha256 del overlay dorado (rootfs) y del volcado de estado
 	// (snap.file), calculados al congelar y verificados al restaurar. Detectan que
@@ -833,4 +844,22 @@ const StatusInsufficientMemory = 507
 func IsInsufficientMemory(err error) bool {
 	var se *StatusError
 	return errors.As(err, &se) && se.Code == StatusInsufficientMemory
+}
+
+// CredentialSpec es una credencial para el proxy de credenciales: la clave real
+// (Secret) se queda en el daemon; el invitado recibe en la variable Env un
+// marcador que el proxy cambia por la clave solo en peticiones a Domain.
+type CredentialSpec struct {
+	Domain string `json:"domain"`
+	Env    string `json:"env"`
+	Secret string `json:"secret"`
+}
+
+// CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de
+// PUT /snapshots/{name}/credentials. Las credenciales se FUSIONAN por Env con
+// las que ya hubiera (repetir una Env con otra clave la rota). Clear, solo para
+// snapshots, borra todas las de la plantilla.
+type CredentialsRequest struct {
+	Credentials []CredentialSpec `json:"credentials"`
+	Clear       bool             `json:"clear,omitempty"`
 }

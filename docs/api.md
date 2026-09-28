@@ -56,6 +56,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
+| `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. Se fusiona por `env` (repetir una rota la clave y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios |
 | `PUT /machines/{ref}/labels` | reetiqueta |
 | `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas) |
 | `GET /machines/{ref}/logs?tail=N` | consola serie |
@@ -69,6 +70,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `GET /snapshots` | lista |
 | `GET /snapshots/{name}` | uno, con disco e instancias vivas |
 | `PUT /snapshots/{name}/annotations/{key}` | guarda JSON opaco (≤1 MiB, ≤32 claves, clave `^[a-z0-9][a-z0-9._-]{0,63}$`) |
+| `PUT /snapshots/{name}/credentials` | ata claves a una plantilla (mismo cuerpo; `"clear":true` las quita todas): cada instancia que nazca de ella (`run -from`, réplicas del gateway) las recibe en su proxy al arrancar, con un marcador propio. Exige que la plantilla tenga egress allowlist; `run -from` con otro egress se rechaza. `Snapshot.credential_domains` lista los dominios |
 | `DELETE /snapshots/{name}/annotations/{key}` | lo borra |
 | `DELETE /snapshots/{name}` | borra el snapshot |
 

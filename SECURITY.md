@@ -165,6 +165,37 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   servicio; van con `chown` al usuario del servicio y permisos `0640`/`0750`.
 - **La integridad de un dorado se comprueba** (sha256 de sus ficheros) antes de
   instanciarlo; el veredicto se recuerda y se re-verifica si tamaño o fecha cambian.
+- **Un secreto por MMDS lo lee el invitado.** El almacén MMDS lo puede leer cualquier
+  proceso root de dentro, y el servidor MCP corre como root: MMDS evita que el secreto
+  acabe en un snapshot, no que el código hostil lo lea y lo saque por un dominio
+  permitido.
+- **Proxy de credenciales** (`kling machine credential`, `internal/net/credproxy.go`):
+  la clave se queda en la memoria del daemon y el invitado recibe un marcador. Con
+  egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
+  la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
+  hay camino directo que lo esquive. El proxy solo acepta el Host de sus credenciales
+  (403 al resto), cambia el marcador por la clave solo en las cabeceras (también dentro
+  de `Authorization: Basic`, en la query y en cuerpos de hasta 1 MiB), sale por HTTPS
+  verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
+  redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
+  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding,
+  entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
+  cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
+  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
+  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, 120 s por petición.
+  El 80 y el 443 de la IP del proxy van al proxy: un `https://dominio` desde dentro
+  muere en el acto (3 ms medidos) en vez de esperar al plazo del SDK.
+- **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
+  no es un secreto (la capacidad es la red del netns de esa máquina hacia su proxy, y
+  el proxy sustituye por dominio, no por marcador), así que una máquina con
+  credenciales se congela y se ramifica como cualquier otra. La clave se guarda en
+  `machines/<id>/credentials.enc` (AES-256-GCM, clave derivada por HKDF de
+  `secrets/snapshot.key`, id de máquina como dato autenticado, 0600) y en
+  `secrets/credentials/<plantilla>.enc` para las de plantilla; `commit` no copia ese
+  fichero, `rm` lo borra con el directorio, y `state.json`, eventos y logs solo llevan
+  dominios. Tras un reinicio del daemon `reconcile` rehace proxy y resolver desde el
+  almacén; tras un thaw se rehacen y se reponen los marcadores en MMDS. Verificado
+  desde dentro del invitado en el lab (`scripts/90-e2e.sh`, secciones 7 y 7b).
 
 ### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
 
@@ -289,6 +320,30 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **El proxy al invitado no filtra la ruta.** Solo llega a los puertos permitidos (ver
   10), pero dentro de ellos a cualquier ruta. No es una escalada —quien llega al socket
   ya manda— pero conviene saberlo si algún día el socket se comparte.
+- **Una credencial se puede usar, aunque no leer.** El proxy impide que el invitado lea
+  la clave o la saque a otro dominio, no que la use contra el suyo: es un oráculo de
+  ella. Lo acota la clave misma (restringida, de solo lectura, con límites de gasto en
+  el proveedor). Un cuerpo de más de 1 MiB, o sin longitud declarada, se reenvía sin
+  sustituir el marcador. La redacción del eco es defensa en profundidad y cubre las
+  transformaciones habituales, no todas las imaginables.
+- **El proxy de credenciales no existe en macOS.** El backend vz no tiene resolver
+  allowlist en el host ni veth donde escuchar: la red del invitado es una pila gVisor
+  dentro de `kling-vz`, un proceso sin privilegios por máquina que a propósito no
+  depende del núcleo. Hacerlo allí exige: (1) que `egress.Resolver` conteste el dominio
+  con credencial con la IP de la pasarela (172.16.0.1); (2) interceptar en
+  `vnet.handleTCP` el destino pasarela:80/443 hacia un `http.Server` en proceso sobre
+  `gonet`; (3) un `PUT /kling/credentials` en `kling-vz` y su llamada desde
+  `plataforma_vz.go`; (4) compartir la lógica del proxy (hoy en `internal/net`) sin que
+  `vz/` dependa del núcleo, o duplicarla. Unas 400 líneas más la verificación en Mac, y
+  la clave viajaría al proceso por máquina del usuario en vez de quedarse en un daemon
+  root. Se deja documentado: el caso que lo motiva (servidores MCP en producción) corre
+  en Linux.
+- **Los secretos por sesión de MMDS (`sessions[<id>]`) no se rellenan solos.** El id
+  de sesión lo genera el puente al recibir `initialize` y el gateway no llama a
+  `PutMMDS`: en la práctica solo funciona `env`, común a todas las sesiones de una
+  réplica. Para claves de API el camino es la credencial de plantilla (una por
+  servicio, entregada a cada réplica al nacer); un secreto distinto por sesión MCP
+  sigue abierto.
 - **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
   en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
   (`-listen 0.0.0.0:9100`) y avisa.

@@ -178,7 +178,7 @@ func main() {
 // squeeze, mmds) son alias.
 func cmdMachine(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling machine <resize|squeeze|secret> <ref> [...]")
+		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential> <ref> [...]")
 	}
 	switch args[0] {
 	case "resize":
@@ -187,8 +187,10 @@ func cmdMachine(args []string) error {
 		return cmdSqueeze(args[1:])
 	case "secret", "mmds":
 		return cmdMMDS(args[1:])
+	case "credential":
+		return cmdCredential(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use resize, squeeze or secret", args[0])
+	return fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret or credential", args[0])
 }
 
 // errConCodigo deja que un comando pida un codigo de salida concreto.
@@ -800,6 +802,44 @@ func cmdMMDS(args []string) error {
 		return err
 	}
 	fmt.Printf("%s  secrets injected via MMDS (can no longer be frozen)\n", mc.ID[:12])
+	return nil
+}
+
+// cmdCredential es `kling machine credential`: entrega una clave al proxy de
+// credenciales de una máquina con egress allowlist. La clave no entra en el
+// invitado; en la variable -env recibe un marcador que el proxy cambia por la
+// clave solo en peticiones a http://<dominio> (el SDK debe usar http://, el
+// proxy sale por HTTPS). Como en cmdMMDS, la clave NO viaja por la línea de
+// comandos: se lee de -f o de stdin.
+func cmdCredential(args []string) error {
+	fs := flag.NewFlagSet("credential", flag.ExitOnError)
+	host := hostFlag(fs)
+	domain := fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com")
+	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
+	file := fs.String("f", "", "file with the key (default: stdin)")
+	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || *domain == "" || *env == "" {
+		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-f keyfile]  (reads stdin if no -f)")
+	}
+	secret, err := leerClave(*file)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	mc, err := api.NewClient(hostOf(*host)).SetCredentials(ctx, fs.Arg(0), api.CredentialsRequest{
+		Credentials: []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret}},
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
+		mc.ID[:12], *env, strings.ToLower(*domain))
+	fmt.Printf("      point the SDK at http://%s (the proxy adds TLS); the key survives freeze/thaw and daemon restarts\n",
+		strings.ToLower(*domain))
 	return nil
 }
 

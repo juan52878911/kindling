@@ -7,8 +7,8 @@ import "time"
 //
 // Existe porque persist() guarda una FOTO de cada máquina (ver manager.go) y,
 // hasta ahora, esa foto era una copia por VALOR de *api.Machine. Eso basta
-// para los campos escalares, pero Volumes, Shares, Forwards, AllowDomains y
-// Labels son slices y mapas: una copia por valor solo copia la cabecera, y la
+// para los campos escalares, pero Volumes, Shares, Forwards, AllowDomains,
+// CredentialDomains y Labels son slices y mapas: una copia por valor solo copia la cabecera, y la
 // foto y la máquina viva siguen apuntando al MISMO array o mapa subyacente.
 // withDriveIDs (ver manager.go, M-03) muta ese slice compartido, así que una
 // foto tomada mientras persist() serializa fuera del lock puede ver un array a
@@ -26,6 +26,7 @@ func (mc *Machine) Clone() *Machine {
 	out.Volumes = append([]VolumeAttachment(nil), mc.Volumes...)
 	out.Shares = append([]ShareAttachment(nil), mc.Shares...)
 	out.AllowDomains = append([]string(nil), mc.AllowDomains...)
+	out.CredentialDomains = append([]string(nil), mc.CredentialDomains...)
 
 	if mc.Forwards != nil {
 		out.Forwards = make(map[string]string, len(mc.Forwards))

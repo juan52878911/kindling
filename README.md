@@ -101,6 +101,7 @@ sections:
 · [Isolation](#isolation)
 · [Egress: none, internet, allowlist](#egress-none-internet-or-an-allowlist-of-domains)
 · [Secrets via MMDS](#secrets-that-never-touch-a-snapshot-mmds)
+· [Credential proxy](#keys-the-guest-never-sees-the-credential-proxy)
 
 **Operations**
 · [Topology report](#topology-report)
@@ -1112,6 +1113,61 @@ The store carries common variables and per-session secrets keyed by `Mcp-Session
 the bridge hands each session its own. A machine that has received secrets **can no
 longer be frozen** — that is enforced, not advised — so no secret ever ends up inside a
 snapshot file.
+
+What MMDS does not prevent: the code inside **reads** the secret (the MCP server runs as
+root in its microVM) and can send it out through an allowed domain. For an API key there
+is something better.
+
+## Keys the guest never sees: the credential proxy
+
+Isolating the process does not limit what it does with the key you hand it. With
+`-egress allowlist`, the key can stay in the daemon:
+
+```sh
+kling run -image toolchain -name payments -egress allowlist -allow example.org
+kling machine credential payments -domain api.stripe.com -env STRIPE_API_KEY -f key.txt
+```
+
+The guest gets a **placeholder** (`kling-cred-…`) in `STRIPE_API_KEY`, not the key. Its
+resolver answers `api.stripe.com` with the IP of a proxy on the host; the SDK talks to
+`http://api.stripe.com` (no TLS up to the proxy, over the local veth) and the proxy swaps
+the placeholder for the key — in headers (inside `Authorization: Basic` too), in the query
+string and in request bodies up to 1 MiB —, goes out over HTTPS verifying the certificate,
+and strips the key from any echo in the response. No MITM: the guest trusts no CA of ours.
+
+The placeholder is not a secret: the capability is being inside that machine's network,
+not knowing the string. So a machine with credentials **can be frozen**, wakes up with
+them, and they survive a daemon restart — they live encrypted in the machine's directory
+(AES-256-GCM, key derived from the host-only `secrets/snapshot.key`), never in
+`state.json`, events or a snapshot. Repeating `-env` with a new key rotates it; the
+placeholder stays, so the running process needs no restart.
+
+For an MCP service nobody is there to hand a key to each replica the gateway wakes.
+Tie it to the template instead: every instance born from it gets its own placeholder
+at start, before the first session (the bridge reads MMDS when it spawns a session):
+
+```sh
+kling mcp import stripe -egress allowlist -allow api.stripe.com
+kling template credential stripe -domain api.stripe.com -env STRIPE_API_KEY -f key.txt
+```
+
+Measured in the lab with a "compromised" server running as root inside:
+
+| What it tries | With MMDS | With the proxy |
+|---|---|---|
+| Read the key | reads it | only sees the placeholder |
+| Use it against its domain | yes | yes, through the proxy |
+| Direct HTTPS to the domain, bypassing the proxy | — | blocked |
+| Get the key back in a response echo | yes | no, it arrives redacted |
+| Use the proxy for another domain | — | 403 |
+
+The proxy adds no latency: 90 ms median per request vs 363 ms over direct HTTPS with a
+client that opens one TLS connection per request (the proxy reuses its own). What it does
+not prevent: the guest can still **use** the key against its domain; that is bounded by
+the key itself (restricted, read-only, spending limits). Echo redaction is defence in
+depth (serious providers never return the credential); a response in an encoding the
+proxy cannot inspect (brotli, deflate) is refused with 502. Not available on macOS yet:
+the vz backend has no host-side resolver to divert the domain (see SECURITY.md).
 
 ---
 

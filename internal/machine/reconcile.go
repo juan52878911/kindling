@@ -70,6 +70,14 @@ func (m *Manager) reconcile() {
 			if mc.Egress == string(knet.EgressAllowlist) {
 				if err := knet.Plan(mc.NetIndex, mc.ID).StartAllowlistResolver(mc.AllowDomains); err != nil {
 					log.Printf("reconcile: couldn't resume the dns resolver for %s: %v", shortID(mc.ID), err)
+				} else if n, err := m.reentregarCredenciales(context.Background(), mc, nil); err != nil {
+					// Y sus credenciales, que también eran goroutines nuestras
+					// (proxy) y estado del resolver. Su MMDS sigue en el VMM
+					// vivo: solo se rehace el lado del host. Si falla, el
+					// dominio no resuelve: falla cerrado, y se dice.
+					log.Printf("reconcile: couldn't hand %s its credentials back: %v", shortID(mc.ID), err)
+				} else if n > 0 {
+					log.Printf("reconcile: %s (%s) got its %d credential(s) back", mc.Name, mc.ID[:8], n)
 				}
 			}
 			continue

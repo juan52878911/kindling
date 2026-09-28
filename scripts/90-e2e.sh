@@ -72,9 +72,10 @@ if contiene "$out" "booted cold"; then
 else
   bad "run" "una máquina arrancada" "$out"
 fi
+# El CLI dice "frozen" desde que el estado warm se muestra así al usuario.
 out=$($KLING freeze "$NAME" 2>&1)
-contiene "$out" "warm" && ok "freeze -> warm ($(echo "$out" | grep -o '[0-9]* ms' | head -1))" \
-  || bad "freeze" "estado warm" "$out"
+contiene "$out" "frozen" && ok "freeze -> frozen ($(echo "$out" | grep -o '[0-9]* ms' | head -1))" \
+  || bad "freeze" "estado frozen" "$out"
 
 # El thaw es LA cifra del proyecto: si sube de 200 ms, algo se rompió.
 out=$($KLING thaw "$NAME" 2>&1)
@@ -243,24 +244,29 @@ if $KLING sandbox create -image "$IMGVOL" -name "$SB" -ttl 5m -q >/dev/null 2>&1
   $KLING exec -timeout 2s "$SB" -- sleep 30 >/dev/null 2>&1; code=$?
   [ "$code" = "137" ] && ok "el plazo mata el comando (137)" || bad "exec -timeout" "137" "$code"
 
-  # Shell interactiva. Necesita un terminal, así que se le pone uno falso con
-  # `script`: sin él, `kling shell` se niega a propósito.
-  if command -v script >/dev/null 2>&1; then
-    out=$(printf 'tty; stty size; exit 5\n' | script -qec "$KLING shell $SB" /dev/null 2>&1 | tr -d '\r')
-    contiene "$out" "/dev/pts/" && ok "shell: hay un pseudoterminal de verdad dentro" \
-      || bad "kling shell" "un /dev/pts/N" "$out"
-    # El código de la shell remota tiene que llegar al proceso local.
-    printf 'exit 5\n' | script -qec "$KLING shell $SB" /dev/null >/dev/null 2>&1
-    # `script` devuelve el código del comando que envuelve.
-    code=$?
-    [ "$code" = "5" ] && ok "shell: el código de salida remoto llega al local" \
-      || bad "código de kling shell" "5" "$code"
-    out=$($KLING shell "$SB" </dev/null 2>&1)
-    contiene "$out" "needs a terminal" && ok "shell: se niega sin terminal, y lo explica" \
-      || bad "kling shell sin tty" "un rechazo explicando" "$out"
-  else
-    echo "  (sin util-linux script: me salto la shell interactiva)"
-  fi
+  # Shell interactiva. Necesita un terminal, así que se le pone uno falso. Con
+  # el pty de python3 (que ya exigimos) y no con `script`: el `script -qec` de
+  # util-linux no existe en el `script` BSD de macOS, desde donde se lanza este
+  # e2e contra el lab, y las dos comprobaciones fallaban por la herramienta,
+  # no por kling. pty.spawn devuelve el estado de waitpid del hijo.
+  conpty() {
+    python3 -c '
+import os, pty, sys
+st = pty.spawn(sys.argv[1:])
+sys.exit(os.waitstatus_to_exitcode(st) if hasattr(os, "waitstatus_to_exitcode") else (st >> 8))
+' "$@"
+  }
+  out=$(printf 'tty; stty size; exit 5\n' | conpty $KLING shell "$SB" 2>&1 | tr -d '\r')
+  contiene "$out" "/dev/pts/" && ok "shell: hay un pseudoterminal de verdad dentro" \
+    || bad "kling shell" "un /dev/pts/N" "$out"
+  # El código de la shell remota tiene que llegar al proceso local.
+  printf 'exit 5\n' | conpty $KLING shell "$SB" >/dev/null 2>&1
+  code=$?
+  [ "$code" = "5" ] && ok "shell: el código de salida remoto llega al local" \
+    || bad "código de kling shell" "5" "$code"
+  out=$($KLING shell "$SB" </dev/null 2>&1)
+  contiene "$out" "needs a terminal" && ok "shell: se niega sin terminal, y lo explica" \
+    || bad "kling shell sin tty" "un rechazo explicando" "$out"
 
   # Congelar y despertar un sandbox sobre una imagen POR CAPAS. El ciclo de
   # vida de arriba usa `min`, que es monolítica, y con jailer activo el thaw de
@@ -479,6 +485,161 @@ while True:
     || failE "share outside roots" "not under any allowed share root" "$out"
   $KLING rm "$SH-bad" >/dev/null 2>&1
   hostsh "rm -rf $HD $SHARE_ROOT/secret-$$"
+fi
+
+# ── 7. proxy de credenciales ─────────────────────────────────────────────────
+# El invitado es hostil: con una clave inyectada por MMDS, un servidor
+# comprometido la lee y la saca por un dominio permitido. Con el proxy la clave
+# no entra: el invitado ve un marcador y el proxy lo cambia por la clave solo
+# hacia su dominio. Necesita salida a internet desde el host (httpbin.org).
+#
+# httpbin.org/basic-auth/<usuario>/<clave> contesta 200 solo si la cabecera
+# Basic trae ESA clave: es la prueba de que al proveedor le llegó la real. La
+# clave va en la ruta porque así funciona httpbin, no porque el invitado la
+# necesite: la sonda solo la usa para comprobar que no aparece en lo que ve.
+step "7. Proxy de credenciales"
+CR="e2e-cred-$$"
+PASS="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+# La sonda corre DENTRO del invitado, como root. Recibe la clave real solo para
+# comprobar que no la ve. Imprime una línea por comprobación.
+SONDA='
+import base64, json, socket, subprocess, sys, time, urllib.request, urllib.error
+real = sys.argv[1]
+subprocess.run(["ip", "route", "add", "169.254.169.254/32", "dev", "eth0"], capture_output=True)
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store)["env"]["E2E_KEY"]
+print("MMDS", "CLAVE" if real in store else "MARCADOR")
+print("PH", ph)
+def get(url, h):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=15); return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+    except Exception as e:
+        return 0, type(e).__name__
+b64 = lambda s: base64.b64encode(s.encode()).decode()
+print("AUTH", get("http://httpbin.org/basic-auth/demo/" + real, {"Authorization": "Basic " + b64("demo:" + ph)})[0])
+if len(sys.argv) > 2 and sys.argv[2] == "corto":
+    sys.exit(0)
+st, body = get("http://httpbin.org/anything", {"Authorization": "Bearer " + ph})
+print("ECO", "CLAVE" if real in body else "MARCADOR")
+# /anything devuelve la cabecera Basic tal cual: el base64 lleva la clave real dentro.
+st, body = get("http://httpbin.org/anything", {"Authorization": "Basic " + b64("demo:" + ph)})
+print("ECOBASIC", "CLAVE" if (real in body or b64("demo:" + real) in body) else ("MARCADOR" if b64("demo:" + ph) in body else "NADA"))
+t0 = time.time(); st, why = get("https://httpbin.org/get", {})
+print("HTTPS", st, why, int((time.time() - t0) * 1000))
+s = socket.create_connection((socket.gethostbyname("httpbin.org"), 80), timeout=5)
+s.sendall(b"GET / HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n")
+print("OTRO", s.recv(20).decode().split(" ")[1])
+'
+if $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+  out=$(printf '%s' "$PASS" | $KLING machine credential "$CR" -domain httpbin.org -env E2E_KEY 2>&1)
+  contiene "$out" "placeholder" && ok "credential: la clave queda en el proxy" || bad "machine credential" "placeholder" "$out"
+
+  out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS" 2>&1)
+  ph1=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+  contiene "$out" "MMDS MARCADOR" && ok "el invitado no ve la clave, solo el marcador" || bad "MMDS" "MMDS MARCADOR" "$out"
+  contiene "$out" "AUTH 200" && ok "el proveedor recibe la clave real (httpbin basic-auth 200)" || bad "sustitución" "AUTH 200" "$out"
+  contiene "$out" "ECO MARCADOR" && ok "el eco de la respuesta llega redactado" || bad "redacción" "ECO MARCADOR" "$out"
+  contiene "$out" "ECOBASIC MARCADOR" && ok "el eco de un Basic (clave dentro del base64) también llega redactado" \
+    || bad "redacción de Basic" "ECOBASIC MARCADOR" "$out"
+  https=$(printf '%s\n' "$out" | awk '/^HTTPS /{print $2, $4}')
+  case "$https" in
+    "0 "*) ms=${https#0 }
+           [ "$ms" -lt 2000 ] && ok "HTTPS directo al dominio, saltándose el proxy: rechazado en ${ms} ms" \
+             || bad "salto del proxy" "un rechazo rápido (RST)" "bloqueado, pero tardó ${ms} ms" ;;
+    *) bad "salto del proxy" "HTTPS 0" "$out" ;;
+  esac
+  contiene "$out" "OTRO 403" && ok "el proxy no sirve para otro dominio (403)" || bad "otro dominio" "OTRO 403" "$out"
+
+  # El marcador NO es un secreto: la máquina se congela, y al despertar el
+  # daemon le devuelve sus credenciales (proxy, resolver y MMDS).
+  out=$($KLING freeze "$CR" 2>&1)
+  contiene "$out" "frozen" && ok "una máquina con credenciales SÍ se congela (solo lleva marcadores)" \
+    || bad "freeze con credenciales" "frozen" "$out"
+  $KLING thaw "$CR" >/dev/null 2>&1
+  out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS" corto 2>&1)
+  ph2=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+  contiene "$out" "AUTH 200" && [ "$ph1" = "$ph2" ] && ok "tras freeze/thaw la credencial sigue viva y el marcador es el mismo" \
+    || bad "credencial tras thaw" "AUTH 200 con el mismo marcador" "$out"
+
+  # Y a un reinicio del daemon: las credenciales viven cifradas en el disco del
+  # host, no solo en su memoria.
+  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+    ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
+    sleep 4
+    out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS" corto 2>&1)
+    contiene "$out" "AUTH 200" && ok "tras reiniciar el daemon la credencial sigue viva" \
+      || bad "credencial tras reiniciar el daemon" "AUTH 200" "$out"
+  fi
+
+  # Rotación: la misma -env con otra clave conserva el marcador (el proceso del
+  # invitado ya lo tiene en su entorno) y el proveedor ve la clave nueva.
+  PASS2="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+  printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain httpbin.org -env E2E_KEY >/dev/null 2>&1
+  out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS2" corto 2>&1)
+  ph3=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+  contiene "$out" "AUTH 200" && [ "$ph1" = "$ph3" ] && ok "rotar la clave: el proveedor acepta la nueva y el marcador no cambia" \
+    || bad "rotación" "AUTH 200 con el mismo marcador" "$out"
+  $KLING rm -f "$CR" >/dev/null 2>&1
+else
+  bad "run -egress allowlist" "una máquina" "no arrancó"
+fi
+if $KLING run -image "$IMGVOL" -name "$CR-none" -ttl 5m -on-ttl remove >/dev/null 2>&1; then
+  out=$(printf 'x' | $KLING machine credential "$CR-none" -domain httpbin.org -env E2E_KEY 2>&1)
+  contiene "$out" "allowlist" && ok "sin -egress allowlist, credential se niega y lo explica" \
+    || bad "credential sin allowlist" "un rechazo que menciona allowlist" "$out"
+  $KLING rm -f "$CR-none" >/dev/null 2>&1
+fi
+
+# 7b. Credenciales de PLANTILLA: el caso MCP. El gateway instancia réplicas del
+# dorado sin nadie delante; la clave va atada a la plantilla y el daemon se la
+# entrega a cada instancia al nacer (marcador propio por instancia).
+step "7b. Credenciales de plantilla (lo que usa el gateway MCP)"
+TC="e2e-tcred-$$"
+TPLC="e2e-tpl-cred-$$"
+PASS3="e2e-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+if $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org -allow-exec >/dev/null 2>&1 \
+   && $KLING save "$TC" "$TPLC" >/dev/null 2>&1; then
+  out=$(printf '%s' "$PASS3" | $KLING template credential "$TPLC" -domain httpbin.org -env E2E_KEY 2>&1)
+  contiene "$out" "every new instance" && ok "template credential: la clave queda atada a la plantilla" \
+    || bad "template credential" "every new instance" "$out"
+  out=$($KLING template inspect "$TPLC" -json 2>&1)
+  contiene "$out" '"credential_domains"' && contiene "$out" "httpbin.org" && ok "la plantilla lista sus dominios con credencial" \
+    || bad "template inspect" "credential_domains con httpbin.org" "$out"
+  # El egress va explícito, como lo manda el gateway: el CLI siempre envía uno
+  # (none por defecto) y el daemon solo hereda el de la plantilla si llega vacío.
+  if $KLING run -from "$TPLC" -name "$TC-a" -egress allowlist -allow example.org -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+    out=$($KLING exec -timeout 90s "$TC-a" -- python3 -c "$SONDA" "$PASS3" corto 2>&1)
+    pha=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+    contiene "$out" "MMDS MARCADOR" && contiene "$out" "AUTH 200" && ok "una instancia nace con la credencial de su plantilla (AUTH 200)" \
+      || bad "instancia de plantilla con credencial" "MMDS MARCADOR y AUTH 200" "$out"
+    if $KLING run -from "$TPLC" -name "$TC-b" -egress allowlist -allow example.org -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+      out=$($KLING exec -timeout 90s "$TC-b" -- python3 -c "$SONDA" "$PASS3" corto 2>&1)
+      phb=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
+      contiene "$out" "AUTH 200" && [ -n "$pha" ] && [ "$pha" != "$phb" ] && ok "la segunda instancia también, con un marcador distinto" \
+        || bad "segunda instancia" "AUTH 200 con otro marcador" "$out"
+      $KLING rm -f "$TC-b" >/dev/null 2>&1
+    fi
+    $KLING rm -f "$TC-a" >/dev/null 2>&1
+  else
+    bad "run -from plantilla con credenciales" "una máquina" "no arrancó"
+  fi
+  out=$($KLING run -from "$TPLC" -name "$TC-c" -egress internet -ttl 5m -on-ttl remove 2>&1)
+  contiene "$out" "allowlist" && ok "run -from con -egress internet se niega: la plantilla tiene credenciales" \
+    || bad "run -from -egress internet" "un rechazo que menciona allowlist" "$out"
+  $KLING rm -f "$TC-c" >/dev/null 2>&1
+  $KLING template credential "$TPLC" -clear >/dev/null 2>&1
+  out=$($KLING template inspect "$TPLC" -json 2>&1)
+  contiene "$out" '"credential_domains"' && bad "template credential -clear" "sin credential_domains" "$out" \
+    || ok "template credential -clear las quita"
+  $KLING rm -f "$TC" >/dev/null 2>&1
+  $KLING template rm -f "$TPLC" >/dev/null 2>&1
+else
+  bad "plantilla con allowlist" "run + save" "falló"
 fi
 
 # ── resumen ──────────────────────────────────────────────────────────────────

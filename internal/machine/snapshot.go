@@ -398,6 +398,7 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 		}
 		s.DiskBytes = disco
 		s.Instances = live[e.Name()]
+		m.anotarCredencialesPlantilla(s)
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -912,6 +913,19 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			req.AllowDomains = snap.AllowDomains
 		}
 	}
+	// Credenciales de plantilla (credenciales.go): se entregan al final, con la
+	// máquina viva. Se comprueba YA que se van a poder entregar, porque una
+	// réplica de un servicio sin su clave es una réplica rota, y mejor decirlo
+	// antes de gastar un arranque que descubrirlo por un 401 dentro.
+	credsPlantilla, err := m.cargarCredencialesPlantilla(req.From)
+	if err != nil {
+		return nil, err
+	}
+	if len(credsPlantilla) > 0 && req.Egress != string(knet.EgressAllowlist) {
+		return nil, fmt.Errorf("template %s has credentials, which need -egress allowlist (this instance would have %q); "+
+			"run it with -egress allowlist -allow <its domains>, or clear them with kling template credential %s -clear",
+			req.From, req.Egress, req.From)
+	}
 	// El techo de CPU, igual. El planificador ya lo pasaba a mano, pero `kling
 	// run -from` no: la réplica caía al 50 % de un core del daemon aunque el
 	// dorado se hubiera hecho con más. Para un modelo VON de 2 vCPU eso es
@@ -1276,6 +1290,18 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 			return abortar(err)
 		}
 	}
+	// Las credenciales de la plantilla, a ESTA instancia: marcadores nuevos en
+	// su MMDS y la clave en su proxy. Antes de devolverla: el puente lee MMDS al
+	// lanzar cada sesión, así que la primera ya nace con el marcador. Un fallo
+	// aborta la restauración por lo dicho arriba.
+	var dominiosCred []string
+	if len(credsPlantilla) > 0 {
+		creds, _, err := m.entregarCredenciales(ctx, id, netcfg, c, credsPlantilla)
+		if err != nil {
+			return abortar(fmt.Errorf("handing %s the credentials of template %s: %w", mc.Name, req.From, err))
+		}
+		dominiosCred = dominiosDe(creds)
+	}
 	elapsed := time.Since(start).Milliseconds()
 
 	// Si el kernel no lo dejó nacer en su cgroup, se mete ahora, ya con el
@@ -1292,6 +1318,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
 	mc.ThawMS = elapsed
+	mc.CredentialDomains = dominiosCred
 	m.socket[id] = sock
 	m.persist()
 	out := *mc
