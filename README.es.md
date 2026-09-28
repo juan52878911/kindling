@@ -1125,10 +1125,14 @@ través del MMDS de Firecracker (el servicio de metadatos de la microVM):
 kling machine secret <ref> -f store.json     # o el JSON por stdin
 ```
 
-El almacén lleva variables comunes y secretos por sesión indexados por `Mcp-Session-Id`;
-el puente le entrega a cada sesión los suyos. Una máquina que ha recibido secretos **ya
-no puede congelarse** — se impone, no se aconseja — así que ningún secreto acaba dentro
-de un fichero de snapshot.
+El almacén lleva **solo variables comunes**; se comparten con todas las sesiones. Una
+máquina que ha recibido secretos **ya no puede congelarse** — se impone, no se aconseja
+— así que ningún secreto acaba dentro de un fichero de snapshot.
+
+**Los secretos por sesión están retirados** (el id de sesión se elige dentro del invitado,
+así que todas las sesiones verían todos los secretos). Usa **credenciales de plantilla**
+en cambio para secretos compartidos, o usa el **proxy de credenciales** para aislamiento
+de claves.
 
 Lo que MMDS no evita: el código de dentro **lee** el secreto (el servidor MCP corre como
 root en su microVM) y puede sacarlo por un dominio permitido. Para una clave de API hay
