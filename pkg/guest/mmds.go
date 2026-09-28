@@ -46,6 +46,7 @@ package guest
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -111,60 +112,70 @@ func SetupMMDSRoute() {
 	log.Printf("mmds: route to 169.254.169.254 via eth0 ready")
 }
 
-// fetchMMDS lee el store completo del metadata service con el flujo v2. Devuelve
-// nil sin ruido si MMDS no está disponible (la mayoría de servicios no usan
-// secretos): un fallo aquí NO debe impedir arrancar la sesión.
-func FetchMMDS() *MMDSStore {
+// FetchMMDS lee el store completo del metadata service con el flujo v2.
+//
+// Distingue dos casos que antes se confundían: (nil, nil) es "MMDS responde pero
+// no hay store" (lo normal en un servicio sin secretos), y (nil, err) es "no se
+// pudo leer". El segundo NO es silencioso para quien llama: un secreto inyectado
+// que no se ve se convierte en una sesión que arranca sin él sin que nadie lo
+// note. Un fallo aquí tampoco impide arrancar la sesión.
+func FetchMMDS() (*MMDSStore, error) {
 	// Cliente de vida corta y plazo agresivo: el link-local es local, y si no hay
-	// nadie sirviendo MMDS no queremos retrasar el arranque de cada sesión.
-	client := &http.Client{Timeout: 2 * time.Second}
+	// nadie sirviendo MMDS no queremos retrasar el arranque de cada sesión. Sin
+	// proxy: el metadata service nunca está detrás de uno.
+	client := &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
+	}
 
 	// 1) Token de sesión (PUT). v2 lo exige para poder leer.
 	treq, err := http.NewRequest(http.MethodPut, mmdsTokenURL, nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	treq.Header.Set("X-metadata-token-ttl-seconds", mmdsTokenTTL)
 	tresp, err := client.Do(treq)
 	if err != nil {
-		// Sin MMDS configurado o sin ruta: silencioso, es el caso normal.
-		return nil
+		return nil, fmt.Errorf("token: %w", err)
 	}
 	defer tresp.Body.Close()
 	if tresp.StatusCode != http.StatusOK {
-		return nil
+		return nil, fmt.Errorf("token: HTTP %d", tresp.StatusCode)
 	}
 	tok, err := io.ReadAll(io.LimitReader(tresp.Body, 4<<10))
 	if err != nil || len(tok) == 0 {
-		return nil
+		return nil, fmt.Errorf("token: empty or unreadable (%v)", err)
 	}
 
 	// 2) Store completo (GET /). Accept: application/json hace que MMDS devuelva
 	// todo el árbol como JSON en vez de texto.
 	greq, err := http.NewRequest(http.MethodGet, mmdsBase+"/", nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	greq.Header.Set("X-metadata-token", strings.TrimSpace(string(tok)))
 	greq.Header.Set("Accept", "application/json")
 	gresp, err := client.Do(greq)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("store: %w", err)
 	}
 	defer gresp.Body.Close()
+	if gresp.StatusCode == http.StatusNotFound {
+		return nil, nil // MMDS vivo, store vacío: nada que inyectar
+	}
 	if gresp.StatusCode != http.StatusOK {
-		return nil
+		return nil, fmt.Errorf("store: HTTP %d", gresp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(gresp.Body, 1<<20))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("store: %w", err)
 	}
 	var store MMDSStore
-	if json.Unmarshal(body, &store) != nil {
+	if err := json.Unmarshal(body, &store); err != nil {
 		// El store existe pero no encaja con el esquema esperado: lo ignoramos en
 		// vez de tumbar la sesión. Un aviso, porque sí indica un store mal formado.
 		log.Printf("mmds: store present but doesn't follow the {env,sessions} schema; ignoring it")
-		return nil
+		return nil, nil
 	}
-	return &store
+	return &store, nil
 }

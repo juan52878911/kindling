@@ -47,7 +47,11 @@ func waitFor(cmd *exec.Cmd, exitCh chan syscall.WaitStatus) error {
 // sesiones (un secreto se inyecta después del boot, en la microVM ya viva), y una
 // caché lo dejaría sin ver justo lo recién inyectado.
 func (b *bridge) sessionEnv(id string) ([]string, bool) {
-	store := guest.FetchMMDS()
+	store, err := guest.FetchMMDS()
+	if err != nil {
+		log.Printf("session %s: can't read MMDS, starting without its secrets: %v", id[:8], err)
+		return b.env, false
+	}
 	if store == nil {
 		return b.env, false
 	}

@@ -164,8 +164,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   que herede; con `-egress` dado, o sin `-from`, no cambia nada. De paso, el error de
   "necesita allowlist" ya lista los dominios concretos de la plantilla en vez de decir
   `<its domains>`.
+- **El puente ya no pierde en silencio los secretos de MMDS.** `guest.FetchMMDS` devolvía
+  `nil` tanto si el store estaba vacío como si no se podía leer, así que un secreto
+  inyectado que el puente no alcanzaba acababa en una sesión que arrancaba sin él (y
+  adoptando el hijo precalentado) sin dejar rastro. Ahora devuelve el error, el puente lo
+  registra por sesión, y el cliente de MMDS ignora `HTTP_PROXY` del entorno.
 
 ### Pruebas
+
+- `ext/mcp/scripts/90-e2e.sh`: la sección 8 crea su propia instancia del servicio, le
+  inyecta el store y abre la sesión directamente contra su puente, en vez de depender de
+  qué máquina elija el gateway. En el lab, dos pasadas seguidas: 25 ok, 0 fallos.
 
 - `scripts/90-e2e.sh`: la sección 2 esperaba `warm` y el CLI dice `frozen`; la sección 5
   usaba `script -qec` (util-linux), que no existe en el `script` BSD de macOS desde donde
