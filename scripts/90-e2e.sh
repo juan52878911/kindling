@@ -843,11 +843,26 @@ fi
 # El mismo modelo con una base de datos: el invitado conecta en claro al
 # dominio del servidor (que su resolver contesta con el proxy) con el marcador
 # como contraseña, y el proxy entra en el servidor con la clave real por TLS
-# verificado (SCRAM). Necesita un PostgreSQL con TLS, con IP PÚBLICA (el proxy
-# no sale a la red privada) y un certificado válido para su nombre:
+# verificado (SCRAM). Sin upstream necesita un PostgreSQL con TLS, con IP
+# PÚBLICA (sin upstream el proxy no sale a la red privada) y un certificado
+# válido para su nombre:
 #
 #   KLING_E2E_PG_URL=postgres://rol:clave@db.ejemplo.com:5432/base
 #   KLING_E2E_PG_CA=/ruta/ca.pem     (opcional: si el certificado no es de una CA pública)
+#
+# Con un upstream fijado (docs/postgres.md) vale una base de datos del propio
+# host o de la LAN; el host de la URL es entonces solo el nombre que usa el
+# invitado (cualquier nombre exacto, p. ej. pg.kindling.test):
+#
+#   KLING_E2E_PG_UPSTREAM=127.0.0.1:55432     (-upstream: a dónde marca el proxy)
+#   KLING_E2E_PG_TLS=disable                  (opcional, -upstream-tls disable: sin TLS, solo SCRAM-SHA-256)
+#   KLING_E2E_PG_SERVERNAME=pg.lan            (opcional, -tls-server-name: el nombre del certificado)
+#
+# Un Docker sin TLS en el host del daemon:
+#   docker run -d --name pge2e -p 127.0.0.1:55432:5432 -e POSTGRES_USER=kling \
+#     -e POSTGRES_PASSWORD=clave-e2e -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:17
+#   KLING_E2E_PG_URL=postgres://kling:clave-e2e@pg.kindling.test:5432/kling \
+#   KLING_E2E_PG_UPSTREAM=127.0.0.1:55432 KLING_E2E_PG_TLS=disable ./scripts/90-e2e.sh
 #
 # La clave va en la URL por comodidad del que prueba; al daemon llega por stdin.
 step "7d. Proxy de credenciales de Postgres"
@@ -863,6 +878,19 @@ print(u.hostname, u.port or 5432, urllib.parse.unquote(u.username or ""), (u.pat
   PG_PASS=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).password or ""))' "$KLING_E2E_PG_URL")
   ca_args=()
   [ -n "${KLING_E2E_PG_CA:-}" ] && ca_args=(-ca-file "$KLING_E2E_PG_CA")
+  # Upstream fijado, modo TLS y nombre del certificado: lo que la CLI dice del
+  # destino y el método que debe quedar en la auditoría dependen de ellos.
+  PG_MODO="over verified TLS"; PG_AUTH='"auth":"scram-sha-256'
+  if [ -n "${KLING_E2E_PG_SERVERNAME:-}" ]; then
+    ca_args+=(-tls-server-name "$KLING_E2E_PG_SERVERNAME"); PG_MODO="over TLS verified as"
+  fi
+  if [ -n "${KLING_E2E_PG_UPSTREAM:-}" ]; then
+    ca_args+=(-upstream "$KLING_E2E_PG_UPSTREAM")
+  fi
+  if [ -n "${KLING_E2E_PG_TLS:-}" ]; then
+    ca_args+=(-upstream-tls "$KLING_E2E_PG_TLS")
+    [ "$KLING_E2E_PG_TLS" = disable ] && { PG_MODO="without TLS"; PG_AUTH='"auth":"scram-sha-256"'; }
+  fi
   # La sonda es un cliente mínimo del protocolo v3 (la imagen no trae psql):
   # SSLRequest (el proxy contesta N), arranque, contraseña en claro (el
   # marcador), una consulta; y lo mismo con un marcador falso.
@@ -917,8 +945,8 @@ print("FALSO", conectar("kling-cred-00000000000000000000")[2])
   if $KLING run -image "$IMGVOL" -name "$PGC" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
     out=$(printf '%s' "$PG_PASS" | $KLING machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
       -user "$PG_USER" -database "$PG_DB" "${ca_args[@]}" -env PGPASSWORD 2>&1)
-    contiene "$out" "verified TLS" && ok "credential -type postgres: la clave queda en el proxy" \
-      || bad "machine credential -type postgres" "verified TLS" "$out"
+    contiene "$out" "$PG_MODO" && ok "credential -type postgres: la clave queda en el proxy ($PG_MODO)" \
+      || bad "machine credential -type postgres" "$PG_MODO" "$out"
     out=$($KLING exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
     contiene "$out" "MMDS MARCADOR" && ok "el invitado no ve la clave, solo el marcador" || bad "MMDS (postgres)" "MMDS MARCADOR" "$out"
     contiene "$out" "SSL N" && ok "el tramo del invitado va en claro (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
@@ -927,8 +955,12 @@ print("FALSO", conectar("kling-cred-00000000000000000000")[2])
     contiene "$out" "FALSO ERROR 28P01" && ok "un marcador falso: 28P01 sin llegar al servidor" \
       || bad "marcador falso" "FALSO ERROR 28P01" "$out"
     out=$($KLING machine audit "$PGC" -tail 0 -json 2>&1)
-    contiene "$out" '"kind":"postgres"' && contiene "$out" '"auth":"scram-sha-256' \
-      && ok "audit: una línea por conexión, autenticada con SCRAM" || bad "audit postgres" 'kind postgres con auth scram' "$out"
+    contiene "$out" '"kind":"postgres"' && contiene "$out" "$PG_AUTH" \
+      && ok "audit: una línea por conexión, autenticada con SCRAM" || bad "audit postgres" "kind postgres con $PG_AUTH" "$out"
+    if [ -n "${KLING_E2E_PG_UPSTREAM:-}" ]; then
+      contiene "$out" '"upstream":"' && ok "audit: la línea dice a qué upstream marcó el proxy" \
+        || bad "audit postgres upstream" '"upstream":"…"' "$out"
+    fi
     contiene "$out" '"reason":"bad_placeholder","denied":true' && ok "audit: el marcador falso queda como denegado" \
       || bad "audit postgres denegado" "bad_placeholder denied" "$out"
     if contiene "$out" "$PG_PASS" || contiene "$out" "kling-cred-" || contiene "$out" "current_user"; then
