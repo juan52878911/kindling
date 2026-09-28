@@ -207,8 +207,20 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
   cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
   codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
-  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB retenido
-  por petición. Plazos: 60 s hasta las cabeceras de la respuesta, 120 s de inactividad
+  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB del cuerpo
+  ya sustituido retenido EN MEMORIA por petición (`pkg/credproxy/cuerpo.go`). Un cuerpo
+  que, tras sustituir, pasa de 1 MiB sale chunked si el invitado lo mandó chunked (no
+  hay longitud que prometer); pero si el invitado declaró Content-Length, se derrama a
+  un fichero temporal y se reenvía con el Content-Length exacto de ese fichero, porque
+  hay proveedores de API que no aceptan una subida chunked. Ese fichero lleva la clave
+  real mientras dura la petición: nombre aleatorio (`os.CreateTemp`), permisos 0600
+  explícitos y se borra en cuanto la petición termina, la reciba el proveedor o falle a
+  mitad (el borrado va en un `defer`, así que corre también si el invitado corta la
+  conexión o si el plazo de la petición la cancela). El directorio es
+  `$KLING_ROOT/tmp` (0700, solo lo lee el daemon) en Linux; sin `KLING_ROOT` cae en
+  `os.TempDir()`, que en un fichero 0600 de nombre aleatorio no es legible por otro
+  usuario del host sin ser root, aunque conviene el primero cuando se pueda. Plazos:
+  60 s hasta las cabeceras de la respuesta, 120 s de inactividad
   (cada byte en cualquier sentido los renueva, también el plazo de la conexión del
   invitado) y un techo de 15 min por petición: un stream largo de un LLM pasa, y un
   invitado que gotea bytes para retener una plaza no la retiene más de 15 min. Un corte
