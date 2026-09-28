@@ -23,6 +23,20 @@ func TestWriteSnapshots(t *testing.T) {
 	if !strings.Contains(b.String(), "NAME") || !strings.Contains(b.String(), "tpl") || !strings.Contains(b.String(), "40M") {
 		t.Fatalf("%s", b.String())
 	}
+	// F2: sin GuestIPv6Off (el caso de arriba, campo en su cero) se marca en
+	// la tabla y se explica al pie.
+	if !strings.Contains(b.String(), "tpl*") || !strings.Contains(b.String(), "IPv6 barrier") {
+		t.Errorf("faltó la marca de F2 (sin GuestIPv6Off):\n%s", b.String())
+	}
+
+	b.Reset()
+	list[0].GuestIPv6Off = true
+	if err := writeSnapshots(&b, list, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "*") {
+		t.Errorf("con GuestIPv6Off no debería haber marca ni pie:\n%s", b.String())
+	}
 }
 
 func TestWriteSnapshot(t *testing.T) {
@@ -36,7 +50,8 @@ func TestWriteSnapshot(t *testing.T) {
 	}
 	out := b.String()
 	for _, want := range []string{"name:        tpl", "2 / 512 MiB (ceiling 1024 MiB)", "instances:   3",
-		"data -> /data (ro)", "annotations:", `mcp.catalog  {"tools": ["a", "b"]}`, "kling run -from tpl"} {
+		"data -> /data (ro)", "annotations:", `mcp.catalog  {"tools": ["a", "b"]}`, "kling run -from tpl",
+		"guest ipv6:  not confirmed off"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("falta %q en:\n%s", want, out)
 		}
@@ -44,6 +59,18 @@ func TestWriteSnapshot(t *testing.T) {
 	if strings.Index(out, "  b  1") > strings.Index(out, "mcp.catalog") {
 		t.Error("las anotaciones van ordenadas")
 	}
+
+	// Con GuestIPv6Off no se muestra el aviso.
+	b.Reset()
+	s2 := *s
+	s2.GuestIPv6Off = true
+	if err := writeSnapshot(&b, &s2, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "guest ipv6") {
+		t.Errorf("con GuestIPv6Off no debería mencionar el ipv6 del invitado:\n%s", b.String())
+	}
+
 	b.Reset()
 	if err := writeSnapshot(&b, s, true); err != nil {
 		t.Fatal(err)

@@ -79,8 +79,11 @@ func (m *Manager) claveFirma() ([]byte, error) {
 
 // contenidoFirmado es lo que cubre la firma, en un orden fijo.
 //
-// s.KernelSHA256 queda fuera A PROPÓSITO (K2): ver la nota de arriba y el
-// comentario del campo en pkg/api/types.go.
+// s.KernelSHA256 y s.GuestIPv6Off quedan fuera A PROPÓSITO (K2 y la nota del
+// campo GuestIPv6Off): son diagnóstico de compatibilidad, no una decisión de
+// arranque, y cubrirlos invalidaría la firma de todo snapshot anterior a esos
+// campos. Ver la nota de arriba y el comentario de cada campo en
+// pkg/api/types.go.
 func contenidoFirmado(s *api.Snapshot) []byte {
 	vols := make([]string, 0, len(s.Volumes))
 	for _, v := range s.Volumes {

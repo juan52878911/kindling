@@ -106,7 +106,9 @@ impidiera la fuga. Se cerró en dos capas independientes, ninguna depende de la 
 1. `ipv6.disable=1` en la línea de arranque del invitado (`internal/net/net.go`, `BootArg`):
    el módulo IPv6 del kernel del invitado no carga, así que no hay ni siquiera una dirección
    link-local. Solo cubre arranques **en frío** — un snapshot dorado ya congelado no relee la
-   línea de arranque al restaurar y sigue con el IPv6 que tenía al congelarse.
+   línea de arranque al restaurar y sigue con el IPv6 que tenía al congelarse. Los dorados
+   congelados desde este cambio lo saben (`guest_ipv6_off` en su meta) y los anteriores lo
+   avisan solos al instanciarse; ver más abajo, en "Lo que NO está resuelto".
 2. `applyIPv6Barrier` en el namespace del host (`internal/net/firewall.go`), aplicada en los
    **tres** modos de egress (`none`, `internet`, `allowlist`) y también en snapshots
    restaurados, no solo en arranques en frío: `sysctl disable_ipv6=1` en `tap0`, en el veth
@@ -435,13 +437,19 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
   en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
   (`-listen 0.0.0.0:9100`) y avisa.
-- **`ipv6.disable=1` no llega a un snapshot dorado ya congelado.** Solo se lee en un
-  arranque en frío; restaurar un dorado hecho antes de este cambio sigue con el IPv6 que
-  tenía al congelarse. La barrera del namespace (`applyIPv6Barrier`) no tiene ese límite
-  y cubre igual esos snapshots, pero el kernel del invitado, si conserva IPv6 vivo, aún
-  podría auto-asignarse una link-local dentro de su propia pila —inofensiva sin
-  reenvío, pero no es lo mismo que no tenerla—. Un dorado nuevo, o uno recongelado tras
-  este cambio, ya arranca sin el módulo.
+- **`ipv6.disable=1` no llega a un snapshot dorado ya congelado, pero ya no es un límite
+  silencioso.** Solo se lee en un arranque en frío; restaurar un dorado hecho antes de
+  este cambio sigue con el módulo IPv6 del kernel del invitado cargado. La barrera del
+  namespace (`applyIPv6Barrier`) no tiene ese límite y cierra el paso igual a esos
+  dorados —esto no reabre una fuga, es defensa en profundidad que falta en una capa—,
+  pero el invitado, si conserva IPv6 vivo, aún podría auto-asignarse una link-local
+  dentro de su propia pila. Cada dorado guarda ahora si se congeló con la barrera activa
+  (`guest_ipv6_off` en su meta; ausente en los anteriores a este cambio, que se leen como
+  "no consta", nunca como "confirmado sin ella"). La primera vez que se instancia un
+  dorado sin esa marca, el daemon avisa una vez (log y evento `snapshot.guest_ipv6`) con
+  cómo rehacerlo, y `kling snapshots` / `kling template inspect <nombre>` lo señalan. Un
+  dorado nuevo, o uno recongelado tras este cambio (`kling commit -replace <máquina>
+  <nombre>`), ya arranca con el módulo descargado y no vuelve a avisar.
 
 ## Ante un incidente
 

@@ -327,6 +327,21 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of the kernel: %w", err)
 	}
+	// F2: si la plantilla arrancó en frío (mc.From == ""), este binario ya le
+	// puso `ipv6.disable=1` en la línea de arranque (knet.BootArg), así que su
+	// kernel congelado no lo tiene cargado. Si en cambio es una instancia de
+	// otro dorado (fork), la línea de arranque no se repite: la que tiene es
+	// la que quedó grabada en la memoria de AQUEL, así que se hereda su marca
+	// y no se vuelve a suponer "sí" a ciegas.
+	guestIPv6Off := mc.From == ""
+	if mc.From != "" {
+		if origen, _, oerr := m.loadSnapshotCached(mc.From); oerr == nil {
+			guestIPv6Off = origen.GuestIPv6Off
+		}
+		// Si no se puede leer el dorado de origen (se borró entre tanto), se
+		// deja en false: "no consta" es la lectura segura, igual que un
+		// dorado antiguo sin el campo.
+	}
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
@@ -340,6 +355,7 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 		RootfsSHA256: rootfsSHA,
 		SnapSHA256:   snapSHA,
 		KernelSHA256: kernelSHA,
+		GuestIPv6Off: guestIPv6Off,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
 		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
@@ -717,6 +733,30 @@ func (m *Manager) avisoKernel(recordedSHA, que string) string {
 // errKernelCambiado es que el kernel instalado no es el grabado al congelar.
 var errKernelCambiado = errors.New("the kernel changed")
 
+// avisoIPv6Invitado dice, para el log y el bus de eventos, si las instancias
+// del dorado `name` arrancan con el módulo IPv6 del kernel todavía cargado
+// (F2): "" si el dorado ya lleva GuestIPv6Off, o si a este dorado ya se le
+// avisó antes en la vida de este daemon (sync.Map, igual que resyncAvisado:
+// un aviso por dorado, no uno por instancia).
+//
+// Es un aviso y no un bloqueo: `applyIPv6Barrier` cierra el paso en el
+// namespace del host lo mismo con o sin este campo (defensa en profundidad,
+// no la única capa) — ver SECURITY.md, "IPv6: cerrado, no solo ausente". Lo
+// que falta en estos dorados es la capa de dentro: el invitado, si el módulo
+// sigue cargado, aún podría auto-asignarse una link-local en su propia pila.
+func (m *Manager) avisoIPv6Invitado(name string, guestIPv6Off bool) string {
+	if guestIPv6Off {
+		return ""
+	}
+	if _, yaAvisado := m.ipv6Avisado.LoadOrStore(name, true); yaAvisado {
+		return ""
+	}
+	return fmt.Sprintf("snapshot %q was frozen before the IPv6 barrier: its guest kernel still has "+
+		"the IPv6 module loaded (the host namespace blocks it either way, see SECURITY.md). "+
+		"To fix this instance's lineage, commit a fresh golden from a machine booted with the "+
+		"current kindling (`kling commit -replace <machine> %s`)", name, name)
+}
+
 // kernelIgual compara recordedSHA con el kernel instalado ahora; vacío se
 // acepta (anterior al campo). Es la parte común de avisoKernel (dorados)
 // y del Thaw de una warm (sello del volcado, ver kernelDelVolcado).
@@ -884,6 +924,17 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// KERNEL (K2): solo se avisa. Ver avisoKernel.
 	if aviso := m.avisoKernel(snap.KernelSHA256, fmt.Sprintf("snapshot %q", req.From)); aviso != "" {
 		log.Print(aviso)
+	}
+	// IPv6 EN EL INVITADO (F2): solo se avisa, y una vez por dorado. Ver
+	// avisoIPv6Invitado.
+	if aviso := m.avisoIPv6Invitado(req.From, snap.GuestIPv6Off); aviso != "" {
+		log.Print(aviso)
+		// m.bus es nil en algún arnés de test que ejercita runFrom sin
+		// necesitar el bus de eventos para nada más; en producción (NewManager)
+		// siempre está.
+		if m.bus != nil {
+			m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvGuestIPv6, Name: req.From, Message: aviso})
+		}
 	}
 
 	// La ejecución se encendió (o no) al arrancar la plantilla, en la línea de

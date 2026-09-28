@@ -152,12 +152,27 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tIMAGE\tCPU/MEM\tMEMORY\tDISK\tINSTANCES\tAGE")
+	// F2: un asterisco basta aquí; el detalle va en `kling template inspect`.
+	// Evita una columna nueva para un caso que, con el tiempo, desaparece solo
+	// (los dorados viejos se van recongelando).
+	huboSinIPv6 := false
 	for _, s := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
-			s.Name, s.Image, s.VCPUs, s.MemMiB,
+		marca := ""
+		if !s.GuestIPv6Off {
+			marca = "*"
+			huboSinIPv6 = true
+		}
+		fmt.Fprintf(tw, "%s%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
+			s.Name, marca, s.Image, s.VCPUs, s.MemMiB,
 			human(s.MemBytes), human(s.DiskBytes), s.Instances, since(s.CreatedAt))
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if huboSinIPv6 {
+		fmt.Fprintln(w, "\n* frozen before the IPv6 barrier: `kling template inspect <name>` for details")
+	}
+	return nil
 }
 
 func snapshotsRemove(name string, args []string) error {
@@ -222,6 +237,10 @@ func writeSnapshot(w io.Writer, s *api.Snapshot, asJSON bool) error {
 	fmt.Fprintf(w, "cpus/mem:    %d / %s\n", s.VCPUs, mem)
 	fmt.Fprintf(w, "on disk:     %s memory, %s total\n", human(s.MemBytes), human(s.DiskBytes))
 	fmt.Fprintf(w, "instances:   %d\n", s.Instances)
+	if !s.GuestIPv6Off {
+		fmt.Fprintf(w, "guest ipv6:  not confirmed off (frozen before the IPv6 barrier); the host "+
+			"namespace still blocks it, but recommit from a fresh boot to close it in the guest too\n")
+	}
 	for i, v := range s.VolumeSet() {
 		label := "volumes:"
 		if i > 0 {
