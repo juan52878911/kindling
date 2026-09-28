@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -110,7 +112,20 @@ func hostAuditado(host string) string {
 	if contieneInsensible(host, PlaceholderPrefix) {
 		return ":cred"
 	}
-	return recortar(host, maxHostAuditado)
+	return recortar(imprimible(host), maxHostAuditado)
+}
+
+// imprimible cambia por "?" los caracteres de control y los bytes que no son
+// UTF-8. La ruta llega decodificada (un %1b es un ESC de verdad) y alguien la
+// va a leer en un terminal con `kling machine audit`: un invitado no debe
+// poder mandarle secuencias de escape.
+func imprimible(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // rutaAuditada es la ruta que va al registro: la normalizada (la que se
@@ -134,6 +149,8 @@ func rutaAuditada(u *url.URL, ocultar []string) string {
 			segs[i] = ":cred"
 		case pareceToken(s):
 			segs[i] = ":tok"
+		default:
+			segs[i] = imprimible(s)
 		}
 	}
 	return recortar(strings.Join(segs, "/"), maxRutaAuditada)

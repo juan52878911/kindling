@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -158,9 +160,21 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 	if creds == "" {
 		creds = "-"
 	}
-	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), r.Method, r.Host, r.Path,
-		fmt.Sprint(r.Status), creds, fmt.Sprint(r.MS), auditResult(r))
+	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), printable(r.Method), printable(r.Host),
+		printable(r.Path), fmt.Sprint(r.Status), printable(creds), fmt.Sprint(r.MS), printable(auditResult(r)))
 	return len(p), nil
+}
+
+// printable cambia por "?" los caracteres de control: la ruta y el host los
+// eligió el invitado, y la tabla va a un terminal. El proxy ya los limpia al
+// escribir; esto cubre un registro de otra versión o tocado a mano.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // auditResult es la última columna: ok, el motivo de un fallo o límite, o

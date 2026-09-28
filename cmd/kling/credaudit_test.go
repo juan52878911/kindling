@@ -82,6 +82,20 @@ func TestAuditFollowSoloLoNuevo(t *testing.T) {
 	}
 }
 
+// Un registro con caracteres de control (de otra versión, o tocado) no llega
+// al terminal tal cual.
+func TestAuditWriterSinEscapes(t *testing.T) {
+	var out, errOut bytes.Buffer
+	w := &auditWriter{out: &out, errOut: &errOut}
+	l := `{"ts":"2026-09-28T10:00:00Z","kind":"http","method":"GET","host":"a\u001b]0;x","path":"/\u001b[2J\u009b","status":200,"req_bytes":0,"resp_bytes":0,"ms":0}`
+	if _, err := w.Write([]byte(l)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\u009b") || !strings.Contains(out.String(), "/?[2J?") {
+		t.Fatalf("salida %q", out.String())
+	}
+}
+
 func TestParseSince(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	if ts, err := parseSince("10m", now); err != nil || !ts.Equal(now.Add(-10*time.Minute)) {

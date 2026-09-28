@@ -268,6 +268,8 @@ func TestRutaAuditada(t *testing.T) {
 		{"/v1/sk_live-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345/x", "/v1/:tok/x"},
 		{"/v1/0123456789abcdef0123456789abcde", "/v1/0123456789abcdef0123456789abcde"}, // 31: no
 		{"/v1/a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q", "/v1/a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q"},
+		{"/v1/%1b%5b2J%0a%ff/x", "/v1/?[2J??/x"}, // ni escapes de terminal ni bytes sueltos
+		{"/v1/%c2%9b31m", "/v1/?31m"},            // CSI de 8 bits (U+009B)
 	} {
 		u, err := url.Parse(c.in)
 		if err != nil {
