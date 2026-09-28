@@ -1148,9 +1148,34 @@ El invitado recibe en `STRIPE_API_KEY` un **marcador** (`kling-cred-…`), no la
 resolver contesta `api.stripe.com` con la IP de un proxy del host; el SDK habla
 `http://api.stripe.com` (sin TLS hasta el proxy, por el veth local) y el proxy cambia el
 marcador por la clave —en las cabeceras (también dentro de `Authorization: Basic`), en la
-query y en cuerpos de hasta 1 MiB—, sale por HTTPS verificando el certificado y quita la
-clave de cualquier eco en la respuesta. Sin MITM: el invitado no confía en ninguna CA
-nuestra.
+query y en el cuerpo, sea del tamaño que sea y venga en flujo o no—, sale por HTTPS
+verificando el certificado y quita la clave de cualquier eco en la respuesta. Sin MITM: el
+invitado no confía en ninguna CA nuestra. Un cuerpo que tras la sustitución sigue por debajo
+de 1 MiB sale con su `Content-Length`; uno mayor sale chunked.
+
+Además, la clave se puede limitar a las peticiones para las que existe. `-allow-request`
+(repetible) recibe `MÉTODO /ruta`; `*` casa dentro de un segmento de la ruta y un `/**`
+final casa cualquier resto. Cualquier otra petición a ese dominio recibe un 403 del proxy,
+antes de leer el cuerpo o de abrir conexión con el proveedor:
+
+```sh
+kling machine credential pagos -domain api.stripe.com -env STRIPE_API_KEY -f clave.txt \
+  -allow-request 'GET /v1/balance' -allow-request 'GET /v1/charges/*'
+```
+
+El método tiene que coincidir exactamente (`GET` no incluye `HEAD`). La ruta se compara
+después de decodificarla y pasarla por `path.Clean`, así que `/v1/../admin` es `/admin`, y
+al proveedor le llega esa ruta limpia, la misma que se comprobó. La query no se compara.
+Sin `-allow-request` se permite toda petición al dominio, como antes. La lista va con la
+clave: al rotar una clave hay que volver a pasar `-allow-request`, o la nueva queda sin
+restricciones (el CLI dice cuál de los dos casos aplica). `kling template credential` acepta
+el mismo flag.
+
+Los streams pueden durar mucho. El proxy no tiene un plazo total, solo tres límites: 60 s
+para las cabeceras de la respuesta, 120 s de **inactividad** (cualquier byte en cualquier
+sentido lo renueva) y un techo de 15 min por petición. Un LLM que emite SSE durante cinco
+minutos pasa. Uno que se atasca, o un invitado que gotea bytes para ocupar una plaza, se
+corta, y quien estaba al otro lado ve un error, no una respuesta que parece completa.
 
 El marcador no es un secreto: la capacidad es estar dentro de la red de esa máquina, no
 conocer la cadena. Por eso una máquina con credenciales **sí se congela**, despierta con

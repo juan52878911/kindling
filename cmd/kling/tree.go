@@ -118,11 +118,13 @@ var coreTree = []section{
   template inspect <name> [-json]                  one template, with its annotations
   template rm [-f] <name>...                       removes templates
   template credential <name> -domain D -env VAR    ties an API key to the template:
-      [-f keyfile] | -clear                        every instance born from it gets a
-                                                   placeholder in VAR that its proxy
+      [-allow-request 'GET /v1/x']...              every instance born from it gets a
+      [-f keyfile] | -clear                        placeholder in VAR that its proxy
                                                    swaps for the key towards http://D
                                                    (needs -egress allowlist; stdin if
-                                                   no -f; -clear removes them all)
+                                                   no -f; -clear removes them all;
+                                                   -allow-request as in machine
+                                                   credential)
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -188,11 +190,16 @@ var coreTree = []section{
                                                    (stdin if no -f); it can no longer
                                                    be frozen
   machine credential <ref> -domain D -env VAR      hands an API key to the credential
-      [-f keyfile]                                 proxy: the guest only sees a
-                                                   placeholder in VAR, swapped for the
+      [-allow-request 'GET /v1/x']...              proxy: the guest only sees a
+      [-f keyfile]                                 placeholder in VAR, swapped for the
                                                    key on requests to http://D (needs
                                                    -egress allowlist; stdin if no -f;
                                                    repeat -env to rotate the key)
+                                                   -allow-request 'METHOD /path' limits
+                                                   which requests get the key, the rest
+                                                   is a 403 (repeatable; * = a segment,
+                                                   final /** = any rest); it goes with
+                                                   the key: repeat it when rotating
 `},
 		{Name: "topo", Summary: "ASCII diagram of everything", Usage: `  topo                                             ASCII diagram of everything
 `},

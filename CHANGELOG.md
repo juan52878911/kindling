@@ -52,13 +52,34 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   clave (JSON `\/` y `\u00XX`, percent-encoding, entidades HTML); una respuesta con una
   codificación que no se puede inspeccionar (brotli, deflate) se rechaza con 502; varias
   credenciales por dominio (antes la segunda pisaba a la primera en silencio); el
-  marcador se sustituye también en la query (`?key=`) y en cuerpos de hasta 1 MiB
-  (`client_secret` de OAuth); el redactor solo retiene del final de cada trozo lo que
+  marcador se sustituye también en la query (`?key=`) y en el cuerpo (`client_secret`
+  de OAuth; ver más abajo la sustitución en flujo); el redactor solo retiene del final de cada trozo lo que
   puede ser el comienzo de la clave, así que un flujo SSE sale evento a evento en vez de
   con la cola del anterior; repetir `-env` rota la clave conservando el marcador; y el
   443 de la IP del proxy también va al proxy, con lo que un `https://dominio` desde
   dentro muere en 3 ms en vez de esperar al plazo del SDK (un REJECT con RST necesitaba
   `xt_REJECT`, que el CT del lab no tiene: la regla fallaba y la máquina no arrancaba).
+- **El proxy de credenciales ya no corta los streams largos.** Antes cada petición tenía
+  120 s en total (contexto, `http.Client.Timeout` y `ReadTimeout`/`WriteTimeout` del
+  servidor), así que un SSE de un LLM que durase más se cortaba a medias. Ahora hay tres
+  plazos: 60 s hasta las cabeceras, 120 s de inactividad (cada byte en cualquier sentido
+  los renueva) y un techo de 15 min por petición contra un invitado que gotee bytes para
+  retener una plaza. Un corte aborta la conexión, así que el SDK ve un error y no una
+  respuesta truncada que parece entera. Probado en tests con plazos reducidos: un stream
+  de 1,2 s con un plazo de inactividad de 0,4 s llega entero, uno que se para se corta a
+  los 0,3 s y el techo corta a los 0,6 s.
+- **El marcador se sustituye en cualquier cuerpo de petición.** Antes solo en cuerpos de
+  hasta 1 MiB con longitud declarada; uno chunked o mayor se reenviaba sin tocar. Ahora
+  se sustituye en flujo con la ventana del redactor puesta al revés, leyendo el cuerpo a
+  trozos de 4 KiB. Lo retenido por petición sigue siendo como mucho 1 MiB: si el cuerpo
+  ya sustituido cabe en él, sale con su `Content-Length`; si no, sale chunked.
+- **Permisos por método y ruta en cada credencial.** `-allow-request 'GET /v1/balance'`
+  (repetible) en `kling machine credential` y `kling template credential`, y `allow` en
+  la API. El método se compara exacto; en la ruta, `*` casa dentro de un segmento y `**`
+  al final casa cualquier resto. La ruta de la petición se normaliza con `path.Clean`
+  antes de comparar, y se reenvía normalizada. Si ninguna credencial del dominio casa, el
+  proxy responde 403 sin leer el cuerpo ni abrir la salida. Sin `-allow-request` todo
+  sigue permitido, y los almacenes cifrados de antes se leen igual.
 - **Pendiente, documentado en SECURITY.md:** el proxy no existe en macOS (backend vz;
   plan concreto anotado), los secretos por sesión de MMDS siguen sin rellenarse solos, y
   `kling run -from` manda siempre un egress (`none` por defecto) en vez de dejar que el

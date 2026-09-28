@@ -817,11 +817,13 @@ func cmdCredential(args []string) error {
 	domain := fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com")
 	env := fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY")
 	file := fs.String("f", "", "file with the key (default: stdin)")
+	var allow stringsFlag
+	fs.Var(&allow, "allow-request", allowRequestHelp)
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || *domain == "" || *env == "" {
-		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-f keyfile]  (reads stdin if no -f)")
+		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)")
 	}
 	secret, err := leerClave(*file)
 	if err != nil {
@@ -831,13 +833,14 @@ func cmdCredential(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	mc, err := api.NewClient(hostOf(*host)).SetCredentials(ctx, fs.Arg(0), api.CredentialsRequest{
-		Credentials: []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret}},
+		Credentials: []api.CredentialSpec{{Domain: *domain, Env: *env, Secret: secret, Allow: allow}},
 	})
 	if err != nil {
 		return err
 	}
 	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
 		mc.ID[:12], *env, strings.ToLower(*domain))
+	fmt.Printf("      %s\n", describirAllow(allow))
 	fmt.Printf("      point the SDK at http://%s (the proxy adds TLS); the key survives freeze/thaw and daemon restarts\n",
 		strings.ToLower(*domain))
 	return nil

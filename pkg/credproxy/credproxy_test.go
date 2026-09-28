@@ -33,6 +33,16 @@ const (
 // al proveedor.
 func proxyContra(t *testing.T, h http.HandlerFunc) (*httptest.Server, *int32) {
 	t.Helper()
+	return proxyCon(t, h, []Credential{
+		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret},
+		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2},
+	}, nil)
+}
+
+// proxyCon es proxyContra con las credenciales que se quieran y, si ajustar
+// no es nil, la ocasión de tocar el proxy (los plazos) antes de servirlo.
+func proxyCon(t *testing.T, h http.HandlerFunc, creds []Credential, ajustar func(*Proxy)) (*httptest.Server, *int32) {
+	t.Helper()
 	var hits int32
 	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
@@ -45,11 +55,11 @@ func proxyContra(t *testing.T, h http.HandlerFunc) (*httptest.Server, *int32) {
 		return d.DialContext(ctx, network, up.Listener.Addr().String())
 	}
 	p := New(Options{Transport: tr})
-	if _, err := p.SetCredentials([]Credential{
-		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret},
-		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2},
-	}); err != nil {
+	if _, err := p.SetCredentials(creds); err != nil {
 		t.Fatal(err)
+	}
+	if ajustar != nil {
+		ajustar(p)
 	}
 	srv := httptest.NewServer(p)
 	t.Cleanup(srv.Close)

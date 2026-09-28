@@ -174,15 +174,32 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
   la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
   hay camino directo que lo esquive. El proxy solo acepta el Host de sus credenciales
-  (403 al resto), cambia el marcador por la clave solo en las cabeceras (también dentro
-  de `Authorization: Basic`, en la query y en cuerpos de hasta 1 MiB), sale por HTTPS
+  (403 al resto), cambia el marcador por la clave en las cabeceras (también dentro
+  de `Authorization: Basic`), en la query y en el cuerpo (en flujo, con una ventana del
+  tamaño del marcador: sin límite de tamaño ni de longitud declarada), sale por HTTPS
   verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
   redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
   respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding,
   entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
   cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
   codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
-  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, 120 s por petición.
+  32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB retenido
+  por petición. Plazos: 60 s hasta las cabeceras de la respuesta, 120 s de inactividad
+  (cada byte en cualquier sentido los renueva, también el plazo de la conexión del
+  invitado) y un techo de 15 min por petición: un stream largo de un LLM pasa, y un
+  invitado que gotea bytes para retener una plaza no la retiene más de 15 min. Un corte
+  aborta la conexión, así que el invitado ve un error y no una respuesta truncada que
+  parezca completa.
+- **Permisos por método y ruta** (`-allow-request 'GET /v1/balance'`, `Allow` en la API):
+  una credencial con permisos solo se sustituye en las peticiones que casan. Si ninguna
+  credencial del Host casa, el proxy responde 403 y cierra la conexión sin leer el
+  cuerpo ni abrir la salida. El método se compara exacto, contra una lista fija sin
+  CONNECT ni TRACE. La ruta se decodifica y se normaliza con `path.Clean` antes de
+  compararla (`/v1/../admin` y `/v1/%2e%2e/admin` valen `/admin`), y lo que se reenvía
+  al proveedor es esa ruta normalizada: el proveedor ve lo mismo que se comprobó. Los
+  patrones se validan al guardar: tienen que estar limpios, `*` no cruza `/` y `**` solo
+  puede ir como último segmento. Con la lista vacía todo está permitido, igual que
+  antes; un almacén cifrado sin `Allow` se sigue leyendo así.
   El 80 y el 443 de la IP del proxy van al proxy: un `https://dominio` desde dentro
   muere en el acto (3 ms medidos) en vez de esperar al plazo del SDK.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
@@ -323,9 +340,11 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **Una credencial se puede usar, aunque no leer.** El proxy impide que el invitado lea
   la clave o la saque a otro dominio, no que la use contra el suyo: es un oráculo de
   ella. Lo acota la clave misma (restringida, de solo lectura, con límites de gasto en
-  el proveedor). Un cuerpo de más de 1 MiB, o sin longitud declarada, se reenvía sin
-  sustituir el marcador. La redacción del eco es defensa en profundidad y cubre las
-  transformaciones habituales, no todas las imaginables.
+  el proveedor). `-allow-request` acota el oráculo a unas rutas, pero no mira la query
+  ni el cuerpo, y lo que no controla es cómo interpreta el proveedor la ruta que recibe:
+  un servidor que trate `;` o `\` como separadores, o `..;` como `..`, ve otra ruta que
+  el proxy. Contra eso, patrones exactos mejor que `/**`. La redacción del eco es defensa
+  en profundidad y cubre las transformaciones habituales, no todas las imaginables.
 - **El proxy de credenciales no existe en macOS.** El backend vz no tiene resolver
   allowlist en el host ni veth donde escuchar: la red del invitado es una pila gVisor
   dentro de `kling-vz`, un proceso sin privilegios por máquina que a propósito no

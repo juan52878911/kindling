@@ -205,7 +205,8 @@ func aeadDe(key []byte) (cipher.AEAD, error) {
 }
 
 // validarSpecs comprueba lo que llega de la API: dominio exacto, nombre de
-// variable válido, clave presente y sin repetir variable. Normaliza el dominio.
+// variable válido, clave presente, sin repetir variable y Allow bien formado.
+// Normaliza el dominio y las entradas de Allow.
 func validarSpecs(specs []api.CredentialSpec) error {
 	if len(specs) > credproxy.MaxCredentials {
 		return fmt.Errorf("at most %d credentials", credproxy.MaxCredentials)
@@ -228,12 +229,15 @@ func validarSpecs(specs []api.CredentialSpec) error {
 			return fmt.Errorf("env %s used by two credentials", s.Env)
 		}
 		vistos[s.Env] = true
+		if err := credproxy.ValidarPermisos(s.Allow); err != nil {
+			return fmt.Errorf("credential for %s (%s): %w", d, s.Env, err)
+		}
 	}
 	return nil
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se
-// sustituye (rotación), las demás se añaden.
+// sustituye entera, Allow incluido (rotación), las demás se añaden.
 func fusionarSpecs(previas, specs []api.CredentialSpec) []api.CredentialSpec {
 	out := append([]api.CredentialSpec(nil), previas...)
 	for _, s := range specs {
@@ -278,15 +282,18 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 		porEnv[cr.Env] = i
 	}
 	for _, s := range specs {
+		// Allow va con la clave: rotar sin él la deja sin restricciones, como
+		// una credencial nueva. Es lo que se pidió, y así la API no tiene un
+		// "conservar lo de antes" implícito que nadie ve.
 		if i, ok := porEnv[s.Env]; ok {
-			creds[i].Domain, creds[i].Secret = s.Domain, s.Secret
+			creds[i].Domain, creds[i].Secret, creds[i].Allow = s.Domain, s.Secret, s.Allow
 			continue
 		}
 		ph, err := credproxy.NuevoMarcador()
 		if err != nil {
 			return nil, 0, err
 		}
-		creds = append(creds, credproxy.Credential{Env: s.Env, Domain: s.Domain, Placeholder: ph, Secret: s.Secret})
+		creds = append(creds, credproxy.Credential{Env: s.Env, Domain: s.Domain, Placeholder: ph, Secret: s.Secret, Allow: s.Allow})
 		porEnv[s.Env] = len(creds) - 1
 		nuevas++
 	}

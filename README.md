@@ -1132,8 +1132,34 @@ The guest gets a **placeholder** (`kling-cred-…`) in `STRIPE_API_KEY`, not the
 resolver answers `api.stripe.com` with the IP of a proxy on the host; the SDK talks to
 `http://api.stripe.com` (no TLS up to the proxy, over the local veth) and the proxy swaps
 the placeholder for the key — in headers (inside `Authorization: Basic` too), in the query
-string and in request bodies up to 1 MiB —, goes out over HTTPS verifying the certificate,
-and strips the key from any echo in the response. No MITM: the guest trusts no CA of ours.
+string and in request bodies of any size, streamed or not —, goes out over HTTPS verifying
+the certificate, and strips the key from any echo in the response. No MITM: the guest
+trusts no CA of ours. A body that is still under 1 MiB after the swap goes out with its
+`Content-Length`; a bigger one goes out chunked.
+
+The key can also be limited to the requests it is meant for. `-allow-request` (repeatable)
+takes `METHOD /path`; `*` matches within one path segment and a final `/**` matches any
+rest. Anything else sent to that domain gets a 403 from the proxy, before the body is read
+or a connection to the provider is opened:
+
+```sh
+kling machine credential payments -domain api.stripe.com -env STRIPE_API_KEY -f key.txt \
+  -allow-request 'GET /v1/balance' -allow-request 'GET /v1/charges/*'
+```
+
+The method must match exactly (`GET` does not cover `HEAD`). The path is compared after
+decoding and `path.Clean`, so `/v1/../admin` is `/admin`. The provider then receives that
+cleaned path, the one that was checked. The query is not compared. With no
+`-allow-request`, every request to the domain is allowed, as before. The list belongs to
+the key: when you rotate a key, pass `-allow-request` again, or the new key has no
+restrictions (the CLI prints which one applies). `kling template credential` takes the
+same flag.
+
+Streams can run long. The proxy has no total deadline, only three limits: 60 s for the
+response headers, 120 s of **inactivity** (renewed by every byte in either direction), and
+a hard ceiling of 15 min per request. An LLM streaming SSE for five minutes gets through.
+A stalled one, or a guest dripping bytes to hold a slot, is cut off and sees an error, not
+a response that looks complete.
 
 The placeholder is not a secret: the capability is being inside that machine's network,
 not knowing the string. So a machine with credentials **can be frozen**, wakes up with

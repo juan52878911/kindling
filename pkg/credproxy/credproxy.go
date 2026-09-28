@@ -29,9 +29,16 @@
 //
 // DÓNDE SE SUSTITUYE el marcador: en las cabeceras (también dentro del base64
 // de Authorization: Basic), en la query de la URL (APIs con ?key=) y en el
-// cuerpo si es pequeño (≤ MaxSwapBody: los client_secret de OAuth van en un
-// formulario de unos bytes). Un cuerpo grande o sin longitud se reenvía tal
-// cual: sustituir en él obligaría a retenerlo entero en memoria por petición.
+// cuerpo, en flujo y con una ventana acotada (ver sustituidor), sea del tamaño
+// que sea y venga con longitud o chunked. Si el cuerpo ya sustituido cabe en
+// MaxSwapBody sale con su Content-Length; si no, sale chunked (la longitud
+// nueva no se sabe hasta el final).
+//
+// QUÉ PETICIONES se firman: todas las del dominio, salvo que la credencial
+// traiga Allow (ver permisos.go). Si ninguna credencial del Host permite el
+// método y la ruta, 403 antes de leer el cuerpo o abrir la salida; y una
+// credencial que no la permite no se sustituye en ella aunque otra del mismo
+// dominio sí.
 //
 // QUÉ SE REDACTA en la vuelta: la clave, sus formas escapadas más comunes
 // (JSON con \/ o \u00XX, percent-encoding, entidades HTML) y cada valor de
@@ -44,11 +51,12 @@
 //
 // QUÉ NO RESUELVE: el invitado puede seguir USANDO la credencial contra su
 // dominio (el proxy es un oráculo de ella). Eso lo acota la clave misma: de
-// solo lectura, restringida o con límites de gasto en el proveedor. Lo que ya
-// no puede es LEERLA, sacarla a otro dominio ni llevársela en un snapshot.
+// solo lectura, restringida o con límites de gasto en el proveedor, y Allow
+// (permisos.go) cuando el proveedor no las ofrece. Lo que ya no puede es LEERLA, sacarla a otro dominio ni llevársela en un snapshot.
 //
 // LÍMITES frente a un invitado que dispara a saco: peticiones en vuelo,
-// cabeceras y cuerpo de la petición acotados, plazos por petición (NewServer).
+// cabeceras y cuerpo de la petición acotados, plazos de inactividad y un techo
+// absoluto por petición (plazos.go).
 // No se siguen redirecciones: una 3xx del proveedor hacia otro host no debe
 // llevarse la clave.
 package credproxy
@@ -58,11 +66,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -80,24 +90,29 @@ const (
 	MaxInFlight = 32
 	// MaxBody: cuerpo de una petición del invitado.
 	MaxBody = 10 << 20
-	// MaxSwapBody: hasta este tamaño el cuerpo se lee entero para cambiar el
-	// marcador en él; por encima se reenvía en flujo y sin tocar.
+	// MaxSwapBody: si el cuerpo, ya sustituido, cabe en esto, se reenvía con
+	// su Content-Length; si no, chunked. Es lo que se retiene por petición.
 	MaxSwapBody = 1 << 20
 	// MaxHeaderBytes: cabeceras de una petición del invitado.
 	MaxHeaderBytes = 64 << 10
-	// Timeout: una petición entera, subida y respuesta incluidas.
-	Timeout = 120 * time.Second
 )
 
 // Credential es una clave atada a un dominio. Secret vive solo en memoria del
 // daemon (y cifrado en su disco); Placeholder es lo único que ve el invitado,
 // en la variable Env. Puede haber varias para el mismo dominio: una API que
 // quiera dos cabeceras distintas (clave y organización, por ejemplo).
+//
+// Allow acota las peticiones en que se usa ("GET /v1/balance", ver
+// permisos.go); vacío es todas. El almacén cifrado del daemon guarda este
+// struct tal cual (sin etiquetas: las claves JSON son los nombres), así que un
+// fichero de antes de Allow se lee con Allow vacío, que es lo que hacía
+// entonces.
 type Credential struct {
 	Env         string
 	Domain      string
 	Placeholder string
 	Secret      string
+	Allow       []string `json:",omitempty"`
 }
 
 var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -151,6 +166,9 @@ func ValidarCredenciales(creds []Credential) error {
 			return fmt.Errorf("credential for %s: duplicate placeholder", d)
 		}
 		vistos[c.Placeholder] = true
+		if err := ValidarPermisos(c.Allow); err != nil {
+			return fmt.Errorf("credential for %s: %w", d, err)
+		}
 	}
 	return nil
 }
@@ -174,9 +192,31 @@ type Options struct {
 // gVisor…), y debe asegurarse de que solo esa máquina llega a él.
 type Proxy struct {
 	mu     sync.RWMutex
-	creds  map[string][]Credential // por dominio
+	creds  map[string][]credCompilada // por dominio
 	sem    chan struct{}
 	client *http.Client
+	// idle y max son IdleTimeout y MaxDuration; campos para que los tests no
+	// tengan que esperar minutos.
+	idle, max time.Duration
+}
+
+// credCompilada es una credencial con su Allow ya partido.
+type credCompilada struct {
+	Credential
+	reglas []regla
+}
+
+// permite dice si la credencial se usa en method sobre ruta (normalizada).
+func (c credCompilada) permite(method, ruta string) bool {
+	if len(c.reglas) == 0 {
+		return true
+	}
+	for _, r := range c.reglas {
+		if r.casa(method, ruta) {
+			return true
+		}
+	}
+	return false
 }
 
 // New crea un proxy sin credenciales (todo 403 hasta SetCredentials).
@@ -190,15 +230,18 @@ func New(o Options) *Proxy {
 		tr = salidaSegura(lookup)
 	}
 	return &Proxy{
-		creds: map[string][]Credential{},
+		creds: map[string][]credCompilada{},
 		sem:   make(chan struct{}, MaxInFlight),
+		// Sin Timeout: cortaría a mitad un stream largo. Los plazos van por
+		// petición en ServeHTTP (ver plazos.go).
 		client: &http.Client{
 			Transport: tr,
 			// Una redirección a otro host no debe llevarse la clave: se devuelve
 			// la 3xx tal cual y que decida el invitado (con su marcador).
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-			Timeout:       Timeout,
 		},
+		idle: IdleTimeout,
+		max:  MaxDuration,
 	}
 }
 
@@ -211,9 +254,14 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	if err := ValidarCredenciales(creds); err != nil {
 		return nil, err
 	}
-	byDomain := map[string][]Credential{}
+	byDomain := map[string][]credCompilada{}
 	for _, c := range creds {
-		byDomain[c.Domain] = append(byDomain[c.Domain], c)
+		reglas, err := compilarPermisos(c.Allow)
+		if err != nil {
+			return nil, err
+		}
+		c.Allow = slices.Clone(c.Allow)
+		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
 	domains := make([]string, 0, len(byDomain))
 	for d := range byDomain {
@@ -230,12 +278,14 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 // plazos y el tope de cabeceras que un invitado hostil no debe poder saltarse.
 // El llamador lo sirve con srv.Serve(ln) sobre el listener que corresponda y
 // lo cierra con srv.Close().
+//
+// Sin ReadTimeout ni WriteTimeout: son plazos TOTALES y cortarían un stream
+// largo. El Proxy pone los suyos a cada petición (inactividad y techo, ver
+// plazos.go); aquí quedan los de antes de que haya petición.
 func NewServer(h http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       Timeout,
-		WriteTimeout:      Timeout,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    MaxHeaderBytes,
 	}
@@ -250,7 +300,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p.sem <- struct{}{}:
 		defer func() { <-p.sem }()
 	default:
-		http.Error(w, "kindling credential proxy: too many requests in flight", http.StatusServiceUnavailable)
+		rechazar(w, "kindling credential proxy: too many requests in flight", http.StatusServiceUnavailable)
 		return
 	}
 	host := strings.ToLower(r.Host)
@@ -259,46 +309,74 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	host = strings.TrimSuffix(host, ".")
 	p.mu.RLock()
-	cs := p.creds[host]
+	todas := p.creds[host]
 	p.mu.RUnlock()
-	if len(cs) == 0 {
-		http.Error(w, "kindling credential proxy: no credential for "+host, http.StatusForbidden)
+	if len(todas) == 0 {
+		rechazar(w, "kindling credential proxy: no credential for "+host, http.StatusForbidden)
 		return
 	}
 	if r.Method == http.MethodConnect {
-		http.Error(w, "kindling credential proxy: CONNECT is not supported; use http://"+host, http.StatusMethodNotAllowed)
+		rechazar(w, "kindling credential proxy: CONNECT is not supported; use http://"+host, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Permisos: solo se usan las credenciales que permiten este método y esta
+	// ruta. Si ninguna, 403 aquí: sin leer el cuerpo ni abrir la salida.
+	ruta := rutaNormalizada(r.URL)
+	var cs []Credential
+	restringido := false
+	for _, c := range todas {
+		restringido = restringido || len(c.reglas) > 0
+		if c.permite(r.Method, ruta) {
+			cs = append(cs, c.Credential)
+		}
+	}
+	if len(cs) == 0 {
+		rechazar(w, "kindling credential proxy: "+r.Method+" "+ruta+" is not allowed for "+host, http.StatusForbidden)
 		return
 	}
 
 	// Un Content-Length por encima del tope se rechaza ya: con MaxBytesReader la
 	// subida se cortaría a medias y la petición saliente se quedaría esperando
-	// bytes que no llegan hasta el plazo entero.
+	// bytes que no llegan hasta el plazo.
 	if r.ContentLength > MaxBody {
-		http.Error(w, "kindling credential proxy: request body too large", http.StatusRequestEntityTooLarge)
+		rechazar(w, "kindling credential proxy: request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	red := nuevoRedactor(w, cs)
 
-	// Cuerpo: si es pequeño y declara su longitud, se lee entero y se cambia el
-	// marcador en él (client_secret de OAuth, JSON con la clave dentro). Si no,
-	// se reenvía en flujo tal cual.
-	var body io.Reader = http.MaxBytesReader(w, r.Body, MaxBody)
-	length := r.ContentLength
-	if length > 0 && length <= MaxSwapBody {
-		b, err := io.ReadAll(body)
-		if err != nil {
-			http.Error(w, "kindling credential proxy: could not read the request body", http.StatusBadRequest)
+	// Plazos (plazos.go): techo absoluto en el contexto, vigía de inactividad
+	// que lo cancela, y los plazos de la conexión del invitado renovados en
+	// cada movimiento. Al salir se quita el de escritura: el servidor no lo
+	// repone y se lo llevaría la siguiente petición de la misma conexión.
+	ctx, cancel := context.WithTimeout(r.Context(), p.max)
+	defer cancel()
+	v := nuevoVigia(p.idle, cancel)
+	defer v.parar()
+	pl := plazosInvitado{rc: http.NewResponseController(w), idle: p.idle, fin: time.Now().Add(p.max)}
+	defer func() { _ = pl.rc.SetWriteDeadline(time.Time{}) }()
+
+	// La respuesta se redacta con TODAS las credenciales del dominio, también
+	// las que no se usaron: defensa en profundidad, no cuesta nada.
+	red := nuevoRedactor(escritorVigilado{w: w, v: v, p: pl}, credencialesDe(todas))
+
+	body, length, err := cuerpoSaliente(r, w, cs, v, pl)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "kindling credential proxy: request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		for _, c := range cs {
-			b = bytes.ReplaceAll(b, []byte(c.Placeholder), []byte(c.Secret))
-		}
-		body, length = bytes.NewReader(b), int64(len(b))
+		http.Error(w, "kindling credential proxy: could not read the request body", http.StatusBadRequest)
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), Timeout)
-	defer cancel()
-	out, err := http.NewRequestWithContext(ctx, r.Method, "https://"+host+sustituirQuery(r.URL, cs), body)
+	// Con permisos en el dominio, al proveedor va la ruta que se comprobó (ver
+	// urlSaliente); sin ellos, la del invitado tal cual, como siempre.
+	u := r.URL
+	if restringido {
+		u = urlSaliente(r.URL)
+	}
+	out, err := http.NewRequestWithContext(ctx, r.Method, "https://"+host+sustituirQuery(u, cs), body)
 	if err != nil {
 		http.Error(w, "kindling credential proxy: bad request", http.StatusBadRequest)
 		return
@@ -355,5 +433,63 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// La longitud puede cambiar al redactar: que la calcule el servidor.
 	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(red, resp.Body)
+	if _, err := io.Copy(red, origenVigilado{r: resp.Body, v: v}); err != nil {
+		// Cortada a medias (inactividad, techo, el proveedor se fue): se aborta
+		// la conexión en vez de cerrar el chunked limpio, para que el SDK del
+		// invitado vea un error y no una respuesta truncada que parece entera.
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// rechazar contesta un error ANTES de leer el cuerpo y cierra la conexión. Sin
+// el cierre, el servidor de net/http lee y descarta hasta 256 KiB del cuerpo
+// antes de mandar la respuesta, para poder reutilizar la conexión: el 403
+// esperaría a la subida que se quería no aceptar.
+func rechazar(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Connection", "close")
+	http.Error(w, msg, code)
+}
+
+func credencialesDe(cc []credCompilada) []Credential {
+	out := make([]Credential, len(cc))
+	for i, c := range cc {
+		out[i] = c.Credential
+	}
+	return out
+}
+
+// cuerpoSaliente prepara el cuerpo que va al proveedor: el del invitado
+// (acotado a MaxBody y vigilado) con el marcador cambiado por la clave en
+// flujo. Lee por adelantado hasta MaxSwapBody de salida: si el cuerpo termina
+// antes, sale entero con su Content-Length (un formulario OAuth, un JSON
+// normal: hay servidores que no aceptan una subida chunked); si no, lo leído
+// va delante del resto y sale chunked (longitud -1). Eso es lo único que se
+// retiene por petición, lo mismo que antes de sustituir en flujo.
+func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, v *vigia, pl plazosInvitado) (io.Reader, int64, error) {
+	if r.ContentLength == 0 {
+		return nil, 0, nil
+	}
+	s := nuevoSustituidor(lectorVigilado{r: http.MaxBytesReader(w, r.Body, MaxBody), v: v, p: pl}, cs)
+	// A mano y no con io.ReadAll: su crecimiento al doble reservaría hasta 2 MiB
+	// para retener 1. Aquí la capacidad no pasa de MaxSwapBody+1.
+	const tope = MaxSwapBody + 1
+	hint := 32 << 10
+	if r.ContentLength > 0 {
+		hint = int(min(r.ContentLength+1024, tope))
+	}
+	buf := make([]byte, 0, hint)
+	for len(buf) < tope {
+		if len(buf) == cap(buf) {
+			buf = slices.Grow(buf, min(cap(buf), tope-len(buf)))
+		}
+		n, err := s.Read(buf[len(buf):min(cap(buf), tope)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return bytes.NewReader(buf), int64(len(buf)), nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	return io.MultiReader(bytes.NewReader(buf), s), -1, nil
 }

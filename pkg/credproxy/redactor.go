@@ -182,10 +182,63 @@ func (r *redactor) ReadFrom(src io.Reader) (int64, error) {
 			return n, err
 		}
 	}
-	if len(r.tail) > 0 {
-		_, err := r.w.Write(r.tail)
-		r.tail = nil
-		return n, err
+	return n, r.vaciar()
+}
+
+// vaciar escribe lo retenido: el flujo terminó y ya nada puede completarlo.
+func (r *redactor) vaciar() error {
+	if len(r.tail) == 0 {
+		return nil
 	}
-	return n, nil
+	_, err := r.w.Write(r.tail)
+	r.tail = nil
+	return err
+}
+
+// sustChunk es cuánto lee el sustituidor del invitado de una vez. Pequeño a
+// propósito: lo que acota la memoria no es el trozo leído sino lo que ocupa
+// tras sustituir, y un trozo lleno de marcadores (47 bytes) que se cambian por
+// claves de hasta MaxSecret crece ~87 veces. Con 4 KiB el peor caso son unos
+// 350 KiB por petición.
+const sustChunk = 4 << 10
+
+// sustituidor cambia el marcador por la clave en el cuerpo de la PETICIÓN
+// según pasa, sin retenerlo entero: es el redactor de la respuesta en sentido
+// inverso (marcador→clave), con la misma ventana, así que un marcador partido
+// entre dos lecturas también se cambia. Solo cambia el marcador tal cual: es
+// [a-z0-9-] y ningún codificador habitual lo transforma.
+type sustituidor struct {
+	src   io.Reader
+	red   *redactor
+	out   bytes.Buffer
+	chunk []byte
+	err   error
+}
+
+func nuevoSustituidor(src io.Reader, cs []Credential) *sustituidor {
+	s := &sustituidor{src: src, chunk: make([]byte, sustChunk)}
+	s.red = &redactor{w: &s.out}
+	for _, c := range cs {
+		s.red.par(c.Placeholder, c.Secret)
+	}
+	return s
+}
+
+func (s *sustituidor) Read(p []byte) (int, error) {
+	for s.out.Len() == 0 {
+		if s.err != nil {
+			return 0, s.err
+		}
+		n, err := s.src.Read(s.chunk)
+		if n > 0 {
+			_, _ = s.red.Write(s.chunk[:n]) // escribe en un bytes.Buffer: no falla
+		}
+		if err != nil {
+			if err == io.EOF {
+				_ = s.red.vaciar()
+			}
+			s.err = err
+		}
+	}
+	return s.out.Read(p)
 }

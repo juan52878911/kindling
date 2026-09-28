@@ -112,6 +112,6 @@ func salidaSegura(lookup LookupFunc) *http.Transport {
 		MaxIdleConns:          16,
 		IdleConnTimeout:       60 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: HeaderTimeout,
 	}
 }

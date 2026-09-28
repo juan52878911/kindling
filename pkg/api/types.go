@@ -849,10 +849,17 @@ func IsInsufficientMemory(err error) bool {
 // CredentialSpec es una credencial para el proxy de credenciales: la clave real
 // (Secret) se queda en el daemon; el invitado recibe en la variable Env un
 // marcador que el proxy cambia por la clave solo en peticiones a Domain.
+//
+// Allow, opcional, acota además QUÉ peticiones a Domain llevan la clave:
+// entradas "MÉTODO /ruta" ("GET /v1/balance", "POST /v1/files/**"; * es un
+// segmento, ** al final es cualquier resto). Vacío es todas. Una petición que
+// ninguna credencial del dominio permite recibe 403 sin salir del host. Al
+// rotar (misma Env) se sustituye junto con la clave: hay que repetirlo.
 type CredentialSpec struct {
-	Domain string `json:"domain"`
-	Env    string `json:"env"`
-	Secret string `json:"secret"`
+	Domain string   `json:"domain"`
+	Env    string   `json:"env"`
+	Secret string   `json:"secret"`
+	Allow  []string `json:"allow,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de

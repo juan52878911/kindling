@@ -584,6 +584,54 @@ if $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org 
   ph3=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
   contiene "$out" "AUTH 200" && [ "$ph1" = "$ph3" ] && ok "rotar la clave: el proveedor acepta la nueva y el marcador no cambia" \
     || bad "rotación" "AUTH 200 con el mismo marcador" "$out"
+
+  # Permisos por método y ruta (-allow-request): solo lo permitido lleva la
+  # clave; lo demás es 403 del proxy, sin salir. La sonda usa http.client, que
+  # manda la ruta tal cual (urllib tampoco la limpia, pero así queda explícito):
+  # un /../ no debe servir para salirse de lo permitido. Y un stream largo
+  # (/drip: 5 bytes en 150 s, uno cada 30) llega entero: antes el plazo TOTAL
+  # de 120 s lo cortaba; ahora el plazo es de inactividad.
+  SONDA_ALLOW='
+import base64, http.client, json, sys, time, urllib.request
+real = sys.argv[1]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+ph = json.loads(urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode())["env"]["E2E_KEY"]
+basic = "Basic " + base64.b64encode(("demo:" + ph).encode()).decode()
+def pedir(metodo, ruta, timeout=20):
+    c = http.client.HTTPConnection("httpbin.org", 80, timeout=timeout)
+    try:
+        c.request(metodo, ruta, headers={"Authorization": basic})
+        r = c.getresponse(); b = r.read()
+        return r.status, b
+    except Exception as e:
+        return 0, type(e).__name__.encode()
+    finally:
+        c.close()
+print("PERMITIDO", pedir("GET", "/basic-auth/demo/" + real)[0])
+print("OTRARUTA", pedir("GET", "/anything")[0])
+print("OTROMETODO", pedir("POST", "/basic-auth/demo/" + real)[0])
+print("PUNTOPUNTO", pedir("GET", "/basic-auth/demo/../../anything")[0])
+t0 = time.time(); st, b = pedir("GET", "/drip?duration=150&numbytes=5&delay=0&code=200", timeout=200)
+print("DRIP", st, len(b), int(time.time() - t0))
+'
+  out=$(printf '%s' "$PASS2" | $KLING machine credential "$CR" -domain httpbin.org -env E2E_KEY \
+    -allow-request 'GET /basic-auth/demo/*' -allow-request 'GET /drip' 2>&1)
+  contiene "$out" "only these requests" && ok "credential -allow-request: la clave queda restringida" \
+    || bad "credential -allow-request" "only these requests" "$out"
+  out=$($KLING exec -timeout 240s "$CR" -- python3 -c "$SONDA_ALLOW" "$PASS2" 2>&1)
+  contiene "$out" "PERMITIDO 200" && ok "Allow: la ruta permitida lleva la clave (basic-auth 200)" \
+    || bad "Allow permitido" "PERMITIDO 200" "$out"
+  contiene "$out" "OTRARUTA 403" && contiene "$out" "OTROMETODO 403" && ok "Allow: otra ruta u otro método, 403 del proxy" \
+    || bad "Allow denegado" "OTRARUTA 403 y OTROMETODO 403" "$out"
+  contiene "$out" "PUNTOPUNTO 403" && ok "Allow: /../ no sirve para salirse de lo permitido" \
+    || bad "Allow con /../" "PUNTOPUNTO 403" "$out"
+  drip=$(printf '%s\n' "$out" | awk '/^DRIP /{print $2, $3, $4}')
+  case "$drip" in
+    "200 5 "*) ok "un stream de ${drip##* } s (más que el plazo total de antes, 120 s) llega entero" ;;
+    *) bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
+  esac
   $KLING rm -f "$CR" >/dev/null 2>&1
 else
   bad "run -egress allowlist" "una máquina" "no arrancó"
