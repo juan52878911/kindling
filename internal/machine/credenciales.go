@@ -327,6 +327,9 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := credproxy.ValidarCredenciales(creds); err != nil {
 		return nil, 0, err
 	}
+	if err := m.comprobarUpstreams(creds); err != nil {
+		return nil, 0, err
+	}
 	if err := m.guardarCredenciales(id, creds); err != nil {
 		return nil, 0, err
 	}
@@ -371,6 +374,12 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 		return 0, err
 	}
 	if c != nil {
+		// Un reenvío pudo abrirse en ese puerto desde la última entrega. Con
+		// c nil (reconcile, m.mu tomado) no se mira: en Linux no hay
+		// reenvíos, y en macOS no se registra nada nuevo.
+		if err := m.comprobarUpstreams(creds); err != nil {
+			return 0, err
+		}
 		if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 			return 0, err
 		}
@@ -443,6 +452,9 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 			name, snap.Egress)
 	}
 	if err := validarSpecs(specs); err != nil {
+		return nil, err
+	}
+	if err := m.comprobarUpstreams(credencialesDeSpecs(specs)); err != nil {
 		return nil, err
 	}
 	previas, err := m.cargarCredencialesPlantilla(name)

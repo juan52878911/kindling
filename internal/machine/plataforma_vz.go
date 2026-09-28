@@ -173,6 +173,11 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 	if err != nil {
 		return fmt.Errorf("opening port forwards: %w", err)
 	}
+	// Fuera del rango reservado, un upstream del loopback de otra máquina
+	// podría dar con este invitado (reenvios.go).
+	if err := validarReenvios(fwd); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	pct := defaultCPUPct
 	if cur := m.byID[id]; cur != nil {

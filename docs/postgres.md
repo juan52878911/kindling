@@ -80,6 +80,11 @@ printf '%s' 'la-clave' | kling machine credential agente -type postgres \
   (en un CT de Proxmox, el del CT). En macOS lo marca `kling-vz` con la pila de red del
   Mac, no con la gVisor del invitado: es el loopback del Mac, donde Docker Desktop
   publica los puertos.
+- **Puertos reservados `29000-29999` del loopback**: en macOS cada `kling-vz` expone
+  los puertos de su invitado en `127.0.0.1` y solo dentro de ese rango. Un `-upstream`
+  del loopback (`127.0.0.0/8`, `::1` o `localhost`) con un puerto del rango se rechaza
+  al darlo y, otra vez, al marcar: así no puede llegar al invitado de otra máquina. La
+  regla es la misma en Linux. Publica la base de datos en otro puerto.
 - En Linux también vale la IP del contenedor en su red (`-upstream 172.17.0.2:5432`):
   la red de Docker no es de kindling. Publicar en `127.0.0.1` es más estable (la IP
   del contenedor cambia al recrearlo).

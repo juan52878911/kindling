@@ -369,6 +369,21 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     host (su `127.0.0.1` es el del host); en macOS lo hace `kling-vz` con la pila del
     Mac, no con la gVisor del invitado. El TLS sigue siendo verify-full, y la
     cancelación va al mismo upstream con el mismo modo.
+  - **El loopback no llega a otras máquinas.** En macOS los invitados se exponen en
+    `127.0.0.1` (los reenvíos de `kling-vz`), y un upstream del loopback podía dar con el
+    de otra máquina. Los reenvíos se abren **solo** en el rango reservado
+    `127.0.0.1:29000-29999` (el daemon rechaza un `kling-vz` que abra otro), y ningún
+    upstream del loopback puede apuntar a ese rango: se rechaza al validar y otra vez al
+    marcar, en el proceso que marca, que no necesita conocer los reenvíos de las demás
+    (sin TOCTOU). Al entregar, el daemon cruza además el puerto con los reenvíos vivos.
+    Se eligió un rango y no otra IP de loopback (`127.0.0.2`) porque macOS solo
+    configura `127.0.0.1` y dar de alta otra exige root en cada arranque. En Linux no
+    hay reenvíos al loopback (al invitado se llega por `172.30.0.0/16`, prohibida; los
+    DNAT de cada netns no tocan el tráfico que origina el host; la API del daemon es un
+    socket Unix); lo único de kindling que puede escuchar ahí es opcional y HTTP con
+    token (gateway MCP o `kling ai up` en `127.0.0.1:8080`), y el proxy no da al
+    invitado ni un byte de una conexión cuyo servidor no haya completado SCRAM o TLS
+    verificado.
   - **`-upstream-tls disable`, solo con `-upstream`.** Sin `SSLRequest` y sin TLS, y
     entonces **solo** SCRAM-SHA-256: ni `-PLUS` (necesita TLS), ni contraseña en claro,
     ni md5, ni un `AuthenticationOk` sin SCRAM (trust). La contraseña no cruza la red
