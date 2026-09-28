@@ -19,13 +19,30 @@ package guest
 // ESQUEMA DEL STORE. Un único documento JSON:
 //
 //	{
-//	  "env":      { "VAR_COMUN": "valor" },              // comunes a TODAS las sesiones
-//	  "sessions": { "<Mcp-Session-Id>": { "TOKEN": "..." } }  // por sesión concreta
+//	  "env":      { "VAR_COMUN": "valor" }              // comunes a TODAS las sesiones
 //	}
 //
 // El bridge, al lanzar el hijo de una sesión, añade a su entorno los pares "env"
-// comunes MÁS los de "sessions[<su-id>]". Si no hay MMDS, no hay store, o no hay
-// entrada, no añade nada: el comportamiento sin secretos queda intacto.
+// comunes. Si no hay MMDS, no hay store, o no hay entrada, no añade nada: el
+// comportamiento sin secretos queda intacto.
+//
+// CAMPO "sessions" RETIRADO (no es seguro). Antes guardaba secretos por sesión
+// (ej: "sessions": { "<Mcp-Session-Id>": { "TOKEN": "..." } }), pero el id de sesión
+// se acuña en el bridge DENTRO del invitado justo al lanzar el hijo, y el bridge
+// (PID 1, root) y el servidor MCP corren como root y leen el almacén completo.
+// Resultado: una sesión podría leer los secretos de todas las otras.
+//
+// ALTERNATIVAS SEGURAS:
+// - VM efímera por sesión: cada sesión corre en su propia microVM, aislada.
+// - Credenciales de plantilla: usar `kling template credential` para inyectar
+//   credenciales vinculadas a la plantilla, no a la sesión: todas las sesiones
+//   de una máquina las ven, pero es seguro si la máquina es efímera.
+// - Proxy de credenciales: si el invitado tiene egress allowlist, usar
+//   `kling machine credential` para entregar claves solo en peticiones HTTP
+//   a dominios específicos (el proxy no es el invitado y solo sabe de esa máquina).
+//
+// El bridge sigue ACEPTANDO "sessions" en el esquema (para atrás-compatible) pero
+// no lo usa: si encuentra sessions no vacío, avisa UNA VEZ al iniciar la máquina.
 
 import (
 	"encoding/json"

@@ -12,6 +12,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Secretos por sesión de MMDS (`sessions[<id>]`) retirados.** El id de sesión se
+  acuña en el bridge dentro del invitado (PID 1, root) justo al lanzar cada hijo, y
+  como el bridge y el servidor MCP corren como root y leen el almacén MMDS completo,
+  una sesión comprometida vería los secretos de todas las otras. El almacén sigue
+  aceptando el campo para atrás-compatibilidad, pero se ignora: el bridge avisa UNA VEZ
+  si está presente. Alternativas seguras: (1) `kling template credential` para secretos
+  comunes en la plantilla; (2) `kling machine credential` (proxy de credenciales) para
+  aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos únicos por
+  sesión.
 - **Proxy de credenciales: la clave de API ya no entra en el invitado.** Con un secreto
   por MMDS, un servidor MCP comprometido (corre como root) leía la clave y la sacaba por
   un dominio permitido: medido en el lab, la leía, la usaba y un eco de `httpbin.org` se

@@ -283,6 +283,10 @@ type bridge struct {
 	// (ver warm.go). Protegido por mu. A propósito NO vive en sessions: no
 	// cuenta para maxSessions ni puede cosecharlo el reaper de ociosas.
 	warm *warmChild
+
+	// warnedSessions registra si ya se ha avisado sobre el campo "sessions" retirado
+	// en MMDS. Se avisa solo UNA VEZ, cuando se encuentra sessions no vacío.
+	warnedSessions sync.Once
 }
 
 // session es una conversación MCP: un proceso hijo y su estado.

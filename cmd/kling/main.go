@@ -775,17 +775,20 @@ func cmdSqueeze(args []string) error {
 	return nil
 }
 
-// cmdMMDS es `kling machine secret` (antes `mmds`): inyecta un secreto de
-// sesión en una microVM viva por MMDS. El store es
-// un documento JSON que se lee de -f o de stdin. Es sobre todo para pruebas en el
-// lab: en producción quien inyecta es el gateway al resolver una sesión.
+// cmdMMDS es `kling machine secret` (antes `mmds`): inyecta secretos comunes
+// en una microVM viva por MMDS. El store es un documento JSON que se lee de -f
+// o de stdin. Es sobre todo para pruebas en el lab: en producción quien inyecta
+// es el gateway al resolver una máquina.
 //
 // Esquema del store (lo entiende el bridge de dentro):
 //
 //	{
-//	  "env": { "VAR_COMUN": "valor" },
-//	  "sessions": { "<Mcp-Session-Id>": { "TOKEN": "secreto-de-esa-sesion" } }
+//	  "env": { "VAR_COMUN": "valor" }
 //	}
+//
+// El campo "sessions" está RETIRADO (no es seguro): se sigue aceptando para
+// atrás-compatibilidad, pero se ignora. Ver pkg/guest/mmds.go para alternativas
+// seguras (credenciales de plantilla, proxy de credenciales, VM efímera).
 //
 // El secreto NO viaja por la línea de comandos (cualquiera lee /proc/<pid>/cmdline):
 // se lee de un fichero o de la entrada estándar.

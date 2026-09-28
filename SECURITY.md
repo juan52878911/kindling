@@ -156,9 +156,10 @@ solo al crear: un `../../etc` saldría del directorio de datos.
 
 ### 7. Secretos y credenciales
 
-- **Un snapshot congelado nunca lleva secretos dentro.** Los secretos se inyectan por
-  sesión vía MMDS en la microVM **viva** (`kling mmds`), y una máquina que los ha
-  recibido **ya no puede congelarse** — se impone, no se aconseja.
+- **Un snapshot congelado nunca lleva secretos dentro.** Los secretos comunes se
+  inyectan vía MMDS en la microVM **viva** (`kling machine secret`), y una máquina que
+  los ha recibido **ya no puede congelarse** — se impone, no se aconseja. Los secretos
+  por sesión de MMDS están retirados (ver punto 9 en "Lo que NO está resuelto").
 - **El gateway no reenvía su propio token** ni al invitado ni a URLs de terceros: un
   servidor MCP comprometido no se lleva la credencial del agregador.
 - **Las imágenes no son world-readable.** Contienen los ficheros `-env` de cada
@@ -357,12 +358,15 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   la clave viajaría al proceso por máquina del usuario en vez de quedarse en un daemon
   root. Se deja documentado: el caso que lo motiva (servidores MCP en producción) corre
   en Linux.
-- **Los secretos por sesión de MMDS (`sessions[<id>]`) no se rellenan solos.** El id
-  de sesión lo genera el puente al recibir `initialize` y el gateway no llama a
-  `PutMMDS`: en la práctica solo funciona `env`, común a todas las sesiones de una
-  réplica. Para claves de API el camino es la credencial de plantilla (una por
-  servicio, entregada a cada réplica al nacer); un secreto distinto por sesión MCP
-  sigue abierto.
+- **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
+  sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el
+  hijo para `initialize`. Como el bridge y el servidor MCP corre como root y lee el
+  almacén MMDS completo, una sesión comprometerida vería los secretos de todas las
+  otras. El almacén sigue aceptando el campo para atrás-compatibilidad, pero se ignora
+  y se avisa si está presente. Alternativas seguras: (1) credencial de plantilla (una
+  por servicio, entregada a cada réplica al nacer); (2) proxy de credenciales para
+  aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos por
+  sesión reales.
 - **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
   en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
   (`-listen 0.0.0.0:9100`) y avisa.

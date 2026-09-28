@@ -1109,10 +1109,13 @@ API key. Secrets are injected into the **live** microVM through Firecracker's MM
 kling machine secret <ref> -f store.json     # or pipe the JSON through stdin
 ```
 
-The store carries common variables and per-session secrets keyed by `Mcp-Session-Id`;
-the bridge hands each session its own. A machine that has received secrets **can no
-longer be frozen** — that is enforced, not advised — so no secret ever ends up inside a
-snapshot file.
+The store carries **common variables only**; they are shared with all sessions. A machine
+that has received secrets **can no longer be frozen** — that is enforced, not advised —
+so no secret ever ends up inside a snapshot file.
+
+**Per-session secrets are deprecated** (the session ID is chosen inside the guest, so all
+sessions would see all secrets). Use **template credentials** instead for shared secrets,
+or use the **credential proxy** for key isolation.
 
 What MMDS does not prevent: the code inside **reads** the secret (the MCP server runs as
 root in its microVM) and can send it out through an allowed domain. For an API key there
