@@ -422,6 +422,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	results := runLoad(ctx, client, o.services, o.sessions, callSpec{Tool: o.tool, Args: o.args}, o.calls)
 	end := time.Since(started)
+	if smp != nil {
+		smp.cierre(ctx, end)
+	}
 
 	// Tiempo hasta cero: se sigue muestreando hasta que no quede ninguna
 	// microVM viva de los servicios medidos, o hasta -settle.

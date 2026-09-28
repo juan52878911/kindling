@@ -269,6 +269,24 @@ func (s *sampler) run(ctx context.Context, every time.Duration) {
 	}
 }
 
+// cierre toma una foto justo al acabar la ráfaga y la fecha en `end`, para que
+// cuente como parte de la ronda. Sin ella, una ráfaga más corta que el
+// intervalo de muestreo (un despertar tarda ~25 ms, el intervalo 250 ms) no
+// dejaría ninguna foto con las microVMs que despertó: siguen vivas hasta el
+// -idle del gateway, así que esta foto las ve.
+func (s *sampler) cierre(ctx context.Context, end time.Duration) {
+	sm, err := s.once(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.errs++
+		s.lastErr = err.Error()
+		return
+	}
+	sm.At = end
+	s.samples = append(s.samples, sm)
+}
+
 // last devuelve la última foto tomada después de `after`, si la hay.
 func (s *sampler) last(after time.Duration) (sample, bool) {
 	s.mu.Lock()

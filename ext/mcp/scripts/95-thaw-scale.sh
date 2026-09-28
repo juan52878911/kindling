@@ -45,7 +45,8 @@
 #   KLING_ROOT (/var/lib/kindling), BASE_IMAGE (min),
 #   NS ("1 10 50"), MS ("1 10 50 200"), MODES ("frozen warm"), REPS ("norep rep"),
 #   R (3), CALLS (5), TIMEOUT (60s), IDLE (10s, -idle del gateway),
-#   SETTLE (120s), MAXREP (16), MEM_NOREP (1024M), MEM_REP (256M),
+#   SETTLE (120s), MAXREP (16), MEM_NOREP (1024M), MEM_REP (256M), PSI_MAX (5,
+#   umbral de PSI some avg10 para empezar y entre celdas; queda en el resultado),
 #   IMG_SCRIPT (80-mcp-image.sh al lado de este script),
 #   PORT (18180), OUT (docs/bench-data/thaw-scale-<fecha> en el repo, o al lado
 #   del script si se copió suelto), KEEP=1 (no limpia),
@@ -72,6 +73,7 @@ TIMEOUT="${TIMEOUT:-60s}"
 IDLE="${IDLE:-10s}"
 SETTLE="${SETTLE:-120s}"
 MAXREP="${MAXREP:-16}"
+PSI_MAX="${PSI_MAX:-5}"
 MEM_NOREP="${MEM_NOREP:-1024M}"
 MEM_REP="${MEM_REP:-256M}"
 PORT="${PORT:-18180}"
@@ -141,7 +143,7 @@ wait_calm() {
   local limit=$1 t=0 live psi
   while :; do
     live=$(live_tb); psi=$(psi_some)
-    if [ "$live" = "0" ] && awk -v p="$psi" 'BEGIN { exit !(p < 5) }'; then
+    if [ "$live" = "0" ] && awk -v p="$psi" -v m="$PSI_MAX" 'BEGIN { exit !(p < m) }'; then
       return 0
     fi
     if [ "$t" -ge "$limit" ]; then
@@ -198,7 +200,7 @@ if [ "$FORCE" != "1" ] && [ -n "$(tb_machines)" ]; then
 fi
 
 psi=$(psi_some)
-awk -v p="$psi" 'BEGIN { exit !(p < 5) }' || die "host under memory pressure before starting (PSI some avg10 $psi >= 5)"
+awk -v p="$psi" -v m="$PSI_MAX" 'BEGIN { exit !(p < m) }' || die "host under memory pressure before starting (PSI some avg10 $psi >= $PSI_MAX; set PSI_MAX to change it)"
 
 NMAX=0; for n in $NS; do [ "$n" -gt "$NMAX" ] && NMAX=$n; done
 MNR=$(mib "$MEM_NOREP"); MR=$(mib "$MEM_REP")
@@ -280,7 +282,7 @@ RESULTS="$OUT/results.md"
   echo "# Thaw at scale — $STAMP"
   echo
   echo "NS=\"$NS\" MS=\"$MS\" MODES=\"$MODES\" REPS=\"$REPS\" R=$R CALLS=$CALLS TIMEOUT=$TIMEOUT"
-  echo "IDLE=$IDLE SETTLE=$SETTLE MAXREP=$MAXREP MEM_NOREP=$MEM_NOREP MEM_REP=$MEM_REP"
+  echo "IDLE=$IDLE SETTLE=$SETTLE MAXREP=$MAXREP PSI_MAX=$PSI_MAX MEM_NOREP=$MEM_NOREP MEM_REP=$MEM_REP"
   echo
   "$BENCH" -md-header
 } >"$RESULTS"
