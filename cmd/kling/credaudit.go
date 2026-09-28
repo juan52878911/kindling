@@ -171,6 +171,11 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 		if r.Database != "" {
 			path += "@" + r.Database
 		}
+		// Una credencial sin -database (o de un almacén antiguo) entra en
+		// cualquier base: que se vea en cada fila, no solo en inspect.
+		if r.AnyDatabase {
+			path += " (any_database)"
+		}
 		if path == "" {
 			path = "-"
 		}

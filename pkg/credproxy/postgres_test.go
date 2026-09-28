@@ -601,7 +601,9 @@ func TestPGAnyDatabase(t *testing.T) {
 	}
 	k.hastaListo()
 	k.c.Close()
-	if recs, _ := e.registro(t); len(recs) != 1 || recs[0].Database != "otra" || recs[0].Denied {
+	// El registro dice que la credencial entra en cualquier base.
+	if recs, crudo := e.registro(t); len(recs) != 1 || recs[0].Database != "otra" || recs[0].Denied || !recs[0].AnyDatabase ||
+		!strings.Contains(crudo, `"any_database":true`) {
 		t.Fatalf("registro %+v", recs)
 	}
 }
@@ -634,22 +636,23 @@ func TestValidarDatabaseObligatoria(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"Env":"PGPASSWORD","Domain":"db.example.com","Placeholder":"`+pgMarca+`","Secret":"x","Kind":"postgres","User":"app"}`), &antigua); err != nil {
 		t.Fatal(err)
 	}
-	NormalizarAlmacen(&antigua)
-	if !antigua.AnyDatabase {
+	if !NormalizarAlmacen(antigua.Kind, antigua.Database, &antigua.AnyDatabase) || !antigua.AnyDatabase {
 		t.Fatalf("no normalizada: %+v", antigua)
 	}
 	if err := ValidarCredenciales([]Credential{antigua}); err != nil {
 		t.Errorf("almacén antiguo: %v", err)
 	}
 	fija := Credential{Kind: KindPostgres, Database: "appdb"}
-	NormalizarAlmacen(&fija)
-	if fija.AnyDatabase {
+	if NormalizarAlmacen(fija.Kind, fija.Database, &fija.AnyDatabase) || fija.AnyDatabase {
 		t.Error("una credencial con base no debe pasar a AnyDatabase")
 	}
 	h := Credential{}
-	NormalizarAlmacen(&h)
-	if h.AnyDatabase {
+	if NormalizarAlmacen(h.Kind, h.Database, &h.AnyDatabase) || h.AnyDatabase {
 		t.Error("HTTP no debe cambiar")
+	}
+	// Ya promovida (o nueva con AnyDatabase): no es de un almacén antiguo.
+	if NormalizarAlmacen(antigua.Kind, antigua.Database, &antigua.AnyDatabase) {
+		t.Error("una credencial con AnyDatabase no es de un almacén antiguo")
 	}
 }
 

@@ -1347,13 +1347,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// su MMDS y la clave en su proxy. Antes de devolverla: el puente lee MMDS al
 	// lanzar cada sesión, así que la primera ya nace con el marcador. Un fallo
 	// aborta la restauración por lo dicho arriba.
-	var dominiosCred []string
+	var dominiosCred, anyDBCred []string
 	if len(credsPlantilla) > 0 {
 		creds, _, err := m.entregarCredenciales(ctx, id, netcfg, c, credsPlantilla)
 		if err != nil {
 			return abortar(fmt.Errorf("handing %s the credentials of template %s: %w", mc.Name, req.From, err))
 		}
-		dominiosCred = dominiosDe(creds)
+		dominiosCred, anyDBCred = dominiosDe(creds), anyDatabaseDe(creds)
 	}
 	elapsed := time.Since(start).Milliseconds()
 
@@ -1371,7 +1371,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
 	mc.ThawMS = elapsed
-	mc.CredentialDomains = dominiosCred
+	mc.CredentialDomains, mc.CredentialAnyDatabase = dominiosCred, anyDBCred
 	m.socket[id] = sock
 	m.persist()
 	out := *mc

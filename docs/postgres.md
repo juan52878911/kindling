@@ -246,5 +246,9 @@ Antes, `-database` era opcional y sin ella el rol podía entrar en cualquier bas
 hace falta `-database` o `-any-database` expreso. Los almacenes cifrados anteriores (máquinas
 y plantillas) siguen cargando: una credencial Postgres guardada sin base se lee como
 `any_database: true`, que es lo que permitía entonces, así que ninguna máquina viva se
-rompe. Para acotarla, rota la credencial con `-database`. Un `kling-vz` nuevo con un
+rompe. No es silencioso: el daemon lo avisa una vez por máquina o plantilla y variable
+(`postgres credential PGPASSWORD (db.example.com) loaded as any_database (pre-upgrade
+store); rotate with -database`), `kling inspect` y `kling template inspect` la listan en
+`credential_any_database`, y cada conexión sale en `kling machine audit` con
+`(any_database)` tras `rol@base`. Para acotarla, rota la credencial con `-database`. Un `kling-vz` nuevo con un
 daemon anterior sí rechaza una credencial sin base: actualiza los dos a la vez.

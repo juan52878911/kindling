@@ -57,6 +57,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -201,11 +202,41 @@ func (m *Manager) cargarCredenciales(id string) ([]credproxy.Credential, error) 
 	if err := m.abrir(sellado, id, &creds); err != nil {
 		return nil, err
 	}
-	// Almacén anterior a -database obligatoria: ver credproxy.NormalizarAlmacen.
 	for i := range creds {
-		credproxy.NormalizarAlmacen(&creds[i])
+		c := &creds[i]
+		m.normalizarAlmacen("machine "+shortID(id), c.Kind, c.Database, c.Env, c.Domain, &c.AnyDatabase)
 	}
 	return creds, nil
+}
+
+// normalizarAlmacen es la ÚNICA puerta por la que una credencial recién
+// descifrada (de máquina o de plantilla) pasa por credproxy.NormalizarAlmacen:
+// una postgres de un almacén anterior a -database obligatoria se lee como
+// AnyDatabase, que es lo que permitía entonces. Eso amplía en silencio lo que
+// el operador cree que dio, así que se avisa en el log, una vez por dueño y
+// variable (las plantillas se leen en cada listado).
+func (m *Manager) normalizarAlmacen(dueño, kind, database, env, domain string, anyDatabase *bool) {
+	if !credproxy.NormalizarAlmacen(kind, database, anyDatabase) {
+		return
+	}
+	if _, visto := m.avisosAnyDB.LoadOrStore(dueño+"\x00"+env, true); visto {
+		return
+	}
+	log.Printf("warning: %s: postgres credential %s (%s) loaded as any_database (pre-upgrade store); rotate with -database",
+		dueño, env, domain)
+}
+
+// anyDatabaseDe son las variables de las credenciales postgres que entran en
+// cualquier base, ordenadas: lo que `kling inspect` enseña de ellas.
+func anyDatabaseDe(creds []credproxy.Credential) []string {
+	var out []string
+	for _, c := range creds {
+		if c.Kind == credproxy.KindPostgres && c.AnyDatabase {
+			out = append(out, c.Env)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func aeadDe(key []byte) (cipher.AEAD, error) {
@@ -368,11 +399,17 @@ func ponerMarcadoresMMDS(ctx context.Context, c *fc.Client, creds []credproxy.Cr
 // máquina viva) en macOS no hay nada que rehacer: el proxy vive en kling-vz,
 // que sobrevive al daemon con sus claves. Devuelve cuántas credenciales
 // entregó.
+//
+// Anota además en mc CredentialAnyDatabase (lo que dice `kling inspect`): una
+// máquina de antes de ese campo lo recupera al primer reconcile o thaw. mc es
+// la viva en reconcile (con m.mu tomado) y una copia en Thaw, que la pasa a la
+// viva al final.
 func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c *fc.Client) (int, error) {
 	creds, err := m.cargarCredenciales(mc.ID)
 	if err != nil || len(creds) == 0 {
 		return 0, err
 	}
+	mc.CredentialAnyDatabase = anyDatabaseDe(creds)
 	if c != nil {
 		// Un reenvío pudo abrirse en ese puerto desde la última entrega. Con
 		// c nil (reconcile, m.mu tomado) no se mira: en Linux no hay
@@ -421,11 +458,10 @@ func (m *Manager) cargarCredencialesPlantilla(name string) ([]api.CredentialSpec
 	if err := m.abrir(sellado, "snapshot:"+name, &specs); err != nil {
 		return nil, err
 	}
-	// Igual que en cargarCredenciales: sin Database es AnyDatabase.
+	// Igual que en cargarCredenciales.
 	for i := range specs {
-		if specs[i].Type == credproxy.KindPostgres && specs[i].Database == "" {
-			specs[i].AnyDatabase = true
-		}
+		s := &specs[i]
+		m.normalizarAlmacen("template "+name, s.Type, s.Database, s.Env, s.Domain, &s.AnyDatabase)
 	}
 	return specs, nil
 }
@@ -483,12 +519,7 @@ func (m *Manager) anotarCredencialesPlantilla(s *api.Snapshot) {
 	if err != nil || len(specs) == 0 {
 		return
 	}
-	seen := map[string]bool{}
-	for _, sp := range specs {
-		if !seen[sp.Domain] {
-			seen[sp.Domain] = true
-			s.CredentialDomains = append(s.CredentialDomains, sp.Domain)
-		}
-	}
-	sort.Strings(s.CredentialDomains)
+	creds := credencialesDeSpecs(specs)
+	s.CredentialDomains = dominiosDe(creds)
+	s.CredentialAnyDatabase = anyDatabaseDe(creds)
 }

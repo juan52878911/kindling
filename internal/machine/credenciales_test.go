@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -640,4 +642,109 @@ func TestAlmacenAntiguoSinDatabase(t *testing.T) {
 	if err := validarSpecs(specs); err != nil {
 		t.Errorf("la spec antigua ya no valida: %v", err)
 	}
+}
+
+// La promoción a AnyDatabase de un almacén antiguo no es silenciosa: un aviso
+// por dueño y variable (no en cada carga: las plantillas se leen en cada
+// listado), y `inspect` lo enseña en la máquina y en la plantilla.
+func TestAlmacenAntiguoAvisaYSeVeEnInspect(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(escritorSeguro{&mu, &buf})
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+	avisos := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Count(buf.String(), "loaded as any_database (pre-upgrade store); rotate with -database")
+	}
+
+	m := newTestManager(t)
+	capturarRegistro(t)
+	for _, id := range []string{"v1", "v2"} {
+		if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	antigua := []credproxy.Credential{
+		{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
+			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
+		{Env: "PGFIJA", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "bb",
+			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb"},
+		{Env: "PGANY", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "cc",
+			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", AnyDatabase: true},
+	}
+	for _, id := range []string{"v1", "v2"} {
+		if err := m.guardarCredenciales(id, antigua); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := m.cargarCredenciales("v1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := avisos(); n != 1 {
+		t.Fatalf("%d avisos tras tres cargas de la misma máquina, quería 1:\n%s", n, buf.String())
+	}
+	mu.Lock()
+	if !strings.Contains(buf.String(), "PGPASSWORD") || strings.Contains(buf.String(), "PGFIJA") || strings.Contains(buf.String(), "PGANY") {
+		t.Errorf("el aviso es de la credencial promovida y solo de ella:\n%s", buf.String())
+	}
+	mu.Unlock()
+	// Otra máquina con el mismo almacén avisa por su cuenta.
+	if _, err := m.cargarCredenciales("v2"); err != nil {
+		t.Fatal(err)
+	}
+	if n := avisos(); n != 2 {
+		t.Fatalf("%d avisos, quería 2", n)
+	}
+
+	// inspect de la máquina: reentregar (reconcile/thaw) lo anota.
+	mc := &api.Machine{ID: "v1", Name: "v1"}
+	if _, err := m.reentregarCredenciales(context.Background(), mc, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"PGANY", "PGPASSWORD"}; !reflect.DeepEqual(mc.CredentialAnyDatabase, want) {
+		t.Errorf("CredentialAnyDatabase = %v, quería %v", mc.CredentialAnyDatabase, want)
+	}
+
+	// La plantilla: aviso una vez aunque se liste muchas veces, y se ve.
+	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "allowlist"})
+	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := escribirSellado(m.credSnapPath("svc"), sellado); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		s, err := m.Snapshot("svc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(s.CredentialAnyDatabase, []string{"PGPASSWORD"}) || !reflect.DeepEqual(s.CredentialDomains, []string{"db.example.com"}) {
+			t.Fatalf("inspect de la plantilla: %+v", s)
+		}
+	}
+	if n := avisos(); n != 3 {
+		t.Fatalf("%d avisos tras listar la plantilla tres veces, quería 3 (uno suyo):\n%s", n, buf.String())
+	}
+	mu.Lock()
+	if !strings.Contains(buf.String(), "template svc") {
+		t.Errorf("el aviso no dice de qué plantilla es:\n%s", buf.String())
+	}
+	mu.Unlock()
+}
+
+// escritorSeguro serializa las escrituras del log con las lecturas del test.
+type escritorSeguro struct {
+	mu *sync.Mutex
+	b  *bytes.Buffer
+}
+
+func (e escritorSeguro) Write(p []byte) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.b.Write(p)
 }

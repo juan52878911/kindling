@@ -187,6 +187,11 @@ type Manager struct {
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
 
+	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
+	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
+	// carga (ver avisarAnyDatabase).
+	avisosAnyDB sync.Map
+
 	// ipv6Avisado recuerda, por nombre de dorado, si ya se avisó (log + evento)
 	// de que sus instancias conservan el módulo IPv6 del kernel del invitado
 	// (F2: dorados congelados antes de la barrera IPv6, sin GuestIPv6Off). Un
@@ -1927,6 +1932,7 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 		return nil, fmt.Errorf("machine %q no longer exists", ref)
 	}
 	live.CredentialDomains = dominiosDe(creds)
+	live.CredentialAnyDatabase = anyDatabaseDe(creds)
 	m.persist()
 	out := live.Clone()
 	m.mu.Unlock()
@@ -2229,6 +2235,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// El techo por defecto se decidió sobre la copia (arriba); se anota en la
 	// viva para que state.json y `kling ps` digan el que de verdad se aplicó.
 	cur.CPUPct = mc.CPUPct
+	// Lo que reentregarCredenciales anotó en la copia.
+	cur.CredentialAnyDatabase = mc.CredentialAnyDatabase
 	m.socket[mc.ID] = sock
 	m.persist()
 	out := *cur
