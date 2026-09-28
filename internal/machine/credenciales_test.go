@@ -539,12 +539,15 @@ func TestSetCredentialsPostgres(t *testing.T) {
 		return s
 	}
 	for nombre, mal := range map[string]func(*api.CredentialSpec){
-		"sin rol":      func(s *api.CredentialSpec) { s.User = "" },
-		"no ASCII":     func(s *api.CredentialSpec) { s.Secret = "contraseña" },
-		"con allow":    func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
-		"tipo raro":    func(s *api.CredentialSpec) { s.Type = "mysql" },
-		"CA basura":    func(s *api.CredentialSpec) { s.CAPEM = "x" },
-		"http con rol": func(s *api.CredentialSpec) { s.Type = "" },
+		"sin rol":              func(s *api.CredentialSpec) { s.User = "" },
+		"no ASCII":             func(s *api.CredentialSpec) { s.Secret = "contraseña" },
+		"con allow":            func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
+		"tipo raro":            func(s *api.CredentialSpec) { s.Type = "mysql" },
+		"CA basura":            func(s *api.CredentialSpec) { s.CAPEM = "x" },
+		"http con rol":         func(s *api.CredentialSpec) { s.Type = "" },
+		"disable sin upstream": func(s *api.CredentialSpec) { s.UpstreamTLS = "disable" },
+		"upstream sin puerto":  func(s *api.CredentialSpec) { s.Upstream = "127.0.0.1" },
+		"upstream metadatos":   func(s *api.CredentialSpec) { s.Upstream = "169.254.169.254:5432" },
 	} {
 		if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(mal)}); err == nil {
 			t.Errorf("%s: aceptada", nombre)
@@ -572,5 +575,29 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	r := (*got)[1][0]
 	if r.User != "ro" || r.Database != "appdb" || r.Port != 6432 || r.Secret != "pw-rotada" || r.Placeholder != c.Placeholder {
 		t.Errorf("rotación: %+v", r)
+	}
+
+	// Upstream fijado: llega normalizado al proxy y se guarda (cifrado) con
+	// el resto; rotar sin él lo quita, como cualquier otro campo.
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(func(s *api.CredentialSpec) {
+		s.Upstream, s.UpstreamTLS = "LocalHost:5432", "DISABLE"
+	})}); err != nil {
+		t.Fatal(err)
+	}
+	u := (*got)[2][0]
+	if u.Upstream != "localhost:5432" || u.UpstreamTLS != credproxy.UpstreamTLSDisable {
+		t.Errorf("upstream al proxy: %+v", u)
+	}
+	back, err = m.cargarCredenciales("m1")
+	if err != nil || back[0].Upstream != "localhost:5432" || back[0].UpstreamTLS != credproxy.UpstreamTLSDisable {
+		t.Fatalf("almacén con upstream: %+v, %v", back, err)
+	}
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(func(s *api.CredentialSpec) {
+		s.TLSServerName = "pg.lan"
+	})}); err != nil {
+		t.Fatal(err)
+	}
+	if u := (*got)[3][0]; u.Upstream != "" || u.UpstreamTLS != "" || u.TLSServerName != "pg.lan" {
+		t.Errorf("rotación sin upstream: %+v", u)
 	}
 }
