@@ -174,7 +174,7 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 | Campo | Qué es |
 |---|---|
 | `kind` | `http`; `dropped` es una línea que solo lleva la cuenta de descartados |
-| `path` | ruta normalizada, cortada a 256 bytes; un segmento con un marcador o una forma de una clave sale `:cred`, uno de ≥32 caracteres base64url/hex, `:tok` |
+| `path` | ruta normalizada, cortada a 256 bytes; un segmento con un marcador o una forma de una clave sale `:cred`, uno de ≥32 caracteres base64url/hex, `:tok`; los caracteres de control salen como `?` |
 | `query` | si la petición llevaba query (su contenido no se escribe nunca) |
 | `status` | lo que recibió el invitado |
 | `reason` | vacío si llegó al proveedor y volvió entera; si no: `disabled`, `busy`, `no_credential`, `connect`, `ambiguous_path`, `not_allowed`, `body_too_large`, `bad_body`, `bad_request`, `upstream_error`, `bad_encoding`, `aborted` |

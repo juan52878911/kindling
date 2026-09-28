@@ -264,7 +264,9 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   marcador (`kling-cred-`, sin mirar mayúsculas) o con cualquier forma escapada de
   alguna clave de la máquina sale como `:cred` (se busca en la ruta entera antes de
   partirla, por si la clave lleva `/`), uno de 32 o más caracteres de base64url/hex
-  como `:tok`, y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
+  como `:tok`, los caracteres de control y los bytes que no son UTF-8 como `?` (la ruta
+  llega decodificada y se lee en un terminal: nada de secuencias de escape del
+  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
   generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
   copian y `rm` lo borra con el directorio. La escritura no bloquea la petición: va por
   una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
