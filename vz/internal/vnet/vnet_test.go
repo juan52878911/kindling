@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -483,15 +484,28 @@ func TestForwardRechazaLoQueNoAdmitePeerAllowed(t *testing.T) {
 }
 
 // El proxy de credenciales se sirve en la pasarela:80 antes de la política (que
-// rechazaría 172.16.0.1), solo en allowlist; el 443 falla al momento y nada de
-// eso sale al host.
+// rechazaría 172.16.0.1); fuera de allowlist lo rechaza el propio proxy
+// (Options.Enabled, como lo monta kling-vz) y ese rechazo queda en su registro;
+// el 443 falla al momento y nada de eso sale al host.
 func TestCredentialProxyOnGateway(t *testing.T) {
+	const ph = "kling-cred-0123456789abcdef"
 	var got atomic.Value
-	cred := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got.Store(r.Host + r.URL.Path)
-		fmt.Fprint(w, "from the proxy")
+	var policy atomic.Pointer[egress.Policy]
+	audit := filepath.Join(t.TempDir(), credproxy.AuditFile)
+	p := credproxy.New(credproxy.Options{
+		Enabled:   func() bool { return policy.Load().Mode() == egress.Allowlist },
+		AuditPath: audit,
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got.Store(r.URL.Host + r.URL.Path)
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Request: r,
+				Body: io.NopCloser(strings.NewReader("from the proxy"))}, nil
+		}),
 	})
-	r := newRigWith(t, "", cred)
+	if _, err := p.SetCredentials([]credproxy.Credential{{Env: "K", Domain: "api.example.com", Placeholder: ph, Secret: "s"}}); err != nil {
+		t.Fatal(err)
+	}
+	r := newRigWith(t, "", p)
+	policy.Store(r.policy)
 	c := r.g.httpClient()
 	get := func() (int, string) {
 		t.Helper()
@@ -508,11 +522,18 @@ func TestCredentialProxyOnGateway(t *testing.T) {
 
 	// En none (el modo por defecto) el listener existe pero no deja pasar.
 	if code, _ := get(); code != http.StatusForbidden || got.Load() != nil {
-		t.Fatalf("none: status %d, handler reached %v; want 403 before the proxy", code, got.Load())
+		t.Fatalf("none: status %d, upstream reached %v; want 403 before the upstream", code, got.Load())
 	}
 	r.policy.Set(egress.Allowlist, []string{"other.org"})
 	if code, body := get(); code != 200 || body != "from the proxy" || got.Load() != "api.example.com/v1/models" {
 		t.Fatalf("allowlist: status %d body %q seen %v", code, body, got.Load())
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(audit)
+	if err != nil || !strings.Contains(string(b), `"reason":"disabled","denied":true`) || strings.Count(string(b), "\n") != 2 {
+		t.Fatalf("audit log: %q (%v)", b, err)
 	}
 
 	// 443: sin listener, la política lo rechaza con un RST, no con un plazo.
@@ -542,6 +563,68 @@ func TestGatewayPort80WithoutCredentials(t *testing.T) {
 	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":80"); err == nil {
 		conn.Close()
 		t.Fatal("gateway:80 without a credential proxy must be refused")
+	}
+}
+
+// pgFalso es un proxy de Postgres de mentira: dice si está activo y contesta
+// "pg" a cada conexión que recibe.
+type pgFalso struct {
+	activo atomic.Bool
+	vistas atomic.Int32
+}
+
+func (f *pgFalso) PGActivo() bool { return f.activo.Load() }
+
+func (f *pgFalso) ServePG(_ context.Context, c net.Conn) {
+	defer c.Close()
+	f.vistas.Add(1)
+	_, _ = c.Write([]byte("pg"))
+}
+
+// Con el proxy de Postgres activo, cualquier puerto de la pasarela (menos el
+// 53 y el 80) va a su ServePG sin salir al host; inactivo, se rechaza como
+// antes, al momento.
+func TestPostgresOnGateway(t *testing.T) {
+	pg := &pgFalso{}
+	r := newRig(t, "")
+	r.n.cfg.CredentialsPG = pg
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":5432"); err == nil {
+		conn.Close()
+		t.Fatal("gateway:5432 with the postgres proxy inactive must be refused")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("gateway:5432 took %v to fail; it must be refused at once", d)
+	}
+
+	pg.activo.Store(true)
+	for _, puerto := range []string{"5432", "6543"} {
+		conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":"+puerto)
+		if err != nil {
+			t.Fatalf("gateway:%s: %v", puerto, err)
+		}
+		b, _ := io.ReadAll(conn)
+		conn.Close()
+		if string(b) != "pg" {
+			t.Fatalf("gateway:%s answered %q", puerto, b)
+		}
+	}
+	// Otra IP no es la pasarela: sigue el camino de la política.
+	r.policy.Set(egress.Allowlist, []string{"example.com"})
+	if conn, err := r.g.dialTCP(ctx, "10.0.0.1:5432"); err == nil {
+		conn.Close()
+		t.Fatal("a private IP must still be refused")
+	}
+	if pg.vistas.Load() != 2 {
+		t.Fatalf("ServePG saw %d connections, want 2", pg.vistas.Load())
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dialed) != 0 {
+		t.Fatalf("nothing should have been dialed on the host, got %v", r.dialed)
 	}
 }
 

@@ -345,6 +345,10 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	restringirRaiz(root, priv)
+	// Las copias de volumen a medias de un daemon anterior (ver
+	// volume_snapshot.go). Aquí y no en el vigilante: en marcha, un .tmp puede
+	// ser una copia en curso.
+	m.barrerTmpVolumenes()
 	cerrarVolcadosExistentes(root)
 	m.load()
 	for _, mc := range m.byID {

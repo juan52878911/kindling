@@ -710,8 +710,15 @@ func TestKlingCredentials(t *testing.T) {
 	r.mustFail("PUT", "/kling/credentials", cred, "no credential proxy")
 
 	gw := netip.MustParseAddr("172.16.0.1")
+	if out := r.must("GET", "/kling/info", ""); strings.Contains(out, "credential_kinds") {
+		t.Fatalf("info without a proxy = %s", out)
+	}
 	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
 	r.srv.d.CredIP = gw
+	// El daemon lo pregunta antes de mandar una credencial Postgres.
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres"]`) {
+		t.Fatalf("info = %s", out)
+	}
 	r.mustFail("PUT", "/kling/credentials", cred, "need egress allowlist")
 	r.must("PUT", "/kling/network", `{"egress":"allowlist","allow_domains":["other.org"]}`)
 	if out := r.must("PUT", "/kling/credentials", cred); !strings.Contains(out, `"domains":["api.example.com"]`) {
@@ -738,10 +745,24 @@ func TestKlingCredentials(t *testing.T) {
 		t.Fatalf("POST fuera de allow: %d", rec.Code)
 	}
 
-	// La red nace con el proxy.
+	// El tipo y sus campos viajan hasta el proxy: una credencial Postgres lo
+	// deja activo en su papel de Postgres (y no la usa el HTTP).
+	if r.srv.d.Credentials.PGActivo() {
+		t.Fatal("PGActivo without a postgres credential")
+	}
+	const credPG = `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres","port":5432,"user":"app","database":"appdb"}]}`
+	if out := r.must("PUT", "/kling/credentials", credPG); !strings.Contains(out, `"domains":["db.example.com"]`) {
+		t.Fatalf("PUT /kling/credentials (postgres) = %s", out)
+	}
+	if !r.srv.d.Credentials.PGActivo() {
+		t.Fatal("the postgres credential did not reach the proxy")
+	}
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres"}]}`, "needs -user")
+
+	// La red nace con el proxy, en sus dos papeles.
 	r.configure(t.TempDir())
 	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
-	if r.nets[0].cfg.Credentials == nil {
+	if r.nets[0].cfg.Credentials == nil || r.nets[0].cfg.CredentialsPG == nil {
 		t.Fatal("the network was not given the credential proxy")
 	}
 

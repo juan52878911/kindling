@@ -488,6 +488,30 @@ if k run -name "$CR" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -al
   ph2=$(printf '%s\n' "$out" | awk '/^PH /{print $2}')
   contiene "$out" "AUTH 200" && [ "$CRED_PH" = "$ph2" ] && ok "after freeze/thaw the credential works with the same placeholder" \
     || bad "credential after thaw" "AUTH 200, same placeholder" "$out"
+
+  # Registro de auditoría: lo escribe cada kling-vz en el directorio de la
+  # máquina, y el daemon lo lee. El freeze mata al primer kling-vz con SIGKILL:
+  # sus líneas (la primera sonda: /anything) tienen que seguir ahí, junto a las
+  # del kling-vz nuevo. Nunca la clave, el marcador ni la query.
+  out=$(k machine audit "$CR" -tail 0 -json 2>&1)
+  contiene "$out" '"path":"/anything"' && contiene "$out" '"creds":["E2E_KEY"]' \
+    && ok "audit: the requests from before the freeze (SIGKILLed kling-vz) are still there" \
+    || bad "audit after freeze/thaw" '"path":"/anything" with "creds":["E2E_KEY"]' "$out"
+  n_auth=$(printf '%s\n' "$out" | grep -c '"path":"/basic-auth/demo/:cred"')
+  [ "$n_auth" -ge 2 ] && ok "audit: basic-auth before and after the thaw ($n_auth), the key in the path as :cred" \
+    || bad "audit across kling-vz processes" ">= 2 /basic-auth/demo/:cred" "$n_auth: $out"
+  contiene "$out" '"reason":"no_credential","denied":true' && ok "audit: the other domain is a recorded denial" \
+    || bad "audit denial" '"reason":"no_credential","denied":true' "$out"
+  if contiene "$out" "$CRED_PASS" || contiene "$out" "kling-cred-" || { [ -n "$CRED_PH" ] && contiene "$out" "$CRED_PH"; }; then
+    bad "audit without secrets" "no key, no placeholder" "$out"
+  else
+    ok "audit: neither the key nor the placeholder"
+  fi
+  alog="$ROOT/machines/$(machine_field "$CR" id)/credaudit.jsonl"
+  perm=$(stat -f %Lp "$alog" 2>&1)
+  [ "$perm" = 600 ] && ok "audit: $alog is 0600" || bad "audit file mode" 600 "$perm"
+  out=$(k machine audit "$CR" -tail 5 2>&1)
+  contiene "$out" "METHOD" && contiene "$out" "httpbin.org" && ok "audit: the table" || bad "audit table" "header and rows" "$out"
 else
   bad "run -egress allowlist" "running" "failed"
 fi
@@ -498,7 +522,35 @@ if k run -name "$CR-none" -image "$IMG" -mem "$MEM" >/dev/null 2>&1; then
   k rm -f "$CR-none" >/dev/null 2>&1
 fi
 
-# ── 7. reinicio del daemon y kill -9 ─────────────────────────────────────────
+# ── 6d. snapshots de volumen ─────────────────────────────────────────────────
+# En APFS el snapshot es un clonefile (modo "clone"): instantáneo y sin ocupar
+# nada hasta que diverge. Escribir, snapshot, cambiar, restore, leer, undo.
+step "6d. volume snapshots (clonefile)"
+SV="$P-sv"
+if k volume create "$SV" -size 64M >/dev/null 2>&1; then
+  vw() { k run -name "$SV-w" -image "$IMG" -mem "$MEM" -volume "$SV" -allow-exec >/dev/null 2>&1 &&
+    k exec "$SV-w" -- sh -c "echo $1 > /data/f && sync" >/dev/null 2>&1; k rm "$SV-w" >/dev/null 2>&1; }
+  vr() { k run -name "$SV-r" -image "$IMG" -mem "$MEM" -volume "$SV:/data:ro" -allow-exec >/dev/null 2>&1 &&
+    k exec "$SV-r" -- cat /data/f 2>&1; k rm "$SV-r" >/dev/null 2>&1; }
+  vw v1
+  out=$(k volume snapshot "$SV" one 2>&1)
+  contiene "$out" "(clone" && ok "snapshot on APFS is a clone" || bad "volume snapshot" "taken (clone, ...)" "$out"
+  vw v2
+  out=$(k volume restore -f "$SV" one 2>&1)
+  contiene "$out" "restored" && ok "restore" || bad "volume restore" "restored" "$out"
+  out=$(vr); [ "$out" = "v1" ] && ok "guest reads v1 after restore" || bad "restored contents" "v1" "$out"
+  k volume restore -f "$SV" undo >/dev/null 2>&1
+  out=$(vr); [ "$out" = "v2" ] && ok "restoring undo brings v2 back" || bad "undo" "v2" "$out"
+  perms=$(stat -f '%Lp' "$ROOT/volumes/snapshots" "$ROOT/volumes/snapshots/$SV" "$ROOT/volumes/snapshots/$SV/one.ext4" | tr '\n' ' ')
+  [ "$perms" = "700 700 600 " ] && ok "snapshot perms 0700/0700/0600" || bad "snapshot perms" "700 700 600" "$perms"
+  out=$(k volume rm -f "$SV" 2>&1)
+  contiene "$out" "-snapshots" && ok "volume rm refuses while snapshots exist" || bad "volume rm" "refusal naming -snapshots" "$out"
+  k volume rm -f -snapshots "$SV" >/dev/null 2>&1
+else
+  info "skipped: volume create failed (e2fsprogs missing?)"
+fi
+
+# ── 7. reinicio del daemon y kill -9─────────────────────────────────────────
 step "7. daemon restart, SIGKILL of a kling-vz"
 pid_before=$(machine_field "$P-r3" pid)
 stop_daemon
@@ -517,6 +569,13 @@ if [ "$CRED_OK" = 1 ]; then
   out=$(k exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$CRED_PASS" short 2>&1)
   contiene "$out" "AUTH 200" && ok "after the daemon restart the credential still works" \
     || bad "credential after daemon restart" "AUTH 200" "$out"
+  # El registro también: el daemon nuevo lo lee, y el kling-vz (el mismo de
+  # antes del reinicio) sigue escribiendo en él.
+  out=$(k machine audit "$CR" -tail 0 -json 2>&1)
+  n_auth=$(printf '%s\n' "$out" | grep -c '"path":"/basic-auth/demo/:cred"')
+  [ "$n_auth" -ge 3 ] && contiene "$out" '"path":"/anything"' \
+    && ok "audit after the daemon restart: old lines kept, the new request added ($n_auth basic-auth)" \
+    || bad "audit after daemon restart" ">= 3 /basic-auth/demo/:cred and /anything" "$n_auth: $out"
 fi
 k rm -f "$CR" >/dev/null 2>&1
 

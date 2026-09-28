@@ -293,22 +293,12 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	}
 
 	// Proxy de credenciales (credproxy.go): el resolver contesta con n.HostIP para
-	// un dominio con credencial y el invitado conecta a su puerto 80; se lleva al
-	// puerto del proxy. Si la máquina no tiene credenciales no escucha nadie y la
-	// conexión se rechaza: la regla no abre nada que no sea el propio proxy.
-	//
-	// El 443 también va al proxy, a propósito: un SDK que insista en
-	// https://dominio se encuentra un servidor HTTP plano (o nada, si la
-	// máquina no tiene credenciales) y su handshake TLS muere en el acto con un
-	// error que el operador ve, en vez de esperar al plazo del SDK contra el
-	// DROP de abajo. No abre nada: el proxy no habla TLS y sin credenciales no
-	// escucha nadie. Se hace así y no con REJECT --reject-with tcp-reset
-	// porque ese target necesita xt_REJECT y en un CT sin él la regla falla y
-	// la máquina no arranca (visto en el lab).
-	for _, puerto := range []string{"80", "443"} {
-		if err := ns("iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
-			"-p", "tcp", "-d", n.HostIP, "--dport", puerto, "-j", "DNAT",
-			"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, credPort)); err != nil {
+	// un dominio con credencial y el invitado conecta a él; los DNAT de
+	// credNATRules llevan el 80/443 al proxy HTTP y el resto de puertos TCP al
+	// de Postgres. Si la máquina no tiene credenciales no escucha nadie y la
+	// conexión se rechaza: las reglas no abren nada que no sean los proxies.
+	for _, r := range n.credNATRules() {
+		if err := ns(r...); err != nil {
 			return err
 		}
 	}
@@ -316,8 +306,8 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	// FORWARD, en orden (la primera que casa gana):
 	//   1. DNS hacia nuestro resolver del host: permitido. Tras el DNAT el destino
 	//      es n.HostIP:dnsPort (el lado host del veth), así que el paquete cruza el
-	//      FORWARD del netns antes de llegar al resolver. Lo mismo el proxy de
-	//      credenciales en n.HostIP:credPort.
+	//      FORWARD del netns antes de llegar al resolver. Lo mismo los proxies
+	//      de credenciales en n.HostIP:credPort y n.HostIP:pgPort.
 	dnsPortStr := fmt.Sprintf("%d", dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
 		if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
@@ -325,9 +315,10 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 			return err
 		}
 	}
-	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
-		"-p", "tcp", "-d", n.HostIP, "--dport", credPortStr, "-j", "ACCEPT"); err != nil {
-		return err
+	for _, r := range n.credForwardRules() {
+		if err := ns(r...); err != nil {
+			return err
+		}
 	}
 	//   2. Conexiones NUEVAS cuya IP destino esté en el ipset: permitidas.
 	if err := ns("iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
@@ -353,6 +344,46 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 	// el invitado va a usar. Si no arranca, el DNAT de arriba apunta a un puerto sin
 	// nadie escuchando y el invitado se queda sin DNS, así que su fallo es fatal.
 	return startDNSResolver(n, domains)
+}
+
+// credNATRules son los DNAT del proxy de credenciales, en orden (el primero que
+// casa gana; los del DNS van antes, en applyAllowlist):
+//   - 80 y 443 de n.HostIP al proxy HTTP (credPort). El 443 a propósito: un
+//     SDK que insista en https://dominio se encuentra un servidor HTTP plano
+//     (o nada, si la máquina no tiene credenciales) y su handshake TLS muere en
+//     el acto con un error que el operador ve, en vez de esperar al plazo del
+//     SDK contra el DROP. No abre nada: el proxy no habla TLS. Se hace así y no
+//     con REJECT --reject-with tcp-reset porque ese target necesita xt_REJECT
+//     y en un CT sin él la regla falla y la máquina no arranca (visto en el lab).
+//   - Cualquier otro puerto TCP de n.HostIP al proxy de Postgres (pgPort): el
+//     invitado usa el puerto de su cadena de conexión (5432 o el que sea) y no
+//     hace falta saberlo de antemano. Es una regla fija y no una por
+//     credencial, sin multiport: el orden deja fuera el 53, el 80 y el 443. No
+//     abre nada nuevo: todo lo que llegue ahí lo atiende (y lo rechaza, si no
+//     trae un marcador) el proxy. El listener existe en cuanto la máquina
+//     tiene cualquier credencial, pero sin una de Postgres cierra cada
+//     conexión sin leerla (ServePG), así que el analizador no queda expuesto.
+func (n *Net) credNATRules() [][]string {
+	var rules [][]string
+	for _, puerto := range []string{"80", "443"} {
+		rules = append(rules, []string{"iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
+			"-p", "tcp", "-d", n.HostIP, "--dport", puerto, "-j", "DNAT",
+			"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, credPort)})
+	}
+	return append(rules, []string{"iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
+		"-p", "tcp", "-d", n.HostIP, "-j", "DNAT",
+		"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, pgPort)})
+}
+
+// credForwardRules dejan pasar por el FORWARD del netns lo que los DNAT de
+// credNATRules llevan a los dos proxies.
+func (n *Net) credForwardRules() [][]string {
+	var rules [][]string
+	for _, puerto := range []string{credPortStr, pgPortStr} {
+		rules = append(rules, []string{"iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
+			"-p", "tcp", "-d", n.HostIP, "--dport", puerto, "-j", "ACCEPT"})
+	}
+	return rules
 }
 
 // resolvePublicIPv4 resuelve un dominio a sus IPv4 públicas, usando el mismo
@@ -466,6 +497,7 @@ func HostInputRules() [][]string {
 		regla("-d", HostSubnet, "-p", "udp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(credPort), "-j", "ACCEPT"),
+		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(pgPort), "-j", "ACCEPT"),
 		regla("-j", "DROP"),
 	}
 }

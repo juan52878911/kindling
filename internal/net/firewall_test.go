@@ -161,7 +161,7 @@ func TestHostInputRulesAceptanLoLegitimoYDescartanElResto(t *testing.T) {
 		junto += strings.Join(r, " ") + "\n"
 	}
 	for _, want := range []string{"ESTABLISHED,RELATED -j ACCEPT", "-p udp --dport 5333 -j ACCEPT", "-p tcp --dport 5333 -j ACCEPT",
-		"-p tcp --dport 5380 -j ACCEPT"} {
+		"-p tcp --dport 5380 -j ACCEPT", "-p tcp --dport 5381 -j ACCEPT"} {
 		if !strings.Contains(junto, want) {
 			t.Errorf("falta %q antes del DROP:\n%s", want, junto)
 		}

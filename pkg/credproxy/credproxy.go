@@ -63,6 +63,14 @@
 // absoluto por petición (plazos.go).
 // No se siguen redirecciones: una 3xx del proveedor hacia otro host no debe
 // llevarse la clave.
+//
+// QUÉ SE REGISTRA (con Options.AuditPath): una línea por petición, también por
+// cada rechazo, con método, host, ruta enmascarada, estado, motivo, qué
+// credenciales se sustituyeron, bytes y duración. Nunca la clave, el marcador,
+// cabeceras, cuerpos ni la query (ver auditoria.go).
+//
+// POSTGRES: una credencial Kind "postgres" no la usa el proxy HTTP sino
+// ServePG, el mismo modelo sobre el protocolo de Postgres (ver postgres.go).
 package credproxy
 
 import (
@@ -80,6 +88,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -111,12 +120,25 @@ const (
 // struct tal cual (sin etiquetas: las claves JSON son los nombres), así que un
 // fichero de antes de Allow se lee con Allow vacío, que es lo que hacía
 // entonces.
+//
+// Kind "postgres" (ver postgres.go) es una credencial de base de datos: el
+// marcador es la contraseña que el invitado manda al proxy de Postgres, y
+// Port, User, Database y CAPEM dicen a qué servidor, con qué rol y contra qué
+// CA se sale. Kind vacío es HTTP, como antes de que hubiera otros; los campos
+// nuevos son omitempty, así que un almacén anterior se lee igual.
 type Credential struct {
 	Env         string
 	Domain      string
 	Placeholder string
 	Secret      string
 	Allow       []string `json:",omitempty"`
+	Kind        string   `json:",omitempty"`
+	Port        int      `json:",omitempty"`
+	User        string   `json:",omitempty"`
+	Database    string   `json:",omitempty"`
+	// CAPEM son certificados de CA en PEM que se AÑADEN a las raíces del
+	// sistema para verificar al servidor (uno autofirmado o de una CA propia).
+	CAPEM string `json:",omitempty"`
 }
 
 var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -170,9 +192,32 @@ func ValidarCredenciales(creds []Credential) error {
 			return fmt.Errorf("credential for %s: duplicate placeholder", d)
 		}
 		vistos[c.Placeholder] = true
+		if err := ValidarTipo(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidarTipo comprueba lo que depende del tipo de la credencial (Allow para
+// HTTP; puerto, rol, base de datos, CA y forma de la clave para Postgres) y
+// pone el puerto por defecto de Postgres. No mira el marcador: lo usa también
+// el manager con lo que llega de la API, que aún no lo tiene. c.Domain debe
+// venir ya normalizado.
+func ValidarTipo(c *Credential) error {
+	d := c.Domain
+	switch c.Kind {
+	case "", KindHTTP:
+		if c.Port != 0 || c.User != "" || c.Database != "" || c.CAPEM != "" {
+			return fmt.Errorf("credential for %s: port, user, database and CA are only for -type postgres", d)
+		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
 		}
+	case KindPostgres:
+		return validarPostgres(c)
+	default:
+		return fmt.Errorf("credential for %s: unknown type %q (http or postgres)", d, c.Kind)
 	}
 	return nil
 }
@@ -195,21 +240,56 @@ type Options struct {
 	// fichero, que lleva la clave real mientras dura la petición, quede fuera
 	// de un /tmp que comparte con cualquier otra cosa del host.
 	TempDir string
+	// Enabled, si no es nil, dice en cada petición si el proxy está activo;
+	// si no, 403 sin mirar nada más (y queda en el registro). kling-vz la usa:
+	// su listener está en la pasarela sea cual sea el modo de red, y fuera de
+	// allowlist no debe dejar salir nada por aquí. Nil = siempre activo.
+	Enabled func() bool
+	// AuditPath, si no es "", es el registro de auditoría de la máquina (ver
+	// auditoria.go): una línea por petición, sin la clave ni contenido. El
+	// proxy lo abre la primera vez que escribe y Close lo cierra.
+	AuditPath string
+	// Logf recibe los fallos del registro de auditoría (disco lleno, fichero
+	// que no se puede abrir). Nil = no se avisa, aunque se siguen contando.
+	Logf func(format string, args ...any)
+	// DialPG sustituye al dialer de la salida de Postgres (el de dialPublico,
+	// con Lookup). Solo para tests y el laboratorio (un servidor en
+	// 127.0.0.1): en producción anula la barrera de IPs. La verificación TLS
+	// no cambia: sigue siendo contra el nombre de la credencial.
+	DialPG func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
 // sirve decide dónde (un listener TCP en el lado host del veth, un listener de
 // gVisor…), y debe asegurarse de que solo esa máquina llega a él.
 type Proxy struct {
-	mu     sync.RWMutex
-	creds  map[string][]credCompilada // por dominio
-	sem    chan struct{}
-	client *http.Client
+	mu    sync.RWMutex
+	creds map[string][]credCompilada // por dominio
+	// ocultar son las claves de TODAS las credenciales en las formas de
+	// variantes(): lo que rutaAuditada enmascara si aparece en una ruta.
+	ocultar []string
+	sem     chan struct{}
+	client  *http.Client
 	// idle y max son IdleTimeout y MaxDuration; campos para que los tests no
 	// tengan que esperar minutos.
 	idle, max time.Duration
 	// tempDir es Options.TempDir ya resuelto ("" nunca: New() pone os.TempDir()).
 	tempDir string
+	enabled func() bool
+	// aud es el registro de auditoría; nil sin Options.AuditPath.
+	aud  *Auditor
+	logf func(string, ...any)
+
+	// Postgres (postgres.go): credenciales, conexiones a la vez, salida y
+	// claves de cancelación falsas -> reales.
+	pg     []credPG
+	pgSem  chan struct{}
+	dialPG func(ctx context.Context, network, addr string) (net.Conn, error)
+	// pgPre y pgAuth son los plazos antes de autenticar (invitado y total);
+	// campos para los tests.
+	pgPre, pgAuth time.Duration
+	cancelMu      sync.Mutex
+	cancelaciones map[claveCancel]destinoCancel
 }
 
 // credCompilada es una credencial con su Allow ya partido.
@@ -245,6 +325,22 @@ func New(o Options) *Proxy {
 	if tempDir == "" {
 		tempDir = os.TempDir()
 	}
+	var aud *Auditor
+	if o.AuditPath != "" {
+		aud = NewAuditor(o.AuditPath, o.Logf)
+	}
+	dialPG := o.DialPG
+	if dialPG == nil {
+		lookup := o.Lookup
+		if lookup == nil {
+			lookup = PublicIPv4Lookup(DefaultDNS)
+		}
+		dialPG = dialPublico(lookup, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive})
+	}
+	logf := o.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	return &Proxy{
 		creds: map[string][]credCompilada{},
 		sem:   make(chan struct{}, MaxInFlight),
@@ -259,12 +355,31 @@ func New(o Options) *Proxy {
 		idle:    IdleTimeout,
 		max:     MaxDuration,
 		tempDir: tempDir,
+		enabled: o.Enabled,
+		aud:     aud,
+		logf:    logf,
+
+		pgSem:         make(chan struct{}, MaxPGConns),
+		dialPG:        dialPG,
+		pgPre:         pgPreAuth,
+		pgAuth:        pgAuthTotal,
+		cancelaciones: map[claveCancel]destinoCancel{},
 	}
+}
+
+// Close escribe y cierra el registro de auditoría. No para al servidor que
+// sirve el proxy (eso es del llamador, y conviene hacerlo antes): una petición
+// que termine después ya no queda registrada.
+func (p *Proxy) Close() error {
+	if p.aud == nil {
+		return nil
+	}
+	return p.aud.Close()
 }
 
 // SetCredentials fija el juego COMPLETO de credenciales (sustituye el
 // anterior) tras validarlo con ValidarCredenciales, que normaliza en el sitio
-// los dominios de creds. Devuelve los dominios distintos, ordenados: los que
+// los dominios de creds. Devuelve los dominios distintos (HTTP y Postgres), ordenados: los que
 // el resolver de la máquina debe desviar hacia el proxy. Con la lista vacía el
 // proxy se queda sin credenciales (todo 403).
 func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
@@ -272,7 +387,24 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 		return nil, err
 	}
 	byDomain := map[string][]credCompilada{}
+	var ocultar []string
+	var pg []credPG
+	vistos := map[string]bool{}
+	var domains []string
 	for _, c := range creds {
+		ocultar = append(ocultar, variantes(c.Secret)...)
+		if !vistos[c.Domain] {
+			vistos[c.Domain] = true
+			domains = append(domains, c.Domain)
+		}
+		if c.Kind == KindPostgres {
+			cp, err := compilarPG(c)
+			if err != nil {
+				return nil, err
+			}
+			pg = append(pg, cp)
+			continue
+		}
 		reglas, err := compilarPermisos(c.Allow)
 		if err != nil {
 			return nil, err
@@ -280,13 +412,9 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 		c.Allow = slices.Clone(c.Allow)
 		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
-	domains := make([]string, 0, len(byDomain))
-	for d := range byDomain {
-		domains = append(domains, d)
-	}
 	sort.Strings(domains)
 	p.mu.Lock()
-	p.creds = byDomain
+	p.creds, p.ocultar, p.pg = byDomain, ocultar, pg
 	p.mu.Unlock()
 	return domains, nil
 }
@@ -312,27 +440,53 @@ func NewServer(h http.Handler) *http.Server {
 var hopByHop = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
 	"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 
-func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	select {
-	case p.sem <- struct{}{}:
-		defer func() { <-p.sem }()
-	default:
-		rechazar(w, "kindling credential proxy: too many requests in flight", http.StatusServiceUnavailable)
-		return
-	}
+// ServeHTTP atiende una petición del invitado. Toda salida, también cada
+// rechazo, deja un registro de auditoría (el defer de arriba): cada return
+// temprano pone antes rec.Reason y, si es por política, rec.Denied.
+func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
+	inicio := time.Now()
 	host := strings.ToLower(r.Host)
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	host = strings.TrimSuffix(host, ".")
 	p.mu.RLock()
-	todas := p.creds[host]
+	todas, ocultar := p.creds[host], p.ocultar
 	p.mu.RUnlock()
+
+	// w mide lo que se contesta; sw (el del servidor) solo va a
+	// MaxBytesReader, ver cuerpoSaliente.
+	w := &medidor{w: sw}
+	var leidos atomic.Int64
+	if r.Body != nil {
+		r.Body = lectorContado{ReadCloser: r.Body, n: &leidos}
+	}
+	rec := &Record{Kind: KindHTTP, Method: recortar(r.Method, maxMetodoAuditado),
+		Host: hostAuditado(host), Path: rutaAuditada(r.URL, ocultar), Query: r.URL.RawQuery != ""}
+	var cs []Credential
+	var usadas marcas
+	defer func() { p.auditar(rec, w, inicio, &leidos, cs, usadas) }()
+
+	if p.enabled != nil && !p.enabled() {
+		rec.Reason, rec.Denied = ReasonDisabled, true
+		rechazar(w, "kindling credential proxy: credentials need egress allowlist", http.StatusForbidden)
+		return
+	}
+	select {
+	case p.sem <- struct{}{}:
+		defer func() { <-p.sem }()
+	default:
+		rec.Reason = ReasonBusy
+		rechazar(w, "kindling credential proxy: too many requests in flight", http.StatusServiceUnavailable)
+		return
+	}
 	if len(todas) == 0 {
+		rec.Reason, rec.Denied = ReasonNoCredential, true
 		rechazar(w, "kindling credential proxy: no credential for "+host, http.StatusForbidden)
 		return
 	}
 	if r.Method == http.MethodConnect {
+		rec.Reason = ReasonConnect
 		rechazar(w, "kindling credential proxy: CONNECT is not supported; use http://"+host, http.StatusMethodNotAllowed)
 		return
 	}
@@ -352,26 +506,29 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// lo que quiera, como antes de que existiera Allow.
 	if restringido {
 		if motivo := rutaAmbigua(r.URL); motivo != "" {
+			rec.Reason, rec.Denied = ReasonAmbiguousPath, true
 			rechazar(w, "kindling credential proxy: ambiguous path ("+motivo+") for "+host, http.StatusForbidden)
 			return
 		}
 	}
 	ruta := rutaNormalizada(r.URL)
-	var cs []Credential
 	for _, c := range todas {
 		if c.permite(r.Method, ruta) {
 			cs = append(cs, c.Credential)
 		}
 	}
 	if len(cs) == 0 {
+		rec.Reason, rec.Denied = ReasonNotAllowed, true
 		rechazar(w, "kindling credential proxy: "+r.Method+" "+ruta+" is not allowed for "+host, http.StatusForbidden)
 		return
 	}
+	usadas = make(marcas, len(cs))
 
 	// Un Content-Length por encima del tope se rechaza ya: con MaxBytesReader la
 	// subida se cortaría a medias y la petición saliente se quedaría esperando
 	// bytes que no llegan hasta el plazo.
 	if r.ContentLength > MaxBody {
+		rec.Reason = ReasonBodyTooLarge
 		rechazar(w, "kindling credential proxy: request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -391,13 +548,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// las que no se usaron: defensa en profundidad, no cuesta nada.
 	red := nuevoRedactor(escritorVigilado{w: w, v: v, p: pl}, credencialesDe(todas))
 
-	body, length, cerrar, err := cuerpoSaliente(r, w, cs, v, pl, p.tempDir)
+	body, length, cerrar, err := cuerpoSaliente(r, sw, cs, usadas, v, pl, p.tempDir)
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
+			rec.Reason = ReasonBodyTooLarge
 			http.Error(w, "kindling credential proxy: request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		rec.Reason = ReasonBadBody
 		http.Error(w, "kindling credential proxy: could not read the request body", http.StatusBadRequest)
 		return
 	}
@@ -413,15 +572,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if restringido {
 		u = urlSaliente(r.URL)
 	}
+	for i, c := range cs {
+		if strings.Contains(u.RawQuery, c.Placeholder) {
+			usadas.marcar(i)
+		}
+	}
 	out, err := http.NewRequestWithContext(ctx, r.Method, "https://"+host+sustituirQuery(u, cs), body)
 	if err != nil {
+		rec.Reason = ReasonBadRequest
 		http.Error(w, "kindling credential proxy: bad request", http.StatusBadRequest)
 		return
 	}
 	out.ContentLength = length
 	for k, vs := range r.Header {
 		for _, v := range vs {
-			nv, pares := sustituir(k, v, cs)
+			nv, pares := sustituirMarcando(k, v, cs, usadas)
 			// El valor tal y como sale, para redactarlo si el proveedor lo
 			// devuelve en eco: cubre el base64 de un Basic y cualquier otra
 			// forma en que el invitado hubiera envuelto el marcador.
@@ -447,6 +612,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := p.client.Do(out)
 	if err != nil {
+		rec.Reason = ReasonUpstreamError
 		http.Error(w, "kindling credential proxy: upstream error: "+red.texto(err.Error()), http.StatusBadGateway)
 		return
 	}
@@ -455,6 +621,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// queda otra codificación, el proveedor la impuso sin que nadie se la
 	// pidiera y el redactor no vería una clave dentro: no se entrega.
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		rec.Reason = ReasonBadEncoding
 		http.Error(w, "kindling credential proxy: upstream replied with Content-Encoding "+enc+
 			", which the proxy can't inspect for the key", http.StatusBadGateway)
 		return
@@ -474,6 +641,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Cortada a medias (inactividad, techo, el proveedor se fue): se aborta
 		// la conexión en vez de cerrar el chunked limpio, para que el SDK del
 		// invitado vea un error y no una respuesta truncada que parece entera.
+		// El registro se escribe igual: el defer corre durante el pánico.
+		rec.Reason = ReasonAborted
 		panic(http.ErrAbortHandler)
 	}
 }

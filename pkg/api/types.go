@@ -354,6 +354,47 @@ type Volume struct {
 	UsedBytes int64 `json:"used_bytes"`
 	// UsedBy son las máquinas que lo tienen montado ahora mismo.
 	UsedBy []string `json:"used_by,omitempty"`
+	// Snapshots cuenta sus copias guardadas, "undo" incluido. Mientras haya
+	// alguna, borrar el volumen exige pedirlo explícitamente.
+	Snapshots int `json:"snapshots,omitempty"`
+}
+
+// VolumeSnapshot es una copia de un volumen tomada sin escritores: el punto al
+// que se puede volver con restore.
+type VolumeSnapshot struct {
+	Volume    string    `json:"volume"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	SizeBytes int64     `json:"size_bytes"`
+	// UsedBytes es lo asignado. Con reflink o clonefile se comparte con el
+	// volumen, así que sumar estas cifras sobrestima lo que ocupa de verdad.
+	UsedBytes int64 `json:"used_bytes"`
+	// Undo marca la copia que restore guarda del estado anterior.
+	Undo bool `json:"undo,omitempty"`
+	// Mode dice cómo se hizo la copia (reflink, clone o copy). Solo viene en
+	// la respuesta de quien la acaba de crear.
+	Mode string `json:"mode,omitempty"`
+}
+
+// VolumeSnapshotUndo es el nombre reservado de la copia previa a un restore.
+const VolumeSnapshotUndo = "undo"
+
+// SnapshotVolumeRequest toma un snapshot; sin nombre, la hora UTC.
+type SnapshotVolumeRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
+// RestoreVolumeRequest devuelve un volumen al contenido de un snapshot.
+type RestoreVolumeRequest struct {
+	Snapshot string `json:"snapshot"`
+}
+
+// RestoreVolumeResult cuenta qué se restauró y dónde quedó lo anterior.
+type RestoreVolumeResult struct {
+	Volume   string          `json:"volume"`
+	Snapshot string          `json:"snapshot"`
+	Mode     string          `json:"mode"`
+	Undo     *VolumeSnapshot `json:"undo"`
 }
 
 // CreateVolumeRequest crea un volumen.
@@ -880,11 +921,24 @@ func IsInsufficientMemory(err error) bool {
 // segmento, ** al final es cualquier resto). Vacío es todas. Una petición que
 // ninguna credencial del dominio permite recibe 403 sin salir del host. Al
 // rotar (misma Env) se sustituye junto con la clave: hay que repetirlo.
+//
+// Type "postgres" es una credencial de base de datos (ver pkg/credproxy,
+// postgres.go): Secret es la contraseña del rol User en el servidor
+// Domain:Port (5432 por defecto), el invitado recibe el marcador como
+// contraseña (PGPASSWORD) y el proxy sale siempre por TLS verificado contra
+// Domain, con las raíces del sistema más CAPEM si se da. Database, si se da,
+// es la única base a la que se deja conectar. Allow no vale para Postgres. Al
+// rotar, como Allow, todos estos campos se sustituyen con la clave.
 type CredentialSpec struct {
-	Domain string   `json:"domain"`
-	Env    string   `json:"env"`
-	Secret string   `json:"secret"`
-	Allow  []string `json:"allow,omitempty"`
+	Domain   string   `json:"domain"`
+	Env      string   `json:"env"`
+	Secret   string   `json:"secret"`
+	Allow    []string `json:"allow,omitempty"`
+	Type     string   `json:"type,omitempty"`
+	Port     int      `json:"port,omitempty"`
+	User     string   `json:"user,omitempty"`
+	Database string   `json:"database,omitempty"`
+	CAPEM    string   `json:"ca_pem,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de
@@ -894,4 +948,45 @@ type CredentialSpec struct {
 type CredentialsRequest struct {
 	Credentials []CredentialSpec `json:"credentials"`
 	Clear       bool             `json:"clear,omitempty"`
+}
+
+// CredAuditRecord es una línea del registro de auditoría del proxy de
+// credenciales de una máquina (GET /machines/{ref}/credaudit, NDJSON). Es el
+// mismo formato que escribe pkg/credproxy en machines/<id>/credaudit.jsonl.
+// No lleva nunca la clave, el marcador, cabeceras, cuerpos ni la query: Path
+// va con ":cred" y ":tok" donde había algo que no debe verse, y Query solo
+// dice si la petición la llevaba.
+//
+// Kind es "http" para el proxy HTTP y "dropped" para una línea que solo lleva
+// la cuenta de registros descartados (Dropped). User, Database y Auth son para
+// proxies de otros protocolos. Reason vacío es que la petición llegó al
+// proveedor y su respuesta entera al invitado; Denied, que la rechazó la
+// política (sin credencial, Allow, ruta ambigua o proxy inactivo).
+type CredAuditRecord struct {
+	TS        time.Time `json:"ts"`
+	Kind      string    `json:"kind"`
+	Method    string    `json:"method,omitempty"`
+	Host      string    `json:"host,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Query     bool      `json:"query,omitempty"`
+	Status    int       `json:"status,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	Denied    bool      `json:"denied,omitempty"`
+	Creds     []string  `json:"creds,omitempty"`
+	User      string    `json:"user,omitempty"`
+	Database  string    `json:"database,omitempty"`
+	Auth      string    `json:"auth,omitempty"`
+	ReqBytes  int64     `json:"req_bytes"`
+	RespBytes int64     `json:"resp_bytes"`
+	MS        int64     `json:"ms"`
+	Dropped   uint64    `json:"dropped,omitempty"`
+}
+
+// CredAuditQuery filtra GET /machines/{ref}/credaudit. Tail son las últimas N
+// líneas tras filtrar (0 = todas las que el daemon lee, hasta 4 MiB); Denied,
+// solo las denegadas; Since, solo desde ese instante (cero = sin límite).
+type CredAuditQuery struct {
+	Tail   int
+	Denied bool
+	Since  time.Time
 }

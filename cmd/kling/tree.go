@@ -125,6 +125,9 @@ var coreTree = []section{
                                                    no -f; -clear removes them all;
                                                    -allow-request as in machine
                                                    credential)
+  template credential <name> -type postgres        the same for a database password
+      -domain D -user R [-database B] [-port P]    (see machine credential)
+      [-ca-file ca.pem] -env PGPASSWORD [-f file]
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -145,10 +148,16 @@ var coreTree = []section{
 `},
 	}},
 	{title: "VOLUMES", cmds: []plugin.Command{
-		{Name: "volume", Summary: "storage that survives the microVM", Subcommands: []string{"create", "ls", "rm", "populate"}, Usage: `  volume create <name> [-size 2G]                  storage that survives the microVM
+		{Name: "volume", Summary: "storage that survives the microVM", Subcommands: []string{"create", "ls", "rm", "populate", "snapshot", "snapshots", "restore"}, Usage: `  volume create <name> [-size 2G]                  storage that survives the microVM
   volume ls [-q] [-json]                           lists them
-  volume rm [-f] <name>...                         removes them
+  volume rm [-f] [-snapshots] <name>...            removes them (-snapshots: and theirs)
+  volume rm <name>@<snapshot>...                   removes snapshots
   volume populate <name> [-image I] -- <cmd>       installs packages inside a microVM
+  volume snapshot <name> [snap]                    copies it while nothing writes to it
+                                                   (default snap: UTC time)
+  volume snapshots <name> [-q] [-json]             lists its snapshots
+  volume restore [-f] <name> <snap>                goes back to a snapshot; the current
+                                                   state is kept in <name>@undo
 `},
 	}},
 	{title: "OBSERVATION", cmds: []plugin.Command{
@@ -182,7 +191,7 @@ var coreTree = []section{
 `},
 	}},
 	{title: "ADVANCED", advanced: true, cmds: []plugin.Command{
-		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret", "credential"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
+		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret", "credential", "audit"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential", "audit"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
                                                    restarting, up to its -mem-max
   machine squeeze <ref>...                         balloon: returns the guest's free
                                                    memory to the host
@@ -200,6 +209,17 @@ var coreTree = []section{
                                                    is a 403 (repeatable; * = a segment,
                                                    final /** = any rest); it goes with
                                                    the key: repeat it when rotating
+  machine credential <ref> -type postgres          a database password: the guest
+      -domain D -user R [-database B] [-port P]    connects in plain text to D (any
+      [-ca-file ca.pem] -env PGPASSWORD [-f file]  port) as R with the placeholder as
+                                                   password; the proxy logs in to D:P
+                                                   with the real one over verified TLS
+                                                   (SCRAM), -ca-file adds a CA
+  machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
+      [-since 10m] [-tail 200] [-json]             one line per request (method, host,
+                                                   masked path, status, credentials
+                                                   used, ms), never the key, headers,
+                                                   bodies or the query
 `},
 		{Name: "topo", Summary: "ASCII diagram of everything", Usage: `  topo                                             ASCII diagram of everything
 `},

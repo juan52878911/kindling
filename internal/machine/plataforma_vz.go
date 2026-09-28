@@ -8,9 +8,13 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -77,7 +81,7 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 			return err
 		}
 		if len(creds) > 0 {
-			if err := registrarCredenciales(ctx, c, nil, creds); err != nil {
+			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id)); err != nil {
 				return err
 			}
 		}
@@ -89,16 +93,34 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 // máquina, que sirve el proxy en la pasarela y desvía los dominios en su DNS.
 // La clave sale del daemon y se queda en la memoria de ese proceso (SECURITY.md
 // §7). Con c nil (el daemon se reinició y la máquina siguió viva) no hay nada
-// que hacer: el kling-vz es el mismo y conserva lo que se le dio.
-func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential) error {
+// que hacer: el kling-vz es el mismo y conserva lo que se le dio. auditPath no
+// viaja: kling-vz escribe el registro junto a su socket, que está en el mismo
+// directorio de la máquina (ver vz/cmd/kling-vz).
+func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string) error {
 	if c == nil {
 		return nil
+	}
+	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
+	// trataría una credencial Postgres como HTTP: se pregunta antes qué
+	// tipos entiende y, si no dice postgres, no se le da ninguna.
+	for _, cr := range creds {
+		if cr.Kind == credproxy.KindPostgres {
+			info, err := c.KlingInfo(ctx)
+			if err != nil {
+				return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+			}
+			if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
+				return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+			}
+			break
+		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
 	for _, cr := range creds {
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
+			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, CAPEM: cr.CAPEM,
 		})
 	}
 	if err := c.SetKlingCredentials(ctx, out); err != nil {
@@ -158,6 +180,42 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 // copia normal.
 func copiarDisco(ctx context.Context, src, dst string) ([]byte, error) {
 	return exec.CommandContext(ctx, "cp", "-c", src, dst).CombinedOutput()
+}
+
+// clonarDisco copia un volumen para un snapshot o un restore y dice cómo. En
+// APFS, `cp -c` clona con clonefile: instantáneo y sin ocupar nada hasta que
+// las copias divergen ("clone"). Fuera de APFS cp caería sin avisar a una copia
+// completa, así que se mira antes el sistema de ficheros y, si no es APFS, se
+// pasa por antesDeCopiar como cualquier copia completa ("copy").
+func clonarDisco(ctx context.Context, src, dst string, antesDeCopiar func() error) (string, error) {
+	modo, args := "clone", []string{"-c", src, dst}
+	if !esAPFS(filepath.Dir(dst)) {
+		if err := antesDeCopiar(); err != nil {
+			return "", err
+		}
+		modo, args = "copy", []string{src, dst}
+	}
+	if out, err := exec.CommandContext(ctx, "cp", args...).CombinedOutput(); err != nil {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("copying %s: %v: %s", filepath.Base(src), err, strings.TrimSpace(string(out)))
+	}
+	return modo, nil
+}
+
+// esAPFS dice si dir está en un volumen APFS, el único donde clonefile clona.
+func esAPFS(dir string) bool {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return false
+	}
+	var b []byte
+	for _, c := range st.Fstypename {
+		if c == 0 {
+			break
+		}
+		b = append(b, byte(c))
+	}
+	return string(b) == "apfs"
 }
 
 // perforarHuecos no hace nada: el mem.file de kling-vz es el estado que

@@ -12,6 +12,31 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **`kling volume create` ya no le da `volumes/` al usuario del VMM.** Recorría el
+  directorio entero con `EnsureWritable`, que dejaba `volumes/` (y todo lo de dentro) con
+  dueño el usuario sin privilegios del VMM hasta el siguiente reinicio del daemon, cuando
+  `restringirRaiz` lo devolvía a root. Ahora solo cambia el dueño del fichero nuevo. Hacía
+  falta para los snapshots de volumen: con `volumes/` del VMM, un VMM comprometido sin jailer
+  (con jailer ni siquiera ve esa ruta) podía renombrar `volumes/snapshots/` y sustituir
+  el pasado al que se vuelve.
+
+- **Registro de auditoría del proxy de credenciales** (`kling machine audit <ref>
+  [-f] [-denied] [-since 10m] [-tail N] [-json]`, `GET /machines/{ref}/credaudit`). Cada
+  petición que pasa por el proxy, también cada rechazo, deja una línea en
+  `machines/<id>/credaudit.jsonl`: método, host, ruta enmascarada (`:cred` donde hubiera
+  un marcador o una forma de la clave, `:tok` en identificadores opacos largos), estado,
+  motivo, si fue una denegación de política, qué credenciales se sustituyeron, bytes y
+  duración. Nunca la clave, el marcador, cabeceras, cuerpos ni la query. 0600, abierto sin
+  seguir enlaces, rota a 1 MiB (una generación); la escritura no bloquea la petición y lo
+  que se descarta con la cola llena se cuenta en la línea siguiente. En Linux lo escribe
+  el daemon, en macOS el `kling-vz` de la máquina (en el mismo directorio, sin RPC
+  nueva); se lee con la máquina corriendo, congelada o parada, y sobrevive a
+  freeze/thaw y a un reinicio del daemon. Son metadatos de tráfico que antes no llegaban
+  a disco: ver SECURITY.md §7.
+- **En macOS el rechazo del proxy fuera de allowlist es del propio proxy**
+  (`credproxy.Options.Enabled`) y no de un envoltorio en `vnet`: cada denegación tiene un
+  solo dueño y queda en el registro. El comportamiento para el invitado no cambia (403).
+
 - **`-allow-request` rechaza rutas ambiguas en vez de normalizarlas a ciegas.** El proxy
   comparaba `-allow-request` contra la ruta ya decodificada y limpiada con `path.Clean`,
   pero eso asume que el proveedor lee `/`, `.` y `..` igual que nosotros. Con alguna
@@ -154,8 +179,66 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   dorados de antes de la barrera IPv6 siguen con el módulo cargado en su kernel (avisado,
   no bloqueado — la barrera del namespace sí los cubre).
 
+### Novedades
+
+- **Proxy de credenciales de Postgres.** `kling machine credential <ref> -type postgres
+  -domain db.ejemplo.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env
+  PGPASSWORD` (y lo mismo en `kling template credential`; la clave, como siempre, por
+  `-f` o stdin). El invitado conecta en claro al dominio del servidor, en el puerto que
+  quiera, con el marcador como contraseña; el proxy entra en el servidor con la clave
+  real por TLS verificado (SCRAM-SHA-256, con `-PLUS` si se ofrece; o contraseña en
+  claro dentro de ese TLS) y solo entonces le da `AuthenticationOk`. Rol y base de datos
+  atados a la credencial, `CancelRequest` traducido con claves falsas, nada sustituido en
+  el flujo, una línea de auditoría por conexión (`kind: postgres`; `kling machine audit`
+  la pinta como `PG rol@base`). Sin dependencias nuevas. En Linux escucha en
+  `n.HostIP:5381` con un DNAT de todo puerto TCP de la IP del proxy salvo 53/80/443; en
+  macOS lo sirve `kling-vz` en la pasarela, y el daemon exige que su `/kling/info` diga
+  `credential_kinds: postgres` (hay que recompilar `kling-vz`). API: `type`, `port`,
+  `user`, `database` y `ca_pem` en `CredentialSpec`; el almacén cifrado de antes se lee
+  igual. Límites y lo que no resuelve (sin TLS en el tramo del invitado, `ALTER ROLE`,
+  sin lista de SQL, bases en IP privada rechazadas): SECURITY.md §7 y "Lo que NO está
+  resuelto". e2e: sección 7d de `scripts/90-e2e.sh` con `KLING_E2E_PG_URL`; prueba de
+  laboratorio contra un PostgreSQL real con `-tags pglab` (`pkg/credproxy/postgres_lab_test.go`).
+- **Snapshots de volumen y vuelta atrás.** `kling volume snapshot <vol> [nombre]` (por
+  defecto la hora UTC), `kling volume snapshots <vol>`, `kling volume restore <vol> <snap>`
+  y `kling volume rm <vol>@<snap>`; `volume ls` gana la columna `SNAPS`. Un snapshot solo
+  se toma sin escritores y un restore solo sin ningún usuario (una máquina congelada
+  cuenta); mientras dura, el volumen queda reservado en `volReservas` y un arranque que
+  llegue a medias se rechaza con "being snapshotted"/"being restored". Restore guarda
+  antes el estado actual en el snapshot reservado `undo`, así que se deshace con
+  `restore <vol> undo`. Hasta 16 por volumen más `undo`; el gc no los toca, y
+  `volume rm <vol>` se niega mientras haya alguno salvo `-snapshots`. La copia es
+  `cp --reflink=always` en Linux (instantánea en XFS/Btrfs) con caída a copia completa
+  dispersa, y `cp -c` (clonefile) en APFS; una copia completa que se comería el suelo de
+  disco libre o el hueco hasta la marca alta del gc se rechaza con 507. Viven en
+  `volumes/snapshots/<vol>/`, de root, `0700`/`0600`. API: `GET`/`POST
+  /volumes/{name}/snapshots`, `POST /volumes/{name}/restore`, `DELETE
+  /volumes/{name}/snapshots/{snap}`, `DELETE /volumes/{name}?snapshots=1`. Receta y
+  nota sobre XFS en el README (Snapshots and rollback). No se expone como herramienta MCP.
+
+- **kling-mcp: `kling-mcpbench` y `ext/mcp/scripts/95-thaw-scale.sh`, despertar a
+  escala.** Un generador de carga (solo biblioteca estándar) que lanza M sesiones MCP a
+  la vez tras una barrera contra N servicios a través del gateway —`initialize`,
+  `notifications/initialized`, `tools/call`, K llamadas más y `DELETE`— y da p50/p95/p99/
+  máx del primer resultado, errores por fase y código, y lo que le cuesta al host
+  muestreando el `/metrics` del daemon y el PSI (microVMs vivas, réplicas, PSS, memoria
+  disponible, tiempo hasta cero). El script monta la imagen y los servicios, su propio
+  gateway y la matriz (N 1/10/50 × M 1/10/50/200, congelado/caliente, con y sin
+  réplicas, R=3), salta las celdas que no caben en el 70 % de la RAM dejándolas en la
+  tabla, marca DEGRADED por encima del 1 % de fallos y limpia comprobando la línea base.
+  Método y reglas en [`docs/thaw-at-scale.md`](docs/thaw-at-scale.md); los resultados,
+  pendientes de la pasada en el lab.
+
 ### Arreglado
 
+- **kling-mcp: el gateway tiene tope de réplicas por servicio (`-max-replicas`, 16 por
+  defecto).** No tenía ninguno (`MaxReplicas` 0 = sin tope): cada sesión que no cabía en
+  las instancias existentes creaba una réplica, así que 200 sesiones simultáneas contra
+  un servicio de 256 MiB (una sesión por instancia) intentaban 200 microVMs y el único
+  freno era quedarse sin memoria en el host. Las sesiones por encima del tope reciben
+  `503 ... all replicas full`, y el servicio ya no se anota como roto por ello (antes
+  ese error era un 502 que marcaba su salud). `-max-replicas 0` devuelve el
+  comportamiento de antes.
 - **`kling run -from` hereda el egress de la plantilla si no se pide otro.** Mandaba
   siempre un egress (`none` por defecto), así que instanciar una plantilla con
   credenciales (`kling template credential`) exigía repetir `-egress allowlist -allow
@@ -186,6 +269,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `scripts/92-e2e-mac.sh`: nueva sección 6c (proxy de credenciales en el Mac, con
   freeze/thaw, reinicio del daemon y `kling-vz` confinado) y la misma corrección de
   `warm` por `frozen` en la sección 2. En este Mac (M4, `BURST=4`): 72 ok, 0 fallos.
+
+- `scripts/90-e2e.sh`: nueva sección 3c (snapshots de volumen: escribe dentro del
+  invitado, snapshot, rechazo con escritor y con congelada, snapshot con lector, restore,
+  undo, permisos en disco y `rm` con y sin `-snapshots`). `scripts/92-e2e-mac.sh`: nueva
+  6d, corta, que comprueba además que en APFS el modo es `clone`. Sin ejecutar aquí.
 
 ## v0.16.0 — 2026-09-27
 

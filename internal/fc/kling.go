@@ -26,6 +26,9 @@ const maxRespuestaKling = 1 << 20
 type KlingInfo struct {
 	Backend string `json:"backend"`
 	Version string `json:"version"`
+	// CredentialKinds son los tipos de credencial que su proxy entiende
+	// ("http", "postgres"). Un kling-vz anterior no lo manda: solo HTTP.
+	CredentialKinds []string `json:"credential_kinds,omitempty"`
 }
 
 // KlingNetwork es la política de salida de una máquina (PUT /kling/network).
@@ -44,6 +47,11 @@ type KlingCredential struct {
 	Placeholder string   `json:"placeholder"`
 	Secret      string   `json:"secret"`
 	Allow       []string `json:"allow,omitempty"`
+	Kind        string   `json:"kind,omitempty"`
+	Port        int      `json:"port,omitempty"`
+	User        string   `json:"user,omitempty"`
+	Database    string   `json:"database,omitempty"`
+	CAPEM       string   `json:"ca_pem,omitempty"`
 }
 
 // doOut es do() leyendo además el cuerpo de la respuesta en out (si no es nil).

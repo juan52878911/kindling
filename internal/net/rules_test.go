@@ -27,3 +27,34 @@ func TestEgressRulesOrden(t *testing.T) {
 		}
 	}
 }
+
+// Los DNAT del proxy de credenciales: 80 y 443 al HTTP, y DESPUÉS el resto de
+// puertos TCP de la IP del proxy al de Postgres (el orden deja fuera el 80 y
+// el 443; el 53 lo toma antes el DNAT del DNS). El FORWARD deja pasar los dos.
+func TestCredNATRulesOrden(t *testing.T) {
+	n := Plan(1, "abcdef0123")
+	nat := n.credNATRules()
+	want := []string{
+		"iptables -t nat -A PREROUTING -i tap0 -p tcp -d " + n.HostIP + " --dport 80 -j DNAT --to-destination " + n.HostIP + ":5380",
+		"iptables -t nat -A PREROUTING -i tap0 -p tcp -d " + n.HostIP + " --dport 443 -j DNAT --to-destination " + n.HostIP + ":5380",
+		"iptables -t nat -A PREROUTING -i tap0 -p tcp -d " + n.HostIP + " -j DNAT --to-destination " + n.HostIP + ":5381",
+	}
+	if len(nat) != len(want) {
+		t.Fatalf("nat = %v", nat)
+	}
+	for i := range want {
+		if got := strings.Join(nat[i], " "); got != want[i] {
+			t.Errorf("regla %d = %q\n quería %q", i, got, want[i])
+		}
+	}
+	fwd := n.credForwardRules()
+	if len(fwd) != 2 {
+		t.Fatalf("forward = %v", fwd)
+	}
+	for i, puerto := range []string{"5380", "5381"} {
+		want := "iptables -A FORWARD -i tap0 -o " + n.NSIf + " -p tcp -d " + n.HostIP + " --dport " + puerto + " -j ACCEPT"
+		if got := strings.Join(fwd[i], " "); got != want {
+			t.Errorf("forward %d = %q", i, got)
+		}
+	}
+}

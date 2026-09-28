@@ -81,8 +81,17 @@ type Config struct {
 	Resolver *egress.Resolver
 	// Credentials, si no es nil, es el proxy de credenciales (pkg/credproxy),
 	// servido en GatewayIP:80: la IP con la que el DNS contesta los dominios
-	// con credencial. Solo contesta en allowlist (ver credHandler).
+	// con credencial. Que solo atienda en allowlist lo decide el propio proxy
+	// (credproxy.Options.Enabled, ver kling-vz), para que cada rechazo quede
+	// en su registro de auditoría.
 	Credentials http.Handler
+	// CredentialsPG, si no es nil, es el mismo proxy en su papel de Postgres:
+	// una conexión TCP del invitado a la pasarela en cualquier puerto que no
+	// sea el 53 ni el 80 (el 5432 de un dominio con credencial Postgres,
+	// normalmente) va a su ServePG, pero solo si PGActivo (allowlist y alguna
+	// credencial Postgres); si no, se rechaza como antes. Es el DNAT
+	// HostIP:* -> 5381 de Linux.
+	CredentialsPG PGProxy
 	// Dial abre las conexiones de salida en el host. Nil = net.Dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// PeerAllowed, si no es nil, decide si se acepta una conexión a un
@@ -92,6 +101,12 @@ type Config struct {
 	// de su propio usuario (ver internal/peercred). Nil = se aceptan todas.
 	PeerAllowed func(net.Conn) bool
 	Logf        func(format string, args ...any)
+}
+
+// PGProxy es lo que la red necesita del proxy de Postgres (*credproxy.Proxy).
+type PGProxy interface {
+	PGActivo() bool
+	ServePG(ctx context.Context, c net.Conn)
 }
 
 // Net es la red de una máquina.
@@ -261,7 +276,7 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 			n.Close()
 			return nil, fmt.Errorf("credential proxy listener: %w", err)
 		}
-		n.cred = credproxy.NewServer(n.credHandler(cfg.Credentials))
+		n.cred = credproxy.NewServer(cfg.Credentials)
 		go func() { _ = n.cred.Serve(l) }()
 	}
 
@@ -269,21 +284,6 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 	go n.rxLoop()
 	go n.txLoop()
 	return n, nil
-}
-
-// credHandler solo deja pasar al proxy en allowlist. Las credenciales llegan
-// por una ruta aparte de la política, y el listener está en la pasarela sea
-// cual sea el modo: sin esta barrera, un invitado sin salida (none) que
-// conectara a mano a 172.16.0.1:80 con el Host de un dominio con credencial
-// saldría a internet a través del proxy.
-func (n *Net) credHandler(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if n.cfg.Policy.Mode() != egress.Allowlist {
-			http.Error(w, "kindling credential proxy: credentials need egress allowlist", http.StatusForbidden)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
 }
 
 // VMFile es el extremo del socketpair que se entrega al framework.
@@ -351,6 +351,17 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		}
 		r.Complete(false)
 		n.serveDNSTCP(gonet.NewTCPConn(&wq, ep))
+		return
+	}
+	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.PGActivo() {
+		var wq waiter.Queue
+		ep, err := r.CreateEndpoint(&wq)
+		if err != nil {
+			r.Complete(true)
+			return
+		}
+		r.Complete(false)
+		n.cfg.CredentialsPG.ServePG(n.ctx, gonet.NewTCPConn(&wq, ep))
 		return
 	}
 	if !n.cfg.Policy.AllowConn(dst) {

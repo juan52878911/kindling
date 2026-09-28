@@ -18,6 +18,7 @@ set -uo pipefail
 KLING="${KLING:-kling}"
 VOL="${VOL:-e2e-vol}"
 VOL2="${VOL2:-e2e-vol2}"
+VOL3="${VOL3:-e2e-vol3}"
 # Los volúmenes los monta el agente de invitado, y la imagen mínima no lo lleva:
 # el daemon rechaza montarlos ahí a propósito, porque el disco se engancharía y
 # nadie lo montaría. Para los bloques de volúmenes hace falta una imagen con
@@ -51,6 +52,7 @@ cleanup() {
   done
   $KLING volume rm "$VOL" >/dev/null 2>&1
   $KLING volume rm "$VOL2" >/dev/null 2>&1
+  $KLING volume rm -f -snapshots "$VOL3" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -201,6 +203,98 @@ out=$($KLING run -name "e2e-choque-$$" -image "$IMGVOL" -volume "$VOL:/x" -volum
 contiene "$out" "would shadow" && ok "rechaza dos volúmenes en el mismo punto" \
   || bad "puntos de montaje repetidos" "un rechazo" "$out"
 $KLING rm "e2e-choque-$$" >/dev/null 2>&1
+
+# ── 3c. snapshots de volumen y restore ───────────────────────────────────────
+# Un snapshot solo sin escritores (los lectores no cambian los bloques) y un
+# restore solo sin nadie; lo anterior al restore queda en <vol>@undo. Se escribe
+# de verdad dentro del invitado y se lee de vuelta: comparar ficheros del host
+# no diría nada de si el ext4 restaurado monta y contiene lo que tenía.
+step "3c. Snapshots de volumen y restore"
+$KLING volume rm -f -snapshots "$VOL3" >/dev/null 2>&1
+$KLING volume create "$VOL3" -size 128M >/dev/null 2>&1
+# escribe_vol <contenido>: una microVM de usar y tirar deja el fichero en /data.
+escribe_vol() {
+  local n="e2e-snap-w-$$"
+  $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3" -allow-exec -ttl 5m >/dev/null 2>&1 || return 1
+  $KLING exec "$n" -- sh -c "echo $1 > /data/f && sync" >/dev/null 2>&1
+  $KLING rm "$n" >/dev/null 2>&1
+}
+lee_vol() {
+  local n="e2e-snap-r-$$" out
+  $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3:/data:ro" -allow-exec -ttl 5m >/dev/null 2>&1 || { echo "no arrancó"; return; }
+  out=$($KLING exec "$n" -- cat /data/f 2>&1)
+  $KLING rm "$n" >/dev/null 2>&1
+  echo "$out"
+}
+if escribe_vol v1; then
+  out=$($KLING volume snapshot "$VOL3" antes 2>&1)
+  if contiene "$out" "taken"; then
+    # El modo es informativo: reflink en XFS/Btrfs, copy en ext4.
+    ok "snapshot tomado: $(printf '%s' "$out" | head -1)"
+  else
+    bad "volume snapshot" "taken" "$out"
+  fi
+  out=$($KLING volume snapshot "$VOL3" undo 2>&1)
+  contiene "$out" "reserved" && ok "undo está reservado" || bad "snapshot undo" "reserved" "$out"
+
+  # Con un escritor dentro, ni snapshot ni restore; congelada sigue contando.
+  n="e2e-snap-busy-$$"
+  if $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3" >/dev/null 2>&1; then
+    out=$($KLING volume snapshot "$VOL3" durante 2>&1)
+    contiene "$out" "WRITE mode" && ok "no hay snapshot con un escritor" || bad "snapshot con escritor" "WRITE mode" "$out"
+    out=$($KLING volume restore -f "$VOL3" antes 2>&1)
+    contiene "$out" "is used by" && ok "no hay restore con la máquina viva" || bad "restore en uso" "is used by" "$out"
+    if out=$($KLING freeze "$n" 2>&1); then
+      out=$($KLING volume snapshot "$VOL3" durante 2>&1)
+      contiene "$out" "WRITE mode" && ok "una congelada cuenta como escritor" || bad "snapshot con congelada" "WRITE mode" "$out"
+    else
+      bad "freeze de una máquina con volumen (3c)" "frozen" "$out"
+    fi
+    $KLING rm "$n" >/dev/null 2>&1
+  else
+    bad "run con volumen (3c)" "una máquina" "no arrancó"
+  fi
+  # Con un lector sí: no cambia los bloques.
+  n="e2e-snap-ro-$$"
+  if $KLING run -name "$n" -image "$IMGVOL" -volume "$VOL3:/data:ro" >/dev/null 2>&1; then
+    out=$($KLING volume snapshot "$VOL3" con-lector 2>&1)
+    contiene "$out" "taken" && ok "snapshot con un lector dentro" || bad "snapshot con lector" "taken" "$out"
+    $KLING rm "$n" >/dev/null 2>&1
+  else
+    bad "run -volume :ro (3c)" "una máquina" "no arrancó"
+  fi
+
+  escribe_vol v2
+  out=$($KLING volume restore -f "$VOL3" antes 2>&1)
+  contiene "$out" "restored" && ok "restore" || bad "volume restore" "restored" "$out"
+  out=$(lee_vol)
+  [ "$out" = "v1" ] && ok "tras el restore el invitado lee v1" || bad "contenido restaurado" "v1" "$out"
+  $KLING volume restore -f "$VOL3" undo >/dev/null 2>&1
+  out=$(lee_vol)
+  [ "$out" = "v2" ] && ok "restore de undo deshace el restore (v2)" || bad "undo" "v2" "$out"
+
+  out=$($KLING volume snapshots "$VOL3" -q 2>&1)
+  contiene "$out" "antes" && contiene "$out" "undo" && ok "volume snapshots lista antes y undo" \
+    || bad "volume snapshots" "antes y undo" "$out"
+  out=$($KLING volume ls 2>&1 | grep "$VOL3 " || true)
+  contiene "$out" " 3 " && ok "volume ls cuenta 3 snapshots" || bad "SNAPS" "3" "$out"
+  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+    perms=$(ssh "${KLING_HOST#ssh://}" \
+      "sudo stat -c '%a %U' /var/lib/kindling/volumes/snapshots /var/lib/kindling/volumes/snapshots/$VOL3 /var/lib/kindling/volumes/snapshots/$VOL3/antes.ext4 | tr '\n' ' '")
+    [ "$perms" = "700 root 700 root 600 root " ] && ok "snapshots de root: 0700/0700/0600" \
+      || bad "permisos de snapshots" "700 root 700 root 600 root" "${perms:-no pude leerlo}"
+  fi
+
+  out=$($KLING volume rm -f "$VOL3" 2>&1)
+  contiene "$out" "-snapshots" && ok "no borra un volumen con snapshots sin -snapshots" \
+    || bad "volume rm con snapshots" "un rechazo que diga -snapshots" "$out"
+  out=$($KLING volume rm -f "$VOL3@con-lector" 2>&1)
+  contiene "$out" "removed" && ok "volume rm vol@snap" || bad "rm vol@snap" "removed" "$out"
+  out=$($KLING volume rm -f -snapshots "$VOL3" 2>&1)
+  contiene "$out" "removed" && ok "volume rm -snapshots se lo lleva todo" || bad "rm -snapshots" "removed" "$out"
+else
+  bad "escribir en el volumen (3c)" "una máquina con exec" "no arrancó"
+fi
 
 # ── 4. reconcile no destruye máquinas vivas ──────────────────────────────────
 # El caso que motivó reescribirlo: el daemon se reinicia y una microVM viva NO
@@ -632,6 +726,49 @@ print("DRIP", st, len(b), int(time.time() - t0))
     "200 5 "*) ok "un stream de ${drip##* } s (más que el plazo total de antes, 120 s) llega entero" ;;
     *) bad "stream largo por el proxy" "DRIP 200 5 ~150" "$out" ;;
   esac
+
+  # Registro de auditoría (kling machine audit): una línea por petición que
+  # pasó por el proxy, también las denegadas, con la ruta enmascarada y la
+  # credencial usada; nunca la clave, el marcador ni la query. Todo lo de
+  # arriba pasó por él, antes y después del freeze/thaw y del reinicio del
+  # daemon: las líneas de la primera sonda (/anything) tienen que seguir ahí.
+  out=$($KLING machine audit "$CR" -tail 0 -json 2>&1)
+  contiene "$out" '"path":"/anything"' && contiene "$out" '"creds":["E2E_KEY"]' \
+    && ok "audit: las peticiones de antes del freeze/thaw siguen, con la credencial usada" \
+    || bad "audit tras freeze/thaw" '"path":"/anything" con "creds":["E2E_KEY"]' "$out"
+  contiene "$out" '"reason":"not_allowed","denied":true' && contiene "$out" '"reason":"no_credential","denied":true' \
+    && ok "audit: las denegaciones (-allow-request y otro dominio) quedan registradas" \
+    || bad "audit de denegaciones" "not_allowed y no_credential con denied" "$out"
+  contiene "$out" '"path":"/basic-auth/demo/:cred"' && contiene "$out" '"query":true' \
+    && ok "audit: la clave en la ruta sale como :cred y de la query solo consta que la había" \
+    || bad "audit enmascarado" '/basic-auth/demo/:cred y "query":true' "$out"
+  if contiene "$out" "$PASS" || contiene "$out" "$PASS2" || contiene "$out" "kling-cred-" \
+    || { [ -n "$ph1" ] && contiene "$out" "$ph1"; } || contiene "$out" "duration="; then
+    bad "audit sin secretos" "ni clave, ni marcador, ni query" "$out"
+  else
+    ok "audit: ni la clave, ni el marcador, ni el contenido de la query"
+  fi
+  out=$($KLING machine audit "$CR" -denied -json -tail 0 2>&1)
+  n_todas=$(printf '%s\n' "$out" | grep -c '"kind":"http"')
+  n_den=$(printf '%s\n' "$out" | grep -c '"denied":true')
+  [ "$n_todas" -gt 0 ] && [ "$n_todas" = "$n_den" ] && ok "audit -denied: solo denegadas ($n_den)" \
+    || bad "audit -denied" "todas las líneas http con denied" "$n_todas líneas, $n_den denegadas"
+  out=$($KLING machine audit "$CR" -tail 3 2>&1)
+  contiene "$out" "METHOD" && contiene "$out" "httpbin.org" && ok "audit: la tabla" || bad "audit tabla" "cabecera y filas" "$out"
+  # -f: sigue el registro como `kling logs -f` sigue la consola.
+  seg=$(mktemp)
+  $KLING machine audit "$CR" -f -tail 1 >"$seg" 2>&1 &
+  segpid=$!
+  sleep 2
+  $KLING exec -timeout 30s "$CR" -- python3 -c '
+import http.client
+c = http.client.HTTPConnection("httpbin.org", 80, timeout=10)
+c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' >/dev/null 2>&1
+  sleep 3
+  kill "$segpid" 2>/dev/null; wait "$segpid" 2>/dev/null
+  out=$(cat "$seg"); rm -f "$seg"
+  contiene "$out" "/anything/e2e-follow" && contiene "$out" "DENIED(not_allowed)" \
+    && ok "audit -f: la petición nueva aparece mientras se sigue" || bad "audit -f" "/anything/e2e-follow DENIED(not_allowed)" "$out"
   $KLING rm -f "$CR" >/dev/null 2>&1
 else
   bad "run -egress allowlist" "una máquina" "no arrancó"
@@ -700,6 +837,109 @@ if $KLING run -image "$IMGVOL" -name "$TC" -egress allowlist -allow example.org 
   $KLING template rm -f "$TPLC" >/dev/null 2>&1
 else
   bad "plantilla con allowlist" "run + save" "falló"
+fi
+
+# ── 7d. proxy de credenciales de Postgres ────────────────────────────────────
+# El mismo modelo con una base de datos: el invitado conecta en claro al
+# dominio del servidor (que su resolver contesta con el proxy) con el marcador
+# como contraseña, y el proxy entra en el servidor con la clave real por TLS
+# verificado (SCRAM). Necesita un PostgreSQL con TLS, con IP PÚBLICA (el proxy
+# no sale a la red privada) y un certificado válido para su nombre:
+#
+#   KLING_E2E_PG_URL=postgres://rol:clave@db.ejemplo.com:5432/base
+#   KLING_E2E_PG_CA=/ruta/ca.pem     (opcional: si el certificado no es de una CA pública)
+#
+# La clave va en la URL por comodidad del que prueba; al daemon llega por stdin.
+step "7d. Proxy de credenciales de Postgres"
+if [ -z "${KLING_E2E_PG_URL:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_PG_URL no está (postgres://rol:clave@host:puerto/base): sin servidor que probar\n"
+else
+  PGC="e2e-pgcred-$$"
+  read -r PG_HOST PG_PORT PG_USER PG_DB < <(python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1])
+print(u.hostname, u.port or 5432, urllib.parse.unquote(u.username or ""), (u.path or "/").lstrip("/") or urllib.parse.unquote(u.username or ""))
+' "$KLING_E2E_PG_URL")
+  PG_PASS=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).password or ""))' "$KLING_E2E_PG_URL")
+  ca_args=()
+  [ -n "${KLING_E2E_PG_CA:-}" ] && ca_args=(-ca-file "$KLING_E2E_PG_CA")
+  # La sonda es un cliente mínimo del protocolo v3 (la imagen no trae psql):
+  # SSLRequest (el proxy contesta N), arranque, contraseña en claro (el
+  # marcador), una consulta; y lo mismo con un marcador falso.
+  SONDA_PG='
+import json, socket, struct, sys, urllib.request
+host, port, user, db, real = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store)["env"]["PGPASSWORD"]
+print("MMDS", "CLAVE" if real in store else "MARCADOR")
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def conectar(pw):
+    s = socket.create_connection((host, port), timeout=20)
+    s.sendall(struct.pack("!II", 8, 80877103))
+    ssl = leer(s, 1).decode()
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, ssl, "SINPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(pw)) + pw.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E":
+            code = [f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C"]
+            return s, ssl, "ERROR " + (code[0] if code else "?")
+        if t == b"Z": return s, ssl, "LISTO"
+s, ssl, r = conectar(ph)
+print("SSL", ssl)
+print("LOGIN", r)
+if r == "LISTO":
+    q = b"SELECT current_user\0"
+    s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+    fila = ""
+    while True:
+        t, b = msg(s)
+        if t == b"D": fila = b[6:].decode(errors="replace")
+        if t in (b"Z", b"E"): break
+    print("FILA", fila)
+s.close()
+print("FALSO", conectar("kling-cred-00000000000000000000")[2])
+'
+  if $KLING run -image "$IMGVOL" -name "$PGC" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
+    out=$(printf '%s' "$PG_PASS" | $KLING machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -database "$PG_DB" "${ca_args[@]}" -env PGPASSWORD 2>&1)
+    contiene "$out" "verified TLS" && ok "credential -type postgres: la clave queda en el proxy" \
+      || bad "machine credential -type postgres" "verified TLS" "$out"
+    out=$($KLING exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
+    contiene "$out" "MMDS MARCADOR" && ok "el invitado no ve la clave, solo el marcador" || bad "MMDS (postgres)" "MMDS MARCADOR" "$out"
+    contiene "$out" "SSL N" && ok "el tramo del invitado va en claro (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
+    contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA $PG_USER" \
+      && ok "con el marcador el invitado entra y consulta como $PG_USER" || bad "login por el proxy" "LOGIN LISTO y FILA $PG_USER" "$out"
+    contiene "$out" "FALSO ERROR 28P01" && ok "un marcador falso: 28P01 sin llegar al servidor" \
+      || bad "marcador falso" "FALSO ERROR 28P01" "$out"
+    out=$($KLING machine audit "$PGC" -tail 0 -json 2>&1)
+    contiene "$out" '"kind":"postgres"' && contiene "$out" '"auth":"scram-sha-256' \
+      && ok "audit: una línea por conexión, autenticada con SCRAM" || bad "audit postgres" 'kind postgres con auth scram' "$out"
+    contiene "$out" '"reason":"bad_placeholder","denied":true' && ok "audit: el marcador falso queda como denegado" \
+      || bad "audit postgres denegado" "bad_placeholder denied" "$out"
+    if contiene "$out" "$PG_PASS" || contiene "$out" "kling-cred-" || contiene "$out" "current_user"; then
+      bad "audit postgres sin secretos" "ni clave, ni marcador, ni SQL" "$out"
+    else
+      ok "audit: ni la clave, ni el marcador, ni el SQL"
+    fi
+    $KLING rm -f "$PGC" >/dev/null 2>&1
+  else
+    bad "run -egress allowlist (postgres)" "una máquina" "no arrancó"
+  fi
 fi
 
 # ── 7c. IPv6 cerrado ──────────────────────────────────────────────────────────
