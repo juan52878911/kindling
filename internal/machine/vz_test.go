@@ -29,6 +29,7 @@ import (
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const envFakeVZ = "KLING_FAKE_VZ_LOG"
@@ -103,6 +104,22 @@ func servirVZFalso(sock, logPath string) {
 			}
 			_ = json.Unmarshal(body, &n)
 			linea += " egress=" + n.Egress
+		case "/kling/credentials":
+			// Se apunta cuántas y para qué dominios, nunca la clave: el fichero
+			// de llamadas es lo que la prueba lee, y no debe contenerla.
+			var c struct {
+				Credentials []struct {
+					Domain, Secret string
+				} `json:"credentials"`
+			}
+			_ = json.Unmarshal(body, &c)
+			linea += fmt.Sprintf(" n=%d", len(c.Credentials))
+			for _, cr := range c.Credentials {
+				linea += " " + cr.Domain
+				if cr.Secret != "" {
+					linea += "+secret"
+				}
+			}
 		case "/kling/forwards":
 			var q struct {
 				Ports []int `json:"ports"`
@@ -557,5 +574,73 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("sin evento de thaw")
+	}
+}
+
+// Una máquina con credenciales que despierta: su kling-vz es nuevo, así que la
+// clave le llega ANTES de cargar el estado (el invitado despierta con el
+// dominio cacheado en la pasarela) y otra vez en la reentrega, con los
+// marcadores de vuelta en MMDS.
+func TestVZThawEntregaLasCredencialesAlAyudante(t *testing.T) {
+	m, logPath := managerVZ(t)
+	id := "cc99dd00ee11ff22"
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := volcadoEnCurso(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := sellarVolcado(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.guardarCredenciales(id, []credproxy.Credential{
+		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: "sk-secreto"}}); err != nil {
+		t.Fatal(err)
+	}
+	m.byID[id] = &api.Machine{ID: id, Name: "vz-cred", State: api.StateWarm, Egress: "allowlist",
+		AllowDomains: []string{"example.org"}, IP: knet.GuestIP, CreatedAt: time.Now()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := m.Thaw(ctx, id)
+	if out != nil {
+		defer matarVMM(out.PID)
+	}
+	if err != nil {
+		t.Fatalf("thaw: %v", err)
+	}
+	ls := llamadas(t, logPath)
+	red, cred, load := indice(ls, "PUT /kling/network"), indice(ls, "PUT /kling/credentials"), indice(ls, "PUT /snapshot/load")
+	if red < 0 || cred < 0 || load < 0 || !(red < cred && cred < load) {
+		t.Fatalf("las credenciales tienen que ir tras la red y antes de cargar (red=%d cred=%d load=%d):\n%s",
+			red, cred, load, strings.Join(ls, "\n"))
+	}
+	if ls[cred] != "PUT /kling/credentials n=1 api.example.com+secret" {
+		t.Fatalf("entrega: %q", ls[cred])
+	}
+	var tras int
+	for _, l := range ls[load:] {
+		if strings.HasPrefix(l, "PUT /kling/credentials") {
+			tras++
+		}
+	}
+	if tras != 1 || indice(ls[load:], "PATCH /mmds") < 0 {
+		t.Fatalf("tras cargar: %d entregas y MMDS %d; quería la reentrega con marcadores:\n%s",
+			tras, indice(ls[load:], "PATCH /mmds"), strings.Join(ls, "\n"))
+	}
+}
+
+// Sin cliente (el daemon se reinició y la máquina siguió viva) no se llama a
+// nadie: el kling-vz es el mismo y conserva las claves.
+func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
+	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
+		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}); err != nil {
+		t.Fatal(err)
 	}
 }

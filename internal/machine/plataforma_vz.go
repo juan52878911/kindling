@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const backendVMM = BackendVZ
@@ -63,6 +65,45 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	}
 	if err := c.SetKlingNetwork(ctx, red); err != nil {
 		return fmt.Errorf("setting the network policy: %w", err)
+	}
+	// Las credenciales que la máquina ya tuviera (un thaw o un reinicio), al
+	// kling-vz nuevo ANTES de que el invitado corra: despierta con el dominio
+	// cacheado apuntando a la pasarela, y así la primera petición ya encuentra
+	// el proxy con su clave. La reentrega de después (reentregarCredenciales)
+	// repite lo mismo, y además los marcadores en MMDS.
+	if red.Egress == string(knet.EgressAllowlist) {
+		creds, err := m.cargarCredenciales(id)
+		if err != nil {
+			return err
+		}
+		if len(creds) > 0 {
+			if err := registrarCredenciales(ctx, c, nil, creds); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// registrarCredencialesPlataforma manda el juego completo al kling-vz de la
+// máquina, que sirve el proxy en la pasarela y desvía los dominios en su DNS.
+// La clave sale del daemon y se queda en la memoria de ese proceso (SECURITY.md
+// §7). Con c nil (el daemon se reinició y la máquina siguió viva) no hay nada
+// que hacer: el kling-vz es el mismo y conserva lo que se le dio.
+func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential) error {
+	if c == nil {
+		return nil
+	}
+	out := make([]fc.KlingCredential, 0, len(creds))
+	for _, cr := range creds {
+		out = append(out, fc.KlingCredential{Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret})
+	}
+	if err := c.SetKlingCredentials(ctx, out); err != nil {
+		// Un kling-vz anterior no conoce la ruta: que el error diga qué hacer.
+		if strings.Contains(err.Error(), "does not implement") {
+			return fmt.Errorf("%w: rebuild kling-vz to use credentials on macOS", err)
+		}
+		return fmt.Errorf("handing the credentials to kling-vz: %w", err)
 	}
 	return nil
 }

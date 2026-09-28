@@ -92,3 +92,29 @@ func TestKlingRutaDesconocidaEsError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestSetKlingCredentialsMandaElJuegoEntero(t *testing.T) {
+	c, _, raw := firecrackerFalso(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/kling/credentials" || r.Method != http.MethodPut {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"domains":["api.example.com"]}`)
+	})
+	cr := KlingCredential{Env: "API_KEY", Domain: "api.example.com", Placeholder: "kling-cred-x", Secret: "sk"}
+	if err := c.SetKlingCredentials(context.Background(), []KlingCredential{cr}); err != nil {
+		t.Fatal(err)
+	}
+	var cuerpo struct {
+		Credentials []KlingCredential `json:"credentials"`
+	}
+	if err := json.Unmarshal(*raw, &cuerpo); err != nil || len(cuerpo.Credentials) != 1 || cuerpo.Credentials[0] != cr {
+		t.Fatalf("cuerpo = %s (%v)", *raw, err)
+	}
+	// nil viaja como lista vacía: quitar todas, no un cuerpo que no se entienda.
+	if err := c.SetKlingCredentials(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(*raw), `"credentials":[]`) {
+		t.Fatalf("cuerpo = %s", *raw)
+	}
+}

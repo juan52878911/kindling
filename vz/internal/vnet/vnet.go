@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -78,6 +79,10 @@ type Config struct {
 	MMDSAddr netip.Addr
 	Policy   *egress.Policy
 	Resolver *egress.Resolver
+	// Credentials, si no es nil, es el proxy de credenciales (pkg/credproxy),
+	// servido en GatewayIP:80: la IP con la que el DNS contesta los dominios
+	// con credencial. Solo contesta en allowlist (ver credHandler).
+	Credentials http.Handler
 	// Dial abre las conexiones de salida en el host. Nil = net.Dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// PeerAllowed, si no es nil, decide si se acepta una conexión a un
@@ -99,6 +104,7 @@ type Net struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	mmds   *http.Server
+	cred   *http.Server
 
 	mu       sync.Mutex
 	forwards map[int]net.Listener
@@ -240,10 +246,44 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 		go func() { _ = n.mmds.Serve(l) }()
 	}
 
+	if cfg.Credentials != nil {
+		// En la pasarela, que es una dirección propia de la pila: un listener
+		// en ella se queda la conexión antes de que llegue a handleTCP, y por
+		// tanto antes de Policy.AllowConn, que la rechazaría (172.16/12). Es
+		// el equivalente del DNAT 80->5380 de Linux, sin puerto intermedio: aquí
+		// no hay nada más en el 80 de esta pila con quien chocar. El 443 no
+		// tiene listener y sigue el camino normal: AllowConn lo rechaza y el
+		// invitado recibe un RST al momento. Es lo que se quiere, el SDK debe
+		// hablar http:// con el proxy, y fallar rápido lo dice antes que un
+		// plazo vencido.
+		l, err := gonet.ListenTCP(s, tcpip.FullAddress{NIC: nicID, Addr: gw, Port: 80}, ipv4.ProtocolNumber)
+		if err != nil {
+			n.Close()
+			return nil, fmt.Errorf("credential proxy listener: %w", err)
+		}
+		n.cred = credproxy.NewServer(n.credHandler(cfg.Credentials))
+		go func() { _ = n.cred.Serve(l) }()
+	}
+
 	n.wg.Add(2)
 	go n.rxLoop()
 	go n.txLoop()
 	return n, nil
+}
+
+// credHandler solo deja pasar al proxy en allowlist. Las credenciales llegan
+// por una ruta aparte de la política, y el listener está en la pasarela sea
+// cual sea el modo: sin esta barrera, un invitado sin salida (none) que
+// conectara a mano a 172.16.0.1:80 con el Host de un dominio con credencial
+// saldría a internet a través del proxy.
+func (n *Net) credHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.cfg.Policy.Mode() != egress.Allowlist {
+			http.Error(w, "kindling credential proxy: credentials need egress allowlist", http.StatusForbidden)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // VMFile es el extremo del socketpair que se entrega al framework.
@@ -548,6 +588,9 @@ func (n *Net) Close() {
 	n.cancel()
 	if n.mmds != nil {
 		_ = n.mmds.Close()
+	}
+	if n.cred != nil {
+		_ = n.cred.Close()
 	}
 	n.conn.Close()
 	n.ep.Close()

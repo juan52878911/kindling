@@ -74,6 +74,7 @@ y cada petición rechazada queda también en el log con el prefijo `kling-vz:`.
 |---|---|
 | `GET /kling/info` | `{"backend": "vz", "version": "x.y.z"}` |
 | `PUT /kling/network` | `{"egress": "none"\|"internet"\|"allowlist", "allow_domains": [...]}`. Se puede cambiar en caliente, salvo ampliar a `internet` o `allowlist` una VM que se creó con `none`: el sandbox ya no le deja salir y la petición da 400. |
+| `PUT /kling/credentials` | `{"credentials": [{"env", "domain", "placeholder", "secret"}]}`, el juego completo (vacío las quita). Solo con egress `allowlist`. Sirve el proxy de credenciales en 172.16.0.1:80 y desvía esos dominios en el DNS; las claves se quedan en la memoria del proceso. |
 | `PUT /kling/forwards` | `{"ports": [8080]}` → `{"forwards": {"8080": "127.0.0.1:61234"}}`. Repetir un puerto devuelve la misma dirección. |
 | `GET /kling/stats` | `{"footprint_mib": N}`: `phys_footprint` del ayudante más el del auxiliar de Apple que aloja la VM. |
 | `PUT /kling/cpu` | `{"pct": N}`: techo de CPU en porcentaje de un núcleo, como `cpu_pct` (0 lo quita). Regula pausando la VM por ventanas de 100 ms, desde que el agente del invitado escucha. `GET /kling/cpu` da el techo y cuánto lleva en pausa. |

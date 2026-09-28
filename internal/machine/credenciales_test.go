@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/events"
+	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
@@ -19,17 +20,15 @@ const (
 	credSecreto2 = "sk_live_LA_CLAVE_ROTADA"
 )
 
-// capturarRegistro sustituye knet.SetCredentials por un registro en memoria:
-// en el Mac no hay veth donde escuchar, y lo que se prueba aquí es lo que el
-// manager le entrega, no el proxy (que tiene sus tests en pkg/credproxy).
+// capturarRegistro sustituye la entrega al proxy (knet.SetCredentials en
+// Linux, PUT /kling/credentials en macOS) por un registro en memoria: lo que se
+// prueba aquí es lo que el manager le entrega, no el proxy (que tiene sus
+// tests en pkg/credproxy y en vz/).
 func capturarRegistro(t *testing.T) *[][]credproxy.Credential {
 	t.Helper()
 	var got [][]credproxy.Credential
-	prevSin := sinProxyDeCredenciales
-	sinProxyDeCredenciales = false
-	t.Cleanup(func() { sinProxyDeCredenciales = prevSin })
 	prev := registrarCredenciales
-	registrarCredenciales = func(_ *knet.Net, creds []credproxy.Credential) error {
+	registrarCredenciales = func(_ context.Context, _ *fc.Client, _ *knet.Net, creds []credproxy.Credential) error {
 		got = append(got, append([]credproxy.Credential(nil), creds...))
 		return nil
 	}
@@ -264,9 +263,6 @@ func TestReentregarCredenciales(t *testing.T) {
 // rehace el snapshot: el almacén vive aparte y sobrevive.
 func TestCredencialesDePlantilla(t *testing.T) {
 	m := newTestManager(t)
-	prevSin := sinProxyDeCredenciales
-	sinProxyDeCredenciales = false
-	t.Cleanup(func() { sinProxyDeCredenciales = prevSin })
 	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "none"})
 	escribirSnapshot(t, m, "svc-al", api.Snapshot{Egress: "allowlist", AllowDomains: []string{"example.org"}})
 	spec := []api.CredentialSpec{{Domain: "API.Example.com", Env: "KEY", Secret: credSecreto}}

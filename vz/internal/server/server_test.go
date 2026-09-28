@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 )
@@ -698,4 +700,42 @@ func TestPausaDelNucleoDuranteLaDelRegulador(t *testing.T) {
 		t.Fatal("el regulador reanudó una VM que el núcleo había pausado")
 	}
 	r.must("PATCH", "/vm", `{"state":"Resumed"}`)
+}
+
+// PUT /kling/credentials: solo en allowlist, fija el juego entero en el proxy y
+// desvía sus dominios a la pasarela; uno inválido no toca el anterior.
+func TestKlingCredentials(t *testing.T) {
+	r := newRig(t)
+	const cred = `{"credentials":[{"env":"API_KEY","domain":"API.example.com","placeholder":"kling-cred-abc","secret":"sk-1"}]}`
+	r.mustFail("PUT", "/kling/credentials", cred, "no credential proxy")
+
+	gw := netip.MustParseAddr("172.16.0.1")
+	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
+	r.srv.d.CredIP = gw
+	r.mustFail("PUT", "/kling/credentials", cred, "need egress allowlist")
+	r.must("PUT", "/kling/network", `{"egress":"allowlist","allow_domains":["other.org"]}`)
+	if out := r.must("PUT", "/kling/credentials", cred); !strings.Contains(out, `"domains":["api.example.com"]`) {
+		t.Fatalf("PUT /kling/credentials = %s", out)
+	}
+	if ip, ok := r.srv.d.Policy.CredHost("api.example.com"); !ok || ip != gw {
+		t.Fatal("the credential domain is not diverted to the gateway")
+	}
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"domain":"*.example.com","placeholder":"kling-cred-x","secret":"s"}]}`, "exact host name")
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"domain":"b.example.com","placeholder":"nope","secret":"s"}]}`, "invalid placeholder")
+	if _, ok := r.srv.d.Policy.CredHost("api.example.com"); !ok {
+		t.Fatal("a rejected set must keep the previous one")
+	}
+
+	// La red nace con el proxy.
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	if r.nets[0].cfg.Credentials == nil {
+		t.Fatal("the network was not given the credential proxy")
+	}
+
+	// La lista vacía las quita, en cualquier modo.
+	r.must("PUT", "/kling/credentials", `{"credentials":[]}`)
+	if _, ok := r.srv.d.Policy.CredHost("api.example.com"); ok {
+		t.Fatal("an empty set must stop the diversion")
+	}
 }

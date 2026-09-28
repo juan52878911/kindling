@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
@@ -93,6 +94,9 @@ func run() int {
 	meter := footprint.NewMeter()
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
+	// El proxy de credenciales resuelve por el mismo upstream que el invitado
+	// y con los mismos destinos prohibidos que la red (egress.PublicIPv4).
+	creds := credproxy.New(credproxy.Options{Lookup: resolver.PublicIPv4})
 	// Nada de lo que crea este proceso (el socket de la API, en particular)
 	// debe nacer legible por otros usuarios, ni siquiera el instante entre
 	// crearlo y el chmod.
@@ -109,7 +113,9 @@ func run() int {
 				MMDSAddr: c.MMDSAddr,
 				Policy:   c.Policy,
 				Resolver: c.Resolver,
-				Logf:     logf,
+				// Credentials: el proxy en la pasarela (ver vnet.Config).
+				Credentials: c.Credentials,
+				Logf:        logf,
 				// Solo los procesos de este usuario llegan al agente del
 				// invitado por el reenvío (ver internal/peercred).
 				PeerAllowed: peers.Allowed,
@@ -120,8 +126,12 @@ func run() int {
 		Logf:      logf,
 		Policy:    policy,
 		Resolver:  resolver,
-		Confine:   confine,
-		CPUTime:   meter.CPUTime,
+		// Las claves del proxy viven en la memoria de este proceso, que
+		// corre como el usuario; ver la sección 7 de SECURITY.md.
+		Credentials: creds,
+		CredIP:      vnet.GatewayIP,
+		Confine:     confine,
+		CPUTime:     meter.CPUTime,
 	})
 
 	// Un socket que sobra de un proceso muerto impediría escuchar. Solo se
