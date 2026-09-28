@@ -1213,8 +1213,13 @@ no evita: el invitado puede seguir **usando** la clave contra su dominio; eso lo
 clave misma (restringida, de solo lectura, con límites de gasto). Redactar el eco es
 defensa en profundidad (un proveedor serio no devuelve la credencial); una respuesta con
 una codificación que el proxy no puede inspeccionar (brotli, deflate) se rechaza con 502.
-En macOS aún no existe: el backend vz no tiene resolver en el host que desvíe el dominio
-(ver SECURITY.md).
+
+En macOS (backend vz) funciona igual visto desde el invitado: el `kling-vz` de cada
+máquina sirve el proxy y el desvío del DNS en su pasarela (172.16.0.1), dentro de su red
+de espacio de usuario. Cambia dónde vive la clave: el daemon se la entrega al `kling-vz`
+de esa máquina (mismo usuario, por su socket de API 0600), así que queda en el proceso
+que también maneja el tráfico de red del invitado, no en un daemon aparte. Qué supone
+eso, en SECURITY.md, sección 7.
 
 ---
 

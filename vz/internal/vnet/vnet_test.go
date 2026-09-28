@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/mmds"
 
@@ -147,6 +148,12 @@ type rig struct {
 // internet: el test comprueba A DÓNDE querría salir, no que haya red.
 func newRig(t *testing.T, dialTo string) *rig {
 	t.Helper()
+	return newRigWith(t, dialTo, nil)
+}
+
+// newRigWith es newRig con un proxy de credenciales en la pasarela.
+func newRigWith(t *testing.T, dialTo string, cred http.Handler) *rig {
+	t.Helper()
 	r := &rig{policy: egress.NewPolicy(), store: mmds.NewStore()}
 	hostSide, guestSide := socketpair(t)
 	resolver := &egress.Resolver{Policy: r.policy, Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
@@ -157,9 +164,10 @@ func newRig(t *testing.T, dialTo string) *rig {
 		return append(resp, 0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 93, 184, 215, 14), nil
 	}}
 	n, err := NewWithConn(Config{
-		MMDS:     r.store.Handler(),
-		Policy:   r.policy,
-		Resolver: resolver,
+		MMDS:        r.store.Handler(),
+		Policy:      r.policy,
+		Resolver:    resolver,
+		Credentials: cred,
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			r.mu.Lock()
 			r.dialed = append(r.dialed, network+" "+addr)
@@ -471,5 +479,128 @@ func TestForwardRechazaLoQueNoAdmitePeerAllowed(t *testing.T) {
 	admitir.Store(true)
 	if got := leer(); got != "hola\n" {
 		t.Fatalf("una conexión admitida recibió %q", got)
+	}
+}
+
+// El proxy de credenciales se sirve en la pasarela:80 antes de la política (que
+// rechazaría 172.16.0.1), solo en allowlist; el 443 falla al momento y nada de
+// eso sale al host.
+func TestCredentialProxyOnGateway(t *testing.T) {
+	var got atomic.Value
+	cred := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Host + r.URL.Path)
+		fmt.Fprint(w, "from the proxy")
+	})
+	r := newRigWith(t, "", cred)
+	c := r.g.httpClient()
+	get := func() (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", "http://"+GatewayIP.String()+"/v1/models", nil)
+		req.Host = "api.example.com"
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatalf("guest -> gateway:80: %v", err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	// En none (el modo por defecto) el listener existe pero no deja pasar.
+	if code, _ := get(); code != http.StatusForbidden || got.Load() != nil {
+		t.Fatalf("none: status %d, handler reached %v; want 403 before the proxy", code, got.Load())
+	}
+	r.policy.Set(egress.Allowlist, []string{"other.org"})
+	if code, body := get(); code != 200 || body != "from the proxy" || got.Load() != "api.example.com/v1/models" {
+		t.Fatalf("allowlist: status %d body %q seen %v", code, body, got.Load())
+	}
+
+	// 443: sin listener, la política lo rechaza con un RST, no con un plazo.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":443"); err == nil {
+		conn.Close()
+		t.Fatal("gateway:443 must be refused")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("gateway:443 took %v to fail; it must be refused at once", d)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dialed) != 0 {
+		t.Fatalf("nothing should have been dialed on the host, got %v", r.dialed)
+	}
+}
+
+// Sin proxy configurado, la pasarela:80 sigue siendo un destino prohibido.
+func TestGatewayPort80WithoutCredentials(t *testing.T) {
+	r := newRig(t, "")
+	r.policy.Set(egress.Allowlist, []string{"example.com"})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":80"); err == nil {
+		conn.Close()
+		t.Fatal("gateway:80 without a credential proxy must be refused")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// La cadena entera con el proxy de verdad: el invitado resuelve el dominio con
+// credencial por nuestro DNS, recibe la pasarela, habla http:// con el marcador
+// y el proveedor recibe la clave por https; el eco de la clave vuelve con el
+// marcador. El proveedor es un RoundTripper: el test no sale a la red.
+func TestCredentialProxyEndToEnd(t *testing.T) {
+	const ph, secret = "kling-cred-0123456789abcdef", "sk-real-secret"
+	var outURL, outAuth string
+	p := credproxy.New(credproxy.Options{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		outURL, outAuth = r.URL.String(), r.Header.Get("Authorization")
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Request: r,
+			Body: io.NopCloser(strings.NewReader("echo " + r.Header.Get("Authorization")))}, nil
+	})})
+	doms, err := p.SetCredentials([]credproxy.Credential{{Env: "API_KEY", Domain: "api.example.com", Placeholder: ph, Secret: secret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRigWith(t, "", p)
+	r.policy.Set(egress.Allowlist, nil)
+	r.policy.SetCredHosts(doms, GatewayIP)
+
+	c, err := gonet.DialUDP(r.g.s, nil, &tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(GatewayIP.As4()), Port: 53}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write(egress.BuildQuery("api.example.com", 1)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 512)
+	k, err := c.Read(buf)
+	if err != nil || k < 16 {
+		t.Fatalf("no DNS answer: %v", err)
+	}
+	ip := netip.AddrFrom4([4]byte(buf[k-4 : k]))
+	if ip != GatewayIP {
+		t.Fatalf("api.example.com resolved to %s, want the gateway", ip)
+	}
+
+	req, _ := http.NewRequest("GET", "http://"+ip.String()+"/v1/models?x=1", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("Authorization", "Bearer "+ph)
+	resp, err := r.g.httpClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if outURL != "https://api.example.com/v1/models?x=1" || outAuth != "Bearer "+secret {
+		t.Fatalf("upstream saw %q with %q", outURL, outAuth)
+	}
+	if strings.Contains(string(body), secret) || string(body) != "echo Bearer "+ph {
+		t.Fatalf("the guest got %q; the key must come back as the placeholder", body)
 	}
 }

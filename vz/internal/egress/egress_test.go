@@ -183,3 +183,71 @@ func TestParseQuestionAndTCPFraming(t *testing.T) {
 		t.Fatal("invalid names must not build a query")
 	}
 }
+
+// Un dominio con credencial se contesta con la IP del proxy sin preguntar al
+// upstream ni sembrar nada, solo en allowlist y solo con el nombre exacto.
+func TestResolverCredHost(t *testing.T) {
+	gw := netip.MustParseAddr("172.16.0.1")
+	p := NewPolicy()
+	var forwarded int
+	r := &Resolver{Policy: p, Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
+		forwarded++
+		return answer(q, 30, "93.184.215.14"), nil
+	}}
+	p.SetCredHosts([]string{"API.Example.com."}, gw)
+	rcode := func(b []byte) byte { return b[3] & 0x0F }
+
+	// En none no hay proxy que valga: ni desvío ni reenvío.
+	if resp := r.Process(context.Background(), BuildQuery("api.example.com", 1), false); rcode(resp) != 5 || forwarded != 0 {
+		t.Fatalf("none: rcode %d, forwarded %d; the credential host must not be answered", rcode(resp), forwarded)
+	}
+	// En internet tampoco: el proxy solo existe para allowlist.
+	p.Set(Internet, nil)
+	if _, ok := p.CredHost("api.example.com"); ok {
+		t.Fatal("internet: a credential host must not be diverted")
+	}
+
+	p.Set(Allowlist, []string{"other.org"}) // el dominio con credencial no está en la lista
+	resp := r.Process(context.Background(), BuildQuery("api.example.com", 1), false)
+	if rcode(resp) != 0 || forwarded != 0 {
+		t.Fatalf("A: rcode %d, forwarded %d; want NOERROR without forwarding", rcode(resp), forwarded)
+	}
+	if n := binary.BigEndian.Uint16(resp[6:8]); n != 1 || !bytes.Equal(resp[len(resp)-4:], []byte{172, 16, 0, 1}) {
+		t.Fatalf("A: %d answers, rdata %v; want one record with the gateway", n, resp[len(resp)-4:])
+	}
+	if ttl := binary.BigEndian.Uint32(resp[len(resp)-10 : len(resp)-6]); ttl != CredTTL {
+		t.Fatalf("TTL %d, want %d", ttl, CredTTL)
+	}
+	if p.IPSet().Len() != 0 {
+		t.Fatal("a diverted name must not seed anything")
+	}
+	// AAAA: NOERROR vacío, para que el cliente use IPv4.
+	resp = r.Process(context.Background(), BuildQuery("api.example.com", 28), false)
+	if rcode(resp) != 0 || binary.BigEndian.Uint16(resp[6:8]) != 0 || forwarded != 0 {
+		t.Fatal("AAAA of a credential host must be an empty NOERROR without forwarding")
+	}
+	// Un subdominio no hereda la credencial: sigue la lista (y aquí no está).
+	if resp := r.Process(context.Background(), BuildQuery("x.api.example.com", 1), false); rcode(resp) != 5 {
+		t.Fatal("a subdomain of a credential host must not be diverted")
+	}
+	// Quitar las credenciales devuelve el nombre a la política normal.
+	p.SetCredHosts(nil, gw)
+	if resp := r.Process(context.Background(), BuildQuery("api.example.com", 1), false); rcode(resp) != 5 {
+		t.Fatal("after clearing, the name must follow the list again")
+	}
+}
+
+// El lookup del proxy nunca devuelve una IP a la que la clave no deba viajar.
+func TestPublicIPv4(t *testing.T) {
+	r := &Resolver{Policy: NewPolicy(), Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
+		return answer(q, 30, "93.184.215.14", "0.0.0.0", "127.0.0.1", "192.168.1.1", "169.254.169.254"), nil
+	}}
+	got := r.PublicIPv4(context.Background(), "api.example.com")
+	if len(got) != 1 || got[0] != "93.184.215.14" {
+		t.Fatalf("PublicIPv4 = %v, want only the public IP", got)
+	}
+	r.Exchange = func(context.Context, []byte, bool) ([]byte, error) { return nil, errors.New("down") }
+	if got := r.PublicIPv4(context.Background(), "api.example.com"); len(got) != 0 {
+		t.Fatalf("an upstream failure must give nothing, got %v", got)
+	}
+}

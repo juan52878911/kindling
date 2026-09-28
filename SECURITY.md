@@ -223,7 +223,9 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   al proveedor es esa ruta normalizada: el proveedor ve lo mismo que se comprobó. Los
   patrones se validan al guardar: tienen que estar limpios, `*` no cruza `/` y `**` solo
   puede ir como último segmento. Con la lista vacía todo está permitido, igual que
-  antes; un almacén cifrado sin `Allow` se sigue leyendo así.
+  antes; un almacén cifrado sin `Allow` se sigue leyendo así. `Allow` viaja igual en
+  macOS: `PUT /kling/credentials` lo lleva y `kling-vz` lo aplica con el mismo
+  `pkg/credproxy`, no una reimplementación aparte.
   El 80 y el 443 de la IP del proxy van al proxy: un `https://dominio` desde dentro
   muere en el acto (3 ms medidos) en vez de esperar al plazo del SDK.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
@@ -237,6 +239,40 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   dominios. Tras un reinicio del daemon `reconcile` rehace proxy y resolver desde el
   almacén; tras un thaw se rehacen y se reponen los marcadores en MMDS. Verificado
   desde dentro del invitado en el lab (`scripts/90-e2e.sh`, secciones 7 y 7b).
+- **En macOS (backend vz) el proxy vive en `kling-vz`, y la clave con él.** No hay
+  veth ni resolver en el host: el mismo `pkg/credproxy` lo sirve cada `kling-vz` dentro
+  de la pila de red gVisor de su máquina. Su DNS contesta el dominio con credencial con
+  la pasarela (172.16.0.1, TTL 30) sin reenviar ni sembrar la IP real, y AAAA vacío; un
+  listener en pasarela:80 recoge la conexión antes de la política de salida (que
+  rechazaría 172.16/12); el 443 de la pasarela no tiene listener y muere con un RST. El
+  proxy solo atiende en allowlist (403 en otro modo aunque el invitado conecte a mano),
+  y su lookup usa el mismo upstream que el invitado y descarta además lo que la red del
+  Mac nunca deja alcanzar: 0.0.0.0/8 (que en macOS llega a localhost), multicast,
+  reservadas y las IPs del propio Mac.
+  **Cambia el modelo de confianza**, y se acepta a sabiendas: en Linux la clave no sale
+  del daemon; en macOS el daemon (que ya corre como el usuario, sin root) se la manda al
+  `kling-vz` de esa máquina por su socket de API (`PUT /kling/credentials`; un socket Unix 0600 en
+  el directorio de la máquina) y queda en la
+  memoria de ese proceso, que corre como el mismo usuario. Lo que eso significa:
+  - Ningún usuario nuevo puede leerla: quien es ese usuario ya leía el almacén cifrado y
+    la clave maestra del daemon.
+  - `kling-vz` es el proceso que termina el tráfico del invitado (pila TCP, DNS, MMDS).
+    Un invitado que encontrara un fallo explotable ahí tendría la clave en la misma
+    memoria; antes de este cambio, ese mismo fallo le daba un proceso sin claves. El
+    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca, pero
+    no protege la memoria del propio proceso.
+  - La memoria del invitado vive en otro proceso (el auxiliar de Apple), así que la clave
+    no entra en su volcado de estado ni en un snapshot. `kling-vz` no la escribe a disco
+    ni a su log.
+  - Un reinicio del daemon no la pierde (el `kling-vz` sigue vivo con ella). Un thaw
+    arranca un `kling-vz` nuevo: el daemon se la entrega tras `PUT /kling/network` y
+    antes de cargar el estado, así que el invitado despierta con el proxy listo.
+  Verificado desde dentro del invitado en un Mac M4 (`scripts/92-e2e-mac.sh`, sección
+  6c, con `kling-vz` confinado en su perfil): solo ve el marcador, el dominio resuelve
+  a la pasarela, el proveedor recibe la clave real (basic-auth 200), eco y eco de
+  `Basic` redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no
+  aparece en el log del daemon ni en el de `kling-vz`, y sigue funcionando tras
+  freeze/thaw y tras reiniciar el daemon.
 
 ### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
 
@@ -368,19 +404,14 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   ni el cuerpo, y lo que no controla es cómo interpreta el proveedor la ruta que recibe:
   un servidor que trate `;` o `\` como separadores, o `..;` como `..`, ve otra ruta que
   el proxy. Contra eso, patrones exactos mejor que `/**`. La redacción del eco es defensa
-  en profundidad y cubre las transformaciones habituales, no todas las imaginables.
-- **El proxy de credenciales no existe en macOS.** El backend vz no tiene resolver
-  allowlist en el host ni veth donde escuchar: la red del invitado es una pila gVisor
-  dentro de `kling-vz`, un proceso sin privilegios por máquina que a propósito no
-  depende del núcleo. Hacerlo allí exige: (1) que `egress.Resolver` conteste el dominio
-  con credencial con la IP de la pasarela (172.16.0.1); (2) interceptar en
-  `vnet.handleTCP` el destino pasarela:80/443 hacia un `http.Server` en proceso sobre
-  `gonet`; (3) un `PUT /kling/credentials` en `kling-vz` y su llamada desde
-  `plataforma_vz.go`; (4) compartir la lógica del proxy (hoy en `internal/net`) sin que
-  `vz/` dependa del núcleo, o duplicarla. Unas 400 líneas más la verificación en Mac, y
-  la clave viajaría al proceso por máquina del usuario en vez de quedarse en un daemon
-  root. Se deja documentado: el caso que lo motiva (servidores MCP en producción) corre
-  en Linux.
+  en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
+  vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
+  mismas reglas antes de reenviar.
+- **En macOS la clave vive en un proceso que el invitado alcanza por la red.** Es el
+  `kling-vz` de su máquina, que corre como el usuario y procesa su tráfico (ver 7). Un
+  fallo explotable en su pila de red, DNS o MMDS que antes daba un proceso sin claves
+  daría ahora la de esa máquina (solo la de esa: cada máquina tiene su `kling-vz`). En
+  Linux la clave nunca sale del daemon.
 - **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
   sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el
   hijo para `initialize`. Como el bridge y el servidor MCP corre como root y lee el
