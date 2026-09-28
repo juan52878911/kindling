@@ -231,7 +231,7 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 | `user` | rol (obligatorio). El invitado tiene que conectar con él |
 | `database` | opcional: la única base a la que se deja conectar (sin ella, cualquiera; la de por defecto es el rol) |
 | `ca_pem` | opcional, ≤64 KiB: CA en PEM que se añade a las raíces del sistema |
-| `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí. Se devuelve normalizado (minúsculas) |
+| `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS solo IP o `localhost`, el daemon rechaza un nombre al entregarla. Se devuelve normalizado (minúsculas) |
 | `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |
 | `tls_server_name` | opcional: nombre (o IP) contra el que se verifica el certificado en lugar de `domain` |
 | `secret` | contraseña del rol, ASCII imprimible |

@@ -792,6 +792,18 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			if err != nil || i < 0 || !strings.Contains(ls[i], "+upstream=127.0.0.1:5432+upstream_tls=disable") {
 				t.Fatalf("err=%v llamadas=%q", err, ls)
 			}
+			// Un upstream con nombre no se le da: el kling-vz confinado no
+			// llega al resolver del Mac.
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432"},
+			}, "")
+			if err == nil || !strings.Contains(err.Error(), "must be an IP address or localhost") {
+				t.Fatalf("upstream con nombre en macOS: %v", err)
+			}
+			if n := len(llamadas(t, logPath)); n != len(ls) {
+				t.Errorf("con un upstream con nombre se llamó a kling-vz: %q", llamadas(t, logPath)[len(ls):])
+			}
 		})
 	}
 }

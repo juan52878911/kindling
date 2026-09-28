@@ -108,11 +108,16 @@ printf '%s' "$PGPASS" | kling machine credential agente -type postgres \
 - El certificado se verifica contra `-domain`. Si lleva otro nombre (el invitado usa
   `db.internal` pero el certificado es de `pg.lan.example.com`, o solo lleva la IP),
   usa `-tls-server-name pg.lan.example.com` (o `-tls-server-name 10.0.3.25`).
-- `-upstream` admite un nombre: `-upstream pg.lan.example.com:5432` se resuelve **en
-  el host**, con su resolver del sistema (`/etc/hosts`, el DNS de la VPC…), al abrir
-  cada conexión. Si alguna de sus IPs cae en un rango prohibido, no se marca ninguna.
-- Un RDS privado en la VPC: `-upstream mydb.xxxx.eu-west-1.rds.amazonaws.com:5432`
-  con el mismo nombre en `-domain` y `-ca-file global-bundle.pem` (ver RDS abajo).
+- En Linux, `-upstream` admite un nombre: `-upstream pg.lan.example.com:5432` se
+  resuelve **en el host**, con su resolver del sistema (`/etc/hosts`, el DNS de la
+  VPC…), al abrir cada conexión. Si alguna de sus IPs cae en un rango prohibido, no se
+  marca ninguna. **En macOS solo una IP o `localhost`**: `kling-vz` corre confinado
+  (`kling-vz.sb`) y desde ahí el resolver del Mac no contesta, así que el daemon rechaza
+  un nombre al entregar la credencial. Usa la IP y, si el certificado lleva un nombre,
+  `-tls-server-name`.
+- Un RDS privado en la VPC (daemon Linux en la VPC): `-upstream
+  mydb.xxxx.eu-west-1.rds.amazonaws.com:5432` con el mismo nombre en `-domain` y
+  `-ca-file global-bundle.pem` (ver RDS abajo).
 
 Sin TLS hacia la LAN (`-upstream-tls disable` con una IP no loopback) la CLI avisa:
 
@@ -207,6 +212,8 @@ En node-postgres, `ssl: false`; en psycopg, `sslmode="disable"`; en JDBC,
 - La contraseña, ASCII imprimible. 32 conexiones a la vez por máquina, 10 s para que el
   invitado mande arranque y contraseña, 15 s para toda la autenticación. Sin
   conexiones de replicación.
+- En macOS, `-upstream` tiene que ser una IP o `localhost` (`localhost` es siempre el
+  loopback, sin preguntar al DNS; ver la receta de la LAN).
 - En macOS hay que recompilar `kling-vz`: el daemon rechaza una credencial con
   `-upstream`, `-upstream-tls` o `-tls-server-name` si su `/kling/info` no anuncia
   `postgres-upstream` en `credential_kinds`.

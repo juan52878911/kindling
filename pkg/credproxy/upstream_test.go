@@ -259,7 +259,9 @@ func TestDialFijado(t *testing.T) {
 			t.Errorf("%s: conectó", addr)
 		}
 	}
-	for _, addr := range []string{"bueno.lan:" + puerto, "127.0.0.1:" + puerto} {
+	// localhost no se pregunta al resolver (el falso no lo conoce): es el
+	// loopback por definición.
+	for _, addr := range []string{"bueno.lan:" + puerto, "127.0.0.1:" + puerto, "localhost:" + puerto} {
 		c, err := dial(ctx, addr)
 		if err != nil {
 			t.Errorf("%s: %v", addr, err)
@@ -321,6 +323,12 @@ func TestValidarUpstream(t *testing.T) {
 		}
 		if c[0].Upstream != caso.wantUp || c[0].UpstreamTLS != caso.wantTLS || c[0].TLSServerName != caso.wantNombre {
 			t.Errorf("%+v: normalizada a %q %q %q", caso, c[0].Upstream, c[0].UpstreamTLS, c[0].TLSServerName)
+		}
+	}
+	for u, want := range map[string]bool{"127.0.0.1:5432": false, "[::1]:5432": false, "localhost:5432": false,
+		"10.0.0.5:5432": false, "": false, "db.lan:5432": true, "host.docker.internal:5432": true} {
+		if got := UpstreamNecesitaDNS(u); got != want {
+			t.Errorf("UpstreamNecesitaDNS(%q) = %v", u, got)
 		}
 	}
 	for u, want := range map[string]bool{"127.0.0.1:5432": true, "localhost:5432": true, "[::1]:5432": true,

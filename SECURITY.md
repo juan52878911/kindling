@@ -363,7 +363,9 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     (`172.16.0.0/30`, el enlace del invitado, y `172.30.0.0/16`, los veth del host): ahí
     están el propio proxy y los invitados de otras máquinas. Un nombre se resuelve al
     marcar, con el resolver del sistema, y basta una IP prohibida entre sus respuestas
-    para no marcar ninguna. En Linux el proxy es del daemon y marca desde el netns del
+    para no marcar ninguna (`localhost` es siempre el loopback, sin DNS). En macOS solo
+    se admite una IP o `localhost`: `kling-vz` está confinado y no llega al resolver del
+    Mac, y abrirle el socket de mDNSResponder para esto no compensa. En Linux el proxy es del daemon y marca desde el netns del
     host (su `127.0.0.1` es el del host); en macOS lo hace `kling-vz` con la pila del
     Mac, no con la gVisor del invitado. El TLS sigue siendo verify-full, y la
     cancelación va al mismo upstream con el mismo modo.

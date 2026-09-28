@@ -188,7 +188,8 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   no es el dominio). Sin ellas nada cambia: IPv4 públicas y TLS verificado. Con
   `-upstream`, nunca se marca a `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`,
   `fe80::/10`, `fd00:ec2::254` ni a la red de kindling (`172.16.0.0/30`,
-  `172.30.0.0/16`), tampoco si un nombre resuelve a alguna de ellas. `disable` exige
+  `172.30.0.0/16`), tampoco si un nombre resuelve a alguna de ellas (en macOS, solo IP o
+  `localhost`: `kling-vz` confinado no llega al resolver del Mac). `disable` exige
   `-upstream` y solo admite SCRAM-SHA-256 (ni `-PLUS`, ni contraseña en claro, ni md5, ni
   trust): la contraseña no cruza la red, las consultas sí (la CLI avisa si el upstream no
   es el loopback). La cancelación va al mismo upstream con el mismo modo, y la auditoría

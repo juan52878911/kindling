@@ -111,6 +111,13 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		if cr.Kind == credproxy.KindPostgres {
 			pg = true
 			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
+			// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde
+			// ahí no llega al resolver del Mac: un upstream con nombre fallaría
+			// en cada conexión. Mejor decirlo ahora.
+			if credproxy.UpstreamNecesitaDNS(cr.Upstream) {
+				return fmt.Errorf("credential for %s: on macOS -upstream must be an IP address or localhost (kling-vz is sandboxed and cannot use the Mac's resolver); got %s",
+					cr.Domain, cr.Upstream)
+			}
 		}
 	}
 	if pg {

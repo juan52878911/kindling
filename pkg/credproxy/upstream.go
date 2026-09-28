@@ -19,12 +19,15 @@ package credproxy
 // ahí están el propio proxy y los invitados de otras máquinas. Un nombre se
 // resuelve al marcar y basta UNA IP prohibida entre sus respuestas para no
 // marcar ninguna: un nombre que apunta a los metadatos no es de fiar a medias.
+// "localhost" no se resuelve: es el loopback (RFC 6761).
 //
 // DESDE DÓNDE SE MARCA: en Linux el proxy es una goroutine del daemon, en el
 // netns del host (escucha en el lado host del veth, no dentro del netns de la
 // máquina): 127.0.0.1 es el loopback del host. En macOS lo sirve kling-vz con
 // la pila de red del Mac (no la de gVisor del invitado): 127.0.0.1 es el
-// loopback del Mac, donde Docker Desktop publica los puertos.
+// loopback del Mac, donde Docker Desktop publica los puertos. kling-vz corre
+// confinado (kling-vz.sb) y desde ahí el resolver del Mac no contesta: en
+// macOS el daemon solo admite una IP o "localhost" (UpstreamNecesitaDNS).
 //
 // UpstreamTLS "disable" apaga el TLS del tramo del servidor, solo con
 // Upstream: la contraseña no cruza la red porque solo se admite SCRAM-SHA-256
@@ -160,6 +163,23 @@ func UpstreamLoopback(u string) bool {
 	return err == nil && ip.Unmap().IsLoopback()
 }
 
+// UpstreamNecesitaDNS dice si marcar el upstream u ("host:puerto") exige
+// resolver un nombre: no es una IP ni "localhost". En macOS el daemon rechaza
+// esos upstream: kling-vz corre confinado (kling-vz.sb) y desde ahí el
+// resolver del Mac no contesta.
+func UpstreamNecesitaDNS(u string) bool {
+	host, _, err := net.SplitHostPort(u)
+	if err != nil || u == "" {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" {
+		return false
+	}
+	_, err = netip.ParseAddr(host)
+	return err != nil
+}
+
 // validarUpstream comprueba Upstream, UpstreamTLS y TLSServerName de una
 // credencial Postgres y los normaliza.
 func validarUpstream(c *Credential) error {
@@ -227,6 +247,11 @@ func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, 
 		var ips []netip.Addr
 		if ip, err := netip.ParseAddr(host); err == nil {
 			ips = []netip.Addr{ip}
+		} else if host == "localhost" {
+			// RFC 6761: localhost es el loopback, sin preguntar a nadie. Así
+			// funciona también en un kling-vz confinado, que no llega al
+			// resolver del Mac (ver UpstreamNecesitaDNS).
+			ips = []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.IPv6Loopback()}
 		} else {
 			lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			ips, err = lookup(lctx, host)
