@@ -187,6 +187,12 @@ type Manager struct {
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
 
+	// ipv6Avisado recuerda, por nombre de dorado, si ya se avisó (log + evento)
+	// de que sus instancias conservan el módulo IPv6 del kernel del invitado
+	// (F2: dorados congelados antes de la barrera IPv6, sin GuestIPv6Off). Un
+	// aviso por dorado, no uno por runFrom: igual que resyncAvisado.
+	ipv6Avisado sync.Map
+
 	// redMontada son las máquinas cuya red (namespace, veth, tap y reglas)
 	// montó ESTE proceso del daemon y sigue en pie. Freeze ya no la desmonta:
 	// Thaw la reutiliza si está aquí y el namespace sigue existiendo, y se

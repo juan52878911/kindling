@@ -63,6 +63,14 @@ func TestFirmaDeSnapshots(t *testing.T) {
 		t.Errorf("KernelSHA256 invalidó la firma: %v", err)
 	}
 
+	// GuestIPv6Off (F2) tampoco: es diagnóstico, y cubrirlo invalidaría la
+	// firma de todo dorado congelado antes de este campo.
+	i := *s
+	i.GuestIPv6Off = true
+	if err := m.comprobarFirma(&i); err != nil {
+		t.Errorf("GuestIPv6Off invalidó la firma: %v", err)
+	}
+
 	// Otro host (otra clave) no la reconoce.
 	otro := newTestManager(t)
 	if err := otro.comprobarFirma(s); !errors.Is(err, errFirma) {

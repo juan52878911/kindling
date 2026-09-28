@@ -115,12 +115,23 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   redactados, HTTPS directo rechazado en 1 ms, otro Host 403, la clave no está en el log
   del daemon ni en el de `kling-vz`, y sigue funcionando tras freeze/thaw (mismo
   marcador) y tras reiniciar el daemon.
+- **Los dorados congelados antes de la barrera IPv6 avisan solos, en vez de quedar como
+  un límite mudo.** `ipv6.disable=1` (arriba) solo se lee en un arranque en frío: un
+  dorado ya congelado sigue con el módulo IPv6 del kernel del invitado cargado, aunque
+  `applyIPv6Barrier` le cierre el paso igual en el namespace del host. Cada dorado graba
+  ahora si se congeló con la barrera activa (`guest_ipv6_off` en su meta; deliberadamente
+  fuera de la firma, como `kernel_sha256`: cubrirlo invalidaría la de todo dorado
+  anterior al campo). Los anteriores no lo llevan y se leen como "no consta", nunca como
+  "confirmado sin ella" — se heredan al hacer fork de un dorado, para no suponer "ya
+  tiene la barrera" sin haber vuelto a arrancar en frío. `runFrom` avisa UNA VEZ por
+  dorado sin la marca (log y evento `snapshot.guest_ipv6`, con cómo rehacerlo), y
+  `kling snapshots` / `kling template inspect <nombre>` lo señalan.
 - **Pendiente, documentado en SECURITY.md** ("Lo que NO está resuelto"): `-allow-request`
   no mira la query ni el cuerpo, y depende de que el proveedor interprete la ruta como
   `path.Clean`; en macOS la clave vive en la memoria de `kling-vz`, que también procesa
-  el tráfico del invitado (cambio de modelo de confianza, aceptado a sabiendas); y
-  `ipv6.disable=1` no llega a un snapshot dorado ya congelado antes de este cambio (la
-  barrera del namespace sí lo cubre).
+  el tráfico del invitado (cambio de modelo de confianza, aceptado a sabiendas); y los
+  dorados de antes de la barrera IPv6 siguen con el módulo cargado en su kernel (avisado,
+  no bloqueado — la barrera del namespace sí los cubre).
 
 ### Arreglado
 
