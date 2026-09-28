@@ -63,12 +63,16 @@ type cerrarCuerpo func()
 //     longitud exacta del fichero: evita el chunked que algunos proveedores
 //     rechazan, sin retener el cuerpo entero en memoria.
 //
-// tempDir es dónde crear ese fichero; "" usa os.TempDir().
-func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, v *vigia, pl plazosInvitado, tempDir string) (io.Reader, int64, cerrarCuerpo, error) {
+// tempDir es dónde crear ese fichero; "" usa os.TempDir(). usadas anota qué
+// credenciales aparecieron en el cuerpo (ver marcas). w debe ser el
+// ResponseWriter del servidor, sin envolver: MaxBytesReader le avisa de que el
+// cuerpo se pasó para que cierre la conexión, y ese aviso no atraviesa un
+// envoltorio.
+func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, usadas marcas, v *vigia, pl plazosInvitado, tempDir string) (io.Reader, int64, cerrarCuerpo, error) {
 	if r.ContentLength == 0 {
 		return nil, 0, nil, nil
 	}
-	s := nuevoSustituidor(lectorVigilado{r: http.MaxBytesReader(w, r.Body, MaxBody), v: v, p: pl}, cs)
+	s := nuevoSustituidorMarcando(lectorVigilado{r: http.MaxBytesReader(w, r.Body, MaxBody), v: v, p: pl}, cs, usadas)
 	// A mano y no con io.ReadAll: su crecimiento al doble reservaría hasta 2 MiB
 	// para retener 1. Aquí la capacidad no pasa de MaxSwapBody+1.
 	const tope = MaxSwapBody + 1
