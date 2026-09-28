@@ -9,6 +9,11 @@ package net
 // invitado conecta al 80/443 de la IP que le da su resolver y un DNAT del netns
 // lo trae aquí (firewall.go). El FORWARD de otros netns no llega a esa IP, así
 // que solo la máquina dueña de las credenciales puede usarlas.
+//
+// Al lado, en n.HostIP:pgPort, el proxy de Postgres del mismo credproxy.Proxy
+// (mismas credenciales, límites y registro): cualquier otro puerto TCP de
+// n.HostIP que abra el invitado (el 5432 de un dominio con credencial
+// Postgres, normalmente) llega ahí por otro DNAT.
 
 import (
 	"context"
@@ -31,6 +36,9 @@ import (
 // atado a 0.0.0.0:80 y el bind a n.HostIP:80 chocaría con él.
 const credPort = 5380
 
+// pgPort es el puerto del host del proxy de Postgres de cada microVM.
+const pgPort = 5381
+
 var (
 	credMu      sync.Mutex
 	credProxies = map[string]*credProxy{}
@@ -40,6 +48,7 @@ var (
 type credProxy struct {
 	proxy *credproxy.Proxy
 	srv   *http.Server
+	pg    *credproxy.PGServer
 }
 
 // SetCredentials fija el juego COMPLETO de credenciales de la máquina de n
@@ -87,9 +96,16 @@ func startCredProxy(n *Net, auditPath string) (*credProxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("credential proxy: could not listen on %s:%d: %w", n.HostIP, credPort, err)
 	}
+	lnPG, err := stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: ip, Port: pgPort})
+	if err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("credential proxy: could not listen on %s:%d: %w", n.HostIP, pgPort, err)
+	}
 	p := newCredProxy(auditPath)
 	p.srv = credproxy.NewServer(p.proxy)
+	p.pg = credproxy.NewPGServer(p.proxy)
 	go func() { _ = p.srv.Serve(ln) }()
+	go func() { _ = p.pg.Serve(lnPG) }()
 	credProxies[n.NS] = p
 	return p, nil
 }
@@ -137,8 +153,14 @@ func stopCredProxy(ns string) {
 	if p.srv != nil {
 		_ = p.srv.Close()
 	}
+	if p.pg != nil {
+		_ = p.pg.Close()
+	}
 	_ = p.proxy.Close()
 }
 
-// credPortStr es credPort en texto, para las reglas.
-var credPortStr = strconv.Itoa(credPort)
+// credPortStr y pgPortStr son los puertos en texto, para las reglas.
+var (
+	credPortStr = strconv.Itoa(credPort)
+	pgPortStr   = strconv.Itoa(pgPort)
+)
