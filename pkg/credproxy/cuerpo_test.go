@@ -2,9 +2,14 @@ package credproxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -79,8 +84,9 @@ func TestProxySustituyeEnUnCuerpoChunkedGrande(t *testing.T) {
 	}
 }
 
-// Un cuerpo grande CON Content-Length también se sustituye (y sale chunked,
-// porque su longitud cambia); uno pequeño chunked sale con su longitud.
+// Un cuerpo grande CON Content-Length se sustituye y sale CON su Content-Length
+// exacto (por fichero temporal: no cabe en memoria) porque el invitado lo
+// declaró; uno pequeño chunked sale con la suya, calculada en memoria.
 func TestProxyCuerpoConYSinLongitud(t *testing.T) {
 	var recibido []byte
 	var declarada int64
@@ -102,13 +108,117 @@ func TestProxyCuerpoConYSinLongitud(t *testing.T) {
 
 	raw := cuerpoGrande(2<<20, testPlace2)
 	enviar(bytes.NewReader(raw), int64(len(raw)))
-	if want := bytes.ReplaceAll(raw, []byte(testPlace2), []byte(testSecret2)); !bytes.Equal(recibido, want) || declarada != -1 {
-		t.Errorf("grande con longitud: %d bytes, Content-Length %d", len(recibido), declarada)
+	want := bytes.ReplaceAll(raw, []byte(testPlace2), []byte(testSecret2))
+	if !bytes.Equal(recibido, want) || declarada != int64(len(want)) {
+		t.Errorf("grande con longitud: %d bytes, Content-Length %d; quería %d bytes con esa misma longitud declarada",
+			len(recibido), declarada, len(want))
 	}
 
 	pequeño := "secret=" + testPlace
 	enviar(io.MultiReader(strings.NewReader(pequeño)), -1)
 	if string(recibido) != "secret="+testSecret || declarada != int64(len("secret="+testSecret)) {
 		t.Errorf("pequeño chunked: %q con Content-Length %d", recibido, declarada)
+	}
+}
+
+// ficherosEn cuenta lo que queda en dir: el temporal del cuerpo debe
+// desaparecer en cuanto termina la petición, la reciba el proveedor o no.
+func ficherosEn(t *testing.T, dir string) []string {
+	t.Helper()
+	ent, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nombres []string
+	for _, e := range ent {
+		nombres = append(nombres, e.Name())
+	}
+	return nombres
+}
+
+// Un cuerpo de 3 MiB (por encima de MaxSwapBody) CON Content-Length llega al
+// proveedor con el Content-Length exacto y el sha256 esperado, pasando por el
+// fichero temporal (cuerpo.go); y ese fichero no sobrevive a la petición.
+func TestProxyCuerpoGrandeConLongitudLlegaPorFicheroYSeBorra(t *testing.T) {
+	dir := t.TempDir()
+	var recibido []byte
+	var declarada int64
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		declarada = r.ContentLength
+		recibido, _ = io.ReadAll(r.Body)
+	}))
+	t.Cleanup(up.Close)
+	tr := up.Client().Transport.(*http.Transport).Clone()
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, up.Listener.Addr().String())
+	}
+	p := New(Options{Transport: tr, TempDir: dir})
+	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+
+	const n = 3 << 20
+	raw := cuerpoGrande(n, testPlace)
+	want := bytes.ReplaceAll(raw, []byte(testPlace), []byte(testSecret))
+	req, _ := http.NewRequest("POST", srv.URL+"/", bytes.NewReader(raw))
+	req.Host = "example.com"
+	req.ContentLength = int64(len(raw))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if declarada != int64(len(want)) {
+		t.Errorf("Content-Length %d; quería %d (el del cuerpo sustituido)", declarada, len(want))
+	}
+	if sha256.Sum256(recibido) != sha256.Sum256(want) {
+		t.Fatalf("sha256 no coincide: %d bytes recibidos, quería %d", len(recibido), len(want))
+	}
+	if f := ficherosEn(t, dir); len(f) != 0 {
+		t.Errorf("el temporal no se borró: quedan %v en %s", f, dir)
+	}
+}
+
+// fallaSiempre es un http.RoundTripper que nunca llega al "proveedor": simula
+// que la salida falla después de haber preparado el cuerpo (fichero temporal
+// incluido).
+type fallaSiempre struct{}
+
+func (fallaSiempre) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("fallaSiempre: no hay proveedor")
+}
+
+// Si la petición al proveedor falla tras preparar el cuerpo por fichero
+// temporal, ese fichero se borra igual: no debe quedar la clave en disco
+// porque la petición no llegó a ningún sitio.
+func TestProxyBorraElTemporalSiElProveedorFalla(t *testing.T) {
+	dir := t.TempDir()
+	p := New(Options{Transport: fallaSiempre{}, TempDir: dir})
+	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+
+	raw := cuerpoGrande(3<<20, testPlace)
+	req, _ := http.NewRequest("POST", srv.URL+"/", bytes.NewReader(raw))
+	req.Host = "example.com"
+	req.ContentLength = int64(len(raw))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status %d, quería 502 (el proveedor falla)", resp.StatusCode)
+	}
+	if f := ficherosEn(t, dir); len(f) != 0 {
+		t.Errorf("el temporal no se borró tras el fallo: quedan %v en %s", f, dir)
 	}
 }

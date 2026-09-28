@@ -31,8 +31,12 @@
 // de Authorization: Basic), en la query de la URL (APIs con ?key=) y en el
 // cuerpo, en flujo y con una ventana acotada (ver sustituidor), sea del tamaño
 // que sea y venga con longitud o chunked. Si el cuerpo ya sustituido cabe en
-// MaxSwapBody sale con su Content-Length; si no, sale chunked (la longitud
-// nueva no se sabe hasta el final).
+// MaxSwapBody sale con su Content-Length desde memoria. Si no cabe y el
+// invitado no declaró Content-Length (llegó chunked), sale chunked, que es lo
+// único que se puede hacer sin conocer la longitud de antemano. Si no cabe
+// pero el invitado SÍ declaró Content-Length, se derrama a un fichero
+// temporal (ver cuerpo.go) y sale con la longitud exacta de ese fichero: hay
+// proveedores que no aceptan una subida chunked.
 //
 // QUÉ PETICIONES se firman: todas las del dominio, salvo que la credencial
 // traiga Allow (ver permisos.go). Si ninguna credencial del Host permite el
@@ -62,7 +66,6 @@
 package credproxy
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -71,6 +74,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -185,6 +189,12 @@ type Options struct {
 	// Transport sustituye al transporte seguro. Solo para tests (un proveedor
 	// de httptest en 127.0.0.1): en producción anula la barrera de IPs.
 	Transport http.RoundTripper
+	// TempDir es dónde se derrama a fichero un cuerpo con Content-Length que
+	// no cabe en MaxSwapBody (ver cuerpo.go); "" usa os.TempDir(). El daemon
+	// puede pasar un directorio propio (bajo su $KLING_ROOT) para que ese
+	// fichero, que lleva la clave real mientras dura la petición, quede fuera
+	// de un /tmp que comparte con cualquier otra cosa del host.
+	TempDir string
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
@@ -198,6 +208,8 @@ type Proxy struct {
 	// idle y max son IdleTimeout y MaxDuration; campos para que los tests no
 	// tengan que esperar minutos.
 	idle, max time.Duration
+	// tempDir es Options.TempDir ya resuelto ("" nunca: New() pone os.TempDir()).
+	tempDir string
 }
 
 // credCompilada es una credencial con su Allow ya partido.
@@ -229,6 +241,10 @@ func New(o Options) *Proxy {
 		}
 		tr = salidaSegura(lookup)
 	}
+	tempDir := o.TempDir
+	if tempDir == "" {
+		tempDir = os.TempDir()
+	}
 	return &Proxy{
 		creds: map[string][]credCompilada{},
 		sem:   make(chan struct{}, MaxInFlight),
@@ -240,8 +256,9 @@ func New(o Options) *Proxy {
 			// la 3xx tal cual y que decida el invitado (con su marcador).
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		idle: IdleTimeout,
-		max:  MaxDuration,
+		idle:    IdleTimeout,
+		max:     MaxDuration,
+		tempDir: tempDir,
 	}
 }
 
@@ -359,7 +376,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// las que no se usaron: defensa en profundidad, no cuesta nada.
 	red := nuevoRedactor(escritorVigilado{w: w, v: v, p: pl}, credencialesDe(todas))
 
-	body, length, err := cuerpoSaliente(r, w, cs, v, pl)
+	body, length, cerrar, err := cuerpoSaliente(r, w, cs, v, pl, p.tempDir)
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
@@ -368,6 +385,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "kindling credential proxy: could not read the request body", http.StatusBadRequest)
 		return
+	}
+	// El fichero temporal del cuerpo (si lo hay) se borra pase lo que pase:
+	// éxito, error del proveedor o corte a mitad de plazos.go.
+	if cerrar != nil {
+		defer cerrar()
 	}
 
 	// Con permisos en el dominio, al proveedor va la ruta que se comprobó (ver
@@ -458,38 +480,5 @@ func credencialesDe(cc []credCompilada) []Credential {
 	return out
 }
 
-// cuerpoSaliente prepara el cuerpo que va al proveedor: el del invitado
-// (acotado a MaxBody y vigilado) con el marcador cambiado por la clave en
-// flujo. Lee por adelantado hasta MaxSwapBody de salida: si el cuerpo termina
-// antes, sale entero con su Content-Length (un formulario OAuth, un JSON
-// normal: hay servidores que no aceptan una subida chunked); si no, lo leído
-// va delante del resto y sale chunked (longitud -1). Eso es lo único que se
-// retiene por petición, lo mismo que antes de sustituir en flujo.
-func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, v *vigia, pl plazosInvitado) (io.Reader, int64, error) {
-	if r.ContentLength == 0 {
-		return nil, 0, nil
-	}
-	s := nuevoSustituidor(lectorVigilado{r: http.MaxBytesReader(w, r.Body, MaxBody), v: v, p: pl}, cs)
-	// A mano y no con io.ReadAll: su crecimiento al doble reservaría hasta 2 MiB
-	// para retener 1. Aquí la capacidad no pasa de MaxSwapBody+1.
-	const tope = MaxSwapBody + 1
-	hint := 32 << 10
-	if r.ContentLength > 0 {
-		hint = int(min(r.ContentLength+1024, tope))
-	}
-	buf := make([]byte, 0, hint)
-	for len(buf) < tope {
-		if len(buf) == cap(buf) {
-			buf = slices.Grow(buf, min(cap(buf), tope-len(buf)))
-		}
-		n, err := s.Read(buf[len(buf):min(cap(buf), tope)])
-		buf = buf[:len(buf)+n]
-		if err == io.EOF {
-			return bytes.NewReader(buf), int64(len(buf)), nil
-		}
-		if err != nil {
-			return nil, 0, err
-		}
-	}
-	return io.MultiReader(bytes.NewReader(buf), s), -1, nil
-}
+// cuerpoSaliente vive en cuerpo.go: qué sale con Content-Length exacto (en
+// memoria o por fichero temporal) y qué sale chunked.
