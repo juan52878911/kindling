@@ -356,6 +356,91 @@ else
   echo "  (skipping link/unlink: no Go here and no BRIDGE_BIN/STDIO_BIN given)"
 fi
 
+# ── 8. MMDS: el aviso de 'sessions' retirado, con un kling-bridge real ───────
+step "8. MMDS: aviso de 'sessions' retirado (e2e)"
+# TestSessionEnvIgnoresSessions (mmds_test.go) prueba la lógica de sessionEnv
+# aislada, sin invitado real. Aquí se comprueba lo mismo de punta a punta:
+# un kling-bridge de verdad, con un almacén MMDS que trae "sessions" no vacío,
+# avisa UNA sola vez y el hijo arranca igualmente con las claves de "env".
+#
+# Se reutiliza $SVC (importado en la sección 2 de este mismo script) en vez de
+# depender de que el daemon tenga ya un dorado MCP concreto (seqbundle,
+# context7...): así el e2e no necesita nada del laboratorio que no traiga él
+# mismo, y sigue siendo el sitio más simple para probarlo, porque ya existe
+# un dorado con kling-bridge dentro listo para despertar.
+refsDeServicio() {
+  # Un ref por línea de las instancias VIVAS de un servicio. Aparte porque hace
+  # falta antes y después de inyectar el MMDS.
+  $KLING ps -a -json 2>/dev/null | python3 -c '
+import json, sys
+s = sys.argv[1]
+try:
+    machines = json.load(sys.stdin)
+except Exception:
+    machines = []
+for m in machines:
+    if (m.get("labels") or {}).get("service") == s:
+        print(m["id"])
+' "$1"
+}
+
+body8=$(mktemp); hdr8=$(mktemp)
+code=$(initSession "$body8" "$hdr8" -H "Authorization: Bearer $TOKEN" "$GATEWAY/mcp/$SVC")
+sid8a=$(sessionOf "$hdr8")
+if [ "$code" = "200" ] && [ -n "$sid8a" ]; then
+  ok "8: la primera sesión sobre $SVC despertó una instancia"
+else
+  bad "8: initialize $SVC (para levantar la instancia)" "HTTP 200 con sesión" "HTTP $code: $(cat "$body8")"
+fi
+
+refs8=$(refsDeServicio "$SVC")
+# Con -json puede haber quedado más de una instancia de antes; se usa la más
+# reciente, que es la que acaba de contestar el initialize de arriba.
+ref8=$(printf '%s\n' "$refs8" | tail -n1)
+
+if [ -z "$ref8" ]; then
+  echo "  (saltando 8: ninguna instancia viva de $SVC tras el initialize; no hay dónde inyectar MMDS)"
+else
+  MARCADOR="e2e-mmds-$$"
+  # "sessions" no vacío es justo lo que retiró 7408919: debe verse UNA vez en
+  # los logs y el "env" común debe seguir llegando al hijo.
+  store8="{\"env\":{\"E2E_MMDS_VAR\":\"$MARCADOR\"},\"sessions\":{\"fake-session\":{\"SECRET\":\"no-me-inyectes\"}}}"
+  out=$(printf '%s' "$store8" | $KLING machine secret "$ref8" 2>&1)
+  contiene "$out" "secrets injected" && ok "8: MMDS con env + sessions no vacío inyectado en $ref8" \
+    || bad "8: kling machine secret $ref8" "\"secrets injected\"" "$out"
+
+  # Segunda sesión sobre el MISMO servicio, inmediatamente después de inyectar:
+  # si el planificador reutiliza la instancia ya caliente (lo normal, recién
+  # usada), esta sesión es la que dispara sessionEnv() con el almacén nuevo.
+  code=$(initSession "$body8" "$hdr8" -H "Authorization: Bearer $TOKEN" "$GATEWAY/mcp/$SVC")
+  sid8b=$(sessionOf "$hdr8")
+  if [ "$code" = "200" ] && [ -n "$sid8b" ]; then
+    ok "8: segunda sesión sobre $SVC abierta tras inyectar el MMDS"
+  else
+    bad "8: initialize $SVC (segunda sesión)" "HTTP 200 con sesión" "HTTP $code: $(cat "$body8")"
+  fi
+
+  refs8b=$(refsDeServicio "$SVC")
+  if [ "$(printf '%s\n' "$refs8b" | sort -u)" = "$ref8" ]; then
+    # Sigue habiendo una única instancia, y es la que recibió el MMDS: los logs
+    # tienen que reflejar justo lo que hizo sessionEnv() con ese almacén.
+    logs8=$($KLING logs -tail 0 "$ref8" 2>&1)
+    avisos=$(printf '%s\n' "$logs8" | grep -c "field 'sessions' is deprecated")
+    if [ "$avisos" = "1" ]; then
+      ok "8: 'sessions' retirado se avisa exactamente una vez en los logs de $ref8"
+    else
+      bad "8: aviso de 'sessions' en los logs" "exactamente 1 línea" "$avisos línea(s):\n$logs8"
+    fi
+    contiene "$logs8" "MMDS secret(s) injected into the environment" \
+      && ok "8: el hijo arrancó con el 'env' del MMDS (según el log del bridge)" \
+      || bad "8: inyección de 'env' en el log" "\"MMDS secret(s) injected into the environment\"" "$logs8"
+  else
+    echo "  (saltando 8: el planificador despertó otra instancia de $SVC en vez de reusar $ref8;" \
+      "no se puede comprobar el aviso sin un almacén MMDS en la instancia nueva)"
+  fi
+fi
+rm -f "$body8" "$hdr8"
+
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fail(s)\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
