@@ -20,7 +20,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   si está presente. Alternativas seguras: (1) `kling template credential` para secretos
   comunes en la plantilla; (2) `kling machine credential` (proxy de credenciales) para
   aislar claves por dominio; (3) VM efímera por sesión si necesitas secretos únicos por
-  sesión.
+  sesión. El aviso único, además de en un test unitario, se comprueba ahora de punta a
+  punta en `ext/mcp/scripts/90-e2e.sh`: un kling-bridge real, con un almacén MMDS que
+  trae `sessions` no vacío, avisa una sola vez en sus logs y el hijo arranca igualmente
+  con las claves de `env`.
 - **Proxy de credenciales: la clave de API ya no entra en el invitado.** Con un secreto
   por MMDS, un servidor MCP comprometido (corre como root) leía la clave y la sacaba por
   un dominio permitido: medido en el lab, la leía, la usaba y un eco de `httpbin.org` se
