@@ -15,9 +15,13 @@ package credproxy
 // sea el de la credencial y, si la credencial fija base de datos, esa.
 //
 // EL TRAMO DEL SERVIDOR sale por el dialer de solo IPs públicas (dialPublico)
-// y SIEMPRE con TLS verificado contra el nombre de la credencial (TLS 1.2+,
+// o, si el operador fijó Upstream, a esa dirección (upstream.go: loopback y
+// privadas sí; metadatos y la red de kindling nunca). Por defecto con TLS
+// verificado contra el nombre de la credencial o TLSServerName (TLS 1.2+,
 // raíces del sistema más la CA de la credencial si la trae). Un servidor que
-// contesta 'N' al SSLRequest es un fallo, no un "entonces en claro". La
+// contesta 'N' al SSLRequest es un fallo, no un "entonces en claro": sin TLS
+// solo se sale si la credencial lo pide (UpstreamTLS "disable", solo con
+// Upstream), y entonces sin SSLRequest y solo con SCRAM-SHA-256. La
 // respuesta al SSLRequest se lee byte a byte, sin buffer: lo que un
 // intermediario inyecte detrás de la 'S' no puede colarse como si viniera
 // dentro del TLS (CVE-2021-23214). La autenticación es SCRAM-SHA-256 (con

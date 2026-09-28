@@ -33,7 +33,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
-| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `ca_pem`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
+| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
 
@@ -208,6 +208,7 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 | `req_bytes`, `resp_bytes`, `ms` | cuerpo leído del invitado, cuerpo enviado al invitado, duración |
 | `dropped` | registros descartados antes de este (cola llena o fallo de disco) |
 | `user`, `database`, `auth` | solo en `kind: postgres` (ver Credenciales de Postgres) |
+| `upstream` | solo en `kind: postgres` con upstream fijado: la dirección a la que marcó el proxy (configuración del operador, no un secreto) |
 
 Nunca lleva la clave, el marcador, cabeceras, cuerpos, la query ni el texto de un
 error del proveedor. Rota a 1 MiB (una generación); `commit` y `fork` no lo copian.
@@ -224,22 +225,27 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 
 | Campo | Qué es |
 |---|---|
-| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database` y `ca_pem` no valen) |
-| `domain` | nombre del servidor: al que sale el proxy y contra el que verifica el TLS. Tiene que resolver a una IPv4 pública |
+| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database`, `ca_pem`, `upstream`, `upstream_tls` y `tls_server_name` no valen) |
+| `domain` | nombre que usa el invitado. Sin `upstream`, es también al que sale el proxy (tiene que resolver a una IPv4 pública); con TLS, contra el que se verifica el certificado salvo `tls_server_name` |
 | `port` | puerto del servidor (defecto 5432). El invitado puede usar cualquier puerto: le llega al proxy igual |
 | `user` | rol (obligatorio). El invitado tiene que conectar con él |
 | `database` | opcional: la única base a la que se deja conectar (sin ella, cualquiera; la de por defecto es el rol) |
 | `ca_pem` | opcional, ≤64 KiB: CA en PEM que se añade a las raíces del sistema |
+| `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí. Se devuelve normalizado (minúsculas) |
+| `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |
+| `tls_server_name` | opcional: nombre (o IP) contra el que se verifica el certificado en lugar de `domain` |
 | `secret` | contraseña del rol, ASCII imprimible |
 | `allow` | no vale para Postgres |
 
 El invitado recibe el marcador en `env` y lo usa como contraseña, sin TLS
 (`sslmode=disable` o `prefer`) contra `domain`. Al rotar (misma `env`) se sustituyen
 todos los campos con la clave. En macOS el daemon lo rechaza si el `kling-vz` de la
-máquina no incluye `postgres` en `credential_kinds` de `GET /kling/info`.
+máquina no incluye `postgres` en `credential_kinds` de `GET /kling/info`, y rechaza una
+que use `upstream`, `upstream_tls` o `tls_server_name` si no incluye `postgres-upstream`.
+Recetas y límites en [postgres.md](postgres.md).
 
 En el registro de auditoría cada conexión es una línea `kind: postgres` con `host`,
-`user`, `database`, `auth` (`scram-sha-256-plus`, `scram-sha-256`, `password` o `trust`:
+`upstream` (si lo hay), `user`, `database`, `auth` (`scram-sha-256-plus`, `scram-sha-256`, `password` o `trust`:
 cómo se autenticó el proxy ante el servidor), `creds`, bytes y duración; `method` es
 `cancel` en un `CancelRequest`. Sus `reason`: los de arriba (`disabled`, `busy`,
 `no_credential`, `upstream_error`) y `bad_startup`, `timeout`, `bad_placeholder`,
