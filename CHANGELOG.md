@@ -64,6 +64,16 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `kling run -from` manda siempre un egress (`none` por defecto) en vez de dejar que el
   daemon herede el de la plantilla: una instancia de una plantilla con credenciales
   necesita `-egress allowlist -allow …` explícito, como hace el gateway.
+- **IPv6 cerrado en los tres modos de egress, como defensa en profundidad.** El filtrado
+  de `internal/net` (ipset, iptables, resolver dinámico) es solo IPv4; un diagnóstico en
+  el lab real no encontró una fuga v6 hoy, pero por una razón incidental del host
+  (`net.ipv6.conf.all.forwarding=0` de fábrica, no de kindling) y no por nada que el
+  código garantizara. Dos capas nuevas, independientes entre sí: `ipv6.disable=1` en la
+  línea de arranque del invitado (solo cubre arranques en frío; un dorado ya congelado
+  no la relee) y, en el namespace del host y para los tres modos (`none`, `internet`,
+  `allowlist`), `sysctl disable_ipv6=1` en `tap0`/veth más `ip6tables FORWARD DROP` como
+  cinturón adicional si `ip6tables` está instalado (si no, se avisa y se sigue: la capa
+  de `sysctl` es la que de verdad cierra el paso).
 
 ### Pruebas
 
@@ -71,7 +81,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   usaba `script -qec` (util-linux), que no existe en el `script` BSD de macOS desde donde
   se lanza el e2e: ahora el pseudoterminal lo pone el `pty` de python3. Sección 7 ampliada
   (freeze/thaw, reinicio del daemon, rotación, eco de `Basic`, HTTPS rápido) y nueva 7b
-  (credenciales de plantilla). En el lab: 54 ok, 0 fallos.
+  (credenciales de plantilla). En el lab: 54 ok, 0 fallos. Nueva 7c: sonda dentro del
+  invitado, en los tres modos de egress, de que no hay dirección ni ruta ni salida IPv6
+  (sin ejecutar aquí — la corre quien tenga el lab a mano).
 
 ## v0.16.0 — 2026-09-27
 

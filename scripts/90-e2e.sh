@@ -642,6 +642,46 @@ else
   bad "plantilla con allowlist" "run + save" "falló"
 fi
 
+# ── 7c. IPv6 cerrado ──────────────────────────────────────────────────────────
+# B1: defensa en profundidad, aunque el diagnóstico de A1 no encontrara fuga hoy
+# en este lab (net.ipv6.conf.all.forwarding=0 en el host ya cortaba el paso
+# antes de llegar a ip6tables, que está vacío). La prueba que vale es DESDE
+# DENTRO del invitado, por la misma razón que la nota de la sección 3 de
+# SECURITY.md: un ping desde el netns del host no cruza tap0 y no dice nada de
+# lo que ve la microVM. Se comprueba en los tres modos de egress porque
+# applyIPv6Barrier se aplica en los tres.
+step "7c. IPv6 cerrado (defensa en profundidad, los tres modos)"
+SONDA_V6='
+import subprocess, sys
+# Sin dirección global ni de enlace: ipv6.disable=1 en el kernel del invitado
+# (arranque en frío) quita el módulo entero, y si algún día el invitado
+# arrancara SIN ese parámetro (un snapshot dorado congelado antes de este
+# cambio), la barrera del namespace en el host debe seguir cerrando el paso.
+addrs = subprocess.run(["ip", "-6", "addr", "show"], capture_output=True, text=True).stdout
+print("ADDRS", "vacio" if "inet6" not in addrs else "CON_IPV6:" + addrs.replace(chr(10), " "))
+ruta = subprocess.run(["ip", "-6", "route", "show", "default"], capture_output=True, text=True).stdout.strip()
+print("RUTA", "vacia" if not ruta else "CON_RUTA:" + ruta)
+r = subprocess.run(["ping", "-6", "-c", "1", "-W", "2", "2606:4700:4700::1111"], capture_output=True, text=True)
+print("PING6", "bloqueado" if r.returncode != 0 else "PASO:" + r.stdout.replace(chr(10), " "))
+'
+for modo in none internet allowlist; do
+  V6="e2e-v6-$modo-$$"
+  extra=""
+  [ "$modo" = "allowlist" ] && extra="-allow example.org"
+  if $KLING run -image "$IMGVOL" -name "$V6" -egress "$modo" $extra -allow-exec -ttl 5m -on-ttl remove >/dev/null 2>&1; then
+    out=$($KLING exec -timeout 60s "$V6" -- python3 -c "$SONDA_V6" 2>&1)
+    contiene "$out" "ADDRS vacio" && ok "egress=$modo: el invitado no tiene ninguna dirección IPv6" \
+      || bad "IPv6 addrs ($modo)" "ADDRS vacio" "$out"
+    contiene "$out" "RUTA vacia" && ok "egress=$modo: sin ruta v6 por defecto" \
+      || bad "IPv6 ruta ($modo)" "RUTA vacia" "$out"
+    contiene "$out" "PING6 bloqueado" && ok "egress=$modo: ping6 a un destino público no sale" \
+      || bad "IPv6 ping ($modo)" "PING6 bloqueado" "$out"
+    $KLING rm -f "$V6" >/dev/null 2>&1
+  else
+    bad "run -egress $modo (sonda IPv6)" "una máquina" "no arrancó"
+  fi
+done
+
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fallo(s)\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

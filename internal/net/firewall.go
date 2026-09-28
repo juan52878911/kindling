@@ -3,6 +3,7 @@ package net
 import (
 	"context"
 	"fmt"
+	"log"
 	stdnet "net"
 	"os/exec"
 	"strconv"
@@ -79,6 +80,11 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 		return run(append([]string{"ip", "netns", "exec", n.NS}, args...)...)
 	}
 
+	// La barrera IPv6 (applyIPv6Barrier, más abajo en este fichero) NO va aquí:
+	// vive en netns_fc.go/Setup, antes de la rama rápida de iptables-restore que
+	// evita esta función para none/internet. Si viviera solo aquí se saltaría en
+	// ese camino, que es el habitual cuando iptables-restore está instalado.
+
 	// PRIMERO: dejar pasar las respuestas a conexiones ya establecidas.
 	//
 	// Sin esto se rompe el acceso host->microVM, porque nuestra propia red de
@@ -115,6 +121,47 @@ func (n *Net) applyEgress(e Egress, domains []string) error {
 		}
 	}
 	return ns("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", n.NSIf, "-j", "MASQUERADE")
+}
+
+// applyIPv6Barrier cierra el paso a IPv6 dentro del namespace, en allowlist,
+// internet Y none: el filtrado de este fichero (ipset, iptables) es solo
+// IPv4, así que sin esto un invitado con salida v6 real (si algún día el host
+// reenvía v6, a diferencia de lo medido hoy en el lab) se saltaría el
+// allowlist entero por ese camino, y en modo internet o none tendría una
+// salida que ningún DROP de aquí cubre. Dos capas independientes, ninguna
+// necesita que la otra exista:
+//
+//  1. sysctl disable_ipv6=1 en tap0, en el veth del namespace y en "all"/
+//     "default": la interfaz del invitado no adquiere ninguna dirección v6
+//     (ni siquiera link-local) y el kernel del namespace no la enruta. Es la
+//     barrera real: no depende de que ip6tables esté instalado.
+//  2. ip6tables FORWARD DROP para lo que entre por tap0: cinturón además de
+//     tirantes, para el caso de una interfaz futura que se sumara al
+//     namespace sin pasar por el paso 1. Si ip6tables no está instalado (no
+//     es una dependencia dura de kindling hoy) se avisa por log y se sigue
+//     sin fallar: la capa 1 ya cierra el hueco que importa.
+//
+// Complementa, no sustituye, a ipv6.disable=1 en la línea de arranque del
+// invitado (net.go/BootArg): esa apaga el módulo v6 DENTRO del invitado, pero
+// solo en un arranque en frío —un snapshot dorado ya congelado no la relee—.
+// Esta barrera vive en el namespace del HOST y cubre también esos snapshots.
+func (n *Net) applyIPv6Barrier(ns func(...string) error) error {
+	for _, iface := range []string{"all", "default", TapName, n.NSIf} {
+		clave := fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", iface)
+		if err := ns("sysctl", "-w", clave); err != nil {
+			// No es fatal: si el namespace no tiene /proc/sys/net/ipv6 (kernel
+			// compilado sin IPv6, por ejemplo) no hay nada que apagar y la capa
+			// 2 sigue siendo la barrera. Pero si sysctl SÍ existe y falla por
+			// otra razón, conviene que quede en el log del daemon.
+			log.Printf("net: aviso, no se pudo aplicar %s en %s: %v", clave, n.NS, err)
+		}
+	}
+
+	if _, err := exec.LookPath("ip6tables"); err != nil {
+		log.Printf("net: ip6tables no está instalado; %s queda solo con la barrera de sysctl para IPv6", n.NS)
+		return nil
+	}
+	return ns("ip6tables", "-A", "FORWARD", "-i", TapName, "-j", "DROP")
 }
 
 // egressRules son las reglas de salida de none e internet, en el mismo orden
@@ -196,7 +243,12 @@ func setNameFromNS(ns string) string {
 // por si el resolver tuviera un tropiezo.
 //
 // QUÉ SIGUE PENDIENTE / TODO:
-//   - AAAA / IPv6: el resolver solo siembra A (IPv4); el ipset es v4. Ver extractA.
+//   - AAAA / IPv6: el resolver solo siembra A (IPv4); el ipset es v4. Ver
+//     extractA. Esto YA NO es el hueco que parece: applyIPv6Barrier (más abajo
+//     en este fichero) apaga IPv6 en el namespace entero antes de llegar a esta
+//     función, así que el invitado no tiene forma de usar una AAAA aunque el
+//     resolver se la sirviera. Sigue sin sembrarse por ser trabajo sin efecto,
+//     no por el hueco de seguridad que este TODO describía antes.
 //   - Tunneling por SUBDOMINIOS de un dominio permitido: se reenvían (un CDN los
 //     necesita), así que un dominio permitido con NS autoritativo del atacante
 //     sigue siendo un canal. Ver dnsresolver.go.

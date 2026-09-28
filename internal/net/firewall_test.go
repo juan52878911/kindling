@@ -1,7 +1,9 @@
 package net
 
 import (
+	"fmt"
 	stdnet "net"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -173,5 +175,69 @@ func TestSinPosicionQuitaElNumeroDeLinea(t *testing.T) {
 	}
 	if got := strings.Join(sinPosicion(r, "-D"), " "); got != "iptables -D INPUT -i vh-+ -j DROP" {
 		t.Errorf("sinPosicion(-D) = %q", got)
+	}
+}
+
+// applyIPv6Barrier es la defensa en profundidad de B1: el filtrado de este
+// fichero (ipset, iptables) es solo IPv4, así que sin ella un invitado con
+// salida v6 real se saltaría el allowlist entero, y en modo internet o none
+// tendría una salida que ningún DROP de aquí cubre. Se comprueba con un `ns`
+// de mentira: no hay netns real en un test.
+func TestApplyIPv6BarrierApagaSysctlEnLasInterfacesQueImportan(t *testing.T) {
+	n := Plan(1, "abcdef0123")
+	var llamadas [][]string
+	ns := func(args ...string) error {
+		llamadas = append(llamadas, append([]string(nil), args...))
+		return nil
+	}
+	if err := n.applyIPv6Barrier(ns); err != nil {
+		t.Fatalf("applyIPv6Barrier = %v", err)
+	}
+
+	junto := ""
+	for _, l := range llamadas {
+		junto += strings.Join(l, " ") + "\n"
+	}
+	// Las cuatro claves de sysctl que cierran IPv6 dentro del namespace, sin
+	// depender de que exista ip6tables.
+	for _, quiere := range []string{
+		"sysctl -w net.ipv6.conf.all.disable_ipv6=1",
+		"sysctl -w net.ipv6.conf.default.disable_ipv6=1",
+		"sysctl -w net.ipv6.conf." + TapName + ".disable_ipv6=1",
+		"sysctl -w net.ipv6.conf." + n.NSIf + ".disable_ipv6=1",
+	} {
+		if !strings.Contains(junto, quiere) {
+			t.Errorf("falta %q:\n%s", quiere, junto)
+		}
+	}
+}
+
+// Sin ip6tables instalado (el caso de este entorno de test, y de muchos hosts
+// reales que no lo llevan por defecto), la función no debe fallar: la capa de
+// sysctl ya es la barrera real, y exigir ip6tables tumbaría el arranque de
+// toda microVM en un host que no lo tiene.
+func TestApplyIPv6BarrierNoFallaSinIp6tables(t *testing.T) {
+	if _, err := exec.LookPath("ip6tables"); err == nil {
+		t.Skip("este host SÍ tiene ip6tables; el caso que prueba este test no se da aquí")
+	}
+	n := Plan(2, "fedcba9876")
+	if err := n.applyIPv6Barrier(func(args ...string) error { return nil }); err != nil {
+		t.Fatalf("sin ip6tables, applyIPv6Barrier tiene que avisar y seguir, no fallar: %v", err)
+	}
+}
+
+// Un fallo de sysctl (namespace sin /proc/sys/net/ipv6, por ejemplo) tampoco
+// es fatal: la capa 2 (ip6tables) sigue en pie, y negarse a montar la red por
+// esto dejaría a la microVM sin arrancar por algo que no es su culpa.
+func TestApplyIPv6BarrierSiguePeseAUnSysctlQueFalla(t *testing.T) {
+	n := Plan(3, "0011223344")
+	ns := func(args ...string) error {
+		if len(args) > 0 && args[0] == "sysctl" {
+			return fmt.Errorf("sysctl: no such file or directory")
+		}
+		return nil
+	}
+	if err := n.applyIPv6Barrier(ns); err != nil {
+		t.Fatalf("un sysctl que falla no debe tumbar applyIPv6Barrier: %v", err)
 	}
 }

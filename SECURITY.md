@@ -96,6 +96,29 @@ RESULTADO 1.1.1.1:       ALCANZABLE
 > válida es ejecutar el comando **dentro del invitado**, por la consola serie. Nos costó dos
 > falsos positivos aprenderlo.
 
+**IPv6: cerrado, no solo ausente.** Todo lo de arriba (ipset, iptables, resolver dinámico)
+es IPv4. Durante un diagnóstico en el lab real comprobamos que hoy no hay fuga v6 posible,
+pero por una razón incidental: el host tiene `net.ipv6.conf.all.forwarding=0` de fábrica, no
+por ninguna configuración de kindling, y `ip6tables` está vacío (policy `ACCEPT` en todas las
+cadenas). Si ese valor del kernel cambiara algún día, no había nada en el código que
+impidiera la fuga. Se cerró en dos capas independientes, ninguna depende de la otra:
+
+1. `ipv6.disable=1` en la línea de arranque del invitado (`internal/net/net.go`, `BootArg`):
+   el módulo IPv6 del kernel del invitado no carga, así que no hay ni siquiera una dirección
+   link-local. Solo cubre arranques **en frío** — un snapshot dorado ya congelado no relee la
+   línea de arranque al restaurar y sigue con el IPv6 que tenía al congelarse.
+2. `applyIPv6Barrier` en el namespace del host (`internal/net/firewall.go`), aplicada en los
+   **tres** modos de egress (`none`, `internet`, `allowlist`) y también en snapshots
+   restaurados, no solo en arranques en frío: `sysctl disable_ipv6=1` en `tap0`, en el veth
+   del namespace y en `all`/`default`, más `ip6tables FORWARD DROP` para lo que entre por
+   `tap0` como cinturón adicional. Si `ip6tables` no está instalado en el host se avisa por
+   log y se sigue sin fallar: la capa de `sysctl` es la que de verdad cierra el paso y no
+   depende de ese binario.
+
+En macOS (`kling-vz`) no hace falta nada de esto: `egress.IsBlockedIP` ya trata cualquier
+dirección que no sea IPv4 como bloqueada, porque el invitado nunca ha tenido IPv6 en ese
+backend.
+
 ### 4. Una microVM no puede degradar a las demás
 
 - **Caudal acotado** por dispositivo: 128 MiB/s de disco y 16 MiB/s de red, con limitadores
@@ -347,6 +370,13 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **El puente local (`kling-bridge-local`) no autentica.** Por eso desde v0.4.0 escucha
   en `127.0.0.1` por defecto; exponerlo a la red es una decisión explícita
   (`-listen 0.0.0.0:9100`) y avisa.
+- **`ipv6.disable=1` no llega a un snapshot dorado ya congelado.** Solo se lee en un
+  arranque en frío; restaurar un dorado hecho antes de este cambio sigue con el IPv6 que
+  tenía al congelarse. La barrera del namespace (`applyIPv6Barrier`) no tiene ese límite
+  y cubre igual esos snapshots, pero el kernel del invitado, si conserva IPv6 vivo, aún
+  podría auto-asignarse una link-local dentro de su propia pila —inofensiva sin
+  reenvío, pero no es lo mismo que no tenerla—. Un dorado nuevo, o uno recongelado tras
+  este cambio, ya arranca sin el módulo.
 
 ## Ante un incidente
 

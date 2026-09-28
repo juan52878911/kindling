@@ -103,6 +103,16 @@ func (n *Net) Setup(egress Egress, domains []string, owner int) error {
 		return err
 	}
 
+	// Barrera IPv6 (firewall.go): va AQUÍ, antes de la rama rápida de
+	// iptables-restore de más abajo, y no dentro de applyEgress. Esa rama
+	// devuelve sin pasar por applyEgress para none/internet cuando hay
+	// iptables-restore, así que si esta llamada viviera solo dentro de
+	// applyEgress se saltaría en el camino más común. Se aplica igual en los
+	// tres modos, por eso no depende de egress.
+	if err := n.applyIPv6Barrier(ns); err != nil {
+		return err
+	}
+
 	// Entrada: lo que llegue a la IP del namespace va a la microVM. Así el host
 	// alcanza cada máquina por una IP distinta aunque todas usen la misma dentro.
 	dnat := []string{"-t", "nat", "-A", "PREROUTING", "-d", n.NSIP, "-j", "DNAT", "--to-destination", GuestIP}

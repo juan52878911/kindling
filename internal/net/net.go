@@ -43,8 +43,17 @@ const (
 
 // BootArg devuelve la configuración de red que el kernel del invitado aplica
 // solo, sin necesitar herramientas dentro de la imagen.
+//
+// ipv6.disable=1 apaga el módulo IPv6 del kernel del invitado entero: sin él
+// no hay direcciones v6 que asignar (ni siquiera link-local) y por tanto nada
+// que filtrar del lado de dentro. Es la barrera MÁS temprana posible, previa a
+// cualquier regla de firewall.go/dnsresolver.go. Solo cubre arranques en FRÍO:
+// un snapshot dorado ya congelado guarda el kernel corriendo con la línea de
+// arranque que tenía al congelarse, así que restaurarlo no vuelve a leer
+// bootArgs y sigue con IPv6 tal como estaba entonces. La barrera del namespace
+// (applyIPv6Barrier en firewall.go) no depende de esto y cubre ese caso.
 func BootArg() string {
-	return fmt.Sprintf("ip=%s::%s:%s::eth0:off", GuestIP, GuestGW, GuestNM)
+	return fmt.Sprintf("ip=%s::%s:%s::eth0:off ipv6.disable=1", GuestIP, GuestGW, GuestNM)
 }
 
 // Net es la red de una microVM concreta.
