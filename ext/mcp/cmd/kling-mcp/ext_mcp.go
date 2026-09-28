@@ -170,7 +170,10 @@ var mcpCommands = []plugin.Command{
       [-keepwarm N]                                N popular services with their
                                                    primary running (persistent;
                                                    avoids cold start on Mac)
-      [-memory SVC]                                agent memory service
+      [-max-replicas 16]                           instances per service when
+                                                   sessions scale out (0 =
+                                                   unlimited); beyond it, 503
+      [-memory SVC]                              agent memory service
       [-hosts name=endpoint,name2=endpoint2]       several daemons instead of one
                                                    (default: mcp.hosts, or the
                                                    active context). /mcp/<service>

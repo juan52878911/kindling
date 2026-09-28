@@ -180,8 +180,29 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   /volumes/{name}/snapshots/{snap}`, `DELETE /volumes/{name}?snapshots=1`. Receta y
   nota sobre XFS en el README (Snapshots and rollback). No se expone como herramienta MCP.
 
+- **kling-mcp: `kling-mcpbench` y `ext/mcp/scripts/95-thaw-scale.sh`, despertar a
+  escala.** Un generador de carga (solo biblioteca estándar) que lanza M sesiones MCP a
+  la vez tras una barrera contra N servicios a través del gateway —`initialize`,
+  `notifications/initialized`, `tools/call`, K llamadas más y `DELETE`— y da p50/p95/p99/
+  máx del primer resultado, errores por fase y código, y lo que le cuesta al host
+  muestreando el `/metrics` del daemon y el PSI (microVMs vivas, réplicas, PSS, memoria
+  disponible, tiempo hasta cero). El script monta la imagen y los servicios, su propio
+  gateway y la matriz (N 1/10/50 × M 1/10/50/200, congelado/caliente, con y sin
+  réplicas, R=3), salta las celdas que no caben en el 70 % de la RAM dejándolas en la
+  tabla, marca DEGRADED por encima del 1 % de fallos y limpia comprobando la línea base.
+  Método y reglas en [`docs/thaw-at-scale.md`](docs/thaw-at-scale.md); los resultados,
+  pendientes de la pasada en el lab.
+
 ### Arreglado
 
+- **kling-mcp: el gateway tiene tope de réplicas por servicio (`-max-replicas`, 16 por
+  defecto).** No tenía ninguno (`MaxReplicas` 0 = sin tope): cada sesión que no cabía en
+  las instancias existentes creaba una réplica, así que 200 sesiones simultáneas contra
+  un servicio de 256 MiB (una sesión por instancia) intentaban 200 microVMs y el único
+  freno era quedarse sin memoria en el host. Las sesiones por encima del tope reciben
+  `503 ... all replicas full`, y el servicio ya no se anota como roto por ello (antes
+  ese error era un 502 que marcaba su salud). `-max-replicas 0` devuelve el
+  comportamiento de antes.
 - **`kling run -from` hereda el egress de la plantilla si no se pide otro.** Mandaba
   siempre un egress (`none` por defecto), así que instanciar una plantilla con
   credenciales (`kling template credential`) exigía repetir `-egress allowlist -allow

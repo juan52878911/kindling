@@ -180,3 +180,46 @@ func TestMaxReplicasSinHuecoDaError(t *testing.T) {
 		t.Fatalf("err = %v; want ErrMaxReplicas", err)
 	}
 }
+
+// Una ráfaga de sesiones contra un servicio de una sesión por instancia (256
+// MiB, ver gwMaxSessions) con tope 16: nacen 16 instancias y las demás sesiones
+// reciben ErrMaxReplicas. Sin tope serían 200 microVMs, que es lo que hacía el
+// gateway MCP antes de -max-replicas.
+func TestMaxReplicasContieneUnaRafaga(t *testing.T) {
+	const tope, sesiones = 16, 200
+	var creadas atomic.Int64
+	g := &Scheduler{
+		services:    map[string]*entry{},
+		extra:       map[string][]*entry{},
+		routes:      map[string]*sessionRoute{},
+		MaxReplicas: tope,
+	}
+	g.services["echo"] = &entry{machineID: "m-0", maxSessions: gwMaxSessions(256), checkedAt: time.Now(), lastUse: time.Now()}
+	g.buildFn = func(context.Context, string, *tenant, bool) (*entry, error) {
+		n := creadas.Add(1)
+		return &entry{machineID: fmt.Sprintf("m-%d", n), maxSessions: gwMaxSessions(256), lastUse: time.Now()}, nil
+	}
+
+	servidas, topadas := 0, 0
+	for i := 0; i < sesiones; i++ {
+		e, err := g.pickInstance(context.Background(), "echo", tenantFrom(context.Background()))
+		if errors.Is(err, ErrMaxReplicas) {
+			topadas++
+			continue
+		}
+		if err != nil {
+			t.Fatalf("sesión %d: %v", i, err)
+		}
+		g.mu.Lock()
+		g.routes[fmt.Sprintf("s%d", i)] = &sessionRoute{service: "echo", machineID: e.machineID}
+		g.mu.Unlock()
+		servidas++
+	}
+	g.mu.Lock()
+	total := len(g.entriesLocked("echo"))
+	g.mu.Unlock()
+	if total != tope || servidas != tope || topadas != sesiones-tope {
+		t.Fatalf("instancias=%d servidas=%d topadas=%d; quería %d, %d y %d",
+			total, servidas, topadas, tope, tope, sesiones-tope)
+	}
+}
