@@ -244,9 +244,11 @@ if escribe_vol v1; then
     contiene "$out" "WRITE mode" && ok "no hay snapshot con un escritor" || bad "snapshot con escritor" "WRITE mode" "$out"
     out=$($KLING volume restore -f "$VOL3" antes 2>&1)
     contiene "$out" "is used by" && ok "no hay restore con la máquina viva" || bad "restore en uso" "is used by" "$out"
-    if $KLING freeze "$n" >/dev/null 2>&1; then
+    if out=$($KLING freeze "$n" 2>&1); then
       out=$($KLING volume snapshot "$VOL3" durante 2>&1)
       contiene "$out" "WRITE mode" && ok "una congelada cuenta como escritor" || bad "snapshot con congelada" "WRITE mode" "$out"
+    else
+      bad "freeze de una máquina con volumen (3c)" "frozen" "$out"
     fi
     $KLING rm "$n" >/dev/null 2>&1
   else
