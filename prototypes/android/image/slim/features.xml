@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SLIM=1 (prototypes/android/image/slim): funciones que el teléfono de
+     automatización no tiene. Sin android.hardware.bluetooth system_server no
+     arranca la pila de Bluetooth (que en Redroid muere en bucle). -->
+<permissions>
+    <unavailable-feature name="android.hardware.bluetooth" />
+    <unavailable-feature name="android.hardware.bluetooth_le" />
+    <unavailable-feature name="android.hardware.camera" />
+    <unavailable-feature name="android.hardware.microphone" />
+    <unavailable-feature name="android.hardware.wifi" />
+    <unavailable-feature name="android.software.print" />
+    <unavailable-feature name="android.software.live_wallpaper" />
+</permissions>

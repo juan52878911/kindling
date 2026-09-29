@@ -1,0 +1,33 @@
+# Fragmento Android solo para x86_64 (Firecracker). Va DETRÁS de config-common +
+# config-amd64 + config-android; lo añade kernel/build.sh con TARGET_ARCH=amd64.
+# docs/proxmox.md.
+
+# ── COMPAT en x86_64 ─────────────────────────────────────────────────────────
+# En x86 CONFIG_COMPAT no tiene pregunta: sale "y" si hay IA32_EMULATION (o
+# X32). El init de Android 13 (SetMmapRndBits) escribe
+# /proc/sys/vm/mmap_rnd_compat_bits aunque la imagen sea 64 bits, y ese fichero
+# solo existe con COMPAT (ARCH_MMAP_RND_COMPAT_BITS): sin él, InitFatalReboot
+# (lo mismo que se midió en arm64, README fila 2). config-amd64 lo apaga para
+# los invitados normales; aquí se enciende. Abre la ABI de 32 bits dentro del
+# invitado: superficie del invitado, no del anfitrión.
+CONFIG_IA32_EMULATION=y
+
+# ── mitigaciones: el nombre de 6.1.140 ───────────────────────────────────────
+# config-amd64 pide CONFIG_SPECULATION_MITIGATIONS, pero en 6.1.140 ese menú se
+# llama CPU_MITIGATIONS (retroportado). Sin esta línea allnoconfig deja todo el
+# menú en "n" (PTI, RETPOLINE, RETHUNK, SRSO...) y el comprobador del núcleo
+# falla. Es deriva del K1 amd64, no de Android (medido en el CT 106,
+# docs/proxmox.md); aquí se corrige solo para este kernel.
+CONFIG_CPU_MITIGATIONS=y
+
+# ── sin ACPI: Firecracker 1.17 describe un PCI que el K1 no tiene ────────────
+# Con Firecracker v1.17.0 el DSDT trae un puente PCI (y una tabla MCFG). El K1
+# amd64 va sin PCI (check-kernel-config.sh lo prohíbe) y ACPICA no puede cargar
+# el DSDT: "ACPI Error: AE_BAD_PARAMETER, During Region initialization", la IRQ
+# del virtio-mmio de la línea de comandos queda sin enrutar y virtio_blk falla
+# con -22 ("VFS: Unable to mount root fs"). Medido en el CT 106 con el K1 +
+# Android; el kernel del CI de Firecracker (con PCI) arranca. Sin ACPI el
+# kernel usa la tabla MP (X86_MPPARSE=y en config-amd64) y los virtio-mmio de
+# la línea de comandos, como con Firecracker antiguo. Se pierde VMGENID, que
+# de todos modos salía "n" (depende de ACPI). docs/proxmox.md.
+# CONFIG_ACPI is not set

@@ -1,0 +1,48 @@
+--- a/drivers/md/dm-verity-target.c
++++ b/drivers/md/dm-verity-target.c
+@@ -289,9 +289,11 @@
+ 	int r;
+ 	sector_t hash_block;
+ 	unsigned int offset;
++	bool reread = false;
+ 
+ 	verity_hash_at_level(v, block, level, &hash_block, &offset);
+ 
++again:
+ 	if (static_branch_unlikely(&use_tasklet_enabled) && io->in_tasklet) {
+ 		data = dm_bufio_get(v->bufio, hash_block, &buf);
+ 		if (data == NULL) {
+@@ -334,6 +336,20 @@
+ 			r = -EAGAIN;
+ 			goto release_ret_r;
+ 		}
++		else if (!reread) {
++			/*
++			 * kindling: a transient bad read (a 4 KiB block of zeros
++			 * from virtio-blk under host memory pressure) would stay
++			 * in the bufio cache and fail every data block below it
++			 * until evicted. Drop it and read it again, once.
++			 */
++			reread = true;
++			DMWARN_LIMIT("%s: metadata block %llu is corrupted, re-reading it",
++				     v->data_dev->name, (unsigned long long)hash_block);
++			dm_bufio_release(buf);
++			dm_bufio_forget(v->bufio, hash_block);
++			goto again;
++		}
+ 		else if (verity_fec_decode(v, io,
+ 					   DM_VERITY_BLOCK_TYPE_METADATA,
+ 					   hash_block, data, NULL) == 0)
+@@ -631,6 +647,12 @@
+ 			 */
+ 			return -EAGAIN;
+ 		} else if (verity_recheck(v, io, start, cur_block) == 0) {
++			/*
++			 * kindling: the re-read was good, so the first read was
++			 * the bad one. Say so: otherwise it goes unnoticed.
++			 */
++			DMWARN_LIMIT("%s: data block %llu was corrupted on read, re-read ok",
++				     v->data_dev->name, (unsigned long long)cur_block);
+ 			if (v->validated_blocks)
+ 				set_bit(cur_block, v->validated_blocks);
+ 			continue;
