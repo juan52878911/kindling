@@ -72,9 +72,10 @@ y cada petición rechazada queda también en el log con el prefijo `kling-vz:`.
 
 | Petición | Qué hace |
 |---|---|
-| `GET /kling/info` | `{"backend": "vz", "version": "x.y.z"}` |
+| `GET /kling/info` | `{"backend": "vz", "version": "x.y.z", "credential_kinds": [...]}`; con broker (`KLING_VZ_BROKER`), `graph-link` entre ellos |
 | `PUT /kling/network` | `{"egress": "none"\|"internet"\|"allowlist", "allow_domains": [...]}`. Se puede cambiar en caliente, salvo ampliar a `internet` o `allowlist` una VM que se creó con `none`: el sandbox ya no le deja salir y la petición da 400. |
-| `PUT /kling/credentials` | `{"credentials": [{"env", "domain", "placeholder", "secret"}]}`, el juego completo (vacío las quita). Solo con egress `allowlist`. Sirve el proxy de credenciales en 172.16.0.1:80 y desvía esos dominios en el DNS; las claves se quedan en la memoria del proceso. |
+| `PUT /kling/credentials` | `{"credentials": [{"env", "domain", "placeholder", "secret"}]}`, el juego completo (vacío las quita). Solo con egress `allowlist` (o si todas van a otra máquina, `upstream_machine`: se piden al broker). Sirve el proxy de credenciales en 172.16.0.1:80 y desvía esos dominios en el DNS; las claves se quedan en la memoria del proceso. |
+| `PUT /kling/graph` | `{"links": [{"host", "port"}], "hosts": [...]}`: las aristas del nodo. El DNS contesta los `hosts` con la pasarela; cada conexión a un `link` se pide al daemon por su broker (`pkg/linkbroker`), que entrega el socket ya conectado (`internal/grafo`). |
 | `PUT /kling/forwards` | `{"ports": [8080]}` → `{"forwards": {"8080": "127.0.0.1:61234"}}`. Repetir un puerto devuelve la misma dirección. |
 | `GET /kling/stats` | `{"footprint_mib": N}`: `phys_footprint` del ayudante más el del auxiliar de Apple que aloja la VM. |
 | `PUT /kling/cpu` | `{"pct": N}`: techo de CPU en porcentaje de un núcleo, como `cpu_pct` (0 lo quita). Regula pausando la VM por ventanas de 100 ms, desde que el agente del invitado escucha. `GET /kling/cpu` da el techo y cuánto lleva en pausa. |
@@ -245,10 +246,13 @@ VM se encierra en `cmd/kling-vz/kling-vz.sb` con `sandbox_init_with_parameters`:
 - lee bajo la raíz de kindling (kernel, imágenes, dorados) y `/etc/resolv.conf`;
 - escribe solo en el directorio de su máquina, `snapshots/` y `volumes/`;
 - escucha en su socket y en loopback, y sale a la red solo si la máquina tiene
-  egress distinto de `none`.
+  egress distinto de `none`;
+- de los sockets Unix de fuera, solo puede abrir el del broker de enlaces del
+  daemon (`KLING_VZ_BROKER`), por el que pide las conexiones de las aristas de un
+  grafo y de `kling db attach` (`internal/grafo`, `pkg/linkbroker`).
 
-La raíz la pasa el daemon en `KLING_VZ_CONFINE_ROOT`; sin ella (lanzado a mano)
-no se confina y lo dice en el log. `KLING_VZ_NO_SANDBOX=1` lo apaga para
+La raíz la pasa el daemon en `KLING_VZ_CONFINE_ROOT`, y el broker en
+`KLING_VZ_BROKER`; sin la raíz (lanzado a mano) no se confina y lo dice en el log. `KLING_VZ_NO_SANDBOX=1` lo apaga para
 diagnosticar un perfil que una versión nueva de macOS rompa. Probado en macOS
 26.5 con arranque, exec, snapshot, restauración y egress `none`/`internet`.
 

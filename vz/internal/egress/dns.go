@@ -69,6 +69,19 @@ func (r *Resolver) Process(ctx context.Context, query []byte, viaTCP bool) []byt
 	if !ok {
 		return RespondError(query, 1) // FORMERR
 	}
+	if ip, esGrafo, ok := r.Policy.GraphHost(name); esGrafo {
+		// Un nombre de grafo: solo los de las aristas de ESTE nodo, y siempre
+		// con la pasarela (la red pide al daemon a dónde va cada conexión).
+		// Cualquier otro *.graph no existe, en todos los modos: ni se
+		// reenvía ni se siembra. Como el resolver del núcleo en Linux.
+		if !ok {
+			return RespondError(query, 3) // NXDOMAIN
+		}
+		if qtype == 1 {
+			return RespondA(query, ip, CredTTL)
+		}
+		return RespondError(query, 0) // NOERROR sin respuestas
+	}
 	if ip, ok := r.Policy.CredHost(name); ok {
 		// Dominio con credencial: la única IP que el invitado debe usar para él
 		// es la del proxy (la pasarela). A se contesta con ella; el resto de
