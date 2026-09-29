@@ -305,7 +305,14 @@ func cmdDaemon(args []string) error {
 	fcBin := fs.String("firecracker", envOr("KLING_FIRECRACKER", "firecracker"), "firecracker binary")
 	sockUser := fs.String("socket-user", os.Getenv("KLING_SOCKET_USER"), "user to hand the socket to (for the CLI over SSH)")
 	runAs := fs.String("run-as", envOr("KLING_RUN_AS", "kindling"), "unprivileged user Firecracker runs as")
+	authzPath := fs.String("authz", os.Getenv("KLING_AUTHZ"), "authz policy file (default "+daemon.RutaAuthzPorDefecto+" if it exists; see docs/authz.md)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
+		return err
+	}
+	// Una ruta explícita tiene que existir: arrancar sin política creyendo
+	// que se tiene sería peor que no arrancar.
+	pol, err := daemon.CargarPolitica(config.Or(*authzPath, daemon.RutaAuthzPorDefecto), *authzPath != "")
+	if err != nil {
 		return err
 	}
 
@@ -322,6 +329,7 @@ func cmdDaemon(args []string) error {
 	}
 	srv.SetShareConfig(shareConfig)
 	srv.SetCoW(cowConfig())
+	srv.SetAuthz(pol)
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -1137,6 +1145,13 @@ func writeInfo(c *api.Client, i *api.Info) {
 			fmt.Printf("at rest:      encrypted (dm-crypt)\n")
 		} else {
 			fmt.Printf("at rest:      NOT encrypted: snapshots hold guest memory in clear; see docs/cifrado.md\n")
+		}
+	}
+	if a := i.Authz; a != nil {
+		if a.Enabled {
+			fmt.Printf("authz:        policy on; you are %s\n", a.Role)
+		} else {
+			fmt.Printf("authz:        no policy (whoever reaches the socket controls everything; see docs/authz.md)\n")
 		}
 	}
 }

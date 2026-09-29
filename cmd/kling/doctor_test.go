@@ -129,3 +129,33 @@ func TestCaptureStdout(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 }
+
+// El aviso de authz: sin política es warn (no hace salir con 1), sin rol es
+// fail, con rol es ok, y un daemon anterior (sin el campo) no opina.
+func TestDoctorAuthz(t *testing.T) {
+	uid := 1001
+	cases := []struct {
+		info  *api.AuthzInfo
+		state string
+		want  string
+	}{
+		{nil, "", ""},
+		{&api.AuthzInfo{Enabled: false}, doctorWarn, "controls everything"},
+		{&api.AuthzInfo{Enabled: true, Role: "none", UID: &uid}, doctorFail, "uid 1001 no role"},
+		{&api.AuthzInfo{Enabled: true, Role: "tenant:alice"}, doctorOK, "tenant:alice"},
+		{&api.AuthzInfo{Enabled: true, Role: "admin"}, doctorOK, "admin"},
+	}
+	for _, c := range cases {
+		cs := doctorChecks(doctorInput{endpoint: "/run/kling.sock", cliVersion: "v1", info: &api.Info{Version: "1", Authz: c.info}})
+		got := findCheck(cs, "authz")
+		if c.state == "" {
+			if got != nil {
+				t.Errorf("daemon anterior: no debía haber check authz: %+v", got)
+			}
+			continue
+		}
+		if got == nil || got.State != c.state || !strings.Contains(got.Detail, c.want) {
+			t.Errorf("%+v: %+v, quería %s con %q", c.info, got, c.state, c.want)
+		}
+	}
+}
