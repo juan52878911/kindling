@@ -86,6 +86,13 @@ también en las futuras del rol de la aplicación (`ALTER DEFAULT PRIVILEGES`). 
 
 ## Aislamiento entre inquilinos (tenant-check)
 
+`doctor -url` habla TLS: `sslmode` de la URL (`verify-full` por defecto: cadena y nombre
+contra las raíces del sistema más `sslrootcert` o `-ca-file`; `-tls-server-name` si el
+certificado es de otro nombre, p. ej. tras un forward a `localhost`), con SCRAM-SHA-256-PLUS
+si el servidor lo ofrece. `disable` y `require` solo en loopback, salvo `-insecure` (el
+informe lo avisa con DB041); `allow` y `prefer` se rechazan. Un servidor sin TLS falla en
+vez de degradarse.
+
 `doctor` lee las políticas RLS; `kling db tenant-check <copia>` las **ejercita**. Nace del
 fallo real de AuraCRM: una política como
 

@@ -49,6 +49,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### kling db
 
+- **`kling db doctor -url` habla TLS (#86).** `pgmini` negocia TLS (SSLRequest + TLS 1.2+)
+  y usa SCRAM-SHA-256-PLUS (`tls-server-end-point`) cuando el servidor lo ofrece; un
+  servidor sin TLS nunca degrada a texto claro. `doctor -url` acepta `sslmode`
+  (`disable|require|verify-ca|verify-full`, por defecto `verify-full`, contra las raíces
+  del sistema más `sslrootcert` de la URL o `-ca-file`) y `-tls-server-name`. `sslmode=disable`
+  (y `require`, que no autentica al servidor) solo con loopback, salvo `-insecure`
+  explícito, y el informe lo avisa (DB041). `allow` y `prefer` se rechazan. Ya se puede
+  revisar una base en la nube (RDS con SSL forzado) sin mandar nada sin cifrar.
 - **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
   `up`, `fork`, `connect`, `reset`, `rm`, `doctor`, `audit` y `golden`. Cada copia estrena
   clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.

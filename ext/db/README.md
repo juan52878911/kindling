@@ -76,12 +76,14 @@ problems (every finding that is not `INFO`).
 | DB011, DB012 | tables with `tenant_id` and RLS off, or owned by the app role without FORCE ROW LEVEL SECURITY |
 | DB020, DB021 | the app role can SET ROLE to something privileged; it can SET the tenant variable itself (INFO) |
 | DB030, DB031 | `password_encryption` other than SCRAM; md5 passwords |
-| DB040, DB041 | `ssl=off` on a non-loopback `-url`; the doctor itself speaks no TLS |
+| DB040, DB041 | `ssl=off` on a non-loopback `-url`; the doctor itself ran without TLS or without verifying the server (only with `-insecure`) |
 | DB050-DB054 | copies only: clock skew over 2 s, clients inherited from the golden, app password still the golden's, `kling.db.state` not `ready`, host password file of the copy (by machine ID) missing, too open or not matching |
 
 A machine is checked from inside (`kling exec ... su postgres -c 'psql -X -At'`, SQL on
-stdin); a `-url` from the host with `pgmini` (SCRAM only, never a cleartext password),
-reading the password from `PGPASSWORD`: a URL with a password is refused.
+stdin); a `-url` from the host with `pgmini` (TLS, `sslmode=verify-full` by default with the
+system roots plus `sslrootcert`/`-ca-file`; SCRAM, with `-PLUS` channel binding when
+offered, never a cleartext password), reading the password from `PGPASSWORD`: a URL with
+a password is refused. `sslmode=disable` or `require` on a non-loopback host needs `-insecure`.
 
 Host reachability of a copy's Postgres differs by platform: on macOS the host reaches
 port 5432 only through a forward (`kling.ports`, loopback, peer-credential checked);
