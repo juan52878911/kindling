@@ -2,11 +2,12 @@
 # phone.sh — teléfonos Android (Redroid 13) en microVMs de kindling, en el Mac.
 #
 #   ./phone.sh up [-n N]          N teléfonos nuevos desde el dorado (lo crea si falta)
-#   ./phone.sh ls                 nombre, estado y puertos adb/vnc en 127.0.0.1
-#   ./phone.sh view [-vnc] <tel>  scrcpy si está; si no, una captura (adb) en Vista Previa;
-#                                 -vnc: Compartir Pantalla por un puente (hoy, en negro)
+#   ./phone.sh ls                 nombre, estado y puerto adb en 127.0.0.1
+#   ./phone.sh view <tel>         scrcpy si está; si no, una captura (adb) en Vista Previa
 #   ./phone.sh adb <tel> [args]   adb contra ese teléfono (sin args: imprime el serial)
 #   ./phone.sh shell <tel> [cmd]  una shell de Android (adb shell; sin adb, kling exec)
+#   ./phone.sh api <tel> <MÉTODO> <ruta> [fichero]   la API de kling-phoned (docs/phoned.md)
+#                                 por POST /machines/{ref}/guest, sin allow_exec
 #   ./phone.sh pause <tel>...     pausado en RAM: no gasta CPU; resume en ~25 ms
 #   ./phone.sh resume <tel>...    lo reanuda (los puertos se leen siempre de kling ps)
 #   ./phone.sh pool <N>           deja N teléfonos pausados listos para resume
@@ -23,15 +24,17 @@
 #   - Un dorado "$GOLDEN": Android arrancado en frío hasta sys.boot_completed=1,
 #     pantalla encendida, sin bloqueo ni animaciones, y `kling save`. Cada
 #     teléfono es `kling run -from` del dorado (~0,6 s de restaurar).
-#   - adb (sin autenticación) y el VNC de Redroid (sin contraseña) llegan al Mac
-#     por los reenvíos de kindling (etiqueta kling.ports=5555,5900), SOLO en
-#     127.0.0.1. El puerto del Mac cambia en cada restore/thaw: siempre se lee de
+#   - adb llega al Mac por los reenvíos de kindling (etiqueta
+#     kling.ports=5555,8091; el 8091 es la API de kling-phoned), SOLO en
+#     127.0.0.1. El VNC de Redroid ya no va por defecto (pantalla en negro, #96). Con una imagen de kling-phoned adb pide
+#     clave: la de cada clon viaja con su identidad (PHONE_ADB_PUBKEY, por
+#     defecto ~/.android/adbkey.pub; PHONE_ADB_KEYS_DIR/<tel>.pub si existe). El puerto del Mac cambia en cada restore/thaw: siempre se lee de
 #     `kling ps -json` (campo forwards), nunca se guarda.
 #   - "Listo" lo decide la imagen (/etc/kindling/ready: sys.boot_completed=1) y
 #     lo espera el núcleo: `kling run -wait-ready` al arrancar el dorado y cada
 #     clon, y `kling save` no congela hasta que la sonda dice que sí.
-#   - Identidad propia por clon: tras restaurar, un android_id y un nombre nuevos
-#     viajan como secreto de sesión por MMDS (`kling machine secret -hooks`,
+#   - Identidad propia por clon: tras restaurar, un android_id, un nombre, una
+#     serie y las claves de adb nuevos viajan como secreto de sesión por MMDS (`kling machine secret -hooks`,
 #     stdin) y el gancho de la imagen (/etc/kindling/post-restore.d/10-identity)
 #     los aplica dentro. No quedan en la línea de órdenes, ni en `kling ps`, ni
 #     en el dorado. Al vaciar después el almacén, el daemon levanta la marca de
@@ -46,6 +49,8 @@
 # 100 por vCPU; con kling v0.16, CPUS×100), PHONE_EGRESS (none | internet),
 # PHONE_MIN_MEMLEVEL (35: no arranca otro teléfono mientras
 # kern.memorystatus_level esté por debajo).
+# PHONE_EXEC (1): 0 = dorado SIN allow_exec; lo que phone.sh hacía por kling
+# exec va por la API de kling-phoned (necesita una imagen PHONED=1).
 # El egress y los recursos se deciden al hacer el dorado: `golden rebuild`.
 #
 # bash 3.2 (el de macOS): nada de mapfile, arrays asociativos ni ${x,,}.
@@ -53,7 +58,7 @@ set -euo pipefail
 
 PHONE_ROOT="${PHONE_ROOT:-$HOME/.kindling-android-telefono}"
 # ── linux ── En Linux (Firecracker, docs/proxmox.md) no hay reenvíos a
-# 127.0.0.1: adb y VNC se alcanzan en la IP de la VM (tap), que solo se ve desde
+# 127.0.0.1: adb se alcanza en la IP de la VM (tap), que solo se ve desde
 # el anfitrión. PHONE_SOCK=/run/kling.sock usa un daemon ya en marcha (el del
 # sistema, con el kernel Android) en vez de arrancar uno privado.
 OS="$(uname -s)"
@@ -77,6 +82,8 @@ MIN_MEMLEVEL="${PHONE_MIN_MEMLEVEL:-35}"
 TTL="${PHONE_TTL:-8760h}"
 BOOT_TIMEOUT="${PHONE_BOOT_TIMEOUT:-180}"
 LABEL_PHONE="kindling.phone=1"
+PHONE_EXEC="${PHONE_EXEC:-1}"
+PHONED_PORT=8091
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'phone.sh: %s\n' "$*" >&2; exit 1; }
@@ -141,7 +148,7 @@ daemon_stop() {
 }
 
 # ── lectura de `kling ps -json` ──────────────────────────────────────────────
-# phones_tsv: nombre, estado, host:puerto para 5555 y para 5900 ("-" si no
+# phones_tsv: nombre, estado, host:puerto para 5555 ("-" si no
 # hay), de las máquinas con la etiqueta de teléfono, ordenadas por nombre. En
 # el Mac es 127.0.0.1:<reenvío>; en Linux, <ip de la VM>:<puerto> si corre.
 phones_tsv() {
@@ -151,8 +158,8 @@ phones_tsv() {
     for my $m (sort { $a->{name} cmp $b->{name} } @m) {
       next unless ($m->{labels} || {})->{"kindling.phone"};
       my $f = $m->{forwards} || {};
-      my ($a, $v) = map { $f->{$_} // (($m->{ip} && $m->{state} eq "running") ? "$m->{ip}:$_" : "-") } qw(5555 5900);
-      print join("\t", $m->{name}, $m->{state}, $a, $v), "\n";
+      my $a = $f->{5555} // (($m->{ip} && $m->{state} eq "running") ? "$m->{ip}:5555" : "-");
+      print join("\t", $m->{name}, $m->{state}, $a), "\n";
     }'
 }
 
@@ -167,9 +174,7 @@ nombre() {
 # puerto TEL GUESTPORT: host:puerto por el que se llega a ese puerto del
 # teléfono. Vacío si no está (pausado, parado o sin reenvío).
 puerto() {
-  local col=3
-  [ "$2" = 5900 ] && col=4
-  phones_tsv | awk -F'\t' -v n="$1" -v c="$col" '$1 == n && $c != "-" { print $c }'
+  phones_tsv | awk -F'\t' -v n="$1" '$1 == n && $3 != "-" { print $3 }'
 }
 
 estado() { phones_tsv | awk -F'\t' -v n="$1" '$1 == n { print $2 }'; }
@@ -178,6 +183,17 @@ existe() { [ -n "$(estado "$1")" ]; }
 
 # ── adb ──────────────────────────────────────────────────────────────────────
 tiene_adb() { command -v adb >/dev/null 2>&1; }
+
+# adb_usable TEL: este phone.sh puede entrar por adb en TEL: hay adb y la clave
+# que abre TEL es la del usuario (~/.android/adbkey, la que usa el servidor de
+# adb), no una propia del clon (PHONE_ADB_KEYS_DIR/<tel>.pub: esa es para
+# quien tenga su privada). Con PHONE_EXEC=0 y sin clave, tampoco: la imagen de
+# kling-phoned pide clave.
+adb_usable() {
+  tiene_adb || return 1
+  if [ -n "${PHONE_ADB_KEYS_DIR:-}" ] && [ -f "$PHONE_ADB_KEYS_DIR/$1.pub" ]; then return 1; fi
+  [ "$PHONE_EXEC" = 1 ] || [ -n "$(adb_pubkey "$1")" ]
+}
 
 # adb_listo SERIAL TIMEOUT_S: adb connect hasta que `adb shell true` conteste.
 adb_listo() {
@@ -215,6 +231,29 @@ adb_olvida() {
 # ── dentro de Android ────────────────────────────────────────────────────────
 ax() { local m="$1" t="$2"; shift 2; k exec -timeout "${t}s" "$m" -- android-sh "$@"; }
 
+# api TEL MÉTODO RUTA [FICHERO]: una llamada a kling-phoned por el proxy del
+# daemon (POST /machines/{ref}/guest), sin allow_exec. Imprime el cuerpo de la
+# respuesta (decodificado si la ruta pide encoding=base64 y es un GET) y sale
+# con 0 si el invitado contestó 2xx. El cuerpo de ida sale de FICHERO tal cual.
+api() {
+  local m="$1" meth="$2" path="$3" body="${4:-}"
+  perl -MJSON::PP -e '
+    my ($meth, $path, $port, $bf) = @ARGV; my $b = "";
+    if (defined $bf && $bf ne "") { local $/; open(my $f, "<", $bf) or die "$bf: $!\n"; binmode $f; $b = <$f>; }
+    print encode_json({port => $port + 0, path => $path, method => $meth, body => $b, wait_ms => 5000,
+      max_body_bytes => 33554432, headers => {"Content-Type" => "application/json"}});' \
+    "$meth" "$path" "$PHONED_PORT" "$body" |
+  curl -sS --max-time 300 --unix-socket "$SOCK" -X POST -H 'Content-Type: application/json' \
+    --data-binary @- "http://kling/machines/$m/guest" |
+  perl -MJSON::PP -MMIME::Base64 -e '
+    local $/; my $t = <STDIN>; my $d = eval { decode_json($t) } or do { print STDERR "phone.sh api: $t\n"; exit 1 };
+    if (!defined $d->{status}) { print STDERR "phone.sh api: ", ($d->{message} // $t), "\n"; exit 1 }
+    my $b = $d->{body} // "";
+    if ($ARGV[0] eq "GET" && $ARGV[1] =~ /encoding=base64/ && $d->{status} == 200) { $b = decode_base64($b) }
+    else { utf8::encode($b) }
+    binmode STDOUT; print $b; exit($d->{status} >= 200 && $d->{status} < 300 ? 0 : 2)' "$meth" "$path"
+}
+
 # espera_listo TEL: con el núcleo nuevo, la sonda de la imagen (run
 # -wait-ready ya esperó; esto lo confirma); con v0.16, getprop a mano.
 espera_listo() {
@@ -238,7 +277,7 @@ espera_boot() {
 
 prepara_pantalla() {
   # Pantalla encendida para siempre, sin bloqueo y sin animaciones (lo mismo
-  # que fase0.sh): lo que se ve por VNC es la pantalla de inicio, y los
+  # que fase0.sh): lo que se ve es la pantalla de inicio, y los
   # clones restauran ya así.
   ax "$1" 30 'svc power stayon true; settings put system screen_off_timeout 2147483647;
     locksettings set-disabled true; input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard;
@@ -250,6 +289,13 @@ prepara_pantalla() {
 # fallos de Android no tiene ni un SIGILL ni una caída de system_server.
 salud() {
   local out
+  if [ "$PHONE_EXEC" = 0 ]; then
+    out="$(api "$1" GET /v1/health >/dev/null || echo "kling-phoned: not healthy ($(api "$1" GET /v1/health 2>&1 | head -c 300))"
+      api "$1" GET '/v1/logs?buffer=crash&lines=400' 2>/dev/null | grep -E "SIGILL|IN SYSTEM PROCESS|bad ELF magic" | head -n 3)"
+    [ -z "$out" ] && return 0
+    printf '%s\n' "$out" | sed "s/^/  $1: /" >&2
+    return 1
+  fi
   out="$(ax "$1" 30 'pidof system_server >/dev/null || echo "no system_server";
     service check settings | grep -q "found" || echo "settings service not found";
     logcat -d -b crash | grep -E "SIGILL|IN SYSTEM PROCESS|bad ELF magic" | head -n 3' 2>&1 || echo "android-sh failed")"
@@ -300,18 +346,24 @@ dorado_crea() {
   log "dorado: arranque en frío de $IMAGE ($CPUS vCPU, $MEM MiB, CPU ${pct:-de la receta} %, egress $EGRESS)"
   t0="$(now_ms)"
   # shellcheck disable=SC2086 # $listo son dos flags o nada
-  kq run -image "$IMAGE" -name "$cold" -cpus "$CPUS" -mem "$MEM" ${pct:+-cpu-pct "$pct"} $listo \
-    -egress "$EGRESS" -ttl "$TTL" -allow-exec -label kling.ports=5555,5900 -label "$LABEL_PHONE" >/dev/null
+  local ex="-allow-exec"
+  [ "$PHONE_EXEC" = 0 ] && ex=""
+  # shellcheck disable=SC2086 # $listo y $ex son flags o nada
+  kq run -image "$IMAGE" -name "$cold" -cpus "$CPUS" -mem "$MEM" ${pct:+-cpu-pct "$pct"} $listo $ex \
+    -egress "$EGRESS" -ttl "$TTL" -label "kling.ports=5555,$PHONED_PORT" -label "$LABEL_PHONE" >/dev/null
   if ! espera_listo "$cold"; then
-    k exec -timeout 10s "$cold" -- tail -n 30 /var/log/service.log >&2 || true
+    if [ "$PHONE_EXEC" = 0 ]; then api "$cold" GET '/v1/logs?buffer=phoned&lines=30' >&2 || true
+    else k exec -timeout 10s "$cold" -- tail -n 30 /var/log/service.log >&2 || true; fi
     die "Android did not reach sys.boot_completed=1 in ${BOOT_TIMEOUT}s ($cold kept for inspection)"
   fi
   t1="$(now_ms)"
   log "dorado: boot_completed en $(secs "$t0" "$t1") s; preparando la pantalla"
-  prepara_pantalla "$cold"
-  # Que el lanzador, adbd y el VNC estén de pie antes de congelar: un dorado a
+  # Sin exec, la prepara kling-phoned (ANDROID_PREP) antes de dar el listo.
+  [ "$PHONE_EXEC" = 0 ] || prepara_pantalla "$cold"
+  # Que el lanzador y adbd estén de pie antes de congelar: un dorado a
   # medio arrancar daría clones a medio arrancar.
   for i in $(seq 1 40); do
+    [ "$PHONE_EXEC" = 0 ] && break
     ax "$cold" 5 'getprop init.svc.adbd' 2>/dev/null | tr -d '\r' | awk '$0 == "running" { f = 1 } END { exit !f }' && break
     sleep 0.5
   done
@@ -320,6 +372,9 @@ dorado_crea() {
   # los clones (visto con el Mac bajo presión de memoria: páginas a cero y
   # SIGILL en cada proceso nuevo; docs/telefono.md). Se suelta la caché limpia
   # y se compara la que queda con el disco.
+  if [ "$PHONE_EXEC" = 0 ]; then
+    log "dorado: sin exec no se compara la caché de páginas con el disco (con verity lo vigila dm-verity: /v1/health)"
+  else
   k exec -timeout 30s "$cold" -- sh -c 'sync; echo 3 >/proc/sys/vm/drop_caches' >/dev/null 2>&1 || true
   log "dorado: comprobando la caché de páginas contra el disco"
   t0="$(now_ms)"
@@ -329,6 +384,7 @@ dorado_crea() {
     die "the guest page cache does not match the disk (host memory pressure? memory level $(nivel_memoria)); not saving a broken golden. Retry with more free memory"
   fi
   log "dorado: $(tail -n 1 "$PHONE_ROOT/verify-golden.txt") en $(secs "$t0" "$(now_ms)") s"
+  fi
   # Y que nada haya muerto por el camino: un system_server que ya se cayó una
   # vez (o un SIGILL) en el dorado se repite en cada clon.
   if ! salud "$cold"; then
@@ -347,8 +403,29 @@ dorado_crea() {
 }
 
 # ── identidad por clon ───────────────────────────────────────────────────────
-# Un android_id nuevo (16 hex, como los de Android) y el nombre del teléfono.
-# El JSON va por la entrada estándar de `kling machine secret`: nunca en argv.
+# Un android_id nuevo (16 hex, como los de Android), el nombre del teléfono, una
+# serie y las claves públicas de adb que abren ESTE clon. El JSON va por la
+# entrada estándar de `kling machine secret`: nunca en argv. Una imagen sin
+# kling-phoned ignora lo que no sea android_id y name.
+adb_pubkey() {
+  local m="$1" f
+  for f in "${PHONE_ADB_KEYS_DIR:+$PHONE_ADB_KEYS_DIR/$m.pub}" "${PHONE_ADB_PUBKEY:-$HOME/.android/adbkey.pub}"; do
+    if [ -n "$f" ] && [ -f "$f" ]; then cat "$f"; return 0; fi
+  done
+  return 0
+}
+
+identidad_json() {
+  local m="$1" id="$2" serie
+  serie="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n' | tr 'a-f' 'A-F')"
+  adb_pubkey "$m" | perl -MJSON::PP -e '
+    my ($id, $name, $serial, $ssaid) = @ARGV; local $/; my $k = <STDIN> // "";
+    my @keys = grep { /\S/ } split /\n/, $k;
+    my %p = (android_id => $id, name => $name, serial => $serial);
+    $p{adb_keys} = \@keys if @keys; $p{ssaid} = $ssaid if $ssaid ne "";
+    print encode_json({phone => \%p});' "$id" "$m" "${PHONE_SERIAL:-$serie}" "${PHONE_SSAID:-}"
+}
+
 identidad() {
   # PHONE_ANDROID_ID: conservar el de un teléfono que se rehace (16 hex).
   local m="$1" id="${PHONE_ANDROID_ID:-}"
@@ -356,10 +433,9 @@ identidad() {
   if nucleo_listo; then
     # -hooks: PUT del almacén y después los ganchos de la imagen (10-identity
     # la aplica), esperando a que acaben con éxito.
-    printf '{"phone":{"android_id":"%s","name":"%s"}}' "$id" "$m" |
-      kq machine secret "$m" -hooks || return 1
+    identidad_json "$m" "$id" | kq machine secret "$m" -hooks || return 1
   else
-    printf '{"phone":{"android_id":"%s","name":"%s"}}' "$id" "$m" | k machine secret "$m" >/dev/null || return 1
+    identidad_json "$m" "$id" | k machine secret "$m" >/dev/null || return 1
     ax "$m" 30 --identity >/dev/null || return 1
   fi
   # Aplicada: el secreto ya no hace falta en el metadata service. PUT pisa el
@@ -391,20 +467,23 @@ nuevo() {
   kq run -from "$GOLDEN" -name "$m" -ttl "$TTL" -egress "${PHONE_EGRESS:-$(egress_dorado)}" $listo ||
     die "kling run -from $GOLDEN failed"
   t1="$(now_ms)"
-  p="$(puerto "$m" 5555)"
-  if tiene_adb && [ -n "$p" ]; then
-    adb_listo "$p" 30 || die "$m: adb does not answer on $p"
-  else
-    ax "$m" 10 true >/dev/null
-  fi
-  t2="$(now_ms)"
+  # La identidad antes que adb: con adb con claves, la de este clon llega con ella.
   if ! identidad "$m"; then
     salud "$m" || true
     die "$m: could not apply its identity; Android is not healthy (above). Remove it: phone.sh rm $m"
   fi
+  t2="$(now_ms)"
+  p="$(puerto "$m" 5555)"
+  if [ -n "$p" ] && adb_usable "$m"; then
+    adb_listo "$p" 30 || die "$m: adb does not answer on $p"
+  elif [ "$PHONE_EXEC" = 0 ]; then
+    api "$m" GET /v1/health >/dev/null || die "$m: kling-phoned is not healthy"
+  else
+    ax "$m" 10 true >/dev/null
+  fi
   t3="$(now_ms)"
-  s="restore $(secs "$t0" "$t1") s, adb listo $(secs "$t0" "$t2") s, identidad $(secs "$t2" "$t3") s"
-  printf '%s\tadb %s\tvnc %s\t(%s)\n' "$m" "${p:--}" "$(puerto "$m" 5900)" "$s"
+  s="restore $(secs "$t0" "$t1") s, identidad $(secs "$t1" "$t2") s, adb/api listo $(secs "$t2" "$t3") s"
+  printf '%s\tadb %s\t(%s)\n' "$m" "${p:--}" "$s"
 }
 
 # ── órdenes ──────────────────────────────────────────────────────────────────
@@ -427,99 +506,36 @@ cmd_up() {
 cmd_ls() {
   ensure_daemon
   {
-    printf 'NAME\tSTATE\tADB\tVNC\n'
-    phones_tsv | awk -F'\t' 'BEGIN { OFS = "\t" } {
-      print $1, $2, $3, $4 }'
+    printf 'NAME\tSTATE\tADB\n'
+    phones_tsv
   } | column -t -s "$(printf '\t')"
 }
 
 cmd_view() {
-  local vnc=0 m p s f lp
-  [ "${1:-}" = -vnc ] && { vnc=1; shift; }
-  [ $# -eq 1 ] || die "usage: phone.sh view [-vnc] <tel>"
+  local m s f
+  [ $# -eq 1 ] || die "usage: phone.sh view <tel>"
   m="$(nombre "$1")"
   ensure_daemon
   existe "$m" || die "no phone $m (phone.sh ls)"
-  if [ "$vnc" = 0 ] && command -v scrcpy >/dev/null 2>&1 && tiene_adb; then
+  if command -v scrcpy >/dev/null 2>&1 && tiene_adb; then
     s="$(serial "$m")"
     log "scrcpy -s $s"
     ( nohup scrcpy -s "$s" --window-title "$m" >/dev/null 2>&1 & )
     return 0
   fi
-  if [ "$vnc" = 0 ]; then
-    # Sin scrcpy: una captura por adb en Vista Previa. El VNC de Redroid no
-    # sirve aquí: con render por software (SwiftShader) su vncserver falla al
-    # importar el búfer de la pantalla ("error creating EGLImage: 0x300c") y
-    # manda la pantalla en negro (medido). docs/telefono.md.
+  # Sin scrcpy: una captura en Vista Previa (por la API de kling-phoned si no
+  # hay adb o exec). El VNC de Redroid no sirve: con render por software manda
+  # la pantalla en negro (#96, docs/telefono.md).
+  mkdir -p "$PHONE_ROOT/screens"
+  f="$PHONE_ROOT/screens/$m.png"
+  if adb_usable "$m"; then
     s="$(serial "$m")"
-    mkdir -p "$PHONE_ROOT/screens"
-    f="$PHONE_ROOT/screens/$m.png"
     adb -s "$s" exec-out screencap -p >"$f" || die "screencap failed"
-    log "captura de $m en $f (en vivo: brew install scrcpy y otra vez phone.sh view $m)"
-    [ "$OS" = Linux ] || open "$f"
-    return 0
+  else
+    api "$m" GET '/v1/screen?encoding=base64' >"$f" || die "screen failed (kling-phoned)"
   fi
-  p="$(puerto "$m" 5900)"
-  [ -n "$p" ] || die "$m has no VNC port (state: $(estado "$m"))"
-  # Compartir Pantalla no habla con un VNC sin autenticación (el de Redroid
-  # solo ofrece "None" y no admite contraseña): se queda en "Conectando..."
-  # para siempre (probado). Un puente local le ofrece "VNC Authentication",
-  # acepta cualquier contraseña y habla "None" con Redroid. Solo en 127.0.0.1.
-  lp="$(vnc_puente "$p")" || die "could not start the local VNC bridge"
-  log "Compartir Pantalla → vnc://127.0.0.1:$lp (puente a $m; contraseña: cualquiera)"
-  log "aviso: con render por software el VNC de Redroid manda la pantalla en negro (docs/telefono.md)"
-  open "vnc://127.0.0.1:$lp"
-}
-
-# vnc_puente PUERTO_REDROID: arranca en segundo plano un puente VNC en un
-# puerto libre de 127.0.0.1 e imprime ese puerto. Hacia el cliente: RFB 3.8
-# con seguridad tipo 2 (reto de 16 bytes, cualquier respuesta vale: el
-# puerto solo escucha en 127.0.0.1, igual que el de Redroid); hacia Redroid:
-# tipo 1 (None). Después copia bytes en los dos sentidos. Se va solo cuando
-# lleva 2 min sin conexiones.
-vnc_puente() {
-  local f="$PHONE_ROOT/vnc-puente.$$.port"
-  rm -f "$f"
-  PUENTE_PORT_FILE="$f" nohup perl -e '
-    use strict; use IO::Socket::INET; use IO::Select; use POSIX ":sys_wait_h";
-    my $dst = shift;
-    my $l = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => 0, Listen => 5, ReuseAddr => 1) or die;
-    open my $pf, ">", $ENV{PUENTE_PORT_FILE} or die; print $pf $l->sockport, "\n"; close $pf;
-    $SIG{CHLD} = sub { 1 while waitpid(-1, WNOHANG) > 0 };
-    my $sel = IO::Select->new($l);
-    while ($sel->can_read(120)) {
-      my $c = $l->accept or next;
-      if (fork) { close $c; next }
-      close $l;
-      my $s = IO::Socket::INET->new(PeerAddr => $dst, Timeout => 5) or exit 1;
-      my $b = sub { my ($h, $n) = @_; my $r = ""; while (length($r) < $n) { my $x; sysread($h, $x, $n - length $r) or exit 1; $r .= $x } $r };
-      $b->($s, 12); syswrite($s, "RFB 003.008\n");
-      my $n = ord $b->($s, 1); my %t = map { ord($_) => 1 } split //, $b->($s, $n);
-      exit 1 unless $t{1};
-      syswrite($s, chr 1); exit 1 unless unpack("N", $b->($s, 4)) == 0;
-      # Compartir Pantalla contesta "RFB 003.003": ahí el servidor impone el
-      # tipo (u32) en vez de ofrecer una lista.
-      syswrite($c, "RFB 003.008\n");
-      if ($b->($c, 12) =~ /003\.00[0-6]/) { syswrite($c, pack "N", 2) }
-      else { syswrite($c, chr(1) . chr(2)); $b->($c, 1) }
-      syswrite($c, join "", map { chr int rand 256 } 1 .. 16); $b->($c, 16);
-      syswrite($c, pack "N", 0);
-      my $io = IO::Select->new($c, $s);
-      while (my @r = $io->can_read) {
-        for my $h (@r) {
-          my $x; my $k = sysread($h, $x, 65536); exit 0 unless $k;
-          my $o = ($h == $c) ? $s : $c; my $off = 0;
-          while ($off < $k) { my $w = syswrite($o, $x, $k - $off, $off); exit 0 unless defined $w; $off += $w }
-        }
-      }
-      exit 0;
-    }' "$1" >/dev/null 2>&1 &
-  local i
-  for i in $(seq 1 50); do
-    [ -s "$f" ] && { cat "$f"; rm -f "$f"; return 0; }
-    sleep 0.1
-  done
-  return 1
+  log "captura de $m en $f (en vivo: brew install scrcpy y otra vez phone.sh view $m)"
+  [ "$OS" = Linux ] || open "$f"
 }
 
 cmd_adb() {
@@ -545,6 +561,14 @@ cmd_shell() {
   exec "$KLING" exec "$m" -- android-sh "$@"
 }
 
+cmd_api() {
+  [ $# -ge 3 ] || die "usage: phone.sh api <tel> <METHOD> <path> [body-file]   (e.g. api 1 GET /v1/health)"
+  local m
+  m="$(nombre "$1")"; shift
+  ensure_daemon
+  api "$m" "$@"
+}
+
 cmd_pause() {
   [ $# -ge 1 ] || die "usage: phone.sh pause <tel>..."
   ensure_daemon
@@ -567,11 +591,13 @@ cmd_resume() {
     k thaw "$m" >/dev/null
     t1="$(now_ms)"
     p="$(puerto "$m" 5555)"
-    if tiene_adb && [ -n "$p" ]; then
+    if [ -n "$p" ] && adb_usable "$m"; then
       adb_listo "$p" 20 || die "$m: adb does not answer on $p after resume"
+    elif [ "$PHONE_EXEC" = 0 ]; then
+      api "$m" GET /v1/health >/dev/null || die "$m: kling-phoned is not healthy after resume"
     fi
-    printf '%s\tadb %s\tvnc %s\t(thaw %s s, adb listo %s s)\n' \
-      "$m" "${p:--}" "$(puerto "$m" 5900)" "$(secs "$t0" "$t1")" "$(secs "$t0" "$(now_ms)")"
+    printf '%s\tadb %s\t(thaw %s s, adb listo %s s)\n' \
+      "$m" "${p:--}" "$(secs "$t0" "$t1")" "$(secs "$t0" "$(now_ms)")"
   done
 }
 
@@ -634,6 +660,7 @@ main() {
     view) cmd_view "$@" ;;
     adb) cmd_adb "$@" ;;
     shell) cmd_shell "$@" ;;
+    api) cmd_api "$@" ;;
     pause) cmd_pause "$@" ;;
     resume|thaw) cmd_resume "$@" ;;
     pool) cmd_pool "$@" ;;

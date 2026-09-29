@@ -19,7 +19,9 @@ ok() { echo "ok   $*"; }
 ko() { echo "FAIL $*"; fallos=$((fallos + 1)); }
 
 SCRIPTS=(fase0.sh test-local.sh kernel/build.sh kernel/check-android-config.sh
-         image/build-image.sh image/android-launch.sh image/android-sh image/verity.sh)
+         image/build-image.sh image/android-launch.sh image/android-sh image/verity.sh
+         test-phoned.sh
+         image/kindling-phoned/ready image/kindling-phoned/post-restore.d/10-identity)
 
 # 1. sintaxis
 for s in "${SCRIPTS[@]}"; do

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Sonda de "listo" de la imagen Android con kling-phoned (api.GuestReadyProbe):
+# 0 cuando sys.boot_completed=1, leído de la memoria de propiedades de Android
+# (sin entrar en sus espacios de nombres). docs/phoned.md.
+exec /usr/local/bin/kling-phoned ready

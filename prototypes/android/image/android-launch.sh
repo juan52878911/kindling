@@ -39,7 +39,8 @@ NETNS=kandroid
 HOSTIF=kandroid0
 VETH_HOST="${ANDROID_VETH_HOST:-10.88.0.1}"
 VETH_ANDROID="${ANDROID_VETH_ANDROID:-10.88.0.2}"
-ANDROID_PORTS="${ANDROID_PORTS:-5555 5900}"
+# Solo adb: el VNC de Redroid ya no va por defecto (pantalla en negro, #96).
+ANDROID_PORTS="${ANDROID_PORTS:-5555}"
 
 log() { echo "android-launch: $*"; }
 estado() { mkdir -p "$STATE_DIR"; printf '%s\n' "$*" >"$STATE_DIR/state"; }
