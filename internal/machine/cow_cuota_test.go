@@ -144,7 +144,9 @@ func probarCuotaReal(t *testing.T, fs, cuota string) {
 	}
 	g.Close()
 
-	// Crecer por encima de la cuota (tamaño lógico + holgura) falla.
+	// Crecer por encima de la cuota (tamaño lógico + holgura) falla. La cuota
+	// cuenta bloques asignados y el dorado es disperso: hay que escribir más
+	// que el límite entero, no solo pasar del tamaño lógico.
 	w, err := os.OpenFile(r1, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +154,7 @@ func probarCuotaReal(t *testing.T, fs, cuota string) {
 	limite := cuotaInstancia(64 << 20)
 	buf := make([]byte, 1<<20)
 	var werr error
-	for off := int64(64 << 20); off < limite+32<<20 && werr == nil; off += int64(len(buf)) {
+	for off := int64(64 << 20); off < 64<<20+limite+32<<20 && werr == nil; off += int64(len(buf)) {
 		_, werr = w.WriteAt(buf, off)
 	}
 	w.Close()
