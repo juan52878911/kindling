@@ -65,13 +65,25 @@ func TestRehearseCopiaNoTocaOrigenYDestruye(t *testing.T) {
 	if len(oa.o.applied[src.ID]) != 0 {
 		t.Fatal("migrations applied to the source")
 	}
-	// Como el rol de la aplicación, con lock_timeout, ON_ERROR_STOP.
-	var found bool
+	// Como el rol de la aplicación DESDE LA AUTENTICACIÓN (peer por el socket,
+	// no postgres con role=, que RESET ROLE desharía), con lock_timeout y
+	// ON_ERROR_STOP; y el mapa peer se pone antes, en la copia desechable.
+	var found, peer bool
 	for _, c := range oa.f.calls {
 		j := strings.Join(c.args, " ")
+		if strings.HasSuffix(j, "sh -s") && strings.Contains(c.stdin, "peer map="+rehearseMap) {
+			if indexOf(c.args, src.ID) >= 0 || !strings.Contains(c.stdin, "local all app peer") {
+				t.Fatalf("peer setup %v\n%s", c.args, c.stdin)
+			}
+			peer = true
+		}
 		if strings.Contains(j, "PGOPTIONS") {
 			found = true
-			if !strings.Contains(j, "role=app") || !strings.Contains(j, "lock_timeout=5000") || !strings.Contains(j, "ON_ERROR_STOP=1") {
+			if !peer {
+				t.Fatal("migration run before the peer map was set up")
+			}
+			if strings.Contains(j, "role=") || !strings.Contains(j, "-h /run/postgresql -U app -d appdb") ||
+				!strings.Contains(j, "lock_timeout=5000") || !strings.Contains(j, "ON_ERROR_STOP=1") {
 				t.Fatalf("migration cmd %s", j)
 			}
 		}

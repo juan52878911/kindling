@@ -3,9 +3,16 @@ package main
 // kling db rehearse <copia|golden> -migrations DIR: ensayo de migraciones.
 //
 // Se hace sobre una copia DESECHABLE (un fork de una copia lista, o un up de un
-// golden), nunca sobre el origen. Cada .sql se aplica en orden, como el rol de
-// la aplicación (PGOPTIONS role=), por stdin a psql con ON_ERROR_STOP, y se
-// mide: duración, si esperó por bloqueos, y tamaño de la base antes y después.
+// golden), nunca sobre el origen. Cada .sql se aplica en orden, por stdin a
+// psql con ON_ERROR_STOP, y se mide: duración, si esperó por bloqueos, y
+// tamaño de la base antes y después.
+//
+// Como el rol de la aplicación DESDE LA AUTENTICACIÓN: el psql entra por el
+// socket con -U <rol> gracias a un mapa peer (el mismo mecanismo que ask), no
+// como postgres con role=<rol>, que un RESET ROLE en el .sql convertiría en
+// superusuario. Lo que no se cierra: los metacomandos de psql (\!) ejecutan
+// órdenes como el usuario del sistema postgres del invitado. Las migraciones
+// son código de confianza; la copia es desechable (ver docs/db.md).
 //
 // Sobre los bloqueos, con honestidad: en una copia aislada nadie más toma
 // locks, así que lo que se ve es lo que la propia migración provoca (p. ej. una
@@ -201,6 +208,12 @@ func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout 
 	if err != nil {
 		return rep, err
 	}
+	// El usuario del sistema postgres puede entrar como el rol de la
+	// aplicación por el socket (y solo por él): ver migrationCmd.
+	if _, err := a.k.Run(ctx, strings.NewReader(fmt.Sprintf(allowPeerScript, role, rehearseMap, db)),
+		"exec", "-i", "-timeout", "60s", mc.ID, "--", "sh", "-s"); err != nil {
+		return rep, fmt.Errorf("letting the migrations log in as %s in %s: %w", role, mc.Name, err)
+	}
 
 	size, err := a.dbSize(ctx, mc.ID, db)
 	if err != nil {
@@ -232,11 +245,17 @@ func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout 
 	return rep, nil
 }
 
-// migrationCmd es la orden de psql de una migración. Todo lo variable pasó
-// identPattern o es un entero: nada que escapar.
+// rehearseMap es el mapa de pg_ident.conf que deja al usuario del sistema
+// postgres entrar como el rol de la aplicación en la copia desechable.
+const rehearseMap = "kling_db_rehearse"
+
+// migrationCmd es la orden de psql de una migración: entra COMO el rol por el
+// socket (peer con rehearseMap), así que session_user es el rol y ni RESET
+// ROLE ni SET ROLE llevan al superusuario. Todo lo variable pasó identPattern
+// o es un entero: nada que escapar.
 func migrationCmd(role, db string, lockTimeout time.Duration) string {
-	return fmt.Sprintf("PGOPTIONS='-c role=%s -c lock_timeout=%d' psql -X -q -At -v ON_ERROR_STOP=1 -d %s",
-		role, lockTimeout.Milliseconds(), db)
+	return fmt.Sprintf("PGOPTIONS='-c lock_timeout=%d' psql -X -q -At -v ON_ERROR_STOP=1 -h /run/postgresql -U %s -d %s",
+		lockTimeout.Milliseconds(), role, db)
 }
 
 // runMigration aplica un fichero y rellena f.
