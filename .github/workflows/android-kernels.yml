@@ -1,0 +1,84 @@
+# Publica en cada release los kernels Android del prototipo (arm64 para vz en
+# Apple Silicon, amd64 para Firecracker en x86_64), con su sha256, su .config,
+# su .buildinfo y una atestación de procedencia firmada (Sigstore) de cada uno.
+# Así nadie necesita una VM Linux para compilar el kernel: se baja de la
+# release y se comprueba (prototypes/android/docs/constructor.md, "Kernels").
+#
+# El tarball de kernel.org se comprueba contra la lista sha256sums.asc FIRMADA
+# (claves de Linus, Greg y el autosigner de kernel.org, por WKD) antes de
+# compilar; si kernel.pin trae el sha256 fijado, tienen que coincidir.
+name: android-kernels
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'release a la que subir los kernels (ej. v0.17.0); tiene que existir'
+        required: true
+
+permissions:
+  contents: write     # subir a la release
+  id-token: write     # firmar la atestación (Sigstore, sin claves)
+  attestations: write
+
+jobs:
+  kernel:
+    name: kernel android ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - name: toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev xz-utils curl gnupg gcc-aarch64-linux-gnu
+
+      - name: kernel.org tarball sha256 (signed list)
+        id: ksha
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/builders/kernel/kernel.pin
+          curl -fsSLo sha256sums.asc "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/sha256sums.asc"
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --quiet --auto-key-locate clear,wkd --locate-keys \
+            torvalds@kernel.org gregkh@kernel.org autosigner@kernel.org
+          gpg --batch --verify sha256sums.asc
+          sum="$(awk -v f="linux-$KERNEL_VERSION.tar.xz" '$2 == f {print $1}' sha256sums.asc)"
+          [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "no signed sha256 for linux-$KERNEL_VERSION" >&2; exit 1; }
+          if [ -n "${KERNEL_SHA256:-}" ] && [ "$KERNEL_SHA256" != "$sum" ]; then
+            echo "kernel.pin says $KERNEL_SHA256, the signed list says $sum" >&2; exit 1
+          fi
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
+          echo "linux-$KERNEL_VERSION.tar.xz: $sum (signed list verified)"
+
+      - name: build
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          KERNEL_SHA256: ${{ steps.ksha.outputs.sha256 }}
+          OUT: ${{ github.workspace }}/dist
+        run: prototypes/android/kernel/build.sh
+
+      - name: attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/vmlinux-*-android
+
+      - name: upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          gh release upload "$TAG" dist/vmlinux-*-android dist/vmlinux-*-android.sha256 \
+            dist/vmlinux-*-android.config dist/vmlinux-*-android.buildinfo --clobber
