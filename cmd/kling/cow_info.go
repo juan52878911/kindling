@@ -20,13 +20,23 @@ func lineaCoW(c *api.CoWInfo) string {
 	case "reflink":
 		b.WriteString("reflink (the data root shares blocks)")
 	case "store":
-		fmt.Fprintf(&b, "store (reflink inside kindling's %s store)", nombreFSAlmacen(c.Store))
+		if c.Pending {
+			// Aún no existe ni se ha montado: nada garantiza que vaya a poder.
+			b.WriteString("store pending (created on first use)")
+		} else {
+			fmt.Fprintf(&b, "store (reflink inside kindling's %s store)", nombreFSAlmacen(c.Store))
+		}
 	case "clonefile":
 		b.WriteString("clonefile (APFS)")
 	default:
 		b.WriteString("copy (every instance copies the whole overlay)")
 	}
 	fmt.Fprintf(&b, "  [daemon.cow=%s]", c.Setting)
+	// El motivo, cuando dice algo que el modo no: por qué se copia (espacio,
+	// sistema de ficheros, núcleo) o qué almacén se va a crear.
+	if c.Reason != "" && (c.Pending || (c.Mode == "copy" && c.Setting != "off")) {
+		fmt.Fprintf(&b, "; %s", c.Reason)
+	}
 	if s := c.Store; s != nil {
 		if s.Mounted {
 			fmt.Fprintf(&b, "; store %s (%s): %d of %d MiB free", s.Path, nombreFSAlmacen(s), s.FreeMiB, s.SizeMiB)

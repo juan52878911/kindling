@@ -12,6 +12,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Fase baja: copias de disco
 
+- **`kling info` ya no da el almacén por hecho antes de crearlo (#60).** Con
+  `daemon.cow=auto` decía `store (reflink inside kindling's XFS store)` antes de que el
+  almacén existiera o se hubiera probado. Ahora dice `store pending (created on first
+  use)` hasta el primer `run -from`, con qué almacén se creará y si el núcleo aún no
+  lista su sistema de ficheros (`GET /info` gana `cow.pending`). La falta de sitio para
+  el almacén se detecta al arrancar y deja el modo en `copy` con el motivo, que ahora sale
+  también en `kling info`.
+
 - **macOS: `commit` clona el overlay en APFS (#62).** Copiaba el overlay disperso desde
   el descriptor comprobado porque `cp -c /dev/fd/N` no clona; ahora usa
   `fclonefileat(2)` desde ese mismo descriptor, por su número de llamada al sistema (sin

@@ -155,8 +155,16 @@ func (m *Manager) detectarCoW(cfg CoWConfig) (string, string) {
 		m.alm.mu.Unlock()
 	default:
 		errAlm = puedeAlmacen(m.alm)
+		if errAlm == nil {
+			errAlm = m.alm.comprobarEspacio(cfg.StoreGiB)
+		}
 	}
-	return decidirCoW(cfg.Mode, nativo, errAlm)
+	modo, motivo := decidirCoW(cfg.Mode, nativo, errAlm)
+	if modo == cowModoStore && !m.alm.existe() {
+		b, _ := os.ReadFile("/proc/filesystems")
+		motivo += notaAlmacenPendiente(m.alm.fs, soportados(string(b))[m.alm.fs])
+	}
+	return modo, motivo
 }
 
 // puedeAlmacen comprueba lo que hace falta para crear el almacén: root, loop,

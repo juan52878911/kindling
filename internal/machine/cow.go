@@ -94,6 +94,18 @@ func decidirCoW(pedido string, nativo bool, errAlmacen error) (modo, motivo stri
 	return cowModoCopy, fmt.Sprintf("unknown daemon.cow %q: copying overlays", pedido)
 }
 
+// notaAlmacenPendiente completa el motivo del modo store cuando el almacén aún
+// no existe: de qué tipo será y, si el núcleo todavía no lista ese sistema de
+// ficheros, que tendrá que cargar su módulo al montarlo (en un contenedor LXC
+// no puede, y el primer run -from lo descubrirá).
+func notaAlmacenPendiente(fs string, conoce bool) string {
+	n := fmt.Sprintf(" (%s store, created on the first run -from", fs)
+	if !conoce {
+		n += fmt.Sprintf("; the kernel does not list %s yet: it has to load its module to mount it", fs)
+	}
+	return n + ")"
+}
+
 // estadoCoW es el modo en uso y sus contadores. Sin configurar (tests, o un
 // daemon que no llama a SetCoW) es la copia de siempre.
 type estadoCoW struct {
@@ -171,6 +183,10 @@ func (m *Manager) CoWInfo() *api.CoWInfo {
 	m.cow.mu.Unlock()
 	if m.alm != nil {
 		info.Store = m.alm.info()
+		// En modo store, hasta el primer run -from el almacén no existe (o no
+		// se ha montado): se crea entonces. Decir "store" sin más daba por
+		// hecho algo que aún no se ha probado.
+		info.Pending = info.Mode == cowModoStore && !m.alm.estaListo()
 	}
 	return info
 }
@@ -500,6 +516,26 @@ func nombreSeguro(n string) error {
 func (a *almacenCoW) existe() bool {
 	_, err := os.Lstat(a.img)
 	return err == nil
+}
+
+// estaListo dice si el almacén está montado y probado: hasta entonces el modo
+// store está pendiente (api.CoWInfo.Pending).
+func (a *almacenCoW) estaListo() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.montado
+}
+
+// comprobarEspacio dice si cabe un almacén nuevo en la raíz (tamAlmacen): si
+// no, se sabe ya al arrancar y no hace falta esperar al primer run -from para
+// decir por qué se copia.
+func (a *almacenCoW) comprobarEspacio(gib int) error {
+	_, libre, err := a.libreEn(a.root)
+	if err != nil {
+		return err
+	}
+	_, err = tamAlmacen(libre, gib)
+	return err
 }
 
 // montarSiExiste monta al arrancar un almacén ya creado, sea cual sea el modo:
