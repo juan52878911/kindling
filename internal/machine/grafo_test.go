@@ -455,7 +455,7 @@ func TestGrafoDespertarCanceladoNoCuenta(t *testing.T) {
 	}
 	for i := range despertarMaxEspera + 8 {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-		_, _, err := e.m.resolverArista(ctx, web, g.ID, "web", "api", 8080, api.GraphEdgeLink)
+		_, _, err := e.m.resolverArista(ctx, web, g.ID, "web", "api", 8081, api.GraphEdgeLink)
 		cancel()
 		if errors.Is(err, credproxy.ErrEnlaceOcupado) {
 			t.Fatalf("la conexión %d se rechazó por ocupado sin nadie esperando", i+1)
