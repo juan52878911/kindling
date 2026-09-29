@@ -103,6 +103,11 @@ func mcpImport(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *isolation == mcp.IsolationSession {
+		if err := mcp.SessionIsolationConflict(importVols); err != nil {
+			return fmt.Errorf("-isolation session: %w", err)
+		}
+	}
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: kling mcp import <service> [-image image]")
 	}

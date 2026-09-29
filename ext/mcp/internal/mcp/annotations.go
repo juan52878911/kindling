@@ -118,3 +118,23 @@ func SetIsolation(ctx context.Context, c *api.Client, name, mode string) error {
 	_, err := c.SetAnnotation(ctx, name, IsolationKey, mode)
 	return tooOld(err)
 }
+
+// SessionIsolationConflict explica por qué un servicio con estos volúmenes no
+// puede aislar cada sesión, o devuelve nil si puede.
+//
+// Un volumen de escritura tiene un solo escritor (internal/machine/volume.go), y
+// en modo session cada sesión es otra máquina que lo monta —congelada también
+// cuenta—. La segunda sesión no arrancaría mientras la primera siguiera viva:
+// el servicio atendería a una sola sesión a la vez hasta que la anterior se
+// cerrase o caducase. Mejor decirlo al activarlo que en cada initialize.
+func SessionIsolationConflict(vols []api.VolumeAttachment) error {
+	for _, v := range vols {
+		if !v.ReadOnly {
+			return fmt.Errorf("volume %q is mounted read-write, and a volume has a single writer: "+
+				"with one microVM per session, a second session could not start while the first one "+
+				"exists (frozen included). Mount it read-only (%s:ro), or keep isolation service",
+				v.Name, v.Name)
+		}
+	}
+	return nil
+}

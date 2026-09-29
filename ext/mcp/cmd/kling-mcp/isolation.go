@@ -40,6 +40,11 @@ func mcpIsolation(args []string) error {
 	if !mcp.ValidIsolation(mode) {
 		return fmt.Errorf("unknown isolation %q: use %s or %s", mode, mcp.IsolationService, mcp.IsolationSession)
 	}
+	if mode == mcp.IsolationSession {
+		if err := mcp.SessionIsolationConflict(s.VolumeSet()); err != nil {
+			return fmt.Errorf("%s: %w", service, err)
+		}
+	}
 	if err := mcp.SetIsolation(ctx, c, s.Name, mode); err != nil {
 		return err
 	}
