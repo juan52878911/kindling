@@ -237,9 +237,12 @@ ALTER ROLE %[1]s SET default_transaction_read_only = on;
 
 // checkRORole lista por qué un rol NO es de solo lectura en esta base (vacío:
 // lo es). Lo que se exige: que exista y pueda entrar; ningún atributo de
-// administración; no pertenecer a roles con ellos ni a los predefinidos que
-// escriben, leen ficheros del servidor o señalan procesos; no ser dueño de
-// ninguna relación ni de la base, ni poder escribir en ninguna.
+// administración; no pertenecer a NINGÚN rol salvo pg_read_all_data; no ser
+// dueño de ninguna relación ni de la base, ni poder escribir en ninguna.
+//
+// Pertenencia con 'MEMBER', no 'USAGE': en PG16 un GRANT app TO ro WITH
+// INHERIT FALSE no hereda privilegios (USAGE da falso) pero sí deja hacer SET
+// ROLE app. Y además pg_auth_members directo, por si pg_has_role cambiara.
 const checkRORole = `WITH r AS (SELECT * FROM pg_roles WHERE rolname = '%[1]s')
 SELECT coalesce(json_agg(p), '[]')::text FROM (
   SELECT 'does not exist' AS p WHERE NOT EXISTS (SELECT FROM r)
@@ -249,18 +252,16 @@ SELECT coalesce(json_agg(p), '[]')::text FROM (
   UNION ALL SELECT 'has CREATEDB' FROM r WHERE rolcreatedb
   UNION ALL SELECT 'has REPLICATION' FROM r WHERE rolreplication
   UNION ALL SELECT 'has BYPASSRLS' FROM r WHERE rolbypassrls
-  UNION ALL (SELECT 'is a member of ' || s.rolname FROM r, pg_roles s
-    WHERE s.oid <> r.oid AND pg_has_role(r.oid, s.oid, 'MEMBER')
-      AND (s.rolsuper OR s.rolcreaterole OR s.rolcreatedb OR s.rolreplication OR s.rolbypassrls
-           OR s.rolname IN ('pg_write_all_data', 'pg_execute_server_program', 'pg_read_server_files',
-                            'pg_write_server_files', 'pg_signal_backend', 'pg_checkpoint',
-                            'pg_create_subscription', 'pg_monitor'))
+  UNION ALL (SELECT DISTINCT 'is a member of ' || s.rolname FROM r, pg_roles s
+    WHERE s.oid <> r.oid AND s.rolname <> 'pg_read_all_data'
+      AND (pg_has_role(r.oid, s.oid, 'MEMBER')
+           OR EXISTS (SELECT FROM pg_auth_members m WHERE m.member = r.oid AND m.roleid = s.oid))
     ORDER BY 1 LIMIT 10)
   UNION ALL SELECT 'owns database ' || d.datname FROM r, pg_database d
-    WHERE d.datname = current_database() AND pg_has_role(r.oid, d.datdba, 'USAGE')
+    WHERE d.datname = current_database() AND pg_has_role(r.oid, d.datdba, 'MEMBER')
   UNION ALL (SELECT 'owns or can write ' || c.oid::regclass::text FROM r, pg_class c
     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-      AND (pg_has_role(r.oid, c.relowner, 'USAGE')
+      AND (pg_has_role(r.oid, c.relowner, 'MEMBER')
            OR (c.relkind <> 'S' AND has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE'))
            OR (c.relkind = 'S' AND has_sequence_privilege(r.oid, c.oid, 'UPDATE')))
     ORDER BY 1 LIMIT 10)

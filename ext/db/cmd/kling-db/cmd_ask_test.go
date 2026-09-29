@@ -396,3 +396,34 @@ func TestCeldaSinControl(t *testing.T) {
 		t.Fatalf("cell %q", got)
 	}
 }
+
+// La comprobación del rol rechaza CUALQUIER pertenencia salvo
+// pg_read_all_data, con 'MEMBER' (no 'USAGE': en PG16 un GRANT ... WITH
+// INHERIT FALSE da USAGE falso pero deja hacer SET ROLE), y mira también
+// pg_auth_members directamente. La propiedad, igual, con 'MEMBER'.
+func TestCheckRORolePertenencias(t *testing.T) {
+	q := fmt.Sprintf(checkRORole, "kling_db_ro")
+	if strings.Contains(q, "'USAGE'") {
+		t.Fatal("pg_has_role with USAGE misses SET-only memberships")
+	}
+	if n := strings.Count(q, "'MEMBER')"); n != 3 {
+		t.Fatalf("%d pg_has_role(..., 'MEMBER'), want 3 (membership, database owner, relation owner)", n)
+	}
+	for _, want := range []string{
+		"s.rolname <> 'pg_read_all_data'",
+		"FROM pg_auth_members m WHERE m.member = r.oid AND m.roleid = s.oid",
+		"pg_has_role(r.oid, d.datdba, 'MEMBER')",
+		"pg_has_role(r.oid, c.relowner, 'MEMBER')",
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("checkRORole lacks %q", want)
+		}
+	}
+	// Nada de lista de roles "peligrosos": todo lo que no sea pg_read_all_data
+	// es una pertenencia de más (app, pg_write_all_data, un rol cualquiera).
+	for _, bad := range []string{"pg_write_all_data", "pg_execute_server_program", "s.rolsuper OR"} {
+		if strings.Contains(q, bad) {
+			t.Errorf("checkRORole still filters memberships by a list (%q)", bad)
+		}
+	}
+}
