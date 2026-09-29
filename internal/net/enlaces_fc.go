@@ -64,6 +64,10 @@ type GraphSpec struct {
 	// Domains: los de allowlist, por si hubiera que rearrancar el resolver.
 	Domains []string
 	Links   []LinkSpec
+	// Credentials dice si el nodo tiene alguna arista credential saliente:
+	// solo entonces necesita, en egress none o internet, los DNAT y ACCEPT
+	// de los proxies de credenciales (ver reglasGrafo).
+	Credentials bool
 	// AuditPath es el registro de la máquina (el del proxy de credenciales).
 	AuditPath string
 }
@@ -140,7 +144,7 @@ func SetGraph(n *Net, spec GraphSpec) error {
 		return err
 	}
 	if spec.Egress != EgressAllowlist {
-		if err := n.asegurarReglas(n.reglasGrafo(spec.Egress)); err != nil {
+		if err := n.asegurarReglas(n.reglasGrafo(spec.Egress, spec.Credentials)); err != nil {
 			return err
 		}
 	}
@@ -273,26 +277,37 @@ func InvalidarEnlaces(ids ...string) int {
 
 // reglasGrafo pone en el netns de un nodo en egress none o internet lo que en
 // allowlist ya puso applyAllowlist: el DNS del invitado al resolver del host
-// y los proxies de credenciales, con sus ACCEPT delante de los DROP. Nada de
-// esto abre una salida: todo va a n.HostIP, el lado host del propio veth.
-func (n *Net) reglasGrafo(e Egress) [][]string {
+// y, si el nodo tiene aristas credential (creds), los proxies de
+// credenciales, con sus ACCEPT delante de los DROP. Nada de esto abre una
+// salida: todo va a n.HostIP, el lado host del propio veth.
+//
+// Sin aristas credential no se ponen: el DNAT de Postgres lleva TODO el TCP a
+// n.HostIP (salvo 80/443) al proxy, y un nodo con solo aristas link no tiene
+// por qué alcanzar un proxy que no le sirve de nada (aunque no escuche nadie
+// por él, es superficie que sobra). Una vez puestas no se quitan si luego
+// desaparece la arista: las aristas de un grafo no cambian en vivo.
+func (n *Net) reglasGrafo(e Egress, creds bool) [][]string {
 	dnsTarget := fmt.Sprintf("%s:%d", n.HostIP, dnsPort)
 	var reglas [][]string
 	for _, proto := range []string{"udp", "tcp"} {
 		reglas = append(reglas, []string{"-t", "nat", "-A", "PREROUTING", "-i", TapName,
 			"-p", proto, "--dport", "53", "-j", "DNAT", "--to-destination", dnsTarget})
 	}
-	for _, r := range n.credNATRules() {
-		reglas = append(reglas, r[1:]) // sin el "iptables" de delante
+	if creds {
+		for _, r := range n.credNATRules() {
+			reglas = append(reglas, r[1:]) // sin el "iptables" de delante
+		}
 	}
 	dnsPortStr := strconv.Itoa(dnsPort)
 	for _, proto := range []string{"udp", "tcp"} {
 		reglas = append(reglas, []string{"-I", "FORWARD", "1", "-i", TapName, "-o", n.NSIf,
 			"-p", proto, "-d", n.HostIP, "--dport", dnsPortStr, "-j", "ACCEPT"})
 	}
-	for _, r := range n.credForwardRules() {
-		// {"iptables", "-A", "FORWARD", ...} -> {"-I", "FORWARD", "1", ...}
-		reglas = append(reglas, append([]string{"-I", "FORWARD", "1"}, r[3:]...))
+	if creds {
+		for _, r := range n.credForwardRules() {
+			// {"iptables", "-A", "FORWARD", ...} -> {"-I", "FORWARD", "1", ...}
+			reglas = append(reglas, append([]string{"-I", "FORWARD", "1"}, r[3:]...))
+		}
 	}
 	if e == EgressNone {
 		// Sin MASQUERADE (none no lo tiene), la respuesta del host iría a

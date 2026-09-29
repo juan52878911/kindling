@@ -757,6 +757,8 @@ func TestGrafoUpAristasSegunPlataforma(t *testing.T) {
 	}
 	if spec, ok := e.redes["kl-"+e.maquina(e.grafoPorNombre("tienda"), "web")[:8]]; !ok || len(spec.Links) != 1 || spec.Links[0].Host != "api.graph" {
 		t.Fatalf("la red de web no llevaba su enlace: %+v", e.redes)
+	} else if spec.Credentials {
+		t.Error("un nodo con solo aristas link pidió los proxies de credenciales")
 	}
 	g := grafoTienda(true)
 	g.Name = "conclave"
@@ -769,6 +771,9 @@ func TestGrafoUpAristasSegunPlataforma(t *testing.T) {
 		t.Fatal(err)
 	}
 	apiID := cg.Nodes["api"].MachineID
+	if spec, ok := e.redes["kl-"+apiID[:8]]; !ok || !spec.Credentials {
+		t.Errorf("el nodo con la arista credential no pidió sus proxies: %+v", spec)
+	}
 	creds, err := e.m.cargarCredenciales(apiID)
 	if err != nil || len(creds) != 1 {
 		t.Fatalf("credenciales de api: %v %v", creds, err)

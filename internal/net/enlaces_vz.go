@@ -23,10 +23,11 @@ type LinkSpec struct {
 
 // GraphSpec: ver enlaces_fc.go.
 type GraphSpec struct {
-	Egress    Egress
-	Domains   []string
-	Links     []LinkSpec
-	AuditPath string
+	Egress      Egress
+	Domains     []string
+	Links       []LinkSpec
+	Credentials bool
+	AuditPath   string
 }
 
 // SetGraph no monta nada en macOS.

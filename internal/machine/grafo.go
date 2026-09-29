@@ -702,6 +702,7 @@ func (m *Manager) especRedGrafoLocked(mc *api.Machine) (knet.GraphSpec, bool) {
 			})
 			hay = true
 		case api.GraphEdgeCredential:
+			spec.Credentials = true
 			hay = true
 		}
 	}
