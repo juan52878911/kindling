@@ -6,6 +6,7 @@
 #
 #   sudo prototypes/android/image/build-image.sh
 #   sudo FETCH=docker prototypes/android/image/build-image.sh     # con Docker
+#   sudo PHONED=0 prototypes/android/image/build-image.sh         # lanzador de bash (comparar)
 #   sudo DATA_MODE=tmpfs prototypes/android/image/build-image.sh  # /data en RAM
 #   sudo FETCH=local ROOTFS_TAR=redroid.tar ROOTFS_SHA256=<sha256> \
 #        prototypes/android/image/build-image.sh                  # un `docker export` propio
@@ -85,6 +86,17 @@ OUT="${OUT:-$WORK/out}"
 FETCH="${FETCH:-curl}"
 GROW="${GROW:-4096}"               # MiB de techo para la capa; se encoge al final
 KLING_GUEST="${KLING_GUEST:-}"     # binario linux/$ARCH de cmd/kling-guest
+# kling-phoned (prototypes/android/phoned, docs/phoned.md): 1 = el agente Go
+# lanza Android, sirve la API del teléfono y aplica la identidad; 0 = el camino
+# de antes (android-launch.sh + android-sh + gancho de bash), para comparar.
+PHONED="${PHONED:-1}"
+KLING_PHONED="${KLING_PHONED:-}"   # binario linux/$ARCH; si falta y hay Go, se compila
+# adb con claves (ro.adb.secure=1): las de cada clon llegan por MMDS. Solo con
+# kling-phoned, que es quien las instala.
+ADB_SECURE="${ADB_SECURE:-$PHONED}"
+# Pantalla encendida, sin bloqueo ni animaciones tras arrancar (lo hace
+# kling-phoned; phone.sh lo hacía por kling exec). La sonda de listo lo espera.
+PREP="${PREP:-$PHONED}"
 
 # Lo que el lanzador lee dentro del invitado (android.conf). Resolución fija:
 # la fase 0 compara tiempos de dump/screencap y una pantalla distinta los mueve.
@@ -117,6 +129,8 @@ case "$ANDROID_NET" in veth|isolated|shared) ;; *) die "ANDROID_NET must be veth
 [[ "$REDROID_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "REDROID_DIGEST must be sha256:<64 hex>"
 [[ "$IMAGE_NAME" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "invalid IMAGE_NAME"
 [[ "$BASE_NAME" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "invalid BASE_NAME"
+case "$PHONED" in 0|1) ;; *) die "PHONED must be 0 or 1" ;; esac
+[ "$ADB_SECURE" = 0 ] || [ "$PHONED" = 1 ] || die "ADB_SECURE=1 needs PHONED=1 (the bash hook does not install adb keys)"
 
 PATH="$PATH:/usr/sbin:/sbin"
 falta=()
@@ -158,6 +172,20 @@ if [ -z "$KLING_GUEST" ] || ! es_elf_arm64 "$KLING_GUEST"; then die "no linux/$A
   Build it (on the Mac or here, with Go):  make guest GOARCH=$ARCH   (leaves ./kling-guest)
   or pass KLING_GUEST=/path/to/kling-guest"; fi
 
+if [ "$PHONED" = 1 ]; then
+  if [ -z "$KLING_PHONED" ] && es_elf_arm64 "$REPO/kling-phoned"; then KLING_PHONED="$REPO/kling-phoned"; fi
+  if [ -z "$KLING_PHONED" ] && command -v go >/dev/null 2>&1; then
+    KLING_PHONED="$WORK/kling-phoned"
+    mkdir -p "$WORK"
+    (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" \
+      -o "$KLING_PHONED" ./prototypes/android/phoned) || die "go build of kling-phoned failed"
+  fi
+  es_elf_arm64 "${KLING_PHONED:-/nonexistent}" || die "no linux/$ARCH kling-phoned found.
+  Build it (on the Mac or here, with Go):
+    CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH go build -o kling-phoned ./prototypes/android/phoned
+  or pass KLING_PHONED=/path/to/kling-phoned (or PHONED=0 for the bash launcher)"
+fi
+
 mkdir -p "$WORK/images" "$WORK/cache/blobs" "$OUT"
 STAGE="$WORK/stage-$IMAGE_NAME"
 TREE="$STAGE/tree"          # lo que se copia a la raíz de la imagen (ROOTFS_DIR)
@@ -169,6 +197,7 @@ mkdir -p "$ROOTFS"
 
 log "scripts del núcleo: $SCRIPTS"
 log "kling-guest: $KLING_GUEST ($(sha256sum "$KLING_GUEST" | cut -c1-12)…)"
+[ "$PHONED" = 1 ] && log "kling-phoned: $KLING_PHONED ($(sha256sum "$KLING_PHONED" | cut -c1-12)…), adb con claves: $ADB_SECURE"
 # Lo que se apunta como origen en la receta y en BUILDINFO.
 if [ "$FETCH" = local ]; then
   SOURCE_REF="local:sha256:$ROOTFS_SHA256"; REDROID_TAG="local"
@@ -343,14 +372,24 @@ fi
 
 # ── 4. lo que va en la capa ──────────────────────────────────────────────────
 LIB="$TREE/usr/local/lib/kindling-android"
-install -Dm755 "$HERE/android-launch.sh"   "$LIB/android-launch.sh"
 install -Dm755 "$PROTO/kernel/check-android-config.sh" "$LIB/check-android-config.sh"
+# android-sh va en los dos caminos: es la vía con allow_exec (kling exec) para
+# depurar, y la usan fase0.sh y uidump.
 install -Dm755 "$HERE/android-sh"          "$TREE/usr/local/bin/android-sh"
 install -Dm644 "$STAGE/entrypoint.args"    "$LIB/entrypoint.args"
 # "Listo" = boot_completed y la identidad por clon, en la imagen: los ejecuta el
 # agente de invitado (docs/api.md del núcleo, "Listo y ganchos tras restaurar").
-install -Dm755 "$HERE/kindling/ready"      "$TREE/etc/kindling/ready"
-install -Dm755 "$HERE/kindling/post-restore.d/10-identity" "$TREE/etc/kindling/post-restore.d/10-identity"
+if [ "$PHONED" = 1 ]; then
+  install -Dm755 "$KLING_PHONED"           "$TREE/usr/local/bin/kling-phoned"
+  install -Dm755 "$HERE/kindling-phoned/ready" "$TREE/etc/kindling/ready"
+  install -Dm755 "$HERE/kindling-phoned/post-restore.d/10-identity" "$TREE/etc/kindling/post-restore.d/10-identity"
+  SERVICE_BIN=/usr/local/bin/kling-phoned
+else
+  install -Dm755 "$HERE/android-launch.sh" "$LIB/android-launch.sh"
+  install -Dm755 "$HERE/kindling/ready"    "$TREE/etc/kindling/ready"
+  install -Dm755 "$HERE/kindling/post-restore.d/10-identity" "$TREE/etc/kindling/post-restore.d/10-identity"
+  SERVICE_BIN=/usr/local/lib/kindling-android/android-launch.sh
+fi
 # ── uidump ───────────────────────────────────────────────────────────────────
 # Servidor residente de UiAutomation (prototypes/android/uidump, docs/uidump.md):
 # el XML de `uiautomator dump` en ~20 ms en vez de ~1,9 s. El dex se compila
@@ -394,6 +433,8 @@ ANDROID_DATA_MODE=$DATA_MODE
 ANDROID_DATA_SIZE=$DATA_SIZE
 ANDROID_NET=$ANDROID_NET
 ANDROID_EXTRA_ARGS="$EXTRA_ARGS"
+ANDROID_ADB_SECURE=$ADB_SECURE
+ANDROID_PREP=$PREP
 EOF
 cat >"$LIB/IMAGE.txt" <<EOF
 redroid=$SOURCE_REF
@@ -412,7 +453,7 @@ EOF
 log "montando la capa $IMAGE_NAME sobre $BASE_NAME (GROW=$GROW MiB; copiar ~2 GiB tarda)"
 KLING_ROOT="$WORK" NAME="$IMAGE_NAME" BASE="$BASE_NAME" GROW="$GROW" PKGS="" \
   AGENT="$KLING_GUEST" ENV_FILE="$STAGE/env" ROOTFS_DIR="$TREE" \
-  SERVICE=/usr/local/lib/kindling-android/android-launch.sh \
+  SERVICE="$SERVICE_BIN" \
   bash "$SCRIPTS/81-base-image.sh"
 
 # ── 6. receta: lo que el daemon lee para saber la base de una capa ───────────
@@ -434,6 +475,7 @@ cat >"$WORK/images/$IMAGE_NAME.recipe.json" <<EOF
   "builder": "prototype-android",
   "spec": {"redroid": "$SOURCE_REF", "tag": "$REDROID_TAG", "arch": "$ARCH",
            "data_mode": "$DATA_MODE", "net": "$ANDROID_NET",
+           "phoned": $([ "$PHONED" = 1 ] && echo true || echo false), "adb_secure": $([ "$ADB_SECURE" = 1 ] && echo true || echo false),
            "display": "${WIDTH}x${HEIGHT}@${DPI}dpi"}
 }
 EOF
@@ -462,6 +504,7 @@ done
   echo "image_name=$IMAGE_NAME"
   echo "base_name=$BASE_NAME"
   echo "kling_guest_sha256=$(sha256sum "$KLING_GUEST" | cut -d' ' -f1)"
+  [ "$PHONED" = 1 ] && echo "kling_phoned_sha256=$(sha256sum "$KLING_PHONED" | cut -d' ' -f1)"
   echo "arch=$ARCH"
   echo "data_mode=$DATA_MODE net=$ANDROID_NET display=${WIDTH}x${HEIGHT}@${DPI}"
 } >>"$PKG/BUILDINFO"
