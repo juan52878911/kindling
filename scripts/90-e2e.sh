@@ -1345,6 +1345,120 @@ SQL
   rm -rf "$DBTMP"; unset KLING_DB_STATE
 fi
 
+# ── 7e (clone). kling db clone: copia de producción enmascarada ──────────────
+# Un golden hecho de una base "de producción" creada aquí mismo, con datos
+# personales falsos pero con forma de reales. Comprueba que una columna
+# sospechosa sin regla bloquea, que un superusuario y una regla que no cabe
+# no dejan golden, y que el golden bueno no contiene ningún valor original
+# pero conserva el join por correo, los NULL y lo que no es sospechoso.
+# Necesita un Postgres con SCRAM al que lleguen ESTE shell (psql) y el daemon
+# (el proxy marca al host:puerto de la URL): córrelo en el host del daemon,
+# p. ej. con
+#
+#   docker run -d --name kpg -p 127.0.0.1:55432:5432 -e POSTGRES_USER=kling \
+#     -e POSTGRES_PASSWORD=clave-e2e -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:16
+#   KLING_E2E_CLONE_ADMIN_URL=postgres://kling:clave-e2e@127.0.0.1:55432/kling ./scripts/90-e2e.sh
+#
+# La URL de administración (un superusuario) crea y borra la base y el rol de
+# solo lectura de la prueba; a kling db clone solo le llega el rol de solo
+# lectura, con su clave por PGPASSWORD. Imagen: KLING_E2E_CLONE_IMAGE (pg16).
+step "7e (clone). kling db clone"
+if [ -z "${KLING_E2E_CLONE_ADMIN_URL:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_CLONE_ADMIN_URL no está (postgres://superusuario:clave@host:puerto/base, con SCRAM): sin origen que clonar\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado\n"
+elif ! command -v psql >/dev/null; then
+  printf "  \033[33mskip\033[0m  no hay psql en este host: sin forma de crear la base de origen\n"
+else
+  CLTMP=$(mktemp -d); export KLING_DB_STATE="$CLTMP/state"
+  CLLOG="$CLTMP/salida.log"; : > "$CLLOG"
+  CLDB="e2eclone$$"; CLRO="e2eclone_ro$$"; CLG="e2e-clone-$$"; CLC="e2e-clonecp-$$"
+  CLPW=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+  CLSCRIPT="$(cd "$(dirname "$0")" && pwd)/db-golden.sh"
+  CLIMG="${KLING_E2E_CLONE_IMAGE:-pg16}"
+  # La URL de administración se parte en variables: su clave nunca va en argv.
+  eval "$(E2E_DSN="$KLING_E2E_CLONE_ADMIN_URL" python3 -c 'import os, shlex, urllib.parse as u
+d = u.urlsplit(os.environ["E2E_DSN"])
+for k, v in (("CLA_HOST", d.hostname), ("CLA_PORT", d.port or 5432), ("CLA_USER", u.unquote(d.username or "")),
+             ("CLA_PW", u.unquote(d.password or "")), ("CLA_DB", d.path.lstrip("/") or u.unquote(d.username or ""))):
+    print("%s=%s" % (k, shlex.quote(str(v or ""))))')"
+  # adm <base> <sql>: SQL como superusuario del origen.
+  adm() { PGHOST="$CLA_HOST" PGPORT="$CLA_PORT" PGUSER="$CLA_USER" PGPASSWORD="$CLA_PW" PGDATABASE="$1" PGSSLMODE=disable \
+    PGCONNECT_TIMEOUT=10 psql -X -q -At -v ON_ERROR_STOP=1 -c "$2" 2>&1; }
+  # clk <usuario> <clave> <reglas> [flags...]: kling db clone contra la base de la prueba.
+  clk() { local u="$1" pw="$2" r="$3"; shift 3
+    local o rc; o=$(PGPASSWORD="$pw" $KLING db clone "postgres://$u@$CLA_HOST:$CLA_PORT/$CLDB?sslmode=disable" \
+      -mask "$r" -golden "$CLG" -script "$CLSCRIPT" -image "$CLIMG" "$@" 2>&1 </dev/null); rc=$?
+    printf '%s\n' "$o" >> "$CLLOG"; printf '%s\n' "$o"; return $rc; }
+  # sin_restos: ni golden ni máquina de construcción.
+  sin_restos() {
+    ! $KLING template inspect "$CLG" -json >/dev/null 2>&1 && ! $KLING ps -a 2>/dev/null | grep -qF -- "$CLG-clone-"
+  }
+  # Los valores "de producción": ninguno puede aparecer en la salida ni en el golden.
+  ORIG="ana.garcia@correo-real.es luis.perez@correo-real.es marta.ruiz@correo-real.es García Pérez Ruiz +34600111222 +34600333444 4111111111111111 5500000000000004"
+  out=$(adm "$CLA_DB" "CREATE DATABASE $CLDB" && adm "$CLA_DB" "CREATE ROLE $CLRO LOGIN PASSWORD '$CLPW'" && adm "$CLDB" "
+    CREATE TABLE users (id int PRIMARY KEY, email text UNIQUE NOT NULL, full_name text, phone text, notes text);
+    CREATE TABLE orders (id int PRIMARY KEY, customer_email text REFERENCES users(email), card text, total numeric);
+    INSERT INTO users VALUES (1, 'ana.garcia@correo-real.es', 'Ana García', '+34600111222', 'vip'),
+      (2, 'luis.perez@correo-real.es', 'Luis Pérez', '+34600333444', NULL), (3, 'marta.ruiz@correo-real.es', 'Marta Ruiz', NULL, 'x');
+    INSERT INTO orders VALUES (10, 'ana.garcia@correo-real.es', '4111111111111111', 10),
+      (11, 'ana.garcia@correo-real.es', '4111111111111111', 20), (12, 'luis.perez@correo-real.es', '5500000000000004', 30);
+    GRANT USAGE ON SCHEMA public TO $CLRO; GRANT SELECT ON ALL TABLES IN SCHEMA public TO $CLRO;")
+  if [ -n "$out" ]; then
+    bad "origen de clone" "base y rol creados" "$out"
+  else
+    printf '%s\n' "users.email: email" "users.full_name: name" "orders.customer_email: email" "orders.card: card" > "$CLTMP/incompletas.yaml"
+    cp "$CLTMP/incompletas.yaml" "$CLTMP/reglas.yaml"; echo "users.phone: phone" >> "$CLTMP/reglas.yaml"
+    cp "$CLTMP/reglas.yaml" "$CLTMP/rota.yaml"; echo "users.id: email" >> "$CLTMP/rota.yaml"
+
+    out=$(clk "$CLRO" "$CLPW" "$CLTMP/incompletas.yaml"); rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "public.users.phone" && sin_restos; } \
+      && ok "clone: una columna sospechosa sin regla bloquea, sin golden ni máquina" || bad "clone bloqueo" "error con users.phone y sin restos" "rc=$rc $(printf '%s' "$out" | tail -3)"
+    out=$(clk "$CLA_USER" "$CLA_PW" "$CLTMP/reglas.yaml"); rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "superuser" && sin_restos; } \
+      && ok "clone: un superusuario del origen se rechaza" || bad "clone superusuario" "error superuser" "rc=$rc $(printf '%s' "$out" | tail -3)"
+    out=$(clk "$CLRO" "$CLPW" "$CLTMP/rota.yaml"); rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "nothing was built" && sin_restos; } \
+      && ok "clone: una regla que no cabe (correo en un entero) no deja golden" || bad "clone regla rota" "nothing was built y sin restos" "rc=$rc $(printf '%s' "$out" | tail -3)"
+
+    out=$(clk "$CLRO" "$CLPW" "$CLTMP/reglas.yaml"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "public.users.email" && contiene "$out" "3 of 3 rows"; } \
+      && ok "clone: golden $CLG construido, con el informe" || bad "clone" "rc 0 e informe" "rc=$rc $(printf '%s' "$out" | tail -5)"
+    if $KLING ps -a 2>/dev/null | grep -qF -- "$CLG-clone-"; then
+      bad "clone: máquina de construcción" "borrada" "sigue"
+    else
+      ok "clone: la máquina de construcción no queda"
+    fi
+    out=$($KLING db up "$CLG" -name "$CLC" 2>&1 </dev/null)
+    if ! contiene "$out" "ready"; then
+      bad "db up del golden enmascarado" "ready" "$out"
+    else
+      clsql() { $KLING exec -timeout 60s "$CLC" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$1\"" 2>&1; }
+      out=$(clsql "SELECT count(*) FROM users WHERE email LIKE 'user\_%@example.invalid'")
+      [ "$out" = 3 ] && ok "golden: los tres correos enmascarados" || bad "correos enmascarados" 3 "$out"
+      out=$(clsql "SELECT count(*) FROM users u JOIN orders o ON o.customer_email = u.email")
+      [ "$out" = 3 ] && ok "golden: el join por correo sigue casando (determinista)" || bad "join enmascarado" 3 "$out"
+      out=$(clsql "SELECT count(DISTINCT customer_email) || ' ' || count(DISTINCT card) FROM orders")
+      [ "$out" = "2 2" ] && ok "golden: mismo valor, mismo enmascarado" || bad "determinismo" "2 2" "$out"
+      out=$(clsql "SELECT count(*) FILTER (WHERE phone IS NULL) || ' ' || (SELECT notes FROM users WHERE id = 1) FROM users")
+      [ "$out" = "1 vip" ] && ok "golden: los NULL siguen NULL y lo no sospechoso queda" || bad "NULL y columnas sin regla" "1 vip" "$out"
+      todo="$(clsql "SELECT string_agg(u::text, ' ') FROM users u") $(clsql "SELECT string_agg(o::text, ' ') FROM orders o")"
+      fuga=""
+      for v in $ORIG; do contiene "$todo" "$v" && fuga="$fuga $v"; done
+      [ -z "$fuga" ] && ok "golden: ningún valor original en las tablas" || bad "golden sin originales" "ninguno" "$fuga"
+      $KLING db rm "$CLC" >/dev/null 2>&1 </dev/null
+    fi
+    fuga=0
+    for v in $ORIG "$CLPW" "$CLA_PW"; do grep -qF -- "$v" "$CLLOG" && fuga=$((fuga+1)); done
+    [ "$fuga" = 0 ] && ok "clone: ni valores originales ni claves en la salida (0 coincidencias)" \
+      || bad "fuga en la salida de clone" 0 "$fuga"
+  fi
+  $KLING template rm -f "$CLG" >/dev/null 2>&1
+  adm "$CLA_DB" "DROP DATABASE IF EXISTS $CLDB" >/dev/null
+  adm "$CLA_DB" "DROP ROLE IF EXISTS $CLRO" >/dev/null
+  rm -rf "$CLTMP"; unset KLING_DB_STATE
+fi
+
 # ── 7f. kling db attach (modelo A) ───────────────────────────────────────────
 # Una copia compartida por dos agentes que viven en OTRAS microVMs: cada uno
 # conecta por el proxy de credenciales de su máquina con su marcador, y el

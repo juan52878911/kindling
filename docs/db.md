@@ -41,6 +41,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `ask <copia> "pregunta" [-role R] [-yes] [-explain -send-data]` | un modelo traduce la pregunta a una SQL que se enseña, se confirma y se ejecuta con un rol de solo lectura en una transacción READ ONLY; ver [db-ask.md](db-ask.md) |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
 | `golden build -template T <nombre>` | como `build`, con las migraciones y el seed de una plantilla incluida (`empty`, `crm-demo`) |
+| `clone <postgres-url> -mask REGLAS [-golden G] [-allow-unmasked] [-strict]` | un golden hecho de una base de producción, con los datos personales enmascarados dentro de una microVM; ver [Copia de producción enmascarada](#copia-de-producción-enmascarada-clone) |
 | `templates` | lista las plantillas incluidas (embebidas en el binario, `ext/db/templates`) |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
@@ -349,6 +350,13 @@ bloqueo, `golden` ni `ask`). Para CI, ver [db-ci.md](db-ci.md). Sin `KLING_E2E_D
 avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
 de la plantilla no entra en una copia.
 
+`clone` tiene su subsección, "7e (clone)", con `KLING_E2E_CLONE_ADMIN_URL` (un
+superusuario de un Postgres con SCRAM al que lleguen el shell y el daemon, p. ej. un
+Docker en el host del lab): crea una base con datos personales falsos y un rol de solo
+lectura, comprueba que una columna sospechosa sin regla, un superusuario y una regla
+que no cabe no dejan ni golden ni máquina, y que el golden bueno no contiene ningún
+valor original pero conserva el join por correo y los `NULL`.
+
 ## Operaciones: rehearse, rotate, snapshot, undo
 
 ### `kling db rehearse <copia|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]`
@@ -468,3 +476,139 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   de rama rota la suya al nacer, como en `fork`. Solo se listan, tocan y borran copias
   del `-owner` indicado. `-prune` se niega si git no dice ninguna rama local.
 - Cada rama viva cuesta disco (su overlay), no RAM: `-prune` y `-rm` lo recuperan.
+
+## Copia de producción enmascarada (clone)
+
+`kling db clone` construye un golden a partir de una base de **producción** con los
+datos personales enmascarados: para probar con datos realistas sin que nadie vea un
+correo, un nombre o una tarjeta de verdad.
+
+```sh
+cat > mask.yaml <<'EOF'
+# tabla.columna (esquema public) o esquema.tabla.columna: tipo
+users.email: email
+users.full_name: name
+users.phone: phone
+users.username: keep          # no es un dato personal: se deja a propósito
+billing.cards.number: card
+users.notes: "null"
+users.country: "fixed:ES"
+orders.customer_email: email  # el mismo correo, el mismo resultado: el join sigue casando
+EOF
+
+printf '%s' "$PROD_RO_PASSWORD" | kling db clone -password-stdin -mask mask.yaml -golden shop-masked \
+  'postgres://readonly@db.prod.example.com:5432/shop'
+kling db up shop-masked -name t1          # copias como de cualquier golden
+```
+
+La contraseña va en `PGPASSWORD` o por stdin con `-password-stdin`; una URL con
+contraseña se rechaza (acabaría en `ps` y en el historial).
+
+### Qué pasa, en orden
+
+1. **Máquina de construcción** `<golden>-clone-<azar>` desde `pg16` (o `-from`, en macOS)
+   con `-egress allowlist`, `-ttl 3h -on-ttl remove` (si `kling-db` muere, la máquina se
+   **borra**, no se congela: congelarla guardaría su RAM en disco) y `-mem 2G` (`-mem`).
+2. **Credencial al proxy.** La contraseña se entrega al proxy de credenciales de
+   Postgres de esa máquina ([postgres.md](postgres.md)): `-domain
+   source.clone.internal`, `-upstream <host:puerto de la URL>` (vale una base de la LAN o
+   del propio host) y, por defecto, **TLS verify-full** contra el host de la URL
+   (`-tls-server-name` lo cambia, `-ca` añade una CA). `?sslmode=disable` en la URL
+   quita el TLS hacia el servidor y entonces el proxy exige SCRAM-SHA-256. El invitado
+   solo ve el marcador (lo lee de MMDS); la contraseña no entra en la microVM.
+3. **Postgres de preparación en RAM.** Un segundo cluster con su directorio de datos en
+   un **tmpfs** del invitado (`/run/klingclone`), solo por socket local (sin TCP) y sin
+   fsync. Si el invitado tuviera swap, se niega.
+4. **Comprobación del rol.** Por el proxy: si el rol es superusuario, se para; si puede
+   escribir (`INSERT`, `UPDATE`, `DELETE` o `TRUNCATE`) en alguna tabla, se para salvo
+   `-allow-writer`. También se para si el servidor es más nuevo que Postgres 16 (el
+   `pg_dump` de la imagen no sabría volcarlo).
+5. **Volcado dentro de la microVM.** `pg_dump --no-owner --no-privileges --no-blobs ...`
+   por el proxy, en una **tubería** al psql del cluster del tmpfs: el volcado sin
+   enmascarar no se escribe en ningún fichero, ni del invitado ni del host.
+6. **Catálogo, plan y bloqueo.** Se leen tablas, columnas y recuentos (sin valores) y se
+   cruzan con las reglas. Una regla que no casa con ninguna columna es un error (una
+   errata dejaría una columna sin tratar); una columna **sospechosa por su nombre** sin
+   regla **bloquea** la construcción (ver abajo).
+7. **Enmascarado** en una transacción del cluster del tmpfs, con
+   `session_replication_role = replica` (ni claves foráneas ni disparadores del usuario:
+   un disparador de auditoría no copia los valores viejos a otra tabla), un `UPDATE` por
+   tabla y la comprobación de que **ninguna** columna enmascarada conserva un valor
+   viejo. Si una regla no cabe en su columna (un correo en un entero), si choca una
+   restricción única o si queda un valor viejo, la transacción se deshace y **no queda
+   golden**.
+8. **El golden es otra máquina.** Se vuelca el cluster ya enmascarado, la máquina de
+   construcción se destruye y `db-golden.sh build -seed <volcado>` construye el golden
+   en una máquina **nueva** con `egress none`, como cualquier otro golden (rol `app`,
+   base `appdb`, clave solo en el host). El golden nunca ha visto un dato sin
+   enmascarar, ni tiene ruta a producción, ni hereda la credencial.
+9. **Informe** por stdout (`-json` en JSON): columnas tratadas con su tipo y cuántas
+   filas cambiaron, las que se dejaron con `keep`, las sospechosas y qué se hizo con
+   cada una. **Nunca valores**: tampoco el de las reglas `fixed`.
+
+Si cualquier paso falla, se borran la máquina de construcción y el volcado, y el golden
+anterior con ese nombre (si lo había) sigue intacto. Un golden existente no se pisa sin
+`-replace`.
+
+### Las reglas
+
+| tipo | valor nuevo (los `NULL` siguen siendo `NULL`) |
+|---|---|
+| `email` | `user_<16 hex>@example.invalid` |
+| `name` | `Person <8 HEX>` |
+| `phone` | `+1555` y 7 cifras (sin `+` en una columna numérica) |
+| `card` | `9999` y 12 cifras (un prefijo que no emite ninguna red) |
+| `text` | `text_<16 hex>` |
+| `null` | `NULL` en todas las filas (falla si la columna es `NOT NULL`) |
+| `keep` | la columna se copia tal cual, a propósito (y el informe lo dice) |
+| `fixed:<valor>` | el mismo valor en todas las filas con valor |
+
+Los tipos con hash usan `sha256(sal ‖ valor)`: la **sal** son 256 bits al azar de
+cada construcción, que viajan solo en el SQL del enmascarado (por stdin a la máquina de
+construcción) y se tiran al acabar. Dentro de una construcción, el mismo valor da el
+mismo resultado en cualquier tabla y columna del mismo tipo: `users.email` y
+`orders.customer_email` siguen casando, y una clave foránea sobre columnas enmascaradas
+con el mismo tipo sigue siendo válida. Entre dos construcciones, no (otra sal). El valor
+nuevo pasa por `CAST` al tipo de la columna: en un `varchar(n)` corto se trunca.
+
+Formatos del fichero: un objeto JSON plano (`{"users.email": "email"}`) o YAML simple,
+una regla por línea (`users.email: email`, comillas opcionales, `#` comenta). Una columna
+repetida, un tipo desconocido o un nombre con caracteres de control se rechazan. Una
+tabla particionada lleva la regla en la raíz (una regla sobre una partición es un
+error); una columna generada no admite regla (se recalcula de sus entradas).
+
+### Columnas sospechosas
+
+Por su nombre, partido en palabras (`firstName`, `billing_address2`): `email`/`mail`,
+`phone`/`tel`/`mobile`, `name` (y `first_name`, `surname`…), `dni`/`nif`/`nie`/`ssn`/
+`passport`, `iban`/`bic`, `card`/`pan`/`cvv`, `address`/`street`/`zip`/`postcode`, `ip`,
+`birth`/`dob`; y por su tipo, `inet`/`cidr`/`macaddr`. Sin regla, la construcción **se
+para** y lista las columnas; `keep` las acepta una a una y `-allow-unmasked` todas (el
+informe las marca `LEFT UNMASKED`). Es una heurística que se equivoca hacia el lado de
+bloquear (`product_name` es sospechosa). `-strict` hace sospechosa además toda columna de
+texto, JSON, XML, `bytea` o array, se llame como se llame: la opción para quien no quiere
+que una columna `notes` con texto libre pase sin que nadie la mire.
+
+### Límites
+
+- **La detección es por nombre y tipo, no por contenido.** Una columna `notes` con
+  correos dentro pasa sin tratar salvo con `-strict`. Tampoco se miran dentro los JSON:
+  a una columna JSON solo le valen `null`, `keep` o `fixed`.
+- **No se vuelcan** objetos grandes (`--no-blobs`), publicaciones, suscripciones,
+  etiquetas de seguridad ni tablespaces. Las políticas de RLS que nombran roles de
+  producción no se restauran (el rol no existe) y paran la construcción. Un rol sujeto a
+  RLS necesita `BYPASSRLS` para volcar entero.
+- **Tamaño y tiempo.** Todo lo sin enmascarar vive en la RAM de la máquina de
+  construcción (`-mem`, el tmpfs es el 75 %), el volcado tiene 1 h (el tope de `kling
+  exec`) y el golden cabe en el overlay de 512 MiB de `db-golden.sh`: pensado para bases
+  de hasta unos cientos de MiB, o para un esquema recortado.
+- **Postgres ≤ 16 en el origen** (el `pg_dump` de la imagen `pg16`).
+- **Extensiones.** El volcado enmascarado se carga como el rol `app`: una extensión no
+  "trusted" necesita `-as-super` (y entonces los objetos son del superusuario).
+- **El volcado enmascarado sí pasa por el host**: un fichero 0600 en un directorio 0700
+  mientras `db-golden.sh` lo carga, borrado al terminar. Es lo mismo que acaba en el
+  disco del golden.
+- **La RAM de la máquina de construcción es memoria del host** (el proceso del VMM): si
+  el host tiene swap, el sistema operativo podría llevarla a disco. En Linux, sin swap
+  en el host o con swap cifrada.
+- Qué garantiza y qué no, en [SECURITY.md](../SECURITY.md) §16.
