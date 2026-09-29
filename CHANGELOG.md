@@ -54,6 +54,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   credenciales Postgres y MySQL en la misma máquina, MySQL es el 3306 (en Linux, un DNAT
   propio a `n.HostIP:5382`). `kling-vz` anuncia `mysql` en `credential_kinds`. Ver
   [`docs/mysql.md`](docs/mysql.md).
+- **Kernel K1 amd64: arranca en Firecracker 1.17.** Con 6.1.140 el K1 amd64 no
+  arrancaba (pánico al montar la raíz: Firecracker 1.17 declara un PCI en su DSDT y
+  el K1 no tiene PCI) y el comprobador fallaba: el menú de mitigaciones se llama
+  `CPU_MITIGATIONS` (no `SPECULATION_MITIGATIONS`) y allnoconfig dejaba PTI y
+  retpolines apagados sin avisar. `config-amd64` va ahora sin ACPI y con
+  `CPU_MITIGATIONS=y`; `check-kernel-config.sh` exige el menú.
 - **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
   nombre y aristas declaradas, descritas en un fichero JSON o YAML (un subconjunto sin
   dependencias), con ciclo de vida atómico: `up`, `ls`, `inspect`, `freeze`, `thaw`,
