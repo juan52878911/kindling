@@ -124,7 +124,11 @@ func (g *Gateway) serveIsolatedSession(w http.ResponseWriter, r *http.Request, s
 // que es la ÚNICA que puede servirla. Si ya no existe, la sesión se da por
 // perdida y el cliente tiene que rehacer el initialize: darle otra máquina
 // sería darle un disco vacío como si fuera el suyo.
-func (g *Gateway) recuperarAislada(w http.ResponseWriter, r *http.Request, service, ext string) *scheduler.Instance {
+func (g *Gateway) recuperarAislada(w http.ResponseWriter, r *http.Request, service, machineID, ext string) *scheduler.Instance {
+	// Puede seguir registrada como despierta aunque no conteste: la congeló el
+	// TTL del daemon o un `kling freeze`, no el segador. Se olvida para que
+	// IsolatedSession la despierte en vez de devolverla tal cual.
+	g.DropInstance(service, machineID)
 	e, err := g.IsolatedSession(r.Context(), service, ext, scheduler.TenantFrom(r.Context()), false)
 	if err == nil {
 		g.Rebind(ext, e)

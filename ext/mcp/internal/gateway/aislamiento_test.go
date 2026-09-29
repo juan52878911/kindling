@@ -26,6 +26,10 @@ type daemonAislado struct {
 	invitados  []string // direcciones de los invitados, en orden de creación
 	compartido bool
 
+	// alDescongelar, si trae una dirección para la máquina, es su reenvío
+	// nuevo tras el thaw (como en macOS, donde restaurar cambia el puerto).
+	alDescongelar map[string]string
+
 	mu       sync.Mutex
 	maquinas map[string]*api.Machine
 	creadas  int
@@ -93,6 +97,9 @@ func (d *daemonAislado) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case len(partes) == 2 && partes[1] == "thaw":
 		m.State = api.StateRunning
+		if a := d.alDescongelar[m.ID]; a != "" {
+			m.Forwards = map[string]string{fmt.Sprint(GuestPort): a}
+		}
 	case len(partes) == 2 && partes[1] == "freeze":
 		m.State = api.StateWarm
 	default:
@@ -321,5 +328,31 @@ func TestAgregadorConServicioAislado(t *testing.T) {
 	d.mu.Unlock()
 	if vivas != 1 || quien(s2) != q2 {
 		t.Fatal("cerrar c1 tenía que destruir su máquina y solo la suya")
+	}
+}
+
+// Congelada POR DEBAJO del gateway (TTL del daemon, `kling freeze`): la
+// instancia sigue registrada pero no contesta. La sesión tiene que despertar
+// SU máquina, no quedarse con la entrada muerta ni crear otra.
+func TestSesionAisladaCongeladaPorDebajo(t *testing.T) {
+	vs, addrs := invitadosFalsos(t, 2)
+	muerto := httptest.NewServer(vs[0]) // la dirección de antes del freeze
+	d := &daemonAislado{service: "notas", invitados: []string{strings.TrimPrefix(muerto.URL, "http://"), addrs[1]},
+		alDescongelar: map[string]string{"m1": addrs[0]}}
+	gw := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "")
+	h := gw.Handler("")
+	sa := pedir(t, h, "POST", "/mcp/notas", "", cuerpoInit).Header().Get(SessionHeader)
+	if soy(pedir(t, h, "POST", "/mcp/notas", sa, cuerpoCall)) != "A" {
+		t.Fatal("la sesión no arrancó en su máquina")
+	}
+	muerto.Close()
+	d.congelar("m1")
+
+	rec := pedir(t, h, "POST", "/mcp/notas", sa, cuerpoCall)
+	if rec.Code != 200 || soy(rec) != "A" {
+		t.Fatalf("tras el freeze por debajo: %d %s", rec.Code, rec.Body)
+	}
+	if !d.vio("POST /machines/m1/thaw") || d.creadas != 1 {
+		t.Fatalf("tenía que descongelar m1 sin crear otra (creadas=%d)", d.creadas)
 	}
 }

@@ -328,7 +328,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if (e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort))) && g.IsIsolated(ext) {
 			// Sesión aislada: solo SU máquina sirve, congelada o no. Ver
 			// aislamiento.go.
-			if e = g.recuperarAislada(w, r, rt.Service(), ext); e == nil {
+			if e = g.recuperarAislada(w, r, rt.Service(), rt.MachineID(), ext); e == nil {
 				return
 			}
 			if rt = g.Route(ext); rt == nil {
