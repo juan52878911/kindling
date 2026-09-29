@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // AggregatePath es el servicio virtual que reúne a todos los demás.
@@ -72,7 +73,10 @@ type aggSession struct {
 	// servicio + máquina para las microVMs (ver forward) y el servicio a secas
 	// para los enlaces externos.
 	backing map[string]string
-	lastUse time.Time
+	// aisladas son los servicios aislados en los que esta conversación ya
+	// tiene (o tuvo) su microVM. Se toca con a.mu.
+	aisladas map[string]bool
+	lastUse  time.Time
 
 	// lastQuery es la última búsqueda de find_tools: sirve para atribuir el
 	// acierto a la herramienta que acabe usándose.
@@ -90,7 +94,7 @@ func newAggregator(gw *Gateway, ephemeral bool) *aggregator {
 // handleAggregate atiende el endpoint virtual /mcp/_all.
 func (g *Gateway) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
-		g.agg.drop(r.Header.Get(SessionHeader))
+		g.agg.drop(r.Context(), r.Header.Get(SessionHeader))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -542,7 +546,40 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 	}
 
 	tEnsure := time.Now()
-	e, err := a.gw.Ensure(ctx, t.Service)
+	var e *scheduler.Instance
+	aislado, err := a.gw.aislado(ctx, t.Service)
+	if err != nil {
+		return nil, &rpcFault{-32000, err.Error()}
+	}
+	if aislado {
+		// Servicio que aísla cada sesión: esta conversación del agregador
+		// tiene SU microVM del servicio, la misma en cada llamada. El resto
+		// del camino (sesión del invitado por máquina) no cambia.
+		//
+		// Solo se crea la PRIMERA vez. Si la conversación ya tuvo máquina y
+		// ya no está (caducó, o se la llevó el recolector del daemon), crear
+		// otra le daría un disco vacío como si fuera el suyo: se dice, igual
+		// que el 404 del camino directo.
+		a.mu.Lock()
+		yaTenia := s.aisladas[t.Service]
+		a.mu.Unlock()
+		e, err = a.gw.IsolatedSession(ctx, t.Service, claveAislada(s.id, t.Service),
+			scheduler.TenantFrom(ctx), !yaTenia)
+		if yaTenia && (errors.Is(err, scheduler.ErrNoSuchSession) || errors.Is(err, scheduler.ErrSessionLost)) {
+			return nil, &rpcFault{-32000, fmt.Sprintf("%s: this conversation's isolated machine is gone "+
+				"(expired or removed) and with it what the tool had written; start a new conversation", t.Service)}
+		}
+		if err == nil {
+			a.mu.Lock()
+			if s.aisladas == nil {
+				s.aisladas = map[string]bool{}
+			}
+			s.aisladas[t.Service] = true
+			a.mu.Unlock()
+		}
+	} else {
+		e, err = a.gw.Ensure(ctx, t.Service)
+	}
 	if err != nil {
 		return nil, &rpcFault{-32000, err.Error()}
 	}
@@ -713,19 +750,41 @@ func (a *aggregator) session(ctx context.Context, r *http.Request) (*aggSession,
 	return s, true, nil
 }
 
-func (a *aggregator) drop(sid string) {
+func (a *aggregator) drop(ctx context.Context, sid string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	s := a.sessions[sid]
 	delete(a.sessions, sid)
+	a.mu.Unlock()
+	if s != nil {
+		a.soltarAisladas(ctx, s)
+	}
 }
 
-func (a *aggregator) reap(idle time.Duration) {
+func (a *aggregator) reap(ctx context.Context, idle time.Duration) {
+	var muertas []*aggSession
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	for id, s := range a.sessions {
 		if time.Since(s.lastUse) > idle {
 			delete(a.sessions, id)
+			muertas = append(muertas, s)
 		}
+	}
+	a.mu.Unlock()
+	for _, s := range muertas {
+		a.soltarAisladas(ctx, s)
+	}
+}
+
+// claveAislada es la clave de sesión aislada de una conversación del agregador
+// con uno de sus servicios: una microVM por conversación y servicio. No choca
+// con las del camino directo, que son 32 caracteres hex (NewSessionKey).
+func claveAislada(aggSID, service string) string { return "agg/" + aggSID + "/" + service }
+
+// soltarAisladas destruye las microVMs que la conversación s tenía en servicios
+// aislados. Las que no existan no cuestan nada: ReleaseIsolated no las encuentra.
+func (a *aggregator) soltarAisladas(ctx context.Context, s *aggSession) {
+	for _, svc := range s.services {
+		a.gw.ReleaseIsolated(ctx, claveAislada(s.id, svc))
 	}
 }
 

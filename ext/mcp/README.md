@@ -248,6 +248,11 @@ by nature**: its state lives in the process. Hence:
   sessions against a service whose bridge caps at 1 session each.
 - **When a bridge hits its session cap**, it recycles the most idle session instead of
   refusing, so clients reconnect cleanly.
+- **Processes are per session, the disk is not.** All sessions of an instance write to its
+  overlay, so a file one leaves in `/tmp` is there for the next. `kling mcp isolation <svc>
+  session` gives each session its own microVM from the golden snapshot instead: frozen with
+  the session inside, destroyed when it closes or goes unused for `-session-ttl` (30 min).
+  See [`docs/aislamiento-por-sesion.md`](../../docs/aislamiento-por-sesion.md).
 
 Demonstrated with the `session_info` tool, which reports its pid and its call count:
 

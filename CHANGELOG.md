@@ -270,6 +270,26 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `KLING_E2E_PG_TLS` y `KLING_E2E_PG_SERVERNAME` en la 7d de `scripts/90-e2e.sh` y en la
   nueva 6e de `scripts/92-e2e-mac.sh`; `pglab`: `KLING_PGLAB_UPSTREAM` y
   `KLING_PGLAB_TLS=disable`.
+
+- **Aislamiento por sesión en servicios MCP persistentes** (`kling mcp isolation <svc>
+  [service|session]`, `kling mcp import … -isolation session`, anotación `mcp.isolation`).
+  Hasta ahora el proceso era de cada sesión, pero el overlay era de la instancia: un
+  fichero que una sesión dejaba en `/tmp` lo leía la siguiente (medido con
+  `filesystem-mcp`). Con `session`, cada sesión MCP tiene su propia microVM, restaurada
+  del snapshot dorado con su overlay. Se congela con la sesión dentro y la siguiente
+  petición despierta esa misma máquina. El `DELETE`, `-session-ttl` sin uso (nuevo flag
+  de `kling mcp serve`, 30 min por defecto) o el apagado del gateway la destruyen, y con
+  ella su capa en el host. Un barrido recoge las que deja un gateway reiniciado. Tope:
+  `-max-replicas` sesiones por servicio, reciclando la más ociosa si lleva 45 s sin uso.
+  El agregador `_all` da una máquina por conversación. Medido en el lab x86: ~10 MiB de
+  RAM y 0,3 MiB de disco por sesión despierta (135,8 MiB congelada, el volcado de memoria)
+  y un primer `initialize` de **70 ms frente a 765 ms** de una sesión nueva en una
+  instancia ya despierta, que paga node en frío porque ya gastó su hijo caliente. El valor
+  por defecto sigue siendo `service`: es lo que quiere `memory`, cuyo grafo es de todas
+  las sesiones. Con un volumen de escritura no se puede activar (un volumen tiene un solo
+  escritor, y la segunda sesión no arrancaría). e2e: `ext/mcp/scripts/91-e2e-aislamiento.sh`.
+  Diseño y límites: [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md).
+
 - **Proxy de credenciales de Postgres.** `kling machine credential <ref> -type postgres
   -domain db.ejemplo.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env
   PGPASSWORD` (y lo mismo en `kling template credential`; la clave, como siempre, por

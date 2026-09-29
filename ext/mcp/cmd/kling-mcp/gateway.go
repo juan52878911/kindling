@@ -71,6 +71,7 @@ func cmdGateway(args []string) error {
 	memory := fs.String("memory", "", "MCP service that remembers which tool resolved each request")
 	pprofOn := fs.Bool("pprof", false, "exposes /debug/pprof; temporary diagnostics only, loopback only")
 	noAuth := fs.Bool("no-auth", false, "no token; development only, and only when listening on loopback")
+	sessionTTL := fs.Duration("session-ttl", 0, "an isolated session (mcp isolation session) unused this long is closed and its microVM destroyed (default 30m)")
 	maxReplicas := fs.Int("max-replicas", defaultMaxReplicas, "max instances per service when scaling out for parallel sessions (0 = unlimited; extra sessions get 503)")
 	hostsFlag := fs.String("hosts", "", "several daemons instead of one: name=endpoint,name2=endpoint2 (default: mcp.hosts, or one host, the active context)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -160,6 +161,7 @@ func cmdGateway(args []string) error {
 		gw := gateway.New(c, *idle, *ephemeral, *prewarm, memSvc)
 		gw.KeepWarm = *keepwarm
 		gw.MaxReplicas = *maxReplicas
+		gw.SessionTTL = *sessionTTL
 		if len(tenants) > 0 {
 			gw.SetTenants(tenants)
 		}

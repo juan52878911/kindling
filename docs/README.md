@@ -17,6 +17,7 @@ depuración.
 | [`von.md`](von.md) | LLM pequeños (SmolLM2, Qwen2.5) servidos desde snapshots dorados con `kling ai model`: uso, diseño, semillas, cifras en Linux y macOS, y el plan de GPU | quieres servir un modelo pequeño con escala a cero |
 | [`despertar.md`](despertar.md) | De réplica dormida a primera respuesta, fase por fase: 152 → 27 ms congelada y 2,2 ms con el nivel pausada, cada palanca con su medida | quieres saber dónde se va el tiempo de un thaw o activar el nivel pausada |
 | [`thaw-at-scale.md`](thaw-at-scale.md) | M sesiones MCP a la vez contra N servicios congelados: método, reglas de honestidad, `kling-mcpbench` + `95-thaw-scale.sh` para reproducirlo, y el tope de réplicas del gateway (resultados pendientes de la pasada en el lab) | quieres saber cómo aguanta el despertar una ráfaga de agentes |
+| [`aislamiento-por-sesion.md`](aislamiento-por-sesion.md) | Una microVM y un disco por sesión MCP (`kling mcp isolation`): opciones, diseño, coste medido y límites | un servicio persistente lo usan clientes que no deben ver lo que escribieron los otros |
 | [`densidad-zram.md`](densidad-zram.md) | Swap comprimido en RAM para densificar el host: cuándo ayuda, cuándo estorba, y el plan de medición antes/después | quieres más microVMs co-residentes sin más RAM |
 
 ## Para quien amplía kindling
