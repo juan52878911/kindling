@@ -116,7 +116,13 @@ y **la pone el daemon**:
   snapshot`/`fork` conservan el dueño. Un `run -from` de una plantilla compartida
   da una máquina del inquilino.
 - Un grafo es de un inquilino si **todos** sus nodos llevan su `kling.owner`.
-- `commit -replace` no pisa el snapshot de otro ni una plantilla compartida.
+- `commit` (con `-replace` o sin él) no pisa el snapshot de otro ni una plantilla
+  compartida. Los nombres de snapshot son un único espacio por daemon: un nombre
+  que el inquilino no ve (de otro inquilino, o de un admin sin compartir) responde
+  siempre lo mismo, `409 snapshot name "X" is taken: pick another name`, sin decir
+  de quién es ni nada de él; una plantilla compartida, que sí ve, `403`. Lo único
+  que se aprende es que el nombre está ocupado; si eso importa, que cada inquilino
+  use un prefijo propio en sus nombres.
 
 Un admin sí puede poner `kling.owner` (crear algo a nombre de un inquilino, o
 reasignarlo), y su cuerpo no se toca.

@@ -718,17 +718,27 @@ func revisarFork(s *Server, t string, b []byte) ([]byte, int, error) {
 	})
 }
 
-// revisarCommit: replace no puede pisar el snapshot de otro (ni una
-// plantilla compartida).
+// revisarCommit: un inquilino no puede pisar el snapshot de otro (ni una
+// plantilla compartida) ni saber de quién es un nombre que no ve. Los nombres
+// de snapshot son un único espacio por daemon, así que un nombre ocupado no se
+// puede usar; pero la respuesta a uno que no ve (de otro inquilino o de un
+// admin sin compartir) es siempre la misma, con -replace o sin él: 409 "name
+// is taken", sin dueño ni nada suyo. Una plantilla compartida sí la ve: 403.
+// Lo propio sigue al manager (sin -replace, "already exists"; con él, se
+// reemplaza).
 func revisarCommit(s *Server, t string, b []byte) ([]byte, int, error) {
 	return recodificar(b, func(req *api.CommitRequest) error {
-		if !req.Replace {
+		snap, err := s.mgr.Snapshot(req.Name)
+		if err != nil {
+			return nil // libre (o inválido): decide el manager
+		}
+		switch o := snap.Labels[api.LabelOwner]; {
+		case o == t:
 			return nil
+		case s.authz.snapVisible(req.Name, snap, t):
+			return errAuthz(http.StatusForbidden, "snapshot %q is a shared template: tenants can use it, not change it", req.Name)
 		}
-		if snap, err := s.mgr.Snapshot(req.Name); err == nil && snap.Labels[api.LabelOwner] != t {
-			return errAuthz(http.StatusForbidden, "snapshot %q is not yours to replace", req.Name)
-		}
-		return nil
+		return errAuthz(http.StatusConflict, "snapshot name %q is taken: pick another name", req.Name)
 	})
 }
 

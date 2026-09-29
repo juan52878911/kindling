@@ -512,8 +512,14 @@ func TestAuthzCuerposDeInquilino(t *testing.T) {
 		{"etiquetas propias", "PUT", "/machines/svc-a/labels", `{"color":"azul","kling.db.owner":""}`, 299, nil},
 		{"fork sella el dueño", "POST", "/sandboxes/caja-a/fork", `{"count":2}`, 299, []string{`"kling.owner":"a"`}},
 		{"fork no fija kling.owner", "POST", "/sandboxes/caja-a/fork", `{"labels":{"kling.owner":"b"}}`, 403, nil},
-		{"commit reemplaza ajeno", "POST", "/machines/svc-a/commit", `{"name":"snap-b","replace":true}`, 403, []string{"not yours"}},
-		{"commit reemplaza compartida", "POST", "/machines/svc-a/commit", `{"name":"base","replace":true}`, 403, nil},
+		// Un nombre que no ve: la misma respuesta con -replace o sin él, sea de
+		// otro inquilino o de un admin, y sin decir de quién es.
+		{"commit reemplaza ajeno", "POST", "/machines/svc-a/commit", `{"name":"snap-b","replace":true}`, 409, []string{`snapshot name \"snap-b\" is taken: pick another name`}},
+		{"commit sobre ajeno", "POST", "/machines/svc-a/commit", `{"name":"snap-b"}`, 409, []string{`snapshot name \"snap-b\" is taken: pick another name`}},
+		{"commit sobre privada de admin", "POST", "/machines/svc-a/commit", `{"name":"privada"}`, 409, []string{`snapshot name \"privada\" is taken: pick another name`}},
+		{"commit reemplaza compartida", "POST", "/machines/svc-a/commit", `{"name":"base","replace":true}`, 403, []string{"shared template"}},
+		{"commit sobre compartida", "POST", "/machines/svc-a/commit", `{"name":"base"}`, 403, []string{"shared template"}},
+		{"commit con nombre libre", "POST", "/machines/svc-a/commit", `{"name":"nuevo-a"}`, 299, nil},
 		{"commit reemplaza propio", "POST", "/machines/svc-a/commit", `{"name":"snap-a","replace":true}`, 299, nil},
 		{"credencial a máquina ajena", "POST", "/machines/svc-a/credentials",
 			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"bbbb000000000001","upstream_owner":"a"}]}`, 404, nil},
