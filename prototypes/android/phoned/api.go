@@ -65,8 +65,8 @@ type verifyResult struct {
 	// páginas de 4 KiB difieren (y cuántas de ellas están a ceros en la caché:
 	// la firma del fallo del Mac bajo presión de memoria).
 	Details []string `json:"details,omitempty"`
-	Errors     int      `json:"errors,omitempty"`
-	Seconds    float64  `json:"seconds"`
+	Errors  int      `json:"errors,omitempty"`
+	Seconds float64  `json:"seconds"`
 }
 
 type healthInfo struct {
