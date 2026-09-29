@@ -786,6 +786,10 @@ elif ! k db --help >/dev/null 2>&1; then
 else
   DBG="$KLING_E2E_DB_GOLDEN"
   DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
+  # copiarlo aquí, doctor no puede comprobar que las copias rotaron la clave.
+  DBREAL="$HOME/.local/state/kling-db/$KLING_E2E_DB_GOLDEN"
+  if [ -d "$DBREAL" ]; then mkdir -m 700 -p "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
   DBLOG="$DBTMP/out.log"; : > "$DBLOG"
   DBU="$P-db"
   dbk() { local o rc; o=$(k db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
