@@ -435,6 +435,50 @@ func TestGrafoTormentaDeDespertaresAcotada(t *testing.T) {
 	wg.Wait()
 }
 
+// Las conexiones que se cancelan mientras esperan un despertar dejan de
+// contar: después de despertarMaxEspera+N abandonos, una conexión nueva sigue
+// esperando al despertar en vez de rechazarse por ocupado.
+func TestGrafoDespertarCanceladoNoCuenta(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(false))
+	web, apiID := e.maquina(g.ID, "web"), e.maquina(g.ID, "api")
+	e.m.mu.Lock()
+	e.m.byID[apiID].State = api.StateWarm
+	e.m.mu.Unlock()
+	soltar := make(chan struct{})
+	despertarNodoGrafo = func(ctx context.Context, m *Manager, id string) error {
+		<-soltar
+		m.mu.Lock()
+		m.byID[id].State = api.StateRunning
+		m.mu.Unlock()
+		return nil
+	}
+	for i := range despertarMaxEspera + 8 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		_, _, err := e.m.resolverArista(ctx, web, g.ID, "web", "api", 8080, api.GraphEdgeLink)
+		cancel()
+		if errors.Is(err, credproxy.ErrEnlaceOcupado) {
+			t.Fatalf("la conexión %d se rechazó por ocupado sin nadie esperando", i+1)
+		}
+	}
+	e.m.despMu.Lock()
+	d := e.m.desp[g.ID+"/api"]
+	n := -1
+	if d != nil {
+		n = d.esperando
+	}
+	e.m.despMu.Unlock()
+	if n != 0 {
+		t.Errorf("quedan %d esperando tras cancelarse todas", n)
+	}
+	// El despertar en vuelo termina antes de que la limpieza del test
+	// restaure despertarNodoGrafo.
+	close(soltar)
+	if d != nil {
+		<-d.hecho
+	}
+}
+
 // Un lazy que no cabe: la conexión se rechaza y el motivo es no_capacity.
 func TestGrafoLazySinCapacidad(t *testing.T) {
 	e := nuevaEscenaGrafo(t)
