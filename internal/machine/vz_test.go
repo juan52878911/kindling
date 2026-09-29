@@ -873,7 +873,7 @@ func arrancarVZFalso(t *testing.T, m *Manager, id string) *fc.Client {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false)
+	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
 	t.Cleanup(func() { matarVMM(pid) })
 	if err != nil {
 		t.Fatalf("boot: %v", err)
