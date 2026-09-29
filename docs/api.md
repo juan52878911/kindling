@@ -290,11 +290,11 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 
 | Ruta | Qué hace |
 |---|---|
-| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`, `501` en macOS si tiene aristas `link` o `credential` |
+| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`, `501` en macOS si tiene aristas `link` o `credential`, o `depends` con `port` |
 | `GET /graphs` | lista, por nombre |
 | `GET /graphs/{ref}` | uno, con el estado de cada nodo |
 | `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
-| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado |
+| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado o el grafo tiene aristas `share` (también en `fork`) |
 | `POST /graphs/{ref}/fork` | `{"count": N}` (1 a 16). Devuelve `{"graphs": [...]}` (`201`) |
 | `DELETE /graphs/{ref}` | el grafo y sus máquinas (`204`) |
 
@@ -303,8 +303,9 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 `fork_of` y en cada nodo `machine_id` y `state` los pone el daemon (lo que llegue en
 ellos se ignora). `GraphNode`: `from` o `image`, `vcpus`, `mem_mib`, `egress`,
 `allow_domains`, `ports`, `wake` (`eager`\|`lazy`), `idle_freeze`, `volumes`, `shares`,
-`labels`, `allow_exec`. `GraphEdge`: `from`, `to`, `kind` (`link`\|`credential`),
-`port`, y en `credential` `env`, `user` y `database`. La clave de una arista no está
+`labels`, `allow_exec`. `GraphEdge`: `from`, `to`, `kind`
+(`link`\|`credential`\|`share`\|`depends`; `mcp` se rechaza con el motivo), `port`, en
+`credential` `env`, `user` y `database`, y en `share` `mount` y `mode` (`ro`\|`rw`). La clave de una arista no está
 nunca en `Graph`. Las etiquetas `kling.graph` y `kling.graph.*` las pone solo el
 daemon: `POST /machines`, `POST /sandboxes`, el fork de un sandbox y
 `PUT /machines/{ref}/labels` las rechazan con `400`. El grafo se guarda en

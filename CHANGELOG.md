@@ -26,6 +26,16 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `up/freeze/thaw/snapshot/fork/rm`, y una arista entre máquinas es `501`. Nuevas rutas
   `/graphs`; las etiquetas `kling.graph*` y el espacio `graph` del store son del daemon.
   Ver [`docs/grafos.md`](docs/grafos.md).
+- **Grafos: aristas `depends` y `share`.** `depends` ordena el grafo: un nodo no arranca
+  ni despierta hasta que aquel del que depende corre (y, con `port`, ese puerto
+  contesta); `up`, `thaw` y el despertar perezoso siguen ese orden, `freeze` y la pausa
+  del snapshot el inverso, y un ciclo se rechaza al validar. `share` da a dos nodos la
+  misma carpeta viva: es del grafo (`$KLING_ROOT/graph-shares/<id>`, se borra con
+  `graph rm`), el destino la monta `rw` y el origen `ro` o `rw`; solo nodos con `image`,
+  y un grafo con `share` no admite `snapshot` ni `fork` todavía (409). La arista `mcp`
+  sigue fuera, ahora con el motivo: el puente MCP solo escucha en el 8080 del agente.
+  `kling graph inspect` enseña las nuevas aristas. Ver
+  [`docs/grafos.md`](docs/grafos.md#aristas-share-y-depends).
 - **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del
   overlay de cada instancia es un clon por reflink: con la raíz en XFS/Btrfs, FICLONE
   directo; en ext4, un almacén XFS propio (`$root/cow.xfs`, montado por loop en

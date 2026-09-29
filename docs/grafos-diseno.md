@@ -12,7 +12,7 @@ Hoy kindling ya tiene grafos implícitos, pero cada plugin los inventa a su mane
 | `credential` | A recibe un marcador cuya clave real la pone el proxy hacia B (Postgres) o hacia un dominio externo | `POST /machines/{ref}/credentials` con `upstream_machine`, tal cual |
 | `share` | A y B ven la misma carpeta (`copy`/`ro`/`rw`) | `internal/machine/shares.go:resolveShares` |
 | `depends` | A no arranca hasta que B está `ready` | etiquetas de estado tipo `kling.db.state` + `waitPort` del sandbox |
-| `mcp` | A (agente) llama herramientas de B (servidor MCP) por el gateway | `ext/mcp/internal/gateway/aggregate.go:callLink` (ya existe `mcp.Link`) |
+| `mcp` | A (agente) llama herramientas de B (servidor MCP) por el gateway | `ext/mcp/internal/gateway/aggregate.go:callLink` (ya existe `mcp.Link`). **Aplazada** (#84): el puente MCP solo escucha en el 8080, que es también el agente de invitado, y ninguna arista puede llegar a él; hace falta antes un puerto solo-MCP en `kling-bridge`. Mientras, un `link` al puerto HTTP propio del servidor |
 
 **Operaciones sobre el grafo entero**: `up` (arranca los `eager`, deja los `lazy` como plantilla-sin-instancia hasta la primera conexión), `freeze`/`thaw` (todos, en orden inverso a `depends`), `snapshot` (instante consistente: pausar todos → commit de todos → reanudar todos), `fork` (N copias del entorno completo, cada una un grafo nuevo), `rm`, `inspect` (nodos, estado, aristas, quién despertó a quién), `audit` (cada conexión por arista, en el registro que ya existe: `internal/machine/credaudit.go`).
 
@@ -85,7 +85,7 @@ edges:
 
 **Entra**: `api.Graph` + validación; `POST/GET/DELETE /graphs`, `freeze`, `thaw`, `snapshot`, `fork`; nodos `eager` y `lazy`; arista `link` (TCP, con despertar perezoso) y arista `credential` (envoltorio de attach); persistencia por etiquetas + store; `kling graph up|ls|inspect|freeze|thaw|snapshot|fork|rm`; auditoría `kind: link` en `credaudit.jsonl`.
 
-**No entra**: `share` y `depends` como aristas (se aceptan en el YAML solo si son `shares` del propio nodo), arista `mcp`, enlaces en macOS, `IdleFreeze` por conexión (solo TTL global), grafos precalentados en el pool.
+**No entra** (y después): `share` y `depends` como aristas llegaron después (#84; la carpeta de un `share` es del grafo, en `$KLING_ROOT/graph-shares/<id>`, y un grafo con `share` no se vuelca todavía), arista `mcp`, enlaces en macOS, `IdleFreeze` por conexión (solo TTL global), grafos precalentados en el pool.
 
 **Tests unitarios**: `pkg/api/graph_test.go` (validación: ciclos en `depends`, puertos no expuestos, arista a nodo inexistente, tamaño); `internal/machine/grafo_test.go` con el Firecracker falso (`fcfalso_test.go`): resolvedor rechaza otro grafo, otro nodo, nodo parado, puerto ausente; lazy crea instancia una sola vez bajo 10 `accept` concurrentes; snapshot pausa-todos/commit-todos/reanuda-todos y deshace en fallo; fork produce grafo nuevo cuyas aristas no resuelven al original. `pkg/credproxy/enlace_test.go`: proxy TCP crudo con `ResolveMachine` por conexión e `Invalidar`.
 
