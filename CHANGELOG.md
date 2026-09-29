@@ -21,6 +21,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   escritura, sin pertenencias, con tiempos máximos y su propia clave en el host);
   `connect -role` lo usa. **`kling db templates`** y `golden build -template` construyen
   una golden de un comando (`empty`, `crm-demo`).
+- **`kling db ask`.** Preguntas en lenguaje natural a una copia: el modelo (API de Anthropic)
+  recibe solo el esquema y la pregunta y devuelve una SQL que se valida, se enseña y se
+  ejecuta con un rol de solo lectura en `BEGIN TRANSACTION READ ONLY`. Ver
+  [`docs/db-ask.md`](docs/db-ask.md).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
   (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
 - e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`
