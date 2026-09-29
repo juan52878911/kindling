@@ -74,7 +74,9 @@ cleanup() {
   done
   rm -rf "$TMP"
   if [ "$KEEP" = "1" ] || [ "$IMPORTADO" = "0" ]; then
-    $KLING_MCP isolation "$SVC" service >/dev/null 2>&1
+    # El modo que tenía, no `service` a secas: la prueba no debe cambiarle el
+    # aislamiento a un servicio que ya existía.
+    $KLING_MCP isolation "$SVC" "${MODO_ORIGINAL:-service}" >/dev/null 2>&1
     return
   fi
   for m in $($KLING ps -a 2>/dev/null | awk -v n="$SVC" '$0 ~ n {print $1}'); do
@@ -150,6 +152,7 @@ if [ "$IMPORTADO" = "1" ]; then
   contiene "$out" "Done." && ok "imported filesystem-mcp as $SVC" \
     || { bad "kling mcp add" "Done." "$out"; exit 1; }
 fi
+MODO_ORIGINAL=$($KLING_MCP isolation "$SVC" 2>/dev/null | awk '{print $2}')
 FICHERO="/tmp/cow-$$-$RANDOM.txt"
 SECRETO="secreto-de-A-$RANDOM"
 
