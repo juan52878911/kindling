@@ -17,8 +17,12 @@ package main
 // stdout.
 //
 // pg_hba.conf de la golden deja entrar por red solo al rol de la aplicación:
-// el rol nuevo necesita su propia línea (con SCRAM). Se añade DESPUÉS de
-// comprobar el rol, y se quita al borrarlo o si algo falla.
+// el rol nuevo necesita su propia línea (con SCRAM, solo a la base de la
+// copia). Se añade DESPUÉS de comprobar el rol, y se quita al borrarlo o si
+// algo falla.
+//
+// El rol NO pasa a las copias que nacen de esta (fork, undo, un golden hecho
+// de ella): prepare lo borra antes de darlas por listas (purgeInheritedRoles).
 
 import (
 	"context"
@@ -38,8 +42,23 @@ const (
 	roleConnLimit  = 5
 	defaultRoleRO  = "agent"
 	defaultRoleTmo = 5 * time.Second
-	hbaFile        = "/var/lib/postgresql/data/pg_hba.conf"
 )
+
+// hbaPrelude lo comparten los scripts que editan pg_hba.conf: define q (una
+// consulta como el superusuario, por el socket) y deja en F la ruta que dice
+// el propio Postgres (SHOW hba_file), como hace ask. Se exige una ruta
+// absoluta sin caracteres raros: va entre comillas, pero es de fuera.
+const hbaPrelude = `set -eu
+q() { su -s /bin/sh postgres -c "psql -X -q -At -v ON_ERROR_STOP=1 -d postgres -c '$1'"; }
+F=$(q 'SHOW hba_file')
+case "$F" in
+  /*) ;;
+  *) echo "unexpected pg_hba path" >&2; exit 1 ;;
+esac
+case "$F" in
+  *[!A-Za-z0-9/._-]*) echo "unexpected pg_hba path" >&2; exit 1 ;;
+esac
+`
 
 // roleNamePattern: identificador simple, hasta los 63 bytes de Postgres.
 var roleNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
@@ -150,14 +169,22 @@ func (a *app) roleState(ctx context.Context, id, name string) (exists bool, comm
 	return n == "1", c, nil
 }
 
-// hbaScript añade o quita la línea del rol en pg_hba.conf. Las comillas del
-// nombre en el fichero hacen que "all" o similares sean nombres, no palabras
-// clave (además de que validRoleName ya los rechaza).
-func hbaScript(name string, add bool) string {
-	line := fmt.Sprintf(`host all "%s" 0.0.0.0/0 scram-sha-256 # kling-db`, name)
+// hbaLine es la línea de pg_hba.conf del rol: solo su base, por red y con
+// SCRAM. dbField va tal cual: la base entre comillas, para que una llamada
+// "all" o "replication" sea un nombre y no una palabra clave (igual que las
+// del rol, que además validRoleName ya rechaza).
+func hbaLine(dbField, name string) string {
+	return fmt.Sprintf(`host %s "%s" 0.0.0.0/0 scram-sha-256 # kling-db`, dbField, name)
+}
+
+// hbaScript añade o quita la línea del rol en pg_hba.conf. Al quitar también
+// se va la de versiones anteriores, que abría todas las bases ("host all").
+// db y name pasaron identPattern y roleNamePattern: nada que escapar.
+func hbaScript(db, name string, add bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "set -eu\nF=%s\nL='%s'\n", hbaFile, line)
-	b.WriteString("T=$(mktemp)\ngrep -vxF -- \"$L\" \"$F\" > \"$T\" || true\n")
+	b.WriteString(hbaPrelude)
+	fmt.Fprintf(&b, "L='%s'\nO='%s'\n", hbaLine(`"`+db+`"`, name), hbaLine("all", name))
+	b.WriteString("T=$(mktemp)\ngrep -vxF -e \"$L\" -e \"$O\" \"$F\" > \"$T\" || true\n")
 	if add {
 		b.WriteString("printf '%s\\n' \"$L\" >> \"$T\"\n")
 	}
@@ -166,8 +193,8 @@ func hbaScript(name string, add bool) string {
 	return b.String()
 }
 
-func (a *app) hba(ctx context.Context, id, name string, add bool) error {
-	_, err := a.k.Run(ctx, strings.NewReader(hbaScript(name, add)), "exec", "-i", "-timeout", "30s", id, "--", "sh", "-s")
+func (a *app) hba(ctx context.Context, id, db, name string, add bool) error {
+	_, err := a.k.Run(ctx, strings.NewReader(hbaScript(db, name, add)), "exec", "-i", "-timeout", "30s", id, "--", "sh", "-s")
 	if err != nil {
 		return errors.New("editing pg_hba.conf in the copy failed")
 	}
@@ -278,11 +305,11 @@ func (a *app) roleCreateRO(ctx context.Context, ref, owner, name string, schemas
 	}
 
 	// Y solo ahora puede entrar por la red.
-	if err := a.hba(ctx, mc.ID, name, true); err != nil {
+	if err := a.hba(ctx, mc.ID, db, name, true); err != nil {
 		return undo(err)
 	}
 	res, err = a.sqlSuper(ctx, mc.ID, fmt.Sprintf(
-		"SELECT pg_reload_conf();\nSELECT count(*) FROM pg_hba_file_rules WHERE user_name @> ARRAY['%s'] AND error IS NULL;\n", name),
+		"SELECT pg_reload_conf();\nSELECT count(*) FROM pg_hba_file_rules WHERE user_name @> ARRAY['%s'] AND database @> ARRAY['%s'] AND error IS NULL;\n", name, db),
 		"reloading pg_hba.conf")
 	if err != nil {
 		return undo(err)
@@ -342,7 +369,7 @@ func (a *app) dropRole(ctx context.Context, id, db, name string, force bool) err
 			return err
 		}
 	}
-	if err := a.hba(ctx, id, name, false); err != nil {
+	if err := a.hba(ctx, id, db, name, false); err != nil {
 		return err
 	}
 	if _, err := a.sqlSuper(ctx, id, "SELECT pg_reload_conf();\n", "reloading pg_hba.conf"); err != nil {

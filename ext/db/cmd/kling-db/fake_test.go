@@ -43,6 +43,15 @@ type fakeKling struct {
 	pgDown bool
 	// macOS: las máquinas se alcanzan por reenvíos en loopback.
 	macOS bool
+	// roRoles: roles de kling db role que hay "dentro" de cada máquina (por id)
+	// y de cada plantilla (por nombre). Un fork y un run -from los heredan,
+	// como heredan la RAM y el disco; la purga de prepare los quita.
+	roRoles   map[string][]string
+	snapRoles map[string][]string
+	// purged: ids en los que se purgaron los roles (SQL) y pg_hba (sh), en orden.
+	purged, purgedHBA []string
+	// purgeLeaves: la purga "no puede" y contesta que queda uno.
+	purgeLeaves bool
 }
 
 func newFake() *fakeKling {
@@ -50,8 +59,10 @@ func newFake() *fakeKling {
 		snaps: map[string]*api.Snapshot{
 			"pg": {Name: "pg", Labels: map[string]string{api.LabelPorts: "8080"}},
 		},
-		machines: map[string]*api.Machine{},
-		verifier: map[string]string{},
+		machines:  map[string]*api.Machine{},
+		verifier:  map[string]string{},
+		roRoles:   map[string][]string{},
+		snapRoles: map[string][]string{},
 	}
 }
 
@@ -141,6 +152,7 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		}
 		mc := f.newMachine(name, merged)
 		mc.From = from
+		f.roRoles[mc.ID] = append([]string(nil), f.snapRoles[from]...)
 		return []byte(mc.ID[:12] + "  " + mc.Name + "  instantiated\n"), nil
 
 	case args[0] == "inspect":
@@ -161,6 +173,16 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		}
 		cmd := strings.Join(args[i+1:], " ")
 		switch {
+		case strings.Contains(string(in), purgeMarker) && strings.HasSuffix(cmd, "sh -s"):
+			f.purgedHBA = append(f.purgedHBA, mc.ID)
+			return nil, nil
+		case strings.Contains(string(in), purgeMarker):
+			f.purged = append(f.purged, mc.ID)
+			if f.purgeLeaves {
+				return []byte("0\n1\n"), nil
+			}
+			delete(f.roRoles, mc.ID)
+			return []byte("0\n0\n"), nil
 		case strings.Contains(cmd, "pg_isready"):
 			if f.pgDown {
 				return fail("exit status 2")
@@ -205,6 +227,7 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			}
 			mc := f.newMachine("", l)
 			f.verifier[mc.ID] = f.verifier[src.ID]
+			f.roRoles[mc.ID] = append([]string(nil), f.roRoles[src.ID]...)
 			res.Sandboxes = append(res.Sandboxes, mc)
 		}
 		return json.Marshal(res)

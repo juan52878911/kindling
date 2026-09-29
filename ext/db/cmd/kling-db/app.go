@@ -311,17 +311,80 @@ func (a *app) setVerifier(ctx context.Context, id, role, ver string) error {
 }
 
 // prepare deja lista una copia que ya está en state=preparing: espera a
-// Postgres y rota la clave. No la marca ready: eso lo hace quien llama cuando
-// todas las de la operación están preparadas.
+// Postgres, quita los roles de solo lectura heredados y rota la clave. No la
+// marca ready: eso lo hace quien llama cuando todas las de la operación están
+// preparadas.
 func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
-	role, _, err := roleDB(mc.Labels)
+	role, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err
 	}
 	if err := a.waitPostgres(ctx, mc.ID); err != nil {
 		return err
 	}
+	if err := a.purgeInheritedRoles(ctx, mc.ID, db); err != nil {
+		return err
+	}
 	return a.rotate(ctx, mc.ID, role)
+}
+
+// purgeMarker va en lo que manda purgeInheritedRoles (los tests lo buscan).
+const purgeMarker = "kling-db:purge-inherited"
+
+// purgeROSQL quita de una copia recién nacida los roles de `kling db role`
+// (COMMENT 'kling-db:ro'). Su verificador viaja en la RAM y el disco del origen
+// (fork, punto de guardado, golden hecho de una copia): quien tuviera la clave
+// de ese rol entraría en cada copia hija. Una copia nueva no hereda accesos: el
+// rol se vuelve a crear con kling db role, con otra clave.
+//
+// kling_db_ro (el de ask) se conserva: no tiene clave ni línea de red, solo el
+// mapa peer del socket para el usuario del sistema postgres, que ya es
+// superusuario dentro. Por si alguien le hubiera puesto una, se le quita.
+//
+// Primero se cortan sus sesiones (una copia restaurada de memoria las trae),
+// luego DROP OWNED BY en la base de la aplicación y en postgres (privilegios en
+// objetos compartidos) y DROP ROLE. Lo último comprueba que no queda nada.
+// %[1]s es la base (identPattern); %%I lo cita format().
+const purgeROSQL = `-- ` + purgeMarker + `
+SELECT count(pg_terminate_backend(a.pid)) FROM pg_stat_activity a JOIN pg_roles r ON r.rolname = a.usename
+  WHERE shobj_description(r.oid, 'pg_authid') = '` + roleComment + `';
+\connect %[1]s
+SELECT format('DROP OWNED BY %%I', rolname) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = '` + roleComment + `' \gexec
+\connect postgres
+SELECT format('DROP OWNED BY %%I', rolname) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = '` + roleComment + `' \gexec
+SELECT format('DROP ROLE %%I', rolname) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = '` + roleComment + `' \gexec
+SELECT format('ALTER ROLE %%I PASSWORD NULL', rolname) FROM pg_authid WHERE rolname = '` + defaultRORole + `' AND rolpassword IS NOT NULL \gexec
+SELECT count(*) FROM pg_authid WHERE shobj_description(oid, 'pg_authid') = '` + roleComment + `'
+  OR (rolname = '` + defaultRORole + `' AND rolpassword IS NOT NULL);
+`
+
+// purgeHBAScript quita de pg_hba.conf las líneas de kling db role (acaban en
+// "# kling-db") y recarga. Se busca el fichero con SHOW hba_file.
+const purgeHBAScript = "# " + purgeMarker + "\n" + hbaPrelude + `if grep -q ' # kling-db$' "$F"; then
+  T=$(mktemp)
+  grep -v ' # kling-db$' "$F" > "$T" || true
+  cat "$T" > "$F"
+  rm -f "$T"
+  q 'SELECT pg_reload_conf()' >/dev/null
+fi
+if grep -q ' # kling-db$' "$F"; then echo "pg_hba.conf still has kling-db lines" >&2; exit 1; fi
+`
+
+// purgeInheritedRoles quita los roles de solo lectura heredados y sus líneas
+// de pg_hba.conf. Si no puede, la copia no se da por lista.
+func (a *app) purgeInheritedRoles(ctx context.Context, id, db string) error {
+	out, err := a.k.Run(ctx, strings.NewReader(fmt.Sprintf(purgeROSQL, db)), "exec", "-i", "-timeout", "60s", id, "--",
+		"su", "-s", "/bin/sh", "postgres", "-c", psqlSuper)
+	if err != nil {
+		return fmt.Errorf("removing the inherited read-only roles of %s: %w", shortID(id), err)
+	}
+	if n := lastLine(string(out)); n != "0" {
+		return fmt.Errorf("removing the inherited read-only roles of %s: %q left", shortID(id), n)
+	}
+	if _, err := a.k.Run(ctx, strings.NewReader(purgeHBAScript), "exec", "-i", "-timeout", "60s", id, "--", "sh", "-s"); err != nil {
+		return fmt.Errorf("removing the inherited pg_hba.conf lines of %s: %w", shortID(id), err)
+	}
+	return nil
 }
 
 // destroy borra una copia y su contraseña. Se usa al deshacer: los errores se
