@@ -360,6 +360,12 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// binds que un daemon anterior dejó en jails de máquinas ya borradas.
 	m.alm = nuevoAlmacen(root, priv)
 	if m.alm != nil {
+		m.alm.viva = func(id string) bool {
+			m.mu.RLock()
+			defer m.mu.RUnlock()
+			_, ok := m.byID[id]
+			return ok
+		}
 		m.alm.montarSiExiste(context.Background())
 	}
 	m.barrerBindsJail()

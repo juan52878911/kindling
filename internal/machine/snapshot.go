@@ -272,8 +272,19 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
-	if out, err := m.copiarOverlay(ctx, m.overlayParaLeer(mc.ID), goldDst); err != nil {
+	srcOverlay := m.overlayParaLeer(mc.ID)
+	// El overlay lo escribe el VMM: se abre sin seguir enlaces y se comprueba
+	// sobre el descriptor que es un fichero regular, antes y después de copiar.
+	tras, err := fijarOverlayParaLeer(srcOverlay)
+	if err != nil {
+		return nil, fmt.Errorf("copying overlay: %w", err)
+	}
+	if out, err := m.copiarOverlay(ctx, srcOverlay, goldDst); err != nil {
 		return nil, fmt.Errorf("copying overlay: %v: %s", err, out)
+	}
+	if err := tras(); err != nil {
+		_ = os.Remove(goldDst)
+		return nil, fmt.Errorf("copying overlay: %w", err)
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
 	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con

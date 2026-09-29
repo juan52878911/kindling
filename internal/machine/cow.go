@@ -251,6 +251,56 @@ func (m *Manager) overlayParaLeer(id string) string {
 	return filepath.Join(m.dir(id), "overlay.ext4")
 }
 
+// rutaCanonica devuelve p absoluta y sin enlaces simbólicos, como las rutas de
+// /proc/self/mountinfo. Si p no existe todavía resuelve su ancestro más
+// cercano; si nada se puede resolver devuelve p tal cual.
+func rutaCanonica(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	rest, cur := "", abs
+	for {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(r, rest)
+		}
+		up := filepath.Dir(cur)
+		if up == cur {
+			return abs
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = up
+	}
+}
+
+// fijarOverlayParaLeer abre ruta con O_NOFOLLOW y comprueba con Fstat, sobre el
+// descriptor ya abierto y no por ruta, que es un fichero regular. El VMM puede
+// haber cambiado el overlay por un enlace simbólico a un fichero de root entre
+// que se eligió la ruta y que se copia: un Lstat previo no lo evita. Devuelve
+// una función que hay que llamar tras la copia: comprueba que la ruta sigue
+// siendo el mismo fichero, y si no, la copia se descarta.
+func fijarOverlayParaLeer(ruta string) (func() error, error) {
+	f, err := os.OpenFile(ruta, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("opening the overlay %s: %w", ruta, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("the overlay %s is not a regular file", ruta)
+	}
+	return func() error {
+		ahora, err := os.Lstat(ruta)
+		if err != nil || !ahora.Mode().IsRegular() || !os.SameFile(fi, ahora) {
+			return fmt.Errorf("the overlay %s changed while it was being copied", ruta)
+		}
+		return nil
+	}, nil
+}
+
 // borrarOverlayAlmacen quita del almacén el overlay de una máquina que se
 // elimina. Lo que no se borre aquí lo recoge barrerAlmacen.
 func (m *Manager) borrarOverlayAlmacen(id string) {
@@ -304,6 +354,9 @@ type almacenCoW struct {
 	img  string // $root/cow.xfs
 	dir  string // $root/cow (punto de montaje)
 	priv *Privileges
+	// viva dice si la máquina id existe (o se está creando): un directorio de
+	// instancia de una máquina que no está viva es un residuo y se reemplaza.
+	viva func(id string) bool
 
 	montado  bool
 	errFatal error // la preparación falló: no se reintenta hasta reiniciar
@@ -553,7 +606,18 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 	}
 	d := a.dirInstancia(id)
 	if err := os.Mkdir(d, 0o700); err != nil {
-		return "", err
+		if !errors.Is(err, os.ErrExist) || a.viva == nil || a.viva(id) {
+			return "", err
+		}
+		// Un directorio residual (un runFrom que murió, un barrido que no llegó):
+		// la máquina no está viva, así que sobra y no debe mandar a la instancia
+		// a copia completa.
+		if err := os.RemoveAll(d); err != nil {
+			return "", err
+		}
+		if err := os.Mkdir(d, 0o700); err != nil {
+			return "", err
+		}
 	}
 	ruta := filepath.Join(d, "overlay.ext4")
 	if err := a.clonar(base, ruta); err != nil {
@@ -562,8 +626,20 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 	}
 	// La base es 0400 y el clon hereda el modo: se abre para el VMM.
 	_ = os.Chmod(ruta, 0o600)
-	if a.priv != nil {
-		if err := a.priv.Own(d, ruta); err != nil {
+	if a.priv != nil && a.priv.Enabled {
+		// El VMM es dueño del FICHERO, no del directorio: con el directorio en
+		// root:grupo 0750 solo lo atraviesa. Dueño del directorio podría crear
+		// ficheros en él (llenar el almacén compartido) y cambiar el overlay por
+		// un enlace entre la comprobación del daemon y su lectura.
+		if err := a.priv.Own(ruta); err != nil {
+			_ = os.RemoveAll(d)
+			return "", err
+		}
+		if err := os.Lchown(d, 0, a.priv.GID); err != nil {
+			_ = os.RemoveAll(d)
+			return "", fmt.Errorf("securing %s: %w", d, err)
+		}
+		if err := os.Chmod(d, 0o750); err != nil {
 			_ = os.RemoveAll(d)
 			return "", err
 		}
