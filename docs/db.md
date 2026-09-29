@@ -49,6 +49,8 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
 | `golden build -template T <nombre>` | como `build`, con las migraciones y el seed de una plantilla incluida (`empty`, `crm-demo`) |
 | `clone <postgres-url> -mask REGLAS [-golden G] [-allow-unmasked] [-strict]` | un golden hecho de una base de producción, con los datos personales enmascarados dentro de una microVM; ver [Copia de producción enmascarada](#copia-de-producción-enmascarada-clone) |
+| `slice <postgres-url> -table T -mask REGLAS [-rows N] [-related-rows N]` | como `clone`, pero con **una** tabla: un subconjunto acotado de sus filas, sus filas relacionadas directas y el resto del esquema vacío; ver [Una tabla de producción (slice)](#una-tabla-de-producción-slice-y-observación) |
+| `observe <copia> \| -off <copia> \| -report <copia> [-table T] [-limit 20] [-json]` | registra en el log de la copia cada sentencia de las conexiones nuevas, con su duración, y agrupa las que tocan la tabla del slice |
 | `templates` | lista las plantillas incluidas (embebidas en el binario, `ext/db/templates`) |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
@@ -668,6 +670,75 @@ que una columna `notes` con texto libre pase sin que nadie la mire.
   el host tiene swap, el sistema operativo podría llevarla a disco. En Linux, sin swap
   en el host o con swap cifrada.
 - Qué garantiza y qué no, en [SECURITY.md](../SECURITY.md) §16.
+
+## Una tabla de producción (slice) y observación
+
+Para mirar qué hace una aplicación con UNA tabla sin copiar la base entera:
+
+```sh
+PGPASSWORD=... kling db slice "postgres://reader@db.internal:5432/shop" \
+  -table public.orders -rows 5000 -mask reglas.yaml     # golden shop-orders-slice
+kling db up shop-orders-slice -name o1
+kling db observe o1                 # desde aquí, cada sentencia de las conexiones nuevas
+# ... la aplicación o el agente trabajan contra o1 ...
+kling db observe -report o1         # las que tocan public.orders, agrupadas
+kling db observe -off o1
+```
+
+`slice` es `clone` con otro relleno: la misma máquina de construcción con `-egress
+allowlist`, la misma credencial en el proxy (la contraseña de producción no entra en la
+microVM), el mismo Postgres de preparación en un tmpfs, **el mismo enmascarado** (las
+mismas reglas, también para las tablas vacías) y el mismo golden construido en una máquina
+nueva sin red. Lo que cambia es qué se copia, y todo es de **solo lectura en producción**:
+
+1. `pg_dump --schema-only`: el esquema entero, sin una fila.
+2. Una consulta del catálogo: las columnas de la tabla (sin las generadas), su clave
+   primaria y sus claves foráneas directas, en los dos sentidos.
+3. Una sola sesión en una transacción `REPEATABLE READ READ ONLY` (una sola foto) saca
+   con `\copy ... TO PROGRAM`, por tuberías dentro de la microVM:
+   - la muestra: `-rows` filas (1000 por defecto) en orden de clave primaria (sin clave
+     primaria, por `ctid`, que obliga a ordenar la tabla entera);
+   - los **padres**: las filas de las tablas a las que la muestra apunta (una por fila
+     como mucho);
+   - los **hijos**: como mucho `-related-rows` (por defecto `-rows`) filas de cada clave
+     foránea que apunta a la muestra.
+
+   Una tabla que es padre por dos claves, o padre e hija a la vez, se carga una vez, sin
+   filas repetidas. Solo un salto: los padres de los padres no se copian.
+4. Todas las demás tablas quedan **vacías**. Las claves foráneas que lo cargado no
+   cumple (un hijo que también apunta a otra tabla vacía) quedan `NOT VALID`: siguen
+   comprobando lo que se escriba después. En una tabla particionada, Postgres 16 no admite
+   `NOT VALID` y la clave se quita. El informe dice cuáles. Las secuencias se ponen tras el
+   máximo copiado.
+
+`-table` es `[esquema.]nombre` sin comillas (un nombre que las necesite no se admite;
+las tablas relacionadas sí pueden tenerlas). El golden se llama `<base>-<tabla>-slice`
+salvo con `-golden`, y en el host queda `<estado>/<golden>/slice.json` (0600) con la tabla,
+el origen sin contraseña y los topes: `observe -report` lo usa para saber la tabla.
+
+**Observación.** `kling db observe <copia>` pone, para la base de la aplicación,
+`log_min_duration_statement = 0` y `log_parameter_max_length = 0`, y deja fuera al
+superusuario (`ALTER ROLE postgres IN DATABASE ... SET log_min_duration_statement = -1`),
+para que las operaciones de `kling db` (la rotación de la clave) no acaben en el log. Son
+ajustes de la base: valen para las **conexiones nuevas**, sin reiniciar Postgres, y un fork
+o un snapshot de la copia los hereda. `-report` lee el final del log (32 MiB) **dentro de
+la copia**, se queda con las sentencias de esa base que nombran la tabla (con o sin
+esquema, con o sin comillas), las normaliza (literales, números y listas a `?`, sin
+comentarios) y las agrupa por llamadas y tiempo total, medio y máximo. El informe nunca
+lleva un literal ni un parámetro; **el log de la copia sí** lleva el SQL tal y como llegó
+(con sus literales): observa copias de goldens enmascarados. `-off` quita los ajustes.
+
+**Los tiempos no son los de producción.** Una copia con unas miles de filas y sus propias
+estadísticas elige otros planes y tarda otra cosa: el informe sirve para ver **qué**
+sentencias tocan la tabla y cuántas veces, no cuánto tardarían allí. Importar las
+estadísticas reales solo es posible desde PostgreSQL 18 (`pg_restore_relation_stats`,
+`pg_restore_attribute_stats`); el golden corre Postgres 16, así que no se hace.
+
+Límites propios, además de los de `clone`: un solo salto de claves foráneas, un tope de
+200 claves foráneas por tabla, la muestra es "las primeras N por clave primaria" (no
+aleatoria; sin filtro `-where`), y el log de observación crece sin rotar en el overlay de
+512 MiB de la copia: apágalo (`-off`) cuando termines.
+
 ## Un entorno entero: app + base como grafo
 
 `kling db env` usa los [grafos](grafos.md) del núcleo para levantar de una vez la
