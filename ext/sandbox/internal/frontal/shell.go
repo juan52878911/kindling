@@ -53,7 +53,7 @@ func (s *Servidor) handleShell(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	t := tenantDe(r)
-	h, mc, err := s.buscar(r.Context(), t, id)
+	h, mc, err := s.buscarEjecutable(r.Context(), t, id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return

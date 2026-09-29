@@ -1,7 +1,9 @@
 // Package pgmini es un cliente PostgreSQL mínimo, solo con la biblioteca
 // estándar, para el banco de pruebas: StartupMessage, autenticación (trust,
-// contraseña en claro o SCRAM-SHA-256), consulta simple y lectura de DataRow.
-// Sin TLS: el banco habla con un invitado o un contenedor del mismo host.
+// contraseña en claro, SCRAM-SHA-256 o SCRAM-SHA-256-PLUS), consulta simple y
+// lectura de DataRow. TLS (SSLRequest + TLS 1.2+) es opcional: el banco habla
+// con un invitado o un contenedor del mismo host sin él; el doctor lo usa
+// contra bases remotas.
 // No es un cliente de producción: sin consultas extendidas, sin COPY, sin
 // tipos; todo valor vuelve como texto.
 package pgmini
@@ -9,6 +11,8 @@ package pgmini
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -34,7 +38,27 @@ type Config struct {
 	// NoCleartext rechaza la autenticación con contraseña en claro: sin TLS,
 	// esa contraseña viajaría legible por la red. Solo SCRAM (o trust).
 	NoCleartext bool
+	// TLSMode activa TLS: "" (sin TLS), "require" (cifra sin verificar al
+	// servidor: no frena a un intermediario), "verify-ca" (cadena válida, sin
+	// comprobar el nombre) o "verify-full" (cadena y nombre). Si el servidor
+	// no acepta TLS, Dial falla: nunca se degrada en silencio.
+	TLSMode string
+	// TLSServerName es el nombre que se verifica y va en el SNI (por defecto,
+	// el host de Addr).
+	TLSServerName string
+	// RootCAs son las raíces de confianza (nil: las del sistema).
+	RootCAs *x509.CertPool
 }
+
+// Modos de TLS de Config.TLSMode.
+const (
+	TLSRequire    = "require"
+	TLSVerifyCA   = "verify-ca"
+	TLSVerifyFull = "verify-full"
+)
+
+// sslRequestCode es el código del SSLRequest (80877103 = 1234,5679).
+const sslRequestCode = 80877103
 
 // Conn es una conexión. No es segura para uso concurrente.
 type Conn struct {
@@ -42,6 +66,9 @@ type Conn struct {
 	r       *bufio.Reader
 	timeout time.Duration
 	stop    func() bool
+	// cb son los datos tls-server-end-point del certificado del servidor
+	// (nil sin TLS) para SCRAM-SHA-256-PLUS.
+	cb []byte
 }
 
 // Error es un ErrorResponse del servidor.
@@ -67,11 +94,97 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 	// Cancelar el contexto cierra el socket y desbloquea cualquier lectura.
 	c.stop = context.AfterFunc(ctx, func() { nc.Close() })
 	c.plazo(ctx)
+	if cfg.TLSMode != "" {
+		if err := c.iniciarTLS(dctx, cfg); err != nil {
+			c.Close()
+			return nil, err
+		}
+		c.plazo(ctx)
+	}
 	if err := c.arranque(cfg); err != nil {
 		c.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// tlsConfig arma la configuración del cliente según el modo. TLS 1.2 como
+// mínimo. require no verifica nada; verify-ca comprueba la cadena pero no el
+// nombre; verify-full, las dos cosas.
+func tlsConfig(cfg Config) (*tls.Config, error) {
+	name := cfg.TLSServerName
+	if name == "" {
+		h, _, err := net.SplitHostPort(cfg.Addr)
+		if err != nil {
+			return nil, err
+		}
+		name = h
+	}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: name, RootCAs: cfg.RootCAs}
+	switch cfg.TLSMode {
+	case TLSVerifyFull:
+	case TLSRequire:
+		tc.InsecureSkipVerify = true // pedido explícito: cifrar sin autenticar al servidor
+	case TLSVerifyCA:
+		// El nombre no se comprueba, la cadena sí: se verifica a mano porque
+		// InsecureSkipVerify desactiva también la verificación de la cadena.
+		tc.InsecureSkipVerify = true
+		tc.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("postgres: the server sent no certificate")
+			}
+			inter := x509.NewCertPool()
+			for _, ic := range cs.PeerCertificates[1:] {
+				inter.AddCert(ic)
+			}
+			_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: cfg.RootCAs, Intermediates: inter})
+			return err
+		}
+	default:
+		return nil, fmt.Errorf("postgres: unknown TLS mode %q", cfg.TLSMode)
+	}
+	return tc, nil
+}
+
+// iniciarTLS negocia TLS con un SSLRequest: 'S' sigue con el handshake; 'N'
+// (el servidor no habla TLS) o cualquier otra cosa es un error, no una
+// degradación a texto claro.
+func (c *Conn) iniciarTLS(ctx context.Context, cfg Config) error {
+	tc, err := tlsConfig(cfg)
+	if err != nil {
+		return err
+	}
+	req := binary.BigEndian.AppendUint32(nil, 8)
+	req = binary.BigEndian.AppendUint32(req, sslRequestCode)
+	if _, err := c.nc.Write(req); err != nil {
+		return err
+	}
+	// Se lee directo del socket, sin bufio: nada de lo que el servidor mande
+	// después de la 'S' puede quedarse como texto claro en un búfer.
+	var b [1]byte
+	if _, err := io.ReadFull(c.nc, b[:]); err != nil {
+		return err
+	}
+	switch b[0] {
+	case 'S':
+	case 'N':
+		return errors.New("postgres: the server does not accept TLS")
+	default:
+		return errors.New("postgres: unexpected reply to SSLRequest")
+	}
+	if c.r.Buffered() > 0 {
+		return errors.New("postgres: data after the SSLRequest reply")
+	}
+	tconn := tls.Client(c.nc, tc)
+	if err := tconn.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("postgres: TLS handshake: %w", err)
+	}
+	if peer := tconn.ConnectionState().PeerCertificates; len(peer) > 0 {
+		c.cb = tlsServerEndPoint(peer[0])
+	}
+	c.nc = tconn
+	c.r = bufio.NewReader(tconn)
+	return nil
 }
 
 // Close cierra la conexión (con Terminate, si se puede).
@@ -154,14 +267,20 @@ func (c *Conn) arranque(cfg Config) error {
 					return err
 				}
 			case 10: // SASL: elegir SCRAM-SHA-256
-				if !ofrece(body[4:], "SCRAM-SHA-256") {
+				// Con TLS y -PLUS ofrecido, se usa -PLUS (channel binding).
+				mec := "SCRAM-SHA-256"
+				plus := c.cb != nil && ofrece(body[4:], "SCRAM-SHA-256-PLUS")
+				if plus {
+					mec = "SCRAM-SHA-256-PLUS"
+				} else if !ofrece(body[4:], "SCRAM-SHA-256") {
 					return errors.New("postgres: the server offers no SCRAM-SHA-256")
 				}
 				if sc, err = nuevoScram(cfg.Password); err != nil {
 					return err
 				}
+				sc.conBinding(c.cb, plus)
 				ini := sc.primero()
-				m := append([]byte("SCRAM-SHA-256\x00"), binary.BigEndian.AppendUint32(nil, uint32(len(ini)))...)
+				m := append([]byte(mec+"\x00"), binary.BigEndian.AppendUint32(nil, uint32(len(ini)))...)
 				if err := c.escribir('p', append(m, ini...)); err != nil {
 					return err
 				}

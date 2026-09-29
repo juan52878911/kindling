@@ -40,6 +40,20 @@ func TestRunPasaHostYStdin(t *testing.T) {
 	}
 }
 
+// Command lleva el mismo binario y el mismo daemon que Run (kling shell para
+// el sqlite3 de una copia SQLite). Sin stdin: cmd.Stdin nil es /dev/null.
+func TestCommandPasaHost(t *testing.T) {
+	t.Setenv("KLING_HOST", "ssh://otro")
+	c := &CLI{Bin: fakeBin(t), Host: "ssh://lab"}
+	out, err := c.Command(context.Background(), "shell", "m", "--", "sqlite3", "/x").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "args=shell m -- sqlite3 /x\nhost=ssh://lab\n"; string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 func TestRunSinHostHeredaElEntorno(t *testing.T) {
 	t.Setenv("KLING_HOST", "ssh://entorno")
 	c := &CLI{Bin: fakeBin(t)}

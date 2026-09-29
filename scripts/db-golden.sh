@@ -3,6 +3,8 @@
 #
 #   scripts/db-golden.sh image                     construye la imagen pg16
 #   scripts/db-golden.sh build [opciones] <nombre> arranca, carga y congela
+#   ... image|build -engine mysql ...             lo mismo con MariaDB (db-golden-mysql.sh)
+#   ... image|build -engine redis|sqlite ...      Redis o SQLite (db-golden-redis.sh, -sqlite.sh)
 #
 # `build` arranca una microVM desde la imagen pg16 (sin red, con exec), crea el
 # cluster en el overlay de la máquina, arranca Postgres escuchando en la IP del
@@ -301,8 +303,30 @@ SQL
   say "  comprobaciones en el lab: scripts/db-golden-verify.sh $name"
 }
 
+# -engine mysql (en cualquier sitio tras image o build) pasa todo a
+# db-golden-mysql.sh, su hermano para MariaDB (docs/mysql.md); -engine redis y
+# -engine sqlite, a db-golden-redis.sh y db-golden-sqlite.sh
+# (docs/db-engines.md); -engine postgres es lo de siempre.
+engine=postgres
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -engine)   engine="${2:?falta valor}"; shift 2 ;;
+    -engine=*) engine="${1#-engine=}"; shift ;;
+    *)         args+=("$1"); shift ;;
+  esac
+done
+case "$engine" in
+  postgres) ;;
+  mysql|mariadb) exec bash "$HERE/db-golden-mysql.sh" ${args[@]+"${args[@]}"} ;;
+  redis) exec bash "$HERE/db-golden-redis.sh" ${args[@]+"${args[@]}"} ;;
+  sqlite) exec bash "$HERE/db-golden-sqlite.sh" ${args[@]+"${args[@]}"} ;;
+  *) die "motor desconocido: $engine (postgres, mysql, redis o sqlite)" ;;
+esac
+set -- ${args[@]+"${args[@]}"}
+
 case "${1:-}" in
   image) shift; cmd_image "$@" ;;
   build) shift; cmd_build "$@" ;;
-  *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

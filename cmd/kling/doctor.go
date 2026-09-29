@@ -179,6 +179,9 @@ func doctorChecks(in doctorInput) []doctorCheck {
 		if c, ok := checkCoW(in.info.CoW); ok {
 			out = append(out, c)
 		}
+		if c, ok := checkAuthz(in.info.Authz); ok {
+			out = append(out, c)
+		}
 	}
 
 	for _, p := range in.plugins {
@@ -355,4 +358,31 @@ func captureStdout(fn func() error) (string, error) {
 	out := <-done
 	r.Close()
 	return out, ferr
+}
+
+// checkAuthz cuenta si el daemon autoriza por operación (docs/authz.md) y con
+// qué rol ve a quien pregunta. Sin política es un aviso, no un fallo: en un
+// host de un solo usuario es lo normal, pero conviene saber que quien alcance
+// el socket manda sobre todo. Un daemon anterior no dice nada y no se opina.
+func checkAuthz(a *api.AuthzInfo) (doctorCheck, bool) {
+	if a == nil {
+		return doctorCheck{}, false
+	}
+	c := doctorCheck{Name: "authz"}
+	switch {
+	case !a.Enabled:
+		c.State = doctorWarn
+		c.Detail = "no authz policy: whoever reaches the daemon's socket controls everything"
+		c.Fix = "fine on a single-user host; to share it, write /etc/kling/authz.json and restart the daemon (docs/authz.md)"
+	case a.Role == "" || a.Role == "none":
+		c.State = doctorFail
+		c.Detail = "the daemon has an authz policy and gives you no role"
+		if a.UID != nil {
+			c.Detail = fmt.Sprintf("the daemon has an authz policy and gives uid %d no role", *a.UID)
+		}
+		c.Fix = "ask the daemon's admin for a rule in its authz policy (docs/authz.md)"
+	default:
+		c.State, c.Detail = doctorOK, "policy on; you are "+a.Role
+	}
+	return c, true
 }

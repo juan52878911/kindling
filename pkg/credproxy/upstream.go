@@ -55,7 +55,8 @@ package credproxy
 // la pila de red del Mac (no la de gVisor del invitado): 127.0.0.1 es el
 // loopback del Mac, donde Docker Desktop publica los puertos. kling-vz corre
 // confinado (kling-vz.sb) y desde ahí el resolver del Mac no contesta: en
-// macOS el daemon solo admite una IP o "localhost" (UpstreamNecesitaDNS).
+// macOS el daemon resuelve el nombre al entregar la credencial y le pasa la
+// IP (ResolverUpstream), que kling-vz vuelve a comprobar al marcar.
 //
 // UpstreamTLS "disable" apaga el TLS del tramo del servidor, solo con
 // Upstream: la contraseña no cruza la red porque solo se admite SCRAM-SHA-256
@@ -238,9 +239,9 @@ func UpstreamPuertoLoopback(u string) (int, bool) {
 }
 
 // UpstreamNecesitaDNS dice si marcar el upstream u ("host:puerto") exige
-// resolver un nombre: no es una IP ni "localhost". En macOS el daemon rechaza
-// esos upstream: kling-vz corre confinado (kling-vz.sb) y desde ahí el
-// resolver del Mac no contesta.
+// resolver un nombre: no es una IP ni "localhost". En macOS el daemon los
+// resuelve él (ResolverUpstream): kling-vz corre confinado (kling-vz.sb) y
+// desde ahí el resolver del Mac no contesta.
 func UpstreamNecesitaDNS(u string) bool {
 	host, _, err := net.SplitHostPort(u)
 	if err != nil || u == "" {
@@ -316,6 +317,77 @@ func lookupSistema(ctx context.Context, host string) ([]netip.Addr, error) {
 // upstreamProhibido.
 var errUpstreamProhibido = errors.New("forbidden upstream destination")
 
+// ipsFijado son las IPs a las que se puede marcar para el host de un upstream
+// fijado: la IP literal, el loopback para "localhost" o lo que resuelva el
+// nombre. Basta UNA IP prohibida (o del rango de reenvíos, con el puerto pn)
+// para no devolver ninguna.
+func ipsFijado(ctx context.Context, lookup lookupUpstream, host string, pn int) ([]netip.Addr, error) {
+	var ips []netip.Addr
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ips = []netip.Addr{ip}
+	} else if host == "localhost" {
+		// RFC 6761: localhost es el loopback, sin preguntar a nadie. Así
+		// funciona también en un kling-vz confinado, que no llega al
+		// resolver del Mac (ver UpstreamNecesitaDNS).
+		ips = []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.IPv6Loopback()}
+	} else {
+		if lookup == nil {
+			lookup = lookupSistema
+		}
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ips, err = lookup(lctx, host)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("resolving upstream %s: %w", host, err)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("upstream %s does not resolve", host)
+		}
+	}
+	port := strconv.Itoa(pn)
+	for _, ip := range ips {
+		if UpstreamIPProhibida(ip) {
+			return nil, fmt.Errorf("%w: %s resolves to %s", errUpstreamProhibido, host, ip.Unmap())
+		}
+		// Otra vez aquí, y no solo al validar: un nombre de la LAN puede
+		// resolver al loopback, y es aquí donde se decide a dónde se va.
+		if destinoReenvio(ip, pn) {
+			return nil, errUpstreamReenvio(net.JoinHostPort(ip.Unmap().String(), port))
+		}
+	}
+	return ips, nil
+}
+
+// ResolverUpstream fija a una IP el upstream u ("host:puerto") si es un
+// nombre, con las mismas comprobaciones que al marcar (ipsFijado): ninguna de
+// sus IPs puede estar prohibida ni caer en el rango de reenvíos. Devuelve
+// "ip:puerto" con la primera IP que dio el resolver; una IP o "localhost" se
+// devuelven tal cual. lookup nil es el resolver del sistema.
+//
+// Es para macOS: kling-vz corre confinado y no llega al resolver del Mac, así
+// que el daemon resuelve el nombre al entregarle la credencial y le pasa la
+// IP, que kling-vz vuelve a comprobar al marcar. El TLS no cambia: se verifica
+// contra TLSServerName o Domain, nunca contra el host del upstream.
+func ResolverUpstream(ctx context.Context, lookup func(ctx context.Context, host string) ([]netip.Addr, error), u string) (string, error) {
+	if !UpstreamNecesitaDNS(u) {
+		return u, nil
+	}
+	host, port, err := net.SplitHostPort(u)
+	if err != nil {
+		return "", err
+	}
+	pn, err := strconv.Atoi(port)
+	if err != nil {
+		return "", fmt.Errorf("upstream %q: bad port", u)
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	ips, err := ipsFijado(ctx, lookup, host, pn)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(ips[0].Unmap().String(), port), nil
+}
+
 // dialFijado marca un upstream fijado por el operador: resuelve el nombre (si
 // lo es), se niega si alguna IP está prohibida y prueba las demás en orden.
 func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, addr string) (net.Conn, error) {
@@ -328,34 +400,9 @@ func dialFijado(lookup lookupUpstream, d *net.Dialer) func(ctx context.Context, 
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: bad port", addr)
 		}
-		var ips []netip.Addr
-		if ip, err := netip.ParseAddr(host); err == nil {
-			ips = []netip.Addr{ip}
-		} else if host == "localhost" {
-			// RFC 6761: localhost es el loopback, sin preguntar a nadie. Así
-			// funciona también en un kling-vz confinado, que no llega al
-			// resolver del Mac (ver UpstreamNecesitaDNS).
-			ips = []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1}), netip.IPv6Loopback()}
-		} else {
-			lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			ips, err = lookup(lctx, host)
-			cancel()
-			if err != nil {
-				return nil, fmt.Errorf("resolving upstream %s: %w", host, err)
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("upstream %s does not resolve", host)
-			}
-		}
-		for _, ip := range ips {
-			if UpstreamIPProhibida(ip) {
-				return nil, fmt.Errorf("%w: %s resolves to %s", errUpstreamProhibido, host, ip.Unmap())
-			}
-			// Otra vez aquí, y no solo al validar: un nombre de la LAN puede
-			// resolver al loopback, y es aquí donde se decide a dónde se va.
-			if destinoReenvio(ip, pn) {
-				return nil, errUpstreamReenvio(net.JoinHostPort(ip.Unmap().String(), port))
-			}
+		ips, err := ipsFijado(ctx, lookup, host, pn)
+		if err != nil {
+			return nil, err
 		}
 		var last error
 		for _, ip := range ips {

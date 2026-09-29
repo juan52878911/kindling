@@ -178,6 +178,9 @@ func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout 
 		if err := owned(src, owner); err != nil {
 			return nil, err
 		}
+		if err := requirePostgres(src, "rehearse"); err != nil {
+			return nil, err
+		}
 		if st := src.Labels[labelState]; st != stateReady {
 			return nil, fmt.Errorf("%s is not ready (%s=%q)", src.Name, labelState, st)
 		}
@@ -193,6 +196,11 @@ func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout 
 		mc = copies[0]
 	} else {
 		rep.SourceKind = "template"
+		if snap, err := a.template(ctx, ref); err == nil {
+			if _, _, engine, err := goldenInfo(snap); err == nil && engine != enginePostgres {
+				return nil, fmt.Errorf("kling db rehearse supports postgres templates only in this version; %s is %s (see %s)", ref, engine, engineDoc(engine))
+			}
+		}
 		name := "rehearse-" + randomSuffix()
 		mc, err = a.up(ctx, ref, name, 0, owner)
 		if err != nil {

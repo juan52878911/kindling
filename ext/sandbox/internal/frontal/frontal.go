@@ -120,6 +120,12 @@ type Servidor struct {
 	// mismo tras un fallo de TSC, para no lanzar la misma reconstrucción dos
 	// veces (ver reconstruir.go).
 	reconstruir reconstrucciones
+
+	// rotos son los grafos del pool que la última vuelta de limpieza vio rotos
+	// (a medias o mezclados). Solo se borra un roto que ya lo era en la vuelta
+	// anterior (ver limpiarGrafos).
+	rotosMu sync.Mutex
+	rotos   map[string]bool
 }
 
 // nombreValido acota nombres de tenant y de host: van en etiquetas y en ids
@@ -199,6 +205,10 @@ func (s *Servidor) rutas() {
 	// Las rutas por sandbox se despachan a mano: el id lleva una barra dentro
 	// ("host/máquina") y el ServeMux no deja que un comodín la contenga.
 	m.Handle("/v1/sandboxes/", s.auth(http.HandlerFunc(s.handleSandbox)))
+	// Grafos precalentados (grafos.go): reclamar, listar, ver y soltar.
+	m.Handle("POST /v1/graphs", s.auth(http.HandlerFunc(s.handleCrearGrafo)))
+	m.Handle("GET /v1/graphs", s.auth(http.HandlerFunc(s.handleListarGrafos)))
+	m.Handle("/v1/graphs/", s.auth(http.HandlerFunc(s.handleGrafo)))
 	s.mux = m
 }
 

@@ -1,3 +1,5 @@
+// La 1.26.3 es la que exige vz/go.mod. Los demás módulos (el núcleo y ext/*)
+// declaran la 1.24, el mínimo que se promete; CI comprueba que no se separen.
 go 1.26.3
 
 use (

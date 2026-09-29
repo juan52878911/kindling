@@ -442,7 +442,7 @@ func (s *Server) sandbox(w http.ResponseWriter, ref string) (*api.Machine, bool)
 
 func (s *Server) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 	out := []*api.Machine{}
-	for _, mc := range s.mgr.List() {
+	for _, mc := range filtrarMaquinas(r, s.mgr.List()) {
 		if mc.Labels[api.LabelKind] == api.KindSandbox {
 			out = append(out, mc)
 		}

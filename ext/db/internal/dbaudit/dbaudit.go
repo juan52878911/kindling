@@ -1,7 +1,9 @@
 // Package dbaudit une en una línea de tiempo los eventos del daemon de una
-// copia y las conexiones a su Postgres. Solo lee metadatos: instante, evento,
-// usuario, base y cliente. Nunca SQL ni contraseñas (el golden no activa
-// log_statement y aquí solo se analizan los mensajes de conexión conocidos).
+// copia y las conexiones a su Postgres (o a su MySQL/MariaDB). Solo lee
+// metadatos: instante, evento, usuario, base y cliente. Nunca SQL ni
+// contraseñas (el golden no activa log_statement y aquí solo se analizan los
+// mensajes de conexión conocidos; en MySQL, el registro de server_audit con
+// server_audit_events=CONNECT, que no lleva consultas).
 package dbaudit
 
 import (
@@ -23,6 +25,7 @@ import (
 const (
 	logTailLines   = 5000
 	pgLogPath      = "/var/log/postgresql/pg.log"
+	myAuditPath    = "/var/log/mysql/audit.log"
 	eventsWindow   = 2 * time.Second
 	maxOutputLines = 10000
 )
@@ -41,8 +44,14 @@ type Entry struct {
 
 var machineRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-// Run escribe en w la línea de tiempo de machine de los últimos since.
+// Run escribe en w la línea de tiempo de machine (una copia Postgres) de los
+// últimos since.
 func Run(ctx context.Context, k klingc.Kling, machine string, since time.Duration, jsonOut bool, w io.Writer) error {
+	return RunEngine(ctx, k, machine, "postgres", since, jsonOut, w)
+}
+
+// RunEngine es Run para una copia del motor engine ("postgres" o "mysql").
+func RunEngine(ctx context.Context, k klingc.Kling, machine, engine string, since time.Duration, jsonOut bool, w io.Writer) error {
 	if !machineRe.MatchString(machine) {
 		return fmt.Errorf("invalid machine name %q", machine)
 	}
@@ -51,12 +60,27 @@ func Run(ctx context.Context, k klingc.Kling, machine string, since time.Duratio
 	}
 	cutoff := now().Add(-since)
 
-	out, err := k.Run(ctx, nil, "exec", "-timeout", "30s", machine, "--",
-		"tail", "-n", fmt.Sprint(logTailLines), pgLogPath)
-	if err != nil {
-		return fmt.Errorf("reading the postgres log of %s: %w", machine, err)
+	var entries []Entry
+	switch engine {
+	case "postgres":
+		out, err := k.Run(ctx, nil, "exec", "-timeout", "30s", machine, "--",
+			"tail", "-n", fmt.Sprint(logTailLines), pgLogPath)
+		if err != nil {
+			return fmt.Errorf("reading the postgres log of %s: %w", machine, err)
+		}
+		entries = ParseLog(string(out))
+	case "mysql":
+		// Sin el registro (una plantilla sin server_audit) la línea de
+		// tiempo sigue con los eventos del daemon, y se dice.
+		out, err := k.Run(ctx, nil, "exec", "-timeout", "30s", machine, "--",
+			"tail", "-n", fmt.Sprint(logTailLines), myAuditPath)
+		if err != nil && !jsonOut {
+			fmt.Fprintf(w, "note: no connection log in %s (%s): only daemon events; build the golden with server_audit (docs/mysql.md)\n", machine, myAuditPath)
+		}
+		entries = ParseMyAudit(string(out))
+	default:
+		return fmt.Errorf("unknown engine %q", engine)
 	}
-	entries := ParseLog(string(out))
 
 	// Los eventos del daemon son un flujo en vivo: se escucha una ventana corta.
 	// Es un extra; si falla, la línea de tiempo sigue con las conexiones.
@@ -196,4 +220,63 @@ func eventName(typ, msg string) string {
 		return "thaw"
 	}
 	return strings.TrimPrefix(typ, "machine.")
+}
+
+// ParseMyAudit extrae las conexiones del registro de server_audit de MariaDB
+// (server_audit_events=CONNECT):
+//
+//	20260929 10:00:00,host,usuario,10.0.0.1,5,0,CONNECT,appdb,,0
+//
+// instante (hora del invitado, UTC), servidor, usuario, cliente, conexión,
+// consulta, operación, base, objeto y código. CONNECT con código 0 es una
+// conexión; con otro, una autenticación fallida (FAILED_CONNECT también);
+// DISCONNECT, una desconexión. Usuario y base los elige el cliente y pueden
+// llevar comas: una línea que no tiene los diez campos no se interpreta a
+// medias (su usuario y su base quedan en "?"). Ignora cualquier otra línea:
+// no se copia texto libre del registro.
+func ParseMyAudit(log string) []Entry {
+	var es []Entry
+	for _, line := range strings.Split(log, "\n") {
+		line = strings.TrimRight(line, "\r")
+		campos := strings.Split(line, ",")
+		if len(campos) < 10 {
+			continue
+		}
+		t, err := time.Parse("20060102 15:04:05", campos[0])
+		if err != nil {
+			continue
+		}
+		n := len(campos)
+		op, codigo := campos[n-4], campos[n-1]
+		if n != 10 {
+			// Comas de más en usuario o base: lo que no es fiable no se enseña;
+			// el código (el último campo) y la operación (un valor fijo) sí.
+			op = ""
+			for _, o := range []string{"CONNECT", "FAILED_CONNECT", "DISCONNECT"} {
+				for _, c := range campos {
+					if c == o {
+						op = o
+					}
+				}
+			}
+		}
+		e := Entry{Time: t.UTC()}
+		if n == 10 {
+			e.User, e.Client, e.DB = safe(campos[2]), safe(campos[3]), safe(campos[7])
+		} else {
+			e.User, e.DB, e.Client = "?", "?", "?"
+		}
+		switch {
+		case op == "CONNECT" && codigo == "0":
+			e.Event = "connect"
+		case op == "CONNECT" || op == "FAILED_CONNECT":
+			e.Event = "auth-failed"
+		case op == "DISCONNECT":
+			e.Event = "disconnect"
+		default:
+			continue
+		}
+		es = append(es, e)
+	}
+	return es
 }

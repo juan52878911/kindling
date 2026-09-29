@@ -98,6 +98,14 @@ func (m *Manager) comprobarCopiaLocked(agente, id, owner string, port int) (*api
 		return nil, fmt.Errorf("owner mismatch: copy %s is %q, agent %s is %q, the credential says %q",
 			cp.Name, co, ag.Name, ao, owner)
 	}
+	// Y el mismo inquilino (kling.owner, docs/authz.md): kling.db.owner es
+	// una etiqueta que elige quien crea la máquina; kling.owner la pone el
+	// daemon con política. Sin política las dos están vacías y esto no cambia
+	// nada.
+	if cp.Labels[api.LabelOwner] != ag.Labels[api.LabelOwner] {
+		return nil, fmt.Errorf("tenant mismatch: copy %s belongs to %q, agent %s to %q",
+			cp.Name, cp.Labels[api.LabelOwner], ag.Name, ag.Labels[api.LabelOwner])
+	}
 	if !puertoExpuesto(cp.Labels[api.LabelPorts], port) {
 		return nil, fmt.Errorf("copy %s does not expose port %d (%s)", cp.Name, port, api.LabelPorts)
 	}
@@ -176,7 +184,7 @@ func (m *Manager) invalidarSesiones(id, motivo string) {
 }
 
 // etiquetasDB son las etiquetas de las que depende el modelo A.
-var etiquetasDB = []string{api.LabelDBGolden, api.LabelDBOwner, api.LabelDBState, api.LabelPorts}
+var etiquetasDB = []string{api.LabelDBGolden, api.LabelDBOwner, api.LabelDBState, api.LabelPorts, api.LabelOwner}
 
 // cambianEtiquetasDB dice si aplicar nuevas sobre antes cambia alguna de
 // etiquetasDB.

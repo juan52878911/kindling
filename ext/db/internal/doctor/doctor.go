@@ -39,6 +39,13 @@ const (
 type Target struct {
 	Machine string
 	URL     string
+	// Solo con URL. CAFile añade raíces de confianza a las del sistema (gana
+	// sobre sslrootcert de la URL); TLSServerName es el nombre que se
+	// verifica si no es el host de la URL; Insecure permite hablar sin TLS
+	// (o sin verificar al servidor) con un servidor que no es loopback.
+	CAFile        string
+	TLSServerName string
+	Insecure      bool
 }
 
 // Severity ordena los hallazgos. Info no cuenta como problema.
@@ -130,7 +137,7 @@ func Run(ctx context.Context, k klingc.Kling, t Target, w io.Writer) (problems i
 		}
 		err = runCopy(ctx, k, t.Machine, r)
 	} else {
-		err = runURL(ctx, t.URL, r)
+		err = runURL(ctx, t, r)
 	}
 	if err != nil {
 		return 0, err

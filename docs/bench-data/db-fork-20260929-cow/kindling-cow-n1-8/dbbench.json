@@ -1,0 +1,542 @@
+{
+  "schema": 1,
+  "started": "2026-09-29T06:36:25.690456085Z",
+  "finished": "2026-09-29T06:36:43.170633052Z",
+  "host": {
+    "hostname": "fc-test",
+    "kernel": "6.17.2-1-pve",
+    "cpu": "Intel(R) Core(TM) i7-8700T CPU @ 2.40GHz",
+    "cpus": 4,
+    "mem_total_mib": 8192,
+    "nested": false,
+    "container": "lxc",
+    "arch": "amd64",
+    "os": "linux",
+    "kling_version": "kling v0.16.0-222-g6fae27c",
+    "docker_version": "20.10.24+dfsg1",
+    "git_sha": "67ee19f676fe"
+  },
+  "config": {
+    "modes": [
+      "kindling-run"
+    ],
+    "n": [
+      1,
+      8,
+      32
+    ],
+    "reps": 3,
+    "timeout_s": 180,
+    "golden": "benchs",
+    "docker_image": "postgres:16-alpine",
+    "table": "items",
+    "expect_count": 400000,
+    "seed_sql": "seed-bench.sql",
+    "disk_path": "/var/lib/kindling",
+    "psi_max": 20,
+    "est_mem_mib": 32
+  },
+  "preflight": [
+    "MemAvailable 8079 MiB",
+    "disk-path /var/lib/kindling: 4581 MiB free",
+    "PSI some avg10 0.00 (limit 20.00)"
+  ],
+  "rounds": [
+    {
+      "mode": "kindling-run",
+      "n": 1,
+      "rep": 1,
+      "status": "ok",
+      "ok": 1,
+      "failed": 0,
+      "latency_ms": {
+        "n": 1,
+        "p50": 2043.34,
+        "p95": 2043.34,
+        "p99": 2043.34,
+        "max": 2043.34,
+        "mean": 2043.34
+      },
+      "provision_ms": {
+        "n": 1,
+        "p50": 1770.51,
+        "p95": 1770.51,
+        "p99": 1770.51,
+        "max": 1770.51,
+        "mean": 1770.51
+      },
+      "wall_ms": 2043.34,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 2043.34,
+          "provision_ms": 1770.51,
+          "tool_ms": 64
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8080,
+        "min": 8059,
+        "peak_used": 21
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "kindling-run",
+      "n": 1,
+      "rep": 2,
+      "status": "ok",
+      "ok": 1,
+      "failed": 0,
+      "latency_ms": {
+        "n": 1,
+        "p50": 133.2,
+        "p95": 133.2,
+        "p99": 133.2,
+        "max": 133.2,
+        "mean": 133.2
+      },
+      "provision_ms": {
+        "n": 1,
+        "p50": 66.68,
+        "p95": 66.68,
+        "p99": 66.68,
+        "max": 66.68,
+        "mean": 66.68
+      },
+      "wall_ms": 133.2,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 133.2,
+          "provision_ms": 66.68,
+          "tool_ms": 10
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8079,
+        "min": 8062,
+        "peak_used": 17
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "kindling-run",
+      "n": 1,
+      "rep": 3,
+      "status": "ok",
+      "ok": 1,
+      "failed": 0,
+      "latency_ms": {
+        "n": 1,
+        "p50": 132.52,
+        "p95": 132.52,
+        "p99": 132.52,
+        "max": 132.52,
+        "mean": 132.52
+      },
+      "provision_ms": {
+        "n": 1,
+        "p50": 66.92,
+        "p95": 66.92,
+        "p99": 66.92,
+        "max": 66.92,
+        "mean": 66.92
+      },
+      "wall_ms": 132.52,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 132.52,
+          "provision_ms": 66.92,
+          "tool_ms": 10
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8079,
+        "min": 8063,
+        "peak_used": 16
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "kindling-run",
+      "n": 8,
+      "rep": 1,
+      "status": "ok",
+      "ok": 8,
+      "failed": 0,
+      "latency_ms": {
+        "n": 8,
+        "p50": 349.39,
+        "p95": 404.63,
+        "p99": 404.63,
+        "max": 404.63,
+        "mean": 352.3
+      },
+      "provision_ms": {
+        "n": 8,
+        "p50": 170.41,
+        "p95": 266.99,
+        "p99": 266.99,
+        "max": 266.99,
+        "mean": 186.13
+      },
+      "wall_ms": 404.63,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 355.31,
+          "provision_ms": 210.19,
+          "tool_ms": 27
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 388.64,
+          "provision_ms": 183.36,
+          "tool_ms": 19
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 290.93,
+          "provision_ms": 117.47,
+          "tool_ms": 13
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 402.92,
+          "provision_ms": 252.51,
+          "tool_ms": 28
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 349.39,
+          "provision_ms": 138.32,
+          "tool_ms": 14
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 342.31,
+          "provision_ms": 170.41,
+          "tool_ms": 23
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 404.63,
+          "provision_ms": 266.99,
+          "tool_ms": 71
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 284.23,
+          "provision_ms": 149.76,
+          "tool_ms": 19
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8080,
+        "min": 7947,
+        "peak_used": 133
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "kindling-run",
+      "n": 8,
+      "rep": 2,
+      "status": "ok",
+      "ok": 8,
+      "failed": 0,
+      "latency_ms": {
+        "n": 8,
+        "p50": 340.65,
+        "p95": 422.08,
+        "p99": 422.08,
+        "max": 422.08,
+        "mean": 345.94
+      },
+      "provision_ms": {
+        "n": 8,
+        "p50": 187.52,
+        "p95": 301.65,
+        "p99": 301.65,
+        "max": 301.65,
+        "mean": 203.32
+      },
+      "wall_ms": 422.08,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 262.14,
+          "provision_ms": 155.87,
+          "tool_ms": 44
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 302.46,
+          "provision_ms": 155.76,
+          "tool_ms": 18
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 363.13,
+          "provision_ms": 187.52,
+          "tool_ms": 19
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 399.71,
+          "provision_ms": 284.15,
+          "tool_ms": 47
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 422.08,
+          "provision_ms": 301.65,
+          "tool_ms": 39
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 340.65,
+          "provision_ms": 196.73,
+          "tool_ms": 22
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 388.9,
+          "provision_ms": 224.91,
+          "tool_ms": 20
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 288.42,
+          "provision_ms": 119.95,
+          "tool_ms": 20
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8078,
+        "min": 7947,
+        "peak_used": 131
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "kindling-run",
+      "n": 8,
+      "rep": 3,
+      "status": "ok",
+      "ok": 8,
+      "failed": 0,
+      "latency_ms": {
+        "n": 8,
+        "p50": 352.17,
+        "p95": 432.35,
+        "p99": 432.35,
+        "max": 432.35,
+        "mean": 364.36
+      },
+      "provision_ms": {
+        "n": 8,
+        "p50": 199.21,
+        "p95": 329.26,
+        "p99": 329.26,
+        "max": 329.26,
+        "mean": 212.45
+      },
+      "wall_ms": 432.35,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 352.17,
+          "provision_ms": 203.54,
+          "tool_ms": 20
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 425.69,
+          "provision_ms": 303.99,
+          "tool_ms": 82
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 312.08,
+          "provision_ms": 166.04,
+          "tool_ms": 22
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 413.33,
+          "provision_ms": 233.98,
+          "tool_ms": 21
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 305.87,
+          "provision_ms": 115.83,
+          "tool_ms": 19
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 379.65,
+          "provision_ms": 199.21,
+          "tool_ms": 33
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 432.35,
+          "provision_ms": 329.26,
+          "tool_ms": 78
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 293.71,
+          "provision_ms": 147.73,
+          "tool_ms": 18
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8079,
+        "min": 7947,
+        "peak_used": 132
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0,
+      "psi_max": 0
+    },
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 0,
+      "status": "skipped",
+      "reason": "N=32 × 128 MiB = 4096 MiB \u003e 70% of free disk 4581 MiB",
+      "ok": 0,
+      "failed": 0,
+      "latency_ms": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "provision_ms": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "wall_ms": 0,
+      "mem_available_mib": {
+        "before": 0,
+        "min": 0,
+        "peak_used": 0
+      },
+      "disk_per_copy_mib": 0,
+      "psi_before": 0,
+      "psi_max": 0
+    }
+  ],
+  "cells": [
+    {
+      "mode": "kindling-run",
+      "n": 1,
+      "status": "ok",
+      "rounds": 3,
+      "copies": 3,
+      "ok": 3,
+      "failed": 0,
+      "latency_ms": {
+        "n": 3,
+        "p50": 133.2,
+        "p95": 2043.34,
+        "p99": 2043.34,
+        "max": 2043.34,
+        "mean": 769.69
+      },
+      "mem_available_min_mib": 8059,
+      "mem_peak_used_mib": 21,
+      "disk_per_copy_mib": 3.58
+    },
+    {
+      "mode": "kindling-run",
+      "n": 8,
+      "status": "ok",
+      "rounds": 3,
+      "copies": 24,
+      "ok": 24,
+      "failed": 0,
+      "latency_ms": {
+        "n": 24,
+        "p50": 352.17,
+        "p95": 425.69,
+        "p99": 432.35,
+        "max": 432.35,
+        "mean": 354.2
+      },
+      "mem_available_min_mib": 7947,
+      "mem_peak_used_mib": 133,
+      "disk_per_copy_mib": 3.58
+    },
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "status": "skipped",
+      "reason": "N=32 × 128 MiB = 4096 MiB \u003e 70% of free disk 4581 MiB",
+      "rounds": 0,
+      "copies": 0,
+      "ok": 0,
+      "failed": 0,
+      "latency_ms": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "mem_available_min_mib": -1,
+      "mem_peak_used_mib": -1,
+      "disk_per_copy_mib": -1
+    }
+  ]
+}

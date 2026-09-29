@@ -8,6 +8,9 @@ package frontal
 // la receta de su anotación, la misma que escribe plantilla.Construir. Un
 // snapshot sin esa anotación (de antes de que existiera, o corrupto) sigue
 // apareciendo, solo que sin receta ni fecha.
+//
+// Las plantillas de grafo (plantilla/grafo.go) salen también, con kind
+// "graph": se piden con POST /v1/graphs, no con POST /v1/sandboxes.
 
 import (
 	"context"
@@ -34,13 +37,16 @@ type TemplateHost struct {
 // TemplateInfo es una plantilla vista desde el frontal: su nombre y en qué
 // hosts está construida.
 type TemplateInfo struct {
-	Name  string         `json:"name"`
+	Name string `json:"name"`
+	// Kind es "graph" en una plantilla de grafo; vacío en una de máquina.
+	Kind  string         `json:"kind,omitempty"`
 	Hosts []TemplateHost `json:"hosts"`
 }
 
 func (s *Servidor) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	todos := s.reg.Todos()
 	porHost := make([][]*api.Snapshot, len(todos))
+	grafosPorHost := make([][]plantilla.PlantillaGrafo, len(todos))
 	var wg sync.WaitGroup
 	for i, h := range todos {
 		wg.Add(1)
@@ -54,6 +60,9 @@ func (s *Servidor) handleTemplates(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			porHost[i] = snaps
+			// Sin la capacidad "store" (o sin plantillas de grafo) no hay nada
+			// que añadir: no es un fallo del host.
+			grafosPorHost[i], _ = plantilla.Grafos(ctx, h.Cliente)
 		}(i, h)
 	}
 	wg.Wait()
@@ -78,6 +87,18 @@ func (s *Servidor) handleTemplates(w http.ResponseWriter, r *http.Request) {
 				th.BuiltAt, th.Recipe = rec.Hecho, rec.Hash
 			}
 			ti.Hosts = append(ti.Hosts, th)
+		}
+		for _, pg := range grafosPorHost[i] {
+			// Clave aparte: una plantilla de grafo puede llamarse como una de
+			// máquina, y son dos cosas distintas.
+			clave := claveGrafo(pg.Nombre)
+			ti, ok := porNombre[clave]
+			if !ok {
+				ti = &TemplateInfo{Name: pg.Nombre, Kind: plantilla.KindGrafo}
+				porNombre[clave] = ti
+				orden = append(orden, clave)
+			}
+			ti.Hosts = append(ti.Hosts, TemplateHost{Host: h.Nombre})
 		}
 	}
 

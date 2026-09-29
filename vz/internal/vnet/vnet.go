@@ -87,12 +87,12 @@ type Config struct {
 	// (credproxy.Options.Enabled, ver kling-vz), para que cada rechazo quede
 	// en su registro de auditoría.
 	Credentials http.Handler
-	// CredentialsPG, si no es nil, es el mismo proxy en su papel de Postgres:
-	// una conexión TCP del invitado a la pasarela en cualquier puerto que no
-	// sea el 53 ni el 80 (el 5432 de un dominio con credencial Postgres,
-	// normalmente) va a su ServePG, pero solo si PGActivo (allowlist y alguna
-	// credencial Postgres); si no, se rechaza como antes. Es el DNAT
-	// HostIP:* -> 5381 de Linux.
+	// CredentialsPG, si no es nil, es el mismo proxy en su papel de bases de
+	// datos: una conexión TCP del invitado a la pasarela en cualquier puerto
+	// que no sea el 53 ni el 80 (el 5432 o el 3306 de un dominio con
+	// credencial Postgres o MySQL, normalmente) va a su ServeDB con ese
+	// puerto, pero solo si DBActivo (allowlist y alguna credencial de base de
+	// datos); si no, se rechaza como antes. Es el DNAT HostIP:* de Linux.
 	CredentialsPG PGProxy
 	// Graph, si no es nil, son las aristas link del nodo (vz/internal/grafo):
 	// una conexión TCP del invitado a la pasarela en un puerto de arista va a
@@ -119,10 +119,12 @@ type GraphLinks interface {
 	Serve(ctx context.Context, port uint16, aceptar func() (net.Conn, error), rechazar func())
 }
 
-// PGProxy es lo que la red necesita del proxy de Postgres (*credproxy.Proxy).
+// PGProxy es lo que la red necesita del proxy de bases de datos
+// (*credproxy.Proxy): si tiene algo que hacer y atender una conexión dado el
+// puerto al que marcó el invitado (con él decide entre Postgres y MySQL).
 type PGProxy interface {
-	PGActivo() bool
-	ServePG(ctx context.Context, c net.Conn)
+	DBActivo() bool
+	ServeDB(ctx context.Context, c net.Conn, port int)
 }
 
 // Net es la red de una máquina.
@@ -382,7 +384,7 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		}, func() { r.Complete(true) })
 		return
 	}
-	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.PGActivo() {
+	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.DBActivo() {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
@@ -390,7 +392,7 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 			return
 		}
 		r.Complete(false)
-		n.cfg.CredentialsPG.ServePG(n.ctx, gonet.NewTCPConn(&wq, ep))
+		n.cfg.CredentialsPG.ServeDB(n.ctx, gonet.NewTCPConn(&wq, ep), int(id.LocalPort))
 		return
 	}
 	if !n.cfg.Policy.AllowConn(dst) {

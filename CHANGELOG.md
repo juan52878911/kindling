@@ -10,6 +10,184 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+## v0.17.0 — 2026-09-29
+
+La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:
+Postgres, MariaDB, Redis y SQLite), grafos de microVMs con aristas (`kling graph`),
+discos con copia al escribir en el núcleo, autorización por inquilino en el socket del
+daemon y el proxy de credenciales para Postgres y MySQL. Probada de punta a punta en
+Linux (CT 105: 224 comprobaciones) y en macOS (M4: 142).
+
+### Compatibilidad al actualizar
+
+- **El daemon y `kling-vz` se actualizan juntos.** El rango de reenvíos 29000-29999
+  queda reservado, las credenciales llevan `any_database` y el broker de enlaces de los
+  grafos es nuevo en los dos lados.
+- **El registro de auditoría del proxy se muda** de `machines/<id>/credaudit.jsonl` a
+  `<root>/audit/<id>.jsonl` (0700/0600, de root). El daemon migra los existentes al
+  arrancar; `kling machine audit` los sigue enseñando.
+- **Sin política de autorización, nada cambia.** `/etc/kling/authz.json` es opcional;
+  con ella, root y el usuario del daemon siguen siendo admin (ver docs/authz.md).
+- **Copia al escribir (`daemon.cow=auto`).** Las máquinas nuevas clonan desde un almacén
+  con reflink. Las existentes no se migran y siguen como estaban.
+- `state.json`, `meta.json` y la firma de los snapshots no cambian de formato.
+
+### Fase baja
+
+- **`idle_freeze` es "N segundos sin conexiones" (#54).** Cada conexión aceptada por una
+  arista `link` o `credential` (proxy de enlace y de Postgres en Linux, broker de enlaces
+  en macOS) reinicia el reloj del TTL del nodo destino, como mucho una vez por segundo;
+  las rechazadas no. Despertar un nodo también lo reinicia: antes, uno dormido más de
+  `idle_freeze` se volvía a congelar en la siguiente vuelta del vigilante. Ver
+  [`docs/grafos.md`](docs/grafos.md#idle_freeze-segundos-sin-uso).
+- **`kling graph audit <g>` (#56).** Las conexiones por aristas `link` y `credential` de
+  todos los nodos de un grafo en una sola línea de tiempo, ordenada y con el nodo de
+  origen; `-since`, `-denied`, `-tail`, `-json` (con `"node"`) y `-all` (también el resto
+  del tráfico de sus credenciales). Lee el `credaudit` de cada nodo por la ruta de
+  siempre: sin API nueva, con la misma autorización y sin secretos. Ver
+  [`docs/grafos.md`](docs/grafos.md#auditoría).
+- **`kling graph snapshot` y `fork` de grafos congelados y con volúmenes (#55).** Un
+  nodo congelado ya no se rechaza: se despierta antes del instante y se vuelve a
+  congelar al final (también si algo falla); el grafo termina como empezó. Un nodo con
+  volúmenes los suelta con el invitado en marcha antes de la pausa y los recupera tras
+  reanudarse, como `kling commit`. Se rechazan (409, antes de tocar nada) un nodo ya
+  pausado con volúmenes (un invitado pausado no contesta: `kling graph thaw` y repite)
+  y el fork de un grafo con un volumen en escritura; en solo lectura se ramifica.
+  Receta para ramificar uno con volumen en escritura en
+  [`docs/grafos.md`](docs/grafos.md). Si un nodo no se puede volver a congelar tras un
+  volcado bueno, la respuesta lo trae en `warnings` y `kling graph snapshot` lo avisa en
+  stderr (antes solo quedaba en el log del daemon).
+- **`kling info` ya no da el almacén por hecho antes de crearlo (#60).** Con
+  `daemon.cow=auto` decía `store (reflink inside kindling's XFS store)` antes de que el
+  almacén existiera o se hubiera probado. Ahora dice `store pending (created on first
+  use)` hasta el primer `run -from`, con qué almacén se creará y si el núcleo aún no
+  lista su sistema de ficheros (`GET /info` gana `cow.pending`). La falta de sitio para
+  el almacén se detecta al arrancar y deja el modo en `copy` con el motivo, que ahora sale
+  también en `kling info`.
+- **El almacén de copia al escribir crece, avisa cuando se llena y no deja imágenes
+  inservibles (#61).** `kling cow grow +8G` (o `32G`, el tamaño nuevo; `POST
+  /cow/store/grow`, solo admin, capacidad `cow-grow`) lo agranda en caliente: reserva el
+  fichero con `fallocate`, hace `LOOP_SET_CAPACITY` sobre su loop (comprobando en
+  `/sys/block/loopN/loop/backing_file` que es el suyo) y `xfs_growfs` o `btrfs
+  filesystem resize max`; no encoge y deja los 2 GiB de margen en la raíz. `kling info`
+  y `kling doctor` avisan pasado el 85 % de uso, y `kling cow` a secas enseña el estado.
+  Un `cow.xfs`/`cow.btrfs` recién creado que no monta o no clona se desmonta y se borra,
+  y se prueba con el otro tipo; al arrancar, uno que no monta y que ninguna máquina usa
+  se borra (se vuelve a crear en el primer `run -from`) solo si el fallo es definitivo
+  (el núcleo no tiene su sistema de ficheros, o no se deja montar); con otro, que puede
+  ser pasajero, se avisa y se queda. Ver [`docs/cow.md`](docs/cow.md).
+- **macOS: `commit` clona el overlay en APFS (#62).** Copiaba el overlay disperso desde
+  el descriptor comprobado porque `cp -c /dev/fd/N` no clona; ahora usa
+  `fclonefileat(2)` desde ese mismo descriptor, por su número de llamada al sistema (sin
+  cgo ni `x/sys`). Sigue sin seguir la ruta del VMM: el clon se crea con su nombre (falla
+  si ya hay algo, enlace incluido), se abre relativo al directorio sin seguir enlaces y
+  se exige un fichero regular con un solo enlace, propio y del tamaño del origen. Fuera
+  de APFS (`ENOTSUP`) o entre volúmenes (`EXDEV`), copia dispersa como antes. Probado en
+  un M4: el dorado comparte los bloques físicos del overlay (`F_LOG2PHYS_EXT`).
+- **El registro de auditoría del proxy sale del alcance del VMM (Linux, #79).** Vive
+  en `<root>/audit/<id>.jsonl` (directorio 0700 y fichero 0600, de root) en vez de en
+  `machines/<id>/`, que es del usuario sin privilegios del VMM: un Firecracker
+  comprometido ya no puede borrar, truncar ni sustituir el registro que lo vigila. Al
+  arrancar, el daemon migra los registros viejos (sin seguir enlaces, solo ficheros
+  regulares con un único enlace; lo demás se descarta sin leerlo) y barre los de
+  máquinas que ya no existen; `rm` borra el de la suya. `kling machine audit` no
+  cambia. En macOS sigue junto al socket de `kling-vz`.
+- **`-upstream` con nombre en macOS (#74).** `kling-vz` corre confinado y no llega al
+  resolver del Mac, así que el daemon rechazaba un nombre. Ahora lo resuelve el daemon
+  al entregar la credencial (al ponerla y en cada arranque o descongelación), con las
+  mismas reglas que al marcar —una IP prohibida o del rango de reenvíos entre las
+  respuestas y no se entrega— y `kling-vz` recibe la primera IP, que vuelve a
+  comprobar. El TLS se sigue verificando contra `-domain` o `-tls-server-name`.
+  Diferencias con Linux: un cambio de DNS no se sigue hasta la siguiente entrega, y no
+  se prueban las demás IPs del nombre (`credproxy.ResolverUpstream`).
+- **Diseño: el proxy de credenciales de macOS en su propio proceso (#80).** Hoy la
+  clave vive en `kling-vz`, el mismo proceso que atiende la red del invitado. El plan
+  (proceso `kling-credproxy` por máquina, confinado, con hardened runtime; IPC por
+  sockets Unix; qué evita y cuánto cuesta) está en
+  [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md) y en `SECURITY.md`.
+  Sin implementar: necesita verificarse en un Mac real.
+- **kling-sandbox: grafos precalentados (#57).** Plantillas con `"kind": "graph"`
+  (`kling sbx template apply -f`, guardadas en el store de cada host): el fondo del
+  gateway levanta instancias enteras con `POST /graphs` y las congela; `POST /v1/graphs
+  {"template": ...}` reclama una (etiqueta todas sus máquinas con el inquilino, relee y
+  `graph thaw`) o levanta una ya reclamada si no hay libres. `GET/DELETE
+  /v1/graphs/{id}` para verla y soltarla entera; el id de cada nodo vale para `exec`,
+  `files` y `shell`. Cuenta en la cuota como un sandbox, la limpieza borra los
+  abandonados y los rotos, y `/v1/templates` los lista con `kind: graph`. Sin nodos
+  `lazy`, aristas `credential` ni volúmenes o carpetas del host en la plantilla. El
+  candado del frontal solo cubre etiquetar y comprobar (las etiquetas reservan el
+  grafo): el `graph thaw` va fuera y uno lento no para las demás reclamaciones. Con
+  `authz` en el daemon, el frontal y el fondo necesitan la identidad `admin`. Ver
+  [`ext/sandbox/README.md`](ext/sandbox/README.md#grafos-precalentados).
+- **`kling db slice` y `kling db observe` (#70).** `slice <postgres-url> -table T -mask
+  REGLAS [-rows N] [-related-rows N]` hace un golden con una sola tabla de producción: las
+  primeras N filas por clave primaria, los padres que apuntan y como mucho N hijos por
+  clave foránea que la apunta, y el resto del esquema como tablas vacías. Reutiliza la
+  máquina de construcción, la credencial en el proxy y el enmascarado de `clone`, y en
+  producción solo lee (`pg_dump --schema-only` y una sesión `REPEATABLE READ READ ONLY`
+  con `\copy ... TO PROGRAM` por tuberías dentro de la microVM). Las claves foráneas que lo
+  copiado no cumple quedan `NOT VALID` y el informe las nombra. Un nombre cerca de la
+  tabla con caracteres de control, barras invertidas o comillas (irían dentro de un
+  `\copy`) detiene la construcción. `observe <copia>` registra
+  en el log de la copia cada sentencia de las conexiones nuevas con su duración (sin
+  parámetros ni sesiones del superusuario) y `observe -report` agrupa las que tocan la
+  tabla, normalizadas y sin literales. Los tiempos no son los de producción: importar las
+  estadísticas reales solo sería posible con PostgreSQL 18 (`pg_restore_relation_stats`).
+  Ver [`docs/db.md`](docs/db.md).
+- **Proxy de Postgres: protocolo 3.2 (#71).** El proxy de credenciales habla 3.0 y 3.2
+  (PostgreSQL 18), con claves de cancelación de longitud variable en `BackendKeyData` y
+  `CancelRequest`. El invitado recibe una clave falsa de la longitud de su versión (4 o
+  32 bytes) y la cancelación llega al servidor con la real, de la de la suya; con un
+  servidor anterior a 18, que contesta `NegotiateProtocolVersion` con 3.0, el proxy
+  sigue en 3.0 con él sin que el invitado lo note. 3.1 y 3.3+ se negocian a la baja. Un
+  `NegotiateProtocolVersion` del servidor fuera de sitio, una clave que no es de su
+  versión o un segundo `BackendKeyData` cortan la conexión. Probado con clientes y
+  servidores falsos 3.0 y 3.2 en las cuatro combinaciones; la prueba de laboratorio
+  (`-tags pglab`) cancela también en 3.2. Ver [`docs/postgres.md`](docs/postgres.md).
+- **`kling db class` (#68): una copia por alumno.** `class -n 30 -prefix alumno <golden>`
+  crea `alumno-01` ... `alumno-30` (cada una un `up` con su clave, etiqueta
+  `kling.db.class`), en paralelo con tope (`-parallel`, 4 por defecto); repetirlo crea solo
+  las que faltan. `class ls` las lista con host, puerto, usuario y base, `class reset`
+  (todas o las nombradas) les da datos nuevos y `class rm` las borra. Las claves nunca se
+  imprimen: `-passwords FICHERO` escribe las DSN en un fichero 0600. Un `kling db reset`
+  conserva ahora `kling.db.class`, `kling.db.repo` y `kling.db.branch`.
+- **`kling db report` (#69): informes programados con `ask`.** `report add <nombre>
+  -golden G -every 1w -question "..."` guarda la pregunta (0600, en el estado de
+  kling-db, sin claves); `report run <nombre> [-due]` hace una copia fresca del golden,
+  pregunta como `ask -yes`, escribe el resultado (a stdout o a un fichero 0600) y borra la
+  copia. Sin demonio: recetas de cron y de un temporizador de systemd en
+  [`docs/db-ask.md`](docs/db-ask.md). Las garantías de `ask` no cambian (filas al
+  proveedor solo con `-explain -send-data`, visible en `report ls`).
+- **`kling db branch` (#73).** `branch -owner T -golden G hook install` deja esos valores
+  en el hook (`-switch` acepta ahora `-golden`). `kling.db.repo` es el hash del directorio
+  git común: una rama tiene una sola copia en todos los worktrees, cada worktree escribe
+  su `kling-db.env` en su propio directorio git y `-switch` no congela la rama que otro
+  worktree tiene activa (las copias de antes se siguen reconociendo). Un `flock` por
+  repositorio en el estado de kling-db evita que dos checkouts a la vez creen dos copias
+  de la misma rama.
+- **ext/db (#83):** la directiva `go` del módulo es la del núcleo y el resto de `ext/`
+  (1.24; el `go.work` pide 1.26.3 solo por `vz/`), y CI comprueba que no se separen.
+- **Redis y SQLite en `kling db` (#65).** Plantillas con `scripts/db-golden-redis.sh` y
+  `scripts/db-golden-sqlite.sh` (o `golden image|build -engine redis|sqlite`; recetas
+  `redis.recipe.json` y `sqlite.recipe.json`, etiqueta `kling.db.engine`). `up`, `fork`,
+  `connect`, `reset`, `rm` y `doctor` (reglas RD y SQ) funcionan en los dos; `rotate` en
+  Redis. **Redis**: cada copia estrena la clave de su usuario ACL (`+@all -@admin`)
+  generada en el host, y al invitado va solo su SHA-256 por stdin, comprobado con
+  `ACL GETUSER`; la clave del administrador (`default`) se genera y se estrena dentro
+  de cada copia y no sale nunca de ella. `connect -redis` (clave en `REDISCLI_AUTH`) y
+  `redis://`. **SQLite**: sin servidor ni clave; la copia es una microVM con
+  `/var/lib/kling-db/<base>.sqlite` y `connect -sqlite` abre `sqlite3` dentro con
+  `kling shell`. Lo demás (attach, role, rehearse, snapshot/undo, tenant-check, ask,
+  diff, env, audit, branch, clone) se rechaza antes de tocar nada. Sin proxy de
+  credenciales para ninguno de los dos. MongoDB queda fuera, y
+  [`docs/db-engines.md`](docs/db-engines.md) explica por qué (Alpine no lo empaqueta y
+  `createUser` exige la clave en claro dentro del servidor). E2E 7h2 en
+  `scripts/90-e2e.sh`, pendiente del lab.
+- **`kling db diff` y `env up` rechazan con claridad lo que no es Postgres.** Con una
+  copia o un golden MySQL fallaban más tarde (psql contra MariaDB, una arista SCRAM al
+  5432); ahora dicen `supports postgres ... only`. `golden build -template` rechaza
+  también `-engine=redis|sqlite` (antes solo miraba `mysql`).
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>
@@ -38,6 +216,36 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Núcleo
 
+- **Autorización por operación en el socket del daemon (capacidad `authz`).** Con
+  `/etc/kling/authz.json` (o `kling daemon -authz <ruta>`, `KLING_AUTHZ`), el daemon lee
+  quién llama con `SO_PEERCRED` (Linux) o `LOCAL_PEERCRED` (macOS) —por SSH, el usuario
+  remoto— y le da un rol por uid, usuario, gid o grupo: `admin` (todo) o
+  `tenant:<nombre>`, que solo ve y opera las máquinas, snapshots y grafos con
+  `kling.owner=<nombre>`. Esa etiqueta la pone el daemon al crear (run, sandbox, cada nodo
+  de un grafo) y se hereda por commit, `run -from`, fork y snapshots de grafo; un
+  inquilino no puede fijarla ni cambiarla. Lo ajeno responde 404, los listados y
+  `/events` se filtran, `kling.db.owner` y `upstream_machine` quedan ligados al
+  inquilino, y el proxy de Postgres exige el mismo `kling.owner` en copia y agente.
+  Plantillas compartidas (`shared_templates`, solo lectura) y tokens de inquilino
+  opcionales (`KLING_AUTHZ_TOKEN`). Volúmenes, carpetas del host, store, imágenes y
+  métricas del host quedan para admin. Cada ruta declara su acción en una tabla única y
+  un middleware decide. Sin fichero, todo como siempre, con un aviso en `kling doctor`;
+  `kling info` y `GET /info` (`authz`) dicen el rol de quien pregunta. Un fichero pedido
+  que falta, mal escrito o escribible por otros impide arrancar. Ver
+  [`docs/authz.md`](docs/authz.md).
+- **Proxy de credenciales para MySQL y MariaDB (`-type mysql`, #64).** El agente conecta
+  en claro con su usuario y el marcador; el proxy manda su propio saludo, comprueba el
+  marcador (`mysql_native_password` o la ruta rápida de `caching_sha2_password`, en
+  tiempo constante contra todas las credenciales MySQL), abre TLS verify-full hacia el
+  servidor (el saludo se lee sin buffer) y entra con la clave real
+  (`caching_sha2_password`, completa dentro del TLS, o `mysql_native_password`). Sin TLS
+  (`-upstream-tls disable`, solo con `-upstream`) solo valen los métodos que no mandan
+  la clave. Nunca reenvía un error del servidor antes de autenticar, exige que el
+  servidor hable el dialecto que eligió el invitado antes de mandar la clave y deja una
+  línea de auditoría por conexión (`kind: mysql`). `KILL QUERY` no se mapea. Con
+  credenciales Postgres y MySQL en la misma máquina, MySQL es el 3306 (en Linux, un DNAT
+  propio a `n.HostIP:5382`). `kling-vz` anuncia `mysql` en `credential_kinds`. Ver
+  [`docs/mysql.md`](docs/mysql.md).
 - **Kernel K1 amd64: arranca en Firecracker 1.17.** Con 6.1.140 el K1 amd64 no
   arrancaba (pánico al montar la raíz: Firecracker 1.17 declara un PCI en su DSDT y
   el K1 no tiene PCI) y el comprobador fallaba: el menú de mitigaciones se llama
@@ -173,6 +381,25 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### kling db
 
+- **`kling db doctor -url` habla TLS (#86).** `pgmini` negocia TLS (SSLRequest + TLS 1.2+)
+  y usa SCRAM-SHA-256-PLUS (`tls-server-end-point`) cuando el servidor lo ofrece; un
+  servidor sin TLS nunca degrada a texto claro. `doctor -url` acepta `sslmode`
+  (`disable|require|verify-ca|verify-full`, por defecto `verify-full`, contra las raíces
+  del sistema más `sslrootcert` de la URL o `-ca-file`) y `-tls-server-name`. `sslmode=disable`
+  (y `require`, que no autentica al servidor) solo con loopback, salvo `-insecure`
+  explícito, y el informe lo avisa (DB041). `allow` y `prefer` se rechazan. Ya se puede
+  revisar una base en la nube (RDS con SSL forzado) sin mandar nada sin cifrar.
+- **MySQL y MariaDB en `kling db` (#64).** Plantillas MariaDB (Alpine) con
+  `scripts/db-golden-mysql.sh` o `golden image|build -engine mysql`: datadir en el
+  overlay, root solo por `unix_socket`, sin cuentas anónimas, `local-infile` apagado,
+  `secure-file-priv` acotado y `server_audit` solo con `CONNECT`; la plantilla lleva
+  `kling.db.engine=mysql`. `up`, `fork`, `connect` (`-mysql`, `-dsn` con `mysql://`),
+  `rotate`, `reset`, `rm`, `branch`, `doctor` (reglas `MY001`-`MY054`) y `audit` (lee
+  server_audit) funcionan sobre esas copias. La clave de cada copia se genera en el host
+  y al invitado va su hash de `mysql_native_password`, nunca la clave, ni siquiera al
+  construir la plantilla (se calcula con `openssl` o `python3`). `attach`, `role`,
+  `rehearse`, `snapshot`/`undo`, `tenant-check`, `ask`, `clone` y `doctor -url` siguen
+  siendo solo de Postgres y lo dicen. Ver [`docs/mysql.md`](docs/mysql.md).
 - **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
   `up`, `fork`, `connect`, `reset`, `rm`, `doctor`, `audit` y `golden`. Cada copia estrena
   clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.
@@ -186,6 +413,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   recibe solo el esquema y la pregunta y devuelve una SQL que se valida, se enseña y se
   ejecuta con un rol de solo lectura en `BEGIN TRANSACTION READ ONLY`. Ver
   [`docs/db-ask.md`](docs/db-ask.md).
+- **`kling db ask-web`.** La misma garantía de `ask` en una página web mínima para quien no usa
+  la terminal (HTML y JS embebidos, sin dependencias): solo esquema y pregunta hacia el modelo,
+  la SQL se muestra y se ejecuta al pulsar un botón, con el rol de solo lectura en `READ ONLY`;
+  `-explain` exige `-send-data`. Escucha solo en loopback (`-allow-remote` con aviso, y aun
+  así solo contesta al `Host` de la dirección de escucha), token
+  aleatorio en la URL que pasa a cookie `SameSite=Strict`, CSRF en cada POST, CSP sin inline,
+  vida acotada (`-ttl`) y límite de peticiones. Ver [`docs/db-ask.md`](docs/db-ask.md).
 - **`kling db rehearse`, `rotate`, `snapshot`/`snapshots`/`undo`.** `rehearse` ensaya
   migraciones SQL en una copia desechable (tiempos, esperas por locks, tamaño; un
   `lock_timeout` se informa como "would block"); `rotate` da una clave nueva a una copia y
@@ -218,6 +452,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   culpable y el porqué (las reglas de `doctor`), `-json` y salida 1 si algo falla, para
   CI. Los valores de inquilino nunca salen de la base ni se escriben en la SQL, y solo
   se imprimen recuentos. Ver [`docs/db.md`](docs/db.md#aislamiento-entre-inquilinos-tenant-check).
+- **`kling db diff <copia1> <copia2> [-json] [-schema-only] [-max-rows N]`: qué cambió
+  entre dos copias, sin volcar datos.** Esquema (tablas, columnas y tipos, clave
+  primaria, índices, restricciones, RLS y políticas) y, por tabla, filas nuevas,
+  borradas y cambiadas por clave primaria. Dentro de cada copia se calculan huellas por
+  fila (md5 de la clave y md5 de la fila, las dos con una sal aleatoria de la ejecución); al host
+  solo llegan huellas, ni claves ni valores. Tablas sin clave primaria: solo recuentos y
+  un aviso. Más de `-max-rows` filas (100000) en una tabla: muestreo por huella de
+  clave, igual en las dos copias y declarado en el informe. Las definiciones que se
+  enseñan no llevan literales. Ver [`docs/db.md`](docs/db.md#diff-entre-copias-diff).
 
 - **`kling db clone <postgres-url> -mask REGLAS [-golden G]`: un golden desde producción
   con los datos personales enmascarados.** La contraseña (de `PGPASSWORD` o
@@ -249,6 +492,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Revisión de la fase media B** (#64, #67, #72, #78, #86). La página de `kling db
+  ask-web` (`web/index.html`) no llegaba al repositorio (el `*.html` del `.gitignore`) y
+  el plugin no compilaba: ahora se versiona, y un test comprueba que cumple la CSP (sin
+  `<script>` en línea ni `on*=`, el CSRF en `<meta name="csrf">`, `textContent`); con
+  `-allow-remote` la página solo contesta al `Host` de la dirección de escucha (`0.0.0.0`
+  y `::` se rechazan). `kling db diff`: la huella de cada fila también lleva la sal.
+  Autorización: `PUT /snapshots/{name}/credentials` pasa por la misma revisión que las
+  credenciales de una máquina; la política se abre con `O_NOFOLLOW` y se comprueba el
+  descriptor, no el nombre (ni TOCTOU ni una FIFO que bloquee el arranque); `commit`
+  sobre un nombre que el inquilino no ve responde siempre `409 ... is taken`, con o sin
+  `-replace` y sin decir de quién es; y `GET /info` sin rol ya no cuenta la raíz, las
+  carpetas compartibles ni el almacén. `kling db connect -mysql` decide la opción de TLS
+  del cliente por `--version` y `--help` y, si no lo sabe, lo dice en vez de pasar
+  `--ssl-mode` a un cliente de MariaDB.
 - **`kling image put` en Linux ya no escribe fuera de la imagen.** Montaba la imagen y
   escribía en `mnt/<ruta>`: un enlace simbólico absoluto de un directorio intermedio
   (`usr/local -> /tmp/x`) lo resolvía el kernel contra la raíz del host, y el daemon
@@ -598,6 +855,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   registra por sesión, y el cliente de MMDS ignora `HTTP_PROXY` del entorno.
 
 ### Pruebas
+
+- `scripts/90-e2e.sh`: nuevas 7g (`kling db diff` entre dos copias de la plantilla
+  Postgres: iguales, y tras cambiar una fila, añadir otra y una columna; ningún valor en
+  la salida), 7h (MariaDB con `KLING_E2E_MYSQL_GOLDEN`: `up`, un agente que entra por el
+  proxy de MySQL con solo el marcador, `doctor` limpio y con una cuenta anónima, `audit`,
+  `rm`; ninguna clave en la salida) y 7i (autorización con `KLING_E2E_AUTHZ=1` y dos
+  tokens de inquilino). Cada una se salta, diciéndolo, sin lo que necesita.
 
 - `ext/mcp/scripts/90-e2e.sh`: la sección 8 crea su propia instancia del servicio, le
   inyecta el store y abre la sesión directamente contra su puente, en vez de depender de

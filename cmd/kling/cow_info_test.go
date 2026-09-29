@@ -30,6 +30,39 @@ func TestLineaCoW(t *testing.T) {
 	if !strings.HasPrefix(l, "store ") {
 		t.Errorf("la primera palabra es el modo (bench-cow.sh): %q", l)
 	}
+	if strings.Contains(l, "no reflink") {
+		t.Errorf("con el almacén montado no hace falta el motivo: %q", l)
+	}
+}
+
+// #60: antes del primer run -from el almacén no existe; no se dice que se
+// clona dentro de él, sino que está pendiente, y qué se va a crear.
+func TestLineaCoWPendiente(t *testing.T) {
+	l := lineaCoW(&api.CoWInfo{Setting: "auto", Mode: "store", Pending: true,
+		Reason: "no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first run -from)"})
+	for _, w := range []string{"store pending (created on first use)", "daemon.cow=auto", "xfs store, created on the first run -from"} {
+		if !strings.Contains(l, w) {
+			t.Errorf("falta %q en %q", w, l)
+		}
+	}
+	if strings.Contains(l, "reflink inside kindling's XFS store)") {
+		t.Errorf("da el almacén por hecho: %q", l)
+	}
+	if !strings.HasPrefix(l, "store ") {
+		t.Errorf("la primera palabra es el modo (bench-cow.sh): %q", l)
+	}
+	// Si no se puede, el motivo sale en la línea: espacio, sistema de
+	// ficheros o núcleo.
+	l = lineaCoW(&api.CoWInfo{Setting: "auto", Mode: "copy",
+		Reason: "no reflink on the data root and no copy-on-write store (only 3000 MiB free under the data root: not enough for a store (needs 4 GiB free)): copying overlays"})
+	if !strings.HasPrefix(l, "copy ") || !strings.Contains(l, "only 3000 MiB free") {
+		t.Errorf("la copia no dice por qué: %q", l)
+	}
+	// Con daemon.cow=off no hay nada que explicar.
+	l = lineaCoW(&api.CoWInfo{Setting: "off", Mode: "copy", Reason: "daemon.cow is off"})
+	if strings.Contains(l, "daemon.cow is off;") || strings.Contains(l, "; daemon.cow is off") {
+		t.Errorf("repite lo configurado: %q", l)
+	}
 }
 
 func TestCheckCoW(t *testing.T) {

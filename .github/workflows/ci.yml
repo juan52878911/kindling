@@ -83,6 +83,20 @@ jobs:
             }
           done
 
+      # La directiva go de cada ext/* es la del núcleo: es el mínimo que se
+      # promete y con el que compila el job de arriba (GOTOOLCHAIN=local). El
+      # go.work declara otra (la de vz/go.mod), y eso no cuenta aquí.
+      - name: ext/* declaran la misma versión de Go que el núcleo
+        run: |
+          want=$(grep -E '^go [0-9]' go.mod)
+          for m in ext/*/go.mod; do
+            got=$(grep -E '^go [0-9]' "$m")
+            [ "$got" = "$want" ] || {
+              echo "$m: '$got', y el núcleo declara '$want'" >&2
+              exit 1
+            }
+          done
+
   # El go.work comiteado es la comodidad de local: un cambio en pkg/api rompe
   # ext/mcp en el mismo `go build`. Si go.work o go.work.sum se quedan atrás (un
   # módulo nuevo sin `use`, una suma que falta), aquí se ve.

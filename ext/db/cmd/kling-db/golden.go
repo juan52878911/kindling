@@ -41,7 +41,9 @@ func cmdGolden(args []string) error {
 	if len(rest) == 0 || (rest[0] != "image" && rest[0] != "build") {
 		return usageErr("usage: kling db golden [-script P] [-H host] image | build [options] <name>\n" +
 			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -as-super  -role R  -database B\n" +
-			"                 -image I  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)")
+			"                 -image I  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)\n" +
+			"  -engine mysql (right after image or build): MariaDB instead of Postgres (see docs/mysql.md)\n" +
+			"  -engine redis | -engine sqlite: Redis or SQLite (see docs/db-engines.md)")
 	}
 	rest, cleanup, err := expandTemplate(rest)
 	if err != nil {
@@ -125,11 +127,12 @@ func checkScript(p string) (string, error) {
 	return filepath.Abs(p)
 }
 
-// sinClavesPG quita del entorno lo que lleva una contraseña de Postgres.
+// sinClavesPG quita del entorno lo que lleva una contraseña de Postgres (o de
+// MySQL: MYSQL_PWD).
 func sinClavesPG(env []string) []string {
 	out := env[:0:0]
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "PGPASSWORD=") || strings.HasPrefix(kv, "PGPASSFILE=") {
+		if strings.HasPrefix(kv, "PGPASSWORD=") || strings.HasPrefix(kv, "PGPASSFILE=") || strings.HasPrefix(kv, "MYSQL_PWD=") {
 			continue
 		}
 		out = append(out, kv)

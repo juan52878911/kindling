@@ -16,6 +16,10 @@ import (
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	root := t.TempDir()
+	// Lo que prepara NewManager para el registro de auditoría (credaudit.go).
+	if err := os.Mkdir(filepath.Join(root, "audit"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	m := &Manager{
 		root:        root,
 		byID:        map[string]*api.Machine{},

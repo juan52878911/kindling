@@ -164,62 +164,71 @@ type cloneOpts struct {
 	image, from   string
 	mem           string
 	jsonOut       bool
+	// slice, si no es nil, cambia el volcado entero por una tabla y sus filas
+	// relacionadas (kling db slice, cmd_slice.go).
+	slice *sliceSpec
 }
 
-func cmdClone(args []string) error {
-	fs := flag.NewFlagSet("db clone", flag.ContinueOnError)
-	host := fs.String("H", "", "daemon endpoint (socket or ssh://user@host); default: KLING_HOST or the active context")
-	mask := fs.String("mask", "", "rules file (JSON or simple YAML): table.column -> email|name|phone|card|text|null|keep|fixed:<value>")
-	golden := fs.String("golden", "", "name of the golden to build (default: <database>-masked)")
-	allowUnmasked := fs.Bool("allow-unmasked", false, "build even if suspicious columns have no rule (they are copied as they are)")
-	strict := fs.Bool("strict", false, "also treat every text, JSON, XML, bytea and array column as suspicious")
-	allowWriter := fs.Bool("allow-writer", false, "accept a role that can write in the source (it is only read, but a read-only role is the safe choice)")
-	pwStdin := fs.Bool("password-stdin", false, "read the password of the source from stdin (default: $PGPASSWORD)")
-	ca := fs.String("ca", "", "CA certificate (PEM) of the source, added to the system roots")
-	serverName := fs.String("tls-server-name", "", "name the source certificate is verified against (default: the URL host)")
-	replace := fs.Bool("replace", false, "replace the golden if it already exists")
-	asSuper := fs.Bool("as-super", false, "load the masked dump as superuser (CREATE EXTENSION of untrusted extensions); see docs/db.md")
-	image := fs.String("image", "", "image with Postgres 16 for the builder and the golden (default pg16)")
-	from := fs.String("from", "", "template with Postgres 16 installed, instead of -image (macOS)")
-	mem := fs.String("mem", "2G", "memory of the builder: the unmasked copy lives in its RAM")
-	script := fs.String("script", "", "path of scripts/db-golden.sh (default: $"+goldenScriptEnv+", or installed next to kling-db)")
-	jsonOut := fs.Bool("json", false, "print the report as JSON")
-	pos, err := parse(fs, args)
+// cloneFlags son los flags que comparten clone y slice.
+type cloneFlags struct {
+	host, mask, golden, ca, serverName, image, from, mem, script *string
+
+	allowUnmasked, strict, allowWriter, pwStdin, replace, asSuper, jsonOut *bool
+}
+
+func addCloneFlags(fs *flag.FlagSet) *cloneFlags {
+	return &cloneFlags{
+		host:          fs.String("H", "", "daemon endpoint (socket or ssh://user@host); default: KLING_HOST or the active context"),
+		mask:          fs.String("mask", "", "rules file (JSON or simple YAML): table.column -> email|name|phone|card|text|null|keep|fixed:<value>"),
+		golden:        fs.String("golden", "", "name of the golden to build (default: <database>-masked; slice: <database>-<table>-slice)"),
+		allowUnmasked: fs.Bool("allow-unmasked", false, "build even if suspicious columns have no rule (they are copied as they are)"),
+		strict:        fs.Bool("strict", false, "also treat every text, JSON, XML, bytea and array column as suspicious"),
+		allowWriter:   fs.Bool("allow-writer", false, "accept a role that can write in the source (it is only read, but a read-only role is the safe choice)"),
+		pwStdin:       fs.Bool("password-stdin", false, "read the password of the source from stdin (default: $PGPASSWORD)"),
+		ca:            fs.String("ca", "", "CA certificate (PEM) of the source, added to the system roots"),
+		serverName:    fs.String("tls-server-name", "", "name the source certificate is verified against (default: the URL host)"),
+		replace:       fs.Bool("replace", false, "replace the golden if it already exists"),
+		asSuper:       fs.Bool("as-super", false, "load the masked dump as superuser (CREATE EXTENSION of untrusted extensions); see docs/db.md"),
+		image:         fs.String("image", "", "image with Postgres 16 for the builder and the golden (default pg16)"),
+		from:          fs.String("from", "", "template with Postgres 16 installed, instead of -image (macOS)"),
+		mem:           fs.String("mem", "2G", "memory of the builder: the unmasked copy lives in its RAM"),
+		script:        fs.String("script", "", "path of scripts/db-golden.sh (default: $"+goldenScriptEnv+", or installed next to kling-db)"),
+		jsonOut:       fs.Bool("json", false, "print the report as JSON"),
+	}
+}
+
+// opts lee lo que los flags señalan (reglas, CA, contraseña) y arma las
+// opciones de la construcción.
+func (f *cloneFlags) opts(rawURL string) (cloneOpts, error) {
+	if *f.image != "" && *f.from != "" {
+		return cloneOpts{}, usageErr("-image and -from exclude each other")
+	}
+	src, err := parseCloneURL(rawURL)
 	if err != nil {
-		return err
+		return cloneOpts{}, usageErr("%v", err)
 	}
-	if len(pos) != 1 || *mask == "" {
-		return usageErr("usage: kling db clone <postgres-url> -mask RULES [-golden NAME] [-allow-unmasked] [-strict] [-password-stdin] [-ca FILE]")
-	}
-	if *image != "" && *from != "" {
-		return usageErr("-image and -from exclude each other")
-	}
-	src, err := parseCloneURL(pos[0])
+	o := cloneOpts{source: src, golden: *f.golden, tlsServerName: *f.serverName,
+		mask:        dbmask.Options{AllowUnmasked: *f.allowUnmasked, Strict: *f.strict},
+		allowWriter: *f.allowWriter, replace: *f.replace, asSuper: *f.asSuper,
+		image: *f.image, from: *f.from, mem: *f.mem, jsonOut: *f.jsonOut}
+	data, err := readLimited(*f.mask, 1<<20+1)
 	if err != nil {
-		return usageErr("%v", err)
-	}
-	o := cloneOpts{source: src, golden: *golden, tlsServerName: *serverName,
-		mask:        dbmask.Options{AllowUnmasked: *allowUnmasked, Strict: *strict},
-		allowWriter: *allowWriter, replace: *replace, asSuper: *asSuper,
-		image: *image, from: *from, mem: *mem, jsonOut: *jsonOut}
-	data, err := readLimited(*mask, 1<<20+1)
-	if err != nil {
-		return err
+		return cloneOpts{}, err
 	}
 	if o.rules, err = dbmask.ParseRules(data); err != nil {
-		return err
+		return cloneOpts{}, err
 	}
-	if *ca != "" {
-		b, err := readLimited(*ca, maxCAPEM)
+	if *f.ca != "" {
+		b, err := readLimited(*f.ca, maxCAPEM)
 		if err != nil {
-			return err
+			return cloneOpts{}, err
 		}
 		o.caPEM = string(b)
 	}
-	if *pwStdin {
+	if *f.pwStdin {
 		b, err := io.ReadAll(io.LimitReader(os.Stdin, maxPasswordBytes+1))
 		if err != nil {
-			return err
+			return cloneOpts{}, err
 		}
 		o.password = strings.TrimRight(string(b), "\r\n")
 	} else {
@@ -229,14 +238,40 @@ func cmdClone(args []string) error {
 		os.Unsetenv("PGPASSWORD")
 		os.Unsetenv("PGPASSFILE")
 	}
-	a, err := newApp(*host)
+	return o, nil
+}
+
+// newCloner es el cloner de verdad: db-golden.sh del flag -script.
+func (f *cloneFlags) newCloner() (*cloner, error) {
+	a, err := newApp(*f.host)
+	if err != nil {
+		return nil, err
+	}
+	host, script := *f.host, *f.script
+	return &cloner{a: a, buildGolden: func(ctx context.Context, args []string) error {
+		// La salida del script va a stderr: stdout es del informe.
+		return runGoldenScript(ctx, script, host, args, nil, os.Stderr, os.Stderr)
+	}}, nil
+}
+
+func cmdClone(args []string) error {
+	fs := flag.NewFlagSet("db clone", flag.ContinueOnError)
+	f := addCloneFlags(fs)
+	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	c := &cloner{a: a, buildGolden: func(ctx context.Context, args []string) error {
-		// La salida del script va a stderr: stdout es del informe.
-		return runGoldenScript(ctx, *script, *host, args, nil, os.Stderr, os.Stderr)
-	}}
+	if len(pos) != 1 || *f.mask == "" {
+		return usageErr("usage: kling db clone <postgres-url> -mask RULES [-golden NAME] [-allow-unmasked] [-strict] [-password-stdin] [-ca FILE]")
+	}
+	o, err := f.opts(pos[0])
+	if err != nil {
+		return err
+	}
+	c, err := f.newCloner()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signalCtx()
 	defer stop()
 	rep, err := c.run(ctx, o)
@@ -244,9 +279,9 @@ func cmdClone(args []string) error {
 		return err
 	}
 	if o.jsonOut {
-		return rep.WriteJSON(a.stdout)
+		return rep.WriteJSON(c.a.stdout)
 	}
-	return rep.WriteText(a.stdout)
+	return rep.WriteText(c.a.stdout)
 }
 
 func readLimited(p string, max int64) ([]byte, error) {
@@ -273,6 +308,8 @@ type cloner struct {
 	// tmpDir es dónde va el directorio temporal del volcado enmascarado ("" =
 	// el del sistema).
 	tmpDir string
+	// sliceRes es lo que cargó un slice (con cloneOpts.slice).
+	sliceRes *sliceResult
 }
 
 func (c *cloner) logf(format string, a ...any) {
@@ -402,9 +439,16 @@ func (c *cloner) run(ctx context.Context, o cloneOpts) (*dbmask.Report, error) {
 		return nil, err
 	}
 
-	c.logf("dumping %s into the builder (pg_dump inside the microVM; nothing on the host's disk)", o.source)
-	if _, err := c.a.k.Run(ctx, strings.NewReader(cloneDumpScript(o.source)), "exec", "-i", "-timeout", "1h", builder, "--", "sh", "-s"); err != nil {
-		return nil, fmt.Errorf("dumping the source: %w", err)
+	if o.slice != nil {
+		// Una tabla y sus filas relacionadas; el resto del esquema, vacío.
+		if c.sliceRes, err = c.sliceFill(ctx, builder, o); err != nil {
+			return nil, err
+		}
+	} else {
+		c.logf("dumping %s into the builder (pg_dump inside the microVM; nothing on the host's disk)", o.source)
+		if _, err := c.a.k.Run(ctx, strings.NewReader(cloneDumpScript(o.source)), "exec", "-i", "-timeout", "1h", builder, "--", "sh", "-s"); err != nil {
+			return nil, fmt.Errorf("dumping the source: %w", err)
+		}
 	}
 
 	out, err = c.stagingPsql(ctx, builder, dbmask.CatalogSQL, "10m")

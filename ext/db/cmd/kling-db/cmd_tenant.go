@@ -202,6 +202,9 @@ func (a *app) tenantCheck(ctx context.Context, ref, owner string, o tcOpts) (*tc
 	if err := owned(mc, owner); err != nil {
 		return nil, err
 	}
+	if err := requirePostgres(mc, "tenant-check"); err != nil {
+		return nil, err
+	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("%s is %s, not running (kling thaw %s)", mc.Name, mc.State, mc.Name)
 	}

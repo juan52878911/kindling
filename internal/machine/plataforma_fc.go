@@ -41,6 +41,12 @@ const restaurarComparteMemoria = true
 // globoSinEstadisticas: Firecracker sí da las estadísticas del invitado.
 const globoSinEstadisticas = false
 
+// auditoriaEnElDaemon: en Linux el registro de auditoría del proxy lo escribe
+// el daemon (root) y vive fuera del directorio de la máquina, que es del
+// usuario sin privilegios del VMM (ver credaudit.go). Variable y no constante
+// solo para que los tests de macOS puedan probar también este camino.
+var auditoriaEnElDaemon = true
+
 // dirsE2fsExtra son directorios donde buscar e2fsprogs además del PATH, /sbin
 // y /usr/sbin. En Linux no hace falta ninguno.
 var dirsE2fsExtra []string

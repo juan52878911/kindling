@@ -7,7 +7,7 @@ import (
 
 // La clave de producción de kling db clone no llega al entorno de db-golden.sh.
 func TestSinClavesPG(t *testing.T) {
-	in := []string{"PATH=/bin", "PGPASSWORD=secreto", "PGPASSFILE=/x", "PGHOST=db", "HOME=/h"}
+	in := []string{"PATH=/bin", "PGPASSWORD=secreto", "PGPASSFILE=/x", "PGHOST=db", "MYSQL_PWD=secreto", "HOME=/h"}
 	want := []string{"PATH=/bin", "PGHOST=db", "HOME=/h"}
 	if got := sinClavesPG(in); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)

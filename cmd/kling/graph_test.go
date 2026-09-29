@@ -257,3 +257,26 @@ func TestEjemploAgenteMCP(t *testing.T) {
 		t.Fatalf("grafo inesperado: %+v", req.Graph)
 	}
 }
+
+// kling graph snapshot enseña los avisos del daemon (un nodo que no volvió a
+// congelarse) en stderr, sin mezclarlos con las plantillas.
+func TestPrintGraphSnapshotAvisos(t *testing.T) {
+	var out, errOut bytes.Buffer
+	s := &api.GraphSnapshot{Graph: "tienda", Generation: 2,
+		Templates: map[string]string{"web": "tienda-web-2", "api": "tienda-api-2"},
+		Warnings:  []string{"node web could not be frozen again after the snapshot and stays running: boom"}}
+	printGraphSnapshot(&out, &errOut, s, 0)
+	if !strings.Contains(out.String(), "api  ->  template tienda-api-2") || strings.Contains(out.String(), "warning") {
+		t.Fatalf("stdout:\n%s", out.String())
+	}
+	if errOut.String() != "warning: node web could not be frozen again after the snapshot and stays running: boom\n" {
+		t.Fatalf("stderr: %q", errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	s.Warnings = nil
+	printGraphSnapshot(&out, &errOut, s, 0)
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr without warnings: %q", errOut.String())
+	}
+}

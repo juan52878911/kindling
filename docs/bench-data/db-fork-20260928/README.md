@@ -1,5 +1,8 @@
 # Base de datos desechable por test — 2026-09-28 (Fase 1 de kling db)
 
+> Repetido con el almacén de copia al escribir en `../db-fork-20260929-cow/`: 1 copia en 133 ms,
+> 32 copias en 1,2 s por ronda sin crecer, 3,6 MiB de disco por copia.
+
 Host: CT 105 del laboratorio (Proxmox LXC, Firecracker anidado, 8 GiB, **ext4**, 3,8 GiB
 de disco libre). Mismo seed en todos los modos: tabla `items` de 400 000 filas (70 MB en
 disco, `seed-bench.sql` de `ext/db/scripts`). La latencia va desde que se suelta la ráfaga

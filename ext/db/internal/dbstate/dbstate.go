@@ -1,10 +1,13 @@
 // Package dbstate es lo que `kling db` guarda en el host: la contraseña de cada
-// copia, y nada más. La contraseña no existe en ningún otro sitio (el invitado
-// solo tiene su verificador SCRAM), así que este fichero es la credencial.
+// copia (más las definiciones de kling db report y los cerrojos). La
+// contraseña no existe en ningún otro sitio (el invitado solo tiene su
+// verificador SCRAM), así que este fichero es la credencial.
 //
 //	$KLING_DB_STATE (por defecto ~/.local/state/kling-db)   0700
 //	├── <plantilla>/password, conn.env      los de scripts/db-golden.sh
-//	└── copies/<id de la máquina>/password  0600, uno por copia
+//	├── copies/<id de la máquina>/password  0600, uno por copia
+//	├── reports/<nombre>.json, .last        kling db report (0600)
+//	└── locks/<nombre>.lock                 cerrojos flock (0600, vacíos)
 //
 // Va por ID y no por nombre a propósito: un nombre se reutiliza (reset, rm y
 // run con el mismo nombre) y el fichero de una copia no puede valer para otra.
