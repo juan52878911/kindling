@@ -109,6 +109,7 @@ func servirVZFalso(sock, logPath string) {
 	}
 	// Lo que el daemon le pasa para confinarse (ver entornoVMM).
 	apuntar("ENV KLING_VZ_CONFINE_ROOT=" + os.Getenv("KLING_VZ_CONFINE_ROOT"))
+	apuntar("ENV KLING_VZ_BROKER=" + os.Getenv("KLING_VZ_BROKER"))
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		if r.Method == http.MethodGet && r.URL.Path == "/" {
@@ -140,6 +141,7 @@ func servirVZFalso(sock, logPath string) {
 					Allow                []string
 					Upstream             string
 					UpstreamTLS          string `json:"upstream_tls"`
+					UpstreamMachine      string `json:"upstream_machine"`
 				} `json:"credentials"`
 			}
 			_ = json.Unmarshal(body, &c)
@@ -161,7 +163,17 @@ func servirVZFalso(sock, logPath string) {
 				if cr.UpstreamTLS != "" {
 					linea += "+upstream_tls=" + cr.UpstreamTLS
 				}
+				if cr.UpstreamMachine != "" {
+					linea += "+upstream_machine=" + cr.UpstreamMachine
+				}
 			}
+		case "/kling/graph":
+			var g fc.KlingGraph
+			_ = json.Unmarshal(body, &g)
+			for _, l := range g.Links {
+				linea += fmt.Sprintf(" link=%s:%d", l.Host, l.Port)
+			}
+			linea += " hosts=" + strings.Join(g.Hosts, ",")
 		case "/kling/forwards":
 			var q struct {
 				Ports []int `json:"ports"`
@@ -831,5 +843,109 @@ func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
 	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
 		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}, "", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// arrancarVZFalso arranca con el kling-vz falso una máquina id (egress
+// internet) y devuelve su cliente.
+func arrancarVZFalso(t *testing.T, m *Manager, id string) *fc.Client {
+	t.Helper()
+	dir := m.dir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if m.byID[id] == nil {
+		m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet"}
+	}
+	base := filepath.Join(m.root, "base.ext4")
+	overlay := filepath.Join(dir, "overlay.ext4")
+	for _, f := range []string{base, overlay} {
+		if err := os.WriteFile(f, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false)
+	t.Cleanup(func() { matarVMM(pid) })
+	if err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	return fc.New(m.socket[id])
+}
+
+// Una credencial hacia otra máquina (arista credential, kling db attach) solo
+// va a un kling-vz que anuncie graph-link: uno anterior ignoraría
+// upstream_machine y marcaría el dominio. Con la capacidad, viaja.
+func TestVZCredencialMaquinaExigeGraphLink(t *testing.T) {
+	for _, kinds := range []string{"http,postgres,postgres-upstream", "http,postgres,postgres-upstream,graph-link"} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			c := arrancarVZFalso(t, m, "aa11bb22cc33dd77")
+			err := registrarCredencialesPlataforma(context.Background(), c, nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb",
+					UpstreamMachine: idCopia, UpstreamOwner: "local", UpstreamTLS: credproxy.UpstreamTLSDisable},
+			}, "", nil)
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/credentials")
+			if !strings.Contains(kinds, credproxy.CapGraphLink) {
+				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") || i >= 0 {
+					t.Fatalf("un kling-vz sin graph-link recibió la credencial: err=%v llamadas=%q", err, ls)
+				}
+				return
+			}
+			if err != nil || i < 0 || !strings.Contains(ls[i], "+upstream_machine="+idCopia) {
+				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+		})
+	}
+}
+
+// Las aristas del nodo van a su kling-vz sin direcciones: las link con su
+// puerto y los nombres <nodo>.graph de todas sus aristas salientes. Uno sin
+// graph-link no las recibe, y el error dice qué hacer.
+func TestVZEnviaLasAristasAlAyudante(t *testing.T) {
+	for _, kinds := range []string{"http,postgres,postgres-upstream", "http,postgres,postgres-upstream,graph-link"} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			g := api.Graph{ID: "0123456789abcdef", Name: "tienda", Nodes: map[string]api.GraphNode{
+				"web": {Image: "min"}, "api": {Image: "min", Ports: []int{8081}}, "db": {Image: "min", Ports: []int{5432}},
+			}, Edges: []api.GraphEdge{
+				{From: "web", To: "api", Kind: api.GraphEdgeLink, Port: 8081},
+				{From: "web", To: "db", Kind: api.GraphEdgeCredential, Port: 5432, Env: "PGPASSWORD", User: "app", Database: "shop"},
+				{From: "api", To: "db", Kind: api.GraphEdgeLink, Port: 5432},
+			}}
+			id := "aa11bb22cc33dd88"
+			web := g.Nodes["web"]
+			web.MachineID = id
+			g.Nodes["web"] = web
+			m.grafos = map[string]*api.Graph{g.ID: &g}
+			m.byID[id] = &api.Machine{ID: id, Name: "tienda-web", State: api.StateCreated, Egress: "none",
+				Labels: map[string]string{api.LabelGraph: g.ID, api.LabelGraphNode: "web"}}
+			c := arrancarVZFalso(t, m, id)
+			err := enviarGrafoVZ(context.Background(), m, c, id)
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/graph")
+			if !strings.Contains(kinds, credproxy.CapGraphLink) {
+				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") {
+					t.Fatalf("sin graph-link: %v %q", err, ls)
+				}
+				// El arranque sí la intentó (redAntesDeArrancar) y falló
+				// cerrado: sin PUT /kling/graph.
+				if i >= 0 {
+					t.Fatalf("un kling-vz sin graph-link recibió aristas: %q", ls)
+				}
+				return
+			}
+			if err != nil || i < 0 {
+				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+			if !strings.Contains(ls[i], " link=api.graph:8081 hosts=api.graph,db.graph") || strings.Contains(ls[i], "5432") {
+				t.Fatalf("aristas mandadas: %q", ls[i])
+			}
+		})
 	}
 }

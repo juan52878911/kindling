@@ -95,9 +95,9 @@ func TestValidateGraphRechaza(t *testing.T) {
 		"credential sin base":     func(g *Graph) { g.Edges[0].Database = "" },
 		"base con comillas":       func(g *Graph) { g.Edges[0].Database = `shop"; DROP` },
 		"tipo desconocido":        func(g *Graph) { g.Edges[1].Kind = "tunnel" },
-		"share como arista":       func(g *Graph) { g.Edges[1].Kind = GraphEdgeShare },
-		"depends como arista":     func(g *Graph) { g.Edges[1].Kind = GraphEdgeDepends },
+		"share con puerto":        func(g *Graph) { g.Edges[1].Kind = GraphEdgeShare },
 		"mcp como arista":         func(g *Graph) { g.Edges[1].Kind = GraphEdgeMCP },
+		"link con mount":          func(g *Graph) { g.Edges[1].Mount = "/data" },
 		"arista repetida":         func(g *Graph) { g.Edges = append(g.Edges, g.Edges[1]) },
 		"dos aristas al mismo puerto desde un nodo": func(g *Graph) {
 			g.Nodes["cache"] = GraphNode{Image: "redis", Ports: []int{8081}}
@@ -119,14 +119,166 @@ func TestValidateGraphRechaza(t *testing.T) {
 	}
 }
 
-// Los mensajes de lo que no está en esta versión dicen qué usar en su lugar.
-func TestValidateGraphFueraDeVersion(t *testing.T) {
-	for kind, want := range map[string]string{GraphEdgeShare: "node's shares", GraphEdgeDepends: "lazy node wakes"} {
-		g := tienda()
-		g.Edges[1].Kind = kind
-		if err := ValidateGraph(&g); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%s: %v", kind, err)
-		}
+// mcp no está en esta versión: el mensaje dice por qué (el puente solo
+// escucha en el puerto del agente) y qué usar en su lugar.
+func TestValidateGraphMCPFueraDeVersion(t *testing.T) {
+	g := tienda()
+	g.Edges[1].Kind = GraphEdgeMCP
+	err := ValidateGraph(&g)
+	if err == nil || !strings.Contains(err.Error(), "not in this version") || !strings.Contains(err.Error(), "use a link edge") {
+		t.Fatalf("mcp: %v", err)
+	}
+}
+
+// cadena es a -> b -> c por aristas depends (a depende de b, b de c), con d
+// suelto.
+func cadena() Graph {
+	return Graph{Name: "cadena", Nodes: map[string]GraphNode{
+		"a": {Image: "min"},
+		"b": {Image: "min", Ports: []int{8081}},
+		"c": {Image: "min", Wake: GraphWakeLazy},
+		"d": {Image: "min"},
+	}, Edges: []GraphEdge{
+		{From: "a", To: "b", Kind: GraphEdgeDepends, Port: 8081},
+		{From: "b", To: "c", Kind: GraphEdgeDepends},
+	}}
+}
+
+func TestValidateGraphDepends(t *testing.T) {
+	g := cadena()
+	if err := ValidateGraph(&g); err != nil {
+		t.Fatal(err)
+	}
+	if g.HasNetworkEdges() {
+		t.Fatal("depends no es una arista de red")
+	}
+	if !g.HasPortDepends() {
+		t.Fatal("a -> b espera a un puerto")
+	}
+	arr, err := g.StartOrder()
+	if err != nil || strings.Join(arr, ",") != "c,b,a,d" {
+		t.Fatalf("arranque: %v %v", arr, err)
+	}
+	par, err := g.StopOrder()
+	if err != nil || strings.Join(par, ",") != "a,b,c,d" {
+		t.Fatalf("parada: %v %v", par, err)
+	}
+	if d := g.Dependencies("a"); len(d) != 1 || d[0] != "b" {
+		t.Fatalf("dependencias de a: %v", d)
+	}
+	// Sin aristas depends, los dos órdenes son el de los nombres.
+	tg := tienda()
+	if o, _ := tg.StartOrder(); strings.Join(o, ",") != "api,db,web" {
+		t.Fatalf("sin depends: %v", o)
+	}
+	if o, _ := tg.StopOrder(); strings.Join(o, ",") != "api,db,web" {
+		t.Fatalf("sin depends, parada: %v", o)
+	}
+
+	casos := map[string]func(g *Graph){
+		"ciclo": func(g *Graph) {
+			g.Edges = append(g.Edges, GraphEdge{From: "c", To: "a", Kind: GraphEdgeDepends})
+		},
+		"ciclo de dos": func(g *Graph) {
+			g.Edges = append(g.Edges, GraphEdge{From: "b", To: "a", Kind: GraphEdgeDepends})
+		},
+		"puerto no expuesto":    func(g *Graph) { g.Edges[0].Port = 9090 },
+		"puerto del agente":     func(g *Graph) { g.Edges[0].Port = GuestPort },
+		"depends con env":       func(g *Graph) { g.Edges[1].Env = "X" },
+		"depends con mount":     func(g *Graph) { g.Edges[1].Mount = "/data" },
+		"depends a sí mismo":    func(g *Graph) { g.Edges[1].To = "b" },
+		"depends a nodo que no": func(g *Graph) { g.Edges[1].To = "z" },
+		"depends repetida":      func(g *Graph) { g.Edges = append(g.Edges, g.Edges[1]) },
+	}
+	for nombre, mod := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			g := cadena()
+			mod(&g)
+			err := ValidateGraph(&g)
+			if err == nil {
+				t.Fatal("aceptado")
+			}
+			if strings.HasPrefix(nombre, "ciclo") && !strings.Contains(err.Error(), "cycle") {
+				t.Fatalf("el ciclo no se nombra: %v", err)
+			}
+		})
+	}
+	// Un depends no ocupa el puerto de la dirección del grafo: un link al
+	// mismo puerto desde el mismo nodo sigue valiendo.
+	g = cadena()
+	g.Edges = append(g.Edges, GraphEdge{From: "a", To: "b", Kind: GraphEdgeLink, Port: 8081})
+	if err := ValidateGraph(&g); err != nil {
+		t.Fatalf("depends y link al mismo puerto: %v", err)
+	}
+}
+
+// taller es web y worker viendo la carpeta /data de files.
+func taller() Graph {
+	return Graph{Name: "taller", Nodes: map[string]GraphNode{
+		"files":  {Image: "min"},
+		"web":    {Image: "min"},
+		"worker": {Image: "min"},
+	}, Edges: []GraphEdge{
+		{From: "web", To: "files", Kind: GraphEdgeShare, Mount: "/data"},
+		{From: "worker", To: "files", Kind: GraphEdgeShare, Mount: "/data", Mode: "rw"},
+	}}
+}
+
+func TestValidateGraphShare(t *testing.T) {
+	g := taller()
+	if err := ValidateGraph(&g); err != nil {
+		t.Fatal(err)
+	}
+	if g.Edges[0].Mode != "ro" || g.Edges[1].Mode != "rw" {
+		t.Fatalf("modo por defecto: %+v", g.Edges)
+	}
+	if g.HasNetworkEdges() || g.HasPortDepends() {
+		t.Fatal("share no es una arista de red")
+	}
+	casos := map[string]func(g *Graph){
+		"con plantilla el que ve": func(g *Graph) { g.Nodes["web"] = GraphNode{From: "tpl"} },
+		"con plantilla el dueño":  func(g *Graph) { g.Nodes["files"] = GraphNode{From: "tpl"} },
+		"modo copy":               func(g *Graph) { g.Edges[0].Mode = "copy" },
+		"modo raro":               func(g *Graph) { g.Edges[0].Mode = "wr" },
+		"sin mount":               func(g *Graph) { g.Edges[0].Mount = "" },
+		"mount relativo":          func(g *Graph) { g.Edges[0].Mount = "data" },
+		"mount en /":              func(g *Graph) { g.Edges[0].Mount = "/" },
+		"mount sucio":             func(g *Graph) { g.Edges[0].Mount = "/data/../etc" },
+		"con puerto":              func(g *Graph) { g.Edges[0].Port = 5432 },
+		"con env":                 func(g *Graph) { g.Edges[0].Env = "X" },
+		"repetida":                func(g *Graph) { g.Edges = append(g.Edges, g.Edges[0]) },
+		"dos carpetas en la misma ruta": func(g *Graph) {
+			// web ya ve /data de files; /data de worker sería otra carpeta.
+			g.Edges = append(g.Edges, GraphEdge{From: "web", To: "worker", Kind: GraphEdgeShare, Mount: "/data"})
+		},
+		"anidadas": func(g *Graph) {
+			g.Edges = append(g.Edges, GraphEdge{From: "web", To: "worker", Kind: GraphEdgeShare, Mount: "/data/sub"})
+		},
+		"pisa un share propio": func(g *Graph) {
+			n := g.Nodes["files"]
+			n.Shares = []ShareSpec{{Mode: "ro", Mount: "/data", Source: "/srv"}}
+			g.Nodes["files"] = n
+		},
+		"demasiadas": func(g *Graph) {
+			for i := 0; i < 8; i++ {
+				g.Edges = append(g.Edges, GraphEdge{From: "web", To: "worker", Kind: GraphEdgeShare, Mount: fmt.Sprintf("/m%d", i)})
+			}
+		},
+	}
+	for nombre, mod := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			g := taller()
+			mod(&g)
+			if err := ValidateGraph(&g); err == nil {
+				t.Fatal("aceptado")
+			}
+		})
+	}
+	// Dos nodos que ven la carpeta del otro, en rutas distintas: vale.
+	g = taller()
+	g.Edges = append(g.Edges, GraphEdge{From: "files", To: "web", Kind: GraphEdgeShare, Mount: "/out"})
+	if err := ValidateGraph(&g); err != nil {
+		t.Fatalf("carpetas cruzadas: %v", err)
 	}
 }
 

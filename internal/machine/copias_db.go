@@ -19,7 +19,10 @@ package machine
 //     vivas hacia ella en todos los proxies (y, si la que cambia es un agente,
 //     las suyas).
 //
-// Solo Linux (modeloAPosible): ver plataforma_vz.go.
+// En Linux el proxy es del daemon y marca a la copia por la IP de su netns.
+// En macOS el proxy es del kling-vz del agente, que pide cada conexión al
+// broker del daemon (broker.go): la misma puerta, comprobarCopiaLocked, en
+// cada conexión, y el daemon marca al reenvío de la copia.
 
 import (
 	"context"
@@ -35,17 +38,12 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
-// errModeloASoloLinux es el error de un attach donde no hay modelo A (macOS,
-// ver plataforma_vz.go).
-var errModeloASoloLinux = errors.New("kling db attach (a postgres credential with upstream_machine) is Linux-only in this version: " +
-	"on macOS the credential proxy lives in each kling-vz, which can't resolve another machine safely on every connection; " +
-	"run the agent inside the copy instead (docs/db.md)")
-
 // Sustituibles en los tests: cortar sesiones es cosa de internal/net.
 var (
 	invalidarCopia   = invalidarCopiaPlataforma
 	invalidarAgente  = invalidarAgentePlataforma
-	invalidarEnlaces = knet.InvalidarEnlaces
+	invalidarEnlaces = invalidarEnlacesPlataforma
+	invalidarOrigen  = invalidarOrigenPlataforma
 )
 
 // resolverCopia es el ResolveMachine del proxy de la máquina agente.
@@ -122,9 +120,6 @@ func (m *Manager) comprobarCopias(agente string, specs []api.CredentialSpec) err
 	for _, s := range specs {
 		if s.UpstreamMachine == "" {
 			continue
-		}
-		if !modeloAPosible {
-			return errModeloASoloLinux
 		}
 		port := s.Port
 		if port == 0 {

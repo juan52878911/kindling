@@ -27,7 +27,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
+	"sort"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -47,25 +47,9 @@ func hexSHA256(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// esperarPuertoGrafo espera a que addr acepte conexiones: un nodo recién
-// despertado tarda un poco en volver a escuchar. Sustituible en los tests.
-var esperarPuertoGrafo = func(ctx context.Context, addr string) error {
-	var d net.Dialer
-	for {
-		intento, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		c, err := d.DialContext(intento, "tcp", addr)
-		cancel()
-		if err == nil {
-			_ = c.Close()
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("port %s didn't answer after waking the node: %w", addr, ctx.Err())
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-}
+// esperarPuertoGrafo espera a que el puerto port del nodo recién despertado
+// (la máquina id, en addr) vuelva a escuchar. Sustituible en los tests.
+var esperarPuertoGrafo = esperarPuertoPlataforma
 
 // despertar es un despertar en vuelo de un nodo.
 type despertar struct {
@@ -135,7 +119,7 @@ func (m *Manager) resolverArista(ctx context.Context, origen, gid, desde, hacia 
 		despertado = true
 	}
 	if despertado {
-		if err := esperarPuertoGrafo(ctx, addr); err != nil {
+		if err := esperarPuertoGrafo(ctx, m, id, addr, port); err != nil {
 			return "", "", err
 		}
 	}
@@ -252,26 +236,66 @@ func (m *Manager) despertarNodo(k, gid, nodo string, d *despertar) {
 	m.despMu.Unlock()
 }
 
-// despertarNodoLocked pone en marcha el nodo: instancia un lazy, descongela o
-// reanuda. Toma el cerrojo del grafo.
+// despertarNodoLocked pone en marcha el nodo (y antes, los nodos de los que
+// depende): instancia un lazy, descongela o reanuda. Toma el cerrojo del
+// grafo.
 func (m *Manager) despertarNodoLocked(ctx context.Context, gid, nodo string) error {
 	defer m.lock(claveCerrojoGrafo(gid))()
+	return m.ponerEnMarchaLocked(ctx, gid, nodo, true, map[string]bool{})
+}
+
+// ponerEnMarchaLocked deja el nodo corriendo: primero, en orden, los nodos de
+// los que depende (cada uno listo: corriendo y, si la arista depends lleva
+// puerto, con él contestando), y luego él: lo instancia si es un lazy sin
+// máquina, lo descongela o lo reanuda. conectar monta sus aristas si lo
+// instancia (up las monta al final, con todos los eager ya en pie). Con el
+// cerrojo del grafo tomado. pila son los nodos en curso (un ciclo, que la
+// validación ya impide, sería un error y no una recursión sin fin).
+func (m *Manager) ponerEnMarchaLocked(ctx context.Context, gid, nodo string, conectar bool, pila map[string]bool) error {
+	if pila[nodo] {
+		return fmt.Errorf("depends edges form a cycle through node %s", nodo)
+	}
+	pila[nodo] = true
+	defer delete(pila, nodo)
 	m.mu.RLock()
 	g := m.grafos[gid]
 	var id string
 	var existe bool
+	var deps []api.GraphEdge
 	if g != nil {
 		var nd api.GraphNode
 		nd, existe = g.Nodes[nodo]
 		id = nd.MachineID
+		for _, e := range g.Edges {
+			if e.Kind == api.GraphEdgeDepends && e.From == nodo {
+				deps = append(deps, e)
+			}
+		}
 	}
 	m.mu.RUnlock()
 	if g == nil || !existe {
 		return fmt.Errorf("node %s of graph %s no longer exists", nodo, shortID(gid))
 	}
+	sort.Slice(deps, func(i, j int) bool {
+		if deps[i].To != deps[j].To {
+			return deps[i].To < deps[j].To
+		}
+		return deps[i].Port < deps[j].Port
+	})
+	for _, d := range deps {
+		if err := m.ponerEnMarchaLocked(ctx, gid, d.To, conectar, pila); err != nil {
+			return fmt.Errorf("it depends on node %s: %w", d.To, err)
+		}
+		if err := m.esperarListo(ctx, gid, d.To, d.Port); err != nil {
+			return fmt.Errorf("it depends on node %s: %w", d.To, err)
+		}
+	}
 	if id == "" {
 		if err := m.instanciarNodo(ctx, gid, nodo, ""); err != nil {
 			return err
+		}
+		if !conectar {
+			return nil
 		}
 		return m.conectarNodo(ctx, gid, nodo, nil)
 	}
@@ -286,4 +310,39 @@ func (m *Manager) despertarNodoLocked(ctx context.Context, gid, nodo string) err
 		return despertarNodoGrafo(ctx, m, id)
 	}
 	return fmt.Errorf("node %s is %s", nodo, mc.State)
+}
+
+// esperarListo espera a que el nodo esté listo para los que dependen de él:
+// su máquina corre y, con port, ese puerto contesta (como mucho
+// plazoDespertar).
+func (m *Manager) esperarListo(ctx context.Context, gid, nodo string, port int) error {
+	m.mu.RLock()
+	var mc *api.Machine
+	if g := m.grafos[gid]; g != nil {
+		mc = m.byID[g.Nodes[nodo].MachineID]
+	}
+	var addr string
+	var err error
+	switch {
+	case mc == nil:
+		err = fmt.Errorf("node %s has no machine", nodo)
+	case mc.State != api.StateRunning:
+		err = fmt.Errorf("node %s is %s, not running", nodo, mc.State)
+	case port != 0:
+		addr, err = direccionListoLocked(mc, port)
+	}
+	var id string
+	if mc != nil {
+		id = mc.ID
+	}
+	m.mu.RUnlock()
+	if err != nil || port == 0 {
+		return err
+	}
+	espera, cancel := context.WithTimeout(ctx, plazoDespertar)
+	defer cancel()
+	if err := esperarPuertoGrafo(espera, m, id, addr, port); err != nil {
+		return fmt.Errorf("node %s is not ready: %w", nodo, err)
+	}
+	return nil
 }

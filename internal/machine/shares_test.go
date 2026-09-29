@@ -68,7 +68,7 @@ func TestResolverCarpetas(t *testing.T) {
 
 	resolver := func(roots []string, vols []resolvedVolume, specs ...api.ShareSpec) ([]resolvedShare, error) {
 		m.SetShareConfig(func() ShareConfig { return ShareConfig{Roots: roots} })
-		return m.resolveShares(api.RunRequest{Shares: specs}, vols)
+		return m.resolveShares(context.Background(), api.RunRequest{Shares: specs}, vols)
 	}
 
 	// Sin raíces: las vivas se rechazan diciendo cómo permitirlas.
@@ -173,7 +173,7 @@ func TestSubidaDeCopia(t *testing.T) {
 	if ents, _ := os.ReadDir(m.uploadsDir()); len(ents) != 1 {
 		t.Errorf("the extracted tree was left behind: %v", ents)
 	}
-	rs, err := m.resolveShares(api.RunRequest{Shares: []api.ShareSpec{{Mount: "/work", Upload: up.ID}}}, nil)
+	rs, err := m.resolveShares(context.Background(), api.RunRequest{Shares: []api.ShareSpec{{Mount: "/work", Upload: up.ID}}}, nil)
 	if err != nil || rs[0].att.Mode != share.ModeCopy || rs[0].upload == "" {
 		t.Fatalf("resolve the upload: %+v %v", rs, err)
 	}

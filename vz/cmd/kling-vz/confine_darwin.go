@@ -22,13 +22,21 @@ import (
 //go:embed kling-vz.sb
 var perfil string
 
+// sinBroker es la ruta que el perfil recibe cuando no hay broker: no existe
+// ni puede crearse (/dev no admite sockets), así que la regla no abre nada.
+const sinBroker = "/dev/null/kling-vz-no-broker"
+
 // confinar encierra este proceso en kling-vz.sb. No tiene vuelta atrás.
-func confinar(root, mdir string, conRed bool) error {
+// broker es el socket del daemon para las aristas ("" si no hay).
+func confinar(root, mdir, broker string, conRed bool) error {
 	red := "0"
 	if conRed {
 		red = "1"
 	}
-	pares := []string{"ROOT", root, "MDIR", mdir, "NET", red}
+	if broker == "" {
+		broker = sinBroker
+	}
+	pares := []string{"ROOT", root, "MDIR", mdir, "NET", red, "BROKER", broker}
 	params := make([]*C.char, 0, len(pares)+1)
 	for _, p := range pares {
 		cs := C.CString(p)

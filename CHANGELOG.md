@@ -10,6 +10,18 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Grafos desde los plugins
+
+- **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>
+  -golden G` crea un grafo `app` + `db` con una arista `credential` (el attach,
+  declarado): la clave va por stdin al daemon, nunca por argv, entorno ni fichero, y si
+  algo falla se deshace todo. `branch -env` lo da por rama de git y `branch -rm` lo
+  borra. Solo Linux. Ver [`docs/db.md`](docs/db.md).
+- **Agente + servidores MCP como grafo:** ejemplo `examples/grafos/agente-mcp.yaml`
+  (validado por un test) y sección "Desde los plugins" en
+  [`docs/grafos.md`](docs/grafos.md), donde también queda documentado, como siguiente
+  paso, el gateway de IA (cascada Chispa a VON como grafo lazy).
+
 ### Núcleo
 
 - **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
@@ -22,10 +34,35 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   en cada conexión y despierta al destino si duerme) y `credential` (el attach de
   Postgres de `kling db`, por dentro). El FORWARD entre namespaces sigue cerrado; el
   resolver de un nodo sirve solo los `*.graph` de sus aristas, también en `egress
-  none`. Las conexiones quedan en la auditoría con `kind: link`. En macOS funcionan
-  `up/freeze/thaw/snapshot/fork/rm`, y una arista entre máquinas es `501`. Nuevas rutas
+  none`. Las conexiones quedan en la auditoría con `kind: link`. En macOS también, por
+  el broker de enlaces (abajo). Nuevas rutas
   `/graphs`; las etiquetas `kling.graph*` y el espacio `graph` del store son del daemon.
   Ver [`docs/grafos.md`](docs/grafos.md).
+- **Grafos: aristas `depends` y `share`.** `depends` ordena el grafo: un nodo no arranca
+  ni despierta hasta que aquel del que depende corre (y, con `port`, ese puerto
+  contesta); `up`, `thaw` y el despertar perezoso siguen ese orden, `freeze` y la pausa
+  del snapshot el inverso, y un ciclo se rechaza al validar. `share` da a dos nodos la
+  misma carpeta viva: es del grafo (`$KLING_ROOT/graph-shares/<id>`, se borra con
+  `graph rm`), el destino la monta `rw` y el origen `ro` o `rw`; solo nodos con `image`,
+  y un grafo con `share` no admite `snapshot` ni `fork` todavía (409). La arista `mcp`
+  sigue fuera, ahora con el motivo: el puente MCP solo escucha en el 8080 del agente.
+  `kling graph inspect` enseña las nuevas aristas. Ver
+  [`docs/grafos.md`](docs/grafos.md#aristas-share-y-depends).
+- **Aristas de grafo y `kling db attach` en macOS: el broker de enlaces** (#53). Antes,
+  `501`. Ahora el `kling-vz` de cada nodo sirve `<nodo>.graph` en su DNS (solo los de
+  sus aristas, en todos los modos) y, en cada conexión a una arista, pide la **arista**
+  (no una dirección) al daemon por un socket Unix privado del usuario, el único que su
+  sandbox le deja abrir. El daemon sabe qué máquina pregunta por el PID del otro
+  extremo, comprueba bajo su candado como en Linux (despertando al destino si duerme),
+  marca él mismo al reenvío del destino y le entrega el socket ya conectado; cortar es
+  cerrar ese socket en los dos lados. Las credenciales Postgres con `upstream_machine`
+  (aristas `credential` y `kling db attach`) van por el mismo camino, también en nodos
+  sin `egress allowlist` si todas van a otra máquina. `kling-vz` lo anuncia con
+  `graph-link` en `credential_kinds`; uno anterior no recibe aristas ni esas
+  credenciales, y el error dice que hay que reconstruirlo. Nueva ruta de `kling-vz`
+  `PUT /kling/graph` y paquete `pkg/linkbroker`. e2e: secciones 6g y 6h de
+  `scripts/92-e2e-mac.sh` y `attach` en su 6f. Ver [`docs/grafos.md`](docs/grafos.md) y
+  SECURITY.md §15.
 - **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del
   overlay de cada instancia es un clon por reflink: con la raíz en XFS/Btrfs, FICLONE
   directo; en ext4, un almacén XFS propio (`$root/cow.xfs`, montado por loop en
@@ -74,15 +111,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   congela las demás (0 RAM) y escribe `DATABASE_URL` en `.git/kling-db.env` (0600, nunca
   en el árbol de trabajo). Además `-ls`, `-rm` y `-prune`. Ver
   [`docs/db.md`](docs/db.md#una-base-por-rama).
-- **`kling db attach` / `detach` (modelo A, solo Linux).** Una copia compartida por
+- **`kling db attach` / `detach` (modelo A).** Una copia compartida por
   agentes de otras microVMs, por el proxy de credenciales de Postgres de cada uno: el
   agente recibe un marcador y nunca la contraseña (la de la copia o la de un rol de
   `kling db role`). La credencial guarda el id de la copia (`upstream_machine`), no una
   dirección: el daemon la resuelve en cada conexión y solo si la copia sigue corriendo,
   lista y del mismo `kling.db.owner` que el agente. Congelar, parar o borrar la copia
   corta las sesiones abiertas. Nuevo `DELETE /machines/{ref}/credentials/{env}` y
-  `kling machine credential -rm`; capacidad `db-attach`. En macOS se rechaza con un error
-  claro. Ver [`docs/db.md`](docs/db.md).
+  `kling machine credential -rm`; capacidad `db-attach`. En macOS, por el broker de
+  enlaces (arriba). Ver [`docs/db.md`](docs/db.md).
 - **`kling db tenant-check <copia>`: prueba de aislamiento entre inquilinos.** Nace del
   fallo de AuraCRM (políticas RLS con una rama `IS NULL OR = ''` que, sin inquilino,
   dejan ver todo). Dentro de la copia descubre las tablas con la columna de inquilino
@@ -125,6 +162,27 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **El broker de enlaces de macOS no da direcciones.** `kling-vz` pide la arista y el
+  daemon entrega el socket ya conectado tras comprobarla bajo su candado y volver a
+  mirar que el destino no cambió al marcar: ni TOCTOU entre resolver y marcar, ni
+  `kling-vz` marcando a los reenvíos de otras máquinas. Quién pregunta lo dice el
+  kernel (`LOCAL_PEERPID`), no la petición; una credencial hacia otra máquina solo se
+  atiende si está en el almacén de quien pregunta; el 8080 se rechaza también ahí; y
+  hay topes por arista, por máquina y en el broker. Ver SECURITY.md §15.
+- **El broker también mira el UID y el ejecutable de quien pregunta.** El otro extremo
+  tiene que ser del usuario del daemon (`LOCAL_PEERCRED`) y ejecutar el `kling-vz` con
+  el que el daemon arranca las máquinas (`proc_pidpath` por `proc_info`, sin cgo): un
+  PID reciclado por otro programa ya no pasa. Como mucho 64 conexiones esperan a que su
+  PID sea el de una máquina; el resto se rechaza en el acto.
+- **Cuota por instancia en el almacén (#59) sin escape.** El overlay de cada instancia
+  en el almacén es `root:grupo-del-VMM` 0660, no del VMM: el dueño de un fichero puede
+  cambiarle el id de proyecto de XFS (`FS_IOC_FSSETXATTR`) y un Firecracker
+  comprometido habría salido de su cuota o se habría comido la de otra instancia.
+  `run -from` ya no hace `chown` a través del enlace de `machines/<id>`. Un `btrfs
+  subvolume delete` que falla se reintenta y, si no, se avisa con el comando para
+  borrarlo a mano. Ver SECURITY.md §14.
+- **`kling db env` no adivina por el texto de un error.** Si un entorno existe lo dice
+  `kling graph ls -json`, no un "404" o "not found" en el mensaje de un fallo.
 - **Almacén de discos copy-on-write.** Cada jail recibe por bind solo el directorio del
   overlay de su instancia (nunca el almacén entero); el bind se desmonta antes de borrar
   el jail y, si no se puede, el jail no se borra. El almacén se monta

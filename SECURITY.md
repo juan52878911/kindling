@@ -420,12 +420,11 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     `DELETE /machines/{ref}/credentials/{env}`); la sesión se registra antes de
     resolver, así que una invalidación que llegue entre la resolución y el dial también
     la para. No se admite en credenciales de plantilla, y un agente con attach no se
-    ramifica (guardián de fork). **Solo Linux en esta versión**: en macOS el proxy vive
-    en el `kling-vz` de cada máquina, confinado y sin conocer las demás; resolver en
-    cada conexión exigiría un canal nuevo de `kling-vz` al daemon (autenticado por
-    peercred) y abrirle el rango de reenvíos del loopback, y pasarle la dirección ya
-    resuelta sería el TOCTOU que el modelo evita. El daemon lo rechaza con un error
-    claro, y `kling-vz` sin resolvedor tampoco marcaría. El dueño (`kling.db.owner`) es
+    ramifica (guardián de fork). **En macOS** el proxy vive en el `kling-vz` del agente,
+    que no conoce a las demás máquinas y **no recibe nunca una dirección**: pide cada
+    conexión al broker de enlaces del daemon, que hace las mismas comprobaciones, marca
+    él mismo al reenvío de la copia y le entrega el socket ya conectado (ver §15, "En
+    macOS"). El dueño (`kling.db.owner`) es
     una etiqueta: la frontera sigue siendo el daemon, y quien tiene su socket puede
     reetiquetar máquinas.
   - **El invitado no ve la autenticación de verdad.** Recibe `AuthenticationOk` solo
@@ -579,9 +578,12 @@ cambia:
 - El daemon no sigue el enlace simbólico de `machines/<id>` (un directorio del VMM)
   para borrar ni para leer el overlay en `commit`: las rutas del almacén salen del id.
 - **Permisos del directorio de instancia**: `cow/m/<id>` es `root:grupo-del-VMM` 0750 (el
-  VMM solo lo atraviesa) y solo el FICHERO `overlay.ext4` es del VMM. Así un Firecracker
-  comprometido no crea ficheros en su directorio ni puede cambiar el overlay por un enlace
-  simbólico. Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
+  VMM solo lo atraviesa) y el FICHERO `overlay.ext4` es `root:grupo-del-VMM` 0660: el VMM
+  lo lee y lo escribe por grupo, pero **no es dueño de nada** en el almacén. Así un
+  Firecracker comprometido no crea ficheros en su directorio, no puede cambiar el overlay
+  por un enlace simbólico y no puede tocar los atributos que el núcleo reserva al dueño
+  (ver la cuota, abajo). `runFrom` no le hace `chown` al enlace de `machines/<id>` cuando
+  apunta al almacén (el `chown` lo seguiría). Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
   `O_NOFOLLOW`, comprueba con `Fstat` sobre el descriptor que es un fichero regular y
   **copia desde ese mismo descriptor** (FICLONE entre descriptores, o una copia dispersa en
   Go con `SEEK_DATA`/`SEEK_HOLE`), sin volver a abrir la ruta: cambiar el overlay por un
@@ -593,12 +595,27 @@ cambia:
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
-  reserva). Dentro de él NO hay cuota por instancia:
-  el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que
-  reescribe dejan de compartirse con la base, así que un invitado que reescribe todo su
-  disco puede llenar el almacén compartido (ENOSPC para las demás instancias del almacén).
-  Es un límite conocido; una cuota por directorio (proyecto en XFS, qgroup en Btrfs)
-  está pendiente.
+  reserva).
+- **Cuota por instancia**: el VMM escribe el fichero de overlay y un Firecracker
+  comprometido podría hacerlo crecer hasta llenar el almacén compartido. Cada overlay lleva
+  una cuota del núcleo igual a su tamaño lógico más una holgura: en XFS, cuota de proyecto
+  (`prjquota`; un id por overlay puesto por ioctl sobre el fichero abierto con
+  `O_NOFOLLOW`, límite duro con `xfs_quota`), y en Btrfs, un subvolumen por instancia con
+  qgroup. El id de proyecto de XFS lo puede cambiar el DUEÑO del fichero
+  (`FS_IOC_FSSETXATTR`, `inode_owner_or_capable`) y por eso el overlay no es del VMM: si lo
+  fuera, podría salirse de su cuota o pasarse al proyecto de otra instancia y comerse la
+  suya (`TestCuotaXFSNoLaCambiaElVMM` lo comprueba con un proceso sin privilegios: abre y
+  escribe por grupo, y el ioctl da EPERM). Un `btrfs subvolume delete` que falla se
+  reintenta una vez y, si sigue fallando, se avisa en el log con el comando para borrarlo a
+  mano (`RemoveAll` no quita un subvolumen). La cuota se aplica antes de abrir el fichero al
+  VMM y, si el almacén la impone
+  y no se puede aplicar, la instancia no entra al almacén (cae a copia completa). Sin
+  `xfs_quota`/`btrfs`, o con un XFS montado sin `prjquota`, no hay cuota y `kling doctor`
+  lo avisa.
+  Límite que queda: la cuota es una cota de crecimiento por instancia (XFS y Btrfs cuentan
+  lo compartido con la base entero), no una reserva. Muchos invitados que reescriban a la
+  vez todo su disco siguen pudiendo agotar el almacén compartido (ENOSPC para las demás);
+  se dimensiona con `daemon.cow_store_gib`. Las instancias anteriores a la cuota no la tienen.
 
 ### 15. Grafos: cada arista es una autorización, no una red
 
@@ -658,16 +675,88 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   almacén de credenciales y el grafo como dato autenticado: copiadas a otro grafo no se
   abren).
 
+- **Las carpetas de las aristas `share` son del daemon.** Viven en
+  `$KLING_ROOT/graph-shares/<grafo>` (0700), fuera del almacén que lee `/store`, y se
+  borran con el grafo. Se montan sin pasar por `daemon.share_roots` solo porque el
+  permiso viaja en el contexto interno con el que el manager arranca ESE nodo (la ruta
+  exacta de cada carpeta de sus aristas); una petición de `run` o `sandbox` con la misma
+  ruta pasa por `share_roots` como cualquier otra y se rechaza. El dueño la monta `rw` y
+  quien la ve, `ro` salvo que la arista diga `rw`. Un grafo con `share` no se vuelca
+  (snapshot ni fork, 409), por el mismo motivo que `commit` no toma una máquina con
+  `-share`.
+- **`depends` no abre nada.** Solo ordena arranques y, con `port`, el daemon comprueba
+  que el puerto del destino contesta: en Linux marcando desde el host a la IP de su netns
+  (lo que ya hace con cualquier invitado), en macOS preguntando al `kling-vz` del
+  destino por su socket de API (`GET /kling/probe`, el mismo sondeo que `exec`), sin
+  abrir ningún reenvío ni dar una dirección. El 8080 del agente no vale tampoco aquí.
+- **No hay arista `mcp`.** El puente MCP escucha solo en el 8080, junto al agente; una
+  arista a él daría `exec` sobre el servidor. Se rechaza al validar.
+
 Lo que queda: el tramo del proxy de enlace al destino va en claro por el host, como el
 attach de Postgres (las credenciales exigen SCRAM; un `link` es TCP crudo y su
-protocolo es cosa de la aplicación). En macOS no hay aristas entre máquinas en esta
-versión (501): allí no hay dónde resolver bajo el candado del daemon en cada conexión.
+protocolo es cosa de la aplicación).
+
+**En macOS: el broker de enlaces** (`pkg/linkbroker`, `internal/machine/broker*.go`,
+`vz/internal/grafo`). Allí la red de cada invitado vive en su `kling-vz`, un proceso
+confinado que no conoce a las demás máquinas, y todos los invitados se alcanzan por
+reenvíos del loopback (`127.0.0.1`, rango reservado 29000-29999). Las aristas (y
+`kling db attach`, arriba en §7) llegan a otra máquina así:
+
+- **`kling-vz` pide la arista, no una dirección.** El DNS de su pila contesta los
+  `<nodo>.graph` de SUS aristas con la pasarela (NXDOMAIN para cualquier otro
+  `*.graph`, en todos los modos), y una conexión del invitado a la pasarela en el
+  puerto de una arista `link` (o al proxy de Postgres de una `credential`) se convierte
+  en una petición al daemon: `{kind: link, host: api.graph, port: 8081}` o `{kind:
+  machine, machine: <id>, owner, port}`. El daemon no acepta campos que no conoce: una
+  petición con una dirección se rechaza.
+- **Quién pregunta lo dice el kernel, no la petición.** El broker escucha en un socket
+  Unix de un directorio privado del usuario (`/tmp/kling-<uid>/`, 0700, comprobado), y
+  el perfil de sandbox de `kling-vz` solo le deja conectar a ese socket. El daemon
+  identifica al que llama con lo que pone el kernel al conectar: su UID
+  (`LOCAL_PEERCRED`) tiene que ser el del daemon, su PID (`LOCAL_PEERPID`) tiene que ser
+  un proceso cuyo ejecutable es el `kling-vz` con el que el daemon arranca las máquinas
+  (`proc_pidpath`, por la llamada `proc_info`, sin cgo) y el VMM de exactamente una
+  máquina; y solo resuelve aristas de ESA máquina, con
+  las mismas comprobaciones que en Linux bajo su candado (`comprobarAristaLocked`,
+  `comprobarCopiaLocked`). Una credencial hacia otra máquina se atiende además solo si
+  está en el almacén de la máquina que pregunta.
+- **El daemon marca y entrega el socket conectado** (SCM_RIGHTS), en vez de devolver
+  la dirección del reenvío: entre esa respuesta y el dial de `kling-vz` el destino
+  podría congelarse y otra máquina heredar su puerto (el TOCTOU que el diseño evita),
+  y habría que dejar a `kling-vz` marcar a los reenvíos de otros, que `upstream.go` le
+  prohíbe. Tras marcar, el daemon vuelve a mirar bajo su candado que el destino sigue
+  en marcha con el mismo reenvío; si no, no entrega nada. El 8080 se rechaza también
+  aquí.
+- **Cortar no necesita un canal hacia `kling-vz`.** La conexión Unix de cada petición
+  queda abierta como arrendamiento de la sesión, y el daemon guarda su copia del socket
+  TCP: al congelar, pausar, parar o borrar el destino (o al cambiar las etiquetas de
+  `kling db` del origen) hace `shutdown`, que corta los dos lados aunque `kling-vz` no colabore, y
+  cierra el arrendamiento. Si el daemon se reinicia, `kling-vz` ve caer el arrendamiento
+  y corta la sesión: ninguna sobrevive sin alguien que la pueda invalidar.
+- **Acotado.** 16 conexiones a la vez por arista en `kling-vz`, 1024 sesiones por
+  máquina de origen y 4096 conexiones al broker en el daemon; una petición tiene 5 s
+  para llegar. Una conexión cuyo PID aún no es de ninguna máquina (un arranque o un
+  thaw en curso) espera hasta 15 s, pero solo 64 a la vez: la siguiente se rechaza en el
+  acto, y ni el UID ni el ejecutable equivocados llegan a esperar.
+
+Lo que queda en macOS: la identidad por PID supone que el PID que el daemon apuntó es
+el del `kling-vz` vivo. Si ese proceso muriera y su PID lo reciclara otro proceso del
+mismo usuario antes de que el vigilante lo note, ahora solo pasaría si ese otro proceso
+es también el ejecutable `kling-vz` del daemon (otro programa se rechaza por su ruta),
+y un `kling-vz` recién lanzado es de otra máquina, que el daemon apunta con su propio
+PID. Aun así no hay un identificador que no se recicle (el `audit_token` con su
+contador de versión de PID pide `getsockopt(LOCAL_PEERTOKEN)` y compararlo con el del
+proceso lanzado, que solo da libproc/cgo). Es el mismo usuario que ya puede hablar con
+el socket del daemon, así que no cruza la frontera de §1. Entre el dial del daemon y la segunda comprobación hay un instante en
+el que un reenvío muerto podría haberlo reabierto otra máquina; la segunda comprobación
+lo detecta si el daemon ya sabe que el destino cambió.
 
 **El puerto del agente de invitado (8080) nunca es destino de una arista.** El agente no
 autentica (confía en que solo el host le habla) y sirve `exec`, ficheros y volúmenes; el
 proxy de enlace marca desde el host. Una arista `link` o `credential` al 8080 se rechaza
 en `ValidateGraph` y, como defensa en profundidad, en `comprobarAristaLocked` en cada
-conexión (grafos guardados antes de la validación). Encontrado por el e2e real.
+conexión (grafos guardados antes de la validación); en macOS, además, en el broker y en
+`kling-vz` al recibir las aristas. Encontrado por el e2e real.
 
 ### 16. `kling db clone`: datos de producción, enmascarados antes de salir de la microVM
 

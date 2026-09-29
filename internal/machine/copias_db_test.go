@@ -2,8 +2,6 @@ package machine
 
 import (
 	"context"
-	"errors"
-	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +30,7 @@ func escenaModeloA(t *testing.T) *Manager {
 	m.byID[idCopia] = &api.Machine{ID: idCopia, Name: "copia", State: api.StateRunning, NetIndex: 7,
 		Labels: map[string]string{api.LabelDBGolden: "pg", api.LabelDBOwner: "local",
 			api.LabelDBState: api.DBStateReady, api.LabelPorts: "5432"}}
+	ponerReenvio(m.byID[idCopia], 5432, "")
 	m.mu.Unlock()
 	return m
 }
@@ -97,13 +96,9 @@ func TestResolverCopia(t *testing.T) {
 				}
 				return
 			}
-			if !modeloAPosible {
-				if !errors.Is(err, errModeloASoloLinux) {
-					t.Fatalf("en esta plataforma no hay modelo A: %q %v", addr, err)
-				}
-				return
-			}
-			want := net.JoinHostPort(knet.Plan(7, idCopia).NSIP, "5432")
+			m.mu.RLock()
+			want := direccionEsperada(m.byID[idCopia], 5432)
+			m.mu.RUnlock()
 			if err != nil || addr != want {
 				t.Fatalf("addr=%q err=%v, esperaba %s", addr, err, want)
 			}
@@ -165,12 +160,6 @@ func TestSetCredentialsUpstreamMachine(t *testing.T) {
 	}
 
 	_, err := m.SetCredentials(ctx, idAgente, []api.CredentialSpec{spec()})
-	if !modeloAPosible {
-		if !errors.Is(err, errModeloASoloLinux) {
-			t.Fatalf("en esta plataforma el attach debe fallar claro: %v", err)
-		}
-		return
-	}
 	if err != nil {
 		t.Fatal(err)
 	}

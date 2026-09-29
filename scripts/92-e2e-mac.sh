@@ -6,7 +6,8 @@
 # con núcleo y ayudante juntos: arranque, exec, cp, shell, congelar y
 # descongelar, snapshots dorados y sus réplicas por reenvío de loopback, el
 # proxy al invitado, sandboxes, squeeze, resize, egress, MMDS, proxy de
-# credenciales, reinicio del
+# credenciales, kling db (con attach), grafos con aristas link y credential,
+# reinicio del
 # daemon con máquinas vivas, un kling-vz muerto de un SIGKILL, y al final una
 # ráfaga corta con la compuerta de arranque. Termina comprobando que no queda
 # ningún proceso ni enlace de la prueba.
@@ -20,7 +21,10 @@
 # una ruta a propósito más larga que sun_path), SOCK, IMG (imagen con agente de
 # invitado, por defecto toolchain), BRIDGE_IMG (imagen con puente MCP en 8080,
 # por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10),
-# y las KLING_E2E_PG_* de la sección 6e (proxy de Postgres; sin ellas se salta).
+# las KLING_E2E_PG_* de la sección 6e (proxy de Postgres; sin ellas se salta) y
+# las de la 6f (kling db: KLING_DB, KLING_E2E_DB_GOLDEN, KLING_E2E_DB_SEED_MB; sin
+# Go ni red se salta, y lo dice) y las KLING_E2E_DB_GOLDEN* de 6h (la arista
+# credential; si 6f construyó su golden, lo usa).
 #
 # La salida va en inglés, como el resto de lo que ve el usuario. Un fallo no
 # aborta el resto: saber que fallan tres cosas relacionadas vale más que
@@ -120,12 +124,13 @@ cleanup() {
   echo; echo "cleaning up..."
   if [ -n "$DPID" ]; then
     for m in $(k ps -a -q 2>/dev/null); do k rm "$m" >/dev/null 2>&1; done
+    for g in $(k graph ls -q 2>/dev/null); do k graph rm -f "$g" >/dev/null 2>&1; done
     for s in $(k snapshots 2>/dev/null | awk -v p="$P" 'index($1,p)==1 {print $1}'); do k rmi "$s" >/dev/null 2>&1; done
   fi
   stop_daemon
   pkill -KILL -f "kling-vz --api-sock $ROOT/" 2>/dev/null
   rm -f "$KLING_CONFIG"
-  rm -rf "$SHARES"
+  rm -rf "$SHARES" "${DBSTAGE:-}" "${GTMP:-}"
 }
 trap cleanup EXIT
 
@@ -766,29 +771,174 @@ tf=$(total_fp); avail_after=$(api http://k/procstats | pyj "d['available_mib']")
 [ "${tf:-1}" = 0 ] && ok "memory returned: footprint 0 MiB, host available $avail_before -> $avail_after MiB" \
   || bad "memory after cleanup" "0 MiB of microVMs" "$tf"
 
-# ── 9. nada suelto ───────────────────────────────────────────────────────────
+# ── ayudantes para 6f, 6g y 6h ───────────────────────────────────────────────
+# pg_probe <máquina> <host> <env> <user> <db> [<tabla>] [hold]: un cliente mínimo
+# del protocolo v3 dentro del invitado (la imagen no trae psql). Lee su marcador
+# de MMDS, entra por el proxy de su kling-vz y, con tabla, cuenta sus filas.
+# Con "hold" se queda con la sesión abierta y dice si se la cortan. Lo usan
+# kling db attach (6f) y las aristas credential (6h).
+PG_PROBE='
+import json, socket, struct, sys, urllib.request
+host, env, user, db, tabla, modo = sys.argv[1:7]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store).get("env", {}).get(env, "")
+print("PLACEHOLDER", "yes" if ph.startswith("kling-cred-") else "NO", flush=True)
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def codigo(b):
+    return "".join(f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C")
+def conectar():
+    s = socket.create_connection((host, 5432), timeout=20)
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t == b"E": return s, "ERROR " + codigo(b)
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, "NOPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(ph)) + ph.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E": return s, "ERROR " + codigo(b)
+        if t == b"Z": return s, "READY"
+try:
+    s, r = conectar()
+except Exception as e:
+    print("LOGIN DOWN", type(e).__name__, flush=True); sys.exit(0)
+print("LOGIN", r, flush=True)
+if r != "READY": sys.exit(0)
+if tabla != "-":
+    q = ("SELECT count(*) FROM %s" % tabla).encode() + b"\0"
+    s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+    fila = ""
+    while True:
+        t, b = msg(s)
+        if t == b"D": fila = b[6:].decode(errors="replace")
+        if t in (b"Z", b"E"): break
+    print("ROWS", fila, flush=True)
+if modo == "hold":
+    print("HOLD", flush=True)
+    s.settimeout(120)
+    try:
+        print("CUT" if not s.recv(1) else "DATA", flush=True)
+    except socket.timeout:
+        print("STILL", flush=True)
+    except Exception as e:
+        print("CUT", type(e).__name__, flush=True)
+'
+pg_probe() { k exec -timeout 150s "$1" -- python3 -c "$PG_PROBE" "$2" "$3" "$4" "$5" "${6:--}" "${7:-once}" 2>&1; }
+
+# ghttp <máquina> <url>: GET desde dentro del invitado; gserve <máquina> <puerto>
+# <dir>: un servidor HTTP en el invitado sirviendo dir (6g y 6h).
+GHTTP='import sys, urllib.request
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=50).read().decode().strip())
+except Exception as e:
+    print("FAILED", type(e).__name__, e)'
+ghttp() { k exec -timeout 90s "$1" -- python3 -c "$GHTTP" "$2" 2>&1; }
+gserve() { k exec "$1" -- sh -c "mkdir -p $3 && cd $3 && setsid python3 -m http.server $2 >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; }
+# glisto <máquina> <puerto>: espera (hasta 15 s) a que el servidor de gserve
+# escuche DENTRO de su nodo. Con un sleep fijo, la primera petición por la
+# arista llegaba a veces antes que python y el broker cerraba sin respuesta; la
+# petición por la arista sigue siendo un único intento.
+glisto() { k exec "$1" -- python3 -c "
+import socket,time,sys
+for _ in range(150):
+    try: socket.create_connection(('127.0.0.1',$2),0.2).close(); sys.exit(0)
+    except OSError: time.sleep(0.1)
+sys.exit(1)" >/dev/null 2>&1; }
+
 # ── 6f. kling db ─────────────────────────────────────────────────────────────
-# Disposable Postgres databases (ext/db). Needs a Postgres golden template
-# (kling db golden build ... pg) in THIS test's daemon and the kling-db plugin
-# installed; without KLING_E2E_DB_GOLDEN it is skipped, visibly.
+# Disposable Postgres databases (ext/db). On macOS vz builds no images, so the
+# golden is made HERE from a template: toolchain + apk add postgresql16 (the only
+# step with internet egress), then scripts/db-golden.sh build -from. The kling-db
+# plugin is KLING_DB (a binary), one already installed, or built with go from
+# ext/db; it goes in a private KLING_PLUGIN_PATH, never in the user's home.
+# Skipped, visibly, without the plugin (no Go) or without network.
 #
-#   KLING_E2E_DB_GOLDEN=pg ./scripts/92-e2e-mac.sh
+#   ./scripts/92-e2e-mac.sh                     builds plugin and golden itself
+#   KLING_DB=/path/kling-db ./scripts/92-e2e-mac.sh
+#   KLING_E2E_DB_GOLDEN=pg ./scripts/92-e2e-mac.sh   use a golden that already exists in THIS daemon
 #   KLING_E2E_DB_GOLDEN_PASSWORD=...   (optional) the template's password: proves it does NOT get into a copy
+#                                      (known by itself when the golden is built here)
+#   KLING_E2E_DB_SEED_MB=8             size of the synthetic seed of the golden built here
 #
 # On macOS the host reaches a copy only through the loopback forward
 # (kling.ports), checked by peer credentials. Every kling db output goes into a
 # file that is searched at the end for every password: it must find none.
+
 step "6f. kling db"
-if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
-  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN is not set (name of the Postgres template): nothing to test\n"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+DBSTAGE=$(mktemp -d "$TMPBASE/kling-e2e-db.XXXXXX")
+DBSKIP=""
+DBREALDIR="$HOME/.local/state/kling-db"
+DBG="${KLING_E2E_DB_GOLDEN:-}"
+DBBUILT=0
+
+# 1. the plugin
+if [ -n "${KLING_DB:-}" ]; then
+  if [ -f "$KLING_DB" ] && [ -x "$KLING_DB" ]; then
+    mkdir -p "$DBSTAGE/plugins" && cp "$KLING_DB" "$DBSTAGE/plugins/kling-db" && export KLING_PLUGIN_PATH="$DBSTAGE/plugins"
+  else
+    DBSKIP="KLING_DB=$KLING_DB is not an executable file"
+  fi
 elif ! k db --help >/dev/null 2>&1; then
-  printf "  \033[33mskip\033[0m  the kling-db plugin is not installed (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+  if command -v go >/dev/null && [ -d "$HERE/../ext/db/cmd/kling-db" ]; then
+    mkdir -p "$DBSTAGE/plugins"
+    if gout=$(cd "$HERE/../ext/db" && go build -o "$DBSTAGE/plugins/kling-db" ./cmd/kling-db 2>&1); then
+      export KLING_PLUGIN_PATH="$DBSTAGE/plugins"; ok "kling-db plugin built with go from ext/db"
+    else
+      bad "go build kling-db" "the plugin built" "$(printf '%s' "$gout" | tail -3)"; DBSKIP="the kling-db plugin did not build"
+    fi
+  else
+    DBSKIP="no kling-db plugin: install go or set KLING_DB=/path/to/kling-db"
+  fi
+fi
+[ -n "$DBSKIP" ] || k db --help >/dev/null 2>&1 || DBSKIP="the kling-db plugin is not usable"
+
+# 2. the golden, if none was given
+if [ -z "$DBSKIP" ] && [ -z "$DBG" ]; then
+  if ! curl -sSI -m 8 -o /dev/null https://dl-cdn.alpinelinux.org/ 2>/dev/null; then
+    DBSKIP="no network to fetch postgresql16 (apk); the golden cannot be built"
+  else
+    GBASE="$P-pgbase"; DBG="$P-pg"; gm="$P-pgbase-m"
+    info "building the golden: $GBASE (toolchain + postgresql16), then $DBG"
+    if ! k run -name "$gm" -image "$IMG" -egress internet -allow-exec -mem 1G -cpus 2 >/dev/null 2>&1; then
+      bad "run the base machine for the golden" "running" "failed"; DBSKIP="the golden base machine did not start"
+    elif gout=$(k exec -timeout 5m "$gm" -- apk add postgresql16 postgresql16-client postgresql16-contrib tzdata 2>&1) \
+         && gout=$(k save -replace -warm=false "$gm" "$GBASE" 2>&1); then
+      ok "template $GBASE: toolchain + postgresql16 installed (internet egress only for this step)"
+    else
+      bad "template $GBASE" "apk add + save" "$(printf '%s' "$gout" | tail -3)"; DBSKIP="the golden base template was not made"
+    fi
+    k rm "$gm" >/dev/null 2>&1
+    if [ -z "$DBSKIP" ]; then
+      if gout=$(KLING="$KLING" "$HERE/db-golden.sh" build -from "$GBASE" -seed-mb "${KLING_E2E_DB_SEED_MB:-8}" -state "$DBSTAGE/golden-state" "$DBG" 2>&1); then
+        ok "db-golden.sh build -from $GBASE: golden $DBG"; DBBUILT=1
+        DBREALDIR="$DBSTAGE/golden-state"
+        [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ] || KLING_E2E_DB_GOLDEN_PASSWORD=$(cat "$DBREALDIR/$DBG/password" 2>/dev/null)
+      else
+        bad "db-golden.sh build -from" "golden built" "$(printf '%s' "$gout" | tail -4)"; DBSKIP="the golden did not build"
+      fi
+    fi
+  fi
+fi
+
+if [ -n "$DBSKIP" ]; then
+  printf "  \033[33mskip\033[0m  %s\n" "$DBSKIP"
 else
-  DBG="$KLING_E2E_DB_GOLDEN"
-  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBTMP="$DBSTAGE"; export KLING_DB_STATE="$DBTMP/state"
   # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
   # copiarlo aquí, doctor no puede comprobar que las copias rotaron la clave.
-  DBREAL="$HOME/.local/state/kling-db/$KLING_E2E_DB_GOLDEN"
+  DBREAL="$DBREALDIR/$DBG"
   if [ -d "$DBREAL" ]; then mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
   DBLOG="$DBTMP/out.log"; : > "$DBLOG"
   DBU="$P-db"
@@ -940,14 +1090,269 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   out=$(dbk rehearse "$DBU" -migrations "$RHDIR"); rc=$?
   { [ "$rc" = 0 ] && contiene "$out" ": OK"; } && ok "rehearse: the add-column migration passes" || bad "rehearse" "OK" "rc=$rc $(printf '%s' "$out" | tail -3)"
   rm -rf "$RHDIR"
+
+  # kling db attach en macOS (docs/db.md): un agente en OTRA microVM entra en la
+  # copia por el proxy de su kling-vz, que pide cada conexión al broker del
+  # daemon. Congelar la copia corta la sesión viva y el siguiente intento falla;
+  # tras el thaw vuelve; detach retira el acceso.
+  AG="$P-dbag"
+  dbsql "$DBU" "CREATE TABLE e2e_a(v text); INSERT INTO e2e_a VALUES ('x'),('y'); ALTER TABLE e2e_a OWNER TO $APPROLE" >/dev/null
+  if ! k run -name "$AG" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -allow example.org >/dev/null 2>&1; then
+    bad "attach agent" "a machine with egress allowlist" "it did not start"
+  else
+    out=$(dbk attach "$AG" "$DBU"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "attached to $DBU"; } && ok "attach on macOS: the agent gets the copy (no 501)" \
+      || bad "attach" "attached to $DBU" "rc=$rc $out"
+    AH="$DBU.db.internal"
+    out=$(pg_probe "$AG" "$AH" PGPASSWORD "$APPROLE" appdb e2e_a)
+    { contiene "$out" "PLACEHOLDER yes" && contiene "$out" "LOGIN READY" && contiene "$out" "ROWS 2"; } \
+      && ok "attach: the agent gets in through its kling-vz with its placeholder (2 rows)" || bad "attach read" "PLACEHOLDER yes, LOGIN READY, ROWS 2" "$out"
+    HOLD=$(mktemp "$DBTMP/hold.XXXXXX")
+    pg_probe "$AG" "$AH" PGPASSWORD "$APPROLE" appdb e2e_a hold > "$HOLD" 2>&1 &
+    HPID=$!
+    for _ in $(seq 1 40); do grep -q HOLD "$HOLD" 2>/dev/null && break; sleep 0.5; done
+    k freeze "$DBU" >/dev/null 2>&1
+    wait "$HPID" 2>/dev/null
+    out=$(cat "$HOLD")
+    contiene "$out" "CUT" && ok "freezing the copy cuts the agent's open session" || bad "live session on freeze" "CUT" "$out"
+    out=$(pg_probe "$AG" "$AH" PGPASSWORD "$APPROLE" appdb e2e_a)
+    contiene "$out" "LOGIN ERROR 08006" && ok "with the copy frozen, a new attempt fails (08006)" || bad "attempt on a frozen copy" "LOGIN ERROR 08006" "$out"
+    k thaw "$DBU" >/dev/null 2>&1
+    out=$(pg_probe "$AG" "$AH" PGPASSWORD "$APPROLE" appdb e2e_a)
+    contiene "$out" "ROWS 2" && ok "after the thaw the agent gets in again" || bad "after thaw" "ROWS 2" "$out"
+    out=$(k machine audit "$AG" -tail 0 -json 2>&1)
+    printf '%s\n' "$out" >> "$DBLOG"
+    contiene "$out" "\"upstream\":\"machine:$(dbid "$DBU")\"" && ok "the agent's audit says machine:<id>" \
+      || bad "attach audit" "machine:<id>" "$(printf '%s' "$out" | tail -2)"
+    out=$(dbk detach "$AG" "$DBU"); rc=$?
+    [ "$rc" = 0 ] && ok "detach" || bad "detach" "rc 0" "rc=$rc $out"
+    out=$(pg_probe "$AG" "$AH" PGPASSWORD "$APPROLE" appdb e2e_a)
+    { contiene "$out" "LOGIN " && ! contiene "$out" "LOGIN READY"; } && ok "after detach the agent no longer gets in" \
+      || bad "after detach" "LOGIN ERROR or LOGIN DOWN" "$out"
+  fi
+  k rm "$AG" >/dev/null 2>&1
   dbk rm "$DBU" >/dev/null 2>&1
 
   leaks=0
   for pw in $ALL; do grep -qF -- "$pw" "$DBLOG" && leaks=$((leaks+1)); done
   [ "$leaks" = 0 ] && ok "no password in any kling db output (0 matches)" || bad "password leak" 0 "$leaks"
-  rm -rf "$DBTMP"; unset KLING_DB_STATE
+  unset KLING_DB_STATE
+fi
+rm -rf "$DBSTAGE"; unset KLING_PLUGIN_PATH
+# El golden (dado o construido aquí) sirve también a la arista credential de 6h.
+DBGOLD=""; [ -z "$DBSKIP" ] && DBGOLD="$DBG"
+
+# ── 6g. grafos ───────────────────────────────────────────────────────────────
+# Grafo sin aristas: todo el ciclo (up, freeze, thaw, snapshot, fork, rm). Y una
+# arista link, que desde #53 (el broker de enlaces) tiene que FUNCIONAR en macOS:
+# un 501 es un fallo. Lo demás de las aristas está en 6h.
+step "6g. graphs (lifecycle; a link edge must work)"
+if ! k graph ls >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  this daemon does not know graphs (graphs capability)\n"
+else
+  G="$P-g"; GTMP=$(mktemp -d "$TMPBASE/kling-e2e-graph.XXXXXX")
+  gstate() { k graph inspect "$1" -json 2>/dev/null | pyj "d['state'] + ' ' + ' '.join(n+'='+(v.get('state') or '-') for n,v in sorted(d['nodes'].items()))"; }
+  cat > "$GTMP/g.yaml" <<EOF
+name: $G
+nodes:
+  a: {image: $IMG, allow_exec: true, mem_mib: $MEM, ports: [8081]}
+  b: {image: $IMG, allow_exec: true, mem_mib: $MEM, ports: [8081]}
+EOF
+  out=$(k graph up "$GTMP/g.yaml" 2>&1); rc=$?
+  if [ $rc -ne 0 ]; then
+    bad "graph up (no edges)" "graph $G up" "$out"
+  else
+    ok "graph up: two nodes, no edges ($(gstate "$G"))"
+    out=$(k exec "$G-a" -- echo alive 2>&1); [ "$out" = alive ] && ok "graph node answers exec" || bad "graph node exec" "alive" "$out"
+    k exec "$G-a" -- sh -c 'echo mark-a > /root/mark' >/dev/null 2>&1
+    k graph freeze "$G" >/dev/null 2>&1; st=$(gstate "$G")
+    [ "$st" = "frozen a=frozen b=frozen" ] && ok "graph freeze: both frozen" || bad "graph freeze" "frozen a=frozen b=frozen" "$st"
+    k graph thaw "$G" >/dev/null 2>&1; st=$(gstate "$G")
+    [ "$st" = "running a=running b=running" ] && ok "graph thaw: both running" || bad "graph thaw" "running a=running b=running" "$st"
+    out=$(k exec "$G-a" -- cat /root/mark 2>&1); [ "$out" = mark-a ] && ok "the node's memory and disk survive freeze/thaw" || bad "node state after thaw" "mark-a" "$out"
+
+    out=$(k graph snapshot "$G" -json 2>&1)
+    n=$(printf '%s' "$out" | pyj "str(d['generation'])+' '+str(len(d['templates']))+' '+str(all(v.endswith('-%d' % d['generation']) for v in d['templates'].values()))")
+    [ "$n" = "1 2 True" ] && ok "graph snapshot: two templates of the same generation" || bad "graph snapshot" "1 2 True" "$out"
+    GSNAPS=$(printf '%s' "$out" | pyj "' '.join(d['templates'].values())")
+    out=$(k graph fork "$G" -n 2 -q 2>&1); rc=$?
+    GFORKS=$out
+    { [ $rc -eq 0 ] && [ "$(printf '%s\n' "$GFORKS" | grep -c .)" = 2 ]; } && ok "graph fork -n 2: two new graphs" || bad "graph fork" "two names" "rc=$rc $out"
+    for F in $GFORKS; do
+      out=$(k exec "$F-a" -- cat /root/mark 2>&1)
+      [ "$out" = mark-a ] && ok "fork $F: node a wakes with the state of the fork instant" || bad "fork $F state" "mark-a" "$out"
+    done
+    for F in $GFORKS; do k graph rm "$F" >/dev/null 2>&1; done
+
+    # Una arista link: desde #53 funciona en macOS (un 501 es un fallo).
+    cat > "$GTMP/e.yaml" <<EOF
+name: $G-e
+nodes:
+  a: {image: $IMG, allow_exec: true, mem_mib: $MEM}
+  b: {image: $IMG, allow_exec: true, mem_mib: $MEM, ports: [8081]}
+edges:
+  - {from: a, to: b, kind: link, port: 8081}
+EOF
+    out=$(k graph up "$GTMP/e.yaml" 2>&1); rc=$?
+    if [ $rc -ne 0 ]; then
+      bad "link edge on macOS" "graph up works (#53: link broker)" "$out"
+    else
+      gserve "$G-e-b" 8081 /srv/e
+      k exec "$G-e-b" -- sh -c 'echo edge-ok > /srv/e/index.html' >/dev/null 2>&1
+      glisto "$G-e-b" 8081
+      out=$(ghttp "$G-e-a" http://b.graph:8081/)
+      [ "$out" = "edge-ok" ] && ok "a link edge works on macOS: a -> b.graph:8081" || bad "link edge on macOS" "edge-ok" "$out"
+    fi
+    k graph rm -f "$G-e" >/dev/null 2>&1
+
+    k graph rm "$G" >/dev/null 2>&1
+    quedan=$(k ps -a 2>/dev/null | grep -c -- "$G" || true)
+    { [ "$quedan" = 0 ] && ! k graph inspect "$G" >/dev/null 2>&1; } && ok "graph rm: no machines, no graph" || bad "graph rm" "0 machines" "machines=$quedan"
+    for t in $GSNAPS; do k rmi "$t" >/dev/null 2>&1; done
+  fi
+  k graph rm -f "$G" >/dev/null 2>&1
+  rm -rf "$GTMP"
 fi
 
+# ── 6h. grafos: aristas link y credential ────────────────────────────────────
+# Lo que los tests de Go no ven en macOS: que <nodo>.graph resuelva dentro del
+# invitado por el DNS de su kling-vz, que la arista llegue al otro invitado
+# con el socket que entrega el broker del daemon (kling-vz nunca marca a otro
+# reenvío), que un lazy despierte con la primera conexión, que ninguna arista
+# llegue al agente del invitado (8080) y que un fork hable con SUS nodos. web
+# -> api -> db, db lazy desde una plantilla que sirve un fichero en el 5432.
+# Con KLING_E2E_DB_GOLDEN y KLING_E2E_DB_GOLDEN_PASSWORD, además una arista
+# credential hacia un Postgres de verdad.
+step "6h. graphs: link and credential edges"
+if ! k graph ls >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  the daemon does not know graphs (capability graphs)\n"
+else
+  G="$P-ge"; GDBT="$P-gdb"; GTMP=$(mktemp -d "$TMPBASE/kling-e2e-edges.XXXXXX")
+  gstate() { k graph inspect "$1" -json 2>/dev/null | python3 -c 'import sys,json; g=json.load(sys.stdin); print(g["state"], " ".join(n+"="+(v.get("state") or "-") for n,v in sorted(g["nodes"].items())))'; }
+  gmark() { k exec "$1" -- sh -c "echo $2 > /srv/db/mark" >/dev/null 2>&1; }
+  gresolve() { k exec "$1" -- python3 -c 'import socket, sys
+try:
+    print(socket.gethostbyname(sys.argv[1]))
+except socket.gaierror as e:
+    print("NXDOMAIN", e)' "$2" 2>&1; }
+
+  # La plantilla del nodo lazy: un servidor en el 5432 con un marcador.
+  k run -name "$GDBT-m" -image "$IMG" -mem "$MEM" -allow-exec >/dev/null 2>&1 \
+    && gserve "$GDBT-m" 5432 /srv/db && gmark "$GDBT-m" template && sleep 1 \
+    && k commit "$GDBT-m" "$GDBT" >/dev/null 2>&1
+  k rm "$GDBT-m" >/dev/null 2>&1
+  cat > "$GTMP/g.yaml" <<EOF
+# e2e: web -> api -> db (lazy)
+name: $G
+nodes:
+  web: {image: $IMG, mem_mib: $MEM, allow_exec: true}
+  api: {image: $IMG, mem_mib: $MEM, allow_exec: true, ports: [8081]}
+  db:  {from: $GDBT, ports: [5432], wake: lazy}
+edges:
+  - {from: web, to: api, kind: link, port: 8081}
+  - {from: api, to: db, kind: link, port: 5432}
+EOF
+  out=$(k graph up "$GTMP/g.yaml" 2>&1)
+  if contiene "$out" "Linux-only" || contiene "$out" "501"; then
+    bad "graph up with edges" "up (edges work on macOS)" "$out"
+  elif ! contiene "$out" "up in"; then
+    bad "graph up" "graph $G up" "$out"
+  else
+    ok "graph up with link edges: three nodes, db lazy without a machine ($(gstate "$G"))"
+    gserve "$G-api" 8081 /srv/api
+    k exec "$G-api" -- sh -c 'echo api-ok > /srv/api/index.html' >/dev/null 2>&1
+    glisto "$G-api" 8081
+    out=$(ghttp "$G-web" http://api.graph:8081/)
+    [ "$out" = "api-ok" ] && ok "web -> api.graph:8081 through the link edge" || bad "link web -> api" "api-ok" "$out"
+    st=$(gstate "$G")
+    contiene "$st" "db=-" && ok "db still has no machine before its first connection" || bad "db lazy" "db=-" "$st"
+    out=$(ghttp "$G-api" http://db.graph:5432/mark)
+    st=$(gstate "$G")
+    { [ "$out" = "template" ] && contiene "$st" "db=running"; } \
+      && ok "the first connection to db.graph wakes the lazy node (db=running)" || bad "lazy wake" "template, db=running" "$out / $st"
+    out=$(gresolve "$G-web" db.graph)
+    contiene "$out" "NXDOMAIN" && ok "web does not resolve db.graph (no edge)" || bad "db.graph from web" "NXDOMAIN" "$out"
+    out=$(gresolve "$G-web" example.org)
+    contiene "$out" "NXDOMAIN" && ok "egress none: nothing outside *.graph resolves" || bad "example.org from web" "NXDOMAIN" "$out"
+    # El agente del invitado (8080) no es una arista: ni desde el nombre del
+    # grafo ni probando la pasarela a mano.
+    out=$(ghttp "$G-web" http://api.graph:8080/)
+    contiene "$out" "FAILED" && ok "api.graph:8080 (the guest agent) is not reachable" || bad "api.graph:8080" "FAILED" "$out"
+    out=$(ghttp "$G-web" http://172.16.0.1:5432/mark)
+    contiene "$out" "FAILED" && ok "web can't reach db through the gateway by port (no edge)" || bad "gateway:5432 from web" "FAILED" "$out"
+    out=$(k machine audit "$G-web" -json 2>&1)
+    contiene "$out" '"kind":"link"' && ok "web's audit has the connection (kind link)" || bad "audit link" '"kind":"link"' "$(printf '%s' "$out" | tail -2)"
+
+    # Un nodo congelado despierta con la siguiente conexión; el grafo entero
+    # se congela y descongela con sus aristas.
+    k freeze "$G-api" >/dev/null 2>&1
+    out=$(ghttp "$G-web" http://api.graph:8081/)
+    st=$(gstate "$G")
+    { [ "$out" = "api-ok" ] && contiene "$st" "api=running"; } \
+      && ok "a frozen node wakes up with the next connection" || bad "wake frozen api" "api-ok, api=running" "$out / $st"
+    k graph freeze "$G" >/dev/null 2>&1
+    st=$(gstate "$G")
+    [ "$st" = "frozen api=frozen db=frozen web=frozen" ] && ok "graph freeze: all three frozen" || bad "graph freeze" "frozen api=frozen db=frozen web=frozen" "$st"
+    k graph thaw "$G" >/dev/null 2>&1
+    out=$(ghttp "$G-web" http://api.graph:8081/)
+    [ "$out" = "api-ok" ] && ok "after graph thaw the edge still works" || bad "link after thaw" "api-ok" "$out"
+
+    gmark "$G-db" before-the-fork
+    out=$(k graph fork "$G" -n 1 -q 2>&1); rc=$?
+    GF=$(printf '%s\n' "$out" | head -1)
+    if [ "$rc" != 0 ] || [ -z "$GF" ]; then
+      bad "graph fork" "one new graph" "rc=$rc $out"
+    else
+      gmark "$G-db" original-after
+      out=$(ghttp "$GF-api" http://db.graph:5432/mark)
+      [ "$out" = "before-the-fork" ] && ok "fork: its api reaches ITS db (state of the fork instant)" \
+        || bad "fork api -> db" "before-the-fork (not original-after)" "$out"
+      out=$(ghttp "$G-api" http://db.graph:5432/mark)
+      [ "$out" = "original-after" ] && ok "the original keeps its db (the fork does not reach it)" || bad "original after fork" "original-after" "$out"
+      k graph rm "$GF" >/dev/null 2>&1
+    fi
+
+    # Arista credential hacia un Postgres de verdad (la plantilla de kling db).
+    GCG="${KLING_E2E_DB_GOLDEN:-$DBGOLD}"
+    if [ -n "$GCG" ] && [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ]; then
+      GC="$P-gc"
+      cat > "$GTMP/gc.yaml" <<EOF
+name: $GC
+nodes:
+  app: {image: $IMG, mem_mib: $MEM, allow_exec: true}
+  pg:  {from: $GCG, ports: [5432]}
+edges:
+  - {from: app, to: pg, kind: credential, port: 5432, user: ${KLING_E2E_DB_GOLDEN_USER:-app}, database: ${KLING_E2E_DB_GOLDEN_DB:-appdb}, env: PGPASSWORD, secret_env: E2E_GC_PASS}
+EOF
+      out=$(E2E_GC_PASS="$KLING_E2E_DB_GOLDEN_PASSWORD" k graph up "$GTMP/gc.yaml" 2>&1)
+      if ! contiene "$out" "up in"; then
+        bad "graph up with a credential edge" "up" "$out"
+      else
+        out=$(pg_probe "$GC-app" pg.graph PGPASSWORD "${KLING_E2E_DB_GOLDEN_USER:-app}" "${KLING_E2E_DB_GOLDEN_DB:-appdb}")
+        { contiene "$out" "PLACEHOLDER yes" && contiene "$out" "LOGIN READY"; } \
+          && ok "credential edge: app gets into pg.graph with only a placeholder (egress none)" || bad "credential edge" "PLACEHOLDER yes, LOGIN READY" "$out"
+        out=$(k machine audit "$GC-app" -json 2>&1)
+        case "$out" in *"$KLING_E2E_DB_GOLDEN_PASSWORD"*) bad "password in the audit" "absent" "present";; *) ok "the audit of the credential edge holds no password";; esac
+      fi
+      k graph rm "$GC" >/dev/null 2>&1
+    else
+      printf "  \033[33mskip\033[0m  credential edge: no Postgres golden (6f skipped and KLING_E2E_DB_GOLDEN/_PASSWORD are not set)\n"
+    fi
+
+    k graph rm "$G" >/dev/null 2>&1
+    left=$(k ps -a 2>/dev/null | grep -c -- "$G" || true)
+    { [ "$left" = 0 ] && ! k graph inspect "$G" >/dev/null 2>&1; } \
+      && ok "graph rm: no machines, no graph" || bad "graph rm" "0 machines" "machines=$left"
+  fi
+  k graph rm -f "$G" >/dev/null 2>&1
+  k rmi "$GDBT" >/dev/null 2>&1
+  rm -rf "$GTMP"
+fi
+
+# El golden de 6f, si lo construyó este script, ya no hace falta.
+if [ "$DBBUILT" = 1 ]; then k rmi "$DBG" >/dev/null 2>&1; k rmi "$GBASE" >/dev/null 2>&1; fi
+
+# ── 9. nada suelto ───────────────────────────────────────────────────────────
 step "9. leftovers"
 k rmi "$SNAP" >/dev/null 2>&1
 stop_daemon

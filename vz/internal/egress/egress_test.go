@@ -251,3 +251,44 @@ func TestPublicIPv4(t *testing.T) {
 		t.Fatalf("an upstream failure must give nothing, got %v", got)
 	}
 }
+
+// Los nombres de grafo: los de las aristas del nodo, con la pasarela, en
+// TODOS los modos; cualquier otro *.graph es NXDOMAIN y no sale nunca.
+func TestResolverGraphHosts(t *testing.T) {
+	gw := netip.MustParseAddr("172.16.0.1")
+	p := NewPolicy()
+	var forwarded int
+	r := &Resolver{Policy: p, Exchange: func(_ context.Context, q []byte, _ bool) ([]byte, error) {
+		forwarded++
+		return answer(q, 30, "93.184.215.14"), nil
+	}}
+	rcode := func(b []byte) byte { return b[3] & 0x0F }
+	p.SetGraphHosts([]string{"API.graph.", "db.graph", "no-es-de-grafo.com"}, gw)
+
+	for _, mode := range []Mode{None, Internet, Allowlist} {
+		p.Set(mode, []string{"example.com"})
+		resp := r.Process(context.Background(), BuildQuery("api.graph", 1), false)
+		if rcode(resp) != 0 || !bytes.Equal(resp[len(resp)-4:], []byte{172, 16, 0, 1}) {
+			t.Fatalf("%s: api.graph must resolve to the gateway (rcode %d)", mode, rcode(resp))
+		}
+		if resp := r.Process(context.Background(), BuildQuery("db.graph", 28), false); rcode(resp) != 0 || binary.BigEndian.Uint16(resp[6:8]) != 0 {
+			t.Fatalf("%s: AAAA of a graph host must be an empty NOERROR", mode)
+		}
+		if resp := r.Process(context.Background(), BuildQuery("cache.graph", 1), false); rcode(resp) != 3 {
+			t.Fatalf("%s: a graph name without an edge must be NXDOMAIN, got %d", mode, rcode(resp))
+		}
+		if resp := r.Process(context.Background(), BuildQuery("x.api.graph", 1), false); rcode(resp) != 3 {
+			t.Fatalf("%s: a subdomain of a graph host must be NXDOMAIN", mode)
+		}
+	}
+	if forwarded != 0 || p.IPSet().Len() != 0 {
+		t.Fatalf("graph names went upstream (%d) or seeded the set", forwarded)
+	}
+	if _, esGrafo, _ := p.GraphHost("no-es-de-grafo.com"); esGrafo {
+		t.Fatal("a name outside .graph is not a graph name")
+	}
+	p.SetGraphHosts(nil, gw)
+	if resp := r.Process(context.Background(), BuildQuery("api.graph", 1), false); rcode(resp) != 3 {
+		t.Fatal("after clearing, api.graph must be NXDOMAIN")
+	}
+}

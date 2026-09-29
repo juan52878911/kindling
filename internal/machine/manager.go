@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -301,6 +302,13 @@ type Manager struct {
 	desp      map[string]*despertar
 	virtuales sync.Map
 
+	// El broker de enlaces de macOS (broker.go, broker_vz.go): dónde escucha
+	// y el listener. Vacíos en Linux y en los managers de prueba.
+	brokerRuta string
+	brokerLn   *net.UnixListener
+	// marcarBrokerPrueba sustituye el dial del broker. Solo las pruebas.
+	marcarBrokerPrueba func(ctx context.Context, addr string) (net.Conn, error)
+
 	// Clave de firma de snapshots (firma.go), cargada una vez.
 	firmaOnce  sync.Once
 	firmaClave []byte
@@ -393,6 +401,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// Los grafos antes de reconciliar: reconcile rehace los proxies de enlace
 	// de los nodos vivos, y para eso necesita sus aristas.
 	m.cargarGrafos()
+	// El broker antes de readoptar: los kling-vz que siguen vivos piden por
+	// él sus aristas en cuanto el invitado conecta.
+	m.iniciarBroker()
 	m.reconcile()
 	m.barrerAlmacen()
 	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
@@ -585,6 +596,7 @@ func (m *Manager) persistirYa() {
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
 		close(m.quit)
+		m.cerrarBroker()
 		m.persistWG.Wait()
 	})
 }
@@ -822,7 +834,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err != nil {
 		return nil, err
 	}
-	shares, err := m.resolveShares(req, vols)
+	shares, err := m.resolveShares(ctx, req, vols)
 	if err != nil {
 		return nil, err
 	}
@@ -2340,6 +2352,7 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 		// las suyas. Después del cambio y fuera del candado.
 		m.invalidarSesiones(id, "kling db labels changed")
 		invalidarAgente(plan)
+		invalidarOrigen(id)
 	}
 	return nil
 }

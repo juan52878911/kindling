@@ -33,7 +33,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
-| `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (solo Linux), `DELETE /machines/{ref}/credentials/{env}` |
+| `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (Linux y macOS), `DELETE /machines/{ref}/credentials/{env}` |
 | `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
@@ -238,7 +238,7 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 | `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS solo IP o `localhost`, el daemon rechaza un nombre al entregarla. Se devuelve normalizado (minúsculas) |
 | `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |
 | `tls_server_name` | opcional: nombre (o IP) contra el que se verifica el certificado en lugar de `domain` |
-| `upstream_machine` | opcional, solo Linux y solo en credenciales de máquina (no de plantilla): el **id** exacto (hexadecimal) de una copia de `kling db` a la que marca el proxy, el modelo A de [db.md](db.md). Nunca una dirección: el daemon la resuelve en cada conexión y solo si la copia existe con ese id, corre, lleva `kling.db.golden`, `kling.db.state=ready`, expone `port` en `kling.ports`, y ella, el agente y `upstream_owner` dicen el mismo `kling.db.owner`. Excluye `upstream`, exige `upstream_tls: "disable"` (SCRAM-SHA-256) y `database`. Se comprueba también al entregar; en macOS se rechaza |
+| `upstream_machine` | opcional, solo en credenciales de máquina (no de plantilla): el **id** exacto (hexadecimal) de una copia de `kling db` a la que marca el proxy, el modelo A de [db.md](db.md). Nunca una dirección: el daemon la resuelve en cada conexión y solo si la copia existe con ese id, corre, lleva `kling.db.golden`, `kling.db.state=ready`, expone `port` en `kling.ports`, y ella, el agente y `upstream_owner` dicen el mismo `kling.db.owner`. Excluye `upstream`, exige `upstream_tls: "disable"` (SCRAM-SHA-256) y `database`. Se comprueba también al entregar. En macOS lo pide el `kling-vz` del agente en cada conexión al broker de enlaces del daemon, que marca él mismo (ver [db.md](db.md)) |
 | `upstream_owner` | con `upstream_machine`, obligatorio: el `kling.db.owner` que tienen que compartir copia y agente |
 | `secret` | contraseña del rol, ASCII imprimible |
 | `allow` | no vale para Postgres |
@@ -247,7 +247,8 @@ El invitado recibe el marcador en `env` y lo usa como contraseña, sin TLS
 (`sslmode=disable` o `prefer`) contra `domain`. Al rotar (misma `env`) se sustituyen
 todos los campos con la clave. En macOS el daemon lo rechaza si el `kling-vz` de la
 máquina no incluye `postgres` en `credential_kinds` de `GET /kling/info`, y rechaza una
-que use `upstream`, `upstream_tls` o `tls_server_name` si no incluye `postgres-upstream`.
+que use `upstream`, `upstream_tls` o `tls_server_name` si no incluye `postgres-upstream`,
+ni una con `upstream_machine` (ni las aristas de un grafo) si no incluye `graph-link`.
 Recetas y límites en [postgres.md](postgres.md).
 
 En el registro de auditoría cada conexión es una línea `kind: postgres` con `host`,
@@ -290,11 +291,11 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 
 | Ruta | Qué hace |
 |---|---|
-| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`, `501` en macOS si tiene aristas `link` o `credential` |
+| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`. En macOS las aristas `link` y `credential` van por el broker de enlaces y una `depends` con `port` espera preguntando al `kling-vz` del destino |
 | `GET /graphs` | lista, por nombre |
 | `GET /graphs/{ref}` | uno, con el estado de cada nodo |
 | `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
-| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado |
+| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado o el grafo tiene aristas `share` (también en `fork`) |
 | `POST /graphs/{ref}/fork` | `{"count": N}` (1 a 16). Devuelve `{"graphs": [...]}` (`201`) |
 | `DELETE /graphs/{ref}` | el grafo y sus máquinas (`204`) |
 
@@ -303,8 +304,9 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 `fork_of` y en cada nodo `machine_id` y `state` los pone el daemon (lo que llegue en
 ellos se ignora). `GraphNode`: `from` o `image`, `vcpus`, `mem_mib`, `egress`,
 `allow_domains`, `ports`, `wake` (`eager`\|`lazy`), `idle_freeze`, `volumes`, `shares`,
-`labels`, `allow_exec`. `GraphEdge`: `from`, `to`, `kind` (`link`\|`credential`),
-`port`, y en `credential` `env`, `user` y `database`. La clave de una arista no está
+`labels`, `allow_exec`. `GraphEdge`: `from`, `to`, `kind`
+(`link`\|`credential`\|`share`\|`depends`; `mcp` se rechaza con el motivo), `port`, en
+`credential` `env`, `user` y `database`, y en `share` `mount` y `mode` (`ro`\|`rw`). La clave de una arista no está
 nunca en `Graph`. Las etiquetas `kling.graph` y `kling.graph.*` las pone solo el
 daemon: `POST /machines`, `POST /sandboxes`, el fork de un sandbox y
 `PUT /machines/{ref}/labels` las rechazan con `400`. El grafo se guarda en
