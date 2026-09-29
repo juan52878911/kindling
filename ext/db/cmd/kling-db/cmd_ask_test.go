@@ -445,3 +445,31 @@ func TestCheckRORoleIgnoraPgSettings(t *testing.T) {
 		t.Fatal("solo pg_settings puede quedar fuera de la comprobación de escritura")
 	}
 }
+
+// Solo "no existe" de una tabla o columna vuelve al modelo, y rehecho a partir
+// del identificador: el resto de la salida de psql no sale nunca.
+func TestMissingIdentSoloTablasYColumnas(t *testing.T) {
+	casos := []struct {
+		err  string
+		want string
+		ok   bool
+	}{
+		{`kling exec: exit status 3: ERROR:  relation "productos" does not exist
+LINE 2: FROM productos p`, "the relation productos does not exist", true},
+		{`ERROR:  column "c.nombre" does not exist`, "the column c.nombre does not exist", true},
+		{`ERROR:  column nombre does not exist`, "the column nombre does not exist", true},
+		{`ERROR:  invalid input syntax for type integer: "4111 1111 1111 1111"`, "", false},
+		{`ERROR:  permission denied for table invoices`, "", false},
+		{`ERROR:  canceling statement due to statement timeout`, "", false},
+	}
+	for _, c := range casos {
+		got, ok := missingIdent(errors.New(c.err))
+		if ok != c.ok || got != c.want {
+			t.Errorf("%q: got (%q, %v), want (%q, %v)", c.err, got, ok, c.want, c.ok)
+		}
+	}
+	p := repairPrompt("{}", "¿cuántos?", "SELECT 1 FROM productos", "the relation productos does not exist")
+	if !strings.Contains(p, "SELECT 1 FROM productos") || !strings.Contains(p, "productos does not exist") || strings.Contains(p, "LINE 2") {
+		t.Fatalf("repairPrompt = %q", p)
+	}
+}
