@@ -767,6 +767,111 @@ tf=$(total_fp); avail_after=$(api http://k/procstats | pyj "d['available_mib']")
   || bad "memory after cleanup" "0 MiB of microVMs" "$tf"
 
 # ── 9. nada suelto ───────────────────────────────────────────────────────────
+# ── 6f. kling db ─────────────────────────────────────────────────────────────
+# Disposable Postgres databases (ext/db). Needs a Postgres golden template
+# (kling db golden build ... pg) in THIS test's daemon and the kling-db plugin
+# installed; without KLING_E2E_DB_GOLDEN it is skipped, visibly.
+#
+#   KLING_E2E_DB_GOLDEN=pg ./scripts/92-e2e-mac.sh
+#   KLING_E2E_DB_GOLDEN_PASSWORD=...   (optional) the template's password: proves it does NOT get into a copy
+#
+# On macOS the host reaches a copy only through the loopback forward
+# (kling.ports), checked by peer credentials. Every kling db output goes into a
+# file that is searched at the end for every password: it must find none.
+step "6f. kling db"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN is not set (name of the Postgres template): nothing to test\n"
+elif ! k db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  the kling-db plugin is not installed (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBLOG="$DBTMP/out.log"; : > "$DBLOG"
+  DBU="$P-db"
+  dbk() { local o rc; o=$(k db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  dbsql() { k exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  dbpw() { local id; id=$(k inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'); cat "$KLING_DB_STATE/copies/$id/password" 2>/dev/null; }
+  dbhost() { k db connect "$1" -dsn 2>/dev/null </dev/null | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.stdin.read().strip())
+print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip("/"))'; }
+  dbhostsql() { local pw="$1" h p u d; read -r h p u d < <(dbhost "$2"); PGPASSWORD="$pw" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$u" -d "$d" -c "$3" 2>&1; }
+
+  out=$(dbk up "$DBG" -name "$DBU")
+  contiene "$out" "ready" && ok "kling db up: ready copy" || bad "db up" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT 1")
+  [ "$out" = "1" ] && ok "SELECT 1 inside the copy, through the socket" || bad "SELECT 1" "1" "$out"
+  PW1=$(dbpw "$DBU"); ALL="$PW1"
+  [ -n "$PW1" ] && ok "the copy has its own password on the host" || bad "copy password" "a password file" "nothing"
+
+  if ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no psql on this host: host-side password checks skipped\n"
+  else
+    out=$(dbhostsql "$PW1" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "the host gets in with the copy's password" || bad "host connection" "1" "$out"
+    if [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ]; then
+      [ "$PW1" != "$KLING_E2E_DB_GOLDEN_PASSWORD" ] && ok "the copy's password differs from the template's" \
+        || bad "rotation" "different passwords" "equal"
+      out=$(dbhostsql "$KLING_E2E_DB_GOLDEN_PASSWORD" "$DBU" "SELECT 1")
+      [ "$out" = "1" ] && bad "template password" "rejected" "IT GOT IN" || ok "the template's password does NOT get into the copy"
+    else
+      printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD is not set: template password not tried from the host\n"
+    fi
+    dsn=$(k db connect "$DBU" -dsn 2>/dev/null </dev/null)
+    out=$(PGCONNECT_TIMEOUT=10 psql -X -At "$dsn" -c "SELECT 1" 2>&1)
+    [ "$out" = "1" ] && ok "connect -dsn works" || bad "connect -dsn" "1" "$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
+    dsn=""
+  fi
+
+  dbsql "$DBU" "CREATE TABLE e2e_mark(v text); INSERT INTO e2e_mark VALUES ('origin')" >/dev/null
+  out=$(dbk fork "$DBU" -n 4)
+  copies=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}')
+  [ "$(printf '%s\n' "$copies" | grep -c . || true)" = 4 ] && ok "fork -n 4: four ready copies" || bad "fork -n 4" "4 copies" "$out"
+  distinct=1; i=0
+  for c in $copies; do
+    i=$((i+1)); pw=$(dbpw "$c")
+    case " $ALL " in *" $pw "*) distinct=0;; esac
+    [ -n "$pw" ] || distinct=0
+    ALL="$ALL $pw"
+    dbsql "$c" "INSERT INTO e2e_mark VALUES ('copy-$i')" >/dev/null
+  done
+  [ "$distinct" = 1 ] && ok "fork: four passwords, all different from each other and from the source's" || bad "fork passwords" "all distinct" "a repeat or an empty one"
+  isolated=1; i=0
+  for c in $copies; do
+    i=$((i+1))
+    rows=$(dbsql "$c" "SELECT string_agg(v, ',' ORDER BY v) FROM e2e_mark")
+    [ "$rows" = "copy-$i,origin" ] || { isolated=0; info "$c sees: $rows"; }
+  done
+  rows=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_mark")
+  { [ "$isolated" = 1 ] && [ "$rows" = "origin" ]; } && ok "each copy sees only its own writes" || bad "fork isolation" "copy-N,origin each; source only origin" "source sees: $rows"
+  for c in $copies; do dbk rm "$c" >/dev/null 2>&1; done
+
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor on a clean copy: 0 problems" || bad "doctor clean" "0 problem(s)" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "CREATE ROLE e2e_super LOGIN SUPERUSER" >/dev/null
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" != 0 ] && ! contiene "$out" "; 0 problem(s)"; } && ok "doctor with a login superuser added: problems found" || bad "doctor dirty" "problems > 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "DROP ROLE e2e_super" >/dev/null
+
+  command -v psql >/dev/null && dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
+  out=$(dbk audit "$DBU" -since 1h)
+  contiene "$out" "connect" && ok "audit shows connections" || bad "audit" "connection events" "$out"
+  if contiene "$out" "424242" || contiene "$out" "SELECT" || contiene "$out" "e2e_mark"; then bad "audit has no SQL" "no SQL, no values" "$out"; else ok "audit holds no SQL"; fi
+
+  dbsql "$DBU" "CREATE TABLE e2e_dirty(x int)" >/dev/null
+  out=$(dbk reset "$DBU"); contiene "$out" "ready" || bad "db reset" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_tables WHERE tablename IN ('e2e_dirty','e2e_mark')")
+  [ "$out" = "0" ] && ok "reset gives back the template's data" || bad "reset" "0 test tables" "$out"
+  PW2=$(dbpw "$DBU")
+  ALL="$ALL $PW2 ${KLING_E2E_DB_GOLDEN_PASSWORD:-}"
+  dbk rm "$DBU" >/dev/null 2>&1
+
+  leaks=0
+  for pw in $ALL; do grep -qF -- "$pw" "$DBLOG" && leaks=$((leaks+1)); done
+  [ "$leaks" = 0 ] && ok "no password in any kling db output (0 matches)" || bad "password leak" 0 "$leaks"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
 step "9. leftovers"
 k rmi "$SNAP" >/dev/null 2>&1
 stop_daemon

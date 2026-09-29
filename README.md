@@ -1274,6 +1274,9 @@ database on a private IP is refused unless you pin it yourself: `-upstream
 `-upstream-tls disable` (SCRAM-SHA-256 only) when it has no TLS. Recipes in
 [docs/postgres.md](docs/postgres.md); the security model in SECURITY.md §7.
 
+Need a throwaway database per test or agent instead? `kling db up <template>` gives a
+ready Postgres copy per microVM with its own password: [docs/db.md](docs/db.md).
+
 Measured in the lab with a "compromised" server running as root inside:
 
 | What it tries | With MMDS | With the proxy |

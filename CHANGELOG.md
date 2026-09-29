@@ -10,7 +10,27 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### kling db
+
+- **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
+  `up`, `fork`, `connect`, `reset`, `rm`, `doctor`, `audit` y `golden`. Cada copia estrena
+  clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.
+  `doctor` revisa la seguridad de una copia o de una URL; `audit` muestra sus conexiones
+  sin SQL ni claves. Ver [`docs/db.md`](docs/db.md).
+- **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
+  (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
+- e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`
+  (`KLING_E2E_DB_GOLDEN`; se salta, avisando, si no hay plantilla).
+
 ### Seguridad
+
+- **Fork: el almacén de credenciales falla cerrado.** Si no se puede mirar (cualquier error
+  salvo "no existe") el fork se rechaza, y la comprobación de "sin credenciales" se repite
+  con el cerrojo de la máquina justo antes de pausarla, para que un `SetCredentials`
+  concurrente no se cuele. El mensaje ahora dice cómo hacerlo bien: "start another instance
+  with run -from <template>".
+- **kindling-sandbox reserva el prefijo `kling.db.`.** Un inquilino ya no puede fijar
+  `kling.db.owner` ni `kling.db.state` al crear un sandbox.
 
 - **Credenciales Postgres: `-database` obligatoria.** `kling machine credential` y
   `kling template credential` con `-type postgres` exigen `-database B` o, expreso,
@@ -189,6 +209,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   no bloqueado — la barrera del namespace sí los cubre).
 
 ### Novedades
+
+- **`fork` con etiquetas.** `POST /sandboxes/{ref}/fork` acepta `labels` y `kling sandbox fork`
+  `-label k=v`: las copias nacen ya etiquetadas. Además, `api.Machine.Exposes(port)`.
 
 - **Postgres en Docker o en la LAN/VPC: upstream fijado por el operador.** `kling machine
   credential` y `kling template credential` ganan `-upstream host:puerto` (a dónde marca

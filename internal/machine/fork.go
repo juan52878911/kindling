@@ -50,6 +50,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -78,6 +79,9 @@ type ForkOptions struct {
 	// Lista, si no es nil, se llama con cada copia recién restaurada. Un error
 	// deshace el fork entero. El daemon espera aquí al agente del invitado.
 	Lista func(ctx context.Context, mc *api.Machine) error
+	// Labels se suman a las de cada copia, ya en su nacimiento (sin ventana en
+	// la que exista sin ellas). Las valida api.ValidateForkLabels.
+	Labels map[string]string
 }
 
 // restaurarFork restaura una copia. Es m.Run —el tope de máquinas, la
@@ -117,6 +121,9 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	if n < 0 || n > api.ForkMax {
 		return "", nil, fmt.Errorf("%w: count must be between 1 and %d", ErrFork, api.ForkMax)
 	}
+	if err := api.ValidateForkLabels(opt.Labels); err != nil {
+		return "", nil, fmt.Errorf("%w: %v", ErrFork, err)
+	}
 	src, ok := m.Get(ref)
 	if !ok {
 		return "", nil, fmt.Errorf("%w: %q", ErrNoMachine, ref)
@@ -144,7 +151,9 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 		}
 	}()
 
-	if _, err := m.Commit(ctx, src.ID, name, false); err != nil {
+	// La comprobación de credenciales se repite con el cerrojo de la máquina:
+	// entre la de arriba y la pausa, un SetCredentials pudo darle alguna.
+	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales); err != nil {
 		return "", nil, fmt.Errorf("forking %s: %w", src.Name, err)
 	}
 	if err := os.WriteFile(filepath.Join(m.snapDir(name), forkMarca), []byte(src.ID+"\n"), 0o644); err != nil {
@@ -168,7 +177,7 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 			AllowExec:  src.AllowExec,
 			TTLSeconds: ttl,
 			OnTTL:      onTTL,
-			Labels:     map[string]string{api.LabelForkOf: src.ID},
+			Labels:     api.MergeLabels(opt.Labels, map[string]string{api.LabelForkOf: src.ID}),
 		})
 		if err != nil {
 			return "", nil, fmt.Errorf("fork %d of %d from %s: %w", i+1, n, src.Name, err)
@@ -234,6 +243,11 @@ func puedeRamificarse(src *api.Machine) error {
 // verdad, y state.json podría ir por detrás.
 func (m *Manager) forkSinCredenciales(src *api.Machine) error {
 	_, err := os.Stat(m.credPath(src.ID))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// Falla cerrado: si no se puede mirar el almacén, no se sabe que no
+		// haya credenciales.
+		return fmt.Errorf("%w: couldn't check whether %s has proxy credentials: %v", ErrFork, src.Name, err)
+	}
 	if len(src.CredentialDomains) == 0 && err != nil {
 		return nil
 	}
@@ -242,8 +256,8 @@ func (m *Manager) forkSinCredenciales(src *api.Machine) error {
 		dominios = "proxy credentials for " + strings.Join(src.CredentialDomains, ", ")
 	}
 	return fmt.Errorf("%w: %s has %s, and every copy would wake up with placeholders its own proxy doesn't know; "+
-		"attach the credentials to a template instead (kling template credential <template> ...) and start each copy "+
-		"with kling run -from <template>, which gives every instance its own placeholder", ErrFork, src.Name, dominios)
+		"attach the credentials to a template instead (kling template credential <template> ...) and "+
+		"start another instance with run -from <template> instead of forking this one; every instance then gets its own placeholder", ErrFork, src.Name, dominios)
 }
 
 // deshacerFork elimina las copias que llegó a crear un fork fallido (también

@@ -18,7 +18,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/units"
 )
 
-const sandboxForkUsage = "usage: kling sandbox fork <sandbox> [-n N] [-ttl 10m] [-on-ttl remove|freeze] [-q] [-json]"
+const sandboxForkUsage = "usage: kling sandbox fork <sandbox> [-n N] [-ttl 10m] [-on-ttl remove|freeze] [-label k=v]... [-q] [-json]"
 
 // forkOptions es `kling sandbox fork` ya interpretado.
 type forkOptions struct {
@@ -40,6 +40,8 @@ func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, 
 	n := fs.Int("n", 1, fmt.Sprintf("how many copies (1-%d)", api.ForkMax))
 	ttl := units.DurationVar(fs, "ttl", 0, "lifetime of each copy: 10m, 1h (bare number = seconds; default: the original's)")
 	onTTL := fs.String("on-ttl", "", "when a copy's ttl runs out: remove or freeze (default: the original's)")
+	var labels labelFlag
+	fs.Var(&labels, "label", "label for every copy, k=v (repeatable)")
 	quiet := fs.Bool("q", false, "print only the ids of the copies")
 	asJSON := fs.Bool("json", false, "JSON output: the snapshot and the copies")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -59,9 +61,12 @@ func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, 
 	default:
 		return forkOptions{}, fmt.Errorf("invalid -on-ttl %q: use %s or %s", *onTTL, api.OnTTLRemove, api.OnTTLFreeze)
 	}
+	if err := api.ValidateForkLabels(map[string]string(labels)); err != nil {
+		return forkOptions{}, fmt.Errorf("-label: %w", err)
+	}
 	return forkOptions{
 		host: *host, ref: fs.Arg(0), quiet: *quiet, asJSON: *asJSON,
-		req: api.ForkRequest{Count: *n, TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL},
+		req: api.ForkRequest{Count: *n, TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Labels: map[string]string(labels)},
 	}, nil
 }
 

@@ -31,6 +31,9 @@ type Config struct {
 	// Timeout acota conectar+autenticar y cada Query (por defecto 30 s). Si el
 	// contexto trae un plazo más corto, manda el del contexto.
 	Timeout time.Duration
+	// NoCleartext rechaza la autenticación con contraseña en claro: sin TLS,
+	// esa contraseña viajaría legible por la red. Solo SCRAM (o trust).
+	NoCleartext bool
 }
 
 // Conn es una conexión. No es segura para uso concurrente.
@@ -144,6 +147,9 @@ func (c *Conn) arranque(cfg Config) error {
 			switch binary.BigEndian.Uint32(body) {
 			case 0: // AuthenticationOk
 			case 3: // contraseña en claro
+				if cfg.NoCleartext {
+					return errors.New("postgres: the server asks for a cleartext password; refused")
+				}
 				if err := c.escribir('p', append([]byte(cfg.Password), 0)); err != nil {
 					return err
 				}

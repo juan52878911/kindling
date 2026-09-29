@@ -49,6 +49,9 @@ func validarFork(req api.ForkRequest) error {
 	default:
 		return fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLRemove, api.OnTTLFreeze)
 	}
+	if err := api.ValidateForkLabels(req.Labels); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -69,7 +72,7 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap, forks, err := s.mgr.Fork(r.Context(), src.ID, machine.ForkOptions{
-		Count: req.Count, TTLSeconds: req.TTLSeconds, OnTTL: req.OnTTL,
+		Count: req.Count, TTLSeconds: req.TTLSeconds, OnTTL: req.OnTTL, Labels: req.Labels,
 		// Como al crear un sandbox: se devuelven cuando el agente ya escucha,
 		// porque quien las pide va a ejecutar algo en ellas acto seguido.
 		Lista: func(ctx context.Context, mc *api.Machine) error {
