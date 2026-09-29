@@ -10,6 +10,19 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Fase baja
+
+- **kling-sandbox: grafos precalentados (#57).** Plantillas con `"kind": "graph"`
+  (`kling sbx template apply -f`, guardadas en el store de cada host): el fondo del
+  gateway levanta instancias enteras con `POST /graphs` y las congela; `POST /v1/graphs
+  {"template": ...}` reclama una (etiqueta todas sus máquinas con el inquilino, relee y
+  `graph thaw`) o levanta una ya reclamada si no hay libres. `GET/DELETE
+  /v1/graphs/{id}` para verla y soltarla entera; el id de cada nodo vale para `exec`,
+  `files` y `shell`. Cuenta en la cuota como un sandbox, la limpieza borra los
+  abandonados y los rotos, y `/v1/templates` los lista con `kind: graph`. Sin nodos
+  `lazy`, aristas `credential` ni volúmenes o carpetas del host en la plantilla. Ver
+  [`ext/sandbox/README.md`](ext/sandbox/README.md#grafos-precalentados).
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>

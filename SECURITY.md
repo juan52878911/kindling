@@ -517,6 +517,16 @@ daemon se niega a crear un sandbox desde él. El daemon no se fía del flujo del
 agente: recorta la salida a los topes y valida cada evento. Los sandboxes nacen sin
 red y se destruyen al vencer su TTL.
 
+Los **grafos precalentados** del frontal de sandboxes (`ext/sandbox`, #57) se reparten
+entre inquilinos con las mismas reglas que las máquinas precalentadas: un grafo es de un
+inquilino solo si TODAS sus máquinas llevan su etiqueta `tenant` (y el `kling.graph` de
+ese grafo, que pone el daemon y nadie cambia); uno mezclado por dos reclamaciones a la
+vez no es de nadie, no se entrega y se borra. Sus nodos admiten `exec`, ficheros y shell
+del dueño del grafo entero, nada más. Una plantilla de grafo no puede llevar aristas
+`credential` (la clave viajaría con la plantilla), ni volúmenes o carpetas del host en
+sus nodos (serían los mismos en todas las instancias, un canal entre inquilinos), ni
+nodos `lazy` (nacerían sin la etiqueta de su dueño).
+
 ### 9. Snapshots firmados
 
 Cada snapshot dorado lleva un HMAC-SHA256, con una clave que solo existe en su
