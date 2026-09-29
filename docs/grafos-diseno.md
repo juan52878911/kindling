@@ -60,11 +60,11 @@ type GraphEdge struct {
 name: tienda
 nodes:
   db:    {from: pg16-golden, ports: [5432], wake: lazy, idle_freeze: 120}
-  api:   {from: api-node, ports: [8080], egress: allowlist, allow_domains: [api.stripe.com]}
+  api:   {from: api-node, ports: [8081], egress: allowlist, allow_domains: [api.stripe.com]}
   web:   {from: web-static, ports: [80]}
 edges:
   - {from: api, to: db, kind: credential, port: 5432, user: app, database: shop, env: PGPASSWORD}
-  - {from: web, to: api, kind: link, port: 8080}
+  - {from: web, to: api, kind: link, port: 8081}
 ```
 
 **API del daemon** (capacidad `graphs` en `GET /info`): `POST /graphs` (cuerpo `Graph`), `GET /graphs`, `GET /graphs/{ref}`, `POST /graphs/{ref}/freeze|thaw|snapshot|fork`, `DELETE /graphs/{ref}`. Persistencia en el store del daemon (`$KLING_ROOT/store/graph/<id>.json`, `internal/daemon/store.go`) más las etiquetas en cada máquina, que son la fuente de verdad para resolver aristas tras un reinicio (`reconcile.go`).
@@ -89,7 +89,7 @@ edges:
 
 **Tests unitarios**: `pkg/api/graph_test.go` (validación: ciclos en `depends`, puertos no expuestos, arista a nodo inexistente, tamaño); `internal/machine/grafo_test.go` con el Firecracker falso (`fcfalso_test.go`): resolvedor rechaza otro grafo, otro nodo, nodo parado, puerto ausente; lazy crea instancia una sola vez bajo 10 `accept` concurrentes; snapshot pausa-todos/commit-todos/reanuda-todos y deshace en fallo; fork produce grafo nuevo cuyas aristas no resuelven al original. `pkg/credproxy/enlace_test.go`: proxy TCP crudo con `ResolveMachine` por conexión e `Invalidar`.
 
-**e2e**, sección nueva `step "8. Grafos"` en `scripts/90-e2e.sh` tras 7f: `graph up` de 3 nodos (`web→api→db`, `db` lazy); desde `web`, `exec curl api.graph:8080` responde y `db` pasa `frozen→running` al primer `psql`; desde `web`, `db.graph` da NXDOMAIN (sin arista); `graph freeze` deja los tres `frozen`, `graph thaw` los devuelve; `graph snapshot` crea tres plantillas con la misma generación; `graph fork -n 2` produce dos grafos cuya `api` llega a su propia `db` y no a la original (comprobado con un marcador escrito en la base); `graph rm` limpia máquinas y plantillas temporales; daemon reiniciado (bloque 4) conserva el grafo y sus enlaces.
+**e2e**, sección nueva `step "8. Grafos"` en `scripts/90-e2e.sh` tras 7f: `graph up` de 3 nodos (`web→api→db`, `db` lazy); desde `web`, `exec curl api.graph:8081` responde y `db` pasa `frozen→running` al primer `psql`; desde `web`, `db.graph` da NXDOMAIN (sin arista); `graph freeze` deja los tres `frozen`, `graph thaw` los devuelve; `graph snapshot` crea tres plantillas con la misma generación; `graph fork -n 2` produce dos grafos cuya `api` llega a su propia `db` y no a la original (comprobado con un marcador escrito en la base); `graph rm` limpia máquinas y plantillas temporales; daemon reiniciado (bloque 4) conserva el grafo y sus enlaces.
 
 **Riesgos de seguridad y cierre**: (a) TOCTOU de dirección — resuelto en cada conexión, nunca cacheado, mismo diseño que attach; (b) un invitado no puede fabricar aristas: los IDs y etiquetas `kling.graph*` los pone el daemon y `SetLabels` (`manager.go:2269`) rechaza cambiarlas; (c) tormenta de despertares — un solo thaw en vuelo por nodo (candado `lifecycle.tomar`), cola acotada, 503 a partir de ahí; (d) fuga entre grafos forkeados — el ID de grafo va en la comprobación, e2e negativo obligatorio; (e) el tramo proxy→B va en claro por el host, igual que hoy con Postgres: se documenta y las credenciales siguen exigiendo SCRAM.
 

@@ -640,6 +640,12 @@ attach de Postgres (las credenciales exigen SCRAM; un `link` es TCP crudo y su
 protocolo es cosa de la aplicación). En macOS no hay aristas entre máquinas en esta
 versión (501): allí no hay dónde resolver bajo el candado del daemon en cada conexión.
 
+**El puerto del agente de invitado (8080) nunca es destino de una arista.** El agente no
+autentica (confía en que solo el host le habla) y sirve `exec`, ficheros y volúmenes; el
+proxy de enlace marca desde el host. Una arista `link` o `credential` al 8080 se rechaza
+en `ValidateGraph` y, como defensa en profundidad, en `comprobarAristaLocked` en cada
+conexión (grafos guardados antes de la validación). Encontrado por el e2e real.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

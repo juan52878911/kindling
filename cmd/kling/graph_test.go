@@ -19,11 +19,11 @@ const tiendaYAML = `# mi tienda de prueba
 name: tienda
 nodes:
   db:    {from: pg16-golden, ports: [5432], wake: lazy, idle_freeze: 120}
-  api:   {from: api-node, ports: [8080], egress: allowlist, allow_domains: [api.stripe.com]}
+  api:   {from: api-node, ports: [8081], egress: allowlist, allow_domains: [api.stripe.com]}
   web:   {from: web-static, ports: [80]}
 edges:
   - {from: api, to: db, kind: credential, port: 5432, user: app, database: shop, env: PGPASSWORD, secret_env: SHOP_PG_PASS}
-  - {from: web, to: api, kind: link, port: 8080}
+  - {from: web, to: api, kind: link, port: 8081}
 `
 
 // Y lo mismo en JSON.
@@ -31,12 +31,12 @@ const tiendaJSON = `{
   "name": "tienda",
   "nodes": {
     "db":  {"from": "pg16-golden", "ports": [5432], "wake": "lazy", "idle_freeze": 120},
-    "api": {"from": "api-node", "ports": [8080], "egress": "allowlist", "allow_domains": ["api.stripe.com"]},
+    "api": {"from": "api-node", "ports": [8081], "egress": "allowlist", "allow_domains": ["api.stripe.com"]},
     "web": {"from": "web-static", "ports": [80]}
   },
   "edges": [
     {"from": "api", "to": "db", "kind": "credential", "port": 5432, "user": "app", "database": "shop", "env": "PGPASSWORD", "secret_env": "SHOP_PG_PASS"},
-    {"from": "web", "to": "api", "kind": "link", "port": 8080}
+    {"from": "web", "to": "api", "kind": "link", "port": 8081}
   ]
 }`
 
@@ -106,8 +106,8 @@ func TestLeerGrafoRechaza(t *testing.T) {
 	t.Setenv("SHOP_PG_PASS", "x")
 	casos := map[string]string{
 		"campo desconocido":         strings.Replace(tiendaYAML, "wake: lazy", "wake: lazy, wakey: 1", 1),
-		"clave en un link":          strings.Replace(tiendaYAML, "port: 8080}", "port: 8080, secret_env: X}", 1),
-		"validación del grafo":      strings.Replace(tiendaYAML, "port: 8080}", "port: 9999}", 1),
+		"clave en un link":          strings.Replace(tiendaYAML, "port: 8081}", "port: 8081, secret_env: X}", 1),
+		"validación del grafo":      strings.Replace(tiendaYAML, "port: 8081}", "port: 9999}", 1),
 		"campo del daemon es texto": strings.Replace(tiendaYAML, "ports: [80]", "ports: [ochenta]", 1),
 	}
 	for nombre, doc := range casos {
@@ -197,7 +197,7 @@ func TestGraphUpContraDaemonFalso(t *testing.T) {
 	}
 	var out bytes.Buffer
 	escribirGrafo(&out, g)
-	if strings.Contains(out.String(), "s3cret") || !strings.Contains(out.String(), "web -> api.graph:8080") {
+	if strings.Contains(out.String(), "s3cret") || !strings.Contains(out.String(), "web -> api.graph:8081") {
 		t.Fatalf("inspect:\n%s", out.String())
 	}
 	// Un daemon sin la capacidad: el 404 de la ruta se explica.

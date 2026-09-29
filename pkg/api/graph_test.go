@@ -12,11 +12,11 @@ import (
 func tienda() Graph {
 	return Graph{Name: "tienda", Nodes: map[string]GraphNode{
 		"db":  {From: "pg16-golden", Ports: []int{5432}, Wake: GraphWakeLazy, IdleFreezeSeconds: 120},
-		"api": {From: "api-node", Ports: []int{8080}, Egress: "allowlist", AllowDomains: []string{"api.stripe.com"}},
+		"api": {From: "api-node", Ports: []int{8081}, Egress: "allowlist", AllowDomains: []string{"api.stripe.com"}},
 		"web": {From: "web-static", Ports: []int{80}},
 	}, Edges: []GraphEdge{
 		{From: "api", To: "db", Kind: GraphEdgeCredential, User: "app", Database: "shop", Env: "PGPASSWORD"},
-		{From: "web", To: "api", Kind: GraphEdgeLink, Port: 8080},
+		{From: "web", To: "api", Kind: GraphEdgeLink, Port: 8081},
 	}}
 }
 
@@ -68,9 +68,25 @@ func TestValidateGraphRechaza(t *testing.T) {
 		"etiqueta kling.ports":    func(g *Graph) { n := g.Nodes["db"]; n.Labels = map[string]string{LabelPorts: "1"}; g.Nodes["db"] = n },
 		"arista a nodo que falta": func(g *Graph) { g.Edges[1].To = "cache" },
 		"arista desde nodo falta": func(g *Graph) { g.Edges[1].From = "cache" },
-		"arista a sí mismo":       func(g *Graph) { g.Edges[1].To = "web"; g.Nodes["web"] = GraphNode{Image: "x", Ports: []int{8080}} },
+		"arista a sí mismo":       func(g *Graph) { g.Edges[1].To = "web"; g.Nodes["web"] = GraphNode{Image: "x", Ports: []int{8081}} },
 		"puerto no expuesto":      func(g *Graph) { g.Edges[1].Port = 9090 },
 		"link al 53":              func(g *Graph) { g.Edges[1].Port = 53; n := g.Nodes["api"]; n.Ports = []int{53}; g.Nodes["api"] = n },
+		"link al puerto del agente": func(g *Graph) {
+			g.Edges[1].Port = GuestPort
+			n := g.Nodes["api"]
+			n.Ports = []int{GuestPort}
+			g.Nodes["api"] = n
+		},
+		"credential al puerto del agente": func(g *Graph) {
+			n := g.Nodes["db"]
+			n.Ports = append(n.Ports, GuestPort)
+			g.Nodes["db"] = n
+			for i := range g.Edges {
+				if g.Edges[i].Kind == GraphEdgeCredential {
+					g.Edges[i].Port = GuestPort
+				}
+			}
+		},
 		"link al 443":             func(g *Graph) { g.Edges[1].Port = 443; n := g.Nodes["api"]; n.Ports = []int{443}; g.Nodes["api"] = n },
 		"link con env":            func(g *Graph) { g.Edges[1].Env = "X" },
 		"credential sin env":      func(g *Graph) { g.Edges[0].Env = "" },
@@ -84,8 +100,8 @@ func TestValidateGraphRechaza(t *testing.T) {
 		"mcp como arista":         func(g *Graph) { g.Edges[1].Kind = GraphEdgeMCP },
 		"arista repetida":         func(g *Graph) { g.Edges = append(g.Edges, g.Edges[1]) },
 		"dos aristas al mismo puerto desde un nodo": func(g *Graph) {
-			g.Nodes["cache"] = GraphNode{Image: "redis", Ports: []int{8080}}
-			g.Edges = append(g.Edges, GraphEdge{From: "web", To: "cache", Kind: GraphEdgeLink, Port: 8080})
+			g.Nodes["cache"] = GraphNode{Image: "redis", Ports: []int{8081}}
+			g.Edges = append(g.Edges, GraphEdge{From: "web", To: "cache", Kind: GraphEdgeLink, Port: 8081})
 		},
 		"dos credential con la misma variable": func(g *Graph) {
 			g.Nodes["db2"] = GraphNode{Image: "pg", Ports: []int{5433}}

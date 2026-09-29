@@ -1526,10 +1526,10 @@ except Exception as e:
 name: $G
 nodes:
   web: {image: $IMGVOL, allow_exec: true}
-  api: {image: $IMGVOL, allow_exec: true, ports: [8080]}
+  api: {image: $IMGVOL, allow_exec: true, ports: [8081]}
   db:  {from: $GDBT, ports: [5432], wake: lazy}
 edges:
-  - {from: web, to: api, kind: link, port: 8080}
+  - {from: web, to: api, kind: link, port: 8081}
   - {from: api, to: db, kind: link, port: 5432}
 EOF
   out=$($KLING graph up "$GTMP/g.yaml" 2>&1)
@@ -1539,11 +1539,11 @@ EOF
     bad "graph up" "graph $G up" "$out"
   else
     ok "graph up: tres nodos, db lazy sin máquina ($(gestado "$G"))"
-    gsirve "$G-api" 8080 /srv/api
+    gsirve "$G-api" 8081 /srv/api
     $KLING exec "$G-api" -- sh -c 'echo api-ok > /srv/api/index.html' >/dev/null 2>&1
     sleep 1
-    out=$(ghttp "$G-web" http://api.graph:8080/)
-    [ "$out" = "api-ok" ] && ok "web -> api.graph:8080 por la arista link" || bad "enlace web -> api" "api-ok" "$out"
+    out=$(ghttp "$G-web" http://api.graph:8081/)
+    [ "$out" = "api-ok" ] && ok "web -> api.graph:8081 por la arista link" || bad "enlace web -> api" "api-ok" "$out"
     st=$(gestado "$G")
     contiene "$st" "db=-" && ok "db sigue sin máquina antes de la primera conexión" || bad "db lazy" "db=-" "$st"
     out=$(ghttp "$G-api" http://db.graph:5432/marca)
@@ -1571,7 +1571,7 @@ except socket.gaierror as e:
     $KLING graph thaw "$G" >/dev/null 2>&1
     st=$(gestado "$G")
     [ "$st" = "running api=running db=running web=running" ] && ok "graph thaw: los tres running" || bad "graph thaw" "running api=running db=running web=running" "$st"
-    out=$(ghttp "$G-web" http://api.graph:8080/)
+    out=$(ghttp "$G-web" http://api.graph:8081/)
     [ "$out" = "api-ok" ] && ok "tras el thaw la arista sigue" || bad "enlace tras thaw" "api-ok" "$out"
 
     out=$($KLING graph snapshot "$G" -json 2>&1)
@@ -1599,7 +1599,7 @@ except socket.gaierror as e:
     if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
       ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
       sleep 4
-      out=$(ghttp "$G-web" http://api.graph:8080/)
+      out=$(ghttp "$G-web" http://api.graph:8081/)
       { [ "$out" = "api-ok" ] && $KLING graph inspect "$G" >/dev/null 2>&1; } \
         && ok "tras reiniciar el daemon el grafo y su enlace siguen" || bad "grafo tras reinicio" "api-ok" "$out"
     else

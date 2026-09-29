@@ -41,8 +41,8 @@ func TestGraphsAPI(t *testing.T) {
 		t.Fatalf("nodo sin from ni image = %d %s", rr.Code, rr.Body)
 	}
 	// Una arista entre máquinas en macOS: 501, como attach.
-	con := `{"graph":{"name":"y","nodes":{"a":{"image":"min"},"b":{"image":"min","ports":[8080]}},` +
-		`"edges":[{"from":"a","to":"b","kind":"link","port":8080}]}}`
+	con := `{"graph":{"name":"y","nodes":{"a":{"image":"min"},"b":{"image":"min","ports":[8081]}},` +
+		`"edges":[{"from":"a","to":"b","kind":"link","port":8081}]}}`
 	rr = call(t, h, "POST", "/graphs", con)
 	if runtime.GOOS == "darwin" && (rr.Code != 501 || !strings.Contains(rr.Body.String(), "Linux-only")) {
 		t.Fatalf("aristas en macOS = %d %s, quería 501", rr.Code, rr.Body)

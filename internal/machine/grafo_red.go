@@ -170,6 +170,11 @@ func (m *Manager) comprobarAristaLocked(origen, gid, desde, hacia string, port i
 	if !arista {
 		return nil, false, fmt.Errorf("graph %s has no %s edge %s -> %s:%d", g.Name, kind, desde, hacia, port)
 	}
+	// Defensa en profundidad para grafos guardados antes de que la validación
+	// lo rechazara: nunca se marca al puerto del agente de invitado.
+	if port == api.GuestPort {
+		return nil, false, fmt.Errorf("graph %s: port %d is the guest agent and is never reachable by an edge", g.Name, port)
+	}
 	nd, ok := g.Nodes[hacia]
 	if !ok {
 		return nil, false, fmt.Errorf("graph %s has no node %s", g.Name, hacia)

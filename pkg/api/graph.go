@@ -341,6 +341,13 @@ func validarArista(g *Graph, e *GraphEdge) error {
 	if e.From == e.To {
 		return fmt.Errorf("%s: a node can't have an edge to itself", desc)
 	}
+	// El puerto del agente de invitado (y del puente MCP) no se alcanza por una
+	// arista: el agente no autentica, confía en que solo el host llega a él, y
+	// el proxy de enlace marca desde el host. Una arista a él daría a otro nodo
+	// exec, ficheros y volúmenes del destino.
+	if e.Port == GuestPort {
+		return fmt.Errorf("%s: port %d is the kindling guest agent (exec, files, volumes): a graph edge can never reach it; expose the service on another port", desc, GuestPort)
+	}
 	switch e.Kind {
 	case GraphEdgeLink:
 		if e.Env != "" || e.User != "" || e.Database != "" {

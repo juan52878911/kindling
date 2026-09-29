@@ -172,16 +172,16 @@ func (e *escenaGrafo) nombre(id string) string {
 	return id
 }
 
-// grafoTienda es web -> api:8080 (link) con db lazy detrás: el de los
+// grafoTienda es web -> api:8081 (link) con db lazy detrás: el de los
 // ejemplos. Sin aristas entre máquinas si sinAristas (lo que vale en macOS).
 func grafoTienda(sinAristas bool) api.Graph {
 	g := api.Graph{Name: "tienda", Nodes: map[string]api.GraphNode{
 		"web": {Image: "min", Ports: []int{8000}},
-		"api": {Image: "min", Ports: []int{8080}},
+		"api": {Image: "min", Ports: []int{8081}},
 		"db":  {Image: "min", Ports: []int{5432}, Wake: api.GraphWakeLazy},
 	}}
 	if !sinAristas {
-		g.Edges = []api.GraphEdge{{From: "web", To: "api", Kind: api.GraphEdgeLink, Port: 8080}}
+		g.Edges = []api.GraphEdge{{From: "web", To: "api", Kind: api.GraphEdgeLink, Port: 8081}}
 	}
 	return g
 }
@@ -263,7 +263,7 @@ func TestGrafoResolvedorRechaza(t *testing.T) {
 		{nombre: "puerto sin arista", port: 9090, error: "has no link edge"},
 		{nombre: "puerto que el destino ya no expone", mod: func(e *escenaGrafo, g *api.Graph) {
 			e.m.byID[e.maquinaSinLock(g.ID, "api")].Labels[api.LabelPorts] = "9999"
-		}, error: "does not expose port 8080"},
+		}, error: "does not expose port 8081"},
 		{nombre: "arista de otro tipo", kind: api.GraphEdgeCredential, error: "has no credential edge"},
 		{nombre: "sin arista hacia ese nodo", hacia: "db", error: "has no link edge"},
 		{nombre: "origen reetiquetado", mod: func(e *escenaGrafo, g *api.Graph) {
@@ -277,13 +277,13 @@ func TestGrafoResolvedorRechaza(t *testing.T) {
 		t.Run(c.nombre, func(t *testing.T) {
 			e := nuevaEscenaGrafo(t)
 			g := e.montarGrafo(grafoTienda(false))
-			web, api8080 := e.maquina(g.ID, "web"), e.maquina(g.ID, "api")
+			web, api8081 := e.maquina(g.ID, "web"), e.maquina(g.ID, "api")
 			if c.mod != nil {
 				e.m.mu.Lock()
 				c.mod(e, g)
 				e.m.mu.Unlock()
 			}
-			hacia, port, kind := "api", 8080, api.GraphEdgeLink
+			hacia, port, kind := "api", 8081, api.GraphEdgeLink
 			if c.hacia != "" {
 				hacia = c.hacia
 			}
@@ -300,10 +300,10 @@ func TestGrafoResolvedorRechaza(t *testing.T) {
 				}
 				return
 			}
-			if modeloAPosible && id != api8080 {
-				t.Fatalf("resolvió a la máquina %s, no a la de api (%s)", id, api8080)
+			if modeloAPosible && id != api8081 {
+				t.Fatalf("resolvió a la máquina %s, no a la de api (%s)", id, api8081)
 			}
-			e.comprobarDireccion(addr, err, api8080, 8080)
+			e.comprobarDireccion(addr, err, api8081, 8081)
 		})
 	}
 }
@@ -371,7 +371,7 @@ func TestGrafoDespiertaCongeladoUnaVez(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			addr, _, err := e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8080, api.GraphEdgeLink)
+			addr, _, err := e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8081, api.GraphEdgeLink)
 			if modeloAPosible && (err != nil || addr == "") {
 				t.Errorf("tras despertar: %q %v", addr, err)
 			}
@@ -408,7 +408,7 @@ func TestGrafoTormentaDeDespertaresAcotada(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, _ = e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8080, api.GraphEdgeLink)
+			_, _, _ = e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8081, api.GraphEdgeLink)
 		}()
 	}
 	k := g.ID + "/api"
@@ -427,7 +427,7 @@ func TestGrafoTormentaDeDespertaresAcotada(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	_, _, err := e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8080, api.GraphEdgeLink)
+	_, _, err := e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8081, api.GraphEdgeLink)
 	if !errors.Is(err, credproxy.ErrEnlaceOcupado) {
 		t.Fatalf("la conexión %d no se rechazó por ocupado: %v", despertarMaxEspera+1, err)
 	}
@@ -575,18 +575,18 @@ func TestGrafoForkNoResuelveAlOriginal(t *testing.T) {
 		}
 		e.m.mu.RLock()
 		// La copia llega a SU api.
-		dest, dormido, err := e.m.comprobarAristaLocked(web, c.ID, "web", "api", 8080, api.GraphEdgeLink)
+		dest, dormido, err := e.m.comprobarAristaLocked(web, c.ID, "web", "api", 8081, api.GraphEdgeLink)
 		if err != nil || dormido || dest.ID != apiID {
 			e.m.mu.RUnlock()
 			t.Fatalf("la copia no llega a su api: %v %v %v", dest, dormido, err)
 		}
 		// Con el ID del grafo original, la máquina de la copia no es nadie.
-		if _, _, err := e.m.comprobarAristaLocked(web, g.ID, "web", "api", 8080, api.GraphEdgeLink); err == nil {
+		if _, _, err := e.m.comprobarAristaLocked(web, g.ID, "web", "api", 8081, api.GraphEdgeLink); err == nil {
 			e.m.mu.RUnlock()
 			t.Fatal("la web de la copia resolvió por el grafo original")
 		}
 		// Y el original no llega a la copia.
-		if _, _, err := e.m.comprobarAristaLocked(origWeb, c.ID, "web", "api", 8080, api.GraphEdgeLink); err == nil {
+		if _, _, err := e.m.comprobarAristaLocked(origWeb, c.ID, "web", "api", 8081, api.GraphEdgeLink); err == nil {
 			e.m.mu.RUnlock()
 			t.Fatal("la web original resolvió por el grafo de la copia")
 		}
@@ -594,7 +594,7 @@ func TestGrafoForkNoResuelveAlOriginal(t *testing.T) {
 	}
 	// El original sigue corriendo y apuntando a lo suyo.
 	e.m.mu.RLock()
-	dest, _, err := e.m.comprobarAristaLocked(origWeb, g.ID, "web", "api", 8080, api.GraphEdgeLink)
+	dest, _, err := e.m.comprobarAristaLocked(origWeb, g.ID, "web", "api", 8081, api.GraphEdgeLink)
 	e.m.mu.RUnlock()
 	if err != nil || dest.ID != origAPI {
 		t.Fatalf("el original ya no llega a su api: %v %v", dest, err)

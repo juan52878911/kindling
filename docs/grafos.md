@@ -16,23 +16,23 @@ uso. Capacidad `graphs` del daemon ([api.md](api.md#grafos)).
 name: tienda
 nodes:
   db:    {from: pg16-golden, ports: [5432], wake: lazy, idle_freeze: 120}
-  api:   {from: api-node, ports: [8080], egress: allowlist, allow_domains: [api.stripe.com]}
+  api:   {from: api-node, ports: [8081], egress: allowlist, allow_domains: [api.stripe.com]}
   web:   {from: web-static, ports: [8000]}
 edges:
   - {from: api, to: db, kind: credential, port: 5432, user: app, database: shop, env: PGPASSWORD, secret_env: SHOP_PG_PASS}
-  - {from: web, to: api, kind: link, port: 8080}
+  - {from: web, to: api, kind: link, port: 8081}
 ```
 
 ```console
 $ SHOP_PG_PASS=... kling graph up tienda.yaml
 graph tienda (4f2a9c1e0b7d) up in 412ms
   NODE  STATE          MACHINE       WAKE   FROM        PORTS
-  api   running        9c1e0b7d4f2a  eager  api-node    8080
+  api   running        9c1e0b7d4f2a  eager  api-node    8081
   db    (not started)  -             lazy   pg16-golden 5432
   web   running        0b7d4f2a9c1e  eager  web-static  8000
 ```
 
-Dentro de `web`, `http://api.graph:8080` llega a `api`. Dentro de `api`, `db.graph:5432`
+Dentro de `web`, `http://api.graph:8081` llega a `api`. Dentro de `api`, `db.graph:5432`
 llega a `db` con la contraseña real puesta por el proxy: `api` solo ve un marcador en
 `PGPASSWORD` (el attach de [kling db](db.md), por dentro). `db` es `lazy`: no tiene
 máquina hasta el primer `psql` de `api`, que espera lo que tarde en arrancar (ms desde
@@ -146,3 +146,13 @@ Aristas `share` y `depends` (las carpetas se declaran en los `shares` del nodo; 
 `lazy` despierta con su primera conexión), arista `mcp`, enlaces en macOS, `idle_freeze`
 renovado por conexión (hoy es el TTL de siempre de la máquina) y grafos
 precalentados en el fondo del sandbox.
+
+## El puerto 8080 no es alcanzable por una arista
+
+El agente de invitado de kindling (y el puente MCP en las imágenes MCP) escucha en el
+8080 del invitado y no autentica: confía en que solo el host llega a él, y sirve `exec`,
+ficheros y volúmenes. El proxy de enlace marca desde el host, así que una arista al 8080
+le daría a otro nodo el control del destino. Por eso ninguna arista (`link` ni
+`credential`) puede apuntar al 8080: se rechaza al validar el grafo y otra vez en cada
+conexión. Expón el servicio en otro puerto (el ejemplo usa el 8081). Lo encontró el e2e
+real en el lab: en la imagen toolchain el 8080 lo ocupa el agente.
