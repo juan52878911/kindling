@@ -12,6 +12,19 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Núcleo
 
+- **Proxy de credenciales para MySQL y MariaDB (`-type mysql`, #64).** El agente conecta
+  en claro con su usuario y el marcador; el proxy manda su propio saludo, comprueba el
+  marcador (`mysql_native_password` o la ruta rápida de `caching_sha2_password`, en
+  tiempo constante contra todas las credenciales MySQL), abre TLS verify-full hacia el
+  servidor (el saludo se lee sin buffer) y entra con la clave real
+  (`caching_sha2_password`, completa dentro del TLS, o `mysql_native_password`). Sin TLS
+  (`-upstream-tls disable`, solo con `-upstream`) solo valen los métodos que no mandan
+  la clave. Nunca reenvía un error del servidor antes de autenticar, exige que el
+  servidor hable el dialecto que eligió el invitado antes de mandar la clave y deja una
+  línea de auditoría por conexión (`kind: mysql`). `KILL QUERY` no se mapea. Con
+  credenciales Postgres y MySQL en la misma máquina, MySQL es el 3306 (en Linux, un DNAT
+  propio a `n.HostIP:5382`). `kling-vz` anuncia `mysql` en `credential_kinds`. Ver
+  [`docs/mysql.md`](docs/mysql.md).
 - **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
   nombre y aristas declaradas, descritas en un fichero JSON o YAML (un subconjunto sin
   dependencias), con ciclo de vida atómico: `up`, `ls`, `inspect`, `freeze`, `thaw`,
@@ -49,6 +62,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### kling db
 
+- **MySQL y MariaDB en `kling db` (#64).** Plantillas MariaDB (Alpine) con
+  `scripts/db-golden-mysql.sh` o `golden image|build -engine mysql`: datadir en el
+  overlay, root solo por `unix_socket`, sin cuentas anónimas, `local-infile` apagado,
+  `secure-file-priv` acotado y `server_audit` solo con `CONNECT`; la plantilla lleva
+  `kling.db.engine=mysql`. `up`, `fork`, `connect` (`-mysql`, `-dsn` con `mysql://`),
+  `rotate`, `reset`, `rm`, `branch`, `doctor` (reglas `MY001`-`MY054`) y `audit` (lee
+  server_audit) funcionan sobre esas copias. La clave de cada copia se genera en el host
+  y al invitado va su hash de `mysql_native_password`, nunca la clave, ni siquiera al
+  construir la plantilla (se calcula con `openssl` o `python3`). `attach`, `role`,
+  `rehearse`, `snapshot`/`undo`, `tenant-check`, `ask`, `clone` y `doctor -url` siguen
+  siendo solo de Postgres y lo dicen. Ver [`docs/mysql.md`](docs/mysql.md).
 - **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
   `up`, `fork`, `connect`, `reset`, `rm`, `doctor`, `audit` y `golden`. Cada copia estrena
   clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.

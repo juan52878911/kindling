@@ -453,6 +453,43 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     `kling-vz` qué tipos entiende (`credential_kinds` en `/kling/info`) y no le manda
     una credencial Postgres si no dice `postgres`: uno anterior la serviría como HTTP.
   - La clave tiene que ser ASCII imprimible (SASLprep es la identidad para eso).
+- **Proxy de credenciales de MySQL y MariaDB** (`kling machine credential -type mysql`,
+  `pkg/credproxy/mysql.go`, sin publicar; ver [docs/mysql.md](docs/mysql.md)). El
+  modelo y las barreras de Postgres (dialer de solo IPs públicas, `-upstream` con los
+  mismos destinos prohibidos y el rango de reenvíos, TLS 1.2+ verify-full, límites de
+  conexiones y plazos, registro por conexión con `kind: mysql`), con estas diferencias:
+  - **El saludo es del proxy.** En MySQL habla primero el servidor: el proxy manda el
+    suyo (versión propia, id de conexión 0, nonce de `crypto/rand`, sin `CLIENT_SSL`,
+    sin compresión, sin `LOCAL INFILE`, sin atributos de conexión). El invitado prueba
+    el marcador con `mysql_native_password` o la ruta rápida de `caching_sha2_password`
+    (cualquier otro método recibe un `AuthSwitchRequest` a native con el mismo nonce);
+    el proxy calcula la prueba de **todos** los marcadores MySQL y compara en tiempo
+    constante. Después, el usuario de la credencial y, si la fija, la base de arranque.
+  - **Hacia el servidor**, el saludo se lee con su longitud exacta y sin buffer, y el
+    TLS empieza tras el `SSLRequest`: lo que un intermediario inyecte tras el saludo
+    cae dentro del handshake. Un servidor sin `CLIENT_SSL` es un fallo. La clave va por
+    `caching_sha2_password` (si el servidor pide la autenticación completa, en claro
+    dentro del TLS verificado) o `mysql_native_password`; `mysql_clear_password`, solo
+    dentro del TLS; nada más.
+  - **`-upstream-tls disable`** (solo con `-upstream`) admite solo lo que no manda la
+    clave (native y la ruta rápida). **Es más débil que en Postgres**: MySQL no tiene
+    nada como la firma del servidor de SCRAM, así que el servidor no prueba que conoce
+    la clave; quien conteste en la dirección fijada se queda con las consultas y con un
+    scramble (atacable por diccionario si la clave fuera débil). El intercambio RSA con
+    la clave pública del propio servidor no se implementa: no lo autentica.
+  - **Capacidades**: se empalman bytes, así que el servidor tiene que tener las que
+    cambian el formato y eligió el invitado; si no, error propio antes de mandar la clave.
+  - **Errores**: nada del servidor llega al invitado antes del OK (recibe 1045 o 2003
+    propios, como mucho con el código numérico del servidor).
+  - **`KILL QUERY` no se mapea** (exigiría reescribir SQL): con el id del saludo (0) no
+    cancela nada; con el de `CONNECTION_ID()`, por el proxy, sí.
+  - **La base no es una frontera** en MySQL (`USE otra`): lo es el `GRANT` del usuario.
+  - **A qué puerto**: con credenciales de los dos tipos en una máquina, MySQL es el 3306
+    y ninguna Postgres puede usarlo (en Linux, un DNAT propio del 3306 a
+    `n.HostIP:5382`, con su FORWARD e INPUT; en macOS, `kling-vz` ve el puerto). El
+    daemon no manda una credencial MySQL a un `kling-vz` que no anuncie `mysql`.
+  - `kling db attach` (upstream que es otra máquina) no se admite con MySQL: sin prueba
+    del servidor, una resolución equivocada llevaría el scramble a otro invitado.
 
 ### 8. Ejecutar comandos dentro es opt-in y se decide al arrancar
 
@@ -733,6 +770,30 @@ Qué **no** garantiza:
 - El tramo entre el invitado y el proxy va en claro dentro de la máquina (como en §7), y
   el del proxy al servidor, en claro si se eligió `sslmode=disable`.
 
+### 17. `kling db` con MySQL/MariaDB: la clave de cada copia no entra en el invitado
+
+Las copias de una plantilla MariaDB (`scripts/db-golden-mysql.sh`, ver
+[docs/mysql.md](docs/mysql.md)) siguen la regla de las de Postgres: la clave de cada
+copia se genera en el host y vive solo ahí (`copies/<id>/password`, 0600), y al invitado
+va **su hash** de `mysql_native_password` por stdin, al cliente de root por el socket
+local (root solo entra por `unix_socket`, desde el propio invitado). En la misma sesión
+se comprueba que `mysql.user` guarda ese hash; si no, la copia se destruye. La clave de
+la plantilla tampoco entra: su hash se calcula en el host (`openssl` o `python3`; sin
+ellos el script se niega) y no hay camino en claro.
+
+Qué implica el hash elegido: `mysql_native_password` es SHA-1 doble y sin sal. Quien lea
+el hash de una copia (su disco, su RAM o su snapshot son del host) puede atacarlo por
+diccionario, y con él y un intercambio observado podría entrar sin la clave; con una
+clave de 192 bits aleatorios el diccionario no sirve, y el disco de la copia ya lleva
+los datos, que valen más que la clave. `caching_sha2_password` (con sal y 5000 rondas)
+queda pendiente hasta poder validarlo contra un servidor real.
+
+La plantilla: sin cuentas anónimas, sin `root` ni `mysql` fuera de `localhost`, sin base
+`test`, `local-infile = 0`, `secure-file-priv` en un directorio vacío, sin log general
+(ni SQL ni datos en disco) y `server_audit` solo con `CONNECT` (`FORCE_PLUS_PERMANENT`).
+Las migraciones corren como root: lo que creen con `DEFINER` corre como root, y
+`kling db doctor` lo avisa (`MY020`).
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
@@ -764,6 +825,13 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
   vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
   mismas reglas antes de reenviar.
+- **MySQL: sin prueba del servidor y sin cancelación.** Con `-upstream-tls disable` el
+  servidor no prueba que conoce la clave (MySQL no tiene nada como la firma de SCRAM),
+  `KILL QUERY` con el id del saludo no cancela nada, la base de la credencial no es una
+  frontera (`USE otra`) y `caching_sha2_password` sin TLS solo funciona con la caché del
+  servidor ya caliente. `kling db attach`, `role`, `rehearse`, `snapshot`/`undo`,
+  `tenant-check`, `ask`, `clone` y `doctor -url` no existen para MySQL todavía, y las
+  plantillas de MySQL 8 de Oracle no se han probado (Alpine solo empaqueta MariaDB).
 - **Postgres: `-database` es obligatoria.** Sin base fijada el rol entraría en cualquiera
   con `CONNECT`, así que hace falta `-database` o `-any-database` expreso (el CLI avisa).
   Los almacenes anteriores, sin base, se leen como `-any-database`: lo que permitían.

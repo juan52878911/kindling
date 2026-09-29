@@ -261,6 +261,21 @@ son `denied` `disabled`, `no_credential`, `bad_placeholder`, `user_mismatch`,
 `database_mismatch`, `replication`, `unknown_cancel` y `machine_unavailable`. Con
 `upstream_machine`, `upstream` es `machine:<id>` (nunca la dirección resuelta).
 
+### Credenciales de MySQL
+
+`"type":"mysql"` lleva los mismos campos que `postgres` salvo `upstream_machine` y
+`upstream_owner` (no se admiten), con `port` 3306 por defecto y distinto de 53, 80 y 443.
+`database` es la base con la que arranca la sesión (el invitado puede pedir esa o
+ninguna), no una frontera: lo que acota es el `GRANT` del usuario. `upstream_tls:
+"disable"` admite solo `mysql_native_password` y la ruta rápida de
+`caching_sha2_password`. Si la máquina tiene credenciales `postgres` y `mysql`, las
+`mysql` tienen que usar el 3306 y ninguna `postgres` puede. En macOS el daemon exige que
+`credential_kinds` incluya `mysql`. En el registro, `kind: mysql` con los mismos campos
+y `auth` `mysql_native_password`, `caching_sha2_password-fast`, `caching_sha2_password`
+(autenticación completa, dentro del TLS) o `mysql_clear_password`; un `reason` más,
+`capabilities` (el servidor no habla el dialecto que eligió el invitado). Ver
+[mysql.md](mysql.md).
+
 ### Admisión
 
 `POST /machines` y `POST /sandboxes` rechazan antes de arrancar:
