@@ -56,6 +56,12 @@ func TestResolverCopia(t *testing.T) {
 		{nombre: "agente de otro dueño", mod: func(m *Manager) { m.byID[idAgente].Labels[api.LabelDBOwner] = "otro" }, error: "owner mismatch"},
 		{nombre: "agente sin dueño", mod: func(m *Manager) { delete(m.byID[idAgente].Labels, api.LabelDBOwner) }, error: "owner mismatch"},
 		{nombre: "la credencial dice otro dueño", owner: "otro", error: "owner mismatch"},
+		// Mismo kling.db.owner, distinto inquilino (kling.owner, authz).
+		{nombre: "copia de otro inquilino", mod: func(m *Manager) { m.byID[idCopia].Labels[api.LabelOwner] = "b" }, error: "tenant mismatch"},
+		{nombre: "mismo inquilino", mod: func(m *Manager) {
+			m.byID[idCopia].Labels[api.LabelOwner] = "a"
+			m.byID[idAgente].Labels[api.LabelOwner] = "a"
+		}},
 		{nombre: "puerto no expuesto", port: 22, error: "does not expose port 22"},
 		{nombre: "agente borrado", mod: func(m *Manager) { delete(m.byID, idAgente) }, error: "no longer exists"},
 		{
