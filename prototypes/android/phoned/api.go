@@ -61,6 +61,10 @@ type verifyResult struct {
 	Files      int      `json:"files"`
 	Bytes      int64    `json:"bytes"`
 	Mismatches []string `json:"mismatches,omitempty"`
+	// Details: por fichero que no casa, dónde empieza la diferencia y cuántas
+	// páginas de 4 KiB difieren (y cuántas de ellas están a ceros en la caché:
+	// la firma del fallo del Mac bajo presión de memoria).
+	Details []string `json:"details,omitempty"`
 	Errors     int      `json:"errors,omitempty"`
 	Seconds    float64  `json:"seconds"`
 }

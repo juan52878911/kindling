@@ -655,6 +655,11 @@ func (a *app) waitMemory(ctx context.Context) error {
 }
 
 // secs formatea una duración como en phone.sh.
-func secs(d time.Duration) string { return strconv.FormatFloat(d.Seconds(), 'f', 2, 64) + " s" }
+func secs(d time.Duration) string {
+	if d < 100*time.Millisecond {
+		return strconv.FormatInt(d.Milliseconds(), 10) + " ms"
+	}
+	return strconv.FormatFloat(d.Seconds(), 'f', 2, 64) + " s"
+}
 
 var errNoGolden = errors.New("no golden")

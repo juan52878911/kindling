@@ -366,7 +366,8 @@ func cmdRm(args []string) error {
 
 // rm borra la máquina y su token.
 func (a *app) rm(ctx context.Context, m *api.Machine) error {
-	if err := a.d.Remove(ctx, m.ID); err != nil && !api.IsNotFound(err) {
+	// DELETE de una máquina que ya no está contesta 400 "doesn't exist", no 404.
+	if err := a.d.Remove(ctx, m.ID); err != nil && !api.IsNotFound(err) && !strings.Contains(err.Error(), "doesn't exist") {
 		return err
 	}
 	if err := a.delToken(ctx, m.ID); err != nil {

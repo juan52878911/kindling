@@ -33,6 +33,8 @@ type fakeDaemon struct {
 	commits  []string
 	// verifyBad hace que verify-cache diga que la caché no casa.
 	verifyBad bool
+	// verifyBadAfterSave: la caché se rompe al volcar o restaurar (el Mac).
+	verifyBadAfterSave bool
 	// storeForbidden: /store es de admin y quien llama es un inquilino
 	// (docs/authz.md): 403.
 	storeForbidden bool
@@ -316,7 +318,7 @@ func (f *fakeDaemon) Guest(_ context.Context, ref string, r api.GuestRequest) (*
 	case "GET /v1/identity":
 		return js(200, map[string]any{"serial": p.serial, "android_id": p.androidID, "device_name": p.name, "adb_keys": len(p.adbKeys)})
 	case "POST /v1/verify-cache":
-		if f.verifyBad {
+		if f.verifyBad || (f.verifyBadAfterSave && len(f.commits) > 0) {
 			return js(409, map[string]any{"ok": false, "files": 10, "mismatches": []string{"/system/lib64/libc.so"}})
 		}
 		return js(200, map[string]any{"ok": true, "files": 1234, "bytes": 5 << 20, "seconds": 1.5})

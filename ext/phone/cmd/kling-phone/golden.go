@@ -63,6 +63,7 @@ type verifyRec struct {
 	Files      int       `json:"files"`
 	Bytes      int64     `json:"bytes"`
 	Mismatches []string  `json:"mismatches,omitempty"`
+	Details    []string  `json:"details,omitempty"`
 	Errors     int       `json:"errors,omitempty"`
 	Seconds    float64   `json:"seconds"`
 	Crashes    []string  `json:"crashes,omitempty"`
@@ -273,7 +274,7 @@ func (a *app) goldenBuild(ctx context.Context, o goldenOpts) (*goldenInfo, error
 	info.Build = rec
 	if !rec.OK {
 		return drop(fmt.Errorf("golden: not saving a broken golden: page cache %d mismatches %v, crashes %v "+
-			"(host memory pressure? retry with more free memory)", len(rec.Mismatches), rec.Mismatches, rec.Crashes))
+			"(host memory pressure? retry with more free memory)", len(rec.Mismatches), rec.Details, rec.Crashes))
 	}
 	fmt.Fprintf(a.errw, "==> golden: page cache = disk (%d files, %.0f MiB, %.1f s), no crashes; saving\n",
 		rec.Files, float64(rec.Bytes)/(1<<20), rec.Seconds)
@@ -288,6 +289,20 @@ func (a *app) goldenBuild(ctx context.Context, o goldenOpts) (*goldenInfo, error
 	if _, err := a.d.SetAnnotation(ctx, o.Name, annGolden, info); err != nil {
 		return info, fmt.Errorf("golden saved, but its annotation was not: %w", err)
 	}
+	// Y otra vez en un clon: lo que cuenta es lo que restaura cada teléfono.
+	// Medido en el Mac: la máquina en frío pasó la comprobación y los clones
+	// del dorado guardado traían una página de libart.so a ceros (se rompió
+	// al volcar o al restaurar, después de comprobar).
+	fmt.Fprintf(a.errw, "==> golden: saved in %.1f s; checking a clone of it\n", info.SaveSeconds)
+	v, err := a.goldenVerify(ctx, o.Name)
+	if err != nil {
+		if v != nil && !v.OK {
+			_ = a.d.RemoveSnapshot(context.WithoutCancel(ctx), o.Name)
+			return nil, fmt.Errorf("%w; golden removed (host memory pressure? retry with more free memory)", err)
+		}
+		return info, fmt.Errorf("golden saved, but checking a clone failed: %w", err)
+	}
+	info.Verify = v
 	return info, nil
 }
 
@@ -331,7 +346,7 @@ func (a *app) goldenVerify(ctx context.Context, golden string) (*verifyRec, erro
 		return rec, err
 	}
 	if !rec.OK {
-		return rec, fmt.Errorf("golden %s is broken: %d page-cache mismatches %v, crashes %v", golden, len(rec.Mismatches), rec.Mismatches, rec.Crashes)
+		return rec, fmt.Errorf("golden %s is broken: %d page-cache mismatches %v, crashes %v", golden, len(rec.Mismatches), rec.Details, rec.Crashes)
 	}
 	return rec, nil
 }

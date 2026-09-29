@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -79,6 +80,9 @@ func verifyTrees(ctx context.Context, root string, dirs []string) (verifyResult,
 			if a != b {
 				rel, _ := filepath.Rel(root, p)
 				res.Mismatches = append(res.Mismatches, "/"+rel)
+				if len(res.Details) < 8 {
+					res.Details = append(res.Details, "/"+rel+": "+diffPages(p, buf))
+				}
 			}
 			return nil
 		})
@@ -130,6 +134,59 @@ func sumDirect(p string, buf []byte) ([32]byte, int64, error) {
 	}
 	copy(out[:], h.Sum(nil))
 	return out, total, nil
+}
+
+// diffPages compara página a página la caché y el disco de un fichero que no
+// casa: la primera página distinta, cuántas lo son y cuántas de esas están a
+// ceros en la caché.
+func diffPages(p string, buf []byte) string {
+	f, err := os.Open(p)
+	if err != nil {
+		return err.Error()
+	}
+	defer f.Close()
+	fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_DIRECT|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return err.Error()
+	}
+	defer syscall.Close(fd)
+	const page = 4096
+	cache := make([]byte, len(buf))
+	var off, first int64 = 0, -1
+	pages, zeros := 0, 0
+	for {
+		n, err := syscall.Read(fd, buf)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil || n <= 0 {
+			break
+		}
+		m, _ := io.ReadFull(f, cache[:n])
+		for i := 0; i < n; i += page {
+			j := min(i+page, n)
+			if j > m || string(cache[i:j]) != string(buf[i:j]) {
+				pages++
+				if first < 0 {
+					first = off + int64(i)
+				}
+				if j <= m && allZero(cache[i:j]) {
+					zeros++
+				}
+			}
+		}
+		off += int64(n)
+	}
+	return fmt.Sprintf("first difference at offset %#x, %d page(s) differ, %d of them zeros in the page cache", first, pages, zeros)
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // kernelRelease: uname -r del invitado (el kernel Android del daemon).

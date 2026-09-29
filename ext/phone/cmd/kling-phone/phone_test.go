@@ -251,6 +251,23 @@ func TestGoldenBuildRefusesBrokenCache(t *testing.T) {
 	}
 }
 
+// Lo medido en el Mac: la máquina en frío pasa la comprobación y el clon del
+// dorado guardado no. El dorado no se queda.
+func TestGoldenBuildChecksAClone(t *testing.T) {
+	a, f, _ := testApp(t)
+	f.verifyBadAfterSave = true
+	_, err := a.goldenBuild(context.Background(), goldenOpts{Name: "g1", Image: "android13", CPUs: 2, MemMiB: 1536, Egress: "none"})
+	if err == nil || !strings.Contains(err.Error(), "golden removed") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := f.Snapshot(context.Background(), "g1"); err == nil {
+		t.Fatal("broken golden kept")
+	}
+	if f.machine("g1-verify") != nil || f.machine("g1-build") != nil {
+		t.Fatal("machines left behind")
+	}
+}
+
 func TestPoolAndClaim(t *testing.T) {
 	a, f, _ := testApp(t)
 	f.addGolden("phone-golden")
