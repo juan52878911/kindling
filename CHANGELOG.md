@@ -169,6 +169,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   kernel (`LOCAL_PEERPID`), no la petición; una credencial hacia otra máquina solo se
   atiende si está en el almacén de quien pregunta; el 8080 se rechaza también ahí; y
   hay topes por arista, por máquina y en el broker. Ver SECURITY.md §15.
+- **El broker también mira el UID y el ejecutable de quien pregunta.** El otro extremo
+  tiene que ser del usuario del daemon (`LOCAL_PEERCRED`) y ejecutar el `kling-vz` con
+  el que el daemon arranca las máquinas (`proc_pidpath` por `proc_info`, sin cgo): un
+  PID reciclado por otro programa ya no pasa. Como mucho 64 conexiones esperan a que su
+  PID sea el de una máquina; el resto se rechaza en el acto.
+- **Cuota por instancia en el almacén (#59) sin escape.** El overlay de cada instancia
+  en el almacén es `root:grupo-del-VMM` 0660, no del VMM: el dueño de un fichero puede
+  cambiarle el id de proyecto de XFS (`FS_IOC_FSSETXATTR`) y un Firecracker
+  comprometido habría salido de su cuota o se habría comido la de otra instancia.
+  `run -from` ya no hace `chown` a través del enlace de `machines/<id>`. Un `btrfs
+  subvolume delete` que falla se reintenta y, si no, se avisa con el comando para
+  borrarlo a mano. Ver SECURITY.md §14.
+- **`kling db env` no adivina por el texto de un error.** Si un entorno existe lo dice
+  `kling graph ls -json`, no un "404" o "not found" en el mensaje de un fallo.
 - **Almacén de discos copy-on-write.** Cada jail recibe por bind solo el directorio del
   overlay de su instancia (nunca el almacén entero); el bind se desmonta antes de borrar
   el jail y, si no se puede, el jail no se borra. El almacén se monta
