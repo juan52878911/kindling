@@ -552,6 +552,11 @@ del dueño del grafo entero, nada más. Una plantilla de grafo no puede llevar a
 sus nodos (serían los mismos en todas las instancias, un canal entre inquilinos), ni
 nodos `lazy` (nacerían sin la etiqueta de su dueño).
 
+Con la autorización del daemon activa ([`docs/authz.md`](docs/authz.md)), el frontal y el
+fondo de `ext/sandbox` necesitan la identidad `admin`: guardan y leen plantillas en
+`/store` y reparten con `SetLabels` (`PUT /machines/{ref}/labels`) máquinas y grafos que
+no son de ningún inquilino del daemon.
+
 ### 9. Snapshots firmados
 
 Cada snapshot dorado lleva un HMAC-SHA256, con una clave que solo existe en su
