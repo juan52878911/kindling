@@ -214,5 +214,7 @@ diez campos se enseña con `?` en vez de interpretarse a medias.
 
 `attach`/`detach` (el modelo A necesita, del lado del proxy, que la copia pruebe que
 conoce la clave, y en MySQL no puede), `role`, `rehearse`, `snapshot`/`undo`,
-`tenant-check`, `ask` y `clone` hablan SQL de Postgres o usan su catálogo: con una copia
-MySQL dan `kling db <cmd> supports postgres copies only in this version`.
+`tenant-check`, `ask`, `diff`, `env` y `clone` hablan SQL de Postgres o usan su
+catálogo: con una copia MySQL dan `kling db <cmd> supports postgres copies only in this
+version` (`diff` y `env` lo dicen desde #65; antes fallaban más tarde y sin explicarlo).
+Redis y SQLite, en [db-engines.md](db-engines.md).

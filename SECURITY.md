@@ -899,6 +899,32 @@ La plantilla: sin cuentas anónimas, sin `root` ni `mysql` fuera de `localhost`,
 Las migraciones corren como root: lo que creen con `DEFINER` corre como root, y
 `kling db doctor` lo avisa (`MY020`).
 
+### 18. `kling db` con Redis y SQLite: la misma regla, o ninguna clave
+
+Las copias Redis (`scripts/db-golden-redis.sh`, ver
+[docs/db-engines.md](docs/db-engines.md)) siguen la regla de las de Postgres y MySQL: la
+clave del usuario de la aplicación se genera en el host y vive solo ahí
+(`copies/<id>/password`, 0600), y al invitado va **su SHA-256** (lo que guarda Redis,
+`ACL SETUSER app resetpass #<hash>`) por stdin; en la misma llamada se comprueba con
+`ACL GETUSER` que el usuario está activo con **exactamente** ese hash, y si no, la copia
+se destruye. El usuario de la aplicación no tiene `@admin` (ni `CONFIG`, ni `ACL`, ni
+`SHUTDOWN`, ni `MODULE`), y el servidor arranca sin `DEBUG` ni `MODULE`.
+
+La administración (`default`) usa una clave que **nunca sale del invitado**: se genera
+dentro, vive en `/etc/kling-db/redis-admin` (0600, root) y cada copia la estrena al
+prepararse, de modo que dos copias del mismo dorado no comparten ninguna clave. Sí viaja
+por la red del invitado como cualquier `AUTH`: quien fuera root en la copia la lee, pero
+root en la copia ya es dueño de sus datos (la frontera es la microVM, como en Postgres).
+SHA-256 sin sal es débil ante un diccionario; con 192 bits aleatorios no hay diccionario
+que valga.
+
+Las copias SQLite **no tienen clave**: no hay servidor ni red. Se entra con `kling exec` o
+`kling shell`, que el daemon reserva a quien puede operar la máquina; el fichero es 0600
+de root dentro. `connect -dsn` y `rotate` se rechazan.
+
+Ni Redis ni SQLite tienen proxy de credenciales: `attach` se rechaza. MongoDB se deja
+fuera porque su `createUser`/`updateUser` exige la clave en claro dentro del servidor.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
@@ -943,6 +969,10 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   servidor ya caliente. `kling db attach`, `role`, `rehearse`, `snapshot`/`undo`,
   `tenant-check`, `ask`, `clone` y `doctor -url` no existen para MySQL todavía, y las
   plantillas de MySQL 8 de Oracle no se han probado (Alpine solo empaqueta MariaDB).
+- **Redis y SQLite en `kling db`: lo básico.** Solo `up`, `fork`, `connect`, `reset`,
+  `rm`, `doctor` (y `rotate` en Redis); lo demás se rechaza. Sin proxy de credenciales
+  (Redis en otra microVM no se comparte), sin `audit` y sin `doctor -url`. Los scripts de
+  plantilla no se han ejecutado todavía contra un Redis ni un SQLite reales en el lab.
 - **Postgres: `-database` es obligatoria.** Sin base fijada el rol entraría en cualquiera
   con `CONNECT`, así que hace falta `-database` o `-any-database` expreso (el CLI avisa).
   Los almacenes anteriores, sin base, se leen como `-any-database`: lo que permitían.

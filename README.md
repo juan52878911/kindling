@@ -956,7 +956,8 @@ kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
 An agent in **another** microVM can share a copy through the credential proxy
 (`kling db attach`; on macOS through the daemon's link broker) and never sees the password.
 MariaDB templates work too (`up`, `fork`, `connect`, `rotate`, `doctor`, `audit`:
-[docs/mysql.md](docs/mysql.md)), and `kling db doctor -url` checks a Postgres you already
+[docs/mysql.md](docs/mysql.md)), and so do Redis and SQLite for the basics (`up`, `fork`,
+`connect`, `reset`, `rm`, `doctor`: [docs/db-engines.md](docs/db-engines.md)), and `kling db doctor -url` checks a Postgres you already
 run, over verified TLS by default. Templates, roles, `rehearse`,
 `snapshot`/`undo`, `audit` and the rest: [docs/db.md](docs/db.md); natural-language
 questions: [docs/db-ask.md](docs/db-ask.md); the frozen Postgres templates:
@@ -1560,6 +1561,7 @@ instances share pages.
 | [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | One microVM and one disk per MCP session: the options weighed, the design, measured cost (Spanish) |
 | [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: a disposable Postgres per microVM, roles, branches, `doctor`, `tenant-check`, `diff`, masked `clone`; questions in natural language, also from a web page (Spanish) |
 | [`docs/mysql.md`](docs/mysql.md) | MySQL and MariaDB: the credential proxy (`-type mysql`) and MariaDB copies in `kling db` (Spanish) |
+| [`docs/db-engines.md`](docs/db-engines.md) | Redis and SQLite copies in `kling db`, and why not MongoDB (Spanish) |
 | [`docs/authz.md`](docs/authz.md) | Per-operation authorization on the daemon socket: admin and tenant roles by peer credentials, what each role can do (Spanish) |
 | [`docs/postgres.md`](docs/postgres.md) | Connect your own Postgres through the credential proxy: Docker, LAN/VPC, Neon, Supabase, RDS (Spanish) |
 | [`docs/grafos.md`](docs/grafos.md) · [`docs/grafos-diseno.md`](docs/grafos-diseno.md) | `kling graph`: several machines and the edges between them, frozen, snapshotted and forked as one (Spanish) |

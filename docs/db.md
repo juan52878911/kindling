@@ -13,6 +13,13 @@ se comparte con agentes de **otras** microVMs sin que vean la contraseña.
 el hash de `mysql_native_password`, nunca la clave. Lo demás se rechaza en copias MySQL
 en esta versión. Todo en [mysql.md](mysql.md).
 
+**Redis y SQLite**: `up`, `fork`, `connect`, `reset`, `rm` y `doctor` (y `rotate` en
+Redis) sobre plantillas de `golden image|build -engine redis|sqlite` (etiqueta
+`kling.db.engine=redis|sqlite`). Redis: usuario ACL con su propia clave por copia, al
+invitado solo su SHA-256, y `connect -redis`/`redis://`. SQLite: una microVM con el
+fichero y `sqlite3`, sin red ni clave (`connect -sqlite`). MongoDB no, y por qué. Todo en
+[db-engines.md](db-engines.md).
+
 ```sh
 kling db golden -script scripts/db-golden.sh build -seed-mb 20 pg   # la plantilla, una vez
 kling db up pg -name t1                  # una copia lista, con su propia contraseña
@@ -31,7 +38,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 |---|---|
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
-| `connect <copia> [-role R] [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role` |
+| `connect <copia> [-role R] [-dsn \| -psql \| -mysql \| -redis \| -sqlite]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role`. `-mysql`, `-redis`, `-sqlite`: el cliente de cada motor ([mysql.md](mysql.md), [db-engines.md](db-engines.md)) |
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
@@ -233,10 +240,10 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 | `kling.db.owner` | quién la pidió; `local` en el CLI |
 | `kling.db.state` | `preparing` o `ready` |
 | `kling.db.role`, `kling.db.database` | rol y base de la aplicación (`app`, `appdb`) |
-| `kling.db.engine` | `mysql` en las copias de una plantilla MariaDB/MySQL (la pone `db-golden-mysql.sh` y se hereda); sin ella, Postgres |
+| `kling.db.engine` | `mysql`, `redis` o `sqlite` en las copias de esas plantillas (la ponen `db-golden-mysql.sh`, `db-golden-redis.sh` y `db-golden-sqlite.sh`, y se hereda); sin ella, Postgres |
 | `kind=sandbox` | lo que permite `sandbox fork` sobre la copia |
 | `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del toplevel del repo, clave de la rama y último uso (segundos unix) |
-| `kling.ports` | incluye `5432` (`3306` en MySQL): el backend de macOS abre el reenvío |
+| `kling.ports` | incluye `5432` (`3306` en MySQL, `6379` en Redis; nada en SQLite): el backend de macOS abre el reenvío |
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
 fusiona y `fork` las copia enteras añadiendo `kling.fork-of`. Por eso `up` pasa

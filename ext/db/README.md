@@ -19,6 +19,13 @@ MySQL/MariaDB copies (`golden image|build -engine mysql`, label
 `mysql_native_password` hash. The rest is Postgres-only for now:
 [`docs/mysql.md`](../../docs/mysql.md).
 
+Redis and SQLite copies (`golden image|build -engine redis|sqlite`) support `up`,
+`fork`, `connect` (`-redis`/`redis://`, `-sqlite`), `reset`, `rm` and `doctor`, plus
+`rotate` on Redis: a Redis copy has an ACL user whose password only this host knows (the
+guest gets its SHA-256); a SQLite copy is a microVM with the file and `sqlite3`, no
+server and no password. See [`docs/db-engines.md`](../../docs/db-engines.md), which also
+explains why MongoDB is left out.
+
 ```sh
 cd ext/db
 go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db
