@@ -351,7 +351,8 @@ func TestWebCheckListen(t *testing.T) {
 	}{
 		{"127.0.0.1:8080", false, true}, {"localhost:0", false, true}, {"[::1]:9", false, true},
 		{"0.0.0.0:8080", false, false}, {"192.168.1.5:80", false, false}, {":8080", false, false},
-		{"example.com:80", true, false}, {"0.0.0.0:8080", true, true}, {"nada", false, false},
+		{"example.com:80", true, false}, {"0.0.0.0:8080", true, false}, {"[::]:8080", true, false},
+		{"192.168.1.5:80", true, true}, {"nada", false, false},
 	} {
 		_, err := checkListen(c.in, c.remote)
 		if (err == nil) != c.ok {
@@ -390,5 +391,35 @@ func TestWebPaginaEmbebida(t *testing.T) {
 	rec := r.do("GET", "/", "", true)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `<meta name="csrf" content="`+r.w.csrf+`">`) {
 		t.Fatalf("GET / = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// Con -allow-remote la página sigue atada al Host por el que escucha: otro
+// nombre (un dominio del atacante que resuelve a esa IP) es 403.
+func TestWebAllowRemoteFijaHost(t *testing.T) {
+	ta, _, _ := newAskApp(t)
+	sess, err := ta.app.askPrepare(ctx, "c1", "local", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const addr = "192.168.1.5:8765"
+	o := webOpts{askOpts: defaultAskOpts(), listen: addr, allowRemote: true, ttl: time.Hour}
+	w, err := newAskWeb(ta.app, sess, &fakeProvider{}, o, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := w.Handler()
+	for host, want := range map[string]int{
+		addr: http.StatusOK, "evil.example:8765": http.StatusForbidden,
+		"127.0.0.1:8765": http.StatusForbidden, "192.168.1.5:9999": http.StatusForbidden,
+	} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = host
+		req.AddCookie(&http.Cookie{Name: webCookie, Value: w.token})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("Host %s: %d, want %d", host, rec.Code, want)
+		}
 	}
 }

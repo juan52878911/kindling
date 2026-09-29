@@ -11,7 +11,8 @@ package main
 //
 // Lo propio de la web: escucha solo en loopback; un token aleatorio en la URL
 // impresa (pasa a una cookie SameSite=Strict HttpOnly); un token CSRF aparte en
-// cada POST; comprobación de Host y Origin; CSP sin inline (el JS y el CSS son
+// cada POST; comprobación de Host (el de la dirección de escucha, también con
+// -allow-remote) y Origin; CSP sin inline (el JS y el CSS son
 // ficheros propios); ni CORS ni redirecciones a otro sitio; vida acotada y tope
 // de peticiones.
 
@@ -148,6 +149,11 @@ func checkListen(listen string, allowRemote bool) (string, error) {
 	if !ip.IsLoopback() && !allowRemote {
 		return "", fmt.Errorf("-listen %s is not a loopback address: the page has no TLS; use 127.0.0.1 (and an SSH tunnel) or add -allow-remote", listen)
 	}
+	// La página solo contesta al Host por el que escucha (contra DNS
+	// rebinding, también con -allow-remote): con 0.0.0.0 o :: no hay uno.
+	if ip.IsUnspecified() {
+		return "", fmt.Errorf("-listen %s listens on every interface: name the address the browser will use (the page only answers to that Host)", listen)
+	}
 	return net.JoinHostPort(h, p), nil
 }
 
@@ -174,7 +180,6 @@ type askWeb struct {
 	token, csrf string
 	pw          string // solo para tapar cualquier aparición en las respuestas
 	hosts       map[string]bool
-	remote      bool
 	now         func() time.Time
 	expires     time.Time
 
@@ -209,15 +214,15 @@ func newAskWeb(a *app, sess *askSession, prov askllm.Provider, o webOpts, listen
 	if pw, err := dbstate.ReadPassword(sess.mc.ID); err == nil && len(pw) >= 4 {
 		w.pw = pw
 	}
+	// Contra DNS rebinding: solo se sirve con el Host por el que se escucha
+	// (con loopback, cualquiera de sus nombres; con -allow-remote, esa IP).
 	h, port, _ := net.SplitHostPort(listenAddr)
 	if isLoopbackAddr(listenAddr) {
-		// Contra DNS rebinding: solo se sirve con un Host de loopback.
 		for _, n := range []string{"127.0.0.1", "localhost", "[::1]"} {
 			w.hosts[n+":"+port] = true
 		}
 	} else {
-		w.remote = true
-		w.hosts[net.JoinHostPort(h, port)] = true
+		w.hosts[strings.ToLower(net.JoinHostPort(h, port))] = true
 	}
 	return w, nil
 }
@@ -282,7 +287,7 @@ func (w *askWeb) Handler() http.Handler {
 	})
 }
 
-func (w *askWeb) hostOK(r *http.Request) bool { return w.remote || w.hosts[strings.ToLower(r.Host)] }
+func (w *askWeb) hostOK(r *http.Request) bool { return w.hosts[strings.ToLower(r.Host)] }
 
 func eq(a, b string) bool { return len(a) > 0 && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 

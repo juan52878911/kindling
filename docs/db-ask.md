@@ -45,7 +45,7 @@ y `-send-data` con el mismo significado y las mismas comprobaciones que `ask` (n
 | flag | qué hace |
 |---|---|
 | `-listen HOST:PORT` | dirección (por defecto `127.0.0.1:0`, un puerto libre); solo loopback |
-| `-allow-remote` | acepta una dirección que no sea loopback, con un aviso: es HTTP sin TLS. Mejor un túnel SSH al loopback |
+| `-allow-remote` | acepta una dirección que no sea loopback (una IP concreta, no `0.0.0.0`), con un aviso: es HTTP sin TLS. Mejor un túnel SSH al loopback |
 | `-ttl D` | cuánto vive la página (30 min; de 1 min a 8 h); después responde 410 y el proceso termina |
 
 **Las garantías de `ask` no cambian.** Al modelo solo van el esquema y la pregunta (filas
@@ -61,7 +61,9 @@ validación no deja ninguna propuesta que ejecutar. Sin el reintento de `ask` tr
 **Seguridad de la página:**
 
 - Escucha solo en loopback; otra dirección se rechaza salvo `-allow-remote`. Se comprueba
-  la cabecera `Host` (contra DNS rebinding) cuando es loopback.
+  siempre la cabecera `Host` (contra DNS rebinding): con loopback vale cualquiera de sus
+  nombres; con `-allow-remote`, solo la IP y el puerto de `-listen`, así que `0.0.0.0` y
+  `::` se rechazan (hay que nombrar la dirección que usará el navegador).
 - El token aleatorio (192 bits) va en la URL impresa por stdout; al abrirla pasa a una
   cookie `HttpOnly; SameSite=Strict` y el navegador es redirigido a `/`, así que no queda
   en la barra ni en el historial. Sin la cookie, todo es 403.
