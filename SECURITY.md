@@ -712,8 +712,11 @@ reenvíos del loopback (`127.0.0.1`, rango reservado 29000-29999). Las aristas (
 - **Quién pregunta lo dice el kernel, no la petición.** El broker escucha en un socket
   Unix de un directorio privado del usuario (`/tmp/kling-<uid>/`, 0700, comprobado), y
   el perfil de sandbox de `kling-vz` solo le deja conectar a ese socket. El daemon
-  identifica al que llama por el PID del otro extremo (`LOCAL_PEERPID`), que tiene que
-  ser el VMM de exactamente una máquina; y solo resuelve aristas de ESA máquina, con
+  identifica al que llama con lo que pone el kernel al conectar: su UID
+  (`LOCAL_PEERCRED`) tiene que ser el del daemon, su PID (`LOCAL_PEERPID`) tiene que ser
+  un proceso cuyo ejecutable es el `kling-vz` con el que el daemon arranca las máquinas
+  (`proc_pidpath`, por la llamada `proc_info`, sin cgo) y el VMM de exactamente una
+  máquina; y solo resuelve aristas de ESA máquina, con
   las mismas comprobaciones que en Linux bajo su candado (`comprobarAristaLocked`,
   `comprobarCopiaLocked`). Una credencial hacia otra máquina se atiende además solo si
   está en el almacén de la máquina que pregunta.
@@ -732,13 +735,19 @@ reenvíos del loopback (`127.0.0.1`, rango reservado 29000-29999). Las aristas (
   y corta la sesión: ninguna sobrevive sin alguien que la pueda invalidar.
 - **Acotado.** 16 conexiones a la vez por arista en `kling-vz`, 1024 sesiones por
   máquina de origen y 4096 conexiones al broker en el daemon; una petición tiene 5 s
-  para llegar.
+  para llegar. Una conexión cuyo PID aún no es de ninguna máquina (un arranque o un
+  thaw en curso) espera hasta 15 s, pero solo 64 a la vez: la siguiente se rechaza en el
+  acto, y ni el UID ni el ejecutable equivocados llegan a esperar.
 
 Lo que queda en macOS: la identidad por PID supone que el PID que el daemon apuntó es
-el del `kling-vz` vivo; si ese proceso muriera y su PID lo reciclara OTRO proceso del
-mismo usuario antes de que el vigilante lo note, ese proceso pasaría por la máquina.
-Es el mismo usuario que ya puede hablar con el socket del daemon, así que no cruza la
-frontera de §1. Entre el dial del daemon y la segunda comprobación hay un instante en
+el del `kling-vz` vivo. Si ese proceso muriera y su PID lo reciclara otro proceso del
+mismo usuario antes de que el vigilante lo note, ahora solo pasaría si ese otro proceso
+es también el ejecutable `kling-vz` del daemon (otro programa se rechaza por su ruta),
+y un `kling-vz` recién lanzado es de otra máquina, que el daemon apunta con su propio
+PID. Aun así no hay un identificador que no se recicle (el `audit_token` con su
+contador de versión de PID pide `getsockopt(LOCAL_PEERTOKEN)` y compararlo con el del
+proceso lanzado, que solo da libproc/cgo). Es el mismo usuario que ya puede hablar con
+el socket del daemon, así que no cruza la frontera de §1. Entre el dial del daemon y la segunda comprobación hay un instante en
 el que un reenvío muerto podría haberlo reabierto otra máquina; la segunda comprobación
 lo detecta si el daemon ya sabe que el destino cambió.
 

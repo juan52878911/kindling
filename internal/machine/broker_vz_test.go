@@ -5,6 +5,7 @@ package machine
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -62,10 +63,25 @@ func TestVZBrokerPorSocket(t *testing.T) {
 		t.Fatal("se marcó para un desconocido")
 	}
 
-	// Ahora es el kling-vz de web.
+	// Ahora es el VMM apuntado de web, pero su ejecutable no es el kling-vz
+	// del daemon (un PID reciclado por otro programa): nada.
 	e.m.mu.Lock()
 	e.m.byID[web].PID = os.Getpid()
 	e.m.mu.Unlock()
+	e.m.fcBin = "/usr/local/bin/kling-vz"
+	if _, _, err := pedir(); err == nil {
+		t.Fatal("un proceso que no es kling-vz obtuvo una conexión")
+	}
+	if len(eco.lista()) != 0 {
+		t.Fatal("se marcó para un proceso que no es kling-vz")
+	}
+
+	// Y ahora este ejecutable es "el kling-vz" del daemon.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m.fcBin = exe
 	tc, resp, err := pedir()
 	if err != nil {
 		t.Fatal(err)
@@ -83,5 +99,78 @@ func TestVZBrokerPorSocket(t *testing.T) {
 	e.m.invalidarSesiones(apiID, "frozen")
 	if !cortadaTCP(tc) {
 		t.Fatal("la sesión siguió tras congelar el destino")
+	}
+}
+
+// La identidad del otro extremo: su UID (LOCAL_PEERCRED) y la ruta de su
+// ejecutable (proc_pidpath por proc_info), sin cgo.
+func TestVZIdentidadDelOtro(t *testing.T) {
+	a, b := parUnix(t)
+	defer a.Close()
+	defer b.Close()
+	uid, err := uidDelOtro(a)
+	if err != nil || uid != os.Geteuid() {
+		t.Fatalf("uid del otro %d %v, quería %d", uid, err, os.Geteuid())
+	}
+	pid, err := pidDelOtro(a)
+	if err != nil || pid != os.Getpid() {
+		t.Fatalf("pid del otro %d %v", pid, err)
+	}
+	ruta, err := rutaEjecutable(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, _ := os.Executable()
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	if ruta != exe {
+		t.Fatalf("ejecutable %q, quería %q", ruta, exe)
+	}
+	if _, err := rutaEjecutable(1 << 30); err == nil {
+		t.Fatal("un PID que no existe tiene ejecutable")
+	}
+	for _, c := range []struct {
+		ruta, bin string
+		ok        bool
+	}{
+		{"/opt/k/kling-vz", "kling-vz", true},
+		{"/opt/k/kling-vz", "/opt/k/kling-vz", true},
+		{"/opt/k/kling-vz", "/usr/bin/kling-vz", false},
+		{"/opt/k/otro", "kling-vz", false},
+		{"/opt/k/kling-vz", "", false},
+	} {
+		if got := mismoEjecutable(c.ruta, c.bin); got != c.ok {
+			t.Errorf("mismoEjecutable(%q, %q) = %v", c.ruta, c.bin, got)
+		}
+	}
+}
+
+// Las conexiones cuyo PID todavía no es de ninguna máquina esperan, pero como
+// mucho maxEsperandoIdentidad a la vez: la siguiente se rechaza en el acto.
+func TestVZBrokerAcotaLasQueEsperan(t *testing.T) {
+	m := newTestManager(t)
+	exe, _ := os.Executable()
+	m.fcBin = exe
+	previo := plazoIdentificar
+	plazoIdentificar = 10 * time.Second
+	t.Cleanup(func() { plazoIdentificar = previo })
+	for i := 0; i < maxEsperandoIdentidad; i++ {
+		esperandoIdentidad <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxEsperandoIdentidad; i++ {
+			<-esperandoIdentidad
+		}
+	})
+	a, b := parUnix(t)
+	defer a.Close()
+	defer b.Close()
+	inicio := time.Now()
+	if _, err := m.identificarBroker(a); err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("con los huecos llenos: %v", err)
+	}
+	if d := time.Since(inicio); d > time.Second {
+		t.Fatalf("esperó %v en vez de rechazar en el acto", d)
 	}
 }
