@@ -572,19 +572,19 @@ func TestGatewayPort80WithoutCredentials(t *testing.T) {
 	}
 }
 
-// pgFalso es un proxy de Postgres de mentira: dice si está activo y contesta
-// "pg" a cada conexión que recibe.
+// pgFalso es un proxy de bases de datos de mentira: dice si está activo y
+// contesta "pg" y el puerto que recibió a cada conexión.
 type pgFalso struct {
 	activo atomic.Bool
 	vistas atomic.Int32
 }
 
-func (f *pgFalso) PGActivo() bool { return f.activo.Load() }
+func (f *pgFalso) DBActivo() bool { return f.activo.Load() }
 
-func (f *pgFalso) ServePG(_ context.Context, c net.Conn) {
+func (f *pgFalso) ServeDB(_ context.Context, c net.Conn, port int) {
 	defer c.Close()
 	f.vistas.Add(1)
-	_, _ = c.Write([]byte("pg"))
+	_, _ = c.Write([]byte("pg" + strconv.Itoa(port)))
 }
 
 // Con el proxy de Postgres activo, cualquier puerto de la pasarela (menos el
@@ -607,14 +607,14 @@ func TestPostgresOnGateway(t *testing.T) {
 	}
 
 	pg.activo.Store(true)
-	for _, puerto := range []string{"5432", "6543"} {
+	for _, puerto := range []string{"5432", "6543", "3306"} {
 		conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":"+puerto)
 		if err != nil {
 			t.Fatalf("gateway:%s: %v", puerto, err)
 		}
 		b, _ := io.ReadAll(conn)
 		conn.Close()
-		if string(b) != "pg" {
+		if string(b) != "pg"+puerto {
 			t.Fatalf("gateway:%s answered %q", puerto, b)
 		}
 	}
@@ -624,8 +624,8 @@ func TestPostgresOnGateway(t *testing.T) {
 		conn.Close()
 		t.Fatal("a private IP must still be refused")
 	}
-	if pg.vistas.Load() != 2 {
-		t.Fatalf("ServePG saw %d connections, want 2", pg.vistas.Load())
+	if pg.vistas.Load() != 3 {
+		t.Fatalf("ServeDB saw %d connections, want 3", pg.vistas.Load())
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

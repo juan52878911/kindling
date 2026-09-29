@@ -971,6 +971,12 @@ func IsInsufficientMemory(err error) bool {
 // es la única base a la que se deja conectar y es obligatoria salvo con
 // AnyDatabase (cualquier base con CONNECT para el rol). Allow no vale para Postgres. Al
 // rotar, como Allow, todos estos campos se sustituyen con la clave.
+//
+// Type "mysql" (pkg/credproxy, mysql.go) es lo mismo para MySQL/MariaDB
+// (puerto 3306 por defecto, MYSQL_PWD), con los mismos campos salvo
+// UpstreamMachine. En MySQL, Database es la base con la que arranca la
+// sesión, no una frontera: lo que acota es el GRANT del usuario. Ver
+// docs/mysql.md.
 type CredentialSpec struct {
 	Domain   string   `json:"domain"`
 	Env      string   `json:"env"`
@@ -980,11 +986,11 @@ type CredentialSpec struct {
 	Port     int      `json:"port,omitempty"`
 	User     string   `json:"user,omitempty"`
 	Database string   `json:"database,omitempty"`
-	// AnyDatabase (solo Postgres) deja entrar en cualquier base del servidor;
-	// sin él, Database es obligatoria.
+	// AnyDatabase (Postgres y MySQL) deja entrar en cualquier base del
+	// servidor; sin él, Database es obligatoria.
 	AnyDatabase bool   `json:"any_database,omitempty"`
 	CAPEM       string `json:"ca_pem,omitempty"`
-	// Upstream, UpstreamTLS y TLSServerName (solo Postgres) fijan a dónde
+	// Upstream, UpstreamTLS y TLSServerName (Postgres y MySQL) fijan a dónde
 	// marca el proxy en vez de Domain:Port ("host:puerto"; loopback y LAN
 	// permitidos, metadatos y la red interna de kindling nunca), si el TLS
 	// hacia él se verifica ("" o "verify-full") o se apaga ("disable": solo

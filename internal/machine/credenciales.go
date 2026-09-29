@@ -230,12 +230,12 @@ func (m *Manager) normalizarAlmacen(dueño, kind, database, env, domain string, 
 		dueño, env, domain)
 }
 
-// anyDatabaseDe son las variables de las credenciales postgres que entran en
-// cualquier base, ordenadas: lo que `kling inspect` enseña de ellas.
+// anyDatabaseDe son las variables de las credenciales postgres y mysql que
+// entran en cualquier base, ordenadas: lo que `kling inspect` enseña de ellas.
 func anyDatabaseDe(creds []credproxy.Credential) []string {
 	var out []string
 	for _, c := range creds {
-		if c.Kind == credproxy.KindPostgres && c.AnyDatabase {
+		if (c.Kind == credproxy.KindPostgres || c.Kind == credproxy.KindMySQL) && c.AnyDatabase {
 			out = append(out, c.Env)
 		}
 	}

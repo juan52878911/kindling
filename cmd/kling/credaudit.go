@@ -161,10 +161,13 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 		creds = "-"
 	}
 	method, path, status := r.Method, r.Path, fmt.Sprint(r.Status)
-	if r.Kind == "postgres" {
-		// Una conexión al proxy de Postgres: sin método ni ruta ni estado
-		// HTTP; en su lugar el rol y la base de datos.
+	if r.Kind == "postgres" || r.Kind == "mysql" {
+		// Una conexión al proxy de Postgres o MySQL: sin método ni ruta ni
+		// estado HTTP; en su lugar el rol y la base de datos.
 		method, path, status = "PG", r.User, "-"
+		if r.Kind == "mysql" {
+			method = "MYSQL"
+		}
 		if r.Method == "cancel" {
 			method = "CANCEL"
 		}
@@ -214,7 +217,7 @@ func auditResult(r api.CredAuditRecord) string {
 	case r.Reason != "":
 		return r.Reason
 	case r.Auth != "":
-		// Postgres: con qué se autenticó el proxy ante el servidor.
+		// Postgres y MySQL: con qué se autenticó el proxy ante el servidor.
 		return "ok(" + r.Auth + ")"
 	}
 	return "ok"

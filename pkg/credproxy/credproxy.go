@@ -69,8 +69,9 @@
 // credenciales se sustituyeron, bytes y duración. Nunca la clave, el marcador,
 // cabeceras, cuerpos ni la query (ver auditoria.go).
 //
-// POSTGRES: una credencial Kind "postgres" no la usa el proxy HTTP sino
-// ServePG, el mismo modelo sobre el protocolo de Postgres (ver postgres.go).
+// POSTGRES Y MYSQL: una credencial Kind "postgres" o "mysql" no la usa el
+// proxy HTTP sino ServeDB, el mismo modelo sobre el protocolo de Postgres (ver
+// postgres.go) o el de MySQL/MariaDB (ver mysql.go).
 package credproxy
 
 import (
@@ -222,12 +223,12 @@ func ValidarCredenciales(creds []Credential) error {
 			return err
 		}
 	}
-	return nil
+	return validarPuertosDB(creds)
 }
 
 // ValidarTipo comprueba lo que depende del tipo de la credencial (Allow para
-// HTTP; puerto, rol, base de datos, CA y forma de la clave para Postgres) y
-// pone el puerto por defecto de Postgres. No mira el marcador: lo usa también
+// HTTP; puerto, rol, base de datos, CA y forma de la clave para Postgres y
+// MySQL) y pone el puerto por defecto de Postgres o MySQL. No mira el marcador: lo usa también
 // el manager con lo que llega de la API, que aún no lo tiene. c.Domain debe
 // venir ya normalizado.
 func ValidarTipo(c *Credential) error {
@@ -236,15 +237,17 @@ func ValidarTipo(c *Credential) error {
 	case "", KindHTTP:
 		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.CAPEM != "" ||
 			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" || c.UpstreamMachine != "" || c.UpstreamOwner != "" {
-			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS, TLS server name and upstream machine are only for -type postgres", d)
+			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS, TLS server name and upstream machine are only for -type postgres or mysql", d)
 		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
 		}
 	case KindPostgres:
 		return validarPostgres(c)
+	case KindMySQL:
+		return validarMySQL(c)
 	default:
-		return fmt.Errorf("credential for %s: unknown type %q (http or postgres)", d, c.Kind)
+		return fmt.Errorf("credential for %s: unknown type %q (http, postgres or mysql)", d, c.Kind)
 	}
 	return nil
 }
@@ -347,6 +350,11 @@ type Proxy struct {
 	cancelMu      sync.Mutex
 	cancelaciones map[claveCancel]destinoCancel
 
+	// MySQL (mysql.go): credenciales (con su TLS, como las de Postgres) y
+	// conexiones a la vez. Comparte con Postgres dialers y plazos.
+	my    []credPG
+	mySem chan struct{}
+
 	// Credenciales con UpstreamMachine (maquina.go): el resolvedor, el
 	// dialer, la comprobación del destino resuelto (campo para los tests) y
 	// las sesiones vivas hacia cada máquina, para cortarlas (Invalidar).
@@ -430,6 +438,7 @@ func New(o Options) *Proxy {
 		pgAuth:        pgAuthTotal,
 		cancelaciones: map[claveCancel]destinoCancel{},
 		lookupUp:      lookupSistema,
+		mySem:         make(chan struct{}, MaxMySQLConns),
 
 		resolveMaq: o.ResolveMachine,
 		dialMaq:    (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive}).DialContext,
@@ -454,7 +463,7 @@ func (p *Proxy) Close() error {
 
 // SetCredentials fija el juego COMPLETO de credenciales (sustituye el
 // anterior) tras validarlo con ValidarCredenciales, que normaliza en el sitio
-// los dominios de creds. Devuelve los dominios distintos (HTTP y Postgres), ordenados: los que
+// los dominios de creds. Devuelve los dominios distintos (HTTP, Postgres y MySQL), ordenados: los que
 // el resolver de la máquina debe desviar hacia el proxy. Con la lista vacía el
 // proxy se queda sin credenciales (todo 403).
 func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
@@ -463,7 +472,7 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	}
 	byDomain := map[string][]credCompilada{}
 	var ocultar []string
-	var pg []credPG
+	var pg, my []credPG
 	vistos := map[string]bool{}
 	var domains []string
 	for _, c := range creds {
@@ -472,12 +481,16 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 			vistos[c.Domain] = true
 			domains = append(domains, c.Domain)
 		}
-		if c.Kind == KindPostgres {
+		if c.Kind == KindPostgres || c.Kind == KindMySQL {
 			cp, err := compilarPG(c)
 			if err != nil {
 				return nil, err
 			}
-			pg = append(pg, cp)
+			if c.Kind == KindMySQL {
+				my = append(my, cp)
+			} else {
+				pg = append(pg, cp)
+			}
 			continue
 		}
 		reglas, err := compilarPermisos(c.Allow)
@@ -495,7 +508,7 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 	p.sesMu.Lock()
 	defer p.sesMu.Unlock()
 	p.mu.Lock()
-	p.creds, p.ocultar, p.pg = byDomain, ocultar, pg
+	p.creds, p.ocultar, p.pg, p.my = byDomain, ocultar, pg, my
 	p.mu.Unlock()
 	p.cortarSesionesHuerfanasLocked(pg)
 	return domains, nil
