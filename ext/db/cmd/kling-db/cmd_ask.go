@@ -19,6 +19,7 @@ package main
 // Ni la clave de la copia ni la de la API van al modelo, ni a argv, ni a la salida.
 
 import (
+	"regexp"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -126,6 +127,9 @@ func (o askOpts) check(question string) error {
 		return errors.New("-llm-timeout must be between 1s and 30m")
 	case o.provider != "" && o.provider != "anthropic" && o.provider != "opencode":
 		return errors.New("-provider must be anthropic or opencode")
+	case o.model != "" && !modelPattern.MatchString(o.model):
+		// Va como argumento de opencode: un valor que empiece por "-" sería otra bandera.
+		return fmt.Errorf("invalid -model %q", o.model)
 	case o.explain && !o.sendData:
 		return errors.New("-explain sends result rows to the model provider: add -send-data to allow it")
 	case o.sendData && !o.explain:
@@ -136,6 +140,9 @@ func (o askOpts) check(question string) error {
 	}
 	return nil
 }
+
+// modelPattern acepta nombres como claude-sonnet-5 o minimax-coding-plan/MiniMax-M2.7.
+var modelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$`)
 
 // askResult es lo que se imprime (y la salida de -json).
 type askResult struct {

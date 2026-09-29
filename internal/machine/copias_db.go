@@ -199,6 +199,17 @@ func (m *Manager) RemoveCredential(ctx context.Context, ref, env, upstreamMachin
 		return nil, fmt.Errorf("the credential in %s of %s does not go to machine %s", env, cur.Name, shortID(upstreamMachine))
 	}
 	quitada := creds[i]
+	// Una máquina corriendo sin socket del VMM no podría enterarse (en macOS,
+	// kling-vz seguiría con la credencial): mejor no tocar nada que dejar el
+	// almacén y el proxy en desacuerdo.
+	if cur.State == api.StateRunning {
+		m.mu.RLock()
+		sinSock := m.socket[cur.ID] == ""
+		m.mu.RUnlock()
+		if sinSock {
+			return nil, fmt.Errorf("machine %s is running but its VMM socket is not available yet: try again", cur.Name)
+		}
+	}
 	creds = append(creds[:i:i], creds[i+1:]...)
 	if err := m.guardarCredenciales(cur.ID, creds); err != nil {
 		return nil, err
