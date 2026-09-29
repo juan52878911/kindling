@@ -175,7 +175,51 @@ si hay Go lo compila (`CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH go build -o
 kling-phoned ./prototypes/android/phoned`). La receta lleva `spec.phoned` y
 `spec.adb_secure`.
 
-## Cifras
+## Cifras (2026-09-29)
 
-Medidas con `test-phoned.sh` (sección "Pruebas" del README).
+`test-phoned.sh` (sin `allow_exec` en ningún momento), con daemons privados y los
+binarios de la rama. Mac: MacBook Air M4, vz, arm64, 2 vCPU, 1,5 GiB. Linux: el CT
+`phones` (x86_64, Firecracker, 6 GiB), con dm-verity.
+
+| | Mac arm64 (vz) | Linux amd64 (Firecracker) |
+|---|---|---|
+| dorado: `boot_completed` en frío (+ pantalla preparada) | 7,7 s | 15,0 s |
+| `kling save` del dorado | 1,3 s | 3,6 s |
+| restaurar un clon (`run -from -wait-ready`) | 1,1–1,5 s | 0,2–2,2 s |
+| identidad (serie + SSAID con reinicio de zygote + android_id + adb) | 2,2–2,7 s | 5,1–7,0 s (SSAID 4,6 s) |
+| `GET /v1/health` | 0,03 s | 0,04 s |
+| `GET /v1/screen` (PNG 720×1280) | 0,55–0,68 s | 0,24–0,56 s |
+| `GET /v1/tree` (uidump) | 0,07–0,09 s | 0,02–0,17 s |
+| `tap` / `key` / `swipe` / `text` (uidump) | 0,04 / 0,04 / 0,24 / 0,95 s | 0,04 / 0,04 / 0,24 / 0,27 s |
+| `install` de Termux (35 MB, base64 por el proxy) | 0,87 s | 2,0–2,2 s |
+| pause → thaw → `screen` por la API | 0,01 s → 0,16–0,26 s | 0,01 s → 0,25–0,27 s |
+| freeze → thaw → listo | 1,1–1,3 s | 0,3–0,5 s |
+| red | veth (NAT; egress `none`) | veth, `verity: verified` |
+
+En los dos: 3 clones con serie, `android_id` y clave de SSAID distintas; adb con la
+clave del clon entra (`ro.serialno` = la de `/v1/identity`), con la de otro clon o sin
+clave, `unauthorized`; `has_secrets` levantada tras el `{}`; la identidad intacta tras
+pause y freeze; ni series ni `android_id` en `kling ps -json`, `kling logs`, los logs
+del daemon ni los ficheros del dorado; el dorado sin `allow_exec` (y `kling run -from`
+con `-allow-exec` sobre él, rechazado por el núcleo).
+
+Red (Linux, `-egress internet`, comprobado con `kling exec` en una máquina de
+depuración): Android sale (`HTTP/1.1 301` de 1.1.1.1, ping a 8.8.8.8, la red de
+Android `IS_VALIDATED`) y no llega a `10.88.0.1:8080/8091`, `172.16.0.2:8080/8091`
+ni `169.254.169.254:80` (timeout: `DROP`).
+
+Sin romper lo de antes: `test-phone.sh` PASS y `fase0.sh -clones 2` 6/6 en el Mac con
+la imagen nueva (frío 6,2 s, restaurar → dump p50 1,06 s, dump 0,024 s, screencap
+0,31 s, fork 3,9 s); `PHONED=0` sigue construyendo y arrancando (listo en 10,2 s en
+Linux, `android-sh` y el gancho de bash funcionan).
+
+Pendiente:
+- SSAID: comprobado que system_server arranca con la clave nueva (sin errores de
+  SettingsProvider) y que cada clon tiene la suya; no se ha visto a una app pedir su
+  `ANDROID_ID` (ninguna de la imagen lo hace y `run-as`/`su <uid> content` no sirven
+  en Redroid). Hace falta un APK de prueba mínimo.
+- Una arista de grafo al 8091 funcionaría hoy, sin autenticación (ver el modelo de
+  amenazas): token por arista o puerto de solo lectura antes de usarla.
+- La base arm64 construida antes del 28-09 no trae iptables: kling-phoned cae a
+  `isolated` (Android sin salida, adb sigue); una base nueva de `build-image.sh` sí.
 

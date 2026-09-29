@@ -64,9 +64,6 @@ func (o *androidOps) Health(ctx context.Context) healthInfo {
 	h := healthInfo{State: s.state, Restarts: s.restarts, Net: s.netMode, Version: version}
 	pid, started := s.pid, s.started
 	s.mu.Unlock()
-	if h.Restarts > 0 {
-		h.Restarts-- // el primer arranque no es un relanzamiento
-	}
 	h.Verity = verityStatus()
 	if pid > 0 && comm(pid) == "init" {
 		h.AndroidPID = pid
