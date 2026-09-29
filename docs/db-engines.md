@@ -34,7 +34,8 @@ kling db fork s1 -n 4 · kling db reset s1 · kling db doctor s1 · kling db rm 
 | `doctor <copia>` | DB | MY | RD (básico) | SQ (básico) |
 | `audit` | sí | sí | no | no |
 | `branch` | sí | sí | no | no |
-| `attach`/`detach`, `role`, `rehearse`, `snapshot`/`undo`, `tenant-check`, `ask`, `ask-web`, `diff`, `env`, `clone` | sí | no | no | no |
+| `class` | sí | sí | sí | sí (sin clave: se entra con `-sqlite`) |
+| `attach`/`detach`, `role`, `rehearse`, `snapshot`/`undo`, `tenant-check`, `ask`, `ask-web`, `report`, `diff`, `env`, `clone`, `slice`, `observe` | sí | no | no | no |
 
 Lo que un motor no hace se rechaza **antes de tocar nada**, con
 `kling db <cmd> supports postgres copies only in this version; <copia> is redis (see
@@ -194,10 +195,9 @@ reciben solo el hash, cada copia estrena clave (y la del administrador en Redis)
 rotación que falla destruye la copia o deja la vieja, `connect` en cada modo, y todos los
 rechazos sin tocar la máquina. Los scripts pasan `bash -n` y `shellcheck`.
 
-Pendiente de ejecutar en el lab (sin hacer en este cambio, porque exige construir las
-imágenes y eso descarga paquetes): `db-golden-redis.sh`/`db-golden-sqlite.sh image` y
-`build`, y la sección 7h2 de `scripts/90-e2e.sh`
-(`KLING_E2E_REDIS_GOLDEN=rd KLING_E2E_SQLITE_GOLDEN=sq`). Lo que más puede sorprender en
-el primer uso real: el formato exacto de la salida de `redis-cli` fuera de una terminal
-(el guion compara `OK`, `PONG` y lee `ACL GETUSER` línea a línea) y la versión de Redis
-que traiga la Alpine del builder.
+Probado en el lab (CT 105, 2026-09-29): las imágenes y los goldens de Redis y SQLite se
+construyeron de verdad sobre Alpine, y la sección 7h2 de `scripts/90-e2e.sh`
+(`KLING_E2E_REDIS_GOLDEN=rd KLING_E2E_SQLITE_GOLDEN=sq`) pasa entera. Eso incluye up, fork
+con clave propia, rotate con el hash nuevo en la copia, doctor con 0 problemas, los
+rechazos y ninguna clave en la salida. `kling db class` también se probó con los dos
+motores.

@@ -343,15 +343,17 @@ type classRow struct {
 
 func classRowOf(mc *api.Machine) classRow {
 	r := classRow{Name: mc.Name, Machine: shortID(mc.ID), Golden: mc.Labels[labelGolden], State: string(mc.State)}
-	// Lista y con clave de ESTE id en el host, como exige connect.
-	r.Ready = mc.Labels[labelState] == stateReady && dbstate.HasPassword(mc.ID) == nil
+	// Lista y con clave de ESTE id en el host, como exige connect (SQLite no
+	// tiene clave: le basta con estar lista).
+	eng := engineOf(mc.Labels)
+	r.Ready = mc.Labels[labelState] == stateReady && (!hasPassword(eng) || dbstate.HasPassword(mc.ID) == nil)
 	if role, db, err := roleDB(mc.Labels); err == nil {
 		r.User, r.Database = role, db
 	}
 	if h, p, err := hostAddr(mc); err == nil {
 		r.Host, r.Port = h, p
 	}
-	if r.Ready {
+	if r.Ready && hasPassword(eng) {
 		r.PasswordFile, _ = dbstate.PasswordPath(mc.ID)
 	}
 	return r
@@ -404,7 +406,10 @@ func (a *app) printClass(o classOpts, members []*api.Machine) error {
 		}
 		host, port := "-", "-"
 		if r.Host != "" {
-			host, port = r.Host, strconv.Itoa(r.Port)
+			host = r.Host
+		}
+		if r.Port > 0 {
+			port = strconv.Itoa(r.Port)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, st, host, port, orDefault(r.User, "-"), orDefault(r.Database, "-"), r.Golden)
 	}
@@ -412,7 +417,22 @@ func (a *app) printClass(o classOpts, members []*api.Machine) error {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "%d copies in class %s, %d ready.\n", len(members), o.prefix, ready)
-	fmt.Fprintf(a.stdout, "  one student:       kling db connect <copy> [-psql | -dsn]\n")
+	// La pista con el cliente de cada motor de la clase (una clase sale de
+	// una plantilla, pero se listan por prefijo).
+	clientes := map[string]bool{}
+	for _, mc := range members {
+		clientes[clientMode(engineOf(mc.Labels))] = true
+	}
+	for _, c := range []string{"psql", "mysql", "redis", "sqlite"} {
+		if !clientes[c] {
+			continue
+		}
+		if c == "sqlite" {
+			fmt.Fprintf(a.stdout, "  one student:       kling db connect <copy> -sqlite\n")
+		} else {
+			fmt.Fprintf(a.stdout, "  one student:       kling db connect <copy> [-%s | -dsn]\n", c)
+		}
+	}
 	if o.passwords == "" {
 		fmt.Fprintf(a.stdout, "  passwords:         not printed; kling db class ls -prefix %s -passwords FILE writes them to a 0600 file\n", o.prefix)
 		return nil
@@ -434,6 +454,11 @@ func (a *app) classPasswords(o classOpts, members []*api.Machine) error {
 	n := 0
 	for _, mc := range members {
 		if classRowOf(mc).Ready {
+			if engineOf(mc.Labels) == engineSQLite {
+				// Sin servidor de red ni clave: se entra con connect -sqlite.
+				fmt.Fprintf(&b, "%s\t(sqlite: kling db connect %s -sqlite)\n", mc.Name, mc.Name)
+				continue
+			}
 			dsn, err := copyDSN(mc)
 			if err != nil {
 				return fmt.Errorf("%s: %w", mc.Name, err)
@@ -464,12 +489,22 @@ func copyDSN(mc *api.Machine) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return engineDSN(engineOf(mc.Labels), role, pw, h, port, db), nil
+}
+
+// engineDSN es la DSN de una copia según su motor (SQLite no tiene: no hay
+// servidor de red). La usan connect -dsn y class -passwords, para que no
+// puedan dar esquemas distintos.
+func engineDSN(engine, role, pw, h string, port int, db string) string {
 	u := url.URL{Scheme: "postgres", User: url.UserPassword(role, pw),
 		Host: net.JoinHostPort(h, strconv.Itoa(port)), Path: "/" + db, RawQuery: "sslmode=disable"}
-	if engineOf(mc.Labels) == engineMySQL {
+	switch engine {
+	case engineMySQL:
 		u.Scheme, u.RawQuery = "mysql", ""
+	case engineRedis:
+		u.Scheme, u.RawQuery, u.Path = "redis", "", "/0"
 	}
-	return u.String(), nil
+	return u.String()
 }
 
 // ── reset y rm ───────────────────────────────────────────────────────────────

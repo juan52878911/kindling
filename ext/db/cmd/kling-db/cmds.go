@@ -7,8 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -451,15 +449,7 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 		if err != nil {
 			return err
 		}
-		u := url.URL{Scheme: "postgres", User: url.UserPassword(role, pw),
-			Host: net.JoinHostPort(h, strconv.Itoa(port)), Path: "/" + db, RawQuery: "sslmode=disable"}
-		switch engine {
-		case engineMySQL:
-			u.Scheme, u.RawQuery = "mysql", ""
-		case engineRedis:
-			u.Scheme, u.RawQuery, u.Path = "redis", "", "/0"
-		}
-		fmt.Fprintln(a.stdout, u.String())
+		fmt.Fprintln(a.stdout, engineDSN(engine, role, pw, h, port, db))
 		return nil
 	case "mysql":
 		pw, err := readPW()
