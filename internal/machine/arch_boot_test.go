@@ -12,7 +12,7 @@ import (
 // consola, no menos loglevel de errores) y, solo en amd64, apaga la
 // emulación de i8042: en arm64 ese controlador no existe.
 func TestBootArgsQuietYArch(t *testing.T) {
-	got := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false, "")
+	got := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false, "", false)
 	if !strings.Contains(got, " quiet") {
 		t.Fatalf("falta quiet en la línea de arranque: %q", got)
 	}

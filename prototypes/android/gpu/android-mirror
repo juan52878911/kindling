@@ -1,0 +1,63 @@
+#!/bin/bash
+# android-mirror: lleva la pantalla de Android (Redroid) a la pantalla
+# virtio-gpu de la VM, que kling-vz enseña en una ventana del Mac
+# (KLING_VZ_GRAPHICS + KLING_VZ_WINDOW; ver prototypes/android/docs/gpu.md).
+#
+#   kling cp fbmirror      <m>:/usr/local/bin/fbmirror
+#   kling cp android-mirror <m>:/usr/local/bin/android-mirror
+#   kling exec <m> -- android-mirror start      # en segundo plano, se relanza solo
+#   kling exec <m> -- android-mirror stop
+#   kling exec <m> -- android-mirror once 10    # 10 s en primer plano, imprime los fps
+#
+# Por qué hace falta: Redroid compone en una pantalla VIRTUAL (hwcomposer.redroid)
+# y no pinta en ningún dispositivo KMS; la pantalla virtio-gpu de la VM, sin
+# esto, se queda en negro. screenrecord --output-format=raw-frames da los
+# fotogramas RGB888 crudos por stdout (solo cuando la pantalla cambia) y
+# fbmirror los copia a /dev/fb0. Con raw-frames screenrecord NO respeta
+# --time-limit (medido: sigue emitiendo), así que la duración la pone timeout;
+# el bucle lo relanza si muere.
+set -euo pipefail
+
+PIDFILE=/run/kindling-android/mirror.pid
+LOG=/var/log/android-mirror.log
+
+tam() {
+  # "Physical size: 720x1280" de wm size (con override si lo hay).
+  android-sh wm size | sed -n 's/.*size: \([0-9]*x[0-9]*\).*/\1/p' | tail -1
+}
+
+pasada() { # SEGUNDOS
+  local s
+  s="$(tam)"
+  [ -n "$s" ] || { echo "android-mirror: Android has no display yet" >&2; return 1; }
+  timeout "$1" android-sh screenrecord --output-format=raw-frames --size "$s" - |
+    fbmirror -size "$s"
+}
+
+case "${1:-}" in
+  start)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "android-mirror: already running (PID $(cat "$PIDFILE"))"; exit 0
+    fi
+    mkdir -p "$(dirname "$PIDFILE")"
+    nohup setsid "$0" loop >>"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+    echo "android-mirror: started (PID $!, log $LOG)"
+    ;;
+  loop)
+    while :; do pasada 3600 || sleep 2; done
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      kill -- -"$(cat "$PIDFILE")" 2>/dev/null || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+      rm -f "$PIDFILE"
+    fi
+    android-sh pkill -f screenrecord >/dev/null 2>&1 || true
+    echo "android-mirror: stopped"
+    ;;
+  once)
+    pasada "${2:-10}"
+    ;;
+  *)
+    echo "uso: $0 start|stop|once [segundos]" >&2; exit 2 ;;
+esac

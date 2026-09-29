@@ -88,8 +88,13 @@ func ResyncHandler() http.HandlerFunc {
 			http.Error(w, "setting the clock: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// El estado de "listo" va en la respuesta: al daemon le dice, sin otra
+		// petición, si la imagen declara ganchos que lanzar (POST /hooks, que
+		// pide él cuando ya montó volúmenes y entregó credenciales) o una
+		// sonda que esperar (ver ready.go).
+		st := readyState.snapshot()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds()})
+		_ = json.NewEncoder(w).Encode(api.GuestResyncResult{SkewMS: skew.Milliseconds(), Ready: &st})
 	}
 }
 
@@ -109,7 +114,8 @@ func validarResync(req api.GuestResync) error {
 // del agente —el gateway MCP— las tiene que cortar: /resync mueve el reloj,
 // /volume/release desmonta los volúmenes por debajo del servidor, /exec ejecuta,
 // /share conecta una carpeta del host.
-var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns", "/share"}
+var controlPaths = []string{api.GuestResyncPath, "/volume", "/exec", "/files", "/dns", "/share",
+	api.GuestReadyPath, api.GuestHooksPath, api.GuestMemInfoPath}
 
 // IsControlPath dice si p (una ruta ya limpia, con path.Clean) es una ruta de
 // control del agente y no algo que un cliente del servicio deba alcanzar.

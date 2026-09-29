@@ -37,7 +37,15 @@ func resolveFromHost(rel string) (string, error) {
 		return "", fmt.Errorf("from_host must be a path relative to %s: %q", libDir(), rel)
 	}
 	p := filepath.Join(libDir(), filepath.Clean(rel))
-	st, err := os.Stat(p)
+	// Por os.Root: un enlace simbólico de libDir puede apuntar dentro de él,
+	// pero no llevar a un fichero cualquiera del host (que acabaría copiado
+	// en la imagen).
+	root, err := os.OpenRoot(libDir())
+	if err != nil {
+		return "", fmt.Errorf("from_host: %w", err)
+	}
+	defer root.Close()
+	st, err := root.Stat(filepath.Clean(rel))
 	if err != nil || !st.Mode().IsRegular() {
 		return "", fmt.Errorf("from_host %q is not a file in %s", rel, libDir())
 	}

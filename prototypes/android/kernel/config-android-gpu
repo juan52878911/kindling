@@ -1,0 +1,25 @@
+# Perfil "gpu" del kernel Android: config-android + una pantalla virtio-gpu.
+# Solo lo aplica `ANDROID_PROFILE=gpu kernel/build.sh` (va DETRÁS de
+# config-android, así que gana a los "is not set" de config-common). El K1
+# normal y el kernel Android sin perfil no cambian. Ver docs/gpu.md.
+#
+# Por qué solo esto:
+#   - vz (Virtualization.framework) da a un invitado Linux un
+#     VZVirtioGraphicsDevice 2D: scanout y nada más. No anuncia VIRGL ni
+#     contextos (venus), así que no hay nada que acelerar dentro; el kernel solo
+#     necesita el driver KMS para tener una pantalla que el Mac enseñe en una
+#     VZVirtualMachineView.
+#   - DRM_FBDEV_EMULATION da /dev/fb0 sobre esa pantalla: el espejo de Android
+#     (gpu/fbmirror) escribe ahí sin libdrm. Con fbdev el driver hace él solo
+#     el "dirty" y la transferencia al anfitrión.
+#   - SIN consola en el framebuffer (VT ya está apagado en config-common):
+#     el cursor de fbcon pintaría encima de Android.
+#   - Sin teclado/puntero: vz solo ofrece USB (xHCI + HID) para Linux, y el
+#     núcleo prohíbe USB. La entrada sigue siendo `input tap/swipe` por exec.
+CONFIG_DRM=y
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_DRM_FBDEV_OVERALLOC=100
+CONFIG_FB=y
+# CONFIG_FRAMEBUFFER_CONSOLE is not set
+# CONFIG_DRM_LEGACY is not set

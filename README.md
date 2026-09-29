@@ -487,6 +487,11 @@ which DNATs to the guest.
 
 It is the same approach AWS Lambda uses, and for the same reason.
 
+Each /30 is checked against the host before it is handed out: two daemons on the same
+host (the system one and a private one with its own `-root`) never mount the same
+subnet. A daemon claims the index in `/run/kindling/net-claims/` and skips any /30 that
+already has an address on the host.
+
 ---
 
 # Sandboxes for code agents

@@ -158,6 +158,11 @@ func (c *Client) ProcStats(ctx context.Context) (*ProcStats, error) {
 
 func (c *Client) Run(ctx context.Context, r RunRequest) (*Machine, error) {
 	var m Machine
+	if r.WaitReady {
+		// La espera a "listo" puede pasar del minuto de tope de cabeceras
+		// (un Android en frío con el Mac cargado): la acota ctx.
+		return &m, c.doWith(c.long, ctx, http.MethodPost, "/machines", r, &m)
+	}
 	return &m, c.do(ctx, http.MethodPost, "/machines", r, &m)
 }
 
@@ -278,8 +283,18 @@ func (c *Client) Resize(ctx context.Context, ref string, memMiB int) (*Machine, 
 }
 
 func (c *Client) Squeeze(ctx context.Context, ref string) (*SqueezeResult, error) {
+	return c.SqueezeWith(ctx, ref, false)
+}
+
+// SqueezeWith es Squeeze; force aprieta también una copia que comparte memoria
+// con su dorado (Machine.MemShared), que el daemon rechaza sin él.
+func (c *Client) SqueezeWith(ctx context.Context, ref string, force bool) (*SqueezeResult, error) {
 	var res SqueezeResult
-	return &res, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/squeeze", nil, &res)
+	path := "/machines/" + ref + "/squeeze"
+	if force {
+		path += "?force=1"
+	}
+	return &res, c.doWith(c.long, ctx, http.MethodPost, path, nil, &res)
 }
 
 // PutMMDS inyecta el store MMDS (un secreto de sesión) en una microVM viva. data
@@ -421,8 +436,38 @@ func (c *Client) SetLabels(ctx context.Context, ref string, labels map[string]st
 // Commit congela una máquina como snapshot dorado. replace permite pisar uno
 // existente con el mismo nombre (el daemon se niega si tiene instancias vivas).
 func (c *Client) Commit(ctx context.Context, ref, name string, replace bool) (*Snapshot, error) {
+	return c.CommitWith(ctx, ref, CommitRequest{Name: name, Replace: replace})
+}
+
+// CommitWith es Commit con la petición entera (skip_ready, ready_timeout_seconds).
+// Sin tope de cabeceras: el daemon espera a que el invitado esté listo según su
+// imagen antes de congelarlo, y eso puede ser más de un minuto. Acota ctx.
+func (c *Client) CommitWith(ctx context.Context, ref string, req CommitRequest) (*Snapshot, error) {
 	var s Snapshot
-	return &s, c.do(ctx, http.MethodPost, "/machines/"+ref+"/commit", CommitRequest{Name: name, Replace: replace}, &s)
+	return &s, c.doWith(c.long, ctx, http.MethodPost, "/machines/"+ref+"/commit", req, &s)
+}
+
+// Ready pregunta si la máquina ref está lista según su imagen (sonda y ganchos
+// tras restaurar); con wait > 0 espera hasta ese plazo. Un "no listo" no es un
+// error: mira ReadyResult.OK.
+func (c *Client) Ready(ctx context.Context, ref string, wait time.Duration) (*ReadyResult, error) {
+	var res ReadyResult
+	path := "/machines/" + ref + "/ready"
+	if wait > 0 {
+		path += "?wait=" + url.QueryEscape(wait.String())
+	}
+	return &res, c.doWith(c.long, ctx, http.MethodGet, path, nil, &res)
+}
+
+// RunHooks vuelve a lanzar los ganchos tras restaurar de la máquina ref y, con
+// wait > 0, espera a que acaben.
+func (c *Client) RunHooks(ctx context.Context, ref string, wait time.Duration) (*ReadyResult, error) {
+	var res ReadyResult
+	path := "/machines/" + ref + "/hooks"
+	if wait > 0 {
+		path += "?wait=" + url.QueryEscape(wait.String())
+	}
+	return &res, c.doWith(c.long, ctx, http.MethodPost, path, nil, &res)
 }
 
 func (c *Client) Snapshots(ctx context.Context) ([]*Snapshot, error) {

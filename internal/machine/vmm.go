@@ -151,6 +151,17 @@ func evaluarNivelMemoria(nivel, minimo int) error {
 		nivel, minimo)}
 }
 
+// parseSwapUsage interpreta el valor crudo de vm.swapusage de macOS (struct
+// xsw_usage: xsu_total, xsu_avail, xsu_used, en bytes) en MiB.
+func parseSwapUsage(b []byte) (usado, total int64, ok bool) {
+	if len(b) < 24 {
+		return 0, 0, false
+	}
+	total = int64(leerUint64LE(string(b[0:8])) >> 20)
+	usado = int64(leerUint64LE(string(b[16:24])) >> 20)
+	return usado, total, true
+}
+
 // leerUint64LE interpreta el valor crudo de un sysctl entero de 64 bits. El
 // syscall.Sysctl de la biblioteca estándar quita un byte final a cero, así que
 // se rellena hasta ocho antes de leerlo.

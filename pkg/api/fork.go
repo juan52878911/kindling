@@ -36,6 +36,11 @@ type ForkRequest struct {
 	// Labels se suman a las de cada copia desde su nacimiento. Claves con
 	// KeyPattern; no se admiten kind ni kling.fork-of, que pone el daemon.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Antes de pausar el original, el daemon espera a que esté listo según su
+	// imagen, y devuelve cada copia cuando lo está (ganchos tras restaurar
+	// incluidos). SkipReady se lo salta; ReadyTimeoutSeconds, por defecto 120.
+	SkipReady           bool `json:"skip_ready,omitempty"`
+	ReadyTimeoutSeconds int  `json:"ready_timeout_seconds,omitempty"`
 }
 
 // Límites de las etiquetas de un fork.

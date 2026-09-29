@@ -37,6 +37,21 @@ func objetivoSinEstadisticas(mc *api.Machine) int {
 	return globoBase(mc) + mc.MemMiB - suelo
 }
 
+// objetivoConMeminfo es el objetivo del globo en macOS cuando el agente dice
+// cuánta memoria tiene disponible el invitado (GET /meminfo). Se reclama lo
+// disponible menos un colchón de un cuarto de su RAM (mínimo el de siempre),
+// y nunca por debajo del suelo de objetivoSinEstadisticas. Sin el colchón, un
+// Android de 1 GiB apretado a la mitad se quedó con 4 MiB disponibles y el
+// `uiautomator dump` dejó de contestar (prototypes/android/docs/densidad.md).
+func objetivoConMeminfo(mc *api.Machine, actualMiB int, mi api.GuestMemInfo) int {
+	colchon := max(balloonSqueezeMarginMiB, mc.MemMiB/4)
+	reclamable := mi.AvailableMiB - colchon
+	if reclamable <= 0 {
+		return actualMiB
+	}
+	return min(actualMiB+reclamable, objetivoSinEstadisticas(mc))
+}
+
 func globoBase(mc *api.Machine) int {
 	if mc == nil || mc.MemMaxMiB <= mc.MemMiB {
 		return 0

@@ -407,6 +407,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds: ttl, OnTTL: onTTL,
 		Volumes: req.Volumes, Shares: req.Shares, Labels: labels,
 		AllowExec: true,
+		WaitReady: req.WaitReady, ReadyTimeoutSeconds: req.ReadyTimeoutSeconds,
 	})
 	if err != nil {
 		fail(w, runStatus(err), err)

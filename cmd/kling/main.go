@@ -183,7 +183,7 @@ func main() {
 // squeeze, mmds) son alias.
 func cmdMachine(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential|audit> <ref> [...]")
+		return fmt.Errorf("usage: kling machine <resize|squeeze|secret|credential|audit|ready|hooks> <ref> [...]")
 	}
 	switch args[0] {
 	case "resize":
@@ -196,8 +196,12 @@ func cmdMachine(args []string) error {
 		return cmdCredential(args[1:])
 	case "audit":
 		return cmdCredAudit(args[1:])
+	case "ready":
+		return cmdReady(args[1:])
+	case "hooks":
+		return cmdHooks(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret, credential or audit", args[0])
+	return fmt.Errorf("unknown subcommand %q: use resize, squeeze, secret, credential, audit, ready or hooks", args[0])
 }
 
 // errConCodigo deja que un comando pida un codigo de salida concreto.
@@ -427,6 +431,8 @@ func cmdRun(args []string) error {
 	volRO := fs.Bool("volume-ro", false, "mount it read-only: so several microVMs can share it")
 	allowExec := fs.Bool("allow-exec", false, "enable kling exec and kling cp on this machine (decided at boot; snapshots keep it)")
 	onTTL := fs.String("on-ttl", "", "what happens when -ttl runs out: freeze (default) or remove")
+	waitReady := fs.Bool("wait-ready", false, "return once the guest is ready by its image's own probe and post-restore hooks, not just when its agent answers")
+	readyTimeout := fs.Duration("ready-timeout", 0, "with -wait-ready, how long to wait (default 2m)")
 	var labels labelFlag
 	fs.Var(&labels, "label", "key=value label (repeatable)")
 	var shares shareFlag
@@ -463,8 +469,13 @@ func cmdRun(args []string) error {
 		Egress:       egressReq,
 		AllowDomains: allowReq,
 		TTLSeconds:   config.Or(*ttl, cfg.Defaults.TTL),
-		CPUPct:       config.Or(resolveCPUPct(fs, *cpuPct, *cpu), cfg.Defaults.CPUPct),
-		Labels:       labels.merge(*service),
+		// El flag va en CPUPct; el valor por defecto de la configuración, aparte:
+		// el del dorado y el de la receta de la imagen le ganan (ver RunRequest).
+		CPUPct:              resolveCPUPct(fs, *cpuPct, *cpu),
+		CPUPctDefault:       cfg.Defaults.CPUPct,
+		WaitReady:           *waitReady,
+		ReadyTimeoutSeconds: int(readyTimeout.Seconds()),
+		Labels:              labels.merge(*service),
 		// El volumen es una propiedad de la MÁQUINA, no solo de un servicio MCP:
 		// arrancar una a mano con almacenamiento que sobreviva es tan legítimo
 		// como importar un servicio con él.
@@ -480,6 +491,15 @@ func cmdRun(args []string) error {
 		fmt.Printf("%s  %s  instantiated from %s in %d ms\n", mc.ID[:12], mc.Name, mc.From, mc.ThawMS)
 	} else {
 		fmt.Printf("%s  %s  booted cold in %d ms\n", mc.ID[:12], mc.Name, mc.BootMS)
+	}
+	if *waitReady {
+		switch mc.Ready {
+		case api.ReadyYes:
+			fmt.Printf("  ready (its image's probe passed)\n")
+		case api.ReadyWaiting, api.ReadyFailed:
+			return &errWithHint{err: fmt.Errorf("%s is running but not ready (%s)", mc.Name, mc.Ready),
+				hint: "kling machine ready " + mc.Name + "   (says why)"}
+		}
 	}
 	for _, s := range mc.Shares {
 		fmt.Printf("  %s  %s  (%s)\n", s.Mount, s.Source, s.Mode)
@@ -543,7 +563,7 @@ func cmdSave(args []string) error {
 	// en un servicio de node. Se cambia disco por latencia de despertar, y a partir
 	// de unas decenas de servicios la cuenta puede no salir.
 	warm := fs.Bool("warm", true, "ask the guest agent to start its runtime before freezing, if it supports it (bigger snapshot, much faster first wake)")
-	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve before committing")
+	espera := fs.Duration("wait", 60*time.Second, "how long to wait for the guest to serve (and to be ready by its image's probe) before committing")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -561,7 +581,12 @@ func cmdSave(args []string) error {
 		}
 	}
 
-	snap, err := c.Commit(ctx, fs.Arg(0), fs.Arg(1), *replace)
+	// El daemon además espera a que el invitado esté listo según su imagen
+	// (sonda y ganchos): un dorado a medio arrancar lo está en cada copia.
+	snap, err := c.CommitWith(ctx, fs.Arg(0), api.CommitRequest{
+		Name: fs.Arg(1), Replace: *replace, SkipReady: *force,
+		ReadyTimeoutSeconds: int(espera.Seconds()),
+	})
 	if err != nil {
 		return err
 	}
@@ -652,14 +677,21 @@ func cmdPS(args []string) error {
 	// La columna de carpetas solo aparece si alguna máquina tiene: quien no
 	// las usa no paga el ancho, y los scripts que leen la tabla de siempre
 	// siguen viendo la misma.
-	conShares := false
+	conShares, conListo := false, false
 	for _, mc := range list {
 		if len(mc.Shares) > 0 {
 			conShares = true
 		}
+		// Igual con READY: solo si alguna imagen declara sonda o ganchos.
+		if mc.Ready != "" {
+			conListo = true
+		}
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	head := "ID\tNAME\tIMAGE/TEMPLATE\tSTATE\tCPU/MEM\tDISK\tEGRESS\tAGE\tLAST OP"
+	if conListo {
+		head += "\tREADY"
+	}
 	if conShares {
 		head += "\tSHARES"
 	}
@@ -683,6 +715,13 @@ func cmdPS(args []string) error {
 		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%d/%dMiB\t%s\t%s\t%s\t%s",
 			mc.ID[:12], mc.Name, origin, mc.State,
 			mc.VCPUs, mc.MemMiB, human(mc.DiskBytes), eg, since(mc.CreatedAt), lastOp(mc))
+		if conListo {
+			listo := mc.Ready
+			if listo == "" || mc.State != api.StateRunning {
+				listo = "-"
+			}
+			row += "\t" + listo
+		}
 		if conShares {
 			row += "\t" + sharesColumn(mc)
 		}
@@ -796,6 +835,7 @@ func cmdLifecycle(op string, args []string) error {
 func cmdSqueeze(args []string) error {
 	fs := flag.NewFlagSet("squeeze", flag.ExitOnError)
 	host := hostFlag(fs)
+	force := fs.Bool("force", false, "squeeze also a copy that shares memory with its template (Firecracker): usually makes the host use MORE memory")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -806,7 +846,7 @@ func cmdSqueeze(args []string) error {
 	defer stop()
 	c := api.NewClient(hostOf(*host))
 	for _, ref := range fs.Args() {
-		res, err := c.Squeeze(ctx, ref)
+		res, err := c.SqueezeWith(ctx, ref, *force)
 		if err != nil {
 			return err
 		}
@@ -837,11 +877,13 @@ func cmdMMDS(args []string) error {
 	fs := flag.NewFlagSet("mmds", flag.ExitOnError)
 	host := hostFlag(fs)
 	file := fs.String("f", "", "JSON file with the MMDS store (default: stdin)")
+	hooks := fs.Bool("hooks", false, "then run the image's post-restore hooks and wait for them (they read the secret)")
+	hooksWait := fs.Duration("hooks-wait", time.Minute, "with -hooks, how long to wait for them")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: kling machine secret <ref> [-f store.json]  (reads stdin if no -f)")
+		return fmt.Errorf("usage: kling machine secret <ref> [-f store.json] [-hooks]  (reads stdin if no -f)")
 	}
 
 	var raw []byte
@@ -865,9 +907,33 @@ func cmdMMDS(args []string) error {
 	ctx, stop := ctxWithSignals()
 	defer stop()
 
-	mc, err := api.NewClient(hostOf(*host)).PutMMDS(ctx, fs.Arg(0), data)
+	c := api.NewClient(hostOf(*host))
+	mc, err := c.PutMMDS(ctx, fs.Arg(0), data)
 	if err != nil {
 		return err
+	}
+	if *hooks {
+		res, err := c.RunHooks(ctx, fs.Arg(0), *hooksWait)
+		if err != nil {
+			return err
+		}
+		if !res.OK() {
+			detalle := ""
+			if res.Guest != nil {
+				detalle = ": " + res.Guest.Detail
+			}
+			return fmt.Errorf("%s: post-restore hooks did not finish (%s)%s", mc.Name, res.Ready, detalle)
+		}
+		fmt.Printf("%s  post-restore hooks done in %d ms\n", mc.ID[:12], res.WaitedMS)
+	}
+	if !mc.HasSecrets {
+		fmt.Printf("%s  MMDS store emptied (no secrets: it can be frozen)\n", mc.ID[:12])
+		return nil
+	}
+	if vacio := strings.Join(strings.Fields(string(data)), ""); vacio == "{}" || vacio == "null" {
+		fmt.Printf("%s  MMDS store emptied, still marked with secrets: no post-restore hook consumed them "+
+			"after the last injection (use -hooks when injecting)\n", mc.ID[:12])
+		return nil
 	}
 	fmt.Printf("%s  secrets injected via MMDS (can no longer be frozen)\n", mc.ID[:12])
 	return nil

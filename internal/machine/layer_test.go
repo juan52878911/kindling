@@ -140,11 +140,11 @@ func TestLayerDevice(t *testing.T) {
 // La línea de comandos de una imagen monolítica no cambia ni un byte: es la
 // misma con la que arrancan todos los snapshots ya congelados.
 func TestBootArgsLayer(t *testing.T) {
-	legacy := bootArgs(nil, false, "")
+	legacy := bootArgs(nil, false, "", false)
 	if strings.Contains(legacy, api.LayerBootParam) {
 		t.Fatalf("sin capa no debe aparecer %s: %q", api.LayerBootParam, legacy)
 	}
-	con := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false, "/dev/vdd")
+	con := bootArgs([]api.VolumeAttachment{{Mount: "/data"}}, false, "/dev/vdd", false)
 	if !strings.Contains(con, api.LayerBootParam+"=/dev/vdd") {
 		t.Fatalf("falta la capa en %q", con)
 	}
