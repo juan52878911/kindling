@@ -218,6 +218,17 @@ func TestContrasenaMala(t *testing.T) {
 	}
 }
 
+func TestNoCleartextNoEnviaLaClave(t *testing.T) {
+	f := nuevoFalso(t, "clear", "s3cret")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cfg := Config{Addr: f.ln.Addr().String(), User: "u", Password: "s3cret", Database: "d", Timeout: 5 * time.Second, NoCleartext: true}
+	if c, err := Dial(ctx, cfg); err == nil {
+		c.Close()
+		t.Fatal("NoCleartext aceptó la contraseña en claro")
+	}
+}
+
 func TestErrorDeConsultaDejaLaConexionUsable(t *testing.T) {
 	f := nuevoFalso(t, "trust", "")
 	f.err = true
