@@ -35,6 +35,8 @@ func cmdMCP(args []string) error {
 		return mcpList(rest)
 	case "inspect":
 		return mcpInspect(rest)
+	case "isolation":
+		return mcpIsolation(rest)
 	case "refresh-bridge":
 		return imagesRefresh(args[1:])
 	case "refresh":
@@ -90,6 +92,8 @@ func mcpImport(args []string) error {
 	force := fs.Bool("force", false, "replace the service if it already exists")
 	stateful := fs.Bool("stateful", false, "force a persistent instance (default: inferred from the catalog)")
 	ephemeral := fs.Bool("ephemeral", false, "force ephemeral machines even if the analysis says otherwise")
+	isolation := fs.String("isolation", mcp.IsolationService,
+		"persistent instance shared by all sessions (service) or one microVM per session (session)")
 	allowRuntimeInstall := fs.Bool("allow-runtime-install", false,
 		"import even if the server installs dependencies at runtime (not recommended: bake them into the image)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
@@ -101,6 +105,10 @@ func mcpImport(args []string) error {
 	}
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: kling mcp import <service> [-image image]")
+	}
+	// Antes de arrancar nada: equivocarse aquí no debe costar una importación.
+	if !mcp.ValidIsolation(*isolation) {
+		return fmt.Errorf("-isolation %q: use %s or %s", *isolation, mcp.IsolationService, mcp.IsolationSession)
 	}
 	service := fs.Arg(0)
 	img := config.Or(*image, service)
@@ -382,6 +390,13 @@ func mcpImport(args []string) error {
 		cleanup()
 		return err
 	}
+	if *isolation == mcp.IsolationSession {
+		if err := mcp.SetIsolation(ctx, c, service, *isolation); err != nil {
+			fmt.Println("✗")
+			cleanup()
+			return err
+		}
+	}
 	fmt.Println("✓")
 
 	cleanup()
@@ -401,6 +416,10 @@ func mcpImport(args []string) error {
 		fmt.Printf("\nIt will use a persistent instance so it doesn't lose what it accumulates. When idle\n")
 		fmt.Printf("it freezes: it stops spending CPU and RAM, and comes back in milliseconds with\n")
 		fmt.Printf("its state intact.\n")
+	}
+	if *isolation == mcp.IsolationSession {
+		fmt.Printf("\nEach MCP session gets its own microVM and disk: no session sees what another\n")
+		fmt.Printf("wrote. Closing or expiring the session destroys its machine. Volumes stay shared.\n")
 	}
 	if egr == "allowlist" {
 		if len(allowDomains) > 0 {

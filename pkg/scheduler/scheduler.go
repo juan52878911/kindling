@@ -220,9 +220,27 @@ type Scheduler struct {
 	// y se usa el cliente: el desalojo por falta de memoria no se puede ejercitar
 	// de otro modo sin levantar un daemon con KVM.
 	freezeFn func(id string) error
+	// removeFn sustituye el borrado de máquinas en los tests (ver
+	// destruirAislada).
+	removeFn func(ctx context.Context, id string) error
 	// renewCap dice si el daemon sabe renovar TTLs (capacidad "renew"): 0 aún
 	// no se sabe, 1 sí, 2 no. Ver renovarTTL.
 	renewCap atomic.Int32
+
+	// SessionTTL es cuánto vive una sesión AISLADA sin uso antes de destruir
+	// su microVM (ver aislada.go). Congelarla por inactividad no la cierra:
+	// esto sí. 0 = defaultSessionTTL.
+	SessionTTL time.Duration
+	// aisladas son las sesiones con microVM propia: clave de sesión -> su
+	// máquina, despierta o congelada. Se toca con mu.
+	aisladas map[string]*aislada
+	// aisladaMu serializa, por clave de sesión, crear o despertar su máquina
+	// (el equivalente de ensureMu para una sesión aislada).
+	aisladaMu sync.Map
+	// barridoAt es la última vez que se buscaron máquinas aisladas huérfanas
+	// (ver barrerAisladas). Se toca con mu.
+	barridoAt time.Time
+
 	mu       sync.Mutex
 	services map[string]*entry        // servicio -> instancia "por defecto" (primaria)
 	extra    map[string][]*entry      // servicio -> RÉPLICAS de scale-out (además de la primaria)
@@ -314,6 +332,13 @@ type entry struct {
 
 	// memMiB es la memoria configurada de la máquina: el coste de pausarla.
 	memMiB int
+
+	// aislada es la clave de la sesión dueña de esta instancia cuando es la
+	// microVM propia de una sesión aislada (ver aislada.go); vacía en el resto.
+	// Una instancia aislada vive en g.extra para que el segador, el desalojo,
+	// el latido del TTL y las cuotas la traten como a cualquier otra, pero
+	// NUNCA recibe una sesión que no sea la suya: entriesLocked la excluye.
+	aislada string
 
 	// wake es el desglose del despertar que dejó lista esta instancia, hasta
 	// que la primera petición lo recoge (TakeWake).
@@ -460,6 +485,11 @@ func (g *Scheduler) route(sid string) *sessionRoute {
 	if e := g.entryByMachineLocked(rt.service, rt.machineID); e != nil {
 		e.lastUse = time.Now()
 	}
+	// Una sesión aislada se usa aunque su máquina esté congelada: es lo que
+	// retrasa que caduque (ver reapOnce).
+	if a := g.aisladas[sid]; a != nil {
+		a.lastUse = time.Now()
+	}
 	return rt
 }
 
@@ -580,6 +610,17 @@ func (g *Scheduler) ensure(ctx context.Context, service string) (*entry, error) 
 // instancias del tenant y el desalojo por memoria, porque siempre crea/despierta
 // —el camino de reutilizar una instancia caliente retorna antes de llegar aquí—.
 func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant, fresh bool) (*entry, error) {
+	return g.buildEntryWith(ctx, service, tnt, func(tr *WakeTrace) (*api.Machine, string, error) {
+		return g.acquire(ctx, service, fresh, tr)
+	})
+}
+
+// buildEntryWith es buildEntry con la forma de conseguir la máquina a elegir:
+// acquire para la primaria y las réplicas, o crear/despertar una máquina
+// concreta para una sesión aislada (ver aislada.go). La máquina que devuelva
+// adquirir tiene que quedar marcada en g.adquiriendo, como hace acquire.
+func (g *Scheduler) buildEntryWith(ctx context.Context, service string, tnt *tenant,
+	adquirir func(tr *WakeTrace) (*api.Machine, string, error)) (*entry, error) {
 	// Cuota de instancias del tenant: reparto justo, no seguridad (ver quota.go).
 	liberarCuota, err := g.reservarTenant(tnt)
 	if err != nil {
@@ -596,7 +637,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 
 	t0 := time.Now()
 	tr := &WakeTrace{}
-	mc, how, err := g.acquire(ctx, service, fresh, tr)
+	mc, how, err := adquirir(tr)
 	// No cabe: se hace sitio congelando instancias ociosas y se reintenta,
 	// EN BUCLE. Una sola puede no bastar —si el anfitrión está muy justo hacen
 	// falta varias—, y rendirse tras la primera dejaba el 502 igual que antes.
@@ -622,7 +663,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 				break
 			}
 			log.Printf("%s: at the daemon's machine limit; dropped a prewarmed instance", service)
-			mc, how, err = g.acquire(ctx, service, fresh, tr)
+			mc, how, err = adquirir(tr)
 			continue
 		}
 		victima := g.evictLRU(ctx, service, tnt.name)
@@ -636,7 +677,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 		} else {
 			log.Printf("%s: didn't fit; froze %s to make room", service, victima)
 		}
-		mc, how, err = g.acquire(ctx, service, fresh, tr)
+		mc, how, err = adquirir(tr)
 	}
 	if err != nil {
 		return nil, err
@@ -674,7 +715,7 @@ func (g *Scheduler) buildEntry(ctx context.Context, service string, tnt *tenant,
 	// instante, un arranque en frío bajo KVM anidado tarda segundos. Se registra solo
 	// cuando es notable, para no ensuciar el log con los thaws de milisegundos.
 	if d := time.Since(wr0); d > 500*time.Millisecond {
-		log.Printf("%s: waitReady %v (fresh=%v)", service, d.Round(time.Millisecond), fresh)
+		log.Printf("%s: waitReady %v (%s)", service, d.Round(time.Millisecond), how)
 	}
 	if g.OnAcquire != nil {
 		g.OnAcquire(service, how, tr.Total)
@@ -793,14 +834,20 @@ func gwMaxSessions(memMiB int) int {
 	return cap
 }
 
-// entriesLocked devuelve TODAS las instancias vivas de un servicio: la primaria y
-// las réplicas de scale-out. Se llama con g.mu tomado.
+// entriesLocked devuelve las instancias vivas de un servicio que pueden recibir
+// sesiones nuevas: la primaria y las réplicas de scale-out. Las aisladas NO: son
+// de una sola sesión, y colar otra en ellas es justo la fuga de estado que
+// existen para evitar. Se llama con g.mu tomado.
 func (g *Scheduler) entriesLocked(service string) []*entry {
 	var es []*entry
 	if e := g.services[service]; e != nil {
 		es = append(es, e)
 	}
-	es = append(es, g.extra[service]...)
+	for _, e := range g.extra[service] {
+		if e.aislada == "" {
+			es = append(es, e)
+		}
+	}
 	return es
 }
 
@@ -808,7 +855,12 @@ func (g *Scheduler) entriesLocked(service string) []*entry {
 // por su machineID. Es lo que permite que una sesión pegajosa a una RÉPLICA
 // vuelva a ella y no se confunda con la primaria. Se llama con g.mu tomado.
 func (g *Scheduler) entryByMachineLocked(service, machineID string) *entry {
-	for _, e := range g.entriesLocked(service) {
+	if e := g.services[service]; e != nil && e.machineID == machineID {
+		return e
+	}
+	// g.extra entero, aisladas incluidas: aquí se busca UNA máquina concreta,
+	// no un hueco para una sesión nueva.
+	for _, e := range g.extra[service] {
 		if e.machineID == machineID {
 			return e
 		}
@@ -935,6 +987,11 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 		if m.Labels["pool"] == "true" || m.Labels["ephemeral"] == "true" {
 			return false
 		}
+		// Y las de una sesión aislada son de esa sesión: adoptar o descongelar
+		// una para otra le entregaría el disco y la memoria de la anterior.
+		if m.Labels[LabelIsolated] == "true" {
+			return false
+		}
 		// Con etiquetas propias, solo lo que lleva todas es nuestro.
 		for k, v := range g.MachineLabels {
 			if m.Labels[k] != v {
@@ -1055,6 +1112,12 @@ func (g *Scheduler) port() int {
 // llamada da una microVM distinta (su propio machineID), que es lo que permite
 // tener varias réplicas del mismo servicio a la vez.
 func (g *Scheduler) runFresh(ctx context.Context, service string) (*api.Machine, error) {
+	return g.runFreshWith(ctx, service, nil)
+}
+
+// runFreshWith es runFresh con etiquetas de más para la máquina nueva (la
+// marca de sesión aislada).
+func (g *Scheduler) runFreshWith(ctx context.Context, service string, extra map[string]string) (*api.Machine, error) {
 	snap, err := g.snapshotFor(ctx, service)
 	if err != nil {
 		return nil, err
@@ -1074,8 +1137,9 @@ func (g *Scheduler) runFresh(ctx context.Context, service string) (*api.Machine,
 		// El techo de CPU también viaja con el snapshot: sin esto la restauración
 		// caía al defaultCPUPct=50 del daemon y un servicio importado con más CPU
 		// arrancaba estrangulado. 0 (snapshots viejos) deja que el daemon decida.
-		CPUPct:     snap.CPUPct,
-		Labels:     api.MergeLabels(g.MachineLabels, map[string]string{api.LabelService: service}),
+		CPUPct: snap.CPUPct,
+		Labels: api.MergeLabels(api.MergeLabels(g.MachineLabels, extra),
+			map[string]string{api.LabelService: service}),
 		TTLSeconds: g.ttlSeconds(), // red de seguridad si el planificador muere
 	})
 }
@@ -1496,10 +1560,12 @@ func (g *Scheduler) prewarmBudget(ctx context.Context) int {
 	return b
 }
 
-// Drain destruye las instancias pre-calentadas. Se llama al parar el gateway.
+// Drain destruye las instancias pre-calentadas y las máquinas de las sesiones
+// aisladas. Se llama al parar el gateway.
 func (g *Scheduler) Drain(ctx context.Context) {
 	g.pop.fold() // deja el historial de popularidad en disco antes de irse
 	g.pool.drain(ctx)
+	g.soltarAisladas(ctx)
 }
 
 func (g *Scheduler) reapOnce(ctx context.Context) {
@@ -1507,6 +1573,9 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	var victims []victim
 
 	g.mu.Lock()
+	// Primero las sesiones aisladas caducadas: su máquina se DESTRUYE, así que
+	// no tiene sentido elegirla además para congelar.
+	caducadas := g.caducarAisladasLocked()
 	// Con trabajo en vuelo NO se congela, por vieja que parezca: lastUse solo dice
 	// cuándo llegó algo, no si sigue corriendo. Aplica igual a la primaria y a las
 	// réplicas de scale-out; una réplica con sesiones activas mantiene su lastUse
@@ -1538,11 +1607,18 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	}
 	// Las sesiones de una instancia que se congela dejan de ser enrutables: su
 	// proceso servidor muere con ella.
+	//
+	// Salvo las aisladas: su máquina es suya y se congela CON su proceso, así
+	// que la sesión sobrevive al thaw. Las caduca SessionTTL, no idle.
 	for sid, rt := range g.routes {
+		if _, aislada := g.aisladas[sid]; aislada {
+			continue
+		}
 		if time.Since(rt.lastUse) > g.idle {
 			delete(g.routes, sid)
 		}
 	}
+	barrer := g.tocaBarrerLocked()
 	// Latido del TTL de las que siguen despiertas (ver renovarTTL). El segador
 	// pasa cada idle/3 y el TTL es 2×idle: renovando lo que lleva más de idle/2
 	// sin renovar, entre dos renovaciones nunca pasa más de ~idle, y no se
@@ -1583,6 +1659,12 @@ func (g *Scheduler) reapOnce(ctx context.Context) {
 	g.enfriarPausadas(ctx)
 	for _, id := range renovar {
 		g.renovarTTL(ctx, id)
+	}
+	for _, a := range caducadas {
+		g.destruirAislada(ctx, a, "expired")
+	}
+	if barrer {
+		g.barrerAisladas(ctx)
 	}
 }
 
@@ -1636,7 +1718,10 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		var elegido, id string
 		var masAntiguo time.Time
 		consid := func(svc string, e *entry) {
-			if svc == salvo || e.inflight > 0 || descartadas[e.machineID] {
+			// Las aisladas de salvo SÍ valen: son de otras sesiones del mismo
+			// servicio, y congelar la más vieja es justo lo que hace sitio a
+			// una sesión nueva sin tocar a nadie activo.
+			if (svc == salvo && e.aislada == "") || e.inflight > 0 || descartadas[e.machineID] {
 				return
 			}
 			if mismo != (e.tenant == tenant) {
@@ -1711,6 +1796,11 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 		// TryLock y no Lock: quien llama a evictLRU ya tiene tomado el candado
 		// de SU servicio, y un Lock aquí podría cruzarse con él.
 		vlock := g.ensureLock(elegido)
+		if victima != nil && victima.aislada != "" {
+			// La de una sesión aislada se despierta bajo SU candado, no el
+			// del servicio (ver isolatedSession).
+			vlock = g.aisladaLock(victima.aislada)
+		}
 		if !vlock.TryLock() {
 			devolver()
 			continue // esa esta ocupada; se prueba otra
@@ -1748,7 +1838,8 @@ func (g *Scheduler) evictLRU(ctx context.Context, salvo, tenant string) string {
 // reponerEntryLocked devuelve al mapa una instancia que se saco para congelar y
 // al final no se congelo. Se llama con g.mu tomado.
 func (g *Scheduler) reponerEntryLocked(service string, e *entry) {
-	if g.services[service] == nil {
+	// Una aislada nunca puede acabar de primaria: recibiría sesiones ajenas.
+	if g.services[service] == nil && e.aislada == "" {
 		g.services[service] = e
 		return
 	}

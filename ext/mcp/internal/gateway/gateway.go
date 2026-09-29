@@ -60,6 +60,8 @@ type Gateway struct {
 	agg *aggregator // endpoint virtual que reúne a todos
 	mem *memory     // memoria de uso; nil si está desactivada
 
+	aisl isolationCache // qué servicios dan una microVM a cada sesión
+
 	// Último estado de salud escrito por servicio, para no repetir la escritura
 	// en cada petición. Ver anotarSalud.
 	saludMu    sync.Mutex
@@ -93,7 +95,7 @@ func New(client *api.Client, idle time.Duration, ephemeral bool, prewarm int, me
 	// Una instancia que no contesta marca la salud del servicio.
 	g.OnProxyError = g.anotarFallo
 	// Las sesiones del agregador viven más que las instancias: son baratas.
-	g.OnTick = func(context.Context) { g.agg.reap(g.Idle() * 4) }
+	g.OnTick = func(ctx context.Context) { g.agg.reap(ctx, g.Idle()*4) }
 	return g
 }
 
@@ -323,6 +325,18 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// GATEWAY la retirara (ya no aparece por machineID) o que el DAEMON la
 		// congelara por TTL (aún figura, pero el invitado no responde). Lo
 		// segundo solo se ve comprobando vida.
+		if (e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort))) && g.IsIsolated(ext) {
+			// Sesión aislada: solo SU máquina sirve, congelada o no. Ver
+			// aislamiento.go.
+			if e = g.recuperarAislada(w, r, rt.Service(), ext); e == nil {
+				return
+			}
+			if rt = g.Route(ext); rt == nil {
+				http.Error(w, "unknown or expired MCP session; start a new one with initialize",
+					http.StatusNotFound)
+				return
+			}
+		}
 		if e == nil || !scheduler.AliveAddr(rt.Addr(GuestPort)) {
 			// Se invalida la instancia congelada (si aún figura) para que
 			// ensure la reconstruya en vez de devolverla tal cual, y se
@@ -363,10 +377,19 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		defer g.End(e)
 		r.Header.Set(SessionHeader, guestSIDOf(rt, ext))
 		rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r)
-		// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
+		// DELETE cierra la sesión: se olvida la ruta para no acumularlas. Si la
+		// sesión era aislada, su máquina se destruye ANTES de contestar, y con
+		// ella su overlay: quien recibe el 204 sabe que su capa ya no existe.
 		if r.Method == http.MethodDelete {
+			g.ReleaseIsolated(r.Context(), ext)
 			g.Forget(ext)
 		}
+		return
+	}
+
+	// Sesión NUEVA de un servicio que aísla cada sesión: microVM propia.
+	if g.aislado(r.Context(), service) {
+		g.serveIsolatedSession(w, r, service, tnt)
 		return
 	}
 

@@ -67,3 +67,54 @@ func tooOld(err error) error {
 	}
 	return err
 }
+
+// Modos de aislamiento de un servicio con instancia persistente (anotación
+// mcp.isolation).
+//
+//   - service: una instancia (y sus réplicas) para todas las sesiones. Cada
+//     sesión tiene su proceso, pero comparten el disco de la instancia: lo que
+//     una escribe en /tmp o en el directorio de datos lo lee la siguiente. Es
+//     lo que un servicio stateful como `memory` quiere —su grafo es de todos— y
+//     el comportamiento de siempre, por eso es el de por defecto.
+//   - session: una microVM por sesión, restaurada del dorado con su propio
+//     overlay, que se congela con la sesión dentro y se destruye al cerrarla o
+//     caducar. Ninguna sesión ve lo que escribió otra. Los volúmenes siguen
+//     siendo compartidos: son justo lo que se quiere conservar.
+const (
+	IsolationService = "service"
+	IsolationSession = "session"
+)
+
+// IsolationKey es la anotación con el modo de aislamiento. Es una anotación y
+// no una etiqueta para poder cambiarla sin reimportar (`kling mcp isolation`).
+const IsolationKey = "mcp.isolation"
+
+// Isolation devuelve el modo de aislamiento del snapshot: IsolationService si
+// no lo declara o si el valor no se entiende.
+func Isolation(s *api.Snapshot) string {
+	var m string
+	if s == nil {
+		return IsolationService
+	}
+	if ok, err := s.Annotation(IsolationKey, &m); ok && err == nil && m == IsolationSession {
+		return IsolationSession
+	}
+	return IsolationService
+}
+
+// ValidIsolation dice si m es un modo de aislamiento conocido.
+func ValidIsolation(m string) bool { return m == IsolationService || m == IsolationSession }
+
+// SetIsolation guarda el modo de aislamiento del servicio. service borra la
+// anotación en vez de escribirla: es el valor por defecto, y así un snapshot
+// que nunca la tuvo y uno que volvió a service son indistinguibles.
+func SetIsolation(ctx context.Context, c *api.Client, name, mode string) error {
+	if !ValidIsolation(mode) {
+		return fmt.Errorf("unknown isolation %q (use %s or %s)", mode, IsolationService, IsolationSession)
+	}
+	if mode == IsolationService {
+		return tooOld(c.RemoveAnnotation(ctx, name, IsolationKey))
+	}
+	_, err := c.SetAnnotation(ctx, name, IsolationKey, mode)
+	return tooOld(err)
+}

@@ -49,6 +49,7 @@ func mcpExtension() *plugin.Builtin {
 			"ls":             mcpList,
 			"list":           mcpList,
 			"inspect":        mcpInspect,
+			"isolation":      mcpIsolation,
 			"refresh":        mcpRefresh,
 			"refresh-bridge": imagesRefresh,
 			"verify":         mcpVerify,
@@ -97,6 +98,7 @@ var mcpCommands = []plugin.Command{
       [-egress none|internet|allowlist]            can do, freezes it and saves its
       [-allow dom1,dom2]                           catalog. All of this ends up
       [-volume NAME[:/mount][:ro]] (repeatable)    BAKED into the template
+      [-isolation service|session]                 one microVM per MCP session
 `,
 	},
 	{
@@ -110,6 +112,14 @@ var mcpCommands = []plugin.Command{
 		Summary: "one service: its template, catalog and health",
 		Usage: `  mcp inspect <service> [-json]                    one service: template, tools
                                                    and last health check
+`,
+	},
+	{
+		Name: "isolation", Group: "SERVICES",
+		Summary: "shows or sets whether sessions share the instance or get one microVM each",
+		Usage: `  mcp isolation <service> [service|session]        shared instance (service, the
+                                                   default) or one microVM and disk
+                                                   per session (session)
 `,
 	},
 	{
@@ -173,6 +183,9 @@ var mcpCommands = []plugin.Command{
       [-max-replicas 16]                           instances per service when
                                                    sessions scale out (0 =
                                                    unlimited); beyond it, 503
+      [-session-ttl 30m]                           an isolated session unused this
+                                                   long is closed and its microVM
+                                                   destroyed
       [-memory SVC]                              agent memory service
       [-hosts name=endpoint,name2=endpoint2]       several daemons instead of one
                                                    (default: mcp.hosts, or the
