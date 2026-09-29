@@ -17,6 +17,7 @@
 #   -as-super         migraciones y seed como superusuario (CREATE EXTENSION...)
 #   -role R           rol de la aplicación (app)     -database B   base (appdb)
 #   -image I          imagen (pg16)                  -mem M        RAM de la VM (1G)
+#   -from T           plantilla con Postgres instalado en vez de -image (macOS: ver docs/db-golden.md)
 #   -cpus N           vCPUs (2)                      -state DIR    dónde va la contraseña
 #   -keep             no borrar la máquina de preparación tras guardar
 #
@@ -67,7 +68,7 @@ cmd_image() {
 }
 
 cmd_build() {
-  local migrations="" seed="" seed_mb=0 as_super=0 role=app db=appdb image=pg16
+  local migrations="" seed="" seed_mb=0 as_super=0 role=app db=appdb image=pg16 from=""
   local mem=1G cpus=2 state="${KLING_DB_STATE:-$HOME/.local/state/kling-db}" name=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -78,6 +79,7 @@ cmd_build() {
       -role)       role="${2:?falta valor}"; shift 2 ;;
       -database)   db="${2:?falta valor}"; shift 2 ;;
       -image)      image="${2:?falta valor}"; shift 2 ;;
+      -from)       from="${2:?falta valor}"; shift 2 ;;
       -mem)        mem="${2:?falta valor}"; shift 2 ;;
       -cpus)       cpus="${2:?falta valor}"; shift 2 ;;
       -state)      state="${2:?falta valor}"; shift 2 ;;
@@ -95,6 +97,7 @@ cmd_build() {
   [[ "$db" =~ ^[a-z_][a-z0-9_]{0,30}$ ]] || die "base no válida: $db"
   [ "$role" != postgres ] || die "el rol de la aplicación no puede ser postgres"
   [[ "$image" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "imagen no válida: $image"
+  [ -z "$from" ] || [[ "$from" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "plantilla no válida: $from"
   [[ "$mem" =~ ^[0-9]+[MG]?$ ]] || die "-mem no válido: $mem"
   [[ "$cpus" =~ ^[0-9]+$ ]] || die "-cpus no válido: $cpus"
   [[ "$seed_mb" =~ ^[0-9]+$ ]] || die "-seed-mb no válido: $seed_mb"
@@ -129,9 +132,18 @@ cmd_build() {
   od -An -tx1 -N24 /dev/urandom | tr -d ' \n' > "$BUILD_TMP/password"
   [ "$(wc -c < "$BUILD_TMP/password" | tr -d ' ')" -eq 48 ] || die "no se pudo generar la contraseña"
 
-  say "arrancando $m desde la imagen $image (egress none)"
-  "${K[@]}" run -name "$m" -image "$image" -egress none -allow-exec \
-    -cpus "$cpus" -mem "$mem" -cpu-pct 100 >/dev/null
+  if [ -n "$from" ]; then
+    # Desde una plantilla con Postgres ya instalado (p. ej. en macOS, donde no se
+    # pueden construir imágenes: toolchain + apk add postgresql16, guardada con
+    # kling save). La memoria y las CPU son las del snapshot; el egress se fuerza
+    # a none aunque la plantilla tuviera salida.
+    say "arrancando $m desde la plantilla $from (egress none)"
+    "${K[@]}" run -name "$m" -from "$from" -egress none -allow-exec >/dev/null
+  else
+    say "arrancando $m desde la imagen $image (egress none)"
+    "${K[@]}" run -name "$m" -image "$image" -egress none -allow-exec \
+      -cpus "$cpus" -mem "$mem" -cpu-pct 100 >/dev/null
+  fi
 
   local i
   for i in $(seq 1 60); do

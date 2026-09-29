@@ -203,3 +203,24 @@ Conectar la copia al invitado sin que vea la contraseña es el proxy de
 postgres -upstream <ip-de-la-copia>:5432 -upstream-tls disable -f password` espera, con
 SCRAM sin TLS (que es lo que el servidor de esta imagen pide). La IP de cada copia es la
 de su netns (`kling inspect <copia>`, campo `ip`), no `172.16.0.2`.
+
+## En macOS: el golden desde una plantilla
+
+El backend vz no construye imágenes (hace falta root, dispositivos loop y chroot en Linux).
+En su lugar, `db-golden.sh build -from <plantilla>` arranca desde una plantilla que ya trae
+Postgres instalado, con la memoria y las CPU de su snapshot y el egress forzado a `none`:
+
+```sh
+kling run -image toolchain -egress internet -allow-exec -mem 1G -cpus 2 -name pgbase
+kling exec pgbase -- apk add postgresql16 postgresql16-client postgresql16-contrib tzdata
+kling save pgbase pg16base
+scripts/db-golden.sh build -from pg16base -seed-mb 20 pg
+```
+
+Medido en un Mac M4 (APFS, clonefile) el 2026-09-29, con un golden de 20 MB de seed:
+`kling db up` deja una copia lista y con la clave rotada en 526–562 ms (la primera, en frío,
+1,0 s); `run -from` solo, 318–357 ms. En el Mac el coste está en la restauración de vz, no
+en la copia del disco, así que clonefile no lo hace más rápido que el lab Linux (ext4).
+`kling db doctor -url` contra una copia marca como crítico al superusuario `postgres`
+porque desde una URL no sabe que en una copia solo entra por el socket local; para una
+copia se usa `kling db doctor <copia>`, que lo informa como INFO.
