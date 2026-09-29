@@ -82,6 +82,11 @@ func TestInterpretarListo(t *testing.T) {
 		{503, `{"ready":true}`, false, nil}, // contradictorio: gana lo prudente
 		{404, `404 page not found`, false, errListoViejo},
 		{400, `missing Mcp-Session-Id`, false, errListoViejo},
+		// Un servidor que contesta 200 a cualquier ruta no tiene sonda: no se
+		// reintenta hasta agotar el plazo (el agente falso de los tests de
+		// commit hacía esperar 120 s a cada Commit en Linux).
+		{200, ``, false, errListoViejo},
+		{200, `OK`, false, errListoViejo},
 	}
 	for _, c := range casos {
 		st, err := interpretarListo(c.code, []byte(c.body))
@@ -91,6 +96,9 @@ func TestInterpretarListo(t *testing.T) {
 	}
 	if _, err := interpretarListo(500, []byte("boom")); err == nil {
 		t.Error("un 500 es un error")
+	}
+	if _, err := interpretarListo(503, []byte("busy")); err == nil || errors.Is(err, errListoViejo) {
+		t.Errorf("un 503 que no es JSON es un error pasajero, no un agente sin sonda: %v", err)
 	}
 }
 

@@ -109,6 +109,13 @@ func interpretarListo(code int, b []byte) (api.GuestReady, error) {
 		return st, fmt.Errorf("guest answered %d to %s: %s", code, api.GuestReadyPath, strings.TrimSpace(string(b)))
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
+		// Un 200 que no es el contrato de /ready es un servidor que contesta a
+		// cualquier ruta (un agente anterior tras un proxy, un servicio propio en
+		// el 8080): no tiene sonda, como el 404. Reintentarlo solo retrasaba cada
+		// commit hasta agotar el plazo.
+		if code == http.StatusOK {
+			return st, errListoViejo
+		}
 		return st, fmt.Errorf("guest answered %d to %s with something that is not JSON", code, api.GuestReadyPath)
 	}
 	// El cuerpo manda, pero un 200 con ready=false (o al revés) es un agente
