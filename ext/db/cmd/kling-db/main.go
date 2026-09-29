@@ -54,7 +54,7 @@ func manifest() plugin.Manifest {
 			{Name: "branch", Group: "COPIES", Summary: "one database per git branch",
 				Usage: usage("branch [<branch>] [-from P] [-golden G] [-env T]", "the copy of a git branch, forked from its parent") +
 					usage("branch -switch | -ls | -rm B | -prune", "activate this branch's copy (git hook), list, clean up") +
-					usage("branch hook install|uninstall", "post-checkout hook that switches the copy")},
+					usage("branch [-owner T] [-golden G] hook install|uninstall", "post-checkout hook that switches the copy")},
 			{Name: "env", Group: "COPIES", Summary: "a whole integration environment: app + database as a graph",
 				Usage: usage("env up <app-template> -golden G [-name N]", "app node + database copy joined by a credential edge") +
 					usage("env down <name>", "removes the graph and the database password")},

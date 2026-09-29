@@ -33,7 +33,7 @@ const (
 	labelState    = "kling.db.state"    // preparing | ready
 	labelRole     = "kling.db.role"     // rol de la aplicación (app)
 	labelDatabase = "kling.db.database" // base de la aplicación (appdb)
-	labelRepo     = "kling.db.repo"     // hash del toplevel del repo git (kling db branch)
+	labelRepo     = "kling.db.repo"     // hash del directorio git común del repo (kling db branch)
 	labelBranch   = "kling.db.branch"   // clave estable de la rama (ver branchKey)
 	labelUsed     = "kling.db.used"     // segundos unix de la última vez que fue la activa
 

@@ -10,8 +10,8 @@ package main
 // volver.
 //
 // Identidad. Una copia de rama se reconoce por sus etiquetas, no por su nombre:
-// sandbox fork no deja poner nombre. kling.db.repo es el hash del toplevel del
-// repo y kling.db.branch la CLAVE de la rama (branchKey), no el nombre: un
+// sandbox fork no deja poner nombre. kling.db.repo es el hash del directorio
+// git común del repo (el mismo en todos sus worktrees) y kling.db.branch la CLAVE de la rama (branchKey), no el nombre: un
 // nombre de rama es texto arbitrario (barras, mayúsculas, unicode) y no puede
 // ir tal cual a una etiqueta, a un nombre de máquina ni, desde luego, a argv o
 // a SQL. La clave es un slug ASCII más un hash corto del nombre entero, así
@@ -29,6 +29,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/url"
@@ -114,8 +115,22 @@ func branchKey(branch string) string {
 	return slug + "-" + hex.EncodeToString(h[:3])
 }
 
-// repoKey identifica un repositorio por su toplevel (ruta real, sin enlaces).
-func repoKey(toplevel string) string {
+// repoKey identifica un repositorio por su directorio git COMÚN (git
+// rev-parse --git-common-dir, ruta real): el mismo para el árbol principal y
+// para todos sus worktrees, así que una rama tiene una sola copia aunque se
+// abra desde varios. El prefijo separa este hash del de legacyRepoKey.
+func repoKey(commonDir string) string {
+	if r, err := filepath.EvalSymlinks(commonDir); err == nil {
+		commonDir = r
+	}
+	h := sha256.Sum256([]byte("git-common-dir:" + commonDir))
+	return hex.EncodeToString(h[:6])
+}
+
+// legacyRepoKey es la clave de antes (hash del toplevel): cada worktree tenía
+// la suya. Las copias etiquetadas así se siguen reconociendo desde el árbol
+// que las creó; las nuevas llevan repoKey.
+func legacyRepoKey(toplevel string) string {
 	if r, err := filepath.EvalSymlinks(toplevel); err == nil {
 		toplevel = r
 	}
@@ -149,9 +164,15 @@ func (a *app) git(ctx context.Context, args ...string) (string, error) {
 
 // repoInfo es el repositorio en el que estamos.
 type repoInfo struct {
-	repo     string // kling.db.repo
+	repo     string // kling.db.repo (repoKey del directorio git común)
+	legacy   string // la clave de antes (legacyRepoKey del toplevel)
 	toplevel string
-	gitDir   string // absoluto
+	gitDir   string // absoluto, el de ESTE worktree (ahí va kling-db.env)
+}
+
+// is dice si una etiqueta kling.db.repo es de este repositorio.
+func (ri *repoInfo) is(label string) bool {
+	return label != "" && (label == ri.repo || label == ri.legacy)
 }
 
 func (a *app) repo(ctx context.Context) (*repoInfo, error) {
@@ -163,10 +184,48 @@ func (a *app) repo(ctx context.Context) (*repoInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if top == "" || gd == "" {
+	common, err := a.git(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return nil, err
+	}
+	if top == "" || gd == "" || common == "" {
 		return nil, errors.New("git did not say where the repository is")
 	}
-	return &repoInfo{repo: repoKey(top), toplevel: top, gitDir: gd}, nil
+	return &repoInfo{repo: repoKey(common), legacy: legacyRepoKey(top), toplevel: top, gitDir: gd}, nil
+}
+
+// branchLockWait es cuánto espera una operación de branch a que acabe otra del
+// mismo repositorio (crear una copia del golden tarda segundos). Variable para
+// los tests.
+var branchLockWait = 3 * time.Minute
+
+// lockRepo serializa las operaciones de kling db branch de un repositorio en
+// este host: dos checkouts a la vez (dos worktrees, o un hook y un comando) no
+// crean dos copias de la misma rama ni congelan la que otro acaba de activar.
+func (a *app) lockRepo(ctx context.Context, ri *repoInfo) (func(), error) {
+	un, err := dbstate.Lock(ctx, "branch-"+ri.repo, branchLockWait, func() {
+		fmt.Fprintln(a.stderr, "waiting for another kling db branch on this repository...")
+	})
+	if errors.Is(err, dbstate.ErrLocked) {
+		return nil, fmt.Errorf("another kling db branch on this repository has been running for more than %s", branchLockWait)
+	}
+	return un, err
+}
+
+// worktreeBranches son las claves de las ramas que tiene activas algún
+// worktree del repo (git worktree list): esas copias están en uso.
+func (a *app) worktreeBranches(ctx context.Context) (map[string]bool, error) {
+	out, err := a.git(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		if b, ok := strings.CutPrefix(strings.TrimSpace(l), "branch refs/heads/"); ok && validBranch(b) == nil {
+			m[branchKey(b)] = true
+		}
+	}
+	return m, nil
 }
 
 // currentBranch es la rama activa. HEAD suelto no tiene copia.
@@ -208,8 +267,9 @@ func (a *app) localBranches(ctx context.Context) (map[string]string, error) {
 
 // ── copias de un repo ────────────────────────────────────────────────────────
 
-// repoCopies son las copias de rama de este repo y dueño, por clave de rama.
-func (a *app) repoCopies(ctx context.Context, repo, owner string) (map[string][]*api.Machine, error) {
+// repoCopies son las copias de rama de este repo (con su clave actual o la de
+// antes) y dueño, por clave de rama.
+func (a *app) repoCopies(ctx context.Context, ri *repoInfo, owner string) (map[string][]*api.Machine, error) {
 	out, err := a.k.Run(ctx, nil, "ps", "-json")
 	if err != nil {
 		return nil, err
@@ -223,7 +283,7 @@ func (a *app) repoCopies(ctx context.Context, repo, owner string) (map[string][]
 	}
 	m := map[string][]*api.Machine{}
 	for _, mc := range all {
-		if mc == nil || mc.Labels[labelRepo] != repo || mc.Labels[labelGolden] == "" || mc.Labels[labelOwner] != owner {
+		if mc == nil || !ri.is(mc.Labels[labelRepo]) || mc.Labels[labelGolden] == "" || mc.Labels[labelOwner] != owner {
 			continue
 		}
 		k := mc.Labels[labelBranch]
@@ -272,7 +332,7 @@ func usable(mc *api.Machine, owner string) bool {
 // de from (si existe y está lista) o up del golden.
 func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, golden, owner string) (*api.Machine, bool, error) {
 	key := branchKey(branch)
-	copies, err := a.repoCopies(ctx, ri.repo, owner)
+	copies, err := a.repoCopies(ctx, ri, owner)
 	if err != nil {
 		return nil, false, err
 	}
@@ -388,16 +448,33 @@ func cmdBranch(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) == 2 && pos[0] == "hook" {
-		return cmdBranchHook(pos[1], *force)
-	}
 	modes := 0
 	for _, on := range []bool{*sw, *ls, *rm != "", *prune} {
 		if on {
 			modes++
 		}
 	}
-	const usage = "usage: kling db branch [<branch>] [-from P] [-golden G] | -switch | -ls [-json] | -rm <branch> | -prune [-dry-run] | [-force] hook install|uninstall"
+	const usage = "usage: kling db branch [<branch>] [-from P] [-golden G] | -switch [-golden G] | -ls [-json] | -rm <branch> | -prune [-dry-run] | [-force] [-owner T] [-golden G] hook install|uninstall"
+	if err := validOwner(*owner); err != nil {
+		return err
+	}
+	if *golden != "" && !namePattern.MatchString(*golden) {
+		return fmt.Errorf("invalid template name %q", *golden)
+	}
+	if len(pos) == 2 && pos[0] == "hook" {
+		if modes > 0 || *from != "" || *envTpl != "" || *dry || *asJSON || (pos[1] == "uninstall" && *golden != "") {
+			return usageErr("%s", usage)
+		}
+		// Solo lo que se pidió explícitamente va al hook: sin -owner, el dueño
+		// por defecto (y el hook sigue sirviendo si ese valor cambia).
+		ho := hookOpts{force: *force, golden: *golden}
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "owner" {
+				ho.owner = *owner
+			}
+		})
+		return cmdBranchHook(pos[1], ho)
+	}
 	if modes > 1 || len(pos) > 1 || (len(pos) == 1 && modes > 0) {
 		return usageErr("%s", usage)
 	}
@@ -407,16 +484,10 @@ func cmdBranch(args []string) error {
 	if *envTpl != "" && (modes > 0 || *from != "" || !namePattern.MatchString(*envTpl)) {
 		return usageErr("%s", usage)
 	}
-	if (*dry && !*prune) || (*asJSON && !*ls) || ((*sw || *ls || *rm != "" || *prune) && (*from != "" || *golden != "")) {
+	// -golden vale con -switch (el hook lo pasa para una rama sin padre).
+	if (*dry && !*prune) || (*asJSON && !*ls) || ((*sw || *ls || *rm != "" || *prune) && *from != "") ||
+		((*ls || *rm != "" || *prune) && *golden != "") {
 		return usageErr("%s", usage)
-	}
-	if err := validOwner(*owner); err != nil {
-		return err
-	}
-	for _, t := range []string{*golden} {
-		if t != "" && !namePattern.MatchString(t) {
-			return fmt.Errorf("invalid template name %q", t)
-		}
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -426,7 +497,7 @@ func cmdBranch(args []string) error {
 	defer stop()
 	switch {
 	case *sw:
-		return a.branchSwitch(ctx, *owner)
+		return a.branchSwitch(ctx, *owner, *golden)
 	case *ls:
 		return a.branchLs(ctx, *owner, *asJSON)
 	case *rm != "":
@@ -459,6 +530,16 @@ func branchEnvName(repo, branch string) string {
 	return "e" + repo[:5] + "-" + slug + "-" + hash
 }
 
+// branchEnvNames son los nombres que puede tener el grafo de una rama: el de
+// la clave del repo y, si difiere, el de la clave de antes.
+func branchEnvNames(ri *repoInfo, branch string) []string {
+	names := []string{branchEnvName(ri.repo, branch)}
+	if ri.legacy != "" && ri.legacy != ri.repo {
+		names = append(names, branchEnvName(ri.legacy, branch))
+	}
+	return names
+}
+
 // branchEnv: el entorno entero de una rama (un grafo app + base), creado si no
 // existe. Es aparte de la copia suelta de la rama: no la usa ni la congela el
 // hook. El golden sale de -golden o de cualquier copia del repo.
@@ -467,15 +548,23 @@ func (a *app) branchEnv(ctx context.Context, branch, appTpl, golden, owner strin
 	if err != nil {
 		return err
 	}
-	name := branchEnvName(ri.repo, branch)
-	if g, err := a.graphOf(ctx, name); err != nil {
+	un, err := a.lockRepo(ctx, ri)
+	if err != nil {
 		return err
-	} else if g != nil {
-		fmt.Fprintf(a.stdout, "branch %s  environment %s  ready\n", branch, name)
-		return nil
 	}
+	defer un()
+	// El de la clave de antes, si existe, sigue siendo el de la rama.
+	for _, n := range branchEnvNames(ri, branch) {
+		if g, err := a.graphOf(ctx, n); err != nil {
+			return err
+		} else if g != nil {
+			fmt.Fprintf(a.stdout, "branch %s  environment %s  ready\n", branch, n)
+			return nil
+		}
+	}
+	name := branchEnvName(ri.repo, branch)
 	if golden == "" {
-		copies, err := a.repoCopies(ctx, ri.repo, owner)
+		copies, err := a.repoCopies(ctx, ri, owner)
 		if err != nil {
 			return err
 		}
@@ -517,6 +606,11 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 	if err != nil {
 		return err
 	}
+	un, err := a.lockRepo(ctx, ri)
+	if err != nil {
+		return err
+	}
+	defer un()
 	mc, created, err := a.ensureBranch(ctx, ri, branch, from, golden, owner)
 	if err != nil {
 		return err
@@ -545,19 +639,28 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 }
 
 // branchSwitch es lo que llama el hook: deja activa la copia de la rama actual,
-// congela las de las demás del repo y escribe la conexión en .git.
-func (a *app) branchSwitch(ctx context.Context, owner string) error {
+// congela las de las demás ramas del repo que ningún worktree tenga activas y
+// escribe la conexión en el .git de este worktree. golden es de dónde sale una
+// rama sin copia del padre ("": el de cualquier copia del repo).
+func (a *app) branchSwitch(ctx context.Context, owner, golden string) error {
 	ri, branch, from, err := a.resolve(ctx, "", "")
 	if err != nil {
 		return err
 	}
+	// Dos checkouts a la vez (dos worktrees): el segundo espera al primero y
+	// encuentra la copia hecha en vez de crear otra.
+	un, err := a.lockRepo(ctx, ri)
+	if err != nil {
+		return err
+	}
+	defer un()
 	envPath := filepath.Join(ri.gitDir, branchEnvFile)
 	// Antes que nada: un .env de la rama anterior apuntaría la aplicación a la
 	// base equivocada. Sin él, falla (y se nota) en vez de usar otra rama.
 	if err := os.Remove(envPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("removing the previous %s: %w", envPath, err)
 	}
-	mc, _, err := a.ensureBranch(ctx, ri, branch, from, "", owner)
+	mc, _, err := a.ensureBranch(ctx, ri, branch, from, golden, owner)
 	if err != nil {
 		return err
 	}
@@ -569,13 +672,19 @@ func (a *app) branchSwitch(ctx context.Context, owner string) error {
 	}
 	fmt.Fprintf(a.stdout, "branch %s  active  (copy %s)\n  connection: %s  (mode 0600, inside .git: it is never committed)\n", branch, mc.Name, envPath)
 
-	copies, err := a.repoCopies(ctx, ri.repo, owner)
+	copies, err := a.repoCopies(ctx, ri, owner)
+	if err != nil {
+		return fmt.Errorf("freezing the other branches: %w", err)
+	}
+	// La rama que otro worktree tiene activa está en uso: no se congela. Si git
+	// no sabe decirlo, no se congela nada (congelar de más rompe a otro).
+	inUse, err := a.worktreeBranches(ctx)
 	if err != nil {
 		return fmt.Errorf("freezing the other branches: %w", err)
 	}
 	var failed []string
 	for k, l := range copies {
-		if k == branchKey(branch) {
+		if k == branchKey(branch) || inUse[k] {
 			continue
 		}
 		for _, o := range l {
@@ -679,7 +788,7 @@ func (a *app) branchLs(ctx context.Context, owner string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	copies, err := a.repoCopies(ctx, ri.repo, owner)
+	copies, err := a.repoCopies(ctx, ri, owner)
 	if err != nil {
 		return err
 	}
@@ -765,7 +874,12 @@ func (a *app) branchRm(ctx context.Context, branch, owner string) error {
 	if err != nil {
 		return err
 	}
-	copies, err := a.repoCopies(ctx, ri.repo, owner)
+	un, err := a.lockRepo(ctx, ri)
+	if err != nil {
+		return err
+	}
+	defer un()
+	copies, err := a.repoCopies(ctx, ri, owner)
 	if err != nil {
 		return err
 	}
@@ -775,12 +889,16 @@ func (a *app) branchRm(ctx context.Context, branch, owner string) error {
 		return err
 	}
 	// El entorno de la rama (kling db branch -env), si lo hay, se va con ella.
-	envGone, err := a.envDown(ctx, branchEnvName(ri.repo, branch), owner)
-	if err != nil {
-		return err
-	}
-	if envGone {
-		fmt.Fprintf(a.stdout, "environment %s removed\n", branchEnvName(ri.repo, branch))
+	envGone := false
+	for _, n := range branchEnvNames(ri, branch) {
+		gone, err := a.envDown(ctx, n, owner)
+		if err != nil {
+			return err
+		}
+		if gone {
+			envGone = true
+			fmt.Fprintf(a.stdout, "environment %s removed\n", n)
+		}
 	}
 	if !ok && !envGone {
 		return fmt.Errorf("branch %s has no copy in this repository", branch)
@@ -806,7 +924,14 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 	if len(branches) == 0 {
 		return errors.New("git reports no local branches: refusing to prune")
 	}
-	copies, err := a.repoCopies(ctx, ri.repo, owner)
+	if !dry {
+		un, err := a.lockRepo(ctx, ri)
+		if err != nil {
+			return err
+		}
+		defer un()
+	}
+	copies, err := a.repoCopies(ctx, ri, owner)
 	if err != nil {
 		return err
 	}

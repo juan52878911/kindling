@@ -35,7 +35,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
-| `branch [<rama>] [-from P] [-golden G] \| -switch \| -ls \| -rm R \| -prune \| hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
+| `branch [<rama>] [-from P] [-golden G] \| -switch [-golden G] \| -ls \| -rm R \| -prune \| [-owner T] [-golden G] hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
 | `rehearse <copia\|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones SQL en una copia desechable: tiempos, esperas por locks y tamaño; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
@@ -235,7 +235,7 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 | `kling.db.role`, `kling.db.database` | rol y base de la aplicación (`app`, `appdb`) |
 | `kling.db.engine` | `mysql` en las copias de una plantilla MariaDB/MySQL (la pone `db-golden-mysql.sh` y se hereda); sin ella, Postgres |
 | `kind=sandbox` | lo que permite `sandbox fork` sobre la copia |
-| `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del toplevel del repo, clave de la rama y último uso (segundos unix) |
+| `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del directorio git común del repo (antes, del toplevel), clave de la rama y último uso (segundos unix) |
 | `kling.ports` | incluye `5432` (`3306` en MySQL): el backend de macOS abre el reenvío |
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
@@ -521,9 +521,31 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   fichero`), es idempotente y **no pisa** uno existente: lo aparta a
   `post-checkout.pre-kling-db` y lo ejecuta primero (`uninstall` lo restaura). Nunca
   bloquea el checkout: si `kling db branch -switch` falla, avisa por stderr y el
-  checkout sigue. Usa `${KLING:-kling}`; para otro daemon, exporte `KLING_HOST`.
+  checkout sigue. Usa `${KLING:-kling}`; para otro daemon, exporte `KLING_HOST`. Con
+  `kling db branch -owner equipo -golden crm-demo hook install`, el hook llama a
+  `-switch -owner equipo -golden crm-demo`: el dueño de las copias y el golden del que
+  sale una rama sin copia del padre quedan escritos en el hook (validados y entre
+  comillas simples). Reinstalar sin ellos vuelve al hook de siempre.
+- **Worktrees.** `kling.db.repo` es el hash del **directorio git común**
+  (`git rev-parse --git-common-dir`), el mismo para el árbol principal y todos sus
+  `git worktree`: una rama tiene **una sola copia** aunque se abra desde varios
+  worktrees, y el hook (que vive en el directorio de hooks común) sirve a todos. Cada
+  worktree escribe su propia conexión en **su** directorio git
+  (`.git/worktrees/<nombre>/kling-db.env`; la ruta la da
+  `git rev-parse --absolute-git-dir`). `-switch` no congela la copia de una rama que
+  otro worktree tiene activa (`git worktree list`): solo las de ramas que nadie usa.
+  Las copias creadas antes de este cambio llevan el hash del toplevel y se siguen
+  reconociendo desde el árbol que las creó.
+- **Un cerrojo por repositorio.** Todo lo que crea, activa o borra copias de rama
+  (`branch`, `-switch`, `-env`, `-rm`, `-prune`) toma antes un `flock` sobre
+  `$KLING_DB_STATE/locks/branch-<repo>.lock` (0600, en un directorio 0700). Dos
+  checkouts a la vez —dos worktrees, o el hook y un comando— se ponen en fila: el
+  segundo espera (hasta 3 minutos, avisando por stderr) y encuentra la copia hecha en
+  vez de crear otra. El cerrojo lo suelta el sistema si el proceso muere. Es por host:
+  dos máquinas contra el mismo daemon no se ven.
 - **Identidad y nombres.** La copia se reconoce por sus etiquetas, no por su nombre
-  (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del toplevel del repo y
+  (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del directorio git común
+  del repo (ver Worktrees) y
   `kling.db.branch` una **clave** de la rama (slug ASCII más 6 hex del hash del nombre
   entero: `feat/x` y `feat-x` no chocan). El nombre de la rama es texto arbitrario y
   nunca va sin validar a argv, a SQL ni a etiquetas; se rechaza el vacío, un `-` inicial,
