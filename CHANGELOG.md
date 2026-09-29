@@ -32,7 +32,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   pausado con volúmenes (un invitado pausado no contesta: `kling graph thaw` y repite)
   y el fork de un grafo con un volumen en escritura; en solo lectura se ramifica.
   Receta para ramificar uno con volumen en escritura en
-  [`docs/grafos.md`](docs/grafos.md).
+  [`docs/grafos.md`](docs/grafos.md). Si un nodo no se puede volver a congelar tras un
+  volcado bueno, la respuesta lo trae en `warnings` y `kling graph snapshot` lo avisa en
+  stderr (antes solo quedaba en el log del daemon).
 - **`kling info` ya no da el almacén por hecho antes de crearlo (#60).** Con
   `daemon.cow=auto` decía `store (reflink inside kindling's XFS store)` antes de que el
   almacén existiera o se hubiera probado. Ahora dice `store pending (created on first
@@ -49,8 +51,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   y `kling doctor` avisan pasado el 85 % de uso, y `kling cow` a secas enseña el estado.
   Un `cow.xfs`/`cow.btrfs` recién creado que no monta o no clona se desmonta y se borra,
   y se prueba con el otro tipo; al arrancar, uno que no monta y que ninguna máquina usa
-  se borra (se vuelve a crear en el primer `run -from`). Ver [`docs/cow.md`](docs/cow.md).
-
+  se borra (se vuelve a crear en el primer `run -from`) solo si el fallo es definitivo
+  (el núcleo no tiene su sistema de ficheros, o no se deja montar); con otro, que puede
+  ser pasajero, se avisa y se queda. Ver [`docs/cow.md`](docs/cow.md).
 - **macOS: `commit` clona el overlay en APFS (#62).** Copiaba el overlay disperso desde
   el descriptor comprobado porque `cp -c /dev/fd/N` no clona; ahora usa
   `fclonefileat(2)` desde ese mismo descriptor, por su número de llamada al sistema (sin
@@ -89,7 +92,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   /v1/graphs/{id}` para verla y soltarla entera; el id de cada nodo vale para `exec`,
   `files` y `shell`. Cuenta en la cuota como un sandbox, la limpieza borra los
   abandonados y los rotos, y `/v1/templates` los lista con `kind: graph`. Sin nodos
-  `lazy`, aristas `credential` ni volúmenes o carpetas del host en la plantilla. Ver
+  `lazy`, aristas `credential` ni volúmenes o carpetas del host en la plantilla. El
+  candado del frontal solo cubre etiquetar y comprobar (las etiquetas reservan el
+  grafo): el `graph thaw` va fuera y uno lento no para las demás reclamaciones. Con
+  `authz` en el daemon, el frontal y el fondo necesitan la identidad `admin`. Ver
   [`ext/sandbox/README.md`](ext/sandbox/README.md#grafos-precalentados).
 - **`kling db slice` y `kling db observe` (#70).** `slice <postgres-url> -table T -mask
   REGLAS [-rows N] [-related-rows N]` hace un golden con una sola tabla de producción: las
@@ -98,7 +104,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   máquina de construcción, la credencial en el proxy y el enmascarado de `clone`, y en
   producción solo lee (`pg_dump --schema-only` y una sesión `REPEATABLE READ READ ONLY`
   con `\copy ... TO PROGRAM` por tuberías dentro de la microVM). Las claves foráneas que lo
-  copiado no cumple quedan `NOT VALID` y el informe las nombra. `observe <copia>` registra
+  copiado no cumple quedan `NOT VALID` y el informe las nombra. Un nombre cerca de la
+  tabla con caracteres de control, barras invertidas o comillas (irían dentro de un
+  `\copy`) detiene la construcción. `observe <copia>` registra
   en el log de la copia cada sentencia de las conexiones nuevas con su duración (sin
   parámetros ni sesiones del superusuario) y `observe -report` agrupa las que tocan la
   tabla, normalizadas y sin literales. Los tiempos no son los de producción: importar las
