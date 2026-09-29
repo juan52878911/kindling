@@ -24,6 +24,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
 	"github.com/juan52878911/kindling/vz/internal/server"
+	"github.com/juan52878911/kindling/vz/internal/spec"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
 	"github.com/juan52878911/kindling/vz/internal/vzvm"
 )
@@ -69,6 +70,13 @@ func logf(format string, args ...any) {
 }
 
 func main() {
+	if vzvm.WindowMode() {
+		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
+		// servidor va en otra gorrutina y el proceso sale cuando acabe.
+		go func() { os.Exit(run()) }()
+		vzvm.RunApp()
+		return
+	}
 	os.Exit(run())
 }
 
@@ -88,6 +96,14 @@ func run() int {
 	}
 	if *sock == "" {
 		fmt.Fprintln(os.Stderr, "kling-vz: --api-sock is required")
+		return 2
+	}
+
+	// Pantalla virtio-gpu para las máquinas que arranquen aquí (el daemon pasa
+	// su entorno a kling-vz). Ver prototypes/android/docs/gpu.md.
+	graphics, err := spec.ParseGraphics(os.Getenv("KLING_VZ_GRAPHICS"))
+	if err != nil {
+		logf("KLING_VZ_GRAPHICS: %v", err)
 		return 2
 	}
 
@@ -117,7 +133,9 @@ func run() int {
 	peers := peercred.New()
 	confine := confinamiento(*sock, logf)
 	srv := server.New(server.Deps{
-		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track},
+		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track,
+			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
+		Graphics: graphics,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			// Sin proxy, la interfaz queda nil de verdad (no un puntero nil
 			// dentro de ella, que vnet tomaría por un proxy).
@@ -231,7 +249,7 @@ func rutaAuditoria(sock string) string {
 //
 // Las rutas se resuelven antes: el sandbox compara rutas reales, y en macOS
 // /tmp es /private/tmp.
-func confinamiento(sock string, logf func(string, ...any)) func(bool) error {
+func confinamiento(sock string, logf func(string, ...any)) func(bool, bool) error {
 	root := os.Getenv("KLING_VZ_CONFINE_ROOT")
 	if root == "" {
 		logf("not confined: KLING_VZ_CONFINE_ROOT is not set (the daemon sets it)")
@@ -251,8 +269,8 @@ func confinamiento(sock string, logf func(string, ...any)) func(bool) error {
 		return p
 	}
 	root, mdir := real(root), real(filepath.Dir(sock))
-	return func(conRed bool) error {
-		if err := confinar(root, mdir, conRed); err != nil {
+	return func(conRed, gfx bool) error {
+		if err := confinar(root, mdir, conRed, gfx); err != nil {
 			return err
 		}
 		logf("confined: reads under %s, writes only to %s, snapshots/ and volumes/, network out: %v", root, mdir, conRed)

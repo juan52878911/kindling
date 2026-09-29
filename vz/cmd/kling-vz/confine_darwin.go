@@ -23,12 +23,16 @@ import (
 var perfil string
 
 // confinar encierra este proceso en kling-vz.sb. No tiene vuelta atrás.
-func confinar(root, mdir string, conRed bool) error {
+func confinar(root, mdir string, conRed, gfx bool) error {
 	red := "0"
 	if conRed {
 		red = "1"
 	}
-	pares := []string{"ROOT", root, "MDIR", mdir, "NET", red}
+	grafica := "0"
+	if gfx {
+		grafica = "1"
+	}
+	pares := []string{"ROOT", root, "MDIR", mdir, "NET", red, "GFX", grafica}
 	params := make([]*C.char, 0, len(pares)+1)
 	for _, p := range pares {
 		cs := C.CString(p)

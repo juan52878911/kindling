@@ -95,10 +95,14 @@ type Deps struct {
 	// antes de crear o restaurar la VM, que es cuando ya se sabe la política
 	// de salida. Un fallo impide crear la VM: preferimos no arrancar a
 	// arrancar sin la barrera.
-	Confine func(conRed bool) error
+	Confine func(conRed, graphics bool) error
 	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
 	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).
 	CPUTime func() (time.Duration, error)
+	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
+	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
+	// no: el framework exige los mismos dispositivos que al guardar.
+	Graphics *spec.Graphics
 }
 
 type state int
@@ -231,6 +235,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /kling/stats", s.getStats)
 	mux.HandleFunc("PUT /kling/cpu", s.putKlingCPU)
 	mux.HandleFunc("GET /kling/cpu", s.getKlingCPU)
+	mux.HandleFunc("GET /kling/screenshot", s.getScreenshot)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fault(w, fmt.Errorf("kling-vz does not implement %s %s", r.Method, r.URL.Path))
 	})
@@ -959,6 +964,32 @@ func (s *Server) getStats(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"footprint_mib": int((b + (1<<20 - 1)) >> 20)})
 }
 
+// Screenshotter lo implementa una VM con ventana (vzvm con KLING_VZ_WINDOW=1).
+type Screenshotter interface {
+	Screenshot() ([]byte, error)
+}
+
+// getScreenshot devuelve la pantalla virtio-gpu tal y como la pinta la
+// ventana, en PNG. Sin ventana no hay de dónde sacarla: el framework no expone
+// el scanout de otro modo.
+func (s *Server) getScreenshot(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	vm := s.vm
+	s.mu.Unlock()
+	sc, ok := vm.(Screenshotter)
+	if vm == nil || !ok {
+		fault(w, errors.New("this VM cannot take screenshots"))
+		return
+	}
+	png, err := sc.Screenshot()
+	if err != nil {
+		fault(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(png)
+}
+
 // --- ciclo de vida ---
 
 func (s *Server) ensureNet() error {
@@ -1014,7 +1045,7 @@ func (s *Server) confinar() error {
 		return nil
 	}
 	conRed := s.d.Policy.Mode() != egress.None
-	if err := s.d.Confine(conRed); err != nil {
+	if err := s.d.Confine(conRed, s.spec.Graphics != nil); err != nil {
 		return fmt.Errorf("confining kling-vz in its sandbox: %w", err)
 	}
 	s.confinado, s.confinadoConRed = true, conRed
@@ -1038,6 +1069,10 @@ func (s *Server) start() error {
 			return fmt.Errorf("machine identifier: %w", err)
 		}
 		s.spec.MachineIdentifier = id
+	}
+	if s.spec.Graphics == nil && s.d.Graphics != nil {
+		g := *s.d.Graphics
+		s.spec.Graphics = &g
 	}
 	t0 := time.Now()
 	if err := s.create(); err != nil {
