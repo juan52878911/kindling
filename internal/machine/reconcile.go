@@ -67,8 +67,20 @@ func (m *Manager) reconcile() {
 			// Su netns y reglas sobrevivieron al daemon, pero el resolver dinámico
 			// del modo allowlist es una goroutine nuestra y murió con nosotros.
 			// Reanudarlo, o su DNS (DNATeado a un puerto sin nadie) se quedaría mudo.
-			if mc.Egress == string(knet.EgressAllowlist) {
-				if err := knet.Plan(mc.NetIndex, mc.ID).StartAllowlistResolver(mc.AllowDomains); err != nil {
+			// Lo mismo con las aristas de un nodo de grafo (grafo_red.go):
+			// sus proxies de enlace y, en egress none o internet, su resolver.
+			spec, esNodo := m.especRedGrafoLocked(mc)
+			if mc.Egress == string(knet.EgressAllowlist) || esNodo {
+				var err error
+				if mc.Egress == string(knet.EgressAllowlist) {
+					err = knet.Plan(mc.NetIndex, mc.ID).StartAllowlistResolver(mc.AllowDomains)
+				}
+				if err == nil && esNodo {
+					if gerr := montarRedGrafo(knet.Plan(mc.NetIndex, mc.ID), spec); gerr != nil {
+						log.Printf("reconcile: couldn't resume the graph edges of %s: %v", shortID(mc.ID), gerr)
+					}
+				}
+				if err != nil {
 					log.Printf("reconcile: couldn't resume the dns resolver for %s: %v", shortID(mc.ID), err)
 				} else if n, err := m.reentregarCredenciales(context.Background(), mc, nil); err != nil {
 					// Y sus credenciales, que también eran goroutines nuestras

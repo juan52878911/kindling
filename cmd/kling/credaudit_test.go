@@ -78,6 +78,25 @@ func TestAuditWriterPostgres(t *testing.T) {
 	}
 }
 
+// Las conexiones por una arista link de un grafo (kind link).
+func TestAuditWriterLink(t *testing.T) {
+	var out, errOut bytes.Buffer
+	w := &auditWriter{out: &out, errOut: &errOut}
+	for _, l := range []string{
+		`{"ts":"2026-09-28T10:00:00Z","kind":"link","host":"api.graph:8080","upstream":"machine:0123456789abcdef","req_bytes":10,"resp_bytes":20,"ms":5}`,
+		`{"ts":"2026-09-28T10:00:01Z","kind":"link","host":"db.graph:5432","reason":"no_capacity","denied":true,"req_bytes":0,"resp_bytes":0,"ms":1}`,
+	} {
+		if _, err := w.Write([]byte(l + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "LINK") || !strings.Contains(lines[0], "machine:0123456789abcdef") ||
+		!strings.HasSuffix(lines[0], "ok") || !strings.HasSuffix(lines[1], "DENIED(no_capacity)") {
+		t.Fatalf("tabla:\n%s", out.String())
+	}
+}
+
 func TestAuditWriterJSON(t *testing.T) {
 	var out, errOut bytes.Buffer
 	w := &auditWriter{out: &out, errOut: &errOut, json: true}

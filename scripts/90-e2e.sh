@@ -1485,6 +1485,134 @@ if modo == "hold":
   rm -rf "$DBTMP"; unset KLING_DB_STATE
 fi
 
+# ── 8. grafos de microVMs ─────────────────────────────────────────────────────
+# Lo que los tests de Go no pueden ver: que <nodo>.graph resuelva dentro del
+# invitado, que el proxy de enlace lleve la conexión al otro netns sin abrir
+# el FORWARD, que un lazy despierte con la primera conexión, y que un fork
+# hable con SUS nodos y no con los del original. web -> api -> db, db lazy
+# desde una plantilla que sirve un fichero en el 5432 (sin Postgres: lo que
+# se prueba es la arista, no la base).
+step "8. Grafos"
+if ! $KLING graph ls >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el daemon no conoce los grafos (capacidad graphs)\n"
+else
+  G="e2e-g-$$"; GDBT="e2e-gdb-$$"; GTMP=$(mktemp -d)
+  GHTTP='import sys, urllib.request
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=50).read().decode().strip())
+except Exception as e:
+    print("FALLO", type(e).__name__, e)'
+  # ghttp <máquina> <url>: GET desde dentro de la máquina.
+  ghttp() { $KLING exec -timeout 90s "$1" -- python3 -c "$GHTTP" "$2" 2>&1; }
+  # gsirve <máquina> <puerto> <dir>: un servidor HTTP que sobrevive al exec.
+  gsirve() { $KLING exec "$1" -- sh -c "mkdir -p $3 && cd $3 && setsid python3 -m http.server $2 >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; }
+  gestado() { $KLING graph inspect "$1" -json 2>/dev/null | python3 -c 'import sys,json; g=json.load(sys.stdin); print(g["state"], " ".join(n+"="+(v.get("state") or "-") for n,v in sorted(g["nodes"].items())))'; }
+  gmarca() { $KLING exec "$1" -- sh -c "echo $2 > /srv/db/marca" >/dev/null 2>&1; }
+
+  # La plantilla del nodo lazy: un servidor en el 5432 con un marcador.
+  $KLING run -name "$GDBT-m" -image "$IMGVOL" -allow-exec >/dev/null 2>&1 \
+    && gsirve "$GDBT-m" 5432 /srv/db && gmarca "$GDBT-m" plantilla && sleep 1 \
+    && $KLING save "$GDBT-m" "$GDBT" >/dev/null 2>&1
+  $KLING rm "$GDBT-m" >/dev/null 2>&1
+  cat > "$GTMP/g.yaml" <<EOF
+# e2e: web -> api -> db (lazy)
+name: $G
+nodes:
+  web: {image: $IMGVOL, allow_exec: true}
+  api: {image: $IMGVOL, allow_exec: true, ports: [8080]}
+  db:  {from: $GDBT, ports: [5432], wake: lazy}
+edges:
+  - {from: web, to: api, kind: link, port: 8080}
+  - {from: api, to: db, kind: link, port: 5432}
+EOF
+  out=$($KLING graph up "$GTMP/g.yaml" 2>&1)
+  if contiene "$out" "Linux-only"; then
+    printf "  \033[33mskip\033[0m  aristas entre máquinas: solo Linux en esta versión\n"
+  elif ! contiene "$out" "up in"; then
+    bad "graph up" "graph $G up" "$out"
+  else
+    ok "graph up: tres nodos, db lazy sin máquina ($(gestado "$G"))"
+    gsirve "$G-api" 8080 /srv/api
+    $KLING exec "$G-api" -- sh -c 'echo api-ok > /srv/api/index.html' >/dev/null 2>&1
+    sleep 1
+    out=$(ghttp "$G-web" http://api.graph:8080/)
+    [ "$out" = "api-ok" ] && ok "web -> api.graph:8080 por la arista link" || bad "enlace web -> api" "api-ok" "$out"
+    st=$(gestado "$G")
+    contiene "$st" "db=-" && ok "db sigue sin máquina antes de la primera conexión" || bad "db lazy" "db=-" "$st"
+    out=$(ghttp "$G-api" http://db.graph:5432/marca)
+    st=$(gestado "$G")
+    { [ "$out" = "plantilla" ] && contiene "$st" "db=running"; } \
+      && ok "la primera conexión a db.graph despierta al lazy (db=running)" || bad "despertar lazy" "plantilla, db=running" "$out / $st"
+    out=$($KLING exec "$G-web" -- python3 -c 'import socket
+try:
+    print(socket.gethostbyname("db.graph"))
+except socket.gaierror as e:
+    print("NXDOMAIN", e)' 2>&1)
+    contiene "$out" "NXDOMAIN" && ok "web no resuelve db.graph (no tiene arista)" || bad "db.graph desde web" "NXDOMAIN" "$out"
+    out=$($KLING exec "$G-web" -- python3 -c 'import socket
+try:
+    print(socket.gethostbyname("example.org"))
+except socket.gaierror as e:
+    print("NXDOMAIN", e)' 2>&1)
+    contiene "$out" "NXDOMAIN" && ok "egress none: fuera de *.graph no resuelve nada" || bad "example.org desde web" "NXDOMAIN" "$out"
+    out=$($KLING machine audit "$G-web" -json 2>&1)
+    contiene "$out" '"kind":"link"' && ok "la auditoría de web tiene la conexión (kind link)" || bad "audit link" '"kind":"link"' "$(printf '%s' "$out" | tail -2)"
+
+    $KLING graph freeze "$G" >/dev/null 2>&1
+    st=$(gestado "$G")
+    [ "$st" = "frozen api=frozen db=frozen web=frozen" ] && ok "graph freeze: los tres frozen" || bad "graph freeze" "frozen api=frozen db=frozen web=frozen" "$st"
+    $KLING graph thaw "$G" >/dev/null 2>&1
+    st=$(gestado "$G")
+    [ "$st" = "running api=running db=running web=running" ] && ok "graph thaw: los tres running" || bad "graph thaw" "running api=running db=running web=running" "$st"
+    out=$(ghttp "$G-web" http://api.graph:8080/)
+    [ "$out" = "api-ok" ] && ok "tras el thaw la arista sigue" || bad "enlace tras thaw" "api-ok" "$out"
+
+    out=$($KLING graph snapshot "$G" -json 2>&1)
+    n=$(printf '%s' "$out" | python3 -c 'import sys,json; s=json.load(sys.stdin); t=s["templates"]; print(s["generation"], len(t), all(v.endswith("-%d" % s["generation"]) for v in t.values()))' 2>/dev/null)
+    [ "$n" = "1 3 True" ] && ok "graph snapshot: tres plantillas de la misma generación" || bad "graph snapshot" "1 3 True" "$out"
+    GSNAPS=$(printf '%s' "$out" | python3 -c 'import sys,json; print(" ".join(json.load(sys.stdin)["templates"].values()))' 2>/dev/null)
+
+    gmarca "$G-db" antes-del-fork
+    out=$($KLING graph fork "$G" -n 2 -q 2>&1); rc=$?
+    GFORKS=$out
+    [ "$rc" = 0 ] && [ "$(printf '%s\n' "$GFORKS" | grep -c .)" = 2 ] && ok "graph fork -n 2: dos grafos nuevos" || bad "graph fork" "dos nombres" "rc=$rc $out"
+    gmarca "$G-db" original-despues
+    for F in $GFORKS; do
+      out=$(ghttp "$F-api" http://db.graph:5432/marca)
+      [ "$out" = "antes-del-fork" ] && ok "fork $F: su api llega a SU db (estado del instante del fork)" \
+        || bad "fork $F: api -> db" "antes-del-fork (no original-despues)" "$out"
+      gmarca "$F-db" "propia-$F"
+      out=$(ghttp "$F-api" http://db.graph:5432/marca)
+      [ "$out" = "propia-$F" ] && ok "fork $F: lo que escribe su db lo ve su api" || bad "fork $F: su db" "propia-$F" "$out"
+    done
+    out=$(ghttp "$G-api" http://db.graph:5432/marca)
+    [ "$out" = "original-despues" ] && ok "el original sigue con su db (ningún fork le llega)" || bad "original tras fork" "original-despues" "$out"
+
+    # Bloque 4: el daemon se reinicia y el grafo y sus enlaces siguen.
+    if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+      ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
+      sleep 4
+      out=$(ghttp "$G-web" http://api.graph:8080/)
+      { [ "$out" = "api-ok" ] && $KLING graph inspect "$G" >/dev/null 2>&1; } \
+        && ok "tras reiniciar el daemon el grafo y su enlace siguen" || bad "grafo tras reinicio" "api-ok" "$out"
+    else
+      echo "  (daemon local: me salto el reinicio para no matar tu sesión)"
+    fi
+
+    for F in $GFORKS; do $KLING graph rm "$F" >/dev/null 2>&1; done
+    $KLING graph rm "$G" >/dev/null 2>&1
+    quedan=$($KLING ps -a 2>/dev/null | grep -c -- "$G" || true)
+    tpls=$($KLING template ls -q 2>/dev/null | grep -c "^gfork-" || true)
+    { [ "$quedan" = 0 ] && [ "$tpls" = 0 ] && ! $KLING graph inspect "$G" >/dev/null 2>&1; } \
+      && ok "graph rm: sin máquinas, sin plantillas temporales de fork, sin grafo" \
+      || bad "graph rm" "0 máquinas, 0 gfork-*" "máquinas=$quedan gfork=$tpls"
+    for s in $GSNAPS; do $KLING template rm -f "$s" >/dev/null 2>&1; done
+  fi
+  $KLING graph rm -f "$G" >/dev/null 2>&1
+  $KLING template rm -f "$GDBT" >/dev/null 2>&1
+  rm -rf "$GTMP"
+fi
+
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fallo(s)\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

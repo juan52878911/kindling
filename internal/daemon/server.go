@@ -35,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -266,6 +266,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sandboxes/{ref}/renew", s.handleRenewSandbox)
 	mux.HandleFunc("POST /sandboxes/{ref}/fork", s.handleForkSandbox)
 	mux.HandleFunc("DELETE /sandboxes/{ref}", s.handleRemoveSandbox)
+	mux.HandleFunc("POST /graphs", s.handleGraphUp)
+	mux.HandleFunc("GET /graphs", s.handleGraphs)
+	mux.HandleFunc("GET /graphs/{ref}", s.handleGraph)
+	mux.HandleFunc("POST /graphs/{ref}/freeze", s.handleGraphFreeze)
+	mux.HandleFunc("POST /graphs/{ref}/thaw", s.handleGraphThaw)
+	mux.HandleFunc("POST /graphs/{ref}/snapshot", s.handleGraphSnapshot)
+	mux.HandleFunc("POST /graphs/{ref}/fork", s.handleGraphFork)
+	mux.HandleFunc("DELETE /graphs/{ref}", s.handleGraphRemove)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /procstats", s.handleProcStats)
@@ -510,6 +518,11 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	decodeMS := time.Since(start).Milliseconds()
+	// kling.graph y kling.graph.* las pone solo el daemon (grafos).
+	if err := api.ValidateNoGraphLabels(req.Labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 	mc, err := s.mgr.Run(r.Context(), req)
 	if err != nil {
 		fail(w, runStatus(err), err)

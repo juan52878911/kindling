@@ -153,7 +153,7 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 
 	// La comprobación de credenciales se repite con el cerrojo de la máquina:
 	// entre la de arriba y la pausa, un SetCredentials pudo darle alguna.
-	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales); err != nil {
+	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales, false); err != nil {
 		return "", nil, fmt.Errorf("forking %s: %w", src.Name, err)
 	}
 	if err := os.WriteFile(filepath.Join(m.snapDir(name), forkMarca), []byte(src.ID+"\n"), 0o644); err != nil {

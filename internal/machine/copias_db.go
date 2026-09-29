@@ -43,13 +43,22 @@ var errModeloASoloLinux = errors.New("kling db attach (a postgres credential wit
 
 // Sustituibles en los tests: cortar sesiones es cosa de internal/net.
 var (
-	invalidarCopia  = invalidarCopiaPlataforma
-	invalidarAgente = invalidarAgentePlataforma
+	invalidarCopia   = invalidarCopiaPlataforma
+	invalidarAgente  = invalidarAgentePlataforma
+	invalidarEnlaces = knet.InvalidarEnlaces
 )
 
 // resolverCopia es el ResolveMachine del proxy de la máquina agente.
 func (m *Manager) resolverCopia(agente string) credproxy.ResolveMachineFunc {
 	return func(id, owner string, port int) (string, error) {
+		// Una arista credential de un grafo: id es el de su nodo destino, no
+		// el de una máquina (grafo_red.go).
+		if gid, desde, hacia, ok := m.aristaVirtual(agente, id, owner); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), plazoDespertar)
+			defer cancel()
+			addr, _, err := m.resolverArista(ctx, agente, gid, desde, hacia, port, api.GraphEdgeCredential)
+			return addr, err
+		}
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 		cp, err := m.comprobarCopiaLocked(agente, id, owner, port)
@@ -121,6 +130,17 @@ func (m *Manager) comprobarCopias(agente string, specs []api.CredentialSpec) err
 		if port == 0 {
 			port = credproxy.PGDefaultPort
 		}
+		if gid, desde, hacia, ok := m.aristaVirtual(agente, s.UpstreamMachine, s.UpstreamOwner); ok {
+			// De un grafo: el destino puede ser un lazy sin instancia, así que
+			// al entregar solo se comprueba la arista, no que corra.
+			m.mu.RLock()
+			_, _, err := m.comprobarAristaLocked(agente, gid, desde, hacia, port, api.GraphEdgeCredential)
+			m.mu.RUnlock()
+			if err != nil {
+				return fmt.Errorf("credential %s: %w", s.Env, err)
+			}
+			continue
+		}
 		m.mu.RLock()
 		cp, err := m.comprobarCopiaLocked(agente, s.UpstreamMachine, s.UpstreamOwner, port)
 		if err == nil {
@@ -139,9 +159,24 @@ func (m *Manager) comprobarCopias(agente string, specs []api.CredentialSpec) err
 // se resuelva después ya ve el estado nuevo, y una que se resolvió antes está
 // registrada y se corta aquí.
 func (m *Manager) invalidarSesiones(id, motivo string) {
-	if n := invalidarCopia(id); n > 0 {
+	// Si es la máquina de un nodo de grafo, también lo que va a su nodo: las
+	// credenciales de las aristas llevan el ID del nodo, y los enlaces que
+	// aún resuelven hacia él (grafo_red.go).
+	ids := []string{id}
+	if v, ok := m.virtuales.Load(id); ok {
+		ids = append(ids, v.(string))
+	}
+	n := 0
+	for _, x := range ids {
+		n += invalidarCopia(x)
+	}
+	if n > 0 {
 		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: id,
 			Message: fmt.Sprintf("%d database session(s) from other machines cut (%s)", n, motivo)})
+	}
+	if n := invalidarEnlaces(ids...); n > 0 {
+		m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: id,
+			Message: fmt.Sprintf("%d graph link session(s) cut (%s)", n, motivo)})
 	}
 }
 

@@ -103,6 +103,8 @@ func main() {
 		err = cmdCp(args)
 	case "sandbox":
 		err = cmdSandbox(args)
+	case "graph":
+		err = cmdGraph(args)
 	case "inspect":
 		err = cmdInspect(args)
 	case "ps":

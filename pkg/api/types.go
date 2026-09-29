@@ -1016,8 +1016,10 @@ type CredentialsRequest struct {
 // va con ":cred" y ":tok" donde había algo que no debe verse, y Query solo
 // dice si la petición la llevaba.
 //
-// Kind es "http" para el proxy HTTP y "dropped" para una línea que solo lleva
-// la cuenta de registros descartados (Dropped). User, Database y Auth son para
+// Kind es "http" para el proxy HTTP, "postgres" para el de Postgres, "link"
+// para una conexión por una arista link de un grafo (Host es <nodo>.graph:P y
+// Upstream la máquina a la que llegó) y "dropped" para una línea que solo
+// lleva la cuenta de registros descartados (Dropped). User, Database y Auth son para
 // proxies de otros protocolos. Reason vacío es que la petición llegó al
 // proveedor y su respuesta entera al invitado; Denied, que la rechazó la
 // política (sin credencial, Allow, ruta ambigua o proxy inactivo).

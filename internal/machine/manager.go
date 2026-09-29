@@ -291,6 +291,16 @@ type Manager struct {
 	uploadMu       sync.Mutex
 	uploadReserved int
 
+	// Grafos de microVMs (grafo.go): por ID, bajo mu, porque el resolvedor de
+	// cada arista los lee con mu tomado en cada conexión. despMu y desp son
+	// los despertares en vuelo, uno por nodo (grafo_red.go); virtuales, el ID
+	// de nodo de cada máquina de un grafo, para cortar las sesiones que van a
+	// su nodo al congelarla, pararla o borrarla.
+	grafos    map[string]*api.Graph
+	despMu    sync.Mutex
+	desp      map[string]*despertar
+	virtuales sync.Map
+
 	// Clave de firma de snapshots (firma.go), cargada una vez.
 	firmaOnce  sync.Once
 	firmaClave []byte
@@ -374,6 +384,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 			m.netCursor = mc.NetIndex
 		}
 	}
+	// Los grafos antes de reconciliar: reconcile rehace los proxies de enlace
+	// de los nodos vivos, y para eso necesita sus aristas.
+	m.cargarGrafos()
 	m.reconcile()
 	m.barrerAlmacen()
 	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
@@ -2094,6 +2107,14 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
 		}
 	}
+	// Las aristas del nodo, si es de un grafo: si la red se rehízo, sus
+	// proxies de enlace y su resolver se fueron con ella. Idempotente. Un
+	// fallo no tumba el thaw: las aristas fallan cerradas, y se dice.
+	if spec, ok := m.especRedGrafo(mc); ok {
+		if err := montarRedGrafo(netcfg, spec); err != nil {
+			log.Printf("thaw: %s woke up without its graph edges: %v", mc.Name, err)
+		}
+	}
 	crono.marca(&crono.p.NetMS)
 	var pid int
 	var c *fc.Client
@@ -2283,6 +2304,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 // SetLabels reetiqueta una máquina viva.
 func (m *Manager) SetLabels(ref string, labels map[string]string) error {
+	// Las de grafo las pone el daemon y no cambian: son la mitad de la
+	// comprobación de cada arista (grafo_red.go).
+	if err := api.ValidateNoGraphLabels(labels); err != nil {
+		return err
+	}
 	mc, ok := m.Get(ref)
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
