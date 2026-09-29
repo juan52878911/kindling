@@ -265,9 +265,14 @@ seguridad de los otros dos modos.
   overlay es del VMM, que podría cambiarlo por un enlace entre la comprobación y la
   copia. La copia es FICLONE entre descriptores o, si no, una copia dispersa en Go
   (`SEEK_DATA`/`SEEK_HOLE` y sin escribir los bloques a cero, como
-  `cp --sparse=always`). En macOS eso significa que el overlay de un `commit` se copia
-  en vez de clonarse (no hay `clonefile` desde un descriptor sin cgo); las instancias
-  siguen clonando del dorado.
+  `cp --sparse=always`). En macOS es `fclonefileat(2)` desde ese mismo descriptor
+  (por su número de llamada al sistema, sin cgo ni `x/sys`): el dorado comparte los
+  bloques del overlay en APFS. `fclonefileat` crea el fichero y falla si ya existe
+  algo con ese nombre (un enlace plantado incluido); después se abre relativo al mismo
+  directorio y sin seguir enlaces, y se exige que sea un fichero regular con un solo
+  enlace, de quien clona (`CLONE_NOOWNERCOPY`) y del tamaño del origen. Si no se puede
+  clonar (`ENOTSUP` fuera de APFS, `EXDEV` entre volúmenes) se copia dispersa como en
+  Linux.
 - `DiskBytes` de `kling ps` no cuenta el overlay del almacén (sus bloques son
   compartidos: sumarlos por instancia mentiría). El uso real está en `kling info`.
 

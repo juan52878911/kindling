@@ -320,11 +320,11 @@ func fijarOverlayParaLeer(ruta string) (*os.File, func() error, error) {
 // con un chown por ruta que seguiría un enlace. Devuelve la identidad del
 // fichero creado, para comprobar después que el que se recupera es este.
 //
-// macOS pierde aquí el clonefile de `cp -c`: no hay clonefile desde un
-// descriptor sin cgo (fclonefileat no está en syscall). El commit copia; las
-// instancias (runFrom) siguen clonando desde el dorado, que es del daemon.
+// En macOS se clona con fclonefileat desde el mismo descriptor (clon_darwin.go),
+// y si el disco no es APFS (ENOTSUP) o dst está en otro volumen (EXDEV), copia
+// dispersa.
 func (m *Manager) copiarOverlayDesde(ctx context.Context, in *os.File, dst string, own func(*os.File) error) (os.FileInfo, error) {
-	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	out, clonado, err := crearDestinoOverlay(in, dst, m.cow.actual() == cowModoReflink)
 	if err != nil {
 		return nil, err
 	}
@@ -332,10 +332,6 @@ func (m *Manager) copiarOverlayDesde(ctx context.Context, in *os.File, dst strin
 		out.Close()
 		_ = os.Remove(dst)
 		return nil, err
-	}
-	clonado := false
-	if m.cow.actual() == cowModoReflink {
-		clonado = clonarDescriptor(in, out) == nil
 	}
 	if !clonado {
 		if err := copiarDisperso(ctx, in, out); err != nil {

@@ -10,6 +10,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Fase baja: copias de disco
+
+- **macOS: `commit` clona el overlay en APFS (#62).** Copiaba el overlay disperso desde
+  el descriptor comprobado porque `cp -c /dev/fd/N` no clona; ahora usa
+  `fclonefileat(2)` desde ese mismo descriptor, por su número de llamada al sistema (sin
+  cgo ni `x/sys`). Sigue sin seguir la ruta del VMM: el clon se crea con su nombre (falla
+  si ya hay algo, enlace incluido), se abre relativo al directorio sin seguir enlaces y
+  se exige un fichero regular con un solo enlace, propio y del tamaño del origen. Fuera
+  de APFS (`ENOTSUP`) o entre volúmenes (`EXDEV`), copia dispersa como antes. Probado en
+  un M4: el dorado comparte los bloques físicos del overlay (`F_LOG2PHYS_EXT`).
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>

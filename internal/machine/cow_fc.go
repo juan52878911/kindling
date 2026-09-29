@@ -62,6 +62,17 @@ func clonarDescriptor(in, out *os.File) error {
 	return nil
 }
 
+// crearDestinoOverlay crea dst (O_EXCL|O_NOFOLLOW, ver copiarOverlayDesde)
+// para el overlay abierto en in y, con reflink, lo clona con FICLONE. Dice si
+// ya lo tiene o hay que copiarlo.
+func crearDestinoOverlay(in *os.File, dst string, reflink bool) (*os.File, bool, error) {
+	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, reflink && clonarDescriptor(in, out) == nil, nil
+}
+
 // probarReflink clona un fichero pequeño de srcDir a dstDir: la única forma
 // fiable de saber si hay reflink entre los dos (el tipo de sistema de ficheros
 // no basta: un XFS formateado sin reflink=1 no clona).
