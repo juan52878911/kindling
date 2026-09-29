@@ -40,7 +40,8 @@ func cmdTry(args []string) (int, error) {
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default 256)")
 	cpus := fs.Int("cpus", 0, "vCPUs (default 1)")
 	egress := fs.String("egress", "", "network egress: none (default) | internet | allowlist")
-	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
+	var allow domainsFlag
+	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
 	ttl := units.DurationVar(fs, "ttl", 0, "lifetime if kling dies before removing it, or with -keep: 10m, 1h (bare number = seconds; default 10m)")
 	keep := fs.Bool("keep", false, "keep the sandbox afterwards and print its id")
 	fs.Usage = func() {
@@ -60,7 +61,7 @@ func cmdTry(args []string) (int, error) {
 	}
 	o := tryOptions{keep: *keep, cmd: cmd, req: api.SandboxRequest{
 		Image: *image, From: *from, MemMiB: *mem, VCPUs: *cpus,
-		Egress: *egress, AllowDomains: splitDomains(*allow), TTLSeconds: int(ttl.Seconds()),
+		Egress: *egress, AllowDomains: splitDomains(allow.String()), TTLSeconds: int(ttl.Seconds()),
 	}}
 	if o.req.Image == "" && o.req.From == "" {
 		o.req.Image = tryDefaultImage

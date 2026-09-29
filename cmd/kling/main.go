@@ -405,7 +405,8 @@ func cmdRun(args []string) error {
 	mem := units.MiBVar(fs, "mem", 0, "memory: 512M, 2G (bare number = MiB; default: 256)")
 	memMax := units.MiBVar(fs, "mem-max", 0, "ceiling for resizing its memory later without restarting (kling machine resize)")
 	egress := fs.String("egress", "", "network egress: none | internet | allowlist (never reaches private networks)")
-	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
+	var allow domainsFlag
+	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
 	ttl := units.SecondsVar(fs, "ttl", 0, "time until it freezes itself: 10m, 1h (bare number = seconds; 0 = never)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core (0 = default)")
 	cpu := fs.Int("cpu", 0, "deprecated alias of -cpu-pct")
@@ -439,7 +440,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	egressReq, allowReq := egressForRun(fs, *from, *egress, *allow, cfg)
+	egressReq, allowReq := egressForRun(fs, *from, *egress, allow.String(), cfg)
 	mc, err := client.Run(ctx, api.RunRequest{
 		Name:  *name,
 		From:  *from,
