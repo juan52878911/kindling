@@ -25,6 +25,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   recibe solo el esquema y la pregunta y devuelve una SQL que se valida, se enseña y se
   ejecuta con un rol de solo lectura en `BEGIN TRANSACTION READ ONLY`. Ver
   [`docs/db-ask.md`](docs/db-ask.md).
+- **`kling db rehearse`, `rotate`, `snapshot`/`snapshots`/`undo`.** `rehearse` ensaya
+  migraciones SQL en una copia desechable (tiempos, esperas por locks, tamaño; un
+  `lock_timeout` se informa como "would block"); `rotate` da una clave nueva a una copia y
+  la vieja deja de valer; `snapshot` guarda una copia viva como punto de restauración y
+  `undo` vuelve a él (mismo nombre y dueño, clave nueva). Ver
+  [`docs/db.md`](docs/db.md).
+- **`kling db` en CI.** Scripts (`ext/db/scripts/ci-load.sh`, `ci-pr-db.sh`) y ejemplos de
+  GitHub Actions y GitLab CI para una base por PR. Ver [`docs/db-ci.md`](docs/db-ci.md).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
   (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
 - e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`
