@@ -69,7 +69,7 @@ func (ta *testApp) copyOf(t *testing.T, branch string) *api.Machine {
 }
 
 func TestNombresDeRama(t *testing.T) {
-	for _, b := range []string{"", "-x", "a\nb", "a\x00", strings.Repeat("a", 300), "\xff"} {
+	for _, b := range []string{"", "-x", "a\nb", "a\x00", "a\u0085b", "a‮b", "a‏b", "a⁦b", strings.Repeat("a", 300), "\xff"} {
 		if validBranch(b) == nil {
 			t.Errorf("validBranch(%q) accepted", b)
 		}

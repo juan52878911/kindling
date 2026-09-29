@@ -44,14 +44,56 @@ fi
 exit $rc
 `
 
-func cmdBranchHook(action string) error {
+func cmdBranchHook(action string, force bool) error {
 	if action != "install" && action != "uninstall" {
 		return usageErr("usage: kling db branch hook install|uninstall")
 	}
-	a := &app{stdout: os.Stdout, stderr: os.Stderr}
+	a := &app{stdout: os.Stdout, stderr: os.Stderr, hookForce: force}
 	ctx, stop := signalCtx()
 	defer stop()
 	return a.branchHook(ctx, action)
+}
+
+// evalExistente resuelve los enlaces de p aunque no exista todavía: resuelve
+// el ancestro más cercano que sí existe y le vuelve a colgar el resto.
+func evalExistente(p string) (string, error) {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest), nil
+		}
+		up := filepath.Dir(p)
+		if up == p {
+			return "", fmt.Errorf("cannot resolve %s", p)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = up
+	}
+}
+
+// hookFueraDelGit rechaza un directorio de hooks que no cuelga del directorio
+// git del repo: con core.hooksPath dentro del árbol de trabajo (versionado,
+// husky) el hook viajaría con el repo, y fuera del repo (global) afectaría a
+// todos los repos de la cuenta.
+func (a *app) hookFueraDelGit(ctx context.Context, dir string) error {
+	common, err := a.git(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	base, err := evalExistente(common)
+	if err != nil {
+		return err
+	}
+	d, err := evalExistente(dir)
+	if err != nil {
+		return err
+	}
+	if rel, err := filepath.Rel(base, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	return fmt.Errorf("the hooks directory %s is outside the git directory %s (core.hooksPath points into the working tree or outside the repo): "+
+		"the hook would be versioned with the repo or shared with other repos; use -force to install it there anyway (kling db branch -force hook install)", dir, base)
 }
 
 // hookDir es el directorio de hooks del repo (respeta core.hooksPath y los
@@ -80,6 +122,11 @@ func (a *app) branchHook(ctx context.Context, action string) error {
 	dir, err := a.hookDir(ctx)
 	if err != nil {
 		return err
+	}
+	if action == "install" && !a.hookForce {
+		if err := a.hookFueraDelGit(ctx, dir); err != nil {
+			return err
+		}
 	}
 	path, orig := filepath.Join(dir, hookName), filepath.Join(dir, hookOrigName)
 	cur, err := readHook(path)
