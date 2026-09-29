@@ -50,12 +50,26 @@ func TestMain(m *testing.M) {
 }
 
 // puertoFalso es el puerto de loopback que el falso "abre" para cada puerto
-// del invitado. Determinista, para poder comprobarlo desde la prueba.
+// del invitado. Determinista, para poder comprobarlo desde la prueba, y dentro
+// del rango reservado, como los de verdad (reenvios.go).
 func puertoFalso(p int) string {
 	if a := os.Getenv(envFakeVZGuest); a != "" && p == api.GuestPort {
 		return a
 	}
-	return "127.0.0.1:" + strconv.Itoa(40000+p%10000)
+	return "127.0.0.1:" + strconv.Itoa(credproxy.ForwardPortMin+p%1000)
+}
+
+// escucharReservado abre un listener en 127.0.0.1 dentro del rango reservado
+// a los reenvíos: el daemon rechaza un reenvío fuera de él.
+func escucharReservado(t *testing.T) net.Listener {
+	t.Helper()
+	for p := credproxy.ForwardPortMax; p >= credproxy.ForwardPortMin; p-- {
+		if l, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
+			return l
+		}
+	}
+	t.Fatal("no free port in the reserved forward range")
+	return nil
 }
 
 // envFakeVZGuest, si está, es la dirección que el falso da como reenvío del
@@ -124,6 +138,8 @@ func servirVZFalso(sock, logPath string) {
 				Credentials []struct {
 					Domain, Secret, Kind string
 					Allow                []string
+					Upstream             string
+					UpstreamTLS          string `json:"upstream_tls"`
 				} `json:"credentials"`
 			}
 			_ = json.Unmarshal(body, &c)
@@ -138,6 +154,12 @@ func servirVZFalso(sock, logPath string) {
 				}
 				if cr.Kind != "" {
 					linea += "+kind=" + cr.Kind
+				}
+				if cr.Upstream != "" {
+					linea += "+upstream=" + cr.Upstream
+				}
+				if cr.UpstreamTLS != "" {
+					linea += "+upstream_tls=" + cr.UpstreamTLS
 				}
 			}
 		case "/kling/forwards":
@@ -528,7 +550,7 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 	m, _ := managerVZ(t)
 	var mu sync.Mutex
 	var vistos []api.GuestResync
-	agente := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	agente := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != api.GuestResyncPath {
 			http.NotFound(w, r)
 			return
@@ -540,6 +562,9 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 		mu.Unlock()
 		_, _ = w.Write([]byte(`{"skew_ms":0}`))
 	}))
+	agente.Listener.Close()
+	agente.Listener = escucharReservado(t)
+	agente.Start()
 	defer agente.Close()
 	t.Setenv(envFakeVZGuest, strings.TrimPrefix(agente.URL, "http://"))
 
@@ -684,7 +709,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 	c := fc.New(m.socket[id])
 	if err := registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk", Allow: []string{"GET /v1/balance"}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	ls := llamadas(t, logPath)
@@ -724,7 +749,7 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
-			}, "")
+			}, "", nil)
 			ls := llamadas(t, logPath)
 			i := indice(ls, "PUT /kling/credentials")
 			if kinds == "" {
@@ -740,11 +765,71 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 	}
 }
 
+// Una credencial Postgres con upstream fijado solo va a un kling-vz que
+// anuncie "postgres-upstream": uno que no lo conozca marcaría el dominio en su
+// lugar. Con la capacidad, upstream y modo TLS viajan.
+func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
+	for _, kinds := range []string{"http,postgres", "http,postgres,postgres-upstream"} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			id := "aa11bb22cc33dd66"
+			dir := m.dir(id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet"}
+			base := filepath.Join(m.root, "base.ext4")
+			overlay := filepath.Join(dir, "overlay.ext4")
+			for _, f := range []string{base, overlay} {
+				if err := os.WriteFile(f, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false)
+			defer matarVMM(pid)
+			if err != nil {
+				t.Fatalf("boot: %v", err)
+			}
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app",
+					Upstream: "127.0.0.1:5432", UpstreamTLS: credproxy.UpstreamTLSDisable},
+			}, "", nil)
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/credentials")
+			if !strings.Contains(kinds, credproxy.CapPostgresUpstream) {
+				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") || i >= 0 {
+					t.Fatalf("un kling-vz sin postgres-upstream recibió la credencial: err=%v llamadas=%q", err, ls)
+				}
+				return
+			}
+			if err != nil || i < 0 || !strings.Contains(ls[i], "+upstream=127.0.0.1:5432+upstream_tls=disable") {
+				t.Fatalf("err=%v llamadas=%q", err, ls)
+			}
+			// Un upstream con nombre no se le da: el kling-vz confinado no
+			// llega al resolver del Mac.
+			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432"},
+			}, "", nil)
+			if err == nil || !strings.Contains(err.Error(), "must be an IP address or localhost") {
+				t.Fatalf("upstream con nombre en macOS: %v", err)
+			}
+			if n := len(llamadas(t, logPath)); n != len(ls) {
+				t.Errorf("con un upstream con nombre se llamó a kling-vz: %q", llamadas(t, logPath)[len(ls):])
+			}
+		})
+	}
+}
+
 // Sin cliente (el daemon se reinició y la máquina siguió viva) no se llama a
 // nadie: el kling-vz es el mismo y conserva las claves.
 func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
 	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
-		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}, ""); err != nil {
+		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}, "", nil); err != nil {
 		t.Fatal(err)
 	}
 }

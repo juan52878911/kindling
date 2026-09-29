@@ -270,6 +270,19 @@ func (c *Client) SetCredentials(ctx context.Context, ref string, req Credentials
 	return &m, c.do(ctx, http.MethodPost, "/machines/"+ref+"/credentials", req, &m)
 }
 
+// RemoveCredential quita de una máquina la credencial de variable env. Con
+// upstreamMachine no vacío, el daemon exige que esa credencial vaya a esa
+// máquina (kling db detach). En una máquina viva el proxy corta en el acto las
+// sesiones de Postgres que la usaban.
+func (c *Client) RemoveCredential(ctx context.Context, ref, env, upstreamMachine string) (*Machine, error) {
+	path := "/machines/" + url.PathEscape(ref) + "/credentials/" + url.PathEscape(env)
+	if upstreamMachine != "" {
+		path += "?upstream_machine=" + url.QueryEscape(upstreamMachine)
+	}
+	var m Machine
+	return &m, c.do(ctx, http.MethodDelete, path, nil, &m)
+}
+
 // SetSnapshotCredentials ata credenciales a una plantilla: cada instancia que
 // nazca de ella (kling run -from, el gateway MCP) las recibe en su proxy de
 // credenciales al arrancar. Exige que la plantilla tenga egress allowlist.

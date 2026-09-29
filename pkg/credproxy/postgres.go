@@ -15,9 +15,13 @@ package credproxy
 // sea el de la credencial y, si la credencial fija base de datos, esa.
 //
 // EL TRAMO DEL SERVIDOR sale por el dialer de solo IPs públicas (dialPublico)
-// y SIEMPRE con TLS verificado contra el nombre de la credencial (TLS 1.2+,
+// o, si el operador fijó Upstream, a esa dirección (upstream.go: loopback y
+// privadas sí; metadatos y la red de kindling nunca). Por defecto con TLS
+// verificado contra el nombre de la credencial o TLSServerName (TLS 1.2+,
 // raíces del sistema más la CA de la credencial si la trae). Un servidor que
-// contesta 'N' al SSLRequest es un fallo, no un "entonces en claro". La
+// contesta 'N' al SSLRequest es un fallo, no un "entonces en claro": sin TLS
+// solo se sale si la credencial lo pide (UpstreamTLS "disable", solo con
+// Upstream), y entonces sin SSLRequest y solo con SCRAM-SHA-256. La
 // respuesta al SSLRequest se lee byte a byte, sin buffer: lo que un
 // intermediario inyecte detrás de la 'S' no puede colarse como si viniera
 // dentro del TLS (CVE-2021-23214). La autenticación es SCRAM-SHA-256 (con
@@ -126,6 +130,9 @@ const (
 type credPG struct {
 	Credential
 	tls *tls.Config
+	// claro hace que el aviso de contraseña en claro salga una vez por
+	// credencial (por juego de credenciales: una rotación lo repone).
+	claro *sync.Once
 }
 
 func compilarPG(c Credential) (credPG, error) {
@@ -136,11 +143,15 @@ func compilarPG(c Credential) (credPG, error) {
 	if c.CAPEM != "" && !pool.AppendCertsFromPEM([]byte(c.CAPEM)) {
 		return credPG{}, fmt.Errorf("credential for %s: the CA is not a PEM certificate", c.Domain)
 	}
+	nombre := c.Domain
+	if c.TLSServerName != "" {
+		nombre = c.TLSServerName
+	}
 	return credPG{Credential: c, tls: &tls.Config{
-		ServerName: c.Domain,
+		ServerName: nombre,
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    pool,
-	}}, nil
+	}, claro: new(sync.Once)}, nil
 }
 
 // validarPostgres: ver ValidarTipo.
@@ -161,10 +172,15 @@ func validarPostgres(c *Credential) error {
 	if err := validarNombrePG(c.User); err != nil {
 		return fmt.Errorf("credential for %s: user: %w", d, err)
 	}
-	if c.Database != "" {
+	switch {
+	case c.Database != "" && c.AnyDatabase:
+		return fmt.Errorf("credential for %s: -database and -any-database are mutually exclusive", d)
+	case c.Database != "":
 		if err := validarNombrePG(c.Database); err != nil {
 			return fmt.Errorf("credential for %s: database: %w", d, err)
 		}
+	case !c.AnyDatabase:
+		return fmt.Errorf("credential for %s: a postgres credential needs -database (or -any-database to allow every database the role can connect to)", d)
 	}
 	// ASCII imprimible: SCRAM pide SASLprep, que para esto es la identidad
 	// (ver scram.go), y la contraseña viaja como cadena C.
@@ -179,7 +195,7 @@ func validarPostgres(c *Credential) error {
 	if c.CAPEM != "" && !x509.NewCertPool().AppendCertsFromPEM([]byte(c.CAPEM)) {
 		return fmt.Errorf("credential for %s: the CA is not a PEM certificate", d)
 	}
-	return nil
+	return validarUpstream(c)
 }
 
 // validarNombrePG: un identificador de Postgres (rol o base de datos) sin
@@ -429,14 +445,14 @@ func (s *sesionPG) servir() {
 		s.fatal("28P01", "password authentication failed (the password must be the placeholder of a postgres credential)")
 		return
 	}
-	s.rec.Host, s.rec.Creds = cred.Domain, []string{cred.Env}
+	s.rec.Host, s.rec.Creds, s.rec.Upstream = cred.Domain, []string{cred.Env}, cred.upstreamAuditado()
 	if user != cred.User {
 		s.rec.Reason, s.rec.Denied = ReasonUserMismatch, true
 		s.fatal("28000", "the user does not match the credential")
 		return
 	}
-	s.rec.User = cred.User
-	if cred.Database != "" && db != cred.Database {
+	s.rec.User, s.rec.AnyDatabase = cred.User, cred.AnyDatabase
+	if !cred.AnyDatabase && db != cred.Database {
 		s.rec.Reason, s.rec.Denied = ReasonDatabaseMismatch, true
 		s.fatal("28000", "the database does not match the credential")
 		return
@@ -451,6 +467,19 @@ func (s *sesionPG) servir() {
 		s.rec.Database = ":cred"
 	}
 
+	// Hacia otra máquina (maquina.go): la sesión se apunta ANTES de resolver,
+	// para que Invalidar la encuentre aunque llegue entre la resolución y el
+	// dial.
+	if cred.UpstreamMachine != "" {
+		quitar, ok := p.registrarSesion(s, cred)
+		defer quitar()
+		if !ok {
+			s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
+			s.fatal("08006", "the credential was withdrawn")
+			return
+		}
+	}
+
 	// 3. El servidor: TLS verificado y la autenticación con la clave real.
 	fin := s.inicio.Add(p.pgAuth)
 	_ = guest.SetDeadline(fin)
@@ -459,10 +488,17 @@ func (s *sesionPG) servir() {
 	up, err := p.abrirPG(ctx, cred)
 	if err != nil {
 		s.rec.Reason = ReasonUpstreamTLS
-		if !errors.Is(err, errTLSUpstream) {
+		switch {
+		case errors.Is(err, errMaquinaNoDisponible):
+			s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
+		case !errors.Is(err, errTLSUpstream):
 			s.rec.Reason = ReasonUpstreamError
 		}
-		p.logf("credential proxy postgres %s:%d: %v", cred.Domain, cred.Port, err)
+		p.logf("credential proxy postgres %s (%s): %v", cred.Domain, cred.destinoPG(), err)
+		if s.rec.Reason == ReasonMachineUnavailable {
+			s.fatal("08006", "the database copy is not available (stopped, frozen, removed or not ready)")
+			return
+		}
 		s.fatal("08006", "could not connect to the database server")
 		return
 	}
@@ -476,13 +512,13 @@ func (s *sesionPG) servir() {
 		s.fatal("08006", "could not connect to the database server")
 		return
 	}
-	metodo, codigo, err := autenticarPG(br, up, cred)
+	metodo, codigo, err := autenticarPG(br, up, cred, cred.UpstreamTLS == UpstreamTLSDisable)
 	if err != nil {
 		s.rec.Reason = ReasonUpstreamAuth
 		if codigo != "" {
-			p.logf("credential proxy postgres %s:%d: the server refused the authentication (SQLSTATE %s)", cred.Domain, cred.Port, codigo)
+			p.logf("credential proxy postgres %s (%s): the server refused the authentication (SQLSTATE %s)", cred.Domain, cred.destinoPG(), codigo)
 		} else {
-			p.logf("credential proxy postgres %s:%d: %v", cred.Domain, cred.Port, err)
+			p.logf("credential proxy postgres %s (%s): %v", cred.Domain, cred.destinoPG(), err)
 		}
 		if strings.HasPrefix(codigo, "28") || codigo == "" {
 			s.fatal("28P01", "the database server refused the credential"+sqlstateDe(codigo))
@@ -492,6 +528,11 @@ func (s *sesionPG) servir() {
 		return
 	}
 	s.rec.Auth = metodo
+	if metodo == AuthPassword {
+		cred.claro.Do(func() {
+			p.logf("credential proxy postgres %s (%s): server asked for the password in cleartext inside TLS; prefer SCRAM", cred.Domain, cred.destinoPG())
+		})
+	}
 
 	// 4. Autenticado: AuthenticationOk al invitado y a pasar bytes.
 	_ = guest.SetDeadline(time.Time{})
@@ -588,7 +629,7 @@ func (p *Proxy) registrarCancel(cred credPG, pid, clave uint32) (claveCancel, bo
 }
 
 // cancelar atiende un CancelRequest: con una clave que el proxy dio, abre una
-// conexión nueva (con el mismo TLS verificado) y manda la real; con otra, cierra
+// conexión nueva (al mismo destino y con el mismo modo TLS) y manda la real; con otra, cierra
 // sin decir nada, como hace el propio Postgres.
 func (s *sesionPG) cancelar(cuerpo []byte) {
 	s.rec.Method = "cancel"
@@ -605,6 +646,7 @@ func (s *sesionPG) cancelar(cuerpo []byte) {
 		return
 	}
 	s.rec.Host, s.rec.Creds, s.rec.User = d.cred.Domain, []string{d.cred.Env}, d.cred.User
+	s.rec.Upstream = d.cred.upstreamAuditado()
 	ctx, cancel := context.WithTimeout(s.ctx, s.p.pgAuth)
 	defer cancel()
 	up, err := s.p.abrirPG(ctx, d.cred)
@@ -613,7 +655,7 @@ func (s *sesionPG) cancelar(cuerpo []byte) {
 		if !errors.Is(err, errTLSUpstream) {
 			s.rec.Reason = ReasonUpstreamError
 		}
-		s.p.logf("credential proxy postgres %s:%d: cancel: %v", d.cred.Domain, d.cred.Port, err)
+		s.p.logf("credential proxy postgres %s (%s): cancel: %v", d.cred.Domain, d.cred.destinoPG(), err)
 		return
 	}
 	if !s.ponerUp(up) {
@@ -639,13 +681,28 @@ var errTLSUpstream = errors.New("TLS")
 
 // abrirPG conecta con el servidor de cred y negocia TLS verificado. La
 // respuesta al SSLRequest se lee de un byte y sin buffer (ver la cabecera).
+// Con Upstream marca esa dirección con dialUp (upstream.go); si además
+// UpstreamTLS es "disable", devuelve la conexión sin TLS y sin SSLRequest
+// (autenticarPG solo admitirá entonces SCRAM-SHA-256).
 func (p *Proxy) abrirPG(ctx context.Context, cred credPG) (net.Conn, error) {
-	c, err := p.dialPG(ctx, "tcp", net.JoinHostPort(cred.Domain, strconv.Itoa(cred.Port)))
+	var c net.Conn
+	var err error
+	switch {
+	case cred.UpstreamMachine != "":
+		c, err = p.dialMaquina(ctx, cred)
+	case cred.Upstream != "":
+		c, err = p.dialUp(ctx, cred.Upstream)
+	default:
+		c, err = p.dialPG(ctx, "tcp", net.JoinHostPort(cred.Domain, strconv.Itoa(cred.Port)))
+	}
 	if err != nil {
 		return nil, err
 	}
 	if dl, ok := ctx.Deadline(); ok {
 		_ = c.SetDeadline(dl)
+	}
+	if cred.UpstreamTLS == UpstreamTLSDisable {
+		return c, nil
 	}
 	parar := context.AfterFunc(ctx, func() { _ = c.Close() })
 	defer parar()
@@ -670,10 +727,16 @@ func (p *Proxy) abrirPG(ctx context.Context, cred credPG) (net.Conn, error) {
 	return tc, nil
 }
 
+// errSinTLSNecesitaSCRAM: sin TLS hacia el servidor solo vale SCRAM-SHA-256.
+var errSinTLSNecesitaSCRAM = errors.New("upstream without TLS requires SCRAM-SHA-256")
+
 // autenticarPG lleva la autenticación con el servidor hasta su
 // AuthenticationOk. Devuelve el método usado; con un ErrorResponse del
-// servidor, su SQLSTATE (nunca el texto).
-func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG) (metodo, codigo string, err error) {
+// servidor, su SQLSTATE (nunca el texto). sinTLS (UpstreamTLS "disable")
+// admite SOLO SASL SCRAM-SHA-256 (sin -PLUS): ni contraseña en claro, ni md5,
+// ni un AuthenticationOk sin SCRAM (trust), que dejaría al servidor sin
+// probar que conoce la clave cuando no hay certificado que lo identifique.
+func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG, sinTLS bool) (metodo, codigo string, err error) {
 	var scram *scramCliente
 	verificado := false
 	for {
@@ -700,11 +763,17 @@ func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG) (metodo, codigo st
 			if scram != nil && !verificado {
 				return "", "", errors.New("AuthenticationOk without a verified SCRAM server signature")
 			}
+			if sinTLS && scram == nil {
+				return "", "", fmt.Errorf("%w (the server let us in without authenticating)", errSinTLSNecesitaSCRAM)
+			}
 			if metodo == "" {
 				metodo = AuthTrust
 			}
 			return metodo, "", nil
 		case 3: // AuthenticationCleartextPassword: dentro del TLS verificado
+			if sinTLS {
+				return "", "", fmt.Errorf("%w (the server asked for a cleartext password)", errSinTLSNecesitaSCRAM)
+			}
 			if metodo != "" {
 				return "", "", errors.New("unexpected password request")
 			}
@@ -718,7 +787,7 @@ func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG) (metodo, codigo st
 			}
 			mecs := cadenasPG(datos)
 			var cb []byte
-			if tc, ok := up.(*tls.Conn); ok {
+			if tc, ok := up.(*tls.Conn); ok && !sinTLS {
 				if cs := tc.ConnectionState(); len(cs.PeerCertificates) > 0 {
 					cb = tlsServerEndPoint(cs.PeerCertificates[0])
 				}
@@ -729,6 +798,8 @@ func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG) (metodo, codigo st
 				mec, metodo = scramSHA256Plus, AuthSCRAMPlus
 			case contiene(mecs, scramSHA256):
 				mec, metodo = scramSHA256, AuthSCRAM
+			case sinTLS:
+				return "", "", fmt.Errorf("%w (the server offers %s)", errSinTLSNecesitaSCRAM, strings.Join(mecs, ", "))
 			default:
 				return "", "", fmt.Errorf("the server offers no supported SASL mechanism (%s)", strings.Join(mecs, ", "))
 			}
@@ -763,6 +834,9 @@ func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG) (metodo, codigo st
 			}
 			verificado = true
 		case 5:
+			if sinTLS {
+				return "", "", fmt.Errorf("%w (the server asked for md5)", errSinTLSNecesitaSCRAM)
+			}
 			return "", "", errors.New("the server asked for md5, which the proxy does not support (use scram-sha-256)")
 		default:
 			return "", "", fmt.Errorf("the server asked for an unsupported authentication method (%d)", sub)

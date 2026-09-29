@@ -14,8 +14,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -79,6 +81,11 @@ type servidorPG struct {
 	// manda justo detrás de la 'S', antes del TLS.
 	ssl     byte
 	inyecta []byte
+	// sinTLS: acepta además un StartupMessage directo, sin SSLRequest (un
+	// servidor sin TLS, como un Docker de pruebas).
+	sinTLS bool
+
+	sslVisto atomic.Bool
 
 	mu        sync.Mutex
 	params    map[string]string
@@ -91,11 +98,17 @@ type servidorPG struct {
 
 func nuevoServidorPG(t *testing.T, modo string) *servidorPG {
 	t.Helper()
+	return nuevoServidorPGNombre(t, modo, pgDominio)
+}
+
+// nuevoServidorPGNombre es nuevoServidorPG con un certificado para nombre.
+func nuevoServidorPGNombre(t *testing.T, modo, nombre string) *servidorPG {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, _ := certPG(t, pgDominio)
+	cert, _ := certPG(t, nombre)
 	s := &servidorPG{t: t, ln: ln, cert: cert, modo: modo, ssl: 'S'}
 	t.Cleanup(func() { ln.Close() })
 	go func() {
@@ -114,20 +127,27 @@ func nuevoServidorPG(t *testing.T, modo string) *servidorPG {
 func (s *servidorPG) atender(raw net.Conn) {
 	defer raw.Close()
 	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
-	code, _, err := leerArranque(raw)
-	if err != nil || code != pgSSLRequest {
-		return
-	}
-	raw.Write(append([]byte{s.ssl}, s.inyecta...))
-	if s.ssl != 'S' {
-		return
-	}
-	c := tls.Server(raw, &tls.Config{Certificates: []tls.Certificate{s.cert}})
-	if err := c.Handshake(); err != nil {
-		return
-	}
-	code, cuerpo, err := leerArranque(c)
+	code, cuerpo, err := leerArranque(raw)
 	if err != nil {
+		return
+	}
+	var c net.Conn = raw
+	switch {
+	case code == pgSSLRequest:
+		s.sslVisto.Store(true)
+		raw.Write(append([]byte{s.ssl}, s.inyecta...))
+		if s.ssl != 'S' {
+			return
+		}
+		tc := tls.Server(raw, &tls.Config{Certificates: []tls.Certificate{s.cert}})
+		if err := tc.Handshake(); err != nil {
+			return
+		}
+		c = tc
+		if code, cuerpo, err = leerArranque(c); err != nil {
+			return
+		}
+	case !s.sinTLS:
 		return
 	}
 	if code == pgCancelRequest {
@@ -191,7 +211,8 @@ func (s *servidorPG) atender(raw net.Conn) {
 	}
 }
 
-func (s *servidorPG) autenticar(c *tls.Conn, br *bufio.Reader) bool {
+func (s *servidorPG) autenticar(c net.Conn, br *bufio.Reader) bool {
+	_, conTLS := c.(*tls.Conn)
 	switch s.modo {
 	case "trust":
 		return true
@@ -219,8 +240,11 @@ func (s *servidorPG) autenticar(c *tls.Conn, br *bufio.Reader) bool {
 	}
 	// SCRAM de servidor.
 	mecs := scramSHA256 + "\x00"
-	if s.modo == "scram-plus" {
+	switch s.modo {
+	case "scram-plus":
 		mecs = scramSHA256Plus + "\x00" + mecs
+	case "solo-plus":
+		mecs = scramSHA256Plus + "\x00"
 	}
 	c.Write(mensajePG('R', append([]byte{0, 0, 0, 10}, mecs+"\x00"...)))
 	tipo, msg, err := leerMensaje(br, 4096)
@@ -234,7 +258,13 @@ func (s *servidorPG) autenticar(c *tls.Conn, br *bufio.Reader) bool {
 	if s.modo == "scram-plus" && (mec != scramSHA256Plus || gs2 != "p=tls-server-end-point,,") {
 		return false
 	}
-	if s.modo != "scram-plus" && (mec != scramSHA256 || gs2 != "y,,") {
+	// "y" con TLS (el cliente sabe de channel binding y el servidor no lo
+	// ofrece); sin TLS no hay nada que atar: "n".
+	gs2Esperado := "n,,"
+	if conTLS {
+		gs2Esperado = "y,,"
+	}
+	if s.modo != "scram-plus" && (mec != scramSHA256 || gs2 != gs2Esperado) {
 		return false
 	}
 	cnonce := desnudo[strings.Index(desnudo, "r=")+2:]
@@ -516,6 +546,113 @@ func TestPGPasswordDentroDelTLS(t *testing.T) {
 	defer srv.mu.Unlock()
 	if len(srv.clavesVis) != 1 || srv.clavesVis[0] != pgClave {
 		t.Fatalf("el servidor recibió %q", srv.clavesVis)
+	}
+}
+
+// Contraseña en claro: la auditoría anota auth="password" (distinto de SCRAM)
+// y el log del host avisa UNA vez por credencial, no por conexión.
+func TestPGPasswordAvisaUnaVez(t *testing.T) {
+	var mu sync.Mutex
+	var logs []string
+	srv := nuevoServidorPG(t, "password")
+	e := proxyPG(t, srv, nil, func(o *Options) {
+		o.Logf = func(f string, a ...any) {
+			mu.Lock()
+			logs = append(logs, fmt.Sprintf(f, a...))
+			mu.Unlock()
+		}
+	})
+	for i := 0; i < 2; i++ {
+		k := conectarPG(t, e.addr)
+		if tipo, msg := k.login(pgMarca); tipo != 'R' || binary.BigEndian.Uint32(msg) != 0 {
+			t.Fatalf("esperaba AuthenticationOk, llegó %q %q", tipo, msg)
+		}
+		k.hastaListo()
+		k.c.Close()
+	}
+	recs, _ := e.registro(t)
+	if len(recs) != 2 || recs[0].Auth != AuthPassword || recs[1].Auth != AuthPassword || AuthPassword == AuthSCRAM {
+		t.Fatalf("registro %+v", recs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, l := range logs {
+		if strings.Contains(l, "asked for the password in cleartext inside TLS; prefer SCRAM") {
+			n++
+			if strings.Contains(l, pgClave) || strings.Contains(l, pgMarca) {
+				t.Errorf("el aviso lleva un secreto: %q", l)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d avisos, quería 1: %q", n, logs)
+	}
+}
+
+// Con AnyDatabase el proxy deja entrar en cualquier base; sin ella, solo en
+// la de la credencial.
+func TestPGAnyDatabase(t *testing.T) {
+	srv := nuevoServidorPG(t, "scram")
+	e := proxyPG(t, srv, func(c *Credential) { c.Database, c.AnyDatabase = "", true })
+	k := conectarPG(t, e.addr)
+	if tipo, msg := k.login(pgMarca, "user", pgUser, "database", "otra"); tipo != 'R' || binary.BigEndian.Uint32(msg) != 0 {
+		t.Fatalf("esperaba AuthenticationOk, llegó %q %q", tipo, msg)
+	}
+	k.hastaListo()
+	k.c.Close()
+	// El registro dice que la credencial entra en cualquier base.
+	if recs, crudo := e.registro(t); len(recs) != 1 || recs[0].Database != "otra" || recs[0].Denied || !recs[0].AnyDatabase ||
+		!strings.Contains(crudo, `"any_database":true`) {
+		t.Fatalf("registro %+v", recs)
+	}
+}
+
+// -database obligatoria: sin ella (ni AnyDatabase) no vale, ambas a la vez
+// tampoco, y AnyDatabase no es para HTTP. NormalizarAlmacen lee un almacén
+// antiguo (postgres sin base) como AnyDatabase.
+func TestValidarDatabaseObligatoria(t *testing.T) {
+	pg := func(mod func(*Credential)) Credential {
+		c := Credential{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave,
+			Kind: KindPostgres, User: pgUser}
+		mod(&c)
+		return c
+	}
+	if err := ValidarCredenciales([]Credential{pg(func(*Credential) {})}); err == nil || !strings.Contains(err.Error(), "-database") {
+		t.Errorf("sin base ni AnyDatabase: %v", err)
+	}
+	if err := ValidarCredenciales([]Credential{pg(func(c *Credential) { c.Database, c.AnyDatabase = pgDB, true })}); err == nil {
+		t.Error("Database y AnyDatabase a la vez: aceptada")
+	}
+	if err := ValidarCredenciales([]Credential{pg(func(c *Credential) { c.AnyDatabase = true })}); err != nil {
+		t.Errorf("AnyDatabase: %v", err)
+	}
+	http := Credential{Env: "K", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "x", Secret: "k", AnyDatabase: true}
+	if err := ValidarCredenciales([]Credential{http}); err == nil {
+		t.Error("AnyDatabase en HTTP: aceptada")
+	}
+	// Almacén antiguo: así se guardaba una credencial sin base.
+	var antigua Credential
+	if err := json.Unmarshal([]byte(`{"Env":"PGPASSWORD","Domain":"db.example.com","Placeholder":"`+pgMarca+`","Secret":"x","Kind":"postgres","User":"app"}`), &antigua); err != nil {
+		t.Fatal(err)
+	}
+	if !NormalizarAlmacen(antigua.Kind, antigua.Database, &antigua.AnyDatabase) || !antigua.AnyDatabase {
+		t.Fatalf("no normalizada: %+v", antigua)
+	}
+	if err := ValidarCredenciales([]Credential{antigua}); err != nil {
+		t.Errorf("almacén antiguo: %v", err)
+	}
+	fija := Credential{Kind: KindPostgres, Database: "appdb"}
+	if NormalizarAlmacen(fija.Kind, fija.Database, &fija.AnyDatabase) || fija.AnyDatabase {
+		t.Error("una credencial con base no debe pasar a AnyDatabase")
+	}
+	h := Credential{}
+	if NormalizarAlmacen(h.Kind, h.Database, &h.AnyDatabase) || h.AnyDatabase {
+		t.Error("HTTP no debe cambiar")
+	}
+	// Ya promovida (o nueva con AnyDatabase): no es de un almacén antiguo.
+	if NormalizarAlmacen(antigua.Kind, antigua.Database, &antigua.AnyDatabase) {
+		t.Error("una credencial con AnyDatabase no es de un almacén antiguo")
 	}
 }
 
@@ -821,7 +958,7 @@ func TestValidarCredencialesPostgres(t *testing.T) {
 	_, ca := certPG(t, pgDominio)
 	base := func() Credential {
 		return Credential{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave,
-			Kind: KindPostgres, User: pgUser}
+			Kind: KindPostgres, User: pgUser, Database: pgDB}
 	}
 	c := []Credential{base()}
 	if err := ValidarCredenciales(c); err != nil || c[0].Port != PGDefaultPort {
@@ -861,7 +998,7 @@ func TestPGNoSeUsaEnHTTP(t *testing.T) {
 	p := New(Options{Transport: roundTripFunc(eco)})
 	defer p.Close()
 	doms, err := p.SetCredentials([]Credential{
-		{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave, Kind: KindPostgres, User: pgUser},
+		{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave, Kind: KindPostgres, User: pgUser, Database: pgDB},
 		{Env: "API", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "api", Secret: "k"},
 	})
 	if err != nil {

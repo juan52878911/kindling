@@ -95,13 +95,20 @@ type Record struct {
 	Denied bool `json:"denied,omitempty"`
 	// Creds son los Env de las credenciales cuyo marcador se sustituyó de
 	// verdad en esta petición.
-	Creds     []string `json:"creds,omitempty"`
-	User      string   `json:"user,omitempty"`
-	Database  string   `json:"database,omitempty"`
-	Auth      string   `json:"auth,omitempty"`
-	ReqBytes  int64    `json:"req_bytes"`
-	RespBytes int64    `json:"resp_bytes"`
-	MS        int64    `json:"ms"`
+	Creds    []string `json:"creds,omitempty"`
+	User     string   `json:"user,omitempty"`
+	Database string   `json:"database,omitempty"`
+	Auth     string   `json:"auth,omitempty"`
+	// AnyDatabase: la credencial usada deja entrar en cualquier base (sin
+	// -database, o de un almacén anterior a que fuese obligatoria).
+	AnyDatabase bool `json:"any_database,omitempty"`
+	// Upstream es la dirección fijada por el operador a la que marcó el
+	// proxy de Postgres (configuración, no un secreto); vacío si marcó el
+	// dominio de la credencial.
+	Upstream  string `json:"upstream,omitempty"`
+	ReqBytes  int64  `json:"req_bytes"`
+	RespBytes int64  `json:"resp_bytes"`
+	MS        int64  `json:"ms"`
 	// Dropped: registros descartados antes de este (cola llena o fallo al
 	// escribir).
 	Dropped uint64 `json:"dropped,omitempty"`

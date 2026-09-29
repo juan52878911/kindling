@@ -64,7 +64,7 @@ func TestCredproxyBloqueaLoMismoQueElFirewall(t *testing.T) {
 func TestSetCredentialsSinResolverFalla(t *testing.T) {
 	n := &Net{NS: "kl-test-sinres", HostIP: "127.0.0.1"}
 	creds := []credproxy.Credential{{Domain: "example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s"}}
-	if err := SetCredentials(n, creds, ""); err == nil {
+	if err := SetCredentials(n, creds, "", nil); err == nil {
 		t.Fatal("debería fallar sin resolver")
 	}
 	credMu.Lock()
@@ -93,7 +93,7 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	n := &Net{NS: ns, HostIP: "127.0.0.1"}
 	creds := []credproxy.Credential{{Domain: "API.Example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s"}}
 	audit := filepath.Join(t.TempDir(), credproxy.AuditFile)
-	if err := SetCredentials(n, creds, audit); err != nil {
+	if err := SetCredentials(n, creds, audit, nil); err != nil {
 		t.Skipf("no se pudo escuchar en 127.0.0.1:%d: %v", credPort, err)
 	}
 	defer stopCredProxy(ns)

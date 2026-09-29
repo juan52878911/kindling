@@ -1,0 +1,938 @@
+{
+  "schema": 1,
+  "started": "2026-09-29T00:51:23.01484035Z",
+  "finished": "2026-09-29T00:52:08.077135121Z",
+  "host": {
+    "hostname": "fc-test",
+    "kernel": "6.17.2-1-pve",
+    "cpu": "Intel(R) Core(TM) i7-8700T CPU @ 2.40GHz",
+    "cpus": 4,
+    "mem_total_mib": 8192,
+    "nested": false,
+    "container": "lxc",
+    "arch": "amd64",
+    "os": "linux",
+    "kling_version": "kling v0.16.0-99-g952656d",
+    "docker_version": "20.10.24+dfsg1",
+    "git_sha": "7b2c2cc70e59-dirty"
+  },
+  "config": {
+    "modes": [
+      "kindling-run",
+      "docker"
+    ],
+    "n": [
+      32
+    ],
+    "reps": 3,
+    "timeout_s": 120,
+    "golden": "benchdb",
+    "docker_image": "postgres:16-alpine",
+    "table": "items",
+    "expect_count": 400000,
+    "seed_sql": "seed-bench.sql",
+    "disk_path": "/var/lib/kindling",
+    "psi_max": 20,
+    "est_mem_mib": 96
+  },
+  "preflight": [
+    "MemAvailable 8037 MiB",
+    "disk-path /var/lib/kindling: 11278 MiB free",
+    "PSI some avg10 0.00 (limit 20.00)"
+  ],
+  "rounds": [
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 1,
+      "status": "DEGRADED",
+      "ok": 27,
+      "failed": 5,
+      "errors": {
+        "provision": 5
+      },
+      "latency_ms": {
+        "n": 27,
+        "p50": 14449.87,
+        "p95": 14891.16,
+        "p99": 14897.94,
+        "max": 14897.94,
+        "mean": 13725.02
+      },
+      "provision_ms": {
+        "n": 27,
+        "p50": 14307.78,
+        "p95": 14757.55,
+        "p99": 14784.55,
+        "max": 14784.55,
+        "mean": 13549.5
+      },
+      "wall_ms": 14897.94,
+      "copies": [
+        {
+          "index": 0,
+          "ok": false,
+          "ms": 11246.14,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 7424 MiB and the host only has 7641 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 14857.68,
+          "provision_ms": 14710.76,
+          "tool_ms": 101
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 11422.2,
+          "provision_ms": 11261.1,
+          "tool_ms": 173
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 14440.67,
+          "provision_ms": 14275.11,
+          "tool_ms": 21
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 11569.53,
+          "provision_ms": 11416.02,
+          "tool_ms": 39
+        },
+        {
+          "index": 5,
+          "ok": false,
+          "ms": 11246.05,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 7424 MiB and the host only has 7640 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 14897.94,
+          "provision_ms": 14784.55,
+          "tool_ms": 22
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 11544.91,
+          "provision_ms": 11313.61,
+          "tool_ms": 27
+        },
+        {
+          "index": 8,
+          "ok": true,
+          "ms": 14759.17,
+          "provision_ms": 14477.13,
+          "tool_ms": 49
+        },
+        {
+          "index": 9,
+          "ok": false,
+          "ms": 11802.5,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 7424 MiB and the host only has 7629 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 10,
+          "ok": false,
+          "ms": 11819.76,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 7424 MiB and the host only has 7620 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "ms": 12142.89,
+          "provision_ms": 12065.09,
+          "tool_ms": 9
+        },
+        {
+          "index": 12,
+          "ok": true,
+          "ms": 11625.31,
+          "provision_ms": 11375.68,
+          "tool_ms": 25
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 14449.17,
+          "provision_ms": 14307.78,
+          "tool_ms": 19
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "ms": 11591.93,
+          "provision_ms": 11327.73,
+          "tool_ms": 21
+        },
+        {
+          "index": 15,
+          "ok": true,
+          "ms": 14891.16,
+          "provision_ms": 14749.51,
+          "tool_ms": 94
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "ms": 14886.31,
+          "provision_ms": 14757.55,
+          "tool_ms": 29
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 14615.38,
+          "provision_ms": 14473.87,
+          "tool_ms": 13
+        },
+        {
+          "index": 18,
+          "ok": true,
+          "ms": 14706.87,
+          "provision_ms": 14568.7,
+          "tool_ms": 53
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 11613.3,
+          "provision_ms": 11462.03,
+          "tool_ms": 27
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "ms": 14769.27,
+          "provision_ms": 14621.57,
+          "tool_ms": 54
+        },
+        {
+          "index": 21,
+          "ok": true,
+          "ms": 14363.93,
+          "provision_ms": 14242.13,
+          "tool_ms": 10
+        },
+        {
+          "index": 22,
+          "ok": true,
+          "ms": 11489.5,
+          "provision_ms": 11261.2,
+          "tool_ms": 112
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 14702.69,
+          "provision_ms": 14444.48,
+          "tool_ms": 52
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 14395.1,
+          "provision_ms": 14235.21,
+          "tool_ms": 10
+        },
+        {
+          "index": 25,
+          "ok": false,
+          "ms": 11244.56,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 7424 MiB and the host only has 7620 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 26,
+          "ok": true,
+          "ms": 14449.87,
+          "provision_ms": 14264.66,
+          "tool_ms": 14
+        },
+        {
+          "index": 27,
+          "ok": true,
+          "ms": 13590.51,
+          "provision_ms": 13421.76,
+          "tool_ms": 11
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 14686.91,
+          "provision_ms": 14427.19,
+          "tool_ms": 140
+        },
+        {
+          "index": 29,
+          "ok": true,
+          "ms": 14710.71,
+          "provision_ms": 14569.54,
+          "tool_ms": 36
+        },
+        {
+          "index": 30,
+          "ok": true,
+          "ms": 14592.97,
+          "provision_ms": 14394.99,
+          "tool_ms": 62
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 14809.68,
+          "provision_ms": 14627.43,
+          "tool_ms": 55
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8041,
+        "min": 7572,
+        "peak_used": 469
+      },
+      "disk_per_copy_mib": 208.46,
+      "psi_before": 0,
+      "psi_max": 0.9
+    },
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 2,
+      "status": "DEGRADED",
+      "ok": 28,
+      "failed": 4,
+      "errors": {
+        "provision": 4
+      },
+      "latency_ms": {
+        "n": 28,
+        "p50": 4801.01,
+        "p95": 9552.65,
+        "p99": 9747.59,
+        "max": 9747.59,
+        "mean": 5073.62
+      },
+      "provision_ms": {
+        "n": 28,
+        "p50": 4497.06,
+        "p95": 9407.36,
+        "p99": 9645.37,
+        "max": 9645.37,
+        "mean": 4787.88
+      },
+      "wall_ms": 9747.59,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 4577.64,
+          "provision_ms": 4219.49,
+          "tool_ms": 87
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 4801.01,
+          "provision_ms": 4585,
+          "tool_ms": 188
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 4869.95,
+          "provision_ms": 4578.95,
+          "tool_ms": 78
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 5014.41,
+          "provision_ms": 4577.73,
+          "tool_ms": 46
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 3844.71,
+          "provision_ms": 3344.41,
+          "tool_ms": 376
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 5077.97,
+          "provision_ms": 4723.61,
+          "tool_ms": 13
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 5169.69,
+          "provision_ms": 4969.68,
+          "tool_ms": 138
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 5097.98,
+          "provision_ms": 4472.29,
+          "tool_ms": 121
+        },
+        {
+          "index": 8,
+          "ok": true,
+          "ms": 9747.59,
+          "provision_ms": 9645.37,
+          "tool_ms": 10
+        },
+        {
+          "index": 9,
+          "ok": false,
+          "ms": 3387.14,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6912 MiB and the host only has 7265 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "ms": 4086.61,
+          "provision_ms": 3891.89,
+          "tool_ms": 155
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "ms": 4266.81,
+          "provision_ms": 3962.13,
+          "tool_ms": 89
+        },
+        {
+          "index": 12,
+          "ok": true,
+          "ms": 4483.74,
+          "provision_ms": 4000.56,
+          "tool_ms": 14
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 4577.69,
+          "provision_ms": 4344.24,
+          "tool_ms": 112
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "ms": 4462.2,
+          "provision_ms": 4116.74,
+          "tool_ms": 75
+        },
+        {
+          "index": 15,
+          "ok": false,
+          "ms": 2272.61,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6912 MiB and the host only has 7093 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "ms": 5225.78,
+          "provision_ms": 5118.74,
+          "tool_ms": 151
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 5015.35,
+          "provision_ms": 4897.59,
+          "tool_ms": 234
+        },
+        {
+          "index": 18,
+          "ok": true,
+          "ms": 5336.03,
+          "provision_ms": 5225.92,
+          "tool_ms": 68
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 3979.58,
+          "provision_ms": 3802.95,
+          "tool_ms": 43
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "ms": 4797.35,
+          "provision_ms": 4497.06,
+          "tool_ms": 20
+        },
+        {
+          "index": 21,
+          "ok": true,
+          "ms": 5312.65,
+          "provision_ms": 5150.79,
+          "tool_ms": 88
+        },
+        {
+          "index": 22,
+          "ok": true,
+          "ms": 4303.13,
+          "provision_ms": 4024.67,
+          "tool_ms": 90
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 5317.35,
+          "provision_ms": 5209.19,
+          "tool_ms": 44
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 5165.45,
+          "provision_ms": 4690.71,
+          "tool_ms": 105
+        },
+        {
+          "index": 25,
+          "ok": true,
+          "ms": 5272.13,
+          "provision_ms": 4972.63,
+          "tool_ms": 34
+        },
+        {
+          "index": 26,
+          "ok": true,
+          "ms": 9552.65,
+          "provision_ms": 9407.36,
+          "tool_ms": 9
+        },
+        {
+          "index": 27,
+          "ok": false,
+          "ms": 1598.49,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6912 MiB and the host only has 7249 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 3799.93,
+          "provision_ms": 3357.76,
+          "tool_ms": 379
+        },
+        {
+          "index": 29,
+          "ok": true,
+          "ms": 4428.62,
+          "provision_ms": 4155.78,
+          "tool_ms": 29
+        },
+        {
+          "index": 30,
+          "ok": false,
+          "ms": 1633.54,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6912 MiB and the host only has 7265 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 4477.34,
+          "provision_ms": 4117.42,
+          "tool_ms": 86
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7678,
+        "min": 7029,
+        "peak_used": 649
+      },
+      "disk_per_copy_mib": 208.35,
+      "psi_before": 0.74,
+      "psi_max": 4.04
+    },
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 3,
+      "status": "DEGRADED",
+      "ok": 14,
+      "failed": 18,
+      "errors": {
+        "provision": 18
+      },
+      "latency_ms": {
+        "n": 14,
+        "p50": 10866.09,
+        "p95": 11227.22,
+        "p99": 11227.22,
+        "max": 11227.22,
+        "mean": 10287.04
+      },
+      "provision_ms": {
+        "n": 14,
+        "p50": 10769.38,
+        "p95": 11155.25,
+        "p99": 11155.25,
+        "max": 11155.25,
+        "mean": 10165.88
+      },
+      "wall_ms": 11227.22,
+      "copies": [
+        {
+          "index": 0,
+          "ok": false,
+          "ms": 10409.91,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/8e18624448d2c021/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 1,
+          "ok": false,
+          "ms": 10409.02,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/d147bff7a7fc6638/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 2,
+          "ok": false,
+          "ms": 10408.3,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/5ce4f7295589025e/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 7625.6,
+          "provision_ms": 7501.74,
+          "tool_ms": 61
+        },
+        {
+          "index": 4,
+          "ok": false,
+          "ms": 10412.21,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/fd33fdf6aa5d608a/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 5,
+          "ok": false,
+          "ms": 8087.3,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6400 MiB and the host only has 6571 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 9421.7,
+          "provision_ms": 9318.19,
+          "tool_ms": 74
+        },
+        {
+          "index": 7,
+          "ok": false,
+          "ms": 10408.24,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/3b3d5e34a385916a/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 8,
+          "ok": false,
+          "ms": 3620.53,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6656 MiB and the host only has 6585 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 9,
+          "ok": false,
+          "ms": 3306.66,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6656 MiB and the host only has 6581 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "ms": 10866.09,
+          "provision_ms": 10769.38,
+          "tool_ms": 10
+        },
+        {
+          "index": 11,
+          "ok": false,
+          "ms": 10408.84,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/11100f0e0f2b0e33/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 12,
+          "ok": false,
+          "ms": 2894.97,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6656 MiB and the host only has 7004 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 11128.06,
+          "provision_ms": 11027.98,
+          "tool_ms": 15
+        },
+        {
+          "index": 14,
+          "ok": false,
+          "ms": 10407.85,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/2f75246df7c6c8ea/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 15,
+          "ok": true,
+          "ms": 9468.33,
+          "provision_ms": 9382.56,
+          "tool_ms": 143
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "ms": 8902.08,
+          "provision_ms": 8636.18,
+          "tool_ms": 50
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 10453.21,
+          "provision_ms": 10173.57,
+          "tool_ms": 71
+        },
+        {
+          "index": 18,
+          "ok": false,
+          "ms": 10409.8,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/383a7094b2e14310/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 11185.18,
+          "provision_ms": 11104.87,
+          "tool_ms": 13
+        },
+        {
+          "index": 20,
+          "ok": false,
+          "ms": 3182.37,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6656 MiB and the host only has 6577 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 21,
+          "ok": true,
+          "ms": 11227.22,
+          "provision_ms": 11155.25,
+          "tool_ms": 16
+        },
+        {
+          "index": 22,
+          "ok": false,
+          "ms": 8114.17,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6400 MiB and the host only has 6574 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 9517.35,
+          "provision_ms": 9419.92,
+          "tool_ms": 47
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 11072.81,
+          "provision_ms": 10976.03,
+          "tool_ms": 10
+        },
+        {
+          "index": 25,
+          "ok": true,
+          "ms": 11027.11,
+          "provision_ms": 10939.48,
+          "tool_ms": 9
+        },
+        {
+          "index": 26,
+          "ok": false,
+          "ms": 10414.9,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/d719cdd2be1ac630/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 27,
+          "ok": false,
+          "ms": 10395.22,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/33c1ec5d3609ca18/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 11169.39,
+          "provision_ms": 11058.29,
+          "tool_ms": 11
+        },
+        {
+          "index": 29,
+          "ok": false,
+          "ms": 10400.96,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: copying golden overlay: exit status 1: cp: error writing '/var/lib/kindling/machines/d0152c99a38e90af/overlay.ext4': No space left on device"
+        },
+        {
+          "index": 30,
+          "ok": false,
+          "ms": 3007.62,
+          "provision_ms": 0,
+          "phase": "provision",
+          "error": "kling run: exit status 1: error: doesn't fit: the microVM asks for 6656 MiB and the host only has 7029 MiB left (384 is reserved for the host itself).\nStarting it anyway would make the host's OOM killer kill processes at random, including other microVMs.\nSee: `kling ps -a`, or give it less memory with -mem"
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 10954.38,
+          "provision_ms": 10858.87,
+          "tool_ms": 10
+        }
+      ],
+      "mem_available_mib": {
+        "before": 7181,
+        "min": 6682,
+        "peak_used": 499
+      },
+      "disk_per_copy_mib": 207.07,
+      "psi_before": 1.81,
+      "psi_max": 1.81
+    },
+    {
+      "mode": "docker",
+      "n": 32,
+      "rep": 0,
+      "status": "skipped",
+      "reason": "N=32 × 300 MiB = 9600 MiB \u003e 70% of free disk 214 MiB",
+      "ok": 0,
+      "failed": 0,
+      "latency_ms": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "provision_ms": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "wall_ms": 0,
+      "mem_available_mib": {
+        "before": 0,
+        "min": 0,
+        "peak_used": 0
+      },
+      "disk_per_copy_mib": 0,
+      "psi_before": 0,
+      "psi_max": 0
+    }
+  ],
+  "cells": [
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "status": "DEGRADED",
+      "rounds": 3,
+      "copies": 96,
+      "ok": 69,
+      "failed": 27,
+      "errors": {
+        "provision": 27
+      },
+      "latency_ms": {
+        "n": 69,
+        "p50": 10866.09,
+        "p95": 14857.68,
+        "p99": 14897.94,
+        "max": 14897.94,
+        "mean": 9516.75
+      },
+      "mem_available_min_mib": 6682,
+      "mem_peak_used_mib": 649,
+      "disk_per_copy_mib": 208.35
+    },
+    {
+      "mode": "docker",
+      "n": 32,
+      "status": "skipped",
+      "reason": "N=32 × 300 MiB = 9600 MiB \u003e 70% of free disk 214 MiB",
+      "rounds": 0,
+      "copies": 0,
+      "ok": 0,
+      "failed": 0,
+      "latency_ms": {
+        "n": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0,
+        "mean": 0
+      },
+      "mem_available_min_mib": -1,
+      "mem_peak_used_mib": -1,
+      "disk_per_copy_mib": -1
+    }
+  ]
+}

@@ -31,6 +31,15 @@ type store struct {
 
 var errStoreNotFound = errors.New("not found")
 
+// nsGrafos es el espacio del almacén donde el manager guarda los grafos
+// (internal/machine/grafo.go). Se lee como cualquier otro, pero solo lo
+// escribe el daemon: las aristas de un grafo son autorizaciones, y una
+// extensión que las reescribiera en disco las cambiaría en el próximo
+// arranque sin pasar por la validación.
+const nsGrafos = "graph"
+
+var errNsGrafos = errors.New("store namespace \"graph\" is reserved: graphs are changed through /graphs")
+
 func (st *store) path(ns, key string) (string, error) {
 	if !api.KeyPattern.MatchString(ns) {
 		return "", fmt.Errorf("invalid store namespace %q", ns)
@@ -144,6 +153,10 @@ func (s *Server) handleStorePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, key := r.PathValue("ns"), r.PathValue("key")
+	if ns == nsGrafos {
+		fail(w, http.StatusForbidden, errNsGrafos)
+		return
+	}
 	if err := s.store.put(ns, key, b); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
@@ -154,6 +167,10 @@ func (s *Server) handleStorePut(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStoreDelete(w http.ResponseWriter, r *http.Request) {
 	ns, key := r.PathValue("ns"), r.PathValue("key")
+	if ns == nsGrafos {
+		fail(w, http.StatusForbidden, errNsGrafos)
+		return
+	}
 	if err := s.store.delete(ns, key); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return

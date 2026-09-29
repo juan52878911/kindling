@@ -59,18 +59,41 @@ func TestAuditWriterPostgres(t *testing.T) {
 		`{"ts":"2026-09-28T10:00:00Z","kind":"postgres","host":"db.example.com","user":"app","database":"appdb","auth":"scram-sha-256-plus","creds":["PGPASSWORD"],"req_bytes":10,"resp_bytes":20,"ms":5}`,
 		`{"ts":"2026-09-28T10:00:01Z","kind":"postgres","reason":"bad_placeholder","denied":true,"req_bytes":10,"resp_bytes":20,"ms":1}`,
 		`{"ts":"2026-09-28T10:00:02Z","kind":"postgres","method":"cancel","host":"db.example.com","user":"app","creds":["PGPASSWORD"],"req_bytes":16,"resp_bytes":0,"ms":3}`,
+		`{"ts":"2026-09-28T10:00:03Z","kind":"postgres","host":"db.example.com","user":"app","database":"otra","any_database":true,"auth":"scram-sha-256","creds":["PGPASSWORD"],"req_bytes":10,"resp_bytes":20,"ms":5}`,
 	} {
 		if _, err := w.Write([]byte(l + "\n")); err != nil {
 			t.Fatal(err)
 		}
 	}
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[0], " PG ") || !strings.Contains(lines[0], "app@appdb") ||
+	if len(lines) != 4 || !strings.Contains(lines[0], " PG ") || !strings.Contains(lines[0], "app@appdb") ||
 		!strings.HasSuffix(lines[0], "ok(scram-sha-256-plus)") {
 		t.Fatalf("tabla:\n%s", out.String())
 	}
+	if strings.Contains(lines[0], "any_database") || !strings.Contains(lines[3], "app@otra (any_database)") {
+		t.Errorf("any_database:\n%s", out.String())
+	}
 	if !strings.HasSuffix(lines[1], "DENIED(bad_placeholder)") || !strings.Contains(lines[2], "CANCEL") {
 		t.Errorf("tabla:\n%s", out.String())
+	}
+}
+
+// Las conexiones por una arista link de un grafo (kind link).
+func TestAuditWriterLink(t *testing.T) {
+	var out, errOut bytes.Buffer
+	w := &auditWriter{out: &out, errOut: &errOut}
+	for _, l := range []string{
+		`{"ts":"2026-09-28T10:00:00Z","kind":"link","host":"api.graph:8080","upstream":"machine:0123456789abcdef","req_bytes":10,"resp_bytes":20,"ms":5}`,
+		`{"ts":"2026-09-28T10:00:01Z","kind":"link","host":"db.graph:5432","reason":"no_capacity","denied":true,"req_bytes":0,"resp_bytes":0,"ms":1}`,
+	} {
+		if _, err := w.Write([]byte(l + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "LINK") || !strings.Contains(lines[0], "machine:0123456789abcdef") ||
+		!strings.HasSuffix(lines[0], "ok") || !strings.HasSuffix(lines[1], "DENIED(no_capacity)") {
+		t.Fatalf("tabla:\n%s", out.String())
 	}
 }
 

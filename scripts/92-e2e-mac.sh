@@ -19,7 +19,8 @@
 # Variables: KLING (binario; kling-vz junto a él o KLING_VMM), ROOT (por defecto
 # una ruta a propósito más larga que sun_path), SOCK, IMG (imagen con agente de
 # invitado, por defecto toolchain), BRIDGE_IMG (imagen con puente MCP en 8080,
-# por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10).
+# por defecto fetch; si falta se salta), MEM (MiB por máquina, 256), BURST (10),
+# y las KLING_E2E_PG_* de la sección 6e (proxy de Postgres; sin ellas se salta).
 #
 # La salida va en inglés, como el resto de lo que ve el usuario. Un fallo no
 # aborta el resto: saber que fallan tres cosas relacionadas vale más que
@@ -522,6 +523,127 @@ if k run -name "$CR-none" -image "$IMG" -mem "$MEM" >/dev/null 2>&1; then
   k rm -f "$CR-none" >/dev/null 2>&1
 fi
 
+# ── 6e. proxy de credenciales de Postgres ────────────────────────────────────
+# Lo mismo que la sección 7d de 90-e2e.sh, en el Mac, y con las mismas
+# variables. El proxy lo sirve kling-vz y marca desde la pila de red del Mac:
+# un -upstream 127.0.0.1:PUERTO es el loopback del Mac, donde Docker Desktop
+# publica. Sin KLING_E2E_PG_URL se salta (y lo dice). Un Docker sin TLS:
+#
+#   docker run -d --name pge2e -p 127.0.0.1:55432:5432 -e POSTGRES_USER=kling \
+#     -e POSTGRES_PASSWORD=clave-e2e -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:17
+#   KLING_E2E_PG_URL=postgres://kling:clave-e2e@pg.kindling.test:5432/kling \
+#   KLING_E2E_PG_UPSTREAM=127.0.0.1:55432 KLING_E2E_PG_TLS=disable ./scripts/92-e2e-mac.sh
+#
+# KLING_E2E_PG_CA y KLING_E2E_PG_SERVERNAME, como en 90-e2e.sh, para un
+# servidor con TLS (verify-full).
+step "6e. postgres credential proxy"
+if [ -z "${KLING_E2E_PG_URL:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_PG_URL is not set (postgres://role:password@host:port/db): no server to test\n"
+else
+  PGC="$P-pgcred"
+  read -r PG_HOST PG_PORT PG_USER PG_DB < <(python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1])
+print(u.hostname, u.port or 5432, urllib.parse.unquote(u.username or ""), (u.path or "/").lstrip("/") or urllib.parse.unquote(u.username or ""))
+' "$KLING_E2E_PG_URL")
+  PG_PASS=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).password or ""))' "$KLING_E2E_PG_URL")
+  pg_args=()
+  PG_MODO="over verified TLS"; PG_AUTH='"auth":"scram-sha-256'
+  [ -n "${KLING_E2E_PG_CA:-}" ] && pg_args+=(-ca-file "$KLING_E2E_PG_CA")
+  if [ -n "${KLING_E2E_PG_SERVERNAME:-}" ]; then
+    pg_args+=(-tls-server-name "$KLING_E2E_PG_SERVERNAME"); PG_MODO="over TLS verified as"
+  fi
+  [ -n "${KLING_E2E_PG_UPSTREAM:-}" ] && pg_args+=(-upstream "$KLING_E2E_PG_UPSTREAM")
+  if [ -n "${KLING_E2E_PG_TLS:-}" ]; then
+    pg_args+=(-upstream-tls "$KLING_E2E_PG_TLS")
+    [ "$KLING_E2E_PG_TLS" = disable ] && { PG_MODO="without TLS"; PG_AUTH='"auth":"scram-sha-256"'; }
+  fi
+  # Cliente mínimo del protocolo v3 dentro del invitado (la imagen no trae
+  # psql): el marcador de MMDS como contraseña, una consulta, y un marcador
+  # falso que debe dar 28P01.
+  SONDA_PG='
+import json, socket, struct, sys, urllib.request
+host, port, user, db, real = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store)["env"]["PGPASSWORD"]
+print("MMDS", "KEY" if real in store else "PLACEHOLDER")
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def conectar(pw):
+    s = socket.create_connection((host, port), timeout=20)
+    s.sendall(struct.pack("!II", 8, 80877103))
+    ssl = leer(s, 1).decode()
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, ssl, "NOPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(pw)) + pw.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E":
+            code = [f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C"]
+            return s, ssl, "ERROR " + (code[0] if code else "?")
+        if t == b"Z": return s, ssl, "READY"
+s, ssl, r = conectar(ph)
+print("SSL", ssl)
+print("LOGIN", r)
+if r == "READY":
+    q = b"SELECT current_user\0"
+    s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+    fila = ""
+    while True:
+        t, b = msg(s)
+        if t == b"D": fila = b[6:].decode(errors="replace")
+        if t in (b"Z", b"E"): break
+    print("ROW", fila)
+s.close()
+print("FAKE", conectar("kling-cred-00000000000000000000")[2])
+'
+  if k run -name "$PGC" -image "$IMG" -mem "$MEM" -allow-exec -egress allowlist -allow example.org >/dev/null 2>&1; then
+    out=$(printf '%s' "$PG_PASS" | k machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -database "$PG_DB" ${pg_args[@]+"${pg_args[@]}"} -env PGPASSWORD 2>&1)
+    contiene "$out" "$PG_MODO" && ok "machine credential -type postgres: the password stays in kling-vz ($PG_MODO)" \
+      || bad "machine credential -type postgres" "$PG_MODO" "$out"
+    # -database is mandatory (or -any-database): without it the CLI refuses before reading the key
+    out=$(printf '%s' "$PG_PASS" | k machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -env PGPASSWORD2 2>&1) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "needs -database"; } && ok "machine credential -type postgres without -database: refused" \
+      || bad "machine credential -type postgres without -database" "error 'needs -database'" "$out"
+    out=$(k exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
+    contiene "$out" "MMDS PLACEHOLDER" && ok "the guest only sees the placeholder" || bad "MMDS (postgres)" "MMDS PLACEHOLDER" "$out"
+    contiene "$out" "SSL N" && ok "the guest leg is plain (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
+    contiene "$out" "LOGIN READY" && contiene "$out" "ROW $PG_USER" \
+      && ok "with the placeholder the guest logs in and queries as $PG_USER" || bad "login through the proxy" "LOGIN READY and ROW $PG_USER" "$out"
+    contiene "$out" "FAKE ERROR 28P01" && ok "a fake placeholder: 28P01 without reaching the server" \
+      || bad "fake placeholder" "FAKE ERROR 28P01" "$out"
+    out=$(k machine audit "$PGC" -tail 0 -json 2>&1)
+    contiene "$out" '"kind":"postgres"' && contiene "$out" "$PG_AUTH" \
+      && ok "audit: one line per connection, authenticated with SCRAM" || bad "audit postgres" "kind postgres with $PG_AUTH" "$out"
+    if [ -n "${KLING_E2E_PG_UPSTREAM:-}" ]; then
+      contiene "$out" '"upstream":"' && ok "audit: the line names the upstream the proxy dialed" \
+        || bad "audit postgres upstream" '"upstream":"..."' "$out"
+    fi
+    if contiene "$out" "$PG_PASS" || contiene "$out" "kling-cred-" || contiene "$out" "current_user"; then
+      bad "audit postgres without secrets" "no password, placeholder or SQL" "$out"
+    else
+      ok "audit: neither the password, the placeholder nor the SQL"
+    fi
+    k rm -f "$PGC" >/dev/null 2>&1
+  else
+    bad "run -egress allowlist (postgres)" "running" "failed"
+  fi
+fi
+
 # ── 6d. snapshots de volumen ─────────────────────────────────────────────────
 # En APFS el snapshot es un clonefile (modo "clone"): instantáneo y sin ocupar
 # nada hasta que diverge. Escribir, snapshot, cambiar, restore, leer, undo.
@@ -645,6 +767,187 @@ tf=$(total_fp); avail_after=$(api http://k/procstats | pyj "d['available_mib']")
   || bad "memory after cleanup" "0 MiB of microVMs" "$tf"
 
 # ── 9. nada suelto ───────────────────────────────────────────────────────────
+# ── 6f. kling db ─────────────────────────────────────────────────────────────
+# Disposable Postgres databases (ext/db). Needs a Postgres golden template
+# (kling db golden build ... pg) in THIS test's daemon and the kling-db plugin
+# installed; without KLING_E2E_DB_GOLDEN it is skipped, visibly.
+#
+#   KLING_E2E_DB_GOLDEN=pg ./scripts/92-e2e-mac.sh
+#   KLING_E2E_DB_GOLDEN_PASSWORD=...   (optional) the template's password: proves it does NOT get into a copy
+#
+# On macOS the host reaches a copy only through the loopback forward
+# (kling.ports), checked by peer credentials. Every kling db output goes into a
+# file that is searched at the end for every password: it must find none.
+step "6f. kling db"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN is not set (name of the Postgres template): nothing to test\n"
+elif ! k db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  the kling-db plugin is not installed (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
+  # copiarlo aquí, doctor no puede comprobar que las copias rotaron la clave.
+  DBREAL="$HOME/.local/state/kling-db/$KLING_E2E_DB_GOLDEN"
+  if [ -d "$DBREAL" ]; then mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
+  DBLOG="$DBTMP/out.log"; : > "$DBLOG"
+  DBU="$P-db"
+  dbk() { local o rc; o=$(k db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  dbsql() { k exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  dbpw() { local id; id=$(k inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'); cat "$KLING_DB_STATE/copies/$id/password" 2>/dev/null; }
+  dbhost() { k db connect "$1" -dsn 2>/dev/null </dev/null | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.stdin.read().strip())
+print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip("/"))'; }
+  dbhostsql() { local pw="$1" h p u d; read -r h p u d < <(dbhost "$2"); PGPASSWORD="$pw" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$u" -d "$d" -c "$3" 2>&1; }
+
+  out=$(dbk up "$DBG" -name "$DBU")
+  contiene "$out" "ready" && ok "kling db up: ready copy" || bad "db up" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT 1")
+  [ "$out" = "1" ] && ok "SELECT 1 inside the copy, through the socket" || bad "SELECT 1" "1" "$out"
+  PW1=$(dbpw "$DBU"); ALL="$PW1"
+  [ -n "$PW1" ] && ok "the copy has its own password on the host" || bad "copy password" "a password file" "nothing"
+
+  if ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no psql on this host: host-side password checks skipped\n"
+  else
+    out=$(dbhostsql "$PW1" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "the host gets in with the copy's password" || bad "host connection" "1" "$out"
+    if [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ]; then
+      [ "$PW1" != "$KLING_E2E_DB_GOLDEN_PASSWORD" ] && ok "the copy's password differs from the template's" \
+        || bad "rotation" "different passwords" "equal"
+      out=$(dbhostsql "$KLING_E2E_DB_GOLDEN_PASSWORD" "$DBU" "SELECT 1")
+      [ "$out" = "1" ] && bad "template password" "rejected" "IT GOT IN" || ok "the template's password does NOT get into the copy"
+    else
+      printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD is not set: template password not tried from the host\n"
+    fi
+    dsn=$(k db connect "$DBU" -dsn 2>/dev/null </dev/null)
+    # El DSN se descompone en variables PG*: la clave va por entorno, nunca en el argv de psql.
+    out=$(eval "$(E2E_DSN="$dsn" python3 -c 'import os, shlex, urllib.parse as u
+d = u.urlsplit(os.environ["E2E_DSN"])
+for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.username or "")),
+             ("PGPASSWORD", u.unquote(d.password or "")), ("PGDATABASE", d.path.lstrip("/"))):
+    print("export %s=%s" % (k, shlex.quote(str(v or ""))))')"; PGCONNECT_TIMEOUT=10 psql -X -At -c "SELECT 1" 2>&1)
+    [ "$out" = "1" ] && ok "connect -dsn works" || bad "connect -dsn" "1" "$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
+    dsn=""
+  fi
+
+  dbsql "$DBU" "CREATE TABLE e2e_mark(v text); INSERT INTO e2e_mark VALUES ('origin')" >/dev/null
+  out=$(dbk fork "$DBU" -n 4)
+  copies=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}')
+  [ "$(printf '%s\n' "$copies" | grep -c . || true)" = 4 ] && ok "fork -n 4: four ready copies" || bad "fork -n 4" "4 copies" "$out"
+  distinct=1; i=0
+  for c in $copies; do
+    i=$((i+1)); pw=$(dbpw "$c")
+    case " $ALL " in *" $pw "*) distinct=0;; esac
+    [ -n "$pw" ] || distinct=0
+    ALL="$ALL $pw"
+    dbsql "$c" "INSERT INTO e2e_mark VALUES ('copy-$i')" >/dev/null
+  done
+  [ "$distinct" = 1 ] && ok "fork: four passwords, all different from each other and from the source's" || bad "fork passwords" "all distinct" "a repeat or an empty one"
+  isolated=1; i=0
+  for c in $copies; do
+    i=$((i+1))
+    rows=$(dbsql "$c" "SELECT string_agg(v, ',' ORDER BY v) FROM e2e_mark")
+    [ "$rows" = "copy-$i,origin" ] || { isolated=0; info "$c sees: $rows"; }
+  done
+  rows=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_mark")
+  { [ "$isolated" = 1 ] && [ "$rows" = "origin" ]; } && ok "each copy sees only its own writes" || bad "fork isolation" "copy-N,origin each; source only origin" "source sees: $rows"
+  for c in $copies; do dbk rm "$c" >/dev/null 2>&1; done
+
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor on a clean copy: 0 problems" || bad "doctor clean" "0 problem(s)" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "CREATE ROLE e2e_super LOGIN SUPERUSER" >/dev/null
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" != 0 ] && ! contiene "$out" "; 0 problem(s)"; } && ok "doctor with a login superuser added: problems found" || bad "doctor dirty" "problems > 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "DROP ROLE e2e_super" >/dev/null
+
+  command -v psql >/dev/null && dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
+  out=$(dbk audit "$DBU" -since 1h)
+  contiene "$out" "connect" && ok "audit shows connections" || bad "audit" "connection events" "$out"
+  if contiene "$out" "424242" || contiene "$out" "SELECT" || contiene "$out" "e2e_mark"; then bad "audit has no SQL" "no SQL, no values" "$out"; else ok "audit holds no SQL"; fi
+
+  dbsql "$DBU" "CREATE TABLE e2e_dirty(x int)" >/dev/null
+  out=$(dbk reset "$DBU"); contiene "$out" "ready" || bad "db reset" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_tables WHERE tablename IN ('e2e_dirty','e2e_mark')")
+  [ "$out" = "0" ] && ok "reset gives back the template's data" || bad "reset" "0 test tables" "$out"
+  PW2=$(dbpw "$DBU")
+  ALL="$ALL $PW2 ${KLING_E2E_DB_GOLDEN_PASSWORD:-}"
+
+  # Versión corta de las pruebas de 90: rol de solo lectura, rotate, snapshot/undo y rehearse.
+  dbid() { k inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  dbrpw() { cat "$KLING_DB_STATE/copies/$(dbid "$1")/$2.password" 2>/dev/null; }
+  dbrosql() { local h p u d; read -r h p u d < <(dbhost "$3"); PGPASSWORD="$2" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$1" -d "$d" -c "$4" 2>&1; }
+  APPROLE=$(dbhost "$DBU" | awk '{print $3}')
+
+  dbsql "$DBU" "CREATE TABLE e2e_ro(v text); INSERT INTO e2e_ro VALUES ('a'),('b'); ALTER TABLE e2e_ro OWNER TO $APPROLE" >/dev/null
+  out=$(dbk role "$DBU" -ro -name e2e_agent); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "read-only"; } && ok "role -ro: read-only role created" || bad "role -ro" "role created" "rc=$rc $out"
+  ROPW=$(dbrpw "$DBU" e2e_agent)
+  [ -n "$ROPW" ] && ALL="$ALL $ROPW"
+  if [ -z "$ROPW" ]; then
+    bad "ro role password" "a password file on the host" "nothing"
+  elif ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no psql on this host: read-only role checks skipped\n"
+  else
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "the ro role can SELECT" || bad "ro SELECT" "2" "$out"
+    for stmt in "INSERT INTO e2e_ro VALUES ('x')" "DELETE FROM e2e_ro" "COPY (SELECT 1) TO PROGRAM 'id'" "SET ROLE postgres"; do
+      out=$(dbrosql e2e_agent "$ROPW" "$DBU" "$stmt")
+      contiene "$out" "ERROR" && ok "the ro role cannot: ${stmt%% *} ${stmt#* }" || bad "ro role: $stmt" "ERROR" "$out"
+    done
+    out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "rows intact after the ro role's attempts" || bad "data after ro" "2" "$out"
+  fi
+  # A fork does not inherit the ro role: the child is born without it, and its password does not get in.
+  out=$(dbk fork "$DBU" -n 1); child=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}' | head -1)
+  if [ -z "$child" ]; then
+    bad "fork with an ro role" "a ready child copy" "$out"
+  else
+    out=$(dbsql "$child" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
+    [ "$out" = "0" ] && ok "fork: the child does not inherit kling db role roles" || bad "ro roles in the child" "0" "$out"
+    if [ -n "$ROPW" ] && command -v psql >/dev/null; then
+      out=$(dbrosql e2e_agent "$ROPW" "$child" "SELECT 1")
+      [ "$out" = "1" ] && bad "ro role password in the child" "rejected" "IT GOT IN" || ok "fork: the source's ro role password does not get into the child"
+    fi
+    ALL="$ALL $(dbpw "$child")"
+    dbk rm "$child" >/dev/null 2>&1
+  fi
+  dbk role "$DBU" -ro -name e2e_agent -rm >/dev/null 2>&1
+
+  if command -v psql >/dev/null; then
+    ROT_OLD=$(dbpw "$DBU"); dbk rotate "$DBU" >/dev/null; ROT_NEW=$(dbpw "$DBU")
+    ALL="$ALL $ROT_OLD $ROT_NEW"
+    { [ -n "$ROT_NEW" ] && [ "$ROT_NEW" != "$ROT_OLD" ]; } && ok "rotate: a new password" || bad "rotate" "a different password" "same or empty"
+    out=$(dbhostsql "$ROT_OLD" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && bad "old password after rotate" "rejected" "IT GOT IN" || ok "rotate: the old password no longer gets in"
+    out=$(dbhostsql "$ROT_NEW" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "rotate: the new password gets in" || bad "new password" "1" "$out"
+  fi
+
+  dbsql "$DBU" "CREATE TABLE e2e_snap(v text); INSERT INTO e2e_snap VALUES ('point')" >/dev/null
+  out=$(dbk snapshot "$DBU" e2e-point); contiene "$out" "snapshot of" && ok "snapshot: restore point created" || bad "snapshot" "created" "$out"
+  dbsql "$DBU" "INSERT INTO e2e_snap VALUES ('after')" >/dev/null
+  out=$(dbk undo "$DBU" e2e-point); contiene "$out" "ready" || bad "undo" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_snap")
+  [ "$out" = "point" ] && ok "undo: the data of the point is back" || bad "data after undo" "point" "$out"
+  ALL="$ALL $(dbpw "$DBU")"
+  dbk snapshot -rm "$DBU" e2e-point >/dev/null 2>&1
+
+  dbsql "$DBU" "CREATE TABLE e2e_rh(id int); ALTER TABLE e2e_rh OWNER TO $APPROLE" >/dev/null
+  RHDIR=$(mktemp -d "$DBTMP/rh.XXXXXX")
+  printf 'ALTER TABLE e2e_rh ADD COLUMN extra text;\n' > "$RHDIR/001_add_col.sql"
+  out=$(dbk rehearse "$DBU" -migrations "$RHDIR"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" ": OK"; } && ok "rehearse: the add-column migration passes" || bad "rehearse" "OK" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  rm -rf "$RHDIR"
+  dbk rm "$DBU" >/dev/null 2>&1
+
+  leaks=0
+  for pw in $ALL; do grep -qF -- "$pw" "$DBLOG" && leaks=$((leaks+1)); done
+  [ "$leaks" = 0 ] && ok "no password in any kling db output (0 matches)" || bad "password leak" 0 "$leaks"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
 step "9. leftovers"
 k rmi "$SNAP" >/dev/null 2>&1
 stop_daemon

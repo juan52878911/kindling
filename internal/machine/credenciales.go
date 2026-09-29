@@ -57,6 +57,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -81,6 +82,10 @@ const (
 // /kling/credentials a su kling-vz, que sirve el proxy y el DNS dentro de su
 // pila de red (plataforma_vz.go). En variable para que los tests del manager
 // corran sin netns ni veth ni ayudante.
+//
+// resolve es el ResolveMachine del proxy de ESTA máquina (m.resolverCopia):
+// solo lo usa el proxy de Linux, en cada conexión de una credencial con
+// UpstreamMachine.
 var registrarCredenciales = registrarCredencialesPlataforma
 
 // reEnvCredencial es el nombre de la variable de entorno que recibe el marcador.
@@ -201,7 +206,41 @@ func (m *Manager) cargarCredenciales(id string) ([]credproxy.Credential, error) 
 	if err := m.abrir(sellado, id, &creds); err != nil {
 		return nil, err
 	}
+	for i := range creds {
+		c := &creds[i]
+		m.normalizarAlmacen("machine "+shortID(id), c.Kind, c.Database, c.Env, c.Domain, &c.AnyDatabase)
+	}
 	return creds, nil
+}
+
+// normalizarAlmacen es la ÚNICA puerta por la que una credencial recién
+// descifrada (de máquina o de plantilla) pasa por credproxy.NormalizarAlmacen:
+// una postgres de un almacén anterior a -database obligatoria se lee como
+// AnyDatabase, que es lo que permitía entonces. Eso amplía en silencio lo que
+// el operador cree que dio, así que se avisa en el log, una vez por dueño y
+// variable (las plantillas se leen en cada listado).
+func (m *Manager) normalizarAlmacen(dueño, kind, database, env, domain string, anyDatabase *bool) {
+	if !credproxy.NormalizarAlmacen(kind, database, anyDatabase) {
+		return
+	}
+	if _, visto := m.avisosAnyDB.LoadOrStore(dueño+"\x00"+env, true); visto {
+		return
+	}
+	log.Printf("warning: %s: postgres credential %s (%s) loaded as any_database (pre-upgrade store); rotate with -database",
+		dueño, env, domain)
+}
+
+// anyDatabaseDe son las variables de las credenciales postgres que entran en
+// cualquier base, ordenadas: lo que `kling inspect` enseña de ellas.
+func anyDatabaseDe(creds []credproxy.Credential) []string {
+	var out []string
+	for _, c := range creds {
+		if c.Kind == credproxy.KindPostgres && c.AnyDatabase {
+			out = append(out, c.Env)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func aeadDe(key []byte) (cipher.AEAD, error) {
@@ -245,6 +284,19 @@ func validarSpecs(specs []api.CredentialSpec) error {
 			return fmt.Errorf("%w (%s)", err, s.Env)
 		}
 		s.Port = c.Port
+		s.Upstream, s.UpstreamTLS, s.TLSServerName = c.Upstream, c.UpstreamTLS, c.TLSServerName
+	}
+	return nil
+}
+
+// sinUpstreamMaquina rechaza specs con UpstreamMachine donde no tienen sentido
+// (credenciales de plantilla: cada instancia quedaría atada a la misma copia
+// sin que nadie lo pidiera para ella).
+func sinUpstreamMaquina(specs []api.CredentialSpec) error {
+	for _, s := range specs {
+		if s.UpstreamMachine != "" || s.UpstreamOwner != "" {
+			return fmt.Errorf("credential %s: upstream_machine is only for a machine's own credentials (kling db attach), not for templates", s.Env)
+		}
 	}
 	return nil
 }
@@ -252,7 +304,9 @@ func validarSpecs(specs []api.CredentialSpec) error {
 // credencialDeSpec es la credencial del proxy que describe s, sin marcador.
 func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
-		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, CAPEM: s.CAPEM}
+		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, AnyDatabase: s.AnyDatabase, CAPEM: s.CAPEM,
+		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName,
+		UpstreamMachine: s.UpstreamMachine, UpstreamOwner: s.UpstreamOwner}
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se
@@ -321,13 +375,22 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := credproxy.ValidarCredenciales(creds); err != nil {
 		return nil, 0, err
 	}
+	if err := m.comprobarUpstreams(creds); err != nil {
+		return nil, 0, err
+	}
+	// Las que van a otra máquina (kling db attach): se comprueba ya lo que el
+	// proxy volverá a comprobar en cada conexión, para que un attach
+	// imposible falle aquí y no en el primer psql del agente.
+	if err := m.comprobarCopias(id, specs); err != nil {
+		return nil, 0, err
+	}
 	if err := m.guardarCredenciales(id, creds); err != nil {
 		return nil, 0, err
 	}
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return nil, 0, err
 	}
-	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id)); err != nil {
+	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id), m.resolverCopia(id)); err != nil {
 		return nil, 0, err
 	}
 	return creds, nuevas, nil
@@ -359,17 +422,29 @@ func ponerMarcadoresMMDS(ctx context.Context, c *fc.Client, creds []credproxy.Cr
 // máquina viva) en macOS no hay nada que rehacer: el proxy vive en kling-vz,
 // que sobrevive al daemon con sus claves. Devuelve cuántas credenciales
 // entregó.
+//
+// Anota además en mc CredentialAnyDatabase (lo que dice `kling inspect`): una
+// máquina de antes de ese campo lo recupera al primer reconcile o thaw. mc es
+// la viva en reconcile (con m.mu tomado) y una copia en Thaw, que la pasa a la
+// viva al final.
 func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c *fc.Client) (int, error) {
 	creds, err := m.cargarCredenciales(mc.ID)
 	if err != nil || len(creds) == 0 {
 		return 0, err
 	}
+	mc.CredentialAnyDatabase = anyDatabaseDe(creds)
 	if c != nil {
+		// Un reenvío pudo abrirse en ese puerto desde la última entrega. Con
+		// c nil (reconcile, m.mu tomado) no se mira: en Linux no hay
+		// reenvíos, y en macOS no se registra nada nuevo.
+		if err := m.comprobarUpstreams(creds); err != nil {
+			return 0, err
+		}
 		if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 			return 0, err
 		}
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID)); err != nil {
+	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID), m.resolverCopia(mc.ID)); err != nil {
 		return 0, err
 	}
 	return len(creds), nil
@@ -406,6 +481,11 @@ func (m *Manager) cargarCredencialesPlantilla(name string) ([]api.CredentialSpec
 	if err := m.abrir(sellado, "snapshot:"+name, &specs); err != nil {
 		return nil, err
 	}
+	// Igual que en cargarCredenciales.
+	for i := range specs {
+		s := &specs[i]
+		m.normalizarAlmacen("template "+name, s.Type, s.Database, s.Env, s.Domain, &s.AnyDatabase)
+	}
 	return specs, nil
 }
 
@@ -431,6 +511,12 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 			name, snap.Egress)
 	}
 	if err := validarSpecs(specs); err != nil {
+		return nil, err
+	}
+	if err := sinUpstreamMaquina(specs); err != nil {
+		return nil, err
+	}
+	if err := m.comprobarUpstreams(credencialesDeSpecs(specs)); err != nil {
 		return nil, err
 	}
 	previas, err := m.cargarCredencialesPlantilla(name)
@@ -459,12 +545,7 @@ func (m *Manager) anotarCredencialesPlantilla(s *api.Snapshot) {
 	if err != nil || len(specs) == 0 {
 		return
 	}
-	seen := map[string]bool{}
-	for _, sp := range specs {
-		if !seen[sp.Domain] {
-			seen[sp.Domain] = true
-			s.CredentialDomains = append(s.CredentialDomains, sp.Domain)
-		}
-	}
-	sort.Strings(s.CredentialDomains)
+	creds := credencialesDeSpecs(specs)
+	s.CredentialDomains = dominiosDe(creds)
+	s.CredentialAnyDatabase = anyDatabaseDe(creds)
 }

@@ -176,6 +176,9 @@ func doctorChecks(in doctorInput) []doctorCheck {
 			v.Fix = "upgrade the older one and restart the daemon (kling up)"
 		}
 		out = append(out, v)
+		if c, ok := checkCoW(in.info.CoW); ok {
+			out = append(out, c)
+		}
 	}
 
 	for _, p := range in.plugins {

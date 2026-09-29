@@ -1,0 +1,15 @@
+kindling-run N=1 rep 1: ok ok=1 failed=0 p50=1794.2ms max=1794.2ms
+kindling-run N=1 rep 2: ok ok=1 failed=0 p50=274.3ms max=274.3ms
+kindling-run N=1 rep 3: ok ok=1 failed=0 p50=260.7ms max=260.7ms
+kindling-run N=8 rep 1: ok ok=8 failed=0 p50=689.0ms max=886.8ms
+kindling-run N=8 rep 2: ok ok=8 failed=0 p50=532.7ms max=1319.4ms
+kindling-run N=8 rep 3: ok ok=8 failed=0 p50=841.1ms max=1577.7ms
+kindling-run N=32: skipped: N=32 × 256 MiB = 8192 MiB > 70% of MemAvailable 8039 MiB
+docker N=1 rep 1: ok ok=1 failed=0 p50=3063.4ms max=3063.4ms
+docker N=1 rep 2: ok ok=1 failed=0 p50=3002.8ms max=3002.8ms
+docker N=1 rep 3: ok ok=1 failed=0 p50=2937.9ms max=2937.9ms
+docker N=8 rep 1: ok ok=8 failed=0 p50=6760.8ms max=6941.9ms
+docker N=8 rep 2: ok ok=8 failed=0 p50=6435.1ms max=6783.7ms
+docker N=8 rep 3: ok ok=8 failed=0 p50=6126.7ms max=6481.9ms
+docker N=32: skipped: N=32 × 200 MiB = 6400 MiB > 70% of MemAvailable 8018 MiB
+template: setup failed: dial tcp 127.0.0.1:55499: connect: connection refused

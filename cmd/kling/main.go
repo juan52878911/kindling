@@ -103,6 +103,8 @@ func main() {
 		err = cmdCp(args)
 	case "sandbox":
 		err = cmdSandbox(args)
+	case "graph":
+		err = cmdGraph(args)
 	case "inspect":
 		err = cmdInspect(args)
 	case "ps":
@@ -319,6 +321,7 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 	srv.SetShareConfig(shareConfig)
+	srv.SetCoW(cowConfig())
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -345,6 +348,30 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y
+// KLING_COW_STORE_GIB mandan sobre el fichero. Un valor que no se entiende se
+// avisa y se queda en auto.
+func cowConfig() machine.CoWConfig {
+	cfg := loadConfig()
+	c := machine.CoWConfig{Mode: cfg.Daemon.CoW, StoreGiB: cfg.Daemon.CoWStoreGiB}
+	if v, ok := os.LookupEnv("KLING_COW"); ok {
+		c.Mode = v
+	}
+	if err := config.ValidateCoW(c.Mode); err != nil {
+		log.Printf("warning: %v (using %q)", err, config.CoWAuto)
+		c.Mode = config.CoWAuto
+	}
+	if c.Mode == "" {
+		c.Mode = config.CoWAuto
+	}
+	if v := os.Getenv("KLING_COW_STORE_GIB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.StoreGiB = n
+		}
+	}
+	return c
 }
 
 // daemonBackend decide con qué VMM arranca el daemon: KLING_VMM si es un
@@ -845,12 +872,27 @@ func cmdCredential(args []string) error {
 	fs := flag.NewFlagSet("credential", flag.ExitOnError)
 	host := hostFlag(fs)
 	cf := credentialFlags(fs)
+	rm := fs.Bool("rm", false, "withdraw the credential in -env from the machine (its placeholder stops working; open postgres sessions that used it are cut)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
+	if *rm {
+		if fs.NArg() < 1 || *cf.env == "" {
+			return fmt.Errorf("usage: kling machine credential -rm <ref> -env NAME")
+		}
+		ctx, stop := ctxWithSignals()
+		defer stop()
+		mc, err := api.NewClient(hostOf(*host)).RemoveCredential(ctx, fs.Arg(0), *cf.env, "")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s  %s withdrawn from the credential proxy\n", mc.ID[:12], *cf.env)
+		return nil
+	}
 	if fs.NArg() < 1 || *cf.domain == "" || *cf.env == "" {
 		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
-			"       kling machine credential <ref> -type postgres -domain db.example.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env PGPASSWORD [-f passfile]")
+			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
+			"       kling machine credential -rm <ref> -env NAME")
 	}
 	spec, err := cf.spec()
 	if err != nil {
@@ -866,7 +908,7 @@ func cmdCredential(args []string) error {
 		return err
 	}
 	if spec.Type == credproxy.KindPostgres {
-		fmt.Printf("%s  %s now holds a placeholder; the password only goes to %s over verified TLS through the proxy\n",
+		fmt.Printf("%s  %s now holds a placeholder; the password only goes to %s through the proxy\n",
 			mc.ID[:12], spec.Env, pgDestino(spec))
 		fmt.Printf("      %s\n", pgConexion(spec))
 		fmt.Printf("      the password survives freeze/thaw and daemon restarts\n")
@@ -1085,6 +1127,9 @@ func writeInfo(c *api.Client, i *api.Info) {
 			roots = strings.Join(i.ShareRoots, ", ")
 		}
 		fmt.Printf("share roots:  %s\n", roots)
+	}
+	if l := lineaCoW(i.CoW); l != "" {
+		fmt.Printf("disk clones:  %s\n", l)
 	}
 	if i.EncryptedAtRest != nil {
 		if *i.EncryptedAtRest {

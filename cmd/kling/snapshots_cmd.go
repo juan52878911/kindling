@@ -55,7 +55,7 @@ func snapshotsCredential(args []string) error {
 	}
 	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
 		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
-			"       kling template credential <template> -type postgres -domain db.example.com -user app [-database appdb] [-port 5432] [-ca-file ca.pem] -env PGPASSWORD [-f passfile]\n" +
+			"       kling template credential <template> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling template credential <template> -clear")
 	}
 	req := api.CredentialsRequest{Clear: *clear}
@@ -78,7 +78,7 @@ func snapshotsCredential(args []string) error {
 		return nil
 	}
 	if spec.Type == credproxy.KindPostgres {
-		fmt.Printf("%s  every new instance gets a placeholder in %s; the password only goes to %s over verified TLS through its proxy\n",
+		fmt.Printf("%s  every new instance gets a placeholder in %s; the password only goes to %s through its proxy\n",
 			s.Name, spec.Env, pgDestino(spec))
 		fmt.Printf("      %s\n", pgConexion(spec))
 		fmt.Printf("      running instances are not changed (kling machine credential does that)\n")
@@ -92,10 +92,16 @@ func snapshotsCredential(args []string) error {
 	return nil
 }
 
+// credAvisos es a dónde van los avisos de las banderas de una credencial
+// (stderr; los tests lo cambian).
+var credAvisos io.Writer = os.Stderr
+
 // credFlags son las banderas de una credencial, iguales en machine credential
 // y template credential. La clave NUNCA va en una bandera: -f o stdin.
 type credFlags struct {
 	domain, env, file, typ, user, database, caFile *string
+	anyDatabase                                    *bool
+	upstream, upstreamTLS, tlsServerName           *string
 	port                                           *int
 	allow                                          *stringsFlag
 }
@@ -108,8 +114,12 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c.typ = fs.String("type", "http", "http, or postgres for a database password")
 	c.port = fs.Int("port", 0, "postgres: the server's port (default 5432)")
 	c.user = fs.String("user", "", "postgres: the role the password belongs to (the guest must connect as it)")
-	c.database = fs.String("database", "", "postgres: the only database the guest may connect to (default: any)")
+	c.database = fs.String("database", "", "postgres: the only database the guest may connect to (required unless -any-database)")
+	c.anyDatabase = fs.Bool("any-database", false, "postgres: let the guest connect to any database the role has CONNECT on (instead of -database)")
 	c.caFile = fs.String("ca-file", "", "postgres: PEM CA added to the system roots to verify the server")
+	c.upstream = fs.String("upstream", "", "postgres: host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database)")
+	c.upstreamTLS = fs.String("upstream-tls", "", "postgres: verify-full (default) or disable (only with -upstream; SCRAM-SHA-256 only, queries travel unencrypted)")
+	c.tlsServerName = fs.String("tls-server-name", "", "postgres: name the server certificate is verified against (default: -domain)")
 	fs.Var(c.allow, "allow-request", allowRequestHelp)
 	return c
 }
@@ -121,8 +131,9 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 	s := api.CredentialSpec{Domain: *c.domain, Env: *c.env, Allow: *c.allow}
 	switch *c.typ {
 	case "", "http":
-		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.caFile != "" {
-			return s, errors.New("-port, -user, -database and -ca-file are only for -type postgres")
+		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
+			*c.upstream != "" || *c.upstreamTLS != "" || *c.tlsServerName != "" {
+			return s, errors.New("-port, -user, -database, -any-database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres")
 		}
 	case credproxy.KindPostgres:
 		if len(*c.allow) > 0 {
@@ -131,7 +142,30 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 		if *c.user == "" {
 			return s, errors.New("-type postgres needs -user (the role the password belongs to)")
 		}
-		s.Type, s.Port, s.User, s.Database = credproxy.KindPostgres, *c.port, *c.user, *c.database
+		switch {
+		case *c.database != "" && *c.anyDatabase:
+			return s, errors.New("-database and -any-database are mutually exclusive")
+		case *c.database == "" && !*c.anyDatabase:
+			return s, errors.New("-type postgres needs -database (the only database the guest may use), or -any-database to allow every database the role can connect to")
+		}
+		if *c.anyDatabase {
+			fmt.Fprintf(credAvisos, "warning: -any-database: the guest may connect to any database on %s that role %s has CONNECT on\n", *c.domain, *c.user)
+		}
+		s.Type, s.Port, s.User, s.Database, s.AnyDatabase = credproxy.KindPostgres, *c.port, *c.user, *c.database, *c.anyDatabase
+		s.Upstream, s.TLSServerName = *c.upstream, *c.tlsServerName
+		switch *c.upstreamTLS {
+		case "", credproxy.UpstreamTLSVerifyFull:
+		case credproxy.UpstreamTLSDisable:
+			if *c.upstream == "" {
+				return s, errors.New("-upstream-tls disable needs -upstream (the address of your database)")
+			}
+			s.UpstreamTLS = credproxy.UpstreamTLSDisable
+			if !credproxy.UpstreamLoopback(*c.upstream) {
+				fmt.Fprintf(credAvisos, "warning: -upstream-tls disable: traffic to %s, including query data, is unencrypted (the password is not: SCRAM-SHA-256 only)\n", *c.upstream)
+			}
+		default:
+			return s, fmt.Errorf("unknown -upstream-tls %q (verify-full or disable)", *c.upstreamTLS)
+		}
 		if *c.caFile != "" {
 			b, err := os.ReadFile(*c.caFile)
 			if err != nil {
@@ -150,8 +184,25 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 	return s, nil
 }
 
-// pgDestino es "servidor:puerto" de una credencial Postgres.
+// pgDestino dice a dónde y cómo sale la contraseña de una credencial
+// Postgres: "servidor:puerto over verified TLS", con el upstream fijado si lo
+// hay.
 func pgDestino(s api.CredentialSpec) string {
+	modo := "over verified TLS"
+	if s.TLSServerName != "" {
+		modo = "over TLS verified as " + strings.ToLower(s.TLSServerName)
+	}
+	if s.UpstreamTLS == credproxy.UpstreamTLSDisable {
+		modo = "without TLS (SCRAM-SHA-256 only: the password itself never crosses the wire)"
+	}
+	if s.Upstream != "" {
+		return fmt.Sprintf("%s (upstream %s) %s", strings.ToLower(s.Domain), s.Upstream, modo)
+	}
+	return pgServidor(s) + " " + modo
+}
+
+// pgServidor es "servidor:puerto" de una credencial Postgres sin upstream.
+func pgServidor(s api.CredentialSpec) string {
 	port := s.Port
 	if port == 0 {
 		port = credproxy.PGDefaultPort
@@ -165,7 +216,7 @@ func pgConexion(s api.CredentialSpec) string {
 	if s.Database != "" {
 		db = " dbname=" + s.Database
 	}
-	return fmt.Sprintf("connect with host=%s user=%s%s password=$%s (sslmode disable or prefer: the proxy adds the TLS)",
+	return fmt.Sprintf("connect with host=%s user=%s%s password=$%s (sslmode disable or prefer, channel_binding not require: the proxy handles the server side)",
 		strings.ToLower(s.Domain), s.User, db, s.Env)
 }
 

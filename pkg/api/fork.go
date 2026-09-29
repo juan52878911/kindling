@@ -9,6 +9,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 )
@@ -32,6 +33,35 @@ type ForkRequest struct {
 	// empieza al crearla.
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 	OnTTL      string `json:"on_ttl,omitempty"`
+	// Labels se suman a las de cada copia desde su nacimiento. Claves con
+	// KeyPattern; no se admiten kind ni kling.fork-of, que pone el daemon.
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// Límites de las etiquetas de un fork.
+const (
+	forkMaxLabels   = 32
+	forkMaxLabelVal = 256
+)
+
+// ValidateForkLabels comprueba las etiquetas que se piden para las copias de
+// un fork. nil y vacío valen.
+func ValidateForkLabels(labels map[string]string) error {
+	if len(labels) > forkMaxLabels {
+		return fmt.Errorf("too many labels (%d); the limit is %d", len(labels), forkMaxLabels)
+	}
+	for k, v := range labels {
+		if !KeyPattern.MatchString(k) {
+			return fmt.Errorf("label %q is not valid (lowercase letters, digits, '.', '_', '-')", k)
+		}
+		if k == LabelKind || k == LabelForkOf || IsGraphLabel(k) {
+			return fmt.Errorf("label %q is reserved", k)
+		}
+		if len(v) > forkMaxLabelVal {
+			return fmt.Errorf("label %q: value longer than %d bytes", k, forkMaxLabelVal)
+		}
+	}
+	return nil
 }
 
 // ForkResult son las copias, ya con su agente escuchando, y el snapshot

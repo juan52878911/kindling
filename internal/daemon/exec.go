@@ -336,6 +336,11 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
+	// kling.graph y kling.graph.* las pone solo el daemon (grafos).
+	if err := api.ValidateNoGraphLabels(req.Labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 	ttl := req.TTLSeconds
 	if ttl == 0 {
 		ttl = api.SandboxDefaultTTL

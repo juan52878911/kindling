@@ -133,6 +133,11 @@ type Machine struct {
 	// credenciales (POST /machines/{ref}/credentials). Solo los nombres: la clave
 	// vive en memoria del daemon y el invitado solo ve un marcador.
 	CredentialDomains []string `json:"credential_domains,omitempty"`
+	// CredentialAnyDatabase son las variables (Env) de las credenciales
+	// Postgres que entran en CUALQUIER base del servidor: sin -database, o de
+	// un almacén anterior a que fuese obligatoria. Se ve en `kling inspect`
+	// para que nadie lo descubra por la auditoría.
+	CredentialAnyDatabase []string `json:"credential_any_database,omitempty"`
 
 	// Milisegundos de la última operación, para ver el coste real de cada fase.
 	BootMS   int64 `json:"boot_ms,omitempty"`
@@ -476,6 +481,9 @@ type Snapshot struct {
 	// las recibe en su proxy de credenciales al arrancar. Solo los nombres; la
 	// clave vive cifrada en el daemon. No está en meta.json: se rellena al leer.
 	CredentialDomains []string `json:"credential_domains,omitempty"`
+	// CredentialAnyDatabase: como en Machine, las variables de las
+	// credenciales Postgres de plantilla que entran en cualquier base.
+	CredentialAnyDatabase []string `json:"credential_any_database,omitempty"`
 
 	// INTEGRIDAD. sha256 del overlay dorado (rootfs) y del volcado de estado
 	// (snap.file), calculados al congelar y verificados al restaurar. Detectan que
@@ -631,6 +639,39 @@ type Info struct {
 	// ShareRoots son los directorios del host bajo los que se pueden compartir
 	// carpetas en vivo (daemon.share_roots). Vacío = ninguno.
 	ShareRoots []string `json:"share_roots,omitempty"`
+	// CoW dice cómo recibe su disco una instancia creada desde un dorado (ver
+	// docs/cow.md). nil = daemon anterior.
+	CoW *CoWInfo `json:"cow,omitempty"`
+}
+
+// CoWInfo es el modo de copia de discos en uso (daemon.cow).
+type CoWInfo struct {
+	// Setting es lo configurado: "auto", "reflink-store" u "off".
+	Setting string `json:"setting"`
+	// Mode es lo que se hace de verdad: "reflink" (el sistema de ficheros de
+	// la raíz comparte bloques), "store" (almacén propio con reflink, XFS o
+	// Btrfs),
+	// "clonefile" (APFS, macOS) o "copy" (copia completa, dispersa).
+	Mode string `json:"mode"`
+	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
+	Reason string `json:"reason,omitempty"`
+	// Store describe el almacén propio, si existe (aunque el modo sea otro:
+	// las instancias viejas siguen en él).
+	Store *CoWStore `json:"store,omitempty"`
+	// Clones cuenta, desde que arrancó el daemon, cuántas instancias recibieron
+	// su overlay de cada forma ("reflink", "store", "clonefile", "copy").
+	Clones map[string]int64 `json:"clones,omitempty"`
+}
+
+// CoWStore es el estado del almacén propio de discos.
+type CoWStore struct {
+	Path string `json:"path"`
+	// FS es el sistema de ficheros del almacén: "xfs" o "btrfs". Vacío en un
+	// daemon anterior (siempre XFS).
+	FS      string `json:"fs,omitempty"`
+	Mounted bool   `json:"mounted"`
+	SizeMiB int64  `json:"size_mib,omitempty"`
+	FreeMiB int64  `json:"free_mib,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.
@@ -927,7 +968,8 @@ func IsInsufficientMemory(err error) bool {
 // Domain:Port (5432 por defecto), el invitado recibe el marcador como
 // contraseña (PGPASSWORD) y el proxy sale siempre por TLS verificado contra
 // Domain, con las raíces del sistema más CAPEM si se da. Database, si se da,
-// es la única base a la que se deja conectar. Allow no vale para Postgres. Al
+// es la única base a la que se deja conectar y es obligatoria salvo con
+// AnyDatabase (cualquier base con CONNECT para el rol). Allow no vale para Postgres. Al
 // rotar, como Allow, todos estos campos se sustituyen con la clave.
 type CredentialSpec struct {
 	Domain   string   `json:"domain"`
@@ -938,7 +980,28 @@ type CredentialSpec struct {
 	Port     int      `json:"port,omitempty"`
 	User     string   `json:"user,omitempty"`
 	Database string   `json:"database,omitempty"`
-	CAPEM    string   `json:"ca_pem,omitempty"`
+	// AnyDatabase (solo Postgres) deja entrar en cualquier base del servidor;
+	// sin él, Database es obligatoria.
+	AnyDatabase bool   `json:"any_database,omitempty"`
+	CAPEM       string `json:"ca_pem,omitempty"`
+	// Upstream, UpstreamTLS y TLSServerName (solo Postgres) fijan a dónde
+	// marca el proxy en vez de Domain:Port ("host:puerto"; loopback y LAN
+	// permitidos, metadatos y la red interna de kindling nunca), si el TLS
+	// hacia él se verifica ("" o "verify-full") o se apaga ("disable": solo
+	// con Upstream y SCRAM-SHA-256), y contra qué nombre se verifica el
+	// certificado (Domain por defecto). Ver docs/postgres.md.
+	Upstream      string `json:"upstream,omitempty"`
+	UpstreamTLS   string `json:"upstream_tls,omitempty"`
+	TLSServerName string `json:"tls_server_name,omitempty"`
+	// UpstreamMachine (solo Postgres, solo credenciales de máquina, solo
+	// Linux) es el ID exacto de una copia de `kling db` a la que marca el
+	// proxy: el modelo A de docs/db.md. Es un ID, nunca una dirección; el
+	// daemon resuelve la dirección en cada conexión y solo si la copia sigue
+	// corriendo, lista y del mismo dueño (UpstreamOwner, que debe coincidir
+	// con kling.db.owner de la copia y del agente). Exige upstream_tls
+	// "disable" y database, y excluye upstream.
+	UpstreamMachine string `json:"upstream_machine,omitempty"`
+	UpstreamOwner   string `json:"upstream_owner,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de
@@ -957,29 +1020,33 @@ type CredentialsRequest struct {
 // va con ":cred" y ":tok" donde había algo que no debe verse, y Query solo
 // dice si la petición la llevaba.
 //
-// Kind es "http" para el proxy HTTP y "dropped" para una línea que solo lleva
-// la cuenta de registros descartados (Dropped). User, Database y Auth son para
+// Kind es "http" para el proxy HTTP, "postgres" para el de Postgres, "link"
+// para una conexión por una arista link de un grafo (Host es <nodo>.graph:P y
+// Upstream la máquina a la que llegó) y "dropped" para una línea que solo
+// lleva la cuenta de registros descartados (Dropped). User, Database y Auth son para
 // proxies de otros protocolos. Reason vacío es que la petición llegó al
 // proveedor y su respuesta entera al invitado; Denied, que la rechazó la
 // política (sin credencial, Allow, ruta ambigua o proxy inactivo).
 type CredAuditRecord struct {
-	TS        time.Time `json:"ts"`
-	Kind      string    `json:"kind"`
-	Method    string    `json:"method,omitempty"`
-	Host      string    `json:"host,omitempty"`
-	Path      string    `json:"path,omitempty"`
-	Query     bool      `json:"query,omitempty"`
-	Status    int       `json:"status,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	Denied    bool      `json:"denied,omitempty"`
-	Creds     []string  `json:"creds,omitempty"`
-	User      string    `json:"user,omitempty"`
-	Database  string    `json:"database,omitempty"`
-	Auth      string    `json:"auth,omitempty"`
-	ReqBytes  int64     `json:"req_bytes"`
-	RespBytes int64     `json:"resp_bytes"`
-	MS        int64     `json:"ms"`
-	Dropped   uint64    `json:"dropped,omitempty"`
+	TS          time.Time `json:"ts"`
+	Kind        string    `json:"kind"`
+	Method      string    `json:"method,omitempty"`
+	Host        string    `json:"host,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	Query       bool      `json:"query,omitempty"`
+	Status      int       `json:"status,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	Denied      bool      `json:"denied,omitempty"`
+	Creds       []string  `json:"creds,omitempty"`
+	User        string    `json:"user,omitempty"`
+	Database    string    `json:"database,omitempty"`
+	Auth        string    `json:"auth,omitempty"`
+	AnyDatabase bool      `json:"any_database,omitempty"`
+	Upstream    string    `json:"upstream,omitempty"`
+	ReqBytes    int64     `json:"req_bytes"`
+	RespBytes   int64     `json:"resp_bytes"`
+	MS          int64     `json:"ms"`
+	Dropped     uint64    `json:"dropped,omitempty"`
 }
 
 // CredAuditQuery filtra GET /machines/{ref}/credaudit. Tail son las últimas N

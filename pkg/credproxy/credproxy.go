@@ -82,6 +82,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -136,9 +137,34 @@ type Credential struct {
 	Port        int      `json:",omitempty"`
 	User        string   `json:",omitempty"`
 	Database    string   `json:",omitempty"`
+	// AnyDatabase permite entrar en cualquier base del servidor (con CONNECT
+	// para el rol). Un postgres sin Database exige AnyDatabase: sin base fijada
+	// y sin pedirlo expresamente, la credencial no vale. COMPATIBILIDAD: un
+	// almacén cifrado anterior a este campo guarda credenciales postgres sin
+	// Database ni AnyDatabase; el manager las lee con AnyDatabase=true al
+	// descifrarlas (ver NormalizarAlmacen), que es lo que hacían entonces.
+	AnyDatabase bool `json:",omitempty"`
 	// CAPEM son certificados de CA en PEM que se AÑADEN a las raíces del
 	// sistema para verificar al servidor (uno autofirmado o de una CA propia).
 	CAPEM string `json:",omitempty"`
+	// Upstream ("host:puerto", IP o nombre) es a dónde marca el proxy en vez
+	// de Domain:Port: una base de datos en el loopback del host o en la LAN,
+	// que el dialer de solo IPs públicas no alcanza. Lo fija solo el operador
+	// (ver upstream.go). UpstreamTLS "" es TLS verificado; "disable", sin TLS
+	// y solo con SCRAM-SHA-256 (exige Upstream). TLSServerName, si no es "",
+	// es el nombre contra el que se verifica el certificado en vez de Domain.
+	Upstream      string `json:",omitempty"`
+	UpstreamTLS   string `json:",omitempty"`
+	TLSServerName string `json:",omitempty"`
+	// UpstreamMachine es el ID de otra máquina de kindling (una copia de
+	// `kling db`) a la que marca el proxy en vez de Domain:Port o Upstream.
+	// NO es una dirección: la dirección se pide en CADA conexión a
+	// Options.ResolveMachine, que el daemon implementa comprobando que la
+	// máquina con ese ID exacto sigue viva, lista y del mismo dueño
+	// (UpstreamOwner). Excluye Upstream, exige UpstreamTLS "disable" (y por
+	// tanto SCRAM-SHA-256) y Database. Ver maquina.go.
+	UpstreamMachine string `json:",omitempty"`
+	UpstreamOwner   string `json:",omitempty"`
 }
 
 var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -208,8 +234,9 @@ func ValidarTipo(c *Credential) error {
 	d := c.Domain
 	switch c.Kind {
 	case "", KindHTTP:
-		if c.Port != 0 || c.User != "" || c.Database != "" || c.CAPEM != "" {
-			return fmt.Errorf("credential for %s: port, user, database and CA are only for -type postgres", d)
+		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.CAPEM != "" ||
+			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" || c.UpstreamMachine != "" || c.UpstreamOwner != "" {
+			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS, TLS server name and upstream machine are only for -type postgres", d)
 		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
@@ -220,6 +247,25 @@ func ValidarTipo(c *Credential) error {
 		return fmt.Errorf("credential for %s: unknown type %q (http or postgres)", d, c.Kind)
 	}
 	return nil
+}
+
+// NormalizarAlmacen adapta lo que se leyó de un almacén antiguo: una credencial
+// postgres sin Database ni AnyDatabase (anterior a que -database fuese
+// obligatoria) se lee con AnyDatabase=true, que es lo que permitía entonces.
+// Así una máquina viva o una plantilla guardada sigue cargando. Se llama al
+// descifrar, nunca con lo que llega de la API o del CLI.
+//
+// Recibe los campos sueltos y no una Credential porque la misma regla vale
+// para las credenciales de máquina (Credential) y las de plantilla
+// (api.CredentialSpec). Devuelve true si la promovió: era de un almacén
+// anterior, y quien la carga debe avisar (una credencial nueva sin base ya
+// trae AnyDatabase).
+func NormalizarAlmacen(kind, database string, anyDatabase *bool) bool {
+	if kind != KindPostgres || database != "" || *anyDatabase {
+		return false
+	}
+	*anyDatabase = true
+	return true
 }
 
 // Options configura un Proxy. El valor cero sirve: resuelve por
@@ -253,10 +299,16 @@ type Options struct {
 	// que no se puede abrir). Nil = no se avisa, aunque se siguen contando.
 	Logf func(format string, args ...any)
 	// DialPG sustituye al dialer de la salida de Postgres (el de dialPublico,
-	// con Lookup). Solo para tests y el laboratorio (un servidor en
-	// 127.0.0.1): en producción anula la barrera de IPs. La verificación TLS
-	// no cambia: sigue siendo contra el nombre de la credencial.
+	// con Lookup) para las credenciales SIN Upstream. Solo para tests y el
+	// laboratorio (un servidor en 127.0.0.1): en producción anula la barrera
+	// de IPs. La verificación TLS no cambia: sigue siendo contra el nombre de
+	// la credencial. Una credencial con Upstream marca siempre con el dialer
+	// de upstream.go, con su propia barrera.
 	DialPG func(ctx context.Context, network, addr string) (net.Conn, error)
+	// ResolveMachine da, en cada conexión, la dirección de la máquina de una
+	// credencial con UpstreamMachine (ver maquina.go). Nil: esas credenciales
+	// no marcan nunca (kling-vz, o un daemon que no las admite).
+	ResolveMachine ResolveMachineFunc
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
@@ -285,11 +337,24 @@ type Proxy struct {
 	pg     []credPG
 	pgSem  chan struct{}
 	dialPG func(ctx context.Context, network, addr string) (net.Conn, error)
+	// dialUp marca los upstream fijados (upstream.go); lookupUp es su
+	// resolver, campo para que los tests pongan uno falso.
+	dialUp   func(ctx context.Context, addr string) (net.Conn, error)
+	lookupUp lookupUpstream
 	// pgPre y pgAuth son los plazos antes de autenticar (invitado y total);
 	// campos para los tests.
 	pgPre, pgAuth time.Duration
 	cancelMu      sync.Mutex
 	cancelaciones map[claveCancel]destinoCancel
+
+	// Credenciales con UpstreamMachine (maquina.go): el resolvedor, el
+	// dialer, la comprobación del destino resuelto (campo para los tests) y
+	// las sesiones vivas hacia cada máquina, para cortarlas (Invalidar).
+	resolveMaq ResolveMachineFunc
+	dialMaq    func(ctx context.Context, network, addr string) (net.Conn, error)
+	destinoMaq func(netip.AddrPort) error
+	sesMu      sync.Mutex
+	sesiones   map[*sesionPG]sesionMaquina
 }
 
 // credCompilada es una credencial con su Allow ya partido.
@@ -341,7 +406,7 @@ func New(o Options) *Proxy {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Proxy{
+	p := &Proxy{
 		creds: map[string][]credCompilada{},
 		sem:   make(chan struct{}, MaxInFlight),
 		// Sin Timeout: cortaría a mitad un stream largo. Los plazos van por
@@ -364,7 +429,17 @@ func New(o Options) *Proxy {
 		pgPre:         pgPreAuth,
 		pgAuth:        pgAuthTotal,
 		cancelaciones: map[claveCancel]destinoCancel{},
+		lookupUp:      lookupSistema,
+
+		resolveMaq: o.ResolveMachine,
+		dialMaq:    (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive}).DialContext,
+		destinoMaq: destinoMaquinaValido,
+		sesiones:   map[*sesionPG]sesionMaquina{},
 	}
+	p.dialUp = dialFijado(func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return p.lookupUp(ctx, host)
+	}, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive})
+	return p
 }
 
 // Close escribe y cierra el registro de auditoría. No para al servidor que
@@ -413,9 +488,16 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
 	sort.Strings(domains)
+	// sesMu antes que mu (el mismo orden que registrarSesion): una sesión
+	// hacia una máquina cuya credencial desaparece o cambia (kling db detach,
+	// otra copia bajo la misma variable) se corta aquí, y una que se registre
+	// después ya ve el juego nuevo.
+	p.sesMu.Lock()
+	defer p.sesMu.Unlock()
 	p.mu.Lock()
 	p.creds, p.ocultar, p.pg = byDomain, ocultar, pg
 	p.mu.Unlock()
+	p.cortarSesionesHuerfanasLocked(pg)
 	return domains, nil
 }
 

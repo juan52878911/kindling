@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: [., ext/mcp, ext/sandbox]
+        dir: [., ext/db, ext/mcp, ext/sandbox]
     env:
       # Sin workspace: así compila quien clona sin go.work, el Dockerfile del
       # operador y `go install`. Los ext/* llegan al núcleo por su replace ../..,
@@ -99,8 +99,8 @@ jobs:
       # vz queda fuera del build: es cgo y solo de macOS (lo compila el job vz).
       # Su go.mod sí entra en el grafo del workspace, así que de paso se
       # comprueba que sus sumas estén en go.work.sum.
-      - run: go build ./... ./ext/mcp/... ./ext/sandbox/...
-      - run: go vet ./ext/mcp/... ./ext/sandbox/...
+      - run: go build ./... ./ext/db/... ./ext/mcp/... ./ext/sandbox/...
+      - run: go vet ./ext/db/... ./ext/mcp/... ./ext/sandbox/...
 
   # kling-vz es un módulo aparte con cgo: `./...` en la raíz no entra en vz/, y
   # solo compila de verdad en macOS. Sus tests no arrancan ninguna VM (la VM es

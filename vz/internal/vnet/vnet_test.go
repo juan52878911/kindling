@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -218,6 +219,11 @@ func TestForwardReachesGuest(t *testing.T) {
 	}
 	if !strings.HasPrefix(addr, "127.0.0.1:") {
 		t.Fatalf("forward must listen on loopback, got %s", addr)
+	}
+	// Siempre en el rango reservado: el proxy de credenciales de otra máquina
+	// no marca ahí (pkg/credproxy/upstream.go).
+	if _, p, _ := net.SplitHostPort(addr); !credproxy.PuertoReservado(mustAtoi(t, p)) {
+		t.Fatalf("forward %s is outside kindling's reserved range", addr)
 	}
 	for i := 0; i < 3; i++ {
 		c, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -686,4 +692,13 @@ func TestCredentialProxyEndToEnd(t *testing.T) {
 	if strings.Contains(string(body), secret) || string(body) != "echo Bearer "+ph {
 		t.Fatalf("the guest got %q; the key must come back as the placeholder", body)
 	}
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

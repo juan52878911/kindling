@@ -1,0 +1,68 @@
+# Ejemplo de GitHub Actions con kling db
+#
+# Este flujo prepara una base de datos desechable por PR usando `kling db`.
+# Requiere un runner self-hosted con acceso a un daemon de kindling que tenga
+# una plantilla golden de Postgres.
+#
+# Prerequisitos en el runner:
+#   - kindling daemon corriendo (kling doctor debe pasar)
+#   - plantilla golden construida (kling db golden -script ... build)
+#   - ext/db/scripts/ci-pr-db.sh disponible en el repositorio
+#
+# Uso:
+#   - Reemplaza GOLDEN_NAME por el nombre de tu plantilla
+#   - Ajusta el comando de pytest/pruebas según tu proyecto
+#   - El DATABASE_URL se pasa solo por el entorno del comando
+#
+# La base se crea al empezar, se resetea en reintentos, y se destruye al salir.
+# -keep se puede setear en los secrets del repo para depuración.
+
+name: Tests with disposable database
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: self-hosted
+    env:
+      # Nombre de la plantilla golden (debe existir en el daemon)
+      GOLDEN: pg-golden
+      # TTL de la copia (opcional, defecto 2h)
+      TTL: 2h
+      # Mantiene la copia para depuración (opcional)
+      KEEP: ${{ secrets.DB_KEEP || '0' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Crea una base desechable por PR y corre las pruebas
+      - name: Run tests with database
+        run: |
+          # ci-pr-db.sh: crea (o resetea si existe) una copia de la plantilla,
+          # lee el DSN (sin ficheros ni traza) y lo pasa por DATABASE_URL.
+          # El comando después de -- corre en el entorno de la base.
+          ext/db/scripts/ci-pr-db.sh \
+            -golden "$GOLDEN" \
+            -pr "${{ github.event.number || github.run_id }}" \
+            -ttl "$TTL" \
+            -- \
+            pytest tests/ --tb=short
+
+      # Limpieza automática: ci-pr-db.sh la hace con trap, pero se puede
+      # documentar el manual aquí. En caso de KEEP=1, hacer:
+      # kling db rm pr-<PR>

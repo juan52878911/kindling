@@ -38,6 +38,24 @@ func (m *Manager) snapDir(name string) string {
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
 func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (snapOut *api.Snapshot, errOut error) {
+	return m.commit(ctx, ref, name, replace, nil, false)
+}
+
+// commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
+// deja pausada: el snapshot de un grafo pausa todos sus nodos, vuelca uno a
+// uno y los reanuda al final, para que todos los volcados sean del mismo
+// instante (grafo_snapshot.go). Sin volúmenes: soltarlos pide hablar con el
+// agente, y un invitado pausado no contesta.
+func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
+	return m.commit(ctx, ref, name, false, nil, true)
+}
+
+// commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
+// de la máquina tomado y la máquina releída, justo antes de pausarla. La usa
+// Fork para repetir ahí lo que ya miró sin cerrojo (TOCTOU con un
+// SetCredentials concurrente, que toma el mismo cerrojo). Con yaPausada, la
+// máquina tiene que estar pausada, no se pausa ni se reanuda (commitPausada).
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -70,8 +88,19 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 			"a snapshot: its RAM would be shared by every instance. Snapshot a machine that never "+
 			"received secrets", mc.Name)
 	}
-	if mc.State != api.StateRunning {
+	switch {
+	case yaPausada && mc.State != api.StatePaused:
+		return nil, fmt.Errorf("machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
+	case yaPausada && len(mc.Volumes) > 0:
+		return nil, fmt.Errorf("machine %s has volumes, and they can't be released while it is paused: "+
+			"a graph snapshot or fork doesn't take nodes with volumes in this version", mc.Name)
+	case !yaPausada && mc.State != api.StateRunning:
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
+	}
+	if comprobar != nil {
+		if err := comprobar(mc); err != nil {
+			return nil, err
+		}
 	}
 	// La memoria volcada llevaría montada una carpeta de ESTE host (las vivas)
 	// o un disco que no viaja con el snapshot (las copias): cada instancia
@@ -246,27 +275,39 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	// mapas de bloques, posición del journal— de un disco que después seguirá
 	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
-	soltados = true
-	if err := m.releaseVolumes(mc); err != nil {
-		return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
-	}
+	if !yaPausada {
+		soltados = true
+		if err := m.releaseVolumes(mc); err != nil {
+			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
+		}
 
-	pausaPedida = true
-	if err := c.Pause(ctx); err != nil {
-		return nil, err
+		pausaPedida = true
+		if err := c.Pause(ctx); err != nil {
+			return nil, err
+		}
+		pausada = true
 	}
-	pausada = true
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
-	if out, err := copiarDisco(ctx, ownOverlay, goldDst); err != nil {
-		return nil, fmt.Errorf("copying overlay: %v: %s", err, out)
+	srcOverlay := m.overlayParaLeer(mc.ID)
+	// El overlay lo escribe el VMM: se abre sin seguir enlaces, se comprueba
+	// sobre el descriptor que es un fichero regular y se copia DESDE ese
+	// descriptor, sin volver a abrir la ruta (ver fijarOverlayParaLeer). El
+	// destino se crea y se cede también por descriptor: en el jail está en un
+	// directorio del VMM.
+	origen, tras, err := fijarOverlayParaLeer(srcOverlay)
+	if err != nil {
+		return nil, fmt.Errorf("copying overlay: %w", err)
 	}
-	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
-	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
-	// "Permission denied".
-	if err := m.priv.Own(goldDst); err != nil {
-		return nil, err
+	goldFI, err := m.copiarOverlayDesde(ctx, origen, goldDst, m.priv.OwnFile)
+	origen.Close()
+	if err != nil {
+		return nil, fmt.Errorf("copying overlay: %w", err)
+	}
+	if err := tras(); err != nil {
+		_ = os.Remove(goldDst)
+		return nil, fmt.Errorf("copying overlay: %w", err)
 	}
 
 	// CLAVE: se reapunta el disco a la copia dorada ANTES de volcar, para que el
@@ -290,6 +331,12 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
 				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
 			}
+		}
+		// El overlay dorado estuvo en un directorio del VMM: lo que se recupera
+		// tiene que ser el fichero que copió el daemon, no un enlace ni otro
+		// fichero puesto en su lugar (de él se clonarán todas las instancias).
+		if fi, err := os.Lstat(goldOverlay); err != nil || !fi.Mode().IsRegular() || !os.SameFile(fi, goldFI) {
+			return nil, fmt.Errorf("recovering overlay.ext4 from jail: it is not the golden copy the daemon wrote")
 		}
 	}
 	// Se devuelve el disco propio y se reanuda YA: la plantilla no debe escribir
@@ -345,7 +392,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
-		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, MemMaxMiB: mc.MemMaxMiB, Labels: mc.Labels,
+		// Sin las etiquetas de grafo: una plantilla no es de ningún grafo, y
+		// una máquina nacida de ella tampoco (ver sinEtiquetasGrafo).
+		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, MemMaxMiB: mc.MemMaxMiB, Labels: sinEtiquetasGrafo(mc.Labels),
 		Egress:       mc.Egress,
 		CPUPct:       mc.CPUPct,
 		AllowDomains: mc.AllowDomains,
@@ -1019,11 +1068,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	defer unreserve()
 
 	// Copia del overlay dorado: mismo contenido, fichero propio. Compartirlo
-	// haría que las instancias se pisaran el disco entre ellas.
+	// haría que las instancias se pisaran el disco entre ellas. Con reflink
+	// (nativo o en el almacén) la copia comparte los bloques del dorado hasta
+	// que la instancia escribe: coste constante, sea cual sea su tamaño (ver
+	// cow.go).
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if out, err := copiarDisco(ctx, filepath.Join(m.snapDir(req.From), "overlay.ext4"), overlay); err != nil {
+	if _, err := m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay); err != nil {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("copying golden overlay: %v: %s", err, out)
+		return nil, fmt.Errorf("copying golden overlay: %w", err)
 	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina
@@ -1121,7 +1173,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
-		Labels:    api.MergeLabels(snap.Labels, req.Labels),
+		Labels:    api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels),
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
@@ -1347,13 +1399,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// su MMDS y la clave en su proxy. Antes de devolverla: el puente lee MMDS al
 	// lanzar cada sesión, así que la primera ya nace con el marcador. Un fallo
 	// aborta la restauración por lo dicho arriba.
-	var dominiosCred []string
+	var dominiosCred, anyDBCred []string
 	if len(credsPlantilla) > 0 {
 		creds, _, err := m.entregarCredenciales(ctx, id, netcfg, c, credsPlantilla)
 		if err != nil {
 			return abortar(fmt.Errorf("handing %s the credentials of template %s: %w", mc.Name, req.From, err))
 		}
-		dominiosCred = dominiosDe(creds)
+		dominiosCred, anyDBCred = dominiosDe(creds), anyDatabaseDe(creds)
 	}
 	elapsed := time.Since(start).Milliseconds()
 
@@ -1371,7 +1423,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc.State = api.StateRunning
 	mc.StartedAt = &now
 	mc.ThawMS = elapsed
-	mc.CredentialDomains = dominiosCred
+	mc.CredentialDomains, mc.CredentialAnyDatabase = dominiosCred, anyDBCred
 	m.socket[id] = sock
 	m.persist()
 	out := *mc

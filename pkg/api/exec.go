@@ -55,6 +55,17 @@ const (
 // puede llegar el proxy (POST /machines/{ref}/guest). Separados por comas.
 const LabelPorts = "kling.ports"
 
+// Etiquetas de `kling db` (ext/db) que el núcleo también lee: una credencial
+// Postgres con UpstreamMachine (el modelo A de kling db, docs/db.md) solo
+// llega a una máquina que es una copia lista (LabelDBGolden no vacía y
+// LabelDBState=DBStateReady) y del mismo LabelDBOwner que el agente.
+const (
+	LabelDBGolden = "kling.db.golden"
+	LabelDBOwner  = "kling.db.owner"
+	LabelDBState  = "kling.db.state"
+	DBStateReady  = "ready"
+)
+
 // ExecRequest es un comando para ejecutar dentro de la microVM. Cmd es argv, sin
 // shell: quien quiera tuberías pasa ["sh", "-c", "..."].
 type ExecRequest struct {

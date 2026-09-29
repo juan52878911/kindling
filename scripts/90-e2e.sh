@@ -843,11 +843,26 @@ fi
 # El mismo modelo con una base de datos: el invitado conecta en claro al
 # dominio del servidor (que su resolver contesta con el proxy) con el marcador
 # como contraseña, y el proxy entra en el servidor con la clave real por TLS
-# verificado (SCRAM). Necesita un PostgreSQL con TLS, con IP PÚBLICA (el proxy
-# no sale a la red privada) y un certificado válido para su nombre:
+# verificado (SCRAM). Sin upstream necesita un PostgreSQL con TLS, con IP
+# PÚBLICA (sin upstream el proxy no sale a la red privada) y un certificado
+# válido para su nombre:
 #
 #   KLING_E2E_PG_URL=postgres://rol:clave@db.ejemplo.com:5432/base
 #   KLING_E2E_PG_CA=/ruta/ca.pem     (opcional: si el certificado no es de una CA pública)
+#
+# Con un upstream fijado (docs/postgres.md) vale una base de datos del propio
+# host o de la LAN; el host de la URL es entonces solo el nombre que usa el
+# invitado (cualquier nombre exacto, p. ej. pg.kindling.test):
+#
+#   KLING_E2E_PG_UPSTREAM=127.0.0.1:55432     (-upstream: a dónde marca el proxy)
+#   KLING_E2E_PG_TLS=disable                  (opcional, -upstream-tls disable: sin TLS, solo SCRAM-SHA-256)
+#   KLING_E2E_PG_SERVERNAME=pg.lan            (opcional, -tls-server-name: el nombre del certificado)
+#
+# Un Docker sin TLS en el host del daemon:
+#   docker run -d --name pge2e -p 127.0.0.1:55432:5432 -e POSTGRES_USER=kling \
+#     -e POSTGRES_PASSWORD=clave-e2e -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:17
+#   KLING_E2E_PG_URL=postgres://kling:clave-e2e@pg.kindling.test:5432/kling \
+#   KLING_E2E_PG_UPSTREAM=127.0.0.1:55432 KLING_E2E_PG_TLS=disable ./scripts/90-e2e.sh
 #
 # La clave va en la URL por comodidad del que prueba; al daemon llega por stdin.
 step "7d. Proxy de credenciales de Postgres"
@@ -863,6 +878,19 @@ print(u.hostname, u.port or 5432, urllib.parse.unquote(u.username or ""), (u.pat
   PG_PASS=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).password or ""))' "$KLING_E2E_PG_URL")
   ca_args=()
   [ -n "${KLING_E2E_PG_CA:-}" ] && ca_args=(-ca-file "$KLING_E2E_PG_CA")
+  # Upstream fijado, modo TLS y nombre del certificado: lo que la CLI dice del
+  # destino y el método que debe quedar en la auditoría dependen de ellos.
+  PG_MODO="over verified TLS"; PG_AUTH='"auth":"scram-sha-256'
+  if [ -n "${KLING_E2E_PG_SERVERNAME:-}" ]; then
+    ca_args+=(-tls-server-name "$KLING_E2E_PG_SERVERNAME"); PG_MODO="over TLS verified as"
+  fi
+  if [ -n "${KLING_E2E_PG_UPSTREAM:-}" ]; then
+    ca_args+=(-upstream "$KLING_E2E_PG_UPSTREAM")
+  fi
+  if [ -n "${KLING_E2E_PG_TLS:-}" ]; then
+    ca_args+=(-upstream-tls "$KLING_E2E_PG_TLS")
+    [ "$KLING_E2E_PG_TLS" = disable ] && { PG_MODO="without TLS"; PG_AUTH='"auth":"scram-sha-256"'; }
+  fi
   # La sonda es un cliente mínimo del protocolo v3 (la imagen no trae psql):
   # SSLRequest (el proxy contesta N), arranque, contraseña en claro (el
   # marcador), una consulta; y lo mismo con un marcador falso.
@@ -917,8 +945,13 @@ print("FALSO", conectar("kling-cred-00000000000000000000")[2])
   if $KLING run -image "$IMGVOL" -name "$PGC" -egress allowlist -allow example.org -allow-exec -ttl 10m -on-ttl remove >/dev/null 2>&1; then
     out=$(printf '%s' "$PG_PASS" | $KLING machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
       -user "$PG_USER" -database "$PG_DB" "${ca_args[@]}" -env PGPASSWORD 2>&1)
-    contiene "$out" "verified TLS" && ok "credential -type postgres: la clave queda en el proxy" \
-      || bad "machine credential -type postgres" "verified TLS" "$out"
+    contiene "$out" "$PG_MODO" && ok "credential -type postgres: la clave queda en el proxy ($PG_MODO)" \
+      || bad "machine credential -type postgres" "$PG_MODO" "$out"
+    # -database es obligatoria (o -any-database): sin ella el CLI rechaza antes de leer la clave
+    out=$(printf '%s' "$PG_PASS" | $KLING machine credential "$PGC" -type postgres -domain "$PG_HOST" -port "$PG_PORT" \
+      -user "$PG_USER" -env PGPASSWORD2 2>&1) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "needs -database"; } && ok "credential -type postgres sin -database: rechazada" \
+      || bad "credential -type postgres sin -database" "error 'needs -database'" "$out"
     out=$($KLING exec -timeout 90s "$PGC" -- python3 -c "$SONDA_PG" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB" "$PG_PASS" 2>&1)
     contiene "$out" "MMDS MARCADOR" && ok "el invitado no ve la clave, solo el marcador" || bad "MMDS (postgres)" "MMDS MARCADOR" "$out"
     contiene "$out" "SSL N" && ok "el tramo del invitado va en claro (SSLRequest -> N)" || bad "SSLRequest" "SSL N" "$out"
@@ -927,8 +960,12 @@ print("FALSO", conectar("kling-cred-00000000000000000000")[2])
     contiene "$out" "FALSO ERROR 28P01" && ok "un marcador falso: 28P01 sin llegar al servidor" \
       || bad "marcador falso" "FALSO ERROR 28P01" "$out"
     out=$($KLING machine audit "$PGC" -tail 0 -json 2>&1)
-    contiene "$out" '"kind":"postgres"' && contiene "$out" '"auth":"scram-sha-256' \
-      && ok "audit: una línea por conexión, autenticada con SCRAM" || bad "audit postgres" 'kind postgres con auth scram' "$out"
+    contiene "$out" '"kind":"postgres"' && contiene "$out" "$PG_AUTH" \
+      && ok "audit: una línea por conexión, autenticada con SCRAM" || bad "audit postgres" "kind postgres con $PG_AUTH" "$out"
+    if [ -n "${KLING_E2E_PG_UPSTREAM:-}" ]; then
+      contiene "$out" '"upstream":"' && ok "audit: la línea dice a qué upstream marcó el proxy" \
+        || bad "audit postgres upstream" '"upstream":"…"' "$out"
+    fi
     contiene "$out" '"reason":"bad_placeholder","denied":true' && ok "audit: el marcador falso queda como denegado" \
       || bad "audit postgres denegado" "bad_placeholder denied" "$out"
     if contiene "$out" "$PG_PASS" || contiene "$out" "kling-cred-" || contiene "$out" "current_user"; then
@@ -981,6 +1018,607 @@ for modo in none internet allowlist; do
     bad "run -egress $modo (sonda IPv6)" "una máquina" "no arrancó"
   fi
 done
+
+# ── 7e. kling db ─────────────────────────────────────────────────────────────
+# Bases Postgres desechables (ext/db). Necesita la plantilla dorada con Postgres
+# (kling db golden build ... pg) y el plugin kling-db instalado. Sin
+# KLING_E2E_DB_GOLDEN se salta, y lo dice.
+#
+#   KLING_E2E_DB_GOLDEN=pg ./scripts/90-e2e.sh
+#   KLING_E2E_DB_GOLDEN_PASSWORD=...   (opcional) la clave de la plantilla: con ella se
+#                                      prueba que NO entra en una copia
+#
+# Las claves de las copias se guardan en un KLING_DB_STATE propio de la prueba.
+# Toda la salida de kling db se acumula en un fichero y al final se busca en él
+# cada clave (la de cada copia y la de la plantilla): tiene que salir 0 veces.
+step "7e. kling db"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN no está (nombre de la plantilla Postgres): sin plantilla que probar\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
+  # copiarlo aquí, doctor no puede comprobar que las copias rotaron la clave.
+  DBREAL="$HOME/.local/state/kling-db/$KLING_E2E_DB_GOLDEN"
+  if [ -d "$DBREAL" ]; then mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  DBU="e2e-db-$$"
+  # dbk ejecuta kling db, acumula stdout+stderr en DBLOG y lo devuelve.
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  # dbsql corre SQL DENTRO de la copia, por el socket, como superusuario local.
+  dbsql() { $KLING exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  # dbpw: la clave de la copia, leída del fichero del host (nunca se imprime).
+  dbpw() { local id; id=$($KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'); cat "$KLING_DB_STATE/copies/$id/password" 2>/dev/null; }
+  # dbhost: host, puerto, usuario y base de una copia (de connect -dsn, sin la clave).
+  dbhost() { $KLING db connect "$1" -dsn 2>/dev/null </dev/null | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.stdin.read().strip())
+print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip("/"))'; }
+  # dbhostsql: SQL desde el host con una clave dada (por entorno, no por argv).
+  dbhostsql() { local pw="$1" h p u d; read -r h p u d < <(dbhost "$2"); PGPASSWORD="$pw" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$u" -d "$d" -c "$3" 2>&1; }
+
+  out=$(dbk up "$DBG" -name "$DBU")
+  contiene "$out" "ready" && ok "kling db up: copia lista" || bad "db up" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT 1")
+  [ "$out" = "1" ] && ok "SELECT 1 dentro de la copia, por el socket" || bad "SELECT 1 por socket" "1" "$out"
+
+  # La clave de la copia no es la de la plantilla.
+  PW1=$(dbpw "$DBU")
+  [ -n "$PW1" ] && ok "la copia tiene su clave en el host" || bad "clave de la copia" "un fichero con la clave" "nada"
+  TODAS="$PW1"
+  if ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no hay psql en este host: sin comprobación de clave desde el host\n"
+  else
+    out=$(dbhostsql "$PW1" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "desde el host entra con la clave de la copia" || bad "conexión del host" "1" "$out"
+    if [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ]; then
+      [ "$PW1" != "$KLING_E2E_DB_GOLDEN_PASSWORD" ] && ok "la clave de la copia es distinta de la de la plantilla" \
+        || bad "rotación" "clave de la copia distinta de la de la plantilla" "iguales"
+      out=$(dbhostsql "$KLING_E2E_DB_GOLDEN_PASSWORD" "$DBU" "SELECT 1")
+      [ "$out" = "1" ] && bad "clave de la plantilla" "rechazada" "ENTRÓ" \
+        || ok "la clave de la plantilla NO entra en la copia"
+    else
+      printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD no está: sin la prueba de la clave de la plantilla desde el host\n"
+    fi
+    # connect -dsn: el DSN funciona tal cual (su salida no va a DBLOG: lleva la clave a propósito).
+    dsn=$($KLING db connect "$DBU" -dsn 2>/dev/null </dev/null)
+    # El DSN se descompone en variables PG*: la clave va por entorno, nunca en el argv de psql.
+    out=$(eval "$(E2E_DSN="$dsn" python3 -c 'import os, shlex, urllib.parse as u
+d = u.urlsplit(os.environ["E2E_DSN"])
+for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.username or "")),
+             ("PGPASSWORD", u.unquote(d.password or "")), ("PGDATABASE", d.path.lstrip("/"))):
+    print("export %s=%s" % (k, shlex.quote(str(v or ""))))')"; PGCONNECT_TIMEOUT=10 psql -X -At -c "SELECT 1" 2>&1)
+    [ "$out" = "1" ] && ok "connect -dsn: el DSN funciona" || bad "connect -dsn" "1" "$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
+    dsn=""
+  fi
+
+  # fork -n 4: cuatro claves distintas y escrituras aisladas.
+  dbsql "$DBU" "CREATE TABLE e2e_marca(v text); INSERT INTO e2e_marca VALUES ('origen')" >/dev/null
+  out=$(dbk fork "$DBU" -n 4)
+  copias=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}')
+  nc=$(printf '%s\n' "$copias" | grep -c . || true)
+  [ "$nc" = "4" ] && ok "fork -n 4: cuatro copias listas" || bad "fork -n 4" "4 copias" "$out"
+  distintas=1; i=0
+  for c in $copias; do
+    i=$((i+1))
+    pw=$(dbpw "$c")
+    case " $TODAS " in *" $pw "*) distintas=0;; esac
+    [ -n "$pw" ] || distintas=0
+    TODAS="$TODAS $pw"
+    dbsql "$c" "INSERT INTO e2e_marca VALUES ('copia-$i')" >/dev/null
+  done
+  [ "$distintas" = 1 ] && ok "fork: cuatro claves distintas entre sí y de la del origen" \
+    || bad "claves del fork" "todas distintas y no vacías" "alguna repetida o vacía"
+  aisladas=1; i=0
+  for c in $copias; do
+    i=$((i+1))
+    filas=$(dbsql "$c" "SELECT string_agg(v, ',' ORDER BY v) FROM e2e_marca")
+    [ "$filas" = "copia-$i,origen" ] || { aisladas=0; echo "     $c ve: $filas"; }
+  done
+  filas=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_marca")
+  { [ "$aisladas" = 1 ] && [ "$filas" = "origen" ]; } && ok "cada copia ve solo sus escrituras (y el origen no ve ninguna)" \
+    || bad "aislamiento del fork" "copia-N,origen en cada una; origen solo 'origen'" "origen ve: $filas"
+  for c in $copias; do dbk rm "$c" >/dev/null 2>&1; done
+
+  # doctor: copia limpia = 0 problemas; con un superusuario de login añadido, >0.
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor de una copia limpia: 0 problemas" \
+    || bad "doctor limpio" "0 problem(s), salida 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "CREATE ROLE e2e_super LOGIN SUPERUSER" >/dev/null
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" != 0 ] && ! contiene "$out" "; 0 problem(s)"; } && ok "doctor con un superusuario de login añadido: hay problemas" \
+    || bad "doctor con superusuario" "problemas > 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "DROP ROLE e2e_super" >/dev/null
+
+  # audit: muestra conexiones y no lleva ni la clave ni SQL.
+  command -v psql >/dev/null && dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
+  out=$(dbk audit "$DBU" -since 1h)
+  contiene "$out" "connect" && ok "audit muestra conexiones" || bad "audit" "eventos de conexión" "$out"
+  if contiene "$out" "424242" || contiene "$out" "SELECT" || contiene "$out" "e2e_marca"; then
+    bad "audit sin SQL" "ni SQL ni valores" "$out"
+  else
+    ok "audit no contiene SQL"
+  fi
+
+  # reset: los datos vuelven a ser los de la plantilla.
+  dbsql "$DBU" "CREATE TABLE e2e_sucia(x int)" >/dev/null
+  out=$(dbk reset "$DBU")
+  contiene "$out" "ready" || bad "db reset" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_tables WHERE tablename IN ('e2e_sucia','e2e_marca')")
+  [ "$out" = "0" ] && ok "reset devuelve los datos de la plantilla" || bad "reset" "0 tablas de la prueba" "$out"
+  PW2=$(dbpw "$DBU")
+  { [ -n "$PW2" ] && [ "$PW2" != "$PW1" ]; } && ok "reset: otra copia, otra clave" || bad "clave tras reset" "distinta" "igual o vacía"
+  TODAS="$TODAS $PW2 ${KLING_E2E_DB_GOLDEN_PASSWORD:-}"
+
+  # ── kling db: rol de solo lectura, rotate, snapshot/undo, rehearse, golden -template, ask ──
+  # dbid: id de la máquina de una copia. dbrpw: la clave de un rol extra (fichero del host, nunca impresa).
+  dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  dbrpw() { cat "$KLING_DB_STATE/copies/$(dbid "$1")/$2.password" 2>/dev/null; }
+  # dbrosql: SQL desde el host como el rol $1 con la clave $2 sobre la copia $3 (clave por entorno).
+  dbrosql() { local h p u d; read -r h p u d < <(dbhost "$3"); PGPASSWORD="$2" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$1" -d "$d" -c "$4" 2>&1; }
+  APPROLE=$(dbhost "$DBU" | awk '{print $3}')
+
+  # role -ro: el rol lee, y INSERT, DELETE, COPY TO PROGRAM y SET ROLE fallan con él.
+  dbsql "$DBU" "CREATE TABLE e2e_ro(v text); INSERT INTO e2e_ro VALUES ('a'),('b'); ALTER TABLE e2e_ro OWNER TO $APPROLE" >/dev/null
+  out=$(dbk role "$DBU" -ro -name e2e_agent); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "read-only"; } && ok "role -ro: rol de solo lectura creado" || bad "role -ro" "rol creado" "rc=$rc $out"
+  ROPW=$(dbrpw "$DBU" e2e_agent)
+  [ -n "$ROPW" ] && TODAS="$TODAS $ROPW"
+  if [ -z "$ROPW" ]; then
+    bad "clave del rol ro" "un fichero con la clave en el host" "nada"
+  elif ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no hay psql en este host: sin las pruebas del rol de solo lectura desde el host\n"
+  else
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "el rol ro lee (SELECT)" || bad "SELECT del rol ro" "2" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "INSERT INTO e2e_ro VALUES ('x')")
+    contiene "$out" "ERROR" && ok "el rol ro no puede INSERT" || bad "INSERT del rol ro" "ERROR" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "DELETE FROM e2e_ro")
+    contiene "$out" "ERROR" && ok "el rol ro no puede DELETE" || bad "DELETE del rol ro" "ERROR" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "COPY (SELECT 1) TO PROGRAM 'id'")
+    contiene "$out" "ERROR" && ok "el rol ro no puede COPY TO PROGRAM" || bad "COPY TO PROGRAM del rol ro" "ERROR" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SET ROLE postgres")
+    contiene "$out" "ERROR" && ok "el rol ro no puede SET ROLE" || bad "SET ROLE del rol ro" "ERROR" "$out"
+    # Ni siquiera apagando la bandera de solo lectura: el rol no tiene el privilegio.
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SET default_transaction_read_only = off; INSERT INTO e2e_ro VALUES ('y')")
+    contiene "$out" "ERROR" && ok "el rol ro no escribe ni apagando default_transaction_read_only" || bad "escritura con la bandera apagada" "ERROR" "$out"
+    out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "las filas siguen intactas tras los intentos del rol ro" || bad "datos tras el rol ro" "2" "$out"
+  fi
+  # Un fork no hereda el rol ro: la hija nace sin él, y su clave no entra en la hija.
+  out=$(dbk fork "$DBU" -n 1); hija=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}' | head -1)
+  if [ -z "$hija" ]; then
+    bad "fork con rol ro" "una copia hija lista" "$out"
+  else
+    out=$(dbsql "$hija" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
+    [ "$out" = "0" ] && ok "fork: la hija no hereda los roles de kling db role" || bad "roles ro en la hija" "0" "$out"
+    if [ -n "$ROPW" ] && command -v psql >/dev/null; then
+      out=$(dbrosql e2e_agent "$ROPW" "$hija" "SELECT 1")
+      [ "$out" = "1" ] && bad "clave del rol ro en la hija" "rechazada" "ENTRÓ" || ok "fork: la clave del rol ro del origen no entra en la hija"
+    fi
+    TODAS="$TODAS $(dbpw "$hija")"
+    dbk rm "$hija" >/dev/null 2>&1
+  fi
+  dbk role "$DBU" -ro -name e2e_agent -rm >/dev/null 2>&1
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_roles WHERE rolname = 'e2e_agent'")
+  [ "$out" = "0" ] && ok "role -rm: el rol desaparece" || bad "role -rm" "0" "$out"
+
+  # rotate: la clave vieja deja de valer y la nueva entra.
+  if command -v psql >/dev/null; then
+    ROT_OLD=$(dbpw "$DBU")
+    out=$(dbk rotate "$DBU"); rc=$?
+    ROT_NEW=$(dbpw "$DBU")
+    TODAS="$TODAS $ROT_OLD $ROT_NEW"
+    { [ "$rc" = 0 ] && [ -n "$ROT_NEW" ] && [ "$ROT_NEW" != "$ROT_OLD" ]; } && ok "rotate: clave nueva distinta de la vieja" || bad "rotate" "clave nueva distinta" "rc=$rc $out"
+    out=$(dbhostsql "$ROT_OLD" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && bad "clave vieja tras rotate" "rechazada" "ENTRÓ" || ok "rotate: la clave vieja ya no entra"
+    out=$(dbhostsql "$ROT_NEW" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "rotate: la clave nueva entra" || bad "clave nueva tras rotate" "1" "$out"
+  else
+    printf "  \033[33mskip\033[0m  no hay psql en este host: sin la prueba de rotate desde el host\n"
+  fi
+
+  # snapshot + undo: los datos vuelven a los del punto.
+  dbsql "$DBU" "CREATE TABLE e2e_snap(v text); INSERT INTO e2e_snap VALUES ('punto')" >/dev/null
+  out=$(dbk snapshot "$DBU" e2e-punto); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "snapshot of"; } && ok "snapshot: punto de restauración creado" || bad "snapshot" "creado" "rc=$rc $out"
+  dbsql "$DBU" "INSERT INTO e2e_snap VALUES ('despues'); CREATE TABLE e2e_tras(x int)" >/dev/null
+  out=$(dbk snapshots "$DBU")
+  contiene "$out" "e2e-punto" && ok "snapshots: lista el punto" || bad "snapshots" "e2e-punto" "$out"
+  out=$(dbk undo "$DBU" e2e-punto); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "ready"; } && ok "undo: copia lista" || bad "undo" "ready" "rc=$rc $out"
+  out=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_snap")
+  [ "$out" = "punto" ] && ok "undo: vuelven los datos del punto" || bad "datos tras undo" "punto" "$out"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_tables WHERE tablename = 'e2e_tras'")
+  [ "$out" = "0" ] && ok "undo: lo posterior al punto ya no está" || bad "undo" "sin e2e_tras" "$out"
+  TODAS="$TODAS $(dbpw "$DBU")"
+  dbk snapshot -rm "$DBU" e2e-punto >/dev/null 2>&1
+  # Tras undo, la copia nació del punto y kling no deja borrarlo con ella viva:
+  # se recoge por nombre al final de la sección (ver dbsnap_limpiar).
+
+  # rehearse: una migración que añade una columna, y otra que se bloquea (lock_timeout).
+  # El origen no se toca: el ensayo va en una copia desechable.
+  dbsql "$DBU" "CREATE TABLE e2e_rh(id int); INSERT INTO e2e_rh VALUES (1); ALTER TABLE e2e_rh OWNER TO $APPROLE" >/dev/null
+  RHDIR=$(mktemp -d "$DBTMP/rh.XXXXXX"); RHBLK=$(mktemp -d "$DBTMP/rhb.XXXXXX")
+  printf 'ALTER TABLE e2e_rh ADD COLUMN extra text;\n' > "$RHDIR/001_add_col.sql"
+  out=$(dbk rehearse "$DBU" -migrations "$RHDIR"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "001_add_col.sql" && contiene "$out" ": OK"; } && ok "rehearse: la migración que añade una columna pasa" || bad "rehearse ok" "OK, salida 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM information_schema.columns WHERE table_name = 'e2e_rh' AND column_name = 'extra'")
+  [ "$out" = "0" ] && ok "rehearse no toca el origen" || bad "rehearse" "origen sin la columna" "$out"
+  # Otra sesión retiene el lock (fuera de la migración, en segundo plano) y la migración lo pide.
+  cat > "$RHBLK/001_bloqueo.sql" <<'SQL'
+\! sh -c 'psql -X -q -d appdb -c "LOCK TABLE e2e_rh IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(20)" >/dev/null 2>&1 &'
+\! sleep 1
+ALTER TABLE e2e_rh ADD COLUMN otra int;
+SQL
+  out=$(dbk rehearse "$DBU" -migrations "$RHBLK" -lock-timeout 1s); rc=$?
+  { [ "$rc" != 0 ] && contiene "$out" "would block" && contiene "$out" ": FAILED"; } && ok "rehearse: la migración que se bloquea falla por lock_timeout (would block)" || bad "rehearse bloqueo" "FAILED con would block, salida != 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  rm -rf "$RHDIR" "$RHBLK"
+
+  # golden -template crm-demo: se construye y se consulta.
+  GTN="e2e-crm-$$"
+  out=$(dbk golden build -template crm-demo "$GTN"); rc=$?
+  if [ "$rc" != 0 ]; then
+    bad "golden build -template crm-demo" "plantilla construida" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  else
+    ok "golden build -template crm-demo: plantilla construida"
+    out=$(dbk up "$GTN" -name "$GTN-c")
+    contiene "$out" "ready" && ok "up de la golden crm-demo: lista" || bad "up crm-demo" "ready" "$out"
+    out=$(dbsql "$GTN-c" "SELECT count(*) > 0 FROM customers")
+    [ "$out" = "t" ] && ok "crm-demo: hay clientes que consultar" || bad "consulta crm-demo" "t" "$out"
+    TODAS="$TODAS $(dbpw "$GTN-c")"
+    dbk rm "$GTN-c" >/dev/null 2>&1
+  fi
+  $KLING template rm "$GTN" >/dev/null 2>&1
+
+  # ask con el "modelo" de pruebas (KLING_DB_ASK_FAKE: la respuesta sale de un fichero, sin red).
+  # No salta ningún control: la SQL pasa por sqlguard, el rol de solo lectura y READ ONLY.
+  ASKF=$(mktemp)
+  printf '%s\n' '```sql' 'SELECT count(*) AS n FROM e2e_ro' '```' > "$ASKF"
+  out=$(KLING_DB_ASK_FAKE="$ASKF" dbk ask "$DBU" "how many rows does e2e_ro have?" -yes -json); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" '"role": "kling_db_ro"' && contiene "$out" '"2"'; } \
+    && ok "ask (modelo de pruebas): responde con el rol de solo lectura" || bad "ask fake" "JSON con el rol y 2" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  printf '%s\n' "INSERT INTO e2e_ro VALUES ('z')" > "$ASKF"
+  out=$(KLING_DB_ASK_FAKE="$ASKF" dbk ask "$DBU" "add a row" -yes -json); rc=$?
+  [ "$rc" != 0 ] && ok "ask: un INSERT del modelo se rechaza" || bad "ask INSERT" "error" "rc=$rc $out"
+  printf '%s\n' "SELECT 1; DELETE FROM e2e_ro" > "$ASKF"
+  out=$(KLING_DB_ASK_FAKE="$ASKF" dbk ask "$DBU" "delete everything" -yes -json); rc=$?
+  [ "$rc" != 0 ] && ok "ask: dos sentencias del modelo se rechazan" || bad "ask 2 sentencias" "error" "rc=$rc $out"
+  rm -f "$ASKF"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+  [ "$out" = "2" ] && ok "ask (modelo de pruebas) no modificó los datos" || bad "datos tras ask fake" "2" "$out"
+
+  # ask con un proveedor real: KLING_E2E_ASK_PROVIDER=opencode|anthropic (o, sin él, con ANTHROPIC_API_KEY).
+  ASKP="${KLING_E2E_ASK_PROVIDER:-}"
+  [ -z "$ASKP" ] && [ -n "${ANTHROPIC_API_KEY:-}" ] && ASKP=anthropic
+  if [ -z "$ASKP" ]; then
+    printf "  \033[33mskip\033[0m  ask real: ni KLING_E2E_ASK_PROVIDER ni ANTHROPIC_API_KEY (con opencode instalado: KLING_E2E_ASK_PROVIDER=opencode)\n"
+  elif [ "$ASKP" = opencode ] && [ ! -x "$HOME/.opencode/bin/opencode" ] && ! command -v opencode >/dev/null; then
+    printf "  \033[33mskip\033[0m  ask real: KLING_E2E_ASK_PROVIDER=opencode pero no hay opencode\n"
+  else
+    out=$(dbk ask "$DBU" "how many rows does the table e2e_ro have?" -provider "$ASKP" -yes -json); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" '"role"'; } && ok "ask ($ASKP): responde con un rol de solo lectura" || bad "ask $ASKP" "JSON con el rol" "rc=$rc $(printf '%s' "$out" | tail -3)"
+    out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "ask ($ASKP) no modificó los datos" || bad "datos tras ask" "2" "$out"
+  fi
+  dbk rm "$DBU" >/dev/null 2>&1
+  # Los puntos de restauración de esta prueba (dbsnap-*-e2e-punto) se quedaban:
+  # con la copia ya borrada, se quitan por nombre.
+  for t in $($KLING template ls 2>/dev/null | awk '$1 ~ /^dbsnap-.*-e2e-punto$/ {print $1}'); do
+    $KLING template rm -f "$t" >/dev/null 2>&1
+  done
+
+  # Ninguna clave en ninguna salida de kling db (ni en la de audit, ni en la de doctor).
+  fugas=0
+  for pw in $TODAS; do
+    grep -qF -- "$pw" "$DBLOG" && fugas=$((fugas+1))
+  done
+  [ "$fugas" = 0 ] && ok "ninguna clave aparece en la salida de kling db (0 coincidencias)" \
+    || bad "fuga de claves" 0 "$fugas"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
+# ── 7f. kling db attach (modelo A) ───────────────────────────────────────────
+# Una copia compartida por dos agentes que viven en OTRAS microVMs: cada uno
+# conecta por el proxy de credenciales de su máquina con su marcador, y el
+# proxy marca a la copia (resuelta por id en cada conexión) con una clave que
+# el agente no ve. Congelar la copia corta la sesión viva y el siguiente
+# intento falla; tras el thaw vuelve; otro dueño no puede; detach retira el
+# acceso. Mismas variables que 7e; sin KLING_E2E_DB_GOLDEN se salta, avisando.
+step "7f. kling db attach (modelo A)"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN no está (nombre de la plantilla Postgres): sin copia que compartir\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  dbsql() { $KLING exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  C="e2e-dba-$$"; A1="e2e-ag1-$$"; A2="e2e-ag2-$$"; A3="e2e-ag3-$$"
+  # La sonda es un cliente mínimo del protocolo v3 (la imagen no trae psql):
+  # lee su marcador de MMDS, entra por el proxy y cuenta las filas de e2e_a.
+  # Con "hold" se queda con la sesión abierta y dice si se la cortan.
+  SONDA_A='
+import json, socket, struct, sys, time, urllib.request
+host, env, user, db, modo = sys.argv[1:6]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store).get("env", {}).get(env, "")
+print("MARCADOR", "si" if ph.startswith("kling-cred-") else "NO", flush=True)
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def conectar():
+    s = socket.create_connection((host, 5432), timeout=20)
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t == b"E": return s, "ERROR " + "".join(f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C")
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, "SINPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(ph)) + ph.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E": return s, "ERROR " + "".join(f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C")
+        if t == b"Z": return s, "LISTO"
+try:
+    s, r = conectar()
+except Exception as e:
+    print("LOGIN CAIDA", type(e).__name__, flush=True); sys.exit(0)
+print("LOGIN", r, flush=True)
+if r != "LISTO": sys.exit(0)
+q = b"SELECT count(*) FROM e2e_a\0"
+s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+fila = ""
+while True:
+    t, b = msg(s)
+    if t == b"D": fila = b[6:].decode(errors="replace")
+    if t in (b"Z", b"E"): break
+print("FILA", fila, flush=True)
+if modo == "hold":
+    print("HOLD", flush=True)
+    s.settimeout(120)
+    try:
+        print("CORTADA" if not s.recv(1) else "DATOS", flush=True)
+    except socket.timeout:
+        print("SIGUE", flush=True)
+    except Exception as e:
+        print("CORTADA", type(e).__name__, flush=True)
+'
+  # sonda <agente> <host> <env> <user> [hold]
+  sonda() { $KLING exec -timeout 150s "$1" -- python3 -c "$SONDA_A" "$2" "$3" "$4" appdb "${5:-once}" 2>&1; }
+  agente() { $KLING run -image "$IMGVOL" -name "$1" -egress allowlist -allow example.org -allow-exec \
+    -label kind=sandbox -ttl 15m -on-ttl remove "${@:2}" >/dev/null 2>&1; }
+
+  out=$(dbk up "$DBG" -name "$C")
+  if ! contiene "$out" "ready"; then
+    bad "db up (7f)" "ready" "$out"
+  elif ! agente "$A1" || ! agente "$A2" || ! agente "$A3" -label kling.db.owner=otro; then
+    bad "agentes (7f)" "tres máquinas con egress allowlist" "alguna no arrancó"
+  else
+    CID=$(dbid "$C"); APPROLE=app
+    dbsql "$C" "CREATE TABLE e2e_a(v text); INSERT INTO e2e_a VALUES ('x'),('y'); ALTER TABLE e2e_a OWNER TO $APPROLE" >/dev/null
+    dbk role "$C" -ro -name e2e_ro >/dev/null
+    TODAS="$(cat "$KLING_DB_STATE/copies/$CID/password" 2>/dev/null) $(cat "$KLING_DB_STATE/copies/$CID/e2e_ro.password" 2>/dev/null)"
+
+    out=$(dbk attach "$A1" "$C"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "attached to $C"; } && ok "attach: el agente 1 recibe la copia (rol de la aplicación)" \
+      || bad "attach A1" "attached to $C" "rc=$rc $out"
+    out=$(dbk attach "$A2" "$C" -role e2e_ro -host shared.db.internal); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "as e2e_ro"; } && ok "attach -role: el agente 2 recibe la copia con el rol de solo lectura" \
+      || bad "attach A2 -role" "as e2e_ro" "rc=$rc $out"
+    H1="$C.db.internal"
+
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    { contiene "$out" "MARCADOR si" && contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 2"; } \
+      && ok "agente 1: entra por el proxy con su marcador y lee (2 filas)" || bad "lectura A1" "MARCADOR si, LOGIN LISTO, FILA 2" "$out"
+    out=$(sonda "$A2" shared.db.internal PGPASSWORD e2e_ro)
+    { contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 2"; } \
+      && ok "agente 2: la misma copia, con su rol ro" || bad "lectura A2" "LOGIN LISTO, FILA 2" "$out"
+    # La copia no se ramifica con el agente: el agente con attach no se puede forkear.
+    out=$($KLING sandbox fork "$A1" -n 1 2>&1) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "proxy credentials"; } && ok "un agente con attach no se ramifica (guardián de fork)" \
+      || bad "fork del agente" "rechazo por credenciales del proxy" "rc=$rc $out"
+
+    # Congelar la copia corta la sesión viva del agente 1...
+    HOLD="$DBTMP/hold.out"
+    sonda "$A1" "$H1" PGPASSWORD "$APPROLE" hold > "$HOLD" 2>&1 &
+    HPID=$!
+    for _ in $(seq 1 40); do grep -q HOLD "$HOLD" 2>/dev/null && break; sleep 0.5; done
+    if grep -q HOLD "$HOLD"; then
+      $KLING freeze "$C" >/dev/null 2>&1
+      wait "$HPID" 2>/dev/null
+      out=$(cat "$HOLD")
+      contiene "$out" "CORTADA" && ok "freeze de la copia: la sesión abierta del agente se corta" \
+        || bad "sesión viva al congelar" "CORTADA" "$out"
+    else
+      kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null
+      bad "sesión de espera" "HOLD" "$(cat "$HOLD")"
+      $KLING freeze "$C" >/dev/null 2>&1
+    fi
+    # ...y el siguiente intento falla sin llegar a ella.
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    contiene "$out" "LOGIN ERROR 08006" && ok "con la copia congelada, un nuevo intento falla (08006)" \
+      || bad "intento con la copia congelada" "LOGIN ERROR 08006" "$out"
+    $KLING thaw "$C" >/dev/null 2>&1
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    { contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 2"; } && ok "tras el thaw el agente vuelve a entrar" \
+      || bad "tras thaw" "LOGIN LISTO, FILA 2" "$out"
+
+    # Otro dueño no puede: ni con un agente de otro dueño ni pidiéndolo como otro.
+    out=$(dbk attach "$A3" "$C") && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "belongs to owner"; } && ok "attach de un agente de otro dueño: rechazado" \
+      || bad "attach otro dueño" "belongs to owner" "rc=$rc $out"
+    out=$(dbk attach "$A1" "$C" -owner otro -env OTRA) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "belongs to owner"; } && ok "attach como otro dueño: rechazado" \
+      || bad "attach -owner otro" "belongs to owner" "rc=$rc $out"
+
+    # La auditoría del agente dice a qué máquina fue y por qué no llegó, sin claves.
+    out=$($KLING machine audit "$A1" -tail 0 -json 2>&1)
+    { contiene "$out" "\"upstream\":\"machine:$CID\"" && contiene "$out" '"reason":"machine_unavailable"'; } \
+      && ok "audit del agente: upstream machine:<id> y machine_unavailable al congelar" \
+      || bad "audit del agente" "machine:$CID y machine_unavailable" "$(printf '%s' "$out" | tail -3)"
+    printf '%s\n' "$out" >> "$DBLOG"
+
+    # detach retira el acceso: el marcador ya no vale.
+    out=$(dbk detach "$A1" "$C"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "detached"; } && ok "detach: el agente 1 pierde la copia" || bad "detach" "detached" "rc=$rc $out"
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    # Sin credencial Postgres el nombre ya no se desvía al proxy (o el proxy
+    # cierra sin leer): cualquier cosa menos entrar.
+    { contiene "$out" "LOGIN " && ! contiene "$out" "LOGIN LISTO"; } && ok "tras detach el agente ya no entra" \
+      || bad "tras detach" "LOGIN ERROR o LOGIN CAIDA" "$out"
+    out=$(sonda "$A2" shared.db.internal PGPASSWORD e2e_ro)
+    contiene "$out" "LOGIN LISTO" && ok "el agente 2 sigue con su attach" || bad "A2 tras detach de A1" "LOGIN LISTO" "$out"
+
+    fugas=0
+    for pw in $TODAS; do grep -qF -- "$pw" "$DBLOG" && fugas=$((fugas+1)); done
+    [ "$fugas" = 0 ] && ok "7f: ninguna clave en la salida de kling db ni en la auditoría" || bad "fuga de claves (7f)" 0 "$fugas"
+  fi
+  $KLING rm -f "$A1" >/dev/null 2>&1; $KLING rm -f "$A2" >/dev/null 2>&1; $KLING rm -f "$A3" >/dev/null 2>&1
+  dbk rm "$C" >/dev/null 2>&1
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
+# ── 8. grafos de microVMs ─────────────────────────────────────────────────────
+# Lo que los tests de Go no pueden ver: que <nodo>.graph resuelva dentro del
+# invitado, que el proxy de enlace lleve la conexión al otro netns sin abrir
+# el FORWARD, que un lazy despierte con la primera conexión, y que un fork
+# hable con SUS nodos y no con los del original. web -> api -> db, db lazy
+# desde una plantilla que sirve un fichero en el 5432 (sin Postgres: lo que
+# se prueba es la arista, no la base).
+step "8. Grafos"
+if ! $KLING graph ls >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el daemon no conoce los grafos (capacidad graphs)\n"
+else
+  G="e2e-g-$$"; GDBT="e2e-gdb-$$"; GTMP=$(mktemp -d)
+  GHTTP='import sys, urllib.request
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=50).read().decode().strip())
+except Exception as e:
+    print("FALLO", type(e).__name__, e)'
+  # ghttp <máquina> <url>: GET desde dentro de la máquina.
+  ghttp() { $KLING exec -timeout 90s "$1" -- python3 -c "$GHTTP" "$2" 2>&1; }
+  # gsirve <máquina> <puerto> <dir>: un servidor HTTP que sobrevive al exec.
+  gsirve() { $KLING exec "$1" -- sh -c "mkdir -p $3 && cd $3 && setsid python3 -m http.server $2 >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; }
+  gestado() { $KLING graph inspect "$1" -json 2>/dev/null | python3 -c 'import sys,json; g=json.load(sys.stdin); print(g["state"], " ".join(n+"="+(v.get("state") or "-") for n,v in sorted(g["nodes"].items())))'; }
+  gmarca() { $KLING exec "$1" -- sh -c "echo $2 > /srv/db/marca" >/dev/null 2>&1; }
+
+  # La plantilla del nodo lazy: un servidor en el 5432 con un marcador.
+  $KLING run -name "$GDBT-m" -image "$IMGVOL" -allow-exec >/dev/null 2>&1 \
+    && gsirve "$GDBT-m" 5432 /srv/db && gmarca "$GDBT-m" plantilla && sleep 1 \
+    && $KLING save "$GDBT-m" "$GDBT" >/dev/null 2>&1
+  $KLING rm "$GDBT-m" >/dev/null 2>&1
+  cat > "$GTMP/g.yaml" <<EOF
+# e2e: web -> api -> db (lazy)
+name: $G
+nodes:
+  web: {image: $IMGVOL, allow_exec: true}
+  api: {image: $IMGVOL, allow_exec: true, ports: [8081]}
+  db:  {from: $GDBT, ports: [5432], wake: lazy}
+edges:
+  - {from: web, to: api, kind: link, port: 8081}
+  - {from: api, to: db, kind: link, port: 5432}
+EOF
+  out=$($KLING graph up "$GTMP/g.yaml" 2>&1)
+  if contiene "$out" "Linux-only"; then
+    printf "  \033[33mskip\033[0m  aristas entre máquinas: solo Linux en esta versión\n"
+  elif ! contiene "$out" "up in"; then
+    bad "graph up" "graph $G up" "$out"
+  else
+    ok "graph up: tres nodos, db lazy sin máquina ($(gestado "$G"))"
+    gsirve "$G-api" 8081 /srv/api
+    $KLING exec "$G-api" -- sh -c 'echo api-ok > /srv/api/index.html' >/dev/null 2>&1
+    sleep 1
+    out=$(ghttp "$G-web" http://api.graph:8081/)
+    [ "$out" = "api-ok" ] && ok "web -> api.graph:8081 por la arista link" || bad "enlace web -> api" "api-ok" "$out"
+    st=$(gestado "$G")
+    contiene "$st" "db=-" && ok "db sigue sin máquina antes de la primera conexión" || bad "db lazy" "db=-" "$st"
+    out=$(ghttp "$G-api" http://db.graph:5432/marca)
+    st=$(gestado "$G")
+    { [ "$out" = "plantilla" ] && contiene "$st" "db=running"; } \
+      && ok "la primera conexión a db.graph despierta al lazy (db=running)" || bad "despertar lazy" "plantilla, db=running" "$out / $st"
+    out=$($KLING exec "$G-web" -- python3 -c 'import socket
+try:
+    print(socket.gethostbyname("db.graph"))
+except socket.gaierror as e:
+    print("NXDOMAIN", e)' 2>&1)
+    contiene "$out" "NXDOMAIN" && ok "web no resuelve db.graph (no tiene arista)" || bad "db.graph desde web" "NXDOMAIN" "$out"
+    out=$($KLING exec "$G-web" -- python3 -c 'import socket
+try:
+    print(socket.gethostbyname("example.org"))
+except socket.gaierror as e:
+    print("NXDOMAIN", e)' 2>&1)
+    contiene "$out" "NXDOMAIN" && ok "egress none: fuera de *.graph no resuelve nada" || bad "example.org desde web" "NXDOMAIN" "$out"
+    out=$($KLING machine audit "$G-web" -json 2>&1)
+    contiene "$out" '"kind":"link"' && ok "la auditoría de web tiene la conexión (kind link)" || bad "audit link" '"kind":"link"' "$(printf '%s' "$out" | tail -2)"
+
+    $KLING graph freeze "$G" >/dev/null 2>&1
+    st=$(gestado "$G")
+    [ "$st" = "frozen api=frozen db=frozen web=frozen" ] && ok "graph freeze: los tres frozen" || bad "graph freeze" "frozen api=frozen db=frozen web=frozen" "$st"
+    $KLING graph thaw "$G" >/dev/null 2>&1
+    st=$(gestado "$G")
+    [ "$st" = "running api=running db=running web=running" ] && ok "graph thaw: los tres running" || bad "graph thaw" "running api=running db=running web=running" "$st"
+    out=$(ghttp "$G-web" http://api.graph:8081/)
+    [ "$out" = "api-ok" ] && ok "tras el thaw la arista sigue" || bad "enlace tras thaw" "api-ok" "$out"
+
+    out=$($KLING graph snapshot "$G" -json 2>&1)
+    n=$(printf '%s' "$out" | python3 -c 'import sys,json; s=json.load(sys.stdin); t=s["templates"]; print(s["generation"], len(t), all(v.endswith("-%d" % s["generation"]) for v in t.values()))' 2>/dev/null)
+    [ "$n" = "1 3 True" ] && ok "graph snapshot: tres plantillas de la misma generación" || bad "graph snapshot" "1 3 True" "$out"
+    GSNAPS=$(printf '%s' "$out" | python3 -c 'import sys,json; print(" ".join(json.load(sys.stdin)["templates"].values()))' 2>/dev/null)
+
+    gmarca "$G-db" antes-del-fork
+    out=$($KLING graph fork "$G" -n 2 -q 2>&1); rc=$?
+    GFORKS=$out
+    [ "$rc" = 0 ] && [ "$(printf '%s\n' "$GFORKS" | grep -c .)" = 2 ] && ok "graph fork -n 2: dos grafos nuevos" || bad "graph fork" "dos nombres" "rc=$rc $out"
+    gmarca "$G-db" original-despues
+    for F in $GFORKS; do
+      out=$(ghttp "$F-api" http://db.graph:5432/marca)
+      [ "$out" = "antes-del-fork" ] && ok "fork $F: su api llega a SU db (estado del instante del fork)" \
+        || bad "fork $F: api -> db" "antes-del-fork (no original-despues)" "$out"
+      gmarca "$F-db" "propia-$F"
+      out=$(ghttp "$F-api" http://db.graph:5432/marca)
+      [ "$out" = "propia-$F" ] && ok "fork $F: lo que escribe su db lo ve su api" || bad "fork $F: su db" "propia-$F" "$out"
+    done
+    out=$(ghttp "$G-api" http://db.graph:5432/marca)
+    [ "$out" = "original-despues" ] && ok "el original sigue con su db (ningún fork le llega)" || bad "original tras fork" "original-despues" "$out"
+
+    # Bloque 4: el daemon se reinicia y el grafo y sus enlaces siguen.
+    if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
+      ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
+      sleep 4
+      out=$(ghttp "$G-web" http://api.graph:8081/)
+      { [ "$out" = "api-ok" ] && $KLING graph inspect "$G" >/dev/null 2>&1; } \
+        && ok "tras reiniciar el daemon el grafo y su enlace siguen" || bad "grafo tras reinicio" "api-ok" "$out"
+    else
+      echo "  (daemon local: me salto el reinicio para no matar tu sesión)"
+    fi
+
+    for F in $GFORKS; do $KLING graph rm "$F" >/dev/null 2>&1; done
+    $KLING graph rm "$G" >/dev/null 2>&1
+    quedan=$($KLING ps -a 2>/dev/null | grep -c -- "$G" || true)
+    tpls=$($KLING template ls -q 2>/dev/null | grep -c "^gfork-" || true)
+    { [ "$quedan" = 0 ] && [ "$tpls" = 0 ] && ! $KLING graph inspect "$G" >/dev/null 2>&1; } \
+      && ok "graph rm: sin máquinas, sin plantillas temporales de fork, sin grafo" \
+      || bad "graph rm" "0 máquinas, 0 gfork-*" "máquinas=$quedan gfork=$tpls"
+    for s in $GSNAPS; do $KLING template rm -f "$s" >/dev/null 2>&1; done
+  fi
+  $KLING graph rm -f "$G" >/dev/null 2>&1
+  $KLING template rm -f "$GDBT" >/dev/null 2>&1
+  rm -rf "$GTMP"
+fi
 
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fallo(s)\033[0m\n" "$pass" "$fail"

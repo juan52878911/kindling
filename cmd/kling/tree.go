@@ -113,6 +113,21 @@ var coreTree = []section{
   sandbox rm [-f] <sb>...                          destroys them
 `},
 	}},
+	{title: "GRAPHS (several machines as one)", cmds: []plugin.Command{
+		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
+                                                   eager nodes; lazy ones start on
+                                                   their first connection
+  graph ls [-q] [-json]                            lists the graphs
+  graph inspect <graph> [-json]                    nodes, state and edges
+  graph freeze <graph>                             freezes every node
+  graph thaw <graph>                               wakes every node that has a machine
+  graph snapshot <graph> [-name N] [-json]         one template per node, all from the
+                                                   same instant (<name>-<node>-<gen>)
+  graph fork <graph> [-n N] [-q] [-json]           N new graphs from this instant; their
+                                                   edges reach their own nodes only
+  graph rm [-f] <graph>...                         removes the graph and its machines
+`},
+	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
 		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential"}, Usage: `  template ls [-q] [-json]                         lists the templates
   template inspect <name> [-json]                  one template, with its annotations
@@ -126,8 +141,11 @@ var coreTree = []section{
                                                    -allow-request as in machine
                                                    credential)
   template credential <name> -type postgres        the same for a database password
-      -domain D -user R [-database B] [-port P]    (see machine credential)
-      [-ca-file ca.pem] -env PGPASSWORD [-f file]
+      -domain D -user R -database B [-port P]      (see machine credential)
+      (-any-database instead of -database: any base)
+      [-ca-file ca.pem] [-upstream H:P]
+      [-upstream-tls verify-full|disable]
+      [-tls-server-name N] -env PGPASSWORD [-f file]
   save <ref> <name>                                makes one from a running machine
 `},
 	}},
@@ -210,11 +228,17 @@ var coreTree = []section{
                                                    final /** = any rest); it goes with
                                                    the key: repeat it when rotating
   machine credential <ref> -type postgres          a database password: the guest
-      -domain D -user R [-database B] [-port P]    connects in plain text to D (any
+      -domain D -user R -database B [-port P]      connects in plain text to D (any
       [-ca-file ca.pem] -env PGPASSWORD [-f file]  port) as R with the placeholder as
                                                    password; the proxy logs in to D:P
                                                    with the real one over verified TLS
                                                    (SCRAM), -ca-file adds a CA
+      [-upstream H:P] [-tls-server-name N]         -upstream: connect to H:P instead of
+      [-upstream-tls verify-full|disable]          D:P (a Docker or LAN database;
+                                                   loopback allowed); -tls-server-name:
+                                                   verify the cert as N; -upstream-tls
+                                                   disable: no TLS, SCRAM-SHA-256 only
+                                                   (see docs/postgres.md)
   machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
       [-since 10m] [-tail 200] [-json]             one line per request (method, host,
                                                    masked path, status, credentials

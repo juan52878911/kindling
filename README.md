@@ -1291,7 +1291,13 @@ kling machine credential payments -type postgres -domain db.example.com -user ap
 
 The role and database are pinned to the credential and nothing in the data stream is
 rewritten. The proxy does not look at SQL, so the role's own grants are the limit. A
-database on a private IP is refused, like any other destination. See SECURITY.md §7.
+database on a private IP is refused unless you pin it yourself: `-upstream
+127.0.0.1:5432` for a Docker database on the same host, or a LAN/VPC address, with
+`-upstream-tls disable` (SCRAM-SHA-256 only) when it has no TLS. Recipes in
+[docs/postgres.md](docs/postgres.md); the security model in SECURITY.md §7.
+
+Need a throwaway database per test or agent instead? `kling db up <template>` gives a
+ready Postgres copy per microVM with its own password: [docs/db.md](docs/db.md).
 
 Measured in the lab with a "compromised" server running as root inside:
 

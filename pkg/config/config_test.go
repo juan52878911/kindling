@@ -247,6 +247,31 @@ func TestSetDaemonVMM(t *testing.T) {
 	}
 }
 
+func TestSetDaemonCoW(t *testing.T) {
+	c := &Config{}
+	if err := c.Set("daemon.cow", "siempre"); err == nil {
+		t.Fatal("un modo desconocido no se acepta")
+	}
+	for _, v := range []string{CoWAuto, CoWStore, CoWOff, ""} {
+		if err := c.Set("daemon.cow", v); err != nil || c.Daemon.CoW != v {
+			t.Fatalf("%q: %v", v, err)
+		}
+	}
+	if err := c.Set("daemon.cow_store_gib", "-1"); err == nil {
+		t.Fatal("un tamaño negativo no se acepta")
+	}
+	if err := c.Set("daemon.cow_store_gib", "32"); err != nil || c.Daemon.CoWStoreGiB != 32 {
+		t.Fatalf("32: %v", err)
+	}
+	claves := map[string]bool{}
+	for _, kv := range c.Keys() {
+		claves[kv[0]] = true
+	}
+	if !claves["daemon.cow"] || !claves["daemon.cow_store_gib"] {
+		t.Fatal("daemon.cow o daemon.cow_store_gib no aparecen en Keys")
+	}
+}
+
 // plugins.disabled sobrevive a Save/Load y no se duplica al desactivar dos
 // veces: es lo que editan `kling plugins enable|disable`.
 func TestPluginsDesactivadosSeGuardan(t *testing.T) {

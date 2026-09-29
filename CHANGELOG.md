@@ -10,7 +10,119 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Núcleo
+
+- **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
+  nombre y aristas declaradas, descritas en un fichero JSON o YAML (un subconjunto sin
+  dependencias), con ciclo de vida atómico: `up`, `ls`, `inspect`, `freeze`, `thaw`,
+  `snapshot` (una plantilla por nodo, todas del mismo instante), `fork -n N` (grafos
+  nuevos cuyas aristas llegan a sus propios nodos y nunca al original) y `rm`. Nodos
+  `eager` o `lazy` (sin máquina hasta la primera conexión). Aristas `link` (TCP a un
+  puerto de otro nodo por `<nodo>.graph`, por un proxy de enlace del daemon que resuelve
+  en cada conexión y despierta al destino si duerme) y `credential` (el attach de
+  Postgres de `kling db`, por dentro). El FORWARD entre namespaces sigue cerrado; el
+  resolver de un nodo sirve solo los `*.graph` de sus aristas, también en `egress
+  none`. Las conexiones quedan en la auditoría con `kind: link`. En macOS funcionan
+  `up/freeze/thaw/snapshot/fork/rm`, y una arista entre máquinas es `501`. Nuevas rutas
+  `/graphs`; las etiquetas `kling.graph*` y el espacio `graph` del store son del daemon.
+  Ver [`docs/grafos.md`](docs/grafos.md).
+- **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del
+  overlay de cada instancia es un clon por reflink: con la raíz en XFS/Btrfs, FICLONE
+  directo; en ext4, un almacén XFS propio (`$root/cow.xfs`, montado por loop en
+  `$root/cow`, creado la primera vez y reservado entero) con una copia base por dorado y
+  un clon por instancia. El coste de crear una instancia deja de depender del tamaño de
+  su disco. `daemon.cow = auto | reflink-store | off` (`KLING_COW`) y
+  `daemon.cow_store_gib`; sin reflink ni almacén posible, la copia de siempre con un
+  aviso. El modo y los contadores salen en `kling info` (`disk clones`), en `GET /info`
+  (`cow`) y en `kling doctor`. Lo existente no se migra. Medida:
+  `scripts/bench-cow.sh`. Ver [`docs/cow.md`](docs/cow.md).
+- **El almacén copy-on-write también puede ser Btrfs.** Donde el núcleo no tiene XFS
+  (Proxmox visto desde un LXC) pero sí Btrfs, el almacén es `$root/cow.btrfs`
+  (`mkfs.btrfs -K -m single -d single`, montado con `nodiscard` para no agujerear la
+  reserva). Se elige por `/proc/filesystems`, XFS primero; un almacén existente conserva
+  su tipo. El tipo sale en `kling info`, `kling doctor` y `GET /info` (`cow.store.fs`).
+- **`commit`, `fork` y `graph snapshot` copian el overlay de la instancia desde el
+  descriptor que comprobaron**, no reabriendo la ruta: un VMM ya no puede colar otro
+  fichero en el dorado cambiando su overlay por un enlace entre la comprobación y la
+  copia. El dorado se crea con `O_EXCL|O_NOFOLLOW` y se cede con `fchown`. En macOS el
+  overlay de un commit se copia (disperso) en vez de clonarse.
+
+### kling db
+
+- **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
+  `up`, `fork`, `connect`, `reset`, `rm`, `doctor`, `audit` y `golden`. Cada copia estrena
+  clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.
+  `doctor` revisa la seguridad de una copia o de una URL; `audit` muestra sus conexiones
+  sin SQL ni claves. Ver [`docs/db.md`](docs/db.md).
+- **`kling db role <copia> -ro`** crea un rol de solo lectura dentro de la copia (sin
+  escritura, sin pertenencias, con tiempos máximos y su propia clave en el host);
+  `connect -role` lo usa. **`kling db templates`** y `golden build -template` construyen
+  una golden de un comando (`empty`, `crm-demo`).
+- **`kling db ask`.** Preguntas en lenguaje natural a una copia: el modelo (API de Anthropic)
+  recibe solo el esquema y la pregunta y devuelve una SQL que se valida, se enseña y se
+  ejecuta con un rol de solo lectura en `BEGIN TRANSACTION READ ONLY`. Ver
+  [`docs/db-ask.md`](docs/db-ask.md).
+- **`kling db rehearse`, `rotate`, `snapshot`/`snapshots`/`undo`.** `rehearse` ensaya
+  migraciones SQL en una copia desechable (tiempos, esperas por locks, tamaño; un
+  `lock_timeout` se informa como "would block"); `rotate` da una clave nueva a una copia y
+  la vieja deja de valer; `snapshot` guarda una copia viva como punto de restauración y
+  `undo` vuelve a él (mismo nombre y dueño, clave nueva). Ver
+  [`docs/db.md`](docs/db.md).
+- **`kling db branch`: una base por rama de git.** La copia de una rama nueva sale por
+  fork de la de su rama padre (o del golden); `-switch`, pensado para el hook
+  `post-checkout` (`branch hook install`), deja activa la copia de la rama actual,
+  congela las demás (0 RAM) y escribe `DATABASE_URL` en `.git/kling-db.env` (0600, nunca
+  en el árbol de trabajo). Además `-ls`, `-rm` y `-prune`. Ver
+  [`docs/db.md`](docs/db.md#una-base-por-rama).
+- **`kling db attach` / `detach` (modelo A, solo Linux).** Una copia compartida por
+  agentes de otras microVMs, por el proxy de credenciales de Postgres de cada uno: el
+  agente recibe un marcador y nunca la contraseña (la de la copia o la de un rol de
+  `kling db role`). La credencial guarda el id de la copia (`upstream_machine`), no una
+  dirección: el daemon la resuelve en cada conexión y solo si la copia sigue corriendo,
+  lista y del mismo `kling.db.owner` que el agente. Congelar, parar o borrar la copia
+  corta las sesiones abiertas. Nuevo `DELETE /machines/{ref}/credentials/{env}` y
+  `kling machine credential -rm`; capacidad `db-attach`. En macOS se rechaza con un error
+  claro. Ver [`docs/db.md`](docs/db.md).
+- **`kling db` en CI.** Scripts (`ext/db/scripts/ci-load.sh`, `ci-pr-db.sh`) y ejemplos de
+  GitHub Actions y GitLab CI para una base por PR. Ver [`docs/db-ci.md`](docs/db-ci.md).
+- **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
+  (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
+- e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`
+  (`KLING_E2E_DB_GOLDEN`; se salta, avisando, si no hay plantilla), y 7f para `attach`.
+
 ### Seguridad
+
+- **Almacén de discos copy-on-write.** Cada jail recibe por bind solo el directorio del
+  overlay de su instancia (nunca el almacén entero); el bind se desmonta antes de borrar
+  el jail y, si no se puede, el jail no se borra. El almacén se monta
+  `nodev,nosuid,noexec` y se reserva entero (sin sobreasignar). Ver SECURITY.md §14.
+- **`kling db`: las copias nuevas no heredan los roles de `role -ro`.** `up`, `fork` y
+  `undo` borran los roles con comentario `kling-db:ro` (y sus líneas de `pg_hba.conf`)
+  antes de dar la copia por lista; si no pueden, la copia se destruye. La línea de
+  `pg_hba.conf` de `role` abre solo la base de la copia, y el fichero se busca con
+  `SHOW hba_file`. `ask` rechaza un rol que pertenezca a cualquier cosa salvo
+  `pg_read_all_data` (también una pertenencia solo-SET de PG16). `rehearse` entra como el
+  rol de la aplicación por peer, no con `role=` (que `RESET ROLE` deshacía).
+- **Scripts de CI de `kling db`.** `ci-load.sh` ya no pone la clave en argv (`psql "$dsn"`):
+  va por `PGPASSWORD`. `ci-pr-db.sh` deja de pasar `-ttl` a `reset` (fallaba siempre), borra
+  con `kling db rm` y el mismo daemon, no usa `timeout` ni `grep -P` y lee `DATABASE_URL`
+  sin fichero intermedio y con la traza apagada.
+- **Fork: el almacén de credenciales falla cerrado.** Si no se puede mirar (cualquier error
+  salvo "no existe") el fork se rechaza, y la comprobación de "sin credenciales" se repite
+  con el cerrojo de la máquina justo antes de pausarla, para que un `SetCredentials`
+  concurrente no se cuele. El mensaje ahora dice cómo hacerlo bien: "start another instance
+  with run -from <template>".
+- **kindling-sandbox reserva el prefijo `kling.db.`.** Un inquilino ya no puede fijar
+  `kling.db.owner` ni `kling.db.state` al crear un sandbox.
+
+- **Credenciales Postgres: `-database` obligatoria.** `kling machine credential` y
+  `kling template credential` con `-type postgres` exigen `-database B` o, expreso,
+  `-any-database` (nuevo campo `any_database` en la API; el CLI avisa por stderr de que el
+  rol podrá entrar en cualquier base con `CONNECT`). Los almacenes anteriores sin base se
+  leen como `any_database`, así que las máquinas vivas y las plantillas siguen cargando.
+- **Contraseña en claro del servidor Postgres: visible.** Sigue admitida solo dentro de
+  TLS verificado, pero la auditoría anota `auth: password` y el log del host avisa una
+  vez por credencial ("server asked for the password in cleartext inside TLS; prefer SCRAM").
 
 - **`kling volume create` ya no le da `volumes/` al usuario del VMM.** Recorría el
   directorio entero con `EnsureWritable`, que dejaba `volumes/` (y todo lo de dentro) con
@@ -180,6 +292,31 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   no bloqueado — la barrera del namespace sí los cubre).
 
 ### Novedades
+
+- **`fork` con etiquetas.** `POST /sandboxes/{ref}/fork` acepta `labels` y `kling sandbox fork`
+  `-label k=v`: las copias nacen ya etiquetadas. Además, `api.Machine.Exposes(port)`.
+
+- **Postgres en Docker o en la LAN/VPC: upstream fijado por el operador.** `kling machine
+  credential` y `kling template credential` ganan `-upstream host:puerto` (a dónde marca
+  el proxy en vez de `dominio:puerto`; IP o nombre, loopback y privadas permitidas),
+  `-upstream-tls verify-full|disable` y `-tls-server-name` (el nombre del certificado si
+  no es el dominio). Sin ellas nada cambia: IPv4 públicas y TLS verificado. Con
+  `-upstream`, nunca se marca a `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`,
+  `fe80::/10`, `fd00:ec2::254` ni a la red de kindling (`172.16.0.0/30`,
+  `172.30.0.0/16`), tampoco si un nombre resuelve a alguna de ellas (en macOS, solo IP o
+  `localhost`: `kling-vz` confinado no llega al resolver del Mac). `disable` exige
+  `-upstream` y solo admite SCRAM-SHA-256 (ni `-PLUS`, ni contraseña en claro, ni md5, ni
+  trust): la contraseña no cruza la red, las consultas sí (la CLI avisa si el upstream no
+  es el loopback). La cancelación va al mismo upstream con el mismo modo, y la auditoría
+  gana `upstream`. En Linux el proxy marca desde el netns del host; en macOS, `kling-vz`
+  desde la pila del Mac (su `127.0.0.1` es donde publica Docker Desktop) y anuncia
+  `postgres-upstream` en `credential_kinds`: sin él, el daemon no le da credenciales con
+  estos campos (hay que recompilar `kling-vz`). API: `upstream`, `upstream_tls` y
+  `tls_server_name` en `CredentialSpec` (omitempty; el almacén cifrado de antes se lee
+  igual). Guía nueva: [docs/postgres.md](docs/postgres.md). e2e: `KLING_E2E_PG_UPSTREAM`,
+  `KLING_E2E_PG_TLS` y `KLING_E2E_PG_SERVERNAME` en la 7d de `scripts/90-e2e.sh` y en la
+  nueva 6e de `scripts/92-e2e-mac.sh`; `pglab`: `KLING_PGLAB_UPSTREAM` y
+  `KLING_PGLAB_TLS=disable`.
 
 - **Aislamiento por sesión en servicios MCP persistentes** (`kling mcp isolation <svc>
   [service|session]`, `kling mcp import … -isolation session`, anotación `mcp.isolation`).

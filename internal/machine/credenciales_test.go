@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/juan52878911/kindling/internal/events"
@@ -29,7 +31,7 @@ func capturarRegistro(t *testing.T) *[][]credproxy.Credential {
 	t.Helper()
 	var got [][]credproxy.Credential
 	prev := registrarCredenciales
-	registrarCredenciales = func(_ context.Context, _ *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string) error {
+	registrarCredenciales = func(_ context.Context, _ *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string, _ credproxy.ResolveMachineFunc) error {
 		got = append(got, append([]credproxy.Credential(nil), creds...))
 		return nil
 	}
@@ -532,19 +534,24 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	}
 	ctx := context.Background()
 	pg := func(mod func(*api.CredentialSpec)) api.CredentialSpec {
-		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real", Type: "postgres", User: "app"}
+		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real", Type: "postgres", User: "app", Database: "appdb"}
 		if mod != nil {
 			mod(&s)
 		}
 		return s
 	}
 	for nombre, mal := range map[string]func(*api.CredentialSpec){
-		"sin rol":      func(s *api.CredentialSpec) { s.User = "" },
-		"no ASCII":     func(s *api.CredentialSpec) { s.Secret = "contraseña" },
-		"con allow":    func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
-		"tipo raro":    func(s *api.CredentialSpec) { s.Type = "mysql" },
-		"CA basura":    func(s *api.CredentialSpec) { s.CAPEM = "x" },
-		"http con rol": func(s *api.CredentialSpec) { s.Type = "" },
+		"sin rol":              func(s *api.CredentialSpec) { s.User = "" },
+		"sin base":             func(s *api.CredentialSpec) { s.Database = "" },
+		"base y any":           func(s *api.CredentialSpec) { s.AnyDatabase = true },
+		"no ASCII":             func(s *api.CredentialSpec) { s.Secret = "contraseña" },
+		"con allow":            func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
+		"tipo raro":            func(s *api.CredentialSpec) { s.Type = "mysql" },
+		"CA basura":            func(s *api.CredentialSpec) { s.CAPEM = "x" },
+		"http con rol":         func(s *api.CredentialSpec) { s.Type = "" },
+		"disable sin upstream": func(s *api.CredentialSpec) { s.UpstreamTLS = "disable" },
+		"upstream sin puerto":  func(s *api.CredentialSpec) { s.Upstream = "127.0.0.1" },
+		"upstream metadatos":   func(s *api.CredentialSpec) { s.Upstream = "169.254.169.254:5432" },
 	} {
 		if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(mal)}); err == nil {
 			t.Errorf("%s: aceptada", nombre)
@@ -573,4 +580,171 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	if r.User != "ro" || r.Database != "appdb" || r.Port != 6432 || r.Secret != "pw-rotada" || r.Placeholder != c.Placeholder {
 		t.Errorf("rotación: %+v", r)
 	}
+
+	// Upstream fijado: llega normalizado al proxy y se guarda (cifrado) con
+	// el resto; rotar sin él lo quita, como cualquier otro campo.
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(func(s *api.CredentialSpec) {
+		s.Upstream, s.UpstreamTLS = "LocalHost:5432", "DISABLE"
+	})}); err != nil {
+		t.Fatal(err)
+	}
+	u := (*got)[2][0]
+	if u.Upstream != "localhost:5432" || u.UpstreamTLS != credproxy.UpstreamTLSDisable {
+		t.Errorf("upstream al proxy: %+v", u)
+	}
+	back, err = m.cargarCredenciales("m1")
+	if err != nil || back[0].Upstream != "localhost:5432" || back[0].UpstreamTLS != credproxy.UpstreamTLSDisable {
+		t.Fatalf("almacén con upstream: %+v, %v", back, err)
+	}
+	if _, err := m.SetCredentials(ctx, "m1", []api.CredentialSpec{pg(func(s *api.CredentialSpec) {
+		s.TLSServerName = "pg.lan"
+	})}); err != nil {
+		t.Fatal(err)
+	}
+	if u := (*got)[3][0]; u.Upstream != "" || u.UpstreamTLS != "" || u.TLSServerName != "pg.lan" {
+		t.Errorf("rotación sin upstream: %+v", u)
+	}
+}
+
+// Un almacén anterior a -database obligatoria (postgres sin base ni
+// AnyDatabase, en la máquina y en la plantilla) sigue cargando y se lee como
+// AnyDatabase, y AnyDatabase viaja de la API al proxy y al almacén.
+func TestAlmacenAntiguoSinDatabase(t *testing.T) {
+	m := newTestManager(t)
+	if err := os.MkdirAll(m.dir("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Se guarda tal cual lo hacía la versión anterior: sin AnyDatabase.
+	antigua := []credproxy.Credential{{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
+		Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app"}}
+	if err := m.guardarCredenciales("v1", antigua); err != nil {
+		t.Fatal(err)
+	}
+	back, err := m.cargarCredenciales("v1")
+	if err != nil || len(back) != 1 || !back[0].AnyDatabase || back[0].Database != "" {
+		t.Fatalf("almacén de máquina: %+v, %v", back, err)
+	}
+	if err := credproxy.ValidarCredenciales(back); err != nil {
+		t.Errorf("la credencial antigua ya no valida: %v", err)
+	}
+
+	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := escribirSellado(m.credSnapPath("svc"), sellado); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := m.cargarCredencialesPlantilla("svc")
+	if err != nil || len(specs) != 1 || !specs[0].AnyDatabase {
+		t.Fatalf("almacén de plantilla: %+v, %v", specs, err)
+	}
+	if err := validarSpecs(specs); err != nil {
+		t.Errorf("la spec antigua ya no valida: %v", err)
+	}
+}
+
+// La promoción a AnyDatabase de un almacén antiguo no es silenciosa: un aviso
+// por dueño y variable (no en cada carga: las plantillas se leen en cada
+// listado), y `inspect` lo enseña en la máquina y en la plantilla.
+func TestAlmacenAntiguoAvisaYSeVeEnInspect(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(escritorSeguro{&mu, &buf})
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+	avisos := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Count(buf.String(), "loaded as any_database (pre-upgrade store); rotate with -database")
+	}
+
+	m := newTestManager(t)
+	capturarRegistro(t)
+	for _, id := range []string{"v1", "v2"} {
+		if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	antigua := []credproxy.Credential{
+		{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
+			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
+		{Env: "PGFIJA", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "bb",
+			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb"},
+		{Env: "PGANY", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "cc",
+			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", AnyDatabase: true},
+	}
+	for _, id := range []string{"v1", "v2"} {
+		if err := m.guardarCredenciales(id, antigua); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := m.cargarCredenciales("v1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := avisos(); n != 1 {
+		t.Fatalf("%d avisos tras tres cargas de la misma máquina, quería 1:\n%s", n, buf.String())
+	}
+	mu.Lock()
+	if !strings.Contains(buf.String(), "PGPASSWORD") || strings.Contains(buf.String(), "PGFIJA") || strings.Contains(buf.String(), "PGANY") {
+		t.Errorf("el aviso es de la credencial promovida y solo de ella:\n%s", buf.String())
+	}
+	mu.Unlock()
+	// Otra máquina con el mismo almacén avisa por su cuenta.
+	if _, err := m.cargarCredenciales("v2"); err != nil {
+		t.Fatal(err)
+	}
+	if n := avisos(); n != 2 {
+		t.Fatalf("%d avisos, quería 2", n)
+	}
+
+	// inspect de la máquina: reentregar (reconcile/thaw) lo anota.
+	mc := &api.Machine{ID: "v1", Name: "v1"}
+	if _, err := m.reentregarCredenciales(context.Background(), mc, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"PGANY", "PGPASSWORD"}; !reflect.DeepEqual(mc.CredentialAnyDatabase, want) {
+		t.Errorf("CredentialAnyDatabase = %v, quería %v", mc.CredentialAnyDatabase, want)
+	}
+
+	// La plantilla: aviso una vez aunque se liste muchas veces, y se ve.
+	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "allowlist"})
+	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := escribirSellado(m.credSnapPath("svc"), sellado); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		s, err := m.Snapshot("svc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(s.CredentialAnyDatabase, []string{"PGPASSWORD"}) || !reflect.DeepEqual(s.CredentialDomains, []string{"db.example.com"}) {
+			t.Fatalf("inspect de la plantilla: %+v", s)
+		}
+	}
+	if n := avisos(); n != 3 {
+		t.Fatalf("%d avisos tras listar la plantilla tres veces, quería 3 (uno suyo):\n%s", n, buf.String())
+	}
+	mu.Lock()
+	if !strings.Contains(buf.String(), "template svc") {
+		t.Errorf("el aviso no dice de qué plantilla es:\n%s", buf.String())
+	}
+	mu.Unlock()
+}
+
+// escritorSeguro serializa las escrituras del log con las lecturas del test.
+type escritorSeguro struct {
+	mu *sync.Mutex
+	b  *bytes.Buffer
+}
+
+func (e escritorSeguro) Write(p []byte) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.b.Write(p)
 }

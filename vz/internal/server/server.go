@@ -776,8 +776,9 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 
 // credentialKinds son los tipos de credencial que entiende este kling-vz. El
 // daemon lo pregunta antes de mandarle una credencial Postgres: uno anterior
-// ignoraría el tipo y la serviría como HTTP.
-var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres}
+// ignoraría el tipo y la serviría como HTTP. "postgres-upstream" dice que
+// entiende además Upstream, UpstreamTLS y TLSServerName.
+var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": "vz", "version": s.d.Version}
@@ -844,7 +845,14 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Port        int      `json:"port,omitempty"`
 			User        string   `json:"user,omitempty"`
 			Database    string   `json:"database,omitempty"`
+			AnyDatabase bool     `json:"any_database,omitempty"`
 			CAPEM       string   `json:"ca_pem,omitempty"`
+			// Upstream fijado por el operador (ver pkg/credproxy/upstream.go):
+			// el proxy marca desde la pila de red del Mac, así que 127.0.0.1
+			// es el loopback del Mac, donde Docker Desktop publica.
+			Upstream      string `json:"upstream,omitempty"`
+			UpstreamTLS   string `json:"upstream_tls,omitempty"`
+			TLSServerName string `json:"tls_server_name,omitempty"`
 		} `json:"credentials"`
 	}
 	if err := decode(r, maxCredBody, &body); err != nil {
@@ -867,7 +875,8 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		creds = append(creds, credproxy.Credential{
 			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
 			Allow: c.Allow,
-			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, CAPEM: c.CAPEM,
+			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
+			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
 		})
 	}
 	doms, err := s.d.Credentials.SetCredentials(creds)

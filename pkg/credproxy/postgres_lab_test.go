@@ -35,7 +35,24 @@ package credproxy
 //	KLING_PGLAB_CA        PEM del certificado autofirmado del servidor (o de
 //	                      su CA).
 //
-// El servidor tiene que tener ssl = on con ese certificado, y en pg_hba.conf
+//	KLING_PGLAB_UPSTREAM  (opcional) host:puerto como -upstream: el proxy marca
+//	                      con su dialer de upstream fijado (el de producción,
+//	                      loopback permitido) y KLING_PGLAB_ADDR sobra.
+//	KLING_PGLAB_TLS       (opcional) "disable" como -upstream-tls disable: sin
+//	                      TLS y solo SCRAM-SHA-256 (exige KLING_PGLAB_UPSTREAM;
+//	                      KLING_PGLAB_CA sobra). Para un Docker sin TLS:
+//
+//	  docker run -d --name pglab -p 127.0.0.1:55432:5432 \
+//	    -e POSTGRES_USER=kling -e POSTGRES_PASSWORD='la-clave' \
+//	    -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 postgres:17
+//	  KLING_PGLAB_UPSTREAM=127.0.0.1:55432 KLING_PGLAB_TLS=disable \
+//	  KLING_PGLAB_DOMAIN=pg.kindling.test KLING_PGLAB_USER=kling \
+//	  KLING_PGLAB_PASSWORD='la-clave' ./credproxy-pglab -test.run PGLab -test.v
+//
+//	KLING_PGLAB_SERVERNAME (opcional) como -tls-server-name: el nombre del
+//	                      certificado si no es KLING_PGLAB_DOMAIN.
+//
+// Con TLS, el servidor tiene que tener ssl = on con ese certificado, y en pg_hba.conf
 // una línea "hostssl <base> <rol> 127.0.0.1/32 scram-sha-256". Con un
 // certificado RSA o ECDSA el servidor ofrece SCRAM-SHA-256-PLUS y la prueba
 // comprueba que el proxy lo usa.
@@ -57,21 +74,31 @@ import (
 
 func entornoLab(t *testing.T) (addr string, cred Credential) {
 	t.Helper()
+	upstream := os.Getenv("KLING_PGLAB_UPSTREAM")
+	sinTLS := os.Getenv("KLING_PGLAB_TLS") == UpstreamTLSDisable
+	opcional := map[string]bool{"KLING_PGLAB_DATABASE": true, "KLING_PGLAB_ADDR": upstream != "", "KLING_PGLAB_CA": sinTLS}
 	get := func(k string) string {
 		v := os.Getenv(k)
-		if v == "" && k != "KLING_PGLAB_DATABASE" {
+		if v == "" && !opcional[k] {
 			t.Fatalf("falta %s (ver la cabecera de postgres_lab_test.go)", k)
 		}
 		return v
 	}
 	addr = get("KLING_PGLAB_ADDR")
-	ca, err := os.ReadFile(get("KLING_PGLAB_CA"))
-	if err != nil {
-		t.Fatal(err)
+	var ca []byte
+	if f := get("KLING_PGLAB_CA"); f != "" && !sinTLS {
+		var err error
+		if ca, err = os.ReadFile(f); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cred = Credential{Env: "PGPASSWORD", Domain: get("KLING_PGLAB_DOMAIN"), Placeholder: pgMarca,
 		Secret: get("KLING_PGLAB_PASSWORD"), Kind: KindPostgres, User: get("KLING_PGLAB_USER"),
-		Database: get("KLING_PGLAB_DATABASE"), CAPEM: string(ca)}
+		Database: get("KLING_PGLAB_DATABASE"), CAPEM: string(ca),
+		Upstream: upstream, TLSServerName: os.Getenv("KLING_PGLAB_SERVERNAME")}
+	if sinTLS {
+		cred.UpstreamTLS = UpstreamTLSDisable
+	}
 	return addr, cred
 }
 
@@ -88,9 +115,17 @@ func TestPGLab(t *testing.T) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}})
+	// Con upstream fijado marca el dialer de producción (dialUp): se cuenta
+	// envolviéndolo.
+	dialUp := e.p.dialUp
+	e.p.dialUp = func(ctx context.Context, a string) (net.Conn, error) {
+		dials.Add(1)
+		return dialUp(ctx, a)
+	}
 	if _, err := e.p.SetCredentials([]Credential{cred}); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("destino %s, TLS %q, nombre TLS %q", cred.destinoPG(), cred.UpstreamTLS, cred.TLSServerName)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +214,14 @@ func TestPGLab(t *testing.T) {
 	t.Logf("autenticación con el servidor: %s", metodo)
 	if metodo != AuthSCRAM && metodo != AuthSCRAMPlus {
 		t.Errorf("método %q: el servidor debería pedir SCRAM (password_encryption = scram-sha-256)", metodo)
+	}
+	if cred.UpstreamTLS == UpstreamTLSDisable && metodo != AuthSCRAM {
+		t.Errorf("sin TLS el método tiene que ser %s, fue %q", AuthSCRAM, metodo)
+	}
+	for _, r := range recs {
+		if r.Host != "" && r.Upstream != cred.Upstream {
+			t.Errorf("el registro dice upstream %q, la credencial %q", r.Upstream, cred.Upstream)
+		}
 	}
 	for _, prohibido := range []string{cred.Secret, pgMarca} {
 		if strings.Contains(crudo, prohibido) {

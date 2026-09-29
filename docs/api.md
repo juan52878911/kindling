@@ -33,7 +33,9 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
-| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `ca_pem`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
+| `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (solo Linux), `DELETE /machines/{ref}/credentials/{env}` |
+| `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
+| `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
 
@@ -41,7 +43,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host) y `share_roots` (desde v0.10) |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10) y `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
@@ -58,8 +60,9 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `POST /machines/{ref}/renew` | reinicia el reloj del TTL (ver abajo) |
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
-| `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret","allow"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. `allow` (opcional, hasta 32) limita qué peticiones llevan la clave: `"MÉTODO /ruta"` con método exacto (GET, HEAD, POST, PUT, PATCH, DELETE u OPTIONS), `*` dentro de un segmento y `**` como último segmento para cualquier resto; la ruta de la petición se compara normalizada con `path.Clean`; lo que no casa con ninguna credencial del dominio recibe 403; vacío permite todo. Se fusiona por `env` (repetir una rota la clave, sustituye también su `allow` y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios. Con `"type":"postgres"` es una contraseña de base de datos (ver abajo) |
-| `PUT /machines/{ref}/labels` | reetiqueta |
+| `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret","allow"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. `allow` (opcional, hasta 32) limita qué peticiones llevan la clave: `"MÉTODO /ruta"` con método exacto (GET, HEAD, POST, PUT, PATCH, DELETE u OPTIONS), `*` dentro de un segmento y `**` como último segmento para cualquier resto; la ruta de la petición se compara normalizada con `path.Clean`; lo que no casa con ninguna credencial del dominio recibe 403; vacío permite todo. Se fusiona por `env` (repetir una rota la clave, sustituye también su `allow` y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios, y `Machine.credential_any_database` las variables de las credenciales postgres que entran en cualquier base (sin `database`, o de un almacén anterior a que fuese obligatoria: el daemon lo avisa en su log al cargarlas). Con `"type":"postgres"` es una contraseña de base de datos (ver abajo) |
+| `DELETE /machines/{ref}/credentials/{env}?upstream_machine=ID` | retira de la máquina la credencial de esa variable (404 si no la tiene). Con `upstream_machine`, solo si va a esa máquina (`kling db detach`). En una máquina viva el proxy deja de conocer el marcador y corta las sesiones de Postgres que lo usaban, y el marcador sale de MMDS; en una congelada o parada solo cambia el almacén. Devuelve la máquina |
+| `PUT /machines/{ref}/labels` | reetiqueta. Cambiar `kling.db.owner`, `kling.db.state`, `kling.db.golden` o `kling.ports` corta las sesiones de otras máquinas hacia esta y las suyas hacia otras (modelo A, ver Credenciales de Postgres) |
 | `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas) |
 | `GET /machines/{ref}/logs?tail=N` | consola serie |
 | `GET /machines/{ref}/credaudit?tail=N&denied=1&since=T` | registro de auditoría del proxy de credenciales, NDJSON (ver abajo) |
@@ -73,7 +76,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `GET /snapshots` | lista |
 | `GET /snapshots/{name}` | uno, con disco e instancias vivas |
 | `PUT /snapshots/{name}/annotations/{key}` | guarda JSON opaco (≤1 MiB, ≤32 claves, clave `^[a-z0-9][a-z0-9._-]{0,63}$`) |
-| `PUT /snapshots/{name}/credentials` | ata claves a una plantilla (mismo cuerpo; `"clear":true` las quita todas): cada instancia que nazca de ella (`run -from`, réplicas del gateway) las recibe en su proxy al arrancar, con un marcador propio. Exige que la plantilla tenga egress allowlist; `run -from` con otro egress se rechaza. `Snapshot.credential_domains` lista los dominios |
+| `PUT /snapshots/{name}/credentials` | ata claves a una plantilla (mismo cuerpo; `"clear":true` las quita todas): cada instancia que nazca de ella (`run -from`, réplicas del gateway) las recibe en su proxy al arrancar, con un marcador propio. Exige que la plantilla tenga egress allowlist; `run -from` con otro egress se rechaza. `Snapshot.credential_domains` lista los dominios y `Snapshot.credential_any_database` las postgres que entran en cualquier base |
 | `DELETE /snapshots/{name}/annotations/{key}` | lo borra |
 | `DELETE /snapshots/{name}` | borra el snapshot |
 
@@ -198,7 +201,7 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 
 | Campo | Qué es |
 |---|---|
-| `kind` | `http`, `postgres` (una conexión, ver abajo); `dropped` es una línea que solo lleva la cuenta de descartados |
+| `kind` | `http`, `postgres` (una conexión, ver abajo), `link` (una conexión por una arista de un grafo: `host` es `<nodo>.graph:P`, `upstream` la máquina a la que llegó, `machine:<id>`, y `reason` puede ser `machine_unavailable`, `busy`, `no_capacity`, `upstream_error` o `invalidated`; ver [grafos.md](grafos.md)); `dropped` es una línea que solo lleva la cuenta de descartados |
 | `path` | ruta normalizada, cortada a 256 bytes; un segmento con un marcador o una forma de una clave sale `:cred`, uno de ≥32 caracteres base64url/hex, `:tok`; los caracteres de control salen como `?` |
 | `query` | si la petición llevaba query (su contenido no se escribe nunca) |
 | `status` | lo que recibió el invitado |
@@ -208,6 +211,7 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 | `req_bytes`, `resp_bytes`, `ms` | cuerpo leído del invitado, cuerpo enviado al invitado, duración |
 | `dropped` | registros descartados antes de este (cola llena o fallo de disco) |
 | `user`, `database`, `auth` | solo en `kind: postgres` (ver Credenciales de Postgres) |
+| `upstream` | solo en `kind: postgres` con upstream fijado: la dirección a la que marcó el proxy (configuración del operador, no un secreto) |
 
 Nunca lleva la clave, el marcador, cabeceras, cuerpos, la query ni el texto de un
 error del proveedor. Rota a 1 MiB (una generación); `commit` y `fork` no lo copian.
@@ -224,28 +228,38 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 
 | Campo | Qué es |
 |---|---|
-| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database` y `ca_pem` no valen) |
-| `domain` | nombre del servidor: al que sale el proxy y contra el que verifica el TLS. Tiene que resolver a una IPv4 pública |
+| `type` | `postgres`; vacío o `http` es una credencial HTTP (y entonces `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls` y `tls_server_name` no valen) |
+| `domain` | nombre que usa el invitado. Sin `upstream`, es también al que sale el proxy (tiene que resolver a una IPv4 pública); con TLS, contra el que se verifica el certificado salvo `tls_server_name` |
 | `port` | puerto del servidor (defecto 5432). El invitado puede usar cualquier puerto: le llega al proxy igual |
 | `user` | rol (obligatorio). El invitado tiene que conectar con él |
-| `database` | opcional: la única base a la que se deja conectar (sin ella, cualquiera; la de por defecto es el rol) |
+| `database` | la única base a la que se deja conectar; obligatoria salvo `any_database` (la de por defecto de un cliente es el rol) |
+| `any_database` | `true` deja conectar a cualquier base con `CONNECT` para el rol; excluyente con `database`. Un almacén anterior sin base se lee como `true` |
 | `ca_pem` | opcional, ≤64 KiB: CA en PEM que se añade a las raíces del sistema |
+| `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS solo IP o `localhost`, el daemon rechaza un nombre al entregarla. Se devuelve normalizado (minúsculas) |
+| `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |
+| `tls_server_name` | opcional: nombre (o IP) contra el que se verifica el certificado en lugar de `domain` |
+| `upstream_machine` | opcional, solo Linux y solo en credenciales de máquina (no de plantilla): el **id** exacto (hexadecimal) de una copia de `kling db` a la que marca el proxy, el modelo A de [db.md](db.md). Nunca una dirección: el daemon la resuelve en cada conexión y solo si la copia existe con ese id, corre, lleva `kling.db.golden`, `kling.db.state=ready`, expone `port` en `kling.ports`, y ella, el agente y `upstream_owner` dicen el mismo `kling.db.owner`. Excluye `upstream`, exige `upstream_tls: "disable"` (SCRAM-SHA-256) y `database`. Se comprueba también al entregar; en macOS se rechaza |
+| `upstream_owner` | con `upstream_machine`, obligatorio: el `kling.db.owner` que tienen que compartir copia y agente |
 | `secret` | contraseña del rol, ASCII imprimible |
 | `allow` | no vale para Postgres |
 
 El invitado recibe el marcador en `env` y lo usa como contraseña, sin TLS
 (`sslmode=disable` o `prefer`) contra `domain`. Al rotar (misma `env`) se sustituyen
 todos los campos con la clave. En macOS el daemon lo rechaza si el `kling-vz` de la
-máquina no incluye `postgres` en `credential_kinds` de `GET /kling/info`.
+máquina no incluye `postgres` en `credential_kinds` de `GET /kling/info`, y rechaza una
+que use `upstream`, `upstream_tls` o `tls_server_name` si no incluye `postgres-upstream`.
+Recetas y límites en [postgres.md](postgres.md).
 
 En el registro de auditoría cada conexión es una línea `kind: postgres` con `host`,
-`user`, `database`, `auth` (`scram-sha-256-plus`, `scram-sha-256`, `password` o `trust`:
+`upstream` (si lo hay), `user`, `database`, `auth` (`scram-sha-256-plus`, `scram-sha-256`, `password` o `trust`:
 cómo se autenticó el proxy ante el servidor), `creds`, bytes y duración; `method` es
 `cancel` en un `CancelRequest`. Sus `reason`: los de arriba (`disabled`, `busy`,
 `no_credential`, `upstream_error`) y `bad_startup`, `timeout`, `bad_placeholder`,
 `user_mismatch`, `database_mismatch`, `replication`, `upstream_tls`, `upstream_auth`,
-`unknown_cancel`; son `denied` `disabled`, `no_credential`, `bad_placeholder`,
-`user_mismatch`, `database_mismatch`, `replication` y `unknown_cancel`.
+`unknown_cancel`, `machine_unavailable` (la copia de `upstream_machine` no se pudo usar);
+son `denied` `disabled`, `no_credential`, `bad_placeholder`, `user_mismatch`,
+`database_mismatch`, `replication`, `unknown_cancel` y `machine_unavailable`. Con
+`upstream_machine`, `upstream` es `machine:<id>` (nunca la dirección resuelta).
 
 ### Admisión
 
@@ -268,6 +282,34 @@ los puertos de loopback por los que el host llega a cada puerto expuesto del
 invitado (allí todos los invitados comparten IP). Quien hable con un invitado sin
 pasar por el daemon resuelve la dirección con `api.Machine.Addr(puerto)`, que usa
 el reenvío si lo hay y `ip:puerto` si no.
+
+## Grafos
+
+Varias máquinas con aristas declaradas y ciclo de vida atómico (capacidad `graphs`;
+uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único del ID.
+
+| Ruta | Qué hace |
+|---|---|
+| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`, `501` en macOS si tiene aristas `link` o `credential` |
+| `GET /graphs` | lista, por nombre |
+| `GET /graphs/{ref}` | uno, con el estado de cada nodo |
+| `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
+| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado |
+| `POST /graphs/{ref}/fork` | `{"count": N}` (1 a 16). Devuelve `{"graphs": [...]}` (`201`) |
+| `DELETE /graphs/{ref}` | el grafo y sus máquinas (`204`) |
+
+`Graph` es `{"id", "name", "nodes": {nombre: GraphNode}, "edges": [GraphEdge], "state",
+"generation", "created_at", "fork_of"}`; `id`, `state`, `generation`, `created_at`,
+`fork_of` y en cada nodo `machine_id` y `state` los pone el daemon (lo que llegue en
+ellos se ignora). `GraphNode`: `from` o `image`, `vcpus`, `mem_mib`, `egress`,
+`allow_domains`, `ports`, `wake` (`eager`\|`lazy`), `idle_freeze`, `volumes`, `shares`,
+`labels`, `allow_exec`. `GraphEdge`: `from`, `to`, `kind` (`link`\|`credential`),
+`port`, y en `credential` `env`, `user` y `database`. La clave de una arista no está
+nunca en `Graph`. Las etiquetas `kling.graph` y `kling.graph.*` las pone solo el
+daemon: `POST /machines`, `POST /sandboxes`, el fork de un sandbox y
+`PUT /machines/{ref}/labels` las rechazan con `400`. El grafo se guarda en
+`$KLING_ROOT/store/graph/<id>.json`, que `GET /store/graph` lee pero que solo el daemon
+escribe.
 
 ## Exec y ficheros
 
@@ -372,6 +414,22 @@ sandbox lo reinicia. También admite `name`, `vcpus`,
 | `DELETE /sandboxes/{ref}` | lo destruye |
 
 Estas rutas solo tocan máquinas con `kind=sandbox`.
+
+### `POST /sandboxes/{ref}/fork`
+
+Ramifica un sandbox en marcha en `count` copias (1 a 64; capacidad `fork`). Cuerpo
+opcional:
+
+```json
+{"count": 2, "ttl_seconds": 600, "on_ttl": "remove", "labels": {"kling.db.state": "preparing"}}
+```
+
+`labels` (desde sin publicar) se suman a las de cada copia en su nacimiento, sin ventana
+en la que exista sin ellas; van con `-label k=v` (repetible) en `kling sandbox fork`. Las
+claves siguen `^[a-z0-9][a-z0-9._-]{0,63}$`, como mucho 32 etiquetas de 256 bytes de
+valor, y `kind` y `kling.fork-of` están reservadas (`400`). Un cuerpo sin `labels` se
+comporta como siempre. Una máquina con credenciales del proxy se rechaza con `409`:
+arranca otra instancia con `run -from <plantilla>` en vez de ramificarla.
 
 ### `allow_exec` y `on_ttl` en `POST /machines`
 

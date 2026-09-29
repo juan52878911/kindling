@@ -18,11 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -496,6 +498,12 @@ func splice(a, b net.Conn) {
 // Forward abre (o devuelve, si ya existe) un puerto en 127.0.0.1 que llega al
 // puerto port del invitado. Es como el host alcanza a cada invitado en el Mac:
 // todos son 172.16.0.2 en redes separadas, así que la IP no sirve.
+//
+// El puerto sale SIEMPRE del rango reservado de kindling
+// (credproxy.ForwardPortMin-ForwardPortMax), nunca uno efímero al azar: el
+// proxy de credenciales de cualquier máquina se niega a marcar un upstream
+// del loopback en ese rango, y así no puede llegar al invitado de otra (ver
+// pkg/credproxy/upstream.go).
 func (n *Net) Forward(port int) (string, error) {
 	if port < 1 || port > 65535 {
 		return "", fmt.Errorf("invalid port %d", port)
@@ -508,13 +516,35 @@ func (n *Net) Forward(port int) (string, error) {
 	if l, ok := n.forwards[port]; ok {
 		return l.Addr().String(), nil
 	}
-	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	l, err := listenReservado()
 	if err != nil {
 		return "", err
 	}
 	n.forwards[port] = l
 	go n.acceptForward(l, uint16(port))
 	return l.Addr().String(), nil
+}
+
+// listenReservado abre 127.0.0.1:<p> con p del rango reservado a los
+// reenvíos. Empieza en un punto al azar para que varios kling-vz arrancando a
+// la vez no se peleen por el mismo puerto, y salta los ocupados (de otra
+// máquina o de cualquier otro programa). Sin hueco, error: nunca se cae a un
+// puerto fuera del rango.
+func listenReservado() (net.Listener, error) {
+	n := credproxy.ForwardPortMax - credproxy.ForwardPortMin + 1
+	inicio := rand.IntN(n)
+	for i := 0; i < n; i++ {
+		p := credproxy.ForwardPortMin + (inicio+i)%n
+		l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+		if err == nil {
+			return l, nil
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("no free loopback port in kindling's forward range %d-%d",
+		credproxy.ForwardPortMin, credproxy.ForwardPortMax)
 }
 
 // Forwards devuelve los puertos abiertos: puerto del invitado -> dirección.

@@ -21,10 +21,38 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const backendVMM = BackendVZ
+
+// modeloAPosible: el modelo A de kling db (una copia compartida por agentes de
+// otras máquinas, credenciales con UpstreamMachine) es solo de Linux en esta
+// versión.
+//
+// POR QUÉ: en macOS el proxy de Postgres no es del daemon sino del kling-vz
+// del agente, un proceso confinado (kling-vz.sb) que no conoce las demás
+// máquinas. Para resolver la copia en cada conexión, como exige el modelo,
+// kling-vz tendría que preguntar al daemon por un canal nuevo en sentido
+// contrario (autenticado por peercred) y marcar a un reenvío del rango
+// reservado del loopback, que hoy upstream.go le prohíbe a propósito; y el
+// daemon, para cortar sesiones al congelar la copia, tendría que llamar a cada
+// kling-vz. Son dos superficies nuevas en el proceso que guarda las claves de
+// cada máquina. Pasarle la dirección ya resuelta sería justo el TOCTOU que el
+// modelo evita (un reenvío muere y su puerto lo reutiliza otra máquina). Hasta
+// que ese canal exista con sus pruebas, el error claro es lo seguro.
+const modeloAPosible = false
+
+// direccionCopiaLocked: ver modeloAPosible.
+func direccionCopiaLocked(_ *api.Machine, _ int) (string, error) { return "", errModeloASoloLinux }
+
+// invalidarCopiaPlataforma no hace nada en macOS: no hay sesiones hacia otras
+// máquinas que cortar.
+func invalidarCopiaPlataforma(string) int { return 0 }
+
+// invalidarAgentePlataforma: ídem.
+func invalidarAgentePlataforma(*knet.Net) int { return 0 }
 
 // Sin jailer en macOS: el aislamiento es el proceso auxiliar de Apple que
 // aloja cada VM, y el daemon corre sin root.
@@ -81,7 +109,7 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 			return err
 		}
 		if len(creds) > 0 {
-			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id)); err != nil {
+			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil); err != nil {
 				return err
 			}
 		}
@@ -96,23 +124,48 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 // que hacer: el kling-vz es el mismo y conserva lo que se le dio. auditPath no
 // viaja: kling-vz escribe el registro junto a su socket, que está en el mismo
 // directorio de la máquina (ver vz/cmd/kling-vz).
-func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string) error {
+func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string, _ credproxy.ResolveMachineFunc) error {
+	// El modelo A de kling db (UpstreamMachine) es solo de Linux: ver
+	// direccionCopiaLocked. Aquí también, antes de mirar c: ni el almacén de
+	// un Linux copiado ni una versión mezclada deben llegar a kling-vz.
+	for _, cr := range creds {
+		if cr.UpstreamMachine != "" {
+			return errModeloASoloLinux
+		}
+	}
 	if c == nil {
 		return nil
 	}
 	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
 	// trataría una credencial Postgres como HTTP: se pregunta antes qué
-	// tipos entiende y, si no dice postgres, no se le da ninguna.
+	// tipos entiende y, si no dice postgres, no se le da ninguna. Lo mismo
+	// con Upstream: uno que no lo conozca marcaría el dominio en su lugar (y,
+	// con -upstream-tls disable, exigiría TLS a un servidor que no lo tiene),
+	// así que sin "postgres-upstream" no se le da ninguna que lo use.
+	var pg, upstream bool
 	for _, cr := range creds {
 		if cr.Kind == credproxy.KindPostgres {
-			info, err := c.KlingInfo(ctx)
-			if err != nil {
-				return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+			pg = true
+			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
+			// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde
+			// ahí no llega al resolver del Mac: un upstream con nombre fallaría
+			// en cada conexión. Mejor decirlo ahora.
+			if credproxy.UpstreamNecesitaDNS(cr.Upstream) {
+				return fmt.Errorf("credential for %s: on macOS -upstream must be an IP address or localhost (kling-vz is sandboxed and cannot use the Mac's resolver); got %s",
+					cr.Domain, cr.Upstream)
 			}
-			if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
-				return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
-			}
-			break
+		}
+	}
+	if pg {
+		info, err := c.KlingInfo(ctx)
+		if err != nil {
+			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+		}
+		if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
+			return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+		}
+		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
+			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")
 		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
@@ -120,7 +173,8 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
-			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, CAPEM: cr.CAPEM,
+			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
+			Upstream: cr.Upstream, UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 		})
 	}
 	if err := c.SetKlingCredentials(ctx, out); err != nil {
@@ -154,6 +208,11 @@ func (m *Manager) abrirReenvios(ctx context.Context, c *fc.Client, id string) er
 	fwd, err := c.KlingForwards(ctx, puertos)
 	if err != nil {
 		return fmt.Errorf("opening port forwards: %w", err)
+	}
+	// Fuera del rango reservado, un upstream del loopback de otra máquina
+	// podría dar con este invitado (reenvios.go).
+	if err := validarReenvios(fwd); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	pct := defaultCPUPct

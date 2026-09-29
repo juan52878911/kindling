@@ -2,6 +2,8 @@ package api
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +52,40 @@ func TestExposedPorts(t *testing.T) {
 	}
 	if got := (&Machine{}).ExposedPorts(); !reflect.DeepEqual(got, []int{GuestPort}) {
 		t.Fatalf("sin etiqueta = %v", got)
+	}
+}
+
+func TestExposes(t *testing.T) {
+	m := &Machine{Labels: map[string]string{LabelPorts: "5432, 80,x"}}
+	for port, want := range map[int]bool{GuestPort: true, 5432: true, 80: true, 81: false, 0: false} {
+		if got := m.Exposes(port); got != want {
+			t.Errorf("Exposes(%d) = %v, quería %v", port, got, want)
+		}
+	}
+	if (&Machine{}).Exposes(5432) {
+		t.Error("sin etiqueta solo se expone el puerto del agente")
+	}
+}
+
+func TestValidateForkLabels(t *testing.T) {
+	if err := ValidateForkLabels(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateForkLabels(map[string]string{"kling.db.state": "preparing"}); err != nil {
+		t.Fatal(err)
+	}
+	malas := []map[string]string{
+		{"Mal": "x"}, {"": "x"}, {LabelKind: "x"}, {LabelForkOf: "x"},
+		{"k": strings.Repeat("v", 257)},
+	}
+	many := map[string]string{}
+	for i := 0; i < 33; i++ {
+		many["k"+strconv.Itoa(i)] = "v"
+	}
+	malas = append(malas, many)
+	for _, l := range malas {
+		if ValidateForkLabels(l) == nil {
+			t.Errorf("se aceptó %v", l)
+		}
 	}
 }

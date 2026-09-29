@@ -110,6 +110,11 @@ type Manager struct {
 	// las microVMs corren sin la barrera de chroot/pivot_root.
 	JailerWarning string
 
+	// cow es el modo de copia de discos en uso (daemon.cow) y alm el almacén
+	// XFS propio, si la plataforma lo tiene (nil en macOS). Ver cow.go.
+	cow estadoCoW
+	alm *almacenCoW
+
 	bus  *events.Bus
 	mu   sync.RWMutex
 	byID map[string]*api.Machine
@@ -186,6 +191,11 @@ type Manager struct {
 	// resyncSinAgente: qué restauraciones no tienen agente al que resincronizar
 	// (claveThaw, claveSnapshot; ver resyncSinAgenteTTL).
 	resyncSinAgente sync.Map
+
+	// avisosAnyDB: credenciales de almacén antiguo promovidas a AnyDatabase de
+	// las que ya se avisó (dueño + variable), para avisar una vez y no en cada
+	// carga (ver avisarAnyDatabase).
+	avisosAnyDB sync.Map
 
 	// ipv6Avisado recuerda, por nombre de dorado, si ya se avisó (log + evento)
 	// de que sus instancias conservan el módulo IPv6 del kernel del invitado
@@ -281,6 +291,16 @@ type Manager struct {
 	uploadMu       sync.Mutex
 	uploadReserved int
 
+	// Grafos de microVMs (grafo.go): por ID, bajo mu, porque el resolvedor de
+	// cada arista los lee con mu tomado en cada conexión. despMu y desp son
+	// los despertares en vuelo, uno por nodo (grafo_red.go); virtuales, el ID
+	// de nodo de cada máquina de un grafo, para cortar las sesiones que van a
+	// su nodo al congelarla, pararla o borrarla.
+	grafos    map[string]*api.Graph
+	despMu    sync.Mutex
+	desp      map[string]*despertar
+	virtuales sync.Map
+
 	// Clave de firma de snapshots (firma.go), cargada una vez.
 	firmaOnce  sync.Once
 	firmaClave []byte
@@ -345,6 +365,20 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	restringirRaiz(root, priv)
+	// El almacén de discos, si existe, se monta ANTES de readoptar: las
+	// instancias con su overlay dentro lo necesitan para descongelarse. Y los
+	// binds que un daemon anterior dejó en jails de máquinas ya borradas.
+	m.alm = nuevoAlmacen(root, priv)
+	if m.alm != nil {
+		m.alm.viva = func(id string) bool {
+			m.mu.RLock()
+			defer m.mu.RUnlock()
+			_, ok := m.byID[id]
+			return ok
+		}
+		m.alm.montarSiExiste(context.Background())
+	}
+	m.barrerBindsJail()
 	// Las copias de volumen a medias de un daemon anterior (ver
 	// volume_snapshot.go). Aquí y no en el vigilante: en marcha, un .tmp puede
 	// ser una copia en curso.
@@ -356,7 +390,11 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 			m.netCursor = mc.NetIndex
 		}
 	}
+	// Los grafos antes de reconciliar: reconcile rehace los proxies de enlace
+	// de los nodos vivos, y para eso necesita sus aristas.
+	m.cargarGrafos()
 	m.reconcile()
+	m.barrerAlmacen()
 	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
 	// se quedó con el techo de arranque (ver arranque_cpu.go).
 	m.reaplicarTopesCPU()
@@ -1102,7 +1140,7 @@ func (m *Manager) newOverlay(ctx context.Context, dst string) error {
 	// Sin perder la dispersión (ver copiarDisco): el overlay es disperso y
 	// copiarlo denso destruiría lo que hace que una máquina cueste ~8 MB en vez
 	// de 512.
-	out, err := copiarDisco(ctx, m.overlayTemplatePath(), dst)
+	out, err := m.copiarOverlay(ctx, m.overlayTemplatePath(), dst)
 	if err != nil {
 		return fmt.Errorf("copying overlay template: %v: %s", err, out)
 	}
@@ -1553,7 +1591,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// El chroot del jail ya no sirve: se borra aquí, en segundo plano del
 	// despertar, y no al principio del siguiente thaw (3,3 ms medidos ahí).
 	if jailed {
-		_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
+		if err := m.borrarJail(mc.ID); err != nil {
+			log.Printf("warning: %v", err)
+		}
 	}
 	// La red se queda montada: Thaw la reutiliza (ver red.go), y el vigilante
 	// la desmonta si la máquina pasa mucho tiempo congelada. El cgroup no hace
@@ -1625,6 +1665,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	// Una copia de kling db congelada no atiende: se cortan las sesiones de
+	// los agentes que llegaban a ella por su proxy (copias_db.go).
+	m.invalidarSesiones(mc.ID, "frozen")
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 	if sinAgente {
@@ -1927,6 +1970,7 @@ func (m *Manager) SetCredentials(ctx context.Context, ref string, specs []api.Cr
 		return nil, fmt.Errorf("machine %q no longer exists", ref)
 	}
 	live.CredentialDomains = dominiosDe(creds)
+	live.CredentialAnyDatabase = anyDatabaseDe(creds)
 	m.persist()
 	out := live.Clone()
 	m.mu.Unlock()
@@ -2067,6 +2111,14 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if !m.redLista(netcfg, mc.ID) {
 		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
+		}
+	}
+	// Las aristas del nodo, si es de un grafo: si la red se rehízo, sus
+	// proxies de enlace y su resolver se fueron con ella. Idempotente. Un
+	// fallo no tumba el thaw: las aristas fallan cerradas, y se dice.
+	if spec, ok := m.especRedGrafo(mc); ok {
+		if err := montarRedGrafo(netcfg, spec); err != nil {
+			log.Printf("thaw: %s woke up without its graph edges: %v", mc.Name, err)
 		}
 	}
 	crono.marca(&crono.p.NetMS)
@@ -2229,6 +2281,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// El techo por defecto se decidió sobre la copia (arriba); se anota en la
 	// viva para que state.json y `kling ps` digan el que de verdad se aplicó.
 	cur.CPUPct = mc.CPUPct
+	// Lo que reentregarCredenciales anotó en la copia.
+	cur.CredentialAnyDatabase = mc.CredentialAnyDatabase
 	m.socket[mc.ID] = sock
 	m.persist()
 	out := *cur
@@ -2256,21 +2310,37 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 
 // SetLabels reetiqueta una máquina viva.
 func (m *Manager) SetLabels(ref string, labels map[string]string) error {
+	// Las de grafo las pone el daemon y no cambian: son la mitad de la
+	// comprobación de cada arista (grafo_red.go).
+	if err := api.ValidateNoGraphLabels(labels); err != nil {
+		return err
+	}
 	mc, ok := m.Get(ref)
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	live := m.byID[mc.ID]
 	if live == nil {
+		m.mu.Unlock()
 		// La eliminaron entre el Get y el candado. Etiquetar algo que ya no
 		// existe no es un error del que llama, pero deref nil sí tumbaba el
 		// daemon entero.
 		return fmt.Errorf("machine %q no longer exists", ref)
 	}
+	cambia := cambianEtiquetasDB(live.Labels, labels)
 	live.Labels = api.MergeLabels(live.Labels, labels)
 	m.persist()
+	id, plan := live.ID, knet.Plan(live.NetIndex, live.ID)
+	m.mu.Unlock()
+	if cambia {
+		// Lo que el proxy comprueba en cada conexión (copias_db.go) acaba de
+		// cambiar: una copia que deja de estar lista o cambia de dueño no
+		// conserva las sesiones abiertas, ni un agente que cambia de dueño
+		// las suyas. Después del cambio y fuera del candado.
+		m.invalidarSesiones(id, "kling db labels changed")
+		invalidarAgente(plan)
+	}
 	return nil
 }
 
@@ -2315,6 +2385,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	m.invalidarSesiones(mc.ID, "stopped")
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name})
 	return &out, nil
@@ -2339,10 +2410,14 @@ func (m *Manager) Remove(ref string) error {
 	m.releaseCPU(mc.ID)
 	// El chroot del jail vive aparte del directorio de la máquina: se limpia
 	// también, o cada restauración jailed deja un árbol huérfano.
-	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
+	if err := m.borrarJail(mc.ID); err != nil {
+		log.Printf("warning: %v", err)
+	}
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
+	// Su overlay en el almacén de discos, si lo tenía (ver cow.go).
+	m.borrarOverlayAlmacen(mc.ID)
 	// Su enlace corto en /tmp/kling-<uid> (macOS) ya no apunta a nada; el
 	// vigilante lo barrería en la siguiente vuelta, pero así no queda ni ese rato.
 	fc.BarrerEnlaces(m.root)
@@ -2351,6 +2426,7 @@ func (m *Manager) Remove(ref string) error {
 	delete(m.socket, mc.ID)
 	m.persist()
 	m.mu.Unlock()
+	m.invalidarSesiones(mc.ID, "removed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil
 }
@@ -2459,5 +2535,6 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	name := destino.Name
 	m.persist()
 	m.mu.Unlock()
+	m.invalidarSesiones(id, "failed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error()})
 }

@@ -471,6 +471,14 @@ func HostEgressRules(bridge string) [][]string {
 	return rules
 }
 
+// linkBasePortRango y linkMaxPortsRango son el rango de los proxies de enlace
+// (enlaces_fc.go: linkBasePort, linkMaxPorts). Aquí aparte porque este
+// fichero también compila en macOS, donde no hay enlaces.
+const (
+	linkBasePortRango = 5400
+	linkMaxPortsRango = 64
+)
+
 // HostSubnet es el rango que kindling usa para los enlaces con los namespaces.
 const HostSubnet = hostPrefix + ".0.0/16"
 
@@ -487,8 +495,9 @@ const HostSubnet = hostPrefix + ".0.0/16"
 // cortan las reglas del namespace; esto cubre sus IPs públicas.
 //
 // Pasa solo lo legítimo: las respuestas a conexiones que abre el host (agente,
-// exec, carpetas compartidas, resync), el resolver DNS del modo allowlist y el
-// proxy de credenciales, los dos en el lado host de cada veth.
+// exec, carpetas compartidas, resync), el resolver DNS del modo allowlist, el
+// proxy de credenciales y los proxies de enlace de los grafos, todos en el
+// lado host de cada veth.
 func HostInputRules() [][]string {
 	base := []string{"iptables", "-I", "INPUT", "1", "-i", "vh-+", "-s", HostSubnet}
 	regla := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
@@ -498,6 +507,9 @@ func HostInputRules() [][]string {
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(credPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(pgPort), "-j", "ACCEPT"),
+		// Los proxies de enlace de los grafos (enlaces_fc.go), también en el
+		// lado host de cada veth.
+		regla("-d", HostSubnet, "-p", "tcp", "--dport", fmt.Sprintf("%d:%d", linkBasePortRango, linkBasePortRango+linkMaxPortsRango-1), "-j", "ACCEPT"),
 		regla("-j", "DROP"),
 	}
 }

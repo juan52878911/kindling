@@ -1,0 +1,124 @@
+# Ejemplo de GitLab CI con kling db
+#
+# Este pipeline prepara una base de datos desechable por PR/MR usando `kling db`.
+# Requiere un runner self-hosted con acceso a un daemon de kindling que tenga
+# una plantilla golden de Postgres.
+#
+# Prerequisitos en el runner:
+#   - kindling daemon corriendo (kling doctor debe pasar)
+#   - plantilla golden construida (kling db golden -script ... build)
+#   - ext/db/scripts/ci-pr-db.sh disponible en el repositorio
+#
+# Uso:
+#   - Reemplaza GOLDEN_NAME por el nombre de tu plantilla
+#   - Ajusta las imágenes base según tu proyecto
+#   - El DATABASE_URL se pasa solo por el entorno del comando
+#
+# La base se crea al empezar, se resetea en reintentos, y se destruye al salir.
+# KEEP=1 puede pasarse como variable del pipeline para depuración.
+
+stages:
+  - build
+  - test
+
+# Variables globales del pipeline
+variables:
+  # Nombre de la plantilla golden (debe existir en el daemon)
+  GOLDEN: "pg-golden"
+  # TTL de la copia (opcional, defecto 2h)
+  TTL: "2h"
+  # Mantiene la copia para depuración (opcional, pasar en job override)
+  KEEP: "0"
+
+# Plantilla base: todos los jobs que usan DB heredan de aquí
+.with_db:
+  script:
+    # ci-pr-db.sh: crea (o resetea si existe) una copia de la plantilla,
+    # lee el DSN (sin ficheros ni traza) y lo pasa por DATABASE_URL.
+    # El número de MR se obtiene de CI_MERGE_REQUEST_IID (GitLab).
+    - |
+      export PR=${CI_MERGE_REQUEST_IID:-${CI_PIPELINE_ID}}
+      ext/db/scripts/ci-pr-db.sh \
+        -golden "$GOLDEN" \
+        -pr "$PR" \
+        -ttl "$TTL" \
+        -- \
+        "$@"
+  tags:
+    - self-hosted  # runner con acceso al daemon
+
+# Job: construir dependencias (Python, pip, etc.)
+build:
+  stage: build
+  image: python:3.11-slim
+  script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - pip install -e .
+  cache:
+    paths:
+      - .venv/
+      - .cache/pip/
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 day
+  tags:
+    - docker
+
+# Job: ejecutar pruebas con base de datos
+test:
+  stage: test
+  extends: .with_db
+  image: python:3.11-slim
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+  script:
+    - !reference [.with_db, script]
+    - pytest tests/ --tb=short
+  dependencies:
+    - build
+  # artifacts pueden capturar logs del job pero NO el DATABASE_URL
+  artifacts:
+    reports:
+      junit: test-results.xml
+    expire_in: 30 days
+  allow_failure: false
+  tags:
+    - self-hosted
+
+# Job: ejecutar pruebas de integración
+integration:
+  stage: test
+  extends: .with_db
+  image: python:3.11-slim
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements-dev.txt
+  script:
+    - !reference [.with_db, script]
+    - pytest tests/integration/ --tb=short -v
+  only:
+    - merge_requests
+    - main
+  tags:
+    - self-hosted
+
+# Job manual: debugging con KEEP=1
+debug:
+  stage: test
+  extends: .with_db
+  image: python:3.11-slim
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+  script:
+    - export KEEP=1
+    - !reference [.with_db, script]
+    - pytest tests/ --tb=short -v
+  manual: true  # requiere click manual en GitLab UI
+  only:
+    - merge_requests
+  tags:
+    - self-hosted

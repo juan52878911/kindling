@@ -1,0 +1,7 @@
+warning: cleanup kling rm: kling rm: exit status 1: error: machine "dbb_t0929005123_n32_r1-0" doesn't exist
+kindling-run N=32 rep 1: DEGRADED ok=27 failed=5 p50=14449.9ms max=14897.9ms
+warning: cleanup kling rm: kling rm: exit status 1: error: machine "dbb_t0929005123_n32_r2-27" doesn't exist
+kindling-run N=32 rep 2: DEGRADED ok=28 failed=4 p50=4801.0ms max=9747.6ms
+warning: cleanup kling rm: kling rm: exit status 1: error: machine "dbb_t0929005123_n32_r3-14" doesn't exist
+kindling-run N=32 rep 3: DEGRADED ok=14 failed=18 p50=10866.1ms max=11227.2ms
+docker N=32: skipped: N=32 × 300 MiB = 9600 MiB > 70% of free disk 214 MiB

@@ -35,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -170,6 +170,10 @@ type Server struct {
 // cada petición: cambiarla no pide reiniciar.
 func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareConfig(f) }
 
+// SetCoW fija el modo de copia de discos (daemon.cow). Se lee una vez, al
+// arrancar: cambiarlo pide reiniciar el daemon. Ver docs/cow.md.
+func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }
+
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
 	if err != nil {
@@ -213,6 +217,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/resize", s.handleResize)
 	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
 	mux.HandleFunc("POST /machines/{ref}/credentials", s.handleCredentials)
+	mux.HandleFunc("DELETE /machines/{ref}/credentials/{env}", s.handleRemoveCredential)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
@@ -261,6 +266,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sandboxes/{ref}/renew", s.handleRenewSandbox)
 	mux.HandleFunc("POST /sandboxes/{ref}/fork", s.handleForkSandbox)
 	mux.HandleFunc("DELETE /sandboxes/{ref}", s.handleRemoveSandbox)
+	mux.HandleFunc("POST /graphs", s.handleGraphUp)
+	mux.HandleFunc("GET /graphs", s.handleGraphs)
+	mux.HandleFunc("GET /graphs/{ref}", s.handleGraph)
+	mux.HandleFunc("POST /graphs/{ref}/freeze", s.handleGraphFreeze)
+	mux.HandleFunc("POST /graphs/{ref}/thaw", s.handleGraphThaw)
+	mux.HandleFunc("POST /graphs/{ref}/snapshot", s.handleGraphSnapshot)
+	mux.HandleFunc("POST /graphs/{ref}/fork", s.handleGraphFork)
+	mux.HandleFunc("DELETE /graphs/{ref}", s.handleGraphRemove)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /procstats", s.handleProcStats)
@@ -473,6 +486,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Backend:      s.mgr.Backend(),
 		Arch:         runtime.GOARCH,
 		ShareRoots:   s.mgr.ShareRoots(),
+		CoW:          s.mgr.CoWInfo(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
@@ -504,6 +518,11 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	decodeMS := time.Since(start).Milliseconds()
+	// kling.graph y kling.graph.* las pone solo el daemon (grafos).
+	if err := api.ValidateNoGraphLabels(req.Labels); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
 	mc, err := s.mgr.Run(r.Context(), req)
 	if err != nil {
 		fail(w, runStatus(err), err)
@@ -616,6 +635,21 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+// handleRemoveCredential quita una credencial de una máquina por su variable.
+// ?upstream_machine=<id> exige que vaya a esa máquina (kling db detach).
+func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) {
+	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "has no credential") {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)

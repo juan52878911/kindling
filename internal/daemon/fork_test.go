@@ -56,6 +56,8 @@ func TestForkSandboxHandler(t *testing.T) {
 		{"negativo", "/sandboxes/caja/fork", `{"count":-2}`, 400, "count"},
 		{"ttl", "/sandboxes/caja/fork", `{"ttl_seconds":999999}`, 400, "ttl_seconds"},
 		{"on_ttl", "/sandboxes/caja/fork", `{"on_ttl":"explode"}`, 400, "on_ttl"},
+		{"label inválida", "/sandboxes/caja/fork", `{"labels":{"Mal":"x"}}`, 400, "label"},
+		{"label reservada", "/sandboxes/caja/fork", `{"labels":{"kling.fork-of":"x"}}`, 400, "reserved"},
 		{"json roto", "/sandboxes/caja/fork", `{`, 400, ""},
 		// Válida, pero el sandbox duerme: se dice, y no se toca nada.
 		{"dormido", "/sandboxes/caja/fork", `{"count":2}`, 409, "thaw it first"},

@@ -340,32 +340,111 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     Las conexiones de replicación, los parámetros repetidos y los arranques de más de
     10000 bytes se rechazan; las opciones `_pq_.` y el protocolo 3.2 se contestan con
     `NegotiateProtocolVersion` (3.0).
-  - **Hacia el servidor, siempre TLS verificado.** Sale por el mismo dialer de solo IPv4
-    públicas que el proxy HTTP (un servidor en la red privada, en `169.254/16` o en
-    loopback **se rechaza**, como un DNS envenenado), manda `SSLRequest` y lee la
+  - **Hacia el servidor, TLS verificado por defecto.** Sin `-upstream`, sale por el mismo
+    dialer de solo IPv4 públicas que el proxy HTTP (un servidor en la red privada, en
+    `169.254/16` o en loopback **se rechaza**, como un DNS envenenado), manda `SSLRequest` y lee la
     respuesta de un byte y sin buffer: una `N` es un fallo, nunca "entonces en claro", y
     lo que un intermediario inyecte detrás de la `S` no se cuela como si viniera dentro
-    del TLS (CVE-2021-23214). TLS 1.2+, verificado contra el nombre de la credencial con
-    las raíces del sistema más `-ca-file` si se da. La autenticación es SCRAM-SHA-256,
+    del TLS (CVE-2021-23214). TLS 1.2+, verificado contra el nombre de la credencial (o
+    contra `-tls-server-name`, si el certificado lleva otro) con las raíces del sistema
+    más `-ca-file` si se da. La autenticación es SCRAM-SHA-256,
     con `-PLUS` (`tls-server-end-point`) si el servidor lo ofrece, implementada aquí con
     la biblioteca estándar: nonce del servidor que alarga el nuestro, iteraciones entre
     4096 y 1 000 000, y la firma del servidor comprobada antes de dar nada por bueno (un
     `AuthenticationOk` sin ella se rechaza). La contraseña en claro solo va dentro de
     ese TLS verificado. MD5, GSS, SSPI y cualquier otro mecanismo se rechazan.
+  - **Upstream fijado por el operador** (`-upstream host:puerto`, `pkg/credproxy/upstream.go`;
+    ver [docs/postgres.md](docs/postgres.md)). Para una base de datos en el propio host
+    (Docker publica en `127.0.0.1`) o en la LAN/VPC, el operador fija a dónde marca el
+    proxy; el invitado sigue conectando al dominio de la credencial y no ve ni elige esa
+    dirección. Solo se fija desde el host (CLI o API del daemon). Con ella se admiten el
+    loopback y las IPs privadas, pero **nunca** `169.254.0.0/16` (metadatos), `0.0.0.0/8`,
+    multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254` ni la red de kindling
+    (`172.16.0.0/30`, el enlace del invitado, y `172.30.0.0/16`, los veth del host): ahí
+    están el propio proxy y los invitados de otras máquinas. Un nombre se resuelve al
+    marcar, con el resolver del sistema, y basta una IP prohibida entre sus respuestas
+    para no marcar ninguna (`localhost` es siempre el loopback, sin DNS). En macOS solo
+    se admite una IP o `localhost`: `kling-vz` está confinado y no llega al resolver del
+    Mac, y abrirle el socket de mDNSResponder para esto no compensa. En Linux el proxy es del daemon y marca desde el netns del
+    host (su `127.0.0.1` es el del host); en macOS lo hace `kling-vz` con la pila del
+    Mac, no con la gVisor del invitado. El TLS sigue siendo verify-full, y la
+    cancelación va al mismo upstream con el mismo modo.
+  - **El loopback no llega a otras máquinas.** En macOS los invitados se exponen en
+    `127.0.0.1` (los reenvíos de `kling-vz`), y un upstream del loopback podía dar con el
+    de otra máquina. Los reenvíos se abren **solo** en el rango reservado
+    `127.0.0.1:29000-29999` (el daemon rechaza un `kling-vz` que abra otro), y ningún
+    upstream del loopback puede apuntar a ese rango: se rechaza al validar y otra vez al
+    marcar, en el proceso que marca, que no necesita conocer los reenvíos de las demás
+    (sin TOCTOU). Al entregar, el daemon cruza además el puerto con los reenvíos vivos.
+    Se eligió un rango y no otra IP de loopback (`127.0.0.2`) porque macOS solo
+    configura `127.0.0.1` y dar de alta otra exige root en cada arranque. En Linux no
+    hay reenvíos al loopback (al invitado se llega por `172.30.0.0/16`, prohibida; los
+    DNAT de cada netns no tocan el tráfico que origina el host; la API del daemon es un
+    socket Unix); lo único de kindling que puede escuchar ahí es opcional y HTTP con
+    token (gateway MCP o `kling ai up` en `127.0.0.1:8080`), y el proxy no da al
+    invitado ni un byte de una conexión cuyo servidor no haya completado SCRAM o TLS
+    verificado.
+  - **`-upstream-tls disable`, solo con `-upstream`.** Sin `SSLRequest` y sin TLS, y
+    entonces **solo** SCRAM-SHA-256: ni `-PLUS` (necesita TLS), ni contraseña en claro,
+    ni md5, ni un `AuthenticationOk` sin SCRAM (trust). La contraseña no cruza la red
+    (SCRAM prueba que se conoce sin mandarla, y el servidor tiene que probar lo mismo
+    con su firma), pero **las consultas y sus resultados sí van en claro** entre el
+    proxy y el servidor: para un Docker en el loopback no salen del host; hacia la LAN,
+    la CLI lo advierte. Un intermediario en esa red no se lleva la clave, pero puede leer
+    y cambiar lo que pasa después de autenticar: para la LAN, mejor TLS con `-ca-file`.
+    Un `kling-vz` que no anuncie `postgres-upstream` en `credential_kinds` no recibe
+    credenciales que usen estos campos (marcaría el dominio en su lugar).
+  - **Upstream que es otra máquina: el modelo A de `kling db`** (`kling db attach`,
+    `upstream_machine`, `pkg/credproxy/maquina.go`, `internal/machine/copias_db.go`).
+    Una copia de base de datos compartida por agentes de otras microVMs, cada uno por su
+    proxy y con su marcador; la contraseña (la de la copia o, mejor, la de un rol de
+    `kling db role`; nunca la del golden, que la copia rotó al nacer) se entrega como
+    cualquier credencial del agente, cifrada con su id como dato autenticado. Lo que se
+    guarda **no es una dirección sino el id de la copia** y el dueño que declara quien la
+    entrega: un índice de red se reutiliza en cuanto la copia se para o se borra, y una
+    dirección fijada al entregar llevaría la clave y el SQL del agente al invitado de
+    otro (TOCTOU). La dirección se pide al daemon **en cada conexión** (y en cada
+    `CancelRequest`), que bajo el candado del manager exige que la máquina con ese id
+    exacto exista, corra, sea una copia de `kling db` en `ready`, exponga el puerto en
+    `kling.ports` y que la copia, el agente y la credencial digan el mismo
+    `kling.db.owner`; si algo no cuadra, no se marca. Esa dirección (la IP del netns de
+    la copia, en `172.30.0.0/16`) es la **única** excepción a los destinos prohibidos, y
+    ni la API ni la CLI la aceptan como texto: `upstream_machine` tiene que ser un id
+    hexadecimal (una IP o `host:puerto` no casan), y aun resuelta se comprueba que sea
+    una dirección de kindling y nada más (ni la LAN ni el loopback fuera del rango de
+    reenvíos). Obliga a `upstream_tls disable` y por tanto a SCRAM-SHA-256: la copia
+    tiene que probar que conoce la clave, así que ni un error de resolución llevaría la
+    contraseña a otro. **Las sesiones vivas se cortan** (las dos mitades) al congelar,
+    pausar, parar, borrar o marcar fallida la copia, al cambiar sus etiquetas de
+    `kling db` o las del agente, y al retirar o cambiar la credencial (`kling db detach`,
+    `DELETE /machines/{ref}/credentials/{env}`); la sesión se registra antes de
+    resolver, así que una invalidación que llegue entre la resolución y el dial también
+    la para. No se admite en credenciales de plantilla, y un agente con attach no se
+    ramifica (guardián de fork). **Solo Linux en esta versión**: en macOS el proxy vive
+    en el `kling-vz` de cada máquina, confinado y sin conocer las demás; resolver en
+    cada conexión exigiría un canal nuevo de `kling-vz` al daemon (autenticado por
+    peercred) y abrirle el rango de reenvíos del loopback, y pasarle la dirección ya
+    resuelta sería el TOCTOU que el modelo evita. El daemon lo rechaza con un error
+    claro, y `kling-vz` sin resolvedor tampoco marcaría. El dueño (`kling.db.owner`) es
+    una etiqueta: la frontera sigue siendo el daemon, y quien tiene su socket puede
+    reetiquetar máquinas.
   - **El invitado no ve la autenticación de verdad.** Recibe `AuthenticationOk` solo
     tras el del servidor; un error del servidor antes de eso no se reenvía (recibe uno
     propio, 28P01 u 08006, como mucho con el SQLSTATE del servidor) y el log del host solo
     lleva ese código. Después el flujo pasa tal cual en los dos sentidos: **no se
     sustituye nada en él**, ni el marcador ni la clave. La excepción es
     `BackendKeyData`: la clave de cancelación se cambia por una aleatoria, y un
-    `CancelRequest` con ella se traduce a la real en una conexión nueva con el mismo TLS;
+    `CancelRequest` con ella se traduce a la real en una conexión nueva al mismo destino
+    y con el mismo modo TLS;
     uno con una clave que el proxy no dio se cierra sin más.
   - **Límites**: 32 conexiones a la vez por máquina, 10 s para que el invitado mande
     arranque y contraseña y 15 s para toda la autenticación; tras ella no hay plazo de
     inactividad (un pool puede estar horas callado), hay keepalive TCP de 30 s.
   - **Registro**: una línea por conexión (`kind: postgres`) con dominio, rol, base de
-    datos, método con que se autenticó el proxy (`auth`), motivo si no llegó, bytes y
-    duración. Nunca la clave, el marcador ni el SQL.
+    datos, el upstream fijado si lo hay (`upstream`, configuración del operador), método
+    con que se autenticó el proxy (`auth`: `scram-sha-256(-plus)`, o `password` si el servidor
+    pidió la contraseña en claro dentro de TLS, con un aviso en el log del host una vez por
+    credencial), motivo si no llegó, bytes y duración. Nunca la clave, el marcador ni el SQL.
   - **Cómo llega el invitado**: en Linux un DNAT lleva cualquier puerto TCP de la IP del
     proxy que no sea el 53, el 80 ni el 443 a `n.HostIP:5381` (con su FORWARD e INPUT),
     así que el cliente usa el puerto de su cadena de conexión. En macOS, `kling-vz` atiende
@@ -479,6 +558,117 @@ darle esa confianza); un enlace duro que ya existiera en la carpeta hacia fuera
 se sirve como el fichero que es; y el daemon, si es root, lee con sus
 permisos lo que haya bajo la carpeta.
 
+### 14. Discos copy-on-write: el almacén (XFS o Btrfs) y su bind en el jail
+
+Con `daemon.cow` (ver [docs/cow.md](docs/cow.md)) el overlay de una instancia creada
+desde un dorado puede vivir en un almacén propio con reflink (`$root/cow.xfs`, o
+`$root/cow.btrfs` donde el núcleo no tiene XFS; montado por loop en `$root/cow`). Lo que
+cambia:
+
+- **El anfitrión no interpreta nada del invitado.** El XFS o el Btrfs lo crea y lo escribe solo el
+  kernel del anfitrión; el invitado controla el CONTENIDO de su fichero de overlay, no
+  los metadatos del sistema de ficheros que lo contiene. Es la misma superficie que un
+  overlay en ext4.
+- El almacén se monta `nodev,nosuid,noexec` (Btrfs además `nodiscard`), con la raíz y `m/` en 0750 root:grupo del
+  VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
+  escribir en la copia de la que se clonan las demás instancias.
+- **Jail**: a cada VMM se le monta por bind SOLO el directorio de su propio overlay
+  (`cow/m/<id>`), nunca el almacén entero. El bind se desmonta antes de borrar el jail,
+  y si no se puede desmontar el jail no se borra (un `RemoveAll` a través del bind
+  borraría el overlay).
+- El daemon no sigue el enlace simbólico de `machines/<id>` (un directorio del VMM)
+  para borrar ni para leer el overlay en `commit`: las rutas del almacén salen del id.
+- **Permisos del directorio de instancia**: `cow/m/<id>` es `root:grupo-del-VMM` 0750 (el
+  VMM solo lo atraviesa) y solo el FICHERO `overlay.ext4` es del VMM. Así un Firecracker
+  comprometido no crea ficheros en su directorio ni puede cambiar el overlay por un enlace
+  simbólico. Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
+  `O_NOFOLLOW`, comprueba con `Fstat` sobre el descriptor que es un fichero regular y
+  **copia desde ese mismo descriptor** (FICLONE entre descriptores, o una copia dispersa en
+  Go con `SEEK_DATA`/`SEEK_HOLE`), sin volver a abrir la ruta: cambiar el overlay por un
+  enlace entre la comprobación y la copia no cuela otro fichero en el dorado. El destino se
+  crea con `O_EXCL|O_NOFOLLOW` y se cede al VMM con `fchown` sobre el descriptor, porque en
+  el jail está en un directorio del VMM; al recuperarlo del jail se exige que sea el mismo
+  inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
+  descarta igualmente (el dorado no correspondería a la memoria volcada).
+- **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
+  que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
+  `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
+  reserva). Dentro de él NO hay cuota por instancia:
+  el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que
+  reescribe dejan de compartirse con la base, así que un invitado que reescribe todo su
+  disco puede llenar el almacén compartido (ENOSPC para las demás instancias del almacén).
+  Es un límite conocido; una cuota por directorio (proyecto en XFS, qgroup en Btrfs)
+  está pendiente.
+
+### 15. Grafos: cada arista es una autorización, no una red
+
+Un grafo (ver [docs/grafos.md](docs/grafos.md)) deja que un nodo llegue a otro por
+aristas declaradas. Nada de eso abre la red entre microVMs:
+
+- **El FORWARD entre namespaces sigue cerrado.** Un nodo llega a otro por un proxy de
+  enlace del daemon en el lado host de SU veth: su resolver contesta `<nodo>.graph`
+  con la IP del host en ese veth y un DNAT del netns lleva ese puerto al proxy. Las
+  reglas que se añaden (DNAT, ACCEPT del FORWARD, el MASQUERADE de `egress none`)
+  tienen todas como destino esa IP; ningún paquete del invitado sale hacia otro netns.
+  En el host, INPUT solo admite además el rango de los proxies de enlace
+  (5400-5463) desde los veth.
+- **La dirección no se fija ni se acepta nunca.** En cada conexión aceptada, el
+  proxy pregunta al manager, que comprueba bajo su candado: la máquina de origen es la
+  del nodo (ID exacto, `kling.graph` y `kling.graph.node`), el grafo tiene la arista
+  (origen, destino, tipo, puerto), la máquina del destino es la que el grafo dice, lleva
+  sus etiquetas y expone el puerto. Solo entonces da la IP de su netns, y aun así el
+  proxy exige que sea un destino de kindling. Ni la API ni el fichero aceptan una
+  dirección; el mismo diseño que el attach de Postgres (§7).
+- **Ningún invitado fabrica ni cambia aristas.** Las aristas viven en el daemon
+  (`store/graph/<id>.json`, que `/store` deja leer pero no escribir: 403). Las
+  etiquetas `kling.graph*` las pone solo el daemon: `run`, `sandbox`, el fork de un
+  sandbox y `PUT labels` las rechazan, y `commit` las quita de la plantilla.
+- **DNS acotado.** El resolver de un nodo con aristas sirve solo los `*.graph` de SUS
+  aristas (y de sus credenciales); cualquier otro `*.graph` es NXDOMAIN en todos los
+  modos, sin reenviarse. En `egress none` todo lo demás es NXDOMAIN: se arranca un
+  resolver solo para esto, que no reenvía nada a ningún sitio. En `internet`, el DNS
+  del invitado pasa a reenviarse desde el host (con los mismos topes de tasa y de
+  consultas en vuelo) en vez de salir directo.
+- **Forks y snapshots no se cruzan.** Las aristas se resuelven por (grafo, nodo) y el
+  ID del grafo va en la comprobación: una copia tiene otro ID y otras máquinas, así
+  que no alcanza nunca al original ni el original a ella. El snapshot y el fork pausan
+  los nodos y cortan las sesiones hacia ellos antes de volcar: ninguna sesión TCP
+  sobrevive a una restauración. Los mismos marcadores de credenciales se entregan a
+  cada copia (el invitado los tiene en memoria), apuntados a su propio grafo; un nodo
+  con credenciales que no son de sus aristas no se ramifica.
+- **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
+  RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
+  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`
+  de un nodo con aristas `credential` contiene los marcadores que el invitado tenía en
+  memoria (en su entorno, en la memoria de su aplicación). **No son las claves**: la
+  clave nunca entra al invitado ni al volcado, y la plantilla no se lleva ni el almacén
+  de credenciales del nodo ni su registro en el proxy. Un marcador solo vale en el proxy
+  de la máquina a la que se entregó y mientras siga registrado ahí; una instancia creada
+  con `run -from` de esa plantilla despierta con marcadores que su propio proxy no
+  conoce, así que son inertes (la conexión con ellos no recibe la clave). Aun así, la
+  plantilla es una foto de la memoria del invitado y se trata como tal: legible solo
+  por root y el grupo del VMM (como cualquier dorado), y a borrar cuando ya no haga
+  falta.
+- **Tormenta acotada.** 16 conexiones a la vez por arista (la siguiente se cierra en el
+  acto), un solo despertar en vuelo por nodo y 64 conexiones esperándolo como mucho;
+  por encima, rechazo y una línea `busy` en la auditoría. Un despertar que no cabe
+  en memoria es `no_capacity`, no un OOM.
+- **Las claves de las aristas `credential`** viajan una vez en `POST /graphs`, nunca
+  salen por la API y se guardan cifradas (`<id>.secrets.enc`, AES-GCM con la clave del
+  almacén de credenciales y el grafo como dato autenticado: copiadas a otro grafo no se
+  abren).
+
+Lo que queda: el tramo del proxy de enlace al destino va en claro por el host, como el
+attach de Postgres (las credenciales exigen SCRAM; un `link` es TCP crudo y su
+protocolo es cosa de la aplicación). En macOS no hay aristas entre máquinas en esta
+versión (501): allí no hay dónde resolver bajo el candado del daemon en cada conexión.
+
+**El puerto del agente de invitado (8080) nunca es destino de una arista.** El agente no
+autentica (confía en que solo el host le habla) y sirve `exec`, ficheros y volúmenes; el
+proxy de enlace marca desde el host. Una arista `link` o `credential` al 8080 se rechaza
+en `ValidateGraph` y, como defensa en profundidad, en `comprobarAristaLocked` en cada
+conexión (grafos guardados antes de la validación). Encontrado por el e2e real.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
@@ -510,6 +700,9 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   en profundidad y cubre las transformaciones habituales, no todas las imaginables. Esto
   vale igual en macOS: `PUT /kling/credentials` lleva `allow` y `kling-vz` aplica las
   mismas reglas antes de reenviar.
+- **Postgres: `-database` es obligatoria.** Sin base fijada el rol entraría en cualquiera
+  con `CONNECT`, así que hace falta `-database` o `-any-database` expreso (el CLI avisa).
+  Los almacenes anteriores, sin base, se leen como `-any-database`: lo que permitían.
 - **Postgres: el rol es el límite, no el proxy.** El proxy no mira el SQL: no hay lista
   de sentencias permitidas y el invitado hace todo lo que el rol puede. Lo que acota el
   daño es el rol mismo (solo lectura, `GRANT` a lo justo, sin `CREATEROLE`, un
@@ -518,7 +711,17 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   dejaría de valer. El tramo del invitado va sin TLS dentro de la máquina (ver 7); un
   cliente con `sslmode=require` o `verify-full`, o con `channel_binding=require`, no
   conecta: tiene que usar `disable` o `prefer`. Un servidor con IP privada (una base de
-  datos en la LAN o en la VPC) no es alcanzable por el proxy, a propósito.
+  datos en la LAN o en la VPC) no es alcanzable por el proxy salvo que el operador lo
+  fije con `-upstream`; el proxy no descubre ni sigue destinos privados por su cuenta.
+  Con `-upstream-tls disable`, lo que pasa tras la autenticación viaja en claro entre el
+  proxy y el servidor.
+- **`kling db attach`: compartir una copia es compartir sus datos.** Todos los agentes
+  con attach a la misma copia ven y, con el rol de la aplicación, escriben la misma base:
+  una copia compartida no aísla a unos agentes de otros (para eso, una copia por agente,
+  o un rol de solo lectura por agente con `-role`). Las consultas viajan en claro por el
+  veth del host entre el proxy y la copia (la contraseña no: SCRAM). `kling db rotate`
+  o `reset`/`undo` de la copia rompen los attach existentes (clave o id nuevos): hay que
+  repetirlos. Solo Linux por ahora (ver 7).
 - **El registro de auditoría es observabilidad, no prueba.** En Linux el directorio de
   la máquina es del usuario del VMM: un Firecracker comprometido no puede leer el
   registro (0600, de root) ni desviar su escritura (ver 7), pero sí borrarlo o

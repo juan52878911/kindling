@@ -101,7 +101,26 @@ var (
 	resolvers   = map[string]*dnsResolver{}
 )
 
+// modoResolver dice qué hace el resolver con un nombre que no es de un grafo
+// ni de una credencial.
+type modoResolver int
+
+const (
+	// modoAllowlist: el de siempre. Solo los dominios permitidos, y siembra
+	// el ipset con lo que devuelve.
+	modoAllowlist modoResolver = iota
+	// modoSoloGrafo: egress none con aristas. Sirve los nombres *.graph de
+	// las aristas del nodo (y los de sus credenciales) y NXDOMAIN para todo
+	// lo demás: no reenvía nada a ningún sitio.
+	modoSoloGrafo
+	// modoLibre: egress internet con aristas. El DNS del invitado pasa por
+	// aquí para que *.graph resuelva; el resto se reenvía sin más (la salida
+	// ya está abierta en ese modo) y sin sembrar nada.
+	modoLibre
+)
+
 type dnsResolver struct {
+	modo     modoResolver
 	ns       string   // netns de esta microVM (para ipset add dentro de él)
 	set      string   // nombre del ipset de esta microVM
 	allowed  []string // dominios permitidos, normalizados (minúsculas, sin punto final)
@@ -123,7 +142,47 @@ type dnsResolver struct {
 	credMu    sync.RWMutex
 	credHosts map[string]bool
 	credIP    stdnet.IP
+	// Nombres <nodo>.graph de las aristas link del nodo (enlaces_fc.go): se
+	// contestan con graphIP, la IP del host en su veth, donde escucha el
+	// proxy de enlace. Mismo candado que las credenciales.
+	graphHosts map[string]bool
+	graphIP    stdnet.IP
 }
+
+// setGraphHosts fija los nombres de las aristas link de esta máquina.
+func (r *dnsResolver) setGraphHosts(hosts []string, ip stdnet.IP) {
+	m := map[string]bool{}
+	for _, d := range normalizeDomains(hosts) {
+		m[d] = true
+	}
+	r.credMu.Lock()
+	r.graphHosts, r.graphIP = m, ip.To4()
+	r.credMu.Unlock()
+}
+
+// graphHostIP devuelve la IP con que se contesta name si es un nombre de
+// grafo servible (de una arista link o de una credencial), o nil.
+func (r *dnsResolver) graphHostIP(name string) stdnet.IP {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	r.credMu.RLock()
+	defer r.credMu.RUnlock()
+	if r.graphHosts[name] {
+		return r.graphIP
+	}
+	if r.credHosts[name] {
+		return r.credIP
+	}
+	return nil
+}
+
+// esNombreDeGrafo dice si name es <algo>.graph.
+func esNombreDeGrafo(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	return strings.HasSuffix(name, "."+graphDomain)
+}
+
+// graphDomain es api.GraphDomain (este paquete no depende de pkg/api).
+const graphDomain = "graph"
 
 // credTTL es el TTL de la respuesta sintética para un dominio con credencial:
 // corto, para que un cambio de credenciales se note pronto.
@@ -152,6 +211,12 @@ func (r *dnsResolver) isCredHost(name string) bool {
 // a un puerto sin nadie escuchando y se quedaría sin DNS, así que el llamador
 // debe tratar el fallo como fatal para el Setup.
 func startDNSResolver(n *Net, domains []string) error {
+	return startDNSResolverModo(n, domains, modoAllowlist)
+}
+
+// startDNSResolverModo es startDNSResolver con el modo del resolver (ver
+// modoResolver). Si ya hay uno para el netns, se queda el que hay.
+func startDNSResolverModo(n *Net, domains []string, modo modoResolver) error {
 	resolversMu.Lock()
 	if _, ok := resolvers[n.NS]; ok {
 		resolversMu.Unlock()
@@ -174,6 +239,7 @@ func startDNSResolver(n *Net, domains []string) error {
 	}
 
 	r := &dnsResolver{
+		modo:     modo,
 		ns:       n.NS,
 		set:      n.setName(),
 		allowed:  normalizeDomains(domains),
@@ -308,6 +374,20 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 	if !ok {
 		return respondError(query, 1) // FORMERR: no lo entendemos
 	}
+	if esNombreDeGrafo(name) {
+		// Un nombre de grafo: solo los de las aristas de ESTE nodo, y siempre
+		// con la IP del host en su veth (el proxy decide a dónde va cada
+		// conexión). Cualquier otro *.graph no existe, en todos los modos: ni
+		// se reenvía ni se siembra.
+		ip := r.graphHostIP(name)
+		if ip == nil {
+			return respondError(query, 3) // NXDOMAIN
+		}
+		if qtype == 1 {
+			return respondA(query, ip, credTTL)
+		}
+		return respondError(query, 0) // NOERROR sin respuestas (AAAA y demás)
+	}
 	if r.isCredHost(name) {
 		// Dominio con credencial: la única IP que el invitado debe usar para él es
 		// la del proxy. A se contesta con ella; el resto de tipos (AAAA incluido)
@@ -321,6 +401,15 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 			return respondA(query, ip, credTTL)
 		}
 		return respondError(query, 0) // NOERROR sin respuestas
+	}
+	switch r.modo {
+	case modoSoloGrafo:
+		// egress none: fuera de los nombres del grafo no hay nada.
+		return respondError(query, 3) // NXDOMAIN
+	case modoLibre:
+		// egress internet: se reenvía sin lista y sin sembrar (no hay ipset;
+		// la salida la gobiernan las reglas de ese modo).
+		return r.reenviarLibre(query, viaTCP)
 	}
 	if !r.isAllowed(name) {
 		// Dominio no listado: ni lo reenviamos. Cierra el DNS-tunneling por
@@ -357,6 +446,21 @@ func (r *dnsResolver) process(query []byte, viaTCP bool) []byte {
 	// donde el A real cuelga del nombre canónico, no del que preguntamos.
 	for _, rec := range extractA(resp) {
 		r.seed(rec.ip, rec.ttl)
+	}
+	return resp
+}
+
+// reenviarLibre reenvía una consulta del modo libre con los mismos topes
+// (cubo de tokens, en vuelo) y la misma comprobación de la respuesta que el
+// modo allowlist, pero sin sembrar nada.
+func (r *dnsResolver) reenviarLibre(query []byte, viaTCP bool) []byte {
+	if !r.limiter.allow() || !r.acquire() {
+		return respondError(query, 2) // SERVFAIL
+	}
+	defer r.release()
+	resp, err := r.forward(query, viaTCP)
+	if err != nil || len(resp) < 12 || !responseMatches(query, resp) {
+		return respondError(query, 2) // SERVFAIL
 	}
 	return resp
 }

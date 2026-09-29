@@ -23,6 +23,17 @@ func (m *Machine) Addr(port int) string {
 	return net.JoinHostPort(m.IP, strconv.Itoa(port))
 }
 
+// Exposes dice si el host puede alcanzar el puerto port de la máquina: el del
+// agente (GuestPort) o alguno de la etiqueta kling.ports.
+func (m *Machine) Exposes(port int) bool {
+	for _, p := range m.ExposedPorts() {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
 // Reachable dice si el host tiene por dónde llegar a la máquina: una IP (Linux)
 // o algún reenvío (macOS). Sustituye a la comprobación "IP != vacía", que en
 // macOS no distingue nada porque la IP del invitado es siempre la misma.
