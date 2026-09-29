@@ -60,7 +60,7 @@ func (k *diffKling) Run(ctx context.Context, stdin io.Reader, args ...string) ([
 					continue
 				}
 			}
-			fmt.Fprintf(&out, "R %s %s\n", h[:16], md5hex(salt+row)[:16])
+			fmt.Fprintf(&out, "R %s %s\n", h[:16], md5hex(salt + row)[:16])
 		}
 		out.WriteString("DONE\n")
 		return []byte(out.String()), nil
