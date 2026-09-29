@@ -121,7 +121,7 @@ sin verity).
 
 | | Mac arm64 (vz) | Linux amd64 (Firecracker) |
 |---|---|---|
-| `golden build`: listo en frío / caché (ficheros, MiB) / `save` / clon | 13,2 s / 6,1 s (1623, 716) / 4,3 s | 12,6–13,5 s / 10,0 s (1711, 863) / 3,7 s / 10,6 s |
+| `golden build`: listo en frío / caché (ficheros, MiB) / `save` / clon | 7,7–14,6 s / 3,3–6,1 s (1623, 716) / 1,7–4,3 s / 3,3 s | 12,6–13,5 s / 10,0 s (1711, 863) / 3,7 s / 10,6 s |
 | `up`: restaurar / identidad / API | 1,0–1,7 s / 2,4 s / 0,2 s | 0,15–1,9 s / 5,7–7,4 s / 0,4–0,8 s |
 | `resume` de un pausado, con la API contestando | ~10 ms | — |
 | muro: captura (ida y vuelta del navegador) | 180–290 ms | ~0,5 s (1,1 s por el túnel ssh al Mac) |
@@ -137,11 +137,15 @@ sin token recibe `401` (y `403` con uno de lectura en una ruta de control), en L
 en macOS (docs/phoned.md).
 
 **Hallazgo en el Mac**: con el Mac cargado (otros agentes, `kern.memorystatus_level`
-40–56), dos arranques en frío seguidos tenían páginas de la caché **a ceros**
-(`core-oj.jar`, un APK de Wi-Fi) y `golden build` se negó a guardarlos; y un dorado que
+40–56), de cinco arranques en frío dos tenían páginas de la caché **a ceros**
+(`core-oj.jar`, un APK de Wi-Fi; 3 páginas, las 3 a ceros), en otro `logcat` murió con
+SIGILL al leer el búfer de fallos, y `golden build` se negó a guardarlos; y un dorado que
 pasó la comprobación en frío tenía una página de `libart.so` rota en **todos** sus
 clones (se rompió al volcar o al restaurar). Por eso `golden build` comprueba también un
-clon del dorado guardado y lo borra si no pasa.
+clon del dorado guardado y lo borra si no pasa. El quinto arranque salió limpio en frío
+y en el clon (`golden verify` después, también). Las pruebas de arriba en el Mac se
+hicieron con el dorado anterior, el de la página de `libart.so` rota, sin que ningún
+proceso se cayera a la vista. En Linux, limpio siempre.
 
 ## Pendiente
 

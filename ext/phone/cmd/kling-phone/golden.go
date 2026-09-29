@@ -156,6 +156,13 @@ func (a *app) check(ctx context.Context, m *api.Machine, tok string) (*verifyRec
 	rec.At = a.now().UTC()
 	lr, err := a.call(ctx, m, tok, "GET", "/v1/logs?buffer=crash&lines=400", nil, false)
 	if err != nil {
+		// logcat muerto por SIGILL es la misma rotura (una página de su binario o
+		// de sus bibliotecas a ceros), no un fallo de la comprobación.
+		if strings.Contains(err.Error(), "illegal instruction") {
+			rec.Crashes = append(rec.Crashes, "logcat itself died with SIGILL")
+			rec.OK = false
+			return rec, nil
+		}
 		return rec, fmt.Errorf("crash log: %w", err)
 	}
 	for _, l := range strings.Split(string(lr.Body), "\n") {
