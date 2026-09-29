@@ -789,7 +789,7 @@ else
   # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
   # copiarlo aquí, doctor no puede comprobar que las copias rotaron la clave.
   DBREAL="$HOME/.local/state/kling-db/$KLING_E2E_DB_GOLDEN"
-  if [ -d "$DBREAL" ]; then mkdir -m 700 -p "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
+  if [ -d "$DBREAL" ]; then mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
   DBLOG="$DBTMP/out.log"; : > "$DBLOG"
   DBU="$P-db"
   dbk() { local o rc; o=$(k db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
@@ -898,6 +898,20 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     done
     out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
     [ "$out" = "2" ] && ok "rows intact after the ro role's attempts" || bad "data after ro" "2" "$out"
+  fi
+  # A fork does not inherit the ro role: the child is born without it, and its password does not get in.
+  out=$(dbk fork "$DBU" -n 1); child=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}' | head -1)
+  if [ -z "$child" ]; then
+    bad "fork with an ro role" "a ready child copy" "$out"
+  else
+    out=$(dbsql "$child" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
+    [ "$out" = "0" ] && ok "fork: the child does not inherit kling db role roles" || bad "ro roles in the child" "0" "$out"
+    if [ -n "$ROPW" ] && command -v psql >/dev/null; then
+      out=$(dbrosql e2e_agent "$ROPW" "$child" "SELECT 1")
+      [ "$out" = "1" ] && bad "ro role password in the child" "rejected" "IT GOT IN" || ok "fork: the source's ro role password does not get into the child"
+    fi
+    ALL="$ALL $(dbpw "$child")"
+    dbk rm "$child" >/dev/null 2>&1
   fi
   dbk role "$DBU" -ro -name e2e_agent -rm >/dev/null 2>&1
 

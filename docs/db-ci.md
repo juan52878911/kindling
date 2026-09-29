@@ -26,7 +26,7 @@ En el job de CI:
 ```bash
 # El script ci-pr-db.sh:
 #   1. Crea (o resetea si existe) una copia de la plantilla
-#   2. Obtiene el DSN en un fichero 0600 (nunca en logs)
+#   2. Lee el DSN de kling db connect -dsn a una variable (traza apagada)
 #   3. Exporta DATABASE_URL por entorno
 #   4. Corre el comando pasado
 #   5. Destruye la copia (trap)
@@ -42,16 +42,22 @@ ext/db/scripts/ci-pr-db.sh \
 
 ### Idempotencia
 
-Si el job falla y se reintenta, `ci-pr-db.sh` resetea la copia (misma máquina,
-otra id, otra contraseña). No hay duplicados, no hay restos de intentos fallidos.
+Si el job falla y se reintenta, `ci-pr-db.sh` resetea la copia (mismo nombre,
+otra máquina, otra contraseña, el ttl que tenía la copia: `-ttl` solo cuenta al
+crearla). No hay duplicados, no hay restos de intentos fallidos.
 
 ### Seguridad
 
 - La contraseña se rota en cada copia (nueva contraseña, verificador SCRAM)
-- Nunca en argv, nunca en logs, nunca en stdout (salvo con `-dsn` a un fichero)
+- Nunca en argv, nunca en logs, nunca en stdout: `ci-pr-db.sh` guarda la salida de
+  `kling db connect -dsn` directamente en una variable, con `set +x` mientras tanto, y
+  `ci-load.sh` descompone el DSN en `PGHOST`/`PGPASSWORD`/... sin procesos externos
+  (nunca `psql "$dsn"`, que pondría la clave en argv)
 - Solo va el verificador SCRAM al invitado (`ALTER ROLE app PASSWORD '<verificador>'`)
 - La clave vive solo en `~/.local/state/kling-db/copies/<id>/password` (0600)
-- DATABASE_URL se pasa por entorno, en un fichero 0600, nunca en logs
+- DATABASE_URL se pasa solo por el entorno del comando; ningún fichero intermedio
+- La trampa de salida borra con `kling db rm` (máquina **y** fichero de la clave) y
+  con el mismo daemon: `-H` se exporta como `KLING_HOST`
 
 ### Paralelo seguro
 
@@ -113,6 +119,11 @@ Flags:
 - `-p N`: número de simulaciones (defecto 20, puede ir en env P)
 - `-keep`: no borra las copias (debugging, puede ir en env KEEP=1)
 - `-out DIR`: directorio de salida (defecto `./ci-load-YYYYMMDD-HHMMSS`)
+- `-H HOST`: endpoint del daemon (se exporta como `KLING_HOST`)
+
+Necesita `psql` en el host. Cada simulación lee su DSN con `kling db connect -dsn` y lo
+descompone en `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` y `PGDATABASE` para su `psql`;
+la clave no aparece en ninguna línea de órdenes.
 
 Cada simulación:
 1. Crea una copia `cil_<idx>` de la plantilla
@@ -210,8 +221,8 @@ La frontera es más fuerte:
 # Bórrala
 kling db rm pr-42
 
-# O, si no hay contraseña (fue un reset fallido):
-kling rm -f <id>
+# kling db rm también vale sin contraseña en el host (reset fallido): borra la
+# máquina y lo que quedara de su fichero.
 ```
 
 ### Quiero reutilizar una copia para debugging
@@ -226,7 +237,8 @@ kling db connect pr-42 -dsn | pbcopy
 
 ### Quiero ver el log de ci-pr-db.sh
 
-Todos los log van a stderr (lineas con timestamp), stdout es solo DATABASE_URL.
+Todos los log van a stderr (lineas con timestamp); stdout es el del comando.
+DATABASE_URL no se imprime nunca.
 En CI, stderr está disponible en la salida del job.
 
 ## Línea de tiempo de un PR
@@ -239,9 +251,10 @@ ci-pr-db.sh checks if pr-N exists
   no: creates pr-N from golden (1-2s)
   yes: resets pr-N (destroy + create)
   ↓
-waits for postgres to accept connections (pg_isready)
+(inside up/reset) waits for postgres, drops inherited kling db role roles,
+rotates the password (ALTER ROLE app PASSWORD '<verifier>')
   ↓
-rotates the password (ALTER ROLE app PASSWORD '...')
+kling db connect pr-N (ready probe), then -dsn into DATABASE_URL
   ↓
 exports DATABASE_URL by environment
   ↓

@@ -1,192 +1,134 @@
 #!/usr/bin/env bash
 # CI: base de datos desechable por PR
 #
-# Prepara un entorno de CI con una copia de Postgres única para cada PR, creada
-# desde una plantilla golden. La copia vive el tiempo del job y se destruye
-# después. Idempotento: si la copia ya existe (p.ej. por reintentos del job),
-# la resetea. DATABASE_URL va a un fichero 0600 nunca en stdout/logs.
+# Prepara una copia de Postgres propia del PR, creada desde una plantilla
+# golden, corre el comando con DATABASE_URL en su entorno y la destruye al
+# salir. Idempotente: si la copia ya existe (reintento del job), la resetea
+# (otra máquina, otra contraseña; el mismo ttl que tenía).
 #
 # Uso:
-#   ci-pr-db.sh -golden GOLDEN -pr N -keep -- comando y args...
+#   ci-pr-db.sh -golden GOLDEN -pr N [-ttl D] [-keep] [-H HOST] -- comando y args...
 #
-# Env:
+# Env (los flags ganan):
 #   GOLDEN      Plantilla (requerida)
-#   PR          Número de PR (requerida)
+#   PR          Número de PR (requerido): la copia se llama pr-<PR>
 #   KLING       Binario kling (defecto: kling)
-#   KLING_HOST  Endpoint del daemon (por defecto, contexto activo)
-#   TTL         TTL de la copia (defecto: 2h)
-#   DB_NAME     Base de datos (defecto: appdb, de la plantilla)
-#   DB_USER     Rol de la aplicación (defecto: app, de la plantilla)
+#   KLING_HOST  Endpoint del daemon (defecto: el contexto activo)
+#   TTL         TTL de la copia al crearla (defecto: 2h)
 #   KEEP        Si es 1, no borra la copia al final
-#   TIMEOUT     Timeout para kling exec (defecto: 60s)
 #
-# FLAGS:
-#   -golden G   Plantilla (puede ir en env)
-#   -pr N       Número de PR (puede ir en env)
-#   -keep       No borra la copia al final (para debugging)
-#   -ttl D      TTL de la copia (defecto 2h, sobrescribe env TTL)
-#   -H HOST     Endpoint del daemon
-#   --          Fin de flags, empieza el comando
+# La contraseña: DATABASE_URL sale de `kling db connect <copia> -dsn` directo a
+# una variable, con la traza del shell apagada (set +x) mientras tanto, y solo
+# viaja por el entorno del comando. Nunca en argv, ni en un fichero, ni en
+# stdout. Los mensajes van a stderr.
 #
-# Si algo falla, la copia se destruye en la trampa EXIT. DATABASE_URL se
-# guarda en un fichero temporal 0600 que el script elimina al salir.
+# El daemon: -H se exporta como KLING_HOST, así kling y kling db (también el rm
+# de la trampa) hablan con el mismo.
 #
 # Ejemplo:
-#   GOLDEN=pg-golden ./ci-pr-db.sh -pr 42 -- \
-#     migration-runner /run/db.env && pytest tests/
+#   GOLDEN=pg-golden ./ci-pr-db.sh -pr 42 -- pytest tests/
 #
 set -uo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
-# Defaults
 KLING="${KLING:-kling}"
-KLING_HOST="${KLING_HOST:-}"
 GOLDEN="${GOLDEN:-}"
 PR="${PR:-}"
 TTL="${TTL:-2h}"
-DB_NAME="${DB_NAME:-}"
-DB_USER="${DB_USER:-}"
 KEEP="${KEEP:-0}"
-TIMEOUT="${TIMEOUT:-60s}"
 
-# Parseo de flags
+need() { [ "$2" -ge 2 ] || die "$1 needs a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    -golden)
-      GOLDEN="$2"
-      shift 2
-      ;;
-    -pr)
-      PR="$2"
-      shift 2
-      ;;
-    -keep)
-      KEEP=1
-      shift
-      ;;
-    -ttl)
-      TTL="$2"
-      shift 2
-      ;;
-    -H)
-      KLING_HOST="$2"
-      shift 2
-      ;;
-    --)
-      shift
-      break
-      ;;
-    *)
-      die "unknown flag: $1"
-      ;;
+    -golden) need "$1" $#; GOLDEN="$2"; shift 2 ;;
+    -pr)     need "$1" $#; PR="$2"; shift 2 ;;
+    -ttl)    need "$1" $#; TTL="$2"; shift 2 ;;
+    -H)      need "$1" $#; export KLING_HOST="$2"; shift 2 ;;
+    -keep)   KEEP=1; shift ;;
+    --)      shift; break ;;
+    *)       die "unknown flag: $1" ;;
   esac
 done
 
-# Validación
 [ -n "$GOLDEN" ] || die "GOLDEN is required (-golden or env)"
 [ -n "$PR" ] || die "PR is required (-pr or env)"
+case "$PR" in
+  *[!A-Za-z0-9._-]*) die "PR must be letters, digits, '.', '_' or '-': $PR" ;;
+esac
+[ $# -ge 1 ] || die "no command given (use -- before the command)"
 command -v "$KLING" >/dev/null 2>&1 || die "kling not found: $KLING"
 
-# Nombre de la copia: pr-{PR}
 COPY_NAME="pr-$PR"
 
-# Fichero temporal para DATABASE_URL (0600, se borra en la trampa)
-DB_ENV_FILE=""
+# timeout no existe en macOS: si no está, sin límite.
+with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# TOUCHED: esta ejecución creó o reseteó la copia, y la trampa la borra.
+TOUCHED=0
 cleanup() {
-  [ -n "$DB_ENV_FILE" ] && rm -f "$DB_ENV_FILE"
-  if [ "$KEEP" != 1 ]; then
-    log "removing $COPY_NAME..."
-    # Contexto propio para que no se cancele con Ctrl-C
-    timeout 60 "$KLING" rm -f "$COPY_NAME" 2>/dev/null || true
-  else
-    log "KEEP=1: $COPY_NAME not removed"
-  fi
-}
-trap cleanup EXIT INT TERM
-
-# Kling con -H si se pasó
-kling_cmd() {
-  if [ -n "$KLING_HOST" ]; then
-    "$KLING" -H "$KLING_HOST" "$@"
-  else
-    "$KLING" "$@"
-  fi
-}
-
-# Inspecciona la copia para obtener host, puerto y rol/base
-inspect() {
-  # Devuelve JSON en línea; se parsea con jq si está disponible, o manualmente
-  kling_cmd inspect "$COPY_NAME" -json 2>/dev/null || echo ""
-}
-
-# Obtiene DATABASE_URL de la copia.
-get_database_url() {
-  # Lee el DSN de la copia (clave nunca en stdout salvo aquí y a un fichero 0600)
-  kling_cmd db connect "$COPY_NAME" -dsn 2>/dev/null || return 1
-}
-
-# Crea o resetea la copia
-setup_copy() {
-  log "checking $COPY_NAME..."
-  json="$(inspect)"
-  if [ -n "$json" ]; then
-    log "$COPY_NAME exists: resetting..."
-    if ! kling_cmd db reset "$COPY_NAME" -ttl "$TTL" >/dev/null 2>&1; then
-      die "failed to reset $COPY_NAME"
-    fi
-  else
-    log "creating $COPY_NAME from $GOLDEN..."
-    if ! kling_cmd db up "$GOLDEN" -name "$COPY_NAME" -ttl "$TTL" >/dev/null 2>&1; then
-      die "failed to create $COPY_NAME"
+  local rc=$?
+  trap - EXIT INT TERM
+  unset DATABASE_URL
+  if [ "$TOUCHED" = 1 ]; then
+    if [ "$KEEP" = 1 ]; then
+      log "KEEP=1: $COPY_NAME not removed (kling db rm $COPY_NAME)"
+    else
+      log "removing $COPY_NAME..."
+      # kling db rm: la máquina Y su contraseña del host.
+      with_timeout 120 "$KLING" db rm "$COPY_NAME" >/dev/null 2>&1 \
+        || log "warning: could not remove $COPY_NAME (kling db rm $COPY_NAME)"
     fi
   fi
-  # Espera a que esté ready
-  retry=30
-  while [ $retry -gt 0 ]; do
-    json="$(inspect)"
-    if [ -n "$json" ] && echo "$json" | grep -q '"kling.db.state":"ready"'; then
-      log "$COPY_NAME is ready"
-      return 0
-    fi
-    sleep 1
-    retry=$((retry - 1))
-  done
-  die "timeout waiting for $COPY_NAME to be ready"
+  exit "$rc"
 }
-
-# Obtiene el DSN de la copia y lo guarda en un fichero 0600
-setup_db_env() {
-  log "obtaining DATABASE_URL..."
-  local dsn
-  dsn="$(get_database_url)" || die "failed to get DATABASE_URL from $COPY_NAME"
-
-  # Crea fichero temporal con permisos 0600
-  DB_ENV_FILE="$(mktemp)"
-  chmod 0600 "$DB_ENV_FILE"
-  echo "export DATABASE_URL='$dsn'" > "$DB_ENV_FILE"
-  # En CI: el fichero se sobreescribe en el export, nunca aparece en logs
-}
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-if [ $# -lt 1 ]; then
-  die "no command given (use -- before the command)"
-fi
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 log "ci-pr-db: PR=$PR GOLDEN=$GOLDEN TTL=$TTL"
 
-setup_copy
-setup_db_env
+# Crea o resetea. up y reset vuelven cuando la copia está lista (o fallan y no
+# dejan nada a medias).
+TOUCHED=1
+if "$KLING" inspect "$COPY_NAME" >/dev/null 2>&1; then
+  log "$COPY_NAME exists: resetting it..."
+  "$KLING" db reset "$COPY_NAME" >/dev/null || die "failed to reset $COPY_NAME"
+else
+  log "creating $COPY_NAME from $GOLDEN..."
+  "$KLING" db up "$GOLDEN" -name "$COPY_NAME" -ttl "$TTL" >/dev/null || die "failed to create $COPY_NAME"
+fi
 
-# Exporta DATABASE_URL en el entorno del comando, nunca en stdout
+# Lista: kling db connect (sin -dsn) exige lo mismo que -dsn (en marcha, lista,
+# contraseña de ESTE id en el host) sin imprimir la clave.
+tries=30
+until "$KLING" db connect "$COPY_NAME" >/dev/null 2>&1; do
+  tries=$((tries - 1))
+  [ "$tries" -gt 0 ] || die "$COPY_NAME is not ready"
+  sleep 1
+done
+log "$COPY_NAME is ready"
+
+# DATABASE_URL, con la traza apagada: set -x (o CI_DEBUG_TRACE) la imprimiría.
+case $- in *x*) xtrace=1; set +x ;; *) xtrace=0 ;; esac
+DATABASE_URL="$("$KLING" db connect "$COPY_NAME" -dsn </dev/null 2>/dev/null)" || DATABASE_URL=""
+if [ -z "$DATABASE_URL" ]; then
+  [ "$xtrace" = 0 ] || set -x
+  die "failed to get DATABASE_URL from $COPY_NAME"
+fi
 export DATABASE_URL
-DATABASE_URL="$(cat "$DB_ENV_FILE" | grep -oP "(?<=DATABASE_URL=').*(?=')" || true)"
-[ -n "$DATABASE_URL" ] || die "DATABASE_URL is empty"
+[ "$xtrace" = 0 ] || set -x
 
 log "running: $*"
 "$@"
 rc=$?
 log "command exited with $rc"
-exit $rc
+exit "$rc"

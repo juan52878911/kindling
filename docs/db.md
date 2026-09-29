@@ -20,8 +20,8 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 
 | comando | qué hace |
 |---|---|
-| `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, **rota la contraseña** y marca `ready` |
-| `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), rota la clave de cada una y las marca `ready`. Todo o nada |
+| `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
+| `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
 | `connect <copia> [-role R] [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role` |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
@@ -57,8 +57,20 @@ también en las futuras del rol de la aplicación (`ALTER DEFAULT PRIVILEGES`). 
   verificador SCRAM por stdin y se comprueba en la misma sesión (junto con los
   atributos y la ausencia de pertenencias). Vive en `copies/<id>/<rol>.password`.
 - `pg_hba.conf` de la golden solo deja entrar por red al rol de la aplicación: `role`
-  añade una línea `scram-sha-256` para el nuevo rol **después** de comprobarlo, y la
-  quita al borrarlo. Si algo falla, se deshace todo (rol, línea y clave).
+  añade una línea `host "<base>" "<rol>" 0.0.0.0/0 scram-sha-256 # kling-db` (solo la
+  base de la copia) **después** de comprobar el rol, y la quita al borrarlo. Si algo
+  falla, se deshace todo (rol, línea y clave). El fichero es el que dice Postgres
+  (`SHOW hba_file`), como en `ask`.
+- **El rol no pasa a las copias hijas.** Su verificador viaja en la RAM y el disco de
+  la copia: sin más, un `fork`, un `undo` desde un punto guardado con el rol, o un
+  `up` de un golden hecho de esa copia lo tendrían, y quien tuviera su clave entraría
+  en todas (en Linux cualquier proceso del host llega a la IP de cada una). Por eso
+  `up`, `fork` y `undo`, antes de marcar la copia `ready`, cortan las sesiones de todo
+  rol con comentario `kling-db:ro`, hacen `DROP OWNED BY` (en la base de la copia y en
+  `postgres`) y `DROP ROLE`, quitan de `pg_hba.conf` las líneas `# kling-db` y
+  recargan. Si queda alguno, la copia se destruye. Las claves del host van por id, así
+  que la copia nueva tampoco tiene fichero: se vuelve a crear con `role`, con otra
+  clave. El origen no se toca.
 - Nombres: `^[a-z_][a-z0-9_]{0,62}$`, sin `postgres`, sin el rol dueño, sin `pg_*` ni
   palabras reservadas. `-rm` solo toca roles que creó este comando (comentario
   `kling-db:ro`).
@@ -195,7 +207,7 @@ de la plantilla no entra en una copia.
 Ensaya migraciones en una copia desechable: un fork de una copia lista (que
 debe estar en marcha: rehearse no descongela ni toca el origen) o un up de un
 golden. Aplica los `.sql` de DIR en orden de nombre, como el rol de la
-aplicación (`PGOPTIONS=-c role=...`), por stdin y con `ON_ERROR_STOP`, y mide
+aplicación, por stdin y con `ON_ERROR_STOP`, y mide
 por fichero: duración, tamaño de la base antes y después y bloqueos. Termina
 con una tabla (o `-json`) y destruye la copia salvo `-keep`. Si un fichero
 falla, los siguientes se marcan `skipped` y el código de salida es 1.
@@ -207,6 +219,17 @@ informa como `would block N s in production`. Sirve para descubrir qué
 sentencias piden un lock fuerte, no para predecir la espera real en producción.
 El error de un fichero muestra solo la línea `ERROR:` de psql (el resto cita la
 sentencia). Los `.sql` no pueden ser enlaces simbólicos.
+
+Como qué rol, con precisión: el psql de la migración **entra como el rol de la
+aplicación** por el socket (`-U app`, peer con un mapa `kling_db_rehearse` que
+permite al usuario del sistema `postgres` ser `app`, lo mismo que usa `ask`). No
+entra como `postgres` con `role=app`: ahí un `RESET ROLE` en un `.sql` lo volvería
+superusuario, y el ensayo no se parecería a producción. Así `session_user` es
+`app` y ni `RESET ROLE` ni `SET ROLE postgres` suben de privilegios. Lo que **no**
+se cierra: los metacomandos de psql (`\!`, `\copy ... program`) ejecutan órdenes
+en el invitado como el usuario del sistema `postgres`, que entra como superusuario
+por el socket. Las migraciones son código de confianza; lo que limita el daño es
+que la copia es desechable y es una microVM propia.
 
 ### `kling db rotate <copia>`
 
@@ -240,4 +263,14 @@ nombre es `[a-z0-9-]`, hasta 40; máximo 16 puntos por copia.
 verificador de la contraseña que la copia tenía entonces. `undo` no la
 recupera: la copia nueva rota una propia antes de darse por lista, y el fichero
 del host es de la copia nueva. La clave del punto solo sirve, en teoría, para
-esa plantilla; la rotación la invalida en cuanto nace la copia.
+esa plantilla; la rotación la invalida en cuanto nace la copia. Los roles de
+`kling db role` que tuviera la copia tampoco vuelven (ver Rol de solo lectura).
+
+**Los puntos son plantillas globales de kindling, sin dueño.** El nombre
+`dbsnap-...` y la etiqueta `kling.db.owner` sirven para que `snapshots` y `undo`
+encuentren los de cada copia, no son un control de acceso: quien tenga el socket
+del daemon (o `-H` a él) puede listarlos con `kling template ls` y hacer
+`kling db up dbsnap-...`, igual que con cualquier golden. La copia que salga
+rota su propia clave y pierde los roles de `role`, pero **los datos** del punto
+son los que eran. Mismo modelo que los golden: el daemon es la frontera; no
+guardes puntos de datos que no deba ver quien lo usa.

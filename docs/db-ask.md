@@ -56,11 +56,12 @@ en el host y en la copia, en este orden:
    `default_transaction_read_only = on`. Con `-role`, el rol tiene que existir; `ask` no
    crea ni cambia nada de él. En los dos casos se **comprueba** antes de usarlo, y se
    rechaza si es superusuario, tiene `CREATEROLE`, `CREATEDB`, `REPLICATION` o
-   `BYPASSRLS`, pertenece a un rol que los tenga o a `pg_write_all_data`,
-   `pg_execute_server_program`, `pg_read_server_files`, `pg_write_server_files`,
-   `pg_signal_backend`, `pg_checkpoint`, `pg_create_subscription` o `pg_monitor`, es
-   dueño de la base o de alguna relación, o puede escribir en alguna. Nunca vale el rol
-   de la aplicación (`app`) ni `postgres`.
+   `BYPASSRLS`, pertenece a **cualquier** rol que no sea `pg_read_all_data` (directa o
+   indirectamente), es dueño de la base o de alguna relación, o puede escribir en
+   alguna. Nunca vale el rol de la aplicación (`app`) ni `postgres`. La pertenencia se
+   mira con `pg_has_role(..., 'MEMBER')` y en `pg_auth_members`, no con `'USAGE'`: en
+   PostgreSQL 16 un `GRANT app TO lector WITH INHERIT FALSE` no hereda privilegios
+   (`USAGE` daría falso) pero deja hacer `SET ROLE app`.
 3. **Entrar como ese rol.** El `pg_hba` de la plantilla solo deja entrar a `postgres` por
    el socket y a `app` por red. `ask` añade (una vez, idempotente) una línea
    `local all <rol> peer map=kling_db_ask` a `pg_hba.conf` y `kling_db_ask postgres <rol>`
@@ -123,9 +124,15 @@ en el host y en la copia, en este orden:
   la transacción READ ONLY impide que escriban, pero pueden leer lo que su dueño lea.
   El validador no conoce las funciones propias de cada base.
 - `kling_db_ro`, la línea de `pg_hba.conf` y la de `pg_ident.conf` se quedan en la copia
-  (y pasan a sus `fork`). Solo las puede usar el usuario del sistema `postgres` del
-  invitado, que ya es superusuario por peer.
+  y pasan a sus `fork`, `undo` y golden: a propósito, porque no dan nada nuevo. El rol no
+  tiene contraseña ni línea de red; solo lo puede usar el usuario del sistema `postgres`
+  del invitado, que ya es superusuario por peer. Para que siga así, `up`, `fork` y `undo`
+  le quitan la contraseña si alguien le hubiera puesto una (`PASSWORD NULL`). Los roles
+  de `kling db role` (comentario `kling-db:ro`), que sí tienen clave y línea de red, en
+  cambio **no** pasan: se borran al preparar la copia nueva (ver [db.md](db.md)).
 - Si una línea anterior de `pg_hba.conf` rechaza al rol por el socket (no pasa con las
   plantillas de `scripts/db-golden.sh`), `ask` falla con ese mensaje.
 - El esquema enviado se corta en 500 relaciones y 256 KiB.
-- No hay `kling db role` en esta versión: `ask` usa su propio mecanismo (arriba).
+- `ask -role agent` con un rol de `kling db role` funciona (le da acceso por el socket),
+  pero ese rol no sobrevive a un `fork` o `undo`: en la copia nueva hay que crearlo otra
+  vez.

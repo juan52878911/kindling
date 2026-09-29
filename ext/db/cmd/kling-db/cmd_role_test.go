@@ -31,7 +31,7 @@ type fakeRole struct{ comment, verifier string }
 
 var (
 	createRoleRe = regexp.MustCompile(`CREATE ROLE "([^"]+)"`)
-	hbaLineRe    = regexp.MustCompile(`L='host all "([^"]+)" `)
+	hbaLineRe    = regexp.MustCompile(`L='host "appdb" "([^"]+)" `)
 )
 
 func newRoleKling(f *fakeKling) *roleKling {
@@ -44,7 +44,7 @@ func (r *roleKling) Run(ctx context.Context, stdin io.Reader, args ...string) ([
 	}
 	in, _ := io.ReadAll(stdin)
 	sql := string(in)
-	if strings.Contains(sql, "ALTER ROLE app PASSWORD") {
+	if strings.Contains(sql, "ALTER ROLE app PASSWORD") || strings.Contains(sql, purgeMarker) {
 		return r.fakeKling.Run(ctx, strings.NewReader(sql), args...)
 	}
 	r.stdins = append(r.stdins, sql)
@@ -172,6 +172,16 @@ func TestRoleROCrea(t *testing.T) {
 		if strings.Contains(create, bad) {
 			t.Errorf("the role script has %q", bad)
 		}
+	}
+	// La regla de pg_hba.conf se comprueba para el rol Y la base de la copia.
+	var rules string
+	for _, s := range rk.stdins {
+		if strings.Contains(s, "pg_hba_file_rules") {
+			rules = s
+		}
+	}
+	if !strings.Contains(rules, "user_name @> ARRAY['agent']") || !strings.Contains(rules, "database @> ARRAY['appdb']") {
+		t.Errorf("pg_hba check %q", rules)
 	}
 	// El rol se crea y comprueba antes de abrirle la red.
 	if len(rk.events) < 2 || rk.events[0] != "create agent" || rk.events[1] != "hba+agent" {

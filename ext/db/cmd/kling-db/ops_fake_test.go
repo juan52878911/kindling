@@ -56,6 +56,10 @@ func (o *opsFake) Run(ctx context.Context, stdin io.Reader, args ...string) ([]b
 	sql := string(in)
 
 	switch {
+	case args[0] == "exec" && strings.Contains(sql, purgeMarker):
+		// La purga de prepare: la contesta el falso de abajo (no es una rotación).
+		return o.fakeKling.Run(ctx, rewind(), args...)
+
 	case args[0] == "exec" && strings.Contains(cmd, "PGOPTIONS"):
 		o.fakeKling.mu.Lock()
 		o.fakeKling.calls = append(o.fakeKling.calls, call{args: append([]string(nil), args...), stdin: sql})
@@ -150,6 +154,8 @@ func (o *opsFake) Run(ctx context.Context, stdin io.Reader, args ...string) ([]b
 		o.saveTick++
 		o.fakeKling.snaps[name] = &api.Snapshot{Name: name, Labels: clone(mc.Labels),
 			CreatedAt: time.Unix(1700000000+int64(o.saveTick), 0).UTC(), DiskBytes: 5 << 20, MemBytes: 256 << 20}
+		// La plantilla guarda la RAM y el disco: con ellos, los roles.
+		o.fakeKling.snapRoles[name] = append([]string(nil), o.fakeKling.roRoles[mc.ID]...)
 		return []byte(name + "  template\n"), nil
 
 	case len(args) >= 3 && args[0] == "template" && args[1] == "ls":

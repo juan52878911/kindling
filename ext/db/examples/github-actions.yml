@@ -12,7 +12,7 @@
 # Uso:
 #   - Reemplaza GOLDEN_NAME por el nombre de tu plantilla
 #   - Ajusta el comando de pytest/pruebas según tu proyecto
-#   - El DATABASE_URL se pasa automáticamente por entorno (0600)
+#   - El DATABASE_URL se pasa solo por el entorno del comando
 #
 # La base se crea al empezar, se resetea en reintentos, y se destruye al salir.
 # -keep se puede setear en los secrets del repo para depuración.
@@ -54,7 +54,7 @@ jobs:
       - name: Run tests with database
         run: |
           # ci-pr-db.sh: crea (o resetea si existe) una copia de la plantilla,
-          # obtiene el DSN en un fichero 0600, y lo pasa por DATABASE_URL.
+          # lee el DSN (sin ficheros ni traza) y lo pasa por DATABASE_URL.
           # El comando después de -- corre en el entorno de la base.
           ext/db/scripts/ci-pr-db.sh \
             -golden "$GOLDEN" \

@@ -1042,7 +1042,7 @@ else
   # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
   # copiarlo aquí, doctor no puede comprobar que las copias rotaron la clave.
   DBREAL="$HOME/.local/state/kling-db/$KLING_E2E_DB_GOLDEN"
-  if [ -d "$DBREAL" ]; then mkdir -m 700 -p "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
+  if [ -d "$DBREAL" ]; then mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
   DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
   DBU="e2e-db-$$"
   # dbk ejecuta kling db, acumula stdout+stderr en DBLOG y lo devuelve.
@@ -1186,6 +1186,20 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     contiene "$out" "ERROR" && ok "el rol ro no escribe ni apagando default_transaction_read_only" || bad "escritura con la bandera apagada" "ERROR" "$out"
     out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
     [ "$out" = "2" ] && ok "las filas siguen intactas tras los intentos del rol ro" || bad "datos tras el rol ro" "2" "$out"
+  fi
+  # Un fork no hereda el rol ro: la hija nace sin él, y su clave no entra en la hija.
+  out=$(dbk fork "$DBU" -n 1); hija=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}' | head -1)
+  if [ -z "$hija" ]; then
+    bad "fork con rol ro" "una copia hija lista" "$out"
+  else
+    out=$(dbsql "$hija" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
+    [ "$out" = "0" ] && ok "fork: la hija no hereda los roles de kling db role" || bad "roles ro en la hija" "0" "$out"
+    if [ -n "$ROPW" ] && command -v psql >/dev/null; then
+      out=$(dbrosql e2e_agent "$ROPW" "$hija" "SELECT 1")
+      [ "$out" = "1" ] && bad "clave del rol ro en la hija" "rechazada" "ENTRÓ" || ok "fork: la clave del rol ro del origen no entra en la hija"
+    fi
+    TODAS="$TODAS $(dbpw "$hija")"
+    dbk rm "$hija" >/dev/null 2>&1
   fi
   dbk role "$DBU" -ro -name e2e_agent -rm >/dev/null 2>&1
   out=$(dbsql "$DBU" "SELECT count(*) FROM pg_roles WHERE rolname = 'e2e_agent'")

@@ -40,6 +40,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **`kling db`: las copias nuevas no heredan los roles de `role -ro`.** `up`, `fork` y
+  `undo` borran los roles con comentario `kling-db:ro` (y sus líneas de `pg_hba.conf`)
+  antes de dar la copia por lista; si no pueden, la copia se destruye. La línea de
+  `pg_hba.conf` de `role` abre solo la base de la copia, y el fichero se busca con
+  `SHOW hba_file`. `ask` rechaza un rol que pertenezca a cualquier cosa salvo
+  `pg_read_all_data` (también una pertenencia solo-SET de PG16). `rehearse` entra como el
+  rol de la aplicación por peer, no con `role=` (que `RESET ROLE` deshacía).
+- **Scripts de CI de `kling db`.** `ci-load.sh` ya no pone la clave en argv (`psql "$dsn"`):
+  va por `PGPASSWORD`. `ci-pr-db.sh` deja de pasar `-ttl` a `reset` (fallaba siempre), borra
+  con `kling db rm` y el mismo daemon, no usa `timeout` ni `grep -P` y lee `DATABASE_URL`
+  sin fichero intermedio y con la traza apagada.
 - **Fork: el almacén de credenciales falla cerrado.** Si no se puede mirar (cualquier error
   salvo "no existe") el fork se rechaza, y la comprobación de "sin credenciales" se repite
   con el cerrojo de la máquina justo antes de pausarla, para que un `SetCredentials`
