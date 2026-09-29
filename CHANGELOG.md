@@ -19,6 +19,16 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   lista su sistema de ficheros (`GET /info` gana `cow.pending`). La falta de sitio para
   el almacén se detecta al arrancar y deja el modo en `copy` con el motivo, que ahora sale
   también en `kling info`.
+- **El almacén de copia al escribir crece, avisa cuando se llena y no deja imágenes
+  inservibles (#61).** `kling cow grow +8G` (o `32G`, el tamaño nuevo; `POST
+  /cow/store/grow`, solo admin, capacidad `cow-grow`) lo agranda en caliente: reserva el
+  fichero con `fallocate`, hace `LOOP_SET_CAPACITY` sobre su loop (comprobando en
+  `/sys/block/loopN/loop/backing_file` que es el suyo) y `xfs_growfs` o `btrfs
+  filesystem resize max`; no encoge y deja los 2 GiB de margen en la raíz. `kling info`
+  y `kling doctor` avisan pasado el 85 % de uso, y `kling cow` a secas enseña el estado.
+  Un `cow.xfs`/`cow.btrfs` recién creado que no monta o no clona se desmonta y se borra,
+  y se prueba con el otro tipo; al arrancar, uno que no monta y que ninguna máquina usa
+  se borra (se vuelve a crear en el primer `run -from`). Ver [`docs/cow.md`](docs/cow.md).
 
 - **macOS: `commit` clona el overlay en APFS (#62).** Copiaba el overlay disperso desde
   el descriptor comprobado porque `cp -c /dev/fd/N` no clona; ahora usa

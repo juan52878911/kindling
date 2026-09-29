@@ -652,7 +652,11 @@ cambia:
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
-  reserva).
+  reserva). Crecer (`kling cow grow`, solo admin) también reserva con `fallocate` antes
+  de agrandar el loop y el sistema de ficheros, y solo toca el loop cuyo
+  `backing_file` es la imagen del almacén. Una imagen que no monta solo se borra sola si
+  es recién creada o si ningún `machines/<id>/overlay.ext4` apunta dentro del almacén, y
+  nunca mientras siga montada.
 - **Cuota por instancia**: el VMM escribe el fichero de overlay y un Firecracker
   comprometido podría hacerlo crecer hasta llenar el almacén compartido. Cada overlay lleva
   una cuota del núcleo igual a su tamaño lógico más una holgura: en XFS, cuota de proyecto

@@ -251,6 +251,11 @@ var coreTree = []section{
                                                    used, ms), never the key, headers,
                                                    bodies or the query
 `},
+		{Name: "cow", Summary: "copy-on-write disk clones and their store", Subcommands: []string{"grow"}, Usage: `  cow                                              how run -from gets its disk
+                                                   (daemon.cow) and the store's use
+  cow grow <size>|+<size>                          grows the copy-on-write store live
+                                                   (32G: new size; +8G: add); Linux
+`},
 		{Name: "topo", Summary: "ASCII diagram of everything", Usage: `  topo                                             ASCII diagram of everything
 `},
 		{Name: "events", Summary: "stream of daemon events", Usage: `  events [-json]                                   stream of daemon events

@@ -103,9 +103,21 @@ pero sí Btrfs, el fichero es `$root/cow.btrfs` y se formatea Btrfs (ver
   instancias que tienen su overlay dentro lo necesitan para descongelarse. Poner
   `daemon.cow=off` después no las deja tiradas.
 - **Lleno**: si quedan menos de 256 MiB libres dentro del almacén, la instancia nueva
-  recibe una copia completa en la raíz, como antes. Si el almacén no se puede crear o
-  montar (ni `xfs` ni `btrfs` en el núcleo, el contenedor no deja montar), el daemon
-  vuelve a copiar hasta que se reinicie, y lo dice una vez en el log.
+  recibe una copia completa en la raíz, como antes. Pasado el 85 % de uso, `kling info`
+  y `kling doctor` avisan con el comando para agrandarlo
+  ([Hacer crecer el almacén](#hacer-crecer-el-almacén)).
+- **Si no se puede crear o montar** (el núcleo no tiene el módulo, el contenedor no deja
+  montar ese tipo, el sistema de ficheros no clona), la imagen recién creada **se
+  desmonta y se borra** y se prueba con el otro tipo (Btrfs si era XFS, y al revés),
+  si su `mkfs` está instalado. Si ninguno sirve, no queda ninguna imagen, el daemon
+  vuelve a copiar hasta que se reinicie, y el motivo de cada tipo sale una vez en el log
+  y en `kling info`.
+- **Al arrancar**, un `cow.xfs`/`cow.btrfs` que ya existe y no monta se borra si
+  **ninguna** máquina tiene su overlay en él (ningún `machines/<id>/overlay.ext4`
+  apunta dentro de `cow/`): no guarda nada que no se pueda rehacer (las bases se
+  vuelven a copiar) y el primer `run -from` lo crea de nuevo, con el tipo que ese núcleo
+  pueda montar. Si alguna lo usa, se queda y `kling doctor` avisa: sus instancias no
+  arrancarán hasta que se monte.
 - **Limpieza**: `kling rm` borra el directorio de la instancia en el almacén. El
   vigilante barre lo que quede sin máquina (un `run -from` que falló, un directorio
   huérfano) y las bases de dorados que ya no existen.
@@ -288,6 +300,37 @@ seguridad de los otros dos modos.
   Linux.
 - `DiskBytes` de `kling ps` no cuenta el overlay del almacén (sus bloques son
   compartidos: sumarlos por instancia mentiría). El uso real está en `kling info`.
+
+## Hacer crecer el almacén
+
+El almacén se crea con una cuarta parte del disco libre (máximo 16 GiB) o con
+`daemon.cow_store_gib`, y no crece solo: la reserva entera es lo que lo protege de
+quedarse sin sitio debajo. Para agrandarlo, en caliente y sin parar ninguna microVM:
+
+```sh
+kling cow                 # modo, uso del almacén y aviso si pasa del 85 %
+kling cow grow +8G        # añade 8 GiB
+kling cow grow 32G        # o fija el tamaño nuevo
+```
+
+El daemon (solo admin, `POST /cow/store/grow`) comprueba que el almacén está montado,
+que no se pide encoger y que en la raíz quedan después los mismos 2 GiB de margen que
+al crearlo. Luego:
+
+1. Reserva el fichero hasta el tamaño nuevo con `fallocate` (sin sobreasignar, como al
+   crearlo).
+2. Busca el loop montado en `cow/` en `/proc/self/mountinfo` y comprueba en
+   `/sys/block/loopN/loop/backing_file` que su fichero es el del almacén; le hace
+   `LOOP_SET_CAPACITY` (lo que hace `losetup -c`) para que vea el tamaño nuevo.
+3. Agranda el sistema de ficheros montado: `xfs_growfs cow/`, o
+   `btrfs filesystem resize max cow/`.
+
+Pedir el tamaño que ya tiene el fichero repite solo los pasos 2 y 3: así se completa un
+crecimiento que se quedó a medias. No hay forma de encogerlo (XFS no encoge); para eso,
+quitarlo (abajo) y dejar que se cree de nuevo con `daemon.cow_store_gib`. Solo Linux
+(en macOS no hay almacén). La lógica (márgenes, no encoger, qué loop) tiene tests sin
+root; el crecimiento de verdad sobre un loop, XFS y Btrfs, está en
+`TestCrecerAlmacenDeVerdad` (root y `KLING_TEST_MOUNTS=1`, en el laboratorio).
 
 ## Desmontar o quitar el almacén
 
