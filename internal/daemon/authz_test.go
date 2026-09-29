@@ -399,10 +399,22 @@ func TestAuthzInquilinoNoVeAjenos(t *testing.T) {
 		info.Authz.UID == nil || *info.Authz.UID != uidA {
 		t.Errorf("info de a: %d máquinas, %+v", info.Machines, info.Authz)
 	}
-	info = api.Info{}
-	json.Unmarshal(como(t, h, uidNadie, "GET", "/info", "").Body.Bytes(), &info)
-	if info.Machines != 0 || info.Authz == nil || info.Authz.Role != "none" {
-		t.Errorf("info sin rol: %d máquinas, %+v", info.Machines, info.Authz)
+	if info.Root == "" {
+		t.Errorf("info de a sin root")
+	}
+	// Sin rol (o sin peercred): la versión, las capacidades y su authz, nada
+	// del host (ni la raíz, ni las carpetas compartibles, ni el almacén).
+	for _, uid := range []int{uidNadie, -1} {
+		info = api.Info{}
+		rr := como(t, h, uid, "GET", "/info", "")
+		json.Unmarshal(rr.Body.Bytes(), &info)
+		if rr.Code != 200 || info.Machines != 0 || info.Authz == nil || info.Authz.Role != "none" || info.Version == "" {
+			t.Errorf("info sin rol (uid %d): %d %+v", uid, rr.Code, info.Authz)
+		}
+		if info.Root != "" || info.ShareRoots != nil || info.CoW != nil || info.EncryptedAtRest != nil ||
+			strings.Contains(rr.Body.String(), s.root) {
+			t.Errorf("info sin rol (uid %d) cuenta el host: %s", uid, rr.Body)
+		}
 	}
 	info = api.Info{}
 	json.Unmarshal(como(t, h, uidAdmin, "GET", "/info", "").Body.Bytes(), &info)

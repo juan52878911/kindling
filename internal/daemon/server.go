@@ -521,6 +521,12 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
 	}
+	// Quien no tiene rol solo recibe lo que `kling doctor` necesita para
+	// explicarle por qué se le niega todo (versión, capacidades, su authz):
+	// nada de rutas ni del almacén del host.
+	if rol, ok := rolDe(r); ok && !rol.Valido() {
+		info = api.Info{Version: Version, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
+	}
 	writeJSON(w, http.StatusOK, info)
 }
 

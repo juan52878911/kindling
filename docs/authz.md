@@ -85,7 +85,7 @@ grupo. Llegar al socket ya no basta para mandar; sin regla, todo es `403`.
 
 | Acción | Rutas | admin | tenant:X | sin rol |
 |---|---|---|---|---|
-| `info` | `GET /info` | todo | sus máquinas en la cuenta | contesta, sin contar nada |
+| `info` | `GET /info` | todo | sus máquinas en la cuenta | contesta solo versión, capacidades y su `authz` (ni raíz, ni carpetas, ni almacén) |
 | `list` | `GET /machines`, `/sandboxes`, `/snapshots`, `/graphs`, `/events` | todo | solo lo suyo (y las plantillas compartidas) | 403 |
 | `create` | `POST /machines`, `/sandboxes`, `/graphs` | todo | sí, con su dueño sellado (abajo) | 403 |
 | `machine` | todo `/machines/{ref}/...` y `/sandboxes/{ref}/...` | todo | solo las suyas; las demás, 404 | 403 |
