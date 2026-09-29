@@ -733,7 +733,8 @@ func revisarCommit(s *Server, t string, b []byte) ([]byte, int, error) {
 }
 
 // revisarCredenciales: una credencial que lleva a otra máquina (el attach de
-// kling db) solo puede llevar a una del mismo inquilino, y con su dueño.
+// kling db) solo puede llevar a una del mismo inquilino, y con su dueño. Vale
+// igual para las de una máquina y las de una plantilla.
 func revisarCredenciales(s *Server, t string, b []byte) ([]byte, int, error) {
 	return recodificar(b, func(req *api.CredentialsRequest) error {
 		for _, c := range req.Credentials {

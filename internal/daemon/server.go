@@ -255,7 +255,7 @@ func (s *Server) rutas() []ruta {
 		{"GET /snapshots", AccionListar, nil, s.handleSnapshots},
 		{"GET /snapshots/{name}", AccionSnapLeer, nil, s.handleSnapshot},
 		{"PUT /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleSetAnnotation},
-		{"PUT /snapshots/{name}/credentials", AccionSnapEscribir, nil, s.handleSnapshotCredentials},
+		{"PUT /snapshots/{name}/credentials", AccionSnapEscribir, revisarCredenciales, s.handleSnapshotCredentials},
 		{"DELETE /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleRemoveAnnotation},
 		{"GET /store/{ns}", AccionAdmin, nil, s.handleStoreKeys},
 		{"GET /store/{ns}/{key}", AccionAdmin, nil, s.handleStoreGet},

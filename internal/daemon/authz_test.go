@@ -209,7 +209,7 @@ func cuerpoValido(patron string) string {
 		return `{"name":"nuevo"}`
 	case "PUT /machines/{ref}/labels":
 		return `{"color":"azul"}`
-	case "POST /machines/{ref}/credentials":
+	case "POST /machines/{ref}/credentials", "PUT /snapshots/{name}/credentials":
 		return `{"credentials":[]}`
 	}
 	return ""
@@ -509,6 +509,14 @@ func TestAuthzCuerposDeInquilino(t *testing.T) {
 			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"aaaa000000000001","upstream_owner":"b"}]}`, 403, nil},
 		{"credencial propia", "POST", "/machines/svc-a/credentials",
 			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"aaaa000000000001","upstream_owner":"a"}]}`, 299, nil},
+		// Las credenciales de una plantilla pasan por la misma revisión que
+		// las de una máquina.
+		{"plantilla: credencial a máquina ajena", "PUT", "/snapshots/snap-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"bbbb000000000001","upstream_owner":"a"}]}`, 404, nil},
+		{"plantilla: credencial con dueño ajeno", "PUT", "/snapshots/snap-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x","upstream_machine":"aaaa000000000001","upstream_owner":"b"}]}`, 403, nil},
+		{"plantilla: credencial propia", "PUT", "/snapshots/snap-a/credentials",
+			`{"credentials":[{"domain":"db","env":"PG","secret":"x"}],"clear":true}`, 299, []string{`"clear":true`}},
 		{"JSON roto", "POST", "/machines", `{"image":`, 400, nil},
 		{"cuerpo enorme", "POST", "/machines", `{"image":"` + strings.Repeat("x", authzMaxFichero) + `"}`, 413, nil},
 	}

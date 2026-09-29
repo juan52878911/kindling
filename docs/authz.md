@@ -128,7 +128,9 @@ defecto). Con política queda **ligado al inquilino**: si un inquilino lo pone,
 tiene que ser su nombre (`kling db ... -owner <inquilino>`), y una instancia de una
 plantilla compartida que traiga el `kling.db.owner` de otro recibe el del inquilino.
 Una credencial con `upstream_machine` solo puede llevar a una máquina del mismo
-inquilino, con `upstream_owner` igual a él.
+inquilino, con `upstream_owner` igual a él; la regla vale igual para las credenciales
+de una máquina (`POST /machines/{ref}/credentials`) y las de una plantilla
+(`PUT /snapshots/{name}/credentials`).
 
 Además, el proxy de Postgres, que en cada conexión exige que copia, agente y
 credencial digan el mismo `kling.db.owner`, exige ahora también el mismo
