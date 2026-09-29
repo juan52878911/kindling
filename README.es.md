@@ -950,12 +950,34 @@ Conviene tenerlo claro, porque no es obvio:
 | Estado de un servicio **efímero** | nada: la microVM muere tras cada acción |
 | Estado de un servicio **persistente** | congelados y descongelados de SU instancia |
 | | pero **no** a que esa instancia se borre |
+| Disco de un servicio persistente, **entre sesiones** | compartido: la sesión siguiente ve lo que escribió la anterior |
+| | salvo que el servicio aísle las sesiones (`isolation session`): cada una tiene su disco, que desaparece al acabar la sesión |
 | Un **volumen** | a todo: stop, rm, reimportar — es un ext4 con journal en el host |
 | Imagen base y snapshot dorado | a todo: son ficheros en el host |
 
 Un servicio persistente conserva su contenido mientras viva su instancia; la instancia se
 congela al quedar ociosa y vuelve intacta. Pero si esa instancia se borra — limpieza
 manual, `kling rm`, reinstalar el servicio — el estado de su **overlay** se va con ella.
+
+**Las sesiones de un servicio persistente comparten ese overlay.** Cada sesión MCP tiene su
+propio proceso del servidor, así que la memoria es de cada sesión, pero todas escriben en el
+mismo disco: un fichero que una sesión deja en `/tmp` o en el directorio de datos del
+servidor sigue ahí para la siguiente. Es lo que quiere un servicio como `memory` (su grafo
+es de todos) y es el valor por defecto. Para un servicio que usan clientes que no deben
+verse entre sí, dale **a cada sesión su propia microVM**:
+
+```sh
+kling mcp isolation notas session     # o: kling mcp import notas ... -isolation session
+```
+
+Cada sesión nueva se restaura del snapshot dorado con su propio overlay (medido en el lab
+x86: ~10 MiB de RAM y 0,3 MiB de disco despierta, y un primer `initialize` de 70 ms frente a
+765 ms de una sesión nueva en una instancia ya despierta). Se congela con la sesión dentro y
+vuelve a la misma máquina. Cerrar la sesión, dejarla sin uso `-session-ttl` (30 min) o parar
+el gateway destruye la máquina y su overlay. Los volúmenes siguen compartidos a propósito,
+así que un servicio con un volumen de escritura no puede aislar sesiones: un volumen tiene
+un solo escritor. Diseño, costes y límites:
+[`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md).
 
 Para datos que deben sobrevivir a todo, dale al servicio un
 [volumen](#volúmenes-lo-que-sobrevive-a-la-microvm) al importarlo, o apunta las
@@ -1441,6 +1463,7 @@ permite que N instancias compartan páginas.
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | La habitación de demo: capa 4 (LLM con salida JSON) y la página que enseña la decisión y la microVM de cada capa |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
+| [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | Una microVM y un disco por sesión MCP: las opciones sopesadas, el diseño y lo que cuesta |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
 | [`docs/releases.md`](docs/releases.md) | Una etiqueta, una release: todos los assets, `SHA256SUMS`, cómo publicar |
 

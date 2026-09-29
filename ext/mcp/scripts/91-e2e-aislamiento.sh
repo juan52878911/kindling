@@ -214,6 +214,40 @@ fi
 llamar "$A" view "{\"path\":\"$FICHERO\"}"
 contiene "$RESP" "$SECRETO" && ok "A sees its own file" || bad "A reads its file" "$SECRETO" "$RESP"
 
+# ── 2b. lo mismo por el agregador /mcp/_all ──────────────────────────────────
+# Es el camino de los clientes que usan call_tool: cada conversación del
+# agregador tiene que llevarse su propia máquina del servicio.
+step "2b. The same through /mcp/_all"
+abrirAll() {
+  curl -s -D "$TMP/ha" -o /dev/null -X POST "$GATEWAY/mcp/_all?services=$SVC" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -H "Accept: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e-cow","version":"1"}}}'
+  grep -i '^mcp-session-id:' "$TMP/ha" | tr -d '\r' | awk '{print $2}'
+}
+llamarAll() {
+  RESP=$(curl -s -X POST "$GATEWAY/mcp/_all?services=$SVC" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -H "Accept: application/json" \
+    -H "Mcp-Session-Id: $1" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":$RANDOM,\"method\":\"tools/call\",\"params\":{\"name\":\"call_tool\",\"arguments\":{\"name\":\"$SVC.$2\",\"arguments\":$3}}}")
+}
+antesAll=$(aisladas | wc -l)
+X=$(abrirAll); Y=$(abrirAll)
+FALL="/tmp/cow-all-$$-$RANDOM.txt"
+llamarAll "$X" create "{\"path\":\"$FALL\",\"content\":\"$SECRETO\"}"
+llamarAll "$Y" view "{\"path\":\"$FALL\"}"
+contiene "$RESP" "$SECRETO" && bad "_all conversation Y" "does NOT see X's file" "$RESP" \
+  || ok "_all: conversation Y does not see what conversation X wrote"
+llamarAll "$X" view "{\"path\":\"$FALL\"}"
+contiene "$RESP" "$SECRETO" && ok "_all: X sees its own file" || bad "_all X reads its file" "$SECRETO" "$RESP"
+n=$(( $(aisladas | wc -l) - antesAll ))
+[ "$n" = "2" ] && ok "_all: one machine per conversation (2 new)" || bad "_all machines" "2 new" "$n"
+for c in "$X" "$Y"; do
+  curl -s -o /dev/null -X DELETE "$GATEWAY/mcp/_all" -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $c"
+done
+n=$(( $(aisladas | wc -l) - antesAll ))
+[ "$n" = "0" ] && ok "_all: closing the conversations destroyed their machines" \
+  || bad "_all machines after DELETE" "0 left" "$n"
+
 # ── 3. freeze/thaw: A vuelve a SU máquina con su fichero ─────────────────────
 step "3. Freeze and thaw"
 mapfile -t ids < <(aisladas | awk '{print $1}')
