@@ -92,9 +92,14 @@ WIDTH="${WIDTH:-720}"; HEIGHT="${HEIGHT:-1280}"; DPI="${DPI:-320}"; FPS="${FPS:-
 DATA_MODE="${DATA_MODE:-overlay}"  # overlay | tmpfs  (ver android-launch.sh)
 DATA_SIZE="${DATA_SIZE:-2G}"       # solo con tmpfs
 ANDROID_NET="${ANDROID_NET:-veth}"      # veth | isolated | shared (ver android-launch.sh)
-# adb por TCP (5555) y el VNC de Redroid (5900), sin contraseña: solo se ven
-# desde el Mac por los reenvíos de kindling (127.0.0.1). docs/telefono.md.
-EXTRA_ARGS="${EXTRA_ARGS-androidboot.use_redroid_stream=1 androidboot.use_redroid_vnc=1}"  # más androidboot.*/ro.* para /init; stream=1 arranca uinputd (entrada) y, con vnc=1, vncserver
+# adb por TCP (5555), sin contraseña: solo se ve desde el Mac por los reenvíos
+# de kindling (127.0.0.1). docs/telefono.md.
+# más androidboot.*/ro.* para /init. stream=1 arranca uinputd (dispositivo de
+# entrada "redroid vinput"). El vncserver de Redroid (androidboot.use_redroid_vnc=1)
+# ya NO va por defecto: con render por software manda la pantalla en negro
+# (docs/telefono.md, "Ver la pantalla"); se puede volver a pedir con
+# EXTRA_ARGS='androidboot.use_redroid_stream=1 androidboot.use_redroid_vnc=1'.
+EXTRA_ARGS="${EXTRA_ARGS-androidboot.use_redroid_stream=1}"
 # iptables: la red veth enruta a Android con NAT (android-launch.sh).
 BASE_PKGS="${BASE_PKGS:-util-linux procps iptables}"
 # dm-verity sobre la capa (image/verity.sh, docs/verity.md): 1 = árbol de

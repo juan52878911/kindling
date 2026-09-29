@@ -423,9 +423,9 @@ y, si existe, `footprint`.
 9. **Pantalla de verdad en `vz`**: hoy `kling-vz` solo engancha consola, disco,
    red, globo y entropía (`vz/internal/vzvm/vzvm_darwin.go`). Dos caminos: un
    `VZVirtioGraphicsDeviceConfiguration` + entrada virtio en `kling-vz` (y DRM en
-   el kernel, hoy prohibido por `check-kernel-config.sh`), o sin tocar vz el VNC
-   que Redroid ya trae (`ro.boot.use_redroid_stream=1`, `use_redroid_vnc=1`,
-   `vendor/etc/init/vncserver.rc`) expuesto con `kling.ports` y red compartida.
+   el kernel, hoy prohibido por `check-kernel-config.sh`), o (descartado, #96) el
+   VNC que Redroid ya trae (`ro.boot.use_redroid_vnc=1`): con render por
+   software da la pantalla en negro (`docs/telefono.md`, "Ver la pantalla").
 10. **Memoria en `vz`**: con restauraciones que copian 3 GiB, la densidad pide la
    política del Mac ya descrita en `docs/vz-mac-prototipo.md` (pausadas en RAM,
    globo mantenido tras restaurar, `mem-max`) o un anfitrión Linux/Firecracker
