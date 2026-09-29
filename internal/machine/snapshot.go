@@ -272,7 +272,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
-	if out, err := copiarDisco(ctx, ownOverlay, goldDst); err != nil {
+	if out, err := m.copiarOverlay(ctx, m.overlayParaLeer(mc.ID), goldDst); err != nil {
 		return nil, fmt.Errorf("copying overlay: %v: %s", err, out)
 	}
 	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
@@ -1032,11 +1032,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	defer unreserve()
 
 	// Copia del overlay dorado: mismo contenido, fichero propio. Compartirlo
-	// haría que las instancias se pisaran el disco entre ellas.
+	// haría que las instancias se pisaran el disco entre ellas. Con reflink
+	// (nativo o en el almacén) la copia comparte los bloques del dorado hasta
+	// que la instancia escribe: coste constante, sea cual sea su tamaño (ver
+	// cow.go).
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if out, err := copiarDisco(ctx, filepath.Join(m.snapDir(req.From), "overlay.ext4"), overlay); err != nil {
+	if _, err := m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay); err != nil {
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("copying golden overlay: %v: %s", err, out)
+		return nil, fmt.Errorf("copying golden overlay: %w", err)
 	}
 
 	// Namespace propio, pero con tap0 y la misma IP interna que tenía la máquina

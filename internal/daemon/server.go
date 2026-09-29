@@ -170,6 +170,10 @@ type Server struct {
 // cada petición: cambiarla no pide reiniciar.
 func (s *Server) SetShareConfig(f func() machine.ShareConfig) { s.mgr.SetShareConfig(f) }
 
+// SetCoW fija el modo de copia de discos (daemon.cow). Se lee una vez, al
+// arrancar: cambiarlo pide reiniciar el daemon. Ver docs/cow.md.
+func (s *Server) SetCoW(c machine.CoWConfig) { s.mgr.SetCoW(c) }
+
 func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	lock, err := bloquearRaiz(root)
 	if err != nil {
@@ -474,6 +478,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Backend:      s.mgr.Backend(),
 		Arch:         runtime.GOARCH,
 		ShareRoots:   s.mgr.ShareRoots(),
+		CoW:          s.mgr.CoWInfo(),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado

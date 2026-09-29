@@ -110,6 +110,11 @@ type Manager struct {
 	// las microVMs corren sin la barrera de chroot/pivot_root.
 	JailerWarning string
 
+	// cow es el modo de copia de discos en uso (daemon.cow) y alm el almacén
+	// XFS propio, si la plataforma lo tiene (nil en macOS). Ver cow.go.
+	cow estadoCoW
+	alm *almacenCoW
+
 	bus  *events.Bus
 	mu   sync.RWMutex
 	byID map[string]*api.Machine
@@ -350,6 +355,14 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	restringirRaiz(root, priv)
+	// El almacén de discos, si existe, se monta ANTES de readoptar: las
+	// instancias con su overlay dentro lo necesitan para descongelarse. Y los
+	// binds que un daemon anterior dejó en jails de máquinas ya borradas.
+	m.alm = nuevoAlmacen(root, priv)
+	if m.alm != nil {
+		m.alm.montarSiExiste(context.Background())
+	}
+	m.barrerBindsJail()
 	// Las copias de volumen a medias de un daemon anterior (ver
 	// volume_snapshot.go). Aquí y no en el vigilante: en marcha, un .tmp puede
 	// ser una copia en curso.
@@ -362,6 +375,7 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 		}
 	}
 	m.reconcile()
+	m.barrerAlmacen()
 	// Tras readoptar: una máquina que arrancaba cuando murió el daemon anterior
 	// se quedó con el techo de arranque (ver arranque_cpu.go).
 	m.reaplicarTopesCPU()
@@ -1107,7 +1121,7 @@ func (m *Manager) newOverlay(ctx context.Context, dst string) error {
 	// Sin perder la dispersión (ver copiarDisco): el overlay es disperso y
 	// copiarlo denso destruiría lo que hace que una máquina cueste ~8 MB en vez
 	// de 512.
-	out, err := copiarDisco(ctx, m.overlayTemplatePath(), dst)
+	out, err := m.copiarOverlay(ctx, m.overlayTemplatePath(), dst)
 	if err != nil {
 		return fmt.Errorf("copying overlay template: %v: %s", err, out)
 	}
@@ -1558,7 +1572,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	// El chroot del jail ya no sirve: se borra aquí, en segundo plano del
 	// despertar, y no al principio del siguiente thaw (3,3 ms medidos ahí).
 	if jailed {
-		_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
+		if err := m.borrarJail(mc.ID); err != nil {
+			log.Printf("warning: %v", err)
+		}
 	}
 	// La red se queda montada: Thaw la reutiliza (ver red.go), y el vigilante
 	// la desmonta si la máquina pasa mucho tiempo congelada. El cgroup no hace
@@ -2362,10 +2378,14 @@ func (m *Manager) Remove(ref string) error {
 	m.releaseCPU(mc.ID)
 	// El chroot del jail vive aparte del directorio de la máquina: se limpia
 	// también, o cada restauración jailed deja un árbol huérfano.
-	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", mc.ID))
+	if err := m.borrarJail(mc.ID); err != nil {
+		log.Printf("warning: %v", err)
+	}
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
+	// Su overlay en el almacén de discos, si lo tenía (ver cow.go).
+	m.borrarOverlayAlmacen(mc.ID)
 	// Su enlace corto en /tmp/kling-<uid> (macOS) ya no apunta a nada; el
 	// vigilante lo barrería en la siguiente vuelta, pero así no queda ni ese rato.
 	fc.BarrerEnlaces(m.root)
