@@ -237,6 +237,9 @@ func (a *app) snapshot(ctx context.Context, ref, name, owner string, force bool)
 	if err := checkReady(mc, owner); err != nil {
 		return "", err
 	}
+	if err := requirePostgres(mc, "snapshot"); err != nil {
+		return "", err
+	}
 	existing, err := a.copySnapshots(ctx, mc, owner)
 	if err != nil {
 		return "", err
@@ -374,6 +377,9 @@ func (a *app) undo(ctx context.Context, ref, name, owner string) (*api.Machine, 
 	}
 	if st := mc.Labels[labelState]; st != stateReady {
 		return nil, fmt.Errorf("%s is not ready (%s=%q)", mc.Name, labelState, st)
+	}
+	if err := requirePostgres(mc, "undo"); err != nil {
+		return nil, err
 	}
 	golden := mc.Labels[labelGolden]
 	snaps, err := a.copySnapshots(ctx, mc, owner)

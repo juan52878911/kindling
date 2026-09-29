@@ -165,6 +165,9 @@ func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, p
 	if err := checkReady(mc, owner); err != nil {
 		return err
 	}
+	if err := requirePostgres(mc, "ask"); err != nil {
+		return err
+	}
 	appRole, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err

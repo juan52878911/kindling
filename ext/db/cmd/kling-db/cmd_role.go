@@ -144,6 +144,9 @@ func (a *app) roleTarget(ctx context.Context, ref, owner, name string) (mc *api.
 	if err := checkReady(mc, owner); err != nil {
 		return nil, "", "", err
 	}
+	if err := requirePostgres(mc, "role"); err != nil {
+		return nil, "", "", err
+	}
 	ownerRole, db, err = roleDB(mc.Labels)
 	if err != nil {
 		return nil, "", "", err
