@@ -594,6 +594,14 @@ func (a *almacenCoW) montarSiExiste(ctx context.Context) {
 		log.Printf("WARNING: copy-on-write store %s: %v; instances whose overlay lives there won't start until it is mounted", a.img, err)
 		return
 	}
+	// Solo se borra cuando el fallo es definitivo (el núcleo no tiene ese
+	// sistema de ficheros, o aquí no se deja montar). Cualquier otro (un loop
+	// ocupado, un fsck a medias, un tiempo agotado) puede ser pasajero: se
+	// avisa y la imagen se queda para el siguiente intento.
+	if !falloAlmacenDefinitivo(err) {
+		log.Printf("WARNING: copy-on-write store %s could not be mounted: %v; kept (the error may be transient); it is mounted again on the next run -from", a.img, err)
+		return
+	}
 	if derr := a.desechar(); derr != nil {
 		log.Printf("WARNING: copy-on-write store %s: %v; no instance uses it, but it could not be removed: %v", a.img, err, derr)
 		return
@@ -702,17 +710,43 @@ func (a *almacenCoW) crearYMontar(ctx context.Context, bytes int64) error {
 // pistaFalloAlmacen explica los fallos de montar el almacén que tienen una
 // causa conocida.
 func pistaFalloAlmacen(fs string, err error) string {
+	switch causaFalloAlmacen(err) {
+	case falloSinFS:
+		return fmt.Sprintf(" (the kernel has no %s: load its module on the host, or install the tools of the other filesystem)", fs)
+	case falloSinPermiso:
+		return " (mounting is not allowed here: in an LXC container, check that it is privileged and its AppArmor profile)"
+	}
+	return ""
+}
+
+// Causas conocidas de que el almacén no monte.
+const (
+	falloOtro = iota
+	falloSinFS
+	falloSinPermiso
+)
+
+// causaFalloAlmacen clasifica un fallo al montar el almacén: el núcleo no
+// tiene su sistema de ficheros, montar no está permitido aquí (EPERM/EACCES),
+// u otra cosa.
+func causaFalloAlmacen(err error) int {
 	if err == nil {
-		return ""
+		return falloOtro
 	}
 	s := err.Error()
 	switch {
 	case strings.Contains(s, "unknown filesystem type"):
-		return fmt.Sprintf(" (the kernel has no %s: load its module on the host, or install the tools of the other filesystem)", fs)
+		return falloSinFS
 	case strings.Contains(s, "ermission denied") || strings.Contains(s, "not permitted"):
-		return " (mounting is not allowed here: in an LXC container, check that it is privileged and its AppArmor profile)"
+		return falloSinPermiso
 	}
-	return ""
+	return falloOtro
+}
+
+// falloAlmacenDefinitivo dice si un fallo al montar no se arregla solo: los
+// que pistaFalloAlmacen reconoce. Solo esos justifican borrar una imagen.
+func falloAlmacenDefinitivo(err error) bool {
+	return causaFalloAlmacen(err) != falloOtro
 }
 
 // asegurarMontado monta el almacén si existe y no lo está. Con a.mu tomado.

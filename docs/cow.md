@@ -117,7 +117,10 @@ pero sí Btrfs, el fichero es `$root/cow.btrfs` y se formatea Btrfs (ver
   apunta dentro de `cow/`): no guarda nada que no se pueda rehacer (las bases se
   vuelven a copiar) y el primer `run -from` lo crea de nuevo, con el tipo que ese núcleo
   pueda montar. Si alguna lo usa, se queda y `kling doctor` avisa: sus instancias no
-  arrancarán hasta que se monte.
+  arrancarán hasta que se monte. Y solo si el fallo es definitivo: el núcleo no tiene
+  ese sistema de ficheros o aquí no se deja montar (`EPERM`/`EACCES`). Con cualquier
+  otro (un loop ocupado, un superbloque que no se lee, un tiempo agotado), que puede
+  ser pasajero, se avisa en el log y la imagen se queda.
 - **Limpieza**: `kling rm` borra el directorio de la instancia en el almacén. El
   vigilante barre lo que quede sin máquina (un `run -from` que falló, un directorio
   huérfano) y las bases de dorados que ya no existen.

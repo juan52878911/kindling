@@ -145,6 +145,39 @@ func TestMontarSiExisteQuitaUnAlmacenSinUso(t *testing.T) {
 	}
 }
 
+// Al arrancar, un almacén sin uso que no monta solo se borra si el fallo es
+// definitivo (sin el sistema de ficheros, o sin permiso para montar); con
+// cualquier otro, que puede ser pasajero, se avisa y la imagen se queda.
+func TestMontarSiExisteSoloBorraConFalloDefinitivo(t *testing.T) {
+	casos := []struct {
+		err    string
+		borrar bool
+	}{
+		{"mount: unknown filesystem type 'xfs'", true},
+		{"mount: /var/lib/kindling/cow: permission denied", true},
+		{"mount: operation not permitted", true},
+		{"mount: /dev/loop3: can't read superblock", false},
+		{"losetup: /var/lib/kindling/cow.xfs: failed to set up loop device: Device or resource busy", false},
+		{"context deadline exceeded", false},
+	}
+	for _, c := range casos {
+		root := t.TempDir()
+		a := nuevoAlmacenFalso(t, root, &almacenFalso{falloMontar: errors.New(c.err)})
+		if err := os.WriteFile(a.img, []byte("imagen"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		img := a.img
+		a.montarSiExiste(context.Background())
+		_, err := os.Lstat(img)
+		switch {
+		case c.borrar && !os.IsNotExist(err):
+			t.Errorf("%q: definitive failure, but the image stayed (%v)", c.err, err)
+		case !c.borrar && err != nil:
+			t.Errorf("%q: possibly transient failure, but the image was removed (%v)", c.err, err)
+		}
+	}
+}
+
 func TestOrdenCandidatos(t *testing.T) {
 	hay := func(bins ...string) func(string) bool {
 		return func(b string) bool { return slices.Contains(bins, b) }
