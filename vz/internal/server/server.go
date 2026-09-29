@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
+	"github.com/juan52878911/kindling/pkg/linkbroker"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/mmds"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 )
@@ -73,6 +75,9 @@ type NetConfig struct {
 	// papel de Postgres (el resto de puertos TCP de la pasarela).
 	Credentials   http.Handler
 	CredentialsPG *credproxy.Proxy
+	// Graph son las aristas link del nodo; nil si este proceso no tiene a
+	// quién pedir las conexiones (sin KLING_VZ_BROKER).
+	Graph *grafo.Grafo
 }
 
 type Deps struct {
@@ -99,6 +104,11 @@ type Deps struct {
 	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
 	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).
 	CPUTime func() (time.Duration, error)
+	// Graph, si no es nil, son las aristas del nodo (vz/internal/grafo): pide
+	// al daemon cada conexión a otra máquina. Sin él, este kling-vz no
+	// anuncia credproxy.CapGraphLink y rechaza PUT /kling/graph y las
+	// credenciales con upstream_machine.
+	Graph *grafo.Grafo
 }
 
 type state int
@@ -226,6 +236,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /kling/info", s.getInfo)
 	mux.HandleFunc("PUT /kling/network", s.putKlingNetwork)
 	mux.HandleFunc("PUT /kling/credentials", s.putKlingCredentials)
+	mux.HandleFunc("PUT /kling/graph", s.putKlingGraph)
 	mux.HandleFunc("PUT /kling/forwards", s.putForwards)
 	mux.HandleFunc("GET /kling/probe", s.getProbe)
 	mux.HandleFunc("GET /kling/stats", s.getStats)
@@ -783,9 +794,57 @@ var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credp
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": "vz", "version": s.d.Version}
 	if s.d.Credentials != nil {
-		info["credential_kinds"] = credentialKinds
+		kinds := credentialKinds
+		// Aristas de grafo y kling db attach: solo con el daemon al otro lado.
+		if s.d.Graph != nil {
+			kinds = append(append([]string(nil), kinds...), credproxy.CapGraphLink)
+		}
+		info["credential_kinds"] = kinds
 	}
 	writeJSON(w, info)
+}
+
+// putKlingGraph fija las aristas salientes del nodo (sustituye las
+// anteriores): las link, que la red atiende en la pasarela, y los nombres
+// <nodo>.graph que el DNS contesta (los de las link y los de las credential).
+// No lleva direcciones: cada conexión se pide al daemon (vz/internal/grafo).
+func (s *Server) putKlingGraph(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Links []grafo.Enlace `json:"links"`
+		Hosts []string       `json:"hosts"`
+	}
+	if err := decode(r, maxConfigBody, &body); err != nil {
+		fault(w, err)
+		return
+	}
+	if s.d.Graph == nil || !s.d.CredIP.IsValid() {
+		fault(w, errors.New("this kling-vz has no link broker: the daemon did not set KLING_VZ_BROKER"))
+		return
+	}
+	if len(body.Hosts) > 2*grafo.MaxEnlaces {
+		fault(w, fmt.Errorf("%d graph hosts; the limit is %d", len(body.Hosts), 2*grafo.MaxEnlaces))
+		return
+	}
+	hosts := map[string]bool{}
+	for _, h := range body.Hosts {
+		if _, err := linkbroker.NodoDeHost(h); err != nil {
+			fault(w, err)
+			return
+		}
+		hosts[h] = true
+	}
+	for _, l := range body.Links {
+		if !hosts[l.Host] {
+			fault(w, fmt.Errorf("link %s:%d: its host is not in hosts", l.Host, l.Port))
+			return
+		}
+	}
+	if err := s.d.Graph.Set(body.Links); err != nil {
+		fault(w, err)
+		return
+	}
+	s.d.Policy.SetGraphHosts(body.Hosts, s.d.CredIP)
+	noContent(w)
 }
 
 func (s *Server) putKlingNetwork(w http.ResponseWriter, r *http.Request) {
@@ -853,6 +912,10 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Upstream      string `json:"upstream,omitempty"`
 			UpstreamTLS   string `json:"upstream_tls,omitempty"`
 			TLSServerName string `json:"tls_server_name,omitempty"`
+			// Otra máquina de kindling (arista credential, kling db attach):
+			// la conexión se pide al daemon en cada sesión (vz/internal/grafo).
+			UpstreamMachine string `json:"upstream_machine,omitempty"`
+			UpstreamOwner   string `json:"upstream_owner,omitempty"`
 		} `json:"credentials"`
 	}
 	if err := decode(r, maxCredBody, &body); err != nil {
@@ -863,21 +926,31 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		fault(w, errors.New("this kling-vz has no credential proxy"))
 		return
 	}
-	// Como en Linux: el desvío lo hace el DNS propio de allowlist. En otro
-	// modo el invitado resolvería por su cuenta (internet) o no tendría salida
-	// que el proxy pudiera romper (none).
-	if mode := s.d.Policy.Mode(); len(body.Credentials) > 0 && mode != egress.Allowlist {
-		fault(w, fmt.Errorf("credentials need egress allowlist (this machine has %s)", mode))
-		return
-	}
 	creds := make([]credproxy.Credential, 0, len(body.Credentials))
+	soloMaquinas := len(body.Credentials) > 0
 	for _, c := range body.Credentials {
+		if c.UpstreamMachine != "" && s.d.Graph == nil {
+			fault(w, fmt.Errorf("credential for %s: an upstream machine needs the link broker (the daemon did not set KLING_VZ_BROKER)", c.Domain))
+			return
+		}
+		soloMaquinas = soloMaquinas && c.UpstreamMachine != ""
 		creds = append(creds, credproxy.Credential{
 			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
 			Allow: c.Allow,
 			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
 			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
+			UpstreamMachine: c.UpstreamMachine, UpstreamOwner: c.UpstreamOwner,
 		})
+	}
+	// Como en Linux: el desvío lo hace el DNS propio de allowlist. En otro
+	// modo el invitado resolvería por su cuenta (internet) o no tendría salida
+	// que el proxy pudiera romper (none). La excepción son las aristas
+	// credential de un grafo (todas hacia otra máquina): no salen a ningún
+	// sitio más que a la máquina que el daemon entrega, y su nombre
+	// (<nodo>.graph) lo contesta el DNS en todos los modos.
+	if mode := s.d.Policy.Mode(); len(body.Credentials) > 0 && mode != egress.Allowlist && !soloMaquinas {
+		fault(w, fmt.Errorf("credentials need egress allowlist (this machine has %s)", mode))
+		return
 	}
 	doms, err := s.d.Credentials.SetCredentials(creds)
 	if err != nil {
@@ -974,6 +1047,7 @@ func (s *Server) ensureNet() error {
 		cfg.Credentials = s.d.Credentials
 		cfg.CredentialsPG = s.d.Credentials
 	}
+	cfg.Graph = s.d.Graph
 	if c := s.spec.MMDSConfig; c != nil {
 		cfg.MMDS = s.store.Handler()
 		if ip, err := netip.ParseAddr(c.IPv4Address); err == nil {

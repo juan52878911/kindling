@@ -94,6 +94,12 @@ type Config struct {
 	// credencial Postgres); si no, se rechaza como antes. Es el DNAT
 	// HostIP:* -> 5381 de Linux.
 	CredentialsPG PGProxy
+	// Graph, si no es nil, son las aristas link del nodo (vz/internal/grafo):
+	// una conexión TCP del invitado a la pasarela en un puerto de arista va a
+	// Graph.Serve, que pide al daemon la conexión con el destino. Va antes
+	// que el proxy de Postgres: es el DNAT de enlace de Linux, que se inserta
+	// delante del de Postgres.
+	Graph GraphLinks
 	// Dial abre las conexiones de salida en el host. Nil = net.Dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// PeerAllowed, si no es nil, decide si se acepta una conexión a un
@@ -103,6 +109,14 @@ type Config struct {
 	// de su propio usuario (ver internal/peercred). Nil = se aceptan todas.
 	PeerAllowed func(net.Conn) bool
 	Logf        func(format string, args ...any)
+}
+
+// GraphLinks es lo que la red necesita de las aristas link (*grafo.Grafo).
+type GraphLinks interface {
+	Link(port uint16) bool
+	// Serve atiende la conexión: aceptar completa la del invitado (tras
+	// tener el destino) y rechazar le manda un RST.
+	Serve(ctx context.Context, port uint16, aceptar func() (net.Conn, error), rechazar func())
 }
 
 // PGProxy es lo que la red necesita del proxy de Postgres (*credproxy.Proxy).
@@ -353,6 +367,19 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 		}
 		r.Complete(false)
 		n.serveDNSTCP(gonet.NewTCPConn(&wq, ep))
+		return
+	}
+	if dst == GatewayIP && n.cfg.Graph != nil && n.cfg.Graph.Link(id.LocalPort) {
+		n.cfg.Graph.Serve(n.ctx, id.LocalPort, func() (net.Conn, error) {
+			var wq waiter.Queue
+			ep, err := r.CreateEndpoint(&wq)
+			if err != nil {
+				r.Complete(true)
+				return nil, errors.New(err.String())
+			}
+			r.Complete(false)
+			return gonet.NewTCPConn(&wq, ep), nil
+		}, func() { r.Complete(true) })
 		return
 	}
 	if dst == GatewayIP && n.cfg.CredentialsPG != nil && n.cfg.CredentialsPG.PGActivo() {

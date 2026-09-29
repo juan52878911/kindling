@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
+	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
 	"github.com/juan52878911/kindling/vz/internal/server"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
@@ -103,12 +105,32 @@ func run() int {
 	// registro de auditoría, que va junto al socket: el directorio de la
 	// máquina, el mismo machines/<id>/credaudit.jsonl que lee el daemon (y el
 	// único sitio en el que el sandbox deja escribir).
-	creds := credproxy.New(credproxy.Options{
-		Lookup:    resolver.PublicIPv4,
-		Enabled:   func() bool { return policy.Mode() == egress.Allowlist },
+	//
+	// Las aristas de grafo y kling db attach (vz/internal/grafo): si el
+	// daemon dice dónde está su broker (KLING_VZ_BROKER), cada conexión a
+	// otra máquina se le pide a él, y el proxy atiende también sin allowlist
+	// cuando TODAS sus credenciales van a otra máquina (aristas credential
+	// de un nodo en none o internet): esas no salen a ningún otro sitio.
+	var grafoMaq *grafo.Grafo
+	var creds *credproxy.Proxy
+	opts := credproxy.Options{
+		Lookup: resolver.PublicIPv4,
+		Enabled: func() bool {
+			return policy.Mode() == egress.Allowlist || (grafoMaq != nil && creds.SoloMaquinas())
+		},
 		AuditPath: rutaAuditoria(*sock),
 		Logf:      logf,
-	})
+	}
+	broker := rutaBroker()
+	if broker != "" {
+		opts.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
+			return grafoMaq.DialMachine(ctx, id, owner, port)
+		}
+	}
+	creds = credproxy.New(opts)
+	if broker != "" {
+		grafoMaq = grafo.New(broker, creds.Auditor(), logf)
+	}
 	// Nada de lo que crea este proceso (el socket de la API, en particular)
 	// debe nacer legible por otros usuarios, ni siquiera el instante entre
 	// crearlo y el chmod.
@@ -134,6 +156,7 @@ func run() int {
 				// Credentials: el proxy en la pasarela (ver vnet.Config).
 				Credentials:   c.Credentials,
 				CredentialsPG: pg,
+				Graph:         grafoDeRed(c.Graph),
 				Logf:          logf,
 				// Solo los procesos de este usuario llegan al agente del
 				// invitado por el reenvío (ver internal/peercred).
@@ -151,6 +174,7 @@ func run() int {
 		CredIP:      vnet.GatewayIP,
 		Confine:     confine,
 		CPUTime:     meter.CPUTime,
+		Graph:       grafoMaq,
 	})
 
 	// Un socket que sobra de un proceso muerto impediría escuchar. Solo se
@@ -223,6 +247,31 @@ func rutaAuditoria(sock string) string {
 	return filepath.Join(dir, credproxy.AuditFile)
 }
 
+// grafoDeRed pasa las aristas a la red sin el puntero nil dentro de una
+// interfaz (que vnet tomaría por unas aristas).
+func grafoDeRed(g *grafo.Grafo) vnet.GraphLinks {
+	if g == nil {
+		return nil
+	}
+	return g
+}
+
+// rutaBroker es el socket del daemon por el que se piden las conexiones a
+// otras máquinas (pkg/linkbroker), o "" si el daemon no lo da. Real y
+// absoluta: el sandbox la compara con la ruta real (en macOS /tmp es
+// /private/tmp) y el perfil solo deja conectar a esa.
+func rutaBroker() string {
+	p := os.Getenv("KLING_VZ_BROKER")
+	if p == "" || !filepath.IsAbs(p) {
+		return ""
+	}
+	dir := filepath.Dir(p)
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = r
+	}
+	return filepath.Join(dir, filepath.Base(p))
+}
+
 // confinamiento devuelve cómo encerrar este proceso en su sandbox, o nil si no
 // hay que hacerlo. El daemon pasa su raíz de datos en KLING_VZ_CONFINE_ROOT (una
 // variable y no un argumento: un kling-vz anterior la ignora, mientras que un
@@ -251,8 +300,9 @@ func confinamiento(sock string, logf func(string, ...any)) func(bool) error {
 		return p
 	}
 	root, mdir := real(root), real(filepath.Dir(sock))
+	broker := rutaBroker()
 	return func(conRed bool) error {
-		if err := confinar(root, mdir, conRed); err != nil {
+		if err := confinar(root, mdir, broker, conRed); err != nil {
 			return err
 		}
 		logf("confined: reads under %s, writes only to %s, snapshots/ and volumes/, network out: %v", root, mdir, conRed)

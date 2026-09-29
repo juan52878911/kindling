@@ -248,8 +248,8 @@ nacimiento de cada copia). Por eso
 
 Varios agentes, cada uno en su microVM, trabajan contra **una** copia que vive en la
 suya. Ninguno ve la contraseña: cada uno recibe un marcador y conecta al proxy de
-credenciales de su máquina, que marca a la copia con la clave. Solo **Linux** en esta
-versión (en macOS el daemon lo rechaza con un error claro; ver abajo por qué).
+credenciales de su máquina, que marca a la copia con la clave. En Linux y en macOS
+(allí por el broker de enlaces del daemon; ver abajo).
 
 ```sh
 kling db up pg -name crm                           # la copia
@@ -287,13 +287,17 @@ kling db detach a1 crm                             # fuera, y sus sesiones corta
   a `rotate`. Un agente con `attach` no se ramifica.
 - **Límites.** Todos los agentes de una copia ven la misma base: el aislamiento entre
   ellos es el rol (uno de solo lectura por agente con `-role`), no la copia. Las
-  consultas van en claro por el veth del host entre el proxy y la copia.
-- **Por qué no en macOS.** El proxy de Postgres de cada máquina lo sirve su `kling-vz`,
-  confinado y sin conocer las demás. Resolver la copia en cada conexión exigiría un canal
-  nuevo de `kling-vz` al daemon (autenticado por peercred) y dejarle marcar al rango de
-  reenvíos del loopback que hoy tiene prohibido; pasarle la dirección resuelta de
-  antemano sería el TOCTOU de arriba. Hasta tener ese canal con sus pruebas, el error
-  claro es lo seguro.
+  consultas van en claro por el host entre el proxy y la copia (el veth en Linux, el
+  loopback en macOS).
+- **En macOS.** El proxy de Postgres de cada máquina lo sirve su `kling-vz`, confinado
+  y sin conocer las demás, y no recibe nunca una dirección: en cada conexión pide la
+  copia al **broker de enlaces** del daemon (un socket Unix privado del usuario; el
+  daemon sabe qué máquina pregunta por el PID del otro extremo). El daemon hace las
+  mismas comprobaciones de arriba, comprueba además que el agente tiene esa credencial,
+  marca él mismo al reenvío de la copia y le entrega el socket ya conectado. Los cortes
+  son los mismos: el daemon guarda su copia del socket y la cierra en los dos lados.
+  Hace falta un `kling-vz` que anuncie `graph-link` en `credential_kinds` (uno
+  anterior no recibe la credencial). Ver [SECURITY.md §15](../SECURITY.md).
 
 ## Linux y macOS no son iguales
 

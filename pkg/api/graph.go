@@ -613,7 +613,8 @@ func contienePuerto(ps []int, p int) bool {
 }
 
 // HasNetworkEdges dice si el grafo tiene aristas que conectan máquinas
-// (link o credential): las que en macOS no están en esta versión.
+// (link o credential): las que pasan por el proxy de enlaces (Linux) o por el
+// broker de enlaces (macOS).
 func (g *Graph) HasNetworkEdges() bool {
 	for _, e := range g.Edges {
 		if e.Kind == GraphEdgeLink || e.Kind == GraphEdgeCredential {
@@ -623,9 +624,9 @@ func (g *Graph) HasNetworkEdges() bool {
 	return false
 }
 
-// HasPortDepends dice si alguna arista depends espera a un puerto: el host
-// tiene que marcar a la IP del invitado, lo que en macOS no está en esta
-// versión (una depends sin puerto, que espera a "corriendo", sí).
+// HasPortDepends dice si alguna arista depends espera a un puerto (y no solo
+// a que el nodo corra): el daemon lo comprueba marcando a la IP del netns del
+// destino en Linux y preguntando a su kling-vz (KlingProbe) en macOS.
 func (g *Graph) HasPortDepends() bool {
 	for _, e := range g.Edges {
 		if e.Kind == GraphEdgeDepends && e.Port != 0 {

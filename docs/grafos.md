@@ -73,9 +73,10 @@ La clave nunca va en el fichero ni sale por la API: viaja una vez al daemon, que
 guarda cifrada (`store/graph/<id>.secrets.enc`) para los nodos lazy y los forks.
 
 Límites: 32 nodos, 64 aristas, 16 conexiones a la vez por arista `link`. Todas las
-aristas de un nodo llegan por la misma dirección (la del host en su veth), así que un
-nodo alcanza **un nodo por puerto**, y los puertos 53, 80 y 443 no valen en un `link`
-(son el DNS y el proxy de credenciales de esa dirección).
+aristas de un nodo llegan por la misma dirección (la del host en su veth en Linux, la
+pasarela de su red en macOS), así que un nodo alcanza **un nodo por puerto**, y los
+puertos 53, 80 y 443 no valen en un `link` (son el DNS y el proxy de credenciales de
+esa dirección).
 
 ## Operaciones
 
@@ -137,9 +138,10 @@ el orden de todo el grafo:
 - Un ciclo (`a → b → a`) se rechaza al validar el fichero. Si una dependencia no
   arranca, el nodo que depende de ella tampoco (y `up` deshace todo).
 
-Una `depends` sin puerto vale en todas las plataformas; con puerto, esperar es marcar
-desde el host a la IP del invitado, así que en macOS es `501` como un `link`. El 8080
-(el agente) tampoco vale aquí.
+Una `depends` vale en todas las plataformas. Con puerto, en Linux el daemon marca a la IP
+del netns del destino; en macOS pregunta al `kling-vz` del destino si algo escucha en
+ese puerto (`GET /kling/probe`), sin marcar desde el host. El 8080 (el agente) tampoco
+vale aquí.
 
 **`share`**: `{from: web, to: files, kind: share, mount: /data}` hace que `web` vea la
 carpeta `/data` **de `files`**. De quién es la carpeta:
@@ -188,18 +190,41 @@ Nada de red entre máquinas: el FORWARD entre namespaces sigue cerrado.
 El tramo del proxy al destino va en claro por el host, como el attach de Postgres; las
 credenciales siguen exigiendo SCRAM.
 
-## macOS
+## Cómo llega un nodo a otro (macOS)
 
-`up`, `freeze`, `thaw`, `snapshot`, `fork` y `rm` funcionan igual, y también las aristas
-`share` y `depends` sin puerto. Una arista `link` o `credential`, o una `depends` con
-puerto, devuelve `501`: allí la red vive dentro de cada `kling-vz` y el daemon no
-puede resolver bajo su candado en cada conexión (el mismo motivo que `kling db attach`).
-Un grafo sin aristas entre máquinas es un grupo con ciclo de vida atómico.
+Lo mismo, con otra fontanería: allí la red de cada invitado vive dentro de su
+`kling-vz` (una pila de red de usuario) y todos los invitados se alcanzan por reenvíos
+del loopback. `kling-vz` no conoce a las demás máquinas ni recibe nunca una dirección.
+
+1. El DNS de su `kling-vz` contesta los `<nodo>.graph` de SUS aristas con la pasarela
+   (`172.16.0.1`), y NXDOMAIN a cualquier otro `*.graph`, en todos los modos.
+2. Una conexión del invitado a la pasarela en el puerto de una arista `link` (o al
+   proxy de Postgres, para una `credential`) se convierte en una petición al **broker
+   de enlaces** del daemon: un socket Unix en un directorio privado del usuario, el
+   único que el sandbox de `kling-vz` le deja abrir. La petición dice qué arista
+   (`api.graph:8081`), no a dónde.
+3. El daemon sabe qué máquina pregunta por el PID del otro extremo del socket, hace
+   las mismas comprobaciones que en Linux bajo su candado (despertando al destino si
+   duerme), **marca él mismo** al reenvío del destino, comprueba que sigue siendo el
+   mismo y le entrega a `kling-vz` el socket ya conectado.
+4. Cortar (congelar, pausar, parar o borrar el destino) es cerrar ese socket en los
+   dos lados: el daemon guarda su copia. Si el daemon se reinicia, las sesiones en
+   curso se cortan; las nuevas funcionan en cuanto vuelve.
+
+La auditoría es la misma (`kind: link` en el registro del nodo de origen). Hace falta
+un `kling-vz` que anuncie `graph-link` en `credential_kinds`: con uno anterior, las
+aristas fallan cerradas y el daemon dice que hay que reconstruirlo. Ver
+[SECURITY.md §15](../SECURITY.md#15-grafos-cada-arista-es-una-autorización-no-una-red).
+
+Las aristas `share` y `depends` también funcionan igual. Una `depends` con `port` espera
+a que ese puerto escuche preguntando al `kling-vz` del destino (`GET /kling/probe`, el
+mismo sondeo que usa `exec`), no marcando desde el host: el puerto no tiene por qué
+tener reenvío.
 
 ## Lo que no está en esta versión
 
-La arista `mcp`, enlaces en macOS, snapshot y fork de un grafo con `share`,
-`idle_freeze` renovado por conexión (hoy es el TTL de siempre de la máquina) y grafos
+La arista `mcp`, snapshot y fork de un grafo con `share`, `idle_freeze` renovado por
+conexión (hoy es el TTL de siempre de la máquina) y grafos
 precalentados en el fondo del sandbox.
 
 **Por qué no hay arista `mcp`.** El diseño era que un agente llamase a las herramientas

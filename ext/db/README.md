@@ -10,7 +10,7 @@ test has its own database with schema and data?*
 password of its own that only this host knows; `fork`, `connect`, `reset`, `rm`,
 `doctor`, `audit` and `golden` complete it. `attach <agent> <copy>` shares a copy
 with an agent in another microVM through its credential proxy, without the agent ever
-seeing the password (Linux only for now). Model, labels, credentials and the
+seeing the password (Linux and macOS). Model, labels, credentials and the
 Linux/macOS asymmetry: [`docs/db.md`](../../docs/db.md).
 
 ```sh

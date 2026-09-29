@@ -420,12 +420,11 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     `DELETE /machines/{ref}/credentials/{env}`); la sesión se registra antes de
     resolver, así que una invalidación que llegue entre la resolución y el dial también
     la para. No se admite en credenciales de plantilla, y un agente con attach no se
-    ramifica (guardián de fork). **Solo Linux en esta versión**: en macOS el proxy vive
-    en el `kling-vz` de cada máquina, confinado y sin conocer las demás; resolver en
-    cada conexión exigiría un canal nuevo de `kling-vz` al daemon (autenticado por
-    peercred) y abrirle el rango de reenvíos del loopback, y pasarle la dirección ya
-    resuelta sería el TOCTOU que el modelo evita. El daemon lo rechaza con un error
-    claro, y `kling-vz` sin resolvedor tampoco marcaría. El dueño (`kling.db.owner`) es
+    ramifica (guardián de fork). **En macOS** el proxy vive en el `kling-vz` del agente,
+    que no conoce a las demás máquinas y **no recibe nunca una dirección**: pide cada
+    conexión al broker de enlaces del daemon, que hace las mismas comprobaciones, marca
+    él mismo al reenvío de la copia y le entrega el socket ya conectado (ver §15, "En
+    macOS"). El dueño (`kling.db.owner`) es
     una etiqueta: la frontera sigue siendo el daemon, y quien tiene su socket puede
     reetiquetar máquinas.
   - **El invitado no ve la autenticación de verdad.** Recibe `AuthenticationOk` solo
@@ -685,22 +684,70 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   quien la ve, `ro` salvo que la arista diga `rw`. Un grafo con `share` no se vuelca
   (snapshot ni fork, 409), por el mismo motivo que `commit` no toma una máquina con
   `-share`.
-- **`depends` no abre nada.** Solo ordena arranques y, con `port`, el daemon marca al
-  puerto del destino desde el host para saber si contesta (lo que ya hace con cualquier
-  invitado); el 8080 del agente no vale tampoco aquí.
+- **`depends` no abre nada.** Solo ordena arranques y, con `port`, el daemon comprueba
+  que el puerto del destino contesta: en Linux marcando desde el host a la IP de su netns
+  (lo que ya hace con cualquier invitado), en macOS preguntando al `kling-vz` del
+  destino por su socket de API (`GET /kling/probe`, el mismo sondeo que `exec`), sin
+  abrir ningún reenvío ni dar una dirección. El 8080 del agente no vale tampoco aquí.
 - **No hay arista `mcp`.** El puente MCP escucha solo en el 8080, junto al agente; una
   arista a él daría `exec` sobre el servidor. Se rechaza al validar.
 
 Lo que queda: el tramo del proxy de enlace al destino va en claro por el host, como el
 attach de Postgres (las credenciales exigen SCRAM; un `link` es TCP crudo y su
-protocolo es cosa de la aplicación). En macOS no hay aristas entre máquinas en esta
-versión (501): allí no hay dónde resolver bajo el candado del daemon en cada conexión.
+protocolo es cosa de la aplicación).
+
+**En macOS: el broker de enlaces** (`pkg/linkbroker`, `internal/machine/broker*.go`,
+`vz/internal/grafo`). Allí la red de cada invitado vive en su `kling-vz`, un proceso
+confinado que no conoce a las demás máquinas, y todos los invitados se alcanzan por
+reenvíos del loopback (`127.0.0.1`, rango reservado 29000-29999). Las aristas (y
+`kling db attach`, arriba en §7) llegan a otra máquina así:
+
+- **`kling-vz` pide la arista, no una dirección.** El DNS de su pila contesta los
+  `<nodo>.graph` de SUS aristas con la pasarela (NXDOMAIN para cualquier otro
+  `*.graph`, en todos los modos), y una conexión del invitado a la pasarela en el
+  puerto de una arista `link` (o al proxy de Postgres de una `credential`) se convierte
+  en una petición al daemon: `{kind: link, host: api.graph, port: 8081}` o `{kind:
+  machine, machine: <id>, owner, port}`. El daemon no acepta campos que no conoce: una
+  petición con una dirección se rechaza.
+- **Quién pregunta lo dice el kernel, no la petición.** El broker escucha en un socket
+  Unix de un directorio privado del usuario (`/tmp/kling-<uid>/`, 0700, comprobado), y
+  el perfil de sandbox de `kling-vz` solo le deja conectar a ese socket. El daemon
+  identifica al que llama por el PID del otro extremo (`LOCAL_PEERPID`), que tiene que
+  ser el VMM de exactamente una máquina; y solo resuelve aristas de ESA máquina, con
+  las mismas comprobaciones que en Linux bajo su candado (`comprobarAristaLocked`,
+  `comprobarCopiaLocked`). Una credencial hacia otra máquina se atiende además solo si
+  está en el almacén de la máquina que pregunta.
+- **El daemon marca y entrega el socket conectado** (SCM_RIGHTS), en vez de devolver
+  la dirección del reenvío: entre esa respuesta y el dial de `kling-vz` el destino
+  podría congelarse y otra máquina heredar su puerto (el TOCTOU que el diseño evita),
+  y habría que dejar a `kling-vz` marcar a los reenvíos de otros, que `upstream.go` le
+  prohíbe. Tras marcar, el daemon vuelve a mirar bajo su candado que el destino sigue
+  en marcha con el mismo reenvío; si no, no entrega nada. El 8080 se rechaza también
+  aquí.
+- **Cortar no necesita un canal hacia `kling-vz`.** La conexión Unix de cada petición
+  queda abierta como arrendamiento de la sesión, y el daemon guarda su copia del socket
+  TCP: al congelar, pausar, parar o borrar el destino (o al cambiar las etiquetas de
+  `kling db` del origen) hace `shutdown`, que corta los dos lados aunque `kling-vz` no colabore, y
+  cierra el arrendamiento. Si el daemon se reinicia, `kling-vz` ve caer el arrendamiento
+  y corta la sesión: ninguna sobrevive sin alguien que la pueda invalidar.
+- **Acotado.** 16 conexiones a la vez por arista en `kling-vz`, 1024 sesiones por
+  máquina de origen y 4096 conexiones al broker en el daemon; una petición tiene 5 s
+  para llegar.
+
+Lo que queda en macOS: la identidad por PID supone que el PID que el daemon apuntó es
+el del `kling-vz` vivo; si ese proceso muriera y su PID lo reciclara OTRO proceso del
+mismo usuario antes de que el vigilante lo note, ese proceso pasaría por la máquina.
+Es el mismo usuario que ya puede hablar con el socket del daemon, así que no cruza la
+frontera de §1. Entre el dial del daemon y la segunda comprobación hay un instante en
+el que un reenvío muerto podría haberlo reabierto otra máquina; la segunda comprobación
+lo detecta si el daemon ya sabe que el destino cambió.
 
 **El puerto del agente de invitado (8080) nunca es destino de una arista.** El agente no
 autentica (confía en que solo el host le habla) y sirve `exec`, ficheros y volúmenes; el
 proxy de enlace marca desde el host. Una arista `link` o `credential` al 8080 se rechaza
 en `ValidateGraph` y, como defensa en profundidad, en `comprobarAristaLocked` en cada
-conexión (grafos guardados antes de la validación). Encontrado por el e2e real.
+conexión (grafos guardados antes de la validación); en macOS, además, en el broker y en
+`kling-vz` al recibir las aristas. Encontrado por el e2e real.
 
 ### 16. `kling db clone`: datos de producción, enmascarados antes de salir de la microVM
 

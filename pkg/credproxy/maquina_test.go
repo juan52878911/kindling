@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -322,5 +323,76 @@ func TestValidarUpstreamMaquina(t *testing.T) {
 		if err := ValidarCredenciales([]Credential{c}); err == nil {
 			t.Errorf("%s: aceptada", nombre)
 		}
+	}
+}
+
+// Con DialMachine (kling-vz) el proxy no resuelve ni marca: pide la conexión
+// ya abierta en cada sesión, y un no es "no disponible" sin tocar nada.
+func TestPGMaquinaDialMachine(t *testing.T) {
+	srv := nuevoServidorPG(t, "scram")
+	srv.sinTLS = true
+	var (
+		mu     sync.Mutex
+		vivo   = true
+		llamas int
+		visto  string
+	)
+	e := proxyPG(t, srv, credMaquina, func(o *Options) {
+		o.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			llamas++
+			visto = fmt.Sprintf("%s/%s/%d", id, owner, port)
+			if !vivo {
+				return nil, errors.New("machine is frozen")
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", srv.ln.Addr().String())
+		}
+	})
+	entrar(t, e.addr).c.Close()
+	mu.Lock()
+	vivo = false
+	mu.Unlock()
+	k := conectarPG(t, e.addr)
+	if code, raw := k.esperarError(k.login(pgMarca)); code != "08006" || !strings.Contains(raw, "not available") {
+		t.Fatalf("máquina no disponible: %s %q", code, raw)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if llamas != 2 || visto != fmt.Sprintf("%s/%s/%d", maqID, maqOwner, PGDefaultPort) {
+		t.Fatalf("DialMachine: %d llamadas, la última %q", llamas, visto)
+	}
+}
+
+// SoloMaquinas: solo con credenciales y todas hacia una máquina.
+func TestSoloMaquinas(t *testing.T) {
+	p := New(Options{})
+	if p.SoloMaquinas() {
+		t.Fatal("sin credenciales no hay nada que servir")
+	}
+	maq := Credential{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: PlaceholderPrefix + "a", Secret: "s",
+		Kind: KindPostgres, Port: 5432, User: "app", Database: "shop"}
+	credMaquina(&maq)
+	if _, err := p.SetCredentials([]Credential{maq}); err != nil {
+		t.Fatal(err)
+	}
+	if !p.SoloMaquinas() {
+		t.Fatal("una credencial hacia una máquina")
+	}
+	web := Credential{Env: "API_KEY", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "b", Secret: "k"}
+	if _, err := p.SetCredentials([]Credential{maq, web}); err != nil {
+		t.Fatal(err)
+	}
+	if p.SoloMaquinas() {
+		t.Fatal("con una credencial HTTP no son solo máquinas")
+	}
+	pg := Credential{Env: "PG2", Domain: "db.example.com", Placeholder: PlaceholderPrefix + "c", Secret: "s",
+		Kind: KindPostgres, Port: 5432, User: "app", Database: "shop"}
+	if _, err := p.SetCredentials([]Credential{maq, pg}); err != nil {
+		t.Fatal(err)
+	}
+	if p.SoloMaquinas() {
+		t.Fatal("con una credencial Postgres a internet no son solo máquinas")
 	}
 }

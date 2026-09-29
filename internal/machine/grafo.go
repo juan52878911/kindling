@@ -46,19 +46,6 @@ import (
 // ErrNoGraph es un grafo que no existe (404 en la API).
 var ErrNoGraph = errors.New("graph doesn't exist")
 
-// errGrafoAristasSoloLinux es el 501 de una arista entre máquinas en macOS:
-// el mismo motivo que attach (errModeloASoloLinux).
-var errGrafoAristasSoloLinux = errors.New("graph edges between machines (link and credential) are Linux-only in this version: " +
-	"on macOS the network lives inside each kling-vz, which can't ask the daemon on every connection where the other node is; " +
-	"a graph without edges (up, freeze, thaw, snapshot, fork, rm) works here (docs/grafos.md)")
-
-// errGrafoDependsPuertoSoloLinux es el 501 de una arista depends con puerto
-// en macOS: esperar a que el puerto conteste es marcar a la IP del invitado
-// desde el host, lo mismo que un link.
-var errGrafoDependsPuertoSoloLinux = errors.New("depends edges with a port are Linux-only in this version: " +
-	"waiting for the port means dialing the guest from the daemon, which on macOS lives inside each kling-vz; " +
-	"a depends edge without port (wait until the node runs) works here (docs/grafos.md)")
-
 // Sustituibles en los tests: arrancar, despertar, congelar o montar la red de
 // verdad pide KVM, firecracker y root. Se asignan en init: Run y Thaw acaban
 // llamando (por el resolvedor de las credenciales) a código que las usa, y
@@ -68,9 +55,11 @@ var (
 	despertarNodoGrafo func(ctx context.Context, m *Manager, id string) error
 	congelarNodoGrafo  func(ctx context.Context, m *Manager, id string) error
 	montarRedGrafo     = knet.SetGraph
+	enviarGrafo        func(ctx context.Context, m *Manager, id string) error
 )
 
 func init() {
+	enviarGrafo = enviarGrafoPlataforma
 	arrancarNodoGrafo = func(ctx context.Context, m *Manager, req api.RunRequest) (*api.Machine, error) {
 		return m.Run(ctx, req)
 	}
@@ -459,12 +448,6 @@ func (m *Manager) memoriaDeNodo(n api.GraphNode) int {
 func (m *Manager) GraphUp(ctx context.Context, g api.Graph, secretos map[string]string) (out *api.Graph, errOut error) {
 	if err := api.ValidateGraph(&g); err != nil {
 		return nil, &api.StatusError{Code: 400, Message: err.Error()}
-	}
-	if g.HasNetworkEdges() && !modeloAPosible {
-		return nil, &api.StatusError{Code: 501, Message: errGrafoAristasSoloLinux.Error()}
-	}
-	if g.HasPortDepends() && !modeloAPosible {
-		return nil, &api.StatusError{Code: 501, Message: errGrafoDependsPuertoSoloLinux.Error()}
 	}
 	sec, err := secretosDeAristas(&g, secretos)
 	if err != nil {
@@ -876,6 +859,10 @@ func (m *Manager) conectarNodo(ctx context.Context, gid, nombre string, creds []
 	}
 	if err := montarRedGrafo(knet.Plan(mc.NetIndex, mc.ID), spec); err != nil {
 		return fmt.Errorf("mounting its graph edges: %w", err)
+	}
+	// En macOS, las aristas a su kling-vz (en Linux ya está todo montado).
+	if err := enviarGrafo(ctx, m, id); err != nil {
+		return err
 	}
 	if len(aristas) == 0 {
 		return nil

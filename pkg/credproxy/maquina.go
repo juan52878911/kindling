@@ -54,6 +54,17 @@ import (
 // es "no marques".
 type ResolveMachineFunc func(id, owner string, port int) (addr string, err error)
 
+// DialMachineFunc da la conexión ya abierta al puerto port de la máquina id
+// para una credencial del dueño owner (Options.DialMachine). Un error es "no
+// marques".
+type DialMachineFunc func(ctx context.Context, id, owner string, port int) (net.Conn, error)
+
+// CapGraphLink es la capacidad que kling-vz anuncia en credential_kinds cuando
+// puede pedir al daemon conexiones a otras máquinas (aristas link y
+// credential de un grafo, kling db attach): ver pkg/linkbroker. No es un Kind
+// de credencial.
+const CapGraphLink = "graph-link"
+
 // ReasonMachineUnavailable: la máquina de UpstreamMachine no se puede usar
 // ahora (parada, congelada, borrada, de otro dueño o no lista).
 const ReasonMachineUnavailable = "machine_unavailable"
@@ -117,6 +128,10 @@ func (c Credential) upstreamAuditado() string {
 // solo como dirección resuelta por el daemon para UpstreamMachine.
 var rangoVethKindling = netip.MustParsePrefix("172.30.0.0/16")
 
+// DestinoMaquinaValido es destinoMaquinaValido para quien resuelve fuera del
+// proxy (el daemon, al marcar él mismo para kling-vz: ver pkg/linkbroker).
+func DestinoMaquinaValido(ap netip.AddrPort) error { return destinoMaquinaValido(ap) }
+
 // destinoMaquinaValido comprueba que lo que devolvió ResolveMachine es un
 // destino de kindling y nada más: la IP de un netns (Linux) o un reenvío del
 // rango reservado en el loopback (macOS). Todo lo demás, también lo que un
@@ -140,6 +155,13 @@ func destinoMaquinaValido(ap netip.AddrPort) error {
 // dialMaquina resuelve y marca la máquina de cred. La dirección se pide ahora,
 // no antes: ver la cabecera.
 func (p *Proxy) dialMaquina(ctx context.Context, cred credPG) (net.Conn, error) {
+	if p.abrirMaq != nil {
+		c, err := p.abrirMaq(ctx, cred.UpstreamMachine, cred.UpstreamOwner, cred.Port)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errMaquinaNoDisponible, err)
+		}
+		return c, nil
+	}
 	if p.resolveMaq == nil {
 		return nil, fmt.Errorf("%w: this proxy can't resolve kindling machines", errMaquinaNoDisponible)
 	}
@@ -189,6 +211,24 @@ func (p *Proxy) registrarSesion(s *sesionPG, cred credPG) (quitar func(), ok boo
 		delete(p.sesiones, s)
 		p.sesMu.Unlock()
 	}, true
+}
+
+// SoloMaquinas dice si el proxy tiene credenciales y TODAS van a otra
+// máquina de kindling (UpstreamMachine): nada de lo que sirve sale a
+// internet. kling-vz lo usa para atender las aristas credential de un nodo
+// sin egress allowlist.
+func (p *Proxy) SoloMaquinas() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.pg) == 0 || len(p.creds) > 0 {
+		return false
+	}
+	for _, c := range p.pg {
+		if c.UpstreamMachine == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // Invalidar corta todas las sesiones vivas hacia la máquina id (las dos
