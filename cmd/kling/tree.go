@@ -113,6 +113,21 @@ var coreTree = []section{
   sandbox rm [-f] <sb>...                          destroys them
 `},
 	}},
+	{title: "GRAPHS (several machines as one)", cmds: []plugin.Command{
+		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
+                                                   eager nodes; lazy ones start on
+                                                   their first connection
+  graph ls [-q] [-json]                            lists the graphs
+  graph inspect <graph> [-json]                    nodes, state and edges
+  graph freeze <graph>                             freezes every node
+  graph thaw <graph>                               wakes every node that has a machine
+  graph snapshot <graph> [-name N] [-json]         one template per node, all from the
+                                                   same instant (<name>-<node>-<gen>)
+  graph fork <graph> [-n N] [-q] [-json]           N new graphs from this instant; their
+                                                   edges reach their own nodes only
+  graph rm [-f] <graph>...                         removes the graph and its machines
+`},
+	}},
 	{title: "TEMPLATES (golden snapshots)", cmds: []plugin.Command{
 		{Name: "template", Summary: "reusable snapshots: run -from <name> starts in ms", Subcommands: []string{"ls", "inspect", "rm", "credential"}, Usage: `  template ls [-q] [-json]                         lists the templates
   template inspect <name> [-json]                  one template, with its annotations
