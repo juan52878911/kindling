@@ -642,6 +642,22 @@ type Info struct {
 	// CoW dice cómo recibe su disco una instancia creada desde un dorado (ver
 	// docs/cow.md). nil = daemon anterior.
 	CoW *CoWInfo `json:"cow,omitempty"`
+	// Authz dice si el daemon aplica una política de autorización y con qué
+	// rol ve a quien pregunta (docs/authz.md). nil = daemon anterior.
+	Authz *AuthzInfo `json:"authz,omitempty"`
+}
+
+// AuthzInfo es el estado de la autorización del daemon visto por quien llama.
+type AuthzInfo struct {
+	// Enabled: hay política. Sin ella, quien alcanza el socket manda sobre
+	// todo, como siempre.
+	Enabled bool `json:"enabled"`
+	// Role es el rol de quien llama: "admin" o "tenant:<nombre>". Vacío sin
+	// política.
+	Role string `json:"role,omitempty"`
+	// UID es el usuario que el daemon vio al otro lado del socket (peercred),
+	// si lo sabe.
+	UID *int `json:"uid,omitempty"`
 }
 
 // CoWInfo es el modo de copia de discos en uso (daemon.cow).

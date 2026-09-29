@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -66,7 +67,28 @@ func NewClient(endpoint string) *Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	if tok := os.Getenv(AuthzTokenEnv); tok != "" {
+		c.long.Transport = conToken{c.long.Transport, tok}
+		c.http.Transport = conToken{c.http.Transport, tok}
+	}
 	return c
+}
+
+// AuthzTokenEnv es la variable con el token de inquilino que el cliente manda
+// al daemon (Authorization: Bearer). Solo tiene efecto con una política de
+// autorización que lo declare (docs/authz.md); sin ella, el daemon lo ignora.
+const AuthzTokenEnv = "KLING_AUTHZ_TOKEN"
+
+// conToken añade el token de inquilino a cada petición al daemon.
+type conToken struct {
+	rt  http.RoundTripper
+	tok string
+}
+
+func (t conToken) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+t.tok)
+	return t.rt.RoundTrip(r)
 }
 
 func (c *Client) Endpoint() string { return c.d.Describe() }
