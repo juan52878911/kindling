@@ -38,7 +38,28 @@ func (m *Manager) snapDir(name string) string {
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
 func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (snapOut *api.Snapshot, errOut error) {
-	return m.commit(ctx, ref, name, replace, nil, false)
+	return m.CommitWith(ctx, ref, name, CommitOptions{Replace: replace})
+}
+
+// CommitOptions es cómo se hace un Commit.
+type CommitOptions struct {
+	Replace bool
+	// SkipReady no espera a que el invitado esté listo según su imagen
+	// (listo.go); ReadyWait es cuánto se espera (0 = DefaultReadyWait).
+	SkipReady bool
+	ReadyWait time.Duration
+}
+
+// CommitWith es Commit con opciones. La espera a "listo" va ANTES del cerrojo
+// de la máquina: puede durar minutos, y mientras nadie más podría pararla ni
+// borrarla.
+func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOptions) (*api.Snapshot, error) {
+	if !o.SkipReady {
+		if err := m.listoParaCongelar(ctx, ref, o.ReadyWait); err != nil {
+			return nil, err
+		}
+	}
+	return m.commit(ctx, ref, name, o.Replace, nil, false)
 }
 
 // commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
@@ -380,10 +401,14 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// otro dorado (fork), la línea de arranque no se repite: la que tiene es
 	// la que quedó grabada en la memoria de AQUEL, así que se hereda su marca
 	// y no se vuelve a suponer "sí" a ciegas.
-	guestIPv6Off := mc.From == ""
+	// Una imagen que pide la pila IPv6 (ipv6DeReceta) arrancó con el módulo
+	// cargado: su dorado no lleva la marca.
+	guestIPv6Stack := mc.From == "" && m.ipv6DeReceta(mc.Image)
+	guestIPv6Off := mc.From == "" && !guestIPv6Stack
 	if mc.From != "" {
 		if origen, _, oerr := m.loadSnapshotCached(mc.From); oerr == nil {
 			guestIPv6Off = origen.GuestIPv6Off
+			guestIPv6Stack = origen.GuestIPv6Stack
 		}
 		// Si no se puede leer el dorado de origen (se borró entre tanto), se
 		// deja en false: "no consta" es la lectura segura, igual que un
@@ -400,11 +425,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		AllowDomains: mc.AllowDomains,
 		// La puerta de exec se congela con la memoria: las instancias la tendrán
 		// quiera quien las cree o no, y el snapshot tiene que decirlo.
-		AllowExec:    mc.AllowExec,
-		RootfsSHA256: rootfsSHA,
-		SnapSHA256:   snapSHA,
-		KernelSHA256: kernelSHA,
-		GuestIPv6Off: guestIPv6Off,
+		AllowExec:      mc.AllowExec,
+		RootfsSHA256:   rootfsSHA,
+		SnapSHA256:     snapSHA,
+		KernelSHA256:   kernelSHA,
+		GuestIPv6Off:   guestIPv6Off,
+		GuestIPv6Stack: guestIPv6Stack,
 		// El volumen se graba en el snapshot porque el conjunto de discos de una
 		// microVM queda FIJADO al congelarla: a una restaurada no se le puede
 		// añadir un disco que no tuviera. Sin esto, el gateway despierta el
@@ -976,7 +1002,9 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	}
 	// IPv6 EN EL INVITADO (F2): solo se avisa, y una vez por dorado. Ver
 	// avisoIPv6Invitado.
-	if aviso := m.avisoIPv6Invitado(req.From, snap.GuestIPv6Off); aviso != "" {
+	// Si la imagen del dorado pide la pila IPv6, no hay nada que avisar: es lo
+	// declarado, y rehacer el dorado no lo cambiaría.
+	if aviso := m.avisoIPv6Invitado(req.From, snap.GuestIPv6Off || m.ipv6DeReceta(snap.Image)); aviso != "" {
 		log.Print(aviso)
 		// m.bus es nil en algún arnés de test que ejercita runFrom sin
 		// necesitar el bus de eventos para nada más; en producción (NewManager)
@@ -1033,8 +1061,13 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// dorado se hubiera hecho con más. Para un modelo VON de 2 vCPU eso es
 	// cuatro veces más lento, y el síntoma —un modelo que genera a paso de
 	// tortuga— no apunta al snapshot.
+	// Precedencia: el flag > el dorado > la receta de la imagen > el valor
+	// por defecto de quien pide > el del daemon (ver techoCPUPorDefecto).
 	if req.CPUPct <= 0 {
 		req.CPUPct = snap.CPUPct
+	}
+	if req.CPUPct <= 0 {
+		req.CPUPct = m.techoCPUPorDefecto(snap.Image, max(req.VCPUs, snap.VCPUs), req.CPUPctDefault)
 	}
 
 	id := newID()
@@ -1152,7 +1185,11 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		}
 	}
 
-	netcfg := knet.Plan(m.allocNetIndex(), id)
+	netcfg, err := m.asignarRed(id)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("setting up network: %w", err)
@@ -1380,7 +1417,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// Reloj y CSPRNG propios ANTES de entregar la máquina: cada instancia de
 	// este dorado despertó con la memoria de todas las demás. Síncrono y
 	// acotado; un agente que no lo sabe hacer no bloquea (ver resync.go).
-	resyncT, resyncOK := m.resyncGuest(ctx, id, claveSnapshot(snap))
+	resyncT, resyncOK, listo := m.resyncGuest(ctx, id, claveSnapshot(snap), api.ResyncInstance)
 	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
 	impulso.bajar()
 	// Y ahora que los discos apuntan a los ficheros de ESTA instancia, el
@@ -1424,10 +1461,19 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	mc.StartedAt = &now
 	mc.ThawMS = elapsed
 	mc.CredentialDomains, mc.CredentialAnyDatabase = dominiosCred, anyDBCred
+	// En Firecracker la RAM de la copia es el mem.file del dorado, MAP_PRIVATE:
+	// compartida con las demás copias hasta que la escriben (ver Squeeze).
+	mc.MemShared = restaurarComparteMemoria
 	m.socket[id] = sock
 	m.persist()
-	out := *mc
 	m.mu.Unlock()
+
+	// Volúmenes montados y credenciales en MMDS: ahora los ganchos de la
+	// imagen (identidad por copia, etc.), en segundo plano.
+	m.trasRestaurar(ctx, id, api.ResyncInstance, listo)
+	m.mu.RLock()
+	out := *mc
+	m.mu.RUnlock()
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("instantiated from %s in %d ms%s", req.From, elapsed, resyncNota(resyncT, resyncOK))})

@@ -124,13 +124,9 @@ func (m *Manager) reconcile() {
 
 	m.sweepCgroups(liveCg)
 
-	// Namespaces de máquinas que ya no existen: basura de ejecuciones anteriores.
-	for _, ns := range knet.ListNamespaces() {
-		if !seen[ns] {
-			log.Printf("reconcile: cleaning up orphan namespace %s", ns)
-			knet.TeardownNamespace(ns)
-		}
-	}
+	// Namespaces de máquinas que ya no existen: basura de ejecuciones
+	// anteriores, pero solo los de ESTE daemon (ver barrerNamespaces).
+	m.barrerNamespaces(seen)
 
 	m.sweepMachineDirs()
 	m.killOrphanVMMs()

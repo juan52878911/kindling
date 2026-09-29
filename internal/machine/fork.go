@@ -55,6 +55,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -81,7 +82,10 @@ type ForkOptions struct {
 	Lista func(ctx context.Context, mc *api.Machine) error
 	// Labels se suman a las de cada copia, ya en su nacimiento (sin ventana en
 	// la que exista sin ellas). Las valida api.ValidateForkLabels.
-	Labels map[string]string
+	Labels map[string]string // SkipReady no espera a que el original esté listo según su imagen antes
+	// de pausarlo; ReadyWait, cuánto se espera (0 = DefaultReadyWait).
+	SkipReady bool
+	ReadyWait time.Duration
 }
 
 // restaurarFork restaura una copia. Es m.Run —el tope de máquinas, la
@@ -133,6 +137,13 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 	}
 	if err := m.forkSinCredenciales(src); err != nil {
 		return "", nil, err
+	}
+
+	// Antes de reservar nada: la espera a "listo" puede durar minutos.
+	if !opt.SkipReady {
+		if err := m.listoParaCongelar(ctx, src.ID, opt.ReadyWait); err != nil {
+			return "", nil, fmt.Errorf("forking %s: %w", src.Name, err)
+		}
 	}
 
 	name := nombreSnapshotFork(src.ID)

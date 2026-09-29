@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -28,7 +27,6 @@ import (
 	"syscall"
 
 	"github.com/juan52878911/kindling/pkg/api"
-	"github.com/juan52878911/kindling/pkg/digest"
 )
 
 // errNoBridge marca una imagen que no lleva puente dentro: una base mínima, no
@@ -223,6 +221,9 @@ func espacioLibre(mnt string) (int64, error) {
 }
 
 func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, quiero string, mode os.FileMode, create bool) (bool, error) {
+	if putSinMontar {
+		return m.intentarPutDebugfs(ctx, image, dentroPath, bridge, quiero, mode, create)
+	}
 	// Antes de montar en ESCRITURA. Montar así un ext4 sucio es como se corrompió
 	// una imagen en este proyecto, y el síntoma fue un pánico del invitado.
 	repairVolume(ctx, image)
@@ -231,7 +232,9 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	if err != nil {
 		return false, err
 	}
-	defer os.RemoveAll(mnt)
+	// Remove y no RemoveAll: si el desmontaje fallara del todo, RemoveAll
+	// vaciaría la imagen montada debajo.
+	defer os.Remove(mnt)
 
 	if out, err := exec.CommandContext(ctx, "mount", "-o", "loop", image, mnt).CombinedOutput(); err != nil {
 		return false, fmt.Errorf("mounting: %v: %s", err, strings.TrimSpace(string(out)))
@@ -257,76 +260,14 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	}
 	defer desmontar()
 
-	dentro := filepath.Join(mnt, dentroPath)
-	tengo, err := digest.File(dentro)
-	if os.IsNotExist(err) && !create {
-		// Una imagen SIN puente no es una imagen de servicio: es una base
-		// mínima, cuyo entrypoint no invoca ningún puente. Inyectarle uno no
-		// haría nada salvo engordarla, así que se deja como está. Lo mismo para
-		// cualquier otro fichero que solo se quiera poner al día.
-		return false, errNoBridge
-	}
-	if os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(dentro), 0o755); err != nil {
-			return false, fmt.Errorf("creating %s: %w", filepath.Dir(dentroPath), err)
-		}
-	}
-	if err == nil && tengo == quiero {
-		return false, nil
-	}
-
-	// Se escribe al lado y se renombra, en vez de sobre el fichero.
-	//
-	// El renombrado dentro de un mismo sistema de ficheros es atómico: o está el
-	// puente viejo o el nuevo, nunca uno a medias. Escribir encima dejaría, si
-	// algo falla a mitad, una imagen cuyo PID 1 es un binario truncado — y eso
-	// no da un error, da un invitado que no arranca.
-	// ¿Cabe? El renombrado atómico exige que quepan las dos copias a la vez, así
-	// que el hueco se mide ANTES de escribir: un ENOSPC a media copia deja un
-	// .nuevo trunco dentro de una imagen que ya no se puede arreglar sin crecer.
-	if libre, err := espacioLibre(mnt); err == nil {
-		if fi, err := os.Stat(bridge); err == nil {
-			if falta := faltaParaElPuente(libre, fi.Size()); falta > 0 {
-				desmontar()
-				return false, errSinHueco{faltan: falta}
-			}
-		}
-	}
-
-	tmp := dentro + ".nuevo"
-	if err := copyFile(bridge, tmp, mode); err != nil {
-		_ = os.Remove(tmp)
-		return false, fmt.Errorf("copying %s: %w", dentroPath, err)
-	}
-	if err := os.Rename(tmp, dentro); err != nil {
-		_ = os.Remove(tmp)
-		return false, fmt.Errorf("replacing %s: %w", dentroPath, err)
+	// Nunca filepath.Join(mnt, ruta): el kernel resolvería los enlaces de la
+	// imagen contra la raíz del host (ver put_seguro_linux.go).
+	cambio, err := ponerEnImagen(mnt, dentroPath, bridge, quiero, mode, create)
+	if err != nil || !cambio {
+		return false, err
 	}
 	desmontar()
 	return true, nil
-}
-
-func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	// Sync antes de cerrar: el renombrado que viene después es atómico respecto
-	// a los metadatos, pero no garantiza que los DATOS estén en el disco.
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // imageHasBridge dice si la imagen lleva puente dentro, SIN montarla.

@@ -35,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "ready"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -252,6 +252,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /machines/{ref}/credaudit", s.handleCredAudit)
 	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
 	mux.HandleFunc("POST /machines/{ref}/renew", s.handleRenew)
+	mux.HandleFunc("GET /machines/{ref}/ready", s.handleReady)
+	mux.HandleFunc("POST /machines/{ref}/hooks", s.handleHooks)
 
 	// Ejecución y ficheros (solo máquinas con allow_exec) y sandboxes.
 	mux.HandleFunc("POST /machines/{ref}/exec", s.handleExec)
@@ -601,9 +603,14 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSqueeze(w http.ResponseWriter, r *http.Request) {
-	res, err := s.mgr.Squeeze(r.Context(), r.PathValue("ref"))
+	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+	res, err := s.mgr.SqueezeWith(r.Context(), r.PathValue("ref"), force)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+		code := http.StatusBadRequest
+		if errors.Is(err, machine.ErrSqueezeShared) {
+			code = http.StatusConflict
+		}
+		fail(w, code, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -783,10 +790,17 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		fail(w, jsonBodyStatus(err), err)
 		return
 	}
-	snap, err := s.mgr.Commit(r.Context(), r.PathValue("ref"), req.Name, req.Replace)
+	if req.ReadyTimeoutSeconds < 0 || req.ReadyTimeoutSeconds > api.ReadyMaxWaitSeconds {
+		fail(w, http.StatusBadRequest, fmt.Errorf("ready_timeout_seconds must be between 0 and %d", api.ReadyMaxWaitSeconds))
+		return
+	}
+	snap, err := s.mgr.CommitWith(r.Context(), r.PathValue("ref"), req.Name, machine.CommitOptions{
+		Replace: req.Replace, SkipReady: req.SkipReady,
+		ReadyWait: time.Duration(req.ReadyTimeoutSeconds) * time.Second,
+	})
 	if err != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, machine.ErrSharesCommit) {
+		if errors.Is(err, machine.ErrSharesCommit) || errors.Is(err, machine.ErrNotReady) {
 			code = http.StatusConflict
 		}
 		fail(w, code, err)
