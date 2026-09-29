@@ -63,26 +63,28 @@ JSON.
 | Campo | Qué es |
 |---|---|
 | `from`, `to` | nodos del grafo |
-| `kind` | `link` o `credential` |
-| `port` | puerto de `to` (tiene que estar en sus `ports`); en `credential`, 5432 por defecto |
+| `kind` | `link`, `credential`, `share` o `depends` (ver [Aristas share y depends](#aristas-share-y-depends)) |
+| `port` | puerto de `to` (tiene que estar en sus `ports`); en `credential`, 5432 por defecto; en `depends`, opcional; en `share`, ninguno |
 | `env`, `user`, `database` | solo `credential`: la variable del marcador, el rol y la base |
+| `mount`, `mode` | solo `share`: la ruta de la carpeta en los dos invitados y cómo la monta `from` (`ro` por defecto, o `rw`) |
 | `secret_env` / `secret_file` | solo `credential` y solo en el fichero: de dónde saca `kling` la clave (una variable de SU entorno, o un fichero relativo al del grafo). Con una sola arista `credential` sin fuente, stdin |
 
 La clave nunca va en el fichero ni sale por la API: viaja una vez al daemon, que la
 guarda cifrada (`store/graph/<id>.secrets.enc`) para los nodos lazy y los forks.
 
 Límites: 32 nodos, 64 aristas, 16 conexiones a la vez por arista `link`. Todas las
-aristas de un nodo llegan por la misma dirección (la del host en su veth), así que un
-nodo alcanza **un nodo por puerto**, y los puertos 53, 80 y 443 no valen en un `link`
-(son el DNS y el proxy de credenciales de esa dirección).
+aristas de un nodo llegan por la misma dirección (la del host en su veth en Linux, la
+pasarela de su red en macOS), así que un nodo alcanza **un nodo por puerto**, y los
+puertos 53, 80 y 443 no valen en un `link` (son el DNS y el proxy de credenciales de
+esa dirección).
 
 ## Operaciones
 
 | Comando | Qué hace |
 |---|---|
-| `kling graph up <f>` | crea el grafo y arranca los `eager`; comprueba antes el tope de máquinas y la memoria de todos ellos. Todo o nada |
+| `kling graph up <f>` | crea el grafo y arranca los `eager` (y los nodos de los que dependen), en orden de `depends`; comprueba antes el tope de máquinas y la memoria de todos ellos. Todo o nada |
 | `kling graph ls` · `inspect <g>` | estado (`running`, `frozen`, `partial`), nodos, aristas y generación |
-| `kling graph freeze <g>` · `thaw <g>` | todos los nodos con máquina (un `lazy` sin máquina sigue sin ella) |
+| `kling graph freeze <g>` · `thaw <g>` | todos los nodos con máquina (un `lazy` sin máquina sigue sin ella, salvo que dependa de él uno que despierta); `thaw` en orden de `depends`, `freeze` al revés |
 | `kling graph snapshot <g> [-name N]` | una plantilla por nodo, `<N>-<nodo>-<gen>`, **todas del mismo instante** |
 | `kling graph fork <g> -n N` | N grafos nuevos desde este instante |
 | `kling graph rm <g>` | el grafo, sus máquinas y las plantillas temporales de fork que ya no use nadie |
@@ -119,6 +121,53 @@ del nodo de origen (`kling machine audit <grafo>-<nodo>`): destino, máquina a l
 llegó, bytes, duración y, si no llegó, por qué (`machine_unavailable`, `busy`,
 `no_capacity`, `invalidated`). Las de `credential` son las de Postgres de siempre.
 
+## Aristas share y depends
+
+Ninguna de las dos conecta máquinas por red: no abren puertos ni tocan el resolver.
+
+**`depends`**: `{from: api, to: db, kind: depends}` dice que `api` no arranca ni
+despierta hasta que `db` está **listo**: corriendo y, si la arista lleva `port` (que
+`db` tiene que exponer), con ese puerto contestando (como mucho 2 minutos). De ahí sale
+el orden de todo el grafo:
+
+- `up` arranca en orden (cada nodo cuando los suyos están listos). Un `lazy` del que
+  depende un `eager` arranca con `up`: sin él, el `eager` no podría.
+- `thaw` y el despertar de un nodo por su primera conexión siguen el mismo orden: si
+  `api` despierta, antes despierta (o se instancia) `db`.
+- `freeze`, y la pausa de un `snapshot`, van al revés: primero quien depende.
+- Un ciclo (`a → b → a`) se rechaza al validar el fichero. Si una dependencia no
+  arranca, el nodo que depende de ella tampoco (y `up` deshace todo).
+
+Una `depends` vale en todas las plataformas. Con puerto, en Linux el daemon marca a la IP
+del netns del destino; en macOS pregunta al `kling-vz` del destino si algo escucha en
+ese puerto (`GET /kling/probe`), sin marcar desde el host. El 8080 (el agente) tampoco
+vale aquí.
+
+**`share`**: `{from: web, to: files, kind: share, mount: /data}` hace que `web` vea la
+carpeta `/data` **de `files`**. De quién es la carpeta:
+
+- Es **del grafo**: la crea el daemon en `$KLING_ROOT/graph-shares/<grafo>/<nodo>/…`
+  (0700) al hacer `up`, y `graph rm` la borra con todo lo que tenga. No está bajo
+  `daemon.share_roots` ni hace falta: solo la montan los nodos de ese grafo, y ninguna
+  petición de `run` puede pedirla (el daemon solo la acepta al arrancar el nodo).
+- `to` es el dueño y la monta en lectura y escritura en `mount`. Cada `from` la monta en
+  la misma ruta con `mode`: `ro` (por defecto) o `rw`. Varios nodos pueden ver la misma
+  carpeta (varias aristas al mismo `to` y `mount`).
+- Es una carpeta **viva** (la de `-share ro|rw`, [compartir.md](compartir.md)): lo que
+  escribe uno lo ve el otro. `copy` no vale: es una subida hecha una vez para una
+  máquina, no una carpeta que ven dos.
+- Los dos nodos arrancan en frío (`image`, no `from`), como los `shares` propios: una
+  carpeta viva se monta al arrancar. Una misma ruta no puede ser dos carpetas en un
+  nodo, ni una estar dentro de otra, y caben 8 por nodo contando las suyas.
+
+**Snapshot y fork de un grafo con `share`: no en esta versión (409).** La memoria
+volcada de un nodo lleva montada su carpeta viva y cada instancia restaurada despertaría
+con un montaje que no le corresponde; es el mismo motivo por el que `kling commit` no
+toma una máquina con `-share`. `freeze` y `thaw` sí funcionan: la carpeta se vuelve a
+enganchar al despertar. Cuando se levante, lo definido es que cada copia de un fork
+tenga **su propia copia** de la carpeta, nunca la del original: igual que sus nodos, las
+copias no se ven entre sí.
+
 ## Cómo llega un nodo a otro (Linux)
 
 Nada de red entre máquinas: el FORWARD entre namespaces sigue cerrado.
@@ -141,19 +190,89 @@ Nada de red entre máquinas: el FORWARD entre namespaces sigue cerrado.
 El tramo del proxy al destino va en claro por el host, como el attach de Postgres; las
 credenciales siguen exigiendo SCRAM.
 
-## macOS
+## Cómo llega un nodo a otro (macOS)
 
-`up`, `freeze`, `thaw`, `snapshot`, `fork` y `rm` funcionan igual. Una arista `link` o
-`credential` devuelve `501`: allí la red vive dentro de cada `kling-vz` y el daemon no
-puede resolver bajo su candado en cada conexión (el mismo motivo que `kling db attach`).
-Un grafo sin aristas entre máquinas es un grupo con ciclo de vida atómico.
+Lo mismo, con otra fontanería: allí la red de cada invitado vive dentro de su
+`kling-vz` (una pila de red de usuario) y todos los invitados se alcanzan por reenvíos
+del loopback. `kling-vz` no conoce a las demás máquinas ni recibe nunca una dirección.
+
+1. El DNS de su `kling-vz` contesta los `<nodo>.graph` de SUS aristas con la pasarela
+   (`172.16.0.1`), y NXDOMAIN a cualquier otro `*.graph`, en todos los modos.
+2. Una conexión del invitado a la pasarela en el puerto de una arista `link` (o al
+   proxy de Postgres, para una `credential`) se convierte en una petición al **broker
+   de enlaces** del daemon: un socket Unix en un directorio privado del usuario, el
+   único que el sandbox de `kling-vz` le deja abrir. La petición dice qué arista
+   (`api.graph:8081`), no a dónde.
+3. El daemon sabe qué máquina pregunta por el PID del otro extremo del socket, hace
+   las mismas comprobaciones que en Linux bajo su candado (despertando al destino si
+   duerme), **marca él mismo** al reenvío del destino, comprueba que sigue siendo el
+   mismo y le entrega a `kling-vz` el socket ya conectado.
+4. Cortar (congelar, pausar, parar o borrar el destino) es cerrar ese socket en los
+   dos lados: el daemon guarda su copia. Si el daemon se reinicia, las sesiones en
+   curso se cortan; las nuevas funcionan en cuanto vuelve.
+
+La auditoría es la misma (`kind: link` en el registro del nodo de origen). Hace falta
+un `kling-vz` que anuncie `graph-link` en `credential_kinds`: con uno anterior, las
+aristas fallan cerradas y el daemon dice que hay que reconstruirlo. Ver
+[SECURITY.md §15](../SECURITY.md#15-grafos-cada-arista-es-una-autorización-no-una-red).
+
+Las aristas `share` y `depends` también funcionan igual. Una `depends` con `port` espera
+a que ese puerto escuche preguntando al `kling-vz` del destino (`GET /kling/probe`, el
+mismo sondeo que usa `exec`), no marcando desde el host: el puerto no tiene por qué
+tener reenvío.
 
 ## Lo que no está en esta versión
 
-Aristas `share` y `depends` (las carpetas se declaran en los `shares` del nodo; un
-`lazy` despierta con su primera conexión), arista `mcp`, enlaces en macOS, `idle_freeze`
-renovado por conexión (hoy es el TTL de siempre de la máquina) y grafos
+La arista `mcp`, snapshot y fork de un grafo con `share`, `idle_freeze` renovado por
+conexión (hoy es el TTL de siempre de la máquina) y grafos
 precalentados en el fondo del sandbox.
+
+**Por qué no hay arista `mcp`.** El diseño era que un agente llamase a las herramientas
+de un servidor MCP del grafo por su puente (`kling-bridge`). Pero el puente escucha solo
+en el 8080 y ahí mismo sirve el agente de invitado (`/exec`, `/volume/*`), y ninguna
+arista llega nunca al 8080 (abajo). Abrirlo daría a un nodo el control de otro, así que
+se rechaza al validar con esta explicación. Hasta que el puente tenga un puerto solo para
+MCP, un servidor MCP que hable HTTP en su propio puerto (las imágenes `transport: http`)
+se alcanza con una arista `link` a ese puerto.
+## Desde los plugins
+
+Los plugins usan el grafo del núcleo (`/graphs`, `kling graph`) para sus entornos; el
+núcleo no sabe de ellos.
+
+**kling db: `kling db env`.** `kling db env up <app-template> -golden G` crea el grafo
+`app` + `db` con una arista `credential` (el `kling db attach` de siempre, declarado): un
+entorno de integración entero en un comando, con la clave por stdin y deshecho entero si
+algo falla. `kling db branch -env <app-template>` lo hace por rama de git. `env down` y
+`branch -rm` lo borran con la clave. Detalle en
+[db.md](db.md#un-entorno-entero-app--base-como-grafo).
+
+**kling-mcp: agente + servidores MCP.** Un grafo sin aristas ya da lo que interesa:
+`agente` eager y `browser`/`memoria` `lazy` (sin RAM hasta que se necesitan), ciclo de
+vida atómico, `snapshot` del agente **con** sus herramientas del mismo instante y `fork
+-n N` para comparar prompts o modelos partiendo del mismo punto. El fichero de ejemplo
+es [`examples/grafos/agente-mcp.yaml`](../examples/grafos/agente-mcp.yaml) (un test lo
+valida con el mismo parser). No hay comando nuevo y el gateway no cambia: sigue
+llegando a cada servidor desde el host. Lo que **no** se puede hoy es una arista del
+agente al servidor: el puente MCP escucha en el 8080 del invitado y una arista no puede
+apuntar a ese puerto (ver abajo); es la arista `mcp` del diseño, pendiente. Tampoco el
+gateway distingue las copias de un fork: el agente de una copia no llega por él al
+navegador de su copia.
+
+**Gateway de IA (Chispa/VON): siguiente paso, sin código.** La cascada es hoy Chispa
+(una microVM pequeña que clasifica) y, si duda, VON (modelos mayores en microVMs), cada
+una despertada y congelada por `pkg/scheduler` con su pool de réplicas
+(`pkg/aigw/guestpool.go`). Como grafo sería `chispa` eager y `von` `lazy`, con una arista
+`link` `chispa -> von`: VON solo tiene máquina cuando Chispa escala. No se prototipa
+porque tocaría el planificador actual, y hay tres cosas que el grafo aún no cubre y que
+el planificador sí: (1) **réplicas por servicio y tope por inquilino** (`MaxInflight`,
+`MaxInstances`), que el grafo no modela (un nodo es una máquina); (2) el
+**arrendamiento**: el planificador renueva el TTL de lo que despierta e `idle_freeze` no
+se renueva por conexión; (3) los **límites del `link`** (una dirección por nodo, 16
+conexiones, sin 80, 443 ni 8080). Sustituirlo sin esas tres cosas empeoraría la latencia
+y el aislamiento. El camino: `idle_freeze` renovado por conexión, luego un grafo por
+inquilino con el planificador solo para las réplicas de cada nodo. Mientras, el grafo
+sirve para lo que sí encaja: `snapshot`/`fork` del par entero para evaluar una cascada
+nueva contra la anterior partiendo del mismo estado.
 
 ## El puerto 8080 no es alcanzable por una arista
 

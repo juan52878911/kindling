@@ -126,6 +126,13 @@ type Policy struct {
 	// dominios y las credenciales llegan por rutas distintas del API.
 	credHosts map[string]bool
 	credIP    netip.Addr
+
+	// Nombres <nodo>.graph de las aristas del nodo (link y credential): el
+	// DNS los contesta con graphIP, la pasarela, EN TODOS LOS MODOS; y
+	// cualquier otro *.graph no existe (ver GraphHost). Es setGraphHosts del
+	// resolver del núcleo.
+	graphHosts map[string]bool
+	graphIP    netip.Addr
 }
 
 // NewPolicy empieza en none: si el núcleo nunca manda PUT /kling/network, la
@@ -227,6 +234,39 @@ func (p *Policy) CredHost(name string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return p.credIP, true
+}
+
+// GraphSuffix es el sufijo de los nombres de grafo (api.GraphDomain).
+const GraphSuffix = ".graph"
+
+// SetGraphHosts fija los nombres <nodo>.graph que el DNS contesta con ip (la
+// pasarela, donde la red atiende las aristas). Sustituye los anteriores.
+func (p *Policy) SetGraphHosts(hosts []string, ip netip.Addr) {
+	m := map[string]bool{}
+	for _, h := range NormalizeDomains(hosts) {
+		if strings.HasSuffix(h, GraphSuffix) {
+			m[h] = true
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.graphHosts, p.graphIP = m, ip
+}
+
+// GraphHost dice si name es un nombre de grafo (esGrafo) y, si es de una
+// arista de este nodo, con qué IP se contesta (ok). Un nombre de grafo que no
+// es de sus aristas no existe: ni se reenvía ni se siembra, en ningún modo.
+func (p *Policy) GraphHost(name string) (ip netip.Addr, esGrafo, ok bool) {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if !strings.HasSuffix(name, GraphSuffix) {
+		return netip.Addr{}, false, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.graphHosts[name] || !p.graphIP.IsValid() {
+		return netip.Addr{}, true, false
+	}
+	return p.graphIP, true, true
 }
 
 // NormalizeDomains pasa a minúsculas y quita el punto final y los vacíos.

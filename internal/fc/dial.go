@@ -48,22 +48,41 @@ func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "unix", corto)
 }
 
+// DirCorto devuelve (creándolo) el directorio privado de rutas cortas del
+// usuario, comprobado: solo nuestro y sin permisos para nadie más. Ahí
+// escucha también el broker de enlaces del daemon en macOS
+// (internal/machine), por el mismo tope de sun_path.
+func DirCorto() (string, error) {
+	dir := dirEnlaces()
+	return dir, dirPrivado(dir)
+}
+
+// dirPrivado crea dir si falta y exige que sea un directorio nuestro, 0700:
+// en /tmp cualquiera puede crear cosas, y un directorio plantado por otro
+// usuario nos haría hablar con SU socket.
+func dirPrivado(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is not a private directory of this user", dir)
+	}
+	return nil
+}
+
 // enlaceCorto devuelve un enlace simbólico corto en dir que apunta a destino,
 // creándolo si falta. El nombre sale de un hash del destino: el mismo socket
 // usa siempre el mismo enlace, y dos sockets distintos nunca comparten uno.
 func enlaceCorto(dir, destino string) (string, error) {
-	// El directorio es solo nuestro: en /tmp cualquiera puede crear cosas, y un
-	// enlace plantado por otro usuario nos haría hablar con SU socket.
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// El directorio es solo nuestro: un enlace plantado por otro usuario nos
+	// haría hablar con SU socket.
+	if err := dirPrivado(dir); err != nil {
 		return "", err
-	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return "", err
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("%s is not a private directory of this user", dir)
 	}
 	h := sha256.Sum256([]byte(destino))
 	link := filepath.Join(dir, hex.EncodeToString(h[:8])+".sock")

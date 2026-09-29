@@ -428,6 +428,63 @@ type almacenCoW struct {
 	clonar      func(src, dst string) error
 	copiar      func(ctx context.Context, src, dst string) error
 	libreEn     func(dir string) (total, libre int64, err error)
+
+	// Cuota por instancia (cow_cuota.go). Todas nil en un test o sin las
+	// herramientas: el almacén funciona igual, sin cuota.
+	//   detectarCuota dice qué cuota impone este montaje ("prjquota", "qgroup" o "").
+	//   crearDir crea el directorio de la instancia (un subvolumen en Btrfs).
+	//   limitar aplica la cuota de bytes al directorio de la instancia y a su overlay.
+	//   quitarDir borra el directorio de la instancia entero.
+	detectarCuota func(ctx context.Context) string
+	crearDir      func(d string) error
+	limitar       func(d, overlay string, bytes int64) error
+	quitarDir     func(d string) error
+	cuota         string // lo que detectó detectarCuota al montar
+}
+
+// holguraCuota es lo que se deja por encima del tamaño lógico del overlay: el
+// sistema de ficheros puede contar más que el tamaño del fichero (asignación
+// especulativa, metadatos del propio fichero). La cuota no es un límite
+// ajustado a propósito: el objetivo es que un VMM comprometido no pueda hacer
+// crecer su overlay, no medir el uso al byte.
+func cuotaInstancia(tam int64) int64 {
+	return tam + tam/32 + 16<<20
+}
+
+// mkdirInstancia crea el directorio de la instancia (con su hook si lo hay).
+func (a *almacenCoW) mkdirInstancia(d string) error {
+	if a.crearDir != nil && a.cuota != "" {
+		return a.crearDir(d)
+	}
+	return os.Mkdir(d, 0o700)
+}
+
+// rmdirInstancia borra el directorio de una instancia, sea un directorio o un
+// subvolumen. Si el hook falla se reintenta una vez (un `btrfs subvolume
+// delete` puede fallar por algo pasajero) y, si vuelve a fallar, se dice
+// claro en el log: RemoveAll vacía un subvolumen pero no lo quita (EPERM), y
+// el que quede ocupa su qgroup y bloquea el id hasta que alguien lo borre.
+func (a *almacenCoW) rmdirInstancia(d string) {
+	if a.quitarDir != nil && a.cuota != "" {
+		err := a.quitarDir(d)
+		if err == nil {
+			return
+		}
+		if _, serr := os.Lstat(d); os.IsNotExist(serr) {
+			return
+		}
+		if err = a.quitarDir(d); err == nil {
+			return
+		}
+		if _, serr := os.Lstat(d); os.IsNotExist(serr) {
+			return
+		}
+		log.Printf("warning: copy-on-write store: could not remove %s (%v); if it is a subvolume, "+
+			"remove it by hand with: btrfs subvolume delete %s", d, err, d)
+	}
+	if err := os.RemoveAll(d); err != nil {
+		log.Printf("warning: copy-on-write store: removing %s: %v", d, err)
+	}
 }
 
 func (a *almacenCoW) dirInstancia(id string) string { return filepath.Join(a.dir, "m", id) }
@@ -483,6 +540,13 @@ func (a *almacenCoW) asegurarMontado(ctx context.Context) error {
 	}
 	if err := a.disponer(); err != nil {
 		return err
+	}
+	a.cuota = ""
+	if a.detectarCuota != nil {
+		a.cuota = a.detectarCuota(ctx)
+	}
+	if a.cuota == "" && a.detectarCuota != nil {
+		log.Printf("WARNING: copy-on-write store %s: no per-instance disk quota (see docs/cow.md, \"Disk quota\")", a.dir)
 	}
 	a.montado = true
 	return nil
@@ -649,7 +713,7 @@ func (a *almacenCoW) base(ctx context.Context, snap, src string) (string, error)
 
 // clonarInstancia prepara el almacén si hace falta, asegura la base del
 // dorado y la clona para la instancia id. Devuelve la ruta del overlay de la
-// instancia, ya cedido al usuario del VMM.
+// instancia, ya abierto al VMM por grupo (ver cederPorGrupo).
 func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, gib int) (string, error) {
 	if err := nombreSeguro(id); err != nil {
 		return "", err
@@ -667,46 +731,89 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 		return "", err
 	}
 	d := a.dirInstancia(id)
-	if err := os.Mkdir(d, 0o700); err != nil {
+	if err := a.mkdirInstancia(d); err != nil {
 		if !errors.Is(err, os.ErrExist) || a.viva == nil || a.viva(id) {
 			return "", err
 		}
 		// Un directorio residual (un runFrom que murió, un barrido que no llegó):
 		// la máquina no está viva, así que sobra y no debe mandar a la instancia
 		// a copia completa.
-		if err := os.RemoveAll(d); err != nil {
-			return "", err
-		}
-		if err := os.Mkdir(d, 0o700); err != nil {
+		a.rmdirInstancia(d)
+		if err := a.mkdirInstancia(d); err != nil {
 			return "", err
 		}
 	}
 	ruta := filepath.Join(d, "overlay.ext4")
 	if err := a.clonar(base, ruta); err != nil {
-		_ = os.RemoveAll(d)
+		a.rmdirInstancia(d)
 		return "", fmt.Errorf("reflinking the overlay: %w", err)
 	}
 	// La base es 0400 y el clon hereda el modo: se abre para el VMM.
 	_ = os.Chmod(ruta, 0o600)
+	// La cuota, antes de ceder el fichero al VMM. Si el almacén la impone y no
+	// se puede aplicar, la instancia NO va al almacén: sin cuota, un VMM
+	// comprometido podría llenarlo.
+	if a.cuota != "" && a.limitar != nil {
+		fi, err := os.Stat(ruta)
+		if err == nil {
+			err = a.limitar(d, ruta, cuotaInstancia(fi.Size()))
+		}
+		if err != nil {
+			a.rmdirInstancia(d)
+			return "", fmt.Errorf("applying the disk quota (%s): %w", a.cuota, err)
+		}
+	}
 	if a.priv != nil && a.priv.Enabled {
-		// El VMM es dueño del FICHERO, no del directorio: con el directorio en
-		// root:grupo 0750 solo lo atraviesa. Dueño del directorio podría crear
-		// ficheros en él (llenar el almacén compartido) y cambiar el overlay por
-		// un enlace entre la comprobación del daemon y su lectura.
-		if err := a.priv.Own(ruta); err != nil {
-			_ = os.RemoveAll(d)
+		// El VMM NO es dueño de nada aquí: el overlay queda del daemon (root) y
+		// el VMM lo lee y escribe por grupo (0660); el directorio, root:grupo
+		// 0750, solo lo atraviesa. Dueño del FICHERO podría cambiarle el id de
+		// proyecto de XFS con FS_IOC_FSSETXATTR (el núcleo lo permite al dueño,
+		// inode_owner_or_capable) y salirse de su cuota o comerse la de otra
+		// instancia. Dueño del directorio podría crear ficheros en él (llenar el
+		// almacén compartido) y cambiar el overlay por un enlace entre la
+		// comprobación del daemon y su lectura.
+		if err := cederPorGrupo(ruta, os.Geteuid(), a.priv.GID); err != nil {
+			a.rmdirInstancia(d)
 			return "", err
 		}
-		if err := os.Lchown(d, 0, a.priv.GID); err != nil {
-			_ = os.RemoveAll(d)
+		if err := os.Lchown(d, os.Geteuid(), a.priv.GID); err != nil {
+			a.rmdirInstancia(d)
 			return "", fmt.Errorf("securing %s: %w", d, err)
 		}
 		if err := os.Chmod(d, 0o750); err != nil {
-			_ = os.RemoveAll(d)
+			a.rmdirInstancia(d)
 			return "", err
 		}
 	}
 	return ruta, nil
+}
+
+// cederPorGrupo deja el fichero ruta con dueño y grupo dados y modo 0660: el
+// grupo (el del VMM) lo lee y escribe, pero no es suyo, así que no puede
+// cambiarle los atributos que solo toca el dueño (el id de proyecto de XFS, el
+// modo, los permisos). Por descriptor y sin seguir enlaces: el directorio es
+// del daemon, pero no cuesta nada no fiarse de la ruta.
+func cederPorGrupo(ruta string, dueño, grupo int) error {
+	fd, err := syscall.Open(ruta, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	f := os.NewFile(uintptr(fd), ruta)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("granting %s: not a regular file", ruta)
+	}
+	if err := f.Chown(dueño, grupo); err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	if err := f.Chmod(0o660); err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	return nil
 }
 
 // borrarInstancia quita el directorio de la instancia id del almacén. La ruta
@@ -721,7 +828,7 @@ func (a *almacenCoW) borrarInstancia(id string) {
 	if !a.montado {
 		return // nunca se borra en el directorio de montaje vacío de la raíz
 	}
-	_ = os.RemoveAll(a.dirInstancia(id))
+	a.rmdirInstancia(a.dirInstancia(id))
 }
 
 // barrer quita las instancias sin máquina y las bases sin dorado (o de una
@@ -738,7 +845,7 @@ func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado func(snap s
 				continue
 			}
 			log.Printf("copy-on-write store: removing the overlay of %s (its machine is gone)", shortID(e.Name()))
-			_ = os.RemoveAll(filepath.Join(a.dir, "m", e.Name()))
+			a.rmdirInstancia(filepath.Join(a.dir, "m", e.Name()))
 		}
 	}
 	entradas, err := os.ReadDir(filepath.Join(a.dir, "bases"))
@@ -780,6 +887,9 @@ func (a *almacenCoW) info() *api.CoWStore {
 	a.mu.Unlock()
 	s := &api.CoWStore{Path: a.dir, FS: a.fs, Mounted: montado}
 	if montado {
+		a.mu.Lock()
+		s.Quota, s.NoQuota = a.cuota, a.cuota == ""
+		a.mu.Unlock()
 		if total, libre, err := a.libreEn(a.dir); err == nil {
 			s.SizeMiB, s.FreeMiB = total>>20, libre>>20
 		}
@@ -858,6 +968,7 @@ func elegirFSAlmacen(filesystems string, hayMkfs func(string) bool) (string, err
 type montaje struct {
 	punto  string
 	fstype string
+	opts   string // opciones del montaje y del superbloque, juntas
 }
 
 // parsearMountinfo lee /proc/self/mountinfo. El punto de montaje es el campo 5
@@ -879,7 +990,11 @@ func parsearMountinfo(r io.Reader) ([]montaje, error) {
 		if len(campos) < 5 || sep < 0 || sep+1 >= len(campos) {
 			continue
 		}
-		out = append(out, montaje{punto: desescaparMountinfo(campos[4]), fstype: campos[sep+1]})
+		opts := campos[5%len(campos)]
+		if sep+3 < len(campos) {
+			opts += "," + campos[sep+3]
+		}
+		out = append(out, montaje{punto: desescaparMountinfo(campos[4]), fstype: campos[sep+1], opts: opts})
 	}
 	return out, sc.Err()
 }

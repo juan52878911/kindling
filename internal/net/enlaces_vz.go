@@ -2,14 +2,14 @@
 
 package net
 
-// En macOS no hay aristas entre máquinas en esta versión (docs/grafos.md): la
-// red vive dentro de cada kling-vz y el daemon no tiene dónde resolver bajo
-// su candado en cada conexión. El manager lo rechaza antes con un 501; estas
-// funciones existen para que compile igual.
+// En macOS no hay nada que montar en el host para las aristas de un grafo
+// (docs/grafos.md): la red vive dentro de cada kling-vz, que atiende las
+// aristas en su pasarela y pide cada conexión al daemon por su broker
+// (internal/machine/broker*.go, pkg/linkbroker). internal/machine le manda
+// las aristas por su API (PUT /kling/graph). Estas funciones existen para que
+// el manager no distinga sistemas.
 
 import (
-	"errors"
-
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
@@ -30,10 +30,9 @@ type GraphSpec struct {
 	AuditPath   string
 }
 
-// SetGraph no monta nada en macOS.
-func SetGraph(n *Net, spec GraphSpec) error {
-	return errors.New("graph edges between machines are Linux-only in this version")
-}
+// SetGraph no monta nada en macOS: ver la cabecera.
+func SetGraph(n *Net, spec GraphSpec) error { return nil }
 
-// InvalidarEnlaces no tiene nada que cortar.
+// InvalidarEnlaces no tiene nada que cortar aquí: las sesiones de las
+// aristas en macOS las lleva el broker del manager.
 func InvalidarEnlaces(ids ...string) int { return 0 }

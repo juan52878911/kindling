@@ -132,10 +132,10 @@ func TestElegirFSAlmacen(t *testing.T) {
 // El montaje visible sobre el directorio del almacén tiene que ser de su tipo.
 func TestMontadoConTipo(t *testing.T) {
 	ms := []montaje{
-		{"/", "ext4"},
-		{"/var/lib/kindling/cow", "btrfs"},
-		{"/otra", "xfs"},
-		{"/otra", "tmpfs"}, // montado encima: es el visible
+		{"/", "ext4", ""},
+		{"/var/lib/kindling/cow", "btrfs", ""},
+		{"/otra", "xfs", ""},
+		{"/otra", "tmpfs", ""}, // montado encima: es el visible
 	}
 	if ok, err := montadoConTipo(ms, "/var/lib/kindling/cow", "btrfs"); !ok || err != nil {
 		t.Errorf("btrfs: %v %v", ok, err)

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -61,10 +62,6 @@ func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Ne
 	return knet.SetCredentials(n, creds, auditPath, resolve)
 }
 
-// modeloAPosible: en Linux el proxy es del daemon y marca a la copia por la IP
-// de su netns (ver copias_db.go).
-const modeloAPosible = true
-
 // direccionCopiaLocked es por dónde llega el proxy del daemon al puerto port
 // de la copia cp: la IP de su netns, cuyo DNAT lleva todos los puertos al
 // invitado. Con m.mu tomado (cp es la entrada viva).
@@ -75,12 +72,59 @@ func direccionCopiaLocked(cp *api.Machine, port int) (string, error) {
 	return net.JoinHostPort(knet.Plan(cp.NetIndex, cp.ID).NSIP, strconv.Itoa(port)), nil
 }
 
+// direccionListoLocked es a qué marca esperarPuertoPlataforma para saber si
+// el puerto port de cp contesta (una arista depends con puerto): la misma
+// dirección que usa el proxy. Con m.mu tomado.
+func direccionListoLocked(cp *api.Machine, port int) (string, error) {
+	return direccionCopiaLocked(cp, port)
+}
+
 // invalidarCopiaPlataforma corta las sesiones de todos los proxies hacia id.
 func invalidarCopiaPlataforma(id string) int { return knet.InvalidarMaquina(id) }
 
 // invalidarAgentePlataforma corta las sesiones hacia otras máquinas del
 // proxy de la máquina de n.
 func invalidarAgentePlataforma(n *knet.Net) int { return knet.InvalidarAgente(n) }
+
+// invalidarEnlacesPlataforma corta las sesiones de enlace hacia ids en los
+// proxies de enlace de todas las máquinas (internal/net).
+func invalidarEnlacesPlataforma(ids ...string) int { return knet.InvalidarEnlaces(ids...) }
+
+// invalidarOrigenPlataforma no hace nada en Linux: las sesiones que pidió una
+// máquina las corta invalidarAgente (su proxy es del daemon).
+func invalidarOrigenPlataforma(string) int { return 0 }
+
+// iniciarBroker no hace nada en Linux: las aristas las sirve el daemon en el
+// netns de cada nodo (internal/net), sin broker (broker.go).
+func (m *Manager) iniciarBroker() {}
+
+// cerrarBroker: ver iniciarBroker.
+func (m *Manager) cerrarBroker() {}
+
+// enviarGrafoPlataforma no hace nada en Linux: SetGraph ya lo montó todo en
+// el netns del nodo.
+func enviarGrafoPlataforma(context.Context, *Manager, string) error { return nil }
+
+// esperarPuertoPlataforma espera a que addr (la IP del netns del destino)
+// acepte conexiones: un nodo recién despertado tarda un poco en volver a
+// escuchar.
+func esperarPuertoPlataforma(ctx context.Context, _ *Manager, _, addr string, _ int) error {
+	var d net.Dialer
+	for {
+		intento, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		c, err := d.DialContext(intento, "tcp", addr)
+		cancel()
+		if err == nil {
+			_ = c.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("port %s didn't answer: %w", addr, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
 
 // abrirReenvios no hace nada en Linux: el host alcanza al invitado por la IP
 // del veth, sin reenvíos.

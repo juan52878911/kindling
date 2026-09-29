@@ -82,7 +82,7 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 	// symlinks la comparación textual del punto de montaje nunca coincidiría.
 	root = rutaCanonica(root)
 	fs, errFS := fsDelAlmacen(root)
-	return &almacenCoW{
+	a := &almacenCoW{
 		root: root, fs: fs, img: filepath.Join(root, imgAlmacen(fs)), dir: filepath.Join(root, "cow"), priv: priv,
 		errFS:       errFS,
 		estaMontado: func(dir string) (bool, error) { return estaMontadoTipo(dir, fs) },
@@ -101,6 +101,8 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 		},
 		libreEn: libreEnDir,
 	}
+	a.activarCuota()
+	return a
 }
 
 // fsDelAlmacen es el sistema de ficheros del almacén de root: el del que ya
@@ -196,8 +198,14 @@ func argsMkfs(fs string) []string {
 // podría quedarse sin sitio debajo (ver tamAlmacen).
 func opcionesMontaje(fs string) string {
 	o := "loop,nodev,nosuid,noexec"
-	if fs == "btrfs" {
+	switch fs {
+	case "btrfs":
 		o += ",nodiscard"
+	case "xfs":
+		// Cuota de proyecto por instancia (cow_cuota.go). Una cuota se activa al
+		// montar: un almacén ya montado sin ella se queda sin cuota hasta que se
+		// desmonte y el daemon lo vuelva a montar.
+		o += ",prjquota"
 	}
 	return o
 }

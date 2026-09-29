@@ -309,6 +309,12 @@ type Options struct {
 	// credencial con UpstreamMachine (ver maquina.go). Nil: esas credenciales
 	// no marcan nunca (kling-vz, o un daemon que no las admite).
 	ResolveMachine ResolveMachineFunc
+	// DialMachine, si no es nil, sustituye a ResolveMachine y al dial: da la
+	// conexión YA ABIERTA a la máquina de una credencial con UpstreamMachine.
+	// Es lo que usa kling-vz (macOS): se la pide al daemon, que comprueba,
+	// resuelve y marca él mismo en cada conexión y le entrega el socket (ver
+	// pkg/linkbroker). Quien la usa nunca ve una dirección.
+	DialMachine DialMachineFunc
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
@@ -351,6 +357,7 @@ type Proxy struct {
 	// dialer, la comprobación del destino resuelto (campo para los tests) y
 	// las sesiones vivas hacia cada máquina, para cortarlas (Invalidar).
 	resolveMaq ResolveMachineFunc
+	abrirMaq   DialMachineFunc
 	dialMaq    func(ctx context.Context, network, addr string) (net.Conn, error)
 	destinoMaq func(netip.AddrPort) error
 	sesMu      sync.Mutex
@@ -432,6 +439,7 @@ func New(o Options) *Proxy {
 		lookupUp:      lookupSistema,
 
 		resolveMaq: o.ResolveMachine,
+		abrirMaq:   o.DialMachine,
 		dialMaq:    (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive}).DialContext,
 		destinoMaq: destinoMaquinaValido,
 		sesiones:   map[*sesionPG]sesionMaquina{},

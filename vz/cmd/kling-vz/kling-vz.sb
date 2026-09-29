@@ -5,6 +5,8 @@
 ;;   ROOT  la raíz de datos de kindling
 ;;   MDIR  el directorio de esta máquina
 ;;   NET   "1" si la máquina tiene salida (egress distinto de none)
+;;   BROKER el socket del daemon por el que se piden las conexiones de las
+;;          aristas de grafo y de kling db attach (pkg/linkbroker)
 ;;   GFX   "1" si la máquina tiene pantalla virtio-gpu (KLING_VZ_GRAPHICS)
 (version 1)
 (deny default)
@@ -35,10 +37,12 @@
   (subpath (string-append (param "ROOT") "/volumes")))
 
 ;; Red: su API (socket Unix en el directorio de la máquina) y los reenvíos en
-;; loopback siempre; salida al exterior, solo si la máquina la tiene.
+;; loopback siempre; el socket del broker del daemon, y ningún otro socket Unix
+;; de fuera; salida al exterior, solo si la máquina la tiene.
 (allow network-bind network-inbound (local unix-socket (subpath (param "MDIR"))))
 (allow network-bind network-inbound (local ip "localhost:*"))
 (allow network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote unix-socket (path-literal (param "BROKER"))))
 (if (string=? (param "NET") "1")
   (allow network-outbound (remote ip "*:*")))
 

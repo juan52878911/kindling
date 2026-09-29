@@ -1,0 +1,16 @@
+# Agente + servidores MCP como una unidad (docs/grafos.md, "desde los plugins").
+#
+# Sin aristas a propósito: el puente MCP escucha en el 8080 del invitado y una
+# arista no puede apuntar al 8080 (el agente de invitado no autentica). El
+# gateway de kling-mcp sigue llegando a cada servidor desde el host, como
+# siempre; el grafo aporta el ciclo de vida atómico: `up`, `freeze`/`thaw`,
+# `snapshot` (agente y herramientas del mismo instante) y `fork -n N` para
+# comparar prompts partiendo del mismo punto.
+#
+# Las plantillas son las que crea `kling mcp add` / `kling snapshot`; cambia
+# los nombres por los tuyos.
+name: agente-mcp
+nodes:
+  agente:  {from: agent-node, egress: allowlist, allow_domains: [api.anthropic.com], idle_freeze: 300}
+  browser: {from: mcp-playwright, wake: lazy, idle_freeze: 120}
+  memoria: {from: mcp-memory, wake: lazy, idle_freeze: 600}

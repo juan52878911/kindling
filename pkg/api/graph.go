@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // Etiquetas que el daemon pone a cada máquina de un grafo. Nadie más puede
@@ -65,11 +67,21 @@ const (
 	// Postgres de su máquina entra en To con la clave real (el attach de
 	// `kling db`). Solo Linux en esta versión.
 	GraphEdgeCredential = "credential"
-	// GraphEdgeShare y GraphEdgeDepends son del diseño y NO de esta versión: se
-	// rechazan con un mensaje que dice qué usar en su lugar.
-	GraphEdgeShare   = "share"
+	// GraphEdgeShare: From ve la carpeta Mount de To. La carpeta es del grafo
+	// (vive en su directorio del almacén y se borra con él); To la monta en
+	// lectura y escritura y From con Mode (ro por defecto, o rw). Solo nodos
+	// con Image: una carpeta viva se monta al arrancar.
+	GraphEdgeShare = "share"
+	// GraphEdgeDepends: From no arranca (ni despierta) hasta que To está listo:
+	// corriendo y, si la arista lleva Port, con ese puerto contestando. Da el
+	// orden de up y thaw (el inverso en freeze y en la pausa de un snapshot);
+	// un ciclo se rechaza al validar.
 	GraphEdgeDepends = "depends"
-	GraphEdgeMCP     = "mcp"
+	// GraphEdgeMCP NO está en esta versión y se rechaza: el puente MCP solo
+	// escucha en el 8080, que es también el agente de invitado (exec,
+	// ficheros, volúmenes), y ninguna arista llega nunca a él. Un servidor MCP
+	// que hable HTTP en su propio puerto se alcanza con una arista link.
+	GraphEdgeMCP = "mcp"
 )
 
 // Estados de un grafo (Graph.State).
@@ -171,13 +183,18 @@ type GraphEdge struct {
 	To   string `json:"to"`
 	Kind string `json:"kind"`
 	// Port del destino (tiene que estar en sus Ports). En credential, 5432
-	// por defecto.
+	// por defecto; en depends, opcional (el puerto que tiene que contestar);
+	// en share, ninguno.
 	Port int `json:"port,omitempty"`
 	// Env, User y Database: solo credential (la variable del marcador, el rol
 	// y la base).
 	Env      string `json:"env,omitempty"`
 	User     string `json:"user,omitempty"`
 	Database string `json:"database,omitempty"`
+	// Mount y Mode: solo share. Mount es la ruta de la carpeta en los dos
+	// invitados; Mode, cómo la monta From (ro por defecto, o rw).
+	Mount string `json:"mount,omitempty"`
+	Mode  string `json:"mode,omitempty"`
 	// Secret es la clave real de una arista credential. NUNCA se serializa:
 	// viaja en GraphRequest.Secrets y el daemon la guarda cifrada.
 	Secret string `json:"-"`
@@ -331,7 +348,8 @@ func validarNodo(name string, n *GraphNode) error {
 
 func validarArista(g *Graph, e *GraphEdge) error {
 	desc := fmt.Sprintf("edge %s -> %s (%s)", e.From, e.To, e.Kind)
-	if _, ok := g.Nodes[e.From]; !ok {
+	from, ok := g.Nodes[e.From]
+	if !ok {
 		return fmt.Errorf("%s: node %q doesn't exist", desc, e.From)
 	}
 	to, ok := g.Nodes[e.To]
@@ -348,11 +366,14 @@ func validarArista(g *Graph, e *GraphEdge) error {
 	if e.Port == GuestPort {
 		return fmt.Errorf("%s: port %d is the kindling guest agent (exec, files, volumes): a graph edge can never reach it; expose the service on another port", desc, GuestPort)
 	}
+	if e.Kind != GraphEdgeCredential && (e.Env != "" || e.User != "" || e.Database != "") {
+		return fmt.Errorf("%s: env, user and database are only for credential edges", desc)
+	}
+	if e.Kind != GraphEdgeShare && (e.Mount != "" || e.Mode != "") {
+		return fmt.Errorf("%s: mount and mode are only for share edges", desc)
+	}
 	switch e.Kind {
 	case GraphEdgeLink:
-		if e.Env != "" || e.User != "" || e.Database != "" {
-			return fmt.Errorf("%s: env, user and database are only for credential edges", desc)
-		}
 		switch e.Port {
 		case 53, 80, 443:
 			// El nombre <nodo>.graph resuelve a la IP del host en el veth del
@@ -373,19 +394,50 @@ func validarArista(g *Graph, e *GraphEdge) error {
 			return fmt.Errorf("%s: database %q is not a valid database name", desc, e.Database)
 		}
 	case GraphEdgeShare:
-		return fmt.Errorf("%s: share edges are not in this version; declare the folder in the node's shares", desc)
+		return validarShare(desc, from, to, e)
 	case GraphEdgeDepends:
-		return fmt.Errorf("%s: depends edges are not in this version; a lazy node wakes on its first connection", desc)
+		// Sin puerto, listo es "corriendo"; con puerto, además ese puerto
+		// contesta (y tiene que estar entre los que el destino expone).
+		if e.Port == 0 {
+			return nil
+		}
 	case GraphEdgeMCP:
-		return fmt.Errorf("%s: mcp edges are not in this version", desc)
+		return fmt.Errorf("%s: mcp edges are not in this version: the MCP bridge listens only on port %d, "+
+			"which is also the guest agent and no edge can ever reach; if the MCP server speaks HTTP on its own port, use a link edge to that port", desc, GuestPort)
 	default:
-		return fmt.Errorf("%s: unknown kind; use %s or %s", desc, GraphEdgeLink, GraphEdgeCredential)
+		return fmt.Errorf("%s: unknown kind; use %s, %s, %s or %s", desc, GraphEdgeLink, GraphEdgeCredential, GraphEdgeShare, GraphEdgeDepends)
 	}
 	if e.Port < 1 || e.Port > 65535 {
 		return fmt.Errorf("%s: port %d out of range", desc, e.Port)
 	}
 	if !contienePuerto(to.Ports, e.Port) {
 		return fmt.Errorf("%s: node %s does not expose port %d (add it to its ports)", desc, e.To, e.Port)
+	}
+	return nil
+}
+
+// validarShare comprueba una arista share y normaliza su modo (ro por
+// defecto: quien no es dueño de la carpeta solo la lee si no pide más).
+func validarShare(desc string, from, to GraphNode, e *GraphEdge) error {
+	if e.Port != 0 {
+		return fmt.Errorf("%s: a share edge has no port", desc)
+	}
+	if err := share.ValidMount(e.Mount); err != nil {
+		return fmt.Errorf("%s: %w", desc, err)
+	}
+	switch e.Mode {
+	case "":
+		e.Mode = share.ModeRO
+	case share.ModeRO, share.ModeRW:
+	case share.ModeCopy:
+		return fmt.Errorf("%s: mode copy is an upload made once for one machine, not a folder two nodes see; use ro or rw", desc)
+	default:
+		return fmt.Errorf("%s: mode %q: use ro or rw", desc, e.Mode)
+	}
+	// Una carpeta viva se monta al arrancar: un nodo que sale de una
+	// plantilla ya arrancó (lo mismo que los shares del nodo).
+	if from.From != "" || to.From != "" {
+		return fmt.Errorf("%s: shared folders need a cold boot (image) on both nodes, not a template", desc)
 	}
 	return nil
 }
@@ -400,11 +452,14 @@ func validarAristasJuntas(g *Graph) error {
 	envs := map[string]bool{}     // origen/variable
 	vistas := map[string]bool{}
 	for _, e := range g.Edges {
-		k := e.From + "\x00" + e.To + "\x00" + e.Kind + "\x00" + strconv.Itoa(e.Port)
+		k := e.From + "\x00" + e.To + "\x00" + e.Kind + "\x00" + strconv.Itoa(e.Port) + "\x00" + e.Mount
 		if vistas[k] {
 			return fmt.Errorf("edge %s -> %s (%s, port %d) is declared twice", e.From, e.To, e.Kind, e.Port)
 		}
 		vistas[k] = true
+		if e.Kind != GraphEdgeLink && e.Kind != GraphEdgeCredential {
+			continue // share y depends no ocupan un puerto de la dirección del grafo
+		}
 		// Todas las aristas de un nodo llegan por la misma dirección (la del
 		// host en su veth): dos al mismo puerto no se distinguirían.
 		if otro, ok := puertos[clave{e.From, e.Port}]; ok {
@@ -419,7 +474,133 @@ func validarAristasJuntas(g *Graph) error {
 			envs[e.Key()] = true
 		}
 	}
+	if err := validarMontajes(g); err != nil {
+		return err
+	}
+	_, err := g.StartOrder()
+	return err
+}
+
+// validarMontajes comprueba, nodo a nodo, que sus carpetas (las suyas y las
+// de sus aristas share) no se pisan: una ruta, una carpeta; ninguna dentro de
+// otra; y no más de share.MaxShares.
+func validarMontajes(g *Graph) error {
+	porNodo := map[string]map[string]string{} // nodo -> montaje -> carpeta
+	poner := func(nodo, mount, carpeta string) error {
+		ms := porNodo[nodo]
+		if ms == nil {
+			ms = map[string]string{}
+			for i, s := range g.Nodes[nodo].Shares {
+				ms[s.Mount] = "own\x00" + strconv.Itoa(i)
+			}
+			porNodo[nodo] = ms
+		}
+		if otra, ok := ms[mount]; ok {
+			if otra == carpeta {
+				return nil
+			}
+			return fmt.Errorf("node %s mounts two different folders at %s", nodo, mount)
+		}
+		for mp := range ms {
+			if strings.HasPrefix(mount, mp+"/") || strings.HasPrefix(mp, mount+"/") {
+				return fmt.Errorf("node %s: %s and %s are nested: one would hide the other", nodo, mount, mp)
+			}
+		}
+		ms[mount] = carpeta
+		if len(ms) > share.MaxShares {
+			return fmt.Errorf("node %s has more than %d shared folders (its own and its share edges)", nodo, share.MaxShares)
+		}
+		return nil
+	}
+	for _, e := range g.Edges {
+		if e.Kind != GraphEdgeShare {
+			continue
+		}
+		// La carpeta es la de To en esa ruta: la ven To y todos los que tienen
+		// una arista share hacia ella.
+		carpeta := "edge\x00" + e.To + "\x00" + e.Mount
+		if err := poner(e.To, e.Mount, carpeta); err != nil {
+			return err
+		}
+		if err := poner(e.From, e.Mount, carpeta); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// Dependencies son los nodos de los que depende nodo (sus aristas depends),
+// por nombre y sin repetir.
+func (g *Graph) Dependencies(nodo string) []string {
+	vistos := map[string]bool{}
+	var out []string
+	for _, e := range g.Edges {
+		if e.Kind == GraphEdgeDepends && e.From == nodo && !vistos[e.To] {
+			vistos[e.To] = true
+			out = append(out, e.To)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// StartOrder es el orden de arranque del grafo: cada nodo después de los que
+// depende (aristas depends) y, entre los que pueden ir a la vez, por nombre
+// (sin aristas depends es SortedNodeNames). Lo siguen up y thaw. Un ciclo es
+// un error.
+func (g *Graph) StartOrder() ([]string, error) { return g.ordenDepends(false) }
+
+// StopOrder es el de parada: cada nodo antes de los que depende y, entre los
+// que pueden ir a la vez, por nombre. Lo siguen freeze y la pausa de un
+// snapshot.
+func (g *Graph) StopOrder() ([]string, error) { return g.ordenDepends(true) }
+
+// ordenDepends ordena los nodos por sus aristas depends (Kahn, desempatando
+// por nombre para que sea reproducible). inverso: los dependientes primero.
+func (g *Graph) ordenDepends(inverso bool) ([]string, error) {
+	pendientes := map[string]int{} // nodo -> los que tienen que ir antes
+	despues := map[string][]string{}
+	for n := range g.Nodes {
+		pendientes[n] += 0
+		for _, d := range g.Dependencies(n) {
+			antes, luego := d, n
+			if inverso {
+				antes, luego = n, d
+			}
+			pendientes[luego]++
+			despues[antes] = append(despues[antes], luego)
+		}
+	}
+	var listos []string
+	for n, k := range pendientes {
+		if k == 0 {
+			listos = append(listos, n)
+		}
+	}
+	out := make([]string, 0, len(g.Nodes))
+	for len(listos) > 0 {
+		sort.Strings(listos)
+		n := listos[0]
+		listos = listos[1:]
+		out = append(out, n)
+		for _, d := range despues[n] {
+			pendientes[d]--
+			if pendientes[d] == 0 {
+				listos = append(listos, d)
+			}
+		}
+	}
+	if len(out) != len(g.Nodes) {
+		var ciclo []string
+		for n, k := range pendientes {
+			if k > 0 {
+				ciclo = append(ciclo, n)
+			}
+		}
+		sort.Strings(ciclo)
+		return nil, fmt.Errorf("graph %s: depends edges form a cycle (through %s)", g.Name, strings.Join(ciclo, ", "))
+	}
+	return out, nil
 }
 
 func contienePuerto(ps []int, p int) bool {
@@ -432,10 +613,23 @@ func contienePuerto(ps []int, p int) bool {
 }
 
 // HasNetworkEdges dice si el grafo tiene aristas que conectan máquinas
-// (link o credential): las que en macOS no están en esta versión.
+// (link o credential): las que pasan por el proxy de enlaces (Linux) o por el
+// broker de enlaces (macOS).
 func (g *Graph) HasNetworkEdges() bool {
 	for _, e := range g.Edges {
 		if e.Kind == GraphEdgeLink || e.Kind == GraphEdgeCredential {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPortDepends dice si alguna arista depends espera a un puerto (y no solo
+// a que el nodo corra): el daemon lo comprueba marcando a la IP del netns del
+// destino en Linux y preguntando a su kling-vz (KlingProbe) en macOS.
+func (g *Graph) HasPortDepends() bool {
+	for _, e := range g.Edges {
+		if e.Kind == GraphEdgeDepends && e.Port != 0 {
 			return true
 		}
 	}

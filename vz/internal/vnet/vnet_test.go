@@ -702,3 +702,102 @@ func mustAtoi(t *testing.T, s string) int {
 	}
 	return n
 }
+
+// enlacesFalsos hace de vz/internal/grafo: aristas link en unos puertos, con
+// el destino dado o rechazadas.
+type enlacesFalsos struct {
+	destino map[uint16]string // puerto -> dirección; "" = el daemon dice que no
+	vistas  atomic.Int32
+}
+
+func (e *enlacesFalsos) Link(port uint16) bool { _, ok := e.destino[port]; return ok }
+
+func (e *enlacesFalsos) Serve(ctx context.Context, port uint16, aceptar func() (net.Conn, error), rechazar func()) {
+	e.vistas.Add(1)
+	addr := e.destino[port]
+	if addr == "" {
+		rechazar()
+		return
+	}
+	up, err := net.Dial("tcp", addr)
+	if err != nil {
+		rechazar()
+		return
+	}
+	g, err := aceptar()
+	if err != nil {
+		up.Close()
+		return
+	}
+	splice(g, up)
+}
+
+// Una arista link: el puerto de la pasarela va a Graph.Serve en TODOS los
+// modos (none incluido), antes que el proxy de Postgres; un rechazo es un RST
+// al momento; los demás puertos siguen su camino de siempre. Nada sale por el
+// Dial del host.
+func TestGraphLinkOnGateway(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(c, c); c.Close() }()
+		}
+	}()
+	r := newRig(t, "")
+	enl := &enlacesFalsos{destino: map[uint16]string{8081: ln.Addr().String(), 5432: ""}}
+	pg := &pgFalso{}
+	pg.activo.Store(true)
+	r.n.cfg.Graph = enl
+	r.n.cfg.CredentialsPG = pg
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":8081")
+	if err != nil {
+		t.Fatalf("gateway:8081 (link): %v", err)
+	}
+	if _, err := conn.Write([]byte("hola")); err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 4)
+	if _, err := io.ReadFull(conn, b); err != nil || string(b) != "hola" {
+		t.Fatalf("eco por la arista: %q %v", b, err)
+	}
+	conn.Close()
+
+	// La arista que el daemon rechaza no cae al proxy de Postgres aunque esté
+	// activo: se rechaza.
+	start := time.Now()
+	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":5432"); err == nil {
+		conn.Close()
+		t.Fatal("a refused link must be refused to the guest")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("a refused link must fail at once")
+	}
+	if pg.vistas.Load() != 0 {
+		t.Fatal("a link port went to the postgres proxy")
+	}
+	// Otro puerto no es una arista: el proxy de Postgres, como siempre.
+	if conn, err := r.g.dialTCP(ctx, GatewayIP.String()+":6543"); err != nil {
+		t.Fatalf("gateway:6543: %v", err)
+	} else {
+		conn.Close()
+	}
+	if enl.vistas.Load() != 2 {
+		t.Fatalf("Graph.Serve saw %d connections, want 2", enl.vistas.Load())
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dialed) != 0 {
+		t.Fatalf("nothing should have been dialed on the host, got %v", r.dialed)
+	}
+}

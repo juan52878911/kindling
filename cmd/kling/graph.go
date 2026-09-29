@@ -328,11 +328,19 @@ func escribirGrafo(w io.Writer, g *api.Graph) {
 	sort.SliceStable(aristas, func(i, j int) bool { return aristas[i].From < aristas[j].From })
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, e := range aristas {
-		extra := ""
-		if e.Kind == api.GraphEdgeCredential {
+		destino, extra := fmt.Sprintf("%s:%d", e.Host(), e.Port), ""
+		switch e.Kind {
+		case api.GraphEdgeCredential:
 			extra = fmt.Sprintf("%s as %s on %s", e.Env, e.User, e.Database)
+		case api.GraphEdgeShare:
+			destino, extra = e.To, fmt.Sprintf("%s (%s)", e.Mount, e.Mode)
+		case api.GraphEdgeDepends:
+			destino, extra = e.To, "waits until it runs"
+			if e.Port != 0 {
+				extra = fmt.Sprintf("waits until port %d answers", e.Port)
+			}
 		}
-		fmt.Fprintf(tw, "  %s -> %s:%d\t%s\t%s\n", e.From, e.Host(), e.Port, e.Kind, extra)
+		fmt.Fprintf(tw, "  %s -> %s\t%s\t%s\n", e.From, destino, e.Kind, extra)
 	}
 	_ = tw.Flush()
 }

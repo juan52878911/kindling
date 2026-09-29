@@ -30,6 +30,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,8 +73,26 @@ type nodoMaquina struct {
 // corriendo o pausados: uno congelado no tiene VMM que volcar (despierta el
 // grafo antes). Los lazy sin instancia no se vuelcan: siguen siendo su
 // plantilla.
+//
+// Un grafo con aristas share no se vuelca: sus nodos llevan montada una
+// carpeta viva del host, y la memoria volcada despertaría en cada instancia
+// con un montaje que no le corresponde (lo mismo que `kling commit` de una
+// máquina con -share). Ver docs/grafos.md.
 func (m *Manager) nodosParaVolcar(gid string) ([]nodoMaquina, error) {
-	nombres, ids := m.maquinasDeGrafo(gid)
+	m.mu.RLock()
+	var carpetas bool
+	if g := m.grafos[gid]; g != nil {
+		for _, e := range g.Edges {
+			carpetas = carpetas || e.Kind == api.GraphEdgeShare
+		}
+	}
+	m.mu.RUnlock()
+	if carpetas {
+		return nil, &api.StatusError{Code: 409, Message: "the graph has share edges: its nodes have a live host folder mounted, " +
+			"and a snapshot would carry that mount to every instance restored from it; snapshot and fork don't take them in this version " +
+			"(freeze and thaw work)"}
+	}
+	nombres, ids := m.maquinasDeGrafo(gid, false)
 	var out []nodoMaquina
 	for i, id := range ids {
 		mc, ok := m.Get(id)
@@ -108,14 +127,30 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 	limpio := context.WithoutCancel(ctx)
 	var pausadas []string
 	reanudar := func() {
+		pausada := map[string]bool{}
 		for _, id := range pausadas {
+			pausada[id] = true
+		}
+		for _, n := range nodos {
+			id := n.id
+			if !pausada[id] {
+				continue
+			}
 			if err := reanudarNodoGrafo(limpio, m, id); err != nil {
 				log.Printf("graph %s: couldn't resume %s after the snapshot: %v", shortID(gid), shortID(id), err)
 			}
 		}
 	}
-	// (1) pausar todos los que corren.
-	for _, n := range nodos {
+	// (1) pausar todos los que corren, cada uno antes que los nodos de los que
+	// depende (el orden de freeze); se reanudan en el de arranque.
+	_, orden := m.maquinasDeGrafo(gid, true)
+	posicion := map[string]int{}
+	for i, id := range orden {
+		posicion[id] = i
+	}
+	aPausar := append([]nodoMaquina(nil), nodos...)
+	sort.SliceStable(aPausar, func(i, j int) bool { return posicion[aPausar[i].id] < posicion[aPausar[j].id] })
+	for _, n := range aPausar {
 		if n.estado != api.StateRunning {
 			continue
 		}
@@ -367,7 +402,12 @@ func (m *Manager) crearCopiaFork(ctx context.Context, gid string, ng *api.Graph,
 	if err := m.guardarGrafo(ng.ID); err != nil {
 		return nil, err
 	}
-	nombres := ng.SortedNodeNames()
+	// En el orden de depends, como up (todos salen del mismo instante, así
+	// que cada dependencia ya estaba lista cuando se volcó).
+	nombres, err := ng.StartOrder()
+	if err != nil {
+		nombres = ng.SortedNodeNames()
+	}
 	for _, nombreNodo := range nombres {
 		if plantillas[nombreNodo] == "" {
 			continue // lazy sin instancia en el original: sigue así

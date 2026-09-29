@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/vz/internal/egress"
+	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/spec"
 )
 
@@ -770,5 +772,65 @@ func TestKlingCredentials(t *testing.T) {
 	r.must("PUT", "/kling/credentials", `{"credentials":[]}`)
 	if _, ok := r.srv.d.Policy.CredHost("api.example.com"); ok {
 		t.Fatal("an empty set must stop the diversion")
+	}
+}
+
+// PUT /kling/graph y las credenciales hacia otra máquina: solo con el broker
+// del daemon (Deps.Graph). Con él se anuncia graph-link, los nombres de las
+// aristas resuelven a la pasarela en cualquier modo, la red recibe las
+// aristas, y las credenciales que van todas a otra máquina valen sin
+// allowlist; mezcladas con otras, no.
+func TestKlingGraph(t *testing.T) {
+	r := newRig(t)
+	gw := netip.MustParseAddr("172.16.0.1")
+	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
+	r.srv.d.CredIP = gw
+	const aristas = `{"links":[{"host":"api.graph","port":8081}],"hosts":["api.graph","db.graph"]}`
+	const credMaq = `{"credentials":[{"env":"PGPASSWORD","domain":"db.graph","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres","port":5432,"user":"app","database":"shop","upstream_tls":"disable","upstream_machine":"0123456789abcdef0123456789abcdef","upstream_owner":"0123456789abcdef"}]}`
+
+	// Sin broker: ni aristas, ni credenciales a otra máquina, ni capacidad.
+	r.mustFail("PUT", "/kling/graph", aristas, "no link broker")
+	r.mustFail("PUT", "/kling/credentials", credMaq, "link broker")
+	if out := r.must("GET", "/kling/info", ""); strings.Contains(out, credproxy.CapGraphLink) {
+		t.Fatalf("info without a broker = %s", out)
+	}
+
+	r.srv.d.Graph = grafo.NewConDial(func(context.Context) (*net.UnixConn, error) {
+		return nil, errors.New("no daemon in this test")
+	}, nil, nil)
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","graph-link"]`) {
+		t.Fatalf("info = %s", out)
+	}
+	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8080}],"hosts":["api.graph"]}`, "guest agent")
+	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8081}],"hosts":[]}`, "not in hosts")
+	r.mustFail("PUT", "/kling/graph", `{"links":[],"hosts":["api.example.com"]}`, "not a graph name")
+	r.must("PUT", "/kling/graph", aristas)
+	for _, h := range []string{"api.graph", "db.graph"} {
+		if ip, _, ok := r.srv.d.Policy.GraphHost(h); !ok || ip != gw {
+			t.Fatalf("%s is not answered with the gateway", h)
+		}
+	}
+	if _, esGrafo, ok := r.srv.d.Policy.GraphHost("cache.graph"); !esGrafo || ok {
+		t.Fatal("a graph name without an edge must not resolve")
+	}
+	if !r.srv.d.Graph.Link(8081) || r.srv.d.Graph.Link(5432) {
+		t.Fatal("the links did not reach the graph")
+	}
+
+	// egress none (lo que tiene la máquina por defecto): las aristas
+	// credential sí; una credencial normal junto a ellas, no.
+	r.must("PUT", "/kling/credentials", credMaq)
+	if !r.srv.d.Credentials.SoloMaquinas() {
+		t.Fatal("the machine credential did not reach the proxy")
+	}
+	const mezcla = `{"credentials":[{"env":"PGPASSWORD","domain":"db.graph","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres","port":5432,"user":"app","database":"shop","upstream_tls":"disable","upstream_machine":"0123456789abcdef0123456789abcdef","upstream_owner":"0123456789abcdef"},` +
+		`{"env":"API_KEY","domain":"api.example.com","placeholder":"kling-cred-abc","secret":"sk-1"}]}`
+	r.mustFail("PUT", "/kling/credentials", mezcla, "need egress allowlist")
+
+	// La red nace con las aristas.
+	r.configure(t.TempDir())
+	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
+	if r.nets[0].cfg.Graph != r.srv.d.Graph {
+		t.Fatal("the network was not given the graph")
 	}
 }
