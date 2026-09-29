@@ -16,3 +16,9 @@ func credencialesPar(net.Conn) (Llamante, error) {
 }
 
 func dueñoFichero(os.FileInfo) (int, bool) { return 0, false }
+
+// abrirSinEnlace: sin O_NOFOLLOW portable, la política no se carga (tampoco
+// se sabría su dueño).
+func abrirSinEnlace(string) (*os.File, error) {
+	return nil, errors.New("authz policies are not supported on this system")
+}

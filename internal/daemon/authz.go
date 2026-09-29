@@ -272,10 +272,18 @@ func parsePolitica(b []byte, res resolutor) (*Politica, error) {
 // daemon, y no escribible por grupo ni otros: quien pudiera reescribirlo se
 // daría admin.
 func CargarPolitica(ruta string, obligatoria bool) (*Politica, error) {
-	fi, err := os.Lstat(ruta)
+	// Se abre el fichero sin seguir enlaces y se comprueba el descriptor
+	// abierto (no un Lstat previo del nombre): así no hay hueco entre lo que
+	// se comprueba y lo que se lee en el que cambiar el fichero por otro.
+	f, err := abrirSinEnlace(ruta)
 	if errors.Is(err, os.ErrNotExist) && !obligatoria {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("authz policy: %w", err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("authz policy: %w", err)
 	}
@@ -292,11 +300,6 @@ func CargarPolitica(ruta string, obligatoria bool) (*Politica, error) {
 	if uid != 0 && uid != os.Geteuid() {
 		return nil, fmt.Errorf("authz policy %s: owned by uid %d; it must belong to root or to the daemon's user", ruta, uid)
 	}
-	f, err := os.Open(ruta)
-	if err != nil {
-		return nil, fmt.Errorf("authz policy: %w", err)
-	}
-	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, authzMaxFichero+1))
 	if err != nil {
 		return nil, fmt.Errorf("authz policy: %w", err)

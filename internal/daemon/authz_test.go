@@ -16,7 +16,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/juan52878911/kindling/internal/events"
 	"github.com/juan52878911/kindling/internal/machine"
@@ -648,8 +650,35 @@ func TestCargarPolitica(t *testing.T) {
 	if err := os.Symlink(ok, enlace); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CargarPolitica(enlace, false); err == nil || !strings.Contains(err.Error(), "regular") {
+	if _, err := CargarPolitica(enlace, false); err == nil || !strings.Contains(err.Error(), "symbolic link") {
 		t.Fatalf("enlace: %v", err)
+	}
+	// Un enlace roto en la ruta por defecto tampoco es "sin política".
+	roto := filepath.Join(dir, "roto.json")
+	if err := os.Symlink(filepath.Join(dir, "no-hay.json"), roto); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := CargarPolitica(roto, false); p != nil || err == nil {
+		t.Fatalf("enlace roto: %v %v", p, err)
+	}
+	// Se comprueba el descriptor abierto: un directorio o una FIFO no son un
+	// fichero regular, y la FIFO no deja al daemon esperando a un escritor.
+	if _, err := CargarPolitica(dir, false); err == nil || !strings.Contains(err.Error(), "regular") {
+		t.Fatalf("directorio: %v", err)
+	}
+	fifo := filepath.Join(dir, "fifo.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hecho := make(chan error, 1)
+	go func() { _, err := CargarPolitica(fifo, false); hecho <- err }()
+	select {
+	case err := <-hecho:
+		if err == nil || !strings.Contains(err.Error(), "regular") {
+			t.Fatalf("fifo: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CargarPolitica se quedó esperando en una FIFO")
 	}
 	// Mal escrita: error con la ruta.
 	mala := filepath.Join(dir, "mala.json")
