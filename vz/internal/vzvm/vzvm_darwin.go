@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"unsafe"
 
 	"github.com/Code-Hex/vz/v3"
 
@@ -28,6 +29,16 @@ type Factory struct {
 	// framework: es lo que permite reconocer después el proceso auxiliar de
 	// Apple que aloja a esta VM (ver footprint).
 	OnCreate func(consoleFD uintptr)
+	// Window: enseñar la pantalla (si la máquina tiene) en una ventana; ver
+	// WindowMode. Title es el título de la ventana.
+	Window bool
+	Title  string
+}
+
+func (f *Factory) logf(format string, args ...any) {
+	if f.Logf != nil {
+		f.Logf(format, args...)
+	}
 }
 
 // NewMachineID genera la identidad de la máquina. El framework la exige igual
@@ -96,7 +107,7 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	// Un virtio-blk por drive en el orden del Spec: vda, vdb... como Firecracker.
 	var disks []vz.StorageDeviceConfiguration
 	for _, d := range s.Drives {
-		att, err := vz.NewDiskImageStorageDeviceAttachment(d.PathOnHost, d.IsReadOnly)
+		att, err := adjuntoDisco(d.PathOnHost, d.IsReadOnly)
 		if err != nil {
 			return nil, fmt.Errorf("drive %s (%s): %w", d.DriveID, d.PathOnHost, err)
 		}
@@ -151,6 +162,22 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 		cfg.SetEntropyDevicesVirtualMachineConfiguration([]*vz.VirtioEntropyDeviceConfiguration{e})
 	}
 
+	// Pantalla virtio-gpu (2D): un scanout del tamaño pedido. Sin teclado ni
+	// puntero: vz solo los da como USB para Linux, y el kernel de invitado no
+	// lleva USB.
+	if g := s.Graphics; g != nil {
+		scan, err := vz.NewVirtioGraphicsScanoutConfiguration(int64(g.Width), int64(g.Height))
+		if err != nil {
+			return nil, fmt.Errorf("graphics scanout: %w", err)
+		}
+		gpu, err := vz.NewVirtioGraphicsDeviceConfiguration()
+		if err != nil {
+			return nil, fmt.Errorf("graphics device: %w", err)
+		}
+		gpu.SetScanouts(scan)
+		cfg.SetGraphicsDevicesVirtualMachineConfiguration([]vz.GraphicsDeviceConfiguration{gpu})
+	}
+
 	if valid, err := cfg.Validate(); !valid || err != nil {
 		return nil, fmt.Errorf("invalid VM configuration: %v", err)
 	}
@@ -163,6 +190,13 @@ func (f *Factory) Create(s *spec.Spec, bootArgs string, n server.Network) (serve
 	}
 	m.vm = vm
 	ok = true
+	if s.Graphics != nil && f.Window {
+		if m.view = showWindow(vm, s.Graphics.Width, s.Graphics.Height, f.Title); m.view != nil {
+			f.logf("graphics %dx%d shown in a window", s.Graphics.Width, s.Graphics.Height)
+		} else {
+			f.logf("warning: cannot open the window (unknown Code-Hex/vz layout)")
+		}
+	}
 	if f.OnCreate != nil {
 		f.OnCreate(m.outW.Fd())
 	}
@@ -184,7 +218,11 @@ type machine struct {
 	stopped              chan error
 	once                 sync.Once
 	logf                 func(string, ...any)
+	view                 unsafe.Pointer // VZVirtualMachineView si hay ventana
 }
+
+// Screenshot devuelve la ventana de la VM como PNG (ver capture).
+func (m *machine) Screenshot() ([]byte, error) { return capture(m.view) }
 
 func (m *machine) closeConsole() {
 	for _, f := range []*os.File{m.inR, m.inW, m.outW} {
@@ -246,4 +284,36 @@ func (m *machine) SetBalloonTargetMiB(mib int) error {
 	}
 	b.SetTargetVirtualMachineMemorySize(uint64(mib) << 20)
 	return nil
+}
+
+// adjuntoDisco crea el adjunto de un disco. Por defecto, el del framework
+// (caché automática). KLING_VZ_DISK_CACHING=cached|uncached|automatic y
+// KLING_VZ_DISK_SYNC=full|fsync|none lo cambian: sirven para comparar modos
+// cuando se investiga una lectura corrupta (prototypes/android/docs/sigill.md).
+func adjuntoDisco(path string, ro bool) (*vz.DiskImageStorageDeviceAttachment, error) {
+	c, s := os.Getenv("KLING_VZ_DISK_CACHING"), os.Getenv("KLING_VZ_DISK_SYNC")
+	if c == "" && s == "" {
+		return vz.NewDiskImageStorageDeviceAttachment(path, ro)
+	}
+	cm := vz.DiskImageCachingModeAutomatic
+	switch c {
+	case "", "automatic":
+	case "cached":
+		cm = vz.DiskImageCachingModeCached
+	case "uncached":
+		cm = vz.DiskImageCachingModeUncached
+	default:
+		return nil, fmt.Errorf("KLING_VZ_DISK_CACHING=%q: use automatic, cached or uncached", c)
+	}
+	sm := vz.DiskImageSynchronizationModeFull
+	switch s {
+	case "", "full":
+	case "fsync":
+		sm = vz.DiskImageSynchronizationModeFsync
+	case "none":
+		sm = vz.DiskImageSynchronizationModeNone
+	default:
+		return nil, fmt.Errorf("KLING_VZ_DISK_SYNC=%q: use full, fsync or none", s)
+	}
+	return vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(path, ro, cm, sm)
 }

@@ -5,6 +5,7 @@
 ;;   ROOT  la raíz de datos de kindling
 ;;   MDIR  el directorio de esta máquina
 ;;   NET   "1" si la máquina tiene salida (egress distinto de none)
+;;   GFX   "1" si la máquina tiene pantalla virtio-gpu (KLING_VZ_GRAPHICS)
 (version 1)
 (deny default)
 (import "system.sb")
@@ -40,3 +41,11 @@
 (allow network-outbound (remote ip "localhost:*"))
 (if (string=? (param "NET") "1")
   (allow network-outbound (remote ip "*:*")))
+
+;; Pantalla virtio-gpu: el framework entrega el scanout como IOSurface al
+;; proceso auxiliar de Apple y para eso emite una extensión de sandbox; sin
+;; este permiso crear la VM falla con "Failed to issue IOSurface sandbox
+;; extension". Solo con pantalla. Medido en macOS 26.5: basta
+;; generic-issue-extension (ni iokit-, ni file-, ni mach-issue-extension solos).
+(if (string=? (param "GFX") "1")
+  (allow generic-issue-extension))
