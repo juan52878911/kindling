@@ -212,9 +212,25 @@ func (a *app) askExplain(ctx context.Context, prov askllm.Provider, question str
 }
 
 func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, prov askllm.Provider) error {
-	sess, err := a.askPrepare(ctx, ref, owner, o.role)
+	res, err := a.askRun(ctx, ref, question, owner, o, prov)
 	if err != nil {
 		return err
+	}
+	if o.jsonOut {
+		enc := json.NewEncoder(a.stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+	a.printTable(res)
+	return nil
+}
+
+// askRun hace la pregunta entera (pasos 1 a 6 y, con -explain, el resumen) y
+// devuelve el resultado sin imprimirlo: lo comparten ask y report run.
+func (a *app) askRun(ctx context.Context, ref, question, owner string, o askOpts, prov askllm.Provider) (*askResult, error) {
+	sess, err := a.askPrepare(ctx, ref, owner, o.role)
+	if err != nil {
+		return nil, err
 	}
 	mc, db, ro, schema := sess.mc, sess.db, sess.ro, sess.schema
 
@@ -230,17 +246,17 @@ func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, p
 	for intento := 1; ; intento++ {
 		answer, err := prov.Complete(ctx, sqlSystemPrompt, prompt)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if sql, err = sqlguard.Extract(answer); err != nil {
-			return err
+			return nil, err
 		}
 		fmt.Fprintf(a.stderr, "\n%s\n\n", indent(printable(sql)))
 		if err := validateSQL(sql); err != nil {
-			return err
+			return nil, err
 		}
 		if !o.yes && !a.confirm(fmt.Sprintf("Run it on %s as the read-only role %s? [y/N] ", mc.Name, ro)) {
-			return errors.New("aborted: nothing was run (-yes skips the question)")
+			return nil, errors.New("aborted: nothing was run (-yes skips the question)")
 		}
 		res, err = a.runReadOnly(ctx, mc, db, ro, sql, o.limit, o.timeout)
 		if err == nil {
@@ -248,7 +264,7 @@ func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, p
 		}
 		fix, ok := missingIdent(err, sql)
 		if !ok || intento >= 2 {
-			return err
+			return nil, err
 		}
 		fmt.Fprintf(a.stderr, "%s; asking %s to correct it once...\n", fix, prov.Name())
 		prompt = repairPrompt(schema, question, sql, fix)
@@ -256,16 +272,10 @@ func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, p
 	res.SQL, res.Role = sql, ro
 	if o.explain {
 		if err := a.askExplain(ctx, prov, question, res); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if o.jsonOut {
-		enc := json.NewEncoder(a.stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(res)
-	}
-	a.printTable(res)
-	return nil
+	return res, nil
 }
 
 // ── el rol de solo lectura ───────────────────────────────────────────────────

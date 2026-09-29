@@ -270,16 +270,9 @@ func (a *app) localBranches(ctx context.Context) (map[string]string, error) {
 // repoCopies son las copias de rama de este repo (con su clave actual o la de
 // antes) y dueño, por clave de rama.
 func (a *app) repoCopies(ctx context.Context, ri *repoInfo, owner string) (map[string][]*api.Machine, error) {
-	out, err := a.k.Run(ctx, nil, "ps", "-json")
+	all, err := a.machines(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if len(out) > maxJSON {
-		return nil, errors.New("kling ps: output too large")
-	}
-	var all []*api.Machine
-	if err := json.Unmarshal(out, &all); err != nil {
-		return nil, fmt.Errorf("kling ps: %w", err)
 	}
 	m := map[string][]*api.Machine{}
 	for _, mc := range all {

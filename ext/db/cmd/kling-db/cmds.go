@@ -515,8 +515,14 @@ func cmdReset(args []string) error {
 	return nil
 }
 
+// resetKeeps son las etiquetas de pertenencia que una copia conserva al
+// resetearse: su clase (kling db class) y su repo y rama (kling db branch).
+// Sin ellas, la copia nueva dejaría de ser de su clase o de su rama.
+var resetKeeps = []string{labelClass, labelRepo, labelBranch}
+
 // reset cambia una copia por otra nueva de la misma plantilla, con el mismo
-// nombre, dueño y ttl. La nueva tiene otro id y otra contraseña.
+// nombre, dueño, ttl y pertenencia (resetKeeps). La nueva tiene otro id y otra
+// contraseña.
 func (a *app) reset(ctx context.Context, ref, owner string) (*api.Machine, error) {
 	if err := validOwner(owner); err != nil {
 		return nil, err
@@ -530,10 +536,16 @@ func (a *app) reset(ctx context.Context, ref, owner string) (*api.Machine, error
 	}
 	golden := mc.Labels[labelGolden]
 	ttl := time.Duration(mc.TTLSeconds) * time.Second
+	var keep [][2]string
+	for _, k := range resetKeeps {
+		if v := mc.Labels[k]; v != "" && api.KeyPattern.MatchString(v) {
+			keep = append(keep, [2]string{k, v})
+		}
+	}
 	if err := a.remove(ctx, mc); err != nil {
 		return nil, err
 	}
-	return a.up(ctx, golden, mc.Name, ttl, owner)
+	return a.upFrom(ctx, golden, golden, mc.Name, ttl, owner, keep)
 }
 
 func cmdRm(args []string) error {

@@ -48,7 +48,7 @@ const (
 
 // dbLabelKeys son las claves que escribe esta extensión, para el test de
 // api.KeyPattern.
-var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, labelEngine, api.LabelKind, api.LabelPorts}
+var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, labelEngine, labelClass, labelReport, api.LabelKind, api.LabelPorts}
 
 var (
 	// nombres de máquina y de plantilla (validName del núcleo).
