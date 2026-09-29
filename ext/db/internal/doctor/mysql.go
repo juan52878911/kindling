@@ -57,13 +57,14 @@ const (
 	qMyVersion = `SELECT JSON_QUOTE(VERSION())`
 
 	// Cuentas de MariaDB (10.4+): mysql.global_priv, donde están el bloqueo y
-	// si es un rol; la vista mysql.user no los enseña.
+	// si es un rol; la vista mysql.user no los enseña. JSON_VALUE de un true
+	// da "1" en MariaDB 11 y "true" en versiones anteriores: valen los dos.
 	qMyUsersMariaDB = `SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
   'user', User, 'host', Host,
   'plugin', COALESCE(JSON_VALUE(Priv, '$.plugin'), ''),
   'auth', COALESCE(JSON_VALUE(Priv, '$.authentication_string'), ''),
-  'locked', COALESCE(JSON_VALUE(Priv, '$.account_locked'), 'false') = 'true',
-  'role', COALESCE(JSON_VALUE(Priv, '$.is_role'), 'false') = 'true')), '[]')
+  'locked', COALESCE(JSON_VALUE(Priv, '$.account_locked'), 'false') IN ('true', '1'),
+  'role', COALESCE(JSON_VALUE(Priv, '$.is_role'), 'false') IN ('true', '1'))), '[]')
   FROM mysql.global_priv`
 
 	// Y de MySQL 8.
@@ -75,8 +76,10 @@ const (
 	qMyPrivs = `SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('grantee', GRANTEE, 'priv', PRIVILEGE_TYPE, 'grantable', IS_GRANTABLE)), '[]')
   FROM information_schema.USER_PRIVILEGES WHERE PRIVILEGE_TYPE <> 'USAGE' OR IS_GRANTABLE = 'YES'`
 
+	// local_infile va como número: MariaDB mete la variable booleana en el
+	// JSON como un OFF sin comillas, que no es JSON.
 	qMySettings = `SELECT JSON_OBJECT(
-  'local_infile', @@GLOBAL.local_infile,
+  'local_infile', IF(@@GLOBAL.local_infile, 1, 0),
   'secure_file_priv', @@GLOBAL.secure_file_priv,
   'audit', COALESCE((SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'SERVER_AUDIT'), ''))`
 
@@ -257,6 +260,7 @@ func myAccountChecks(users []myUserRow, privs []myPrivRow, appUser string, r *re
 	peligrosas := map[string]bool{}
 	type cuenta struct{ user, host string }
 	porCuenta := map[cuenta][]string{}
+	conGrant := map[cuenta]bool{}
 	for _, p := range privs {
 		m := reGrantee.FindStringSubmatch(p.Grantee)
 		if m == nil {
@@ -266,7 +270,9 @@ func myAccountChecks(users []myUserRow, privs []myPrivRow, appUser string, r *re
 		if p.Priv != "USAGE" {
 			porCuenta[c] = append(porCuenta[c], p.Priv)
 		}
-		if p.Grantable == "YES" {
+		// IS_GRANTABLE va en cada privilegio: GRANT OPTION se cuenta una vez.
+		if p.Grantable == "YES" && !conGrant[c] {
+			conGrant[c] = true
 			porCuenta[c] = append(porCuenta[c], "GRANT OPTION")
 		}
 	}

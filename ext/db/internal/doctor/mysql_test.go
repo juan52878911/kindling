@@ -163,3 +163,34 @@ func TestMyURLNoAdmitida(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Lo que devolvió un MariaDB 11.8 de verdad (lab, 2026-09-29): IS_GRANTABLE en
+// cada privilegio de root no repite GRANT OPTION, y mariadb.sys (bloqueada, sin
+// contraseña) no es una cuenta sin contraseña.
+func TestMyMariaDBReal(t *testing.T) {
+	var privs []myPrivRow
+	for _, p := range []string{"SELECT", "INSERT", "RELOAD", "SHUTDOWN"} {
+		privs = append(privs, myPrivRow{Grantee: "'root'@'localhost'", Priv: p, Grantable: "YES"})
+	}
+	users := []myUserRow{
+		{User: "mariadb.sys", Host: "localhost", Plugin: "mysql_native_password", Locked: true},
+		{User: "root", Host: "localhost", Plugin: "mysql_native_password", Auth: "invalid"},
+	}
+	r := &report{}
+	myAccountChecks(users, privs, "app", r)
+	for _, f := range r.findings {
+		if f.Rule == "MY004" {
+			t.Errorf("una cuenta bloqueada sale sin contraseña: %s", f.Msg)
+		}
+		if strings.Count(f.Msg, "GRANT OPTION") > 1 {
+			t.Errorf("GRANT OPTION repetido: %s", f.Msg)
+		}
+	}
+	// Las consultas aceptan el "1" de MariaDB 11 y no meten un OFF sin comillas.
+	if !strings.Contains(qMyUsersMariaDB, "IN ('true', '1')") {
+		t.Error("qMyUsersMariaDB: account_locked de MariaDB 11 es \"1\"")
+	}
+	if !strings.Contains(qMySettings, "IF(@@GLOBAL.local_infile, 1, 0)") {
+		t.Error("qMySettings: local_infile tiene que ir como número")
+	}
+}
