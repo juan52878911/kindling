@@ -7,6 +7,12 @@ microVM instanciada de una plantilla con Postgres ya caliente
 microVM; con `attach` (el [modelo A](#modelo-a-una-copia-compartida-attach)) una copia
 se comparte con agentes de **otras** microVMs sin que vean la contraseña.
 
+**MySQL/MariaDB**: `up`, `fork`, `connect` (`-mysql`, DSN `mysql://`), `rotate`, `reset`,
+`rm`, `branch`, `doctor` y `audit` funcionan igual sobre copias de una plantilla MariaDB
+(`golden image|build -engine mysql`, etiqueta `kling.db.engine=mysql`); al invitado va
+el hash de `mysql_native_password`, nunca la clave. Lo demás se rechaza en copias MySQL
+en esta versión. Todo en [mysql.md](mysql.md).
+
 ```sh
 kling db golden -script scripts/db-golden.sh build -seed-mb 20 pg   # la plantilla, una vez
 kling db up pg -name t1                  # una copia lista, con su propia contraseña
@@ -226,9 +232,10 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 | `kling.db.owner` | quién la pidió; `local` en el CLI |
 | `kling.db.state` | `preparing` o `ready` |
 | `kling.db.role`, `kling.db.database` | rol y base de la aplicación (`app`, `appdb`) |
+| `kling.db.engine` | `mysql` en las copias de una plantilla MariaDB/MySQL (la pone `db-golden-mysql.sh` y se hereda); sin ella, Postgres |
 | `kind=sandbox` | lo que permite `sandbox fork` sobre la copia |
 | `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del toplevel del repo, clave de la rama y último uso (segundos unix) |
-| `kling.ports` | incluye `5432`: el backend de macOS abre el reenvío |
+| `kling.ports` | incluye `5432` (`3306` en MySQL): el backend de macOS abre el reenvío |
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
 fusiona y `fork` las copia enteras añadiendo `kling.fork-of`. Por eso `up` pasa
@@ -256,6 +263,9 @@ nacimiento de cada copia). Por eso
 - Si la rotación falla (o Postgres no arranca en 30 s), la copia **se destruye**.
 - La contraseña de la plantilla sigue viva en una copia solo mientras está en
   `preparing` (el tiempo de un `pg_isready` y un `ALTER ROLE`), nunca en una `ready`.
+- En una copia MySQL, lo mismo con el hash de `mysql_native_password`
+  (`ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS '<hash>'`, al cliente
+  de root por el socket) y la comprobación en `mysql.user`; ver [mysql.md](mysql.md).
 
 ## Modelo de seguridad
 

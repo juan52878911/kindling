@@ -38,6 +38,9 @@ func parseURL(raw string) (*pgURL, error) {
 		// El error de url.Parse repite la URL entera: no se enseña.
 		return nil, errors.New("doctor: the URL does not parse")
 	}
+	if u.Scheme == "mysql" || u.Scheme == "mariadb" {
+		return nil, errors.New("doctor: -url checks postgres only in this version; a mysql copy is checked by name (kling db doctor <copy>)")
+	}
 	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
 		return nil, errors.New("doctor: the URL must start with postgres:// or postgresql://")
 	}

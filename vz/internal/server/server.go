@@ -72,7 +72,7 @@ type NetConfig struct {
 	Resolver *egress.Resolver
 	// Credentials es el proxy de credenciales que la red sirve en la pasarela;
 	// nil si este proceso no lo tiene. CredentialsPG es el mismo proxy en su
-	// papel de Postgres (el resto de puertos TCP de la pasarela).
+	// papel de Postgres y MySQL (el resto de puertos TCP de la pasarela).
 	Credentials   http.Handler
 	CredentialsPG *credproxy.Proxy
 	// Graph son las aristas link del nodo; nil si este proceso no tiene a
@@ -786,10 +786,11 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 // --- rutas propias ---
 
 // credentialKinds son los tipos de credencial que entiende este kling-vz. El
-// daemon lo pregunta antes de mandarle una credencial Postgres: uno anterior
-// ignoraría el tipo y la serviría como HTTP. "postgres-upstream" dice que
-// entiende además Upstream, UpstreamTLS y TLSServerName.
-var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream}
+// daemon lo pregunta antes de mandarle una credencial Postgres o MySQL: uno
+// anterior ignoraría el tipo y la serviría como HTTP. "postgres-upstream"
+// dice que entiende además Upstream, UpstreamTLS y TLSServerName (también en
+// las MySQL, que nacieron con ellos).
+var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": "vz", "version": s.d.Version}

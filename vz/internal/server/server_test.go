@@ -718,7 +718,7 @@ func TestKlingCredentials(t *testing.T) {
 	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
 	r.srv.d.CredIP = gw
 	// El daemon lo pregunta antes de mandar una credencial Postgres.
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/credentials", cred, "need egress allowlist")
@@ -760,6 +760,15 @@ func TestKlingCredentials(t *testing.T) {
 		t.Fatal("the postgres credential did not reach the proxy")
 	}
 	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres"}]}`, "needs -user")
+	// Y una MySQL, en su papel de MySQL.
+	const credMy = `{"credentials":[{"env":"MYSQL_PWD","domain":"mysql.example.com","placeholder":"kling-cred-my","secret":"pw","kind":"mysql","user":"app","database":"appdb"}]}`
+	if out := r.must("PUT", "/kling/credentials", credMy); !strings.Contains(out, `"domains":["mysql.example.com"]`) {
+		t.Fatalf("PUT /kling/credentials (mysql) = %s", out)
+	}
+	if !r.srv.d.Credentials.MySQLActivo() || r.srv.d.Credentials.PGActivo() {
+		t.Fatal("the mysql credential did not reach the proxy as mysql")
+	}
+	r.must("PUT", "/kling/credentials", credPG)
 
 	// La red nace con el proxy, en sus dos papeles.
 	r.configure(t.TempDir())
@@ -798,7 +807,7 @@ func TestKlingGraph(t *testing.T) {
 	r.srv.d.Graph = grafo.NewConDial(func(context.Context) (*net.UnixConn, error) {
 		return nil, errors.New("no daemon in this test")
 	}, nil, nil)
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","graph-link"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","graph-link"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8080}],"hosts":["api.graph"]}`, "guest agent")

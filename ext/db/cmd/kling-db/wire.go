@@ -4,7 +4,7 @@ package main
 // contrato exacto:
 //
 //	doctor.Run(ctx, k, doctor.Target{Machine, URL}, w) (problems int, err error)
-//	dbaudit.Run(ctx, k, machine, since, jsonOut, w) error
+//	dbaudit.RunEngine(ctx, k, machine, engine, since, jsonOut, w) error
 
 import (
 	"context"
@@ -26,6 +26,6 @@ func runDoctor(ctx context.Context, k klingc.Kling, t doctorTarget, w io.Writer)
 	return doctor.Run(ctx, k, doctor.Target{Machine: t.Machine, URL: t.URL, CAFile: t.CAFile, TLSServerName: t.TLSServerName, Insecure: t.Insecure}, w)
 }
 
-func runAudit(ctx context.Context, k klingc.Kling, machine string, since time.Duration, jsonOut bool, w io.Writer) error {
-	return dbaudit.Run(ctx, k, machine, since, jsonOut, w)
+func runAudit(ctx context.Context, k klingc.Kling, machine, engine string, since time.Duration, jsonOut bool, w io.Writer) error {
+	return dbaudit.RunEngine(ctx, k, machine, engine, since, jsonOut, w)
 }

@@ -13,6 +13,12 @@ with an agent in another microVM through its credential proxy, without the agent
 seeing the password (Linux and macOS). Model, labels, credentials and the
 Linux/macOS asymmetry: [`docs/db.md`](../../docs/db.md).
 
+MySQL/MariaDB copies (`golden image|build -engine mysql`, label
+`kling.db.engine=mysql`) support `up`, `fork`, `connect` (`-mysql`, `mysql://` DSN),
+`rotate`, `reset`, `rm`, `branch`, `doctor` and `audit`; the guest only ever gets the
+`mysql_native_password` hash. The rest is Postgres-only for now:
+[`docs/mysql.md`](../../docs/mysql.md).
+
 ```sh
 cd ext/db
 go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db
@@ -23,6 +29,7 @@ kling db up pg -name t1 && kling db connect t1 -psql
 |---|---|
 | `internal/klingc` | runs the `kling` binary (the seam the tests fake) |
 | `internal/scram` | SCRAM-SHA-256 verifiers (RFC 5803/7677), tested with the RFC vector |
+| `internal/mysqlpw` | the `mysql_native_password` hash, computed on the host |
 | `internal/dbstate` | the per-copy password files on the host |
 
 ## kling-dbbench

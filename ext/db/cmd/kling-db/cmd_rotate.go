@@ -8,7 +8,8 @@ package main
 // siendo alcanzable con la clave que ya tenía.
 //
 //  1. la nueva se deja en password.new (la vigente no se toca)
-//  2. se cambia el verificador en la base (setVerifier, el mismo mecanismo)
+//  2. se cambia el verificador en la base (setVerifier, el mismo mecanismo;
+//     en MySQL, el hash de mysql_native_password con setMySQLHash)
 //  3. solo si eso fue bien, password.new pasa a ser password (rename)
 //
 // Si el paso 2 falla o queda en duda (un plazo vencido puede haberse aplicado),
@@ -79,14 +80,16 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
-	ver, err := newVerifier(pw)
-	if err != nil {
-		return nil, err
+	if engineOf(mc.Labels) != engineMySQL {
+		// Postgres: el verificador antes de tocar nada (si falla, nada cambió).
+		if _, err := newVerifier(pw); err != nil {
+			return nil, err
+		}
 	}
 	if err := dbstate.StagePassword(mc.ID, pw); err != nil {
 		return nil, fmt.Errorf("staging the new password of %s: %w", mc.Name, err)
 	}
-	if err := a.setVerifier(ctx, mc.ID, role, ver); err != nil {
+	if err := a.setPassword(ctx, mc, role, pw); err != nil {
 		dbstate.DiscardStaged(mc.ID)
 		return nil, a.keepOld(mc, role, oldPw, err)
 	}
@@ -103,10 +106,7 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 func (a *app) keepOld(mc *api.Machine, role, oldPw string, cause error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	ver, err := newVerifier(oldPw)
-	if err == nil {
-		err = a.setVerifier(ctx, mc.ID, role, ver)
-	}
+	err := a.setPassword(ctx, mc, role, oldPw)
 	if err != nil {
 		return fmt.Errorf("%w; could not confirm the previous password is still in force (%v): "+
 			"if connect stops working, kling db reset %s", cause, err, mc.Name)

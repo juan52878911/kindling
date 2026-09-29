@@ -239,6 +239,12 @@ var coreTree = []section{
                                                    verify the cert as N; -upstream-tls
                                                    disable: no TLS, SCRAM-SHA-256 only
                                                    (see docs/postgres.md)
+  machine credential <ref> -type mysql             the same for MySQL/MariaDB (default
+      -domain D -user U -database B [-port P]      port 3306, -env MYSQL_PWD): the
+      [...same flags as postgres]                  proxy greets the guest itself and
+                                                   logs in with the real password;
+                                                   disable: native or caching_sha2
+                                                   fast path only (see docs/mysql.md)
   machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
       [-since 10m] [-tail 200] [-json]             one line per request (method, host,
                                                    masked path, status, credentials

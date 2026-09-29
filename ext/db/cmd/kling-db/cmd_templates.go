@@ -72,10 +72,16 @@ func expandTemplate(rest []string) ([]string, func(), error) {
 	if name == "" {
 		return rest, noop, nil
 	}
-	for _, a := range out[1:] {
+	for i, a := range out[1:] {
 		switch strings.TrimPrefix(a, "-") {
 		case "migrations", "seed", "seed-mb":
 			return nil, noop, usageErr("-template excludes %s: the template brings its own migrations and seed", a)
+		case "engine", "engine=mysql":
+			// Las plantillas incluidas son SQL de Postgres. out[i+2] es el
+			// valor de "-engine" (out[1:] empieza en out[1]).
+			if a == "-engine=mysql" || i+2 >= len(out) || out[i+2] != "postgres" {
+				return nil, noop, usageErr("-template is postgres-only: the bundled templates are Postgres SQL")
+			}
 		}
 	}
 	d, err := templates.Materialize(name)

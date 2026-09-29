@@ -127,7 +127,7 @@ func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Dur
 	if err != nil {
 		return nil, err
 	}
-	role, db, err := goldenRoleDB(snap)
+	role, db, engine, err := goldenInfo(snap)
 	if err != nil {
 		return nil, fmt.Errorf("template %s: %w", tpl, err)
 	}
@@ -143,7 +143,10 @@ func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Dur
 		{labelRole, role},
 		{labelDatabase, db},
 		{api.LabelKind, api.KindSandbox},
-		{api.LabelPorts, mergePorts(snap.Labels[api.LabelPorts])},
+		{api.LabelPorts, mergePortsFor(snap.Labels[api.LabelPorts], enginePort(engine))},
+	}
+	if engine == engineMySQL {
+		labels = append(labels, [2]string{labelEngine, engineMySQL})
 	}
 	labels = append(labels, extra...)
 	runArgs := []string{"run", "-from", tpl, "-name", name}
@@ -183,6 +186,11 @@ func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Dur
 func (a *app) printReady(mc *api.Machine) {
 	_, db, _ := roleDB(mc.Labels)
 	fmt.Fprintf(a.stdout, "%s  ready  (template %s, machine %s)\n", mc.Name, mc.Labels[labelGolden], shortID(mc.ID))
+	if engineOf(mc.Labels) == engineMySQL {
+		fmt.Fprintf(a.stdout, "  inside the copy:  mariadb %s   (as root, over the local socket)\n", db)
+		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-mysql | -dsn]\n", mc.Name)
+		return
+	}
 	fmt.Fprintf(a.stdout, "  inside the copy:  su -s /bin/sh postgres -c 'psql -h /run/postgresql %s'\n", db)
 	fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-psql | -dsn]\n", mc.Name)
 }
@@ -315,16 +323,23 @@ func cmdConnect(args []string) error {
 	fs, host, owner := newFlags("connect")
 	dsn := fs.Bool("dsn", false, "print a DSN WITH the password (asks first if stdout is a terminal)")
 	psql := fs.Bool("psql", false, "open the host's psql on the copy (password through the environment)")
+	mysql := fs.Bool("mysql", false, "mysql copies: open the host's mariadb or mysql client on the copy (password through the environment)")
 	role := fs.String("role", "", "connect as this role made by kling db role (default: the application role)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageErr("usage: kling db connect <copy> [-role R] [-dsn | -psql]")
+		return usageErr("usage: kling db connect <copy> [-role R] [-dsn | -psql | -mysql]")
 	}
-	if *dsn && *psql {
-		return usageErr("-dsn and -psql exclude each other")
+	n := 0
+	for _, b := range []bool{*dsn, *psql, *mysql} {
+		if b {
+			n++
+		}
+	}
+	if n > 1 {
+		return usageErr("-dsn, -psql and -mysql exclude each other")
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -338,6 +353,8 @@ func cmdConnect(args []string) error {
 		mode = "dsn"
 	case *psql:
 		mode = "psql"
+	case *mysql:
+		mode = "mysql"
 	}
 	return a.connectAs(ctx, pos[0], *owner, mode, *role)
 }
@@ -361,6 +378,15 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 	role, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err
+	}
+	engine := engineOf(mc.Labels)
+	switch {
+	case engine == engineMySQL && mode == "psql":
+		return fmt.Errorf("%s is a mysql copy: use -mysql or -dsn", mc.Name)
+	case engine != engineMySQL && mode == "mysql":
+		return fmt.Errorf("%s is a postgres copy: use -psql or -dsn", mc.Name)
+	case engine == engineMySQL && extraRole != "":
+		return requirePostgres(mc, "connect -role")
 	}
 	h, port, err := hostAddr(mc)
 	if err != nil {
@@ -398,8 +424,19 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 		}
 		u := url.URL{Scheme: "postgres", User: url.UserPassword(role, pw),
 			Host: net.JoinHostPort(h, strconv.Itoa(port)), Path: "/" + db, RawQuery: "sslmode=disable"}
+		if engine == engineMySQL {
+			u.Scheme, u.RawQuery = "mysql", ""
+		}
 		fmt.Fprintln(a.stdout, u.String())
 		return nil
+	case "mysql":
+		pw, err := readPW()
+		if err != nil {
+			return err
+		}
+		// La clave por el entorno del hijo (MYSQL_PWD), nunca en argv.
+		return a.runMysql(ctx, []string{"MYSQL_PWD=" + pw},
+			[]string{"--protocol=TCP", "-h", h, "-P", strconv.Itoa(port), "-u", role, db})
 	case "psql":
 		pw, err := readPW()
 		if err != nil {
@@ -416,7 +453,11 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 	if extraRole != "" {
 		flagRole = " -role " + extraRole
 	}
-	fmt.Fprintf(a.stdout, "  kling db connect %s%s -psql   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, mc.Name, flagRole)
+	client := "-psql"
+	if engine == engineMySQL {
+		client = "-mysql"
+	}
+	fmt.Fprintf(a.stdout, "  kling db connect %s%s %s   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, client, mc.Name, flagRole)
 	return nil
 }
 
@@ -538,7 +579,7 @@ func (a *app) remove(ctx context.Context, mc *api.Machine) error {
 
 func cmdDoctor(args []string) error {
 	fs, host, owner := newFlags("doctor")
-	u := fs.String("url", "", "check this Postgres instead of a copy (postgres://user@host:port/db?sslmode=verify-full; the password goes in PGPASSWORD)")
+	u := fs.String("url", "", "check this Postgres instead of a copy (postgres://user@host:port/db?sslmode=verify-full; the password goes in PGPASSWORD; postgres only)")
 	caFile := fs.String("ca-file", "", "with -url: PEM file of extra trusted roots (added to the system's; wins over sslrootcert)")
 	tlsName := fs.String("tls-server-name", "", "with -url: name to verify in the certificate, if it is not the URL's host")
 	insecure := fs.Bool("insecure", false, "with -url: allow sslmode=disable or require on a non-loopback server (unencrypted or unauthenticated; the report says so)")
@@ -606,5 +647,5 @@ func cmdAudit(args []string) error {
 	if err := owned(mc, *owner); err != nil {
 		return err
 	}
-	return runAudit(ctx, a.k, mc.Name, *since, *asJSON, a.stdout)
+	return runAudit(ctx, a.k, mc.Name, engineOf(mc.Labels), *since, *asJSON, a.stdout)
 }

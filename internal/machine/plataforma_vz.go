@@ -255,16 +255,18 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		return nil
 	}
 	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
-	// trataría una credencial Postgres como HTTP: se pregunta antes qué
-	// tipos entiende y, si no dice postgres, no se le da ninguna. Lo mismo
+	// trataría una credencial Postgres o MySQL como HTTP: se pregunta antes
+	// qué tipos entiende y, si no dice postgres (o mysql), no se le da
+	// ninguna. Lo mismo
 	// con Upstream: uno que no lo conozca marcaría el dominio en su lugar (y,
 	// con -upstream-tls disable, exigiría TLS a un servidor que no lo tiene),
 	// así que sin "postgres-upstream" no se le da ninguna que lo use.
-	var pg, upstream, maquina bool
+	var pg, my, upstream, maquina bool
 	for _, cr := range creds {
 		maquina = maquina || cr.UpstreamMachine != ""
-		if cr.Kind == credproxy.KindPostgres {
-			pg = true
+		if cr.Kind == credproxy.KindPostgres || cr.Kind == credproxy.KindMySQL {
+			pg = pg || cr.Kind == credproxy.KindPostgres
+			my = my || cr.Kind == credproxy.KindMySQL
 			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
 			// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde
 			// ahí no llega al resolver del Mac: un upstream con nombre fallaría
@@ -275,13 +277,16 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			}
 		}
 	}
-	if pg {
+	if pg || my {
 		info, err := c.KlingInfo(ctx)
 		if err != nil {
 			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
 		}
-		if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
+		if pg && !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
 			return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+		}
+		if my && !slices.Contains(info.CredentialKinds, credproxy.KindMySQL) {
+			return errors.New("this kling-vz does not support mysql credentials: rebuild kling-vz")
 		}
 		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
 			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")

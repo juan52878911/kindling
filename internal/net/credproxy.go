@@ -10,10 +10,14 @@ package net
 // lo trae aquí (firewall.go). El FORWARD de otros netns no llega a esa IP, así
 // que solo la máquina dueña de las credenciales puede usarlas.
 //
-// Al lado, en n.HostIP:pgPort, el proxy de Postgres del mismo credproxy.Proxy
-// (mismas credenciales, límites y registro): cualquier otro puerto TCP de
-// n.HostIP que abra el invitado (el 5432 de un dominio con credencial
-// Postgres, normalmente) llega ahí por otro DNAT.
+// Al lado, en n.HostIP:pgPort, los proxies de bases de datos del mismo
+// credproxy.Proxy (mismas credenciales, límites y registro): cualquier otro
+// puerto TCP de n.HostIP que abra el invitado (el 5432 de un dominio con
+// credencial Postgres, normalmente) llega ahí por otro DNAT, y ServeDB decide
+// si habla Postgres o MySQL. El 3306 tiene su propio DNAT a n.HostIP:myPort:
+// el DNAT del netns no deja ver al host el puerto original, y con
+// credenciales de los dos tipos el 3306 es el que dice "MySQL" (ver
+// pkg/credproxy/mysql.go).
 
 import (
 	"context"
@@ -37,8 +41,12 @@ import (
 // atado a 0.0.0.0:80 y el bind a n.HostIP:80 chocaría con él.
 const credPort = 5380
 
-// pgPort es el puerto del host del proxy de Postgres de cada microVM.
-const pgPort = 5381
+// pgPort es el puerto del host de los proxies de bases de datos de cada
+// microVM (cualquier puerto del invitado); myPort, el del 3306 del invitado.
+const (
+	pgPort = 5381
+	myPort = 5382
+)
 
 var (
 	credMu      sync.Mutex
@@ -50,6 +58,7 @@ type credProxy struct {
 	proxy *credproxy.Proxy
 	srv   *http.Server
 	pg    *credproxy.PGServer
+	my    *credproxy.PGServer
 	// resolve es el ResolveMachine vigente (ver SetCredentials); el proxy lo
 	// consulta en cada conexión a través de resolverMaquina.
 	resolve atomic.Pointer[credproxy.ResolveMachineFunc]
@@ -150,11 +159,20 @@ func startCredProxy(n *Net, auditPath string) (*credProxy, error) {
 		_ = ln.Close()
 		return nil, fmt.Errorf("credential proxy: could not listen on %s:%d: %w", n.HostIP, pgPort, err)
 	}
+	lnMy, err := stdnet.ListenTCP("tcp4", &stdnet.TCPAddr{IP: ip, Port: myPort})
+	if err != nil {
+		_ = ln.Close()
+		_ = lnPG.Close()
+		return nil, fmt.Errorf("credential proxy: could not listen on %s:%d: %w", n.HostIP, myPort, err)
+	}
 	p := newCredProxy(auditPath)
 	p.srv = credproxy.NewServer(p.proxy)
 	p.pg = credproxy.NewPGServer(p.proxy)
+	p.my = credproxy.NewPGServer(p.proxy)
+	p.my.DestPort = credproxy.MySQLDefaultPort
 	go func() { _ = p.srv.Serve(ln) }()
 	go func() { _ = p.pg.Serve(lnPG) }()
+	go func() { _ = p.my.Serve(lnMy) }()
 	credProxies[n.NS] = p
 	return p, nil
 }
@@ -208,11 +226,16 @@ func stopCredProxy(ns string) {
 	if p.pg != nil {
 		_ = p.pg.Close()
 	}
+	if p.my != nil {
+		_ = p.my.Close()
+	}
 	_ = p.proxy.Close()
 }
 
-// credPortStr y pgPortStr son los puertos en texto, para las reglas.
+// credPortStr, pgPortStr y myPortStr son los puertos en texto, para las
+// reglas.
 var (
 	credPortStr = strconv.Itoa(credPort)
 	pgPortStr   = strconv.Itoa(pgPort)
+	myPortStr   = strconv.Itoa(myPort)
 )
