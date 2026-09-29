@@ -12,6 +12,23 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Núcleo
 
+- **Autorización por operación en el socket del daemon (capacidad `authz`).** Con
+  `/etc/kling/authz.json` (o `kling daemon -authz <ruta>`, `KLING_AUTHZ`), el daemon lee
+  quién llama con `SO_PEERCRED` (Linux) o `LOCAL_PEERCRED` (macOS) —por SSH, el usuario
+  remoto— y le da un rol por uid, usuario, gid o grupo: `admin` (todo) o
+  `tenant:<nombre>`, que solo ve y opera las máquinas, snapshots y grafos con
+  `kling.owner=<nombre>`. Esa etiqueta la pone el daemon al crear (run, sandbox, cada nodo
+  de un grafo) y se hereda por commit, `run -from`, fork y snapshots de grafo; un
+  inquilino no puede fijarla ni cambiarla. Lo ajeno responde 404, los listados y
+  `/events` se filtran, `kling.db.owner` y `upstream_machine` quedan ligados al
+  inquilino, y el proxy de Postgres exige el mismo `kling.owner` en copia y agente.
+  Plantillas compartidas (`shared_templates`, solo lectura) y tokens de inquilino
+  opcionales (`KLING_AUTHZ_TOKEN`). Volúmenes, carpetas del host, store, imágenes y
+  métricas del host quedan para admin. Cada ruta declara su acción en una tabla única y
+  un middleware decide. Sin fichero, todo como siempre, con un aviso en `kling doctor`;
+  `kling info` y `GET /info` (`authz`) dicen el rol de quien pregunta. Un fichero pedido
+  que falta, mal escrito o escribible por otros impide arrancar. Ver
+  [`docs/authz.md`](docs/authz.md).
 - **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
   nombre y aristas declaradas, descritas en un fichero JSON o YAML (un subconjunto sin
   dependencias), con ciclo de vida atómico: `up`, `ls`, `inspect`, `freeze`, `thaw`,

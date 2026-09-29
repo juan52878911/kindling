@@ -20,6 +20,19 @@ comprometidos.
 El acceso remoto es **SSH y nada más**: `ssh host kling dial-stdio`. La autenticación es la
 de SSH; kindling no inventa credenciales propias.
 
+**Autorización por operación** ([docs/authz.md](docs/authz.md)). Sin política, quien alcanza
+el socket manda sobre todo. Con `/etc/kling/authz.json` (o `kling daemon -authz`), el daemon
+lee quién está al otro lado del socket con `SO_PEERCRED` (Linux) o `LOCAL_PEERCRED` (macOS)
+—por SSH, el usuario remoto, que es quien lanza `dial-stdio`— y le da un rol: `admin` (todo),
+`tenant:<nombre>` (solo las máquinas, snapshots y grafos con `kling.owner=<nombre>`, que pone
+el daemon y el inquilino no puede fijar ni cambiar; lo ajeno responde 404) o ninguno (403). Un
+único middleware decide por la acción que declara cada ruta; los listados y los eventos se
+filtran por dueño. Volúmenes, carpetas del host, el store, construir imágenes y las métricas
+del host son de admin. El fichero tiene que ser regular, de root o del usuario del daemon y no
+escribible por otros; uno pedido que falta, o mal escrito, impide arrancar. root y el usuario
+del daemon son siempre admin (pueden reescribir la política). Tokens de inquilino opcionales
+(`KLING_AUTHZ_TOKEN`, guardados como sha256) que solo dan roles de inquilino.
+
 Ese socket incluye `POST /machines/{ref}/guest`, que reenvía una petición HTTP al servidor
 que corre dentro de una microVM. Es lo que permite importar un servicio desde un CLI remoto,
 porque las IP de los invitados solo existen en la red del host. Amplía lo que puede hacer
@@ -426,8 +439,11 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     peercred) y abrirle el rango de reenvíos del loopback, y pasarle la dirección ya
     resuelta sería el TOCTOU que el modelo evita. El daemon lo rechaza con un error
     claro, y `kling-vz` sin resolvedor tampoco marcaría. El dueño (`kling.db.owner`) es
-    una etiqueta: la frontera sigue siendo el daemon, y quien tiene su socket puede
-    reetiquetar máquinas.
+    una etiqueta: la frontera sigue siendo el daemon. Sin política de autorización, quien
+    tiene su socket puede reetiquetar máquinas; con ella ([docs/authz.md](docs/authz.md)) un
+    inquilino solo puede poner su propio nombre en `kling.db.owner`, solo apunta
+    `upstream_machine` a máquinas suyas, y el proxy exige además el mismo `kling.owner` (el
+    inquilino, que pone el daemon) en copia y agente.
   - **El invitado no ve la autenticación de verdad.** Recibe `AuthenticationOk` solo
     tras el del servidor; un error del servidor antes de eso no se reenvía (recibe uno
     propio, 28P01 u 08006, como mucho con el SQLSTATE del servidor) y el log del host solo
@@ -747,11 +763,17 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
 - **El cifrado en reposo es cosa del disco, no de kindling.** `kling info` dice si
   `$KLING_ROOT` está sobre dm-crypt; si no, quien tenga el disco tiene la memoria de las
   microVMs. Receta en `docs/cifrado.md`.
-- **El daemon confía en quien alcanza su socket.** No hay autorización por operación: si
-  entras, puedes con todo.
+- **Sin política de autorización, el daemon confía en quien alcanza su socket.** Es el
+  modo por defecto (sin `/etc/kling/authz.json`), y `kling doctor` lo avisa: si entras,
+  puedes con todo. Con política ([docs/authz.md](docs/authz.md)) quien no tiene regla no
+  puede nada y un inquilino solo lo suyo, pero es un MVP: los nombres de máquinas,
+  snapshots y grafos son globales (un `409` dice que un nombre ajeno existe, no de quién
+  es), no hay cuotas por inquilino (topes del host y nada más), los inquilinos no usan
+  volúmenes ni carpetas del host, y la política se lee al arrancar. Dos inquilinos siguen
+  compartiendo host y kernel: lo que separa sus microVMs es lo de las barreras de arriba.
 - **El proxy al invitado no filtra la ruta.** Solo llega a los puertos permitidos (ver
-  10), pero dentro de ellos a cualquier ruta. No es una escalada —quien llega al socket
-  ya manda— pero conviene saberlo si algún día el socket se comparte.
+  10), pero dentro de ellos a cualquier ruta. No es una escalada: sin política quien
+  llega al socket ya manda, y con ella un inquilino solo alcanza sus propias máquinas.
 - **Una credencial se puede usar, aunque no leer.** El proxy impide que el invitado lea
   la clave o la saque a otro dominio, no que la use contra el suyo: es un oráculo de
   ella. Lo acota la clave misma (restringida, de solo lectura, con límites de gasto en

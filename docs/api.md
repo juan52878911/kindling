@@ -35,6 +35,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
 | `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (solo Linux), `DELETE /machines/{ref}/credentials/{env}` |
 | `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
+| `authz` | sin publicar | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
@@ -43,7 +44,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10) y `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
