@@ -899,6 +899,29 @@ La plantilla: sin cuentas anónimas, sin `root` ni `mysql` fuera de `localhost`,
 Las migraciones corren como root: lo que creen con `DEFINER` corre como root, y
 `kling db doctor` lo avisa (`MY020`).
 
+### 18. `kling db class`, `report` y `branch`: lo que queda en el host
+
+- **`class`** no imprime ninguna clave: por copia, dirección, usuario y base. Las DSN con
+  clave solo salen con `-passwords FICHERO`, a un fichero **0600** escrito aparte y
+  renombrado (un enlace en esa ruta se sustituye, no se sigue); `-passwords -` se
+  rechaza. `ls`, `reset` y `rm` solo tocan copias con `kling.db.class=<prefijo>` **y** el
+  `-owner` pedido, y un nombre ajeno a la clase no se crea encima ni se borra.
+- **`report`** guarda la definición en `reports/<nombre>.json` (0600, directorio 0700,
+  leída como una contraseña: normal, del usuario, sin permisos para otros) y **ninguna
+  clave**: la de la API sale del entorno de quien ejecuta (cron o systemd: un
+  `EnvironmentFile` 0600, nunca la línea del crontab). La definición es el consentimiento
+  de `ask -yes`: al cargarla se repiten todas las comprobaciones de `ask`, y
+  `-send-data` (filas al proveedor) queda escrito y a la vista en `report ls`. Cada
+  ejecución usa una copia nueva del golden que se borra con su clave pase lo que pase, y
+  el resultado (datos de la base) va a stdout o a un fichero 0600. La SQL la genera el
+  modelo en cada ejecución: la encierran las mismas capas que en `ask` (sqlguard, rol de
+  solo lectura, transacción READ ONLY, plazo y LIMIT).
+- **`branch`** serializa por repositorio con `flock` sobre `locks/branch-<repo>.lock`
+  (0600, abierto con `O_NOFOLLOW` y comprobado de este usuario): dos checkouts a la vez
+  no crean dos copias de una rama. El cerrojo es de este host; dos hosts contra el mismo
+  daemon no se coordinan. El hook instalado con `-owner` y `-golden` lleva esos valores
+  escritos (validados y entre comillas simples; no son secretos).
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

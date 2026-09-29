@@ -948,6 +948,8 @@ kling db tenant-check t1                      # exercises RLS: each tenant sees 
 kling db ask t1 "how many customers per country?"   # a model writes the SQL; you confirm; read-only
 kling db ask-web t1                           # the same in a local web page (loopback, one-time URL)
 kling db diff t1 t2                           # what changed between two copies: schema and rows, no data
+kling db class -n 30 -prefix student pg       # one copy per student; class reset / ls / rm
+kling db report add weekly -golden pg -every 1w -question "new customers this week"   # run it from cron
 kling db env up shop-app -golden pg           # app + database as a graph (Linux); the app never sees the password
 kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
   'postgres://readonly@db.prod.example.com:5432/shop'   # a masked copy of production
