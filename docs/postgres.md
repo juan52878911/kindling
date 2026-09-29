@@ -173,6 +173,14 @@ el valor por defecto desde Postgres 14; en RDS, el grupo de parámetros). md5 no
 admite. La autenticación IAM de RDS (tokens que caducan cada 15 minutos) tampoco: la
 credencial es una contraseña fija.
 
+**Probado contra RDS real** (2026-09-29, `us-east-1`, RDS Postgres 16.13 `db.t4g.micro`
+con acceso público restringido a una IP): desde una microVM del laboratorio, con solo el
+marcador, el proxy entra con **SCRAM-SHA-256-PLUS** (channel binding sobre TLS verificado
+con el paquete regional de CAs de RDS), consulta y cancela `pg_sleep`; sin `-ca-file` el
+proxy se niega (`upstream_tls`: la CA de RDS no está entre las raíces del sistema), así
+que la contraseña nunca sale; un marcador inventado se rechaza sin tocar RDS. Neon,
+Supabase y pgbouncer siguen sin probar de verdad (#63).
+
 ## El cliente dentro de la microVM
 
 | Ajuste | Valor |
