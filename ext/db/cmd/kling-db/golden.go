@@ -67,7 +67,10 @@ func runGoldenScript(ctx context.Context, scriptFlag, host string, args []string
 		return fmt.Errorf("the kling path %q has spaces; db-golden.sh cannot run it (set $KLING to a path without spaces)", bin)
 	}
 	c := exec.CommandContext(ctx, "bash", append([]string{path}, args...)...)
-	c.Env = append(os.Environ(), "KLING="+bin)
+	// El script genera su propia clave y nunca necesita la de otra base: una
+	// PGPASSWORD del entorno (la de producción en kling db clone) no debe llegar
+	// a él ni a nada de lo que lance.
+	c.Env = append(sinClavesPG(os.Environ()), "KLING="+bin)
 	if host != "" {
 		c.Env = append(c.Env, "KLING_HOST="+host)
 	}
@@ -120,4 +123,16 @@ func checkScript(p string) (string, error) {
 		return "", fmt.Errorf("%s is not a file", p)
 	}
 	return filepath.Abs(p)
+}
+
+// sinClavesPG quita del entorno lo que lleva una contraseña de Postgres.
+func sinClavesPG(env []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PGPASSWORD=") || strings.HasPrefix(kv, "PGPASSFILE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

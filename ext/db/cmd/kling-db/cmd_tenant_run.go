@@ -41,7 +41,7 @@ func (dt *tcDiscTable) table(o tcOpts) *tcTable {
 	}
 	for _, p := range dt.Policies {
 		pol := tcPolicy{Name: p.Name, Command: p.Cmd, Permissive: p.Permissive != "RESTRICTIVE",
-			Roles: p.Roles, Applies: p.Applies, Using: doctor.Safe(p.Qual, 300), WithCheck: doctor.Safe(p.WithCheck, 300)}
+			Roles: p.Roles, Applies: p.Applies, Using: doctor.Safe(sinLiterales(p.Qual), 300), WithCheck: doctor.Safe(sinLiterales(p.WithCheck), 300)}
 		if pol.Roles == nil {
 			pol.Roles = []string{}
 		}
@@ -559,3 +559,22 @@ func writeTenantReport(w io.Writer, rep *tcReport, asJSON bool) error {
 		len(rep.Tables), failing, rep.Failed, rep.Errors, rep.Skipped)
 	return nil
 }
+
+// reLiteral es una cadena SQL entre comillas simples (” dentro es una comilla).
+var reLiteral = regexp.MustCompile(`'(?:[^']|'')*'`)
+
+// sinLiterales quita los valores de la expresión de una política antes de
+// enseñarla: una política puede nombrar un inquilino concreto
+// (tenant_id = 'acme') y el informe no enseña datos, solo la estructura.
+func sinLiterales(expr string) string {
+	return reLiteral.ReplaceAllStringFunc(expr, func(lit string) string {
+		// Un nombre de ajuste (app.tenant_id) es estructura, no un dato: se deja.
+		if reNombreAjuste.MatchString(lit) {
+			return lit
+		}
+		return "'…'"
+	})
+}
+
+// reNombreAjuste es un literal con forma de nombre de ajuste de Postgres.
+var reNombreAjuste = regexp.MustCompile(`^'[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*'$`)
