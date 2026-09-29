@@ -300,8 +300,8 @@ tener reenvío.
 
 ## Lo que no está en esta versión
 
-La arista `mcp`, snapshot y fork de un grafo con `share` y grafos
-precalentados en el fondo del sandbox.
+La arista `mcp` y snapshot y fork de un grafo con `share`. Los grafos precalentados en
+el fondo del sandbox ya están (#57, abajo en "Desde los plugins").
 
 **Por qué no hay arista `mcp`.** El diseño era que un agente llamase a las herramientas
 de un servidor MCP del grafo por su puente (`kling-bridge`). Pero el puente escucha solo
@@ -321,6 +321,16 @@ entorno de integración entero en un comando, con la clave por stdin y deshecho 
 algo falla. `kling db branch -env <app-template>` lo hace por rama de git. `env down` y
 `branch -rm` lo borran con la clave. Detalle en
 [db.md](db.md#un-entorno-entero-app--base-como-grafo).
+
+**kling-sandbox: grafos precalentados (#57).** Una plantilla con `"kind": "graph"`
+declara un grafo (nodos que nacen de plantillas ya construidas, y sus aristas) con un
+`pool`. El fondo del gateway levanta cada instancia con `POST /graphs` y la congela con
+`graph freeze`; `POST /v1/graphs {"template": ...}` del frontal reclama una (etiqueta
+todas sus máquinas con el inquilino, relee, y `graph thaw`) o, si no hay, levanta una
+ya a nombre del inquilino. `DELETE /v1/graphs/{id}` la borra entera. Sin nodos `lazy`,
+sin aristas `credential` y sin volúmenes ni carpetas del host en los nodos: serían
+comunes a todas las instancias. Detalle en
+[ext/sandbox/README.md](../ext/sandbox/README.md#grafos-precalentados).
 
 **kling-mcp: agente + servidores MCP.** Un grafo sin aristas ya da lo que interesa:
 `agente` eager y `browser`/`memoria` `lazy` (sin RAM hasta que se necesitan), ciclo de

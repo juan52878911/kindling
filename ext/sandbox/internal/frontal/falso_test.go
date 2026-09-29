@@ -56,6 +56,17 @@ type falso struct {
 	shellIlegal bool
 	// creadas cuenta los POST /sandboxes aceptados.
 	creadas int
+
+	// grafos por id, y el store (espacio -> clave -> valor).
+	grafos map[string]*api.Graph
+	store  map[string]map[string]json.RawMessage
+	// grafoUpCodigo hace fallar POST /graphs con ese estado; thawFalla, POST
+	// /graphs/{ref}/thaw.
+	grafoUpCodigo int
+	thawFalla     bool
+	freezeFalla   bool
+	// grafosUp cuenta los POST /graphs aceptados.
+	grafosUp int
 }
 
 // nuevoFalso arranca un daemon falso en un socket Unix corto (macOS limita
@@ -236,6 +247,7 @@ func (f *falso) rutas() http.Handler {
 		mc.Labels = api.MergeLabels(mc.Labels, labels)
 		w.WriteHeader(204)
 	})
+	f.rutasGrafos(m)
 	m.HandleFunc("POST /machines/{ref}/exec", f.exec)
 	m.HandleFunc("POST /machines/{ref}/shell", f.shell)
 	m.HandleFunc("/machines/{ref}/files", f.files)
@@ -509,4 +521,206 @@ func (c *conexionShell) leer(t *testing.T) (byte, []byte) {
 		t.Fatalf("reading a frame: %v", err)
 	}
 	return tp, p
+}
+
+// ---- grafos y store
+
+func (f *falso) rutasGrafos(m *http.ServeMux) {
+	m.HandleFunc("GET /machines", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		out := []*api.Machine{}
+		for _, mc := range f.maquinas {
+			c := *mc
+			c.Labels = api.MergeLabels(nil, mc.Labels)
+			out = append(out, &c)
+		}
+		f.mu.Unlock()
+		writeJSON(w, 200, out)
+	})
+	m.HandleFunc("GET /store/{ns}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		keys := []string{}
+		for k := range f.store[r.PathValue("ns")] {
+			keys = append(keys, k)
+		}
+		writeJSON(w, 200, api.StoreKeys{Keys: keys})
+	})
+	m.HandleFunc("GET /store/{ns}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		v, ok := f.store[r.PathValue("ns")][r.PathValue("key")]
+		if !ok {
+			fail(w, 404, fmt.Errorf("no key"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(v)
+	})
+	m.HandleFunc("PUT /store/{ns}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		var v json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.store == nil {
+			f.store = map[string]map[string]json.RawMessage{}
+		}
+		ns := r.PathValue("ns")
+		if f.store[ns] == nil {
+			f.store[ns] = map[string]json.RawMessage{}
+		}
+		f.store[ns][r.PathValue("key")] = v
+		w.WriteHeader(204)
+	})
+	m.HandleFunc("DELETE /store/{ns}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		delete(f.store[r.PathValue("ns")], r.PathValue("key"))
+		w.WriteHeader(204)
+	})
+	m.HandleFunc("POST /graphs", func(w http.ResponseWriter, r *http.Request) {
+		var req api.GraphRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		g := req.Graph
+		if err := api.ValidateGraph(&g); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.grafoUpCodigo != 0 {
+			fail(w, f.grafoUpCodigo, fmt.Errorf("no room for the graph"))
+			return
+		}
+		for _, otro := range f.grafos {
+			if otro.Name == g.Name {
+				fail(w, 409, fmt.Errorf("graph %q already exists", g.Name))
+				return
+			}
+		}
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		g.ID = "g" + hex.EncodeToString(b)
+		g.CreatedAt = time.Now().UTC()
+		for nombre, n := range g.Nodes {
+			nb := make([]byte, 8)
+			_, _ = rand.Read(nb)
+			ahora := time.Now()
+			mc := &api.Machine{ID: hex.EncodeToString(nb), Name: g.Name + "-" + nombre, From: n.From, Image: n.Image,
+				State: api.StateRunning, AllowExec: true, CreatedAt: ahora, StartedAt: &ahora,
+				Labels: api.MergeLabels(n.Labels, map[string]string{api.LabelGraph: g.ID, api.LabelGraphNode: nombre})}
+			f.maquinas[mc.ID] = mc
+			n.MachineID = mc.ID
+			g.Nodes[nombre] = n
+		}
+		if f.grafos == nil {
+			f.grafos = map[string]*api.Graph{}
+		}
+		f.grafos[g.ID] = &g
+		f.grafosUp++
+		writeJSON(w, 201, f.vistaGrafoLocked(&g))
+	})
+	m.HandleFunc("GET /graphs", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		out := []*api.Graph{}
+		for _, g := range f.grafos {
+			out = append(out, f.vistaGrafoLocked(g))
+		}
+		writeJSON(w, 200, out)
+	})
+	m.HandleFunc("GET /graphs/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		g, ok := f.grafos[r.PathValue("ref")]
+		if !ok {
+			fail(w, 404, fmt.Errorf("no graph"))
+			return
+		}
+		writeJSON(w, 200, f.vistaGrafoLocked(g))
+	})
+	estado := func(nuevo api.State, falla func() bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			g, ok := f.grafos[r.PathValue("ref")]
+			if !ok {
+				fail(w, 404, fmt.Errorf("no graph"))
+				return
+			}
+			if falla() {
+				fail(w, 500, fmt.Errorf("could not change the graph state"))
+				return
+			}
+			for _, n := range g.Nodes {
+				if mc := f.maquinas[n.MachineID]; mc != nil {
+					mc.State = nuevo
+					if nuevo == api.StateRunning {
+						ahora := time.Now()
+						mc.StartedAt = &ahora
+					}
+				}
+			}
+			writeJSON(w, 200, f.vistaGrafoLocked(g))
+		}
+	}
+	m.HandleFunc("POST /graphs/{ref}/freeze", estado(api.StateWarm, func() bool { return f.freezeFalla }))
+	m.HandleFunc("POST /graphs/{ref}/thaw", estado(api.StateRunning, func() bool { return f.thawFalla }))
+	m.HandleFunc("DELETE /graphs/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		g, ok := f.grafos[r.PathValue("ref")]
+		if !ok {
+			fail(w, 404, fmt.Errorf("no graph"))
+			return
+		}
+		for _, n := range g.Nodes {
+			delete(f.maquinas, n.MachineID)
+		}
+		delete(f.grafos, g.ID)
+		w.WriteHeader(204)
+	})
+}
+
+// vistaGrafoLocked copia el grafo con el estado de cada nodo, como el daemon.
+func (f *falso) vistaGrafoLocked(g *api.Graph) *api.Graph {
+	c := *g
+	c.Nodes = map[string]api.GraphNode{}
+	corriendo := 0
+	for nombre, n := range g.Nodes {
+		if mc := f.maquinas[n.MachineID]; mc != nil {
+			n.State = string(mc.State)
+			if mc.State == api.StateWarm {
+				n.State = "frozen"
+			}
+			if mc.State == api.StateRunning {
+				corriendo++
+			}
+		} else {
+			n.State = "missing"
+		}
+		c.Nodes[nombre] = n
+	}
+	switch {
+	case corriendo == len(g.Nodes):
+		c.State = api.GraphStateRunning
+	case corriendo == 0:
+		c.State = api.GraphStateFrozen
+	default:
+		c.State = api.GraphStatePartial
+	}
+	return &c
+}
+
+// grafosVivos cuenta los grafos que hay en el daemon.
+func (f *falso) grafosVivos() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.grafos)
 }

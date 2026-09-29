@@ -499,9 +499,17 @@ func (s *Servidor) reservar(ctx context.Context, t *Tenant, plantilla string) er
 		return nil
 	}
 	vivos, _ := s.sandboxesDe(ctx, t)
-	total, dePlantilla := len(vivos), 0
+	grafos, _ := s.grafosDe(ctx, t)
+	total, dePlantilla := len(vivos)+len(grafos), 0
 	for _, sb := range vivos {
 		if plantilla != "" && sb.Template == plantilla {
+			dePlantilla++
+		}
+	}
+	// Un grafo cuenta como un sandbox, y por su plantilla con la clave
+	// claveGrafo (plantilla trae ya esa forma cuando se pide un grafo).
+	for _, g := range grafos {
+		if plantilla != "" && claveGrafo(g.Template) == plantilla {
 			dePlantilla++
 		}
 	}
@@ -720,8 +728,10 @@ func esPrecalentadaDe(mc *api.Machine, template string) bool {
 // esto es lo que evita que se acumulen para siempre.
 //
 // Solo toca sandboxes con tenant: las precalentadas son del pool de
-// plantilla, y las máquinas sin kind=sandbox ni se listan.
+// plantilla, y las máquinas sin kind=sandbox ni se listan. Los grafos tienen
+// su propia vuelta (limpiarGrafos).
 func (s *Servidor) Limpiar(ctx context.Context) {
+	defer s.limpiarGrafos(ctx)
 	porHost, errs := s.enCadaHost(ctx, func(ctx context.Context, h *hosts.Host) ([]*api.Machine, error) {
 		return h.Cliente.Sandboxes(ctx)
 	})
