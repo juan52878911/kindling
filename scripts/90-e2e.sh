@@ -1936,7 +1936,7 @@ else
     out=$(kb volume ls) && rc=0 || rc=$?
     { [ "$rc" != 0 ] && contiene "$out" "admin"; } && ok "volúmenes: solo admin" || bad "volume ls de inquilino" "needs the admin role" "rc=$rc $out"
     # Snapshots: el de A no lo ve B, y B no puede usar ese nombre (409, sin decir de quién es).
-    out=$(ka save "$AZM" "$AZS") && rc=0 || rc=$?
+    out=$(ka save -force "$AZM" "$AZS") && rc=0 || rc=$?
     [ "$rc" = 0 ] && ok "save como $TA" || bad "save como $TA" "salida 0" "rc=$rc $out"
     out=$(kb template ls)
     contiene "$out" "$AZS" && bad "template ls de $TB" "sin la plantilla de $TA" "$out" || ok "$TB no ve la plantilla de $TA"
@@ -1944,7 +1944,7 @@ else
     if contiene "$out" "booted"; then
       for rep in "" -replace; do
         # shellcheck disable=SC2086
-        out=$(kb save $rep "$AZM-b" "$AZS") && rc=0 || rc=$?
+        out=$(kb save -force $rep "$AZM-b" "$AZS") && rc=0 || rc=$?
         { [ "$rc" != 0 ] && contiene "$out" "is taken" && ! contiene "$out" "$TA"; } \
           && ok "save ${rep:-sin -replace} de $TB sobre el nombre de $TA: 'is taken', sin dueño" \
           || bad "save ${rep:-sin -replace} sobre nombre ajeno" "is taken, sin $TA" "rc=$rc $out"
