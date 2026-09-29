@@ -90,7 +90,7 @@ func newAskApp(t *testing.T) (*testApp, *askKling, string) {
 }
 
 func defaultAskOpts() askOpts {
-	return askOpts{yes: true, model: askllm.DefaultModel, limit: 200, timeout: 30 * time.Second}
+	return askOpts{yes: true, model: askllm.DefaultModel, limit: 200, timeout: 30 * time.Second, llmTime: 90 * time.Second}
 }
 
 // queryExecs son los exec que llevan la sentencia del modelo.
@@ -353,12 +353,14 @@ func TestAskOpcionesYSinClave(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, o := range map[string]askOpts{
-		"explain sin send-data": {limit: 1, timeout: time.Second, explain: true},
-		"send-data solo":        {limit: 1, timeout: time.Second, sendData: true},
-		"limit 0":               {limit: 0, timeout: time.Second},
-		"limit enorme":          {limit: askMaxLimit + 1, timeout: time.Second},
-		"timeout corto":         {limit: 1, timeout: time.Millisecond},
-		"rol raro":              {limit: 1, timeout: time.Second, role: "x; drop"},
+		"explain sin send-data": {llmTime: time.Minute, limit: 1, timeout: time.Second, explain: true},
+		"send-data solo":        {llmTime: time.Minute, limit: 1, timeout: time.Second, sendData: true},
+		"limit 0":               {llmTime: time.Minute, limit: 0, timeout: time.Second},
+		"limit enorme":          {llmTime: time.Minute, limit: askMaxLimit + 1, timeout: time.Second},
+		"timeout corto":         {llmTime: time.Minute, limit: 1, timeout: time.Millisecond},
+		"rol raro":              {llmTime: time.Minute, limit: 1, timeout: time.Second, role: "x; drop"},
+		"proveedor raro":        {llmTime: time.Minute, limit: 1, timeout: time.Second, provider: "gpt"},
+		"llm-timeout 0":         {limit: 1, timeout: time.Second},
 	} {
 		if err := o.check("q"); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -370,10 +372,14 @@ func TestAskOpcionesYSinClave(t *testing.T) {
 
 	// Sin clave de la API, error claro y ni se toca la copia.
 	t.Setenv(askllm.EnvKey, "")
+	t.Setenv(askllm.EnvProvider, "")
+	t.Setenv(askllm.EnvFake, "")
+	t.Setenv("PATH", t.TempDir()) // sin opencode
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("KLING", "/nonexistent/kling")
 	err := cmdAsk([]string{"c1", "¿cuántos clientes hay?"})
-	if !errors.Is(err, askllm.ErrNoKey) {
-		t.Fatalf("err = %v, want ErrNoKey", err)
+	if !errors.Is(err, askllm.ErrNoProvider) {
+		t.Fatalf("err = %v, want ErrNoProvider", err)
 	}
 }
 

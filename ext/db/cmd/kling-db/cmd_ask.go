@@ -55,14 +55,16 @@ const (
 // Sustituibles en los tests: el proveedor y el validador (para comprobar que,
 // aun si el validador dejara pasar algo, la ejecución sigue encerrada).
 var (
-	newProvider = func(model string) (askllm.Provider, error) { return askllm.FromEnv(model) }
+	newProvider = askllm.Select
 	validateSQL = sqlguard.Validate
 )
 
 type askOpts struct {
 	role     string
 	yes      bool
+	provider string
 	model    string
+	llmTime  time.Duration
 	limit    int
 	timeout  time.Duration
 	jsonOut  bool
@@ -75,7 +77,9 @@ func cmdAsk(args []string) error {
 	var o askOpts
 	fs.StringVar(&o.role, "role", "", "read-only role to run as (default: "+defaultRORole+", created if missing)")
 	fs.BoolVar(&o.yes, "yes", false, "run the generated SQL without asking")
-	fs.StringVar(&o.model, "model", askllm.DefaultModel, "Anthropic model")
+	fs.StringVar(&o.provider, "provider", "", "model provider: anthropic or opencode (default: $"+askllm.EnvProvider+", else anthropic if $"+askllm.EnvKey+" is set, else opencode if installed)")
+	fs.StringVar(&o.model, "model", "", "model (default: "+askllm.DefaultModel+" for anthropic, "+askllm.DefaultOpenCodeModel+" for opencode)")
+	fs.DurationVar(&o.llmTime, "llm-timeout", askllm.DefaultLLMTimeout, "how long to wait for the model (opencode provider)")
 	fs.IntVar(&o.limit, "limit", askDefaultLimit, fmt.Sprintf("maximum rows returned (1-%d)", askMaxLimit))
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Second, "statement_timeout of the query")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
@@ -86,14 +90,14 @@ func cmdAsk(args []string) error {
 		return err
 	}
 	if len(pos) < 2 {
-		return usageErr(`usage: kling db ask <copy> "question" [-role R] [-yes] [-model M] [-limit N] [-json] [-explain -send-data]`)
+		return usageErr(`usage: kling db ask <copy> "question" [-role R] [-yes] [-provider P] [-model M] [-limit N] [-json] [-explain -send-data]`)
 	}
 	question := strings.TrimSpace(strings.Join(pos[1:], " "))
 	if err := o.check(question); err != nil {
 		return usageErr("%v", err)
 	}
-	// La clave de la API, lo primero: sin ella no se toca la copia.
-	prov, err := newProvider(o.model)
+	// El proveedor, lo primero: sin él (clave u opencode) no se toca la copia.
+	prov, err := newProvider(o.provider, o.model, o.llmTime)
 	if err != nil {
 		return err
 	}
@@ -118,6 +122,10 @@ func (o askOpts) check(question string) error {
 		return fmt.Errorf("-limit must be between 1 and %d", askMaxLimit)
 	case o.timeout < time.Second || o.timeout > 10*time.Minute:
 		return errors.New("-timeout must be between 1s and 10m")
+	case o.llmTime < time.Second || o.llmTime > 30*time.Minute:
+		return errors.New("-llm-timeout must be between 1s and 30m")
+	case o.provider != "" && o.provider != "anthropic" && o.provider != "opencode":
+		return errors.New("-provider must be anthropic or opencode")
 	case o.explain && !o.sendData:
 		return errors.New("-explain sends result rows to the model provider: add -send-data to allow it")
 	case o.sendData && !o.explain:

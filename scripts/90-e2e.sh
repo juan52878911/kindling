@@ -1271,15 +1271,35 @@ SQL
   fi
   $KLING template rm "$GTN" >/dev/null 2>&1
 
-  # ask: no hay modo de prueba con proveedor falso (a propósito: no se añade código de prueba
-  # a la ruta que ejecuta SQL). Con ANTHROPIC_API_KEY se prueba de verdad; sin ella, skip.
-  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    printf "  \033[33mskip\033[0m  ask: no hay ANTHROPIC_API_KEY (y kling db ask no tiene proveedor falso): sin la prueba de ask\n"
+  # ask con el "modelo" de pruebas (KLING_DB_ASK_FAKE: la respuesta sale de un fichero, sin red).
+  # No salta ningún control: la SQL pasa por sqlguard, el rol de solo lectura y READ ONLY.
+  ASKF=$(mktemp)
+  printf '%s\n' '```sql' 'SELECT count(*) AS n FROM e2e_ro' '```' > "$ASKF"
+  out=$(KLING_DB_ASK_FAKE="$ASKF" dbk ask "$DBU" "how many rows does e2e_ro have?" -yes -json); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" '"role": "kling_db_ro"' && contiene "$out" '"2"'; } \
+    && ok "ask (modelo de pruebas): responde con el rol de solo lectura" || bad "ask fake" "JSON con el rol y 2" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  printf '%s\n' "INSERT INTO e2e_ro VALUES ('z')" > "$ASKF"
+  out=$(KLING_DB_ASK_FAKE="$ASKF" dbk ask "$DBU" "add a row" -yes -json); rc=$?
+  [ "$rc" != 0 ] && ok "ask: un INSERT del modelo se rechaza" || bad "ask INSERT" "error" "rc=$rc $out"
+  printf '%s\n' "SELECT 1; DELETE FROM e2e_ro" > "$ASKF"
+  out=$(KLING_DB_ASK_FAKE="$ASKF" dbk ask "$DBU" "delete everything" -yes -json); rc=$?
+  [ "$rc" != 0 ] && ok "ask: dos sentencias del modelo se rechazan" || bad "ask 2 sentencias" "error" "rc=$rc $out"
+  rm -f "$ASKF"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+  [ "$out" = "2" ] && ok "ask (modelo de pruebas) no modificó los datos" || bad "datos tras ask fake" "2" "$out"
+
+  # ask con un proveedor real: KLING_E2E_ASK_PROVIDER=opencode|anthropic (o, sin él, con ANTHROPIC_API_KEY).
+  ASKP="${KLING_E2E_ASK_PROVIDER:-}"
+  [ -z "$ASKP" ] && [ -n "${ANTHROPIC_API_KEY:-}" ] && ASKP=anthropic
+  if [ -z "$ASKP" ]; then
+    printf "  \033[33mskip\033[0m  ask real: ni KLING_E2E_ASK_PROVIDER ni ANTHROPIC_API_KEY (con opencode instalado: KLING_E2E_ASK_PROVIDER=opencode)\n"
+  elif [ "$ASKP" = opencode ] && [ ! -x "$HOME/.opencode/bin/opencode" ] && ! command -v opencode >/dev/null; then
+    printf "  \033[33mskip\033[0m  ask real: KLING_E2E_ASK_PROVIDER=opencode pero no hay opencode\n"
   else
-    out=$(dbk ask "$DBU" "how many rows does the table e2e_ro have?" -yes -json); rc=$?
-    { [ "$rc" = 0 ] && contiene "$out" '"role"'; } && ok "ask: responde con un rol de solo lectura" || bad "ask" "JSON con el rol" "rc=$rc $(printf '%s' "$out" | tail -3)"
+    out=$(dbk ask "$DBU" "how many rows does the table e2e_ro have?" -provider "$ASKP" -yes -json); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" '"role"'; } && ok "ask ($ASKP): responde con un rol de solo lectura" || bad "ask $ASKP" "JSON con el rol" "rc=$rc $(printf '%s' "$out" | tail -3)"
     out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
-    [ "$out" = "2" ] && ok "ask no modificó los datos" || bad "datos tras ask" "2" "$out"
+    [ "$out" = "2" ] && ok "ask ($ASKP) no modificó los datos" || bad "datos tras ask" "2" "$out"
   fi
   dbk rm "$DBU" >/dev/null 2>&1
 
