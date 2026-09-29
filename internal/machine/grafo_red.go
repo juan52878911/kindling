@@ -27,7 +27,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -47,25 +46,9 @@ func hexSHA256(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// esperarPuertoGrafo espera a que addr acepte conexiones: un nodo recién
-// despertado tarda un poco en volver a escuchar. Sustituible en los tests.
-var esperarPuertoGrafo = func(ctx context.Context, addr string) error {
-	var d net.Dialer
-	for {
-		intento, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		c, err := d.DialContext(intento, "tcp", addr)
-		cancel()
-		if err == nil {
-			_ = c.Close()
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("port %s didn't answer after waking the node: %w", addr, ctx.Err())
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-}
+// esperarPuertoGrafo espera a que el puerto port del nodo recién despertado
+// (la máquina id, en addr) vuelva a escuchar. Sustituible en los tests.
+var esperarPuertoGrafo = esperarPuertoPlataforma
 
 // despertar es un despertar en vuelo de un nodo.
 type despertar struct {
@@ -135,7 +118,7 @@ func (m *Manager) resolverArista(ctx context.Context, origen, gid, desde, hacia 
 		despertado = true
 	}
 	if despertado {
-		if err := esperarPuertoGrafo(ctx, addr); err != nil {
+		if err := esperarPuertoGrafo(ctx, m, id, addr, port); err != nil {
 			return "", "", err
 		}
 	}

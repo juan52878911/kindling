@@ -11,10 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,32 +30,134 @@ import (
 
 const backendVMM = BackendVZ
 
-// modeloAPosible: el modelo A de kling db (una copia compartida por agentes de
-// otras máquinas, credenciales con UpstreamMachine) es solo de Linux en esta
-// versión.
-//
-// POR QUÉ: en macOS el proxy de Postgres no es del daemon sino del kling-vz
-// del agente, un proceso confinado (kling-vz.sb) que no conoce las demás
-// máquinas. Para resolver la copia en cada conexión, como exige el modelo,
-// kling-vz tendría que preguntar al daemon por un canal nuevo en sentido
-// contrario (autenticado por peercred) y marcar a un reenvío del rango
-// reservado del loopback, que hoy upstream.go le prohíbe a propósito; y el
-// daemon, para cortar sesiones al congelar la copia, tendría que llamar a cada
-// kling-vz. Son dos superficies nuevas en el proceso que guarda las claves de
-// cada máquina. Pasarle la dirección ya resuelta sería justo el TOCTOU que el
-// modelo evita (un reenvío muere y su puerto lo reutiliza otra máquina). Hasta
-// que ese canal exista con sus pruebas, el error claro es lo seguro.
-const modeloAPosible = false
+// Las aristas de un grafo y kling db attach (una credencial Postgres con
+// UpstreamMachine) llegan a la otra máquina por el broker (broker.go): el
+// kling-vz del origen pide la arista, el daemon comprueba, marca al reenvío
+// del destino y le entrega el socket conectado. kling-vz nunca marca él
+// mismo a un reenvío (upstream.go se lo sigue prohibiendo) ni ve una
+// dirección.
 
-// direccionCopiaLocked: ver modeloAPosible.
-func direccionCopiaLocked(_ *api.Machine, _ int) (string, error) { return "", errModeloASoloLinux }
+// direccionCopiaLocked es por dónde llega el DAEMON al puerto port de la
+// máquina cp: su reenvío en el loopback, del rango reservado (reenvios.go).
+// Con m.mu tomado. Solo lo usa el broker, que marca él mismo.
+func direccionCopiaLocked(cp *api.Machine, port int) (string, error) {
+	addr := cp.Forwards[strconv.Itoa(port)]
+	if addr == "" {
+		return "", fmt.Errorf("machine %s has no forward for port %d yet", cp.Name, port)
+	}
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil || !ap.Addr().IsLoopback() || !credproxy.PuertoReservado(int(ap.Port())) {
+		return "", fmt.Errorf("machine %s: forward %q is not in kindling's reserved range", cp.Name, addr)
+	}
+	return addr, nil
+}
 
-// invalidarCopiaPlataforma no hace nada en macOS: no hay sesiones hacia otras
-// máquinas que cortar.
-func invalidarCopiaPlataforma(string) int { return 0 }
+// invalidarCopiaPlataforma corta las sesiones de credenciales que el broker
+// entregó hacia id.
+func invalidarCopiaPlataforma(id string) int { return invalidarCopiaBroker(id) }
 
-// invalidarAgentePlataforma: ídem.
+// invalidarAgentePlataforma no hace nada: las sesiones que pidió una máquina
+// las corta invalidarOrigen, que tiene su ID (n no lo lleva).
 func invalidarAgentePlataforma(*knet.Net) int { return 0 }
+
+// invalidarEnlacesPlataforma corta las sesiones de enlace que el broker
+// entregó hacia ids.
+func invalidarEnlacesPlataforma(ids ...string) int { return invalidarEnlacesBroker(ids...) }
+
+// invalidarOrigenPlataforma corta las sesiones que pidió la máquina id.
+func invalidarOrigenPlataforma(id string) int { return invalidarOrigenBroker(id) }
+
+// esperarPuertoPlataforma espera a que algo escuche en el puerto port del
+// invitado de la máquina id. El reenvío acepta siempre (lo abre kling-vz),
+// así que se pregunta a kling-vz (GET /kling/probe).
+func esperarPuertoPlataforma(ctx context.Context, m *Manager, id, addr string, port int) error {
+	for {
+		m.mu.RLock()
+		sock := m.socket[id]
+		m.mu.RUnlock()
+		if sock != "" {
+			if ok, err := fc.New(sock).KlingProbe(ctx, port); err == nil && ok {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("port %d of %s didn't answer after waking the node: %w", port, shortID(id), ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// capacidadGrafo comprueba que el kling-vz de c sabe pedir conexiones al
+// daemon (credproxy.CapGraphLink).
+func capacidadGrafo(ctx context.Context, c *fc.Client) error {
+	info, err := c.KlingInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
+	}
+	if !slices.Contains(info.CredentialKinds, credproxy.CapGraphLink) {
+		return errors.New("this kling-vz can't reach other machines (graph edges, kling db attach): rebuild kling-vz")
+	}
+	return nil
+}
+
+// enviarGrafoVZ manda al kling-vz de la máquina id sus aristas salientes (si
+// es el nodo de un grafo con aristas): las link y los nombres <nodo>.graph.
+// Sin direcciones: cada conexión se pide al broker.
+func enviarGrafoVZ(ctx context.Context, m *Manager, c *fc.Client, id string) error {
+	m.mu.RLock()
+	mc := m.byID[id]
+	var g fc.KlingGraph
+	hay := false
+	if mc != nil {
+		g, hay = m.aristasVZLocked(mc)
+	}
+	m.mu.RUnlock()
+	if !hay {
+		return nil
+	}
+	if err := capacidadGrafo(ctx, c); err != nil {
+		return err
+	}
+	if err := c.SetKlingGraph(ctx, g); err != nil {
+		return fmt.Errorf("handing the graph edges to kling-vz: %w", err)
+	}
+	return nil
+}
+
+// enviarGrafoPlataforma es enviarGrafoVZ con el socket de la máquina.
+func enviarGrafoPlataforma(ctx context.Context, m *Manager, id string) error {
+	m.mu.RLock()
+	sock := m.socket[id]
+	m.mu.RUnlock()
+	if sock == "" {
+		return fmt.Errorf("no socket for %s", shortID(id))
+	}
+	return enviarGrafoVZ(ctx, m, fc.New(sock), id)
+}
+
+// aristasVZLocked son las aristas salientes del nodo de mc, en la forma que
+// entiende kling-vz. Con m.mu tomado.
+func (m *Manager) aristasVZLocked(mc *api.Machine) (fc.KlingGraph, bool) {
+	var g fc.KlingGraph
+	spec, hay := m.especRedGrafoLocked(mc)
+	if !hay {
+		return g, false
+	}
+	for _, l := range spec.Links {
+		g.Links = append(g.Links, fc.KlingGraphLink{Host: l.Host, Port: l.Port})
+	}
+	vistos := map[string]bool{}
+	gr := m.grafos[mc.Labels[api.LabelGraph]]
+	for _, e := range gr.Edges {
+		if e.From == mc.Labels[api.LabelGraphNode] && !vistos[e.Host()] {
+			vistos[e.Host()] = true
+			g.Hosts = append(g.Hosts, e.Host())
+		}
+	}
+	sort.Strings(g.Hosts)
+	return g, true
+}
 
 // Sin jailer en macOS: el aislamiento es el proceso auxiliar de Apple que
 // aloja cada VM, y el daemon corre sin root.
@@ -98,23 +203,39 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	if err := c.SetKlingNetwork(ctx, red); err != nil {
 		return fmt.Errorf("setting the network policy: %w", err)
 	}
+	// Las aristas del nodo, si es de un grafo (un thaw): antes de que el
+	// invitado corra, que despierta sabiendo ya a qué nombres conectar. Un
+	// fallo no impide arrancar: las aristas fallan cerradas, y se dice.
+	if err := enviarGrafoVZ(ctx, m, c, id); err != nil {
+		log.Printf("%s woke up without its graph edges: %v", shortID(id), err)
+	}
 	// Las credenciales que la máquina ya tuviera (un thaw o un reinicio), al
 	// kling-vz nuevo ANTES de que el invitado corra: despierta con el dominio
 	// cacheado apuntando a la pasarela, y así la primera petición ya encuentra
 	// el proxy con su clave. La reentrega de después (reentregarCredenciales)
 	// repite lo mismo, y además los marcadores en MMDS.
-	if red.Egress == string(knet.EgressAllowlist) {
-		creds, err := m.cargarCredenciales(id)
-		if err != nil {
+	// Fuera de allowlist solo puede tener las de sus aristas credential, que
+	// van todas a otra máquina (entregarCredencialesNodo).
+	creds, err := m.cargarCredenciales(id)
+	if err != nil {
+		return err
+	}
+	if len(creds) > 0 && (red.Egress == string(knet.EgressAllowlist) || todasAMaquina(creds)) {
+		if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil); err != nil {
 			return err
-		}
-		if len(creds) > 0 {
-			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
+}
+
+// todasAMaquina dice si todas las credenciales van a otra máquina.
+func todasAMaquina(creds []credproxy.Credential) bool {
+	for _, c := range creds {
+		if c.UpstreamMachine == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // registrarCredencialesPlataforma manda el juego completo al kling-vz de la
@@ -125,14 +246,6 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 // viaja: kling-vz escribe el registro junto a su socket, que está en el mismo
 // directorio de la máquina (ver vz/cmd/kling-vz).
 func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string, _ credproxy.ResolveMachineFunc) error {
-	// El modelo A de kling db (UpstreamMachine) es solo de Linux: ver
-	// direccionCopiaLocked. Aquí también, antes de mirar c: ni el almacén de
-	// un Linux copiado ni una versión mezclada deben llegar a kling-vz.
-	for _, cr := range creds {
-		if cr.UpstreamMachine != "" {
-			return errModeloASoloLinux
-		}
-	}
 	if c == nil {
 		return nil
 	}
@@ -142,8 +255,9 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 	// con Upstream: uno que no lo conozca marcaría el dominio en su lugar (y,
 	// con -upstream-tls disable, exigiría TLS a un servidor que no lo tiene),
 	// así que sin "postgres-upstream" no se le da ninguna que lo use.
-	var pg, upstream bool
+	var pg, upstream, maquina bool
 	for _, cr := range creds {
+		maquina = maquina || cr.UpstreamMachine != ""
 		if cr.Kind == credproxy.KindPostgres {
 			pg = true
 			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
@@ -167,6 +281,11 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
 			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")
 		}
+		// Uno que no pide conexiones al daemon trataría upstream_machine
+		// como si no estuviera y marcaría el dominio: ninguna le llega.
+		if maquina && !slices.Contains(info.CredentialKinds, credproxy.CapGraphLink) {
+			return errors.New("this kling-vz can't reach other machines (graph credential edges, kling db attach): rebuild kling-vz")
+		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
 	for _, cr := range creds {
@@ -175,6 +294,7 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			Allow: append([]string(nil), cr.Allow...),
 			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
 			Upstream: cr.Upstream, UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
+			UpstreamMachine: cr.UpstreamMachine, UpstreamOwner: cr.UpstreamOwner,
 		})
 	}
 	if err := c.SetKlingCredentials(ctx, out); err != nil {
@@ -361,6 +481,13 @@ func memoriaFisicaMiB() int64 {
 // de datos, con la que se encierra en su perfil de sandbox al crear la VM
 // (vz/cmd/kling-vz/kling-vz.sb): lee bajo la raíz y escribe solo en su
 // directorio, snapshots/ y volumes/.
+//
+// Y el socket del broker (broker_vz.go), por el que pide las conexiones de las
+// aristas y de kling db attach; su perfil solo le deja conectar a ese.
 func (m *Manager) entornoVMM() []string {
-	return []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
+	env := []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
+	if m.brokerRuta != "" {
+		env = append(env, "KLING_VZ_BROKER="+m.brokerRuta)
+	}
+	return env
 }

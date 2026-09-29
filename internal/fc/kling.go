@@ -58,6 +58,26 @@ type KlingCredential struct {
 	Upstream      string `json:"upstream,omitempty"`
 	UpstreamTLS   string `json:"upstream_tls,omitempty"`
 	TLSServerName string `json:"tls_server_name,omitempty"`
+	// UpstreamMachine y UpstreamOwner: otra máquina de kindling (arista
+	// credential, kling db attach). No es una dirección: kling-vz pide la
+	// conexión al daemon en cada sesión. Solo a un kling-vz que anuncia
+	// credproxy.CapGraphLink.
+	UpstreamMachine string `json:"upstream_machine,omitempty"`
+	UpstreamOwner   string `json:"upstream_owner,omitempty"`
+}
+
+// KlingGraphLink es una arista link saliente de un nodo.
+type KlingGraphLink struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+// KlingGraph son las aristas salientes de un nodo (PUT /kling/graph): las
+// link, que kling-vz atiende en su pasarela, y los nombres <nodo>.graph que
+// su DNS contesta. Sin direcciones: cada conexión se pide al daemon.
+type KlingGraph struct {
+	Links []KlingGraphLink `json:"links"`
+	Hosts []string         `json:"hosts"`
 }
 
 // doOut es do() leyendo además el cuerpo de la respuesta en out (si no es nil).
@@ -117,6 +137,17 @@ func (c *Client) SetKlingCredentials(ctx context.Context, creds []KlingCredentia
 		creds = []KlingCredential{}
 	}
 	return c.doOut(ctx, http.MethodPut, "/kling/credentials", map[string]any{"credentials": creds}, nil)
+}
+
+// SetKlingGraph fija las aristas del nodo (sustituye las anteriores).
+func (c *Client) SetKlingGraph(ctx context.Context, g KlingGraph) error {
+	if g.Links == nil {
+		g.Links = []KlingGraphLink{}
+	}
+	if g.Hosts == nil {
+		g.Hosts = []string{}
+	}
+	return c.doOut(ctx, http.MethodPut, "/kling/graph", g, nil)
 }
 
 // KlingForwards pide un puerto de loopback por cada puerto del invitado y

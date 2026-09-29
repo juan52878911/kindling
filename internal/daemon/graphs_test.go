@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"encoding/json"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -10,8 +9,8 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-// La API de grafos sin arrancar nada: capacidad, 404, validación, 501 en
-// macOS y las etiquetas y el espacio del almacén reservados.
+// La API de grafos sin arrancar nada: capacidad, 404, validación, aristas
+// en los dos sistemas y las etiquetas y el espacio del almacén reservados.
 func TestGraphsAPI(t *testing.T) {
 	_, h := testServer(t)
 
@@ -40,12 +39,13 @@ func TestGraphsAPI(t *testing.T) {
 	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "needs from") {
 		t.Fatalf("nodo sin from ni image = %d %s", rr.Code, rr.Body)
 	}
-	// Una arista entre máquinas en macOS: 501, como attach.
+	// Una arista entre máquinas ya no es un 501 en ningún sistema (en macOS
+	// la sirve el broker de enlaces): aquí falla, si falla, por arrancar.
 	con := `{"graph":{"name":"y","nodes":{"a":{"image":"min"},"b":{"image":"min","ports":[8081]}},` +
 		`"edges":[{"from":"a","to":"b","kind":"link","port":8081}]}}`
 	rr = call(t, h, "POST", "/graphs", con)
-	if runtime.GOOS == "darwin" && (rr.Code != 501 || !strings.Contains(rr.Body.String(), "Linux-only")) {
-		t.Fatalf("aristas en macOS = %d %s, quería 501", rr.Code, rr.Body)
+	if rr.Code == 501 || strings.Contains(rr.Body.String(), "Linux-only") {
+		t.Fatalf("aristas = %d %s: no deben ser solo de Linux", rr.Code, rr.Body)
 	}
 
 	// Nadie pone etiquetas de grafo por la API de máquinas.

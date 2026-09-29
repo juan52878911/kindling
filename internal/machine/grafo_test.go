@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,7 @@ type escenaGrafo struct {
 	mu       sync.Mutex
 	eventos  []string
 	redes    map[string]knet.GraphSpec
+	enviados []string // máquinas a cuyo VMM se mandaron las aristas (macOS)
 	despiert atomic.Int32
 }
 
@@ -52,8 +54,9 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 
 	pArr, pDesp, pCong, pRed := arrancarNodoGrafo, despertarNodoGrafo, congelarNodoGrafo, montarRedGrafo
 	pPaus, pReanu, pCommit, pBorrar, pPuerto := pausarNodoGrafo, reanudarNodoGrafo, commitNodoPausado, borrarSnapshotGrafo, esperarPuertoGrafo
-	pReg, pInvC, pInvE := registrarCredenciales, invalidarCopia, invalidarEnlaces
+	pReg, pInvC, pInvE, pEnv := registrarCredenciales, invalidarCopia, invalidarEnlaces, enviarGrafo
 	t.Cleanup(func() {
+		enviarGrafo = pEnv
 		arrancarNodoGrafo, despertarNodoGrafo, congelarNodoGrafo, montarRedGrafo = pArr, pDesp, pCong, pRed
 		pausarNodoGrafo, reanudarNodoGrafo, commitNodoPausado, borrarSnapshotGrafo, esperarPuertoGrafo = pPaus, pReanu, pCommit, pBorrar, pPuerto
 		registrarCredenciales, invalidarCopia, invalidarEnlaces = pReg, pInvC, pInvE
@@ -79,6 +82,12 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 		m.mu.Lock()
 		mc := &api.Machine{ID: id, Name: req.Name, Image: req.Image, From: req.From, State: api.StateRunning,
 			NetIndex: len(m.byID) + 2, Egress: egress, Labels: req.Labels, CreatedAt: time.Now()}
+		// Sus reenvíos (macOS), como los abriría abrirReenvios.
+		for _, p := range strings.Split(req.Labels[api.LabelPorts], ",") {
+			if n, err := strconv.Atoi(p); err == nil {
+				ponerReenvio(mc, n, "")
+			}
+		}
 		m.byID[id] = mc
 		m.socket[id] = f.Sock
 		out := mc.Clone()
@@ -130,7 +139,13 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 		e.anotar("rmsnap " + name)
 		return os.RemoveAll(m.snapDir(name))
 	}
-	esperarPuertoGrafo = func(context.Context, string) error { return nil }
+	esperarPuertoGrafo = func(context.Context, *Manager, string, string, int) error { return nil }
+	enviarGrafo = func(_ context.Context, _ *Manager, id string) error {
+		e.mu.Lock()
+		e.enviados = append(e.enviados, id)
+		e.mu.Unlock()
+		return nil
+	}
 	montarRedGrafo = func(n *knet.Net, spec knet.GraphSpec) error {
 		e.mu.Lock()
 		e.redes[n.NS] = spec
@@ -173,7 +188,7 @@ func (e *escenaGrafo) nombre(id string) string {
 }
 
 // grafoTienda es web -> api:8081 (link) con db lazy detrás: el de los
-// ejemplos. Sin aristas entre máquinas si sinAristas (lo que vale en macOS).
+// ejemplos. Sin aristas entre máquinas si sinAristas.
 func grafoTienda(sinAristas bool) api.Graph {
 	g := api.Graph{Name: "tienda", Nodes: map[string]api.GraphNode{
 		"web": {Image: "min", Ports: []int{8000}},
@@ -186,8 +201,8 @@ func grafoTienda(sinAristas bool) api.Graph {
 	return g
 }
 
-// montarGrafo registra g ya instanciado sin pasar por GraphUp (que en macOS
-// rechaza las aristas): cada nodo eager con su máquina corriendo.
+// montarGrafo registra g ya instanciado sin pasar por GraphUp: cada nodo
+// eager con su máquina corriendo.
 func (e *escenaGrafo) montarGrafo(g api.Graph) *api.Graph {
 	e.t.Helper()
 	if err := api.ValidateGraph(&g); err != nil {
@@ -218,18 +233,12 @@ func (e *escenaGrafo) maquina(gid, nodo string) string {
 	return e.m.grafos[gid].Nodes[nodo].MachineID
 }
 
-// direccionEsperada es lo que el resolvedor da para la máquina id: su netns
-// en Linux; en macOS no hay aristas y el error es el de attach.
+// comprobarDireccion: lo que el resolvedor da para la máquina id es por
+// dónde llega a ella el daemon (su netns en Linux, su reenvío en macOS).
 func (e *escenaGrafo) comprobarDireccion(addr string, err error, id string, port int) {
 	e.t.Helper()
-	if !modeloAPosible {
-		if !errors.Is(err, errModeloASoloLinux) {
-			e.t.Fatalf("en esta plataforma no hay aristas: %q %v", addr, err)
-		}
-		return
-	}
 	e.m.mu.RLock()
-	want := net.JoinHostPort(knet.Plan(e.m.byID[id].NetIndex, id).NSIP, fmt.Sprint(port))
+	want := direccionEsperada(e.m.byID[id], port)
 	e.m.mu.RUnlock()
 	if err != nil || addr != want {
 		e.t.Fatalf("addr=%q err=%v, esperaba %s", addr, err, want)
@@ -300,7 +309,7 @@ func TestGrafoResolvedorRechaza(t *testing.T) {
 				}
 				return
 			}
-			if modeloAPosible && id != api8081 {
+			if id != api8081 {
 				t.Fatalf("resolvió a la máquina %s, no a la de api (%s)", id, api8081)
 			}
 			e.comprobarDireccion(addr, err, api8081, 8081)
@@ -344,7 +353,7 @@ func TestGrafoLazyUnaSolaInstancia(t *testing.T) {
 		t.Fatal("el grafo no anotó la máquina del lazy")
 	}
 	for i := range 10 {
-		if modeloAPosible && (errs[i] != nil || ids[i] != db) {
+		if errs[i] != nil || ids[i] != db {
 			t.Fatalf("conexión %d: id=%s err=%v, esperaba %s", i, ids[i], errs[i], db)
 		}
 	}
@@ -372,7 +381,7 @@ func TestGrafoDespiertaCongeladoUnaVez(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			addr, _, err := e.m.resolverArista(context.Background(), web, g.ID, "web", "api", 8081, api.GraphEdgeLink)
-			if modeloAPosible && (err != nil || addr == "") {
+			if err != nil || addr == "" {
 				t.Errorf("tras despertar: %q %v", addr, err)
 			}
 		}()
@@ -784,20 +793,17 @@ func TestGrafoUpTodoONada(t *testing.T) {
 	}
 }
 
-// Aristas entre máquinas en una plataforma sin ellas: 501 con el motivo.
-// Y en Linux, una arista credential sin su clave no pasa.
-func TestGrafoUpAristasSegunPlataforma(t *testing.T) {
+// Aristas entre máquinas: en los dos sistemas (en macOS, el VMM de cada nodo
+// recibe además sus aristas). Una arista credential sin su clave no pasa.
+func TestGrafoUpAristas(t *testing.T) {
 	e := nuevaEscenaGrafo(t)
 	_, err := e.m.GraphUp(context.Background(), grafoTienda(false), nil)
 	var se *api.StatusError
-	if !modeloAPosible {
-		if !errors.As(err, &se) || se.Code != 501 || !strings.Contains(err.Error(), "Linux-only") {
-			t.Fatalf("macOS: esperaba 501, llegó %v", err)
-		}
-		return
-	}
 	if err != nil {
-		t.Fatalf("Linux: %v", err)
+		t.Fatal(err)
+	}
+	if web := e.maquina(e.grafoPorNombre("tienda"), "web"); !slices.Contains(e.enviados, web) {
+		t.Fatalf("las aristas de web no se mandaron a su VMM: %v", e.enviados)
 	}
 	if spec, ok := e.redes["kl-"+e.maquina(e.grafoPorNombre("tienda"), "web")[:8]]; !ok || len(spec.Links) != 1 || spec.Links[0].Host != "api.graph" {
 		t.Fatalf("la red de web no llevaba su enlace: %+v", e.redes)
