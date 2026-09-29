@@ -22,14 +22,52 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 |---|---|
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, **rota la contraseña** y marca `ready` |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), rota la clave de cada una y las marca `ready`. Todo o nada |
-| `connect <copia> [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD` |
+| `connect <copia> [-role R] [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role` |
+| `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
 | `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
+| `golden build -template T <nombre>` | como `build`, con las migraciones y el seed de una plantilla incluida (`empty`, `crm-demo`) |
+| `templates` | lista las plantillas incluidas (embebidas en el binario, `ext/db/templates`) |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
+
+## Rol de solo lectura
+
+`kling db role <copia> -ro` da a un agente o a una herramienta de análisis acceso a la
+base sin darle el rol de la aplicación. El rol es `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION`, con `CONNECTION LIMIT 5`, sin pertenencia a
+ningún rol (ni `pg_read_server_files` ni `pg_execute_server_program`), `USAGE` en los
+esquemas pedidos (por defecto todos menos los del sistema) y `SELECT` en sus tablas,
+también en las futuras del rol de la aplicación (`ALTER DEFAULT PRIVILEGES`). Además
+`default_transaction_read_only=on`, `statement_timeout` e
+`idle_in_transaction_session_timeout` (`-timeout`, 5 s por defecto).
+
+- La barrera real es que **no tiene privilegios de escritura**; la bandera de solo
+  lectura se puede apagar con `SET`, los permisos no. Límites: puede crear tablas
+  temporales si apaga la bandera (`TEMP` es de PUBLIC), y las tablas que cree un
+  superusuario a mano no entran en el `SELECT` futuro.
+- La clave sigue la regla de siempre: se genera en el host, al invitado va solo el
+  verificador SCRAM por stdin y se comprueba en la misma sesión (junto con los
+  atributos y la ausencia de pertenencias). Vive en `copies/<id>/<rol>.password`.
+- `pg_hba.conf` de la golden solo deja entrar por red al rol de la aplicación: `role`
+  añade una línea `scram-sha-256` para el nuevo rol **después** de comprobarlo, y la
+  quita al borrarlo. Si algo falla, se deshace todo (rol, línea y clave).
+- Nombres: `^[a-z_][a-z0-9_]{0,62}$`, sin `postgres`, sin el rol dueño, sin `pg_*` ni
+  palabras reservadas. `-rm` solo toca roles que creó este comando (comentario
+  `kling-db:ro`).
+- `kling db connect <copia> -role agent` usa esa clave. `kling db rm` se lleva todas.
+
+## Plantillas
+
+`kling db templates` lista las incluidas y `kling db golden build -template crm-demo
+crm` construye una golden de un comando (escribe la plantilla a un temporal 0700 y se
+la pasa a `db-golden.sh` como `-migrations` y `-seed`; excluye `-migrations`, `-seed`
+y `-seed-mb`). `empty` es una base vacía; `crm-demo` un CRM pequeño (clientes,
+contactos, oportunidades con estados, actividades, productos y facturas) con ~50k
+filas sintéticas y deterministas, sin datos personales reales.
 
 ## Etiquetas
 
