@@ -54,10 +54,14 @@ func manifest() plugin.Manifest {
 			{Name: "branch", Group: "COPIES", Summary: "one database per git branch",
 				Usage: usage("branch [<branch>] [-from P] [-golden G] [-env T]", "the copy of a git branch, forked from its parent") +
 					usage("branch -switch | -ls | -rm B | -prune", "activate this branch's copy (git hook), list, clean up") +
-					usage("branch hook install|uninstall", "post-checkout hook that switches the copy")},
+					usage("branch [-owner T] [-golden G] hook install|uninstall", "post-checkout hook that switches the copy")},
 			{Name: "env", Group: "COPIES", Summary: "a whole integration environment: app + database as a graph",
 				Usage: usage("env up <app-template> -golden G [-name N]", "app node + database copy joined by a credential edge") +
 					usage("env down <name>", "removes the graph and the database password")},
+			{Name: "class", Group: "COPIES", Summary: "one copy per student for a class or workshop",
+				Usage: usage("class -n N [-prefix P] <template>", "creates <prefix>-01..N, each with its own password") +
+					usage("class ls | reset [<copy>...] | rm [<copy>...]", "list with connection info, fresh data, remove") +
+					usage("class ... -passwords FILE", "the DSNs, with passwords, to a 0600 file; never printed")},
 			{Name: "reset", Group: "COPIES", Summary: "replaces a copy with a fresh one from its template",
 				Usage:       usage("reset <copy>", "same name, same template, new data"),
 				MachineArgs: []string{""}},
@@ -82,6 +86,9 @@ func manifest() plugin.Manifest {
 			{Name: "ask", Group: "COPIES", Summary: "a question in plain words, answered read-only",
 				Usage:       usage(`ask <copy> "question" [-yes] [-role R]`, "answered by a model, run read-only"),
 				MachineArgs: []string{""}},
+			{Name: "report", Group: "COPIES", Summary: "a saved ask question, run on a fresh copy",
+				Usage: usage(`report add <name> -golden G -every 1w -question "..."`, "saved (0600); schedule report run with cron") +
+					usage("report run <name> [-due] [-out FILE] | ls | rm <name>", "fresh copy, ask, remove; the result to a file")},
 			{Name: "ask-web", Group: "COPIES", Summary: "the same, in a local web page",
 				Usage:       usage("ask-web <copy> [-listen 127.0.0.1:PORT]", "a page for people who do not use the terminal"),
 				MachineArgs: []string{""}},
@@ -141,6 +148,8 @@ func main() {
 		"diff":         cmdDiff,
 		"tenant-check": cmdTenantCheck,
 		"ask":          cmdAsk,
+		"class":        cmdClass,
+		"report":       cmdReport,
 		"ask-web":      cmdAskWeb,
 		"golden":       cmdGolden,
 		"clone":        cmdClone,

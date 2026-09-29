@@ -114,6 +114,29 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   versión o un segundo `BackendKeyData` cortan la conexión. Probado con clientes y
   servidores falsos 3.0 y 3.2 en las cuatro combinaciones; la prueba de laboratorio
   (`-tags pglab`) cancela también en 3.2. Ver [`docs/postgres.md`](docs/postgres.md).
+- **`kling db class` (#68): una copia por alumno.** `class -n 30 -prefix alumno <golden>`
+  crea `alumno-01` ... `alumno-30` (cada una un `up` con su clave, etiqueta
+  `kling.db.class`), en paralelo con tope (`-parallel`, 4 por defecto); repetirlo crea solo
+  las que faltan. `class ls` las lista con host, puerto, usuario y base, `class reset`
+  (todas o las nombradas) les da datos nuevos y `class rm` las borra. Las claves nunca se
+  imprimen: `-passwords FICHERO` escribe las DSN en un fichero 0600. Un `kling db reset`
+  conserva ahora `kling.db.class`, `kling.db.repo` y `kling.db.branch`.
+- **`kling db report` (#69): informes programados con `ask`.** `report add <nombre>
+  -golden G -every 1w -question "..."` guarda la pregunta (0600, en el estado de
+  kling-db, sin claves); `report run <nombre> [-due]` hace una copia fresca del golden,
+  pregunta como `ask -yes`, escribe el resultado (a stdout o a un fichero 0600) y borra la
+  copia. Sin demonio: recetas de cron y de un temporizador de systemd en
+  [`docs/db-ask.md`](docs/db-ask.md). Las garantías de `ask` no cambian (filas al
+  proveedor solo con `-explain -send-data`, visible en `report ls`).
+- **`kling db branch` (#73).** `branch -owner T -golden G hook install` deja esos valores
+  en el hook (`-switch` acepta ahora `-golden`). `kling.db.repo` es el hash del directorio
+  git común: una rama tiene una sola copia en todos los worktrees, cada worktree escribe
+  su `kling-db.env` en su propio directorio git y `-switch` no congela la rama que otro
+  worktree tiene activa (las copias de antes se siguen reconociendo). Un `flock` por
+  repositorio en el estado de kling-db evita que dos checkouts a la vez creen dos copias
+  de la misma rama.
+- **ext/db (#83):** la directiva `go` del módulo es la del núcleo y el resto de `ext/`
+  (1.24; el `go.work` pide 1.26.3 solo por `vz/`), y CI comprueba que no se separen.
 
 ### Grafos desde los plugins
 

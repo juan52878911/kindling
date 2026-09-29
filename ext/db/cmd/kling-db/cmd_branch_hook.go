@@ -23,10 +23,32 @@ const (
 	hookOrigName = "post-checkout.pre-kling-db"
 )
 
+// hookOpts es lo que se decide al instalar el hook: el dueño y el golden que
+// pasa a -switch (vacíos: los de por defecto) y -force.
+type hookOpts struct {
+	owner, golden string
+	force         bool
+}
+
+// switchArgs son los flags que el hook añade a `kling db branch -switch`. Los
+// valores ya pasaron validOwner y namePattern (sin espacios ni comillas), y
+// aun así van entre comillas simples.
+func (o hookOpts) switchArgs() string {
+	s := ""
+	if o.owner != "" {
+		s += " -owner '" + o.owner + "'"
+	}
+	if o.golden != "" {
+		s += " -golden '" + o.golden + "'"
+	}
+	return s
+}
+
 // hookScript va en sh POSIX. $3 = 1 solo en el checkout de una rama (los de
-// ficheros no cambian de base). ${KLING:-kling} es el binario; -H y el dueño
-// van por KLING_HOST y los valores por defecto.
-const hookScript = `#!/bin/sh
+// ficheros no cambian de base). ${KLING:-kling} es el binario; -H va por
+// KLING_HOST, y -owner y -golden, si se dieron al instalar, quedan escritos.
+func hookScript(o hookOpts) string {
+	return `#!/bin/sh
 ` + hookMarker + ` (managed by "kling db branch hook"; uninstall with: kling db branch hook uninstall)
 rc=0
 d=$(dirname "$0")
@@ -36,22 +58,23 @@ fi
 if [ "$3" = "1" ]; then
   k="${KLING:-kling}"
   if command -v "$k" >/dev/null 2>&1; then
-    "$k" db branch -switch >&2 || echo "kling db: could not switch the database of this branch (the checkout is not affected)" >&2
+    "$k" db branch -switch` + o.switchArgs() + ` >&2 || echo "kling db: could not switch the database of this branch (the checkout is not affected)" >&2
   else
     echo "kling db: kling not found; the database was not switched" >&2
   fi
 fi
 exit $rc
 `
+}
 
-func cmdBranchHook(action string, force bool) error {
+func cmdBranchHook(action string, o hookOpts) error {
 	if action != "install" && action != "uninstall" {
-		return usageErr("usage: kling db branch hook install|uninstall")
+		return usageErr("usage: kling db branch [-owner T] [-golden G] [-force] hook install|uninstall")
 	}
-	a := &app{stdout: os.Stdout, stderr: os.Stderr, hookForce: force}
+	a := &app{stdout: os.Stdout, stderr: os.Stderr, hookForce: o.force}
 	ctx, stop := signalCtx()
 	defer stop()
-	return a.branchHook(ctx, action)
+	return a.branchHook(ctx, action, o)
 }
 
 // evalExistente resuelve los enlaces de p aunque no exista todavía: resuelve
@@ -126,7 +149,7 @@ func (a *app) hookDir(ctx context.Context) (string, error) {
 	return p, nil
 }
 
-func (a *app) branchHook(ctx context.Context, action string) error {
+func (a *app) branchHook(ctx context.Context, action string, o hookOpts) error {
 	dir, err := a.hookDir(ctx)
 	if err != nil {
 		return err
@@ -175,7 +198,7 @@ func (a *app) branchHook(ctx context.Context, action string) error {
 		}
 		chained = true
 	}
-	if err := writeExecutable(path, hookScript); err != nil {
+	if err := writeExecutable(path, hookScript(o)); err != nil {
 		return err
 	}
 	if chained {
@@ -183,9 +206,10 @@ func (a *app) branchHook(ctx context.Context, action string) error {
 	} else {
 		fmt.Fprintf(a.stdout, "installed %s\n", path)
 	}
-	fmt.Fprintf(a.stdout, "every branch checkout now runs kling db branch -switch and writes the connection to\n"+
-		"  <repo>/.git/%s  (0600, never in the working tree)\n"+
-		"load it in your shell with:  set -a; . \"$(git rev-parse --absolute-git-dir)/%s\"; set +a\n", branchEnvFile, branchEnvFile)
+	fmt.Fprintf(a.stdout, "every branch checkout (in any worktree of this repo) now runs kling db branch -switch%s and writes the connection to\n"+
+		"  <repo>/.git/%s, or .git/worktrees/<name>/%s in a linked worktree  (0600, never in the working tree)\n"+
+		"load it in your shell with:  set -a; . \"$(git rev-parse --absolute-git-dir)/%s\"; set +a\n",
+		o.switchArgs(), branchEnvFile, branchEnvFile, branchEnvFile)
 	return nil
 }
 

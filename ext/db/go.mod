@@ -1,5 +1,7 @@
 module github.com/juan52878911/kindling/ext/db
 
+// La misma versión de Go que el núcleo y el resto de ext/ (lo comprueba CI):
+// es el mínimo que se promete. El go.work pide la 1.26.3 solo por vz/.
 go 1.24
 
 require github.com/juan52878911/kindling v0.16.0

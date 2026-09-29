@@ -35,8 +35,10 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
-| `branch [<rama>] [-from P] [-golden G] \| -switch \| -ls \| -rm R \| -prune \| hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
-| `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
+| `branch [<rama>] [-from P] [-golden G] \| -switch [-golden G] \| -ls \| -rm R \| -prune \| [-owner T] [-golden G] hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
+| `class -n N [-prefix P] <golden> \| class ls \| class reset [<copia>...] \| class rm [<copia>...]` | una copia por alumno (`<prefijo>-01`...), en paralelo; las claves solo a un fichero 0600 con `-passwords`. Ver [Una copia por alumno](#una-copia-por-alumno-class) |
+| `report add <nombre> -golden G -every 1w -question "..." \| report run <nombre> [-due] \| report ls \| report rm <nombre>` | una pregunta de `ask` guardada, que cada ejecución hace sobre una copia fresca del golden y borra al acabar; se programa con cron o systemd. Ver [db-ask.md](db-ask.md#kling-db-report-la-misma-pregunta-cada-cierto-tiempo) |
+| `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño, ttl y pertenencia (`kling.db.class`, `kling.db.repo`, `kling.db.branch`) |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
 | `rehearse <copia\|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones SQL en una copia desechable: tiempos, esperas por locks y tamaño; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
 | `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
@@ -237,7 +239,9 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 | `kling.db.role`, `kling.db.database` | rol y base de la aplicación (`app`, `appdb`) |
 | `kling.db.engine` | `mysql` en las copias de una plantilla MariaDB/MySQL (la pone `db-golden-mysql.sh` y se hereda); sin ella, Postgres |
 | `kind=sandbox` | lo que permite `sandbox fork` sobre la copia |
-| `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del toplevel del repo, clave de la rama y último uso (segundos unix) |
+| `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del directorio git común del repo (antes, del toplevel), clave de la rama y último uso (segundos unix) |
+| `kling.db.class` | `kling db class`: el prefijo de la clase de la copia |
+| `kling.db.report` | `kling db report`: el informe de la copia de una ejecución (`rpt-<nombre>`) |
 | `kling.ports` | incluye `5432` (`3306` en MySQL): el backend de macOS abre el reenvío |
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
@@ -490,6 +494,48 @@ rota su propia clave y pierde los roles de `role`, pero **los datos** del punto
 son los que eran. Mismo modelo que los golden: el daemon es la frontera; no
 guardes puntos de datos que no deba ver quien lo usa.
 
+## Una copia por alumno (class)
+
+Para un taller o una clase: cada alumno su copia del mismo golden, con su clave, y
+entre ejercicio y ejercicio, datos nuevos para todos.
+
+```sh
+kling db class -n 30 -prefix alumno crm-demo     # alumno-01 ... alumno-30
+kling db class ls -prefix alumno                  # estado y cómo conectar, sin claves
+kling db class ls -prefix alumno -passwords claves.tsv   # las DSN, con clave, a un fichero 0600
+kling db class reset -prefix alumno               # siguiente ejercicio: todas desde el golden
+kling db class reset -prefix alumno alumno-07     # o solo la que se rompió
+kling db class rm -prefix alumno                  # fin de la clase
+```
+
+- **Nada nuevo por debajo.** Cada copia es un `kling db up` (rota su clave al nacer, la
+  clave solo en el host) con la etiqueta `kling.db.class=<prefijo>`; `reset` y `rm` son
+  los de siempre. Lo que agrupa la clase es la etiqueta más el `-owner`: `ls`, `reset` y
+  `rm` solo ven y tocan copias con las dos, y `reset`/`rm <copia>` rechazan un nombre que
+  no sea de la clase. Un `kling db reset` suelto de una copia de la clase la deja en ella
+  (conserva `kling.db.class`, y también `kling.db.repo`/`kling.db.branch` en una copia de
+  rama).
+- **Nombres.** `<prefijo>-01` ... con dos cifras como mínimo (tres desde 100, para que
+  ordenen bien). El prefijo (`-prefix`, por defecto `student`): minúsculas, cifras, `_` y
+  `-`, hasta 40. `-n` de 1 a 200.
+- **En paralelo, con tope.** `-parallel K` (4 por defecto, hasta 16) copias a la vez al
+  crear, resetear o borrar.
+- **Repetir es seguro.** Si alguna copia falla, las demás quedan listas y el error dice
+  cuáles; repetir el mismo comando crea **solo las que faltan** (las que ya existen en la
+  clase, listas y del mismo golden, no se tocan). Si un nombre está ocupado por una
+  máquina que no es de la clase, o una copia de la clase es de otro golden o no está
+  lista, no se crea nada y se dice qué hacer.
+- **Las claves no se imprimen.** Tras crear o resetear, y en `ls`, sale por copia el
+  estado, host, puerto, usuario y base (en `ls -json`, además, la ruta del fichero de su
+  clave). Con `-passwords FICHERO` (en la creación, `ls` o `reset`) se escribe una línea
+  `NOMBRE<TAB>DSN` por copia lista, con la clave, en ese fichero: **0600**, escrito
+  aparte y renombrado (si la ruta era un enlace, se sustituye el enlace, no su destino).
+  `-passwords -` se rechaza. Repártelo como repartirías contraseñas.
+- **Desde dónde conecta el alumno.** Las direcciones son las del host (en Linux, la IP
+  del netns de cada copia; en macOS, un reenvío en `127.0.0.1`): valen desde el equipo
+  donde corre el daemon. Para una clase en red, los alumnos entran a ese equipo (SSH) o
+  cada uno usa `kling db connect` con su propio acceso al daemon.
+
 ## Una base por rama
 
 `kling db branch` da a cada rama de git su propia copia. La de una rama nueva sale
@@ -523,9 +569,31 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   fichero`), es idempotente y **no pisa** uno existente: lo aparta a
   `post-checkout.pre-kling-db` y lo ejecuta primero (`uninstall` lo restaura). Nunca
   bloquea el checkout: si `kling db branch -switch` falla, avisa por stderr y el
-  checkout sigue. Usa `${KLING:-kling}`; para otro daemon, exporte `KLING_HOST`.
+  checkout sigue. Usa `${KLING:-kling}`; para otro daemon, exporte `KLING_HOST`. Con
+  `kling db branch -owner equipo -golden crm-demo hook install`, el hook llama a
+  `-switch -owner equipo -golden crm-demo`: el dueño de las copias y el golden del que
+  sale una rama sin copia del padre quedan escritos en el hook (validados y entre
+  comillas simples). Reinstalar sin ellos vuelve al hook de siempre.
+- **Worktrees.** `kling.db.repo` es el hash del **directorio git común**
+  (`git rev-parse --git-common-dir`), el mismo para el árbol principal y todos sus
+  `git worktree`: una rama tiene **una sola copia** aunque se abra desde varios
+  worktrees, y el hook (que vive en el directorio de hooks común) sirve a todos. Cada
+  worktree escribe su propia conexión en **su** directorio git
+  (`.git/worktrees/<nombre>/kling-db.env`; la ruta la da
+  `git rev-parse --absolute-git-dir`). `-switch` no congela la copia de una rama que
+  otro worktree tiene activa (`git worktree list`): solo las de ramas que nadie usa.
+  Las copias creadas antes de este cambio llevan el hash del toplevel y se siguen
+  reconociendo desde el árbol que las creó.
+- **Un cerrojo por repositorio.** Todo lo que crea, activa o borra copias de rama
+  (`branch`, `-switch`, `-env`, `-rm`, `-prune`) toma antes un `flock` sobre
+  `$KLING_DB_STATE/locks/branch-<repo>.lock` (0600, en un directorio 0700). Dos
+  checkouts a la vez —dos worktrees, o el hook y un comando— se ponen en fila: el
+  segundo espera (hasta 3 minutos, avisando por stderr) y encuentra la copia hecha en
+  vez de crear otra. El cerrojo lo suelta el sistema si el proceso muere. Es por host:
+  dos máquinas contra el mismo daemon no se ven.
 - **Identidad y nombres.** La copia se reconoce por sus etiquetas, no por su nombre
-  (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del toplevel del repo y
+  (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del directorio git común
+  del repo (ver Worktrees) y
   `kling.db.branch` una **clave** de la rama (slug ASCII más 6 hex del hash del nombre
   entero: `feat/x` y `feat-x` no chocan). El nombre de la rama es texto arbitrario y
   nunca va sin validar a argv, a SQL ni a etiquetas; se rechaza el vacío, un `-` inicial,

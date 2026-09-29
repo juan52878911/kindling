@@ -54,7 +54,7 @@ func (ta *testApp) copyOf(t *testing.T, branch string) *api.Machine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	copies, err := ta.repoCopies(context.Background(), ri.repo, defaultOwner)
+	copies, err := ta.repoCopies(context.Background(), ri, defaultOwner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestBranchSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitT(t, dir, "checkout", "-q", "-b", "feat/x")
-	if err := ta.branchSwitch(ctx, defaultOwner); err != nil {
+	if err := ta.branchSwitch(ctx, defaultOwner, ""); err != nil {
 		t.Fatal(err)
 	}
 	mainC, feat := ta.copyOf(t, "main"), ta.copyOf(t, "feat/x")
@@ -258,7 +258,7 @@ func TestBranchSwitch(t *testing.T) {
 	}
 	// Vuelta a main: se descongela y la otra se congela; el .env cambia.
 	gitT(t, dir, "checkout", "-q", "main")
-	if err := ta.branchSwitch(ctx, defaultOwner); err != nil {
+	if err := ta.branchSwitch(ctx, defaultOwner, ""); err != nil {
 		t.Fatal(err)
 	}
 	if mainC.State != api.StateRunning || feat.State != api.StateWarm {
@@ -277,7 +277,7 @@ func TestBranchSwitchFallaSinEnvViejo(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Sin copia, sin padre y sin golden: falla, y el .env de otra rama ya no está.
-	if err := ta.branchSwitch(context.Background(), defaultOwner); err == nil {
+	if err := ta.branchSwitch(context.Background(), defaultOwner, ""); err == nil {
 		t.Fatal("no error")
 	}
 	if _, err := os.Stat(envPath); err == nil {
@@ -293,7 +293,7 @@ func TestBranchSwitchUsaElGoldenDelRepo(t *testing.T) {
 	}
 	ta.copyOf(t, "main").Labels[labelState] = statePreparing // el padre no sirve
 	gitT(t, dir, "checkout", "-q", "-b", "other")
-	if err := ta.branchSwitch(ctx, defaultOwner); err != nil {
+	if err := ta.branchSwitch(ctx, defaultOwner, ""); err != nil {
 		t.Fatal(err)
 	}
 	if mc := ta.copyOf(t, "other"); mc == nil || mc.From != "pg" {
@@ -309,7 +309,7 @@ func TestBranchSwitchAvisaSiNoCongela(t *testing.T) {
 	}
 	gitT(t, dir, "checkout", "-q", "-b", "b2")
 	ta.f.freezeFails = true
-	err := ta.branchSwitch(ctx, defaultOwner)
+	err := ta.branchSwitch(ctx, defaultOwner, "")
 	if err == nil || !strings.Contains(err.Error(), "could not freeze") {
 		t.Fatalf("err = %v", err)
 	}
@@ -428,7 +428,7 @@ func TestHookInstalaYDesinstala(t *testing.T) {
 	ctx := context.Background()
 	hook := filepath.Join(dir, ".git", "hooks", hookName)
 
-	if err := ta.branchHook(ctx, "install"); err != nil {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(hook)
@@ -438,7 +438,7 @@ func TestHookInstalaYDesinstala(t *testing.T) {
 	if st, _ := os.Stat(hook); st.Mode().Perm()&0o100 == 0 {
 		t.Error("hook not executable")
 	}
-	if err := ta.branchHook(ctx, "install"); err != nil {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	second, _ := os.ReadFile(hook)
@@ -448,14 +448,14 @@ func TestHookInstalaYDesinstala(t *testing.T) {
 	if _, err := os.Stat(hook + ".pre-kling-db"); err == nil {
 		t.Error("it chained itself")
 	}
-	if err := ta.branchHook(ctx, "uninstall"); err != nil {
+	if err := ta.branchHook(ctx, "uninstall", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(hook); err == nil {
 		t.Error("hook still there")
 	}
 	// Desinstalar sin hook no falla.
-	if err := ta.branchHook(ctx, "uninstall"); err != nil {
+	if err := ta.branchHook(ctx, "uninstall", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -469,7 +469,7 @@ func TestHookEncadenaUnoExistente(t *testing.T) {
 	}
 	mine := filepath.Join(dir, "mine.log")
 	writeStub(t, hooks, hookName, "echo old >> '"+mine+"'\n")
-	if err := ta.branchHook(ctx, "install"); err != nil {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(hooks, hookOrigName)); err != nil {
@@ -489,7 +489,7 @@ func TestHookEncadenaUnoExistente(t *testing.T) {
 	if b, _ := os.ReadFile(klog); string(b) != "db branch -switch\n" {
 		t.Errorf("file checkout called kling: %q", b)
 	}
-	if err := ta.branchHook(ctx, "uninstall"); err != nil {
+	if err := ta.branchHook(ctx, "uninstall", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(hooks, hookName)); !strings.Contains(string(b), "echo old") {
@@ -502,7 +502,7 @@ func TestHookEncadenaUnoExistente(t *testing.T) {
 
 func TestHookNoBloqueaElCheckout(t *testing.T) {
 	ta, dir := branchTestApp(t)
-	if err := ta.branchHook(context.Background(), "install"); err != nil {
+	if err := ta.branchHook(context.Background(), "install", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("KLING", writeStub(t, dir, "badkling", "echo boom >&2\nexit 7\n"))
@@ -524,7 +524,7 @@ func TestHookRechazaEnlaces(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(hooks, hookName)); err != nil {
 		t.Skip(err)
 	}
-	if err := ta.branchHook(context.Background(), "install"); err == nil {
+	if err := ta.branchHook(context.Background(), "install", hookOpts{}); err == nil {
 		t.Fatal("it followed a symlink")
 	}
 	if b, _ := os.ReadFile(target); string(b) != "x" {
@@ -538,7 +538,7 @@ func TestHookScriptSintaxis(t *testing.T) {
 		t.Skip()
 	}
 	p := filepath.Join(t.TempDir(), "h")
-	_ = os.WriteFile(p, []byte(hookScript), 0o755)
+	_ = os.WriteFile(p, []byte(hookScript(hookOpts{})), 0o755)
 	if out, err := exec.Command(sh, "-n", p).CombinedOutput(); err != nil {
 		t.Fatalf("sh -n: %v\n%s", err, out)
 	}
