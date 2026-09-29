@@ -109,8 +109,13 @@ func runCopy(ctx context.Context, k klingc.Kling, ref string, r *report) error {
 	if err != nil {
 		return err
 	}
-	if mc.Labels[LabelEngine] == "mysql" {
+	switch mc.Labels[LabelEngine] {
+	case "mysql":
 		return mysqlCopy(ctx, k, &mc, state, r)
+	case "redis":
+		return redisCopy(ctx, k, &mc, state, r)
+	case "sqlite":
+		return sqliteCopy(ctx, k, &mc, state, r)
 	}
 	appRole, err := appRoleOf(state, golden)
 	if err != nil {

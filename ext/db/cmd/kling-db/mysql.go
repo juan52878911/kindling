@@ -38,16 +38,8 @@ import (
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
-const (
-	// labelEngine es el motor de la copia: "mysql" o, sin etiqueta,
-	// Postgres (las copias anteriores a #64 no la llevan).
-	labelEngine = "kling.db.engine"
-
-	enginePostgres = "postgres"
-	engineMySQL    = "mysql"
-
-	myPort = 3306
-)
+// myPort es el puerto de MySQL/MariaDB en la copia.
+const myPort = 3306
 
 // myClient es el cliente del superusuario dentro de la copia: root por el
 // socket local (unix_socket: solo el root del sistema del invitado), sin
@@ -59,31 +51,6 @@ const myClient = `c=$(command -v mariadb || command -v mysql) && exec "$c" --pro
 // myPing dice si el servidor contesta (vale también un "access denied": el
 // servidor está vivo).
 const myPing = `c=$(command -v mariadb-admin || command -v mysqladmin) && exec "$c" --protocol=socket -uroot ping --silent`
-
-// engineOf es el motor de unas etiquetas.
-func engineOf(labels map[string]string) string {
-	if labels[labelEngine] == engineMySQL {
-		return engineMySQL
-	}
-	return enginePostgres
-}
-
-// enginePort es el puerto del servidor de un motor.
-func enginePort(engine string) int {
-	if engine == engineMySQL {
-		return myPort
-	}
-	return pgPort
-}
-
-// requirePostgres rechaza las operaciones que esta versión solo sabe hacer
-// sobre Postgres.
-func requirePostgres(mc *api.Machine, cmd string) error {
-	if engineOf(mc.Labels) != enginePostgres {
-		return fmt.Errorf("kling db %s supports postgres copies only in this version; %s is %s (see docs/mysql.md)", cmd, mc.Name, engineOf(mc.Labels))
-	}
-	return nil
-}
 
 // myReservedUsers no pueden ser el usuario de la aplicación: son del sistema.
 var myReservedUsers = map[string]bool{"root": true, "mysql": true, "mariadb_sys": true, "mysql_sys": true}
@@ -142,11 +109,19 @@ func (a *app) setMySQLHash(ctx context.Context, id, user, h string) error {
 }
 
 // setPassword pone en la copia la contraseña pw (ya en el host) con el
-// mecanismo de su motor: verificador SCRAM o hash de mysql_native_password.
+// mecanismo de su motor: verificador SCRAM, hash de mysql_native_password o
+// SHA-256 del usuario ACL de Redis.
 // Lo usa kling db rotate, en los dos sentidos (la nueva y, si falla, la vieja).
 func (a *app) setPassword(ctx context.Context, mc *api.Machine, role, pw string) error {
-	if engineOf(mc.Labels) == engineMySQL {
+	switch engineOf(mc.Labels) {
+	case engineMySQL:
 		return a.setMySQLHash(ctx, mc.ID, role, mysqlpw.NativeHash(pw))
+	case engineRedis:
+		// Solo el usuario de la aplicación: la del administrador no sale del
+		// invitado y ya se estrenó al preparar la copia.
+		return a.setRedisHash(ctx, mc.ID, role, redisHash(pw), false)
+	case engineSQLite:
+		return fmt.Errorf("%s is a sqlite copy: it has no password", mc.Name)
 	}
 	ver, err := newVerifier(pw)
 	if err != nil {

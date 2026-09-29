@@ -135,6 +135,15 @@ func (c *CLI) Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte,
 	return out.Bytes(), nil
 }
 
+// Command es `kling <args...>` sin ejecutar, con el mismo binario y el mismo
+// daemon que Run, para quien necesite conectarle la terminal (kling shell).
+// Nada secreto en args, como en Run.
+func (c *CLI) Command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, c.Bin, args...)
+	cmd.Env = c.env()
+	return cmd
+}
+
 // env es el entorno del hijo. -H se traduce a KLING_HOST: kling lo lee con la
 // misma precedencia que el flag salvo que otro -H lo pise, y así no hay que
 // saber dónde va el flag en cada subcomando (`sandbox fork`, `exec -i`...).

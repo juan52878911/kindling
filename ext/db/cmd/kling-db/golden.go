@@ -42,7 +42,8 @@ func cmdGolden(args []string) error {
 		return usageErr("usage: kling db golden [-script P] [-H host] image | build [options] <name>\n" +
 			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -as-super  -role R  -database B\n" +
 			"                 -image I  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)\n" +
-			"  -engine mysql (right after image or build): MariaDB instead of Postgres (see docs/mysql.md)")
+			"  -engine mysql (right after image or build): MariaDB instead of Postgres (see docs/mysql.md)\n" +
+			"  -engine redis | -engine sqlite: Redis or SQLite (see docs/db-engines.md)")
 	}
 	rest, cleanup, err := expandTemplate(rest)
 	if err != nil {

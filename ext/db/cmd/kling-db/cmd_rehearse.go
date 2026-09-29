@@ -198,7 +198,7 @@ func (a *app) rehearse(ctx context.Context, ref, owner, dir string, lockTimeout 
 		rep.SourceKind = "template"
 		if snap, err := a.template(ctx, ref); err == nil {
 			if _, _, engine, err := goldenInfo(snap); err == nil && engine != enginePostgres {
-				return nil, fmt.Errorf("kling db rehearse supports postgres templates only in this version; %s is %s (see docs/mysql.md)", ref, engine)
+				return nil, fmt.Errorf("kling db rehearse supports postgres templates only in this version; %s is %s (see %s)", ref, engine, engineDoc(engine))
 			}
 		}
 		name := "rehearse-" + randomSuffix()
