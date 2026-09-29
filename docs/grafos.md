@@ -121,9 +121,42 @@ máquina es suyo: un fork empieza con el suyo vacío, y `graph rm` lo borra con 
 
 **Snapshot**: pausa todos los nodos que corren, corta las sesiones hacia ellos, vuelca
 cada uno sin reanudarlo y los reanuda al final: todos los volcados son del instante de
-la pausa. Si un volcado falla, se borran las plantillas hechas y se reanuda todo. Un
-nodo congelado no se vuelca (despierta el grafo antes) y un nodo con volúmenes
-tampoco en esta versión (soltarlos pide hablar con el invitado, y pausado no contesta).
+la pausa. Si un volcado falla, se borran las plantillas hechas y se reanuda todo.
+
+**Nodos congelados.** Un grafo congelado (entero o en parte) se vuelca igual: antes de
+la pausa se despiertan sus nodos congelados, en orden de `depends`, y al final se
+vuelven a congelar, en el orden de `freeze`; el grafo termina como empezó (`frozen`
+sigue `frozen`). Un nodo congelado no tiene VMM que volcar y su volcado de `freeze` no
+sirve de plantilla (apunta al disco de esa máquina), por eso se despierta. Cuesta un
+`thaw` y un `freeze` por nodo congelado. Si algo falla, también vuelven a congelarse.
+
+**Volúmenes.** Un nodo con volúmenes los **suelta** antes de la pausa, con el invitado
+aún en marcha (lo mismo que `kling commit` de una máquina: la caché de ext4 no puede
+ir en la memoria volcada de un disco que no viaja con ella), y los recupera tras
+reanudarse. Entre soltarlos y la pausa (milisegundos), el servicio del nodo no ve su
+volumen. Las plantillas llevan el volumen apuntado, como las de `commit`. Dos casos
+se rechazan (409) antes de tocar nada:
+
+- un nodo **ya pausado** con volúmenes: soltarlos pide al agente del invitado y un
+  invitado pausado no contesta. Despiértalo (`kling graph thaw <g>`) y repite.
+- un **fork** con un volumen en **escritura** en cualquier nodo, instanciado o `lazy`:
+  un ext4 no admite dos escritores y la primera copia chocaría con el original. En
+  solo lectura (`:ro`) se ramifica y cada copia lo monta, como en `kling sandbox fork`.
+
+Receta para ramificar un grafo con un volumen en escritura (p. ej. la `db`):
+
+1. `kling graph snapshot <g> -name base`: plantillas `base-<nodo>-<gen>`, cada una con
+   su volumen apuntado.
+2. Por cada rama, un volumen propio: `kling volume create db-rama1` y llénalo
+   (`kling volume populate`, o carga un volcado). Hoy no hay `volume clone`: `kling
+   volume snapshot`/`restore` guardan y devuelven **el mismo** volumen, no lo copian.
+3. Un fichero de grafo por rama cuyos nodos usan `from: base-<nodo>-<gen>` y
+   `volumes: [{name: db-rama1, mount: /data}]`. Una máquina restaurada no puede cambiar el número de
+   discos ni su modo ni su punto de montaje (quedaron fijados en la memoria), solo el
+   fichero al que apunta cada uno: mismo número de volúmenes, mismo `:ro` o no y mismo
+   `/data` que el original.
+
+Cada rama escribe en el suyo, y el original sigue con el que tenía.
 
 Las plantillas de un snapshot son **persistentes**: no se borran con el grafo (`graph
 rm` solo quita las temporales de un fork); se quitan con `kling snapshot rm`. La de un

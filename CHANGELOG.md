@@ -10,7 +10,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
-### Fase baja: grafos
+### Fase baja
 
 - **`idle_freeze` es "N segundos sin conexiones" (#54).** Cada conexión aceptada por una
   arista `link` o `credential` (proxy de enlace y de Postgres en Linux, broker de enlaces
@@ -24,6 +24,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   del tráfico de sus credenciales). Lee el `credaudit` de cada nodo por la ruta de
   siempre: sin API nueva, con la misma autorización y sin secretos. Ver
   [`docs/grafos.md`](docs/grafos.md#auditoría).
+- **`kling graph snapshot` y `fork` de grafos congelados y con volúmenes (#55).** Un
+  nodo congelado ya no se rechaza: se despierta antes del instante y se vuelve a
+  congelar al final (también si algo falla); el grafo termina como empezó. Un nodo con
+  volúmenes los suelta con el invitado en marcha antes de la pausa y los recupera tras
+  reanudarse, como `kling commit`. Se rechazan (409, antes de tocar nada) un nodo ya
+  pausado con volúmenes (un invitado pausado no contesta: `kling graph thaw` y repite)
+  y el fork de un grafo con un volumen en escritura; en solo lectura se ramifica.
+  Receta para ramificar uno con volumen en escritura en
+  [`docs/grafos.md`](docs/grafos.md).
 
 ### Grafos desde los plugins
 
