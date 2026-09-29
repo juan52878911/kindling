@@ -131,6 +131,8 @@ args=(-modes "$MODES" -n "$NS" -r "$R" -timeout "$TIMEOUT"
 [ -n "$SEED_SQL" ] && args+=(-seed-sql "$SEED_SQL")
 [ -n "$DISK_PATH" ] && args+=(-disk-path "$DISK_PATH")
 [ -n "$KLING_RUN_ARGS" ] && args+=(-kling-run-args "$KLING_RUN_ARGS")
+# Banderas extra del binario (p. ej. -est-mem-mib 64 tras medir una pasada): se pasan tal cual.
+args+=("$@")
 
 "$BENCH" "${args[@]}" 2> >(tee "$OUT/dbbench.log" >&2)
 rc=$?
