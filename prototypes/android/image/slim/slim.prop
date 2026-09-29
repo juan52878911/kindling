@@ -1,0 +1,31 @@
+# Propiedades de SLIM=1 (apply.sh las añade al final de vendor/build.prop).
+# Medidas en docs/densidad.md.
+
+# Android Go: menos procesos en caché, cachés de HWUI/SystemUI más pequeñas,
+# sin fondos animados ni PiP, lmkd en modo low_ram.
+ro.config.low_ram=true
+
+# Montículos de ART como en Android Go (512 MiB): menos hueco libre por proceso.
+dalvik.vm.heapstartsize=4m
+dalvik.vm.heapgrowthlimit=128m
+dalvik.vm.heapsize=256m
+dalvik.vm.heaptargetutilization=0.75
+dalvik.vm.heapminfree=512k
+dalvik.vm.heapmaxfree=8m
+
+# Sin perfiles de JIT (no hay dexopt en segundo plano que los aproveche).
+dalvik.vm.usejitprofiles=false
+
+# zygote no precarga los controladores de GL: con SwiftShader son caros y cada
+# app los carga igual cuando pinta.
+ro.zygote.disable_gl_preload=true
+
+# lmkd: matar antes lo que está en caché, en vez de dejar que el invitado use
+# toda su RAM (en vz lo que toca el invitado lo paga el Mac).
+ro.lmk.use_minfree_levels=false
+ro.lmk.kill_heaviest_task=true
+ro.lmk.psi_partial_stall_ms=70
+persist.sys.lmk.reportkills=false
+
+# Sin tombstones ni trazas que llenen /data (en RAM).
+tombstoned.max_tombstone_count=5
