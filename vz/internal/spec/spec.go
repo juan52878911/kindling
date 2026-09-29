@@ -63,6 +63,17 @@ type Balloon struct {
 	StatsPollingIntervalS int  `json:"stats_polling_interval_s"`
 }
 
+// Graphics es una pantalla virtio-gpu (VZVirtioGraphicsDevice con un scanout).
+// No es parte del API de Firecracker: la pone kling-vz al arrancar si su
+// entorno lo pide (KLING_VZ_GRAPHICS, ver cmd/kling-vz) y viaja en el snapshot
+// porque restaurar exige la misma configuración de dispositivos que se guardó.
+// En vz es solo 2D (sin virgl ni venus para invitados Linux): da una pantalla,
+// no aceleración. Ver prototypes/android/docs/gpu.md.
+type Graphics struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
 // Spec es todo lo necesario para crear (o recrear) la VM.
 type Spec struct {
 	KlingVZ           int               `json:"kling_vz"`
@@ -74,6 +85,7 @@ type Spec struct {
 	Balloon           *Balloon          `json:"balloon"`
 	Entropy           bool              `json:"entropy"`
 	MachineIdentifier string            `json:"machine_identifier,omitempty"`
+	Graphics          *Graphics         `json:"graphics,omitempty"`
 }
 
 // Clone devuelve una copia profunda: el servidor guarda el Spec vivo y lo
@@ -121,6 +133,9 @@ func (s *Spec) Validate() error {
 	if len(s.Drives) == 0 {
 		return errors.New("no drives configured")
 	}
+	if g := s.Graphics; g != nil && (g.Width < 64 || g.Height < 64 || g.Width > 8192 || g.Height > 8192) {
+		return fmt.Errorf("graphics %dx%d: each side must be between 64 and 8192 pixels", g.Width, g.Height)
+	}
 	if s.Balloon != nil && s.Balloon.AmountMiB >= s.MachineConfig.MemSizeMiB {
 		return fmt.Errorf("balloon amount_mib (%d) must be below mem_size_mib (%d)",
 			s.Balloon.AmountMiB, s.MachineConfig.MemSizeMiB)
@@ -164,6 +179,21 @@ func TranslateBootArgs(args string) string {
 		}
 	}
 	return strings.Join(out, " ")
+}
+
+// ParseGraphics lee "ANCHOxALTO" (p. ej. "720x1280"). Vacío = sin pantalla.
+func ParseGraphics(v string) (*Graphics, error) {
+	if v == "" {
+		return nil, nil
+	}
+	var g Graphics
+	if _, err := fmt.Sscanf(strings.ToLower(v), "%dx%d", &g.Width, &g.Height); err != nil {
+		return nil, fmt.Errorf("graphics %q: want WIDTHxHEIGHT, e.g. 720x1280", v)
+	}
+	if g.Width < 64 || g.Height < 64 || g.Width > 8192 || g.Height > 8192 {
+		return nil, fmt.Errorf("graphics %q: each side must be between 64 and 8192 pixels", v)
+	}
+	return &g, nil
 }
 
 // WriteFile escribe el JSON del snapshot de forma atómica (temporal + rename):

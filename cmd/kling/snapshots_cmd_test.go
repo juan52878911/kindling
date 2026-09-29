@@ -37,6 +37,16 @@ func TestWriteSnapshots(t *testing.T) {
 	if strings.Contains(b.String(), "*") {
 		t.Errorf("con GuestIPv6Off no debería haber marca ni pie:\n%s", b.String())
 	}
+
+	// Un dorado de una imagen que pide la pila IPv6 (Android) no es "viejo".
+	b.Reset()
+	list[0].GuestIPv6Off, list[0].GuestIPv6Stack = false, true
+	if err := writeSnapshots(&b, list, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "*") {
+		t.Errorf("con GuestIPv6Stack no debería haber marca ni pie:\n%s", b.String())
+	}
 }
 
 func TestWriteSnapshot(t *testing.T) {
@@ -69,6 +79,15 @@ func TestWriteSnapshot(t *testing.T) {
 	}
 	if strings.Contains(b.String(), "guest ipv6") {
 		t.Errorf("con GuestIPv6Off no debería mencionar el ipv6 del invitado:\n%s", b.String())
+	}
+	b.Reset()
+	s3 := *s
+	s3.GuestIPv6Stack = true
+	if err := writeSnapshot(&b, &s3, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "stack kept by the image") || strings.Contains(b.String(), "not confirmed off") {
+		t.Errorf("con GuestIPv6Stack se dice que lo pidió la imagen:\n%s", b.String())
 	}
 
 	b.Reset()

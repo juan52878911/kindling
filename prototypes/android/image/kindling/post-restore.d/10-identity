@@ -1,0 +1,16 @@
+#!/bin/sh
+# Gancho tras restaurar de la imagen Android: aplica la identidad del clon que
+# el host puso en MMDS ({"phone":{"android_id":...,"name":...}}). Sin
+# identidad en MMDS (la restauración automática, antes de que llegue el
+# secreto) no hay nada que hacer.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+out="$(android-sh --identity 2>&1)"
+rc=$?
+case "$out" in
+*"no identity in MMDS"*)
+  echo "no identity in MMDS ($KLING_RESTORE): nothing to apply"
+  exit 0
+  ;;
+esac
+echo "$out"
+exit $rc

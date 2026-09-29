@@ -11,7 +11,11 @@
 //
 //	GET  /healthz            "ok": el invitado está en pie
 //	GET  /dns?host=...       diagnóstico de la resolución de nombres
-//	POST /resync             hora del host y entropía fresca, tras restaurar
+//	POST /resync             hora del host y entropía fresca, tras restaurar;
+//	                         lanza los ganchos de la imagen (ready.go)
+//	GET  /ready              ¿terminó de arrancar según su imagen? (ready.go)
+//	POST /hooks              vuelve a lanzar los ganchos tras restaurar
+//	GET  /meminfo            MemTotal y MemAvailable del invitado (squeeze en macOS)
 //	POST /volume/sync        vacía la caché del invitado a los volúmenes
 //	POST /volume/release     desmonta los volúmenes (antes de congelar)
 //	POST /volume/acquire     los vuelve a montar (después de restaurar)
@@ -66,6 +70,7 @@ func New() (*Agent, error) {
 	// Después de montar, no antes: hay que mirar dentro de los volúmenes para
 	// saber cuáles traen paquetes.
 	a.Env = LibraryEnv(os.Environ(), a.Volumes.Specs())
+	readyState.setEnv(a.Env)
 	for _, kv := range a.Env {
 		if strings.HasPrefix(kv, "NODE_PATH=") || strings.HasPrefix(kv, "PYTHONPATH=") {
 			log.Printf("library: %s", kv)
@@ -86,6 +91,11 @@ func (a *Agent) Register(mux *http.ServeMux) {
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).
 	mux.HandleFunc(api.GuestResyncPath, ResyncHandler())
+	// /ready y /hooks: la sonda y los ganchos que declara la imagen. Sin
+	// kling.exec: ejecutan lo que la imagen trae, nunca lo que pida quien llama.
+	mux.HandleFunc(api.GuestReadyPath, ReadyHandler())
+	mux.HandleFunc(api.GuestHooksPath, HooksHandler())
+	mux.HandleFunc(api.GuestMemInfoPath, MemInfoHandler())
 
 	// /volume/sync la llama el daemon antes de matar la microVM. Sin esto lo
 	// último que se escribió se queda en la caché de páginas del invitado y muere

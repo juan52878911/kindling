@@ -16,6 +16,10 @@ func TestPutImageFileValida(t *testing.T) {
 	lib := t.TempDir()
 	t.Setenv("KLING_LIB_DIR", lib)
 	os.WriteFile(filepath.Join(lib, "kling-bridge"), []byte("bin"), 0o755)
+	// Un enlace de libDir que lleva fuera no sirve de origen.
+	fuera := filepath.Join(t.TempDir(), "shadow")
+	os.WriteFile(fuera, []byte("secreto"), 0o600)
+	os.Symlink(fuera, filepath.Join(lib, "fuga"))
 	grande := base64.StdEncoding.EncodeToString(make([]byte, maxImageFileUpload+1))
 
 	casos := []struct {
@@ -27,6 +31,7 @@ func TestPutImageFileValida(t *testing.T) {
 		{`{"path":"/x","from_host":"../etc/shadow"}`, "relative to", 400},
 		{`{"path":"/x","from_host":"/etc/shadow"}`, "relative to", 400},
 		{`{"path":"/x","from_host":"no-existe"}`, "is not a file", 400},
+		{`{"path":"/x","from_host":"fuga"}`, "is not a file", 400},
 		{`{"path":"/x","content_b64":"no es base64!"}`, "content_b64", 400},
 		{`{"path":"/x","content_b64":"` + grande + `"}`, "the limit is", 413},
 		{`{"path":"/x","from_host":"kling-bridge","mode":"4755"}`, "no setuid", 400},

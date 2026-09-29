@@ -22,6 +22,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   [`docs/grafos.md`](docs/grafos.md), donde también queda documentado, como siguiente
   paso, el gateway de IA (cascada Chispa a VON como grafo lazy).
 
+### macOS
+
+- **Techo de CPU en vz: paradas cortas con SIGSTOP en vez de pausar la VM a ventanas
+  (#88).** `cpu_pct` significa lo mismo que en Linux (% de un núcleo para toda la VM) y
+  ya lo cumplía, pero a trompicones: se medían ventanas de 100 ms y se pausaba la VM
+  hasta 300 ms de golpe, y la pausa del framework paraba también el reloj del invitado
+  (una VM regulada se quedaba 23 s atrás en 30 s). Ahora un cubo de fichas para el
+  auxiliar de Apple 20 ms cada vez con SIGSTOP, que manda un proceso freno aparte en su
+  propio sandbox (`kling-vz` sigue sin poder señalizar a nadie). Medido en un M4 con
+  `yes` dentro y techo 50: 50 % de CPU en 1 y 2 vCPU, reloj del invitado al segundo, y
+  `kling exec true` de p99 117-324 ms a 34-78 ms. Hasta que el agente escucha, el techo es
+  `max(pct, 100)`, como el impulso de arranque de Linux (antes, sin techo). Ni el nice ni
+  `taskpolicy -b` sirven de techo, y los hilos de vCPU no se pueden tocar sueltos.
+
 ### Núcleo
 
 - **Autorización por operación en el socket del daemon (capacidad `authz`).** Con
@@ -60,6 +74,73 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `CPU_MITIGATIONS` (no `SPECULATION_MITIGATIONS`) y allnoconfig dejaba PTI y
   retpolines apagados sin avisar. `config-amd64` va ahora sin ACPI y con
   `CPU_MITIGATIONS=y`; `check-kernel-config.sh` exige el menú.
+- **"Listo" lo define la imagen, y ganchos tras restaurar (capacidad `ready`).** La
+  imagen declara una sonda (`/etc/kindling/ready`) y ganchos
+  (`/etc/kindling/post-restore.d/*`) que el agente de invitado ejecuta él mismo, sin
+  `allow_exec`: rutas del agente `GET /ready`, `POST /hooks` y `GET /meminfo`, de
+  control. `commit` y `sandbox fork` esperan a que el original esté listo antes de
+  pausarlo (`ready_timeout_seconds`, 120 por defecto; `skip_ready`, `kling save
+  -force`, `sandbox fork -skip-ready`), y el fork devuelve cada copia lista. `kling run
+  -wait-ready` y `sandbox create -wait-ready` (`wait_ready`) esperan al arrancar.
+  `Machine.ready` (`kling ps`, columna `READY`) y `GET /machines/{ref}/ready?wait=`
+  (`kling machine ready`). Los ganchos corren al final de cada restauración (reloj,
+  volúmenes y credenciales ya al día, `KLING_RESTORE=instance|thaw`) y a petición
+  (`POST /machines/{ref}/hooks`, `kling machine hooks`, `kling machine secret
+  -hooks`). Sin sonda ni ganchos, o con un agente anterior, todo es como antes. Medido
+  con Android 13 en el M4: `save` esperó 5,7 s a `boot_completed` y el clon salió
+  listo. Ver [`docs/api.md`](docs/api.md), "Listo y ganchos tras restaurar".
+- **La marca de secretos MMDS se puede levantar.** Un almacén vacío (`{}`) levanta
+  `has_secrets` si, tras la última inyección, los ganchos de la imagen terminaron con
+  éxito (la imagen declara así que consumió el secreto). Vaciar una máquina sin
+  secretos ya no la marca. Un teléfono con identidad por copia vuelve a poder
+  congelarse.
+- **`cpu_pct` por imagen.** La receta puede llevar `cpu_pct` o `cpu_pct_per_vcpu`.
+  Precedencia: flag > dorado > receta > `cpu_pct_default` (el valor por defecto de la
+  configuración del CLI, que antes pisaba al del dorado como si fuera un flag) > 50.
+- **Pila IPv6 por imagen (`guest_ipv6_stack` en la receta).** Con `ipv6.disable=1`
+  en todos los arranques, Android dejó de ser alcanzable: `adbd` solo escucha en
+  `[::]:5555` y el `IpClient` de su `eth0` fallaba en bucle cada ~15 ms borrándole la
+  IPv4. Una receta con `"guest_ipv6_stack": true` arranca con `ipv6.disable_ipv6=1`
+  (el módulo carga, ninguna interfaz tiene IPv6); la barrera del host no cambia.
+  Sus dorados llevan `guest_ipv6_off` en false y `guest_ipv6_stack` en true, y ni
+  el daemon ni `kling template ls`/`inspect` los toman por dorados viejos. Ver
+  [`SECURITY.md`](SECURITY.md), "IPv6".
+- **`run -wait-ready` tras restaurar, ~150 ms antes.** La espera a "listo" pregunta
+  a los 25 ms y dobla hasta 250 ms, en vez de 250 ms desde la primera: tras
+  restaurar solo faltan los ganchos (50 ms en Android).
+- **`squeeze` no aprieta copias que comparten memoria con su dorado** (Firecracker,
+  `Machine.mem_shared`): el globo subía la memoria total (24 Android: Σ PSS de 4533 a
+  5072 MiB y el host colgado). `409` salvo `?force=1` / `-force`; el "hacer sitio"
+  automático se las salta. En vz, `squeeze` pregunta al agente cuánta memoria tiene
+  disponible y deja un cuarto de colchón, en vez de apretar a la mitad a ciegas.
+- **Admisión en macOS por swap y disco.** `507` si el swap usado supera
+  `KLING_MAX_SWAP_PCT` (85 %) de lo que puede llegar a ocupar (el actual más el disco
+  libre por encima del mínimo), y el mínimo de disco libre en macOS pasa de 2 a 16 GiB
+  (`KLING_MIN_FREE_DISK_MIB`). Ver [`docs/estabilidad.md`](docs/estabilidad.md) §9.
+- **Dos daemons en el mismo host ya no se borran la red.** El barrido de namespaces
+  huérfanos solo toca los que el daemon apuntó como suyos en `<root>/net/`; antes, un
+  daemon privado borraba el namespace y el veth de una máquina viva del del sistema.
+  Las máquinas vivas que un daemon anterior dejó corriendo reciben la marca al
+  readoptarse, para que su red se pueda barrer si un día quedan huérfanas.
+- **Ni se pisan la subred (#97).** Cada daemon repartía los índices de red mirando
+  solo sus máquinas, y dos en el mismo Linux podían montar la misma 172.30.a.b/30.
+  Ahora el índice se reserva en `/run/kindling/net-claims/` (compartido entre
+  daemons) y se salta si alguna dirección del host cae en su /30. Una máquina
+  congelada cuya red se soltó y cuya subred tomó otro daemon se muda a otra al
+  descongelarse (cambia `Machine.ip`; el invitado no lo nota). Sin subredes libres,
+  `run` falla en vez de repetir el índice 1. Ver
+  [`docs/estabilidad.md`](docs/estabilidad.md) §9.
+- **`kling image put` en macOS (#98).** `PUT /images/{name}/files` (y el recambio
+  del puente, que va por el mismo camino) montaba la imagen, y en el Mac no hay
+  mount de ext4. Ahora escribe con `debugfs -w` de e2fsprogs, que macOS ya exige:
+  modo pedido y dueño root, copia al lado comprobada antes de cambiar la entrada
+  (los demás enlaces duros del viejo conservan su contenido, como con el rename de
+  Linux), crece la imagen si no cabe y e2fsck antes y después. Los enlaces
+  simbólicos de los directorios se siguen siempre dentro de la imagen; una ruta con
+  comillas, barras invertidas o caracteres de control se rechaza. Ver
+  [`docs/mac.md`](docs/mac.md).
+- **`Commit` del cliente (`pkg/api`) sin tope de cabeceras**, y `Run` tampoco con
+  `wait_ready`: la espera la acota el contexto.
 - **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
   nombre y aristas declaradas, descritas en un fichero JSON o YAML (un subconjunto sin
   dependencias), con ciclo de vida atómico: `up`, `ls`, `inspect`, `freeze`, `thaw`,
@@ -247,6 +328,16 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   carpetas compartibles ni el almacén. `kling db connect -mysql` decide la opción de TLS
   del cliente por `--version` y `--help` y, si no lo sabe, lo dice en vez de pasar
   `--ssl-mode` a un cliente de MariaDB.
+- **`kling image put` en Linux ya no escribe fuera de la imagen.** Montaba la imagen y
+  escribía en `mnt/<ruta>`: un enlace simbólico absoluto de un directorio intermedio
+  (`usr/local -> /tmp/x`) lo resolvía el kernel contra la raíz del host, y el daemon
+  escribía allí como root (reproducido en el lab). La ruta se resuelve ahora a mano con
+  `openat(O_NOFOLLOW)` componente a componente, siguiendo los enlaces siempre dentro de
+  la imagen, y la copia y el renombrado van relativos al descriptor del directorio (sin
+  carrera entre resolver y escribir). Vale también para el recambio del puente. El
+  modo del fichero es el pedido, sin la umask del daemon. `from_host` se abre por
+  `os.Root`: un enlace de `/usr/local/lib/kindling` que lleve fuera se rechaza. Ver
+  SECURITY.md §17.
 - **El broker de enlaces de macOS no da direcciones.** `kling-vz` pide la arista y el
   daemon entrega el socket ya conectado tras comprobarla bajo su candado y volver a
   mirar que el destino no cambió al marcar: ni TOCTOU entre resolver y marcar, ni

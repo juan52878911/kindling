@@ -24,12 +24,19 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
+// putSinMontar: en Linux, intentarPut monta la imagen por loop.
+const putSinMontar = false
+
 // backendVMM es el VMM con el que arranca este binario.
 const backendVMM = BackendFirecracker
 
 // jailerPosible dice si esta plataforma tiene jailer. En Linux lo decide
 // decidirJailer según haya binario y usuario sin privilegios (ver jailer.go).
 const jailerPosible = true
+
+// restaurarComparteMemoria: Firecracker restaura mapeando el mem.file del
+// dorado MAP_PRIVATE, así que las copias comparten sus páginas limpias.
+const restaurarComparteMemoria = true
 
 // globoSinEstadisticas: Firecracker sí da las estadísticas del invitado.
 const globoSinEstadisticas = false
@@ -172,7 +179,11 @@ func e2fsCmd(ctx context.Context, nombre string, args ...string) *exec.Cmd {
 
 // checkPresionPlataforma no añade nada en Linux: allí la presión la mide PSI
 // en checkPressure.
-func checkPresionPlataforma() error { return nil }
+func (m *Manager) checkPresionPlataforma() error { return nil }
+
+// minDiscoLibrePlataforma: 2 GiB en Linux, donde el swap (si lo hay) no
+// crece a costa del disco de datos.
+const minDiscoLibrePlataforma = 2048
 
 // lanzamientoPlataforma es el tope de encendidos simultáneos propio de la
 // plataforma; 0 = el cálculo general de maxParallelLaunch.

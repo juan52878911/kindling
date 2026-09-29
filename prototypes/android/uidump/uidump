@@ -1,0 +1,147 @@
+#!/bin/bash
+# uidump: cliente del servidor residente de UiAutomation (Server.java). Corre
+# en la VM, es decir, desde `kling exec`:
+#
+#   kling exec <m> -- uidump                        > ui.xml   (= uiautomator dump, sin esperar 1 s)
+#   kling exec <m> -- uidump dump --idle 200        > ui.xml   (espera 200 ms de interfaz quieta)
+#   kling exec <m> -- uidump dump --compressed      > ui.xml   (= uiautomator dump --compressed)
+#   kling exec <m> -- uidump tap 360 640
+#   kling exec <m> -- uidump swipe 360 1000 360 300 [MS]
+#   kling exec <m> -- uidump text 'hola mundo'
+#   kling exec <m> -- uidump key BACK               (código o nombre: 4, BACK, KEYCODE_BACK)
+#   kling exec <m> -- uidump ping | status | start | stop | connect | release
+#
+# Habla con el socket unix /dev/socket/kindling-uidump de Android a través de
+# nc de toybox, entrando en los espacios del init de Android con nsenter pero
+# sin el entorno de zygote de android-sh (nc no lo necesita; ahorra ~30 ms).
+# Si el servidor no responde lo arranca con android-sh (el servicio de init
+# `kindling_uidump`, que init relanza si muere; si no está instalado, con
+# app_process a mano) y repite una vez.
+#
+# Ojo: nada de Android debe correr fuera de su espacio de PIDs. Sin --pid, ART
+# no encuentra /proc/self/exe y aborta, debuggerd no puede con él, y la
+# tormenta de crash_dump64 acaba en el OOM del invitado y se lleva a Android
+# (pasó dos veces probando).
+#
+# Solo puede haber un UiAutomation a la vez en Android. El servidor lo toma
+# para cada petición y lo suelta al responder (~6 ms de coste por dump), y no lo
+# toma mientras vea correr un `uiautomator` o un `am instrument`: no los
+# estorba (docs/uidump.md). `connect` lo toma y suelta sin volcar nada (calienta
+# la ruta antes de guardar un dorado). `release` solo importa si el servidor
+# se arrancó con --release-after-ms N (mantener UiAutomation N ms entre dumps).
+set -uo pipefail
+
+SOCK=/dev/socket/kindling-uidump
+DEX=/system/framework/kindling-uidump.dex
+CACHE=/run/kindling-uidump.pid
+START_TIMEOUT_MS=${UIDUMP_START_TIMEOUT_MS:-8000}
+
+die() { echo "uidump: $*" >&2; exit 125; }
+
+# init_pid: el init de Android, hijo del unshare del lanzador (lo mismo que
+# android-sh). Se guarda en /run para no recorrer procesos en cada llamada; se
+# valida con su comm y su padre.
+init_pid() {
+  local u c p
+  u="$(cat /run/kindling-android/unshare.pid 2>/dev/null)" || return 1
+  [ -n "$u" ] || return 1
+  if p="$(cat "$CACHE" 2>/dev/null)" && [ -n "$p" ] &&
+     [ "$(cat "/proc/$p/comm" 2>/dev/null)" = init ] &&
+     [ "$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$p/status" 2>/dev/null)" = "$u" ]; then
+    echo "$p"; return 0
+  fi
+  for c in $(pgrep -P "$u" 2>/dev/null); do
+    if [ "$(cat "/proc/$c/comm" 2>/dev/null)" = init ]; then
+      echo "$c" >"$CACHE" 2>/dev/null || true
+      echo "$c"; return 0
+    fi
+  done
+  return 1
+}
+
+PID="$(init_pid)" || die "Android is not running ($(cat /run/kindling-android/state 2>/dev/null || echo 'no state')); see /var/log/service.log"
+NS=(nsenter --target "$PID" --mount --uts --ipc --net --pid --root --wd)
+
+# pide LINEA: una petición; la respuesta a stdout. Sale con el código de nc:
+# distinto de 0 si no conecta (no hay servidor o su socket está roto).
+pide() {
+  printf '%s\n' "$1" | "${NS[@]}" -- /system/bin/nc -U "$SOCK" 2>/dev/null
+}
+
+vivo() { [ "$(pide ping | cut -c1-2)" = ok ]; }
+
+# arranca: el servicio de init si está instalado; si no, app_process a mano
+# (dex en $DEX o en /data/local/tmp). Espera a que el socket responda.
+arranca() {
+  # Si se llega aquí el socket no responde: un servidor que siga vivo está roto
+  # (y aún tendría UiAutomation, que es uno solo), así que se mata antes.
+  local rc=0 i
+  "${NS[@]}" -- /system/bin/test -f /system/etc/init/kindling-uidump.rc && rc=1
+  if [ $rc = 1 ]; then
+    # stop y start, no ctl.restart: tras morir, init espera 5 s
+    # (restart_period, mínimo 5) para relanzarlo y ctl.restart no se salta esa
+    # espera; ctl.stop la anula (medido: 5,1 s → 0,2 s).
+    "${NS[@]}" -- /system/bin/setprop ctl.stop kindling_uidump
+    "${NS[@]}" -- /system/bin/pkill -x kindling-uidump
+    "${NS[@]}" -- /system/bin/setprop ctl.start kindling_uidump
+  else
+    # A mano necesita el entorno de zygote (BOOTCLASSPATH...): android-sh.
+    # shellcheck disable=SC2016 # $dex lo expande el sh de Android
+    android-sh '
+      pkill -x kindling-uidump
+      dex='"$DEX"'; [ -f "$dex" ] || dex=/data/local/tmp/kindling-uidump.dex
+      [ -f "$dex" ] || { echo "no dex: '"$DEX"'" >&2; exit 1; }
+      CLASSPATH=/system/framework/uiautomator.jar:$dex nohup /system/bin/app_process /system/bin \
+        --nice-name=kindling-uidump kindling.uidump.Server >/data/local/tmp/kindling-uidump.log 2>&1 </dev/null &' ||
+      return 1
+  fi
+  for ((i = 1; i <= START_TIMEOUT_MS / 20; i++)); do
+    vivo && return 0
+    # Un start que llega mientras el proceso viejo aún no ha salido se ignora:
+    # se repite cada medio segundo (si ya corre, no hace nada).
+    [ $rc = 1 ] && [ $((i % 25)) = 0 ] && "${NS[@]}" -- /system/bin/setprop ctl.start kindling_uidump
+    sleep 0.02
+  done
+  return 1
+}
+
+# llama LINEA: pide; si no conecta, arranca el servidor y repite una vez. Un
+# "ERROR:" del servidor va a stderr y sale con 1; el "ok" de las acciones no se
+# imprime.
+llama() {
+  local out st
+  out="$(pide "$1"; printf 'x%d' $?)"; st="${out##*x}"; out="${out%x*}"
+  if [ "$st" != 0 ] || [ -z "$out" ]; then
+    arranca || die "server did not start (logcat -s uidump, or /data/local/tmp/kindling-uidump.log)"
+    out="$(pide "$1"; printf 'x%d' $?)"; st="${out##*x}"; out="${out%x*}"
+    [ "$st" = 0 ] && [ -n "$out" ] || die "no answer from server"
+  fi
+  case "$out" in
+    ERROR:*) printf '%s' "$out" >&2; return 1 ;;
+    $'ok\n') return 0 ;;
+  esac
+  printf '%s' "$out"
+}
+
+cmd="${1:-dump}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  dump|tap|swipe|key|ping|connect|release)
+    llama "$cmd${*:+ $*}" ;;
+  text)
+    [ $# -ge 1 ] || die "usage: uidump text STRING"
+    llama "text $*" ;;
+  start)
+    vivo || arranca || die "server did not start" ;;
+  status)
+    pide ping || { echo "not running"; exit 1; } ;;
+  stop)
+    # Primero por init (si no, lo relanzaría); luego uno arrancado a mano.
+    "${NS[@]}" -- /system/bin/setprop ctl.stop kindling_uidump
+    pide quit >/dev/null
+    true ;;
+  -h|--help|help)
+    sed -n '2,20s/^# \{0,1\}//p' "$0" ;;
+  *)
+    die "unknown command: $cmd (uidump help)" ;;
+esac

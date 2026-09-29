@@ -225,7 +225,7 @@ func TestBootSeNiegaSiJailerEstaBloqueado(t *testing.T) {
 	m := newTestManager(t)
 	m.JailerBlocked = "refusing to start: jailer is required... (test)"
 
-	pid, err := m.boot(context.Background(), "deadbeef00000001", 1, 128, 0, "", "", "", nil, nil, false)
+	pid, err := m.boot(context.Background(), "deadbeef00000001", 1, 128, 0, "", "", "", nil, nil, false, false)
 	if pid != 0 {
 		t.Fatalf("boot bloqueado devolvió pid=%d, quería 0", pid)
 	}

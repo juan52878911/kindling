@@ -100,10 +100,20 @@ type Deps struct {
 	// antes de crear o restaurar la VM, que es cuando ya se sabe la política
 	// de salida. Un fallo impide crear la VM: preferimos no arrancar a
 	// arrancar sin la barrera.
-	Confine func(conRed bool) error
+	Confine func(conRed, graphics bool) error
 	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
 	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).
 	CPUTime func() (time.Duration, error)
+	// Freeze para (true) o reanuda (false) el auxiliar de Apple entero con
+	// SIGSTOP/SIGCONT: el freno del tope de CPU. Sin él (o si falla), el
+	// regulador pausa la VM por el framework, que para también el reloj del
+	// invitado (ver cpu.go).
+	Freeze func(stop bool) error
+	// Graphics, si no es nil, añade una pantalla virtio-gpu a las máquinas que
+	// ARRANCAN en este proceso. Una restauración usa la del snapshot, tenga o
+	// no: el framework exige los mismos dispositivos que al guardar.
+	Graphics *spec.Graphics
+
 	// Graph, si no es nil, son las aristas del nodo (vz/internal/grafo): pide
 	// al daemon cada conexión a otra máquina. Sin él, este kling-vz no
 	// anuncia credproxy.CapGraphLink y rechaza PUT /kling/graph y las
@@ -165,11 +175,20 @@ type Server struct {
 	confinado, confinadoConRed bool
 
 	// Tope de CPU (cpu.go). regulando: la VM está en una pausa del regulador,
-	// que el núcleo no ve (para él sigue running).
-	cpuPct                 int
-	cpuEnMarcha, regulando bool
-	cpuPausado             time.Duration
-	cpuVentana, cpuGracia  time.Duration // para las pruebas; 0 = por defecto
+	// que el núcleo no ve (para él sigue running). cpuListo: el agente ya
+	// escucha (o pasó la gracia) y rige el techo configurado.
+	cpuPct                           int
+	cpuEnMarcha, regulando, cpuListo bool
+	cpuPausado                       time.Duration
+	cpuPeriodo, cpuGracia            time.Duration // para las pruebas; 0 = por defecto
+	cpuReloj                         reloj         // para las pruebas; nil = el de verdad
+
+	// frenoMu protege congelado: el auxiliar está parado por el regulador
+	// (Deps.Freeze). Va aparte de mu para que reanudarlo nunca espere a quien
+	// tiene mu, que puede estar esperando justo a que el auxiliar conteste.
+	frenoMu    sync.Mutex
+	congelado  bool
+	frenoAviso bool // ya se avisó de que Freeze falla (con mu)
 }
 
 func New(d Deps) *Server {
@@ -200,6 +219,7 @@ func (s *Server) finish(err error) {
 // Shutdown para la VM y la red. Es lo que se hace ante SIGTERM.
 func (s *Server) Shutdown() {
 	s.mu.Lock()
+	s.soltarFreno()
 	vm, n := s.vm, s.net
 	s.vm, s.net = nil, nil
 	s.st = stStopped
@@ -242,6 +262,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /kling/stats", s.getStats)
 	mux.HandleFunc("PUT /kling/cpu", s.putKlingCPU)
 	mux.HandleFunc("GET /kling/cpu", s.getKlingCPU)
+	mux.HandleFunc("GET /kling/screenshot", s.getScreenshot)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fault(w, fmt.Errorf("kling-vz does not implement %s %s", r.Method, r.URL.Path))
 	})
@@ -512,6 +533,7 @@ func (s *Server) patchBalloon(w http.ResponseWriter, r *http.Request) {
 	}
 	s.spec.Balloon.AmountMiB = *b.AmountMiB
 	if s.vm != nil {
+		s.soltarFreno()
 		if err := s.vm.SetBalloonTargetMiB(s.spec.BalloonTargetMiB()); err != nil {
 			fault(w, fmt.Errorf("moving the balloon: %w", err))
 			return
@@ -633,6 +655,8 @@ func (s *Server) patchVM(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Si el regulador tiene parado el auxiliar, el framework no contestaría.
+	s.soltarFreno()
 	var err error
 	switch v.State {
 	case "Paused":
@@ -1033,6 +1057,32 @@ func (s *Server) getStats(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"footprint_mib": int((b + (1<<20 - 1)) >> 20)})
 }
 
+// Screenshotter lo implementa una VM con ventana (vzvm con KLING_VZ_WINDOW=1).
+type Screenshotter interface {
+	Screenshot() ([]byte, error)
+}
+
+// getScreenshot devuelve la pantalla virtio-gpu tal y como la pinta la
+// ventana, en PNG. Sin ventana no hay de dónde sacarla: el framework no expone
+// el scanout de otro modo.
+func (s *Server) getScreenshot(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	vm := s.vm
+	s.mu.Unlock()
+	sc, ok := vm.(Screenshotter)
+	if vm == nil || !ok {
+		fault(w, errors.New("this VM cannot take screenshots"))
+		return
+	}
+	png, err := sc.Screenshot()
+	if err != nil {
+		fault(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(png)
+}
+
 // --- ciclo de vida ---
 
 func (s *Server) ensureNet() error {
@@ -1089,7 +1139,7 @@ func (s *Server) confinar() error {
 		return nil
 	}
 	conRed := s.d.Policy.Mode() != egress.None
-	if err := s.d.Confine(conRed); err != nil {
+	if err := s.d.Confine(conRed, s.spec.Graphics != nil); err != nil {
 		return fmt.Errorf("confining kling-vz in its sandbox: %w", err)
 	}
 	s.confinado, s.confinadoConRed = true, conRed
@@ -1113,6 +1163,10 @@ func (s *Server) start() error {
 			return fmt.Errorf("machine identifier: %w", err)
 		}
 		s.spec.MachineIdentifier = id
+	}
+	if s.spec.Graphics == nil && s.d.Graphics != nil {
+		g := *s.d.Graphics
+		s.spec.Graphics = &g
 	}
 	t0 := time.Now()
 	if err := s.create(); err != nil {

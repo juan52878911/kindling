@@ -26,6 +26,7 @@ import (
 	"github.com/juan52878911/kindling/vz/internal/grafo"
 	"github.com/juan52878911/kindling/vz/internal/peercred"
 	"github.com/juan52878911/kindling/vz/internal/server"
+	"github.com/juan52878911/kindling/vz/internal/spec"
 	"github.com/juan52878911/kindling/vz/internal/vnet"
 	"github.com/juan52878911/kindling/vz/internal/vzvm"
 )
@@ -70,7 +71,21 @@ func logf(format string, args ...any) {
 	stdout.line("kling-vz: " + fmt.Sprintf(format, args...))
 }
 
+// argFreno lanza este binario como proceso freno del tope de CPU (ver
+// footprint/freno_darwin.go).
+const argFreno = "--cpu-brake"
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == argFreno {
+		os.Exit(servirFreno())
+	}
+	if vzvm.WindowMode() {
+		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
+		// servidor va en otra gorrutina y el proceso sale cuando acabe.
+		go func() { os.Exit(run()) }()
+		vzvm.RunApp()
+		return
+	}
 	os.Exit(run())
 }
 
@@ -93,7 +108,32 @@ func run() int {
 		return 2
 	}
 
+	// Pantalla virtio-gpu para las máquinas que arranquen aquí (el daemon pasa
+	// su entorno a kling-vz). Ver prototypes/android/docs/gpu.md.
+	graphics, err := spec.ParseGraphics(os.Getenv("KLING_VZ_GRAPHICS"))
+	if err != nil {
+		logf("KLING_VZ_GRAPHICS: %v", err)
+		return 2
+	}
+
 	meter := footprint.NewMeter()
+	// El freno del tope de CPU va en su propio proceso, lanzado antes de que
+	// este se encierre. Sin él, el tope pausa la VM por el framework, con la
+	// que se para también el reloj del invitado.
+	freno, err := footprint.StartFreno(argFreno)
+	if err != nil {
+		logf("warning: no CPU brake process, the CPU ceiling will pause the VM instead: %v", err)
+	}
+	onCreate, freeze := meter.Track, func(bool) error { return errors.New("no CPU brake process") }
+	if freno != nil {
+		onCreate = func(fd uintptr) {
+			meter.Track(fd)
+			if err := freno.Track(fd); err != nil {
+				logf("warning: %v", err)
+			}
+		}
+		freeze = freno.Freeze
+	}
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
 	// El proxy de credenciales resuelve por el mismo upstream que el invitado
@@ -139,7 +179,9 @@ func run() int {
 	peers := peercred.New()
 	confine := confinamiento(*sock, logf)
 	srv := server.New(server.Deps{
-		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track},
+		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
+			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
+		Graphics: graphics,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
 			// Sin proxy, la interfaz queda nil de verdad (no un puntero nil
 			// dentro de ella, que vnet tomaría por un proxy).
@@ -174,6 +216,7 @@ func run() int {
 		CredIP:      vnet.GatewayIP,
 		Confine:     confine,
 		CPUTime:     meter.CPUTime,
+		Freeze:      freeze,
 		Graph:       grafoMaq,
 	})
 
@@ -280,7 +323,7 @@ func rutaBroker() string {
 //
 // Las rutas se resuelven antes: el sandbox compara rutas reales, y en macOS
 // /tmp es /private/tmp.
-func confinamiento(sock string, logf func(string, ...any)) func(bool) error {
+func confinamiento(sock string, logf func(string, ...any)) func(bool, bool) error {
 	root := os.Getenv("KLING_VZ_CONFINE_ROOT")
 	if root == "" {
 		logf("not confined: KLING_VZ_CONFINE_ROOT is not set (the daemon sets it)")
@@ -301,11 +344,24 @@ func confinamiento(sock string, logf func(string, ...any)) func(bool) error {
 	}
 	root, mdir := real(root), real(filepath.Dir(sock))
 	broker := rutaBroker()
-	return func(conRed bool) error {
-		if err := confinar(root, mdir, broker, conRed); err != nil {
+	return func(conRed, gfx bool) error {
+		if err := confinar(root, mdir, broker, conRed, gfx); err != nil {
 			return err
 		}
 		logf("confined: reads under %s, writes only to %s, snapshots/ and volumes/, network out: %v", root, mdir, conRed)
 		return nil
 	}
+}
+
+// servirFreno es el proceso freno: se encierra y atiende a su kling-vz por el
+// fd 3 hasta que este muere. Ignora las señales de terminal y SIGTERM: si
+// muriera con el auxiliar parado, la VM se quedaría parada mientras kling-vz
+// viva; lo que lo termina es que se cierre el socket (o un SIGKILL).
+func servirFreno() int {
+	signal.Ignore(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	if err := confinarFreno(); err != nil {
+		fmt.Fprintf(os.Stderr, "kling-vz: CPU brake: %v\n", err)
+		return 1
+	}
+	return footprint.ServeFreno(3)
 }
