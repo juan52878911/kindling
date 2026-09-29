@@ -33,16 +33,18 @@ CONFIG_X86_PAT=y
 # CONFIG_X86_VSYSCALL_EMULATION is not set
 CONFIG_LEGACY_VSYSCALL_NONE=y
 
-# ACPI como en la config de Firecracker (CPUs y vmgenid), sin nada de energía.
-CONFIG_ACPI=y
-# CONFIG_ACPI_AC is not set
-# CONFIG_ACPI_BATTERY is not set
-# CONFIG_ACPI_BUTTON is not set
-# CONFIG_ACPI_FAN is not set
-# CONFIG_ACPI_THERMAL is not set
-# CONFIG_ACPI_PROCESSOR is not set
-# CONFIG_ACPI_NUMA is not set
-CONFIG_VMGENID=y
+# Sin ACPI. Firecracker 1.17 describe en su DSDT un puente PCI y una tabla MCFG;
+# con el kernel sin PCI, ACPICA no puede cargar el DSDT ("AE_BAD_PARAMETER,
+# During Region initialization"), la IRQ de los virtio-mmio queda sin enrutar,
+# "virtio_blk: probe ... failed with error -22" y pánico al montar la raíz.
+# Sin ACPI el kernel usa la tabla MP y los virtio_mmio.device= de la línea de
+# comandos, que valen igual en Firecracker viejos y nuevos y no piden PCI.
+# Probado en Firecracker 1.17.0 (arranque en frío, exec, save y run -from). La alternativa
+# (ACPI=y + PCI=y sin virtio-pci, como el kernel del CI de Firecracker) también
+# arranca, pero mete el bus PCI y el intérprete AML en un kernel que no los usa
+# y obliga a levantar la prohibición de PCI.
+# CONFIG_ACPI is not set
+# (VMGENID depende de ACPI y de VIRT_DRIVERS: antes ya salía "n" y no se pide.)
 
 # Sin PCI: los virtio van por MMIO y Firecracker los declara en la cmdline.
 # CONFIG_PCI is not set
@@ -51,9 +53,12 @@ CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 # KASLR completo.
 CONFIG_RANDOMIZE_MEMORY=y
 
-# Mitigaciones de ejecución especulativa (nombres de 6.1). allnoconfig las
-# apagaría todas: tienen pregunta y valen "y" por defecto.
-CONFIG_SPECULATION_MITIGATIONS=y
+# Mitigaciones de ejecución especulativa (nombres de 6.1.140). allnoconfig las
+# apagaría todas: tienen pregunta y valen "y" por defecto. El menú se llama
+# CPU_MITIGATIONS (retroportado en 6.1.x; antes SPECULATION_MITIGATIONS): si se
+# pide el nombre viejo no existe, allnoconfig deja el menú en "n" y PTI,
+# RETPOLINE, RETHUNK... desaparecen sin aviso.
+CONFIG_CPU_MITIGATIONS=y
 CONFIG_PAGE_TABLE_ISOLATION=y
 CONFIG_RETPOLINE=y
 CONFIG_RETHUNK=y
