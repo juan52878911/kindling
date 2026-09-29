@@ -1293,6 +1293,178 @@ SQL
   rm -rf "$DBTMP"; unset KLING_DB_STATE
 fi
 
+# ── 7f. kling db attach (modelo A) ───────────────────────────────────────────
+# Una copia compartida por dos agentes que viven en OTRAS microVMs: cada uno
+# conecta por el proxy de credenciales de su máquina con su marcador, y el
+# proxy marca a la copia (resuelta por id en cada conexión) con una clave que
+# el agente no ve. Congelar la copia corta la sesión viva y el siguiente
+# intento falla; tras el thaw vuelve; otro dueño no puede; detach retira el
+# acceso. Mismas variables que 7e; sin KLING_E2E_DB_GOLDEN se salta, avisando.
+step "7f. kling db attach (modelo A)"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN no está (nombre de la plantilla Postgres): sin copia que compartir\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  dbsql() { $KLING exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  C="e2e-dba-$$"; A1="e2e-ag1-$$"; A2="e2e-ag2-$$"; A3="e2e-ag3-$$"
+  # La sonda es un cliente mínimo del protocolo v3 (la imagen no trae psql):
+  # lee su marcador de MMDS, entra por el proxy y cuenta las filas de e2e_a.
+  # Con "hold" se queda con la sesión abierta y dice si se la cortan.
+  SONDA_A='
+import json, socket, struct, sys, time, urllib.request
+host, env, user, db, modo = sys.argv[1:6]
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+ph = json.loads(store).get("env", {}).get(env, "")
+print("MARCADOR", "si" if ph.startswith("kling-cred-") else "NO", flush=True)
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def msg(s):
+    h = leer(s, 5); return h[:1], leer(s, struct.unpack("!I", h[1:])[0] - 4)
+def conectar():
+    s = socket.create_connection((host, 5432), timeout=20)
+    p = b"".join(k.encode() + b"\0" + v.encode() + b"\0" for k, v in (("user", user), ("database", db))) + b"\0"
+    s.sendall(struct.pack("!II", 8 + len(p), 196608) + p)
+    t, b = msg(s)
+    if t == b"E": return s, "ERROR " + "".join(f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C")
+    if t != b"R" or b[:4] != b"\0\0\0\3": return s, "SINPASS"
+    s.sendall(b"p" + struct.pack("!I", 5 + len(ph)) + ph.encode() + b"\0")
+    while True:
+        t, b = msg(s)
+        if t == b"E": return s, "ERROR " + "".join(f[1:].decode() for f in b.split(b"\0") if f[:1] == b"C")
+        if t == b"Z": return s, "LISTO"
+try:
+    s, r = conectar()
+except Exception as e:
+    print("LOGIN CAIDA", type(e).__name__, flush=True); sys.exit(0)
+print("LOGIN", r, flush=True)
+if r != "LISTO": sys.exit(0)
+q = b"SELECT count(*) FROM e2e_a\0"
+s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+fila = ""
+while True:
+    t, b = msg(s)
+    if t == b"D": fila = b[6:].decode(errors="replace")
+    if t in (b"Z", b"E"): break
+print("FILA", fila, flush=True)
+if modo == "hold":
+    print("HOLD", flush=True)
+    s.settimeout(120)
+    try:
+        print("CORTADA" if not s.recv(1) else "DATOS", flush=True)
+    except socket.timeout:
+        print("SIGUE", flush=True)
+    except Exception as e:
+        print("CORTADA", type(e).__name__, flush=True)
+'
+  # sonda <agente> <host> <env> <user> [hold]
+  sonda() { $KLING exec -timeout 150s "$1" -- python3 -c "$SONDA_A" "$2" "$3" "$4" appdb "${5:-once}" 2>&1; }
+  agente() { $KLING run -image "$IMGVOL" -name "$1" -egress allowlist -allow example.org -allow-exec \
+    -label kind=sandbox -ttl 15m -on-ttl remove "${@:2}" >/dev/null 2>&1; }
+
+  out=$(dbk up "$DBG" -name "$C")
+  if ! contiene "$out" "ready"; then
+    bad "db up (7f)" "ready" "$out"
+  elif ! agente "$A1" || ! agente "$A2" || ! agente "$A3" -label kling.db.owner=otro; then
+    bad "agentes (7f)" "tres máquinas con egress allowlist" "alguna no arrancó"
+  else
+    CID=$(dbid "$C"); APPROLE=app
+    dbsql "$C" "CREATE TABLE e2e_a(v text); INSERT INTO e2e_a VALUES ('x'),('y'); ALTER TABLE e2e_a OWNER TO $APPROLE" >/dev/null
+    dbk role "$C" -ro -name e2e_ro >/dev/null
+    TODAS="$(cat "$KLING_DB_STATE/copies/$CID/password" 2>/dev/null) $(cat "$KLING_DB_STATE/copies/$CID/e2e_ro.password" 2>/dev/null)"
+
+    out=$(dbk attach "$A1" "$C"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "attached to $C"; } && ok "attach: el agente 1 recibe la copia (rol de la aplicación)" \
+      || bad "attach A1" "attached to $C" "rc=$rc $out"
+    out=$(dbk attach "$A2" "$C" -role e2e_ro -host shared.db.internal); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "as e2e_ro"; } && ok "attach -role: el agente 2 recibe la copia con el rol de solo lectura" \
+      || bad "attach A2 -role" "as e2e_ro" "rc=$rc $out"
+    H1="$C.db.internal"
+
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    { contiene "$out" "MARCADOR si" && contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 2"; } \
+      && ok "agente 1: entra por el proxy con su marcador y lee (2 filas)" || bad "lectura A1" "MARCADOR si, LOGIN LISTO, FILA 2" "$out"
+    out=$(sonda "$A2" shared.db.internal PGPASSWORD e2e_ro)
+    { contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 2"; } \
+      && ok "agente 2: la misma copia, con su rol ro" || bad "lectura A2" "LOGIN LISTO, FILA 2" "$out"
+    # La copia no se ramifica con el agente: el agente con attach no se puede forkear.
+    out=$($KLING sandbox fork "$A1" -n 1 2>&1) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "proxy credentials"; } && ok "un agente con attach no se ramifica (guardián de fork)" \
+      || bad "fork del agente" "rechazo por credenciales del proxy" "rc=$rc $out"
+
+    # Congelar la copia corta la sesión viva del agente 1...
+    HOLD="$DBTMP/hold.out"
+    sonda "$A1" "$H1" PGPASSWORD "$APPROLE" hold > "$HOLD" 2>&1 &
+    HPID=$!
+    for _ in $(seq 1 40); do grep -q HOLD "$HOLD" 2>/dev/null && break; sleep 0.5; done
+    if grep -q HOLD "$HOLD"; then
+      $KLING freeze "$C" >/dev/null 2>&1
+      wait "$HPID" 2>/dev/null
+      out=$(cat "$HOLD")
+      contiene "$out" "CORTADA" && ok "freeze de la copia: la sesión abierta del agente se corta" \
+        || bad "sesión viva al congelar" "CORTADA" "$out"
+    else
+      kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null
+      bad "sesión de espera" "HOLD" "$(cat "$HOLD")"
+      $KLING freeze "$C" >/dev/null 2>&1
+    fi
+    # ...y el siguiente intento falla sin llegar a ella.
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    contiene "$out" "LOGIN ERROR 08006" && ok "con la copia congelada, un nuevo intento falla (08006)" \
+      || bad "intento con la copia congelada" "LOGIN ERROR 08006" "$out"
+    $KLING thaw "$C" >/dev/null 2>&1
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    { contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 2"; } && ok "tras el thaw el agente vuelve a entrar" \
+      || bad "tras thaw" "LOGIN LISTO, FILA 2" "$out"
+
+    # Otro dueño no puede: ni con un agente de otro dueño ni pidiéndolo como otro.
+    out=$(dbk attach "$A3" "$C") && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "belongs to owner"; } && ok "attach de un agente de otro dueño: rechazado" \
+      || bad "attach otro dueño" "belongs to owner" "rc=$rc $out"
+    out=$(dbk attach "$A1" "$C" -owner otro -env OTRA) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "belongs to owner"; } && ok "attach como otro dueño: rechazado" \
+      || bad "attach -owner otro" "belongs to owner" "rc=$rc $out"
+
+    # La auditoría del agente dice a qué máquina fue y por qué no llegó, sin claves.
+    out=$($KLING machine audit "$A1" -tail 0 -json 2>&1)
+    { contiene "$out" "\"upstream\":\"machine:$CID\"" && contiene "$out" '"reason":"machine_unavailable"'; } \
+      && ok "audit del agente: upstream machine:<id> y machine_unavailable al congelar" \
+      || bad "audit del agente" "machine:$CID y machine_unavailable" "$(printf '%s' "$out" | tail -3)"
+    printf '%s\n' "$out" >> "$DBLOG"
+
+    # detach retira el acceso: el marcador ya no vale.
+    out=$(dbk detach "$A1" "$C"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "detached"; } && ok "detach: el agente 1 pierde la copia" || bad "detach" "detached" "rc=$rc $out"
+    out=$(sonda "$A1" "$H1" PGPASSWORD "$APPROLE")
+    # Sin credencial Postgres el nombre ya no se desvía al proxy (o el proxy
+    # cierra sin leer): cualquier cosa menos entrar.
+    { contiene "$out" "LOGIN " && ! contiene "$out" "LOGIN LISTO"; } && ok "tras detach el agente ya no entra" \
+      || bad "tras detach" "LOGIN ERROR o LOGIN CAIDA" "$out"
+    out=$(sonda "$A2" shared.db.internal PGPASSWORD e2e_ro)
+    contiene "$out" "LOGIN LISTO" && ok "el agente 2 sigue con su attach" || bad "A2 tras detach de A1" "LOGIN LISTO" "$out"
+
+    fugas=0
+    for pw in $TODAS; do grep -qF -- "$pw" "$DBLOG" && fugas=$((fugas+1)); done
+    [ "$fugas" = 0 ] && ok "7f: ninguna clave en la salida de kling db ni en la auditoría" || bad "fuga de claves (7f)" 0 "$fugas"
+  fi
+  $KLING rm -f "$A1" >/dev/null 2>&1; $KLING rm -f "$A2" >/dev/null 2>&1; $KLING rm -f "$A3" >/dev/null 2>&1
+  dbk rm "$C" >/dev/null 2>&1
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fallo(s)\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
