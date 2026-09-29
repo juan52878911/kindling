@@ -82,7 +82,9 @@ machine_field() { k ps -a -json 2>/dev/null | pyj "next((str(m.get('$2','')) for
 footprint() { api http://k/procstats | pyj "next((m['pss_mib'] for m in d['machines'] if m['name']=='$1'), 0)"; }
 total_fp() { api http://k/procstats | pyj "d['total_pss_mib']"; }
 apple_vms() { pgrep -f com.apple.Virtualization.VirtualMachine | wc -l | tr -d ' '; }
-our_vmms() { pgrep -f "kling-vz --api-sock $ROOT/" | wc -l | tr -d ' '; }
+# Por el socket bajo $ROOT, no por el nombre del binario: KLING_VMM puede
+# llamarse de otra forma.
+our_vmms() { pgrep -f -- "--api-sock $ROOT/" | wc -l | tr -d ' '; }
 our_links() {
   local n=0 l
   for l in /tmp/kling-"$(id -u)"/*.sock; do
