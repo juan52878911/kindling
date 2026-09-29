@@ -32,6 +32,15 @@ func mcpIsolation(args []string) error {
 		return fmt.Errorf("service %q: %w", service, err)
 	}
 
+	// Solo servicios MCP: la anotación no significa nada para otro snapshot, y
+	// ponérsela a una plantilla cualquiera por un nombre mal escrito tiene que
+	// fallar, no "funcionar". Un servicio lleva la etiqueta service (la pone el
+	// import) o, si es de antes, su catálogo.
+	if tools, _ := mcp.ToolsOf(s); s.Service() == "" && len(tools) == 0 {
+		return fmt.Errorf("%q is not an MCP service (no service label and no catalog): "+
+			"see kling mcp ls", service)
+	}
+
 	if fs.NArg() == 1 {
 		fmt.Printf("%s: %s\n", service, describeIsolation(mcp.Isolation(s)))
 		return nil
