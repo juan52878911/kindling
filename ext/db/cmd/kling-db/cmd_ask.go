@@ -175,7 +175,7 @@ func (a *app) askPrepare(ctx context.Context, ref, owner, role string) (*askSess
 		return nil, err
 	}
 	if err := requirePostgres(mc, "ask"); err != nil {
-		return err
+		return nil, err
 	}
 	appRole, db, err := roleDB(mc.Labels)
 	if err != nil {
