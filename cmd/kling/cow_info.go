@@ -15,15 +15,16 @@ func lineaCoW(c *api.CoWInfo) string {
 		return ""
 	}
 	var b strings.Builder
+	// La primera palabra es el modo tal cual (scripts/bench-cow.sh la lee).
 	switch c.Mode {
 	case "reflink":
 		b.WriteString("reflink (the data root shares blocks)")
 	case "store":
-		b.WriteString("reflink in kindling's XFS store")
+		b.WriteString("store (reflink inside kindling's XFS store)")
 	case "clonefile":
 		b.WriteString("clonefile (APFS)")
 	default:
-		b.WriteString("full copy")
+		b.WriteString("copy (every instance copies the whole overlay)")
 	}
 	fmt.Fprintf(&b, "  [daemon.cow=%s]", c.Setting)
 	if s := c.Store; s != nil {
