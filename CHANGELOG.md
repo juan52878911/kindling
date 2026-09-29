@@ -10,6 +10,28 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+## v0.17.0 — 2026-09-29
+
+La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:
+Postgres, MariaDB, Redis y SQLite), grafos de microVMs con aristas (`kling graph`),
+discos con copia al escribir en el núcleo, autorización por inquilino en el socket del
+daemon y el proxy de credenciales para Postgres y MySQL. Probada de punta a punta en
+Linux (CT 105: 224 comprobaciones) y en macOS (M4: 142).
+
+### Compatibilidad al actualizar
+
+- **El daemon y `kling-vz` se actualizan juntos.** El rango de reenvíos 29000-29999
+  queda reservado, las credenciales llevan `any_database` y el broker de enlaces de los
+  grafos es nuevo en los dos lados.
+- **El registro de auditoría del proxy se muda** de `machines/<id>/credaudit.jsonl` a
+  `<root>/audit/<id>.jsonl` (0700/0600, de root). El daemon migra los existentes al
+  arrancar; `kling machine audit` los sigue enseñando.
+- **Sin política de autorización, nada cambia.** `/etc/kling/authz.json` es opcional;
+  con ella, root y el usuario del daemon siguen siendo admin (ver docs/authz.md).
+- **Copia al escribir (`daemon.cow=auto`).** Las máquinas nuevas clonan desde un almacén
+  con reflink. Las existentes no se migran y siguen como estaban.
+- `state.json`, `meta.json` y la firma de los snapshots no cambian de formato.
+
 ### Fase baja
 
 - **`idle_freeze` es "N segundos sin conexiones" (#54).** Cada conexión aceptada por una
