@@ -359,3 +359,36 @@ func TestWebCheckListen(t *testing.T) {
 		}
 	}
 }
+
+// La página embebida tiene que cumplir la CSP (default-src 'none', script-src
+// 'self'): nada de <script> en línea ni manejadores on*=, el JS es /app.js, y el
+// token CSRF va en <meta name="csrf">, que es de donde lo lee app.js.
+func TestWebPaginaEmbebida(t *testing.T) {
+	if !strings.Contains(webIndex, `<meta name="csrf" content="{{CSRF}}">`) {
+		t.Fatal(`the page has no <meta name="csrf" content="{{CSRF}}">`)
+	}
+	scripts := regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`).FindAllStringSubmatch(webIndex, -1)
+	if len(scripts) == 0 {
+		t.Fatal("the page loads no script")
+	}
+	for _, s := range scripts {
+		if strings.TrimSpace(s[2]) != "" || !regexp.MustCompile(`\bsrc="/[a-z]+\.js"`).MatchString(s[1]) {
+			t.Fatalf("inline script (only <script src=\"/x.js\"></script> passes the CSP): %q", s[0])
+		}
+	}
+	if m := regexp.MustCompile(`(?i)\son[a-z]+\s*=`).FindString(webIndex); m != "" {
+		t.Fatalf("inline event handler %q", m)
+	}
+	if strings.Contains(webIndex, "style=") || strings.Contains(strings.ToLower(webIndex), "<style") {
+		t.Fatal("inline style (style-src 'self')")
+	}
+	if strings.Contains(string(webJS), "innerHTML") || strings.Contains(string(webJS), "insertAdjacentHTML") {
+		t.Fatal("app.js must render with textContent, never as HTML")
+	}
+	// Y servida: el marcador sustituido por el token de la sesión.
+	r := newWebRig(t)
+	rec := r.do("GET", "/", "", true)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `<meta name="csrf" content="`+r.w.csrf+`">`) {
+		t.Fatalf("GET / = %d %q", rec.Code, rec.Body.String())
+	}
+}

@@ -28,10 +28,11 @@ bench-*.json
 /kling-linux-amd64
 /kindling-domotica
 
-# Informes generados (las páginas de los ejemplos sí se versionan: van
-# embebidas en sus binarios y sin ellas el ejemplo no compila su interfaz)
+# Informes generados (las páginas de los ejemplos y la de kling db ask-web sí
+# se versionan: van embebidas en sus binarios y sin ellas no compilan)
 *.html
 !examples/**/*.html
+!ext/db/cmd/kling-db/web/*.html
 
 # Restos de herramientas ajenas
 .utm-workspace/
