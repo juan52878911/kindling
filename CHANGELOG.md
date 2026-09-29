@@ -38,6 +38,36 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Núcleo
 
+- **Autorización por operación en el socket del daemon (capacidad `authz`).** Con
+  `/etc/kling/authz.json` (o `kling daemon -authz <ruta>`, `KLING_AUTHZ`), el daemon lee
+  quién llama con `SO_PEERCRED` (Linux) o `LOCAL_PEERCRED` (macOS) —por SSH, el usuario
+  remoto— y le da un rol por uid, usuario, gid o grupo: `admin` (todo) o
+  `tenant:<nombre>`, que solo ve y opera las máquinas, snapshots y grafos con
+  `kling.owner=<nombre>`. Esa etiqueta la pone el daemon al crear (run, sandbox, cada nodo
+  de un grafo) y se hereda por commit, `run -from`, fork y snapshots de grafo; un
+  inquilino no puede fijarla ni cambiarla. Lo ajeno responde 404, los listados y
+  `/events` se filtran, `kling.db.owner` y `upstream_machine` quedan ligados al
+  inquilino, y el proxy de Postgres exige el mismo `kling.owner` en copia y agente.
+  Plantillas compartidas (`shared_templates`, solo lectura) y tokens de inquilino
+  opcionales (`KLING_AUTHZ_TOKEN`). Volúmenes, carpetas del host, store, imágenes y
+  métricas del host quedan para admin. Cada ruta declara su acción en una tabla única y
+  un middleware decide. Sin fichero, todo como siempre, con un aviso en `kling doctor`;
+  `kling info` y `GET /info` (`authz`) dicen el rol de quien pregunta. Un fichero pedido
+  que falta, mal escrito o escribible por otros impide arrancar. Ver
+  [`docs/authz.md`](docs/authz.md).
+- **Proxy de credenciales para MySQL y MariaDB (`-type mysql`, #64).** El agente conecta
+  en claro con su usuario y el marcador; el proxy manda su propio saludo, comprueba el
+  marcador (`mysql_native_password` o la ruta rápida de `caching_sha2_password`, en
+  tiempo constante contra todas las credenciales MySQL), abre TLS verify-full hacia el
+  servidor (el saludo se lee sin buffer) y entra con la clave real
+  (`caching_sha2_password`, completa dentro del TLS, o `mysql_native_password`). Sin TLS
+  (`-upstream-tls disable`, solo con `-upstream`) solo valen los métodos que no mandan
+  la clave. Nunca reenvía un error del servidor antes de autenticar, exige que el
+  servidor hable el dialecto que eligió el invitado antes de mandar la clave y deja una
+  línea de auditoría por conexión (`kind: mysql`). `KILL QUERY` no se mapea. Con
+  credenciales Postgres y MySQL en la misma máquina, MySQL es el 3306 (en Linux, un DNAT
+  propio a `n.HostIP:5382`). `kling-vz` anuncia `mysql` en `credential_kinds`. Ver
+  [`docs/mysql.md`](docs/mysql.md).
 - **Kernel K1 amd64: arranca en Firecracker 1.17.** Con 6.1.140 el K1 amd64 no
   arrancaba (pánico al montar la raíz: Firecracker 1.17 declara un PCI en su DSDT y
   el K1 no tiene PCI) y el comprobador fallaba: el menú de mitigaciones se llama
@@ -173,6 +203,25 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### kling db
 
+- **`kling db doctor -url` habla TLS (#86).** `pgmini` negocia TLS (SSLRequest + TLS 1.2+)
+  y usa SCRAM-SHA-256-PLUS (`tls-server-end-point`) cuando el servidor lo ofrece; un
+  servidor sin TLS nunca degrada a texto claro. `doctor -url` acepta `sslmode`
+  (`disable|require|verify-ca|verify-full`, por defecto `verify-full`, contra las raíces
+  del sistema más `sslrootcert` de la URL o `-ca-file`) y `-tls-server-name`. `sslmode=disable`
+  (y `require`, que no autentica al servidor) solo con loopback, salvo `-insecure`
+  explícito, y el informe lo avisa (DB041). `allow` y `prefer` se rechazan. Ya se puede
+  revisar una base en la nube (RDS con SSL forzado) sin mandar nada sin cifrar.
+- **MySQL y MariaDB en `kling db` (#64).** Plantillas MariaDB (Alpine) con
+  `scripts/db-golden-mysql.sh` o `golden image|build -engine mysql`: datadir en el
+  overlay, root solo por `unix_socket`, sin cuentas anónimas, `local-infile` apagado,
+  `secure-file-priv` acotado y `server_audit` solo con `CONNECT`; la plantilla lleva
+  `kling.db.engine=mysql`. `up`, `fork`, `connect` (`-mysql`, `-dsn` con `mysql://`),
+  `rotate`, `reset`, `rm`, `branch`, `doctor` (reglas `MY001`-`MY054`) y `audit` (lee
+  server_audit) funcionan sobre esas copias. La clave de cada copia se genera en el host
+  y al invitado va su hash de `mysql_native_password`, nunca la clave, ni siquiera al
+  construir la plantilla (se calcula con `openssl` o `python3`). `attach`, `role`,
+  `rehearse`, `snapshot`/`undo`, `tenant-check`, `ask`, `clone` y `doctor -url` siguen
+  siendo solo de Postgres y lo dicen. Ver [`docs/mysql.md`](docs/mysql.md).
 - **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
   `up`, `fork`, `connect`, `reset`, `rm`, `doctor`, `audit` y `golden`. Cada copia estrena
   clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.
@@ -186,6 +235,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   recibe solo el esquema y la pregunta y devuelve una SQL que se valida, se enseña y se
   ejecuta con un rol de solo lectura en `BEGIN TRANSACTION READ ONLY`. Ver
   [`docs/db-ask.md`](docs/db-ask.md).
+- **`kling db ask-web`.** La misma garantía de `ask` en una página web mínima para quien no usa
+  la terminal (HTML y JS embebidos, sin dependencias): solo esquema y pregunta hacia el modelo,
+  la SQL se muestra y se ejecuta al pulsar un botón, con el rol de solo lectura en `READ ONLY`;
+  `-explain` exige `-send-data`. Escucha solo en loopback (`-allow-remote` con aviso, y aun
+  así solo contesta al `Host` de la dirección de escucha), token
+  aleatorio en la URL que pasa a cookie `SameSite=Strict`, CSRF en cada POST, CSP sin inline,
+  vida acotada (`-ttl`) y límite de peticiones. Ver [`docs/db-ask.md`](docs/db-ask.md).
 - **`kling db rehearse`, `rotate`, `snapshot`/`snapshots`/`undo`.** `rehearse` ensaya
   migraciones SQL en una copia desechable (tiempos, esperas por locks, tamaño; un
   `lock_timeout` se informa como "would block"); `rotate` da una clave nueva a una copia y
@@ -218,6 +274,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   culpable y el porqué (las reglas de `doctor`), `-json` y salida 1 si algo falla, para
   CI. Los valores de inquilino nunca salen de la base ni se escriben en la SQL, y solo
   se imprimen recuentos. Ver [`docs/db.md`](docs/db.md#aislamiento-entre-inquilinos-tenant-check).
+- **`kling db diff <copia1> <copia2> [-json] [-schema-only] [-max-rows N]`: qué cambió
+  entre dos copias, sin volcar datos.** Esquema (tablas, columnas y tipos, clave
+  primaria, índices, restricciones, RLS y políticas) y, por tabla, filas nuevas,
+  borradas y cambiadas por clave primaria. Dentro de cada copia se calculan huellas por
+  fila (md5 de la clave y md5 de la fila, las dos con una sal aleatoria de la ejecución); al host
+  solo llegan huellas, ni claves ni valores. Tablas sin clave primaria: solo recuentos y
+  un aviso. Más de `-max-rows` filas (100000) en una tabla: muestreo por huella de
+  clave, igual en las dos copias y declarado en el informe. Las definiciones que se
+  enseñan no llevan literales. Ver [`docs/db.md`](docs/db.md#diff-entre-copias-diff).
 
 - **`kling db clone <postgres-url> -mask REGLAS [-golden G]`: un golden desde producción
   con los datos personales enmascarados.** La contraseña (de `PGPASSWORD` o
@@ -249,6 +314,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Revisión de la fase media B** (#64, #67, #72, #78, #86). La página de `kling db
+  ask-web` (`web/index.html`) no llegaba al repositorio (el `*.html` del `.gitignore`) y
+  el plugin no compilaba: ahora se versiona, y un test comprueba que cumple la CSP (sin
+  `<script>` en línea ni `on*=`, el CSRF en `<meta name="csrf">`, `textContent`); con
+  `-allow-remote` la página solo contesta al `Host` de la dirección de escucha (`0.0.0.0`
+  y `::` se rechazan). `kling db diff`: la huella de cada fila también lleva la sal.
+  Autorización: `PUT /snapshots/{name}/credentials` pasa por la misma revisión que las
+  credenciales de una máquina; la política se abre con `O_NOFOLLOW` y se comprueba el
+  descriptor, no el nombre (ni TOCTOU ni una FIFO que bloquee el arranque); `commit`
+  sobre un nombre que el inquilino no ve responde siempre `409 ... is taken`, con o sin
+  `-replace` y sin decir de quién es; y `GET /info` sin rol ya no cuenta la raíz, las
+  carpetas compartibles ni el almacén. `kling db connect -mysql` decide la opción de TLS
+  del cliente por `--version` y `--help` y, si no lo sabe, lo dice en vez de pasar
+  `--ssl-mode` a un cliente de MariaDB.
 - **`kling image put` en Linux ya no escribe fuera de la imagen.** Montaba la imagen y
   escribía en `mnt/<ruta>`: un enlace simbólico absoluto de un directorio intermedio
   (`usr/local -> /tmp/x`) lo resolvía el kernel contra la raíz del host, y el daemon
@@ -598,6 +677,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   registra por sesión, y el cliente de MMDS ignora `HTTP_PROXY` del entorno.
 
 ### Pruebas
+
+- `scripts/90-e2e.sh`: nuevas 7g (`kling db diff` entre dos copias de la plantilla
+  Postgres: iguales, y tras cambiar una fila, añadir otra y una columna; ningún valor en
+  la salida), 7h (MariaDB con `KLING_E2E_MYSQL_GOLDEN`: `up`, un agente que entra por el
+  proxy de MySQL con solo el marcador, `doctor` limpio y con una cuenta anónima, `audit`,
+  `rm`; ninguna clave en la salida) y 7i (autorización con `KLING_E2E_AUTHZ=1` y dos
+  tokens de inquilino). Cada una se salta, diciéndolo, sin lo que necesita.
 
 - `ext/mcp/scripts/90-e2e.sh`: la sección 8 crea su propia instancia del servicio, le
   inyecta el store y abre la sesión directamente contra su puente, en vez de depender de

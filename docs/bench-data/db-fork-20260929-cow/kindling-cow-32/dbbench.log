@@ -1,0 +1,3 @@
+kindling-run N=32 rep 1: ok ok=32 failed=0 p50=1173.3ms max=1710.7ms
+kindling-run N=32 rep 2: ok ok=32 failed=0 p50=1320.8ms max=1805.5ms
+kindling-run N=32 rep 3: ok ok=32 failed=0 p50=1270.1ms max=1753.9ms

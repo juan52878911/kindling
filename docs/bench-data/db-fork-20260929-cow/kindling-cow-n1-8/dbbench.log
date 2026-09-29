@@ -1,0 +1,7 @@
+kindling-run N=1 rep 1: ok ok=1 failed=0 p50=2043.3ms max=2043.3ms
+kindling-run N=1 rep 2: ok ok=1 failed=0 p50=133.2ms max=133.2ms
+kindling-run N=1 rep 3: ok ok=1 failed=0 p50=132.5ms max=132.5ms
+kindling-run N=8 rep 1: ok ok=8 failed=0 p50=349.4ms max=404.6ms
+kindling-run N=8 rep 2: ok ok=8 failed=0 p50=340.6ms max=422.1ms
+kindling-run N=8 rep 3: ok ok=8 failed=0 p50=352.2ms max=432.4ms
+kindling-run N=32: skipped: N=32 × 128 MiB = 4096 MiB > 70% of free disk 4581 MiB

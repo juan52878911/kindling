@@ -35,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "ready"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach", "graphs", "authz", "ready"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -163,7 +163,18 @@ type Server struct {
 	// exec de más, y nada la cambia dentro de la vida del proceso —un binario
 	// distinto en disco necesita un daemon nuevo para tenerse en cuenta.
 	fcVersion string
+
+	// authz es la política de autorización (authz.go). nil = sin política:
+	// quien alcanza el socket manda sobre todo, como siempre.
+	authz *Politica
+	// identificar lee quién está al otro lado de una conexión. nil =
+	// credencialesPar (SO_PEERCRED / LOCAL_PEERCRED); los tests ponen uno falso.
+	identificar func(net.Conn) (Llamante, error)
 }
+
+// SetAuthz fija la política de autorización (nil = ninguna). Se llama antes de
+// Listen: la política no cambia con el daemon en marcha.
+func (s *Server) SetAuthz(p *Politica) { s.authz = p }
 
 // SetShareConfig fija de dónde lee el daemon su configuración de carpetas
 // compartidas (daemon.share_roots y daemon.share_copy_max_mib). Se consulta en
@@ -204,81 +215,90 @@ func firecrackerVersion(bin string) string {
 	return string(line)
 }
 
+// rutas es la tabla del API: cada ruta con su acción de autorización (ver
+// authz.go). Es el ÚNICO sitio donde se registra una ruta, así que ninguna se
+// queda sin decidir quién puede usarla.
+func (s *Server) rutas() []ruta {
+	return []ruta{
+		{"GET /info", AccionInfo, nil, s.handleInfo},
+		{"GET /machines", AccionListar, nil, s.handleList},
+		{"POST /machines", AccionCrear, revisarRun, s.handleRun},
+		{"GET /machines/{ref}", AccionMaquina, nil, s.handleGet},
+		{"POST /machines/{ref}/freeze", AccionMaquina, nil, s.handleFreeze},
+		{"POST /machines/{ref}/thaw", AccionMaquina, nil, s.handleThaw},
+		{"POST /machines/{ref}/pause", AccionMaquina, nil, s.handlePause},
+		{"POST /machines/{ref}/squeeze", AccionMaquina, nil, s.handleSqueeze},
+		{"POST /machines/{ref}/resize", AccionMaquina, nil, s.handleResize},
+		{"POST /machines/{ref}/mmds", AccionMaquina, nil, s.handleMMDS},
+		{"POST /machines/{ref}/credentials", AccionMaquina, revisarCredenciales, s.handleCredentials},
+		{"DELETE /machines/{ref}/credentials/{env}", AccionMaquina, nil, s.handleRemoveCredential},
+		{"POST /machines/{ref}/stop", AccionMaquina, nil, s.handleStop},
+		{"DELETE /machines/{ref}", AccionMaquina, nil, s.handleRemove},
+		{"PUT /machines/{ref}/labels", AccionMaquina, revisarEtiquetas, s.handleLabels},
+		{"POST /machines/{ref}/commit", AccionMaquina, revisarCommit, s.handleCommit},
+		{"POST /images", AccionAdmin, nil, s.handleBuildImage},
+		{"GET /images", AccionImagenes, nil, s.handleImages},
+		{"DELETE /images/{name}", AccionAdmin, nil, s.handleRemoveImage},
+		{"GET /volumes", AccionAdmin, nil, s.handleVolumes},
+		{"POST /volumes", AccionAdmin, nil, s.handleCreateVolume},
+		{"DELETE /volumes/{name}", AccionAdmin, nil, s.handleRemoveVolume},
+		{"POST /volumes/{name}/populate", AccionAdmin, nil, s.handlePopulateVolume},
+		{"GET /volumes/{name}/snapshots", AccionAdmin, nil, s.handleVolumeSnapshots},
+		{"POST /volumes/{name}/snapshots", AccionAdmin, nil, s.handleSnapshotVolume},
+		{"POST /volumes/{name}/restore", AccionAdmin, nil, s.handleRestoreVolume},
+		{"DELETE /volumes/{name}/snapshots/{snap}", AccionAdmin, nil, s.handleRemoveVolumeSnapshot},
+		{"GET /images/{name}/recipe", AccionAdmin, nil, s.handleImageRecipe},
+		{"GET /images/{name}/files", AccionAdmin, nil, s.handleGetImageFile},
+		{"PUT /images/{name}/files", AccionAdmin, nil, s.handlePutImageFile},
+		{"GET /images/{name}/blob", AccionAdmin, nil, s.handleGetImageBlob},
+		{"PUT /images/{name}/blob", AccionAdmin, nil, s.handlePutImageBlob},
+		{"GET /snapshots", AccionListar, nil, s.handleSnapshots},
+		{"GET /snapshots/{name}", AccionSnapLeer, nil, s.handleSnapshot},
+		{"PUT /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleSetAnnotation},
+		{"PUT /snapshots/{name}/credentials", AccionSnapEscribir, revisarCredenciales, s.handleSnapshotCredentials},
+		{"DELETE /snapshots/{name}/annotations/{key}", AccionSnapEscribir, nil, s.handleRemoveAnnotation},
+		{"GET /store/{ns}", AccionAdmin, nil, s.handleStoreKeys},
+		{"GET /store/{ns}/{key}", AccionAdmin, nil, s.handleStoreGet},
+		{"PUT /store/{ns}/{key}", AccionAdmin, nil, s.handleStorePut},
+		{"DELETE /store/{ns}/{key}", AccionAdmin, nil, s.handleStoreDelete},
+		{"DELETE /snapshots/{name}", AccionSnapEscribir, nil, s.handleRemoveSnapshot},
+		{"GET /machines/{ref}/logs", AccionMaquina, nil, s.handleLogs},
+		{"GET /machines/{ref}/credaudit", AccionMaquina, nil, s.handleCredAudit},
+		{"POST /machines/{ref}/guest", AccionMaquina, nil, s.handleGuest},
+		{"POST /machines/{ref}/renew", AccionMaquina, nil, s.handleRenew},
+		{"GET /machines/{ref}/ready", AccionMaquina, nil, s.handleReady},
+		{"POST /machines/{ref}/hooks", AccionMaquina, nil, s.handleHooks},
+		{"POST /machines/{ref}/exec", AccionMaquina, nil, s.handleExec},
+		{"POST /machines/{ref}/shell", AccionMaquina, nil, s.handleShell},
+		{"GET /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
+		{"PUT /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
+		{"DELETE /machines/{ref}/files", AccionMaquina, nil, s.handleFiles},
+		{"POST /shares/uploads", AccionAdmin, nil, s.handleShareUpload},
+		{"POST /sandboxes", AccionCrear, revisarSandbox, s.handleCreateSandbox},
+		{"GET /sandboxes", AccionListar, nil, s.handleListSandboxes},
+		{"GET /sandboxes/{ref}", AccionMaquina, nil, s.handleGetSandbox},
+		{"POST /sandboxes/{ref}/renew", AccionMaquina, nil, s.handleRenewSandbox},
+		{"POST /sandboxes/{ref}/fork", AccionMaquina, revisarFork, s.handleForkSandbox},
+		{"DELETE /sandboxes/{ref}", AccionMaquina, nil, s.handleRemoveSandbox},
+		{"POST /graphs", AccionCrear, revisarGrafo, s.handleGraphUp},
+		{"GET /graphs", AccionListar, nil, s.handleGraphs},
+		{"GET /graphs/{ref}", AccionGrafo, nil, s.handleGraph},
+		{"POST /graphs/{ref}/freeze", AccionGrafo, nil, s.handleGraphFreeze},
+		{"POST /graphs/{ref}/thaw", AccionGrafo, nil, s.handleGraphThaw},
+		{"POST /graphs/{ref}/snapshot", AccionGrafo, nil, s.handleGraphSnapshot},
+		{"POST /graphs/{ref}/fork", AccionGrafo, nil, s.handleGraphFork},
+		{"DELETE /graphs/{ref}", AccionGrafo, nil, s.handleGraphRemove},
+		{"GET /events", AccionListar, nil, s.handleEvents},
+		{"GET /metrics", AccionAdmin, nil, s.handleMetrics},
+		{"GET /procstats", AccionAdmin, nil, s.handleProcStats},
+	}
+}
+
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /info", s.handleInfo)
-	mux.HandleFunc("GET /machines", s.handleList)
-	mux.HandleFunc("POST /machines", s.handleRun)
-	mux.HandleFunc("GET /machines/{ref}", s.handleGet)
-	mux.HandleFunc("POST /machines/{ref}/freeze", s.handleFreeze)
-	mux.HandleFunc("POST /machines/{ref}/thaw", s.handleThaw)
-	mux.HandleFunc("POST /machines/{ref}/pause", s.handlePause)
-	mux.HandleFunc("POST /machines/{ref}/squeeze", s.handleSqueeze)
-	mux.HandleFunc("POST /machines/{ref}/resize", s.handleResize)
-	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
-	mux.HandleFunc("POST /machines/{ref}/credentials", s.handleCredentials)
-	mux.HandleFunc("DELETE /machines/{ref}/credentials/{env}", s.handleRemoveCredential)
-	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
-	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
-	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
-	mux.HandleFunc("POST /machines/{ref}/commit", s.handleCommit)
-	mux.HandleFunc("POST /images", s.handleBuildImage)
-	mux.HandleFunc("GET /images", s.handleImages)
-	mux.HandleFunc("DELETE /images/{name}", s.handleRemoveImage)
-	mux.HandleFunc("GET /volumes", s.handleVolumes)
-	mux.HandleFunc("POST /volumes", s.handleCreateVolume)
-	mux.HandleFunc("DELETE /volumes/{name}", s.handleRemoveVolume)
-	mux.HandleFunc("POST /volumes/{name}/populate", s.handlePopulateVolume)
-	mux.HandleFunc("GET /volumes/{name}/snapshots", s.handleVolumeSnapshots)
-	mux.HandleFunc("POST /volumes/{name}/snapshots", s.handleSnapshotVolume)
-	mux.HandleFunc("POST /volumes/{name}/restore", s.handleRestoreVolume)
-	mux.HandleFunc("DELETE /volumes/{name}/snapshots/{snap}", s.handleRemoveVolumeSnapshot)
-	mux.HandleFunc("GET /images/{name}/recipe", s.handleImageRecipe)
-	mux.HandleFunc("GET /images/{name}/files", s.handleGetImageFile)
-	mux.HandleFunc("PUT /images/{name}/files", s.handlePutImageFile)
-	mux.HandleFunc("GET /images/{name}/blob", s.handleGetImageBlob)
-	mux.HandleFunc("PUT /images/{name}/blob", s.handlePutImageBlob)
-	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
-	mux.HandleFunc("GET /snapshots/{name}", s.handleSnapshot)
-	mux.HandleFunc("PUT /snapshots/{name}/annotations/{key}", s.handleSetAnnotation)
-	mux.HandleFunc("PUT /snapshots/{name}/credentials", s.handleSnapshotCredentials)
-	mux.HandleFunc("DELETE /snapshots/{name}/annotations/{key}", s.handleRemoveAnnotation)
-	mux.HandleFunc("GET /store/{ns}", s.handleStoreKeys)
-	mux.HandleFunc("GET /store/{ns}/{key}", s.handleStoreGet)
-	mux.HandleFunc("PUT /store/{ns}/{key}", s.handleStorePut)
-	mux.HandleFunc("DELETE /store/{ns}/{key}", s.handleStoreDelete)
-	mux.HandleFunc("DELETE /snapshots/{name}", s.handleRemoveSnapshot)
-	mux.HandleFunc("GET /machines/{ref}/logs", s.handleLogs)
-	mux.HandleFunc("GET /machines/{ref}/credaudit", s.handleCredAudit)
-	mux.HandleFunc("POST /machines/{ref}/guest", s.handleGuest)
-	mux.HandleFunc("POST /machines/{ref}/renew", s.handleRenew)
-	mux.HandleFunc("GET /machines/{ref}/ready", s.handleReady)
-	mux.HandleFunc("POST /machines/{ref}/hooks", s.handleHooks)
-
-	// Ejecución y ficheros (solo máquinas con allow_exec) y sandboxes.
-	mux.HandleFunc("POST /machines/{ref}/exec", s.handleExec)
-	mux.HandleFunc("POST /machines/{ref}/shell", s.handleShell)
-	mux.HandleFunc("GET /machines/{ref}/files", s.handleFiles)
-	mux.HandleFunc("PUT /machines/{ref}/files", s.handleFiles)
-	mux.HandleFunc("DELETE /machines/{ref}/files", s.handleFiles)
-	mux.HandleFunc("POST /shares/uploads", s.handleShareUpload)
-	mux.HandleFunc("POST /sandboxes", s.handleCreateSandbox)
-	mux.HandleFunc("GET /sandboxes", s.handleListSandboxes)
-	mux.HandleFunc("GET /sandboxes/{ref}", s.handleGetSandbox)
-	mux.HandleFunc("POST /sandboxes/{ref}/renew", s.handleRenewSandbox)
-	mux.HandleFunc("POST /sandboxes/{ref}/fork", s.handleForkSandbox)
-	mux.HandleFunc("DELETE /sandboxes/{ref}", s.handleRemoveSandbox)
-	mux.HandleFunc("POST /graphs", s.handleGraphUp)
-	mux.HandleFunc("GET /graphs", s.handleGraphs)
-	mux.HandleFunc("GET /graphs/{ref}", s.handleGraph)
-	mux.HandleFunc("POST /graphs/{ref}/freeze", s.handleGraphFreeze)
-	mux.HandleFunc("POST /graphs/{ref}/thaw", s.handleGraphThaw)
-	mux.HandleFunc("POST /graphs/{ref}/snapshot", s.handleGraphSnapshot)
-	mux.HandleFunc("POST /graphs/{ref}/fork", s.handleGraphFork)
-	mux.HandleFunc("DELETE /graphs/{ref}", s.handleGraphRemove)
-	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("GET /procstats", s.handleProcStats)
+	for _, rt := range s.rutas() {
+		mux.HandleFunc(rt.patron, s.autorizar(rt))
+	}
 	return sinBarrasEscapadas(mux)
 }
 
@@ -339,7 +359,8 @@ func (s *Server) Listen(ctx context.Context) error {
 	s.mgr.Watch(ctx, 10*time.Second)
 
 	srv := &http.Server{
-		Handler: s.routes(),
+		Handler:     s.routes(),
+		ConnContext: s.conContexto,
 		// Sin timeouts, un cliente que abre la conexión y nunca termina
 		// el header mantiene una goroutine y un FD indefinidamente. El
 		// daemon controla root: este es el tipo de superficie que no
@@ -383,6 +404,11 @@ func (s *Server) Listen(ctx context.Context) error {
 	}
 	if s.mgr.JailerBlocked != "" {
 		log.Printf("WARNING: %s", s.mgr.JailerBlocked)
+	}
+	if s.authz != nil {
+		log.Printf("authz policy %s: operations are authorized per caller (docs/authz.md)", s.authz.Ruta)
+	} else {
+		log.Printf("no authz policy (%s): whoever reaches the socket controls everything", RutaAuthzPorDefecto)
 	}
 	log.Printf("kling daemon %s listening on %s (root=%s)", Version, s.socket, s.root)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -483,12 +509,13 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Version:      Version,
 		Root:         s.root,
 		KVM:          kvmErr == nil,
-		Machines:     s.mgr.Count(),
+		Machines:     s.contarMaquinas(r),
 		Capabilities: Capabilities,
 		Backend:      s.mgr.Backend(),
 		Arch:         runtime.GOARCH,
 		ShareRoots:   s.mgr.ShareRoots(),
 		CoW:          s.mgr.CoWInfo(),
+		Authz:        s.infoAuthz(r),
 	}
 	if cifrado, conocido := machine.CifradoEnReposo(s.root); conocido {
 		info.EncryptedAtRest = &cifrado
@@ -496,11 +523,25 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if s.fcVersion != "" {
 		info.Firecrack = s.fcVersion
 	}
+	// Quien no tiene rol solo recibe lo que `kling doctor` necesita para
+	// explicarle por qué se le niega todo (versión, capacidades, su authz):
+	// nada de rutas ni del almacén del host.
+	if rol, ok := rolDe(r); ok && !rol.Valido() {
+		info = api.Info{Version: Version, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
+	}
 	writeJSON(w, http.StatusOK, info)
 }
 
+// contarMaquinas es cuántas máquinas ve quien pregunta.
+func (s *Server) contarMaquinas(r *http.Request) int {
+	if _, filtra := inquilinoDe(r); filtra {
+		return len(filtrarMaquinas(r, s.mgr.List()))
+	}
+	return s.mgr.Count()
+}
+
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.mgr.List())
+	writeJSON(w, http.StatusOK, filtrarMaquinas(r, s.mgr.List()))
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -810,7 +851,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.mgr.Snapshots())
+	writeJSON(w, http.StatusOK, s.filtrarSnapshots(r, s.mgr.Snapshots()))
 }
 
 func (s *Server) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
@@ -857,6 +898,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case ev, ok := <-ch:
 			if !ok {
 				return
+			}
+			if !s.eventoVisible(r, ev) {
+				continue
 			}
 			if enc.Encode(ev) != nil {
 				return

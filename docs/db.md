@@ -7,6 +7,12 @@ microVM instanciada de una plantilla con Postgres ya caliente
 microVM; con `attach` (el [modelo A](#modelo-a-una-copia-compartida-attach)) una copia
 se comparte con agentes de **otras** microVMs sin que vean la contraseña.
 
+**MySQL/MariaDB**: `up`, `fork`, `connect` (`-mysql`, DSN `mysql://`), `rotate`, `reset`,
+`rm`, `branch`, `doctor` y `audit` funcionan igual sobre copias de una plantilla MariaDB
+(`golden image|build -engine mysql`, etiqueta `kling.db.engine=mysql`); al invitado va
+el hash de `mysql_native_password`, nunca la clave. Lo demás se rechaza en copias MySQL
+en esta versión. Todo en [mysql.md](mysql.md).
+
 ```sh
 kling db golden -script scripts/db-golden.sh build -seed-mb 20 pg   # la plantilla, una vez
 kling db up pg -name t1                  # una copia lista, con su propia contraseña
@@ -37,6 +43,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `snapshot [-rm] <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]` | puntos de restauración de una copia viva y vuelta a uno de ellos (mismo nombre y dueño, clave nueva) |
 | `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `tenant-check <copia> [-role R] [-column tenant_id] [-setting app.tenant_id] [-max 5] [-json]` | prueba que cada inquilino solo ve sus filas y que sin inquilino no ve ninguna; sale con 1 si algo falla. Ver [Aislamiento entre inquilinos](#aislamiento-entre-inquilinos-tenant-check) |
+| `diff <copia1> <copia2> [-json] [-schema-only] [-max-rows 100000]` | diferencias de esquema y, por tabla, filas nuevas, borradas y cambiadas por clave primaria, sin volcar datos. Ver [Diff entre copias](#diff-entre-copias-diff) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
 | `ask <copia> "pregunta" [-role R] [-yes] [-explain -send-data]` | un modelo traduce la pregunta a una SQL que se enseña, se confirma y se ejecuta con un rol de solo lectura en una transacción READ ONLY; ver [db-ask.md](db-ask.md) |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
@@ -85,6 +92,13 @@ también en las futuras del rol de la aplicación (`ALTER DEFAULT PRIVILEGES`). 
 - `kling db connect <copia> -role agent` usa esa clave. `kling db rm` se lleva todas.
 
 ## Aislamiento entre inquilinos (tenant-check)
+
+`doctor -url` habla TLS: `sslmode` de la URL (`verify-full` por defecto: cadena y nombre
+contra las raíces del sistema más `sslrootcert` o `-ca-file`; `-tls-server-name` si el
+certificado es de otro nombre, p. ej. tras un forward a `localhost`), con SCRAM-SHA-256-PLUS
+si el servidor lo ofrece. `disable` y `require` solo en loopback, salvo `-insecure` (el
+informe lo avisa con DB041); `allow` y `prefer` se rechazan. Un servidor sin TLS falla en
+vez de degradarse.
 
 `doctor` lee las políticas RLS; `kling db tenant-check <copia>` las **ejercita**. Nace del
 fallo real de AuraCRM: una política como
@@ -168,6 +182,38 @@ En CI, después de `kling db up` y las migraciones:
 kling db tenant-check "$COPY" -json > tenant-check.json   # salida 1 si hay fugas
 ```
 
+## Diff entre copias (diff)
+
+`kling db diff <copia1> <copia2>` dice qué cambió de la primera a la segunda: "esta
+migración añadió 3 columnas y cambió 1.200 filas". Complementa `rehearse` (que ensaya) y
+`undo` (que vuelve atrás): compara una copia antes y después, o una copia y su `undo`.
+
+- **Esquema**: tablas nuevas y borradas y, en las comunes, columnas (nombre, tipo,
+  `NOT NULL`, si cambió el `DEFAULT`), clave primaria, índices, restricciones, RLS
+  (activada/forzada) y políticas. Las definiciones que se enseñan pasan por el mismo
+  filtro que `tenant-check`: sin literales (`tenant = '…'`).
+- **Filas**: por tabla con la misma clave primaria en las dos copias, cuántas filas son
+  nuevas, borradas o cambiadas. Se comparan las columnas comunes, así que añadir una
+  columna no marca todas las filas como cambiadas.
+- **Sin volcar datos**: dentro de cada copia (`kling exec` + psql por stdin, sesión de
+  solo lectura) se calculan dos huellas de 64 bits por fila: la de la clave primaria (md5
+  con una **sal aleatoria** de esa ejecución, igual en las dos copias, para que no se
+  puedan buscar ids conocidos) y la de la fila entera (con la misma sal: tampoco se
+  pueden adivinar filas de pocos valores posibles). Al host solo llegan huellas; ni
+  una clave ni un valor salen de la base. Los nombres de tablas y columnas se citan como
+  identificadores.
+- **Sin clave primaria** (o distinta en cada copia): solo recuentos y un aviso.
+- **`-max-rows N`** (100000; hasta 2.000.000): con más filas en una tabla se muestrea, 1
+  de cada k según la huella de la clave (las mismas filas en las dos copias), y el
+  informe lo declara: los recuentos de esa tabla son los de la muestra.
+- **`-schema-only`**: solo el esquema; no cuenta ni lee filas.
+- `-json` para máquinas. La salida es 0 aunque haya diferencias; `same` en el JSON dice
+  si las copias son iguales.
+
+Las copias deberían estar quietas mientras se comparan: cada tabla se lee en su propia
+sesión, no en una instantánea común. Una huella de 64 bits basta para decidir "cambió", no
+es una prueba criptográfica de igualdad.
+
 ## Plantillas
 
 `kling db templates` lista las incluidas y `kling db golden build -template crm-demo
@@ -187,9 +233,10 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 | `kling.db.owner` | quién la pidió; `local` en el CLI |
 | `kling.db.state` | `preparing` o `ready` |
 | `kling.db.role`, `kling.db.database` | rol y base de la aplicación (`app`, `appdb`) |
+| `kling.db.engine` | `mysql` en las copias de una plantilla MariaDB/MySQL (la pone `db-golden-mysql.sh` y se hereda); sin ella, Postgres |
 | `kind=sandbox` | lo que permite `sandbox fork` sobre la copia |
 | `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del toplevel del repo, clave de la rama y último uso (segundos unix) |
-| `kling.ports` | incluye `5432`: el backend de macOS abre el reenvío |
+| `kling.ports` | incluye `5432` (`3306` en MySQL): el backend de macOS abre el reenvío |
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
 fusiona y `fork` las copia enteras añadiendo `kling.fork-of`. Por eso `up` pasa
@@ -217,6 +264,9 @@ nacimiento de cada copia). Por eso
 - Si la rotación falla (o Postgres no arranca en 30 s), la copia **se destruye**.
 - La contraseña de la plantilla sigue viva en una copia solo mientras está en
   `preparing` (el tiempo de un `pg_isready` y un `ALTER ROLE`), nunca en una `ready`.
+- En una copia MySQL, lo mismo con el hash de `mysql_native_password`
+  (`ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS '<hash>'`, al cliente
+  de root por el socket) y la comprobación en `mysql.user`; ver [mysql.md](mysql.md).
 
 ## Modelo de seguridad
 

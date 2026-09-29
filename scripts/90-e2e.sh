@@ -1631,6 +1631,332 @@ if modo == "hold":
   rm -rf "$DBTMP"; unset KLING_DB_STATE
 fi
 
+# ── 7g. kling db diff ────────────────────────────────────────────────────────
+# Dos copias de la misma plantilla Postgres: iguales, diff dice same; tras
+# cambiar una fila, añadir otra y una columna en la segunda, diff lo cuenta
+# (esquema y filas) sin que ningún valor de la tabla salga en su salida. Mismas
+# variables que 7e; sin KLING_E2E_DB_GOLDEN se salta, avisando.
+step "7g. kling db diff"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN no está (nombre de la plantilla Postgres): sin copias que comparar\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  dbsql() { $KLING exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  D1="e2e-dd1-$$"; D2="e2e-dd2-$$"
+  o1=$(dbk up "$DBG" -name "$D1"); o2=$(dbk up "$DBG" -name "$D2")
+  if ! contiene "$o1" "ready" || ! contiene "$o2" "ready"; then
+    bad "db up (7g)" "dos copias ready" "$o1 / $o2"
+  else
+    for c in "$D1" "$D2"; do
+      dbsql "$c" "CREATE TABLE e2e_diff(id int PRIMARY KEY, v text);
+        INSERT INTO e2e_diff VALUES (1, 'e2e-valor-uno'), (2, 'e2e-valor-dos'), (3, 'e2e-valor-tres')" >/dev/null
+    done
+    out=$(dbk diff "$D1" "$D2" -json); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" '"same": true'; } && ok "diff de dos copias iguales: same" \
+      || bad "diff iguales" '"same": true' "rc=$rc $(printf '%s' "$out" | tail -5)"
+    dbsql "$D2" "UPDATE e2e_diff SET v = 'e2e-valor-cambiado' WHERE id = 2;
+      INSERT INTO e2e_diff VALUES (4, 'e2e-valor-nuevo'); ALTER TABLE e2e_diff ADD COLUMN extra text" >/dev/null
+    out=$(dbk diff "$D1" "$D2"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "~ public.e2e_diff" && contiene "$out" "+ column extra"; } \
+      && ok "diff: la columna nueva sale en el esquema" \
+      || bad "diff esquema" "~ public.e2e_diff y + column extra" "rc=$rc $(printf '%s' "$out" | tail -8)"
+    contiene "$out" "new 1, deleted 0, changed 1, unchanged 2" \
+      && ok "diff: una fila nueva y una cambiada, por huellas" \
+      || bad "diff filas" "new 1, deleted 0, changed 1, unchanged 2" "$(printf '%s' "$out" | tail -8)"
+    out=$(dbk diff "$D1" "$D2" -schema-only -json); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" '"schema_only": true' && contiene "$out" '"same": false'; } \
+      && ok "diff -schema-only -json: distinto, sin filas" || bad "diff -schema-only" 'schema_only true, same false' "rc=$rc"
+    out=$(dbk diff "$D1" "$D1"); rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "same copy"; } && ok "diff de una copia consigo misma: rechazado" \
+      || bad "diff misma copia" "same copy" "rc=$rc $out"
+    # Ni un valor de la tabla en ninguna salida de diff: solo estructura y cuentas.
+    if grep -q "e2e-valor" "$DBLOG"; then
+      bad "diff sin datos" "ningún valor de e2e_diff en la salida" "$(grep -m2 e2e-valor "$DBLOG")"
+    else
+      ok "diff no saca ningún valor de las filas"
+    fi
+  fi
+  dbk rm "$D1" >/dev/null 2>&1; dbk rm "$D2" >/dev/null 2>&1
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
+# ── 7h. MariaDB: plantilla, proxy de credenciales, doctor y audit ────────────
+# Con KLING_E2E_MYSQL_GOLDEN (una plantilla MariaDB de scripts/db-golden-mysql.sh,
+# construida con kling db golden ... -engine mysql). Una copia; un agente la usa
+# por el proxy de MySQL con SOLO el marcador (la clave de la copia la tiene el
+# proxy); doctor limpio y con una cuenta anónima; audit con conexiones y sin SQL;
+# rm. Ninguna salida lleva la clave.
+#
+# El proxy no marca a la red de kindling (172.30.0.0/16): se le da -upstream a un
+# reenvío en el loopback del host (127.0.0.1:<libre> -> la copia, un relé en
+# python3), con -upstream-tls disable (la copia no tiene TLS; mysql_native_password
+# no manda la clave). El agente es la imagen $IMGVOL y habla el protocolo con una
+# sonda en python3 (sin cliente de MySQL).
+#
+#   KLING_E2E_MYSQL_GOLDEN=my ./scripts/90-e2e.sh
+step "7h. MariaDB (kling db + proxy de MySQL)"
+if [ -z "${KLING_E2E_MYSQL_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_MYSQL_GOLDEN no está (nombre de una plantilla MariaDB): sin plantilla que probar\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+elif ! $KLING template inspect "$KLING_E2E_MYSQL_GOLDEN" >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  la plantilla %s no existe (kling db golden -script scripts/db-golden.sh build -engine mysql %s)\n" \
+    "$KLING_E2E_MYSQL_GOLDEN" "$KLING_E2E_MYSQL_GOLDEN"
+else
+  MYG="$KLING_E2E_MYSQL_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  # Como en 7e: el estado de la plantilla (su clave) permite a doctor comprobar la rotación.
+  DBREAL="$HOME/.local/state/kling-db/$MYG"
+  if [ -d "$DBREAL" ]; then mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"; fi
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  # mysql_sql corre SQL DENTRO de la copia como root por el socket local (unix_socket).
+  mysql_sql() { $KLING exec -timeout 60s "$1" -- mariadb -N -B appdb -e "$2" 2>&1; }
+  dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  MYC="e2e-my-$$"; MYA="e2e-myag-$$"; RELAY_PID=""
+  out=$(dbk up "$MYG" -name "$MYC")
+  if ! contiene "$out" "ready"; then
+    bad "db up (MariaDB)" "ready" "$out"
+  else
+    ok "kling db up de la plantilla MariaDB: copia lista"
+    MYPW=$(cat "$KLING_DB_STATE/copies/$(dbid "$MYC")/password" 2>/dev/null)
+    TODAS="$MYPW ${KLING_E2E_MYSQL_GOLDEN_PASSWORD:-}"
+    [ -n "$MYPW" ] && ok "la copia tiene su clave en el host" || bad "clave de la copia (MariaDB)" "un fichero con la clave" "nada"
+    mysql_sql "$MYC" "CREATE TABLE e2e_my(v text); INSERT INTO e2e_my VALUES ('a'),('b'),('c')" >/dev/null
+    # connect -dsn: mysql://app:...@IP:3306/appdb. Solo se usan host, puerto, usuario y base.
+    read -r MYH MYP MYU MYD < <($KLING db connect "$MYC" -dsn 2>/dev/null </dev/null | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.stdin.read().strip())
+print(u.hostname, u.port or 3306, urllib.parse.unquote(u.username or ""), u.path.lstrip("/"))')
+    # El relé: 127.0.0.1:<libre> -> la copia. Escribe el puerto elegido y se queda sirviendo.
+    RELAY_PORT_F="$DBTMP/relay.port"
+    python3 -c '
+import socket, sys, threading
+dst = (sys.argv[1], int(sys.argv[2]))
+ln = socket.socket(); ln.bind(("127.0.0.1", 0)); ln.listen(16)
+open(sys.argv[3], "w").write(str(ln.getsockname()[1]))
+def pipe(a, b):
+    try:
+        while True:
+            d = a.recv(65536)
+            if not d: break
+            b.sendall(d)
+    except OSError: pass
+    for s in (a, b):
+        try: s.shutdown(socket.SHUT_RDWR)
+        except OSError: pass
+while True:
+    c, _ = ln.accept()
+    try: u = socket.create_connection(dst, timeout=10)
+    except OSError: c.close(); continue
+    for x, y in ((c, u), (u, c)): threading.Thread(target=pipe, args=(x, y), daemon=True).start()
+' "$MYH" "$MYP" "$RELAY_PORT_F" >/dev/null 2>&1 &
+    RELAY_PID=$!
+    for _ in $(seq 1 20); do [ -s "$RELAY_PORT_F" ] && break; sleep 0.2; done
+    RELAY_PORT=$(cat "$RELAY_PORT_F" 2>/dev/null)
+    # La sonda: protocolo de MySQL a mano (saludo v10, HandshakeResponse41 con
+    # mysql_native_password sobre el marcador de MMDS, COM_QUERY); y lo mismo con
+    # un marcador falso. A la sonda solo le llega el sha256 de la clave (para ver
+    # que no está en MMDS), nunca la clave.
+    MYPW_SHA=$(printf '%s' "$MYPW" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+    SONDA_MY='
+import hashlib, json, socket, struct, sys, urllib.request
+host, user, db, real = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]  # real: sha256 de la clave
+t = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/latest/api/token", method="PUT",
+    headers={"X-metadata-token-ttl-seconds": "60"}), timeout=4).read().decode()
+store = urllib.request.urlopen(urllib.request.Request("http://169.254.169.254/",
+    headers={"X-metadata-token": t, "Accept": "application/json"}), timeout=4).read().decode()
+env = json.loads(store).get("env", {})
+ph = env.get("MYSQL_PWD", "")
+clave = any(hashlib.sha256(str(v).encode()).hexdigest() == real for v in env.values())
+print("MMDS", "CLAVE" if clave else ("MARCADOR" if ph.startswith("kling-cred-") else "NADA"), flush=True)
+def leer(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise EOFError
+        b += c
+    return b
+def pkt(s):
+    h = leer(s, 4); return h[3], leer(s, h[0] | h[1] << 8 | h[2] << 16)
+def enviar(s, seq, p): s.sendall(struct.pack("<I", len(p))[:3] + bytes([seq]) + p)
+def nativo(pw, nonce):
+    a = hashlib.sha1(pw.encode()).digest(); b = hashlib.sha1(a).digest()
+    c = hashlib.sha1(nonce + b).digest(); return bytes(x ^ y for x, y in zip(a, c))
+def lenenc(b, i):
+    n = b[i]
+    if n < 251: return n, i + 1
+    k = {252: 2, 253: 3, 254: 8}[n]; return int.from_bytes(b[i + 1:i + 1 + k], "little"), i + 1 + k
+def conectar(pw):
+    s = socket.create_connection((host, 3306), timeout=20)
+    _, g = pkt(s)
+    i = g.index(b"\0", 1) + 1 + 4
+    nonce = g[i:i + 8]; i += 8 + 1 + 2 + 1 + 2 + 2 + 1 + 10
+    nonce += g[i:i + 12]
+    caps = 0x1 | 0x8 | 0x200 | 0x2000 | 0x8000 | 0x80000
+    auth = nativo(pw, nonce)
+    p = struct.pack("<IIB", caps, 1 << 24, 45) + b"\0" * 23 + user.encode() + b"\0" + bytes([len(auth)]) + auth
+    p += db.encode() + b"\0" + b"mysql_native_password\0"
+    enviar(s, 1, p)
+    _, r = pkt(s)
+    if r[:1] == b"\0": return s, "LISTO"
+    if r[:1] == b"\xff": return s, "ERROR %d" % struct.unpack("<H", r[1:3])[0]
+    return s, "RARO %r" % r[:1]
+try:
+    s, r = conectar(ph)
+except Exception as e:
+    print("LOGIN CAIDA", type(e).__name__, flush=True); sys.exit(0)
+print("LOGIN", r, flush=True)
+if r == "LISTO":
+    enviar(s, 0, b"\x03SELECT count(*) FROM e2e_my")
+    _, r = pkt(s)
+    if r[:1] == b"\xff":
+        print("FILA ERROR", flush=True)
+    else:
+        n, _ = lenenc(r, 0)
+        for _ in range(n): pkt(s)
+        pkt(s)
+        _, fila = pkt(s)
+        l, i = lenenc(fila, 0)
+        print("FILA", fila[i:i + l].decode(), flush=True)
+    s.close()
+try:
+    print("FALSO", conectar("kling-cred-00000000000000000000")[1], flush=True)
+except Exception as e:
+    print("FALSO CAIDA", type(e).__name__, flush=True)
+'
+    MYDOM="my-$$.e2e.internal"
+    if [ -z "$RELAY_PORT" ]; then
+      bad "relé al loopback" "un puerto" "el relé no arrancó"
+    elif ! $KLING run -image "$IMGVOL" -name "$MYA" -egress allowlist -allow example.org -allow-exec -ttl 15m -on-ttl remove >/dev/null 2>&1; then
+      bad "agente (MariaDB)" "una máquina con egress allowlist" "no arrancó"
+    else
+      out=$(printf '%s' "$MYPW" | $KLING machine credential "$MYA" -type mysql -domain "$MYDOM" -user "$MYU" -database "$MYD" \
+        -upstream "127.0.0.1:$RELAY_PORT" -upstream-tls disable -env MYSQL_PWD 2>&1); rc=$?
+      printf '%s\n' "$out" >> "$DBLOG"
+      [ "$rc" = 0 ] && ok "credential -type mysql: la clave de la copia queda en el proxy" \
+        || bad "machine credential -type mysql" "salida 0" "rc=$rc $out"
+      out=$($KLING exec -timeout 90s "$MYA" -- python3 -c "$SONDA_MY" "$MYDOM" "$MYU" "$MYD" "$MYPW_SHA" 2>&1)
+      printf '%s\n' "$out" >> "$DBLOG"
+      contiene "$out" "MMDS MARCADOR" && ok "el agente solo ve el marcador, no la clave" || bad "MMDS (mysql)" "MMDS MARCADOR" "$out"
+      { contiene "$out" "LOGIN LISTO" && contiene "$out" "FILA 3"; } \
+        && ok "con el marcador el agente entra por el proxy de MySQL y lee (3 filas)" || bad "login por el proxy de MySQL" "LOGIN LISTO y FILA 3" "$out"
+      contiene "$out" "FALSO ERROR 1045" && ok "un marcador falso: 1045 sin llegar a la copia" || bad "marcador falso (mysql)" "FALSO ERROR 1045" "$out"
+      out=$($KLING machine audit "$MYA" -tail 0 -json 2>&1)
+      printf '%s\n' "$out" >> "$DBLOG"
+      { contiene "$out" '"kind":"mysql"' && contiene "$out" '"reason":"bad_placeholder"'; } \
+        && ok "machine audit: líneas kind mysql, el marcador falso denegado" || bad "audit del agente (mysql)" "kind mysql y bad_placeholder" "$(printf '%s' "$out" | tail -3)"
+      if contiene "$out" "kling-cred-" || contiene "$out" "e2e_my"; then
+        bad "audit mysql sin secretos" "ni marcador ni SQL" "$out"
+      else
+        ok "machine audit: ni el marcador ni el SQL"
+      fi
+    fi
+    $KLING rm -f "$MYA" >/dev/null 2>&1
+    [ -n "$RELAY_PID" ] && { kill "$RELAY_PID" 2>/dev/null; wait "$RELAY_PID" 2>/dev/null; }
+
+    # doctor: la copia recién hecha, sin problemas; con una cuenta anónima, MY003.
+    out=$(dbk doctor "$MYC"); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor de la copia MariaDB: 0 problemas" \
+      || bad "doctor MariaDB limpio" "0 problem(s), salida 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
+    mysql_sql "$MYC" "CREATE USER ''@'%'" >/dev/null
+    out=$(dbk doctor "$MYC"); rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "MY003"; } && ok "doctor con una cuenta anónima: MY003" \
+      || bad "doctor MariaDB anónima" "MY003, salida != 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
+    mysql_sql "$MYC" "DROP USER ''@'%'" >/dev/null
+
+    # audit (server_audit con CONNECT): conexiones, sin SQL.
+    out=$(dbk audit "$MYC" -since 1h)
+    contiene "$out" "connect" && ok "audit de la copia MariaDB: conexiones" || bad "audit MariaDB" "eventos connect" "$(printf '%s' "$out" | tail -4)"
+    if contiene "$out" "SELECT" || contiene "$out" "e2e_my"; then
+      bad "audit MariaDB sin SQL" "ni SQL ni tablas" "$out"
+    else
+      ok "audit de la copia MariaDB: sin SQL"
+    fi
+  fi
+  out=$(dbk rm "$MYC"); rc=$?
+  { [ "$rc" = 0 ] && ! $KLING inspect "$MYC" >/dev/null 2>&1; } && ok "kling db rm: la copia MariaDB ya no está" \
+    || bad "db rm (MariaDB)" "la copia borrada" "rc=$rc $out"
+  fugas=0
+  for pw in $TODAS; do grep -qF -- "$pw" "$DBLOG" && fugas=$((fugas+1)); done
+  [ "$fugas" = 0 ] && ok "7h: ninguna clave en la salida de kling db, del agente ni de la auditoría" || bad "fuga de claves (7h)" 0 "$fugas"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
+# ── 7i. autorización por inquilino (authz) ───────────────────────────────────
+# Solo con KLING_E2E_AUTHZ=1: necesita un daemon arrancado con una política
+# (docs/authz.md) que dé DOS tokens de inquilino, y los tokens en claro:
+#
+#   /etc/kling/authz.json (root, 0644):
+#     {"rules": [], "tokens": [
+#       {"sha256": "<sha256sum del token A>", "role": "tenant:e2ea"},
+#       {"sha256": "<sha256sum del token B>", "role": "tenant:e2eb"}]}
+#   KLING_E2E_AUTHZ=1 KLING_E2E_AUTHZ_TOKEN_A=<token A> KLING_E2E_AUTHZ_TOKEN_B=<token B> \
+#     ./scripts/90-e2e.sh
+#
+# Quien corre el e2e sigue siendo admin sin token (root o el usuario del daemon,
+# o una regla admin): el resto de secciones no cambia, y la limpieza la hace él.
+# Los inquilinos se llaman e2ea y e2eb salvo KLING_E2E_AUTHZ_TENANT_A/_B.
+step "7i. autorización por inquilino"
+if [ "${KLING_E2E_AUTHZ:-0}" != 1 ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_AUTHZ no es 1 (hace falta un daemon con política y dos tokens de inquilino; ver la cabecera de 7i)\n"
+elif [ -z "${KLING_E2E_AUTHZ_TOKEN_A:-}" ] || [ -z "${KLING_E2E_AUTHZ_TOKEN_B:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_AUTHZ=1 pero faltan KLING_E2E_AUTHZ_TOKEN_A o KLING_E2E_AUTHZ_TOKEN_B\n"
+else
+  TA="${KLING_E2E_AUTHZ_TENANT_A:-e2ea}"; TB="${KLING_E2E_AUTHZ_TENANT_B:-e2eb}"
+  ka() { KLING_AUTHZ_TOKEN="$KLING_E2E_AUTHZ_TOKEN_A" $KLING "$@" 2>&1 </dev/null; }
+  kb() { KLING_AUTHZ_TOKEN="$KLING_E2E_AUTHZ_TOKEN_B" $KLING "$@" 2>&1 </dev/null; }
+  AZM="e2e-authz-$$"; AZS="e2e-authz-snap-$$"
+  out=$(ka info)
+  contiene "$out" "you are tenant:$TA" && ok "info con el token A: tenant:$TA" || bad "info con token A" "you are tenant:$TA" "$out"
+  out=$(KLING_AUTHZ_TOKEN="no-es-un-token" $KLING ps 2>&1 </dev/null) && rc=0 || rc=$?
+  { [ "$rc" != 0 ] && contiene "$out" "not valid"; } && ok "un token inválido: rechazado" || bad "token inválido" "error 'not valid'" "rc=$rc $out"
+  out=$(ka run -name "$AZM" -image min -ttl 10m -on-ttl remove)
+  if ! contiene "$out" "booted"; then
+    bad "run como $TA" "una máquina" "$out"
+  else
+    out=$($KLING inspect "$AZM" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("labels", {}).get("kling.owner", ""))')
+    [ "$out" = "$TA" ] && ok "run como inquilino: el daemon sella kling.owner=$TA" \
+      || bad "kling.owner sellado" "$TA" "$out"
+    out=$(kb ps -a)
+    contiene "$out" "$AZM" && bad "ps de $TB" "sin la máquina de $TA" "$out" || ok "$TB no ve la máquina de $TA en ps"
+    out=$(kb inspect "$AZM") && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "doesn't exist"; } && ok "$TB: inspect de la máquina de $TA responde como si no existiera" \
+      || bad "inspect ajeno" "doesn't exist" "rc=$rc $out"
+    kb rm -f "$AZM" >/dev/null
+    $KLING inspect "$AZM" >/dev/null 2>&1 && ok "$TB no puede borrar la máquina de $TA" || bad "rm ajeno" "la máquina sigue" "borrada"
+    out=$(kb run -name "$AZM-b" -image min -label "kling.owner=$TA") && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "set by the daemon"; } && ok "$TB no puede ponerse kling.owner=$TA" \
+      || bad "kling.owner ajeno" "set by the daemon" "rc=$rc $out"
+    out=$(kb volume ls) && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "admin"; } && ok "volúmenes: solo admin" || bad "volume ls de inquilino" "needs the admin role" "rc=$rc $out"
+    # Snapshots: el de A no lo ve B, y B no puede usar ese nombre (409, sin decir de quién es).
+    out=$(ka save -force "$AZM" "$AZS") && rc=0 || rc=$?
+    [ "$rc" = 0 ] && ok "save como $TA" || bad "save como $TA" "salida 0" "rc=$rc $out"
+    out=$(kb template ls)
+    contiene "$out" "$AZS" && bad "template ls de $TB" "sin la plantilla de $TA" "$out" || ok "$TB no ve la plantilla de $TA"
+    out=$(kb run -name "$AZM-b" -image min -ttl 10m -on-ttl remove)
+    if contiene "$out" "booted"; then
+      for rep in "" -replace; do
+        # shellcheck disable=SC2086
+        out=$(kb save -force $rep "$AZM-b" "$AZS") && rc=0 || rc=$?
+        { [ "$rc" != 0 ] && contiene "$out" "is taken" && ! contiene "$out" "$TA"; } \
+          && ok "save ${rep:-sin -replace} de $TB sobre el nombre de $TA: 'is taken', sin dueño" \
+          || bad "save ${rep:-sin -replace} sobre nombre ajeno" "is taken, sin $TA" "rc=$rc $out"
+      done
+    else
+      bad "run como $TB" "una máquina" "$out"
+    fi
+  fi
+  $KLING rm -f "$AZM" >/dev/null 2>&1; $KLING rm -f "$AZM-b" >/dev/null 2>&1
+  $KLING template rm -f "$AZS" >/dev/null 2>&1
+fi
+
 # ── 8. grafos de microVMs ─────────────────────────────────────────────────────
 # Lo que los tests de Go no pueden ver: que <nodo>.graph resuelva dentro del
 # invitado, que el proxy de enlace lleve la conexión al otro netns sin abrir

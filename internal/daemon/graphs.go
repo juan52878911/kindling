@@ -38,7 +38,7 @@ func (s *Server) handleGraphUp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGraphs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.mgr.Graphs())
+	writeJSON(w, http.StatusOK, filtrarGrafos(r, s.mgr.Graphs()))
 }
 
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {

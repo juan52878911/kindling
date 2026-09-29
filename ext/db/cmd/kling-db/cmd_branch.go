@@ -631,6 +631,14 @@ func (a *app) writeBranchEnv(mc *api.Machine, path string) error {
 	body := fmt.Sprintf("# kling db branch -switch: database of this branch (copy %s). Secret: do not copy it.\n"+
 		"DATABASE_URL=%s\nPGHOST=%s\nPGPORT=%d\nPGUSER=%s\nPGDATABASE=%s\nPGPASSWORD=%s\nPGSSLMODE=disable\n",
 		mc.Name, u.String(), h, port, role, db, envQuote(pw))
+	if engineOf(mc.Labels) == engineMySQL {
+		// Las variables que leen los clientes de MySQL/MariaDB (MYSQL_PWD) y
+		// las habituales de las aplicaciones.
+		u.Scheme, u.RawQuery = "mysql", ""
+		body = fmt.Sprintf("# kling db branch -switch: database of this branch (copy %s). Secret: do not copy it.\n"+
+			"DATABASE_URL=%s\nMYSQL_HOST=%s\nMYSQL_TCP_PORT=%d\nMYSQL_USER=%s\nMYSQL_DATABASE=%s\nMYSQL_PWD=%s\n",
+			mc.Name, envQuote(u.String()), h, port, role, db, envQuote(pw))
+	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".kling-db.env.*")
 	if err != nil {
 		return err

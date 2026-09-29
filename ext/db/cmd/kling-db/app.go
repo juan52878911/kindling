@@ -48,7 +48,7 @@ const (
 
 // dbLabelKeys son las claves que escribe esta extensión, para el test de
 // api.KeyPattern.
-var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, api.LabelKind, api.LabelPorts}
+var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, labelEngine, api.LabelKind, api.LabelPorts}
 
 var (
 	// nombres de máquina y de plantilla (validName del núcleo).
@@ -74,9 +74,11 @@ type app struct {
 	// stdoutTTY dice si stdout es una terminal (ahí no se imprime una clave sin
 	// confirmación).
 	stdoutTTY func() bool
-	// runPsql ejecuta el psql del host con ese entorno extra y esos argumentos.
-	runPsql func(ctx context.Context, env []string, args []string) error
-	sleep   func(time.Duration)
+	// runPsql ejecuta el psql del host con ese entorno extra y esos argumentos;
+	// runMysql, el cliente de MySQL/MariaDB del host.
+	runPsql  func(ctx context.Context, env []string, args []string) error
+	runMysql func(ctx context.Context, env []string, args []string) error
+	sleep    func(time.Duration)
 	// readyWait es cuánto se espera a que Postgres acepte conexiones.
 	readyWait time.Duration
 	// cwd es el directorio del que kling db branch lee el repositorio git
@@ -96,6 +98,7 @@ func newApp(host string) (*app, error) {
 		k: cli, stdout: os.Stdout, stderr: os.Stderr, stdin: os.Stdin,
 		stdoutTTY: func() bool { return isTerminal(os.Stdout) },
 		runPsql:   runHostPsql,
+		runMysql:  runHostMySQL,
 		sleep:     time.Sleep,
 		readyWait: 30 * time.Second,
 	}, nil
@@ -180,7 +183,7 @@ func checkReady(mc *api.Machine, owner string) error {
 func roleDB(labels map[string]string) (role, db string, err error) {
 	role = orDefault(labels[labelRole], defaultRole)
 	db = orDefault(labels[labelDatabase], defaultDatabase)
-	if !identPattern.MatchString(role) || role == "postgres" {
+	if !identPattern.MatchString(role) || role == "postgres" || (engineOf(labels) == engineMySQL && myReservedUsers[role]) {
 		return "", "", fmt.Errorf("invalid role %q", role)
 	}
 	if !identPattern.MatchString(db) {
@@ -193,23 +196,38 @@ func roleDB(labels map[string]string) (role, db string, err error) {
 // tiene (scripts/db-golden.sh no etiqueta), el conn.env que dejó ese script
 // en este host. Si no hay nada, app/appdb, los de db-golden.sh.
 func goldenRoleDB(s *api.Snapshot) (string, string, error) {
+	role, db, _, err := goldenInfo(s)
+	return role, db, err
+}
+
+// goldenInfo es goldenRoleDB con el motor de la plantilla: su etiqueta
+// kling.db.engine (db-golden-mysql.sh la pone) o ENGINE en su conn.env;
+// Postgres si no dice nada.
+func goldenInfo(s *api.Snapshot) (role, db, engine string, err error) {
 	labels := map[string]string{}
-	if d, err := dbstate.Dir(); err == nil && namePattern.MatchString(s.Name) {
+	if d, derr := dbstate.Dir(); derr == nil && namePattern.MatchString(s.Name) {
 		for k, v := range readEnvFile(d + "/" + s.Name + "/conn.env") {
 			switch k {
-			case "PGUSER":
+			case "PGUSER", "DBUSER":
 				labels[labelRole] = v
-			case "PGDATABASE":
+			case "PGDATABASE", "DBNAME":
 				labels[labelDatabase] = v
+			case "ENGINE":
+				labels[labelEngine] = v
 			}
 		}
 	}
-	for _, k := range []string{labelRole, labelDatabase} {
+	for _, k := range []string{labelRole, labelDatabase, labelEngine} {
 		if v := s.Labels[k]; v != "" {
 			labels[k] = v
 		}
 	}
-	return roleDB(labels)
+	if e := labels[labelEngine]; e != "" && e != enginePostgres && e != engineMySQL {
+		return "", "", "", fmt.Errorf("unknown engine %q", e)
+	}
+	engine = engineOf(labels)
+	role, db, err = roleDB(labels)
+	return role, db, engine, err
 }
 
 func readEnvFile(p string) map[string]string {
@@ -228,16 +246,17 @@ func readEnvFile(p string) map[string]string {
 	return out
 }
 
-// hostAddr es por dónde llega el host al 5432 de la copia: en macOS, el
-// reenvío que abre el backend por kling.ports (loopback, con peercred); en
-// Linux, la IP del netns de la máquina. En Linux no hay frontera: cualquier
-// proceso del host llega a esa IP, y por eso la contraseña de cada copia es
-// propia y solo está en este host.
+// hostAddr es por dónde llega el host al 5432 (3306 en MySQL) de la copia:
+// en macOS, el reenvío que abre el backend por kling.ports (loopback, con
+// peercred); en Linux, la IP del netns de la máquina. En Linux no hay
+// frontera: cualquier proceso del host llega a esa IP, y por eso la
+// contraseña de cada copia es propia y solo está en este host.
 func hostAddr(mc *api.Machine) (host string, port int, err error) {
+	dbPort := enginePort(engineOf(mc.Labels))
 	if len(mc.Forwards) > 0 {
-		a, ok := mc.Forwards[strconv.Itoa(pgPort)]
+		a, ok := mc.Forwards[strconv.Itoa(dbPort)]
 		if !ok || a == "" {
-			return "", 0, fmt.Errorf("%s has no forward for port %d (it needs the label %s=%d)", mc.Name, pgPort, api.LabelPorts, pgPort)
+			return "", 0, fmt.Errorf("%s has no forward for port %d (it needs the label %s=%d)", mc.Name, dbPort, api.LabelPorts, dbPort)
 		}
 		h, p, serr := net.SplitHostPort(a)
 		n, perr := strconv.Atoi(p)
@@ -249,7 +268,7 @@ func hostAddr(mc *api.Machine) (host string, port int, err error) {
 	if mc.IP == "" {
 		return "", 0, fmt.Errorf("%s has no address the host can reach", mc.Name)
 	}
-	return mc.IP, pgPort, nil
+	return mc.IP, dbPort, nil
 }
 
 // ── preparar una copia ───────────────────────────────────────────────────────
@@ -323,11 +342,18 @@ func (a *app) setVerifier(ctx context.Context, id, role, ver string) error {
 // prepare deja lista una copia que ya está en state=preparing: espera a
 // Postgres, quita los roles de solo lectura heredados y rota la clave. No la
 // marca ready: eso lo hace quien llama cuando todas las de la operación están
-// preparadas.
+// preparadas. Una copia MySQL espera a su servidor y rota (kling db role no
+// existe para MySQL: no hay roles heredados que quitar).
 func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
 	role, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err
+	}
+	if engineOf(mc.Labels) == engineMySQL {
+		if err := a.waitMySQL(ctx, mc.ID); err != nil {
+			return err
+		}
+		return a.rotateMySQL(ctx, mc.ID, role)
 	}
 	if err := a.waitPostgres(ctx, mc.ID); err != nil {
 		return err
@@ -442,8 +468,11 @@ func randomSuffix() string {
 	return hex.EncodeToString(b)
 }
 
-// mergePorts añade 5432 a la lista de kling.ports sin perder la que hubiera.
-func mergePorts(cur string) string {
+// mergePorts añade el puerto de la base (5432, o 3306 con mergePortsFor) a la
+// lista de kling.ports sin perder la que hubiera.
+func mergePorts(cur string) string { return mergePortsFor(cur, pgPort) }
+
+func mergePortsFor(cur string, dbPort int) string {
 	seen := map[int]bool{}
 	var ports []int
 	for _, p := range strings.Split(cur, ",") {
@@ -452,8 +481,8 @@ func mergePorts(cur string) string {
 			ports = append(ports, n)
 		}
 	}
-	if !seen[pgPort] {
-		ports = append(ports, pgPort)
+	if !seen[dbPort] {
+		ports = append(ports, dbPort)
 	}
 	sort.Ints(ports)
 	s := make([]string, len(ports))

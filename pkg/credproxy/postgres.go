@@ -1064,9 +1064,17 @@ func arranqueUpstream(user, db string, ps paramsPG) []byte {
 
 // ── servidor ────────────────────────────────────────────────────────────────
 
-// PGServer sirve el proxy de Postgres en un listener (Linux: el lado host del
-// veth). Close deja de aceptar y corta las conexiones abiertas.
+// PGServer sirve los proxies de bases de datos (Postgres y MySQL, ver
+// ServeDB) en un listener (Linux: el lado host del veth). Close deja de
+// aceptar y corta las conexiones abiertas.
+//
+// DestPort es el puerto al que conectó el invitado si este listener solo
+// recibe uno (Linux: el DNAT del 3306 tiene su listener, ver
+// internal/net); 0 si recibe cualquiera. Se pasa a ServeDB, que con eso
+// decide entre Postgres y MySQL. Se fija antes de Serve.
 type PGServer struct {
+	DestPort int
+
 	p      *Proxy
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -1116,7 +1124,7 @@ func (s *PGServer) Serve(ln net.Listener) error {
 		s.mu.Unlock()
 		go func() {
 			defer s.wg.Done()
-			s.p.ServePG(s.ctx, c)
+			s.p.ServeDB(s.ctx, c, s.DestPort)
 		}()
 	}
 }

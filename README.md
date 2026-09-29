@@ -88,6 +88,9 @@ sections:
 · [Chispa: a tiny classifier for small decisions](#chispa-a-tiny-classifier-for-small-decisions)
 · [AI gateway](#ai-gateway-many-models-ready-none-running-247)
 · [Demo: a smart-home room](#demo-a-smart-home-room-on-serverless-models)
+· [A Postgres per microVM: kling db](#a-postgres-per-microvm-kling-db)
+· [Graphs: kling graph](#graphs-a-whole-environment-in-one-file)
+· [Copy-on-write disks](#copy-on-write-disks)
 · [What persists and what does not](#what-persists-and-what-does-not)
 
 **Performance and density**
@@ -933,6 +936,82 @@ make domotica                                         # builds ./kindling-domoti
 ./kindling-domotica decide "pon la luz del salón en azul"          # layers 1-2 in-process, no daemon
 ```
 
+## A Postgres per microVM: `kling db`
+
+`kling db` (the `kling-db` extension) gives an agent or a test its own Postgres 16, with
+data, in milliseconds. A **copy** is a microVM born from a golden snapshot with Postgres
+already warm; each one has its own password, and the agent can be given a read-only role:
+
+```sh
+kling db golden -script scripts/db-golden.sh build -template crm-demo pg   # the template, once
+kling db up pg -name t1                       # a ready copy with its own password
+kling db connect t1 -psql                     # a psql session from the host
+kling db fork t1 -n 4                         # 4 copies of t1 as it is now, all or none
+kling db branch hook install                  # one copy per git branch, switched on checkout
+kling db doctor t1                            # security findings (exit 1 if there are any)
+kling db tenant-check t1                      # exercises RLS: each tenant sees only its rows
+kling db ask t1 "how many customers per country?"   # a model writes the SQL; you confirm; read-only
+kling db ask-web t1                           # the same in a local web page (loopback, one-time URL)
+kling db diff t1 t2                           # what changed between two copies: schema and rows, no data
+kling db env up shop-app -golden pg           # app + database as a graph (Linux); the app never sees the password
+kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
+  'postgres://readonly@db.prod.example.com:5432/shop'   # a masked copy of production
+```
+
+An agent in **another** microVM can share a copy through the credential proxy
+(`kling db attach`; on macOS through the daemon's link broker) and never sees the password.
+MariaDB templates work too (`up`, `fork`, `connect`, `rotate`, `doctor`, `audit`:
+[docs/mysql.md](docs/mysql.md)), and `kling db doctor -url` checks a Postgres you already
+run, over verified TLS by default. Templates, roles, `rehearse`,
+`snapshot`/`undo`, `audit` and the rest: [docs/db.md](docs/db.md); natural-language
+questions: [docs/db-ask.md](docs/db-ask.md); the frozen Postgres templates:
+[docs/db-golden.md](docs/db-golden.md). To point an agent at a database you already run
+(Docker, LAN/VPC, Neon, Supabase, RDS —tested against a real RDS), see
+[Keys the guest never sees](#keys-the-guest-never-sees-the-credential-proxy) and
+[docs/postgres.md](docs/postgres.md).
+
+(These docs are in Spanish.)
+
+## Graphs: a whole environment in one file
+
+`kling graph` brings up an app, a database and a cache as one unit, described in a YAML
+or JSON file: named machines plus the **edges** that say who may reach whom. A node
+reaches another only through a declared edge (`web` reaches `api` at `api.graph`), and
+an edge of kind `credential` puts the Postgres password in through the proxy, so the
+node holding the connection never sees it. The whole graph freezes, snapshots at one
+consistent instant and forks into N live copies that cannot see each other:
+
+```sh
+SHOP_PG_PASS=... kling graph up tienda.yaml       # creates the graph, starts the eager nodes
+kling graph ls                                    # state, nodes, edges, generation
+kling graph snapshot tienda -name t0              # one template per node, all from the same instant
+kling graph fork tienda -n 3                      # 3 new graphs from this instant
+kling graph freeze tienda ; kling graph thaw tienda
+kling graph rm tienda
+```
+
+File format, node fields and limits: [docs/grafos.md](docs/grafos.md); the design:
+[docs/grafos-diseno.md](docs/grafos-diseno.md) (both in Spanish).
+
+## Copy-on-write disks
+
+Creating an instance from a golden snapshot (`kling run -from`, `kling sandbox fork`, the
+gateway waking a service) used to copy its whole overlay disk. With `daemon.cow` the
+overlay is a **reflink clone**: its own file that shares the golden's blocks until one of
+the two writes, so the cost of a copy no longer depends on the disk size and each
+instance still has an independent disk.
+
+```sh
+kling config set daemon.cow auto            # auto (default) | reflink-store | off
+sudo systemctl restart kling                # read when the daemon starts
+kling info                                  # the mode in use, on the "disk clones" line
+```
+
+`auto` uses native reflink when the data root is XFS or Btrfs, falls back to a store of
+its own (loop-mounted XFS) when the host can have one, and to the plain copy otherwise,
+with a warning in the log and in `kling doctor`. Modes, sizing and measurements:
+[docs/cow.md](docs/cow.md) (Spanish).
+
 ## What persists and what does not
 
 Worth being clear about, because it is not obvious:
@@ -1299,7 +1378,8 @@ rewritten. The proxy does not look at SQL, so the role's own grants are the limi
 database on a private IP is refused unless you pin it yourself: `-upstream
 127.0.0.1:5432` for a Docker database on the same host, or a LAN/VPC address, with
 `-upstream-tls disable` (SCRAM-SHA-256 only) when it has no TLS. Recipes in
-[docs/postgres.md](docs/postgres.md); the security model in SECURITY.md §7.
+[docs/postgres.md](docs/postgres.md); the security model in SECURITY.md §7. MySQL and
+MariaDB work the same way with `-type mysql`: [docs/mysql.md](docs/mysql.md).
 
 Need a throwaway database per test or agent instead? `kling db up <template>` gives a
 ready Postgres copy per microVM with its own password: [docs/db.md](docs/db.md).
@@ -1483,6 +1563,12 @@ instances share pages.
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: Chispa classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | One microVM and one disk per MCP session: the options weighed, the design, measured cost (Spanish) |
+| [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: a disposable Postgres per microVM, roles, branches, `doctor`, `tenant-check`, `diff`, masked `clone`; questions in natural language, also from a web page (Spanish) |
+| [`docs/mysql.md`](docs/mysql.md) | MySQL and MariaDB: the credential proxy (`-type mysql`) and MariaDB copies in `kling db` (Spanish) |
+| [`docs/authz.md`](docs/authz.md) | Per-operation authorization on the daemon socket: admin and tenant roles by peer credentials, what each role can do (Spanish) |
+| [`docs/postgres.md`](docs/postgres.md) | Connect your own Postgres through the credential proxy: Docker, LAN/VPC, Neon, Supabase, RDS (Spanish) |
+| [`docs/grafos.md`](docs/grafos.md) · [`docs/grafos-diseno.md`](docs/grafos-diseno.md) | `kling graph`: several machines and the edges between them, frozen, snapshotted and forked as one (Spanish) |
+| [`docs/cow.md`](docs/cow.md) | `daemon.cow`: reflink disks for `run -from`, the three modes and measurements (Spanish) |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |
 | [`docs/releases.md`](docs/releases.md) | One tag, one release: every asset, `SHA256SUMS`, how to cut a release |
 

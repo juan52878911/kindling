@@ -975,7 +975,7 @@ func TestValidarCredencialesPostgres(t *testing.T) {
 		"allow":            func(c *Credential) { c.Allow = []string{"GET /"} },
 		"CA basura":        func(c *Credential) { c.CAPEM = "no es un PEM" },
 		"CA enorme":        func(c *Credential) { c.CAPEM = ca + strings.Repeat(" ", MaxCAPEM) },
-		"tipo raro":        func(c *Credential) { c.Kind = "mysql" },
+		"tipo raro":        func(c *Credential) { c.Kind = "oracle" },
 		"http con rol":     func(c *Credential) { c.Kind = ""; c.Port = 0 },
 	} {
 		c := base()

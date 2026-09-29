@@ -13,6 +13,12 @@ with an agent in another microVM through its credential proxy, without the agent
 seeing the password (Linux and macOS). Model, labels, credentials and the
 Linux/macOS asymmetry: [`docs/db.md`](../../docs/db.md).
 
+MySQL/MariaDB copies (`golden image|build -engine mysql`, label
+`kling.db.engine=mysql`) support `up`, `fork`, `connect` (`-mysql`, `mysql://` DSN),
+`rotate`, `reset`, `rm`, `branch`, `doctor` and `audit`; the guest only ever gets the
+`mysql_native_password` hash. The rest is Postgres-only for now:
+[`docs/mysql.md`](../../docs/mysql.md).
+
 ```sh
 cd ext/db
 go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db
@@ -23,6 +29,7 @@ kling db up pg -name t1 && kling db connect t1 -psql
 |---|---|
 | `internal/klingc` | runs the `kling` binary (the seam the tests fake) |
 | `internal/scram` | SCRAM-SHA-256 verifiers (RFC 5803/7677), tested with the RFC vector |
+| `internal/mysqlpw` | the `mysql_native_password` hash, computed on the host |
 | `internal/dbstate` | the per-copy password files on the host |
 
 ## kling-dbbench
@@ -76,12 +83,14 @@ problems (every finding that is not `INFO`).
 | DB011, DB012 | tables with `tenant_id` and RLS off, or owned by the app role without FORCE ROW LEVEL SECURITY |
 | DB020, DB021 | the app role can SET ROLE to something privileged; it can SET the tenant variable itself (INFO) |
 | DB030, DB031 | `password_encryption` other than SCRAM; md5 passwords |
-| DB040, DB041 | `ssl=off` on a non-loopback `-url`; the doctor itself speaks no TLS |
+| DB040, DB041 | `ssl=off` on a non-loopback `-url`; the doctor itself ran without TLS or without verifying the server (only with `-insecure`) |
 | DB050-DB054 | copies only: clock skew over 2 s, clients inherited from the golden, app password still the golden's, `kling.db.state` not `ready`, host password file of the copy (by machine ID) missing, too open or not matching |
 
 A machine is checked from inside (`kling exec ... su postgres -c 'psql -X -At'`, SQL on
-stdin); a `-url` from the host with `pgmini` (SCRAM only, never a cleartext password),
-reading the password from `PGPASSWORD`: a URL with a password is refused.
+stdin); a `-url` from the host with `pgmini` (TLS, `sslmode=verify-full` by default with the
+system roots plus `sslrootcert`/`-ca-file`; SCRAM, with `-PLUS` channel binding when
+offered, never a cleartext password), reading the password from `PGPASSWORD`: a URL with
+a password is refused. `sslmode=disable` or `require` on a non-loopback host needs `-insecure`.
 
 Host reachability of a copy's Postgres differs by platform: on macOS the host reaches
 port 5432 only through a forward (`kling.ports`, loopback, peer-credential checked);

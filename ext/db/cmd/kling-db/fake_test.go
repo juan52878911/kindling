@@ -106,8 +106,8 @@ func (f *fakeKling) newMachine(name string, labels map[string]string) *api.Machi
 		mc.IP = "172.16.0.2"
 		mc.Forwards = map[string]string{"10000": "127.0.0.1:29001"}
 		for _, p := range strings.Split(labels[api.LabelPorts], ",") {
-			if p == "5432" {
-				mc.Forwards["5432"] = fmt.Sprintf("127.0.0.1:%d", 29100+f.seq)
+			if p == "5432" || p == "3306" {
+				mc.Forwards[p] = fmt.Sprintf("127.0.0.1:%d", 29100+f.seq)
 			}
 		}
 	}
@@ -199,6 +199,28 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			}
 			delete(f.roRoles, mc.ID)
 			return []byte("0\n0\n"), nil
+		case strings.Contains(cmd, "mysqladmin"):
+			// myPing: el servidor MySQL de la copia.
+			if f.pgDown {
+				return fail("exit status 1")
+			}
+			return nil, nil
+		case strings.Contains(cmd, "command -v mariadb ||"):
+			// myClient: la rotación de una copia MySQL (ALTER USER ... AS
+			// '<hash>') y su comprobación.
+			f.rotations++
+			if f.rotations == f.failRotation {
+				return fail("%s", "ERROR 1064: ... ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS '*...'")
+			}
+			h := hashIn(string(in))
+			if h == "" {
+				return fail("no hash in %q", in)
+			}
+			if f.wrongVerifier {
+				return []byte("0\n"), nil
+			}
+			f.verifier[mc.ID] = h
+			return []byte("1\n"), nil
 		case strings.Contains(cmd, "pg_isready"):
 			if f.pgDown {
 				return fail("exit status 2")
@@ -345,6 +367,16 @@ func indexOf(s []string, x string) int {
 	return -1
 }
 
+// hashIn saca el hash del ALTER USER de MySQL que llegó por stdin.
+func hashIn(sql string) string {
+	_, rest, ok := strings.Cut(sql, "mysql_native_password AS '")
+	if !ok {
+		return ""
+	}
+	h, _, _ := strings.Cut(rest, "'")
+	return h
+}
+
 // verifierIn saca el verificador del ALTER ROLE que llegó por stdin.
 func verifierIn(sql string) string {
 	_, rest, ok := strings.Cut(sql, "PASSWORD '")
@@ -362,6 +394,7 @@ type testApp struct {
 	out, err *bytes.Buffer
 	tty      bool
 	psql     []string // entorno + argumentos de la última llamada a psql
+	mysql    []string // lo mismo con el cliente de MySQL
 }
 
 func newTestApp(t *testing.T) *testApp {
@@ -374,6 +407,10 @@ func newTestApp(t *testing.T) *testApp {
 		stdoutTTY: func() bool { return ta.tty },
 		runPsql: func(_ context.Context, env, args []string) error {
 			ta.psql = append(append([]string(nil), env...), args...)
+			return nil
+		},
+		runMysql: func(_ context.Context, env, args []string) error {
+			ta.mysql = append(append([]string(nil), env...), args...)
 			return nil
 		},
 		sleep:     func(time.Duration) {},

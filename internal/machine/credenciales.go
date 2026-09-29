@@ -230,12 +230,12 @@ func (m *Manager) normalizarAlmacen(dueño, kind, database, env, domain string, 
 		dueño, env, domain)
 }
 
-// anyDatabaseDe son las variables de las credenciales postgres que entran en
-// cualquier base, ordenadas: lo que `kling inspect` enseña de ellas.
+// anyDatabaseDe son las variables de las credenciales postgres y mysql que
+// entran en cualquier base, ordenadas: lo que `kling inspect` enseña de ellas.
 func anyDatabaseDe(creds []credproxy.Credential) []string {
 	var out []string
 	for _, c := range creds {
-		if c.Kind == credproxy.KindPostgres && c.AnyDatabase {
+		if (c.Kind == credproxy.KindPostgres || c.Kind == credproxy.KindMySQL) && c.AnyDatabase {
 			out = append(out, c.Env)
 		}
 	}
@@ -526,6 +526,11 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 	todas := fusionarSpecs(previas, specs)
 	if len(todas) > credproxy.MaxCredentials {
 		return nil, fmt.Errorf("at most %d credentials per template", credproxy.MaxCredentials)
+	}
+	// Postgres y MySQL juntos: MySQL en el 3306 y ninguna Postgres ahí (lo
+	// comprobaría el proxy al arrancar cada instancia; mejor decirlo ya).
+	if err := credproxy.ValidarPuertosDB(credencialesDeSpecs(todas)); err != nil {
+		return nil, err
 	}
 	sellado, err := m.sellar(todas, "snapshot:"+name)
 	if err != nil {

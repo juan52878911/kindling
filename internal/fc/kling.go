@@ -27,7 +27,8 @@ type KlingInfo struct {
 	Backend string `json:"backend"`
 	Version string `json:"version"`
 	// CredentialKinds son los tipos de credencial que su proxy entiende
-	// ("http", "postgres"). Un kling-vz anterior no lo manda: solo HTTP.
+	// ("http", "postgres", "mysql"). Un kling-vz anterior no lo manda: solo
+	// HTTP.
 	CredentialKinds []string `json:"credential_kinds,omitempty"`
 }
 

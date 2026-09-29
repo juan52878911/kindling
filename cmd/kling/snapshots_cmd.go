@@ -56,6 +56,7 @@ func snapshotsCredential(args []string) error {
 	if fs.NArg() != 1 || (!*clear && (*cf.domain == "" || *cf.env == "")) {
 		return errors.New("usage: kling template credential <template> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling template credential <template> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
+			"       kling template credential <template> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
 			"       kling template credential <template> -clear")
 	}
 	req := api.CredentialsRequest{Clear: *clear}
@@ -77,7 +78,7 @@ func snapshotsCredential(args []string) error {
 		fmt.Printf("%s  no credentials; new instances get none (running ones keep theirs)\n", s.Name)
 		return nil
 	}
-	if spec.Type == credproxy.KindPostgres {
+	if spec.Type == credproxy.KindPostgres || spec.Type == credproxy.KindMySQL {
 		fmt.Printf("%s  every new instance gets a placeholder in %s; the password only goes to %s through its proxy\n",
 			s.Name, spec.Env, pgDestino(spec))
 		fmt.Printf("      %s\n", pgConexion(spec))
@@ -108,18 +109,18 @@ type credFlags struct {
 
 func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c := &credFlags{allow: &stringsFlag{}}
-	c.domain = fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com (postgres: the database server)")
-	c.env = fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY (postgres: PGPASSWORD)")
+	c.domain = fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com (postgres/mysql: the database server)")
+	c.env = fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY (postgres: PGPASSWORD, mysql: MYSQL_PWD)")
 	c.file = fs.String("f", "", "file with the key or password (default: stdin)")
-	c.typ = fs.String("type", "http", "http, or postgres for a database password")
-	c.port = fs.Int("port", 0, "postgres: the server's port (default 5432)")
-	c.user = fs.String("user", "", "postgres: the role the password belongs to (the guest must connect as it)")
-	c.database = fs.String("database", "", "postgres: the only database the guest may connect to (required unless -any-database)")
-	c.anyDatabase = fs.Bool("any-database", false, "postgres: let the guest connect to any database the role has CONNECT on (instead of -database)")
-	c.caFile = fs.String("ca-file", "", "postgres: PEM CA added to the system roots to verify the server")
-	c.upstream = fs.String("upstream", "", "postgres: host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database)")
-	c.upstreamTLS = fs.String("upstream-tls", "", "postgres: verify-full (default) or disable (only with -upstream; SCRAM-SHA-256 only, queries travel unencrypted)")
-	c.tlsServerName = fs.String("tls-server-name", "", "postgres: name the server certificate is verified against (default: -domain)")
+	c.typ = fs.String("type", "http", "http, or postgres or mysql for a database password")
+	c.port = fs.Int("port", 0, "postgres/mysql: the server's port (default 5432 or 3306)")
+	c.user = fs.String("user", "", "postgres/mysql: the role or user the password belongs to (the guest must connect as it)")
+	c.database = fs.String("database", "", "postgres/mysql: the only database the guest may connect to (required unless -any-database; in mysql it is the default database, the GRANTs are the boundary)")
+	c.anyDatabase = fs.Bool("any-database", false, "postgres/mysql: let the guest connect to any database the role has access to (instead of -database)")
+	c.caFile = fs.String("ca-file", "", "postgres/mysql: PEM CA added to the system roots to verify the server")
+	c.upstream = fs.String("upstream", "", "postgres/mysql: host:port the proxy connects to instead of the domain (loopback and LAN allowed, e.g. 127.0.0.1:5432 for a Docker database)")
+	c.upstreamTLS = fs.String("upstream-tls", "", "postgres/mysql: verify-full (default) or disable (only with -upstream; queries travel unencrypted; postgres: SCRAM-SHA-256 only; mysql: only methods that do not send the password)")
+	c.tlsServerName = fs.String("tls-server-name", "", "postgres/mysql: name the server certificate is verified against (default: -domain)")
 	fs.Var(c.allow, "allow-request", allowRequestHelp)
 	return c
 }
@@ -133,25 +134,33 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 	case "", "http":
 		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
 			*c.upstream != "" || *c.upstreamTLS != "" || *c.tlsServerName != "" {
-			return s, errors.New("-port, -user, -database, -any-database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres")
+			return s, errors.New("-port, -user, -database, -any-database, -ca-file, -upstream, -upstream-tls and -tls-server-name are only for -type postgres or mysql")
 		}
-	case credproxy.KindPostgres:
+	case credproxy.KindPostgres, credproxy.KindMySQL:
 		if len(*c.allow) > 0 {
 			return s, errors.New("-allow-request is only for HTTP credentials")
 		}
 		if *c.user == "" {
-			return s, errors.New("-type postgres needs -user (the role the password belongs to)")
+			return s, fmt.Errorf("-type %s needs -user (the role the password belongs to)", *c.typ)
 		}
 		switch {
 		case *c.database != "" && *c.anyDatabase:
 			return s, errors.New("-database and -any-database are mutually exclusive")
 		case *c.database == "" && !*c.anyDatabase:
-			return s, errors.New("-type postgres needs -database (the only database the guest may use), or -any-database to allow every database the role can connect to")
+			return s, fmt.Errorf("-type %s needs -database (the only database the guest may use), or -any-database to allow every database the role can connect to", *c.typ)
 		}
 		if *c.anyDatabase {
-			fmt.Fprintf(credAvisos, "warning: -any-database: the guest may connect to any database on %s that role %s has CONNECT on\n", *c.domain, *c.user)
+			if *c.typ == credproxy.KindMySQL {
+				fmt.Fprintf(credAvisos, "warning: -any-database: the guest may connect to any database on %s that user %s has GRANTs on\n", *c.domain, *c.user)
+			} else {
+				fmt.Fprintf(credAvisos, "warning: -any-database: the guest may connect to any database on %s that role %s has CONNECT on\n", *c.domain, *c.user)
+			}
 		}
-		s.Type, s.Port, s.User, s.Database, s.AnyDatabase = credproxy.KindPostgres, *c.port, *c.user, *c.database, *c.anyDatabase
+		if *c.typ == credproxy.KindMySQL && *c.database != "" {
+			// En MySQL la base del arranque no es una frontera (USE otra).
+			fmt.Fprintf(credAvisos, "note: in mysql -database is the database the guest starts in; it can still USE any database %s has GRANTs on\n", *c.user)
+		}
+		s.Type, s.Port, s.User, s.Database, s.AnyDatabase = *c.typ, *c.port, *c.user, *c.database, *c.anyDatabase
 		s.Upstream, s.TLSServerName = *c.upstream, *c.tlsServerName
 		switch *c.upstreamTLS {
 		case "", credproxy.UpstreamTLSVerifyFull:
@@ -160,7 +169,10 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 				return s, errors.New("-upstream-tls disable needs -upstream (the address of your database)")
 			}
 			s.UpstreamTLS = credproxy.UpstreamTLSDisable
-			if !credproxy.UpstreamLoopback(*c.upstream) {
+			switch {
+			case *c.typ == credproxy.KindMySQL && !credproxy.UpstreamLoopback(*c.upstream):
+				fmt.Fprintf(credAvisos, "warning: -upstream-tls disable: traffic to %s, including query data, is unencrypted, and mysql does not prove the server knows the password: whoever answers at that address gets the queries and a hash exchange (the password itself is not sent)\n", *c.upstream)
+			case !credproxy.UpstreamLoopback(*c.upstream):
 				fmt.Fprintf(credAvisos, "warning: -upstream-tls disable: traffic to %s, including query data, is unencrypted (the password is not: SCRAM-SHA-256 only)\n", *c.upstream)
 			}
 		default:
@@ -174,7 +186,7 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 			s.CAPEM = string(b)
 		}
 	default:
-		return s, fmt.Errorf("unknown -type %q (http or postgres)", *c.typ)
+		return s, fmt.Errorf("unknown -type %q (http, postgres or mysql)", *c.typ)
 	}
 	secret, err := leerClave(*c.file)
 	if err != nil {
@@ -185,7 +197,7 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 }
 
 // pgDestino dice a dónde y cómo sale la contraseña de una credencial
-// Postgres: "servidor:puerto over verified TLS", con el upstream fijado si lo
+// Postgres o MySQL: "servidor:puerto over verified TLS", con el upstream fijado si lo
 // hay.
 func pgDestino(s api.CredentialSpec) string {
 	modo := "over verified TLS"
@@ -194,6 +206,9 @@ func pgDestino(s api.CredentialSpec) string {
 	}
 	if s.UpstreamTLS == credproxy.UpstreamTLSDisable {
 		modo = "without TLS (SCRAM-SHA-256 only: the password itself never crosses the wire)"
+		if s.Type == credproxy.KindMySQL {
+			modo = "without TLS (mysql_native_password or the caching_sha2_password fast path only: the password itself never crosses the wire)"
+		}
 	}
 	if s.Upstream != "" {
 		return fmt.Sprintf("%s (upstream %s) %s", strings.ToLower(s.Domain), s.Upstream, modo)
@@ -206,6 +221,9 @@ func pgServidor(s api.CredentialSpec) string {
 	port := s.Port
 	if port == 0 {
 		port = credproxy.PGDefaultPort
+		if s.Type == credproxy.KindMySQL {
+			port = credproxy.MySQLDefaultPort
+		}
 	}
 	return fmt.Sprintf("%s:%d", strings.ToLower(s.Domain), port)
 }
@@ -215,6 +233,10 @@ func pgConexion(s api.CredentialSpec) string {
 	db := ""
 	if s.Database != "" {
 		db = " dbname=" + s.Database
+	}
+	if s.Type == credproxy.KindMySQL {
+		return fmt.Sprintf("connect with host=%s user=%s%s password=$%s (ssl-mode DISABLED or PREFERRED: the proxy handles TLS to the server)",
+			strings.ToLower(s.Domain), s.User, strings.Replace(db, "dbname", "database", 1), s.Env)
 	}
 	return fmt.Sprintf("connect with host=%s user=%s%s password=$%s (sslmode disable or prefer, channel_binding not require: the proxy handles the server side)",
 		strings.ToLower(s.Domain), s.User, db, s.Env)

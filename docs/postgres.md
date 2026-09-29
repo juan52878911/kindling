@@ -7,7 +7,8 @@ servidor. Este documento es la guía práctica: cómo funciona, recetas para los
 habituales (un Docker en el mismo host, una base de datos en la LAN o la VPC, Neon,
 Supabase y RDS), cómo configurar el cliente y qué no resuelve. El modelo de seguridad
 completo está en [SECURITY.md §7](../SECURITY.md); la API, en
-[api.md](api.md#credenciales-de-postgres).
+[api.md](api.md#credenciales-de-postgres). Para MySQL y MariaDB (`-type mysql`), el
+mismo modelo con sus diferencias: [mysql.md](mysql.md).
 
 ## Cómo funciona
 

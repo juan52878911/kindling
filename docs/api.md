@@ -35,6 +35,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
 | `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (Linux y macOS), `DELETE /machines/{ref}/credentials/{env}` |
 | `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
+| `authz` | sin publicar | `authz` en `GET /info`; con una política ([authz.md](authz.md)) cada ruta se autoriza por quien llama: `403` sin rol o fuera de lo suyo, `404` sobre lo ajeno, `401` con un token inválido |
 | `ready` | sin publicar | `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` en `POST /machines` y `POST /sandboxes`, `skip_ready` en commit y fork, `?force=1` en squeeze, `cpu_pct_default` en `POST /machines` (ver "Listo y ganchos tras restaurar") |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
@@ -44,7 +45,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10) y `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
@@ -264,6 +265,21 @@ cómo se autenticó el proxy ante el servidor), `creds`, bytes y duración; `met
 son `denied` `disabled`, `no_credential`, `bad_placeholder`, `user_mismatch`,
 `database_mismatch`, `replication`, `unknown_cancel` y `machine_unavailable`. Con
 `upstream_machine`, `upstream` es `machine:<id>` (nunca la dirección resuelta).
+
+### Credenciales de MySQL
+
+`"type":"mysql"` lleva los mismos campos que `postgres` salvo `upstream_machine` y
+`upstream_owner` (no se admiten), con `port` 3306 por defecto y distinto de 53, 80 y 443.
+`database` es la base con la que arranca la sesión (el invitado puede pedir esa o
+ninguna), no una frontera: lo que acota es el `GRANT` del usuario. `upstream_tls:
+"disable"` admite solo `mysql_native_password` y la ruta rápida de
+`caching_sha2_password`. Si la máquina tiene credenciales `postgres` y `mysql`, las
+`mysql` tienen que usar el 3306 y ninguna `postgres` puede. En macOS el daemon exige que
+`credential_kinds` incluya `mysql`. En el registro, `kind: mysql` con los mismos campos
+y `auth` `mysql_native_password`, `caching_sha2_password-fast`, `caching_sha2_password`
+(autenticación completa, dentro del TLS) o `mysql_clear_password`; un `reason` más,
+`capabilities` (el servidor no habla el dialecto que eligió el invitado). Ver
+[mysql.md](mysql.md).
 
 ### Admisión
 
