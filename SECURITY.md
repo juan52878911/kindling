@@ -581,6 +581,56 @@ en `$root/cow`). Lo que cambia:
   instancia que llena su disco llena su cuota en el almacén y no puede provocar errores
   de E/S en el XFS que compartan las demás por falta de sitio debajo.
 
+### 15. Grafos: cada arista es una autorización, no una red
+
+Un grafo (ver [docs/grafos.md](docs/grafos.md)) deja que un nodo llegue a otro por
+aristas declaradas. Nada de eso abre la red entre microVMs:
+
+- **El FORWARD entre namespaces sigue cerrado.** Un nodo llega a otro por un proxy de
+  enlace del daemon en el lado host de SU veth: su resolver contesta `<nodo>.graph`
+  con la IP del host en ese veth y un DNAT del netns lleva ese puerto al proxy. Las
+  reglas que se añaden (DNAT, ACCEPT del FORWARD, el MASQUERADE de `egress none`)
+  tienen todas como destino esa IP; ningún paquete del invitado sale hacia otro netns.
+  En el host, INPUT solo admite además el rango de los proxies de enlace
+  (5400-5463) desde los veth.
+- **La dirección no se fija ni se acepta nunca.** En cada conexión aceptada, el
+  proxy pregunta al manager, que comprueba bajo su candado: la máquina de origen es la
+  del nodo (ID exacto, `kling.graph` y `kling.graph.node`), el grafo tiene la arista
+  (origen, destino, tipo, puerto), la máquina del destino es la que el grafo dice, lleva
+  sus etiquetas y expone el puerto. Solo entonces da la IP de su netns, y aun así el
+  proxy exige que sea un destino de kindling. Ni la API ni el fichero aceptan una
+  dirección; el mismo diseño que el attach de Postgres (§7).
+- **Ningún invitado fabrica ni cambia aristas.** Las aristas viven en el daemon
+  (`store/graph/<id>.json`, que `/store` deja leer pero no escribir: 403). Las
+  etiquetas `kling.graph*` las pone solo el daemon: `run`, `sandbox`, el fork de un
+  sandbox y `PUT labels` las rechazan, y `commit` las quita de la plantilla.
+- **DNS acotado.** El resolver de un nodo con aristas sirve solo los `*.graph` de SUS
+  aristas (y de sus credenciales); cualquier otro `*.graph` es NXDOMAIN en todos los
+  modos, sin reenviarse. En `egress none` todo lo demás es NXDOMAIN: se arranca un
+  resolver solo para esto, que no reenvía nada a ningún sitio. En `internet`, el DNS
+  del invitado pasa a reenviarse desde el host (con los mismos topes de tasa y de
+  consultas en vuelo) en vez de salir directo.
+- **Forks y snapshots no se cruzan.** Las aristas se resuelven por (grafo, nodo) y el
+  ID del grafo va en la comprobación: una copia tiene otro ID y otras máquinas, así
+  que no alcanza nunca al original ni el original a ella. El snapshot y el fork pausan
+  los nodos y cortan las sesiones hacia ellos antes de volcar: ninguna sesión TCP
+  sobrevive a una restauración. Los mismos marcadores de credenciales se entregan a
+  cada copia (el invitado los tiene en memoria), apuntados a su propio grafo; un nodo
+  con credenciales que no son de sus aristas no se ramifica.
+- **Tormenta acotada.** 16 conexiones a la vez por arista (la siguiente se cierra en el
+  acto), un solo despertar en vuelo por nodo y 64 conexiones esperándolo como mucho;
+  por encima, rechazo y una línea `busy` en la auditoría. Un despertar que no cabe
+  en memoria es `no_capacity`, no un OOM.
+- **Las claves de las aristas `credential`** viajan una vez en `POST /graphs`, nunca
+  salen por la API y se guardan cifradas (`<id>.secrets.enc`, AES-GCM con la clave del
+  almacén de credenciales y el grafo como dato autenticado: copiadas a otro grafo no se
+  abren).
+
+Lo que queda: el tramo del proxy de enlace al destino va en claro por el host, como el
+attach de Postgres (las credenciales exigen SCRAM; un `link` es TCP crudo y su
+protocolo es cosa de la aplicación). En macOS no hay aristas entre máquinas en esta
+versión (501): allí no hay dónde resolver bajo el candado del daemon en cada conexión.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

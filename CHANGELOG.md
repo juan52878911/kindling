@@ -12,6 +12,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Núcleo
 
+- **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
+  nombre y aristas declaradas, descritas en un fichero JSON o YAML (un subconjunto sin
+  dependencias), con ciclo de vida atómico: `up`, `ls`, `inspect`, `freeze`, `thaw`,
+  `snapshot` (una plantilla por nodo, todas del mismo instante), `fork -n N` (grafos
+  nuevos cuyas aristas llegan a sus propios nodos y nunca al original) y `rm`. Nodos
+  `eager` o `lazy` (sin máquina hasta la primera conexión). Aristas `link` (TCP a un
+  puerto de otro nodo por `<nodo>.graph`, por un proxy de enlace del daemon que resuelve
+  en cada conexión y despierta al destino si duerme) y `credential` (el attach de
+  Postgres de `kling db`, por dentro). El FORWARD entre namespaces sigue cerrado; el
+  resolver de un nodo sirve solo los `*.graph` de sus aristas, también en `egress
+  none`. Las conexiones quedan en la auditoría con `kind: link`. En macOS funcionan
+  `up/freeze/thaw/snapshot/fork/rm`, y una arista entre máquinas es `501`. Nuevas rutas
+  `/graphs`; las etiquetas `kling.graph*` y el espacio `graph` del store son del daemon.
+  Ver [`docs/grafos.md`](docs/grafos.md).
 - **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del
   overlay de cada instancia es un clon por reflink: con la raíz en XFS/Btrfs, FICLONE
   directo; en ext4, un almacén XFS propio (`$root/cow.xfs`, montado por loop en

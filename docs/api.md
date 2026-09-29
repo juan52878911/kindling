@@ -34,6 +34,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
 | `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (solo Linux), `DELETE /machines/{ref}/credentials/{env}` |
+| `graphs` | sin publicar | `POST/GET /graphs`, `GET/DELETE /graphs/{ref}`, `POST /graphs/{ref}/freeze\|thaw\|snapshot\|fork`; `PUT/DELETE /store/graph/*` reservados (403) |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
@@ -200,7 +201,7 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 
 | Campo | Qué es |
 |---|---|
-| `kind` | `http`, `postgres` (una conexión, ver abajo); `dropped` es una línea que solo lleva la cuenta de descartados |
+| `kind` | `http`, `postgres` (una conexión, ver abajo), `link` (una conexión por una arista de un grafo: `host` es `<nodo>.graph:P`, `upstream` la máquina a la que llegó, `machine:<id>`, y `reason` puede ser `machine_unavailable`, `busy`, `no_capacity`, `upstream_error` o `invalidated`; ver [grafos.md](grafos.md)); `dropped` es una línea que solo lleva la cuenta de descartados |
 | `path` | ruta normalizada, cortada a 256 bytes; un segmento con un marcador o una forma de una clave sale `:cred`, uno de ≥32 caracteres base64url/hex, `:tok`; los caracteres de control salen como `?` |
 | `query` | si la petición llevaba query (su contenido no se escribe nunca) |
 | `status` | lo que recibió el invitado |
@@ -281,6 +282,34 @@ los puertos de loopback por los que el host llega a cada puerto expuesto del
 invitado (allí todos los invitados comparten IP). Quien hable con un invitado sin
 pasar por el daemon resuelve la dirección con `api.Machine.Addr(puerto)`, que usa
 el reenvío si lo hay y `ip:puerto` si no.
+
+## Grafos
+
+Varias máquinas con aristas declaradas y ciclo de vida atómico (capacidad `graphs`;
+uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único del ID.
+
+| Ruta | Qué hace |
+|---|---|
+| `POST /graphs` | crea el grafo y arranca sus nodos `eager` (`201` con el grafo). Cuerpo `{"graph": Graph, "secrets": {"<from>/<ENV>": "clave"}}`: una clave por arista `credential`, ninguna de más. Todo o nada; `409` si ya hay uno con ese nombre o no caben las máquinas, `507` si no cabe la memoria de los `eager`, `501` en macOS si tiene aristas `link` o `credential` |
+| `GET /graphs` | lista, por nombre |
+| `GET /graphs/{ref}` | uno, con el estado de cada nodo |
+| `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
+| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado |
+| `POST /graphs/{ref}/fork` | `{"count": N}` (1 a 16). Devuelve `{"graphs": [...]}` (`201`) |
+| `DELETE /graphs/{ref}` | el grafo y sus máquinas (`204`) |
+
+`Graph` es `{"id", "name", "nodes": {nombre: GraphNode}, "edges": [GraphEdge], "state",
+"generation", "created_at", "fork_of"}`; `id`, `state`, `generation`, `created_at`,
+`fork_of` y en cada nodo `machine_id` y `state` los pone el daemon (lo que llegue en
+ellos se ignora). `GraphNode`: `from` o `image`, `vcpus`, `mem_mib`, `egress`,
+`allow_domains`, `ports`, `wake` (`eager`\|`lazy`), `idle_freeze`, `volumes`, `shares`,
+`labels`, `allow_exec`. `GraphEdge`: `from`, `to`, `kind` (`link`\|`credential`),
+`port`, y en `credential` `env`, `user` y `database`. La clave de una arista no está
+nunca en `Graph`. Las etiquetas `kling.graph` y `kling.graph.*` las pone solo el
+daemon: `POST /machines`, `POST /sandboxes`, el fork de un sandbox y
+`PUT /machines/{ref}/labels` las rechazan con `400`. El grafo se guarda en
+`$KLING_ROOT/store/graph/<id>.json`, que `GET /store/graph` lee pero que solo el daemon
+escribe.
 
 ## Exec y ficheros
 
