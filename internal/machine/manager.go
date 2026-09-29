@@ -52,8 +52,10 @@ func archBootArg() string {
 // mismo snapshot dorado sirve con volúmenes distintos, o sin ninguno. Lo mismo
 // vale para layerDev, el disco de la capa de servicio: vacío en las imágenes
 // monolíticas, que siguen arrancando con la línea de siempre.
-func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string) string {
-	return bootArgsBase + archBootArg() + " " + knet.BootArg() + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
+//
+// ipv6Stack: la receta de la imagen pide el módulo IPv6 cargado (knet.BootArg).
+func bootArgs(vols []api.VolumeAttachment, allowExec bool, layerDev string, ipv6Stack bool) string {
+	return bootArgsBase + archBootArg() + " " + knet.BootArg(ipv6Stack) + volumeBootArg(vols) + execBootArg(allowExec) + layerBootArg(layerDev)
 }
 
 // defaultOverlayMiB es el tamaño lógico del disco escribible por máquina. Al ser
@@ -170,7 +172,8 @@ type Manager struct {
 	volReservas map[string][]reservaVolumen
 
 	// netCursor rota los índices de red en vez de reutilizar el menor libre.
-	// Ver allocNetIndex.
+	// Ver asignarRed. Lo protege netMu, no mu: asignar mira el host.
+	netMu     sync.Mutex
 	netCursor int
 
 	// layerOK memoriza qué bases traen un overlay-init que entiende las capas.
@@ -265,6 +268,19 @@ type Manager struct {
 	// pruebasCPU sustituye la escritura de cpu.max y la espera al agente del
 	// techo de arranque (arranque_cpu.go). Solo lo ponen las pruebas.
 	pruebasCPU *ganchosCPU
+
+	// vigiasListo numera las vigías de "listo" de cada máquina (listo.go):
+	// una nueva jubila a la anterior.
+	vigiasListo sync.Map
+	// pruebasListo y pruebasGanchos sustituyen GET /ready y POST /hooks del
+	// agente. Solo lo ponen las pruebas.
+	pruebasListo   func(ctx context.Context, id string) (api.GuestReady, error)
+	pruebasGanchos func(ctx context.Context, id, kind string) (api.GuestReady, error)
+	pruebasMeminfo func(ctx context.Context, id string) (api.GuestMemInfo, error)
+
+	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
+	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
+	secretos map[string]*estadoSecreto
 
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
@@ -720,7 +736,9 @@ func (m *Manager) Count() int {
 // netIndexSpace es el rango de /30 disponibles en 172.30.0.0/16.
 const netIndexSpace = 16000
 
-// allocNetIndex asigna el siguiente índice libre EN ROTACIÓN, no el menor.
+// asignarRed asigna la red de una máquina nueva: el siguiente índice libre EN
+// ROTACIÓN, no el menor, y libre también en el host (knet.Asignar), con su
+// reserva hecha; montarRed la suelta.
 //
 // Reutilizar el índice más bajo parece más ordenado, pero con máquinas efímeras
 // —que nacen y mueren en cientos de milisegundos— significa que la siguiente
@@ -728,22 +746,19 @@ const netIndexSpace = 16000
 // conntrack de la conexión previa y la nueva microVM se come un "connection
 // reset by peer".
 //
-// Rotando, una IP tarda 16.000 máquinas en repetirse.
-func (m *Manager) allocNetIndex() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+// Rotando, una IP tarda 16.000 máquinas en repetirse. Y mirando el host, no se
+// repite la de una máquina de otro daemon (ver internal/net/subredes.go).
+func (m *Manager) asignarRed(id string) (*knet.Net, error) {
+	m.mu.RLock()
 	used := make(map[int]bool, len(m.byID))
 	for _, mc := range m.byID {
 		used[mc.NetIndex] = true
 	}
-	for i := 0; i < netIndexSpace; i++ {
-		m.netCursor = m.netCursor%netIndexSpace + 1
-		if !used[m.netCursor] {
-			return m.netCursor
-		}
-	}
-	return 1 // rango agotado: MaxMachines lo impide mucho antes
+	m.mu.RUnlock()
+
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	return knet.Asignar(&m.netCursor, netIndexSpace, func(i int) bool { return used[i] }, id)
 }
 
 // ── ciclo de vida ─────────────────────────────────────────────────────────────
@@ -756,6 +771,22 @@ func newID() string {
 
 // Run crea una microVM y la arranca en frío.
 func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
+	mc, err := m.run(ctx, req)
+	if err != nil || !req.WaitReady {
+		return mc, err
+	}
+	// -wait-ready: la máquina se devuelve igual si no llega; Ready dice cómo
+	// quedó y quien pidió decide (el CLI sale con error).
+	plazo := time.Duration(min(req.ReadyTimeoutSeconds, api.ReadyMaxWaitSeconds)) * time.Second
+	res, werr := m.WaitReady(ctx, mc.ID, OpcionesListo{Plazo: plazo})
+	mc.Ready = res.Ready
+	if werr != nil && res.Ready == api.ReadyUnknown {
+		mc.Ready = api.ReadyWaiting
+	}
+	return mc, nil
+}
+
+func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, error) {
 	// Jailer bloqueado: lo PRIMERO, antes de reservar ni publicar nada. Más
 	// tarde el abort pasaba por fail() y cada intento dejaba una entrada
 	// fallida en byID que contaba para checkMachineLimit. El check de boot()
@@ -802,6 +833,11 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	}
 	if req.MemMaxMiB == req.MemMiB {
 		req.MemMaxMiB = 0 // un techo igual a la memoria es memoria fija
+	}
+	// El techo de CPU: el flag > la receta de la imagen > el valor por defecto
+	// de quien pide > el del daemon (este último, tras arrancar).
+	if req.CPUPct <= 0 {
+		req.CPUPct = m.techoCPUPorDefecto(req.Image, req.VCPUs, req.CPUPctDefault)
 	}
 
 	if err := m.checkMachineLimit(); err != nil {
@@ -994,7 +1030,10 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err != nil {
 		return abandonar(err)
 	}
-	netcfg := knet.Plan(m.allocNetIndex(), id)
+	netcfg, err := m.asignarRed(id)
+	if err != nil {
+		return abandonar(err)
+	}
 	if err := m.montarRed(netcfg, id, egress, req.AllowDomains); err != nil {
 		return abandonar(fmt.Errorf("mounting the network: %w", err))
 	}
@@ -1014,7 +1053,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 
 	start := time.Now()
 	m.persistirYa()
-	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec)
+	pid, err := m.boot(ctx, mc.ID, mc.VCPUs, mc.MemMiB, mc.MemMaxMiB, src, layer, overlay, netcfg, append(vols, copies...), req.AllowExec, m.ipv6DeReceta(mc.Image))
 	if err != nil {
 		// boot() devuelve el PID aunque falle DESPUÉS de lanzar el proceso, y
 		// hay que matarlo aquí: m.fail() llama a kill(), que lee el PID de la
@@ -1077,6 +1116,9 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Desde aquí baja el techo la goroutine que espera al agente: con carpetas
 	// vivas ya contestó (waitShares) y lo bajará en su primer sondeo.
 	impulso.entregar()
+	// Para `kling ps`: si la imagen declara una sonda, cuándo termina de
+	// arrancar (listo.go). En segundo plano; -wait-ready espera aparte.
+	m.vigilarListo(id, nil)
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil
@@ -1176,7 +1218,7 @@ func createOverlay(ctx context.Context, path string, sizeMiB int) error {
 // Devuelve el PID en vez de escribirlo en la estructura: quien llama lo asigna
 // bajo el mutex. Escribirlo aquí sería una carrera con List(), que copia las
 // máquinas concurrentemente.
-func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec bool) (int, error) {
+func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB int, base, layer, overlay string, n *knet.Net, vols []resolvedVolume, allowExec, ipv6Stack bool) (int, error) {
 	// Puerta de arranque: el encendido en frío crea los vCPU y los pone a correr
 	// en KVM (c.Start más abajo). Que no lo hagan doce a la vez, o el kernel del
 	// host se cuelga bajo anidamiento. boot() devuelve justo tras Start, así que el
@@ -1233,7 +1275,7 @@ func (m *Manager) boot(ctx context.Context, id string, vcpus, memMiB, memMaxMiB 
 	if err := waitSocket(ctx, c); err != nil {
 		return pid, err
 	}
-	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec, layerDev)}); err != nil {
+	if err := c.SetBootSource(ctx, fc.BootSource{KernelImagePath: m.KernelPath(), BootArgs: bootArgs(attachments(vols), allowExec, layerDev, ipv6Stack)}); err != nil {
 		return pid, err
 	}
 	// vda: base compartida. is_read_only es lo que hace segura la compartición.
@@ -1482,7 +1524,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if mc.HasSecrets {
 		return nil, fmt.Errorf("machine %s has session secrets injected via MMDS and "+
 			"cannot be frozen: the RAM dump would end up in mem.file, which is shared if it is or "+
-			"becomes a golden snapshot. Use squeeze (does not dump to disk) or stop/rm", mc.ID[:12])
+			"becomes a golden snapshot. Use squeeze (does not dump to disk) or stop/rm; or, if its image "+
+			"has post-restore hooks that consume the secret, run them (kling machine hooks -wait) and "+
+			"empty the store (echo '{}' | kling machine secret), which lifts the mark", mc.ID[:12])
 	}
 
 	m.mu.RLock()
@@ -1706,18 +1750,28 @@ const squeezeMinRetenerMiB = 16
 // host—, y desinfla a 0 para que el invitado pueda volver a crecer: la RAM ya
 // está reclamada y solo reentra si de verdad se necesita.
 func (m *Manager) Squeeze(ctx context.Context, ref string) (*api.SqueezeResult, error) {
+	return m.SqueezeWith(ctx, ref, false)
+}
+
+// ErrSqueezeShared es un squeeze que se niega porque la máquina comparte su
+// RAM con otras copias del mismo dorado (Machine.MemShared).
+var ErrSqueezeShared = errors.New("squeezing a copy that shares memory with its template")
+
+// SqueezeWith es Squeeze; force aprieta aunque la máquina comparta memoria con
+// un dorado (ver squeezeLocked).
+func (m *Manager) SqueezeWith(ctx context.Context, ref string, force bool) (*api.SqueezeResult, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	defer m.lock(mc.ID)()
-	return m.squeezeLocked(ctx, mc.ID, ref)
+	return m.squeezeLocked(ctx, mc.ID, ref, force)
 }
 
 // squeezeLocked es el apretón propiamente dicho, con el cerrojo de la máquina ya
 // tomado por quien llama (Squeeze espera por él; makeRoom lo intenta y se salta
 // las ocupadas).
-func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.SqueezeResult, error) {
+func (m *Manager) squeezeLocked(ctx context.Context, id, ref string, force bool) (*api.SqueezeResult, error) {
 	// Pudo cambiar de estado mientras esperábamos el lock.
 	cur, ok := m.Get(id)
 	if !ok {
@@ -1725,6 +1779,19 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	}
 	if cur.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be squeezed (it is %s)", cur.State)
+	}
+	// Una copia de un dorado en Firecracker mapea su mem.file MAP_PRIVATE: la
+	// caché de páginas del invitado son páginas LIMPIAS y COMPARTIDAS con las
+	// demás copias. Al inflar el globo el invitado las suelta, y en cuanto
+	// vuelve a leer esos ficheros los trae del disco virtual a páginas
+	// PRIVADAS. Cada copia "devuelve" algo y el total sube: medido con 24
+	// teléfonos Android, Σ PSS de 4533 a 5072 MiB, la swap llena y el host
+	// colgado (prototypes/android/docs/proxmox.md).
+	if cur.MemShared && !force {
+		return nil, fmt.Errorf("%w: %s was restored from template %s and shares its memory pages with the "+
+			"other copies; the balloon would make its guest drop shared page cache and read it back as "+
+			"private memory, so the host would end up using MORE memory, not less. "+
+			"Freeze it instead, or use -force if it is the only copy", ErrSqueezeShared, cur.Name, cur.From)
 	}
 
 	m.mu.RLock()
@@ -1761,9 +1828,15 @@ func (m *Manager) squeezeLocked(ctx context.Context, id, ref string) (*api.Squee
 	if sinEstadisticas {
 		// macOS: el framework no dice cuánta memoria tiene libre el invitado
 		// (los tres campos llegan a 0), así que la cuenta de arriba no reclama
-		// nada. Se aprieta hasta un suelo fijo en su lugar; ver
-		// objetivoSinEstadisticas.
-		target = objetivoSinEstadisticas(cur)
+		// nada. Se pregunta al agente (GET /meminfo) y, si no lo sabe, se
+		// aprieta hasta un suelo fijo; ver objetivoSinEstadisticas.
+		mi, err := m.memoriaInvitado(ctx, id)
+		if err == nil {
+			target = objetivoConMeminfo(cur, stats.ActualMiB, mi)
+			freeMiB = mi.AvailableMiB
+		} else {
+			target = objetivoSinEstadisticas(cur)
+		}
 	}
 	if target <= stats.ActualMiB {
 		// El invitado no tiene holgura que reclamar.
@@ -1894,6 +1967,7 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 	if err := c.PutMMDSData(ctx, data); err != nil {
 		return nil, fmt.Errorf("injecting MMDS: %w", err)
 	}
+	vacio := almacenVacio(data)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -1901,14 +1975,109 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 		m.mu.Unlock()
 		return nil, fmt.Errorf("machine %q no longer exists", ref)
 	}
-	live.HasSecrets = true
+	if m.secretos == nil {
+		m.secretos = map[string]*estadoSecreto{}
+	}
+	st := m.secretos[mc.ID]
+	mensaje := "session secrets injected via MMDS (can no longer be frozen)"
+	levantada := false
+	switch {
+	case !vacio:
+		if st == nil {
+			st = &estadoSecreto{}
+			m.secretos[mc.ID] = st
+		}
+		st.gen++
+		live.HasSecrets = true
+	case !live.HasSecrets:
+		mensaje = "MMDS store emptied"
+	case st.confirmado(): // st != nil: lo garantiza confirmado()
+		live.HasSecrets = false
+		delete(m.secretos, mc.ID)
+		levantada = true
+		mensaje = "MMDS store emptied after its post-restore hooks consumed the secret: it can be frozen again"
+	default:
+		mensaje = "MMDS store emptied, but still marked with secrets: no post-restore hook confirmed it " +
+			"consumed them (kling machine hooks -wait) after the last injection"
+	}
 	m.persist()
 	out := *live
 	m.mu.Unlock()
 
-	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: mc.ID, Name: mc.Name,
-		Message: "session secrets injected via MMDS (can no longer be frozen)"})
+	if levantada {
+		log.Printf("%s: %s", mc.Name, mensaje)
+	}
+	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStarted, ID: mc.ID, Name: mc.Name, Message: mensaje})
 	return &out, nil
+}
+
+// LEVANTAR LA MARCA DE SECRETOS.
+//
+// Una máquina que recibió un secreto por MMDS no se congela (HasSecrets): la
+// RAM del invitado lo lleva, y un volcado lo repartiría. Pero el caso de la
+// identidad por copia (un teléfono: android_id y nombre por MMDS, que un
+// gancho aplica) dejaba la máquina marcada para siempre aunque el almacén se
+// vaciara, y ya no se podía ni congelar para recuperarla.
+//
+// Nadie puede demostrar desde fuera que la RAM del invitado ya no contiene el
+// secreto. Lo que el daemon SÍ sabe es esto, y es lo que se exige:
+//
+//  1. después de la ÚLTIMA inyección no vacía corrió una tanda de ganchos de
+//     la imagen (POST /machines/{ref}/hooks) y terminó con éxito, sin otra
+//     inyección en medio;
+//  2. y el almacén se vació después (PUT con {} o null).
+//
+// La garantía es la de la imagen: su gancho declara, al salir con 0, que
+// aplicó el secreto y no dejó copia (en un Android, la identidad aplicada ES
+// del teléfono y no es secreto; lo que no debe quedar es el documento). Una
+// imagen sin ganchos, o un servidor MCP que guardó el secreto en el entorno de
+// sus procesos, no confirma nada y la marca se queda. No sobrevive a reiniciar
+// el daemon: sin el registro, la marca también se queda.
+
+// estadoSecreto es lo que el daemon sabe de los secretos de una máquina.
+type estadoSecreto struct {
+	gen        uint64 // inyecciones no vacías
+	consumidos uint64 // la gen que una tanda de ganchos confirmó
+}
+
+func (e *estadoSecreto) confirmado() bool {
+	return e != nil && e.gen > 0 && e.consumidos == e.gen
+}
+
+// almacenVacio: {} o null (con espacios), que es como se vacía el almacén.
+func almacenVacio(data any) bool {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	switch strings.Join(strings.Fields(string(b)), "") {
+	case "{}", "null":
+		return true
+	}
+	return false
+}
+
+// genSecreto es la inyección vigente de la máquina id (0 = ninguna).
+func (m *Manager) genSecreto(id string) uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if st := m.secretos[id]; st != nil {
+		return st.gen
+	}
+	return 0
+}
+
+// confirmarSecreto apunta que los ganchos terminaron bien tras la inyección
+// gen, si no hubo otra entre medias.
+func (m *Manager) confirmarSecreto(id string, gen uint64) {
+	if gen == 0 {
+		return
+	}
+	m.mu.Lock()
+	if st := m.secretos[id]; st != nil && st.gen == gen {
+		st.consumidos = gen
+	}
+	m.mu.Unlock()
 }
 
 // SetCredentials entrega credenciales al proxy de credenciales de una máquina
@@ -2109,6 +2278,11 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	egress, _ := knet.ParseEgress(mc.Egress)
 	netcfg := knet.Plan(mc.NetIndex, mc.ID)
 	if !m.redLista(netcfg, mc.ID) {
+		n, err := m.redParaRehacer(mc)
+		if err != nil {
+			return nil, fmt.Errorf("rebuilding the network: %w", err)
+		}
+		netcfg = n
 		if err := m.montarRed(netcfg, mc.ID, egress, mc.AllowDomains); err != nil {
 			return nil, fmt.Errorf("rebuilding the network: %w", err)
 		}
@@ -2236,8 +2410,9 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// antes de devolverla como running (ver resync.go).
 	var resyncT time.Duration
 	var resyncOK bool
+	var listo *api.GuestReady
 	if _, sinAgente := m.resyncSinAgente.LoadAndDelete(claveThaw(mc.ID)); !sinAgente {
-		resyncT, resyncOK = m.resyncGuest(ctx, mc.ID, "")
+		resyncT, resyncOK, listo = m.resyncGuest(ctx, mc.ID, "", api.ResyncThaw)
 	}
 	crono.marca(&crono.p.ResyncMS)
 	// El agente ya contestó (o no lo hay): fin del arranque, techo configurado.
@@ -2281,6 +2456,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// El techo por defecto se decidió sobre la copia (arriba); se anota en la
 	// viva para que state.json y `kling ps` digan el que de verdad se aplicó.
 	cur.CPUPct = mc.CPUPct
+	// Descongelada de SU mem.file: ya no comparte páginas con un dorado.
+	cur.MemShared = false
 	// Lo que reentregarCredenciales anotó en la copia.
 	cur.CredentialAnyDatabase = mc.CredentialAnyDatabase
 	m.socket[mc.ID] = sock
@@ -2294,6 +2471,8 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	// por su tag y sigue con el mismo. En segundo plano; lo que el invitado
 	// pida mientras tanto espera a la sesión.
 	m.startShares(mc.ID)
+	// Los ganchos de la imagen, con credenciales y red ya en su sitio.
+	m.trasRestaurar(ctx, mc.ID, api.ResyncThaw, listo)
 
 	fases := crono.cerrar()
 	out.Wake = fases

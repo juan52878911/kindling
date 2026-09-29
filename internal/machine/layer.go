@@ -121,6 +121,49 @@ func (m *Manager) ImageFile(image string) string {
 	return m.imagePath(image)
 }
 
+// techoCPUPorDefecto es el cpu_pct de una máquina que no lo pidió: el de la
+// receta de su imagen (cpu_pct_per_vcpu × vcpus, o cpu_pct), y si no dice
+// nada, porDefecto (el de quien pide). 0 = el del daemon, que se aplica al
+// arrancar. Una receta ilegible cuenta como sin techo propio.
+func (m *Manager) techoCPUPorDefecto(image string, vcpus, porDefecto int) int {
+	if validName.MatchString(image) {
+		if b, err := os.ReadFile(m.recipePath(image)); err == nil {
+			var rec api.ImageRecipe
+			if json.Unmarshal(b, &rec) == nil {
+				if pct := techoDeReceta(rec, vcpus); pct > 0 {
+					return pct
+				}
+			}
+		}
+	}
+	return max(porDefecto, 0)
+}
+
+// ipv6DeReceta dice si la receta de la imagen pide el módulo IPv6 cargado en
+// el invitado (api.ImageRecipe.GuestIPv6Stack). Sin receta, o ilegible: no.
+func (m *Manager) ipv6DeReceta(image string) bool {
+	if !validName.MatchString(image) {
+		return false
+	}
+	b, err := os.ReadFile(m.recipePath(image))
+	if err != nil {
+		return false
+	}
+	var rec api.ImageRecipe
+	return json.Unmarshal(b, &rec) == nil && rec.GuestIPv6Stack
+}
+
+// techoDeReceta es el cpu_pct que pide una receta para vcpus vCPU (0 = nada).
+func techoDeReceta(rec api.ImageRecipe, vcpus int) int {
+	switch {
+	case rec.CPUPctPerVCPU > 0:
+		return rec.CPUPctPerVCPU * max(vcpus, 1)
+	case rec.CPUPct > 0:
+		return rec.CPUPct
+	}
+	return 0
+}
+
 // recipeBase lee de la receta sobre qué base se construyó la imagen.
 //
 // Sin receta —o con una ilegible— se asume la base por defecto: es la que usó el

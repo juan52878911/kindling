@@ -13,6 +13,10 @@ import (
 	"strings"
 )
 
+// redEnHost: las /30 de los enlaces viven en el host y pueden chocar con las
+// de otro daemon (ver subredes.go).
+const redEnHost = true
+
 // nsIP es la IP del lado namespace del enlace: por ella alcanza el host a la
 // microVM.
 func nsIP(third, fourth int) string {

@@ -292,7 +292,7 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 	huboSinIPv6 := false
 	for _, s := range list {
 		marca := ""
-		if !s.GuestIPv6Off {
+		if !s.GuestIPv6Off && !s.GuestIPv6Stack {
 			marca = "*"
 			huboSinIPv6 = true
 		}
@@ -371,7 +371,10 @@ func writeSnapshot(w io.Writer, s *api.Snapshot, asJSON bool) error {
 	fmt.Fprintf(w, "cpus/mem:    %d / %s\n", s.VCPUs, mem)
 	fmt.Fprintf(w, "on disk:     %s memory, %s total\n", human(s.MemBytes), human(s.DiskBytes))
 	fmt.Fprintf(w, "instances:   %d\n", s.Instances)
-	if !s.GuestIPv6Off {
+	if s.GuestIPv6Stack {
+		fmt.Fprintf(w, "guest ipv6:  stack kept by the image (recipe guest_ipv6_stack), no v6 addresses; "+
+			"the host namespace blocks it\n")
+	} else if !s.GuestIPv6Off {
 		fmt.Fprintf(w, "guest ipv6:  not confirmed off (frozen before the IPv6 barrier); the host "+
 			"namespace still blocks it, but recommit from a fresh boot to close it in the guest too\n")
 	}

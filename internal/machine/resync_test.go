@@ -57,7 +57,7 @@ func TestResyncGuestMandaHoraYEntropiaNuevas(t *testing.T) {
 
 	antes := time.Now()
 	for i := 0; i < 2; i++ {
-		if _, ok := m.resyncGuest(context.Background(), id, ""); !ok {
+		if _, ok, _ := m.resyncGuest(context.Background(), id, "", api.ResyncThaw); !ok {
 			t.Fatal("resync no se aplicó contra un agente que lo sabe hacer")
 		}
 	}
@@ -91,7 +91,7 @@ func TestResyncGuestAgenteViejoNoFalla(t *testing.T) {
 		}))
 		buf := capturarLog(t)
 		for i := 0; i < 3; i++ {
-			took, ok := m.resyncGuest(context.Background(), id, "")
+			took, ok, _ := m.resyncGuest(context.Background(), id, "", api.ResyncThaw)
 			if ok {
 				t.Fatalf("%d: se dio por aplicado", code)
 			}
@@ -120,24 +120,24 @@ func TestResyncGuestSinAgente(t *testing.T) {
 	}}
 	buf := capturarLog(t)
 	clave := claveSnapshot(&api.Snapshot{Name: "dorado", CreatedAt: time.Now()})
-	took, ok := m.resyncGuest(context.Background(), "x", clave)
+	took, ok, _ := m.resyncGuest(context.Background(), "x", clave, api.ResyncThaw)
 	if ok || took > resyncReintento+time.Second {
 		t.Fatalf("ok=%v took=%s", ok, took)
 	}
 	// Otra instancia del MISMO snapshot: ni se intenta —nadie escuchaba, y su
 	// memoria no cambia— ni se repite el aviso.
 	m.byID["z"] = &api.Machine{ID: "z", Name: "z", Image: "sin-agente", Forwards: map[string]string{"8080": addr}}
-	if took, ok := m.resyncGuest(context.Background(), "z", clave); ok || took != 0 {
+	if took, ok, _ := m.resyncGuest(context.Background(), "z", clave, api.ResyncThaw); ok || took != 0 {
 		t.Fatalf("snapshot sin agente recordado: ok=%v took=%s", ok, took)
 	}
 	// Sin clave (un thaw) no se recuerda nada: se intenta.
-	if took, _ := m.resyncGuest(context.Background(), "z", ""); took == 0 {
+	if took, _, _ := m.resyncGuest(context.Background(), "z", "", api.ResyncThaw); took == 0 {
 		t.Fatal("sin clave no debería saltarse el intento")
 	}
 	if n := strings.Count(buf.String(), "no guest agent"); n != 1 {
 		t.Fatalf("%d avisos para una imagen, quería 1:\n%s", n, buf)
 	}
-	if took, ok := m.resyncGuest(context.Background(), "y", ""); ok || took != 0 {
+	if took, ok, _ := m.resyncGuest(context.Background(), "y", "", api.ResyncThaw); ok || took != 0 {
 		t.Fatalf("máquina inalcanzable: ok=%v took=%s", ok, took)
 	}
 }
@@ -155,7 +155,7 @@ func TestResyncGuestFalloDelAgenteNoSeRecuerda(t *testing.T) {
 	}))
 	capturarLog(t)
 	for i := 0; i < 3; i++ {
-		if _, ok := m.resyncGuest(context.Background(), id, ""); ok {
+		if _, ok, _ := m.resyncGuest(context.Background(), id, "", api.ResyncThaw); ok {
 			t.Fatal("un 500 no es un resync aplicado")
 		}
 	}

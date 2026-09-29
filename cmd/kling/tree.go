@@ -65,6 +65,8 @@ var coreTree = []section{
       [-mem-max 2G]                                ceiling for machine resize
       [-share SRC:DST[:copy|ro|rw]] (repeatable)   host folder inside: a read-only
                                                    copy (default), or live
+      [-wait-ready] [-ready-timeout 2m]            return once ready by the image's
+                                                   own probe and post-restore hooks
 `},
 		{Name: "ps", Summary: "lists the machines", Usage: `  ps [-a] [-q] [-json]                             lists the machines (-a: stopped
                                                    too; -q: only IDs)
@@ -88,7 +90,9 @@ var coreTree = []section{
                                                    (asks first for several; -f: no)
 `},
 		{Name: "save", Summary: "turns a machine into a template", MachineArgs: []string{""}, Usage: `  save [-replace] [-force] <ref> <name>            freezes a machine as a reusable
-                                                   template: run -from <name>
+                                                   template: run -from <name>; waits
+                                                   until the guest serves and is ready
+                                                   by its image's probe (-force: no)
 `},
 	}},
 	{title: "INSIDE A MACHINE", cmds: []plugin.Command{
@@ -209,13 +213,21 @@ var coreTree = []section{
 `},
 	}},
 	{title: "ADVANCED", advanced: true, cmds: []plugin.Command{
-		{Name: "machine", Summary: "resize, squeeze, secrets", Subcommands: []string{"resize", "squeeze", "secret", "credential", "audit"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential", "audit"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
+		{Name: "machine", Summary: "resize, squeeze, secrets, readiness", Subcommands: []string{"resize", "squeeze", "secret", "credential", "audit", "ready", "hooks"}, MachineArgs: []string{"resize", "squeeze", "secret", "credential", "audit", "ready", "hooks"}, Usage: `  machine resize <ref> -mem 512M                   changes its memory without
                                                    restarting, up to its -mem-max
-  machine squeeze <ref>...                         balloon: returns the guest's free
-                                                   memory to the host
-  machine secret <ref> [-f store.json]             injects a session secret via MMDS
+  machine squeeze [-force] <ref>...                balloon: returns the guest's free
+                                                   memory to the host (-force: also a
+                                                   copy sharing its template's memory)
+  machine secret <ref> [-f store.json] [-hooks]    injects a session secret via MMDS
                                                    (stdin if no -f); it can no longer
-                                                   be frozen
+                                                   be frozen. -hooks: then runs the
+                                                   image's post-restore hooks; after
+                                                   that, '{}' empties it and lifts
+                                                   the mark
+  machine ready <ref> [-wait 1m] [-json]           ready by its image's probe
+                                                   (/etc/kindling/ready) and hooks?
+  machine hooks <ref> [-wait 1m] [-json]           runs its post-restore hooks again
+                                                   (/etc/kindling/post-restore.d)
   machine credential <ref> -domain D -env VAR      hands an API key to the credential
       [-allow-request 'GET /v1/x']...              proxy: the guest only sees a
       [-f keyfile]                                 placeholder in VAR, swapped for the

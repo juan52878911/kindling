@@ -27,7 +27,7 @@ func forkStatus(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrNoMachine):
 		return http.StatusNotFound
-	case errors.Is(err, machine.ErrNotRunning), errors.Is(err, machine.ErrFork),
+	case errors.Is(err, machine.ErrNotRunning), errors.Is(err, machine.ErrFork), errors.Is(err, machine.ErrNotReady),
 		errors.Is(err, machine.ErrSharesCommit), errors.Is(err, machine.ErrExecNotInSnapshot):
 		return http.StatusConflict
 	}
@@ -52,6 +52,9 @@ func validarFork(req api.ForkRequest) error {
 	if err := api.ValidateForkLabels(req.Labels); err != nil {
 		return err
 	}
+	if req.ReadyTimeoutSeconds < 0 || req.ReadyTimeoutSeconds > api.ReadyMaxWaitSeconds {
+		return fmt.Errorf("ready_timeout_seconds must be between 0 and %d", api.ReadyMaxWaitSeconds)
+	}
 	return nil
 }
 
@@ -71,13 +74,23 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	espera := time.Duration(req.ReadyTimeoutSeconds) * time.Second
 	snap, forks, err := s.mgr.Fork(r.Context(), src.ID, machine.ForkOptions{
 		Count: req.Count, TTLSeconds: req.TTLSeconds, OnTTL: req.OnTTL, Labels: req.Labels,
+		SkipReady: req.SkipReady, ReadyWait: espera,
 		// Como al crear un sandbox: se devuelven cuando el agente ya escucha,
-		// porque quien las pide va a ejecutar algo en ellas acto seguido.
+		// porque quien las pide va a ejecutar algo en ellas acto seguido. Y,
+		// si la imagen declara sonda o ganchos, cuando está lista: una copia
+		// cuyos ganchos (su identidad) no han terminado no es aún la suya.
 		Lista: func(ctx context.Context, mc *api.Machine) error {
 			if err := s.esperarPuerto(ctx, mc, api.GuestPort, forkAgentWait); err != nil {
 				return fmt.Errorf("the guest agent of %s never answered in %s: %w", mc.Name, forkAgentWait, err)
+			}
+			if req.SkipReady {
+				return nil
+			}
+			if _, err := s.mgr.WaitReady(ctx, mc.ID, machine.OpcionesListo{Plazo: espera, SinAgenteVale: true}); err != nil {
+				return err
 			}
 			return nil
 		},

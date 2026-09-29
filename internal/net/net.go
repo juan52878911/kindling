@@ -52,8 +52,20 @@ const (
 // arranque que tenía al congelarse, así que restaurarlo no vuelve a leer
 // bootArgs y sigue con IPv6 tal como estaba entonces. La barrera del namespace
 // (applyIPv6Barrier en firewall.go) no depende de esto y cubre ese caso.
-func BootArg() string {
-	return fmt.Sprintf("ip=%s::%s:%s::eth0:off ipv6.disable=1", GuestIP, GuestGW, GuestNM)
+//
+// ipv6Stack (la imagen lo pide en su receta, api.ImageRecipe.GuestIPv6Stack)
+// cambia ipv6.disable=1 por ipv6.disable_ipv6=1: el módulo carga, así que hay
+// sockets AF_INET6 (un servidor que escucha en [::] con v4 mapeado, como adbd
+// de Android, que sin ellos no escucha nada), pero ninguna interfaz arranca con
+// IPv6, ni link-local. El invitado, como root, puede encenderlo en una
+// interfaz suya; lo que sale de ella lo cierra la otra capa (applyIPv6Barrier
+// en Linux, egress.IsBlockedIP en macOS), que no depende de esto.
+func BootArg(ipv6Stack bool) string {
+	v6 := "ipv6.disable=1"
+	if ipv6Stack {
+		v6 = "ipv6.disable_ipv6=1"
+	}
+	return fmt.Sprintf("ip=%s::%s:%s::eth0:off %s", GuestIP, GuestGW, GuestNM, v6)
 }
 
 // Net es la red de una microVM concreta.
@@ -64,6 +76,10 @@ type Net struct {
 	HostIP string // IP del host en el enlace
 	NSIP   string // IP del namespace en el enlace; por aquí se alcanza la microVM
 	Index  int
+
+	// reserva es el fichero de DirReservas que aparta Index mientras se
+	// monta la red (ver subredes.go). Vacío si no hay reserva.
+	reserva string
 }
 
 func run(args ...string) error {

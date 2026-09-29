@@ -55,6 +55,39 @@ func TestCommitMarcaGuestIPv6OffEnArranqueEnFrio(t *testing.T) {
 	}
 }
 
+// Una plantilla en frío de una imagen que pide la pila IPv6 (Android): su
+// dorado no lleva GuestIPv6Off (el módulo está cargado) pero sí GuestIPv6Stack,
+// para que el CLI no la tome por un dorado anterior a la barrera.
+func TestCommitMarcaGuestIPv6StackSiLaRecetaLaPide(t *testing.T) {
+	m := newTestManager(t)
+	id := "c3aa170000000003"
+	falso, _ := plantillaParaCommit(t, m, id)
+	img := "android13"
+	m.mu.Lock()
+	m.byID[id].Image = img
+	m.mu.Unlock()
+	if err := os.WriteFile(m.recipePath(img), []byte(`{"name":"android13","cmd":[],"guest_ipv6_stack":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := m.snapDir("dorado")
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			_ = os.WriteFile(filepath.Join(dir, "snap.file"), []byte("estado"), 0o644)
+			_ = os.WriteFile(filepath.Join(dir, "mem.file"), make([]byte, 1<<20), 0o644)
+		}
+	})
+	snap, err := m.Commit(context.Background(), id, "dorado", false)
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if snap.GuestIPv6Off || !snap.GuestIPv6Stack {
+		t.Fatalf("GuestIPv6Off=%v GuestIPv6Stack=%v; quiero false/true", snap.GuestIPv6Off, snap.GuestIPv6Stack)
+	}
+	if got, err := m.loadSnapshot("dorado"); err != nil || !got.GuestIPv6Stack {
+		t.Fatalf("meta.json en disco sin guest_ipv6_stack (err %v)", err)
+	}
+}
+
 // TestCommitHeredaGuestIPv6OffDeLaCadena: si la plantilla es a su vez una
 // instancia de otro dorado (fork), no volvió a arrancar en frío, así que su
 // línea de arranque es la que traía AQUEL: se hereda su marca, no se supone.

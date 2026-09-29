@@ -418,3 +418,106 @@ scp /tmp/t.test lab:/tmp/k/internal/machine/ && ssh lab 'cd /tmp/k/internal/mach
 ```
 
 **Los siete paquetes pasan en Linux**, no sólo en macOS.
+
+## 9. Lo que pidió el prototipo Android (29-09-2026)
+
+El prototipo (`prototypes/android/`) llevó al núcleo a sitios donde un servidor
+MCP no llega: un invitado que tarda segundos en terminar de arrancar detrás del
+agente, identidad por copia, un sistema entero que necesita todos sus núcleos y
+un Mac al límite. Lo que se cambió, y por qué:
+
+- **"Listo" lo define la imagen** (`/etc/kindling/ready`) y **ganchos tras
+  restaurar** (`/etc/kindling/post-restore.d/`): ver [api.md](api.md), "Listo y
+  ganchos tras restaurar". Medido en el M4 con Android 13 (2 vCPU, 1,5 GiB):
+  `kling save` pedido en cuanto el agente contesta esperó 5,7 s a
+  `boot_completed=1` (run → dorado 7,2 s), y el clon restaurado estaba listo
+  (`boot_completed=1`, gancho de identidad en 0,39 s). Con el agente viejo del
+  paquete, el mismo `save` congeló a los 2,7 s con Android a medias, y ni la
+  copia ni `android-sh getprop` respondían.
+- **`cpu_pct` en la receta** (`cpu_pct_per_vcpu: 100` en Android: 200 con 2 vCPU,
+  sin flag).
+- **Pila IPv6 en la receta** (`guest_ipv6_stack`). Con `ipv6.disable=1` (la barrera
+  IPv6 del 27-09) Android arrancaba y se guardaba, pero nadie llegaba a él: `adbd`
+  no escuchaba (solo abre `[::]:5555`) y el `IpClient` del `eth0` fallaba en bucle
+  (`onProvisioningFailure(): 5`, ERROR_STARTING_IPV6) borrándole la IPv4. Con
+  `ipv6.disable_ipv6=1` vuelve todo; ver SECURITY.md, "IPv6".
+- **La marca de secretos se puede levantar** tras ganchos que los consumen y un
+  almacén vacío: un teléfono con identidad por copia vuelve a poder congelarse
+  (freeze 1,34 s, thaw 1,02 s, `android_id` intacto tras el thaw).
+- **`squeeze` no aprieta copias que comparten memoria** (Firecracker) y en vz
+  pregunta al agente cuánta tiene disponible: Android 1,5 GiB quedó con 359 MiB
+  disponibles (antes, 4 MiB con 1 GiB) y `uiautomator dump` siguió en 3 s.
+- **Dos daemons en el mismo host no se barren la red.** Los namespaces
+  `kl-<id>` son globales; el barrido de huérfanos de un daemon privado borró el
+  namespace y el veth de una máquina viva del daemon del sistema (lab, CT con
+  Firecracker). Cada daemon apunta ahora los suyos en `<root>/net/` y solo barre
+  esos; los que no llevan marca se dejan (y se dice en el log).
+
+### Admisión en macOS: swap y disco
+
+En el Mac bajo presión se vieron páginas de la caché del invitado a ceros
+(`prototypes/android/docs/sigill.md`): swap 8–9 de 9,2 GB, disco al 97–98 % y
+`kern.memorystatus_level` en 22–40, por encima del 15 % de la compuerta de
+siempre, que por eso no protegía.
+
+El swap de macOS no tiene tamaño fijo: `dynamic_pager` añade ficheros de 1 GiB
+en el volumen `VM` mientras haya disco. "Usado sobre total" no mide presión: el
+día de esta prueba el Mac iba al 89 % (5,4 de 6 GiB) con 63 GiB libres, sano, y un
+tope del 85 % sobre el total habría rechazado todo. La cuenta es sobre lo que el
+swap **puede** llegar a ocupar: el total más el disco libre del volumen `VM` por
+encima del mínimo de disco. Con disco de sobra sale bajo (ese día, 10 %); con el
+disco en su mínimo es usado/total, que es la situación de los fallos. Por encima
+de `KLING_MAX_SWAP_PCT` (85 % por defecto; 0 lo apaga), `507`.
+
+Y el mínimo de disco libre en macOS sube de 2 a **16 GiB**
+(`KLING_MIN_FREE_DISK_MIB`), porque el disco de datos es también el del swap: con
+el disco al 97–98 % de 460 GiB quedaban 9–14 GiB, y el daemon seguía admitiendo.
+En Linux sigue en 2 GiB. Probado en el Mac con los topes forzados: `507` por
+swap (`KLING_MAX_SWAP_PCT=5`), `503` por disco, y admite con los de por defecto.
+
+### Dos daemons, una subred (#97)
+
+La marca de namespaces evitaba el borrado, no el choque: cada daemon reparte
+los índices de red (`NetIndex`, una /30 de 172.30.0.0/16 en el lado host del
+veth) mirando solo sus máquinas, y el privado y el del sistema podían montar la
+misma /30. La ruta del host lleva a uno de los dos veth, y la red del otro se
+pierde.
+
+Rangos por raíz (un trozo del /16 para cada `-root`) no lo arreglan: los dos
+daemons tendrían que ponerse de acuerdo en quién tiene cuál, y un dorado o una
+máquina de antes seguiría en su índice. Así que la subred es del host y se
+comprueba contra el host (`internal/net/subredes.go`):
+
+1. El daemon reserva el índice con un fichero en `/run/kindling/net-claims/`
+   (tmpfs, compartido por todos, vacío tras reiniciar), creado con `O_EXCL`.
+   Dos daemons que eligen el mismo a la vez: gana uno. Una reserva de más de
+   un minuto es de un daemon que murió a medias y se recoge.
+2. **Después** de reservarlo, mira que ninguna dirección del host caiga en la
+   /30 (el veth de otro daemon que ya la montó). Si cae, suelta y prueba la
+   siguiente.
+3. Suelta la reserva cuando `Setup` ya puso la dirección al veth: desde ahí es
+   la dirección la que la ocupa.
+
+El orden es lo que cierra la carrera: quien reserva tras soltar el otro ya ve
+su dirección. Mirar antes de reservar dejaría una ventana.
+
+Lo que esto no ve es la red de una máquina congelada de otro daemon que se
+soltó (a los 30 min, o al reiniciar su daemon): su índice parece libre y se
+puede tomar. Al descongelarla, su daemon comprueba lo mismo, ve la /30 ocupada
+y la muda a otra (`network: … moving it to index N` en el log). El invitado no
+lo nota: su IP y su pasarela son siempre 172.16.0.2 y 172.16.0.1, también en un
+dorado, que por eso sirve para cualquier índice. Cambia `Machine.ip` (la IP por
+la que el host la alcanza, que el daemon resuelve en cada conexión, también en
+las aristas de un grafo) y la del resolver y los proxies del veth, que el
+invitado pudo guardar en su caché de DNS. Las máquinas y dorados existentes
+conservan su índice; solo se mudan si al rehacer su red la encuentran ocupada.
+En macOS no hay enlaces en el host y nada de esto aplica.
+
+Probado en `phones` (CT Linux, Firecracker) con el daemon del sistema y su
+`phone-1` en el índice 90 (172.30.1.105/30): un daemon privado con otra raíz y
+otro socket, rotado hasta el 89, dio a su máquina el 91 (sin el arreglo habría
+montado la 90); las dos contestan. Y la mudanza: la máquina del privado
+congelada en el 91 y su daemon reiniciado (red soltada), un segundo daemon
+privado tomó el 91; el thaw la movió al 92 y respondieron las tres. Test:
+`TestDosDaemonsALaVez` (80 arranques en dos daemons a la vez, sin repetir
+índice; sin la comprobación repite en cada pasada).
