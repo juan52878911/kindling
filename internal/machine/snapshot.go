@@ -38,14 +38,24 @@ func (m *Manager) snapDir(name string) string {
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
 func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (snapOut *api.Snapshot, errOut error) {
-	return m.commit(ctx, ref, name, replace, nil)
+	return m.commit(ctx, ref, name, replace, nil, false)
+}
+
+// commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
+// deja pausada: el snapshot de un grafo pausa todos sus nodos, vuelca uno a
+// uno y los reanuda al final, para que todos los volcados sean del mismo
+// instante (grafo_snapshot.go). Sin volúmenes: soltarlos pide hablar con el
+// agente, y un invitado pausado no contesta.
+func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
+	return m.commit(ctx, ref, name, false, nil, true)
 }
 
 // commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
 // de la máquina tomado y la máquina releída, justo antes de pausarla. La usa
 // Fork para repetir ahí lo que ya miró sin cerrojo (TOCTOU con un
-// SetCredentials concurrente, que toma el mismo cerrojo).
-func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error) (snapOut *api.Snapshot, errOut error) {
+// SetCredentials concurrente, que toma el mismo cerrojo). Con yaPausada, la
+// máquina tiene que estar pausada, no se pausa ni se reanuda (commitPausada).
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -78,7 +88,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			"a snapshot: its RAM would be shared by every instance. Snapshot a machine that never "+
 			"received secrets", mc.Name)
 	}
-	if mc.State != api.StateRunning {
+	switch {
+	case yaPausada && mc.State != api.StatePaused:
+		return nil, fmt.Errorf("machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
+	case yaPausada && len(mc.Volumes) > 0:
+		return nil, fmt.Errorf("machine %s has volumes, and they can't be released while it is paused: "+
+			"a graph snapshot or fork doesn't take nodes with volumes in this version", mc.Name)
+	case !yaPausada && mc.State != api.StateRunning:
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}
 	if comprobar != nil {
@@ -259,16 +275,18 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// mapas de bloques, posición del journal— de un disco que después seguirá
 	// cambiando, porque el fichero del volumen NO se copia al snapshot. Cada
 	// instancia restaurada arrancaría creyendo un estado que ya no existe.
-	soltados = true
-	if err := m.releaseVolumes(mc); err != nil {
-		return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
-	}
+	if !yaPausada {
+		soltados = true
+		if err := m.releaseVolumes(mc); err != nil {
+			return nil, fmt.Errorf("preparing volumes for freeze: %w", err)
+		}
 
-	pausaPedida = true
-	if err := c.Pause(ctx); err != nil {
-		return nil, err
+		pausaPedida = true
+		if err := c.Pause(ctx); err != nil {
+			return nil, err
+		}
+		pausada = true
 	}
-	pausada = true
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
@@ -358,7 +376,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 
 	snap := &api.Snapshot{
 		Name: name, Image: mc.Image, CreatedAt: time.Now(),
-		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, MemMaxMiB: mc.MemMaxMiB, Labels: mc.Labels,
+		// Sin las etiquetas de grafo: una plantilla no es de ningún grafo, y
+		// una máquina nacida de ella tampoco (ver sinEtiquetasGrafo).
+		VCPUs: mc.VCPUs, MemMiB: mc.MemMiB, MemMaxMiB: mc.MemMaxMiB, Labels: sinEtiquetasGrafo(mc.Labels),
 		Egress:       mc.Egress,
 		CPUPct:       mc.CPUPct,
 		AllowDomains: mc.AllowDomains,
@@ -1137,7 +1157,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		Volumes:   attachments(vols),
 		AllowExec: snap.AllowExec, OnTTL: req.OnTTL,
 		// Las etiquetas del snapshot se heredan; las de la petición mandan.
-		Labels:    api.MergeLabels(snap.Labels, req.Labels),
+		Labels:    api.MergeLabels(sinEtiquetasGrafo(snap.Labels), req.Labels),
 		CreatedAt: creada,
 		TTLAt:     &creada,
 	}
