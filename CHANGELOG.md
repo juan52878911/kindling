@@ -83,12 +83,33 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   corta las sesiones abiertas. Nuevo `DELETE /machines/{ref}/credentials/{env}` y
   `kling machine credential -rm`; capacidad `db-attach`. En macOS se rechaza con un error
   claro. Ver [`docs/db.md`](docs/db.md).
+- **`kling db clone <postgres-url> -mask REGLAS [-golden G]`: un golden desde producción
+  con los datos personales enmascarados.** La contraseña (de `PGPASSWORD` o
+  `-password-stdin`, nunca de la URL) va al proxy de credenciales de una máquina de
+  construcción con `-egress allowlist`: el invitado solo ve un marcador y el proxy entra
+  por TLS verify-full (`-ca`, `-tls-server-name`; `sslmode=disable` solo con SCRAM). El rol
+  tiene que ser de solo lectura (se comprueba antes de volcar; `-allow-writer` para
+  saltarlo, nunca un superusuario). `pg_dump` corre **dentro** de esa microVM y se restaura
+  por una tubería en un Postgres cuyo directorio de datos está en un tmpfs del invitado:
+  el volcado sin enmascarar no toca nunca el disco del host. Allí se aplican las reglas
+  (`email`, `name`, `phone`, `card`, `text`, `null`, `keep`, `fixed:<valor>`, por
+  `tabla.columna` en JSON o YAML simple) en una transacción, con un hash con sal secreta
+  de la construcción (se conservan relaciones y joins) y una comprobación de que ninguna
+  columna enmascarada conserva un valor viejo; las columnas sospechosas por nombre
+  (email, phone, name, dni, iban, card, address, ip…) sin regla **bloquean** la
+  construcción salvo `-allow-unmasked` (`-strict` añade todo texto, JSON y array). Si algo
+  falla, se destruye todo y no queda golden. El golden se construye con `db-golden.sh`
+  desde el volcado ya enmascarado en una máquina nueva con `egress none`. El informe
+  dice columnas tratadas, sospechosas y recuentos, nunca valores (`-json`). Ver
+  [`docs/db.md`](docs/db.md#copia-de-producción-enmascarada-clone).
 - **`kling db` en CI.** Scripts (`ext/db/scripts/ci-load.sh`, `ci-pr-db.sh`) y ejemplos de
   GitHub Actions y GitLab CI para una base por PR. Ver [`docs/db-ci.md`](docs/db-ci.md).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
   (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
 - e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`
-  (`KLING_E2E_DB_GOLDEN`; se salta, avisando, si no hay plantilla), y 7f para `attach`.
+  (`KLING_E2E_DB_GOLDEN`; se salta, avisando, si no hay plantilla), y 7f para `attach`;
+  `clone` tiene su subsección en 7e (`KLING_E2E_CLONE_ADMIN_URL`, un Postgres con SCRAM
+  en el host).
 
 ### Seguridad
 

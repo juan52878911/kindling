@@ -669,6 +669,70 @@ proxy de enlace marca desde el host. Una arista `link` o `credential` al 8080 se
 en `ValidateGraph` y, como defensa en profundidad, en `comprobarAristaLocked` en cada
 conexión (grafos guardados antes de la validación). Encontrado por el e2e real.
 
+### 16. `kling db clone`: datos de producción, enmascarados antes de salir de la microVM
+
+`kling db clone <url> -mask REGLAS` (ver [docs/db.md](docs/db.md#copia-de-producción-enmascarada-clone))
+hace un golden de una base de producción. Es lo más delicado de `kling db`: un
+enmascarado mal hecho filtra datos. Qué garantiza:
+
+- **La contraseña de producción no entra en ninguna microVM ni en argv.** Se lee de
+  `PGPASSWORD` o de stdin (una URL con contraseña se rechaza), va al proxy de
+  credenciales de Postgres de la máquina de construcción por el cuerpo de una petición
+  al daemon (§7) y el invitado solo recibe un marcador. Hacia el servidor, TLS
+  verify-full por defecto; sin TLS (`sslmode=disable`), solo SCRAM-SHA-256.
+- **Solo lectura.** Antes de volcar se comprueba el rol por el proxy: un superusuario se
+  rechaza siempre y un rol que puede escribir en alguna tabla, salvo `-allow-writer`.
+  `pg_dump` además lee en una transacción `READ ONLY`.
+- **Lo sin enmascarar no toca el disco del host.** `pg_dump` corre dentro de la máquina
+  de construcción y se restaura por una tubería en un Postgres cuyo directorio de datos
+  es un tmpfs del invitado (sin swap en el invitado: si la hay, se niega). El overlay de
+  esa máquina (un fichero del host) no recibe datos, y la máquina tiene `-on-ttl remove`:
+  si `kling-db` muere, se borra al vencer en vez de congelarse (congelar guardaría su RAM
+  en disco).
+- **Enmascarado todo o nada.** Una transacción con los disparadores apagados
+  (`session_replication_role = replica`: un disparador de auditoría no copia valores
+  viejos a otra tabla), un `UPDATE` por tabla y una comprobación, fila a fila, de que
+  ninguna columna enmascarada conserva un valor viejo. Cualquier fallo deshace la
+  transacción, destruye la máquina y no deja golden.
+- **Hash con sal secreta por construcción** (256 bits de `crypto/rand`, solo en el SQL
+  del enmascarado, por stdin; nunca en disco, en el golden ni en el informe): el mismo
+  valor da el mismo resultado dentro de una construcción (joins y claves foráneas
+  siguen casando) y, sin la sal, no se puede comprobar un valor adivinado (un correo
+  conocido) contra su enmascarado. Entre construcciones cambia.
+- **El golden no es la máquina de construcción.** Un `UPDATE` deja las versiones viejas
+  de las filas en las páginas y en el WAL; por eso se vuelca el cluster YA enmascarado y
+  el golden se construye con `db-golden.sh` en una máquina nueva con `egress none`, sin
+  credencial ni ruta a producción. El golden no contiene ni una página ni un byte de RAM
+  que haya visto un dato sin enmascarar.
+- **Bloqueo por defecto.** Una columna sospechosa por su nombre o su tipo sin regla
+  para la construcción; una regla que no casa con ninguna columna, también (una errata
+  no deja una columna sin tratar en silencio).
+- **Errores e informe sin valores.** Los psql del volcado, del catálogo y del
+  enmascarado corren con `VERBOSITY=sqlstate` (el código, no el mensaje que citaría el
+  valor que falló), del `pg_dump` solo se enseñan sus líneas `pg_dump:` y el informe no
+  tiene un solo campo en el que quepa un valor: nombres, tipos de regla y recuentos.
+
+Qué **no** garantiza:
+
+- **La detección es heurística.** Por nombre y tipo, no por contenido: un correo dentro
+  de una columna `notes` o de un JSON pasa si nadie pone regla (`-strict` obliga a
+  decidir sobre toda columna de texto, JSON o array). `keep` y `-allow-unmasked` son
+  decisiones de quien construye, y el informe las deja escritas.
+- **Enmascarar no es anonimizar.** Los tipos con hash conservan la igualdad (quién
+  comparte correo con quién), las columnas sin regla (fechas, importes, ciudades) siguen
+  ahí y, cruzadas, pueden reidentificar a alguien. El golden se trata como datos
+  internos, no como públicos.
+- **El volcado enmascarado pasa por el disco del host** (0600, en un directorio 0700,
+  borrado al terminar) mientras `db-golden.sh` lo carga: lo mismo que acaba en el golden.
+- **La RAM del invitado es memoria del host.** El tmpfs vive en la memoria del proceso
+  del VMM; con swap en el host, el sistema operativo podría llevarla a disco. Un host
+  para esto: sin swap o con swap cifrada.
+- **El rol es el límite en producción.** La comprobación de solo lectura mira privilegios
+  de tabla y `rolsuper`; no ve funciones `SECURITY DEFINER` ni otros caminos de
+  escritura. Dale un rol que de verdad solo lea.
+- El tramo entre el invitado y el proxy va en claro dentro de la máquina (como en §7), y
+  el del proxy al servidor, en claro si se eligió `sslmode=disable`.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
@@ -715,6 +779,11 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   fije con `-upstream`; el proxy no descubre ni sigue destinos privados por su cuenta.
   Con `-upstream-tls disable`, lo que pasa tras la autenticación viaja en claro entre el
   proxy y el servidor.
+- **`kling db clone` enmascara lo que las reglas y la detección ven.** Datos personales
+  dentro de texto libre o de JSON sin regla, o combinaciones de columnas no sensibles
+  que reidentifican, pasan al golden; el volcado enmascarado pasa por el disco del host
+  mientras se carga, y la RAM de la máquina de construcción puede ir a la swap del host.
+  Ver 16.
 - **`kling db attach`: compartir una copia es compartir sus datos.** Todos los agentes
   con attach a la misma copia ven y, con el rol de la aplicación, escriben la misma base:
   una copia compartida no aísla a unos agentes de otros (para eso, una copia por agente,
