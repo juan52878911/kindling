@@ -67,6 +67,9 @@ func TestUsoIncorrecto(t *testing.T) {
 		{"tenant-check"},
 		{"tenant-check", "c", "-max", "0"},
 		{"tenant-check", "c", "-setting", "tenant"},
+		{"diff", "a"},
+		{"diff", "a", "b", "c"},
+		{"diff", "a", "b", "-max-rows", "0"},
 		{"golden"},
 		{"up", "-nope"},
 	} {

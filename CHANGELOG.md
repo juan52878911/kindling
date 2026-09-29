@@ -94,6 +94,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   culpable y el porqué (las reglas de `doctor`), `-json` y salida 1 si algo falla, para
   CI. Los valores de inquilino nunca salen de la base ni se escriben en la SQL, y solo
   se imprimen recuentos. Ver [`docs/db.md`](docs/db.md#aislamiento-entre-inquilinos-tenant-check).
+- **`kling db diff <copia1> <copia2> [-json] [-schema-only] [-max-rows N]`: qué cambió
+  entre dos copias, sin volcar datos.** Esquema (tablas, columnas y tipos, clave
+  primaria, índices, restricciones, RLS y políticas) y, por tabla, filas nuevas,
+  borradas y cambiadas por clave primaria. Dentro de cada copia se calculan huellas por
+  fila (md5 de la clave con una sal aleatoria de la ejecución y md5 de la fila); al host
+  solo llegan huellas, ni claves ni valores. Tablas sin clave primaria: solo recuentos y
+  un aviso. Más de `-max-rows` filas (100000) en una tabla: muestreo por huella de
+  clave, igual en las dos copias y declarado en el informe. Las definiciones que se
+  enseñan no llevan literales. Ver [`docs/db.md`](docs/db.md#diff-entre-copias-diff).
 
 - **`kling db clone <postgres-url> -mask REGLAS [-golden G]`: un golden desde producción
   con los datos personales enmascarados.** La contraseña (de `PGPASSWORD` o
