@@ -433,3 +433,15 @@ func TestCheckRORolePertenencias(t *testing.T) {
 		}
 	}
 }
+
+// En Postgres real todo rol tiene UPDATE sobre pg_settings (es SET): la
+// comprobación no puede tratarlo como escritura, o ningún rol pasaría nunca
+// (lo encontró la prueba contra el lab; los tests con el kling falso no).
+func TestCheckRORoleIgnoraPgSettings(t *testing.T) {
+	if !strings.Contains(checkRORole, "c.oid <> 'pg_catalog.pg_settings'::regclass") {
+		t.Fatal("checkRORole trataría el UPDATE de PUBLIC sobre pg_settings como escritura")
+	}
+	if strings.Count(checkRORole, "<> 'pg_catalog.") != 1 {
+		t.Fatal("solo pg_settings puede quedar fuera de la comprobación de escritura")
+	}
+}

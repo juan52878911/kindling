@@ -276,6 +276,9 @@ SELECT coalesce(json_agg(p), '[]')::text FROM (
     WHERE d.datname = current_database() AND pg_has_role(r.oid, d.datdba, 'MEMBER')
   UNION ALL (SELECT 'owns or can write ' || c.oid::regclass::text FROM r, pg_class c
     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      -- pg_settings: Postgres da UPDATE a PUBLIC (equivale a SET en la sesión,
+      -- no escribe datos); lo cubren sqlguard (SET prohibido) y READ ONLY.
+      AND c.oid <> 'pg_catalog.pg_settings'::regclass
       AND (pg_has_role(r.oid, c.relowner, 'MEMBER')
            OR (c.relkind <> 'S' AND has_table_privilege(r.oid, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE'))
            OR (c.relkind = 'S' AND has_sequence_privilege(r.oid, c.oid, 'UPDATE')))
