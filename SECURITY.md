@@ -394,6 +394,40 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     y cambiar lo que pasa después de autenticar: para la LAN, mejor TLS con `-ca-file`.
     Un `kling-vz` que no anuncie `postgres-upstream` en `credential_kinds` no recibe
     credenciales que usen estos campos (marcaría el dominio en su lugar).
+  - **Upstream que es otra máquina: el modelo A de `kling db`** (`kling db attach`,
+    `upstream_machine`, `pkg/credproxy/maquina.go`, `internal/machine/copias_db.go`).
+    Una copia de base de datos compartida por agentes de otras microVMs, cada uno por su
+    proxy y con su marcador; la contraseña (la de la copia o, mejor, la de un rol de
+    `kling db role`; nunca la del golden, que la copia rotó al nacer) se entrega como
+    cualquier credencial del agente, cifrada con su id como dato autenticado. Lo que se
+    guarda **no es una dirección sino el id de la copia** y el dueño que declara quien la
+    entrega: un índice de red se reutiliza en cuanto la copia se para o se borra, y una
+    dirección fijada al entregar llevaría la clave y el SQL del agente al invitado de
+    otro (TOCTOU). La dirección se pide al daemon **en cada conexión** (y en cada
+    `CancelRequest`), que bajo el candado del manager exige que la máquina con ese id
+    exacto exista, corra, sea una copia de `kling db` en `ready`, exponga el puerto en
+    `kling.ports` y que la copia, el agente y la credencial digan el mismo
+    `kling.db.owner`; si algo no cuadra, no se marca. Esa dirección (la IP del netns de
+    la copia, en `172.30.0.0/16`) es la **única** excepción a los destinos prohibidos, y
+    ni la API ni la CLI la aceptan como texto: `upstream_machine` tiene que ser un id
+    hexadecimal (una IP o `host:puerto` no casan), y aun resuelta se comprueba que sea
+    una dirección de kindling y nada más (ni la LAN ni el loopback fuera del rango de
+    reenvíos). Obliga a `upstream_tls disable` y por tanto a SCRAM-SHA-256: la copia
+    tiene que probar que conoce la clave, así que ni un error de resolución llevaría la
+    contraseña a otro. **Las sesiones vivas se cortan** (las dos mitades) al congelar,
+    pausar, parar, borrar o marcar fallida la copia, al cambiar sus etiquetas de
+    `kling db` o las del agente, y al retirar o cambiar la credencial (`kling db detach`,
+    `DELETE /machines/{ref}/credentials/{env}`); la sesión se registra antes de
+    resolver, así que una invalidación que llegue entre la resolución y el dial también
+    la para. No se admite en credenciales de plantilla, y un agente con attach no se
+    ramifica (guardián de fork). **Solo Linux en esta versión**: en macOS el proxy vive
+    en el `kling-vz` de cada máquina, confinado y sin conocer las demás; resolver en
+    cada conexión exigiría un canal nuevo de `kling-vz` al daemon (autenticado por
+    peercred) y abrirle el rango de reenvíos del loopback, y pasarle la dirección ya
+    resuelta sería el TOCTOU que el modelo evita. El daemon lo rechaza con un error
+    claro, y `kling-vz` sin resolvedor tampoco marcaría. El dueño (`kling.db.owner`) es
+    una etiqueta: la frontera sigue siendo el daemon, y quien tiene su socket puede
+    reetiquetar máquinas.
   - **El invitado no ve la autenticación de verdad.** Recibe `AuthenticationOk` solo
     tras el del servidor; un error del servidor antes de eso no se reenvía (recibe uno
     propio, 28P01 u 08006, como mucho con el SQLSTATE del servidor) y el log del host solo
@@ -570,6 +604,13 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   fije con `-upstream`; el proxy no descubre ni sigue destinos privados por su cuenta.
   Con `-upstream-tls disable`, lo que pasa tras la autenticación viaja en claro entre el
   proxy y el servidor.
+- **`kling db attach`: compartir una copia es compartir sus datos.** Todos los agentes
+  con attach a la misma copia ven y, con el rol de la aplicación, escriben la misma base:
+  una copia compartida no aísla a unos agentes de otros (para eso, una copia por agente,
+  o un rol de solo lectura por agente con `-role`). Las consultas viajan en claro por el
+  veth del host entre el proxy y la copia (la contraseña no: SCRAM). `kling db rotate`
+  o `reset`/`undo` de la copia rompen los attach existentes (clave o id nuevos): hay que
+  repetirlos. Solo Linux por ahora (ver 7).
 - **El registro de auditoría es observabilidad, no prueba.** En Linux el directorio de
   la máquina es del usuario del VMM: un Firecracker comprometido no puede leer el
   registro (0600, de root) ni desviar su escritura (ver 7), pero sí borrarlo o

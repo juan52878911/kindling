@@ -3,7 +3,9 @@
 `kling db` es la extensión `kling-db` (`ext/db/cmd/kling-db`). Da a un agente o a un
 test su propia base Postgres 16, con datos, en milisegundos: una **copia** es una
 microVM instanciada de una plantilla con Postgres ya caliente
-([db-golden.md](db-golden.md)). La base y el agente viven en la **misma** microVM.
+([db-golden.md](db-golden.md)). Por defecto la base y el agente viven en la **misma**
+microVM; con `attach` (el [modelo A](#modelo-a-una-copia-compartida-attach)) una copia
+se comparte con agentes de **otras** microVMs sin que vean la contraseña.
 
 ```sh
 kling db golden -script scripts/db-golden.sh build -seed-mb 20 pg   # la plantilla, una vez
@@ -14,6 +16,7 @@ kling db fork t1 -n 4                    # 4 copias de t1 tal como está ahora
 kling db reset t1                        # t1 vuelve a salir de la plantilla
 kling db rm t1
 kling db doctor t1        ·   kling db audit t1 -since 1h
+kling db attach agente t1 -role agent    # otro agente, otra microVM, por el proxy (Linux)
 ```
 
 ## Subcomandos
@@ -23,6 +26,8 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
 | `connect <copia> [-role R] [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role` |
+| `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
+| `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
@@ -131,7 +136,9 @@ nacimiento de cada copia). Por eso
   puede leer todo lo que hay dentro, incluidos los datos y el `postgres`
   superusuario del socket. La frontera es la microVM, no Postgres: lo que una copia
   contiene solo debe ser lo que su agente puede ver. Para separar agente y datos,
-  usa una base fuera (proxy de credenciales, [postgres.md](postgres.md)).
+  usa el [modelo A](#modelo-a-una-copia-compartida-attach) (la copia en su máquina,
+  el agente en otra, el rol como límite) o una base fuera (proxy de credenciales,
+  [postgres.md](postgres.md)).
 - **Rotación obligatoria.** Una copia sale de una plantilla que tiene una clave
   conocida por quien la construyó. Ninguna copia se entrega sin cambiarla: la copia
   se destruye si la rotación falla. Es lo que hace inútil, sobre todo en Linux, que
@@ -146,7 +153,59 @@ nacimiento de cada copia). Por eso
   (`log_connections`/`log_disconnections`): quién entró, desde dónde y cuándo, no qué
   consultó.
 - **Credenciales del proxy.** Una copia con credenciales del proxy no se ramifica
-  (cada copia despertaría con marcadores que su proxy no conoce).
+  (cada copia despertaría con marcadores que su proxy no conoce). Tampoco un agente con
+  `attach`: se hace `detach`, se ramifica y se hace `attach` de cada copia.
+
+## Modelo A: una copia compartida (attach)
+
+Varios agentes, cada uno en su microVM, trabajan contra **una** copia que vive en la
+suya. Ninguno ve la contraseña: cada uno recibe un marcador y conecta al proxy de
+credenciales de su máquina, que marca a la copia con la clave. Solo **Linux** en esta
+versión (en macOS el daemon lo rechaza con un error claro; ver abajo por qué).
+
+```sh
+kling db up pg -name crm                           # la copia
+kling db role crm -ro -name agent                  # un rol de solo lectura (recomendado)
+kling run -image toolchain -name a1 -egress allowlist -allow example.org -allow-exec
+kling db attach a1 crm -role agent                 # a1: PGPASSWORD = marcador
+# dentro de a1 (PGPASSWORD = el marcador de MMDS env):
+#   psql "host=crm.db.internal user=agent dbname=appdb sslmode=disable"
+kling db detach a1 crm                             # fuera, y sus sesiones cortadas
+```
+
+- **Qué se entrega.** Al agente, una credencial Postgres del proxy
+  (`POST /machines/{ref}/credentials`) con `upstream_machine` = el **id** de la copia,
+  `upstream_owner` = el dueño, `upstream_tls: disable` (SCRAM-SHA-256) y la clave del rol
+  (la de la aplicación de `copies/<id>/password` o, con `-role`, la de
+  `copies/<id>/<rol>.password`; nunca la del golden). El agente conecta a
+  `<copia>.db.internal` (`-host` para otro nombre), que su resolver desvía al proxy.
+  La clave va en el cuerpo de la petición al daemon (ni argv ni ficheros) y se guarda
+  cifrada en el almacén del agente, como cualquier credencial.
+- **Dirección en cada conexión, no al entregar.** Lo guardado es el id, no una IP: un
+  índice de red se reutiliza cuando la copia se para o se borra, y una dirección fijada
+  llevaría la clave al invitado de otro. En **cada** conexión el proxy pregunta al
+  daemon, que bajo su candado exige que la copia con ese id exacto exista, corra, esté
+  `ready`, exponga el 5432 en `kling.ports`, y que la copia, el agente y la credencial
+  tengan el mismo `kling.db.owner`. Si no, `08006` al agente y `machine_unavailable` en
+  su auditoría (`kling machine audit <agente>`, con `upstream: machine:<id>`).
+- **Cortes.** Congelar, pausar, parar, borrar o marcar fallida la copia, cambiar sus
+  etiquetas de `kling db` o las del agente, o `detach`, cortan en el acto las sesiones
+  abiertas. Tras `thaw` el agente vuelve a entrar sin hacer nada.
+- **Dueño.** `attach` exige que la copia sea del `-owner` (por defecto `local`) y que el
+  agente sea del mismo: si no tiene `kling.db.owner`, se le pone; si tiene otro, se
+  rechaza. El daemon lo vuelve a mirar en cada conexión.
+- **Lo que rompe un attach.** `reset` y `undo` crean otra copia (otro id), y `rotate`
+  cambia la clave de la aplicación: hay que repetir `attach`. Un rol de `role` sobrevive
+  a `rotate`. Un agente con `attach` no se ramifica.
+- **Límites.** Todos los agentes de una copia ven la misma base: el aislamiento entre
+  ellos es el rol (uno de solo lectura por agente con `-role`), no la copia. Las
+  consultas van en claro por el veth del host entre el proxy y la copia.
+- **Por qué no en macOS.** El proxy de Postgres de cada máquina lo sirve su `kling-vz`,
+  confinado y sin conocer las demás. Resolver la copia en cada conexión exigiría un canal
+  nuevo de `kling-vz` al daemon (autenticado por peercred) y dejarle marcar al rango de
+  reenvíos del loopback que hoy tiene prohibido; pasarle la dirección resuelta de
+  antemano sería el TOCTOU de arriba. Hasta tener ese canal con sus pruebas, el error
+  claro es lo seguro.
 
 ## Linux y macOS no son iguales
 
@@ -189,7 +248,10 @@ está en el invitado.
 
 ## Prueba de extremo a extremo
 
-`scripts/90-e2e.sh` (sección 7e, lab Linux) y `scripts/92-e2e-mac.sh` (sección 6f, Mac)
+`scripts/90-e2e.sh` (sección 7e, lab Linux; la 7f prueba `attach`: dos agentes leen la
+misma copia por el proxy, congelarla corta la sesión abierta y el siguiente intento, el
+thaw la devuelve, otro dueño no entra y `detach` retira el acceso) y
+`scripts/92-e2e-mac.sh` (sección 6f, Mac)
 recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset`, `role -ro`
 (INSERT, DELETE, COPY TO PROGRAM y SET ROLE tienen que fallar con ese rol), `rotate` (la
 clave vieja deja de valer), `snapshot` + `undo`, `rehearse` (una migración que añade una
