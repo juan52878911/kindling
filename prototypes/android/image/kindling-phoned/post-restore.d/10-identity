@@ -1,0 +1,6 @@
+#!/bin/sh
+# Gancho tras restaurar de la imagen Android con kling-phoned: la identidad
+# del clon de MMDS (android_id, nombre, serie, SSAID por app, claves de adb).
+# Sin identidad en MMDS no hace nada. Su salida (consola, `kling logs`) nunca
+# lleva los valores. docs/phoned.md.
+exec /usr/local/bin/kling-phoned identity

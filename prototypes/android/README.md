@@ -18,6 +18,23 @@ está en
 y en [Qué necesitaría el núcleo si la fase 0 sale bien](#qué-necesitaría-el-núcleo-si-la-fase-0-sale-bien);
 parte ya está hecha (estado de abajo).
 
+## Estado (2026-09-29, tarde): kling-phoned (#89, #92)
+
+La imagen trae por defecto (`PHONED=1`) **`kling-phoned`**
+([`phoned/`](phoned/), [`docs/phoned.md`](docs/phoned.md)): un binario Go estático
+que sustituye a `android-launch.sh` y a `android-sh` (espacios de nombres,
+`pivot_root`, `/data`, veth por netlink, relanzado), sirve la **API del teléfono**
+en el 8091 del invitado (`screen`, `tree`, `tap/swipe/text/key`, `install`,
+`launch`, `logs`, `health`, `identity`) para usarla por `POST
+/machines/{ref}/guest` **sin `allow_exec`**, y es la sonda de listo y el gancho de
+identidad: serie (`ro.serialno`, reescrita en la memoria de propiedades), SSAID por
+app (clave nueva en `settings_ssaid.xml` con reinicio de zygote), `android_id` y
+**adb con claves por clon** (`ro.adb.secure=1`). `phone.sh api` la envuelve;
+`PHONE_EXEC=0` hace el dorado sin `allow_exec`. `PHONED=0` construye la imagen de
+antes para comparar. Probado en arm64 (vz) y amd64 (Firecracker) con
+[`test-phoned.sh`](test-phoned.sh): PASS en los dos; `test-phone.sh` PASS y
+`fase0.sh` 6/6 en el Mac con la imagen nueva. Cifras en `docs/phoned.md`.
+
 ## Estado (2026-09-29): con el núcleo de "listo" y ganchos
 
 El núcleo trae ya lo que pedía el prototipo (`CHANGELOG.md`, "Sin publicar";
@@ -167,8 +184,11 @@ kling exec <m> -- android-sh <cmd>   → nsenter en los espacios de Android
 | `kernel/build.sh` | Linux (arm64, o amd64 cruzado) | compone config-common + config-arm64 + config-android **ejecutando una copia literal del builder K1** en un árbol de sombra (el builder no acepta un fragmento extra) y deja `vmlinux-6.1.140-kindling-arm64-android` |
 | `kernel/check-android-config.sh` | Linux o dentro del invitado | obligatorias (falla) y recomendadas (avisa) para Android; el `build.sh` de aquí lo encadena al comprobador del núcleo; el lanzador lo corre contra `/proc/config.gz` |
 | `image/build-image.sh` | Linux arm64, root (la VM Lima vale; **no** hace falta virtualización anidada ni daemon) | baja Redroid 13 64only **por digest** y verifica cada pieza, construye la base glibc, monta la capa con `81-base-image.sh` (ROOTFS_DIR + SERVICE, como el constructor `llm`), escribe la receta y empaqueta un `.tar` con `SHA256SUMS` |
-| `image/android-launch.sh` | dentro de la microVM | el lanzador (arriba) |
-| `image/android-sh` | dentro de la microVM | ejecutar dentro de Android; `--push`, `--pid`, `--state` |
+| `phoned/` | dentro de la microVM | `kling-phoned` (Go, estático): lanzador, API del teléfono en el 8091, sonda de listo y gancho de identidad. [`docs/phoned.md`](docs/phoned.md) |
+| `image/kindling-phoned/` | — | `/etc/kindling/ready` y `post-restore.d/10-identity` de la imagen con kling-phoned |
+| `image/android-launch.sh` | dentro de la microVM | el lanzador de bash (arriba); solo con `PHONED=0` |
+| `image/android-sh` | dentro de la microVM | ejecutar dentro de Android por `kling exec` (exige `allow_exec`); `--push`, `--pid`, `--state` |
+| `test-phoned.sh` | el Mac o Linux | la API sin `allow_exec`, identidad por clon, adb con claves, pause/freeze y fugas |
 | `image/verity.sh` | Linux, root (Lima) | dm-verity + FEC sobre la capa (árbol pegado detrás del ext4) y la base montándola por `/dev/mapper`; `VERITY=1 build-image.sh` lo llama. [`docs/verity.md`](docs/verity.md) |
 | `kernel/patches/` | — | parches que `kernel/build.sh` aplica a la copia del builder (hoy: relectura de bloques de hashes en dm-verity) |
 | `stress-restore.sh` | el Mac | estrés de restaurar/pausar/congelar/bifurcar y lecturas contra referencia ([`docs/sigill.md`](docs/sigill.md)) |
