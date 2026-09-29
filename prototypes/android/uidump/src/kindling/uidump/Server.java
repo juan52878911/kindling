@@ -2,15 +2,18 @@
 //
 // `uiautomator dump` cuesta ~1,9 s porque arranca una JVM (app_process),
 // conecta UiAutomation y espera 1 s de interfaz quieta. Este servidor arranca
-// la JVM una vez y mantiene UiAutomation mientras se use: cada petición es solo
-// recorrer el árbol de accesibilidad.
+// la JVM una vez: cada petición es solo tomar UiAutomation, recorrer el árbol
+// de accesibilidad y soltarlo. UiAutomation es uno solo en todo Android, así que
+// solo se tiene durante la petición y no se estorba a `uiautomator` ni a las
+// instrumentaciones (ver "vigilante de rivales" y docs/uidump.md).
 //
 // Se lanza con app_process, como uiautomator, scrcpy o uiautomator2-server sin
 // APK:
 //
 //   CLASSPATH=/system/framework/uiautomator.jar:/system/framework/kindling-uidump.dex \
 //     app_process /system/bin --nice-name=kindling-uidump kindling.uidump.Server \
-//       [--release-after-ms N (30000; 0 = nunca)] [--connect] [SOCKET]
+//       [--release-after-ms N (0: soltar al responder; N>0: tras N ms sin peticiones; -1: nunca)]
+//       [--busy-wait-ms N (5000)] [--watch-ms N (100; 0 = sin vigilante)] [--trace] [--connect] [SOCKET]
 //
 // El XML sale del MISMO código que `uiautomator dump`: se llama por reflexión
 // al AccessibilityNodeInfoDumper de /system/framework/uiautomator.jar (su
@@ -30,9 +33,9 @@
 //   text CADENA                                      teclea (mapa de teclado virtual)
 //   key CODIGO|NOMBRE                                una tecla (3, HOME, KEYCODE_BACK...)
 //   ping                                             "ok pid=... uptime_ms=..."
-//   connect                                          toma UiAutomation ya (antes de guardar un dorado)
-//   release                                          lo suelta (para usar uiautomator); también
-//                                                    solo, tras --release-after-ms sin peticiones
+//   connect                                          calienta UiAutomation (con --release-after-ms 0 se
+//                                                    suelta al responder, como tras cualquier petición)
+//   release                                          lo suelta ya (solo hace falta con --release-after-ms > 0)
 //   quit                                             termina el servidor
 //
 // La respuesta es el cuerpo y el cierre de la conexión. Un error empieza por
@@ -94,15 +97,136 @@ public final class Server {
 
     // UiAutomation es uno solo en todo Android: mientras lo tengamos,
     // `uiautomator dump` y las pruebas de instrumentación fallan ("already
-    // registered"). Se suelta tras releaseAfterMs sin peticiones (0 = nunca) y
-    // se vuelve a tomar en la siguiente (medido: ~5-8 ms en el servidor).
+    // registered"), y quien lo pide no espera ni reintenta. Por eso solo se
+    // tiene durante una petición: se suelta al responder (releaseAfterMs = 0,
+    // por defecto) o tras releaseAfterMs sin peticiones (>0); -1 = nunca. Cada
+    // dump lo vuelve a tomar (coste medido en docs/uidump.md). Si lo tiene otro
+    // cliente, connect() reintenta hasta busyWaitMs antes de rendirse.
     private final long releaseAfterMs;
+    private final long busyWaitMs;
     private final boolean connectNow;
     private long lastUse = SystemClock.uptimeMillis();
 
-    Server(String socketPath, long releaseAfterMs, boolean connectNow) {
+    // ── vigilante de rivales ─────────────────────────────────────────────────
+    // Soltar UiAutomation entre peticiones no basta: si el otro cliente cae
+    // justo dentro de un dump (~7 ms de cada ~15 en un bucle), falla ("already
+    // registered") y no reintenta. Pero un rival tarda en llegar a
+    // UiAutomation: la JVM de `uiautomator` (app_process) ~130 ms, y una
+    // instrumentación tiene que arrancar la app. Un hilo mira /proc cada
+    // WATCH_MS buscando procesos nuevos con pinta de rival y, mientras haya
+    // uno (más una gracia), el servidor no toma UiAutomation: las peticiones
+    // esperan hasta busyWaitMs. Un dump en curso acaba mucho antes de que el
+    // rival llegue.
+    static final long WATCH_MS = 100;
+    static final long GRACE_MS = 300;      // tras desaparecer el rival
+    static final long INSTRUMENT_GRACE_MS = 3000; // `am instrument` sin -w sale al momento y la app tarda en arrancar
+    // pid -> {tipo de rival, relecturas pendientes}. Un proceso recién bifurcado
+    // trae la línea de órdenes de su padre hasta que hace exec: lo que no es
+    // rival se vuelve a mirar unas pasadas antes de darlo por bueno.
+    private final java.util.HashMap<Integer, int[]> seen = new java.util.HashMap<>();
+    static final int RECHECKS = 4;
+    private volatile long rivalUntil;      // uptimeMillis hasta el que se cede
+    private volatile int rivalPid;         // el último rival visto, para el log
+    private final long watchMs;
+
+    // ¿Es esta línea de órdenes de un cliente que va a pedir UiAutomation?
+    // `uiautomator ...` (Launcher de com.android.commands.uiautomator) y
+    // `am instrument` y `cmd activity instrument`.
+    static final int NONE = 0, UIAUTOMATOR = 1, INSTRUMENT = 2;
+
+    static int rivalKind(String cmdline) {
+        if (cmdline.isEmpty()) return NONE;
+        String[] a = cmdline.split("\0");
+        if (a.length > 0 && a[0].equals("kindling-uidump")) return NONE;
+        for (int i = 0; i < a.length; i++) {
+            if (a[i].equals("com.android.commands.uiautomator.Launcher")) return UIAUTOMATOR;
+            // `uiautomator ...` o `sh /system/bin/uiautomator ...`, pero no `grep uiautomator`.
+            if ((a[i].equals("uiautomator") || a[i].endsWith("/uiautomator"))
+                    && (i == 0 || (i == 1 && a[0].endsWith("sh")))) return UIAUTOMATOR;
+            // `am instrument` es app_process ... com.android.commands.am.Am instrument;
+            // `cmd activity instrument` la vía directa.
+            if (a[i].equals("instrument") && i > 0 && (a[i - 1].equals("activity")
+                    || a[i - 1].equals("com.android.commands.am.Am"))) return INSTRUMENT;
+        }
+        return NONE;
+    }
+
+    private final Object scanLock = new Object();
+    private boolean scanned; // ya se hizo la primera pasada (los que estaban antes no se anuncian)
+
+    // Una pasada por /proc: procesos nuevos (y los recién bifurcados, otra vez)
+    // con pinta de rival. Actualiza rivalUntil; devuelve true si apareció uno
+    // nuevo. La llama el hilo vigilante y, justo antes de tomar UiAutomation,
+    // connect(): un rival tarda >100 ms en llegar a UiAutomation, así que si al
+    // conectar no está en /proc, no puede chocar con un dump que dura ~15 ms.
+    private boolean scan() {
+        synchronized (scanLock) {
+            int me = Os.getpid();
+            String[] names = new File("/proc").list();
+            long now = SystemClock.uptimeMillis();
+            boolean alive = false, newRival = false, first = !scanned;
+            java.util.HashSet<Integer> present = new java.util.HashSet<>();
+            if (names != null) for (String n : names) {
+                int pid;
+                try { pid = Integer.parseInt(n); } catch (NumberFormatException e) { continue; }
+                present.add(pid);
+                int[] ent = seen.get(pid);
+                if (ent == null || (ent[0] == NONE && ent[1] > 0)) {
+                    int r0 = pid == me ? NONE : rivalKind(readCmdline(pid));
+                    if (ent == null) seen.put(pid, ent = new int[] { r0, first ? 0 : RECHECKS });
+                    else { ent[0] = r0; ent[1]--; }
+                    // Los que ya estaban al arrancar no se anuncian, pero
+                    // cuentan igual como vivos (más abajo).
+                    if (ent[0] != NONE && !first) {
+                        rivalPid = pid;
+                        if (ent[0] == INSTRUMENT) rivalUntil = Math.max(rivalUntil, now + INSTRUMENT_GRACE_MS);
+                        log("rival client started (pid " + pid + "); yielding UiAutomation");
+                        tr("rival pid " + pid);
+                        newRival = true;
+                    }
+                }
+                if (ent[0] != NONE) alive = true;
+            }
+            seen.keySet().retainAll(present);
+            if (alive) rivalUntil = Math.max(rivalUntil, now + GRACE_MS); // también si ya estaba
+            scanned = true;
+            return newRival;
+        }
+    }
+
+    private void startWatcher() {
+        if (watchMs <= 0) return;
+        Thread t = new Thread(() -> {
+            while (true) {
+                try {
+                    // Con --release-after-ms > 0 UiAutomation puede estar tomado
+                    // entre peticiones: se suelta ya (espera al dump en curso).
+                    if (scan() && releaseAfterMs != 0) releaseNow();
+                } catch (Throwable e) {
+                    log("watcher: " + e);
+                }
+                SystemClock.sleep(WATCH_MS);
+            }
+        }, "uidump-watch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static String readCmdline(int pid) {
+        try (FileInputStream in = new FileInputStream("/proc/" + pid + "/cmdline")) {
+            byte[] b = new byte[512];
+            int n = in.read(b);
+            return n <= 0 ? "" : new String(b, 0, n, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    Server(String socketPath, long releaseAfterMs, long busyWaitMs, long watchMs, boolean connectNow) {
         this.socketPath = socketPath;
+        this.watchMs = watchMs;
         this.releaseAfterMs = releaseAfterMs;
+        this.busyWaitMs = busyWaitMs;
         this.connectNow = connectNow;
     }
 
@@ -110,11 +234,13 @@ public final class Server {
     // cerrojo del servidor, y bloquear ese Looper mientras un dump espera
     // eventos (waitForIdle) los retrasaría.
     private void startReleaser() {
-        if (releaseAfterMs <= 0) return;
+        if (releaseAfterMs <= 0) return; // 0: se suelta al responder; -1: nunca
         new java.util.Timer("uidump-release", true).schedule(new java.util.TimerTask() {
             @Override public void run() { releaseIfIdle(); }
         }, 1000, 1000);
     }
+
+    private synchronized void releaseNow() { disconnect(); }
 
     private synchronized void releaseIfIdle() {
         if (ua != null && SystemClock.uptimeMillis() - lastUse >= releaseAfterMs) {
@@ -123,20 +249,29 @@ public final class Server {
         }
     }
 
-    // Server [--release-after-ms N] [--connect] [SOCKET]
+    // Server [--release-after-ms N] [--busy-wait-ms N] [--watch-ms N] [--connect] [SOCKET]
     public static void main(String[] args) throws Exception {
         String path = DEFAULT_SOCKET;
-        long releaseAfter = 30000;
+        long releaseAfter = 0;
+        long busyWait = 5000;
+        long watch = WATCH_MS;
         boolean connectNow = false;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--release-after-ms") && i + 1 < args.length) releaseAfter = Long.parseLong(args[++i]);
+            else if (args[i].equals("--busy-wait-ms") && i + 1 < args.length) busyWait = Long.parseLong(args[++i]);
+            else if (args[i].equals("--watch-ms") && i + 1 < args.length) watch = Long.parseLong(args[++i]);
+            else if (args[i].equals("--trace")) trace = true;
             else if (args[i].equals("--connect")) connectNow = true;
             else path = args[i];
         }
-        new Server(path, releaseAfter, connectNow).serve();
+        new Server(path, releaseAfter, busyWait, watch, connectNow).serve();
     }
 
+    static boolean trace; // --trace: cada toma y suelta de UiAutomation, con la hora
+
     static void log(String s) { System.err.println("uidump: " + s); }
+
+    static void tr(String s) { if (trace) log("[" + SystemClock.uptimeMillis() + "] " + s); }
 
     // ── UiAutomation ─────────────────────────────────────────────────────────
     // Lo mismo que UiAutomationShellWrapper.connect() de uiautomator, por
@@ -145,6 +280,27 @@ public final class Server {
     private void connect() throws Exception {
         if (ua != null) return;
         long t0 = SystemClock.uptimeMillis();
+        for (;;) {
+            try {
+                // Hay un rival en marcha: no se toma UiAutomation (ver el vigilante).
+                if (watchMs > 0) scan();
+                if (SystemClock.uptimeMillis() < rivalUntil)
+                    throw new Busy("UiAutomation is held by another client (uiautomator or instrumentation running?): "
+                            + "yielding to pid " + rivalPid);
+                connect1();
+                break;
+            } catch (Busy b) {
+                // Lo tiene otro cliente (uiautomator, una instrumentación):
+                // se espera a que acabe, sin tocarlo.
+                if (SystemClock.uptimeMillis() - t0 >= busyWaitMs) throw b;
+                SystemClock.sleep(25);
+            }
+        }
+        long ms = SystemClock.uptimeMillis() - t0;
+        if (ms > 50) log("UiAutomation connected in " + ms + " ms");
+    }
+
+    private void connect1() throws Exception {
         if (thread == null) {
             thread = new HandlerThread("UiAutomatorHandlerThread");
             thread.start();
@@ -168,11 +324,12 @@ public final class Server {
         }
         ua = u;
         flags = null;
-        log("UiAutomation connected in " + (SystemClock.uptimeMillis() - t0) + " ms");
+        tr("connected");
     }
 
     private void disconnect() {
         if (ua == null) return;
+        tr("disconnect");
         try {
             Method m = UiAutomation.class.getDeclaredMethod("disconnect");
             m.setAccessible(true);
@@ -447,8 +604,10 @@ public final class Server {
         // puede arrancar con Android sin romper `uiautomator dump`.
         if (connectNow) {
             try { connect(); } catch (Exception e) { log("connect: " + e); }
+            if (releaseAfterMs == 0) disconnect();
         }
         startReleaser();
+        startWatcher();
         log("listening on " + socketPath + " (pid " + Os.getpid() + ")");
         int fails = 0;
         while (true) {
@@ -477,6 +636,9 @@ public final class Server {
         try {
             return handle1(c);
         } finally {
+            // La respuesta ya salió y la conexión se cerró: soltar
+            // UiAutomation no cuesta latencia al cliente.
+            if (releaseAfterMs == 0) disconnect();
             lastUse = SystemClock.uptimeMillis();
         }
     }

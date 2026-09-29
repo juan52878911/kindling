@@ -92,7 +92,8 @@ daemon privado (`PHONE_ROOT`, por defecto `~/.kindling-android-telefono`, con
 - **scrcpy** (sobre adb) si está en el PATH. **No probado**: no está instalado
   aquí y no lo he instalado (`brew install scrcpy`).
 - Sin scrcpy: una captura por adb (`screencap -p`) abierta en Vista Previa.
-- `view -vnc`: el VNC de Redroid llega al Mac (`RFB 003.008`, seguridad
+- `view -vnc` (**el VNC ya no va en la imagen por defecto**, #96; ver abajo):
+  el VNC de Redroid llega al Mac (`RFB 003.008`, seguridad
   "None", `ServerInit 720x1280 name=redroid`), pero:
   1. **Compartir Pantalla no conecta a un VNC sin autenticación**: se queda en
      "Conectando…" para siempre. Además contesta `RFB 003.003`. `phone.sh`
@@ -103,11 +104,37 @@ daemon privado (`PHONE_ROOT`, por defecto `~/.kindling-android-telefono`, con
      bytes no nulos de 3 686 400. El `vncserver` de Redroid falla al importar
      el búfer de la pantalla con render por software (`RfbServer: error
      creating EGLImage: 0x300c`), mientras `screencap` sí ve la pantalla de
-     inicio. Arreglarlo es del lado de la imagen (gralloc/minigbm con
-     dma-buf, o un servidor VNC que lea de SurfaceFlinger); queda abierto.
-  `androidboot.use_redroid_vnc=1` necesita también
-  `androidboot.use_redroid_stream=1` (`vncserver.rc`), que además arranca
-  `uinputd` (entrada). Los dos van ahora por defecto en `build-image.sh`.
+     inicio. Reconfirmado el 2026-09-29 (3 fotogramas Raw de 720x1280, 36
+     bytes no nulos de 3 686 400 cada uno, con el teléfono en Ajustes y
+     moviéndose).
+  **Decisión (#96): se retira de los valores por defecto** (`EXTRA_ARGS` de
+  `build-image.sh` = solo `androidboot.use_redroid_stream=1`). No hay un
+  camino razonable para arreglarlo: `/vendor/bin/vncserver` es un binario de
+  Redroid que importa el búfer de SurfaceFlinger con `eglCreateImageKHR`
+  (`EGL_NATIVE_BUFFER_ANDROID`) y el EGL de SwiftShader no acepta el gralloc de
+  Redroid (`0x300c` = `EGL_BAD_PARAMETER`); arreglarlo sería escribir otro
+  servidor RFB que lea por `SurfaceControl`/`screencap` (lo que ya hace
+  `screencap`, 0,35 s por fotograma) y una capa de entrada, es decir, rehacer
+  scrcpy. Ya hay tres formas de ver y tocar la pantalla que funcionan:
+  1. **scrcpy sobre adb** (`phone.sh view`, `brew install scrcpy`);
+  2. **el muro** (`wall/wall-mac.sh -local`): todas las pantallas en el
+     navegador, refrescadas con `screencap` y con toque por `uidump tap`;
+  3. **la ventana nativa de `vz`** (`KLING_VZ_WINDOW=1`, `docs/gpu.md`).
+  Lo que se ahorra: el `vncserver` ocupaba 32 MB de RSS (13 MB de PSS) en el
+  invitado y no gasta CPU en reposo; el coste era sobre todo un puerto que
+  parecía servir y no servía. Sigue siendo posible volver a pedirlo con
+  `EXTRA_ARGS='androidboot.use_redroid_stream=1 androidboot.use_redroid_vnc=1'`
+  al construir la imagen (`vncserver.rc` arranca con los dos).
+  **`androidboot.use_redroid_stream=1` se mantiene** (arranca `uinputd`, que
+  crea el dispositivo de entrada `redroid vinput`; 3,4 MB de RSS, 0 CPU). Ojo,
+  medido: nada de lo que se usa aquí depende de él. Con `vncserver` y
+  `uinputd` parados (`stop vendor.vncserver; stop vendor.uinputd`, sin
+  dispositivos en `/dev/input`) siguen funcionando `uidump tap/swipe/key`,
+  `input tap/swipe/text/keyevent` (todo va por `InputManager`) y `screencap`,
+  y ni con `uinputd` vivo Android lista `redroid vinput` en `dumpsys input`. Se
+  deja por prudencia (es el `stream` de Redroid, que otros consumidores como un
+  VNC futuro pueden esperar) y porque quitarlo cambiaría el disco de todos los
+  dorados; si alguien quiere el 0,1 % más de RAM, se puede quitar.
 
 ## 3. Dorado bien hecho
 
@@ -207,7 +234,7 @@ Lo que no cubre:
 | `test-phone.sh` | la prueba de la sección 6 |
 | `image/android-launch.sh` | `ANDROID_NET=veth` (por defecto), `isolated`, `shared` |
 | `image/android-sh` | `--identity` (MMDS) y `--verify-cache` |
-| `image/build-image.sh` | por defecto `veth`, `use_redroid_stream=1 use_redroid_vnc=1`, `iptables` en la base |
+| `image/build-image.sh` | por defecto `veth`, `use_redroid_stream=1` (el VNC se quitó por defecto, #96), `iptables` en la base |
 | `kernel/config-android` | `CONFIG_VETH=y` |
 
 La imagen de estas pruebas es la base reconstruida con `iptables`

@@ -71,7 +71,14 @@ func logf(format string, args ...any) {
 	stdout.line("kling-vz: " + fmt.Sprintf(format, args...))
 }
 
+// argFreno lanza este binario como proceso freno del tope de CPU (ver
+// footprint/freno_darwin.go).
+const argFreno = "--cpu-brake"
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == argFreno {
+		os.Exit(servirFreno())
+	}
 	if vzvm.WindowMode() {
 		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
 		// servidor va en otra gorrutina y el proceso sale cuando acabe.
@@ -110,6 +117,23 @@ func run() int {
 	}
 
 	meter := footprint.NewMeter()
+	// El freno del tope de CPU va en su propio proceso, lanzado antes de que
+	// este se encierre. Sin él, el tope pausa la VM por el framework, con la
+	// que se para también el reloj del invitado.
+	freno, err := footprint.StartFreno(argFreno)
+	if err != nil {
+		logf("warning: no CPU brake process, the CPU ceiling will pause the VM instead: %v", err)
+	}
+	onCreate, freeze := meter.Track, func(bool) error { return errors.New("no CPU brake process") }
+	if freno != nil {
+		onCreate = func(fd uintptr) {
+			meter.Track(fd)
+			if err := freno.Track(fd); err != nil {
+				logf("warning: %v", err)
+			}
+		}
+		freeze = freno.Freeze
+	}
 	policy := egress.NewPolicy()
 	resolver := egress.NewResolver(policy)
 	// El proxy de credenciales resuelve por el mismo upstream que el invitado
@@ -155,7 +179,7 @@ func run() int {
 	peers := peercred.New()
 	confine := confinamiento(*sock, logf)
 	srv := server.New(server.Deps{
-		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: meter.Track,
+		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
 		Graphics: graphics,
 		NewNet: func(c server.NetConfig) (server.Network, error) {
@@ -192,6 +216,7 @@ func run() int {
 		CredIP:      vnet.GatewayIP,
 		Confine:     confine,
 		CPUTime:     meter.CPUTime,
+		Freeze:      freeze,
 		Graph:       grafoMaq,
 	})
 
@@ -326,4 +351,17 @@ func confinamiento(sock string, logf func(string, ...any)) func(bool, bool) erro
 		logf("confined: reads under %s, writes only to %s, snapshots/ and volumes/, network out: %v", root, mdir, conRed)
 		return nil
 	}
+}
+
+// servirFreno es el proceso freno: se encierra y atiende a su kling-vz por el
+// fd 3 hasta que este muere. Ignora las señales de terminal y SIGTERM: si
+// muriera con el auxiliar parado, la VM se quedaría parada mientras kling-vz
+// viva; lo que lo termina es que se cierre el socket (o un SIGKILL).
+func servirFreno() int {
+	signal.Ignore(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	if err := confinarFreno(); err != nil {
+		fmt.Fprintf(os.Stderr, "kling-vz: CPU brake: %v\n", err)
+		return 1
+	}
+	return footprint.ServeFreno(3)
 }

@@ -1,8 +1,8 @@
 # Servidor residente de UiAutomation de kindling (prototypes/android/uidump).
 # Se instala en /system/etc/init/ de la capa Android; el cliente es `uidump` en
 # la VM. Arranca con boot_completed para que un dorado guardado después ya lo
-# traiga con la JVM caliente; no toma UiAutomation hasta la primera petición
-# (sin --connect), así que `uiautomator dump` sigue funcionando.
+# traiga con la JVM caliente; solo toma UiAutomation durante cada petición, así
+# que `uiautomator dump` y `am instrument` siguen funcionando.
 # No es oneshot: si muere, init lo relanza.
 service kindling_uidump /system/bin/app_process /system/bin --nice-name=kindling-uidump kindling.uidump.Server
     class late_start

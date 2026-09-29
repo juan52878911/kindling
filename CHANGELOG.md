@@ -22,6 +22,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   [`docs/grafos.md`](docs/grafos.md), donde también queda documentado, como siguiente
   paso, el gateway de IA (cascada Chispa a VON como grafo lazy).
 
+### macOS
+
+- **Techo de CPU en vz: paradas cortas con SIGSTOP en vez de pausar la VM a ventanas
+  (#88).** `cpu_pct` significa lo mismo que en Linux (% de un núcleo para toda la VM) y
+  ya lo cumplía, pero a trompicones: se medían ventanas de 100 ms y se pausaba la VM
+  hasta 300 ms de golpe, y la pausa del framework paraba también el reloj del invitado
+  (una VM regulada se quedaba 23 s atrás en 30 s). Ahora un cubo de fichas para el
+  auxiliar de Apple 20 ms cada vez con SIGSTOP, que manda un proceso freno aparte en su
+  propio sandbox (`kling-vz` sigue sin poder señalizar a nadie). Medido en un M4 con
+  `yes` dentro y techo 50: 50 % de CPU en 1 y 2 vCPU, reloj del invitado al segundo, y
+  `kling exec true` de p99 117-324 ms a 34-78 ms. Hasta que el agente escucha, el techo es
+  `max(pct, 100)`, como el impulso de arranque de Linux (antes, sin techo). Ni el nice ni
+  `taskpolicy -b` sirven de techo, y los hilos de vCPU no se pueden tocar sueltos.
+
 ### Núcleo
 
 - **Kernel K1 amd64: arranca en Firecracker 1.17.** Con 6.1.140 el K1 amd64 no
