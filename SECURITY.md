@@ -579,9 +579,12 @@ cambia:
 - El daemon no sigue el enlace simbólico de `machines/<id>` (un directorio del VMM)
   para borrar ni para leer el overlay en `commit`: las rutas del almacén salen del id.
 - **Permisos del directorio de instancia**: `cow/m/<id>` es `root:grupo-del-VMM` 0750 (el
-  VMM solo lo atraviesa) y solo el FICHERO `overlay.ext4` es del VMM. Así un Firecracker
-  comprometido no crea ficheros en su directorio ni puede cambiar el overlay por un enlace
-  simbólico. Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
+  VMM solo lo atraviesa) y el FICHERO `overlay.ext4` es `root:grupo-del-VMM` 0660: el VMM
+  lo lee y lo escribe por grupo, pero **no es dueño de nada** en el almacén. Así un
+  Firecracker comprometido no crea ficheros en su directorio, no puede cambiar el overlay
+  por un enlace simbólico y no puede tocar los atributos que el núcleo reserva al dueño
+  (ver la cuota, abajo). `runFrom` no le hace `chown` al enlace de `machines/<id>` cuando
+  apunta al almacén (el `chown` lo seguiría). Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
   `O_NOFOLLOW`, comprueba con `Fstat` sobre el descriptor que es un fichero regular y
   **copia desde ese mismo descriptor** (FICLONE entre descriptores, o una copia dispersa en
   Go con `SEEK_DATA`/`SEEK_HOLE`), sin volver a abrir la ruta: cambiar el overlay por un
@@ -594,12 +597,19 @@ cambia:
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
   reserva).
-- **Cuota por instancia**: el VMM es dueño del fichero de overlay y un Firecracker
+- **Cuota por instancia**: el VMM escribe el fichero de overlay y un Firecracker
   comprometido podría hacerlo crecer hasta llenar el almacén compartido. Cada overlay lleva
   una cuota del núcleo igual a su tamaño lógico más una holgura: en XFS, cuota de proyecto
   (`prjquota`; un id por overlay puesto por ioctl sobre el fichero abierto con
   `O_NOFOLLOW`, límite duro con `xfs_quota`), y en Btrfs, un subvolumen por instancia con
-  qgroup. La cuota se aplica antes de ceder el fichero al VMM y, si el almacén la impone
+  qgroup. El id de proyecto de XFS lo puede cambiar el DUEÑO del fichero
+  (`FS_IOC_FSSETXATTR`, `inode_owner_or_capable`) y por eso el overlay no es del VMM: si lo
+  fuera, podría salirse de su cuota o pasarse al proyecto de otra instancia y comerse la
+  suya (`TestCuotaXFSNoLaCambiaElVMM` lo comprueba con un proceso sin privilegios: abre y
+  escribe por grupo, y el ioctl da EPERM). Un `btrfs subvolume delete` que falla se
+  reintenta una vez y, si sigue fallando, se avisa en el log con el comando para borrarlo a
+  mano (`RemoveAll` no quita un subvolumen). La cuota se aplica antes de abrir el fichero al
+  VMM y, si el almacén la impone
   y no se puede aplicar, la instancia no entra al almacén (cae a copia completa). Sin
   `xfs_quota`/`btrfs`, o con un XFS montado sin `prjquota`, no hay cuota y `kling doctor`
   lo avisa.

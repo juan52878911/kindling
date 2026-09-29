@@ -135,8 +135,10 @@ montado sin discard, y clona dos instancias.
 
 Cada overlay del almacén lleva una **cuota por instancia**, impuesta por el núcleo: el
 tamaño lógico del overlay más una holgura (3 % y 16 MiB). El invitado no puede pasar de
-su disco, pero el VMM es dueño del fichero y un Firecracker comprometido podría hacerlo
-crecer hasta llenar el almacén compartido; con la cuota recibe `EDQUOT`.
+su disco, pero el VMM escribe el fichero y un Firecracker comprometido podría hacerlo
+crecer hasta llenar el almacén compartido; con la cuota recibe `EDQUOT`. El overlay es
+`root:grupo-del-VMM` 0660 y no del VMM: el dueño de un fichero puede cambiarle el id de
+proyecto de XFS (`FS_IOC_FSSETXATTR`) y con eso salirse de la cuota.
 
 - **XFS**: cuota de proyecto. El almacén se monta con `prjquota`; cada overlay recibe un
   id de proyecto propio (ioctl sobre el fichero, no sobre el directorio: `PROJINHERIT`
@@ -201,8 +203,9 @@ con XFS o Btrfs no haga falta nada.
   loop para construirlas y ampliarlas), `mkfs.xfs` (xfsprogs) y el módulo `xfs` del
   núcleo. Nada más: ni `dmsetup`, ni udev, ni metadatos propios.
 - **Jailer**: resuelto con un bind por instancia (arriba). El VMM sin privilegios abre
-  un fichero suyo (0600, dueño el usuario del VMM) en un directorio suyo; la raíz del
-  almacén y `m/` son 0750 root:grupo del VMM, como `machines/`.
+  su overlay por grupo (0660, dueño root, grupo el del VMM) en un directorio que solo
+  atraviesa (0750 root:grupo del VMM); la raíz del almacén y `m/` son 0750 root:grupo del
+  VMM, como `machines/`.
 - **Crash-safety**: XFS es transaccional (el reflink va al journal). Las bases se
   publican con fsync + rename. Tras un corte, lo que quede a medias (un clon sin
   máquina, un temporal) lo barre el vigilante. El `cow.xfs` también se crea en un

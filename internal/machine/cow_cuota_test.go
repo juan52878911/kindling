@@ -5,7 +5,9 @@ package machine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -181,3 +183,105 @@ func probarCuotaReal(t *testing.T, fs, cuota string) {
 
 func TestCuotaXFSDeVerdad(t *testing.T)   { probarCuotaReal(t, "xfs", "prjquota") }
 func TestCuotaBtrfsDeVerdad(t *testing.T) { probarCuotaReal(t, "btrfs", "qgroup") }
+
+// usuarioVMMPrueba es el usuario sin privilegios con el que corre el proceso
+// hijo de TestCuotaXFSNoLaCambiaElVMM (nobody:nogroup en casi todo Linux).
+const usuarioVMMPrueba = 65534
+
+// TestAyudanteProyecto no es una prueba: es el proceso hijo que, como el
+// usuario del VMM, abre el overlay en escritura (por grupo) e intenta sacarlo
+// de su proyecto de XFS. Solo corre con KLING_TEST_AYUDANTE_PROYECTO.
+func TestAyudanteProyecto(t *testing.T) {
+	ruta := os.Getenv("KLING_TEST_AYUDANTE_PROYECTO")
+	if ruta == "" {
+		t.Skip("proceso hijo de TestCuotaXFSNoLaCambiaElVMM")
+	}
+	f, err := os.OpenFile(ruta, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Println("RESULTADO no-abre", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteAt([]byte("x"), 0); err != nil {
+		fmt.Println("RESULTADO no-escribe", err)
+		return
+	}
+	switch err := fijarProyecto(f, 0); {
+	case err == nil:
+		fmt.Println("RESULTADO cambio-proyecto")
+	case errors.Is(err, syscall.EPERM):
+		fmt.Println("RESULTADO eperm")
+	default:
+		fmt.Println("RESULTADO otro", err)
+	}
+}
+
+// De verdad (root, KLING_TEST_MOUNTS=1): con usuario sin privilegios, el
+// overlay del almacén XFS es root:grupo-del-VMM 0660; el VMM lo abre y lo
+// escribe, pero no puede cambiarle el id de proyecto (FS_IOC_FSSETXATTR da
+// EPERM al que no es dueño) y el proyecto sigue siendo el que puso el daemon.
+func TestCuotaXFSNoLaCambiaElVMM(t *testing.T) {
+	a := almacenReal(t, "xfs")
+	a.priv = &Privileges{Enabled: true, UID: usuarioVMMPrueba, GID: usuarioVMMPrueba}
+	src := doradoDe(t, a.root, 64)
+	ruta, err := a.clonarInstancia(context.Background(), "d", src, "id1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.cuota != "prjquota" {
+		t.Skipf("el almacén no impone cuota (%q)", a.cuota)
+	}
+	f, err := abrirSinSeguir(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	antes, err := proyectoDe(f)
+	f.Close()
+	if err != nil || antes == 0 {
+		t.Fatalf("proyecto del overlay %d %v", antes, err)
+	}
+	fi, err := os.Lstat(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != 0 || st.Gid != usuarioVMMPrueba || fi.Mode().Perm() != 0o660 {
+		t.Fatalf("overlay %d:%d %v, quería 0:%d 0660", st.Uid, st.Gid, fi.Mode().Perm(), usuarioVMMPrueba)
+	}
+
+	// El hijo tiene que llegar al overlay y ejecutar el binario de la prueba:
+	// se abren los directorios de la prueba (solo atravesar) y se copia el
+	// binario a uno suyo.
+	for d := a.root; d != filepath.Dir(d) && strings.HasPrefix(d, os.TempDir()) && d != os.TempDir(); d = filepath.Dir(d) {
+		_ = os.Chmod(d, 0o711)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(a.root, "prueba.test")
+	datos, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, datos, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-test.run=^TestAyudanteProyecto$", "-test.v")
+	cmd.Env = append(os.Environ(), "KLING_TEST_AYUDANTE_PROYECTO="+ruta)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
+		Uid: usuarioVMMPrueba, Gid: usuarioVMMPrueba, Groups: []uint32{},
+	}}
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "RESULTADO eperm") {
+		t.Errorf("el usuario del VMM sobre su overlay: %s", out)
+	}
+	f, err = abrirSinSeguir(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	despues, err := proyectoDe(f)
+	f.Close()
+	if err != nil || despues != antes {
+		t.Errorf("proyecto %d → %d (%v)", antes, despues, err)
+	}
+}

@@ -460,14 +460,31 @@ func (a *almacenCoW) mkdirInstancia(d string) error {
 }
 
 // rmdirInstancia borra el directorio de una instancia, sea un directorio o un
-// subvolumen.
+// subvolumen. Si el hook falla se reintenta una vez (un `btrfs subvolume
+// delete` puede fallar por algo pasajero) y, si vuelve a fallar, se dice
+// claro en el log: RemoveAll vacía un subvolumen pero no lo quita (EPERM), y
+// el que quede ocupa su qgroup y bloquea el id hasta que alguien lo borre.
 func (a *almacenCoW) rmdirInstancia(d string) {
 	if a.quitarDir != nil && a.cuota != "" {
-		if a.quitarDir(d) == nil {
+		err := a.quitarDir(d)
+		if err == nil {
 			return
 		}
+		if _, serr := os.Lstat(d); os.IsNotExist(serr) {
+			return
+		}
+		if err = a.quitarDir(d); err == nil {
+			return
+		}
+		if _, serr := os.Lstat(d); os.IsNotExist(serr) {
+			return
+		}
+		log.Printf("warning: copy-on-write store: could not remove %s (%v); if it is a subvolume, "+
+			"remove it by hand with: btrfs subvolume delete %s", d, err, d)
 	}
-	_ = os.RemoveAll(d)
+	if err := os.RemoveAll(d); err != nil {
+		log.Printf("warning: copy-on-write store: removing %s: %v", d, err)
+	}
 }
 
 func (a *almacenCoW) dirInstancia(id string) string { return filepath.Join(a.dir, "m", id) }
@@ -696,7 +713,7 @@ func (a *almacenCoW) base(ctx context.Context, snap, src string) (string, error)
 
 // clonarInstancia prepara el almacén si hace falta, asegura la base del
 // dorado y la clona para la instancia id. Devuelve la ruta del overlay de la
-// instancia, ya cedido al usuario del VMM.
+// instancia, ya abierto al VMM por grupo (ver cederPorGrupo).
 func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, gib int) (string, error) {
 	if err := nombreSeguro(id); err != nil {
 		return "", err
@@ -747,15 +764,19 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 		}
 	}
 	if a.priv != nil && a.priv.Enabled {
-		// El VMM es dueño del FICHERO, no del directorio: con el directorio en
-		// root:grupo 0750 solo lo atraviesa. Dueño del directorio podría crear
-		// ficheros en él (llenar el almacén compartido) y cambiar el overlay por
-		// un enlace entre la comprobación del daemon y su lectura.
-		if err := a.priv.Own(ruta); err != nil {
+		// El VMM NO es dueño de nada aquí: el overlay queda del daemon (root) y
+		// el VMM lo lee y escribe por grupo (0660); el directorio, root:grupo
+		// 0750, solo lo atraviesa. Dueño del FICHERO podría cambiarle el id de
+		// proyecto de XFS con FS_IOC_FSSETXATTR (el núcleo lo permite al dueño,
+		// inode_owner_or_capable) y salirse de su cuota o comerse la de otra
+		// instancia. Dueño del directorio podría crear ficheros en él (llenar el
+		// almacén compartido) y cambiar el overlay por un enlace entre la
+		// comprobación del daemon y su lectura.
+		if err := cederPorGrupo(ruta, os.Geteuid(), a.priv.GID); err != nil {
 			a.rmdirInstancia(d)
 			return "", err
 		}
-		if err := os.Lchown(d, 0, a.priv.GID); err != nil {
+		if err := os.Lchown(d, os.Geteuid(), a.priv.GID); err != nil {
 			a.rmdirInstancia(d)
 			return "", fmt.Errorf("securing %s: %w", d, err)
 		}
@@ -765,6 +786,34 @@ func (a *almacenCoW) clonarInstancia(ctx context.Context, snap, src, id string, 
 		}
 	}
 	return ruta, nil
+}
+
+// cederPorGrupo deja el fichero ruta con dueño y grupo dados y modo 0660: el
+// grupo (el del VMM) lo lee y escribe, pero no es suyo, así que no puede
+// cambiarle los atributos que solo toca el dueño (el id de proyecto de XFS, el
+// modo, los permisos). Por descriptor y sin seguir enlaces: el directorio es
+// del daemon, pero no cuesta nada no fiarse de la ruta.
+func cederPorGrupo(ruta string, dueño, grupo int) error {
+	fd, err := syscall.Open(ruta, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	f := os.NewFile(uintptr(fd), ruta)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("granting %s: not a regular file", ruta)
+	}
+	if err := f.Chown(dueño, grupo); err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	if err := f.Chmod(0o660); err != nil {
+		return fmt.Errorf("granting %s: %w", ruta, err)
+	}
+	return nil
 }
 
 // borrarInstancia quita el directorio de la instancia id del almacén. La ruta

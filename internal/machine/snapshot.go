@@ -1073,7 +1073,8 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// que la instancia escribe: coste constante, sea cual sea su tamaño (ver
 	// cow.go).
 	overlay := filepath.Join(dir, "overlay.ext4")
-	if _, err := m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay); err != nil {
+	modoCoW, err := m.clonarOverlayInstancia(ctx, req.From, filepath.Join(m.snapDir(req.From), "overlay.ext4"), id, overlay)
+	if err != nil {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("copying golden overlay: %w", err)
 	}
@@ -1157,7 +1158,14 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("setting up network: %w", err)
 	}
-	if err := m.priv.Own(dir, overlay); err != nil {
+	// Con el overlay en el almacén, overlay es un enlace a él y Own (chown, que
+	// sigue enlaces) se lo daría en propiedad al VMM: ahí es del daemon y el VMM
+	// lo usa por grupo (ver clonarInstancia).
+	ceder := []string{dir, overlay}
+	if modoCoW == cowModoStore {
+		ceder = ceder[:1]
+	}
+	if err := m.priv.Own(ceder...); err != nil {
 		m.desmontarRed(netcfg, id)
 		os.RemoveAll(dir)
 		return nil, err

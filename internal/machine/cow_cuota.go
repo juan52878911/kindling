@@ -4,10 +4,13 @@ package machine
 
 // Cuota por instancia en el almacén de copia al escribir (ver cow.go).
 //
-// Qué se limita y por qué así. El VMM es dueño del FICHERO overlay.ext4 de su
-// instancia (no del directorio). Un invitado legítimo no puede pasar del tamaño
-// lógico de su disco, pero un Firecracker comprometido puede hacer crecer el
-// fichero (ftruncate, escribir más allá) y llenar el almacén compartido. La
+// Qué se limita y por qué así. El VMM escribe el FICHERO overlay.ext4 de su
+// instancia por grupo (dueño root, 0660; ver cederPorGrupo), sin ser dueño de
+// nada: dueño del fichero podría cambiarle el id de proyecto con
+// FS_IOC_FSSETXATTR y salirse de la cuota. Un invitado legítimo no puede pasar
+// del tamaño lógico de su disco, pero un Firecracker comprometido puede hacer
+// crecer el fichero (ftruncate, escribir más allá) y llenar el almacén
+// compartido. La
 // cuota es, por tanto, el tamaño lógico del overlay más una holgura
 // (cuotaInstancia), aplicada por el núcleo:
 //
