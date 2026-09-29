@@ -1,0 +1,391 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
+	"github.com/juan52878911/kindling/ext/db/internal/klingc"
+	"github.com/juan52878911/kindling/pkg/api"
+)
+
+// Etiquetas de una copia. Todas cumplen api.KeyPattern (sin '/'): el daemon
+// las guarda con la máquina, Commit las copia a la plantilla y run -from y fork
+// las heredan. Por eso state no se puede dar por bueno solo porque venga
+// puesto: una copia de una copia lista nace con state=ready heredado, y lo que
+// la delata es que no hay contraseña de SU id en el host (ver checkReady).
+const (
+	labelGolden   = "kling.db.golden"   // plantilla de la que sale
+	labelOwner    = "kling.db.owner"    // quién la pidió ("local" en el CLI)
+	labelState    = "kling.db.state"    // preparing | ready
+	labelRole     = "kling.db.role"     // rol de la aplicación (app)
+	labelDatabase = "kling.db.database" // base de la aplicación (appdb)
+
+	statePreparing = "preparing"
+	stateReady     = "ready"
+
+	defaultOwner    = "local"
+	defaultRole     = "app"
+	defaultDatabase = "appdb"
+	pgPort          = 5432
+)
+
+// dbLabelKeys son las claves que escribe esta extensión, para el test de
+// api.KeyPattern.
+var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, api.LabelKind, api.LabelPorts}
+
+var (
+	// nombres de máquina y de plantilla (validName del núcleo).
+	namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+	// rol y base: identificadores simples de SQL, sin comillas que escapar.
+	identPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,30}$`)
+)
+
+// backend es lo que la extensión pide a kindling.
+type backend interface {
+	klingc.Kling
+	klingc.Labeler
+}
+
+// app lleva todo lo que los comandos tocan fuera de sí mismos, para poder
+// sustituirlo en los tests.
+type app struct {
+	k      backend
+	stdout io.Writer
+	stderr io.Writer
+	stdin  io.Reader
+	// stdoutTTY dice si stdout es una terminal (ahí no se imprime una clave sin
+	// confirmación).
+	stdoutTTY func() bool
+	// runPsql ejecuta el psql del host con ese entorno extra y esos argumentos.
+	runPsql func(ctx context.Context, env []string, args []string) error
+	sleep   func(time.Duration)
+	// readyWait es cuánto se espera a que Postgres acepte conexiones.
+	readyWait time.Duration
+}
+
+func newApp(host string) (*app, error) {
+	cli, err := klingc.New(host)
+	if err != nil {
+		return nil, err
+	}
+	return &app{
+		k: cli, stdout: os.Stdout, stderr: os.Stderr, stdin: os.Stdin,
+		stdoutTTY: func() bool { return isTerminal(os.Stdout) },
+		runPsql:   runHostPsql,
+		sleep:     time.Sleep,
+		readyWait: 30 * time.Second,
+	}, nil
+}
+
+func isTerminal(f *os.File) bool {
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+// ── lectura del estado ───────────────────────────────────────────────────────
+
+// maxJSON acota lo que se decodifica de una salida de kling.
+const maxJSON = 8 << 20
+
+func (a *app) inspect(ctx context.Context, ref string) (*api.Machine, error) {
+	out, err := a.k.Run(ctx, nil, "inspect", ref)
+	if err != nil {
+		return nil, fmt.Errorf("no machine %q: %w", ref, err)
+	}
+	if len(out) > maxJSON {
+		return nil, errors.New("kling inspect: output too large")
+	}
+	var mc api.Machine
+	if err := json.Unmarshal(out, &mc); err != nil {
+		return nil, fmt.Errorf("kling inspect %s: %w", ref, err)
+	}
+	if mc.ID == "" {
+		return nil, fmt.Errorf("kling inspect %s: no id in the answer", ref)
+	}
+	return &mc, nil
+}
+
+func (a *app) template(ctx context.Context, name string) (*api.Snapshot, error) {
+	out, err := a.k.Run(ctx, nil, "template", "inspect", name, "-json")
+	if err != nil {
+		return nil, fmt.Errorf("no template %q: %w", name, err)
+	}
+	var s api.Snapshot
+	if err := json.Unmarshal(out, &s); err != nil {
+		return nil, fmt.Errorf("kling template inspect %s: %w", name, err)
+	}
+	return &s, nil
+}
+
+// owned exige que la máquina sea una copia de kling db de ese dueño.
+func owned(mc *api.Machine, owner string) error {
+	if mc.Labels[labelGolden] == "" {
+		return fmt.Errorf("%s is not a kling db copy (no %s label)", mc.Name, labelGolden)
+	}
+	if got := mc.Labels[labelOwner]; got != owner {
+		return fmt.Errorf("%s belongs to owner %q, not %q", mc.Name, got, owner)
+	}
+	return nil
+}
+
+// checkReady es la puerta de connect y fork, sobre UNA sola lectura de la
+// máquina: existe (la lectura), corre, está lista, es de owner y este host
+// tiene la contraseña de ESTE id. Lo último es lo que distingue una copia
+// preparada aquí de una que heredó state=ready de su origen.
+func checkReady(mc *api.Machine, owner string) error {
+	if err := owned(mc, owner); err != nil {
+		return err
+	}
+	if mc.State != api.StateRunning {
+		return fmt.Errorf("%s is %s, not running (kling thaw %s)", mc.Name, mc.State, mc.Name)
+	}
+	if st := mc.Labels[labelState]; st != stateReady {
+		return fmt.Errorf("%s is not ready (%s=%q): it was never finished or is being prepared", mc.Name, labelState, st)
+	}
+	if err := dbstate.HasPassword(mc.ID); err != nil {
+		if errors.Is(err, dbstate.ErrNoPassword) {
+			return fmt.Errorf("%s: this host has no password for machine %s; it was not prepared here (kling db reset %s gives a fresh one)",
+				mc.Name, shortID(mc.ID), mc.Name)
+		}
+		return err
+	}
+	return nil
+}
+
+// roleDB son el rol y la base de una copia, de sus etiquetas.
+func roleDB(labels map[string]string) (role, db string, err error) {
+	role = orDefault(labels[labelRole], defaultRole)
+	db = orDefault(labels[labelDatabase], defaultDatabase)
+	if !identPattern.MatchString(role) || role == "postgres" {
+		return "", "", fmt.Errorf("invalid role %q", role)
+	}
+	if !identPattern.MatchString(db) {
+		return "", "", fmt.Errorf("invalid database %q", db)
+	}
+	return role, db, nil
+}
+
+// goldenRoleDB lee rol y base de la plantilla: sus etiquetas y, si no las
+// tiene (scripts/db-golden.sh no etiqueta), el conn.env que dejó ese script
+// en este host. Si no hay nada, app/appdb, los de db-golden.sh.
+func goldenRoleDB(s *api.Snapshot) (string, string, error) {
+	labels := map[string]string{}
+	if d, err := dbstate.Dir(); err == nil && namePattern.MatchString(s.Name) {
+		for k, v := range readEnvFile(d + "/" + s.Name + "/conn.env") {
+			switch k {
+			case "PGUSER":
+				labels[labelRole] = v
+			case "PGDATABASE":
+				labels[labelDatabase] = v
+			}
+		}
+	}
+	for _, k := range []string{labelRole, labelDatabase} {
+		if v := s.Labels[k]; v != "" {
+			labels[k] = v
+		}
+	}
+	return roleDB(labels)
+}
+
+func readEnvFile(p string) map[string]string {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	out := map[string]string{}
+	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
+	for sc.Scan() {
+		if k, v, ok := strings.Cut(strings.TrimSpace(sc.Text()), "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// hostAddr es por dónde llega el host al 5432 de la copia: en macOS, el
+// reenvío que abre el backend por kling.ports (loopback, con peercred); en
+// Linux, la IP del netns de la máquina. En Linux no hay frontera: cualquier
+// proceso del host llega a esa IP, y por eso la contraseña de cada copia es
+// propia y solo está en este host.
+func hostAddr(mc *api.Machine) (host string, port int, err error) {
+	if len(mc.Forwards) > 0 {
+		a, ok := mc.Forwards[strconv.Itoa(pgPort)]
+		if !ok || a == "" {
+			return "", 0, fmt.Errorf("%s has no forward for port %d (it needs the label %s=%d)", mc.Name, pgPort, api.LabelPorts, pgPort)
+		}
+		h, p, serr := net.SplitHostPort(a)
+		n, perr := strconv.Atoi(p)
+		if serr != nil || perr != nil {
+			return "", 0, fmt.Errorf("%s: bad forward %q", mc.Name, a)
+		}
+		return h, n, nil
+	}
+	if mc.IP == "" {
+		return "", 0, fmt.Errorf("%s has no address the host can reach", mc.Name)
+	}
+	return mc.IP, pgPort, nil
+}
+
+// ── preparar una copia ───────────────────────────────────────────────────────
+
+// psqlSuper es el psql del superusuario dentro de la copia, por el socket
+// local y como el usuario del sistema postgres (pg_hba: local all postgres
+// peer). La orden es fija: lo variable va por stdin.
+const psqlSuper = "psql -X -q -At -v ON_ERROR_STOP=1 -d postgres"
+
+// waitPostgres espera a que el postmaster de la copia acepte conexiones.
+func (a *app) waitPostgres(ctx context.Context, id string) error {
+	deadline := time.Now().Add(a.readyWait)
+	for {
+		_, err := a.k.Run(ctx, nil, "exec", "-timeout", "10s", id, "--",
+			"su", "-s", "/bin/sh", "postgres", "-c", "pg_isready -q -h /run/postgresql")
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("postgres in %s does not accept connections after %s", shortID(id), a.readyWait)
+		}
+		a.sleep(time.Second)
+	}
+}
+
+// rotate estrena la contraseña del rol de la aplicación en la copia id.
+//
+// La clave se genera aquí y NUNCA sale del host: al invitado va solo su
+// verificador SCRAM, por stdin (ni argv ni pantalla). Se comprueba en la misma
+// sesión que pg_authid guarda exactamente ese verificador. La clave se escribe
+// en el host ANTES de tocar la base: si lo segundo falla, quien llama destruye
+// la copia y el fichero; lo contrario dejaría una base con una clave perdida.
+func (a *app) rotate(ctx context.Context, id, role string) error {
+	pw, err := generatePassword()
+	if err != nil {
+		return err
+	}
+	ver, err := newVerifier(pw)
+	if err != nil {
+		return err
+	}
+	if err := dbstate.WritePassword(id, pw); err != nil {
+		return fmt.Errorf("storing the password of %s: %w", shortID(id), err)
+	}
+	// role pasó identPattern y el verificador es base64 con '$' y ':': nada
+	// que escapar dentro de las comillas.
+	sql := fmt.Sprintf("ALTER ROLE %s PASSWORD '%s';\nSELECT rolpassword = '%s' FROM pg_authid WHERE rolname = '%s';\n",
+		role, ver, ver, role)
+	out, err := a.k.Run(ctx, strings.NewReader(sql), "exec", "-i", "-timeout", "60s", id, "--",
+		"su", "-s", "/bin/sh", "postgres", "-c", psqlSuper)
+	if err != nil {
+		// Sin el detalle a propósito: el error de psql cita la sentencia.
+		return fmt.Errorf("rotating the password of %s failed (output omitted: it may quote the statement)", shortID(id))
+	}
+	if strings.TrimSpace(string(out)) != "t" {
+		return fmt.Errorf("rotating the password of %s: role %q does not hold the new verifier", shortID(id), role)
+	}
+	return nil
+}
+
+// prepare deja lista una copia que ya está en state=preparing: espera a
+// Postgres y rota la clave. No la marca ready: eso lo hace quien llama cuando
+// todas las de la operación están preparadas.
+func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
+	role, _, err := roleDB(mc.Labels)
+	if err != nil {
+		return err
+	}
+	if err := a.waitPostgres(ctx, mc.ID); err != nil {
+		return err
+	}
+	return a.rotate(ctx, mc.ID, role)
+}
+
+// destroy borra una copia y su contraseña. Se usa al deshacer: los errores se
+// cuentan, no se devuelven, para que el del motivo original no se pierda.
+func (a *app) destroy(id string) {
+	// Con un contexto propio: si el original se canceló (Ctrl-C), deshacer
+	// tiene que poder ejecutarse igual.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := a.k.Run(ctx, nil, "rm", "-f", id); err != nil {
+		fmt.Fprintf(a.stderr, "warning: could not remove %s: %v (remove it with kling rm -f %s)\n", shortID(id), err, id)
+	}
+	if _, err := dbstate.CopyDir(id); err != nil {
+		return // un nombre, no un id: no tiene contraseña guardada
+	}
+	if err := dbstate.Remove(id); err != nil {
+		fmt.Fprintf(a.stderr, "warning: could not remove the password of %s: %v\n", shortID(id), err)
+	}
+}
+
+func (a *app) setState(ctx context.Context, id, state string) error {
+	return a.k.SetLabels(ctx, id, map[string]string{labelState: state})
+}
+
+// ── utilidades ───────────────────────────────────────────────────────────────
+
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// randomSuffix para los nombres por defecto de las copias.
+func randomSuffix() string {
+	b := make([]byte, 3)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// mergePorts añade 5432 a la lista de kling.ports sin perder la que hubiera.
+func mergePorts(cur string) string {
+	seen := map[int]bool{}
+	var ports []int
+	for _, p := range strings.Split(cur, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil && n > 0 && n < 65536 && !seen[n] {
+			seen[n] = true
+			ports = append(ports, n)
+		}
+	}
+	if !seen[pgPort] {
+		ports = append(ports, pgPort)
+	}
+	sort.Ints(ports)
+	s := make([]string, len(ports))
+	for i, p := range ports {
+		s[i] = strconv.Itoa(p)
+	}
+	return strings.Join(s, ",")
+}
+
+func validOwner(o string) error {
+	if !api.KeyPattern.MatchString(o) {
+		return fmt.Errorf("invalid owner %q: lowercase letters, digits, '.', '_' and '-'", o)
+	}
+	return nil
+}
