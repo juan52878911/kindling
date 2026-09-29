@@ -245,8 +245,8 @@ func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api
 	}
 	var res api.ForkResult
 	if err := json.Unmarshal(out, &res); err != nil || len(res.Sandboxes) == 0 {
-		return nil, fmt.Errorf("kling sandbox fork: unexpected answer (%v); the copies, if any, stay in state %q "+
-			"inherited from %s but have no password here, so connect refuses them", err, stateReady, mc.Name)
+		return nil, fmt.Errorf("kling sandbox fork: unexpected answer (%v); the copies of %s, if any, were not rotated "+
+			"and have no password here, so connect refuses them: remove them with kling rm", err, mc.Name)
 	}
 	copies := res.Sandboxes
 	undo := func(cause error) ([]*api.Machine, error) {

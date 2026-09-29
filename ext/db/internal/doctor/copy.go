@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -247,7 +248,8 @@ func passwordChecks(exists bool, v, id, state, golden, appRole string, ready boo
 	}
 
 	// La contraseña de ESTA copia en el host (la que usa kling db connect).
-	p := filepath.Join(state, id, "password")
+	// Misma ruta que dbstate (la que escribe kling db y lee connect): copies/<id>.
+	p := filepath.Join(state, dbstate.CopiesDir, id, "password")
 	fi, err := os.Lstat(p)
 	switch {
 	case errors.Is(err, os.ErrNotExist):

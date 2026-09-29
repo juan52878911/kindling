@@ -221,9 +221,9 @@ func limpio() (*kFalso, map[string]string) {
 		},
 	}
 	files := map[string]string{
-		"pg-golden/password": goldenPW,
-		"pg-golden/conn.env": "PGUSER=app\nPGDATABASE=appdb\n",
-		"m-1a2b3c/password":  copyPW,
+		"pg-golden/password":       goldenPW,
+		"pg-golden/conn.env":       "PGUSER=app\nPGDATABASE=appdb\n",
+		"copies/m-1a2b3c/password": copyPW,
 	}
 	return k, files
 }
@@ -264,7 +264,7 @@ func TestRotacionNoVerificable(t *testing.T) {
 
 func TestFicheroDeLaCopia(t *testing.T) {
 	k, files := limpio()
-	files["m-1a2b3c/password"] = goldenPW // no es la clave del verificador
+	files["copies/m-1a2b3c/password"] = goldenPW // no es la clave del verificador
 	estado(t, files)
 	_, out := correr(t, k)
 	tiene(t, out, "HIGH", "DB054")
@@ -272,7 +272,7 @@ func TestFicheroDeLaCopia(t *testing.T) {
 	k, files = limpio()
 	estado(t, files)
 	d := os.Getenv("KLING_DB_STATE")
-	if err := os.Chmod(filepath.Join(d, "m-1a2b3c", "password"), 0o644); err != nil {
+	if err := os.Chmod(filepath.Join(d, "copies", "m-1a2b3c", "password"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, out = correr(t, k)
@@ -281,7 +281,7 @@ func TestFicheroDeLaCopia(t *testing.T) {
 
 func TestCopiaEnPreparacion(t *testing.T) {
 	k, files := limpio()
-	delete(files, "m-1a2b3c/password")
+	delete(files, "copies/m-1a2b3c/password")
 	k.machine.Labels[LabelState] = StatePreparing
 	estado(t, files)
 	_, out := correr(t, k)

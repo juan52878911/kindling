@@ -818,7 +818,12 @@ print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip(
       printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD is not set: template password not tried from the host\n"
     fi
     dsn=$(k db connect "$DBU" -dsn 2>/dev/null </dev/null)
-    out=$(PGCONNECT_TIMEOUT=10 psql -X -At "$dsn" -c "SELECT 1" 2>&1)
+    # El DSN se descompone en variables PG*: la clave va por entorno, nunca en el argv de psql.
+    out=$(eval "$(python3 -c 'import sys, shlex, urllib.parse as u
+d = u.urlsplit(sys.argv[1])
+for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.username or "")),
+             ("PGPASSWORD", u.unquote(d.password or "")), ("PGDATABASE", d.path.lstrip("/"))):
+    print("export %s=%s" % (k, shlex.quote(str(v or ""))))' "$dsn")"; PGCONNECT_TIMEOUT=10 psql -X -At -c "SELECT 1" 2>&1)
     [ "$out" = "1" ] && ok "connect -dsn works" || bad "connect -dsn" "1" "$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
     dsn=""
   fi
