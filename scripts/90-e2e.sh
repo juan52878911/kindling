@@ -1913,6 +1913,12 @@ elif ! $KLING db --help >/dev/null 2>&1; then
   printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado\n"
 else
   DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  # Como en 7e y 7h: el estado de la plantilla Redis (su clave) permite a doctor
+  # comprobar que la copia ya no la usa (RD052).
+  DBREAL="$HOME/.local/state/kling-db/${KLING_E2E_REDIS_GOLDEN:-}"
+  if [ -n "${KLING_E2E_REDIS_GOLDEN:-}" ] && [ -d "$DBREAL" ]; then
+    mkdir -p "$KLING_DB_STATE" && chmod 700 "$KLING_DB_STATE" && cp -a "$DBREAL" "$KLING_DB_STATE/"
+  fi
   DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
   dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
   dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
