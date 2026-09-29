@@ -151,7 +151,8 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - **`kling db ask-web`.** La misma garantía de `ask` en una página web mínima para quien no usa
   la terminal (HTML y JS embebidos, sin dependencias): solo esquema y pregunta hacia el modelo,
   la SQL se muestra y se ejecuta al pulsar un botón, con el rol de solo lectura en `READ ONLY`;
-  `-explain` exige `-send-data`. Escucha solo en loopback (`-allow-remote` con aviso), token
+  `-explain` exige `-send-data`. Escucha solo en loopback (`-allow-remote` con aviso, y aun
+  así solo contesta al `Host` de la dirección de escucha), token
   aleatorio en la URL que pasa a cookie `SameSite=Strict`, CSRF en cada POST, CSP sin inline,
   vida acotada (`-ttl`) y límite de peticiones. Ver [`docs/db-ask.md`](docs/db-ask.md).
 - **`kling db rehearse`, `rotate`, `snapshot`/`snapshots`/`undo`.** `rehearse` ensaya
@@ -190,7 +191,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   entre dos copias, sin volcar datos.** Esquema (tablas, columnas y tipos, clave
   primaria, índices, restricciones, RLS y políticas) y, por tabla, filas nuevas,
   borradas y cambiadas por clave primaria. Dentro de cada copia se calculan huellas por
-  fila (md5 de la clave con una sal aleatoria de la ejecución y md5 de la fila); al host
+  fila (md5 de la clave y md5 de la fila, las dos con una sal aleatoria de la ejecución); al host
   solo llegan huellas, ni claves ni valores. Tablas sin clave primaria: solo recuentos y
   un aviso. Más de `-max-rows` filas (100000) en una tabla: muestreo por huella de
   clave, igual en las dos copias y declarado en el informe. Las definiciones que se
@@ -226,6 +227,20 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Revisión de la fase media B** (#64, #67, #72, #78, #86). La página de `kling db
+  ask-web` (`web/index.html`) no llegaba al repositorio (el `*.html` del `.gitignore`) y
+  el plugin no compilaba: ahora se versiona, y un test comprueba que cumple la CSP (sin
+  `<script>` en línea ni `on*=`, el CSRF en `<meta name="csrf">`, `textContent`); con
+  `-allow-remote` la página solo contesta al `Host` de la dirección de escucha (`0.0.0.0`
+  y `::` se rechazan). `kling db diff`: la huella de cada fila también lleva la sal.
+  Autorización: `PUT /snapshots/{name}/credentials` pasa por la misma revisión que las
+  credenciales de una máquina; la política se abre con `O_NOFOLLOW` y se comprueba el
+  descriptor, no el nombre (ni TOCTOU ni una FIFO que bloquee el arranque); `commit`
+  sobre un nombre que el inquilino no ve responde siempre `409 ... is taken`, con o sin
+  `-replace` y sin decir de quién es; y `GET /info` sin rol ya no cuenta la raíz, las
+  carpetas compartibles ni el almacén. `kling db connect -mysql` decide la opción de TLS
+  del cliente por `--version` y `--help` y, si no lo sabe, lo dice en vez de pasar
+  `--ssl-mode` a un cliente de MariaDB.
 - **El broker de enlaces de macOS no da direcciones.** `kling-vz` pide la arista y el
   daemon entrega el socket ya conectado tras comprobarla bajo su candado y volver a
   mirar que el destino no cambió al marcar: ni TOCTOU entre resolver y marcar, ni
@@ -565,6 +580,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   registra por sesión, y el cliente de MMDS ignora `HTTP_PROXY` del entorno.
 
 ### Pruebas
+
+- `scripts/90-e2e.sh`: nuevas 7g (`kling db diff` entre dos copias de la plantilla
+  Postgres: iguales, y tras cambiar una fila, añadir otra y una columna; ningún valor en
+  la salida), 7h (MariaDB con `KLING_E2E_MYSQL_GOLDEN`: `up`, un agente que entra por el
+  proxy de MySQL con solo el marcador, `doctor` limpio y con una cuenta anónima, `audit`,
+  `rm`; ninguna clave en la salida) y 7i (autorización con `KLING_E2E_AUTHZ=1` y dos
+  tokens de inquilino). Cada una se salta, diciéndolo, sin lo que necesita.
 
 - `ext/mcp/scripts/90-e2e.sh`: la sección 8 crea su propia instancia del servicio, le
   inyecta el store y abre la sesión directamente contra su puente, en vez de depender de
