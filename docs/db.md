@@ -198,7 +198,8 @@ migración añadió 3 columnas y cambió 1.200 filas". Complementa `rehearse` (q
 - **Sin volcar datos**: dentro de cada copia (`kling exec` + psql por stdin, sesión de
   solo lectura) se calculan dos huellas de 64 bits por fila: la de la clave primaria (md5
   con una **sal aleatoria** de esa ejecución, igual en las dos copias, para que no se
-  puedan buscar ids conocidos) y la de la fila entera. Al host solo llegan huellas; ni
+  puedan buscar ids conocidos) y la de la fila entera (con la misma sal: tampoco se
+  pueden adivinar filas de pocos valores posibles). Al host solo llegan huellas; ni
   una clave ni un valor salen de la base. Los nombres de tablas y columnas se citan como
   identificadores.
 - **Sin clave primaria** (o distinta en cada copia): solo recuentos y un aviso.

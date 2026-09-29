@@ -60,7 +60,7 @@ func (k *diffKling) Run(ctx context.Context, stdin io.Reader, args ...string) ([
 					continue
 				}
 			}
-			fmt.Fprintf(&out, "R %s %s\n", h[:16], md5hex(row)[:16])
+			fmt.Fprintf(&out, "R %s %s\n", h[:16], md5hex(salt+row)[:16])
 		}
 		out.WriteString("DONE\n")
 		return []byte(out.String()), nil
@@ -256,6 +256,19 @@ func TestDiffCitaIdentificadores(t *testing.T) {
 	}
 	if !strings.Contains(sql, "default_transaction_read_only = on") {
 		t.Error("not read-only")
+	}
+}
+
+// Las dos huellas llevan la sal: sin ella, la de una fila de pocos valores
+// posibles (flags, estados) se podría buscar en una tabla precalculada.
+func TestDiffHuellasConSal(t *testing.T) {
+	tb := &dbTable{Schema: "public", Name: "flags", PK: []string{"id"}, Cols: []dbCol{{Name: "id"}, {Name: "on"}}}
+	sql := diffRowsSQL(tb, []string{"id", "on"}, "0123abcd", 1)
+	if n := strings.Count(sql, "md5("); n != 2 {
+		t.Fatalf("%d md5 calls, want 2:\n%s", n, sql)
+	}
+	if n := strings.Count(sql, "md5('0123abcd' || ROW("); n != 2 {
+		t.Fatalf("an unsalted fingerprint:\n%s", sql)
 	}
 }
 

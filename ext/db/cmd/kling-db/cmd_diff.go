@@ -12,9 +12,10 @@ package main
 //  2. Filas (una sesión por tabla y copia, solo tablas con la MISMA clave
 //     primaria en ambas): por fila, dos huellas de 64 bits, la de la clave
 //     (md5 con una sal aleatoria de esta ejecución, igual en las dos copias)
-//     y la de la fila (md5 de sus columnas comunes). Al host solo llegan
-//     huellas: ni una clave ni un valor salen de la base. La sal impide
-//     buscar claves conocidas (ids pequeños) en las huellas.
+//     y la de la fila (md5 de sus columnas comunes, con la misma sal). Al
+//     host solo llegan huellas: ni una clave ni un valor salen de la base. La
+//     sal impide buscar claves conocidas (ids pequeños) o filas adivinables
+//     (una tabla de flags, un estado de pocos valores) en las huellas.
 //
 // Filas nuevas / borradas / cambiadas se calculan cruzando las huellas de
 // clave. Tablas sin clave primaria (o con otra distinta en cada copia): solo
@@ -163,7 +164,7 @@ func diffRowsSQL(t *dbTable, cols []string, salt string, k int64) string {
 SET default_transaction_read_only = on;
 SET statement_timeout = '`+diffRowsStmtTmo+`';
 SELECT 'R ' || left(h, 16) || ' ' || left(r, 16) FROM (
-  SELECT md5('%[2]s' || ROW(%[3]s)::text) AS h, md5(ROW(%[4]s)::text) AS r
+  SELECT md5('%[2]s' || ROW(%[3]s)::text) AS h, md5('%[2]s' || ROW(%[4]s)::text) AS r
   FROM %[5]s.%[6]s AS t
 ) s
 WHERE %[1]d = 1 OR mod(('x' || left(h, 8))::bit(32)::bigint, %[1]d) = 0;
