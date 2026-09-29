@@ -156,6 +156,7 @@ deploy: daemon guest chispa-guest
 	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
 	scp -q scripts/builders/llm $(TARGET):/tmp/builder-llm
 	scp -q scripts/builders/chispa $(TARGET):/tmp/builder-chispa
+	scp -q scripts/builders/android $(TARGET):/tmp/builder-android
 	scp -q packaging/$(BIN).service $(TARGET):/tmp/
 	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
@@ -169,6 +170,7 @@ deploy: daemon guest chispa-guest
 		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
 		sudo install -m755 /tmp/builder-llm /usr/local/lib/kindling/builders/llm && \
 		sudo install -m755 /tmp/builder-chispa /usr/local/lib/kindling/builders/chispa && \
+		sudo install -m755 /tmp/builder-android /usr/local/lib/kindling/builders/android && \
 		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
 		if [ ! -f /etc/default/kling ]; then \
 			printf "%s\n" "# Config de kling propia de este host; make deploy la crea una vez y no la vuelve a tocar." "KLING_SOCKET_USER=$(HOST_USER)" "#KLING_RUN_AS=kindling" | sudo tee /etc/default/kling >/dev/null && \
@@ -178,7 +180,7 @@ deploy: daemon guest chispa-guest
 		sudo systemctl restart $(BIN) && \
 		sleep 1 && systemctl is-active $(BIN)'
 	@echo "daemon desplegado en $(TARGET)"
-	@echo "  agentes de invitado (kling-guest, kling-chispa) y constructores base, llm y chispa en /usr/local/lib/kindling"
+	@echo "  agentes de invitado (kling-guest, kling-chispa) y constructores base, llm, chispa y android en /usr/local/lib/kindling"
 	@echo "  config por host en /etc/default/kling (make deploy no la pisa en redespliegues)"
 	@echo
 	@echo "Imagen de herramientas para poblar volúmenes:  kling images toolchain"
