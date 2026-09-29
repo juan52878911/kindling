@@ -1,2 +1,4 @@
 /kling-db
 /kling-dbbench
+/cmd/kling-db/kling-db
+/cmd/kling-dbbench/kling-dbbench

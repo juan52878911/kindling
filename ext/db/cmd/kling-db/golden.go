@@ -11,13 +11,16 @@ package main
 // sorpresa, y pasarle el mismo kling y el mismo daemon que usa `kling db`.
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/juan52878911/kindling/ext/db/internal/klingc"
 	"github.com/juan52878911/kindling/pkg/plugin"
@@ -45,7 +48,13 @@ func cmdGolden(args []string) error {
 		return err
 	}
 	defer cleanup()
-	path, err := findGoldenScript(*script)
+	return runGoldenScript(context.Background(), *script, *host, rest, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// runGoldenScript ejecuta db-golden.sh con esos argumentos, el mismo kling y
+// el mismo daemon que usa kling db. Lo comparten golden y clone.
+func runGoldenScript(ctx context.Context, scriptFlag, host string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	path, err := findGoldenScript(scriptFlag)
 	if err != nil {
 		return err
 	}
@@ -57,12 +66,19 @@ func cmdGolden(args []string) error {
 		// El script parte $KLING por espacios (admite banderas).
 		return fmt.Errorf("the kling path %q has spaces; db-golden.sh cannot run it (set $KLING to a path without spaces)", bin)
 	}
-	c := exec.Command("bash", append([]string{path}, rest...)...)
-	c.Env = append(os.Environ(), "KLING="+bin)
-	if *host != "" {
-		c.Env = append(c.Env, "KLING_HOST="+*host)
+	c := exec.CommandContext(ctx, "bash", append([]string{path}, args...)...)
+	// El script genera su propia clave y nunca necesita la de otra base: una
+	// PGPASSWORD del entorno (la de producción en kling db clone) no debe llegar
+	// a él ni a nada de lo que lance.
+	c.Env = append(sinClavesPG(os.Environ()), "KLING="+bin)
+	if host != "" {
+		c.Env = append(c.Env, "KLING_HOST="+host)
 	}
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	c.Stdin, c.Stdout, c.Stderr = stdin, stdout, stderr
+	// Cancelar no mata el script de golpe: con SIGINT su trap retira la
+	// máquina de preparación y los temporales.
+	c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
+	c.WaitDelay = 2 * time.Minute
 	err = c.Run()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -107,4 +123,16 @@ func checkScript(p string) (string, error) {
 		return "", fmt.Errorf("%s is not a file", p)
 	}
 	return filepath.Abs(p)
+}
+
+// sinClavesPG quita del entorno lo que lleva una contraseña de Postgres.
+func sinClavesPG(env []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PGPASSWORD=") || strings.HasPrefix(kv, "PGPASSFILE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

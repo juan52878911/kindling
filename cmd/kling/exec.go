@@ -241,7 +241,8 @@ func sandboxCreate(args []string) error {
 	ttl := units.DurationVar(fs, "ttl", 0, "lifetime, or idle time with -on-ttl freeze: 10m, 1h (bare number = seconds; default 10m, max 24h)")
 	onTTL := fs.String("on-ttl", "", "when the ttl runs out: remove (default) or freeze (sleeps at zero cost, the next exec wakes it in ms)")
 	egress := fs.String("egress", "", "network egress: none (default) | internet | allowlist")
-	allow := fs.String("allow", "", "domains allowed with -egress allowlist (comma-separated)")
+	var allow domainsFlag
+	fs.Var(&allow, "allow", "domain allowed with -egress allowlist (repeatable, or comma-separated)")
 	cpuPct := fs.Int("cpu-pct", 0, "CPU ceiling as a percentage of one core")
 	var volumes volumeFlag
 	fs.Var(&volumes, "volume", "volume to mount: name[:/mount][:ro] (repeatable)")
@@ -261,7 +262,7 @@ func sandboxCreate(args []string) error {
 		return err
 	}
 	req := api.SandboxRequest{Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
-		TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Egress: *egress, AllowDomains: splitDomains(*allow),
+		TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Egress: *egress, AllowDomains: splitDomains(allow.String()),
 		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes), Shares: shareSpecs}
 	mc, err := client.CreateSandbox(ctx, req)
 	if err != nil {

@@ -246,8 +246,7 @@ func policyChecks(ctx context.Context, qr querier, db string, env *sqlEnv, r *re
 				vars[v] = true
 			}
 			if why, bad := failOpen(e.expr); bad {
-				r.add("DB010", Critical,
-					"make the policy fail closed: current_setting('<var>') without missing_ok (errors when unset), or compare only tenant_id = current_setting(...) with no IS NULL / '' / COALESCE escape",
+				r.add("DB010", Critical, FailOpenFix,
 					"policy %s on %s.%s%s is fail-open in %s: %s, so every row is visible without a tenant; expression: %s",
 					q(p.Name), q(p.Schema), q(p.Table), where, e.kind, safe(why, 120), safe(e.expr, 160))
 			}
