@@ -180,6 +180,14 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 			path = "-"
 		}
 	}
+	if r.Kind == "link" {
+		// Una conexión por una arista link de un grafo: TCP crudo, sin
+		// método ni estado; en la ruta, a qué máquina llegó.
+		method, path, status = "LINK", r.Upstream, "-"
+		if path == "" {
+			path = "-"
+		}
+	}
 	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), printable(method), printable(r.Host),
 		printable(path), status, printable(creds), fmt.Sprint(r.MS), printable(auditResult(r)))
 	return len(p), nil
