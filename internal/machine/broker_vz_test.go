@@ -67,8 +67,8 @@ func TestVZBrokerPorSocket(t *testing.T) {
 	// del daemon (un PID reciclado por otro programa): nada.
 	e.m.mu.Lock()
 	e.m.byID[web].PID = os.Getpid()
-	e.m.mu.Unlock()
 	e.m.fcBin = "/usr/local/bin/kling-vz"
+	e.m.mu.Unlock()
 	if _, _, err := pedir(); err == nil {
 		t.Fatal("un proceso que no es kling-vz obtuvo una conexión")
 	}
@@ -81,7 +81,9 @@ func TestVZBrokerPorSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.m.mu.Lock()
 	e.m.fcBin = exe
+	e.m.mu.Unlock()
 	tc, resp, err := pedir()
 	if err != nil {
 		t.Fatal(err)

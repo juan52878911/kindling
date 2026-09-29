@@ -204,7 +204,10 @@ func (m *Manager) esKlingVZ(pid int) error {
 	if err != nil {
 		return fmt.Errorf("pid %d: %w", pid, err)
 	}
-	if !mismoEjecutable(ruta, m.fcBin) {
+	m.mu.RLock()
+	bin := m.fcBin // fijo en producción; los tests lo cambian bajo m.mu
+	m.mu.RUnlock()
+	if !mismoEjecutable(ruta, bin) {
 		return fmt.Errorf("pid %d runs %s, not the VMM", pid, ruta)
 	}
 	return nil
