@@ -102,7 +102,7 @@ JSON opaco de hasta 1 MiB. Mismas reglas de nombre que las anotaciones.
 | Ruta | Qué hace |
 |---|---|
 | `GET /images` | lista, con receta y snapshots que salen de cada una |
-| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base` y `llm` (modelos VON, [`von.md`](von.md)) y kindling-mcp instala `mcp` |
+| `POST /images` | construye. Con `builder`, lo hace el ejecutable de root `/usr/local/lib/kindling/builders/<builder>` (o `$KLING_BUILDERS_DIR`) con el `spec` de la petición. `builder` es obligatorio desde v0.6: el núcleo trae `base`, `llm` (modelos VON, [`von.md`](von.md)) y `android` (Redroid + base Debian + dm-verity, todo en Go: [`prototypes/android/docs/constructor.md`](../prototypes/android/docs/constructor.md)), y kindling-mcp instala `mcp` |
 | `GET /images/{name}/recipe` | cómo se construyó |
 | `GET /images/{name}/files?path=/p[&max=N]` | el contenido de un fichero de dentro (1 MiB por defecto, hasta 64) |
 | `GET /images/{name}/files?path=/p&stat=1` | `{exists, size, sha256}` |
@@ -118,7 +118,8 @@ que impide borrarla: un dorado o una máquina que no esté parada que la usen, o
 capas encima; para el kernel, cualquier máquina que no esté parada. La receta de
 una imagen por capas cuenta como la imagen, porque decide su base. Es lo que usa
 `kling image copy` (`api.CopyImage`) para llevar una imagen de un daemon Linux a
-uno de macOS, donde `POST /images` contesta `501`.
+uno de macOS, donde `POST /images` contesta `501` salvo para los constructores
+escritos en Go de punta a punta (hoy `android`), que no montan ni hacen chroot.
 
 **El protocolo del constructor.** El daemon crea un directorio de trabajo, deja
 en él `request.json` y ejecuta `<constructor> <dir>` con `KLING_ROOT`,
@@ -127,7 +128,12 @@ constructor tiene que dejar `$KLING_ROOT/images/<name>.ext4` o
 `<name>.layer.ext4` y salir con 0; su salida vuelve a quien pidió la construcción.
 Tiene que ser de root y nadie más puede escribirlo, ni a él ni a su directorio,
 porque el daemon lo ejecuta como root. La receta la escribe el daemon, con
-permisos `0600` porque el spec puede llevar secretos.
+permisos `0600` porque el spec puede llevar secretos. El constructor puede dejar
+al lado de `request.json` un `recipe.json` (`api.BuildRecipeHints`: `base` si la
+eligió o la hizo él, `cpu_pct`, `cpu_pct_per_vcpu`, `guest_ipv6_stack` y `built`,
+lo que apuntó de lo construido) y el daemon lo lleva a la receta. Los del núcleo
+en Go (`android`) no hace falta instalarlos: si no están en el directorio de
+constructores, el daemon se ejecuta a sí mismo como `kling builder <nombre>`.
 
 ### Volúmenes
 

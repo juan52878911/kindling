@@ -55,15 +55,16 @@ var (
 )
 
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
-	if !construirImagenes {
-		fail(w, http.StatusNotImplemented, errors.New("this daemon can't build images: building needs root, loop "+
-			"devices and chroot on Linux. Build the image on a Linux host and copy it here:\n"+
-			"  kling images copy <name> -from ssh://user@linux-host"))
-		return
-	}
 	var req api.BuildImageRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		fail(w, jsonBodyStatus(err), err)
+		return
+	}
+	if !construirImagenes && !constructoresSinRoot[req.Builder] {
+		fail(w, http.StatusNotImplemented, errors.New("this daemon can't build images: building needs root, loop "+
+			"devices and chroot on Linux (only the builders written in Go, like \"android\", run here). "+
+			"Build the image on a Linux host and copy it here:\n"+
+			"  kling images copy <name> -from ssh://user@linux-host"))
 		return
 	}
 	if req.Builder == "" {

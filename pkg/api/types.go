@@ -964,6 +964,25 @@ type ImageRecipe struct {
 	// externo.
 	Builder string          `json:"builder,omitempty"`
 	Spec    json.RawMessage `json:"spec,omitempty"`
+	// Built es lo que el constructor apuntó de lo que construyó (digests de
+	// lo descargado, la raíz de dm-verity...): BuildRecipeHints.Built.
+	Built json.RawMessage `json:"built,omitempty"`
+}
+
+// BuildRecipeHints es lo que un constructor puede dejar en recipe.json de su
+// directorio de trabajo para que el daemon lo lleve a la receta de la imagen
+// (el resto de la receta lo sigue escribiendo el daemon). Sin el fichero, la
+// receta es la de siempre.
+type BuildRecipeHints struct {
+	// Base es la base de la capa cuando la eligió o la hizo el constructor
+	// (la petición no traía una, o trae el nombre que le dio).
+	Base string `json:"base,omitempty"`
+	// Los techos de CPU y la pila IPv6 del invitado, como en ImageRecipe.
+	CPUPct         int  `json:"cpu_pct,omitempty"`
+	CPUPctPerVCPU  int  `json:"cpu_pct_per_vcpu,omitempty"`
+	GuestIPv6Stack bool `json:"guest_ipv6_stack,omitempty"`
+	// Built va tal cual a ImageRecipe.Built.
+	Built json.RawMessage `json:"built,omitempty"`
 }
 
 // StatusError es un error de la API que conserva el código HTTP.
