@@ -6,6 +6,7 @@ copia de [`kling db`](db.md).
 
 ```sh
 export ANTHROPIC_API_KEY=...            # la clave de la API, solo en el entorno
+# o, sin clave de Anthropic, con opencode (MiniMax): kling db ask ... -provider opencode
 kling db up pg -name t1
 kling db ask t1 "¿cuáles son los 5 clientes que más han gastado este año?"
 kling db ask t1 "pedidos por mes en 2025" -json
@@ -16,7 +17,9 @@ kling db ask t1 "¿hay algo raro en las devoluciones?" -explain -send-data
 |---|---|
 | `-role R` | rol de solo lectura con el que ejecutar (por defecto `kling_db_ro`, que se crea si falta) |
 | `-yes` | ejecuta sin preguntar (la SQL se enseña igual, por stderr) |
-| `-model M` | modelo de Anthropic (por defecto `claude-sonnet-5`) |
+| `-provider P` | `anthropic` u `opencode` (por defecto: `$KLING_DB_ASK_PROVIDER`; si no, `anthropic` si hay `ANTHROPIC_API_KEY`; si no, `opencode` si está instalado; si no, error) |
+| `-model M` | modelo (por defecto `claude-sonnet-5` con anthropic, `minimax-coding-plan/MiniMax-M2.7` con opencode) |
+| `-llm-timeout D` | plazo de la respuesta del modelo con opencode (90 s; de 1 s a 30 min); el proceso se mata entero al vencer |
 | `-limit N` | filas como máximo (200; de 1 a 10000) |
 | `-timeout D` | `statement_timeout` de la consulta (30 s; de 1 s a 10 min) |
 | `-json` | `{"sql", "role", "columns", "rows", "truncated", "summary"}` en stdout |
@@ -25,9 +28,34 @@ kling db ask t1 "¿hay algo raro en las devoluciones?" -explain -send-data
 
 Además, `-H` y `-owner` como el resto de `kling db`.
 
+## Proveedores
+
+- **anthropic**: la API Messages, con `ANTHROPIC_API_KEY`.
+- **opencode**: el CLI [opencode](https://opencode.ai) (se busca en el `PATH` y en
+  `~/.opencode/bin`) hablando con MiniMax u otro modelo que tengas configurado en él
+  (`-model proveedor/modelo`; por defecto `minimax-coding-plan/MiniMax-M2.7`). Se ejecuta
+  como `opencode run --pure -m <modelo> --format json`:
+  - `--pure`, sin plugins; **nunca** `--auto`.
+  - En un directorio temporal nuevo y vacío (0700) que se borra al acabar.
+  - El prompt (instrucciones, esquema y pregunta) va por argumento hasta 100 KiB (lo
+    puede ver con `ps` cualquier usuario del equipo; no lleva secretos) y, si es mayor,
+    en un fichero adjunto de ese directorio.
+  - Solo se aceptan los eventos `text` y `step_start`/`step_finish`. Si opencode intenta
+    usar una herramienta, pide un permiso o falla, `ask` aborta y mata el proceso.
+  - El entorno del proceso es **el tuyo**, sin filtrar: opencode necesita su configuración
+    y sus credenciales. opencode guarda además la sesión (el prompt y la respuesta) en su
+    propio almacén local, como en cualquier otro uso suyo.
+  - De la respuesta se extrae la sentencia (bloque ` ```sql `, o el texto entero); lo
+    dudoso (varias sentencias, texto suelto) lo rechaza `sqlguard`, igual que con
+    Anthropic. Nada de esto relaja los pasos siguientes.
+- **`KLING_DB_ASK_FAKE=<fichero>`, solo para pruebas** (e2e sin red): la respuesta del
+  "modelo" es el contenido del fichero (hasta 64 KiB) y manda sobre `-provider`. No salta
+  ningún control: la SQL pasa por `sqlguard`, el rol de solo lectura y la transacción
+  READ ONLY como cualquier otra.
+
 ## Qué sale de tu máquina y qué no
 
-| sale hacia la API de Anthropic | NO sale nunca |
+| sale hacia el proveedor (la API de Anthropic, o MiniMax a través de opencode) | NO sale nunca |
 |---|---|
 | la pregunta | la contraseña de la copia (ni al modelo, ni a argv, ni a la salida) |
 | el esquema que el rol de solo lectura puede ver: esquemas, tablas y vistas, columnas con su tipo y `NOT NULL`, claves primarias, únicas y foráneas, y los **comentarios** (`COMMENT ON`) de tablas y columnas | los datos de las tablas (salvo con `-explain -send-data`) |
@@ -42,7 +70,11 @@ Además, `-H` y `-owner` como el resto de `kling db`.
   stderr de cuántas filas manda y a quién.
 - La petición va a `https://api.anthropic.com/v1/messages` con la biblioteca estándar de
   Go, sin seguir redirecciones (la cabecera de la clave no saldría hacia otro sitio).
-  La clave se lee de `ANTHROPIC_API_KEY`; sin ella, `ask` falla antes de tocar la copia.
+  La clave se lee de `ANTHROPIC_API_KEY`; sin ella ni opencode, `ask` falla antes de tocar
+  la copia.
+- Con opencode sale lo mismo (esquema y pregunta; filas solo con `-explain -send-data`),
+  pero hacia el servicio que opencode tenga para ese modelo (para MiniMax, el suyo), con
+  las credenciales de opencode: `kling` no las ve ni las toca.
 
 ## Cómo se ejecuta la consulta
 
