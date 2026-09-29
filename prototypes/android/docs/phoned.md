@@ -168,17 +168,29 @@ kling phone token 1 -rotate          # nuevo token de control; los anteriores de
 kling phone api 1 -no-token GET /v1/tree    # lo que ve una arista sin token: 401
 ```
 
-Una arista `link` hacia el 8091 de un teléfono (el nodo `ctl` le pasa el token en
-la cabecera; se lo da el operador, p. ej. `kling phone token tel | kling machine
-secret <ctl>`, que lo deja en el MMDS de `ctl`):
+Una arista `link` hacia el 8091 de un teléfono, probada en Linux (Firecracker, proxy de
+enlace) y en macOS (vz, broker de enlaces). El nodo del dorado nace sin identidad ni
+token; `kling phone adopt` se los da, y el operador le pasa el token a `ctl` (aquí por
+la entrada estándar de `kling exec -i`, nunca en argv):
 
 ```yaml
+name: tg
 nodes:
-  ctl: {image: toolchain, allow_exec: true}
+  ctl: {image: ctl, allow_exec: true}          # Alpine + curl (en el Mac: android13 y bash /dev/tcp)
   tel: {from: phone-golden, ports: [5555, 8091]}
 edges:
   - {from: ctl, to: tel, kind: link, port: 8091}
 ```
+
+| Desde `ctl` por `tel.graph:8091` | Linux | macOS |
+|---|---|---|
+| `GET /v1/health` sin token | 200 | 200 |
+| `GET /v1/tree`, `POST /v1/tap` sin token, antes de `adopt` (API cerrada) | 401 | 401 |
+| tras `kling phone adopt tg-tel`: `tree` sin token / con uno falso / `install` sin token | 401 / 401 / 401 | 401 / 401 / — |
+| con el token de control: `tree`, `key HOME`, `tap` | 200 | 200 |
+| con uno de lectura (`token -read`): `screen` / `tap` | 200 / 403 | 200 / 403 |
+| tras `token -rotate`: el control viejo / el de lectura viejo / el nuevo | 401 / 401 / 200 | — |
+| el proxy del daemon sin la cabecera (`curl --unix-socket`): `tree` / `health` | 401 / 200 | 401 / 200 |
 
 ## Identidad por clon (#92)
 
@@ -283,6 +295,18 @@ depuración): Android sale (`HTTP/1.1 301` de 1.1.1.1, ping a 8.8.8.8, la red de
 Android `IS_VALIDATED`) y no llega a `10.88.0.1:8080/8091`, `172.16.0.2:8080/8091`
 ni `169.254.169.254:80` (timeout: `DROP`).
 
+**#110 y ext/phone** (2026-09-29, `kling phone`, [`ext/phone/README.md`](../../../ext/phone/README.md)):
+`/data` en RAM (`ANDROID_DATA_MODE=tmpfs`) no arrancaba con `kling-phoned`: el loop con
+autoborrado se soltaba al cerrar su descriptor antes del `mount` (`input/output error`
+leyendo el superbloque en cada relanzamiento); ahora se cierra después de montar.
+`verify-cache` en Go recorre 1623 (arm64) y 1711 (amd64) ficheros en 3–10 s; comparaba
+el `st_dev` de cada fichero con el de su directorio y en overlayfs no casa nunca (los
+ficheros de la capa de abajo dan el de esa capa): 0 ficheros. En el Mac cargado,
+`verify-cache` encontró páginas de la caché a ceros en dos arranques en frío seguidos y
+en todos los clones de un dorado que había pasado la comprobación en frío (una página
+de `libart.so`): `kling phone golden build` comprueba también un clon del dorado
+guardado.
+
 Sin romper lo de antes: `test-phone.sh` PASS y `fase0.sh -clones 2` 6/6 en el Mac con
 la imagen nueva (frío 6,2 s, restaurar → dump p50 1,06 s, dump 0,024 s, screencap
 0,31 s, fork 3,9 s); `PHONED=0` sigue construyendo y arrancando (listo en 10,2 s en
@@ -293,8 +317,9 @@ Pendiente:
   SettingsProvider) y que cada clon tiene la suya; no se ha visto a una app pedir su
   `ANDROID_ID` (ninguna de la imagen lo hace y `run-as`/`su <uid> content` no sirven
   en Redroid). Hace falta un APK de prueba mínimo.
-- Una arista de grafo al 8091 funcionaría hoy, sin autenticación (ver el modelo de
-  amenazas): token por arista o puerto de solo lectura antes de usarla.
+- ~~Una arista de grafo al 8091 funcionaría hoy, sin autenticación~~: hecho en #110
+  (token de portador, arriba). Queda que el núcleo reparta el token a los dos extremos de
+  la arista (hoy lo hace el operador con `kling phone token`).
 - La base arm64 construida antes del 28-09 no trae iptables: kling-phoned cae a
   `isolated` (Android sin salida, adb sigue); una base nueva de `build-image.sh` sí.
 

@@ -35,7 +35,7 @@ func manifest() plugin.Manifest {
 		Name:            "phone",
 		Version:         strings.TrimPrefix(Version, "v"),
 		// run -wait-ready, POST /hooks y la marca de secretos que se levanta.
-		MinKling:  "0.16.0",
+		MinKling:  "0.17.0",
 		Summary:   "Android phones in microVMs: identity per clone, a screen wall and an MCP server",
 		HelpGroup: "SERVE",
 		Commands: []plugin.Command{

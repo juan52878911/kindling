@@ -17,7 +17,10 @@ extensión instalada. Promover uno a primer nivel (`kling connect`) es explícit
 como ella (`kling hello`) es de primer nivel sin decir nada.
 
 Las extensiones oficiales viven en este mismo repositorio y salen en cada
-release: `kling plugin install mcp` y `kling plugin install sandbox`. Este
+release: `kling plugin install mcp` y `kling plugin install sandbox`. `ext/db`
+(`kling db`) y `ext/phone` (`kling phone`, teléfonos Android:
+[`ext/phone/README.md`](../ext/phone/README.md)) viven aquí también, aún fuera de
+la release (`make -C ext/phone install` la deja en el directorio de extensiones). Este
 documento enseña a escribir otra; el ejemplo es
 [`examples/hello-extension`](../examples/hello-extension). (La demo de
 domótica de [`examples/domotica`](../examples/domotica) ya no es una extensión:
