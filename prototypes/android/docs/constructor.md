@@ -98,11 +98,11 @@ dos arrancan con la tabla del constructor: `/v1/health` de kling-phoned da
 
 | | Mac M4 (vz, arm64) | `phones` (x86_64, Firecracker, amd64) |
 |---|---|---|
-| construir, caché caliente | 21 s (capa ~15 s, verity 1,4 s, base 2,9 s) | 57 s (con 28 `.deb` bajados y reintentos de TLS) |
+| construir, caché caliente | 15–21 s (capa ~12 s, verity 1,4 s, base 1,7–2,9 s) | 57 s (con 28 `.deb` bajados y reintentos de TLS) |
 | construir, caché fría | ~1,5 min (610 MiB de Redroid, ~25 s) | — (blob enlazado del de `build-image.sh`) |
 | capa (PHONED=1, /data en overlay) | 1 419 MiB: 1 397 de ext4 + 22 de árbol y FEC | 1 591 MiB |
 | base | 157 MiB (94 MiB reales) | 129 MiB (97 MiB reales) |
-| arranque en frío hasta listo (`-wait-ready`) | 9,1 s | 16,3 s |
+| arranque en frío hasta listo (`-wait-ready`) | 7,3–9,1 s | 16,3 s |
 
 (Referencia: la base de `build-image.sh` son 186 MiB, la capa 2 560 MiB de
 fichero con 1,4 GiB usados.)
