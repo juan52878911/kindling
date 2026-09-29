@@ -1132,6 +1132,31 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     || bad "doctor con superusuario" "problemas > 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
   dbsql "$DBU" "DROP ROLE e2e_super" >/dev/null
 
+  # tenant-check: una política "tipo AuraCRM" (sin inquilino deja ver todo) falla con
+  # salida != 0 y nombra la rama IS NULL; corregida, pasa. Nunca imprime valores de inquilino.
+  dbsql "$DBU" "CREATE TABLE e2e_tc(id serial PRIMARY KEY, tenant_id text NOT NULL);
+    INSERT INTO e2e_tc(tenant_id) VALUES ('e2e-inquilino-uno'), ('e2e-inquilino-uno'), ('e2e-inquilino-dos');
+    GRANT SELECT, INSERT, UPDATE ON e2e_tc TO app; GRANT USAGE ON SEQUENCE e2e_tc_id_seq TO app;
+    ALTER TABLE e2e_tc ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY e2e_tc_p ON e2e_tc USING (current_setting('app.tenant_id', true) IS NULL
+      OR current_setting('app.tenant_id', true) = '' OR tenant_id = current_setting('app.tenant_id', true))" >/dev/null
+  out=$(dbk tenant-check "$DBU"); rc=$?
+  { [ "$rc" != 0 ] && contiene "$out" "fail-open in USING" && contiene "$out" "e2e_tc"; } \
+    && ok "tenant-check: la política fail-open falla (salida $rc) y la señala" \
+    || bad "tenant-check fail-open" "salida != 0 y 'fail-open in USING'" "rc=$rc $(printf '%s' "$out" | tail -5)"
+  contiene "$out" "e2e-inquilino" && bad "tenant-check sin datos" "sin valores de inquilino" "$(printf '%s' "$out" | grep e2e-inquilino | head -2)"
+  out=$(dbk tenant-check "$DBU" -json); rc=$?
+  { [ "$rc" != 0 ] && contiene "$out" '"pass": false'; } && ok "tenant-check -json: pass false" \
+    || bad "tenant-check -json" '"pass": false' "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "DROP POLICY e2e_tc_p ON e2e_tc;
+    CREATE POLICY e2e_tc_p ON e2e_tc USING (tenant_id = current_setting('app.tenant_id', true))" >/dev/null
+  out=$(dbk tenant-check "$DBU"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "0 failed check(s), 0 error(s)"; } && ok "tenant-check: con la política corregida pasa" \
+    || bad "tenant-check correcta" "salida 0" "rc=$rc $(printf '%s' "$out" | tail -5)"
+  n=$(dbsql "$DBU" "SELECT count(*) FROM e2e_tc")
+  [ "$n" = 3 ] && ok "tenant-check no cambió los datos (las escrituras se deshacen)" || bad "datos tras tenant-check" 3 "$n"
+  dbsql "$DBU" "DROP TABLE e2e_tc" >/dev/null
+
   # audit: muestra conexiones y no lleva ni la clave ni SQL.
   command -v psql >/dev/null && dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
   out=$(dbk audit "$DBU" -since 1h)

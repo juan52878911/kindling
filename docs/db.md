@@ -36,6 +36,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
 | `snapshot [-rm] <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]` | puntos de restauración de una copia viva y vuelta a uno de ellos (mismo nombre y dueño, clave nueva) |
 | `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
+| `tenant-check <copia> [-role R] [-column tenant_id] [-setting app.tenant_id] [-max 5] [-json]` | prueba que cada inquilino solo ve sus filas y que sin inquilino no ve ninguna; sale con 1 si algo falla. Ver [Aislamiento entre inquilinos](#aislamiento-entre-inquilinos-tenant-check) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
 | `ask <copia> "pregunta" [-role R] [-yes] [-explain -send-data]` | un modelo traduce la pregunta a una SQL que se enseña, se confirma y se ejecuta con un rol de solo lectura en una transacción READ ONLY; ver [db-ask.md](db-ask.md) |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
@@ -81,6 +82,90 @@ también en las futuras del rol de la aplicación (`ALTER DEFAULT PRIVILEGES`). 
   palabras reservadas. `-rm` solo toca roles que creó este comando (comentario
   `kling-db:ro`).
 - `kling db connect <copia> -role agent` usa esa clave. `kling db rm` se lleva todas.
+
+## Aislamiento entre inquilinos (tenant-check)
+
+`doctor` lee las políticas RLS; `kling db tenant-check <copia>` las **ejercita**. Nace del
+fallo real de AuraCRM: una política como
+
+```sql
+USING (current_setting('app.tenant_id', true) IS NULL
+       OR current_setting('app.tenant_id', true) = ''
+       OR tenant_id = current_setting('app.tenant_id', true)::uuid)
+```
+
+es correcta con el inquilino fijado, pero una conexión que olvida el `SET` ve a todos.
+
+Qué hace, todo dentro de la copia (`kling exec` + psql por stdin):
+
+1. Como superusuario, descubre las tablas con la columna de inquilino (`-column`, por
+   defecto `tenant_id`; se excluyen las de extensiones y las particiones), sus
+   políticas, si RLS está activa o forzada, si el rol es su dueño y sus privilegios.
+2. En una sola sesión guarda en una tabla temporal los primeros `-max` valores de
+   inquilino (5; hasta 100) y, como el rol de la aplicación (el de la copia, o `-role`),
+   prueba cada tabla en cada escenario: la variable (`-setting`, por defecto
+   `app.tenant_id`) **sin fijar**, **a `''`** y fijada a **cada inquilino**:
+   - `select`: cuántas filas ve y cuántas son de otro inquilino. Sin inquilino debe ser
+     0 (o un error: falla cerrada); con inquilino, ninguna ajena.
+   - `insert-other`: copia una fila visible con el inquilino cambiado por otro de la
+     misma tabla; `move-to-other`: mueve una fila suya a otro inquilino;
+     `update-others`: toca las filas de otros. Cada una en `BEGIN ... ROLLBACK`; debe
+     rechazarla la política (`42501`). Si lo que la para es una restricción (clase `23`,
+     p. ej. la clave primaria), la política la dejó pasar: Postgres comprueba el `WITH
+     CHECK` antes que las restricciones, así que cuenta como fallo.
+3. Informe por tabla (`PASS`/`FAIL`/`ERROR`) con las pruebas que fallan, el porqué
+   (RLS apagada, el rol es dueño sin `FORCE ROW LEVEL SECURITY`, rol `SUPERUSER` o
+   `BYPASSRLS`, y la política culpable con la regla fail-open de `doctor`: "fail-open
+   in USING: `<tenant setting> IS NULL` is true when the setting is missing") y el
+   arreglo. `-json` da el informe entero. Sale con **1** si hay algún fallo o error:
+
+```console
+$ kling db tenant-check crm-1
+kling db tenant-check: crm-1 (database appdb, role app, column tenant_id, setting app.tenant_id)
+  tenants tested: 3 (-max 5)
+  FAIL   public.accounts  (RLS on, 1 policy)
+         fail  no tenant (setting unset): SELECT sees 4 row(s) with no tenant set
+         fail  no tenant (setting unset): INSERT of a row for another tenant passed row level security; only a constraint stopped it (23505)
+         fail  no tenant (setting unset): UPDATE moving a row to another tenant succeeded (1 row(s), rolled back)
+         fail  no tenant (setting unset): UPDATE of rows with no tenant set succeeded (4 row(s), rolled back)
+         why:  policy "tenant_isolation" (permissive, ALL): fail-open in USING: <tenant setting> IS NULL is true when the setting is missing, so with no tenant set every row passes
+         fix:  make the policy fail closed: current_setting('<var>') without missing_ok (errors when unset), or compare only tenant_id = current_setting(...) with no IS NULL / '' / COALESCE escape
+  PASS   public.contacts  (RLS on, 1 policy)
+summary: 2 table(s), 1 not passing; 4 failed check(s), 0 error(s), 2 skipped
+```
+
+(Con esa política exacta, el caso `''` falla cerrado en Postgres 16: el `''::uuid` da
+error antes de que la rama `= ''` abra la puerta. Lo que cuenta es lo que hace la base,
+no lo que parece la expresión.)
+
+Garantías:
+
+- **Los valores de inquilino no salen de la base.** La sesión los lee de su tabla
+  temporal con `set_config(..., v, false)`; no pasan por el host ni se interpolan en la
+  SQL. Tampoco se imprime ninguna fila: solo recuentos y SQLSTATE (`\set VERBOSITY
+  sqlstate`: los errores no citan valores).
+- Los nombres de tablas y columnas van citados como identificadores; los que tienen
+  caracteres de control no se prueban (`ERROR`). `-role`, `-column` y `-setting` pasan
+  por un patrón antes de escribirse en la SQL.
+- Las escrituras se deshacen siempre (`ROLLBACK`); `statement_timeout` 60 s y
+  `lock_timeout` 5 s. Es una copia: los efectos fuera de la transacción de un trigger
+  (`NOTIFY`, `dblink`) no se deshacen.
+
+Límites:
+
+- Usa `SET ROLE`, no un login: las políticas ven `current_user` = el rol, pero
+  `session_user` es `postgres` y no se aplican los `ALTER ROLE ... SET` del rol.
+- Si la variable ya tiene valor al abrir la sesión (`ALTER DATABASE ... SET`,
+  `postgresql.conf`), el caso "sin fijar" prueba ese valor y el informe lo avisa.
+- Los valores de inquilino se toman de todas las tablas: uno que no cabe en el cast de
+  la política de otra tabla (un `int` frente a un `uuid`) da `skip` ("inconclusive"), no
+  fallo. Sin otro valor de inquilino en la tabla, las escrituras no se prueban.
+
+En CI, después de `kling db up` y las migraciones:
+
+```sh
+kling db tenant-check "$COPY" -json > tenant-check.json   # salida 1 si hay fugas
+```
 
 ## Plantillas
 

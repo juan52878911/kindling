@@ -64,6 +64,9 @@ func TestUsoIncorrecto(t *testing.T) {
 		{"doctor"},
 		{"doctor", "c", "-url", "postgres://x"},
 		{"audit", "c", "-since", "-1h"},
+		{"tenant-check"},
+		{"tenant-check", "c", "-max", "0"},
+		{"tenant-check", "c", "-setting", "tenant"},
 		{"golden"},
 		{"up", "-nope"},
 	} {

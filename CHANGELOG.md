@@ -83,6 +83,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   corta las sesiones abiertas. Nuevo `DELETE /machines/{ref}/credentials/{env}` y
   `kling machine credential -rm`; capacidad `db-attach`. En macOS se rechaza con un error
   claro. Ver [`docs/db.md`](docs/db.md).
+- **`kling db tenant-check <copia>`: prueba de aislamiento entre inquilinos.** Nace del
+  fallo de AuraCRM (políticas RLS con una rama `IS NULL OR = ''` que, sin inquilino,
+  dejan ver todo). Dentro de la copia descubre las tablas con la columna de inquilino
+  (`-column`, `tenant_id`), toma hasta `-max` valores (5) y, como el rol de la
+  aplicación (`-role`, con `SET ROLE`), comprueba que sin inquilino (variable sin fijar y
+  a `''`, `-setting app.tenant_id`) no ve ninguna fila y que cada inquilino solo ve las
+  suyas; además intenta escribir filas de otro inquilino (INSERT, mover una suya, UPDATE
+  de las ajenas) en transacciones que se deshacen. Informe por tabla con la política
+  culpable y el porqué (las reglas de `doctor`), `-json` y salida 1 si algo falla, para
+  CI. Los valores de inquilino nunca salen de la base ni se escriben en la SQL, y solo
+  se imprimen recuentos. Ver [`docs/db.md`](docs/db.md#aislamiento-entre-inquilinos-tenant-check).
 - **`kling db` en CI.** Scripts (`ext/db/scripts/ci-load.sh`, `ci-pr-db.sh`) y ejemplos de
   GitHub Actions y GitLab CI para una base por PR. Ver [`docs/db-ci.md`](docs/db-ci.md).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
