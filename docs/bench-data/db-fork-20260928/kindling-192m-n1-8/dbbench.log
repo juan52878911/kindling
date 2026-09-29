@@ -1,0 +1,7 @@
+kindling-run N=1 rep 1: ok ok=1 failed=0 p50=1744.6ms max=1744.6ms
+kindling-run N=1 rep 2: ok ok=1 failed=0 p50=191.1ms max=191.1ms
+kindling-run N=1 rep 3: ok ok=1 failed=0 p50=192.1ms max=192.1ms
+kindling-run N=8 rep 1: ok ok=8 failed=0 p50=1181.2ms max=1352.0ms
+kindling-run N=8 rep 2: ok ok=8 failed=0 p50=1251.5ms max=1324.5ms
+kindling-run N=8 rep 3: ok ok=8 failed=0 p50=1031.8ms max=1294.9ms
+kindling-run N=32: skipped: N=32 × 192 MiB = 6144 MiB > 70% of MemAvailable 8053 MiB

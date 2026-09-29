@@ -21,6 +21,13 @@ las que entran esperan su turno de arranque. Para 32 copias en este host el gold
 configurarse a ~200 MiB (`mem_mib` es el límite de densidad, no el consumo real). Sin medir
 aún con esa configuración.
 
+**Con el golden configurado a 192 MiB** (`kindling-192m*/`): 1 copia en **191 ms**
+(p50; la primera en frío 1,7 s), 8 copias 1 032 – 1 252 ms, y **32 copias: 96/96 listas**
+en las tres rondas, ~19 MiB de RAM real por copia. Pero la latencia crece de ronda en
+ronda (p50 6,0 s → 9,9 s → 15,0 s): cada ronda escribe 32 copias completas del overlay
+(~6,7 GiB en ext4), y ese es el cuello de botella a esta escala. Con reflink desaparecería;
+sin medir.
+
 Resto de celdas de 32 copias: kindling y docker quedan `skipped` por la regla de
 RAM/disco del banco; `TEMPLATE` con 32 llena el disco (desde PG 15 la copia pasa por el
 WAL) y el servidor muere, así que su fila `DEGRADED` no es un resultado de Postgres.
