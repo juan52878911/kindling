@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -104,5 +105,124 @@ func TestBindDelAlmacenEnElJail(t *testing.T) {
 	}
 	if b, err := os.ReadFile(overlay); err != nil || string(b) != "disco" {
 		t.Fatalf("borrar el jail se llevó el overlay del almacén: %q %v", b, err)
+	}
+}
+
+// Un almacén existente conserva su tipo: el fichero de imagen lo dice.
+func TestFSDelAlmacenExistente(t *testing.T) {
+	for _, c := range []struct{ img, fs string }{{"cow.xfs", "xfs"}, {"cow.btrfs", "btrfs"}} {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, c.img), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fs, err := fsDelAlmacen(root)
+		if err != nil || fs != c.fs {
+			t.Errorf("%s: %q %v", c.img, fs, err)
+		}
+		a := nuevoAlmacen(root, &Privileges{})
+		if a.fs != c.fs || filepath.Base(a.img) != c.img || !a.existe() {
+			t.Errorf("%s: almacén %s en %s", c.img, a.fs, a.img)
+		}
+	}
+}
+
+// Btrfs se formatea sin discard, con datos y metadatos single, y se monta sin
+// discard: un discard agujerearía el fichero reservado. Los dos, sin
+// dispositivos, suid ni ejecutables.
+func TestArgsYOpcionesBtrfs(t *testing.T) {
+	args := strings.Join(argsMkfs("btrfs"), " ")
+	for _, w := range []string{"-K", "-m single", "-d single", "-L kling-cow"} {
+		if !strings.Contains(args, w) {
+			t.Errorf("mkfs.btrfs sin %q: %s", w, args)
+		}
+	}
+	if args := strings.Join(argsMkfs("xfs"), " "); !strings.Contains(args, "reflink=1") {
+		t.Errorf("mkfs.xfs sin reflink: %s", args)
+	}
+	for _, fs := range []string{"xfs", "btrfs"} {
+		o := opcionesMontaje(fs)
+		for _, w := range []string{"loop", "nodev", "nosuid", "noexec"} {
+			if !strings.Contains(o, w) {
+				t.Errorf("%s: montaje sin %s: %s", fs, w, o)
+			}
+		}
+	}
+	if !strings.Contains(opcionesMontaje("btrfs"), "nodiscard") {
+		t.Error("btrfs se monta con discard")
+	}
+}
+
+// El almacén Btrfs de verdad (root, KLING_TEST_MOUNTS=1, btrfs en el núcleo y
+// btrfs-progs): se crea reservado, se monta con sus opciones y clona
+// instancias de verdad desde la base.
+func TestAlmacenBtrfsDeVerdad(t *testing.T) {
+	if os.Geteuid() != 0 || os.Getenv("KLING_TEST_MOUNTS") != "1" {
+		t.Skip("needs root and KLING_TEST_MOUNTS=1")
+	}
+	if b, _ := os.ReadFile("/proc/filesystems"); !soportados(string(b))["btrfs"] || buscarE2fs("mkfs.btrfs") == "" {
+		t.Skip("needs btrfs in the kernel and mkfs.btrfs")
+	}
+	root := t.TempDir()
+	a := nuevoAlmacen(root, &Privileges{})
+	// Forzado a Btrfs aunque el núcleo tenga XFS: es lo que se prueba.
+	a.fs, a.img, a.errFS = "btrfs", filepath.Join(a.root, "cow.btrfs"), nil
+	a.estaMontado = func(dir string) (bool, error) { return estaMontadoTipo(dir, "btrfs") }
+	a.crear = func(ctx context.Context, img string, bytes int64) error {
+		return crearImagenAlmacen(ctx, "btrfs", img, bytes)
+	}
+	a.montar = func(ctx context.Context, img, dir string) error {
+		return montarLoopAlmacen(ctx, "btrfs", img, dir)
+	}
+	t.Cleanup(func() { _ = syscall.Unmount(a.dir, syscall.MNT_DETACH) })
+
+	src := filepath.Join(root, "dorado.ext4")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(512 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("disco de verdad"), 100<<20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ruta, err := a.clonarInstancia(context.Background(), "d", src, "id1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := estaMontadoTipo(a.dir, "btrfs"); !ok || err != nil {
+		t.Fatalf("montado como btrfs: %v %v", ok, err)
+	}
+	// Reservado entero: ni mkfs ni el montaje lo agujerearon.
+	var st syscall.Stat_t
+	if err := syscall.Stat(a.img, &st); err != nil {
+		t.Fatal(err)
+	}
+	if ocupa := int64(st.Blocks) * 512; ocupa < st.Size {
+		t.Errorf("la imagen ocupa %d de %d MiB: no está reservada entera", ocupa>>20, st.Size>>20)
+	}
+	g, err := os.Open(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	b := make([]byte, 15)
+	if _, err := g.ReadAt(b, 100<<20); err != nil || string(b) != "disco de verdad" {
+		t.Errorf("la instancia lee %q %v", b, err)
+	}
+	// Una segunda instancia de la misma base, también por FICLONE.
+	if _, err := a.clonarInstancia(context.Background(), "d", src, "id2", 1); err != nil {
+		t.Fatal(err)
+	}
+	if s := a.info(); s == nil || !s.Mounted || s.FS != "btrfs" || s.SizeMiB == 0 {
+		t.Errorf("info: %+v", s)
+	}
+	mi, _ := os.ReadFile("/proc/self/mountinfo")
+	for _, l := range strings.Split(string(mi), "\n") {
+		if strings.Contains(l, " "+a.dir+" ") && strings.Contains(l, "discard") && !strings.Contains(l, "nodiscard") {
+			t.Errorf("montado con discard: %s", l)
+		}
 	}
 }

@@ -649,7 +649,8 @@ type CoWInfo struct {
 	// Setting es lo configurado: "auto", "reflink-store" u "off".
 	Setting string `json:"setting"`
 	// Mode es lo que se hace de verdad: "reflink" (el sistema de ficheros de
-	// la raíz comparte bloques), "store" (almacén XFS propio con reflink),
+	// la raíz comparte bloques), "store" (almacén propio con reflink, XFS o
+	// Btrfs),
 	// "clonefile" (APFS, macOS) o "copy" (copia completa, dispersa).
 	Mode string `json:"mode"`
 	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
@@ -664,7 +665,10 @@ type CoWInfo struct {
 
 // CoWStore es el estado del almacén propio de discos.
 type CoWStore struct {
-	Path    string `json:"path"`
+	Path string `json:"path"`
+	// FS es el sistema de ficheros del almacén: "xfs" o "btrfs". Vacío en un
+	// daemon anterior (siempre XFS).
+	FS      string `json:"fs,omitempty"`
 	Mounted bool   `json:"mounted"`
 	SizeMiB int64  `json:"size_mib,omitempty"`
 	FreeMiB int64  `json:"free_mib,omitempty"`

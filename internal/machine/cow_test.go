@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -86,6 +87,70 @@ func TestParsearMountinfo(t *testing.T) {
 	}
 }
 
+// El almacén nuevo es XFS si el núcleo lo tiene y hay mkfs.xfs; si no, Btrfs
+// (el caso del laboratorio: Proxmox en LXC, sin módulo xfs, con btrfs).
+func TestElegirFSAlmacen(t *testing.T) {
+	const conXFS = "nodev\tsysfs\nnodev\ttmpfs\n\text4\n\txfs\n\tbtrfs\n"
+	const sinXFS = "nodev\tsysfs\n\text4\n\tbtrfs\n"
+	const ninguno = "nodev\tsysfs\n\text4\n"
+	hay := func(bins ...string) func(string) bool {
+		return func(b string) bool { return slices.Contains(bins, b) }
+	}
+	casos := []struct {
+		nombre string
+		fs     string
+		mkfs   func(string) bool
+		quiero string
+		errCon string
+	}{
+		{"los dos", conXFS, hay("mkfs.xfs", "mkfs.btrfs"), "xfs", ""},
+		{"xfs sin xfsprogs", conXFS, hay("mkfs.btrfs"), "btrfs", ""},
+		{"laboratorio LXC", sinXFS, hay("mkfs.xfs", "mkfs.btrfs"), "btrfs", ""},
+		{"módulos sin cargar", ninguno, hay("mkfs.xfs", "mkfs.btrfs"), "xfs", ""},
+		{"módulos sin cargar, solo btrfs-progs", ninguno, hay("mkfs.btrfs"), "btrfs", ""},
+		{"sin btrfs-progs", sinXFS, hay("mkfs.xfs"), "", "mkfs.btrfs not found (install btrfs-progs)"},
+		{"sin nada", ninguno, hay(), "", "install xfsprogs"},
+		{"sin ningún mkfs", conXFS, hay(), "", "mkfs.xfs not found (install xfsprogs); mkfs.btrfs not found (install btrfs-progs)"},
+	}
+	for _, c := range casos {
+		fs, err := elegirFSAlmacen(c.fs, c.mkfs)
+		if fs != c.quiero {
+			t.Errorf("%s: %q, quería %q", c.nombre, fs, c.quiero)
+		}
+		if c.errCon == "" && err != nil {
+			t.Errorf("%s: %v", c.nombre, err)
+		}
+		if c.errCon != "" && (err == nil || !strings.Contains(err.Error(), c.errCon)) {
+			t.Errorf("%s: error %v, quería que dijera %q", c.nombre, err, c.errCon)
+		}
+	}
+	if imgAlmacen("xfs") != "cow.xfs" || imgAlmacen("btrfs") != "cow.btrfs" {
+		t.Error("los nombres de imagen cambiaron: los almacenes existentes dejarían de encontrarse")
+	}
+}
+
+// El montaje visible sobre el directorio del almacén tiene que ser de su tipo.
+func TestMontadoConTipo(t *testing.T) {
+	ms := []montaje{
+		{"/", "ext4"},
+		{"/var/lib/kindling/cow", "btrfs"},
+		{"/otra", "xfs"},
+		{"/otra", "tmpfs"}, // montado encima: es el visible
+	}
+	if ok, err := montadoConTipo(ms, "/var/lib/kindling/cow", "btrfs"); !ok || err != nil {
+		t.Errorf("btrfs: %v %v", ok, err)
+	}
+	if ok, err := montadoConTipo(ms, "/var/lib/kindling/cow", "xfs"); ok || err == nil {
+		t.Errorf("un btrfs no es el almacén XFS: %v %v", ok, err)
+	}
+	if ok, err := montadoConTipo(ms, "/otra", "xfs"); ok || err == nil {
+		t.Errorf("un tmpfs encima tapa el XFS: %v %v", ok, err)
+	}
+	if ok, err := montadoConTipo(ms, "/nada", "xfs"); ok || err != nil {
+		t.Errorf("sin montar: %v %v", ok, err)
+	}
+}
+
 func TestNombreSeguro(t *testing.T) {
 	for _, n := range []string{"", ".", "..", "../x", "a/b", ".tmp-x", "a\\b"} {
 		if nombreSeguro(n) == nil {
@@ -129,7 +194,7 @@ func nuevoAlmacenFalso(t *testing.T, root string, f *almacenFalso) *almacenCoW {
 		return err
 	}
 	return &almacenCoW{
-		root: root, img: filepath.Join(root, "cow.xfs"), dir: filepath.Join(root, "cow"),
+		root: root, fs: "btrfs", img: filepath.Join(root, "cow.btrfs"), dir: filepath.Join(root, "cow"),
 		estaMontado: func(string) (bool, error) { return f.montado, nil },
 		crear: func(_ context.Context, img string, _ int64) error {
 			f.creados.Add(1)
@@ -366,6 +431,10 @@ func TestClonarOverlayInstanciaModos(t *testing.T) {
 	info := m2.CoWInfo()
 	if info.Mode != cowModoCopy || info.Clones[cowModoCopy] != 1 || !strings.Contains(info.Reason, "store unavailable") {
 		t.Errorf("info: %+v", info)
+	}
+	// El almacén existe (se creó antes de fallar al clonar) y dice su tipo.
+	if info.Store == nil || info.Store.FS != "btrfs" {
+		t.Errorf("info.Store: %+v", info.Store)
 	}
 }
 

@@ -3,7 +3,8 @@
 package machine
 
 // Lo que toca el sistema en las copias de disco (ver cow.go): FICLONE, el
-// almacén XFS por loop y los binds de su directorio dentro del jail. Linux.
+// almacén XFS o Btrfs por loop y los binds de su directorio dentro del jail.
+// Linux.
 
 import (
 	"context"
@@ -80,12 +81,18 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 	// mountinfo da rutas absolutas y sin enlaces: con una raíz relativa o con
 	// symlinks la comparación textual del punto de montaje nunca coincidiría.
 	root = rutaCanonica(root)
+	fs, errFS := fsDelAlmacen(root)
 	return &almacenCoW{
-		root: root, img: filepath.Join(root, "cow.xfs"), dir: filepath.Join(root, "cow"), priv: priv,
-		estaMontado: estaMontadoXFS,
-		crear:       crearImagenXFS,
-		montar:      montarLoopXFS,
-		clonar:      clonarFichero,
+		root: root, fs: fs, img: filepath.Join(root, imgAlmacen(fs)), dir: filepath.Join(root, "cow"), priv: priv,
+		errFS:       errFS,
+		estaMontado: func(dir string) (bool, error) { return estaMontadoTipo(dir, fs) },
+		crear: func(ctx context.Context, img string, bytes int64) error {
+			return crearImagenAlmacen(ctx, fs, img, bytes)
+		},
+		montar: func(ctx context.Context, img, dir string) error {
+			return montarLoopAlmacen(ctx, fs, img, dir)
+		},
+		clonar: clonarFichero,
 		copiar: func(ctx context.Context, src, dst string) error {
 			if out, err := copiarDisco(ctx, src, dst); err != nil {
 				return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
@@ -94,6 +101,25 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 		},
 		libreEn: libreEnDir,
 	}
+}
+
+// fsDelAlmacen es el sistema de ficheros del almacén de root: el del que ya
+// existe (un almacén no cambia de tipo; si hubiera los dos, manda el XFS,
+// que es el que eligiría auto) o, para uno nuevo, el que elige
+// elegirFSAlmacen en este núcleo. Con error, "xfs": el almacén no se crea
+// (puedeAlmacen devuelve ese error) y los mensajes hablan del de siempre.
+func fsDelAlmacen(root string) (string, error) {
+	for _, c := range fsAlmacen {
+		if _, err := os.Lstat(filepath.Join(root, c.img)); err == nil {
+			return c.fs, nil
+		}
+	}
+	b, _ := os.ReadFile("/proc/filesystems")
+	fs, err := elegirFSAlmacen(string(b), func(mkfs string) bool { return buscarE2fs(mkfs) != "" })
+	if err != nil {
+		return "xfs", err
+	}
+	return fs, nil
 }
 
 // detectarCoW decide el modo en este host (ver decidirCoW).
@@ -115,23 +141,27 @@ func (m *Manager) detectarCoW(cfg CoWConfig) (string, string) {
 		errAlm = m.alm.asegurarMontado(context.Background())
 		m.alm.mu.Unlock()
 	default:
-		errAlm = puedeAlmacen()
+		errAlm = puedeAlmacen(m.alm)
 	}
 	return decidirCoW(cfg.Mode, nativo, errAlm)
 }
 
-// puedeAlmacen comprueba lo que hace falta para crear el almacén: root, loop
-// y mkfs.xfs. Que el núcleo sepa montar XFS solo se sabe montando: si no,
-// el primer run -from lo descubre y el daemon vuelve a copiar (con aviso).
-func puedeAlmacen() error {
+// puedeAlmacen comprueba lo que hace falta para crear el almacén: root, loop,
+// un sistema de ficheros con reflink y su mkfs (ver fsDelAlmacen). Que el
+// núcleo sepa montarlo del todo solo se sabe montando: si no, el primer run
+// -from lo descubre y el daemon vuelve a copiar (con aviso).
+func puedeAlmacen(a *almacenCoW) error {
 	if os.Geteuid() != 0 {
 		return errors.New("the store needs the daemon to run as root")
 	}
 	if _, err := os.Stat("/dev/loop-control"); err != nil {
 		return errors.New("no loop devices (/dev/loop-control)")
 	}
-	if buscarE2fs("mkfs.xfs") == "" {
-		return errors.New("mkfs.xfs not found (install xfsprogs)")
+	if a.errFS != nil {
+		return a.errFS
+	}
+	if mkfs := mkfsAlmacen(a.fs); buscarE2fs(mkfs) == "" {
+		return fmt.Errorf("%s not found (install %s)", mkfs, paqueteAlmacen(a.fs))
 	}
 	if _, err := exec.LookPath("mount"); err != nil {
 		if _, err := os.Stat("/bin/mount"); err != nil {
@@ -141,13 +171,63 @@ func puedeAlmacen() error {
 	return nil
 }
 
-// crearImagenXFS reserva el fichero entero (fallocate: sin sobreasignar, ver
-// tamAlmacen) y lo formatea XFS con reflink. Se hace en un temporal y se
-// renombra: un cow.xfs a medias no puede quedar con su nombre.
-func crearImagenXFS(ctx context.Context, img string, bytes int64) error {
-	mkfs := buscarE2fs("mkfs.xfs")
+// argsMkfs son los argumentos del formateo de cada tipo, sin el fichero.
+//
+//   - XFS: reflink=1 (el defecto desde xfsprogs 5.1, pero uno más viejo no
+//     clonaría).
+//   - Btrfs: un solo dispositivo, así que datos y metadatos "single" (DUP
+//     duplicaría los metadatos en el mismo fichero sin proteger de nada que el
+//     disco de debajo no cubra ya). Sin modo mixto: el almacén mide al menos
+//     1 GiB (tamAlmacen), y mixto es para los de menos. -K (sin discard): un
+//     discard sobre el fichero lo agujerearía y perdería la reserva.
+func argsMkfs(fs string) []string {
+	switch fs {
+	case "btrfs":
+		return []string{"-q", "-K", "-m", "single", "-d", "single", "-L", "kling-cow"}
+	}
+	return []string{"-q", "-m", "reflink=1", "-L", "kling-cow"}
+}
+
+// opcionesMontaje son las del montaje por loop de cada tipo. nodev, nosuid y
+// noexec: dentro solo hay discos de microVM, que ningún proceso del anfitrión
+// tiene por qué ejecutar. Btrfs además con nodiscard: desde Linux 6.2 monta
+// con discard=async si el dispositivo lo admite, y un loop lo admite
+// agujereando el fichero de debajo; el almacén dejaría de estar reservado y
+// podría quedarse sin sitio debajo (ver tamAlmacen).
+func opcionesMontaje(fs string) string {
+	o := "loop,nodev,nosuid,noexec"
+	if fs == "btrfs" {
+		o += ",nodiscard"
+	}
+	return o
+}
+
+func mkfsAlmacen(fs string) string {
+	for _, c := range fsAlmacen {
+		if c.fs == fs {
+			return c.mkfs
+		}
+	}
+	return "mkfs." + fs
+}
+
+func paqueteAlmacen(fs string) string {
+	for _, c := range fsAlmacen {
+		if c.fs == fs {
+			return c.paquete
+		}
+	}
+	return fs
+}
+
+// crearImagenAlmacen reserva el fichero entero (fallocate: sin sobreasignar,
+// ver tamAlmacen) y lo formatea (argsMkfs). Se hace en un temporal y se
+// renombra: una imagen a medias no puede quedar con su nombre.
+func crearImagenAlmacen(ctx context.Context, fs, img string, bytes int64) error {
+	nombre := mkfsAlmacen(fs)
+	mkfs := buscarE2fs(nombre)
 	if mkfs == "" {
-		return errors.New("mkfs.xfs not found (install xfsprogs)")
+		return fmt.Errorf("%s not found (install %s)", nombre, paqueteAlmacen(fs))
 	}
 	tmp := img + ".tmp"
 	_ = os.Remove(tmp)
@@ -164,10 +244,10 @@ func crearImagenXFS(ctx context.Context, img string, bytes int64) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	out, err := exec.CommandContext(ctx, mkfs, "-q", "-m", "reflink=1", "-L", "kling-cow", tmp).CombinedOutput()
+	out, err := exec.CommandContext(ctx, mkfs, append(argsMkfs(fs), tmp)...).CombinedOutput()
 	if err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("mkfs.xfs: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s: %v: %s", nombre, err, strings.TrimSpace(string(out)))
 	}
 	if err := durable.Renombrar(tmp, img); err != nil {
 		_ = os.Remove(tmp)
@@ -176,19 +256,18 @@ func crearImagenXFS(ctx context.Context, img string, bytes int64) error {
 	return nil
 }
 
-// montarLoopXFS monta el almacén. nodev, nosuid y noexec: dentro solo hay
-// discos de microVM, que ningún proceso del anfitrión tiene por qué ejecutar.
-func montarLoopXFS(ctx context.Context, img, dir string) error {
-	out, err := exec.CommandContext(ctx, "mount", "-t", "xfs", "-o", "loop,nodev,nosuid,noexec", img, dir).CombinedOutput()
+// montarLoopAlmacen monta el almacén (opcionesMontaje).
+func montarLoopAlmacen(ctx context.Context, fs, img, dir string) error {
+	out, err := exec.CommandContext(ctx, "mount", "-t", fs, "-o", opcionesMontaje(fs), img, dir).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mounting %s: %v: %s", img, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// estaMontadoXFS dice si dir es un punto de montaje, y exige que sea XFS: si
-// alguien montó otra cosa encima, no es el almacén.
-func estaMontadoXFS(dir string) (bool, error) {
+// estaMontadoTipo dice si dir es un punto de montaje, y exige que sea del tipo
+// del almacén: si alguien montó otra cosa encima, no es el almacén.
+func estaMontadoTipo(dir, fs string) (bool, error) {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		return false, err
@@ -198,20 +277,7 @@ func estaMontadoXFS(dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	tipo := ""
-	dir = rutaCanonica(dir)
-	for _, mt := range ms {
-		if mt.punto == dir {
-			tipo = mt.fstype // el último montaje sobre la ruta es el visible
-		}
-	}
-	switch tipo {
-	case "":
-		return false, nil
-	case "xfs":
-		return true, nil
-	}
-	return false, fmt.Errorf("%s is mounted, but it is %s and not the XFS store", dir, tipo)
+	return montadoConTipo(ms, rutaCanonica(dir), fs)
 }
 
 func libreEnDir(dir string) (total, libre int64, err error) {

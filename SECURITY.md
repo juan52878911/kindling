@@ -558,17 +558,18 @@ darle esa confianza); un enlace duro que ya existiera en la carpeta hacia fuera
 se sirve como el fichero que es; y el daemon, si es root, lee con sus
 permisos lo que haya bajo la carpeta.
 
-### 14. Discos copy-on-write: el almacén XFS y su bind en el jail
+### 14. Discos copy-on-write: el almacén (XFS o Btrfs) y su bind en el jail
 
 Con `daemon.cow` (ver [docs/cow.md](docs/cow.md)) el overlay de una instancia creada
-desde un dorado puede vivir en un almacén XFS propio (`$root/cow.xfs`, montado por loop
-en `$root/cow`). Lo que cambia:
+desde un dorado puede vivir en un almacén propio con reflink (`$root/cow.xfs`, o
+`$root/cow.btrfs` donde el núcleo no tiene XFS; montado por loop en `$root/cow`). Lo que
+cambia:
 
-- **El anfitrión no interpreta nada del invitado.** El XFS lo crea y lo escribe solo el
+- **El anfitrión no interpreta nada del invitado.** El XFS o el Btrfs lo crea y lo escribe solo el
   kernel del anfitrión; el invitado controla el CONTENIDO de su fichero de overlay, no
   los metadatos del sistema de ficheros que lo contiene. Es la misma superficie que un
   overlay en ext4.
-- El almacén se monta `nodev,nosuid,noexec`, con la raíz y `m/` en 0750 root:grupo del
+- El almacén se monta `nodev,nosuid,noexec` (Btrfs además `nodiscard`), con la raíz y `m/` en 0750 root:grupo del
   VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
   escribir en la copia de la que se clonan las demás instancias.
 - **Jail**: a cada VMM se le monta por bind SOLO el directorio de su propio overlay
@@ -590,11 +591,14 @@ en `$root/cow`). Lo que cambia:
   inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
   descarta igualmente (el dorado no correspondería a la memoria volcada).
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
-  que el XFS no falla por falta de sitio debajo. Dentro de él NO hay cuota por instancia:
+  que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
+  `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
+  reserva). Dentro de él NO hay cuota por instancia:
   el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que
   reescribe dejan de compartirse con la base, así que un invitado que reescribe todo su
   disco puede llenar el almacén compartido (ENOSPC para las demás instancias del almacén).
-  Es un límite conocido; una cuota XFS por proyecto por directorio está pendiente.
+  Es un límite conocido; una cuota por directorio (proyecto en XFS, qgroup en Btrfs)
+  está pendiente.
 
 ### 15. Grafos: cada arista es una autorización, no una red
 

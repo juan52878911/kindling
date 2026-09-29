@@ -36,6 +36,16 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   aviso. El modo y los contadores salen en `kling info` (`disk clones`), en `GET /info`
   (`cow`) y en `kling doctor`. Lo existente no se migra. Medida:
   `scripts/bench-cow.sh`. Ver [`docs/cow.md`](docs/cow.md).
+- **El almacén copy-on-write también puede ser Btrfs.** Donde el núcleo no tiene XFS
+  (Proxmox visto desde un LXC) pero sí Btrfs, el almacén es `$root/cow.btrfs`
+  (`mkfs.btrfs -K -m single -d single`, montado con `nodiscard` para no agujerear la
+  reserva). Se elige por `/proc/filesystems`, XFS primero; un almacén existente conserva
+  su tipo. El tipo sale en `kling info`, `kling doctor` y `GET /info` (`cow.store.fs`).
+- **`commit`, `fork` y `graph snapshot` copian el overlay de la instancia desde el
+  descriptor que comprobaron**, no reabriendo la ruta: un VMM ya no puede colar otro
+  fichero en el dorado cambiando su overlay por un enlace entre la comprobación y la
+  copia. El dorado se crea con `O_EXCL|O_NOFOLLOW` y se cede con `fchown`. En macOS el
+  overlay de un commit se copia (disperso) en vez de clonarse.
 
 ### kling db
 
