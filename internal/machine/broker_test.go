@@ -297,7 +297,11 @@ func TestBrokerAttach(t *testing.T) {
 	if _, _, _, err := pedirBroker(t, m, idAgente, req); err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("copia no lista: %v", err)
 	}
-	// Lo que pidió el agente se corta si el agente cambia.
+	// Lo que pidió el agente se corta si el agente cambia. La petición
+	// rechazada de arriba ya tiene su respuesta, pero su sesión sale del
+	// registro con un defer del servidor que puede no haber corrido aún:
+	// esperar a que solo quede la que sigue viva, o se contarían dos.
+	esperarSesionesBroker(t, idAgente, 1)
 	if n := invalidarOrigenBroker(idAgente); n != 1 || !cortadaTCP(tc) {
 		t.Fatalf("invalidarOrigen cortó %d", n)
 	}
@@ -357,5 +361,24 @@ func TestBrokerInvalidaMientrasResuelve(t *testing.T) {
 			t.Fatal("el despertar no terminó")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// esperarSesionesBroker espera (con plazo) a que el origen id tenga exactamente
+// n sesiones registradas en el broker.
+func esperarSesionesBroker(t *testing.T, id string, n int) {
+	t.Helper()
+	limite := time.Now().Add(5 * time.Second)
+	for {
+		sesionesBroker.mu.Lock()
+		hay := sesionesBroker.porOrigen[id]
+		sesionesBroker.mu.Unlock()
+		if hay == n {
+			return
+		}
+		if time.Now().After(limite) {
+			t.Fatalf("el origen %s tiene %d sesiones en el broker, esperaba %d", id, hay, n)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
