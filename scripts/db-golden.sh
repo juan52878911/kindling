@@ -184,6 +184,11 @@ log_timezone = 'UTC'
 log_min_error_statement = panic
 log_statement = none
 logging_collector = off
+# Auditoría de conexiones (kling db audit): quién entró, a qué base y desde
+# dónde. Solo metadatos; sin log_statement no hay SQL ni datos en el log.
+log_connections = on
+log_disconnections = on
+log_line_prefix = '%m [%p] u=%u d=%d h=%h '
 CONF
 chown postgres:postgres "\$D/pg_hba.conf" "\$D/postgresql.conf"
 # El postmaster hereda las tuberías del exec: a fichero y sin stdin, o el
