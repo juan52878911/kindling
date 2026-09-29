@@ -234,6 +234,45 @@ arista llega nunca al 8080 (abajo). Abrirlo daría a un nodo el control de otro,
 se rechaza al validar con esta explicación. Hasta que el puente tenga un puerto solo para
 MCP, un servidor MCP que hable HTTP en su propio puerto (las imágenes `transport: http`)
 se alcanza con una arista `link` a ese puerto.
+## Desde los plugins
+
+Los plugins usan el grafo del núcleo (`/graphs`, `kling graph`) para sus entornos; el
+núcleo no sabe de ellos.
+
+**kling db: `kling db env`.** `kling db env up <app-template> -golden G` crea el grafo
+`app` + `db` con una arista `credential` (el `kling db attach` de siempre, declarado): un
+entorno de integración entero en un comando, con la clave por stdin y deshecho entero si
+algo falla. `kling db branch -env <app-template>` lo hace por rama de git. `env down` y
+`branch -rm` lo borran con la clave. Detalle en
+[db.md](db.md#un-entorno-entero-app--base-como-grafo).
+
+**kling-mcp: agente + servidores MCP.** Un grafo sin aristas ya da lo que interesa:
+`agente` eager y `browser`/`memoria` `lazy` (sin RAM hasta que se necesitan), ciclo de
+vida atómico, `snapshot` del agente **con** sus herramientas del mismo instante y `fork
+-n N` para comparar prompts o modelos partiendo del mismo punto. El fichero de ejemplo
+es [`examples/grafos/agente-mcp.yaml`](../examples/grafos/agente-mcp.yaml) (un test lo
+valida con el mismo parser). No hay comando nuevo y el gateway no cambia: sigue
+llegando a cada servidor desde el host. Lo que **no** se puede hoy es una arista del
+agente al servidor: el puente MCP escucha en el 8080 del invitado y una arista no puede
+apuntar a ese puerto (ver abajo); es la arista `mcp` del diseño, pendiente. Tampoco el
+gateway distingue las copias de un fork: el agente de una copia no llega por él al
+navegador de su copia.
+
+**Gateway de IA (Chispa/VON): siguiente paso, sin código.** La cascada es hoy Chispa
+(una microVM pequeña que clasifica) y, si duda, VON (modelos mayores en microVMs), cada
+una despertada y congelada por `pkg/scheduler` con su pool de réplicas
+(`pkg/aigw/guestpool.go`). Como grafo sería `chispa` eager y `von` `lazy`, con una arista
+`link` `chispa -> von`: VON solo tiene máquina cuando Chispa escala. No se prototipa
+porque tocaría el planificador actual, y hay tres cosas que el grafo aún no cubre y que
+el planificador sí: (1) **réplicas por servicio y tope por inquilino** (`MaxInflight`,
+`MaxInstances`), que el grafo no modela (un nodo es una máquina); (2) el
+**arrendamiento**: el planificador renueva el TTL de lo que despierta e `idle_freeze` no
+se renueva por conexión; (3) los **límites del `link`** (una dirección por nodo, 16
+conexiones, sin 80, 443 ni 8080). Sustituirlo sin esas tres cosas empeoraría la latencia
+y el aislamiento. El camino: `idle_freeze` renovado por conexión, luego un grafo por
+inquilino con el planificador solo para las réplicas de cada nodo. Mientras, el grafo
+sirve para lo que sí encaja: `snapshot`/`fork` del par entero para evaluar una cascada
+nueva contra la anterior partiendo del mismo estado.
 
 ## El puerto 8080 no es alcanzable por una arista
 

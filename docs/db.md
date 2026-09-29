@@ -616,3 +616,41 @@ que una columna `notes` con texto libre pase sin que nadie la mire.
   el host tiene swap, el sistema operativo podría llevarla a disco. En Linux, sin swap
   en el host o con swap cifrada.
 - Qué garantiza y qué no, en [SECURITY.md](../SECURITY.md) §16.
+## Un entorno entero: app + base como grafo
+
+`kling db env` usa los [grafos](grafos.md) del núcleo para levantar de una vez la
+aplicación y su copia de base, unidas por una arista `credential`: es el `kling db
+attach` de siempre, declarado en el grafo en vez de a mano.
+
+```sh
+kling db env up my-app -golden crm-demo -name pr-42 -allow api.stripe.com -app-port 8081
+kling db connect pr-42-db -psql       # la base, desde el host
+kling db env down pr-42               # el grafo, sus dos máquinas y la clave
+kling db branch -env my-app -golden crm-demo   # lo mismo, un entorno por rama de git
+```
+
+- **Qué crea.** Un grafo `<name>` con dos nodos: `db` (`from` el golden; el rol, la base,
+  el dueño y el estado como en `kling db up`) y `app` (`from` la plantilla de la
+  aplicación, `egress allowlist` con los `-allow` que pases). La arista `app -> db` es
+  `credential` en el 5432: dentro de `app`, `db.graph:5432` con `PGPASSWORD` (un
+  marcador) llega a la base con la clave real puesta por el proxy. La copia de base es
+  una copia normal de `kling db`: `connect`, `snapshot`, `undo` y `rotate` la aceptan
+  con el nombre `<name>-db`.
+- **La clave.** Se genera en el host y llega al daemon por **stdin** de `kling graph up`
+  (nunca en argv, en el entorno ni en el fichero del grafo, que va a un directorio
+  temporal 0700 y se borra). Al invitado de `db` solo va su verificador SCRAM, por stdin,
+  como en `rotate`. Si algo falla (Postgres no arranca, memoria...), se borra el grafo y
+  la clave; no queda nada a medias.
+- **`-app-port`** expone ese puerto de `app` en el grafo (no el 8080: es el del agente
+  de invitado y una arista no puede llegar a él). En macOS la arista `credential` va por
+  el broker de enlaces del daemon (ver
+  [grafos.md](grafos.md#cómo-llega-un-nodo-a-otro-macos)); hace falta un `kling-vz` que
+  anuncie `graph-link`.
+- **`branch -env <app-template>`** hace lo mismo para una rama: el grafo se llama
+  `e<repo>-<rama>-<hash>` (cabe en los 24 caracteres del núcleo), es idempotente y es
+  **aparte** de la copia suelta de la rama: el hook no lo activa ni lo congela. El golden
+  es `-golden` o el de cualquier copia del repo. `branch -rm <rama>` lo borra con ella.
+  No se ramifica del entorno del padre todavía: cada rama nace del golden. Ramificar un
+  entorno vivo es `kling graph fork` (el grafo entero, en un instante consistente).
+- Solo se borra (`env down`, `branch -rm`) un entorno cuya copia de base es del `-owner`
+  indicado.

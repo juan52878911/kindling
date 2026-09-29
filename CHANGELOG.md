@@ -10,6 +10,18 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Grafos desde los plugins
+
+- **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>
+  -golden G` crea un grafo `app` + `db` con una arista `credential` (el attach,
+  declarado): la clave va por stdin al daemon, nunca por argv, entorno ni fichero, y si
+  algo falla se deshace todo. `branch -env` lo da por rama de git y `branch -rm` lo
+  borra. Solo Linux. Ver [`docs/db.md`](docs/db.md).
+- **Agente + servidores MCP como grafo:** ejemplo `examples/grafos/agente-mcp.yaml`
+  (validado por un test) y sección "Desde los plugins" en
+  [`docs/grafos.md`](docs/grafos.md), donde también queda documentado, como siguiente
+  paso, el gateway de IA (cascada Chispa a VON como grafo lazy).
+
 ### Núcleo
 
 - **Grafos de microVMs (`kling graph`, capacidad `graphs`).** Varias máquinas con
