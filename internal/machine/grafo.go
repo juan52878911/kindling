@@ -40,6 +40,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/share"
 )
 
 // ErrNoGraph es un grafo que no existe (404 en la API).
@@ -50,6 +51,13 @@ var ErrNoGraph = errors.New("graph doesn't exist")
 var errGrafoAristasSoloLinux = errors.New("graph edges between machines (link and credential) are Linux-only in this version: " +
 	"on macOS the network lives inside each kling-vz, which can't ask the daemon on every connection where the other node is; " +
 	"a graph without edges (up, freeze, thaw, snapshot, fork, rm) works here (docs/grafos.md)")
+
+// errGrafoDependsPuertoSoloLinux es el 501 de una arista depends con puerto
+// en macOS: esperar a que el puerto conteste es marcar a la IP del invitado
+// desde el host, lo mismo que un link.
+var errGrafoDependsPuertoSoloLinux = errors.New("depends edges with a port are Linux-only in this version: " +
+	"waiting for the port means dialing the guest from the daemon, which on macOS lives inside each kling-vz; " +
+	"a depends edge without port (wait until the node runs) works here (docs/grafos.md)")
 
 // Sustituibles en los tests: arrancar, despertar, congelar o montar la red de
 // verdad pide KVM, firecracker y root. Se asignan en init: Run y Thaw acaban
@@ -85,6 +93,62 @@ func (m *Manager) rutaGrafo(id string) string { return filepath.Join(m.dirGrafos
 
 func (m *Manager) rutaSecretosGrafo(id string) string {
 	return filepath.Join(m.dirGrafos(), id+".secrets.enc")
+}
+
+// dirCarpetasGrafo es donde viven las carpetas de las aristas share del
+// grafo id: $KLING_ROOT/graph-shares/<id>, fuera del almacén (que es de JSON
+// y se lee por la API). Son del grafo: nacen con up y se borran con rm.
+func (m *Manager) dirCarpetasGrafo(id string) string {
+	return filepath.Join(m.root, "graph-shares", id)
+}
+
+// carpetaGrafo es la carpeta que el nodo dueño monta en mount (y los que
+// tienen una arista share hacia ella). El nombre es un resumen de la ruta:
+// una ruta del invitado no se convierte en una ruta del host.
+func (m *Manager) carpetaGrafo(id, dueño, mount string) string {
+	return filepath.Join(m.dirCarpetasGrafo(id), dueño, hexSHA256(mount)[:16])
+}
+
+// crearCarpetasGrafo crea las carpetas de las aristas share de g (0700, del
+// daemon: solo se ven desde los invitados que las montan).
+func (m *Manager) crearCarpetasGrafo(g *api.Graph) error {
+	for _, e := range g.Edges {
+		if e.Kind != api.GraphEdgeShare {
+			continue
+		}
+		if err := os.MkdirAll(m.carpetaGrafo(g.ID, e.To, e.Mount), 0o700); err != nil {
+			return fmt.Errorf("share %s -> %s:%s: %w", e.From, e.To, e.Mount, err)
+		}
+	}
+	return nil
+}
+
+// sharesDeAristas son las carpetas vivas que monta el nodo nombre por las
+// aristas share de g: las suyas (es el dueño, rw) y las de otros nodos que ve
+// (con el modo de la arista).
+func sharesDeAristas(g *api.Graph, nombre string, carpeta func(dueño, mount string) string) []api.ShareSpec {
+	var out []api.ShareSpec
+	vistos := map[string]bool{}
+	for _, e := range g.Edges {
+		if e.Kind != api.GraphEdgeShare || vistos[e.Mount] {
+			continue
+		}
+		var modo string
+		switch nombre {
+		case e.To:
+			modo = share.ModeRW
+		case e.From:
+			modo = e.Mode
+			if modo == "" {
+				modo = share.ModeRO
+			}
+		default:
+			continue
+		}
+		vistos[e.Mount] = true
+		out = append(out, api.ShareSpec{Mode: modo, Mount: e.Mount, Source: carpeta(e.To, e.Mount)})
+	}
+	return out
 }
 
 // idVirtual es el ID de un nodo: lo que llevan como UpstreamMachine las
@@ -399,6 +463,9 @@ func (m *Manager) GraphUp(ctx context.Context, g api.Graph, secretos map[string]
 	if g.HasNetworkEdges() && !modeloAPosible {
 		return nil, &api.StatusError{Code: 501, Message: errGrafoAristasSoloLinux.Error()}
 	}
+	if g.HasPortDepends() && !modeloAPosible {
+		return nil, &api.StatusError{Code: 501, Message: errGrafoDependsPuertoSoloLinux.Error()}
+	}
 	sec, err := secretosDeAristas(&g, secretos)
 	if err != nil {
 		return nil, &api.StatusError{Code: 400, Message: err.Error()}
@@ -408,14 +475,13 @@ func (m *Manager) GraphUp(ctx context.Context, g api.Graph, secretos map[string]
 	}
 
 	// Antes de arrancar el primero: cuántas máquinas y cuánta memoria piden
-	// los eager. Sin esto, el tercer nodo fallaría con 507 después de haber
+	// los eager (y los lazy de los que dependen, que arrancan antes que
+	// ellos). Sin esto, el tercer nodo fallaría con 507 después de haber
 	// arrancado los dos primeros para nada.
-	eager, memoria := 0, 0
-	for _, n := range g.Nodes {
-		if n.Wake == api.GraphWakeEager {
-			eager++
-			memoria += m.memoriaDeNodo(n)
-		}
+	arrancar := nodosDeArranque(&g)
+	eager, memoria := len(arrancar), 0
+	for nombre := range arrancar {
+		memoria += m.memoriaDeNodo(g.Nodes[nombre])
 	}
 	m.mu.RLock()
 	total := len(m.byID)
@@ -459,11 +525,19 @@ func (m *Manager) GraphUp(ctx context.Context, g api.Graph, secretos map[string]
 	if err := m.guardarGrafo(g.ID); err != nil {
 		return nil, err
 	}
-	for _, nombre := range g.SortedNodeNames() {
-		if g.Nodes[nombre].Wake != api.GraphWakeEager {
+	if err := m.crearCarpetasGrafo(&g); err != nil {
+		return nil, err
+	}
+	// En orden de depends: cada nodo cuando los suyos están listos.
+	orden, err := g.StartOrder()
+	if err != nil {
+		return nil, &api.StatusError{Code: 400, Message: err.Error()}
+	}
+	for _, nombre := range orden {
+		if !arrancar[nombre] {
 			continue
 		}
-		if err := m.instanciarNodo(ctx, g.ID, nombre, ""); err != nil {
+		if err := m.ponerEnMarchaLocked(ctx, g.ID, nombre, false, map[string]bool{}); err != nil {
 			return nil, fmt.Errorf("graph %s: node %s: %w", g.Name, nombre, err)
 		}
 	}
@@ -474,8 +548,30 @@ func (m *Manager) GraphUp(ctx context.Context, g api.Graph, secretos map[string]
 			return nil, fmt.Errorf("graph %s: node %s: %w", g.Name, nombre, err)
 		}
 	}
-	log.Printf("graph %s (%s): up with %d node(s), %d eager", g.Name, shortID(g.ID), len(g.Nodes), eager)
+	log.Printf("graph %s (%s): up with %d node(s), %d started", g.Name, shortID(g.ID), len(g.Nodes), eager)
 	return m.Graph(g.ID)
+}
+
+// nodosDeArranque son los nodos que arranca up: los eager y, detrás, todos
+// los nodos de los que dependen (aunque sean lazy: sin ellos no arrancan).
+func nodosDeArranque(g *api.Graph) map[string]bool {
+	out := map[string]bool{}
+	var poner func(n string)
+	poner = func(n string) {
+		if out[n] {
+			return
+		}
+		out[n] = true
+		for _, d := range g.Dependencies(n) {
+			poner(d)
+		}
+	}
+	for _, n := range g.SortedNodeNames() {
+		if g.Nodes[n].Wake == api.GraphWakeEager {
+			poner(n)
+		}
+	}
+	return out
 }
 
 // peticionDeNodo es el RunRequest que arranca el nodo nombre del grafo g.
@@ -515,14 +611,24 @@ func (m *Manager) instanciarNodo(ctx context.Context, gid, nombre, forkOf string
 	m.mu.RLock()
 	g := m.grafos[gid]
 	var req api.RunRequest
+	var carpetas []string
 	if g != nil {
 		req = peticionDeNodo(g, nombre, forkOf)
+		// Las carpetas de sus aristas share, y SOLO esas, se montan sin pasar
+		// por daemon.share_roots (ver conCarpetasGrafo).
+		extra := sharesDeAristas(g, nombre, func(dueño, mount string) string { return m.carpetaGrafo(gid, dueño, mount) })
+		if len(extra) > 0 {
+			req.Shares = append(append([]api.ShareSpec(nil), req.Shares...), extra...)
+			for _, s := range extra {
+				carpetas = append(carpetas, s.Source)
+			}
+		}
 	}
 	m.mu.RUnlock()
 	if g == nil {
 		return fmt.Errorf("%w: %s", ErrNoGraph, gid)
 	}
-	mc, err := arrancarNodoGrafo(ctx, m, req)
+	mc, err := arrancarNodoGrafo(conCarpetasGrafo(ctx, carpetas), m, req)
 	if err != nil {
 		return err
 	}
@@ -545,15 +651,25 @@ func (m *Manager) instanciarNodo(ctx context.Context, gid, nombre, forkOf string
 
 // ── freeze, thaw, rm ─────────────────────────────────────────────────────────
 
-// maquinasDeGrafo son las máquinas instanciadas del grafo, por nodo en orden.
-func (m *Manager) maquinasDeGrafo(gid string) (nombres, ids []string) {
+// maquinasDeGrafo son las máquinas instanciadas del grafo, por nodo en el
+// orden de arranque (parar: el de parada).
+func (m *Manager) maquinasDeGrafo(gid string, parar bool) (nombres, ids []string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	g := m.grafos[gid]
 	if g == nil {
 		return nil, nil
 	}
-	for _, n := range g.SortedNodeNames() {
+	orden, err := g.StartOrder()
+	if parar {
+		orden, err = g.StopOrder()
+	}
+	if err != nil {
+		// Un grafo guardado con un ciclo (no pasaría la validación de hoy):
+		// por nombre, como antes de las aristas depends.
+		orden = g.SortedNodeNames()
+	}
+	for _, n := range orden {
 		if id := g.Nodes[n].MachineID; id != "" {
 			nombres = append(nombres, n)
 			ids = append(ids, id)
@@ -562,16 +678,16 @@ func (m *Manager) maquinasDeGrafo(gid string) (nombres, ids []string) {
 	return nombres, ids
 }
 
-// GraphFreeze congela todos los nodos que corren (o están pausados). Sigue
-// con los demás si uno falla, y devuelve el primer error: el grafo queda
-// partial y se ve.
+// GraphFreeze congela todos los nodos que corren (o están pausados), cada
+// uno antes que los nodos de los que depende. Sigue con los demás si uno
+// falla, y devuelve el primer error: el grafo queda partial y se ve.
 func (m *Manager) GraphFreeze(ctx context.Context, ref string) (*api.Graph, error) {
 	gid, err := m.idGrafo(ref)
 	if err != nil {
 		return nil, err
 	}
 	defer m.lock(claveCerrojoGrafo(gid))()
-	nombres, ids := m.maquinasDeGrafo(gid)
+	nombres, ids := m.maquinasDeGrafo(gid, true)
 	var primero error
 	for i, id := range ids {
 		mc, ok := m.Get(id)
@@ -589,22 +705,23 @@ func (m *Manager) GraphFreeze(ctx context.Context, ref string) (*api.Graph, erro
 	return g, gerr
 }
 
-// GraphThaw despierta todos los nodos instanciados (congelados o pausados).
-// Un lazy sin instancia sigue sin ella.
+// GraphThaw despierta todos los nodos instanciados (congelados o pausados),
+// cada uno cuando los nodos de los que depende están listos. Un lazy sin
+// instancia sigue sin ella, salvo que dependa de él un nodo que despierta.
 func (m *Manager) GraphThaw(ctx context.Context, ref string) (*api.Graph, error) {
 	gid, err := m.idGrafo(ref)
 	if err != nil {
 		return nil, err
 	}
 	defer m.lock(claveCerrojoGrafo(gid))()
-	nombres, ids := m.maquinasDeGrafo(gid)
+	nombres, ids := m.maquinasDeGrafo(gid, false)
 	var primero error
 	for i, id := range ids {
 		mc, ok := m.Get(id)
 		if !ok || (mc.State != api.StateWarm && mc.State != api.StatePaused) {
 			continue
 		}
-		if err := despertarNodoGrafo(ctx, m, id); err != nil && primero == nil {
+		if err := m.ponerEnMarchaLocked(ctx, gid, nombres[i], true, map[string]bool{}); err != nil && primero == nil {
 			primero = fmt.Errorf("node %s: %w", nombres[i], err)
 		}
 	}
@@ -657,6 +774,11 @@ func (m *Manager) eliminarGrafo(ctx context.Context, gid string) error {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) && primero == nil {
 			primero = err
 		}
+	}
+	// Las carpetas de sus aristas share: son del grafo y se van con él (sus
+	// máquinas ya no están, así que nadie las sirve).
+	if err := os.RemoveAll(m.dirCarpetasGrafo(gid)); err != nil && primero == nil {
+		primero = err
 	}
 	// Las plantillas temporales de un fork del que salió este grafo: si ya
 	// no las usa nadie, fuera ahora (el vigilante lo haría en su siguiente

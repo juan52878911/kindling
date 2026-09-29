@@ -822,7 +822,7 @@ func (m *Manager) Run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	if err != nil {
 		return nil, err
 	}
-	shares, err := m.resolveShares(req, vols)
+	shares, err := m.resolveShares(ctx, req, vols)
 	if err != nil {
 		return nil, err
 	}

@@ -251,7 +251,12 @@ type resolvedShare struct {
 
 // resolveShares valida las carpetas de una petición contra los volúmenes que
 // ya se van a montar.
-func (m *Manager) resolveShares(req api.RunRequest, vols []resolvedVolume) ([]resolvedShare, error) {
+//
+// ctx puede traer las carpetas de las aristas share de un grafo
+// (conCarpetasGrafo): esas se aceptan en ro y rw sin estar bajo
+// daemon.share_roots, porque las crea y las guarda el daemon. Solo el código
+// de los grafos las pone; ninguna petición de fuera llega con ellas.
+func (m *Manager) resolveShares(ctx context.Context, req api.RunRequest, vols []resolvedVolume) ([]resolvedShare, error) {
 	if len(req.Shares) == 0 {
 		return nil, nil
 	}
@@ -303,6 +308,11 @@ func (m *Manager) resolveShares(req api.RunRequest, vols []resolvedVolume) ([]re
 			rs.att.ImageBytes = fi.Size()
 			copies++
 		case share.ModeRO, share.ModeRW:
+			if carpetaDeGrafo(ctx, s.Source) {
+				// La del grafo: ya es absoluta, limpia y del daemon.
+				rs.att.Source = s.Source
+				break
+			}
 			if cfg == nil {
 				c := m.shareConfig()
 				cfg = &c
@@ -324,6 +334,35 @@ func (m *Manager) resolveShares(req api.RunRequest, vols []resolvedVolume) ([]re
 			len(vols), copies, maxDataDisks)
 	}
 	return out, nil
+}
+
+// claveCarpetasGrafo es la clave de contexto de las carpetas de un grafo que
+// puede montar el nodo que se arranca. Sin exportar: solo instanciarNodo la
+// pone.
+type claveCarpetasGrafo struct{}
+
+// conCarpetasGrafo marca en ctx las carpetas (rutas exactas) que el nodo que
+// se va a arrancar puede montar en vivo sin pasar por daemon.share_roots.
+func conCarpetasGrafo(ctx context.Context, carpetas []string) context.Context {
+	if len(carpetas) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, claveCarpetasGrafo{}, append([]string(nil), carpetas...))
+}
+
+// carpetaDeGrafo dice si src es, exactamente, una de las carpetas de grafo
+// que ctx permite.
+func carpetaDeGrafo(ctx context.Context, src string) bool {
+	if ctx == nil || src == "" {
+		return false
+	}
+	carpetas, _ := ctx.Value(claveCarpetasGrafo{}).([]string)
+	for _, c := range carpetas {
+		if c == src {
+			return true
+		}
+	}
+	return false
 }
 
 // maxDataDisks es el máximo de discos de datos (volúmenes + copias) por máquina.
