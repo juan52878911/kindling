@@ -10,6 +10,19 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Núcleo
+
+- **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del
+  overlay de cada instancia es un clon por reflink: con la raíz en XFS/Btrfs, FICLONE
+  directo; en ext4, un almacén XFS propio (`$root/cow.xfs`, montado por loop en
+  `$root/cow`, creado la primera vez y reservado entero) con una copia base por dorado y
+  un clon por instancia. El coste de crear una instancia deja de depender del tamaño de
+  su disco. `daemon.cow = auto | reflink-store | off` (`KLING_COW`) y
+  `daemon.cow_store_gib`; sin reflink ni almacén posible, la copia de siempre con un
+  aviso. El modo y los contadores salen en `kling info` (`disk clones`), en `GET /info`
+  (`cow`) y en `kling doctor`. Lo existente no se migra. Medida:
+  `scripts/bench-cow.sh`. Ver [`docs/cow.md`](docs/cow.md).
+
 ### kling db
 
 - **`kling db` (extensión `kling-db`).** Bases Postgres desechables, una por microVM:
@@ -49,6 +62,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Almacén de discos copy-on-write.** Cada jail recibe por bind solo el directorio del
+  overlay de su instancia (nunca el almacén entero); el bind se desmonta antes de borrar
+  el jail y, si no se puede, el jail no se borra. El almacén se monta
+  `nodev,nosuid,noexec` y se reserva entero (sin sobreasignar). Ver SECURITY.md §14.
 - **`kling db`: las copias nuevas no heredan los roles de `role -ro`.** `up`, `fork` y
   `undo` borran los roles con comentario `kling-db:ro` (y sus líneas de `pg_hba.conf`)
   antes de dar la copia por lista; si no pueden, la copia se destruye. La línea de
