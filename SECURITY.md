@@ -580,9 +580,15 @@ en `$root/cow`). Lo que cambia:
 - **Permisos del directorio de instancia**: `cow/m/<id>` es `root:grupo-del-VMM` 0750 (el
   VMM solo lo atraviesa) y solo el FICHERO `overlay.ext4` es del VMM. Así un Firecracker
   comprometido no crea ficheros en su directorio ni puede cambiar el overlay por un enlace
-  simbólico. Además `commit` abre el overlay con `O_NOFOLLOW`, comprueba con `Fstat` sobre
-  el descriptor (no por ruta) que es un fichero regular y descarta la copia si la ruta
-  cambió de fichero mientras se copiaba.
+  simbólico. Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
+  `O_NOFOLLOW`, comprueba con `Fstat` sobre el descriptor que es un fichero regular y
+  **copia desde ese mismo descriptor** (FICLONE entre descriptores, o una copia dispersa en
+  Go con `SEEK_DATA`/`SEEK_HOLE`), sin volver a abrir la ruta: cambiar el overlay por un
+  enlace entre la comprobación y la copia no cuela otro fichero en el dorado. El destino se
+  crea con `O_EXCL|O_NOFOLLOW` y se cede al VMM con `fchown` sobre el descriptor, porque en
+  el jail está en un directorio del VMM; al recuperarlo del jail se exige que sea el mismo
+  inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
+  descarta igualmente (el dorado no correspondería a la memoria volcada).
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el XFS no falla por falta de sitio debajo. Dentro de él NO hay cuota por instancia:
   el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que

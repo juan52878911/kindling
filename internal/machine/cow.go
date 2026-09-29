@@ -274,31 +274,88 @@ func rutaCanonica(p string) string {
 }
 
 // fijarOverlayParaLeer abre ruta con O_NOFOLLOW y comprueba con Fstat, sobre el
-// descriptor ya abierto y no por ruta, que es un fichero regular. El VMM puede
-// haber cambiado el overlay por un enlace simbólico a un fichero de root entre
-// que se eligió la ruta y que se copia: un Lstat previo no lo evita. Devuelve
-// una función que hay que llamar tras la copia: comprueba que la ruta sigue
-// siendo el mismo fichero, y si no, la copia se descarta.
-func fijarOverlayParaLeer(ruta string) (func() error, error) {
+// descriptor ya abierto y no por ruta, que es un fichero regular. Devuelve el
+// fichero ABIERTO: la copia se hace desde ese descriptor (copiarOverlayDesde),
+// nunca volviendo a abrir la ruta. El VMM es dueño del overlay y puede cambiarlo
+// por un enlace simbólico a un fichero de root entre la comprobación y la
+// copia, y dejarlo como estaba después; una copia por ruta se llevaría al
+// dorado el otro fichero y ninguna comprobación posterior lo vería. El
+// descriptor sigue apuntando al inodo que se comprobó, pase lo que pase con la
+// ruta.
+//
+// La función que devuelve, a llamar tras la copia, mira además que la ruta
+// siga siendo el mismo fichero: ya no es lo que protege la copia, pero un
+// overlay cambiado a mitad de un commit es un dorado que no corresponde a la
+// memoria volcada, y se descarta.
+func fijarOverlayParaLeer(ruta string) (*os.File, func() error, error) {
 	f, err := os.OpenFile(ruta, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, fmt.Errorf("opening the overlay %s: %w", ruta, err)
+		return nil, nil, fmt.Errorf("opening the overlay %s: %w", ruta, err)
 	}
-	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, err
+		f.Close()
+		return nil, nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("the overlay %s is not a regular file", ruta)
+		f.Close()
+		return nil, nil, fmt.Errorf("the overlay %s is not a regular file", ruta)
 	}
-	return func() error {
+	return f, func() error {
 		ahora, err := os.Lstat(ruta)
 		if err != nil || !ahora.Mode().IsRegular() || !os.SameFile(fi, ahora) {
 			return fmt.Errorf("the overlay %s changed while it was being copied", ruta)
 		}
 		return nil
 	}, nil
+}
+
+// copiarOverlayDesde copia en dst el overlay abierto en in (ver
+// fijarOverlayParaLeer): con FICLONE si el modo es reflink, y si no (o si
+// falla) con una copia dispersa en Go. Todo va por descriptores: se lee del
+// que se comprobó y se escribe en un dst creado con O_EXCL|O_NOFOLLOW, porque
+// dst puede estar en un directorio del VMM (el jail de la plantilla) y un
+// enlace plantado ahí haría que root escribiera, o cediera, otro fichero. Si
+// own no es nil se aplica al fichero creado, también por su descriptor, y no
+// con un chown por ruta que seguiría un enlace. Devuelve la identidad del
+// fichero creado, para comprobar después que el que se recupera es este.
+//
+// macOS pierde aquí el clonefile de `cp -c`: no hay clonefile desde un
+// descriptor sin cgo (fclonefileat no está en syscall). El commit copia; las
+// instancias (runFrom) siguen clonando desde el dorado, que es del daemon.
+func (m *Manager) copiarOverlayDesde(ctx context.Context, in *os.File, dst string, own func(*os.File) error) (os.FileInfo, error) {
+	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fallo := func(err error) (os.FileInfo, error) {
+		out.Close()
+		_ = os.Remove(dst)
+		return nil, err
+	}
+	clonado := false
+	if m.cow.actual() == cowModoReflink {
+		clonado = clonarDescriptor(in, out) == nil
+	}
+	if !clonado {
+		if err := copiarDisperso(ctx, in, out); err != nil {
+			return fallo(err)
+		}
+	}
+	if own != nil {
+		if err := own(out); err != nil {
+			return fallo(err)
+		}
+	}
+	fi, err := out.Stat()
+	if err != nil {
+		return fallo(err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return nil, err
+	}
+	return fi, nil
 }
 
 // borrarOverlayAlmacen quita del almacén el overlay de una máquina que se

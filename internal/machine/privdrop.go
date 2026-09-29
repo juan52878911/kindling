@@ -101,6 +101,19 @@ func (p *Privileges) Own(paths ...string) error {
 	return nil
 }
 
+// OwnFile cede a Firecracker un fichero ya abierto, por su descriptor
+// (fchown): para ficheros en directorios que el VMM puede tocar, donde un
+// chown por ruta seguiría un enlace que el VMM haya plantado.
+func (p *Privileges) OwnFile(f *os.File) error {
+	if !p.Enabled {
+		return nil
+	}
+	if err := f.Chown(p.UID, p.GID); err != nil {
+		return fmt.Errorf("granting %s: %w", f.Name(), err)
+	}
+	return nil
+}
+
 // EnsureReadable deja un árbol de activos de SOLO LECTURA para el VMM (kernel,
 // imágenes, capas, snapshots dorados): dueño root, grupo el del VMM, 0640 y
 // directorios 0750. El VMM los lee por grupo y no puede reescribirlos.

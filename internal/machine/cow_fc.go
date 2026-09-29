@@ -38,15 +38,25 @@ func clonarFichero(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, out.Fd(), ioctlFICLONE, in.Fd())
+	e := clonarDescriptor(in, out)
 	cerr := out.Close()
-	if e != 0 {
+	if e != nil {
 		_ = os.Remove(dst)
 		return &os.PathError{Op: "ficlone", Path: dst, Err: e}
 	}
 	if cerr != nil {
 		_ = os.Remove(dst)
 		return cerr
+	}
+	return nil
+}
+
+// clonarDescriptor hace de out un clon de in (FICLONE entre descriptores ya
+// abiertos). Es atómico: si falla, out sigue como estaba.
+func clonarDescriptor(in, out *os.File) error {
+	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, out.Fd(), ioctlFICLONE, in.Fd())
+	if e != 0 {
+		return e
 	}
 	return nil
 }
