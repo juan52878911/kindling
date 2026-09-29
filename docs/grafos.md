@@ -84,10 +84,35 @@ esa dirección).
 |---|---|
 | `kling graph up <f>` | crea el grafo y arranca los `eager` (y los nodos de los que dependen), en orden de `depends`; comprueba antes el tope de máquinas y la memoria de todos ellos. Todo o nada |
 | `kling graph ls` · `inspect <g>` | estado (`running`, `frozen`, `partial`), nodos, aristas y generación |
+| `kling graph audit <g>` | las conexiones por aristas `link` y `credential` de todos los nodos en una línea de tiempo; ver [Auditoría](#auditoría) |
 | `kling graph freeze <g>` · `thaw <g>` | todos los nodos con máquina (un `lazy` sin máquina sigue sin ella, salvo que dependa de él uno que despierta); `thaw` en orden de `depends`, `freeze` al revés |
 | `kling graph snapshot <g> [-name N]` | una plantilla por nodo, `<N>-<nodo>-<gen>`, **todas del mismo instante** |
 | `kling graph fork <g> -n N` | N grafos nuevos desde este instante |
 | `kling graph rm <g>` | el grafo, sus máquinas y las plantillas temporales de fork que ya no use nadie |
+
+### Auditoría
+
+Cada nodo apunta sus conexiones salientes en el registro del proxy de credenciales de su
+máquina (`kling machine audit`): `kind: link` para una arista `link` (con `host`
+`<nodo>.graph:P` y la máquina a la que llegó en `upstream`) y `kind: postgres` o `mysql`
+con `host` `<nodo>.graph` para una `credential`. `kling graph audit <g>` pide el de cada
+nodo con máquina y los junta, ordenados por tiempo, con una columna `NODE` (el nodo de
+origen):
+
+```sh
+kling graph audit tienda                 # las últimas 200 conexiones por aristas
+kling graph audit tienda -since 10m      # desde hace 10 minutos (o un instante RFC 3339)
+kling graph audit tienda -denied         # solo las rechazadas
+kling graph audit tienda -json           # una línea JSON por registro, con "node"
+kling graph audit tienda -all            # también el resto del tráfico de sus credenciales
+```
+
+No hay ruta nueva en el daemon: son las lecturas de `GET /machines/{ref}/credaudit` de
+siempre, una por nodo, así que un inquilino solo ve lo de sus máquinas, y el registro no
+lleva claves ni marcadores. Un nodo `lazy` sin máquina no tiene nada que leer; uno cuyo
+registro no se puede leer se avisa por stderr y no para a los demás. Los registros de
+descartados (`dropped`) salen siempre, por stderr en la tabla. El registro de una
+máquina es suyo: un fork empieza con el suyo vacío, y `graph rm` lo borra con ella.
 
 `<g>` es el nombre, el ID o un prefijo único del ID. Las máquinas se llaman
 `<grafo>-<nodo>` y se ven en `kling ps`; cada una lleva `kling.graph=<id>` y

@@ -114,11 +114,13 @@ var coreTree = []section{
 `},
 	}},
 	{title: "GRAPHS (several machines as one)", cmds: []plugin.Command{
-		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
+		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "audit", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
                                                    eager nodes; lazy ones start on
                                                    their first connection
   graph ls [-q] [-json]                            lists the graphs
   graph inspect <graph> [-json]                    nodes, state and edges
+  graph audit <graph> [-since 10m] [-denied]       every node's edge connections (link
+      [-all] [-tail N] [-json]                     and credential) in one timeline
   graph freeze <graph>                             freezes every node
   graph thaw <graph>                               wakes every node that has a machine
   graph snapshot <graph> [-name N] [-json]         one template per node, all from the
