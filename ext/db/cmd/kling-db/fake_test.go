@@ -52,6 +52,12 @@ type fakeKling struct {
 	purged, purgedHBA []string
 	// purgeLeaves: la purga "no puede" y contesta que queda uno.
 	purgeLeaves bool
+	// creds: credenciales entregadas por SetCredential, por id de máquina.
+	// removed: "id env upstream" de cada RemoveCredential.
+	creds   map[string][]api.CredentialSpec
+	removed []string
+	// credErr, si no es nil, lo devuelve SetCredential.
+	credErr error
 }
 
 func newFake() *fakeKling {
@@ -263,6 +269,34 @@ func (f *fakeKling) SetLabels(_ context.Context, ref string, labels map[string]s
 	for k, v := range labels {
 		mc.Labels[k] = v
 	}
+	return nil
+}
+
+func (f *fakeKling) SetCredential(_ context.Context, ref string, spec api.CredentialSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.credErr != nil {
+		return f.credErr
+	}
+	mc := f.find(ref)
+	if mc == nil {
+		return errors.New("no machine")
+	}
+	if f.creds == nil {
+		f.creds = map[string][]api.CredentialSpec{}
+	}
+	f.creds[mc.ID] = append(f.creds[mc.ID], spec)
+	return nil
+}
+
+func (f *fakeKling) RemoveCredential(_ context.Context, ref, env, upstream string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mc := f.find(ref)
+	if mc == nil {
+		return errors.New("no machine")
+	}
+	f.removed = append(f.removed, mc.ID+" "+env+" "+upstream)
 	return nil
 }
 

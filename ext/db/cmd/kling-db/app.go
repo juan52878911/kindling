@@ -58,6 +58,7 @@ var (
 type backend interface {
 	klingc.Kling
 	klingc.Labeler
+	klingc.Credentialer
 }
 
 // app lleva todo lo que los comandos tocan fuera de sí mismos, para poder

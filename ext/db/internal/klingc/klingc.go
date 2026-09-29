@@ -38,6 +38,16 @@ type Labeler interface {
 	SetLabels(ctx context.Context, ref string, labels map[string]string) error
 }
 
+// Credentialer entrega y retira credenciales del proxy de credenciales de una
+// máquina (kling db attach/detach). Va por pkg/api y no por `kling machine
+// credential` para que la contraseña viaje en el cuerpo de la petición al
+// daemon, nunca en argv ni en un fichero, y porque el CLI del núcleo no expone
+// upstream_machine.
+type Credentialer interface {
+	SetCredential(ctx context.Context, ref string, spec api.CredentialSpec) error
+	RemoveCredential(ctx context.Context, ref, env, upstreamMachine string) error
+}
+
 // CLI es la implementación de verdad.
 type CLI struct {
 	// Bin es el ejecutable de kling. Vacío: Resolve.
@@ -142,12 +152,30 @@ func (c *CLI) env() []string {
 	return append(out, "KLING_HOST="+c.Host)
 }
 
-// SetLabels implementa Labeler contra el API del daemon, resolviendo el daemon
-// igual que kling (-H > KLING_HOST > contexto > socket local).
-func (c *CLI) SetLabels(ctx context.Context, ref string, labels map[string]string) error {
+// client es el cliente del API del daemon, resuelto igual que kling (-H >
+// KLING_HOST > contexto > socket local).
+func (c *CLI) client() *api.Client {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = &config.Config{}
 	}
-	return api.NewClient(cfg.Host(c.Host)).SetLabels(ctx, ref, labels)
+	return api.NewClient(cfg.Host(c.Host))
+}
+
+// SetLabels implementa Labeler contra el API del daemon.
+func (c *CLI) SetLabels(ctx context.Context, ref string, labels map[string]string) error {
+	return c.client().SetLabels(ctx, ref, labels)
+}
+
+// SetCredential implementa Credentialer: una credencial más para la máquina
+// (se fusiona por variable con las que tenga).
+func (c *CLI) SetCredential(ctx context.Context, ref string, spec api.CredentialSpec) error {
+	_, err := c.client().SetCredentials(ctx, ref, api.CredentialsRequest{Credentials: []api.CredentialSpec{spec}})
+	return err
+}
+
+// RemoveCredential implementa Credentialer.
+func (c *CLI) RemoveCredential(ctx context.Context, ref, env, upstreamMachine string) error {
+	_, err := c.client().RemoveCredential(ctx, ref, env, upstreamMachine)
+	return err
 }
