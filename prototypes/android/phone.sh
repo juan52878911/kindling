@@ -240,7 +240,8 @@ api() {
   local m="$1" meth="$2" path="$3" body="${4:-}"
   # El token del teléfono (docs/phoned.md, #110): sin él solo contesta
   # /v1/health. Va por la entrada estándar de perl, no en argv.
-  cat "$PHONE_ROOT/tokens/$m" 2>/dev/null | perl -MJSON::PP -e '
+  # (|| true: sin fichero, con pipefail, la tubería entera fallaría.)
+  { cat "$PHONE_ROOT/tokens/$m" 2>/dev/null || true; } | perl -MJSON::PP -e '
     my ($meth, $path, $port, $bf) = @ARGV; my $b = ""; my $tok = <STDIN> // ""; chomp $tok;
     if (defined $bf && $bf ne "") { local $/; open(my $f, "<", $bf) or die "$bf: $!\n"; binmode $f; $b = <$f>; }
     my %h = ("Content-Type" => "application/json"); $h{Authorization} = "Bearer $tok" if $tok ne "";
