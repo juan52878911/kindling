@@ -157,8 +157,8 @@ func (a *app) setPassword(ctx context.Context, mc *api.Machine, role, pw string)
 
 // runHostMySQL abre el cliente del host (mariadb o mysql) con la clave en
 // MYSQL_PWD, nunca en argv. Sin TLS, como -psql con sslmode=disable: el tramo
-// es el del host a su propio invitado. Cada cliente lo pide a su manera:
-// --skip-ssl el de MariaDB, --ssl-mode=DISABLED el de MySQL.
+// es el del host a su propio invitado. Cada cliente lo pide a su manera
+// (mysqlClientTLSFlag).
 func runHostMySQL(ctx context.Context, env, args []string) error {
 	p, err := exec.LookPath("mariadb")
 	if err != nil {
@@ -166,11 +166,9 @@ func runHostMySQL(ctx context.Context, env, args []string) error {
 			return errors.New("neither mariadb nor mysql is installed on this host: use kling db connect -dsn with your client")
 		}
 	}
-	tls := "--ssl-mode=DISABLED"
-	if filepath.Base(p) == "mariadb" {
-		tls = "--skip-ssl"
-	} else if v, verr := exec.CommandContext(ctx, p, "--version").Output(); verr == nil && strings.Contains(string(v), "MariaDB") {
-		tls = "--skip-ssl"
+	tls, err := mysqlClientTLSFlag(ctx, p, probeClient)
+	if err != nil {
+		return err
 	}
 	c := exec.CommandContext(ctx, p, append([]string{tls}, args...)...)
 	c.Env = append(os.Environ(), env...)
@@ -182,4 +180,54 @@ func runHostMySQL(ctx context.Context, env, args []string) error {
 		return &plugin.ExitError{Code: ee.ExitCode()}
 	}
 	return err
+}
+
+// probeClient ejecuta el cliente con un solo argumento informativo (--version
+// o --help) y devuelve lo que escribe. Sin stdin, sin la clave y con tiempo
+// acotado.
+func probeClient(ctx context.Context, p, arg string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c := exec.CommandContext(ctx, p, arg)
+	c.Env = os.Environ()
+	out, err := c.CombinedOutput()
+	return string(out), err
+}
+
+// mysqlClientTLSFlag dice cómo apagar TLS en el cliente p: --skip-ssl en el de
+// MariaDB (que no conoce --ssl-mode y lo rechaza) y --ssl-mode=DISABLED en el
+// de MySQL (que en 8.x ya no acepta --skip-ssl). "mysql" puede ser
+// cualquiera de los dos (en muchas distribuciones es el de MariaDB), así que
+// se pregunta: primero --version y, si no lo aclara (o falla), --help, que
+// lista las opciones de verdad. Si nada lo aclara no se adivina: un cliente
+// con la opción equivocada no arranca, o arrancaría pidiendo TLS a una copia
+// que no lo tiene.
+func mysqlClientTLSFlag(ctx context.Context, p string, probe func(ctx context.Context, p, arg string) (string, error)) (string, error) {
+	const mariadb, mysql = "--skip-ssl", "--ssl-mode=DISABLED"
+	if filepath.Base(p) == "mariadb" {
+		return mariadb, nil
+	}
+	v, verr := probe(ctx, p, "--version")
+	if verr == nil && strings.Contains(v, "MariaDB") {
+		return mariadb, nil
+	}
+	h, herr := probe(ctx, p, "--help")
+	if herr == nil {
+		switch {
+		case strings.Contains(h, "MariaDB"):
+			return mariadb, nil
+		case strings.Contains(h, "--ssl-mode"):
+			return mysql, nil
+		case strings.Contains(h, "--skip-ssl"):
+			return mariadb, nil
+		}
+	}
+	why := verr
+	if why == nil {
+		why = herr
+	}
+	if why == nil {
+		why = errors.New("neither --version nor --help names it")
+	}
+	return "", fmt.Errorf("can't tell whether %s is the MySQL or the MariaDB client (%v): use kling db connect -dsn with your client", p, why)
 }

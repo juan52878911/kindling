@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,4 +216,47 @@ func TestMySQLSoloPostgres(t *testing.T) {
 		}
 	}
 	_ = mc
+}
+
+// El cliente del host: la opción para apagar TLS depende de cuál sea, y
+// "mysql" puede ser el de MariaDB. Si --version falla, no se cae en
+// --ssl-mode=DISABLED (que MariaDB rechaza): se mira --help.
+func TestMySQLClientTLSFlag(t *testing.T) {
+	const helpMariaDB = "Usage: mysql [OPTIONS] [database]\n  --ssl  Enable SSL for connection (automatically enabled with other flags). (Defaults to on; use --skip-ssl to disable.)\n"
+	const helpMySQL = "mysql  Ver 8.4.2 for Linux on x86_64 (MySQL Community Server - GPL)\n  --ssl-mode=name  SSL connection mode.\n"
+	falla := errors.New("exit status 1")
+	casos := []struct {
+		nombre, bin     string
+		version, help   string
+		verErr, helpErr error
+		want            string
+		error           bool
+	}{
+		{"binario mariadb", "/usr/bin/mariadb", "", "", falla, falla, "--skip-ssl", false},
+		{"mysql de MariaDB", "/usr/bin/mysql", "mysql from 11.4.2-MariaDB, client 15.2 for Linux", "", nil, falla, "--skip-ssl", false},
+		{"mysql de MariaDB 10", "/usr/bin/mysql", "mysql  Ver 15.1 Distrib 10.11.6-MariaDB, for debian-linux-gnu", "", nil, nil, "--skip-ssl", false},
+		{"mysql de verdad", "/usr/bin/mysql", "mysql  Ver 8.4.2 for Linux on x86_64 (MySQL Community Server - GPL)", helpMySQL, nil, nil, "--ssl-mode=DISABLED", false},
+		{"--version falla, --help de MariaDB", "/usr/bin/mysql", "", helpMariaDB, falla, nil, "--skip-ssl", false},
+		{"--version falla, --help de MySQL", "/usr/bin/mysql", "", helpMySQL, falla, nil, "--ssl-mode=DISABLED", false},
+		{"nada lo aclara", "/usr/bin/mysql", "", "", falla, falla, "", true},
+		{"--help sin opciones de TLS", "/usr/bin/mysql", "mysql 1.0", "Usage: mysql", nil, nil, "", true},
+	}
+	for _, c := range casos {
+		probe := func(_ context.Context, p, arg string) (string, error) {
+			if p != c.bin {
+				t.Fatalf("%s: probed %s", c.nombre, p)
+			}
+			if arg == "--version" {
+				return c.version, c.verErr
+			}
+			return c.help, c.helpErr
+		}
+		got, err := mysqlClientTLSFlag(context.Background(), c.bin, probe)
+		if (err != nil) != c.error || got != c.want {
+			t.Errorf("%s: %q %v, want %q (error %v)", c.nombre, got, err, c.want, c.error)
+		}
+		if err != nil && !strings.Contains(err.Error(), "-dsn") {
+			t.Errorf("%s: the error should point to -dsn: %v", c.nombre, err)
+		}
+	}
 }
