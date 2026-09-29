@@ -19,13 +19,13 @@ package main
 // Ni la clave de la copia ni la de la API van al modelo, ni a argv, ni a la salida.
 
 import (
-	"regexp"
 	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
