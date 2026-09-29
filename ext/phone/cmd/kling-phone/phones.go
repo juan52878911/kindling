@@ -141,6 +141,8 @@ type app struct {
 
 	namesMu  *sync.Mutex
 	reserved map[string]bool
+	// tokenDir sustituye al directorio local de tokens (pruebas).
+	tokenDir string
 }
 
 func newApp(host string) *app {
@@ -339,8 +341,8 @@ func (r *tokenRec) hashes() []apiToken {
 }
 
 func (a *app) token(ctx context.Context, m *api.Machine) (*tokenRec, error) {
-	var r tokenRec
-	if err := a.d.GetStore(ctx, storeNS, m.ID, &r); err != nil {
+	r, err := a.getToken(ctx, m.ID)
+	if err != nil {
 		if api.IsNotFound(err) {
 			return nil, fmt.Errorf("%s has no API token in the daemon store (not made by kling phone, or a copy of one): "+
 				"remove it (kling phone rm %s) or make a new one", m.Name, m.Name)
@@ -350,7 +352,7 @@ func (a *app) token(ctx context.Context, m *api.Machine) (*tokenRec, error) {
 	if r.Machine != m.ID || r.Control == "" {
 		return nil, fmt.Errorf("%s: the stored API token belongs to another machine", m.Name)
 	}
-	return &r, nil
+	return r, nil
 }
 
 // ── la API del teléfono, por el proxy del daemon ─────────────────────────────

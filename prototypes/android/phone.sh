@@ -7,7 +7,8 @@
 #   ./phone.sh adb <tel> [args]   adb contra ese teléfono (sin args: imprime el serial)
 #   ./phone.sh shell <tel> [cmd]  una shell de Android (adb shell; sin adb, kling exec)
 #   ./phone.sh api <tel> <MÉTODO> <ruta> [fichero]   la API de kling-phoned (docs/phoned.md)
-#                                 por POST /machines/{ref}/guest, sin allow_exec
+#                                 por POST /machines/{ref}/guest, sin allow_exec, con el
+#                                 token del teléfono ($PHONE_ROOT/tokens/<tel>)
 #   ./phone.sh pause <tel>...     pausado en RAM: no gasta CPU; resume en ~25 ms
 #   ./phone.sh resume <tel>...    lo reanuda (los puertos se leen siempre de kling ps)
 #   ./phone.sh pool <N>           deja N teléfonos pausados listos para resume
@@ -98,7 +99,7 @@ kq() {
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 secs() { perl -e 'printf "%.2f\n", ($ARGV[1] - $ARGV[0]) / 1000' "$1" "$2"; }
 
-uso() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+uso() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # nucleo_listo: el CLI y el daemon tienen la capacidad `ready` (sonda, ganchos,
 # -wait-ready, cpu_pct de la receta y marca de secretos que se levanta). Se
@@ -237,11 +238,14 @@ ax() { local m="$1" t="$2"; shift 2; k exec -timeout "${t}s" "$m" -- android-sh 
 # con 0 si el invitado contestó 2xx. El cuerpo de ida sale de FICHERO tal cual.
 api() {
   local m="$1" meth="$2" path="$3" body="${4:-}"
-  perl -MJSON::PP -e '
-    my ($meth, $path, $port, $bf) = @ARGV; my $b = "";
+  # El token del teléfono (docs/phoned.md, #110): sin él solo contesta
+  # /v1/health. Va por la entrada estándar de perl, no en argv.
+  cat "$PHONE_ROOT/tokens/$m" 2>/dev/null | perl -MJSON::PP -e '
+    my ($meth, $path, $port, $bf) = @ARGV; my $b = ""; my $tok = <STDIN> // ""; chomp $tok;
     if (defined $bf && $bf ne "") { local $/; open(my $f, "<", $bf) or die "$bf: $!\n"; binmode $f; $b = <$f>; }
+    my %h = ("Content-Type" => "application/json"); $h{Authorization} = "Bearer $tok" if $tok ne "";
     print encode_json({port => $port + 0, path => $path, method => $meth, body => $b, wait_ms => 5000,
-      max_body_bytes => 33554432, headers => {"Content-Type" => "application/json"}});' \
+      max_body_bytes => 33554432, headers => \%h});' \
     "$meth" "$path" "$PHONED_PORT" "$body" |
   curl -sS --max-time 300 --unix-socket "$SOCK" -X POST -H 'Content-Type: application/json' \
     --data-binary @- "http://kling/machines/$m/guest" |
@@ -419,23 +423,37 @@ identidad_json() {
   local m="$1" id="$2" serie
   serie="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n' | tr 'a-f' 'A-F')"
   adb_pubkey "$m" | perl -MJSON::PP -e '
-    my ($id, $name, $serial, $ssaid) = @ARGV; local $/; my $k = <STDIN> // "";
+    my ($id, $name, $serial, $ssaid, $toksum) = @ARGV; local $/; my $k = <STDIN> // "";
     my @keys = grep { /\S/ } split /\n/, $k;
     my %p = (android_id => $id, name => $name, serial => $serial);
     $p{adb_keys} = \@keys if @keys; $p{ssaid} = $ssaid if $ssaid ne "";
-    print encode_json({phone => \%p});' "$id" "$m" "${PHONE_SERIAL:-$serie}" "${PHONE_SSAID:-}"
+    $p{api_tokens} = [{sha256 => $toksum, scope => "control"}] if $toksum ne "";
+    print encode_json({phone => \%p});' "$id" "$m" "${PHONE_SERIAL:-$serie}" "${PHONE_SSAID:-}" "${3:-}"
+}
+
+# token_nuevo TEL: un token para la API de kling-phoned de ESTE teléfono
+# (docs/phoned.md, #110). Se guarda en $PHONE_ROOT/tokens/<tel> (0600) y al
+# teléfono solo le llega su sha256. Imprime el sha256.
+token_nuevo() {
+  local tok
+  mkdir -p "$PHONE_ROOT/tokens" && chmod 700 "$PHONE_ROOT/tokens"
+  tok="kph_$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  ( umask 077; printf '%s\n' "$tok" >"$PHONE_ROOT/tokens/$1" )
+  printf '%s' "$tok" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64
 }
 
 identidad() {
   # PHONE_ANDROID_ID: conservar el de un teléfono que se rehace (16 hex).
   local m="$1" id="${PHONE_ANDROID_ID:-}"
   [ -n "$id" ] || id="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  local toksum
+  toksum="$(token_nuevo "$m")"
   if nucleo_listo; then
     # -hooks: PUT del almacén y después los ganchos de la imagen (10-identity
     # la aplica), esperando a que acaben con éxito.
-    identidad_json "$m" "$id" | kq machine secret "$m" -hooks || return 1
+    identidad_json "$m" "$id" "$toksum" | kq machine secret "$m" -hooks || return 1
   else
-    identidad_json "$m" "$id" | k machine secret "$m" >/dev/null || return 1
+    identidad_json "$m" "$id" "$toksum" | k machine secret "$m" >/dev/null || return 1
     ax "$m" 30 --identity >/dev/null || return 1
   fi
   # Aplicada: el secreto ya no hace falta en el metadata service. PUT pisa el
@@ -630,7 +648,7 @@ cmd_rm() {
   fi
   for m in $lista; do
     adb_olvida "$m"
-    k rm -f "$m" >/dev/null && echo "$m removed"
+    k rm -f "$m" >/dev/null && rm -f "$PHONE_ROOT/tokens/$m" && echo "$m removed"
   done
 }
 

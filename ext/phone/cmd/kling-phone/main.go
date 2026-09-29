@@ -62,6 +62,9 @@ func manifest() plugin.Manifest {
 				MachineArgs: []string{""}},
 			{Name: "pool", Group: "PHONES", Summary: "N spare phones, paused and ready",
 				Usage: usage("pool <N> [-watch] [-freeze-after 30m]", "prewarmed spares; -watch refills and freezes idle ones")},
+			{Name: "adopt", Group: "PHONES", Summary: "gives identity and API token to a phone kling phone did not make",
+				Usage:       usage("adopt <machine>", "e.g. a graph node from the golden: its API stays locked until then"),
+				MachineArgs: []string{""}},
 			{Name: "token", Group: "PHONES", Summary: "the phone API token, to hand to a graph node",
 				Usage:       usage("token <phone> [-read] [-rotate]", "prints a token for the 8091 (docs/phoned.md)"),
 				MachineArgs: []string{""}},
@@ -102,6 +105,7 @@ func main() {
 		"rm":     cmdRm,
 		"pool":   cmdPool,
 		"token":  cmdToken,
+		"adopt":  cmdAdopt,
 		"golden": cmdGolden,
 		"mcp":    cmdMCP,
 	}, map[string]func([]string, io.Writer) error{})

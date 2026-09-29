@@ -68,23 +68,33 @@ func (a *app) newPhone(ctx context.Context, name, golden string, labels map[stri
 		return r, fmt.Errorf("%w (the machine is kept for inspection: kling phone rm %s)", err, name)
 	}
 
+	if err := a.giveIdentity(ctx, r); err != nil {
+		return fail(err)
+	}
+	return r, nil
+}
+
+// giveIdentity da a un teléfono recién restaurado su identidad y su token, y
+// lo comprueba por la API con ese token. Rellena r.Identity y r.API.
+func (a *app) giveIdentity(ctx context.Context, r *newResult) error {
+	m := r.M
 	// El token antes que la identidad: si el gancho la aplica, el token con el
-	// que se abre ya está en el store.
+	// que se abre ya está guardado.
 	tok, err := newToken()
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	rec := &tokenRec{Machine: m.ID, Name: m.Name, Control: tok, Created: a.now().UTC()}
-	if err := a.d.PutStore(ctx, storeNS, m.ID, rec); err != nil {
-		return fail(fmt.Errorf("saving its API token: %w", err))
+	if err := a.putToken(ctx, rec); err != nil {
+		return fmt.Errorf("saving its API token: %w", err)
 	}
-	doc, err := a.newIdentity(name, rec)
+	doc, err := a.newIdentity(m.Name, rec)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	t1 := a.now()
 	if err := a.applyDoc(ctx, m, doc); err != nil {
-		return fail(err)
+		return err
 	}
 	r.Identity = a.now().Sub(t1)
 
@@ -93,24 +103,71 @@ func (a *app) newPhone(ctx context.Context, name, golden string, labels map[stri
 	t2 := a.now()
 	resp, err := a.call(ctx, m, tok, "GET", "/v1/identity", nil, false)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	var got struct {
 		Serial    string `json:"serial"`
 		AndroidID string `json:"android_id"`
 	}
 	if err := json.Unmarshal(resp.Body, &got); err != nil {
-		return fail(fmt.Errorf("/v1/identity: %w", err))
+		return fmt.Errorf("/v1/identity: %w", err)
 	}
 	if got.Serial != doc.Phone.Serial || got.AndroidID != doc.Phone.AndroidID {
-		return fail(errors.New("the phone does not report the identity it was given"))
+		return errors.New("the phone does not report the identity it was given")
 	}
 	if _, err := a.waitHealthy(ctx, m, 30*time.Second); err != nil {
-		return fail(err)
+		return err
 	}
 	r.API = a.now().Sub(t2)
 	if m2, err := a.d.Get(ctx, m.ID); err == nil {
 		r.M = m2
+	}
+	return nil
+}
+
+// ── adopt ────────────────────────────────────────────────────────────────────
+
+func cmdAdopt(args []string) error {
+	fs := flag.NewFlagSet("adopt", flag.ContinueOnError)
+	host := hostFlag(fs)
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return usageErr(errors.New("usage: kling phone adopt <machine>"))
+	}
+	ctx, stop := ctxWithSignals()
+	defer stop()
+	a := newApp(*host)
+	r, err := a.adopt(ctx, pos[0])
+	if err != nil {
+		return err
+	}
+	a.printNew(r)
+	return nil
+}
+
+// adopt da identidad y token a un teléfono que no hizo kling phone: un nodo de
+// grafo `from: <dorado>` (sus máquinas las crea el daemon), o una copia de uno.
+// Sin esto su API sigue cerrada (docs/phoned.md, #110).
+func (a *app) adopt(ctx context.Context, ref string) (*newResult, error) {
+	m, err := a.d.Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if !isPhone(m) {
+		return nil, fmt.Errorf("%s is not a phone (no %s label: was it made from a golden of kling phone?)", m.Name, labelPhone)
+	}
+	if m.State != api.StateRunning {
+		return nil, fmt.Errorf("%s is %s: it has to be running", m.Name, m.State)
+	}
+	if _, err := a.token(ctx, m); err == nil {
+		return nil, fmt.Errorf("%s already has its identity and token (kling phone token %s -rotate for a new token)", m.Name, m.Name)
+	}
+	r := &newResult{M: m}
+	if err := a.giveIdentity(ctx, r); err != nil {
+		return nil, err
 	}
 	return r, nil
 }
@@ -303,7 +360,7 @@ func (a *app) rm(ctx context.Context, m *api.Machine) error {
 	if err := a.d.Remove(ctx, m.ID); err != nil && !api.IsNotFound(err) {
 		return err
 	}
-	if err := a.d.DeleteStore(ctx, storeNS, m.ID); err != nil && !api.IsNotFound(err) {
+	if err := a.delToken(ctx, m.ID); err != nil {
 		return fmt.Errorf("%s: removing its API token: %w", m.Name, err)
 	}
 	return nil
@@ -519,7 +576,7 @@ func (a *app) tokenCmd(ctx context.Context, m *api.Machine, read, rotate bool) (
 	if err := a.applyDoc(ctx, m, identityDoc{Phone: phoneDoc{APITokens: &toks}}); err != nil {
 		return "", err
 	}
-	if err := a.d.PutStore(ctx, storeNS, m.ID, &next); err != nil {
+	if err := a.putToken(ctx, &next); err != nil {
 		return "", err
 	}
 	return out, nil

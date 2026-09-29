@@ -158,6 +158,33 @@ func TestAPINeedsToken(t *testing.T) {
 	}
 }
 
+// Con la autorización del daemon, un inquilino no tiene /store: el token va a
+// un fichero 0600 suyo y todo sigue funcionando.
+func TestTokensWithoutStore(t *testing.T) {
+	a, f, _ := testApp(t)
+	f.addGolden("phone-golden")
+	f.storeForbidden = true
+	ctx := context.Background()
+	if err := a.up(ctx, 1, "phone-golden"); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := a.phone(ctx, "1")
+	p, _ := a.localTokenPath(m.ID)
+	st, err := os.Stat(p)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("local token file: %v %v", err, st)
+	}
+	if _, err := a.callPhone(ctx, m, "GET", "/v1/screen", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.rm(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("local token left after rm: %v", err)
+	}
+}
+
 func TestGoldenBuild(t *testing.T) {
 	a, f, _ := testApp(t)
 	ctx := context.Background()
@@ -506,5 +533,37 @@ func TestNaturalSortAndNames(t *testing.T) {
 		if loopbackHost(h) != want {
 			t.Errorf("loopbackHost(%q) != %v", h, want)
 		}
+	}
+}
+
+// Un nodo de grafo `from: <dorado>` nace sin identidad ni token (API cerrada);
+// adopt se los da.
+func TestAdopt(t *testing.T) {
+	a, f, _ := testApp(t)
+	f.addGolden("phone-golden")
+	ctx := context.Background()
+	m, err := f.Run(ctx, api.RunRequest{From: "phone-golden", Name: "g-tel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.call(ctx, m, "x", "GET", "/v1/tree", nil, false); err == nil {
+		t.Fatal("a phone without identity answered tree")
+	}
+	r, err := a.adopt(ctx, "g-tel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := f.phoneOf("g-tel"); p.androidID == "" || len(p.tokens) != 1 {
+		t.Fatalf("not adopted: %+v", p)
+	}
+	if _, err := a.callPhone(ctx, r.M, "GET", "/v1/tree", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.adopt(ctx, "g-tel"); err == nil {
+		t.Fatal("adopted twice")
+	}
+	other, _ := f.Run(ctx, api.RunRequest{Image: "min", Name: "web"})
+	if _, err := a.adopt(ctx, other.Name); err == nil {
+		t.Fatal("adopted a machine that is not a phone")
 	}
 }

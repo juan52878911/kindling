@@ -33,6 +33,9 @@ type fakeDaemon struct {
 	commits  []string
 	// verifyBad hace que verify-cache diga que la caché no casa.
 	verifyBad bool
+	// storeForbidden: /store es de admin y quien llama es un inquilino
+	// (docs/authz.md): 403.
+	storeForbidden bool
 	// guestCalls cuenta llamadas al proxy por ruta.
 	guestCalls map[string]int
 }
@@ -386,6 +389,9 @@ func (f *fakeDaemon) RemoveSnapshot(_ context.Context, name string) error {
 func (f *fakeDaemon) GetStore(_ context.Context, ns, key string, out any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.storeForbidden {
+		return &api.StatusError{Code: 403, Message: "admin only"}
+	}
 	b, ok := f.store[ns+"/"+key]
 	if !ok {
 		return notFound("key")
@@ -396,6 +402,9 @@ func (f *fakeDaemon) GetStore(_ context.Context, ns, key string, out any) error 
 func (f *fakeDaemon) PutStore(_ context.Context, ns, key string, v any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.storeForbidden {
+		return &api.StatusError{Code: 403, Message: "admin only"}
+	}
 	b, _ := json.Marshal(v)
 	f.store[ns+"/"+key] = b
 	return nil
@@ -404,6 +413,9 @@ func (f *fakeDaemon) PutStore(_ context.Context, ns, key string, v any) error {
 func (f *fakeDaemon) DeleteStore(_ context.Context, ns, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.storeForbidden {
+		return &api.StatusError{Code: 403, Message: "admin only"}
+	}
 	if _, ok := f.store[ns+"/"+key]; !ok {
 		return notFound("key")
 	}
@@ -463,6 +475,6 @@ func testApp(t *testing.T) (*app, *fakeDaemon, *bytes.Buffer) {
 	s := defaultSettings()
 	s.AdbPubKey = "/nonexistent"
 	a := &app{d: f, s: s, out: &out, errw: io.Discard, now: time.Now, sleep: func(time.Duration) {},
-		namesMu: &sync.Mutex{}}
+		namesMu: &sync.Mutex{}, tokenDir: t.TempDir()}
 	return a, f, &out
 }
