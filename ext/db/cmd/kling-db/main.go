@@ -50,6 +50,10 @@ func manifest() plugin.Manifest {
 			{Name: "role", Group: "COPIES", Summary: "a read-only role inside a copy",
 				Usage:       usage("role <copy> -ro [-name agent] [-schemas a,b] [-rm]", "a login role that can only read"),
 				MachineArgs: []string{""}},
+			{Name: "branch", Group: "COPIES", Summary: "one database per git branch",
+				Usage: usage("branch [<branch>] [-from P] [-golden G]", "the copy of a git branch, forked from its parent") +
+					usage("branch -switch | -ls | -rm B | -prune", "activate this branch's copy (git hook), list, clean up") +
+					usage("branch hook install|uninstall", "post-checkout hook that switches the copy")},
 			{Name: "reset", Group: "COPIES", Summary: "replaces a copy with a fresh one from its template",
 				Usage:       usage("reset <copy>", "same name, same template, new data"),
 				MachineArgs: []string{""}},
@@ -98,6 +102,7 @@ func main() {
 	plugin.Main(manifest(), map[string]func([]string) error{
 		"up":        cmdUp,
 		"fork":      cmdFork,
+		"branch":    cmdBranch,
 		"connect":   cmdConnect,
 		"attach":    cmdAttach,
 		"detach":    cmdDetach,

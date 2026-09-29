@@ -218,6 +218,12 @@ func cmdFork(args []string) error {
 // fork ramifica una copia lista en n copias listas. Todo o nada: si una no se
 // puede preparar, se borran todas las creadas.
 func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api.Machine, error) {
+	return a.forkWith(ctx, src, n, owner, nil)
+}
+
+// forkWith es fork con etiquetas extra que nacen con las copias (pisan las
+// heredadas del origen: kling db branch pone así su repo y su rama).
+func (a *app) forkWith(ctx context.Context, src string, n int, owner string, extra [][2]string) ([]*api.Machine, error) {
 	if n < 1 || n > api.ForkMax {
 		return nil, fmt.Errorf("-n must be between 1 and %d", api.ForkMax)
 	}
@@ -246,8 +252,11 @@ func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api
 		return nil, fmt.Errorf("%s is %s: only a running or frozen copy can be forked", mc.Name, mc.State)
 	}
 
-	out, err := a.k.Run(ctx, nil, "sandbox", "fork", mc.ID, "-n", strconv.Itoa(n),
-		"-label", labelState+"="+statePreparing, "-json")
+	forkArgs := []string{"sandbox", "fork", mc.ID, "-n", strconv.Itoa(n), "-label", labelState + "=" + statePreparing}
+	for _, l := range extra {
+		forkArgs = append(forkArgs, "-label", l[0]+"="+l[1])
+	}
+	out, err := a.k.Run(ctx, nil, append(forkArgs, "-json")...)
 	if err != nil {
 		// El daemon deshace el fork entero si una copia falla.
 		return nil, err
@@ -282,6 +291,9 @@ func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api
 			}
 		}
 		c.Labels[labelState] = statePreparing
+		for _, l := range extra {
+			c.Labels[l[0]] = l[1]
+		}
 	}
 	for _, c := range copies {
 		if err := a.prepare(ctx, c); err != nil {

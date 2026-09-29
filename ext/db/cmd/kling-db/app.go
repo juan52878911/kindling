@@ -33,6 +33,9 @@ const (
 	labelState    = "kling.db.state"    // preparing | ready
 	labelRole     = "kling.db.role"     // rol de la aplicación (app)
 	labelDatabase = "kling.db.database" // base de la aplicación (appdb)
+	labelRepo     = "kling.db.repo"     // hash del toplevel del repo git (kling db branch)
+	labelBranch   = "kling.db.branch"   // clave estable de la rama (ver branchKey)
+	labelUsed     = "kling.db.used"     // segundos unix de la última vez que fue la activa
 
 	statePreparing = "preparing"
 	stateReady     = "ready"
@@ -45,7 +48,7 @@ const (
 
 // dbLabelKeys son las claves que escribe esta extensión, para el test de
 // api.KeyPattern.
-var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, api.LabelKind, api.LabelPorts}
+var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, api.LabelKind, api.LabelPorts}
 
 var (
 	// nombres de máquina y de plantilla (validName del núcleo).
@@ -76,6 +79,10 @@ type app struct {
 	sleep   func(time.Duration)
 	// readyWait es cuánto se espera a que Postgres acepte conexiones.
 	readyWait time.Duration
+	// cwd es el directorio del que kling db branch lee el repositorio git
+	// (vacío: el del proceso). now es el reloj (sustituible en los tests).
+	cwd string
+	now func() time.Time
 }
 
 func newApp(host string) (*app, error) {
