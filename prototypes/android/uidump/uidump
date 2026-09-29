@@ -23,11 +23,12 @@
 # tormenta de crash_dump64 acaba en el OOM del invitado y se lleva a Android
 # (pasó dos veces probando).
 #
-# Solo puede haber un UiAutomation a la vez en Android: mientras el servidor lo
-# tiene, `uiautomator dump` y las pruebas de instrumentación fallan. Lo suelta
-# solo tras 30 s sin peticiones, o ya con `release`; el siguiente `uidump` lo
-# vuelve a tomar (~5-8 ms). `connect` lo toma sin volcar nada (antes de
-# guardar un dorado, para que los clones lo traigan tomado).
+# Solo puede haber un UiAutomation a la vez en Android. El servidor lo toma
+# para cada petición y lo suelta al responder (~6 ms de coste por dump), y no lo
+# toma mientras vea correr un `uiautomator` o un `am instrument`: no los
+# estorba (docs/uidump.md). `connect` lo toma y suelta sin volcar nada (calienta
+# la ruta antes de guardar un dorado). `release` solo importa si el servidor
+# se arrancó con --release-after-ms N (mantener UiAutomation N ms entre dumps).
 set -uo pipefail
 
 SOCK=/dev/socket/kindling-uidump

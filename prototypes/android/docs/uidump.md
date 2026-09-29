@@ -3,8 +3,10 @@
 `uiautomator dump` tarda ~1,9 s dentro de Android: arranca una JVM
 (`app_process`), conecta UiAutomation, espera **1 s** de interfaz quieta
 (`waitForIdle(1000, 10000)` en `DumpCommand`) y suelta la conexión. `uidump` es
-un servidor residente que hace el arranque una vez y mantiene UiAutomation
-mientras se use, más un cliente en la VM que le pide el XML por un socket unix.
+un servidor residente que hace el arranque una vez y toma UiAutomation solo lo
+que dura cada petición, más un cliente en la VM que le pide el XML por un
+socket unix. **No estorba a `uiautomator` ni a `am instrument`** (ver
+"Convivencia con uiautomator y la instrumentación").
 
 **El XML es el mismo, byte a byte**: el servidor llama por reflexión al
 `AccessibilityNodeInfoDumper` de `/system/framework/uiautomator.jar` (su
@@ -61,8 +63,9 @@ Otras corridas en la VM fría: 16-21 ms de p50, p95 ≤ 30 ms.
   del disco, igual que con uiautomator). Con `uiautomator` eran 2,7 s (README).
   50 dumps en el clon: p50 15, p95 16 ms.
 - `kling pause` + `thaw` → dump: 17 ms. El servidor ni se entera.
-- Tras `release` (o tras 30 s sin peticiones) el siguiente dump reconecta:
-  30-70 ms de extremo a extremo (5-8 ms la conexión en sí).
+- Cada dump toma y suelta UiAutomation (ver más abajo); la conexión cuesta
+  ~6 ms. La tabla de arriba es de la versión anterior, que lo mantenía; las
+  cifras actuales están en "Convivencia".
 - Servidor muerto (`kill -9`) → primer dump: 148 ms (el cliente lo relanza;
   arrancar la JVM de `app_process` cuesta ~130 ms: el grueso de los 1,9 s de
   uiautomator es la espera de quietud). Parado con `uidump stop` → 150 ms.
@@ -74,6 +77,65 @@ Otras corridas en la VM fría: 16-21 ms de p50, p95 ≤ 30 ms.
   ganancia aquí es pequeña: la entrada está por comodidad, no por velocidad.
 
 Resultados crudos en `results/uidump/` (no se versionan): `bench.sh` los deja ahí.
+
+## Convivencia con uiautomator y la instrumentación (#94)
+
+El registro de UiAutomation está en `AccessibilityManagerService`: el segundo
+cliente recibe `IllegalStateException: UiAutomationService ... already
+registered!` y ni `uiautomator` ni `am instrument` reintentan. Antes el
+servidor lo mantenía hasta 30 s tras el último dump y los dos fallaban (medido:
+la instrumentación, **0/10** tras un `uidump`). Un `AccessibilityService`
+propio se descartó: hay que instalarlo y activarlo en Ajustes, no da
+`getRootInActiveWindow` igual que UiAutomation y no ve el mismo árbol
+(`FLAG_INCLUDE_NOT_IMPORTANT_VIEWS` de `uiautomator`).
+
+Ahora, dos cosas:
+
+1. **UiAutomation solo dura la petición**: se toma al llegar y se suelta justo
+   después de responder (el cliente no espera a la suelta). Sin vigilante, un
+   rival que cayera dentro de un dump (~13 ms de cada ~25 en un bucle) fallaba:
+   `uiautomator` 9/10 con un `uidump` en bucle.
+2. **Vigilante de rivales**: un rival tarda en llegar a UiAutomation (la JVM de
+   `uiautomator` ~130 ms; `am instrument` es otra `app_process` más la app).
+   Un hilo mira `/proc` cada 100 ms buscando `uiautomator` y `am|cmd activity
+   instrument`, y **`connect()` hace además una pasada justo antes de tomar
+   UiAutomation** (solo mira los pids nuevos): si hay un rival vivo (o se fue
+   hace <300 ms; 3 s en el caso de `instrument`, que sin `-w` sale al momento),
+   no lo toma y la petición espera hasta `--busy-wait-ms`. Un proceso recién
+   bifurcado trae la línea de órdenes de su padre hasta el `exec`: lo que no es
+   rival se relee 4 pasadas. (Primera versión: solo el hilo, y `am instrument`
+   no era `cmd activity instrument` sino `app_process ...am.Am`, así que no se
+   veía nunca: 2-8 % de fallos de la instrumentación con el bucle.)
+
+### Cifras (2026-09-29, VM Android viva, `-mem 1536 -cpus 2`, Mac con otros agentes)
+
+APK de prueba con una `Instrumentation` que llama a `getUiAutomation().
+getRootInActiveWindow()` (`uidump/itest/`). En la VM (`uidump/coexist.sh`):
+
+| | antes (mantiene 30 s) | ahora |
+|---|---|---|
+| `am instrument` justo tras un `uidump` | 0/10 | **10/10** |
+| `am instrument` con `uidump` en bucle sin pausa | 2/10 | **160/160** (dos tandas, 60 y 100) |
+| `uiautomator dump` con `uidump` en bucle | (sin medir; falla mientras lo mantiene) | **20/20** y 15/15 (9/10 sin vigilante) |
+| `uiautomator dump` tras un `uidump` | 0/10 | 10/10 |
+| instrumentación sin `uidump` (línea base) | | 60/60 |
+| `uidump dump`, 300 seguidos, dentro de la VM | p50 7,8 ms (200) | **p50 12,9, p95 20,6, máx 41,9 ms** |
+| `uidump` desde el Mac (`kling exec`), 100 | p50 19 | **p50 24, p95 50 ms** (17/27 en otra tanda) |
+| `uidump dump --windows` desde el Mac | p50 21 | **p50 134 ms** (19 con `--release-after-ms 2000`) |
+| CPU del servidor en reposo | 0 | ~0,35 % de un núcleo (vigilante a 100 ms; 3 % a 20 ms) |
+
+- **Coste de retomar**: +5-6 ms por dump (p50 en la VM 7,8 → 12,9 ms; el
+  registro de UiAutomation en `system_server` es lo que cuesta). De extremo a
+  extremo sigue en ~20-25 ms de p50; el p95 depende de lo cargado que esté el
+  Mac (27-54 ms).
+- **`--windows` sale caro (134 ms)**: al reconectar se reinicia la bandera
+  `FLAG_RETRIEVE_INTERACTIVE_WINDOWS` y hay que esperar 100 ms a que
+  `system_server` rellene la lista. Es el único modo afectado; quien lo use en
+  ráfagas puede arrancar el servidor con `--release-after-ms 2000`.
+- El dump mismo no cambia (mismo `dumpNodeRec`): no se repitió la comparación
+  de XML, solo se comprobó que sale `<hierarchy` en cada uno.
+- Una instrumentación que **ya** corre (tests de minutos) hace esperar 5 s al
+  dump y devolver `ERROR: ... held by another client`: no se le quita nada.
 
 ## Cómo funciona
 
@@ -96,11 +158,8 @@ Mac: kling exec <m> -- uidump dump
 - Antes de cada dump se vacía la caché de nodos de la conexión
   (`AccessibilityInteractionClient.clearCache(connId)`), como si fuera un
   uiautomator recién conectado: nunca devuelve un árbol viejo.
-- **UiAutomation es uno solo en Android.** Mientras el servidor lo tiene,
-  `uiautomator dump` y las pruebas de instrumentación fallan. Por eso no lo toma
-  hasta la primera petición y lo suelta tras 30 s sin peticiones
-  (`--release-after-ms`, 0 = nunca) o con `uidump release`. `uidump connect` lo
-  toma sin volcar (antes de guardar un dorado).
+- **UiAutomation es uno solo en Android.** Ver "Convivencia con uiautomator y
+  la instrumentación": se toma para cada petición y se suelta al responder.
 - **Servicio de init** (`uidump/kindling-uidump.rc` en `/system/etc/init/`):
   arranca con `sys.boot_completed=1`, así un dorado guardado después ya trae la
   JVM caliente; init lo relanza si muere.
@@ -141,8 +200,14 @@ dejó los mismos ficheros y el mismo dex.)
 
 ## Limitaciones
 
-- Mientras el servidor tiene UiAutomation, `uiautomator` y la instrumentación
-  fallan ("already registered"): `uidump release` antes, o esperar 30 s.
+- Un `uiautomator` o una instrumentación que **ya tienen** UiAutomation hacen
+  esperar a `uidump` hasta `--busy-wait-ms` (5 s) y luego `ERROR: UiAutomation
+  is held by another client`. Un dump con `--idle` sí lo mantiene mientras
+  espera (hasta `--timeout`, 10 s): un rival que llegue en ese rato falla.
+- Con `--release-after-ms N` (N > 0, opcional) el servidor lo mantiene N ms
+  entre dumps: `dump --windows` baja de 134 a ~19 ms, pero deja de estar
+  cubierto del todo (la instrumentación falló 1 de 20 veces en la prueba de
+  abajo).
 - Sin `--idle`, el dump no espera a que la interfaz se calme (es lo que lo hace
   rápido). Quien necesite el estado final tras una acción pide `--idle`.
 - Solo Android 13 probado (Redroid 13 arm64). Lo interno que se usa por
