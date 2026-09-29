@@ -20,6 +20,12 @@ package machine
 // en vuelo por nodo (los demás esperan el mismo), con un tope de esperas; por
 // encima, la conexión se rechaza y la auditoría dice busy. Si no cabe en el
 // host, no_capacity.
+//
+// EL USO: idle_freeze es el TTL de la máquina del nodo, y cada conexión que
+// pasa la puerta (y, si despertó al destino, cuyo puerto ya contesta)
+// reinicia su reloj (renovarPorUso): un nodo se vuelve a congelar solo tras
+// idle_freeze segundos sin conexiones nuevas. Las rechazadas (sin arista,
+// busy, no_capacity, destino que no está) no renuevan nada.
 
 import (
 	"context"
@@ -123,7 +129,30 @@ func (m *Manager) resolverArista(ctx context.Context, origen, gid, desde, hacia 
 			return "", "", err
 		}
 	}
+	m.renovarPorUso(id)
 	return addr, id, nil
+}
+
+// renovarMinimo es cada cuánto, como mucho, una conexión renueva el TTL de un
+// nodo: el TTL va en segundos, y así una ráfaga de conexiones no pide una
+// escritura del estado por cada una.
+const renovarMinimo = time.Second
+
+// renovarPorUso reinicia el reloj del TTL (idle_freeze) de la máquina id, si
+// corre y lo tiene. Toma m.mu en escritura: quien llama no puede tenerlo.
+func (m *Manager) renovarPorUso(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mc := m.byID[id]
+	if mc == nil || mc.TTLSeconds <= 0 || mc.State != api.StateRunning {
+		return
+	}
+	ahora := time.Now()
+	if mc.TTLAt != nil && !mc.TTLAt.After(ahora) && ahora.Sub(*mc.TTLAt) < renovarMinimo {
+		return
+	}
+	mc.TTLAt = &ahora
+	m.persist()
 }
 
 // comprobarAristaLocked es la puerta de cada conexión por una arista. Con
@@ -307,7 +336,14 @@ func (m *Manager) ponerEnMarchaLocked(ctx context.Context, gid, nodo string, con
 	case api.StateRunning:
 		return nil
 	case api.StateWarm, api.StatePaused:
-		return despertarNodoGrafo(ctx, m, id)
+		if err := despertarNodoGrafo(ctx, m, id); err != nil {
+			return err
+		}
+		// Thaw no toca el reloj del TTL: sin esto, un nodo que llevaba más
+		// de idle_freeze dormido se volvería a congelar en la siguiente
+		// vuelta del vigilante, con la conexión que lo despertó a medias.
+		m.renovarPorUso(id)
+		return nil
 	}
 	return fmt.Errorf("node %s is %s", nodo, mc.State)
 }

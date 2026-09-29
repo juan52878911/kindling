@@ -10,6 +10,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Fase baja: grafos
+
+- **`idle_freeze` es "N segundos sin conexiones" (#54).** Cada conexión aceptada por una
+  arista `link` o `credential` (proxy de enlace y de Postgres en Linux, broker de enlaces
+  en macOS) reinicia el reloj del TTL del nodo destino, como mucho una vez por segundo;
+  las rechazadas no. Despertar un nodo también lo reinicia: antes, uno dormido más de
+  `idle_freeze` se volvía a congelar en la siguiente vuelta del vigilante. Ver
+  [`docs/grafos.md`](docs/grafos.md#idle_freeze-segundos-sin-uso).
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>

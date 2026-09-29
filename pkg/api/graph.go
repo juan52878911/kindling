@@ -159,8 +159,9 @@ type GraphNode struct {
 	Ports []int `json:"ports,omitempty"`
 	// Wake: eager (por defecto) o lazy.
 	Wake string `json:"wake,omitempty"`
-	// IdleFreezeSeconds congela el nodo tras ese tiempo (el TTL de siempre con
-	// on_ttl freeze). En esta versión no se renueva por conexión.
+	// IdleFreezeSeconds congela el nodo tras ese tiempo sin conexiones nuevas:
+	// es el TTL de siempre con on_ttl freeze, y cada conexión aceptada por
+	// una arista hacia el nodo (o despertarlo) reinicia su reloj.
 	IdleFreezeSeconds int                `json:"idle_freeze,omitempty"`
 	Volumes           []VolumeAttachment `json:"volumes,omitempty"`
 	// Shares: carpetas del host del propio nodo, como en run (solo con Image).
