@@ -47,6 +47,9 @@ func manifest() plugin.Manifest {
 			{Name: "rm", Group: "COPIES", Summary: "removes a copy and its password",
 				Usage:       usage("rm <copy>", "the machine and its password file"),
 				MachineArgs: []string{""}},
+			{Name: "ask", Group: "COPIES", Summary: "a question in plain words, answered read-only",
+				Usage:       usage(`ask <copy> "question" [-yes] [-role R]`, "answered by a model, run read-only"),
+				MachineArgs: []string{""}},
 			{Name: "doctor", Group: "DIAGNOSE", Summary: "checks a copy or a Postgres URL",
 				Usage:       usage("doctor <copy> | -url postgres://...", "finds what is wrong with a database"),
 				MachineArgs: []string{""}},
@@ -73,6 +76,7 @@ func main() {
 		"rm":      cmdRm,
 		"doctor":  cmdDoctor,
 		"audit":   cmdAudit,
+		"ask":     cmdAsk,
 		"golden":  cmdGolden,
 	}, map[string]func([]string, io.Writer) error{})
 }

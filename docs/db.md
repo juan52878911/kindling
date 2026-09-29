@@ -27,6 +27,7 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
 | `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
+| `ask <copia> "pregunta" [-role R] [-yes] [-explain -send-data]` | un modelo traduce la pregunta a una SQL que se enseña, se confirma y se ejecuta con un rol de solo lectura en una transacción READ ONLY; ver [db-ask.md](db-ask.md) |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
