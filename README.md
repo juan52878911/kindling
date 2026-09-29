@@ -946,12 +946,18 @@ kling db branch hook install                  # one copy per git branch, switche
 kling db doctor t1                            # security findings (exit 1 if there are any)
 kling db tenant-check t1                      # exercises RLS: each tenant sees only its rows
 kling db ask t1 "how many customers per country?"   # a model writes the SQL; you confirm; read-only
+kling db ask-web t1                           # the same in a local web page (loopback, one-time URL)
+kling db diff t1 t2                           # what changed between two copies: schema and rows, no data
+kling db env up shop-app -golden pg           # app + database as a graph (Linux); the app never sees the password
 kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
   'postgres://readonly@db.prod.example.com:5432/shop'   # a masked copy of production
 ```
 
 An agent in **another** microVM can share a copy through the credential proxy
-(`kling db attach`, Linux only) and never sees the password. Templates, roles, `rehearse`,
+(`kling db attach`; on macOS through the daemon's link broker) and never sees the password.
+MariaDB templates work too (`up`, `fork`, `connect`, `rotate`, `doctor`, `audit`:
+[docs/mysql.md](docs/mysql.md)), and `kling db doctor -url` checks a Postgres you already
+run, over verified TLS by default. Templates, roles, `rehearse`,
 `snapshot`/`undo`, `audit` and the rest: [docs/db.md](docs/db.md); natural-language
 questions: [docs/db-ask.md](docs/db-ask.md); the frozen Postgres templates:
 [docs/db-golden.md](docs/db-golden.md). To point an agent at a database you already run
@@ -1367,7 +1373,8 @@ rewritten. The proxy does not look at SQL, so the role's own grants are the limi
 database on a private IP is refused unless you pin it yourself: `-upstream
 127.0.0.1:5432` for a Docker database on the same host, or a LAN/VPC address, with
 `-upstream-tls disable` (SCRAM-SHA-256 only) when it has no TLS. Recipes in
-[docs/postgres.md](docs/postgres.md); the security model in SECURITY.md §7.
+[docs/postgres.md](docs/postgres.md); the security model in SECURITY.md §7. MySQL and
+MariaDB work the same way with `-type mysql`: [docs/mysql.md](docs/mysql.md).
 
 Need a throwaway database per test or agent instead? `kling db up <template>` gives a
 ready Postgres copy per microVM with its own password: [docs/db.md](docs/db.md).
@@ -1551,7 +1558,9 @@ instances share pages.
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: Chispa classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
 | [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | One microVM and one disk per MCP session: the options weighed, the design, measured cost (Spanish) |
-| [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: a disposable Postgres per microVM, roles, branches, `doctor`, `tenant-check`, masked `clone`; questions in natural language (Spanish) |
+| [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: a disposable Postgres per microVM, roles, branches, `doctor`, `tenant-check`, `diff`, masked `clone`; questions in natural language, also from a web page (Spanish) |
+| [`docs/mysql.md`](docs/mysql.md) | MySQL and MariaDB: the credential proxy (`-type mysql`) and MariaDB copies in `kling db` (Spanish) |
+| [`docs/authz.md`](docs/authz.md) | Per-operation authorization on the daemon socket: admin and tenant roles by peer credentials, what each role can do (Spanish) |
 | [`docs/postgres.md`](docs/postgres.md) | Connect your own Postgres through the credential proxy: Docker, LAN/VPC, Neon, Supabase, RDS (Spanish) |
 | [`docs/grafos.md`](docs/grafos.md) · [`docs/grafos-diseno.md`](docs/grafos-diseno.md) | `kling graph`: several machines and the edges between them, frozen, snapshotted and forked as one (Spanish) |
 | [`docs/cow.md`](docs/cow.md) | `daemon.cow`: reflink disks for `run -from`, the three modes and measurements (Spanish) |

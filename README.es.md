@@ -960,12 +960,18 @@ kling db branch hook install                  # una copia por rama de git, que c
 kling db doctor t1                            # hallazgos de seguridad (sale con 1 si hay alguno)
 kling db tenant-check t1                      # ejercita RLS: cada inquilino ve solo sus filas
 kling db ask t1 "¿cuántos clientes hay por país?"   # un modelo escribe la SQL; tú la confirmas; solo lectura
+kling db ask-web t1                           # lo mismo en una página web local (loopback, URL de un uso)
+kling db diff t1 t2                           # qué cambió entre dos copias: esquema y filas, sin datos
+kling db env up shop-app -golden pg           # app + base como grafo (Linux); la app nunca ve la contraseña
 kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
   'postgres://readonly@db.prod.example.com:5432/shop'   # una copia enmascarada de producción
 ```
 
 Un agente de **otra** microVM puede compartir una copia por el proxy de credenciales
-(`kling db attach`, solo Linux) sin ver nunca la contraseña. Plantillas, roles, `rehearse`,
+(`kling db attach`; en macOS, por el broker de enlaces del daemon) sin ver nunca la
+contraseña. También hay plantillas MariaDB (`up`, `fork`, `connect`, `rotate`, `doctor`,
+`audit`: [docs/mysql.md](docs/mysql.md)), y `kling db doctor -url` revisa una Postgres que
+ya tienes, con TLS verificado por defecto. Plantillas, roles, `rehearse`,
 `snapshot`/`undo`, `audit` y el resto: [docs/db.md](docs/db.md); preguntas en lenguaje
 natural: [docs/db-ask.md](docs/db-ask.md); las plantillas de Postgres congeladas:
 [docs/db-golden.md](docs/db-golden.md). Para apuntar a un agente a una base que ya tienes
@@ -1384,7 +1390,8 @@ proxy no mira el SQL, así que los permisos del propio rol son el límite. Una b
 privada se rechaza salvo que la fijes tú: `-upstream 127.0.0.1:5432` para una base en
 Docker del mismo host, o una dirección de la LAN/VPC, con `-upstream-tls disable` (solo
 SCRAM-SHA-256) si no tiene TLS. Recetas (también RDS, probado contra uno real) en
-[docs/postgres.md](docs/postgres.md); el modelo de seguridad en SECURITY.md §7.
+[docs/postgres.md](docs/postgres.md); el modelo de seguridad en SECURITY.md §7. MySQL y
+MariaDB van igual con `-type mysql`: [docs/mysql.md](docs/mysql.md).
 
 ¿Prefieres una base desechable por test o por agente? `kling db up <plantilla>` da una copia
 de Postgres lista por microVM con su propia contraseña: [docs/db.md](docs/db.md).
@@ -1570,7 +1577,9 @@ permite que N instancias compartan páginas.
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | Una microVM y un disco por sesión MCP: las opciones sopesadas, el diseño y lo que cuesta |
-| [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: una Postgres desechable por microVM, roles, ramas, `doctor`, `tenant-check`, `clone` enmascarado; preguntas en lenguaje natural |
+| [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: una Postgres desechable por microVM, roles, ramas, `doctor`, `tenant-check`, `diff`, `clone` enmascarado; preguntas en lenguaje natural, también desde una página web |
+| [`docs/mysql.md`](docs/mysql.md) | MySQL y MariaDB: el proxy de credenciales (`-type mysql`) y las copias MariaDB de `kling db` |
+| [`docs/authz.md`](docs/authz.md) | Autorización por operación en el socket del daemon: roles admin e inquilino por las credenciales del par, qué puede hacer cada uno |
 | [`docs/postgres.md`](docs/postgres.md) | Conectar tu propia Postgres por el proxy de credenciales: Docker, LAN/VPC, Neon, Supabase, RDS |
 | [`docs/grafos.md`](docs/grafos.md) · [`docs/grafos-diseno.md`](docs/grafos-diseno.md) | `kling graph`: varias máquinas y las aristas entre ellas, congeladas, guardadas y ramificadas como una |
 | [`docs/cow.md`](docs/cow.md) | `daemon.cow`: discos por reflink para `run -from`, los tres modos y medidas |
