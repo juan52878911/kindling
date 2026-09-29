@@ -394,8 +394,16 @@ func TestParseURL(t *testing.T) {
 	if _, err := parseURL("postgres://app:secreto@db.example:5432/appdb"); err == nil || strings.Contains(err.Error(), "secreto") {
 		t.Fatalf("contraseña en la URL: %v", err)
 	}
-	if _, err := parseURL("postgres://app@db.example/appdb?sslmode=verify-full"); err == nil {
-		t.Fatal("aceptó un sslmode que exige TLS")
+	for _, m := range []string{"allow", "prefer", "nope"} {
+		if _, err := parseURL("postgres://app@db.example/appdb?sslmode=" + m); err == nil {
+			t.Fatalf("aceptó sslmode=%s", m)
+		}
+	}
+	if p, err := parseURL("postgres://app@db.example/appdb"); err != nil || p.sslmode != "verify-full" {
+		t.Fatalf("el modo por defecto no es verify-full: %+v %v", p, err)
+	}
+	if p, err := parseURL("postgres://app@db.example/appdb?sslmode=verify-ca&sslrootcert=/x/ca.pem"); err != nil || p.sslmode != "verify-ca" || p.rootCert != "/x/ca.pem" {
+		t.Fatalf("%+v %v", p, err)
 	}
 	if _, err := parseURL("mysql://app@h/d"); err == nil {
 		t.Fatal("aceptó otro esquema")

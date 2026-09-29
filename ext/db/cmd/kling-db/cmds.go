@@ -538,7 +538,10 @@ func (a *app) remove(ctx context.Context, mc *api.Machine) error {
 
 func cmdDoctor(args []string) error {
 	fs, host, owner := newFlags("doctor")
-	u := fs.String("url", "", "check this Postgres instead of a copy (postgres://user:pass@host:port/db)")
+	u := fs.String("url", "", "check this Postgres instead of a copy (postgres://user@host:port/db?sslmode=verify-full; the password goes in PGPASSWORD)")
+	caFile := fs.String("ca-file", "", "with -url: PEM file of extra trusted roots (added to the system's; wins over sslrootcert)")
+	tlsName := fs.String("tls-server-name", "", "with -url: name to verify in the certificate, if it is not the URL's host")
+	insecure := fs.Bool("insecure", false, "with -url: allow sslmode=disable or require on a non-loopback server (unencrypted or unauthenticated; the report says so)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -552,7 +555,10 @@ func cmdDoctor(args []string) error {
 	}
 	ctx, stop := signalCtx()
 	defer stop()
-	t := doctorTarget{URL: *u}
+	if *u == "" && (*caFile != "" || *tlsName != "" || *insecure) {
+		return usageErr("-ca-file, -tls-server-name and -insecure only go with -url")
+	}
+	t := doctorTarget{URL: *u, CAFile: *caFile, TLSServerName: *tlsName, Insecure: *insecure}
 	if len(pos) == 1 {
 		mc, err := a.inspect(ctx, pos[0])
 		if err != nil {
