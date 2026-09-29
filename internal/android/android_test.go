@@ -197,8 +197,11 @@ func TestBuild(t *testing.T) {
 	work := t.TempDir()
 	agent := filepath.Join(t.TempDir(), "kling-guest")
 	os.WriteFile(agent, []byte(elf(0xb7)), 0o755)
-	launcher := filepath.Join(t.TempDir(), "phoned")
+	inputs := t.TempDir()
+	launcher := filepath.Join(inputs, "phoned")
 	os.WriteFile(launcher, []byte(elf(0xb7)), 0o755)
+	// Como root (el daemon de Linux), solo se leen ficheros de aquí.
+	t.Setenv("KLING_ANDROID_INPUTS", inputs)
 	t.Setenv("KLING_ROOT", root)
 	t.Setenv("KLING_GUEST_AGENT", agent)
 	t.Setenv("SOURCE_DATE_EPOCH", "1790000000")
@@ -353,6 +356,34 @@ func TestBuild(t *testing.T) {
 	os.WriteFile(filepath.Join(work, "request.json"), req, 0o600)
 	if err := Build(work, io.Discard); err == nil || !strings.Contains(err.Error(), "not written by the android builder") {
 		t.Fatalf("overwrote a foreign base: %v", err)
+	}
+}
+
+// Como root, el constructor solo lee ficheros del directorio de kindling o de
+// KLING_ANDROID_INPUTS (el daemon de Linux lo corre como root).
+func TestAllowedSrcAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("only as root")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f")
+	os.WriteFile(p, []byte("x"), 0o644)
+	b := &builder{lib: "/nonexistent"}
+	t.Setenv("KLING_ANDROID_INPUTS", "")
+	if _, err := b.allowedSrc(p); err == nil {
+		t.Fatal("read a file outside the allowed directories as root")
+	}
+	if _, err := b.allowedSrc("/etc/passwd"); err == nil {
+		t.Fatal("read /etc/passwd as root")
+	}
+	t.Setenv("KLING_ANDROID_INPUTS", dir)
+	if _, err := b.allowedSrc(p); err != nil {
+		t.Fatal(err)
+	}
+	// Un enlace desde dentro hacia fuera no sirve para escapar.
+	os.Symlink("/etc/passwd", filepath.Join(dir, "l"))
+	if _, err := b.allowedSrc(filepath.Join(dir, "l")); err == nil {
+		t.Fatal("followed a symlink out of the allowed directory")
 	}
 }
 
