@@ -156,6 +156,18 @@ func TestAPINeedsToken(t *testing.T) {
 	if _, ok := f.store[storeNS+"/"+m.ID]; ok {
 		t.Fatal("token left in the store after rm")
 	}
+	// Un teléfono borrado sin kling phone (kling rm, graph rm): ls poda su token.
+	if err := a.up(ctx, 1, "phone-golden"); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := a.phone(ctx, "1")
+	_ = f.Remove(ctx, m2.ID)
+	if err := a.ls(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.store[storeNS+"/"+m2.ID]; ok {
+		t.Fatal("orphan token not pruned by ls")
+	}
 }
 
 // Con la autorización del daemon, un inquilino no tiene /store: el token va a

@@ -53,8 +53,14 @@ func verifyTrees(ctx context.Context, root string, dirs []string) (verifyResult,
 				return ctx.Err()
 			}
 			var s syscall.Stat_t
-			if syscall.Lstat(p, &s) != nil || s.Dev != dev {
-				if e.IsDir() && p != d {
+			if syscall.Lstat(p, &s) != nil {
+				return nil
+			}
+			// -xdev mira los directorios: en overlayfs un fichero de la capa de
+			// abajo da el st_dev de ESA capa, no el del overlay, y compararlo
+			// saltaba todos los ficheros.
+			if e.IsDir() {
+				if s.Dev != dev && p != d {
 					return filepath.SkipDir
 				}
 				return nil

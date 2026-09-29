@@ -105,6 +105,25 @@ func (a *app) putToken(ctx context.Context, r *tokenRec) error {
 	return os.Rename(tmp, p)
 }
 
+// pruneTokens borra los tokens de máquinas que ya no existen (un `kling rm` o
+// un `graph rm` a mano, que no pasan por kling phone). Sin /store (inquilino)
+// no hace nada: sus tokens locales se borran con `kling phone rm`.
+func (a *app) pruneTokens(ctx context.Context, ms []*api.Machine) {
+	keys, err := a.d.StoreKeys(ctx, storeNS)
+	if err != nil {
+		return
+	}
+	alive := map[string]bool{}
+	for _, m := range ms {
+		alive[m.ID] = true
+	}
+	for _, k := range keys {
+		if !alive[k] {
+			_ = a.d.DeleteStore(ctx, storeNS, k)
+		}
+	}
+}
+
 func (a *app) delToken(ctx context.Context, id string) error {
 	err := a.d.DeleteStore(ctx, storeNS, id)
 	if err != nil && !isForbidden(err) && !api.IsNotFound(err) {

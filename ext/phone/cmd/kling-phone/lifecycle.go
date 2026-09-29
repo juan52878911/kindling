@@ -59,8 +59,9 @@ func (a *app) newPhone(ctx context.Context, name, golden string, labels map[stri
 		WaitReady: true, ReadyTimeoutSeconds: 180,
 		Labels: api.MergeLabels(map[string]string{labelGolden: golden}, labels),
 	})
+	// La máquina ya existe (o no va a existir): el nombre lo guarda el daemon.
+	a.unreserve(name)
 	if err != nil {
-		a.unreserve(name)
 		return nil, fmt.Errorf("run -from %s: %w", golden, err)
 	}
 	r := &newResult{M: m, Restore: a.now().Sub(t0)}
@@ -265,10 +266,18 @@ func cmdLs(args []string) error {
 }
 
 func (a *app) ls(ctx context.Context, js bool) error {
-	ps, err := a.phones(ctx)
+	all, err := a.d.List(ctx)
 	if err != nil {
 		return err
 	}
+	a.pruneTokens(ctx, all)
+	var ps []*api.Machine
+	for _, m := range all {
+		if isPhone(m) {
+			ps = append(ps, m)
+		}
+	}
+	sortNatural(ps)
 	rows := make([]lsRow, len(ps))
 	var wg sync.WaitGroup
 	for i, m := range ps {
