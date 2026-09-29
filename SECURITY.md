@@ -558,6 +558,29 @@ darle esa confianza); un enlace duro que ya existiera en la carpeta hacia fuera
 se sirve como el fichero que es; y el daemon, si es root, lee con sus
 permisos lo que haya bajo la carpeta.
 
+### 14. Discos copy-on-write: el almacén XFS y su bind en el jail
+
+Con `daemon.cow` (ver [docs/cow.md](docs/cow.md)) el overlay de una instancia creada
+desde un dorado puede vivir en un almacén XFS propio (`$root/cow.xfs`, montado por loop
+en `$root/cow`). Lo que cambia:
+
+- **El anfitrión no interpreta nada del invitado.** El XFS lo crea y lo escribe solo el
+  kernel del anfitrión; el invitado controla el CONTENIDO de su fichero de overlay, no
+  los metadatos del sistema de ficheros que lo contiene. Es la misma superficie que un
+  overlay en ext4.
+- El almacén se monta `nodev,nosuid,noexec`, con la raíz y `m/` en 0750 root:grupo del
+  VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
+  escribir en la copia de la que se clonan las demás instancias.
+- **Jail**: a cada VMM se le monta por bind SOLO el directorio de su propio overlay
+  (`cow/m/<id>`), nunca el almacén entero. El bind se desmonta antes de borrar el jail,
+  y si no se puede desmontar el jail no se borra (un `RemoveAll` a través del bind
+  borraría el overlay).
+- El daemon no sigue el enlace simbólico de `machines/<id>` (un directorio del VMM)
+  para borrar ni para leer el overlay en `commit`: las rutas del almacén salen del id.
+- **Espacio**: el fichero se reserva entero al crearlo (sin sobreasignar), así que una
+  instancia que llena su disco llena su cuota en el almacén y no puede provocar errores
+  de E/S en el XFS que compartan las demás por falta de sitio debajo.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

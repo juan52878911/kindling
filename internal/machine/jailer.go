@@ -300,7 +300,14 @@ func (m *Manager) spawnJailed(id string, n *knet.Net, cg *os.File) (int, string,
 	// jailer se queja si su directorio ya existe de una ejecución anterior que
 	// no se limpió. Se borra: el estado que importa (snapshot, overlay) vive en
 	// machines/, no aquí.
-	_ = os.RemoveAll(filepath.Join(m.jailBase(), "firecracker", id))
+	if err := m.borrarJail(id); err != nil {
+		return 0, "", false, err
+	}
+	// El overlay en el almacén de discos entra al jail por bind, y tiene que
+	// estar montado antes de que jailer haga su chroot (ver prepararBindsJail).
+	if err := m.prepararBindsJail(id); err != nil {
+		return 0, "", false, err
+	}
 
 	logf, err := abrirConsola(m.dir(id))
 	if err != nil {

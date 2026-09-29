@@ -423,6 +423,9 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 				// Los snapshots temporales de fork sin copias (ver fork.go).
 				m.barrerForks()
 				m.vaciarPapelera()
+				// Overlays del almacén de discos sin máquina, y bases de
+				// dorados que ya no existen (ver cow.go).
+				m.barrerAlmacen()
 				// Los enlaces cortos a sockets de máquinas que ya no existen
 				// (macOS, rutas largas: ver fc.BarrerEnlaces).
 				fc.BarrerEnlaces(m.root)

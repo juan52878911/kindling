@@ -123,6 +123,33 @@ type Daemon struct {
 
 	// ShareCopyMaxMiB acota el contenido de una carpeta en modo copy. 0 = 1024.
 	ShareCopyMaxMiB int `json:"share_copy_max_mib,omitempty"`
+
+	// CoW decide cómo recibe una instancia creada desde un dorado (run -from,
+	// fork) su copia del overlay: "auto" (vacío), "reflink-store" u "off". Ver
+	// docs/cow.md. KLING_COW lo sustituye sin tocar el fichero. Se lee al
+	// arrancar el daemon.
+	CoW string `json:"cow,omitempty"`
+
+	// CoWStoreGiB es el tamaño del almacén propio (reflink-store) cuando se crea.
+	// 0 = una cuarta parte del disco libre, con un máximo de 16 GiB. Se reserva
+	// entero al crearlo (sin sobreasignar). KLING_COW_STORE_GIB lo sustituye.
+	CoWStoreGiB int `json:"cow_store_gib,omitempty"`
+}
+
+// Modos de daemon.cow.
+const (
+	CoWAuto  = "auto"
+	CoWStore = "reflink-store"
+	CoWOff   = "off"
+)
+
+// ValidateCoW dice si v es un valor válido de daemon.cow (vacío = auto).
+func ValidateCoW(v string) error {
+	switch v {
+	case "", CoWAuto, CoWStore, CoWOff:
+		return nil
+	}
+	return fmt.Errorf("daemon.cow must be %q, %q or %q, not %q", CoWAuto, CoWStore, CoWOff, v)
 }
 
 // Backends de microVM que entiende el daemon.
@@ -423,6 +450,20 @@ func (c *Config) Set(key, value string) error {
 				return fmt.Errorf("daemon.share_copy_max_mib can't be negative")
 			}
 			c.Daemon.ShareCopyMaxMiB = n
+		case "cow":
+			if err := ValidateCoW(value); err != nil {
+				return err
+			}
+			c.Daemon.CoW = value
+		case "cow_store_gib":
+			n, err := atoi()
+			if err != nil {
+				return err
+			}
+			if n < 0 {
+				return fmt.Errorf("daemon.cow_store_gib can't be negative")
+			}
+			c.Daemon.CoWStoreGiB = n
 		default:
 			return fmt.Errorf("unknown field daemon.%s", field)
 		}
@@ -514,6 +555,8 @@ func (c *Config) Keys() [][2]string {
 		{"daemon.vmm", c.Daemon.VMM},
 		{"daemon.share_roots", strings.Join(c.Daemon.ShareRoots, ",")},
 		{"daemon.share_copy_max_mib", itoa(c.Daemon.ShareCopyMaxMiB)},
+		{"daemon.cow", c.Daemon.CoW},
+		{"daemon.cow_store_gib", itoa(c.Daemon.CoWStoreGiB)},
 	}
 }
 

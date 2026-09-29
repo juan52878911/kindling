@@ -639,6 +639,35 @@ type Info struct {
 	// ShareRoots son los directorios del host bajo los que se pueden compartir
 	// carpetas en vivo (daemon.share_roots). Vacío = ninguno.
 	ShareRoots []string `json:"share_roots,omitempty"`
+	// CoW dice cómo recibe su disco una instancia creada desde un dorado (ver
+	// docs/cow.md). nil = daemon anterior.
+	CoW *CoWInfo `json:"cow,omitempty"`
+}
+
+// CoWInfo es el modo de copia de discos en uso (daemon.cow).
+type CoWInfo struct {
+	// Setting es lo configurado: "auto", "reflink-store" u "off".
+	Setting string `json:"setting"`
+	// Mode es lo que se hace de verdad: "reflink" (el sistema de ficheros de
+	// la raíz comparte bloques), "store" (almacén XFS propio con reflink),
+	// "clonefile" (APFS, macOS) o "copy" (copia completa, dispersa).
+	Mode string `json:"mode"`
+	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
+	Reason string `json:"reason,omitempty"`
+	// Store describe el almacén propio, si existe (aunque el modo sea otro:
+	// las instancias viejas siguen en él).
+	Store *CoWStore `json:"store,omitempty"`
+	// Clones cuenta, desde que arrancó el daemon, cuántas instancias recibieron
+	// su overlay de cada forma ("reflink", "store", "clonefile", "copy").
+	Clones map[string]int64 `json:"clones,omitempty"`
+}
+
+// CoWStore es el estado del almacén propio de discos.
+type CoWStore struct {
+	Path    string `json:"path"`
+	Mounted bool   `json:"mounted"`
+	SizeMiB int64  `json:"size_mib,omitempty"`
+	FreeMiB int64  `json:"free_mib,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

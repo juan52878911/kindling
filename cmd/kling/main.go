@@ -319,6 +319,7 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 	srv.SetShareConfig(shareConfig)
+	srv.SetCoW(cowConfig())
 	ctx, stop := ctxWithSignals()
 	defer stop()
 	return srv.Listen(ctx)
@@ -345,6 +346,30 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y
+// KLING_COW_STORE_GIB mandan sobre el fichero. Un valor que no se entiende se
+// avisa y se queda en auto.
+func cowConfig() machine.CoWConfig {
+	cfg := loadConfig()
+	c := machine.CoWConfig{Mode: cfg.Daemon.CoW, StoreGiB: cfg.Daemon.CoWStoreGiB}
+	if v, ok := os.LookupEnv("KLING_COW"); ok {
+		c.Mode = v
+	}
+	if err := config.ValidateCoW(c.Mode); err != nil {
+		log.Printf("warning: %v (using %q)", err, config.CoWAuto)
+		c.Mode = config.CoWAuto
+	}
+	if c.Mode == "" {
+		c.Mode = config.CoWAuto
+	}
+	if v := os.Getenv("KLING_COW_STORE_GIB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.StoreGiB = n
+		}
+	}
+	return c
 }
 
 // daemonBackend decide con qué VMM arranca el daemon: KLING_VMM si es un
@@ -1100,6 +1125,9 @@ func writeInfo(c *api.Client, i *api.Info) {
 			roots = strings.Join(i.ShareRoots, ", ")
 		}
 		fmt.Printf("share roots:  %s\n", roots)
+	}
+	if l := lineaCoW(i.CoW); l != "" {
+		fmt.Printf("disk clones:  %s\n", l)
 	}
 	if i.EncryptedAtRest != nil {
 		if *i.EncryptedAtRest {
