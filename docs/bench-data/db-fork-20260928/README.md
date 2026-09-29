@@ -13,7 +13,15 @@ carpetas de al lado.
 | docker `postgres:16-alpine` + seed (como Testcontainers) | ~3 000 ms | 6 127 – 6 761 ms | ~725 MiB | 204 MiB |
 | `CREATE DATABASE … TEMPLATE` | ~229 ms | 1 543 – 1 693 ms | ~19 MiB | n/a |
 
-32 copias: **sin medir en este host**. kindling y docker quedan `skipped` por la regla de
+32 copias de kindling (2.ª pasada, con 11 GiB de disco libre, `kindling-32/`): **DEGRADED**,
+69 de 96 copias listas, p50 10,9 s. Los 27 fallos son la **admisión de memoria del daemon**
+("doesn't fit: the microVM asks for … MiB"): el golden está configurado a 1 GiB por copia y
+el host de 8 GiB no reserva sitio para 32 aunque cada copia use de verdad ~17 MiB de PSS;
+las que entran esperan su turno de arranque. Para 32 copias en este host el golden debe
+configurarse a ~200 MiB (`mem_mib` es el límite de densidad, no el consumo real). Sin medir
+aún con esa configuración.
+
+Resto de celdas de 32 copias: kindling y docker quedan `skipped` por la regla de
 RAM/disco del banco; `TEMPLATE` con 32 llena el disco (desde PG 15 la copia pasa por el
 WAL) y el servidor muere, así que su fila `DEGRADED` no es un resultado de Postgres.
 
