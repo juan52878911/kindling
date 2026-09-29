@@ -30,6 +30,11 @@ import (
 
 const backendVMM = BackendVZ
 
+// auditoriaEnElDaemon: en macOS el registro lo escribe el kling-vz de la
+// máquina junto a su socket, el único sitio en que su sandbox le deja
+// escribir; el daemon solo lo lee (ver credaudit.go).
+var auditoriaEnElDaemon = false
+
 // Las aristas de un grafo y kling db attach (una credencial Postgres con
 // UpstreamMachine) llegan a la otra máquina por el broker (broker.go): el
 // kling-vz del origen pide la arista, el daemon comprueba, marca al reenvío

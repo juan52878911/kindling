@@ -769,7 +769,17 @@ c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' >/dev/n
   out=$(cat "$seg"); rm -f "$seg"
   contiene "$out" "/anything/e2e-follow" && contiene "$out" "DENIED(not_allowed)" \
     && ok "audit -f: la petición nueva aparece mientras se sigue" || bad "audit -f" "/anything/e2e-follow DENIED(not_allowed)" "$out"
+  # El registro vive fuera del directorio de la máquina (que es del VMM), en
+  # <root>/audit, 0700 de root; rm lo borra (#79).
+  crid=$($KLING inspect "$CR" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+  out=$(hostsh "sudo stat -c '%a %U' /var/lib/kindling/audit /var/lib/kindling/audit/$crid.jsonl 2>&1 | tr '\n' ' '")
+  vieja=$(hostsh "sudo test -e /var/lib/kindling/machines/$crid/credaudit.jsonl && echo si || echo no")
+  [ "$out" = "700 root 600 root " ] && [ "$vieja" = no ] \
+    && ok "audit: en <root>/audit (0700 y 0600, de root), no en el directorio del VMM" \
+    || bad "sitio del registro" "700 root 600 root y nada en machines/<id>" "$out vieja=$vieja"
   $KLING rm -f "$CR" >/dev/null 2>&1
+  [ "$(hostsh "sudo test -e /var/lib/kindling/audit/$crid.jsonl && echo si || echo no")" = no ] \
+    && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado" "sigue"
 else
   bad "run -egress allowlist" "una máquina" "no arrancó"
 fi

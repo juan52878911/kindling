@@ -10,6 +10,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Fase baja: seguridad
+
+- **El registro de auditoría del proxy sale del alcance del VMM (Linux, #79).** Vive
+  en `<root>/audit/<id>.jsonl` (directorio 0700 y fichero 0600, de root) en vez de en
+  `machines/<id>/`, que es del usuario sin privilegios del VMM: un Firecracker
+  comprometido ya no puede borrar, truncar ni sustituir el registro que lo vigila. Al
+  arrancar, el daemon migra los registros viejos (sin seguir enlaces, solo ficheros
+  regulares con un único enlace; lo demás se descarta sin leerlo) y barre los de
+  máquinas que ya no existen; `rm` borra el de la suya. `kling machine audit` no
+  cambia. En macOS sigue junto al socket de `kling-vz`.
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>

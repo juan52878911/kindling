@@ -103,9 +103,13 @@ func (m *Manager) claveCredenciales() ([]byte, error) {
 func (m *Manager) credPath(id string) string { return filepath.Join(m.dir(id), credFile) }
 
 // credAuditPath es el registro de auditoría del proxy de la máquina (ver
-// credaudit.go). En Linux lo escribe el proxy del daemon; en macOS, el
-// kling-vz de la máquina, que lo deja en el mismo sitio por su cuenta.
+// credaudit.go). En Linux lo escribe el proxy del daemon en <root>/audit, un
+// directorio solo de root; en macOS, el kling-vz de la máquina, que lo deja
+// junto a su socket, en el directorio de la máquina.
 func (m *Manager) credAuditPath(id string) string {
+	if auditoriaEnElDaemon {
+		return filepath.Join(m.dirAuditoria(), id+".jsonl")
+	}
 	return filepath.Join(m.dir(id), credproxy.AuditFile)
 }
 

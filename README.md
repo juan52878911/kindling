@@ -1334,8 +1334,9 @@ them, and they survive a daemon restart — they live encrypted in the machine's
 `state.json`, events or a snapshot. Repeating `-env` with a new key rotates it; the
 placeholder stays, so the running process needs no restart.
 
-Every request through the proxy, and every refusal, is logged in the machine's directory
-(`credaudit.jsonl`, 0600, rotated at 1 MiB):
+Every request through the proxy, and every refusal, is logged per machine (0600, rotated
+at 1 MiB; on Linux in `<root>/audit/<id>.jsonl`, out of the VMM's reach; on macOS in the
+machine's directory, `credaudit.jsonl`):
 
 ```sh
 kling machine audit payments            # TIME METHOD HOST PATH STATUS CREDS MS RESULT

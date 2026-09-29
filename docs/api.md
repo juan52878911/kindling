@@ -181,7 +181,8 @@ El techo queda en el snapshot al hacer commit.
 ### `GET /machines/{ref}/credaudit`
 
 El registro de auditoría del proxy de credenciales de la máquina
-(`machines/<id>/credaudit.jsonl` y su rotación `.1`), como NDJSON: una
+(`<root>/audit/<id>.jsonl` en Linux, fuera del alcance del VMM;
+`machines/<id>/credaudit.jsonl` en macOS; y su rotación `.1`), como NDJSON: una
 `api.CredAuditRecord` por línea, las más antiguas primero. Funciona con la máquina
 corriendo, congelada o parada; sin registro (nunca tuvo credenciales) devuelve `200`
 vacío. Lo usa `kling machine audit`.

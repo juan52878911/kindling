@@ -267,7 +267,7 @@ solo al crear: un `../../etc` saldría del directorio de datos.
 - **Registro de auditoría: metadatos del tráfico en disco** (`kling machine audit`,
   `GET /machines/{ref}/credaudit`, `pkg/credproxy/auditoria.go`). Cada petición que
   llega al proxy, también cada rechazo, deja una línea JSON en
-  `machines/<id>/credaudit.jsonl` (0600, abierto con `O_APPEND`): hora, método, host,
+  un fichero JSONL por máquina (0600, abierto con `O_APPEND`; dónde, abajo): hora, método, host,
   ruta, estado, motivo, si fue una denegación de política, los nombres (`Env`) de las
   credenciales que se sustituyeron de verdad, bytes y duración. **Esto es nuevo en
   disco**: antes el proxy no dejaba rastro de qué pedía el invitado; ahora queda qué
@@ -281,15 +281,27 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   llega decodificada y se lee en un terminal: nada de secuencias de escape del
   invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
   generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
-  copian y `rm` lo borra con el directorio. La escritura no bloquea la petición: va por
+  copian y `rm` lo borra. La escritura no bloquea la petición: va por
   una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
   descarta y se cuenta, y la cuenta viaja en el campo `dropped` del siguiente (o en una
-  línea propia), nunca en silencio. En Linux lo escribe el daemon (root) en el
-  directorio de la máquina, que es del usuario sin privilegios del VMM: se abre con
-  `O_NOFOLLOW` y solo si es un fichero regular, y el daemon lo lee igual, para que un
-  enlace o una FIFO plantados por un VMM comprometido no lleven la escritura ni la
-  lectura a otro fichero. En macOS lo escribe el `kling-vz` de la máquina junto a su
-  socket (el único directorio en que su sandbox le deja escribir) y lo lee el daemon.
+  línea propia), nunca en silencio. **En Linux lo escribe el daemon (root) en
+  `<root>/audit/<id>.jsonl`**, un directorio 0700 de root fuera del directorio de la
+  máquina (`internal/machine/credaudit.go`). Antes vivía en `machines/<id>/`, que es
+  del usuario sin privilegios del VMM: un Firecracker comprometido no podía leerlo ni
+  desviar la escritura (`O_NOFOLLOW`, solo ficheros regulares), pero sí borrarlo,
+  truncarlo o cambiarlo por otro, justo el registro que lo vigila. Ahora no lo alcanza.
+  Al arrancar, el daemon migra los registros viejos: copia el contenido (con
+  `O_NOFOLLOW`, solo si es un fichero regular con un único enlace; si no, lo descarta
+  sin leerlo) a un fichero nuevo creado con `O_EXCL`, y borra el viejo; si ya hay uno
+  nuevo, manda ese. Lo migrado vale lo que valía: estuvo en un directorio que el VMM
+  podía tocar. También borra los registros de máquinas que ya no existen, y `rm` borra
+  el de la suya. Si `<root>/audit` no se puede preparar (un enlace o un fichero en su
+  sitio, otro dueño), el proxy no escribe registro y el daemon lo avisa: nunca vuelve
+  al directorio del VMM. En macOS lo escribe el `kling-vz` de la máquina junto a su
+  socket (`machines/<id>/credaudit.jsonl`, el único directorio en que su sandbox le deja
+  escribir) y lo lee el daemon, sin seguir enlaces y solo con un único enlace; ahí el
+  que escribe es el mismo proceso que atiende al invitado, así que moverlo no
+  protegería nada (ver el plan de `docs/proxy-macos-separado.md`).
   El rechazo fuera de allowlist en macOS es ahora del propio proxy
   (`credproxy.Options.Enabled`), para que también quede en el registro.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
@@ -970,11 +982,11 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   veth del host entre el proxy y la copia (la contraseña no: SCRAM). `kling db rotate`
   o `reset`/`undo` de la copia rompen los attach existentes (clave o id nuevos): hay que
   repetirlos. Solo Linux por ahora (ver 7).
-- **El registro de auditoría es observabilidad, no prueba.** En Linux el directorio de
-  la máquina es del usuario del VMM: un Firecracker comprometido no puede leer el
-  registro (0600, de root) ni desviar su escritura (ver 7), pero sí borrarlo o
-  cambiarlo por otro. En macOS lo escribe `kling-vz`, el proceso que termina el
-  tráfico del invitado. No hay fsync: lo que estaba en el búfer al caer el host se
+- **El registro de auditoría es observabilidad, no prueba.** En Linux vive en
+  `<root>/audit`, fuera del alcance del VMM (ver 7), pero lo migrado desde versiones
+  anteriores estuvo en un directorio que el VMM podía tocar. En macOS lo escribe
+  `kling-vz`, el proceso que termina el tráfico del invitado, en el directorio de la
+  máquina: un `kling-vz` comprometido puede borrarlo o reescribirlo. No hay fsync: lo que estaba en el búfer al caer el host se
   pierde (lo escrito sobrevive a que maten el proceso, que es como el daemon para a
   `kling-vz`). Si se necesita un registro a prueba de manipulación, hay que sacarlo del
   host (`kling machine audit -f -json` a un colector).
