@@ -1352,8 +1352,9 @@ máquina (AES-256-GCM con una clave derivada de `secrets/snapshot.key`, solo de 
 nunca en `state.json`, en eventos ni en un snapshot. Repetir `-env` con otra clave la
 rota; el marcador se conserva y el proceso no tiene que reiniciarse.
 
-Cada petición que pasa por el proxy, y cada rechazo, queda anotada en el directorio de la
-máquina (`credaudit.jsonl`, 0600, rotado a 1 MiB):
+Cada petición que pasa por el proxy, y cada rechazo, queda anotada en un registro de la
+máquina (0600, rotado a 1 MiB; en Linux en `<root>/audit/<id>.jsonl`, donde el VMM no
+llega; en macOS en su directorio, `credaudit.jsonl`):
 
 ```sh
 kling machine audit pagos            # TIME METHOD HOST PATH STATUS CREDS MS RESULT

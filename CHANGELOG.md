@@ -59,6 +59,28 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   se exige un fichero regular con un solo enlace, propio y del tamaño del origen. Fuera
   de APFS (`ENOTSUP`) o entre volúmenes (`EXDEV`), copia dispersa como antes. Probado en
   un M4: el dorado comparte los bloques físicos del overlay (`F_LOG2PHYS_EXT`).
+- **El registro de auditoría del proxy sale del alcance del VMM (Linux, #79).** Vive
+  en `<root>/audit/<id>.jsonl` (directorio 0700 y fichero 0600, de root) en vez de en
+  `machines/<id>/`, que es del usuario sin privilegios del VMM: un Firecracker
+  comprometido ya no puede borrar, truncar ni sustituir el registro que lo vigila. Al
+  arrancar, el daemon migra los registros viejos (sin seguir enlaces, solo ficheros
+  regulares con un único enlace; lo demás se descarta sin leerlo) y barre los de
+  máquinas que ya no existen; `rm` borra el de la suya. `kling machine audit` no
+  cambia. En macOS sigue junto al socket de `kling-vz`.
+- **`-upstream` con nombre en macOS (#74).** `kling-vz` corre confinado y no llega al
+  resolver del Mac, así que el daemon rechazaba un nombre. Ahora lo resuelve el daemon
+  al entregar la credencial (al ponerla y en cada arranque o descongelación), con las
+  mismas reglas que al marcar —una IP prohibida o del rango de reenvíos entre las
+  respuestas y no se entrega— y `kling-vz` recibe la primera IP, que vuelve a
+  comprobar. El TLS se sigue verificando contra `-domain` o `-tls-server-name`.
+  Diferencias con Linux: un cambio de DNS no se sigue hasta la siguiente entrega, y no
+  se prueban las demás IPs del nombre (`credproxy.ResolverUpstream`).
+- **Diseño: el proxy de credenciales de macOS en su propio proceso (#80).** Hoy la
+  clave vive en `kling-vz`, el mismo proceso que atiende la red del invitado. El plan
+  (proceso `kling-credproxy` por máquina, confinado, con hardened runtime; IPC por
+  sockets Unix; qué evita y cuánto cuesta) está en
+  [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md) y en `SECURITY.md`.
+  Sin implementar: necesita verificarse en un Mac real.
 
 ### Grafos desde los plugins
 
