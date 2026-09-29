@@ -89,6 +89,8 @@ func manifest() plugin.Manifest {
 					usage("golden build [opts] <name>", "a warm Postgres frozen as a template") +
 					usage("golden build -template T <name>", "the same, from a bundled template"),
 				Subcommands: []string{"image", "build"}},
+			{Name: "clone", Group: "TEMPLATES", Summary: "a golden from a production database, personal data masked",
+				Usage: usage("clone <postgres-url> -mask RULES [-golden G]", "read-only, dumped and masked inside a microVM")},
 			{Name: "templates", Group: "TEMPLATES", Summary: "lists the bundled database templates",
 				Usage: usage("templates", "empty, crm-demo...")},
 		},
@@ -117,6 +119,7 @@ func main() {
 		"audit":     cmdAudit,
 		"ask":       cmdAsk,
 		"golden":    cmdGolden,
+		"clone":     cmdClone,
 		"role":      cmdRole,
 		"templates": cmdTemplates,
 	}, map[string]func([]string, io.Writer) error{})
