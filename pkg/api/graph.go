@@ -228,6 +228,9 @@ type GraphSnapshot struct {
 	Graph      string            `json:"graph"`
 	Generation int               `json:"generation"`
 	Templates  map[string]string `json:"templates"`
+	// Warnings son los nodos que se volcaron pero no se pudieron volver a
+	// congelar después (siguen en marcha). Las plantillas valen igual.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // GraphForkRequest es el cuerpo de POST /graphs/{ref}/fork.

@@ -157,10 +157,13 @@ func (m *Manager) nodosParaVolcar(gid string) ([]nodoMaquina, error) {
 // la memoria volcada de un disco que no viaja con ella). Después: reanuda los
 // que pausó, les devuelve los volúmenes y vuelve a congelar los que despertó,
 // en orden de parada. Lo mismo si algo falla: el grafo queda como estaba.
-func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre func(nodo string) string) (map[string]string, error) {
+//
+// avisos son los nodos que no se pudieron volver a congelar tras un volcado
+// bueno: siguen en marcha, y quien pidió el snapshot tiene que saberlo.
+func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre func(nodo string) string) (hechas map[string]string, avisos []string, err error) {
 	nodos, err := m.nodosParaVolcar(gid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Deshacer no es opcional aunque quien lo pidió se haya ido.
 	limpio := context.WithoutCancel(ctx)
@@ -204,6 +207,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 			}
 			if err := congelarNodoGrafo(limpio, m, n.id); err != nil {
 				log.Printf("graph %s: couldn't freeze node %s again after the snapshot (it stays running): %v", shortID(gid), n.nodo, err)
+				avisos = append(avisos, fmt.Sprintf("node %s could not be frozen again after the snapshot and stays running: %v", n.nodo, err))
 			}
 		}
 	}
@@ -216,7 +220,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		if err := despertarNodoGrafo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err)
+			return nil, nil, fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err)
 		}
 		despertadas[n.id] = true
 		estado[n.id] = api.StateRunning
@@ -231,7 +235,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		soltadas[n.id] = true
 		if err := soltarVolumenesNodo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err)
+			return nil, nil, fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err)
 		}
 	}
 	// (1) pausar todos los que corren, en orden de parada; se reanudan en el
@@ -242,7 +246,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		}
 		if err := pausarNodoGrafo(ctx, m, n.id); err != nil {
 			deshacer()
-			return nil, fmt.Errorf("pausing node %s: %w", n.nodo, err)
+			return nil, nil, fmt.Errorf("pausing node %s: %w", n.nodo, err)
 		}
 		pausadas[n.id] = true
 	}
@@ -251,7 +255,7 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 		m.invalidarSesiones(n.id, "graph snapshot")
 	}
 	// (3) volcar cada uno, sin reanudarlo.
-	hechas := map[string]string{}
+	hechas = map[string]string{}
 	for _, n := range nodos {
 		name := nombre(n.nodo)
 		if err := commitNodoPausado(ctx, m, n.id, name); err != nil {
@@ -261,14 +265,14 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 				}
 			}
 			deshacer()
-			return nil, fmt.Errorf("snapshot of node %s: %w", n.nodo, err)
+			return nil, nil, fmt.Errorf("snapshot of node %s: %w", n.nodo, err)
 		}
 		hechas[n.nodo] = name
 	}
 	// (4) reanudar los que pausamos (los que ya estaban pausados, así siguen),
 	// devolverles los volúmenes y volver a congelar los que despertamos.
 	deshacer()
-	return hechas, nil
+	return hechas, avisos, nil
 }
 
 // volumenesDeFork rechaza el fork de un grafo con un volumen en escritura en
@@ -339,7 +343,7 @@ func (m *Manager) GraphSnapshot(ctx context.Context, ref, prefijo string) (*api.
 			return nil, &api.StatusError{Code: 409, Message: fmt.Sprintf("template %q already exists (use another -name, or kling template rm it)", name)}
 		}
 	}
-	plantillas, err := m.snapshotConsistente(ctx, gid, nombre)
+	plantillas, avisos, err := m.snapshotConsistente(ctx, gid, nombre)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +356,7 @@ func (m *Manager) GraphSnapshot(ctx context.Context, ref, prefijo string) (*api.
 		return nil, err
 	}
 	log.Printf("graph %s (%s): snapshot generation %d, %d template(s)", nombreGrafo, shortID(gid), gen, len(plantillas))
-	return &api.GraphSnapshot{Graph: nombreGrafo, Generation: gen, Templates: plantillas}, nil
+	return &api.GraphSnapshot{Graph: nombreGrafo, Generation: gen, Templates: plantillas, Warnings: avisos}, nil
 }
 
 // nombreFork es el nombre de un grafo copia: el del original recortado y un
@@ -431,7 +435,9 @@ func (m *Manager) GraphFork(ctx context.Context, ref string, n int) (out []*api.
 	for _, nd := range nodos {
 		defer m.reserveDir(reservaSnapshot(nombre(nd.nodo)))()
 	}
-	plantillas, err := m.snapshotConsistente(ctx, gid, nombre)
+	// Un nodo que no vuelve a congelarse queda en el log: el fork no tiene
+	// dónde avisar sin cambiar su respuesta.
+	plantillas, _, err := m.snapshotConsistente(ctx, gid, nombre)
 	if err != nil {
 		return nil, fmt.Errorf("forking graph %s: %w", orig.Name, err)
 	}

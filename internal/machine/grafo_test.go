@@ -679,6 +679,44 @@ func TestGrafoSnapshotGrafoCongelado(t *testing.T) {
 	}
 }
 
+// Si un nodo no se puede volver a congelar tras un volcado bueno, el snapshot
+// vale igual, pero la respuesta lo dice (no solo el log): ese nodo sigue en
+// marcha.
+func TestGrafoSnapshotAvisaSiNoVuelveACongelar(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	e.montarGrafo(grafoTienda(true))
+	if _, err := e.m.GraphFreeze(context.Background(), "tienda"); err != nil {
+		t.Fatal(err)
+	}
+	prev := congelarNodoGrafo
+	congelarNodoGrafo = func(ctx context.Context, m *Manager, id string) error {
+		if e.nombre(id) == "web" {
+			return errors.New("sin sitio para la memoria")
+		}
+		return prev(ctx, m, id)
+	}
+	snap, err := e.m.GraphSnapshot(context.Background(), "tienda", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Templates) != 2 {
+		t.Fatalf("plantillas: %v", snap.Templates)
+	}
+	if len(snap.Warnings) != 1 || !strings.Contains(snap.Warnings[0], "node web") || !strings.Contains(snap.Warnings[0], "sin sitio para la memoria") {
+		t.Fatalf("avisos: %q", snap.Warnings)
+	}
+
+	// Y sin fallos, ningún aviso.
+	congelarNodoGrafo = prev
+	snap, err = e.m.GraphSnapshot(context.Background(), "tienda", "otro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Warnings) != 0 {
+		t.Fatalf("avisos sin fallos: %q", snap.Warnings)
+	}
+}
+
 // Solo se despierta y se vuelve a congelar el nodo que estaba congelado.
 func TestGrafoSnapshotNodoCongelado(t *testing.T) {
 	e := nuevaEscenaGrafo(t)

@@ -313,7 +313,7 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 | `GET /graphs` | lista, por nombre |
 | `GET /graphs/{ref}` | uno, con el estado de cada nodo |
 | `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
-| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado o el grafo tiene aristas `share` (también en `fork`) |
+| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}, "warnings"}`; `warnings` (si lo hay) nombra los nodos que se volcaron pero no se pudieron volver a congelar y siguen en marcha. Los congelados se despiertan para el instante y se vuelven a congelar. `409` si un nodo ya pausado tiene volúmenes o el grafo tiene aristas `share` (también en `fork`) |
 | `POST /graphs/{ref}/fork` | `{"count": N}` (1 a 16). Devuelve `{"graphs": [...]}` (`201`) |
 | `DELETE /graphs/{ref}` | el grafo y sus máquinas (`204`) |
 
