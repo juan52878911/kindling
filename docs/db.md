@@ -140,3 +140,57 @@ recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset` y buscan 
 clave en toda la salida. Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
 avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
 de la plantilla no entra en una copia.
+
+## Operaciones: rehearse, rotate, snapshot, undo
+
+### `kling db rehearse <copia|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]`
+
+Ensaya migraciones en una copia desechable: un fork de una copia lista (que
+debe estar en marcha: rehearse no descongela ni toca el origen) o un up de un
+golden. Aplica los `.sql` de DIR en orden de nombre, como el rol de la
+aplicación (`PGOPTIONS=-c role=...`), por stdin y con `ON_ERROR_STOP`, y mide
+por fichero: duración, tamaño de la base antes y después y bloqueos. Termina
+con una tabla (o `-json`) y destruye la copia salvo `-keep`. Si un fichero
+falla, los siguientes se marcan `skipped` y el código de salida es 1.
+
+Los bloqueos, sin adornos: en una copia aislada nadie más toma locks, así que
+se ve lo que la migración provoca por sí sola. Se detecta con un muestreo de
+`pg_stat_activity` (`waited ~N s`) y con el fallo por `lock_timeout`, que se
+informa como `would block N s in production`. Sirve para descubrir qué
+sentencias piden un lock fuerte, no para predecir la espera real en producción.
+El error de un fichero muestra solo la línea `ERROR:` de psql (el resto cita la
+sentencia). Los `.sql` no pueden ser enlaces simbólicos.
+
+### `kling db rotate <copia>`
+
+Contraseña nueva con el mismo mecanismo que `up` (verificador SCRAM por stdin).
+Atómico: la nueva se deja en `password.new`, se cambia la base y solo entonces
+pasa a ser `password`. Si algo falla, el fichero no cambia y se devuelve a la
+base el verificador de la clave anterior. Las sesiones abiertas siguen hasta
+que reconectan.
+
+### `kling db snapshot <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]`
+
+Un punto de guardado es una plantilla propia (`kling save` de la máquina viva)
+llamada `dbsnap-<hash dueño+copia>-<nombre>`, con `kling.db.golden` (el golden
+original), `kling.db.owner` y `kling.db.snapshot-of` (el id de la copia; una
+copia nacida de un undo lleva el mismo valor, así conserva sus puntos). El
+nombre es `[a-z0-9-]`, hasta 40; máximo 16 puntos por copia.
+
+- `snapshot` exige copia lista y propia, sin conexiones de cliente abiertas
+  (sus sockets se repartirían idénticos a toda copia nacida del punto; `-force`
+  lo salta) y hace CHECKPOINT antes. No pisa puntos: repetir un nombre falla.
+- `undo` borra la copia y crea otra con el mismo nombre, dueño y ttl desde el
+  punto (el último si no se da nombre); el punto no se consume. Si el `up`
+  posterior falla, la copia ya no existe y el error dice cómo recrearla desde
+  la plantilla.
+- `snapshot -rm <copia> <nombre>` borra el punto; kindling se niega mientras
+  haya copias vivas nacidas de él (un undo deja una).
+- Los puntos de una copia borrada con `kling db rm` no se borran solos:
+  quítelos antes con `snapshot -rm`.
+
+**Contraseña.** El punto guarda la RAM y el disco de ese momento, incluido el
+verificador de la contraseña que la copia tenía entonces. `undo` no la
+recupera: la copia nueva rota una propia antes de darse por lista, y el fichero
+del host es de la copia nueva. La clave del punto solo sirve, en teoría, para
+esa plantilla; la rotación la invalida en cuanto nace la copia.

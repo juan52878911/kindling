@@ -96,8 +96,16 @@ func cmdUp(args []string) error {
 // up crea una copia de golden y la deja lista. Si algo falla después de
 // crearla, la destruye: una copia a medias no se entrega nunca.
 func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, owner string) (*api.Machine, error) {
-	if !namePattern.MatchString(golden) {
-		return nil, fmt.Errorf("invalid template name %q", golden)
+	return a.upFrom(ctx, golden, golden, name, ttl, owner, nil)
+}
+
+// upFrom es up con la plantilla de la que se instancia (tpl) separada de la
+// etiqueta kling.db.golden (golden), y etiquetas extra: un punto de guardado
+// (kling db undo) es una plantilla propia, pero la copia sigue siendo de su
+// golden original.
+func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Duration, owner string, extra [][2]string) (*api.Machine, error) {
+	if !namePattern.MatchString(tpl) || !namePattern.MatchString(golden) {
+		return nil, fmt.Errorf("invalid template name %q", tpl)
 	}
 	if err := validOwner(owner); err != nil {
 		return nil, err
@@ -115,13 +123,13 @@ func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, ow
 	if ttl < 0 || (ttl > 0 && ttl < time.Second) {
 		return nil, errors.New("-ttl must be at least 1s")
 	}
-	tpl, err := a.template(ctx, golden)
+	snap, err := a.template(ctx, tpl)
 	if err != nil {
 		return nil, err
 	}
-	role, db, err := goldenRoleDB(tpl)
+	role, db, err := goldenRoleDB(snap)
 	if err != nil {
-		return nil, fmt.Errorf("template %s: %w", golden, err)
+		return nil, fmt.Errorf("template %s: %w", tpl, err)
 	}
 
 	// La copia NACE en preparing: run -from fusiona estas etiquetas sobre las
@@ -135,16 +143,17 @@ func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, ow
 		{labelRole, role},
 		{labelDatabase, db},
 		{api.LabelKind, api.KindSandbox},
-		{api.LabelPorts, mergePorts(tpl.Labels[api.LabelPorts])},
+		{api.LabelPorts, mergePorts(snap.Labels[api.LabelPorts])},
 	}
-	runArgs := []string{"run", "-from", golden, "-name", name}
+	labels = append(labels, extra...)
+	runArgs := []string{"run", "-from", tpl, "-name", name}
 	if ttl > 0 {
 		runArgs = append(runArgs, "-ttl", strconv.Itoa(int(ttl.Seconds())))
 	}
 	for _, l := range labels {
 		runArgs = append(runArgs, "-label", l[0]+"="+l[1])
 	}
-	fmt.Fprintf(a.stderr, "creating %s from %s...\n", name, golden)
+	fmt.Fprintf(a.stderr, "creating %s from %s...\n", name, tpl)
 	if _, err := a.k.Run(ctx, nil, runArgs...); err != nil {
 		// No se borra nada por nombre: si el run falló porque el nombre ya
 		// existía, esa máquina es de otro.
@@ -157,7 +166,7 @@ func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, ow
 	}
 	if mc.Name != name || mc.Labels[labelState] != statePreparing {
 		a.destroy(mc.ID)
-		return nil, fmt.Errorf("kling run -from %s did not return the copy it was asked for", golden)
+		return nil, fmt.Errorf("kling run -from %s did not return the copy it was asked for", tpl)
 	}
 	if err := a.prepare(ctx, mc); err != nil {
 		a.destroy(mc.ID)

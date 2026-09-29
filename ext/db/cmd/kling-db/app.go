@@ -287,6 +287,13 @@ func (a *app) rotate(ctx context.Context, id, role string) error {
 	if err := dbstate.WritePassword(id, pw); err != nil {
 		return fmt.Errorf("storing the password of %s: %w", shortID(id), err)
 	}
+	return a.setVerifier(ctx, id, role, ver)
+}
+
+// setVerifier pone el verificador ver al rol de la copia id y comprueba en la
+// misma sesión que pg_authid lo guarda. Lo comparten la rotación al preparar y
+// kling db rotate.
+func (a *app) setVerifier(ctx context.Context, id, role, ver string) error {
 	// role pasó identPattern y el verificador es base64 con '$' y ':': nada
 	// que escapar dentro de las comillas.
 	sql := fmt.Sprintf("ALTER ROLE %s PASSWORD '%s';\nSELECT rolpassword = '%s' FROM pg_authid WHERE rolname = '%s';\n",
