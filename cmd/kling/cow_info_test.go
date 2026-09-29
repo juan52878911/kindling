@@ -52,4 +52,12 @@ func TestCheckCoW(t *testing.T) {
 	if c.State != doctorWarn || !strings.Contains(c.Detail, "not mounted") {
 		t.Errorf("almacén sin montar: %+v", c)
 	}
+	c, _ = checkCoW(&api.CoWInfo{Setting: "auto", Mode: "store", Store: &api.CoWStore{Path: "/x/cow", FS: "xfs", Mounted: true, NoQuota: true}})
+	if c.State != doctorWarn || !strings.Contains(c.Detail, "quota") || c.Fix == "" {
+		t.Errorf("almacén sin cuota: %+v", c)
+	}
+	c, _ = checkCoW(&api.CoWInfo{Setting: "auto", Mode: "store", Store: &api.CoWStore{Path: "/x/cow", FS: "xfs", Mounted: true, Quota: "prjquota"}})
+	if c.State != doctorOK {
+		t.Errorf("almacén con cuota: %+v", c)
+	}
 }

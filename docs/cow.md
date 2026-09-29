@@ -131,6 +131,34 @@ Hay un test con un Btrfs de verdad (`TestAlmacenBtrfsDeVerdad`, root y
 `KLING_TEST_MOUNTS=1`): crea el almacén, comprueba que sigue reservado entero y
 montado sin discard, y clona dos instancias.
 
+### Cuota por instancia
+
+Cada overlay del almacén lleva una **cuota por instancia**, impuesta por el núcleo: el
+tamaño lógico del overlay más una holgura (3 % y 16 MiB). El invitado no puede pasar de
+su disco, pero el VMM es dueño del fichero y un Firecracker comprometido podría hacerlo
+crecer hasta llenar el almacén compartido; con la cuota recibe `EDQUOT`.
+
+- **XFS**: cuota de proyecto. El almacén se monta con `prjquota`; cada overlay recibe un
+  id de proyecto propio (ioctl sobre el fichero, no sobre el directorio: `PROJINHERIT`
+  rompería el FICLONE desde la base con `EXDEV`) y un límite duro con `xfs_quota`.
+- **Btrfs**: un subvolumen por instancia con un qgroup de límite referenciado
+  (`btrfs quota enable` sobre el almacén, que es del daemon). FICLONE entre subvolúmenes
+  funciona.
+
+Ni XFS ni Btrfs descuentan lo compartido con la base al contar (XFS cuenta los bloques
+enteros; el `rfer` de Btrfs también), así que el límite no puede ser menor que el tamaño
+lógico: es una cota de crecimiento, no una reserva de lo que reescribe cada instancia.
+Que muchas instancias reescriban su disco a la vez sigue pudiendo llenar el almacén
+(dimensiónalo con `daemon.cow_store_gib`).
+
+Si faltan `xfs_quota` o `btrfs`, o un almacén XFS ya montado no tiene `prjquota`
+(una cuota solo se activa al montar: desmóntalo con el daemon parado y las microVMs
+apagadas, y el daemon lo vuelve a montar con ella), el almacén funciona como antes, sin
+cuota, con un aviso en el log y en `kling doctor`. Si la cuota está activa y no se puede
+aplicar a una instancia, esa instancia va a copia completa en lugar de al almacén. Las
+instancias creadas antes de la cuota siguen sin ella. Los tests con un almacén de verdad
+(`TestCuotaXFSDeVerdad`, `TestCuotaBtrfsDeVerdad`) necesitan root y `KLING_TEST_MOUNTS=1`.
+
 ### copy
 
 La copia completa y dispersa de siempre (`cp --sparse=always`; en macOS `cp -c`, que
