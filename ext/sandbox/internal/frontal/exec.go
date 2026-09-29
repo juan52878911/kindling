@@ -43,7 +43,7 @@ func (s *Servidor) handleExec(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	t := tenantDe(r)
-	h, mc, err := s.buscar(r.Context(), t, id)
+	h, mc, err := s.buscarEjecutable(r.Context(), t, id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return
@@ -135,7 +135,7 @@ func (s *Servidor) handleFiles(w http.ResponseWriter, r *http.Request, id string
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Minute))
 	}
 
-	h, mc, err := s.buscar(r.Context(), tenantDe(r), id)
+	h, mc, err := s.buscarEjecutable(r.Context(), tenantDe(r), id)
 	if err != nil {
 		fail(w, codigoBuscar(err), err)
 		return

@@ -68,6 +68,11 @@ func TestExpandTemplateRechaza(t *testing.T) {
 		{"build", "-template", "empty", "-seed", "s.sql", "x"},
 		{"build", "-template", "empty", "-migrations", "d", "x"},
 		{"build", "-template", "empty", "-seed-mb", "5", "x"},
+		{"build", "-engine", "mysql", "-template", "empty", "x"},
+		{"build", "-template", "empty", "-engine=mysql", "x"},
+		{"build", "-engine", "redis", "-template", "empty", "x"},
+		{"build", "-template", "empty", "-engine=sqlite", "x"},
+		{"build", "-template", "empty", "--engine", "sqlite", "x"},
 	} {
 		if got, cleanup, err := expandTemplate(args); err == nil {
 			cleanup()

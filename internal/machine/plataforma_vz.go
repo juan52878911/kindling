@@ -34,6 +34,11 @@ const putSinMontar = true
 
 const backendVMM = BackendVZ
 
+// auditoriaEnElDaemon: en macOS el registro lo escribe el kling-vz de la
+// máquina junto a su socket, el único sitio en que su sandbox le deja
+// escribir; el daemon solo lo lee (ver credaudit.go).
+var auditoriaEnElDaemon = false
+
 // Las aristas de un grafo y kling db attach (una credencial Postgres con
 // UpstreamMachine) llegan a la otra máquina por el broker (broker.go): el
 // kling-vz del origen pide la arista, el daemon comprueba, marca al reenvío
@@ -241,6 +246,11 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	return nil
 }
 
+// resolverUpstream resuelve el nombre de un -upstream antes de dárselo a
+// kling-vz (ver registrarCredencialesPlataforma). Nil es el resolver del
+// sistema; los tests ponen uno falso.
+var resolverUpstream func(ctx context.Context, host string) ([]netip.Addr, error)
+
 // todasAMaquina dice si todas las credenciales van a otra máquina.
 func todasAMaquina(creds []credproxy.Credential) bool {
 	for _, c := range creds {
@@ -263,33 +273,48 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		return nil
 	}
 	// Un kling-vz anterior ignoraría el tipo (su JSON no lo conoce) y
-	// trataría una credencial Postgres como HTTP: se pregunta antes qué
-	// tipos entiende y, si no dice postgres, no se le da ninguna. Lo mismo
+	// trataría una credencial Postgres o MySQL como HTTP: se pregunta antes
+	// qué tipos entiende y, si no dice postgres (o mysql), no se le da
+	// ninguna. Lo mismo
 	// con Upstream: uno que no lo conozca marcaría el dominio en su lugar (y,
 	// con -upstream-tls disable, exigiría TLS a un servidor que no lo tiene),
 	// así que sin "postgres-upstream" no se le da ninguna que lo use.
-	var pg, upstream, maquina bool
+	var pg, my, upstream, maquina bool
 	for _, cr := range creds {
 		maquina = maquina || cr.UpstreamMachine != ""
-		if cr.Kind == credproxy.KindPostgres {
-			pg = true
+		if cr.Kind == credproxy.KindPostgres || cr.Kind == credproxy.KindMySQL {
+			pg = pg || cr.Kind == credproxy.KindPostgres
+			my = my || cr.Kind == credproxy.KindMySQL
 			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
-			// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde
-			// ahí no llega al resolver del Mac: un upstream con nombre fallaría
-			// en cada conexión. Mejor decirlo ahora.
-			if credproxy.UpstreamNecesitaDNS(cr.Upstream) {
-				return fmt.Errorf("credential for %s: on macOS -upstream must be an IP address or localhost (kling-vz is sandboxed and cannot use the Mac's resolver); got %s",
-					cr.Domain, cr.Upstream)
-			}
 		}
 	}
-	if pg {
+	// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde ahí no
+	// llega al resolver del Mac: un upstream con nombre lo resuelve aquí el
+	// daemon, con las mismas comprobaciones que haría al marcar, y kling-vz
+	// recibe la IP (que vuelve a comprobar). Antes de hablar con kling-vz: un
+	// nombre que no resuelve o que da un destino prohibido no le llega.
+	upstreams := make([]string, len(creds))
+	for i, cr := range creds {
+		upstreams[i] = cr.Upstream
+		if cr.Kind != credproxy.KindPostgres && cr.Kind != credproxy.KindMySQL {
+			continue
+		}
+		ip, err := credproxy.ResolverUpstream(ctx, resolverUpstream, cr.Upstream)
+		if err != nil {
+			return fmt.Errorf("credential for %s: %w", cr.Domain, err)
+		}
+		upstreams[i] = ip
+	}
+	if pg || my {
 		info, err := c.KlingInfo(ctx)
 		if err != nil {
 			return fmt.Errorf("asking kling-vz for its credential kinds: %w", err)
 		}
-		if !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
+		if pg && !slices.Contains(info.CredentialKinds, credproxy.KindPostgres) {
 			return errors.New("this kling-vz does not support postgres credentials: rebuild kling-vz")
+		}
+		if my && !slices.Contains(info.CredentialKinds, credproxy.KindMySQL) {
+			return errors.New("this kling-vz does not support mysql credentials: rebuild kling-vz")
 		}
 		if upstream && !slices.Contains(info.CredentialKinds, credproxy.CapPostgresUpstream) {
 			return errors.New("this kling-vz does not support -upstream, -upstream-tls or -tls-server-name on postgres credentials: rebuild kling-vz")
@@ -301,12 +326,12 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
-	for _, cr := range creds {
+	for i, cr := range creds {
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
 			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
-			Upstream: cr.Upstream, UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
+			Upstream: upstreams[i], UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 			UpstreamMachine: cr.UpstreamMachine, UpstreamOwner: cr.UpstreamOwner,
 		})
 	}

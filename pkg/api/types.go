@@ -677,6 +677,22 @@ type Info struct {
 	// CoW dice cómo recibe su disco una instancia creada desde un dorado (ver
 	// docs/cow.md). nil = daemon anterior.
 	CoW *CoWInfo `json:"cow,omitempty"`
+	// Authz dice si el daemon aplica una política de autorización y con qué
+	// rol ve a quien pregunta (docs/authz.md). nil = daemon anterior.
+	Authz *AuthzInfo `json:"authz,omitempty"`
+}
+
+// AuthzInfo es el estado de la autorización del daemon visto por quien llama.
+type AuthzInfo struct {
+	// Enabled: hay política. Sin ella, quien alcanza el socket manda sobre
+	// todo, como siempre.
+	Enabled bool `json:"enabled"`
+	// Role es el rol de quien llama: "admin" o "tenant:<nombre>". Vacío sin
+	// política.
+	Role string `json:"role,omitempty"`
+	// UID es el usuario que el daemon vio al otro lado del socket (peercred),
+	// si lo sabe.
+	UID *int `json:"uid,omitempty"`
 }
 
 // CoWInfo es el modo de copia de discos en uso (daemon.cow).
@@ -690,6 +706,10 @@ type CoWInfo struct {
 	Mode string `json:"mode"`
 	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
 	Reason string `json:"reason,omitempty"`
+	// Pending: el modo es "store" pero el almacén aún no se ha creado ni
+	// montado; se crea en el primer run -from, y si entonces falla el modo
+	// pasa a "copy" con el motivo en Reason.
+	Pending bool `json:"pending,omitempty"`
 	// Store describe el almacén propio, si existe (aunque el modo sea otro:
 	// las instancias viejas siguen en él).
 	Store *CoWStore `json:"store,omitempty"`
@@ -713,6 +733,13 @@ type CoWStore struct {
 	// anterior no dice nada.
 	Quota   string `json:"quota,omitempty"`
 	NoQuota bool   `json:"no_quota,omitempty"`
+}
+
+// GrowCoWStoreRequest es el cuerpo de POST /cow/store/grow: el tamaño nuevo
+// del almacén (SizeMiB) o cuánto añadirle (AddMiB). Uno de los dos.
+type GrowCoWStoreRequest struct {
+	SizeMiB int64 `json:"size_mib,omitempty"`
+	AddMiB  int64 `json:"add_mib,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.
@@ -1028,6 +1055,12 @@ func IsInsufficientMemory(err error) bool {
 // es la única base a la que se deja conectar y es obligatoria salvo con
 // AnyDatabase (cualquier base con CONNECT para el rol). Allow no vale para Postgres. Al
 // rotar, como Allow, todos estos campos se sustituyen con la clave.
+//
+// Type "mysql" (pkg/credproxy, mysql.go) es lo mismo para MySQL/MariaDB
+// (puerto 3306 por defecto, MYSQL_PWD), con los mismos campos salvo
+// UpstreamMachine. En MySQL, Database es la base con la que arranca la
+// sesión, no una frontera: lo que acota es el GRANT del usuario. Ver
+// docs/mysql.md.
 type CredentialSpec struct {
 	Domain   string   `json:"domain"`
 	Env      string   `json:"env"`
@@ -1037,11 +1070,11 @@ type CredentialSpec struct {
 	Port     int      `json:"port,omitempty"`
 	User     string   `json:"user,omitempty"`
 	Database string   `json:"database,omitempty"`
-	// AnyDatabase (solo Postgres) deja entrar en cualquier base del servidor;
-	// sin él, Database es obligatoria.
+	// AnyDatabase (Postgres y MySQL) deja entrar en cualquier base del
+	// servidor; sin él, Database es obligatoria.
 	AnyDatabase bool   `json:"any_database,omitempty"`
 	CAPEM       string `json:"ca_pem,omitempty"`
-	// Upstream, UpstreamTLS y TLSServerName (solo Postgres) fijan a dónde
+	// Upstream, UpstreamTLS y TLSServerName (Postgres y MySQL) fijan a dónde
 	// marca el proxy en vez de Domain:Port ("host:puerto"; loopback y LAN
 	// permitidos, metadatos y la red interna de kindling nunca), si el TLS
 	// hacia él se verifica ("" o "verify-full") o se apaga ("disable": solo

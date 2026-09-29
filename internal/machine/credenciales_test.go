@@ -546,7 +546,7 @@ func TestSetCredentialsPostgres(t *testing.T) {
 		"base y any":           func(s *api.CredentialSpec) { s.AnyDatabase = true },
 		"no ASCII":             func(s *api.CredentialSpec) { s.Secret = "contraseña" },
 		"con allow":            func(s *api.CredentialSpec) { s.Allow = []string{"GET /"} },
-		"tipo raro":            func(s *api.CredentialSpec) { s.Type = "mysql" },
+		"tipo raro":            func(s *api.CredentialSpec) { s.Type = "oracle" },
 		"CA basura":            func(s *api.CredentialSpec) { s.CAPEM = "x" },
 		"http con rol":         func(s *api.CredentialSpec) { s.Type = "" },
 		"disable sin upstream": func(s *api.CredentialSpec) { s.UpstreamTLS = "disable" },

@@ -1,5 +1,7 @@
-// kling-db es la extensión de kling para bases de datos Postgres desechables:
-// `kling db up`, `kling db fork`, `kling db connect`...
+// kling-db es la extensión de kling para bases de datos Postgres (y
+// MySQL/MariaDB, Redis y SQLite: ver mysql.go y engines.go) desechables:
+// `kling db up`, `kling db fork`,
+// `kling db connect`...
 //
 // Modelo: la base y el agente viven en la MISMA microVM. Una copia es una
 // máquina instanciada (`run -from`) o ramificada (`sandbox fork`) de una
@@ -30,16 +32,16 @@ func manifest() plugin.Manifest {
 		Version:         strings.TrimPrefix(Version, "v"),
 		// sandbox fork con el guardián de credenciales y kling.ports.
 		MinKling:  "0.16.0",
-		Summary:   "disposable Postgres databases, one per microVM",
+		Summary:   "disposable Postgres, MySQL, Redis and SQLite databases, one per microVM",
 		HelpGroup: "SERVE",
 		Commands: []plugin.Command{
-			{Name: "up", Group: "COPIES", Summary: "a ready copy of a Postgres template",
+			{Name: "up", Group: "COPIES", Summary: "a ready copy of a Postgres, MySQL, Redis or SQLite template",
 				Usage: usage("up <template> [-name N] [-ttl D] [-owner T]", "a new copy with its own password")},
 			{Name: "fork", Group: "COPIES", Summary: "branches a live copy into N copies",
 				Usage:       usage("fork <copy> [-n N]", "N copies of a copy, all or none"),
 				MachineArgs: []string{""}},
 			{Name: "connect", Group: "COPIES", Summary: "how to reach a copy from the host",
-				Usage:       usage("connect <copy> [-role R] [-dsn | -psql]", "address, or DSN, or a psql session"),
+				Usage:       usage("connect <copy> [-role R] [-dsn | -psql | -mysql | -redis | -sqlite]", "address, or DSN, or a client session"),
 				MachineArgs: []string{""}},
 			{Name: "attach", Group: "COPIES", Summary: "shares a copy with an agent in another machine",
 				Usage:       usage("attach <agent> <copy> [-role R] [-env PGPASSWORD]", "through the proxy; the agent never sees the password"),
@@ -53,10 +55,14 @@ func manifest() plugin.Manifest {
 			{Name: "branch", Group: "COPIES", Summary: "one database per git branch",
 				Usage: usage("branch [<branch>] [-from P] [-golden G] [-env T]", "the copy of a git branch, forked from its parent") +
 					usage("branch -switch | -ls | -rm B | -prune", "activate this branch's copy (git hook), list, clean up") +
-					usage("branch hook install|uninstall", "post-checkout hook that switches the copy")},
+					usage("branch [-owner T] [-golden G] hook install|uninstall", "post-checkout hook that switches the copy")},
 			{Name: "env", Group: "COPIES", Summary: "a whole integration environment: app + database as a graph",
 				Usage: usage("env up <app-template> -golden G [-name N]", "app node + database copy joined by a credential edge") +
 					usage("env down <name>", "removes the graph and the database password")},
+			{Name: "class", Group: "COPIES", Summary: "one copy per student for a class or workshop",
+				Usage: usage("class -n N [-prefix P] <template>", "creates <prefix>-01..N, each with its own password") +
+					usage("class ls | reset [<copy>...] | rm [<copy>...]", "list with connection info, fresh data, remove") +
+					usage("class ... -passwords FILE", "the DSNs, with passwords, to a 0600 file; never printed")},
 			{Name: "reset", Group: "COPIES", Summary: "replaces a copy with a fresh one from its template",
 				Usage:       usage("reset <copy>", "same name, same template, new data"),
 				MachineArgs: []string{""}},
@@ -81,11 +87,20 @@ func manifest() plugin.Manifest {
 			{Name: "ask", Group: "COPIES", Summary: "a question in plain words, answered read-only",
 				Usage:       usage(`ask <copy> "question" [-yes] [-role R]`, "answered by a model, run read-only"),
 				MachineArgs: []string{""}},
+			{Name: "report", Group: "COPIES", Summary: "a saved ask question, run on a fresh copy",
+				Usage: usage(`report add <name> -golden G -every 1w -question "..."`, "saved (0600); schedule report run with cron") +
+					usage("report run <name> [-due] [-out FILE] | ls | rm <name>", "fresh copy, ask, remove; the result to a file")},
+			{Name: "ask-web", Group: "COPIES", Summary: "the same, in a local web page",
+				Usage:       usage("ask-web <copy> [-listen 127.0.0.1:PORT]", "a page for people who do not use the terminal"),
+				MachineArgs: []string{""}},
 			{Name: "doctor", Group: "DIAGNOSE", Summary: "checks a copy or a Postgres URL",
 				Usage:       usage("doctor <copy> | -url postgres://...", "finds what is wrong with a database"),
 				MachineArgs: []string{""}},
 			{Name: "tenant-check", Group: "DIAGNOSE", Summary: "proves each tenant sees only its own rows",
 				Usage:       usage("tenant-check <copy> [-max N] [-json]", "RLS isolation between tenants, for CI"),
+				MachineArgs: []string{""}},
+			{Name: "diff", Group: "DIAGNOSE", Summary: "what changed between two copies, without dumping data",
+				Usage:       usage("diff <copy1> <copy2> [-json] [-schema-only] [-max-rows N]", "schema changes and new/deleted/changed rows"),
 				MachineArgs: []string{""}},
 			{Name: "audit", Group: "DIAGNOSE", Summary: "timeline of a copy: events and connections",
 				Usage:       usage("audit <copy> [-since 24h] [-json]", "who connected, and when"),
@@ -93,10 +108,18 @@ func manifest() plugin.Manifest {
 			{Name: "golden", Group: "TEMPLATES", Summary: "builds the pg16 image and Postgres templates",
 				Usage: usage("golden image", "builds the pg16 image") +
 					usage("golden build [opts] <name>", "a warm Postgres frozen as a template") +
+					usage("golden image|build -engine mysql ...", "the same with MariaDB (docs/mysql.md)") +
+					usage("golden image|build -engine redis|sqlite ...", "the same with Redis or SQLite (docs/db-engines.md)") +
 					usage("golden build -template T <name>", "the same, from a bundled template"),
 				Subcommands: []string{"image", "build"}},
 			{Name: "clone", Group: "TEMPLATES", Summary: "a golden from a production database, personal data masked",
 				Usage: usage("clone <postgres-url> -mask RULES [-golden G]", "read-only, dumped and masked inside a microVM")},
+			{Name: "slice", Group: "TEMPLATES", Summary: "a golden with one production table and its related rows, masked",
+				Usage: usage("slice <postgres-url> -table T -mask RULES [-rows N]", "the rest of the schema as empty tables")},
+			{Name: "observe", Group: "DIAGNOSE", Summary: "logs and reports the statements that touch a table",
+				Usage: usage("observe <copy> | -off <copy>", "log every statement of new connections, with its duration") +
+					usage("observe -report <copy> [-table T] [-json]", "the statements that touch the table, grouped"),
+				MachineArgs: []string{""}},
 			{Name: "templates", Group: "TEMPLATES", Summary: "lists the bundled database templates",
 				Usage: usage("templates", "empty, crm-demo...")},
 		},
@@ -124,10 +147,16 @@ func main() {
 		"undo":         cmdUndo,
 		"doctor":       cmdDoctor,
 		"audit":        cmdAudit,
+		"diff":         cmdDiff,
 		"tenant-check": cmdTenantCheck,
 		"ask":          cmdAsk,
+		"class":        cmdClass,
+		"report":       cmdReport,
+		"ask-web":      cmdAskWeb,
 		"golden":       cmdGolden,
 		"clone":        cmdClone,
+		"slice":        cmdSlice,
+		"observe":      cmdObserve,
 		"role":         cmdRole,
 		"templates":    cmdTemplates,
 	}, map[string]func([]string, io.Writer) error{})

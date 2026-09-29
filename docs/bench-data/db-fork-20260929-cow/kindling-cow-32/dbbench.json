@@ -1,0 +1,844 @@
+{
+  "schema": 1,
+  "started": "2026-09-29T06:37:01.766771232Z",
+  "finished": "2026-09-29T06:37:18.657106703Z",
+  "host": {
+    "hostname": "fc-test",
+    "kernel": "6.17.2-1-pve",
+    "cpu": "Intel(R) Core(TM) i7-8700T CPU @ 2.40GHz",
+    "cpus": 4,
+    "mem_total_mib": 8192,
+    "nested": false,
+    "container": "lxc",
+    "arch": "amd64",
+    "os": "linux",
+    "kling_version": "kling v0.16.0-222-g6fae27c",
+    "docker_version": "20.10.24+dfsg1",
+    "git_sha": "67ee19f676fe"
+  },
+  "config": {
+    "modes": [
+      "kindling-run"
+    ],
+    "n": [
+      32
+    ],
+    "reps": 3,
+    "timeout_s": 180,
+    "golden": "benchs",
+    "docker_image": "postgres:16-alpine",
+    "table": "items",
+    "expect_count": 400000,
+    "seed_sql": "seed-bench.sql",
+    "disk_path": "/var/lib/kindling",
+    "psi_max": 20,
+    "est_mem_mib": 32,
+    "est_disk_mib": 16
+  },
+  "preflight": [
+    "MemAvailable 8068 MiB",
+    "disk-path /var/lib/kindling: 4581 MiB free",
+    "PSI some avg10 0.08 (limit 20.00)"
+  ],
+  "rounds": [
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 1,
+      "status": "ok",
+      "ok": 32,
+      "failed": 0,
+      "latency_ms": {
+        "n": 32,
+        "p50": 1173.35,
+        "p95": 1675.92,
+        "p99": 1710.65,
+        "max": 1710.65,
+        "mean": 1153.8
+      },
+      "provision_ms": {
+        "n": 32,
+        "p50": 863.23,
+        "p95": 1519.74,
+        "p99": 1561.83,
+        "max": 1561.83,
+        "mean": 881.36
+      },
+      "wall_ms": 1710.65,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 1045.66,
+          "provision_ms": 664.54,
+          "tool_ms": 49
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 862.06,
+          "provision_ms": 545.57,
+          "tool_ms": 42
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 665.72,
+          "provision_ms": 366.94,
+          "tool_ms": 92
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 347.92,
+          "provision_ms": 217.26,
+          "tool_ms": 48
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 946.75,
+          "provision_ms": 549.17,
+          "tool_ms": 37
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 971.93,
+          "provision_ms": 600.73,
+          "tool_ms": 82
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 1236.8,
+          "provision_ms": 875.13,
+          "tool_ms": 83
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 328.97,
+          "provision_ms": 143.38,
+          "tool_ms": 21
+        },
+        {
+          "index": 8,
+          "ok": true,
+          "ms": 589.23,
+          "provision_ms": 373.91,
+          "tool_ms": 133
+        },
+        {
+          "index": 9,
+          "ok": true,
+          "ms": 1312.76,
+          "provision_ms": 1120.68,
+          "tool_ms": 112
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "ms": 1646.97,
+          "provision_ms": 1477.81,
+          "tool_ms": 20
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "ms": 1101.39,
+          "provision_ms": 782.49,
+          "tool_ms": 83
+        },
+        {
+          "index": 12,
+          "ok": true,
+          "ms": 1301.92,
+          "provision_ms": 1033.94,
+          "tool_ms": 69
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 963.5,
+          "provision_ms": 680.48,
+          "tool_ms": 54
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "ms": 1233.56,
+          "provision_ms": 863.23,
+          "tool_ms": 66
+        },
+        {
+          "index": 15,
+          "ok": true,
+          "ms": 1675.42,
+          "provision_ms": 1321.31,
+          "tool_ms": 25
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "ms": 1308.02,
+          "provision_ms": 1181.37,
+          "tool_ms": 40
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 1605.15,
+          "provision_ms": 1375.09,
+          "tool_ms": 35
+        },
+        {
+          "index": 18,
+          "ok": true,
+          "ms": 1534.59,
+          "provision_ms": 1364.8,
+          "tool_ms": 22
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 1362.21,
+          "provision_ms": 943.88,
+          "tool_ms": 53
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "ms": 1675.92,
+          "provision_ms": 1519.74,
+          "tool_ms": 31
+        },
+        {
+          "index": 21,
+          "ok": true,
+          "ms": 1173.35,
+          "provision_ms": 936.08,
+          "tool_ms": 46
+        },
+        {
+          "index": 22,
+          "ok": true,
+          "ms": 1710.65,
+          "provision_ms": 1561.83,
+          "tool_ms": 179
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 1572.65,
+          "provision_ms": 1325.3,
+          "tool_ms": 133
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 1130.73,
+          "provision_ms": 733.44,
+          "tool_ms": 50
+        },
+        {
+          "index": 25,
+          "ok": true,
+          "ms": 1290.23,
+          "provision_ms": 987.53,
+          "tool_ms": 27
+        },
+        {
+          "index": 26,
+          "ok": true,
+          "ms": 1630.55,
+          "provision_ms": 1433.83,
+          "tool_ms": 39
+        },
+        {
+          "index": 27,
+          "ok": true,
+          "ms": 421.31,
+          "provision_ms": 134.32,
+          "tool_ms": 19
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 1113.78,
+          "provision_ms": 769.11,
+          "tool_ms": 22
+        },
+        {
+          "index": 29,
+          "ok": true,
+          "ms": 851.85,
+          "provision_ms": 545.45,
+          "tool_ms": 51
+        },
+        {
+          "index": 30,
+          "ok": true,
+          "ms": 844.33,
+          "provision_ms": 602.11,
+          "tool_ms": 43
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 1465.71,
+          "provision_ms": 1172.98,
+          "tool_ms": 130
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8078,
+        "min": 7524,
+        "peak_used": 554
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0.08,
+      "psi_max": 0.08
+    },
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 2,
+      "status": "ok",
+      "ok": 32,
+      "failed": 0,
+      "latency_ms": {
+        "n": 32,
+        "p50": 1320.75,
+        "p95": 1799.39,
+        "p99": 1805.49,
+        "max": 1805.49,
+        "mean": 1269.09
+      },
+      "provision_ms": {
+        "n": 32,
+        "p50": 989.68,
+        "p95": 1653.97,
+        "p99": 1686.08,
+        "max": 1686.08,
+        "mean": 982.04
+      },
+      "wall_ms": 1805.49,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 955.73,
+          "provision_ms": 779.61,
+          "tool_ms": 43
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 1320.75,
+          "provision_ms": 876.84,
+          "tool_ms": 102
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 1654.65,
+          "provision_ms": 1221.26,
+          "tool_ms": 15
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 542.27,
+          "provision_ms": 198.31,
+          "tool_ms": 49
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 513.86,
+          "provision_ms": 266.07,
+          "tool_ms": 33
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 936.38,
+          "provision_ms": 686.94,
+          "tool_ms": 171
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 1027.86,
+          "provision_ms": 814.59,
+          "tool_ms": 16
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 1117.59,
+          "provision_ms": 938.14,
+          "tool_ms": 71
+        },
+        {
+          "index": 8,
+          "ok": true,
+          "ms": 1797.68,
+          "provision_ms": 1686.08,
+          "tool_ms": 49
+        },
+        {
+          "index": 9,
+          "ok": true,
+          "ms": 805.99,
+          "provision_ms": 523.13,
+          "tool_ms": 73
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "ms": 963.11,
+          "provision_ms": 721.93,
+          "tool_ms": 28
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "ms": 1182.08,
+          "provision_ms": 989.68,
+          "tool_ms": 33
+        },
+        {
+          "index": 12,
+          "ok": true,
+          "ms": 1681.27,
+          "provision_ms": 1306.17,
+          "tool_ms": 50
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 1484.55,
+          "provision_ms": 1149.85,
+          "tool_ms": 16
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "ms": 1479.17,
+          "provision_ms": 1058.13,
+          "tool_ms": 50
+        },
+        {
+          "index": 15,
+          "ok": true,
+          "ms": 1727.48,
+          "provision_ms": 1372.07,
+          "tool_ms": 47
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "ms": 1657.8,
+          "provision_ms": 1266.75,
+          "tool_ms": 35
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 1805.49,
+          "provision_ms": 1653.97,
+          "tool_ms": 87
+        },
+        {
+          "index": 18,
+          "ok": true,
+          "ms": 1625.82,
+          "provision_ms": 1426.36,
+          "tool_ms": 32
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 1760.99,
+          "provision_ms": 1511.53,
+          "tool_ms": 138
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "ms": 606.39,
+          "provision_ms": 250.38,
+          "tool_ms": 46
+        },
+        {
+          "index": 21,
+          "ok": true,
+          "ms": 857.96,
+          "provision_ms": 666.52,
+          "tool_ms": 161
+        },
+        {
+          "index": 22,
+          "ok": true,
+          "ms": 1036.7,
+          "provision_ms": 857.99,
+          "tool_ms": 13
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 1637.38,
+          "provision_ms": 1232.95,
+          "tool_ms": 72
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 1799.39,
+          "provision_ms": 1609.03,
+          "tool_ms": 128
+        },
+        {
+          "index": 25,
+          "ok": true,
+          "ms": 1571.09,
+          "provision_ms": 1350.47,
+          "tool_ms": 57
+        },
+        {
+          "index": 26,
+          "ok": true,
+          "ms": 1014.71,
+          "provision_ms": 761.47,
+          "tool_ms": 12
+        },
+        {
+          "index": 27,
+          "ok": true,
+          "ms": 959.34,
+          "provision_ms": 522.77,
+          "tool_ms": 143
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 1474.3,
+          "provision_ms": 1023.12,
+          "tool_ms": 50
+        },
+        {
+          "index": 29,
+          "ok": true,
+          "ms": 1330.54,
+          "provision_ms": 1111.62,
+          "tool_ms": 51
+        },
+        {
+          "index": 30,
+          "ok": true,
+          "ms": 1705.73,
+          "provision_ms": 1178.72,
+          "tool_ms": 14
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 576.84,
+          "provision_ms": 412.85,
+          "tool_ms": 81
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8073,
+        "min": 7519,
+        "peak_used": 554
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0.05,
+      "psi_max": 0.05
+    },
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "rep": 3,
+      "status": "ok",
+      "ok": 32,
+      "failed": 0,
+      "latency_ms": {
+        "n": 32,
+        "p50": 1270.1,
+        "p95": 1743.73,
+        "p99": 1753.9,
+        "max": 1753.9,
+        "mean": 1240.99
+      },
+      "provision_ms": {
+        "n": 32,
+        "p50": 971.55,
+        "p95": 1611.99,
+        "p99": 1627.25,
+        "max": 1627.25,
+        "mean": 981.83
+      },
+      "wall_ms": 1753.9,
+      "copies": [
+        {
+          "index": 0,
+          "ok": true,
+          "ms": 834.11,
+          "provision_ms": 696.06,
+          "tool_ms": 52
+        },
+        {
+          "index": 1,
+          "ok": true,
+          "ms": 1164.64,
+          "provision_ms": 913.25,
+          "tool_ms": 53
+        },
+        {
+          "index": 2,
+          "ok": true,
+          "ms": 1742.17,
+          "provision_ms": 1611.99,
+          "tool_ms": 27
+        },
+        {
+          "index": 3,
+          "ok": true,
+          "ms": 1561.73,
+          "provision_ms": 1286.52,
+          "tool_ms": 37
+        },
+        {
+          "index": 4,
+          "ok": true,
+          "ms": 1743.73,
+          "provision_ms": 1576.64,
+          "tool_ms": 50
+        },
+        {
+          "index": 5,
+          "ok": true,
+          "ms": 1341.93,
+          "provision_ms": 1115.88,
+          "tool_ms": 18
+        },
+        {
+          "index": 6,
+          "ok": true,
+          "ms": 641.21,
+          "provision_ms": 178.24,
+          "tool_ms": 16
+        },
+        {
+          "index": 7,
+          "ok": true,
+          "ms": 1270.1,
+          "provision_ms": 971.55,
+          "tool_ms": 47
+        },
+        {
+          "index": 8,
+          "ok": true,
+          "ms": 942.23,
+          "provision_ms": 680.96,
+          "tool_ms": 24
+        },
+        {
+          "index": 9,
+          "ok": true,
+          "ms": 1649.89,
+          "provision_ms": 1403.09,
+          "tool_ms": 26
+        },
+        {
+          "index": 10,
+          "ok": true,
+          "ms": 719.21,
+          "provision_ms": 362.39,
+          "tool_ms": 83
+        },
+        {
+          "index": 11,
+          "ok": true,
+          "ms": 1461.84,
+          "provision_ms": 1041.37,
+          "tool_ms": 56
+        },
+        {
+          "index": 12,
+          "ok": true,
+          "ms": 1475.27,
+          "provision_ms": 1208.81,
+          "tool_ms": 51
+        },
+        {
+          "index": 13,
+          "ok": true,
+          "ms": 1697.74,
+          "provision_ms": 1538.46,
+          "tool_ms": 32
+        },
+        {
+          "index": 14,
+          "ok": true,
+          "ms": 495.73,
+          "provision_ms": 228.98,
+          "tool_ms": 31
+        },
+        {
+          "index": 15,
+          "ok": true,
+          "ms": 1185.24,
+          "provision_ms": 968.4,
+          "tool_ms": 26
+        },
+        {
+          "index": 16,
+          "ok": true,
+          "ms": 886.13,
+          "provision_ms": 732.13,
+          "tool_ms": 33
+        },
+        {
+          "index": 17,
+          "ok": true,
+          "ms": 1075.42,
+          "provision_ms": 875.35,
+          "tool_ms": 123
+        },
+        {
+          "index": 18,
+          "ok": true,
+          "ms": 1753.9,
+          "provision_ms": 1627.25,
+          "tool_ms": 33
+        },
+        {
+          "index": 19,
+          "ok": true,
+          "ms": 1519.97,
+          "provision_ms": 1272.9,
+          "tool_ms": 49
+        },
+        {
+          "index": 20,
+          "ok": true,
+          "ms": 1382.35,
+          "provision_ms": 1060.48,
+          "tool_ms": 68
+        },
+        {
+          "index": 21,
+          "ok": true,
+          "ms": 1470.78,
+          "provision_ms": 1223.3,
+          "tool_ms": 131
+        },
+        {
+          "index": 22,
+          "ok": true,
+          "ms": 760.44,
+          "provision_ms": 512.32,
+          "tool_ms": 125
+        },
+        {
+          "index": 23,
+          "ok": true,
+          "ms": 636.52,
+          "provision_ms": 220.26,
+          "tool_ms": 37
+        },
+        {
+          "index": 24,
+          "ok": true,
+          "ms": 1033.04,
+          "provision_ms": 768.54,
+          "tool_ms": 49
+        },
+        {
+          "index": 25,
+          "ok": true,
+          "ms": 884.49,
+          "provision_ms": 645.86,
+          "tool_ms": 109
+        },
+        {
+          "index": 26,
+          "ok": true,
+          "ms": 939.69,
+          "provision_ms": 511.74,
+          "tool_ms": 186
+        },
+        {
+          "index": 27,
+          "ok": true,
+          "ms": 1060.66,
+          "provision_ms": 827.82,
+          "tool_ms": 47
+        },
+        {
+          "index": 28,
+          "ok": true,
+          "ms": 1687.37,
+          "provision_ms": 1491.15,
+          "tool_ms": 41
+        },
+        {
+          "index": 29,
+          "ok": true,
+          "ms": 1391.04,
+          "provision_ms": 1084.18,
+          "tool_ms": 28
+        },
+        {
+          "index": 30,
+          "ok": true,
+          "ms": 1649.69,
+          "provision_ms": 1422.26,
+          "tool_ms": 102
+        },
+        {
+          "index": 31,
+          "ok": true,
+          "ms": 1653.45,
+          "provision_ms": 1360.35,
+          "tool_ms": 59
+        }
+      ],
+      "mem_available_mib": {
+        "before": 8071,
+        "min": 7520,
+        "peak_used": 551
+      },
+      "disk_per_copy_mib": 3.58,
+      "psi_before": 0.02,
+      "psi_max": 0.02
+    }
+  ],
+  "cells": [
+    {
+      "mode": "kindling-run",
+      "n": 32,
+      "status": "ok",
+      "rounds": 3,
+      "copies": 96,
+      "ok": 96,
+      "failed": 0,
+      "latency_ms": {
+        "n": 96,
+        "p50": 1236.8,
+        "p95": 1753.9,
+        "p99": 1805.49,
+        "max": 1805.49,
+        "mean": 1221.29
+      },
+      "mem_available_min_mib": 7519,
+      "mem_peak_used_mib": 554,
+      "disk_per_copy_mib": 3.58
+    }
+  ]
+}

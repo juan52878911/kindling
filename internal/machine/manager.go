@@ -414,6 +414,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 			m.netCursor = mc.NetIndex
 		}
 	}
+	// El registro de auditoría del proxy, fuera del alcance del VMM (Linux),
+	// antes de que reconcile vuelva a levantar los proxies (ver credaudit.go).
+	m.prepararAuditoria()
 	// Los grafos antes de reconciliar: reconcile rehace los proxies de enlace
 	// de los nodos vivos, y para eso necesita sus aristas.
 	m.cargarGrafos()
@@ -2608,6 +2611,7 @@ func (m *Manager) Remove(ref string) error {
 	if err := os.RemoveAll(m.dir(mc.ID)); err != nil {
 		return err
 	}
+	m.borrarAuditoria(mc.ID)
 	// Su overlay en el almacén de discos, si lo tenía (ver cow.go).
 	m.borrarOverlayAlmacen(mc.ID)
 	// Su enlace corto en /tmp/kling-<uid> (macOS) ya no apunta a nada; el

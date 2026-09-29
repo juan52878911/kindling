@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kling db ask</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="csrf" content="{{CSRF}}">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <h1>Ask your database</h1>
+  <p id="info" class="muted">Loading...</p>
+  <p id="notice" class="notice" hidden></p>
+  <form id="ask">
+    <label for="q">Your question</label>
+    <textarea id="q" rows="3" maxlength="4000" required></textarea>
+    <button id="go" type="submit">Generate the query</button>
+  </form>
+  <section id="review" hidden>
+    <h2>The query to run</h2>
+    <p class="muted">Read it first. It runs only when you press the button, as a read-only role.</p>
+    <pre id="sql"></pre>
+    <button id="run" type="button">Run this query</button>
+    <button id="discard" type="button" class="secondary">Discard</button>
+  </section>
+  <p id="status" role="status"></p>
+  <p id="error" class="error" role="alert" hidden></p>
+  <section id="result" hidden>
+    <h2>Result</h2>
+    <p id="summary" hidden></p>
+    <div class="scroll"><table><thead></thead><tbody></tbody></table></div>
+    <p id="count" class="muted"></p>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -55,7 +55,7 @@ JSON.
 | `egress`, `allow_domains` | como en `run`. Una arista no abre nada de esto |
 | `ports` | puertos que el nodo expone a sus aristas (`kling.ports`) |
 | `wake` | `eager` (por defecto: arranca con `up`) o `lazy` (en la primera conexión) |
-| `idle_freeze` | segundos hasta congelarse solo (el TTL de siempre con `on_ttl: freeze`) |
+| `idle_freeze` | segundos **sin conexiones nuevas** hasta congelarse solo: el TTL de la máquina, que cada conexión aceptada por una arista (`link` o `credential`) hacia el nodo vuelve a poner en marcha; ver [idle_freeze](#idle_freeze-segundos-sin-uso) |
 | `volumes`, `shares`, `allow_exec`, `labels` | como en `run`; `shares` solo con `image` |
 
 **Aristas**:
@@ -84,10 +84,35 @@ esa dirección).
 |---|---|
 | `kling graph up <f>` | crea el grafo y arranca los `eager` (y los nodos de los que dependen), en orden de `depends`; comprueba antes el tope de máquinas y la memoria de todos ellos. Todo o nada |
 | `kling graph ls` · `inspect <g>` | estado (`running`, `frozen`, `partial`), nodos, aristas y generación |
+| `kling graph audit <g>` | las conexiones por aristas `link` y `credential` de todos los nodos en una línea de tiempo; ver [Auditoría](#auditoría) |
 | `kling graph freeze <g>` · `thaw <g>` | todos los nodos con máquina (un `lazy` sin máquina sigue sin ella, salvo que dependa de él uno que despierta); `thaw` en orden de `depends`, `freeze` al revés |
 | `kling graph snapshot <g> [-name N]` | una plantilla por nodo, `<N>-<nodo>-<gen>`, **todas del mismo instante** |
 | `kling graph fork <g> -n N` | N grafos nuevos desde este instante |
 | `kling graph rm <g>` | el grafo, sus máquinas y las plantillas temporales de fork que ya no use nadie |
+
+### Auditoría
+
+Cada nodo apunta sus conexiones salientes en el registro del proxy de credenciales de su
+máquina (`kling machine audit`): `kind: link` para una arista `link` (con `host`
+`<nodo>.graph:P` y la máquina a la que llegó en `upstream`) y `kind: postgres` o `mysql`
+con `host` `<nodo>.graph` para una `credential`. `kling graph audit <g>` pide el de cada
+nodo con máquina y los junta, ordenados por tiempo, con una columna `NODE` (el nodo de
+origen):
+
+```sh
+kling graph audit tienda                 # las últimas 200 conexiones por aristas
+kling graph audit tienda -since 10m      # desde hace 10 minutos (o un instante RFC 3339)
+kling graph audit tienda -denied         # solo las rechazadas
+kling graph audit tienda -json           # una línea JSON por registro, con "node"
+kling graph audit tienda -all            # también el resto del tráfico de sus credenciales
+```
+
+No hay ruta nueva en el daemon: son las lecturas de `GET /machines/{ref}/credaudit` de
+siempre, una por nodo, así que un inquilino solo ve lo de sus máquinas, y el registro no
+lleva claves ni marcadores. Un nodo `lazy` sin máquina no tiene nada que leer; uno cuyo
+registro no se puede leer se avisa por stderr y no para a los demás. Los registros de
+descartados (`dropped`) salen siempre, por stderr en la tabla. El registro de una
+máquina es suyo: un fork empieza con el suyo vacío, y `graph rm` lo borra con ella.
 
 `<g>` es el nombre, el ID o un prefijo único del ID. Las máquinas se llaman
 `<grafo>-<nodo>` y se ven en `kling ps`; cada una lleva `kling.graph=<id>` y
@@ -96,9 +121,42 @@ esa dirección).
 
 **Snapshot**: pausa todos los nodos que corren, corta las sesiones hacia ellos, vuelca
 cada uno sin reanudarlo y los reanuda al final: todos los volcados son del instante de
-la pausa. Si un volcado falla, se borran las plantillas hechas y se reanuda todo. Un
-nodo congelado no se vuelca (despierta el grafo antes) y un nodo con volúmenes
-tampoco en esta versión (soltarlos pide hablar con el invitado, y pausado no contesta).
+la pausa. Si un volcado falla, se borran las plantillas hechas y se reanuda todo.
+
+**Nodos congelados.** Un grafo congelado (entero o en parte) se vuelca igual: antes de
+la pausa se despiertan sus nodos congelados, en orden de `depends`, y al final se
+vuelven a congelar, en el orden de `freeze`; el grafo termina como empezó (`frozen`
+sigue `frozen`). Un nodo congelado no tiene VMM que volcar y su volcado de `freeze` no
+sirve de plantilla (apunta al disco de esa máquina), por eso se despierta. Cuesta un
+`thaw` y un `freeze` por nodo congelado. Si algo falla, también vuelven a congelarse.
+
+**Volúmenes.** Un nodo con volúmenes los **suelta** antes de la pausa, con el invitado
+aún en marcha (lo mismo que `kling commit` de una máquina: la caché de ext4 no puede
+ir en la memoria volcada de un disco que no viaja con ella), y los recupera tras
+reanudarse. Entre soltarlos y la pausa (milisegundos), el servicio del nodo no ve su
+volumen. Las plantillas llevan el volumen apuntado, como las de `commit`. Dos casos
+se rechazan (409) antes de tocar nada:
+
+- un nodo **ya pausado** con volúmenes: soltarlos pide al agente del invitado y un
+  invitado pausado no contesta. Despiértalo (`kling graph thaw <g>`) y repite.
+- un **fork** con un volumen en **escritura** en cualquier nodo, instanciado o `lazy`:
+  un ext4 no admite dos escritores y la primera copia chocaría con el original. En
+  solo lectura (`:ro`) se ramifica y cada copia lo monta, como en `kling sandbox fork`.
+
+Receta para ramificar un grafo con un volumen en escritura (p. ej. la `db`):
+
+1. `kling graph snapshot <g> -name base`: plantillas `base-<nodo>-<gen>`, cada una con
+   su volumen apuntado.
+2. Por cada rama, un volumen propio: `kling volume create db-rama1` y llénalo
+   (`kling volume populate`, o carga un volcado). Hoy no hay `volume clone`: `kling
+   volume snapshot`/`restore` guardan y devuelven **el mismo** volumen, no lo copian.
+3. Un fichero de grafo por rama cuyos nodos usan `from: base-<nodo>-<gen>` y
+   `volumes: [{name: db-rama1, mount: /data}]`. Una máquina restaurada no puede cambiar el número de
+   discos ni su modo ni su punto de montaje (quedaron fijados en la memoria), solo el
+   fichero al que apunta cada uno: mismo número de volúmenes, mismo `:ro` o no y mismo
+   `/data` que el original.
+
+Cada rama escribe en el suyo, y el original sigue con el que tenía.
 
 Las plantillas de un snapshot son **persistentes**: no se borran con el grafo (`graph
 rm` solo quita las temporales de un fork); se quitan con `kling snapshot rm`. La de un
@@ -190,6 +248,25 @@ Nada de red entre máquinas: el FORWARD entre namespaces sigue cerrado.
 El tramo del proxy al destino va en claro por el host, como el attach de Postgres; las
 credenciales siguen exigiendo SCRAM.
 
+### idle_freeze: segundos sin uso
+
+`idle_freeze: N` es el TTL de la máquina del nodo (congelar al vencer), pero su reloj lo
+mueve el uso: cada conexión por una arista `link` o `credential` que pasa la puerta (y,
+si despertó al destino, cuyo puerto ya contesta) lo pone a cero, en Linux (el proxy de
+enlace y el de Postgres) y en macOS (el broker) por igual. Así un nodo `lazy` se vuelve a
+congelar solo tras N segundos sin conexiones nuevas, no N segundos después de arrancar.
+
+- Las conexiones **rechazadas** (sin esa arista, `busy`, `no_capacity`, destino parado o
+  borrado) no renuevan nada: un nodo no mantiene despierto a otro sin tener la arista.
+- Despertar un nodo (thaw) también pone su reloj a cero: sin eso, uno que llevaba más de
+  N segundos dormido se volvería a congelar en la siguiente vuelta del vigilante.
+- Se renueva como mucho una vez por segundo y nodo: una ráfaga de conexiones no pide una
+  escritura del estado por cada una.
+- Cuenta el **comienzo** de cada conexión, no su duración: una conexión abierta más de N
+  segundos sin que llegue otra se corta al congelarse el nodo, como siempre. Para
+  conexiones largas, un `idle_freeze` mayor que su duración.
+- `kling renew` sobre la máquina del nodo sigue funcionando igual.
+
 ## Cómo llega un nodo a otro (macOS)
 
 Lo mismo, con otra fontanería: allí la red de cada invitado vive dentro de su
@@ -223,9 +300,8 @@ tener reenvío.
 
 ## Lo que no está en esta versión
 
-La arista `mcp`, snapshot y fork de un grafo con `share`, `idle_freeze` renovado por
-conexión (hoy es el TTL de siempre de la máquina) y grafos
-precalentados en el fondo del sandbox.
+La arista `mcp` y snapshot y fork de un grafo con `share`. Los grafos precalentados en
+el fondo del sandbox ya están (#57, abajo en "Desde los plugins").
 
 **Por qué no hay arista `mcp`.** El diseño era que un agente llamase a las herramientas
 de un servidor MCP del grafo por su puente (`kling-bridge`). Pero el puente escucha solo
@@ -245,6 +321,16 @@ entorno de integración entero en un comando, con la clave por stdin y deshecho 
 algo falla. `kling db branch -env <app-template>` lo hace por rama de git. `env down` y
 `branch -rm` lo borran con la clave. Detalle en
 [db.md](db.md#un-entorno-entero-app--base-como-grafo).
+
+**kling-sandbox: grafos precalentados (#57).** Una plantilla con `"kind": "graph"`
+declara un grafo (nodos que nacen de plantillas ya construidas, y sus aristas) con un
+`pool`. El fondo del gateway levanta cada instancia con `POST /graphs` y la congela con
+`graph freeze`; `POST /v1/graphs {"template": ...}` del frontal reclama una (etiqueta
+todas sus máquinas con el inquilino, relee, y `graph thaw`) o, si no hay, levanta una
+ya a nombre del inquilino. `DELETE /v1/graphs/{id}` la borra entera. Sin nodos `lazy`,
+sin aristas `credential` y sin volúmenes ni carpetas del host en los nodos: serían
+comunes a todas las instancias. Detalle en
+[ext/sandbox/README.md](../ext/sandbox/README.md#grafos-precalentados).
 
 **kling-mcp: agente + servidores MCP.** Un grafo sin aristas ya da lo que interesa:
 `agente` eager y `browser`/`memoria` `lazy` (sin RAM hasta que se necesitan), ciclo de
@@ -266,10 +352,10 @@ una despertada y congelada por `pkg/scheduler` con su pool de réplicas
 porque tocaría el planificador actual, y hay tres cosas que el grafo aún no cubre y que
 el planificador sí: (1) **réplicas por servicio y tope por inquilino** (`MaxInflight`,
 `MaxInstances`), que el grafo no modela (un nodo es una máquina); (2) el
-**arrendamiento**: el planificador renueva el TTL de lo que despierta e `idle_freeze` no
-se renueva por conexión; (3) los **límites del `link`** (una dirección por nodo, 16
+**arrendamiento**: el planificador renueva el TTL mientras hay peticiones en vuelo;
+`idle_freeze` ya se renueva por conexión, pero al abrirla, no mientras dura; (3) los **límites del `link`** (una dirección por nodo, 16
 conexiones, sin 80, 443 ni 8080). Sustituirlo sin esas tres cosas empeoraría la latencia
-y el aislamiento. El camino: `idle_freeze` renovado por conexión, luego un grafo por
+y el aislamiento. El camino (con `idle_freeze` ya renovado por conexión): un grafo por
 inquilino con el planificador solo para las réplicas de cada nodo. Mientras, el grafo
 sirve para lo que sí encaja: `snapshot`/`fork` del par entero para evaluar una cascada
 nueva contra la anterior partiendo del mismo estado.

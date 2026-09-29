@@ -2,7 +2,7 @@ module github.com/juan52878911/kindling/ext/sandbox
 
 go 1.24
 
-require github.com/juan52878911/kindling v0.16.0
+require github.com/juan52878911/kindling v0.17.0
 
 // El núcleo vive dos directorios arriba en el mismo repo: el replace relativo
 // está siempre para que GOWORK=off, el Dockerfile y quien clone sin workspace

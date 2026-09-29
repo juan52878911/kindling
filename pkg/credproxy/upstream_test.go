@@ -435,9 +435,9 @@ func TestPGUpstreamCancel(t *testing.T) {
 		t.Fatalf("la consulta no se canceló: %q %q", tipo, msg)
 	}
 	srv.mu.Lock()
-	canc := append([][2]uint32(nil), srv.cancelado...)
+	canc := append([]cancelVisto(nil), srv.cancelado...)
 	srv.mu.Unlock()
-	if len(canc) != 1 || canc[0] != [2]uint32{42, 0xdeadbeef} {
+	if len(canc) != 1 || canc[0] != (cancelVisto{42, "\xde\xad\xbe\xef"}) {
 		t.Fatalf("cancelaciones en el servidor: %x", canc)
 	}
 	if srv.sslVisto.Load() {

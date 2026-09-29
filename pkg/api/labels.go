@@ -36,6 +36,13 @@ func MergeLabels(base, override map[string]string) map[string]string {
 	return out
 }
 
+// LabelOwner es el inquilino dueño de una máquina, y por herencia de los
+// snapshots que salen de ella y de las máquinas que nacen de esos snapshots.
+// Con una política de autorización (docs/authz.md) la pone el daemon a partir
+// de quién llama: un inquilino no puede fijarla ni cambiarla, y solo ve y
+// toca lo que la lleva con su nombre. Sin política es una etiqueta más.
+const LabelOwner = "kling.owner"
+
 // LabelDBPrefix es el prefijo de las etiquetas de las bases de datos de
 // ext/db (kling.db.owner, kling.db.state...). kindling-sandbox lo reserva: un
 // inquilino no puede fijarlas.

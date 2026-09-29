@@ -142,6 +142,10 @@ func (a *app) envUp(ctx context.Context, o envOpts) (*api.Graph, error) {
 	if err != nil {
 		return nil, err
 	}
+	// La arista de credenciales y el grafo hablan Postgres (5432, SCRAM).
+	if err := requireGoldenEngine(snap, "env", enginePostgres); err != nil {
+		return nil, err
+	}
 	role, db, err := goldenRoleDB(snap)
 	if err != nil {
 		return nil, fmt.Errorf("template %s: %w", o.golden, err)

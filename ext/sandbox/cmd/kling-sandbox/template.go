@@ -49,23 +49,59 @@ func registro() (*hosts.Registro, error) {
 	return hosts.Nuevo(a.Hosts), nil
 }
 
-// leerPlantilla lee la receta de un fichero o de la entrada estándar.
-func leerPlantilla(ruta string) (plantilla.Plantilla, error) {
-	var p plantilla.Plantilla
-	var b []byte
-	var err error
+// leerFichero lee la receta de un fichero o de la entrada estándar.
+func leerFichero(ruta string) ([]byte, error) {
 	if ruta == "-" || ruta == "" {
-		b, err = os.ReadFile("/dev/stdin")
-	} else {
-		b, err = os.ReadFile(ruta)
+		return os.ReadFile("/dev/stdin")
 	}
-	if err != nil {
-		return p, err
-	}
+	return os.ReadFile(ruta)
+}
+
+// leerPlantilla decodifica una receta de máquina.
+func leerPlantilla(ruta string, b []byte) (plantilla.Plantilla, error) {
+	var p plantilla.Plantilla
 	if err := json.Unmarshal(b, &p); err != nil {
 		return p, fmt.Errorf("%s: %w", ruta, err)
 	}
 	return p, nil
+}
+
+// aplicarGrafo guarda una plantilla de grafo en el store de cada host. No
+// construye nada: sus nodos nacen de plantillas o imágenes que ya tienen que
+// estar en el host, y el fondo del gateway levanta y congela las instancias.
+func aplicarGrafo(ruta string, b []byte, host string) error {
+	var p plantilla.PlantillaGrafo
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("%s: %w", ruta, err)
+	}
+	if err := plantilla.ValidarGrafo(&p); err != nil {
+		return err
+	}
+	reg, err := registro()
+	if err != nil {
+		return err
+	}
+	ctx, stop := ctxSenales()
+	defer stop()
+	var fallos int
+	for _, h := range reg.Todos() {
+		if host != "" && h.Nombre != host {
+			continue
+		}
+		if err := plantilla.GuardarGrafo(ctx, h.Cliente, p); err != nil {
+			fmt.Printf("  %-12s ✗ %v\n", h.Nombre, err)
+			fallos++
+			continue
+		}
+		fmt.Printf("  %-12s ✓ graph template %s saved (%d node(s), pool %d)\n", h.Nombre, p.Nombre, len(p.Nodes), p.Pool)
+	}
+	if fallos > 0 {
+		return fmt.Errorf("%d host(s) could not save the graph template", fallos)
+	}
+	fmt.Printf("\nGraphs from it:  POST /v1/graphs {\"template\": %q}\n", p.Nombre)
+	return nil
 }
 
 func tplApply(args []string) error {
@@ -79,7 +115,14 @@ func tplApply(args []string) error {
 	if *fichero == "" {
 		return errors.New("usage: kling sbx template apply -f tpl.json [-host NAME] [-force]")
 	}
-	p, err := leerPlantilla(*fichero)
+	b, err := leerFichero(*fichero)
+	if err != nil {
+		return err
+	}
+	if plantilla.EsGrafo(b) {
+		return aplicarGrafo(*fichero, b, *host)
+	}
+	p, err := leerPlantilla(*fichero, b)
 	if err != nil {
 		return err
 	}
@@ -149,6 +192,24 @@ func tplLs(args []string) error {
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", strings.TrimPrefix(s.Name, "sbx-"), h.Nombre, s.Name, hecho, s.Instances)
 		}
+		// Las de grafo no tienen snapshot propio: INSTANCES son las libres.
+		gs, err := plantilla.Grafos(ctx, h.Cliente)
+		if err != nil || len(gs) == 0 {
+			continue
+		}
+		libres := map[string]int{}
+		if grs, err := h.Cliente.Graphs(ctx); err == nil {
+			if ms, err := h.Cliente.List(ctx); err == nil {
+				for _, in := range plantilla.Instancias(grs, ms) {
+					if in.Libre() {
+						libres[in.Plantilla]++
+					}
+				}
+			}
+		}
+		for _, g := range gs {
+			fmt.Fprintf(tw, "%s\t%s\t(graph, pool %d)\t—\t%d\n", g.Nombre, h.Nombre, g.Pool, libres[g.Nombre])
+		}
 	}
 	return tw.Flush()
 }
@@ -211,6 +272,11 @@ func tplRebuild(args []string) error {
 		}
 	}
 	if !encontrada {
+		for _, h := range reg.Todos() {
+			if g, err := plantilla.Grafo(ctx, h.Cliente, nombre); err == nil && g != nil {
+				return fmt.Errorf("%q is a graph template: there is nothing to rebuild (its nodes come from other templates)", nombre)
+			}
+		}
 		return fmt.Errorf("no recipe for %q on any host: apply it again with -f", nombre)
 	}
 	var fallos int
@@ -246,6 +312,17 @@ func tplRm(args []string) error {
 	snap := plantilla.SnapshotDe(args[0])
 	var fallos int
 	for _, h := range reg.Todos() {
+		// Una plantilla de grafo: fuera del store y fuera sus instancias
+		// libres. Las reclamadas siguen hasta que sus tenants las suelten.
+		if g, err := plantilla.Grafo(ctx, h.Cliente, args[0]); err == nil && g != nil {
+			n, err := plantilla.BorrarGrafo(ctx, h.Cliente, args[0])
+			if err != nil {
+				fmt.Printf("  %-12s ✗ %v\n", h.Nombre, err)
+				fallos++
+			} else {
+				fmt.Printf("  %-12s ✓ removed graph template %s and %d free instance(s)\n", h.Nombre, args[0], n)
+			}
+		}
 		if err := h.Cliente.RemoveSnapshot(ctx, snap); err != nil {
 			if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "doesn't exist") {
 				continue

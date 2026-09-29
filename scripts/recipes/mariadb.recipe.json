@@ -1,0 +1,3 @@
+{
+  "packages": ["mariadb", "mariadb-client", "tzdata"]
+}

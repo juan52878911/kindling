@@ -118,11 +118,13 @@ var coreTree = []section{
 `},
 	}},
 	{title: "GRAPHS (several machines as one)", cmds: []plugin.Command{
-		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
+		{Name: "graph", Summary: "machines with declared edges, frozen, saved and forked together", Subcommands: []string{"up", "ls", "inspect", "audit", "freeze", "thaw", "snapshot", "fork", "rm"}, Usage: `  graph up <file.json|file.yaml> [-q] [-json]      creates the graph and starts its
                                                    eager nodes; lazy ones start on
                                                    their first connection
   graph ls [-q] [-json]                            lists the graphs
   graph inspect <graph> [-json]                    nodes, state and edges
+  graph audit <graph> [-since 10m] [-denied]       every node's edge connections (link
+      [-all] [-tail N] [-json]                     and credential) in one timeline
   graph freeze <graph>                             freezes every node
   graph thaw <graph>                               wakes every node that has a machine
   graph snapshot <graph> [-name N] [-json]         one template per node, all from the
@@ -251,11 +253,22 @@ var coreTree = []section{
                                                    verify the cert as N; -upstream-tls
                                                    disable: no TLS, SCRAM-SHA-256 only
                                                    (see docs/postgres.md)
+  machine credential <ref> -type mysql             the same for MySQL/MariaDB (default
+      -domain D -user U -database B [-port P]      port 3306, -env MYSQL_PWD): the
+      [...same flags as postgres]                  proxy greets the guest itself and
+                                                   logs in with the real password;
+                                                   disable: native or caching_sha2
+                                                   fast path only (see docs/mysql.md)
   machine audit <ref> [-f] [-denied]               the credential proxy's audit log:
       [-since 10m] [-tail 200] [-json]             one line per request (method, host,
                                                    masked path, status, credentials
                                                    used, ms), never the key, headers,
                                                    bodies or the query
+`},
+		{Name: "cow", Summary: "copy-on-write disk clones and their store", Subcommands: []string{"grow"}, Usage: `  cow                                              how run -from gets its disk
+                                                   (daemon.cow) and the store's use
+  cow grow <size>|+<size>                          grows the copy-on-write store live
+                                                   (32G: new size; +8G: add); Linux
 `},
 		{Name: "topo", Summary: "ASCII diagram of everything", Usage: `  topo                                             ASCII diagram of everything
 `},

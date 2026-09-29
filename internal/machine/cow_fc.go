@@ -62,6 +62,17 @@ func clonarDescriptor(in, out *os.File) error {
 	return nil
 }
 
+// crearDestinoOverlay crea dst (O_EXCL|O_NOFOLLOW, ver copiarOverlayDesde)
+// para el overlay abierto en in y, con reflink, lo clona con FICLONE. Dice si
+// ya lo tiene o hay que copiarlo.
+func crearDestinoOverlay(in *os.File, dst string, reflink bool) (*os.File, bool, error) {
+	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, reflink && clonarDescriptor(in, out) == nil, nil
+}
+
 // probarReflink clona un fichero pequeño de srcDir a dstDir: la única forma
 // fiable de saber si hay reflink entre los dos (el tipo de sistema de ficheros
 // no basta: un XFS formateado sin reflink=1 no clona).
@@ -84,14 +95,7 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 	fs, errFS := fsDelAlmacen(root)
 	a := &almacenCoW{
 		root: root, fs: fs, img: filepath.Join(root, imgAlmacen(fs)), dir: filepath.Join(root, "cow"), priv: priv,
-		errFS:       errFS,
-		estaMontado: func(dir string) (bool, error) { return estaMontadoTipo(dir, fs) },
-		crear: func(ctx context.Context, img string, bytes int64) error {
-			return crearImagenAlmacen(ctx, fs, img, bytes)
-		},
-		montar: func(ctx context.Context, img, dir string) error {
-			return montarLoopAlmacen(ctx, fs, img, dir)
-		},
+		errFS:  errFS,
 		clonar: clonarFichero,
 		copiar: func(ctx context.Context, src, dst string) error {
 			if out, err := copiarDisco(ctx, src, dst); err != nil {
@@ -99,7 +103,29 @@ func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
 			}
 			return nil
 		},
-		libreEn: libreEnDir,
+		libreEn:   libreEnDir,
+		desmontar: desmontarAlmacen,
+		candidatos: func() []string {
+			b, _ := os.ReadFile("/proc/filesystems")
+			return ordenCandidatos(string(b), func(mkfs string) bool { return buscarE2fs(mkfs) != "" })
+		},
+	}
+	// Las operaciones leen a.fs al llamarlas (con a.mu tomado): el tipo puede
+	// cambiar si el primero no monta (crearYMontar).
+	a.estaMontado = func(dir string) (bool, error) { return estaMontadoTipo(dir, a.fs) }
+	a.crear = func(ctx context.Context, img string, bytes int64) error {
+		return crearImagenAlmacen(ctx, a.fs, img, bytes)
+	}
+	a.montar = func(ctx context.Context, img, dir string) error {
+		return montarLoopAlmacen(ctx, a.fs, img, dir)
+	}
+	a.agrandar = func(ctx context.Context, img, dir string, bytes int64) error {
+		return agrandarAlmacen(ctx, a.fs, img, dir, bytes)
+	}
+	a.reconfigurar = func(fs string) {
+		a.fs, a.img, a.errFS = fs, filepath.Join(root, imgAlmacen(fs)), nil
+		a.detectarCuota, a.crearDir, a.limitar, a.quitarDir = nil, nil, nil, nil
+		a.activarCuota()
 	}
 	a.activarCuota()
 	return a
@@ -144,8 +170,16 @@ func (m *Manager) detectarCoW(cfg CoWConfig) (string, string) {
 		m.alm.mu.Unlock()
 	default:
 		errAlm = puedeAlmacen(m.alm)
+		if errAlm == nil {
+			errAlm = m.alm.comprobarEspacio(cfg.StoreGiB)
+		}
 	}
-	return decidirCoW(cfg.Mode, nativo, errAlm)
+	modo, motivo := decidirCoW(cfg.Mode, nativo, errAlm)
+	if modo == cowModoStore && !m.alm.existe() {
+		b, _ := os.ReadFile("/proc/filesystems")
+		motivo += notaAlmacenPendiente(m.alm.fs, soportados(string(b))[m.alm.fs])
+	}
+	return modo, motivo
 }
 
 // puedeAlmacen comprueba lo que hace falta para crear el almacén: root, loop,
@@ -271,6 +305,87 @@ func montarLoopAlmacen(ctx context.Context, fs, img, dir string) error {
 		return fmt.Errorf("mounting %s: %v: %s", img, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// desmontarAlmacen desmonta el almacén (solo uno recién creado que no sirve,
+// o uno que ninguna instancia usa: ver desechar).
+func desmontarAlmacen(dir string) error {
+	return syscall.Unmount(dir, 0)
+}
+
+// ioctlLoopSetCapacity es LOOP_SET_CAPACITY: el loop relee el tamaño de su
+// fichero (lo que hace `losetup -c`).
+const ioctlLoopSetCapacity = 0x4C07
+
+// agrandarAlmacen amplía el almacén montado en dir hasta bytes: reserva el
+// fichero entero (fallocate, como al crearlo: sin sobreasignar), hace que su
+// loop relea el tamaño y agranda el sistema de ficheros en caliente
+// (xfs_growfs, o `btrfs filesystem resize max`). Las instancias siguen
+// corriendo: los dos crecen montados.
+func agrandarAlmacen(ctx context.Context, fs, img, dir string, bytes int64) error {
+	bin, args := argsCrecerFS(fs, dir)
+	ruta := buscarE2fs(bin)
+	if ruta == "" {
+		return fmt.Errorf("%s not found (install %s)", bin, paqueteAlmacen(fs))
+	}
+	loop, err := loopDelAlmacen(dir, img)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(img, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	fi, err := f.Stat()
+	if err == nil && fi.Size() < bytes {
+		if err = syscall.Fallocate(int(f.Fd()), 0, fi.Size(), bytes-fi.Size()); err != nil {
+			err = fmt.Errorf("reserving %d MiB more for the store: %w", (bytes-fi.Size())>>20, err)
+		}
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	l, err := os.OpenFile(loop, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, l.Fd(), ioctlLoopSetCapacity, 0)
+	l.Close()
+	if e != 0 {
+		return fmt.Errorf("refreshing the size of %s: %w", loop, e)
+	}
+	if out, err := exec.CommandContext(ctx, ruta, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %v: %s", bin, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// loopDelAlmacen es el dispositivo loop montado en dir, comprobando que es un
+// loop y que su fichero es img (/sys/block/loopN/loop/backing_file): lo que se
+// va a agrandar tiene que ser el almacén y no otra cosa montada ahí.
+func loopDelAlmacen(dir, img string) (string, error) {
+	mt, ok := montajeDe(dir)
+	if !ok {
+		return "", fmt.Errorf("%s is not mounted", dir)
+	}
+	nombre, ok := nombreLoop(mt.fuente)
+	if !ok {
+		return "", fmt.Errorf("%s is mounted from %q, not from a loop device", dir, mt.fuente)
+	}
+	b, err := os.ReadFile(filepath.Join("/sys/block", nombre, "loop", "backing_file"))
+	if err != nil {
+		return "", fmt.Errorf("reading the backing file of %s: %w", mt.fuente, err)
+	}
+	if rutaCanonica(strings.TrimSpace(string(b))) != rutaCanonica(img) {
+		return "", fmt.Errorf("%s is backed by %s, not by the store %s", mt.fuente, strings.TrimSpace(string(b)), img)
+	}
+	return "/dev/" + nombre, nil
 }
 
 // estaMontadoTipo dice si dir es un punto de montaje, y exige que sea del tipo

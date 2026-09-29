@@ -101,6 +101,9 @@ func (a *app) attach(ctx context.Context, agentRef, copyRef string, o attachOpts
 	if err := checkReady(cp, o.owner); err != nil {
 		return err
 	}
+	if err := requirePostgres(cp, "attach"); err != nil {
+		return err
+	}
 	ag, err := a.inspect(ctx, agentRef)
 	if err != nil {
 		return err

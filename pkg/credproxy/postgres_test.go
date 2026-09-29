@@ -69,6 +69,16 @@ func certPG(t *testing.T, host string) (tls.Certificate, string) {
 		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
+// cancelVisto es un CancelRequest tal y como llega al servidor falso.
+type cancelVisto struct {
+	pid   uint32
+	clave string
+}
+
+// pgClaveReal32 es la clave de cancelación (32 bytes, como PostgreSQL 18) que
+// da el servidor falso en 3.2.
+var pgClaveReal32 = []byte("clave-real-de-32-bytes-del-pg18!")
+
 // servidorPG es un PostgreSQL de mentira.
 type servidorPG struct {
 	t    *testing.T
@@ -84,13 +94,25 @@ type servidorPG struct {
 	// sinTLS: acepta además un StartupMessage directo, sin SSLRequest (un
 	// servidor sin TLS, como un Docker de pruebas).
 	sinTLS bool
+	// v32: habla 3.2 (PostgreSQL 18: clave de cancelación de 32 bytes). Sin
+	// él, a un 3.2 contesta NegotiateProtocolVersion con 3.0, como un 17.
+	v32 bool
+	// negociaMal es el NegotiateProtocolVersion (cuerpo) que manda en vez del
+	// bueno, para probar los que el proxy rechaza.
+	negociaMal []byte
+	// claveMal es la clave que manda en BackendKeyData (claveMalVeces veces)
+	// en vez de la que toca a la versión.
+	claveMal      []byte
+	claveMalVeces int
 
 	sslVisto atomic.Bool
 
 	mu        sync.Mutex
 	params    map[string]string
+	versiones []uint32
 	consultas []string
-	cancelado [][2]uint32
+	// cancelado: pid y clave de cada CancelRequest, de la longitud que llegue.
+	cancelado []cancelVisto
 	cbVisto   string
 	clavesVis []string
 	conns     atomic.Int32
@@ -152,7 +174,7 @@ func (s *servidorPG) atender(raw net.Conn) {
 	}
 	if code == pgCancelRequest {
 		s.mu.Lock()
-		s.cancelado = append(s.cancelado, [2]uint32{binary.BigEndian.Uint32(cuerpo[:4]), binary.BigEndian.Uint32(cuerpo[4:])})
+		s.cancelado = append(s.cancelado, cancelVisto{binary.BigEndian.Uint32(cuerpo[:4]), string(cuerpo[4:])})
 		s.mu.Unlock()
 		return
 	}
@@ -165,14 +187,36 @@ func (s *servidorPG) atender(raw net.Conn) {
 	for _, p := range ps {
 		s.params[p[0]] = p[1]
 	}
+	s.versiones = append(s.versiones, code)
 	s.mu.Unlock()
+	// La versión: 3.0 siempre; 3.2 si v32; lo demás se negocia a la baja.
+	minor := code & 0xffff
+	if !s.v32 {
+		minor = 0
+	}
+	minor = min(minor, 2)
+	switch {
+	case s.negociaMal != nil:
+		c.Write(mensajePG('v', s.negociaMal))
+	case minor != code&0xffff:
+		c.Write(negociarVersionPG(minor, nil))
+	}
 	br := bufio.NewReader(c)
 	if !s.autenticar(c, br) {
 		return
 	}
 	c.Write(mensajePG('R', []byte{0, 0, 0, 0}))
 	c.Write(mensajePG('S', []byte("server_version\x0017.0\x00")))
-	c.Write(mensajePG('K', []byte{0, 0, 0, 42, 0xde, 0xad, 0xbe, 0xef}))
+	switch {
+	case s.claveMal != nil:
+		for range s.claveMalVeces {
+			c.Write(mensajePG('K', append([]byte{0, 0, 0, 42}, s.claveMal...)))
+		}
+	case minor == 2:
+		c.Write(mensajePG('K', append([]byte{0, 0, 0, 42}, pgClaveReal32...)))
+	default:
+		c.Write(mensajePG('K', []byte{0, 0, 0, 42, 0xde, 0xad, 0xbe, 0xef}))
+	}
 	c.Write(mensajePG('Z', []byte{'I'}))
 	for {
 		tipo, msg, err := leerMensaje(br, 1<<20)
@@ -772,7 +816,7 @@ func TestPGTramoDelInvitado(t *testing.T) {
 	}
 	k.arranque(2, "user", pgUser, "database", pgDB, "_pq_.algo", "1")
 	tipo, msg := k.leer()
-	if tipo != 'v' || binary.BigEndian.Uint32(msg) != 0 || binary.BigEndian.Uint32(msg[4:]) != 1 || !strings.Contains(string(msg), "_pq_.algo") {
+	if tipo != 'v' || binary.BigEndian.Uint32(msg) != pgProto32 || binary.BigEndian.Uint32(msg[4:]) != 1 || !strings.Contains(string(msg), "_pq_.algo") {
 		t.Fatalf("esperaba NegotiateProtocolVersion, llegó %q %q", tipo, msg)
 	}
 	if tipo, _ := k.leer(); tipo != 'R' {
@@ -841,9 +885,9 @@ func TestPGCancelRequest(t *testing.T) {
 		t.Fatalf("la consulta no se canceló: %q %q", tipo, msg)
 	}
 	srv.mu.Lock()
-	canc := append([][2]uint32(nil), srv.cancelado...)
+	canc := append([]cancelVisto(nil), srv.cancelado...)
 	srv.mu.Unlock()
-	if len(canc) != 1 || canc[0] != [2]uint32{42, 0xdeadbeef} {
+	if len(canc) != 1 || canc[0] != (cancelVisto{42, "\xde\xad\xbe\xef"}) {
 		t.Fatalf("cancelaciones en el servidor: %x", canc)
 	}
 	k.c.Close()
@@ -975,7 +1019,7 @@ func TestValidarCredencialesPostgres(t *testing.T) {
 		"allow":            func(c *Credential) { c.Allow = []string{"GET /"} },
 		"CA basura":        func(c *Credential) { c.CAPEM = "no es un PEM" },
 		"CA enorme":        func(c *Credential) { c.CAPEM = ca + strings.Repeat(" ", MaxCAPEM) },
-		"tipo raro":        func(c *Credential) { c.Kind = "mysql" },
+		"tipo raro":        func(c *Credential) { c.Kind = "oracle" },
 		"http con rol":     func(c *Credential) { c.Kind = ""; c.Port = 0 },
 	} {
 		c := base()

@@ -21,7 +21,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-const graphUsage = "usage: kling graph <up|ls|inspect|freeze|thaw|snapshot|fork|rm> [...]"
+const graphUsage = "usage: kling graph <up|ls|inspect|audit|freeze|thaw|snapshot|fork|rm> [...]"
 
 func cmdGraph(args []string) error {
 	if len(args) == 0 {
@@ -34,6 +34,8 @@ func cmdGraph(args []string) error {
 		return graphList(args[1:])
 	case "inspect":
 		return graphInspect(args[1:])
+	case "audit":
+		return graphAudit(args[1:])
 	case "freeze", "thaw":
 		return graphLifecycle(args[0], args[1:])
 	case "snapshot":
@@ -43,7 +45,7 @@ func cmdGraph(args []string) error {
 	case "rm", "remove":
 		return graphRemove(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use up, ls, inspect, freeze, thaw, snapshot, fork or rm", args[0])
+	return fmt.Errorf("unknown subcommand %q: use up, ls, inspect, audit, freeze, thaw, snapshot, fork or rm", args[0])
 }
 
 // fileGraph es el fichero de un grafo: el api.Graph de siempre y, en cada
@@ -392,17 +394,27 @@ func graphSnapshot(args []string) error {
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(s)
 	}
-	fmt.Printf("graph %s: generation %d saved in %s (one instant for every node)\n", s.Graph, s.Generation, time.Since(start).Round(time.Millisecond))
+	printGraphSnapshot(os.Stdout, os.Stderr, s, time.Since(start))
+	next("use them as from: in a graph file, or kling run -from <template>")
+	return nil
+}
+
+// printGraphSnapshot escribe el resultado de un snapshot de grafo: las
+// plantillas por nodo en out y, en errOut, los avisos (un nodo que no se pudo
+// volver a congelar sigue en marcha).
+func printGraphSnapshot(out, errOut io.Writer, s *api.GraphSnapshot, d time.Duration) {
+	fmt.Fprintf(out, "graph %s: generation %d saved in %s (one instant for every node)\n", s.Graph, s.Generation, d.Round(time.Millisecond))
 	nodos := make([]string, 0, len(s.Templates))
 	for n := range s.Templates {
 		nodos = append(nodos, n)
 	}
 	sort.Strings(nodos)
 	for _, n := range nodos {
-		fmt.Printf("  %s  ->  template %s\n", n, s.Templates[n])
+		fmt.Fprintf(out, "  %s  ->  template %s\n", n, s.Templates[n])
 	}
-	next("use them as from: in a graph file, or kling run -from <template>")
-	return nil
+	for _, w := range s.Warnings {
+		fmt.Fprintf(errOut, "warning: %s\n", w)
+	}
 }
 
 func graphFork(args []string) error {

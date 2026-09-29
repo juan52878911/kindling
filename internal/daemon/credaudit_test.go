@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,16 @@ func TestHandleCredAudit(t *testing.T) {
 	if rr := call(t, h, "GET", "/machines/svc/credaudit", ""); rr.Code != http.StatusOK || rr.Body.Len() != 0 {
 		t.Fatalf("sin registro: %d %q", rr.Code, rr.Body)
 	}
-	a := credproxy.NewAuditor(filepath.Join(dir, credproxy.AuditFile), nil)
+	// Donde lo escribe cada plataforma: en Linux el daemon, fuera del directorio
+	// de la máquina (<root>/audit/<id>.jsonl); en macOS el kling-vz, dentro.
+	ruta := filepath.Join(dir, credproxy.AuditFile)
+	if runtime.GOOS == "linux" {
+		if err := os.MkdirAll(filepath.Join(root, "audit"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ruta = filepath.Join(root, "audit", "c4c4c4c4c4c4c4c4c4.jsonl")
+	}
+	a := credproxy.NewAuditor(ruta, nil)
 	ahora := time.Now()
 	a.Record(credproxy.Record{TS: ahora.Add(-time.Hour), Kind: credproxy.KindHTTP, Method: "GET", Host: "a.com", Path: "/viejo", Status: 200})
 	a.Record(credproxy.Record{TS: ahora, Kind: credproxy.KindHTTP, Method: "GET", Host: "a.com", Path: "/no",

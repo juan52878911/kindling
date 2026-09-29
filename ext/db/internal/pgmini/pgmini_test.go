@@ -3,13 +3,21 @@ package pgmini
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/pbkdf2"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"io"
+	"math/big"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -62,6 +70,19 @@ type falso struct {
 	// respuesta a una consulta: filas de una columna
 	filas []string
 	err   bool
+	// TLS: tlsCfg != nil acepta el SSLRequest; nil contesta 'N'. plus ofrece
+	// SCRAM-SHA-256-PLUS. mec y gs2 son lo que el cliente eligió.
+	tlsCfg *tls.Config
+	plus   bool
+	mu     sync.Mutex
+	mec    string
+	gs2    string
+}
+
+func (f *falso) eleccion() (string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mec, f.gs2
 }
 
 func nuevoFalso(t *testing.T, auth, pass string) *falso {
@@ -94,11 +115,31 @@ func auth(code uint32, extra string) []byte {
 }
 
 func (f *falso) atender(c net.Conn) {
-	defer c.Close()
+	defer func() { c.Close() }()
 	r := bufio.NewReader(c)
 	var l [4]byte
 	if _, err := io.ReadFull(r, l[:]); err != nil {
 		return
+	}
+	if binary.BigEndian.Uint32(l[:]) == 8 { // SSLRequest
+		var code [4]byte
+		if _, err := io.ReadFull(r, code[:]); err != nil || binary.BigEndian.Uint32(code[:]) != sslRequestCode {
+			return
+		}
+		if f.tlsCfg == nil {
+			c.Write([]byte("N"))
+		} else {
+			c.Write([]byte("S"))
+			tc := tls.Server(c, f.tlsCfg)
+			if tc.Handshake() != nil {
+				return
+			}
+			c = tc
+			r = bufio.NewReader(tc)
+		}
+		if _, err := io.ReadFull(r, l[:]); err != nil {
+			return
+		}
 	}
 	io.CopyN(io.Discard, r, int64(binary.BigEndian.Uint32(l[:]))-4) // StartupMessage
 	leerP := func() []byte {
@@ -121,18 +162,31 @@ func (f *falso) atender(c net.Conn) {
 			return
 		}
 	case "scram":
-		c.Write(auth(10, "SCRAM-SHA-256\x00\x00"))
+		mecs := "SCRAM-SHA-256\x00"
+		if f.plus {
+			mecs = "SCRAM-SHA-256-PLUS\x00" + mecs
+		}
+		c.Write(auth(10, mecs+"\x00"))
 		p := leerP()
 		i := strings.Index(string(p), "\x00")
 		cf := string(p[i+1+4:]) // tras el mecanismo y la longitud
-		bare := strings.TrimPrefix(cf, "n,,")
+		partes := strings.SplitN(cf, ",", 3)
+		gs2 := partes[0] + "," + partes[1] + ","
+		bare := partes[2]
+		f.mu.Lock()
+		f.mec, f.gs2 = string(p[:i]), gs2
+		f.mu.Unlock()
+		cbind := gs2
+		if strings.HasPrefix(gs2, "p=") {
+			cbind += string(tlsServerEndPoint(f.tlsCfg.Certificates[0].Leaf))
+		}
 		cn := strings.TrimPrefix(strings.Split(bare, ",")[1], "r=")
 		nonce := cn + "SERVERPART"
 		sal := []byte("salsalsal")
 		sf := "r=" + nonce + ",s=" + base64.StdEncoding.EncodeToString(sal) + ",i=4096"
 		c.Write(auth(11, sf))
 		fin := string(leerP())
-		sinPrueba := "c=biws,r=" + nonce
+		sinPrueba := "c=" + base64.StdEncoding.EncodeToString([]byte(cbind)) + ",r=" + nonce
 		salted, _ := pbkdf2.Key(sha256.New, f.pass, sal, 4096, 32)
 		ck := hmacSHA256(salted, "Client Key")
 		sk := sha256.Sum256(ck)
@@ -291,5 +345,148 @@ func TestCancelarDesbloquea(t *testing.T) {
 	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("cancelar no desbloqueó")
+	}
+}
+
+// ── TLS ──────────────────────────────────────────────────────────────────────
+
+// pki genera una CA y un certificado de servidor para db.test y 127.0.0.1.
+func pki(t *testing.T, ca *ecdsa.PrivateKey, caCert *x509.Certificate) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	nueva := func() *ecdsa.PrivateKey {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	if ca == nil {
+		ca = nueva()
+		tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "ca"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+		der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &ca.PublicKey, ca)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caCert, _ = x509.ParseCertificate(der)
+	}
+	k := nueva()
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "db.test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		DNSNames: []string{"db.test"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, caCert, &k.PublicKey, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := x509.ParseCertificate(der)
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k, Leaf: leaf}, pool
+}
+
+func falsoTLS(t *testing.T, auth, pass string, plus bool) (*falso, *x509.CertPool) {
+	cert, pool := pki(t, nil, nil)
+	f := nuevoFalso(t, auth, pass)
+	f.tlsCfg = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	f.plus = plus
+	return f, pool
+}
+
+func dialTLS(t *testing.T, f *falso, cfg Config) (*Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	cfg.Addr, cfg.User, cfg.Database, cfg.Timeout = f.ln.Addr().String(), "u", "d", 5*time.Second
+	return Dial(ctx, cfg)
+}
+
+func TestTLSVerifyFullConScramPlus(t *testing.T) {
+	f, pool := falsoTLS(t, "scram", "s3cret", true)
+	f.filas = []string{"7"}
+	c, err := dialTLS(t, f, Config{Password: "s3cret", TLSMode: TLSVerifyFull, TLSServerName: "db.test", RootCAs: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if mec, gs2 := f.eleccion(); mec != "SCRAM-SHA-256-PLUS" || gs2 != "p=tls-server-end-point,," {
+		t.Fatalf("mecanismo = %q gs2 = %q", mec, gs2)
+	}
+	if rows, err := c.Query(context.Background(), "SELECT 7"); err != nil || len(rows) != 1 || rows[0][0] != "7" {
+		t.Fatalf("%v %v", rows, err)
+	}
+}
+
+func TestTLSScramSinPlusUsaY(t *testing.T) {
+	f, pool := falsoTLS(t, "scram", "s3cret", false)
+	c, err := dialTLS(t, f, Config{Password: "s3cret", TLSMode: TLSVerifyFull, TLSServerName: "db.test", RootCAs: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if mec, gs2 := f.eleccion(); mec != "SCRAM-SHA-256" || gs2 != "y,," {
+		t.Fatalf("mecanismo = %q gs2 = %q", mec, gs2)
+	}
+}
+
+func TestTLSVerifyFullPorIPDeLaDireccion(t *testing.T) {
+	// Sin TLSServerName se verifica el host de Addr (127.0.0.1, en el SAN).
+	f, pool := falsoTLS(t, "trust", "", false)
+	c, err := dialTLS(t, f, Config{TLSMode: TLSVerifyFull, RootCAs: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+}
+
+func TestTLSVerifyFullRechaza(t *testing.T) {
+	f, pool := falsoTLS(t, "trust", "", false)
+	// Nombre que no está en el certificado.
+	if c, err := dialTLS(t, f, Config{TLSMode: TLSVerifyFull, TLSServerName: "otro.test", RootCAs: pool}); err == nil {
+		c.Close()
+		t.Fatal("verify-full aceptó un nombre que no es el del certificado")
+	}
+	// CA que no firmó el certificado.
+	_, otra := pki(t, nil, nil)
+	if c, err := dialTLS(t, f, Config{TLSMode: TLSVerifyFull, TLSServerName: "db.test", RootCAs: otra}); err == nil {
+		c.Close()
+		t.Fatal("verify-full aceptó una CA ajena")
+	}
+}
+
+func TestTLSVerifyCAyRequire(t *testing.T) {
+	f, pool := falsoTLS(t, "trust", "", false)
+	// verify-ca: nombre distinto vale, cadena mala no.
+	c, err := dialTLS(t, f, Config{TLSMode: TLSVerifyCA, TLSServerName: "otro.test", RootCAs: pool})
+	if err != nil {
+		t.Fatalf("verify-ca con otro nombre: %v", err)
+	}
+	c.Close()
+	_, otra := pki(t, nil, nil)
+	if c, err := dialTLS(t, f, Config{TLSMode: TLSVerifyCA, RootCAs: otra}); err == nil {
+		c.Close()
+		t.Fatal("verify-ca aceptó una CA ajena")
+	}
+	// require no verifica nada.
+	c, err = dialTLS(t, f, Config{TLSMode: TLSRequire})
+	if err != nil {
+		t.Fatalf("require: %v", err)
+	}
+	c.Close()
+}
+
+func TestTLSServidorSinTLSNoDegrada(t *testing.T) {
+	f := nuevoFalso(t, "trust", "") // contesta 'N'
+	if c, err := dialTLS(t, f, Config{TLSMode: TLSVerifyFull}); err == nil {
+		c.Close()
+		t.Fatal("se degradó a texto claro")
+	}
+}
+
+func TestTLSModoDesconocido(t *testing.T) {
+	f, _ := falsoTLS(t, "trust", "", false)
+	if c, err := dialTLS(t, f, Config{TLSMode: "prefer"}); err == nil {
+		c.Close()
+		t.Fatal("aceptó un modo desconocido")
 	}
 }

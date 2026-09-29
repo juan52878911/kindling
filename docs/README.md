@@ -26,6 +26,7 @@ depuración.
 |---|---|---|
 | [`extensions.md`](extensions.md) | Escribe una extensión en 10 minutos con [`examples/hello-extension`](../examples/hello-extension): el manifiesto campo a campo (con `companions`), descubrimiento, ganchos, cómo publicarla para `kling plugin install` y lo que el núcleo ofrece | vas a escribir una extensión o quieres entender cómo llega `kling mcp` a su código |
 | [`../ext/mcp/README.es.md`](../ext/mcp/README.es.md) · [`../ext/sandbox/README.md`](../ext/sandbox/README.md) | Las extensiones oficiales: servidores MCP bajo demanda y sandboxes multiinquilino | usas `kling plugin install mcp` o `sandbox` |
+| [`authz.md`](authz.md) | Autorización por operación en el socket del daemon: identidad por peercred (también por SSH), la política `/etc/kling/authz.json` con roles `admin` y `tenant:<nombre>`, plantillas compartidas, tokens de inquilino y qué ve cada uno | vas a compartir un daemon entre varios usuarios |
 | [`api.md`](api.md) | Todas las rutas del daemon, las capacidades, el protocolo de los constructores de imágenes y el proxy al invitado | vas a hablar con el daemon desde otro programa |
 
 ## Diseño y auditorías

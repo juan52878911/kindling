@@ -142,3 +142,44 @@ func TestCredentialFlagsAnyDatabase(t *testing.T) {
 		t.Errorf("sin aviso: %q", avisos.String())
 	}
 }
+
+// -type mysql: mismas banderas que postgres; avisa de que la base no es una
+// frontera, de que sin TLS fuera del loopback el servidor no se autentica, y
+// describe la conexión con los términos de MySQL.
+func TestCredentialFlagsMySQL(t *testing.T) {
+	clave := filepath.Join(t.TempDir(), "clave")
+	if err := os.WriteFile(clave, []byte("pw-real\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var avisos bytes.Buffer
+	antes := credAvisos
+	credAvisos = &avisos
+	t.Cleanup(func() { credAvisos = antes })
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cf := credentialFlags(fs)
+	if err := fs.Parse([]string{"-f", clave, "-type", "mysql", "-domain", "db.example.com", "-env", "MYSQL_PWD",
+		"-user", "app", "-database", "appdb", "-upstream", "10.0.0.5:3306", "-upstream-tls", "disable"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := cf.spec()
+	if err != nil || s.Type != "mysql" || s.User != "app" || s.Database != "appdb" || s.UpstreamTLS != "disable" || s.Secret != "pw-real" {
+		t.Fatalf("spec %+v, %v", s, err)
+	}
+	if !strings.Contains(avisos.String(), "USE any database") || !strings.Contains(avisos.String(), "does not prove the server knows the password") {
+		t.Errorf("avisos: %q", avisos.String())
+	}
+	if got := pgConexion(s); !strings.Contains(got, "database=appdb") || !strings.Contains(got, "ssl-mode") {
+		t.Errorf("conexión: %q", got)
+	}
+	s.Upstream, s.UpstreamTLS = "", ""
+	if got := pgDestino(s); !strings.Contains(got, "db.example.com:3306") {
+		t.Errorf("destino: %q", got)
+	}
+
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cf = credentialFlags(fs)
+	_ = fs.Parse([]string{"-f", clave, "-type", "mysql", "-domain", "db.example.com", "-env", "MYSQL_PWD", "-user", "app"})
+	if _, err := cf.spec(); err == nil || !strings.Contains(err.Error(), "-type mysql needs -database") {
+		t.Errorf("sin -database: %v", err)
+	}
+}

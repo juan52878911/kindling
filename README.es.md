@@ -19,7 +19,7 @@ milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detr�
 al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
 extensiones.
 
-> Estado: **v0.16.0 — un núcleo endurecido, en Linux y en macOS.** `kling` gestiona
+> Estado: **v0.17.0 — bases de datos desechables, grafos de microVMs y discos con copia al escribir, en Linux y en macOS.** `kling` gestiona
 > microVMs con red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por
 > capas, eventos, constructores de imágenes, un API del daemon documentado y sandboxes de
 > usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
@@ -89,6 +89,9 @@ enlazadas:
 · [Chispa: un clasificador diminuto para decisiones pequeñas](#chispa-un-clasificador-diminuto-para-decisiones-pequeñas)
 · [Gateway de IA](#gateway-de-ia-muchos-modelos-listos-ninguno-encendido-247)
 · [Demo: una habitación](#demo-una-habitación-con-modelos-serverless)
+· [Una Postgres por microVM: kling db](#una-postgres-por-microvm-kling-db)
+· [Grafos: kling graph](#grafos-un-entorno-entero-en-un-fichero)
+· [Discos copia al escribir](#discos-copia-al-escribir)
 · [Qué persiste y qué no](#qué-persiste-y-qué-no)
 
 **Rendimiento y densidad**
@@ -193,7 +196,7 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # Versión concreta (por defecto instala la última release):
-curl -fsSL .../install.sh | sh -s -- --tag v0.16.0
+curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
 
 # Prefijo personalizado:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -941,6 +944,81 @@ make domotica                                         # compila ./kindling-domot
 ./kindling-domotica decide "pon la luz del salón en azul"          # capas 1-2 en el proceso, sin daemon
 ```
 
+## Una Postgres por microVM: `kling db`
+
+`kling db` (la extensión `kling-db`) da a un agente o a un test su propia Postgres 16, con
+datos, en milisegundos. Una **copia** es una microVM nacida de un snapshot dorado con
+Postgres ya caliente; cada una tiene su propia contraseña, y al agente se le puede dar un
+rol de solo lectura:
+
+```sh
+kling db golden -script scripts/db-golden.sh build -template crm-demo pg   # la plantilla, una vez
+kling db up pg -name t1                       # una copia lista, con su propia contraseña
+kling db connect t1 -psql                     # una sesión psql desde el host
+kling db fork t1 -n 4                         # 4 copias de t1 tal como está ahora, todo o nada
+kling db branch hook install                  # una copia por rama de git, que cambia con el checkout
+kling db doctor t1                            # hallazgos de seguridad (sale con 1 si hay alguno)
+kling db tenant-check t1                      # ejercita RLS: cada inquilino ve solo sus filas
+kling db ask t1 "¿cuántos clientes hay por país?"   # un modelo escribe la SQL; tú la confirmas; solo lectura
+kling db ask-web t1                           # lo mismo en una página web local (loopback, URL de un uso)
+kling db diff t1 t2                           # qué cambió entre dos copias: esquema y filas, sin datos
+kling db env up shop-app -golden pg           # app + base como grafo (Linux); la app nunca ve la contraseña
+kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
+  'postgres://readonly@db.prod.example.com:5432/shop'   # una copia enmascarada de producción
+```
+
+Un agente de **otra** microVM puede compartir una copia por el proxy de credenciales
+(`kling db attach`; en macOS, por el broker de enlaces del daemon) sin ver nunca la
+contraseña. También hay plantillas MariaDB (`up`, `fork`, `connect`, `rotate`, `doctor`,
+`audit`: [docs/mysql.md](docs/mysql.md)), y `kling db doctor -url` revisa una Postgres que
+ya tienes, con TLS verificado por defecto. Plantillas, roles, `rehearse`,
+`snapshot`/`undo`, `audit` y el resto: [docs/db.md](docs/db.md); preguntas en lenguaje
+natural: [docs/db-ask.md](docs/db-ask.md); las plantillas de Postgres congeladas:
+[docs/db-golden.md](docs/db-golden.md). Para apuntar a un agente a una base que ya tienes
+(Docker, LAN/VPC, Neon, Supabase, RDS —probado contra un RDS real—), mira
+[Claves que el invitado nunca ve](#claves-que-el-invitado-nunca-ve-el-proxy-de-credenciales)
+y [docs/postgres.md](docs/postgres.md).
+
+## Grafos: un entorno entero en un fichero
+
+`kling graph` levanta como una unidad una app, una base y una caché descritas en un
+fichero YAML o JSON: máquinas con nombre y las **aristas** que dicen quién llega a quién.
+Un nodo solo alcanza a otro por una arista declarada (`web` llega a `api` en
+`api.graph`), y una arista de tipo `credential` pone la contraseña de Postgres por el
+proxy, de modo que el nodo que tiene la conexión nunca la ve. El grafo entero se congela,
+se guarda en un instante consistente y se ramifica en N copias vivas que no se ven entre sí:
+
+```sh
+SHOP_PG_PASS=... kling graph up tienda.yaml       # crea el grafo y arranca los nodos eager
+kling graph ls                                    # estado, nodos, aristas y generación
+kling graph audit tienda -since 10m               # las conexiones por aristas, en una línea de tiempo
+kling graph snapshot tienda -name t0              # una plantilla por nodo, todas del mismo instante
+kling graph fork tienda -n 3                      # 3 grafos nuevos desde este instante
+kling graph freeze tienda ; kling graph thaw tienda
+kling graph rm tienda
+```
+
+Formato del fichero, campos de los nodos y límites: [docs/grafos.md](docs/grafos.md); el
+diseño: [docs/grafos-diseno.md](docs/grafos-diseno.md).
+
+## Discos copia al escribir
+
+Crear una instancia desde un snapshot dorado (`kling run -from`, `kling sandbox fork`, el
+gateway despertando un servicio) antes copiaba entero su disco overlay. Con `daemon.cow`
+el overlay es un **clon por reflink**: un fichero propio que comparte los bloques del
+dorado hasta que uno de los dos escribe, así que el coste de la copia deja de depender del
+tamaño del disco y cada instancia sigue teniendo un disco independiente.
+
+```sh
+kling config set daemon.cow auto            # auto (defecto) | reflink-store | off
+sudo systemctl restart kling                # se lee al arrancar el daemon
+kling info                                  # el modo en uso, en la línea «disk clones»
+```
+
+`auto` usa reflink nativo si la raíz de datos es XFS o Btrfs, cae a un almacén propio
+(XFS montado por loop) si el host puede tenerlo, y a la copia completa si no, con un
+aviso en el log y en `kling doctor`. Modos, dimensionado y medidas: [docs/cow.md](docs/cow.md).
+
 ## Qué persiste y qué no
 
 Conviene tenerlo claro, porque no es obvio:
@@ -1274,6 +1352,22 @@ máquina (AES-256-GCM con una clave derivada de `secrets/snapshot.key`, solo de 
 nunca en `state.json`, en eventos ni en un snapshot. Repetir `-env` con otra clave la
 rota; el marcador se conserva y el proceso no tiene que reiniciarse.
 
+Cada petición que pasa por el proxy, y cada rechazo, queda anotada en un registro de la
+máquina (0600, rotado a 1 MiB; en Linux en `<root>/audit/<id>.jsonl`, donde el VMM no
+llega; en macOS en su directorio, `credaudit.jsonl`):
+
+```sh
+kling machine audit pagos            # TIME METHOD HOST PATH STATUS CREDS MS RESULT
+kling machine audit pagos -denied -since 1h
+kling machine audit pagos -f -json   # seguir, un registro JSON por línea
+```
+
+Registra el método, el host, el estado, qué credenciales se sustituyeron, los bytes, la
+duración y si la política la denegó. Nunca la clave, el marcador, las cabeceras, los
+cuerpos ni la query (solo si había una), y la ruta se enmascara: un segmento que lleve un
+marcador o cualquier forma de una clave pasa a `:cred`, y un identificador largo y opaco a
+`:tok`. Funciona con máquinas en marcha, congeladas y paradas.
+
 Para un servicio MCP nadie está delante para entregar la clave a cada réplica que el
 gateway despierta. Se ata a la plantilla: cada instancia que nace de ella recibe su propio
 marcador al arrancar, antes de la primera sesión (el puente lee MMDS al lanzar cada una):
@@ -1282,6 +1376,27 @@ marcador al arrancar, antes de la primera sesión (el puente lee MMDS al lanzar 
 kling mcp import stripe -egress allowlist -allow api.stripe.com
 kling template credential stripe -domain api.stripe.com -env STRIPE_API_KEY -f clave.txt
 ```
+
+Lo mismo vale para una **contraseña de Postgres**. El invitado conecta en claro al nombre
+de la base con el marcador como contraseña; el proxy entra en el servidor real con la
+contraseña real, por TLS verificado (SCRAM-SHA-256, `-PLUS` si se ofrece):
+
+```sh
+kling machine credential pagos -type postgres -domain db.example.com -user app \
+  -database appdb -env PGPASSWORD -f db-password.txt     # -ca-file ca.pem para una CA privada
+# dentro: psql "host=db.example.com user=app dbname=appdb sslmode=prefer"
+```
+
+El rol y la base quedan fijados a la credencial y nada del flujo de datos se reescribe. El
+proxy no mira el SQL, así que los permisos del propio rol son el límite. Una base en una IP
+privada se rechaza salvo que la fijes tú: `-upstream 127.0.0.1:5432` para una base en
+Docker del mismo host, o una dirección de la LAN/VPC, con `-upstream-tls disable` (solo
+SCRAM-SHA-256) si no tiene TLS. Recetas (también RDS, probado contra uno real) en
+[docs/postgres.md](docs/postgres.md); el modelo de seguridad en SECURITY.md §7. MySQL y
+MariaDB van igual con `-type mysql`: [docs/mysql.md](docs/mysql.md).
+
+¿Prefieres una base desechable por test o por agente? `kling db up <plantilla>` da una copia
+de Postgres lista por microVM con su propia contraseña: [docs/db.md](docs/db.md).
 
 Medido en el lab con un servidor «comprometido» que corre como root dentro:
 
@@ -1464,6 +1579,12 @@ permite que N instancias compartan páginas.
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | El gateway de IA: Chispa clasifica, VON genera, la cascada solo con una evaluación que la respalde, escala a cero, API de OpenAI, cifras medidas |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram para densidad: cuándo ayuda, y cómo medirlo |
 | [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | Una microVM y un disco por sesión MCP: las opciones sopesadas, el diseño y lo que cuesta |
+| [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: una Postgres desechable por microVM, roles, ramas, `doctor`, `tenant-check`, `diff`, `clone` enmascarado; preguntas en lenguaje natural, también desde una página web |
+| [`docs/mysql.md`](docs/mysql.md) | MySQL y MariaDB: el proxy de credenciales (`-type mysql`) y las copias MariaDB de `kling db` |
+| [`docs/authz.md`](docs/authz.md) | Autorización por operación en el socket del daemon: roles admin e inquilino por las credenciales del par, qué puede hacer cada uno |
+| [`docs/postgres.md`](docs/postgres.md) | Conectar tu propia Postgres por el proxy de credenciales: Docker, LAN/VPC, Neon, Supabase, RDS |
+| [`docs/grafos.md`](docs/grafos.md) · [`docs/grafos-diseno.md`](docs/grafos-diseno.md) | `kling graph`: varias máquinas y las aristas entre ellas, congeladas, guardadas y ramificadas como una |
+| [`docs/cow.md`](docs/cow.md) | `daemon.cow`: discos por reflink para `run -from`, los tres modos y medidas |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Notas de campo — cosas que cuestan horas descubrir por tu cuenta |
 | [`docs/releases.md`](docs/releases.md) | Una etiqueta, una release: todos los assets, `SHA256SUMS`, cómo publicar |
 

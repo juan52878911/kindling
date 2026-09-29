@@ -2,7 +2,7 @@ package credproxy
 
 // Proxy de credenciales para PostgreSQL: el mismo modelo que el HTTP (la clave
 // real no entra en la microVM; el invitado tiene un marcador) sobre el
-// protocolo de Postgres v3.
+// protocolo de Postgres v3 (3.0 y 3.2).
 //
 // EL TRAMO DEL INVITADO va en claro: el invitado conecta al puerto de Postgres
 // del dominio con credencial, que su resolver contesta con la IP del proxy, y
@@ -38,6 +38,16 @@ package credproxy
 // cuya clave de cancelación se cambia por una falsa: un CancelRequest del
 // invitado con la falsa se traduce a la real en una conexión nueva (con el
 // mismo TLS), y uno con una clave desconocida se cierra sin más.
+//
+// VERSIONES DEL PROTOCOLO: el proxy habla 3.0 y 3.2 (PostgreSQL 18), que solo
+// se diferencian en la clave de cancelación: 4 bytes en 3.0, hasta 256 en 3.2
+// (en BackendKeyData y en CancelRequest). Con el invitado se queda la versión
+// que pide si es una de esas dos; a una más nueva (3.3+) o a la 3.1, que nunca
+// se usó, se contesta NegotiateProtocolVersion con 3.2 o 3.0. Al servidor se le
+// pide la misma versión que al invitado; si es anterior a PostgreSQL 18 y
+// contesta NegotiateProtocolVersion con 3.0, se sigue en 3.0 con él sin que el
+// invitado lo note: la clave falsa del invitado tiene la longitud de SU
+// versión (4 o 32 bytes) y la real, la de la del servidor.
 //
 // QUÉ NO RESUELVE: el invitado usa el rol con todos sus permisos (el proxy no
 // mira el SQL). Lo que acota el daño es el rol: de solo lectura, con GRANT a lo
@@ -103,6 +113,12 @@ const (
 	pgGSSENCRequest = 80877104
 	pgCancelRequest = 80877102
 	pgProto30       = 3 << 16
+	pgProto32       = 3<<16 | 2
+	// pgMaxClaveCancel es la clave de cancelación más larga que admite 3.2;
+	// pgClaveFalsa32, la longitud de las falsas que se dan a un invitado 3.2
+	// (la misma que usa PostgreSQL 18).
+	pgMaxClaveCancel = 256
+	pgClaveFalsa32   = 32
 )
 
 // Motivos propios del proxy de Postgres (Record.Reason).
@@ -227,14 +243,19 @@ func (p *Proxy) PGActivo() bool {
 	return len(p.pg) > 0
 }
 
-// claveCancel identifica una sesión para CancelRequest: pid y clave, tal y
-// como las ve el invitado.
-type claveCancel struct{ pid, clave uint32 }
+// claveCancel identifica una sesión para CancelRequest: pid y clave (4 bytes
+// en 3.0, pgClaveFalsa32 en 3.2), tal y como las ve el invitado.
+type claveCancel struct {
+	pid   uint32
+	clave string
+}
 
-// destinoCancel es a dónde y con qué clave real va una cancelación.
+// destinoCancel es a dónde y con qué clave real (de la longitud que dio el
+// servidor) va una cancelación.
 type destinoCancel struct {
-	cred       credPG
-	pid, clave uint32
+	cred  credPG
+	pid   uint32
+	clave []byte
 }
 
 // connContada cuenta lo que se lee de y se escribe a la conexión del invitado.
@@ -394,6 +415,13 @@ func (s *sesionPG) servir() {
 		s.fatal("08P01", "unsupported frontend protocol "+strconv.Itoa(int(code>>16))+"."+strconv.Itoa(int(code&0xffff)))
 		return
 	}
+	// La versión con el invitado: 3.0 o 3.2 tal cual; 3.1 (nunca se usó) se
+	// baja a 3.0 y cualquier 3.3+ a 3.2, con NegotiateProtocolVersion.
+	pedida := code & 0xffff
+	minor := uint32(0)
+	if pedida >= 2 {
+		minor = 2
+	}
 	params, desconocidas, err := parsearParams(cuerpo)
 	if err != nil {
 		s.rec.Reason = ReasonBadStartup
@@ -413,11 +441,11 @@ func (s *sesionPG) servir() {
 			return
 		}
 	}
-	// El servidor habla 3.0 (el proxy no le pide más): una versión menor más
-	// nueva o las opciones _pq_. se rechazan con NegotiateProtocolVersion,
-	// que el cliente acepta y sigue.
-	if code&0xffff != 0 || len(desconocidas) > 0 {
-		if _, err := guest.Write(negociarVersionPG(desconocidas)); err != nil {
+	// Una versión menor distinta de la pedida o las opciones _pq_. (el proxy
+	// no entiende ninguna) se contestan con NegotiateProtocolVersion, que el
+	// cliente acepta y sigue.
+	if minor != pedida || len(desconocidas) > 0 {
+		if _, err := guest.Write(negociarVersionPG(minor, desconocidas)); err != nil {
 			return
 		}
 	}
@@ -507,12 +535,13 @@ func (s *sesionPG) servir() {
 	}
 	_ = up.SetDeadline(fin)
 	br := bufio.NewReader(up)
-	if _, err := up.Write(arranqueUpstream(cred.User, db, params)); err != nil {
+	if _, err := up.Write(arranqueUpstream(pgProto30|minor, cred.User, db, params)); err != nil {
 		s.rec.Reason = ReasonUpstreamError
 		s.fatal("08006", "could not connect to the database server")
 		return
 	}
-	metodo, codigo, err := autenticarPG(br, up, cred, cred.UpstreamTLS == UpstreamTLSDisable)
+	upMinor := minor
+	metodo, codigo, err := autenticarPG(br, up, cred, cred.UpstreamTLS == UpstreamTLSDisable, &upMinor)
 	if err != nil {
 		s.rec.Reason = ReasonUpstreamAuth
 		if codigo != "" {
@@ -540,13 +569,15 @@ func (s *sesionPG) servir() {
 	if _, err := guest.Write([]byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}); err != nil {
 		return
 	}
-	s.relevo(br, up, cred)
+	s.relevo(br, up, cred, minor, upMinor)
 }
 
 // relevo pasa bytes en los dos sentidos hasta que uno se cierra, y entonces
 // cierra los dos. Del servidor al invitado se miran los mensajes hasta el
-// primer ReadyForQuery para cambiar BackendKeyData; después, bytes tal cual.
-func (s *sesionPG) relevo(br *bufio.Reader, up net.Conn, cred credPG) {
+// primer ReadyForQuery para cambiar BackendKeyData (uno como mucho, con una
+// clave de la longitud que toca a la versión del servidor, upMinor; la falsa
+// tiene la de la versión del invitado, minor); después, bytes tal cual.
+func (s *sesionPG) relevo(br *bufio.Reader, up net.Conn, cred credPG, minor, upMinor uint32) {
 	var registradas []claveCancel
 	defer func() {
 		s.p.cancelMu.Lock()
@@ -570,15 +601,20 @@ func (s *sesionPG) relevo(br *bufio.Reader, up net.Conn, cred credPG) {
 				return
 			}
 			if tipo == 'K' {
-				if len(msg) != 8 {
+				if len(registradas) > 0 || len(msg) < 4 || !claveBackendValida(len(msg)-4, upMinor) {
 					return
 				}
-				k, ok := s.p.registrarCancel(cred, binary.BigEndian.Uint32(msg[:4]), binary.BigEndian.Uint32(msg[4:]))
+				largo := 4
+				if minor >= 2 {
+					largo = pgClaveFalsa32
+				}
+				pid := binary.BigEndian.Uint32(msg[:4])
+				k, ok := s.p.registrarCancel(cred, pid, msg[4:], largo)
 				if !ok {
 					return
 				}
 				registradas = append(registradas, k)
-				binary.BigEndian.PutUint32(msg[4:], k.clave)
+				msg = append(binary.BigEndian.AppendUint32(nil, pid), k.clave...)
 			}
 			if _, err := s.guest.Write(mensajePG(tipo, msg)); err != nil {
 				return
@@ -610,18 +646,28 @@ func (p *Proxy) elegirPG(pass []byte) (cred credPG, hay, ok bool) {
 	return p.pg[elegida], true, true
 }
 
-// registrarCancel da una clave de cancelación falsa para (pid, clave) real.
-func (p *Proxy) registrarCancel(cred credPG, pid, clave uint32) (claveCancel, bool) {
+// claveBackendValida: la clave de BackendKeyData mide 4 bytes en 3.0 y entre
+// 4 y pgMaxClaveCancel en 3.2.
+func claveBackendValida(n int, minor uint32) bool {
+	if minor < 2 {
+		return n == 4
+	}
+	return n >= 4 && n <= pgMaxClaveCancel
+}
+
+// registrarCancel da una clave de cancelación falsa de largo bytes para
+// (pid, clave) real; la real se copia.
+func (p *Proxy) registrarCancel(cred credPG, pid uint32, clave []byte, largo int) (claveCancel, bool) {
 	p.cancelMu.Lock()
 	defer p.cancelMu.Unlock()
+	b := make([]byte, largo)
 	for range 8 {
-		var b [4]byte
-		if _, err := rand.Read(b[:]); err != nil {
+		if _, err := rand.Read(b); err != nil {
 			return claveCancel{}, false
 		}
-		k := claveCancel{pid: pid, clave: binary.BigEndian.Uint32(b[:])}
+		k := claveCancel{pid: pid, clave: string(b)}
 		if _, usada := p.cancelaciones[k]; !usada {
-			p.cancelaciones[k] = destinoCancel{cred: cred, pid: pid, clave: clave}
+			p.cancelaciones[k] = destinoCancel{cred: cred, pid: pid, clave: append([]byte(nil), clave...)}
 			return k, true
 		}
 	}
@@ -633,11 +679,13 @@ func (p *Proxy) registrarCancel(cred credPG, pid, clave uint32) (claveCancel, bo
 // sin decir nada, como hace el propio Postgres.
 func (s *sesionPG) cancelar(cuerpo []byte) {
 	s.rec.Method = "cancel"
-	if len(cuerpo) != 8 {
+	// pid y clave: 4 bytes en 3.0, hasta pgMaxClaveCancel en 3.2 (el código es
+	// el mismo; la longitud del mensaje dice la de la clave).
+	if len(cuerpo) < 8 || len(cuerpo) > 4+pgMaxClaveCancel {
 		s.rec.Reason = ReasonBadStartup
 		return
 	}
-	k := claveCancel{pid: binary.BigEndian.Uint32(cuerpo[:4]), clave: binary.BigEndian.Uint32(cuerpo[4:])}
+	k := claveCancel{pid: binary.BigEndian.Uint32(cuerpo[:4]), clave: string(cuerpo[4:])}
 	s.p.cancelMu.Lock()
 	d, ok := s.p.cancelaciones[k]
 	s.p.cancelMu.Unlock()
@@ -661,13 +709,12 @@ func (s *sesionPG) cancelar(cuerpo []byte) {
 	if !s.ponerUp(up) {
 		return
 	}
-	var m [16]byte
-	binary.BigEndian.PutUint32(m[0:], 16)
-	binary.BigEndian.PutUint32(m[4:], pgCancelRequest)
-	binary.BigEndian.PutUint32(m[8:], d.pid)
-	binary.BigEndian.PutUint32(m[12:], d.clave)
+	m := binary.BigEndian.AppendUint32(nil, uint32(12+len(d.clave)))
+	m = binary.BigEndian.AppendUint32(m, pgCancelRequest)
+	m = binary.BigEndian.AppendUint32(m, d.pid)
+	m = append(m, d.clave...)
 	_ = up.SetDeadline(time.Now().Add(pgPreAuth))
-	if _, err := up.Write(m[:]); err != nil {
+	if _, err := up.Write(m); err != nil {
 		s.rec.Reason = ReasonUpstreamError
 		return
 	}
@@ -736,10 +783,15 @@ var errSinTLSNecesitaSCRAM = errors.New("upstream without TLS requires SCRAM-SHA
 // admite SOLO SASL SCRAM-SHA-256 (sin -PLUS): ni contraseña en claro, ni md5,
 // ni un AuthenticationOk sin SCRAM (trust), que dejaría al servidor sin
 // probar que conoce la clave cuando no hay certificado que lo identifique.
-func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG, sinTLS bool) (metodo, codigo string, err error) {
+//
+// minor entra con la versión menor pedida al servidor y sale con la que queda:
+// un NegotiateProtocolVersion la baja si es lo primero que llega, una sola
+// vez, a una versión menor más baja y sin opciones rechazadas (no se manda
+// ninguna); en cualquier otro caso es un error.
+func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG, sinTLS bool, minor *uint32) (metodo, codigo string, err error) {
 	var scram *scramCliente
 	verificado := false
-	for {
+	for primero := true; ; primero = false {
 		tipo, msg, err := leerMensaje(br, pgMaxAuthMsg)
 		if err != nil {
 			return "", "", err
@@ -750,6 +802,19 @@ func autenticarPG(br *bufio.Reader, up net.Conn, cred credPG, sinTLS bool) (meto
 			return "", c, errors.New("error response")
 		case 'N':
 			continue // NoticeResponse: no se reenvía
+		case 'v':
+			if !primero {
+				return "", "", errors.New("unexpected NegotiateProtocolVersion")
+			}
+			if len(msg) != 8 {
+				return "", "", errors.New("malformed NegotiateProtocolVersion")
+			}
+			v, n := binary.BigEndian.Uint32(msg[:4]), binary.BigEndian.Uint32(msg[4:])
+			if v>>16 != 3 || v&0xffff >= *minor || n != 0 {
+				return "", "", fmt.Errorf("the server negotiated protocol %d.%d with %d rejected options (asked for 3.%d)", v>>16, v&0xffff, n, *minor)
+			}
+			*minor = v & 0xffff
+			continue
 		case 'R':
 		default:
 			return "", "", fmt.Errorf("unexpected message %q during authentication", tipo)
@@ -903,10 +968,10 @@ func errorResponsePG(code, msg string) []byte {
 	return mensajePG('E', append(b, 0))
 }
 
-// negociarVersionPG es NegotiateProtocolVersion: 3.0 y las opciones _pq_. que
-// no se reconocen.
-func negociarVersionPG(desconocidas []string) []byte {
-	b := binary.BigEndian.AppendUint32(nil, 0)
+// negociarVersionPG es NegotiateProtocolVersion: 3.minor y las opciones _pq_.
+// que no se reconocen.
+func negociarVersionPG(minor uint32, desconocidas []string) []byte {
+	b := binary.BigEndian.AppendUint32(nil, pgProto30|minor)
 	b = binary.BigEndian.AppendUint32(b, uint32(len(desconocidas)))
 	for _, d := range desconocidas {
 		b = append(append(b, d...), 0)
@@ -1042,11 +1107,11 @@ func cadenaC(b []byte) (string, []byte, bool) {
 	return "", nil, false
 }
 
-// arranqueUpstream es el StartupMessage 3.0 hacia el servidor: rol y base de
-// datos de la credencial, y el resto de parámetros del invitado (menos
-// replication, que ya se comprobó que es falso).
-func arranqueUpstream(user, db string, ps paramsPG) []byte {
-	b := binary.BigEndian.AppendUint32(make([]byte, 4, 256), pgProto30)
+// arranqueUpstream es el StartupMessage hacia el servidor con version (3.0 o
+// 3.2): rol y base de datos de la credencial, y el resto de parámetros del
+// invitado (menos replication, que ya se comprobó que es falso).
+func arranqueUpstream(version uint32, user, db string, ps paramsPG) []byte {
+	b := binary.BigEndian.AppendUint32(make([]byte, 4, 256), version)
 	add := func(k, v string) { b = append(append(append(append(b, k...), 0), v...), 0) }
 	add("user", user)
 	add("database", db)
@@ -1064,9 +1129,17 @@ func arranqueUpstream(user, db string, ps paramsPG) []byte {
 
 // ── servidor ────────────────────────────────────────────────────────────────
 
-// PGServer sirve el proxy de Postgres en un listener (Linux: el lado host del
-// veth). Close deja de aceptar y corta las conexiones abiertas.
+// PGServer sirve los proxies de bases de datos (Postgres y MySQL, ver
+// ServeDB) en un listener (Linux: el lado host del veth). Close deja de
+// aceptar y corta las conexiones abiertas.
+//
+// DestPort es el puerto al que conectó el invitado si este listener solo
+// recibe uno (Linux: el DNAT del 3306 tiene su listener, ver
+// internal/net); 0 si recibe cualquiera. Se pasa a ServeDB, que con eso
+// decide entre Postgres y MySQL. Se fija antes de Serve.
 type PGServer struct {
+	DestPort int
+
 	p      *Proxy
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -1116,7 +1189,7 @@ func (s *PGServer) Serve(ln net.Listener) error {
 		s.mu.Unlock()
 		go func() {
 			defer s.wg.Done()
-			s.p.ServePG(s.ctx, c)
+			s.p.ServeDB(s.ctx, c, s.DestPort)
 		}()
 	}
 }

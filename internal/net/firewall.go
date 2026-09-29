@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 // Egress define qué puede alcanzar una microVM hacia fuera.
@@ -355,6 +357,11 @@ func (n *Net) applyAllowlist(ns func(...string) error, domains []string) error {
 //     SDK contra el DROP. No abre nada: el proxy no habla TLS. Se hace así y no
 //     con REJECT --reject-with tcp-reset porque ese target necesita xt_REJECT
 //     y en un CT sin él la regla falla y la máquina no arranca (visto en el lab).
+//   - El 3306 de n.HostIP al listener de MySQL (myPort): el mismo proxy de
+//     bases de datos, pero sabiendo que el invitado marcó el 3306 (con
+//     credenciales Postgres y MySQL en la máquina, eso es lo que dice que es
+//     MySQL; ver pkg/credproxy/mysql.go). Con solo credenciales Postgres, lo
+//     que llegue ahí es Postgres igual.
 //   - Cualquier otro puerto TCP de n.HostIP al proxy de Postgres (pgPort): el
 //     invitado usa el puerto de su cadena de conexión (5432 o el que sea) y no
 //     hace falta saberlo de antemano. Es una regla fija y no una por
@@ -370,16 +377,19 @@ func (n *Net) credNATRules() [][]string {
 			"-p", "tcp", "-d", n.HostIP, "--dport", puerto, "-j", "DNAT",
 			"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, credPort)})
 	}
+	rules = append(rules, []string{"iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
+		"-p", "tcp", "-d", n.HostIP, "--dport", strconv.Itoa(credproxy.MySQLDefaultPort), "-j", "DNAT",
+		"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, myPort)})
 	return append(rules, []string{"iptables", "-t", "nat", "-A", "PREROUTING", "-i", TapName,
 		"-p", "tcp", "-d", n.HostIP, "-j", "DNAT",
 		"--to-destination", fmt.Sprintf("%s:%d", n.HostIP, pgPort)})
 }
 
 // credForwardRules dejan pasar por el FORWARD del netns lo que los DNAT de
-// credNATRules llevan a los dos proxies.
+// credNATRules llevan a los proxies.
 func (n *Net) credForwardRules() [][]string {
 	var rules [][]string
-	for _, puerto := range []string{credPortStr, pgPortStr} {
+	for _, puerto := range []string{credPortStr, pgPortStr, myPortStr} {
 		rules = append(rules, []string{"iptables", "-A", "FORWARD", "-i", TapName, "-o", n.NSIf,
 			"-p", "tcp", "-d", n.HostIP, "--dport", puerto, "-j", "ACCEPT"})
 	}
@@ -507,6 +517,7 @@ func HostInputRules() [][]string {
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(dnsPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(credPort), "-j", "ACCEPT"),
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(pgPort), "-j", "ACCEPT"),
+		regla("-d", HostSubnet, "-p", "tcp", "--dport", strconv.Itoa(myPort), "-j", "ACCEPT"),
 		// Los proxies de enlace de los grafos (enlaces_fc.go), también en el
 		// lado host de cada veth.
 		regla("-d", HostSubnet, "-p", "tcp", "--dport", fmt.Sprintf("%d:%d", linkBasePortRango, linkBasePortRango+linkMaxPortsRango-1), "-j", "ACCEPT"),
