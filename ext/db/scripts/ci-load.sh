@@ -17,18 +17,19 @@
 #   KLING       Binario kling (defecto: kling)
 #   KLING_HOST  Endpoint del daemon
 #   TTL         TTL de cada copia (defecto: 10m)
-#   DB_NAME     Base de datos (defecto: appdb)
-#   DB_USER     Rol de la aplicación (defecto: app)
-#   TIMEOUT     Timeout para kling exec (defecto: 120s)
 #   KEEP        Si es 1, no borra las copias (para debugging)
 #   OUT         Directorio de salida (defecto: ./ci-load-STAMP)
-#   PREFIX      Prefijo de nombres de copia (defecto: cil)
 #
 # FLAGS:
 #   -golden G   Plantilla (puede ir en env)
 #   -p N        Número de simulaciones (defecto 20)
 #   -keep       No borra las copias
 #   -out DIR    Directorio de salida
+#   -H HOST     Endpoint del daemon (se exporta como KLING_HOST)
+#
+# Contraseñas: el DSN de `kling db connect -dsn` se descompone en el propio
+# shell (sin procesos: nada en argv) en PGHOST, PGPORT, PGUSER, PGPASSWORD y
+# PGDATABASE, que solo ve el psql de esa simulación. Nunca `psql "$dsn"`.
 #
 # Ejemplo:
 #   GOLDEN=pg-golden P=10 ./ci-load.sh
@@ -41,185 +42,160 @@ log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 # Defaults
 KLING="${KLING:-kling}"
-KLING_HOST="${KLING_HOST:-}"
 GOLDEN="${GOLDEN:-}"
 P="${P:-20}"
 TTL="${TTL:-10m}"
-DB_NAME="${DB_NAME:-}"
-DB_USER="${DB_USER:-}"
-TIMEOUT="${TIMEOUT:-120s}"
 KEEP="${KEEP:-0}"
 PREFIX="cil"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 OUT="${OUT:-./ci-load-$STAMP}"
 
 # Parseo de flags
+need() { [ "$2" -ge 2 ] || die "$1 needs a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    -golden)
-      GOLDEN="$2"
-      shift 2
-      ;;
-    -p)
-      P="$2"
-      shift 2
-      ;;
-    -keep)
-      KEEP=1
-      shift
-      ;;
-    -out)
-      OUT="$2"
-      shift 2
-      ;;
-    -H)
-      KLING_HOST="$2"
-      shift 2
-      ;;
-    *)
-      die "unknown flag: $1"
-      ;;
+    -golden) need "$1" $#; GOLDEN="$2"; shift 2 ;;
+    -p)      need "$1" $#; P="$2"; shift 2 ;;
+    -out)    need "$1" $#; OUT="$2"; shift 2 ;;
+    -H)      need "$1" $#; export KLING_HOST="$2"; shift 2 ;;
+    -keep)   KEEP=1; shift ;;
+    *)       die "unknown flag: $1" ;;
   esac
 done
 
 # Validación
 [ -n "$GOLDEN" ] || die "GOLDEN is required (-golden or env)"
 command -v "$KLING" >/dev/null 2>&1 || die "kling not found: $KLING"
+case "$P" in ''|*[!0-9]*) die "P must be a number" ;; esac
 [ "$P" -gt 0 ] || die "P must be > 0"
+command -v psql >/dev/null 2>&1 || die "psql not found"
 
-# Funciones auxiliares
-kling_cmd() {
-  if [ -n "$KLING_HOST" ]; then
-    "$KLING" -H "$KLING_HOST" "$@"
+# ── Funciones auxiliares ─────────────────────────────────────────────────────
+
+# now_ms: milisegundos desde epoch sin date +%N (solo GNU): EPOCHREALTIME de
+# bash 5, o perl, o segundos enteros.
+now_ms() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    local t="${EPOCHREALTIME//[.,]/}"
+    echo $((10#$t / 1000))
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=time -e 'printf("%d\n", time() * 1000)'
   else
-    "$KLING" "$@"
+    echo $(($(date +%s) * 1000))
   fi
 }
 
-# Inspecciona una copia
-inspect() {
-  kling_cmd inspect "$1" -json 2>/dev/null || echo ""
+# urldecode deshace el %XX de un trozo del DSN (printf es interno: sin argv).
+urldecode() { local s="${1//%/\\x}"; printf '%b' "$s"; }
+
+# pgenv_from_dsn exporta las PG* del DSN de kling db connect -dsn
+# (postgres://usuario:clave@host:puerto/base?sslmode=disable). Solo con
+# expansiones del shell: la clave no pasa por la línea de órdenes de nadie.
+pgenv_from_dsn() {
+  local rest="${1#postgres://}" auth hostport
+  [ "$rest" != "$1" ] || return 1
+  case "$rest" in *@*/*) ;; *) return 1 ;; esac
+  auth="${rest%%@*}"
+  rest="${rest#*@}"
+  hostport="${rest%%/*}"
+  rest="${rest#*/}"
+  case "$auth" in *:*) ;; *) return 1 ;; esac
+  PGUSER="$(urldecode "${auth%%:*}")"
+  PGPASSWORD="$(urldecode "${auth#*:}")"
+  PGHOST="${hostport%:*}"
+  PGHOST="${PGHOST#[}"
+  PGHOST="${PGHOST%]}"
+  PGPORT="${hostport##*:}"
+  PGDATABASE="${rest%%\?*}"
+  PGSSLMODE=disable
+  export PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE
 }
 
-# Espera a que una copia esté ready (max 60s)
-wait_ready() {
-  local name="$1"
-  local retry=60
-  while [ $retry -gt 0 ]; do
-    local json
-    json="$(inspect "$name")"
-    if [ -n "$json" ] && echo "$json" | grep -q '"kling.db.state":"ready"'; then
-      return 0
-    fi
-    sleep 1
-    retry=$((retry - 1))
-  done
-  return 1
-}
-
-# Obtiene el DSN de una copia
-get_dsn() {
-  kling_cmd db connect "$1" -dsn 2>/dev/null || echo ""
-}
-
-# Corre la migración y consultas en una copia
+# run_workload: migración y consultas en la copia de las PG* del entorno.
 run_workload() {
-  local name="$1"
-  local dsn="$2"
-
   # Migración simple: crear tabla
   # En un proyecto real, aquí irían las migraciones reales.
-  psql "$dsn" << 'EOF' >/dev/null 2>&1
+  psql -X -q -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL' || return 1
 CREATE TABLE IF NOT EXISTS load_test (
   id SERIAL PRIMARY KEY,
   payload TEXT
 );
-EOF
-  [ $? -eq 0 ] || return 1
+SQL
 
   # 100 consultas INSERT + SELECT
   local i
-  for i in {1..50}; do
-    psql "$dsn" << EOF >/dev/null 2>&1
+  for i in $(seq 1 50); do
+    psql -X -q -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || return 1
 INSERT INTO load_test (payload) VALUES ('test-$i') RETURNING id;
 SELECT * FROM load_test WHERE id = (SELECT MAX(id) FROM load_test);
-EOF
-    [ $? -eq 0 ] || return 1
+SQL
   done
-
   return 0
 }
 
-# Simula una carga de PR: crea copia, corre workload, mide tiempo
+# rm_copy: kling db rm borra la máquina Y su contraseña del host.
+rm_copy() { "$KLING" db rm "$1" >/dev/null 2>&1; }
+
+# simulate_pr: crea copia, corre workload, mide tiempo. Corre en un subshell
+# propio: las PG* que exporta no salen de él.
 simulate_pr() {
   local idx="$1"
   local name="${PREFIX}_${idx}"
-  local start_time
-  local up_duration
-  local total_start
+  local start up_ms total_ms dsn
 
-  total_start="$(date +%s%N)"
-  start_time="$(date +%s%N)"
+  start="$(now_ms)"
+  # up vuelve cuando la copia está lista (o falla sin dejar nada a medias).
+  if ! "$KLING" db up "$GOLDEN" -name "$name" -ttl "$TTL" >/dev/null 2>&1; then
+    printf 'FAIL\t%s\tcreate\n' "$name"
+    return 1
+  fi
+  up_ms=$(($(now_ms) - start))
 
-  # Crea la copia
-  if ! kling_cmd db up "$GOLDEN" -name "$name" -ttl "$TTL" >/dev/null 2>&1; then
-    echo "FAIL	$name	create"
+  # El DSN, con la traza apagada: set -x lo imprimiría.
+  set +x
+  dsn="$("$KLING" db connect "$name" -dsn </dev/null 2>/dev/null)" || dsn=""
+  if [ -z "$dsn" ] || ! pgenv_from_dsn "$dsn"; then
+    dsn=""
+    rm_copy "$name"
+    printf 'FAIL\t%s\tdsn\n' "$name"
+    return 1
+  fi
+  dsn=""
+
+  if ! run_workload; then
+    rm_copy "$name"
+    printf 'FAIL\t%s\tworkload\n' "$name"
     return 1
   fi
 
-  up_duration=$(($(date +%s%N) - start_time))
-
-  # Espera a que esté ready
-  if ! wait_ready "$name"; then
-    kling_cmd rm -f "$name" 2>/dev/null || true
-    echo "FAIL	$name	wait"
+  if [ "$KEEP" != 1 ] && ! rm_copy "$name"; then
+    printf 'FAIL\t%s\tremove\n' "$name"
     return 1
   fi
 
-  # Obtiene el DSN
-  local dsn
-  dsn="$(get_dsn "$name")"
-  [ -n "$dsn" ] || {
-    kling_cmd rm -f "$name" 2>/dev/null || true
-    echo "FAIL	$name	dsn"
-    return 1
-  }
-
-  # Corre el workload
-  if ! run_workload "$name" "$dsn"; then
-    kling_cmd rm -f "$name" 2>/dev/null || true
-    echo "FAIL	$name	workload"
-    return 1
-  fi
-
-  # Limpia
-  if ! kling_cmd rm -f "$name" 2>/dev/null; then
-    echo "FAIL	$name	remove"
-    return 1
-  fi
-
-  # Devuelve métricas: up_time(ms), total_time(ms)
-  local end_time
-  end_time="$(date +%s%N)"
-  local up_ms=$((up_duration / 1000000))
-  local total_ms=$((end_time - total_start))
-  total_ms=$((total_ms / 1000000))
-  echo "OK	${name}	${up_ms}	${total_ms}"
+  # Métricas: up_time(ms), total_time(ms)
+  total_ms=$(($(now_ms) - start))
+  printf 'OK\t%s\t%s\t%s\n' "$name" "$up_ms" "$total_ms"
 }
 
-# Limpieza: borra todas las copias con el prefijo
+# cleanup: las copias de esta ejecución que queden, por nombre (kling db rm
+# solo borra copias de kling db del dueño, y con su contraseña).
 cleanup() {
   if [ "$KEEP" = 1 ]; then
-    log "KEEP=1: copies not removed"
+    log "KEEP=1: copies not removed (kling db rm ${PREFIX}_<n>)"
     return
   fi
   log "cleaning up..."
-  kling_cmd ps -a -q 2>/dev/null | while read -r id; do
-    kling_cmd inspect "$id" 2>/dev/null | grep -q "\"name\": \"${PREFIX}_" && \
-      kling_cmd rm -f "$id" >/dev/null 2>&1 || true
+  local idx
+  for idx in $(seq 1 "$P"); do
+    if "$KLING" inspect "${PREFIX}_${idx}" >/dev/null 2>&1; then
+      rm_copy "${PREFIX}_${idx}" || true
+    fi
   done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -243,16 +219,15 @@ log "all simulations completed"
 parse_results() {
   local results_file="$1"
   local up_times=()
-  local total_times=()
   local ok_count=0
   local fail_count=0
+  local status name up_ms total_ms
 
   while IFS=$'\t' read -r status name up_ms total_ms; do
     case "$status" in
       OK)
         ok_count=$((ok_count + 1))
         up_times+=("$up_ms")
-        total_times+=("$total_ms")
         ;;
       FAIL)
         fail_count=$((fail_count + 1))
