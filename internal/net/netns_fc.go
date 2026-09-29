@@ -136,6 +136,8 @@ func (n *Net) Teardown() {
 	// Primero el resolver dinámico (goroutine del daemon), si este netns tenía uno
 	// en modo allowlist. Es no-op para none/internet.
 	stopResolver(n.NS)
+	// Los enlaces antes que el proxy de credenciales: escriben en su auditor.
+	stopGraph(n.NS)
 	stopCredProxy(n.NS)
 	quiet("ip", "netns", "del", n.NS)
 	quiet("ip", "link", "del", n.HostIf)
@@ -185,6 +187,7 @@ func ListNamespaces() []string {
 // TeardownNamespace borra un namespace y su veth por nombre.
 func TeardownNamespace(ns string) {
 	stopResolver(ns)
+	stopGraph(ns)
 	stopCredProxy(ns)
 	quiet("ip", "netns", "del", ns)
 	quiet("ip", "link", "del", "vh-"+strings.TrimPrefix(ns, "kl-"))
