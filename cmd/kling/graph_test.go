@@ -208,3 +208,20 @@ func TestGraphUpContraDaemonFalso(t *testing.T) {
 		t.Fatalf("daemon viejo: %v", err)
 	}
 }
+
+// El ejemplo de docs/grafos.md (agente + servidores MCP) tiene que ser un grafo
+// válido: si el formato cambia, el ejemplo no puede quedarse viejo.
+func TestEjemploAgenteMCP(t *testing.T) {
+	p := filepath.Join("..", "..", "examples", "grafos", "agente-mcp.yaml")
+	datos, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := leerGrafo(p, datos, sinStdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Graph.Nodes) != 3 || req.Graph.Nodes["browser"].Wake != "lazy" || len(req.Graph.Edges) != 0 {
+		t.Fatalf("grafo inesperado: %+v", req.Graph)
+	}
+}

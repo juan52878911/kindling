@@ -61,6 +61,12 @@ type fakeKling struct {
 	freezeFails bool
 	// credErr, si no es nil, lo devuelve SetCredential.
 	credErr error
+	// graphs: los grafos que crea "graph up"; graphSecrets: la clave que llegó
+	// por stdin de cada uno (para comprobar que no viaja por otro lado).
+	graphs       map[string]*api.Graph
+	graphSecrets map[string]string
+	graphFiles   []string // contenido de cada fichero de grafo recibido
+	graphUpFails bool
 }
 
 func newFake() *fakeKling {
@@ -240,6 +246,9 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			res.Sandboxes = append(res.Sandboxes, mc)
 		}
 		return json.Marshal(res)
+
+	case args[0] == "graph":
+		return f.graphCmd(args[1:], string(in))
 
 	case args[0] == "ps":
 		ids := make([]string, 0, len(f.machines))

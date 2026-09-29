@@ -376,6 +376,7 @@ func cmdBranch(args []string) error {
 	fs, host, owner := newFlags("branch")
 	from := fs.String("from", "", "parent branch whose copy the new one is forked from (default: the repo's default branch)")
 	golden := fs.String("golden", "", "template to start from when there is no parent copy to fork")
+	envTpl := fs.String("env", "", "instead of a single copy, bring up the branch's whole environment: a graph of this app template + a database copy (see kling db env)")
 	sw := fs.Bool("switch", false, "for the git hook: activate this branch's copy, freeze the others, write "+branchEnvFile+" in .git")
 	ls := fs.Bool("ls", false, "list the branches with their copy")
 	rm := fs.String("rm", "", "remove the copy of this branch")
@@ -401,6 +402,9 @@ func cmdBranch(args []string) error {
 		return usageErr("%s", usage)
 	}
 	if *force {
+		return usageErr("%s", usage)
+	}
+	if *envTpl != "" && (modes > 0 || *from != "" || !namePattern.MatchString(*envTpl)) {
 		return usageErr("%s", usage)
 	}
 	if (*dry && !*prune) || (*asJSON && !*ls) || ((*sw || *ls || *rm != "" || *prune) && (*from != "" || *golden != "")) {
@@ -437,7 +441,55 @@ func cmdBranch(args []string) error {
 			return err
 		}
 	}
+	if *envTpl != "" {
+		return a.branchEnv(ctx, branch, *envTpl, *golden, *owner)
+	}
 	return a.branch(ctx, branch, *from, *golden, *owner)
+}
+
+// branchEnvName es el nombre del grafo de una rama: cabe en los 24 del núcleo
+// (e + 5 del repo + slug de hasta 8 + hash de 6) y sigue siendo único por rama.
+func branchEnvName(repo, branch string) string {
+	key := branchKey(branch)
+	i := strings.LastIndexByte(key, '-')
+	slug, hash := key[:i], key[i+1:]
+	if len(slug) > 8 {
+		slug = strings.Trim(slug[:8], "-")
+	}
+	return "e" + repo[:5] + "-" + slug + "-" + hash
+}
+
+// branchEnv: el entorno entero de una rama (un grafo app + base), creado si no
+// existe. Es aparte de la copia suelta de la rama: no la usa ni la congela el
+// hook. El golden sale de -golden o de cualquier copia del repo.
+func (a *app) branchEnv(ctx context.Context, branch, appTpl, golden, owner string) error {
+	ri, branch, _, err := a.resolve(ctx, branch, "")
+	if err != nil {
+		return err
+	}
+	name := branchEnvName(ri.repo, branch)
+	if g, err := a.graphOf(ctx, name); err != nil {
+		return err
+	} else if g != nil {
+		fmt.Fprintf(a.stdout, "branch %s  environment %s  ready\n", branch, name)
+		return nil
+	}
+	if golden == "" {
+		copies, err := a.repoCopies(ctx, ri.repo, owner)
+		if err != nil {
+			return err
+		}
+		if golden = a.repoGolden(copies); golden == "" {
+			return errors.New("no golden to start the database from: kling db branch -env <app-template> -golden <template>")
+		}
+	}
+	g, err := a.envUp(ctx, envOpts{name: name, appTpl: appTpl, golden: golden, owner: owner})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "branch %s  environment %s  created\n", branch, name)
+	a.envReport(g)
+	return nil
 }
 
 // resolve fija repo, rama y padre de una llamada.
@@ -714,7 +766,15 @@ func (a *app) branchRm(ctx context.Context, branch, owner string) error {
 	if err != nil {
 		return err
 	}
-	if !ok {
+	// El entorno de la rama (kling db branch -env), si lo hay, se va con ella.
+	envGone, err := a.envDown(ctx, branchEnvName(ri.repo, branch), owner)
+	if err != nil {
+		return err
+	}
+	if envGone {
+		fmt.Fprintf(a.stdout, "environment %s removed\n", branchEnvName(ri.repo, branch))
+	}
+	if !ok && !envGone {
 		return fmt.Errorf("branch %s has no copy in this repository", branch)
 	}
 	// Su conexión ya no vale: fuera de .git también.
