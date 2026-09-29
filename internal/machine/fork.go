@@ -257,7 +257,8 @@ func (m *Manager) forkSinCredenciales(src *api.Machine) error {
 	}
 	return fmt.Errorf("%w: %s has %s, and every copy would wake up with placeholders its own proxy doesn't know; "+
 		"attach the credentials to a template instead (kling template credential <template> ...) and "+
-		"start another instance with run -from <template> instead of forking this one; every instance then gets its own placeholder", ErrFork, src.Name, dominios)
+		"start another instance with run -from <template> instead of forking this one; every instance then gets its own placeholder "+
+		"(an agent attached to a database copy with kling db attach holds one too: kling db detach it first, fork, and attach each copy)", ErrFork, src.Name, dominios)
 }
 
 // deshacerFork elimina las copias que llegó a crear un fork fallido (también

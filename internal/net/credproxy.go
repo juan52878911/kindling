@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -49,6 +50,48 @@ type credProxy struct {
 	proxy *credproxy.Proxy
 	srv   *http.Server
 	pg    *credproxy.PGServer
+	// resolve es el ResolveMachine vigente (ver SetCredentials); el proxy lo
+	// consulta en cada conexión a través de resolverMaquina.
+	resolve atomic.Pointer[credproxy.ResolveMachineFunc]
+}
+
+// resolverMaquina es el Options.ResolveMachine del proxy: delega en el
+// resolvedor que dio la última entrega de credenciales.
+func (p *credProxy) resolverMaquina(id, owner string, port int) (string, error) {
+	f := p.resolve.Load()
+	if f == nil || *f == nil {
+		return "", errors.New("this daemon does not resolve kindling machines for this machine")
+	}
+	return (*f)(id, owner, port)
+}
+
+// InvalidarMaquina corta, en el proxy de cada máquina, las sesiones de
+// Postgres vivas hacia la máquina id (una copia de kling db que se congela,
+// se para, se borra o se reetiqueta). Devuelve cuántas cortó.
+func InvalidarMaquina(id string) int {
+	credMu.Lock()
+	ps := make([]*credProxy, 0, len(credProxies))
+	for _, p := range credProxies {
+		ps = append(ps, p)
+	}
+	credMu.Unlock()
+	n := 0
+	for _, p := range ps {
+		n += p.proxy.Invalidar(id)
+	}
+	return n
+}
+
+// InvalidarAgente corta TODAS las sesiones hacia otras máquinas del proxy de
+// la máquina de n (el agente cambió de dueño, por ejemplo).
+func InvalidarAgente(n *Net) int {
+	credMu.Lock()
+	p := credProxies[n.NS]
+	credMu.Unlock()
+	if p == nil {
+		return 0
+	}
+	return p.proxy.Invalidar("")
 }
 
 // SetCredentials fija el juego COMPLETO de credenciales de la máquina de n
@@ -60,7 +103,12 @@ type credProxy struct {
 // auditPath es el registro de auditoría de la máquina (una línea por petición,
 // ver pkg/credproxy/auditoria.go); "" = sin registro. Solo cuenta al arrancar
 // el proxy: la máquina es siempre la misma, y su ruta también.
-func SetCredentials(n *Net, creds []credproxy.Credential, auditPath string) error {
+//
+// resolve es cómo el proxy llega a una credencial con UpstreamMachine (una
+// copia de kling db en otra máquina, ver pkg/credproxy/maquina.go); lo da el
+// manager, atado a ESTA máquina. Se sustituye en cada llamada; nil deja esas
+// credenciales sin marcar.
+func SetCredentials(n *Net, creds []credproxy.Credential, auditPath string, resolve credproxy.ResolveMachineFunc) error {
 	if err := credproxy.ValidarCredenciales(creds); err != nil {
 		return err
 	}
@@ -74,6 +122,7 @@ func SetCredentials(n *Net, creds []credproxy.Credential, auditPath string) erro
 	if err != nil {
 		return err
 	}
+	p.resolve.Store(&resolve)
 	domains, err := p.proxy.SetCredentials(creds)
 	if err != nil {
 		return err
@@ -114,12 +163,15 @@ func startCredProxy(n *Net, auditPath string) (*credProxy, error) {
 // resolver público que siembra el ipset, para que lo que el proxy alcanza sea
 // lo mismo que el modo allowlist dejaría ver.
 func newCredProxy(auditPath string) *credProxy {
-	return &credProxy{proxy: credproxy.New(credproxy.Options{
-		Lookup:    func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
-		TempDir:   credTempDir(),
-		AuditPath: auditPath,
-		Logf:      log.Printf,
-	})}
+	p := &credProxy{}
+	p.proxy = credproxy.New(credproxy.Options{
+		Lookup:         func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
+		TempDir:        credTempDir(),
+		AuditPath:      auditPath,
+		Logf:           log.Printf,
+		ResolveMachine: p.resolverMaquina,
+	})
+	return p
 }
 
 // credTempDir es $KLING_ROOT/tmp, creado con permisos 0700 si hace falta: un

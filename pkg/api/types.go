@@ -960,6 +960,15 @@ type CredentialSpec struct {
 	Upstream      string `json:"upstream,omitempty"`
 	UpstreamTLS   string `json:"upstream_tls,omitempty"`
 	TLSServerName string `json:"tls_server_name,omitempty"`
+	// UpstreamMachine (solo Postgres, solo credenciales de máquina, solo
+	// Linux) es el ID exacto de una copia de `kling db` a la que marca el
+	// proxy: el modelo A de docs/db.md. Es un ID, nunca una dirección; el
+	// daemon resuelve la dirección en cada conexión y solo si la copia sigue
+	// corriendo, lista y del mismo dueño (UpstreamOwner, que debe coincidir
+	// con kling.db.owner de la copia y del agente). Exige upstream_tls
+	// "disable" y database, y excluye upstream.
+	UpstreamMachine string `json:"upstream_machine,omitempty"`
+	UpstreamOwner   string `json:"upstream_owner,omitempty"`
 }
 
 // CredentialsRequest es el cuerpo de POST /machines/{ref}/credentials y de

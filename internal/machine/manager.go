@@ -1630,6 +1630,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	// Una copia de kling db congelada no atiende: se cortan las sesiones de
+	// los agentes que llegaban a ella por su proxy (copias_db.go).
+	m.invalidarSesiones(mc.ID, "frozen")
 
 	out.DiskBytes = m.touchDisk(mc.ID)
 	if sinAgente {
@@ -2269,16 +2272,27 @@ func (m *Manager) SetLabels(ref string, labels map[string]string) error {
 		return fmt.Errorf("machine %q doesn't exist", ref)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	live := m.byID[mc.ID]
 	if live == nil {
+		m.mu.Unlock()
 		// La eliminaron entre el Get y el candado. Etiquetar algo que ya no
 		// existe no es un error del que llama, pero deref nil sí tumbaba el
 		// daemon entero.
 		return fmt.Errorf("machine %q no longer exists", ref)
 	}
+	cambia := cambianEtiquetasDB(live.Labels, labels)
 	live.Labels = api.MergeLabels(live.Labels, labels)
 	m.persist()
+	id, plan := live.ID, knet.Plan(live.NetIndex, live.ID)
+	m.mu.Unlock()
+	if cambia {
+		// Lo que el proxy comprueba en cada conexión (copias_db.go) acaba de
+		// cambiar: una copia que deja de estar lista o cambia de dueño no
+		// conserva las sesiones abiertas, ni un agente que cambia de dueño
+		// las suyas. Después del cambio y fuera del candado.
+		m.invalidarSesiones(id, "kling db labels changed")
+		invalidarAgente(plan)
+	}
 	return nil
 }
 
@@ -2323,6 +2337,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	m.invalidarSesiones(mc.ID, "stopped")
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name})
 	return &out, nil
@@ -2359,6 +2374,7 @@ func (m *Manager) Remove(ref string) error {
 	delete(m.socket, mc.ID)
 	m.persist()
 	m.mu.Unlock()
+	m.invalidarSesiones(mc.ID, "removed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvStopped, ID: mc.ID, Name: mc.Name, Message: "removed"})
 	return nil
 }
@@ -2467,5 +2483,6 @@ func (m *Manager) fail(mc *api.Machine, err error) {
 	name := destino.Name
 	m.persist()
 	m.mu.Unlock()
+	m.invalidarSesiones(id, "failed")
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvFailed, ID: id, Name: name, Message: err.Error()})
 }

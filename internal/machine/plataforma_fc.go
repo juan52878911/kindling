@@ -10,13 +10,16 @@ package machine
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
@@ -47,9 +50,30 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 // registrarCredencialesPlataforma: en Linux el proxy y el resolver son del
 // daemon (internal/net); el VMM no interviene, así que c no se usa. El proxy
 // escribe su registro de auditoría en auditPath.
-func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential, auditPath string) error {
-	return knet.SetCredentials(n, creds, auditPath)
+func registrarCredencialesPlataforma(_ context.Context, _ *fc.Client, n *knet.Net, creds []credproxy.Credential, auditPath string, resolve credproxy.ResolveMachineFunc) error {
+	return knet.SetCredentials(n, creds, auditPath, resolve)
 }
+
+// modeloAPosible: en Linux el proxy es del daemon y marca a la copia por la IP
+// de su netns (ver copias_db.go).
+const modeloAPosible = true
+
+// direccionCopiaLocked es por dónde llega el proxy del daemon al puerto port
+// de la copia cp: la IP de su netns, cuyo DNAT lleva todos los puertos al
+// invitado. Con m.mu tomado (cp es la entrada viva).
+func direccionCopiaLocked(cp *api.Machine, port int) (string, error) {
+	if cp.NetIndex <= 0 {
+		return "", fmt.Errorf("machine %s has no network yet", cp.Name)
+	}
+	return net.JoinHostPort(knet.Plan(cp.NetIndex, cp.ID).NSIP, strconv.Itoa(port)), nil
+}
+
+// invalidarCopiaPlataforma corta las sesiones de todos los proxies hacia id.
+func invalidarCopiaPlataforma(id string) int { return knet.InvalidarMaquina(id) }
+
+// invalidarAgentePlataforma corta las sesiones hacia otras máquinas del
+// proxy de la máquina de n.
+func invalidarAgentePlataforma(n *knet.Net) int { return knet.InvalidarAgente(n) }
 
 // abrirReenvios no hace nada en Linux: el host alcanza al invitado por la IP
 // del veth, sin reenvíos.

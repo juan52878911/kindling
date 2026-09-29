@@ -258,6 +258,9 @@ func UpstreamNecesitaDNS(u string) bool {
 // credencial Postgres y los normaliza.
 func validarUpstream(c *Credential) error {
 	d := c.Domain
+	if c.UpstreamMachine != "" || c.UpstreamOwner != "" {
+		return validarUpstreamMaquina(c)
+	}
 	if c.Upstream != "" {
 		u, err := normalizarUpstream(c.Upstream)
 		if err != nil {
@@ -292,6 +295,9 @@ func validarUpstream(c *Credential) error {
 // destinoPG es la dirección que se marca para cred: el upstream fijado o
 // Domain:Port.
 func (c Credential) destinoPG() string {
+	if c.UpstreamMachine != "" {
+		return "machine " + c.UpstreamMachine
+	}
 	if c.Upstream != "" {
 		return c.Upstream
 	}

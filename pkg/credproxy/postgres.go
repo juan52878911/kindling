@@ -445,7 +445,7 @@ func (s *sesionPG) servir() {
 		s.fatal("28P01", "password authentication failed (the password must be the placeholder of a postgres credential)")
 		return
 	}
-	s.rec.Host, s.rec.Creds, s.rec.Upstream = cred.Domain, []string{cred.Env}, cred.Upstream
+	s.rec.Host, s.rec.Creds, s.rec.Upstream = cred.Domain, []string{cred.Env}, cred.upstreamAuditado()
 	if user != cred.User {
 		s.rec.Reason, s.rec.Denied = ReasonUserMismatch, true
 		s.fatal("28000", "the user does not match the credential")
@@ -467,6 +467,19 @@ func (s *sesionPG) servir() {
 		s.rec.Database = ":cred"
 	}
 
+	// Hacia otra máquina (maquina.go): la sesión se apunta ANTES de resolver,
+	// para que Invalidar la encuentre aunque llegue entre la resolución y el
+	// dial.
+	if cred.UpstreamMachine != "" {
+		quitar, ok := p.registrarSesion(s, cred)
+		defer quitar()
+		if !ok {
+			s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
+			s.fatal("08006", "the credential was withdrawn")
+			return
+		}
+	}
+
 	// 3. El servidor: TLS verificado y la autenticación con la clave real.
 	fin := s.inicio.Add(p.pgAuth)
 	_ = guest.SetDeadline(fin)
@@ -475,10 +488,17 @@ func (s *sesionPG) servir() {
 	up, err := p.abrirPG(ctx, cred)
 	if err != nil {
 		s.rec.Reason = ReasonUpstreamTLS
-		if !errors.Is(err, errTLSUpstream) {
+		switch {
+		case errors.Is(err, errMaquinaNoDisponible):
+			s.rec.Reason, s.rec.Denied = ReasonMachineUnavailable, true
+		case !errors.Is(err, errTLSUpstream):
 			s.rec.Reason = ReasonUpstreamError
 		}
 		p.logf("credential proxy postgres %s (%s): %v", cred.Domain, cred.destinoPG(), err)
+		if s.rec.Reason == ReasonMachineUnavailable {
+			s.fatal("08006", "the database copy is not available (stopped, frozen, removed or not ready)")
+			return
+		}
 		s.fatal("08006", "could not connect to the database server")
 		return
 	}
@@ -626,7 +646,7 @@ func (s *sesionPG) cancelar(cuerpo []byte) {
 		return
 	}
 	s.rec.Host, s.rec.Creds, s.rec.User = d.cred.Domain, []string{d.cred.Env}, d.cred.User
-	s.rec.Upstream = d.cred.Upstream
+	s.rec.Upstream = d.cred.upstreamAuditado()
 	ctx, cancel := context.WithTimeout(s.ctx, s.p.pgAuth)
 	defer cancel()
 	up, err := s.p.abrirPG(ctx, d.cred)
@@ -667,9 +687,12 @@ var errTLSUpstream = errors.New("TLS")
 func (p *Proxy) abrirPG(ctx context.Context, cred credPG) (net.Conn, error) {
 	var c net.Conn
 	var err error
-	if cred.Upstream != "" {
+	switch {
+	case cred.UpstreamMachine != "":
+		c, err = p.dialMaquina(ctx, cred)
+	case cred.Upstream != "":
 		c, err = p.dialUp(ctx, cred.Upstream)
-	} else {
+	default:
 		c, err = p.dialPG(ctx, "tcp", net.JoinHostPort(cred.Domain, strconv.Itoa(cred.Port)))
 	}
 	if err != nil {

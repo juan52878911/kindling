@@ -156,6 +156,15 @@ type Credential struct {
 	Upstream      string `json:",omitempty"`
 	UpstreamTLS   string `json:",omitempty"`
 	TLSServerName string `json:",omitempty"`
+	// UpstreamMachine es el ID de otra máquina de kindling (una copia de
+	// `kling db`) a la que marca el proxy en vez de Domain:Port o Upstream.
+	// NO es una dirección: la dirección se pide en CADA conexión a
+	// Options.ResolveMachine, que el daemon implementa comprobando que la
+	// máquina con ese ID exacto sigue viva, lista y del mismo dueño
+	// (UpstreamOwner). Excluye Upstream, exige UpstreamTLS "disable" (y por
+	// tanto SCRAM-SHA-256) y Database. Ver maquina.go.
+	UpstreamMachine string `json:",omitempty"`
+	UpstreamOwner   string `json:",omitempty"`
 }
 
 var reDominio = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -226,8 +235,8 @@ func ValidarTipo(c *Credential) error {
 	switch c.Kind {
 	case "", KindHTTP:
 		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.CAPEM != "" ||
-			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" {
-			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS and TLS server name are only for -type postgres", d)
+			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" || c.UpstreamMachine != "" || c.UpstreamOwner != "" {
+			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS, TLS server name and upstream machine are only for -type postgres", d)
 		}
 		if err := ValidarPermisos(c.Allow); err != nil {
 			return fmt.Errorf("credential for %s: %w", d, err)
@@ -296,6 +305,10 @@ type Options struct {
 	// la credencial. Una credencial con Upstream marca siempre con el dialer
 	// de upstream.go, con su propia barrera.
 	DialPG func(ctx context.Context, network, addr string) (net.Conn, error)
+	// ResolveMachine da, en cada conexión, la dirección de la máquina de una
+	// credencial con UpstreamMachine (ver maquina.go). Nil: esas credenciales
+	// no marcan nunca (kling-vz, o un daemon que no las admite).
+	ResolveMachine ResolveMachineFunc
 }
 
 // Proxy es el http.Handler del proxy de credenciales de UNA máquina. Quien lo
@@ -333,6 +346,15 @@ type Proxy struct {
 	pgPre, pgAuth time.Duration
 	cancelMu      sync.Mutex
 	cancelaciones map[claveCancel]destinoCancel
+
+	// Credenciales con UpstreamMachine (maquina.go): el resolvedor, el
+	// dialer, la comprobación del destino resuelto (campo para los tests) y
+	// las sesiones vivas hacia cada máquina, para cortarlas (Invalidar).
+	resolveMaq ResolveMachineFunc
+	dialMaq    func(ctx context.Context, network, addr string) (net.Conn, error)
+	destinoMaq func(netip.AddrPort) error
+	sesMu      sync.Mutex
+	sesiones   map[*sesionPG]sesionMaquina
 }
 
 // credCompilada es una credencial con su Allow ya partido.
@@ -408,6 +430,11 @@ func New(o Options) *Proxy {
 		pgAuth:        pgAuthTotal,
 		cancelaciones: map[claveCancel]destinoCancel{},
 		lookupUp:      lookupSistema,
+
+		resolveMaq: o.ResolveMachine,
+		dialMaq:    (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: pgKeepAlive}).DialContext,
+		destinoMaq: destinoMaquinaValido,
+		sesiones:   map[*sesionPG]sesionMaquina{},
 	}
 	p.dialUp = dialFijado(func(ctx context.Context, host string) ([]netip.Addr, error) {
 		return p.lookupUp(ctx, host)
@@ -461,9 +488,16 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
 	sort.Strings(domains)
+	// sesMu antes que mu (el mismo orden que registrarSesion): una sesión
+	// hacia una máquina cuya credencial desaparece o cambia (kling db detach,
+	// otra copia bajo la misma variable) se corta aquí, y una que se registre
+	// después ya ve el juego nuevo.
+	p.sesMu.Lock()
+	defer p.sesMu.Unlock()
 	p.mu.Lock()
 	p.creds, p.ocultar, p.pg = byDomain, ocultar, pg
 	p.mu.Unlock()
+	p.cortarSesionesHuerfanasLocked(pg)
 	return domains, nil
 }
 

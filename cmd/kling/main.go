@@ -845,12 +845,27 @@ func cmdCredential(args []string) error {
 	fs := flag.NewFlagSet("credential", flag.ExitOnError)
 	host := hostFlag(fs)
 	cf := credentialFlags(fs)
+	rm := fs.Bool("rm", false, "withdraw the credential in -env from the machine (its placeholder stops working; open postgres sessions that used it are cut)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
+	if *rm {
+		if fs.NArg() < 1 || *cf.env == "" {
+			return fmt.Errorf("usage: kling machine credential -rm <ref> -env NAME")
+		}
+		ctx, stop := ctxWithSignals()
+		defer stop()
+		mc, err := api.NewClient(hostOf(*host)).RemoveCredential(ctx, fs.Arg(0), *cf.env, "")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s  %s withdrawn from the credential proxy\n", mc.ID[:12], *cf.env)
+		return nil
+	}
 	if fs.NArg() < 1 || *cf.domain == "" || *cf.env == "" {
 		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
-			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]")
+			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
+			"       kling machine credential -rm <ref> -env NAME")
 	}
 	spec, err := cf.spec()
 	if err != nil {

@@ -82,6 +82,10 @@ const (
 // /kling/credentials a su kling-vz, que sirve el proxy y el DNS dentro de su
 // pila de red (plataforma_vz.go). En variable para que los tests del manager
 // corran sin netns ni veth ni ayudante.
+//
+// resolve es el ResolveMachine del proxy de ESTA máquina (m.resolverCopia):
+// solo lo usa el proxy de Linux, en cada conexión de una credencial con
+// UpstreamMachine.
 var registrarCredenciales = registrarCredencialesPlataforma
 
 // reEnvCredencial es el nombre de la variable de entorno que recibe el marcador.
@@ -285,11 +289,24 @@ func validarSpecs(specs []api.CredentialSpec) error {
 	return nil
 }
 
+// sinUpstreamMaquina rechaza specs con UpstreamMachine donde no tienen sentido
+// (credenciales de plantilla: cada instancia quedaría atada a la misma copia
+// sin que nadie lo pidiera para ella).
+func sinUpstreamMaquina(specs []api.CredentialSpec) error {
+	for _, s := range specs {
+		if s.UpstreamMachine != "" || s.UpstreamOwner != "" {
+			return fmt.Errorf("credential %s: upstream_machine is only for a machine's own credentials (kling db attach), not for templates", s.Env)
+		}
+	}
+	return nil
+}
+
 // credencialDeSpec es la credencial del proxy que describe s, sin marcador.
 func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
 		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, AnyDatabase: s.AnyDatabase, CAPEM: s.CAPEM,
-		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName}
+		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName,
+		UpstreamMachine: s.UpstreamMachine, UpstreamOwner: s.UpstreamOwner}
 }
 
 // fusionarSpecs aplica specs sobre previas por Env: la misma variable se
@@ -361,13 +378,19 @@ func (m *Manager) entregarCredenciales(ctx context.Context, id string, netcfg *k
 	if err := m.comprobarUpstreams(creds); err != nil {
 		return nil, 0, err
 	}
+	// Las que van a otra máquina (kling db attach): se comprueba ya lo que el
+	// proxy volverá a comprobar en cada conexión, para que un attach
+	// imposible falle aquí y no en el primer psql del agente.
+	if err := m.comprobarCopias(id, specs); err != nil {
+		return nil, 0, err
+	}
 	if err := m.guardarCredenciales(id, creds); err != nil {
 		return nil, 0, err
 	}
 	if err := ponerMarcadoresMMDS(ctx, c, creds); err != nil {
 		return nil, 0, err
 	}
-	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id)); err != nil {
+	if err := registrarCredenciales(ctx, c, netcfg, creds, m.credAuditPath(id), m.resolverCopia(id)); err != nil {
 		return nil, 0, err
 	}
 	return creds, nuevas, nil
@@ -421,7 +444,7 @@ func (m *Manager) reentregarCredenciales(ctx context.Context, mc *api.Machine, c
 			return 0, err
 		}
 	}
-	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID)); err != nil {
+	if err := registrarCredenciales(ctx, c, knet.Plan(mc.NetIndex, mc.ID), creds, m.credAuditPath(mc.ID), m.resolverCopia(mc.ID)); err != nil {
 		return 0, err
 	}
 	return len(creds), nil
@@ -488,6 +511,9 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 			name, snap.Egress)
 	}
 	if err := validarSpecs(specs); err != nil {
+		return nil, err
+	}
+	if err := sinUpstreamMaquina(specs); err != nil {
 		return nil, err
 	}
 	if err := m.comprobarUpstreams(credencialesDeSpecs(specs)); err != nil {
