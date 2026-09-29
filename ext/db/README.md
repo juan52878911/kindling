@@ -1,8 +1,27 @@
 # kindling-db
 
-Extension module for disposable Postgres databases ("kling db"). Today it holds
-one thing: the benchmark harness that answers, honestly, *how long until a test
-has its own database with schema and data?*
+Extension module for disposable Postgres databases ("kling db"): the `kling-db`
+extension and the benchmark harness that answers, honestly, *how long until a
+test has its own database with schema and data?*
+
+## kling-db
+
+`kling db up <template>` gives a ready copy of a warm Postgres template, with a
+password of its own that only this host knows; `fork`, `connect`, `reset`, `rm`,
+`doctor`, `audit` and `golden` complete it. Model, labels, credentials and the
+Linux/macOS asymmetry: [`docs/db.md`](../../docs/db.md).
+
+```sh
+cd ext/db
+go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db
+kling db up pg -name t1 && kling db connect t1 -psql
+```
+
+| package | what |
+|---|---|
+| `internal/klingc` | runs the `kling` binary (the seam the tests fake) |
+| `internal/scram` | SCRAM-SHA-256 verifiers (RFC 5803/7677), tested with the RFC vector |
+| `internal/dbstate` | the per-copy password files on the host |
 
 ## kling-dbbench
 
