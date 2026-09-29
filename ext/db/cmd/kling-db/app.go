@@ -82,7 +82,9 @@ type app struct {
 	// cwd es el directorio del que kling db branch lee el repositorio git
 	// (vacío: el del proceso). now es el reloj (sustituible en los tests).
 	cwd string
-	now func() time.Time
+	// hookForce permite instalar el hook fuera del directorio git del repo.
+	hookForce bool
+	now       func() time.Time
 }
 
 func newApp(host string) (*app, error) {

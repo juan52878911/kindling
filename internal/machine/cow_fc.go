@@ -67,6 +67,9 @@ func probarReflink(srcDir, dstDir string) error {
 
 // nuevoAlmacen prepara (sin crear ni montar nada) el almacén de root.
 func nuevoAlmacen(root string, priv *Privileges) *almacenCoW {
+	// mountinfo da rutas absolutas y sin enlaces: con una raíz relativa o con
+	// symlinks la comparación textual del punto de montaje nunca coincidiría.
+	root = rutaCanonica(root)
 	return &almacenCoW{
 		root: root, img: filepath.Join(root, "cow.xfs"), dir: filepath.Join(root, "cow"), priv: priv,
 		estaMontado: estaMontadoXFS,
@@ -186,6 +189,7 @@ func estaMontadoXFS(dir string) (bool, error) {
 		return false, err
 	}
 	tipo := ""
+	dir = rutaCanonica(dir)
 	for _, mt := range ms {
 		if mt.punto == dir {
 			tipo = mt.fstype // el último montaje sobre la ruta es el visible

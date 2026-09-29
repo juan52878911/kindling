@@ -577,9 +577,18 @@ en `$root/cow`). Lo que cambia:
   borraría el overlay).
 - El daemon no sigue el enlace simbólico de `machines/<id>` (un directorio del VMM)
   para borrar ni para leer el overlay en `commit`: las rutas del almacén salen del id.
-- **Espacio**: el fichero se reserva entero al crearlo (sin sobreasignar), así que una
-  instancia que llena su disco llena su cuota en el almacén y no puede provocar errores
-  de E/S en el XFS que compartan las demás por falta de sitio debajo.
+- **Permisos del directorio de instancia**: `cow/m/<id>` es `root:grupo-del-VMM` 0750 (el
+  VMM solo lo atraviesa) y solo el FICHERO `overlay.ext4` es del VMM. Así un Firecracker
+  comprometido no crea ficheros en su directorio ni puede cambiar el overlay por un enlace
+  simbólico. Además `commit` abre el overlay con `O_NOFOLLOW`, comprueba con `Fstat` sobre
+  el descriptor (no por ruta) que es un fichero regular y descarta la copia si la ruta
+  cambió de fichero mientras se copiaba.
+- **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
+  que el XFS no falla por falta de sitio debajo. Dentro de él NO hay cuota por instancia:
+  el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que
+  reescribe dejan de compartirse con la base, así que un invitado que reescribe todo su
+  disco puede llenar el almacén compartido (ENOSPC para las demás instancias del almacén).
+  Es un límite conocido; una cuota XFS por proyecto por directorio está pendiente.
 
 ### 15. Grafos: cada arista es una autorización, no una red
 

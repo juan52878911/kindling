@@ -40,6 +40,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/juan52878911/kindling/ext/db/internal/dbstate"
@@ -71,11 +72,21 @@ func validBranch(b string) error {
 		return fmt.Errorf("invalid branch name %q: it starts with '-'", b)
 	}
 	for _, r := range b {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return errors.New("invalid branch name: control characters")
+		}
+		if bidiRune(r) {
+			return errors.New("invalid branch name: bidirectional formatting characters")
 		}
 	}
 	return nil
+}
+
+// bidiRune dice si r es una marca o control de dirección de texto (LRM, RLM,
+// ALM, embebidos, overrides y aislados): sirven para disfrazar un nombre.
+func bidiRune(r rune) bool {
+	return r == 0x061C || r == 0x200E || r == 0x200F ||
+		(r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // branchKey es la clave estable de una rama: slug ASCII (hasta 40) + '-' + 6
@@ -371,12 +382,13 @@ func cmdBranch(args []string) error {
 	prune := fs.Bool("prune", false, "remove the copies of branches that no longer exist in git")
 	dry := fs.Bool("dry-run", false, "with -prune: only say what would be removed")
 	asJSON := fs.Bool("json", false, "with -ls: JSON output")
+	force := fs.Bool("force", false, "with hook install: install even if core.hooksPath points into the working tree or outside the repo")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) == 2 && pos[0] == "hook" {
-		return cmdBranchHook(pos[1])
+		return cmdBranchHook(pos[1], *force)
 	}
 	modes := 0
 	for _, on := range []bool{*sw, *ls, *rm != "", *prune} {
@@ -384,8 +396,11 @@ func cmdBranch(args []string) error {
 			modes++
 		}
 	}
-	const usage = "usage: kling db branch [<branch>] [-from P] [-golden G] | -switch | -ls [-json] | -rm <branch> | -prune [-dry-run] | hook install|uninstall"
+	const usage = "usage: kling db branch [<branch>] [-from P] [-golden G] | -switch | -ls [-json] | -rm <branch> | -prune [-dry-run] | [-force] hook install|uninstall"
 	if modes > 1 || len(pos) > 1 || (len(pos) == 1 && modes > 0) {
+		return usageErr("%s", usage)
+	}
+	if *force {
 		return usageErr("%s", usage)
 	}
 	if (*dry && !*prune) || (*asJSON && !*ls) || ((*sw || *ls || *rm != "" || *prune) && (*from != "" || *golden != "")) {
@@ -517,6 +532,23 @@ func (a *app) branchSwitch(ctx context.Context, owner string) error {
 	return nil
 }
 
+// envQuote entrecomilla un valor para el .env: entre comillas simples, que ni
+// el shell ni los lectores de .env expanden (una comilla simple se escribe
+// '\”). Un valor sin caracteres especiales va tal cual.
+func envQuote(v string) string {
+	safe := v != ""
+	for _, r := range v {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_.,:@%+=/", r)) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return v
+	}
+	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
+}
+
 // writeBranchEnv escribe la conexión de la copia, 0600, en path (dentro de
 // .git), aparte y renombrado: nunca queda a medias ni con permisos abiertos.
 func (a *app) writeBranchEnv(mc *api.Machine, path string) error {
@@ -536,7 +568,7 @@ func (a *app) writeBranchEnv(mc *api.Machine, path string) error {
 	u := url.URL{Scheme: "postgres", User: url.UserPassword(role, pw), Host: hp, Path: "/" + db, RawQuery: "sslmode=disable"}
 	body := fmt.Sprintf("# kling db branch -switch: database of this branch (copy %s). Secret: do not copy it.\n"+
 		"DATABASE_URL=%s\nPGHOST=%s\nPGPORT=%d\nPGUSER=%s\nPGDATABASE=%s\nPGPASSWORD=%s\nPGSSLMODE=disable\n",
-		mc.Name, u.String(), h, port, role, db, pw)
+		mc.Name, u.String(), h, port, role, db, envQuote(pw))
 	f, err := os.CreateTemp(filepath.Dir(path), ".kling-db.env.*")
 	if err != nil {
 		return err
