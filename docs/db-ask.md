@@ -88,6 +88,102 @@ vale para `ask-web`: el "modelo" contesta siempre lo que hay en el fichero, y to
 red. La prueba con la API real de Anthropic (`ANTHROPIC_API_KEY=... kling db ask-web t1`)
 está pendiente de una clave: solo hay cubierta la petición con tests unitarios.
 
+## `kling db report`: la misma pregunta cada cierto tiempo
+
+Un informe es una pregunta de `ask` **guardada**, que se repite sobre una copia
+**fresca** de un golden: "cada lunes, clientes nuevos y facturas vencidas". No hay
+demonio: lo programa cron o un temporizador de systemd, que llama a `report run`.
+
+```sh
+kling db report add lunes -golden crm -every 1w \
+  -question "clientes nuevos de la última semana y facturas vencidas" \
+  -out ~/informes/lunes.txt
+kling db report run lunes            # probarlo ya
+kling db report ls                   # los guardados, cuándo corrieron y si toca
+kling db report rm lunes
+```
+
+- **La definición** va en `$KLING_DB_STATE/reports/<nombre>.json`, **0600** en un
+  directorio 0700, y se lee con las exigencias de una contraseña (fichero normal, no un
+  enlace, del usuario, sin permisos para otros). Guarda el golden, el periodo (`-every`:
+  `30m`, `6h`, `1d`, `1w`), la pregunta, la salida y las opciones de `ask` (`-role`,
+  `-provider`, `-model`, `-limit`, `-timeout`, `-llm-timeout`, `-json`,
+  `-explain -send-data`), y ninguna clave. Al cargarla se vuelven a pasar todas las
+  comprobaciones de `ask`: un fichero tocado a mano (un campo desconocido, `send_data`
+  sin `explain`...) no se ejecuta.
+- **Cada ejecución** comprueba que no hay otra del mismo informe (un `flock` en
+  `locks/report-<nombre>.lock`; la segunda falla), crea `rpt-<nombre>` con `kling db up`
+  del golden (clave propia, etiqueta `kling.db.report=<nombre>`, `-ttl 3h` por si
+  `kling-db` muriera a mitad), hace la pregunta como `ask -yes` —la definición es el
+  consentimiento— y **borra la copia y su clave** pase lo que pase. Si encuentra una
+  `rpt-<nombre>` de una ejecución que no terminó (con su etiqueta y su dueño), la borra
+  antes; un nombre ocupado por otra cosa es un error y no se toca.
+- **El resultado**: con `-out`, un fichero **0600** escrito aparte y renombrado (la ruta
+  se guarda absoluta: cron no corre en tu directorio); sin él, stdout. Lleva la
+  pregunta, la hora, la tabla y la SQL que se ejecutó (`-json`:
+  `{"report", "golden", "ran_at", "question", "result"}`). La SQL la genera el modelo en
+  **cada** ejecución: puede no ser idéntica de una semana a otra, y siempre va escrita en
+  el resultado.
+- **Qué sale hacia el proveedor**: lo mismo que con `ask` (ver abajo): el esquema y la
+  pregunta, nunca filas, salvo que el informe se guardara con `-explain -send-data`, que
+  queda escrito en la definición y se ve en la columna `ROWS TO MODEL` de `report ls`.
+- `report run <nombre> -due` no hace nada si la última ejecución **buena** (se apunta en
+  `reports/<nombre>.last`) es más reciente que `-every`. Así una sola entrada de cron cada
+  hora sirve para todos los periodos y recupera lo que se perdió con el portátil
+  apagado. `report run -out F` escribe en otro fichero esa vez.
+
+### Programarlo con cron
+
+```sh
+crontab -e
+# cada hora, al minuto 17: corre lo que toque
+17 * * * *  . "$HOME/.config/kling-db/env" && /usr/local/bin/kling db report run lunes -due >>"$HOME/informes/cron.log" 2>&1
+```
+
+cron arranca con un entorno casi vacío: lo que `report run` necesita (`KLING_HOST` si el
+daemon no es el local, `ANTHROPIC_API_KEY` o el `PATH` de opencode, `KLING_DB_STATE` si no
+es el de por defecto) va en un fichero **0600** que solo lee tu usuario
+(`~/.config/kling-db/env`, con líneas `export VAR=...`), nunca en la línea del crontab
+(se ve en `crontab -l` y, al ejecutarse, en `ps`).
+
+### Programarlo con un temporizador de systemd (de usuario)
+
+```ini
+# ~/.config/systemd/user/kling-db-report@.service
+[Unit]
+Description=kling db report %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/kling-db/env.systemd
+ExecStart=/usr/local/bin/kling db report run %i -due
+```
+
+```ini
+# ~/.config/systemd/user/kling-db-report@.timer
+[Unit]
+Description=kling db report %i, every hour if due
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+chmod 600 ~/.config/kling-db/env.systemd    # VAR=valor, sin export
+systemctl --user daemon-reload
+systemctl --user enable --now kling-db-report@lunes.timer
+journalctl --user -u kling-db-report@lunes   # la salida, si no hay -out
+```
+
+`Persistent=true` corre al encender lo que se perdió apagado; `-due` evita repetir lo que
+ya corrió. Para que corra sin sesión abierta: `loginctl enable-linger $USER`. En macOS,
+cron vale igual (o un `launchd` con `StartInterval`), con las mismas reglas del entorno.
+
 ## Proveedores
 
 - **anthropic**: la API Messages, con `ANTHROPIC_API_KEY`.

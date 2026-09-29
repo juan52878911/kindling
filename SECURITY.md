@@ -276,7 +276,7 @@ solo al crear: un `../../etc` saldría del directorio de datos.
 - **Registro de auditoría: metadatos del tráfico en disco** (`kling machine audit`,
   `GET /machines/{ref}/credaudit`, `pkg/credproxy/auditoria.go`). Cada petición que
   llega al proxy, también cada rechazo, deja una línea JSON en
-  `machines/<id>/credaudit.jsonl` (0600, abierto con `O_APPEND`): hora, método, host,
+  un fichero JSONL por máquina (0600, abierto con `O_APPEND`; dónde, abajo): hora, método, host,
   ruta, estado, motivo, si fue una denegación de política, los nombres (`Env`) de las
   credenciales que se sustituyeron de verdad, bytes y duración. **Esto es nuevo en
   disco**: antes el proxy no dejaba rastro de qué pedía el invitado; ahora queda qué
@@ -290,15 +290,27 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   llega decodificada y se lee en un terminal: nada de secuencias de escape del
   invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
   generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
-  copian y `rm` lo borra con el directorio. La escritura no bloquea la petición: va por
+  copian y `rm` lo borra. La escritura no bloquea la petición: va por
   una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
   descarta y se cuenta, y la cuenta viaja en el campo `dropped` del siguiente (o en una
-  línea propia), nunca en silencio. En Linux lo escribe el daemon (root) en el
-  directorio de la máquina, que es del usuario sin privilegios del VMM: se abre con
-  `O_NOFOLLOW` y solo si es un fichero regular, y el daemon lo lee igual, para que un
-  enlace o una FIFO plantados por un VMM comprometido no lleven la escritura ni la
-  lectura a otro fichero. En macOS lo escribe el `kling-vz` de la máquina junto a su
-  socket (el único directorio en que su sandbox le deja escribir) y lo lee el daemon.
+  línea propia), nunca en silencio. **En Linux lo escribe el daemon (root) en
+  `<root>/audit/<id>.jsonl`**, un directorio 0700 de root fuera del directorio de la
+  máquina (`internal/machine/credaudit.go`). Antes vivía en `machines/<id>/`, que es
+  del usuario sin privilegios del VMM: un Firecracker comprometido no podía leerlo ni
+  desviar la escritura (`O_NOFOLLOW`, solo ficheros regulares), pero sí borrarlo,
+  truncarlo o cambiarlo por otro, justo el registro que lo vigila. Ahora no lo alcanza.
+  Al arrancar, el daemon migra los registros viejos: copia el contenido (con
+  `O_NOFOLLOW`, solo si es un fichero regular con un único enlace; si no, lo descarta
+  sin leerlo) a un fichero nuevo creado con `O_EXCL`, y borra el viejo; si ya hay uno
+  nuevo, manda ese. Lo migrado vale lo que valía: estuvo en un directorio que el VMM
+  podía tocar. También borra los registros de máquinas que ya no existen, y `rm` borra
+  el de la suya. Si `<root>/audit` no se puede preparar (un enlace o un fichero en su
+  sitio, otro dueño), el proxy no escribe registro y el daemon lo avisa: nunca vuelve
+  al directorio del VMM. En macOS lo escribe el `kling-vz` de la máquina junto a su
+  socket (`machines/<id>/credaudit.jsonl`, el único directorio en que su sandbox le deja
+  escribir) y lo lee el daemon, sin seguir enlaces y solo con un único enlace; ahí el
+  que escribe es el mismo proceso que atiende al invitado, así que moverlo no
+  protegería nada (ver el plan de `docs/proxy-macos-separado.md`).
   El rechazo fuera de allowlist en macOS es ahora del propio proxy
   (`credproxy.Options.Enabled`), para que también quede en el registro.
 - **Las credenciales viven cifradas en el host, nunca en un snapshot.** El marcador
@@ -360,8 +372,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     de TODAS las credenciales Postgres de la máquina y así elige la credencial; después
     exige que el rol sea el de la credencial y, si la credencial fija base de datos, esa.
     Las conexiones de replicación, los parámetros repetidos y los arranques de más de
-    10000 bytes se rechazan; las opciones `_pq_.` y el protocolo 3.2 se contestan con
-    `NegotiateProtocolVersion` (3.0).
+    10000 bytes se rechazan; las opciones `_pq_.`, la versión 3.1 y las 3.3+ se
+    contestan con `NegotiateProtocolVersion` (3.0 o 3.2); 3.0 y 3.2 se hablan tal cual.
   - **Hacia el servidor, TLS verificado por defecto.** Sin `-upstream`, sale por el mismo
     dialer de solo IPv4 públicas que el proxy HTTP (un servidor en la red privada, en
     `169.254/16` o en loopback **se rechaza**, como un DNS envenenado), manda `SSLRequest` y lee la
@@ -385,9 +397,13 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     (`172.16.0.0/30`, el enlace del invitado, y `172.30.0.0/16`, los veth del host): ahí
     están el propio proxy y los invitados de otras máquinas. Un nombre se resuelve al
     marcar, con el resolver del sistema, y basta una IP prohibida entre sus respuestas
-    para no marcar ninguna (`localhost` es siempre el loopback, sin DNS). En macOS solo
-    se admite una IP o `localhost`: `kling-vz` está confinado y no llega al resolver del
-    Mac, y abrirle el socket de mDNSResponder para esto no compensa. En Linux el proxy es del daemon y marca desde el netns del
+    para no marcar ninguna (`localhost` es siempre el loopback, sin DNS). En macOS
+    `kling-vz` está confinado y no llega al resolver del Mac (abrirle el socket de
+    mDNSResponder para esto no compensa): el nombre lo resuelve el daemon al entregar
+    la credencial (`credproxy.ResolverUpstream`), con la misma regla —una IP prohibida
+    o del rango de reenvíos entre las respuestas y no se entrega— y `kling-vz` recibe
+    la primera IP, que vuelve a comprobar al marcar. El TLS se verifica contra el
+    nombre de la credencial o `-tls-server-name`, no contra la IP. En Linux el proxy es del daemon y marca desde el netns del
     host (su `127.0.0.1` es el del host); en macOS lo hace `kling-vz` con la pila del
     Mac, no con la gVisor del invitado. El TLS sigue siendo verify-full, y la
     cancelación va al mismo upstream con el mismo modo.
@@ -460,7 +476,16 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     `BackendKeyData`: la clave de cancelación se cambia por una aleatoria, y un
     `CancelRequest` con ella se traduce a la real en una conexión nueva al mismo destino
     y con el mismo modo TLS;
-    uno con una clave que el proxy no dio se cierra sin más.
+    uno con una clave que el proxy no dio se cierra sin más. Con el protocolo 3.2
+    (PostgreSQL 18) la clave es de longitud variable: la falsa tiene la longitud de la
+    versión del invitado (4 bytes en 3.0, 32 en 3.2) y la real se guarda tal cual la da
+    el servidor, que tiene que ser de SU versión (4 bytes en 3.0, 4-256 en 3.2); un
+    segundo `BackendKeyData` o una clave de otra longitud cortan la conexión antes de
+    que el invitado reciba nada. Un `NegotiateProtocolVersion` del servidor solo vale
+    como primer mensaje, una vez, a una versión menor más baja que la pedida y sin
+    opciones rechazadas (el proxy no manda ninguna); cualquier otro es un fallo de
+    autenticación. Un `CancelRequest` con una clave de más de 256 bytes se rechaza como
+    arranque mal formado.
   - **Límites**: 32 conexiones a la vez por máquina, 10 s para que el invitado mande
     arranque y contraseña y 15 s para toda la autenticación; tras ella no hay plazo de
     inactividad (un pool puede estar horas callado), hay keepalive TCP de 30 s.
@@ -525,6 +550,21 @@ así que un snapshot de servicio (sin ella) nunca da máquinas que ejecuten, y e
 daemon se niega a crear un sandbox desde él. El daemon no se fía del flujo del
 agente: recorta la salida a los topes y valida cada evento. Los sandboxes nacen sin
 red y se destruyen al vencer su TTL.
+
+Los **grafos precalentados** del frontal de sandboxes (`ext/sandbox`, #57) se reparten
+entre inquilinos con las mismas reglas que las máquinas precalentadas: un grafo es de un
+inquilino solo si TODAS sus máquinas llevan su etiqueta `tenant` (y el `kling.graph` de
+ese grafo, que pone el daemon y nadie cambia); uno mezclado por dos reclamaciones a la
+vez no es de nadie, no se entrega y se borra. Sus nodos admiten `exec`, ficheros y shell
+del dueño del grafo entero, nada más. Una plantilla de grafo no puede llevar aristas
+`credential` (la clave viajaría con la plantilla), ni volúmenes o carpetas del host en
+sus nodos (serían los mismos en todas las instancias, un canal entre inquilinos), ni
+nodos `lazy` (nacerían sin la etiqueta de su dueño).
+
+Con la autorización del daemon activa ([`docs/authz.md`](docs/authz.md)), el frontal y el
+fondo de `ext/sandbox` necesitan la identidad `admin`: guardan y leen plantillas en
+`/store` y reparten con `SetLabels` (`PUT /machines/{ref}/labels`) máquinas y grafos que
+no son de ningún inquilino del daemon.
 
 ### 9. Snapshots firmados
 
@@ -653,11 +693,19 @@ cambia:
   crea con `O_EXCL|O_NOFOLLOW` y se cede al VMM con `fchown` sobre el descriptor, porque en
   el jail está en un directorio del VMM; al recuperarlo del jail se exige que sea el mismo
   inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
-  descarta igualmente (el dorado no correspondería a la memoria volcada).
+  descarta igualmente (el dorado no correspondería a la memoria volcada). En macOS el
+  clon es `fclonefileat(2)` desde el mismo descriptor: crea el destino él mismo (falla si
+  existe, enlace incluido), y el daemon lo abre relativo al directorio con `O_NOFOLLOW` y
+  exige fichero regular, un solo enlace (no un hardlink a otro fichero puesto en su
+  lugar), dueño el daemon (`CLONE_NOOWNERCOPY`) y el tamaño del origen.
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
-  reserva).
+  reserva). Crecer (`kling cow grow`, solo admin) también reserva con `fallocate` antes
+  de agrandar el loop y el sistema de ficheros, y solo toca el loop cuyo
+  `backing_file` es la imagen del almacén. Una imagen que no monta solo se borra sola si
+  es recién creada o si ningún `machines/<id>/overlay.ext4` apunta dentro del almacén, y
+  nunca mientras siga montada.
 - **Cuota por instancia**: el VMM escribe el fichero de overlay y un Firecracker
   comprometido podría hacerlo crecer hasta llenar el almacén compartido. Cada overlay lleva
   una cuota del núcleo igual a su tamaño lógico más una holgura: en XFS, cuota de proyecto
@@ -714,7 +762,12 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   los nodos y cortan las sesiones hacia ellos antes de volcar: ninguna sesión TCP
   sobrevive a una restauración. Los mismos marcadores de credenciales se entregan a
   cada copia (el invitado los tiene en memoria), apuntados a su propio grafo; un nodo
-  con credenciales que no son de sus aristas no se ramifica.
+  con credenciales que no son de sus aristas no se ramifica. Un volumen en escritura
+  (en cualquier nodo, instanciado o no) tampoco: dos escritores sobre un ext4 lo
+  corrompen, así que el fork se rechaza (409) antes de pausar nada; en solo lectura se
+  comparte. Los volúmenes se sueltan con el invitado en marcha antes de la pausa, como
+  en `commit`: la caché de ext4 de un disco que no viaja con el volcado no entra en la
+  memoria de la plantilla.
 - **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
   RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
   plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`
@@ -732,6 +785,11 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   acto), un solo despertar en vuelo por nodo y 64 conexiones esperándolo como mucho;
   por encima, rechazo y una línea `busy` en la auditoría. Un despertar que no cabe
   en memoria es `no_capacity`, no un OOM.
+- **Mantener despierto a un nodo exige su arista.** `idle_freeze` se renueva solo con
+  las conexiones que pasan la puerta de una arista hacia ese nodo; las rechazadas no
+  tocan su reloj. Un nodo sin arista no puede impedir que otro se congele; uno con ella
+  sí, conectando cada menos de N segundos (es el uso que la arista autoriza, y cuesta lo
+  que la memoria de ese nodo).
 - **Las claves de las aristas `credential`** viajan una vez en `POST /graphs`, nunca
   salen por la API y se guardan cifradas (`<id>.secrets.enc`, AES-GCM con la clave del
   almacén de credenciales y el grafo como dato autenticado: copiadas a otro grafo no se
@@ -884,6 +942,35 @@ Qué **no** garantiza:
 - El tramo entre el invitado y el proxy va en claro dentro de la máquina (como en §7), y
   el del proxy al servidor, en claro si se eligió `sslmode=disable`.
 
+**`kling db slice`** (una tabla, sus filas relacionadas y el resto del esquema vacío; ver
+[docs/db.md](docs/db.md#una-tabla-de-producción-slice-y-observación)) es `clone` con otro
+relleno y hereda todo lo anterior: misma máquina, misma credencial en el proxy, misma
+comprobación del rol, mismo enmascarado (con las mismas reglas, también para las tablas
+vacías) y mismo golden en una máquina nueva. Lo propio:
+
+- **Solo lectura en producción**: `pg_dump --schema-only`, una consulta del catálogo y
+  una sola sesión en `REPEATABLE READ READ ONLY` con `\copy (SELECT ...) TO PROGRAM`.
+  Las consultas las arma `kling-db` con nombres citados por el propio catálogo
+  (`quote_ident`); un nombre con caracteres de control, barras invertidas o comillas
+  (simples o dobles, que irían dentro del metacomando `\copy`) cerca de la
+  tabla detiene la construcción, y `-table` solo admite `[esquema.]nombre` sin comillas.
+- **Lo sin enmascarar sigue sin tocar un fichero**: cada `\copy` va por una tubería a un
+  psql del Postgres del tmpfs (`COPY FROM` con `session_replication_role = replica`, sin
+  disparadores ni comprobaciones de claves foráneas al cargar). En el tmpfs solo se
+  escriben los cargadores, que llevan nombres, no datos.
+- **Claves foráneas**: las que lo cargado no cumple quedan `NOT VALID` (o fuera, en una
+  particionada) y el informe lo dice; no se inventan ni se borran filas.
+
+**`kling db observe`** activa en una copia `log_min_duration_statement = 0` para la base de
+la aplicación. Consecuencia: **el log de Postgres de la copia pasa a llevar SQL**, con sus
+literales (lo que `kling db audit` daba por hecho que no pasaba; audit sigue leyendo solo
+los mensajes de conexión). Para acotarlo: sin los parámetros enlazados
+(`log_parameter_max_length = 0`), sin las sesiones del superusuario (así la rotación de
+la clave no llega al log), solo en la copia (el golden no cambia) y el informe normaliza
+las sentencias sin imprimir un literal. Úsalo en copias de goldens enmascarados y
+apágalo (`-off`) al terminar; un fork o un snapshot de una copia observada hereda los
+ajustes.
+
 ### 17. `kling db` con MySQL/MariaDB: la clave de cada copia no entra en el invitado
 
 Las copias de una plantilla MariaDB (`scripts/db-golden-mysql.sh`, ver
@@ -908,7 +995,56 @@ La plantilla: sin cuentas anónimas, sin `root` ni `mysql` fuera de `localhost`,
 Las migraciones corren como root: lo que creen con `DEFINER` corre como root, y
 `kling db doctor` lo avisa (`MY020`).
 
-### 18. Escribir dentro de una imagen no sale de ella
+### 18. `kling db class`, `report` y `branch`: lo que queda en el host
+
+- **`class`** no imprime ninguna clave: por copia, dirección, usuario y base. Las DSN con
+  clave solo salen con `-passwords FICHERO`, a un fichero **0600** escrito aparte y
+  renombrado (un enlace en esa ruta se sustituye, no se sigue); `-passwords -` se
+  rechaza. `ls`, `reset` y `rm` solo tocan copias con `kling.db.class=<prefijo>` **y** el
+  `-owner` pedido, y un nombre ajeno a la clase no se crea encima ni se borra.
+- **`report`** guarda la definición en `reports/<nombre>.json` (0600, directorio 0700,
+  leída como una contraseña: normal, del usuario, sin permisos para otros) y **ninguna
+  clave**: la de la API sale del entorno de quien ejecuta (cron o systemd: un
+  `EnvironmentFile` 0600, nunca la línea del crontab). La definición es el consentimiento
+  de `ask -yes`: al cargarla se repiten todas las comprobaciones de `ask`, y
+  `-send-data` (filas al proveedor) queda escrito y a la vista en `report ls`. Cada
+  ejecución usa una copia nueva del golden que se borra con su clave pase lo que pase, y
+  el resultado (datos de la base) va a stdout o a un fichero 0600. La SQL la genera el
+  modelo en cada ejecución: la encierran las mismas capas que en `ask` (sqlguard, rol de
+  solo lectura, transacción READ ONLY, plazo y LIMIT).
+- **`branch`** serializa por repositorio con `flock` sobre `locks/branch-<repo>.lock`
+  (0600, abierto con `O_NOFOLLOW` y comprobado de este usuario): dos checkouts a la vez
+  no crean dos copias de una rama. El cerrojo es de este host; dos hosts contra el mismo
+  daemon no se coordinan. El hook instalado con `-owner` y `-golden` lleva esos valores
+  escritos (validados y entre comillas simples; no son secretos).
+
+### 19. `kling db` con Redis y SQLite: la misma regla, o ninguna clave
+
+Las copias Redis (`scripts/db-golden-redis.sh`, ver
+[docs/db-engines.md](docs/db-engines.md)) siguen la regla de las de Postgres y MySQL: la
+clave del usuario de la aplicación se genera en el host y vive solo ahí
+(`copies/<id>/password`, 0600), y al invitado va **su SHA-256** (lo que guarda Redis,
+`ACL SETUSER app resetpass #<hash>`) por stdin; en la misma llamada se comprueba con
+`ACL GETUSER` que el usuario está activo con **exactamente** ese hash, y si no, la copia
+se destruye. El usuario de la aplicación no tiene `@admin` (ni `CONFIG`, ni `ACL`, ni
+`SHUTDOWN`, ni `MODULE`), y el servidor arranca sin `DEBUG` ni `MODULE`.
+
+La administración (`default`) usa una clave que **nunca sale del invitado**: se genera
+dentro, vive en `/etc/kling-db/redis-admin` (0600, root) y cada copia la estrena al
+prepararse, de modo que dos copias del mismo dorado no comparten ninguna clave. Sí viaja
+por la red del invitado como cualquier `AUTH`: quien fuera root en la copia la lee, pero
+root en la copia ya es dueño de sus datos (la frontera es la microVM, como en Postgres).
+SHA-256 sin sal es débil ante un diccionario; con 192 bits aleatorios no hay diccionario
+que valga.
+
+Las copias SQLite **no tienen clave**: no hay servidor ni red. Se entra con `kling exec` o
+`kling shell`, que el daemon reserva a quien puede operar la máquina; el fichero es 0600
+de root dentro. `connect -dsn` y `rotate` se rechazan.
+
+Ni Redis ni SQLite tienen proxy de credenciales: `attach` se rechaza. MongoDB se deja
+fuera porque su `createUser`/`updateUser` exige la clave en claro dentro del servidor.
+
+### 20. Escribir dentro de una imagen no sale de ella
 
 Una imagen no es de fiar: la trae quien la construye o la copia (`kling image copy`), y
 sus enlaces simbólicos son suyos. `kling image put` (`PUT /images/{name}/files`) y el
@@ -974,6 +1110,10 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   servidor ya caliente. `kling db attach`, `role`, `rehearse`, `snapshot`/`undo`,
   `tenant-check`, `ask`, `clone` y `doctor -url` no existen para MySQL todavía, y las
   plantillas de MySQL 8 de Oracle no se han probado (Alpine solo empaqueta MariaDB).
+- **Redis y SQLite en `kling db`: lo básico.** Solo `up`, `fork`, `connect`, `reset`,
+  `rm`, `doctor` (y `rotate` en Redis); lo demás se rechaza. Sin proxy de credenciales
+  (Redis en otra microVM no se comparte), sin `audit` y sin `doctor -url`. Los scripts de
+  plantilla no se han ejecutado todavía contra un Redis ni un SQLite reales en el lab.
 - **Postgres: `-database` es obligatoria.** Sin base fijada el rol entraría en cualquiera
   con `CONNECT`, así que hace falta `-database` o `-any-database` expreso (el CLI avisa).
   Los almacenes anteriores, sin base, se leen como `-any-database`: lo que permitían.
@@ -1001,11 +1141,11 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   veth del host entre el proxy y la copia (la contraseña no: SCRAM). `kling db rotate`
   o `reset`/`undo` de la copia rompen los attach existentes (clave o id nuevos): hay que
   repetirlos. Solo Linux por ahora (ver 7).
-- **El registro de auditoría es observabilidad, no prueba.** En Linux el directorio de
-  la máquina es del usuario del VMM: un Firecracker comprometido no puede leer el
-  registro (0600, de root) ni desviar su escritura (ver 7), pero sí borrarlo o
-  cambiarlo por otro. En macOS lo escribe `kling-vz`, el proceso que termina el
-  tráfico del invitado. No hay fsync: lo que estaba en el búfer al caer el host se
+- **El registro de auditoría es observabilidad, no prueba.** En Linux vive en
+  `<root>/audit`, fuera del alcance del VMM (ver 7), pero lo migrado desde versiones
+  anteriores estuvo en un directorio que el VMM podía tocar. En macOS lo escribe
+  `kling-vz`, el proceso que termina el tráfico del invitado, en el directorio de la
+  máquina: un `kling-vz` comprometido puede borrarlo o reescribirlo. No hay fsync: lo que estaba en el búfer al caer el host se
   pierde (lo escrito sobrevive a que maten el proceso, que es como el daemon para a
   `kling-vz`). Si se necesita un registro a prueba de manipulación, hay que sacarlo del
   host (`kling machine audit -f -json` a un colector).
@@ -1013,7 +1153,14 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   `kling-vz` de su máquina, que corre como el usuario y procesa su tráfico (ver 7). Un
   fallo explotable en su pila de red, DNS o MMDS que antes daba un proceso sin claves
   daría ahora la de esa máquina (solo la de esa: cada máquina tiene su `kling-vz`). En
-  Linux la clave nunca sale del daemon.
+  Linux la clave nunca sale del daemon. **Plan** (#80, diseñado, sin implementar):
+  sacar el proxy a un proceso propio por máquina (`kling-credproxy`), confinado en un
+  perfil sin Virtualization.framework, sin disco salvo su registro y con la red justa;
+  el daemon le entrega las claves a él y `kling-vz` solo recibe dominios y marcadores,
+  y le pasa cada conexión de la pasarela por un socket Unix. Un fallo en la pila de red
+  de `kling-vz` dejaría de dar la clave; uno en el propio proxy, no. Proceso, perfil,
+  IPC, coste y qué falta para hacerlo en
+  [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md).
 - **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
   sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el
   hijo para `initialize`. Como el bridge y el servidor MCP corre como root y lee el

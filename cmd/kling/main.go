@@ -129,6 +129,8 @@ func main() {
 		err = cmdEvents(args)
 	case "context":
 		err = cmdContext(args)
+	case "cow":
+		err = cmdCoW(args)
 	case "config":
 		err = cmdConfig(args)
 	case "completion":

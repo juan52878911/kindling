@@ -9,6 +9,11 @@
 // paquete las FABRICA, y son dos ritmos distintos. El contrato entre ambos son
 // las etiquetas (kind=sandbox, template=X, sin tenant) y la política de la
 // máquina (sin red, duerme al vencer); está escrito en esPrecalentadaDe.
+//
+// También fabrica GRAFOS enteros (plantilla.PlantillaGrafo): levanta la
+// instancia con `graph up` y la congela con `graph freeze`, de modo que una
+// instancia en el fondo no cuesta RAM y reclamarla es etiquetar y despertar.
+// El contrato de esas instancias está en plantilla/grafo.go.
 package pool
 
 import (
@@ -84,6 +89,7 @@ func (r *Rellenador) Vuelta(ctx context.Context) {
 	for _, h := range r.reg.Todos() {
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		r.vueltaHost(hctx, h)
+		r.vueltaGrafos(hctx, h)
 		cancel()
 	}
 }
@@ -152,4 +158,44 @@ func DeseoDe(s *api.Snapshot) (nombre string, quiere int) {
 		return "", 0
 	}
 	return r.Plantilla.Nombre, r.Plantilla.Pool
+}
+
+// vueltaGrafos fabrica las instancias de grafo que falten en el host. Como
+// con las máquinas, nunca destruye lo que sobra: una instancia libre de más se
+// queda congelada (disco, no RAM) hasta que alguien la reclame, o hasta que
+// `kling sbx template rm` borre la plantilla y sus instancias libres.
+func (r *Rellenador) vueltaGrafos(ctx context.Context, h *hosts.Host) {
+	tpls, err := plantilla.Grafos(ctx, h.Cliente)
+	if err != nil || len(tpls) == 0 {
+		return
+	}
+	gs, err := h.Cliente.Graphs(ctx)
+	if err != nil {
+		return // un daemon sin la capacidad "graphs" no tiene grafos que llenar
+	}
+	ms, err := h.Cliente.List(ctx)
+	if err != nil {
+		return
+	}
+	libres := map[string]int{}
+	for _, in := range plantilla.Instancias(gs, ms) {
+		if in.Libre() {
+			libres[in.Plantilla]++
+		}
+	}
+	for _, p := range tpls {
+		for i := libres[p.Nombre]; i < p.Pool; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			g, err := plantilla.FabricarGrafo(ctx, h.Cliente, p)
+			if err != nil {
+				if !api.IsInsufficientMemory(err) && !api.IsMachineLimit(err) {
+					r.log.Printf("pool %s/graph %s: %v", h.Nombre, p.Nombre, err)
+				}
+				break // la siguiente plantilla puede caber aunque esta no
+			}
+			r.log.Printf("pool %s/graph %s: prewarmed %s (%d/%d)", h.Nombre, p.Nombre, g.Name, i+1, p.Pool)
+		}
+	}
 }

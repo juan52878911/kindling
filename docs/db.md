@@ -13,6 +13,13 @@ se comparte con agentes de **otras** microVMs sin que vean la contraseña.
 el hash de `mysql_native_password`, nunca la clave. Lo demás se rechaza en copias MySQL
 en esta versión. Todo en [mysql.md](mysql.md).
 
+**Redis y SQLite**: `up`, `fork`, `connect`, `reset`, `rm` y `doctor` (y `rotate` en
+Redis) sobre plantillas de `golden image|build -engine redis|sqlite` (etiqueta
+`kling.db.engine=redis|sqlite`). Redis: usuario ACL con su propia clave por copia, al
+invitado solo su SHA-256, y `connect -redis`/`redis://`. SQLite: una microVM con el
+fichero y `sqlite3`, sin red ni clave (`connect -sqlite`). MongoDB no, y por qué. Todo en
+[db-engines.md](db-engines.md).
+
 ```sh
 kling db golden -script scripts/db-golden.sh build -seed-mb 20 pg   # la plantilla, una vez
 kling db up pg -name t1                  # una copia lista, con su propia contraseña
@@ -31,12 +38,14 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 |---|---|
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, quita los roles de `role` heredados, **rota la contraseña** y marca `ready` |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), quita en cada una los roles de `role` heredados, rota su clave y las marca `ready`. Todo o nada |
-| `connect <copia> [-role R] [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role` |
+| `connect <copia> [-role R] [-dsn \| -psql \| -mysql \| -redis \| -sqlite]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role`. `-mysql`, `-redis`, `-sqlite`: el cliente de cada motor ([mysql.md](mysql.md), [db-engines.md](db-engines.md)) |
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
-| `branch [<rama>] [-from P] [-golden G] \| -switch \| -ls \| -rm R \| -prune \| hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
-| `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
+| `branch [<rama>] [-from P] [-golden G] \| -switch [-golden G] \| -ls \| -rm R \| -prune \| [-owner T] [-golden G] hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
+| `class -n N [-prefix P] <golden> \| class ls \| class reset [<copia>...] \| class rm [<copia>...]` | una copia por alumno (`<prefijo>-01`...), en paralelo; las claves solo a un fichero 0600 con `-passwords`. Ver [Una copia por alumno](#una-copia-por-alumno-class) |
+| `report add <nombre> -golden G -every 1w -question "..." \| report run <nombre> [-due] \| report ls \| report rm <nombre>` | una pregunta de `ask` guardada, que cada ejecución hace sobre una copia fresca del golden y borra al acabar; se programa con cron o systemd. Ver [db-ask.md](db-ask.md#kling-db-report-la-misma-pregunta-cada-cierto-tiempo) |
+| `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño, ttl y pertenencia (`kling.db.class`, `kling.db.repo`, `kling.db.branch`) |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
 | `rehearse <copia\|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones SQL en una copia desechable: tiempos, esperas por locks y tamaño; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
 | `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
@@ -49,6 +58,8 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
 | `golden build -template T <nombre>` | como `build`, con las migraciones y el seed de una plantilla incluida (`empty`, `crm-demo`) |
 | `clone <postgres-url> -mask REGLAS [-golden G] [-allow-unmasked] [-strict]` | un golden hecho de una base de producción, con los datos personales enmascarados dentro de una microVM; ver [Copia de producción enmascarada](#copia-de-producción-enmascarada-clone) |
+| `slice <postgres-url> -table T -mask REGLAS [-rows N] [-related-rows N]` | como `clone`, pero con **una** tabla: un subconjunto acotado de sus filas, sus filas relacionadas directas y el resto del esquema vacío; ver [Una tabla de producción (slice)](#una-tabla-de-producción-slice-y-observación) |
+| `observe <copia> \| -off <copia> \| -report <copia> [-table T] [-limit 20] [-json]` | registra en el log de la copia cada sentencia de las conexiones nuevas, con su duración, y agrupa las que tocan la tabla del slice |
 | `templates` | lista las plantillas incluidas (embebidas en el binario, `ext/db/templates`) |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
@@ -233,10 +244,12 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 | `kling.db.owner` | quién la pidió; `local` en el CLI |
 | `kling.db.state` | `preparing` o `ready` |
 | `kling.db.role`, `kling.db.database` | rol y base de la aplicación (`app`, `appdb`) |
-| `kling.db.engine` | `mysql` en las copias de una plantilla MariaDB/MySQL (la pone `db-golden-mysql.sh` y se hereda); sin ella, Postgres |
+| `kling.db.engine` | `mysql`, `redis` o `sqlite` en las copias de esas plantillas (la ponen `db-golden-mysql.sh`, `db-golden-redis.sh` y `db-golden-sqlite.sh`, y se hereda); sin ella, Postgres |
 | `kind=sandbox` | lo que permite `sandbox fork` sobre la copia |
-| `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del toplevel del repo, clave de la rama y último uso (segundos unix) |
-| `kling.ports` | incluye `5432` (`3306` en MySQL): el backend de macOS abre el reenvío |
+| `kling.db.repo`, `kling.db.branch`, `kling.db.used` | `kling db branch`: hash del directorio git común del repo (antes, del toplevel), clave de la rama y último uso (segundos unix) |
+| `kling.db.class` | `kling db class`: el prefijo de la clase de la copia |
+| `kling.db.report` | `kling db report`: el informe de la copia de una ejecución (`rpt-<nombre>`) |
+| `kling.ports` | incluye `5432` (`3306` en MySQL, `6379` en Redis; nada en SQLite): el backend de macOS abre el reenvío |
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
 fusiona y `fork` las copia enteras añadiendo `kling.fork-of`. Por eso `up` pasa
@@ -488,6 +501,48 @@ rota su propia clave y pierde los roles de `role`, pero **los datos** del punto
 son los que eran. Mismo modelo que los golden: el daemon es la frontera; no
 guardes puntos de datos que no deba ver quien lo usa.
 
+## Una copia por alumno (class)
+
+Para un taller o una clase: cada alumno su copia del mismo golden, con su clave, y
+entre ejercicio y ejercicio, datos nuevos para todos.
+
+```sh
+kling db class -n 30 -prefix alumno crm-demo     # alumno-01 ... alumno-30
+kling db class ls -prefix alumno                  # estado y cómo conectar, sin claves
+kling db class ls -prefix alumno -passwords claves.tsv   # las DSN, con clave, a un fichero 0600
+kling db class reset -prefix alumno               # siguiente ejercicio: todas desde el golden
+kling db class reset -prefix alumno alumno-07     # o solo la que se rompió
+kling db class rm -prefix alumno                  # fin de la clase
+```
+
+- **Nada nuevo por debajo.** Cada copia es un `kling db up` (rota su clave al nacer, la
+  clave solo en el host) con la etiqueta `kling.db.class=<prefijo>`; `reset` y `rm` son
+  los de siempre. Lo que agrupa la clase es la etiqueta más el `-owner`: `ls`, `reset` y
+  `rm` solo ven y tocan copias con las dos, y `reset`/`rm <copia>` rechazan un nombre que
+  no sea de la clase. Un `kling db reset` suelto de una copia de la clase la deja en ella
+  (conserva `kling.db.class`, y también `kling.db.repo`/`kling.db.branch` en una copia de
+  rama).
+- **Nombres.** `<prefijo>-01` ... con dos cifras como mínimo (tres desde 100, para que
+  ordenen bien). El prefijo (`-prefix`, por defecto `student`): minúsculas, cifras, `_` y
+  `-`, hasta 40. `-n` de 1 a 200.
+- **En paralelo, con tope.** `-parallel K` (4 por defecto, hasta 16) copias a la vez al
+  crear, resetear o borrar.
+- **Repetir es seguro.** Si alguna copia falla, las demás quedan listas y el error dice
+  cuáles; repetir el mismo comando crea **solo las que faltan** (las que ya existen en la
+  clase, listas y del mismo golden, no se tocan). Si un nombre está ocupado por una
+  máquina que no es de la clase, o una copia de la clase es de otro golden o no está
+  lista, no se crea nada y se dice qué hacer.
+- **Las claves no se imprimen.** Tras crear o resetear, y en `ls`, sale por copia el
+  estado, host, puerto, usuario y base (en `ls -json`, además, la ruta del fichero de su
+  clave). Con `-passwords FICHERO` (en la creación, `ls` o `reset`) se escribe una línea
+  `NOMBRE<TAB>DSN` por copia lista, con la clave, en ese fichero: **0600**, escrito
+  aparte y renombrado (si la ruta era un enlace, se sustituye el enlace, no su destino).
+  `-passwords -` se rechaza. Repártelo como repartirías contraseñas.
+- **Desde dónde conecta el alumno.** Las direcciones son las del host (en Linux, la IP
+  del netns de cada copia; en macOS, un reenvío en `127.0.0.1`): valen desde el equipo
+  donde corre el daemon. Para una clase en red, los alumnos entran a ese equipo (SSH) o
+  cada uno usa `kling db connect` con su propio acceso al daemon.
+
 ## Una base por rama
 
 `kling db branch` da a cada rama de git su propia copia. La de una rama nueva sale
@@ -521,9 +576,31 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   fichero`), es idempotente y **no pisa** uno existente: lo aparta a
   `post-checkout.pre-kling-db` y lo ejecuta primero (`uninstall` lo restaura). Nunca
   bloquea el checkout: si `kling db branch -switch` falla, avisa por stderr y el
-  checkout sigue. Usa `${KLING:-kling}`; para otro daemon, exporte `KLING_HOST`.
+  checkout sigue. Usa `${KLING:-kling}`; para otro daemon, exporte `KLING_HOST`. Con
+  `kling db branch -owner equipo -golden crm-demo hook install`, el hook llama a
+  `-switch -owner equipo -golden crm-demo`: el dueño de las copias y el golden del que
+  sale una rama sin copia del padre quedan escritos en el hook (validados y entre
+  comillas simples). Reinstalar sin ellos vuelve al hook de siempre.
+- **Worktrees.** `kling.db.repo` es el hash del **directorio git común**
+  (`git rev-parse --git-common-dir`), el mismo para el árbol principal y todos sus
+  `git worktree`: una rama tiene **una sola copia** aunque se abra desde varios
+  worktrees, y el hook (que vive en el directorio de hooks común) sirve a todos. Cada
+  worktree escribe su propia conexión en **su** directorio git
+  (`.git/worktrees/<nombre>/kling-db.env`; la ruta la da
+  `git rev-parse --absolute-git-dir`). `-switch` no congela la copia de una rama que
+  otro worktree tiene activa (`git worktree list`): solo las de ramas que nadie usa.
+  Las copias creadas antes de este cambio llevan el hash del toplevel y se siguen
+  reconociendo desde el árbol que las creó.
+- **Un cerrojo por repositorio.** Todo lo que crea, activa o borra copias de rama
+  (`branch`, `-switch`, `-env`, `-rm`, `-prune`) toma antes un `flock` sobre
+  `$KLING_DB_STATE/locks/branch-<repo>.lock` (0600, en un directorio 0700). Dos
+  checkouts a la vez —dos worktrees, o el hook y un comando— se ponen en fila: el
+  segundo espera (hasta 3 minutos, avisando por stderr) y encuentra la copia hecha en
+  vez de crear otra. El cerrojo lo suelta el sistema si el proceso muere. Es por host:
+  dos máquinas contra el mismo daemon no se ven.
 - **Identidad y nombres.** La copia se reconoce por sus etiquetas, no por su nombre
-  (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del toplevel del repo y
+  (`sandbox fork` no deja ponerlo): `kling.db.repo` es el hash del directorio git común
+  del repo (ver Worktrees) y
   `kling.db.branch` una **clave** de la rama (slug ASCII más 6 hex del hash del nombre
   entero: `feat/x` y `feat-x` no chocan). El nombre de la rama es texto arbitrario y
   nunca va sin validar a argv, a SQL ni a etiquetas; se rechaza el vacío, un `-` inicial,
@@ -668,6 +745,82 @@ que una columna `notes` con texto libre pase sin que nadie la mire.
   el host tiene swap, el sistema operativo podría llevarla a disco. En Linux, sin swap
   en el host o con swap cifrada.
 - Qué garantiza y qué no, en [SECURITY.md](../SECURITY.md) §16.
+
+## Una tabla de producción (slice) y observación
+
+Para mirar qué hace una aplicación con UNA tabla sin copiar la base entera:
+
+```sh
+PGPASSWORD=... kling db slice "postgres://reader@db.internal:5432/shop" \
+  -table public.orders -rows 5000 -mask reglas.yaml     # golden shop-orders-slice
+kling db up shop-orders-slice -name o1
+kling db observe o1                 # desde aquí, cada sentencia de las conexiones nuevas
+# ... la aplicación o el agente trabajan contra o1 ...
+kling db observe -report o1         # las que tocan public.orders, agrupadas
+kling db observe -off o1
+```
+
+`slice` es `clone` con otro relleno: la misma máquina de construcción con `-egress
+allowlist`, la misma credencial en el proxy (la contraseña de producción no entra en la
+microVM), el mismo Postgres de preparación en un tmpfs, **el mismo enmascarado** (las
+mismas reglas, también para las tablas vacías) y el mismo golden construido en una máquina
+nueva sin red. Lo que cambia es qué se copia, y todo es de **solo lectura en producción**:
+
+1. `pg_dump --schema-only`: el esquema entero, sin una fila.
+2. Una consulta del catálogo: las columnas de la tabla (sin las generadas), su clave
+   primaria y sus claves foráneas directas, en los dos sentidos.
+3. Una sola sesión en una transacción `REPEATABLE READ READ ONLY` (una sola foto) saca
+   con `\copy ... TO PROGRAM`, por tuberías dentro de la microVM:
+   - la muestra: `-rows` filas (1000 por defecto) en orden de clave primaria (sin clave
+     primaria, por `ctid`, que obliga a ordenar la tabla entera);
+   - los **padres**: las filas de las tablas a las que la muestra apunta (una por fila
+     como mucho);
+   - los **hijos**: como mucho `-related-rows` (por defecto `-rows`) filas de cada clave
+     foránea que apunta a la muestra.
+
+   Una tabla que es padre por dos claves, o padre e hija a la vez, se carga una vez, sin
+   filas repetidas. Solo un salto: los padres de los padres no se copian.
+4. Todas las demás tablas quedan **vacías**. Las claves foráneas que lo cargado no
+   cumple (un hijo que también apunta a otra tabla vacía) quedan `NOT VALID`: siguen
+   comprobando lo que se escriba después. En una tabla particionada, Postgres 16 no admite
+   `NOT VALID` y la clave se quita. El informe dice cuáles. Las secuencias se ponen tras el
+   máximo copiado.
+
+`-table` es `[esquema.]nombre` sin comillas (un nombre que las necesite no se admite;
+las tablas relacionadas sí pueden tenerlas). El golden se llama `<base>-<tabla>-slice`
+salvo con `-golden`, y en el host queda `<estado>/<golden>/slice.json` (0600) con la tabla,
+el origen sin contraseña y los topes: `observe -report` lo usa para saber la tabla.
+
+Probado en el lab (2026-09-29) contra un Postgres 16 en Docker, con un rol de solo lectura:
+`orders` particionada, una tabla que se referencia a sí misma, otra con un espacio en el
+nombre (`"Order Notes"`) y una sin clave primaria. Con `-rows 200`, 8 tablas y 850 filas en
+7,5 s; 0 filas huérfanas, todas las claves foráneas validadas, ningún correo original y la
+secuencia sigue tras el máximo. `observe -report` agrupó las dos sentencias sobre `orders`,
+con los literales sustituidos.
+
+**Observación.** `kling db observe <copia>` pone, para la base de la aplicación,
+`log_min_duration_statement = 0` y `log_parameter_max_length = 0`, y deja fuera al
+superusuario (`ALTER ROLE postgres IN DATABASE ... SET log_min_duration_statement = -1`),
+para que las operaciones de `kling db` (la rotación de la clave) no acaben en el log. Son
+ajustes de la base: valen para las **conexiones nuevas**, sin reiniciar Postgres, y un fork
+o un snapshot de la copia los hereda. `-report` lee el final del log (32 MiB) **dentro de
+la copia**, se queda con las sentencias de esa base que nombran la tabla (con o sin
+esquema, con o sin comillas), las normaliza (literales, números y listas a `?`, sin
+comentarios) y las agrupa por llamadas y tiempo total, medio y máximo. El informe nunca
+lleva un literal ni un parámetro; **el log de la copia sí** lleva el SQL tal y como llegó
+(con sus literales): observa copias de goldens enmascarados. `-off` quita los ajustes.
+
+**Los tiempos no son los de producción.** Una copia con unas miles de filas y sus propias
+estadísticas elige otros planes y tarda otra cosa: el informe sirve para ver **qué**
+sentencias tocan la tabla y cuántas veces, no cuánto tardarían allí. Importar las
+estadísticas reales solo es posible desde PostgreSQL 18 (`pg_restore_relation_stats`,
+`pg_restore_attribute_stats`); el golden corre Postgres 16, así que no se hace.
+
+Límites propios, además de los de `clone`: un solo salto de claves foráneas, un tope de
+200 claves foráneas por tabla, la muestra es "las primeras N por clave primaria" (no
+aleatoria; sin filtro `-where`), y el log de observación crece sin rotar en el overlay de
+512 MiB de la copia: apágalo (`-off`) cuando termines.
+
 ## Un entorno entero: app + base como grafo
 
 `kling db env` usa los [grafos](grafos.md) del núcleo para levantar de una vez la

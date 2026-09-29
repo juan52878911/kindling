@@ -7,8 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -143,10 +141,12 @@ func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Dur
 		{labelRole, role},
 		{labelDatabase, db},
 		{api.LabelKind, api.KindSandbox},
-		{api.LabelPorts, mergePortsFor(snap.Labels[api.LabelPorts], enginePort(engine))},
 	}
-	if engine == engineMySQL {
-		labels = append(labels, [2]string{labelEngine, engineMySQL})
+	if p := enginePort(engine); p > 0 {
+		labels = append(labels, [2]string{api.LabelPorts, mergePortsFor(snap.Labels[api.LabelPorts], p)})
+	}
+	if engine != enginePostgres {
+		labels = append(labels, [2]string{labelEngine, engine})
 	}
 	labels = append(labels, extra...)
 	runArgs := []string{"run", "-from", tpl, "-name", name}
@@ -186,9 +186,18 @@ func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Dur
 func (a *app) printReady(mc *api.Machine) {
 	_, db, _ := roleDB(mc.Labels)
 	fmt.Fprintf(a.stdout, "%s  ready  (template %s, machine %s)\n", mc.Name, mc.Labels[labelGolden], shortID(mc.ID))
-	if engineOf(mc.Labels) == engineMySQL {
+	switch engineOf(mc.Labels) {
+	case engineMySQL:
 		fmt.Fprintf(a.stdout, "  inside the copy:  mariadb %s   (as root, over the local socket)\n", db)
 		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-mysql | -dsn]\n", mc.Name)
+		return
+	case engineRedis:
+		fmt.Fprintf(a.stdout, "  inside the copy:  REDISCLI_AUTH=$(cat %s) redis-cli -s %s   (as the admin)\n", redisAdminFile, redisSock)
+		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-redis | -dsn]\n", mc.Name)
+		return
+	case engineSQLite:
+		fmt.Fprintf(a.stdout, "  inside the copy:  sqlite3 %s\n", sqlitePath(db))
+		fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s -sqlite   (no network server, no password)\n", mc.Name)
 		return
 	}
 	fmt.Fprintf(a.stdout, "  inside the copy:  su -s /bin/sh postgres -c 'psql -h /run/postgresql %s'\n", db)
@@ -324,22 +333,24 @@ func cmdConnect(args []string) error {
 	dsn := fs.Bool("dsn", false, "print a DSN WITH the password (asks first if stdout is a terminal)")
 	psql := fs.Bool("psql", false, "open the host's psql on the copy (password through the environment)")
 	mysql := fs.Bool("mysql", false, "mysql copies: open the host's mariadb or mysql client on the copy (password through the environment)")
+	redis := fs.Bool("redis", false, "redis copies: open the host's redis-cli on the copy (password through the environment)")
+	sqlite := fs.Bool("sqlite", false, "sqlite copies: open sqlite3 inside the copy (kling shell)")
 	role := fs.String("role", "", "connect as this role made by kling db role (default: the application role)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageErr("usage: kling db connect <copy> [-role R] [-dsn | -psql | -mysql]")
+		return usageErr("usage: kling db connect <copy> [-role R] [-dsn | -psql | -mysql | -redis | -sqlite]")
 	}
 	n := 0
-	for _, b := range []bool{*dsn, *psql, *mysql} {
+	for _, b := range []bool{*dsn, *psql, *mysql, *redis, *sqlite} {
 		if b {
 			n++
 		}
 	}
 	if n > 1 {
-		return usageErr("-dsn, -psql and -mysql exclude each other")
+		return usageErr("-dsn, -psql, -mysql, -redis and -sqlite exclude each other")
 	}
 	a, err := newApp(*host)
 	if err != nil {
@@ -355,6 +366,10 @@ func cmdConnect(args []string) error {
 		mode = "psql"
 	case *mysql:
 		mode = "mysql"
+	case *redis:
+		mode = "redis"
+	case *sqlite:
+		mode = "sqlite"
 	}
 	return a.connectAs(ctx, pos[0], *owner, mode, *role)
 }
@@ -380,13 +395,25 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 		return err
 	}
 	engine := engineOf(mc.Labels)
-	switch {
-	case engine == engineMySQL && mode == "psql":
-		return fmt.Errorf("%s is a mysql copy: use -mysql or -dsn", mc.Name)
-	case engine != engineMySQL && mode == "mysql":
-		return fmt.Errorf("%s is a postgres copy: use -psql or -dsn", mc.Name)
-	case engine == engineMySQL && extraRole != "":
+	client := clientMode(engine)
+	switch mode {
+	case "psql", "mysql", "redis", "sqlite":
+		if mode != client {
+			if engine == engineSQLite {
+				return fmt.Errorf("%s is a sqlite copy: use -sqlite (it has no network server)", mc.Name)
+			}
+			return fmt.Errorf("%s is a %s copy: use -%s or -dsn", mc.Name, engine, client)
+		}
+	case "dsn":
+		if engine == engineSQLite {
+			return fmt.Errorf("%s is a sqlite copy: it has no network server nor DSN; use -sqlite or kling exec", mc.Name)
+		}
+	}
+	if engine != enginePostgres && extraRole != "" {
 		return requirePostgres(mc, "connect -role")
+	}
+	if engine == engineSQLite {
+		return a.connectSQLite(ctx, mc, db, mode)
 	}
 	h, port, err := hostAddr(mc)
 	if err != nil {
@@ -422,12 +449,7 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 		if err != nil {
 			return err
 		}
-		u := url.URL{Scheme: "postgres", User: url.UserPassword(role, pw),
-			Host: net.JoinHostPort(h, strconv.Itoa(port)), Path: "/" + db, RawQuery: "sslmode=disable"}
-		if engine == engineMySQL {
-			u.Scheme, u.RawQuery = "mysql", ""
-		}
-		fmt.Fprintln(a.stdout, u.String())
+		fmt.Fprintln(a.stdout, engineDSN(engine, role, pw, h, port, db))
 		return nil
 	case "mysql":
 		pw, err := readPW()
@@ -437,6 +459,14 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 		// La clave por el entorno del hijo (MYSQL_PWD), nunca en argv.
 		return a.runMysql(ctx, []string{"MYSQL_PWD=" + pw},
 			[]string{"--protocol=TCP", "-h", h, "-P", strconv.Itoa(port), "-u", role, db})
+	case "redis":
+		pw, err := readPW()
+		if err != nil {
+			return err
+		}
+		// La clave por el entorno del hijo (REDISCLI_AUTH), nunca en argv.
+		return a.runRedis(ctx, []string{"REDISCLI_AUTH=" + pw},
+			[]string{"-h", h, "-p", strconv.Itoa(port), "--user", role})
 	case "psql":
 		pw, err := readPW()
 		if err != nil {
@@ -447,17 +477,16 @@ func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string)
 			[]string{"-h", h, "-p", strconv.Itoa(port), "-U", role, "-d", db})
 	}
 	fmt.Fprintf(a.stdout, "%s  ready  (machine %s)\n", mc.Name, shortID(mc.ID))
+	if engine == engineRedis {
+		db = "0"
+	}
 	fmt.Fprintf(a.stdout, "  host      %s\n  port      %d\n  user      %s\n  database  %s\n  password  %s\n",
 		h, port, role, db, pwPath)
 	flagRole := ""
 	if extraRole != "" {
 		flagRole = " -role " + extraRole
 	}
-	client := "-psql"
-	if engine == engineMySQL {
-		client = "-mysql"
-	}
-	fmt.Fprintf(a.stdout, "  kling db connect %s%s %s   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, client, mc.Name, flagRole)
+	fmt.Fprintf(a.stdout, "  kling db connect %s%s -%s   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, client, mc.Name, flagRole)
 	return nil
 }
 
@@ -515,8 +544,14 @@ func cmdReset(args []string) error {
 	return nil
 }
 
+// resetKeeps son las etiquetas de pertenencia que una copia conserva al
+// resetearse: su clase (kling db class) y su repo y rama (kling db branch).
+// Sin ellas, la copia nueva dejaría de ser de su clase o de su rama.
+var resetKeeps = []string{labelClass, labelRepo, labelBranch}
+
 // reset cambia una copia por otra nueva de la misma plantilla, con el mismo
-// nombre, dueño y ttl. La nueva tiene otro id y otra contraseña.
+// nombre, dueño, ttl y pertenencia (resetKeeps). La nueva tiene otro id y otra
+// contraseña.
 func (a *app) reset(ctx context.Context, ref, owner string) (*api.Machine, error) {
 	if err := validOwner(owner); err != nil {
 		return nil, err
@@ -530,10 +565,16 @@ func (a *app) reset(ctx context.Context, ref, owner string) (*api.Machine, error
 	}
 	golden := mc.Labels[labelGolden]
 	ttl := time.Duration(mc.TTLSeconds) * time.Second
+	var keep [][2]string
+	for _, k := range resetKeeps {
+		if v := mc.Labels[k]; v != "" && api.KeyPattern.MatchString(v) {
+			keep = append(keep, [2]string{k, v})
+		}
+	}
 	if err := a.remove(ctx, mc); err != nil {
 		return nil, err
 	}
-	return a.up(ctx, golden, mc.Name, ttl, owner)
+	return a.upFrom(ctx, golden, golden, mc.Name, ttl, owner, keep)
 }
 
 func cmdRm(args []string) error {
@@ -645,6 +686,9 @@ func cmdAudit(args []string) error {
 		return err
 	}
 	if err := owned(mc, *owner); err != nil {
+		return err
+	}
+	if err := requireEngine(mc, "audit", enginePostgres, engineMySQL); err != nil {
 		return err
 	}
 	return runAudit(ctx, a.k, mc.Name, engineOf(mc.Labels), *since, *asJSON, a.stdout)

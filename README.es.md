@@ -19,7 +19,7 @@ milisegundos desde un fichero en disco, con aislamiento a nivel de kernel, detr�
 al estilo de docker llamado `kling`. Lo que corre dentro lo decides tú, y `kling` crece con
 extensiones.
 
-> Estado: **v0.16.0 — un núcleo endurecido, en Linux y en macOS.** `kling` gestiona
+> Estado: **v0.17.0 — bases de datos desechables, grafos de microVMs y discos con copia al escribir, en Linux y en macOS.** `kling` gestiona
 > microVMs con red, snapshots dorados, aislamiento, volúmenes persistentes, imágenes por
 > capas, eventos, constructores de imágenes, un API del daemon documentado y sandboxes de
 > usar y tirar con exec en streaming. Alojar servidores MCP bajo demanda — el uso para el
@@ -196,7 +196,7 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # Versión concreta (por defecto instala la última release):
-curl -fsSL .../install.sh | sh -s -- --tag v0.16.0
+curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
 
 # Prefijo personalizado:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -991,6 +991,7 @@ se guarda en un instante consistente y se ramifica en N copias vivas que no se v
 ```sh
 SHOP_PG_PASS=... kling graph up tienda.yaml       # crea el grafo y arranca los nodos eager
 kling graph ls                                    # estado, nodos, aristas y generación
+kling graph audit tienda -since 10m               # las conexiones por aristas, en una línea de tiempo
 kling graph snapshot tienda -name t0              # una plantilla por nodo, todas del mismo instante
 kling graph fork tienda -n 3                      # 3 grafos nuevos desde este instante
 kling graph freeze tienda ; kling graph thaw tienda
@@ -1351,8 +1352,9 @@ máquina (AES-256-GCM con una clave derivada de `secrets/snapshot.key`, solo de 
 nunca en `state.json`, en eventos ni en un snapshot. Repetir `-env` con otra clave la
 rota; el marcador se conserva y el proceso no tiene que reiniciarse.
 
-Cada petición que pasa por el proxy, y cada rechazo, queda anotada en el directorio de la
-máquina (`credaudit.jsonl`, 0600, rotado a 1 MiB):
+Cada petición que pasa por el proxy, y cada rechazo, queda anotada en un registro de la
+máquina (0600, rotado a 1 MiB; en Linux en `<root>/audit/<id>.jsonl`, donde el VMM no
+llega; en macOS en su directorio, `credaudit.jsonl`):
 
 ```sh
 kling machine audit pagos            # TIME METHOD HOST PATH STATUS CREDS MS RESULT

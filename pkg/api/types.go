@@ -706,6 +706,10 @@ type CoWInfo struct {
 	Mode string `json:"mode"`
 	// Reason explica por qué es ese modo, sobre todo cuando es "copy".
 	Reason string `json:"reason,omitempty"`
+	// Pending: el modo es "store" pero el almacén aún no se ha creado ni
+	// montado; se crea en el primer run -from, y si entonces falla el modo
+	// pasa a "copy" con el motivo en Reason.
+	Pending bool `json:"pending,omitempty"`
 	// Store describe el almacén propio, si existe (aunque el modo sea otro:
 	// las instancias viejas siguen en él).
 	Store *CoWStore `json:"store,omitempty"`
@@ -729,6 +733,13 @@ type CoWStore struct {
 	// anterior no dice nada.
 	Quota   string `json:"quota,omitempty"`
 	NoQuota bool   `json:"no_quota,omitempty"`
+}
+
+// GrowCoWStoreRequest es el cuerpo de POST /cow/store/grow: el tamaño nuevo
+// del almacén (SizeMiB) o cuánto añadirle (AddMiB). Uno de los dos.
+type GrowCoWStoreRequest struct {
+	SizeMiB int64 `json:"size_mib,omitempty"`
+	AddMiB  int64 `json:"add_mib,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.

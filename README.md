@@ -18,7 +18,7 @@ A Firecracker microVM runtime with golden snapshots: machines that wake in
 milliseconds from a file on disk, with kernel-level isolation, behind a docker-like CLI
 called `kling`. What runs inside is up to you, and `kling` grows through extensions.
 
-> Status: **v0.16.0 — a hardened core, on Linux and macOS.** `kling` manages
+> Status: **v0.17.0 — disposable databases, microVM graphs and copy-on-write disks, on Linux and macOS.** `kling` manages
 > microVMs with networking, golden snapshots, isolation, persistent volumes, layered
 > images, events, image builders, a documented daemon API and throwaway sandboxes with
 > streaming exec. Hosting MCP servers on demand — the use kindling was born for — and
@@ -193,7 +193,7 @@ curl -fsSL https://raw.githubusercontent.com/juan52878911/kindling/main/scripts/
 curl -fsSL .../install.sh | sh -s -- --with mcp,sandbox
 
 # A specific version (it installs the latest release by default):
-curl -fsSL .../install.sh | sh -s -- --tag v0.16.0
+curl -fsSL .../install.sh | sh -s -- --tag v0.17.0
 
 # Custom prefix:
 curl -fsSL .../install.sh | sh -s -- --prefix ~/.local
@@ -953,6 +953,8 @@ kling db tenant-check t1                      # exercises RLS: each tenant sees 
 kling db ask t1 "how many customers per country?"   # a model writes the SQL; you confirm; read-only
 kling db ask-web t1                           # the same in a local web page (loopback, one-time URL)
 kling db diff t1 t2                           # what changed between two copies: schema and rows, no data
+kling db class -n 30 -prefix student pg       # one copy per student; class reset / ls / rm
+kling db report add weekly -golden pg -every 1w -question "new customers this week"   # run it from cron
 kling db env up shop-app -golden pg           # app + database as a graph (Linux); the app never sees the password
 kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
   'postgres://readonly@db.prod.example.com:5432/shop'   # a masked copy of production
@@ -961,7 +963,8 @@ kling db clone -mask mask.yaml -golden shop-masked -password-stdin \
 An agent in **another** microVM can share a copy through the credential proxy
 (`kling db attach`; on macOS through the daemon's link broker) and never sees the password.
 MariaDB templates work too (`up`, `fork`, `connect`, `rotate`, `doctor`, `audit`:
-[docs/mysql.md](docs/mysql.md)), and `kling db doctor -url` checks a Postgres you already
+[docs/mysql.md](docs/mysql.md)), and so do Redis and SQLite for the basics (`up`, `fork`,
+`connect`, `reset`, `rm`, `doctor`: [docs/db-engines.md](docs/db-engines.md)), and `kling db doctor -url` checks a Postgres you already
 run, over verified TLS by default. Templates, roles, `rehearse`,
 `snapshot`/`undo`, `audit` and the rest: [docs/db.md](docs/db.md); natural-language
 questions: [docs/db-ask.md](docs/db-ask.md); the frozen Postgres templates:
@@ -984,6 +987,7 @@ consistent instant and forks into N live copies that cannot see each other:
 ```sh
 SHOP_PG_PASS=... kling graph up tienda.yaml       # creates the graph, starts the eager nodes
 kling graph ls                                    # state, nodes, edges, generation
+kling graph audit tienda -since 10m               # every edge connection, one timeline
 kling graph snapshot tienda -name t0              # one template per node, all from the same instant
 kling graph fork tienda -n 3                      # 3 new graphs from this instant
 kling graph freeze tienda ; kling graph thaw tienda
@@ -1339,8 +1343,9 @@ them, and they survive a daemon restart — they live encrypted in the machine's
 `state.json`, events or a snapshot. Repeating `-env` with a new key rotates it; the
 placeholder stays, so the running process needs no restart.
 
-Every request through the proxy, and every refusal, is logged in the machine's directory
-(`credaudit.jsonl`, 0600, rotated at 1 MiB):
+Every request through the proxy, and every refusal, is logged per machine (0600, rotated
+at 1 MiB; on Linux in `<root>/audit/<id>.jsonl`, out of the VMM's reach; on macOS in the
+machine's directory, `credaudit.jsonl`):
 
 ```sh
 kling machine audit payments            # TIME METHOD HOST PATH STATUS CREDS MS RESULT
@@ -1565,6 +1570,7 @@ instances share pages.
 | [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | One microVM and one disk per MCP session: the options weighed, the design, measured cost (Spanish) |
 | [`docs/db.md`](docs/db.md) · [`docs/db-ask.md`](docs/db-ask.md) | `kling db`: a disposable Postgres per microVM, roles, branches, `doctor`, `tenant-check`, `diff`, masked `clone`; questions in natural language, also from a web page (Spanish) |
 | [`docs/mysql.md`](docs/mysql.md) | MySQL and MariaDB: the credential proxy (`-type mysql`) and MariaDB copies in `kling db` (Spanish) |
+| [`docs/db-engines.md`](docs/db-engines.md) | Redis and SQLite copies in `kling db`, and why not MongoDB (Spanish) |
 | [`docs/authz.md`](docs/authz.md) | Per-operation authorization on the daemon socket: admin and tenant roles by peer credentials, what each role can do (Spanish) |
 | [`docs/postgres.md`](docs/postgres.md) | Connect your own Postgres through the credential proxy: Docker, LAN/VPC, Neon, Supabase, RDS (Spanish) |
 | [`docs/grafos.md`](docs/grafos.md) · [`docs/grafos-diseno.md`](docs/grafos-diseno.md) | `kling graph`: several machines and the edges between them, frozen, snapshotted and forked as one (Spanish) |

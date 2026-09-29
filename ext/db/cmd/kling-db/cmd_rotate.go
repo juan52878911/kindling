@@ -9,7 +9,8 @@ package main
 //
 //  1. la nueva se deja en password.new (la vigente no se toca)
 //  2. se cambia el verificador en la base (setVerifier, el mismo mecanismo;
-//     en MySQL, el hash de mysql_native_password con setMySQLHash)
+//     en MySQL, el hash de mysql_native_password con setMySQLHash; en Redis,
+//     el SHA-256 del usuario ACL con setRedisHash)
 //  3. solo si eso fue bien, password.new pasa a ser password (rename)
 //
 // Si el paso 2 falla o queda en duda (un plazo vencido puede haberse aplicado),
@@ -65,6 +66,9 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
+	if err := requireEngine(mc, "rotate", enginePostgres, engineMySQL, engineRedis); err != nil {
+		return nil, err
+	}
 	if err := checkReady(mc, owner); err != nil {
 		return nil, err
 	}
@@ -80,7 +84,7 @@ func (a *app) rotateCopy(ctx context.Context, ref, owner string) (*api.Machine, 
 	if err != nil {
 		return nil, err
 	}
-	if engineOf(mc.Labels) != engineMySQL {
+	if engineOf(mc.Labels) == enginePostgres {
 		// Postgres: el verificador antes de tocar nada (si falla, nada cambió).
 		if _, err := newVerifier(pw); err != nil {
 			return nil, err

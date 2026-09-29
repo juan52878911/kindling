@@ -30,7 +30,8 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-// LabelEngine es el motor de una copia ("mysql"; sin etiqueta, Postgres).
+// LabelEngine es el motor de una copia ("mysql", "redis", "sqlite"; sin
+// etiqueta, Postgres).
 const LabelEngine = "kling.db.engine"
 
 // myClient es el cliente del superusuario dentro de la copia (el mismo que

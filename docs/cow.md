@@ -37,8 +37,21 @@ El modo en uso se ve en `kling info`:
 disk clones:  store (reflink inside kindling's XFS store)  [daemon.cow=auto]; store /var/lib/kindling/cow (XFS): 15870 of 16384 MiB free; since start: store 32
 ```
 
-y en `GET /info` (campo `cow`: `setting`, `mode`, `reason`, `store` —con `fs`, `xfs` o
-`btrfs`— y `clones`, que
+Antes del primer `run -from` el almacén aún no existe, y no se da por hecho:
+
+```
+disk clones:  store pending (created on first use)  [daemon.cow=auto]; no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store (xfs store, created on the first run -from)
+```
+
+Si el núcleo todavía no lista ese sistema de ficheros, el motivo lo añade (tendrá que
+cargar el módulo al montar). Lo que se sabe al arrancar sin crear nada —falta de sitio
+en la raíz para el almacén, ningún `mkfs`, no ser root— deja el modo en `copy` con el
+motivo en la misma línea; lo que solo se descubre montando (el núcleo no tiene el
+módulo, el contenedor no deja montar) lo dice el primer `run -from`, que pasa a `copy`
+con el error.
+
+y en `GET /info` (campo `cow`: `setting`, `mode`, `reason`, `pending` —el almacén está
+por crear—, `store` —con `fs`, `xfs` o `btrfs`— y `clones`, que
 cuenta desde el arranque cuántas instancias recibieron su overlay de cada forma).
 `kling doctor` avisa si las instancias copian el disco entero sin que nadie haya
 puesto `off`, o si hay un almacén que no está montado.
@@ -90,9 +103,24 @@ pero sí Btrfs, el fichero es `$root/cow.btrfs` y se formatea Btrfs (ver
   instancias que tienen su overlay dentro lo necesitan para descongelarse. Poner
   `daemon.cow=off` después no las deja tiradas.
 - **Lleno**: si quedan menos de 256 MiB libres dentro del almacén, la instancia nueva
-  recibe una copia completa en la raíz, como antes. Si el almacén no se puede crear o
-  montar (ni `xfs` ni `btrfs` en el núcleo, el contenedor no deja montar), el daemon
-  vuelve a copiar hasta que se reinicie, y lo dice una vez en el log.
+  recibe una copia completa en la raíz, como antes. Pasado el 85 % de uso, `kling info`
+  y `kling doctor` avisan con el comando para agrandarlo
+  ([Hacer crecer el almacén](#hacer-crecer-el-almacén)).
+- **Si no se puede crear o montar** (el núcleo no tiene el módulo, el contenedor no deja
+  montar ese tipo, el sistema de ficheros no clona), la imagen recién creada **se
+  desmonta y se borra** y se prueba con el otro tipo (Btrfs si era XFS, y al revés),
+  si su `mkfs` está instalado. Si ninguno sirve, no queda ninguna imagen, el daemon
+  vuelve a copiar hasta que se reinicie, y el motivo de cada tipo sale una vez en el log
+  y en `kling info`.
+- **Al arrancar**, un `cow.xfs`/`cow.btrfs` que ya existe y no monta se borra si
+  **ninguna** máquina tiene su overlay en él (ningún `machines/<id>/overlay.ext4`
+  apunta dentro de `cow/`): no guarda nada que no se pueda rehacer (las bases se
+  vuelven a copiar) y el primer `run -from` lo crea de nuevo, con el tipo que ese núcleo
+  pueda montar. Si alguna lo usa, se queda y `kling doctor` avisa: sus instancias no
+  arrancarán hasta que se monte. Y solo si el fallo es definitivo: el núcleo no tiene
+  ese sistema de ficheros o aquí no se deja montar (`EPERM`/`EACCES`). Con cualquier
+  otro (un loop ocupado, un superbloque que no se lee, un tiempo agotado), que puede
+  ser pasajero, se avisa en el log y la imagen se queda.
 - **Limpieza**: `kling rm` borra el directorio de la instancia en el almacén. El
   vigilante barre lo que quede sin máquina (un `run -from` que falló, un directorio
   huérfano) y las bases de dorados que ya no existen.
@@ -265,11 +293,47 @@ seguridad de los otros dos modos.
   overlay es del VMM, que podría cambiarlo por un enlace entre la comprobación y la
   copia. La copia es FICLONE entre descriptores o, si no, una copia dispersa en Go
   (`SEEK_DATA`/`SEEK_HOLE` y sin escribir los bloques a cero, como
-  `cp --sparse=always`). En macOS eso significa que el overlay de un `commit` se copia
-  en vez de clonarse (no hay `clonefile` desde un descriptor sin cgo); las instancias
-  siguen clonando del dorado.
+  `cp --sparse=always`). En macOS es `fclonefileat(2)` desde ese mismo descriptor
+  (por su número de llamada al sistema, sin cgo ni `x/sys`): el dorado comparte los
+  bloques del overlay en APFS. `fclonefileat` crea el fichero y falla si ya existe
+  algo con ese nombre (un enlace plantado incluido); después se abre relativo al mismo
+  directorio y sin seguir enlaces, y se exige que sea un fichero regular con un solo
+  enlace, de quien clona (`CLONE_NOOWNERCOPY`) y del tamaño del origen. Si no se puede
+  clonar (`ENOTSUP` fuera de APFS, `EXDEV` entre volúmenes) se copia dispersa como en
+  Linux.
 - `DiskBytes` de `kling ps` no cuenta el overlay del almacén (sus bloques son
   compartidos: sumarlos por instancia mentiría). El uso real está en `kling info`.
+
+## Hacer crecer el almacén
+
+El almacén se crea con una cuarta parte del disco libre (máximo 16 GiB) o con
+`daemon.cow_store_gib`, y no crece solo: la reserva entera es lo que lo protege de
+quedarse sin sitio debajo. Para agrandarlo, en caliente y sin parar ninguna microVM:
+
+```sh
+kling cow                 # modo, uso del almacén y aviso si pasa del 85 %
+kling cow grow +8G        # añade 8 GiB
+kling cow grow 32G        # o fija el tamaño nuevo
+```
+
+El daemon (solo admin, `POST /cow/store/grow`) comprueba que el almacén está montado,
+que no se pide encoger y que en la raíz quedan después los mismos 2 GiB de margen que
+al crearlo. Luego:
+
+1. Reserva el fichero hasta el tamaño nuevo con `fallocate` (sin sobreasignar, como al
+   crearlo).
+2. Busca el loop montado en `cow/` en `/proc/self/mountinfo` y comprueba en
+   `/sys/block/loopN/loop/backing_file` que su fichero es el del almacén; le hace
+   `LOOP_SET_CAPACITY` (lo que hace `losetup -c`) para que vea el tamaño nuevo.
+3. Agranda el sistema de ficheros montado: `xfs_growfs cow/`, o
+   `btrfs filesystem resize max cow/`.
+
+Pedir el tamaño que ya tiene el fichero repite solo los pasos 2 y 3: así se completa un
+crecimiento que se quedó a medias. No hay forma de encogerlo (XFS no encoge); para eso,
+quitarlo (abajo) y dejar que se cree de nuevo con `daemon.cow_store_gib`. Solo Linux
+(en macOS no hay almacén). La lógica (márgenes, no encoger, qué loop) tiene tests sin
+root; el crecimiento de verdad sobre un loop, XFS y Btrfs, está en
+`TestCrecerAlmacenDeVerdad` (root y `KLING_TEST_MOUNTS=1`, en el laboratorio).
 
 ## Desmontar o quitar el almacén
 

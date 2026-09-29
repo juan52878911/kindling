@@ -45,10 +45,11 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `pending`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
+| `POST /cow/store/grow` | amplía en caliente el almacén de copias de disco (`size_mib`, el tamaño nuevo, o `add_mib`, cuánto añadir); devuelve el `store` como en `GET /info`. Solo admin; capacidad `cow-grow`. Ver [cow.md](cow.md#hacer-crecer-el-almacén) |
 
 ### Máquinas
 
@@ -184,7 +185,8 @@ El techo queda en el snapshot al hacer commit.
 ### `GET /machines/{ref}/credaudit`
 
 El registro de auditoría del proxy de credenciales de la máquina
-(`machines/<id>/credaudit.jsonl` y su rotación `.1`), como NDJSON: una
+(`<root>/audit/<id>.jsonl` en Linux, fuera del alcance del VMM;
+`machines/<id>/credaudit.jsonl` en macOS; y su rotación `.1`), como NDJSON: una
 `api.CredAuditRecord` por línea, las más antiguas primero. Funciona con la máquina
 corriendo, congelada o parada; sin registro (nunca tuvo credenciales) devuelve `200`
 vacío. Lo usa `kling machine audit`.
@@ -239,7 +241,7 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 | `database` | la única base a la que se deja conectar; obligatoria salvo `any_database` (la de por defecto de un cliente es el rol) |
 | `any_database` | `true` deja conectar a cualquier base con `CONNECT` para el rol; excluyente con `database`. Un almacén anterior sin base se lee como `true` |
 | `ca_pem` | opcional, ≤64 KiB: CA en PEM que se añade a las raíces del sistema |
-| `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS solo IP o `localhost`, el daemon rechaza un nombre al entregarla. Se devuelve normalizado (minúsculas) |
+| `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS lo resuelve el daemon al entregarla a `kling-vz` (con las mismas comprobaciones) y este recibe la primera IP. Se devuelve normalizado (minúsculas) |
 | `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |
 | `tls_server_name` | opcional: nombre (o IP) contra el que se verifica el certificado en lugar de `domain` |
 | `upstream_machine` | opcional, solo en credenciales de máquina (no de plantilla): el **id** exacto (hexadecimal) de una copia de `kling db` a la que marca el proxy, el modelo A de [db.md](db.md). Nunca una dirección: el daemon la resuelve en cada conexión y solo si la copia existe con ese id, corre, lleva `kling.db.golden`, `kling.db.state=ready`, expone `port` en `kling.ports`, y ella, el agente y `upstream_owner` dicen el mismo `kling.db.owner`. Excluye `upstream`, exige `upstream_tls: "disable"` (SCRAM-SHA-256) y `database`. Se comprueba también al entregar. En macOS lo pide el `kling-vz` del agente en cada conexión al broker de enlaces del daemon, que marca él mismo (ver [db.md](db.md)) |
@@ -314,7 +316,7 @@ uso en [grafos.md](grafos.md)). `{ref}` es el ID, el nombre o un prefijo único 
 | `GET /graphs` | lista, por nombre |
 | `GET /graphs/{ref}` | uno, con el estado de cada nodo |
 | `POST /graphs/{ref}/freeze` · `/thaw` | todos los nodos con máquina. Si uno falla sigue con los demás y devuelve el primer error |
-| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}}`. `409` si un nodo está congelado o el grafo tiene aristas `share` (también en `fork`) |
+| `POST /graphs/{ref}/snapshot` | `{"name": "prefijo"}` opcional. Una plantilla `<prefijo>-<nodo>-<gen>` por nodo con máquina, del mismo instante; devuelve `{"graph", "generation", "templates": {nodo: plantilla}, "warnings"}`; `warnings` (si lo hay) nombra los nodos que se volcaron pero no se pudieron volver a congelar y siguen en marcha. Los congelados se despiertan para el instante y se vuelven a congelar. `409` si un nodo ya pausado tiene volúmenes o el grafo tiene aristas `share` (también en `fork`) |
 | `POST /graphs/{ref}/fork` | `{"count": N}` (1 a 16). Devuelve `{"graphs": [...]}` (`201`) |
 | `DELETE /graphs/{ref}` | el grafo y sus máquinas (`204`) |
 

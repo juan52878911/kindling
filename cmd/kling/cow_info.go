@@ -20,16 +20,29 @@ func lineaCoW(c *api.CoWInfo) string {
 	case "reflink":
 		b.WriteString("reflink (the data root shares blocks)")
 	case "store":
-		fmt.Fprintf(&b, "store (reflink inside kindling's %s store)", nombreFSAlmacen(c.Store))
+		if c.Pending {
+			// Aún no existe ni se ha montado: nada garantiza que vaya a poder.
+			b.WriteString("store pending (created on first use)")
+		} else {
+			fmt.Fprintf(&b, "store (reflink inside kindling's %s store)", nombreFSAlmacen(c.Store))
+		}
 	case "clonefile":
 		b.WriteString("clonefile (APFS)")
 	default:
 		b.WriteString("copy (every instance copies the whole overlay)")
 	}
 	fmt.Fprintf(&b, "  [daemon.cow=%s]", c.Setting)
+	// El motivo, cuando dice algo que el modo no: por qué se copia (espacio,
+	// sistema de ficheros, núcleo) o qué almacén se va a crear.
+	if c.Reason != "" && (c.Pending || (c.Mode == "copy" && c.Setting != "off")) {
+		fmt.Fprintf(&b, "; %s", c.Reason)
+	}
 	if s := c.Store; s != nil {
 		if s.Mounted {
 			fmt.Fprintf(&b, "; store %s (%s): %d of %d MiB free", s.Path, nombreFSAlmacen(s), s.FreeMiB, s.SizeMiB)
+			if c := casiLlenoCoW(s); c != "" {
+				fmt.Fprintf(&b, " (%s: kling cow grow)", c)
+			}
 		} else {
 			fmt.Fprintf(&b, "; store %s (%s) NOT mounted", s.Path, nombreFSAlmacen(s))
 		}
@@ -47,6 +60,23 @@ func lineaCoW(c *api.CoWInfo) string {
 		fmt.Fprintf(&b, "; since start: %s", strings.Join(partes, ", "))
 	}
 	return b.String()
+}
+
+// umbralCasiLleno es el porcentaje usado del almacén a partir del cual kling
+// info y kling doctor avisan: por encima, unas pocas instancias que reescriban
+// su disco lo llenan, y las nuevas ya van a copia completa en la raíz.
+const umbralCasiLleno = 85
+
+// casiLlenoCoW dice "N% used" si el almacén está montado y pasa del umbral.
+func casiLlenoCoW(s *api.CoWStore) string {
+	if s == nil || !s.Mounted || s.SizeMiB <= 0 {
+		return ""
+	}
+	usado := (s.SizeMiB - s.FreeMiB) * 100 / s.SizeMiB
+	if usado < umbralCasiLleno {
+		return ""
+	}
+	return fmt.Sprintf("%d%% used", usado)
 }
 
 // nombreFSAlmacen es cómo se llama al sistema de ficheros del almacén. Un
@@ -75,7 +105,12 @@ func checkCoW(c *api.CoWInfo) (doctorCheck, bool) {
 	case c.Store != nil && !c.Store.Mounted:
 		d.State = doctorWarn
 		d.Detail = "the copy-on-write store " + c.Store.Path + " (" + nombreFSAlmacen(c.Store) + ") exists but is not mounted: instances with their overlay there won't start"
-		d.Fix = "restart the daemon (it mounts the store), and check its log for the mount error"
+		d.Fix = "restart the daemon (it mounts the store, or removes it if no instance uses it), and check its log for the mount error"
+	case casiLlenoCoW(c.Store) != "":
+		d.State = doctorWarn
+		d.Detail = fmt.Sprintf("the copy-on-write store %s (%s) is %s (%d of %d MiB free): new instances will copy their whole overlay once it is full",
+			c.Store.Path, nombreFSAlmacen(c.Store), casiLlenoCoW(c.Store), c.Store.FreeMiB, c.Store.SizeMiB)
+		d.Fix = "kling cow grow +8G   (grows it live; docs/cow.md)"
 	case c.Store != nil && c.Store.NoQuota:
 		d.State = doctorWarn
 		d.Detail = "the copy-on-write store " + c.Store.Path + " (" + nombreFSAlmacen(c.Store) + ") has no per-instance disk quota: a compromised VMM could grow its overlay and fill the store"

@@ -262,6 +262,9 @@ func (a *app) diffSide(ctx context.Context, ref, owner string, o diffOpts) (*dif
 	if err := owned(mc, owner); err != nil {
 		return nil, err
 	}
+	if err := requirePostgres(mc, "diff"); err != nil {
+		return nil, err
+	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("%s is %s, not running (kling thaw %s)", mc.Name, mc.State, mc.Name)
 	}

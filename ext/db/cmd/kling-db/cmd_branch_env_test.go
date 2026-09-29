@@ -27,7 +27,7 @@ func TestHookRechazaHooksPathFuera(t *testing.T) {
 	ctx := context.Background()
 	// Dentro del árbol de trabajo (versionado).
 	gitT(t, dir, "config", "core.hooksPath", ".husky")
-	if err := ta.branchHook(ctx, "install"); err == nil || !strings.Contains(err.Error(), "-force") {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err == nil || !strings.Contains(err.Error(), "-force") {
 		t.Fatalf("hooksPath in the working tree: err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".husky", hookName)); err == nil {
@@ -36,7 +36,7 @@ func TestHookRechazaHooksPathFuera(t *testing.T) {
 	// El propio directorio git: cuelga de él (rel == ".") pero no es un
 	// directorio de hooks.
 	gitT(t, dir, "config", "core.hooksPath", ".git")
-	if err := ta.branchHook(ctx, "install"); err == nil || !strings.Contains(err.Error(), "git directory itself") {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err == nil || !strings.Contains(err.Error(), "git directory itself") {
 		t.Fatalf("hooksPath = .git: err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".git", hookName)); err == nil {
@@ -44,21 +44,21 @@ func TestHookRechazaHooksPathFuera(t *testing.T) {
 	}
 	// Un subdirectorio del directorio git sí vale (el de siempre).
 	gitT(t, dir, "config", "core.hooksPath", filepath.Join(".git", "hooks-kling"))
-	if err := ta.branchHook(ctx, "install"); err != nil {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err != nil {
 		t.Fatalf("hooksPath = .git/hooks-kling: %v", err)
 	}
-	if err := ta.branchHook(ctx, "uninstall"); err != nil {
+	if err := ta.branchHook(ctx, "uninstall", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	// Fuera del repo.
 	out := filepath.Join(t.TempDir(), "global-hooks")
 	gitT(t, dir, "config", "core.hooksPath", out)
-	if err := ta.branchHook(ctx, "install"); err == nil {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err == nil {
 		t.Fatal("hooksPath outside the repo was accepted")
 	}
 	// Con -force sí.
 	ta.hookForce = true
-	if err := ta.branchHook(ctx, "install"); err != nil {
+	if err := ta.branchHook(ctx, "install", hookOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(out, hookName)); err != nil {

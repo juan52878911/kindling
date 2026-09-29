@@ -203,6 +203,36 @@ func TestPGLab(t *testing.T) {
 		k.c.Close()
 	})
 
+	// Con 3.2 el invitado recibe una clave falsa de 32 bytes; contra un
+	// PostgreSQL 18 la real también es larga, contra uno anterior el servidor
+	// negocia 3.0 y la real es de 4 bytes. En los dos casos cancela.
+	t.Run("cancelación 3.2", func(t *testing.T) {
+		k := conectarPG(t, e.addr)
+		if v := k.loginVersion(2, pares...); v != pgProto32 {
+			t.Fatalf("el proxy negoció %x con el invitado", v)
+		}
+		pid, clave := k.hastaListoK()
+		if len(clave) != pgClaveFalsa32 {
+			t.Fatalf("clave falsa de %d bytes", len(clave))
+		}
+		k.c.Write(mensajePG('Q', []byte("SELECT pg_sleep(30)\x00")))
+		time.Sleep(500 * time.Millisecond)
+		cancelarPG(t, e.addr, pid, clave)
+		for {
+			tipo, msg := k.leer()
+			if tipo == 'E' {
+				if code := sqlstate(msg); code != "57014" {
+					t.Fatalf("error %s, quería 57014 (query_canceled)", code)
+				}
+				break
+			}
+			if tipo == 'Z' {
+				t.Fatal("pg_sleep terminó sin cancelarse")
+			}
+		}
+		k.c.Close()
+	})
+
 	recs, crudo := e.registro(t)
 	var metodo string
 	for _, r := range recs {
