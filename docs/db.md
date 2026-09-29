@@ -22,14 +22,56 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 |---|---|
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, **rota la contraseña** y marca `ready` |
 | `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), rota la clave de cada una y las marca `ready`. Todo o nada |
-| `connect <copia> [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD` |
+| `connect <copia> [-role R] [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD`. `-role R`: como un rol creado con `role` |
+| `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
+| `rehearse <copia\|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones SQL en una copia desechable: tiempos, esperas por locks y tamaño; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
+| `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
+| `snapshot [-rm] <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]` | puntos de restauración de una copia viva y vuelta a uno de ellos (mismo nombre y dueño, clave nueva) |
 | `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
+| `ask <copia> "pregunta" [-role R] [-yes] [-explain -send-data]` | un modelo traduce la pregunta a una SQL que se enseña, se confirma y se ejecuta con un rol de solo lectura en una transacción READ ONLY; ver [db-ask.md](db-ask.md) |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
+| `golden build -template T <nombre>` | como `build`, con las migraciones y el seed de una plantilla incluida (`empty`, `crm-demo`) |
+| `templates` | lista las plantillas incluidas (embebidas en el binario, `ext/db/templates`) |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
+
+## Rol de solo lectura
+
+`kling db role <copia> -ro` da a un agente o a una herramienta de análisis acceso a la
+base sin darle el rol de la aplicación. El rol es `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION`, con `CONNECTION LIMIT 5`, sin pertenencia a
+ningún rol (ni `pg_read_server_files` ni `pg_execute_server_program`), `USAGE` en los
+esquemas pedidos (por defecto todos menos los del sistema) y `SELECT` en sus tablas,
+también en las futuras del rol de la aplicación (`ALTER DEFAULT PRIVILEGES`). Además
+`default_transaction_read_only=on`, `statement_timeout` e
+`idle_in_transaction_session_timeout` (`-timeout`, 5 s por defecto).
+
+- La barrera real es que **no tiene privilegios de escritura**; la bandera de solo
+  lectura se puede apagar con `SET`, los permisos no. Límites: puede crear tablas
+  temporales si apaga la bandera (`TEMP` es de PUBLIC), y las tablas que cree un
+  superusuario a mano no entran en el `SELECT` futuro.
+- La clave sigue la regla de siempre: se genera en el host, al invitado va solo el
+  verificador SCRAM por stdin y se comprueba en la misma sesión (junto con los
+  atributos y la ausencia de pertenencias). Vive en `copies/<id>/<rol>.password`.
+- `pg_hba.conf` de la golden solo deja entrar por red al rol de la aplicación: `role`
+  añade una línea `scram-sha-256` para el nuevo rol **después** de comprobarlo, y la
+  quita al borrarlo. Si algo falla, se deshace todo (rol, línea y clave).
+- Nombres: `^[a-z_][a-z0-9_]{0,62}$`, sin `postgres`, sin el rol dueño, sin `pg_*` ni
+  palabras reservadas. `-rm` solo toca roles que creó este comando (comentario
+  `kling-db:ro`).
+- `kling db connect <copia> -role agent` usa esa clave. `kling db rm` se lleva todas.
+
+## Plantillas
+
+`kling db templates` lista las incluidas y `kling db golden build -template crm-demo
+crm` construye una golden de un comando (escribe la plantilla a un temporal 0700 y se
+la pasa a `db-golden.sh` como `-migrations` y `-seed`; excluye `-migrations`, `-seed`
+y `-seed-mb`). `empty` es una base vacía; `crm-demo` un CRM pequeño (clientes,
+contactos, oportunidades con estados, actividades, productos y facturas) con ~50k
+filas sintéticas y deterministas, sin datos personales reales.
 
 ## Etiquetas
 
@@ -136,7 +178,66 @@ está en el invitado.
 ## Prueba de extremo a extremo
 
 `scripts/90-e2e.sh` (sección 7e, lab Linux) y `scripts/92-e2e-mac.sh` (sección 6f, Mac)
-recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset` y buscan cada
-clave en toda la salida. Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
+recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset`, `role -ro`
+(INSERT, DELETE, COPY TO PROGRAM y SET ROLE tienen que fallar con ese rol), `rotate` (la
+clave vieja deja de valer), `snapshot` + `undo`, `rehearse` (una migración que añade una
+columna y otra que se bloquea por `lock_timeout`), `golden build -template crm-demo` (y su
+consulta) y `ask` (solo con `ANTHROPIC_API_KEY`: no hay proveedor falso; sin ella se salta,
+avisando), y buscan cada clave en toda la salida. La versión de 92 es más corta (sin el
+bloqueo, `golden` ni `ask`). Para CI, ver [db-ci.md](db-ci.md). Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
 avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
 de la plantilla no entra en una copia.
+
+## Operaciones: rehearse, rotate, snapshot, undo
+
+### `kling db rehearse <copia|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]`
+
+Ensaya migraciones en una copia desechable: un fork de una copia lista (que
+debe estar en marcha: rehearse no descongela ni toca el origen) o un up de un
+golden. Aplica los `.sql` de DIR en orden de nombre, como el rol de la
+aplicación (`PGOPTIONS=-c role=...`), por stdin y con `ON_ERROR_STOP`, y mide
+por fichero: duración, tamaño de la base antes y después y bloqueos. Termina
+con una tabla (o `-json`) y destruye la copia salvo `-keep`. Si un fichero
+falla, los siguientes se marcan `skipped` y el código de salida es 1.
+
+Los bloqueos, sin adornos: en una copia aislada nadie más toma locks, así que
+se ve lo que la migración provoca por sí sola. Se detecta con un muestreo de
+`pg_stat_activity` (`waited ~N s`) y con el fallo por `lock_timeout`, que se
+informa como `would block N s in production`. Sirve para descubrir qué
+sentencias piden un lock fuerte, no para predecir la espera real en producción.
+El error de un fichero muestra solo la línea `ERROR:` de psql (el resto cita la
+sentencia). Los `.sql` no pueden ser enlaces simbólicos.
+
+### `kling db rotate <copia>`
+
+Contraseña nueva con el mismo mecanismo que `up` (verificador SCRAM por stdin).
+Atómico: la nueva se deja en `password.new`, se cambia la base y solo entonces
+pasa a ser `password`. Si algo falla, el fichero no cambia y se devuelve a la
+base el verificador de la clave anterior. Las sesiones abiertas siguen hasta
+que reconectan.
+
+### `kling db snapshot <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]`
+
+Un punto de guardado es una plantilla propia (`kling save` de la máquina viva)
+llamada `dbsnap-<hash dueño+copia>-<nombre>`, con `kling.db.golden` (el golden
+original), `kling.db.owner` y `kling.db.snapshot-of` (el id de la copia; una
+copia nacida de un undo lleva el mismo valor, así conserva sus puntos). El
+nombre es `[a-z0-9-]`, hasta 40; máximo 16 puntos por copia.
+
+- `snapshot` exige copia lista y propia, sin conexiones de cliente abiertas
+  (sus sockets se repartirían idénticos a toda copia nacida del punto; `-force`
+  lo salta) y hace CHECKPOINT antes. No pisa puntos: repetir un nombre falla.
+- `undo` borra la copia y crea otra con el mismo nombre, dueño y ttl desde el
+  punto (el último si no se da nombre); el punto no se consume. Si el `up`
+  posterior falla, la copia ya no existe y el error dice cómo recrearla desde
+  la plantilla.
+- `snapshot -rm <copia> <nombre>` borra el punto; kindling se niega mientras
+  haya copias vivas nacidas de él (un undo deja una).
+- Los puntos de una copia borrada con `kling db rm` no se borran solos:
+  quítelos antes con `snapshot -rm`.
+
+**Contraseña.** El punto guarda la RAM y el disco de ese momento, incluido el
+verificador de la contraseña que la copia tenía entonces. `undo` no la
+recupera: la copia nueva rota una propia antes de darse por lista, y el fichero
+del host es de la copia nueva. La clave del punto solo sirve, en teoría, para
+esa plantilla; la rotación la invalida en cuanto nace la copia.

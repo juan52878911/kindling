@@ -37,9 +37,14 @@ func cmdGolden(args []string) error {
 	rest := fs.Args()
 	if len(rest) == 0 || (rest[0] != "image" && rest[0] != "build") {
 		return usageErr("usage: kling db golden [-script P] [-H host] image | build [options] <name>\n" +
-			"  build options: -migrations DIR  -seed FILE | -seed-mb N  -as-super  -role R  -database B\n" +
+			"  build options: -template T | -migrations DIR  -seed FILE | -seed-mb N  -as-super  -role R  -database B\n" +
 			"                 -image I  -mem M  -cpus N  -state DIR  -keep   (see docs/db-golden.md)")
 	}
+	rest, cleanup, err := expandTemplate(rest)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	path, err := findGoldenScript(*script)
 	if err != nil {
 		return err

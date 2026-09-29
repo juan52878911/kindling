@@ -67,38 +67,10 @@ func PasswordPath(id string) (string, error) {
 // WritePassword guarda la contraseña de la copia: directorios 0700, fichero
 // 0600, escrito aparte y renombrado para que nunca quede a medias.
 func WritePassword(id, password string) error {
-	if password == "" || strings.ContainsAny(password, "\r\n") {
-		return errors.New("refusing to store an empty or multi-line password")
-	}
-	dir, err := CopyDir(id)
-	if err != nil {
+	if err := StagePassword(id, password); err != nil {
 		return err
 	}
-	root, _ := Dir()
-	for _, d := range []string{root, filepath.Join(root, CopiesDir), dir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chmod(d, 0o700); err != nil {
-			return err
-		}
-	}
-	tmp := filepath.Join(dir, "password.new")
-	_ = os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.WriteString(password + "\n"); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(dir, "password"))
+	return CommitStaged(id)
 }
 
 // ErrNoPassword: la copia no tiene contraseña en este host (no la preparó

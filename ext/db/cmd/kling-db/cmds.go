@@ -96,8 +96,16 @@ func cmdUp(args []string) error {
 // up crea una copia de golden y la deja lista. Si algo falla después de
 // crearla, la destruye: una copia a medias no se entrega nunca.
 func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, owner string) (*api.Machine, error) {
-	if !namePattern.MatchString(golden) {
-		return nil, fmt.Errorf("invalid template name %q", golden)
+	return a.upFrom(ctx, golden, golden, name, ttl, owner, nil)
+}
+
+// upFrom es up con la plantilla de la que se instancia (tpl) separada de la
+// etiqueta kling.db.golden (golden), y etiquetas extra: un punto de guardado
+// (kling db undo) es una plantilla propia, pero la copia sigue siendo de su
+// golden original.
+func (a *app) upFrom(ctx context.Context, tpl, golden, name string, ttl time.Duration, owner string, extra [][2]string) (*api.Machine, error) {
+	if !namePattern.MatchString(tpl) || !namePattern.MatchString(golden) {
+		return nil, fmt.Errorf("invalid template name %q", tpl)
 	}
 	if err := validOwner(owner); err != nil {
 		return nil, err
@@ -115,13 +123,13 @@ func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, ow
 	if ttl < 0 || (ttl > 0 && ttl < time.Second) {
 		return nil, errors.New("-ttl must be at least 1s")
 	}
-	tpl, err := a.template(ctx, golden)
+	snap, err := a.template(ctx, tpl)
 	if err != nil {
 		return nil, err
 	}
-	role, db, err := goldenRoleDB(tpl)
+	role, db, err := goldenRoleDB(snap)
 	if err != nil {
-		return nil, fmt.Errorf("template %s: %w", golden, err)
+		return nil, fmt.Errorf("template %s: %w", tpl, err)
 	}
 
 	// La copia NACE en preparing: run -from fusiona estas etiquetas sobre las
@@ -135,16 +143,17 @@ func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, ow
 		{labelRole, role},
 		{labelDatabase, db},
 		{api.LabelKind, api.KindSandbox},
-		{api.LabelPorts, mergePorts(tpl.Labels[api.LabelPorts])},
+		{api.LabelPorts, mergePorts(snap.Labels[api.LabelPorts])},
 	}
-	runArgs := []string{"run", "-from", golden, "-name", name}
+	labels = append(labels, extra...)
+	runArgs := []string{"run", "-from", tpl, "-name", name}
 	if ttl > 0 {
 		runArgs = append(runArgs, "-ttl", strconv.Itoa(int(ttl.Seconds())))
 	}
 	for _, l := range labels {
 		runArgs = append(runArgs, "-label", l[0]+"="+l[1])
 	}
-	fmt.Fprintf(a.stderr, "creating %s from %s...\n", name, golden)
+	fmt.Fprintf(a.stderr, "creating %s from %s...\n", name, tpl)
 	if _, err := a.k.Run(ctx, nil, runArgs...); err != nil {
 		// No se borra nada por nombre: si el run falló porque el nombre ya
 		// existía, esa máquina es de otro.
@@ -157,7 +166,7 @@ func (a *app) up(ctx context.Context, golden, name string, ttl time.Duration, ow
 	}
 	if mc.Name != name || mc.Labels[labelState] != statePreparing {
 		a.destroy(mc.ID)
-		return nil, fmt.Errorf("kling run -from %s did not return the copy it was asked for", golden)
+		return nil, fmt.Errorf("kling run -from %s did not return the copy it was asked for", tpl)
 	}
 	if err := a.prepare(ctx, mc); err != nil {
 		a.destroy(mc.ID)
@@ -294,12 +303,13 @@ func cmdConnect(args []string) error {
 	fs, host, owner := newFlags("connect")
 	dsn := fs.Bool("dsn", false, "print a DSN WITH the password (asks first if stdout is a terminal)")
 	psql := fs.Bool("psql", false, "open the host's psql on the copy (password through the environment)")
+	role := fs.String("role", "", "connect as this role made by kling db role (default: the application role)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageErr("usage: kling db connect <copy> [-dsn | -psql]")
+		return usageErr("usage: kling db connect <copy> [-role R] [-dsn | -psql]")
 	}
 	if *dsn && *psql {
 		return usageErr("-dsn and -psql exclude each other")
@@ -317,10 +327,15 @@ func cmdConnect(args []string) error {
 	case *psql:
 		mode = "psql"
 	}
-	return a.connect(ctx, pos[0], *owner, mode)
+	return a.connectAs(ctx, pos[0], *owner, mode, *role)
 }
 
 func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
+	return a.connectAs(ctx, ref, owner, mode, "")
+}
+
+// connectAs es connect con un rol elegido ("" = el de la aplicación).
+func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string) error {
 	if err := validOwner(owner); err != nil {
 		return err
 	}
@@ -340,13 +355,32 @@ func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
 		return err
 	}
 	pwPath, _ := dbstate.PasswordPath(mc.ID)
+	readPW := func() (string, error) { return dbstate.ReadPassword(mc.ID) }
+	if extraRole != "" {
+		if err := validRoleName(extraRole, role); err != nil {
+			return err
+		}
+		role = extraRole
+		pwPath, _ = dbstate.RolePasswordPath(mc.ID, role)
+		readPW = func() (string, error) {
+			pw, err := dbstate.ReadRolePassword(mc.ID, role)
+			if errors.Is(err, dbstate.ErrNoPassword) {
+				return "", fmt.Errorf("this host has no password for role %s of %s (kling db role %s -ro -name %s creates it)", role, mc.Name, mc.Name, role)
+			}
+			return pw, err
+		}
+		// Sin contraseña no hay nada que entregar: falla antes de preguntar.
+		if _, err := readPW(); err != nil {
+			return err
+		}
+	}
 
 	switch mode {
 	case "dsn":
 		if a.stdoutTTY() && !a.confirm(fmt.Sprintf("This prints the password of %s to the terminal. Continue? [y/N] ", mc.Name)) {
 			return errors.New("aborted: nothing printed (pipe it, e.g. kling db connect " + mc.Name + " -dsn | pbcopy)")
 		}
-		pw, err := dbstate.ReadPassword(mc.ID)
+		pw, err := readPW()
 		if err != nil {
 			return err
 		}
@@ -355,7 +389,7 @@ func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
 		fmt.Fprintln(a.stdout, u.String())
 		return nil
 	case "psql":
-		pw, err := dbstate.ReadPassword(mc.ID)
+		pw, err := readPW()
 		if err != nil {
 			return err
 		}
@@ -366,7 +400,11 @@ func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
 	fmt.Fprintf(a.stdout, "%s  ready  (machine %s)\n", mc.Name, shortID(mc.ID))
 	fmt.Fprintf(a.stdout, "  host      %s\n  port      %d\n  user      %s\n  database  %s\n  password  %s\n",
 		h, port, role, db, pwPath)
-	fmt.Fprintf(a.stdout, "  kling db connect %s -psql   ·   kling db connect %s -dsn | <your tool>\n", mc.Name, mc.Name)
+	flagRole := ""
+	if extraRole != "" {
+		flagRole = " -role " + extraRole
+	}
+	fmt.Fprintf(a.stdout, "  kling db connect %s%s -psql   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, mc.Name, flagRole)
 	return nil
 }
 
