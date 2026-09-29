@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/panico"
 	"github.com/juan52878911/kindling/pkg/scheduler"
 )
@@ -83,10 +84,15 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range snaps {
-		n := s.Name
-		if svc := s.Service(); svc != "" {
-			n = svc
+		// Solo es un servicio MCP lo que se importó como tal (etiqueta service) y
+		// no es un modelo del gateway de IA. Una plantilla cualquiera (un golden
+		// de kling db, un punto de restauración, una plantilla de sandbox) no lo
+		// es: listarla haría que el catálogo la despertara para preguntarle
+		// herramientas que no tiene.
+		if !esServicioMCP(s) {
+			continue
 		}
+		n := s.Service()
 		if !seen[n] {
 			seen[n] = true
 			out = append(out, n)
@@ -105,6 +111,21 @@ func (c *catalog) services(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// esServicioMCP dice si un snapshot es un servicio MCP: importado con la
+// etiqueta service y que no sea un modelo de IA (von.*, chispa.task), que
+// también llevan service pero los sirve el gateway de IA.
+func esServicioMCP(s *api.Snapshot) bool {
+	if s.Service() == "" {
+		return false
+	}
+	for _, l := range []string{"von.model", "von.kind", "chispa.task"} {
+		if _, ok := s.Labels[l]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 // externalSet devuelve el conjunto de servicios servidos por un enlace externo.

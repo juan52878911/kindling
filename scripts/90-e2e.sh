@@ -1235,6 +1235,8 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   [ "$out" = "0" ] && ok "undo: lo posterior al punto ya no está" || bad "undo" "sin e2e_tras" "$out"
   TODAS="$TODAS $(dbpw "$DBU")"
   dbk snapshot -rm "$DBU" e2e-punto >/dev/null 2>&1
+  # Tras undo, la copia nació del punto y kling no deja borrarlo con ella viva:
+  # se recoge por nombre al final de la sección (ver dbsnap_limpiar).
 
   # rehearse: una migración que añade una columna, y otra que se bloquea (lock_timeout).
   # El origen no se toca: el ensayo va en una copia desechable.
@@ -1302,6 +1304,11 @@ SQL
     [ "$out" = "2" ] && ok "ask ($ASKP) no modificó los datos" || bad "datos tras ask" "2" "$out"
   fi
   dbk rm "$DBU" >/dev/null 2>&1
+  # Los puntos de restauración de esta prueba (dbsnap-*-e2e-punto) se quedaban:
+  # con la copia ya borrada, se quitan por nombre.
+  for t in $($KLING template ls 2>/dev/null | awk '$1 ~ /^dbsnap-.*-e2e-punto$/ {print $1}'); do
+    $KLING template rm -f "$t" >/dev/null 2>&1
+  done
 
   # Ninguna clave en ninguna salida de kling db (ni en la de audit, ni en la de doctor).
   fugas=0
