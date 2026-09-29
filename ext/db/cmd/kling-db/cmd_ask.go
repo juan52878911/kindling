@@ -154,38 +154,69 @@ type askResult struct {
 	Summary   string     `json:"summary,omitempty"`
 }
 
-func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, prov askllm.Provider) error {
+// askSession es lo que ask y ask-web comparten tras preparar la copia: la
+// copia comprobada, la base, el rol de solo lectura y el esquema que ve.
+type askSession struct {
+	mc     *api.Machine
+	db, ro string
+	schema string
+}
+
+// askPrepare hace los pasos 1 a 3 (copia, rol de solo lectura, esquema).
+func (a *app) askPrepare(ctx context.Context, ref, owner, role string) (*askSession, error) {
 	if err := validOwner(owner); err != nil {
-		return err
+		return nil, err
 	}
 	mc, err := a.inspect(ctx, ref)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := checkReady(mc, owner); err != nil {
-		return err
+		return nil, err
 	}
 	if err := requirePostgres(mc, "ask"); err != nil {
 		return err
 	}
 	appRole, db, err := roleDB(mc.Labels)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ro := o.role
+	ro := role
 	if ro == "" {
 		ro = defaultRORole
 	}
 	if ro == appRole || ro == "postgres" {
-		return fmt.Errorf("-role %s is not a read-only role: pick one that only has SELECT", ro)
+		return nil, fmt.Errorf("-role %s is not a read-only role: pick one that only has SELECT", ro)
 	}
-	if err := a.ensureRORole(ctx, mc, db, ro, o.role == ""); err != nil {
-		return err
+	if err := a.ensureRORole(ctx, mc, db, ro, role == ""); err != nil {
+		return nil, err
 	}
 	schema, err := a.readSchema(ctx, mc, db, ro)
 	if err != nil {
+		return nil, err
+	}
+	return &askSession{mc: mc, db: db, ro: ro, schema: schema}, nil
+}
+
+// askExplain manda a prov, con -send-data ya consentido, hasta askExplainRows
+// filas del resultado y guarda el resumen en res.
+func (a *app) askExplain(ctx context.Context, prov askllm.Provider, question string, res *askResult) error {
+	n := min(len(res.Rows), askExplainRows)
+	fmt.Fprintf(a.stderr, "sending %d of %d rows of the result to %s (-send-data)...\n", n, len(res.Rows), prov.Name())
+	sum, err := prov.Complete(ctx, explainSystemPrompt, explainPrompt(question, res.SQL, res.Columns, res.Rows[:n]))
+	if err != nil {
+		return fmt.Errorf("the rows were read, but the summary failed: %w", err)
+	}
+	res.Summary = strings.TrimSpace(sum)
+	return nil
+}
+
+func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, prov askllm.Provider) error {
+	sess, err := a.askPrepare(ctx, ref, owner, o.role)
+	if err != nil {
 		return err
 	}
+	mc, db, ro, schema := sess.mc, sess.db, sess.ro, sess.schema
 
 	fmt.Fprintf(a.stderr, "asking %s (it gets the schema and the question, no data)...\n", prov.Name())
 	prompt := sqlPrompt(schema, question)
@@ -224,13 +255,9 @@ func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, p
 	}
 	res.SQL, res.Role = sql, ro
 	if o.explain {
-		n := min(len(res.Rows), askExplainRows)
-		fmt.Fprintf(a.stderr, "sending %d of %d rows of the result to %s (-send-data)...\n", n, len(res.Rows), prov.Name())
-		sum, err := prov.Complete(ctx, explainSystemPrompt, explainPrompt(question, sql, res.Columns, res.Rows[:n]))
-		if err != nil {
-			return fmt.Errorf("the rows were read, but the summary failed: %w", err)
+		if err := a.askExplain(ctx, prov, question, res); err != nil {
+			return err
 		}
-		res.Summary = strings.TrimSpace(sum)
 	}
 	if o.jsonOut {
 		enc := json.NewEncoder(a.stdout)
