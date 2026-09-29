@@ -415,3 +415,20 @@ func TestCloneScripts(t *testing.T) {
 		t.Fatal("long default name")
 	}
 }
+
+func TestCloneUsoIncorrecto(t *testing.T) {
+	for _, args := range [][]string{
+		{"clone"},
+		{"clone", "postgres://ro@db/app"}, // sin -mask
+		{"clone", "postgres://ro:" + clonePW + "@db/app", "-mask", "x.yaml"},
+		{"clone", "postgres://ro@db/app", "-mask", "x.yaml", "-image", "a", "-from", "b"},
+	} {
+		out, code := runExt(t, args...)
+		if code != 2 {
+			t.Errorf("%v: exit %d, want 2\n%s", args, code, out)
+		}
+		if strings.Contains(out, clonePW) {
+			t.Errorf("%v: the password was printed", args)
+		}
+	}
+}

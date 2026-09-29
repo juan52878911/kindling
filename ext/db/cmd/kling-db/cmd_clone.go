@@ -559,7 +559,7 @@ func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'
 const cloneSetupScript = `# kling-db:clone-setup
 set -eu
 C=` + cloneDir + `
-if [ "$(wc -l < /proc/swaps)" -gt 1 ]; then echo "the builder has swap: refusing (unmasked data could reach a disk)" >&2; exit 1; fi
+if [ -r /proc/swaps ] && [ "$(wc -l < /proc/swaps)" -gt 1 ]; then echo "the builder has swap: refusing (unmasked data could reach a disk)" >&2; exit 1; fi
 mkdir -p "$C"
 grep -q " $C tmpfs " /proc/mounts || mount -t tmpfs -o size=75%,mode=0700 klingclone "$C"
 grep -q " $C tmpfs " /proc/mounts || { echo "no tmpfs at $C" >&2; exit 1; }
