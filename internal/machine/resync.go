@@ -70,7 +70,7 @@ var resyncClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: tr
 // clave es la del snapshot del que se restauró (claveSnapshot) para recordar
 // que no tiene agente, o "" para no recordar nada. Devuelve cuánto tardó y si
 // el agente lo aplicó.
-func (m *Manager) resyncGuest(ctx context.Context, id, clave string) (time.Duration, bool) {
+func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) (time.Duration, bool, *api.GuestReady) {
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr, image, name string
@@ -79,18 +79,18 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave string) (time.Durat
 	}
 	m.mu.RUnlock()
 	if addr == "" {
-		return 0, false
+		return 0, false, nil
 	}
 	if clave != "" {
 		if hasta, ok := m.resyncSinAgente.Load(clave); ok && time.Now().Before(hasta.(time.Time)) {
-			return 0, false
+			return 0, false, nil
 		}
 	}
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, resyncPlazo)
 	defer cancel()
-	res, err := resyncOnce(ctx, "http://"+addr)
+	res, err := resyncOnce(ctx, "http://"+addr, kind)
 	for err != nil && errors.Is(err, errResyncConexion) && time.Since(start) < resyncReintento {
 		select {
 		case <-ctx.Done():
@@ -99,7 +99,7 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave string) (time.Durat
 		if ctx.Err() != nil {
 			break
 		}
-		res, err = resyncOnce(ctx, "http://"+addr)
+		res, err = resyncOnce(ctx, "http://"+addr, kind)
 	}
 	took := time.Since(start)
 	if err != nil {
@@ -107,13 +107,13 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave string) (time.Durat
 			m.resyncSinAgente.Store(clave, time.Now().Add(resyncSinAgenteTTL))
 		}
 		m.avisarResync(image, name, err)
-		return took, false
+		return took, false, nil
 	}
 	if res.SkewMS > 1000 || res.SkewMS < -1000 {
 		log.Printf("%s: guest clock was %s off; resynced in %s", name,
 			(time.Duration(res.SkewMS) * time.Millisecond).Round(time.Millisecond), took.Round(time.Millisecond))
 	}
-	return took, true
+	return took, true, res.Ready
 }
 
 // avisarResync registra por qué no se resincronizó, una vez por imagen y
@@ -157,7 +157,7 @@ var (
 	errResyncNadie = errors.New("nothing listens on the guest agent port")
 )
 
-func resyncOnce(ctx context.Context, base string) (api.GuestResyncResult, error) {
+func resyncOnce(ctx context.Context, base, kind string) (api.GuestResyncResult, error) {
 	var out api.GuestResyncResult
 	ent := make([]byte, api.GuestResyncEntropy)
 	if _, err := rand.Read(ent); err != nil {
@@ -165,7 +165,7 @@ func resyncOnce(ctx context.Context, base string) (api.GuestResyncResult, error)
 	}
 	// La hora se toma lo más tarde posible: lo que tarde la petición es el
 	// error que queda en el invitado.
-	body, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(), Entropy: ent})
+	body, err := json.Marshal(api.GuestResync{UnixNano: time.Now().UnixNano(), Entropy: ent, Restore: kind})
 	if err != nil {
 		return out, err
 	}

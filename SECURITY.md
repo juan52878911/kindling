@@ -117,6 +117,15 @@ impidiera la fuga. Se cerró en dos capas independientes, ninguna depende de la 
    log y se sigue sin fallar: la capa de `sysctl` es la que de verdad cierra el paso y no
    depende de ese binario.
 
+**Excepción declarada por la imagen: `guest_ipv6_stack`.** Una receta con
+`"guest_ipv6_stack": true` cambia la capa 1 por `ipv6.disable_ipv6=1`: el módulo IPv6
+carga (hay sockets `AF_INET6`) pero ninguna interfaz arranca con IPv6, ni link-local. Es
+para software que no escucha sin ellos: el `adbd` de Android solo abre `[::]:5555`, y el
+`IpClient` de su `eth0` falla en bucle y le borra la IPv4 (prototipo Android, 29-09-2026).
+El invitado, como root, puede encender IPv6 en una interfaz suya; la capa 2 no cambia y es
+la que cierra el paso. Sus dorados quedan con `guest_ipv6_off` en false (dicen la verdad)
+y no avisan al instanciarse, porque es lo declarado.
+
 En macOS (`kling-vz`) no hace falta nada de esto: `egress.IsBlockedIP` ya trata cualquier
 dirección que no sea IPv4 como bloqueada, porque el invitado nunca ha tenido IPv6 en ese
 backend.
@@ -821,6 +830,28 @@ Qué **no** garantiza:
   escritura. Dale un rol que de verdad solo lea.
 - El tramo entre el invitado y el proxy va en claro dentro de la máquina (como en §7), y
   el del proxy al servidor, en claro si se eligió `sslmode=disable`.
+
+### 17. Escribir dentro de una imagen no sale de ella
+
+Una imagen no es de fiar: la trae quien la construye o la copia (`kling image copy`), y
+sus enlaces simbólicos son suyos. `kling image put` (`PUT /images/{name}/files`) y el
+recambio del puente escriben dentro como root, así que:
+
+- **Linux** (la imagen montada por loop): la ruta nunca se pasa entera al kernel, que
+  resolvería un enlace absoluto de la imagen contra la raíz del host. Se resuelve a mano
+  componente a componente con `openat(O_NOFOLLOW)` relativo al directorio anterior; un
+  enlace de un directorio intermedio se lee y se sigue dentro de la imagen (un destino
+  absoluto desde su raíz, `..` acotado a ella, 40 saltos como mucho), y lo que se crea,
+  se lee o se renombra va relativo al descriptor del directorio final (`mkdirat`,
+  `openat`, `renameat`). Cambiar un componente por un enlace entre medias hace fallar
+  la escritura, no la desvía. El último componente no se sigue: si es un enlace, se
+  reemplaza el enlace. Antes de esto, con `usr/local -> /tmp/x` en la imagen, poner
+  `/usr/local/bin/f` escribía `/tmp/x/bin/f` en el host (reproducido en el lab con el
+  binario anterior; `internal/machine/put_seguro_linux.go`).
+- **macOS**: `debugfs -w` sin montar, que no ve el sistema de ficheros del host; los
+  enlaces se siguen igual, dentro de la imagen (`put_debugfs.go`).
+- **`from_host`** se abre por `os.Root` sobre `/usr/local/lib/kindling`: un enlace de ese
+  directorio no lleva a un fichero cualquiera del host.
 
 ## Lo que NO está resuelto
 

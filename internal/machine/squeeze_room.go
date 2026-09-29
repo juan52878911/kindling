@@ -59,7 +59,9 @@ func (m *Manager) makeRoom(ctx context.Context, skip string) int {
 		m.squeezedAt = map[string]time.Time{}
 	}
 	for id, mc := range m.byID {
-		if id == skip || mc.State != api.StateRunning || mc.PID == 0 {
+		// Las copias que comparten memoria con un dorado, no: apretarlas
+		// SUBE la memoria del host (ver squeezeLocked).
+		if id == skip || mc.State != api.StateRunning || mc.PID == 0 || mc.MemShared {
 			continue
 		}
 		if ahora.Sub(m.squeezedAt[id]) < squeezeCooldown {
@@ -89,7 +91,7 @@ func (m *Manager) makeRoom(ctx context.Context, skip string) int {
 		if !ok {
 			continue
 		}
-		res, err := m.squeezeLocked(ctx, c.id, c.id)
+		res, err := m.squeezeLocked(ctx, c.id, c.id, false)
 		soltar()
 		m.mu.Lock()
 		m.squeezedAt[c.id] = time.Now()

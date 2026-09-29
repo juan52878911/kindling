@@ -18,7 +18,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/units"
 )
 
-const sandboxForkUsage = "usage: kling sandbox fork <sandbox> [-n N] [-ttl 10m] [-on-ttl remove|freeze] [-label k=v]... [-q] [-json]"
+const sandboxForkUsage = "usage: kling sandbox fork <sandbox> [-n N] [-ttl 10m] [-on-ttl remove|freeze] [-label k=v]... [-skip-ready] [-q] [-json]"
 
 // forkOptions es `kling sandbox fork` ya interpretado.
 type forkOptions struct {
@@ -44,6 +44,7 @@ func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, 
 	fs.Var(&labels, "label", "label for every copy, k=v (repeatable)")
 	quiet := fs.Bool("q", false, "print only the ids of the copies")
 	asJSON := fs.Bool("json", false, "JSON output: the snapshot and the copies")
+	skipReady := fs.Bool("skip-ready", false, "don't wait for the sandbox (and each copy) to be ready by its image's probe and hooks")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return forkOptions{}, err
 	}
@@ -66,7 +67,8 @@ func parseSandboxFork(args []string, handling flag.ErrorHandling) (forkOptions, 
 	}
 	return forkOptions{
 		host: *host, ref: fs.Arg(0), quiet: *quiet, asJSON: *asJSON,
-		req: api.ForkRequest{Count: *n, TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Labels: map[string]string(labels)},
+		req: api.ForkRequest{Count: *n, TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Labels: map[string]string(labels),
+			SkipReady: *skipReady},
 	}, nil
 }
 

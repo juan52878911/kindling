@@ -28,6 +28,10 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
+// putSinMontar: macOS no monta ext4; intentarPut escribe con debugfs -w
+// (put_debugfs.go).
+const putSinMontar = true
+
 const backendVMM = BackendVZ
 
 // Las aristas de un grafo y kling db attach (una credencial Postgres con
@@ -167,6 +171,10 @@ func (m *Manager) aristasVZLocked(mc *api.Machine) (fc.KlingGraph, bool) {
 // Sin jailer en macOS: el aislamiento es el proceso auxiliar de Apple que
 // aloja cada VM, y el daemon corre sin root.
 const jailerPosible = false
+
+// restaurarComparteMemoria: Virtualization.framework copia la memoria al
+// restaurar (RestoreMachineState); las copias no comparten nada.
+const restaurarComparteMemoria = false
 
 // globoSinEstadisticas: Virtualization.framework no da las estadísticas de
 // memoria del invitado; squeeze aprieta a ciegas (ver objetivoSinEstadisticas).
@@ -428,12 +436,53 @@ func e2fsCmd(ctx context.Context, nombre string, args ...string) *exec.Cmd {
 // checkPresionPlataforma rechaza con 507 cuando macOS dice que le queda poca
 // memoria. PSI no existe aquí; kern.memorystatus_level es lo que usa el
 // propio sistema para decidir cuándo avisar y cuándo matar procesos.
-func checkPresionPlataforma() error {
-	nivel, err := syscall.SysctlUint32("kern.memorystatus_level")
-	if err != nil {
+//
+// Y el swap: el nivel no protegía (los fallos de docs/sigill.md se vieron con
+// el nivel en 22–40, por encima del 15 %), con el swap casi lleno y sin disco
+// en el que crecer. Ver evaluarSwap.
+func (m *Manager) checkPresionPlataforma() error {
+	if nivel, err := syscall.SysctlUint32("kern.memorystatus_level"); err == nil {
+		if err := evaluarNivelMemoria(int(nivel), minMemLevel()); err != nil {
+			return err
+		}
+	}
+	usado, total, ok := swapMac()
+	if !ok {
 		return nil // sin poder medirlo no se bloquea nada
 	}
-	return evaluarNivelMemoria(int(nivel), minMemLevel())
+	return evaluarSwap(usado, total, discoLibreMiB(volumenSwapMac, m.root), minFreeDiskMiB(), maxSwapPct())
+}
+
+// minDiscoLibrePlataforma: 16 GiB en macOS. El disco de datos es también el
+// del swap (volumen VM, mismo contenedor APFS), que crece de GiB en GiB: en
+// el Mac de 16 GiB del prototipo Android llegó a 9,2 GB. Con 2 GiB el daemon
+// seguía admitiendo con el disco al 97–98 % (9–14 GiB libres de 460), justo
+// cuando se vieron páginas a ceros (prototypes/android/docs/sigill.md).
+const minDiscoLibrePlataforma = 16 << 10
+
+// volumenSwapMac es donde dynamic_pager deja los ficheros de swap.
+const volumenSwapMac = "/System/Volumes/VM"
+
+// swapMac lee vm.swapusage (struct xsw_usage: total, avail y used en bytes,
+// uint64 little-endian) en MiB.
+func swapMac() (usado, total int64, ok bool) {
+	s, err := syscall.Sysctl("vm.swapusage")
+	if err != nil || len(s) < 24 {
+		return 0, 0, false
+	}
+	return parseSwapUsage([]byte(s))
+}
+
+// discoLibreMiB es el disco libre (para quien no es root) en path, o en
+// alternativa si path no existe; -1 si no se puede saber.
+func discoLibreMiB(path, alternativa string) int64 {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		if err := syscall.Statfs(alternativa, &st); err != nil {
+			return -1
+		}
+	}
+	return int64(st.Bavail) * int64(st.Bsize) >> 20
 }
 
 // lanzamientoPlataforma: 4 encendidos a la vez. El prototipo vio fallos con

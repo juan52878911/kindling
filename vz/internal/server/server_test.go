@@ -588,7 +588,7 @@ func TestShutdown(t *testing.T) {
 func TestConfinarAlCrearYNoAmpliarElEgress(t *testing.T) {
 	r := newRig(t)
 	var llamadas []bool
-	r.srv.d.Confine = func(conRed bool) error { llamadas = append(llamadas, conRed); return nil }
+	r.srv.d.Confine = func(conRed, _ bool) error { llamadas = append(llamadas, conRed); return nil }
 
 	r.configure(t.TempDir())
 	r.must("PUT", "/kling/network", `{"egress":"none"}`)
@@ -611,7 +611,7 @@ func TestConfinarAlCrearYNoAmpliarElEgress(t *testing.T) {
 func TestConfinarConRed(t *testing.T) {
 	r := newRig(t)
 	var llamadas []bool
-	r.srv.d.Confine = func(conRed bool) error { llamadas = append(llamadas, conRed); return nil }
+	r.srv.d.Confine = func(conRed, _ bool) error { llamadas = append(llamadas, conRed); return nil }
 	r.configure(t.TempDir())
 	r.must("PUT", "/kling/network", `{"egress":"internet"}`)
 	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
@@ -625,7 +625,7 @@ func TestConfinarConRed(t *testing.T) {
 // sin la barrera.
 func TestSinConfinarNoSeArranca(t *testing.T) {
 	r := newRig(t)
-	r.srv.d.Confine = func(bool) error { return errors.New("perfil roto") }
+	r.srv.d.Confine = func(bool, bool) error { return errors.New("perfil roto") }
 	r.configure(t.TempDir())
 	r.mustFail("PUT", "/actions", `{"action_type":"InstanceStart"}`, "perfil roto")
 	r.f.mu.Lock()

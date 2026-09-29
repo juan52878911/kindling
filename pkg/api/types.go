@@ -129,6 +129,17 @@ type Machine struct {
 	// eso Freeze se niega a congelar una máquina marcada así (ver Freeze).
 	HasSecrets bool `json:"has_secrets,omitempty"`
 
+	// Ready es lo que el daemon sabe de si el invitado terminó de arrancar según
+	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
+	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
+	Ready string `json:"ready,omitempty"`
+
+	// MemShared: su RAM se mapea del mem.file de un dorado, compartido por
+	// copia-en-escritura con las demás instancias (Firecracker, run -from o
+	// fork). El globo es contraproducente ahí: ver Squeeze. Se apaga al
+	// congelar y descongelar (la memoria pasa a ser suya).
+	MemShared bool `json:"mem_shared,omitempty"`
+
 	// CredentialDomains son los dominios con credencial inyectada por el proxy de
 	// credenciales (POST /machines/{ref}/credentials). Solo los nombres: la clave
 	// vive en memoria del daemon y el invitado solo ve un marcador.
@@ -210,8 +221,21 @@ type RunRequest struct {
 	// costar CPU y RAM sin intervención de nadie.
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 
-	// CPUPct acota el uso de CPU (100 = un core completo).
+	// CPUPct acota el uso de CPU (100 = un core completo). Precedencia: este
+	// campo > el del snapshot (con From) > el de la receta de la imagen >
+	// CPUPctDefault > el del daemon.
 	CPUPct int `json:"cpu_pct,omitempty"`
+	// CPUPctDefault es el techo por defecto de quien pide (la configuración
+	// del CLI): solo se usa si ni CPUPct, ni el snapshot, ni la imagen dicen
+	// nada. Existe para que un valor por defecto del cliente no pise el de la
+	// imagen como si fuera un flag.
+	CPUPctDefault int `json:"cpu_pct_default,omitempty"`
+
+	// WaitReady: no contestar hasta que el invitado esté listo según su imagen
+	// (ver ready.go), o hasta ReadyTimeoutSeconds (por defecto 120). La
+	// máquina se devuelve igual si no llega: Machine.Ready dice cómo quedó.
+	WaitReady           bool `json:"wait_ready,omitempty"`
+	ReadyTimeoutSeconds int  `json:"ready_timeout_seconds,omitempty"`
 
 	// Volumes son los volúmenes a montar, en orden. Es la forma completa.
 	Volumes []VolumeAttachment `json:"volumes,omitempty"`
@@ -535,6 +559,12 @@ type Snapshot struct {
 	// cubrirlo invalidaría la firma de todo dorado anterior a este campo.
 	GuestIPv6Off bool `json:"guest_ipv6_off,omitempty"`
 
+	// GuestIPv6Stack: el invitado arrancó con el módulo IPv6 porque su imagen
+	// lo pide (ImageRecipe.GuestIPv6Stack), sin direcciones v6. No es un dorado
+	// anterior a la barrera por recongelar: GuestIPv6Off va a false a propósito
+	// y el CLI no lo marca. Fuera de Signature, igual que GuestIPv6Off.
+	GuestIPv6Stack bool `json:"guest_ipv6_stack,omitempty"`
+
 	// Signature es el HMAC-SHA256, con la clave del host, de los hashes y la
 	// política del snapshot. Detecta manipulación y snapshots traídos de otro
 	// host, que los sha256 solos no detectan.
@@ -557,6 +587,11 @@ type Snapshot struct {
 type CommitRequest struct {
 	Name    string `json:"name"`
 	Replace bool   `json:"replace,omitempty"`
+	// Antes de congelar, el daemon espera a que el invitado esté listo según
+	// su imagen (ver ready.go), como mucho ReadyTimeoutSeconds (por defecto
+	// 120). SkipReady se lo salta (kling save -force).
+	SkipReady           bool `json:"skip_ready,omitempty"`
+	ReadyTimeoutSeconds int  `json:"ready_timeout_seconds,omitempty"`
 }
 
 // Event es un cambio de estado publicado en el bus del daemon.
@@ -870,17 +905,33 @@ type PopulateResult struct {
 // el comando de cada imagen con `debugfs`, y aun así los paquetes hubo que
 // adivinarlos.
 type ImageRecipe struct {
-	Name     string    `json:"name"`
-	Base     string    `json:"base,omitempty"`
-	Packages []string  `json:"packages,omitempty"`
-	NPM      []string  `json:"npm,omitempty"`
-	PIP      []string  `json:"pip,omitempty"`
-	Env      []string  `json:"env,omitempty"`
-	Cmd      []string  `json:"cmd"`
-	GrowMB   int       `json:"grow_mb,omitempty"`
-	Bundle   bool      `json:"bundle,omitempty"`
-	BuiltAt  time.Time `json:"built_at"`
-	KlingVer string    `json:"kling_version,omitempty"`
+	Name     string   `json:"name"`
+	Base     string   `json:"base,omitempty"`
+	Packages []string `json:"packages,omitempty"`
+	NPM      []string `json:"npm,omitempty"`
+	PIP      []string `json:"pip,omitempty"`
+	Env      []string `json:"env,omitempty"`
+	Cmd      []string `json:"cmd"`
+	GrowMB   int      `json:"grow_mb,omitempty"`
+	Bundle   bool     `json:"bundle,omitempty"`
+
+	// CPUPct es el techo de CPU por defecto de las máquinas de esta imagen
+	// (100 = un núcleo), y CPUPctPerVCPU el mismo techo POR vCPU (200 con 2
+	// vCPU = 400): el segundo manda si están los dos. Un flag o el snapshot
+	// ganan. El 50 % del daemon está pensado para servidores MCP; un sistema
+	// entero como Android lo necesita a vCPUs×100 (y en vz el regulador pausa
+	// la VM entera).
+	CPUPct        int `json:"cpu_pct,omitempty"`
+	CPUPctPerVCPU int `json:"cpu_pct_per_vcpu,omitempty"`
+	// GuestIPv6Stack deja cargado el módulo IPv6 del kernel del invitado en
+	// un arranque en frío (ipv6.disable_ipv6=1 en vez de ipv6.disable=1):
+	// sockets AF_INET6 sí, direcciones v6 no, salvo que el invitado las
+	// encienda. Para imágenes cuyo software no escucha sin ellos (Android:
+	// adbd solo abre [::]:5555). La barrera del host no cambia. Sus dorados
+	// quedan con GuestIPv6Off en false. Ver SECURITY.md, "IPv6".
+	GuestIPv6Stack bool      `json:"guest_ipv6_stack,omitempty"`
+	BuiltAt        time.Time `json:"built_at"`
+	KlingVer       string    `json:"kling_version,omitempty"`
 
 	// Builder y Spec son los de la petición cuando la construyó un constructor
 	// externo.

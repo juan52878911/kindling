@@ -140,6 +140,11 @@ type SandboxRequest struct {
 	Volumes      []VolumeAttachment `json:"volumes,omitempty"`
 	Shares       []ShareSpec        `json:"shares,omitempty"`
 	Labels       map[string]string  `json:"labels,omitempty"`
+	// WaitReady devuelve el sandbox cuando está listo según su imagen (sonda
+	// y ganchos tras restaurar, ver ready.go), no solo cuando el agente
+	// contesta. Machine.Ready dice cómo quedó.
+	WaitReady           bool `json:"wait_ready,omitempty"`
+	ReadyTimeoutSeconds int  `json:"ready_timeout_seconds,omitempty"`
 }
 
 // SandboxDefaultTTL y SandboxMaxTTL acotan la vida de un sandbox.

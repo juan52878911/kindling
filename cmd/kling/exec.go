@@ -249,6 +249,7 @@ func sandboxCreate(args []string) error {
 	var shares shareFlag
 	fs.Var(&shares, "share", shareUsage)
 	quiet := fs.Bool("q", false, "print only the id")
+	waitReady := fs.Bool("wait-ready", false, "return once the guest is ready by its image's probe and post-restore hooks")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
 	}
@@ -263,10 +264,14 @@ func sandboxCreate(args []string) error {
 	}
 	req := api.SandboxRequest{Name: *name, Image: *image, From: *from, VCPUs: *cpus, MemMiB: *mem,
 		TTLSeconds: int(ttl.Seconds()), OnTTL: *onTTL, Egress: *egress, AllowDomains: splitDomains(allow.String()),
-		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes), Shares: shareSpecs}
+		CPUPct: *cpuPct, Volumes: []api.VolumeAttachment(volumes), Shares: shareSpecs, WaitReady: *waitReady}
 	mc, err := client.CreateSandbox(ctx, req)
 	if err != nil {
 		return err
+	}
+	if *waitReady && (mc.Ready == api.ReadyWaiting || mc.Ready == api.ReadyFailed) {
+		return &errWithHint{err: fmt.Errorf("sandbox %s is running but not ready (%s)", mc.Name, mc.Ready),
+			hint: "kling machine ready " + mc.Name + "   (says why)"}
 	}
 	if *quiet {
 		fmt.Println(mc.ID)

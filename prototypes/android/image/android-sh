@@ -1,0 +1,181 @@
+#!/bin/bash
+# android-sh: ejecutar algo DENTRO de Android desde la VM (es decir, desde
+# `kling exec`). Hace de `adb shell` sin adb ni puertos abiertos.
+#
+#   kling exec <m> -- android-sh getprop sys.boot_completed
+#   kling exec <m> -- android-sh 'uiautomator dump /data/local/tmp/ui.xml && cat /data/local/tmp/ui.xml'
+#   kling exec <m> -- android-sh screencap -p            > pantalla.png   (binario: exec lo lleva en base64)
+#   kling exec <m> -- android-sh --push /tmp/app.apk /data/local/tmp/app.apk
+#   kling exec <m> -- android-sh --pid                    # PID (en la VM) del init de Android
+#   kling exec <m> -- android-sh --state                  # lo que dejó el lanzador
+#   kling exec <m> -- android-sh --identity               # aplica la identidad del secreto MMDS (phone.sh)
+#
+# Cómo: busca el init de Android (el hijo del unshare del lanzador), entra en TODOS sus espacios de nombres y en su raíz con nsenter, y
+# ejecuta /system/bin/sh -c "<args>" como root con el entorno de zygote
+# (BOOTCLASSPATH, ANDROID_ROOT...: sin él, uiautomator, am y pm, que arrancan
+# con app_process, no funcionan). Antes de que exista zygote, un entorno
+# mínimo que basta para getprop.
+set -euo pipefail
+
+die() { echo "android-sh: $*" >&2; exit 125; }
+
+# ppid_de PID: el padre, leído de /proc/PID/status (el comm de /proc/PID/stat
+# puede llevar espacios y paréntesis; status no tiene ese problema).
+ppid_de() { sed -n 's/^PPid:[[:space:]]*//p' "/proc/$1/status" 2>/dev/null; }
+
+# hijos_de PID: los PID cuyo padre es PID. pgrep (procps, en la base) lo
+# resuelve en un proceso; el bucle por /proc lanzaba un sed por cada PID del
+# invitado y costaba ~150 ms en cada llamada (medido en la fase 0).
+hijos_de() {
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -P "$1" || true
+    return 0
+  fi
+  local p
+  for p in /proc/[0-9]*; do
+    [ "$(ppid_de "${p#/proc/}")" = "$1" ] && echo "${p#/proc/}"
+  done
+  return 0
+}
+
+# init_pid: el hijo del `unshare` que dejó el lanzador (su PID queda en
+# /run/kindling-android/unshare.pid, porque stage1 hace exec de unshare). Se
+# busca por el árbol de procesos y no por /proc/<pid>/root: ese enlace, visto
+# desde otro espacio de montajes, no es fiable.
+init_pid() {
+  local u c
+  u="$(cat /run/kindling-android/unshare.pid 2>/dev/null)" || return 1
+  [ -n "$u" ] && [ -d "/proc/$u" ] || return 1
+  for c in $(hijos_de "$u"); do
+    if [ "$(cat "/proc/$c/comm" 2>/dev/null)" = init ]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+# zygote_pid: hijo del init de Android cuyo cmdline empieza por zygote64/zygote.
+zygote_pid() {
+  local c cmd
+  for c in $(hijos_de "$1"); do
+    cmd="$(tr '\0' ' ' <"/proc/$c/cmdline" 2>/dev/null || true)"
+    case "$cmd" in zygote64*|zygote\ *) echo "$c"; return 0 ;; esac
+  done
+  return 1
+}
+
+# mmds_get RUTA: una hoja del metadata service de kindling (MMDS v2: token por
+# PUT y lectura con el token), con los builtins de bash (/dev/tcp): la base no
+# trae curl. Imprime el cuerpo; falla si la respuesta no es 200.
+# El cuerpo se lee por Content-Length y no hasta que se cierre la conexión: el
+# MMDS de Firecracker contesta "Connection: keep-alive" aunque se le pida
+# close, y un `cat` se quedaba colgado (medido en x86_64, docs/proxmox.md).
+mmds_req() {
+  local st l len=0
+  exec 3<>/dev/tcp/169.254.169.254/80 || return 1
+  printf '%b' "$1" >&3
+  IFS= read -r -t 5 st <&3 || { exec 3<&-; return 1; }
+  while IFS= read -r -t 5 l <&3; do
+    l="${l%$'\r'}"
+    [ -z "$l" ] && break
+    case "${l,,}" in content-length:*) len="${l#*:}"; len="${len// /}" ;; esac
+  done
+  MMDS_BODY=""
+  [ "$len" -gt 0 ] && IFS= read -r -t 5 -N "$len" MMDS_BODY <&3
+  exec 3<&-
+  case "$st" in *" 200"*) return 0 ;; *) return 1 ;; esac
+}
+mmds_get() {
+  local tok
+  mmds_req 'PUT /latest/api/token HTTP/1.1\r\nHost: 169.254.169.254\r\nX-metadata-token-ttl-seconds: 30\r\nContent-Length: 0\r\n\r\n' || return 1
+  tok="$MMDS_BODY"
+  mmds_req "GET $1 HTTP/1.1\r\nHost: 169.254.169.254\r\nX-metadata-token: $tok\r\n\r\n" || return 1
+  printf '%s' "$MMDS_BODY"
+}
+
+case "${1:-}" in
+  --state)
+    cat /run/kindling-android/state 2>/dev/null || echo "unknown (launcher never ran?)"
+    exit 0 ;;
+  --pid)
+    init_pid || die "Android is not running (android-sh --state; tail /var/log/service.log)"
+    exit 0 ;;
+  --verify-cache)
+    # ¿La caché de páginas del invitado dice lo mismo que el disco? Compara
+    # cada fichero leído por la caché con el mismo leído con O_DIRECT. En el
+    # Mac bajo presión de memoria se han visto páginas de la caché A CEROS
+    # (procesos nuevos de Android mueren con SIGILL ILL_ILLOPC siempre en el
+    # mismo sitio: es una instrucción 0x00000000). Si pasa antes de `kling
+    # save`, el dorado lleva la página rota y la heredan TODOS los clones, así
+    # que phone.sh lo comprueba antes de guardar. docs/telefono.md.
+    shift
+    # shellcheck source=/dev/null
+    . /usr/local/lib/kindling-android/android.conf
+    r="${ANDROID_ROOT:-/android}"
+    [ $# -gt 0 ] || set -- "$r/system/lib64" "$r/system/bin" "$r/system/framework" \
+      "$r/system/apex" "$r/vendor/lib64" "$r/vendor/bin"
+    # (Una lista en /tmp y no <(find): bajo `kling exec` no hay /dev/fd.)
+    lista="$(mktemp)"
+    find "$@" -xdev -type f -size +0 >"$lista" 2>/dev/null || true
+    n=0; bad=0
+    while IFS= read -r f; do
+      n=$((n + 1))
+      a="$(md5sum <"$f" | cut -c1-32)"
+      b="$(dd if="$f" bs=1M iflag=direct 2>/dev/null | md5sum | cut -c1-32)"
+      if [ "$a" != "$b" ]; then bad=$((bad + 1)); echo "MISMATCH ${f#"$r"}"; fi
+    done <"$lista"
+    rm -f "$lista"
+    echo "files=$n mismatches=$bad"
+    [ "$n" -gt 0 ] && [ "$bad" -eq 0 ]
+    exit ;;
+esac
+
+pid="$(init_pid)" || die "Android is not running ($(cat /run/kindling-android/state 2>/dev/null || echo 'no state')); see /var/log/service.log"
+
+ENV=()
+if zpid="$(zygote_pid "$pid")"; then
+  mapfile -d '' -t ENV <"/proc/$zpid/environ" || ENV=()
+fi
+if [ ${#ENV[@]} -eq 0 ]; then
+  ENV=(PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin
+       ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_STORAGE=/storage)
+fi
+ENV+=(HOME=/ TMPDIR=/data/local/tmp)
+
+# -r/-w: raíz y directorio del init de Android (el chroot). -p: los hijos
+# nacen en su espacio de PIDs (nsenter hace fork).
+NS=(nsenter --target "$pid" --mount --uts --ipc --net --pid --root --wd)
+
+if [ "${1:-}" = "--identity" ]; then
+  # La identidad propia de un clon, leída del secreto de sesión que el Mac le
+  # inyectó por MMDS tras restaurar (`kling machine secret`, phone.sh):
+  #   {"phone": {"android_id": "<16 hex>", "name": "<nombre visible>"}}
+  # El valor no viaja en la línea de órdenes de exec ni queda en ningún log de
+  # kindling; solo en la RAM de este clon (y el daemon ya no deja congelarlo,
+  # guardarlo ni clonarlo: HasSecrets). Android no ve MMDS (red veth).
+  id="$(mmds_get /phone/android_id)" || die "no identity in MMDS (kling machine secret <m> first)"
+  name="$(mmds_get /phone/name 2>/dev/null || true)"
+  [[ "$id" =~ ^[0-9a-f]{16}$ ]] || die "MMDS phone/android_id must be 16 lowercase hex digits"
+  [[ "$name" =~ ^[A-Za-z0-9._-]{0,40}$ ]] || die "MMDS phone/name has invalid characters"
+  # shellcheck disable=SC2016
+  "${NS[@]}" -- /system/bin/env -i "${ENV[@]}" /system/bin/sh -c '
+    settings put secure android_id "$1" || exit 1
+    [ -z "$2" ] || settings put global device_name "$2" || exit 1
+    [ "$(settings get secure android_id)" = "$1" ]' sh "$id" "$name" ||
+    die "could not apply the identity inside Android"
+  # Ni un trozo del valor: con los ganchos tras restaurar esta salida acaba en
+  # la consola del invitado (kling logs).
+  echo "identity applied"
+  exit 0
+fi
+
+if [ "${1:-}" = "--push" ]; then
+  [ $# -eq 3 ] || die "usage: android-sh --push <file-in-vm> <path-in-android>"
+  [ -f "$2" ] || die "no such file in the VM: $2"
+  # Por la entrada estándar: vale igual si /data está en tmpfs (invisible desde
+  # la VM) que en el overlay. $1 lo expande el sh de Android, no este.
+  # shellcheck disable=SC2016
+  "${NS[@]}" -- /system/bin/env -i "${ENV[@]}" /system/bin/sh -c 'cat > "$1"' sh "$3" <"$2"
+  exit $?
+fi
+
+[ $# -ge 1 ] || die "usage: android-sh <command...> | --push SRC DST | --identity | --pid | --state"
+exec "${NS[@]}" -- /system/bin/env -i "${ENV[@]}" /system/bin/sh -c "$*"

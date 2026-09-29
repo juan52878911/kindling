@@ -87,14 +87,56 @@ func checkPressure() error {
 }
 
 // minFreeDiskMiB es el disco libre mínimo bajo $KLING_ROOT para admitir una
-// máquina: KLING_MIN_FREE_DISK_MIB, o 2 GiB.
+// máquina: KLING_MIN_FREE_DISK_MIB, o el de la plataforma (2 GiB en Linux,
+// 16 GiB en macOS: ver minDiscoLibrePlataforma).
 func minFreeDiskMiB() int64 {
 	if v := os.Getenv("KLING_MIN_FREE_DISK_MIB"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
 			return n
 		}
 	}
-	return 2048
+	return minDiscoLibrePlataforma
+}
+
+// defaultMaxSwapPct es el tope de swap usado (ver evaluarSwap) por encima del
+// cual no se admiten máquinas: KLING_MAX_SWAP_PCT, 0 lo apaga.
+const defaultMaxSwapPct = 85
+
+func maxSwapPct() int64 {
+	if v := os.Getenv("KLING_MAX_SWAP_PCT"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 && n <= 100 {
+			return n
+		}
+	}
+	return defaultMaxSwapPct
+}
+
+// evaluarSwap es la admisión por swap sobre cifras ya leídas (MiB).
+//
+// macOS no tiene un swap de tamaño fijo: dynamic_pager añade ficheros de
+// 1 GiB en el volumen VM mientras haya disco. "Usado sobre total" no dice
+// nada (un Mac sano va al 90 % de 4 GiB con 60 GiB libres: crecerá), así que
+// la capacidad es lo que YA hay más lo que aún puede crecer sin bajar del
+// mínimo de disco libre (libreDisco − minDisco). Con disco de sobra el
+// porcentaje es bajo; con el disco en su mínimo es usado/total, que es la
+// situación en la que se vieron páginas de la caché del invitado a ceros
+// (prototypes/android/docs/sigill.md: swap 8–9 de 9,2 GB con el disco al
+// 97–98 %). 507, como el resto de la admisión de memoria.
+func evaluarSwap(usado, total, libreDisco, minDisco, maxPct int64) error {
+	if maxPct <= 0 || total <= 0 || usado <= 0 {
+		return nil
+	}
+	capacidad := total + max(0, libreDisco-minDisco)
+	pct := usado * 100 / capacidad
+	if pct < maxPct {
+		return nil
+	}
+	return &api.StatusError{Code: api.StatusInsufficientMemory, Message: fmt.Sprintf(
+		"the host swap is %d%% full (%d of %d MiB, and only %d MiB of disk left for it to grow; limit %d%%).\n"+
+			"Under this pressure macOS has handed guests pages of zeros (docs/estabilidad.md); another "+
+			"microVM would make it worse.\n"+
+			"Freeze or remove idle instances (`kling ps`), free disk, or raise the limit with KLING_MAX_SWAP_PCT",
+		pct, usado, total, max(0, libreDisco-minDisco), maxPct)}
 }
 
 // checkDisk rechaza si queda poco disco. 503 y NO 507: el planificador contesta
@@ -124,7 +166,7 @@ func (m *Manager) admitir() error {
 	if err := m.checkDisk(); err != nil {
 		return err
 	}
-	if err := checkPresionPlataforma(); err != nil {
+	if err := m.checkPresionPlataforma(); err != nil {
 		return err
 	}
 	return checkPressure()

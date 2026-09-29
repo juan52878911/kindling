@@ -8,6 +8,9 @@ package net
 // internal/machine. Estas funciones existen para que el gestor de máquinas no
 // tenga que distinguir sistemas en cada arranque: aquí no hacen nada.
 
+// redEnHost: en macOS no hay enlaces en el host con los que chocar.
+const redEnHost = false
+
 // nsIP en macOS es la IP del propio invitado. Es informativa: el host no tiene
 // ruta hacia ella y alcanza a cada invitado por los reenvíos de su ayudante
 // (api.Machine.Addr).

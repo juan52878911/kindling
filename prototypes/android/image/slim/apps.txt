@@ -1,0 +1,37 @@
+# Apps del sistema que SLIM=1 quita del rootfs (rutas dentro de Android).
+# Se quedan: SystemUI, Launcher3QuickStep, Settings, SettingsProvider, Shell,
+# PackageInstaller, webview, los proveedores (contactos, descargas, medios...),
+# TeleService/Telecom y todo lo de /system/apex.
+/system/product/app/Browser2
+/system/product/app/Calendar
+/system/product/app/Camera2
+/system/product/app/DeskClock
+/system/product/app/Gallery2
+/system/product/app/Music
+/system/product/app/PhotoTable
+/system/product/app/QuickSearchBox
+/system/product/priv-app/Contacts
+/system/product/priv-app/OneTimeInitializer
+/system/product/priv-app/SettingsIntelligence
+/system/system_ext/app/WAPPushManager
+/system/system_ext/priv-app/WallpaperCropper
+/system/app/BasicDreams
+/system/app/BluetoothMidiService
+/system/app/BookmarkProvider
+/system/app/CameraExtensionsProxy
+/system/app/EasterEgg
+/system/app/NfcNci
+/system/app/PrintRecommendationService
+/system/app/SecureElement
+/system/app/SimAppDialog
+/system/app/Traceur
+/system/priv-app/BuiltInPrintService
+/system/priv-app/CalendarProvider
+/system/priv-app/DynamicSystemInstallationService
+/system/priv-app/LiveWallpapersPicker
+/system/priv-app/ManagedProvisioning
+/system/priv-app/MmsService
+/system/priv-app/MusicFX
+/system/priv-app/SharedStorageBackup
+/system/priv-app/SoundPicker
+/system/priv-app/StatementService

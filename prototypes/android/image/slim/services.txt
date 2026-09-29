@@ -1,0 +1,31 @@
+# Servicios de init que SLIM=1 comenta (apply.sh). Un teléfono de
+# automatización sin sonido, cámara, radio, wifi ni Bluetooth.
+# Lo que NO se toca, porque se rompe algo: servicemanager, hwservicemanager,
+# surfaceflinger, zygote, netd, vold, installd, keystore2, logd, lmkd,
+# gralloc/hwcomposer, adbd, gatekeeper; y tampoco la HAL térmica (system_server
+# se queda esperándola para siempre en HardwarePropertiesManagerService),
+# storaged ni statsd (StorageManagerService y otros los reintentan en bucle).
+# Ver docs/densidad.md.
+
+# Bluetooth: en Redroid la HAL simulada y la pila mueren en bucle
+vendor.bluetooth-1-1
+# radio
+vendor.ril-daemon
+# wifi
+vendor.wifi_hal_legacy
+wificond
+# cámara
+cameraserver
+# trazas y diagnóstico
+traced
+traced_probes
+traced_perf
+incidentd
+# red local que nadie usa (egress none)
+mdnsd
+# DRM y CAS
+vendor.cas-hal-1-2
+drm
+vendor.drm-clearkey-hal-1-4
+# VNC
+vendor.vncserver

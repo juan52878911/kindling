@@ -31,10 +31,25 @@ type GuestResync struct {
 	UnixNano int64 `json:"unix_nano"`
 	// Entropy son bytes aleatorios del host (base64 en el JSON).
 	Entropy []byte `json:"entropy"`
+	// Restore dice de qué restauración viene: ResyncThaw (la misma máquina
+	// que se congeló) o ResyncInstance (una copia de un dorado: run -from,
+	// fork). Los ganchos lo reciben en KLING_RESTORE. Vacío = daemon anterior.
+	Restore string `json:"restore,omitempty"`
 }
+
+// Valores de GuestResync.Restore.
+const (
+	ResyncThaw     = "thaw"
+	ResyncInstance = "instance"
+)
 
 // GuestResyncResult es la respuesta: cuánto estaba desfasado el reloj del
 // invitado antes de corregirlo (positivo = iba atrasado). Solo diagnóstico.
 type GuestResyncResult struct {
 	SkewMS int64 `json:"skew_ms"`
+	// Ready es el estado de "listo" justo tras resincronizar, sin ejecutar la
+	// sonda (el último resultado que el agente recuerda) y con los ganchos ya
+	// en marcha. nil = agente anterior a /ready. Ahorra al daemon una
+	// petición en cada restauración.
+	Ready *GuestReady `json:"ready,omitempty"`
 }
