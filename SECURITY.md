@@ -644,7 +644,11 @@ cambia:
   crea con `O_EXCL|O_NOFOLLOW` y se cede al VMM con `fchown` sobre el descriptor, porque en
   el jail está en un directorio del VMM; al recuperarlo del jail se exige que sea el mismo
   inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
-  descarta igualmente (el dorado no correspondería a la memoria volcada).
+  descarta igualmente (el dorado no correspondería a la memoria volcada). En macOS el
+  clon es `fclonefileat(2)` desde el mismo descriptor: crea el destino él mismo (falla si
+  existe, enlace incluido), y el daemon lo abre relativo al directorio con `O_NOFOLLOW` y
+  exige fichero regular, un solo enlace (no un hardlink a otro fichero puesto en su
+  lugar), dueño el daemon (`CLONE_NOOWNERCOPY`) y el tamaño del origen.
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
