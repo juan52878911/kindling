@@ -105,6 +105,12 @@ func manifest() plugin.Manifest {
 				Subcommands: []string{"image", "build"}},
 			{Name: "clone", Group: "TEMPLATES", Summary: "a golden from a production database, personal data masked",
 				Usage: usage("clone <postgres-url> -mask RULES [-golden G]", "read-only, dumped and masked inside a microVM")},
+			{Name: "slice", Group: "TEMPLATES", Summary: "a golden with one production table and its related rows, masked",
+				Usage: usage("slice <postgres-url> -table T -mask RULES [-rows N]", "the rest of the schema as empty tables")},
+			{Name: "observe", Group: "DIAGNOSE", Summary: "logs and reports the statements that touch a table",
+				Usage: usage("observe <copy> | -off <copy>", "log every statement of new connections, with its duration") +
+					usage("observe -report <copy> [-table T] [-json]", "the statements that touch the table, grouped"),
+				MachineArgs: []string{""}},
 			{Name: "templates", Group: "TEMPLATES", Summary: "lists the bundled database templates",
 				Usage: usage("templates", "empty, crm-demo...")},
 		},
@@ -138,6 +144,8 @@ func main() {
 		"ask-web":      cmdAskWeb,
 		"golden":       cmdGolden,
 		"clone":        cmdClone,
+		"slice":        cmdSlice,
+		"observe":      cmdObserve,
 		"role":         cmdRole,
 		"templates":    cmdTemplates,
 	}, map[string]func([]string, io.Writer) error{})

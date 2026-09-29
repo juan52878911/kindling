@@ -363,8 +363,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     de TODAS las credenciales Postgres de la máquina y así elige la credencial; después
     exige que el rol sea el de la credencial y, si la credencial fija base de datos, esa.
     Las conexiones de replicación, los parámetros repetidos y los arranques de más de
-    10000 bytes se rechazan; las opciones `_pq_.` y el protocolo 3.2 se contestan con
-    `NegotiateProtocolVersion` (3.0).
+    10000 bytes se rechazan; las opciones `_pq_.`, la versión 3.1 y las 3.3+ se
+    contestan con `NegotiateProtocolVersion` (3.0 o 3.2); 3.0 y 3.2 se hablan tal cual.
   - **Hacia el servidor, TLS verificado por defecto.** Sin `-upstream`, sale por el mismo
     dialer de solo IPv4 públicas que el proxy HTTP (un servidor en la red privada, en
     `169.254/16` o en loopback **se rechaza**, como un DNS envenenado), manda `SSLRequest` y lee la
@@ -467,7 +467,16 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     `BackendKeyData`: la clave de cancelación se cambia por una aleatoria, y un
     `CancelRequest` con ella se traduce a la real en una conexión nueva al mismo destino
     y con el mismo modo TLS;
-    uno con una clave que el proxy no dio se cierra sin más.
+    uno con una clave que el proxy no dio se cierra sin más. Con el protocolo 3.2
+    (PostgreSQL 18) la clave es de longitud variable: la falsa tiene la longitud de la
+    versión del invitado (4 bytes en 3.0, 32 en 3.2) y la real se guarda tal cual la da
+    el servidor, que tiene que ser de SU versión (4 bytes en 3.0, 4-256 en 3.2); un
+    segundo `BackendKeyData` o una clave de otra longitud cortan la conexión antes de
+    que el invitado reciba nada. Un `NegotiateProtocolVersion` del servidor solo vale
+    como primer mensaje, una vez, a una versión menor más baja que la pedida y sin
+    opciones rechazadas (el proxy no manda ninguna); cualquier otro es un fallo de
+    autenticación. Un `CancelRequest` con una clave de más de 256 bytes se rechaza como
+    arranque mal formado.
   - **Límites**: 32 conexiones a la vez por máquina, 10 s para que el invitado mande
     arranque y contraseña y 15 s para toda la autenticación; tras ella no hay plazo de
     inactividad (un pool puede estar horas callado), hay keepalive TCP de 30 s.
@@ -918,6 +927,34 @@ Qué **no** garantiza:
   escritura. Dale un rol que de verdad solo lea.
 - El tramo entre el invitado y el proxy va en claro dentro de la máquina (como en §7), y
   el del proxy al servidor, en claro si se eligió `sslmode=disable`.
+
+**`kling db slice`** (una tabla, sus filas relacionadas y el resto del esquema vacío; ver
+[docs/db.md](docs/db.md#una-tabla-de-producción-slice-y-observación)) es `clone` con otro
+relleno y hereda todo lo anterior: misma máquina, misma credencial en el proxy, misma
+comprobación del rol, mismo enmascarado (con las mismas reglas, también para las tablas
+vacías) y mismo golden en una máquina nueva. Lo propio:
+
+- **Solo lectura en producción**: `pg_dump --schema-only`, una consulta del catálogo y
+  una sola sesión en `REPEATABLE READ READ ONLY` con `\copy (SELECT ...) TO PROGRAM`.
+  Las consultas las arma `kling-db` con nombres citados por el propio catálogo
+  (`quote_ident`); un nombre con caracteres de control o barras invertidas cerca de la
+  tabla detiene la construcción, y `-table` solo admite `[esquema.]nombre` sin comillas.
+- **Lo sin enmascarar sigue sin tocar un fichero**: cada `\copy` va por una tubería a un
+  psql del Postgres del tmpfs (`COPY FROM` con `session_replication_role = replica`, sin
+  disparadores ni comprobaciones de claves foráneas al cargar). En el tmpfs solo se
+  escriben los cargadores, que llevan nombres, no datos.
+- **Claves foráneas**: las que lo cargado no cumple quedan `NOT VALID` (o fuera, en una
+  particionada) y el informe lo dice; no se inventan ni se borran filas.
+
+**`kling db observe`** activa en una copia `log_min_duration_statement = 0` para la base de
+la aplicación. Consecuencia: **el log de Postgres de la copia pasa a llevar SQL**, con sus
+literales (lo que `kling db audit` daba por hecho que no pasaba; audit sigue leyendo solo
+los mensajes de conexión). Para acotarlo: sin los parámetros enlazados
+(`log_parameter_max_length = 0`), sin las sesiones del superusuario (así la rotación de
+la clave no llega al log), solo en la copia (el golden no cambia) y el informe normaliza
+las sentencias sin imprimir un literal. Úsalo en copias de goldens enmascarados y
+apágalo (`-off`) al terminar; un fork o un snapshot de una copia observada hereda los
+ajustes.
 
 ### 17. `kling db` con MySQL/MariaDB: la clave de cada copia no entra en el invitado
 

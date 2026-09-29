@@ -91,6 +91,29 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   abandonados y los rotos, y `/v1/templates` los lista con `kind: graph`. Sin nodos
   `lazy`, aristas `credential` ni volúmenes o carpetas del host en la plantilla. Ver
   [`ext/sandbox/README.md`](ext/sandbox/README.md#grafos-precalentados).
+- **`kling db slice` y `kling db observe` (#70).** `slice <postgres-url> -table T -mask
+  REGLAS [-rows N] [-related-rows N]` hace un golden con una sola tabla de producción: las
+  primeras N filas por clave primaria, los padres que apuntan y como mucho N hijos por
+  clave foránea que la apunta, y el resto del esquema como tablas vacías. Reutiliza la
+  máquina de construcción, la credencial en el proxy y el enmascarado de `clone`, y en
+  producción solo lee (`pg_dump --schema-only` y una sesión `REPEATABLE READ READ ONLY`
+  con `\copy ... TO PROGRAM` por tuberías dentro de la microVM). Las claves foráneas que lo
+  copiado no cumple quedan `NOT VALID` y el informe las nombra. `observe <copia>` registra
+  en el log de la copia cada sentencia de las conexiones nuevas con su duración (sin
+  parámetros ni sesiones del superusuario) y `observe -report` agrupa las que tocan la
+  tabla, normalizadas y sin literales. Los tiempos no son los de producción: importar las
+  estadísticas reales solo sería posible con PostgreSQL 18 (`pg_restore_relation_stats`).
+  Ver [`docs/db.md`](docs/db.md).
+- **Proxy de Postgres: protocolo 3.2 (#71).** El proxy de credenciales habla 3.0 y 3.2
+  (PostgreSQL 18), con claves de cancelación de longitud variable en `BackendKeyData` y
+  `CancelRequest`. El invitado recibe una clave falsa de la longitud de su versión (4 o
+  32 bytes) y la cancelación llega al servidor con la real, de la de la suya; con un
+  servidor anterior a 18, que contesta `NegotiateProtocolVersion` con 3.0, el proxy
+  sigue en 3.0 con él sin que el invitado lo note. 3.1 y 3.3+ se negocian a la baja. Un
+  `NegotiateProtocolVersion` del servidor fuera de sitio, una clave que no es de su
+  versión o un segundo `BackendKeyData` cortan la conexión. Probado con clientes y
+  servidores falsos 3.0 y 3.2 en las cuatro combinaciones; la prueba de laboratorio
+  (`-tags pglab`) cancela también en 3.2. Ver [`docs/postgres.md`](docs/postgres.md).
 
 ### Grafos desde los plugins
 

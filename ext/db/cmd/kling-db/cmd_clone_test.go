@@ -37,6 +37,10 @@ type cloneFake struct {
 	dumpErr error
 	// seedContent es lo que "copia" kling cp al host.
 	seedContent string
+	// discover, fillErr y fixup contestan los pasos de kling db slice.
+	discover string
+	fillErr  error
+	fixup    string
 }
 
 func newCloneFake() *cloneFake {
@@ -93,6 +97,12 @@ func (f *cloneFake) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			return []byte(f.probe), nil
 		case strings.Contains(s, "kling-db:clone-dump"):
 			return nil, f.dumpErr
+		case strings.Contains(s, sliceDiscoverMarker):
+			return []byte(f.discover), nil
+		case strings.Contains(s, sliceFillMarker):
+			return nil, f.fillErr
+		case strings.Contains(s, sliceFixupMarker):
+			return []byte(f.fixup), nil
 		case strings.Contains(s, dbmask.CatalogMarker):
 			return []byte(f.catalog), nil
 		case strings.Contains(s, dbmask.MaskMarker):

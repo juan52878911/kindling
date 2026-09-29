@@ -231,6 +231,15 @@ En node-postgres, `ssl: false`; en psycopg, `sslmode="disable"`; en JDBC,
   `scram-sha-256`, y el log del host avisa una vez por credencial: "server asked for the
   password in cleartext inside TLS; prefer SCRAM"). Sin md5, GSS/Kerberos, SSPI,
   certificados de cliente ni tokens IAM.
+- Protocolo 3.0 y 3.2 (el de PostgreSQL 18 y libpq 18 con
+  `max_protocol_version=3.2`), que solo se diferencian en la clave de cancelación (4
+  bytes en 3.0, hasta 256 en 3.2). Con el cliente se queda la versión que pida si es
+  una de esas dos; a la 3.1 (nunca se usó) o a una 3.3+ se contesta
+  `NegotiateProtocolVersion` con 3.0 o 3.2. Al servidor se le pide la misma: uno
+  anterior a PostgreSQL 18 contesta 3.0 y el proxy sigue en 3.0 con él sin que el
+  cliente lo note (la clave falsa del cliente tiene la longitud de su versión, 4 o 32
+  bytes; la real, la del servidor). Las opciones `_pq_.` no se pasan: se contestan con
+  `NegotiateProtocolVersion`.
 - La contraseña, ASCII imprimible. 32 conexiones a la vez por máquina, 10 s para que el
   invitado mande arranque y contraseña, 15 s para toda la autenticación. Sin
   conexiones de replicación.
