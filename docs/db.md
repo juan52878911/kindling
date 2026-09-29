@@ -791,6 +791,13 @@ las tablas relacionadas sí pueden tenerlas). El golden se llama `<base>-<tabla>
 salvo con `-golden`, y en el host queda `<estado>/<golden>/slice.json` (0600) con la tabla,
 el origen sin contraseña y los topes: `observe -report` lo usa para saber la tabla.
 
+Probado en el lab (2026-09-29) contra un Postgres 16 en Docker, con un rol de solo lectura:
+`orders` particionada, una tabla que se referencia a sí misma, otra con un espacio en el
+nombre (`"Order Notes"`) y una sin clave primaria. Con `-rows 200`, 8 tablas y 850 filas en
+7,5 s; 0 filas huérfanas, todas las claves foráneas validadas, ningún correo original y la
+secuencia sigue tras el máximo. `observe -report` agrupó las dos sentencias sobre `orders`,
+con los literales sustituidos.
+
 **Observación.** `kling db observe <copia>` pone, para la base de la aplicación,
 `log_min_duration_statement = 0` y `log_parameter_max_length = 0`, y deja fuera al
 superusuario (`ALTER ROLE postgres IN DATABASE ... SET log_min_duration_statement = -1`),
