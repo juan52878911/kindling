@@ -22,10 +22,25 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   en cada conexión y despierta al destino si duerme) y `credential` (el attach de
   Postgres de `kling db`, por dentro). El FORWARD entre namespaces sigue cerrado; el
   resolver de un nodo sirve solo los `*.graph` de sus aristas, también en `egress
-  none`. Las conexiones quedan en la auditoría con `kind: link`. En macOS funcionan
-  `up/freeze/thaw/snapshot/fork/rm`, y una arista entre máquinas es `501`. Nuevas rutas
+  none`. Las conexiones quedan en la auditoría con `kind: link`. En macOS también, por
+  el broker de enlaces (abajo). Nuevas rutas
   `/graphs`; las etiquetas `kling.graph*` y el espacio `graph` del store son del daemon.
   Ver [`docs/grafos.md`](docs/grafos.md).
+- **Aristas de grafo y `kling db attach` en macOS: el broker de enlaces** (#53). Antes,
+  `501`. Ahora el `kling-vz` de cada nodo sirve `<nodo>.graph` en su DNS (solo los de
+  sus aristas, en todos los modos) y, en cada conexión a una arista, pide la **arista**
+  (no una dirección) al daemon por un socket Unix privado del usuario, el único que su
+  sandbox le deja abrir. El daemon sabe qué máquina pregunta por el PID del otro
+  extremo, comprueba bajo su candado como en Linux (despertando al destino si duerme),
+  marca él mismo al reenvío del destino y le entrega el socket ya conectado; cortar es
+  cerrar ese socket en los dos lados. Las credenciales Postgres con `upstream_machine`
+  (aristas `credential` y `kling db attach`) van por el mismo camino, también en nodos
+  sin `egress allowlist` si todas van a otra máquina. `kling-vz` lo anuncia con
+  `graph-link` en `credential_kinds`; uno anterior no recibe aristas ni esas
+  credenciales, y el error dice que hay que reconstruirlo. Nueva ruta de `kling-vz`
+  `PUT /kling/graph` y paquete `pkg/linkbroker`. e2e: sección 6g de
+  `scripts/92-e2e-mac.sh` y `attach` en su 6f. Ver [`docs/grafos.md`](docs/grafos.md) y
+  SECURITY.md §15.
 - **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del
   overlay de cada instancia es un clon por reflink: con la raíz en XFS/Btrfs, FICLONE
   directo; en ext4, un almacén XFS propio (`$root/cow.xfs`, montado por loop en
@@ -74,15 +89,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   congela las demás (0 RAM) y escribe `DATABASE_URL` en `.git/kling-db.env` (0600, nunca
   en el árbol de trabajo). Además `-ls`, `-rm` y `-prune`. Ver
   [`docs/db.md`](docs/db.md#una-base-por-rama).
-- **`kling db attach` / `detach` (modelo A, solo Linux).** Una copia compartida por
+- **`kling db attach` / `detach` (modelo A).** Una copia compartida por
   agentes de otras microVMs, por el proxy de credenciales de Postgres de cada uno: el
   agente recibe un marcador y nunca la contraseña (la de la copia o la de un rol de
   `kling db role`). La credencial guarda el id de la copia (`upstream_machine`), no una
   dirección: el daemon la resuelve en cada conexión y solo si la copia sigue corriendo,
   lista y del mismo `kling.db.owner` que el agente. Congelar, parar o borrar la copia
   corta las sesiones abiertas. Nuevo `DELETE /machines/{ref}/credentials/{env}` y
-  `kling machine credential -rm`; capacidad `db-attach`. En macOS se rechaza con un error
-  claro. Ver [`docs/db.md`](docs/db.md).
+  `kling machine credential -rm`; capacidad `db-attach`. En macOS, por el broker de
+  enlaces (arriba). Ver [`docs/db.md`](docs/db.md).
 - **`kling db` en CI.** Scripts (`ext/db/scripts/ci-load.sh`, `ci-pr-db.sh`) y ejemplos de
   GitHub Actions y GitLab CI para una base por PR. Ver [`docs/db-ci.md`](docs/db-ci.md).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
@@ -92,6 +107,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **El broker de enlaces de macOS no da direcciones.** `kling-vz` pide la arista y el
+  daemon entrega el socket ya conectado tras comprobarla bajo su candado y volver a
+  mirar que el destino no cambió al marcar: ni TOCTOU entre resolver y marcar, ni
+  `kling-vz` marcando a los reenvíos de otras máquinas. Quién pregunta lo dice el
+  kernel (`LOCAL_PEERPID`), no la petición; una credencial hacia otra máquina solo se
+  atiende si está en el almacén de quien pregunta; el 8080 se rechaza también ahí; y
+  hay topes por arista, por máquina y en el broker. Ver SECURITY.md §15.
 - **Almacén de discos copy-on-write.** Cada jail recibe por bind solo el directorio del
   overlay de su instancia (nunca el almacén entero); el bind se desmonta antes de borrar
   el jail y, si no se puede, el jail no se borra. El almacén se monta

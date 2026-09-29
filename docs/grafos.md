@@ -72,9 +72,10 @@ La clave nunca va en el fichero ni sale por la API: viaja una vez al daemon, que
 guarda cifrada (`store/graph/<id>.secrets.enc`) para los nodos lazy y los forks.
 
 Límites: 32 nodos, 64 aristas, 16 conexiones a la vez por arista `link`. Todas las
-aristas de un nodo llegan por la misma dirección (la del host en su veth), así que un
-nodo alcanza **un nodo por puerto**, y los puertos 53, 80 y 443 no valen en un `link`
-(son el DNS y el proxy de credenciales de esa dirección).
+aristas de un nodo llegan por la misma dirección (la del host en su veth en Linux, la
+pasarela de su red en macOS), así que un nodo alcanza **un nodo por puerto**, y los
+puertos 53, 80 y 443 no valen en un `link` (son el DNS y el proxy de credenciales de
+esa dirección).
 
 ## Operaciones
 
@@ -141,17 +142,36 @@ Nada de red entre máquinas: el FORWARD entre namespaces sigue cerrado.
 El tramo del proxy al destino va en claro por el host, como el attach de Postgres; las
 credenciales siguen exigiendo SCRAM.
 
-## macOS
+## Cómo llega un nodo a otro (macOS)
 
-`up`, `freeze`, `thaw`, `snapshot`, `fork` y `rm` funcionan igual. Una arista `link` o
-`credential` devuelve `501`: allí la red vive dentro de cada `kling-vz` y el daemon no
-puede resolver bajo su candado en cada conexión (el mismo motivo que `kling db attach`).
-Un grafo sin aristas entre máquinas es un grupo con ciclo de vida atómico.
+Lo mismo, con otra fontanería: allí la red de cada invitado vive dentro de su
+`kling-vz` (una pila de red de usuario) y todos los invitados se alcanzan por reenvíos
+del loopback. `kling-vz` no conoce a las demás máquinas ni recibe nunca una dirección.
+
+1. El DNS de su `kling-vz` contesta los `<nodo>.graph` de SUS aristas con la pasarela
+   (`172.16.0.1`), y NXDOMAIN a cualquier otro `*.graph`, en todos los modos.
+2. Una conexión del invitado a la pasarela en el puerto de una arista `link` (o al
+   proxy de Postgres, para una `credential`) se convierte en una petición al **broker
+   de enlaces** del daemon: un socket Unix en un directorio privado del usuario, el
+   único que el sandbox de `kling-vz` le deja abrir. La petición dice qué arista
+   (`api.graph:8081`), no a dónde.
+3. El daemon sabe qué máquina pregunta por el PID del otro extremo del socket, hace
+   las mismas comprobaciones que en Linux bajo su candado (despertando al destino si
+   duerme), **marca él mismo** al reenvío del destino, comprueba que sigue siendo el
+   mismo y le entrega a `kling-vz` el socket ya conectado.
+4. Cortar (congelar, pausar, parar o borrar el destino) es cerrar ese socket en los
+   dos lados: el daemon guarda su copia. Si el daemon se reinicia, las sesiones en
+   curso se cortan; las nuevas funcionan en cuanto vuelve.
+
+La auditoría es la misma (`kind: link` en el registro del nodo de origen). Hace falta
+un `kling-vz` que anuncie `graph-link` en `credential_kinds`: con uno anterior, las
+aristas fallan cerradas y el daemon dice que hay que reconstruirlo. Ver
+[SECURITY.md §15](../SECURITY.md#15-grafos-cada-arista-es-una-autorización-no-una-red).
 
 ## Lo que no está en esta versión
 
 Aristas `share` y `depends` (las carpetas se declaran en los `shares` del nodo; un
-`lazy` despierta con su primera conexión), arista `mcp`, enlaces en macOS, `idle_freeze`
+`lazy` despierta con su primera conexión), arista `mcp`, `idle_freeze`
 renovado por conexión (hoy es el TTL de siempre de la máquina) y grafos
 precalentados en el fondo del sandbox.
 
