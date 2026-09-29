@@ -329,39 +329,10 @@ func (m *Manager) GraphFork(ctx context.Context, ref string, n int) (out []*api.
 			}
 			ng.Nodes[nombreNodo] = nd
 		}
-		m.mu.Lock()
-		if m.grafos == nil {
-			m.grafos = map[string]*api.Graph{}
-		}
-		m.grafos[ng.ID] = ng
-		m.mu.Unlock()
 		creados = append(creados, ng.ID)
-		if err := m.guardarSecretosGrafo(ng.ID, secretos); err != nil {
-			return nil, err
-		}
-		if err := m.guardarGrafo(ng.ID); err != nil {
-			return nil, err
-		}
-		for _, nombreNodo := range ng.SortedNodeNames() {
-			if plantillas[nombreNodo] == "" {
-				continue // lazy sin instancia en el original: sigue así
-			}
-			if err := m.instanciarNodo(ctx, ng.ID, nombreNodo, origDe[nombreNodo]); err != nil {
-				return nil, fmt.Errorf("fork %d of %d: node %s: %w", i+1, n, nombreNodo, err)
-			}
-		}
-		for _, nombreNodo := range ng.SortedNodeNames() {
-			creds, err := m.credencialesReescritas(gid, ng.ID, credsPorNodo[nombreNodo])
-			if err != nil {
-				return nil, err
-			}
-			if err := m.conectarNodo(ctx, ng.ID, nombreNodo, creds); err != nil {
-				return nil, fmt.Errorf("fork %d of %d: node %s: %w", i+1, n, nombreNodo, err)
-			}
-		}
-		g, err := m.Graph(ng.ID)
+		g, err := m.crearCopiaFork(ctx, gid, ng, secretos, plantillas, origDe, credsPorNodo)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("fork %d of %d: %w", i+1, n, err)
 		}
 		out = append(out, g)
 	}
@@ -375,6 +346,46 @@ func (m *Manager) GraphFork(ctx context.Context, ref string, n int) (out []*api.
 	}
 	log.Printf("graph %s (%s): forked into %d graph(s)", orig.Name, shortID(gid), n)
 	return out, nil
+}
+
+// crearCopiaFork registra el grafo ng (una copia de gid), arranca los nodos
+// que tenían máquina en el original desde sus plantillas y les monta las
+// aristas con las credenciales del original reescritas. Con el cerrojo del
+// grafo nuevo: ya se ve en la lista mientras arranca.
+func (m *Manager) crearCopiaFork(ctx context.Context, gid string, ng *api.Graph, secretos map[string]string,
+	plantillas, origDe map[string]string, credsPorNodo map[string][]credproxy.Credential) (*api.Graph, error) {
+	defer m.lock(claveCerrojoGrafo(ng.ID))()
+	m.mu.Lock()
+	if m.grafos == nil {
+		m.grafos = map[string]*api.Graph{}
+	}
+	m.grafos[ng.ID] = ng
+	m.mu.Unlock()
+	if err := m.guardarSecretosGrafo(ng.ID, secretos); err != nil {
+		return nil, err
+	}
+	if err := m.guardarGrafo(ng.ID); err != nil {
+		return nil, err
+	}
+	nombres := ng.SortedNodeNames()
+	for _, nombreNodo := range nombres {
+		if plantillas[nombreNodo] == "" {
+			continue // lazy sin instancia en el original: sigue así
+		}
+		if err := m.instanciarNodo(ctx, ng.ID, nombreNodo, origDe[nombreNodo]); err != nil {
+			return nil, fmt.Errorf("node %s: %w", nombreNodo, err)
+		}
+	}
+	for _, nombreNodo := range nombres {
+		creds, err := m.credencialesReescritas(gid, ng.ID, credsPorNodo[nombreNodo])
+		if err != nil {
+			return nil, err
+		}
+		if err := m.conectarNodo(ctx, ng.ID, nombreNodo, creds); err != nil {
+			return nil, fmt.Errorf("node %s: %w", nombreNodo, err)
+		}
+	}
+	return m.Graph(ng.ID)
 }
 
 // credencialesReescritas son las credenciales de un nodo del grafo gid,
