@@ -16,7 +16,8 @@
 # golden "cowb-gold" from IMAGE with FILL_MIB of random data in its overlay),
 # IMAGE (default), FILL_MIB (200), MODES ("off auto"), COUNTS ("1 8 32"),
 # KLING (kling binary), ROOT (/var/lib/kindling), UNIT (kling), KEEP_GOLD=1
-# (do not remove the golden BUILD made).
+# (do not remove the golden BUILD made), STORE_GIB (size of the store if this
+# run creates it; default: a quarter of the free disk, at most 16 GiB).
 #
 # Leaves the daemon as it found it: KLING_COW is unset from the systemd
 # manager environment and the unit restarted at the end.
@@ -55,7 +56,7 @@ cleanup() {
   if [ "$BUILD" = "1" ] && [ "$KEEP_GOLD" != "1" ]; then
     "$KLING" template rm "$PREFIX-gold" >/dev/null 2>&1
   fi
-  systemctl unset-environment KLING_COW >/dev/null 2>&1
+  systemctl unset-environment KLING_COW KLING_COW_STORE_GIB >/dev/null 2>&1
   systemctl restart "$UNIT" >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -70,6 +71,9 @@ wait_daemon() {
 
 restart_with() {
   systemctl set-environment KLING_COW="$1" || die "systemctl set-environment failed"
+  if [ -n "${STORE_GIB:-}" ]; then
+    systemctl set-environment KLING_COW_STORE_GIB="$STORE_GIB" || die "systemctl set-environment failed"
+  fi
   systemctl restart "$UNIT" || die "systemctl restart $UNIT failed"
   wait_daemon
 }
