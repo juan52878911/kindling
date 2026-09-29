@@ -676,6 +676,21 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   almacén de credenciales y el grafo como dato autenticado: copiadas a otro grafo no se
   abren).
 
+- **Las carpetas de las aristas `share` son del daemon.** Viven en
+  `$KLING_ROOT/graph-shares/<grafo>` (0700), fuera del almacén que lee `/store`, y se
+  borran con el grafo. Se montan sin pasar por `daemon.share_roots` solo porque el
+  permiso viaja en el contexto interno con el que el manager arranca ESE nodo (la ruta
+  exacta de cada carpeta de sus aristas); una petición de `run` o `sandbox` con la misma
+  ruta pasa por `share_roots` como cualquier otra y se rechaza. El dueño la monta `rw` y
+  quien la ve, `ro` salvo que la arista diga `rw`. Un grafo con `share` no se vuelca
+  (snapshot ni fork, 409), por el mismo motivo que `commit` no toma una máquina con
+  `-share`.
+- **`depends` no abre nada.** Solo ordena arranques y, con `port`, el daemon marca al
+  puerto del destino desde el host para saber si contesta (lo que ya hace con cualquier
+  invitado); el 8080 del agente no vale tampoco aquí.
+- **No hay arista `mcp`.** El puente MCP escucha solo en el 8080, junto al agente; una
+  arista a él daría `exec` sobre el servidor. Se rechaza al validar.
+
 Lo que queda: el tramo del proxy de enlace al destino va en claro por el host, como el
 attach de Postgres (las credenciales exigen SCRAM; un `link` es TCP crudo y su
 protocolo es cosa de la aplicación). En macOS no hay aristas entre máquinas en esta

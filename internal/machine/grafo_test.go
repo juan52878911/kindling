@@ -41,6 +41,12 @@ type escenaGrafo struct {
 	eventos  []string
 	redes    map[string]knet.GraphSpec
 	despiert atomic.Int32
+	// peticiones: el RunRequest de cada máquina arrancada, por nombre, y las
+	// carpetas de grafo que su contexto permitía montar.
+	peticiones map[string]api.RunRequest
+	permitidas map[string][]string
+	// puertos: las direcciones a las que se esperó (esperarPuertoGrafo).
+	puertos []string
 }
 
 func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
@@ -48,7 +54,8 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 	m := newTestManager(t)
 	m.bus = events.New()
 	m.priv = &Privileges{}
-	e := &escenaGrafo{t: t, m: m, redes: map[string]knet.GraphSpec{}}
+	e := &escenaGrafo{t: t, m: m, redes: map[string]knet.GraphSpec{},
+		peticiones: map[string]api.RunRequest{}, permitidas: map[string][]string{}}
 
 	pArr, pDesp, pCong, pRed := arrancarNodoGrafo, despertarNodoGrafo, congelarNodoGrafo, montarRedGrafo
 	pPaus, pReanu, pCommit, pBorrar, pPuerto := pausarNodoGrafo, reanudarNodoGrafo, commitNodoPausado, borrarSnapshotGrafo, esperarPuertoGrafo
@@ -67,6 +74,14 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 			}
 		}
 		e.arrancadas.Add(1)
+		e.mu.Lock()
+		e.peticiones[req.Name] = req
+		for _, sh := range req.Shares {
+			if carpetaDeGrafo(ctx, sh.Source) {
+				e.permitidas[req.Name] = append(e.permitidas[req.Name], sh.Source)
+			}
+		}
+		e.mu.Unlock()
 		f := nuevoFcFalso(t)
 		id := newID()
 		if err := os.MkdirAll(m.dir(id), 0o755); err != nil {
@@ -130,7 +145,12 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 		e.anotar("rmsnap " + name)
 		return os.RemoveAll(m.snapDir(name))
 	}
-	esperarPuertoGrafo = func(context.Context, string) error { return nil }
+	esperarPuertoGrafo = func(_ context.Context, addr string) error {
+		e.mu.Lock()
+		e.puertos = append(e.puertos, addr)
+		e.mu.Unlock()
+		return nil
+	}
 	montarRedGrafo = func(n *knet.Net, spec knet.GraphSpec) error {
 		e.mu.Lock()
 		e.redes[n.NS] = spec
@@ -927,5 +947,253 @@ func TestGrafoSecretosCifrados(t *testing.T) {
 	}
 	if _, err := secretosDeAristas(&api.Graph{}, map[string]string{"x/Y": "z"}); err == nil {
 		t.Fatal("una clave sin arista se aceptó")
+	}
+}
+
+// ── aristas depends y share ──────────────────────────────────────────────────
+
+// grafoCadena: a depende de b, b de c (lazy); d suelto. Sin puertos en las
+// depends, que es lo que vale en todas las plataformas.
+func grafoCadena() api.Graph {
+	return api.Graph{Name: "cadena", Nodes: map[string]api.GraphNode{
+		"a": {Image: "min"},
+		"b": {Image: "min", Ports: []int{8081}},
+		"c": {Image: "min", Wake: api.GraphWakeLazy},
+		"d": {Image: "min"},
+	}, Edges: []api.GraphEdge{
+		{From: "a", To: "b", Kind: api.GraphEdgeDepends},
+		{From: "b", To: "c", Kind: api.GraphEdgeDepends},
+	}}
+}
+
+// up arranca en orden de depends, y un lazy del que depende un eager arranca
+// con él; freeze va al revés y thaw otra vez al derecho; la pausa de un
+// snapshot, como freeze.
+func TestGrafoDependsOrden(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g, err := e.m.GraphUp(context.Background(), grafoCadena(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(e.vistos(), "|"); got != "run cadena-c|run cadena-b|run cadena-a|run cadena-d" {
+		t.Fatalf("up: %s", got)
+	}
+	if g.Nodes["c"].MachineID == "" {
+		t.Fatal("el lazy del que depende b se quedó sin máquina")
+	}
+	e.olvidar()
+	if _, err := e.m.GraphFreeze(context.Background(), "cadena"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.GraphThaw(context.Background(), "cadena"); err != nil {
+		t.Fatal(err)
+	}
+	want := "freeze a|freeze b|freeze c|freeze d|thaw c|thaw b|thaw a|thaw d"
+	if got := strings.Join(e.vistos(), "|"); got != want {
+		t.Fatalf("freeze/thaw:\n got %s\nwant %s", got, want)
+	}
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "cadena", ""); err != nil {
+		t.Fatal(err)
+	}
+	var pausas, reanudas []string
+	for _, v := range e.vistos() {
+		if n, ok := strings.CutPrefix(v, "pause "); ok {
+			pausas = append(pausas, n)
+		}
+		if n, ok := strings.CutPrefix(v, "resume "); ok {
+			reanudas = append(reanudas, n)
+		}
+	}
+	if strings.Join(pausas, ",") != "a,b,c,d" || strings.Join(reanudas, ",") != "c,b,a,d" {
+		t.Fatalf("snapshot: pausas %v, reanudaciones %v", pausas, reanudas)
+	}
+}
+
+// Un nodo que despierta por su primera conexión despierta antes lo que
+// depende: web -> api (link), api lazy depende de db lazy.
+func TestGrafoDependsAlDespertar(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := grafoTienda(false)
+	n := g.Nodes["api"]
+	n.Wake = api.GraphWakeLazy
+	g.Nodes["api"] = n
+	g.Edges = append(g.Edges, api.GraphEdge{From: "api", To: "db", Kind: api.GraphEdgeDepends})
+	gg := e.montarGrafo(g)
+	if e.maquina(gg.ID, "api") != "" || e.maquina(gg.ID, "db") != "" {
+		t.Fatal("los lazy nacieron con máquina")
+	}
+	e.olvidar()
+	web := e.maquina(gg.ID, "web")
+	addr, _, err := e.m.resolverArista(context.Background(), web, gg.ID, "web", "api", 8081, api.GraphEdgeLink)
+	if got := strings.Join(e.vistos(), "|"); got != "run tienda-db|run tienda-api" {
+		t.Fatalf("despertar: %s", got)
+	}
+	e.comprobarDireccion(addr, err, e.maquina(gg.ID, "api"), 8081)
+
+	// Congelado todo, un despertar de api descongela db antes.
+	for _, nodo := range []string{"api", "db"} {
+		e.m.mu.Lock()
+		e.m.byID[e.maquinaSinLock(gg.ID, nodo)].State = api.StateWarm
+		e.m.mu.Unlock()
+	}
+	e.olvidar()
+	_, _, _ = e.m.resolverArista(context.Background(), web, gg.ID, "web", "api", 8081, api.GraphEdgeLink)
+	if got := strings.Join(e.vistos(), "|"); got != "thaw db|thaw api" {
+		t.Fatalf("descongelar: %s", got)
+	}
+}
+
+// Si la dependencia no arranca, el nodo que depende de ella tampoco.
+func TestGrafoDependsFallaLaDependencia(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	e.fallarArranque = func(nombre string) error {
+		if nombre == "cadena-c" {
+			return errors.New("imagen rota")
+		}
+		return nil
+	}
+	_, err := e.m.GraphUp(context.Background(), grafoCadena(), nil)
+	if err == nil || !strings.Contains(err.Error(), "imagen rota") {
+		t.Fatalf("esperaba el fallo de c, llegó %v", err)
+	}
+	for _, v := range e.vistos() {
+		if v == "run cadena-a" || v == "run cadena-b" {
+			t.Fatalf("arrancó %s sin su dependencia", v)
+		}
+	}
+	if n := len(e.m.List()); n != 0 {
+		t.Fatalf("quedaron %d máquinas", n)
+	}
+}
+
+// Una depends con puerto espera a que ese puerto conteste (Linux); en macOS
+// el host no marca a los invitados y es un 501.
+func TestGrafoDependsConPuerto(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := grafoCadena()
+	g.Edges[0].Port = 8081
+	out, err := e.m.GraphUp(context.Background(), g, nil)
+	if !modeloAPosible {
+		var se *api.StatusError
+		if !errors.As(err, &se) || se.Code != 501 || !strings.Contains(err.Error(), "Linux-only") {
+			t.Fatalf("macOS: esperaba 501, llegó %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := out.Nodes["b"].MachineID
+	e.m.mu.RLock()
+	want := net.JoinHostPort(knet.Plan(e.m.byID[b].NetIndex, b).NSIP, "8081")
+	e.m.mu.RUnlock()
+	e.mu.Lock()
+	puertos := append([]string(nil), e.puertos...)
+	e.mu.Unlock()
+	if len(puertos) != 1 || puertos[0] != want {
+		t.Fatalf("esperó a %v, esperaba %s", puertos, want)
+	}
+	// Si el puerto no contesta, a no arranca.
+	esperarPuertoGrafo = func(context.Context, string) error { return errors.New("sin respuesta") }
+	g.Name = "cadena2"
+	if _, err := e.m.GraphUp(context.Background(), g, nil); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("puerto mudo: %v", err)
+	}
+}
+
+// grafoTaller: web (ro) y worker (rw, lazy) ven la carpeta /data de files.
+func grafoTaller() api.Graph {
+	return api.Graph{Name: "taller", Nodes: map[string]api.GraphNode{
+		"files":  {Image: "min"},
+		"web":    {Image: "min"},
+		"worker": {Image: "min", Wake: api.GraphWakeLazy},
+	}, Edges: []api.GraphEdge{
+		{From: "web", To: "files", Kind: api.GraphEdgeShare, Mount: "/data"},
+		{From: "worker", To: "files", Kind: api.GraphEdgeShare, Mount: "/data", Mode: "rw"},
+	}}
+}
+
+// share: la carpeta es del grafo (en su directorio, 0700), el dueño la monta
+// rw y los demás con su modo; solo el contexto del nodo permite montarla sin
+// daemon.share_roots; rm la borra; snapshot y fork se niegan.
+func TestGrafoShare(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g, err := e.m.GraphUp(context.Background(), grafoTaller(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carpeta := e.m.carpetaGrafo(g.ID, "files", "/data")
+	if !strings.HasPrefix(carpeta, e.m.dirCarpetasGrafo(g.ID)+string(os.PathSeparator)) || strings.HasSuffix(carpeta, "data") {
+		t.Fatalf("carpeta: %s", carpeta)
+	}
+	fi, err := os.Stat(carpeta)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("la carpeta del grafo: %v %v", fi, err)
+	}
+	e.mu.Lock()
+	files, web, permWeb := e.peticiones["taller-files"], e.peticiones["taller-web"], e.permitidas["taller-web"]
+	_, worker := e.peticiones["taller-worker"]
+	e.mu.Unlock()
+	if len(files.Shares) != 1 || files.Shares[0] != (api.ShareSpec{Mode: "rw", Mount: "/data", Source: carpeta}) {
+		t.Fatalf("shares del dueño: %+v", files.Shares)
+	}
+	if len(web.Shares) != 1 || web.Shares[0] != (api.ShareSpec{Mode: "ro", Mount: "/data", Source: carpeta}) {
+		t.Fatalf("shares de web: %+v", web.Shares)
+	}
+	if len(permWeb) != 1 || permWeb[0] != carpeta {
+		t.Fatalf("el contexto de web no permitía su carpeta: %v", permWeb)
+	}
+	if worker {
+		t.Fatal("el lazy arrancó con up")
+	}
+	// El nodo lazy la monta rw al instanciarse.
+	if err := e.m.despertarNodoLocked(context.Background(), g.ID, "worker"); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	wr := e.peticiones["taller-worker"]
+	e.mu.Unlock()
+	if len(wr.Shares) != 1 || wr.Shares[0].Mode != "rw" || wr.Shares[0].Source != carpeta {
+		t.Fatalf("shares de worker: %+v", wr.Shares)
+	}
+
+	var se *api.StatusError
+	if _, err := e.m.GraphSnapshot(context.Background(), "taller", ""); !errors.As(err, &se) || se.Code != 409 || !strings.Contains(err.Error(), "share edges") {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if _, err := e.m.GraphFork(context.Background(), "taller", 1); !errors.As(err, &se) || se.Code != 409 {
+		t.Fatalf("fork: %v", err)
+	}
+	if err := e.m.GraphRemove(context.Background(), "taller"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(e.m.dirCarpetasGrafo(g.ID)); !os.IsNotExist(err) {
+		t.Fatalf("rm dejó las carpetas del grafo: %v", err)
+	}
+}
+
+// La carpeta de un grafo se acepta sin daemon.share_roots SOLO con el
+// contexto que pone instanciarNodo: una petición de fuera con la misma ruta se
+// rechaza como cualquier otra.
+func TestGrafoShareSoloConSuContexto(t *testing.T) {
+	m := newTestManager(t)
+	m.SetShareConfig(func() ShareConfig { return ShareConfig{} })
+	carpeta := m.carpetaGrafo("0123456789abcdef", "files", "/data")
+	if err := os.MkdirAll(carpeta, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req := api.RunRequest{Shares: []api.ShareSpec{{Mode: "rw", Mount: "/data", Source: carpeta}}}
+	if _, err := m.resolveShares(context.Background(), req, nil); err == nil {
+		t.Fatal("una petición sin el contexto del grafo montó su carpeta")
+	}
+	// Otra ruta con el contexto de esta carpeta tampoco.
+	otra := api.RunRequest{Shares: []api.ShareSpec{{Mode: "rw", Mount: "/data", Source: t.TempDir()}}}
+	if _, err := m.resolveShares(conCarpetasGrafo(context.Background(), []string{carpeta}), otra, nil); err == nil {
+		t.Fatal("el contexto de una carpeta dejó pasar otra")
+	}
+	rs, err := m.resolveShares(conCarpetasGrafo(context.Background(), []string{carpeta}), req, nil)
+	if err != nil || len(rs) != 1 || rs[0].att.Source != carpeta || rs[0].att.Mode != "rw" {
+		t.Fatalf("con su contexto: %+v %v", rs, err)
 	}
 }

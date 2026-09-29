@@ -1756,6 +1756,63 @@ except socket.gaierror as e:
   fi
   $KLING graph rm -f "$G" >/dev/null 2>&1
   $KLING template rm -f "$GDBT" >/dev/null 2>&1
+
+  # 8b. Aristas share y depends. Sin enlaces entre máquinas: valen también
+  # en macOS. files es lazy, pero web depende de él: arranca con up.
+  G2="e2e-g2-$$"
+  cat > "$GTMP/g2.yaml" <<EOF
+# e2e: web y worker ven /data de files; worker -> web -> files por depends
+name: $G2
+nodes:
+  files:  {image: $IMGVOL, allow_exec: true, wake: lazy}
+  web:    {image: $IMGVOL, allow_exec: true}
+  worker: {image: $IMGVOL, allow_exec: true}
+edges:
+  - {from: web, to: files, kind: share, mount: /data}
+  - {from: worker, to: files, kind: share, mount: /data, mode: rw}
+  - {from: web, to: files, kind: depends}
+  - {from: worker, to: web, kind: depends}
+EOF
+  out=$($KLING graph up "$GTMP/g2.yaml" 2>&1)
+  if ! contiene "$out" "up in"; then
+    bad "graph up con share y depends" "graph $G2 up" "$out"
+  else
+    st=$(gestado "$G2")
+    [ "$st" = "running files=running web=running worker=running" ] \
+      && ok "graph up con depends: files (lazy) arranca porque web depende de él" || bad "up con depends" "los tres running" "$st"
+    $KLING exec "$G2-worker" -- sh -c 'echo desde-worker > /data/nota' >/dev/null 2>&1
+    out=$($KLING exec "$G2-web" -- cat /data/nota 2>&1)
+    [ "$out" = "desde-worker" ] && ok "share: web ve lo que worker escribe en la carpeta de files" || bad "share web" "desde-worker" "$out"
+    out=$($KLING exec "$G2-files" -- cat /data/nota 2>&1)
+    [ "$out" = "desde-worker" ] && ok "share: files (el dueño) ve la misma carpeta" || bad "share files" "desde-worker" "$out"
+    $KLING exec "$G2-web" -- sh -c 'echo no > /data/de-web' >/dev/null 2>&1; rc=$?
+    [ "$rc" != 0 ] && ok "share ro: web no puede escribir en ella" || bad "share ro" "fallo al escribir" "rc=$rc"
+    out=$($KLING graph snapshot "$G2" 2>&1)
+    contiene "$out" "share edges" && ok "graph snapshot se niega con aristas share (y dice por qué)" || bad "snapshot con share" "share edges" "$out"
+    $KLING graph freeze "$G2" >/dev/null 2>&1
+    $KLING graph thaw "$G2" >/dev/null 2>&1
+    st=$(gestado "$G2")
+    out=$($KLING exec "$G2-web" -- cat /data/nota 2>&1)
+    { [ "$st" = "running files=running web=running worker=running" ] && [ "$out" = "desde-worker" ]; } \
+      && ok "freeze/thaw en orden de depends; la carpeta sigue ahí" || bad "freeze/thaw con share" "running, desde-worker" "$st / $out"
+    $KLING graph rm "$G2" >/dev/null 2>&1
+    quedan=$($KLING ps -a 2>/dev/null | grep -c -- "$G2" || true)
+    [ "$quedan" = 0 ] && ok "graph rm con share: sin máquinas" || bad "graph rm con share" "0 máquinas" "$quedan"
+  fi
+  $KLING graph rm -f "$G2" >/dev/null 2>&1
+  # Un ciclo de depends no llega a arrancar nada.
+  cat > "$GTMP/ciclo.yaml" <<EOF
+name: $G2
+nodes:
+  a: {image: $IMGVOL}
+  b: {image: $IMGVOL}
+edges:
+  - {from: a, to: b, kind: depends}
+  - {from: b, to: a, kind: depends}
+EOF
+  out=$($KLING graph up "$GTMP/ciclo.yaml" 2>&1)
+  contiene "$out" "cycle" && ok "un ciclo de depends se rechaza al validar" || bad "ciclo de depends" "cycle" "$out"
+  $KLING graph rm -f "$G2" >/dev/null 2>&1
   rm -rf "$GTMP"
 fi
 
