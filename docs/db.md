@@ -26,6 +26,9 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
+| `rehearse <copia\|golden> -migrations DIR [-lock-timeout 5s] [-keep] [-json]` | ensaya migraciones SQL en una copia desechable: tiempos, esperas por locks y tamaño; ver [Operaciones](#operaciones-rehearse-rotate-snapshot-undo) |
+| `rotate <copia>` | clave nueva para la copia; si falla, la vieja sigue valiendo |
+| `snapshot [-rm] <copia> <nombre>`, `snapshots <copia>`, `undo <copia> [<nombre>]` | puntos de restauración de una copia viva y vuelta a uno de ellos (mismo nombre y dueño, clave nueva) |
 | `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
 | `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
 | `ask <copia> "pregunta" [-role R] [-yes] [-explain -send-data]` | un modelo traduce la pregunta a una SQL que se enseña, se confirma y se ejecuta con un rol de solo lectura en una transacción READ ONLY; ver [db-ask.md](db-ask.md) |
@@ -175,8 +178,13 @@ está en el invitado.
 ## Prueba de extremo a extremo
 
 `scripts/90-e2e.sh` (sección 7e, lab Linux) y `scripts/92-e2e-mac.sh` (sección 6f, Mac)
-recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset` y buscan cada
-clave en toda la salida. Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
+recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset`, `role -ro`
+(INSERT, DELETE, COPY TO PROGRAM y SET ROLE tienen que fallar con ese rol), `rotate` (la
+clave vieja deja de valer), `snapshot` + `undo`, `rehearse` (una migración que añade una
+columna y otra que se bloquea por `lock_timeout`), `golden build -template crm-demo` (y su
+consulta) y `ask` (solo con `ANTHROPIC_API_KEY`: no hay proveedor falso; sin ella se salta,
+avisando), y buscan cada clave en toda la salida. La versión de 92 es más corta (sin el
+bloqueo, `golden` ni `ask`). Para CI, ver [db-ci.md](db-ci.md). Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
 avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
 de la plantilla no entra en una copia.
 

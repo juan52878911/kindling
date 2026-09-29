@@ -873,6 +873,59 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   [ "$out" = "0" ] && ok "reset gives back the template's data" || bad "reset" "0 test tables" "$out"
   PW2=$(dbpw "$DBU")
   ALL="$ALL $PW2 ${KLING_E2E_DB_GOLDEN_PASSWORD:-}"
+
+  # Versión corta de las pruebas de 90: rol de solo lectura, rotate, snapshot/undo y rehearse.
+  dbid() { k inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  dbrpw() { cat "$KLING_DB_STATE/copies/$(dbid "$1")/$2.password" 2>/dev/null; }
+  dbrosql() { local h p u d; read -r h p u d < <(dbhost "$3"); PGPASSWORD="$2" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$1" -d "$d" -c "$4" 2>&1; }
+  APPROLE=$(dbhost "$DBU" | awk '{print $3}')
+
+  dbsql "$DBU" "CREATE TABLE e2e_ro(v text); INSERT INTO e2e_ro VALUES ('a'),('b'); ALTER TABLE e2e_ro OWNER TO $APPROLE" >/dev/null
+  out=$(dbk role "$DBU" -ro -name e2e_agent); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "read-only"; } && ok "role -ro: read-only role created" || bad "role -ro" "role created" "rc=$rc $out"
+  ROPW=$(dbrpw "$DBU" e2e_agent)
+  [ -n "$ROPW" ] && ALL="$ALL $ROPW"
+  if [ -z "$ROPW" ]; then
+    bad "ro role password" "a password file on the host" "nothing"
+  elif ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no psql on this host: read-only role checks skipped\n"
+  else
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "the ro role can SELECT" || bad "ro SELECT" "2" "$out"
+    for stmt in "INSERT INTO e2e_ro VALUES ('x')" "DELETE FROM e2e_ro" "COPY (SELECT 1) TO PROGRAM 'id'" "SET ROLE postgres"; do
+      out=$(dbrosql e2e_agent "$ROPW" "$DBU" "$stmt")
+      contiene "$out" "ERROR" && ok "the ro role cannot: ${stmt%% *} ${stmt#* }" || bad "ro role: $stmt" "ERROR" "$out"
+    done
+    out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "rows intact after the ro role's attempts" || bad "data after ro" "2" "$out"
+  fi
+  dbk role "$DBU" -ro -name e2e_agent -rm >/dev/null 2>&1
+
+  if command -v psql >/dev/null; then
+    ROT_OLD=$(dbpw "$DBU"); dbk rotate "$DBU" >/dev/null; ROT_NEW=$(dbpw "$DBU")
+    ALL="$ALL $ROT_OLD $ROT_NEW"
+    { [ -n "$ROT_NEW" ] && [ "$ROT_NEW" != "$ROT_OLD" ]; } && ok "rotate: a new password" || bad "rotate" "a different password" "same or empty"
+    out=$(dbhostsql "$ROT_OLD" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && bad "old password after rotate" "rejected" "IT GOT IN" || ok "rotate: the old password no longer gets in"
+    out=$(dbhostsql "$ROT_NEW" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "rotate: the new password gets in" || bad "new password" "1" "$out"
+  fi
+
+  dbsql "$DBU" "CREATE TABLE e2e_snap(v text); INSERT INTO e2e_snap VALUES ('point')" >/dev/null
+  out=$(dbk snapshot "$DBU" e2e-point); contiene "$out" "snapshot of" && ok "snapshot: restore point created" || bad "snapshot" "created" "$out"
+  dbsql "$DBU" "INSERT INTO e2e_snap VALUES ('after')" >/dev/null
+  out=$(dbk undo "$DBU" e2e-point); contiene "$out" "ready" || bad "undo" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_snap")
+  [ "$out" = "point" ] && ok "undo: the data of the point is back" || bad "data after undo" "point" "$out"
+  ALL="$ALL $(dbpw "$DBU")"
+  dbk snapshot -rm "$DBU" e2e-point >/dev/null 2>&1
+
+  dbsql "$DBU" "CREATE TABLE e2e_rh(id int); ALTER TABLE e2e_rh OWNER TO $APPROLE" >/dev/null
+  RHDIR=$(mktemp -d "$DBTMP/rh.XXXXXX")
+  printf 'ALTER TABLE e2e_rh ADD COLUMN extra text;\n' > "$RHDIR/001_add_col.sql"
+  out=$(dbk rehearse "$DBU" -migrations "$RHDIR"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" ": OK"; } && ok "rehearse: the add-column migration passes" || bad "rehearse" "OK" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  rm -rf "$RHDIR"
   dbk rm "$DBU" >/dev/null 2>&1
 
   leaks=0

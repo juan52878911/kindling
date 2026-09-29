@@ -1151,6 +1151,122 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   PW2=$(dbpw "$DBU")
   { [ -n "$PW2" ] && [ "$PW2" != "$PW1" ]; } && ok "reset: otra copia, otra clave" || bad "clave tras reset" "distinta" "igual o vacía"
   TODAS="$TODAS $PW2 ${KLING_E2E_DB_GOLDEN_PASSWORD:-}"
+
+  # ── kling db: rol de solo lectura, rotate, snapshot/undo, rehearse, golden -template, ask ──
+  # dbid: id de la máquina de una copia. dbrpw: la clave de un rol extra (fichero del host, nunca impresa).
+  dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  dbrpw() { cat "$KLING_DB_STATE/copies/$(dbid "$1")/$2.password" 2>/dev/null; }
+  # dbrosql: SQL desde el host como el rol $1 con la clave $2 sobre la copia $3 (clave por entorno).
+  dbrosql() { local h p u d; read -r h p u d < <(dbhost "$3"); PGPASSWORD="$2" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$1" -d "$d" -c "$4" 2>&1; }
+  APPROLE=$(dbhost "$DBU" | awk '{print $3}')
+
+  # role -ro: el rol lee, y INSERT, DELETE, COPY TO PROGRAM y SET ROLE fallan con él.
+  dbsql "$DBU" "CREATE TABLE e2e_ro(v text); INSERT INTO e2e_ro VALUES ('a'),('b'); ALTER TABLE e2e_ro OWNER TO $APPROLE" >/dev/null
+  out=$(dbk role "$DBU" -ro -name e2e_agent); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "read-only"; } && ok "role -ro: rol de solo lectura creado" || bad "role -ro" "rol creado" "rc=$rc $out"
+  ROPW=$(dbrpw "$DBU" e2e_agent)
+  [ -n "$ROPW" ] && TODAS="$TODAS $ROPW"
+  if [ -z "$ROPW" ]; then
+    bad "clave del rol ro" "un fichero con la clave en el host" "nada"
+  elif ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no hay psql en este host: sin las pruebas del rol de solo lectura desde el host\n"
+  else
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "el rol ro lee (SELECT)" || bad "SELECT del rol ro" "2" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "INSERT INTO e2e_ro VALUES ('x')")
+    contiene "$out" "ERROR" && ok "el rol ro no puede INSERT" || bad "INSERT del rol ro" "ERROR" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "DELETE FROM e2e_ro")
+    contiene "$out" "ERROR" && ok "el rol ro no puede DELETE" || bad "DELETE del rol ro" "ERROR" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "COPY (SELECT 1) TO PROGRAM 'id'")
+    contiene "$out" "ERROR" && ok "el rol ro no puede COPY TO PROGRAM" || bad "COPY TO PROGRAM del rol ro" "ERROR" "$out"
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SET ROLE postgres")
+    contiene "$out" "ERROR" && ok "el rol ro no puede SET ROLE" || bad "SET ROLE del rol ro" "ERROR" "$out"
+    # Ni siquiera apagando la bandera de solo lectura: el rol no tiene el privilegio.
+    out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SET default_transaction_read_only = off; INSERT INTO e2e_ro VALUES ('y')")
+    contiene "$out" "ERROR" && ok "el rol ro no escribe ni apagando default_transaction_read_only" || bad "escritura con la bandera apagada" "ERROR" "$out"
+    out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "las filas siguen intactas tras los intentos del rol ro" || bad "datos tras el rol ro" "2" "$out"
+  fi
+  dbk role "$DBU" -ro -name e2e_agent -rm >/dev/null 2>&1
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_roles WHERE rolname = 'e2e_agent'")
+  [ "$out" = "0" ] && ok "role -rm: el rol desaparece" || bad "role -rm" "0" "$out"
+
+  # rotate: la clave vieja deja de valer y la nueva entra.
+  if command -v psql >/dev/null; then
+    ROT_OLD=$(dbpw "$DBU")
+    out=$(dbk rotate "$DBU"); rc=$?
+    ROT_NEW=$(dbpw "$DBU")
+    TODAS="$TODAS $ROT_OLD $ROT_NEW"
+    { [ "$rc" = 0 ] && [ -n "$ROT_NEW" ] && [ "$ROT_NEW" != "$ROT_OLD" ]; } && ok "rotate: clave nueva distinta de la vieja" || bad "rotate" "clave nueva distinta" "rc=$rc $out"
+    out=$(dbhostsql "$ROT_OLD" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && bad "clave vieja tras rotate" "rechazada" "ENTRÓ" || ok "rotate: la clave vieja ya no entra"
+    out=$(dbhostsql "$ROT_NEW" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "rotate: la clave nueva entra" || bad "clave nueva tras rotate" "1" "$out"
+  else
+    printf "  \033[33mskip\033[0m  no hay psql en este host: sin la prueba de rotate desde el host\n"
+  fi
+
+  # snapshot + undo: los datos vuelven a los del punto.
+  dbsql "$DBU" "CREATE TABLE e2e_snap(v text); INSERT INTO e2e_snap VALUES ('punto')" >/dev/null
+  out=$(dbk snapshot "$DBU" e2e-punto); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "snapshot of"; } && ok "snapshot: punto de restauración creado" || bad "snapshot" "creado" "rc=$rc $out"
+  dbsql "$DBU" "INSERT INTO e2e_snap VALUES ('despues'); CREATE TABLE e2e_tras(x int)" >/dev/null
+  out=$(dbk snapshots "$DBU")
+  contiene "$out" "e2e-punto" && ok "snapshots: lista el punto" || bad "snapshots" "e2e-punto" "$out"
+  out=$(dbk undo "$DBU" e2e-punto); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "ready"; } && ok "undo: copia lista" || bad "undo" "ready" "rc=$rc $out"
+  out=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_snap")
+  [ "$out" = "punto" ] && ok "undo: vuelven los datos del punto" || bad "datos tras undo" "punto" "$out"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_tables WHERE tablename = 'e2e_tras'")
+  [ "$out" = "0" ] && ok "undo: lo posterior al punto ya no está" || bad "undo" "sin e2e_tras" "$out"
+  TODAS="$TODAS $(dbpw "$DBU")"
+  dbk snapshot -rm "$DBU" e2e-punto >/dev/null 2>&1
+
+  # rehearse: una migración que añade una columna, y otra que se bloquea (lock_timeout).
+  # El origen no se toca: el ensayo va en una copia desechable.
+  dbsql "$DBU" "CREATE TABLE e2e_rh(id int); INSERT INTO e2e_rh VALUES (1); ALTER TABLE e2e_rh OWNER TO $APPROLE" >/dev/null
+  RHDIR=$(mktemp -d "$DBTMP/rh.XXXXXX"); RHBLK=$(mktemp -d "$DBTMP/rhb.XXXXXX")
+  printf 'ALTER TABLE e2e_rh ADD COLUMN extra text;\n' > "$RHDIR/001_add_col.sql"
+  out=$(dbk rehearse "$DBU" -migrations "$RHDIR"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "001_add_col.sql" && contiene "$out" ": OK"; } && ok "rehearse: la migración que añade una columna pasa" || bad "rehearse ok" "OK, salida 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM information_schema.columns WHERE table_name = 'e2e_rh' AND column_name = 'extra'")
+  [ "$out" = "0" ] && ok "rehearse no toca el origen" || bad "rehearse" "origen sin la columna" "$out"
+  # Otra sesión retiene el lock (fuera de la migración, en segundo plano) y la migración lo pide.
+  cat > "$RHBLK/001_bloqueo.sql" <<'SQL'
+\! sh -c 'psql -X -q -d appdb -c "LOCK TABLE e2e_rh IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(20)" >/dev/null 2>&1 &'
+\! sleep 1
+ALTER TABLE e2e_rh ADD COLUMN otra int;
+SQL
+  out=$(dbk rehearse "$DBU" -migrations "$RHBLK" -lock-timeout 1s); rc=$?
+  { [ "$rc" != 0 ] && contiene "$out" "would block" && contiene "$out" ": FAILED"; } && ok "rehearse: la migración que se bloquea falla por lock_timeout (would block)" || bad "rehearse bloqueo" "FAILED con would block, salida != 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  rm -rf "$RHDIR" "$RHBLK"
+
+  # golden -template crm-demo: se construye y se consulta.
+  GTN="e2e-crm-$$"
+  out=$(dbk golden build -template crm-demo "$GTN"); rc=$?
+  if [ "$rc" != 0 ]; then
+    bad "golden build -template crm-demo" "plantilla construida" "rc=$rc $(printf '%s' "$out" | tail -4)"
+  else
+    ok "golden build -template crm-demo: plantilla construida"
+    out=$(dbk up "$GTN" -name "$GTN-c")
+    contiene "$out" "ready" && ok "up de la golden crm-demo: lista" || bad "up crm-demo" "ready" "$out"
+    out=$(dbsql "$GTN-c" "SELECT count(*) > 0 FROM customers")
+    [ "$out" = "t" ] && ok "crm-demo: hay clientes que consultar" || bad "consulta crm-demo" "t" "$out"
+    TODAS="$TODAS $(dbpw "$GTN-c")"
+    dbk rm "$GTN-c" >/dev/null 2>&1
+  fi
+  $KLING template rm "$GTN" >/dev/null 2>&1
+
+  # ask: no hay modo de prueba con proveedor falso (a propósito: no se añade código de prueba
+  # a la ruta que ejecuta SQL). Con ANTHROPIC_API_KEY se prueba de verdad; sin ella, skip.
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    printf "  \033[33mskip\033[0m  ask: no hay ANTHROPIC_API_KEY (y kling db ask no tiene proveedor falso): sin la prueba de ask\n"
+  else
+    out=$(dbk ask "$DBU" "how many rows does the table e2e_ro have?" -yes -json); rc=$?
+    { [ "$rc" = 0 ] && contiene "$out" '"role"'; } && ok "ask: responde con un rol de solo lectura" || bad "ask" "JSON con el rol" "rc=$rc $(printf '%s' "$out" | tail -3)"
+    out=$(dbsql "$DBU" "SELECT count(*) FROM e2e_ro")
+    [ "$out" = "2" ] && ok "ask no modificó los datos" || bad "datos tras ask" "2" "$out"
+  fi
   dbk rm "$DBU" >/dev/null 2>&1
 
   # Ninguna clave en ninguna salida de kling db (ni en la de audit, ni en la de doctor).
