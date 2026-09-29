@@ -75,9 +75,13 @@ type app struct {
 	// confirmación).
 	stdoutTTY func() bool
 	// runPsql ejecuta el psql del host con ese entorno extra y esos argumentos;
-	// runMysql, el cliente de MySQL/MariaDB del host.
+	// runMysql, el cliente de MySQL/MariaDB del host; runRedis, el redis-cli.
 	runPsql  func(ctx context.Context, env []string, args []string) error
 	runMysql func(ctx context.Context, env []string, args []string) error
+	runRedis func(ctx context.Context, env []string, args []string) error
+	// runKling ejecuta kling con la terminal del usuario (kling shell, para
+	// el sqlite3 de una copia SQLite).
+	runKling func(ctx context.Context, args []string) error
 	sleep    func(time.Duration)
 	// readyWait es cuánto se espera a que Postgres acepte conexiones.
 	readyWait time.Duration
@@ -99,6 +103,10 @@ func newApp(host string) (*app, error) {
 		stdoutTTY: func() bool { return isTerminal(os.Stdout) },
 		runPsql:   runHostPsql,
 		runMysql:  runHostMySQL,
+		runRedis:  runHostRedis,
+		runKling: func(ctx context.Context, args []string) error {
+			return runInteractive(cli.Command(ctx, args...))
+		},
 		sleep:     time.Sleep,
 		readyWait: 30 * time.Second,
 	}, nil
@@ -169,6 +177,11 @@ func checkReady(mc *api.Machine, owner string) error {
 	if st := mc.Labels[labelState]; st != stateReady {
 		return fmt.Errorf("%s is not ready (%s=%q): it was never finished or is being prepared", mc.Name, labelState, st)
 	}
+	if !hasPassword(engineOf(mc.Labels)) {
+		// SQLite: no hay clave que distinguir; se entra por kling exec, que el
+		// daemon ya reserva al dueño de la máquina.
+		return nil
+	}
 	if err := dbstate.HasPassword(mc.ID); err != nil {
 		if errors.Is(err, dbstate.ErrNoPassword) {
 			return fmt.Errorf("%s: this host has no password for machine %s; it was not prepared here (kling db reset %s gives a fresh one)",
@@ -183,7 +196,8 @@ func checkReady(mc *api.Machine, owner string) error {
 func roleDB(labels map[string]string) (role, db string, err error) {
 	role = orDefault(labels[labelRole], defaultRole)
 	db = orDefault(labels[labelDatabase], defaultDatabase)
-	if !identPattern.MatchString(role) || role == "postgres" || (engineOf(labels) == engineMySQL && myReservedUsers[role]) {
+	e := engineOf(labels)
+	if !identPattern.MatchString(role) || role == "postgres" || (e == engineMySQL && myReservedUsers[role]) || (e == engineRedis && redisReservedUsers[role]) {
 		return "", "", fmt.Errorf("invalid role %q", role)
 	}
 	if !identPattern.MatchString(db) {
@@ -201,7 +215,8 @@ func goldenRoleDB(s *api.Snapshot) (string, string, error) {
 }
 
 // goldenInfo es goldenRoleDB con el motor de la plantilla: su etiqueta
-// kling.db.engine (db-golden-mysql.sh la pone) o ENGINE en su conn.env;
+// kling.db.engine (la ponen db-golden-mysql.sh, -redis.sh y -sqlite.sh) o
+// ENGINE en su conn.env;
 // Postgres si no dice nada.
 func goldenInfo(s *api.Snapshot) (role, db, engine string, err error) {
 	labels := map[string]string{}
@@ -222,7 +237,7 @@ func goldenInfo(s *api.Snapshot) (role, db, engine string, err error) {
 			labels[k] = v
 		}
 	}
-	if e := labels[labelEngine]; e != "" && e != enginePostgres && e != engineMySQL {
+	if e := labels[labelEngine]; e != "" && !knownEngine(e) {
 		return "", "", "", fmt.Errorf("unknown engine %q", e)
 	}
 	engine = engineOf(labels)
@@ -342,18 +357,28 @@ func (a *app) setVerifier(ctx context.Context, id, role, ver string) error {
 // prepare deja lista una copia que ya está en state=preparing: espera a
 // Postgres, quita los roles de solo lectura heredados y rota la clave. No la
 // marca ready: eso lo hace quien llama cuando todas las de la operación están
-// preparadas. Una copia MySQL espera a su servidor y rota (kling db role no
-// existe para MySQL: no hay roles heredados que quitar).
+// preparadas. Una copia MySQL o Redis espera a su servidor y rota (kling db
+// role no existe para ellos: no hay roles heredados que quitar); una SQLite
+// solo comprueba que su base se abre.
 func (a *app) prepare(ctx context.Context, mc *api.Machine) error {
 	role, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err
 	}
-	if engineOf(mc.Labels) == engineMySQL {
+	switch engineOf(mc.Labels) {
+	case engineMySQL:
 		if err := a.waitMySQL(ctx, mc.ID); err != nil {
 			return err
 		}
 		return a.rotateMySQL(ctx, mc.ID, role)
+	case engineRedis:
+		if err := a.waitRedis(ctx, mc.ID); err != nil {
+			return err
+		}
+		return a.rotateRedis(ctx, mc.ID, role)
+	case engineSQLite:
+		// Sin clave que rotar: basta con que la base esté y se abra.
+		return a.waitSQLite(ctx, mc.ID, db)
 	}
 	if err := a.waitPostgres(ctx, mc.ID); err != nil {
 		return err

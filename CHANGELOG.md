@@ -137,6 +137,26 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   de la misma rama.
 - **ext/db (#83):** la directiva `go` del módulo es la del núcleo y el resto de `ext/`
   (1.24; el `go.work` pide 1.26.3 solo por `vz/`), y CI comprueba que no se separen.
+- **Redis y SQLite en `kling db` (#65).** Plantillas con `scripts/db-golden-redis.sh` y
+  `scripts/db-golden-sqlite.sh` (o `golden image|build -engine redis|sqlite`; recetas
+  `redis.recipe.json` y `sqlite.recipe.json`, etiqueta `kling.db.engine`). `up`, `fork`,
+  `connect`, `reset`, `rm` y `doctor` (reglas RD y SQ) funcionan en los dos; `rotate` en
+  Redis. **Redis**: cada copia estrena la clave de su usuario ACL (`+@all -@admin`)
+  generada en el host, y al invitado va solo su SHA-256 por stdin, comprobado con
+  `ACL GETUSER`; la clave del administrador (`default`) se genera y se estrena dentro
+  de cada copia y no sale nunca de ella. `connect -redis` (clave en `REDISCLI_AUTH`) y
+  `redis://`. **SQLite**: sin servidor ni clave; la copia es una microVM con
+  `/var/lib/kling-db/<base>.sqlite` y `connect -sqlite` abre `sqlite3` dentro con
+  `kling shell`. Lo demás (attach, role, rehearse, snapshot/undo, tenant-check, ask,
+  diff, env, audit, branch, clone) se rechaza antes de tocar nada. Sin proxy de
+  credenciales para ninguno de los dos. MongoDB queda fuera, y
+  [`docs/db-engines.md`](docs/db-engines.md) explica por qué (Alpine no lo empaqueta y
+  `createUser` exige la clave en claro dentro del servidor). E2E 7h2 en
+  `scripts/90-e2e.sh`, pendiente del lab.
+- **`kling db diff` y `env up` rechazan con claridad lo que no es Postgres.** Con una
+  copia o un golden MySQL fallaban más tarde (psql contra MariaDB, una arista SCRAM al
+  5432); ahora dicen `supports postgres ... only`. `golden build -template` rechaza
+  también `-engine=redis|sqlite` (antes solo miraba `mysql`).
 
 ### Grafos desde los plugins
 

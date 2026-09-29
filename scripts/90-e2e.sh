@@ -1898,6 +1898,106 @@ except Exception as e:
   rm -rf "$DBTMP"; unset KLING_DB_STATE
 fi
 
+# ── 7h2. Redis y SQLite: up, fork, connect, rotate, doctor, rechazos y rm ────
+# Con KLING_E2E_REDIS_GOLDEN y/o KLING_E2E_SQLITE_GOLDEN (plantillas de
+# scripts/db-golden-redis.sh y db-golden-sqlite.sh, o kling db golden ...
+# -engine redis|sqlite). Redis: cada copia estrena su clave (al invitado solo
+# su SHA-256) y la del administrador; SQLite: sin clave, la base se abre.
+#
+#   KLING_E2E_REDIS_GOLDEN=rd KLING_E2E_SQLITE_GOLDEN=sq ./scripts/90-e2e.sh
+step "7h2. Redis y SQLite (kling db)"
+sha256_de() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | cut -d' ' -f1; else printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; fi; }
+if [ -z "${KLING_E2E_REDIS_GOLDEN:-}${KLING_E2E_SQLITE_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  ni KLING_E2E_REDIS_GOLDEN ni KLING_E2E_SQLITE_GOLDEN: sin plantillas que probar\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado\n"
+else
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  dbid() { $KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+  # shellcheck disable=SC2016 # se expande en el invitado
+  RDADM='c=$(command -v redis-cli || command -v valkey-cli) && REDISCLI_AUTH=$(cat /etc/kling-db/redis-admin) && export REDISCLI_AUTH && exec "$c" -s /run/redis/redis.sock'
+  TODAS=""
+  if [ -n "${KLING_E2E_REDIS_GOLDEN:-}" ]; then
+    RC1="e2e-rd-$$"
+    out=$(dbk up "$KLING_E2E_REDIS_GOLDEN" -name "$RC1")
+    if ! contiene "$out" "ready"; then
+      bad "db up (Redis)" "ready" "$out"
+    else
+      ok "kling db up de la plantilla Redis: copia lista"
+      RPW=$(cat "$KLING_DB_STATE/copies/$(dbid "$RC1")/password" 2>/dev/null); TODAS="$TODAS $RPW"
+      acl=$($KLING exec -i "$RC1" -- sh -c "$RDADM" <<<"ACL GETUSER app" 2>&1)
+      contiene "$acl" "$(sha256_de "$RPW")" && ok "el usuario app tiene el SHA-256 de la clave del host" \
+        || bad "hash de la copia Redis" "el SHA-256 de la clave del host" "$acl"
+      contiene "$acl" "$RPW" && bad "Redis guarda la clave" "solo el hash" "la clave en ACL GETUSER"
+      out=$(dbk fork "$RC1" -n 2)
+      mapfile -t RFK < <(printf '%s\n' "$out" | awk '/  ready  /{print $1}')
+      if [ "${#RFK[@]}" = 2 ]; then
+        p1=$(cat "$KLING_DB_STATE/copies/$(dbid "${RFK[0]}")/password" 2>/dev/null)
+        p2=$(cat "$KLING_DB_STATE/copies/$(dbid "${RFK[1]}")/password" 2>/dev/null)
+        a0=$($KLING exec "$RC1" -- cat /etc/kling-db/redis-admin 2>/dev/null)
+        a1=$($KLING exec "${RFK[0]}" -- cat /etc/kling-db/redis-admin 2>/dev/null)
+        TODAS="$TODAS $p1 $p2"
+        { [ -n "$p1" ] && [ "$p1" != "$p2" ] && [ "$p1" != "$RPW" ] && [ -n "$a1" ] && [ "$a0" != "$a1" ]; } \
+          && ok "fork Redis: cada copia con su clave y su administrador" || bad "fork Redis" "claves distintas" "iguales o vacías"
+        for c in "${RFK[@]}"; do dbk rm "$c" >/dev/null; done
+      else
+        bad "fork Redis -n 2" "2 copias listas" "$out"
+      fi
+      # Fuera de dbk: el DSN lleva la clave y no va al registro de fugas.
+      out=$($KLING db connect "$RC1" -dsn 2>&1 </dev/null)
+      [ "$out" = "redis://app:$RPW@${out#*@}" ] && ok "connect -dsn: redis:// con la clave del host" \
+        || bad "connect -dsn (Redis)" "redis://app:<clave>@..." "(omitido: lleva la clave)"
+      out=$(dbk rotate "$RC1"); rc=$?
+      RPW2=$(cat "$KLING_DB_STATE/copies/$(dbid "$RC1")/password" 2>/dev/null); TODAS="$TODAS $RPW2"
+      acl=$($KLING exec -i "$RC1" -- sh -c "$RDADM" <<<"ACL GETUSER app" 2>&1)
+      { [ "$rc" = 0 ] && [ "$RPW2" != "$RPW" ] && contiene "$acl" "$(sha256_de "$RPW2")"; } \
+        && ok "rotate Redis: clave nueva en el host y su hash en la copia" || bad "rotate Redis" "hash nuevo" "rc=$rc $out"
+      out=$(dbk doctor "$RC1"); rc=$?
+      { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor de la copia Redis: 0 problemas" \
+        || bad "doctor Redis" "0 problem(s)" "rc=$rc $(printf '%s' "$out" | tail -4)"
+      out=$(dbk snapshot "$RC1" s1); rc=$?
+      { [ "$rc" != 0 ] && contiene "$out" "postgres copies only"; } && ok "snapshot de una copia Redis: rechazado" \
+        || bad "snapshot Redis" "rechazo claro" "rc=$rc $out"
+    fi
+    out=$(dbk rm "$RC1"); rc=$?
+    { [ "$rc" = 0 ] && ! $KLING inspect "$RC1" >/dev/null 2>&1; } && ok "kling db rm: la copia Redis ya no está" \
+      || bad "db rm (Redis)" "la copia borrada" "rc=$rc $out"
+  fi
+  if [ -n "${KLING_E2E_SQLITE_GOLDEN:-}" ]; then
+    SC1="e2e-sq-$$"
+    out=$(dbk up "$KLING_E2E_SQLITE_GOLDEN" -name "$SC1")
+    if ! contiene "$out" "ready"; then
+      bad "db up (SQLite)" "ready" "$out"
+    else
+      ok "kling db up de la plantilla SQLite: copia lista"
+      [ -e "$KLING_DB_STATE/copies/$(dbid "$SC1")/password" ] && bad "SQLite sin clave" "ningún fichero de clave" "hay uno"
+      SQF=$(printf '%s\n' "$out" | sed -n 's/.*sqlite3 \(\/var\/lib\/kling-db\/[a-z0-9_]*\.sqlite\).*/\1/p' | head -n1)
+      $KLING exec -i "$SC1" -- sqlite3 -bail "$SQF" <<<"CREATE TABLE e2e_sq(v TEXT); INSERT INTO e2e_sq VALUES ('a');" >/dev/null 2>&1
+      out=$(dbk fork "$SC1" -n 1)
+      SFK=$(printf '%s\n' "$out" | awk '/  ready  /{print $1; exit}')
+      n=$($KLING exec -i "$SFK" -- sqlite3 -bail -readonly "$SQF" <<<"SELECT count(*) FROM e2e_sq;" 2>&1)
+      [ "$n" = 1 ] && ok "fork SQLite: la copia hija trae los datos del origen" || bad "fork SQLite" 1 "$n"
+      [ -n "$SFK" ] && dbk rm "$SFK" >/dev/null
+      out=$(dbk connect "$SC1")
+      contiene "$out" "no password" && ok "connect SQLite: el fichero y cómo entrar" || bad "connect SQLite" "no password" "$out"
+      out=$(dbk connect "$SC1" -dsn); rc=$?
+      { [ "$rc" != 0 ] && contiene "$out" "-sqlite"; } && ok "connect -dsn de una copia SQLite: rechazado" || bad "connect -dsn SQLite" "rechazo" "rc=$rc $out"
+      out=$(dbk doctor "$SC1"); rc=$?
+      { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor de la copia SQLite: 0 problemas" \
+        || bad "doctor SQLite" "0 problem(s)" "rc=$rc $(printf '%s' "$out" | tail -4)"
+    fi
+    out=$(dbk rm "$SC1"); rc=$?
+    { [ "$rc" = 0 ] && ! $KLING inspect "$SC1" >/dev/null 2>&1; } && ok "kling db rm: la copia SQLite ya no está" \
+      || bad "db rm (SQLite)" "la copia borrada" "rc=$rc $out"
+  fi
+  fugas=0
+  for pw in $TODAS; do grep -qF -- "$pw" "$DBLOG" && fugas=$((fugas+1)); done
+  [ "$fugas" = 0 ] && ok "7h2: ninguna clave en la salida de kling db" || bad "fuga de claves (7h2)" 0 "$fugas"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
 # ── 7i. autorización por inquilino (authz) ───────────────────────────────────
 # Solo con KLING_E2E_AUTHZ=1: necesita un daemon arrancado con una política
 # (docs/authz.md) que dé DOS tokens de inquilino, y los tokens en claro:

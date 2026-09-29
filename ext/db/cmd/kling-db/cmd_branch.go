@@ -347,6 +347,9 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 		}
 	}
 	if parent != nil && usable(parent, owner) {
+		if err := requireEngine(parent, "branch", branchEngines...); err != nil {
+			return nil, false, err
+		}
 		wasFrozen := parent.State == api.StateWarm || parent.State == api.StatePaused
 		fmt.Fprintf(a.stderr, "branch %s: forking the copy of %s...\n", branch, from)
 		cs, err := a.forkWith(ctx, parent.ID, 1, owner, extra)
@@ -373,12 +376,21 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 	} else {
 		fmt.Fprintf(a.stderr, "branch %s: the copy of %s is not ready; starting from the golden %s\n", branch, from, golden)
 	}
+	if snap, err := a.template(ctx, golden); err != nil {
+		return nil, false, err
+	} else if err := requireGoldenEngine(snap, "branch", branchEngines...); err != nil {
+		return nil, false, err
+	}
 	mc, err := a.upFrom(ctx, golden, golden, branchMachineName(ri.repo, key), 0, owner, extra)
 	if err != nil {
 		return nil, false, err
 	}
 	return mc, true, nil
 }
+
+// branchEngines son los motores con los que kling db branch escribe su
+// fichero de conexión (DATABASE_URL y las variables de su cliente).
+var branchEngines = []string{enginePostgres, engineMySQL}
 
 // repoGolden es el golden de cualquier copia del repo (para un hook sin -golden).
 func (a *app) repoGolden(copies map[string][]*api.Machine) string {
@@ -716,6 +728,9 @@ func envQuote(v string) string {
 // writeBranchEnv escribe la conexión de la copia, 0600, en path (dentro de
 // .git), aparte y renombrado: nunca queda a medias ni con permisos abiertos.
 func (a *app) writeBranchEnv(mc *api.Machine, path string) error {
+	if err := requireEngine(mc, "branch", branchEngines...); err != nil {
+		return err
+	}
 	role, db, err := roleDB(mc.Labels)
 	if err != nil {
 		return err

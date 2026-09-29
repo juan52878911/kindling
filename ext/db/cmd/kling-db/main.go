@@ -1,5 +1,6 @@
 // kling-db es la extensión de kling para bases de datos Postgres (y
-// MySQL/MariaDB, ver mysql.go) desechables: `kling db up`, `kling db fork`,
+// MySQL/MariaDB, Redis y SQLite: ver mysql.go y engines.go) desechables:
+// `kling db up`, `kling db fork`,
 // `kling db connect`...
 //
 // Modelo: la base y el agente viven en la MISMA microVM. Una copia es una
@@ -31,16 +32,16 @@ func manifest() plugin.Manifest {
 		Version:         strings.TrimPrefix(Version, "v"),
 		// sandbox fork con el guardián de credenciales y kling.ports.
 		MinKling:  "0.16.0",
-		Summary:   "disposable Postgres and MySQL databases, one per microVM",
+		Summary:   "disposable Postgres, MySQL, Redis and SQLite databases, one per microVM",
 		HelpGroup: "SERVE",
 		Commands: []plugin.Command{
-			{Name: "up", Group: "COPIES", Summary: "a ready copy of a Postgres or MySQL template",
+			{Name: "up", Group: "COPIES", Summary: "a ready copy of a Postgres, MySQL, Redis or SQLite template",
 				Usage: usage("up <template> [-name N] [-ttl D] [-owner T]", "a new copy with its own password")},
 			{Name: "fork", Group: "COPIES", Summary: "branches a live copy into N copies",
 				Usage:       usage("fork <copy> [-n N]", "N copies of a copy, all or none"),
 				MachineArgs: []string{""}},
 			{Name: "connect", Group: "COPIES", Summary: "how to reach a copy from the host",
-				Usage:       usage("connect <copy> [-role R] [-dsn | -psql | -mysql]", "address, or DSN, or a client session"),
+				Usage:       usage("connect <copy> [-role R] [-dsn | -psql | -mysql | -redis | -sqlite]", "address, or DSN, or a client session"),
 				MachineArgs: []string{""}},
 			{Name: "attach", Group: "COPIES", Summary: "shares a copy with an agent in another machine",
 				Usage:       usage("attach <agent> <copy> [-role R] [-env PGPASSWORD]", "through the proxy; the agent never sees the password"),
@@ -108,6 +109,7 @@ func manifest() plugin.Manifest {
 				Usage: usage("golden image", "builds the pg16 image") +
 					usage("golden build [opts] <name>", "a warm Postgres frozen as a template") +
 					usage("golden image|build -engine mysql ...", "the same with MariaDB (docs/mysql.md)") +
+					usage("golden image|build -engine redis|sqlite ...", "the same with Redis or SQLite (docs/db-engines.md)") +
 					usage("golden build -template T <name>", "the same, from a bundled template"),
 				Subcommands: []string{"image", "build"}},
 			{Name: "clone", Group: "TEMPLATES", Summary: "a golden from a production database, personal data masked",
