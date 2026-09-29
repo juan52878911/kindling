@@ -31,12 +31,21 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   la vieja deja de valer; `snapshot` guarda una copia viva como punto de restauración y
   `undo` vuelve a él (mismo nombre y dueño, clave nueva). Ver
   [`docs/db.md`](docs/db.md).
+- **`kling db attach` / `detach` (modelo A, solo Linux).** Una copia compartida por
+  agentes de otras microVMs, por el proxy de credenciales de Postgres de cada uno: el
+  agente recibe un marcador y nunca la contraseña (la de la copia o la de un rol de
+  `kling db role`). La credencial guarda el id de la copia (`upstream_machine`), no una
+  dirección: el daemon la resuelve en cada conexión y solo si la copia sigue corriendo,
+  lista y del mismo `kling.db.owner` que el agente. Congelar, parar o borrar la copia
+  corta las sesiones abiertas. Nuevo `DELETE /machines/{ref}/credentials/{env}` y
+  `kling machine credential -rm`; capacidad `db-attach`. En macOS se rechaza con un error
+  claro. Ver [`docs/db.md`](docs/db.md).
 - **`kling db` en CI.** Scripts (`ext/db/scripts/ci-load.sh`, `ci-pr-db.sh`) y ejemplos de
   GitHub Actions y GitLab CI para una base por PR. Ver [`docs/db-ci.md`](docs/db-ci.md).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
   (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
 - e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`
-  (`KLING_E2E_DB_GOLDEN`; se salta, avisando, si no hay plantilla).
+  (`KLING_E2E_DB_GOLDEN`; se salta, avisando, si no hay plantilla), y 7f para `attach`.
 
 ### Seguridad
 

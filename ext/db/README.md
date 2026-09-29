@@ -8,7 +8,9 @@ test has its own database with schema and data?*
 
 `kling db up <template>` gives a ready copy of a warm Postgres template, with a
 password of its own that only this host knows; `fork`, `connect`, `reset`, `rm`,
-`doctor`, `audit` and `golden` complete it. Model, labels, credentials and the
+`doctor`, `audit` and `golden` complete it. `attach <agent> <copy>` shares a copy
+with an agent in another microVM through its credential proxy, without the agent ever
+seeing the password (Linux only for now). Model, labels, credentials and the
 Linux/macOS asymmetry: [`docs/db.md`](../../docs/db.md).
 
 ```sh

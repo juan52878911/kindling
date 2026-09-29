@@ -35,7 +35,7 @@ var Version = "dev"
 // Capabilities son las capacidades del API que este daemon sirve. Una extensión
 // (p. ej. kindling-mcp) las consulta en GET /info antes de usar una ruta, en vez
 // de deducirlas de la versión. Solo se añaden nombres; nunca se reutilizan.
-var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit"}
+var Capabilities = []string{"annotations", "store", "builders", "image-files", "exec", "sandboxes", "shell", "resize", "image-blobs", "guest-resync", "shares-copy", "shares-live", "renew", "pause", "fork", "credaudit", "db-attach"}
 
 // guestProgressTimeout es el plazo de INACTIVIDAD al leer el CUERPO de una
 // respuesta del invitado: se renueva con cada Read que devuelve datos, así
@@ -213,6 +213,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /machines/{ref}/resize", s.handleResize)
 	mux.HandleFunc("POST /machines/{ref}/mmds", s.handleMMDS)
 	mux.HandleFunc("POST /machines/{ref}/credentials", s.handleCredentials)
+	mux.HandleFunc("DELETE /machines/{ref}/credentials/{env}", s.handleRemoveCredential)
 	mux.HandleFunc("POST /machines/{ref}/stop", s.handleStop)
 	mux.HandleFunc("DELETE /machines/{ref}", s.handleRemove)
 	mux.HandleFunc("PUT /machines/{ref}/labels", s.handleLabels)
@@ -616,6 +617,21 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	mc, err := s.mgr.SetCredentials(r.Context(), r.PathValue("ref"), req.Credentials)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
+}
+
+// handleRemoveCredential quita una credencial de una máquina por su variable.
+// ?upstream_machine=<id> exige que vaya a esa máquina (kling db detach).
+func (s *Server) handleRemoveCredential(w http.ResponseWriter, r *http.Request) {
+	mc, err := s.mgr.RemoveCredential(r.Context(), r.PathValue("ref"), r.PathValue("env"), r.URL.Query().Get("upstream_machine"))
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "has no credential") {
+			code = http.StatusNotFound
+		}
+		fail(w, code, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mc)

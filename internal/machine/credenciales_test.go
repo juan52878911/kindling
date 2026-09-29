@@ -31,7 +31,7 @@ func capturarRegistro(t *testing.T) *[][]credproxy.Credential {
 	t.Helper()
 	var got [][]credproxy.Credential
 	prev := registrarCredenciales
-	registrarCredenciales = func(_ context.Context, _ *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string) error {
+	registrarCredenciales = func(_ context.Context, _ *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string, _ credproxy.ResolveMachineFunc) error {
 		got = append(got, append([]credproxy.Credential(nil), creds...))
 		return nil
 	}

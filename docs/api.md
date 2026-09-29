@@ -33,6 +33,7 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `renew` | v0.11 | `POST /machines/{ref}/renew` |
 | `pause` | v0.12 | `POST /machines/{ref}/pause` |
 | `credaudit` | sin publicar | `GET /machines/{ref}/credaudit` |
+| `db-attach` | sin publicar | `upstream_machine` y `upstream_owner` en las credenciales postgres de `POST /machines/{ref}/credentials` (solo Linux), `DELETE /machines/{ref}/credentials/{env}` |
 | `pg-credentials` | sin publicar | `type: "postgres"` (con `port`, `user`, `database`, `any_database`, `ca_pem`, `upstream`, `upstream_tls`, `tls_server_name`) en `POST /machines/{ref}/credentials` y `PUT /snapshots/{name}/credentials` |
 
 ## Rutas
@@ -59,7 +60,8 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 | `POST /machines/{ref}/squeeze` | el globo devuelve al host la memoria libre del invitado |
 | `POST /machines/{ref}/mmds` | secretos de sesión por MMDS (≤1 MiB); la máquina deja de poder congelarse |
 | `POST /machines/{ref}/credentials` | entrega claves al proxy de credenciales (`{"credentials":[{"domain","env","secret","allow"}]}`, ≤256 KiB, hasta 16): el invitado recibe en `env` un marcador que el proxy cambia por la clave solo hacia `http://domain`. `allow` (opcional, hasta 32) limita qué peticiones llevan la clave: `"MÉTODO /ruta"` con método exacto (GET, HEAD, POST, PUT, PATCH, DELETE u OPTIONS), `*` dentro de un segmento y `**` como último segmento para cualquier resto; la ruta de la petición se compara normalizada con `path.Clean`; lo que no casa con ninguna credencial del dominio recibe 403; vacío permite todo. Se fusiona por `env` (repetir una rota la clave, sustituye también su `allow` y conserva el marcador). Exige egress allowlist; la máquina sigue pudiendo congelarse y las claves sobreviven al reinicio del daemon (cifradas en su directorio). `Machine.credential_domains` lista los dominios, y `Machine.credential_any_database` las variables de las credenciales postgres que entran en cualquier base (sin `database`, o de un almacén anterior a que fuese obligatoria: el daemon lo avisa en su log al cargarlas). Con `"type":"postgres"` es una contraseña de base de datos (ver abajo) |
-| `PUT /machines/{ref}/labels` | reetiqueta |
+| `DELETE /machines/{ref}/credentials/{env}?upstream_machine=ID` | retira de la máquina la credencial de esa variable (404 si no la tiene). Con `upstream_machine`, solo si va a esa máquina (`kling db detach`). En una máquina viva el proxy deja de conocer el marcador y corta las sesiones de Postgres que lo usaban, y el marcador sale de MMDS; en una congelada o parada solo cambia el almacén. Devuelve la máquina |
+| `PUT /machines/{ref}/labels` | reetiqueta. Cambiar `kling.db.owner`, `kling.db.state`, `kling.db.golden` o `kling.ports` corta las sesiones de otras máquinas hacia esta y las suyas hacia otras (modelo A, ver Credenciales de Postgres) |
 | `POST /machines/{ref}/commit` | congela la máquina como snapshot reutilizable (`409` si tiene carpetas compartidas) |
 | `GET /machines/{ref}/logs?tail=N` | consola serie |
 | `GET /machines/{ref}/credaudit?tail=N&denied=1&since=T` | registro de auditoría del proxy de credenciales, NDJSON (ver abajo) |
@@ -235,6 +237,8 @@ Una credencial con `"type":"postgres"` en `POST /machines/{ref}/credentials` o
 | `upstream` | opcional, `"host:puerto"` (IP o nombre; IPv6 entre corchetes): a dónde marca el proxy en lugar de `domain:port`. Admite loopback y privadas; nunca `169.254.0.0/16`, `0.0.0.0/8`, multicast, `240.0.0.0/4`, `fe80::/10`, `fd00:ec2::254`, `172.16.0.0/30` ni `172.30.0.0/16`. Un nombre se resuelve al marcar y ninguna de sus IPs puede caer ahí (`localhost` es el loopback sin DNS); en macOS solo IP o `localhost`, el daemon rechaza un nombre al entregarla. Se devuelve normalizado (minúsculas) |
 | `upstream_tls` | opcional: `verify-full` (defecto, se guarda vacío) o `disable`: sin TLS y solo SCRAM-SHA-256 (ni contraseña en claro, ni md5, ni trust, ni `-PLUS`). `disable` exige `upstream` y no admite `ca_pem` ni `tls_server_name` |
 | `tls_server_name` | opcional: nombre (o IP) contra el que se verifica el certificado en lugar de `domain` |
+| `upstream_machine` | opcional, solo Linux y solo en credenciales de máquina (no de plantilla): el **id** exacto (hexadecimal) de una copia de `kling db` a la que marca el proxy, el modelo A de [db.md](db.md). Nunca una dirección: el daemon la resuelve en cada conexión y solo si la copia existe con ese id, corre, lleva `kling.db.golden`, `kling.db.state=ready`, expone `port` en `kling.ports`, y ella, el agente y `upstream_owner` dicen el mismo `kling.db.owner`. Excluye `upstream`, exige `upstream_tls: "disable"` (SCRAM-SHA-256) y `database`. Se comprueba también al entregar; en macOS se rechaza |
+| `upstream_owner` | con `upstream_machine`, obligatorio: el `kling.db.owner` que tienen que compartir copia y agente |
 | `secret` | contraseña del rol, ASCII imprimible |
 | `allow` | no vale para Postgres |
 
@@ -251,8 +255,10 @@ cómo se autenticó el proxy ante el servidor), `creds`, bytes y duración; `met
 `cancel` en un `CancelRequest`. Sus `reason`: los de arriba (`disabled`, `busy`,
 `no_credential`, `upstream_error`) y `bad_startup`, `timeout`, `bad_placeholder`,
 `user_mismatch`, `database_mismatch`, `replication`, `upstream_tls`, `upstream_auth`,
-`unknown_cancel`; son `denied` `disabled`, `no_credential`, `bad_placeholder`,
-`user_mismatch`, `database_mismatch`, `replication` y `unknown_cancel`.
+`unknown_cancel`, `machine_unavailable` (la copia de `upstream_machine` no se pudo usar);
+son `denied` `disabled`, `no_credential`, `bad_placeholder`, `user_mismatch`,
+`database_mismatch`, `replication`, `unknown_cancel` y `machine_unavailable`. Con
+`upstream_machine`, `upstream` es `machine:<id>` (nunca la dirección resuelta).
 
 ### Admisión
 

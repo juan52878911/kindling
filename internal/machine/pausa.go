@@ -71,6 +71,7 @@ func (m *Manager) Pause(ctx context.Context, ref string) (*api.Machine, error) {
 	m.persist()
 	out := *live
 	m.mu.Unlock()
+	m.invalidarSesiones(mc.ID, "paused")
 
 	m.bus.Publish(api.Event{Time: now, Type: api.EvFrozen, ID: mc.ID, Name: mc.Name,
 		Message: fmt.Sprintf("paused in %.1f ms (VMM kept, RAM retained)", msDesde(time.Since(start)))})

@@ -21,10 +21,38 @@ import (
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
 const backendVMM = BackendVZ
+
+// modeloAPosible: el modelo A de kling db (una copia compartida por agentes de
+// otras máquinas, credenciales con UpstreamMachine) es solo de Linux en esta
+// versión.
+//
+// POR QUÉ: en macOS el proxy de Postgres no es del daemon sino del kling-vz
+// del agente, un proceso confinado (kling-vz.sb) que no conoce las demás
+// máquinas. Para resolver la copia en cada conexión, como exige el modelo,
+// kling-vz tendría que preguntar al daemon por un canal nuevo en sentido
+// contrario (autenticado por peercred) y marcar a un reenvío del rango
+// reservado del loopback, que hoy upstream.go le prohíbe a propósito; y el
+// daemon, para cortar sesiones al congelar la copia, tendría que llamar a cada
+// kling-vz. Son dos superficies nuevas en el proceso que guarda las claves de
+// cada máquina. Pasarle la dirección ya resuelta sería justo el TOCTOU que el
+// modelo evita (un reenvío muere y su puerto lo reutiliza otra máquina). Hasta
+// que ese canal exista con sus pruebas, el error claro es lo seguro.
+const modeloAPosible = false
+
+// direccionCopiaLocked: ver modeloAPosible.
+func direccionCopiaLocked(_ *api.Machine, _ int) (string, error) { return "", errModeloASoloLinux }
+
+// invalidarCopiaPlataforma no hace nada en macOS: no hay sesiones hacia otras
+// máquinas que cortar.
+func invalidarCopiaPlataforma(string) int { return 0 }
+
+// invalidarAgentePlataforma: ídem.
+func invalidarAgentePlataforma(*knet.Net) int { return 0 }
 
 // Sin jailer en macOS: el aislamiento es el proceso auxiliar de Apple que
 // aloja cada VM, y el daemon corre sin root.
@@ -81,7 +109,7 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 			return err
 		}
 		if len(creds) > 0 {
-			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id)); err != nil {
+			if err := registrarCredenciales(ctx, c, nil, creds, m.credAuditPath(id), nil); err != nil {
 				return err
 			}
 		}
@@ -96,7 +124,15 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 // que hacer: el kling-vz es el mismo y conserva lo que se le dio. auditPath no
 // viaja: kling-vz escribe el registro junto a su socket, que está en el mismo
 // directorio de la máquina (ver vz/cmd/kling-vz).
-func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string) error {
+func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.Net, creds []credproxy.Credential, _ string, _ credproxy.ResolveMachineFunc) error {
+	// El modelo A de kling db (UpstreamMachine) es solo de Linux: ver
+	// direccionCopiaLocked. Aquí también, antes de mirar c: ni el almacén de
+	// un Linux copiado ni una versión mezclada deben llegar a kling-vz.
+	for _, cr := range creds {
+		if cr.UpstreamMachine != "" {
+			return errModeloASoloLinux
+		}
+	}
 	if c == nil {
 		return nil
 	}
