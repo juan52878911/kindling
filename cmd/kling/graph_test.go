@@ -208,3 +208,35 @@ func TestGraphUpContraDaemonFalso(t *testing.T) {
 		t.Fatalf("daemon viejo: %v", err)
 	}
 }
+
+// Las aristas share y depends se leen del fichero y se ven en inspect.
+func TestLeerGrafoShareYDepends(t *testing.T) {
+	const f = `name: taller
+nodes:
+  files:  {image: min, ports: [8081]}
+  web:    {image: min}
+edges:
+  - {from: web, to: files, kind: share, mount: /data}
+  - {from: web, to: files, kind: depends, port: 8081}
+`
+	req, err := leerGrafo("taller.yaml", []byte(f), sinStdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := req.Graph
+	if err := api.ValidateGraph(&g); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	escribirGrafo(&out, &g)
+	for _, want := range []string{"web -> files  share    /data (ro)", "web -> files  depends  waits until port 8081 answers"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("inspect sin %q:\n%s", want, out.String())
+		}
+	}
+	// Una fuente de clave en una arista que no es credential no vale.
+	mal := strings.Replace(f, "mount: /data}", "mount: /data, secret_env: X}", 1)
+	if _, err := leerGrafo("taller.yaml", []byte(mal), sinStdin); err == nil {
+		t.Fatal("secret_env en una arista share")
+	}
+}
