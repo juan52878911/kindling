@@ -62,6 +62,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   recibe solo el esquema y la pregunta y devuelve una SQL que se valida, se enseña y se
   ejecuta con un rol de solo lectura en `BEGIN TRANSACTION READ ONLY`. Ver
   [`docs/db-ask.md`](docs/db-ask.md).
+- **`kling db ask-web`.** La misma garantía de `ask` en una página web mínima para quien no usa
+  la terminal (HTML y JS embebidos, sin dependencias): solo esquema y pregunta hacia el modelo,
+  la SQL se muestra y se ejecuta al pulsar un botón, con el rol de solo lectura en `READ ONLY`;
+  `-explain` exige `-send-data`. Escucha solo en loopback (`-allow-remote` con aviso), token
+  aleatorio en la URL que pasa a cookie `SameSite=Strict`, CSRF en cada POST, CSP sin inline,
+  vida acotada (`-ttl`) y límite de peticiones. Ver [`docs/db-ask.md`](docs/db-ask.md).
 - **`kling db rehearse`, `rotate`, `snapshot`/`snapshots`/`undo`.** `rehearse` ensaya
   migraciones SQL en una copia desechable (tiempos, esperas por locks, tamaño; un
   `lock_timeout` se informa como "would block"); `rotate` da una clave nueva a una copia y

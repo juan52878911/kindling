@@ -28,6 +28,64 @@ kling db ask t1 "¿hay algo raro en las devoluciones?" -explain -send-data
 
 Además, `-H` y `-owner` como el resto de `kling db`.
 
+## `kling db ask-web`: la misma garantía en una página web
+
+Para quien no usa la terminal. Se arranca en la máquina del operador y se abre en el
+navegador:
+
+```sh
+kling db ask-web t1                      # imprime http://127.0.0.1:PORT/?t=<token>
+kling db ask-web t1 -listen 127.0.0.1:8765 -provider opencode
+```
+
+Acepta `-role`, `-provider`, `-model`, `-llm-timeout`, `-limit`, `-timeout`, `-explain`
+y `-send-data` con el mismo significado y las mismas comprobaciones que `ask` (no hay
+`-yes`: la web siempre pide el botón). Además:
+
+| flag | qué hace |
+|---|---|
+| `-listen HOST:PORT` | dirección (por defecto `127.0.0.1:0`, un puerto libre); solo loopback |
+| `-allow-remote` | acepta una dirección que no sea loopback, con un aviso: es HTTP sin TLS. Mejor un túnel SSH al loopback |
+| `-ttl D` | cuánto vive la página (30 min; de 1 min a 8 h); después responde 410 y el proceso termina |
+
+**Las garantías de `ask` no cambian.** Al modelo solo van el esquema y la pregunta (filas
+solo con `-explain -send-data`, y la página avisa de ello); la SQL pasa por `sqlguard`; se
+**muestra** y solo se ejecuta cuando el usuario pulsa "Run this query"; se ejecuta con el
+rol de solo lectura en `BEGIN TRANSACTION READ ONLY` con `statement_timeout`, envuelta en
+`LIMIT`; el resultado es una tabla. La petición de ejecutar lleva el **id** de la
+propuesta y `confirm: true`, nunca una SQL: se ejecuta exactamente la que se enseñó (se
+vuelve a validar) y cada propuesta vale una vez y caduca a los 10 min. Un error de
+validación no deja ninguna propuesta que ejecutar. Sin el reintento de `ask` tras un
+"no existe": el usuario simplemente vuelve a preguntar.
+
+**Seguridad de la página:**
+
+- Escucha solo en loopback; otra dirección se rechaza salvo `-allow-remote`. Se comprueba
+  la cabecera `Host` (contra DNS rebinding) cuando es loopback.
+- El token aleatorio (192 bits) va en la URL impresa por stdout; al abrirla pasa a una
+  cookie `HttpOnly; SameSite=Strict` y el navegador es redirigido a `/`, así que no queda
+  en la barra ni en el historial. Sin la cookie, todo es 403.
+- Cada POST exige además un segundo token (CSRF, distinto del de la URL, que solo lleva la
+  página ya autenticada) en `X-CSRF`, `Content-Type: application/json`, y rechaza un
+  `Origin` o `Sec-Fetch-Site` de otro sitio. Los tokens se comparan en tiempo constante.
+- CSP estricta sin `unsafe-inline` (`default-src 'none'; script-src 'self'; style-src
+  'self'`): el JS y el CSS son ficheros propios embebidos en el binario, sin dependencias
+  ni CDN, y lo que viene del modelo o de la base entra con `textContent`, nunca como HTML.
+  Además `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+  `Cache-Control: no-store`. Ni CORS ni preflight.
+- Límites: cuerpos de 16 KiB, 30 peticiones por minuto y 500 en total, una consulta a la
+  vez, 20 propuestas pendientes como mucho y tiempos de lectura y escritura del servidor.
+- La clave de la copia no está en ninguna respuesta: no se lee en la página, y si aparece
+  en una celda, un resumen o un error se sustituye por `[redacted]`.
+- Con `-allow-remote` cualquiera que llegue al puerto Y tenga la URL puede consultar la
+  copia (con el mismo rol de solo lectura): trátala como una clave.
+
+**Probar sin clave de un proveedor.** `KLING_DB_ASK_FAKE=<fichero>` (ver arriba) también
+vale para `ask-web`: el "modelo" contesta siempre lo que hay en el fichero, y todo lo demás
+(validación, botón, rol, transacción) es real. Sirve para el e2e y para ver la página sin
+red. La prueba con la API real de Anthropic (`ANTHROPIC_API_KEY=... kling db ask-web t1`)
+está pendiente de una clave: solo hay cubierta la petición con tests unitarios.
+
 ## Proveedores
 
 - **anthropic**: la API Messages, con `ANTHROPIC_API_KEY`.
