@@ -593,12 +593,20 @@ cambia:
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
-  reserva). Dentro de él NO hay cuota por instancia:
-  el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que
-  reescribe dejan de compartirse con la base, así que un invitado que reescribe todo su
-  disco puede llenar el almacén compartido (ENOSPC para las demás instancias del almacén).
-  Es un límite conocido; una cuota por directorio (proyecto en XFS, qgroup en Btrfs)
-  está pendiente.
+  reserva).
+- **Cuota por instancia**: el VMM es dueño del fichero de overlay y un Firecracker
+  comprometido podría hacerlo crecer hasta llenar el almacén compartido. Cada overlay lleva
+  una cuota del núcleo igual a su tamaño lógico más una holgura: en XFS, cuota de proyecto
+  (`prjquota`; un id por overlay puesto por ioctl sobre el fichero abierto con
+  `O_NOFOLLOW`, límite duro con `xfs_quota`), y en Btrfs, un subvolumen por instancia con
+  qgroup. La cuota se aplica antes de ceder el fichero al VMM y, si el almacén la impone
+  y no se puede aplicar, la instancia no entra al almacén (cae a copia completa). Sin
+  `xfs_quota`/`btrfs`, o con un XFS montado sin `prjquota`, no hay cuota y `kling doctor`
+  lo avisa.
+  Límite que queda: la cuota es una cota de crecimiento por instancia (XFS y Btrfs cuentan
+  lo compartido con la base entero), no una reserva. Muchos invitados que reescriban a la
+  vez todo su disco siguen pudiendo agotar el almacén compartido (ENOSPC para las demás);
+  se dimensiona con `daemon.cow_store_gib`. Las instancias anteriores a la cuota no la tienen.
 
 ### 15. Grafos: cada arista es una autorización, no una red
 

@@ -76,6 +76,10 @@ func checkCoW(c *api.CoWInfo) (doctorCheck, bool) {
 		d.State = doctorWarn
 		d.Detail = "the copy-on-write store " + c.Store.Path + " (" + nombreFSAlmacen(c.Store) + ") exists but is not mounted: instances with their overlay there won't start"
 		d.Fix = "restart the daemon (it mounts the store), and check its log for the mount error"
+	case c.Store != nil && c.Store.NoQuota:
+		d.State = doctorWarn
+		d.Detail = "the copy-on-write store " + c.Store.Path + " (" + nombreFSAlmacen(c.Store) + ") has no per-instance disk quota: a compromised VMM could grow its overlay and fill the store"
+		d.Fix = "install xfs_quota (xfsprogs) or btrfs (btrfs-progs); an XFS store mounted without prjquota needs the daemon stopped, no microVMs running and `umount " + c.Store.Path + "` so the daemon remounts it with quota (docs/cow.md)"
 	case c.Mode == "copy" && c.Setting != "off":
 		d.State = doctorWarn
 		d.Detail = "run -from copies the whole golden overlay: " + c.Reason

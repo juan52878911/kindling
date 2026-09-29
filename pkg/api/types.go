@@ -672,6 +672,12 @@ type CoWStore struct {
 	Mounted bool   `json:"mounted"`
 	SizeMiB int64  `json:"size_mib,omitempty"`
 	FreeMiB int64  `json:"free_mib,omitempty"`
+	// Quota es la cuota por instancia que impone el almacén: "prjquota" (XFS) o
+	// "qgroup" (Btrfs). NoQuota lo pone un daemon con el almacén montado y sin
+	// cuota (faltan las herramientas o el montaje no la tiene): un daemon
+	// anterior no dice nada.
+	Quota   string `json:"quota,omitempty"`
+	NoQuota bool   `json:"no_quota,omitempty"`
 }
 
 // Has dice si el daemon anuncia la capacidad c.
