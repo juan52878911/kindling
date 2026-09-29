@@ -374,3 +374,93 @@ func TestBarrerForksSoloLosMarcadosYLibres(t *testing.T) {
 		t.Errorf("el barrido se llevó un snapshot sin marca (de un usuario): %v", err)
 	}
 }
+
+// Las etiquetas pedidas llegan a cada copia en su nacimiento, junto a fork-of;
+// las inválidas se rechazan antes de pausar nada.
+func TestForkEtiquetasDeLasCopias(t *testing.T) {
+	m := newTestManager(t)
+	id := "f0aa170000000007"
+	falso, _ := origenParaFork(t, m, id)
+	pedidas := copiasFalsas(t, m, 0)
+
+	for _, malas := range []map[string]string{
+		{"Mal": "x"}, {api.LabelForkOf: "otro"}, {api.LabelKind: "service"},
+	} {
+		if _, _, err := m.Fork(context.Background(), "caja", ForkOptions{Labels: malas}); !errors.Is(err, ErrFork) {
+			t.Errorf("etiquetas %v: %v, quería ErrFork", malas, err)
+		}
+	}
+	if n := len(falso.todas()); n != 0 {
+		t.Errorf("se habló %d veces con el VMM para etiquetas inválidas", n)
+	}
+
+	_, copias, err := m.Fork(context.Background(), "caja", ForkOptions{Count: 2,
+		Labels: map[string]string{"kling.db.state": "preparing"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copias) != 2 || len(pedidas()) != 2 {
+		t.Fatalf("copias %d, pedidas %d", len(copias), len(pedidas()))
+	}
+	for _, r := range pedidas() {
+		if r.Labels["kling.db.state"] != "preparing" || r.Labels[api.LabelForkOf] != id {
+			t.Errorf("la petición de restauración lleva %v", r.Labels)
+		}
+	}
+	for _, c := range copias {
+		if c.Labels["kling.db.state"] != "preparing" || c.Labels[api.LabelKind] != api.KindSandbox {
+			t.Errorf("copia con %v", c.Labels)
+		}
+	}
+}
+
+// Si el almacén de credenciales no se puede mirar (ni existe ni deja de
+// existir: ENOTDIR), se rechaza en vez de suponer que no hay credenciales.
+func TestForkSinCredencialesFallaCerrado(t *testing.T) {
+	m := newTestManager(t)
+	src := &api.Machine{ID: "f0aa170000000008", Name: "caja"}
+	if err := m.forkSinCredenciales(src); err != nil {
+		t.Fatalf("sin almacén: %v", err)
+	}
+	// El "directorio" de la máquina es un fichero: Stat da ENOTDIR.
+	if err := os.MkdirAll(filepath.Dir(m.dir(src.ID)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.dir(src.ID), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.forkSinCredenciales(src); !errors.Is(err, ErrFork) {
+		t.Errorf("almacén ilegible: %v, quería ErrFork", err)
+	}
+}
+
+// Unas credenciales dadas mientras el fork esperaba el cerrojo de la máquina
+// (TOCTOU con SetCredentials) lo rechazan antes de pausarla.
+func TestForkRepiteLaComprobacionBajoElCerrojo(t *testing.T) {
+	m := newTestManager(t)
+	id := "f0aa170000000009"
+	falso, _ := origenParaFork(t, m, id)
+	pedidas := copiasFalsas(t, m, 0)
+
+	soltar := m.lock(id) // como un SetCredentials en curso
+	hecho := make(chan error, 1)
+	go func() {
+		_, _, err := m.Fork(context.Background(), "caja", ForkOptions{})
+		hecho <- err
+	}()
+	time.Sleep(200 * time.Millisecond) // el fork ya pasó su comprobación sin cerrojo
+	if err := m.guardarCredenciales(id, []credproxy.Credential{{Env: "KEY", Domain: "api.example.com",
+		Placeholder: credproxy.PlaceholderPrefix + "aa", Secret: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	soltar()
+	if err := <-hecho; !errors.Is(err, ErrFork) || !strings.Contains(err.Error(), "run -from") {
+		t.Fatalf("fork tras darle credenciales: %v", err)
+	}
+	if n := len(falso.todas()); n != 0 {
+		t.Errorf("se pausó/volcó la máquina (%d llamadas al VMM)", n)
+	}
+	if len(pedidas()) != 0 || len(snapshotsFork(t, m)) != 0 {
+		t.Error("el fork rechazado dejó copias o snapshot")
+	}
+}

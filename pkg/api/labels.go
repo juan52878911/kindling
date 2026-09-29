@@ -35,3 +35,8 @@ func MergeLabels(base, override map[string]string) map[string]string {
 	}
 	return out
 }
+
+// LabelDBPrefix es el prefijo de las etiquetas de las bases de datos de
+// ext/db (kling.db.owner, kling.db.state...). kindling-sandbox lo reserva: un
+// inquilino no puede fijarlas.
+const LabelDBPrefix = "kling.db."

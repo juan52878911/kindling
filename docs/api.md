@@ -380,6 +380,22 @@ sandbox lo reinicia. También admite `name`, `vcpus`,
 
 Estas rutas solo tocan máquinas con `kind=sandbox`.
 
+### `POST /sandboxes/{ref}/fork`
+
+Ramifica un sandbox en marcha en `count` copias (1 a 64; capacidad `fork`). Cuerpo
+opcional:
+
+```json
+{"count": 2, "ttl_seconds": 600, "on_ttl": "remove", "labels": {"kling.db.state": "preparing"}}
+```
+
+`labels` (desde sin publicar) se suman a las de cada copia en su nacimiento, sin ventana
+en la que exista sin ellas; van con `-label k=v` (repetible) en `kling sandbox fork`. Las
+claves siguen `^[a-z0-9][a-z0-9._-]{0,63}$`, como mucho 32 etiquetas de 256 bytes de
+valor, y `kind` y `kling.fork-of` están reservadas (`400`). Un cuerpo sin `labels` se
+comporta como siempre. Una máquina con credenciales del proxy se rechaza con `409`:
+arranca otra instancia con `run -from <plantilla>` en vez de ramificarla.
+
 ### `allow_exec` y `on_ttl` en `POST /machines`
 
 `allow_exec: true` enciende exec y ficheros. Con `from`, las máquinas heredan la

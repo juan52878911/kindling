@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +19,7 @@ func TestParseSandboxFork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.ref != "caja" || o.req != (api.ForkRequest{Count: 1}) || o.quiet || o.asJSON {
+	if o.ref != "caja" || !reflect.DeepEqual(o.req, api.ForkRequest{Count: 1}) || o.quiet || o.asJSON {
 		t.Fatalf("por defecto: %+v (quería una copia y el ttl del original)", o)
 	}
 
@@ -28,7 +29,7 @@ func TestParseSandboxFork(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := api.ForkRequest{Count: 4, TTLSeconds: 1800, OnTTL: api.OnTTLFreeze}
-	if o.ref != "caja" || o.req != want || !o.quiet {
+	if o.ref != "caja" || !reflect.DeepEqual(o.req, want) || !o.quiet {
 		t.Fatalf("con flags: %+v, quería %+v", o, want)
 	}
 	if o, err = parseSandboxFork([]string{"-json", "-ttl", "90", "caja"}, flag.ContinueOnError); err != nil ||
@@ -36,14 +37,23 @@ func TestParseSandboxFork(t *testing.T) {
 		t.Fatalf("-ttl en segundos y -json: %+v %v", o, err)
 	}
 
+	// -label repetido, validado con las reglas de la API.
+	o, err = parseSandboxFork([]string{"caja", "-label", "kling.db.state=preparing", "-label", "a=b"}, flag.ContinueOnError)
+	if err != nil || !reflect.DeepEqual(o.req.Labels, map[string]string{"kling.db.state": "preparing", "a": "b"}) {
+		t.Fatalf("-label: %+v %v", o.req.Labels, err)
+	}
+
 	malos := map[string][]string{
-		"sin sandbox":  {},
-		"dos sandbox":  {"a", "b"},
-		"cero copias":  {"caja", "-n", "0"},
-		"demasiadas":   {"caja", "-n", "65"},
-		"on-ttl":       {"caja", "-on-ttl", "explode"},
-		"ttl inválido": {"caja", "-ttl", "mucho"},
-		"flag extraño": {"caja", "-x"},
+		"label sin =":      {"caja", "-label", "x"},
+		"label mayúsculas": {"caja", "-label", "Bad=1"},
+		"label reservada":  {"caja", "-label", "kling.fork-of=x"},
+		"sin sandbox":      {},
+		"dos sandbox":      {"a", "b"},
+		"cero copias":      {"caja", "-n", "0"},
+		"demasiadas":       {"caja", "-n", "65"},
+		"on-ttl":           {"caja", "-on-ttl", "explode"},
+		"ttl inválido":     {"caja", "-ttl", "mucho"},
+		"flag extraño":     {"caja", "-x"},
 	}
 	for nombre, args := range malos {
 		if _, err := parseSandboxFork(args, flag.ContinueOnError); err == nil {
@@ -92,7 +102,7 @@ func TestRunSandboxFork(t *testing.T) {
 	if err := runSandboxFork(context.Background(), c, o, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(d.reqs) != 1 || d.refs[0] != "caja" || d.reqs[0] != o.req {
+	if len(d.reqs) != 1 || d.refs[0] != "caja" || !reflect.DeepEqual(d.reqs[0], o.req) {
 		t.Fatalf("petición: %v %+v", d.refs, d.reqs)
 	}
 	s := out.String()

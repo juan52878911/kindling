@@ -38,6 +38,14 @@ func (m *Manager) snapDir(name string) string {
 // el disco que le demos debe tener exactamente el contenido que tenía al
 // congelarse.
 func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (snapOut *api.Snapshot, errOut error) {
+	return m.commit(ctx, ref, name, replace, nil)
+}
+
+// commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
+// de la máquina tomado y la máquina releída, justo antes de pausarla. La usa
+// Fork para repetir ahí lo que ya miró sin cerrojo (TOCTOU con un
+// SetCredentials concurrente, que toma el mismo cerrojo).
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -72,6 +80,11 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 	}
 	if mc.State != api.StateRunning {
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
+	}
+	if comprobar != nil {
+		if err := comprobar(mc); err != nil {
+			return nil, err
+		}
 	}
 	// La memoria volcada llevaría montada una carpeta de ESTE host (las vivas)
 	// o un disco que no viaja con el snapshot (las copias): cada instancia

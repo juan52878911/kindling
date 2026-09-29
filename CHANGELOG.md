@@ -12,6 +12,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ### Seguridad
 
+- **Fork: el almacén de credenciales falla cerrado.** Si no se puede mirar (cualquier error
+  salvo "no existe") el fork se rechaza, y la comprobación de "sin credenciales" se repite
+  con el cerrojo de la máquina justo antes de pausarla, para que un `SetCredentials`
+  concurrente no se cuele. El mensaje ahora dice cómo hacerlo bien: "start another instance
+  with run -from <template>".
+- **kindling-sandbox reserva el prefijo `kling.db.`.** Un inquilino ya no puede fijar
+  `kling.db.owner` ni `kling.db.state` al crear un sandbox.
+
 - **Credenciales Postgres: `-database` obligatoria.** `kling machine credential` y
   `kling template credential` con `-type postgres` exigen `-database B` o, expreso,
   `-any-database` (nuevo campo `any_database` en la API; el CLI avisa por stderr de que el
@@ -189,6 +197,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   no bloqueado — la barrera del namespace sí los cubre).
 
 ### Novedades
+
+- **`fork` con etiquetas.** `POST /sandboxes/{ref}/fork` acepta `labels` y `kling sandbox fork`
+  `-label k=v`: las copias nacen ya etiquetadas. Además, `api.Machine.Exposes(port)`.
 
 - **Postgres en Docker o en la LAN/VPC: upstream fijado por el operador.** `kling machine
   credential` y `kling template credential` ganan `-upstream host:puerto` (a dónde marca

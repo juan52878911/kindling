@@ -159,6 +159,12 @@ func TestCrearConImagen(t *testing.T) {
 	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", `{}`), 400)
 	// Etiqueta reservada.
 	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{LabelTenant: "bob"}}), 400)
+	// El prefijo kling.db. es de ext/db: no se puede falsificar owner ni state.
+	for _, k := range []string{"kling.db.owner", "kling.db.state", "kling.db.x"} {
+		esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{k: "x"}}), 400)
+	}
+	// Una etiqueta parecida pero sin el prefijo sigue valiendo.
+	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", CrearPeticion{Image: "base", Labels: map[string]string{"kling.dbx": "x"}}), 201)
 	// Cuerpo con campos desconocidos.
 	esperaCodigo(t, pide(t, srv, tokenAlice, "POST", "/v1/sandboxes", `{"image":"base","foo":1}`), 400)
 	// on_ttl y egress inválidos.
