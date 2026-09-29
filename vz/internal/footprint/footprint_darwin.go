@@ -106,31 +106,47 @@ func NewMeter() *Meter { return &Meter{} }
 // Track registra el descriptor de la tubería de consola que se entregó al
 // framework al crear la VM.
 func (m *Meter) Track(fd uintptr) {
-	var h C.ulonglong
-	if C.pipe_handle(C.int(os.Getpid()), C.int(fd), &h) != 0 {
+	h, ok := pipeHandle(fd)
+	if !ok {
 		return
 	}
 	m.mu.Lock()
-	m.anchor, m.helper = uint64(h), 0
+	m.anchor, m.helper = h, 0
 	m.mu.Unlock()
 }
 
 func (m *Meter) findHelper() int {
-	if m.anchor == 0 {
+	m.helper = buscarAuxiliar(m.anchor, m.helper)
+	return m.helper
+}
+
+// pipeHandle es la identidad en el kernel del extremo de tubería fd de este
+// proceso.
+func pipeHandle(fd uintptr) (uint64, bool) {
+	var h C.ulonglong
+	if C.pipe_handle(C.int(os.Getpid()), C.int(fd), &h) != 0 {
+		return 0, false
+	}
+	return uint64(h), true
+}
+
+// buscarAuxiliar devuelve el pid del auxiliar de Apple que tiene abierta la
+// tubería anchor (0 si no hay), empezando por el que se encontró la última
+// vez (cache).
+func buscarAuxiliar(anchor uint64, cache int) int {
+	if anchor == 0 {
 		return 0
 	}
-	if m.helper > 0 && C.holds_pipe(C.int(m.helper), C.ulonglong(m.anchor)) == 1 {
-		return m.helper
+	if cache > 0 && C.holds_pipe(C.int(cache), C.ulonglong(anchor)) == 1 {
+		return cache
 	}
 	pids := make([]C.int, 1024)
 	n := int(C.helpers(&pids[0], C.int(len(pids))))
 	for i := 0; i < n; i++ {
-		if C.holds_pipe(pids[i], C.ulonglong(m.anchor)) == 1 {
-			m.helper = int(pids[i])
-			return m.helper
+		if C.holds_pipe(pids[i], C.ulonglong(anchor)) == 1 {
+			return int(pids[i])
 		}
 	}
-	m.helper = 0
 	return 0
 }
 

@@ -640,7 +640,7 @@ func TestSinConfinarNoSeArranca(t *testing.T) {
 // deja corriendo más o menos la mitad del tiempo.
 func TestReguladorDeCPUDejaElTecho(t *testing.T) {
 	r := newRig(t)
-	r.srv.cpuVentana, r.srv.cpuGracia = 10*time.Millisecond, time.Millisecond
+	r.srv.cpuPeriodo, r.srv.cpuGracia = 10*time.Millisecond, time.Millisecond
 	r.configure(t.TempDir())
 	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
 	vm, _, _ := r.f.last()
@@ -670,7 +670,7 @@ func TestReguladorDeCPUDejaElTecho(t *testing.T) {
 // regulador no la reanuda.
 func TestPausaDelNucleoDuranteLaDelRegulador(t *testing.T) {
 	r := newRig(t)
-	r.srv.cpuVentana, r.srv.cpuGracia = 10*time.Millisecond, time.Millisecond
+	r.srv.cpuPeriodo, r.srv.cpuGracia = 10*time.Millisecond, time.Millisecond
 	r.configure(t.TempDir())
 	r.must("PUT", "/actions", `{"action_type":"InstanceStart"}`)
 	vm, _, _ := r.f.last()

@@ -62,3 +62,32 @@ func confinar(root, mdir, broker string, conRed, gfx bool) error {
 	}
 	return nil
 }
+
+// perfilFreno es el sandbox del proceso freno del tope de CPU
+// (footprint.ServeFreno): mandar señales y mirar procesos, nada más; ni
+// ficheros, ni red, ni lanzar procesos.
+const perfilFreno = `(version 1)
+(deny default)
+(import "system.sb")
+(allow signal (target others))
+(allow process-info-listpids)
+(allow process-info-pidinfo)
+(allow process-info-pidfdinfo)
+`
+
+// confinarFreno encierra el proceso freno en perfilFreno.
+func confinarFreno() error {
+	cp := C.CString(perfilFreno)
+	defer C.free(unsafe.Pointer(cp))
+	params := []*C.char{nil}
+	var errbuf *C.char
+	if C.sandbox_init_with_parameters(cp, 0, &params[0], &errbuf) != 0 {
+		msg := "sandbox_init failed"
+		if errbuf != nil {
+			msg = C.GoString(errbuf)
+			C.sandbox_free_error(errbuf)
+		}
+		return errors.New(msg)
+	}
+	return nil
+}
