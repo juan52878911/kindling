@@ -10,6 +10,19 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Fase baja
+
+- **Proxy de Postgres: protocolo 3.2 (#71).** El proxy de credenciales habla 3.0 y 3.2
+  (PostgreSQL 18), con claves de cancelación de longitud variable en `BackendKeyData` y
+  `CancelRequest`. El invitado recibe una clave falsa de la longitud de su versión (4 o
+  32 bytes) y la cancelación llega al servidor con la real, de la de la suya; con un
+  servidor anterior a 18, que contesta `NegotiateProtocolVersion` con 3.0, el proxy
+  sigue en 3.0 con él sin que el invitado lo note. 3.1 y 3.3+ se negocian a la baja. Un
+  `NegotiateProtocolVersion` del servidor fuera de sitio, una clave que no es de su
+  versión o un segundo `BackendKeyData` cortan la conexión. Probado con clientes y
+  servidores falsos 3.0 y 3.2 en las cuatro combinaciones; la prueba de laboratorio
+  (`-tags pglab`) cancela también en 3.2. Ver [`docs/postgres.md`](docs/postgres.md).
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>

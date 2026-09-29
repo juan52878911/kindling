@@ -351,8 +351,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     de TODAS las credenciales Postgres de la máquina y así elige la credencial; después
     exige que el rol sea el de la credencial y, si la credencial fija base de datos, esa.
     Las conexiones de replicación, los parámetros repetidos y los arranques de más de
-    10000 bytes se rechazan; las opciones `_pq_.` y el protocolo 3.2 se contestan con
-    `NegotiateProtocolVersion` (3.0).
+    10000 bytes se rechazan; las opciones `_pq_.`, la versión 3.1 y las 3.3+ se
+    contestan con `NegotiateProtocolVersion` (3.0 o 3.2); 3.0 y 3.2 se hablan tal cual.
   - **Hacia el servidor, TLS verificado por defecto.** Sin `-upstream`, sale por el mismo
     dialer de solo IPv4 públicas que el proxy HTTP (un servidor en la red privada, en
     `169.254/16` o en loopback **se rechaza**, como un DNS envenenado), manda `SSLRequest` y lee la
@@ -451,7 +451,16 @@ solo al crear: un `../../etc` saldría del directorio de datos.
     `BackendKeyData`: la clave de cancelación se cambia por una aleatoria, y un
     `CancelRequest` con ella se traduce a la real en una conexión nueva al mismo destino
     y con el mismo modo TLS;
-    uno con una clave que el proxy no dio se cierra sin más.
+    uno con una clave que el proxy no dio se cierra sin más. Con el protocolo 3.2
+    (PostgreSQL 18) la clave es de longitud variable: la falsa tiene la longitud de la
+    versión del invitado (4 bytes en 3.0, 32 en 3.2) y la real se guarda tal cual la da
+    el servidor, que tiene que ser de SU versión (4 bytes en 3.0, 4-256 en 3.2); un
+    segundo `BackendKeyData` o una clave de otra longitud cortan la conexión antes de
+    que el invitado reciba nada. Un `NegotiateProtocolVersion` del servidor solo vale
+    como primer mensaje, una vez, a una versión menor más baja que la pedida y sin
+    opciones rechazadas (el proxy no manda ninguna); cualquier otro es un fallo de
+    autenticación. Un `CancelRequest` con una clave de más de 256 bytes se rechaza como
+    arranque mal formado.
   - **Límites**: 32 conexiones a la vez por máquina, 10 s para que el invitado mande
     arranque y contraseña y 15 s para toda la autenticación; tras ella no hay plazo de
     inactividad (un pool puede estar horas callado), hay keepalive TCP de 30 s.
