@@ -474,7 +474,9 @@ func (s *Servidor) normalizar(p *CrearPeticion) error {
 	for k := range p.Labels {
 		// Las reservadas las pone el frontal: dejar que el cliente las mande
 		// sería dejarle firmar como otro tenant.
-		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate {
+		// kling.db. es de ext/db: dejar que el cliente fije kling.db.owner o
+		// kling.db.state sería dejarle falsificar de quién es una base.
+		if k == api.LabelKind || k == LabelTenant || k == LabelTemplate || strings.HasPrefix(k, api.LabelDBPrefix) {
 			return fmt.Errorf("label %q is reserved", k)
 		}
 		if !api.KeyPattern.MatchString(k) {
