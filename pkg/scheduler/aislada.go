@@ -82,10 +82,30 @@ func (g *Scheduler) sessionTTL() time.Duration {
 	return defaultSessionTTL
 }
 
-// aisladaLock devuelve el candado de una sesión aislada.
+// aisladaLock devuelve el candado de una sesión aislada. Lo toman quien crea o
+// despierta su máquina (isolatedSession) y quien la cierra (releaseIsolated);
+// la caducidad y el reciclado, que corren bajo g.mu, solo lo PRUEBAN (libreLocked)
+// y dejan en paz una sesión ocupada.
+//
+// El candado no se borra al cerrar la sesión: alguien puede estar esperándolo,
+// y uno nuevo para la misma clave dejaría a dos dueños a la vez. Los que ya no
+// son de ninguna sesión los poda el barrido (podarCandados).
 func (g *Scheduler) aisladaLock(key string) *sync.Mutex {
 	v, _ := g.aisladaMu.LoadOrStore(key, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// libreLocked dice si nadie tiene el candado de la sesión key ahora mismo. Si
+// está libre lo deja libre: quien llama tiene g.mu, y mientras lo tenga nadie
+// que tome el candado después puede ver la sesión a medio quitar (isolatedSession
+// mira g.aisladas bajo g.mu). Se llama con g.mu tomado.
+func (g *Scheduler) libreLocked(key string) bool {
+	l := g.aisladaLock(key)
+	if !l.TryLock() {
+		return false
+	}
+	l.Unlock()
+	return true
 }
 
 // isolatedSession devuelve la microVM de la sesión key del servicio, despierta.
@@ -252,7 +272,7 @@ func (g *Scheduler) despertarAislada(ctx context.Context, id string, tr *WakeTra
 }
 
 // reservarAislada aplica el tope de sesiones aisladas por servicio y reserva la
-// plaza (en g.creando, como scaleOut) hasta que la sesión nueva se registra.
+// plaza (en g.creandoAisladas, como g.creando en scaleOut) hasta que la sesión nueva se registra.
 //
 // Cada sesión aislada es una máquina, así que el tope es el de réplicas: con
 // -max-replicas 16, dieciséis sesiones simultáneas, despiertas o congeladas.
@@ -262,22 +282,22 @@ func (g *Scheduler) reservarAislada(ctx context.Context, service string) (libera
 	tope := g.topeReplicas(service)
 	for {
 		g.mu.Lock()
-		n := g.creando[service]
+		n := g.creandoAisladas[service]
 		for _, a := range g.aisladas {
 			if a.service == service {
 				n++
 			}
 		}
 		if tope <= 0 || n < tope {
-			if g.creando == nil {
-				g.creando = map[string]int{}
+			if g.creandoAisladas == nil {
+				g.creandoAisladas = map[string]int{}
 			}
-			g.creando[service]++
+			g.creandoAisladas[service]++
 			g.mu.Unlock()
 			return func() {
 				g.mu.Lock()
-				if g.creando[service]--; g.creando[service] <= 0 {
-					delete(g.creando, service)
+				if g.creandoAisladas[service]--; g.creandoAisladas[service] <= 0 {
+					delete(g.creandoAisladas, service)
 				}
 				g.mu.Unlock()
 			}, nil
@@ -300,7 +320,7 @@ func (g *Scheduler) reservarAislada(ctx context.Context, service string) (libera
 func (g *Scheduler) aisladaReciclableLocked(service string) *aislada {
 	var v *aislada
 	for _, a := range g.aisladas {
-		if a.service != service || time.Since(a.lastUse) < aisladaReclaimGrace {
+		if a.service != service || time.Since(a.lastUse) < aisladaReclaimGrace || !g.libreLocked(a.key) {
 			continue
 		}
 		if e := g.entryByMachineLocked(a.service, a.machineID); e != nil && e.inflight > 0 {
@@ -329,7 +349,8 @@ func (g *Scheduler) caducarAisladasLocked() []*aislada {
 	ttl := g.sessionTTL()
 	var out []*aislada
 	for _, a := range g.aisladas {
-		if time.Since(a.lastUse) <= ttl {
+		// Ocupada es que alguien la está despertando o cerrando: no ha caducado.
+		if time.Since(a.lastUse) <= ttl || !g.libreLocked(a.key) {
 			continue
 		}
 		if e := g.entryByMachineLocked(a.service, a.machineID); e != nil && e.inflight > 0 {
@@ -346,6 +367,12 @@ func (g *Scheduler) caducarAisladasLocked() []*aislada {
 // releaseIsolated cierra la sesión aislada key y destruye su máquina. false si
 // no había tal sesión.
 func (g *Scheduler) releaseIsolated(ctx context.Context, key string) bool {
+	// Bajo el candado de la sesión: si alguien la está despertando, se espera
+	// a que acabe. Sin esto, un despertar a medias volvía a registrar la
+	// máquina justo después de destruirla, y quedaba una sesión fantasma.
+	lock := g.aisladaLock(key)
+	lock.Lock()
+	defer lock.Unlock()
 	g.mu.Lock()
 	a := g.aisladas[key]
 	if a != nil {
@@ -363,7 +390,6 @@ func (g *Scheduler) releaseIsolated(ctx context.Context, key string) bool {
 // y su volcado de memoria. Es el único final de una sesión aislada: congelarla
 // la conserva, esto la libera.
 func (g *Scheduler) destruirAislada(ctx context.Context, a *aislada, motivo string) {
-	g.aisladaMu.Delete(a.key)
 	borrar := g.removeFn
 	if borrar == nil {
 		if g.client == nil {
@@ -429,10 +455,28 @@ func (g *Scheduler) barrerAisladas(ctx context.Context) {
 		}
 		huerfanas = append(huerfanas, &aislada{key: "(orphan)", service: m.Service(), machineID: m.ID})
 	}
+	g.podarCandadosLocked()
 	g.mu.Unlock()
 	for _, a := range huerfanas {
 		g.destruirAislada(ctx, a, "had no session")
 	}
+}
+
+// podarCandadosLocked olvida los candados de sesiones que ya no existen. Solo
+// los libres: uno tomado es de alguien que está creando o cerrando esa clave.
+// Se llama con g.mu tomado.
+func (g *Scheduler) podarCandadosLocked() {
+	g.aisladaMu.Range(func(k, v any) bool {
+		key := k.(string)
+		if _, viva := g.aisladas[key]; viva {
+			return true
+		}
+		if l := v.(*sync.Mutex); l.TryLock() {
+			g.aisladaMu.Delete(key)
+			l.Unlock()
+		}
+		return true
+	})
 }
 
 // soltarAisladas destruye las máquinas de todas las sesiones aisladas. Lo usa el

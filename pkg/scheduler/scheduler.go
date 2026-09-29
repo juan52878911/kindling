@@ -237,6 +237,10 @@ type Scheduler struct {
 	// aisladaMu serializa, por clave de sesión, crear o despertar su máquina
 	// (el equivalente de ensureMu para una sesión aislada).
 	aisladaMu sync.Map
+	// creandoAisladas cuenta, por servicio, las sesiones aisladas cuya máquina
+	// está naciendo: cuentan para el tope como las ya registradas. Aparte de
+	// creando, que es de las réplicas compartidas. Se toca con mu.
+	creandoAisladas map[string]int
 	// barridoAt es la última vez que se buscaron máquinas aisladas huérfanas
 	// (ver barrerAisladas). Se toca con mu.
 	barridoAt time.Time

@@ -376,19 +376,38 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		g.Begin(e)
 		defer g.End(e)
 		r.Header.Set(SessionHeader, guestSIDOf(rt, ext))
-		rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r)
-		// DELETE cierra la sesión: se olvida la ruta para no acumularlas. Si la
-		// sesión era aislada, su máquina se destruye ANTES de contestar, y con
-		// ella su overlay: quien recibe el 204 sabe que su capa ya no existe.
-		if r.Method == http.MethodDelete {
+		// DELETE de una sesión aislada: su máquina se destruye ANTES de que
+		// salga la respuesta, y con ella su overlay. Quien recibe el 204 sabe
+		// que su capa ya no existe. Por eso la respuesta del invitado (una
+		// línea) se guarda y se entrega después, en vez de dejar que el proxy
+		// la escriba y confiar en cuándo se vacía el búfer.
+		if r.Method == http.MethodDelete && g.IsIsolated(ext) {
+			rec := httptest.NewRecorder()
+			rt.ServeHTTP(&sidWriter{ResponseWriter: rec, ext: ext}, r)
 			g.ReleaseIsolated(r.Context(), ext)
+			g.Forget(ext)
+			for k, vs := range rec.Header() {
+				w.Header()[k] = vs
+			}
+			w.WriteHeader(rec.Code)
+			_, _ = w.Write(rec.Body.Bytes())
+			return
+		}
+		rt.ServeHTTP(&sidWriter{ResponseWriter: w, ext: ext}, r)
+		// DELETE cierra la sesión: se olvida la ruta para no acumularlas.
+		if r.Method == http.MethodDelete {
 			g.Forget(ext)
 		}
 		return
 	}
 
 	// Sesión NUEVA de un servicio que aísla cada sesión: microVM propia.
-	if g.aislado(r.Context(), service) {
+	aislado, err := g.aislado(r.Context(), service)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if aislado {
 		g.serveIsolatedSession(w, r, service, tnt)
 		return
 	}

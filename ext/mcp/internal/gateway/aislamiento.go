@@ -34,16 +34,26 @@ type isolationCache struct {
 	modo map[string]string
 }
 
-// aislado dice si las sesiones del servicio llevan microVM propia. Si no se
-// puede leer el catálogo de snapshots, lo último que se supo; sin nada sabido,
-// el modo compartido de siempre (el error saldrá igual al despertar).
-func (g *Gateway) aislado(ctx context.Context, service string) bool {
+// aislado dice si las sesiones del servicio llevan microVM propia.
+//
+// Falla CERRADO: si nunca se ha podido leer el catálogo de snapshots, devuelve
+// error en vez de suponer el modo compartido. Suponerlo serviría un servicio
+// aislado por la instancia común, y sus sesiones volverían a verse el disco sin
+// que nada lo dijera. Con una lectura anterior, se usa esa aunque haya caducado:
+// el modo cambia a mano y rara vez, el daemon caído es lo pasajero.
+//
+// La lectura va FUERA del candado: dentro, un daemon lento ponía en fila todas
+// las peticiones del gateway detrás de una sola llamada.
+func (g *Gateway) aislado(ctx context.Context, service string) (bool, error) {
 	c := &g.aisl
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.modo == nil || time.Since(c.at) > isolationTTL {
-		if snaps, err := g.Client().Snapshots(ctx); err == nil {
-			modo := map[string]string{}
+	modo, fresco := c.modo, c.modo != nil && time.Since(c.at) <= isolationTTL
+	c.mu.Unlock()
+	if !fresco {
+		snaps, err := g.Client().Snapshots(ctx)
+		switch {
+		case err == nil:
+			modo = map[string]string{}
 			for _, s := range snaps {
 				m := mcp.Isolation(s)
 				modo[s.Name] = m
@@ -51,10 +61,14 @@ func (g *Gateway) aislado(ctx context.Context, service string) bool {
 					modo[svc] = m
 				}
 			}
+			c.mu.Lock()
 			c.modo, c.at = modo, time.Now()
+			c.mu.Unlock()
+		case modo == nil:
+			return false, fmt.Errorf("cannot tell whether %q isolates its sessions: %w", service, err)
 		}
 	}
-	return c.modo[service] == mcp.IsolationSession
+	return modo[service] == mcp.IsolationSession, nil
 }
 
 // serveIsolatedSession abre una sesión en una microVM propia: la crea, le pasa

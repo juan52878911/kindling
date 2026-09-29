@@ -22,6 +22,9 @@ import (
 // borrar. Las máquinas se alcanzan por un reenvío (Forwards), así que esperar
 // a que escuchen es una pregunta al daemon y no un dial de verdad.
 type daemonAislado struct {
+	// guestFalla hace que ninguna máquina llegue a escuchar.
+	guestFalla bool
+
 	mu       sync.Mutex
 	n        int
 	maquinas map[string]*api.Machine
@@ -75,6 +78,10 @@ func (d *daemonAislado) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case len(partes) == 2 && partes[1] == "guest":
+		if d.guestFalla {
+			http.Error(w, `{"error":"guest not listening"}`, http.StatusBadGateway)
+			return
+		}
 		responder(api.GuestResponse{Status: 200})
 		return
 	case len(partes) == 2 && partes[1] == "thaw":
@@ -396,5 +403,99 @@ func TestReponerAisladaNoLaHacePrimaria(t *testing.T) {
 	}
 	if len(g.extra["svc"]) != 1 {
 		t.Fatal("la aislada no se repuso en extra")
+	}
+}
+
+// Cerrar una sesión mientras alguien la despierta espera a que acabe, y la
+// máquina no vuelve a registrarse después de destruida (la sesión fantasma).
+func TestCerrarEsperaAlDespertar(t *testing.T) {
+	g, d := conDaemonAislado(t)
+	ctx := context.Background()
+	a, _ := g.isolatedSession(ctx, "svc", "A", sinTenant, true)
+
+	despertando := g.aisladaLock("A")
+	despertando.Lock() // como isolatedSession a mitad de un thaw
+	hecho := make(chan bool)
+	go func() { hecho <- g.releaseIsolated(ctx, "A") }()
+	select {
+	case <-hecho:
+		t.Fatal("releaseIsolated no esperó al despertar en curso")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if !d.existe(a.machineID) {
+		t.Fatal("la máquina se destruyó con el despertar aún en curso")
+	}
+	despertando.Unlock()
+	if !<-hecho {
+		t.Fatal("releaseIsolated no encontró la sesión")
+	}
+	if d.existe(a.machineID) || g.IsIsolated("A") || g.Instance("svc", a.machineID) != nil {
+		t.Fatal("tras cerrar quedan la máquina, el registro o la instancia")
+	}
+}
+
+// Ni la caducidad ni el reciclado tocan una sesión que alguien está usando
+// (su candado tomado), por vieja que sea.
+func TestCaducidadRespetaUnaSesionOcupada(t *testing.T) {
+	g, d := conDaemonAislado(t)
+	ctx := context.Background()
+	g.SessionTTL = time.Minute
+	a, _ := g.isolatedSession(ctx, "svc", "A", sinTenant, true)
+	g.mu.Lock()
+	g.aisladas["A"].lastUse = time.Now().Add(-time.Hour)
+	g.mu.Unlock()
+
+	l := g.aisladaLock("A")
+	l.Lock()
+	g.reapOnce(ctx)
+	g.MaxReplicas = 1
+	if _, err := g.reservarAislada(ctx, "svc"); !errors.Is(err, ErrMaxReplicas) {
+		t.Fatalf("reciclar una sesión ocupada: %v, quería ErrMaxReplicas", err)
+	}
+	l.Unlock()
+	if !d.existe(a.machineID) || !g.IsIsolated("A") {
+		t.Fatal("se destruyó una sesión ocupada")
+	}
+	g.reapOnce(ctx)
+	if d.existe(a.machineID) {
+		t.Fatal("libre y caducada, tenía que destruirse")
+	}
+}
+
+// Si la máquina nueva nace pero no llega a escuchar, se destruye: nadie más
+// podría usarla.
+func TestMaquinaQueNoArrancaSeDestruye(t *testing.T) {
+	g, d := conDaemonAislado(t)
+	d.guestFalla = true
+	if _, err := g.isolatedSession(context.Background(), "svc", "A", sinTenant, true); err == nil {
+		t.Fatal("una máquina que no escucha tenía que dar error")
+	}
+	d.mu.Lock()
+	vivas, borradas := len(d.maquinas), len(d.borradas)
+	d.mu.Unlock()
+	if vivas != 0 || borradas != 1 {
+		t.Fatalf("quedan %d máquina(s), %d borrada(s); quería 0 y 1", vivas, borradas)
+	}
+	if g.IsIsolated("A") {
+		t.Fatal("la sesión fallida quedó registrada")
+	}
+}
+
+// El apagado destruye todas las máquinas aisladas; el barrido poda después los
+// candados de sesiones que ya no existen.
+func TestApagadoSueltaLasAisladas(t *testing.T) {
+	g, d := conDaemonAislado(t)
+	ctx := context.Background()
+	a, _ := g.isolatedSession(ctx, "svc", "A", sinTenant, true)
+	b, _ := g.isolatedSession(ctx, "svc", "B", sinTenant, true)
+	g.Drain(ctx)
+	if d.existe(a.machineID) || d.existe(b.machineID) || g.IsIsolated("A") || g.IsIsolated("B") {
+		t.Fatal("el apagado dejó sesiones aisladas vivas")
+	}
+	g.barrerAisladas(ctx)
+	n := 0
+	g.aisladaMu.Range(func(any, any) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("quedan %d candado(s) de sesiones que ya no existen", n)
 	}
 }

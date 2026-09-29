@@ -201,8 +201,11 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 // catálogo, es decir, si el servicio no se importó con `kling mcp import`.
 func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	var e *scheduler.Instance
-	var err error
-	if c.gw.aislado(ctx, service) {
+	aislado, err := c.gw.aislado(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	if aislado {
 		// Un servicio aislado no tiene instancia compartida, y despertar una
 		// solo para listar dejaría una máquina común entre sesiones. Una sesión
 		// aislada de usar y tirar: se destruye al terminar.

@@ -73,7 +73,10 @@ type aggSession struct {
 	// servicio + máquina para las microVMs (ver forward) y el servicio a secas
 	// para los enlaces externos.
 	backing map[string]string
-	lastUse time.Time
+	// aisladas son los servicios aislados en los que esta conversación ya
+	// tiene (o tuvo) su microVM. Se toca con a.mu.
+	aisladas map[string]bool
+	lastUse  time.Time
 
 	// lastQuery es la última búsqueda de find_tools: sirve para atribuir el
 	// acierto a la herramienta que acabe usándose.
@@ -544,13 +547,36 @@ func (a *aggregator) forward(ctx context.Context, s *aggSession, name string, ar
 
 	tEnsure := time.Now()
 	var e *scheduler.Instance
-	var err error
-	if a.gw.aislado(ctx, t.Service) {
+	aislado, err := a.gw.aislado(ctx, t.Service)
+	if err != nil {
+		return nil, &rpcFault{-32000, err.Error()}
+	}
+	if aislado {
 		// Servicio que aísla cada sesión: esta conversación del agregador
 		// tiene SU microVM del servicio, la misma en cada llamada. El resto
 		// del camino (sesión del invitado por máquina) no cambia.
+		//
+		// Solo se crea la PRIMERA vez. Si la conversación ya tuvo máquina y
+		// ya no está (caducó, o se la llevó el recolector del daemon), crear
+		// otra le daría un disco vacío como si fuera el suyo: se dice, igual
+		// que el 404 del camino directo.
+		a.mu.Lock()
+		yaTenia := s.aisladas[t.Service]
+		a.mu.Unlock()
 		e, err = a.gw.IsolatedSession(ctx, t.Service, claveAislada(s.id, t.Service),
-			scheduler.TenantFrom(ctx), true)
+			scheduler.TenantFrom(ctx), !yaTenia)
+		if yaTenia && (errors.Is(err, scheduler.ErrNoSuchSession) || errors.Is(err, scheduler.ErrSessionLost)) {
+			return nil, &rpcFault{-32000, fmt.Sprintf("%s: this conversation's isolated machine is gone "+
+				"(expired or removed) and with it what the tool had written; start a new conversation", t.Service)}
+		}
+		if err == nil {
+			a.mu.Lock()
+			if s.aisladas == nil {
+				s.aisladas = map[string]bool{}
+			}
+			s.aisladas[t.Service] = true
+			a.mu.Unlock()
+		}
 	} else {
 		e, err = a.gw.Ensure(ctx, t.Service)
 	}

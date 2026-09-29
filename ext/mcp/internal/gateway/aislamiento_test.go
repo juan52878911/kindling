@@ -25,6 +25,8 @@ type daemonAislado struct {
 	service    string
 	invitados  []string // direcciones de los invitados, en orden de creación
 	compartido bool
+	// sinCatalogo hace fallar GET /snapshots, como un daemon que no contesta.
+	sinCatalogo bool
 
 	// alDescongelar, si trae una dirección para la máquina, es su reenvío
 	// nuevo tras el thaw (como en macOS, donde restaurar cambia el puerto).
@@ -42,6 +44,9 @@ func (d *daemonAislado) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	d.llamadas = append(d.llamadas, r.Method+" "+r.URL.Path)
 	responder := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 	switch {
+	case r.URL.Path == "/snapshots" && d.sinCatalogo:
+		http.Error(w, `{"error":"daemon busy"}`, http.StatusInternalServerError)
+		return
 	case r.URL.Path == "/snapshots":
 		s := &api.Snapshot{Name: d.service, Labels: map[string]string{api.LabelService: d.service}, Egress: "none"}
 		if !d.compartido {
@@ -354,5 +359,81 @@ func TestSesionAisladaCongeladaPorDebajo(t *testing.T) {
 	}
 	if !d.vio("POST /machines/m1/thaw") || d.creadas != 1 {
 		t.Fatalf("tenía que descongelar m1 sin crear otra (creadas=%d)", d.creadas)
+	}
+}
+
+// Sin haber podido leer nunca el modo, el gateway no supone "compartido": un
+// servicio aislado servido por la instancia común volvería a filtrar el disco
+// entre sesiones sin que nada lo dijera. Se niega y no crea nada.
+func TestAisladoFallaCerrado(t *testing.T) {
+	_, addrs := invitadosFalsos(t, 1)
+	d := &daemonAislado{service: "notas", invitados: addrs, sinCatalogo: true}
+	h := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "").Handler("")
+	rec := pedir(t, h, "POST", "/mcp/notas", "", cuerpoInit)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "isolates its sessions") {
+		t.Fatalf("sin catálogo: %d %s", rec.Code, rec.Body)
+	}
+	if d.creadas != 0 {
+		t.Fatalf("se crearon %d máquinas sin saber el modo", d.creadas)
+	}
+}
+
+// escritorQueMira apunta si la máquina seguía existiendo cuando salió la
+// cabecera de la respuesta.
+type escritorQueMira struct {
+	*httptest.ResponseRecorder
+	d               *daemonAislado
+	id              string
+	vivaAlResponder bool
+}
+
+func (e *escritorQueMira) WriteHeader(code int) {
+	e.vivaAlResponder = e.d.existe(e.id)
+	e.ResponseRecorder.WriteHeader(code)
+}
+
+// El 204 del DELETE de una sesión aislada sale cuando su máquina ya no existe.
+func TestDeleteAisladoDestruyeAntesDeContestar(t *testing.T) {
+	_, addrs := invitadosFalsos(t, 1)
+	d := &daemonAislado{service: "notas", invitados: addrs}
+	h := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "").Handler("")
+	sa := pedir(t, h, "POST", "/mcp/notas", "", cuerpoInit).Header().Get(SessionHeader)
+	req := httptest.NewRequest("DELETE", "/mcp/notas", nil)
+	req.Header.Set(SessionHeader, sa)
+	w := &escritorQueMira{ResponseRecorder: httptest.NewRecorder(), d: d, id: "m1"}
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE: %d %s", w.Code, w.Body)
+	}
+	if w.vivaAlResponder {
+		t.Fatal("la respuesta salió con la máquina aún viva")
+	}
+}
+
+// Si la máquina de una conversación del agregador desaparece, la siguiente
+// llamada lo dice en vez de darle otra máquina con el disco vacío.
+func TestAgregadorNoCambiaDeMaquinaEnSilencio(t *testing.T) {
+	_, addrs := invitadosFalsos(t, 3)
+	d := &daemonAislado{service: "notas", invitados: addrs}
+	gw := New(api.NewClient(levantarDaemonAislado(t, d)), 5*time.Minute, false, 0, "")
+	ctx := t.Context()
+	s := &aggSession{id: "c1", services: []string{"notas"}, mode: modeProxy, backing: map[string]string{}}
+	gw.agg.sessions[s.id] = s
+	if _, fault := gw.agg.forward(ctx, s, "notas.echo", nil); fault != nil {
+		t.Fatalf("primera llamada: %+v", fault)
+	}
+	d.mu.Lock()
+	antes := d.creadas
+	d.mu.Unlock()
+	gw.ReleaseIsolated(ctx, claveAislada("c1", "notas")) // como la caducidad
+	_, fault := gw.agg.forward(ctx, s, "notas.echo", nil)
+	if fault == nil || !strings.Contains(fault.msg, "is gone") {
+		t.Fatalf("tras perder su máquina: %+v, quería el aviso", fault)
+	}
+	d.mu.Lock()
+	despues := d.creadas
+	d.mu.Unlock()
+	if despues != antes {
+		t.Fatalf("se creó otra máquina en silencio (%d creadas, antes %d)", despues, antes)
 	}
 }
