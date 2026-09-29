@@ -998,7 +998,14 @@ Se enumera a propósito, porque una lista de garantías sin sus límites es prop
   `kling-vz` de su máquina, que corre como el usuario y procesa su tráfico (ver 7). Un
   fallo explotable en su pila de red, DNS o MMDS que antes daba un proceso sin claves
   daría ahora la de esa máquina (solo la de esa: cada máquina tiene su `kling-vz`). En
-  Linux la clave nunca sale del daemon.
+  Linux la clave nunca sale del daemon. **Plan** (#80, diseñado, sin implementar):
+  sacar el proxy a un proceso propio por máquina (`kling-credproxy`), confinado en un
+  perfil sin Virtualization.framework, sin disco salvo su registro y con la red justa;
+  el daemon le entrega las claves a él y `kling-vz` solo recibe dominios y marcadores,
+  y le pasa cada conexión de la pasarela por un socket Unix. Un fallo en la pila de red
+  de `kling-vz` dejaría de dar la clave; uno en el propio proxy, no. Proceso, perfil,
+  IPC, coste y qué falta para hacerlo en
+  [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md).
 - **Los secretos por sesión de MMDS (`sessions[<id>]`) están retirados.** El id de
   sesión lo genera el puente DENTRO del invitado (PID 1, root) justo al lanzar el
   hijo para `initialize`. Como el bridge y el servidor MCP corre como root y lee el

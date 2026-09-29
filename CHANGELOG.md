@@ -28,6 +28,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   comprobar. El TLS se sigue verificando contra `-domain` o `-tls-server-name`.
   Diferencias con Linux: un cambio de DNS no se sigue hasta la siguiente entrega, y no
   se prueban las demás IPs del nombre (`credproxy.ResolverUpstream`).
+- **Diseño: el proxy de credenciales de macOS en su propio proceso (#80).** Hoy la
+  clave vive en `kling-vz`, el mismo proceso que atiende la red del invitado. El plan
+  (proceso `kling-credproxy` por máquina, confinado, con hardened runtime; IPC por
+  sockets Unix; qué evita y cuánto cuesta) está en
+  [`docs/proxy-macos-separado.md`](docs/proxy-macos-separado.md) y en `SECURITY.md`.
+  Sin implementar: necesita verificarse en un Mac real.
 
 ### Grafos desde los plugins
 
