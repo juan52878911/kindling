@@ -11,11 +11,13 @@ package machine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -142,6 +144,7 @@ func servirVZFalso(sock, logPath string) {
 					Upstream             string
 					UpstreamTLS          string `json:"upstream_tls"`
 					UpstreamMachine      string `json:"upstream_machine"`
+					TLSServerName        string `json:"tls_server_name"`
 				} `json:"credentials"`
 			}
 			_ = json.Unmarshal(body, &c)
@@ -165,6 +168,9 @@ func servirVZFalso(sock, logPath string) {
 				}
 				if cr.UpstreamMachine != "" {
 					linea += "+upstream_machine=" + cr.UpstreamMachine
+				}
+				if cr.TLSServerName != "" {
+					linea += "+tls_server_name=" + cr.TLSServerName
 				}
 			}
 		case "/kling/graph":
@@ -821,17 +827,47 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			if err != nil || i < 0 || !strings.Contains(ls[i], "+upstream=127.0.0.1:5432+upstream_tls=disable") {
 				t.Fatalf("err=%v llamadas=%q", err, ls)
 			}
-			// Un upstream con nombre no se le da: el kling-vz confinado no
-			// llega al resolver del Mac.
+			// Un upstream con nombre lo resuelve el daemon (el kling-vz
+			// confinado no llega al resolver del Mac) y kling-vz recibe la
+			// IP; el nombre TLS (Domain o TLSServerName) no cambia.
+			prev := resolverUpstream
+			t.Cleanup(func() { resolverUpstream = prev })
+			resolverUpstream = func(_ context.Context, host string) ([]netip.Addr, error) {
+				switch host {
+				case "db.lan":
+					return []netip.Addr{netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("10.0.0.6")}, nil
+				case "meta.lan":
+					return []netip.Addr{netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("169.254.169.254")}, nil
+				}
+				return nil, errors.New("no such host")
+			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
 				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
-					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432"},
+					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432", TLSServerName: "db.lan"},
 			}, "", nil)
-			if err == nil || !strings.Contains(err.Error(), "must be an IP address or localhost") {
-				t.Fatalf("upstream con nombre en macOS: %v", err)
+			ls = llamadas(t, logPath)
+			if err != nil || len(ls) == 0 {
+				t.Fatalf("upstream con nombre en macOS: err=%v llamadas=%q", err, ls)
 			}
-			if n := len(llamadas(t, logPath)); n != len(ls) {
-				t.Errorf("con un upstream con nombre se llamó a kling-vz: %q", llamadas(t, logPath)[len(ls):])
+			ultima := ls[len(ls)-1]
+			if !strings.Contains(ultima, "PUT /kling/credentials") || !strings.Contains(ultima, " db.example.com+") ||
+				!strings.Contains(ultima, "+upstream=10.0.0.5:5432") || !strings.Contains(ultima, "+tls_server_name=db.lan") ||
+				strings.Contains(ultima, "db.lan:5432") {
+				t.Fatalf("kling-vz no recibió la IP resuelta: %q", ultima)
+			}
+			// Un nombre que no resuelve, o con una IP prohibida entre sus
+			// respuestas, no le llega a kling-vz.
+			for _, up := range []string{"meta.lan:5432", "nadie.lan:5432"} {
+				err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
+					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+						Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: up},
+				}, "", nil)
+				if err == nil {
+					t.Fatalf("%s: se aceptó", up)
+				}
+				if n := len(llamadas(t, logPath)); n != len(ls) {
+					t.Errorf("%s: se llamó a kling-vz: %q", up, llamadas(t, logPath)[len(ls):])
+				}
 			}
 		})
 	}

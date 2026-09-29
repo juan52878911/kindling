@@ -20,6 +20,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   regulares con un único enlace; lo demás se descarta sin leerlo) y barre los de
   máquinas que ya no existen; `rm` borra el de la suya. `kling machine audit` no
   cambia. En macOS sigue junto al socket de `kling-vz`.
+- **`-upstream` con nombre en macOS (#74).** `kling-vz` corre confinado y no llega al
+  resolver del Mac, así que el daemon rechazaba un nombre. Ahora lo resuelve el daemon
+  al entregar la credencial (al ponerla y en cada arranque o descongelación), con las
+  mismas reglas que al marcar —una IP prohibida o del rango de reenvíos entre las
+  respuestas y no se entrega— y `kling-vz` recibe la primera IP, que vuelve a
+  comprobar. El TLS se sigue verificando contra `-domain` o `-tls-server-name`.
+  Diferencias con Linux: un cambio de DNS no se sigue hasta la siguiente entrega, y no
+  se prueban las demás IPs del nombre (`credproxy.ResolverUpstream`).
 
 ### Grafos desde los plugins
 

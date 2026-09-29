@@ -238,6 +238,11 @@ func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id strin
 	return nil
 }
 
+// resolverUpstream resuelve el nombre de un -upstream antes de dárselo a
+// kling-vz (ver registrarCredencialesPlataforma). Nil es el resolver del
+// sistema; los tests ponen uno falso.
+var resolverUpstream func(ctx context.Context, host string) ([]netip.Addr, error)
+
 // todasAMaquina dice si todas las credenciales van a otra máquina.
 func todasAMaquina(creds []credproxy.Credential) bool {
 	for _, c := range creds {
@@ -273,14 +278,24 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 			pg = pg || cr.Kind == credproxy.KindPostgres
 			my = my || cr.Kind == credproxy.KindMySQL
 			upstream = upstream || cr.Upstream != "" || cr.UpstreamTLS != "" || cr.TLSServerName != ""
-			// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde
-			// ahí no llega al resolver del Mac: un upstream con nombre fallaría
-			// en cada conexión. Mejor decirlo ahora.
-			if credproxy.UpstreamNecesitaDNS(cr.Upstream) {
-				return fmt.Errorf("credential for %s: on macOS -upstream must be an IP address or localhost (kling-vz is sandboxed and cannot use the Mac's resolver); got %s",
-					cr.Domain, cr.Upstream)
-			}
 		}
+	}
+	// kling-vz corre confinado (vz/cmd/kling-vz/kling-vz.sb) y desde ahí no
+	// llega al resolver del Mac: un upstream con nombre lo resuelve aquí el
+	// daemon, con las mismas comprobaciones que haría al marcar, y kling-vz
+	// recibe la IP (que vuelve a comprobar). Antes de hablar con kling-vz: un
+	// nombre que no resuelve o que da un destino prohibido no le llega.
+	upstreams := make([]string, len(creds))
+	for i, cr := range creds {
+		upstreams[i] = cr.Upstream
+		if cr.Kind != credproxy.KindPostgres && cr.Kind != credproxy.KindMySQL {
+			continue
+		}
+		ip, err := credproxy.ResolverUpstream(ctx, resolverUpstream, cr.Upstream)
+		if err != nil {
+			return fmt.Errorf("credential for %s: %w", cr.Domain, err)
+		}
+		upstreams[i] = ip
 	}
 	if pg || my {
 		info, err := c.KlingInfo(ctx)
@@ -303,12 +318,12 @@ func registrarCredencialesPlataforma(ctx context.Context, c *fc.Client, _ *knet.
 		}
 	}
 	out := make([]fc.KlingCredential, 0, len(creds))
-	for _, cr := range creds {
+	for i, cr := range creds {
 		out = append(out, fc.KlingCredential{
 			Env: cr.Env, Domain: cr.Domain, Placeholder: cr.Placeholder, Secret: cr.Secret,
 			Allow: append([]string(nil), cr.Allow...),
 			Kind:  cr.Kind, Port: cr.Port, User: cr.User, Database: cr.Database, AnyDatabase: cr.AnyDatabase, CAPEM: cr.CAPEM,
-			Upstream: cr.Upstream, UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
+			Upstream: upstreams[i], UpstreamTLS: cr.UpstreamTLS, TLSServerName: cr.TLSServerName,
 			UpstreamMachine: cr.UpstreamMachine, UpstreamOwner: cr.UpstreamOwner,
 		})
 	}
