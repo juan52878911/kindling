@@ -12,6 +12,10 @@ package machine
 // volcado, así que todos los volcados son del instante (1). Si un volcado
 // falla, se reanuda todo y se borran las plantillas ya hechas.
 //
+// Antes de (1), los nodos congelados se despiertan (y se vuelven a congelar
+// al final) y los nodos con volúmenes los sueltan con el invitado en marcha:
+// ver snapshotConsistente.
+//
 // FORK: un snapshot consistente temporal (con la marca de fork, como `kling
 // sandbox fork`) y, por cada copia, un grafo NUEVO (otro ID) cuyos nodos
 // arrancan de esas plantillas. Las aristas se resuelven por (grafo, nodo), así
@@ -44,6 +48,9 @@ var (
 	reanudarNodoGrafo   func(ctx context.Context, m *Manager, id string) error
 	commitNodoPausado   func(ctx context.Context, m *Manager, id, name string) error
 	borrarSnapshotGrafo func(m *Manager, name string) error
+	// Soltar y devolver los volúmenes de un nodo: hablar con su agente.
+	soltarVolumenesNodo   func(ctx context.Context, m *Manager, id string) error
+	devolverVolumenesNodo func(ctx context.Context, m *Manager, id string) error
 )
 
 func init() {
@@ -61,18 +68,39 @@ func init() {
 		return err
 	}
 	borrarSnapshotGrafo = func(m *Manager, name string) error { return m.removeSnapshot(name, true) }
+	soltarVolumenesNodo = func(_ context.Context, m *Manager, id string) error {
+		mc, ok := m.Get(id)
+		if !ok {
+			return fmt.Errorf("machine %s no longer exists", shortID(id))
+		}
+		return m.releaseVolumes(mc)
+	}
+	devolverVolumenesNodo = func(_ context.Context, m *Manager, id string) error {
+		mc, ok := m.Get(id)
+		if !ok {
+			return fmt.Errorf("machine %s no longer exists", shortID(id))
+		}
+		return m.acquireVolumes(mc)
+	}
 }
 
 // nodoMaquina es un nodo instanciado con su máquina.
 type nodoMaquina struct {
-	nodo, id string
-	estado   api.State
+	nodo, id  string
+	estado    api.State
+	volumenes []api.VolumeAttachment
 }
 
 // nodosParaVolcar son los nodos con máquina del grafo, que tienen que estar
-// corriendo o pausados: uno congelado no tiene VMM que volcar (despierta el
-// grafo antes). Los lazy sin instancia no se vuelcan: siguen siendo su
-// plantilla.
+// corriendo, pausados o congelados. Los lazy sin instancia no se vuelcan:
+// siguen siendo su plantilla. Todo lo que se rechaza se rechaza aquí, antes
+// de tocar ninguna máquina.
+//
+// Un nodo congelado no tiene VMM que volcar: snapshotConsistente lo despierta,
+// lo vuelca con los demás y lo vuelve a congelar. Un nodo con volúmenes los
+// suelta antes de la pausa (hablando con su agente, como Commit); uno que YA
+// está pausado no contesta, así que con volúmenes se rechaza con el consejo
+// de despertarlo.
 //
 // Un grafo con aristas share no se vuelca: sus nodos llevan montada una
 // carpeta viva del host, y la memoria volcada despertaría en cada instancia
@@ -100,14 +128,18 @@ func (m *Manager) nodosParaVolcar(gid string) ([]nodoMaquina, error) {
 			return nil, fmt.Errorf("the machine of node %s no longer exists", nombres[i])
 		}
 		switch mc.State {
-		case api.StateRunning, api.StatePaused:
-		case api.StateWarm:
-			return nil, &api.StatusError{Code: 409, Message: fmt.Sprintf(
-				"node %s is frozen: thaw the graph first (kling graph thaw), then snapshot it", nombres[i])}
+		case api.StateRunning, api.StateWarm:
+		case api.StatePaused:
+			if len(mc.Volumes) > 0 {
+				return nil, &api.StatusError{Code: 409, Message: fmt.Sprintf(
+					"node %s is paused and has volumes: releasing them needs its guest agent, and a paused guest doesn't answer; "+
+						"resume it first (kling graph thaw), then snapshot", nombres[i])}
+			}
 		default:
 			return nil, &api.StatusError{Code: 409, Message: fmt.Sprintf("node %s is %s", nombres[i], mc.State)}
 		}
-		out = append(out, nodoMaquina{nodo: nombres[i], id: id, estado: mc.State})
+		out = append(out, nodoMaquina{nodo: nombres[i], id: id, estado: mc.State,
+			volumenes: append([]api.VolumeAttachment(nil), mc.Volumes...)})
 	}
 	if len(out) == 0 {
 		return nil, &api.StatusError{Code: 409, Message: "no node of the graph has a machine yet: nothing to snapshot"}
@@ -118,6 +150,13 @@ func (m *Manager) nodosParaVolcar(gid string) ([]nodoMaquina, error) {
 // snapshotConsistente vuelca los nodos del grafo gid en el mismo instante,
 // uno en la plantilla nombre(nodo) cada uno, y devuelve las plantillas por
 // nodo. Con el cerrojo del grafo tomado.
+//
+// Antes del instante: (0) despierta los congelados, en orden de arranque, y
+// (0b) pide a los nodos con volúmenes que los suelten, con el invitado aún en
+// marcha (lo mismo que Commit de una máquina: la caché de ext4 no puede ir en
+// la memoria volcada de un disco que no viaja con ella). Después: reanuda los
+// que pausó, les devuelve los volúmenes y vuelve a congelar los que despertó,
+// en orden de parada. Lo mismo si algo falla: el grafo queda como estaba.
 func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre func(nodo string) string) (map[string]string, error) {
 	nodos, err := m.nodosParaVolcar(gid)
 	if err != nil {
@@ -125,40 +164,87 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 	}
 	// Deshacer no es opcional aunque quien lo pidió se haya ido.
 	limpio := context.WithoutCancel(ctx)
-	var pausadas []string
-	reanudar := func() {
-		pausada := map[string]bool{}
-		for _, id := range pausadas {
-			pausada[id] = true
-		}
-		for _, n := range nodos {
-			id := n.id
-			if !pausada[id] {
-				continue
-			}
-			if err := reanudarNodoGrafo(limpio, m, id); err != nil {
-				log.Printf("graph %s: couldn't resume %s after the snapshot: %v", shortID(gid), shortID(id), err)
-			}
-		}
-	}
-	// (1) pausar todos los que corren, cada uno antes que los nodos de los que
-	// depende (el orden de freeze); se reanudan en el de arranque.
+	// El orden de parada (el de freeze): cada nodo antes que los nodos de los
+	// que depende. nodos va en el de arranque.
 	_, orden := m.maquinasDeGrafo(gid, true)
 	posicion := map[string]int{}
 	for i, id := range orden {
 		posicion[id] = i
 	}
-	aPausar := append([]nodoMaquina(nil), nodos...)
-	sort.SliceStable(aPausar, func(i, j int) bool { return posicion[aPausar[i].id] < posicion[aPausar[j].id] })
-	for _, n := range aPausar {
-		if n.estado != api.StateRunning {
+	porParada := append([]nodoMaquina(nil), nodos...)
+	sort.SliceStable(porParada, func(i, j int) bool { return posicion[porParada[i].id] < posicion[porParada[j].id] })
+
+	pausadas, soltadas, despertadas := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	// deshacer devuelve cada nodo a como estaba: reanudar antes de devolver
+	// los volúmenes (un invitado pausado no contesta) y devolverlos antes de
+	// congelar (Freeze los vuelve a soltar, como con cualquier máquina).
+	deshacer := func() {
+		for _, n := range nodos {
+			if !pausadas[n.id] {
+				continue
+			}
+			if err := reanudarNodoGrafo(limpio, m, n.id); err != nil {
+				log.Printf("graph %s: couldn't resume %s after the snapshot: %v", shortID(gid), shortID(n.id), err)
+			}
+		}
+		for _, n := range nodos {
+			if !soltadas[n.id] {
+				continue
+			}
+			if err := devolverVolumenesNodo(limpio, m, n.id); err != nil {
+				log.Printf("warning: graph %s: node %s ended up without its volumes after the snapshot: %v", shortID(gid), n.nodo, err)
+			}
+		}
+		for _, n := range porParada {
+			if !despertadas[n.id] {
+				continue
+			}
+			if mc, ok := m.Get(n.id); !ok || (mc.State != api.StateRunning && mc.State != api.StatePaused) {
+				continue
+			}
+			if err := congelarNodoGrafo(limpio, m, n.id); err != nil {
+				log.Printf("graph %s: couldn't freeze node %s again after the snapshot (it stays running): %v", shortID(gid), n.nodo, err)
+			}
+		}
+	}
+	estado := map[string]api.State{}
+	// (0) despertar los congelados, en orden de arranque.
+	for _, n := range nodos {
+		estado[n.id] = n.estado
+		if n.estado != api.StateWarm {
+			continue
+		}
+		if err := despertarNodoGrafo(ctx, m, n.id); err != nil {
+			deshacer()
+			return nil, fmt.Errorf("thawing frozen node %s for the snapshot: %w", n.nodo, err)
+		}
+		despertadas[n.id] = true
+		estado[n.id] = api.StateRunning
+	}
+	// (0b) soltar los volúmenes, con los invitados en marcha. Se anota antes
+	// de pedirlo: una petición fallida pudo aplicarse, y devolver un volumen
+	// que no se soltó es inocuo.
+	for _, n := range nodos {
+		if len(n.volumenes) == 0 {
+			continue
+		}
+		soltadas[n.id] = true
+		if err := soltarVolumenesNodo(ctx, m, n.id); err != nil {
+			deshacer()
+			return nil, fmt.Errorf("releasing the volumes of node %s: %w", n.nodo, err)
+		}
+	}
+	// (1) pausar todos los que corren, en orden de parada; se reanudan en el
+	// de arranque.
+	for _, n := range porParada {
+		if estado[n.id] != api.StateRunning {
 			continue
 		}
 		if err := pausarNodoGrafo(ctx, m, n.id); err != nil {
-			reanudar()
+			deshacer()
 			return nil, fmt.Errorf("pausing node %s: %w", n.nodo, err)
 		}
-		pausadas = append(pausadas, n.id)
+		pausadas[n.id] = true
 	}
 	// (2) ninguna sesión hacia el grafo cruza el instante.
 	for _, n := range nodos {
@@ -174,14 +260,43 @@ func (m *Manager) snapshotConsistente(ctx context.Context, gid string, nombre fu
 					log.Printf("graph %s: couldn't remove partial template %s: %v", shortID(gid), s, berr)
 				}
 			}
-			reanudar()
+			deshacer()
 			return nil, fmt.Errorf("snapshot of node %s: %w", n.nodo, err)
 		}
 		hechas[n.nodo] = name
 	}
-	// (4) reanudar los que pausamos (los que ya estaban pausados, así siguen).
-	reanudar()
+	// (4) reanudar los que pausamos (los que ya estaban pausados, así siguen),
+	// devolverles los volúmenes y volver a congelar los que despertamos.
+	deshacer()
 	return hechas, nil
+}
+
+// volumenesDeFork rechaza el fork de un grafo con un volumen en escritura en
+// cualquiera de sus nodos, instanciado o no: un ext4 no admite dos
+// escritores, y la primera copia ya chocaría con el original. En solo
+// lectura se comparte, como en `kling sandbox fork`.
+func volumenesDeFork(g *api.Graph, nodos []nodoMaquina) error {
+	rechazo := func(nodo, vol string) error {
+		return &api.StatusError{Code: 409, Message: fmt.Sprintf(
+			"node %s has volume %q mounted read-write, and only one machine at a time can write to a volume; "+
+				"mount it read-only (:ro) to fork the graph, or snapshot it (kling graph snapshot) and start each copy with its own volume",
+			nodo, vol)}
+	}
+	for _, n := range nodos {
+		for _, v := range n.volumenes {
+			if !v.ReadOnly {
+				return rechazo(n.nodo, v.Name)
+			}
+		}
+	}
+	for _, nombre := range g.SortedNodeNames() {
+		for _, v := range g.Nodes[nombre].Volumes {
+			if !v.ReadOnly {
+				return rechazo(nombre, v.Name)
+			}
+		}
+	}
+	return nil
 }
 
 // GraphSnapshot guarda el grafo en un instante consistente: una plantilla
@@ -296,6 +411,9 @@ func (m *Manager) GraphFork(ctx context.Context, ref string, n int) (out []*api.
 	}
 	nodos, err := m.nodosParaVolcar(gid)
 	if err != nil {
+		return nil, err
+	}
+	if err := volumenesDeFork(orig, nodos); err != nil {
 		return nil, err
 	}
 	credsPorNodo, err := m.credencialesDeFork(gid, nodos)

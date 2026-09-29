@@ -705,7 +705,12 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   los nodos y cortan las sesiones hacia ellos antes de volcar: ninguna sesión TCP
   sobrevive a una restauración. Los mismos marcadores de credenciales se entregan a
   cada copia (el invitado los tiene en memoria), apuntados a su propio grafo; un nodo
-  con credenciales que no son de sus aristas no se ramifica.
+  con credenciales que no son de sus aristas no se ramifica. Un volumen en escritura
+  (en cualquier nodo, instanciado o no) tampoco: dos escritores sobre un ext4 lo
+  corrompen, así que el fork se rechaza (409) antes de pausar nada; en solo lectura se
+  comparte. Los volúmenes se sueltan con el invitado en marcha antes de la pausa, como
+  en `commit`: la caché de ext4 de un disco que no viaja con el volcado no entra en la
+  memoria de la plantilla.
 - **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
   RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
   plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`

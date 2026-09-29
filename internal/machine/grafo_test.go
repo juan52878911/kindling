@@ -64,8 +64,10 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 	pArr, pDesp, pCong, pRed := arrancarNodoGrafo, despertarNodoGrafo, congelarNodoGrafo, montarRedGrafo
 	pPaus, pReanu, pCommit, pBorrar, pPuerto := pausarNodoGrafo, reanudarNodoGrafo, commitNodoPausado, borrarSnapshotGrafo, esperarPuertoGrafo
 	pReg, pInvC, pInvE, pEnv := registrarCredenciales, invalidarCopia, invalidarEnlaces, enviarGrafo
+	pSolt, pDev := soltarVolumenesNodo, devolverVolumenesNodo
 	t.Cleanup(func() {
 		enviarGrafo = pEnv
+		soltarVolumenesNodo, devolverVolumenesNodo = pSolt, pDev
 		arrancarNodoGrafo, despertarNodoGrafo, congelarNodoGrafo, montarRedGrafo = pArr, pDesp, pCong, pRed
 		pausarNodoGrafo, reanudarNodoGrafo, commitNodoPausado, borrarSnapshotGrafo, esperarPuertoGrafo = pPaus, pReanu, pCommit, pBorrar, pPuerto
 		registrarCredenciales, invalidarCopia, invalidarEnlaces = pReg, pInvC, pInvE
@@ -151,6 +153,20 @@ func nuevaEscenaGrafo(t *testing.T) *escenaGrafo {
 			return errors.New("disco lleno")
 		}
 		return os.MkdirAll(m.snapDir(name), 0o755)
+	}
+	soltarVolumenesNodo = func(ctx context.Context, m *Manager, id string) error {
+		if mc, _ := m.Get(id); mc == nil || mc.State != api.StateRunning {
+			return fmt.Errorf("%s no corría al soltar sus volúmenes", id)
+		}
+		e.anotar("release " + e.nombre(id))
+		return nil
+	}
+	devolverVolumenesNodo = func(ctx context.Context, m *Manager, id string) error {
+		if mc, _ := m.Get(id); mc == nil || mc.State != api.StateRunning {
+			return fmt.Errorf("%s no corría al devolverle sus volúmenes", id)
+		}
+		e.anotar("acquire " + e.nombre(id))
+		return nil
 	}
 	borrarSnapshotGrafo = func(m *Manager, name string) error {
 		e.anotar("rmsnap " + name)
@@ -608,17 +624,221 @@ func TestGrafoSnapshotDeshaceEnFallo(t *testing.T) {
 	}
 }
 
-// Un nodo congelado no se vuelca: se pide despertar el grafo antes.
-func TestGrafoSnapshotConNodoCongelado(t *testing.T) {
+// ponerEstado cambia a mano el estado de la máquina de un nodo.
+func (e *escenaGrafo) ponerEstado(gid, nodo string, st api.State) {
+	e.m.mu.Lock()
+	e.m.byID[e.maquinaSinLock(gid, nodo)].State = st
+	e.m.mu.Unlock()
+}
+
+// ponerVolumenes le da volúmenes al nodo: a su especificación y a su máquina.
+func (e *escenaGrafo) ponerVolumenes(gid, nodo string, vs ...api.VolumeAttachment) {
+	e.m.mu.Lock()
+	g := e.m.grafos[gid]
+	n := g.Nodes[nodo]
+	n.Volumes = vs
+	g.Nodes[nodo] = n
+	if id := n.MachineID; id != "" {
+		e.m.byID[id].Volumes = vs
+	}
+	e.m.mu.Unlock()
+}
+
+func (e *escenaGrafo) comprobarEventos(want ...string) {
+	e.t.Helper()
+	if got := e.vistos(); strings.Join(got, "|") != strings.Join(want, "|") {
+		e.t.Fatalf("orden:\n got %v\nwant %v", got, want)
+	}
+}
+
+// Un grafo congelado entero se vuelca: se despierta, se vuelca del mismo
+// instante y vuelve a quedar congelado.
+func TestGrafoSnapshotGrafoCongelado(t *testing.T) {
 	e := nuevaEscenaGrafo(t)
 	g := e.montarGrafo(grafoTienda(true))
-	e.m.mu.Lock()
-	e.m.byID[e.maquinaSinLock(g.ID, "api")].State = api.StateWarm
-	e.m.mu.Unlock()
+	if _, err := e.m.GraphFreeze(context.Background(), "tienda"); err != nil {
+		t.Fatal(err)
+	}
+	e.olvidar()
+	snap, err := e.m.GraphSnapshot(context.Background(), "tienda", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.comprobarEventos(
+		"thaw api", "thaw web",
+		"pause api", "pause web",
+		"commit api tienda-api-1", "commit web tienda-web-1",
+		"resume api", "resume web",
+		"freeze api", "freeze web",
+	)
+	if len(snap.Templates) != 2 {
+		t.Fatalf("plantillas: %v", snap.Templates)
+	}
+	if gv, _ := e.m.Graph(g.ID); gv.State != api.GraphStateFrozen || gv.Generation != 1 {
+		t.Fatalf("el grafo quedó %s (generación %d), no frozen", gv.State, gv.Generation)
+	}
+}
+
+// Solo se despierta y se vuelve a congelar el nodo que estaba congelado.
+func TestGrafoSnapshotNodoCongelado(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerEstado(g.ID, "api", api.StateWarm)
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "tienda", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.comprobarEventos(
+		"thaw api",
+		"pause api", "pause web",
+		"commit api tienda-api-1", "commit web tienda-web-1",
+		"resume api", "resume web",
+		"freeze api",
+	)
+	if mc, _ := e.m.Get(e.maquina(g.ID, "api")); mc.State != api.StateWarm {
+		t.Fatalf("api quedó %s", mc.State)
+	}
+	if mc, _ := e.m.Get(e.maquina(g.ID, "web")); mc.State != api.StateRunning {
+		t.Fatalf("web quedó %s", mc.State)
+	}
+}
+
+// Si el volcado falla con un nodo que se despertó para él, también vuelve a
+// quedar congelado.
+func TestGrafoSnapshotCongeladoDeshaceEnFallo(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerEstado(g.ID, "api", api.StateWarm)
+	prev := commitNodoPausado
+	commitNodoPausado = func(ctx context.Context, m *Manager, id, name string) error {
+		if strings.HasPrefix(name, "tienda-web") {
+			name = "rompe"
+		}
+		return prev(ctx, m, id, name)
+	}
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "tienda", ""); err == nil {
+		t.Fatal("esperaba el fallo del volcado")
+	}
+	e.comprobarEventos(
+		"thaw api",
+		"pause api", "pause web",
+		"commit api tienda-api-1", "commit web rompe",
+		"rmsnap tienda-api-1",
+		"resume api", "resume web",
+		"freeze api",
+	)
+	if mc, _ := e.m.Get(e.maquina(g.ID, "api")); mc.State != api.StateWarm {
+		t.Fatalf("api quedó %s", mc.State)
+	}
+}
+
+// Un nodo congelado que no se deja despertar: no se pausa nada y los que ya
+// se despertaron vuelven a congelarse.
+func TestGrafoSnapshotFallaAlDespertar(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	if _, err := e.m.GraphFreeze(context.Background(), "tienda"); err != nil {
+		t.Fatal(err)
+	}
+	prev := despertarNodoGrafo
+	despertarNodoGrafo = func(ctx context.Context, m *Manager, id string) error {
+		if e.nombre(id) == "web" {
+			return errors.New("sin memoria")
+		}
+		return prev(ctx, m, id)
+	}
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "tienda", ""); err == nil || !strings.Contains(err.Error(), "sin memoria") {
+		t.Fatalf("esperaba el fallo del despertar, llegó %v", err)
+	}
+	e.comprobarEventos("thaw api", "freeze api")
+	if gv, _ := e.m.Graph(g.ID); gv.State != api.GraphStateFrozen || gv.Generation != 0 {
+		t.Fatalf("el grafo quedó %s (generación %d)", gv.State, gv.Generation)
+	}
+}
+
+// Los volúmenes se sueltan con los invitados en marcha, antes de la pausa, y
+// se devuelven tras reanudar y antes de volver a congelar.
+func TestGrafoSnapshotConVolumenes(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerVolumenes(g.ID, "api", api.VolumeAttachment{Name: "datos", Mount: "/data"})
+	e.ponerEstado(g.ID, "api", api.StateWarm)
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "tienda", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.comprobarEventos(
+		"thaw api",
+		"release api",
+		"pause api", "pause web",
+		"commit api tienda-api-1", "commit web tienda-web-1",
+		"resume api", "resume web",
+		"acquire api",
+		"freeze api",
+	)
+}
+
+// Si soltar los volúmenes falla, no se pausa nada y se devuelven.
+func TestGrafoSnapshotVolumenesNoSeSueltan(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerVolumenes(g.ID, "web", api.VolumeAttachment{Name: "datos", Mount: "/data"})
+	prev := soltarVolumenesNodo
+	soltarVolumenesNodo = func(ctx context.Context, m *Manager, id string) error {
+		_ = prev(ctx, m, id)
+		return errors.New("puente antiguo")
+	}
+	e.olvidar()
+	if _, err := e.m.GraphSnapshot(context.Background(), "tienda", ""); err == nil || !strings.Contains(err.Error(), "puente antiguo") {
+		t.Fatalf("esperaba el fallo al soltar, llegó %v", err)
+	}
+	e.comprobarEventos("release web", "acquire web")
+}
+
+// Un nodo YA pausado con volúmenes no los puede soltar: 409 con consejo y
+// sin tocar nada.
+func TestGrafoSnapshotPausadoConVolumenes(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(true))
+	e.ponerVolumenes(g.ID, "web", api.VolumeAttachment{Name: "datos", Mount: "/data", ReadOnly: true})
+	e.ponerEstado(g.ID, "web", api.StatePaused)
+	e.olvidar()
 	_, err := e.m.GraphSnapshot(context.Background(), "tienda", "")
 	var se *api.StatusError
-	if !errors.As(err, &se) || se.Code != 409 || !strings.Contains(err.Error(), "thaw the graph") {
+	if !errors.As(err, &se) || se.Code != 409 || !strings.Contains(err.Error(), "kling graph thaw") {
 		t.Fatalf("esperaba 409 con consejo, llegó %v", err)
+	}
+	e.comprobarEventos()
+}
+
+// Fork: un volumen en escritura (aunque sea de un lazy sin instancia) no se
+// ramifica; en solo lectura sí, y cada copia lo lleva.
+func TestGrafoForkVolumenes(t *testing.T) {
+	e := nuevaEscenaGrafo(t)
+	g := e.montarGrafo(grafoTienda(false))
+	e.ponerVolumenes(g.ID, "db", api.VolumeAttachment{Name: "pg", Mount: "/data"})
+	e.olvidar()
+	_, err := e.m.GraphFork(context.Background(), "tienda", 1)
+	var se *api.StatusError
+	if !errors.As(err, &se) || se.Code != 409 || !strings.Contains(err.Error(), `"pg" mounted read-write`) {
+		t.Fatalf("esperaba 409 por el volumen en escritura, llegó %v", err)
+	}
+	e.comprobarEventos()
+
+	e.ponerVolumenes(g.ID, "db")
+	e.ponerVolumenes(g.ID, "api", api.VolumeAttachment{Name: "libs", Mount: "/libs", ReadOnly: true})
+	copias, err := e.m.GraphFork(context.Background(), "tienda", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.vistos(), "release api") || !slices.Contains(e.vistos(), "acquire api") {
+		t.Fatalf("el original no soltó y recuperó su volumen: %v", e.vistos())
+	}
+	gv, _ := e.m.Graph(copias[0].ID)
+	if vs := gv.Nodes["api"].Volumes; len(vs) != 1 || vs[0].Name != "libs" || !vs[0].ReadOnly {
+		t.Fatalf("la copia no lleva el volumen en solo lectura: %+v", vs)
 	}
 }
 

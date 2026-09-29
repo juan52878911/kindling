@@ -44,8 +44,9 @@ func (m *Manager) Commit(ctx context.Context, ref, name string, replace bool) (s
 // commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
 // deja pausada: el snapshot de un grafo pausa todos sus nodos, vuelca uno a
 // uno y los reanuda al final, para que todos los volcados sean del mismo
-// instante (grafo_snapshot.go). Sin volúmenes: soltarlos pide hablar con el
-// agente, y un invitado pausado no contesta.
+// instante (grafo_snapshot.go). Los volúmenes los suelta quien llama ANTES de
+// pausarla (soltarlos pide hablar con el agente, y un invitado pausado no
+// contesta), y es también quien se los devuelve: aquí no se tocan.
 func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
 	return m.commit(ctx, ref, name, false, nil, true)
 }
@@ -91,9 +92,6 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	switch {
 	case yaPausada && mc.State != api.StatePaused:
 		return nil, fmt.Errorf("machine %s should be paused for this snapshot (is %s)", mc.Name, mc.State)
-	case yaPausada && len(mc.Volumes) > 0:
-		return nil, fmt.Errorf("machine %s has volumes, and they can't be released while it is paused: "+
-			"a graph snapshot or fork doesn't take nodes with volumes in this version", mc.Name)
 	case !yaPausada && mc.State != api.StateRunning:
 		return nil, fmt.Errorf("only a running machine can be committed (is %s)", mc.State)
 	}

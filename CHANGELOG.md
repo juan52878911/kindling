@@ -10,6 +10,18 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+### Fase baja
+
+- **`kling graph snapshot` y `fork` de grafos congelados y con volúmenes (#55).** Un
+  nodo congelado ya no se rechaza: se despierta antes del instante y se vuelve a
+  congelar al final (también si algo falla); el grafo termina como empezó. Un nodo con
+  volúmenes los suelta con el invitado en marcha antes de la pausa y los recupera tras
+  reanudarse, como `kling commit`. Se rechazan (409, antes de tocar nada) un nodo ya
+  pausado con volúmenes (un invitado pausado no contesta: `kling graph thaw` y repite)
+  y el fork de un grafo con un volumen en escritura; en solo lectura se ramifica.
+  Receta para ramificar uno con volumen en escritura en
+  [`docs/grafos.md`](docs/grafos.md).
+
 ### Grafos desde los plugins
 
 - **`kling db env up|down` y `kling db branch -env` (#58).** `env up <app-template>
