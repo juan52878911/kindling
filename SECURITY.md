@@ -937,7 +937,8 @@ vacías) y mismo golden en una máquina nueva. Lo propio:
 - **Solo lectura en producción**: `pg_dump --schema-only`, una consulta del catálogo y
   una sola sesión en `REPEATABLE READ READ ONLY` con `\copy (SELECT ...) TO PROGRAM`.
   Las consultas las arma `kling-db` con nombres citados por el propio catálogo
-  (`quote_ident`); un nombre con caracteres de control o barras invertidas cerca de la
+  (`quote_ident`); un nombre con caracteres de control, barras invertidas o comillas
+  (simples o dobles, que irían dentro del metacomando `\copy`) cerca de la
   tabla detiene la construcción, y `-table` solo admite `[esquema.]nombre` sin comillas.
 - **Lo sin enmascarar sigue sin tocar un fichero**: cada `\copy` va por una tubería a un
   psql del Postgres del tmpfs (`COPY FROM` con `session_replication_role = replica`, sin

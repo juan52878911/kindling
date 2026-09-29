@@ -200,13 +200,24 @@ func TestParseSliceDiscover(t *testing.T) {
 		"sin columnas": j("target", "r", "public.t", "public.t", "", ""),
 		"control":      j("target", "r", "public.t", "public.t", "a\x1bb", ""),
 		"barra":        j("target", "r", `public."a\b"`, `public.a\b`, "a", ""),
-		"dos tablas":   j("target", "r", "public.t", "public.t", "a", "") + j("target", "r", "public.u", "public.u", "a", ""),
-		"rara":         j("otra", "r", "x"),
-		"fk vacía":     j("target", "r", "public.t", "public.t", "a", "") + j("parent", "r", "public.u", "public.u", "a", "", "id"),
+		// Comillas en un nombre: irían dentro de un metacomando \copy.
+		"comilla simple":            j("target", "r", `public."a'b"`, `public.a'b`, "a", ""),
+		"comilla doble":             j("target", "r", `public."a""b"`, `public.a"b`, "a", ""),
+		"comilla simple en columna": j("target", "r", "public.t", "public.t", `"a'b"`, ""),
+		"comilla doble en columna":  j("target", "r", "public.t", "public.t", `"a""b"`, ""),
+		"comilla doble en fk":       j("target", "r", "public.t", "public.t", "a", "") + j("parent", "r", "public.u", "public.u", "a", `"x""y"`, "id"),
+		"dos tablas":                j("target", "r", "public.t", "public.t", "a", "") + j("target", "r", "public.u", "public.u", "a", ""),
+		"rara":                      j("otra", "r", "x"),
+		"fk vacía":                  j("target", "r", "public.t", "public.t", "a", "") + j("parent", "r", "public.u", "public.u", "a", "", "id"),
 	} {
 		if _, _, err := parseSliceDiscover([]byte(out)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// Un nombre que necesita cita (mayúsculas, espacios) sí vale: sus
+	// comillas son las de quote_ident.
+	if tg, _, err := parseSliceDiscover([]byte(j("target", "r", `public."Order Items"`, "public.Order Items", `"Id",name`, `"Id"`))); err != nil || tg.qname != `public."Order Items"` {
+		t.Fatalf("quoted identifier: %+v %v", tg, err)
 	}
 	var many strings.Builder
 	many.WriteString(j("target", "r", "public.t", "public.t", "a", "id"))
@@ -215,6 +226,24 @@ func TestParseSliceDiscover(t *testing.T) {
 	}
 	if _, _, err := parseSliceDiscover([]byte(many.String())); err == nil {
 		t.Error("too many relations accepted")
+	}
+}
+
+// nombreSeguro rechaza las comillas de un nombre sin citar, y observe (que
+// parte esquema.tabla con él) también.
+func TestNombreSeguroComillas(t *testing.T) {
+	for _, s := range []string{`a'b`, `a"b`, `a\b`, "a\nb", ""} {
+		if nombreSeguro(s) {
+			t.Errorf("%q accepted", s)
+		}
+		if _, _, ok := splitTable("public." + s); ok && s != "" {
+			t.Errorf("splitTable(public.%q) accepted", s)
+		}
+	}
+	for _, s := range []string{"orders", "public.Order Items", "a$b"} {
+		if !nombreSeguro(s) {
+			t.Errorf("%q rejected", s)
+		}
 	}
 }
 

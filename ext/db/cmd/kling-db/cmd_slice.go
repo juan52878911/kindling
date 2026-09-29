@@ -296,16 +296,30 @@ SQL
 `
 }
 
-// nombreSeguro: un nombre del catálogo de producción no puede llevar
-// caracteres de control (romperían una línea de \copy o de la terminal) ni
-// barras invertidas (psql las interpreta en sus metacomandos).
+// nombreSeguro: un nombre del catálogo de producción, tal cual (sin citar),
+// no puede llevar caracteres de control (romperían una línea de \copy o de la
+// terminal), barras invertidas (psql las interpreta en sus metacomandos) ni
+// comillas simples o dobles: van dentro de un metacomando \copy, que psql
+// trocea con sus propias reglas de comillas.
 func nombreSeguro(s string) bool {
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f || r == '\\' {
+		if r < 0x20 || r == 0x7f || r == '\\' || r == '\'' || r == '"' {
 			return false
 		}
 	}
 	return s != ""
+}
+
+// citadoSeguro es nombreSeguro para lo que llega ya citado con quote_ident o
+// format('%I'): las comillas dobles de la cita valen, pero no un "" (una
+// comilla doble dentro del nombre) ni una comilla simple.
+func citadoSeguro(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == '\\' || r == '\'' {
+			return false
+		}
+	}
+	return s != "" && !strings.Contains(s, `""`)
 }
 
 // parseSliceDiscover lee la salida de sliceDiscoverScript.
@@ -319,9 +333,18 @@ func parseSliceDiscover(out []byte) (sliceTable, []sliceRel, error) {
 			continue
 		}
 		f := strings.Split(line, "\x1f")
-		for _, v := range f[1:] {
-			if v != "" && !nombreSeguro(v) {
-				return sliceTable{}, nil, errors.New("the source has a table or column name with control characters or backslashes near the slice: not supported")
+		for i, v := range f {
+			if i == 0 || v == "" {
+				continue
+			}
+			// El 1 es relkind y el 3 esquema.tabla sin citar; el resto va
+			// citado (qname, columnas y claves).
+			ok := citadoSeguro(v)
+			if i == 1 || i == 3 {
+				ok = nombreSeguro(v)
+			}
+			if !ok {
+				return sliceTable{}, nil, errors.New("the source has a table or column name with control characters, quotes or backslashes near the slice: not supported")
 			}
 		}
 		switch {
