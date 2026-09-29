@@ -269,11 +269,11 @@ func validarNombreMy(s string, max int) error {
 	return nil
 }
 
-// validarPuertosDB: con credenciales MySQL y Postgres en la misma máquina, el
+// ValidarPuertosDB: con credenciales MySQL y Postgres en la misma máquina, el
 // proxy las distingue por el puerto al que conecta el invitado, y el único que
 // ve en Linux es el 3306 (ver la cabecera). Así que entonces las MySQL van al
 // 3306 y ninguna Postgres.
-func validarPuertosDB(creds []Credential) error {
+func ValidarPuertosDB(creds []Credential) error {
 	var hayPG, hayMy bool
 	for _, c := range creds {
 		hayPG = hayPG || c.Kind == KindPostgres

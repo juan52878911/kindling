@@ -223,7 +223,7 @@ func ValidarCredenciales(creds []Credential) error {
 			return err
 		}
 	}
-	return validarPuertosDB(creds)
+	return ValidarPuertosDB(creds)
 }
 
 // ValidarTipo comprueba lo que depende del tipo de la credencial (Allow para

@@ -527,6 +527,11 @@ func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec
 	if len(todas) > credproxy.MaxCredentials {
 		return nil, fmt.Errorf("at most %d credentials per template", credproxy.MaxCredentials)
 	}
+	// Postgres y MySQL juntos: MySQL en el 3306 y ninguna Postgres ahí (lo
+	// comprobaría el proxy al arrancar cada instancia; mejor decirlo ya).
+	if err := credproxy.ValidarPuertosDB(credencialesDeSpecs(todas)); err != nil {
+		return nil, err
+	}
 	sellado, err := m.sellar(todas, "snapshot:"+name)
 	if err != nil {
 		return nil, err
