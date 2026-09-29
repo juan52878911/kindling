@@ -937,12 +937,34 @@ Worth being clear about, because it is not obvious:
 | State of an **ephemeral** service | nothing: the microVM dies after every action |
 | State of a **persistent** service | freezes and thaws of ITS instance |
 | | but **not** that instance being deleted |
+| Disk of a persistent service, **between sessions** | shared: the next session sees what the last one wrote |
+| | unless the service isolates sessions (`isolation session`): each has its own disk, gone when the session ends |
 | A **volume** | everything: stop, rm, re-import — it is a journaled ext4 on the host |
 | Base image and golden snapshot | everything: they are files on the host |
 
 A persistent service keeps its contents for as long as its instance lives; the instance
 freezes when idle and comes back intact. But if that instance is deleted — manual cleanup,
 `kling rm`, reinstalling the service — the state in its **overlay** goes with it.
+
+**Sessions of a persistent service share that overlay.** Each MCP session gets its own
+server process, so memory is per session, but they all write to the same disk: a file one
+session leaves in `/tmp` or in the server's data directory is there for the next one. That
+is what a service like `memory` wants (its graph belongs to everyone), and it is the
+default. For a service used by clients that must not see each other, give **each session
+its own microVM**:
+
+```sh
+kling mcp isolation notes session     # or: kling mcp import notes ... -isolation session
+```
+
+Each new session is restored from the golden snapshot with its own overlay (measured on the
+x86 lab: ~10 MiB of RAM and 0.3 MiB of disk while awake, and a first `initialize` of 70 ms
+against 765 ms for a new session on an instance already awake). It freezes with the session
+inside and comes back to the same machine. Closing the session, leaving it unused for
+`-session-ttl` (30 min) or stopping the gateway destroys the machine and its overlay.
+Volumes stay shared on purpose, so a service with a read-write volume cannot isolate
+sessions: a volume has a single writer. Design, costs and limits:
+[`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md).
 
 For data that must survive everything, give the service a [volume](#volumes-what-outlives-the-microvm)
 at import time, or point the tools at a [linked memory service](ext/mcp/README.md#bring-your-own-memory-service)
@@ -1449,6 +1471,7 @@ instances share pages.
 | [`docs/demo-domotica.md`](docs/demo-domotica.md) · [`examples/domotica`](examples/domotica/README.md) | The demo room: layer 4 (LLM with JSON output) and the web page that shows every layer's decision and microVM (Spanish) |
 | [`docs/ai-gateway.md`](docs/ai-gateway.md) | The AI gateway: Chispa classifies, VON generates, the cascade only with an eval that backs it, scale to zero, OpenAI API, measured numbers |
 | [`docs/densidad-zram.md`](docs/densidad-zram.md) | zram for density: when it helps, and how to measure it |
+| [`docs/aislamiento-por-sesion.md`](docs/aislamiento-por-sesion.md) | One microVM and one disk per MCP session: the options weighed, the design, measured cost (Spanish) |
 | [`docs/hallazgos.md`](docs/hallazgos.md) | Field notes — things that take hours to figure out on your own |
 | [`docs/releases.md`](docs/releases.md) | One tag, one release: every asset, `SHA256SUMS`, how to cut a release |
 

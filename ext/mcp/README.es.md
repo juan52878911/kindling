@@ -254,6 +254,12 @@ sesión única por naturaleza**: su estado vive en el proceso. De ahí:
   Verificado con 4 sesiones concurrentes contra un servicio cuyo puente topa en 1 sesión.
 - **Cuando un puente llega a su tope de sesiones**, recicla la más ociosa en vez de
   negarse, y los clientes reconectan limpio.
+- **El proceso es de cada sesión; el disco, no.** Todas las sesiones de una instancia
+  escriben en su overlay, así que un fichero que una deja en `/tmp` sigue ahí para la
+  siguiente. `kling mcp isolation <svc> session` da en cambio a cada sesión su propia
+  microVM del snapshot dorado: se congela con la sesión dentro y se destruye al cerrarla o
+  tras `-session-ttl` (30 min) sin uso. Ver
+  [`docs/aislamiento-por-sesion.md`](../../docs/aislamiento-por-sesion.md).
 
 Demostrado con la herramienta `session_info`, que informa de su pid y su contador:
 

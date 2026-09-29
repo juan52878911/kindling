@@ -15,6 +15,7 @@ import (
 
 	"github.com/juan52878911/kindling/ext/mcp/internal/mcp"
 	"github.com/juan52878911/kindling/pkg/panico"
+	"github.com/juan52878911/kindling/pkg/scheduler"
 )
 
 // Tool es una herramienta de un servicio, tal como la describe su servidor MCP.
@@ -199,7 +200,21 @@ func (c *catalog) fromSnapshot(ctx context.Context, service string) ([]Tool, boo
 // Es el camino caro: despierta la microVM. Solo se usa si el snapshot no trae
 // catálogo, es decir, si el servicio no se importó con `kling mcp import`.
 func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
-	e, err := c.gw.Ensure(ctx, service)
+	var e *scheduler.Instance
+	aislado, err := c.gw.aislado(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	if aislado {
+		// Un servicio aislado no tiene instancia compartida, y despertar una
+		// solo para listar dejaría una máquina común entre sesiones. Una sesión
+		// aislada de usar y tirar: se destruye al terminar.
+		key := scheduler.NewSessionKey()
+		e, err = c.gw.IsolatedSession(ctx, service, key, scheduler.TenantFrom(ctx), true)
+		defer c.gw.ReleaseIsolated(ctx, key)
+	} else {
+		e, err = c.gw.Ensure(ctx, service)
+	}
 	if err != nil {
 		return nil, err
 	}

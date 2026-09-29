@@ -140,6 +140,31 @@ func (g *Scheduler) Status(service string) ServiceStatus {
 	return st
 }
 
+// ---- sesiones aisladas: una microVM por sesión (ver aislada.go)
+
+// IsolatedSession devuelve, despierta, la microVM propia de la sesión key del
+// servicio: la que ya tenía (descongelándola si hace falta) o, con create, una
+// nueva restaurada del snapshot dorado. Nunca comparte máquina con otra sesión.
+// Sin create y sin sesión, ErrNoSuchSession; si su máquina desapareció,
+// ErrSessionLost.
+func (g *Scheduler) IsolatedSession(ctx context.Context, service, key string, t *Tenant, create bool) (*Instance, error) {
+	return g.isolatedSession(ctx, service, key, t, create)
+}
+
+// ReleaseIsolated cierra la sesión aislada key y destruye su máquina (y con
+// ella su overlay). false si key no era una sesión aislada.
+func (g *Scheduler) ReleaseIsolated(ctx context.Context, key string) bool {
+	return g.releaseIsolated(ctx, key)
+}
+
+// IsIsolated dice si key es una sesión aislada viva.
+func (g *Scheduler) IsIsolated(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.aisladas[key]
+	return ok
+}
+
 // ---- afinidad: una clave de sesión fija a una instancia
 
 // Route es la instancia a la que está fijada una sesión.

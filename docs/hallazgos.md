@@ -381,6 +381,46 @@ cae en otra microVM, se encuentra un servidor recién arrancado sin nada de su e
 resuelve observando la cabecera `Mcp-Session-Id` de la respuesta al `initialize` y fijando
 ahí la ruta.
 
+## Un proceso por sesión no aísla el disco
+
+`kling-bridge` da a cada sesión su proceso, y eso se leía como "las sesiones están
+aisladas". Solo la memoria. Todas las sesiones de una instancia escriben en el mismo
+overlay, y un fichero que una deja en `/tmp` lo lee la siguiente. Lo destapó una pregunta
+en r/mcp, y se reproduce en dos llamadas con `filesystem-mcp`.
+
+Dos detalles que despistan al reproducirlo:
+
+- **Con 256 MiB cabe una sesión por instancia.** Dos sesiones *simultáneas* acaban en
+  réplicas distintas y no se ven, así que la prueba ingenua (A escribe, B lee, las dos
+  abiertas) dice que no hay fuga. La fuga está entre sesiones *sucesivas*: A escribe y
+  cierra, y B abre en la misma instancia. Esa es además la pregunta que se hacía.
+- **La ruta de una sesión caducaba con `idle`, en la misma vuelta del segador que congelaba
+  la instancia.** El proceso de la sesión sobrevivía congelado dentro de la microVM, pero
+  el gateway ya no sabía adónde mandarla. Para que una sesión aislada sobreviva al
+  congelado hizo falta separar las dos cosas: el segador congela por `idle` y la sesión
+  caduca por `-session-ttl`.
+
+La solución (una microVM por sesión, `kling mcp isolation <svc> session`) y por qué no un
+overlayfs por sesión dentro del invitado: [`aislamiento-por-sesion.md`](aislamiento-por-sesion.md).
+
+## Una microVM nueva abre sesión más rápido que un proceso nuevo en una despierta
+
+Contraintuitivo: una sesión nueva en su propia microVM restaurada del dorado contesta al
+`initialize` en 70 ms (mediana), y una sesión nueva en una instancia que ya estaba despierta
+tarda 765 ms. La instancia despierta ya gastó su hijo caliente en su primera sesión, así
+que cada sesión siguiente arranca node en frío dentro de ella. La microVM recién restaurada
+trae el hijo caliente del dorado y lo adopta. En este caso, cuesta más un proceso que una
+máquina.
+
+## Dos gateways sobre el mismo daemon se barren las sesiones aisladas
+
+El barrido de máquinas aisladas huérfanas destruye las que no son de ninguna sesión *de ese
+gateway*. Con dos `kling mcp serve` sobre el mismo daemon y sin `MachineLabels` distintas,
+cada uno ve las sesiones del otro como huérfanas y las destruye pasados 2 minutos. Casi
+pasa en el propio lab, con dos gateways de prueba en puertos distintos: hubo que parar uno
+antes de su siguiente barrido. Lo normal es un gateway por daemon. Si hace falta más de uno,
+cada uno necesita sus etiquetas.
+
 ## Envolver la respuesta HTTP para capturar una cabecera
 
 Para fijar la ruta hay que leer `Mcp-Session-Id` de la respuesta, y `httputil.ReverseProxy`
