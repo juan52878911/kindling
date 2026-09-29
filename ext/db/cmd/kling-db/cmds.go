@@ -237,7 +237,8 @@ func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api
 		return nil, fmt.Errorf("%s is %s: only a running or frozen copy can be forked", mc.Name, mc.State)
 	}
 
-	out, err := a.k.Run(ctx, nil, "sandbox", "fork", mc.ID, "-n", strconv.Itoa(n), "-json")
+	out, err := a.k.Run(ctx, nil, "sandbox", "fork", mc.ID, "-n", strconv.Itoa(n),
+		"-label", labelState+"="+statePreparing, "-json")
 	if err != nil {
 		// El daemon deshace el fork entero si una copia falla.
 		return nil, err
@@ -254,10 +255,14 @@ func (a *app) fork(ctx context.Context, src string, n int, owner string) ([]*api
 		}
 		return nil, fmt.Errorf("fork of %s undone, %d copies removed: %w", mc.Name, len(copies), cause)
 	}
-	// Lo primero, antes de nada más: fuera el ready heredado del origen.
+	// Las copias ya nacen en preparing (el fork lleva la etiqueta desde su
+	// nacimiento). Si un daemon antiguo la ignorase, se marca aquí, antes de
+	// nada más: fuera el ready heredado del origen.
 	for _, c := range copies {
-		if err := a.setState(ctx, c.ID, statePreparing); err != nil {
-			return undo(fmt.Errorf("marking %s as preparing: %w", c.Name, err))
+		if c.Labels[labelState] != statePreparing {
+			if err := a.setState(ctx, c.ID, statePreparing); err != nil {
+				return undo(fmt.Errorf("marking %s as preparing: %w", c.Name, err))
+			}
 		}
 		if c.Labels == nil {
 			c.Labels = map[string]string{}

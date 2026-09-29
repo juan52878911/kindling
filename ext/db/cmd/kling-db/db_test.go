@@ -179,22 +179,18 @@ func TestForkPreparaCadaCopia(t *testing.T) {
 		assertVerifierMatches(t, ta.f.verifier[c.ID], pw)
 		assertNoLeak(t, ta.f, pw)
 	}
-	// Todas pasan a preparing antes de la primera rotación.
-	firstRot := -1
-	preparing := map[string]int{}
-	for i, c := range ta.f.calls[start:] {
-		if c.labels[labelState] == statePreparing {
-			preparing[c.ref] = i
-		}
-		if firstRot < 0 && len(c.args) > 0 && c.args[0] == "exec" && strings.Contains(c.stdin, "ALTER ROLE") {
-			firstRot = i
+	// Nacen en preparing: el fork lleva la etiqueta, sin ventana en ready.
+	forked := false
+	for _, c := range ta.f.calls[start:] {
+		if len(c.args) > 1 && c.args[0] == "sandbox" && c.args[1] == "fork" {
+			forked = true
+			if !strings.Contains(strings.Join(c.args, " "), "-label "+labelState+"="+statePreparing) {
+				t.Fatalf("fork without the preparing label: %v", c.args)
+			}
 		}
 	}
-	for _, c := range copies {
-		i, ok := preparing[c.ID]
-		if !ok || i > firstRot {
-			t.Fatalf("%s was not marked preparing before the rotations", c.Name)
-		}
+	if !forked {
+		t.Fatal("no sandbox fork call")
 	}
 	if ta.f.calls[start+1].args[0] != "thaw" {
 		t.Fatalf("frozen source not thawed: %v", ta.f.calls[start+1].args)

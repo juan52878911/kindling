@@ -196,6 +196,13 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		for j := 0; j < n; j++ {
 			l := clone(src.Labels)
 			l["kling.fork-of"] = src.ID
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-label" {
+					if k, v, ok := strings.Cut(args[i+1], "="); ok {
+						l[k] = v
+					}
+				}
+			}
 			mc := f.newMachine("", l)
 			f.verifier[mc.ID] = f.verifier[src.ID]
 			res.Sandboxes = append(res.Sandboxes, mc)
