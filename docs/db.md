@@ -21,12 +21,12 @@ kling db doctor t1        ·   kling db audit t1 -since 1h
 | comando | qué hace |
 |---|---|
 | `up <plantilla> [-name N] [-ttl D] [-owner T]` | `run -from` con `kling.db.state=preparing`, espera a Postgres, **rota la contraseña** y marca `ready` |
-| `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork`, pasa cada copia a `preparing`, rota la clave de cada una y las marca `ready`. Todo o nada |
+| `fork <copia> [-n N]` | descongela si hace falta, `sandbox fork -label kling.db.state=preparing` (las copias nacen en `preparing`), rota la clave de cada una y las marca `ready`. Todo o nada |
 | `connect <copia> [-dsn \| -psql]` | sin flags: dirección, usuario, base y la ruta del fichero de la clave. `-dsn`: el DSN con la clave (pregunta si stdout es una terminal). `-psql`: abre el psql del host con la clave en `PGPASSWORD` |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño y ttl |
 | `rm <copia>...` | borra la máquina y, después, su contraseña |
-| `doctor <copia> \| -url postgres://...` | diagnóstico (`ext/db/internal/doctor`) |
-| `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`) |
+| `doctor <copia> \| -url postgres://...` | diagnóstico de seguridad (reglas DB001-DB054, `ext/db/internal/doctor`); sale con 1 si hay problemas (todo lo que no es `INFO`) |
+| `audit <copia> [-since D] [-json]` | eventos del daemon y conexiones a Postgres (`ext/db/internal/dbaudit`); sin SQL ni claves |
 | `golden [-script P] image \| build ...` | ejecuta `scripts/db-golden.sh` con el mismo `kling` y el mismo daemon |
 
 Todos aceptan `-H` (daemon) y `-owner` (por defecto `local`).
@@ -46,8 +46,10 @@ Todas cumplen `api.KeyPattern` (sin `/`):
 
 Las etiquetas **se heredan**: `save` las guarda en la plantilla, `run -from` las
 fusiona y `fork` las copia enteras añadiendo `kling.fork-of`. Por eso `up` pasa
-`kling.db.state=preparing` en el propio `run -from` (la copia nace así) y `fork`
-cambia el `ready` heredado a `preparing` antes de hacer nada más. Y por eso
+`kling.db.state=preparing` en el propio `run -from` y `fork` lo pasa con `-label` a
+`sandbox fork`: en los dos casos la copia **nace** en `preparing`, sin ninguna ventana
+en la que exista como `ready` heredado (el núcleo fusiona las etiquetas del fork en el
+nacimiento de cada copia). Por eso
 `connect` no se fía solo de la etiqueta: exige además que exista la contraseña de
 **ese id** en este host.
 
@@ -68,6 +70,29 @@ cambia el `ready` heredado a `preparing` antes de hacer nada más. Y por eso
 - Si la rotación falla (o Postgres no arranca en 30 s), la copia **se destruye**.
 - La contraseña de la plantilla sigue viva en una copia solo mientras está en
   `preparing` (el tiempo de un `pg_isready` y un `ALTER ROLE`), nunca en una `ready`.
+
+## Modelo de seguridad
+
+- **Misma microVM.** La base y el agente comparten máquina: el agente es root y
+  puede leer todo lo que hay dentro, incluidos los datos y el `postgres`
+  superusuario del socket. La frontera es la microVM, no Postgres: lo que una copia
+  contiene solo debe ser lo que su agente puede ver. Para separar agente y datos,
+  usa una base fuera (proxy de credenciales, [postgres.md](postgres.md)).
+- **Rotación obligatoria.** Una copia sale de una plantilla que tiene una clave
+  conocida por quien la construyó. Ninguna copia se entrega sin cambiarla: la copia
+  se destruye si la rotación falla. Es lo que hace inútil, sobre todo en Linux, que
+  cualquier proceso del host alcance el puerto.
+- **La clave solo en el host**, en un fichero 0600 por id de máquina; al invitado solo
+  va el verificador SCRAM. Nunca en argv, etiquetas, logs ni en la salida de `audit`
+  o `doctor` (`connect -dsn` es la única salida que la imprime, a propósito).
+- **`doctor`** busca lo que rompe este modelo: roles de login superusuario o con
+  `BYPASSRLS`/`CREATEROLE`, políticas RLS que fallan abiertas, clave que sigue siendo
+  la de la plantilla (DB052, crítica), fichero de clave ausente o demasiado abierto.
+- **`audit`** junta los eventos del daemon y las conexiones que Postgres registra
+  (`log_connections`/`log_disconnections`): quién entró, desde dónde y cuándo, no qué
+  consultó.
+- **Credenciales del proxy.** Una copia con credenciales del proxy no se ramifica
+  (cada copia despertaría con marcadores que su proxy no conoce).
 
 ## Linux y macOS no son iguales
 
@@ -92,6 +117,12 @@ está en el invitado.
 
 ## Límites de este MVP
 
+- No hay TLS entre el host y la copia (`sslmode=disable`): el camino es el veth o el
+  reenvío de loopback del propio equipo.
+- El agente de la misma microVM ve la base entera (ver Modelo de seguridad).
+- La asimetría Linux/macOS de arriba es real: en Linux la clave es la única barrera
+  de red; en macOS se suma la comprobación de peercred del reenvío.
+
 - `golden` necesita el script: desde un checkout de kindling con `-script`, o
   `KLING_DB_GOLDEN_SCRIPT`, o instalado junto al binario. No busca en el directorio
   actual a propósito.
@@ -101,3 +132,11 @@ está en el invitado.
   hay que borrarlas con `kling rm`.
 - `rm` desde fuera (`kling rm`, ttl con `-on-ttl remove`) deja el fichero de la
   contraseña de una máquina que ya no existe; no sirve para ninguna otra (va por id).
+
+## Prueba de extremo a extremo
+
+`scripts/90-e2e.sh` (sección 7e, lab Linux) y `scripts/92-e2e-mac.sh` (sección 6f, Mac)
+recorren `up`, `fork -n 4`, `connect -dsn`, `doctor`, `audit`, `reset` y buscan cada
+clave en toda la salida. Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
+avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
+de la plantilla no entra en una copia.

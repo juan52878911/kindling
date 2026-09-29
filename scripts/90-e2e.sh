@@ -1019,6 +1019,141 @@ for modo in none internet allowlist; do
   fi
 done
 
+# ── 7e. kling db ─────────────────────────────────────────────────────────────
+# Bases Postgres desechables (ext/db). Necesita la plantilla dorada con Postgres
+# (kling db golden build ... pg) y el plugin kling-db instalado. Sin
+# KLING_E2E_DB_GOLDEN se salta, y lo dice.
+#
+#   KLING_E2E_DB_GOLDEN=pg ./scripts/90-e2e.sh
+#   KLING_E2E_DB_GOLDEN_PASSWORD=...   (opcional) la clave de la plantilla: con ella se
+#                                      prueba que NO entra en una copia
+#
+# Las claves de las copias se guardan en un KLING_DB_STATE propio de la prueba.
+# Toda la salida de kling db se acumula en un fichero y al final se busca en él
+# cada clave (la de cada copia y la de la plantilla): tiene que salir 0 veces.
+step "7e. kling db"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN no está (nombre de la plantilla Postgres): sin plantilla que probar\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  DBLOG="$DBTMP/salida.log"; : > "$DBLOG"
+  DBU="e2e-db-$$"
+  # dbk ejecuta kling db, acumula stdout+stderr en DBLOG y lo devuelve.
+  dbk() { local o rc; o=$($KLING db "$@" 2>&1 </dev/null); rc=$?; printf '%s\n' "$o" >> "$DBLOG"; printf '%s\n' "$o"; return $rc; }
+  # dbsql corre SQL DENTRO de la copia, por el socket, como superusuario local.
+  dbsql() { $KLING exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  # dbpw: la clave de la copia, leída del fichero del host (nunca se imprime).
+  dbpw() { local id; id=$($KLING inspect "$1" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'); cat "$KLING_DB_STATE/copies/$id/password" 2>/dev/null; }
+  # dbhost: host, puerto, usuario y base de una copia (de connect -dsn, sin la clave).
+  dbhost() { $KLING db connect "$1" -dsn 2>/dev/null </dev/null | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.stdin.read().strip())
+print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip("/"))'; }
+  # dbhostsql: SQL desde el host con una clave dada (por entorno, no por argv).
+  dbhostsql() { local pw="$1" h p u d; read -r h p u d < <(dbhost "$2"); PGPASSWORD="$pw" PGSSLMODE=disable PGCONNECT_TIMEOUT=10 psql -X -At -h "$h" -p "$p" -U "$u" -d "$d" -c "$3" 2>&1; }
+
+  out=$(dbk up "$DBG" -name "$DBU")
+  contiene "$out" "ready" && ok "kling db up: copia lista" || bad "db up" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT 1")
+  [ "$out" = "1" ] && ok "SELECT 1 dentro de la copia, por el socket" || bad "SELECT 1 por socket" "1" "$out"
+
+  # La clave de la copia no es la de la plantilla.
+  PW1=$(dbpw "$DBU")
+  [ -n "$PW1" ] && ok "la copia tiene su clave en el host" || bad "clave de la copia" "un fichero con la clave" "nada"
+  TODAS="$PW1"
+  if ! command -v psql >/dev/null; then
+    printf "  \033[33mskip\033[0m  no hay psql en este host: sin comprobación de clave desde el host\n"
+  else
+    out=$(dbhostsql "$PW1" "$DBU" "SELECT 1")
+    [ "$out" = "1" ] && ok "desde el host entra con la clave de la copia" || bad "conexión del host" "1" "$out"
+    if [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ]; then
+      [ "$PW1" != "$KLING_E2E_DB_GOLDEN_PASSWORD" ] && ok "la clave de la copia es distinta de la de la plantilla" \
+        || bad "rotación" "clave de la copia distinta de la de la plantilla" "iguales"
+      out=$(dbhostsql "$KLING_E2E_DB_GOLDEN_PASSWORD" "$DBU" "SELECT 1")
+      [ "$out" = "1" ] && bad "clave de la plantilla" "rechazada" "ENTRÓ" \
+        || ok "la clave de la plantilla NO entra en la copia"
+    else
+      printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD no está: sin la prueba de la clave de la plantilla desde el host\n"
+    fi
+    # connect -dsn: el DSN funciona tal cual (su salida no va a DBLOG: lleva la clave a propósito).
+    dsn=$($KLING db connect "$DBU" -dsn 2>/dev/null </dev/null)
+    out=$(PGCONNECT_TIMEOUT=10 psql -X -At "$dsn" -c "SELECT 1" 2>&1)
+    [ "$out" = "1" ] && ok "connect -dsn: el DSN funciona" || bad "connect -dsn" "1" "$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
+    dsn=""
+  fi
+
+  # fork -n 4: cuatro claves distintas y escrituras aisladas.
+  dbsql "$DBU" "CREATE TABLE e2e_marca(v text); INSERT INTO e2e_marca VALUES ('origen')" >/dev/null
+  out=$(dbk fork "$DBU" -n 4)
+  copias=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}')
+  nc=$(printf '%s\n' "$copias" | grep -c . || true)
+  [ "$nc" = "4" ] && ok "fork -n 4: cuatro copias listas" || bad "fork -n 4" "4 copias" "$out"
+  distintas=1; i=0
+  for c in $copias; do
+    i=$((i+1))
+    pw=$(dbpw "$c")
+    case " $TODAS " in *" $pw "*) distintas=0;; esac
+    [ -n "$pw" ] || distintas=0
+    TODAS="$TODAS $pw"
+    dbsql "$c" "INSERT INTO e2e_marca VALUES ('copia-$i')" >/dev/null
+  done
+  [ "$distintas" = 1 ] && ok "fork: cuatro claves distintas entre sí y de la del origen" \
+    || bad "claves del fork" "todas distintas y no vacías" "alguna repetida o vacía"
+  aisladas=1; i=0
+  for c in $copias; do
+    i=$((i+1))
+    filas=$(dbsql "$c" "SELECT string_agg(v, ',' ORDER BY v) FROM e2e_marca")
+    [ "$filas" = "copia-$i,origen" ] || { aisladas=0; echo "     $c ve: $filas"; }
+  done
+  filas=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_marca")
+  { [ "$aisladas" = 1 ] && [ "$filas" = "origen" ]; } && ok "cada copia ve solo sus escrituras (y el origen no ve ninguna)" \
+    || bad "aislamiento del fork" "copia-N,origen en cada una; origen solo 'origen'" "origen ve: $filas"
+  for c in $copias; do dbk rm "$c" >/dev/null 2>&1; done
+
+  # doctor: copia limpia = 0 problemas; con un superusuario de login añadido, >0.
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" = 0 ] && contiene "$out" "; 0 problem(s)"; } && ok "doctor de una copia limpia: 0 problemas" \
+    || bad "doctor limpio" "0 problem(s), salida 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "CREATE ROLE e2e_super LOGIN SUPERUSER" >/dev/null
+  out=$(dbk doctor "$DBU"); rc=$?
+  { [ "$rc" != 0 ] && ! contiene "$out" "; 0 problem(s)"; } && ok "doctor con un superusuario de login añadido: hay problemas" \
+    || bad "doctor con superusuario" "problemas > 0" "rc=$rc $(printf '%s' "$out" | tail -3)"
+  dbsql "$DBU" "DROP ROLE e2e_super" >/dev/null
+
+  # audit: muestra conexiones y no lleva ni la clave ni SQL.
+  command -v psql >/dev/null && dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
+  out=$(dbk audit "$DBU" -since 1h)
+  contiene "$out" "connect" && ok "audit muestra conexiones" || bad "audit" "eventos de conexión" "$out"
+  if contiene "$out" "424242" || contiene "$out" "SELECT" || contiene "$out" "e2e_marca"; then
+    bad "audit sin SQL" "ni SQL ni valores" "$out"
+  else
+    ok "audit no contiene SQL"
+  fi
+
+  # reset: los datos vuelven a ser los de la plantilla.
+  dbsql "$DBU" "CREATE TABLE e2e_sucia(x int)" >/dev/null
+  out=$(dbk reset "$DBU")
+  contiene "$out" "ready" || bad "db reset" "ready" "$out"
+  out=$(dbsql "$DBU" "SELECT count(*) FROM pg_tables WHERE tablename IN ('e2e_sucia','e2e_marca')")
+  [ "$out" = "0" ] && ok "reset devuelve los datos de la plantilla" || bad "reset" "0 tablas de la prueba" "$out"
+  PW2=$(dbpw "$DBU")
+  { [ -n "$PW2" ] && [ "$PW2" != "$PW1" ]; } && ok "reset: otra copia, otra clave" || bad "clave tras reset" "distinta" "igual o vacía"
+  TODAS="$TODAS $PW2 ${KLING_E2E_DB_GOLDEN_PASSWORD:-}"
+  dbk rm "$DBU" >/dev/null 2>&1
+
+  # Ninguna clave en ninguna salida de kling db (ni en la de audit, ni en la de doctor).
+  fugas=0
+  for pw in $TODAS; do
+    grep -qF -- "$pw" "$DBLOG" && fugas=$((fugas+1))
+  done
+  [ "$fugas" = 0 ] && ok "ninguna clave aparece en la salida de kling db (0 coincidencias)" \
+    || bad "fuga de claves" 0 "$fugas"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
 # ── resumen ──────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d ok · %d fallo(s)\033[0m\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
