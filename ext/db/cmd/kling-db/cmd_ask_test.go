@@ -462,11 +462,16 @@ LINE 2: FROM productos p`, "the relation productos does not exist", true},
 		{`ERROR:  permission denied for table invoices`, "", false},
 		{`ERROR:  canceling statement due to statement timeout`, "", false},
 	}
+	sql := "SELECT p.nombre FROM productos p JOIN x c ON c.nombre = p.nombre"
 	for _, c := range casos {
-		got, ok := missingIdent(errors.New(c.err))
+		got, ok := missingIdent(errors.New(c.err), sql)
 		if ok != c.ok || got != c.want {
 			t.Errorf("%q: got (%q, %v), want (%q, %v)", c.err, got, ok, c.want, c.ok)
 		}
+	}
+	// Un valor de una fila (cast de datos a regclass) no está en la SQL: no sale.
+	if got, ok := missingIdent(errors.New(`ERROR:  relation "juan_perez_4111" does not exist`), "SELECT nombre::regclass FROM clientes"); ok {
+		t.Fatalf("un dato de una fila saldría hacia el proveedor: %q", got)
 	}
 	p := repairPrompt("{}", "¿cuántos?", "SELECT 1 FROM productos", "the relation productos does not exist")
 	if !strings.Contains(p, "SELECT 1 FROM productos") || !strings.Contains(p, "productos does not exist") || strings.Contains(p, "LINE 2") {

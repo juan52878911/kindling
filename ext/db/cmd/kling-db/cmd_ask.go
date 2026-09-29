@@ -212,7 +212,7 @@ func (a *app) ask(ctx context.Context, ref, question, owner string, o askOpts, p
 		if err == nil {
 			break
 		}
-		fix, ok := missingIdent(err)
+		fix, ok := missingIdent(err, sql)
 		if !ok || intento >= 2 {
 			return err
 		}
@@ -533,10 +533,13 @@ Rules:
 var reMissing = regexp.MustCompile(`ERROR:\s+(relation|column) "?([A-Za-z_][A-Za-z0-9_.]{0,127})"? does not exist`)
 
 // missingIdent devuelve una línea para el modelo si err es "no existe" de una
-// tabla o una columna; nada de lo demás de psql sale de la máquina.
-func missingIdent(err error) (string, bool) {
+// tabla o una columna que aparece en la SQL del propio modelo; nada de lo demás
+// de psql sale de la máquina. La comprobación contra sql no sobra: un cast de
+// DATOS a regclass (SELECT nombre::regclass FROM clientes) da el mismo error con
+// el valor de una fila, y ese valor no puede acabar en el proveedor.
+func missingIdent(err error, sql string) (string, bool) {
 	m := reMissing.FindStringSubmatch(err.Error())
-	if m == nil {
+	if m == nil || !strings.Contains(strings.ToLower(sql), strings.ToLower(m[2])) {
 		return "", false
 	}
 	return fmt.Sprintf("the %s %s does not exist", m[1], m[2]), true

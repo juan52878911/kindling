@@ -160,6 +160,14 @@ func TestDefaultAttachHost(t *testing.T) {
 func TestDetach(t *testing.T) {
 	ta, cp, ag := escenaAttach(t)
 	ctx := context.Background()
+	// Un agente sin dueño (o de otro) no se toca: attach lo habría etiquetado.
+	if err := ta.detach(ctx, "agente", "c1", "local", "PGPASSWORD"); err == nil || !strings.Contains(err.Error(), "same owner") {
+		t.Fatalf("detach de un agente sin dueño: %v", err)
+	}
+	if ag.Labels == nil {
+		ag.Labels = map[string]string{}
+	}
+	ag.Labels[labelOwner] = "local"
 	if err := ta.detach(ctx, "agente", "c1", "local", "PGPASSWORD"); err != nil {
 		t.Fatal(err)
 	}

@@ -227,6 +227,11 @@ func (a *app) detach(ctx context.Context, agentRef, copyRef, owner, env string) 
 	if err != nil {
 		return err
 	}
+	// Como en attach: solo se toca un agente del mismo dueño, también cuando la
+	// copia ya no existe y no hay otra comprobación.
+	if got := ag.Labels[labelOwner]; got != owner {
+		return fmt.Errorf("agent %s belongs to owner %q, not %q: detach only touches machines of the same owner", ag.Name, got, owner)
+	}
 	copyID, copyName := copyRef, copyRef
 	if cp, err := a.inspect(ctx, copyRef); err == nil {
 		if err := owned(cp, owner); err != nil {
