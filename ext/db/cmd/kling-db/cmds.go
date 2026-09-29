@@ -294,12 +294,13 @@ func cmdConnect(args []string) error {
 	fs, host, owner := newFlags("connect")
 	dsn := fs.Bool("dsn", false, "print a DSN WITH the password (asks first if stdout is a terminal)")
 	psql := fs.Bool("psql", false, "open the host's psql on the copy (password through the environment)")
+	role := fs.String("role", "", "connect as this role made by kling db role (default: the application role)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageErr("usage: kling db connect <copy> [-dsn | -psql]")
+		return usageErr("usage: kling db connect <copy> [-role R] [-dsn | -psql]")
 	}
 	if *dsn && *psql {
 		return usageErr("-dsn and -psql exclude each other")
@@ -317,10 +318,15 @@ func cmdConnect(args []string) error {
 	case *psql:
 		mode = "psql"
 	}
-	return a.connect(ctx, pos[0], *owner, mode)
+	return a.connectAs(ctx, pos[0], *owner, mode, *role)
 }
 
 func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
+	return a.connectAs(ctx, ref, owner, mode, "")
+}
+
+// connectAs es connect con un rol elegido ("" = el de la aplicación).
+func (a *app) connectAs(ctx context.Context, ref, owner, mode, extraRole string) error {
 	if err := validOwner(owner); err != nil {
 		return err
 	}
@@ -340,13 +346,32 @@ func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
 		return err
 	}
 	pwPath, _ := dbstate.PasswordPath(mc.ID)
+	readPW := func() (string, error) { return dbstate.ReadPassword(mc.ID) }
+	if extraRole != "" {
+		if err := validRoleName(extraRole, role); err != nil {
+			return err
+		}
+		role = extraRole
+		pwPath, _ = dbstate.RolePasswordPath(mc.ID, role)
+		readPW = func() (string, error) {
+			pw, err := dbstate.ReadRolePassword(mc.ID, role)
+			if errors.Is(err, dbstate.ErrNoPassword) {
+				return "", fmt.Errorf("this host has no password for role %s of %s (kling db role %s -ro -name %s creates it)", role, mc.Name, mc.Name, role)
+			}
+			return pw, err
+		}
+		// Sin contraseña no hay nada que entregar: falla antes de preguntar.
+		if _, err := readPW(); err != nil {
+			return err
+		}
+	}
 
 	switch mode {
 	case "dsn":
 		if a.stdoutTTY() && !a.confirm(fmt.Sprintf("This prints the password of %s to the terminal. Continue? [y/N] ", mc.Name)) {
 			return errors.New("aborted: nothing printed (pipe it, e.g. kling db connect " + mc.Name + " -dsn | pbcopy)")
 		}
-		pw, err := dbstate.ReadPassword(mc.ID)
+		pw, err := readPW()
 		if err != nil {
 			return err
 		}
@@ -355,7 +380,7 @@ func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
 		fmt.Fprintln(a.stdout, u.String())
 		return nil
 	case "psql":
-		pw, err := dbstate.ReadPassword(mc.ID)
+		pw, err := readPW()
 		if err != nil {
 			return err
 		}
@@ -366,7 +391,11 @@ func (a *app) connect(ctx context.Context, ref, owner, mode string) error {
 	fmt.Fprintf(a.stdout, "%s  ready  (machine %s)\n", mc.Name, shortID(mc.ID))
 	fmt.Fprintf(a.stdout, "  host      %s\n  port      %d\n  user      %s\n  database  %s\n  password  %s\n",
 		h, port, role, db, pwPath)
-	fmt.Fprintf(a.stdout, "  kling db connect %s -psql   ·   kling db connect %s -dsn | <your tool>\n", mc.Name, mc.Name)
+	flagRole := ""
+	if extraRole != "" {
+		flagRole = " -role " + extraRole
+	}
+	fmt.Fprintf(a.stdout, "  kling db connect %s%s -psql   ·   kling db connect %s%s -dsn | <your tool>\n", mc.Name, flagRole, mc.Name, flagRole)
 	return nil
 }
 

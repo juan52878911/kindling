@@ -17,6 +17,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   clave (solo en el host; al invitado va el verificador SCRAM) antes de marcarse `ready`.
   `doctor` revisa la seguridad de una copia o de una URL; `audit` muestra sus conexiones
   sin SQL ni claves. Ver [`docs/db.md`](docs/db.md).
+- **`kling db role <copia> -ro`** crea un rol de solo lectura dentro de la copia (sin
+  escritura, sin pertenencias, con tiempos máximos y su propia clave en el host);
+  `connect -role` lo usa. **`kling db templates`** y `golden build -template` construyen
+  una golden de un comando (`empty`, `crm-demo`).
 - **`sandbox fork -label k=v`.** Las etiquetas se aplican en el nacimiento de cada copia
   (sin ventana con las heredadas); `kling db fork` las usa para nacer en `preparing`.
 - e2e: sección "kling db" en `scripts/90-e2e.sh` y `scripts/92-e2e-mac.sh`

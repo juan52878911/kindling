@@ -39,7 +39,10 @@ func manifest() plugin.Manifest {
 				Usage:       usage("fork <copy> [-n N]", "N copies of a copy, all or none"),
 				MachineArgs: []string{""}},
 			{Name: "connect", Group: "COPIES", Summary: "how to reach a copy from the host",
-				Usage:       usage("connect <copy> [-dsn | -psql]", "address, or DSN, or a psql session"),
+				Usage:       usage("connect <copy> [-role R] [-dsn | -psql]", "address, or DSN, or a psql session"),
+				MachineArgs: []string{""}},
+			{Name: "role", Group: "COPIES", Summary: "a read-only role inside a copy",
+				Usage:       usage("role <copy> -ro [-name agent] [-schemas a,b] [-rm]", "a login role that can only read"),
 				MachineArgs: []string{""}},
 			{Name: "reset", Group: "COPIES", Summary: "replaces a copy with a fresh one from its template",
 				Usage:       usage("reset <copy>", "same name, same template, new data"),
@@ -55,8 +58,11 @@ func manifest() plugin.Manifest {
 				MachineArgs: []string{""}},
 			{Name: "golden", Group: "TEMPLATES", Summary: "builds the pg16 image and Postgres templates",
 				Usage: usage("golden image", "builds the pg16 image") +
-					usage("golden build [opts] <name>", "a warm Postgres frozen as a template"),
+					usage("golden build [opts] <name>", "a warm Postgres frozen as a template") +
+					usage("golden build -template T <name>", "the same, from a bundled template"),
 				Subcommands: []string{"image", "build"}},
+			{Name: "templates", Group: "TEMPLATES", Summary: "lists the bundled database templates",
+				Usage: usage("templates", "empty, crm-demo...")},
 		},
 	}
 }
@@ -66,13 +72,15 @@ func usage(cmd, desc string) string { return fmt.Sprintf("  db %-45s %s\n", cmd,
 
 func main() {
 	plugin.Main(manifest(), map[string]func([]string) error{
-		"up":      cmdUp,
-		"fork":    cmdFork,
-		"connect": cmdConnect,
-		"reset":   cmdReset,
-		"rm":      cmdRm,
-		"doctor":  cmdDoctor,
-		"audit":   cmdAudit,
-		"golden":  cmdGolden,
+		"up":        cmdUp,
+		"fork":      cmdFork,
+		"connect":   cmdConnect,
+		"reset":     cmdReset,
+		"rm":        cmdRm,
+		"doctor":    cmdDoctor,
+		"audit":     cmdAudit,
+		"golden":    cmdGolden,
+		"role":      cmdRole,
+		"templates": cmdTemplates,
 	}, map[string]func([]string, io.Writer) error{})
 }
