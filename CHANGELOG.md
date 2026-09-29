@@ -44,6 +44,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   la vieja deja de valer; `snapshot` guarda una copia viva como punto de restauración y
   `undo` vuelve a él (mismo nombre y dueño, clave nueva). Ver
   [`docs/db.md`](docs/db.md).
+- **`kling db branch`: una base por rama de git.** La copia de una rama nueva sale por
+  fork de la de su rama padre (o del golden); `-switch`, pensado para el hook
+  `post-checkout` (`branch hook install`), deja activa la copia de la rama actual,
+  congela las demás (0 RAM) y escribe `DATABASE_URL` en `.git/kling-db.env` (0600, nunca
+  en el árbol de trabajo). Además `-ls`, `-rm` y `-prune`. Ver
+  [`docs/db.md`](docs/db.md#una-base-por-rama).
 - **`kling db attach` / `detach` (modelo A, solo Linux).** Una copia compartida por
   agentes de otras microVMs, por el proxy de credenciales de Postgres de cada uno: el
   agente recibe un marcador y nunca la contraseña (la de la copia o la de un rol de

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,8 @@ type fakeKling struct {
 	// removed: "id env upstream" de cada RemoveCredential.
 	creds   map[string][]api.CredentialSpec
 	removed []string
+	// freezeFails: kling freeze siempre falla.
+	freezeFails bool
 	// credErr, si no es nil, lo devuelve SetCredential.
 	credErr error
 }
@@ -237,6 +240,29 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			res.Sandboxes = append(res.Sandboxes, mc)
 		}
 		return json.Marshal(res)
+
+	case args[0] == "ps":
+		ids := make([]string, 0, len(f.machines))
+		for id := range f.machines {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		list := make([]*api.Machine, 0, len(ids))
+		for _, id := range ids {
+			list = append(list, f.machines[id])
+		}
+		return json.Marshal(list)
+
+	case args[0] == "freeze":
+		mc := f.find(args[1])
+		if mc == nil {
+			return fail("no machine")
+		}
+		if f.freezeFails {
+			return fail("freeze failed")
+		}
+		mc.State = api.StateWarm
+		return nil, nil
 
 	case args[0] == "thaw":
 		mc := f.find(args[1])
