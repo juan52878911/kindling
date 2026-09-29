@@ -644,11 +644,19 @@ cambia:
   crea con `O_EXCL|O_NOFOLLOW` y se cede al VMM con `fchown` sobre el descriptor, porque en
   el jail está en un directorio del VMM; al recuperarlo del jail se exige que sea el mismo
   inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
-  descarta igualmente (el dorado no correspondería a la memoria volcada).
+  descarta igualmente (el dorado no correspondería a la memoria volcada). En macOS el
+  clon es `fclonefileat(2)` desde el mismo descriptor: crea el destino él mismo (falla si
+  existe, enlace incluido), y el daemon lo abre relativo al directorio con `O_NOFOLLOW` y
+  exige fichero regular, un solo enlace (no un hardlink a otro fichero puesto en su
+  lugar), dueño el daemon (`CLONE_NOOWNERCOPY`) y el tamaño del origen.
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
   que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
   `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
-  reserva).
+  reserva). Crecer (`kling cow grow`, solo admin) también reserva con `fallocate` antes
+  de agrandar el loop y el sistema de ficheros, y solo toca el loop cuyo
+  `backing_file` es la imagen del almacén. Una imagen que no monta solo se borra sola si
+  es recién creada o si ningún `machines/<id>/overlay.ext4` apunta dentro del almacén, y
+  nunca mientras siga montada.
 - **Cuota por instancia**: el VMM escribe el fichero de overlay y un Firecracker
   comprometido podría hacerlo crecer hasta llenar el almacén compartido. Cada overlay lleva
   una cuota del núcleo igual a su tamaño lógico más una holgura: en XFS, cuota de proyecto

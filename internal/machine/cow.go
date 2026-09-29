@@ -37,6 +37,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,6 +93,18 @@ func decidirCoW(pedido string, nativo bool, errAlmacen error) (modo, motivo stri
 		return cowModoCopy, fmt.Sprintf("no reflink on the data root and no copy-on-write store (%v): copying overlays", errAlmacen)
 	}
 	return cowModoCopy, fmt.Sprintf("unknown daemon.cow %q: copying overlays", pedido)
+}
+
+// notaAlmacenPendiente completa el motivo del modo store cuando el almacén aún
+// no existe: de qué tipo será y, si el núcleo todavía no lista ese sistema de
+// ficheros, que tendrá que cargar su módulo al montarlo (en un contenedor LXC
+// no puede, y el primer run -from lo descubrirá).
+func notaAlmacenPendiente(fs string, conoce bool) string {
+	n := fmt.Sprintf(" (%s store, created on the first run -from", fs)
+	if !conoce {
+		n += fmt.Sprintf("; the kernel does not list %s yet: it has to load its module to mount it", fs)
+	}
+	return n + ")"
 }
 
 // estadoCoW es el modo en uso y sus contadores. Sin configurar (tests, o un
@@ -171,8 +184,31 @@ func (m *Manager) CoWInfo() *api.CoWInfo {
 	m.cow.mu.Unlock()
 	if m.alm != nil {
 		info.Store = m.alm.info()
+		// En modo store, hasta el primer run -from el almacén no existe (o no
+		// se ha montado): se crea entonces. Decir "store" sin más daba por
+		// hecho algo que aún no se ha probado.
+		info.Pending = info.Mode == cowModoStore && !m.alm.estaListo()
 	}
 	return info
+}
+
+// GrowCoWStore amplía el almacén de copias de disco (POST /cow/store/grow):
+// hasta sizeMiB, o en addMiB. Uno de los dos. Devuelve cómo queda.
+func (m *Manager) GrowCoWStore(ctx context.Context, sizeMiB, addMiB int64) (*api.CoWStore, error) {
+	if m.alm == nil {
+		return nil, errors.New("there is no copy-on-write store on this platform")
+	}
+	const maxMiB = 1 << 30 // 1 PiB: más es un error de unidades, no un almacén
+	switch {
+	case sizeMiB < 0 || addMiB < 0 || sizeMiB > maxMiB || addMiB > maxMiB:
+		return nil, errors.New("invalid size")
+	case (sizeMiB > 0) == (addMiB > 0):
+		return nil, errors.New("give either the new size or how much to add")
+	}
+	if err := m.alm.crecer(ctx, sizeMiB<<20, addMiB<<20); err != nil {
+		return nil, err
+	}
+	return m.alm.info(), nil
 }
 
 // copiarOverlay copia un disco entero (plantilla, commit): con reflink nativo
@@ -320,11 +356,11 @@ func fijarOverlayParaLeer(ruta string) (*os.File, func() error, error) {
 // con un chown por ruta que seguiría un enlace. Devuelve la identidad del
 // fichero creado, para comprobar después que el que se recupera es este.
 //
-// macOS pierde aquí el clonefile de `cp -c`: no hay clonefile desde un
-// descriptor sin cgo (fclonefileat no está en syscall). El commit copia; las
-// instancias (runFrom) siguen clonando desde el dorado, que es del daemon.
+// En macOS se clona con fclonefileat desde el mismo descriptor (clon_darwin.go),
+// y si el disco no es APFS (ENOTSUP) o dst está en otro volumen (EXDEV), copia
+// dispersa.
 func (m *Manager) copiarOverlayDesde(ctx context.Context, in *os.File, dst string, own func(*os.File) error) (os.FileInfo, error) {
-	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	out, clonado, err := crearDestinoOverlay(in, dst, m.cow.actual() == cowModoReflink)
 	if err != nil {
 		return nil, err
 	}
@@ -332,10 +368,6 @@ func (m *Manager) copiarOverlayDesde(ctx context.Context, in *os.File, dst strin
 		out.Close()
 		_ = os.Remove(dst)
 		return nil, err
-	}
-	clonado := false
-	if m.cow.actual() == cowModoReflink {
-		clonado = clonarDescriptor(in, out) == nil
 	}
 	if !clonado {
 		if err := copiarDisperso(ctx, in, out); err != nil {
@@ -429,6 +461,17 @@ type almacenCoW struct {
 	copiar      func(ctx context.Context, src, dst string) error
 	libreEn     func(dir string) (total, libre int64, err error)
 
+	// Para no dejar atrás un almacén que no monta y para hacerlo crecer
+	// (cow_fc.go). nil en un test que no los usa:
+	//   candidatos son los tipos posibles para un almacén nuevo, por preferencia.
+	//   reconfigurar cambia el tipo del almacén (fichero, operaciones, cuota).
+	//   desmontar desmonta el almacén.
+	//   agrandar amplía el fichero, el loop y el sistema de ficheros a bytes.
+	candidatos   func() []string
+	reconfigurar func(fs string)
+	desmontar    func(dir string) error
+	agrandar     func(ctx context.Context, img, dir string, bytes int64) error
+
 	// Cuota por instancia (cow_cuota.go). Todas nil en un test o sin las
 	// herramientas: el almacén funciona igual, sin cuota.
 	//   detectarCuota dice qué cuota impone este montaje ("prjquota", "qgroup" o "").
@@ -500,10 +543,31 @@ func nombreSeguro(n string) error {
 	return nil
 }
 
-// existe dice si el almacén está creado (el fichero de imagen existe).
+// existe dice si el almacén está creado (el fichero de imagen existe). Con
+// a.mu, salvo al arrancar (antes de servir nada): a.img puede cambiar.
 func (a *almacenCoW) existe() bool {
 	_, err := os.Lstat(a.img)
 	return err == nil
+}
+
+// estaListo dice si el almacén está montado y probado: hasta entonces el modo
+// store está pendiente (api.CoWInfo.Pending).
+func (a *almacenCoW) estaListo() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.montado
+}
+
+// comprobarEspacio dice si cabe un almacén nuevo en la raíz (tamAlmacen): si
+// no, se sabe ya al arrancar y no hace falta esperar al primer run -from para
+// decir por qué se copia.
+func (a *almacenCoW) comprobarEspacio(gib int) error {
+	_, libre, err := a.libreEn(a.root)
+	if err != nil {
+		return err
+	}
+	_, err = tamAlmacen(libre, gib)
+	return err
 }
 
 // montarSiExiste monta al arrancar un almacén ya creado, sea cual sea el modo:
@@ -516,9 +580,139 @@ func (a *almacenCoW) montarSiExiste(ctx context.Context) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.asegurarMontado(ctx); err != nil {
-		log.Printf("WARNING: copy-on-write store %s: %v; instances whose overlay lives there won't start until it is mounted", a.img, err)
+	err := a.asegurarMontado(ctx)
+	if err == nil {
+		return
 	}
+	// Un almacén que no monta y que no usa ninguna instancia (lo dejó un
+	// daemon anterior que no llegó a usarlo, o el núcleo ya no tiene su
+	// sistema de ficheros) no guarda nada que no se pueda rehacer: las bases
+	// se vuelven a copiar. Se quita, en vez de dejar un fichero de gigas
+	// reservados y un aviso en cada arranque; el primer run -from lo crea otra
+	// vez, con el tipo que este núcleo pueda montar.
+	if a.enUso() {
+		log.Printf("WARNING: copy-on-write store %s: %v; instances whose overlay lives there won't start until it is mounted", a.img, err)
+		return
+	}
+	if derr := a.desechar(); derr != nil {
+		log.Printf("WARNING: copy-on-write store %s: %v; no instance uses it, but it could not be removed: %v", a.img, err, derr)
+		return
+	}
+	log.Printf("warning: copy-on-write store %s could not be mounted (%v%s) and no instance uses it: removed; it is created again on the next run -from", a.img, err, pistaFalloAlmacen(a.fs, err))
+	if a.candidatos != nil {
+		if c := a.candidatos(); len(c) > 0 && c[0] != a.fs {
+			a.usarFS(c[0])
+		}
+	}
+}
+
+// enUso dice si alguna máquina tiene su overlay en el almacén: su
+// machines/<id>/overlay.ext4 es un enlace que apunta dentro de a.dir. Ante la
+// duda (no se puede leer machines/), sí.
+func (a *almacenCoW) enUso() bool {
+	entradas, err := os.ReadDir(filepath.Join(a.root, "machines"))
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	for _, e := range entradas {
+		dest, err := os.Readlink(filepath.Join(a.root, "machines", e.Name(), "overlay.ext4"))
+		if err == nil && strings.HasPrefix(filepath.Clean(dest), a.dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// desechar desmonta (si está montado) y borra la imagen del almacén. Solo
+// para uno recién creado que no funciona o uno que ninguna instancia usa. Si
+// sobre el punto de montaje hay otra cosa, o no se puede desmontar, no borra
+// nada: con la imagen montada el borrado no liberaría el sitio. Con a.mu.
+func (a *almacenCoW) desechar() error {
+	a.montado = false
+	ya, err := a.estaMontado(a.dir)
+	if err != nil {
+		return err
+	}
+	if ya {
+		if a.desmontar == nil {
+			return fmt.Errorf("%s is mounted", a.dir)
+		}
+		if err := a.desmontar(a.dir); err != nil {
+			return fmt.Errorf("unmounting %s: %w", a.dir, err)
+		}
+	}
+	if err := os.Remove(a.img); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// usarFS cambia el tipo del almacén (aún sin crear). Con a.mu.
+func (a *almacenCoW) usarFS(fs string) {
+	if a.reconfigurar != nil {
+		a.reconfigurar(fs)
+		return
+	}
+	a.fs, a.img = fs, filepath.Join(a.root, imgAlmacen(fs))
+}
+
+// tiposAProbar son los tipos con los que intentar crear el almacén: el suyo y
+// luego los demás candidatos.
+func (a *almacenCoW) tiposAProbar() []string {
+	out := []string{a.fs}
+	if a.candidatos != nil {
+		for _, fs := range a.candidatos() {
+			if !slices.Contains(out, fs) {
+				out = append(out, fs)
+			}
+		}
+	}
+	return out
+}
+
+// crearYMontar crea el almacén de bytes y lo monta. Si el tipo elegido no
+// monta o no clona (el núcleo no tiene el módulo, el contenedor no deja
+// montar ese tipo), su imagen se desmonta y se borra, y se prueba con el
+// siguiente tipo: nunca queda atrás un fichero reservado que no sirve. Con
+// a.mu.
+func (a *almacenCoW) crearYMontar(ctx context.Context, bytes int64) error {
+	var fallos []string
+	for i, fs := range a.tiposAProbar() {
+		if i > 0 {
+			a.usarFS(fs)
+			log.Printf("trying the copy-on-write store as %s instead", fs)
+		}
+		log.Printf("creating the copy-on-write store %s (%d MiB, reserved up front)", a.img, bytes>>20)
+		err := a.crear(ctx, a.img, bytes)
+		if err == nil {
+			if err = a.asegurarMontado(ctx); err == nil {
+				return nil
+			}
+			if derr := a.desechar(); derr != nil {
+				// No se sigue: la imagen sigue ahí y otro tipo no cambiaría eso.
+				return fmt.Errorf("%s: %v%s; and the image could not be removed: %v", fs, err, pistaFalloAlmacen(fs, err), derr)
+			}
+			log.Printf("warning: the copy-on-write store as %s does not work (%v): image removed", fs, err)
+		}
+		fallos = append(fallos, fmt.Sprintf("%s: %v%s", fs, err, pistaFalloAlmacen(fs, err)))
+	}
+	return errors.New(strings.Join(fallos, "; "))
+}
+
+// pistaFalloAlmacen explica los fallos de montar el almacén que tienen una
+// causa conocida.
+func pistaFalloAlmacen(fs string, err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "unknown filesystem type"):
+		return fmt.Sprintf(" (the kernel has no %s: load its module on the host, or install the tools of the other filesystem)", fs)
+	case strings.Contains(s, "ermission denied") || strings.Contains(s, "not permitted"):
+		return " (mounting is not allowed here: in an LXC container, check that it is privileged and its AppArmor profile)"
+	}
+	return ""
 }
 
 // asegurarMontado monta el almacén si existe y no lo está. Con a.mu tomado.
@@ -616,10 +810,7 @@ func (a *almacenCoW) preparar(ctx context.Context, gib int) error {
 			if err != nil {
 				return err
 			}
-			log.Printf("creating the copy-on-write store %s (%d MiB, reserved up front)", a.img, bytes>>20)
-			if err := a.crear(ctx, a.img, bytes); err != nil {
-				return err
-			}
+			return a.crearYMontar(ctx, bytes)
 		}
 		return a.asegurarMontado(ctx)
 	}()
@@ -630,6 +821,10 @@ func (a *almacenCoW) preparar(ctx context.Context, gib int) error {
 	return nil
 }
 
+// margenRaizAlmacen es lo que el almacén deja libre en la raíz al crearse o
+// crecer, como minFreeDiskMiB.
+const margenRaizAlmacen = 2 << 30
+
 // tamAlmacen es cuánto reservar para el almacén: lo pedido, o una cuarta
 // parte del disco libre con un máximo de 16 GiB. Se reserva entero
 // (fallocate): un XFS o un Btrfs sobre un fichero disperso que se queda sin
@@ -637,10 +832,9 @@ func (a *almacenCoW) preparar(ctx context.Context, gib int) error {
 // todas sus instancias dentro. Mejor
 // una cuota fija que un almacén que puede romperse por algo que hace otro.
 func tamAlmacen(libre int64, gib int) (int64, error) {
-	const margen = 2 << 30 // lo que se deja libre en la raíz, como minFreeDiskMiB
 	if gib > 0 {
 		b := int64(gib) << 30
-		if b > libre-margen {
+		if b > libre-margenRaizAlmacen {
 			return 0, fmt.Errorf("daemon.cow_store_gib=%d doesn't fit: %d MiB free under the data root", gib, libre>>20)
 		}
 		return b, nil
@@ -879,22 +1073,70 @@ func (a *almacenCoW) barrer(viva func(id string) bool, overlayDorado func(snap s
 
 // info es el estado del almacén para GET /info; nil si no existe.
 func (a *almacenCoW) info() *api.CoWStore {
+	// Todo bajo a.mu: el tipo y la imagen cambian si el primero no monta
+	// (crearYMontar), a la vez que alguien pregunta por GET /info.
+	a.mu.Lock()
 	if !a.existe() {
+		a.mu.Unlock()
 		return nil
 	}
-	a.mu.Lock()
-	montado := a.montado
-	a.mu.Unlock()
-	s := &api.CoWStore{Path: a.dir, FS: a.fs, Mounted: montado}
-	if montado {
-		a.mu.Lock()
+	s := &api.CoWStore{Path: a.dir, FS: a.fs, Mounted: a.montado}
+	if s.Mounted {
 		s.Quota, s.NoQuota = a.cuota, a.cuota == ""
-		a.mu.Unlock()
+	}
+	a.mu.Unlock()
+	if s.Mounted {
 		if total, libre, err := a.libreEn(a.dir); err == nil {
 			s.SizeMiB, s.FreeMiB = total>>20, libre>>20
 		}
 	}
 	return s
+}
+
+// crecer amplía el almacén montado hasta nuevo bytes, o en añadir bytes: el
+// fichero (reservado, como al crearlo), su loop y el sistema de ficheros
+// (agrandar). No encoge. Pedir el tamaño que ya tiene el fichero repite solo
+// el loop y el sistema de ficheros: así se completa un crecimiento que se
+// quedó a medias. Deja en la raíz el mismo margen que al crearlo.
+func (a *almacenCoW) crecer(ctx context.Context, nuevo, añadir int64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.montado {
+		if !a.existe() {
+			return errors.New("there is no copy-on-write store yet: it is created on the first run -from")
+		}
+		return fmt.Errorf("the copy-on-write store %s is not mounted", a.dir)
+	}
+	if a.agrandar == nil {
+		return errors.New("growing the copy-on-write store is not supported here")
+	}
+	fi, err := os.Lstat(a.img)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", a.img)
+	}
+	actual := fi.Size()
+	if añadir > 0 {
+		nuevo = actual + añadir
+	}
+	nuevo &^= (1 << 20) - 1 // MiB enteros
+	if nuevo < actual {
+		return fmt.Errorf("the copy-on-write store already has %d MiB: it can't shrink", actual>>20)
+	}
+	if extra := nuevo - actual; extra > 0 {
+		_, libre, err := a.libreEn(a.root)
+		if err != nil {
+			return err
+		}
+		if extra > libre-margenRaizAlmacen {
+			return fmt.Errorf("growing the store by %d MiB doesn't fit: %d MiB free under the data root, and %d MiB must stay free",
+				extra>>20, libre>>20, int64(margenRaizAlmacen)>>20)
+		}
+	}
+	log.Printf("growing the copy-on-write store %s from %d to %d MiB", a.img, actual>>20, nuevo>>20)
+	return a.agrandar(ctx, a.img, a.dir, nuevo)
 }
 
 // Los sistemas de ficheros que sirven de almacén, en orden de preferencia, con
@@ -962,6 +1204,49 @@ func elegirFSAlmacen(filesystems string, hayMkfs func(string) bool) (string, err
 	return "", errors.New(strings.Join(falta, "; "))
 }
 
+// ordenCandidatos son los tipos con los que se puede crear un almacén nuevo en
+// este host, por preferencia: los que el núcleo ya lista y tienen mkfs, y
+// luego los que tienen mkfs y el núcleo aún no lista (se cargarían al
+// montar). Si el primero no monta, se prueba el siguiente (crearYMontar).
+func ordenCandidatos(filesystems string, hayMkfs func(string) bool) []string {
+	conoce := soportados(filesystems)
+	var primero, luego []string
+	for _, c := range fsAlmacen {
+		switch {
+		case !hayMkfs(c.mkfs):
+		case conoce[c.fs]:
+			primero = append(primero, c.fs)
+		default:
+			luego = append(luego, c.fs)
+		}
+	}
+	return append(primero, luego...)
+}
+
+// argsCrecerFS es el programa y los argumentos que agrandan en caliente el
+// sistema de ficheros montado en dir hasta llenar su dispositivo.
+func argsCrecerFS(fs, dir string) (string, []string) {
+	if fs == "btrfs" {
+		return "btrfs", []string{"filesystem", "resize", "max", dir}
+	}
+	return "xfs_growfs", []string{dir}
+}
+
+// nombreLoop dice si fuente es un /dev/loopN y devuelve "loopN".
+func nombreLoop(fuente string) (string, bool) {
+	n, ok := strings.CutPrefix(fuente, "/dev/")
+	num, ok2 := strings.CutPrefix(n, "loop")
+	if !ok || !ok2 || num == "" {
+		return "", false
+	}
+	for _, c := range num {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	return n, true
+}
+
 // ── montajes ──────────────────────────────────────────────────────────────────
 
 // montaje es una línea de /proc/self/mountinfo.
@@ -969,6 +1254,7 @@ type montaje struct {
 	punto  string
 	fstype string
 	opts   string // opciones del montaje y del superbloque, juntas
+	fuente string // el dispositivo (/dev/loop3), tras el tipo
 }
 
 // parsearMountinfo lee /proc/self/mountinfo. El punto de montaje es el campo 5
@@ -994,7 +1280,11 @@ func parsearMountinfo(r io.Reader) ([]montaje, error) {
 		if sep+3 < len(campos) {
 			opts += "," + campos[sep+3]
 		}
-		out = append(out, montaje{punto: desescaparMountinfo(campos[4]), fstype: campos[sep+1], opts: opts})
+		mt := montaje{punto: desescaparMountinfo(campos[4]), fstype: campos[sep+1], opts: opts}
+		if sep+2 < len(campos) {
+			mt.fuente = desescaparMountinfo(campos[sep+2])
+		}
+		out = append(out, mt)
 	}
 	return out, sc.Err()
 }

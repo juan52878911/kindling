@@ -44,10 +44,11 @@ vez de deducirlo de la versión. Un daemon anterior no envía la lista.
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
+| `GET /info` | versión, raíz, KVM, máquinas, versión del VMM (`firecracker`, por historia, también con `vz`), capacidades, `backend` (`firecracker` o `vz`, desde v0.9), `arch` (GOARCH del host), `share_roots` (desde v0.10), `cow` (modo de copia de discos de `run -from`: `setting`, `mode` `reflink`/`store`/`clonefile`/`copy`, `reason`, `pending`, `store` y `clones`; ver [cow.md](cow.md)) y `authz` (`enabled`, el `role` de quien pregunta y su `uid`; ver [authz.md](authz.md)). Contesta también a quien no tiene rol, sin contarle máquinas |
 | `GET /events` | flujo NDJSON de eventos (`machine.*`, `snapshot.committed`, `snapshot.annotated`, `store.updated`), con latido cada 30 s |
 | `GET /metrics` | métricas Prometheus en texto |
 | `GET /procstats` | memoria por microVM (PSS) y del host, en JSON |
+| `POST /cow/store/grow` | amplía en caliente el almacén de copias de disco (`size_mib`, el tamaño nuevo, o `add_mib`, cuánto añadir); devuelve el `store` como en `GET /info`. Solo admin; capacidad `cow-grow`. Ver [cow.md](cow.md#hacer-crecer-el-almacén) |
 
 ### Máquinas
 

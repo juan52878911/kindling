@@ -33,6 +33,32 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   y el fork de un grafo con un volumen en escritura; en solo lectura se ramifica.
   Receta para ramificar uno con volumen en escritura en
   [`docs/grafos.md`](docs/grafos.md).
+- **`kling info` ya no da el almacén por hecho antes de crearlo (#60).** Con
+  `daemon.cow=auto` decía `store (reflink inside kindling's XFS store)` antes de que el
+  almacén existiera o se hubiera probado. Ahora dice `store pending (created on first
+  use)` hasta el primer `run -from`, con qué almacén se creará y si el núcleo aún no
+  lista su sistema de ficheros (`GET /info` gana `cow.pending`). La falta de sitio para
+  el almacén se detecta al arrancar y deja el modo en `copy` con el motivo, que ahora sale
+  también en `kling info`.
+- **El almacén de copia al escribir crece, avisa cuando se llena y no deja imágenes
+  inservibles (#61).** `kling cow grow +8G` (o `32G`, el tamaño nuevo; `POST
+  /cow/store/grow`, solo admin, capacidad `cow-grow`) lo agranda en caliente: reserva el
+  fichero con `fallocate`, hace `LOOP_SET_CAPACITY` sobre su loop (comprobando en
+  `/sys/block/loopN/loop/backing_file` que es el suyo) y `xfs_growfs` o `btrfs
+  filesystem resize max`; no encoge y deja los 2 GiB de margen en la raíz. `kling info`
+  y `kling doctor` avisan pasado el 85 % de uso, y `kling cow` a secas enseña el estado.
+  Un `cow.xfs`/`cow.btrfs` recién creado que no monta o no clona se desmonta y se borra,
+  y se prueba con el otro tipo; al arrancar, uno que no monta y que ninguna máquina usa
+  se borra (se vuelve a crear en el primer `run -from`). Ver [`docs/cow.md`](docs/cow.md).
+
+- **macOS: `commit` clona el overlay en APFS (#62).** Copiaba el overlay disperso desde
+  el descriptor comprobado porque `cp -c /dev/fd/N` no clona; ahora usa
+  `fclonefileat(2)` desde ese mismo descriptor, por su número de llamada al sistema (sin
+  cgo ni `x/sys`). Sigue sin seguir la ruta del VMM: el clon se crea con su nombre (falla
+  si ya hay algo, enlace incluido), se abre relativo al directorio sin seguir enlaces y
+  se exige un fichero regular con un solo enlace, propio y del tamaño del origen. Fuera
+  de APFS (`ENOTSUP`) o entre volúmenes (`EXDEV`), copia dispersa como antes. Probado en
+  un M4: el dorado comparte los bloques físicos del overlay (`F_LOG2PHYS_EXT`).
 
 ### Grafos desde los plugins
 

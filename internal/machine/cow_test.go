@@ -132,10 +132,10 @@ func TestElegirFSAlmacen(t *testing.T) {
 // El montaje visible sobre el directorio del almacén tiene que ser de su tipo.
 func TestMontadoConTipo(t *testing.T) {
 	ms := []montaje{
-		{"/", "ext4", ""},
-		{"/var/lib/kindling/cow", "btrfs", ""},
-		{"/otra", "xfs", ""},
-		{"/otra", "tmpfs", ""}, // montado encima: es el visible
+		{"/", "ext4", "", ""},
+		{"/var/lib/kindling/cow", "btrfs", "", ""},
+		{"/otra", "xfs", "", ""},
+		{"/otra", "tmpfs", "", ""}, // montado encima: es el visible
 	}
 	if ok, err := montadoConTipo(ms, "/var/lib/kindling/cow", "btrfs"); !ok || err != nil {
 		t.Errorf("btrfs: %v %v", ok, err)
@@ -169,6 +169,7 @@ func TestNombreSeguro(t *testing.T) {
 // se monta y se copia entero.
 type almacenFalso struct {
 	creados, montajes, copias atomic.Int32
+	desmontajes               atomic.Int32
 	libre                     int64
 	falloMontar               error
 	falloClonar               error
@@ -217,6 +218,11 @@ func nuevoAlmacenFalso(t *testing.T, root string, f *almacenFalso) *almacenCoW {
 		copiar: func(_ context.Context, src, dst string) error {
 			f.copias.Add(1)
 			return copiar(src, dst)
+		},
+		desmontar: func(string) error {
+			f.desmontajes.Add(1)
+			f.montado = false
+			return nil
 		},
 		libreEn: func(string) (int64, int64, error) {
 			if f.libre == 0 {
@@ -432,9 +438,13 @@ func TestClonarOverlayInstanciaModos(t *testing.T) {
 	if info.Mode != cowModoCopy || info.Clones[cowModoCopy] != 1 || !strings.Contains(info.Reason, "store unavailable") {
 		t.Errorf("info: %+v", info)
 	}
-	// El almacén existe (se creó antes de fallar al clonar) y dice su tipo.
-	if info.Store == nil || info.Store.FS != "btrfs" {
+	// El almacén se creó, montó y no clonó: se desmonta y se borra, en vez de
+	// quedarse ocupando su reserva (#61).
+	if info.Store != nil {
 		t.Errorf("info.Store: %+v", info.Store)
+	}
+	if m2.alm.existe() {
+		t.Error("la imagen de un almacén que no clona se quedó")
 	}
 }
 

@@ -135,6 +135,14 @@ func (c *Client) Info(ctx context.Context) (*Info, error) {
 	return &i, c.do(ctx, http.MethodGet, "/info", nil, &i)
 }
 
+// GrowCoWStore amplía el almacén de copias de disco del daemon (capacidad
+// "cow-grow"). Va por c.long: reservar gigas y agrandar el sistema de
+// ficheros puede tardar.
+func (c *Client) GrowCoWStore(ctx context.Context, r GrowCoWStoreRequest) (*CoWStore, error) {
+	var st CoWStore
+	return &st, c.doWith(c.long, ctx, http.MethodPost, "/cow/store/grow", r, &st)
+}
+
 func (c *Client) List(ctx context.Context) ([]*Machine, error) {
 	var l []*Machine
 	return l, c.do(ctx, http.MethodGet, "/machines", nil, &l)
