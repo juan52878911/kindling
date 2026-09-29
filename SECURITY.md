@@ -636,6 +636,19 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   sobrevive a una restauración. Los mismos marcadores de credenciales se entregan a
   cada copia (el invitado los tiene en memoria), apuntados a su propio grafo; un nodo
   con credenciales que no son de sus aristas no se ramifica.
+- **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
+  RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
+  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`
+  de un nodo con aristas `credential` contiene los marcadores que el invitado tenía en
+  memoria (en su entorno, en la memoria de su aplicación). **No son las claves**: la
+  clave nunca entra al invitado ni al volcado, y la plantilla no se lleva ni el almacén
+  de credenciales del nodo ni su registro en el proxy. Un marcador solo vale en el proxy
+  de la máquina a la que se entregó y mientras siga registrado ahí; una instancia creada
+  con `run -from` de esa plantilla despierta con marcadores que su propio proxy no
+  conoce, así que son inertes (la conexión con ellos no recibe la clave). Aun así, la
+  plantilla es una foto de la memoria del invitado y se trata como tal: legible solo
+  por root y el grupo del VMM (como cualquier dorado), y a borrar cuando ya no haga
+  falta.
 - **Tormenta acotada.** 16 conexiones a la vez por arista (la siguiente se cierra en el
   acto), un solo despertar en vuelo por nodo y 64 conexiones esperándolo como mucho;
   por encima, rechazo y una línea `busy` en la auditoría. Un despertar que no cabe

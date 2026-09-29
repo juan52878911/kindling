@@ -98,6 +98,14 @@ la pausa. Si un volcado falla, se borran las plantillas hechas y se reanuda todo
 nodo congelado no se vuelca (despierta el grafo antes) y un nodo con volúmenes
 tampoco en esta versión (soltarlos pide hablar con el invitado, y pausado no contesta).
 
+Las plantillas de un snapshot son **persistentes**: no se borran con el grafo (`graph
+rm` solo quita las temporales de un fork); se quitan con `kling snapshot rm`. La de un
+nodo con aristas `credential` lleva en su memoria los **marcadores** que tenía el
+invitado, no las claves: ni la plantilla ni sus instancias reciben el almacén de
+credenciales del nodo, y un marcador solo sirve en el proxy de la máquina a la que se
+entregó. Una instancia arrancada de esa plantilla con `run -from` tiene marcadores
+inertes. Ver [SECURITY.md §15](../SECURITY.md#15-grafos-cada-arista-es-una-autorización-no-una-red).
+
 **Fork**: un snapshot consistente temporal y, por cada copia, un grafo nuevo con otro
 ID cuyos nodos arrancan de él. Las aristas se resuelven por (grafo, nodo): la `api`
 de una copia llega a la `db` de su copia y nunca a la del original, sin tocar nada
