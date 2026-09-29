@@ -96,13 +96,34 @@ type openEvent struct {
 		Text   string `json:"text"`
 		Reason string `json:"reason"`
 	} `json:"part"`
+	Error json.RawMessage `json:"error"`
+}
+
+// providerError es un fallo del proveedor que opencode informa con un evento
+// "error" (caída o límite de la API, plazo del proveedor...). Es lo único que
+// se reintenta: una herramienta o un permiso abortan sin más.
+type providerError struct{ msg string }
+
+func (e *providerError) Error() string {
+	return "the model provider failed (reported by opencode): " + e.msg
 }
 
 // Complete implementa Provider.
 func (o *OpenCode) Complete(ctx context.Context, system, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
+	text, err := o.attempt(ctx, system, prompt)
+	var pe *providerError
+	if errors.As(err, &pe) && ctx.Err() == nil {
+		// Fallos del proveedor intermitentes (visto con MiniMax): un reintento,
+		// dentro del mismo plazo total.
+		text, err = o.attempt(ctx, system, prompt)
+	}
+	return text, err
+}
 
+// attempt es una ejecución de opencode.
+func (o *OpenCode) attempt(ctx context.Context, system, prompt string) (string, error) {
 	dir, err := os.MkdirTemp("", "kling-db-ask-")
 	if err != nil {
 		return "", fmt.Errorf("creating the scratch directory: %w", err)
@@ -185,8 +206,10 @@ func parseOpenCode(r io.Reader) (string, error) {
 			if r := ev.Part.Reason; r != "" && r != "stop" {
 				return "", fmt.Errorf("opencode stopped with reason %q instead of an answer", clip(r, 40))
 			}
+		case "error":
+			return "", &providerError{msg: clip(strings.Join(strings.Fields(errorText(ev.Error)), " "), 300)}
 		default:
-			// tool_use, permisos, errores...: el modelo no debe usar nada.
+			// tool_use, permisos...: el modelo no debe usar nada.
 			return "", fmt.Errorf("opencode sent an unexpected %q event (tools and permissions are not allowed): aborted", clip(ev.Type, 40))
 		}
 	}
@@ -215,4 +238,40 @@ func (l *limitBuf) hint() string {
 		return ""
 	}
 	return ": " + clip(strings.Join(strings.Fields(s), " "), 300)
+}
+
+// errorText saca un mensaje legible del campo "error" de un evento de opencode
+// (un texto, o un objeto con data.message/message/name), sin caracteres de control.
+func errorText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "no details"
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil && str != "" {
+		return sinControl(str)
+	}
+	var obj struct {
+		Name    string `json:"name"`
+		Message string `json:"message"`
+		Data    struct {
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		for _, m := range []string{obj.Data.Message, obj.Message, obj.Name} {
+			if m != "" {
+				return sinControl(m)
+			}
+		}
+	}
+	return "no details"
+}
+
+func sinControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }

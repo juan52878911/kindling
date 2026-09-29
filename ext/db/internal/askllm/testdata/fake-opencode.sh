@@ -31,6 +31,21 @@ case "$FAKE_OC_MODE" in
     sleep 300 &
     echo $! > "$FAKE_OC_PIDFILE"
     sleep 300 ;;
+  provider)
+    # el proveedor falla siempre (con control en el mensaje, que no debe llegar)
+    echo "$start"
+    printf '%s\n' '{"type":"error","error":{"name":"APIError","data":{"message":"upstream\u001b[31m overloaded"}}}' ;;
+  provideronce)
+    # falla la primera vez y responde la segunda: el reintento lo arregla
+    if [ ! -e "$FAKE_OC_LOG.once" ]; then
+      : > "$FAKE_OC_LOG.once"
+      echo "$start"
+      printf '%s\n' '{"type":"error","error":"rate limited"}'
+    else
+      echo "$start"
+      printf '%s\n' '{"type":"text","part":{"type":"text","text":"SELECT 2"}}'
+      echo "$fin"
+    fi ;;
   notjson)
     echo "this is not json" ;;
   nofinish)

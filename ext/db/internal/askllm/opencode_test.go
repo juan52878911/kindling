@@ -2,6 +2,7 @@ package askllm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -202,5 +203,38 @@ func TestFake(t *testing.T) {
 	t.Setenv(EnvFake, filepath.Join(t.TempDir(), "nada"))
 	if _, err := Select("", "", 0); err == nil {
 		t.Fatal("missing fake file accepted")
+	}
+}
+
+// Un fallo del proveedor se informa con su mensaje (sin caracteres de control)
+// y, tras un reintento que también falla, se devuelve.
+func TestOpenCodeFalloDelProveedor(t *testing.T) {
+	o, _ := fakeOC(t, "provider")
+	_, err := o.Complete(context.Background(), "sys", "q")
+	var pe *providerError
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, quería un providerError", err)
+	}
+	if !strings.Contains(err.Error(), "upstream") || !strings.Contains(err.Error(), "overloaded") || strings.ContainsRune(err.Error(), 0x1b) {
+		t.Fatalf("mensaje = %q", err)
+	}
+}
+
+// Un fallo intermitente del proveedor se arregla con el reintento.
+func TestOpenCodeReintentaUnaVez(t *testing.T) {
+	o, _ := fakeOC(t, "provideronce")
+	got, err := o.Complete(context.Background(), "sys", "q")
+	if err != nil || strings.TrimSpace(got) != "SELECT 2" {
+		t.Fatalf("got %q, err %v", got, err)
+	}
+}
+
+// Una herramienta NO se reintenta: aborta a la primera.
+func TestOpenCodeHerramientaNoSeReintenta(t *testing.T) {
+	o, _ := fakeOC(t, "tool")
+	_, err := o.Complete(context.Background(), "sys", "q")
+	var pe *providerError
+	if err == nil || errors.As(err, &pe) {
+		t.Fatalf("err = %v, quería un aborto que no sea providerError", err)
 	}
 }
