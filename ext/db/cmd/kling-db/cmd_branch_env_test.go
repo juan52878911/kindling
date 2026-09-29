@@ -33,6 +33,23 @@ func TestHookRechazaHooksPathFuera(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".husky", hookName)); err == nil {
 		t.Error("the hook was written anyway")
 	}
+	// El propio directorio git: cuelga de él (rel == ".") pero no es un
+	// directorio de hooks.
+	gitT(t, dir, "config", "core.hooksPath", ".git")
+	if err := ta.branchHook(ctx, "install"); err == nil || !strings.Contains(err.Error(), "git directory itself") {
+		t.Fatalf("hooksPath = .git: err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", hookName)); err == nil {
+		t.Error("the hook was written into the git directory anyway")
+	}
+	// Un subdirectorio del directorio git sí vale (el de siempre).
+	gitT(t, dir, "config", "core.hooksPath", filepath.Join(".git", "hooks-kling"))
+	if err := ta.branchHook(ctx, "install"); err != nil {
+		t.Fatalf("hooksPath = .git/hooks-kling: %v", err)
+	}
+	if err := ta.branchHook(ctx, "uninstall"); err != nil {
+		t.Fatal(err)
+	}
 	// Fuera del repo.
 	out := filepath.Join(t.TempDir(), "global-hooks")
 	gitT(t, dir, "config", "core.hooksPath", out)

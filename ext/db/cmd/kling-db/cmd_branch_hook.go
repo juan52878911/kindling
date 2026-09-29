@@ -89,7 +89,15 @@ func (a *app) hookFueraDelGit(ctx context.Context, dir string) error {
 	if err != nil {
 		return err
 	}
-	if rel, err := filepath.Rel(base, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, err := filepath.Rel(base, d)
+	if err == nil && rel == "." {
+		// El propio directorio git no es un directorio de hooks: el hook
+		// quedaría junto a config, HEAD y los objetos (core.hooksPath=.git).
+		return fmt.Errorf("the hooks directory %s is the git directory itself (core.hooksPath points at it): "+
+			"it must be a subdirectory such as %s; use -force to install it there anyway (kling db branch -force hook install)",
+			dir, filepath.Join(base, "hooks"))
+	}
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil
 	}
 	return fmt.Errorf("the hooks directory %s is outside the git directory %s (core.hooksPath points into the working tree or outside the repo): "+

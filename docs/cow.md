@@ -27,17 +27,18 @@ sudo systemctl restart kling                # se lee al arrancar el daemon
 
 | `daemon.cow` | Qué hace |
 |---|---|
-| `auto` | Si la raíz de datos clona (FICLONE funciona entre `snapshots/` y `machines/`), reflink nativo. Si no, el almacén propio, si el host puede tenerlo (root, `/dev/loop-control`, `mkfs.xfs`). Si tampoco, la copia completa de siempre, con un aviso en el log y en `kling doctor`. |
+| `auto` | Si la raíz de datos clona (FICLONE funciona entre `snapshots/` y `machines/`), reflink nativo. Si no, el almacén propio, si el host puede tenerlo (root, `/dev/loop-control` y `mkfs.xfs`, o `mkfs.btrfs` donde el núcleo no tiene XFS). Si tampoco, la copia completa de siempre, con un aviso en el log y en `kling doctor`. |
 | `reflink-store` | El almacén propio aunque la raíz clone. Si no se puede, copia completa (con aviso). |
 | `off` | La copia completa de siempre. |
 
 El modo en uso se ve en `kling info`:
 
 ```
-disk clones:  store (reflink inside kindling's XFS store)  [daemon.cow=auto]; store /var/lib/kindling/cow: 15870 of 16384 MiB free; since start: store 32
+disk clones:  store (reflink inside kindling's XFS store)  [daemon.cow=auto]; store /var/lib/kindling/cow (XFS): 15870 of 16384 MiB free; since start: store 32
 ```
 
-y en `GET /info` (campo `cow`: `setting`, `mode`, `reason`, `store` y `clones`, que
+y en `GET /info` (campo `cow`: `setting`, `mode`, `reason`, `store` —con `fs`, `xfs` o
+`btrfs`— y `clones`, que
 cuenta desde el arranque cuántas instancias recibieron su overlay de cada forma).
 `kling doctor` avisa si las instancias copian el disco entero sin que nadie haya
 puesto `off`, o si hay un almacén que no está montado.
@@ -60,7 +61,9 @@ XFS formateado sin reflink no clona, y un Btrfs sí.
 
 La raíz no tiene reflink (ext4, el caso del laboratorio). kindling crea **la primera
 vez que hace falta** (el primer `run -from` en ese modo) un fichero `$root/cow.xfs`, lo
-formatea XFS con reflink y lo monta por loop en `$root/cow`:
+formatea XFS con reflink y lo monta por loop en `$root/cow`. Si el núcleo no tiene XFS
+pero sí Btrfs, el fichero es `$root/cow.btrfs` y se formatea Btrfs (ver
+[Btrfs](#btrfs-en-lugar-de-xfs)); todo lo demás es igual:
 
 ```
 /var/lib/kindling/
@@ -76,7 +79,7 @@ formatea XFS con reflink y lo monta por loop en `$root/cow`:
   esa base. La base se identifica por dispositivo, inodo, tamaño y fecha del overlay
   del dorado: si el dorado se reemplaza (`commit -replace`), la siguiente instancia
   crea una base nueva y la vieja se borra (sus bloques siguen vivos en las instancias
-  que se clonaron de ella; XFS cuenta las referencias).
+  que se clonaron de ella; XFS y Btrfs cuentan las referencias).
 - **La base se escribe a un temporal, se sincroniza y se renombra**: una base a medias
   no puede quedar con su nombre definitivo, porque de ella se clonarían instancias
   corruptas para siempre.
@@ -88,11 +91,45 @@ formatea XFS con reflink y lo monta por loop en `$root/cow`:
   `daemon.cow=off` después no las deja tiradas.
 - **Lleno**: si quedan menos de 256 MiB libres dentro del almacén, la instancia nueva
   recibe una copia completa en la raíz, como antes. Si el almacén no se puede crear o
-  montar (no hay módulo `xfs`, el contenedor no deja montar), el daemon vuelve a copiar
-  hasta que se reinicie, y lo dice una vez en el log.
+  montar (ni `xfs` ni `btrfs` en el núcleo, el contenedor no deja montar), el daemon
+  vuelve a copiar hasta que se reinicie, y lo dice una vez en el log.
 - **Limpieza**: `kling rm` borra el directorio de la instancia en el almacén. El
   vigilante barre lo que quede sin máquina (un `run -from` que falló, un directorio
   huérfano) y las bases de dorados que ya no existen.
+
+### Btrfs en lugar de XFS
+
+El núcleo de Proxmox (6.17) visto desde un contenedor LXC no tiene el módulo `xfs` y el
+contenedor no puede cargarlo; `btrfs` sí está (medido en el laboratorio: un Btrfs por
+loop clona 100 MiB con `cp --reflink=always` en 5 ms). El almacén elige su sistema de
+ficheros así:
+
+1. Si ya existe `$root/cow.xfs` o `$root/cow.btrfs`, ese: un almacén no cambia de tipo.
+2. Si no, el primero que el núcleo lista en `/proc/filesystems` **y** cuyo `mkfs` está
+   instalado, XFS antes que Btrfs.
+3. Si el núcleo no lista ninguno de los dos (módulo sin cargar; se cargaría al montar),
+   el primero cuyo `mkfs` esté instalado.
+4. Si nada de eso, no hay almacén, y el motivo (qué instalar) sale en `kling info` y
+   `kling doctor`.
+
+Btrfs se formatea con `mkfs.btrfs -K -m single -d single -L kling-cow` y se monta con
+`loop,nodev,nosuid,noexec,nodiscard`:
+
+- **`-m single -d single`**: un solo dispositivo. DUP duplicaría los metadatos dentro
+  del mismo fichero, sin proteger de nada que el disco de debajo no cubra. Sin modo
+  mixto: el almacén mide al menos 1 GiB.
+- **`-K` y `nodiscard`**: desde Linux 6.2 Btrfs monta con `discard=async` si el
+  dispositivo lo admite, y un loop lo admite **agujereando el fichero de debajo**. El
+  almacén dejaría de estar reservado y podría quedarse sin sitio debajo, que es justo lo
+  que la reserva con `fallocate` evita. Lo mismo en el formateo.
+- Todo lo demás es idéntico: reserva entera, temporal + rename durable, comprobación
+  del montaje por ruta canónica y **tipo** (un Btrfs montado donde se espera el XFS, o
+  al revés, no es el almacén), prueba de FICLONE real dentro del almacén antes de
+  usarlo, y vuelta a la copia completa con un único aviso si algo falla.
+
+Hay un test con un Btrfs de verdad (`TestAlmacenBtrfsDeVerdad`, root y
+`KLING_TEST_MOUNTS=1`): crea el almacén, comprueba que sigue reservado entero y
+montado sin discard, y clona dos instancias.
 
 ### copy
 
@@ -130,7 +167,7 @@ Se evaluaron tres. El criterio: seguridad, luego sencillez, luego eficiencia; si
 cambiar el sistema de ficheros del host ni el formato de las imágenes; y que en hosts
 con XFS o Btrfs no haga falta nada.
 
-### (a) Almacén XFS con reflink en un fichero, montado por loop — **elegida**
+### (a) Almacén XFS (o Btrfs) con reflink en un fichero, montado por loop — **elegida**
 
 - **Requisitos**: root (el daemon ya lo es), loop (el daemon ya monta imágenes por
   loop para construirlas y ampliarlas), `mkfs.xfs` (xfsprogs) y el módulo `xfs` del
@@ -152,7 +189,8 @@ con XFS o Btrfs no haga falta nada.
   no rompe a nadie (XFS cuenta referencias).
 - **LXC privilegiado** (el laboratorio): los montajes por loop ya funcionan ahí (el
   daemon los usa); XFS necesita el módulo en el núcleo del anfitrión Proxmox, que lo
-  trae. Si el perfil de AppArmor del contenedor no deja montar XFS, el primer
+  trae, pero el contenedor no puede cargarlo si no está ya cargado: ahí el almacén es
+  Btrfs (arriba). Si el perfil de AppArmor del contenedor no deja montar, el primer
   `run -from` lo descubre y el daemon vuelve a copiar, avisando.
 - **XFS/Btrfs**: `auto` usa el reflink nativo y no crea nada.
 
@@ -191,6 +229,14 @@ seguridad de los otros dos modos.
   `machines/<id>`.
 - `commit` de una instancia del almacén copia su overlay entero al snapshot (el dorado
   vive en la raíz, fuera del almacén). Con reflink nativo, `commit` también clona.
+- `commit` (y `fork` y `graph snapshot`, que pasan por él) lee el overlay de la
+  instancia **por el descriptor que comprobó**, nunca volviendo a abrir la ruta: el
+  overlay es del VMM, que podría cambiarlo por un enlace entre la comprobación y la
+  copia. La copia es FICLONE entre descriptores o, si no, una copia dispersa en Go
+  (`SEEK_DATA`/`SEEK_HOLE` y sin escribir los bloques a cero, como
+  `cp --sparse=always`). En macOS eso significa que el overlay de un `commit` se copia
+  en vez de clonarse (no hay `clonefile` desde un descriptor sin cgo); las instancias
+  siguen clonando del dorado.
 - `DiskBytes` de `kling ps` no cuenta el overlay del almacén (sus bloques son
   compartidos: sumarlos por instancia mentiría). El uso real está en `kling info`.
 
@@ -200,7 +246,7 @@ Con el daemon parado y sin microVMs vivas:
 
 ```sh
 sudo umount /var/lib/kindling/cow
-sudo rm /var/lib/kindling/cow.xfs     # borra los overlays de las instancias que lo usaban
+sudo rm /var/lib/kindling/cow.xfs     # o cow.btrfs; borra los overlays de las instancias que lo usaban
 ```
 
 Las instancias que tenían su overlay en el almacén no podrán arrancar después: bórralas

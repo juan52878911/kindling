@@ -40,10 +40,11 @@ func TestFijarOverlayParaLeer(t *testing.T) {
 	if err := os.WriteFile(ok, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tras, err := fijarOverlayParaLeer(ok)
+	f, tras, err := fijarOverlayParaLeer(ok)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 	if err := tras(); err != nil {
 		t.Errorf("sin cambios: %v", err)
 	}
@@ -66,12 +67,98 @@ func TestFijarOverlayParaLeer(t *testing.T) {
 	if err := os.Symlink(secreto, enlace); err != nil {
 		t.Skip(err)
 	}
-	if _, err := fijarOverlayParaLeer(enlace); err == nil {
+	if _, _, err := fijarOverlayParaLeer(enlace); err == nil {
 		t.Error("siguió un enlace simbólico")
 	}
 	// Un directorio no es un overlay.
-	if _, err := fijarOverlayParaLeer(d); err == nil {
+	if _, _, err := fijarOverlayParaLeer(d); err == nil {
 		t.Error("aceptó un directorio")
+	}
+}
+
+// El ataque: el VMM cambia el overlay por un enlace a un fichero de root
+// DESPUÉS de la comprobación y lo devuelve a su sitio antes de la
+// comprobación final. La copia sale del descriptor comprobado, así que el
+// dorado tiene el overlay y no el otro fichero, aunque tras() pase.
+func TestCopiarOverlayDesdeDescriptorNoSigueLaRuta(t *testing.T) {
+	d := t.TempDir()
+	ruta := filepath.Join(d, "overlay.ext4")
+	if err := os.WriteFile(ruta, []byte("overlay de verdad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secreto := filepath.Join(d, "shadow")
+	if err := os.WriteFile(secreto, []byte("SECRETO DE ROOT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, tras, err := fijarOverlayParaLeer(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	// Entre la comprobación y la copia: la ruta pasa a ser un enlace.
+	aparte := filepath.Join(d, "aparte")
+	if err := os.Rename(ruta, aparte); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secreto, ruta); err != nil {
+		t.Skip(err)
+	}
+	m := &Manager{}
+	dst := filepath.Join(d, "dorado.ext4")
+	cedido := false
+	own := func(*os.File) error { cedido = true; return nil }
+	if _, err := m.copiarOverlayDesde(context.Background(), f, dst, own); err != nil {
+		t.Fatal(err)
+	}
+	// Y se deja todo como estaba antes de la comprobación final.
+	if err := os.Remove(ruta); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(aparte, ruta); err != nil {
+		t.Fatal(err)
+	}
+	if err := tras(); err != nil {
+		t.Fatalf("la ruta vuelve a ser el mismo fichero: %v", err)
+	}
+	b, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "overlay de verdad" {
+		t.Errorf("el dorado tiene %q: se copió por ruta", b)
+	}
+	if !cedido {
+		t.Error("no cedió el fichero creado")
+	}
+}
+
+// El destino puede estar en un directorio del VMM (el jail): un enlace
+// plantado en su lugar no se sigue, ni para escribir ni para ceder.
+func TestCopiarOverlayDesdeNoEscribeEnUnEnlace(t *testing.T) {
+	d := t.TempDir()
+	src := filepath.Join(d, "overlay.ext4")
+	if err := os.WriteFile(src, []byte("overlay"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	victima := filepath.Join(d, "victima")
+	if err := os.WriteFile(victima, []byte("intacto"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(d, "dorado.ext4")
+	if err := os.Symlink(victima, dst); err != nil {
+		t.Skip(err)
+	}
+	f, _, err := fijarOverlayParaLeer(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	m := &Manager{}
+	if _, err := m.copiarOverlayDesde(context.Background(), f, dst, nil); err == nil {
+		t.Error("escribió a través de un enlace")
+	}
+	if b, _ := os.ReadFile(victima); string(b) != "intacto" {
+		t.Errorf("la víctima tiene %q", b)
 	}
 }
 

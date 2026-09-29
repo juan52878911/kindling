@@ -4,6 +4,7 @@ package net
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -60,7 +61,7 @@ func TestComprobacionDe(t *testing.T) {
 func TestReglasDeGrafoNoSalenDelVeth(t *testing.T) {
 	n := Plan(5, "abcdef0123456789")
 	for _, e := range []Egress{EgressNone, EgressInternet} {
-		reglas := append(n.reglasGrafo(e), n.reglasEnlace(8080, 0)...)
+		reglas := append(n.reglasGrafo(e, true), n.reglasEnlace(8080, 0)...)
 		for _, r := range reglas {
 			l := strings.Join(r, " ")
 			if strings.Contains(l, "DNAT") && !strings.Contains(l, "--to-destination "+n.HostIP+":") {
@@ -77,5 +78,42 @@ func TestReglasDeGrafoNoSalenDelVeth(t *testing.T) {
 	enl := strings.Join(n.reglasEnlace(8080, 3)[0], " ")
 	if !strings.Contains(enl, "-I PREROUTING 1") || !strings.Contains(enl, "--dport 8080") || !strings.HasSuffix(enl, n.HostIP+":5403") {
 		t.Errorf("DNAT de enlace inesperado: %s", enl)
+	}
+}
+
+// Un nodo con solo aristas link no recibe los DNAT ni los ACCEPT de los
+// proxies de credenciales (el de Postgres se lleva todo el TCP a n.HostIP);
+// uno con una arista credential, sí. El DNS va siempre.
+func TestReglasGrafoCredencialesSoloConArista(t *testing.T) {
+	n := Plan(5, "abcdef0123456789")
+	proxies := func(reglas [][]string) (pg, http int) {
+		for _, r := range reglas {
+			l := strings.Join(r, " ")
+			if strings.Contains(l, fmt.Sprintf("%s:%d", n.HostIP, pgPort)) || strings.Contains(l, "--dport "+pgPortStr) {
+				pg++
+			}
+			if strings.Contains(l, fmt.Sprintf("%s:%d", n.HostIP, credPort)) || strings.Contains(l, "--dport "+credPortStr) {
+				http++
+			}
+		}
+		return
+	}
+	for _, e := range []Egress{EgressNone, EgressInternet} {
+		sin := n.reglasGrafo(e, false)
+		if pg, http := proxies(sin); pg != 0 || http != 0 {
+			t.Errorf("%s sin arista credential: %d reglas de Postgres y %d del proxy HTTP", e, pg, http)
+		}
+		dns := 0
+		for _, r := range sin {
+			if strings.Contains(strings.Join(r, " "), "--dport 53 ") {
+				dns++
+			}
+		}
+		if dns != 2 {
+			t.Errorf("%s: el DNS al resolver tiene que seguir (%d reglas)", e, dns)
+		}
+		if pg, http := proxies(n.reglasGrafo(e, true)); pg != 2 || http != 3 {
+			t.Errorf("%s con arista credential: %d reglas de Postgres (quería DNAT y ACCEPT) y %d del HTTP", e, pg, http)
+		}
 	}
 }

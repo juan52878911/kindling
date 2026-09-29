@@ -291,24 +291,23 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
 	srcOverlay := m.overlayParaLeer(mc.ID)
-	// El overlay lo escribe el VMM: se abre sin seguir enlaces y se comprueba
-	// sobre el descriptor que es un fichero regular, antes y después de copiar.
-	tras, err := fijarOverlayParaLeer(srcOverlay)
+	// El overlay lo escribe el VMM: se abre sin seguir enlaces, se comprueba
+	// sobre el descriptor que es un fichero regular y se copia DESDE ese
+	// descriptor, sin volver a abrir la ruta (ver fijarOverlayParaLeer). El
+	// destino se crea y se cede también por descriptor: en el jail está en un
+	// directorio del VMM.
+	origen, tras, err := fijarOverlayParaLeer(srcOverlay)
 	if err != nil {
 		return nil, fmt.Errorf("copying overlay: %w", err)
 	}
-	if out, err := m.copiarOverlay(ctx, srcOverlay, goldDst); err != nil {
-		return nil, fmt.Errorf("copying overlay: %v: %s", err, out)
+	goldFI, err := m.copiarOverlayDesde(ctx, origen, goldDst, m.priv.OwnFile)
+	origen.Close()
+	if err != nil {
+		return nil, fmt.Errorf("copying overlay: %w", err)
 	}
 	if err := tras(); err != nil {
 		_ = os.Remove(goldDst)
 		return nil, fmt.Errorf("copying overlay: %w", err)
-	}
-	// La copia la crea el daemon (root) pero quien va a abrirla es el VMM, que
-	// corre sin privilegios. Sin ceder el fichero, el reapuntado falla con
-	// "Permission denied".
-	if err := m.priv.Own(goldDst); err != nil {
-		return nil, err
 	}
 
 	// CLAVE: se reapunta el disco a la copia dorada ANTES de volcar, para que el
@@ -332,6 +331,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
 				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
 			}
+		}
+		// El overlay dorado estuvo en un directorio del VMM: lo que se recupera
+		// tiene que ser el fichero que copió el daemon, no un enlace ni otro
+		// fichero puesto en su lugar (de él se clonarán todas las instancias).
+		if fi, err := os.Lstat(goldOverlay); err != nil || !fi.Mode().IsRegular() || !os.SameFile(fi, goldFI) {
+			return nil, fmt.Errorf("recovering overlay.ext4 from jail: it is not the golden copy the daemon wrote")
 		}
 	}
 	// Se devuelve el disco propio y se reanuda YA: la plantilla no debe escribir

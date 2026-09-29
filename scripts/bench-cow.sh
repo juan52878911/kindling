@@ -5,7 +5,7 @@
 # For each mode in MODES it restarts the daemon with KLING_COW=<mode>, then for
 # each N in COUNTS creates N instances of the golden GOLD one after another
 # (`kling run -from`), timing each one and measuring how much disk they took
-# (the data root plus, in store mode, the inside of kindling's XFS store), and
+# (the data root plus, in store mode, the inside of kindling's XFS or Btrfs store), and
 # removes them before the next round.
 #
 #   sudo GOLD=my-golden ./bench-cow.sh

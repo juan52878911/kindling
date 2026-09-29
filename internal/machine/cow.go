@@ -16,9 +16,9 @@ package machine
 //     que comparte los bloques del dorado hasta que alguno escribe. Coste
 //     constante, sin nada que montar.
 //   - store: la raíz no tiene reflink (ext4). kindling monta por loop un
-//     fichero XFS propio ($root/cow.xfs en $root/cow) y guarda ahí, una vez por
-//     dorado, una copia "base" de su overlay; cada instancia es un FICLONE de
-//     esa base. El overlay de la instancia vive en $root/cow/m/<id>/ y
+//     fichero propio con reflink ($root/cow.xfs, o $root/cow.btrfs donde el
+//     núcleo no tiene XFS, en $root/cow) y guarda ahí, una vez por dorado, una
+//     copia "base" de su overlay; cada instancia es un FICLONE de esa base. El overlay de la instancia vive en $root/cow/m/<id>/ y
 //     machines/<id>/overlay.ext4 es un enlace simbólico a él: el resto del
 //     daemon sigue abriendo la ruta de siempre.
 //   - copy: lo de antes.
@@ -79,7 +79,7 @@ func decidirCoW(pedido string, nativo bool, errAlmacen error) (modo, motivo stri
 		return cowModoCopy, "daemon.cow is off: every instance copies its golden overlay"
 	case CoWStore:
 		if errAlmacen == nil {
-			return cowModoStore, "daemon.cow=reflink-store: overlays are reflinked inside kindling's XFS store"
+			return cowModoStore, "daemon.cow=reflink-store: overlays are reflinked inside kindling's copy-on-write store"
 		}
 		return cowModoCopy, fmt.Sprintf("daemon.cow=reflink-store, but the store is unavailable (%v): copying overlays", errAlmacen)
 	case "", CoWAuto:
@@ -87,9 +87,9 @@ func decidirCoW(pedido string, nativo bool, errAlmacen error) (modo, motivo stri
 			return cowModoReflink, "the data root supports reflink (FICLONE): overlays share blocks with their golden"
 		}
 		if errAlmacen == nil {
-			return cowModoStore, "no reflink on the data root: overlays are reflinked inside kindling's XFS store"
+			return cowModoStore, "no reflink on the data root: overlays are reflinked inside kindling's copy-on-write store"
 		}
-		return cowModoCopy, fmt.Sprintf("no reflink on the data root and no XFS store (%v): copying overlays", errAlmacen)
+		return cowModoCopy, fmt.Sprintf("no reflink on the data root and no copy-on-write store (%v): copying overlays", errAlmacen)
 	}
 	return cowModoCopy, fmt.Sprintf("unknown daemon.cow %q: copying overlays", pedido)
 }
@@ -274,31 +274,88 @@ func rutaCanonica(p string) string {
 }
 
 // fijarOverlayParaLeer abre ruta con O_NOFOLLOW y comprueba con Fstat, sobre el
-// descriptor ya abierto y no por ruta, que es un fichero regular. El VMM puede
-// haber cambiado el overlay por un enlace simbólico a un fichero de root entre
-// que se eligió la ruta y que se copia: un Lstat previo no lo evita. Devuelve
-// una función que hay que llamar tras la copia: comprueba que la ruta sigue
-// siendo el mismo fichero, y si no, la copia se descarta.
-func fijarOverlayParaLeer(ruta string) (func() error, error) {
+// descriptor ya abierto y no por ruta, que es un fichero regular. Devuelve el
+// fichero ABIERTO: la copia se hace desde ese descriptor (copiarOverlayDesde),
+// nunca volviendo a abrir la ruta. El VMM es dueño del overlay y puede cambiarlo
+// por un enlace simbólico a un fichero de root entre la comprobación y la
+// copia, y dejarlo como estaba después; una copia por ruta se llevaría al
+// dorado el otro fichero y ninguna comprobación posterior lo vería. El
+// descriptor sigue apuntando al inodo que se comprobó, pase lo que pase con la
+// ruta.
+//
+// La función que devuelve, a llamar tras la copia, mira además que la ruta
+// siga siendo el mismo fichero: ya no es lo que protege la copia, pero un
+// overlay cambiado a mitad de un commit es un dorado que no corresponde a la
+// memoria volcada, y se descarta.
+func fijarOverlayParaLeer(ruta string) (*os.File, func() error, error) {
 	f, err := os.OpenFile(ruta, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, fmt.Errorf("opening the overlay %s: %w", ruta, err)
+		return nil, nil, fmt.Errorf("opening the overlay %s: %w", ruta, err)
 	}
-	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, err
+		f.Close()
+		return nil, nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("the overlay %s is not a regular file", ruta)
+		f.Close()
+		return nil, nil, fmt.Errorf("the overlay %s is not a regular file", ruta)
 	}
-	return func() error {
+	return f, func() error {
 		ahora, err := os.Lstat(ruta)
 		if err != nil || !ahora.Mode().IsRegular() || !os.SameFile(fi, ahora) {
 			return fmt.Errorf("the overlay %s changed while it was being copied", ruta)
 		}
 		return nil
 	}, nil
+}
+
+// copiarOverlayDesde copia en dst el overlay abierto en in (ver
+// fijarOverlayParaLeer): con FICLONE si el modo es reflink, y si no (o si
+// falla) con una copia dispersa en Go. Todo va por descriptores: se lee del
+// que se comprobó y se escribe en un dst creado con O_EXCL|O_NOFOLLOW, porque
+// dst puede estar en un directorio del VMM (el jail de la plantilla) y un
+// enlace plantado ahí haría que root escribiera, o cediera, otro fichero. Si
+// own no es nil se aplica al fichero creado, también por su descriptor, y no
+// con un chown por ruta que seguiría un enlace. Devuelve la identidad del
+// fichero creado, para comprobar después que el que se recupera es este.
+//
+// macOS pierde aquí el clonefile de `cp -c`: no hay clonefile desde un
+// descriptor sin cgo (fclonefileat no está en syscall). El commit copia; las
+// instancias (runFrom) siguen clonando desde el dorado, que es del daemon.
+func (m *Manager) copiarOverlayDesde(ctx context.Context, in *os.File, dst string, own func(*os.File) error) (os.FileInfo, error) {
+	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fallo := func(err error) (os.FileInfo, error) {
+		out.Close()
+		_ = os.Remove(dst)
+		return nil, err
+	}
+	clonado := false
+	if m.cow.actual() == cowModoReflink {
+		clonado = clonarDescriptor(in, out) == nil
+	}
+	if !clonado {
+		if err := copiarDisperso(ctx, in, out); err != nil {
+			return fallo(err)
+		}
+	}
+	if own != nil {
+		if err := own(out); err != nil {
+			return fallo(err)
+		}
+	}
+	fi, err := out.Stat()
+	if err != nil {
+		return fallo(err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return nil, err
+	}
+	return fi, nil
 }
 
 // borrarOverlayAlmacen quita del almacén el overlay de una máquina que se
@@ -344,14 +401,16 @@ var errAlmacenNoDisponible = errors.New("store unavailable")
 // Por debajo, la instancia va a una copia completa en la raíz, como antes.
 const libreMinimaAlmacen = 256 << 20
 
-// almacenCoW es el almacén propio: un XFS con reflink en un fichero, montado
-// por loop dentro de la raíz de kindling. Todo lo que toca el sistema (crear
+// almacenCoW es el almacén propio: un XFS con reflink (o un Btrfs, ver
+// elegirFSAlmacen) en un fichero, montado por loop dentro de la raíz de
+// kindling. Todo lo que toca el sistema (crear
 // el fichero, formatear, montar, clonar) va por funciones que pone la
 // plataforma, para poder probar la lógica sin root.
 type almacenCoW struct {
 	mu   sync.Mutex
 	root string // $root
-	img  string // $root/cow.xfs
+	fs   string // "xfs" o "btrfs"
+	img  string // $root/cow.xfs o $root/cow.btrfs
 	dir  string // $root/cow (punto de montaje)
 	priv *Privileges
 	// viva dice si la máquina id existe (o se está creando): un directorio de
@@ -360,6 +419,7 @@ type almacenCoW struct {
 
 	montado  bool
 	errFatal error // la preparación falló: no se reintenta hasta reiniciar
+	errFS    error // no hay sistema de ficheros para crear el almacén (fsDelAlmacen)
 
 	// Operaciones del sistema, de la plataforma (cow_fc.go) o de un test.
 	estaMontado func(dir string) (bool, error)
@@ -457,7 +517,8 @@ func (a *almacenCoW) disponer() error {
 }
 
 // probar clona un fichero pequeño dentro del almacén. Un XFS formateado sin
-// reflink (xfsprogs muy viejo) se montaría igual y aquí se ve.
+// reflink (xfsprogs muy viejo) se montaría igual y aquí se ve; y es lo que
+// demuestra que el Btrfs clona dentro de este núcleo y este contenedor.
 func (a *almacenCoW) probar() error {
 	dir := filepath.Join(a.dir, "bases")
 	src := filepath.Join(dir, fmt.Sprintf(".probe-%d", time.Now().UnixNano()))
@@ -507,8 +568,9 @@ func (a *almacenCoW) preparar(ctx context.Context, gib int) error {
 
 // tamAlmacen es cuánto reservar para el almacén: lo pedido, o una cuarta
 // parte del disco libre con un máximo de 16 GiB. Se reserva entero
-// (fallocate): un XFS sobre un fichero disperso que se queda sin sitio debajo
-// recibe errores de E/S y se apaga, con todas sus instancias dentro. Mejor
+// (fallocate): un XFS o un Btrfs sobre un fichero disperso que se queda sin
+// sitio debajo recibe errores de E/S y se apaga (o pasa a solo lectura), con
+// todas sus instancias dentro. Mejor
 // una cuota fija que un almacén que puede romperse por algo que hace otro.
 func tamAlmacen(libre int64, gib int) (int64, error) {
 	const margen = 2 << 30 // lo que se deja libre en la raíz, como minFreeDiskMiB
@@ -573,8 +635,8 @@ func (a *almacenCoW) base(ctx context.Context, snap, src string) (string, error)
 		return "", err
 	}
 	// Las bases de versiones anteriores de este dorado sobran. Sus bloques
-	// siguen vivos en las instancias que se clonaron de ellas: XFS cuenta las
-	// referencias.
+	// siguen vivos en las instancias que se clonaron de ellas: XFS y Btrfs
+	// cuentan las referencias.
 	if entradas, err := os.ReadDir(dir); err == nil {
 		for _, e := range entradas {
 			if e.Name() != filepath.Base(ruta) {
@@ -716,13 +778,78 @@ func (a *almacenCoW) info() *api.CoWStore {
 	a.mu.Lock()
 	montado := a.montado
 	a.mu.Unlock()
-	s := &api.CoWStore{Path: a.dir, Mounted: montado}
+	s := &api.CoWStore{Path: a.dir, FS: a.fs, Mounted: montado}
 	if montado {
 		if total, libre, err := a.libreEn(a.dir); err == nil {
 			s.SizeMiB, s.FreeMiB = total>>20, libre>>20
 		}
 	}
 	return s
+}
+
+// Los sistemas de ficheros que sirven de almacén, en orden de preferencia, con
+// su programa de formateo y el nombre de su fichero de imagen. XFS primero: es
+// el que se probó a fondo y el que ya tienen los almacenes existentes. Btrfs
+// es para núcleos sin XFS, como el de Proxmox visto desde un contenedor LXC
+// (que no puede cargar módulos).
+var fsAlmacen = []struct{ fs, mkfs, paquete, img string }{
+	{"xfs", "mkfs.xfs", "xfsprogs", "cow.xfs"},
+	{"btrfs", "mkfs.btrfs", "btrfs-progs", "cow.btrfs"},
+}
+
+// imgAlmacen es el nombre del fichero de imagen del almacén de tipo fs.
+func imgAlmacen(fs string) string {
+	for _, c := range fsAlmacen {
+		if c.fs == fs {
+			return c.img
+		}
+	}
+	return "cow." + fs
+}
+
+// soportados lee /proc/filesystems: una línea por tipo, "nodev" delante de los
+// que no necesitan dispositivo.
+func soportados(filesystems string) map[string]bool {
+	out := make(map[string]bool)
+	for _, l := range strings.Split(filesystems, "\n") {
+		if campos := strings.Fields(l); len(campos) > 0 {
+			out[campos[len(campos)-1]] = true
+		}
+	}
+	return out
+}
+
+// elegirFSAlmacen elige el sistema de ficheros de un almacén nuevo: el primero
+// que el núcleo ya conoce (/proc/filesystems) y cuyo mkfs está instalado. Si
+// el núcleo no lista ninguno de los dos (el módulo aún no está cargado; se
+// cargaría al montar), el primero con mkfs. Si no, error diciendo qué
+// instalar. Es pura para probar la tabla sin root.
+func elegirFSAlmacen(filesystems string, hayMkfs func(string) bool) (string, error) {
+	conoce := soportados(filesystems)
+	ninguno := true
+	for _, c := range fsAlmacen {
+		if conoce[c.fs] {
+			ninguno = false
+			if hayMkfs(c.mkfs) {
+				return c.fs, nil
+			}
+		}
+	}
+	if ninguno {
+		for _, c := range fsAlmacen {
+			if hayMkfs(c.mkfs) {
+				return c.fs, nil
+			}
+		}
+		return "", errors.New("no mkfs.xfs or mkfs.btrfs: install xfsprogs (or btrfs-progs where the kernel has no XFS)")
+	}
+	var falta []string
+	for _, c := range fsAlmacen {
+		if conoce[c.fs] {
+			falta = append(falta, fmt.Sprintf("%s not found (install %s)", c.mkfs, c.paquete))
+		}
+	}
+	return "", errors.New(strings.Join(falta, "; "))
 }
 
 // ── montajes ──────────────────────────────────────────────────────────────────
@@ -773,6 +900,24 @@ func desescaparMountinfo(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+// montadoConTipo dice si dir (canónica) es un punto de montaje en ms, y exige
+// que el montaje visible (el último sobre la ruta) sea de tipo fs.
+func montadoConTipo(ms []montaje, dir, fs string) (bool, error) {
+	tipo := ""
+	for _, mt := range ms {
+		if mt.punto == dir {
+			tipo = mt.fstype // el último montaje sobre la ruta es el visible
+		}
+	}
+	switch tipo {
+	case "":
+		return false, nil
+	case fs:
+		return true, nil
+	}
+	return false, fmt.Errorf("%s is mounted, but it is %s and not the %s store", dir, tipo, fs)
 }
 
 // montadoEncima dice si ruta es la raíz de un montaje distinto del de su

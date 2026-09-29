@@ -225,6 +225,12 @@ func (m *Manager) asegurarNodo(ctx context.Context, gid, nodo string) error {
 	case <-d.hecho:
 		return d.err
 	case <-ctx.Done():
+		// La conexión se fue: deja de contar. Si no, un despertar largo con
+		// clientes que abandonan acabaría rechazando por "ocupado" a los que
+		// llegan aunque ya no espere nadie.
+		m.despMu.Lock()
+		d.esperando--
+		m.despMu.Unlock()
 		return ctx.Err()
 	}
 }

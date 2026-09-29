@@ -558,17 +558,18 @@ darle esa confianza); un enlace duro que ya existiera en la carpeta hacia fuera
 se sirve como el fichero que es; y el daemon, si es root, lee con sus
 permisos lo que haya bajo la carpeta.
 
-### 14. Discos copy-on-write: el almacén XFS y su bind en el jail
+### 14. Discos copy-on-write: el almacén (XFS o Btrfs) y su bind en el jail
 
 Con `daemon.cow` (ver [docs/cow.md](docs/cow.md)) el overlay de una instancia creada
-desde un dorado puede vivir en un almacén XFS propio (`$root/cow.xfs`, montado por loop
-en `$root/cow`). Lo que cambia:
+desde un dorado puede vivir en un almacén propio con reflink (`$root/cow.xfs`, o
+`$root/cow.btrfs` donde el núcleo no tiene XFS; montado por loop en `$root/cow`). Lo que
+cambia:
 
-- **El anfitrión no interpreta nada del invitado.** El XFS lo crea y lo escribe solo el
+- **El anfitrión no interpreta nada del invitado.** El XFS o el Btrfs lo crea y lo escribe solo el
   kernel del anfitrión; el invitado controla el CONTENIDO de su fichero de overlay, no
   los metadatos del sistema de ficheros que lo contiene. Es la misma superficie que un
   overlay en ext4.
-- El almacén se monta `nodev,nosuid,noexec`, con la raíz y `m/` en 0750 root:grupo del
+- El almacén se monta `nodev,nosuid,noexec` (Btrfs además `nodiscard`), con la raíz y `m/` en 0750 root:grupo del
   VMM (como `machines/`), `bases/` en 0700 root y cada base en 0400: el VMM no puede
   escribir en la copia de la que se clonan las demás instancias.
 - **Jail**: a cada VMM se le monta por bind SOLO el directorio de su propio overlay
@@ -580,15 +581,24 @@ en `$root/cow`). Lo que cambia:
 - **Permisos del directorio de instancia**: `cow/m/<id>` es `root:grupo-del-VMM` 0750 (el
   VMM solo lo atraviesa) y solo el FICHERO `overlay.ext4` es del VMM. Así un Firecracker
   comprometido no crea ficheros en su directorio ni puede cambiar el overlay por un enlace
-  simbólico. Además `commit` abre el overlay con `O_NOFOLLOW`, comprueba con `Fstat` sobre
-  el descriptor (no por ruta) que es un fichero regular y descarta la copia si la ruta
-  cambió de fichero mientras se copiaba.
+  simbólico. Además `commit` (y con él `fork` y `graph snapshot`) abre el overlay con
+  `O_NOFOLLOW`, comprueba con `Fstat` sobre el descriptor que es un fichero regular y
+  **copia desde ese mismo descriptor** (FICLONE entre descriptores, o una copia dispersa en
+  Go con `SEEK_DATA`/`SEEK_HOLE`), sin volver a abrir la ruta: cambiar el overlay por un
+  enlace entre la comprobación y la copia no cuela otro fichero en el dorado. El destino se
+  crea con `O_EXCL|O_NOFOLLOW` y se cede al VMM con `fchown` sobre el descriptor, porque en
+  el jail está en un directorio del VMM; al recuperarlo del jail se exige que sea el mismo
+  inodo que escribió el daemon. Si la ruta cambió de fichero durante la copia, la copia se
+  descarta igualmente (el dorado no correspondería a la memoria volcada).
 - **Espacio**: el fichero de imagen se reserva entero al crearlo (sin sobreasignar), así
-  que el XFS no falla por falta de sitio debajo. Dentro de él NO hay cuota por instancia:
+  que el sistema de ficheros no falla por falta de sitio debajo (Btrfs se formatea con
+  `-K` y se monta con `nodiscard`: un discard agujerearía el fichero y perdería la
+  reserva). Dentro de él NO hay cuota por instancia:
   el VMM puede crecer su overlay hasta el tamaño lógico del disco y los bloques que
   reescribe dejan de compartirse con la base, así que un invitado que reescribe todo su
   disco puede llenar el almacén compartido (ENOSPC para las demás instancias del almacén).
-  Es un límite conocido; una cuota XFS por proyecto por directorio está pendiente.
+  Es un límite conocido; una cuota por directorio (proyecto en XFS, qgroup en Btrfs)
+  está pendiente.
 
 ### 15. Grafos: cada arista es una autorización, no una red
 
@@ -626,6 +636,19 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   sobrevive a una restauración. Los mismos marcadores de credenciales se entregan a
   cada copia (el invitado los tiene en memoria), apuntados a su propio grafo; un nodo
   con credenciales que no son de sus aristas no se ramifica.
+- **Las plantillas de `graph snapshot` son persistentes y llevan marcadores en su
+  RAM.** A diferencia de las temporales de un fork, no se borran solas: quedan como
+  plantillas normales (`<N>-<nodo>-<gen>`) hasta un `kling snapshot rm`. El `mem.file`
+  de un nodo con aristas `credential` contiene los marcadores que el invitado tenía en
+  memoria (en su entorno, en la memoria de su aplicación). **No son las claves**: la
+  clave nunca entra al invitado ni al volcado, y la plantilla no se lleva ni el almacén
+  de credenciales del nodo ni su registro en el proxy. Un marcador solo vale en el proxy
+  de la máquina a la que se entregó y mientras siga registrado ahí; una instancia creada
+  con `run -from` de esa plantilla despierta con marcadores que su propio proxy no
+  conoce, así que son inertes (la conexión con ellos no recibe la clave). Aun así, la
+  plantilla es una foto de la memoria del invitado y se trata como tal: legible solo
+  por root y el grupo del VMM (como cualquier dorado), y a borrar cuando ya no haga
+  falta.
 - **Tormenta acotada.** 16 conexiones a la vez por arista (la siguiente se cierra en el
   acto), un solo despertar en vuelo por nodo y 64 conexiones esperándolo como mucho;
   por encima, rechazo y una línea `busy` en la auditoría. Un despertar que no cabe

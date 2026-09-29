@@ -19,6 +19,17 @@ func TestLineaCoW(t *testing.T) {
 			t.Errorf("falta %q en %q", w, l)
 		}
 	}
+	// Un almacén Btrfs lo dice, en el modo y en el estado del almacén.
+	l = lineaCoW(&api.CoWInfo{Setting: "auto", Mode: "store",
+		Store: &api.CoWStore{Path: "/var/lib/kindling/cow", FS: "btrfs", Mounted: true, SizeMiB: 4096, FreeMiB: 4000}})
+	for _, w := range []string{"Btrfs store", "cow (Btrfs): 4000 of 4096 MiB free"} {
+		if !strings.Contains(l, w) {
+			t.Errorf("falta %q en %q", w, l)
+		}
+	}
+	if !strings.HasPrefix(l, "store ") {
+		t.Errorf("la primera palabra es el modo (bench-cow.sh): %q", l)
+	}
 }
 
 func TestCheckCoW(t *testing.T) {
