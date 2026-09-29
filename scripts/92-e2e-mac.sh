@@ -845,6 +845,16 @@ except Exception as e:
     print("FAILED", type(e).__name__, e)'
 ghttp() { k exec -timeout 90s "$1" -- python3 -c "$GHTTP" "$2" 2>&1; }
 gserve() { k exec "$1" -- sh -c "mkdir -p $3 && cd $3 && setsid python3 -m http.server $2 >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; }
+# glisto <máquina> <puerto>: espera (hasta 15 s) a que el servidor de gserve
+# escuche DENTRO de su nodo. Con un sleep fijo, la primera petición por la
+# arista llegaba a veces antes que python y el broker cerraba sin respuesta; la
+# petición por la arista sigue siendo un único intento.
+glisto() { k exec "$1" -- python3 -c "
+import socket,time,sys
+for _ in range(150):
+    try: socket.create_connection(('127.0.0.1',$2),0.2).close(); sys.exit(0)
+    except OSError: time.sleep(0.1)
+sys.exit(1)" >/dev/null 2>&1; }
 
 # ── 6f. kling db ─────────────────────────────────────────────────────────────
 # Disposable Postgres databases (ext/db). On macOS vz builds no images, so the
@@ -1189,7 +1199,7 @@ EOF
     else
       gserve "$G-e-b" 8081 /srv/e
       k exec "$G-e-b" -- sh -c 'echo edge-ok > /srv/e/index.html' >/dev/null 2>&1
-      sleep 1
+      glisto "$G-e-b" 8081
       out=$(ghttp "$G-e-a" http://b.graph:8081/)
       [ "$out" = "edge-ok" ] && ok "a link edge works on macOS: a -> b.graph:8081" || bad "link edge on macOS" "edge-ok" "$out"
     fi
@@ -1251,7 +1261,7 @@ EOF
     ok "graph up with link edges: three nodes, db lazy without a machine ($(gstate "$G"))"
     gserve "$G-api" 8081 /srv/api
     k exec "$G-api" -- sh -c 'echo api-ok > /srv/api/index.html' >/dev/null 2>&1
-    sleep 1
+    glisto "$G-api" 8081
     out=$(ghttp "$G-web" http://api.graph:8081/)
     [ "$out" = "api-ok" ] && ok "web -> api.graph:8081 through the link edge" || bad "link web -> api" "api-ok" "$out"
     st=$(gstate "$G")
