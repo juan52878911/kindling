@@ -113,6 +113,11 @@ func TestBranchCreaDelGoldenYEsIdempotente(t *testing.T) {
 	if !strings.Contains(ta.out.String(), "kling db connect "+mc.Name) {
 		t.Errorf("no connection hint:\n%s", ta.out)
 	}
+	// Es la rama actual: la conexión ya está en .git, sin esperar al hook.
+	fi, err := os.Stat(filepath.Join(ri.gitDir, branchEnvFile))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("branch on the current branch must write .git/%s 0600: %v %v", branchEnvFile, fi, err)
+	}
 	n := len(ta.f.machines)
 	ta.out.Reset()
 	if err := ta.branch(ctx, "", "", "", defaultOwner); err != nil {

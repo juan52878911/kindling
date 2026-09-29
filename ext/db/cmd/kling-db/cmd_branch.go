@@ -477,6 +477,16 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 		verb = "created"
 	}
 	fmt.Fprintf(a.stdout, "branch %s  %s  (copy %s, machine %s)\n", branch, verb, mc.Name, shortID(mc.ID))
+	// Si es la rama actual, la app ya puede conectar: se escribe la conexión en
+	// .git como haría el hook (antes solo -switch lo hacía y, hasta el primer
+	// checkout, la app no tenía con qué conectar; lo vio la prueba en el lab).
+	if _, cur, _, err := a.resolve(ctx, "", ""); err == nil && cur == branch {
+		envPath := filepath.Join(ri.gitDir, branchEnvFile)
+		if err := a.writeBranchEnv(mc, envPath); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.stdout, "  connection:       %s  (mode 0600, inside .git: it is never committed)\n", envPath)
+	}
 	fmt.Fprintf(a.stdout, "  from this host:   kling db connect %s [-psql | -dsn]\n", mc.Name)
 	fmt.Fprintf(a.stdout, "  for your app:     kling db branch hook install   (then every checkout writes .git/%s)\n", branchEnvFile)
 	return nil
