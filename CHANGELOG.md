@@ -60,7 +60,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   sin `egress allowlist` si todas van a otra máquina. `kling-vz` lo anuncia con
   `graph-link` en `credential_kinds`; uno anterior no recibe aristas ni esas
   credenciales, y el error dice que hay que reconstruirlo. Nueva ruta de `kling-vz`
-  `PUT /kling/graph` y paquete `pkg/linkbroker`. e2e: sección 6g de
+  `PUT /kling/graph` y paquete `pkg/linkbroker`. e2e: secciones 6g y 6h de
   `scripts/92-e2e-mac.sh` y `attach` en su 6f. Ver [`docs/grafos.md`](docs/grafos.md) y
   SECURITY.md §15.
 - **`run -from` ya no copia entero el disco del dorado (`daemon.cow`).** La copia del

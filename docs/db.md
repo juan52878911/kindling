@@ -350,8 +350,10 @@ clave vieja deja de valer), `snapshot` + `undo`, `rehearse` (una migración que 
 columna y otra que se bloquea por `lock_timeout`), `golden build -template crm-demo` (y su
 consulta) y `ask` (solo con `ANTHROPIC_API_KEY`: no hay proveedor falso; sin ella se salta,
 avisando), y buscan cada clave en toda la salida. La versión de 92 es más corta (sin el
-bloqueo, `golden` ni `ask`). Para CI, ver [db-ci.md](db-ci.md). Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) se saltan,
-avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
+bloqueo, `golden` ni `ask`). Para CI, ver [db-ci.md](db-ci.md). Sin `KLING_E2E_DB_GOLDEN` (nombre de la plantilla) 90 se salta,
+avisando; 92 (Mac) construye ella misma la plantilla base (toolchain + `apk add postgresql16`,
+único paso con egress internet) y el golden con `db-golden.sh -from`, y compila el plugin
+con Go o usa `KLING_DB=ruta`; sin Go o sin red se salta, avisando; `KLING_E2E_DB_GOLDEN_PASSWORD` es opcional y añade la prueba de que la clave
 de la plantilla no entra en una copia.
 
 `clone` tiene su subsección, "7e (clone)", con `KLING_E2E_CLONE_ADMIN_URL` (un
