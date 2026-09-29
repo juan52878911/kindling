@@ -324,3 +324,63 @@ func TestPoolNoDejaGrafosAMedias(t *testing.T) {
 		t.Fatalf("%d graphs left after a failed freeze (%d ups)", n, f.grafosUp)
 	}
 }
+
+// Un thaw lento no para otra reclamación: el candado del frontal solo cubre
+// etiquetar y comprobar, y las etiquetas ya reservan la instancia, así que las
+// dos se llevan grafos distintos.
+func TestThawLentoNoBloqueaOtraReclamacion(t *testing.T) {
+	f := nuevoFalso(t)
+	guardarGrafo(t, f, plantillaAgentePG(2))
+	daemons := map[string]*falso{"a": f}
+	rellenar(t, daemons)
+	_, s := montar(t, daemons)
+
+	espera, empezado := make(chan struct{}), make(chan struct{})
+	f.mu.Lock()
+	f.thawEspera, f.thawEmpezado = espera, empezado
+	f.mu.Unlock()
+	sirve := func(*hosts.Host) bool { return true }
+	ctx := context.Background()
+
+	type res struct {
+		in plantilla.Instancia
+		ok bool
+	}
+	lenta := make(chan res, 1)
+	go func() {
+		_, in, ok := s.reclamarGrafo(ctx, &Tenant{Nombre: "alice"}, "agente-pg", sirve)
+		lenta <- res{in, ok}
+	}()
+	select {
+	case <-empezado:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first claim never reached its thaw")
+	}
+
+	rapida := make(chan res, 1)
+	go func() {
+		_, in, ok := s.reclamarGrafo(ctx, &Tenant{Nombre: "bob"}, "agente-pg", sirve)
+		rapida <- res{in, ok}
+	}()
+	var b res
+	select {
+	case b = <-rapida:
+	case <-time.After(5 * time.Second):
+		close(espera)
+		t.Fatal("a slow thaw blocked another claim")
+	}
+	close(espera)
+	a := <-lenta
+	if !a.ok || !b.ok {
+		t.Fatalf("claims: alice ok=%v, bob ok=%v", a.ok, b.ok)
+	}
+	if a.in.Grafo.ID == b.in.Grafo.ID {
+		t.Fatalf("both claims got graph %s", a.in.Grafo.ID)
+	}
+	if !a.in.De("alice") || !b.in.De("bob") {
+		t.Fatalf("owners: %q and %q", a.in.Tenant, b.in.Tenant)
+	}
+	if f.grafosUp != 2 {
+		t.Fatalf("%d graph ups, want 2 (the pool's)", f.grafosUp)
+	}
+}

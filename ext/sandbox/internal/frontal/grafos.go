@@ -343,15 +343,43 @@ func (s *Servidor) instanciaDe(ctx context.Context, h *hosts.Host, t *Tenant, gi
 // reclamarGrafo busca, en los hosts que sirven y por orden de hueco, una
 // instancia libre de la plantilla y la hace del tenant.
 //
-// Bajo s.mu, como reclamarPrecalentada. Contra OTRO frontal sobre el mismo
-// daemon no hay candado: los dos pueden etiquetar a la vez y SetLabels es un
-// merge por máquina, así que el grafo puede acabar entero de uno, entero del
-// otro o MEZCLADO. Por eso se relee después de etiquetar: si es entero del
-// tenant, es suyo; si es entero de otro, se deja; si está mezclado no es de
-// nadie, y se borra (lo hacen los dos, y el segundo recibe un 404 que no
-// importa). Un grafo que no llega a despertar también se borra: nunca vuelve
-// al fondo algo a medias.
+// Etiquetar y comprobar va bajo s.mu, como reclamarPrecalentada: son las
+// etiquetas las que la reservan (una instancia con tenant ya no es Libre), así
+// que dos reclamaciones de este frontal no se llevan la misma. Despertarla y
+// releerla va FUERA del candado: un thaw lento no para las demás reclamaciones
+// ni la creación de sandboxes.
+//
+// Contra OTRO frontal sobre el mismo daemon no hay candado: los dos pueden
+// etiquetar a la vez y SetLabels es un merge por máquina, así que el grafo
+// puede acabar entero de uno, entero del otro o MEZCLADO. Por eso se relee
+// después de etiquetar: si es entero del tenant, es suyo; si es entero de
+// otro, se deja; si está mezclado no es de nadie, y se borra (lo hacen los
+// dos, y el segundo recibe un 404 que no importa). Un grafo que no llega a
+// despertar también se borra: nunca vuelve al fondo algo a medias.
 func (s *Servidor) reclamarGrafo(ctx context.Context, t *Tenant, tpl string, sirve func(*hosts.Host) bool) (*hosts.Host, plantilla.Instancia, bool) {
+	vistos := map[string]bool{}
+	for {
+		h, gid, ok := s.etiquetarGrafo(ctx, t, tpl, sirve, vistos)
+		if !ok {
+			return nil, plantilla.Instancia{}, false
+		}
+		if _, err := h.Cliente.GraphThaw(ctx, gid); err != nil {
+			s.soltarGrafo(ctx, h, gid, "thaw failed: "+err.Error())
+			continue
+		}
+		ahora, err := s.releerInstancia(ctx, h, gid)
+		if err != nil || ahora == nil || !ahora.De(t.Nombre) || ahora.Rota() {
+			continue
+		}
+		return h, *ahora, true
+	}
+}
+
+// etiquetarGrafo es la parte de reclamarGrafo que va bajo s.mu: pone las
+// etiquetas del tenant a todos los nodos de la primera instancia libre y
+// comprueba que ha quedado entera suya. vistos guarda las ya intentadas (por
+// host e id) para no volver a ellas en la misma reclamación.
+func (s *Servidor) etiquetarGrafo(ctx context.Context, t *Tenant, tpl string, sirve func(*hosts.Host) bool, vistos map[string]bool) (*hosts.Host, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	etiquetas := map[string]string{
@@ -368,6 +396,10 @@ func (s *Servidor) reclamarGrafo(ctx context.Context, t *Tenant, tpl string, sir
 				continue
 			}
 			gid := in.Grafo.ID
+			if vistos[h.Nombre+"/"+gid] {
+				continue
+			}
+			vistos[h.Nombre+"/"+gid] = true
 			fallo := false
 			for _, nombre := range in.Grafo.SortedNodeNames() {
 				if err := h.Cliente.SetLabels(ctx, in.Maquinas[nombre].ID, etiquetas); err != nil {
@@ -383,6 +415,7 @@ func (s *Servidor) reclamarGrafo(ctx context.Context, t *Tenant, tpl string, sir
 			case ahora == nil:
 				continue // la borró otro (o `template rm`) entre tanto
 			case !fallo && ahora.De(t.Nombre) && !ahora.Rota():
+				return h, gid, true
 			case !ahora.Mezclada && ahora.Tenant != "" && ahora.Tenant != t.Nombre:
 				continue // la ganó otro frontal
 			case ahora.Libre():
@@ -391,18 +424,9 @@ func (s *Servidor) reclamarGrafo(ctx context.Context, t *Tenant, tpl string, sir
 				s.soltarGrafo(ctx, h, gid, "claim left it mixed or half-labeled")
 				continue
 			}
-			if _, err := h.Cliente.GraphThaw(ctx, gid); err != nil {
-				s.soltarGrafo(ctx, h, gid, "thaw failed: "+err.Error())
-				continue
-			}
-			ahora, err = s.releerInstancia(ctx, h, gid)
-			if err != nil || ahora == nil || !ahora.De(t.Nombre) || ahora.Rota() {
-				continue
-			}
-			return h, *ahora, true
 		}
 	}
-	return nil, plantilla.Instancia{}, false
+	return nil, "", false
 }
 
 // releerInstancia vuelve a leer una instancia por id; (nil, nil) si ya no está.

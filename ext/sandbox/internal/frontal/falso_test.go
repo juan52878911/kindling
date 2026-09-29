@@ -65,6 +65,10 @@ type falso struct {
 	grafoUpCodigo int
 	thawFalla     bool
 	freezeFalla   bool
+	// thawEspera, si no es nil, para el SIGUIENTE thaw (solo ese) hasta que se
+	// cierre, fuera de f.mu; antes cierra thawEmpezado.
+	thawEspera   chan struct{}
+	thawEmpezado chan struct{}
 	// grafosUp cuenta los POST /graphs aceptados.
 	grafosUp int
 }
@@ -671,7 +675,18 @@ func (f *falso) rutasGrafos(m *http.ServeMux) {
 		}
 	}
 	m.HandleFunc("POST /graphs/{ref}/freeze", estado(api.StateWarm, func() bool { return f.freezeFalla }))
-	m.HandleFunc("POST /graphs/{ref}/thaw", estado(api.StateRunning, func() bool { return f.thawFalla }))
+	thaw := estado(api.StateRunning, func() bool { return f.thawFalla })
+	m.HandleFunc("POST /graphs/{ref}/thaw", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		espera, empezado := f.thawEspera, f.thawEmpezado
+		f.thawEspera, f.thawEmpezado = nil, nil
+		f.mu.Unlock()
+		if espera != nil {
+			close(empezado)
+			<-espera
+		}
+		thaw(w, r)
+	})
 	m.HandleFunc("DELETE /graphs/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
