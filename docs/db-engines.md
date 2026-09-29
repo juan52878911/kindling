@@ -201,3 +201,43 @@ construyeron de verdad sobre Alpine, y la sección 7h2 de `scripts/90-e2e.sh`
 con clave propia, rotate con el hash nuevo en la copia, doctor con 0 problemas, los
 rechazos y ninguna clave en la salida. `kling db class` también se probó con los dos
 motores.
+
+## Próximas funcionalidades
+
+Análisis de compatibilidad del 2026-09-29. Hay tres niveles de soporte:
+
+1. **Golden y copia al instante.** Vale para cualquier motor que corra en Linux, porque
+   una microVM congelada no depende de lo que haya dentro.
+2. **Clave por copia sin que el invitado vea la clave.** Al invitado solo le llega un hash
+   o un verificador; hace falta que el motor acepte un hash calculado en el host.
+3. **Proxy de credenciales o `attach`.** El servidor tiene que demostrar que conoce la
+   clave; hoy solo Postgres (SCRAM) lo hace bien.
+
+Por orden:
+
+1. **Rápido.** pgvector y PostGIS en la receta de Postgres (hay que comprobar que Alpine
+   los empaqueta), un golden de Valkey de verdad (el guion ya acepta
+   `valkey-server`/`valkey-cli`) y esta tabla por motor en la documentación de producto.
+2. **MySQL 8.4 y 9 de Oracle.** El hash de `caching_sha2_password` (SHA-256-crypt, 5000
+   rondas) calculado en el host: MySQL 9 ya no trae `mysql_native_password`. Abre también
+   Percona y los orígenes de `clone` en MySQL.
+3. **Almacenamiento de objetos (S3).**
+   - Un golden de almacén de objetos con clave por copia: Garage o SeaweedFS mejor que
+     MinIO, que dejó de publicar binarios de su edición comunitaria y es AGPL. SigV4 es
+     HMAC, así que el servidor necesita el secreto: el invitado conoce el de su copia
+     (aleatorio y suyo), nunca el del host.
+   - Un modo de **re-firma SigV4** en el proxy HTTP. El invitado firma con una credencial
+     marcador y el proxy descarta esa firma y firma de nuevo con la real. Lo delicado: el
+     hash del cuerpo (`UNSIGNED-PAYLOAD`), las subidas `aws-chunked`, con una firma por
+     trozo, y las URL prefirmadas. Con él, un agente usa S3, R2, GCS en modo S3, MinIO o
+     Garage sin ver la clave.
+   - Opcional: `clone` de un bucket por prefijo hacia el golden.
+4. **Compatible con MongoDB mediante FerretDB** (Apache-2.0, protocolo de MongoDB sobre
+   Postgres). El golden es un Postgres con FerretDB y reutiliza lo que ya funciona.
+   MongoDB en sí sigue fuera, por su licencia y por `createUser` con la clave en claro.
+5. **ClickHouse** con `-from`, si alguien lo pide: acepta `password_sha256_hex`, así que
+   cumple la regla del hash.
+
+Descartados por ahora: Cassandra y Scylla (pesados), y Elasticsearch y OpenSearch (JVM
+con 1 GiB o más por copia; posibles con un hash bcrypt calculado en el host si hay
+demanda). KeyDB y Dragonfly no son compatibles del todo con las ACL de Redis 7.
