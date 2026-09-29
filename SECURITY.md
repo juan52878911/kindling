@@ -723,6 +723,11 @@ aristas declaradas. Nada de eso abre la red entre microVMs:
   acto), un solo despertar en vuelo por nodo y 64 conexiones esperándolo como mucho;
   por encima, rechazo y una línea `busy` en la auditoría. Un despertar que no cabe
   en memoria es `no_capacity`, no un OOM.
+- **Mantener despierto a un nodo exige su arista.** `idle_freeze` se renueva solo con
+  las conexiones que pasan la puerta de una arista hacia ese nodo; las rechazadas no
+  tocan su reloj. Un nodo sin arista no puede impedir que otro se congele; uno con ella
+  sí, conectando cada menos de N segundos (es el uso que la arista autoriza, y cuesta lo
+  que la memoria de ese nodo).
 - **Las claves de las aristas `credential`** viajan una vez en `POST /graphs`, nunca
   salen por la API y se guardan cifradas (`<id>.secrets.enc`, AES-GCM con la clave del
   almacén de credenciales y el grafo como dato autenticado: copiadas a otro grafo no se

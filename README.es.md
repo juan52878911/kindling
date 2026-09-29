@@ -991,6 +991,7 @@ se guarda en un instante consistente y se ramifica en N copias vivas que no se v
 ```sh
 SHOP_PG_PASS=... kling graph up tienda.yaml       # crea el grafo y arranca los nodos eager
 kling graph ls                                    # estado, nodos, aristas y generación
+kling graph audit tienda -since 10m               # las conexiones por aristas, en una línea de tiempo
 kling graph snapshot tienda -name t0              # una plantilla por nodo, todas del mismo instante
 kling graph fork tienda -n 3                      # 3 grafos nuevos desde este instante
 kling graph freeze tienda ; kling graph thaw tienda

@@ -979,6 +979,7 @@ consistent instant and forks into N live copies that cannot see each other:
 ```sh
 SHOP_PG_PASS=... kling graph up tienda.yaml       # creates the graph, starts the eager nodes
 kling graph ls                                    # state, nodes, edges, generation
+kling graph audit tienda -since 10m               # every edge connection, one timeline
 kling graph snapshot tienda -name t0              # one template per node, all from the same instant
 kling graph fork tienda -n 3                      # 3 new graphs from this instant
 kling graph freeze tienda ; kling graph thaw tienda

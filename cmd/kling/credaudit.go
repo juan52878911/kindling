@@ -156,11 +156,21 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 	if r.Kind == "dropped" {
 		return len(p), nil
 	}
-	creds := strings.Join(r.Creds, ",")
+	method, path, status, creds := auditColumnas(r)
+	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), printable(method), printable(r.Host),
+		printable(path), status, printable(creds), fmt.Sprint(r.MS), printable(auditResult(r)))
+	return len(p), nil
+}
+
+// auditColumnas son las columnas METHOD, PATH, STATUS y CREDS de un registro
+// según su tipo (HTTP, Postgres o MySQL, o una arista link). Sin imprimibles:
+// quien pinta pasa cada una por printable.
+func auditColumnas(r api.CredAuditRecord) (method, path, status, creds string) {
+	creds = strings.Join(r.Creds, ",")
 	if creds == "" {
 		creds = "-"
 	}
-	method, path, status := r.Method, r.Path, fmt.Sprint(r.Status)
+	method, path, status = r.Method, r.Path, fmt.Sprint(r.Status)
 	if r.Kind == "postgres" || r.Kind == "mysql" {
 		// Una conexión al proxy de Postgres o MySQL: sin método ni ruta ni
 		// estado HTTP; en su lugar el rol y la base de datos.
@@ -191,9 +201,7 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 			path = "-"
 		}
 	}
-	fmt.Fprintf(w.out, auditRowFmt, r.TS.Local().Format("01-02 15:04:05"), printable(method), printable(r.Host),
-		printable(path), status, printable(creds), fmt.Sprint(r.MS), printable(auditResult(r)))
-	return len(p), nil
+	return method, path, status, creds
 }
 
 // printable cambia por "?" los caracteres de control: la ruta y el host los

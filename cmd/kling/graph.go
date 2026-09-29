@@ -21,7 +21,7 @@ import (
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
-const graphUsage = "usage: kling graph <up|ls|inspect|freeze|thaw|snapshot|fork|rm> [...]"
+const graphUsage = "usage: kling graph <up|ls|inspect|audit|freeze|thaw|snapshot|fork|rm> [...]"
 
 func cmdGraph(args []string) error {
 	if len(args) == 0 {
@@ -34,6 +34,8 @@ func cmdGraph(args []string) error {
 		return graphList(args[1:])
 	case "inspect":
 		return graphInspect(args[1:])
+	case "audit":
+		return graphAudit(args[1:])
 	case "freeze", "thaw":
 		return graphLifecycle(args[0], args[1:])
 	case "snapshot":
@@ -43,7 +45,7 @@ func cmdGraph(args []string) error {
 	case "rm", "remove":
 		return graphRemove(args[1:])
 	}
-	return fmt.Errorf("unknown subcommand %q: use up, ls, inspect, freeze, thaw, snapshot, fork or rm", args[0])
+	return fmt.Errorf("unknown subcommand %q: use up, ls, inspect, audit, freeze, thaw, snapshot, fork or rm", args[0])
 }
 
 // fileGraph es el fichero de un grafo: el api.Graph de siempre y, en cada
