@@ -17,6 +17,13 @@ equivale a root en el host: puede montar discos arbitrarios y arrancar kernels a
 Exponerlo por TCP sería repetir el error que ha costado a Docker una década de servidores
 comprometidos.
 
+El socket nace en un directorio privado (`0700`) junto al de destino, con `0660` y cedido
+al usuario de `-socket-user` (o al de `sudo`) y a su grupo principal, y se renombra a su
+sitio: el `chmod` y el `chown` no siguen un enlace que alguien ponga en la ruta mientras
+el daemon arranca, y no hay un instante en que tenga los permisos del umask. Si otros
+pueden escribir en el directorio del socket (sin sticky bit), el daemon lo avisa: podrían
+cambiarlo por uno suyo.
+
 El acceso remoto es **SSH y nada más**: `ssh host kling dial-stdio`. La autenticación es la
 de SSH; kindling no inventa credenciales propias.
 

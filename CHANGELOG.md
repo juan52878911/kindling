@@ -10,6 +10,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Núcleo: el socket del daemon se prepara sin seguir enlaces.** Nace `0660` y cedido
+  a `-socket-user` en un directorio privado y se renombra a su sitio; antes el `chmod`
+  y el `chown` iban por el nombre y seguían un enlace puesto entre medias.
 - **Núcleo: los nombres de máquina son únicos.** Crear (`run`, `sandbox`, `run -from`,
   `fork`, nodos de grafo) con un nombre que ya lleva otra máquina, o que es su ID, es
   un `409`. Un nombre o un prefijo de ID que casa con varias máquinas ya no resuelve
