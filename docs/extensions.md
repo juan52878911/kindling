@@ -191,6 +191,7 @@ menos de 2 segundos. Uno parecido al de la extensión de MCP, recortado:
 | `name` | sí | `[a-z][a-z0-9-]{0,31}`; tiene que coincidir con el `<nombre>` de `kling-<nombre>` |
 | `version` | sí | la de la extensión; sale en `kling plugin ls` y `kling doctor` |
 | `min_kling` | no | versión mínima del núcleo. Si el núcleo es más viejo, la extensión se lista con el motivo y no se ejecuta |
+| `max_api` | no | el API del daemon más nuevo para el que se escribió (`api.APIVersion`; `plugin.Main` lo rellena con el del `pkg/api` con que se compiló). Con un daemon de API mayor, `kling plugin ls` la lista como `ok (see warning)` con el aviso de actualizarla; sigue ejecutándose. Sin el campo cuenta como `1` |
 | `summary` | no | una línea para `kling plugin ls`, la pantalla de `kling` y la cabecera de su ayuda |
 | `group` | no | sección de la pantalla de `kling` donde sale la extensión (`SERVE` para las de casa; vacío = `EXTENSIONS`) |
 | `commands[].name` | sí | comando que recibe; mismo patrón que `name`. Se teclea `kling <nombre> <comando>` y llega como `kling-<nombre> <comando>` |

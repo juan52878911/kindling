@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/config"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
@@ -86,9 +87,15 @@ type pluginRow struct {
 	Installed string   `json:"installed,omitempty"`
 	// Modified es que el binario ya no tiene el sha256 con el que se instaló.
 	Modified bool `json:"modified,omitempty"`
+	// Warning es por qué puede fallar aunque esté "ok": hoy, que se escribió
+	// para un API del daemon más viejo que el que habla (max_api).
+	Warning string `json:"warning,omitempty"`
 }
 
-func pluginRows(reg *plugin.Registry) []pluginRow {
+// pluginRows arma las filas de `plugins ls`. daemonAPI es el API del daemon
+// (api.Info.DaemonAPI), o 0 si no contesta: entonces no hay con qué comparar
+// el max_api de cada extensión.
+func pluginRows(reg *plugin.Registry, daemonAPI int) []pluginRow {
 	out := []pluginRow{}
 	for _, p := range reg.Plugins {
 		r := pluginRow{Name: p.Name, Path: p.Path, Builtin: p.Builtin != nil, Disabled: p.Disabled,
@@ -106,6 +113,10 @@ func pluginRows(reg *plugin.Registry) []pluginRow {
 			r.Status = "disabled"
 		case p.Err != nil:
 			r.Status, r.Error = "error: "+p.Err.Error(), p.Err.Error()
+		case p.Manifest != nil && daemonAPI > 0:
+			if w := p.Manifest.APIWarning(daemonAPI); w != "" {
+				r.Status, r.Warning = "ok (see warning)", w
+			}
 		}
 		// El .json dice de dónde salió; el hash se recalcula para que lo que
 		// se enseña sea lo que hay en disco y no lo que hubo.
@@ -133,7 +144,7 @@ func pluginsLs(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	rows := pluginRows(extensions())
+	rows := pluginRows(extensions(), daemonAPIFor(hostOf("")))
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(rows)
 	}
@@ -166,10 +177,27 @@ func pluginsLs(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	for _, r := range rows {
+		if r.Warning != "" {
+			fmt.Printf("\nwarning: kling-%s: %s\n", r.Name, r.Warning)
+		}
+	}
 	fmt.Println("\nAn extension is any executable named kling-<name> on your PATH or in")
 	fmt.Println("$KLING_PLUGIN_PATH. Install one from this release:  kling plugin install <name>")
 	fmt.Println("After installing one, reload completion:  " + reloadHint(""))
 	return nil
+}
+
+// daemonAPIFor pregunta, con un plazo corto, el API del daemon de endpoint.
+// 0 si no contesta: listar extensiones no necesita daemon.
+func daemonAPIFor(endpoint string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	info, err := api.NewClient(endpoint).Info(ctx)
+	if err != nil {
+		return 0
+	}
+	return info.DaemonAPI()
 }
 
 func shortSHA(h string) string {

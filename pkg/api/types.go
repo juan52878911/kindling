@@ -673,7 +673,10 @@ type ProcStats struct {
 
 // Info describe el daemon.
 type Info struct {
-	Version   string `json:"version"`
+	Version string `json:"version"`
+	// API es la versión del API del daemon (APIVersion, apiversion.go): sube
+	// solo si se quita o cambia una ruta. 0 = daemon anterior, que es el API 1.
+	API       int    `json:"api,omitempty"`
 	Root      string `json:"root"`
 	KVM       bool   `json:"kvm"`
 	Machines  int    `json:"machines"`

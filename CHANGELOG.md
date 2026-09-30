@@ -10,6 +10,22 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **El API del daemon lleva versión, y el cliente la compara.** `GET /info` gana `api`
+  (hoy `1`) y cada respuesta del daemon las cabeceras `X-Kling-API` y `X-Kling-Version`.
+  `pkg/api` las mira en toda petición, así que el CLI y las extensiones lo hacen sin
+  preguntar nada más: un daemon con un API mayor que el suyo da un aviso (una vez) y uno
+  por debajo del mínimo es un error que dice qué versión es y cómo actualizarlo, en vez
+  de un 404 a medio camino. Un daemon anterior no manda nada y cuenta como API 1. El API
+  sube solo si se quita o cambia una ruta; lo nuevo sigue en `capabilities`.
+- **Extensiones: `max_api` en el manifiesto.** `plugin.Main` lo rellena con el API que
+  conoce el `pkg/api` con que se compiló; `kling plugin ls` marca `ok (see warning)` y
+  explica que hay que actualizar una extensión escrita para un API más viejo que el del
+  daemon. Sigue ejecutándose: es un aviso, no un bloqueo. Sin el campo cuenta como 1.
+- **macOS: los snapshots de `kling-vz` pasan a `kling_vz: 2`.** `graphics` entró sin subir
+  la versión y un `kling-vz` anterior restauraba sin pantalla un snapshot que la tenía.
+  **Incompatible**: un `kling-vz` ≤ v0.17 se niega a restaurar los snapshots nuevos
+  (`unsupported snapshot format kling_vz=2`); el nuevo sigue leyendo los de la 1, y uno
+  de una versión futura se rechaza diciendo que se actualice `kling-vz`.
 - **El agente de invitado ignora los parámetros de kernel que no conoce y dice qué es.**
   `kling-guest` y `kling-bridge` (los dos son PID 1) apartan con un aviso en la consola
   los `kling.*` que no entienden, y una opción de volumen desconocida (`/data:ro:algo`) ya
