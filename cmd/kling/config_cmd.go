@@ -194,21 +194,23 @@ func contextRemove(args []string) error {
 // de Go deja de parsear al primer no-flag). Es la versión correcta de reorder:
 //   - Consulta el flagset para saber qué flags son booleanos (y por tanto NO se
 //     llevan el siguiente argumento), en vez de una lista hardcodeada.
+//   - Un flag conocido y no booleano se lleva SIEMPRE el siguiente argumento,
+//     como hace `flag`, aunque empiece por '-': `-spec -` es stdin, y dejar el
+//     '-' suelto hacía que `-spec` se comiera el nombre de la imagen.
 //   - Se detiene en `--`: todo lo que sigue es el comando del servidor y se deja
 //     intacto, sin reordenar.
 //
 // Los flags SÍ deben estar definidos en fs antes de llamar aquí (lo están: se
 // define todo y luego se parsea).
 func reorderFor(fs *flag.FlagSet, args []string) []string {
-	isBool := func(a string) bool {
+	lookup := func(a string) *flag.Flag {
 		name := strings.TrimLeft(a, "-")
 		if i := strings.IndexByte(name, '='); i >= 0 {
 			name = name[:i]
 		}
-		f := fs.Lookup(name)
-		if f == nil {
-			return false
-		}
+		return fs.Lookup(name)
+	}
+	isBool := func(f *flag.Flag) bool {
 		bf, ok := f.Value.(interface{ IsBoolFlag() bool })
 		return ok && bf.IsBoolFlag()
 	}
@@ -222,8 +224,14 @@ func reorderFor(fs *flag.FlagSet, args []string) []string {
 		}
 		if len(a) > 1 && a[0] == '-' {
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && i+1 < len(args) &&
-				(len(args[i+1]) == 0 || args[i+1][0] != '-') && !isBool(a) {
+			if strings.Contains(a, "=") || i+1 >= len(args) {
+				continue
+			}
+			// Uno desconocido fallará en Parse; mientras, solo se lleva el
+			// siguiente si no parece otro flag.
+			f := lookup(a)
+			if (f != nil && !isBool(f)) ||
+				(f == nil && (len(args[i+1]) == 0 || args[i+1][0] != '-')) {
 				i++
 				flags = append(flags, args[i])
 			}

@@ -36,6 +36,9 @@ func TestReorderFor(t *testing.T) {
 		{"ya ordenado no cambia", []string{"-tail", "50", "mivm"}, []string{"-tail", "50", "mivm"}},
 		{"flag=valor no consume el siguiente", []string{"mivm", "-tail=50"}, []string{"-tail=50", "mivm"}},
 		{"flag desconocido se trata como con valor", []string{"m", "-zzz", "x"}, []string{"-zzz", "x", "m"}},
+		{"flag desconocido no se lleva otro flag", []string{"m", "-zzz", "-a"}, []string{"-zzz", "-a", "m"}},
+		{"valor '-' (stdin) se queda con su flag", []string{"ref", "-f", "-"}, []string{"-f", "-", "ref"}},
+		{"valor que empieza por '-' se queda con su flag", []string{"ref", "-f", "-x", "-a"}, []string{"-f", "-x", "-a", "ref"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -44,6 +47,41 @@ func TestReorderFor(t *testing.T) {
 				t.Errorf("reorderFor(%v) = %v, want %v", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// `kling image build <name> -builder b -spec -` (el orden de la ayuda) leía
+// `-spec alpaca-cli` y fallaba con "open alpaca-cli". El nombre puede ir
+// delante o detrás de los flags, con -spec a fichero o a stdin.
+func TestReorderForImageBuild(t *testing.T) {
+	mk := func() (*flag.FlagSet, *string, *string, *string) {
+		fs := flag.NewFlagSet("image build", flag.ContinueOnError)
+		hostFlag(fs)
+		builder := fs.String("builder", "", "")
+		spec := fs.String("spec", "", "")
+		base := fs.String("base", "", "")
+		fs.Int("grow", 0, "")
+		return fs, builder, spec, base
+	}
+	for _, specArg := range []string{"-", "/tmp/x.json"} {
+		flags := []string{"-builder", "base", "-base", "min", "-spec", specArg}
+		for name, args := range map[string][]string{
+			"nombre delante": append([]string{"alpaca-cli"}, flags...),
+			"nombre detrás":  append(append([]string{}, flags...), "alpaca-cli"),
+		} {
+			t.Run(name+" spec="+specArg, func(t *testing.T) {
+				fs, builder, spec, base := mk()
+				if err := fs.Parse(reorderFor(fs, args)); err != nil {
+					t.Fatal(err)
+				}
+				if fs.NArg() != 1 || fs.Arg(0) != "alpaca-cli" {
+					t.Errorf("posicionales = %v, want [alpaca-cli]", fs.Args())
+				}
+				if *builder != "base" || *base != "min" || *spec != specArg {
+					t.Errorf("builder=%q base=%q spec=%q, want base min %q", *builder, *base, *spec, specArg)
+				}
+			})
+		}
 	}
 }
 
