@@ -458,6 +458,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 	}
 }
 
+// errProcesoDesaparecido es el LastErr de una máquina que CORRÍA y cuyo VMM
+// murió: su disco tiene lo que escribió mientras vivía (ver retieneDatos).
+const errProcesoDesaparecido = "the microVM process disappeared"
+
 func (m *Manager) sweep() {
 	var died []*api.Machine
 	live := make(map[string]bool)
@@ -497,7 +501,7 @@ func (m *Manager) sweep() {
 		}
 		now := time.Now()
 		mc.State = api.StateFailed
-		mc.LastErr = "the microVM process disappeared"
+		mc.LastErr = errProcesoDesaparecido
 		mc.FailedAt = &now
 		mc.PID = 0
 		delete(m.socket, mc.ID)
@@ -517,7 +521,7 @@ func (m *Manager) sweep() {
 		m.releaseCPU(mc.ID)
 		m.bus.Publish(api.Event{
 			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
-			Message: "the microVM process disappeared",
+			Message: errProcesoDesaparecido,
 		})
 	}
 }

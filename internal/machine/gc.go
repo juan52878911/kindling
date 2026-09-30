@@ -135,6 +135,11 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		if mc.State != api.StateWarm || mc.From == "" {
 			continue
 		}
+		// Con volúmenes no es "recreable desde su snapshot": es una máquina
+		// con estado, y el dorado no sabe nada de lo que pasó desde entonces.
+		if m.retieneDatos(mc) != "" {
+			continue
+		}
 		// Solo si su snapshot sigue ahí para recrearla. Sin él, esta warm es
 		// irrecuperable y no se toca.
 		if _, err := m.loadSnapshot(mc.From); err != nil {
@@ -230,7 +235,7 @@ func (m *Manager) gcFailed() {
 			stamped = true
 			continue
 		}
-		if now.Sub(*mc.FailedAt) >= retention {
+		if now.Sub(*mc.FailedAt) >= retention && m.retieneDatos(mc) == "" {
 			due = append(due, victim{mc.ID, mc.Name, mc.LastErr})
 		}
 	}
@@ -247,4 +252,34 @@ func (m *Manager) gcFailed() {
 		}
 		log.Printf("gc: collected failed machine %s (failed with: %s)", v.name, v.lastErr)
 	}
+}
+
+// retieneDatos dice por qué borrar mc perdería algo que no existe en otro
+// sitio, o "" si no pierde nada. La recogida automática (gcDisk, gcFailed)
+// solo toca lo que devuelve "": una failed de verdad inservible, o una warm
+// que se recrea igual desde su dorado. Lo demás lo retira el operador con
+// `kling rm`, sabiendo lo que borra.
+//
+//   - Volúmenes enganchados: es una máquina con estado. El volumen sobrevive a
+//     Remove, pero la máquina que lo usaba (y su overlay coherente con él) no.
+//   - Un volcado completo en su directorio: una failed que lo tiene es casi
+//     siempre un Thaw que falló, y ese mem.file + snap.file es el ÚNICO estado
+//     de una warm. Borrarla a la hora era perder la máquina entera.
+//   - Una arrancada en frío (sin From) cuyo VMM murió corriendo: su overlay es
+//     el único disco que tiene, con todo lo que escribió.
+//
+// Se llama con m.mu tomado (lectura basta).
+func (m *Manager) retieneDatos(mc *api.Machine) string {
+	if len(mc.Volumes) > 0 {
+		return "it has volumes attached"
+	}
+	if mc.State == api.StateFailed {
+		if volcadoValido(m.dir(mc.ID)) == nil {
+			return "it keeps a complete snapshot of its own"
+		}
+		if mc.From == "" && mc.LastErr == errProcesoDesaparecido {
+			return "it was cold-booted and ran: its overlay is the only copy of its disk"
+		}
+	}
+	return ""
 }
