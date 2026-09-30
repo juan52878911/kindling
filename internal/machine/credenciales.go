@@ -172,13 +172,41 @@ func escribirSellado(ruta string, sellado []byte) error {
 	if err := os.MkdirAll(filepath.Dir(ruta), 0o700); err != nil {
 		return err
 	}
-	tmp := ruta + ".tmp"
-	if err := os.WriteFile(tmp, sellado, 0o600); err != nil {
+	// Temporal con nombre propio en el MISMO directorio (el rename tiene que
+	// ser atómico), y no ruta+".tmp": con un nombre fijo, dos escrituras a la
+	// vez se pisaban el temporal y una renombraba el contenido de la otra, o
+	// fallaba con un ENOENT. Durable antes de renombrar: un corte no puede
+	// dejar un almacén con el nombre bueno y medio contenido.
+	f, err := os.CreateTemp(filepath.Dir(ruta), "."+filepath.Base(ruta)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("writing the credential store: %w", err)
+	}
+	tmp := f.Name()
+	fallo := func(err error) error {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing the credential store: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return fallo(err)
+	}
+	if _, err := f.Write(sellado); err != nil {
+		return fallo(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fallo(err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("writing the credential store: %w", err)
 	}
 	if err := os.Rename(tmp, ruta); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	if d, err := os.Open(filepath.Dir(ruta)); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 	return nil
 }
@@ -534,7 +562,13 @@ func (m *Manager) cargarCredencialesPlantilla(name string) ([]api.CredentialSpec
 // SetSnapshotCredentials ata credenciales a una plantilla (o, con clear, se las
 // quita todas). Exige que la plantilla exista y tenga egress allowlist, que es
 // lo que cada instancia necesitará para que se le puedan entregar.
+//
+// Leer, fusionar y escribir va entero bajo credPlantillaMu: dos llamadas a la
+// vez (dos `kling mcp credentials` sobre la misma plantilla) leían el mismo
+// almacén y la segunda en escribir borraba lo que añadió la primera.
 func (m *Manager) SetSnapshotCredentials(name string, specs []api.CredentialSpec, clear bool) (*api.Snapshot, error) {
+	m.credPlantillaMu.Lock()
+	defer m.credPlantillaMu.Unlock()
 	snap, err := m.loadSnapshot(name)
 	if err != nil {
 		return nil, err

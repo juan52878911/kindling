@@ -283,6 +283,10 @@ type Manager struct {
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
 	secretos map[string]*estadoSecreto
 
+	// credPlantillaMu serializa la lectura-fusión-escritura del almacén de
+	// credenciales de las plantillas (SetSnapshotCredentials).
+	credPlantillaMu sync.Mutex
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
