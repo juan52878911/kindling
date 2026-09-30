@@ -111,7 +111,7 @@ func (r *Rellenador) vueltaHost(ctx context.Context, h *hosts.Host) {
 		}
 		hay := 0
 		for _, mc := range vivas {
-			if mc.Labels[LabelTemplate] == nombre && mc.Labels[LabelTenant] == "" {
+			if mc.Labels[LabelTemplate] == nombre && mc.Labels[LabelTenant] == "" && plantilla.DelFrontal(mc.Labels) {
 				hay++
 			}
 		}

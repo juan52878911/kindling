@@ -247,7 +247,10 @@ func Reconciliar(ctx context.Context, c *api.Client, p Plantilla) (*Estado, bool
 	switch {
 	case err == nil:
 		var rec Receta
-		if ok, errAnot := sn.Annotation(AnotacionReceta, &rec); ok && errAnot == nil && rec.Hash == hash {
+		// Un snapshot con kling.owner lo hizo un inquilino del daemon con el
+		// nombre reservado de la plantilla (la receta y su hash se pueden
+		// copiar): no es nuestro y se reconstruye encima.
+		if ok, errAnot := sn.Annotation(AnotacionReceta, &rec); ok && errAnot == nil && rec.Hash == hash && DelFrontal(sn.Labels) {
 			hecho := rec.Hecho
 			if hecho.IsZero() {
 				hecho = sn.CreatedAt

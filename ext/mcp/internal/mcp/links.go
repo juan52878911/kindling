@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
@@ -20,6 +21,15 @@ const (
 )
 
 var validLinkName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+
+// linksMu serializa el leer-modificar-escribir de mcp/links. Es UN documento y
+// el store del daemon no tiene versión ni ETag: sin cerrojo, ocho SetLink a la
+// vez dejaban dos (cada uno escribía su copia leída antes que las demás).
+//
+// Cubre lo que corre en este proceso (el gateway, un CLI con varias altas).
+// Dos procesos distintos a la vez pueden seguir pisándose: eso necesita que el
+// store ofrezca escritura condicional.
+var linksMu sync.Mutex
 
 func loadLinks(ctx context.Context, c *api.Client) (map[string]*Link, error) {
 	m := map[string]*Link{}
@@ -58,6 +68,8 @@ func SetLink(ctx context.Context, c *api.Client, l *Link) (*Link, error) {
 	if l.URL == "" {
 		return nil, fmt.Errorf("missing MCP server URL")
 	}
+	linksMu.Lock()
+	defer linksMu.Unlock()
 	m, err := loadLinks(ctx, c)
 	if err != nil {
 		return nil, err
@@ -74,6 +86,8 @@ func SetLink(ctx context.Context, c *api.Client, l *Link) (*Link, error) {
 
 // RemoveLink desregistra un servidor externo.
 func RemoveLink(ctx context.Context, c *api.Client, name string) error {
+	linksMu.Lock()
+	defer linksMu.Unlock()
 	m, err := loadLinks(ctx, c)
 	if err != nil {
 		return err

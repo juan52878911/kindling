@@ -104,13 +104,19 @@ elige su egress (sin red por defecto).
 ## kling exec
 
 ```sh
-kling exec [-i] [-e K=V] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] <cmd> [args...]
+kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] <cmd> [args...]
 ```
 
 - `cmd` es argv, sin shell. Para tuberías: `kling exec sb -- sh -c '...'`.
 - stdout y stderr llegan por separado y según salen; también a través de SSH.
 - kling termina con el **código del comando remoto**: se puede usar en scripts.
 - `-i` manda la entrada estándar (hasta 1 MiB; para más, `kling cp`).
+- `-e KEY=valor` pone una variable, pero el valor queda en el argv de `kling` (lo ve
+  cualquiera con `ps`, y el historial del shell): no lo uses para secretos. Para
+  ellos, `-e KEY` toma el valor del entorno de `kling` (`API_KEY=… kling exec -e
+  API_KEY …`, o una variable ya exportada) y `-env-file F` lo lee de un fichero con
+  una `KEY=valor` por línea (`#` comenta, `export` delante se admite). Lo mismo en
+  `kling shell`.
 - `-timeout` mata el comando y a todos sus hijos al vencer (por defecto 5 min,
   máximo 1 h). El código es 137, como en una shell.
 - La salida se corta a 8 MiB por flujo (`-max-output`, máximo 64 MiB). El proceso
@@ -121,7 +127,7 @@ kling exec [-i] [-e K=V] [-w DIR] [-timeout 5m] [-max-output N] <máquina> [--] 
 ## kling shell
 
 ```sh
-kling shell [-e K=V] [-w DIR] [-t TERM] <máquina|sandbox> [--] [cmd args...]
+kling shell [-e K=V|K] [-env-file F] [-w DIR] [-t TERM] <máquina|sandbox> [--] [cmd args...]
 ```
 
 Una terminal de verdad dentro de la microVM: `vim`, edición de línea, historial,

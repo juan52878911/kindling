@@ -282,6 +282,14 @@ type Instancia struct {
 	Mezclada bool
 }
 
+// DelFrontal dice si lo que llevan estas etiquetas lo creó el frontal (o un
+// admin): sin kling.owner. Con política de autorización, lo que crea un
+// inquilino del daemon lleva su nombre ahí y no lo puede quitar; kind,
+// template y tenant sí los puede poner él, así que por sí solos no prueban
+// nada. Lo que no sea del frontal no se reparte, no se reclama, no se cuenta
+// en el fondo ni se limpia.
+func DelFrontal(labels map[string]string) bool { return labels[api.LabelOwner] == "" }
+
 // Libre dice si la instancia se puede reclamar.
 func (in Instancia) Libre() bool { return in.Completa && !in.Mezclada && in.Tenant == "" }
 
@@ -307,7 +315,8 @@ func (in Instancia) ReclamadaEn() int64 {
 
 // Instancias clasifica los grafos del pool (nombre con PrefijoGrafo) con las
 // máquinas del host. Un grafo con alguna máquina que no lleve el contrato
-// (kind y kling.graph de ese grafo) no es del pool y no aparece: ni se
+// (kind y kling.graph de ese grafo, y sin kling.owner: ver DelFrontal) no es
+// del pool y no aparece: ni se
 // reclama ni se limpia.
 func Instancias(gs []*api.Graph, ms []*api.Machine) []Instancia {
 	porID := make(map[string]*api.Machine, len(ms))
@@ -329,7 +338,7 @@ func Instancias(gs []*api.Graph, ms []*api.Machine) []Instancia {
 				continue
 			}
 			if mc.Labels[api.LabelKind] != KindNodoGrafo || mc.Labels[api.LabelGraph] != g.ID ||
-				mc.Labels[api.LabelGraphNode] != nombre {
+				mc.Labels[api.LabelGraphNode] != nombre || !DelFrontal(mc.Labels) {
 				ajeno = true
 				break
 			}

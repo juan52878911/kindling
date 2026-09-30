@@ -169,11 +169,26 @@ func gatewayServiceNames(url, token string) ([]string, error) {
 // ser instantáneo. Por eso "never probed" es un estado que se muestra y no se
 // disimula: sin sondeo no hay dato, y fingir salud es lo que tapó la caída.
 func mcpHealthLine(snaps []*api.Snapshot) string {
+	return mcpHealthLineAt(snaps, time.Now())
+}
+
+// healthStale es la antigüedad a partir de la cual un "sano" ya no se cree:
+// el doble del intervalo de kling-heal.timer (6 h). Un veredicto más viejo es
+// que nadie ha vuelto a sondear, y se muestra como desconocido.
+const healthStale = 12 * time.Hour
+
+func mcpHealthLineAt(snaps []*api.Snapshot, now time.Time) string {
 	var healthy, unknown int
 	var sick []string
 	for _, s := range snaps {
-		switch mcp.HealthOf(s).Status {
+		h := mcp.HealthOf(s)
+		switch h.Status {
 		case mcp.Healthy:
+			// Sin fecha, o vieja, no es un dato de salud de ahora.
+			if h.At == nil || now.Sub(*h.At) > healthStale {
+				unknown++
+				continue
+			}
 			healthy++
 		case mcp.Unhealthy:
 			n := s.Name
@@ -189,13 +204,13 @@ func mcpHealthLine(snaps []*api.Snapshot) string {
 	case len(sick) > 0:
 		line := fmt.Sprintf("✗ %d unhealthy (%s) · %d healthy", len(sick), strings.Join(sick, ", "), healthy)
 		if unknown > 0 {
-			line += fmt.Sprintf(" · %d never probed", unknown)
+			line += fmt.Sprintf(" · %d never probed or stale", unknown)
 		}
 		return line + " — details: kling mcp ls"
 	case unknown == len(snaps):
-		return fmt.Sprintf("? none of the %d service(s) has ever been probed — probe them: kling mcp health", unknown)
+		return fmt.Sprintf("? none of the %d service(s) has ever been probed (or not in %s) — probe them: kling mcp health", unknown, healthStale)
 	case unknown > 0:
-		return fmt.Sprintf("✓ %d healthy · %d never probed — probe them: kling mcp health", healthy, unknown)
+		return fmt.Sprintf("✓ %d healthy · %d never probed or stale — probe them: kling mcp health", healthy, unknown)
 	default:
 		return fmt.Sprintf("✓ %d healthy", healthy)
 	}
@@ -220,7 +235,7 @@ func servicesLine(url, token string) string {
 	if resp.StatusCode == http.StatusUnauthorized {
 		if token == "" {
 			return "✗ requires a token and none is configured here\n" +
-				"              copy it from the host:  kling config set gateway.token <t>"
+				"              copy it from the host:  " + tokenPipeHint
 		}
 		return "✗ the gateway rejects the token from gateway.token (401)"
 	}

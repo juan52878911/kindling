@@ -78,7 +78,7 @@ construcción. Flags útiles:
 
 | Flag | Qué hace |
 |---|---|
-| `-bundle` | colapsa `node_modules` en **un** fichero con esbuild — medido: 1205 ficheros → 1, `initialize` en frío de ~7 s → ~2,5 s. La palanca mayor en Mac/arm64 |
+| `-bundle` | colapsa `node_modules` en **un** fichero con esbuild — medido: 1205 ficheros → 1, `initialize` en frío de ~7 s → ~2,5 s. La palanca mayor en Mac/arm64. esbuild va con versión fija y su binario se comprueba por sha512 (`ESBUILD_TGZ=<tarball>` para construir sin red) |
 | `-base node` / `-base python` | construye una **capa** pequeña sobre una base de runtime compartida en vez de una imagen monolítica ([imágenes por capas](https://github.com/juan52878911/kindling/blob/main/README.es.md#imágenes-por-capas-una-base-por-familia-de-runtime)); se elige sola si existe una base con el nombre de la familia |
 | `-env KEY=value` | hornea interruptores de entorno en el entrypoint (texto plano: para toggles, **no para secretos** — esos van [por MMDS](https://github.com/juan52878911/kindling/blob/main/README.es.md#secretos-que-nunca-tocan-un-snapshot-mmds)) |
 | `-cmd "..."` | sustituye el comando de arranque inferido (los entry points de PyPI se infieren por convención y se verifican al construir) |
@@ -632,7 +632,10 @@ curl http://127.0.0.1:8080/healthz              # abierto: es la sonda de vida
 ```
 
 El token se guarda en `gateway.token` en el host donde corre el gateway, y se copia al
-cliente con `kling config set gateway.token …` (`kling connect` lo hace por ti). Para
+cliente por una tubería, nunca como argumento (quedaría en `ps` y en el historial):
+`ssh <host-del-gateway> kling config get gateway.token -reveal | kling config set gateway.token -`
+(`kling connect` lo escribe luego en el fichero de configuración de cada cliente, no en
+una línea de comandos). Para
 saltárselo en desarrollo existe `-no-auth`, que insiste en escuchar en loopback. El
 gateway **nunca reenvía su propio token** a invitados ni a URLs de terceros — un servidor
 MCP comprometido no debe llevarse la credencial del agregador. Cuando un mismo token lo
@@ -653,10 +656,14 @@ costar CPU y RAM, y la siguiente llamada la trae de vuelta en milisegundos.
 ### Que sobreviva a los reinicios
 
 ```sh
-sudo install -m644 packaging/kling-gateway.service /etc/systemd/system/
+U=$(. /etc/default/kling; echo "$KLING_SOCKET_USER")   # a quién cede el daemon su socket
+sed -e "s/@KLING_USER@/$U/" -e "s/@KLING_GROUP@/$(id -gn "$U")/" packaging/kling-gateway.service \
+  | sudo tee /etc/systemd/system/kling-gateway.service >/dev/null
 sudo systemctl enable --now kling-gateway
 ```
 
+La unidad viene con `User=@KLING_USER@` (`make deploy` lo rellena igual): tiene que correr
+con el usuario dueño del socket del daemon, y sin rellenar no arranca.
 El gateway **no corre como root**: solo habla con el daemon por su socket y proxya. Todo
 el trabajo privilegiado se queda en `kling.service`.
 

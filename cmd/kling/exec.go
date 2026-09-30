@@ -24,7 +24,65 @@ type stringsFlag []string
 func (s *stringsFlag) String() string     { return strings.Join(*s, ",") }
 func (s *stringsFlag) Set(v string) error { *s = append(*s, v); return nil }
 
-// cmdExec es `kling exec [-i] [-e K=V] [-w DIR] [-timeout D] <ref> [--] cmd...`.
+// envFlags son -e y -env-file, comunes a exec y shell.
+//
+// `-e KEY=valor` deja el valor en el argv de kling (ps, historial): vale para
+// lo que no es secreto. Para un secreto, `-e KEY` toma el valor del entorno
+// de este proceso y `-env-file F` lo lee de un fichero (KEY=valor por línea).
+type envFlags struct {
+	env   stringsFlag
+	files stringsFlag
+}
+
+func (e *envFlags) register(fs *flag.FlagSet) {
+	fs.Var(&e.env, "e", "environment variable KEY=value, or KEY to take it from this environment (repeatable; KEY=value shows in ps)")
+	fs.Var(&e.files, "env-file", "file with KEY=value lines, # comments (repeatable; for secrets)")
+}
+
+// resolve devuelve la lista KEY=valor para el invitado.
+func (e *envFlags) resolve() ([]string, error) {
+	return resolveEnv(e.env, e.files, os.LookupEnv, os.ReadFile)
+}
+
+func resolveEnv(env, files []string, lookup func(string) (string, bool), read func(string) ([]byte, error)) ([]string, error) {
+	var out []string
+	for _, f := range files {
+		b, err := read(f)
+		if err != nil {
+			return nil, fmt.Errorf("-env-file: %w", err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line = strings.TrimPrefix(line, "export ")
+			k, _, ok := strings.Cut(line, "=")
+			if !ok || strings.TrimSpace(k) == "" || strings.ContainsAny(k, " \t") {
+				// Sin el contenido de la línea: puede ser un secreto.
+				return nil, fmt.Errorf("-env-file %s: line %d is not KEY=value", f, i+1)
+			}
+			out = append(out, line)
+		}
+	}
+	for _, kv := range env {
+		k, _, ok := strings.Cut(kv, "=")
+		if k == "" {
+			return nil, fmt.Errorf("-e %q: use KEY=value or KEY", kv)
+		}
+		if !ok {
+			v, set := lookup(k)
+			if !set {
+				return nil, fmt.Errorf("-e %s: not set in this environment", k)
+			}
+			kv = k + "=" + v
+		}
+		out = append(out, kv)
+	}
+	return out, nil
+}
+
+// cmdExec es `kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout D] <ref> [--] cmd...`.
 //
 // La salida remota va a la salida local según llega, stdout a stdout y stderr a
 // stderr, y kling termina con el código del comando remoto: se puede usar en
@@ -33,13 +91,13 @@ func cmdExec(args []string) (int, error) {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	host := hostFlag(fs)
 	stdin := fs.Bool("i", false, "send local stdin to the command (up to 1 MiB)")
-	var env stringsFlag
-	fs.Var(&env, "e", "environment variable KEY=value (repeatable)")
+	var ef envFlags
+	ef.register(fs)
 	dir := fs.String("w", "", "working directory inside the machine")
 	timeout := fs.Duration("timeout", 0, "kill the command after this long (default 5m, max 1h)")
 	maxOut := fs.Int("max-output", 0, "bytes of stdout and of stderr to keep (default 8 MiB, max 64 MiB)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: kling exec [-i] [-e K=V] [-w DIR] [-timeout 5m] <machine|sandbox> [--] <cmd> [args...]")
+		fmt.Fprintln(os.Stderr, "usage: kling exec [-i] [-e K=V|K] [-env-file F] [-w DIR] [-timeout 5m] <machine|sandbox> [--] <cmd> [args...]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -57,10 +115,9 @@ func cmdExec(args []string) (int, error) {
 	if len(cmd) == 0 {
 		return 2, errors.New("missing command")
 	}
-	for _, kv := range env {
-		if !strings.Contains(kv, "=") {
-			return 2, fmt.Errorf("-e %q: use KEY=value", kv)
-		}
+	env, err := ef.resolve()
+	if err != nil {
+		return 2, err
 	}
 	req := api.ExecRequest{Cmd: cmd, Dir: *dir, Env: env,
 		TimeoutSeconds: int(timeout.Seconds()), MaxOutputBytes: *maxOut}

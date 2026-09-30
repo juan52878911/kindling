@@ -249,45 +249,103 @@ func cmdConfig(args []string) error {
 		return configShow(args)
 	}
 	switch args[0] {
-	case "show", "get":
+	case "get":
+		// get <clave> [-reveal]: una sola clave, para scripts.
+		if len(args) >= 2 && !strings.HasPrefix(args[1], "-") {
+			return configGet(os.Stdout, args[1], args[2:])
+		}
+		return configShow(args[1:])
+	case "show":
 		return configShow(args[1:])
 	case "path":
 		fmt.Println(config.Path())
 		return nil
 	case "set":
-		if len(args) < 3 {
-			return fmt.Errorf("usage: kling config set <key> <value>\n" +
-				"  e.g.: kling config set defaults.image min")
-		}
-		cfg, err := config.Load()
-		if err != nil {
-			return err
-		}
-		shown := ""
-		if ext, key, ck := extensionKey(args[1]); ck != nil {
-			if err := cfg.SetExtension(ext, key, ck.Type, args[2]); err != nil {
-				return err
-			}
-			shown = cfg.ExtensionValue(ext, key, ck.Type)
-		} else if err := cfg.Set(args[1], args[2]); err != nil {
-			return err
-		}
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-		if shown != "" {
-			fmt.Printf("%s = %s\n", args[1], shown)
+		return configSet(os.Stdout, os.Stdin, args[1:])
+	default:
+		return fmt.Errorf("usage: kling config [show|path|get <key> [-reveal]|set <key> <value|->]")
+	}
+}
+
+// configGet imprime el valor de una clave. Los secretos salen enmascarados
+// salvo con -reveal, que existe para pasar el token de un host a otro por una
+// tubería sin que toque la línea de comandos:
+//
+//	ssh gw kling config get gateway.token -reveal | kling config set gateway.token -
+func configGet(w io.Writer, key string, args []string) error {
+	fs := flag.NewFlagSet("config get", flag.ContinueOnError)
+	reveal := fs.Bool("reveal", false, "print secrets in full (for a pipe, not a screen)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if *reveal && key == "gateway.token" {
+		fmt.Fprintln(w, cfg.Gateway.Token)
+		return nil
+	}
+	if ext, k, ck := extensionKey(key); ck != nil {
+		fmt.Fprintln(w, cfg.ExtensionValue(ext, k, ck.Type))
+		return nil
+	}
+	for _, kv := range cfg.Keys() {
+		if kv[0] == key {
+			fmt.Fprintln(w, kv[1])
 			return nil
 		}
-		// Se reimprime desde la configuración ya guardada, no desde el
-		// argumento: así los secretos salen enmascarados igual que en
-		// `config show`. El valor suele venir de un `$(...)` que quien lo
-		// teclea nunca llegó a ver, y no hay razón para enseñarlo ahora.
-		fmt.Printf("%s = %s\n", args[1], valueOf(cfg, args[1]))
-		return nil
-	default:
-		return fmt.Errorf("usage: kling config [show|path|set <key> <value>]")
 	}
+	return fmt.Errorf("unknown key %q", key)
+}
+
+// configSet es `kling config set <clave> <valor>`. Con el valor `-` (o
+// `-stdin`) lo lee de stdin, hasta el primer salto de línea: un secreto como
+// argumento queda en `ps` y en el historial del shell.
+func configSet(w io.Writer, stdin io.Reader, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: kling config set <key> <value|->\n" +
+			"  e.g.: kling config set defaults.image min\n" +
+			"        kling config set gateway.token - < token-file   (a secret: from stdin, not argv)")
+	}
+	key, value := args[0], args[1]
+	if value == "-" || value == "-stdin" {
+		b, err := io.ReadAll(io.LimitReader(stdin, 64<<10))
+		if err != nil {
+			return fmt.Errorf("reading the value from stdin: %w", err)
+		}
+		value, _, _ = strings.Cut(string(b), "\n")
+		value = strings.TrimRight(value, "\r")
+		if value == "" {
+			return fmt.Errorf("no value on stdin for %s", key)
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	shown := ""
+	if ext, k, ck := extensionKey(key); ck != nil {
+		if err := cfg.SetExtension(ext, k, ck.Type, value); err != nil {
+			return err
+		}
+		shown = cfg.ExtensionValue(ext, k, ck.Type)
+	} else if err := cfg.Set(key, value); err != nil {
+		return err
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	if shown != "" {
+		fmt.Fprintf(w, "%s = %s\n", key, shown)
+		return nil
+	}
+	// Se reimprime desde la configuración ya guardada, no desde el
+	// argumento: así los secretos salen enmascarados igual que en
+	// `config show`. El valor suele venir de un `$(...)` que quien lo
+	// teclea nunca llegó a ver, y no hay razón para enseñarlo ahora.
+	fmt.Fprintf(w, "%s = %s\n", key, valueOf(cfg, key))
+	return nil
 }
 
 // extensionKey reconoce "<extensión>.<clave>" cuando la clave la declara una
