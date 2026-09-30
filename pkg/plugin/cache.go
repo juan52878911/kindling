@@ -41,14 +41,20 @@ const (
 // quieto es lo que hace git con su índice por lo mismo.
 var racyWindow = 2 * time.Second
 
-// DefaultManifestCache es dónde guarda kling la caché de manifiestos, o "" si
-// no hay directorio de caché del usuario.
+// DefaultManifestCache es dónde guarda kling la caché de manifiestos:
+// $XDG_STATE_HOME/kling/plugins, o ~/.local/state/kling/plugins, como el estado
+// de kling-db. "" si no hay HOME. No va en ~/.cache: un `sudo` que conserva el
+// HOME lo deja a veces de root, y entonces no habría caché.
 func DefaultManifestCache() string {
-	d, err := os.UserCacheDir()
-	if err != nil || d == "" {
-		return ""
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		h, err := os.UserHomeDir()
+		if err != nil || h == "" {
+			return ""
+		}
+		base = filepath.Join(h, ".local", "state")
 	}
-	return filepath.Join(d, "kindling", "plugins", "manifests.json")
+	return filepath.Join(base, "kling", "plugins", "manifests.json")
 }
 
 // fileID es la identidad de un binario. Si cualquier campo cambia, la entrada
@@ -193,6 +199,27 @@ func privateDir(dir string) error {
 	return nil
 }
 
+// mkdirMine crea dir (0700) solo si el antepasado más cercano que ya existe es
+// de este usuario: un kling con sudo que conserva el HOME no deja directorios
+// de root en el HOME de otro, que luego ese otro no podría usar.
+func mkdirMine(dir string) error {
+	for p := dir; ; {
+		fi, err := os.Stat(p)
+		if err == nil {
+			if !ownedByMe(fi) {
+				return fmt.Errorf("%s: %w", p, errNotPrivate)
+			}
+			break
+		}
+		up := filepath.Dir(p)
+		if up == p {
+			break
+		}
+		p = up
+	}
+	return os.MkdirAll(dir, 0o700)
+}
+
 // readPrivate lee path solo si él y su directorio son de este usuario y de
 // nadie más, sin seguir un enlace en el último componente.
 func readPrivate(path string) ([]byte, error) {
@@ -221,7 +248,7 @@ func readPrivate(path string) ([]byte, error) {
 // directorio 0700. Dos kling a la vez: gana el último, y nadie lee a medias.
 func writePrivate(path string, raw []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirMine(dir); err != nil {
 		return err
 	}
 	if err := privateDir(dir); err != nil {

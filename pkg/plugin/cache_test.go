@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,22 @@ func TestCacheInvalidaSiCambiaElBinario(t *testing.T) {
 		t.Fatalf("tras sobrescribir en su sitio salió la versión %q", v)
 	}
 
+	// Sobrescrito y con el mtime de antes restaurado (touch -d, cp -p): solo
+	// cambia el ctime, que no se puede fijar a mano.
+	fi, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoverCached(t, []string{d}, cache, "0.5.0") // v2 ya en la caché
+	time.Sleep(10 * time.Millisecond)
+	counting(t, d, "4")
+	if err := os.Chtimes(bin, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if v := cntVersion(t, discoverCached(t, []string{d}, cache, "0.5.0")); v != "4" {
+		t.Fatalf("con el mtime restaurado salió la versión %q", v)
+	}
+
 	// Reemplazado con rename, como hace `kling plugins install`.
 	nd := t.TempDir()
 	counting(t, nd, "3")
@@ -131,9 +148,9 @@ func TestCacheInvalidaSiCambiaElBinario(t *testing.T) {
 	// Un chmod también cambia la identidad.
 	os.Chmod(bin, 0o700)
 	discoverCached(t, []string{d}, cache, "0.5.0")
-	// Una vez por cada binario distinto: v1, v2, v3 y el chmod.
-	if n := asked(t, bin); n != 4 {
-		t.Fatalf("se pidió el manifiesto %d veces, se esperaban 4", n)
+	// Una vez por cada binario distinto: v1, v2, v4, v3 y el chmod.
+	if n := asked(t, bin); n != 5 {
+		t.Fatalf("se pidió el manifiesto %d veces, se esperaban 5", n)
 	}
 }
 
@@ -385,5 +402,37 @@ func BenchmarkDiscover(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestCacheRutaPorDefecto(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/tmp/estado")
+	if p := DefaultManifestCache(); p != "/tmp/estado/kling/plugins/manifests.json" {
+		t.Fatalf("con XDG_STATE_HOME: %s", p)
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "/home/alguien")
+	if p := DefaultManifestCache(); p != "/home/alguien/.local/state/kling/plugins/manifests.json" {
+		t.Fatalf("sin XDG_STATE_HOME: %s", p)
+	}
+}
+
+// Bajo un directorio ajeno la caché no crea nada aunque pueda: /tmp es de root
+// y cualquiera escribe en él. Es lo que evita que un sudo con el HOME del
+// usuario le deje directorios de root.
+func TestCacheNoCreaBajoDirectoriosAjenos(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("como root todo es suyo")
+	}
+	if fi, err := os.Stat("/tmp"); err != nil || ownedByMe(fi) {
+		t.Skip("/tmp no es de otro usuario")
+	}
+	d := filepath.Join("/tmp", fmt.Sprintf("kling-test-%d", time.Now().UnixNano()), "c")
+	defer os.RemoveAll(filepath.Dir(d))
+	if err := writePrivate(filepath.Join(d, "manifests.json"), []byte("{}")); err == nil {
+		t.Fatal("se escribió bajo /tmp")
+	}
+	if _, err := os.Stat(d); !os.IsNotExist(err) {
+		t.Fatalf("se creó %s: %v", d, err)
 	}
 }
