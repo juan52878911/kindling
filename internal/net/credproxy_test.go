@@ -63,7 +63,7 @@ func TestCredproxyBloqueaLoMismoQueElFirewall(t *testing.T) {
 // de los dominios desviados: error y ningún proxy escuchando.
 func TestSetCredentialsSinResolverFalla(t *testing.T) {
 	n := &Net{NS: "kl-test-sinres", HostIP: "127.0.0.1"}
-	creds := []credproxy.Credential{{Domain: "example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s"}}
+	creds := []credproxy.Credential{{Domain: "example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s-clave-de-prueba"}}
 	if err := SetCredentials(n, creds, "", nil); err == nil {
 		t.Fatal("debería fallar sin resolver")
 	}
@@ -91,7 +91,7 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 		resolversMu.Unlock()
 	}()
 	n := &Net{NS: ns, HostIP: "127.0.0.1"}
-	creds := []credproxy.Credential{{Domain: "API.Example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s"}}
+	creds := []credproxy.Credential{{Domain: "API.Example.com", Placeholder: credproxy.PlaceholderPrefix + "x", Secret: "s-clave-de-prueba"}}
 	audit := filepath.Join(t.TempDir(), credproxy.AuditFile)
 	if err := SetCredentials(n, creds, audit, nil); err != nil {
 		t.Skipf("no se pudo escuchar en 127.0.0.1:%d: %v", credPort, err)
@@ -137,5 +137,38 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 	b, err = os.ReadFile(audit)
 	if err != nil || !strings.Contains(string(b), `"reason":"no_credential"`) || !strings.Contains(string(b), `"denied":true`) {
 		t.Fatalf("registro tras parar el proxy: %q (%v)", b, err)
+	}
+}
+
+// El derrame del cuerpo (con la clave dentro) va al directorio que fija el
+// daemon, 0700 y vaciado al arrancar; sin fijarlo, "" (el proxy no escribe a
+// disco), NUNCA os.TempDir(). Antes se leía $KLING_ROOT, que el daemon no
+// tiene en su entorno (recibe -root), y el fichero caía en /tmp.
+func TestCredTempDirLoFijaElDaemon(t *testing.T) {
+	t.Setenv("KLING_ROOT", t.TempDir())
+	credTmp.Store("")
+	t.Cleanup(func() { credTmp.Store("") })
+	if d := credTempDir(); d != "" {
+		t.Fatalf("sin SetCredTempDir: %q", d)
+	}
+	dir := filepath.Join(t.TempDir(), "credtmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resto := filepath.Join(dir, "kindling-credproxy-9.tmp")
+	if err := os.WriteFile(resto, []byte("sk_live_x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetCredTempDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if d := credTempDir(); d != dir {
+		t.Fatalf("credTempDir = %q, quería %q", d, dir)
+	}
+	if _, err := os.Stat(resto); !os.IsNotExist(err) {
+		t.Errorf("no borró el temporal que quedó: %v", err)
+	}
+	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
+		t.Errorf("permisos %v", fi.Mode().Perm())
 	}
 }

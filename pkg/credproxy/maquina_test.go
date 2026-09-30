@@ -381,7 +381,7 @@ func TestSoloMaquinas(t *testing.T) {
 	if p.SoloMaquinas() {
 		t.Fatal("sin credenciales no hay nada que servir")
 	}
-	maq := Credential{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: PlaceholderPrefix + "a", Secret: "s",
+	maq := Credential{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: PlaceholderPrefix + "a", Secret: "s-clave-de-prueba",
 		Kind: KindPostgres, Port: 5432, User: "app", Database: "shop"}
 	credMaquina(&maq)
 	if _, err := p.SetCredentials([]Credential{maq}); err != nil {
@@ -390,14 +390,14 @@ func TestSoloMaquinas(t *testing.T) {
 	if !p.SoloMaquinas() {
 		t.Fatal("una credencial hacia una máquina")
 	}
-	web := Credential{Env: "API_KEY", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "b", Secret: "k"}
+	web := Credential{Env: "API_KEY", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "b", Secret: "k-clave-de-prueba"}
 	if _, err := p.SetCredentials([]Credential{maq, web}); err != nil {
 		t.Fatal(err)
 	}
 	if p.SoloMaquinas() {
 		t.Fatal("con una credencial HTTP no son solo máquinas")
 	}
-	pg := Credential{Env: "PG2", Domain: "db.example.com", Placeholder: PlaceholderPrefix + "c", Secret: "s",
+	pg := Credential{Env: "PG2", Domain: "db.example.com", Placeholder: PlaceholderPrefix + "c", Secret: "s-clave-de-prueba",
 		Kind: KindPostgres, Port: 5432, User: "app", Database: "shop"}
 	if _, err := p.SetCredentials([]Credential{maq, pg}); err != nil {
 		t.Fatal(err)

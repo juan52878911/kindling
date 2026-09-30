@@ -39,10 +39,9 @@ func ParseMode(s string) (Mode, error) {
 	return "", fmt.Errorf("unknown egress policy: %q (use none, internet, or allowlist)", s)
 }
 
-// blocked es la lista de firewall.go del núcleo MÁS tres rangos que en Linux no
-// hacen falta porque el kernel ya no los enruta (0/8, multicast y reservados):
-// aquí es este proceso quien abre el socket, y un connect() a 0.0.0.0 en macOS
-// llega a localhost.
+// blocked es la misma lista de firewall.go del núcleo (y de pkg/credproxy):
+// también 0/8, multicast y reservados, porque aquí es este proceso quien abre
+// el socket, y un connect() a 0.0.0.0 en macOS llega a localhost.
 var blocked = mustPrefixes(
 	"10.0.0.0/8",     // privada
 	"172.16.0.0/12",  // privada (incluye la 172.16.0.0/30 del invitado)

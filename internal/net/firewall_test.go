@@ -29,6 +29,12 @@ func TestIsBlockedIPTapaLasRedesQueUnInvitadoNoDebeAlcanzarJamas(t *testing.T) {
 		{"127.0.0.1", "el loopback del anfitrion"},
 		{"127.255.255.254", "el borde alto de 127/8"},
 		{"100.64.0.1", "CGNAT"},
+		{"0.0.0.0", "hacia 0.0.0.0 el host se llama a sí mismo"},
+		{"0.1.2.3", "el resto de 0/8"},
+		{"224.0.0.251", "multicast (mDNS)"},
+		{"239.255.255.250", "multicast (SSDP)"},
+		{"240.0.0.1", "reservada"},
+		{"255.255.255.255", "broadcast"},
 	}
 	for _, c := range prohibidas {
 		ip := stdnet.ParseIP(c.ip)

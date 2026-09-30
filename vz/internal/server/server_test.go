@@ -708,7 +708,7 @@ func TestPausaDelNucleoDuranteLaDelRegulador(t *testing.T) {
 // desvía sus dominios a la pasarela; uno inválido no toca el anterior.
 func TestKlingCredentials(t *testing.T) {
 	r := newRig(t)
-	const cred = `{"credentials":[{"env":"API_KEY","domain":"API.example.com","placeholder":"kling-cred-abc","secret":"sk-1"}]}`
+	const cred = `{"credentials":[{"env":"API_KEY","domain":"API.example.com","placeholder":"kling-cred-abc","secret":"sk-1-clave-de-prueba"}]}`
 	r.mustFail("PUT", "/kling/credentials", cred, "no credential proxy")
 
 	gw := netip.MustParseAddr("172.16.0.1")
@@ -718,7 +718,7 @@ func TestKlingCredentials(t *testing.T) {
 	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
 	r.srv.d.CredIP = gw
 	// El daemon lo pregunta antes de mandar una credencial Postgres.
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/credentials", cred, "need egress allowlist")
@@ -729,15 +729,15 @@ func TestKlingCredentials(t *testing.T) {
 	if ip, ok := r.srv.d.Policy.CredHost("api.example.com"); !ok || ip != gw {
 		t.Fatal("the credential domain is not diverted to the gateway")
 	}
-	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"domain":"*.example.com","placeholder":"kling-cred-x","secret":"s"}]}`, "exact host name")
-	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"domain":"b.example.com","placeholder":"nope","secret":"s"}]}`, "invalid placeholder")
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"domain":"*.example.com","placeholder":"kling-cred-x","secret":"s-clave-de-prueba"}]}`, "exact host name")
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"domain":"b.example.com","placeholder":"nope","secret":"s-clave-de-prueba"}]}`, "invalid placeholder")
 	if _, ok := r.srv.d.Policy.CredHost("api.example.com"); !ok {
 		t.Fatal("a rejected set must keep the previous one")
 	}
 
 	// allow viaja hasta el proxy y se cablea igual que en Linux: casa GET pero
 	// no POST sobre la misma ruta.
-	const credAllow = `{"credentials":[{"env":"API_KEY","domain":"api.example.com","placeholder":"kling-cred-abc","secret":"sk-1","allow":["GET /v1/balance"]}]}`
+	const credAllow = `{"credentials":[{"env":"API_KEY","domain":"api.example.com","placeholder":"kling-cred-abc","secret":"sk-1-clave-de-prueba","allow":["GET /v1/balance"]}]}`
 	r.must("PUT", "/kling/credentials", credAllow)
 	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/v1/balance", nil)
 	req.Host = "api.example.com"
@@ -752,16 +752,16 @@ func TestKlingCredentials(t *testing.T) {
 	if r.srv.d.Credentials.PGActivo() {
 		t.Fatal("PGActivo without a postgres credential")
 	}
-	const credPG = `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres","port":5432,"user":"app","database":"appdb"}]}`
+	const credPG = `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw-clave-de-prueba","kind":"postgres","port":5432,"user":"app","database":"appdb"}]}`
 	if out := r.must("PUT", "/kling/credentials", credPG); !strings.Contains(out, `"domains":["db.example.com"]`) {
 		t.Fatalf("PUT /kling/credentials (postgres) = %s", out)
 	}
 	if !r.srv.d.Credentials.PGActivo() {
 		t.Fatal("the postgres credential did not reach the proxy")
 	}
-	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres"}]}`, "needs -user")
+	r.mustFail("PUT", "/kling/credentials", `{"credentials":[{"env":"PGPASSWORD","domain":"db.example.com","placeholder":"kling-cred-pg","secret":"pw-clave-de-prueba","kind":"postgres"}]}`, "needs -user")
 	// Y una MySQL, en su papel de MySQL.
-	const credMy = `{"credentials":[{"env":"MYSQL_PWD","domain":"mysql.example.com","placeholder":"kling-cred-my","secret":"pw","kind":"mysql","user":"app","database":"appdb"}]}`
+	const credMy = `{"credentials":[{"env":"MYSQL_PWD","domain":"mysql.example.com","placeholder":"kling-cred-my","secret":"pw-clave-de-prueba","kind":"mysql","user":"app","database":"appdb"}]}`
 	if out := r.must("PUT", "/kling/credentials", credMy); !strings.Contains(out, `"domains":["mysql.example.com"]`) {
 		t.Fatalf("PUT /kling/credentials (mysql) = %s", out)
 	}
@@ -795,7 +795,7 @@ func TestKlingGraph(t *testing.T) {
 	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
 	r.srv.d.CredIP = gw
 	const aristas = `{"links":[{"host":"api.graph","port":8081}],"hosts":["api.graph","db.graph"]}`
-	const credMaq = `{"credentials":[{"env":"PGPASSWORD","domain":"db.graph","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres","port":5432,"user":"app","database":"shop","upstream_tls":"disable","upstream_machine":"0123456789abcdef0123456789abcdef","upstream_owner":"0123456789abcdef"}]}`
+	const credMaq = `{"credentials":[{"env":"PGPASSWORD","domain":"db.graph","placeholder":"kling-cred-pg","secret":"pw-clave-de-prueba","kind":"postgres","port":5432,"user":"app","database":"shop","upstream_tls":"disable","upstream_machine":"0123456789abcdef0123456789abcdef","upstream_owner":"0123456789abcdef"}]}`
 
 	// Sin broker: ni aristas, ni credenciales a otra máquina, ni capacidad.
 	r.mustFail("PUT", "/kling/graph", aristas, "no link broker")
@@ -807,7 +807,7 @@ func TestKlingGraph(t *testing.T) {
 	r.srv.d.Graph = grafo.NewConDial(func(context.Context) (*net.UnixConn, error) {
 		return nil, errors.New("no daemon in this test")
 	}, nil, nil)
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","graph-link"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","graph-link"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8080}],"hosts":["api.graph"]}`, "guest agent")
@@ -832,8 +832,8 @@ func TestKlingGraph(t *testing.T) {
 	if !r.srv.d.Credentials.SoloMaquinas() {
 		t.Fatal("the machine credential did not reach the proxy")
 	}
-	const mezcla = `{"credentials":[{"env":"PGPASSWORD","domain":"db.graph","placeholder":"kling-cred-pg","secret":"pw","kind":"postgres","port":5432,"user":"app","database":"shop","upstream_tls":"disable","upstream_machine":"0123456789abcdef0123456789abcdef","upstream_owner":"0123456789abcdef"},` +
-		`{"env":"API_KEY","domain":"api.example.com","placeholder":"kling-cred-abc","secret":"sk-1"}]}`
+	const mezcla = `{"credentials":[{"env":"PGPASSWORD","domain":"db.graph","placeholder":"kling-cred-pg","secret":"pw-clave-de-prueba","kind":"postgres","port":5432,"user":"app","database":"shop","upstream_tls":"disable","upstream_machine":"0123456789abcdef0123456789abcdef","upstream_owner":"0123456789abcdef"},` +
+		`{"env":"API_KEY","domain":"api.example.com","placeholder":"kling-cred-abc","secret":"sk-1-clave-de-prueba"}]}`
 	r.mustFail("PUT", "/kling/credentials", mezcla, "need egress allowlist")
 
 	// La red nace con las aristas.

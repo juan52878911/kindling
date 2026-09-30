@@ -257,7 +257,7 @@ func TestBrokerTopePorOrigen(t *testing.T) {
 func TestBrokerAttach(t *testing.T) {
 	m := escenaModeloA(t)
 	eco := nuevoEcoBroker(t, m)
-	cred := credproxy.Credential{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-a", Secret: "s",
+	cred := credproxy.Credential{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-a", Secret: "s-clave-de-prueba",
 		Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb",
 		UpstreamMachine: idCopia, UpstreamOwner: "local", UpstreamTLS: credproxy.UpstreamTLSDisable}
 	req := linkbroker.Request{Kind: linkbroker.KindMachine, Machine: idCopia, Owner: "local", Port: 5432}
