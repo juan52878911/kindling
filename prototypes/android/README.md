@@ -367,7 +367,9 @@ y, si existe, `footprint`.
   duerme o hay animaciones; `fase0.sh` ya pone `svc power stayon`, quita el
   bloqueo y las animaciones.
 - **Render por CPU**: 15 FPS por defecto sin GPU. Vale para dumps y capturas, no
-  para vídeo o juegos. `vz` no expone GPU al invitado.
+  para vídeo o juegos. `vz` no expone GPU al invitado. En Proxmox sí hay GPU
+  (medido en [`docs/gpu.md`](docs/gpu.md)); el diseño para llevarla a los
+  teléfonos con frontera de VM está en [`docs/gpu-proxmox.md`](docs/gpu-proxmox.md).
 - **`/data` lleno** ("No space left" al instalar): `/data` va al overlay de la
   VM, que en kindling mide **512 MiB fijos** (`defaultOverlayMiB`). Reconstruye
   con `DATA_MODE=tmpfs DATA_SIZE=2G` (cuenta contra la RAM del invitado).
