@@ -70,6 +70,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `kling mcp health` sale con error si un servicio no responde aunque no se pueda
   grabar su salud (antes el fallo al grabar saltaba la cuenta y salía con 0), y dice
   siempre el fallo de la sonda.
+- `kling mcp heal` ya no dice "all healthy" con un servicio caído cuando no puede
+  grabar su salud: lo cuenta como roto, intenta curarlo y, si no pudo grabar, sale con
+  1 (la unidad falla; el 3 sigue siendo "sondeé y grabé, algo sigue roto").
 
 ### Seguridad
 
