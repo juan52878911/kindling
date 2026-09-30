@@ -38,6 +38,9 @@ func extensions() *plugin.Registry {
 			Version:  strings.TrimPrefix(Version, "v"),
 			Disabled: disabled,
 			Builtins: builtinExtensions(),
+			// Sin ella, cada `kling <comando de extensión>` ejecutaría antes
+			// cada extensión instalada para leer su manifiesto.
+			ManifestCache: plugin.DefaultManifestCache(),
 		})
 	})
 	return extReg

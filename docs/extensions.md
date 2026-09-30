@@ -261,6 +261,20 @@ instaladas. `kling` solo busca cuando le hace falta: ante un comando que no es
 del núcleo, y en `help`, `completion`, `status`, `config`, `doctor` y
 `plugins`; `kling ps` no ejecuta nada de nadie.
 
+`kling` guarda lo que imprimió `--kling-manifest` en
+`$XDG_STATE_HOME/kling/plugins/manifests.json` (o
+`~/.local/state/kling/plugins/`), para no ejecutar cada extensión en cada
+invocación: con una extensión Go instalada eso eran ~5 ms en cada `kling db …`
+y en cada `git checkout` con el gancho de `kling db branch`. La entrada vale
+mientras el binario sea el mismo fichero —ruta, inodo, tamaño, modo, dueño,
+mtime y ctime— y la versión de `kling` no cambie; lo que sale de la caché se
+valida igual que lo recién ejecutado. Por eso **el manifiesto tiene que depender
+solo del binario**: nada del entorno, de la configuración ni de la hora. Un
+binario cambiado hace menos de 2 segundos no se guarda, y reinstalar o
+recompilar la extensión la invalida sola; borrar el fichero es siempre seguro.
+El directorio tiene que ser 0700 y el fichero 0600 y del usuario: si no, `kling`
+lo ignora y pregunta a cada extensión como antes.
+
 Los comandos del núcleo ganan siempre: una extensión que declare `ps` no lo
 recibe y `kling plugin ls` lo marca. Entre dos extensiones gana la primera.
 

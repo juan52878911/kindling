@@ -10,6 +10,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling <comando de extensión>` ya no ejecuta cada extensión para leer su manifiesto.**
+  La salida de `--kling-manifest` se guarda en `~/.local/state/kling/plugins/manifests.json`
+  (0600), válida mientras el binario sea el mismo fichero (inodo, tamaño, mtime, ctime…) y
+  la versión de `kling` no cambie; lo que sale de ella se valida como siempre. En el lab
+  (CT 105) `kling db branch -ls` pasa de 19,4 a 11,0 ms, y lo mismo gana cada `git checkout`
+  con el gancho de `kling db branch`. Las extensiones tienen que imprimir un manifiesto que
+  dependa solo del binario (`docs/extensions.md`).
 - **`kling db branch`: el `git checkout` ya no espera a nada que su rama no necesite.**
   Medido de extremo a extremo con `scripts/bench-db-branch.sh` (N = 20, golden `pg` de
   1 GiB; datos en `docs/bench-data/db-branch-20260929/`): en Linux (CT 105) volver a una
