@@ -77,6 +77,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   la daba por hecha y, con el daemon ya bien, los fallos siguientes no se anotaban), y
   la línea de salud de `kling status` ya no pinta ✓ con un veredicto de más de 12 h
   (el doble del intervalo de `kling-heal.timer`) o sin fecha: cuenta como desconocido.
+- `tools/list` sigue `nextCursor` en el catálogo del gateway y en `kling mcp import`
+  (antes, de un servidor que pagina solo se veía la primera página), con tope de 64
+  páginas y 4096 herramientas; un cursor repetido es un error.
 
 ### Seguridad
 

@@ -958,14 +958,55 @@ func introspectConSesion(post poster) (string, string, []mcp.ToolSpec, error) {
 	// a nada más. Es parte del handshake y omitirla deja a algunos colgados.
 	_, _, _ = post(sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 
-	_, raw, err = post(sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	if err != nil {
-		return name, sid, nil, fmt.Errorf("tools/list: %w", err)
+	// tools/list pagina con nextCursor: se siguen las páginas (con tope) o un
+	// servidor que pagina solo enseñaría la primera.
+	var tools []mcp.ToolSpec
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxToolPages {
+			return name, sid, nil, fmt.Errorf("tools/list: more than %d pages", maxToolPages)
+		}
+		params := ""
+		if cursor != "" {
+			c, _ := json.Marshal(map[string]string{"cursor": cursor})
+			params = `,"params":` + string(c)
+		}
+		_, raw, err = post(sid, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list"%s}`, 2+page, params))
+		if err != nil {
+			return name, sid, nil, fmt.Errorf("tools/list: %w", err)
+		}
+		next, pageTools, perr := parseToolsPage(raw)
+		if perr != nil {
+			return name, sid, nil, perr
+		}
+		tools = append(tools, pageTools...)
+		if len(tools) > maxTools {
+			return name, sid, nil, fmt.Errorf("tools/list: more than %d tools", maxTools)
+		}
+		if next == "" {
+			return name, sid, tools, nil
+		}
+		if seen[next] {
+			return name, sid, nil, fmt.Errorf("tools/list: the server repeated the cursor %q", next)
+		}
+		seen[next] = true
+		cursor = next
 	}
+}
 
+// Topes de la paginación de tools/list (los mismos que en el gateway).
+const (
+	maxToolPages = 64
+	maxTools     = 4096
+)
+
+// parseToolsPage lee una página de tools/list: su nextCursor y sus herramientas.
+func parseToolsPage(raw []byte) (string, []mcp.ToolSpec, error) {
 	var out struct {
 		Result struct {
-			Tools []mcp.ToolSpec `json:"tools"`
+			Tools      []mcp.ToolSpec `json:"tools"`
+			NextCursor string         `json:"nextCursor"`
 		} `json:"result"`
 		Error *struct {
 			Message string `json:"message"`
@@ -985,13 +1026,13 @@ func introspectConSesion(post poster) (string, string, []mcp.ToolSpec, error) {
 		if body == "" {
 			body = "(empty response)"
 		}
-		return name, sid, nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
+		return "", nil, fmt.Errorf("couldn't understand the response to tools/list (%w).\n"+
 			"The server replied: %s", err, body)
 	}
 	if out.Error != nil {
-		return name, sid, nil, fmt.Errorf("tools/list: %s", out.Error.Message)
+		return "", nil, fmt.Errorf("tools/list: %s", out.Error.Message)
 	}
-	return name, sid, out.Result.Tools, nil
+	return out.Result.NextCursor, out.Result.Tools, nil
 }
 
 // splitDomains parte una lista de dominios separada por comas, recortando
