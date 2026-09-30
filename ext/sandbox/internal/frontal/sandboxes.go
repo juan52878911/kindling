@@ -142,7 +142,8 @@ func relojTTL(mc *api.Machine) time.Time {
 
 // esSandboxDe dice si la máquina es un sandbox de este tenant.
 func esSandboxDe(mc *api.Machine, t *Tenant) bool {
-	return mc.Labels[api.LabelKind] == api.KindSandbox && mc.Labels[LabelTenant] == t.Nombre
+	return mc.Labels[api.LabelKind] == api.KindSandbox && mc.Labels[LabelTenant] == t.Nombre &&
+		plantilla.DelFrontal(mc.Labels)
 }
 
 // ---- consultas a los hosts
@@ -706,9 +707,12 @@ func (s *Servidor) reclamarPrecalentada(ctx context.Context, t *Tenant, p CrearP
 
 // esPrecalentadaDe es el contrato con el pool del paquete plantilla: una
 // máquina kind=sandbox, de esta plantilla, sin tenant, viva o dormida, sin red
-// y que duerme al vencer.
+// y que duerme al vencer. Y del frontal (sin kling.owner): las etiquetas de
+// arriba las puede poner cualquier inquilino del daemon, que conservaría exec y
+// ficheros de lo que se le diera a un cliente.
 func esPrecalentadaDe(mc *api.Machine, template string) bool {
-	if mc.Labels[api.LabelKind] != api.KindSandbox || mc.Labels[LabelTemplate] != template || mc.Labels[LabelTenant] != "" {
+	if mc.Labels[api.LabelKind] != api.KindSandbox || mc.Labels[LabelTemplate] != template || mc.Labels[LabelTenant] != "" ||
+		!plantilla.DelFrontal(mc.Labels) {
 		return false
 	}
 	if mc.State != api.StateRunning && mc.State != api.StateWarm {
@@ -740,7 +744,8 @@ func (s *Servidor) Limpiar(ctx context.Context) {
 	}
 	for h, ms := range porHost {
 		for _, mc := range ms {
-			if mc.Labels[api.LabelKind] != api.KindSandbox || mc.Labels[LabelTenant] == "" {
+			if mc.Labels[api.LabelKind] != api.KindSandbox || mc.Labels[LabelTenant] == "" ||
+				!plantilla.DelFrontal(mc.Labels) {
 				continue
 			}
 			desde := relojTTL(mc)

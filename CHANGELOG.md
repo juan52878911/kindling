@@ -75,6 +75,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   disparadores apagados), `point` y los arrays de texto. **Cambio de comportamiento:**
   un clon que antes pasaba puede pararse ahora; se resuelve con una regla por columna
   (`keep` si no es personal) o con `-allow-unmasked`.
+- **`kindling-sandbox` no reparte máquinas ni grafos de otro inquilino del daemon.**
+  Reconocía las precalentadas, los sandboxes de un cliente, los grafos del fondo y el
+  snapshot de una plantilla solo por etiquetas y nombres que cualquier inquilino puede
+  poner: un inquilino A creaba un sandbox con `kind=sandbox,template=py`, el frontal se
+  lo daba al cliente B y A conservaba exec y ficheros. Ahora exige `kling.owner` vacío
+  en todos esos caminos ([authz.md](docs/authz.md#el-dueño-klingowner)).
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
