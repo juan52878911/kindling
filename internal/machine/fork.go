@@ -139,6 +139,7 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 		return "", nil, err
 	}
 
+	t := nuevosTiempos()
 	// Antes de reservar nada: la espera a "listo" puede durar minutos.
 	if !opt.SkipReady {
 		if err := m.listoParaCongelar(ctx, src.ID, opt.ReadyWait); err != nil {
@@ -146,6 +147,7 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 		}
 	}
 
+	t.marca("ready")
 	name := nombreSnapshotFork(src.ID)
 	// Reservado de principio a fin: entre que Commit termina y la primera
 	// restauración reserva por su cuenta, el snapshot no tiene marca, ni
@@ -164,12 +166,13 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 
 	// La comprobación de credenciales se repite con el cerrojo de la máquina:
 	// entre la de arriba y la pausa, un SetCredentials pudo darle alguna.
-	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales, false); err != nil {
+	if _, err := m.commit(ctx, src.ID, name, false, m.forkSinCredenciales, false, true); err != nil {
 		return "", nil, fmt.Errorf("forking %s: %w", src.Name, err)
 	}
 	if err := os.WriteFile(filepath.Join(m.snapDir(name), forkMarca), []byte(src.ID+"\n"), 0o644); err != nil {
 		return "", nil, fmt.Errorf("marking fork snapshot %s: %w", name, err)
 	}
+	t.marca("commit")
 
 	ttl, onTTL := opt.TTLSeconds, opt.OnTTL
 	if ttl == 0 {
@@ -194,13 +197,15 @@ func (m *Manager) Fork(ctx context.Context, ref string, opt ForkOptions) (snapNa
 			return "", nil, fmt.Errorf("fork %d of %d from %s: %w", i+1, n, src.Name, err)
 		}
 		out = append(out, mc)
+		t.marca("restore")
 		if opt.Lista != nil {
 			if err := opt.Lista(ctx, mc); err != nil {
 				return "", nil, fmt.Errorf("fork %d of %d from %s: %w", i+1, n, src.Name, err)
 			}
+			t.marca("agent")
 		}
 	}
-	log.Printf("fork: %s branched into %d copies from snapshot %s", src.Name, n, name)
+	log.Printf("fork: %s branched into %d copies from snapshot %s: %s", src.Name, n, name, t)
 	return name, out, nil
 }
 

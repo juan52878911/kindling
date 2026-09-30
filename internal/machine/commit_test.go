@@ -300,6 +300,11 @@ func TestCommitCompletoDejaSnapshotYPlantillaEnMarcha(t *testing.T) {
 	if got, err := m.loadSnapshot("dorado"); err != nil || got.Name != "dorado" {
 		t.Errorf("loadSnapshot tras el commit: %+v, %v", got, err)
 	}
+	// Los digests se acaban de calcular sobre estos ficheros: la primera
+	// restauración no los vuelve a leer.
+	if !m.integridadYaVista("dorado", dir) {
+		t.Error("tras el commit, el veredicto de integridad no quedó anotado: la primera restauración volvería a hashear")
+	}
 }
 
 // M-15: las reservas se cuentan. Con un bool, la primera en soltar dejaba sin
