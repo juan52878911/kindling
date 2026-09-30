@@ -3,11 +3,13 @@ package main
 // kling db branch: una base de datos por rama de git.
 //
 // Cada rama del repositorio tiene su copia (una microVM de kling db). La copia
-// de una rama nueva sale de la de su rama padre (fork: los datos y el esquema
-// de esa rama, en milisegundos) o, si no la hay, del golden. Al cambiar de
-// rama (hook post-checkout → -switch) la copia de la rama activa se descongela
-// y las de las demás ramas del repo se congelan: 0 RAM, y thaw en ~10 ms al
-// volver.
+// de una rama nueva sale de la de su rama padre, con sus datos de ese momento:
+// una copia de reserva ya preparada si el padre no cambió desde que se sacó
+// (cmd_branch_spare.go), o un fork en caliente (segundos: vuelca su memoria);
+// si no hay copia del padre, del golden. Al cambiar de rama (hook post-checkout
+// → -switch) la copia de la rama activa se descongela y se escribe su
+// conexión; congelar las de las demás ramas (0 RAM) va en segundo plano
+// (-settle). docs/db.md tiene lo que cuesta cada caso, medido.
 //
 // Identidad. Una copia de rama se reconoce por sus etiquetas, no por su nombre:
 // sandbox fork no deja poner nombre. kling.db.repo es el hash del directorio

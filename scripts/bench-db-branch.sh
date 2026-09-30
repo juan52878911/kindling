@@ -17,6 +17,11 @@
 #
 #   GOLDEN=pg N=20 ./scripts/bench-db-branch.sh
 #   CASES="existing new-spare" N=5 OUT=/tmp/b ./scripts/bench-db-branch.sh
+#   PAUSE_S=30 CASES=new-fork ./scripts/bench-db-branch.sh   deja respirar al disco
+#
+# PAUSE_S (0) son los segundos de espera tras cada medida, además de la del
+# trabajo de fondo: sin ella, cada fork (vuelca 1 GiB con el golden pg) compite
+# con la escritura a disco de los congelados de la vuelta anterior.
 #
 # Deja en OUT: <caso>.csv (iteración, ms), trace-<caso>-<i>.txt (la traza por
 # fases de KLING_DB_TRACE) y summary.txt (p50/p95/min/max por caso). No
@@ -28,6 +33,7 @@ N="${N:-20}"
 CASES="${CASES:-existing new-spare new-fork}"
 OUT="${OUT:-./bench-db-branch-$(date +%Y%m%d-%H%M%S)}"
 KLING="${KLING:-kling}"
+PAUSE_S="${PAUSE_S:-0}"
 
 die() { echo "bench-db-branch: $*" >&2; exit 1; }
 command -v git >/dev/null || die "needs git"
@@ -86,6 +92,7 @@ checkout() {
   t1=$(now_ms)
   echo "$i,$((t1 - t0))" >>"$OUT/$c.csv"
   idle
+  sleep "$PAUSE_S"
 }
 
 summary() {
@@ -102,7 +109,7 @@ summary() {
 {
   echo "# $(date -u +%Y-%m-%dT%H:%M:%SZ)  host $(uname -n) $(uname -sm)"
   echo "# $("$KLING" version 2>&1 | tr '\n' ' ')"
-  echo "# golden $GOLDEN  N=$N"
+  echo "# golden $GOLDEN  N=$N  PAUSE_S=$PAUSE_S"
 } >"$OUT/summary.txt"
 
 for c in $CASES; do
