@@ -38,10 +38,14 @@ func TestOpenCodeBloqueDeCodigo(t *testing.T) {
 	}
 	b, _ := os.ReadFile(log)
 	l := string(b)
-	for _, want := range []string{"run --pure -m " + DefaultOpenCodeModel, "--format json", "-- SYS"} {
+	for _, want := range []string{"run --pure -m " + DefaultOpenCodeModel, "--format json", "STDIN: SYS  PROMPT-Q"} {
 		if !strings.Contains(l, want) {
 			t.Errorf("log lacks %q:\n%s", want, l)
 		}
+	}
+	// El prompt (esquema y pregunta) no va en el argv: lo vería cualquiera con ps.
+	if args := strings.SplitN(l, "\n", 2)[0]; strings.Contains(args, "SYS") || strings.Contains(args, "PROMPT-Q") {
+		t.Errorf("the prompt went through argv: %s", args)
 	}
 	if strings.Contains(strings.SplitN(l, "\n", 2)[0], "--auto") || !strings.Contains(l, "LS: \n") {
 		t.Errorf("unsafe args or non-empty dir:\n%s", l)
@@ -56,15 +60,17 @@ func TestOpenCodeBloqueDeCodigo(t *testing.T) {
 	}
 }
 
-func TestOpenCodePromptGrandeVaEnFichero(t *testing.T) {
+// Un esquema grande (más que un argumento de Linux) también va por stdin, sin
+// fichero adjunto en el directorio.
+func TestOpenCodePromptGrandePorStdin(t *testing.T) {
 	o, log := fakeOC(t, "block")
-	if _, err := o.Complete(context.Background(), "SYS", strings.Repeat("x", maxArgPrompt)); err != nil {
+	if _, err := o.Complete(context.Background(), "SYS", strings.Repeat("x", 200<<10)); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(log)
 	l := string(b)
-	if !strings.Contains(l, "-f prompt.txt") || !strings.Contains(l, "LS: prompt.txt") {
-		t.Errorf("big prompt not attached:\n%.300s", l)
+	if !strings.Contains(l, "STDIN: SYS  xxx") || !strings.Contains(l, "LS: \n") || strings.Contains(l, "-f ") {
+		t.Errorf("big prompt not sent by stdin:\n%.300s", l)
 	}
 }
 

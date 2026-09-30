@@ -1,12 +1,13 @@
 #!/bin/sh
 # opencode falso para los tests: FAKE_OC_MODE elige qué emite.
-# Deja en $FAKE_OC_LOG los argumentos, el cwd y el contenido de su directorio.
+# Deja en $FAKE_OC_LOG los argumentos, el cwd, el contenido de su directorio y
+# el principio de su stdin (por donde llega el prompt).
 if [ -n "$FAKE_OC_LOG" ]; then
   {
     echo "ARGS: $*"
     echo "PWD: $(pwd)"
     echo "LS: $(ls -A | tr '\n' ' ')"
-    echo "PROMPT: $(head -c 200 prompt.txt 2>/dev/null | tr '\n' ' ')"
+    echo "STDIN: $(head -c 200 | tr '\n' ' ')"
   } > "$FAKE_OC_LOG"
 fi
 start='{"type":"step_start","part":{"type":"step-start"}}'

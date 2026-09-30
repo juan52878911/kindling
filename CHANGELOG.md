@@ -106,6 +106,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   KEY=valor`, que deja el secreto en el argv de `kling` (`ps`, historial). `-e KEY`
   toma el valor del entorno del CLI y `-env-file F` de un fichero `KEY=valor`
   ([exec-sandbox.md](docs/exec-sandbox.md#kling-exec)).
+- **`kling db ask` con opencode pasa el prompt por stdin.** Esquema y pregunta iban en
+  el argv de `opencode run` (visibles con `ps` para cualquier usuario del equipo) hasta
+  100 KiB; ahora van siempre por stdin, también los grandes (sin fichero adjunto).
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
