@@ -207,3 +207,8 @@ func memoriaHost() (available, free int64) { return hostMemMiB() }
 // entornoVMM: Firecracker no necesita nada más que el entorno del daemon (su
 // confinamiento es el jailer).
 func (m *Manager) entornoVMM() []string { return nil }
+
+// techoDelDaemon es el cpu_pct de una máquina que no lo pidió (ni por
+// flag, ni su dorado, ni su receta, ni la configuración). En Linux, media vCPU
+// (defaultCPUPct): el cgroup no cuesta nada al invitado.
+func techoDelDaemon(vcpus int) int { return defaultCPUPct }
