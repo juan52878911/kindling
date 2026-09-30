@@ -413,6 +413,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// volume_snapshot.go). Aquí y no en el vigilante: en marcha, un .tmp puede
 	// ser una copia en curso.
 	m.barrerTmpVolumenes()
+	// Un commit -replace que un daemon anterior dejó a medias: el dorado
+	// viejo sigue apartado al lado del nuevo (ver apartarAnterior).
+	m.recuperarReemplazos()
 	cerrarVolcadosExistentes(root)
 	m.load()
 	for _, mc := range m.byID {
