@@ -1015,6 +1015,13 @@ func (g *Scheduler) acquire(ctx context.Context, service string, fresh bool, tr 
 			if !match(m) || m.State != state || g.adquiriendo[m.ID] || g.entryByMachineLocked(service, m.ID) != nil {
 				continue
 			}
+			// A medio congelar, parar o borrar (por el TTL del daemon, un
+			// `kling freeze`, otro gateway): sigue figurando con su estado
+			// de antes, pero en segundos dejará de estar. Adoptarla era
+			// enrutar sesiones a un invitado que se está pausando.
+			if m.Transition != "" {
+				continue
+			}
 			if state == api.StateRunning && !m.Reachable() {
 				continue
 			}

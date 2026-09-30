@@ -188,6 +188,12 @@ func (s *Server) regularCPU() {
 		vmBase VM
 	)
 	for {
+		// Si el último SIGCONT falló, el auxiliar sigue parado (congelado) y
+		// nadie más lo iba a soltar: parado no gasta CPU, el cubo se llena y
+		// el regulador ya no vuelve a frenar, que era lo único que lo
+		// reintentaba. La VM se quedaba parada para siempre figurando running.
+		// No hace nada si no está parado.
+		s.soltarFreno()
 		s.mu.Lock()
 		if s.st == stStopped {
 			s.mu.Unlock()
@@ -296,8 +302,13 @@ func (s *Server) soltarFreno() {
 		return
 	}
 	if err := s.d.Freeze(false); err != nil {
-		s.d.Logf("warning: could not resume the VM's helper after a CPU pause: %v", err)
+		// El regulador lo reintenta en cada vuelta: se avisa una vez por
+		// racha, no una por intento.
+		if !s.sueltaAviso {
+			s.sueltaAviso = true
+			s.d.Logf("warning: could not resume the VM's helper after a CPU pause (will retry): %v", err)
+		}
 		return
 	}
-	s.congelado = false
+	s.congelado, s.sueltaAviso = false, false
 }
