@@ -18,10 +18,19 @@ import (
 	"strings"
 )
 
-// FormatVersion es el valor de "kling_vz" en el JSON del snapshot. Si cambia el
-// formato de forma incompatible, se sube y los snapshots viejos se rechazan con
-// un error claro en vez de restaurar una máquina distinta de la guardada.
-const FormatVersion = 1
+// FormatVersion es el valor de "kling_vz" en el JSON del snapshot. Sube cada
+// vez que el snapshot gana algo que cambia la máquina restaurada: un kling-vz
+// que no lo conoce lo ignoraría y restauraría OTRA máquina, así que lo que
+// tiene que hacer es negarse. Se escribe siempre la actual.
+//
+//   - 1: el formato inicial.
+//   - 2: graphics (la pantalla virtio-gpu). Entró sin subir la versión, y un
+//     kling-vz anterior restauraba sin pantalla un snapshot que la tenía.
+const FormatVersion = 2
+
+// minFormatVersion es la más vieja que se sigue leyendo. Un snapshot de la 1
+// no tiene graphics, que es justo lo que significa leerla con este código.
+const minFormatVersion = 1
 
 // maxSnapshotJSON acota lo que se lee del fichero de snapshot. El fichero viene
 // de disco y lo escribe este mismo programa, pero un fichero corrupto o ajeno no
@@ -255,8 +264,14 @@ func Decode(r io.Reader) (*Spec, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("snapshot file is not a kling-vz snapshot: %w", err)
 	}
-	if s.KlingVZ != FormatVersion {
-		return nil, fmt.Errorf("unsupported snapshot format kling_vz=%d (this build reads %d)", s.KlingVZ, FormatVersion)
+	switch {
+	case s.KlingVZ > FormatVersion:
+		return nil, fmt.Errorf("snapshot format kling_vz=%d was written by a newer kling-vz (this one reads %d to %d); "+
+			"restoring it here would leave out what it doesn't know: update kling-vz to the daemon's version, "+
+			"or recreate the snapshot", s.KlingVZ, minFormatVersion, FormatVersion)
+	case s.KlingVZ < minFormatVersion:
+		return nil, fmt.Errorf("unsupported snapshot format kling_vz=%d (this build reads %d to %d)",
+			s.KlingVZ, minFormatVersion, FormatVersion)
 	}
 	if s.MachineIdentifier == "" {
 		return nil, errors.New("snapshot has no machine_identifier: the framework cannot restore it")
