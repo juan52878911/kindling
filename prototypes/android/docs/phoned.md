@@ -156,6 +156,19 @@ mismo documento aún en MMDS no regenera nada. La salida del gancho (consola,
 `kling logs`) dice qué se aplicó, nunca los valores, y cualquier error pasa por
 un filtro que los tacha.
 
+**Comprobado con apps reales (#111).** `ssaidtest/` son dos APK mínimos
+(`kindling.ssaidtest.a` y `.b`, cada uno con su firma) que, al pasar a primer plano,
+escriben en logcat (etiqueta `SSAIDTEST`) el `Settings.Secure.ANDROID_ID` que ven.
+`ssaidtest/build.sh` los compila en Linux (JDK, aapt, apksigner, zipalign; como
+`uidump/itest`) y `ssaidtest/collect.sh` los instala por la API, los abre y saca los
+valores de `/v1/logs`. Con 3 clones de un dorado (identidad por el gancho): 6
+valores distintos, es decir, la misma app ve un `ANDROID_ID` distinto en cada clon y
+las dos apps de un clon ven valores distintos entre sí; sin cambios tras pause/thaw
+y freeze/thaw (el proceso de la app sigue vivo; `onResume` lo vuelve a leer, porque
+`am start` sobre una app viva no la recrea). No hizo falta cambiar la generación de
+la clave. `test-phoned.sh` lo repite si encuentra `ssaid-a.apk` y `ssaid-b.apk`
+(`SSAID_APKS`, por defecto `ssaidtest/`).
+
 **Lo que sigue igual entre clones**: las claves de firma de apps instaladas en el
 dorado, los tokens que haya en `/data` del dorado (ninguno en uno recién
 arrancado), la MAC de `eth0` de Android (la del veth, que se crea al arrancar y
@@ -214,10 +227,6 @@ la imagen nueva (frío 6,2 s, restaurar → dump p50 1,06 s, dump 0,024 s, scree
 Linux, `android-sh` y el gancho de bash funcionan).
 
 Pendiente:
-- SSAID: comprobado que system_server arranca con la clave nueva (sin errores de
-  SettingsProvider) y que cada clon tiene la suya; no se ha visto a una app pedir su
-  `ANDROID_ID` (ninguna de la imagen lo hace y `run-as`/`su <uid> content` no sirven
-  en Redroid). Hace falta un APK de prueba mínimo.
 - Una arista de grafo al 8091 funcionaría hoy, sin autenticación (ver el modelo de
   amenazas): token por arista o puerto de solo lectura antes de usarla.
 - La base arm64 construida antes del 28-09 no trae iptables: kling-phoned cae a

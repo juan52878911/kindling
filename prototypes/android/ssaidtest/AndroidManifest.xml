@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="@PKG@">
+    <uses-sdk android:minSdkVersion="33" android:targetSdkVersion="33" />
+    <application android:label="ssaid @PKG@">
+        <activity android:name="kindling.ssaidtest.Main" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
