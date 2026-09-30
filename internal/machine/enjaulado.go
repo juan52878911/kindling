@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 )
@@ -132,6 +133,41 @@ func borrarSinCruzar(dirfd int, nombre string, dev uint64, ruta string) error {
 			return err
 		}
 	}
+}
+
+// borrarArbolSinCruzar borra dir y todo lo que tiene debajo con
+// borrarSinCruzar, desde un descriptor de su padre: sin seguir enlaces y sin
+// entrar en otro sistema de ficheros. El padre es del daemon (se abre sin
+// seguir un enlace en el último componente); lo de dentro puede ser del VMM.
+func borrarArbolSinCruzar(dir string) error {
+	dir = filepath.Clean(dir)
+	padre, err := syscall.Open(filepath.Dir(dir), oDirSinEnlaces, 0)
+	if errors.Is(err, syscall.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", filepath.Dir(dir), err)
+	}
+	defer syscall.Close(padre)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(padre, &st); err != nil {
+		return err
+	}
+	return borrarSinCruzar(padre, filepath.Base(dir), uint64(st.Dev), dir)
+}
+
+// montajesBajo devuelve los puntos de montaje de ms que son base o están
+// debajo, los más hondos primero (el orden en que hay que desmontarlos).
+func montajesBajo(ms []montaje, base string) []string {
+	base = filepath.Clean(base)
+	var out []string
+	for _, mt := range ms {
+		if mt.punto == base || strings.HasPrefix(mt.punto, base+"/") {
+			out = append(out, mt.punto)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
 }
 
 // recuperarDelJail mueve al directorio dst del host los ficheros nombres que

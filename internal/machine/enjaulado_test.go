@@ -114,6 +114,32 @@ func TestBorrarEnJailNoSigueEnlaces(t *testing.T) {
 	}
 }
 
+// borrarJail desmonta todo lo que haya bajo el jail, no solo el bind en su
+// ruta original, y lo más hondo primero.
+func TestMontajesBajo(t *testing.T) {
+	info := strings.Join([]string{
+		"20 1 8:1 / / rw - ext4 /dev/sda1 rw",
+		"30 20 0:50 / /var/lib/kindling/cow rw - xfs /dev/loop0 rw",
+		"31 20 0:50 /cow/ab /var/lib/kindling/jails/firecracker/ab/root/movido/lib/kindling/cow/ab rw - xfs /dev/loop0 rw",
+		"32 31 0:51 / /var/lib/kindling/jails/firecracker/ab/root/movido/lib/kindling/cow/ab/x rw - tmpfs tmpfs rw",
+		"33 20 0:52 / /var/lib/kindling/jails/firecracker/abc/root rw - tmpfs tmpfs rw",
+		"34 20 0:53 / /var/lib/kindling/jails/firecracker/ab rw - tmpfs tmpfs rw",
+	}, "\n")
+	ms, err := parsearMountinfo(strings.NewReader(info))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := montajesBajo(ms, "/var/lib/kindling/jails/firecracker/ab/")
+	want := []string{
+		"/var/lib/kindling/jails/firecracker/ab/root/movido/lib/kindling/cow/ab/x",
+		"/var/lib/kindling/jails/firecracker/ab/root/movido/lib/kindling/cow/ab",
+		"/var/lib/kindling/jails/firecracker/ab",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("montajesBajo = %q, quería %q (sin el jail de abc)", got, want)
+	}
+}
+
 // Commit de una plantilla jailed cuyo VMM cambió un directorio de la réplica
 // de snapshots/ en su chroot por un enlace al host. Antes, el MkdirAll (y el
 // Chown) de la réplica, el overlay dorado y el RemoveAll de la limpieza
