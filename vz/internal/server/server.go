@@ -209,9 +209,12 @@ type Server struct {
 	// frenoMu protege congelado: el auxiliar está parado por el regulador
 	// (Deps.Freeze). Va aparte de mu para que reanudarlo nunca espere a quien
 	// tiene mu, que puede estar esperando justo a que el auxiliar conteste.
-	frenoMu    sync.Mutex
-	congelado  bool
-	frenoAviso bool // ya se avisó de que Freeze falla (con mu)
+	frenoMu   sync.Mutex
+	congelado bool
+	// sueltaAviso: ya se avisó de que reanudar el auxiliar falla (con
+	// frenoMu); se rearma al conseguirlo.
+	sueltaAviso bool
+	frenoAviso  bool // ya se avisó de que Freeze falla (con mu)
 }
 
 func New(d Deps) *Server {
@@ -1134,6 +1137,10 @@ func (s *Server) getScreenshot(w http.ResponseWriter, _ *http.Request) {
 		fault(w, errors.New("this VM cannot take screenshots"))
 		return
 	}
+	// Con el auxiliar parado por el regulador el framework no contesta, y la
+	// ventana tampoco pinta: se suelta antes de pedirle la pantalla, como
+	// hacen los demás caminos que le piden algo (patchVM, putBalloon).
+	s.soltarFreno()
 	png, err := sc.Screenshot()
 	if err != nil {
 		fault(w, err)
@@ -1323,6 +1330,9 @@ func (s *Server) reaplicarGlobo(vm VM, en []time.Duration) {
 			s.mu.Unlock()
 			return
 		}
+		// Lo mismo que putBalloon: parado por el regulador, el framework
+		// no atendería al globo hasta el final de la parada.
+		s.soltarFreno()
 		err := vm.SetBalloonTargetMiB(s.spec.BalloonTargetMiB())
 		s.mu.Unlock()
 		if err != nil {

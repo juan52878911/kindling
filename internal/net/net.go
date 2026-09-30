@@ -80,6 +80,9 @@ type Net struct {
 	// reserva es el fichero de DirReservas que aparta Index mientras se
 	// monta la red (ver subredes.go). Vacío si no hay reserva.
 	reserva string
+	// reservaToken es lo que se escribió en reserva: lo que dice que el
+	// fichero sigue siendo NUESTRO al soltarlo (ver SoltarReserva).
+	reservaToken string
 }
 
 func run(args ...string) error {

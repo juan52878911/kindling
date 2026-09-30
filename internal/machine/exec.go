@@ -82,19 +82,23 @@ func (m *Manager) touchTTL(id string) {
 //
 // ttlSeconds 0 conserva el plazo que ya tenía y solo reinicia el reloj; sobre
 // una máquina sin TTL no hace nada.
+//
+// Toma el cerrojo de ciclo de vida: el TTL decide con una foto y vuelve a
+// mirar el plazo con ese cerrojo tomado antes de congelar o borrar (ver
+// expireTTL). Sin él, un renew que llegaba justo después de esa segunda
+// mirada contestaba que sí y la máquina moría igual.
 func (m *Manager) Renew(ref string, ttlSeconds int) (*api.Machine, error) {
 	if ttlSeconds < 0 {
 		return nil, fmt.Errorf("ttl can't be negative")
 	}
+	found, ok := m.get(ref)
+	if !ok {
+		return nil, ErrNoMachine
+	}
+	defer m.lock(found.ID)()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var mc *api.Machine
-	for _, c := range m.byID {
-		if c.ID == ref || c.Name == ref || (len(ref) >= 4 && len(c.ID) >= len(ref) && c.ID[:len(ref)] == ref) {
-			mc = c
-			break
-		}
-	}
+	mc := m.byID[found.ID]
 	if mc == nil {
 		return nil, ErrNoMachine
 	}

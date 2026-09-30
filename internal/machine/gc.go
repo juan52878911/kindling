@@ -18,6 +18,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"sort"
@@ -160,8 +161,22 @@ func (m *Manager) gcDisk(ctx context.Context) {
 		if m.diskUsedPct() < target {
 			return
 		}
-		if err := m.Remove(c.id); err != nil {
-			log.Printf("gc: couldn't remove dormant instance %s: %v", c.name, err)
+		// Se eligió con una foto: con el cerrojo tomado tiene que seguir
+		// congelada y ser la MISMA congelación (FrozenAt). Si entre medias la
+		// despertaron —un thaw, un renew seguido de thaw del gateway—, borrarla
+		// era matar una máquina en uso con sus sesiones dentro.
+		since := c.since
+		sigue := func(mc *api.Machine) bool {
+			var ahora int64
+			if mc.FrozenAt != nil {
+				ahora = mc.FrozenAt.UnixNano()
+			}
+			return mc.State == api.StateWarm && ahora == since
+		}
+		if err := m.removeSi(c.id, sigue); err != nil {
+			if !errors.Is(err, errYaNoToca) {
+				log.Printf("gc: couldn't remove dormant instance %s: %v", c.name, err)
+			}
 			continue
 		}
 		log.Printf("gc: disk at %d%%, removed dormant instance %s (recreates from %s)",

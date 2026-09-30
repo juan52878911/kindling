@@ -31,6 +31,13 @@ const (
 	StateFailed  State = "failed"
 )
 
+// Valores de Machine.Transition.
+const (
+	TransitionFreezing = "freezing"
+	TransitionStopping = "stopping"
+	TransitionRemoving = "removing"
+)
+
 // UnmarshalJSON acepta el nombre antiguo del estado congelado: un CLI nuevo
 // contra un daemon 0.13, o un daemon nuevo leyendo el estado que guardó el
 // anterior, ven "warm" y lo entienden como "frozen".
@@ -133,6 +140,15 @@ type Machine struct {
 	// su imagen (ReadyYes, ReadyWaiting, ReadyFailed; vacío si la imagen no
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
 	Ready string `json:"ready,omitempty"`
+
+	// Transition dice que una operación de ciclo de vida que va a sacarla de
+	// su estado está en curso ahora mismo (TransitionFreezing, ...). La
+	// máquina sigue figurando con su State de antes hasta que termina: un
+	// freeze tarda segundos y durante ellos es "running". Quien elige máquinas
+	// para usarlas (el planificador del gateway) debe saltarse las que lo
+	// traen. Solo existe en las respuestas del daemon: no se guarda en el
+	// estado, porque no sobrevive a la operación.
+	Transition string `json:"transition,omitempty"`
 
 	// MemShared: su RAM se mapea del mem.file de un dorado, compartido por
 	// copia-en-escritura con las demás instancias (Firecracker, run -from o
