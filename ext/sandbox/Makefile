@@ -48,14 +48,21 @@ linux:
 deploy: linux
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
-	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q packaging/kling-sandbox.service $(TARGET):/tmp/
-	ssh $(TARGET) 'test -x /usr/local/bin/kling || { echo "falta kling en el host: despliega kindling primero" >&2; exit 1; } && \
-		sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
+	@# A un directorio de mktemp -d (0700, del usuario de SSH), no a /tmp/<nombre>:
+	@# otro usuario del host podía dejar antes un enlace con ese nombre y
+	@# `sudo install` lo instalaba como root. Igual que el deploy de la raíz.
+	@set -e; \
+	D=$$(ssh $(TARGET) 'mktemp -d'); \
+	case "$$D" in /*) ;; *) echo "mktemp -d on $(TARGET) failed: $$D" >&2; exit 1;; esac; \
+	trap 'ssh $(TARGET) "rm -rf $$D"' EXIT; \
+	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):$$D/$(BIN); \
+	scp -q packaging/kling-sandbox.service $(TARGET):$$D/; \
+	ssh $(TARGET) "D=$$D; "'test -x /usr/local/bin/kling || { echo "falta kling en el host: despliega kindling primero" >&2; exit 1; } && \
+		sudo install -m755 "$$D/$(BIN)" /usr/local/bin/$(BIN) && \
 		KU=$$( . /etc/default/kling 2>/dev/null; echo "$${KLING_SOCKET_USER:-$$(id -un)}" ) && \
 		KG=$$(id -gn "$$KU") && \
 		for u in kling-sandbox.service; do \
-		  sed -e "s/@KLING_USER@/$$KU/" -e "s/@KLING_GROUP@/$$KG/" /tmp/$$u | sudo tee /etc/systemd/system/$$u >/dev/null && \
+		  sed -e "s/@KLING_USER@/$$KU/" -e "s/@KLING_GROUP@/$$KG/" "$$D/$$u" | sudo tee /etc/systemd/system/$$u >/dev/null && \
 		  sudo chmod 644 /etc/systemd/system/$$u || exit 1; \
 		done && \
 		sudo install -d -m755 /etc/kling && \
