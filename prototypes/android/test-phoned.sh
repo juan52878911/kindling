@@ -15,6 +15,9 @@
 #      del clon entra, con la del otro clon o sin clave, no;
 #   4. un tercer clon (borrando uno: máximo 2 VMs a la vez);
 #   5. pause/thaw y freeze/thaw con la identidad intacta;
+#      Con los APK de ssaidtest/ (SSAID_APKS, por defecto ssaidtest/; se construyen
+#      con ssaidtest/build.sh en Linux): el ANDROID_ID que ve cada app es distinto
+#      entre clones y no cambia con pause/thaw ni freeze/thaw;
 #   6. que los valores no estén en kling ps, los logs ni el dorado.
 # Borra todos los teléfonos de esa raíz al empezar y al acabar. bash 3.2.
 # shellcheck disable=SC2015,SC2013,SC2329  # ok || mal, como test-phone.sh
@@ -135,6 +138,19 @@ case "$v" in *unauthorized*|*"failed to authenticate"*) ok "adb a phone-2 sin cl
 v="$(adbk phone-2 "$s2" shell getprop ro.adb.secure | tr -d '\r')"
 [ "$v" = 1 ] && ok "adb a phone-2 con SU clave: ro.adb.secure=1" || mal "adb phone-2 con su clave: $v"
 
+# ── 3b. SSAID por app (opcional: necesita ssaid-a.apk y ssaid-b.apk) ───────────
+SSAID_APKS="${SSAID_APKS:-$HERE/ssaidtest}"
+ssaid=0
+[ -f "$SSAID_APKS/ssaid-a.apk" ] && [ -f "$SSAID_APKS/ssaid-b.apk" ] && ssaid=1
+ssaid_de() { APKS="$SSAID_APKS" PHONE="$PHONE" bash "$HERE/ssaidtest/collect.sh" "$@"; }
+: >"$OUT/ssaid.txt"
+if [ "$ssaid" = 1 ]; then
+  for t in phone-1 phone-2; do ssaid_de "$t" >>"$OUT/ssaid.txt"; done
+  [ "$(wc -l <"$OUT/ssaid.txt" | tr -d ' ')" -eq 4 ] && ok "SSAID: 2 apps en 2 clones leídas por logcat" || mal "SSAID: faltan valores ($(wc -l <"$OUT/ssaid.txt" | tr -d ' ') de 4)"
+else
+  echo "        (sin ssaid-a.apk/ssaid-b.apk en $SSAID_APKS: no se prueba el SSAID por app)"
+fi
+
 # ── 4. tercer clon ───────────────────────────────────────────────────────────
 "$PHONE" rm phone-2 >/dev/null && ok "rm phone-2"
 if "$PHONE" up >"$OUT/up3.txt" 2>"$OUT/up3.err"; then
@@ -146,6 +162,20 @@ for c in 2 3 4; do
   n="$(awk -v c="$c" '{ print $c }' "$OUT/ids.txt" | sort -u | grep -vc '^-$')"
   [ "$n" -eq 3 ] && ok "3 clones, 3 valores distintos en la columna $c (serie/android_id/SSAID)" || mal "columna $c: $n distintos de 3"
 done
+
+if [ "$ssaid" = 1 ]; then
+  # El tercero puede reutilizar el nombre del que se borró: sus líneas viejas pasan a otro nombre.
+  sed -i.bak "s/^$t3 /$t3-anterior /" "$OUT/ssaid.txt"; rm -f "$OUT/ssaid.txt.bak"
+  ssaid_de "$t3" >>"$OUT/ssaid.txt"
+  for v in a b; do
+    n="$(awk -v p="kindling.ssaidtest.$v" '$2 == p { print $3 }' "$OUT/ssaid.txt" | sort -u | grep -c .)"
+    [ "$n" -eq 3 ] && ok "SSAID: la app $v ve 3 valores distintos en 3 clones" || mal "SSAID: la app $v ve $n valores distintos en 3 clones"
+  done
+  for t in phone-1 "$t3"; do
+    n="$(awk -v t="$t" '$1 == t { print $3 }' "$OUT/ssaid.txt" | sort -u | grep -c .)"
+    [ "$n" -eq 2 ] && ok "SSAID: $t ve valores distintos en sus 2 apps" || mal "SSAID: $t ve $n valores distintos en sus 2 apps"
+  done
+fi
 
 # ── 5. pause/thaw y freeze/thaw ──────────────────────────────────────────────
 antes="$(ident phone-1)"
@@ -167,6 +197,11 @@ despues="$(ident phone-1)"
 [ "$antes" = "$despues" ] && ok "phone-1 conserva su identidad tras pause y freeze ($despues)" || mal "identidad antes '$antes' después '$despues'"
 v="$(adbk phone-1 "$(adb_de phone-1)" shell getprop ro.serialno | tr -d '\r')"
 [ "$v" = "$(echo "$despues" | cut -d' ' -f1)" ] && ok "adb con su clave tras freeze/thaw" || mal "adb tras freeze/thaw: $v"
+
+if [ "$ssaid" = 1 ]; then
+  [ "$(ssaid_de --no-install phone-1)" = "$(awk '$1 == "phone-1"' "$OUT/ssaid.txt")" ] &&
+    ok "SSAID: phone-1 ve los mismos valores tras pause/thaw y freeze/thaw" || mal "SSAID: phone-1 cambió tras pause/thaw o freeze/thaw"
+fi
 
 # ── 6. los valores no se filtran ─────────────────────────────────────────────
 fuga=0
