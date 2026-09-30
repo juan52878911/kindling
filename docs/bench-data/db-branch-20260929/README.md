@@ -36,6 +36,8 @@ gancho. No se descartó ni se repitió ninguna medida.
   (`/tmp/kbm`), golden `pg` hecho con `scripts/db-golden.sh build -from` (1 GiB, seed de
   ~70 MiB). El "antes" (`mac-antes/`) es la extensión de main contra el daemon de esta
   rama: no incluye lo que cambió el núcleo (en vz, el fork ya no hashea el overlay).
+  Todo lo de macOS se midió antes de fusionar #124 (sin techo de CPU por defecto en
+  vz): las VM corrían con el 50 % de CPU de siempre.
 - Una rama nueva de `new-spare` en Linux (la 3.ª) no pudo usar la reserva (4 619 ms):
   el autovacuum de `template1` al minuto de arrancar cambió la huella del padre. Lo
   arregla `db-golden.sh` en esta misma rama; el golden `pg` medido es anterior.
