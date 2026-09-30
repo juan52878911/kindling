@@ -17,6 +17,7 @@ const (
 	argsPath     = "/usr/local/lib/kindling-android/entrypoint.args"
 	checkPath    = "/usr/local/lib/kindling-android/check-android-config.sh"
 	dataImgPath  = "/usr/local/lib/kindling-android/data.ext4"
+	imageTxtPath = "/usr/local/lib/kindling-android/IMAGE.txt"
 	stateDir     = "/run/kindling-android"
 	statePath    = stateDir + "/state"
 	parentPIDPth = stateDir + "/unshare.pid"
