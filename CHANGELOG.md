@@ -81,6 +81,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   poner: un inquilino A creaba un sandbox con `kind=sandbox,template=py`, el frontal se
   lo daba al cliente B y A conservaba exec y ficheros. Ahora exige `kling.owner` vacío
   en todos esos caminos ([authz.md](docs/authz.md#el-dueño-klingowner)).
+- **El filtro de secretos del gateway de IA, reescrito por forma.** Dejaba pasar
+  `Authorization: Basic <b64>`, contraseñas en URLs (`postgres://u:pw@host`),
+  `PGPASSWORD=`, `MYSQL_PWD=`, `access_token=`, `client_secret=`, `"password": "…"` y
+  prefijos como `sk_live_`, `whsec_`, `glpat-`, `hf_` o `AIza`; y borraba prosa ("token
+  expired", "reset your password please"), SHA de commit, sha256 y UUID. Ahora tapa la
+  credencial de un esquema de autorización, el userinfo de una URL, los pares cuya
+  clave termina en password/secret/token/key y los prefijos de proveedores con longitud
+  mínima, y deja la prosa y los hashes ([mejora-continua.md](docs/mejora-continua.md)).
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
