@@ -54,6 +54,12 @@ type entrada struct {
 	existe bool
 	tipo   string // regular, directory, symlink, ...
 	enlace string // destino, si es un enlace simbólico
+	// blanqueo: un whiteout de overlayfs (dispositivo de caracteres 0:0). En
+	// una capa dice "esto se BORRÓ": lo de la base con ese nombre no existe.
+	blanqueo bool
+	// opaco: directorio con trusted.overlay.opaque=y. En una capa tapa ENTERO
+	// el directorio de la base con ese nombre.
+	opaco bool
 }
 
 // nombreDebugfs valida una ruta que va entre comillas en un comando de
@@ -77,8 +83,12 @@ func (im imagenDebugfs) cmd(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 // leer ejecuta un comando de solo lectura.
+//
+// Con tope (maxSalidaDebugfs): lo que se lee así se analiza como texto, y un
+// enlace lento o un stat no se acercan. Lo que sí puede ser grande (el
+// contenido de un fichero) va por leerFichero o sha256De.
 func (im imagenDebugfs) leer(ctx context.Context, orden string) ([]byte, error) {
-	out, err := im.cmd(ctx, "-R", orden).Output()
+	out, err := salidaAcotada(im.cmd(ctx, "-R", orden), maxSalidaDebugfs)
 	if err != nil {
 		return nil, fmt.Errorf("debugfs %s on %s: %w", orden, filepath.Base(im.file), err)
 	}
@@ -91,9 +101,14 @@ var (
 	reBloque = regexp.MustCompile(`(?m)^Block size:\s+(\d+)`)
 	reLibres = regexp.MustCompile(`(?m)^Free blocks:\s+(\d+)`)
 	reReserv = regexp.MustCompile(`(?m)^Reserved block count:\s+(\d+)`)
+	reDisp   = regexp.MustCompile(`Device major/minor number:\s+(\S+)`)
+	reOpaco  = regexp.MustCompile(`trusted\.overlay\.opaque \(\d+\) = "y"`)
 )
 
 func (im imagenDebugfs) stat(ctx context.Context, p string) (entrada, error) {
+	if err := nombreDebugfs(p); err != nil {
+		return entrada{}, err
+	}
 	out, err := im.leer(ctx, "stat "+comillas(p))
 	if err != nil {
 		return entrada{}, err
@@ -106,6 +121,12 @@ func (im imagenDebugfs) stat(ctx context.Context, p string) (entrada, error) {
 	if m := reTipo.FindStringSubmatch(s); m != nil {
 		e.tipo = m[1]
 	}
+	if e.tipo == "character" {
+		if m := reDisp.FindStringSubmatch(s); m != nil && m[1] == "00:00" {
+			e.blanqueo = true
+		}
+	}
+	e.opaco = e.tipo == "directory" && reOpaco.MatchString(s)
 	if e.tipo == "symlink" {
 		if m := reFast.FindStringSubmatch(s); m != nil {
 			e.enlace = m[1]
@@ -239,6 +260,22 @@ func quejasDebugfs(out []byte) []string {
 	return res
 }
 
+// leerFichero lee p de la imagen, como mucho max bytes: si ocupa más, error
+// sin haberlo cargado entero.
+func (im imagenDebugfs) leerFichero(ctx context.Context, p string, max int64) ([]byte, error) {
+	if err := nombreDebugfs(p); err != nil {
+		return nil, err
+	}
+	out, err := salidaAcotada(im.cmd(ctx, "-R", "cat "+comillas(p)), max)
+	if errors.Is(err, errSalidaGrande) {
+		return nil, fmt.Errorf("%s is larger than the limit of %d bytes", p, max)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("debugfs cat %s on %s: %w", p, filepath.Base(im.file), err)
+	}
+	return out, nil
+}
+
 // sha256De lee p de la imagen y devuelve su digest, sin cargarlo entero.
 func (im imagenDebugfs) sha256De(ctx context.Context, p string) (string, error) {
 	c := im.cmd(ctx, "-R", "cat "+comillas(p))
@@ -302,11 +339,15 @@ func (m *Manager) intentarPutDebugfs(ctx context.Context, image, dentroPath, src
 			return false, err
 		}
 	}
-	if !viejo.existe && !create {
+	// Un whiteout de la capa en el destino: el fichero está BORRADO en la
+	// imagen. Para quien solo reemplaza, no está; para quien crea, se
+	// sustituye (rm + ln, como a un fichero viejo) y el nuevo lo tapa.
+	blanqueo := viejo.blanqueo && strings.HasPrefix(destino, "/"+layerUpperDir+"/")
+	if (!viejo.existe || blanqueo) && !create {
 		return false, errNoBridge
 	}
-	switch viejo.tipo {
-	case "", "regular", "symlink":
+	switch {
+	case blanqueo, viejo.tipo == "", viejo.tipo == "regular", viejo.tipo == "symlink":
 	default:
 		return false, fmt.Errorf("%s is a %s in the image, not a file", limpio, viejo.tipo)
 	}

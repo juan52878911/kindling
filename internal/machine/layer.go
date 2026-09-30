@@ -210,7 +210,9 @@ func (m *Manager) baseSupportsLayers(ctx context.Context, base string) (bool, er
 	if bin == "" {
 		return false, ErrNoDebugfs
 	}
-	out, err := exec.CommandContext(ctx, bin, "-R", "cat "+guestInitPath, base).Output()
+	// Con tope: overlay-init es un guion de unos KiB, y la base es un fichero
+	// que no controla este código.
+	out, err := salidaAcotada(exec.CommandContext(ctx, bin, "-R", "cat "+comillas(guestInitPath), base), maxSalidaDebugfs)
 	if err != nil {
 		return false, fmt.Errorf("reading %s from %s: %w", guestInitPath, base, err)
 	}

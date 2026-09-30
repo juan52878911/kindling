@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 
@@ -41,9 +40,22 @@ func cleanGuestPath(p string) (string, error) {
 // ReadImageFile devuelve el contenido de p dentro de la imagen (primero la capa
 // del servicio, después su base). Falla con ErrNotInImage si no está y si pasa
 // de max bytes.
+//
+// La capa es el upperdir de un overlay (ver layer.go), y se lee como lo vería
+// el invitado: un whiteout de p (o de un directorio que lo contiene) es que se
+// BORRÓ, y un directorio opaco de la capa tapa entero el de la base. Antes se
+// caía a la base en los dos casos, y `images cat` enseñaba un fichero que el
+// servicio no tiene.
+//
+// Las rutas van entre comillas y validadas (nombreDebugfs), y lo leído, con
+// tope: sin comillas, "cat /a b" leía /a; sin tope, un fichero de gigas se
+// cargaba entero en el daemon antes de comprobar max.
 func (m *Manager) ReadImageFile(ctx context.Context, image, p string, max int64) ([]byte, error) {
 	p, err := cleanGuestPath(p)
 	if err != nil {
+		return nil, err
+	}
+	if err := nombreDebugfs(p); err != nil {
 		return nil, err
 	}
 	base, layer, err := m.imageLayer(image)
@@ -54,30 +66,81 @@ func (m *Manager) ReadImageFile(ctx context.Context, image, p string, max int64)
 	if bin == "" {
 		return nil, ErrNoDebugfs
 	}
-	type candidato struct{ img, inside string }
-	var cs []candidato
-	if layer != "" {
-		cs = append(cs, candidato{layer, layerGuestPath(strings.TrimPrefix(p, "/"))})
-	}
-	cs = append(cs, candidato{base, p})
-	for _, c := range cs {
-		has, err := hasFile(ctx, c.img, c.inside)
-		if err != nil {
-			return nil, err
-		}
-		if !has {
-			continue
-		}
-		out, err := exec.CommandContext(ctx, bin, "-R", "cat "+c.inside, c.img).Output()
+	leerDe := func(img, inside string) ([]byte, error) {
+		b, err := imagenDebugfs{bin: bin, file: img}.leerFichero(ctx, inside, max)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s from %s: %w", p, image, err)
 		}
-		if int64(len(out)) > max {
-			return nil, fmt.Errorf("%s is %d bytes; the limit is %d", p, len(out), max)
-		}
-		return out, nil
+		return b, nil
 	}
-	return nil, ErrNotInImage
+	if layer != "" {
+		capa := imagenDebugfs{bin: bin, file: layer}
+		dentro := layerGuestPath(strings.TrimPrefix(p, "/"))
+		visto, err := capa.enCapa(ctx, dentro)
+		if err != nil {
+			return nil, err
+		}
+		switch visto {
+		case capaLoTiene:
+			return leerDe(layer, dentro)
+		case capaLoTapa:
+			return nil, ErrNotInImage
+		}
+	}
+	e, err := imagenDebugfs{bin: bin, file: base}.stat(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if !e.existe {
+		return nil, ErrNotInImage
+	}
+	return leerDe(base, p)
+}
+
+// Lo que dice una capa de una ruta (ver enCapa).
+const (
+	capaNoDice  = iota // no la tiene ni la tapa: manda la base
+	capaLoTiene        // la tiene: se lee de la capa
+	capaLoTapa         // whiteout o directorio opaco: no está en la imagen
+)
+
+// enCapa recorre dentro (una ruta bajo /upper) componente a componente: un
+// whiteout en cualquiera de ellos la borra, y un directorio opaco por encima
+// hace que lo que la capa no tenga tampoco venga de la base.
+func (im imagenDebugfs) enCapa(ctx context.Context, dentro string) (int, error) {
+	comps := partes(dentro)
+	cur := "/"
+	opaco := false
+	for i, c := range comps {
+		cur = path.Join(cur, c)
+		e, err := im.stat(ctx, cur)
+		if err != nil {
+			return 0, err
+		}
+		if !e.existe {
+			break
+		}
+		if e.blanqueo {
+			return capaLoTapa, nil
+		}
+		if i == len(comps)-1 {
+			if e.tipo == "directory" {
+				break // un directorio no se lee
+			}
+			return capaLoTiene, nil
+		}
+		if e.tipo != "directory" {
+			// Algo que no es un directorio tapa el de la base entero.
+			return capaLoTapa, nil
+		}
+		if e.opaco {
+			opaco = true
+		}
+	}
+	if opaco {
+		return capaLoTapa, nil
+	}
+	return capaNoDice, nil
 }
 
 // StatImageFile dice si p está en la imagen, cuánto ocupa y su sha256.

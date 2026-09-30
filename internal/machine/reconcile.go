@@ -147,6 +147,9 @@ func (m *Manager) reconcile() {
 // estado que lo explique. liveVMs sí lo ve (escanea /proc), y es la única forma
 // de reconciliar con la realidad. Se llama con m.mu tomado.
 func (m *Manager) killOrphanVMMs() {
+	if m.barridoBloqueado() {
+		return
+	}
 	for id, pid := range m.liveVMs() {
 		mc := m.byID[id]
 		// Vivo y debería estarlo: no se toca.
@@ -176,6 +179,9 @@ func (m *Manager) killOrphanVMMs() {
 func (m *Manager) sweepOrphanVMMs() {
 	// El escaneo de /proc va fuera del candado: recorrerlo con el lock global
 	// tomado congela ps, run y thaw mientras dura.
+	if m.barridoBloqueado() {
+		return
+	}
 	live := m.liveVMs()
 
 	m.mu.Lock()
@@ -293,6 +299,9 @@ const dirGrace = 2 * time.Minute
 // disco sigue teniendo su entrada en memoria, y una que aún se está construyendo
 // tiene su id en reserved, así que ninguna de las dos es candidata.
 func (m *Manager) sweepMachineDirs() {
+	if m.barridoBloqueado() {
+		return
+	}
 	dir := filepath.Join(m.root, "machines")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -449,6 +458,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 	}
 }
 
+// errProcesoDesaparecido es el LastErr de una máquina que CORRÍA y cuyo VMM
+// murió: su disco tiene lo que escribió mientras vivía (ver retieneDatos).
+const errProcesoDesaparecido = "the microVM process disappeared"
+
 func (m *Manager) sweep() {
 	var died []*api.Machine
 	live := make(map[string]bool)
@@ -488,7 +501,7 @@ func (m *Manager) sweep() {
 		}
 		now := time.Now()
 		mc.State = api.StateFailed
-		mc.LastErr = "the microVM process disappeared"
+		mc.LastErr = errProcesoDesaparecido
 		mc.FailedAt = &now
 		mc.PID = 0
 		delete(m.socket, mc.ID)
@@ -508,7 +521,7 @@ func (m *Manager) sweep() {
 		m.releaseCPU(mc.ID)
 		m.bus.Publish(api.Event{
 			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
-			Message: "the microVM process disappeared",
+			Message: errProcesoDesaparecido,
 		})
 	}
 }
