@@ -4,7 +4,7 @@
 #
 #   sudo ./71-build-glibc-base.sh                  # base "min-glibc"
 #   sudo ./71-build-glibc-base.sh node-glibc       # + nodejs
-#   sudo CHROME_SHA256=<...> ./71-build-glibc-base.sh chrome   # + nodejs + chrome-headless-shell
+#   sudo ./71-build-glibc-base.sh chrome           # + nodejs + chrome-headless-shell (solo x86_64)
 #
 # POR QUÉ EXISTE, SI YA HAY UNA BASE.
 #
@@ -74,10 +74,15 @@ fi
 # comprobaba nada. Se deciden aquí, antes del debootstrap, para fallar pronto.
 #   - Node: el hash es el de SHASUMS256.txt de nodejs.org para esa versión. Otra
 #     versión: NODE_VERSION=v22.x.y NODE_SHA256=<...>.
-#   - Chrome for Testing no publica hashes: CHROME_SHA256 es el sha256 del zip de
-#     esa versión, bajado una vez por un camino de confianza y fijado aquí o
-#     pasado a mano (sha256sum chrome-headless-shell-linux64.zip). Sin él no se
-#     instala.
+#   - Chrome for Testing no publica sha256, pero Google Cloud Storage sí da el
+#     MD5 y el CRC32C de cada objeto (cabecera x-goog-hash de un HEAD). El hash
+#     fijado abajo es el sha256 de un zip cuyo tamaño y MD5 coincidían con los de
+#     GCS. Otra versión: CHROME_VERSION=… CHROME_SHA256=<…>, sacado así:
+#       u=https://storage.googleapis.com/chrome-for-testing-public/$V/linux64/chrome-headless-shell-linux64.zip
+#       curl -sI "$u" | grep -i x-goog-hash          # md5=<base64>
+#       curl -sfLo chs.zip "$u"; openssl md5 -binary chs.zip | base64   # el mismo
+#       sha256sum chs.zip                            # el que se fija
+#     Sin hash no se instala.
 NODE_VERSION="${NODE_VERSION:-v22.23.3}"
 NARCH=x64; [ "$DEB_ARCH" = arm64 ] && NARCH=arm64
 if [ "$NODE" = si ] && [ -z "${NODE_SHA256:-}" ]; then
@@ -89,6 +94,12 @@ if [ "$NODE" = si ] && [ -z "${NODE_SHA256:-}" ]; then
 fi
 CHROME_VERSION="${CHROME_VERSION:-154.0.8037.92}"
 CHROME_SHA256="${CHROME_SHA256:-}"
+if [ "$CHROME" = si ] && [ -z "$CHROME_SHA256" ]; then
+  case "$CHROME_VERSION-$CHROME_ARCH" in
+    # 120477194 bytes, md5 (GCS) qwuFqD7Srpqly/tYvTQSlQ==, comprobado 2026-09-30.
+    154.0.8037.92-linux64) CHROME_SHA256=636aa5c79f2693632e9921b8bbb050038ba11672e02346c06c20f991aed096f9 ;;
+  esac
+fi
 if [ "$CHROME" = si ] && [ -z "$CHROME_SHA256" ]; then
   echo "falta CHROME_SHA256: el sha256 de chrome-headless-shell-$CHROME_ARCH.zip $CHROME_VERSION" >&2
   echo "(Chrome for Testing no publica hashes; bájalo una vez, compruébalo y pásalo)" >&2

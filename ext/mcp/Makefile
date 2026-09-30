@@ -91,24 +91,30 @@ linux:
 deploy: linux bridge
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
-	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-bridge scripts/80-mcp-image.sh $(TARGET):/tmp/
-	scp -q scripts/builders/mcp $(TARGET):/tmp/builder-mcp
-	scp -q packaging/kling-gateway.service packaging/kling-heal.service \
-		packaging/kling-heal.timer $(TARGET):/tmp/
-	ssh $(TARGET) 'test -x /usr/local/bin/kling || { echo "falta kling en el host: despliega kindling primero" >&2; exit 1; } && \
-		sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
+	@# A un directorio de mktemp -d (0700, del usuario de SSH), no a /tmp/<nombre>:
+	@# otro usuario del host podía dejar antes un enlace con ese nombre y
+	@# `sudo install` lo instalaba como root. Igual que el deploy de la raíz.
+	@set -e; \
+	D=$$(ssh $(TARGET) 'mktemp -d'); \
+	case "$$D" in /*) ;; *) echo "mktemp -d on $(TARGET) failed: $$D" >&2; exit 1;; esac; \
+	trap 'ssh $(TARGET) "rm -rf $$D"' EXIT; \
+	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):$$D/$(BIN); \
+	scp -q kling-bridge scripts/80-mcp-image.sh $(TARGET):$$D/; \
+	scp -q scripts/builders/mcp $(TARGET):$$D/builder-mcp; \
+	scp -q packaging/kling-gateway.service packaging/kling-heal.service packaging/kling-heal.timer $(TARGET):$$D/; \
+	ssh $(TARGET) "D=$$D; "'test -x /usr/local/bin/kling || { echo "falta kling en el host: despliega kindling primero" >&2; exit 1; } && \
+		sudo install -m755 "$$D/$(BIN)" /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling /usr/local/lib/kindling/builders && \
-		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
-		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
-		sudo install -m755 /tmp/builder-mcp /usr/local/lib/kindling/builders/mcp && \
+		sudo install -m755 "$$D/kling-bridge" /usr/local/lib/kindling/kling-bridge && \
+		sudo install -m755 "$$D/80-mcp-image.sh" /usr/local/lib/kindling/80-mcp-image.sh && \
+		sudo install -m755 "$$D/builder-mcp" /usr/local/lib/kindling/builders/mcp && \
 		KU=$$( . /etc/default/kling 2>/dev/null; echo "$${KLING_SOCKET_USER:-$$(id -un)}" ) && \
 		KG=$$(id -gn "$$KU") && \
 		for u in kling-gateway.service kling-heal.service; do \
-		  sed -e "s/@KLING_USER@/$$KU/" -e "s/@KLING_GROUP@/$$KG/" /tmp/$$u | sudo tee /etc/systemd/system/$$u >/dev/null && \
+		  sed -e "s/@KLING_USER@/$$KU/" -e "s/@KLING_GROUP@/$$KG/" "$$D/$$u" | sudo tee /etc/systemd/system/$$u >/dev/null && \
 		  sudo chmod 644 /etc/systemd/system/$$u || exit 1; \
 		done && \
-		sudo install -m644 /tmp/kling-heal.timer /etc/systemd/system/ && \
+		sudo install -m644 "$$D/kling-heal.timer" /etc/systemd/system/ && \
 		sudo install -d -m755 /etc/kling && \
 		( [ -s /etc/kling/gateway.env ] || \
 		  ( sudo install -m600 /dev/null /etc/kling/gateway.env && \

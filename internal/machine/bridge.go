@@ -392,7 +392,14 @@ func hasFile(ctx context.Context, image, path string) (bool, error) {
 	if bin == "" {
 		return false, ErrNoDebugfs
 	}
-	out, err := exec.CommandContext(ctx, bin, "-R", "stat "+path, image).CombinedOutput()
+	// Entre comillas y validada, como el resto de órdenes de debugfs
+	// (put_debugfs.go): su intérprete parte por espacios y no escapa nada.
+	if err := nombreDebugfs(path); err != nil {
+		return false, err
+	}
+	c := exec.CommandContext(ctx, bin, "-R", "stat "+comillas(path), image)
+	c.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	out, err := salidaAcotada(c, maxSalidaDebugfs)
 	if err != nil {
 		return false, fmt.Errorf("debugfs on %s: %v: %s", image, err, strings.TrimSpace(string(out)))
 	}
