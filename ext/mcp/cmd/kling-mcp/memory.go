@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"net"
@@ -302,9 +303,24 @@ func localIP() string {
 func memoryInstallService(args []string) error {
 	fs := flag.NewFlagSet("memory install-service", flag.ExitOnError)
 	listen := fs.String("listen", "127.0.0.1:9100", "where to listen")
-	cmdline := fs.String("cmd", "engram mcp --tools=agent", "stdio MCP server to wrap")
+	cmdline := fs.String("cmd", "engram mcp --tools=agent", "stdio MCP server to wrap (quotes group words; or give it after --)")
 	if err := fs.Parse(reorderFor(fs, args)); err != nil {
 		return err
+	}
+	// El comando como lista: tras `--` va tal cual, argumento a argumento; con
+	// -cmd se parte respetando comillas. strings.Fields partía "a b" en dos.
+	parts := fs.Args()
+	if len(parts) > 0 && parts[0] == "--" {
+		parts = parts[1:]
+	}
+	if len(parts) == 0 {
+		var err error
+		if parts, err = splitArgs(*cmdline); err != nil {
+			return fmt.Errorf("-cmd: %w", err)
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Errorf("-cmd is empty")
 	}
 	bin := bridgePath()
 	if bin == "" {
@@ -325,20 +341,53 @@ func memoryInstallService(args []string) error {
 	// launchd NO hereda el PATH de tu shell: un comando escrito por nombre falla
 	// con "executable file not found in $PATH", igual que le pasaba al init de
 	// las microVMs. Se resuelve aquí a ruta absoluta.
-	parts := strings.Fields(*cmdline)
 	if abs, err := exec.LookPath(parts[0]); err == nil {
 		parts[0] = abs
 	} else {
 		return fmt.Errorf("can't find %q in PATH: install it or provide the full path with -cmd", parts[0])
 	}
 
-	var argsXML strings.Builder
-	for _, a := range append([]string{bin, "-listen", *listen, "--"}, parts...) {
-		fmt.Fprintf(&argsXML, "    <string>%s</string>\n", a)
+	body := launchAgentPlist(home, append([]string{bin, "-listen", *listen, "--"}, parts...))
+
+	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
+		return err
 	}
+	_ = exec.Command("launchctl", "unload", plist).Run()
+	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl load: %v: %s", err, out)
+	}
+	if err := waitForStart(bin); err != nil {
+		return err
+	}
+	warnIfExposed(*listen)
+
+	fmt.Printf("Service installed: %s\n", plist)
+	fmt.Printf("  exposes: %s\n", strings.Join(parts, " "))
+	fmt.Printf("  at:      http://%s:%s/mcp\n", localIP(), portOf(*listen))
+	fmt.Printf("  log:     ~/Library/Logs/kindling-bridge.log\n\n")
+	fmt.Printf("Starts automatically at login. To remove it:\n")
+	fmt.Printf("  launchctl unload %s && rm %s\n", plist, plist)
+	return nil
+}
+
+// xmlText escapa s para un nodo de texto del plist (& < > y comillas).
+func xmlText(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
+// launchAgentPlist es el plist del agente: un <string> por argumento, cada
+// uno escapado. Un & o un < en un argumento o en el home rompía el plist.
+func launchAgentPlist(home string, argv []string) string {
+	var argsXML strings.Builder
+	for _, a := range argv {
+		fmt.Fprintf(&argsXML, "    <string>%s</string>\n", xmlText(a))
+	}
+	home = xmlText(home)
 	// Agente de usuario, no demonio del sistema: envuelve un programa del usuario
 	// y no tiene por qué correr con privilegios ni antes de que inicie sesión.
-	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.kindling.bridge</string>
@@ -354,24 +403,57 @@ func memoryInstallService(args []string) error {
   <key>StandardErrorPath</key><string>%s/Library/Logs/kindling-bridge.log</string>
 </dict></plist>
 `, argsXML.String(), home, home, home, home, home)
+}
 
-	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
-		return err
+// splitArgs parte una línea de órdenes como un shell sencillo: espacios fuera
+// de comillas separan, '...' es literal, "..." admite \" y \\, y \ fuera de
+// comillas escapa el siguiente carácter. Sin expansiones.
+func splitArgs(s string) ([]string, error) {
+	var out []string
+	var cur strings.Builder
+	inWord := false
+	var quote rune
+	esc := false
+	for _, r := range s {
+		switch {
+		case esc:
+			cur.WriteRune(r)
+			esc = false
+		case quote == '\'':
+			if r == '\'' {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case quote == '"':
+			switch r {
+			case '"':
+				quote = 0
+			case '\\':
+				esc = true
+			default:
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote, inWord = r, true
+		case r == '\\':
+			esc, inWord = true, true
+		case r == ' ' || r == '\t' || r == '\n':
+			if inWord {
+				out = append(out, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteRune(r)
+			inWord = true
+		}
 	}
-	_ = exec.Command("launchctl", "unload", plist).Run()
-	if out, err := exec.Command("launchctl", "load", plist).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load: %v: %s", err, out)
+	if quote != 0 || esc {
+		return nil, fmt.Errorf("unterminated quote or escape in %q", s)
 	}
-	if err := waitForStart(bin); err != nil {
-		return err
+	if inWord {
+		out = append(out, cur.String())
 	}
-	warnIfExposed(*listen)
-
-	fmt.Printf("Service installed: %s\n", plist)
-	fmt.Printf("  exposes: %s\n", *cmdline)
-	fmt.Printf("  at:      http://%s:%s/mcp\n", localIP(), portOf(*listen))
-	fmt.Printf("  log:     ~/Library/Logs/kindling-bridge.log\n\n")
-	fmt.Printf("Starts automatically at login. To remove it:\n")
-	fmt.Printf("  launchctl unload %s && rm %s\n", plist, plist)
-	return nil
+	return out, nil
 }

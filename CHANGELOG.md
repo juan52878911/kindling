@@ -63,6 +63,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `kling sbx renew <id> -ttl 30m` funciona en el orden que enseña su ayuda (antes daba
   el error de uso), y `-ttl` por debajo de 1 s es un error en `sbx new` y `sbx renew`
   (`-ttl 500ms` se truncaba a 0 y se omitía sin avisar).
+- `kling memory install-service`: el comando va como lista (tras `--`, argumento a
+  argumento, o con `-cmd` respetando comillas) y el plist del LaunchAgent escapa cada
+  valor; antes `strings.Fields` partía los argumentos con espacios y un `&` o un `<`
+  dejaba un plist que launchd no leía.
 
 ### Seguridad
 
