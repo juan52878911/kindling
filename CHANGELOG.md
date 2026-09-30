@@ -10,6 +10,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`state.json` lleva versión, y un daemon viejo no pisa el estado de uno nuevo.** El
+  fichero pasa de un array a `{"schema": 1, "machines": [...]}`. El formato anterior se
+  sigue leyendo y, antes de la primera escritura, se copia a `state.json.v0.bak`. Uno con
+  un `schema` mayor del que entiende el binario ya no se aparta como corrupto ni se
+  sobrescribe: el daemon se niega a arrancar y dice qué versión encontró. Es la primera
+  pieza de [`docs/actualizar.md`](docs/actualizar.md) (`pkg/esquema`, común a los demás
+  ficheros). Volver a un kling anterior con un `state.json` ya migrado: restaurar la copia.
 - **Un paquete DNS perdido ya no tumba una petición del proxy de credenciales.** El proxy
   y la allowlist resolvían con un plazo total de 5 s, el mismo que el resolver de Go da a
   un solo intento: si se perdía el datagrama, no había reintento y la petición salía con
