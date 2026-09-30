@@ -210,6 +210,16 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	// Una imagen es monolítica O por capas, nunca las dos: con los dos
+	// ficheros manda el .ext4 (ver machine/layer.go), así que una capa subida
+	// sobre una monolítica no se usaba nunca —y el copy decía que sí—, y una
+	// monolítica sobre una por capas dejaba la capa y su receta mezcladas con
+	// ella. Se mira antes de recibir nada: son gigas.
+	if otra, ok := s.formaContraria(t); ok {
+		fail(w, http.StatusConflict, fmt.Errorf("image %q already exists as a %s on this daemon; "+
+			"remove it first (kling images rm %s) to replace it with a %s", t.name, otra, t.name, t.part))
+		return
+	}
 	if r.ContentLength > api.MaxBlobBytes {
 		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the %s is %d bytes and the limit is %d", t.part, r.ContentLength, api.MaxBlobBytes))
 		return
@@ -334,4 +344,26 @@ func (s *Server) blobReplaceable(t blobTarget) error {
 func (s *Server) esCapa(name string) bool {
 	_, err := os.Stat(filepath.Join(s.root, "images", name+".layer.ext4"))
 	return err == nil
+}
+
+// formaContraria dice si name ya existe con la otra forma que t: una capa
+// cuando se sube el ext4 monolítico, o al revés.
+func (s *Server) formaContraria(t blobTarget) (string, bool) {
+	var otra string
+	switch t.part {
+	case api.BlobImage:
+		otra = api.BlobLayer
+	case api.BlobLayer:
+		otra = api.BlobImage
+	default:
+		return "", false
+	}
+	o, err := s.resolveBlob(t.name, otra, true)
+	if err != nil {
+		return "", false
+	}
+	if _, err := os.Lstat(o.path); err != nil {
+		return "", false
+	}
+	return otra, true
 }
