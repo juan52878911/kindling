@@ -67,6 +67,9 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   argumento, o con `-cmd` respetando comillas) y el plist del LaunchAgent escapa cada
   valor; antes `strings.Fields` partía los argumentos con espacios y un `&` o un `<`
   dejaba un plist que launchd no leía.
+- `kling mcp health` sale con error si un servicio no responde aunque no se pueda
+  grabar su salud (antes el fallo al grabar saltaba la cuenta y salía con 0), y dice
+  siempre el fallo de la sonda.
 
 ### Seguridad
 

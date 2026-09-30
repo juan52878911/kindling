@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -650,27 +651,39 @@ func mcpHealth(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	var enfermos int
+	var enfermos, sinGrabar int
 	for _, t := range targets {
 		svc := t.nombre
 		probeErr := probeHealth(ctx, c, svc, *wait, *profundo, t.egress)
-		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
-		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
-		if err := mcp.SetHealth(ctx, c, svc, probeErr == nil, errMsg(probeErr)); err != nil {
-			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", svc, err)
-			continue
-		}
+		// El veredicto de la sonda se cuenta y se dice SIEMPRE, se pueda grabar
+		// o no: antes un fallo al grabar hacía `continue` antes de contar al
+		// enfermo, y un servicio que no arrancaba salía con código 0.
 		if probeErr != nil {
 			enfermos++
 			fmt.Fprintf(tw, "  %s\t✗ unhealthy: %v\n", svc, probeErr)
 		} else {
 			fmt.Fprintf(tw, "  %s\t✓ healthy\n", svc)
 		}
+		// El veredicto se persiste aunque el servicio esté roto: "enferma" es un
+		// dato tan útil como "sana", y es justo el que queremos ver en mcp list.
+		// No poder grabarlo también es un fallo: mcp list seguiría enseñando
+		// el de antes.
+		if err := mcp.SetHealth(ctx, c, svc, probeErr == nil, errMsg(probeErr)); err != nil {
+			sinGrabar++
+			fmt.Fprintf(tw, "  %s\t✗ couldn't record health: %v\n", svc, err)
+		}
 	}
 	_ = tw.Flush()
 
+	var errs []string
 	if enfermos > 0 {
-		return fmt.Errorf("%d of %d service(s) didn't respond to the probe", enfermos, len(targets))
+		errs = append(errs, fmt.Sprintf("%d of %d service(s) didn't respond to the probe", enfermos, len(targets)))
+	}
+	if sinGrabar > 0 {
+		errs = append(errs, fmt.Sprintf("the health of %d service(s) couldn't be recorded", sinGrabar))
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
 }
