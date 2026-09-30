@@ -345,7 +345,7 @@ func TestForkRechazaAntesDePausar(t *testing.T) {
 	// Con el almacén en disco basta, aunque state.json no lo diga todavía.
 	cambiar(func(*api.Machine) {})
 	if err := m.guardarCredenciales(id, []credproxy.Credential{{Env: "KEY", Domain: "api.example.com",
-		Placeholder: credproxy.PlaceholderPrefix + "aa", Secret: "x"}}); err != nil {
+		Placeholder: credproxy.PlaceholderPrefix + "aa", Secret: "x-clave-de-prueba"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := m.Fork(context.Background(), "caja", ForkOptions{}); !errors.Is(err, ErrFork) {
@@ -462,7 +462,7 @@ func TestForkRepiteLaComprobacionBajoElCerrojo(t *testing.T) {
 	}()
 	time.Sleep(200 * time.Millisecond) // el fork ya pasó su comprobación sin cerrojo
 	if err := m.guardarCredenciales(id, []credproxy.Credential{{Env: "KEY", Domain: "api.example.com",
-		Placeholder: credproxy.PlaceholderPrefix + "aa", Secret: "x"}}); err != nil {
+		Placeholder: credproxy.PlaceholderPrefix + "aa", Secret: "x-clave-de-prueba"}}); err != nil {
 		t.Fatal(err)
 	}
 	soltar()

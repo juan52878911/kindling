@@ -99,6 +99,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   el dialer del daemon llegaba al loopback del host. `credproxy.IsBlockedIP` rechaza
   además IPv6 sin especificar, loopback, link-local, ULA, multicast, NAT64 y 6to4 (la
   salida sigue siendo solo IPv4).
+- **Una clave de menos de 8 bytes se rechaza** al registrar la credencial (máquina,
+  plantilla, arista de grafo y `kling-vz`), con un error que dice por qué: se aceptaba
+  de 1 byte y el redactor la cambiaba en toda la respuesta (con `abc`, `abcdef` llegaba
+  como `kling-cred-…def`). **Incompatible**: una máquina cuyo almacén guarde una clave más
+  corta no recibe sus credenciales al arrancar o despertar (el error lo dice) hasta
+  rotarla con `kling machine credential` y la misma `-env`.
 
 ## v0.17.0 — 2026-09-29
 

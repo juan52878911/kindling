@@ -361,7 +361,7 @@ func TestProxySinPermisosEsTodoYNoTocaLaRuta(t *testing.T) {
 }
 
 func TestValidarCredencialesConPermisos(t *testing.T) {
-	c := []Credential{{Domain: "a.example.com", Placeholder: testPlace, Secret: "x", Allow: []string{"get /v1/x"}}}
+	c := []Credential{{Domain: "a.example.com", Placeholder: testPlace, Secret: "x-clave-de-prueba", Allow: []string{"get /v1/x"}}}
 	if err := ValidarCredenciales(c); err != nil || c[0].Allow[0] != "GET /v1/x" {
 		t.Fatalf("%v, %q", err, c[0].Allow)
 	}

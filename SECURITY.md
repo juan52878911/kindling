@@ -245,7 +245,10 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   proveedor que refleje lo que recibe. En macOS el daemon solo entrega credenciales
   HTTP a un `kling-vz` que anuncie `http-places` (uno anterior las cambiaría en todas
   partes). Una respuesta con una
-  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
+  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. La clave tiene que medir entre 8 y 4096
+  bytes: una más corta se rechaza al registrarla, porque redactarla cambiaría texto que
+  nada tiene que ver (con `abc`, un `abcdef` del proveedor llegaría como
+  `kling-cred-…def`). Acotado:
   32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB del cuerpo
   ya sustituido retenido EN MEMORIA por petición (`pkg/credproxy/cuerpo.go`). Un cuerpo
   que, tras sustituir, pasa de 1 MiB sale chunked si el invitado lo mandó chunked (no

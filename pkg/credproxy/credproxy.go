@@ -111,6 +111,12 @@ const (
 	MaxCredentials = 16
 	// MaxSecret: tamaño de una clave.
 	MaxSecret = 4096
+	// MinSecret: tamaño mínimo de una clave. La respuesta se redacta
+	// cambiando cada aparición de la clave por el marcador, y el registro
+	// enmascara los segmentos de ruta que la contienen: con una clave de pocos
+	// bytes ("abc") se corromperían respuestas enteras ("abcdef" pasaría a
+	// "kling-cred-…def") y rutas que nada tienen que ver.
+	MinSecret = 8
 	// MaxInFlight: peticiones a la vez por proxy antes de contestar 503.
 	MaxInFlight = 32
 	// MaxBody: cuerpo de una petición del invitado.
@@ -230,8 +236,8 @@ func ValidarCredenciales(creds []Credential) error {
 			return err
 		}
 		c.Domain = d
-		if c.Secret == "" || len(c.Secret) > MaxSecret {
-			return fmt.Errorf("credential for %s: the secret must be 1-%d bytes", d, MaxSecret)
+		if len(c.Secret) < MinSecret || len(c.Secret) > MaxSecret {
+			return fmt.Errorf("credential for %s: the secret must be %d-%d bytes (got %d): a shorter one would be redacted inside unrelated response text", d, MinSecret, MaxSecret, len(c.Secret))
 		}
 		if !strings.HasPrefix(c.Placeholder, PlaceholderPrefix) || len(c.Placeholder) <= len(PlaceholderPrefix) {
 			return fmt.Errorf("credential for %s: invalid placeholder", d)

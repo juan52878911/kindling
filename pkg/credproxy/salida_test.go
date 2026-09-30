@@ -17,14 +17,14 @@ import (
 func TestSetCredentialsDevuelveLosDominios(t *testing.T) {
 	p := New(Options{})
 	got, err := p.SetCredentials([]Credential{
-		{Domain: "B.example.com.", Placeholder: testPlace, Secret: "x"},
-		{Domain: "a.example.com", Placeholder: testPlace2, Secret: "y"},
-		{Domain: "b.example.com", Placeholder: testPlace + "2", Secret: "z"},
+		{Domain: "B.example.com.", Placeholder: testPlace, Secret: "x-clave-de-prueba"},
+		{Domain: "a.example.com", Placeholder: testPlace2, Secret: "y-clave-de-prueba"},
+		{Domain: "b.example.com", Placeholder: testPlace + "2", Secret: "z-clave-de-prueba"},
 	})
 	if err != nil || strings.Join(got, ",") != "a.example.com,b.example.com" {
 		t.Fatalf("dominios %v (%v)", got, err)
 	}
-	if _, err := p.SetCredentials([]Credential{{Domain: "*.example.com", Placeholder: testPlace, Secret: "x"}}); err == nil {
+	if _, err := p.SetCredentials([]Credential{{Domain: "*.example.com", Placeholder: testPlace, Secret: "x-clave-de-prueba"}}); err == nil {
 		t.Fatal("un comodín debería rechazarse")
 	}
 	if len(p.creds["b.example.com"]) != 2 {

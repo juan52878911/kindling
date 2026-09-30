@@ -50,7 +50,7 @@ func TestUpstreamEnReenvioDeOtraMaquina(t *testing.T) {
 	}
 	ctx := context.Background()
 	pg := func(up string) []api.CredentialSpec {
-		return []api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres",
+		return []api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw-clave-de-prueba", Type: "postgres",
 			User: "app", Database: "appdb", Upstream: up, UpstreamTLS: "disable"}}
 	}
 	for _, up := range []string{"127.0.0.1:61234", "localhost:61234", "[::1]:61234"} {
@@ -78,7 +78,7 @@ func TestUpstreamEnReenvioDeOtraMaquina(t *testing.T) {
 
 	// Al reentregar (thaw) se vuelve a mirar: el reenvío pudo abrirse después.
 	creds := []credproxy.Credential{{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
-		Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb", Upstream: "127.0.0.1:61234", UpstreamTLS: "disable"}}
+		Secret: "pw-clave-de-prueba", Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb", Upstream: "127.0.0.1:61234", UpstreamTLS: "disable"}}
 	if err := m.guardarCredenciales("m1", creds); err != nil {
 		t.Fatal(err)
 	}

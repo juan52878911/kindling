@@ -748,7 +748,7 @@ func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
 			}
 			c := fc.New(m.socket[id])
 			err = registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
-				{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk", Allow: []string{"GET /v1/balance"},
+				{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba", Allow: []string{"GET /v1/balance"},
 					Headers: []string{"X-Goog-Api-Key"}, Body: true},
 			}, "", nil)
 			if !strings.Contains(kinds, credproxy.CapHTTPPlaces) {
@@ -797,7 +797,7 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 				t.Fatalf("boot: %v", err)
 			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
 			}, "", nil)
 			ls := llamadas(t, logPath)
@@ -844,7 +844,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				t.Fatalf("boot: %v", err)
 			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app",
 					Upstream: "127.0.0.1:5432", UpstreamTLS: credproxy.UpstreamTLSDisable},
 			}, "", nil)
@@ -874,7 +874,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				return nil, errors.New("no such host")
 			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432", TLSServerName: "db.lan"},
 			}, "", nil)
 			ls = llamadas(t, logPath)
@@ -891,7 +891,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			// respuestas, no le llega a kling-vz.
 			for _, up := range []string{"meta.lan:5432", "nadie.lan:5432"} {
 				err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 						Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: up},
 				}, "", nil)
 				if err == nil {
@@ -909,7 +909,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 // nadie: el kling-vz es el mismo y conserva las claves.
 func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
 	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
-		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}, "", nil); err != nil {
+		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s-clave-de-prueba"}}, "", nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -952,7 +952,7 @@ func TestVZCredencialMaquinaExigeGraphLink(t *testing.T) {
 			m, logPath := managerVZ(t)
 			c := arrancarVZFalso(t, m, "aa11bb22cc33dd77")
 			err := registrarCredencialesPlataforma(context.Background(), c, nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb",
 					UpstreamMachine: idCopia, UpstreamOwner: "local", UpstreamTLS: credproxy.UpstreamTLSDisable},
 			}, "", nil)

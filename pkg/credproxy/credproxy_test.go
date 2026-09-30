@@ -371,17 +371,17 @@ func TestValidarDominio(t *testing.T) {
 }
 
 func TestValidarCredenciales(t *testing.T) {
-	ok := []Credential{{Domain: "A.example.com", Placeholder: testPlace, Secret: "x"}}
+	ok := []Credential{{Domain: "A.example.com", Placeholder: testPlace, Secret: "x-clave-de-prueba"}}
 	if err := ValidarCredenciales(ok); err != nil || ok[0].Domain != "a.example.com" {
 		t.Fatalf("válida: %v, dominio %q", err, ok[0].Domain)
 	}
 	for nombre, c := range map[string][]Credential{
-		"marcador repetido": {{Domain: "a.example.com", Placeholder: testPlace, Secret: "x"},
-			{Domain: "b.example.com", Placeholder: testPlace, Secret: "y"}},
+		"marcador repetido": {{Domain: "a.example.com", Placeholder: testPlace, Secret: "x-clave-de-prueba"},
+			{Domain: "b.example.com", Placeholder: testPlace, Secret: "y-clave-de-prueba"}},
 		"sin secreto":        {{Domain: "a.example.com", Placeholder: testPlace}},
-		"marcador de otro":   {{Domain: "a.example.com", Placeholder: "sk_live_x", Secret: "x"}},
-		"prefijo a secas":    {{Domain: "a.example.com", Placeholder: PlaceholderPrefix, Secret: "x"}},
-		"dominio con puerto": {{Domain: "a.example.com:443", Placeholder: testPlace, Secret: "x"}},
+		"marcador de otro":   {{Domain: "a.example.com", Placeholder: "sk_live_x", Secret: "x-clave-de-prueba"}},
+		"prefijo a secas":    {{Domain: "a.example.com", Placeholder: PlaceholderPrefix, Secret: "x-clave-de-prueba"}},
+		"dominio con puerto": {{Domain: "a.example.com:443", Placeholder: testPlace, Secret: "x-clave-de-prueba"}},
 	} {
 		if err := ValidarCredenciales(c); err == nil {
 			t.Errorf("%s: debería rechazarse", nombre)
@@ -405,5 +405,24 @@ func TestProxyRechazaUnCuerpoDemasiadoGrande(t *testing.T) {
 	}
 	if atomic.LoadInt32(hits) != 0 {
 		t.Errorf("el proveedor recibió %d peticiones", *hits)
+	}
+}
+
+// Una clave corta corrompía las respuestas: con "abc", un "abcdef" del
+// proveedor llegaba como "kling-cred-…def". Se rechaza al registrarla.
+func TestValidarCredencialesClaveCorta(t *testing.T) {
+	for _, secreto := range []string{"a", "abc", "1234567"} {
+		c := []Credential{{Domain: "a.example.com", Placeholder: testPlace, Secret: secreto}}
+		if err := ValidarCredenciales(c); err == nil || !strings.Contains(err.Error(), "8-4096 bytes") {
+			t.Errorf("%q: %v", secreto, err)
+		}
+		p := New(Options{})
+		if _, err := p.SetCredentials(c); err == nil {
+			t.Errorf("%q: el proxy la aceptó", secreto)
+		}
+	}
+	c := []Credential{{Domain: "a.example.com", Placeholder: testPlace, Secret: "12345678"}}
+	if err := ValidarCredenciales(c); err != nil {
+		t.Errorf("8 bytes: %v", err)
 	}
 }
