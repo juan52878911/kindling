@@ -50,22 +50,25 @@ func ioctl(fd uintptr, req, arg uintptr) error {
 }
 
 // attachLoop engancha file a un loop libre con autoborrado (se suelta solo al
-// desmontar) y devuelve /dev/loopN.
-func attachLoop(file string) (string, error) {
+// desmontar) y devuelve /dev/loopN y su descriptor abierto. Quien llama lo
+// cierra DESPUÉS de montar: con LO_FLAGS_AUTOCLEAR el kernel suelta el loop en
+// el último cierre, y cerrarlo antes del mount lo dejaba vacío (el mount daba
+// "input/output error" leyendo el superbloque).
+func attachLoop(file string) (string, *os.File, error) {
 	ctl, err := os.OpenFile("/dev/loop-control", os.O_RDWR, 0)
 	if err != nil {
-		return "", fmt.Errorf("loop-control: %w", err)
+		return "", nil, fmt.Errorf("loop-control: %w", err)
 	}
 	defer ctl.Close()
 	f, err := os.OpenFile(file, os.O_RDWR, 0)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer f.Close()
 	for try := 0; try < 8; try++ {
 		n, _, e := syscall.Syscall(syscall.SYS_IOCTL, ctl.Fd(), loopCtlGetFree, 0)
 		if e != 0 {
-			return "", fmt.Errorf("LOOP_CTL_GET_FREE: %w", e)
+			return "", nil, fmt.Errorf("LOOP_CTL_GET_FREE: %w", e)
 		}
 		dev := fmt.Sprintf("/dev/loop%d", n)
 		if _, err := os.Stat(dev); errors.Is(err, os.ErrNotExist) {
@@ -73,14 +76,14 @@ func attachLoop(file string) (string, error) {
 		}
 		l, err := os.OpenFile(dev, os.O_RDWR, 0)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if err := ioctl(l.Fd(), loopSetFd, f.Fd()); err != nil {
 			l.Close()
 			if errors.Is(err, syscall.EBUSY) {
 				continue // otro lo cogió entre medias
 			}
-			return "", fmt.Errorf("LOOP_SET_FD: %w", err)
+			return "", nil, fmt.Errorf("LOOP_SET_FD: %w", err)
 		}
 		var info loopInfo64
 		info.Flags = loFlagsAutoCl
@@ -88,12 +91,11 @@ func attachLoop(file string) (string, error) {
 		if err := ioctl(l.Fd(), loopSetStatus, uintptr(unsafe.Pointer(&info))); err != nil {
 			_ = ioctl(l.Fd(), loopClrFd, 0)
 			l.Close()
-			return "", fmt.Errorf("LOOP_SET_STATUS64: %w", err)
+			return "", nil, fmt.Errorf("LOOP_SET_STATUS64: %w", err)
 		}
-		l.Close()
-		return dev, nil
+		return dev, l, nil
 	}
-	return "", errors.New("no free loop device")
+	return "", nil, errors.New("no free loop device")
 }
 
 // copySparse copia src en dst sin rellenar los huecos (SEEK_DATA/SEEK_HOLE):

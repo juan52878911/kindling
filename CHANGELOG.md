@@ -10,6 +10,22 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling phone`** (`ext/phone`, #91): teléfonos Android en microVMs por la API del
+  daemon, sin `allow_exec`. `up`/`ls`/`pause`/`resume`/`rm`/`adb`/`api`, identidad por
+  clon con `machine secret -hooks`, `pool` de repuestos pausados (`-watch` congela los
+  ociosos), `golden build|verify|inspect` (sonda de listo, caché de páginas contra el
+  disco también en un clon del dorado guardado, anotación con arquitectura, kernel,
+  verity y resultado), el muro web (`view`) y un servidor MCP (`mcp`) que `kling mcp
+  link` importa: `phone.screen`, `phone.tree`, `phone.tap`... con un teléfono por sesión.
+- **La API del teléfono exige un token** (`kling-phoned`, #110): todo salvo
+  `/v1/health` pide `Authorization: Bearer`, también por el proxy del daemon; el
+  invitado guarda solo los sha256 (`read` o `control`) que llegan con la identidad por
+  MMDS, y sin ellos la API está cerrada (un dorado, un nodo de grafo sin `kling phone
+  adopt`). Una arista `link` al 8091 sin token recibe 401. `SECURITY.md` §21.
+- `kling-phoned`: `POST /v1/verify-cache` (el `--verify-cache` de `android-sh` sin
+  shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
+  `mount`).
+
 ## v0.17.0 — 2026-09-29
 
 La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:

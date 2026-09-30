@@ -31,11 +31,25 @@ func runIdentity() int {
 		fmt.Printf("no identity in MMDS (%s): nothing to apply\n", orQ(restore))
 		return 0
 	}
+	// Los tokens de la API (auth.go) van primero y aparte: un documento que
+	// solo los trae no toca la identidad, y rotarlos no la rehace.
+	tokens := ""
+	if id.APITokens != nil {
+		if err := writeTokens(tokensPath, *id.APITokens); err != nil {
+			fmt.Printf("identity: api tokens: %v\n", err)
+			return 1
+		}
+		tokens = fmt.Sprintf("api tokens: %d", len(*id.APITokens))
+	}
+	if id.authOnly() {
+		fmt.Println(tokens)
+		return 0
+	}
 	sum := id.digest()
 	if b, err := os.ReadFile(identityMark); err == nil && strings.TrimSpace(string(b)) == sum {
 		// El mismo documento otra vez (un thaw con el almacén aún lleno): no se
 		// regeneran los SSAID en cada descongelación.
-		fmt.Println("identity already applied")
+		fmt.Println(joinNonEmpty("identity already applied", tokens))
 		return 0
 	}
 	t0 := time.Now()
@@ -45,9 +59,19 @@ func runIdentity() int {
 		return 1
 	}
 	_ = os.WriteFile(identityMark, []byte(sum+"\n"), 0o600)
+	if tokens != "" {
+		done = append(done, tokens)
+	}
 	// Ni un trozo de los valores: esta salida acaba en la consola (kling logs).
 	fmt.Printf("identity applied (%s) in %.2fs\n", strings.Join(done, ", "), time.Since(t0).Seconds())
 	return 0
+}
+
+func joinNonEmpty(a, b string) string {
+	if b == "" {
+		return a
+	}
+	return a + "; " + b
 }
 
 // redact quita de un mensaje cualquier valor de la identidad.

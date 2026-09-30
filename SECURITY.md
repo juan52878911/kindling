@@ -1066,6 +1066,44 @@ recambio del puente escriben dentro como root, así que:
 - **`from_host`** se abre por `os.Root` sobre `/usr/local/lib/kindling`: un enlace de ese
   directorio no lleva a un fichero cualquiera del host.
 
+### 21. La API del teléfono (8091) exige un token, también desde el daemon
+
+`kling-phoned` (el agente de los teléfonos Android, `prototypes/android/phoned`) sirve
+en el 8091 del invitado una API que controla el teléfono: tocar, escribir, instalar un
+APK (ejecutar código en él). Quien llega a ese puerto: el proxy del daemon (`POST
+/machines/{ref}/guest`), el reenvío de `127.0.0.1` del Mac, cualquier proceso del
+anfitrión Linux y un nodo de grafo con una arista `link` al 8091. Los dos primeros y el
+último marcan desde el anfitrión por el mismo camino, así que **el invitado no puede
+saber quién le habla por el origen**. Por eso (#110):
+
+- **Todo salvo `GET /v1/health` exige `Authorization: Bearer <token>`**, también por el
+  proxy del daemon. El invitado solo guarda el sha256 de cada token, con un ámbito
+  (`read`: pantalla y árbol; `control`: todo), en la RAM de la VM (`/run`, 0600);
+  compara todos en tiempo constante, y un fichero ilegible cuenta como vacío.
+- **Sin tokens, cerrado.** Un dorado no tiene ninguno (`kling phone golden build` usa
+  uno de un solo uso y lo revoca antes de guardar, y lo comprueba), ni un clon hasta que
+  su gancho de identidad los recibe por MMDS. Un nodo de grafo hecho del dorado no se
+  controla por ninguna arista hasta `kling phone adopt`.
+- **El token no pasa por MMDS**: el documento de identidad lleva su sha256. El token de
+  control lo genera `kling phone` y lo guarda en el store del daemon (`/store/phone/<id>`),
+  que solo se lee con acceso al socket: pedir el token al proxy no añade una confianza
+  nueva, y un `curl` al socket sin él solo ve `/v1/health`. Con política de autorización
+  (`docs/authz.md`) `/store` es de admin y un inquilino guarda sus tokens en un fichero
+  0600 suyo.
+- **Dar el control a otro nodo es darle el token** (`kling phone token <tel>`, o
+  `-read` para uno que solo ve): una arista sigue siendo una autorización de red (§15) y
+  el token la de la API. `-rotate` invalida todos los anteriores sin rehacer la
+  identidad.
+- `kling phone view` (el muro) y `kling phone mcp` (el servidor MCP) escuchan en
+  loopback, contestan solo a un `Host` de loopback (rebinding de DNS) y exigen algo que
+  un formulario de otra web no puede mandar sin preflight (`X-Kling-Wall: 1` en los POST
+  del muro; `Content-Type: application/json` y una ruta secreta al azar en el MCP).
+  Tienen el token de cada teléfono: quien llega a ellos controla los teléfonos.
+
+Lo que no cubre: el token viaja en claro por el tramo anfitrión → invitado, como todo lo
+del proxy y de las aristas (§15); y la API no tiene shell (cada ruta valida sus
+argumentos), así que un token de control da el teléfono, no root en la VM.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:

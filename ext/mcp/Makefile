@@ -137,7 +137,7 @@ deploy-mac:
 ## 70-build-minimal-image.sh encuentra el núcleo en ../.. ($KINDLING_DIR lo
 ## sobrescribe si hiciera falta).
 test:
-	gofmt -l . | tee /dev/stderr | (! read)
+	gofmt -l . | tee /dev/stderr | (! read -r _)
 	go vet ./...
 	go test -race ./...
 

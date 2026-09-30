@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/juan52878911/kindling/internal/android"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -46,7 +47,7 @@ var (
 
 func cmdBuilder(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: kling builder base|llm|chispa <workdir>  (the daemon runs it; see docs/api.md)")
+		return fmt.Errorf("usage: kling builder base|llm|chispa|android <workdir>  (the daemon runs it; see docs/api.md)")
 	}
 	switch args[0] {
 	case "base":
@@ -55,6 +56,10 @@ func cmdBuilder(args []string) error {
 		return builderLLM(args[1])
 	case "chispa":
 		return builderChispa(args[1])
+	case "android":
+		// Todo en Go (internal/android): sin root, loop ni chroot, así que
+		// también corre en el daemon de macOS.
+		return android.Build(args[1], os.Stdout)
 	default:
 		return fmt.Errorf("unknown builder %q", args[0])
 	}
