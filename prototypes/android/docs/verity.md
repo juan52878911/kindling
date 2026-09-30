@@ -178,7 +178,11 @@ ninguno medible en lecturas en frío (2,53 s por pasada contra 2,51 s).
   `sigill.md`), no lo ve. Tampoco lo que trae un dorado: su caché de páginas se
   restaura tal cual, sin pasar por verity. Si un fallo aparece con verity
   puesta y sin líneas de verity en dmesg, apunta a la RAM y no al disco: eso
-  es lo que esta prueba sirve para separar.
+  es lo que esta prueba sirve para separar. **Separado el 29-09 (#87):** 47
+  lecturas malas de la capa con verity puesta y 0 líneas de verity; es la
+  RAM (páginas de 16 KiB del host a ceros, también en memoria anónima). Ver
+  `sigill.md`, "La causa". verity sigue sirviendo para eso, para distinguir,
+  pero no protege del fallo de verdad.
 - **El `.odex`/`.art` que Android genera en `/data`** (tmpfs o overlay): no es
   la capa.
 

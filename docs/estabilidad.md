@@ -475,6 +475,15 @@ el disco al 97–98 % de 460 GiB quedaban 9–14 GiB, y el daemon seguía admiti
 En Linux sigue en 2 GiB. Probado en el Mac con los topes forzados: `507` por
 swap (`KLING_MAX_SWAP_PCT=5`), `503` por disco, y admite con los de por defecto.
 
+**Lo que se supo después (#87, 29-09):** ni el disco lleno ni la swap sin
+sitio son la condición. Con 26–46 GiB libres las páginas a ceros siguen
+saliendo, y no son lecturas de disco: el Mac pierde páginas de 16 KiB de la
+RAM de la VM cuando su compresor aprieta la memoria del auxiliar mientras el
+invitado hace E/S (`prototypes/android/docs/sigill.md`, "La causa"). Estas
+compuertas bajan la probabilidad, pero no la cierran: se vio con
+`memorystatus_level` 30–50, por encima de cualquier umbral razonable. Un tope
+de CPU bajo la empeora, pare la VM con SIGSTOP o con la pausa del framework.
+
 ### Dos daemons, una subred (#97)
 
 La marca de namespaces evitaba el borrado, no el choque: cada daemon reparte
