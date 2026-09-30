@@ -1695,6 +1695,106 @@ else
   rm -rf "$DBTMP"; unset KLING_DB_STATE
 fi
 
+# ── 7g2. kling db branch ────────────────────────────────────────────────────
+# Una base por rama de git, con el gancho post-checkout puesto: la rama nueva
+# empieza con los datos de su padre (por la copia de reserva si el padre no
+# cambió desde que se sacó, por el fork en caliente si cambió, incluido un
+# nextval() que no escribe WAL), el .env de .git cambia en cada checkout, las
+# demás ramas se congelan en segundo plano y ninguna salida lleva una clave.
+# Mismas variables que 7e; sin KLING_E2E_DB_GOLDEN se salta, avisando.
+step "7g2. kling db branch"
+if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
+  printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN no está (nombre de la plantilla Postgres): sin plantilla de la que sacar ramas\n"
+elif ! $KLING db --help >/dev/null 2>&1; then
+  printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
+elif ! command -v git >/dev/null; then
+  printf "  \033[33mskip\033[0m  sin git no hay ramas\n"
+else
+  DBG="$KLING_E2E_DB_GOLDEN"
+  DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
+  BR="$DBTMP/repo"; BLOG="$DBTMP/gancho.log"; : > "$BLOG"
+  # El gancho llama a ${KLING:-kling} desde el repo: ruta absoluta.
+  KABS=$(command -v "$KLING"); export KLING="$KABS"
+  dbsql() { $KLING exec -timeout 60s "$1" -- su -s /bin/sh postgres -c "psql -X -At -h /run/postgresql appdb -c \"$2\"" 2>&1; }
+  # bcopy: la copia (o la reserva, con spare) de una rama, por -ls -json.
+  bcopy() { (cd "$BR" && $KLING db branch -ls -json 2>/dev/null) | python3 -c '
+import sys, json
+b, spare = sys.argv[1], len(sys.argv) > 2
+for r in json.load(sys.stdin):
+    if r["branch"] == b and bool(r.get("spare")) == spare:
+        print(r["copy"]); break' "$@"; }
+  # bidle: espera a que acabe el trabajo de segundo plano del gancho.
+  bidle() { local i; for i in $(seq 1 600); do pgrep -f "branch -settle" >/dev/null || return 0; sleep 0.2; done; }
+  # bco: git checkout con la salida del gancho al registro; deja en BMS lo que tardó.
+  bco() { local t0 t1; t0=$(date +%s%N); (cd "$BR" && git checkout -q "$@" 2>>"$BLOG"); t1=$(date +%s%N); BMS=$(( (t1 - t0) / 1000000 )); }
+  benv() { grep '^PGPASSWORD=' "$BR/.git/kling-db.env" 2>/dev/null; }
+
+  mkdir -p "$BR" && (cd "$BR" && git init -q -b main && git -c user.name=e2e -c user.email=e2e@localhost commit -q --allow-empty -m init)
+  out=$(cd "$BR" && $KLING db branch -golden "$DBG" 2>&1); printf '%s\n' "$out" >> "$BLOG"
+  BMAIN=$(bcopy main)
+  { [ -n "$BMAIN" ] && [ "$(stat -c %a "$BR/.git/kling-db.env" 2>/dev/null)" = 600 ]; } \
+    && ok "db branch: copia de main y su conexión en .git (0600)" || bad "db branch main" "copia y .git/kling-db.env 0600" "$out"
+  out=$(cd "$BR" && $KLING db branch hook install 2>&1); contiene "$out" "installed" && ok "hook install" || bad "hook install" "installed" "$out"
+  dbsql "$BMAIN" "CREATE TABLE e2e_br(v text); INSERT INTO e2e_br VALUES ('de-main')" >/dev/null
+
+  bco -b e2e-a; ENVA=$(benv)
+  BA=$(bcopy e2e-a)
+  { [ -n "$BA" ] && [ "$(dbsql "$BA" "SELECT v FROM e2e_br")" = "de-main" ]; } \
+    && ok "rama nueva (fork en caliente, $BMS ms): empieza con los datos de main" || bad "rama e2e-a" "copia con la fila de main" "copia=$BA"
+  bidle
+  [ "$($KLING inspect "$BMAIN" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["state"])')" = frozen ] \
+    && ok "main queda congelada en segundo plano" || bad "main congelada" "frozen" "$($KLING ps | grep "$BMAIN")"
+  [ -n "$(bcopy main spare)" ] && ok "al salir de main queda una copia de reserva suya" || bad "reserva de main" "una fila spare en -ls" "$(cd "$BR" && $KLING db branch -ls)"
+
+  dbsql "$BA" "INSERT INTO e2e_br VALUES ('de-a')" >/dev/null
+  bco main
+  { [ "$BMS" -lt 1000 ] && [ "$(benv)" != "$ENVA" ]; } \
+    && ok "volver a main: $BMS ms, y el .env cambia" || bad "volver a main" "< 1000 ms y otro .env" "$BMS ms"
+  [ "$(dbsql "$BMAIN" "SELECT count(*) FROM e2e_br")" = 1 ] && ok "main no ve lo escrito en e2e-a" || bad "aislamiento" "1 fila" "$(dbsql "$BMAIN" "SELECT count(*) FROM e2e_br")"
+  bidle
+
+  SPARE=$(bcopy main spare)
+  bco -b e2e-b
+  BB=$(bcopy e2e-b)
+  { [ -n "$SPARE" ] && [ "$BB" = "$SPARE" ] && [ "$(dbsql "$BB" "SELECT v FROM e2e_br")" = "de-main" ]; } \
+    && ok "rama nueva desde main sin cambios: se queda la reserva ($BMS ms) con los datos de main" \
+    || bad "adopción de la reserva" "e2e-b = $SPARE con la fila de main" "e2e-b=$BB"
+  bidle; bco main; bidle
+
+  # main cambia (una fila): la reserva ya no vale y la rama sale del fork.
+  dbsql "$BMAIN" "INSERT INTO e2e_br VALUES ('otra-de-main')" >/dev/null
+  SPARE=$(bcopy main spare)
+  bco -b e2e-c
+  BC=$(bcopy e2e-c)
+  { [ -n "$BC" ] && [ "$BC" != "$SPARE" ] && [ "$(dbsql "$BC" "SELECT count(*) FROM e2e_br")" = 2 ]; } \
+    && ok "con main cambiada no se usa la reserva: e2e-c sale del fork con la fila nueva" || bad "reserva caducada" "fork con 2 filas" "e2e-c=$BC reserva=$SPARE"
+  bidle; bco main; bidle
+
+  # Solo nextval(): ni xid ni (dentro de su lote) WAL. La huella lo ve igual.
+  dbsql "$BMAIN" "CREATE SEQUENCE e2e_sq; SELECT nextval('e2e_sq')" >/dev/null
+  bco e2e-a; bidle; bco main; bidle
+  dbsql "$BMAIN" "SELECT nextval('e2e_sq')" >/dev/null
+  SPARE=$(bcopy main spare)
+  bco -b e2e-d
+  BD=$(bcopy e2e-d)
+  { [ -n "$BD" ] && [ "$BD" != "$SPARE" ] && [ "$(dbsql "$BD" "SELECT last_value FROM e2e_sq")" = 2 ]; } \
+    && ok "un nextval() en main también invalida la reserva (la secuencia sigue en 2)" || bad "nextval" "fork con last_value 2" "e2e-d=$BD reserva=$SPARE"
+  bidle
+
+  # Ninguna clave en lo que imprimieron el gancho y los comandos.
+  leak=""
+  for d in "$KLING_DB_STATE"/copies/*/password; do
+    [ -f "$d" ] && grep -qF "$(cat "$d")" "$BLOG" && leak="$leak $d"
+  done
+  [ -z "$leak" ] && ok "ninguna clave en la salida del gancho" || bad "claves en la salida" "ninguna" "$leak"
+
+  (cd "$BR" && git checkout -q main 2>/dev/null); bidle
+  for b in e2e-a e2e-b e2e-c e2e-d main; do (cd "$BR" && $KLING db branch -rm "$b" >/dev/null 2>&1); done
+  left=$($KLING ps -a 2>/dev/null | grep -c "$(basename "$BMAIN" | cut -c1-9)")
+  [ "$left" = 0 ] && ok "-rm de todas las ramas: sin copias ni reservas" || bad "limpieza" "0 copias del repo" "$left"
+  rm -rf "$DBTMP"; unset KLING_DB_STATE
+fi
+
 # ── 7h. MariaDB: plantilla, proxy de credenciales, doctor y audit ────────────
 # Con KLING_E2E_MYSQL_GOLDEN (una plantilla MariaDB de scripts/db-golden-mysql.sh,
 # construida con kling db golden ... -engine mysql). Una copia; un agente la usa
