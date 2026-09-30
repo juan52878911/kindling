@@ -271,7 +271,8 @@ func localProbe(root string) probe {
 
 // remoteScript es lo mismo que hace localProbe, pero en sh y en el host del
 // contexto. Se manda por la entrada estándar de `ssh ... sh -s` para no pelearse
-// con dos niveles de comillas.
+// con dos niveles de comillas; sus variables (RUNAS, ROOT, UNITS) van delante,
+// en el mismo guion (ver remoteProbeScript).
 const remoteScript = `
 si() { [ "$1" ] && echo si || echo no; }
 echo "system=$(uname -s)/$(uname -m)"
@@ -289,14 +290,25 @@ echo "kernel=$(si "$([ -f "$ROOT/images/vmlinux" ] && echo 1)")"
 echo "image=$(si "$([ -f "$ROOT/images/min.ext4" ] && echo 1)")"
 `
 
+// remoteProbeScript es remoteScript con sus variables delante, entrecomilladas
+// para sh. Antes iban en la línea de órdenes de ssh, que el host remoto pasa
+// entera a una shell: un -root, un KLING_RUN_AS o una unidad del manifiesto de
+// una extensión con `;` o `$(...)` se ejecutaba allí. Ahora la línea de ssh es
+// fija (`sh -s`) y los valores son datos de una asignación.
+func remoteProbeScript(runAs, root string, units []string) string {
+	return "RUNAS=" + shQuote(runAs) + "\n" +
+		"ROOT=" + shQuote(root) + "\n" +
+		"UNITS=" + shQuote(strings.Join(units, " ")) + "\n" +
+		remoteScript
+}
+
 func remoteProbe(target, root string) (probe, error) {
 	p := probe{remote: true, runAs: envOr("KLING_RUN_AS", runAsDefault), root: root}
 
 	// BatchMode: si las claves no están puestas queremos un error inmediato, no
 	// una petición de contraseña en mitad de un diagnóstico.
-	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-		target, "RUNAS="+p.runAs, "ROOT="+root, "UNITS='"+strings.Join(extensionUnits(), " ")+"'", "sh", "-s")
-	cmd.Stdin = strings.NewReader(remoteScript)
+	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target, "sh", "-s")
+	cmd.Stdin = strings.NewReader(remoteProbeScript(p.runAs, root, extensionUnits()))
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
