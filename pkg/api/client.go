@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/transport"
@@ -31,6 +33,9 @@ type Client struct {
 	// subirle el número al de todos.
 	long *http.Client
 	d    *transport.Dialer
+	// avisoAPI: el aviso de un daemon más nuevo (apiversion.go) sale una vez
+	// por cliente, no en cada petición.
+	avisoAPI sync.Once
 }
 
 func NewClient(endpoint string) *Client {
@@ -67,6 +72,8 @@ func NewClient(endpoint string) *Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
 	}
+	c.long.Transport = comprobarAPI{c.long.Transport, &c.avisoAPI}
+	c.http.Transport = comprobarAPI{c.http.Transport, &c.avisoAPI}
 	if tok := os.Getenv(AuthzTokenEnv); tok != "" {
 		c.long.Transport = conToken{c.long.Transport, tok}
 		c.http.Transport = conToken{c.http.Transport, tok}
@@ -112,6 +119,12 @@ func (c *Client) doWith(cl *http.Client, ctx context.Context, method, path strin
 
 	resp, err := cl.Do(req)
 	if err != nil {
+		// Un daemon demasiado viejo se dice tal cual, sin el "Get http://kling/..."
+		// delante: es la frase que hay que leer.
+		var viejo *ErrDaemonTooOld
+		if errors.As(err, &viejo) {
+			return viejo
+		}
 		return err
 	}
 	defer resp.Body.Close()

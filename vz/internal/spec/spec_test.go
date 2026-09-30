@@ -79,7 +79,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	}
 	// El JSON lleva los nombres del contrato.
 	b, _ := os.ReadFile(path)
-	for _, k := range []string{`"kling_vz": 1`, `"boot_source"`, `"machine_config"`, `"drives"`, `"network"`,
+	for _, k := range []string{`"kling_vz": 2`, `"boot_source"`, `"machine_config"`, `"drives"`, `"network"`,
 		`"mmds_config"`, `"balloon"`, `"entropy"`, `"machine_identifier"`} {
 		if !strings.Contains(string(b), k) {
 			t.Errorf("snapshot JSON lacks %s", k)
@@ -95,7 +95,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 func TestDecodeRejects(t *testing.T) {
 	cases := map[string]string{
 		"not json":        "firecracker binary snapshot",
-		"wrong version":   `{"kling_vz": 2, "machine_identifier": "x"}`,
+		"wrong version":   `{"kling_vz": 0, "machine_identifier": "x"}`,
 		"no identifier":   `{"kling_vz": 1, "boot_source": {"kernel_image_path": "/k"}, "machine_config": {"vcpu_count": 1, "mem_size_mib": 128}, "drives": [{"drive_id": "r", "path_on_host": "/r"}]}`,
 		"incomplete":      `{"kling_vz": 1, "machine_identifier": "x"}`,
 		"too large":       `{"kling_vz": 1, "pad": "` + strings.Repeat("a", maxSnapshotJSON) + `"}`,
@@ -116,5 +116,32 @@ func TestBalloonTarget(t *testing.T) {
 	s.Balloon = nil
 	if got := s.BalloonTargetMiB(); got != 256 {
 		t.Fatalf("target without balloon = %d", got)
+	}
+}
+
+// graphics entró sin subir kling_vz, y un kling-vz anterior restauraba sin
+// pantalla un snapshot que la tenía. Ahora se escribe la 2; la 1 se sigue
+// leyendo (no tiene graphics), y una del futuro se niega diciendo qué hacer.
+func TestSnapshotVersion(t *testing.T) {
+	s := sample()
+	s.Graphics = &Graphics{Width: 720, Height: 1280}
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := s.WriteFile(path); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), `"kling_vz": 2`) {
+		t.Fatalf("snapshot con graphics escrito sin kling_vz 2:\n%s", b)
+	}
+
+	v1 := strings.Replace(string(b), `"kling_vz": 2`, `"kling_vz": 1`, 1)
+	if _, err := Decode(strings.NewReader(v1)); err != nil {
+		t.Fatalf("un snapshot de la versión 1 se tiene que seguir leyendo: %v", err)
+	}
+
+	futuro := strings.Replace(string(b), `"kling_vz": 2`, `"kling_vz": 3`, 1)
+	_, err := Decode(strings.NewReader(futuro))
+	if err == nil || !strings.Contains(err.Error(), "newer kling-vz") || !strings.Contains(err.Error(), "update kling-vz") {
+		t.Fatalf("snapshot del futuro: %v", err)
 	}
 }

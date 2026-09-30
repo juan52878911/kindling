@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // Main es el main de una extensión escrita en Go. Atiende --kling-manifest,
@@ -31,6 +33,11 @@ func serve(m Manifest, cmds map[string]func([]string) error, hooks map[string]fu
 
 	if m.ManifestVersion == 0 {
 		m.ManifestVersion = ManifestVersion
+	}
+	if m.MaxAPI == 0 {
+		// El API que conoce el pkg/api con el que se compiló: el de sus
+		// llamadas al daemon.
+		m.MaxAPI = api.APIVersion
 	}
 	prefix := "kling " + m.Name
 	if len(args) == 0 || IsHelpArg(args[0]) {

@@ -87,7 +87,7 @@ y cada petición rechazada queda también en el log con el prefijo `kling-vz:`.
 
 ```json
 {
-  "kling_vz": 1,
+  "kling_vz": 2,
   "boot_source": {"kernel_image_path": "...", "boot_args": "console=ttyS0 ..."},
   "machine_config": {"vcpu_count": 1, "mem_size_mib": 256},
   "drives": [{"drive_id": "rootfs", "path_on_host": "...", "is_root_device": true, "is_read_only": true}, ...],
@@ -99,7 +99,10 @@ y cada petición rechazada queda también en el log con el prefijo `kling-vz:`.
 }
 ```
 
-y `mem_file_path` el estado de la VM (`saveMachineStateTo`). Se guarda
+y `mem_file_path` el estado de la VM (`saveMachineStateTo`). `kling_vz` sube
+cuando el JSON gana algo que cambia la máquina restaurada (la 2 añadió
+`graphics`): un kling-vz lee su versión y las anteriores, y una más nueva la
+rechaza con un error que dice que se actualice. Se guarda
 `boot_args` sin traducir, tal y como llegó: el invitado despierta con su línea
 de comandos congelada en memoria y no se vuelve a usar, pero así el JSON es el
 mismo que describiría la máquina en Linux.

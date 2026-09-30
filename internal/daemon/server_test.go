@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -268,5 +269,32 @@ func TestProgressBodyEntregaLosDatos(t *testing.T) {
 	got, err := io.ReadAll(pb)
 	if err != nil || string(got) != "hola mundo" {
 		t.Fatalf("ReadAll = %q, %v", got, err)
+	}
+}
+
+// /info dice el API del daemon, y cada respuesta lo lleva en la cabecera para
+// que el cliente lo compare sin preguntar /info (api.APIVersion).
+func TestInfoYCabecerasLlevanElAPI(t *testing.T) {
+	root := t.TempDir()
+	s := &Server{mgr: nuevoManager(t, root), root: root}
+	h := s.routes()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/info", nil))
+	var info api.Info
+	if err := json.Unmarshal(rr.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.API != api.APIVersion {
+		t.Fatalf("/info api = %d, quería %d", info.API, api.APIVersion)
+	}
+	// También en un error: el cliente lo mira antes que el código.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/machines/no-existe", nil))
+	if got := rr.Header().Get(api.HeaderAPI); got != strconv.Itoa(api.APIVersion) {
+		t.Fatalf("%s = %q en un %d", api.HeaderAPI, got, rr.Code)
+	}
+	if rr.Header().Get(api.HeaderVersion) != Version {
+		t.Fatalf("%s = %q", api.HeaderVersion, rr.Header().Get(api.HeaderVersion))
 	}
 }

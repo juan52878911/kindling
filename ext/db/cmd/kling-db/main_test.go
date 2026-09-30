@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -51,7 +52,9 @@ func TestManifiesto(t *testing.T) {
 	if err := m.Validate(); err != nil {
 		t.Fatalf("invalid manifest: %v", err)
 	}
-	if want := manifest(); !reflect.DeepEqual(m, want) {
+	want := manifest()
+	want.MaxAPI = api.APIVersion // plugin.Main lo rellena
+	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("printed manifest differs:\n got %+v\nwant %+v", m, want)
 	}
 }
