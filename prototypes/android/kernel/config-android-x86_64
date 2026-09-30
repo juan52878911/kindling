@@ -31,3 +31,13 @@ CONFIG_CPU_MITIGATIONS=y
 # la línea de comandos, como con Firecracker antiguo. Se pierde VMGENID, que
 # de todos modos salía "n" (depende de ACPI). docs/proxmox.md.
 # CONFIG_ACPI is not set
+
+# ── binfmt_misc: ejecutables arm64 traducidos (issue #93) ────────────────────
+# Con la traducción ARM (libndk_translation, docs/traduccion-arm.md), las
+# bibliotecas arm64 de una app las carga el puente nativo desde ART, pero un
+# EJECUTABLE arm64 (el bootstrap de Termux, un binario que la app lanza con
+# exec) lo tiene que pasar el kernel al traductor: el ndk_translation.rc de la
+# imagen monta binfmt_misc y registra arm64_exe/arm64_dyn con
+# /system/bin/ndk_translation_program_runner_binfmt_misc_arm64. Sin esto,
+# execve de un ELF aarch64 da ENOEXEC. No hace falta en arm64 (allí es nativo).
+CONFIG_BINFMT_MISC=y
