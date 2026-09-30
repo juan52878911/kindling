@@ -17,6 +17,10 @@ const cederSocket = false
 // (`kling images copy`), no se construyen.
 const construirImagenes = false
 
+// prepararRaizPlataforma: en macOS el proxy de credenciales vive en cada
+// kling-vz, que prepara su propio directorio de derrame (vz/cmd/kling-vz).
+func prepararRaizPlataforma(string) {}
+
 // comprobarHost avisa de lo que falta para arrancar microVMs en macOS: el
 // ayudante kling-vz y e2fsprogs. No hay red del host que montar: cada
 // ayudante lleva la suya.

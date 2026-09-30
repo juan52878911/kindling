@@ -190,6 +190,9 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Antes del manager: al cargar reconcilia las máquinas vivas y levanta
+	// sus proxies de credenciales, que toman ya el directorio de derrame.
+	prepararRaizPlataforma(root)
 	bus := events.New()
 	mgr, err := machine.NewManager(root, fcBin, runAs, bus)
 	if err != nil {

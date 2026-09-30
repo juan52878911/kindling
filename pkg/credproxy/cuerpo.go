@@ -22,15 +22,12 @@ package credproxy
 //     (cerrarCuerpo va en un defer del llamador, así que corre también si
 //     ServeHTTP hace panic(http.ErrAbortHandler)).
 //   - El directorio lo elige el llamador (TempDir de Options): el daemon
-//     puede pasar uno bajo $KLING_ROOT, que solo lee él. Sin TempDir, cae en
-//     os.TempDir(): normalmente compartido por todo el host, pero un archivo
-//     0600 con nombre aleatorio ahí no es legible por otro usuario sin ser
-//     root, así que sigue siendo razonable como valor por defecto. Si el
-//     llamador tiene un directorio propio de verdad (el caso del daemon),
-//     conviene pasarlo: un proceso hostil en la MISMA cuenta del daemon (que
-//     aquí no se protege de todos modos: ver el aviso de package credproxy)
-//     tendría que acertar el nombre para leerlo, y con un directorio ajeno al
-//     de /tmp ni siquiera puede listarlo.
+//     pasa <raíz>/credtmp y kling-vz credtmp/ en el directorio de su
+//     máquina, los dos 0700 y vaciados al arrancar con PrepararTempDir (un
+//     proceso que muere a mitad de una petición deja el fichero). Sin
+//     TempDir NO se derrama nunca: el cuerpo sale chunked. Antes caía en
+//     os.TempDir(), el /tmp compartido con todo el host, donde el fichero
+//     con la clave sobrevivía a un daemon muerto de golpe.
 //
 // El cuerpo del invitado sigue acotado a MaxBody y pasando por el vigía de
 // plazos igual que antes de este fichero: aquí solo cambia adónde va lo ya
@@ -41,7 +38,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // cerrarCuerpo libera lo que cuerpoSaliente reservó para el cuerpo (hoy, solo
@@ -63,7 +62,7 @@ type cerrarCuerpo func()
 //     longitud exacta del fichero: evita el chunked que algunos proveedores
 //     rechazan, sin retener el cuerpo entero en memoria.
 //
-// tempDir es dónde crear ese fichero; "" usa os.TempDir(). usadas anota qué
+// tempDir es dónde crear ese fichero; con "" no se crea y sale chunked. usadas anota qué
 // credenciales aparecieron en el cuerpo (ver marcas). w debe ser el
 // ResponseWriter del servidor, sin envolver: MaxBytesReader le avisa de que el
 // cuerpo se pasó para que cierre la conexión, y ese aviso no atraviesa un
@@ -96,7 +95,7 @@ func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, usa
 			return nil, 0, nil, err
 		}
 	}
-	if r.ContentLength < 0 {
+	if r.ContentLength < 0 || tempDir == "" {
 		// Chunked desde el invitado: sin Content-Length que prometer, sigue
 		// saliendo chunked como antes de este fichero.
 		return io.MultiReader(bytes.NewReader(buf), s), -1, nil, nil
@@ -110,7 +109,7 @@ func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, usa
 // va bien, esa limpieza queda en el cerrarCuerpo que devuelve, para que corra
 // el llamador cuando termine la petición al proveedor (con éxito o sin él).
 func cuerpoAFichero(buf []byte, resto io.Reader, tempDir string) (io.Reader, int64, cerrarCuerpo, error) {
-	f, err := os.CreateTemp(tempDir, "kindling-credproxy-*.tmp")
+	f, err := os.CreateTemp(tempDir, prefijoTemporal+"*.tmp")
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -140,4 +139,33 @@ func cuerpoAFichero(buf []byte, resto io.Reader, tempDir string) (io.Reader, int
 		return nil, 0, nil, err
 	}
 	return f, tam, limpiar, nil
+}
+
+// prefijoTemporal es el nombre de los ficheros de cuerpoAFichero: lo que
+// PrepararTempDir borra al arrancar.
+const prefijoTemporal = "kindling-credproxy-"
+
+// PrepararTempDir deja dir listo para Options.TempDir: lo crea si hace falta,
+// le pone 0700 (solo lo lee el dueño del proceso) y borra los temporales del
+// proxy que dejó un proceso anterior muerto a mitad de una petición (llevan la
+// clave en claro). No toca nada más del directorio.
+func PrepararTempDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	ent, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ent {
+		if e.Type().IsRegular() && strings.HasPrefix(e.Name(), prefijoTemporal) {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

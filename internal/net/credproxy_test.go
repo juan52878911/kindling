@@ -139,3 +139,36 @@ func TestSetCredentialsArrancaElProxyYAvisaAlResolver(t *testing.T) {
 		t.Fatalf("registro tras parar el proxy: %q (%v)", b, err)
 	}
 }
+
+// El derrame del cuerpo (con la clave dentro) va al directorio que fija el
+// daemon, 0700 y vaciado al arrancar; sin fijarlo, "" (el proxy no escribe a
+// disco), NUNCA os.TempDir(). Antes se leía $KLING_ROOT, que el daemon no
+// tiene en su entorno (recibe -root), y el fichero caía en /tmp.
+func TestCredTempDirLoFijaElDaemon(t *testing.T) {
+	t.Setenv("KLING_ROOT", t.TempDir())
+	credTmp.Store("")
+	t.Cleanup(func() { credTmp.Store("") })
+	if d := credTempDir(); d != "" {
+		t.Fatalf("sin SetCredTempDir: %q", d)
+	}
+	dir := filepath.Join(t.TempDir(), "credtmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resto := filepath.Join(dir, "kindling-credproxy-9.tmp")
+	if err := os.WriteFile(resto, []byte("sk_live_x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetCredTempDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if d := credTempDir(); d != dir {
+		t.Fatalf("credTempDir = %q, quería %q", d, dir)
+	}
+	if _, err := os.Stat(resto); !os.IsNotExist(err) {
+		t.Errorf("no borró el temporal que quedó: %v", err)
+	}
+	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
+		t.Errorf("permisos %v", fi.Mode().Perm())
+	}
+}

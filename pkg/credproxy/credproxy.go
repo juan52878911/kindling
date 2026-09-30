@@ -94,7 +94,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -317,7 +316,9 @@ type Options struct {
 	// de httptest en 127.0.0.1): en producción anula la barrera de IPs.
 	Transport http.RoundTripper
 	// TempDir es dónde se derrama a fichero un cuerpo con Content-Length que
-	// no cabe en MaxSwapBody (ver cuerpo.go); "" usa os.TempDir(). El daemon
+	// no cabe en MaxSwapBody (ver cuerpo.go). "" es NUNCA a disco: ese cuerpo
+	// sale chunked, como uno que el invitado mandó chunked. Conviene un
+	// directorio propio preparado con PrepararTempDir. El daemon
 	// puede pasar un directorio propio (bajo su $KLING_ROOT) para que ese
 	// fichero, que lleva la clave real mientras dura la petición, quede fuera
 	// de un /tmp que comparte con cualquier otra cosa del host.
@@ -367,7 +368,7 @@ type Proxy struct {
 	// idle y max son IdleTimeout y MaxDuration; campos para que los tests no
 	// tengan que esperar minutos.
 	idle, max time.Duration
-	// tempDir es Options.TempDir ya resuelto ("" nunca: New() pone os.TempDir()).
+	// tempDir es Options.TempDir; "" = no derramar nunca a disco.
 	tempDir string
 	enabled func() bool
 	// aud es el registro de auditoría; nil sin Options.AuditPath.
@@ -435,9 +436,6 @@ func New(o Options) *Proxy {
 		tr = salidaSegura(lookup)
 	}
 	tempDir := o.TempDir
-	if tempDir == "" {
-		tempDir = os.TempDir()
-	}
 	var aud *Auditor
 	if o.AuditPath != "" {
 		aud = NewAuditor(o.AuditPath, o.Logf)

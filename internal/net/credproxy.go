@@ -26,8 +26,6 @@ import (
 	"log"
 	stdnet "net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -192,22 +190,30 @@ func newCredProxy(auditPath string) *credProxy {
 	return p
 }
 
-// credTempDir es $KLING_ROOT/tmp, creado con permisos 0700 si hace falta: un
-// cuerpo grande con Content-Length se derrama ahí con la clave real dentro
-// (ver pkg/credproxy/cuerpo.go), y ese directorio solo lo lee el daemon (el
-// dueño de KLING_ROOT), a diferencia de un /tmp que comparte con cualquier
-// otra cosa del host. Sin KLING_ROOT, o si no se puede crear, "": el proxy cae
-// en os.TempDir() por su cuenta.
+// credTmp es el directorio donde el proxy derrama un cuerpo grande con
+// Content-Length (con la clave real dentro, ver pkg/credproxy/cuerpo.go). Lo
+// fija el daemon con SetCredTempDir antes de levantar ninguna máquina; sin él,
+// "" y el proxy no escribe nunca a disco (ese cuerpo sale chunked). Antes se
+// leía de $KLING_ROOT, que el daemon recibe por -root y no por el entorno: en
+// la instalación normal el fichero acababa en /tmp.
+var credTmp atomic.Value // string
+
+// SetCredTempDir prepara dir (0700, vaciado de los temporales que dejó un
+// daemon muerto a mitad de una petición) y lo fija como directorio de derrame
+// de los proxies que se creen a partir de ahora. Si no se puede preparar,
+// devuelve el error y los proxies no derraman a disco.
+func SetCredTempDir(dir string) error {
+	if err := credproxy.PrepararTempDir(dir); err != nil {
+		credTmp.Store("")
+		return err
+	}
+	credTmp.Store(dir)
+	return nil
+}
+
 func credTempDir() string {
-	root := os.Getenv("KLING_ROOT")
-	if root == "" {
-		return ""
-	}
-	dir := filepath.Join(root, "tmp")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return ""
-	}
-	return dir
+	d, _ := credTmp.Load().(string)
+	return d
 }
 
 func stopCredProxy(ns string) {

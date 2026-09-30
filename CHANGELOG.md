@@ -105,6 +105,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   como `kling-cred-…def`). **Incompatible**: una máquina cuyo almacén guarde una clave más
   corta no recibe sus credenciales al arrancar o despertar (el error lo dice) hasta
   rotarla con `kling machine credential` y la misma `-env`.
+- **El cuerpo con la clave ya no se derrama a `/tmp`.** El directorio de derrame del
+  proxy (un cuerpo grande con Content-Length, con la clave real dentro) salía de la
+  variable `KLING_ROOT`, que el daemon no tiene (recibe `-root`): en la instalación
+  normal el fichero iba a `os.TempDir()` y se quedaba ahí si el daemon moría. Ahora es
+  `<raíz>/credtmp` en Linux y `credtmp/` del directorio de la máquina en macOS, 0700 y
+  vaciado al arrancar; sin directorio, `pkg/credproxy` no escribe a disco (sale
+  chunked).
 
 ## v0.17.0 — 2026-09-29
 

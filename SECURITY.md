@@ -259,9 +259,14 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   explícitos y se borra en cuanto la petición termina, la reciba el proveedor o falle a
   mitad (el borrado va en un `defer`, así que corre también si el invitado corta la
   conexión o si el plazo de la petición la cancela). El directorio es
-  `$KLING_ROOT/tmp` (0700, solo lo lee el daemon) en Linux; sin `KLING_ROOT` cae en
-  `os.TempDir()`, que en un fichero 0600 de nombre aleatorio no es legible por otro
-  usuario del host sin ser root, aunque conviene el primero cuando se pueda. Plazos:
+  `<raíz>/credtmp` en Linux (la raíz real del daemon, la de `-root`, que se le pasa al
+  proxy al arrancar) y `credtmp/` del directorio de la máquina en macOS (dentro de lo
+  que el perfil de `kling-vz` deja escribir): 0700, y al arrancar se borran los
+  temporales que dejó un proceso muerto a mitad de una petición. **Nunca `/tmp`**: antes
+  el directorio salía de la variable `KLING_ROOT`, que el daemon no tiene en su entorno
+  (recibe `-root`), así que en la instalación normal el fichero con la clave caía en
+  `os.TempDir()` y ahí se quedaba si el daemon moría de golpe. Si el directorio no se
+  puede preparar, el proxy no escribe a disco: ese cuerpo sale chunked. Plazos:
   60 s hasta las cabeceras de la respuesta, 120 s de inactividad
   (cada byte en cualquier sentido los renueva, también el plazo de la conexión del
   invitado) y un techo de 15 min por petición: un stream largo de un LLM pasa, y un

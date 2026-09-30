@@ -161,6 +161,16 @@ func run() int {
 		AuditPath: rutaAuditoria(*sock),
 		Logf:      logf,
 	}
+	// Un cuerpo grande con Content-Length se derrama con la clave dentro
+	// (pkg/credproxy/cuerpo.go): a credtmp/ del directorio de la máquina (0700,
+	// dentro de lo que el perfil deja escribir), vaciado aquí de lo que dejó un
+	// kling-vz muerto a mitad. Nunca a os.TempDir(); si no se puede, el proxy
+	// no derrama y ese cuerpo sale chunked.
+	if tmp := filepath.Join(filepath.Dir(rutaAuditoria(*sock)), "credtmp"); credproxy.PrepararTempDir(tmp) == nil {
+		opts.TempDir = tmp
+	} else {
+		logf("WARNING: no credential proxy spill directory at %s: large request bodies will be sent chunked", tmp)
+	}
 	broker := rutaBroker()
 	if broker != "" {
 		opts.DialMachine = func(ctx context.Context, id, owner string, port int) (net.Conn, error) {
