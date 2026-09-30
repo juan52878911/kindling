@@ -167,6 +167,18 @@ func TestForkCreaCopiasYElSnapshotVivePorEllas(t *testing.T) {
 	if !esSnapshotDeFork(dir) {
 		t.Fatal("el snapshot temporal no lleva la marca de fork")
 	}
+	// El temporal no hashea su overlay (la DECISIÓN de commit), sí snap.file,
+	// y queda verificado para las restauraciones de esta misma llamada.
+	meta, err := m.loadSnapshot(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.RootfsSHA256 != "" || meta.SnapSHA256 == "" {
+		t.Errorf("digests del snapshot de fork: rootfs=%q snap=%q; quería rootfs vacío y snap grabado", meta.RootfsSHA256, meta.SnapSHA256)
+	}
+	if !m.integridadYaVista(snap, dir) {
+		t.Error("el snapshot de fork no quedó anotado como verificado")
+	}
 	m.mu.RLock()
 	reservas := m.reserved[reservaSnapshot(snap)]
 	m.mu.RUnlock()

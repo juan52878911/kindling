@@ -72,6 +72,9 @@ type fakeKling struct {
 	// en cada máquina. sqliteOpens: aperturas de la base SQLite, por id.
 	adminRot    map[string]int
 	sqliteOpens map[string]int
+	// fp: la "huella" (fingerprintSQL) de cada máquina; una sin entrada da la
+	// de fábrica. Cambiarla simula que alguien escribió en esa copia.
+	fp map[string]string
 }
 
 func newFake() *fakeKling {
@@ -85,7 +88,24 @@ func newFake() *fakeKling {
 		snapRoles:   map[string][]string{},
 		adminRot:    map[string]int{},
 		sqliteOpens: map[string]int{},
+		fp:          map[string]string{},
 	}
+}
+
+// fpDefault es la huella de una copia en la que nadie ha escrito.
+const fpDefault = "00000000000000000000000000000000"
+
+// forks son los ids de las máquinas que se ramificaron, en orden.
+func (f *fakeKling) forks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.calls {
+		if len(c.args) > 2 && c.args[0] == "sandbox" && c.args[1] == "fork" {
+			out = append(out, c.args[2])
+		}
+	}
+	return out
 }
 
 func (f *fakeKling) find(ref string) *api.Machine {
@@ -257,6 +277,14 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 			}
 			f.verifier[mc.ID] = h
 			return []byte("1\n"), nil
+		case strings.Contains(string(in), "pg_current_snapshot()"):
+			if mc.State != api.StateRunning {
+				return fail("machine %s is %s", mc.Name, mc.State)
+			}
+			if v, ok := f.fp[mc.ID]; ok {
+				return []byte(v + "\n"), nil
+			}
+			return []byte(fpDefault + "\n"), nil
 		case strings.Contains(cmd, "pg_isready"):
 			if f.pgDown {
 				return fail("exit status 2")
@@ -332,6 +360,14 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		mc.State = api.StateWarm
 		return nil, nil
 
+	case args[0] == "pause":
+		mc := f.find(args[1])
+		if mc == nil {
+			return fail("no machine")
+		}
+		mc.State = api.StatePaused
+		return nil, nil
+
 	case args[0] == "thaw":
 		mc := f.find(args[1])
 		if mc == nil {
@@ -350,6 +386,29 @@ func (f *fakeKling) Run(_ context.Context, stdin io.Reader, args ...string) ([]b
 		return nil, nil
 	}
 	return fail("fake kling: unexpected %v", args)
+}
+
+// List y Thaw son las de Machiner: se apuntan como sus equivalentes del CLI
+// (ps -json, thaw) y devuelven copias, como el API.
+func (f *fakeKling) List(ctx context.Context) ([]*api.Machine, error) {
+	out, err := f.Run(ctx, nil, "ps", "-json")
+	if err != nil {
+		return nil, err
+	}
+	var all []*api.Machine
+	return all, json.Unmarshal(out, &all)
+}
+
+func (f *fakeKling) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	if _, err := f.Run(ctx, nil, "thaw", ref); err != nil {
+		return nil, err
+	}
+	out, err := f.Run(ctx, nil, "inspect", ref)
+	if err != nil {
+		return nil, err
+	}
+	var mc api.Machine
+	return &mc, json.Unmarshal(out, &mc)
 }
 
 func (f *fakeKling) SetLabels(_ context.Context, ref string, labels map[string]string) error {

@@ -68,7 +68,7 @@ Qué hace, en orden:
    `KLING_DB_STATE` la cambian) y viaja al invitado **por stdin**: no aparece en argv,
    ni en pantalla, ni en el log de Postgres (`log_min_error_statement = panic`). Si ese
    paso falla, la salida no se muestra a propósito: el error de psql cita la sentencia;
-5. aplica migraciones y seed, `VACUUM (ANALYZE)` y `CHECKPOINT`;
+5. aplica migraciones y seed, `VACUUM (ANALYZE)` (en la base y en `postgres` y `template1`, para que el autovacuum no lo haga en cada copia) y `CHECKPOINT`;
 6. comprueba que no queda ningún cliente conectado y que el overlay no pasa del 85 %;
 7. borra los SQL de entrada del invitado, `sync`, y `kling save -replace` con la
    máquina **viva**;

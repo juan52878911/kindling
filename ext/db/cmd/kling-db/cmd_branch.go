@@ -3,11 +3,13 @@ package main
 // kling db branch: una base de datos por rama de git.
 //
 // Cada rama del repositorio tiene su copia (una microVM de kling db). La copia
-// de una rama nueva sale de la de su rama padre (fork: los datos y el esquema
-// de esa rama, en milisegundos) o, si no la hay, del golden. Al cambiar de
-// rama (hook post-checkout → -switch) la copia de la rama activa se descongela
-// y las de las demás ramas del repo se congelan: 0 RAM, y thaw en ~10 ms al
-// volver.
+// de una rama nueva sale de la de su rama padre, con sus datos de ese momento:
+// una copia de reserva ya preparada si el padre no cambió desde que se sacó
+// (cmd_branch_spare.go), o un fork en caliente (segundos: vuelca su memoria);
+// si no hay copia del padre, del golden. Al cambiar de rama (hook post-checkout
+// → -switch) la copia de la rama activa se descongela y se escribe su
+// conexión; congelar las de las demás ramas (0 RAM) va en segundo plano
+// (-settle). docs/db.md tiene lo que cuesta cada caso, medido.
 //
 // Identidad. Una copia de rama se reconoce por sus etiquetas, no por su nombre:
 // sandbox fork no deja poner nombre. kling.db.repo es el hash del directorio
@@ -36,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -147,6 +150,7 @@ func branchMachineName(repo, key string) string { return "db-" + repo[:6] + "-" 
 // git ejecuta `git <args>` en a.cwd con argumentos FIJOS: el nombre de una
 // rama nunca llega aquí como argumento. Devuelve stdout sin el salto final.
 func (a *app) git(ctx context.Context, args ...string) (string, error) {
+	defer a.tr.span("git " + args[0])()
 	c := exec.CommandContext(ctx, "git", args...)
 	c.Dir = a.cwd
 	c.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C")
@@ -176,21 +180,17 @@ func (ri *repoInfo) is(label string) bool {
 }
 
 func (a *app) repo(ctx context.Context) (*repoInfo, error) {
-	top, err := a.git(ctx, "rev-parse", "--show-toplevel")
+	// Una sola llamada: rev-parse contesta una línea por opción, en orden (el
+	// gancho corre en cada checkout y cada proceso de git son ~1 ms).
+	out, err := a.git(ctx, "rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return nil, fmt.Errorf("not inside a git repository: %w", err)
 	}
-	gd, err := a.git(ctx, "rev-parse", "--absolute-git-dir")
-	if err != nil {
-		return nil, err
-	}
-	common, err := a.git(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		return nil, err
-	}
-	if top == "" || gd == "" || common == "" {
+	l := strings.Split(out, "\n")
+	if len(l) != 3 || l[0] == "" || l[1] == "" || l[2] == "" {
 		return nil, errors.New("git did not say where the repository is")
 	}
+	top, gd, common := l[0], l[1], l[2]
 	return &repoInfo{repo: repoKey(common), legacy: legacyRepoKey(top), toplevel: top, gitDir: gd}, nil
 }
 
@@ -270,22 +270,34 @@ func (a *app) localBranches(ctx context.Context) (map[string]string, error) {
 // repoCopies son las copias de rama de este repo (con su clave actual o la de
 // antes) y dueño, por clave de rama.
 func (a *app) repoCopies(ctx context.Context, ri *repoInfo, owner string) (map[string][]*api.Machine, error) {
+	copies, _, err := a.repoState(ctx, ri, owner)
+	return copies, err
+}
+
+// repoState son, con un solo listado, las copias de rama del repo y dueño y
+// sus copias de reserva (ver cmd_branch_spare.go), las dos por clave de rama.
+func (a *app) repoState(ctx context.Context, ri *repoInfo, owner string) (copies, spares map[string][]*api.Machine, err error) {
 	all, err := a.machines(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	m := map[string][]*api.Machine{}
+	copies, spares = map[string][]*api.Machine{}, map[string][]*api.Machine{}
 	for _, mc := range all {
 		if mc == nil || !ri.is(mc.Labels[labelRepo]) || mc.Labels[labelGolden] == "" || mc.Labels[labelOwner] != owner {
 			continue
 		}
-		k := mc.Labels[labelBranch]
-		if k == "" || !api.KeyPattern.MatchString(k) {
-			continue
+		// Una copia con rama es de esa rama aunque lleve aún la etiqueta de
+		// reserva (adoptarla las cambia a la vez, pero por si acaso).
+		switch b, sp := mc.Labels[labelBranch], mc.Labels[labelSpare]; {
+		case b != "":
+			if api.KeyPattern.MatchString(b) {
+				copies[b] = append(copies[b], mc)
+			}
+		case sp != "" && api.KeyPattern.MatchString(sp):
+			spares[sp] = append(spares[sp], mc)
 		}
-		m[k] = append(m[k], mc)
 	}
-	return m, nil
+	return copies, spares, nil
 }
 
 // one da la copia de una clave, o nil. Dos copias de la misma rama no deberían
@@ -322,10 +334,13 @@ func usable(mc *api.Machine, owner string) bool {
 }
 
 // ensureBranch devuelve la copia de la rama, creándola si no existe: fork de la
-// de from (si existe y está lista) o up del golden.
-func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, golden, owner string) (*api.Machine, bool, error) {
+// de from (si existe y está lista) o up del golden. from vacío es la rama por
+// defecto del repo, que solo se pregunta a git si hay que crear la copia. Si
+// el fork descongeló al padre, refreeze lo vuelve a congelar aquí; si no, se
+// queda en marcha para quien congele después (settle).
+func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, golden, owner string, refreeze bool) (*api.Machine, bool, error) {
 	key := branchKey(branch)
-	copies, err := a.repoCopies(ctx, ri, owner)
+	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {
 		return nil, false, err
 	}
@@ -338,6 +353,9 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 		return mc, false, nil
 	}
 
+	if from == "" {
+		from = a.defaultBranch(ctx)
+	}
 	extra := [][2]string{{labelRepo, ri.repo}, {labelBranch, key}, {labelUsed, strconv.FormatInt(a.clock().Unix(), 10)}}
 	parentKey := branchKey(from)
 	var parent *api.Machine
@@ -350,10 +368,26 @@ func (a *app) ensureBranch(ctx context.Context, ri *repoInfo, branch, from, gold
 		if err := requireEngine(parent, "branch", branchEngines...); err != nil {
 			return nil, false, err
 		}
-		wasFrozen := parent.State == api.StateWarm || parent.State == api.StatePaused
+		// Primero, una reserva del padre con sus datos de ahora (cmd_branch_spare.go).
+		sp, thawed, err := a.adoptSpare(ctx, parent, spares[parentKey], owner, extra)
+		if err != nil {
+			fmt.Fprintf(a.stderr, "warning: the spare copies of %s could not be used (%v); forking it\n", from, err)
+		}
+		if sp != nil {
+			if thawed && refreeze {
+				if _, ferr := a.k.Run(ctx, nil, "freeze", parent.ID); ferr != nil {
+					fmt.Fprintf(a.stderr, "warning: could not freeze %s again: %v\n", parent.Name, ferr)
+				}
+			}
+			fmt.Fprintf(a.stderr, "branch %s: took a spare copy of %s (same data)\n", branch, from)
+			return sp, true, nil
+		}
+		wasFrozen := thawed || parent.State == api.StateWarm || parent.State == api.StatePaused
 		fmt.Fprintf(a.stderr, "branch %s: forking the copy of %s...\n", branch, from)
+		end := a.tr.span("phase fork")
 		cs, err := a.forkWith(ctx, parent.ID, 1, owner, extra)
-		if wasFrozen {
+		end()
+		if wasFrozen && refreeze {
 			// fork descongeló al padre; una rama que no es la activa no gasta RAM.
 			if _, ferr := a.k.Run(ctx, nil, "freeze", parent.ID); ferr != nil {
 				fmt.Fprintf(a.stderr, "warning: could not freeze %s again: %v\n", parent.Name, ferr)
@@ -412,18 +446,18 @@ func (a *app) repoGolden(copies map[string][]*api.Machine) string {
 // activate deja la copia corriendo y devuelve su estado al día (la IP o el
 // reenvío pueden cambiar al descongelar).
 func (a *app) activate(ctx context.Context, mc *api.Machine, owner string) (*api.Machine, error) {
+	// mc sale de un listado de hace milisegundos; thaw devuelve la máquina ya
+	// descongelada (con su IP o reenvío de ahora): no hace falta otro inspect.
+	cur := mc
 	switch mc.State {
 	case api.StateRunning:
 	case api.StateWarm, api.StatePaused:
-		if _, err := a.k.Run(ctx, nil, "thaw", mc.ID); err != nil {
+		var err error
+		if cur, err = a.k.Thaw(ctx, mc.ID); err != nil {
 			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("%s is %s: remove it (kling db branch -rm) and create it again", mc.Name, mc.State)
-	}
-	cur, err := a.inspect(ctx, mc.ID)
-	if err != nil {
-		return nil, err
 	}
 	if err := checkReady(cur, owner); err != nil {
 		return nil, err
@@ -442,7 +476,9 @@ func cmdBranch(args []string) error {
 	from := fs.String("from", "", "parent branch whose copy the new one is forked from (default: the repo's default branch)")
 	golden := fs.String("golden", "", "template to start from when there is no parent copy to fork")
 	envTpl := fs.String("env", "", "instead of a single copy, bring up the branch's whole environment: a graph of this app template + a database copy (see kling db env)")
-	sw := fs.Bool("switch", false, "for the git hook: activate this branch's copy, freeze the others, write "+branchEnvFile+" in .git")
+	sw := fs.Bool("switch", false, "for the git hook: activate this branch's copy, write "+branchEnvFile+" in .git and freeze the other branches in the background")
+	wait := fs.Bool("wait", false, "with -switch: freeze the other branches before returning, not in the background")
+	settle := fs.Bool("settle", false, "freeze the copies of the branches no worktree has checked out (what -switch leaves to the background)")
 	ls := fs.Bool("ls", false, "list the branches with their copy")
 	rm := fs.String("rm", "", "remove the copy of this branch")
 	prune := fs.Bool("prune", false, "remove the copies of branches that no longer exist in git")
@@ -454,12 +490,12 @@ func cmdBranch(args []string) error {
 		return err
 	}
 	modes := 0
-	for _, on := range []bool{*sw, *ls, *rm != "", *prune} {
+	for _, on := range []bool{*sw, *ls, *rm != "", *prune, *settle} {
 		if on {
 			modes++
 		}
 	}
-	const usage = "usage: kling db branch [<branch>] [-from P] [-golden G] | -switch [-golden G] | -ls [-json] | -rm <branch> | -prune [-dry-run] | [-force] [-owner T] [-golden G] hook install|uninstall"
+	const usage = "usage: kling db branch [<branch>] [-from P] [-golden G] | -switch [-wait] [-golden G] | -settle | -ls [-json] | -rm <branch> | -prune [-dry-run] | [-force] [-owner T] [-golden G] hook install|uninstall"
 	if err := validOwner(*owner); err != nil {
 		return err
 	}
@@ -490,8 +526,8 @@ func cmdBranch(args []string) error {
 		return usageErr("%s", usage)
 	}
 	// -golden vale con -switch (el hook lo pasa para una rama sin padre).
-	if (*dry && !*prune) || (*asJSON && !*ls) || ((*sw || *ls || *rm != "" || *prune) && *from != "") ||
-		((*ls || *rm != "" || *prune) && *golden != "") {
+	if (*dry && !*prune) || (*asJSON && !*ls) || (*wait && !*sw) || ((*sw || *ls || *rm != "" || *prune || *settle) && *from != "") ||
+		((*ls || *rm != "" || *prune || *settle) && *golden != "") {
 		return usageErr("%s", usage)
 	}
 	a, err := newApp(*host)
@@ -502,7 +538,13 @@ func cmdBranch(args []string) error {
 	defer stop()
 	switch {
 	case *sw:
-		return a.branchSwitch(ctx, *owner, *golden)
+		return a.branchSwitch(ctx, *host, *owner, *golden, *wait)
+	case *settle:
+		ri, err := a.repo(ctx)
+		if err != nil {
+			return err
+		}
+		return a.settle(ctx, ri, *owner)
 	case *ls:
 		return a.branchLs(ctx, *owner, *asJSON)
 	case *rm != "":
@@ -586,7 +628,8 @@ func (a *app) branchEnv(ctx context.Context, branch, appTpl, golden, owner strin
 	return nil
 }
 
-// resolve fija repo, rama y padre de una llamada.
+// resolve fija repo, rama y padre de una llamada (el padre vacío es la rama por
+// defecto, que decide ensureBranch solo si la necesita).
 func (a *app) resolve(ctx context.Context, branch, from string) (*repoInfo, string, string, error) {
 	ri, err := a.repo(ctx)
 	if err != nil {
@@ -597,10 +640,10 @@ func (a *app) resolve(ctx context.Context, branch, from string) (*repoInfo, stri
 			return nil, "", "", err
 		}
 	}
-	if from == "" {
-		from = a.defaultBranch(ctx)
-	} else if err := validBranch(from); err != nil {
-		return nil, "", "", fmt.Errorf("-from: %w", err)
+	if from != "" {
+		if err := validBranch(from); err != nil {
+			return nil, "", "", fmt.Errorf("-from: %w", err)
+		}
 	}
 	return ri, branch, from, nil
 }
@@ -616,7 +659,7 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 		return err
 	}
 	defer un()
-	mc, created, err := a.ensureBranch(ctx, ri, branch, from, golden, owner)
+	mc, created, err := a.ensureBranch(ctx, ri, branch, from, golden, owner, true)
 	if err != nil {
 		return err
 	}
@@ -631,7 +674,7 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 	// Si es la rama actual, la app ya puede conectar: se escribe la conexión en
 	// .git como haría el hook (antes solo -switch lo hacía y, hasta el primer
 	// checkout, la app no tenía con qué conectar; lo vio la prueba en el lab).
-	if _, cur, _, err := a.resolve(ctx, "", ""); err == nil && cur == branch {
+	if cur, err := a.currentBranch(ctx); err == nil && cur == branch {
 		envPath := filepath.Join(ri.gitDir, branchEnvFile)
 		if err := a.writeBranchEnv(mc, envPath); err != nil {
 			return err
@@ -644,68 +687,183 @@ func (a *app) branch(ctx context.Context, branch, from, golden, owner string) er
 }
 
 // branchSwitch es lo que llama el hook: deja activa la copia de la rama actual,
-// congela las de las demás ramas del repo que ningún worktree tenga activas y
-// escribe la conexión en el .git de este worktree. golden es de dónde sale una
+// escribe la conexión en el .git de este worktree y congela las de las demás
+// ramas del repo que ningún worktree tenga activas. golden es de dónde sale una
 // rama sin copia del padre ("": el de cualquier copia del repo).
-func (a *app) branchSwitch(ctx context.Context, owner, golden string) error {
-	ri, branch, from, err := a.resolve(ctx, "", "")
+//
+// Congelar las otras (~1-2 s cada una: el volcado de su memoria) no hace falta
+// para usar esta, así que va en segundo plano (settle) salvo con wait o si no
+// se puede lanzar: el checkout espera solo a lo que su rama necesita.
+func (a *app) branchSwitch(ctx context.Context, host, owner, golden string, wait bool) error {
+	defer a.tr.span("total -switch")()
+	ri, err := a.switchActivate(ctx, owner, golden)
 	if err != nil {
 		return err
 	}
+	if !wait && a.background != nil {
+		err := a.background(settleArgs(host, owner))
+		if err == nil {
+			return nil
+		}
+		fmt.Fprintf(a.stderr, "warning: could not freeze the other branches in the background (%v): freezing them now\n", err)
+	}
+	return a.settle(ctx, ri, owner)
+}
+
+// switchActivate es la parte de -switch que el checkout espera, con el cerrojo
+// del repo tomado: borrar el .env anterior, tener la copia de la rama, activarla
+// y escribir su conexión.
+func (a *app) switchActivate(ctx context.Context, owner, golden string) (*repoInfo, error) {
+	end := a.tr.span("phase resolve")
+	ri, branch, from, err := a.resolve(ctx, "", "")
+	end()
+	if err != nil {
+		return nil, err
+	}
 	// Dos checkouts a la vez (dos worktrees): el segundo espera al primero y
 	// encuentra la copia hecha en vez de crear otra.
+	end = a.tr.span("phase lock")
 	un, err := a.lockRepo(ctx, ri)
+	end()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer un()
 	envPath := filepath.Join(ri.gitDir, branchEnvFile)
 	// Antes que nada: un .env de la rama anterior apuntaría la aplicación a la
 	// base equivocada. Sin él, falla (y se nota) en vez de usar otra rama.
 	if err := os.Remove(envPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("removing the previous %s: %w", envPath, err)
+		return nil, fmt.Errorf("removing the previous %s: %w", envPath, err)
 	}
-	mc, _, err := a.ensureBranch(ctx, ri, branch, from, golden, owner)
+	end = a.tr.span("phase ensure")
+	mc, _, err := a.ensureBranch(ctx, ri, branch, from, golden, owner, false)
+	end()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if mc, err = a.activate(ctx, mc, owner); err != nil {
-		return err
+	end = a.tr.span("phase activate")
+	mc, err = a.activate(ctx, mc, owner)
+	end()
+	if err != nil {
+		return nil, err
 	}
-	if err := a.writeBranchEnv(mc, envPath); err != nil {
-		return err
+	end = a.tr.span("phase env")
+	err = a.writeBranchEnv(mc, envPath)
+	end()
+	if err != nil {
+		return nil, err
 	}
 	fmt.Fprintf(a.stdout, "branch %s  active  (copy %s)\n  connection: %s  (mode 0600, inside .git: it is never committed)\n", branch, mc.Name, envPath)
+	return ri, nil
+}
 
-	copies, err := a.repoCopies(ctx, ri, owner)
-	if err != nil {
-		return fmt.Errorf("freezing the other branches: %w", err)
+// settleArgs son los argumentos del proceso de segundo plano de -switch.
+func settleArgs(host, owner string) []string {
+	args := []string{"branch", "-settle", "-owner", owner}
+	if host != "" {
+		args = append(args, "-H", host)
 	}
-	// La rama que otro worktree tiene activa está en uso: no se congela. Si git
-	// no sabe decirlo, no se congela nada (congelar de más rompe a otro).
-	inUse, err := a.worktreeBranches(ctx)
-	if err != nil {
-		return fmt.Errorf("freezing the other branches: %w", err)
+	return args
+}
+
+// settle congela las copias de las ramas del repo que ningún worktree tiene
+// activas. Una a una, y cada una con el cerrojo del repo tomado y el estado
+// releído (git worktree list y las copias) justo antes: un -switch que llega
+// mientras tanto espera como mucho a UN congelado, y lo que él active ya no se
+// congela. Si git no sabe decir qué ramas están en uso, no se congela nada
+// (congelar de más rompe a otro).
+func (a *app) settle(ctx context.Context, ri *repoInfo, owner string) error {
+	defer a.tr.span("phase settle")()
+	// La reserva de la rama por defecto antes que nada: si se acaba de salir
+	// de ella, sigue en marcha y no hay que descongelarla para ramificarla.
+	if err := a.settleSpare(ctx, ri, owner); err != nil {
+		fmt.Fprintf(a.stderr, "warning: spare copy: %v\n", err)
 	}
+	keep := keepPaused()
+	tried := map[string]bool{}
 	var failed []string
-	for k, l := range copies {
-		if k == branchKey(branch) || inUse[k] {
-			continue
+	for {
+		un, err := a.lockRepo(ctx, ri)
+		if err != nil {
+			return err
 		}
-		for _, o := range l {
-			if o.State != api.StateRunning {
-				continue
+		next, op, err := a.nextIdle(ctx, ri, owner, tried, keep)
+		if err != nil || next == nil {
+			un()
+			if err != nil {
+				return fmt.Errorf("freezing the other branches: %w", err)
 			}
-			if _, err := a.k.Run(ctx, nil, "freeze", o.ID); err != nil {
-				failed = append(failed, o.Name)
-			}
+			break
 		}
+		tried[next.ID] = true
+		if _, err := a.k.Run(ctx, nil, op, next.ID); err != nil {
+			failed = append(failed, next.Name)
+		}
+		un()
 	}
 	if len(failed) > 0 {
 		sort.Strings(failed)
 		return fmt.Errorf("could not freeze: %s", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// keepPausedEnv es cuántas de las ramas que se dejan se quedan PAUSADAS (en RAM,
+// ~1 ms para volver) en vez de congeladas (0 RAM): las usadas más
+// recientemente. 0 por defecto. Sirve sobre todo en macOS, donde descongelar
+// una copia del golden pg (1 GiB) cuesta ~230 ms de restauración en vz y
+// reanudarla ~1 ms; a cambio, cada una ocupa su memoria (~1,1 GiB medidos allí).
+const keepPausedEnv = "KLING_DB_BRANCH_KEEP_PAUSED"
+
+func keepPaused() int {
+	n, err := strconv.Atoi(os.Getenv(keepPausedEnv))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return min(n, 8)
+}
+
+// nextIdle es la siguiente copia del repo, de una rama que no tiene activa
+// ningún worktree, que hay que apartar, y cómo ("freeze" o "pause"), o nil. Las
+// keep usadas más recientemente se pausan; el resto de las que corren (y, con
+// keep, las pausadas de más) se congelan. tried son las ya intentadas.
+func (a *app) nextIdle(ctx context.Context, ri *repoInfo, owner string, tried map[string]bool, keep int) (*api.Machine, string, error) {
+	copies, err := a.repoCopies(ctx, ri, owner)
+	if err != nil {
+		return nil, "", err
+	}
+	inUse, err := a.worktreeBranches(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	var idle []*api.Machine
+	for k, l := range copies {
+		if !inUse[k] {
+			idle = append(idle, l...)
+		}
+	}
+	used := func(mc *api.Machine) int64 {
+		n, _ := strconv.ParseInt(mc.Labels[labelUsed], 10, 64)
+		return n
+	}
+	sort.Slice(idle, func(i, j int) bool {
+		if ui, uj := used(idle[i]), used(idle[j]); ui != uj {
+			return ui > uj
+		}
+		return idle[i].ID < idle[j].ID
+	})
+	for i, o := range idle {
+		if tried[o.ID] {
+			continue
+		}
+		switch {
+		case i < keep && o.State == api.StateRunning:
+			return o, "pause", nil
+		case i >= keep && (o.State == api.StateRunning || (keep > 0 && o.State == api.StatePaused)):
+			return o, "freeze", nil
+		}
+	}
+	return nil, "", nil
 }
 
 // envQuote entrecomilla un valor para el .env: entre comillas simples, que ni
@@ -788,7 +946,8 @@ type branchRow struct {
 	Bytes    int64  `json:"disk_bytes"`
 	LastUsed string `json:"last_used,omitempty"`
 	Current  bool   `json:"current,omitempty"`
-	Gone     bool   `json:"gone,omitempty"` // la rama ya no existe en git
+	Gone     bool   `json:"gone,omitempty"`  // la rama ya no existe en git
+	Spare    bool   `json:"spare,omitempty"` // copia de reserva de la rama (ver cmd_branch_spare.go)
 }
 
 func (a *app) branchLs(ctx context.Context, owner string, asJSON bool) error {
@@ -796,7 +955,7 @@ func (a *app) branchLs(ctx context.Context, owner string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	copies, err := a.repoCopies(ctx, ri, owner)
+	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {
 		return err
 	}
@@ -806,6 +965,16 @@ func (a *app) branchLs(ctx context.Context, owner string, asJSON bool) error {
 	}
 	cur, _ := a.currentBranch(ctx)
 	rows := []branchRow{}
+	for k, l := range spares {
+		name, ok := branches[k]
+		if !ok {
+			name = k
+		}
+		for _, mc := range l {
+			rows = append(rows, branchRow{Branch: name, Key: k, Copy: mc.Name, State: string(mc.State),
+				Ready: mc.Labels[labelState] == stateReady, Bytes: mc.DiskBytes, Spare: true})
+		}
+	}
 	for k, l := range copies {
 		for _, mc := range l {
 			name, ok := branches[k]
@@ -821,7 +990,12 @@ func (a *app) branchLs(ctx context.Context, owner string, asJSON bool) error {
 			rows = append(rows, r)
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Branch < rows[j].Branch })
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Branch != rows[j].Branch {
+			return rows[i].Branch < rows[j].Branch
+		}
+		return !rows[i].Spare && rows[j].Spare
+	})
 	if asJSON {
 		return json.NewEncoder(a.stdout).Encode(rows)
 	}
@@ -838,6 +1012,9 @@ func (a *app) branchLs(ctx context.Context, owner string, asJSON bool) error {
 		}
 		if r.Gone {
 			name += " (gone from git)"
+		}
+		if r.Spare {
+			name += " (spare for the next new branch)"
 		}
 		st := r.State
 		if !r.Ready {
@@ -887,13 +1064,17 @@ func (a *app) branchRm(ctx context.Context, branch, owner string) error {
 		return err
 	}
 	defer un()
-	copies, err := a.repoCopies(ctx, ri, owner)
+	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {
 		return err
 	}
 	key := branchKey(branch)
 	ok, err := a.removeKey(ctx, copies, key, owner)
 	if err != nil {
+		return err
+	}
+	// Sus reservas salieron de ella: sin la rama no sirven.
+	if _, err := a.removeKey(ctx, spares, key, owner); err != nil {
 		return err
 	}
 	// El entorno de la rama (kling db branch -env), si lo hay, se va con ella.
@@ -939,7 +1120,7 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 		}
 		defer un()
 	}
-	copies, err := a.repoCopies(ctx, ri, owner)
+	copies, spares, err := a.repoState(ctx, ri, owner)
 	if err != nil {
 		return err
 	}
@@ -949,7 +1130,19 @@ func (a *app) branchPrune(ctx context.Context, owner string, dry bool) error {
 			keys = append(keys, k)
 		}
 	}
-	sort.Strings(keys)
+	// Las reservas de una rama que se va (o sin copia ya) se van con ella.
+	for k := range spares {
+		if _, ok := copies[k]; !ok {
+			keys = append(keys, k)
+		} else if _, ok := branches[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	for k, l := range spares {
+		copies[k] = append(copies[k], l...)
+	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
 	if len(keys) == 0 {
 		fmt.Fprintln(a.stderr, "nothing to prune")
 		return nil

@@ -68,3 +68,28 @@ func notaFases(p *api.WakePhases) string {
 	add("finish", p.FinishMS)
 	return fmt.Sprintf(" [%s %.1f ms: %s]", p.Tier, p.TotalMS, b.String())
 }
+
+// tiempos cronometra por fases algo que solo va al registro (commit, fork):
+// "overlay 80 ms, dump 900 ms". Cada marca es lo transcurrido desde la anterior.
+type tiempos struct {
+	t0, ultima time.Time
+	b          strings.Builder
+}
+
+func nuevosTiempos() *tiempos {
+	now := time.Now()
+	return &tiempos{t0: now, ultima: now}
+}
+
+func (t *tiempos) marca(fase string) {
+	now := time.Now()
+	if t.b.Len() > 0 {
+		t.b.WriteString(", ")
+	}
+	fmt.Fprintf(&t.b, "%s %d ms", fase, now.Sub(t.ultima).Milliseconds())
+	t.ultima = now
+}
+
+func (t *tiempos) String() string {
+	return fmt.Sprintf("%s (total %d ms)", t.b.String(), time.Since(t.t0).Milliseconds())
+}

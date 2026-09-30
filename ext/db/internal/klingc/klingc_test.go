@@ -2,12 +2,17 @@ package klingc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // fakeBin escribe un "kling" de shell que imprime su argv, su KLING_HOST y su
@@ -88,5 +93,49 @@ func TestResolve(t *testing.T) {
 	t.Setenv("KLING_BIN", "/usr/lib/kling")
 	if p, err := Resolve(); err != nil || p != "/usr/lib/kling" {
 		t.Fatalf("got %q %v", p, err)
+	}
+}
+
+// List y Thaw van por el API del daemon (sin lanzar kling), al host de -H.
+func TestMachinerPorElAPI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket")
+	}
+	dir, err := os.MkdirTemp("/tmp", "klingc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/machines":
+			json.NewEncoder(w).Encode([]*api.Machine{{ID: "abc", State: api.StateWarm}})
+		case "/machines/abc/thaw":
+			json.NewEncoder(w).Encode(api.Machine{ID: "abc", State: api.StateRunning, IP: "172.30.0.9"})
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+	t.Setenv("KLING_CONFIG", filepath.Join(dir, "config.json"))
+	c := &CLI{Bin: "/nonexistent/kling", Host: "unix://" + sock}
+	l, err := c.List(context.Background())
+	if err != nil || len(l) != 1 || l[0].ID != "abc" {
+		t.Fatalf("List = %v, %v", l, err)
+	}
+	mc, err := c.Thaw(context.Background(), "abc")
+	if err != nil || mc.State != api.StateRunning || mc.IP != "172.30.0.9" {
+		t.Fatalf("Thaw = %+v, %v", mc, err)
+	}
+	if want := []string{"GET /machines", "POST /machines/abc/thaw"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("requests %v, want %v", got, want)
 	}
 }

@@ -130,20 +130,9 @@ func classNames(prefix string, n int) []string {
 	return names
 }
 
-// machines es `kling ps -json`.
+// machines es `kling ps -json`, por el API.
 func (a *app) machines(ctx context.Context) ([]*api.Machine, error) {
-	out, err := a.k.Run(ctx, nil, "ps", "-json")
-	if err != nil {
-		return nil, err
-	}
-	if len(out) > maxJSON {
-		return nil, errors.New("kling ps: output too large")
-	}
-	var all []*api.Machine
-	if err := json.Unmarshal(out, &all); err != nil {
-		return nil, fmt.Errorf("kling ps: %w", err)
-	}
-	return all, nil
+	return a.k.List(ctx)
 }
 
 // inClass dice si mc es una copia de la clase y el dueño de o.

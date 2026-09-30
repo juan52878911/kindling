@@ -1,0 +1,23 @@
+trace       0.2ms       1.1ms  git rev-parse
+trace       1.4ms       0.9ms  git symbolic-ref
+trace       0.2ms       2.1ms  phase resolve
+trace       2.3ms       0.0ms  phase lock
+trace       2.4ms       0.7ms  api list
+trace       3.1ms       0.9ms  git symbolic-ref
+branch b18: forking the copy of main...
+trace       4.0ms       5.2ms  kling inspect
+trace       9.3ms    5578.0ms  kling sandbox fork
+trace    5587.3ms      74.5ms  kling exec su …pg_isready
+trace    5661.9ms      76.8ms  kling exec su …psql
+trace    5738.8ms      14.0ms  kling exec sh
+trace    5754.8ms      26.5ms  kling exec su …psql
+trace    5587.3ms     194.0ms  phase prepare
+trace    5781.3ms       0.4ms  api setlabels
+trace       4.0ms    5777.7ms  phase fork
+trace       2.4ms    5779.4ms  phase ensure
+trace    5781.7ms       0.2ms  api setlabels
+trace    5781.7ms       0.2ms  phase activate
+trace    5782.0ms       0.1ms  phase env
+branch b18  active  (copy db-c25fff-main-0d6e40-21e376)
+  connection: /tmp/bench-db-branch.TTQ2YQ/.git/kling-db.env  (mode 0600, inside .git: it is never committed)
+trace       0.2ms    5782.1ms  total -switch

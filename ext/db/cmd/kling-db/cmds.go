@@ -313,7 +313,10 @@ func (a *app) forkWith(ctx context.Context, src string, n int, owner string, ext
 		}
 	}
 	for _, c := range copies {
-		if err := a.prepare(ctx, c); err != nil {
+		end := a.tr.span("phase prepare")
+		err := a.prepare(ctx, c)
+		end()
+		if err != nil {
 			return undo(err)
 		}
 	}

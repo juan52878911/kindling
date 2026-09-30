@@ -10,6 +10,34 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling db branch`: el `git checkout` ya no espera a nada que su rama no necesite.**
+  Medido de extremo a extremo con `scripts/bench-db-branch.sh` (N = 20, golden `pg` de
+  1 GiB; datos en `docs/bench-data/db-branch-20260929/`): en Linux (CT 105) volver a una
+  rama con copia pasa de 1 985 ms a **43 ms** p50 y una rama nueva de 6 719 ms a **88 ms**
+  p50 cuando el padre no cambió (2,2 s por fork en caliente si cambió, 4,5 s con el disco ocupado); en macOS (M4, vz), de 718 a 322 ms y de
+  1 116 a 348 ms (731 ms por fork), y **57 ms** al volver con
+  `KLING_DB_BRANCH_KEEP_PAUSED=1`. Lo que cambia:
+  - congelar las demás ramas va en segundo plano (`-settle`, registro en
+    `$KLING_DB_STATE/branch-background.log`), una a una y con el cerrojo del repo;
+    `-switch -wait` conserva el comportamiento anterior;
+  - **copias de reserva**: al dejar la rama por defecto se prepara un fork suyo
+    congelado, que la siguiente rama nueva adopta si la huella de Postgres del padre
+    (instantánea de transacciones, secuencias, `postgresql.auto.conf`, `pg_hba.conf`)
+    no cambió; si cambió, fork como siempre. `KLING_DB_BRANCH_SPARE=0` las desactiva;
+  - `KLING_DB_BRANCH_KEEP_PAUSED=N` deja pausadas (en RAM) las N últimas ramas;
+  - listar y descongelar van por el API del daemon (sin un `kling` por paso ni el
+    `inspect` de después) y git se llama 2 veces en vez de 5;
+  - `KLING_DB_TRACE=1`: tiempo de cada fase en stderr.
+- `scripts/db-golden.sh` (y `kling db golden build`): `VACUUM (ANALYZE)` también en
+  `postgres` y `template1` antes de congelar. Sin él, cada copia gastaba 11
+  transacciones de autovacuum al minuto o dos de nacer (y la reserva de `kling db
+  branch` dejaba de valer). Reconstruya el golden para aprovecharlo.
+- **Núcleo: el fork ya no hashea el overlay de su snapshot temporal**, y ningún commit
+  obliga a la primera restauración a rehashear lo que acaba de hashear: 3 s menos por
+  `sandbox fork` de una copia de 1 GiB en el lab (el sha256 de 512 MiB, dos veces). El
+  log del daemon da el desglose de cada commit y fork.
+- **Núcleo: el `mem.file` de una máquina congelada se queda en caché hasta 256 MiB**
+  (antes 128): una copia del golden de Postgres despierta en ~13 ms en vez de 40-130.
 - **macOS: sin techo de CPU por defecto** (#87). Una máquina de vz que no pide
   `cpu_pct` (ni por flag, ni su dorado, ni su receta, ni `defaults.cpu_pct`) corre con
   todas sus vCPU en vez del 50 % de siempre. Regular una VM de vz la detiene a

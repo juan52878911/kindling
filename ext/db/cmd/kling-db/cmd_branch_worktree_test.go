@@ -52,7 +52,7 @@ func TestBranchWorktreesCompartenCopia(t *testing.T) {
 
 	// El hook en el worktree: la copia de feat sale por fork de la de main, y la
 	// de main NO se congela, porque el árbol principal la tiene activa.
-	if err := tw.branchSwitch(ctx, defaultOwner, ""); err != nil {
+	if err := tw.branchSwitch(ctx, "", defaultOwner, "", false); err != nil {
 		t.Fatal(err)
 	}
 	mainC, feat := ta.copyOf(t, "main"), ta.copyOf(t, "feat")
@@ -83,7 +83,7 @@ func TestBranchWorktreesCompartenCopia(t *testing.T) {
 	if err := ta.branch(ctx, "idle", "", "", defaultOwner); err != nil {
 		t.Fatal(err)
 	}
-	if err := tw.branchSwitch(ctx, defaultOwner, ""); err != nil {
+	if err := tw.branchSwitch(ctx, "", defaultOwner, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if st := ta.copyOf(t, "idle").State; st != api.StateWarm {
@@ -139,7 +139,7 @@ func TestBranchCerrojo(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := len(ta.f.machines)
-	err = ta.branchSwitch(ctx, defaultOwner, "")
+	err = ta.branchSwitch(ctx, "", defaultOwner, "", false)
 	un()
 	if err == nil || !strings.Contains(err.Error(), "another kling db branch") {
 		t.Fatalf("err = %v", err)
@@ -158,7 +158,7 @@ func TestBranchCerrojo(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = x.branchSwitch(ctx, defaultOwner, "")
+			errs[i] = x.branchSwitch(ctx, "", defaultOwner, "", false)
 		}()
 	}
 	wg.Wait()

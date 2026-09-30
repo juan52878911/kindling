@@ -1135,6 +1135,58 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   k rm "$AG" >/dev/null 2>&1
   dbk rm "$DBU" >/dev/null 2>&1
 
+  # kling db branch with the post-checkout hook (the same as 7g2 in 90-e2e.sh):
+  # the new branch starts with its parent's data (from the spare copy when the
+  # parent did not change, from a live fork when it did), the .env inside .git
+  # switches on every checkout, the other branches freeze in the background.
+  if ! command -v git >/dev/null; then
+    printf "  \033[33mskip\033[0m  no git: kling db branch not tried\n"
+  else
+    BR="$DBSTAGE/repo"; BLOG="$DBSTAGE/hook.log"; : > "$BLOG"
+    export KLING
+    bcopy() { (cd "$BR" && k db branch -ls -json 2>/dev/null) | python3 -c '
+import sys, json
+b, spare = sys.argv[1], len(sys.argv) > 2
+for r in json.load(sys.stdin):
+    if r["branch"] == b and bool(r.get("spare")) == spare:
+        print(r["copy"]); break' "$@"; }
+    bidle() { local i; for i in $(seq 1 600); do pgrep -f "branch -settle" >/dev/null || return 0; sleep 0.2; done; }
+    bco() { local t0; t0=$(now_ms); (cd "$BR" && git checkout -q "$@" 2>>"$BLOG"); BMS=$(( $(now_ms) - t0 )); }
+    benv() { grep '^PGPASSWORD=' "$BR/.git/kling-db.env" 2>/dev/null; }
+    mkdir -p "$BR" && (cd "$BR" && git init -q -b main && git -c user.name=e2e -c user.email=e2e@localhost commit -q --allow-empty -m init)
+    out=$(cd "$BR" && k db branch -golden "$DBG" 2>&1); printf '%s\n' "$out" >> "$BLOG"
+    BMAIN=$(bcopy main)
+    { [ -n "$BMAIN" ] && [ "$(stat -f %Lp "$BR/.git/kling-db.env" 2>/dev/null)" = 600 ]; } \
+      && ok "db branch: a copy for main and its connection in .git (0600)" || bad "db branch main" "copy and .git/kling-db.env 0600" "$out"
+    out=$(cd "$BR" && k db branch hook install 2>&1); contiene "$out" "installed" && ok "branch hook install" || bad "hook install" "installed" "$out"
+    dbsql "$BMAIN" "CREATE TABLE e2e_br(v text); INSERT INTO e2e_br VALUES ('from-main')" >/dev/null
+    bco -b e2e-a; ENVA=$(benv); BA=$(bcopy e2e-a)
+    { [ -n "$BA" ] && [ "$(dbsql "$BA" "SELECT v FROM e2e_br")" = "from-main" ]; } \
+      && ok "new branch (live fork, $BMS ms) starts with main's data" || bad "branch e2e-a" "a copy with main's row" "copy=$BA"
+    bidle
+    [ -n "$(bcopy main spare)" ] && ok "leaving main leaves a spare copy of it" || bad "spare of main" "a spare row in -ls" "$(cd "$BR" && k db branch -ls 2>&1)"
+    bco main
+    { [ "$BMS" -lt 1500 ] && [ "$(benv)" != "$ENVA" ]; } && ok "back to main: $BMS ms, and the .env switches" || bad "back to main" "< 1500 ms and another .env" "$BMS ms"
+    bidle
+    SPARE=$(bcopy main spare)
+    bco -b e2e-b; BB=$(bcopy e2e-b)
+    { [ -n "$SPARE" ] && [ "$BB" = "$SPARE" ] && [ "$(dbsql "$BB" "SELECT v FROM e2e_br")" = "from-main" ]; } \
+      && ok "new branch from an unchanged main takes the spare ($BMS ms)" || bad "spare adoption" "e2e-b = $SPARE" "e2e-b=$BB"
+    bidle; bco main; bidle
+    dbsql "$BMAIN" "INSERT INTO e2e_br VALUES ('more-from-main')" >/dev/null
+    SPARE=$(bcopy main spare)
+    bco -b e2e-c; BC=$(bcopy e2e-c)
+    { [ -n "$BC" ] && [ "$BC" != "$SPARE" ] && [ "$(dbsql "$BC" "SELECT count(*) FROM e2e_br")" = 2 ]; } \
+      && ok "with main changed the spare is not used: e2e-c is a live fork with the new row" || bad "stale spare" "a fork with 2 rows" "e2e-c=$BC spare=$SPARE"
+    bidle
+    for pw in $(cat "$KLING_DB_STATE"/copies/*/password 2>/dev/null); do ALL="$ALL $pw"; done
+    cat "$BLOG" >> "$DBLOG"
+    (cd "$BR" && git checkout -q main 2>/dev/null); bidle
+    for b in e2e-a e2e-b e2e-c main; do (cd "$BR" && k db branch -rm "$b" >/dev/null 2>&1); done
+    left=$(k ps -a 2>/dev/null | grep -c "$(printf '%s' "$BMAIN" | cut -c1-9)")
+    [ "$left" = 0 ] && ok "branch -rm of every branch: no copies or spares left" || bad "branch cleanup" "0 copies of the repo" "$left"
+  fi
+
   leaks=0
   for pw in $ALL; do grep -qF -- "$pw" "$DBLOG" && leaks=$((leaks+1)); done
   [ "$leaks" = 0 ] && ok "no password in any kling db output (0 matches)" || bad "password leak" 0 "$leaks"

@@ -59,7 +59,7 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 			return nil, err
 		}
 	}
-	return m.commit(ctx, ref, name, o.Replace, nil, false)
+	return m.commit(ctx, ref, name, o.Replace, nil, false, false)
 }
 
 // commitPausada es Commit de una máquina que YA está pausada (Pause) y que se
@@ -69,7 +69,7 @@ func (m *Manager) CommitWith(ctx context.Context, ref, name string, o CommitOpti
 // pausarla (soltarlos pide hablar con el agente, y un invitado pausado no
 // contesta), y es también quien se los devuelve: aquí no se tocan.
 func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Snapshot, error) {
-	return m.commit(ctx, ref, name, false, nil, true)
+	return m.commit(ctx, ref, name, false, nil, true, false)
 }
 
 // commit es Commit con una comprobación opcional que se ejecuta con el cerrojo
@@ -77,7 +77,9 @@ func (m *Manager) commitPausada(ctx context.Context, ref, name string) (*api.Sna
 // Fork para repetir ahí lo que ya miró sin cerrojo (TOCTOU con un
 // SetCredentials concurrente, que toma el mismo cerrojo). Con yaPausada, la
 // máquina tiene que estar pausada, no se pausa ni se reanuda (commitPausada).
-func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada bool) (snapOut *api.Snapshot, errOut error) {
+// Con deFork es el snapshot temporal de un fork: no se hashea su overlay (ver
+// la DECISIÓN junto a los digests).
+func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, comprobar func(*api.Machine) error, yaPausada, deFork bool) (snapOut *api.Snapshot, errOut error) {
 	if !validName.MatchString(name) {
 		return nil, fmt.Errorf("invalid snapshot name: %q", name)
 	}
@@ -306,6 +308,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		}
 		pausada = true
 	}
+	t := nuevosTiempos()
 
 	// El overlay se copia con la máquina pausada, para que sea coherente con la
 	// memoria que se va a volcar.
@@ -320,6 +323,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		return nil, fmt.Errorf("copying overlay: %w", err)
 	}
 	goldFI, err := m.copiarOverlayDesde(ctx, origen, goldDst, m.priv.OwnFile)
+	t.marca("overlay")
 	origen.Close()
 	if err != nil {
 		return nil, fmt.Errorf("copying overlay: %w", err)
@@ -343,6 +347,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if err := lento.Snapshot(ctx, snapPath, memPath); err != nil {
 		return nil, err
 	}
+	t.marca("dump")
 	if jailed {
 		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
 		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
@@ -366,10 +371,12 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if err := restaurarPlantilla(); err != nil {
 		return nil, err
 	}
+	t.marca("resume")
 
 	if out, err := perforarHuecos(ctx, memPath); err != nil {
 		return nil, fmt.Errorf("punching holes in memory file: %v: %s", err, out)
 	}
+	t.marca("holes")
 
 	// Digests de integridad del rootfs dorado y del volcado de estado.
 	//
@@ -377,9 +384,22 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// el snap volcado, la memoria perforada). El mem.file se deja fuera a
 	// propósito: es el grande y volver a leerlo entero en cada restauración mataría
 	// los ~30 ms del thaw. Ver verifyIntegrity para el porqué completo.
-	rootfsSHA, err := digest.File(goldOverlay)
-	if err != nil {
-		return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
+	//
+	// DECISIÓN — el snapshot temporal de un fork no graba el digest de su
+	// overlay. Son 512 MiB nominales que sha256 lee enteros (los huecos pasan
+	// como ceros): medido en fc-test, 1,5 s de un fork de 5 s, con la
+	// plantilla ya reanudada pero con quien pidió el fork esperando. Ese digest
+	// detecta que un dorado se corrompió en disco entre que se congeló y una
+	// restauración futura; el temporal de un fork se restaura en esta misma
+	// llamada, segundos después de escribirlo este daemon, y se borra cuando no
+	// quedan copias (barrerForks). Sin digest se trata como un dorado antiguo
+	// para ese fichero (verifyIntegrity lo salta); el de snap.file, que es
+	// pequeño, se sigue grabando y comprobando.
+	var rootfsSHA string
+	if !deFork {
+		if rootfsSHA, err = digest.File(goldOverlay); err != nil {
+			return nil, fmt.Errorf("computing digest of golden overlay: %w", err)
+		}
 	}
 	snapSHA, err := digest.File(snapPath)
 	if err != nil {
@@ -393,6 +413,7 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	if err != nil {
 		return nil, fmt.Errorf("computing digest of the kernel: %w", err)
 	}
+	t.marca("digest")
 	// F2: si la plantilla arrancó en frío (mc.From == ""), este binario ya le
 	// puso `ipv6.disable=1` en la línea de arranque (knet.BootArg), así que su
 	// kernel congelado no lo tiene cargado. Si en cambio es una instancia de
@@ -454,6 +475,13 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// pudo dejar cacheado con el mismo nombre (M-08, M-12).
 	m.invalidateSnapCache(name)
 	hecho = true
+	// Los digests se acaban de calcular sobre estos mismos ficheros: la
+	// primera restauración no tiene que volver a leerlos (1,4 s medidos en la
+	// de un fork). Tras reiniciar el daemon se verifican otra vez, como
+	// cualquier dorado (integridadYaVista).
+	m.anotarIntegridad(name, dir)
+	t.marca("meta")
+	log.Printf("commit %s -> %s: %s", mc.Name, name, t)
 
 	m.bus.Publish(api.Event{Time: time.Now(), Type: api.EvCommitted, ID: mc.ID, Name: name,
 		Message: fmt.Sprintf("golden snapshot from %s (%d MiB)", mc.Name, snap.MemBytes>>20)})

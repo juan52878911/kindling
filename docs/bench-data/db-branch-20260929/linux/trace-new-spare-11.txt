@@ -1,0 +1,20 @@
+trace       0.2ms       1.2ms  git rev-parse
+trace       1.5ms       1.0ms  git symbolic-ref
+trace       0.2ms       2.3ms  phase resolve
+trace       2.5ms       0.0ms  phase lock
+trace       2.6ms       1.1ms  api list
+trace       3.7ms       1.0ms  git symbolic-ref
+trace       4.7ms      42.5ms  kling exec su …psql
+trace       4.7ms      42.5ms  phase fingerprint
+trace      47.2ms       0.3ms  api setlabels
+trace       4.7ms      42.8ms  phase adopt
+branch b11: took a spare copy of main (same data)
+trace       2.6ms      45.0ms  phase ensure
+trace      47.5ms      16.9ms  api thaw
+trace   wake frozen: net 0.0 spawn 2.5 socket 2.5 load 5.5 forwards 0.0 resync 4.7 total 16.5 ms
+trace      64.5ms       0.9ms  api setlabels
+trace      47.5ms      17.9ms  phase activate
+trace      65.4ms       0.1ms  phase env
+branch b11  active  (copy db-c25fff-main-0d6e40-463789)
+  connection: /tmp/bench-db-branch.TTQ2YQ/.git/kling-db.env  (mode 0600, inside .git: it is never committed)
+trace       0.2ms      65.6ms  total -switch

@@ -1,0 +1,14 @@
+trace       0.1ms       3.8ms  git rev-parse
+trace       4.0ms       3.6ms  git symbolic-ref
+trace       0.1ms       7.5ms  phase resolve
+trace       7.6ms       0.1ms  phase lock
+trace       7.7ms       0.5ms  api list
+trace       7.7ms       0.5ms  phase ensure
+trace       8.2ms     263.0ms  api thaw
+trace   wake frozen: net 0.2 spawn 1.1 socket 9.3 load 231.0 forwards 0.5 resync 1.1 total 262.8 ms
+trace     271.3ms       0.1ms  api setlabels
+trace       8.2ms     263.2ms  phase activate
+trace     271.4ms       0.2ms  phase env
+branch main  active  (copy db-02bcec-main-0d6e40)
+  connection: /private/var/folders/3d/c82_mdgd33zd8tdmwmfwkwwr0000gn/T/bench-db-branch.xz2iNp/.git/kling-db.env  (mode 0600, inside .git: it is never committed)
+trace       0.1ms     272.8ms  total -switch

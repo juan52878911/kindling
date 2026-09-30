@@ -230,7 +230,7 @@ func TestBranchSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitT(t, dir, "checkout", "-q", "-b", "feat/x")
-	if err := ta.branchSwitch(ctx, defaultOwner, ""); err != nil {
+	if err := ta.branchSwitch(ctx, "", defaultOwner, "", false); err != nil {
 		t.Fatal(err)
 	}
 	mainC, feat := ta.copyOf(t, "main"), ta.copyOf(t, "feat/x")
@@ -258,7 +258,7 @@ func TestBranchSwitch(t *testing.T) {
 	}
 	// Vuelta a main: se descongela y la otra se congela; el .env cambia.
 	gitT(t, dir, "checkout", "-q", "main")
-	if err := ta.branchSwitch(ctx, defaultOwner, ""); err != nil {
+	if err := ta.branchSwitch(ctx, "", defaultOwner, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if mainC.State != api.StateRunning || feat.State != api.StateWarm {
@@ -277,7 +277,7 @@ func TestBranchSwitchFallaSinEnvViejo(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Sin copia, sin padre y sin golden: falla, y el .env de otra rama ya no está.
-	if err := ta.branchSwitch(context.Background(), defaultOwner, ""); err == nil {
+	if err := ta.branchSwitch(context.Background(), "", defaultOwner, "", false); err == nil {
 		t.Fatal("no error")
 	}
 	if _, err := os.Stat(envPath); err == nil {
@@ -293,7 +293,7 @@ func TestBranchSwitchUsaElGoldenDelRepo(t *testing.T) {
 	}
 	ta.copyOf(t, "main").Labels[labelState] = statePreparing // el padre no sirve
 	gitT(t, dir, "checkout", "-q", "-b", "other")
-	if err := ta.branchSwitch(ctx, defaultOwner, ""); err != nil {
+	if err := ta.branchSwitch(ctx, "", defaultOwner, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if mc := ta.copyOf(t, "other"); mc == nil || mc.From != "pg" {
@@ -309,7 +309,7 @@ func TestBranchSwitchAvisaSiNoCongela(t *testing.T) {
 	}
 	gitT(t, dir, "checkout", "-q", "-b", "b2")
 	ta.f.freezeFails = true
-	err := ta.branchSwitch(ctx, defaultOwner, "")
+	err := ta.branchSwitch(ctx, "", defaultOwner, "", false)
 	if err == nil || !strings.Contains(err.Error(), "could not freeze") {
 		t.Fatalf("err = %v", err)
 	}

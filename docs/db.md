@@ -42,7 +42,7 @@ kling db attach agente t1 -role agent    # otro agente, otra microVM, por el pro
 | `attach <agente> <copia> [-role R] [-env PGPASSWORD] [-database appdb] [-host H]` | da a un agente de **otra** microVM acceso a la copia por su proxy de credenciales: recibe un marcador en `-env` y el proxy, en el host, pone la contraseña. Solo Linux; ver [Modelo A](#modelo-a-una-copia-compartida-attach) |
 | `detach <agente> <copia> [-env PGPASSWORD]` | retira ese acceso y corta sus sesiones abiertas (acepta el id de una copia ya borrada) |
 | `role <copia> -ro [-name agent] [-schemas a,b] [-timeout 5s] [-rm]` | crea (o con `-rm` borra) un rol de LOGIN de solo lectura dentro de la copia, con su propia clave en el host (`copies/<id>/<rol>.password`, 0600) |
-| `branch [<rama>] [-from P] [-golden G] \| -switch [-golden G] \| -ls \| -rm R \| -prune \| [-owner T] [-golden G] hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
+| `branch [<rama>] [-from P] [-golden G] \| -switch [-wait] [-golden G] \| -settle \| -ls \| -rm R \| -prune \| [-owner T] [-golden G] hook install\|uninstall` | una base por rama de git; ver [Una base por rama](#una-base-por-rama) |
 | `class -n N [-prefix P] <golden> \| class ls \| class reset [<copia>...] \| class rm [<copia>...]` | una copia por alumno (`<prefijo>-01`...), en paralelo; las claves solo a un fichero 0600 con `-passwords`. Ver [Una copia por alumno](#una-copia-por-alumno-class) |
 | `report add <nombre> -golden G -every 1w -question "..." \| report run <nombre> [-due] \| report ls \| report rm <nombre>` | una pregunta de `ask` guardada, que cada ejecución hace sobre una copia fresca del golden y borra al acabar; se programa con cron o systemd. Ver [db-ask.md](db-ask.md#kling-db-report-la-misma-pregunta-cada-cierto-tiempo) |
 | `reset <copia>` | `rm` + `up` de la misma plantilla, con el mismo nombre, dueño, ttl y pertenencia (`kling.db.class`, `kling.db.repo`, `kling.db.branch`) |
@@ -546,8 +546,53 @@ kling db class rm -prefix alumno                  # fin de la clase
 ## Una base por rama
 
 `kling db branch` da a cada rama de git su propia copia. La de una rama nueva sale
-por `fork` de la copia de su rama padre (los datos y el esquema de esa rama, en
-milisegundos) o, si el padre no tiene copia lista, por `up` del golden.
+de la copia de su rama padre, con los datos y el esquema que el padre tiene en ese
+momento: por una **copia de reserva** ya preparada si el padre no ha cambiado desde
+que se sacó, o por `fork` en caliente si ha cambiado. Si el padre no tiene copia
+lista, sale por `up` del golden.
+
+### Cuánto tarda un `git checkout`
+
+Medido de extremo a extremo (el reloj envuelve el `git checkout` entero, gancho
+incluido) con `scripts/bench-db-branch.sh`, N = 20, sin descartar nada. Golden `pg`
+de 1 GiB configurado (el de `kling db golden build`; 400 000 filas en Linux, ~70 MiB
+de seed en macOS). Datos crudos y trazas por fase en
+[`bench-data/db-branch-20260929/`](bench-data/db-branch-20260929/).
+
+| | Linux (CT 105, i7-8700T) | macOS (M4, vz) |
+|---|---|---|
+| volver a una rama que ya tiene copia | 1 985 ms → **43 ms** p50 (70 p95) | 718 → **322 ms** p50 (379 p95); **57 ms** con `KLING_DB_BRANCH_KEEP_PAUSED=1` |
+| rama nueva, con la reserva del padre | 6 719 ms → **88 ms** p50 (118 p95) | 1 116 → **348 ms** p50 (390 p95) |
+| rama nueva, fork en caliente (padre cambiado) | 6 719 ms → **2 200 ms** p50 (2 234 p95) con el disco en reposo; 4 526 ms p50 (5 664 p95) uno tras otro | 1 116 → **731 ms** p50 (778 p95) |
+
+Lo que queda en cada caso:
+
+- **Linux, volver a una rama:** ~13 ms de despertar la copia (el volcado de su memoria
+  sigue en la caché de páginas del host, ver abajo), ~10 ms de git, listar y escribir
+  la conexión, y ~20 ms de arrancar `kling` y la extensión desde el gancho.
+- **macOS:** restaurar el estado de una VM de 1 GiB en Virtualization.framework cuesta
+  ~230 ms por sí solo (`kling thaw`; reanudar una pausada, ~1 ms; una VM de 256 MiB
+  de la prueba e2e descongela en ~155 ms). `KLING_DB_BRANCH_KEEP_PAUSED` lo evita a
+  cambio de RAM.
+- **Fork en caliente:** pausar la copia del padre y volcar su memoria a disco (~1,1 s),
+  perforar sus huecos (~0,5 s con 1 GiB), restaurar la copia y prepararla (~0,5 s).
+  El volcado lo marca el disco más que el tamaño: con un golden de 192 MiB también
+  tarda ~1,1 s (2,3 s p50 la rama nueva), y con la escritura de los congelados
+  anteriores aún en curso sube a ~3,5 s (la tanda "uno tras otro"). En macOS el
+  volcado es mucho más barato.
+- **Reserva no válida:** en 1 de 20 ramas nuevas (en las dos tandas medidas en Linux,
+  y siempre al principio) la reserva no se pudo usar y la rama salió del fork: al
+  minuto o dos de arrancar, el autovacuum analizaba los catálogos de `template1`, que
+  nadie había analizado nunca, y esas 11 transacciones cambian la huella del padre
+  (ver *Copias de reserva*). `scripts/db-golden.sh` hace ya `VACUUM (ANALYZE)` también
+  en `postgres` y `template1` antes de congelar: con un golden reconstruido, la huella
+  de una copia recién nacida se queda fija (comprobado 3 minutos en macOS; con el
+  golden de antes cambiaba a los ~100 s). El golden `pg` de los números de arriba es
+  anterior al arreglo.
+
+Antes, `-switch` congelaba las demás ramas antes de volver (1,4-1,7 s por copia: el
+volcado de su memoria), el fork rehacía dos veces el sha256 del overlay de 512 MiB
+(3 s de los 4,7) y cada paso lanzaba un `kling` y 5 procesos de git.
 
 ```sh
 kling db branch -golden crm-demo      # rama actual: crea su copia (fork del padre si existe)
@@ -563,10 +608,40 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   `main`). Sin copia del padre ni `-golden`, se usa el golden de cualquier otra copia
   del repo; si no hay ninguno, falla y pide `-golden`.
 - **`-switch`** es lo que llama el hook. Deja **activa** la copia de la rama actual
-  (`thaw` si estaba congelada, ~10 ms) y **congela** las de las demás ramas del repo
-  (0 RAM). Escribe la conexión en `.git/kling-db.env` (0600). Antes de nada borra el
-  fichero de la rama anterior: si algo falla, la aplicación no conecta a la base de
-  otra rama por error.
+  (`thaw` si estaba congelada) y escribe la conexión en `.git/kling-db.env` (0600).
+  Antes de nada borra el fichero de la rama anterior: si algo falla, la aplicación no
+  conecta a la base de otra rama por error. Lo demás no lo espera el checkout: un
+  proceso en segundo plano (`kling db branch -settle`, sin terminal, con su salida en
+  `$KLING_DB_STATE/branch-background.log`, 0600) **congela** las copias de las ramas
+  que ningún worktree tiene activas (0 RAM) y prepara la reserva. Congela una a una,
+  cada una con el cerrojo del repo y releyendo `git worktree list`: un checkout que
+  llega a la vez espera como mucho a un congelado, y lo que él active ya no se
+  congela. Con `-switch -wait` todo se hace antes de volver (lo que hacía siempre); si
+  el proceso de fondo no se puede lanzar, también.
+- **Copias de reserva.** Al salir de la rama por defecto (cuando ya no la tiene activa
+  ningún worktree), el proceso de fondo saca un fork de su copia, lo prepara (clave
+  propia, como cualquier copia) y lo congela: es la **reserva** de la siguiente rama
+  nueva. Lleva la **huella** de la copia de la rama por defecto en ese momento: la
+  instantánea de transacciones de Postgres (`pg_current_snapshot()`, que cambia en
+  cuanto una transacción que escribe empieza o acaba: tablas con o sin WAL,
+  temporales, DDL), los valores de las secuencias (un `nextval()` puede no escribir
+  WAL) y el md5 de `postgresql.auto.conf` y `pg_hba.conf`. Una rama nueva solo se
+  queda la reserva si la huella del padre **sigue siendo la misma**; si no, sale del
+  fork de siempre con los datos de ahora y la reserva se tira. Es conservador: un
+  autovacuum o un `ANALYZE` también cambian la huella. Solo la rama por defecto tiene
+  reserva, solo Postgres (MySQL sale siempre del fork), y nunca se saca de la base de
+  una rama activa (sacarla la pausa ~1-2 s). `-ls` la enseña como `(spare for the
+  next new branch)`; `-rm` y `-prune` de su rama la borran. Cuesta el disco de una
+  copia congelada (~210 MiB con el golden `pg`); `KLING_DB_BRANCH_SPARE=0` las
+  desactiva.
+- **`KLING_DB_BRANCH_KEEP_PAUSED=N`** (0 por defecto, como mucho 8): las N ramas
+  dejadas más recientemente se **pausan** en vez de congelarse. Volver a ellas es
+  reanudar (~1 ms) en vez de restaurar, pero ocupan su memoria: ~1,1 GiB cada copia
+  del golden `pg` en macOS. Pensado para macOS; en Linux congelar ya cuesta ~13 ms al
+  volver.
+- **`KLING_DB_TRACE=1`** escribe en stderr el tiempo de cada fase (git, cerrojo, cada
+  llamada al daemon, huella, fork, preparar, despertar con sus fases). Solo nombres de
+  fase y de subcomando: ni ramas ni claves.
 - **La conexión** (`DATABASE_URL`, `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`,
   `PGPASSWORD`) vive **dentro de `.git`**, nunca en el árbol de trabajo: no se puede
   subir al repo por descuido. Cárguela con
@@ -592,7 +667,7 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
   Las copias creadas antes de este cambio llevan el hash del toplevel y se siguen
   reconociendo desde el árbol que las creó.
 - **Un cerrojo por repositorio.** Todo lo que crea, activa o borra copias de rama
-  (`branch`, `-switch`, `-env`, `-rm`, `-prune`) toma antes un `flock` sobre
+  (`branch`, `-switch`, `-settle`, `-env`, `-rm`, `-prune`) toma antes un `flock` sobre
   `$KLING_DB_STATE/locks/branch-<repo>.lock` (0600, en un directorio 0700). Dos
   checkouts a la vez —dos worktrees, o el hook y un comando— se ponen en fila: el
   segundo espera (hasta 3 minutos, avisando por stderr) y encuentra la copia hecha en
@@ -608,7 +683,10 @@ kling db branch -prune [-dry-run]     # borra las copias de ramas que ya no exis
 - **Seguridad.** La clave de cada copia sigue solo en el host (`dbstate`), y cada copia
   de rama rota la suya al nacer, como en `fork`. Solo se listan, tocan y borran copias
   del `-owner` indicado. `-prune` se niega si git no dice ninguna rama local.
-- Cada rama viva cuesta disco (su overlay), no RAM: `-prune` y `-rm` lo recuperan.
+- Cada rama viva cuesta disco (su overlay y el volcado de su memoria mientras está
+  congelada; en Linux el volcado sigue en la caché de páginas del host hasta 30
+  minutos, que es lo que hace que volver cueste ~13 ms), no RAM: `-prune` y `-rm` lo
+  recuperan.
 
 ## Copia de producción enmascarada (clone)
 
