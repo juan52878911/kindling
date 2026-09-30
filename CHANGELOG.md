@@ -89,6 +89,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   credencial de un esquema de autorización, el userinfo de una URL, los pares cuya
   clave termina en password/secret/token/key y los prefijos de proveedores con longitud
   mínima, y deja la prosa y los hashes ([mejora-continua.md](docs/mejora-continua.md)).
+- **`kling logs` no pasa en crudo la consola del invitado a un terminal.** Una
+  secuencia OSC o CSI del invitado podía escribir en el portapapeles (OSC 52), cambiar
+  el título o falsear líneas ya escritas. Con la salida en un terminal, los caracteres
+  de control (salvo `\n`, `\r` y `\t`) salen escapados (`\x1b`); `-raw` los deja como
+  están, y a un fichero o una tubería salen tal cual.
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora

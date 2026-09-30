@@ -243,7 +243,7 @@ A few more everyday commands:
 
 ```sh
 kling help run                    # just the help for one command
-kling logs -f <machine>           # follow the console until it stops running
+kling logs -f <machine>           # follow the console until it stops running (-raw: escapes as is)
 kling template ls | inspect <name> | rm <name>
 kling version                     # CLI and daemon versions (-json)
 kling completion install          # writes the completion script and shows the line for your rc
