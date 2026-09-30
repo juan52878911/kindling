@@ -1,0 +1,4 @@
+#!/bin/sh
+# Constructor "android" del núcleo: Redroid 13 + base Debian + dm-verity, todo
+# en Go (internal/android). Ver prototypes/android/docs/constructor.md.
+exec /usr/local/bin/kling builder android "$@"

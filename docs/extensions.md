@@ -348,7 +348,7 @@ Todo por el API del daemon (`pkg/api`), nunca por dentro:
 |---|---|
 | **Anotaciones de snapshot** — `PUT/DELETE /snapshots/{name}/annotations/{key}` | datos de la extensión que viven con un snapshot (la de MCP guarda ahí su catálogo y su salud) |
 | **Store** — `GET/PUT/DELETE /store/{ns}/{key}` | estado global de la extensión en el host del daemon (la de MCP guarda ahí sus servidores externos enlazados) |
-| **Constructores de imágenes** — `POST /images` con `builder` y `spec` | construir imágenes a su manera; el constructor es un ejecutable de root en `/usr/local/lib/kindling/builders/<nombre>` |
+| **Constructores de imágenes** — `POST /images` con `builder` y `spec` | construir imágenes a su manera; el constructor es un ejecutable de root en `/usr/local/lib/kindling/builders/<nombre>`, y puede dejar un `recipe.json` (`api.BuildRecipeHints`) con la base, los techos de CPU y lo que apuntó para la receta ([`api.md`](api.md), "El protocolo del constructor") |
 | **Ficheros en imágenes** — `GET/PUT /images/{name}/files` | leer o poner al día un fichero dentro de una imagen ya construida |
 | **Proxy al invitado** — `POST /machines/{ref}/guest` | hablar con el servidor de dentro de una microVM; ruta, cabeceras y tamaño los decide la extensión |
 | **Listo y ganchos** — `/etc/kindling/ready` y `/etc/kindling/post-restore.d/*` en la imagen; `GET /machines/{ref}/ready`, `POST /machines/{ref}/hooks`, `wait_ready` | que `save`, `fork` y `run -wait-ready` esperen a que el invitado termine de arrancar según la imagen, y aplicar lo propio de cada copia tras restaurar (una identidad por MMDS). Sin `allow_exec`. Receta: `cpu_pct` / `cpu_pct_per_vcpu` para el techo de CPU por defecto (ver [`api.md`](api.md), "Listo y ganchos tras restaurar") |

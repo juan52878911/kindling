@@ -93,3 +93,45 @@ func TestConstructorDebeSerDeRoot(t *testing.T) {
 		t.Fatalf("un constructor que no es de root debe rechazarse: %v", err)
 	}
 }
+
+// El constructor puede dejar recipe.json (api.BuildRecipeHints) y el daemon
+// lo lleva a la receta. "android" es de los que corren sin root: también en
+// el daemon de macOS, que al resto le contesta 501.
+func TestConstructorPistasDeReceta(t *testing.T) {
+	s, h := testServer(t)
+	bdir := t.TempDir()
+	t.Setenv("KLING_BUILDERS_DIR", bdir)
+	t.Setenv("KLING_BUILDERS_INSECURE", "1")
+	os.MkdirAll(filepath.Join(s.root, "images"), 0o755)
+	instalarConstructor(t, bdir, "android", `
+set -e
+echo capa > "$KLING_ROOT/images/$KLING_IMAGE_NAME.layer.ext4"
+echo base > "$KLING_ROOT/images/$KLING_IMAGE_NAME-base.ext4"
+echo '{"base": "tel-base", "cpu_pct_per_vcpu": 100, "guest_ipv6_stack": true, "built": {"verity_root_hash": "abc"}}' > "$1/recipe.json"
+`)
+	rr := call(t, h, "POST", "/images", `{"name":"tel","builder":"android","spec":{}}`)
+	if rr.Code != 200 {
+		t.Fatalf("android: %d %s", rr.Code, rr.Body)
+	}
+	var rec api.ImageRecipe
+	b, _ := os.ReadFile(s.recipePath("tel"))
+	json.Unmarshal(b, &rec)
+	if rec.Base != "tel-base" || rec.CPUPctPerVCPU != 100 || !rec.GuestIPv6Stack || !strings.Contains(string(rec.Built), `"abc"`) {
+		t.Fatalf("receta: %s", b)
+	}
+
+	// Pistas malas: la construcción falla en vez de dejar una receta rara.
+	instalarConstructor(t, bdir, "android", `
+echo capa > "$KLING_ROOT/images/$KLING_IMAGE_NAME.layer.ext4"
+echo '{"base": "../x"}' > "$1/recipe.json"
+`)
+	if rr := call(t, h, "POST", "/images", `{"name":"tel","builder":"android"}`); rr.Code != 500 || !strings.Contains(rr.Body.String(), "invalid base") {
+		t.Fatalf("base inválida en recipe.json: %d %s", rr.Code, rr.Body)
+	}
+	if !construirImagenes {
+		instalarConstructor(t, bdir, "toy", "exit 0\n")
+		if rr := call(t, h, "POST", "/images", `{"name":"x","builder":"toy"}`); rr.Code != 501 {
+			t.Fatalf("macOS con un constructor de root: %d", rr.Code)
+		}
+	}
+}

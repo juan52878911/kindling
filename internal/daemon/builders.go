@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -36,12 +37,24 @@ import (
 // name, base, grow_mb y el spec del constructor). El constructor tiene que dejar
 // $KLING_ROOT/images/<name>.ext4 o <name>.layer.ext4 y salir con 0; lo que
 // escriba por stdout/stderr vuelve a quien pidió la construcción. La receta la
-// escribe el daemon.
+// escribe el daemon; el constructor puede dejar al lado de request.json un
+// recipe.json (api.BuildRecipeHints: la base que hizo, techos de CPU, pila
+// IPv6 del invitado y lo que apuntó de lo construido) que el daemon lleva a
+// la receta.
 //
 // El constructor recibe en el entorno KLING_ROOT, KLING_IMAGE_NAME,
 // KLING_BUILD_DIR y, si se pidieron, BASE_IMAGE y GROW.
 
 var reBuilder = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// constructoresSinRoot son los constructores del núcleo escritos en Go de
+// punta a punta (sin loop, chroot ni root): corren también en el daemon de
+// macOS, y si no están instalados en el directorio de constructores el
+// daemon se ejecuta a sí mismo como `kling builder <nombre>`.
+var constructoresSinRoot = map[string]bool{"android": true}
+
+// maxRecipeHints es el tamaño máximo del recipe.json que deja un constructor.
+const maxRecipeHints = 256 << 10
 
 func buildersDir() string {
 	if d := os.Getenv("KLING_BUILDERS_DIR"); d != "" {
@@ -99,6 +112,13 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		return
 	}
 	bin, err := builderPath(req.Builder)
+	var binArgs []string
+	if err != nil && constructoresSinRoot[req.Builder] {
+		// Del núcleo y en Go: el propio binario del daemon lo lleva.
+		if self, serr := os.Executable(); serr == nil {
+			bin, binArgs, err = self, []string{"builder", req.Builder}, nil
+		}
+	}
 	if err != nil {
 		fail(w, http.StatusPreconditionFailed, err)
 		return
@@ -124,7 +144,7 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 	// con un loopback montado a medias deja el host peor que esperar.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), buildTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, work)
+	cmd := exec.CommandContext(ctx, bin, append(binArgs, work)...)
 	cmd.Dir = work
 	cmd.Env = append(os.Environ(),
 		"KLING_ROOT="+s.root,
@@ -144,12 +164,22 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		return
 	}
 
+	hints, err := readRecipeHints(filepath.Join(work, "recipe.json"))
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("builder %s: %w\n%s", req.Builder, err, strings.TrimSpace(out.String())))
+		return
+	}
+	base := req.Base
+	if hints.Base != "" {
+		base = hints.Base
+	}
+
 	s.mgr.EnsureImageReadable(req.Name)
 	// La base también: un constructor puede crearla la primera vez (el de
 	// modelos, "llm", hace su base glibc), y sin esto la capa se construye bien
 	// y la máquina no arranca porque el VMM no puede leer el suelo.
-	if req.Base != "" {
-		s.mgr.EnsureImageReadable(req.Base)
+	if base != "" {
+		s.mgr.EnsureImageReadable(base)
 	}
 	img := s.mgr.ImageFile(req.Name)
 	if _, err := os.Stat(img); err != nil {
@@ -160,8 +190,10 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		}
 	}
 
-	rec := api.ImageRecipe{Name: req.Name, Base: req.Base, GrowMB: req.GrowMB,
-		Builder: req.Builder, Spec: req.Spec, BuiltAt: time.Now(), KlingVer: Version}
+	rec := api.ImageRecipe{Name: req.Name, Base: base, GrowMB: req.GrowMB,
+		Builder: req.Builder, Spec: req.Spec, BuiltAt: time.Now(), KlingVer: Version,
+		CPUPct: hints.CPUPct, CPUPctPerVCPU: hints.CPUPctPerVCPU, GuestIPv6Stack: hints.GuestIPv6Stack,
+		Built: hints.Built}
 	rb, _ := json.MarshalIndent(rec, "", "  ")
 	// 0600: el spec de un constructor puede llevar secretos y el núcleo no sabe
 	// cuáles son.
@@ -169,4 +201,35 @@ func (s *Server) buildWithBuilder(w http.ResponseWriter, r *http.Request, req ap
 		log.Printf("image %s: built, but couldn't save its recipe: %v", req.Name, err)
 	}
 	writeJSON(w, http.StatusOK, api.BuildImageResult{Name: req.Name, Path: img, Output: out.String()})
+}
+
+// readRecipeHints lee el recipe.json que puede dejar un constructor
+// (api.BuildRecipeHints). Sin fichero no es error: la receta es la de siempre.
+func readRecipeHints(p string) (api.BuildRecipeHints, error) {
+	var h api.BuildRecipeHints
+	f, err := os.Open(p)
+	if os.IsNotExist(err) {
+		return h, nil
+	}
+	if err != nil {
+		return h, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxRecipeHints+1))
+	if err != nil {
+		return h, err
+	}
+	if len(b) > maxRecipeHints {
+		return h, fmt.Errorf("recipe.json over %d bytes", maxRecipeHints)
+	}
+	if err := json.Unmarshal(b, &h); err != nil {
+		return h, fmt.Errorf("recipe.json: %w", err)
+	}
+	if h.Base != "" && !reName.MatchString(h.Base) {
+		return h, fmt.Errorf("recipe.json: invalid base %q", h.Base)
+	}
+	if h.CPUPct < 0 || h.CPUPct > 100*256 || h.CPUPctPerVCPU < 0 || h.CPUPctPerVCPU > 100 {
+		return h, fmt.Errorf("recipe.json: cpu_pct out of range")
+	}
+	return h, nil
 }
