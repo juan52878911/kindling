@@ -18,12 +18,15 @@ func fetchVerified(ctx context.Context, url, want string, size int64, dst string
 	if got, err := sha256Path(dst); err == nil && got == want {
 		return nil
 	}
+	// 10 minutos, o lo que tarde el fichero a 1 MiB/s si es más (la imagen
+	// del emulador de arm_translation "libndk" son 1,4 GiB).
+	timeout := max(10*time.Minute, time.Duration(size>>20)*time.Second)
 	client := &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
-	}, Timeout: 10 * time.Minute}
+	}, Timeout: timeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err

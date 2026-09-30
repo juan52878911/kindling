@@ -4,7 +4,7 @@
 #
 #   sudo ./71-build-glibc-base.sh                  # base "min-glibc"
 #   sudo ./71-build-glibc-base.sh node-glibc       # + nodejs
-#   sudo ./71-build-glibc-base.sh chrome           # + nodejs + chrome-headless-shell
+#   sudo CHROME_SHA256=<...> ./71-build-glibc-base.sh chrome   # + nodejs + chrome-headless-shell
 #
 # POR QUÉ EXISTE, SI YA HAY UNA BASE.
 #
@@ -69,6 +69,45 @@ if [ "$CHROME" = si ] && [ -z "$CHROME_ARCH" ]; then
   echo "Google no publica chrome-headless-shell para $(uname -m)" >&2; exit 1
 fi
 
+# Node y chrome-headless-shell, fijados con su sha256 y no "el más reciente": lo
+# que se descarga acaba dentro de cada microVM de esta base, y antes no se
+# comprobaba nada. Se deciden aquí, antes del debootstrap, para fallar pronto.
+#   - Node: el hash es el de SHASUMS256.txt de nodejs.org para esa versión. Otra
+#     versión: NODE_VERSION=v22.x.y NODE_SHA256=<...>.
+#   - Chrome for Testing no publica hashes: CHROME_SHA256 es el sha256 del zip de
+#     esa versión, bajado una vez por un camino de confianza y fijado aquí o
+#     pasado a mano (sha256sum chrome-headless-shell-linux64.zip). Sin él no se
+#     instala.
+NODE_VERSION="${NODE_VERSION:-v22.23.3}"
+NARCH=x64; [ "$DEB_ARCH" = arm64 ] && NARCH=arm64
+if [ "$NODE" = si ] && [ -z "${NODE_SHA256:-}" ]; then
+  case "$NODE_VERSION-$NARCH" in
+    v22.23.3-x64)   NODE_SHA256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de ;;
+    v22.23.3-arm64) NODE_SHA256=a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f ;;
+    *) echo "no hay sha256 fijado para Node $NODE_VERSION ($NARCH): pásalo en NODE_SHA256" >&2; exit 1 ;;
+  esac
+fi
+CHROME_VERSION="${CHROME_VERSION:-154.0.8037.92}"
+CHROME_SHA256="${CHROME_SHA256:-}"
+if [ "$CHROME" = si ] && [ -z "$CHROME_SHA256" ]; then
+  echo "falta CHROME_SHA256: el sha256 de chrome-headless-shell-$CHROME_ARCH.zip $CHROME_VERSION" >&2
+  echo "(Chrome for Testing no publica hashes; bájalo una vez, compruébalo y pásalo)" >&2
+  exit 1
+fi
+
+sha256_de() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+# comprobar_sha256 FICHERO ESPERADO: borra el fichero y sale si no coincide.
+comprobar_sha256() {
+  local got
+  got="$(sha256_de "$1")"
+  [ "$got" = "$2" ] || {
+    rm -f "$1"
+    echo "sha256 de $(basename "$1") no coincide: $got, se esperaba $2" >&2; exit 1; }
+}
+
 mnt="$(mktemp -d)"
 cleanup() {
   umount "$mnt/proc" 2>/dev/null || true
@@ -100,16 +139,11 @@ fi
 
 if [ "$NODE" = si ]; then
   # Node desde nodejs.org y no desde apt: bookworm empaqueta el 18, y Playwright
-  # se niega a arrancar con menos del 20. Mismo patron que usa la base de Alpine
-  # con su rootfs: se busca la mas reciente de la rama, para que la receta no
-  # caduque sola al salir una version nueva.
-  echo "buscando el Node 22 más reciente..."
-  NARCH=x64; [ "$DEB_ARCH" = arm64 ] && NARCH=arm64
-  NODE_TAR="$(curl -sfL https://nodejs.org/dist/latest-v22.x/ \
-    | grep -oE "node-v[0-9.]+-linux-$NARCH\.tar\.xz" | sort -V | tail -1)"
-  [ -n "$NODE_TAR" ] || { echo "no se pudo averiguar la versión de Node" >&2; exit 1; }
+  # se niega a arrancar con menos del 20. Versión y sha256 fijados arriba.
+  NODE_TAR="node-$NODE_VERSION-linux-$NARCH.tar.xz"
   echo "  $NODE_TAR"
-  curl -#fL "https://nodejs.org/dist/latest-v22.x/$NODE_TAR" -o "$mnt/tmp/node.tar.xz"
+  curl -#fL "https://nodejs.org/dist/$NODE_VERSION/$NODE_TAR" -o "$mnt/tmp/node.tar.xz"
+  comprobar_sha256 "$mnt/tmp/node.tar.xz" "$NODE_SHA256"
   chroot "$mnt" env DEBIAN_FRONTEND=noninteractive sh -c \
     "apt-get install -y --no-install-recommends xz-utils >/dev/null 2>&1" || true
   # --strip-components=1: el tarball lo trae todo bajo node-vX/, y lo que se
@@ -128,15 +162,12 @@ if [ "$CHROME" = si ]; then
        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
        libgbm1 libpango-1.0-0 libcairo2 libasound2 fonts-liberation ca-certificates"
 
-  # Chrome for Testing publica la version buena conocida en un JSON estable.
-  # Fijarla por nombre y no por numero evita que la receta caduque sola.
-  echo "buscando la última versión estable de chrome-headless-shell..."
-  VER="$(curl -sfL https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json \
-        | sed -n 's/.*"Stable":{"channel":"Stable","version":"\([^"]*\)".*/\1/p')"
-  [ -n "$VER" ] || { echo "no se pudo averiguar la versión de Chrome for Testing" >&2; exit 1; }
-  echo "  versión $VER"
+  # Versión y sha256 fijados arriba (Chrome for Testing no publica hashes).
+  VER="$CHROME_VERSION"
+  echo "  chrome-headless-shell $VER"
   URL="https://storage.googleapis.com/chrome-for-testing-public/$VER/$CHROME_ARCH/chrome-headless-shell-$CHROME_ARCH.zip"
   curl -#fL "$URL" -o "$mnt/tmp/chs.zip"
+  comprobar_sha256 "$mnt/tmp/chs.zip" "$CHROME_SHA256"
   chroot "$mnt" env DEBIAN_FRONTEND=noninteractive sh -c \
     "apt-get install -y --no-install-recommends unzip >/dev/null && \
      unzip -q /tmp/chs.zip -d /opt && rm /tmp/chs.zip && \

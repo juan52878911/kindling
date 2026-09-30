@@ -507,7 +507,7 @@ func TestCredentialProxyOnGateway(t *testing.T) {
 				Body: io.NopCloser(strings.NewReader("from the proxy"))}, nil
 		}),
 	})
-	if _, err := p.SetCredentials([]credproxy.Credential{{Env: "K", Domain: "api.example.com", Placeholder: ph, Secret: "s"}}); err != nil {
+	if _, err := p.SetCredentials([]credproxy.Credential{{Env: "K", Domain: "api.example.com", Placeholder: ph, Secret: "s-clave-de-prueba"}}); err != nil {
 		t.Fatal(err)
 	}
 	r := newRigWith(t, "", p)

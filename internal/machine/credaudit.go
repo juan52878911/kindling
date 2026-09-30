@@ -43,10 +43,10 @@ import (
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
 
-// credAuditMaxBytes es cuánto lee CredAudit como mucho entre el fichero y su
-// rotación (.1). Cada uno se rota a credproxy.AuditMaxBytes, así que en la
-// práctica cabe todo.
-const credAuditMaxBytes = 4 << 20
+// credAuditMaxBytes es cuánto lee CredAudit como mucho entre el fichero y sus
+// rotaciones (.1, .2...), del más nuevo al más viejo. Con los valores por
+// defecto (credproxy.AuditMaxBytes y AuditGenerations, ~16 MiB) cabe todo.
+const credAuditMaxBytes = 32 << 20
 
 // CredAudit devuelve las líneas del registro de auditoría del proxy de
 // credenciales de ref que pasan el filtro q, las más antiguas primero. Sin
@@ -56,22 +56,24 @@ func (m *Manager) CredAudit(ref string, q api.CredAuditQuery) ([]api.CredAuditRe
 	if !ok {
 		return nil, &api.StatusError{Code: 404, Message: fmt.Sprintf("machine %q does not exist", ref)}
 	}
-	path := m.credAuditPath(mc.ID)
-	actual, err := leerAuditoria(path, credAuditMaxBytes)
-	if err != nil {
-		return nil, err
-	}
-	var viejo []byte
-	if resto := credAuditMaxBytes - int64(len(actual)); resto > 0 {
-		if viejo, err = leerAuditoria(path+".1", resto); err != nil {
+	// Del fichero actual hacia atrás por las generaciones, hasta el tope: lo
+	// más reciente es lo que no debe faltar.
+	ficheros := credproxy.AuditFiles(m.credAuditPath(mc.ID))
+	trozos := make([][]byte, len(ficheros))
+	resto := int64(credAuditMaxBytes)
+	for i := len(ficheros) - 1; i >= 0 && resto > 0; i-- {
+		b, err := leerAuditoria(ficheros[i], resto)
+		if err != nil {
 			return nil, err
 		}
+		trozos[i] = b
+		resto -= int64(len(b))
 	}
 
 	var out []api.CredAuditRecord
-	for _, datos := range [][]byte{viejo, actual} {
+	for _, datos := range trozos {
 		sc := bufio.NewScanner(bytes.NewReader(datos))
-		sc.Buffer(make([]byte, 0, 64<<10), credproxy.AuditMaxBytes)
+		sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 		for sc.Scan() {
 			var r api.CredAuditRecord
 			// Una línea a medias (el escritor murió a mitad) o ajena no para
@@ -246,7 +248,12 @@ func (m *Manager) barrerAuditorias(vivas map[string]bool) {
 		return
 	}
 	for _, e := range entradas {
-		id, ok := strings.CutSuffix(strings.TrimSuffix(e.Name(), ".1"), ".jsonl")
+		nombre := e.Name()
+		// <id>.jsonl y sus rotaciones <id>.jsonl.N.
+		if i := strings.LastIndexByte(nombre, '.'); i > 0 && strings.Trim(nombre[i+1:], "0123456789") == "" && i+1 < len(nombre) {
+			nombre = nombre[:i]
+		}
+		id, ok := strings.CutSuffix(nombre, ".jsonl")
 		if !ok || vivas[id] {
 			continue
 		}
@@ -262,8 +269,7 @@ func (m *Manager) borrarAuditoria(id string) {
 	if !auditoriaEnElDaemon {
 		return
 	}
-	p := m.credAuditPath(id)
-	for _, f := range []string{p, p + ".1"} {
+	for _, f := range credproxy.AuditFiles(m.credAuditPath(id)) {
 		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			log.Printf("warning: removing the credential audit log of %s: %v", id, err)
 		}

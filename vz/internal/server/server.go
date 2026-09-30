@@ -95,12 +95,19 @@ type Deps struct {
 	// dominios. Con Credentials nil, PUT /kling/credentials se rechaza.
 	Credentials *credproxy.Proxy
 	CredIP      netip.Addr
-	// Confine, si no es nil, encierra el proceso en su perfil de sandbox
-	// (conRed: si puede abrir conexiones al exterior). Se llama UNA vez, justo
-	// antes de crear o restaurar la VM, que es cuando ya se sabe la política
-	// de salida. Un fallo impide crear la VM: preferimos no arrancar a
-	// arrancar sin la barrera.
-	Confine func(conRed, graphics bool) error
+	// Confine, si no es nil, encierra el proceso en su perfil de sandbox con
+	// lo que necesita la VM que va a crear (ver Confinamiento). Se llama UNA
+	// vez, justo antes de crear o restaurar la VM, que es cuando ya se saben
+	// la política de salida y los ficheros de la VM. Un fallo impide crear la
+	// VM: preferimos no arrancar a arrancar sin la barrera.
+	Confine func(Confinamiento) error
+	// Destino, si no es nil, dice dónde escribir de verdad un fichero de
+	// snapshot pedido en path: confinado, este proceso solo escribe en el
+	// directorio de su máquina, así que un destino de fuera (el dorado de
+	// kling commit en snapshots/<nombre>/) se escribe en un temporal suyo y
+	// publicar lo deja en path (vz/internal/custodio). publicar nil: se
+	// escribe en path directamente. Nil = siempre directamente.
+	Destino func(path string) (escribir string, publicar func() error, err error)
 	// CPUTime es la CPU que lleva gastada la VM (el auxiliar de Apple donde
 	// corren sus vCPU). Sin ella no hay tope de CPU (ver cpu.go).
 	CPUTime func() (time.Duration, error)
@@ -119,6 +126,22 @@ type Deps struct {
 	// anuncia credproxy.CapGraphLink y rechaza PUT /kling/graph y las
 	// credenciales con upstream_machine.
 	Graph *grafo.Grafo
+}
+
+// Confinamiento es lo que el sandbox deja tocar a kling-vz, sacado de la VM
+// que va a crear: solo sus ficheros, no los de las demás máquinas.
+type Confinamiento struct {
+	// ConRed: puede abrir conexiones al exterior (egress distinto de none).
+	ConRed bool
+	// Loopback: puede marcar al loopback del Mac, fuera del rango de los
+	// reenvíos (allowlist: el upstream -upstream 127.0.0.1:5432 de una
+	// credencial de base de datos).
+	Loopback bool
+	Graphics bool
+	// Lectura: ficheros que solo lee (kernel, discos de solo lectura, el
+	// estado que restaura). Escritura: los que lee y escribe (discos de
+	// lectura y escritura).
+	Lectura, Escritura []string
 }
 
 type state int
@@ -186,9 +209,12 @@ type Server struct {
 	// frenoMu protege congelado: el auxiliar está parado por el regulador
 	// (Deps.Freeze). Va aparte de mu para que reanudarlo nunca espere a quien
 	// tiene mu, que puede estar esperando justo a que el auxiliar conteste.
-	frenoMu    sync.Mutex
-	congelado  bool
-	frenoAviso bool // ya se avisó de que Freeze falla (con mu)
+	frenoMu   sync.Mutex
+	congelado bool
+	// sueltaAviso: ya se avisó de que reanudar el auxiliar falla (con
+	// frenoMu); se rearma al conseguirlo.
+	sueltaAviso bool
+	frenoAviso  bool // ya se avisó de que Freeze falla (con mu)
 }
 
 func New(d Deps) *Server {
@@ -724,23 +750,56 @@ func (s *Server) putSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t0 := time.Now()
+	destino := s.d.Destino
+	if destino == nil {
+		destino = func(p string) (string, func() error, error) { return p, nil, nil }
+	}
+	memW, pubMem, err := destino(c.MemFilePath)
+	if err != nil {
+		fault(w, fmt.Errorf("state file: %w", err))
+		return
+	}
+	snapW, pubSnap, err := destino(c.SnapshotPath)
+	if err != nil {
+		fault(w, fmt.Errorf("snapshot file: %w", err))
+		return
+	}
+	// Los temporales de un destino de fuera no deben quedarse en el
+	// directorio de la máquina, salga bien o mal.
+	defer func() {
+		if pubMem != nil {
+			_ = os.Remove(memW)
+		}
+		if pubSnap != nil {
+			_ = os.Remove(snapW)
+		}
+	}()
 	// El framework se niega a escribir sobre un fichero existente, y Firecracker
 	// sí lo pisa: el núcleo reutiliza las rutas al volver a congelar.
-	if err := os.Remove(c.MemFilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(memW); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fault(w, fmt.Errorf("removing the old state file: %w", err))
 		return
 	}
-	if err := s.vm.SaveState(c.MemFilePath); err != nil {
+	if err := s.vm.SaveState(memW); err != nil {
 		fault(w, fmt.Errorf("saving the machine state: %w", err))
 		return
 	}
-	if err := s.spec.WriteFile(c.SnapshotPath); err != nil {
+	if err := s.spec.WriteFile(snapW); err != nil {
 		fault(w, fmt.Errorf("writing the snapshot file: %w", err))
 		return
 	}
 	var size int64
-	if fi, err := os.Stat(c.MemFilePath); err == nil {
+	if fi, err := os.Stat(memW); err == nil {
 		size = fi.Size()
+	}
+	for _, pub := range []func() error{pubMem, pubSnap} {
+		if pub == nil {
+			continue
+		}
+		if err := pub(); err != nil {
+			fault(w, fmt.Errorf("placing the snapshot: %w", err))
+			return
+		}
 	}
 	s.d.Logf("snapshot created in %d ms (state %.1f MiB)", time.Since(t0).Milliseconds(), float64(size)/(1<<20))
 	noContent(w)
@@ -814,7 +873,7 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 // anterior ignoraría el tipo y la serviría como HTTP. "postgres-upstream"
 // dice que entiende además Upstream, UpstreamTLS y TLSServerName (también en
 // las MySQL, que nacieron con ellos).
-var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL}
+var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": "vz", "version": s.d.Version}
@@ -925,6 +984,9 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Placeholder string   `json:"placeholder"`
 			Secret      string   `json:"secret"`
 			Allow       []string `json:"allow,omitempty"`
+			Headers     []string `json:"headers,omitempty"`
+			Query       bool     `json:"query,omitempty"`
+			Body        bool     `json:"body,omitempty"`
 			Kind        string   `json:"kind,omitempty"`
 			Port        int      `json:"port,omitempty"`
 			User        string   `json:"user,omitempty"`
@@ -961,8 +1023,9 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		soloMaquinas = soloMaquinas && c.UpstreamMachine != ""
 		creds = append(creds, credproxy.Credential{
 			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
-			Allow: c.Allow,
-			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
+			Allow:   c.Allow,
+			Headers: c.Headers, Query: c.Query, Body: c.Body,
+			Kind: c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
 			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
 			UpstreamMachine: c.UpstreamMachine, UpstreamOwner: c.UpstreamOwner,
 		})
@@ -1074,6 +1137,10 @@ func (s *Server) getScreenshot(w http.ResponseWriter, _ *http.Request) {
 		fault(w, errors.New("this VM cannot take screenshots"))
 		return
 	}
+	// Con el auxiliar parado por el regulador el framework no contesta, y la
+	// ventana tampoco pinta: se suelta antes de pedirle la pantalla, como
+	// hacen los demás caminos que le piden algo (patchVM, putBalloon).
+	s.soltarFreno()
 	png, err := sc.Screenshot()
 	if err != nil {
 		fault(w, err)
@@ -1138,12 +1205,38 @@ func (s *Server) confinar() error {
 	if s.d.Confine == nil || s.confinado {
 		return nil
 	}
-	conRed := s.d.Policy.Mode() != egress.None
-	if err := s.d.Confine(conRed, s.spec.Graphics != nil); err != nil {
+	c := s.confinamiento()
+	if err := s.d.Confine(c); err != nil {
 		return fmt.Errorf("confining kling-vz in its sandbox: %w", err)
 	}
-	s.confinado, s.confinadoConRed = true, conRed
+	s.confinado, s.confinadoConRed = true, c.ConRed
 	return nil
+}
+
+// confinamiento es lo que la VM que se va a crear necesita tocar. Se llama
+// con s.mu tomado y la spec ya definitiva (tras los PATCH de discos de una
+// restauración).
+func (s *Server) confinamiento() Confinamiento {
+	modo := s.d.Policy.Mode()
+	c := Confinamiento{
+		ConRed:   modo != egress.None,
+		Loopback: modo == egress.Allowlist,
+		Graphics: s.spec.Graphics != nil,
+	}
+	if s.spec.BootSource != nil && s.spec.BootSource.KernelImagePath != "" {
+		c.Lectura = append(c.Lectura, s.spec.BootSource.KernelImagePath)
+	}
+	for _, d := range s.spec.Drives {
+		if d.IsReadOnly {
+			c.Lectura = append(c.Lectura, d.PathOnHost)
+		} else {
+			c.Escritura = append(c.Escritura, d.PathOnHost)
+		}
+	}
+	if s.st == stPendingLoad && s.statePath != "" {
+		c.Lectura = append(c.Lectura, s.statePath)
+	}
+	return c
 }
 
 // abandon deshace una creación fallida. La red se conserva: sigue siendo válida
@@ -1237,6 +1330,9 @@ func (s *Server) reaplicarGlobo(vm VM, en []time.Duration) {
 			s.mu.Unlock()
 			return
 		}
+		// Lo mismo que putBalloon: parado por el regulador, el framework
+		// no atendería al globo hasta el final de la parada.
+		s.soltarFreno()
 		err := vm.SetBalloonTargetMiB(s.spec.BalloonTargetMiB())
 		s.mu.Unlock()
 		if err != nil {

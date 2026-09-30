@@ -70,6 +70,36 @@ base salen iguales bit a bit (sal de verity y UUID derivados de las
 entradas): comprobado construyendo dos veces (sha256 de las dos imágenes
 iguales) y en `TestBuild`.
 
+## Traducción ARM (`arm_translation`)
+
+Issue #93, [traduccion-arm.md](traduccion-arm.md). Solo en amd64:
+
+| `arm_translation` | Qué deja en la capa |
+|---|---|
+| `none` (por defecto) | **quita** el `libndk_translation` que ya trae Redroid 13 amd64 (con `libnb.so`) y deja las ABIs en `x86_64` en todas las `build.prop` (system, vendor y odm): una app solo-ARM da `INSTALL_FAILED_NO_MATCHING_ABIS` |
+| `libndk` | quita el de Redroid y pone el de la imagen x86_64 del **emulador de Android 14** de Google (`x86_64-34_r14.zip`, fijada por URL, tamaño y sha256 en `pins.go`), más las propiedades del puente y un intérprete de binfmt_misc que arregla `argv[0]` |
+| `redroid` | el de Redroid tal cual |
+
+En arm64 no hay nada que traducir (`native` en la receta); `libndk` y `redroid`
+son un error. Con `libndk` el constructor baja el zip (1,4 GiB) a
+`cache/android/`, comprueba tamaño y sha256, lee el `system.img` en streaming
+(GPT → `super` → ext4 `system`, sin escribir los 4 GiB), guarda las 90
+entradas de la traducción en un tar de 29 MiB en la caché y borra el zip:
+~35 s la primera vez, nada después. La receta (`built.layer.arm_translation`),
+`IMAGE.txt` y `/v1/health` de kling-phoned dicen el modo, el puente y las
+ABIs. El kernel necesita `CONFIG_BINFMT_MISC=y` para los ejecutables arm64.
+
+**Licencia, con franqueza.** `libndk_translation` es un binario propietario
+de Google sin licencia de redistribución. La imagen del emulador va bajo el
+*Android SDK License Agreement*, que la da solo para desarrollar apps para
+implementaciones compatibles de Android (Redroid no lo es) y prohíbe copiarla,
+modificarla o redistribuirla. Por eso va **apagada por defecto**, el
+repositorio no lleva ni un byte de ella (solo URL y sha256), la baja quien
+construye y **una imagen con `libndk` no se publica** ni se copia a otro
+daemon. La copia que trae Redroid tiene un origen aún menos claro: por eso el
+defecto la quita. Houdini (Intel) no se toca. Los detalles, las cifras y
+cuándo conviene un host ARM en su lugar: traduccion-arm.md.
+
 ## Igual que `build-image.sh`
 
 `go run ./internal/ext4/ext4cmp -sub /upper/android -mtime REF.ext4 NUEVA.ext4`
@@ -148,6 +178,9 @@ con qué fragmentos, parches y compilador. El kernel sigue siendo uno por
 daemon (`images/vmlinux`): el kernel por imagen queda para otro issue.
 
 ## Pendiente
+
+- `kling phone golden inspect` (ext/phone, PR #120) debería enseñar
+  `built.layer.arm_translation` y `abilist` de la receta.
 
 - Kernel por imagen (hoy, un daemon aparte para Android).
 - Publicar también la base como imagen OCI para no depender de

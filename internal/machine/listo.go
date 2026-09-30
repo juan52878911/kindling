@@ -299,11 +299,75 @@ func (m *Manager) vigilarListo(id string, inicial *api.GuestReady) {
 // listoParaCongelar espera, antes de congelar un dorado (Commit, Fork), a que
 // la máquina esté lista según su imagen. Una imagen sin agente, o que no
 // declara nada, pasa sin esperar: lo de siempre.
+//
+// "Sin agente no hay nada que esperar" solo vale si la imagen no declara
+// nada. Si declara sonda o ganchos, que nadie conteste en el puerto del agente
+// es un invitado que aún arranca (o cuyo agente se cayó), no uno listo: dar
+// eso por bueno congelaba el dorado a medio arrancar, que es justo lo que la
+// sonda existe para impedir.
 func (m *Manager) listoParaCongelar(ctx context.Context, ref string, plazo time.Duration) error {
-	_, err := m.WaitReady(ctx, ref, OpcionesListo{Plazo: plazo, SinAgenteVale: true})
+	_, err := m.WaitReady(ctx, ref, OpcionesListo{Plazo: plazo, SinAgenteVale: !m.declaraListo(ctx, ref)})
 	if err == nil || errors.Is(err, ErrNoMachine) || errors.Is(err, ErrNotRunning) {
 		return nil // el commit dará su propio error, con su mensaje de siempre
 	}
 	return fmt.Errorf("%w.\nFreezing it now would give every copy a guest that has not finished booting. "+
 		"Check it with `kling machine ready %s`, or skip the check (kling save -force, skip_ready)", err, ref)
+}
+
+// declaraListo dice si la máquina ref tiene sonda o ganchos que esperar antes
+// de congelarla. Lo sabe por dos lados: lo que ya contestó su agente
+// (Machine.Ready distinto de "desconocido" solo sale de una imagen que
+// declara algo) y, si aún no ha contestado nunca, su imagen en disco.
+// Sin poder saberlo, false: lo de siempre.
+func (m *Manager) declaraListo(ctx context.Context, ref string) bool {
+	mc, ok := m.Get(ref)
+	if !ok {
+		return false
+	}
+	switch mc.Ready {
+	case api.ReadyWaiting, api.ReadyYes, api.ReadyFailed:
+		return true
+	}
+	if mc.Image == "" {
+		return false
+	}
+	decl, err := m.imagenDeclaraListo(ctx, mc.Image)
+	return err == nil && decl
+}
+
+// imagenDeclaraListo mira en el rootfs de la imagen (capa y base) si trae
+// api.GuestReadyProbe o api.GuestPostRestoreDir. Con caché por huella de los
+// ficheros, como imageHasBridgeCached; el error (sin debugfs) no se cachea.
+func (m *Manager) imagenDeclaraListo(ctx context.Context, image string) (bool, error) {
+	base, layer, err := m.imageLayer(image)
+	if err != nil {
+		return false, err
+	}
+	key := bridgeFingerprint(base) + "\x00" + bridgeFingerprint(layer)
+	if v, ok := m.listoDeclarado.Load(key); ok {
+		return v.(bool), nil
+	}
+	decl := false
+	for _, p := range []string{api.GuestReadyProbe, api.GuestPostRestoreDir} {
+		if layer != "" {
+			has, err := hasFile(ctx, layer, layerGuestPath(p))
+			if err != nil {
+				return false, err
+			}
+			if has {
+				decl = true
+				break
+			}
+		}
+		has, err := hasFile(ctx, base, p)
+		if err != nil {
+			return false, err
+		}
+		if has {
+			decl = true
+			break
+		}
+	}
+	m.listoDeclarado.Store(key, decl)
+	return decl, nil
 }

@@ -32,6 +32,8 @@ package net
 // nada en el host que pueda chocar: Reservar siempre vale.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -40,6 +42,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -151,12 +154,19 @@ func (n *Net) reservarFichero() bool {
 		return true
 	}
 	path := filepath.Join(DirReservas, strconv.Itoa(n.Index))
+	token := tokenReserva(n.NS)
+	defer cerrojoReservas()()
 	for intento := 0; intento < 3; intento++ {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
-			fmt.Fprintf(f, "%d %s\n", os.Getpid(), n.NS)
+			_, werr := f.WriteString(token)
 			f.Close()
-			n.reserva = path
+			if werr != nil {
+				_ = os.Remove(path)
+				aviso(werr)
+				return true
+			}
+			n.reserva, n.reservaToken = path, token
 			return true
 		}
 		if !errors.Is(err, os.ErrExist) {
@@ -168,7 +178,9 @@ func (n *Net) reservarFichero() bool {
 		case errors.Is(err, os.ErrNotExist):
 			continue // la soltaron entre medias
 		case err == nil && time.Since(fi.ModTime()) > reservaCaduca:
-			_ = os.Remove(path) // de un daemon que murió a medias
+			// De un daemon que murió a medias. Con el cerrojo tomado nadie
+			// puede haberla renovado entre el Stat y el Remove.
+			_ = os.Remove(path)
 			continue
 		}
 		return false // otro daemon la está montando ahora
@@ -176,13 +188,57 @@ func (n *Net) reservarFichero() bool {
 	return false
 }
 
+// tokenReserva es el contenido de una reserva: PID y namespace, para quien la
+// mire a mano, y un aleatorio que la hace única aunque el PID se repita.
+func tokenReserva(ns string) string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%d %s %s\n", os.Getpid(), ns, hex.EncodeToString(b[:]))
+}
+
+// cerrojoReservas serializa entre TODOS los daemons del host (flock sobre un
+// fichero de DirReservas) crear, robar una caducada y soltar reservas.
+// Devuelve con qué soltarlo. Si no se puede tomar, se sigue sin él: es lo que
+// había antes, y el token de cada reserva sigue impidiendo soltar la de otro
+// salvo en una ventana de microsegundos.
+func cerrojoReservas() func() {
+	f, err := os.OpenFile(filepath.Join(DirReservas, ".cerrojo"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return func() {}
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return func() {}
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}
+}
+
 // SoltarReserva suelta la reserva de Reservar, si la hay. Idempotente.
+//
+// Solo si sigue siendo la nuestra. Una reserva que tardó más de reservaCaduca
+// en soltarse (un host muy cargado a mitad de Setup) la puede dar por muerta
+// otro daemon y hacerse la suya con el mismo nombre; borrar el fichero sin
+// mirar era soltarle la reserva a él, y un tercero podía tomar entonces el
+// índice que él estaba montando.
 func (n *Net) SoltarReserva() {
 	if n.reserva == "" {
 		return
 	}
-	_ = os.Remove(n.reserva)
-	n.reserva = ""
+	path, token := n.reserva, n.reservaToken
+	n.reserva, n.reservaToken = "", ""
+	defer cerrojoReservas()()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return // ya no está: nada que soltar
+	}
+	if token != "" && string(b) != token {
+		log.Printf("network: the claim %s is no longer ours (another daemon took it over as stale); leaving it", path)
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // Asignar busca el siguiente índice libre en rotación a partir de *cursor, de

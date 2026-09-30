@@ -120,15 +120,25 @@ func TestPGMaquinaResuelveEnCadaDial(t *testing.T) {
 	if n := r.llamas.Load(); n != 3 {
 		t.Fatalf("el resolvedor se llamó %d veces, esperaba 3 (una por conexión)", n)
 	}
+	// Cada sesión se audita al cerrarse, y la primera se cierra por su lado:
+	// su registro puede llegar después del de la denegada. Se cuenta, no se
+	// fía del orden.
 	recs, _ := e.registro(t)
 	var motivos []string
+	denegadas := 0
 	for _, rec := range recs {
 		motivos = append(motivos, rec.Reason)
 		if rec.Upstream != "machine:"+maqID {
 			t.Errorf("upstream auditado %q", rec.Upstream)
 		}
+		if rec.Denied {
+			denegadas++
+			if rec.Reason != ReasonMachineUnavailable {
+				t.Errorf("denegada con motivo %q", rec.Reason)
+			}
+		}
 	}
-	if len(recs) != 3 || recs[1].Reason != ReasonMachineUnavailable || !recs[1].Denied {
+	if len(recs) != 3 || denegadas != 1 {
 		t.Fatalf("registro: %v", motivos)
 	}
 }
@@ -371,7 +381,7 @@ func TestSoloMaquinas(t *testing.T) {
 	if p.SoloMaquinas() {
 		t.Fatal("sin credenciales no hay nada que servir")
 	}
-	maq := Credential{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: PlaceholderPrefix + "a", Secret: "s",
+	maq := Credential{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: PlaceholderPrefix + "a", Secret: "s-clave-de-prueba",
 		Kind: KindPostgres, Port: 5432, User: "app", Database: "shop"}
 	credMaquina(&maq)
 	if _, err := p.SetCredentials([]Credential{maq}); err != nil {
@@ -380,14 +390,14 @@ func TestSoloMaquinas(t *testing.T) {
 	if !p.SoloMaquinas() {
 		t.Fatal("una credencial hacia una máquina")
 	}
-	web := Credential{Env: "API_KEY", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "b", Secret: "k"}
+	web := Credential{Env: "API_KEY", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "b", Secret: "k-clave-de-prueba"}
 	if _, err := p.SetCredentials([]Credential{maq, web}); err != nil {
 		t.Fatal(err)
 	}
 	if p.SoloMaquinas() {
 		t.Fatal("con una credencial HTTP no son solo máquinas")
 	}
-	pg := Credential{Env: "PG2", Domain: "db.example.com", Placeholder: PlaceholderPrefix + "c", Secret: "s",
+	pg := Credential{Env: "PG2", Domain: "db.example.com", Placeholder: PlaceholderPrefix + "c", Secret: "s-clave-de-prueba",
 		Kind: KindPostgres, Port: 5432, User: "app", Database: "shop"}
 	if _, err := p.SetCredentials([]Credential{maq, pg}); err != nil {
 		t.Fatal(err)
