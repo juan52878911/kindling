@@ -132,8 +132,10 @@ Imita el namespace de Linux para que un snapshot sirva en los dos sistemas:
   propia de la pila porque el puente del invitado pone una ruta on-link a ella y
   pregunta por ARP.
 - **DNS**: toda consulta al puerto 53 (UDP y TCP), vaya a la IP que vaya, se
-  contesta aquí. Se reenvía al primer `nameserver` IPv4 de `/etc/resolv.conf`
-  del Mac (o a `1.1.1.1` si no hay).
+  contesta aquí. Se reenvía a `1.1.1.1`, como en Linux, y nunca al resolver
+  del Mac: ese suele ser privado (router, VPN) y contestaría la intranet por
+  split-horizon. Con topes por máquina: 64 flujos UDP y 64 conexiones TCP al
+  53, 32 consultas en vuelo y 200/s (ráfagas de 400) hacia el upstream.
 - **TCP y UDP de salida**: la pila termina cada conexión del invitado y la
   vuelve a abrir desde el Mac solo si la política lo permite. Los flujos UDP se
   cierran tras 60 s sin tráfico.

@@ -73,6 +73,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   máquina (64 flujos UDP y 64 conexiones TCP al 53, 256 flujos UDP de salida) y hacia el
   upstream los de Linux (32 en vuelo, 200/s con ráfagas de 400). Y una respuesta con
   otro id u otra pregunta ya no siembra la allowlist. `SECURITY.md` §22.
+- **macOS: el DNS del invitado va a `1.1.1.1` y no al resolver del Mac**, como en Linux.
+  Con egress internet se reenviaba al `nameserver` de `/etc/resolv.conf` (router, VPN),
+  que por split-horizon le enseñaba al invitado los nombres de la intranet. En una red
+  que bloquee `1.1.1.1:53` el invitado deja de resolver. `SECURITY.md` §22.
 
 ## v0.17.0 — 2026-09-29
 

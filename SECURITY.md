@@ -74,7 +74,8 @@ Cada máquina vive en su propio namespace de red. La política por defecto es **
 Un valor de egress desconocido es un **error**, no una caída al modo más permisivo, y la
 política viaja con el snapshot del servicio: reimportar o curar un servicio la conserva.
 
-El resolver de `allowlist` está acotado: como máximo 32 consultas a la vez y ~200/s (ráfaga
+El resolver de `allowlist` está acotado (en Linux; en macOS, desde §22, también el DNS de
+`kling-vz`, en todos los modos): como máximo 32 consultas a la vez y ~200/s (ráfaga
 400) por microVM; por encima de eso responde SERVFAIL en el sitio, sin abrir un socket al
 upstream ni lanzar el `ip netns exec ... ipset add` que sembraría la ruta. Antes, un
 invitado que repitiera una consulta A miles de veces por segundo hacía que el host abriera
@@ -1129,6 +1130,14 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
   200/s con ráfagas de 400 (por encima, SERVFAIL sin tocar la red), también para las
   búsquedas del proxy de credenciales. Una respuesta del upstream con otro id o con otra
   pregunta no se entrega ni siembra la allowlist (como `responseMatches` en Linux).
+- **El DNS del invitado va a `1.1.1.1`, no al resolver del Mac** (`vz/internal/egress`).
+  Se reenviaba al primer `nameserver` de `/etc/resolv.conf`, que en un Mac suele ser
+  privado (el router, una VPN, el DNS de la empresa): con egress internet el invitado
+  resolvía nombres de la intranet por split-horizon (`intranet.corp` → `10.x`) y podía
+  reconocer la red interna aunque no pudiera conectar a ella. Ahora, como en Linux,
+  el upstream es público y fijo. Consecuencia: en una red que bloquee `1.1.1.1:53`
+  el invitado no resuelve (tampoco en Linux), y los nombres que solo existen en el DNS
+  del Mac (VPN, `.local`) no los ve, que es justo lo que se quería.
 
 ## Lo que NO está resuelto
 

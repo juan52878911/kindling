@@ -6,21 +6,25 @@ package egress
 // modos porque en el Mac no hay otra forma de que el invitado resuelva.
 
 import (
-	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
-// DefaultUpstream es el resolver al que se reenvía si el Mac no tiene uno
-// legible en /etc/resolv.conf. Es el mismo que DNSResolver del núcleo.
+// DefaultUpstream es el resolver al que se reenvía el DNS del invitado, en
+// todos los modos. Es el mismo que DNSResolver del núcleo en Linux.
+//
+// Público a propósito, y NO el nameserver del Mac: ese suele ser privado (el
+// router, el de una VPN o el de la empresa) y contesta nombres de la intranet
+// por split-horizon. Reenviarle el DNS del invitado en egress internet le
+// dejaba reconocer la red interna por nombre (intranet.corp -> 10.x) aunque
+// no pudiera conectar a ella, cosa que en Linux ya era imposible.
 const DefaultUpstream = "1.1.1.1:53"
 
 // maxDNSMsg acota lo que se acepta de un mensaje DNS por TCP.
@@ -48,6 +52,9 @@ type Resolver struct {
 	// Exchange manda una consulta cruda al upstream y devuelve la respuesta. Es
 	// un campo para poder probar la lógica sin red.
 	Exchange func(ctx context.Context, query []byte, viaTCP bool) ([]byte, error)
+	// Upstream es a dónde manda Exchange las consultas (informativo: con un
+	// Exchange propio puede no usarse).
+	Upstream string
 
 	topes    sync.Once
 	enVuelo  chan struct{}
@@ -127,33 +134,13 @@ func (b *cubo) permite() bool {
 	return true
 }
 
-// NewResolver usa el primer nameserver del host (lo que el Mac tiene
-// configurado, VPN incluida) y, si no hay, DefaultUpstream. Resolver "en el
-// host" es eso: la consulta sale desde el Mac, no desde el invitado.
+// NewResolver reenvía a DefaultUpstream, nunca al resolver del Mac (ver
+// DefaultUpstream). La consulta sale desde el Mac, no desde el invitado.
 func NewResolver(p *Policy) *Resolver {
-	up := HostUpstream()
-	return &Resolver{Policy: p, Exchange: func(ctx context.Context, q []byte, tcp bool) ([]byte, error) {
+	up := DefaultUpstream
+	return &Resolver{Policy: p, Upstream: up, Exchange: func(ctx context.Context, q []byte, tcp bool) ([]byte, error) {
 		return exchange(ctx, up, q, tcp)
 	}}
-}
-
-// HostUpstream lee /etc/resolv.conf del Mac.
-func HostUpstream() string {
-	f, err := os.Open("/etc/resolv.conf")
-	if err != nil {
-		return DefaultUpstream
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
-	for sc.Scan() {
-		fs := strings.Fields(sc.Text())
-		if len(fs) >= 2 && fs[0] == "nameserver" {
-			if ip, err := netip.ParseAddr(fs[1]); err == nil && ip.Is4() {
-				return net.JoinHostPort(ip.String(), "53")
-			}
-		}
-	}
-	return DefaultUpstream
 }
 
 // Process decide, reenvía, siembra y devuelve la respuesta cruda. Nunca
