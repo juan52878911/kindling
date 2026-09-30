@@ -1629,21 +1629,21 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if jailed {
 		// Recuperar el volcado del chroot al dir del host: es donde Thaw y
 		// reconcile lo buscan. Rename dentro del mismo filesystem.
-		root := m.jailRoot(mc.ID)
-		for _, f := range []string{"snap.file", "mem.file"} {
-			if err := os.Rename(filepath.Join(root, f), filepath.Join(dir, f)); err != nil {
-				// La máquina sigue PAUSADA: devolver el error sin más la dejaba
-				// figurando como running, sin contestar a nada, y sin que el
-				// vigilante la viera, porque el proceso existe. Mismo trato que
-				// un fallo del propio snapshot, más arriba.
-				err = fmt.Errorf("recovering %s from jail: %w", f, err)
-				if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-					m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-					return nil, err
-				}
-				_ = m.acquireVolumes(mc)
+		// Sin seguir enlaces, y solo si lo que hay es el fichero que escribió
+		// el VMM: un enlace o un hardlink plantado en su chroot llevaría al
+		// daemon a perforar, precargar y ceder un fichero del host (ver
+		// recuperarDelJail).
+		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", "mem.file"); err != nil {
+			// La máquina sigue PAUSADA: devolver el error sin más la dejaba
+			// figurando como running, sin contestar a nada, y sin que el
+			// vigilante la viera, porque el proceso existe. Mismo trato que
+			// un fallo del propio snapshot, más arriba.
+			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
+			_ = m.acquireVolumes(mc)
+			return nil, err
 		}
 		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 	}

@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,5 +151,137 @@ func TestCommitJailedNoSigueEnlacesDelChroot(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(destino, "overlay.ext4")); !os.IsNotExist(err) {
 		t.Fatalf("el overlay dorado se escribió en el host a través del enlace: %v", err)
+	}
+}
+
+// Lo que el VMM dejó en su chroot solo se recupera si es el fichero que él
+// escribió: ni un enlace simbólico ni un hardlink a un fichero del host, ni a
+// través de un directorio cambiado por un enlace.
+func TestRecuperarDelJail(t *testing.T) {
+	uid := os.Geteuid()
+	preparar := func(t *testing.T) (raiz, dst, secreto string) {
+		raiz, dst = t.TempDir(), t.TempDir()
+		secreto = filepath.Join(t.TempDir(), "secreto")
+		if err := os.WriteFile(secreto, []byte("del host"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(raiz, "snap.file"), []byte("estado"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return raiz, dst, secreto
+	}
+	intacto := func(t *testing.T, secreto string) {
+		t.Helper()
+		if b, err := os.ReadFile(secreto); err != nil || string(b) != "del host" {
+			t.Fatalf("el fichero del host cambió: %q, %v", b, err)
+		}
+	}
+
+	t.Run("el fichero del VMM", func(t *testing.T) {
+		raiz, dst, _ := preparar(t)
+		if err := os.WriteFile(filepath.Join(raiz, "mem.file"), []byte("ram"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := recuperarDelJail(raiz, "/", dst, uid, "snap.file", "mem.file"); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.ReadFile(filepath.Join(dst, "mem.file")); err != nil || string(b) != "ram" {
+			t.Fatalf("mem.file recuperado: %q, %v", b, err)
+		}
+	})
+
+	t.Run("enlace simbolico", func(t *testing.T) {
+		raiz, dst, secreto := preparar(t)
+		if err := os.Symlink(secreto, filepath.Join(raiz, "mem.file")); err != nil {
+			t.Fatal(err)
+		}
+		if err := recuperarDelJail(raiz, "/", dst, uid, "snap.file", "mem.file"); err == nil {
+			t.Fatal("recuperó un enlace simbólico como mem.file")
+		}
+		if _, err := os.Lstat(filepath.Join(dst, "mem.file")); !os.IsNotExist(err) {
+			t.Fatalf("el enlace se quedó en el directorio del host: %v", err)
+		}
+		intacto(t, secreto)
+	})
+
+	t.Run("hardlink", func(t *testing.T) {
+		raiz, dst, secreto := preparar(t)
+		if err := os.Link(secreto, filepath.Join(raiz, "mem.file")); err != nil {
+			t.Skip(err) // otro sistema de ficheros
+		}
+		if err := recuperarDelJail(raiz, "/", dst, uid, "snap.file", "mem.file"); err == nil {
+			t.Fatal("recuperó un hardlink a un fichero del host como mem.file")
+		}
+		if _, err := os.Lstat(filepath.Join(dst, "mem.file")); !os.IsNotExist(err) {
+			t.Fatalf("el hardlink se quedó en el directorio del host: %v", err)
+		}
+		intacto(t, secreto)
+	})
+
+	t.Run("de otro usuario", func(t *testing.T) {
+		raiz, dst, _ := preparar(t)
+		if err := recuperarDelJail(raiz, "/", dst, uid+1, "snap.file"); err == nil {
+			t.Fatal("recuperó un fichero que no es del usuario del VMM")
+		}
+	})
+
+	t.Run("directorio cambiado por un enlace", func(t *testing.T) {
+		raiz, dst, secreto := preparar(t)
+		fuera := filepath.Dir(secreto)
+		if err := os.WriteFile(filepath.Join(fuera, "snap.file"), []byte("del host"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(fuera, filepath.Join(raiz, "var")); err != nil {
+			t.Fatal(err)
+		}
+		if err := recuperarDelJail(raiz, "/var", dst, uid, "snap.file"); err == nil {
+			t.Fatal("recuperó a través de un directorio cambiado por un enlace")
+		}
+		if b, err := os.ReadFile(filepath.Join(fuera, "snap.file")); err != nil || string(b) != "del host" {
+			t.Fatalf("movió un fichero del host: %q, %v", b, err)
+		}
+	})
+}
+
+// Commit de una plantilla jailed cuyo VMM deja como mem.file un enlace a un
+// fichero del host. Antes el rename lo traía tal cual al dorado, y el daemon
+// lo perforaba (fallocate como root, a través del enlace), lo hasheaba y lo
+// daba por bueno.
+func TestCommitJailedNoRecuperaUnEnlaceComoVolcado(t *testing.T) {
+	if _, err := exec.LookPath("fallocate"); err != nil {
+		t.Skip("sin fallocate no se puede perforar el volcado")
+	}
+	m := newTestManager(t)
+	id := "c0aa1700000000e2"
+	falso, _ := plantillaParaCommit(t, m, id)
+	m.jailerJailed = true
+	if err := os.MkdirAll(filepath.Dir(m.jailSock(id)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(falso.Sock, m.jailSock(id)); err != nil {
+		t.Skip(err)
+	}
+	m.mu.Lock()
+	m.socket[id] = m.jailSock(id)
+	m.mu.Unlock()
+
+	secreto := filepath.Join(t.TempDir(), "secreto")
+	if err := os.WriteFile(secreto, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := m.snapDir("dorado")
+	falso.enGancho(func(metodo, ruta string) {
+		if ruta == "/snapshot/create" {
+			// Lo que escribiría un Firecracker comprometido en su chroot.
+			_ = os.WriteFile(m.jailPath(id, filepath.Join(dir, "snap.file")), []byte("estado"), 0o644)
+			_ = os.Symlink(secreto, m.jailPath(id, filepath.Join(dir, "mem.file")))
+		}
+	})
+
+	if _, err := m.Commit(context.Background(), id, "dorado", false); err == nil {
+		t.Fatal("Commit aceptó como mem.file un enlace plantado por el VMM")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "mem.file")); !os.IsNotExist(err) {
+		t.Fatalf("el enlace quedó en el dorado: %v", err)
 	}
 }

@@ -133,3 +133,69 @@ func borrarSinCruzar(dirfd int, nombre string, dev uint64, ruta string) error {
 		}
 	}
 }
+
+// recuperarDelJail mueve al directorio dst del host los ficheros nombres que
+// el VMM dejó en el directorio dir de su chroot (raiz): el volcado de un
+// Freeze o de un Commit, y el overlay dorado.
+//
+// El VMM pudo dejar ahí, en vez del fichero que escribió, un enlace simbólico
+// o un hardlink a un fichero del host (el mem.file de otro dorado, por
+// ejemplo): el daemon lo perforaría, lo hashearía y lo cedería como suyo, y
+// las instancias del dorado lo mapearían. Así que:
+//
+//   - la ruta del jail se recorre sin seguir enlaces (abrirDirSinEnlaces) y
+//     el traslado es un renameat entre descriptores, que mueve el nombre, no
+//     lo que haya al otro lado de un enlace;
+//   - lo que llega a dst, donde el VMM ya no alcanza, tiene que ser un fichero
+//     regular, con un solo enlace y de uid (el usuario con el que corre el
+//     VMM, que es quien lo creó). Si no, se borra (el nombre, no su destino) y
+//     se devuelve un error.
+func recuperarDelJail(raiz, dir, dst string, uid int, nombres ...string) error {
+	src, err := abrirDirSinEnlaces(raiz, dir, false)
+	if err != nil {
+		return fmt.Errorf("recovering the dump from the jail: %w", err)
+	}
+	defer src.Close()
+	dfd, err := syscall.Open(dst, oDirSinEnlaces, 0)
+	if err != nil {
+		return fmt.Errorf("recovering the dump from the jail: opening %s: %w", dst, err)
+	}
+	defer syscall.Close(dfd)
+	for _, n := range nombres {
+		if err := jRenameat(int(src.Fd()), n, dfd, n); err != nil {
+			return fmt.Errorf("recovering %s from jail: %w", n, err)
+		}
+		if err := esFicheroDelVMM(dfd, n, uid); err != nil {
+			_ = jUnlinkat(dfd, n, false)
+			return fmt.Errorf("recovering %s from jail: %w", n, err)
+		}
+	}
+	return nil
+}
+
+// esFicheroDelVMM exige que nombre, en dirfd y sin seguir un enlace, sea un
+// fichero regular con un solo enlace y de uid.
+func esFicheroDelVMM(dirfd int, nombre string, uid int) error {
+	var st syscall.Stat_t
+	if err := jLstatat(dirfd, nombre, &st); err != nil {
+		return err
+	}
+	switch {
+	case st.Mode&syscall.S_IFMT != syscall.S_IFREG:
+		return fmt.Errorf("it is not a regular file (mode %o): the VMM may have planted a symlink", st.Mode)
+	case uint64(st.Nlink) != 1:
+		return fmt.Errorf("it has %d hard links: it could be another file of the host", st.Nlink)
+	case int(st.Uid) != uid:
+		return fmt.Errorf("it belongs to uid %d, not to the VMM (%d)", st.Uid, uid)
+	}
+	return nil
+}
+
+// uidJail es el usuario con el que corre Firecracker dentro del jail (ver
+// jailerArgv): el de servicio, o el del propio daemon si no lo hay.
+func (m *Manager) uidJail() int {
+	if m.priv != nil && m.priv.Enabled {
+		return m.priv.UID
+	}
+	return os.Geteuid()
+}

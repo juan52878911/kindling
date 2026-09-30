@@ -362,11 +362,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	t.marca("dump")
 	if jailed {
 		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
-		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
-		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
-			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
-				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
-			}
+		// los replica de vuelta en el próximo jail). Rename, mismo filesystem,
+		// sin seguir enlaces y solo si es el fichero que escribió el VMM (ver
+		// recuperarDelJail).
+		if err := recuperarDelJail(m.jailRoot(mc.ID), dir, dir, m.uidJail(), "snap.file", "mem.file", "overlay.ext4"); err != nil {
+			return nil, err
 		}
 		// El overlay dorado estuvo en un directorio del VMM: lo que se recupera
 		// tiene que ser el fichero que copió el daemon, no un enlace ni otro
