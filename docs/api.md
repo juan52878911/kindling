@@ -221,12 +221,15 @@ Un parámetro que no se entiende es `400`; una máquina que no existe, `404`.
 | `denied` | la rechazó la política: `disabled`, `no_credential`, `ambiguous_path`, `not_allowed` |
 | `creds` | `env` de las credenciales cuyo marcador se sustituyó en esta petición |
 | `req_bytes`, `resp_bytes`, `ms` | cuerpo leído del invitado, cuerpo enviado al invitado, duración |
-| `dropped` | registros descartados antes de este (cola llena o fallo de disco) |
+| `dropped` | registros descartados antes de este (cola llena, fallo de disco o caídos de la generación más antigua al rotar) |
+| `rotated` | de `dropped`, los que se cayeron al rotar |
 | `user`, `database`, `auth` | solo en `kind: postgres` (ver Credenciales de Postgres) |
 | `upstream` | solo en `kind: postgres` con upstream fijado: la dirección a la que marcó el proxy (configuración del operador, no un secreto) |
 
 Nunca lleva la clave, el marcador, cabeceras, cuerpos, la query ni el texto de un
-error del proveedor. Rota a 1 MiB (una generación); `commit` y `fork` no lo copian.
+error del proveedor. Rota a 4 MiB con 3 generaciones (`daemon.credaudit_max_mib`,
+`daemon.credaudit_generations`), se lee entero, y lo que se cae de la más antigua
+cuenta en `dropped`; `commit` y `fork` no lo copian.
 
 ### Credenciales de Postgres
 

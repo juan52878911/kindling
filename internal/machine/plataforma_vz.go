@@ -564,6 +564,10 @@ func memoriaFisicaMiB() int64 {
 	return int64(leerUint64LE(s) >> 20)
 }
 
+// fijarAuditoriaPlataforma: en macOS cada kling-vz lleva su proxy; la
+// configuración le llega en entornoVMM.
+func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
+
 // entornoVMM es lo que kling-vz recibe además del entorno del daemon: la raíz
 // de datos, con la que se encierra en su perfil de sandbox al crear la VM
 // (vz/cmd/kling-vz/kling-vz.sb): lee bajo la raíz y escribe solo en su
@@ -573,6 +577,10 @@ func memoriaFisicaMiB() int64 {
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.
 func (m *Manager) entornoVMM() []string {
 	env := []string{"KLING_VZ_CONFINE_ROOT=" + m.root}
+	// El registro de auditoría de su proxy: tamaño y generaciones.
+	if c := credAuditConfig(); c != (credproxy.AuditConfig{}) {
+		env = append(env, "KLING_VZ_CREDAUDIT="+c.String())
+	}
 	if m.brokerRuta != "" {
 		env = append(env, "KLING_VZ_BROKER="+m.brokerRuta)
 	}

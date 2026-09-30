@@ -1164,6 +1164,9 @@ type CredAuditRecord struct {
 	RespBytes   int64     `json:"resp_bytes"`
 	MS          int64     `json:"ms"`
 	Dropped     uint64    `json:"dropped,omitempty"`
+	// Rotated: de Dropped, los que se cayeron de la generación más antigua
+	// al rotar el registro.
+	Rotated uint64 `json:"rotated,omitempty"`
 }
 
 // CredAuditQuery filtra GET /machines/{ref}/credaudit. Tail son las últimas N

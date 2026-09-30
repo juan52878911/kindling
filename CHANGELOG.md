@@ -112,6 +112,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `<raíz>/credtmp` en Linux y `credtmp/` del directorio de la máquina en macOS, 0700 y
   vaciado al arrancar; sin directorio, `pkg/credproxy` no escribe a disco (sale
   chunked).
+- **El registro de auditoría ya no pierde registros al rotar sin contarlos.** Rotaba a
+  1 MiB con una sola generación que pisaba la anterior sin sumar nada a `dropped`: de
+  20 000 peticiones quedaban 9 185 con `dropped=0`. Ahora rota a 4 MiB con 3
+  generaciones (`.1` a `.3`, ~80 000 peticiones), configurables con
+  `daemon.credaudit_max_mib`, `daemon.credaudit_generations` o
+  `KLING_CREDAUDIT=MIB:N` (también en macOS, que se lo pasa a `kling-vz`); las líneas
+  de la generación que se cae se suman a `dropped` y al campo nuevo `rotated`, `kling
+  machine audit` lo dice (`dropped N records (M rotated out...)`) y
+  `GET /machines/{ref}/credaudit` lee todas las generaciones.
 
 ## v0.17.0 — 2026-09-29
 

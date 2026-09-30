@@ -288,39 +288,91 @@ func TestRutaAuditada(t *testing.T) {
 	}
 }
 
-// Rotación: al pasar de AuditMaxBytes el fichero pasa a .1 (una generación) y
-// no se pierde ninguna línea de las que caben.
-func TestAuditoriaRota(t *testing.T) {
+// Rotación: al pasar de MaxBytes el fichero pasa a .1, el .1 a .2... hasta
+// Generations, y lo que se cae del último NO se pierde en silencio: sus líneas
+// (y los descartados que llevaban) se suman a dropped y a rotated del
+// siguiente registro. Antes había una sola generación y la rotación pisaba el
+// .1 sin contar nada: de 20 000 peticiones quedaban 9 185 con dropped=0.
+func TestAuditoriaRotaSinPerderEnSilencio(t *testing.T) {
+	path := filepath.Join(t.TempDir(), AuditFile)
+	a := &Auditor{path: path, cfg: AuditConfig{MaxBytes: 8 << 10, Generations: 2}}
+	rec := Record{Kind: KindHTTP, Method: "GET", Host: "example.com", Path: "/" + strings.Repeat("x", 100)}
+	const total = 1000 // ~170 KiB: rota una veintena de veces
+	for range total {
+		a.escribir(rec)
+	}
+	a.anotarPerdidas()
+	a.vaciar()
+	a.cerrarFichero()
+	var vistos, perdidos, rotados uint64
+	for _, f := range []string{path + ".2", path + ".1", path} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) > 8<<10 {
+			t.Errorf("%s: %d bytes, por encima del tope", f, len(b))
+		}
+		for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			var r Record
+			if err := json.Unmarshal([]byte(l), &r); err != nil {
+				t.Fatal(err)
+			}
+			if r.Kind != KindDropped {
+				vistos++
+			}
+			perdidos += r.Dropped
+			rotados += r.Rotated
+		}
+	}
+	if _, err := os.Stat(path + ".3"); err == nil {
+		t.Error("hay más generaciones de las pedidas")
+	}
+	if vistos+perdidos != total || rotados != perdidos || perdidos == 0 {
+		t.Fatalf("quedan %d, dropped suma %d (rotated %d): quería %d en total", vistos, perdidos, rotados, total)
+	}
+}
+
+// Por defecto caben las peticiones de un uso normal: 20 000 registros de ruta
+// corta no rotan nada fuera.
+func TestAuditoriaPorDefectoNoPierde(t *testing.T) {
 	path := filepath.Join(t.TempDir(), AuditFile)
 	a := &Auditor{path: path}
-	rec := Record{Kind: KindHTTP, Method: "GET", Host: "example.com", Path: "/" + strings.Repeat("x", 200)}
-	linea, _ := json.Marshal(Record{TS: time.Now().UTC(), Kind: rec.Kind, Method: rec.Method, Host: rec.Host, Path: rec.Path})
-	porFichero := AuditMaxBytes / (len(linea) + 1)
-	total := porFichero*2 + 10 // rota dos veces
-	for range total {
+	rec := Record{Kind: KindHTTP, Method: "POST", Host: "api.example.com", Path: "/v1/chat/completions",
+		Status: 200, Creds: []string{"OPENAI_API_KEY"}, ReqBytes: 1234, RespBytes: 56789, MS: 1234}
+	for range 20000 {
 		a.escribir(rec)
 	}
 	a.vaciar()
 	a.cerrarFichero()
-	cur, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	lineas := 0
+	for _, f := range AuditFiles(path) {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lineas += strings.Count(string(b), "\n")
+		if strings.Contains(string(b), `"dropped"`) {
+			t.Errorf("%s lleva descartados", f)
+		}
 	}
-	viejo, err := os.ReadFile(path + ".1")
-	if err != nil {
-		t.Fatal(err)
+	if lineas != 20000 {
+		t.Fatalf("quedan %d de 20000 registros con la configuración por defecto", lineas)
 	}
-	if len(cur) > AuditMaxBytes || len(viejo) > AuditMaxBytes {
-		t.Fatalf("tamaños %d y %d por encima del tope", len(cur), len(viejo))
+}
+
+func TestParseAuditConfig(t *testing.T) {
+	c, err := ParseAuditConfig("16:5")
+	if err != nil || c.MaxBytes != 16<<20 || c.Generations != 5 {
+		t.Fatalf("%+v %v", c, err)
 	}
-	// El .1 se rotó casi lleno (le faltaba menos de una línea); la longitud
-	// de cada línea varía un poco con los dígitos de ts.
-	nc, nv := strings.Count(string(cur), "\n"), strings.Count(string(viejo), "\n")
-	if len(viejo) < AuditMaxBytes-2*len(linea) || nc == 0 || nc+nv >= total {
-		t.Fatalf("líneas: actual %d, .1 %d, escritas %d (una generación: la primera se pierde)", nc, nv, total)
+	if back, _ := ParseAuditConfig(c.String()); back != c {
+		t.Fatalf("ida y vuelta: %+v", back)
 	}
-	if _, err := os.Stat(path + ".2"); err == nil {
-		t.Fatal("solo debe haber una generación")
+	for _, s := range []string{"", "x", "0:1", "1:0", "1:100", "-1:2", "5000:1"} {
+		if _, err := ParseAuditConfig(s); err == nil {
+			t.Errorf("%q aceptado", s)
+		}
 	}
 }
 

@@ -332,6 +332,9 @@ type Options struct {
 	// auditoria.go): una línea por petición, sin la clave ni contenido. El
 	// proxy lo abre la primera vez que escribe y Close lo cierra.
 	AuditPath string
+	// Audit es el tamaño de cada fichero del registro y cuántos rotados se
+	// guardan; cero = AuditMaxBytes y AuditGenerations.
+	Audit AuditConfig
 	// Logf recibe los fallos del registro de auditoría (disco lleno, fichero
 	// que no se puede abrir). Nil = no se avisa, aunque se siguen contando.
 	Logf func(format string, args ...any)
@@ -438,7 +441,7 @@ func New(o Options) *Proxy {
 	tempDir := o.TempDir
 	var aud *Auditor
 	if o.AuditPath != "" {
-		aud = NewAuditor(o.AuditPath, o.Logf)
+		aud = NewAuditorCon(o.AuditPath, o.Audit, o.Logf)
 	}
 	dialPG := o.DialPG
 	if dialPG == nil {

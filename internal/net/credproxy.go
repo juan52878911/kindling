@@ -184,11 +184,20 @@ func newCredProxy(auditPath string) *credProxy {
 		Lookup:         func(_ context.Context, host string) []string { return resolvePublicIPv4(host) },
 		TempDir:        credTempDir(),
 		AuditPath:      auditPath,
+		Audit:          auditCfg(),
 		Logf:           log.Printf,
 		ResolveMachine: p.resolverMaquina,
 	})
 	return p
 }
+
+// credAudit es el tamaño y las generaciones del registro de auditoría de los
+// proxies que se creen (credproxy.AuditConfig; cero = por defecto).
+var credAudit atomic.Value
+
+// SetCredAudit fija el registro de auditoría de los proxies que se creen a
+// partir de ahora.
+func SetCredAudit(c credproxy.AuditConfig) { credAudit.Store(c) }
 
 // credTmp es el directorio donde el proxy derrama un cuerpo grande con
 // Content-Length (con la clave real dentro, ver pkg/credproxy/cuerpo.go). Lo
@@ -209,6 +218,11 @@ func SetCredTempDir(dir string) error {
 	}
 	credTmp.Store(dir)
 	return nil
+}
+
+func auditCfg() credproxy.AuditConfig {
+	c, _ := credAudit.Load().(credproxy.AuditConfig)
+	return c
 }
 
 func credTempDir() string {

@@ -327,9 +327,15 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   partirla, por si la clave lleva `/`), uno de 32 o más caracteres de base64url/hex
   como `:tok`, los caracteres de control y los bytes que no son UTF-8 como `?` (la ruta
   llega decodificada y se lee en un terminal: nada de secuencias de escape del
-  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
-  generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
-  copian y `rm` lo borra. La escritura no bloquea la petición: va por
+  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 4 MiB por
+  generaciones (`.1`, `.2`, `.3`; `daemon.credaudit_max_mib` y
+  `daemon.credaudit_generations`, o `KLING_CREDAUDIT=MIB:N`), así que ocupa como mucho
+  ~16 MiB por máquina por defecto (unas 80 000 peticiones). Lo que se cae de la
+  generación más antigua **también se cuenta**: sus líneas, y los descartados que
+  llevaban, se suman a `dropped` (y a `rotated`) del primer registro del fichero
+  nuevo. Antes había una sola generación de 1 MiB y la rotación pisaba el `.1` sin
+  contar nada: de 20 000 peticiones quedaban 9 185 con `dropped=0`. `commit` y `fork`
+  no lo copian y `rm` lo borra (todas las generaciones). La escritura no bloquea la petición: va por
   una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
   descarta y se cuenta, y la cuenta viaja en el campo `dropped` del siguiente (o en una
   línea propia), nunca en silencio. **En Linux lo escribe el daemon (root) en

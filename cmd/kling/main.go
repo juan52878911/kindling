@@ -329,6 +329,7 @@ func cmdDaemon(args []string) error {
 	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), *fcBin)
 
 	daemon.Version = strings.TrimPrefix(Version, "v")
+	machine.SetCredAuditConfig(credAuditConfig())
 	srv, err := daemon.New(*socket, *root, vmm, *sockUser, *runAs)
 	if err != nil {
 		return err
@@ -362,6 +363,23 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// credAuditConfig lee daemon.credaudit_max_mib y daemon.credaudit_generations;
+// KLING_CREDAUDIT ("MIB:GENERACIONES") manda sobre el fichero. Un valor que no
+// se entiende se avisa y se queda en los de por defecto.
+func credAuditConfig() credproxy.AuditConfig {
+	cfg := loadConfig()
+	c := credproxy.AuditConfig{MaxBytes: int64(cfg.Daemon.CredAuditMiB) << 20, Generations: cfg.Daemon.CredAuditGenerations}
+	if v := os.Getenv("KLING_CREDAUDIT"); v != "" {
+		p, err := credproxy.ParseAuditConfig(v)
+		if err != nil {
+			log.Printf("warning: KLING_CREDAUDIT: %v (using the defaults)", err)
+			return credproxy.AuditConfig{}
+		}
+		c = p
+	}
+	return c
 }
 
 // cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y

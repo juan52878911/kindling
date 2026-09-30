@@ -161,6 +161,14 @@ func run() int {
 		AuditPath: rutaAuditoria(*sock),
 		Logf:      logf,
 	}
+	// Tamaño y generaciones del registro, si el daemon los fijó.
+	if v := os.Getenv("KLING_VZ_CREDAUDIT"); v != "" {
+		if c, err := credproxy.ParseAuditConfig(v); err == nil {
+			opts.Audit = c
+		} else {
+			logf("WARNING: %v (using the defaults)", err)
+		}
+	}
 	// Un cuerpo grande con Content-Length se derrama con la clave dentro
 	// (pkg/credproxy/cuerpo.go): a credtmp/ del directorio de la máquina (0700,
 	// dentro de lo que el perfil deja escribir), vaciado aquí de lo que dejó un

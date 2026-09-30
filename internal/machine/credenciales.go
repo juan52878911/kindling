@@ -63,6 +63,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/juan52878911/kindling/internal/fc"
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -76,6 +77,23 @@ const (
 	// misma maestra. Cambiarla invalidaría todo almacén existente.
 	credInfo = "kindling credential store v1"
 )
+
+// credAuditCfg es el tamaño y las generaciones del registro de auditoría de
+// los proxies de credenciales (credproxy.AuditConfig; cero = por defecto).
+var credAuditCfg atomic.Value
+
+// SetCredAuditConfig fija el registro de auditoría de los proxies que se
+// creen a partir de ahora: en Linux los del daemon, en macOS cada kling-vz
+// (por KLING_VZ_CREDAUDIT). El daemon lo llama antes de crear el manager.
+func SetCredAuditConfig(c credproxy.AuditConfig) {
+	credAuditCfg.Store(c)
+	fijarAuditoriaPlataforma(c)
+}
+
+func credAuditConfig() credproxy.AuditConfig {
+	c, _ := credAuditCfg.Load().(credproxy.AuditConfig)
+	return c
+}
 
 // registrarCredenciales entrega el juego completo al proxy de la máquina:
 // en Linux, knet.SetCredentials (proxy y resolver del daemon); en macOS, PUT
