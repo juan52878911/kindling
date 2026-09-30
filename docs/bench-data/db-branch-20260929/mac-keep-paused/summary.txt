@@ -1,0 +1,4 @@
+# 2026-09-30T04:20:20Z  host MacBook-Pro-de-Juan-2.local Darwin arm64
+# kling v0.17.0-31-g9a7118a6-dirty daemon: 0.17.0-31-g9a7118a6-dirty (unix:///tmp/kbm.sock) 
+# golden pg  N=20
+existing   n=20  p50 57 ms  p95 62 ms  min 53 ms  max 73 ms

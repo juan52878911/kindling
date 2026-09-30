@@ -1,0 +1,4 @@
+# 2026-09-30T04:29:23Z  host fc-test Linux x86_64
+# kling v0.17.0-31-g9a7118a6-dirty daemon: 0.17.0-31-g9a7118a6-dirty (/run/kling.sock) 
+# golden pg  N=10  PAUSE_S=30
+new-fork   n=10  p50 2200 ms  p95 2234 ms  min 2164 ms  max 2234 ms
