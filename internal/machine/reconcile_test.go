@@ -285,7 +285,8 @@ func TestElSegadorSeRindeTrasDemasiadosFallosSeguidos(t *testing.T) {
 	if n := m.noteFreezeFailure(id); n < maxFreezeFailures {
 		t.Fatalf("tras %d fallos seguidos el contador dice %d", maxFreezeFailures, n)
 	}
-	m.giveUpOn(id, errors.New("gave up for the test"))
+	visto, _ := m.Get(id)
+	m.giveUpOn(visto, errors.New("gave up for the test"))
 
 	m.mu.RLock()
 	mc := m.byID[id]

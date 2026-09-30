@@ -691,13 +691,13 @@ func (m *Manager) handleFreezeFailure(id string, err error) {
 		return
 	}
 	if freezeErrIsStructural(err) || !m.controlSockAlive(cur) {
-		m.giveUpOn(id, fmt.Errorf("unreachable: couldn't freeze it when its TTL expired (%v); "+
+		m.giveUpOn(cur, fmt.Errorf("unreachable: couldn't freeze it when its TTL expired (%v); "+
 			"its control socket is gone, so no retry can succeed", err))
 		return
 	}
 	n := m.noteFreezeFailure(id)
 	if n >= maxFreezeFailures {
-		m.giveUpOn(id, fmt.Errorf("gave up freezing it after %d consecutive attempts; last error: %v", n, err))
+		m.giveUpOn(cur, fmt.Errorf("gave up freezing it after %d consecutive attempts; last error: %v", n, err))
 		return
 	}
 	log.Printf("ttl: couldn't freeze %s (attempt %d/%d): %v", shortID(id), n, maxFreezeFailures, err)
@@ -715,12 +715,20 @@ func (m *Manager) controlSockAlive(mc *api.Machine) bool {
 // giveUpOn marca una máquina como perdida (failed, terminal) y limpia su
 // contador de reintentos. fail() además mata el proceso si sigue vivo: es lo
 // que evita que un firecracker sordo retenga su RAM para siempre.
-func (m *Manager) giveUpOn(id string, err error) {
+//
+// visto es la copia sobre la que se decidió. Con el cerrojo de ciclo de vida
+// tomado tiene que seguir siendo la misma: running con el mismo VMM. Sin el
+// cerrojo, fail mataba lo que hubiera en ese momento, y si entre medias un
+// Stop y un Thaw la habían relanzado, era el VMM nuevo y sano.
+func (m *Manager) giveUpOn(visto *api.Machine, err error) {
+	id := visto.ID
 	m.clearFreezeFailures(id)
+	defer m.lock(id)()
 	m.mu.RLock()
 	mc := m.byID[id]
+	igual := mc != nil && mc.State == api.StateRunning && mc.PID == visto.PID
 	m.mu.RUnlock()
-	if mc == nil {
+	if !igual {
 		return
 	}
 	log.Printf("ttl: giving up on %s: %v", shortID(id), err)

@@ -289,6 +289,10 @@ type Manager struct {
 	// así que tampoco llega al estado persistido. Ver marcarTransicion.
 	transicion map[string]string
 
+	// muertes serializa killMachine por máquina (ver killMachine). Aparte del
+	// cerrojo de ciclo de vida, que quien mata ya suele tener tomado.
+	muertes cerrojos
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -2724,17 +2728,37 @@ func (m *Manager) killMachine(id string, flush bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
+	// Dos kill de la misma máquina a la vez (un fail sin cerrojo de ciclo de
+	// vida contra un Stop) leían los dos el mismo PID; el segundo mandaba su
+	// SIGKILL cuando el primero ya lo había visto morir, y ese PID podía ser
+	// ya de otro proceso. Se hacen de uno en uno, y el que mata deja el PID a
+	// 0 (abajo): el siguiente ya no tiene a quién matar.
+	defer m.muertes.tomar(id)()
+	// Una COPIA tomada con el candado: la entrada viva la escriben otros
+	// (anotarListo, touchTTL...) con m.mu, y leer su State o sus volúmenes
+	// sin él era una carrera.
 	m.mu.RLock()
-	mc := m.byID[id]
+	var mc *api.Machine
+	if live := m.byID[id]; live != nil {
+		mc = live.Clone()
+	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
 		return
 	}
+	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
 		m.flushVolume(mc)
 	}
-	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	defer func() {
+		m.mu.Lock()
+		if live := m.byID[id]; live != nil && live.PID == pid {
+			live.PID = 0
+		}
+		m.mu.Unlock()
+	}()
 
 	// Esperar a que MUERA de verdad, no solo a mandar la señal.
 	//
@@ -2748,7 +2772,7 @@ func (m *Manager) killMachine(id string, flush bool) {
 	// Con tope: un firecracker que ignorase el SIGKILL (imposible, pero) no debe
 	// colgar el daemon. El proceso lo recoge la goroutine de cmd.Wait() del
 	// arranque, así que Kill(pid, 0) devuelve ESRCH en cuanto desaparece.
-	waitGone(mc.PID, 5*time.Second)
+	waitGone(pid, 5*time.Second)
 }
 
 // waitGone espera a que un pid desaparezca de la tabla de procesos.
