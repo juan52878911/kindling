@@ -283,6 +283,12 @@ type Manager struct {
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
 	secretos map[string]*estadoSecreto
 
+	// transicion es la operación de ciclo de vida en curso de cada máquina
+	// que va a sacarla de su estado (api.Transition*). Con m.mu. Solo se
+	// copia a lo que devuelven List y Get: las entradas de byID no la llevan,
+	// así que tampoco llega al estado persistido. Ver marcarTransicion.
+	transicion map[string]string
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -631,6 +637,7 @@ func (m *Manager) List() []*api.Machine {
 		// candado global cogido, así que contar bytes bloqueaba arranques y
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
+		c.Transition = m.transicion[mc.ID]
 		out = append(out, &c)
 	}
 	m.mu.RUnlock()
@@ -731,15 +738,40 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 	defer m.mu.RUnlock()
 	if mc, ok := m.byID[ref]; ok {
 		c := *mc
+		c.Transition = m.transicion[mc.ID]
 		return &c, true
 	}
 	for _, mc := range m.byID {
 		if mc.Name == ref || (len(ref) >= 4 && len(mc.ID) >= len(ref) && mc.ID[:len(ref)] == ref) {
 			c := *mc
+			c.Transition = m.transicion[mc.ID]
 			return &c, true
 		}
 	}
 	return nil, false
+}
+
+// marcarTransicion apunta que la máquina id está en medio de que (un
+// api.Transition*) y devuelve la función que lo retira. La llama quien tiene
+// el cerrojo de ciclo de vida de id, justo cuando ya sabe que va a seguir.
+//
+// Sin esto, un freeze de segundos se veía desde fuera como una máquina
+// "running" corriente: el planificador del gateway la adoptaba y enrutaba a
+// ella sesiones que morían con el volcado.
+func (m *Manager) marcarTransicion(id, que string) func() {
+	m.mu.Lock()
+	if m.transicion == nil {
+		m.transicion = map[string]string{}
+	}
+	m.transicion[id] = que
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		if m.transicion[id] == que {
+			delete(m.transicion, id)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) Count() int {
@@ -1557,6 +1589,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if sock == "" {
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
@@ -2563,6 +2596,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
@@ -2607,6 +2641,7 @@ func (m *Manager) Remove(ref string) error {
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
 	m.kill(mc.ID)
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
