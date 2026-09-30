@@ -61,6 +61,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
 
+### Seguridad
+
+- **macOS: un reenvío de `127.0.0.1` ya no acepta a otro usuario que reutilice el puerto
+  de una conexión del daemon.** `vz/internal/peercred` comparaba solo puertos, y
+  `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` desde otra cuenta pasaba por del daemon y
+  llegaba al agente del invitado. Ahora compara también direcciones y familia.
+  `SECURITY.md` §22.
+
 ## v0.17.0 — 2026-09-29
 
 La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:

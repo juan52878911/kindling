@@ -123,7 +123,8 @@ puerto 8080 está el agente del invitado, con exec y ficheros. Por eso `kling-vz
 solo acepta en un reenvío las conexiones que abre un proceso **de su mismo
 usuario**: macOS no da las credenciales del otro extremo de un socket TCP, así que
 busca con `libproc`, entre los procesos de su usuario, cuál tiene abierto ese
-socket, y si ninguno lo tiene corta la conexión (`vz/internal/peercred`). Cuesta
+socket (mismas direcciones y puertos en los dos extremos, IPv4), y si ninguno lo
+tiene corta la conexión (`vz/internal/peercred`). Cuesta
 ~0,15 ms la primera vez, ~5 µs después (recuerda los últimos procesos dueños,
 normalmente el daemon) y ~2,5 ms en el peor caso con 800 procesos.
 

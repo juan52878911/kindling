@@ -1104,6 +1104,22 @@ Lo que no cubre: el token viaja en claro por el tramo anfitrión → invitado, c
 del proxy y de las aristas (§15); y la API no tiene shell (cada ruta valida sus
 argumentos), así que un token de control da el teléfono, no root en la VM.
 
+### 22. macOS: `kling-vz` es lo que el invitado tiene delante
+
+En el Mac no hay netns, iptables ni resolver en el host: la pila TCP/IP (gVisor), el DNS
+y MMDS de cada invitado corren dentro de su `kling-vz`, que es un proceso del usuario.
+Un fallo explotable ahí es código del invitado corriendo como el usuario, así que lo que
+ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
+
+- **Los reenvíos de `127.0.0.1` solo aceptan al mismo usuario, por dirección y puerto**
+  (`vz/internal/peercred`). macOS no da las credenciales del otro extremo de un socket
+  TCP, así que `kling-vz` busca entre los procesos de su usuario el socket que es el otro
+  extremo. Hasta ahora comparaba solo los puertos, y en un Mac multiusuario otro usuario
+  podía hacer `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` con el puerto `X` de una
+  conexión abierta del daemon: el reenvío la aceptaba y le daba el agente del invitado
+  (exec). Ahora el socket tiene que ser IPv4 y casar en las dos direcciones además de en
+  los dos puertos.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
