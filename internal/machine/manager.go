@@ -25,6 +25,7 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/durable"
+	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/panico"
 )
 
@@ -384,6 +385,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 			return nil, err
 		}
 	}
+	if err := comprobarVersionEstado(root); err != nil {
+		return nil, err
+	}
 	priv, warn := privilegiosPlataforma(runAs)
 	jailed, jailerBlocked, jailerWarn := decidirJailer(jailerPosible, os.Getenv("KLING_JAILER"), jailerBinPresent(), priv.Enabled, priv.Motivo, os.Geteuid() == 0)
 	m := &Manager{
@@ -500,12 +504,35 @@ func (m *Manager) load() {
 		return
 	}
 	var list []*api.Machine
+	var version int
 	if err == nil {
-		err = json.Unmarshal(b, &list)
+		version, err = esquema.Comprobar(m.statePath(), b, versionEstado)
+	}
+	if esquema.EsMasNuevo(err) {
+		// Lo dejó un kling más nuevo: no está roto, así que no se aparta, y
+		// no se escribe encima (perdería lo que este binario no conoce).
+		// NewManager ya se niega a arrancar con él; esto es la red de debajo.
+		m.estadoIntocable = true
+		m.estadoIlegible = err.Error()
+		log.Printf("state: %v. Protected mode, and the state will NOT be written", err)
+		return
+	}
+	if err == nil {
+		list, err = decodificarEstado(b, version)
 	}
 	if err != nil {
 		m.ponerEnCuarentena(err)
 		return
+	}
+	if version < versionEstado {
+		// La primera escritura lo pasará al formato nuevo: antes, la copia
+		// del original, que es lo que permite volver al binario anterior.
+		if err := esquema.Respaldar(m.statePath(), version); err != nil {
+			m.estadoIntocable = true
+			m.estadoIlegible = fmt.Sprintf("%s (schema %d) could not be backed up before migrating it (%v)",
+				m.statePath(), version, err)
+			log.Printf("state: %s. Protected mode, and the state will NOT be written", m.estadoIlegible)
+		}
 	}
 	// No se toca el estado aquí: reconcile() decide comparando con la realidad
 	// del host, porque una microVM SÍ puede sobrevivir al daemon.
@@ -515,6 +542,51 @@ func (m *Manager) load() {
 		}
 		m.byID[mc.ID] = mc
 	}
+}
+
+// versionEstado es la versión del formato de state.json que escribe este
+// binario (ver pkg/esquema). Súbela cuando un kling anterior fuera a leer mal
+// lo que se escribe, y añade el caso a decodificarEstado.
+//
+//	0: un array JSON de máquinas, sin campo (hasta v0.17).
+//	1: {"schema": 1, "machines": [...]}.
+const versionEstado = 1
+
+// ficheroEstado es state.json desde la versión 1.
+type ficheroEstado struct {
+	esquema.Cabecera
+	Machines []*api.Machine `json:"machines"`
+}
+
+// decodificarEstado lee state.json en cualquier versión conocida.
+func decodificarEstado(b []byte, version int) ([]*api.Machine, error) {
+	switch version {
+	case 0:
+		var list []*api.Machine
+		err := json.Unmarshal(b, &list)
+		return list, err
+	case 1:
+		var f ficheroEstado
+		err := json.Unmarshal(b, &f)
+		return f.Machines, err
+	}
+	return nil, fmt.Errorf("state.json: unknown schema %d", version)
+}
+
+// comprobarVersionEstado se niega a arrancar con un state.json de un kling más
+// nuevo. Es lo primero que hace NewManager, antes de montar, barrer o
+// readoptar nada: un daemon viejo sobre un estado nuevo no debe operar, ni
+// siquiera en modo protegido, porque lo que haría con él no lo sabe nadie.
+func comprobarVersionEstado(root string) error {
+	ruta := filepath.Join(root, "state.json")
+	b, err := os.ReadFile(ruta)
+	if err != nil {
+		return nil // que no exista es la primera arrancada; ilegible lo trata load
+	}
+	if _, err := esquema.Comprobar(ruta, b, versionEstado); esquema.EsMasNuevo(err) {
+		return err
+	}
+	return nil
 }
 
 // sufijoCuarentena es lo que lleva el nombre de un state.json apartado.
@@ -672,7 +744,11 @@ func (m *Manager) writePending() {
 		return // ya se escribió una foto más nueva
 	}
 
-	b, err := json.MarshalIndent(list, "", "  ")
+	f := struct {
+		esquema.Cabecera
+		Machines []api.Machine `json:"machines"`
+	}{esquema.Cabecera{Schema: versionEstado}, list}
+	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		log.Printf("state: could not serialize it: %v", err)
 		return

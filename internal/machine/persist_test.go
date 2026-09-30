@@ -49,11 +49,17 @@ func readState(t *testing.T, m *Manager) []api.Machine {
 	if err != nil {
 		return nil
 	}
-	var out []api.Machine
-	if err := json.Unmarshal(b, &out); err != nil {
+	var f struct {
+		Schema   int           `json:"schema"`
+		Machines []api.Machine `json:"machines"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
 		t.Fatalf("state.json ilegible: %v", err)
 	}
-	return out
+	if f.Schema != versionEstado {
+		t.Fatalf("state.json con schema %d, se esperaba %d", f.Schema, versionEstado)
+	}
+	return f.Machines
 }
 
 // El caso que importa: persistir mientras otra goroutine muta las máquinas.

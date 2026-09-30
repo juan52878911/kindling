@@ -11,6 +11,7 @@ depuración.
 |---|---|---|
 | [`mac-arm64.md`](mac-arm64.md) | kindling en Apple Silicon: la VM Lima con virtualización anidada, los límites honestos (M3+, ~16 s de arranque en frío) y las tres palancas medidas para bajarlo a ~2,5 s (`-bundle`, `-cpu-pct 100`, http-proxy) | vas a correrlo en un Mac |
 | [`releases.md`](releases.md) | Una etiqueta, una release: todos los assets (núcleo y extensiones), el `SHA256SUMS` único, los módulos del repo y cómo crear una release | mantienes el proyecto o quieres compilar desde fuentes |
+| [`actualizar.md`](actualizar.md) | Qué persiste kindling y qué rompe un cambio de versión, el `schema` de cada fichero, la política de compatibilidad, `kling upgrade` y lo que conviene romper antes de tener usuarios | vas a actualizar un host o a cambiar un formato en disco |
 | [`kubernetes.md`](kubernetes.md) | `kindling-operator`: sandboxes de `ext/sandbox` gestionados desde Kubernetes, con su CRD y su despliegue | quieres pedir sandboxes con `kubectl` |
 | [`postgres.md`](postgres.md) | Conectar tu base de datos: el proxy de credenciales de Postgres, recetas (Docker en el mismo host, LAN/VPC con TLS, Neon, Supabase, RDS), `-upstream`, `-upstream-tls disable` y `-tls-server-name`, el cliente del invitado y los límites | quieres que un agente use tu Postgres sin ver la contraseña |
 | [`exec-sandbox.md`](exec-sandbox.md) | Sandboxes para agentes de código: `kling sandbox`, `kling exec` en streaming, `kling cp`, plantillas desde snapshot y la puerta `allow_exec` | quieres ejecutar código de un agente sin tocar tu máquina |

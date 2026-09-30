@@ -147,6 +147,12 @@ daemon, MINOR para funcionalidades compatibles, PATCH para arreglos. Seguimos en
 **0.x** porque la API aún puede cambiar. La versión es una para todo el repo:
 una extensión oficial lleva la del núcleo con el que salió.
 
+Qué se promete al pasar de una versión a otra (formatos en disco con `schema`,
+migraciones con copia, dorados obsoletos, qué pasa al mezclar versiones) y el
+plan de `kling upgrade`, en [`actualizar.md`](actualizar.md). Un cambio que
+sube la versión de un formato persistido va en una MINOR y dice en el
+CHANGELOG cómo volver atrás.
+
 ## Qué no automatizamos (todavía)
 
 - **Firma de los binarios** (cosign, sigstore): `SHA256SUMS` cubre la
