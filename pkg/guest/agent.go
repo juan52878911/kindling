@@ -9,7 +9,8 @@
 //
 // Rutas que registra:
 //
-//	GET  /healthz            "ok": el invitado está en pie
+//	GET  /healthz            "ok": el invitado está en pie; con Accept JSON,
+//	                         qué agente es, su versión y sus capacidades
 //	GET  /dns?host=...       diagnóstico de la resolución de nombres
 //	POST /resync             hora del host y entropía fresca, tras restaurar;
 //	                         lanza los ganchos de la imagen (ready.go)
@@ -27,6 +28,7 @@
 package guest
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -50,6 +52,36 @@ type Agent struct {
 
 	// Volumes son los volúmenes que pidió el kernel (kling.volume=...).
 	Volumes *Volumes
+
+	// Name y Version son el binario que embebe al agente ("kling-guest",
+	// "kling-bridge") y su versión: los devuelve /healthz para que el host
+	// sepa qué agente lleva cada imagen sin tener que sondearlo por rutas.
+	Name, Version string
+	// ExtraCaps son las capacidades que añade quien embebe al agente (el
+	// puente: api.GuestCapMCP). Se fijan antes de Register.
+	ExtraCaps []string
+}
+
+// Caps son las capacidades que anuncia /healthz: las rutas que Register sirve
+// en este proceso y las que añade quien lo embebe.
+func (a *Agent) Caps() []string {
+	caps := []string{api.GuestCapResync, api.GuestCapReady, api.GuestCapHooks, api.GuestCapMemInfo,
+		api.GuestCapVolume, api.GuestCapShare, api.GuestCapBootOpt}
+	if ExecEnabled() {
+		caps = append(caps, api.GuestCapExec)
+	}
+	return append(caps, a.ExtraCaps...)
+}
+
+// handleHealthz contesta "ok" como siempre, o GuestHealth si se pide JSON. El
+// texto plano no cambia: hosts anteriores y scripts solo miran que conteste.
+func (a *Agent) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if !strings.Contains(r.Header.Get("Accept"), "application/json") {
+		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.GuestHealth{Status: "ok", Agent: a.Name, Version: a.Version, Caps: a.Caps()})
 }
 
 // New prepara el agente: arranca el cosechador, añade la ruta a MMDS y monta los
@@ -84,9 +116,7 @@ func New() (*Agent, error) {
 // capacidad de ejecutar comandos que solo depende de no ser alcanzable acaba
 // siendo alcanzada.
 func (a *Agent) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	mux.HandleFunc(api.GuestHealthPath, a.handleHealthz)
 	mux.HandleFunc("/dns", DNSHandler)
 	// /resync la llama el daemon tras cada restauración: reloj y CSPRNG propios
 	// en cada instancia de un mismo snapshot (ver resync.go).

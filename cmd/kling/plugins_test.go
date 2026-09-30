@@ -87,3 +87,25 @@ func TestAyudaYCompletadoConUnaExtension(t *testing.T) {
 		t.Fatal("un comando del núcleo nunca se cede a una extensión")
 	}
 }
+
+// Una extensión escrita para un API del daemon más viejo sale "ok" con su
+// aviso en `kling plugins`, no en silencio; sin daemon no hay con qué
+// compararla y no se dice nada.
+func TestPluginRowsAvisaDeMaxAPI(t *testing.T) {
+	reg := &plugin.Registry{Plugins: []*plugin.Plugin{
+		{Name: "vieja", Manifest: &plugin.Manifest{Name: "vieja", MaxAPI: 1}},
+		{Name: "nueva", Manifest: &plugin.Manifest{Name: "nueva", MaxAPI: 2}},
+	}}
+	rows := pluginRows(reg, 2)
+	if rows[0].Warning == "" || !strings.Contains(rows[0].Status, "warning") {
+		t.Fatalf("vieja: %+v", rows[0])
+	}
+	if rows[1].Warning != "" || rows[1].Status != "ok" {
+		t.Fatalf("nueva: %+v", rows[1])
+	}
+	for _, r := range pluginRows(reg, 0) {
+		if r.Warning != "" {
+			t.Fatalf("sin daemon no hay aviso: %+v", r)
+		}
+	}
+}

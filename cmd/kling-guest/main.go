@@ -47,6 +47,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("volume: %v", err)
 	}
+	agent.Name, agent.Version = "kling-guest", Version
 	mux := http.NewServeMux()
 	agent.Register(mux)
 

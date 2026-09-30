@@ -23,6 +23,8 @@ import (
 // que contestó el /resync; nil (agente anterior, o sin agente) no hace nada.
 // No espera a los ganchos: quien lo necesite llama a WaitReady.
 func (m *Manager) trasRestaurar(ctx context.Context, id, kind string, inicial *api.GuestReady) {
+	// Una descongelada ya sabe qué agente lleva; una copia de un dorado, no.
+	m.conocerAgente(id)
 	if inicial == nil {
 		m.anotarListo(id, api.ReadyUnknown)
 		return
@@ -50,12 +52,18 @@ func (m *Manager) lanzarGanchos(ctx context.Context, id, kind string) (api.Guest
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr string
+	var ag *api.GuestAgent
 	if mc != nil && mc.Reachable() {
-		addr = mc.Addr(api.GuestPort)
+		addr, ag = mc.Addr(api.GuestPort), mc.Agent
 	}
 	m.mu.RUnlock()
 	if addr == "" {
 		return api.GuestReady{}, errListoConexion
+	}
+	// Un agente que anuncia lo que sabe y no dice "hooks" no tiene la ruta:
+	// ni se le pregunta (agente.go).
+	if ag.Lacks(api.GuestCapHooks) {
+		return api.GuestReady{}, errListoViejo
 	}
 	ctx, cancel := context.WithTimeout(ctx, resyncPlazo)
 	defer cancel()

@@ -58,7 +58,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | `vmm` en el meta (PR 2) y en el sello de las congeladas | otro VMM u otra MAJOR.MINOR de Firecracker: el dorado sale `stale` en `kling template ls`/`inspect` y `run -from` da `409` con la orden para rehacerlo, sin llegar al VMM; una congelada no se descongela y se dice con cuál se congeló. Un parche no invalida. Los dorados sin `vmm` (v0) se intentan como siempre. El TSC sigue con su traducción (`explainRestoreErr`) |
 | kernel del dorado | `kernel_sha256` en el meta | hash, no versión | cambiarlo solo da un aviso (`avisoKernel`): el kernel del invitado vive en `mem.file` y sigue restaurando |
 | sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna; lleva `vmm` desde el PR 2 (opcional) | sin marcadores se acepta (máquina anterior al sello); sin `vmm`, no se compara |
-| `snap.file` de kling-vz | `vz/internal/spec/spec.go` | **`kling_vz: 1`**; `Decode` rechaza cualquier otro | error claro en ambas direcciones. Pero `graphics` entró sin subir la versión: un kling-vz anterior lo ignora y restaura con otros dispositivos |
+| `snap.file` de kling-vz | `vz/internal/spec/spec.go` | **`kling_vz: 2`** desde v0.18 (la 2 es `graphics`); `Decode` lee 1 y 2 | uno ≤ v0.17 rechaza la 2 con su error de siempre; uno de una versión futura se rechaza diciendo que se actualice kling-vz |
 | `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | `macos` en el meta (PR 2) | no invalida por adelantado (no hay regla conocida); si restaurar falla y el macOS o el kling-vz no son los del dorado, el error lo dice y da la orden para rehacerlo. Un `kling_vz` que el kling-vz no entiende se traduce igual |
 | firma de dorados | `secrets/snapshot.key`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe |
 
@@ -68,7 +68,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 |---|---|---|---|
 | `images/<n>.ext4`, `.layer.ext4`, `vmlinux` | `internal/machine/layer.go` | ninguna; la forma se deduce de qué ficheros hay | nada que migrar. Una base sin `kling.layer` se detecta (`baseSupportsLayers`) |
 | `images/<n>.recipe.json` | `api.ImageRecipe` | ninguna; `kling_version` es informativo | lectura laxa: ilegible es base `min` y sin techo de CPU. El de Android se escribe sin `durable` |
-| `kling-guest` dentro de la imagen | `cmd/kling/builder*.go`, `internal/android` | la versión va en el binario pero **el host nunca la pregunta** | se detecta por sondeo: 404/405 en `/resync`, `/ready`, `/hooks`, o sin cabecera `X-Kling-Share`. Actualizarlo es reconstruir la imagen; solo MCP tiene `refresh-bridge` |
+| `kling-guest` dentro de la imagen | `cmd/kling/builder*.go`, `internal/android` | desde v0.18, `/healthz` con `Accept: application/json` da `agent`, `version` y `caps`; el daemon lo guarda en `api.Machine.Agent` | un agente anterior contesta `ok` y se sigue detectando por sondeo: 404/405 en `/resync`, `/ready`, `/hooks`, o sin cabecera `X-Kling-Share`. Actualizarlo es reconstruir la imagen; solo MCP tiene `refresh-bridge` |
 | caché OCI | `internal/oci` | direccionada por contenido | sin riesgo |
 | volúmenes y sus snapshots | `volumes/*.ext4`, `internal/machine/volume*.go` | sin metadatos | sin riesgo mientras sean ext4 |
 
@@ -85,7 +85,7 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
 | `manifests.json` | `pkg/plugin/cache.go` | **`format: 1`**, y cada entrada con la versión de kling y la API | caché: una versión distinta la tira entera y la rehace. Correcto: es regenerable |
-| manifiesto de extensión | `pkg/plugin/manifest.go` | **`ManifestVersion` 2** (acepta 1–2), `min_kling` | fuera de rango: la extensión sale con error en la lista, sin tumbar nada. **No hay `max_kling`** |
+| manifiesto de extensión | `pkg/plugin/manifest.go` | **`ManifestVersion` 2** (acepta 1–2), `min_kling`, `max_api` (v0.18) | fuera de rango: la extensión sale con error en la lista, sin tumbar nada. Un `max_api` menor que el API del daemon es un aviso en `kling plugins` |
 | sidecar `.json` de cada extensión | `pkg/plugin/install.go` | ninguna | versión, url, sha256, fecha |
 | `~/.config/kling/config.json` | `pkg/config/config.go` | ninguna | claves desconocidas se ignoran |
 | `/etc/default/kling`, `/etc/kling/gateway.env` | `Makefile`, `ext/mcp/Makefile` | ninguna | se crean si no existen y **no se tocan nunca más**: una variable nueva no llega a un host viejo |
@@ -99,10 +99,10 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 
 | Entre | Cómo se versiona hoy | Si se mezclan |
 |---|---|---|
-| CLI ↔ daemon | `GET /info` da `Version` y `Capabilities` (solo se añaden, nunca se reusan: `internal/daemon/server.go`). Sin `/v1` ni cabecera | `kling version` y `kling doctor` avisan si difieren; un 404 pelado lleva la pista "el daemon puede ser más viejo" |
-| extensión ↔ daemon | `Info.Has(cap)` para cada función nueva, `min_kling` en el manifiesto | extensión vieja con núcleo nuevo: funciona mientras no se quite una ruta. Nueva con núcleo viejo: 404 o `Has` falso |
+| CLI ↔ daemon | `GET /info` da `Version`, `Capabilities` (solo se añaden, nunca se reusan: `internal/daemon/server.go`) y, desde v0.18, `api`; cada respuesta lleva `X-Kling-API` y `X-Kling-Version`. Sin `/v1` | `pkg/api` compara el API en cada petición: aviso si el daemon es más nuevo, error claro si es más viejo que `MinDaemonAPI`. `kling version` y `kling doctor` avisan si las versiones difieren |
+| extensión ↔ daemon | `Info.Has(cap)` para cada función nueva, `min_kling` y `max_api` en el manifiesto, y la misma comprobación de `X-Kling-API` que el CLI (usan `pkg/api`) | extensión vieja con núcleo nuevo: funciona mientras no se quite una ruta, y con un API mayor avisa. Nueva con núcleo viejo: 404 o `Has` falso |
 | daemon ↔ kling-vz | `GET /kling/info` con `credential_kinds` (`http-places`, `graph-link`…) | falta un tipo: "rebuild kling-vz". **La versión de kling-vz no se compara** |
-| host ↔ `kling-guest` | ninguno; HTTP en el 8080, sondeo por ruta | host nuevo, invitado viejo: degradación ruta a ruta. Host viejo, invitado nuevo: nada lo nota. Un puente viejo con parámetros de kernel nuevos **muere, y como es PID 1, el invitado entra en pánico** |
+| host ↔ `kling-guest` | `/healthz` JSON con `version` y `caps` (v0.18); sondeo por ruta para los anteriores | host nuevo, invitado viejo: degradación ruta a ruta. Host viejo, invitado nuevo: nada lo nota. Un puente viejo con una opción de volumen nueva **muere, y como es PID 1, el invitado entra en pánico**; desde v0.18 el agente ignora lo que no conoce |
 
 ### Cómo llega un binario nuevo al disco
 
@@ -244,7 +244,8 @@ Mezclar versiones queda así:
 |---|---|
 | CLI nuevo, daemon viejo | funciona con lo que el daemon anuncie; lo que no, "actualiza el daemon" |
 | CLI viejo, daemon nuevo | funciona mientras `api` sea la misma |
-| extensión fuera de `min_kling`/`max_api` | sale con error en `kling plugins`, no se ejecuta |
+| extensión fuera de `min_kling` | sale con error en `kling plugins`, no se ejecuta |
+| extensión con `max_api` menor que el API del daemon | aviso en `kling plugins` y en sus propias peticiones; se ejecuta |
 | invitado viejo | funciona sin las `caps` que le falten; `doctor` lo cuenta |
 | kling-vz de otra versión | aviso; error si falta un `credential_kind` o el `kling_vz` no casa |
 
@@ -338,10 +339,10 @@ su prueba para siempre.
 | **P0** | `schema` en `state.json` | **hecho** en este cambio: sin él no hay forma de rechazar un fichero del futuro |
 | **P0** | `schema` en `meta.json` y versión de Firecracker/kling-vz/macOS y de kling en el dorado | **hecho** (PR 2): es lo que permite marcar obsoletos en vez de fallar al despertar |
 | **P0** | byte de versión en `credentials.enc` | **hecho** (PR 3): es binario, y añadirlo después obliga a adivinar si un fichero lo tiene |
-| **P0** | el agente y el puente ignoran `kling.*` desconocidos | cada imagen que se construye con el agente de hoy lleva el pánico dentro para siempre |
-| **P1** | `/healthz` del agente con `version` y `caps` | mismo motivo: lo que se hornea hoy es lo que habrá que soportar |
-| **P1** | `api` en `/info` y `max_api` en el manifiesto | el manifiesto ya tiene versión; añadir el campo ahora es gratis |
-| **P1** | subir `kling_vz` a 2 por `graphics` | hoy un kling-vz anterior restaura en silencio con otros dispositivos |
+| **P0** | el agente y el puente ignoran `kling.*` desconocidos | **hecho** (PR 4). Los `kling.*` ya se buscaban por nombre; lo que mataba a PID 1 era una opción nueva dentro de `kling.volume`, que el puente anterior a `:ro` pegaba al directorio |
+| **P1** | `/healthz` del agente con `version` y `caps` | **hecho** (PR 4): lo que se hornea hoy es lo que habrá que soportar |
+| **P1** | `api` en `/info` y `max_api` en el manifiesto | **hecho** (PR 5): el manifiesto ya tenía versión; añadir el campo era gratis |
+| **P1** | subir `kling_vz` a 2 por `graphics` | **hecho** (PR 5): un kling-vz anterior restauraba en silencio con otros dispositivos |
 | **P1** | `schema` en el almacén (`store`) para `mcp/links`, `phone/*` y grafos | los dueños son nuestras extensiones; poner la convención antes de que haya extensiones de otros |
 | **P2** | quitar `migrateLinks` y `liftV04` | migraciones de v0.4 sin nadie en v0.4; son código que hay que mantener probado |
 | **P2** | recetas de Android con `durable.Escribir` | lo único que escribe estado sin la escritura segura |
@@ -363,8 +364,8 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | 1 | **`pkg/esquema` y `state.json` v1** | helper común, `schema` en `state.json`, copia `.v0.bak`, el daemon no arranca con uno del futuro. Tests: versión 0 migra con copia; futura se rechaza sin pisarla | S — **hecho** |
 | 2 | `meta.json` v1 y dorados obsoletos | `schema`, `vmm` (`firecracker 1.17.0` / `kling-vz 0.18.0`), `macos` y `kling_version` en el meta; `stale` con causa en `kling template ls`/`inspect` (en `doctor`, pendiente); `run -from` y `thaw` se niegan con la orden; conservar claves desconocidas en `editMeta` | M — **hecho** |
 | 3 | `credentials.enc` con byte de versión | `KLCS` + `0x01` delante del nonce, también en plantillas y secretos de grafo; sin él es v0 y se reescribe (con copia) en el siguiente sellado; un byte mayor se rechaza sin tocar el fichero | S — **hecho** |
-| 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge`; `/healthz` JSON si se pide con `Accept`; versión del agente en la receta | M |
-| 5 | `api` en `/info` y `max_api` en extensiones | cliente con aviso claro; `kling plugins` marca las que no casan; `kling_vz` a 2 | S |
+| 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge` (y las opciones de volumen que no conocen: solo lectura); `/healthz` JSON si se pide con `Accept`; versión y `caps` del agente en la máquina (`api.Machine.Agent`), no en la receta: construir no arranca el invitado | M — **hecho** |
+| 5 | `api` en `/info` y `max_api` en extensiones | `api` en `/info` y `X-Kling-API` en cada respuesta, que `pkg/api` compara (aviso si el daemon es más nuevo, error si es más viejo que el mínimo); `kling plugins` avisa de las que no casan; `kling_vz` a 2 | S — **hecho** |
 | 6 | guarda de structs persistidos | test que compara campos de `api.Machine`, `api.Snapshot`, `credproxy.Credential` con una lista comiteada y exige subir la versión | S |
 | 7 | fijaciones de `testdata/` | los ficheros de v0.17 de cada formato y sus tests de carga | S |
 | 8 | `kling upgrade` en Linux | pasos 1–9 de §3.4, copia de binarios y unidades, `--dry-run`, `--rollback`, `--from-dir` | L |

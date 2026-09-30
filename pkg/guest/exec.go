@@ -20,9 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/juan52878911/kindling/pkg/api"
 )
@@ -51,16 +49,7 @@ type execResponse struct {
 
 // execEnabled dice si el kernel encendió la ejecución de comandos.
 func ExecEnabled() bool {
-	b, err := os.ReadFile("/proc/cmdline")
-	if err != nil {
-		return false
-	}
-	for _, tok := range strings.Fields(string(b)) {
-		if tok == execBootParam+"=1" {
-			return true
-		}
-	}
-	return false
+	return cmdlineParams().values[execBootParam] == "1"
 }
 
 // handleExec corre un comando y devuelve su salida y su código.

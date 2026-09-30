@@ -20,6 +20,34 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   con la sesión que abre el daemon siguiente. Funciona con los agentes ya desplegados
   (el valor es el que usan por dentro para "no llegó a salir" desde v0.10, la primera con
   carpetas vivas).
+- **El API del daemon lleva versión, y el cliente la compara.** `GET /info` gana `api`
+  (hoy `1`) y cada respuesta del daemon las cabeceras `X-Kling-API` y `X-Kling-Version`.
+  `pkg/api` las mira en toda petición, así que el CLI y las extensiones lo hacen sin
+  preguntar nada más: un daemon con un API mayor que el suyo da un aviso (una vez) y uno
+  por debajo del mínimo es un error que dice qué versión es y cómo actualizarlo, en vez
+  de un 404 a medio camino. Un daemon anterior no manda nada y cuenta como API 1. El API
+  sube solo si se quita o cambia una ruta; lo nuevo sigue en `capabilities`.
+- **Extensiones: `max_api` en el manifiesto.** `plugin.Main` lo rellena con el API que
+  conoce el `pkg/api` con que se compiló; `kling plugin ls` marca `ok (see warning)` y
+  explica que hay que actualizar una extensión escrita para un API más viejo que el del
+  daemon. Sigue ejecutándose: es un aviso, no un bloqueo. Sin el campo cuenta como 1.
+- **macOS: los snapshots de `kling-vz` pasan a `kling_vz: 2`.** `graphics` entró sin subir
+  la versión y un `kling-vz` anterior restauraba sin pantalla un snapshot que la tenía.
+  **Incompatible**: un `kling-vz` ≤ v0.17 se niega a restaurar los snapshots nuevos
+  (`unsupported snapshot format kling_vz=2`); el nuevo sigue leyendo los de la 1, y uno
+  de una versión futura se rechaza diciendo que se actualice `kling-vz`.
+- **El agente de invitado ignora los parámetros de kernel que no conoce y dice qué es.**
+  `kling-guest` y `kling-bridge` (los dos son PID 1) apartan con un aviso en la consola
+  los `kling.*` que no entienden, y una opción de volumen desconocida (`/data:ro:algo`) ya
+  no se pega al nombre del directorio —lo que llevaba al `EACCES` y al pánico del kernel—:
+  se descarta y el volumen se monta de solo lectura. `GET /healthz` con
+  `Accept: application/json` devuelve `{"status","agent","version","caps"}`; a secas sigue
+  siendo `ok`. El daemon lo pregunta al arrancar o restaurar una máquina y lo guarda en
+  `agent` (se ve en `kling inspect`), y a un agente que anuncia sus capacidades ya no le
+  pide `/resync`, `/ready` ni `/hooks` si no las tiene. Un agente anterior contesta `ok`,
+  queda como `agent: {}` y se le sigue sondeando como antes. Para llevar el agente nuevo
+  hay que **reconstruir la imagen** (`kling images build`, o `kling mcp refresh-bridge`
+  para las de MCP); las imágenes de antes funcionan igual que hoy.
 - **`state.json` lleva versión, y un daemon viejo no pisa el estado de uno nuevo.** El
   fichero pasa de un array a `{"schema": 1, "machines": [...]}`. El formato anterior se
   sigue leyendo y, antes de la primera escritura, se copia a `state.json.v0.bak`. Uno con
