@@ -73,6 +73,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - `kling mcp heal` ya no dice "all healthy" con un servicio caído cuando no puede
   grabar su salud: lo cuenta como roto, intenta curarlo y, si no pudo grabar, sale con
   1 (la unidad falla; el 3 sigue siendo "sondeé y grabé, algo sigue roto").
+- El gateway MCP reintenta anotar la salud de un servicio si la escritura falló (antes
+  la daba por hecha y, con el daemon ya bien, los fallos siguientes no se anotaban), y
+  la línea de salud de `kling status` ya no pinta ✓ con un veredicto de más de 12 h
+  (el doble del intervalo de `kling-heal.timer`) o sin fecha: cuenta como desconocido.
 
 ### Seguridad
 

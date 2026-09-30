@@ -668,6 +668,11 @@ func (g *Gateway) newSessionError(w http.ResponseWriter, r *http.Request, servic
 // Vive aparte de anotarSalud para poder comprobarse: la decisión de escribir es
 // la parte con lógica, y la escritura es un viaje al daemon dentro de una
 // goroutine que un test no debería tener que montar.
+//
+// El estado se apunta ya (así las peticiones que llegan mientras se escribe no
+// lanzan cada una su escritura), pero si la escritura falla saludFallida lo
+// deshace: sin eso, un fallo al anotar con el daemon a 503 dejaba el recuerdo
+// en "roto" y los fallos siguientes, con el daemon ya bien, ni se intentaban.
 func (g *Gateway) saludCambio(service string, sano bool) bool {
 	g.saludMu.Lock()
 	defer g.saludMu.Unlock()
@@ -679,6 +684,17 @@ func (g *Gateway) saludCambio(service string, sano bool) bool {
 	}
 	g.saludVista[service] = sano
 	return true
+}
+
+// saludFallida deshace lo que apuntó saludCambio cuando la escritura no llegó
+// al daemon, para que la siguiente noticia del mismo estado lo reintente. Si
+// entretanto el estado cambió, no toca nada: esa otra escritura manda.
+func (g *Gateway) saludFallida(service string, sano bool) {
+	g.saludMu.Lock()
+	defer g.saludMu.Unlock()
+	if previo, hay := g.saludVista[service]; hay && previo == sano {
+		delete(g.saludVista, service)
+	}
 }
 
 func (g *Gateway) anotarExito(service string) {
@@ -715,7 +731,8 @@ func (g *Gateway) anotarSalud(service string, sano bool, causa string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := mcp.SetHealth(ctx, g.Client(), service, sano, causa); err != nil {
-				log.Printf("%s: couldn't record its health in the snapshot: %v", service, err)
+				g.saludFallida(service, sano)
+				log.Printf("%s: couldn't record its health in the snapshot (will retry on the next request): %v", service, err)
 			}
 		})
 	}()
