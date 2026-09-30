@@ -53,3 +53,37 @@ type debPin struct {
 
 // elfMachine es el e_machine de los binarios de cada arquitectura.
 var elfMachine = map[string]uint16{"arm64": 0xb7, "amd64": 0x3e}
+
+// libndkPin es de dónde sale libndk_translation con arm_translation
+// "libndk": la imagen de sistema x86_64 del emulador de Android 14 (API 34,
+// "Google APIs", revisión 14), tal como la sirve Google en su repositorio del
+// SDK. La lista oficial
+// (https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml,
+// "system-images;android-34;google_apis;x86_64") da el tamaño y el sha1; el
+// sha256 se calculó el 2026-09-30 sobre el fichero bajado de esa URL, y el
+// sha1 del mismo fichero coincide con el de la lista. Dentro, system.img es
+// un disco GPT con una partición "super" (particiones dinámicas) y en ella el
+// ext4 "system" con /system/lib64/libndk_translation.so (de julio de 2024,
+// ro.ndk_translation.version=0.2.3), las bibliotecas arm64 que ve la app
+// (/system/lib64/arm64) y el lanzador de binfmt_misc. No se redistribuye: lo
+// baja quien construye (prototypes/android/docs/traduccion-arm.md).
+//
+// Se probó antes la de Android 12L (API 32, x86_64-32_r08.zip): su
+// libndk_translation (2022) no tiene todos los "thunks" que usa el dpkg de
+// Termux ("Bad thunk call") y el bootstrap no termina. La de API 33 no trae
+// traducción.
+var libndkPin = struct {
+	URL, SHA256, SHA1 string
+	Size              int64
+	Entry, Partition  string
+	Version, Android  string
+}{
+	URL:       "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r14.zip",
+	SHA256:    "783a40134baf4f3012d4464fbe1571b1612a0dbd2e7a44d14bd8328923443833",
+	SHA1:      "e0f6c9a0691aa27bd597d0deb1bcfdc943ac8ca7",
+	Size:      1563721130,
+	Entry:     "x86_64/system.img",
+	Partition: "system",
+	Version:   "0.2.3",
+	Android:   "14 (API 34)",
+}

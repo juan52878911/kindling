@@ -451,30 +451,44 @@ func (m *Manager) prepararBindsJail(id string) error {
 	return nil
 }
 
-// borrarJail borra el chroot de id, desmontando antes el bind del almacén.
-// Si el bind sigue montado NO se borra: RemoveAll no se para en los puntos de
-// montaje y se llevaría por delante el overlay de la instancia.
+// borrarJail borra el chroot de id, desmontando antes lo que haya montado
+// dentro (el bind del almacén). Si algo sigue montado NO se borra: RemoveAll
+// no se para en los puntos de montaje y se llevaría por delante el overlay de
+// la instancia.
+//
+// Los montajes se buscan en mountinfo en TODO el árbol del jail, no solo en
+// la ruta del bind: la raíz del chroot es del VMM, y renombrar un directorio
+// que contiene un punto de montaje se lleva el montaje con él. Mirar solo
+// dirBindJail(id) daría "no montado" y el borrado entraría en el almacén por
+// el nombre nuevo. Y el borrado mismo (borrarArbolSinCruzar) no sigue enlaces
+// ni entra en otro sistema de ficheros, por si algo se montó entre medias.
 func (m *Manager) borrarJail(id string) error {
 	base := filepath.Join(m.jailBase(), "firecracker", id)
-	if m.alm != nil {
-		dst := m.dirBindJail(id)
-		for i := 0; ; i++ {
-			encima, err := montadoEncima(dst)
-			if err != nil {
-				return fmt.Errorf("checking the store bind in the jail of %s: %w", shortID(id), err)
-			}
-			if !encima {
-				break
-			}
-			if i == 8 {
-				return fmt.Errorf("the store bind in the jail of %s is still mounted (%s): not removing the jail", shortID(id), dst)
-			}
-			if err := syscall.Unmount(dst, syscall.MNT_DETACH); err != nil {
-				return fmt.Errorf("unmounting the store bind in the jail of %s: %w", shortID(id), err)
+	canon := rutaCanonica(base)
+	for i := 0; ; i++ {
+		f, err := os.Open("/proc/self/mountinfo")
+		if err != nil {
+			return fmt.Errorf("checking the mounts in the jail of %s: %w", shortID(id), err)
+		}
+		ms, err := parsearMountinfo(f)
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("checking the mounts in the jail of %s: %w", shortID(id), err)
+		}
+		quedan := montajesBajo(ms, canon)
+		if len(quedan) == 0 {
+			break
+		}
+		if i == 8 {
+			return fmt.Errorf("%s is still mounted in the jail of %s: not removing the jail", quedan[0], shortID(id))
+		}
+		for _, p := range quedan {
+			if err := syscall.Unmount(p, syscall.MNT_DETACH); err != nil && !errors.Is(err, syscall.EINVAL) {
+				return fmt.Errorf("unmounting %s in the jail of %s: %w", p, shortID(id), err)
 			}
 		}
 	}
-	return os.RemoveAll(base)
+	return borrarArbolSinCruzar(base)
 }
 
 // barrerBindsJail desmonta, al arrancar, los binds del almacén que quedaron en

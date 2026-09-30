@@ -52,6 +52,13 @@ type Spec struct {
 	// Packages sustituye a la lista de .deb fijados que van en la base
 	// (subconjunto de debian_lock.go, por nombre; vacío = todos).
 	Packages []string `json:"packages,omitempty"`
+	// ARMTranslation es la traducción ARM de una imagen amd64 (issue #93,
+	// prototypes/android/docs/traduccion-arm.md): "none" (por defecto) quita
+	// el puente nativo que trae Redroid y deja las ABIs en x86_64; "libndk"
+	// pone el libndk_translation de la imagen del emulador de Google (fijada
+	// por URL y sha256, la baja el constructor); "redroid" deja el que trae
+	// Redroid tal cual. En arm64 no hay nada que traducir: "" o "none".
+	ARMTranslation string `json:"arm_translation,omitempty"`
 }
 
 // RedroidSource es una imagen de Redroid distinta de la fijada.
@@ -242,6 +249,15 @@ func (s *Spec) Validate() error {
 	}
 	if s.BaseName != "" && !reName.MatchString(s.BaseName) {
 		return fmt.Errorf("invalid base_name %q", s.BaseName)
+	}
+	switch s.ARMTranslation {
+	case "", TranslationNone:
+	case TranslationLibndk, TranslationRedroid:
+		if s.Arch != "amd64" {
+			return fmt.Errorf("arm_translation %q is for amd64 images: arm64 runs ARM apps natively", s.ARMTranslation)
+		}
+	default:
+		return fmt.Errorf("arm_translation must be none, libndk or redroid, not %q", s.ARMTranslation)
 	}
 	lock := debianLock[s.Arch]
 	for _, p := range s.Packages {
