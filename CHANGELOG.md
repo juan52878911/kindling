@@ -61,6 +61,14 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
 
+### Seguridad
+
+- **`kling db clone` ya no copia credenciales sin enmascarar.** La heurística de
+  columnas sospechosas solo miraba datos personales: `password_hash`,
+  `encrypted_password`, `api_key`, `access_token`, `client_secret`, `totp_seed`,
+  `private_key`, `jwt`, `salt`… pasaban tal cual al dorado. Ahora son sospechosas
+  (motivo `credential`) y, sin regla, la construcción se para salvo `-allow-unmasked`.
+
 ## v0.17.0 — 2026-09-29
 
 La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:

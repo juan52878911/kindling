@@ -105,10 +105,63 @@ var suspiciousSubstrings = []struct{ s, why string }{
 	{"fullname", "name"}, {"birthdate", "birth"},
 }
 
-// Suspicious dice si el nombre de una columna parece de un dato personal y
-// por qué ("" si no). Es una heurística por nombre: se equivoca hacia el lado
-// de bloquear (table_name es sospechosa; se marca keep y listo).
+// credentialTokens son palabras que, como trozo del nombre, delatan una
+// credencial: contraseñas (y sus hashes, sales y cifrados), secretos, tokens,
+// semillas de OTP y credenciales enteras. Un hash de contraseña también se
+// marca: con él se ataca la contraseña por fuerza bruta fuera de línea.
+var credentialTokens = map[string]bool{
+	"password": true, "passwd": true, "pwd": true, "pass": true, "passphrase": true, "passcode": true,
+	"secret": true, "secrets": true, "token": true, "jwt": true, "salt": true, "bearer": true,
+	"credential": true, "credentials": true, "creds": true,
+	"otp": true, "totp": true, "hotp": true, "mfa": true, "apikey": true, "privkey": true,
+}
+
+// credentialKeyPrefixes son las palabras que, delante de key, la convierten en
+// una clave de verdad (api_key, private_key, secret_key…); key sola no basta
+// (primary_key, sort_key, key en una tabla clave-valor).
+var credentialKeyPrefixes = map[string]bool{
+	"api": true, "private": true, "priv": true, "secret": true, "access": true, "signing": true,
+	"encryption": true, "master": true, "client": true, "auth": true, "ssh": true, "gpg": true,
+	"pgp": true, "hmac": true, "license": true, "live": true, "webhook": true,
+}
+
+// credentialSubstrings se buscan dentro del nombre entero, para los pegados
+// (userpassword, accesstoken, apikeyhash…).
+var credentialSubstrings = []string{
+	"password", "passwd", "passphrase", "secret", "credential", "apikey", "privatekey",
+	"accesstoken", "refreshtoken", "authtoken", "sessiontoken", "resettoken", "apitoken",
+	"idtoken", "bearertoken", "csrftoken", "otpseed", "totpseed",
+}
+
+// Credential dice si el nombre de una columna parece una credencial.
+func Credential(column string) bool {
+	toks := tokens(column)
+	for i, tok := range toks {
+		if credentialTokens[tok] {
+			return true
+		}
+		if tok == "key" && i > 0 && credentialKeyPrefixes[toks[i-1]] {
+			return true
+		}
+	}
+	// secretary/secretaría no son secretos.
+	low := strings.ReplaceAll(strings.ToLower(column), "secretar", "")
+	for _, s := range credentialSubstrings {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// Suspicious dice si el nombre de una columna parece de un dato personal o de
+// una credencial y por qué ("" si no). Es una heurística por nombre: se
+// equivoca hacia el lado de bloquear (table_name es sospechosa; se marca keep
+// y listo). Las credenciales van primero: password_hash dice "credential".
 func Suspicious(column string) string {
+	if Credential(column) {
+		return "credential"
+	}
 	for _, tok := range tokens(column) {
 		if why, ok := suspiciousTokens[tok]; ok {
 			return why

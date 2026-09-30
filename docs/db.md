@@ -793,7 +793,12 @@ error); una columna generada no admite regla (se recalcula de sus entradas).
 Por su nombre, partido en palabras (`firstName`, `billing_address2`): `email`/`mail`,
 `phone`/`tel`/`mobile`, `name` (y `first_name`, `surname`…), `dni`/`nif`/`nie`/`ssn`/
 `passport`, `iban`/`bic`, `card`/`pan`/`cvv`, `address`/`street`/`zip`/`postcode`, `ip`,
-`birth`/`dob`; y por su tipo, `inet`/`cidr`/`macaddr`. Sin regla, la construcción **se
+`birth`/`dob`; las **credenciales** (`password`, `passwd`, `pwd`, `passphrase`, `secret`,
+`token`, `jwt`, `salt`, `credentials`, `otp`/`totp`/`mfa`, y `key` detrás de `api`,
+`private`, `secret`, `access`, `client`, `signing`…: `password_hash`,
+`encrypted_password`, `api_key_digest`, `resetPasswordToken`, `stripe_secret_key`; el
+informe las marca `credential` y lo normal es `null` o `fixed:`); y por su tipo,
+`inet`/`cidr`/`macaddr`. Sin regla, la construcción **se
 para** y lista las columnas; `keep` las acepta una a una y `-allow-unmasked` todas (el
 informe las marca `LEFT UNMASKED`). Es una heurística que se equivoca hacia el lado de
 bloquear (`product_name` es sospechosa). `-strict` hace sospechosa además toda columna de
