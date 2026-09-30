@@ -188,6 +188,9 @@ type Manager struct {
 	// arranque en frío de cada microVM con volúmenes o carpetas compartidas.
 	// Ver imageHasBridgeCached.
 	bridgeOK sync.Map
+	// listoDeclarado memoriza, igual, qué imágenes declaran sonda o ganchos
+	// de "listo" (ver imagenDeclaraListo).
+	listoDeclarado sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
