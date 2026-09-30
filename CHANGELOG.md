@@ -68,6 +68,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `encrypted_password`, `api_key`, `access_token`, `client_secret`, `totp_seed`,
   `private_key`, `jwt`, `salt`… pasaban tal cual al dorado. Ahora son sospechosas
   (motivo `credential`) y, sin regla, la construcción se para salvo `-allow-unmasked`.
+- **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
+  las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
+  entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
+  pasado `8 MiB` (el tope del proxy por servicio) la llamada falla, sin truncar.
 
 ## v0.17.0 — 2026-09-29
 

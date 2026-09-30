@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -186,7 +187,7 @@ func probeMCP(url, token string) (string, []string, error) {
 			} `json:"serverInfo"`
 		} `json:"result"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&init)
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&init)
 	server := init.Result.ServerInfo.Name
 	if server == "" {
 		server = "MCP server"
@@ -208,7 +209,7 @@ func probeMCP(url, token string) (string, []string, error) {
 			} `json:"tools"`
 		} `json:"result"`
 	}
-	_ = json.NewDecoder(tr.Body).Decode(&tl)
+	_ = json.NewDecoder(io.LimitReader(tr.Body, 8<<20)).Decode(&tl)
 	names := make([]string, 0, len(tl.Result.Tools))
 	for _, t := range tl.Result.Tools {
 		names = append(names, t.Name)
@@ -279,7 +280,7 @@ func catalogCost(url, token string) (int, int, error) {
 			Tools []json.RawMessage `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.NewDecoder(tr.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(tr.Body, 8<<20)).Decode(&out); err != nil {
 		return 0, 0, err
 	}
 	b, _ := json.Marshal(out.Result.Tools)

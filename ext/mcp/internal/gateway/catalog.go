@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -401,9 +400,11 @@ func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, err
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
+	// Con tope: el invitado puede estar comprometido y el gateway se comparte;
+	// una respuesta sin fin lo tumbaría por memoria. Se falla, no se trunca.
+	b, err := api.LeerCuerpo(resp.Body, maxProxyBody)
+	if err != nil {
 		return nil, err
 	}
-	return mcp.MCPPayload(buf.Bytes()), nil
+	return mcp.MCPPayload(b), nil
 }
