@@ -797,18 +797,29 @@ Por su nombre, partido en palabras (`firstName`, `billing_address2`): `email`/`m
 `token`, `jwt`, `salt`, `credentials`, `otp`/`totp`/`mfa`, y `key` detrás de `api`,
 `private`, `secret`, `access`, `client`, `signing`…: `password_hash`,
 `encrypted_password`, `api_key_digest`, `resetPasswordToken`, `stripe_secret_key`; el
-informe las marca `credential` y lo normal es `null` o `fixed:`); y por su tipo,
-`inet`/`cidr`/`macaddr`. Sin regla, la construcción **se
+informe las marca `credential` y lo normal es `null` o `fixed:`); los mismos datos en
+español, portugués y francés (`correo`, `telefono`/`telefone`/`movil`/`celular`,
+`nombre`/`apellido`/`nome`/`prenom`, `cedula`/`cpf`/`curp`, `direccion`/`domicilio`/
+`endereco`/`adresse`, `nacimiento`/`nascimento`/`naissance`); en columnas de texto o
+JSON, además, palabras de identidad o texto libre (`login`, `handle`, `owner`,
+`recipient`, `sender`, `author`, `contact`, `notes`, `comment`, `bio` y sus
+equivalentes en español; `owner_id` numérico no cuenta). Y por su tipo, siempre (no
+solo con `-strict`): `inet`/`cidr`/`macaddr`, `json`/`jsonb`/`hstore`/`xml`,
+`tsvector`/`tsquery`, los geométricos (`point`, `polygon`…, `geometry`/`geography`) y
+los arrays de texto. Un `tsvector` guarda los lexemas del texto original y, como el
+enmascarado corre con los disparadores apagados, **no se regenera** aunque se enmascare
+su fuente: necesita su propia regla (`null`, y que la aplicación lo recalcule, o
+`keep` si se sabe que no guarda nada personal). Sin regla, la construcción **se
 para** y lista las columnas; `keep` las acepta una a una y `-allow-unmasked` todas (el
 informe las marca `LEFT UNMASKED`). Es una heurística que se equivoca hacia el lado de
 bloquear (`product_name` es sospechosa). `-strict` hace sospechosa además toda columna de
-texto, JSON, XML, `bytea` o array, se llame como se llame: la opción para quien no quiere
-que una columna `notes` con texto libre pase sin que nadie la mire.
+texto, XML, `bytea`, array o tipo de extensión, se llame como se llame: la opción para
+quien no quiere que una columna `summary` con texto libre pase sin que nadie la mire.
 
 ### Límites
 
-- **La detección es por nombre y tipo, no por contenido.** Una columna `notes` con
-  correos dentro pasa sin tratar salvo con `-strict`. Tampoco se miran dentro los JSON:
+- **La detección es por nombre y tipo, no por contenido.** Una columna de texto con
+  un nombre neutro (`summary`) y correos dentro pasa sin tratar salvo con `-strict`. Tampoco se miran dentro los JSON:
   a una columna JSON solo le valen `null`, `keep` o `fixed`.
 - **No se vuelcan** objetos grandes (`--no-blobs`), publicaciones, suscripciones,
   etiquetas de seguridad ni tablespaces. Las políticas de RLS que nombran roles de

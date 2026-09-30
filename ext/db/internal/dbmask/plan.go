@@ -95,6 +95,27 @@ var suspiciousTokens = map[string]string{
 	"address": "address", "addr": "address", "street": "address", "zip": "address", "postcode": "address", "postal": "address",
 	"ip": "ip", "ipaddr": "ip", "ipaddress": "ip",
 	"birth": "birth", "birthdate": "birth", "dob": "birth",
+	// español, portugués y francés: una base de aquí no se llama en inglés.
+	"correo": "email", "courriel": "email",
+	"telefono": "phone", "teléfono": "phone", "telefone": "phone", "téléphone": "phone", "telephone2": "phone",
+	"movil": "phone", "móvil": "phone", "celular": "phone", "portable": "phone",
+	"nombre": "name", "nombres": "name", "apellido": "name", "apellidos": "name", "nome": "name",
+	"sobrenome": "name", "nom": "name", "prenom": "name", "prénom": "name", "usuario": "name", "apodo": "name",
+	"cedula": "dni", "cédula": "dni", "cpf": "dni", "curp": "dni", "rut": "dni", "nss": "dni", "pasaporte": "dni",
+	"direccion": "address", "dirección": "address", "domicilio": "address", "calle": "address",
+	"endereco": "address", "endereço": "address", "morada": "address", "adresse": "address", "rue": "address",
+	"nacimiento": "birth", "nascimento": "birth", "naissance": "birth",
+}
+
+// weakTokens son palabras que, en una columna de texto o JSON, suelen guardar
+// quién es alguien o texto libre sobre él (login, handle, notes…). En una
+// columna numérica no dicen nada (owner_id es una clave).
+var weakTokens = map[string]bool{
+	"login": true, "handle": true, "recipient": true, "sender": true, "owner": true, "author": true,
+	"contact": true, "nick": true, "nickname": true, "notes": true, "note": true, "comment": true,
+	"comments": true, "bio": true, "signature": true,
+	"remitente": true, "destinatario": true, "contacto": true, "notas": true, "nota": true,
+	"comentario": true, "comentarios": true, "autor": true, "propietario": true,
 }
 
 // suspiciousSubstrings se buscan dentro del nombre entero (emailaddress,
@@ -103,6 +124,9 @@ var suspiciousSubstrings = []struct{ s, why string }{
 	{"email", "email"}, {"phone", "phone"}, {"iban", "iban"}, {"address", "address"},
 	{"passport", "dni"}, {"firstname", "name"}, {"lastname", "name"}, {"surname", "name"},
 	{"fullname", "name"}, {"birthdate", "birth"},
+	{"correo", "email"}, {"telefon", "phone"}, {"nombre", "name"}, {"apellido", "name"},
+	{"direccion", "address"}, {"domicilio", "address"}, {"nacimiento", "birth"},
+	{"endereco", "address"}, {"naissance", "birth"}, {"prenom", "name"},
 }
 
 // credentialTokens son palabras que, como trozo del nombre, delatan una
@@ -204,11 +228,84 @@ func tokens(s string) []string {
 	return out
 }
 
+// riskyType dice si el tipo de una columna guarda, sin que el nombre lo diga,
+// datos que no se pueden revisar por nombre: documentos (json, jsonb, hstore,
+// xml), el índice de texto (tsvector: los lexemas del texto original, y con
+// los disparadores apagados al enmascarar no se regenera), posiciones
+// (tipos geométricos, geography/geometry) y arrays de texto. Son sospechosos
+// siempre, no solo con -strict.
+func riskyType(c Column) bool {
+	if c.Category == "G" {
+		return true // point, polygon, circle…
+	}
+	base := strings.ToLower(c.Type)
+	for _, t := range []string{"json", "jsonb", "hstore", "xml", "tsvector", "tsquery"} {
+		if base == t || base == t+"[]" {
+			return true
+		}
+	}
+	for _, t := range []string{"geometry", "geography"} {
+		if base == t || strings.HasPrefix(base, t+"(") {
+			return true
+		}
+	}
+	if c.Category == "A" {
+		elem := strings.TrimSuffix(base, "[]")
+		if i := strings.IndexByte(elem, '('); i >= 0 {
+			elem = elem[:i]
+		}
+		switch strings.TrimSpace(elem) {
+		case "text", "character varying", "varchar", "character", "char", "citext", "name":
+			return true
+		}
+	}
+	return false
+}
+
+// textual dice si una columna guarda texto o documentos (donde una palabra
+// débil como notes u owner ya es motivo).
+func textual(c Column) bool {
+	return c.Category == "S" || riskyType(c)
+}
+
+// weak dice si alguna palabra del nombre es débil (ver weakTokens).
+func weak(column string) bool {
+	for _, tok := range tokens(column) {
+		if weakTokens[tok] {
+			return true
+		}
+	}
+	return false
+}
+
+// columnReason es por qué una columna es sospechosa ("" si no lo es).
+func columnReason(c Column, o Options) string {
+	if reason := Suspicious(c.Column); reason != "" {
+		return reason
+	}
+	if c.Category == "I" {
+		return "network address type"
+	}
+	if riskyType(c) {
+		return "type " + c.Type
+	}
+	if textual(c) && weak(c.Column) {
+		return "free text or identity"
+	}
+	if o.Strict && strictType(c) {
+		return "type " + c.Type
+	}
+	return ""
+}
+
 // strictTypes son los tipos que -strict exige tratar aunque el nombre no diga
-// nada: texto libre, JSON, XML, binario y arrays.
+// nada: texto libre, JSON, XML, binario y arrays (además de los de riskyType).
 func strictType(c Column) bool {
 	switch c.Category {
-	case "S", "A":
+	case "S", "A", "U":
+		return true
+	}
+	if riskyType(c) {
 		return true
 	}
 	base := strings.ToLower(c.Type)
@@ -356,13 +453,7 @@ func NewPlan(cat *Catalog, rules *Rules, o Options) (*Plan, error) {
 		if t := tables[c.Schema+"."+c.Table]; t != nil && t.Root != "" {
 			continue // la cubre la regla (o el hallazgo) de su tabla raíz
 		}
-		reason := Suspicious(c.Column)
-		if reason == "" && c.Category == "I" {
-			reason = "network address type"
-		}
-		if reason == "" && o.Strict && strictType(c) {
-			reason = "type " + c.Type
-		}
+		reason := columnReason(c, o)
 		if reason == "" {
 			continue
 		}

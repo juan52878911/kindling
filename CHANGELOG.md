@@ -68,6 +68,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `encrypted_password`, `api_key`, `access_token`, `client_secret`, `totp_seed`,
   `private_key`, `jwt`, `salt`… pasaban tal cual al dorado. Ahora son sospechosas
   (motivo `credential`) y, sin regla, la construcción se para salvo `-allow-unmasked`.
+- **`kling db clone` reconoce datos personales en español, portugués y francés y por
+  su tipo.** `correo`, `telefono`, `nombre`, `domicilio`… salían tal cual; también
+  `login`, `handle`, `owner`, `notes` en columnas de texto y, se llamaran como se
+  llamaran, `jsonb`, `hstore`, `tsvector` (sus lexemas no se regeneran con los
+  disparadores apagados), `point` y los arrays de texto. **Cambio de comportamiento:**
+  un clon que antes pasaba puede pararse ahora; se resuelve con una regla por columna
+  (`keep` si no es personal) o con `-allow-unmasked`.
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
