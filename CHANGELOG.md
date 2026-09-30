@@ -89,6 +89,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   y escapada como ruta o userinfo. **Incompatible**: una credencial que se usaba en
   otra cabecera, en `?key=` o en el cuerpo hay que volver a darla con `-header`,
   `-query` o `-body`. En macOS el daemon exige un `kling-vz` que anuncie `http-places`.
+- **`-allow-request`: `%3B` y las dobles codificaciones ya no se saltan el rechazo de
+  rutas ambiguas.** `/public/..%3B/admin` casaba con `GET /public/**` y salía como
+  `/public/..;/admin` (`/admin` para Tomcat o Spring). La ruta se mira también
+  decodificada: `;`, `%` restante (`%252e`), `\`, `//`, caracteres de control y
+  segmentos `.`/`..` son 403.
 
 ## v0.17.0 — 2026-09-29
 

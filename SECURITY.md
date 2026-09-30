@@ -292,6 +292,12 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   podría interpretar distinto de como lo hace `path.Clean`: una barra o un punto
   codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
   parámetro de ruta con `;` (tipo `;jsessionid=`), o un segmento `.`/`..` sin decodificar.
+  Y después mira la ruta decodificada una vez, que es la que sale al proveedor: un `;`
+  codificado (`%3B`), un `%` que quede tras decodificar (doble codificación, `%252e`),
+  una barra invertida, una barra doble, un carácter de control o un segmento `.`/`..`
+  también son 403. Antes `%3B` se colaba: `/public/..%3B/admin` casaba con
+  `GET /public/**` y salía como `/public/..;/admin`, que Tomcat o Spring leen como
+  `/admin`.
   No intenta adivinar qué haría el proveedor con eso: rechaza la ambigüedad en vez de
   arriesgarse a firmar una petición para una ruta que nunca se comprobó de verdad. Sin
   ninguna credencial con `Allow` esto no se mira, igual que antes de este cambio.
