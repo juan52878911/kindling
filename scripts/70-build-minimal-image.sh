@@ -48,12 +48,26 @@ case "$(uname -m)" in
   *) echo "arquitectura no soportada: $(uname -m)" >&2; exit 1 ;;
 esac
 
-BASE="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/$ALPINE_ARCH"
-echo "buscando el minirootfs de Alpine más reciente ($ALPINE_ARCH)..."
-TARBALL="$(curl -sfL "$BASE/" \
-  | grep -oE "alpine-minirootfs-[0-9.]+-$ALPINE_ARCH\.tar\.gz" | sort -V | tail -1)"
-[ -n "$TARBALL" ] || { echo "no pude resolver el minirootfs" >&2; exit 1; }
-echo "  -> $TARBALL"
+# El minirootfs, fijado con su sha256 y no "el más reciente de latest-stable":
+# lo que se descarga acaba siendo el sistema de cada microVM, y antes no se
+# comprobaba nada. Los hashes son los .sha256 que Alpine publica junto a cada
+# tarball. Otra versión pide su hash: ALPINE_VERSION=3.24.3 ALPINE_SHA256=<...>.
+ALPINE_VERSION="${ALPINE_VERSION:-3.24.2}"
+if [ -z "${ALPINE_SHA256:-}" ]; then
+  case "$ALPINE_VERSION-$ALPINE_ARCH" in
+    3.24.2-x86_64)  ALPINE_SHA256=c5ca053cfe1d85c5b96dff8b9bc57045f7f184a30ffb6b65776409ca90388677 ;;
+    3.24.2-aarch64) ALPINE_SHA256=9bf70a7f18ea44094cbb5f70c58f9af129c8214745743db0e68e5502cc2ce773 ;;
+    *) echo "no hay sha256 fijado para el minirootfs $ALPINE_VERSION ($ALPINE_ARCH): pásalo en ALPINE_SHA256" >&2; exit 1 ;;
+  esac
+fi
+BASE="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION%.*}/releases/$ALPINE_ARCH"
+TARBALL="alpine-minirootfs-$ALPINE_VERSION-$ALPINE_ARCH.tar.gz"
+echo "minirootfs de Alpine: $TARBALL"
+
+sha256_de() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
 
 work="$(mktemp -d)"
 mnt="$(mktemp -d)"
@@ -61,6 +75,9 @@ cleanup() { umount "$mnt" 2>/dev/null || true; rm -rf "$work"; rmdir "$mnt" 2>/d
 trap cleanup EXIT
 
 curl -#fL "$BASE/$TARBALL" -o "$work/rootfs.tar.gz"
+got="$(sha256_de "$work/rootfs.tar.gz")"
+[ "$got" = "$ALPINE_SHA256" ] || {
+  echo "sha256 de $TARBALL no coincide: $got, se esperaba $ALPINE_SHA256" >&2; exit 1; }
 
 mkdir -p "$ROOT/images"
 DEST="$ROOT/images/$NAME.ext4"

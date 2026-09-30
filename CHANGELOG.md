@@ -10,6 +10,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Scripts: descargas con versión y sha256 fijados.** `20-install-firecracker.sh`
+  (Firecracker v1.17.0), `70-build-minimal-image.sh` (minirootfs de Alpine 3.24.2) y
+  `71-build-glibc-base.sh` (Node v22.23.3) ya no instalan "la última" sin comprobar nada:
+  comprueban el sha256 fijado (el que publica cada proyecto) y paran si no coincide.
+  Otra versión se pide con su hash (`FC_VERSION`/`FC_SHA256`, `ALPINE_VERSION`/
+  `ALPINE_SHA256`, `NODE_VERSION`/`NODE_SHA256`). Chrome for Testing no publica hashes:
+  la base `chrome` exige `CHROME_SHA256` del zip de `CHROME_VERSION` (154.0.8037.92).
 - **Núcleo: el socket del daemon se prepara sin seguir enlaces.** Nace `0660` y cedido
   a `-socket-user` en un directorio privado y se renombra a su sitio; antes el `chmod`
   y el `chown` iban por el nombre y seguían un enlace puesto entre medias.
