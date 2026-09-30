@@ -10,6 +10,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Núcleo: los nombres de máquina son únicos.** Crear (`run`, `sandbox`, `run -from`,
+  `fork`, nodos de grafo) con un nombre que ya lleva otra máquina, o que es su ID, es
+  un `409`. Un nombre o un prefijo de ID que casa con varias máquinas ya no resuelve
+  a la primera del mapa, al azar, sino a ninguna: la autorización por nombre podía
+  caer sobre otra máquina (de otro inquilino) que se llamaba igual.
 - **`kling <comando de extensión>` ya no ejecuta cada extensión para leer su manifiesto.**
   La salida de `--kling-manifest` se guarda en `~/.local/state/kling/plugins/manifests.json`
   (0600), válida mientras el binario sea el mismo fichero (inodo, tamaño, mtime, ctime…) y

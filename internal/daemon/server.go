@@ -592,6 +592,8 @@ func runStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, machine.ErrShareRequest):
 		return http.StatusBadRequest
+	case errors.Is(err, machine.ErrNameTaken):
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }

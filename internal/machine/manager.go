@@ -121,6 +121,9 @@ type Manager struct {
 	bus  *events.Bus
 	mu   sync.RWMutex
 	byID map[string]*api.Machine
+	// nombresNaciendo son los nombres de las máquinas que run está creando y
+	// aún no están en byID (reservarNombre). Bajo mu.
+	nombresNaciendo map[string]bool
 
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
@@ -726,6 +729,12 @@ func (m *Manager) Get(ref string) (*api.Machine, bool) {
 	return c, ok
 }
 
+// get resuelve ref en este orden: ID exacto, nombre exacto, prefijo de ID (4
+// caracteres o más). Un nombre o un prefijo que casa con más de una máquina no
+// resuelve a ninguna: antes se devolvía la primera del mapa, al azar, y un `rm`
+// o la autorización por nombre (internal/daemon/authz.go) podían caer sobre
+// otra máquina que se llamaba igual. Los nombres nuevos son únicos
+// (reservarNombre); la ambigüedad solo queda para estados de antes.
 func (m *Manager) get(ref string) (*api.Machine, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -733,13 +742,60 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 		c := *mc
 		return &c, true
 	}
+	var porNombre, porPrefijo []*api.Machine
 	for _, mc := range m.byID {
-		if mc.Name == ref || (len(ref) >= 4 && len(mc.ID) >= len(ref) && mc.ID[:len(ref)] == ref) {
-			c := *mc
-			return &c, true
+		switch {
+		case mc.Name == ref:
+			porNombre = append(porNombre, mc)
+		case len(ref) >= 4 && strings.HasPrefix(mc.ID, ref):
+			porPrefijo = append(porPrefijo, mc)
 		}
 	}
+	for _, l := range [][]*api.Machine{porNombre, porPrefijo} {
+		switch len(l) {
+		case 0:
+			continue
+		case 1:
+			c := *l[0]
+			return &c, true
+		}
+		return nil, false
+	}
 	return nil, false
+}
+
+// ErrNameTaken: ya hay una máquina (o una que está naciendo) con ese nombre.
+var ErrNameTaken = errors.New("machine name is taken")
+
+// reservarNombre aparta nombre para una máquina que va a nacer: falla si ya lo
+// lleva otra, si otra está naciendo con él, o si es el ID de otra. La reserva
+// se suelta al volver de run; para entonces la máquina ya está en byID, que la
+// cubre. Un nombre vacío (el que run genera, con parte del ID) no se reserva.
+func (m *Manager) reservarNombre(nombre string) (func(), error) {
+	if nombre == "" {
+		return func() {}, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ocupado := m.nombresNaciendo[nombre] || m.byID[nombre] != nil
+	for _, mc := range m.byID {
+		if mc.Name == nombre {
+			ocupado = true
+			break
+		}
+	}
+	if ocupado {
+		return nil, fmt.Errorf("%w: %q (kling rm it, or pick another -name)", ErrNameTaken, nombre)
+	}
+	if m.nombresNaciendo == nil {
+		m.nombresNaciendo = map[string]bool{}
+	}
+	m.nombresNaciendo[nombre] = true
+	return func() {
+		m.mu.Lock()
+		delete(m.nombresNaciendo, nombre)
+		m.mu.Unlock()
+	}, nil
 }
 
 func (m *Manager) Count() int {
@@ -823,6 +879,13 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	default:
 		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
+	// El nombre es único: autorizar, borrar o entrar por nombre tiene que
+	// llevar siempre a la misma máquina (docs/authz.md).
+	soltarNombre, err := m.reservarNombre(req.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer soltarNombre()
 
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.

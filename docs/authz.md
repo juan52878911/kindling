@@ -183,9 +183,19 @@ error: uid 1003 has no role in the daemon's authz policy (/etc/kling/authz.json)
 
 ## Límites de este MVP
 
-- **Los nombres son globales.** Dos inquilinos no pueden tener una máquina, un
-  snapshot o un grafo con el mismo nombre, y el `409` de un nombre ocupado dice que
-  existe. No dice de quién ni deja tocarlo.
+- **Los nombres son globales y únicos.** Dos inquilinos no pueden tener una máquina,
+  un snapshot o un grafo con el mismo nombre, y el `409` de un nombre ocupado dice
+  que existe. No dice de quién ni deja tocarlo. En las máquinas lo impone el daemon
+  al crear (`run`, `sandbox`, `run -from`, `fork`, los nodos de un grafo): un nombre
+  que ya lleva otra máquina, o que es el ID de otra, es un `409`, también para un
+  admin. Así la autorización por nombre (`/machines/{ref}`) siempre mira la misma
+  máquina sobre la que luego actúa el handler, que recibe su ID exacto.
+- **Cómo se resuelve `{ref}`.** ID exacto, luego nombre exacto, luego prefijo de ID
+  (4 caracteres o más). Un nombre o un prefijo que casa con más de una máquina no
+  resuelve a ninguna (`404`): solo pasa con estados de antes de que los nombres
+  fueran únicos, y se deshace con el ID completo. Un nombre gana a un prefijo: quien
+  quiera la máquina de un prefijo que coincide con el nombre de otra usa el ID
+  completo.
 - **La política se lee al arrancar.** Cambiarla pide reiniciar el daemon.
 - **Sin cuotas.** Un inquilino puede llenar el host de máquinas hasta los topes del
   daemon (`KLING_MAX_MACHINES`, memoria, disco). El reparto por inquilino con cuotas
