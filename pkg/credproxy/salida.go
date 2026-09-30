@@ -8,6 +8,7 @@ package credproxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -49,30 +50,56 @@ func IsBlockedIP(ip net.IP) bool {
 }
 
 // PublicIPv4Lookup resuelve preguntando a dnsServer (puerto 53) y se queda
-// solo con las IPv4 que no son de IsBlockedIP. Plazo de 5 s por consulta.
+// solo con las IPv4 que no son de IsBlockedIP (ver LookupPublicIPv4).
 func PublicIPv4Lookup(dnsServer string) LookupFunc {
+	server := net.JoinHostPort(dnsServer, "53")
+	return func(ctx context.Context, host string) []string {
+		return LookupPublicIPv4(ctx, server, host)
+	}
+}
+
+// Reintentos de DNS. El resolver de Go espera 5 s por intento; con un plazo
+// total de 5 s, un solo datagrama perdido agotaba el plazo sin reintento y la
+// petición salía con 502 a los 5000 ms (medido: 2 de 60 consultas a 1.1.1.1
+// perdidas desde el lab). Tres intentos de 2 s cada uno.
+var (
+	dnsIntentos     = 3
+	dnsPlazoIntento = 2 * time.Second
+)
+
+// LookupPublicIPv4 pregunta a server ("ip:puerto") por los A de host y se queda
+// con las IPv4 que no son de IsBlockedIP. Solo pide A: el proxy y el ipset son
+// IPv4. Reintenta si un intento no llega a respuesta; un "no existe" es
+// definitivo. Vacío si no hay ninguna (falla CERRADO).
+func LookupPublicIPv4(ctx context.Context, server, host string) []string {
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, network, net.JoinHostPort(dnsServer, "53"))
+			return d.DialContext(ctx, network, server)
 		},
 	}
-	return func(ctx context.Context, host string) []string {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		addrs, err := r.LookupHost(ctx, host)
+	for i := 0; i < dnsIntentos && ctx.Err() == nil; i++ {
+		ictx, cancel := context.WithTimeout(ctx, dnsPlazoIntento)
+		addrs, err := r.LookupNetIP(ictx, "ip4", host)
+		cancel()
 		if err != nil {
-			return nil
+			var dnsErr *net.DNSError
+			if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+				return nil
+			}
+			continue
 		}
 		var out []string
 		for _, a := range addrs {
-			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !IsBlockedIP(ip) {
+			ip := net.IP(a.Unmap().AsSlice())
+			if ip.To4() != nil && !IsBlockedIP(ip) {
 				out = append(out, ip.String())
 			}
 		}
 		return out
 	}
+	return nil
 }
 
 // dialPublico es el dialer de toda salida del proxy (HTTP y Postgres): resuelve

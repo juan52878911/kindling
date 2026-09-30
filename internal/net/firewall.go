@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
 )
@@ -400,36 +399,14 @@ func (n *Net) credForwardRules() [][]string {
 // resolver (DNSResolver) al que se fuerza al invitado, para que lo que sembramos
 // coincida con lo que el invitado verá. Devuelve solo direcciones enrutables:
 // las privadas/link-local se descartan por seguridad (resolver envenenado).
+// Solo IPv4: las reglas de este fichero son iptables v4. Sin IP falla CERRADO:
+// el dominio simplemente no se permite.
 func resolvePublicIPv4(domain string) []string {
 	domain = strings.TrimSpace(domain)
 	if domain == "" {
 		return nil
 	}
-	r := &stdnet.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (stdnet.Conn, error) {
-			var d stdnet.Dialer
-			return d.DialContext(ctx, network, DNSResolver+":53")
-		},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	addrs, err := r.LookupHost(ctx, domain)
-	if err != nil {
-		return nil // falla CERRADO: sin IP, el dominio simplemente no se permite
-	}
-	var out []string
-	for _, a := range addrs {
-		ip := stdnet.ParseIP(a)
-		if ip == nil || ip.To4() == nil {
-			continue // solo IPv4: las reglas de este fichero son iptables v4
-		}
-		if isBlockedIP(ip) {
-			continue
-		}
-		out = append(out, ip.String())
-	}
-	return out
+	return credproxy.LookupPublicIPv4(context.Background(), DNSResolver+":53", domain)
 }
 
 // isBlockedIP dice si una IP cae en alguno de los rangos que jamás se permiten,

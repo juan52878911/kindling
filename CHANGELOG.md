@@ -10,6 +10,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Un paquete DNS perdido ya no tumba una petición del proxy de credenciales.** El proxy
+  y la allowlist resolvían con un plazo total de 5 s, el mismo que el resolver de Go da a
+  un solo intento: si se perdía el datagrama, no había reintento y la petición salía con
+  502 a los 5 000 ms (o el dominio no entraba en el ipset). Visto con la API paper de
+  Alpaca: 1 de las primeras peticiones de una máquina nueva; desde el lab se pierden 2 de
+  cada 60 consultas a 1.1.1.1. Ahora son tres intentos de 2 s, solo registros A, y un
+  NXDOMAIN no se reintenta.
 - **`kling <comando de extensión>` ya no ejecuta cada extensión para leer su manifiesto.**
   La salida de `--kling-manifest` se guarda en `~/.local/state/kling/plugins/manifests.json`
   (0600), válida mientras el binario sea el mismo fichero (inodo, tamaño, mtime, ctime…) y

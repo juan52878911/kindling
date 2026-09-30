@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // SetCredentials normaliza los dominios, devuelve los distintos ordenados (los
@@ -71,5 +72,104 @@ func TestIsBlockedIP(t *testing.T) {
 		if IsBlockedIP(net.ParseIP(s)) {
 			t.Errorf("%s no debería estar bloqueada", s)
 		}
+	}
+}
+
+// dnsFalso contesta por UDP en loopback a toda consulta A con ip, salvo las
+// primeras `tira`, que se pierden como un datagrama en la red. Con nx, contesta
+// NXDOMAIN. Cuenta las consultas recibidas.
+func dnsFalso(t *testing.T, tira int32, ip [4]byte, nx bool) (string, *atomic.Int32) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	var n atomic.Int32
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			m, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n.Add(1) <= tira || m < 12 {
+				continue
+			}
+			// Cabecera: mismo id, respuesta, RD+RA, una pregunta; luego la
+			// pregunta tal cual y, si hay, un A que apunta al nombre (0xc00c).
+			q := buf[:m]
+			resp := append([]byte{}, q[:2]...)
+			if nx {
+				resp = append(resp, 0x81, 0x83, 0, 1, 0, 0, 0, 0, 0, 0)
+			} else {
+				resp = append(resp, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0)
+			}
+			// Solo la pregunta: Go añade detrás un registro EDNS (OPT).
+			fin := 12
+			for fin < m && q[fin] != 0 {
+				fin += int(q[fin]) + 1
+			}
+			fin += 5 // el 0 final, tipo y clase
+			if fin > m {
+				continue
+			}
+			resp = append(resp, q[12:fin]...)
+			if !nx {
+				resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
+				resp = append(resp, ip[:]...)
+			}
+			pc.WriteTo(resp, from)
+		}
+	}()
+	return pc.LocalAddr().String(), &n
+}
+
+// Un datagrama DNS perdido no puede dejar al proxy sin IP: antes el plazo
+// total (5 s) era el de un solo intento del resolver de Go y la petición
+// salía con 502 a los 5000 ms.
+func TestLookupPublicIPv4ReintentaSiSePierdeLaConsulta(t *testing.T) {
+	defer func(p time.Duration) { dnsPlazoIntento = p }(dnsPlazoIntento)
+	dnsPlazoIntento = 200 * time.Millisecond
+
+	srv, n := dnsFalso(t, 2, [4]byte{93, 184, 216, 34}, false)
+	got := LookupPublicIPv4(context.Background(), srv, "api.example.com")
+	if len(got) != 1 || got[0] != "93.184.216.34" {
+		t.Fatalf("con 2 consultas perdidas = %v, quiero [93.184.216.34]", got)
+	}
+	if c := n.Load(); c != 3 {
+		t.Fatalf("consultas = %d, quiero 3 (dos perdidas y la buena, solo A)", c)
+	}
+
+	// Si se pierden todas, vacío (falla cerrado) sin pasar de los intentos.
+	srv, n = dnsFalso(t, 100, [4]byte{93, 184, 216, 34}, false)
+	if got := LookupPublicIPv4(context.Background(), srv, "api.example.com"); len(got) != 0 {
+		t.Fatalf("sin respuesta = %v, quiero vacío", got)
+	}
+	if c := n.Load(); c != int32(dnsIntentos) {
+		t.Fatalf("consultas sin respuesta = %d, quiero %d", c, dnsIntentos)
+	}
+}
+
+// Un NXDOMAIN es definitivo: no se reintenta. Y una IP bloqueada no sale nunca.
+func TestLookupPublicIPv4NoReintentaNXDOMAINNiDevuelveBloqueadas(t *testing.T) {
+	srv, n := dnsFalso(t, 0, [4]byte{93, 184, 216, 34}, true)
+	// Cuántas consultas hace una sola búsqueda de Go (según el sistema, prueba
+	// también con los sufijos de búsqueda): LookupPublicIPv4 no debe hacer más.
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, srv)
+	}}
+	r.LookupNetIP(context.Background(), "ip4", "no.example.com")
+	una := n.Load()
+	if got := LookupPublicIPv4(context.Background(), srv, "no.example.com"); len(got) != 0 {
+		t.Fatalf("NXDOMAIN = %v, quiero vacío", got)
+	}
+	if c := n.Load() - una; c != una {
+		t.Fatalf("consultas con NXDOMAIN = %d, quiero %d (un solo intento)", c, una)
+	}
+	srv, _ = dnsFalso(t, 0, [4]byte{10, 0, 0, 5}, false)
+	if got := LookupPublicIPv4(context.Background(), srv, "lan.example.com"); len(got) != 0 {
+		t.Fatalf("IP privada = %v, quiero vacío", got)
 	}
 }
