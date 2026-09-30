@@ -88,6 +88,9 @@ RECOMMENDED=(
   # dm-verity sobre la capa (docs/verity.md)
   BLK_DEV_DM DM_VERITY DM_VERITY_FEC CRYPTO_SHA256
 )
+# Traducción ARM en x86_64 (docs/traduccion-arm.md): los ejecutables arm64 van
+# al traductor por binfmt_misc.
+[ "$(valor X86_64)" = y ] && RECOMMENDED+=(BINFMT_MISC)
 
 fallos=0
 avisos=0

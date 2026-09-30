@@ -94,6 +94,10 @@ type Options struct {
 	// no reciben comandos ni ganchos. A una externa apagada ni siquiera se le
 	// pide el manifiesto: apagarla es no ejecutar nada suyo.
 	Disabled []string
+	// ManifestCache es el fichero donde se guardan los manifiestos ya leídos
+	// (cache.go), para no ejecutar cada extensión en cada invocación. Vacío =
+	// sin caché; kling usa DefaultManifestCache().
+	ManifestCache string
 }
 
 // DisabledError es el Err de una extensión apagada.
@@ -171,22 +175,25 @@ func Discover(ctx context.Context, o Options) *Registry {
 		claim(p)
 	}
 
+	cache := openManifestCache(o.ManifestCache, o.Version)
+	defer cache.save()
+
 	path := o.Path
 	if path == nil {
 		path = SearchPath()
 	}
 	for _, dir := range path {
-		entries, err := os.ReadDir(dir)
+		names, err := klingNames(dir)
 		if err != nil {
 			continue
 		}
-		companions := companionsIn(dir)
-		for _, e := range entries {
-			name, ok := strings.CutPrefix(e.Name(), "kling-")
-			if !ok || notPlugins[e.Name()] || companions[e.Name()] || strings.ContainsAny(name, ".") || seen[name] {
+		companions := companionsFrom(dir, names)
+		for _, base := range names {
+			name, _ := strings.CutPrefix(base, "kling-")
+			if notPlugins[base] || companions[base] || strings.ContainsAny(name, ".") || seen[name] {
 				continue
 			}
-			full := filepath.Join(dir, e.Name())
+			full := filepath.Join(dir, base)
 			if !isExecutable(full) {
 				continue
 			}
@@ -197,7 +204,7 @@ func Discover(ctx context.Context, o Options) *Registry {
 				r.Plugins = append(r.Plugins, p)
 				continue
 			}
-			p.Manifest, p.Err = loadManifest(ctx, full)
+			p.Manifest, p.Err = cache.manifest(ctx, full)
 			if p.Err == nil && p.Manifest.Name != name {
 				p.Err = fmt.Errorf("its manifest says it is %q, but the binary is kling-%s", p.Manifest.Name, name)
 			}
@@ -217,6 +224,15 @@ func isExecutable(path string) bool {
 }
 
 func loadManifest(ctx context.Context, path string) (*Manifest, error) {
+	raw, err := runManifest(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return parseManifest(raw)
+}
+
+// runManifest ejecuta path --kling-manifest y devuelve lo que imprime.
+func runManifest(ctx context.Context, path string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ManifestTimeout)
 	defer cancel()
 	var out bytes.Buffer
@@ -233,8 +249,14 @@ func loadManifest(ctx context.Context, path string) (*Manifest, error) {
 		}
 		return nil, fmt.Errorf("--kling-manifest failed: %v", err)
 	}
+	return out.Bytes(), nil
+}
+
+// parseManifest lee y valida lo que imprimió --kling-manifest. Lo que sale de
+// la caché pasa por aquí igual que lo recién ejecutado.
+func parseManifest(raw []byte) (*Manifest, error) {
 	var m Manifest
-	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("--kling-manifest did not print a valid manifest: %v", err)
 	}
 	if err := m.Validate(); err != nil {
@@ -293,16 +315,47 @@ func (r *Registry) DisabledFor(cmd string) *Plugin {
 // declararon como compañeros (leídos de sus kling-<n>.json): no son
 // extensiones y no se les pide manifiesto.
 func companionsIn(dir string) map[string]bool {
+	names, _ := klingNames(dir)
+	return companionsFrom(dir, names)
+}
+
+// companionsFrom es companionsIn con el directorio ya leído (names, de
+// klingNames): Discover recorre todo el PATH y leerlo dos veces se nota.
+func companionsFrom(dir string, names []string) map[string]bool {
 	out := map[string]bool{}
-	matches, _ := filepath.Glob(filepath.Join(dir, "kling-*.json"))
-	for _, m := range matches {
-		if s, err := readSidecar(m); err == nil {
+	for _, n := range names {
+		if !strings.HasSuffix(n, ".json") {
+			continue
+		}
+		if s, err := readSidecar(filepath.Join(dir, n)); err == nil {
 			for _, c := range s.Companions {
 				out[c] = true
 			}
 		}
 	}
 	return out
+}
+
+// klingNames son, ordenados, los nombres kling-* de dir. Solo ordena esos: un
+// /usr/bin tiene miles de entradas y ninguna interesa.
+func klingNames(dir string) ([]string, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	all, err := f.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, n := range all {
+		if strings.HasPrefix(n, "kling-") {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // CompanionsIn son, ordenados, los compañeros que declaran las extensiones

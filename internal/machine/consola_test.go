@@ -187,3 +187,110 @@ func TestSweepMachineDirsNoTocaFirecrackerLog1DeUnaMaquinaConocida(t *testing.T)
 		t.Fatalf("firecracker.log.1 cambió de contenido: %q", got)
 	}
 }
+
+// Con KLING_JAILER=0 el VMM ve el disco del host y el directorio de su
+// máquina es suyo: puede cambiar firecracker.log (o .log.1) por un enlace a
+// un fichero del host. El daemon, que es root, no puede truncarlo, ni
+// escribir la consola del invitado en él, ni devolverlo por Logs.
+func TestConsolaNoSigueEnlacesPlantados(t *testing.T) {
+	fichHost := func(t *testing.T, tam int64) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "del-host")
+		if err := os.WriteFile(p, []byte("contenido del host\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if tam > 0 {
+			if err := os.Truncate(p, tam); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+	tamDe := func(t *testing.T, p string) int64 {
+		t.Helper()
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Size()
+	}
+
+	t.Run("abrirConsola no trunca el destino", func(t *testing.T) {
+		dir, host := t.TempDir(), fichHost(t, 0)
+		if err := os.Symlink(host, filepath.Join(dir, "firecracker.log")); err != nil {
+			t.Fatal(err)
+		}
+		f, err := abrirConsola(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		if b, _ := os.ReadFile(host); string(b) != "contenido del host\n" {
+			t.Fatalf("abrirConsola truncó el fichero del host: %q", b)
+		}
+		if fi, err := os.Lstat(filepath.Join(dir, "firecracker.log")); err != nil || !fi.Mode().IsRegular() {
+			t.Fatalf("firecracker.log no es un fichero nuevo: %v", err)
+		}
+	})
+
+	t.Run("rotar no trunca ni copia el destino", func(t *testing.T) {
+		dir, host := t.TempDir(), fichHost(t, consolaMaxBytes+4096)
+		if err := os.Symlink(host, filepath.Join(dir, "firecracker.log")); err != nil {
+			t.Fatal(err)
+		}
+		if err := rotarConsola(dir); err == nil {
+			t.Error("rotarConsola rotó un enlace sin quejarse")
+		}
+		if got := tamDe(t, host); got != consolaMaxBytes+4096 {
+			t.Fatalf("rotarConsola truncó el fichero del host: %d bytes", got)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "firecracker.log.1")); !os.IsNotExist(err) {
+			t.Fatalf("copió el fichero del host a firecracker.log.1: %v", err)
+		}
+	})
+
+	t.Run("rotar no trunca un hardlink", func(t *testing.T) {
+		dir, host := t.TempDir(), fichHost(t, consolaMaxBytes+4096)
+		if err := os.Link(host, filepath.Join(dir, "firecracker.log")); err != nil {
+			t.Skip(err)
+		}
+		_ = rotarConsola(dir)
+		if got := tamDe(t, host); got != consolaMaxBytes+4096 {
+			t.Fatalf("rotarConsola truncó el fichero del host por un hardlink: %d bytes", got)
+		}
+	})
+
+	t.Run("rotar no escribe a traves de firecracker.log.1", func(t *testing.T) {
+		dir, host := t.TempDir(), fichHost(t, 0)
+		f, err := abrirConsola(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := f.Truncate(consolaMaxBytes + 4096); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(host, filepath.Join(dir, "firecracker.log.1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := rotarConsola(dir); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(host); string(b) != "contenido del host\n" {
+			t.Fatalf("la consola del invitado se escribió en el fichero del host (%d bytes)", len(b))
+		}
+		if fi, err := os.Lstat(filepath.Join(dir, "firecracker.log.1")); err != nil || !fi.Mode().IsRegular() || fi.Size() != consolaKeepBytes {
+			t.Fatalf("firecracker.log.1 no quedó como la cola rotada: %v", err)
+		}
+	})
+
+	t.Run("Logs no lee el destino", func(t *testing.T) {
+		dir, host := t.TempDir(), fichHost(t, 0)
+		if err := os.Symlink(host, filepath.Join(dir, "firecracker.log")); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := leerCola(filepath.Join(dir, "firecracker.log"), logMaxBytes); err == nil {
+			t.Fatalf("leerCola devolvió el fichero del host: %q", b)
+		}
+	})
+}

@@ -132,8 +132,10 @@ Imita el namespace de Linux para que un snapshot sirva en los dos sistemas:
   propia de la pila porque el puente del invitado pone una ruta on-link a ella y
   pregunta por ARP.
 - **DNS**: toda consulta al puerto 53 (UDP y TCP), vaya a la IP que vaya, se
-  contesta aquí. Se reenvía al primer `nameserver` IPv4 de `/etc/resolv.conf`
-  del Mac (o a `1.1.1.1` si no hay).
+  contesta aquí. Se reenvía a `1.1.1.1`, como en Linux, y nunca al resolver
+  del Mac: ese suele ser privado (router, VPN) y contestaría la intranet por
+  split-horizon. Con topes por máquina: 64 flujos UDP y 64 conexiones TCP al
+  53, 32 consultas en vuelo y 200/s (ráfagas de 400) hacia el upstream.
 - **TCP y UDP de salida**: la pila termina cada conexión del invitado y la
   vuelve a abrir desde el Mac solo si la política lo permite. Los flujos UDP se
   cierran tras 60 s sin tráfico.
@@ -243,10 +245,20 @@ Resultado en un Mac M4 (16 GiB, macOS 26.5.1), 1 vCPU y 256 MiB, 2026-09-23:
 MMDS). Para que un fallo ahí no llegue al resto del Mac, al crear o restaurar la
 VM se encierra en `cmd/kling-vz/kling-vz.sb` con `sandbox_init_with_parameters`:
 
-- lee bajo la raíz de kindling (kernel, imágenes, dorados) y `/etc/resolv.conf`;
-- escribe solo en el directorio de su máquina, `snapshots/` y `volumes/`;
-- escucha en su socket y en loopback, y sale a la red solo si la máquina tiene
-  egress distinto de `none`;
+- lee y escribe su directorio (`machines/<id>`), lee los ficheros exactos de
+  su VM (kernel, discos de solo lectura, el estado que restaura) y escribe los
+  de lectura y escritura (su overlay, sus volúmenes). Nada más de la raíz: ni
+  `secrets/`, ni los dorados que no restaura, ni otras máquinas;
+- no escribe en `snapshots/`: el dorado de `kling commit` lo vuelca en su
+  directorio y lo coloca el **custodio** (`internal/custodio`), un proceso que
+  lanza antes de encerrarse, confinado en su propio perfil, que solo clona a
+  `snapshots/<nombre>/{snap,mem}.file` en un directorio que ya existe, sin
+  `meta.json` y sin pisar ningún fichero;
+- escucha en su socket y en `127.0.0.1` solo en el rango de los reenvíos
+  (29000-29999); sale a la red solo si la máquina tiene egress distinto de
+  `none`, y al loopback del Mac solo en allowlist (el `-upstream` de una
+  credencial) y nunca al rango de los reenvíos, donde está el agente de las
+  demás máquinas;
 - de los sockets Unix de fuera, solo puede abrir el del broker de enlaces del
   daemon (`KLING_VZ_BROKER`), por el que pide las conexiones de las aristas de un
   grafo y de `kling db attach` (`internal/grafo`, `pkg/linkbroker`).
@@ -254,7 +266,9 @@ VM se encierra en `cmd/kling-vz/kling-vz.sb` con `sandbox_init_with_parameters`:
 La raíz la pasa el daemon en `KLING_VZ_CONFINE_ROOT`, y el broker en
 `KLING_VZ_BROKER`; sin la raíz (lanzado a mano) no se confina y lo dice en el log. `KLING_VZ_NO_SANDBOX=1` lo apaga para
 diagnosticar un perfil que una versión nueva de macOS rompa. Probado en macOS
-26.5 con arranque, exec, snapshot, restauración y egress `none`/`internet`.
+26.5 con arranque, exec, volúmenes, freeze/thaw, commit a un dorado, arrancar
+de él y egress `none`/`internet`/`allowlist`. `scripts/sandbox-perfil.sh`
+comprueba el perfil con `sandbox-exec` (y, dándole otro perfil, qué abría).
 
 Los reenvíos en loopback, además, solo aceptan conexiones de procesos del mismo
 usuario (`internal/peercred`).

@@ -1,13 +1,23 @@
 ;; Perfil de sandbox de kling-vz. Lo aplica el propio proceso (confine_darwin.go)
 ;; justo antes de crear o restaurar la VM. kling-vz procesa dentro de sí el
 ;; tráfico del invitado (pila de red de usuario, DNS, MMDS): si un invitado hostil
-;; encontrara un fallo ahí, esto es lo que puede tocar. Parámetros:
-;;   ROOT  la raíz de datos de kindling
-;;   MDIR  el directorio de esta máquina
-;;   NET   "1" si la máquina tiene salida (egress distinto de none)
-;;   BROKER el socket del daemon por el que se piden las conexiones de las
-;;          aristas de grafo y de kling db attach (pkg/linkbroker)
-;;   GFX   "1" si la máquina tiene pantalla virtio-gpu (KLING_VZ_GRAPHICS)
+;; encontrara un fallo ahí, esto es lo que puede tocar. Y lo que no: las demás
+;; máquinas. Nada de la raíz entera: ni secrets/ (la clave de la que salen las
+;; de todos los credentials.enc), ni los dorados de otros, ni sus directorios,
+;; ni sus reenvíos. Parámetros (todos presentes; "" = no hay):
+;;   ROOT    la raíz de datos de kindling
+;;   MDIR    el directorio de esta máquina
+;;   NET     "1" si la máquina tiene salida (egress distinto de none)
+;;   LOOP    "1" si puede marcar al loopback del Mac (allowlist: el upstream
+;;           127.0.0.1:5432 de una credencial), nunca a los reenvíos
+;;   BROKER  el socket del daemon por el que se piden las conexiones de las
+;;           aristas de grafo y de kling db attach (pkg/linkbroker)
+;;   GFX     "1" si la máquina tiene pantalla virtio-gpu (KLING_VZ_GRAPHICS)
+;;   L0..L15 ficheros que solo lee: kernel, discos de solo lectura, el estado
+;;           que restaura (su dorado o su congelación)
+;;   E0..E15 ficheros que lee y escribe: sus discos de lectura y escritura
+;;           (su overlay, sus volúmenes)
+;;   FMIN FMAX el rango de puertos de los reenvíos (credproxy.ForwardPort*)
 (version 1)
 (deny default)
 (import "system.sb")
@@ -24,27 +34,43 @@
 (allow ipc-posix-shm-read* ipc-posix-shm-write-data)
 (allow file-read-metadata)
 
-;; Ficheros: leer la raíz de kindling (kernel, imágenes, dorados) y el
-;; resolv.conf del Mac; escribir solo lo de esta máquina, los snapshots y los
-;; volúmenes. Nada más del disco: ni el HOME, ni las claves SSH.
-(allow file-read*
-  (subpath (param "ROOT"))
-  (literal "/etc/resolv.conf")
-  (literal "/private/etc/resolv.conf"))
-(allow file-read* file-write* file-ioctl
-  (subpath (param "MDIR"))
-  (subpath (string-append (param "ROOT") "/snapshots"))
-  (subpath (string-append (param "ROOT") "/volumes")))
+(define (si-hay nombre regla)
+  (if (not (string=? (param nombre) "")) (regla (param nombre))))
+(define (cada-uno prefijo n regla)
+  (if (> n 0)
+    (begin (si-hay (string-append prefijo (number->string (- n 1))) regla)
+           (cada-uno prefijo (- n 1) regla))))
+(define (cada-puerto desde hasta regla)
+  (if (<= desde hasta)
+    (begin (regla (string-append "localhost:" (number->string desde)))
+           (cada-puerto (+ desde 1) hasta regla))))
+(define fmin (string->number (param "FMIN")))
+(define fmax (string->number (param "FMAX")))
 
-;; Red: su API (socket Unix en el directorio de la máquina) y los reenvíos en
-;; loopback siempre; el socket del broker del daemon, y ningún otro socket Unix
-;; de fuera; salida al exterior, solo si la máquina la tiene.
+;; Ficheros: su directorio entero (socket, log de auditoría, overlay y
+;; congelación) y los ficheros exactos de su VM. Un snapshot dorado de
+;; kling commit (snapshots/<nombre>/) no lo escribe este proceso: lo vuelca en
+;; su directorio y lo coloca el custodio (vz/internal/custodio).
+(allow file-read* file-write* file-ioctl (subpath (param "MDIR")))
+(cada-uno "L" 16 (lambda (f) (allow file-read* (literal f))))
+(cada-uno "E" 16 (lambda (f) (allow file-read* file-write* file-ioctl (literal f))))
+
+;; Red: su API (socket Unix en el directorio de la máquina) y sus reenvíos,
+;; que solo escuchan en 127.0.0.1 y en el rango reservado; el socket del
+;; broker del daemon y ningún otro socket Unix de fuera; salida al exterior
+;; solo si la máquina la tiene; y al loopback del Mac (0.0.0.0 incluido, que
+;; en macOS llega a él) solo con LOOP, y nunca al rango de los reenvíos, donde
+;; está el agente (exec) de las demás máquinas.
 (allow network-bind network-inbound (local unix-socket (subpath (param "MDIR"))))
-(allow network-bind network-inbound (local ip "localhost:*"))
-(allow network-outbound (remote ip "localhost:*"))
+(cada-puerto fmin fmax (lambda (hp) (allow network-bind network-inbound (local ip hp))))
 (allow network-outbound (remote unix-socket (path-literal (param "BROKER"))))
 (if (string=? (param "NET") "1")
   (allow network-outbound (remote ip "*:*")))
+(deny network-outbound (remote ip "localhost:*"))
+(if (string=? (param "LOOP") "1")
+  (begin
+    (allow network-outbound (remote ip "localhost:*"))
+    (cada-puerto fmin fmax (lambda (hp) (deny network-outbound (remote ip hp))))))
 
 ;; Pantalla virtio-gpu: el framework entrega el scanout como IOSurface al
 ;; proceso auxiliar de Apple y para eso emite una extensión de sandbox; sin
@@ -53,3 +79,9 @@
 ;; generic-issue-extension (ni iokit-, ni file-, ni mach-issue-extension solos).
 (if (string=? (param "GFX") "1")
   (allow generic-issue-extension))
+
+;; Por si un fichero de la VM apuntara ahí (un disco o un estado mal
+;; reapuntado por el daemon): secrets/ nunca, y los dorados nunca para
+;; escribir. Van al final para ganar a cualquier regla anterior.
+(deny file-read* file-write* (subpath (string-append (param "ROOT") "/secrets")))
+(deny file-write* (subpath (string-append (param "ROOT") "/snapshots")))

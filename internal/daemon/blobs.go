@@ -78,7 +78,7 @@ func (s *Server) resolveBlob(name, part string, write bool) (blobTarget, error) 
 func blobSidecarPath(path string) string { return path + ".sha256" }
 
 // cachedSHA256 devuelve el sha256 de path, releyéndolo entero solo si su
-// tamaño o su mtime cambiaron desde la última vez que se calculó (D-03).
+// huella (huellaBlob) cambió desde la última vez que se calculó (D-03).
 //
 // Sin esto, GET y HEAD de /images/{name}/blob hasheaban el fichero entero en
 // cada llamada — varios GiB para una imagen normal — antes de contestar
@@ -91,19 +91,33 @@ func cachedSHA256(path string) (string, error) {
 		return "", err
 	}
 	side := blobSidecarPath(path)
+	huella := huellaBlob(fi)
 	if b, err := os.ReadFile(side); err == nil {
-		if parts := strings.SplitN(strings.TrimSpace(string(b)), ":", 3); len(parts) == 3 &&
-			parts[0] == strconv.FormatInt(fi.Size(), 10) &&
-			parts[1] == strconv.FormatInt(fi.ModTime().UnixNano(), 10) {
-			return parts[2], nil
+		linea := strings.TrimSpace(string(b))
+		if i := strings.LastIndexByte(linea, ':'); i > 0 && linea[:i] == huella {
+			return linea[i+1:], nil
 		}
 	}
 	hash, err := digest.File(path)
 	if err != nil {
 		return "", err
 	}
-	writeSidecar(side, fi.Size(), fi.ModTime().UnixNano(), hash)
+	// La huella de ANTES de leer: si el fichero cambió mientras se hasheaba,
+	// la siguiente lectura no coincidirá y se rehará.
+	writeSidecar(side, huella, hash)
 	return hash, nil
+}
+
+// huellaBlob es lo que tiene que seguir igual para fiarse del sha256 cacheado:
+// tamaño, mtime, inodo y ctime. Tamaño y mtime solos no bastan: reescribir el
+// fichero con el mismo tamaño y devolverle su mtime (touch -r, cp -p, un
+// rsync con -t) dejaba servir un hash que ya no era el suyo, y el destino de
+// un `images copy` verifica contra ESE hash. El ctime no se puede poner a mano
+// (cambia con cualquier escritura, chmod o utimes), y el inodo cambia si
+// alguien sustituye el fichero por otro.
+func huellaBlob(fi os.FileInfo) string {
+	ino, ctime := identidadFichero(fi)
+	return fmt.Sprintf("%d:%d:%d:%d", fi.Size(), fi.ModTime().UnixNano(), ino, ctime)
 }
 
 // cacheSHA256 escribe el sidecar de path con un hash ya conocido (por
@@ -111,21 +125,21 @@ func cachedSHA256(path string) (string, error) {
 // fichero para confirmarlo.
 func cacheSHA256(path, hash string) {
 	if fi, err := os.Stat(path); err == nil {
-		writeSidecar(blobSidecarPath(path), fi.Size(), fi.ModTime().UnixNano(), hash)
+		writeSidecar(blobSidecarPath(path), huellaBlob(fi), hash)
 	}
 }
 
-// writeSidecar escribe "size:mtime_ns:hash" en side de forma atómica
-// (temporal + rename). Mejor esfuerzo: el sidecar es una caché, no una
-// fuente de verdad — si falla al escribirse, la próxima lectura simplemente
-// vuelve a hashear el fichero.
-func writeSidecar(side string, size, mtimeNS int64, hash string) {
+// writeSidecar escribe "huella:hash" en side de forma atómica (temporal +
+// rename). Mejor esfuerzo: el sidecar es una caché, no una fuente de verdad —
+// si falla al escribirse, la próxima lectura simplemente vuelve a hashear el
+// fichero.
+func writeSidecar(side, huella, hash string) {
 	tmp, err := os.CreateTemp(filepath.Dir(side), ".sha256-*")
 	if err != nil {
 		return
 	}
 	defer os.Remove(tmp.Name()) // no-op si el rename de abajo tuvo éxito
-	if _, err := fmt.Fprintf(tmp, "%d:%d:%s\n", size, mtimeNS, hash); err != nil {
+	if _, err := fmt.Fprintf(tmp, "%s:%s\n", huella, hash); err != nil {
 		tmp.Close()
 		return
 	}
@@ -208,6 +222,16 @@ func (s *Server) handlePutImageBlob(w http.ResponseWriter, r *http.Request) {
 	t, err := s.resolveBlob(r.PathValue("name"), r.URL.Query().Get("part"), true)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	// Una imagen es monolítica O por capas, nunca las dos: con los dos
+	// ficheros manda el .ext4 (ver machine/layer.go), así que una capa subida
+	// sobre una monolítica no se usaba nunca —y el copy decía que sí—, y una
+	// monolítica sobre una por capas dejaba la capa y su receta mezcladas con
+	// ella. Se mira antes de recibir nada: son gigas.
+	if otra, ok := s.formaContraria(t); ok {
+		fail(w, http.StatusConflict, fmt.Errorf("image %q already exists as a %s on this daemon; "+
+			"remove it first (kling images rm %s) to replace it with a %s", t.name, otra, t.name, t.part))
 		return
 	}
 	if r.ContentLength > api.MaxBlobBytes {
@@ -334,4 +358,26 @@ func (s *Server) blobReplaceable(t blobTarget) error {
 func (s *Server) esCapa(name string) bool {
 	_, err := os.Stat(filepath.Join(s.root, "images", name+".layer.ext4"))
 	return err == nil
+}
+
+// formaContraria dice si name ya existe con la otra forma que t: una capa
+// cuando se sube el ext4 monolítico, o al revés.
+func (s *Server) formaContraria(t blobTarget) (string, bool) {
+	var otra string
+	switch t.part {
+	case api.BlobImage:
+		otra = api.BlobLayer
+	case api.BlobLayer:
+		otra = api.BlobImage
+	default:
+		return "", false
+	}
+	o, err := s.resolveBlob(t.name, otra, true)
+	if err != nil {
+		return "", false
+	}
+	if _, err := os.Lstat(o.path); err != nil {
+		return "", false
+	}
+	return otra, true
 }

@@ -74,7 +74,8 @@ Cada máquina vive en su propio namespace de red. La política por defecto es **
 Un valor de egress desconocido es un **error**, no una caída al modo más permisivo, y la
 política viaja con el snapshot del servicio: reimportar o curar un servicio la conserva.
 
-El resolver de `allowlist` está acotado: como máximo 32 consultas a la vez y ~200/s (ráfaga
+El resolver de `allowlist` está acotado (en Linux; en macOS, desde §22, también el DNS de
+`kling-vz`, en todos los modos): como máximo 32 consultas a la vez y ~200/s (ráfaga
 400) por microVM; por encima de eso responde SERVFAIL en el sitio, sin abrir un socket al
 upstream ni lanzar el `ip netns exec ... ipset add` que sembraría la ruta. Antes, un
 invitado que repitiera una consulta A miles de veces por segundo hacía que el host abriera
@@ -345,8 +346,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   - `kling-vz` es el proceso que termina el tráfico del invitado (pila TCP, DNS, MMDS).
     Un invitado que encontrara un fallo explotable ahí tendría la clave en la misma
     memoria; antes de este cambio, ese mismo fallo le daba un proceso sin claves. El
-    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca, pero
-    no protege la memoria del propio proceso.
+    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca (solo
+    los de su máquina, §22), pero no protege la memoria del propio proceso.
   - La memoria del invitado vive en otro proceso (el auxiliar de Apple), así que la clave
     no entra en su volcado de estado ni en un snapshot. `kling-vz` no la escribe a disco
     ni a su log.
@@ -1103,6 +1104,79 @@ saber quién le habla por el origen**. Por eso (#110):
 Lo que no cubre: el token viaja en claro por el tramo anfitrión → invitado, como todo lo
 del proxy y de las aristas (§15); y la API no tiene shell (cada ruta valida sus
 argumentos), así que un token de control da el teléfono, no root en la VM.
+
+### 22. macOS: `kling-vz` es lo que el invitado tiene delante
+
+En el Mac no hay netns, iptables ni resolver en el host: la pila TCP/IP (gVisor), el DNS
+y MMDS de cada invitado corren dentro de su `kling-vz`, que es un proceso del usuario.
+Un fallo explotable ahí es código del invitado corriendo como el usuario, así que lo que
+ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
+
+- **El perfil de sandbox aísla a una máquina de las demás** (`vz/cmd/kling-vz/kling-vz.sb`,
+  `vz/internal/custodio`). Hasta ahora dejaba a `kling-vz` leer toda la raíz, incluido
+  `secrets/snapshot.key` (la clave HMAC y la maestra de la que HKDF deriva la de cada
+  `credentials.enc`), escribir en `snapshots/` y `volumes/` enteros y conectar a
+  `localhost:*` aunque la máquina no tuviera red: un fallo en la pila de red, el DNS o
+  MMDS daba las credenciales de todas las máquinas, reescribir el `mem.file` de
+  cualquier dorado (que no lleva hash: es la memoria de cada instancia futura) y
+  conectar al agente (exec) de las demás por sus reenvíos. Ahora:
+  - **Ficheros**: su directorio y los ficheros exactos de su VM, que se conocen al
+    confinarse (justo antes de crear o restaurar, con los discos ya reapuntados): el
+    kernel, los discos de solo lectura y el estado que restaura, para leer; su overlay y
+    sus volúmenes, para leer y escribir. Nunca `secrets/`, nunca escribir en
+    `snapshots/` (dos reglas al final del perfil, por si el daemon le pasara ahí un
+    disco). `kling-vz` no necesita ninguna clave de disco: las credenciales le llegan ya
+    en claro por su API.
+  - **Dorados**: `kling commit` pide el volcado en `snapshots/<nombre>/`, un nombre que
+    no se sabe al confinarse. `kling-vz` lo vuelca en su directorio y un proceso
+    **custodio** (el mismo binario, lanzado antes de encerrarse, confinado en su propio
+    perfil: leer el directorio de la máquina, escribir bajo `snapshots/`, sin red) lo
+    clona (`clonefile`) a su sitio. El custodio no se fía de `kling-vz`: solo escribe
+    `snap.file` o `mem.file`, en un directorio que ya existe justo debajo de
+    `snapshots/` (lo crea el daemon) y que no tiene `meta.json`, sin seguir enlaces y
+    sin pisar un fichero que exista. Un dorado terminado no se puede tocar; lo peor que
+    hace un `kling-vz` tomado es adelantarse al commit en curso de otra máquina, que
+    falla en vez de quedar corrupto. Al clonar, lo que se escriba después en el origen
+    no llega al dorado.
+  - **Red**: escucha solo en `127.0.0.1:29000-29999` (sus reenvíos); sale al exterior
+    solo con egress distinto de none; al loopback del Mac (que para el sandbox incluye
+    `0.0.0.0`) solo en allowlist (el `-upstream 127.0.0.1:5432` de una credencial), y
+    nunca al rango de los reenvíos.
+  - Probado con `sandbox-exec` y el perfil real (`vz/scripts/sandbox-perfil.sh`): con el
+    perfil anterior, 15 de 23 comprobaciones abrían lo que no debían (leer
+    `snapshot.key`, otras máquinas y dorados ajenos; escribir dorados y volúmenes ajenos;
+    conectar a un reenvío ajeno en los tres modos, también por `0.0.0.0`); con el nuevo,
+    ninguna. Y de extremo a extremo en un M4 (macOS 26.5): exec, volumen, freeze/thaw,
+    commit a un dorado, arrancar otra máquina de él, egress none/internet/allowlist.
+  - Lo que queda: su propio directorio es suyo (el daemon lee de ahí el volcado de una
+    congelación y el registro de auditoría), y con egress internet o allowlist sale a
+    lo que la red del Mac alcance, filtrado por la política en el propio proceso.
+- **Los reenvíos de `127.0.0.1` solo aceptan al mismo usuario, por dirección y puerto**
+  (`vz/internal/peercred`). macOS no da las credenciales del otro extremo de un socket
+  TCP, así que `kling-vz` busca entre los procesos de su usuario el socket que es el otro
+  extremo. Hasta ahora comparaba solo los puertos, y en un Mac multiusuario otro usuario
+  podía hacer `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` con el puerto `X` de una
+  conexión abierta del daemon: el reenvío la aceptaba y le daba el agente del invitado
+  (exec). Ahora el socket tiene que ser IPv4 y casar en las dos direcciones además de en
+  los dos puertos.
+- **Lo que el invitado abre contra `kling-vz` está acotado, también en egress none**
+  (`vz/internal/vnet`, `vz/internal/egress/dns.go`). Cada flujo UDP y cada conexión TCP al
+  53 retienen goroutines hasta su plazo de inactividad, y no había tope: 3000 flujos al 53
+  dejaban ~2800 goroutines vivas, y cada consulta abría su socket hacia el upstream. Ahora,
+  por máquina: 64 flujos UDP al 53 y 64 conexiones TCP al 53 a la vez (por encima, el
+  flujo se descarta y la conexión recibe un RST), 256 flujos UDP de salida, y hacia el
+  upstream los mismos topes que el resolver de Linux: 32 consultas en vuelo y un cubo de
+  200/s con ráfagas de 400 (por encima, SERVFAIL sin tocar la red), también para las
+  búsquedas del proxy de credenciales. Una respuesta del upstream con otro id o con otra
+  pregunta no se entrega ni siembra la allowlist (como `responseMatches` en Linux).
+- **El DNS del invitado va a `1.1.1.1`, no al resolver del Mac** (`vz/internal/egress`).
+  Se reenviaba al primer `nameserver` de `/etc/resolv.conf`, que en un Mac suele ser
+  privado (el router, una VPN, el DNS de la empresa): con egress internet el invitado
+  resolvía nombres de la intranet por split-horizon (`intranet.corp` → `10.x`) y podía
+  reconocer la red interna aunque no pudiera conectar a ella. Ahora, como en Linux,
+  el upstream es público y fijo. Consecuencia: en una red que bloquee `1.1.1.1:53`
+  el invitado no resuelve (tampoco en Linux), y los nombres que solo existen en el DNS
+  del Mac (VPN, `.local`) no los ve, que es justo lo que se quería.
 
 ## Lo que NO está resuelto
 
