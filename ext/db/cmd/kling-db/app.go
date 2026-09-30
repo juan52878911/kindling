@@ -36,6 +36,8 @@ const (
 	labelRepo     = "kling.db.repo"     // hash del directorio git común del repo (kling db branch)
 	labelBranch   = "kling.db.branch"   // clave estable de la rama (ver branchKey)
 	labelUsed     = "kling.db.used"     // segundos unix de la última vez que fue la activa
+	labelSpare    = "kling.db.spare"    // clave de la rama de la que es copia de reserva (kling db branch)
+	labelSpareFP  = "kling.db.spare.fp" // huella de esa rama al sacar la reserva
 
 	statePreparing = "preparing"
 	stateReady     = "ready"
@@ -48,7 +50,7 @@ const (
 
 // dbLabelKeys son las claves que escribe esta extensión, para el test de
 // api.KeyPattern.
-var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, labelEngine, labelClass, labelReport, api.LabelKind, api.LabelPorts}
+var dbLabelKeys = []string{labelGolden, labelOwner, labelState, labelRole, labelDatabase, labelRepo, labelBranch, labelUsed, labelSpare, labelSpareFP, labelEngine, labelClass, labelReport, api.LabelKind, api.LabelPorts}
 
 var (
 	// nombres de máquina y de plantilla (validName del núcleo).
@@ -62,6 +64,7 @@ type backend interface {
 	klingc.Kling
 	klingc.Labeler
 	klingc.Credentialer
+	klingc.Machiner
 }
 
 // app lleva todo lo que los comandos tocan fuera de sí mismos, para poder
@@ -91,6 +94,11 @@ type app struct {
 	// hookForce permite instalar el hook fuera del directorio git del repo.
 	hookForce bool
 	now       func() time.Time
+	// tr apunta tiempos por fase (KLING_DB_TRACE); nil no apunta nada.
+	tr *tracer
+	// background lanza kling-db con esos argumentos en segundo plano, sin
+	// esperarlo (lo que -switch deja para después). nil: se hace en el acto.
+	background func(args []string) error
 }
 
 func newApp(host string) (*app, error) {
@@ -98,7 +106,7 @@ func newApp(host string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &app{
+	a := &app{
 		k: cli, stdout: os.Stdout, stderr: os.Stderr, stdin: os.Stdin,
 		stdoutTTY: func() bool { return isTerminal(os.Stdout) },
 		runPsql:   runHostPsql,
@@ -107,9 +115,15 @@ func newApp(host string) (*app, error) {
 		runKling: func(ctx context.Context, args []string) error {
 			return runInteractive(cli.Command(ctx, args...))
 		},
-		sleep:     time.Sleep,
-		readyWait: 30 * time.Second,
-	}, nil
+		sleep:      time.Sleep,
+		readyWait:  30 * time.Second,
+		tr:         newTracer(os.Stderr),
+		background: spawnBackground,
+	}
+	if a.tr != nil {
+		a.k = tracedBackend{backend: cli, t: a.tr}
+	}
+	return a, nil
 }
 
 func isTerminal(f *os.File) bool {

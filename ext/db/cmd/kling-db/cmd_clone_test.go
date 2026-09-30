@@ -124,6 +124,12 @@ func (f *cloneFake) SetCredential(_ context.Context, ref string, spec api.Creden
 
 func (f *cloneFake) RemoveCredential(context.Context, string, string, string) error { return nil }
 
+// clone no lista ni descongela máquinas.
+func (f *cloneFake) List(context.Context) ([]*api.Machine, error) { return nil, nil }
+func (f *cloneFake) Thaw(context.Context, string) (*api.Machine, error) {
+	return nil, errors.New("cloneFake: thaw")
+}
+
 type cloneTest struct {
 	f       *cloneFake
 	c       *cloner

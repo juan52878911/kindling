@@ -48,6 +48,16 @@ type Credentialer interface {
 	RemoveCredential(ctx context.Context, ref, env, upstreamMachine string) error
 }
 
+// Machiner lista y descongela máquinas por el API del daemon, sin un proceso
+// de kling por llamada. Lo usa el camino de cada checkout de kling db branch
+// (el gancho de git): lanzar `kling` cuesta ~5 ms cada vez, y Thaw devuelve la
+// máquina ya al día, sin el inspect de después. Es lo mismo que `kling ps
+// -json` y `kling thaw`.
+type Machiner interface {
+	List(ctx context.Context) ([]*api.Machine, error)
+	Thaw(ctx context.Context, ref string) (*api.Machine, error)
+}
+
 // CLI es la implementación de verdad.
 type CLI struct {
 	// Bin es el ejecutable de kling. Vacío: Resolve.
@@ -169,6 +179,16 @@ func (c *CLI) client() *api.Client {
 		cfg = &config.Config{}
 	}
 	return api.NewClient(cfg.Host(c.Host))
+}
+
+// List implementa Machiner.
+func (c *CLI) List(ctx context.Context) ([]*api.Machine, error) {
+	return c.client().List(ctx)
+}
+
+// Thaw implementa Machiner.
+func (c *CLI) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
+	return c.client().Thaw(ctx, ref)
 }
 
 // SetLabels implementa Labeler contra el API del daemon.
