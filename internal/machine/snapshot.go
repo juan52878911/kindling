@@ -1261,7 +1261,7 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	// goroutines (M-02).
 	if mc.CPUPct <= 0 {
 		m.mu.Lock()
-		mc.CPUPct = defaultCPUPct
+		mc.CPUPct = techoDelDaemon(mc.VCPUs)
 		m.mu.Unlock()
 	}
 	impulso := m.nuevoImpulso(id, mc.CPUPct)

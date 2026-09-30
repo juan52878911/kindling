@@ -326,8 +326,9 @@ func TestVZBootMandaRedAntesDeArrancarYReenviaDespues(t *testing.T) {
 		t.Fatalf("la política de salida no viajó: %q", ls[red])
 	}
 	// El techo de CPU va tras los reenvíos (en macOS no hay cgroup: lo aplica
-	// kling-vz), con el de por defecto si la máquina no pidió otro.
-	if cpu := indice(ls, "PUT /kling/cpu"); cpu < fwd || !strings.HasSuffix(ls[cpu], "pct="+strconv.Itoa(defaultCPUPct)) {
+	// kling-vz), con el del daemon si la máquina no pidió otro: en macOS, sin
+	// techo (todas sus vCPU, #87).
+	if cpu := indice(ls, "PUT /kling/cpu"); cpu < fwd || !strings.HasSuffix(ls[cpu], "pct="+strconv.Itoa(techoDelDaemon(m.byID[id].VCPUs))) {
 		t.Fatalf("el techo de CPU no llegó a kling-vz tras los reenvíos:\n%s", strings.Join(ls, "\n"))
 	}
 	// Y kling-vz recibe la raíz con la que se confina.
@@ -990,5 +991,15 @@ func TestVZEnviaLasAristasAlAyudante(t *testing.T) {
 				t.Fatalf("aristas mandadas: %q", ls[i])
 			}
 		})
+	}
+}
+
+// En macOS el techo del daemon es no tener techo: regular una VM de vz la
+// detiene a ráfagas y eso multiplica la pérdida de páginas del #87.
+func TestTechoDelDaemonEnMacEsSinTecho(t *testing.T) {
+	for vcpus, want := range map[int]int{0: 100, 1: 100, 2: 200, 4: 400} {
+		if got := techoDelDaemon(vcpus); got != want {
+			t.Errorf("techoDelDaemon(%d) = %d, quería %d", vcpus, got, want)
+		}
 	}
 }
