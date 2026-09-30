@@ -145,6 +145,27 @@ nada; con ella, ni un admin que ponga el mismo `kling.db.owner` a máquinas de d
 inquilinos cruza la frontera. Cambiar `kling.owner` de una máquina corta sus
 sesiones como cambiar sus etiquetas de `kling db`.
 
+## Plantillas compartidas: lo que llevan, lo reciben todos
+
+Compartir una plantilla (`shared_templates`) es dar a **cada** inquilino lo que viaja
+con ella (`SECURITY.md` §22):
+
+- **Sus credenciales de plantilla** (`kling template credential`): cada instancia las
+  recibe, la de un inquilino también. La clave no entra en el invitado, pero el
+  inquilino la **usa**: sus peticiones a esos dominios salen con ella. Las que se aten
+  después de compartirla también.
+- **Lo que hay en su memoria y su disco**: se lee desde dentro de la instancia (con
+  `exec` si la plantilla tiene `allow_exec`).
+- **Sus volúmenes**, que se reenganchan (abajo).
+- La lista va **por nombre**: otro snapshot sin dueño que un admin cree con el mismo
+  nombre queda compartido sin tocar la política.
+
+Comparta solo plantillas preparadas para eso: sin secretos dentro y, si llevan
+credenciales, de una cuenta de fuera que pueda usar cualquier inquilino (solo lectura,
+cuota propia, `-allow-request`). Lo que es de un inquilino, en una plantilla suya o en
+credenciales de máquina (`kling machine credential`) de cada instancia. `kling template
+inspect <plantilla>` enseña los dominios con credencial y si lleva volúmenes o `exec`.
+
 ## Lo que un inquilino no puede usar (todavía)
 
 - **Volúmenes** (`-volume`, `volumes`): no tienen dueño, y un volumen compartido

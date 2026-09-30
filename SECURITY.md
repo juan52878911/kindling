@@ -1104,6 +1104,39 @@ Lo que no cubre: el token viaja en claro por el tramo anfitrión → invitado, c
 del proxy y de las aristas (§15); y la API no tiene shell (cada ruta valida sus
 argumentos), así que un token de control da el teléfono, no root en la VM.
 
+### 22. Una plantilla compartida entrega lo que lleva a todos los inquilinos
+
+Con política de autorización ([docs/authz.md](docs/authz.md)), `shared_templates` deja que
+cualquier inquilino haga `run -from` (o `sandbox -from`) de un snapshot de admin. El
+inquilino no puede cambiar ni borrar la plantilla, pero **cada instancia suya recibe todo
+lo que la plantilla trae**, y compartirla es decidir dárselo a todos:
+
+- **Sus credenciales.** Las de plantilla (`PUT /snapshots/{name}/credentials`,
+  `secrets/credentials/<plantilla>.enc`) se entregan a cada máquina que nace de ella, la
+  del inquilino incluida. La clave no entra en el invitado (§7), pero el inquilino puede
+  **usarla**: cualquier petición suya a los dominios de la allowlist sale con ella, con los
+  permisos que tenga en el servicio de fuera. Las que se aten a la plantilla después de
+  compartirla valen igual para las instancias nuevas. El registro de auditoría del proxy
+  dice qué máquina usó la credencial (y su `kling.owner`), no la impide.
+- **Su memoria y su disco.** La plantilla es una foto del invitado: lo que el admin dejó
+  en su RAM o en su overlay (un token en una variable de entorno, una caché, un fichero de
+  configuración con una clave) lo lee el inquilino desde dentro de su instancia, con
+  `exec` si la plantilla se hizo con `AllowExec` o desde el propio servicio si no.
+- **Sus volúmenes.** Una plantilla de un admin que lleve volúmenes los reengancha en la
+  instancia del inquilino (la única vía por la que un inquilino llega a un volumen).
+- **Por nombre, no por contenido.** `shared_templates` lista nombres: si el admin borra
+  `python` y hace otro snapshot sin dueño con ese nombre, el nuevo queda compartido sin
+  tocar la política. (Uno con dueño no se comparte aunque esté en la lista.)
+
+Por eso: comparta solo plantillas hechas para eso, sin credenciales ni secretos en la
+memoria o el disco, o con credenciales de un servicio de fuera que den lo mismo a todos
+los inquilinos (una cuenta de solo lectura, con su propia cuota, y `-allow-request` para
+acotar las rutas). Lo que es de un inquilino va en una plantilla suya (sin compartir), o
+en credenciales de máquina que se atan a cada instancia (`POST
+/machines/{ref}/credentials`) después de crearla. Revise `kling template inspect
+<plantilla>` (dominios con credencial, volúmenes, `allow_exec`) antes de añadirla a
+`shared_templates`.
+
 ## Lo que NO está resuelto
 
 Se enumera a propósito, porque una lista de garantías sin sus límites es propaganda:
