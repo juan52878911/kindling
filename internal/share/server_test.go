@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	proto "github.com/juan52878911/kindling/pkg/share"
 )
@@ -559,5 +560,101 @@ func TestErrno(t *testing.T) {
 		if got := Errno(err); got != want {
 			t.Errorf("Errno(%v) = %d, want %d", err, got, want)
 		}
+	}
+}
+
+// El cierre ordenado: lo que estaba en vuelo contesta de verdad, lo que llega
+// después se devuelve SIN ejecutar con ERetry (el agente lo repite con la
+// sesión siguiente) y la conexión se corta sola. Antes el daemon salía con la
+// sesión abierta y el invitado recibía EIO en lo que tuviera en vuelo.
+func TestServeDrainTerminaLoEnVueloYDevuelveLoNuevo(t *testing.T) {
+	viejoQ := drainQuiet
+	drainQuiet = 50 * time.Millisecond
+	t.Cleanup(func() { drainQuiet = viejoQ })
+
+	dir := t.TempDir()
+	srv, err := Open(dir, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	a, b := net.Pipe()
+	defer b.Close()
+	drain := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- srv.ServeDrain(context.Background(), drain, a) }()
+
+	enviar := func(id uint64, p string) {
+		e := proto.Request(id, proto.OpMkdir)
+		e.Str(p)
+		e.U32(0o755)
+		if err := proto.WriteFrame(b, e.B); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leer := func() (uint64, uint32) {
+		body, err := proto.ReadFrame(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := proto.NewDec(body)
+		return d.U64(), d.U32()
+	}
+
+	// La 1 se ejecuta y su respuesta se queda esperando (nadie lee el pipe):
+	// está en vuelo cuando empieza el cierre.
+	enviar(1, "en-vuelo")
+	for i := 0; ; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "en-vuelo")); err == nil {
+			break
+		}
+		if i > 200 {
+			t.Fatal("la operación en vuelo no llegó a ejecutarse")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(drain)
+	// La 2 llega ya cerrando.
+	enviar(2, "despues")
+
+	if id, e := leer(); id != 1 || e != 0 {
+		t.Fatalf("en vuelo: id %d errno %d, want 1 y 0", id, e)
+	}
+	if id, e := leer(); id != 2 || e != proto.ERetry {
+		t.Fatalf("después del cierre: id %d errno %d, want 2 y ERetry", id, e)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "despues")); !os.IsNotExist(err) {
+		t.Fatalf("la operación devuelta con ERetry se ejecutó (stat: %v)", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeDrain: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeDrain no cortó la conexión tras el cierre")
+	}
+	if _, err := proto.ReadFrame(b); err == nil {
+		t.Fatal("la conexión sigue abierta tras el cierre ordenado")
+	}
+}
+
+// Sin nada en vuelo ni tramas nuevas, el cierre corta enseguida.
+func TestServeDrainSinTraficoCorta(t *testing.T) {
+	srv, err := Open(t.TempDir(), false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	a, b := net.Pipe()
+	defer b.Close()
+	drain := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- srv.ServeDrain(context.Background(), drain, a) }()
+	close(drain)
+	select {
+	case <-done:
+	case <-time.After(drainMax + time.Second):
+		t.Fatal("ServeDrain no volvió")
 	}
 }

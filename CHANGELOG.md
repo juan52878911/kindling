@@ -10,6 +10,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **Reiniciar el daemon ya no mata a quien escribe en una carpeta compartida en vivo.**
+  El daemon salía con las sesiones de las carpetas abiertas y el invitado recibía EIO en
+  la operación que tuviera en vuelo: un proceso escribiendo sin pausa en `-share ...:rw`
+  moría en cada `systemctl restart kling` (y el e2e fallaba de vez en cuando). Ahora el
+  apagado cierra cada sesión en orden: lo que está en vuelo contesta, y lo que llega
+  después se devuelve sin ejecutar con un código nuevo (`ERetry`) que el agente repite
+  con la sesión que abre el daemon siguiente. Funciona con los agentes ya desplegados
+  (el valor es el que usan por dentro para "no llegó a salir" desde v0.10, la primera con
+  carpetas vivas).
 - **`state.json` lleva versión, y un daemon viejo no pisa el estado de uno nuevo.** El
   fichero pasa de un array a `{"schema": 1, "machines": [...]}`. El formato anterior se
   sigue leyendo y, antes de la primera escritura, se copia a `state.json.v0.bak`. Uno con

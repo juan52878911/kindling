@@ -90,11 +90,11 @@ func (s *shareSession) alive() bool {
 	}
 }
 
-// errnoRetry es la respuesta interna de call cuando la operación NO llegó a
-// salir: la sesión ya estaba cerrada o la escritura falló. El daemon no la vio,
-// así que se puede repetir con la sesión siguiente sin riesgo de hacerla dos
-// veces. Nunca llega al kernel.
-const errnoRetry uint32 = 1<<32 - 1
+// errnoRetry es la respuesta de call cuando la operación NO se hizo: la sesión
+// ya estaba cerrada, la escritura falló, o el daemon la devolvió sin ejecutar
+// porque se apaga (share.ERetry, el mismo valor). Se puede repetir con la
+// sesión siguiente sin riesgo de hacerla dos veces. Nunca llega al kernel.
+const errnoRetry = share.ERetry
 
 // call manda una operación y espera su respuesta. build escribe los argumentos.
 // Si la sesión se corta con la operación ya enviada, EIO: no se sabe si el

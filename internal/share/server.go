@@ -153,10 +153,33 @@ type handle struct {
 	write bool
 }
 
+// Plazos del cierre ordenado (ServeDrain): cuánto se espera sin tramas nuevas
+// antes de cortar, y cuánto como mucho en total.
+var (
+	drainQuiet = 200 * time.Millisecond
+	drainMax   = 3 * time.Second
+)
+
+// trama es lo que lee de la conexión la goroutine lectora de ServeDrain.
+type trama struct {
+	body []byte
+	err  error
+}
+
 // Serve atiende una conexión del agente hasta que se corta o ctx se cancela.
 // Al volver, los ficheros que el invitado tuviera abiertos se cierran: si vuelve
 // a conectar, los reabre por ruta (ver ESTALE en el agente).
 func (s *Server) Serve(ctx context.Context, conn io.ReadWriteCloser) error {
+	return s.ServeDrain(ctx, nil, conn)
+}
+
+// ServeDrain es Serve con un cierre ordenado: cuando drain se cierra (el
+// daemon se apaga), deja de ejecutar operaciones nuevas, espera a que las que
+// están en vuelo contesten y a las que lleguen desde entonces les responde
+// proto.ERetry, que el agente repite con la sesión siguiente. Cortar a secas,
+// como hace ctx, deja al invitado con EIO en lo que estuviera en vuelo: un
+// proceso que escribía en la carpeta moría en cada reinicio del daemon.
+func (s *Server) ServeDrain(ctx context.Context, drain <-chan struct{}, conn io.ReadWriteCloser) error {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	sess := &session{srv: s, epoch: uint64(binary.BigEndian.Uint32(b[:])|1) << 32, files: map[uint64]*handle{}}
@@ -166,20 +189,53 @@ func (s *Server) Serve(ctx context.Context, conn io.ReadWriteCloser) error {
 	defer stop()
 
 	var wmu sync.Mutex
+	reply := func(resp []byte) {
+		wmu.Lock()
+		err := proto.WriteFrame(conn, resp)
+		wmu.Unlock()
+		if err != nil {
+			_ = conn.Close()
+		}
+	}
 	slots := make(chan struct{}, maxInflight)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	// Las tramas se leen en su goroutine para poder atender a drain mientras
+	// ReadFrame espera. Sin búfer: no se lee la siguiente hasta que el bucle
+	// la toma, y así la contrapresión de maxInflight sigue llegando por TCP.
+	tramas := make(chan trama)
+	salir := make(chan struct{})
+	defer close(salir)
+	go func() {
+		for {
+			body, err := proto.ReadFrame(conn)
+			select {
+			case tramas <- trama{body, err}:
+			case <-salir:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
-		body, err := proto.ReadFrame(conn)
-		if err != nil {
+		var t trama
+		select {
+		case t = <-tramas:
+		case <-drain:
+			return s.drainSession(ctx, conn, tramas, &wg, reply)
+		}
+		if t.err != nil {
 			_ = conn.Close()
-			if errors.Is(err, io.EOF) || ctx.Err() != nil {
+			if errors.Is(t.err, io.EOF) || ctx.Err() != nil {
 				return nil
 			}
-			return err
+			return t.err
 		}
-		d := proto.NewDec(body)
+		d := proto.NewDec(t.body)
 		id, op := d.U64(), d.U8()
 		if d.Err() != nil {
 			_ = conn.Close()
@@ -189,14 +245,57 @@ func (s *Server) Serve(ctx context.Context, conn io.ReadWriteCloser) error {
 		wg.Add(1)
 		go func() {
 			defer func() { <-slots; wg.Done() }()
-			resp := sess.dispatch(id, op, d)
-			wmu.Lock()
-			err := proto.WriteFrame(conn, resp)
-			wmu.Unlock()
-			if err != nil {
-				_ = conn.Close()
-			}
+			reply(sess.dispatch(id, op, d))
 		}()
+	}
+}
+
+// drainSession es la segunda mitad del cierre ordenado. Primero espera a que
+// contesten las operaciones en vuelo (sus respuestas salen antes que cualquier
+// ERetry: el agente, al ver el primero, deja de usar esta sesión). Luego
+// contesta ERetry a lo que siga llegando hasta drainQuiet sin tramas, o
+// drainMax en total, y corta.
+func (s *Server) drainSession(ctx context.Context, conn io.Closer, tramas <-chan trama, wg *sync.WaitGroup, reply func([]byte)) error {
+	defer conn.Close()
+	limite := time.NewTimer(drainMax)
+	defer limite.Stop()
+	enVuelo := make(chan struct{})
+	go func() { wg.Wait(); close(enVuelo) }()
+	select {
+	case <-enVuelo:
+	case <-limite.C:
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
+	quieto := time.NewTimer(drainQuiet)
+	defer quieto.Stop()
+	for {
+		select {
+		case t := <-tramas:
+			if t.err != nil {
+				return nil
+			}
+			d := proto.NewDec(t.body)
+			id := d.U64()
+			if d.Err() != nil {
+				return nil
+			}
+			reply(errReply(id, proto.ERetry))
+			if !quieto.Stop() {
+				select {
+				case <-quieto.C:
+				default:
+				}
+			}
+			quieto.Reset(drainQuiet)
+		case <-quieto.C:
+			return nil
+		case <-limite.C:
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
 	}
 }
 

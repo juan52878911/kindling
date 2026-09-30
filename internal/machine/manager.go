@@ -792,6 +792,9 @@ func (m *Manager) persistirYa() {
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
+		// agente del invitado, no el estado.
+		m.drainShares(shareDrainWait)
 		close(m.quit)
 		m.cerrarBroker()
 		m.persistWG.Wait()

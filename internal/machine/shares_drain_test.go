@@ -1,0 +1,53 @@
+package machine
+
+import (
+	"testing"
+	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/share"
+)
+
+// Al apagar el daemon, drainShares corta los bucles de las carpetas vivas (aquí
+// uno que reintenta porque la máquina aún no es alcanzable) sin esperar a su
+// backoff, y después ya no se lanza ninguno: el daemon siguiente es quien
+// vuelve a conectarlas.
+func TestDrainSharesParaLosBuclesYNoRelanza(t *testing.T) {
+	m := &Manager{byID: map[string]*api.Machine{
+		"m1": {ID: "m1", Name: "m1", State: api.StateRunning,
+			Shares: []api.ShareAttachment{{Source: t.TempDir(), Mount: "/w", Mode: share.ModeRW}}},
+	}}
+	m.startShares("m1")
+	m.sup().mu.Lock()
+	run := m.sup().runs["m1"]
+	m.sup().mu.Unlock()
+	if run == nil {
+		t.Fatal("startShares no lanzó la carpeta viva")
+	}
+	// Que el bucle haya fallado ya alguna vez y esté en su backoff.
+	time.Sleep(300 * time.Millisecond)
+
+	t0 := time.Now()
+	m.drainShares(5 * time.Second)
+	select {
+	case <-run.done:
+	default:
+		t.Fatal("drainShares volvió con el bucle de la carpeta aún vivo")
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("drainShares tardó %s: esperó al backoff en vez de cortar", d)
+	}
+
+	m.sup().mu.Lock()
+	delete(m.sup().runs, "m1")
+	m.sup().mu.Unlock()
+	m.startShares("m1")
+	m.sup().mu.Lock()
+	despues := m.sup().runs["m1"]
+	m.sup().mu.Unlock()
+	if despues != nil {
+		t.Fatal("tras drainShares se lanzó otra vez la carpeta")
+	}
+	// Idempotente: una segunda llamada (Close tras Close) no entra en pánico.
+	m.drainShares(time.Second)
+}
