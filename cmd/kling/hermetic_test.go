@@ -22,9 +22,9 @@ func TestMain(m *testing.M) {
 
 // hermetic aísla un test del Mac de quien lo corre: sin las extensiones que
 // tenga instaladas (~/.local/share/kling/plugins, el PATH) ni su caché de
-// manifiestos, sin su configuración, y con el registro de extensiones sin descubrir. Dos tests
-// fallaban aquí porque encontraban una kling-mcp real; ahora solo ven lo que
-// ellos ponen en KLING_PLUGIN_PATH.
+// manifiestos, sin su configuración, y con el registro de extensiones sin
+// descubrir. Dos tests fallaban aquí porque encontraban una kling-mcp real;
+// ahora solo ven lo que ellos ponen en KLING_PLUGIN_PATH.
 func hermetic(t *testing.T) {
 	t.Helper()
 	t.Setenv("KLING_PLUGIN_PATH", t.TempDir())
