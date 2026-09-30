@@ -1534,8 +1534,23 @@ func waitSocket(ctx context.Context, c *fc.Client) error {
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
 
+// errYaNoToca es la respuesta de freezeSi y removeSi cuando, con el cerrojo
+// tomado, la máquina ya no cumple lo que justificaba la operación.
+var errYaNoToca = errors.New("the machine no longer qualifies for this operation")
+
 // Freeze pausa la microVM, la vuelca a disco y libera su RAM y su proceso.
 func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) {
+	return m.freezeSi(ctx, ref, nil)
+}
+
+// freezeSi es Freeze, pero solo si sigue valiendo sigue(máquina) con el
+// cerrojo de ciclo de vida ya tomado; si no, errYaNoToca y no se toca nada.
+// sigue nil es congelar siempre.
+//
+// Es para quien decide congelar mirando una foto (el TTL): entre la foto y el
+// cerrojo pudo llegar un renew, y congelar entonces era congelar una máquina
+// que su dueño acababa de pedir conservar.
+func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
@@ -1552,6 +1567,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	}
 	if cur.State == api.StateWarm {
 		return cur, nil
+	}
+	if sigue != nil && !sigue(cur) {
+		return nil, errYaNoToca
 	}
 	mc = cur
 	// Una pausada se reanuda antes: hay que vaciar sus volúmenes y preguntar
@@ -2629,6 +2647,17 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 
 // Remove para la máquina y borra su directorio, snapshot incluido.
 func (m *Manager) Remove(ref string) error {
+	return m.removeSi(ref, nil)
+}
+
+// removeSi es Remove, pero solo si sigue valiendo sigue(máquina) con el
+// cerrojo de ciclo de vida ya tomado; si no, errYaNoToca y no se toca nada.
+// sigue nil es borrar siempre.
+//
+// Lo usan los que deciden borrar mirando una foto sin cerrojo: el TTL con
+// on_ttl=remove (un renew pudo llegar entre medias) y la recogida de disco
+// (la congelada que eligió pudo despertarse con sesiones dentro).
+func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
@@ -2640,6 +2669,11 @@ func (m *Manager) Remove(ref string) error {
 	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
+	} else if sigue != nil {
+		return errYaNoToca
+	}
+	if sigue != nil && !sigue(mc) {
+		return errYaNoToca
 	}
 	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
 	m.kill(mc.ID)

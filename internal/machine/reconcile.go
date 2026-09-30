@@ -546,13 +546,22 @@ func (m *Manager) expireTTL(ctx context.Context) {
 		// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué
 		// seguir existiendo, y congelarlo guardaría en disco una memoria que
 		// nadie va a volver a usar.
+		//
+		// La decisión se tomó con una foto; freezeSi y removeSi vuelven a mirar
+		// el plazo con el cerrojo de la máquina tomado, que es también el de
+		// Renew. Un renew que llegó entre medias gana.
+		vence := func(mc *api.Machine) bool { return ttlVence(mc, time.Now()) }
 		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
-			if err := m.Remove(id); err != nil {
+			if err := m.removeSi(id, vence); err != nil && !errors.Is(err, errYaNoToca) {
 				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
 			}
 			continue
 		}
-		if _, err := m.Freeze(ctx, id); err != nil {
+		if _, err := m.freezeSi(ctx, id, vence); err != nil {
+			if errors.Is(err, errYaNoToca) {
+				m.clearFreezeFailures(id)
+				continue
+			}
 			m.handleFreezeFailure(id, err)
 			continue
 		}
@@ -560,34 +569,41 @@ func (m *Manager) expireTTL(ctx context.Context) {
 	}
 }
 
+// ttlVence dice si a mc le toca ya aplicar su TTL: running o pausada con el
+// plazo cumplido, o congelada que al vencer se destruye.
+func ttlVence(mc *api.Machine, ahora time.Time) bool {
+	if mc.TTLSeconds <= 0 {
+		return false
+	}
+	// Una máquina congelada solo vence si al vencer se DESTRUYE: congelar lo
+	// ya congelado no tiene sentido, pero un sandbox dormido que nadie
+	// reclama sí debe desaparecer, o dormir sería una forma de no morir
+	// nunca.
+	switch mc.State {
+	case api.StateRunning, api.StatePaused:
+	case api.StateWarm:
+		if mc.OnTTL != api.OnTTLRemove {
+			return false
+		}
+	default:
+		return false
+	}
+	desde := ttlDesde(mc)
+	if desde.IsZero() {
+		return false
+	}
+	return ahora.Sub(desde) >= time.Duration(mc.TTLSeconds)*time.Second
+}
+
 // ttlVencidas son las máquinas a las que expireTTL tiene que aplicar su TTL
 // ahora. Aparte para poder probar la decisión sin un VMM que congelar.
 func (m *Manager) ttlVencidas() []string {
 	var due []string
 
+	ahora := time.Now()
 	m.mu.RLock()
 	for _, mc := range m.byID {
-		if mc.TTLSeconds <= 0 {
-			continue
-		}
-		// Una máquina congelada solo vence si al vencer se DESTRUYE: congelar lo
-		// ya congelado no tiene sentido, pero un sandbox dormido que nadie
-		// reclama sí debe desaparecer, o dormir sería una forma de no morir
-		// nunca.
-		switch mc.State {
-		case api.StateRunning, api.StatePaused:
-		case api.StateWarm:
-			if mc.OnTTL != api.OnTTLRemove {
-				continue
-			}
-		default:
-			continue
-		}
-		desde := ttlDesde(mc)
-		if desde.IsZero() {
-			continue
-		}
-		if time.Since(desde) >= time.Duration(mc.TTLSeconds)*time.Second {
+		if ttlVence(mc, ahora) {
 			due = append(due, mc.ID)
 		}
 	}
