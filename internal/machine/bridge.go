@@ -263,8 +263,13 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 		return m.intentarPutDebugfs(ctx, image, dentroPath, bridge, quiero, mode, create)
 	}
 	// Antes de montar en ESCRITURA. Montar así un ext4 sucio es como se corrompió
-	// una imagen en este proyecto, y el síntoma fue un pánico del invitado.
-	repairVolume(ctx, image)
+	// una imagen en este proyecto, y el síntoma fue un pánico del invitado. Y
+	// si e2fsck dice que quedaron errores sin corregir, o no acaba, no se
+	// monta: es el kernel del host, como root, leyendo un ext4 roto que no es
+	// de fiar. Sin e2fsck instalado se sigue como siempre.
+	if _, _, err := revisarExt4(ctx, image); err != nil && !errors.Is(err, exec.ErrNotFound) {
+		return false, fmt.Errorf("not mounting %s: %w", filepath.Base(image), err)
+	}
 
 	mnt, err := m.dirMontajePut()
 	if err != nil {
