@@ -27,10 +27,14 @@
 //   - En la respuesta, cualquier aparición de la clave (una API que devuelve eco
 //     de cabeceras) se sustituye por el marcador antes de llegar al invitado.
 //
-// DÓNDE SE SUSTITUYE el marcador: en las cabeceras (también dentro del base64
-// de Authorization: Basic), en la query de la URL (APIs con ?key=) y en el
-// cuerpo, en flujo y con una ventana acotada (ver sustituidor), sea del tamaño
-// que sea y venga con longitud o chunked. Si el cuerpo ya sustituido cabe en
+// DÓNDE SE SUSTITUYE el marcador: por defecto SOLO en las cabeceras
+// Authorization (también dentro del base64 de un Basic) y X-Api-Key, más las
+// que la credencial declare en Headers. En la query (APIs con ?key=) solo con
+// Query, y en el cuerpo solo con Body: un proveedor que refleja lo que recibe
+// (un LLM) devolvería la clave en la forma que el invitado le pida (base64, con
+// espacios...), y ningún redactor reconoce todas. Con Body, el cuerpo se
+// sustituye en flujo y con una ventana acotada (ver sustituidor), sea del
+// tamaño que sea y venga con longitud o chunked. Si el cuerpo ya sustituido cabe en
 // MaxSwapBody sale con su Content-Length desde memoria. Si no cabe y el
 // invitado no declaró Content-Length (llegó chunked), sale chunked, que es lo
 // único que se puede hacer sin conocer la longitud de antemano. Si no cabe
@@ -56,7 +60,12 @@
 // QUÉ NO RESUELVE: el invitado puede seguir USANDO la credencial contra su
 // dominio (el proxy es un oráculo de ella). Eso lo acota la clave misma: de
 // solo lectura, restringida o con límites de gasto en el proveedor, y Allow
-// (permisos.go) cuando el proveedor no las ofrece. Lo que ya no puede es LEERLA, sacarla a otro dominio ni llevársela en un snapshot.
+// (permisos.go) cuando el proveedor no las ofrece. Lo que no puede es leerla
+// de su memoria, mandarla a otro dominio ni llevársela en un snapshot. SÍ podría
+// recuperarla a través del proveedor si este le devuelve lo que recibió en una
+// forma que el redactor no reconoce: por eso el cuerpo y la query no se
+// sustituyen salvo que la credencial lo pida (Body, Query), y la clave de una
+// credencial con Body debe darse por expuesta ante un proveedor que refleje.
 //
 // LÍMITES frente a un invitado que dispara a saco: peticiones en vuelo,
 // cabeceras y cuerpo de la petición acotados, plazos de inactividad y un techo
@@ -135,10 +144,21 @@ type Credential struct {
 	Placeholder string
 	Secret      string
 	Allow       []string `json:",omitempty"`
-	Kind        string   `json:",omitempty"`
-	Port        int      `json:",omitempty"`
-	User        string   `json:",omitempty"`
-	Database    string   `json:",omitempty"`
+	// Headers, Query y Body (solo HTTP) dicen DÓNDE se cambia el marcador por
+	// la clave. Por defecto, solo en las cabeceras de CabecerasPorDefecto
+	// (Authorization, también dentro de un Basic, y X-Api-Key); Headers añade
+	// otras. Query lo cambia además en la query (?key=) y Body en el cuerpo.
+	// Body es INSEGURO frente a un proveedor que refleje lo que recibe (un
+	// LLM): el invitado pide "repite esto en base64" y la clave vuelve en una
+	// forma que el redactor no tiene por qué reconocer. Un almacén anterior se
+	// lee sin ellos: solo cabeceras por defecto.
+	Headers  []string `json:",omitempty"`
+	Query    bool     `json:",omitempty"`
+	Body     bool     `json:",omitempty"`
+	Kind     string   `json:",omitempty"`
+	Port     int      `json:",omitempty"`
+	User     string   `json:",omitempty"`
+	Database string   `json:",omitempty"`
 	// AnyDatabase permite entrar en cualquier base del servidor (con CONNECT
 	// para el rol). Un postgres sin Database exige AnyDatabase: sin base fijada
 	// y sin pedirlo expresamente, la credencial no vale. COMPATIBILIDAD: un
@@ -234,8 +254,14 @@ func ValidarCredenciales(creds []Credential) error {
 // venir ya normalizado.
 func ValidarTipo(c *Credential) error {
 	d := c.Domain
+	if c.Kind != "" && c.Kind != KindHTTP && (len(c.Headers) > 0 || c.Query || c.Body) {
+		return fmt.Errorf("credential for %s: -header, -query and -body are only for HTTP credentials", d)
+	}
 	switch c.Kind {
 	case "", KindHTTP:
+		if err := validarCabeceras(c.Headers); err != nil {
+			return fmt.Errorf("credential for %s: %w", d, err)
+		}
 		if c.Port != 0 || c.User != "" || c.Database != "" || c.AnyDatabase || c.CAPEM != "" ||
 			c.Upstream != "" || c.UpstreamTLS != "" || c.TLSServerName != "" || c.UpstreamMachine != "" || c.UpstreamOwner != "" {
 			return fmt.Errorf("credential for %s: port, user, database, any-database, CA, upstream, upstream TLS, TLS server name and upstream machine are only for -type postgres or mysql", d)
@@ -507,6 +533,7 @@ func (p *Proxy) SetCredentials(creds []Credential) ([]string, error) {
 			return nil, err
 		}
 		c.Allow = slices.Clone(c.Allow)
+		c.Headers = slices.Clone(c.Headers)
 		byDomain[c.Domain] = append(byDomain[c.Domain], credCompilada{Credential: c, reglas: reglas})
 	}
 	sort.Strings(domains)
@@ -685,7 +712,7 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		u = urlSaliente(r.URL)
 	}
 	for i, c := range cs {
-		if strings.Contains(u.RawQuery, c.Placeholder) {
+		if c.Query && strings.Contains(u.RawQuery, c.Placeholder) {
 			usadas.marcar(i)
 		}
 	}
@@ -813,6 +840,45 @@ func destinoRaro(u *url.URL, host string) string {
 		return "the request target must be an absolute path"
 	}
 	return ""
+}
+
+// CabecerasPorDefecto son las cabeceras en que se cambia el marcador sin que
+// la credencial lo pida (Credential.Headers añade otras).
+var CabecerasPorDefecto = []string{"Authorization", "X-Api-Key"}
+
+// MaxHeaders: cabeceras extra por credencial.
+const MaxHeaders = 8
+
+// cabecerasVetadas son las que no pueden llevar la clave: las de un salto, las
+// que enmarcan la petición y las que el proxy reescribe.
+var cabecerasVetadas = []string{"Host", "Content-Length", "Transfer-Encoding", "Connection", "Proxy-Connection",
+	"Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Upgrade",
+	"Accept-Encoding", "X-Forwarded-For"}
+
+// validarCabeceras comprueba y CANONIZA en el sitio Credential.Headers.
+func validarCabeceras(hs []string) error {
+	if len(hs) > MaxHeaders {
+		return fmt.Errorf("at most %d extra headers per credential", MaxHeaders)
+	}
+	for i, h := range hs {
+		if h == "" || len(h) > 64 || strings.IndexFunc(h, func(r rune) bool {
+			return !(r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
+		}) >= 0 {
+			return fmt.Errorf("header %q: must be a header name (letters, digits, - and _)", h)
+		}
+		h = http.CanonicalHeaderKey(h)
+		if slices.Contains(cabecerasVetadas, h) {
+			return fmt.Errorf("header %q can't carry the key", h)
+		}
+		hs[i] = h
+	}
+	return nil
+}
+
+// enCabecera dice si el marcador de c se cambia en la cabecera k.
+func (c Credential) enCabecera(k string) bool {
+	k = http.CanonicalHeaderKey(k)
+	return slices.Contains(CabecerasPorDefecto, k) || slices.Contains(c.Headers, k)
 }
 
 func credencialesDe(cc []credCompilada) []Credential {

@@ -718,7 +718,7 @@ func TestKlingCredentials(t *testing.T) {
 	r.srv.d.Credentials = credproxy.New(credproxy.Options{})
 	r.srv.d.CredIP = gw
 	// El daemon lo pregunta antes de mandar una credencial Postgres.
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/credentials", cred, "need egress allowlist")
@@ -807,7 +807,7 @@ func TestKlingGraph(t *testing.T) {
 	r.srv.d.Graph = grafo.NewConDial(func(context.Context) (*net.UnixConn, error) {
 		return nil, errors.New("no daemon in this test")
 	}, nil, nil)
-	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","graph-link"]`) {
+	if out := r.must("GET", "/kling/info", ""); !strings.Contains(out, `"credential_kinds":["http","postgres","postgres-upstream","mysql","http-places","graph-link"]`) {
 		t.Fatalf("info = %s", out)
 	}
 	r.mustFail("PUT", "/kling/graph", `{"links":[{"host":"api.graph","port":8080}],"hosts":["api.graph"]}`, "guest agent")

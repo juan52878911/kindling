@@ -308,6 +308,7 @@ func sinUpstreamMaquina(specs []api.CredentialSpec) error {
 // credencialDeSpec es la credencial del proxy que describe s, sin marcador.
 func credencialDeSpec(s api.CredentialSpec) credproxy.Credential {
 	return credproxy.Credential{Env: s.Env, Domain: s.Domain, Secret: s.Secret, Allow: s.Allow,
+		Headers: s.Headers, Query: s.Query, Body: s.Body,
 		Kind: s.Type, Port: s.Port, User: s.User, Database: s.Database, AnyDatabase: s.AnyDatabase, CAPEM: s.CAPEM,
 		Upstream: s.Upstream, UpstreamTLS: s.UpstreamTLS, TLSServerName: s.TLSServerName,
 		UpstreamMachine: s.UpstreamMachine, UpstreamOwner: s.UpstreamOwner}

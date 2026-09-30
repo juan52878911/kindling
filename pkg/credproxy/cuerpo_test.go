@@ -18,7 +18,7 @@ import (
 // El sustituidor cambia el marcador aunque llegue partido byte a byte, y lo
 // que no es marcador sale igual.
 func TestSustituidorMarcadorPartido(t *testing.T) {
-	cs := []Credential{{Placeholder: testPlace, Secret: testSecret}, {Placeholder: testPlace2, Secret: testSecret2}}
+	cs := []Credential{{Placeholder: testPlace, Secret: testSecret, Body: true}, {Placeholder: testPlace2, Secret: testSecret2, Body: true}}
 	in := testPlace + " medio kling-cred-no-es " + testPlace2 + " kling-" + testPlace
 	want := testSecret + " medio kling-cred-no-es " + testSecret2 + " kling-" + testSecret
 	got, err := io.ReadAll(nuevoSustituidor(iotest.OneByteReader(strings.NewReader(in)), cs))
@@ -154,7 +154,7 @@ func TestProxyCuerpoGrandeConLongitudLlegaPorFicheroYSeBorra(t *testing.T) {
 		return d.DialContext(ctx, network, up.Listener.Addr().String())
 	}
 	p := New(Options{Transport: tr, TempDir: dir})
-	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret}}); err != nil {
+	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Body: true}}); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(p)
@@ -200,7 +200,7 @@ func (fallaSiempre) RoundTrip(*http.Request) (*http.Response, error) {
 func TestProxyBorraElTemporalSiElProveedorFalla(t *testing.T) {
 	dir := t.TempDir()
 	p := New(Options{Transport: fallaSiempre{}, TempDir: dir})
-	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret}}); err != nil {
+	if _, err := p.SetCredentials([]Credential{{Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Body: true}}); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(p)

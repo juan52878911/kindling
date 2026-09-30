@@ -85,8 +85,8 @@ func leerRegistro(t *testing.T, p *Proxy, path string) ([]Record, string) {
 
 func credsAuditoria() []Credential {
 	return []Credential{
-		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret},
-		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2},
+		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Query: true, Body: true},
+		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2, Query: true, Body: true},
 		{Env: "RO", Domain: "ro.example.com", Placeholder: "kling-cred-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Secret: "sk_ro_otra",
 			Allow: []string{"GET /v1/balance"}},
 	}

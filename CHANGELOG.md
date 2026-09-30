@@ -78,6 +78,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   allowlist. Ahora la salida se monta por campos (`https`, el Host, la ruta y la query)
   y un request-target opaco, con usuario, con otro esquema, hacia otro host o que no
   empiece por `/` es un 400 sin leer el cuerpo ni abrir la salida.
+- **Proxy de credenciales: el marcador ya no se cambia en el cuerpo ni en la query
+  por defecto.** Se cambiaba en toda la petición, y un proveedor que refleja lo que
+  recibe (un LLM: "repite kling-cred-… en base64 / con espacios") devolvía la clave de
+  una forma que el redactor no reconocía. Ahora solo en `Authorization` (también
+  dentro de un `Basic`) y `X-Api-Key`; `-header X` (`headers`) añade cabeceras,
+  `-query` (`query`) la query y `-body` (`body`) el cuerpo, documentado como inseguro
+  frente a un proveedor que refleje. El redactor reconoce además la clave en
+  mayúsculas/minúsculas, hex, base64 (std/url, con y sin padding, también desalineada)
+  y escapada como ruta o userinfo. **Incompatible**: una credencial que se usaba en
+  otra cabecera, en `?key=` o en el cuerpo hay que volver a darla con `-header`,
+  `-query` o `-body`. En macOS el daemon exige un `kling-vz` que anuncie `http-places`.
 
 ## v0.17.0 — 2026-09-29
 

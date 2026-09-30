@@ -6,11 +6,13 @@ package credproxy
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 )
@@ -20,6 +22,9 @@ import (
 // como iría si el SDK la hubiera puesto él.
 func sustituirQuery(q string, cs []Credential) string {
 	for _, c := range cs {
+		if !c.Query {
+			continue
+		}
 		q = strings.ReplaceAll(q, c.Placeholder, url.QueryEscape(c.Secret))
 	}
 	return q
@@ -43,7 +48,7 @@ func sustituirMarcando(k, v string, cs []Credential, usadas marcas) (string, [][
 		if raw, err := base64.StdEncoding.DecodeString(enc); err == nil {
 			cambiado := false
 			for i, c := range cs {
-				if bytes.Contains(raw, []byte(c.Placeholder)) {
+				if c.enCabecera(k) && bytes.Contains(raw, []byte(c.Placeholder)) {
 					raw = bytes.ReplaceAll(raw, []byte(c.Placeholder), []byte(c.Secret))
 					cambiado = true
 					usadas.marcar(i)
@@ -56,7 +61,7 @@ func sustituirMarcando(k, v string, cs []Credential, usadas marcas) (string, [][
 		}
 	}
 	for i, c := range cs {
-		if strings.Contains(v, c.Placeholder) {
+		if c.enCabecera(k) && strings.Contains(v, c.Placeholder) {
 			v = strings.ReplaceAll(v, c.Placeholder, c.Secret)
 			usadas.marcar(i)
 		}
@@ -84,12 +89,25 @@ func (m marcas) de(i int) func() {
 	return func() { m[i].Store(true) }
 }
 
-// variantes son las formas en que un proveedor suele devolver una cadena en
-// eco además de tal cual: escapada como JSON (\/ de PHP, < de Go),
-// percent-encoded y como entidades HTML. Solo las que cambian algo.
+// variantes son las formas en que un proveedor puede devolver una cadena en
+// eco además de tal cual: escapada como JSON (\/ de PHP, \u003c de Go),
+// percent-encoded (query, ruta y userinfo), como entidades HTML, en mayúsculas
+// o minúsculas, en hex y en base64 (std y url, con y sin padding, y también el
+// trozo central de la clave codificada en medio de otros datos, con cualquiera
+// de los tres desfases posibles). Solo las que cambian algo.
+//
+// Es defensa en profundidad y NO cubre toda transformación: un proveedor que
+// refleje lo que recibe (un LLM) puede devolverla con espacios, al revés o
+// cifrada con César. Por eso el marcador solo se cambia por defecto en
+// cabeceras (ver Credential.Body).
 func variantes(s string) []string {
 	out := []string{s}
 	add := func(v string) {
+		// Una forma derivada muy corta casaría con cualquier cosa (y rutaAuditada
+		// enmascararía rutas enteras); la clave tal cual va siempre.
+		if len(v) < minVariante {
+			return
+		}
 		for _, o := range out {
 			if o == v {
 				return
@@ -102,8 +120,41 @@ func variantes(s string) []string {
 	}
 	add(strings.ReplaceAll(s, "/", `\/`))
 	add(url.QueryEscape(s))
+	add(url.PathEscape(s))
+	add(url.User(s).String())
 	add(html.EscapeString(s))
+	add(strings.ToUpper(s))
+	add(strings.ToLower(s))
+	b := []byte(s)
+	add(hex.EncodeToString(b))
+	add(strings.ToUpper(hex.EncodeToString(b)))
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
+		add(enc.EncodeToString(b))
+		sin := enc.WithPadding(base64.NoPadding)
+		add(sin.EncodeToString(b))
+		for k := range 3 {
+			add(nucleoBase64(sin, b, k))
+		}
+	}
 	return out
+}
+
+// minVariante: largo mínimo de una forma derivada de la clave.
+const minVariante = 6
+
+// nucleoBase64 es lo que sale SIEMPRE igual al codificar b en base64 cuando
+// va precedido de k bytes cualesquiera (k = 0, 1 o 2) y seguido de otros:
+// quita del principio los caracteres que mezclan bits de lo anterior y del
+// final el grupo incompleto que mezclaría bits de lo siguiente.
+func nucleoBase64(enc *base64.Encoding, b []byte, k int) string {
+	buf := append(make([]byte, k), b...)
+	n := len(buf) / 3 * 3
+	e := enc.EncodeToString(buf[:n])
+	salto := [3]int{0, 2, 3}[k]
+	if len(e) <= salto {
+		return ""
+	}
+	return e[salto:]
 }
 
 // redactor sustituye cada clave (y sus variantes) por su marcador en un flujo,
@@ -144,7 +195,14 @@ func (r *redactor) par(old, new string) {
 			return
 		}
 	}
-	r.pares = append(r.pares, par{old: []byte(old), new: []byte(new)})
+	// De más larga a más corta: una forma que contiene a otra (el base64 de
+	// un Basic entero contiene el trozo central del base64 de la clave) se
+	// cambia entera antes de que la corta la rompa.
+	i := len(r.pares)
+	for i > 0 && len(r.pares[i-1].old) < len(old) {
+		i--
+	}
+	r.pares = slices.Insert(r.pares, i, par{old: []byte(old), new: []byte(new)})
 }
 
 // texto redacta una cadena suelta (cabeceras, mensajes de error).
@@ -250,13 +308,17 @@ func nuevoSustituidor(src io.Reader, cs []Credential) *sustituidor {
 }
 
 // nuevoSustituidorMarcando es nuevoSustituidor anotando en usadas qué
-// credenciales aparecieron en el cuerpo. Los marcadores son distintos entre sí
+// credenciales aparecieron en el cuerpo. Solo cambia las credenciales con Body:
+// las demás pasan el marcador tal cual (ver Credential.Body). Los marcadores son distintos entre sí
 // (ValidarCredenciales) y nunca iguales a su clave, así que cada credencial es
 // exactamente un par.
 func nuevoSustituidorMarcando(src io.Reader, cs []Credential, usadas marcas) *sustituidor {
 	s := &sustituidor{src: src, chunk: make([]byte, sustChunk)}
 	s.red = &redactor{w: &s.out}
 	for i, c := range cs {
+		if !c.Body {
+			continue
+		}
 		s.red.pares = append(s.red.pares, par{old: []byte(c.Placeholder), new: []byte(c.Secret), marca: usadas.de(i)})
 	}
 	return s

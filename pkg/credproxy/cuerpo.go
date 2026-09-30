@@ -72,6 +72,8 @@ func cuerpoSaliente(r *http.Request, w http.ResponseWriter, cs []Credential, usa
 	if r.ContentLength == 0 {
 		return nil, 0, nil, nil
 	}
+	// Solo las credenciales con Body se cambian en el cuerpo (ver
+	// Credential.Body); las demás pasan el marcador tal cual al proveedor.
 	s := nuevoSustituidorMarcando(lectorVigilado{r: http.MaxBytesReader(w, r.Body, MaxBody), v: v, p: pl}, cs, usadas)
 	// A mano y no con io.ReadAll: su crecimiento al doble reservaría hasta 2 MiB
 	// para retener 1. Aquí la capacidad no pasa de MaxSwapBody+1.

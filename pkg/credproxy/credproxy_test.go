@@ -34,8 +34,8 @@ const (
 func proxyContra(t *testing.T, h http.HandlerFunc) (*httptest.Server, *int32) {
 	t.Helper()
 	return proxyCon(t, h, []Credential{
-		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret},
-		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2},
+		{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret, Query: true, Body: true},
+		{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2, Headers: []string{"x-org"}, Body: true},
 	}, nil)
 }
 

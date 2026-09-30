@@ -117,7 +117,7 @@ func credsConPermisos(conOrg bool) []Credential {
 	cs := []Credential{{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret,
 		Allow: []string{"GET /v1/balance", "POST /v1/files/**"}}}
 	if conOrg {
-		cs = append(cs, Credential{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2})
+		cs = append(cs, Credential{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2, Headers: []string{"X-Org"}})
 	}
 	return cs
 }

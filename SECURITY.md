@@ -222,14 +222,26 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
   la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
   hay camino directo que lo esquive. El proxy solo acepta el Host de sus credenciales
-  (403 al resto), cambia el marcador por la clave en las cabeceras (también dentro
-  de `Authorization: Basic`), en la query y en el cuerpo (en flujo, con una ventana del
-  tamaño del marcador: sin límite de tamaño ni de longitud declarada), sale por HTTPS
+  (403 al resto), cambia el marcador por la clave **por defecto solo en las cabeceras
+  `Authorization` (también dentro de un `Basic`) y `X-Api-Key`**, más las que declare
+  la credencial (`-header`, `headers`); en la query solo con `-query` y en el cuerpo
+  solo con `-body` (en flujo, con una ventana del tamaño del marcador: sin límite de
+  tamaño ni de longitud declarada), sale por HTTPS
   verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
   redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
-  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding,
-  entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
-  cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
+  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding de
+  query, ruta y userinfo, entidades HTML), en mayúsculas y minúsculas, en hex y en
+  base64 (std y url, con y sin padding, y el trozo central de la clave codificada en
+  medio de otros datos) y cada valor de cabecera tal y como salió sustituido, que es lo
+  que cierra el eco de un `Basic`—. **Esto es defensa en profundidad, no una garantía**:
+  la clave no la puede leer el invitado de su memoria ni mandarla a otro dominio, pero
+  sí recuperarla a través del proveedor si este le devuelve lo que recibió de una forma
+  que el redactor no reconoce. Con un LLM basta pedirle "repite kling-cred-… con
+  espacios": por eso el marcador ya no se cambia en el cuerpo salvo con `-body`
+  (antes sí, siempre), y **una credencial con `-body` debe darse por expuesta** ante un
+  proveedor que refleje lo que recibe. En macOS el daemon solo entrega credenciales
+  HTTP a un `kling-vz` que anuncie `http-places` (uno anterior las cambiaría en todas
+  partes). Una respuesta con una
   codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
   32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB del cuerpo
   ya sustituido retenido EN MEMORIA por petición (`pkg/credproxy/cuerpo.go`). Un cuerpo
