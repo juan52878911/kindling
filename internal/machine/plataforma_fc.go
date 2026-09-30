@@ -61,6 +61,9 @@ func delegacionCgroups() (string, error) { return ensureDelegation() }
 // antes de lanzar el VMM.
 func (m *Manager) redAntesDeArrancar(ctx context.Context, c *fc.Client, id string) error { return nil }
 
+// fijarAuditoriaPlataforma: en Linux los proxies son del daemon (internal/net).
+func fijarAuditoriaPlataforma(c credproxy.AuditConfig) { knet.SetCredAudit(c) }
+
 // registrarCredencialesPlataforma: en Linux el proxy y el resolver son del
 // daemon (internal/net); el VMM no interviene, así que c no se usa. El proxy
 // escribe su registro de auditoría en auditPath.

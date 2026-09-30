@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"time"
 )
 
@@ -32,6 +33,25 @@ var blocked = []string{
 	"169.254.0.0/16", // link-local y metadatos de cloud
 	"127.0.0.0/8",    // loopback del host
 	"100.64.0.0/10",  // CGNAT
+	"0.0.0.0/8",      // "esta red": hacia 0.0.0.0 el host se llama a sí mismo
+	"224.0.0.0/4",    // multicast
+	"240.0.0.0/4",    // reservada y broadcast
+}
+
+// blockedV6 son los rangos IPv6 que IsBlockedIP rechaza además. La salida es
+// solo IPv4 (tcp4), así que es defensa en profundidad para quien llame a
+// IsBlockedIP con una IPv6. Aparte de blocked porque el firewall de Linux es
+// iptables v4 (y un test compara las dos listas v4). Las mapeadas
+// (::ffff:a.b.c.d) no van aquí: se miran como la IPv4 que llevan.
+var blockedV6 = []netip.Prefix{
+	netip.MustParsePrefix("::/96"),          // sin especificar, loopback y compatibles con IPv4
+	netip.MustParsePrefix("fe80::/10"),      // link-local
+	netip.MustParsePrefix("fc00::/7"),       // ULA: la LAN en v6
+	netip.MustParsePrefix("ff00::/8"),       // multicast
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64: lleva una IPv4 cualquiera dentro
+	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local
+	netip.MustParsePrefix("2002::/16"),      // 6to4: ídem
+	netip.MustParsePrefix("100::/64"),       // descarte
 }
 
 // BlockedCIDRs devuelve una copia de los rangos que IsBlockedIP rechaza.
@@ -40,6 +60,18 @@ func BlockedCIDRs() []string { return append([]string(nil), blocked...) }
 // IsBlockedIP dice si ip cae en alguno de los rangos a los que la clave no
 // debe viajar nunca, por mucho que un DNS hostil los devuelva.
 func IsBlockedIP(ip net.IP) bool {
+	if ip.To4() == nil {
+		a, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			return true // lo que no es una IP no lleva a ninguna parte
+		}
+		for _, p := range blockedV6 {
+			if p.Contains(a) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, cidr := range blocked {
 		if _, n, err := net.ParseCIDR(cidr); err == nil && n.Contains(ip) {
 			return true

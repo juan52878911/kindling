@@ -141,6 +141,8 @@ func servirVZFalso(sock, logPath string) {
 				Credentials []struct {
 					Domain, Secret, Kind string
 					Allow                []string
+					Headers              []string
+					Body                 bool
 					Upstream             string
 					UpstreamTLS          string `json:"upstream_tls"`
 					UpstreamMachine      string `json:"upstream_machine"`
@@ -156,6 +158,12 @@ func servirVZFalso(sock, logPath string) {
 				}
 				if len(cr.Allow) > 0 {
 					linea += "+allow=" + strings.Join(cr.Allow, ",")
+				}
+				if len(cr.Headers) > 0 {
+					linea += "+headers=" + strings.Join(cr.Headers, ",")
+				}
+				if cr.Body {
+					linea += "+body"
 				}
 				if cr.Kind != "" {
 					linea += "+kind=" + cr.Kind
@@ -653,6 +661,7 @@ func TestVZThawResincronizaAlInvitado(t *testing.T) {
 // dominio cacheado en la pasarela) y otra vez en la reentrega, con los
 // marcadores de vuelta en MMDS.
 func TestVZThawEntregaLasCredencialesAlAyudante(t *testing.T) {
+	t.Setenv(envFakeVZKinds, "http,"+credproxy.CapHTTPPlaces)
 	m, logPath := managerVZ(t)
 	id := "cc99dd00ee11ff22"
 	dir := m.dir(id)
@@ -707,41 +716,56 @@ func TestVZThawEntregaLasCredencialesAlAyudante(t *testing.T) {
 	}
 }
 
-// Allow viaja hasta kling-vz igual que el resto de la credencial: vz aplica
-// los mismos permisos por ruta que Linux, no todo-o-nada.
+// Allow, Headers y Body viajan hasta kling-vz igual que el resto de la
+// credencial: vz aplica los mismos permisos y los mismos sitios de sustitución
+// que Linux. Un kling-vz que no anuncia http-places cambiaría el marcador
+// también en el cuerpo y la query de toda petición: no recibe ninguna HTTP.
 func TestVZRegistrarCredencialesLlevaAllow(t *testing.T) {
-	m, logPath := managerVZ(t)
-	id := "aa11bb22cc33dd44"
-	dir := m.dir(id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet",
-		Labels: map[string]string{api.LabelPorts: "9000"}}
-	base := filepath.Join(m.root, "base.ext4")
-	overlay := filepath.Join(dir, "overlay.ext4")
-	for _, f := range []string{base, overlay} {
-		if err := os.WriteFile(f, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
-	defer matarVMM(pid)
-	if err != nil {
-		t.Fatalf("boot: %v", err)
-	}
-	c := fc.New(m.socket[id])
-	if err := registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
-		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk", Allow: []string{"GET /v1/balance"}},
-	}, "", nil); err != nil {
-		t.Fatal(err)
-	}
-	ls := llamadas(t, logPath)
-	i := indice(ls, "PUT /kling/credentials")
-	if i < 0 || !strings.Contains(ls[i], "allow=GET /v1/balance") {
-		t.Fatalf("allow no llegó: %q", ls)
+	for _, kinds := range []string{"http,postgres", "http," + credproxy.CapHTTPPlaces} {
+		t.Run("kinds="+kinds, func(t *testing.T) {
+			t.Setenv(envFakeVZKinds, kinds)
+			m, logPath := managerVZ(t)
+			id := "aa11bb22cc33dd44"
+			dir := m.dir(id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m.byID[id] = &api.Machine{ID: id, Name: "vz", State: api.StateCreated, Egress: "internet",
+				Labels: map[string]string{api.LabelPorts: "9000"}}
+			base := filepath.Join(m.root, "base.ext4")
+			overlay := filepath.Join(dir, "overlay.ext4")
+			for _, f := range []string{base, overlay} {
+				if err := os.WriteFile(f, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			pid, err := m.boot(ctx, id, 1, 256, 0, base, "", overlay, knet.Plan(1, id), nil, false, false)
+			defer matarVMM(pid)
+			if err != nil {
+				t.Fatalf("boot: %v", err)
+			}
+			c := fc.New(m.socket[id])
+			err = registrarCredencialesPlataforma(ctx, c, nil, []credproxy.Credential{
+				{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "sk-clave-de-prueba", Allow: []string{"GET /v1/balance"},
+					Headers: []string{"X-Goog-Api-Key"}, Body: true},
+			}, "", nil)
+			if !strings.Contains(kinds, credproxy.CapHTTPPlaces) {
+				if err == nil || !strings.Contains(err.Error(), "rebuild kling-vz") {
+					t.Fatalf("sin http-places: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ls := llamadas(t, logPath)
+			i := indice(ls, "PUT /kling/credentials")
+			if i < 0 || !strings.Contains(ls[i], "allow=GET /v1/balance") || !strings.Contains(ls[i], "+headers=X-Goog-Api-Key+body") {
+				t.Fatalf("allow, headers o body no llegaron: %q", ls)
+			}
+		})
 	}
 }
 
@@ -773,7 +797,7 @@ func TestVZCredencialPostgresExigeKinds(t *testing.T) {
 				t.Fatalf("boot: %v", err)
 			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
 			}, "", nil)
 			ls := llamadas(t, logPath)
@@ -820,7 +844,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				t.Fatalf("boot: %v", err)
 			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app",
 					Upstream: "127.0.0.1:5432", UpstreamTLS: credproxy.UpstreamTLSDisable},
 			}, "", nil)
@@ -850,7 +874,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 				return nil, errors.New("no such host")
 			}
 			err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: "db.lan:5432", TLSServerName: "db.lan"},
 			}, "", nil)
 			ls = llamadas(t, logPath)
@@ -867,7 +891,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 			// respuestas, no le llega a kling-vz.
 			for _, up := range []string{"meta.lan:5432", "nadie.lan:5432"} {
 				err = registrarCredencialesPlataforma(ctx, fc.New(m.socket[id]), nil, []credproxy.Credential{
-					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw",
+					{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 						Kind: credproxy.KindPostgres, Port: 5432, User: "app", Upstream: up},
 				}, "", nil)
 				if err == nil {
@@ -885,7 +909,7 @@ func TestVZCredencialUpstreamExigeCapacidad(t *testing.T) {
 // nadie: el kling-vz es el mismo y conserva las claves.
 func TestVZRegistrarSinClienteNoHaceNada(t *testing.T) {
 	if err := registrarCredencialesPlataforma(context.Background(), nil, nil,
-		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s"}}, "", nil); err != nil {
+		[]credproxy.Credential{{Env: "K", Domain: "a.example.com", Placeholder: "kling-cred-a", Secret: "s-clave-de-prueba"}}, "", nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -928,7 +952,7 @@ func TestVZCredencialMaquinaExigeGraphLink(t *testing.T) {
 			m, logPath := managerVZ(t)
 			c := arrancarVZFalso(t, m, "aa11bb22cc33dd77")
 			err := registrarCredencialesPlataforma(context.Background(), c, nil, []credproxy.Credential{
-				{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-pg", Secret: "pw",
+				{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-pg", Secret: "pw-clave-de-prueba",
 					Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb",
 					UpstreamMachine: idCopia, UpstreamOwner: "local", UpstreamTLS: credproxy.UpstreamTLSDisable},
 			}, "", nil)

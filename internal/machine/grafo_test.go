@@ -958,7 +958,7 @@ func TestGrafoCredencialesReescritas(t *testing.T) {
 	g := e.montarGrafo(grafoTienda(true))
 	nuevo := e.montarGrafo(api.Graph{Name: "copia", Nodes: map[string]api.GraphNode{
 		"web": {Image: "min"}, "api": {Image: "min"}, "db": {Image: "min", Wake: api.GraphWakeLazy}}})
-	creds := []credproxy.Credential{{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: "kling-cred-x", Secret: "s",
+	creds := []credproxy.Credential{{Env: "PGPASSWORD", Domain: "db.graph", Placeholder: "kling-cred-x", Secret: "s-clave-de-prueba",
 		Kind: credproxy.KindPostgres, UpstreamMachine: idVirtual(g.ID, "db"), UpstreamOwner: g.ID}}
 	out, err := e.m.credencialesReescritas(g.ID, nuevo.ID, creds)
 	if err != nil {
@@ -982,7 +982,7 @@ func TestGrafoForkRechazaCredencialesSueltas(t *testing.T) {
 	g := e.montarGrafo(grafoTienda(true))
 	web := e.maquina(g.ID, "web")
 	if err := e.m.guardarCredenciales(web, []credproxy.Credential{{Env: "API_KEY", Domain: "api.example.com",
-		Placeholder: "kling-cred-y", Secret: "k"}}); err != nil {
+		Placeholder: "kling-cred-y", Secret: "k-clave-de-prueba"}}); err != nil {
 		t.Fatal(err)
 	}
 	_, err := e.m.GraphFork(context.Background(), "tienda", 1)
@@ -1096,7 +1096,7 @@ func TestGrafoUpAristas(t *testing.T) {
 	if _, err := e.m.GraphUp(context.Background(), g, nil); !errors.As(err, &se) || se.Code != 400 || !strings.Contains(err.Error(), "no secret") {
 		t.Fatalf("credential sin clave: %v", err)
 	}
-	cg, err := e.m.GraphUp(context.Background(), g, map[string]string{"api/PGPASSWORD": "s3cret"})
+	cg, err := e.m.GraphUp(context.Background(), g, map[string]string{"api/PGPASSWORD": "s3cret-de-prueba"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1109,15 +1109,15 @@ func TestGrafoUpAristas(t *testing.T) {
 		t.Fatalf("credenciales de api: %v %v", creds, err)
 	}
 	c := creds[0]
-	if c.Domain != "db.graph" || c.UpstreamMachine != idVirtual(cg.ID, "db") || c.UpstreamOwner != cg.ID || c.Secret != "s3cret" || c.Port != 5432 {
+	if c.Domain != "db.graph" || c.UpstreamMachine != idVirtual(cg.ID, "db") || c.UpstreamOwner != cg.ID || c.Secret != "s3cret-de-prueba" || c.Port != 5432 {
 		t.Fatalf("credencial de la arista: %+v", c)
 	}
 	// Por la API nunca sale la clave.
-	if strings.Contains(fmt.Sprintf("%+v", cg), "s3cret") {
+	if strings.Contains(fmt.Sprintf("%+v", cg), "s3cret-de-prueba") {
 		t.Fatal("la clave aparece en el grafo")
 	}
 	b, _ := os.ReadFile(e.m.rutaGrafo(cg.ID))
-	if strings.Contains(string(b), "s3cret") {
+	if strings.Contains(string(b), "s3cret-de-prueba") {
 		t.Fatal("la clave está en claro en el almacén del grafo")
 	}
 	// El resolvedor de la credencial va por la arista (db es lazy: se

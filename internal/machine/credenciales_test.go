@@ -140,7 +140,7 @@ func TestSetCredentialsGuardaFusionaYRota(t *testing.T) {
 	// KEY se conserva (el proceso del invitado ya lo tiene en su entorno).
 	out, err = m.SetCredentials(ctx, "m1", []api.CredentialSpec{
 		{Domain: "api.example.com", Env: "KEY", Secret: credSecreto2},
-		{Domain: "b.example.org", Env: "ORG", Secret: "org-1"},
+		{Domain: "b.example.org", Env: "ORG", Secret: "org-1-clave-de-prueba"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestSetCredentialsRechazaLoQueNoVale(t *testing.T) {
 	m.socket["m1"] = falso.Sock
 	m.mu.Unlock()
 	ctx := context.Background()
-	spec := []api.CredentialSpec{{Domain: "api.example.com", Env: "KEY", Secret: "x"}}
+	spec := []api.CredentialSpec{{Domain: "api.example.com", Env: "KEY", Secret: "x-clave-de-prueba"}}
 
 	if _, err := m.SetCredentials(ctx, "m1", spec); err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Errorf("sin allowlist: %v", err)
@@ -198,9 +198,9 @@ func TestSetCredentialsRechazaLoQueNoVale(t *testing.T) {
 	mc.Egress = string(knet.EgressAllowlist)
 	m.mu.Unlock()
 	for nombre, s := range map[string][]api.CredentialSpec{
-		"env en minúsculas": {{Domain: "api.example.com", Env: "key", Secret: "x"}},
-		"env repetida":      {{Domain: "a.example.com", Env: "KEY", Secret: "x"}, {Domain: "b.example.com", Env: "KEY", Secret: "y"}},
-		"comodín":           {{Domain: "*.example.com", Env: "KEY", Secret: "x"}},
+		"env en minúsculas": {{Domain: "api.example.com", Env: "key", Secret: "x-clave-de-prueba"}},
+		"env repetida":      {{Domain: "a.example.com", Env: "KEY", Secret: "x-clave-de-prueba"}, {Domain: "b.example.com", Env: "KEY", Secret: "y-clave-de-prueba"}},
+		"comodín":           {{Domain: "*.example.com", Env: "KEY", Secret: "x-clave-de-prueba"}},
 		"sin clave":         {{Domain: "api.example.com", Env: "KEY"}},
 		"nada":              {},
 	} {
@@ -230,7 +230,7 @@ func TestReentregarCredenciales(t *testing.T) {
 	}
 	creds := []credproxy.Credential{
 		{Env: "KEY", Domain: "api.example.com", Placeholder: "kling-cred-aa", Secret: credSecreto},
-		{Env: "ORG", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "org"},
+		{Env: "ORG", Domain: "api.example.com", Placeholder: "kling-cred-bb", Secret: "org-clave-de-prueba"},
 	}
 	if err := m.guardarCredenciales("m1", creds); err != nil {
 		t.Fatal(err)
@@ -294,7 +294,7 @@ func TestCredencialesDePlantilla(t *testing.T) {
 	// Fusión: rotar KEY y añadir ORG.
 	snap, err = m.SetSnapshotCredentials("svc-al", []api.CredentialSpec{
 		{Domain: "api.example.com", Env: "KEY", Secret: credSecreto2},
-		{Domain: "b.example.org", Env: "ORG", Secret: "org"},
+		{Domain: "b.example.org", Env: "ORG", Secret: "org-clave-de-prueba"},
 	}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -496,7 +496,7 @@ func TestCredencialesDePlantillaConAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := m.SetSnapshotCredentials("svc", []api.CredentialSpec{
-		{Domain: "api.example.com", Env: "ORG", Secret: "x", Allow: []string{"GET /v1/../x"}},
+		{Domain: "api.example.com", Env: "ORG", Secret: "x-clave-de-prueba", Allow: []string{"GET /v1/../x"}},
 	}, false); err == nil {
 		t.Error("un Allow inválido en plantilla debería rechazarse")
 	}
@@ -534,7 +534,7 @@ func TestSetCredentialsPostgres(t *testing.T) {
 	}
 	ctx := context.Background()
 	pg := func(mod func(*api.CredentialSpec)) api.CredentialSpec {
-		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real", Type: "postgres", User: "app", Database: "appdb"}
+		s := api.CredentialSpec{Domain: "DB.Example.com", Env: "PGPASSWORD", Secret: "pw-real-clave-de-prueba", Type: "postgres", User: "app", Database: "appdb"}
 		if mod != nil {
 			mod(&s)
 		}
@@ -564,7 +564,7 @@ func TestSetCredentialsPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := (*got)[0][0]
-	if c.Kind != credproxy.KindPostgres || c.Port != 5432 || c.User != "app" || c.Domain != "db.example.com" || c.Secret != "pw-real" {
+	if c.Kind != credproxy.KindPostgres || c.Port != 5432 || c.User != "app" || c.Domain != "db.example.com" || c.Secret != "pw-real-clave-de-prueba" {
 		t.Fatalf("al proxy llegó %+v", c)
 	}
 	back, err := m.cargarCredenciales("m1")
@@ -616,7 +616,7 @@ func TestAlmacenAntiguoSinDatabase(t *testing.T) {
 	}
 	// Se guarda tal cual lo hacía la versión anterior: sin AnyDatabase.
 	antigua := []credproxy.Credential{{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
-		Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app"}}
+		Secret: "pw-clave-de-prueba", Kind: credproxy.KindPostgres, Port: 5432, User: "app"}}
 	if err := m.guardarCredenciales("v1", antigua); err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +628,7 @@ func TestAlmacenAntiguoSinDatabase(t *testing.T) {
 		t.Errorf("la credencial antigua ya no valida: %v", err)
 	}
 
-	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
+	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw-clave-de-prueba", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,11 +668,11 @@ func TestAlmacenAntiguoAvisaYSeVeEnInspect(t *testing.T) {
 	}
 	antigua := []credproxy.Credential{
 		{Env: "PGPASSWORD", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "aa",
-			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
+			Secret: "pw-clave-de-prueba", Kind: credproxy.KindPostgres, Port: 5432, User: "app"},
 		{Env: "PGFIJA", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "bb",
-			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb"},
+			Secret: "pw-clave-de-prueba", Kind: credproxy.KindPostgres, Port: 5432, User: "app", Database: "appdb"},
 		{Env: "PGANY", Domain: "db.example.com", Placeholder: credproxy.PlaceholderPrefix + "cc",
-			Secret: "pw", Kind: credproxy.KindPostgres, Port: 5432, User: "app", AnyDatabase: true},
+			Secret: "pw-clave-de-prueba", Kind: credproxy.KindPostgres, Port: 5432, User: "app", AnyDatabase: true},
 	}
 	for _, id := range []string{"v1", "v2"} {
 		if err := m.guardarCredenciales(id, antigua); err != nil {
@@ -711,7 +711,7 @@ func TestAlmacenAntiguoAvisaYSeVeEnInspect(t *testing.T) {
 
 	// La plantilla: aviso una vez aunque se liste muchas veces, y se ve.
 	escribirSnapshot(t, m, "svc", api.Snapshot{Egress: "allowlist"})
-	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
+	sellado, err := m.sellar([]api.CredentialSpec{{Domain: "db.example.com", Env: "PGPASSWORD", Secret: "pw-clave-de-prueba", Type: "postgres", Port: 5432, User: "app"}}, "snapshot:svc")
 	if err != nil {
 		t.Fatal(err)
 	}
