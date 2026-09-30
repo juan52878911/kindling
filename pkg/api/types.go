@@ -141,6 +141,12 @@ type Machine struct {
 	// declara sonda ni ganchos, o nadie ha mirado). Ver ready.go.
 	Ready string `json:"ready,omitempty"`
 
+	// Agent es el agente de invitado que contestó a su /healthz: qué binario,
+	// qué versión y qué capacidades anuncia (GuestAgent). nil = no se le ha
+	// preguntado todavía, o nadie escucha. Un agente anterior a v0.18 queda
+	// como GuestAgent vacío: contestó, pero no dice nada de sí mismo.
+	Agent *GuestAgent `json:"agent,omitempty"`
+
 	// Transition dice que una operación de ciclo de vida que va a sacarla de
 	// su estado está en curso ahora mismo (TransitionFreezing, ...). La
 	// máquina sigue figurando con su State de antes hasta que termina: un

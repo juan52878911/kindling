@@ -1392,6 +1392,10 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	// Para `kling ps`: si la imagen declara una sonda, cuándo termina de
 	// arrancar (listo.go). En segundo plano; -wait-ready espera aparte.
 	m.vigilarListo(id, nil)
+	// Y qué agente lleva (agente.go). Un arranque en frío puede estrenar
+	// imagen reconstruida: lo que se supiera de antes no vale.
+	m.olvidarAgente(id)
+	m.conocerAgente(id)
 	m.bus.Publish(api.Event{Time: now, Type: api.EvStarted, ID: id, Name: mc.Name,
 		Message: fmt.Sprintf("cold started in %d ms", out.BootMS)})
 	return &out, nil

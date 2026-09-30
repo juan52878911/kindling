@@ -17,7 +17,7 @@ package guest
 // compilaría.
 
 import (
-	"os"
+	"log"
 	"strings"
 	"sync"
 )
@@ -50,17 +50,17 @@ type VolumeSpec struct {
 // que sea imposible leer uno sin el otro: montar en escritura lo que se pidió
 // de solo lectura corrompería lo que están leyendo las demás microVMs.
 func volumeSpecsFromCmdline() []VolumeSpec {
-	b, err := os.ReadFile("/proc/cmdline")
-	if err != nil {
-		return nil
-	}
-	var raw string
-	for _, tok := range strings.Fields(string(b)) {
-		if v, ok := strings.CutPrefix(tok, volumeBootParam+"="); ok && v != "" {
-			raw = v
-			break
-		}
-	}
+	return parseVolumeSpecs(cmdlineParams().values[volumeBootParam])
+}
+
+// parseVolumeSpecs interpreta el valor de kling.volume. Cada punto de montaje
+// puede llevar modificadores tras dos puntos ("/libs:ro"). Uno que este agente
+// no conoce se descarta con un aviso y el volumen se monta de SOLO LECTURA: el
+// host más nuevo pudo pedir algo que implica no escribir, y montar en
+// escritura un disco compartido es lo único que aquí puede corromper algo. Lo
+// que no hace nunca es pegarlo al nombre del directorio, que es lo que llevaba
+// al EACCES y al pánico de PID 1 con el puente anterior a ":ro".
+func parseVolumeSpecs(raw string) []VolumeSpec {
 	if raw == "" {
 		return nil
 	}
@@ -70,10 +70,18 @@ func volumeSpecsFromCmdline() []VolumeSpec {
 			continue
 		}
 		v := VolumeSpec{device: "/dev/vd" + string(rune(firstVolumeDevice+i))}
-		if mp, ro := strings.CutSuffix(spec, ":ro"); ro {
-			v.mount, v.readOnly = mp, true
-		} else {
-			v.mount = spec
+		parts := strings.Split(spec, ":")
+		v.mount = parts[0]
+		for _, mod := range parts[1:] {
+			switch mod {
+			case "ro":
+				v.readOnly = true
+			case "rw", "":
+			default:
+				log.Printf("warning: volume %s: ignoring unknown option %q from a newer host; "+
+					"mounting it read-only to be safe (rebuild the image to use it)", v.mount, mod)
+				v.readOnly = true
+			}
 		}
 		out = append(out, v)
 	}
