@@ -94,6 +94,10 @@ type Options struct {
 	// no reciben comandos ni ganchos. A una externa apagada ni siquiera se le
 	// pide el manifiesto: apagarla es no ejecutar nada suyo.
 	Disabled []string
+	// ManifestCache es el fichero donde se guardan los manifiestos ya leídos
+	// (cache.go), para no ejecutar cada extensión en cada invocación. Vacío =
+	// sin caché; kling usa DefaultManifestCache().
+	ManifestCache string
 }
 
 // DisabledError es el Err de una extensión apagada.
@@ -171,6 +175,9 @@ func Discover(ctx context.Context, o Options) *Registry {
 		claim(p)
 	}
 
+	cache := openManifestCache(o.ManifestCache, o.Version)
+	defer cache.save()
+
 	path := o.Path
 	if path == nil {
 		path = SearchPath()
@@ -197,7 +204,7 @@ func Discover(ctx context.Context, o Options) *Registry {
 				r.Plugins = append(r.Plugins, p)
 				continue
 			}
-			p.Manifest, p.Err = loadManifest(ctx, full)
+			p.Manifest, p.Err = cache.manifest(ctx, full)
 			if p.Err == nil && p.Manifest.Name != name {
 				p.Err = fmt.Errorf("its manifest says it is %q, but the binary is kling-%s", p.Manifest.Name, name)
 			}
@@ -217,6 +224,15 @@ func isExecutable(path string) bool {
 }
 
 func loadManifest(ctx context.Context, path string) (*Manifest, error) {
+	raw, err := runManifest(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return parseManifest(raw)
+}
+
+// runManifest ejecuta path --kling-manifest y devuelve lo que imprime.
+func runManifest(ctx context.Context, path string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ManifestTimeout)
 	defer cancel()
 	var out bytes.Buffer
@@ -233,8 +249,14 @@ func loadManifest(ctx context.Context, path string) (*Manifest, error) {
 		}
 		return nil, fmt.Errorf("--kling-manifest failed: %v", err)
 	}
+	return out.Bytes(), nil
+}
+
+// parseManifest lee y valida lo que imprimió --kling-manifest. Lo que sale de
+// la caché pasa por aquí igual que lo recién ejecutado.
+func parseManifest(raw []byte) (*Manifest, error) {
 	var m Manifest
-	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("--kling-manifest did not print a valid manifest: %v", err)
 	}
 	if err := m.Validate(); err != nil {
