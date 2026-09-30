@@ -3,9 +3,11 @@ package machine
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/esquema"
 )
 
 // Snapshot devuelve un snapshot por nombre, con los mismos campos calculados
@@ -22,6 +24,7 @@ func (m *Manager) Snapshot(name string) (*api.Snapshot, error) {
 	}
 	s.DiskBytes = disco
 	m.anotarCredencialesPlantilla(s)
+	m.marcarObsoleto(s)
 	m.mu.RLock()
 	for _, mc := range m.byID {
 		if mc.From == name && mc.State == api.StateRunning {
@@ -77,11 +80,16 @@ func (m *Manager) RemoveAnnotation(name, key string) (*api.Snapshot, error) {
 
 // editMeta es el leer-modificar-escribir de meta.json de un snapshot existente,
 // serializado por metaMu. edit devuelve el mensaje del evento.
+//
+// Escribe siempre la versión actual: un meta v0 se copia antes a
+// meta.json.v0.bak, y las claves que este binario no conoce (las de un kling
+// más nuevo de la misma versión) se conservan tal cual (ver meta.go). Uno de
+// una versión mayor ni se lee: loadSnapshotMeta falla antes.
 func (m *Manager) editMeta(name string, edit func(*api.Snapshot) (string, error)) (*api.Snapshot, error) {
 	m.metaMu.Lock()
 	defer m.metaMu.Unlock()
 
-	snap, err := m.loadSnapshot(name)
+	snap, previo, v, err := m.loadSnapshotMeta(name)
 	if err != nil {
 		return nil, err
 	}
@@ -90,9 +98,14 @@ func (m *Manager) editMeta(name string, edit func(*api.Snapshot) (string, error)
 		return nil, err
 	}
 
-	b, err := json.MarshalIndent(snap, "", "  ")
+	b, err := codificarMeta(snap, previo)
 	if err != nil {
 		return nil, err
+	}
+	if v < metaSchema {
+		if err := esquema.Respaldar(filepath.Join(m.snapDir(name), "meta.json"), v); err != nil {
+			return nil, fmt.Errorf("snapshot %q: backing up its meta.json before migrating it: %w", name, err)
+		}
 	}
 	if err := writeMeta(m.snapDir(name), b); err != nil {
 		return nil, err

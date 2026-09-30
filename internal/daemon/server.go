@@ -201,8 +201,12 @@ func New(socket, root, fcBin, socketUser, runAs string) (*Server, error) {
 	}
 	st := &store{dir: filepath.Join(root, "store")}
 	migrateLinks(root, st)
+	fcVersion := firecrackerVersion(fcBin)
+	// Lo que se graba en cada dorado y contra lo que se comparan los que hay:
+	// un dorado de otro VMM sale obsoleto en vez de fallar al despertar.
+	mgr.FijarOrigen(Version, fcVersion)
 	return &Server{socket: socket, bus: bus, mgr: mgr, root: root, fcBin: fcBin, socketUser: socketUser, store: st, lock: lock,
-		fcVersion: firecrackerVersion(fcBin)}, nil
+		fcVersion: fcVersion}, nil
 }
 
 // firecrackerVersion ejecuta `firecracker --version` una vez. Si el binario
@@ -582,7 +586,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 // runStatus traduce los errores de arrancar una máquina a códigos HTTP.
 func runStatus(err error) int {
 	switch {
-	case errors.Is(err, machine.ErrExecNotInSnapshot):
+	case errors.Is(err, machine.ErrExecNotInSnapshot), errors.Is(err, machine.ErrDoradoObsoleto):
 		return http.StatusConflict
 	case errors.Is(err, machine.ErrShareRequest):
 		return http.StatusBadRequest

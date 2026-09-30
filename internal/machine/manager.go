@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -149,6 +150,11 @@ type Manager struct {
 	// (K2): se pide en cada Commit y en cada runFrom, y el vmlinux no cambia
 	// entre un arranque del daemon y el siguiente. Ver kernelHash.
 	kernelSHA huellaKernel
+
+	// origen es con qué trabaja este daemon (versión de kling, VMM, macOS):
+	// se graba en cada dorado y se compara con el de los que ya hay. Lo fija
+	// FijarOrigen; nil es "no consta". Ver meta.go.
+	origen atomic.Pointer[origenHost]
 
 	// snapCache memoriza, por nombre de snapshot, el meta.json ya parseado y la
 	// ocupación en disco del directorio (M-08): Snapshots() se llama en cada
@@ -1980,7 +1986,7 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 		log.Printf("warning: %s: could not hash the kernel for the seal: %v", mc.Name, kerr)
 	}
 	cerrarVolcado(dir)
-	if err := sellarVolcado(dir, kernelSHA); err != nil {
+	if err := sellarVolcado(dir, kernelSHA, m.origenActual().vmm); err != nil {
 		log.Printf("warning: %s: could not seal the frozen state: %v", mc.Name, err)
 	}
 
@@ -2550,6 +2556,14 @@ func (m *Manager) Thaw(ctx context.Context, ref string) (*api.Machine, error) {
 	if err := volcadoValido(dir); err != nil {
 		return nil, fmt.Errorf("machine %q can't be thawed: %w. Remove it (kling rm %s) and start it again",
 			mc.Name, err, mc.Name)
+	}
+	// VMM: congelada con uno que el de ahora no sabe cargar (otro VMM u otra
+	// MAJOR.MINOR de Firecracker, ver causaObsoleto). Se dice aquí, antes de
+	// lanzar nada: el error crudo del VMM al cargar no señala la causa.
+	if causa := causaObsoleto(vmmDelVolcado(dir), m.origenActual().vmm); causa != "" {
+		return nil, fmt.Errorf("machine %q can't be thawed: it was frozen %s, and a memory dump "+
+			"can't be loaded by another VMM version. Go back to that VMM to thaw it, or remove it "+
+			"(kling rm %s) and start it again", mc.Name, strings.Replace(causa, "made with", "with", 1), mc.Name)
 	}
 	// KERNEL (K2), como runFrom con los dorados: solo se avisa, porque
 	// descongelar no usa vmlinux (ver avisoKernel).

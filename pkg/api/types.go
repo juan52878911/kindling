@@ -581,6 +581,21 @@ type Snapshot struct {
 	// y el CLI no lo marca. Fuera de Signature, igual que GuestIPv6Off.
 	GuestIPv6Stack bool `json:"guest_ipv6_stack,omitempty"`
 
+	// CON QUÉ SE HIZO. VMM es el VMM y su versión al congelar
+	// ("firecracker 1.12.0", "kling-vz 0.18.0"), MacOS la versión del sistema
+	// en macOS y KlingVersion la del daemon. Vacíos en los dorados de antes
+	// de meta.json v1: "no consta". Fuera de Signature, como KernelSHA256:
+	// son compatibilidad, no política.
+	VMM          string `json:"vmm,omitempty"`
+	MacOS        string `json:"macos,omitempty"`
+	KlingVersion string `json:"kling_version,omitempty"`
+
+	// Stale, si no está vacío, es por qué este dorado no se puede restaurar
+	// con el VMM de ahora ("made with firecracker 1.12.0; this host runs
+	// firecracker 1.17.0"): hay que rehacerlo. Lo calcula el daemon al leer;
+	// no se guarda en meta.json.
+	Stale string `json:"stale,omitempty"`
+
 	// Signature es el HMAC-SHA256, con la clave del host, de los hashes y la
 	// política del snapshot. Detecta manipulación y snapshots traídos de otro
 	// host, que los sha256 solos no detectan.

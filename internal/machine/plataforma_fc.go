@@ -215,3 +215,6 @@ func (m *Manager) entornoVMM() []string { return nil }
 // flag, ni su dorado, ni su receta, ni la configuración). En Linux, media vCPU
 // (defaultCPUPct): el cgroup no cuesta nada al invitado.
 func techoDelDaemon(vcpus int) int { return defaultCPUPct }
+
+// versionMacOS es "" fuera de macOS: el dorado no depende del sistema.
+func versionMacOS() string { return "" }

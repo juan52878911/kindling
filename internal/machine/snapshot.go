@@ -19,6 +19,7 @@ import (
 	knet "github.com/juan52878911/kindling/internal/net"
 	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/digest"
+	"github.com/juan52878911/kindling/pkg/esquema"
 	"github.com/juan52878911/kindling/pkg/lazyre"
 
 	"github.com/juan52878911/kindling/pkg/durable"
@@ -499,6 +500,9 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		MemBytes:  allocatedBytes(memPath),
 		DiskBytes: diskUsage(dir),
 	}
+	// Con qué VMM, kling y macOS se hizo: lo que permite marcarlo obsoleto
+	// cuando cambien en vez de fallar al despertar (meta.go).
+	m.grabarOrigen(snap)
 	if err := m.firmar(snap); err != nil {
 		return nil, err
 	}
@@ -506,7 +510,10 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	m.priv.EnsureReadable(dir)
 	m.overlayDoradoSinJailer(dir)
 
-	b, _ := json.MarshalIndent(snap, "", "  ")
+	b, err := codificarMeta(snap, nil)
+	if err != nil {
+		return nil, err
+	}
 	if err := writeMeta(dir, b); err != nil {
 		return nil, err
 	}
@@ -556,6 +563,7 @@ func (m *Manager) Snapshots() []*api.Snapshot {
 		s.DiskBytes = disco
 		s.Instances = live[e.Name()]
 		m.anotarCredencialesPlantilla(s)
+		m.marcarObsoleto(s)
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -661,18 +669,29 @@ func cloneSnapshot(s *api.Snapshot) *api.Snapshot {
 }
 
 func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
+	s, _, _, err := m.loadSnapshotMeta(name)
+	return s, err
+}
+
+// loadSnapshotMeta es loadSnapshot devolviendo también el meta.json tal cual
+// estaba y su versión: lo que editMeta necesita para migrarlo con copia y
+// conservar lo que no conoce (ver meta.go).
+func (m *Manager) loadSnapshotMeta(name string) (*api.Snapshot, []byte, int, error) {
 	// El nombre llega de la URL. Sin validarlo, un "../../etc" saldría del
 	// directorio de datos: recorrido de rutas de manual.
 	if !validName.MatchString(name) {
-		return nil, fmt.Errorf("invalid snapshot name: %q", name)
+		return nil, nil, 0, fmt.Errorf("invalid snapshot name: %q", name)
 	}
-	b, err := os.ReadFile(filepath.Join(m.snapDir(name), "meta.json"))
+	ruta := filepath.Join(m.snapDir(name), "meta.json")
+	b, err := os.ReadFile(ruta)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot %q does not exist", name)
+		return nil, nil, 0, fmt.Errorf("snapshot %q does not exist", name)
 	}
-	var s api.Snapshot
-	if err := json.Unmarshal(b, &s); err != nil {
-		return nil, err
+	// Uno de un kling más nuevo (schema mayor) es un error y no se toca: ni
+	// se restaura ni se anota ni se aparta (esquema.ErrMasNuevo).
+	s, v, err := decodificarMeta(ruta, b)
+	if err != nil {
+		return nil, nil, v, err
 	}
 	// El DIRECTORIO manda sobre lo que diga el meta.
 	//
@@ -687,8 +706,8 @@ func (m *Manager) loadSnapshot(name string) (*api.Snapshot, error) {
 			name, s.Name)
 		s.Name = name
 	}
-	liftV04(b, &s)
-	return &s, nil
+	liftV04(b, s)
+	return s, b, v, nil
 }
 
 // verifyIntegrity comprueba que el rootfs dorado y el volcado de estado no se
@@ -1029,7 +1048,14 @@ func (m *Manager) recuperarReemplazos() {
 			continue
 		}
 		anterior := filepath.Join(base, e.Name())
-		if _, err := m.loadSnapshot(nombre); err == nil {
+		_, err := m.loadSnapshot(nombre)
+		if esquema.EsMasNuevo(err) {
+			// El nuevo lo escribió un kling más nuevo: está entero, pero este
+			// binario no lo entiende. No se decide nada; los dos se quedan.
+			log.Printf("snapshot %q: %v; leaving the old one at %s", nombre, err, anterior)
+			continue
+		}
+		if err == nil {
 			log.Printf("snapshot %q: the replacement finished before the daemon stopped; removing the old one", nombre)
 			_ = os.RemoveAll(anterior)
 			continue
@@ -1123,6 +1149,12 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 	snap, _, err := m.loadSnapshotCached(req.From)
 	if err != nil {
 		return nil, err
+	}
+	// OBSOLETO: hecho con un VMM que el de ahora no sabe cargar. Se falla
+	// aquí, antes de hashear, copiar ni arrancar nada: el error crudo del VMM
+	// al cargar no dice que la causa es la actualización (meta.go).
+	if causa := causaObsoleto(snap.VMM, m.origenActual().vmm); causa != "" {
+		return nil, errObsoleto(req.From, causa)
 	}
 
 	// INTEGRIDAD. Antes de tocar nada: si el rootfs dorado o el volcado de estado
@@ -1516,6 +1548,10 @@ func (m *Manager) runFrom(ctx context.Context, req api.RunRequest) (*api.Machine
 		err = explainRestoreErr(err, fmt.Sprintf("snapshot %q", req.From), fmt.Sprintf(
 			"  kling mcp import %s -force    (imported MCP service)\n"+
 				"  kling commit -replace <machine> %s    (manual snapshot)", req.From, req.From))
+		// Si no era el TSC, lo que se sepa de con qué se hizo (meta.go).
+		if !api.EsFalloTSC(err) {
+			err = m.explicarRestauracion(err, req.From, snap)
+		}
 		return abortar(err)
 	}
 	// Nada de SetEntropy aquí: tras cargar un snapshot no se pueden añadir

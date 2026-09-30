@@ -330,12 +330,18 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 	// F2: un asterisco basta aquí; el detalle va en `kling template inspect`.
 	// Evita una columna nueva para un caso que, con el tiempo, desaparece solo
 	// (los dorados viejos se van recongelando).
-	huboSinIPv6 := false
+	huboSinIPv6, huboObsoleto := false, false
 	for _, s := range list {
 		marca := ""
 		if !s.GuestIPv6Off && !s.GuestIPv6Stack {
 			marca = "*"
 			huboSinIPv6 = true
+		}
+		// Obsoleto: no restaura con el VMM de ahora. Va delante del
+		// asterisco porque es lo que impide usarlo.
+		if s.Stale != "" {
+			marca = "!" + marca
+			huboObsoleto = true
 		}
 		fmt.Fprintf(tw, "%s%s\t%s\t%d/%dMiB\t%s\t%s\t%d\t%s\n",
 			s.Name, marca, s.Image, s.VCPUs, s.MemMiB,
@@ -344,8 +350,14 @@ func writeSnapshots(w io.Writer, list []*api.Snapshot, asJSON bool) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	if huboObsoleto || huboSinIPv6 {
+		fmt.Fprintln(w)
+	}
+	if huboObsoleto {
+		fmt.Fprintln(w, "! stale: made with another VMM version and can't be restored; re-save it (`kling template inspect <name>`)")
+	}
 	if huboSinIPv6 {
-		fmt.Fprintln(w, "\n* frozen before the IPv6 barrier: `kling template inspect <name>` for details")
+		fmt.Fprintln(w, "* frozen before the IPv6 barrier: `kling template inspect <name>` for details")
 	}
 	return nil
 }
@@ -412,6 +424,13 @@ func writeSnapshot(w io.Writer, s *api.Snapshot, asJSON bool) error {
 	fmt.Fprintf(w, "cpus/mem:    %d / %s\n", s.VCPUs, mem)
 	fmt.Fprintf(w, "on disk:     %s memory, %s total\n", human(s.MemBytes), human(s.DiskBytes))
 	fmt.Fprintf(w, "instances:   %d\n", s.Instances)
+	if hecho := origenDorado(s); hecho != "" {
+		fmt.Fprintf(w, "made with:   %s\n", hecho)
+	}
+	if s.Stale != "" {
+		fmt.Fprintf(w, "stale:       %s; it can't be restored. Re-save it: "+
+			"kling save -replace <machine> %s (or kling mcp import %s -force)\n", s.Stale, s.Name, s.Name)
+	}
 	if s.GuestIPv6Stack {
 		fmt.Fprintf(w, "guest ipv6:  stack kept by the image (recipe guest_ipv6_stack), no v6 addresses; "+
 			"the host namespace blocks it\n")
@@ -452,4 +471,20 @@ func excerpt(raw json.RawMessage, n int) string {
 		return string(r)
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// origenDorado es con qué se hizo s ("firecracker 1.12.0, kling 0.18.0"), o
+// "" en un dorado anterior a meta.json v1, que no lo guarda.
+func origenDorado(s *api.Snapshot) string {
+	var partes []string
+	if s.VMM != "" {
+		partes = append(partes, s.VMM)
+	}
+	if s.MacOS != "" {
+		partes = append(partes, "macOS "+s.MacOS)
+	}
+	if s.KlingVersion != "" {
+		partes = append(partes, "kling "+s.KlingVersion)
+	}
+	return strings.Join(partes, ", ")
 }

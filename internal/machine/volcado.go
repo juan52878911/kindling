@@ -47,6 +47,9 @@ type sello struct {
 	// dorados en meta.json). Opcional: los sellos anteriores no lo llevan y se
 	// descongelan igual (ver kernelDelVolcado).
 	KernelSHA256 string `json:"kernel_sha256,omitempty"`
+	// VMM es con qué VMM y versión se volcó ("firecracker 1.12.0"), como el
+	// de los dorados (meta.go). Opcional: sin él no se compara.
+	VMM string `json:"vmm,omitempty"`
 }
 
 // volcadoEnCurso deja la marca de que empieza un volcado y retira el sello del
@@ -58,8 +61,9 @@ func volcadoEnCurso(dir string) error {
 
 // sellarVolcado escribe el sello cuando snap.file y mem.file ya están completos
 // y en su sitio, y retira la marca de volcado en curso. kernelSHA es el
-// sha256 del vmlinux instalado; vacío, el sello no lo lleva.
-func sellarVolcado(dir, kernelSHA string) error {
+// sha256 del vmlinux instalado y vmm el VMM que volcó; vacíos, el sello no
+// los lleva.
+func sellarVolcado(dir, kernelSHA, vmm string) error {
 	snapSHA, err := digest.File(filepath.Join(dir, "snap.file"))
 	if err != nil {
 		return err
@@ -68,7 +72,7 @@ func sellarVolcado(dir, kernelSHA string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA})
+	b, _ := json.Marshal(sello{SnapSHA256: snapSHA, MemBytes: fi.Size(), At: time.Now(), KernelSHA256: kernelSHA, VMM: vmm})
 	if err := durable.Escribir(filepath.Join(dir, marcaOK), b, 0o600); err != nil {
 		return err
 	}
@@ -120,16 +124,20 @@ func volcadoValido(dir string) error {
 // existe, no se lee o es anterior al campo: en todos esos casos no hay nada
 // con qué comparar y el thaw sigue como siempre. Se llama tras volcadoValido,
 // que ya rechazó los sellos ilegibles.
-func kernelDelVolcado(dir string) string {
+func kernelDelVolcado(dir string) string { return leerSello(dir).KernelSHA256 }
+
+// vmmDelVolcado es el VMM grabado en el sello de dir, o "" si no consta.
+func vmmDelVolcado(dir string) string { return leerSello(dir).VMM }
+
+// leerSello lee el sello de dir; vacío si no hay o no se lee.
+func leerSello(dir string) sello {
+	var s sello
 	raw, err := os.ReadFile(filepath.Join(dir, marcaOK))
 	if err != nil {
-		return ""
+		return s
 	}
-	var s sello
-	if json.Unmarshal(raw, &s) != nil {
-		return ""
-	}
-	return s.KernelSHA256
+	_ = json.Unmarshal(raw, &s)
+	return s
 }
 
 // plazoVolcado es cuánto se le deja a Firecracker para volcar (Snapshot) o
