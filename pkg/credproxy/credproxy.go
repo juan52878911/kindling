@@ -84,6 +84,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
@@ -593,6 +594,14 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 		rechazar(w, "kindling credential proxy: CONNECT is not supported; use http://"+host, http.StatusMethodNotAllowed)
 		return
 	}
+	// El destino de la salida es SIEMPRE el Host con el que se eligió la
+	// credencial: un request-target que diga otra cosa se rechaza aquí, antes
+	// de leer el cuerpo o abrir la salida (ver destinoRaro).
+	if motivo := destinoRaro(r.URL, host); motivo != "" {
+		rec.Reason = ReasonBadRequest
+		rechazar(w, "kindling credential proxy: "+motivo, http.StatusBadRequest)
+		return
+	}
 
 	// Permisos: solo se usan las credenciales que permiten este método y esta
 	// ruta. Si ninguna, 403 aquí: sin leer el cuerpo ni abrir la salida.
@@ -680,12 +689,20 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 			usadas.marcar(i)
 		}
 	}
-	out, err := http.NewRequestWithContext(ctx, r.Method, "https://"+host+sustituirQuery(u, cs), body)
-	if err != nil {
+	// La URL saliente se monta por campos y NUNCA concatenando texto del
+	// invitado tras "https://"+host: una ruta que no empezase por "/" o un
+	// request-target opaco cambiarían el host al volver a parsearla.
+	salida := &url.URL{Scheme: "https", Host: host, Path: u.Path, RawPath: u.RawPath, RawQuery: sustituirQuery(u.RawQuery, cs)}
+	if salida.Path == "" {
+		salida.Path = "/"
+	}
+	out, err := http.NewRequestWithContext(ctx, r.Method, salida.String(), body)
+	if err != nil || out.URL.Host != host {
 		rec.Reason = ReasonBadRequest
 		http.Error(w, "kindling credential proxy: bad request", http.StatusBadRequest)
 		return
 	}
+	out.URL = salida
 	out.ContentLength = length
 	for k, vs := range r.Header {
 		for _, v := range vs {
@@ -757,6 +774,45 @@ func (p *Proxy) ServeHTTP(sw http.ResponseWriter, r *http.Request) {
 func rechazar(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Connection", "close")
 	http.Error(w, msg, code)
+}
+
+// destinoRaro dice, con un motivo, si el request-target de la petición podría
+// llevar la salida a otro sitio que host (el Host con el que se eligió la
+// credencial). Solo vale una ruta absoluta (origin-form) o el absolute-form
+// http(s) del MISMO host, sin usuario. Todo lo demás se rechaza:
+//   - opaco ("http:@attacker.example/x"): RequestURI() lo devuelve tal cual y
+//     "https://"+host+eso era https://host@attacker.example/x;
+//   - con userinfo ("http://user@host/"), por lo mismo;
+//   - absolute-form hacia otro host (net/http toma ese host como r.Host, pero
+//     otro servidor que sirva el handler podría no hacerlo);
+//   - una ruta que no empieza por "/" ("*" de OPTIONS, o cualquier cosa que
+//     al pegarla tras el host cambiara su significado).
+func destinoRaro(u *url.URL, host string) string {
+	switch {
+	case u.Opaque != "":
+		return "opaque request target"
+	case u.User != nil:
+		return "userinfo in the request target"
+	case u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https":
+		return "unsupported scheme in the request target"
+	case u.Scheme != "" && u.Host == "":
+		return "absolute-form request target without a host"
+	}
+	if u.Host != "" {
+		h := strings.ToLower(u.Host)
+		if hh, _, err := net.SplitHostPort(h); err == nil {
+			h = hh
+		}
+		if strings.TrimSuffix(h, ".") != host {
+			return "request target host differs from Host"
+		}
+	} else if u.Path == "" {
+		return "empty request target"
+	}
+	if u.Path != "" && !strings.HasPrefix(u.Path, "/") {
+		return "the request target must be an absolute path"
+	}
+	return ""
 }
 
 func credencialesDe(cc []credCompilada) []Credential {

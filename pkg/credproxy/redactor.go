@@ -15,24 +15,14 @@ import (
 	"sync/atomic"
 )
 
-// sustituirQuery devuelve path+query con el marcador cambiado por la clave en
-// la query (APIs que la piden como ?key=). La clave va percent-encoded, que es
+// sustituirQuery devuelve la query cruda q con el marcador cambiado por la
+// clave (APIs que la piden como ?key=). La clave va percent-encoded, que es
 // como iría si el SDK la hubiera puesto él.
-func sustituirQuery(u *url.URL, cs []Credential) string {
-	uri := u.RequestURI()
-	if u.RawQuery == "" {
-		return uri
-	}
-	q := u.RawQuery
+func sustituirQuery(q string, cs []Credential) string {
 	for _, c := range cs {
 		q = strings.ReplaceAll(q, c.Placeholder, url.QueryEscape(c.Secret))
 	}
-	if q == u.RawQuery {
-		return uri
-	}
-	v := *u
-	v.RawQuery = q
-	return v.RequestURI()
+	return q
 }
 
 // sustituir cambia el marcador por la clave en una cabecera. Authorization:

