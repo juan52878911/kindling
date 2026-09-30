@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/juan52878911/kindling/pkg/api"
 	"github.com/juan52878911/kindling/pkg/plugin"
 )
 
@@ -58,6 +59,7 @@ func TestManifiesto(t *testing.T) {
 	}
 	want := manifest
 	want.ManifestVersion = plugin.ManifestVersion
+	want.MaxAPI = api.APIVersion // plugin.Main lo rellena, como manifest_version
 	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("printed manifest differs:\n got %+v\nwant %+v", m, want)
 	}

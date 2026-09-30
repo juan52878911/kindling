@@ -74,11 +74,18 @@ func (m *Manager) resyncGuest(ctx context.Context, id, clave, kind string) (time
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr, image, name string
+	var ag *api.GuestAgent
 	if mc != nil && mc.Reachable() {
-		addr, image, name = mc.Addr(api.GuestPort), mc.Image, mc.Name
+		addr, image, name, ag = mc.Addr(api.GuestPort), mc.Image, mc.Name, mc.Agent
 	}
 	m.mu.RUnlock()
 	if addr == "" {
+		return 0, false, nil
+	}
+	// El agente dijo en su /healthz lo que sabe hacer y resync no está: el
+	// mismo aviso que daría el 404, sin la petición (agente.go).
+	if ag.Lacks(api.GuestCapResync) {
+		m.avisarResync(image, name, errResyncNoSoportado)
 		return 0, false, nil
 	}
 	if clave != "" {

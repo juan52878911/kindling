@@ -307,7 +307,19 @@ func (s *Server) routes() http.Handler {
 	for _, rt := range s.rutas() {
 		mux.HandleFunc(rt.patron, s.autorizar(rt))
 	}
-	return sinBarrasEscapadas(mux)
+	return conVersionAPI(sinBarrasEscapadas(mux))
+}
+
+// conVersionAPI pone en cada respuesta el API y la versión del daemon: el
+// cliente (pkg/api) los compara sin tener que preguntar /info en cada orden
+// (ver api.APIVersion).
+func conVersionAPI(h http.Handler) http.Handler {
+	apiVer := strconv.Itoa(api.APIVersion)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(api.HeaderAPI, apiVer)
+		w.Header().Set(api.HeaderVersion, Version)
+		h.ServeHTTP(w, r)
+	})
 }
 
 // sinBarrasEscapadas rechaza las rutas con una barra escapada (%2F). El mux
@@ -506,6 +518,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	_, kvmErr := os.Stat("/dev/kvm")
 	info := api.Info{
 		Version:      Version,
+		API:          api.APIVersion,
 		Root:         s.root,
 		KVM:          kvmErr == nil,
 		Machines:     s.contarMaquinas(r),
@@ -526,7 +539,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	// explicarle por qué se le niega todo (versión, capacidades, su authz):
 	// nada de rutas ni del almacén del host.
 	if rol, ok := rolDe(r); ok && !rol.Valido() {
-		info = api.Info{Version: Version, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
+		info = api.Info{Version: Version, API: api.APIVersion, Capabilities: Capabilities, Backend: info.Backend, Authz: info.Authz}
 	}
 	writeJSON(w, http.StatusOK, info)
 }

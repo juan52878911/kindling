@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Clone devuelve una copia profunda de mc: nada en el resultado comparte
 // memoria con el original, ni con ningún otro Clone().
@@ -50,6 +53,13 @@ func (mc *Machine) Clone() *Machine {
 	if mc.Wake != nil {
 		w := *mc.Wake
 		out.Wake = &w
+	}
+	if mc.Agent != nil {
+		// slices.Clone y no append(nil, ...): unas Caps vacías pero no nil
+		// son "anuncia y no tiene nada", y nil es "no anuncia" (GuestAgent).
+		a := *mc.Agent
+		a.Caps = slices.Clone(mc.Agent.Caps)
+		out.Agent = &a
 	}
 
 	return &out

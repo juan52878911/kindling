@@ -44,7 +44,9 @@ func TestManifest(t *testing.T) {
 	if err := m.Validate(); err != nil {
 		t.Fatalf("invalid manifest: %v", err)
 	}
-	if want := manifest(); !reflect.DeepEqual(m, want) {
+	want := manifest()
+	want.MaxAPI = api.APIVersion // plugin.Main lo rellena
+	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("printed manifest differs:\n got %+v\nwant %+v", m, want)
 	}
 	for _, c := range m.Commands {

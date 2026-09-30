@@ -44,6 +44,10 @@ import (
 	"github.com/juan52878911/kindling/pkg/guest"
 )
 
+// Version se fija al compilar (-ldflags "-X main.Version=..."): la devuelve
+// /healthz para que el host sepa qué puente lleva cada imagen.
+var Version = "dev"
+
 // SessionHeader es la cabecera del protocolo MCP que identifica la conversación.
 const SessionHeader = "Mcp-Session-Id"
 
@@ -123,6 +127,8 @@ Options:
 		log.Fatalf("volume: %v", err)
 	}
 	b.env = agent.Env
+	agent.Name, agent.Version = "kling-bridge", Version
+	agent.ExtraCaps = []string{api.GuestCapMCP}
 
 	mux := http.NewServeMux()
 	// El mismo manejador en / y en /mcp: distintos clientes asumen distinta ruta

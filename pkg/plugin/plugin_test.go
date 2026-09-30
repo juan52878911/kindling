@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/api"
 )
 
 // dir es un directorio con extensiones de prueba: kling-hello compilada de
@@ -227,6 +229,36 @@ func TestServe(t *testing.T) {
 	}
 	if code := serve(m, cmds, nil, []string{"--kling-hook", "status"}, &out, &errb); code != 2 {
 		t.Fatalf("gancho no implementado: %d", code)
+	}
+}
+
+// Una extensión compilada con Main declara el API del daemon que conoce, y con
+// un daemon más nuevo `kling plugins` la avisa en vez de dejar que falle.
+func TestMaxAPI(t *testing.T) {
+	var out, errb bytes.Buffer
+	m := Manifest{Name: "x", Version: "1", Commands: []Command{{Name: "a"}}}
+	if code := serve(m, nil, nil, []string{"--kling-manifest"}, &out, &errb); code != 0 {
+		t.Fatalf("--kling-manifest: %d", code)
+	}
+	var got Manifest
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.MaxAPI != api.APIVersion {
+		t.Fatalf("max_api impreso %d, quería %d (%v)", got.MaxAPI, api.APIVersion, err)
+	}
+
+	if w := got.APIWarning(got.MaxAPI); w != "" {
+		t.Fatalf("aviso con el mismo API: %q", w)
+	}
+	if w := got.APIWarning(got.MaxAPI + 1); !strings.Contains(w, "kling plugins install x") {
+		t.Fatalf("sin aviso, o sin decir qué hacer, con un daemon más nuevo: %q", w)
+	}
+	// Una extensión anterior al campo se escribió para el API 1.
+	viejo := Manifest{Name: "y"}
+	if viejo.APIWarning(1) != "" || viejo.APIWarning(2) == "" {
+		t.Fatal("sin max_api tiene que contar como API 1")
+	}
+	bad := Manifest{ManifestVersion: ManifestVersion, Name: "z", MaxAPI: -1}
+	if bad.Validate() == nil {
+		t.Fatal("un max_api negativo es un manifiesto roto")
 	}
 }
 

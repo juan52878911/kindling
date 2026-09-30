@@ -74,12 +74,16 @@ func (m *Manager) consultarListo(ctx context.Context, id string) (api.GuestReady
 	m.mu.RLock()
 	mc := m.byID[id]
 	var addr string
+	var ag *api.GuestAgent
 	if mc != nil && mc.Reachable() {
-		addr = mc.Addr(api.GuestPort)
+		addr, ag = mc.Addr(api.GuestPort), mc.Agent
 	}
 	m.mu.RUnlock()
 	if addr == "" {
 		return api.GuestReady{}, errListoConexion
+	}
+	if ag.Lacks(api.GuestCapReady) {
+		return api.GuestReady{}, errListoViejo
 	}
 	ctx, cancel := context.WithTimeout(ctx, plazoPeticionListo)
 	defer cancel()

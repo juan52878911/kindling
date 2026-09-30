@@ -61,7 +61,13 @@ type Manifest struct {
 	Version         string `json:"version"`
 	// MinKling es la versión mínima del núcleo que necesita. Vacía = cualquiera.
 	MinKling string `json:"min_kling,omitempty"`
-	Summary  string `json:"summary,omitempty"`
+	// MaxAPI es el API del daemon más nuevo para el que se escribió
+	// (api.APIVersion al compilarla; Main lo rellena solo). Con un daemon de
+	// API mayor, lo que la extensión da por sabido puede haber cambiado:
+	// `kling plugins` lo avisa en vez de dejar que falle con un 404. 0 = una
+	// extensión anterior al campo, escrita para el API 1.
+	MaxAPI  int    `json:"max_api,omitempty"`
+	Summary string `json:"summary,omitempty"`
 
 	Commands []Command   `json:"commands"`
 	Config   []ConfigKey `json:"config,omitempty"`
@@ -183,6 +189,9 @@ func (m *Manifest) Validate() error {
 	if !reName.MatchString(m.Name) {
 		return fmt.Errorf("invalid extension name %q", m.Name)
 	}
+	if m.MaxAPI < 0 {
+		return fmt.Errorf("max_api %d: must be 0 (not declared) or positive", m.MaxAPI)
+	}
 	seen := map[string]bool{}
 	for _, c := range m.Commands {
 		if !reCommand.MatchString(c.Name) {
@@ -227,6 +236,22 @@ func (m *Manifest) Validate() error {
 		}
 	}
 	return nil
+}
+
+// APIWarning dice por qué la extensión puede fallar contra un daemon del API
+// daemonAPI, o "" si no hay motivo. Es un aviso y no un error: casi todo lo
+// que usa una extensión sigue igual entre dos API, y dejarla inservible por lo
+// que quizá no toca sería peor que avisar.
+func (m *Manifest) APIWarning(daemonAPI int) string {
+	max := m.MaxAPI
+	if max <= 0 {
+		max = 1
+	}
+	if daemonAPI <= max {
+		return ""
+	}
+	return fmt.Sprintf("built for daemon API %d or older and the daemon speaks API %d: "+
+		"update it (kling plugins install %s)", max, daemonAPI, m.Name)
 }
 
 // HasHook dice si la extensión declara el gancho h.
