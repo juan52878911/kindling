@@ -242,6 +242,13 @@ const (
 	ESTALE       uint32 = 116
 )
 
+// ERetry no es un errno de Linux y nunca llega al kernel del invitado: el
+// daemon contesta con él una operación que NO ejecutó porque la sesión se está
+// cerrando por un apagado ordenado. El agente la repite con la sesión
+// siguiente, sin riesgo de hacerla dos veces (es el mismo valor que usa por
+// dentro para "no llegó a salir").
+const ERetry uint32 = 1<<32 - 1
+
 // Attr son los atributos de un fichero tal como los ve el invitado.
 type Attr struct {
 	Mode   uint32 // tipo (SIF*) y permisos, ya recortados a 0777

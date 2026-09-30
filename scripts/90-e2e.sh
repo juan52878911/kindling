@@ -10,6 +10,9 @@
 #   ./90-e2e.sh                      contra el contexto activo de kling
 #   KLING_HOST=ssh://lab ./90-e2e.sh
 #   KEEP=1 ./90-e2e.sh               no limpia al terminar (para inspeccionar)
+#   KLING_E2E_RESTART='cmd' ./90-e2e.sh  cómo reiniciar el daemon (un daemon privado,
+#                                    p. ej. matarlo y relanzarlo con su -root/-socket);
+#                                    sin ella, solo con ssh:// (sudo systemctl restart kling)
 #
 # Cada comprobación dice qué esperaba y qué obtuvo. Un fallo NO aborta el resto:
 # saber que fallan tres cosas relacionadas vale más que enterarse de una.
@@ -71,6 +74,40 @@ contiene "$kvm" "yes" && ok "KVM disponible" || bad "KVM" "KVM: yes" "${kvm:-nad
 contiene "$info" "irecracker" && ok "firecracker instalado" \
   || bad "firecracker" "una versión" "nada"
 
+# El host del daemon: por ssh, o este mismo si el daemon es local (socket unix).
+# Las comprobaciones que miran ficheros del daemon usan SU raíz (la que dice
+# status -v; un daemon privado no vive en /var/lib/kindling) y sudo solo si no
+# se es root allí. Con la raíz y sudo fijos, en un host sin sudo o con otra
+# raíz "no existe" salía verde (el registro borrado, la ruta vieja vacía)
+# aunque no se hubiera mirado nada.
+SSHT=""
+if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then SSHT="${KLING_HOST#ssh://}"; fi
+# hostsh corre algo en el host del daemon: por ssh, o aquí si es local.
+hostsh() { if [ -n "$SSHT" ]; then ssh "$SSHT" "$1"; else sh -c "$1"; fi; }
+# HOSTFS: se puede mirar el disco del daemon (por ssh, o local con socket unix).
+HOSTFS=0
+{ [ -n "$SSHT" ] || [[ "${KLING_HOST:-}" == unix://* ]]; } && HOSTFS=1
+KROOT=$(printf '%s\n' "$info" | awk '$1 == "root:" {print $2; exit}')
+KROOT="${KROOT:-/var/lib/kindling}"
+HSUDO="sudo"
+[ "$HOSTFS" = 1 ] && [ "$(hostsh 'id -u' 2>/dev/null)" = 0 ] && HSUDO=""
+
+# reiniciar_daemon reinicia el daemon y espera a que responda. Sin
+# KLING_E2E_RESTART solo sabe hacerlo por ssh con systemd; con un daemon local
+# no se reinicia nada (podría ser el de tu sesión) y devuelve 1.
+reiniciar_daemon() {
+  if [ -n "${KLING_E2E_RESTART:-}" ]; then
+    sh -c "$KLING_E2E_RESTART" >/dev/null 2>&1 || return 1
+  elif [ -n "$SSHT" ]; then
+    ssh "$SSHT" 'sudo systemctl restart kling' >/dev/null 2>&1 || return 1
+  else
+    return 1
+  fi
+  local i
+  for i in $(seq 1 30); do $KLING ps >/dev/null 2>&1 && break; sleep 0.5; done
+  sleep 2
+}
+
 # ── 2. ciclo de vida: arrancar, congelar, descongelar ─────────────────────────
 step "2. Ciclo de vida de una microVM"
 NAME="e2e-vida-$$"
@@ -110,9 +147,8 @@ contiene "$out" "created" && ok "volumen creado" || bad "volume create" "creado"
 # CON journal. Sin él, matar el VMM —que es como se para una microVM— deja el
 # sistema de ficheros incoherente y sin nada que reproducir: el siguiente
 # arranque monta sin quejarse y el primer read devuelve EBADMSG.
-if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-  feats=$(ssh "${KLING_HOST#ssh://}" \
-    "sudo dumpe2fs -h /var/lib/kindling/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem features'")
+if [ "$HOSTFS" = 1 ]; then
+  feats=$(hostsh "$HSUDO dumpe2fs -h $KROOT/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem features'")
   contiene "$feats" "has_journal" && ok "formateado con journal" \
     || bad "journal" "has_journal entre las features" "${feats:-no pude leerlo}"
 fi
@@ -160,9 +196,8 @@ fi
 out=$($KLING volume ls 2>&1 | grep "$VOL " || true)
 contiene "$out" "—" && ok "se libera al destruir la máquina" \
   || bad "liberación" "sin usuarios" "$out"
-if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-  st=$(ssh "${KLING_HOST#ssh://}" \
-    "sudo dumpe2fs -h /var/lib/kindling/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem state'")
+if [ "$HOSTFS" = 1 ]; then
+  st=$(hostsh "$HSUDO dumpe2fs -h $KROOT/volumes/$VOL.ext4 2>/dev/null | grep -i '^Filesystem state'")
   contiene "$st" "clean" && ok "queda limpio tras matar el VMM" \
     || bad "estado del ext4" "clean" "${st:-no pude leerlo}"
 fi
@@ -284,9 +319,8 @@ if escribe_vol v1; then
     || bad "volume snapshots" "antes y undo" "$out"
   out=$($KLING volume ls 2>&1 | grep "$VOL3 " || true)
   contiene "$out" " 3 " && ok "volume ls cuenta 3 snapshots" || bad "SNAPS" "3" "$out"
-  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-    perms=$(ssh "${KLING_HOST#ssh://}" \
-      "sudo stat -c '%a %U' /var/lib/kindling/volumes/snapshots /var/lib/kindling/volumes/snapshots/$VOL3 /var/lib/kindling/volumes/snapshots/$VOL3/antes.ext4 | tr '\n' ' '")
+  if [ "$HOSTFS" = 1 ]; then
+    perms=$(hostsh "$HSUDO stat -c '%a %U' $KROOT/volumes/snapshots $KROOT/volumes/snapshots/$VOL3 $KROOT/volumes/snapshots/$VOL3/antes.ext4 | tr '\n' ' '")
     [ "$perms" = "700 root 700 root 600 root " ] && ok "snapshots de root: 0700/0700/0600" \
       || bad "permisos de snapshots" "700 root 700 root 600 root" "${perms:-no pude leerlo}"
   fi
@@ -308,15 +342,12 @@ fi
 step "4. El daemon se reinicia sin llevarse las microVMs por delante"
 NAME="e2e-rec-$$"
 if $KLING run -name "$NAME" -image min >/dev/null 2>&1; then
-  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-    T="${KLING_HOST#ssh://}"
-    ssh "$T" 'sudo systemctl restart kling' >/dev/null 2>&1
-    sleep 4
+  if reiniciar_daemon; then
     state=$($KLING ps -a 2>/dev/null | awk -v n="$NAME" '$0 ~ n {print $4}')
     [ "$state" = "running" ] && ok "sobrevive al reinicio del daemon (sigue running)" \
       || bad "reconcile" "running" "${state:-desaparecida}"
   else
-    echo "  (daemon local: me salto el reinicio para no matar tu sesión)"
+    echo "  (daemon local sin KLING_E2E_RESTART: me salto el reinicio para no matar tu sesión)"
   fi
   $KLING rm "$NAME" >/dev/null 2>&1
 else
@@ -438,10 +469,6 @@ fi
 # permitido; si no, la sección lo dice y se salta las vivas. Salida en inglés.
 step "6. Shared folders"
 failE() { printf "  \033[31mFAIL\033[0m  %s\n        expected: %s\n        got:      %s\n" "$1" "$2" "$3"; fail=$((fail+1)); }
-SSHT=""
-if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then SSHT="${KLING_HOST#ssh://}"; fi
-# hostsh corre algo en el host del daemon: por ssh, o aquí si es local.
-hostsh() { if [ -n "$SSHT" ]; then ssh "$SSHT" "$1"; else sh -c "$1"; fi; }
 SH="e2e-sh-$$"
 SHARE_ROOT="${SHARE_ROOT:-$(hostsh 'echo $HOME')/kling-e2e-shares}"
 HD="$SHARE_ROOT/run-$$"
@@ -563,16 +590,15 @@ while True:
       && ok "rw: freeze -> thaw keeps the mount and the open file ($n1 -> $n2 lines)" \
       || failE "freeze/thaw with a live share" "the log grows, no errors" "$n1 -> $n2, $out"
 
-    if [ -n "$SSHT" ]; then
-      ssh "$SSHT" 'sudo systemctl restart kling' >/dev/null 2>&1
-      sleep 5
+    if reiniciar_daemon; then
+      sleep 1
       n1=$(hostsh "wc -l < $HD/rw/log" | tr -d ' '); sleep 2; n2=$(hostsh "wc -l < $HD/rw/log" | tr -d ' ')
       st=$($KLING inspect "$SH-rw" 2>&1 | grep '"status"' || true)
       [ "${n2:-0}" -gt "${n1:-0}" ] && contiene "$st" "attached" \
         && ok "rw: the daemon restarts and re-attaches the share" \
         || failE "re-attach after a daemon restart" "the log grows, status attached" "$n1 -> $n2, $st"
     else
-      echo "  (local daemon: skipping the restart)"
+      echo "  (local daemon without KLING_E2E_RESTART: skipping the restart)"
     fi
   else
     failE "run -share :rw" "a machine" "$out"
@@ -668,12 +694,12 @@ if $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org 
 
   # Y a un reinicio del daemon: las credenciales viven cifradas en el disco del
   # host, no solo en su memoria.
-  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-    ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
-    sleep 4
+  if reiniciar_daemon; then
     out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS" corto 2>&1)
     contiene "$out" "AUTH 200" && ok "tras reiniciar el daemon la credencial sigue viva" \
       || bad "credencial tras reiniciar el daemon" "AUTH 200" "$out"
+  else
+    echo "  (daemon local sin KLING_E2E_RESTART: me salto el reinicio)"
   fi
 
   # Rotación: la misma -env con otra clave conserva el marcador (el proceso del
@@ -778,13 +804,16 @@ c.request("GET", "/anything/e2e-follow"); print(c.getresponse().status)' >/dev/n
   # El registro vive fuera del directorio de la máquina (que es del VMM), en
   # <root>/audit, 0700 de root; rm lo borra (#79).
   crid=$($KLING inspect "$CR" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
-  out=$(hostsh "sudo stat -c '%a %U' /var/lib/kindling/audit /var/lib/kindling/audit/$crid.jsonl 2>&1 | tr '\n' ' '")
-  vieja=$(hostsh "sudo test -e /var/lib/kindling/machines/$crid/credaudit.jsonl && echo si || echo no")
+  # "no" solo si test contesta de verdad (sale 1); un sudo o un test que no
+  # corren daban "no" y la comprobación no podía fallar.
+  out=$(hostsh "$HSUDO stat -c '%a %U' $KROOT/audit $KROOT/audit/$crid.jsonl 2>&1 | tr '\n' ' '")
+  vieja=$(hostsh "$HSUDO test -e $KROOT/machines/$crid/credaudit.jsonl; echo \$?")
+  case "$vieja" in 0) vieja=si;; 1) vieja=no;; *) vieja="no pude mirarlo ($vieja)";; esac
   [ "$out" = "700 root 600 root " ] && [ "$vieja" = no ] \
     && ok "audit: en <root>/audit (0700 y 0600, de root), no en el directorio del VMM" \
     || bad "sitio del registro" "700 root 600 root y nada en machines/<id>" "$out vieja=$vieja"
   $KLING rm -f "$CR" >/dev/null 2>&1
-  [ "$(hostsh "sudo test -e /var/lib/kindling/audit/$crid.jsonl && echo si || echo no")" = no ] \
+  [ "$(hostsh "$HSUDO test -e $KROOT/audit/$crid.jsonl; echo \$?")" = 1 ] \
     && ok "audit: rm borra el registro de la máquina" || bad "audit tras rm" "borrado" "sigue"
 else
   bad "run -egress allowlist" "una máquina" "no arrancó"
@@ -1279,9 +1308,13 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     out=$(dbsql "$hija" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
     [ "$out" = "0" ] && ok "fork: la hija no hereda los roles de kling db role" || bad "roles ro en la hija" "0" "$out"
     if [ -n "$ROPW" ]; then
+      # En la hija el rol no existe y el fork le quita su línea de pg_hba.conf:
+      # el servidor la rechaza antes de mirar la clave ("no pg_hba.conf entry"
+      # para ese usuario). También es un rechazo del servidor, no una red rota.
       out=$(dbrosql e2e_agent "$ROPW" "$hija" "SELECT 1")
-      rechazo_clave "$out" && ok "fork: la clave del rol ro del origen no entra en la hija" \
-        || bad "clave del rol ro en la hija" "password authentication failed" "$out"
+      { rechazo_clave "$out" || { contiene "$out" "no pg_hba.conf entry for host" && contiene "$out" 'user "e2e_agent"'; }; } \
+        && ok "fork: la clave del rol ro del origen no entra en la hija" \
+        || bad "clave del rol ro en la hija" "password authentication failed o no pg_hba.conf entry para e2e_agent" "$out"
     fi
     TODAS="$TODAS $(dbpw "$hija")"
     dbk rm "$hija" >/dev/null 2>&1
@@ -1341,7 +1374,10 @@ SQL
   { [ "$rc" != 0 ] && contiene "$out" "would block" && contiene "$out" ": FAILED"; } && ok "rehearse: la migración que se bloquea falla por lock_timeout (would block)" || bad "rehearse bloqueo" "FAILED con would block, salida != 0" "rc=$rc $(printf '%s' "$out" | tail -4)"
   rm -rf "$RHDIR" "$RHBLK"
 
-  # golden -template crm-demo: se construye y se consulta.
+  # golden -template crm-demo: se construye y se consulta. kling db no busca
+  # db-golden.sh en el directorio actual (a propósito); fuera de una
+  # instalación con el script al lado del plugin, se le da el de este checkout.
+  export KLING_DB_GOLDEN_SCRIPT="${KLING_DB_GOLDEN_SCRIPT:-$(cd "$(dirname "$0")" && pwd)/db-golden.sh}"
   GTN="e2e-crm-$$"
   out=$(dbk golden build -template crm-demo "$GTN"); rc=$?
   if [ "$rc" != 0 ]; then
@@ -2331,14 +2367,12 @@ except socket.gaierror as e:
     [ "$out" = "original-despues" ] && ok "el original sigue con su db (ningún fork le llega)" || bad "original tras fork" "original-despues" "$out"
 
     # Bloque 4: el daemon se reinicia y el grafo y sus enlaces siguen.
-    if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-      ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
-      sleep 4
+    if reiniciar_daemon; then
       out=$(ghttp "$G-web" http://api.graph:8081/)
       { [ "$out" = "api-ok" ] && $KLING graph inspect "$G" >/dev/null 2>&1; } \
         && ok "tras reiniciar el daemon el grafo y su enlace siguen" || bad "grafo tras reinicio" "api-ok" "$out"
     else
-      echo "  (daemon local: me salto el reinicio para no matar tu sesión)"
+      echo "  (daemon local sin KLING_E2E_RESTART: me salto el reinicio para no matar tu sesión)"
     fi
 
     for F in $GFORKS; do $KLING graph rm "$F" >/dev/null 2>&1; done

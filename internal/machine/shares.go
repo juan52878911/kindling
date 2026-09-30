@@ -470,6 +470,8 @@ type shareSup struct {
 	mu   sync.Mutex
 	runs map[string]*shareRun
 	held map[string]bool
+	// drained: el daemon se apaga (drainShares) y no se lanza ninguna más.
+	drained bool
 }
 
 type shareRun struct {
@@ -480,7 +482,13 @@ type shareRun struct {
 	// de correr, o un error permanente). Una ejecución terminada se puede
 	// sustituir por otra.
 	done chan struct{}
+	// drain, al cerrarse, termina sus sesiones con un cierre ordenado
+	// (share.ServeDrain) y sus bucles no reconectan.
+	drain     chan struct{}
+	drainOnce sync.Once
 }
+
+func (r *shareRun) startDrain() { r.drainOnce.Do(func() { close(r.drain) }) }
 
 // permanent dice si alguna de sus carpetas acabó en un error que no se arregla
 // reintentando: el vigilante no la relanza sola.
@@ -555,7 +563,7 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 	sup := m.sup()
 	sup.mu.Lock()
 	defer sup.mu.Unlock()
-	if sup.held[id] {
+	if sup.held[id] || sup.drained {
 		return
 	}
 	if r := sup.runs[id]; r != nil {
@@ -569,7 +577,7 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	run := &shareRun{cancel: cancel, done: make(chan struct{})}
+	run := &shareRun{cancel: cancel, done: make(chan struct{}), drain: make(chan struct{})}
 	for tag, s := range mc.Shares {
 		if !s.Live() {
 			continue
@@ -579,15 +587,39 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		run.wg.Add(1)
 		go func(s api.ShareAttachment) {
 			defer run.wg.Done()
-			m.shareLoop(ctx, id, s, t)
+			m.shareLoop(ctx, run.drain, id, s, t)
 		}(s)
 	}
 	go func() { run.wg.Wait(); close(run.done) }()
 	sup.runs[id] = run
 }
 
+// drainSharesOf cierra en orden las conexiones de id (lo que está en vuelo
+// contesta; lo nuevo, el invitado lo repite con la sesión siguiente) y espera a
+// que terminen, como mucho shareDrainWait; después corta a secas. Es lo que usa
+// congelar: el invitado sigue vivo y vuelve a conectarse al descongelar, y un
+// corte seco le daba EIO en lo que tuviera en vuelo.
+func (m *Manager) drainSharesOf(id string) {
+	sup := m.sup()
+	sup.mu.Lock()
+	run := sup.runs[id]
+	delete(sup.runs, id)
+	sup.mu.Unlock()
+	if run == nil {
+		return
+	}
+	run.startDrain()
+	select {
+	case <-run.done:
+	case <-time.After(shareDrainWait):
+		log.Printf("%s: live shares did not close in %s; cutting them", id, shareDrainWait)
+	}
+	run.cancel()
+	run.wg.Wait()
+}
+
 // stopShares corta las conexiones de id y espera a que terminen. Lo que el
-// invitado tuviera en vuelo recibe EIO.
+// invitado tuviera en vuelo recibe EIO: es para cuando la máquina muere.
 func (m *Manager) stopShares(id string) {
 	sup := m.sup()
 	sup.mu.Lock()
@@ -599,6 +631,38 @@ func (m *Manager) stopShares(id string) {
 	}
 	run.cancel()
 	run.wg.Wait()
+}
+
+// shareDrainWait es lo más que se espera a que las carpetas vivas cierren
+// ordenadamente, al apagar o al congelar (el servidor corta a los 3 s como
+// mucho).
+const shareDrainWait = 5 * time.Second
+
+// drainShares cierra ordenadamente todas las carpetas vivas y espera a que
+// terminen, como mucho wait. Lo llama el apagado del daemon: sin él el proceso
+// salía con las sesiones abiertas y el invitado recibía EIO en lo que tuviera
+// en vuelo (un proceso escribiendo en la carpeta moría en cada reinicio). Con
+// el cierre ordenado lo que estaba en vuelo contesta y lo nuevo se repite con
+// la sesión que abra el daemon siguiente.
+func (m *Manager) drainShares(wait time.Duration) {
+	sup := m.sup()
+	sup.mu.Lock()
+	sup.drained = true
+	runs := make([]*shareRun, 0, len(sup.runs))
+	for _, r := range sup.runs {
+		r.startDrain()
+		runs = append(runs, r)
+	}
+	sup.mu.Unlock()
+	limite := time.After(wait)
+	for _, r := range runs {
+		select {
+		case <-r.done:
+		case <-limite:
+			log.Printf("shutdown: live shares did not close in %s; the guest may see EIO", wait)
+			return
+		}
+	}
 }
 
 // holdShares impide que se vuelvan a lanzar (congelar). releaseShares lo
@@ -697,13 +761,23 @@ func (m *Manager) decorarShares(out *api.Machine) {
 	out.Shares = sh
 }
 
+// isClosed dice si el canal ya está cerrado, sin esperar.
+func isClosed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
+
 // errPermanente marca un fallo de attach que no se arregla reintentando.
 type errPermanente struct{ error }
 
 func (e errPermanente) Unwrap() error { return e.error }
 
 // shareLoop mantiene conectada una carpeta viva mientras la máquina corra.
-func (m *Manager) shareLoop(ctx context.Context, id string, s api.ShareAttachment, t *shareTag) {
+func (m *Manager) shareLoop(ctx context.Context, drain <-chan struct{}, id string, s api.ShareAttachment, t *shareTag) {
 	backoff := 200 * time.Millisecond
 	for ctx.Err() == nil {
 		mc, ok := m.get(id)
@@ -711,8 +785,8 @@ func (m *Manager) shareLoop(ctx context.Context, id string, s api.ShareAttachmen
 			t.set("detached")
 			return
 		}
-		err := m.attachOnce(ctx, mc, s, t)
-		if ctx.Err() != nil {
+		err := m.attachOnce(ctx, drain, mc, s, t)
+		if ctx.Err() != nil || isClosed(drain) {
 			t.set("detached")
 			return
 		}
@@ -732,6 +806,9 @@ func (m *Manager) shareLoop(ctx context.Context, id string, s api.ShareAttachmen
 		select {
 		case <-ctx.Done():
 			return
+		case <-drain:
+			t.set("detached")
+			return
 		case <-time.After(backoff):
 		}
 		if backoff < 5*time.Second {
@@ -749,7 +826,8 @@ var shareClient = &http.Client{Transport: &http.Transport{
 
 // attachOnce conecta la carpeta s con el agente de mc y la sirve hasta que la
 // sesión se corta. nil = se sirvió y se cortó (hay que reconectar).
-func (m *Manager) attachOnce(ctx context.Context, mc *api.Machine, s api.ShareAttachment, t *shareTag) error {
+// Con drain cerrado la sesión acaba con un cierre ordenado (share.ServeDrain).
+func (m *Manager) attachOnce(ctx context.Context, drain <-chan struct{}, mc *api.Machine, s api.ShareAttachment, t *shareTag) error {
 	if !mc.Reachable() {
 		return errors.New("the machine is not reachable yet")
 	}
@@ -803,7 +881,7 @@ func (m *Manager) attachOnce(ctx context.Context, mc *api.Machine, s api.ShareAt
 	}
 	t.set("attached")
 	t.settle(nil)
-	err = srv.Serve(ctx, rwc)
+	err = srv.ServeDrain(ctx, drain, rwc)
 	_ = rwc.Close()
 	if err != nil && ctx.Err() == nil {
 		log.Printf("%s: shared folder %s: session ended: %v", mc.Name, s.Mount, err)

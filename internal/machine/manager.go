@@ -792,6 +792,9 @@ func (m *Manager) persistirYa() {
 // reconstruye un estado que ya no es el real.
 func (m *Manager) Close() {
 	m.quitOnce.Do(func() {
+		// Antes que nada, las carpetas vivas: su cierre ordenado necesita al
+		// agente del invitado, no el estado.
+		m.drainShares(shareDrainWait)
 		close(m.quit)
 		m.cerrarBroker()
 		m.persistWG.Wait()
@@ -1868,13 +1871,15 @@ func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Mach
 
 	// Las carpetas vivas se desconectan ANTES de pausar: la conexión muere con
 	// el VMM, y si no se cortara aquí el daemon no se enteraría hasta que
-	// venciera el keepalive, con la sesión colgada. hold impide que el vigilante
-	// las reconecte mientras dura el volcado; al salir, si la máquina sigue
-	// corriendo (el volcado falló), releaseShares las relanza.
+	// venciera el keepalive, con la sesión colgada. En orden (drainSharesOf):
+	// lo que el invitado tenga en vuelo contesta y lo nuevo lo repite al
+	// descongelar, en vez de EIO. hold impide que el vigilante las reconecte
+	// mientras dura el volcado; al salir, si la máquina sigue corriendo (el
+	// volcado falló), releaseShares las relanza.
 	if hasLiveShares(mc) {
 		m.holdShares(mc.ID)
 		defer m.releaseShares(mc.ID)
-		m.stopShares(mc.ID)
+		m.drainSharesOf(mc.ID)
 	}
 
 	// ¿Hay agente al que resincronizar al descongelarla? Se pregunta ahora,
