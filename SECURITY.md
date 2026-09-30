@@ -1111,7 +1111,7 @@ Lo que no cubre: el token viaja en claro por el tramo anfitrión → invitado, c
 del proxy y de las aristas (§15); y la API no tiene shell (cada ruta valida sus
 argumentos), así que un token de control da el teléfono, no root en la VM.
 
-### 22. Una plantilla compartida entrega lo que lleva a todos los inquilinos
+### 23. Una plantilla compartida entrega lo que lleva a todos los inquilinos
 
 Con política de autorización ([docs/authz.md](docs/authz.md)), `shared_templates` deja que
 cualquier inquilino haga `run -from` (o `sandbox -from`) de un snapshot de admin. El

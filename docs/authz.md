@@ -148,7 +148,7 @@ sesiones como cambiar sus etiquetas de `kling db`.
 ## Plantillas compartidas: lo que llevan, lo reciben todos
 
 Compartir una plantilla (`shared_templates`) es dar a **cada** inquilino lo que viaja
-con ella (`SECURITY.md` §22):
+con ella (`SECURITY.md` §23):
 
 - **Sus credenciales de plantilla** (`kling template credential`): cada instancia las
   recibe, la de un inquilino también. La clave no entra en el invitado, pero el
