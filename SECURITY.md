@@ -227,7 +227,10 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   la credencial (`-header`, `headers`); en la query solo con `-query` y en el cuerpo
   solo con `-body` (en flujo, con una ventana del tamaño del marcador: sin límite de
   tamaño ni de longitud declarada), sale por HTTPS
-  verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
+  verificando el certificado con un dialer que no conecta a IPs privadas (ni a
+  `0.0.0.0/8`, que en el host es su propio loopback, multicast `224.0.0.0/4` ni
+  reservadas y broadcast `240.0.0.0/4`; en IPv6, `::/96`, link-local, ULA, multicast,
+  NAT64 y 6to4), no sigue
   redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
   respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding de
   query, ruta y userinfo, entidades HTML), en mayúsculas y minúsculas, en hex y en

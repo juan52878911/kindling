@@ -73,6 +73,9 @@ var blocked = []string{
 	"169.254.0.0/16", // link-local y metadatos de cloud
 	"127.0.0.0/8",    // loopback del host
 	"100.64.0.0/10",  // CGNAT
+	"0.0.0.0/8",      // "esta red": hacia 0.0.0.0 el host se llama a sí mismo
+	"224.0.0.0/4",    // multicast
+	"240.0.0.0/4",    // reservada y broadcast
 }
 
 // applyEgress instala las reglas de salida dentro del namespace. domains solo se

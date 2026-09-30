@@ -94,6 +94,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `/public/..;/admin` (`/admin` para Tomcat o Spring). La ruta se mira también
   decodificada: `;`, `%` restante (`%252e`), `\`, `//`, caracteres de control y
   segmentos `.`/`..` son 403.
+- **Rangos bloqueados de salida: `0.0.0.0/8`, `224.0.0.0/4` y `240.0.0.0/4`** en el
+  proxy de credenciales y en el firewall de Linux (macOS ya los tenía). Hacia 0.0.0.0
+  el dialer del daemon llegaba al loopback del host. `credproxy.IsBlockedIP` rechaza
+  además IPv6 sin especificar, loopback, link-local, ULA, multicast, NAT64 y 6to4 (la
+  salida sigue siendo solo IPv4).
 
 ## v0.17.0 — 2026-09-29
 

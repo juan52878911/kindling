@@ -73,3 +73,21 @@ func TestIsBlockedIP(t *testing.T) {
 		}
 	}
 }
+
+// 0.0.0.0/8 (hacia 0.0.0.0 el dialer del host llega a su propio loopback),
+// multicast, reservadas y broadcast, y lo mismo en IPv6 (sin especificar,
+// loopback, link-local, ULA, multicast, NAT64, 6to4 y mapeadas).
+func TestIsBlockedIPRangosEspeciales(t *testing.T) {
+	for _, s := range []string{"0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+		"::", "::1", "fe80::1", "fd00::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:0.0.0.0", "::ffff:224.0.0.1",
+		"64:ff9b::a00:1", "2002:c0a8:101::1", "::127.0.0.1"} {
+		if !IsBlockedIP(net.ParseIP(s)) {
+			t.Errorf("%s debería estar bloqueada", s)
+		}
+	}
+	for _, s := range []string{"1.0.0.1", "223.255.255.255", "2606:4700:4700::1111", "::ffff:1.1.1.1"} {
+		if IsBlockedIP(net.ParseIP(s)) {
+			t.Errorf("%s no debería estar bloqueada", s)
+		}
+	}
+}
