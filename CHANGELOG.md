@@ -77,13 +77,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   la daba por hecha y, con el daemon ya bien, los fallos siguientes no se anotaban), y
   la línea de salud de `kling status` ya no pinta ✓ con un veredicto de más de 12 h
   (el doble del intervalo de `kling-heal.timer`) o sin fecha: cuenta como desconocido.
-- **`kling add <nombre>` ya no puede instalar el servidor de otro autor por mirar solo
-  la primera página del registro.** Con un nombre corto (`github`, 630 resultados) daba
-  por inequívoco el único `*/github` de la página 1 aunque hubiera más en las
-  siguientes. Ahora recorre todas (hasta 50) y, con varios, pide el nombre completo.
 - `tools/list` sigue `nextCursor` en el catálogo del gateway y en `kling mcp import`
   (antes, de un servidor que pagina solo se veía la primera página), con tope de 64
   páginas y 4096 herramientas; un cursor repetido es un error.
+- `mcp/links` ya no pierde enlaces con altas o bajas simultáneas en el mismo proceso
+  (ocho `SetLink` a la vez dejaban dos): el leer-modificar-escribir va con cerrojo. El
+  store no tiene escritura condicional, así que dos procesos a la vez aún pueden
+  pisarse.
 
 ### Seguridad
 
@@ -153,6 +153,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
   pasado `8 MiB` (el tope del proxy por servicio) la llamada falla, sin truncar.
+- **`kling add <nombre>` ya no puede instalar el servidor de otro autor por mirar solo
+  la primera página del registro.** Con un nombre corto (`github`, 630 resultados) daba
+  por inequívoco el único `*/github` de la página 1 aunque hubiera más en las
+  siguientes. Ahora recorre todas (hasta 50) y, con varios, pide el nombre completo.
 
 ## v0.17.0 — 2026-09-29
 
