@@ -88,6 +88,32 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   shell); `/data` en RAM ya monta (el loop con autoborrado se soltaba antes del
   `mount`).
 
+### Seguridad
+
+- **macOS: el sandbox de `kling-vz` ya no deja a una máquina tocar las de las demás.**
+  Leía toda la raíz (también `secrets/snapshot.key`, de la que salen las claves de todos
+  los `credentials.enc`), escribía en `snapshots/` y `volumes/` enteros y conectaba a
+  `localhost:*` sin red: un fallo en su pila de red daba las credenciales de todas, los
+  dorados y el agente de las demás por sus reenvíos. Ahora lee y escribe solo su
+  directorio y los ficheros exactos de su VM, nunca `secrets/` ni escribe en
+  `snapshots/` (el dorado de `kling commit` lo coloca un proceso custodio que no pisa
+  nada), escucha solo en el rango de reenvíos y nunca conecta a él.
+  `vz/scripts/sandbox-perfil.sh` lo comprueba con `sandbox-exec`. `SECURITY.md` §22.
+- **macOS: un reenvío de `127.0.0.1` ya no acepta a otro usuario que reutilice el puerto
+  de una conexión del daemon.** `vz/internal/peercred` comparaba solo puertos, y
+  `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` desde otra cuenta pasaba por del daemon y
+  llegaba al agente del invitado. Ahora compara también direcciones y familia.
+  `SECURITY.md` §22.
+- **macOS: un invitado ya no puede agotar `kling-vz` a base de DNS y flujos**, tampoco
+  en egress none. 3000 flujos UDP al 53 dejaban ~2800 goroutines; ahora hay topes por
+  máquina (64 flujos UDP y 64 conexiones TCP al 53, 256 flujos UDP de salida) y hacia el
+  upstream los de Linux (32 en vuelo, 200/s con ráfagas de 400). Y una respuesta con
+  otro id u otra pregunta ya no siembra la allowlist. `SECURITY.md` §22.
+- **macOS: el DNS del invitado va a `1.1.1.1` y no al resolver del Mac**, como en Linux.
+  Con egress internet se reenviaba al `nameserver` de `/etc/resolv.conf` (router, VPN),
+  que por split-horizon le enseñaba al invitado los nombres de la intranet. En una red
+  que bloquee `1.1.1.1:53` el invitado deja de resolver. `SECURITY.md` §22.
+
 ## v0.17.0 — 2026-09-29
 
 La versión más grande hasta ahora: `kling db` (bases de datos desechables por microVM:

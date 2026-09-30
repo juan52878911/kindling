@@ -220,15 +220,58 @@ func espacioLibre(mnt string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
+// argsMontajePut son los argumentos de mount para abrir una imagen en
+// escritura y poner un fichero dentro. La imagen no es de fiar (la trae quien
+// la construye o la copia) y mientras está montada su contenido es visible en
+// el host: nosuid, nodev y noexec para que un binario setuid o un nodo de
+// dispositivo que traiga no sirvan de nada a quien llegue al punto de
+// montaje. ponerEnImagen solo lee y escribe ficheros.
+func argsMontajePut(image, mnt string) []string {
+	return []string{"-o", "loop,nosuid,nodev,noexec", image, mnt}
+}
+
+// dirMontajePut crea el punto de montaje de intentarPut en build/ de la raíz
+// del daemon (0700), y no en /tmp. Un directorio de MkdirTemp es 0700, pero
+// al montar encima lo que cuenta son los permisos de la raíz de la IMAGEN: en
+// /tmp, cualquier usuario del host podía entrar en la imagen montada mientras
+// duraba el put. Bajo un directorio 0700 de root, no llega.
+func (m *Manager) dirMontajePut() (string, error) {
+	if m.root == "" {
+		return "", errors.New("no data root to mount the image in")
+	}
+	d := filepath.Join(m.root, "build")
+	if err := os.Mkdir(d, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	fi, err := os.Lstat(d)
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", d)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(d, 0o700); err != nil {
+			return "", err
+		}
+	}
+	return os.MkdirTemp(d, "kling-refresh-")
+}
+
 func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, quiero string, mode os.FileMode, create bool) (bool, error) {
 	if putSinMontar {
 		return m.intentarPutDebugfs(ctx, image, dentroPath, bridge, quiero, mode, create)
 	}
 	// Antes de montar en ESCRITURA. Montar así un ext4 sucio es como se corrompió
-	// una imagen en este proyecto, y el síntoma fue un pánico del invitado.
-	repairVolume(ctx, image)
+	// una imagen en este proyecto, y el síntoma fue un pánico del invitado. Y
+	// si e2fsck dice que quedaron errores sin corregir, o no acaba, no se
+	// monta: es el kernel del host, como root, leyendo un ext4 roto que no es
+	// de fiar. Sin e2fsck instalado se sigue como siempre.
+	if _, _, err := revisarExt4(ctx, image); err != nil && !errors.Is(err, exec.ErrNotFound) {
+		return false, fmt.Errorf("not mounting %s: %w", filepath.Base(image), err)
+	}
 
-	mnt, err := os.MkdirTemp("", "kling-refresh-")
+	mnt, err := m.dirMontajePut()
 	if err != nil {
 		return false, err
 	}
@@ -236,7 +279,7 @@ func (m *Manager) intentarPut(ctx context.Context, image, dentroPath, bridge, qu
 	// vaciaría la imagen montada debajo.
 	defer os.Remove(mnt)
 
-	if out, err := exec.CommandContext(ctx, "mount", "-o", "loop", image, mnt).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "mount", argsMontajePut(image, mnt)...).CombinedOutput(); err != nil {
 		return false, fmt.Errorf("mounting: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	// El desmontaje va en defer y NO al final del cuerpo: cualquier retorno

@@ -108,6 +108,82 @@ func TestBindDelAlmacenEnElJail(t *testing.T) {
 	}
 }
 
+// El VMM renombra, dentro de su chroot (que es suyo), el directorio que
+// contiene el bind del almacén: el montaje se va con él. Antes borrarJail
+// solo miraba la ruta original del bind, la veía sin montar, y el RemoveAll
+// entraba en el almacén por el nombre nuevo y se llevaba el overlay (root y
+// KLING_TEST_MOUNTS=1).
+func TestBorrarJailConElBindRenombrado(t *testing.T) {
+	if os.Geteuid() != 0 || os.Getenv("KLING_TEST_MOUNTS") != "1" {
+		t.Skip("needs root and KLING_TEST_MOUNTS=1")
+	}
+	m := newTestManager(t)
+	m.alm = nuevoAlmacen(m.root, &Privileges{})
+	if err := os.MkdirAll(m.alm.dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount("tmpfs", m.alm.dir, "tmpfs", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Unmount(m.alm.dir, syscall.MNT_DETACH) })
+	d := m.alm.dirInstancia("id1")
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(d, "overlay.ext4")
+	if err := os.WriteFile(overlay, []byte("disco"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.prepararBindsJail("id1"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.barrerBindsJail() })
+	// Lo que haría el VMM: mover el primer componente de la ruta del bind.
+	raiz := m.jailRoot("id1")
+	c1, _, _ := strings.Cut(strings.TrimPrefix(m.alm.dirInstancia("id1"), "/"), "/")
+	if err := os.Rename(filepath.Join(raiz, c1), filepath.Join(raiz, "movido")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.borrarJail("id1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(overlay); err != nil || string(b) != "disco" {
+		t.Fatalf("borrar el jail se llevó el overlay del almacén por el bind renombrado: %q %v", b, err)
+	}
+	if _, err := os.Lstat(filepath.Join(m.jailBase(), "firecracker", "id1")); !os.IsNotExist(err) {
+		t.Errorf("el jail sigue: %v", err)
+	}
+}
+
+// borrarJail no sigue los enlaces que el VMM deje en su chroot (sin root).
+func TestBorrarJailNoSigueEnlaces(t *testing.T) {
+	m := newTestManager(t)
+	fuera := t.TempDir()
+	canario := filepath.Join(fuera, "canario")
+	if err := os.WriteFile(canario, []byte("del host"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raiz := m.jailRoot("id1")
+	if err := os.MkdirAll(filepath.Join(raiz, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(fuera, filepath.Join(raiz, "var")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canario, filepath.Join(raiz, "run", "f")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.borrarJail("id1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(canario); err != nil {
+		t.Fatalf("borrarJail siguió un enlace: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(m.jailBase(), "firecracker", "id1")); !os.IsNotExist(err) {
+		t.Errorf("el jail sigue: %v", err)
+	}
+}
+
 // Un almacén existente conserva su tipo: el fichero de imagen lo dice.
 func TestFSDelAlmacenExistente(t *testing.T) {
 	for _, c := range []struct{ img, fs string }{{"cow.xfs", "xfs"}, {"cow.btrfs", "btrfs"}} {

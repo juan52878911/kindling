@@ -387,6 +387,10 @@ y, si existe, `footprint`.
   operadoras pueden negarse a funcionar. Propuesta §5.
 - **Apps solo-32 bits**: `INSTALL_FAILED_NO_MATCHING_ABIS`. Apple Silicon no
   ejecuta AArch32 y la imagen es 64only.
+- **Apps solo-ARM en x86_64**: por defecto `INSTALL_FAILED_NO_MATCHING_ABIS`;
+  con `arm_translation: libndk` corren traducidas (4–30× más lentas, blob de
+  Google con licencia restrictiva). Para eso, mejor un host ARM:
+  [docs/traduccion-arm.md](docs/traduccion-arm.md).
 - **Identidad de los clones**: todos despiertan con el mismo `android_id`,
   claves y semillas (`internal/machine/fork.go`). El informe cuenta cuántos
   `android_id` distintos hubo (se espera 1). Es para la fase 1 (hook post-thaw).

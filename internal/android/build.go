@@ -157,6 +157,12 @@ func (b *builder) run(ctx context.Context, rawSpec json.RawMessage) error {
 	h := sha256.New()
 	fmt.Fprintf(h, "kindling-android-v1\x00%s\x00%s\x00%s\x00%s\x00%d\x00", b.name, b.baseName, rawSpec, agentSum, b.t.Unix())
 	fmt.Fprintf(h, "%+v\x00%+v\x00", b.redroid(), debianLock[b.spec.Arch])
+	if tr := b.spec.translation(); tr != "" {
+		fmt.Fprintf(h, "arm_translation=%s\x00", tr)
+		if tr == TranslationLibndk {
+			fmt.Fprintf(h, "%+v\x00", libndkPin)
+		}
+	}
 	for _, f := range files {
 		fmt.Fprintf(h, "%s=%s\x00", f.spec.Path, f.sha)
 	}

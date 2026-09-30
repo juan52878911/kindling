@@ -202,8 +202,10 @@ func TestImageBlobSha256Sidecar(t *testing.T) {
 		t.Fatalf("el PUT ya conoce el hash comprobado; debía dejar el sidecar: %v", err)
 	}
 
-	// Se sustituye el contenido SIN cambiar tamaño ni mtime: un GET que de
-	// verdad cacheara por esas dos cosas seguiría sirviendo el hash viejo.
+	// Se sustituye el contenido SIN cambiar tamaño ni mtime: cachear solo por
+	// esas dos cosas seguiría sirviendo el hash viejo, y el destino de un
+	// copy verificaría contra un hash que no es el del fichero. La huella
+	// lleva también inodo y ctime, que un touch -r no devuelve.
 	fi, err := os.Stat(filepath.Join(imgs, "foo.ext4"))
 	if err != nil {
 		t.Fatal(err)
@@ -217,8 +219,21 @@ func TestImageBlobSha256Sidecar(t *testing.T) {
 	}
 	rr := httptest.NewRecorder()
 	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/images/foo/blob", nil))
-	if got := rr.Header().Get(api.HeaderSha256); got != shaHex([]byte(body)) {
-		t.Fatalf("con el mismo tamaño y mtime el GET debía servir el hash cacheado, no rehashear: %s", got)
+	if got := rr.Header().Get(api.HeaderSha256); got != shaHex([]byte(otro)) {
+		t.Fatalf("contenido nuevo con el mismo tamaño y mtime: el GET sirvió un hash que no es el suyo: %s", got)
+	}
+	// Sin tocar nada, el siguiente GET sí sale del sidecar (que ahora lleva
+	// el hash de otro): se comprueba cambiando el sidecar a mano.
+	b, _ := os.ReadFile(side)
+	linea := strings.TrimSpace(string(b))
+	falso := linea[:strings.LastIndexByte(linea, ':')+1] + strings.Repeat("0", 64)
+	if err := os.WriteFile(side, []byte(falso+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/images/foo/blob", nil))
+	if got := rr.Header().Get(api.HeaderSha256); got != strings.Repeat("0", 64) {
+		t.Fatalf("con la huella intacta el GET debía servir el hash cacheado, no rehashear: %s", got)
 	}
 
 	// Pero un tamaño distinto invalida el sidecar y se rehashea de verdad.

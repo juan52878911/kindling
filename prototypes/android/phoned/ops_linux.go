@@ -65,6 +65,7 @@ func (o *androidOps) Health(ctx context.Context) healthInfo {
 	pid, started := s.pid, s.started
 	s.mu.Unlock()
 	h.Verity = verityStatus()
+	h.ARMTranslation = imageValue(imageTxtPath, "arm_translation")
 	if pid > 0 && comm(pid) == "init" {
 		h.AndroidPID = pid
 		h.UptimeS = int64(time.Since(started).Seconds())
@@ -74,6 +75,10 @@ func (o *androidOps) Health(ctx context.Context) healthInfo {
 		h.AdbSecure = sec == "1"
 		h.SystemServer = procByComm("system_server") > 0
 		h.Uidump = uidumpInstalled(pid)
+		abis, _ := getProp(pid, "ro.product.cpu.abilist")
+		bridge, _ := getProp(pid, "ro.dalvik.vm.native.bridge")
+		h.ABIs, h.NativeBridge = splitABIs(abis), bridgeName(bridge)
+		h.ARM64Exec = binfmtState(fmt.Sprintf("/proc/%d/root/proc/sys/fs/binfmt_misc/arm64_exe", pid))
 	} else {
 		h.Detail = "android is not running"
 	}

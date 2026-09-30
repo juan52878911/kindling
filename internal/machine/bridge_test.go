@@ -187,3 +187,53 @@ func TestSeComparaPorContenido(t *testing.T) {
 		t.Error("dos ficheros distintos del mismo tamaño dieron la misma huella")
 	}
 }
+
+// La imagen que se monta para un put no es de fiar: ni setuid, ni nodos de
+// dispositivo, ni ejecutables, y el punto de montaje en un directorio del
+// daemon al que nadie más llega, no en /tmp.
+func TestMontajeDelPutEsPrivadoYSinSuid(t *testing.T) {
+	args := argsMontajePut("/img.ext4", "/mnt")
+	if len(args) != 4 || args[0] != "-o" || args[2] != "/img.ext4" || args[3] != "/mnt" {
+		t.Fatalf("argumentos de mount: %q", args)
+	}
+	opts := map[string]bool{}
+	for _, o := range strings.Split(args[1], ",") {
+		opts[o] = true
+	}
+	for _, w := range []string{"loop", "nosuid", "nodev", "noexec"} {
+		if !opts[w] {
+			t.Errorf("mount del put sin %s: %s", w, args[1])
+		}
+	}
+
+	m := newTestManager(t)
+	// Un build/ que quedó abierto de antes se cierra.
+	if err := os.Mkdir(filepath.Join(m.root, "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mnt, err := m.dirMontajePut()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(mnt)
+	if filepath.Dir(mnt) != filepath.Join(m.root, "build") {
+		t.Fatalf("punto de montaje fuera de la raíz del daemon: %s", mnt)
+	}
+	fi, err := os.Lstat(filepath.Dir(mnt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("build/ es %o: otros usuarios llegarían a la imagen montada", fi.Mode().Perm())
+	}
+
+	// build/ cambiado por un enlace: no se monta a través de él.
+	m2 := newTestManager(t)
+	if err := os.Symlink(t.TempDir(), filepath.Join(m2.root, "build")); err != nil {
+		t.Fatal(err)
+	}
+	if mnt, err := m2.dirMontajePut(); err == nil {
+		os.Remove(mnt)
+		t.Fatal("dirMontajePut siguió un enlace en build/")
+	}
+}
