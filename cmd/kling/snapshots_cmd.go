@@ -88,6 +88,7 @@ func snapshotsCredential(args []string) error {
 	fmt.Printf("%s  every new instance gets a placeholder in %s; the key only goes to https://%s through its proxy\n",
 		s.Name, spec.Env, strings.ToLower(spec.Domain))
 	fmt.Printf("      %s\n", describirAllow(spec.Allow))
+	fmt.Printf("      %s\n", describirSitios(spec))
 	fmt.Printf("      point the SDK at http://%s; running instances are not changed (kling machine credential does that)\n",
 		strings.ToLower(spec.Domain))
 	return nil
@@ -101,14 +102,14 @@ var credAvisos io.Writer = os.Stderr
 // y template credential. La clave NUNCA va en una bandera: -f o stdin.
 type credFlags struct {
 	domain, env, file, typ, user, database, caFile *string
-	anyDatabase                                    *bool
+	anyDatabase, query, body                       *bool
 	upstream, upstreamTLS, tlsServerName           *string
 	port                                           *int
-	allow                                          *stringsFlag
+	allow, headers                                 *stringsFlag
 }
 
 func credentialFlags(fs *flag.FlagSet) *credFlags {
-	c := &credFlags{allow: &stringsFlag{}}
+	c := &credFlags{allow: &stringsFlag{}, headers: &stringsFlag{}}
 	c.domain = fs.String("domain", "", "the only host the key is sent to, e.g. api.stripe.com (postgres/mysql: the database server)")
 	c.env = fs.String("env", "", "environment variable that receives the placeholder, e.g. STRIPE_API_KEY (postgres: PGPASSWORD, mysql: MYSQL_PWD)")
 	c.file = fs.String("f", "", "file with the key or password (default: stdin)")
@@ -122,6 +123,9 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 	c.upstreamTLS = fs.String("upstream-tls", "", "postgres/mysql: verify-full (default) or disable (only with -upstream; queries travel unencrypted; postgres: SCRAM-SHA-256 only; mysql: only methods that do not send the password)")
 	c.tlsServerName = fs.String("tls-server-name", "", "postgres/mysql: name the server certificate is verified against (default: -domain)")
 	fs.Var(c.allow, "allow-request", allowRequestHelp)
+	fs.Var(c.headers, "header", "http: also swap the placeholder in this request header (repeatable; Authorization and X-Api-Key always)")
+	c.query = fs.Bool("query", false, "http: also swap the placeholder in the query string (?key=)")
+	c.body = fs.Bool("body", false, "http: also swap the placeholder in the request body; UNSAFE if the provider can echo it back transformed (an LLM asked to repeat it in base64)")
 	return c
 }
 
@@ -129,7 +133,7 @@ func credentialFlags(fs *flag.FlagSet) *credFlags {
 // no pega con el tipo se rechaza aquí, antes de leer la clave; el daemon lo
 // valida todo igualmente.
 func (c *credFlags) spec() (api.CredentialSpec, error) {
-	s := api.CredentialSpec{Domain: *c.domain, Env: *c.env, Allow: *c.allow}
+	s := api.CredentialSpec{Domain: *c.domain, Env: *c.env, Allow: *c.allow, Headers: *c.headers, Query: *c.query, Body: *c.body}
 	switch *c.typ {
 	case "", "http":
 		if *c.port != 0 || *c.user != "" || *c.database != "" || *c.anyDatabase || *c.caFile != "" ||
@@ -139,6 +143,9 @@ func (c *credFlags) spec() (api.CredentialSpec, error) {
 	case credproxy.KindPostgres, credproxy.KindMySQL:
 		if len(*c.allow) > 0 {
 			return s, errors.New("-allow-request is only for HTTP credentials")
+		}
+		if len(*c.headers) > 0 || *c.query || *c.body {
+			return s, errors.New("-header, -query and -body are only for HTTP credentials")
 		}
 		if *c.user == "" {
 			return s, fmt.Errorf("-type %s needs -user (the role the password belongs to)", *c.typ)
@@ -253,6 +260,18 @@ func describirAllow(allow []string) string {
 		return "every request to that host gets the key (use -allow-request to restrict it)"
 	}
 	return "only these requests get the key, anything else is a 403: " + strings.Join(allow, ", ")
+}
+
+// describirSitios dice en una línea dónde cambiará el proxy el marcador.
+func describirSitios(s api.CredentialSpec) string {
+	sitios := "headers " + strings.Join(append(append([]string(nil), credproxy.CabecerasPorDefecto...), s.Headers...), ", ")
+	if s.Query {
+		sitios += ", the query"
+	}
+	if s.Body {
+		sitios += " and the BODY (unsafe if the provider echoes what it gets)"
+	}
+	return "the placeholder is swapped only in " + sitios
 }
 
 // leerClave lee la clave de un fichero o de stdin, sin espacios alrededor.

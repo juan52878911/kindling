@@ -71,6 +71,18 @@ const (
 	dialTimeout = 10 * time.Second
 	udpIdle     = 60 * time.Second
 	dnsIdle     = 10 * time.Second
+
+	// Topes de lo que el invitado puede tener abierto a la vez contra este
+	// proceso, también en egress none. Cada flujo UDP (una 5-tupla) y cada
+	// conexión TCP al 53 retiene goroutines y memoria hasta su plazo de
+	// inactividad: sin tope, 3000 flujos al 53 dejaban 2800 goroutines vivas
+	// en kling-vz. Por encima, el flujo UDP se descarta y la conexión TCP
+	// recibe un RST, como el tope de dnsMaxTCPConns del núcleo en Linux.
+	// MaxUDPFlows cuenta los flujos UDP que no son DNS (salida en internet o
+	// allowlist), que retienen además un socket del Mac.
+	MaxDNSUDPFlows = 64
+	MaxDNSTCPConns = 64
+	MaxUDPFlows    = 256
 )
 
 // Config es lo que la red necesita saber de la máquina.
@@ -143,6 +155,19 @@ type Net struct {
 	forwards map[int]net.Listener
 	closed   bool
 	wg       sync.WaitGroup
+
+	// Plazas de MaxDNSUDPFlows, MaxDNSTCPConns y MaxUDPFlows.
+	dnsUDP, dnsTCP, udpFlows chan struct{}
+}
+
+// tomar ocupa una plaza de sem sin esperar; false si no queda ninguna.
+func tomar(sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 // New crea el socketpair y la pila. El lado de la VM se obtiene con VMFile.
@@ -213,7 +238,9 @@ func NewWithConn(cfg Config, conn net.Conn) (*Net, error) {
 	ep.LinkEPCapabilities |= stack.CapabilityRXChecksumOffload
 
 	ctx, cancel := context.WithCancel(context.Background())
-	n := &Net{cfg: cfg, stack: s, ep: ep, conn: conn, ctx: ctx, cancel: cancel, forwards: map[int]net.Listener{}}
+	n := &Net{cfg: cfg, stack: s, ep: ep, conn: conn, ctx: ctx, cancel: cancel, forwards: map[int]net.Listener{},
+		dnsUDP: make(chan struct{}, MaxDNSUDPFlows), dnsTCP: make(chan struct{}, MaxDNSTCPConns),
+		udpFlows: make(chan struct{}, MaxUDPFlows)}
 	fail := func(what string, e tcpip.Error) (*Net, error) {
 		n.Close()
 		return nil, fmt.Errorf("netstack %s: %s", what, e)
@@ -361,6 +388,11 @@ func (n *Net) handleTCP(r *tcp.ForwarderRequest) {
 	id := r.ID()
 	dst := addrOf(id.LocalAddress)
 	if id.LocalPort == 53 {
+		if !tomar(n.dnsTCP) {
+			r.Complete(true) // por encima de MaxDNSTCPConns: RST
+			return
+		}
+		defer func() { <-n.dnsTCP }()
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
@@ -440,17 +472,29 @@ func (n *Net) handleUDP(r *udp.ForwarderRequest) bool {
 	if !isDNS && !n.cfg.Policy.AllowConn(dst) {
 		return true // descartado en silencio, como el DROP de iptables
 	}
+	sem := n.udpFlows
+	if isDNS {
+		sem = n.dnsUDP
+	}
+	if !tomar(sem) {
+		return true // por encima del tope: descartado, como sin plaza en conntrack
+	}
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
+		<-sem
 		return true
 	}
 	gc := gonet.NewUDPConn(&wq, ep)
 	if isDNS {
-		go n.serveDNSUDP(gc)
+		go func() {
+			defer func() { <-sem }()
+			n.serveDNSUDP(gc)
+		}()
 		return true
 	}
 	go func() {
+		defer func() { <-sem }()
 		ctx, cancel := context.WithTimeout(n.ctx, dialTimeout)
 		hc, err := n.cfg.Dial(ctx, "udp4", netip.AddrPortFrom(dst, id.LocalPort).String())
 		cancel()

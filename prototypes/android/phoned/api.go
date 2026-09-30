@@ -81,8 +81,18 @@ type healthInfo struct {
 	Verity        string `json:"verity"`
 	Uidump        bool   `json:"uidump"`
 	AdbSecure     bool   `json:"adb_secure"`
-	Version       string `json:"version"`
-	Kernel        string `json:"kernel,omitempty"`
+	// La traducción ARM (issue #93, docs/traduccion-arm.md): las ABIs que
+	// anuncia Android (ro.product.cpu.abilist), su puente nativo
+	// (ro.dalvik.vm.native.bridge, vacío si no hay), lo que dice la imagen
+	// (arm_translation de IMAGE.txt: native, none, libndk o redroid) y si
+	// binfmt_misc pasa los ejecutables arm64 al traductor ("enabled",
+	// "disabled"; vacío si no hay registro).
+	ABIs           []string `json:"abis,omitempty"`
+	NativeBridge   string   `json:"native_bridge,omitempty"`
+	ARMTranslation string   `json:"arm_translation,omitempty"`
+	ARM64Exec      string   `json:"arm64_exec,omitempty"`
+	Version        string   `json:"version"`
+	Kernel         string   `json:"kernel,omitempty"`
 	// APITokens: cuántos tokens abren la API (0 = cerrada, auth.go).
 	APITokens int    `json:"api_tokens"`
 	Detail    string `json:"detail,omitempty"`

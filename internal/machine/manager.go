@@ -121,6 +121,9 @@ type Manager struct {
 	bus  *events.Bus
 	mu   sync.RWMutex
 	byID map[string]*api.Machine
+	// nombresNaciendo son los nombres de las máquinas que run está creando y
+	// aún no están en byID (reservarNombre). Bajo mu.
+	nombresNaciendo map[string]bool
 
 	// metaMu serializa las escrituras de meta.json de snapshots existentes
 	// (anotaciones). Leer-modificar-escribir sin él dejaba que dos anotaciones
@@ -188,6 +191,9 @@ type Manager struct {
 	// arranque en frío de cada microVM con volúmenes o carpetas compartidas.
 	// Ver imageHasBridgeCached.
 	bridgeOK sync.Map
+	// listoDeclarado memoriza, igual, qué imágenes declaran sonda o ganchos
+	// de "listo" (ver imagenDeclaraListo).
+	listoDeclarado sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
@@ -283,6 +289,20 @@ type Manager struct {
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
 	secretos map[string]*estadoSecreto
 
+	// transicion es la operación de ciclo de vida en curso de cada máquina
+	// que va a sacarla de su estado (api.Transition*). Con m.mu. Solo se
+	// copia a lo que devuelven List y Get: las entradas de byID no la llevan,
+	// así que tampoco llega al estado persistido. Ver marcarTransicion.
+	transicion map[string]string
+
+	// muertes serializa killMachine por máquina (ver killMachine). Aparte del
+	// cerrojo de ciclo de vida, que quien mata ya suele tener tomado.
+	muertes cerrojos
+
+	// credPlantillaMu serializa la lectura-fusión-escritura del almacén de
+	// credenciales de las plantillas (SetSnapshotCredentials).
+	credPlantillaMu sync.Mutex
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -292,6 +312,12 @@ type Manager struct {
 	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
 	pendGen    uint64
 	escritoGen uint64
+	// estadoIlegible no está vacío si state.json no se pudo leer (ver load):
+	// el daemon no borra ni mata nada por no conocerlo. estadoIntocable, si
+	// además no se pudo apartar: tampoco se escribe encima. Se fijan en load,
+	// antes de que arranque nada concurrente, y después solo se leen.
+	estadoIlegible  string
+	estadoIntocable bool
 	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
 	// un temporal de nombre fijo y dos a la vez se lo pisarían.
 	escrituraMu sync.Mutex
@@ -407,6 +433,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// volume_snapshot.go). Aquí y no en el vigilante: en marcha, un .tmp puede
 	// ser una copia en curso.
 	m.barrerTmpVolumenes()
+	// Un commit -replace que un daemon anterior dejó a medias: el dorado
+	// viejo sigue apartado al lado del nuevo (ver apartarAnterior).
+	m.recuperarReemplazos()
 	cerrarVolcadosExistentes(root)
 	m.load()
 	for _, mc := range m.byID {
@@ -449,21 +478,85 @@ func (m *Manager) imagePath(image string) string {
 // Los snapshots viven en disco, así que las máquinas warm deben sobrevivir a un
 // reinicio del daemon: si no, perderíamos la vista de lo que sigue congelado.
 
+// load carga state.json.
+//
+// UN ESTADO ILEGIBLE NO ES UN ESTADO VACÍO. Antes, si state.json no se podía
+// leer o no era JSON válido, load volvía sin decir nada con byID vacío, y lo
+// que venía después lo tomaba al pie de la letra: reconcile mataba todos los
+// VMM "huérfanos", el barrido mandaba a la papelera el directorio de cada
+// máquina (overlays, mem.file de las warm) y persist escribía un state.json
+// vacío encima del roto. Un fichero truncado por un disco lleno se llevaba por
+// delante todas las máquinas del host.
+//
+// Ahora el fichero ilegible se aparta a state.json.corrupt-<ns> (nunca se
+// borra ni se pisa) y el daemon arranca en modo protegido: no borra ni mata
+// nada que no conozca (ver barridoBloqueado). El modo dura mientras quede un
+// state.json.corrupt-* en la raíz: es el operador quien decide qué recuperar
+// y, al retirarlo, vuelve la recogida de basura.
 func (m *Manager) load() {
+	defer m.detectarCuarentena()
 	b, err := os.ReadFile(m.statePath())
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	var list []*api.Machine
-	if json.Unmarshal(b, &list) != nil {
+	if err == nil {
+		err = json.Unmarshal(b, &list)
+	}
+	if err != nil {
+		m.ponerEnCuarentena(err)
 		return
 	}
 	// No se toca el estado aquí: reconcile() decide comparando con la realidad
 	// del host, porque una microVM SÍ puede sobrevivir al daemon.
 	for _, mc := range list {
+		if mc == nil || mc.ID == "" {
+			continue
+		}
 		m.byID[mc.ID] = mc
 	}
 }
+
+// sufijoCuarentena es lo que lleva el nombre de un state.json apartado.
+const sufijoCuarentena = ".corrupt-"
+
+// ponerEnCuarentena aparta el state.json que no se pudo leer. Si ni siquiera
+// se puede renombrar, se bloquea además su escritura: persist lo pisaría con
+// un estado vacío, y ese fichero es lo único que queda de las máquinas.
+func (m *Manager) ponerEnCuarentena(causa error) {
+	destino := m.statePath() + sufijoCuarentena + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := os.Rename(m.statePath(), destino); err != nil {
+		m.estadoIntocable = true
+		m.estadoIlegible = fmt.Sprintf("%s is unreadable (%v) and could not be set aside (%v)",
+			m.statePath(), causa, err)
+		log.Printf("state: %s. Protected mode: nothing will be deleted or killed, and the state "+
+			"will NOT be written until the file is fixed or moved away by hand", m.estadoIlegible)
+		return
+	}
+	log.Printf("state: %s is unreadable (%v); moved to %s. Protected mode: machine directories, "+
+		"VMMs and snapshots the daemon doesn't know about will NOT be deleted or killed until "+
+		"that file is recovered or removed", m.statePath(), causa, destino)
+}
+
+// detectarCuarentena activa el modo protegido si queda algún state.json
+// apartado: en esta arrancada o en una anterior (tras apartarlo, el daemon
+// escribe un state.json nuevo con lo que cree, que es menos que la verdad).
+func (m *Manager) detectarCuarentena() {
+	if m.estadoIlegible != "" {
+		return
+	}
+	apartados, _ := filepath.Glob(m.statePath() + sufijoCuarentena + "*")
+	if len(apartados) > 0 {
+		m.estadoIlegible = fmt.Sprintf("an unreadable state was set aside at %s", apartados[0])
+		log.Printf("state: %s. Protected mode: nothing unknown to the daemon will be deleted or "+
+			"killed until it is recovered or removed", m.estadoIlegible)
+	}
+}
+
+// barridoBloqueado dice si el daemon está en modo protegido (ver load): con un
+// estado que no se pudo leer, "no lo conozco" no significa "es basura", y
+// nada que decida por ausencia en byID puede borrar ni matar.
+func (m *Manager) barridoBloqueado() bool { return m.estadoIlegible != "" }
 
 // persist encola una escritura del estado. Se llama SIEMPRE con m.mu tomado por
 // quien la invoca — los doce sitios que la usan están dentro de una operación de
@@ -572,6 +665,9 @@ func (m *Manager) writePending() {
 
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
+	if m.estadoIntocable {
+		return // ver ponerEnCuarentena
+	}
 	if gen <= m.escritoGen {
 		return // ya se escribió una foto más nueva
 	}
@@ -631,6 +727,7 @@ func (m *Manager) List() []*api.Machine {
 		// candado global cogido, así que contar bytes bloqueaba arranques y
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
+		c.Transition = m.transicion[mc.ID]
 		out = append(out, &c)
 	}
 	m.mu.RUnlock()
@@ -726,20 +823,98 @@ func (m *Manager) Get(ref string) (*api.Machine, bool) {
 	return c, ok
 }
 
+// get resuelve ref en este orden: ID exacto, nombre exacto, prefijo de ID (4
+// caracteres o más). Un nombre o un prefijo que casa con más de una máquina no
+// resuelve a ninguna: antes se devolvía la primera del mapa, al azar, y un `rm`
+// o la autorización por nombre (internal/daemon/authz.go) podían caer sobre
+// otra máquina que se llamaba igual. Los nombres nuevos son únicos
+// (reservarNombre); la ambigüedad solo queda para estados de antes.
 func (m *Manager) get(ref string) (*api.Machine, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if mc, ok := m.byID[ref]; ok {
 		c := *mc
+		c.Transition = m.transicion[mc.ID]
 		return &c, true
 	}
+	var porNombre, porPrefijo []*api.Machine
 	for _, mc := range m.byID {
-		if mc.Name == ref || (len(ref) >= 4 && len(mc.ID) >= len(ref) && mc.ID[:len(ref)] == ref) {
-			c := *mc
-			return &c, true
+		switch {
+		case mc.Name == ref:
+			porNombre = append(porNombre, mc)
+		case len(ref) >= 4 && strings.HasPrefix(mc.ID, ref):
+			porPrefijo = append(porPrefijo, mc)
 		}
 	}
+	for _, l := range [][]*api.Machine{porNombre, porPrefijo} {
+		switch len(l) {
+		case 0:
+			continue
+		case 1:
+			c := *l[0]
+			c.Transition = m.transicion[c.ID]
+			return &c, true
+		}
+		return nil, false
+	}
 	return nil, false
+}
+
+// ErrNameTaken: ya hay una máquina (o una que está naciendo) con ese nombre.
+var ErrNameTaken = errors.New("machine name is taken")
+
+// reservarNombre aparta nombre para una máquina que va a nacer: falla si ya lo
+// lleva otra, si otra está naciendo con él, o si es el ID de otra. La reserva
+// se suelta al volver de run; para entonces la máquina ya está en byID, que la
+// cubre. Un nombre vacío (el que run genera, con parte del ID) no se reserva.
+func (m *Manager) reservarNombre(nombre string) (func(), error) {
+	if nombre == "" {
+		return func() {}, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ocupado := m.nombresNaciendo[nombre] || m.byID[nombre] != nil
+	for _, mc := range m.byID {
+		if mc.Name == nombre {
+			ocupado = true
+			break
+		}
+	}
+	if ocupado {
+		return nil, fmt.Errorf("%w: %q (kling rm it, or pick another -name)", ErrNameTaken, nombre)
+	}
+	if m.nombresNaciendo == nil {
+		m.nombresNaciendo = map[string]bool{}
+	}
+	m.nombresNaciendo[nombre] = true
+	return func() {
+		m.mu.Lock()
+		delete(m.nombresNaciendo, nombre)
+		m.mu.Unlock()
+	}, nil
+}
+
+// marcarTransicion apunta que la máquina id está en medio de que (un
+// api.Transition*) y devuelve la función que lo retira. La llama quien tiene
+// el cerrojo de ciclo de vida de id, justo cuando ya sabe que va a seguir.
+//
+// Sin esto, un freeze de segundos se veía desde fuera como una máquina
+// "running" corriente: el planificador del gateway la adoptaba y enrutaba a
+// ella sesiones que morían con el volcado.
+func (m *Manager) marcarTransicion(id, que string) func() {
+	m.mu.Lock()
+	if m.transicion == nil {
+		m.transicion = map[string]string{}
+	}
+	m.transicion[id] = que
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		if m.transicion[id] == que {
+			delete(m.transicion, id)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) Count() int {
@@ -823,6 +998,13 @@ func (m *Manager) run(ctx context.Context, req api.RunRequest) (*api.Machine, er
 	default:
 		return nil, fmt.Errorf("invalid on_ttl %q: use %q or %q", req.OnTTL, api.OnTTLFreeze, api.OnTTLRemove)
 	}
+	// El nombre es único: autorizar, borrar o entrar por nombre tiene que
+	// llevar siempre a la misma máquina (docs/authz.md).
+	soltarNombre, err := m.reservarNombre(req.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer soltarNombre()
 
 	// Instanciar desde un snapshot dorado es un camino distinto: no se arranca
 	// nada en frío, se restaura.
@@ -1502,8 +1684,23 @@ func waitSocket(ctx context.Context, c *fc.Client) error {
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
 
+// errYaNoToca es la respuesta de freezeSi y removeSi cuando, con el cerrojo
+// tomado, la máquina ya no cumple lo que justificaba la operación.
+var errYaNoToca = errors.New("the machine no longer qualifies for this operation")
+
 // Freeze pausa la microVM, la vuelca a disco y libera su RAM y su proceso.
 func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) {
+	return m.freezeSi(ctx, ref, nil)
+}
+
+// freezeSi es Freeze, pero solo si sigue valiendo sigue(máquina) con el
+// cerrojo de ciclo de vida ya tomado; si no, errYaNoToca y no se toca nada.
+// sigue nil es congelar siempre.
+//
+// Es para quien decide congelar mirando una foto (el TTL): entre la foto y el
+// cerrojo pudo llegar un renew, y congelar entonces era congelar una máquina
+// que su dueño acababa de pedir conservar.
+func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
@@ -1520,6 +1717,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	}
 	if cur.State == api.StateWarm {
 		return cur, nil
+	}
+	if sigue != nil && !sigue(cur) {
+		return nil, errYaNoToca
 	}
 	mc = cur
 	// Una pausada se reanuda antes: hay que vaciar sus volúmenes y preguntar
@@ -1557,6 +1757,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if sock == "" {
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
@@ -1629,21 +1830,21 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if jailed {
 		// Recuperar el volcado del chroot al dir del host: es donde Thaw y
 		// reconcile lo buscan. Rename dentro del mismo filesystem.
-		root := m.jailRoot(mc.ID)
-		for _, f := range []string{"snap.file", "mem.file"} {
-			if err := os.Rename(filepath.Join(root, f), filepath.Join(dir, f)); err != nil {
-				// La máquina sigue PAUSADA: devolver el error sin más la dejaba
-				// figurando como running, sin contestar a nada, y sin que el
-				// vigilante la viera, porque el proceso existe. Mismo trato que
-				// un fallo del propio snapshot, más arriba.
-				err = fmt.Errorf("recovering %s from jail: %w", f, err)
-				if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-					m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-					return nil, err
-				}
-				_ = m.acquireVolumes(mc)
+		// Sin seguir enlaces, y solo si lo que hay es el fichero que escribió
+		// el VMM: un enlace o un hardlink plantado en su chroot llevaría al
+		// daemon a perforar, precargar y ceder un fichero del host (ver
+		// recuperarDelJail).
+		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", "mem.file"); err != nil {
+			// La máquina sigue PAUSADA: devolver el error sin más la dejaba
+			// figurando como running, sin contestar a nada, y sin que el
+			// vigilante la viera, porque el proceso existe. Mismo trato que
+			// un fallo del propio snapshot, más arriba.
+			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
+			_ = m.acquireVolumes(mc)
+			return nil, err
 		}
 		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 	}
@@ -1985,11 +2186,20 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
+	// El PUT sustituye el almacén ENTERO, y en él están los marcadores de sus
+	// credenciales (ponerMarcadoresMMDS): sin volver a ponerlos, el invitado
+	// se quedaba sin la variable que el proxy sabe cambiar por la clave. Van
+	// en el mismo documento, no en un PATCH después: así no hay un instante
+	// en que una sesión nueva lea el almacén sin ellos.
+	vacio := almacenVacio(data)
+	doc, err := m.conMarcadores(mc.ID, data)
+	if err != nil {
+		return nil, err
+	}
 	c := fc.New(sock)
-	if err := c.PutMMDSData(ctx, data); err != nil {
+	if err := c.PutMMDSData(ctx, doc); err != nil {
 		return nil, fmt.Errorf("injecting MMDS: %w", err)
 	}
-	vacio := almacenVacio(data)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]
@@ -2563,6 +2773,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
@@ -2595,6 +2806,17 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 
 // Remove para la máquina y borra su directorio, snapshot incluido.
 func (m *Manager) Remove(ref string) error {
+	return m.removeSi(ref, nil)
+}
+
+// removeSi es Remove, pero solo si sigue valiendo sigue(máquina) con el
+// cerrojo de ciclo de vida ya tomado; si no, errYaNoToca y no se toca nada.
+// sigue nil es borrar siempre.
+//
+// Lo usan los que deciden borrar mirando una foto sin cerrojo: el TTL con
+// on_ttl=remove (un renew pudo llegar entre medias) y la recogida de disco
+// (la congelada que eligió pudo despertarse con sesiones dentro).
+func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
@@ -2606,7 +2828,13 @@ func (m *Manager) Remove(ref string) error {
 	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
+	} else if sigue != nil {
+		return errYaNoToca
 	}
+	if sigue != nil && !sigue(mc) {
+		return errYaNoToca
+	}
+	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
 	m.kill(mc.ID)
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -2655,17 +2883,37 @@ func (m *Manager) killMachine(id string, flush bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
+	// Dos kill de la misma máquina a la vez (un fail sin cerrojo de ciclo de
+	// vida contra un Stop) leían los dos el mismo PID; el segundo mandaba su
+	// SIGKILL cuando el primero ya lo había visto morir, y ese PID podía ser
+	// ya de otro proceso. Se hacen de uno en uno, y el que mata deja el PID a
+	// 0 (abajo): el siguiente ya no tiene a quién matar.
+	defer m.muertes.tomar(id)()
+	// Una COPIA tomada con el candado: la entrada viva la escriben otros
+	// (anotarListo, touchTTL...) con m.mu, y leer su State o sus volúmenes
+	// sin él era una carrera.
 	m.mu.RLock()
-	mc := m.byID[id]
+	var mc *api.Machine
+	if live := m.byID[id]; live != nil {
+		mc = live.Clone()
+	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
 		return
 	}
+	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
 		m.flushVolume(mc)
 	}
-	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	defer func() {
+		m.mu.Lock()
+		if live := m.byID[id]; live != nil && live.PID == pid {
+			live.PID = 0
+		}
+		m.mu.Unlock()
+	}()
 
 	// Esperar a que MUERA de verdad, no solo a mandar la señal.
 	//
@@ -2679,7 +2927,7 @@ func (m *Manager) killMachine(id string, flush bool) {
 	// Con tope: un firecracker que ignorase el SIGKILL (imposible, pero) no debe
 	// colgar el daemon. El proceso lo recoge la goroutine de cmd.Wait() del
 	// arranque, así que Kill(pid, 0) devuelve ESRCH en cuanto desaparece.
-	waitGone(mc.PID, 5*time.Second)
+	waitGone(pid, 5*time.Second)
 }
 
 // waitGone espera a que un pid desaparezca de la tabla de procesos.

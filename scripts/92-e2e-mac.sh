@@ -71,6 +71,11 @@ api() { curl -s -m 30 --unix-socket "$SOCK" "$@"; }
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 1; }; }
 need "$KLING"; need curl; need python3; need perl; need script
+
+# rechazo_clave: la salida de psql es un rechazo de la CLAVE (28P01, del servidor
+# o del proxy). "Esta clave no entra" se daba por bueno con cualquier fallo (host
+# inalcanzable, psql roto) y no podía fallar; ver 90-e2e.sh.
+rechazo_clave() { contiene "$1" "password authentication failed" || contiene "$1" "refused the credential"; }
 [ "$(uname -s)" = Darwin ] || { echo "this test is for macOS (backend vz); on Linux use 90-e2e.sh" >&2; exit 1; }
 
 # jq de pobre: evalúa una expresión de Python sobre el JSON de stdin (d).
@@ -969,7 +974,8 @@ print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip(
       [ "$PW1" != "$KLING_E2E_DB_GOLDEN_PASSWORD" ] && ok "the copy's password differs from the template's" \
         || bad "rotation" "different passwords" "equal"
       out=$(dbhostsql "$KLING_E2E_DB_GOLDEN_PASSWORD" "$DBU" "SELECT 1")
-      [ "$out" = "1" ] && bad "template password" "rejected" "IT GOT IN" || ok "the template's password does NOT get into the copy"
+      rechazo_clave "$out" && ok "the template's password does NOT get into the copy" \
+        || bad "template password" "password authentication failed" "$out"
     else
       printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD is not set: template password not tried from the host\n"
     fi
@@ -987,7 +993,8 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   dbsql "$DBU" "CREATE TABLE e2e_mark(v text); INSERT INTO e2e_mark VALUES ('origin')" >/dev/null
   out=$(dbk fork "$DBU" -n 4)
   copies=$(printf '%s\n' "$out" | awk '/  ready  / {print $1}')
-  [ "$(printf '%s\n' "$copies" | grep -c . || true)" = 4 ] && ok "fork -n 4: four ready copies" || bad "fork -n 4" "4 copies" "$out"
+  nc=$(printf '%s\n' "$copies" | grep -c . || true)
+  [ "$nc" = 4 ] && ok "fork -n 4: four ready copies" || bad "fork -n 4" "4 copies" "$out"
   distinct=1; i=0
   for c in $copies; do
     i=$((i+1)); pw=$(dbpw "$c")
@@ -996,6 +1003,8 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     ALL="$ALL $pw"
     dbsql "$c" "INSERT INTO e2e_mark VALUES ('copy-$i')" >/dev/null
   done
+  # Sin copias los bucles no dan ni una vuelta y el fork fallido salía aislado.
+  [ "$nc" = 4 ] || distinct=0
   [ "$distinct" = 1 ] && ok "fork: four passwords, all different from each other and from the source's" || bad "fork passwords" "all distinct" "a repeat or an empty one"
   isolated=1; i=0
   for c in $copies; do
@@ -1003,6 +1012,7 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     rows=$(dbsql "$c" "SELECT string_agg(v, ',' ORDER BY v) FROM e2e_mark")
     [ "$rows" = "copy-$i,origin" ] || { isolated=0; info "$c sees: $rows"; }
   done
+  [ "$nc" = 4 ] || isolated=0
   rows=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_mark")
   { [ "$isolated" = 1 ] && [ "$rows" = "origin" ]; } && ok "each copy sees only its own writes" || bad "fork isolation" "copy-N,origin each; source only origin" "source sees: $rows"
   for c in $copies; do dbk rm "$c" >/dev/null 2>&1; done
@@ -1060,7 +1070,8 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     [ "$out" = "0" ] && ok "fork: the child does not inherit kling db role roles" || bad "ro roles in the child" "0" "$out"
     if [ -n "$ROPW" ] && command -v psql >/dev/null; then
       out=$(dbrosql e2e_agent "$ROPW" "$child" "SELECT 1")
-      [ "$out" = "1" ] && bad "ro role password in the child" "rejected" "IT GOT IN" || ok "fork: the source's ro role password does not get into the child"
+      rechazo_clave "$out" && ok "fork: the source's ro role password does not get into the child" \
+        || bad "ro role password in the child" "password authentication failed" "$out"
     fi
     ALL="$ALL $(dbpw "$child")"
     dbk rm "$child" >/dev/null 2>&1
@@ -1072,7 +1083,8 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     ALL="$ALL $ROT_OLD $ROT_NEW"
     { [ -n "$ROT_NEW" ] && [ "$ROT_NEW" != "$ROT_OLD" ]; } && ok "rotate: a new password" || bad "rotate" "a different password" "same or empty"
     out=$(dbhostsql "$ROT_OLD" "$DBU" "SELECT 1")
-    [ "$out" = "1" ] && bad "old password after rotate" "rejected" "IT GOT IN" || ok "rotate: the old password no longer gets in"
+    rechazo_clave "$out" && ok "rotate: the old password no longer gets in" \
+      || bad "old password after rotate" "password authentication failed" "$out"
     out=$(dbhostsql "$ROT_NEW" "$DBU" "SELECT 1")
     [ "$out" = "1" ] && ok "rotate: the new password gets in" || bad "new password" "1" "$out"
   fi

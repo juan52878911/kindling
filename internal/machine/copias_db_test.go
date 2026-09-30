@@ -265,9 +265,9 @@ func TestRemoveCredential(t *testing.T) {
 	m.socket[idAgente] = falso.Sock
 	m.mu.Unlock()
 	creds := []credproxy.Credential{
-		{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-a", Secret: "s1", Kind: credproxy.KindPostgres,
+		{Env: "PGPASSWORD", Domain: "copia.db.internal", Placeholder: "kling-cred-a", Secret: "s1-clave-de-prueba", Kind: credproxy.KindPostgres,
 			Port: 5432, User: "app", Database: "appdb", UpstreamMachine: idCopia, UpstreamOwner: "local", UpstreamTLS: credproxy.UpstreamTLSDisable},
-		{Env: "API_KEY", Domain: "api.example.com", Placeholder: "kling-cred-b", Secret: "s2"},
+		{Env: "API_KEY", Domain: "api.example.com", Placeholder: "kling-cred-b", Secret: "s2-clave-de-prueba"},
 	}
 	if err := m.guardarCredenciales(idAgente, creds); err != nil {
 		t.Fatal(err)

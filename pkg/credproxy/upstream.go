@@ -90,6 +90,10 @@ const (
 	// credential_kinds cuando entiende Upstream, UpstreamTLS y TLSServerName.
 	// No es un Kind de credencial.
 	CapPostgresUpstream = "postgres-upstream"
+	// CapHTTPPlaces es la capacidad que kling-vz anuncia cuando cambia el
+	// marcador solo donde dicen Headers, Query y Body. Uno anterior lo
+	// cambiaría también en el cuerpo y la query de toda petición.
+	CapHTTPPlaces = "http-places"
 
 	// ForwardPortMin y ForwardPortMax delimitan el rango de puertos del
 	// loopback reservado a los reenvíos de kindling (kling-vz, macOS). Por

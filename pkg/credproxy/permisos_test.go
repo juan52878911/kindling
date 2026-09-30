@@ -117,7 +117,7 @@ func credsConPermisos(conOrg bool) []Credential {
 	cs := []Credential{{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret,
 		Allow: []string{"GET /v1/balance", "POST /v1/files/**"}}}
 	if conOrg {
-		cs = append(cs, Credential{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2})
+		cs = append(cs, Credential{Env: "ORG", Domain: "example.com", Placeholder: testPlace2, Secret: testSecret2, Headers: []string{"X-Org"}})
 	}
 	return cs
 }
@@ -261,6 +261,16 @@ func TestRutaAmbigua(t *testing.T) {
 		{"/v1/%2e%2e/balance", true},
 		{"/v1/%2E%2E/balance", true},
 		{"/v1/a;jsessionid=x/balance", true},
+		// Codificados: ";" "%" "\\" y los puntos, también dos veces.
+		{"/public/..%3B/admin", true},
+		{"/public/..%3b/admin", true},
+		{"/public/a%3Bb", true},
+		{"/public/%252e%252e/admin", true},
+		{"/public/..%253B/admin", true},
+		{"/public/a%252Fb", true},
+		{"/public/a%25", true},
+		{"/public/a%00b", true},
+		{"/public/a%0Ab", true},
 	}
 	for _, c := range casos {
 		got := rutaAmbigua(rutaCruda(c.ruta)) != ""
@@ -351,7 +361,7 @@ func TestProxySinPermisosEsTodoYNoTocaLaRuta(t *testing.T) {
 }
 
 func TestValidarCredencialesConPermisos(t *testing.T) {
-	c := []Credential{{Domain: "a.example.com", Placeholder: testPlace, Secret: "x", Allow: []string{"get /v1/x"}}}
+	c := []Credential{{Domain: "a.example.com", Placeholder: testPlace, Secret: "x-clave-de-prueba", Allow: []string{"get /v1/x"}}}
 	if err := ValidarCredenciales(c); err != nil || c[0].Allow[0] != "GET /v1/x" {
 		t.Fatalf("%v, %q", err, c[0].Allow)
 	}
@@ -362,5 +372,32 @@ func TestValidarCredencialesConPermisos(t *testing.T) {
 	p := New(Options{})
 	if _, err := p.SetCredentials(c); err == nil {
 		t.Error("SetCredentials debería rechazar un Allow inválido")
+	}
+}
+
+// Un ";" codificado (%3B) pasaba el rechazo de ";" y salía decodificado:
+// /public/..%3B/admin casaba con GET /public/** y el proveedor recibía
+// /public/..;/admin, que Tomcat o Spring leen como /admin.
+func TestProxyPermisosPuntoYComaCodificado(t *testing.T) {
+	var vistas []string
+	srv, _ := proxyCon(t, func(w http.ResponseWriter, r *http.Request) {
+		vistas = append(vistas, r.URL.EscapedPath())
+	}, []Credential{{Env: "KEY", Domain: "example.com", Placeholder: testPlace, Secret: testSecret,
+		Allow: []string{"GET /public/**"}}}, nil)
+	for _, ruta := range []string{"/public/..%3B/admin", "/public/..%3b/admin", "/public/%252e%252e/admin"} {
+		req, _ := http.NewRequest("GET", srv.URL+ruta, nil)
+		req.Host = "example.com"
+		req.Header.Set("Authorization", "Bearer "+testPlace)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status %d, quería 403", ruta, resp.StatusCode)
+		}
+	}
+	if len(vistas) != 0 {
+		t.Fatalf("el proveedor recibió %q", vistas)
 	}
 }

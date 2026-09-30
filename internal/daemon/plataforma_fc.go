@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"log"
+	"path/filepath"
 	"strings"
 
 	knet "github.com/juan52878911/kindling/internal/net"
@@ -16,6 +17,16 @@ const cederSocket = true
 // construirImagenes: los constructores montan un loopback y hacen chroot, que
 // solo existe aquí.
 const construirImagenes = true
+
+// prepararRaizPlataforma fija <raíz>/credtmp como directorio de derrame del
+// proxy de credenciales (un cuerpo grande con la clave dentro, ver
+// pkg/credproxy/cuerpo.go): 0700 del daemon y vaciado de lo que dejó uno
+// anterior muerto a mitad. Si no se puede, el proxy no escribe a disco.
+func prepararRaizPlataforma(root string) {
+	if err := knet.SetCredTempDir(filepath.Join(root, "credtmp")); err != nil {
+		log.Printf("WARNING: credential proxy spill directory: %v (large request bodies will be sent chunked)", err)
+	}
+}
 
 // comprobarHost avisa de lo que falta para arrancar microVMs y monta las
 // reglas de red del host.

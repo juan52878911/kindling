@@ -147,6 +147,9 @@ func (m *Manager) reconcile() {
 // estado que lo explique. liveVMs sí lo ve (escanea /proc), y es la única forma
 // de reconciliar con la realidad. Se llama con m.mu tomado.
 func (m *Manager) killOrphanVMMs() {
+	if m.barridoBloqueado() {
+		return
+	}
 	for id, pid := range m.liveVMs() {
 		mc := m.byID[id]
 		// Vivo y debería estarlo: no se toca.
@@ -176,6 +179,9 @@ func (m *Manager) killOrphanVMMs() {
 func (m *Manager) sweepOrphanVMMs() {
 	// El escaneo de /proc va fuera del candado: recorrerlo con el lock global
 	// tomado congela ps, run y thaw mientras dura.
+	if m.barridoBloqueado() {
+		return
+	}
 	live := m.liveVMs()
 
 	m.mu.Lock()
@@ -293,6 +299,9 @@ const dirGrace = 2 * time.Minute
 // disco sigue teniendo su entrada en memoria, y una que aún se está construyendo
 // tiene su id en reserved, así que ninguna de las dos es candidata.
 func (m *Manager) sweepMachineDirs() {
+	if m.barridoBloqueado() {
+		return
+	}
 	dir := filepath.Join(m.root, "machines")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -449,6 +458,10 @@ func (m *Manager) watch(ctx context.Context, every time.Duration) {
 	}
 }
 
+// errProcesoDesaparecido es el LastErr de una máquina que CORRÍA y cuyo VMM
+// murió: su disco tiene lo que escribió mientras vivía (ver retieneDatos).
+const errProcesoDesaparecido = "the microVM process disappeared"
+
 func (m *Manager) sweep() {
 	var died []*api.Machine
 	live := make(map[string]bool)
@@ -480,6 +493,30 @@ func (m *Manager) sweep() {
 		muertas = append(muertas, v)
 	}
 
+	// Una máquina con su cerrojo de ciclo de vida tomado está en manos de
+	// alguien: Freeze mata el VMM (killPaused) y solo después, con el volcado
+	// ya sellado, la apunta warm con PID 0. En ese hueco el proceso ya no
+	// existe y la máquina sigue "running" con el PID de antes, así que el
+	// vigilante la daba por muerta: la marcaba failed, le desmontaba la red
+	// que el thaw iba a reutilizar y publicaba un EvFailed falso, y luego
+	// Freeze la pisaba con warm. Si está ocupada se deja para la próxima
+	// vuelta; quien la tiene sabrá lo que pasó. TryLock y no Lock: el
+	// vigilante no debe esperar a un volcado de segundos.
+	var soltar []func()
+	defer func() {
+		for _, s := range soltar {
+			s()
+		}
+	}()
+	libres := muertas[:0]
+	for _, v := range muertas {
+		if s, ok := m.tryLock(v.mc.ID); ok {
+			soltar = append(soltar, s)
+			libres = append(libres, v)
+		}
+	}
+	muertas = libres
+
 	m.mu.Lock()
 	for _, v := range muertas {
 		mc := v.mc
@@ -488,7 +525,7 @@ func (m *Manager) sweep() {
 		}
 		now := time.Now()
 		mc.State = api.StateFailed
-		mc.LastErr = "the microVM process disappeared"
+		mc.LastErr = errProcesoDesaparecido
 		mc.FailedAt = &now
 		mc.PID = 0
 		delete(m.socket, mc.ID)
@@ -508,7 +545,7 @@ func (m *Manager) sweep() {
 		m.releaseCPU(mc.ID)
 		m.bus.Publish(api.Event{
 			Time: time.Now(), Type: api.EvFailed, ID: mc.ID, Name: mc.Name,
-			Message: "the microVM process disappeared",
+			Message: errProcesoDesaparecido,
 		})
 	}
 }
@@ -546,13 +583,22 @@ func (m *Manager) expireTTL(ctx context.Context) {
 		// que quiere un sandbox. Lo que se ejecutó dentro no tiene por qué
 		// seguir existiendo, y congelarlo guardaría en disco una memoria que
 		// nadie va a volver a usar.
+		//
+		// La decisión se tomó con una foto; freezeSi y removeSi vuelven a mirar
+		// el plazo con el cerrojo de la máquina tomado, que es también el de
+		// Renew. Un renew que llegó entre medias gana.
+		vence := func(mc *api.Machine) bool { return ttlVence(mc, time.Now()) }
 		if mc, ok := m.Get(id); ok && mc.OnTTL == api.OnTTLRemove {
-			if err := m.Remove(id); err != nil {
+			if err := m.removeSi(id, vence); err != nil && !errors.Is(err, errYaNoToca) {
 				log.Printf("ttl: couldn't remove %s: %v", shortID(id), err)
 			}
 			continue
 		}
-		if _, err := m.Freeze(ctx, id); err != nil {
+		if _, err := m.freezeSi(ctx, id, vence); err != nil {
+			if errors.Is(err, errYaNoToca) {
+				m.clearFreezeFailures(id)
+				continue
+			}
 			m.handleFreezeFailure(id, err)
 			continue
 		}
@@ -560,34 +606,41 @@ func (m *Manager) expireTTL(ctx context.Context) {
 	}
 }
 
+// ttlVence dice si a mc le toca ya aplicar su TTL: running o pausada con el
+// plazo cumplido, o congelada que al vencer se destruye.
+func ttlVence(mc *api.Machine, ahora time.Time) bool {
+	if mc.TTLSeconds <= 0 {
+		return false
+	}
+	// Una máquina congelada solo vence si al vencer se DESTRUYE: congelar lo
+	// ya congelado no tiene sentido, pero un sandbox dormido que nadie
+	// reclama sí debe desaparecer, o dormir sería una forma de no morir
+	// nunca.
+	switch mc.State {
+	case api.StateRunning, api.StatePaused:
+	case api.StateWarm:
+		if mc.OnTTL != api.OnTTLRemove {
+			return false
+		}
+	default:
+		return false
+	}
+	desde := ttlDesde(mc)
+	if desde.IsZero() {
+		return false
+	}
+	return ahora.Sub(desde) >= time.Duration(mc.TTLSeconds)*time.Second
+}
+
 // ttlVencidas son las máquinas a las que expireTTL tiene que aplicar su TTL
 // ahora. Aparte para poder probar la decisión sin un VMM que congelar.
 func (m *Manager) ttlVencidas() []string {
 	var due []string
 
+	ahora := time.Now()
 	m.mu.RLock()
 	for _, mc := range m.byID {
-		if mc.TTLSeconds <= 0 {
-			continue
-		}
-		// Una máquina congelada solo vence si al vencer se DESTRUYE: congelar lo
-		// ya congelado no tiene sentido, pero un sandbox dormido que nadie
-		// reclama sí debe desaparecer, o dormir sería una forma de no morir
-		// nunca.
-		switch mc.State {
-		case api.StateRunning, api.StatePaused:
-		case api.StateWarm:
-			if mc.OnTTL != api.OnTTLRemove {
-				continue
-			}
-		default:
-			continue
-		}
-		desde := ttlDesde(mc)
-		if desde.IsZero() {
-			continue
-		}
-		if time.Since(desde) >= time.Duration(mc.TTLSeconds)*time.Second {
+		if ttlVence(mc, ahora) {
 			due = append(due, mc.ID)
 		}
 	}
@@ -651,13 +704,13 @@ func (m *Manager) handleFreezeFailure(id string, err error) {
 		return
 	}
 	if freezeErrIsStructural(err) || !m.controlSockAlive(cur) {
-		m.giveUpOn(id, fmt.Errorf("unreachable: couldn't freeze it when its TTL expired (%v); "+
+		m.giveUpOn(cur, fmt.Errorf("unreachable: couldn't freeze it when its TTL expired (%v); "+
 			"its control socket is gone, so no retry can succeed", err))
 		return
 	}
 	n := m.noteFreezeFailure(id)
 	if n >= maxFreezeFailures {
-		m.giveUpOn(id, fmt.Errorf("gave up freezing it after %d consecutive attempts; last error: %v", n, err))
+		m.giveUpOn(cur, fmt.Errorf("gave up freezing it after %d consecutive attempts; last error: %v", n, err))
 		return
 	}
 	log.Printf("ttl: couldn't freeze %s (attempt %d/%d): %v", shortID(id), n, maxFreezeFailures, err)
@@ -675,12 +728,20 @@ func (m *Manager) controlSockAlive(mc *api.Machine) bool {
 // giveUpOn marca una máquina como perdida (failed, terminal) y limpia su
 // contador de reintentos. fail() además mata el proceso si sigue vivo: es lo
 // que evita que un firecracker sordo retenga su RAM para siempre.
-func (m *Manager) giveUpOn(id string, err error) {
+//
+// visto es la copia sobre la que se decidió. Con el cerrojo de ciclo de vida
+// tomado tiene que seguir siendo la misma: running con el mismo VMM. Sin el
+// cerrojo, fail mataba lo que hubiera en ese momento, y si entre medias un
+// Stop y un Thaw la habían relanzado, era el VMM nuevo y sano.
+func (m *Manager) giveUpOn(visto *api.Machine, err error) {
+	id := visto.ID
 	m.clearFreezeFailures(id)
+	defer m.lock(id)()
 	m.mu.RLock()
 	mc := m.byID[id]
+	igual := mc != nil && mc.State == api.StateRunning && mc.PID == visto.PID
 	m.mu.RUnlock()
-	if mc == nil {
+	if !igual {
 		return
 	}
 	log.Printf("ttl: giving up on %s: %v", shortID(id), err)

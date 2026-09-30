@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -146,16 +147,43 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	defer soltar()
 
 	dir := m.snapDir(name)
+	var anterior string // el dorado viejo apartado por -replace
+	defer func() {
+		if anterior == "" {
+			return
+		}
+		if errOut == nil {
+			// El nuevo está entero (meta.json escrito): el viejo sobra.
+			if err := os.RemoveAll(anterior); err != nil {
+				log.Printf("commit %s: couldn't remove the replaced snapshot at %s: %v", name, anterior, err)
+			}
+			return
+		}
+		// La limpieza de abajo (que corre antes: los defer van al revés) ya
+		// quitó lo a medias; el viejo vuelve a su sitio.
+		if err := os.Rename(anterior, dir); err != nil {
+			log.Printf("commit %s: couldn't restore the previous snapshot from %s: %v", name, anterior, err)
+			return
+		}
+		m.invalidateSnapCache(name)
+	}()
 	if _, err := os.Stat(dir); err == nil {
 		if !replace {
 			return nil, fmt.Errorf("snapshot %q already exists (use `kling commit -replace` to replace it)", name)
 		}
-		// Reemplazar pasa por RemoveSnapshot y no por un RemoveAll directo: es
-		// quien sabe negarse si el snapshot tiene instancias vivas, que seguirían
-		// mapeando un mem.file que estaríamos pisando debajo de ellas. El borrado
-		// previo no es atómico, pero el caso que motiva -replace es un snapshot
-		// que un reinicio del host ya dejó irrestaurable: no hay nada que salvar.
-		if err := m.removeSnapshot(name, true); err != nil {
+		// Reemplazar pasa por las comprobaciones de RemoveSnapshot y no por un
+		// RemoveAll directo: son las que saben negarse si el snapshot tiene
+		// instancias vivas, que seguirían mapeando un mem.file que estaríamos
+		// pisando debajo de ellas.
+		//
+		// Pero el viejo NO se borra hasta que el nuevo esté entero: se aparta
+		// al lado y vuelve a su sitio si el commit falla (o, si el daemon muere
+		// a mitad, al arrancar: recuperarReemplazos). Antes se borraba primero,
+		// y un volcado que fallaba por disco lleno dejaba sin ninguno de los dos.
+		// El nuevo se escribe en el nombre definitivo, no en un temporal: el
+		// volcado graba la ruta de su overlay, y restaurar la abre tal cual.
+		var err error
+		if anterior, err = m.apartarParaReemplazo(name); err != nil {
 			return nil, fmt.Errorf("replacing snapshot %q: %w", name, err)
 		}
 	}
@@ -168,12 +196,10 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	// Una plantilla jailed corre chrooteada: no ve snapDir. El overlay dorado y
 	// el volcado se escriben en el jail (en su path absoluto) y se recuperan al
 	// host después. goldDst es dónde se copia el overlay para que firecracker lo
-	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot.
+	// abra; en el host es goldOverlay, en el jail su réplica dentro del chroot
+	// (se fija al crear ese directorio, más abajo).
 	jailed := m.jailerJailed && strings.HasPrefix(sock, m.jailRoot(mc.ID))
 	goldDst := goldOverlay
-	if jailed {
-		goldDst = m.jailPath(mc.ID, goldOverlay)
-	}
 
 	c := fc.New(sock)
 	// El volcado escribe la memoria entera: con varios GiB no cabe en los 30 s
@@ -264,8 +290,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 			m.invalidateSnapCache(name)
 			if jailed {
 				// Las réplicas en el chroot de la plantilla: el volcado y el
-				// overlay dorado que no llegaron a recuperarse.
-				os.RemoveAll(m.jailPath(mc.ID, dir))
+				// overlay dorado que no llegaron a recuperarse. Sin seguir
+				// enlaces: el chroot es del VMM (ver enjaulado.go).
+				if err := borrarEnJail(m.jailRoot(mc.ID), dir); err != nil {
+					log.Printf("commit %s: cleaning up the jail: %v", mc.Name, err)
+				}
 			}
 		}
 	}()
@@ -281,12 +310,23 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 		return nil, err
 	}
 	if jailed {
-		if err := os.MkdirAll(filepath.Dir(goldDst), 0o755); err != nil {
+		// La réplica del directorio dentro del chroot se crea y se cede por
+		// descriptor, sin seguir enlaces: la raíz del chroot es del VMM, que
+		// pudo cambiar cualquier componente de esa ruta por un enlace al host,
+		// y un MkdirAll y un Chown por ruta, como root, lo seguirían. El overlay
+		// dorado se crea después dentro de ESTE directorio (rutaEnDir), no en
+		// lo que la ruta resuelva entonces.
+		dj, err := abrirDirSinEnlaces(m.jailRoot(mc.ID), dir, true)
+		if err != nil {
 			return nil, err
 		}
+		defer dj.Close()
 		if m.priv.Enabled {
-			_ = os.Chown(filepath.Dir(goldDst), m.priv.UID, m.priv.GID)
+			if err := dj.Chown(m.priv.UID, m.priv.GID); err != nil {
+				return nil, fmt.Errorf("granting the snapshot directory in the jail: %w", err)
+			}
 		}
+		goldDst = rutaEnDir(dj, "overlay.ext4")
 	}
 
 	// Los volúmenes se DESMONTAN antes de congelar, y con la máquina aún
@@ -350,11 +390,11 @@ func (m *Manager) commit(ctx context.Context, ref, name string, replace bool, co
 	t.marca("dump")
 	if jailed {
 		// Recuperar del chroot al host: snapDir es donde runFrom los busca (y
-		// los replica de vuelta en el próximo jail). Rename, mismo filesystem.
-		for _, f := range []string{"snap.file", "mem.file", "overlay.ext4"} {
-			if err := os.Rename(m.jailPath(mc.ID, filepath.Join(dir, f)), filepath.Join(dir, f)); err != nil {
-				return nil, fmt.Errorf("recovering %s from jail: %w", f, err)
-			}
+		// los replica de vuelta en el próximo jail). Rename, mismo filesystem,
+		// sin seguir enlaces y solo si es el fichero que escribió el VMM (ver
+		// recuperarDelJail).
+		if err := recuperarDelJail(m.jailRoot(mc.ID), dir, dir, m.uidJail(), "snap.file", "mem.file", "overlay.ext4"); err != nil {
+			return nil, err
 		}
 		// El overlay dorado estuvo en un directorio del VMM: lo que se recupera
 		// tiene que ser el fichero que copió el daemon, no un enlace ni otro
@@ -893,50 +933,10 @@ func (m *Manager) RemoveSnapshot(name string) error { return m.removeSnapshot(na
 // "nadie lo usa" y "ya no está" no cabe una reserva nueva. El borrado de verdad,
 // que con un mem.file de GiB tarda, va después y sin cerrojo.
 func (m *Manager) removeSnapshot(name string, propio bool) error {
-	restos := false
-	if _, err := m.loadSnapshot(name); err != nil {
-		// Sin meta.json pero con directorio: son los restos de un commit que se
-		// interrumpió antes de escribirlo (el meta es lo último). Antes esto
-		// abortaba aquí, así que esos GiB solo se recuperaban con un rm -rf a
-		// mano, y `commit -replace` con el mismo nombre fallaba igual.
-		if !restosDeCommit(m.snapDir(name)) {
-			return err
-		}
-		restos = true
+	destino, restos, rerr, err := m.retirarSnapshot(name, propio, m.apartarSnapshot)
+	if err != nil {
+		return err
 	}
-
-	m.mu.Lock()
-	enUso := m.reserved[reservaSnapshot(name)]
-	if propio {
-		enUso-- // la reserva del propio commit que reemplaza
-	}
-	if enUso > 0 {
-		m.mu.Unlock()
-		if restos {
-			return fmt.Errorf("snapshot %q is being committed right now", name)
-		}
-		return fmt.Errorf("snapshot %q is in use right now (an instance is being restored from it, "+
-			"or it is being committed); retry in a moment", name)
-	}
-	if !restos {
-		var users []string
-		for _, mc := range m.byID {
-			if mc.From == name && mc.State != api.StateStopped {
-				users = append(users, mc.Name)
-			}
-		}
-		if len(users) > 0 {
-			m.mu.Unlock()
-			return fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
-		}
-	}
-	destino, rerr := m.apartarSnapshot(name)
-	m.mu.Unlock()
-	// El directorio ya no está donde estaba (o está a punto de dejar de
-	// estarlo): lo que loadSnapshotCached/hotMemFilesMiBLocked recordaban de
-	// este nombre ya no vale (M-08, M-12).
-	m.invalidateSnapCache(name)
-
 	if restos {
 		log.Printf("snapshot %q: removing the leftovers of an interrupted commit", name)
 	}
@@ -949,6 +949,107 @@ func (m *Manager) removeSnapshot(name string, propio bool) error {
 	return os.RemoveAll(destino)
 }
 
+// retirarSnapshot comprueba que nadie usa el snapshot name y lo quita de su
+// sitio con apartar, todo bajo el mismo m.mu (ver removeSnapshot). err es que
+// no se puede retirar; rerr, que apartar falló (y el directorio sigue ahí).
+func (m *Manager) retirarSnapshot(name string, propio bool, apartar func(string) (string, error)) (destino string, restos bool, rerr, err error) {
+	if _, err := m.loadSnapshot(name); err != nil {
+		// Sin meta.json pero con directorio: son los restos de un commit que se
+		// interrumpió antes de escribirlo (el meta es lo último). Antes esto
+		// abortaba aquí, así que esos GiB solo se recuperaban con un rm -rf a
+		// mano, y `commit -replace` con el mismo nombre fallaba igual.
+		if !restosDeCommit(m.snapDir(name)) {
+			return "", false, nil, err
+		}
+		restos = true
+	}
+
+	m.mu.Lock()
+	enUso := m.reserved[reservaSnapshot(name)]
+	if propio {
+		enUso-- // la reserva del propio commit que reemplaza
+	}
+	if enUso > 0 {
+		m.mu.Unlock()
+		if restos {
+			return "", restos, nil, fmt.Errorf("snapshot %q is being committed right now", name)
+		}
+		return "", restos, nil, fmt.Errorf("snapshot %q is in use right now (an instance is being restored from it, "+
+			"or it is being committed); retry in a moment", name)
+	}
+	if !restos {
+		var users []string
+		for _, mc := range m.byID {
+			if mc.From == name && mc.State != api.StateStopped {
+				users = append(users, mc.Name)
+			}
+		}
+		if len(users) > 0 {
+			m.mu.Unlock()
+			return "", restos, nil, fmt.Errorf("snapshot %q has %d live instance(s) (%v)", name, len(users), users)
+		}
+	}
+	destino, rerr = apartar(name)
+	m.mu.Unlock()
+	// El directorio ya no está donde estaba (o está a punto de dejar de
+	// estarlo): lo que loadSnapshotCached/hotMemFilesMiBLocked recordaban de
+	// este nombre ya no vale (M-08, M-12).
+	m.invalidateSnapCache(name)
+	return destino, restos, rerr, nil
+}
+
+// sufijoAnterior marca el dorado viejo que un `commit -replace` apartó
+// mientras escribe el nuevo: snapshots/.<nombre>.anterior-<ns>. Empieza por
+// punto: ni Snapshots ni los barridos lo toman por un snapshot.
+const sufijoAnterior = ".anterior-"
+
+// apartarAnterior es el apartar de un commit -replace: el dorado viejo no va
+// a la papelera (que se vacía sola), va al lado, para poder devolverlo si el
+// nuevo no llega a completarse.
+func (m *Manager) apartarAnterior(name string) (string, error) {
+	destino := filepath.Join(m.root, "snapshots", "."+name+sufijoAnterior+strconv.FormatInt(time.Now().UnixNano(), 10))
+	if err := os.Rename(m.snapDir(name), destino); err != nil {
+		return "", err
+	}
+	return destino, nil
+}
+
+// recuperarReemplazos resuelve, al arrancar, los `commit -replace` que un
+// daemon anterior dejó a medias: si el nuevo dorado llegó a su meta.json, el
+// viejo sobra; si no, el viejo vuelve a su sitio y lo a medias se aparta.
+func (m *Manager) recuperarReemplazos() {
+	base := filepath.Join(m.root, "snapshots")
+	entradas, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, e := range entradas {
+		nombre, _, ok := strings.Cut(strings.TrimPrefix(e.Name(), "."), sufijoAnterior)
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".") || !ok || !validName.MatchString(nombre) {
+			continue
+		}
+		anterior := filepath.Join(base, e.Name())
+		if _, err := m.loadSnapshot(nombre); err == nil {
+			log.Printf("snapshot %q: the replacement finished before the daemon stopped; removing the old one", nombre)
+			_ = os.RemoveAll(anterior)
+			continue
+		}
+		if _, err := os.Stat(m.snapDir(nombre)); err == nil {
+			if _, err := m.apartarSnapshot(nombre); err != nil {
+				log.Printf("snapshot %q: couldn't set the unfinished replacement aside (%v); the old one stays at %s",
+					nombre, err, anterior)
+				continue
+			}
+		}
+		if err := os.Rename(anterior, m.snapDir(nombre)); err != nil {
+			log.Printf("snapshot %q: couldn't restore the old one from %s: %v", nombre, anterior, err)
+			continue
+		}
+		m.invalidateSnapCache(nombre)
+		log.Printf("snapshot %q: the replacement didn't finish; the previous snapshot is back", nombre)
+	}
+}
+
 // apartarSnapshot mueve el directorio del snapshot a la papelera y devuelve
 // dónde quedó. Solo renombra: se puede (y se debe) llamar con m.mu tomado.
 func (m *Manager) apartarSnapshot(name string) (string, error) {
@@ -959,6 +1060,19 @@ func (m *Manager) apartarSnapshot(name string) (string, error) {
 	destino := filepath.Join(papelera, fmt.Sprintf("snap-%s-%d", name, time.Now().UnixNano()))
 	if err := os.Rename(m.snapDir(name), destino); err != nil {
 		return "", err
+	}
+	return destino, nil
+}
+
+// apartarParaReemplazo retira el snapshot name para que un commit -replace
+// escriba el nuevo, sin borrarlo: devuelve dónde quedó (ver apartarAnterior).
+func (m *Manager) apartarParaReemplazo(name string) (string, error) {
+	destino, _, rerr, err := m.retirarSnapshot(name, true, m.apartarAnterior)
+	if err != nil {
+		return "", err
+	}
+	if rerr != nil {
+		return "", fmt.Errorf("setting the old snapshot aside: %w", rerr)
 	}
 	return destino, nil
 }

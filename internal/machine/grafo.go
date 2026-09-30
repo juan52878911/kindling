@@ -415,8 +415,8 @@ func secretosDeAristas(g *api.Graph, secretos map[string]string) (map[string]str
 		if s == "" {
 			return nil, fmt.Errorf("credential edge %s -> %s (%s) has no secret (secrets[%q])", e.From, e.To, e.Env, e.Key())
 		}
-		if len(s) > credproxy.MaxSecret {
-			return nil, fmt.Errorf("credential edge %s -> %s: the secret is longer than %d bytes", e.From, e.To, credproxy.MaxSecret)
+		if len(s) > credproxy.MaxSecret || len(s) < credproxy.MinSecret {
+			return nil, fmt.Errorf("credential edge %s -> %s: the secret must be %d-%d bytes", e.From, e.To, credproxy.MinSecret, credproxy.MaxSecret)
 		}
 		out[e.Key()] = s
 	}

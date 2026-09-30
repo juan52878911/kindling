@@ -306,3 +306,18 @@ func TestPluginsDesactivadosSeGuardan(t *testing.T) {
 		t.Fatalf("sin desactivadas la lista queda vacía: %q", c.Plugins.Disabled)
 	}
 }
+
+func TestSetCredAudit(t *testing.T) {
+	var c Config
+	if err := c.Set("daemon.credaudit_max_mib", "16"); err != nil || c.Daemon.CredAuditMiB != 16 {
+		t.Fatalf("%v %d", err, c.Daemon.CredAuditMiB)
+	}
+	if err := c.Set("daemon.credaudit_generations", "5"); err != nil || c.Daemon.CredAuditGenerations != 5 {
+		t.Fatalf("%v %d", err, c.Daemon.CredAuditGenerations)
+	}
+	for _, kv := range [][2]string{{"daemon.credaudit_max_mib", "-1"}, {"daemon.credaudit_max_mib", "2000"}, {"daemon.credaudit_generations", "100"}} {
+		if err := c.Set(kv[0], kv[1]); err == nil {
+			t.Errorf("%s=%s aceptado", kv[0], kv[1])
+		}
+	}
+}

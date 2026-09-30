@@ -199,8 +199,9 @@ Redroid `13.0.0_64only-240527`, **amd64**, del mismo índice que el arm64
 | capa (única) | `sha256:2824b019a4a8a038e79392f80302a3ddca69fdfdd6acb8c37b16e1461b2a6168` (682 925 585 bytes) | sha256 al bajarla (`build-image.sh`, `EXPECT_LAYER`) |
 
 Lo que dice la imagen: Android 13, `ro.product.model=redroid13_x86_64_only`,
-ABIs `x86_64,arm64-v8a` (anuncia arm64 pero **no** trae traducción; apps arm64
-quedan fuera de alcance), APEX aplanados, binderfs lo monta su `init.rc`.
+ABIs `x86_64,arm64-v8a` (anuncia arm64 y **sí** trae un `libndk_translation`
+con `libnb.so`, de origen sin documentar: lo que se dijo aquí antes era falso;
+el constructor lo quita por defecto, ver [traduccion-arm.md](traduccion-arm.md)), APEX aplanados, binderfs lo monta su `init.rc`.
 `kling-guest` linux/amd64 estático. `android-launch.sh` usa el cargador de glibc
 x86_64 tras el `pivot_root`.
 

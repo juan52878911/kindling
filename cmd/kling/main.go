@@ -329,6 +329,7 @@ func cmdDaemon(args []string) error {
 	vmm := machine.ResolverVMM(backend, os.Getenv("KLING_VMM"), *fcBin)
 
 	daemon.Version = strings.TrimPrefix(Version, "v")
+	machine.SetCredAuditConfig(credAuditConfig())
 	srv, err := daemon.New(*socket, *root, vmm, *sockUser, *runAs)
 	if err != nil {
 		return err
@@ -362,6 +363,23 @@ func shareConfig() machine.ShareConfig {
 		}
 	}
 	return machine.ShareConfig{Roots: roots, CopyMaxBytes: int64(mib) << 20}
+}
+
+// credAuditConfig lee daemon.credaudit_max_mib y daemon.credaudit_generations;
+// KLING_CREDAUDIT ("MIB:GENERACIONES") manda sobre el fichero. Un valor que no
+// se entiende se avisa y se queda en los de por defecto.
+func credAuditConfig() credproxy.AuditConfig {
+	cfg := loadConfig()
+	c := credproxy.AuditConfig{MaxBytes: int64(cfg.Daemon.CredAuditMiB) << 20, Generations: cfg.Daemon.CredAuditGenerations}
+	if v := os.Getenv("KLING_CREDAUDIT"); v != "" {
+		p, err := credproxy.ParseAuditConfig(v)
+		if err != nil {
+			log.Printf("warning: KLING_CREDAUDIT: %v (using the defaults)", err)
+			return credproxy.AuditConfig{}
+		}
+		c = p
+	}
+	return c
 }
 
 // cowConfig lee daemon.cow y daemon.cow_store_gib; KLING_COW y
@@ -967,7 +985,7 @@ func cmdCredential(args []string) error {
 		return nil
 	}
 	if fs.NArg() < 1 || *cf.domain == "" || *cf.env == "" {
-		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-f keyfile]  (reads stdin if no -f)\n" +
+		return fmt.Errorf("usage: kling machine credential <ref> -domain api.example.com -env API_KEY [-allow-request 'GET /v1/balance']... [-header X-Name]... [-query] [-body] [-f keyfile]  (reads stdin if no -f)\n" +
 			"       kling machine credential <ref> -type postgres -domain db.example.com -user app (-database appdb | -any-database) [-port 5432] [-ca-file ca.pem] [-upstream host:port] [-upstream-tls verify-full|disable] [-tls-server-name N] -env PGPASSWORD [-f passfile]\n" +
 			"       kling machine credential <ref> -type mysql -domain db.example.com -user app (-database appdb | -any-database) [-port 3306] [...same as postgres] -env MYSQL_PWD [-f passfile]\n" +
 			"       kling machine credential -rm <ref> -env NAME")
@@ -995,6 +1013,7 @@ func cmdCredential(args []string) error {
 	fmt.Printf("%s  %s now holds a placeholder; the key only goes to https://%s through the proxy\n",
 		mc.ID[:12], spec.Env, strings.ToLower(spec.Domain))
 	fmt.Printf("      %s\n", describirAllow(spec.Allow))
+	fmt.Printf("      %s\n", describirSitios(spec))
 	fmt.Printf("      point the SDK at http://%s (the proxy adds TLS); the key survives freeze/thaw and daemon restarts\n",
 		strings.ToLower(spec.Domain))
 	return nil

@@ -24,6 +24,8 @@ type simulado struct {
 	paradas []time.Duration
 	medidas int
 	fallar  bool // Freeze(true) falla
+	// fallarSoltar: cuántos Freeze(false) seguidos fallan desde ya.
+	fallarSoltar int
 }
 
 func nuevoSimulado(carga int) *simulado {
@@ -62,6 +64,10 @@ func (m *simulado) Freeze(stop bool) error {
 		}
 		m.parado, m.desde = true, m.t
 		return nil
+	}
+	if m.fallarSoltar > 0 {
+		m.fallarSoltar--
+		return errors.New("SIGCONT: operation not permitted")
 	}
 	if m.parado {
 		m.paradas = append(m.paradas, m.t.Sub(m.desde))

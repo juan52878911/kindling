@@ -22,14 +22,20 @@ package credproxy
 // sin privilegios del VMM mientras el proxy corre como root: se abre con
 // O_NOFOLLOW y se exige que sea un fichero regular, para que un enlace o una
 // FIFO plantados ahí no lleven la escritura a otro sitio ni la bloqueen. Se
-// rota al pasar de AuditMaxBytes a <fichero>.1 (una sola generación).
+// rota al pasar de AuditConfig.MaxBytes: <fichero> pasa a .1, .1 a .2... hasta
+// AuditConfig.Generations. Lo que se cae de la última generación tampoco pasa
+// callado: sus líneas (y los descartados que ya llevaban) se suman a dropped
+// del siguiente registro, y también a rotated para saber por qué.
 
 import (
 	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -39,8 +45,15 @@ import (
 const (
 	// AuditFile es el nombre del registro en el directorio de la máquina.
 	AuditFile = "credaudit.jsonl"
-	// AuditMaxBytes es el tamaño a partir del cual se rota a AuditFile+".1".
-	AuditMaxBytes = 1 << 20
+	// AuditMaxBytes es el tamaño por defecto a partir del cual se rota.
+	AuditMaxBytes = 4 << 20
+	// AuditGenerations es cuántos ficheros rotados (.1, .2...) se guardan por
+	// defecto. Con AuditMaxBytes, ~16 MiB por máquina: unas 80 000 peticiones
+	// antes de que la más antigua se caiga (y se cuente).
+	AuditGenerations = 3
+	// maxAuditMiB y maxAuditGenerations acotan lo configurable.
+	maxAuditMiB         = 1024
+	maxAuditGenerations = 99
 
 	// KindHTTP es un registro del proxy HTTP.
 	KindHTTP = "http"
@@ -109,9 +122,65 @@ type Record struct {
 	ReqBytes  int64  `json:"req_bytes"`
 	RespBytes int64  `json:"resp_bytes"`
 	MS        int64  `json:"ms"`
-	// Dropped: registros descartados antes de este (cola llena o fallo al
-	// escribir).
+	// Dropped: registros descartados antes de este (cola llena, fallo al
+	// escribir o caídos de la última generación al rotar).
 	Dropped uint64 `json:"dropped,omitempty"`
+	// Rotated: de los Dropped, cuántos se perdieron al rotar (ver
+	// AuditConfig): si no para de subir, conviene más tamaño o generaciones.
+	Rotated uint64 `json:"rotated,omitempty"`
+}
+
+// AuditConfig es el tamaño de cada fichero del registro y cuántos rotados se
+// guardan. El valor cero son los de por defecto (AuditMaxBytes,
+// AuditGenerations).
+type AuditConfig struct {
+	MaxBytes    int64
+	Generations int
+}
+
+func (c AuditConfig) conDefectos() AuditConfig {
+	if c.MaxBytes <= 0 {
+		c.MaxBytes = AuditMaxBytes
+	}
+	if c.Generations <= 0 {
+		c.Generations = AuditGenerations
+	}
+	return c
+}
+
+// String es "MiB:generaciones", lo que lee ParseAuditConfig (el daemon se lo
+// pasa así a kling-vz).
+func (c AuditConfig) String() string {
+	c = c.conDefectos()
+	return fmt.Sprintf("%d:%d", c.MaxBytes>>20, c.Generations)
+}
+
+// ParseAuditConfig lee "MiB:generaciones" (1-1024 MiB, 1-99 generaciones).
+func ParseAuditConfig(s string) (AuditConfig, error) {
+	mib, gens, ok := strings.Cut(s, ":")
+	m, err1 := strconv.Atoi(mib)
+	g, err2 := strconv.Atoi(gens)
+	if !ok || err1 != nil || err2 != nil || m < 1 || m > maxAuditMiB || g < 1 || g > maxAuditGenerations {
+		return AuditConfig{}, fmt.Errorf("credential audit %q: want MIB:GENERATIONS (1-%d MiB, 1-%d generations)", s, maxAuditMiB, maxAuditGenerations)
+	}
+	return AuditConfig{MaxBytes: int64(m) << 20, Generations: g}, nil
+}
+
+// AuditFiles son los ficheros del registro de path que existen, del más
+// antiguo al actual (path.N ... path.1, path). Lo usa quien lo lee sin saber
+// con cuántas generaciones se escribió.
+func AuditFiles(path string) []string {
+	var out []string
+	for i := maxAuditGenerations; i >= 1; i-- {
+		f := path + "." + strconv.Itoa(i)
+		if _, err := os.Lstat(f); err == nil {
+			out = append(out, f)
+		}
+	}
+	if _, err := os.Lstat(path); err == nil {
+		out = append(out, path)
+	}
+	return out
 }
 
 // Auditor escribe registros en un fichero sin bloquear a quien los manda. Lo
@@ -120,9 +189,12 @@ type Record struct {
 // descartados).
 type Auditor struct {
 	path    string
+	cfg     AuditConfig // cero = por defecto (ver AuditConfig)
 	logf    func(string, ...any)
 	ch      chan Record
 	dropped atomic.Uint64
+	// rotados es, de dropped, lo que se cayó al rotar (solo la escritora).
+	rotados uint64
 	quit    chan struct{}
 	done    chan struct{}
 	cerrar  sync.Once
@@ -143,6 +215,13 @@ type Auditor struct {
 // fallos de disco, como mucho uno por minuto.
 func NewAuditor(path string, logf func(string, ...any)) *Auditor {
 	return nuevoAuditor(path, logf, nil)
+}
+
+// NewAuditorCon es NewAuditor con un tamaño y unas generaciones propios.
+func NewAuditorCon(path string, cfg AuditConfig, logf func(string, ...any)) *Auditor {
+	a := nuevoAuditor(path, logf, nil)
+	a.cfg = cfg
+	return a
 }
 
 func nuevoAuditor(path string, logf func(string, ...any), espera func()) *Auditor {
@@ -235,6 +314,8 @@ func (a *Auditor) escribir(r Record) {
 	}
 	r.TS = r.TS.UTC()
 	r.Dropped += a.dropped.Swap(0)
+	r.Rotated += a.rotados
+	a.rotados = 0
 	linea, err := json.Marshal(r)
 	if err != nil {
 		a.perder(r.Dropped+1, err)
@@ -247,14 +328,24 @@ func (a *Auditor) escribir(r Record) {
 			return
 		}
 	}
-	if a.tam > 0 && a.tam+int64(len(linea)) > AuditMaxBytes {
-		a.rotar()
+	if a.tam > 0 && a.tam+int64(len(linea)) > a.cfg.conDefectos().MaxBytes {
+		// Lo que se cae de la última generación va en ESTE registro, que es
+		// el primero del fichero nuevo.
+		n := a.rotar()
+		r.Dropped += n
+		r.Rotated += n
+		if linea, err = json.Marshal(r); err != nil {
+			a.perder(r.Dropped+1, err)
+			return
+		}
+		linea = append(linea, '\n')
 		if err := a.abrir(); err != nil {
 			a.perder(r.Dropped+1, err)
 			return
 		}
 	}
 	if _, err := a.bw.Write(linea); err != nil {
+		a.rotados += r.Rotated
 		a.perder(r.Dropped+1+a.enBuffer, err)
 		a.enBuffer = 0
 		a.cerrarFichero()
@@ -309,15 +400,64 @@ func (a *Auditor) abrir() error {
 	return nil
 }
 
-// rotar pasa el fichero actual a .1 (sustituyendo el anterior) y deja el
-// siguiente para abrir. Si el rename falla, se sigue en el mismo: mejor un
-// fichero que crece que perder registros.
-func (a *Auditor) rotar() {
+// rotar desplaza las generaciones (path.N-1 a path.N, ..., path a path.1) y
+// deja el siguiente para abrir. Devuelve cuántos registros se perdieron con
+// la generación más antigua, que se borra: sus líneas más los descartados que
+// ya llevaban anotados. Si un rename falla, se sigue en el mismo fichero:
+// mejor uno que crece que perder registros.
+func (a *Auditor) rotar() uint64 {
 	a.vaciar()
 	a.cerrarFichero()
-	if err := os.Rename(a.path, a.path+".1"); err != nil {
+	gens := a.cfg.conDefectos().Generations
+	gen := func(i int) string { return a.path + "." + strconv.Itoa(i) }
+	perdidos := contarRegistros(gen(gens))
+	if err := os.Remove(gen(gens)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		a.avisar("couldn't rotate: %v", err)
+		return 0
+	}
+	for i := gens - 1; i >= 1; i-- {
+		if err := os.Rename(gen(i), gen(i+1)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			a.avisar("couldn't rotate: %v", err)
+		}
+	}
+	if err := os.Rename(a.path, gen(1)); err != nil {
 		a.avisar("couldn't rotate: %v", err)
 	}
+	if perdidos > 0 {
+		a.avisar("rotation dropped the %d oldest records (counted in dropped; raise the size or generations to keep more)", perdidos)
+	}
+	return perdidos
+}
+
+// contarRegistros cuenta los registros de un fichero del registro que se va a
+// borrar: una por línea más los descartados que cada una llevaba. Un fichero
+// que no se puede leer cuenta 0 (y no es regular: no se lee).
+func contarRegistros(path string) uint64 {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return 0
+	}
+	var n uint64
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		var r struct {
+			Kind    string `json:"kind"`
+			Dropped uint64 `json:"dropped"`
+		}
+		if json.Unmarshal(sc.Bytes(), &r) == nil {
+			n += r.Dropped
+			if r.Kind == KindDropped {
+				continue
+			}
+		}
+		n++
+	}
+	return n
 }
 
 func (a *Auditor) vaciar() {
