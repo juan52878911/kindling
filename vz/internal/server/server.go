@@ -873,7 +873,7 @@ func (s *Server) putSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 // anterior ignoraría el tipo y la serviría como HTTP. "postgres-upstream"
 // dice que entiende además Upstream, UpstreamTLS y TLSServerName (también en
 // las MySQL, que nacieron con ellos).
-var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL}
+var credentialKinds = []string{credproxy.KindHTTP, credproxy.KindPostgres, credproxy.CapPostgresUpstream, credproxy.KindMySQL, credproxy.CapHTTPPlaces}
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{"backend": "vz", "version": s.d.Version}
@@ -984,6 +984,9 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 			Placeholder string   `json:"placeholder"`
 			Secret      string   `json:"secret"`
 			Allow       []string `json:"allow,omitempty"`
+			Headers     []string `json:"headers,omitempty"`
+			Query       bool     `json:"query,omitempty"`
+			Body        bool     `json:"body,omitempty"`
 			Kind        string   `json:"kind,omitempty"`
 			Port        int      `json:"port,omitempty"`
 			User        string   `json:"user,omitempty"`
@@ -1020,8 +1023,9 @@ func (s *Server) putKlingCredentials(w http.ResponseWriter, r *http.Request) {
 		soloMaquinas = soloMaquinas && c.UpstreamMachine != ""
 		creds = append(creds, credproxy.Credential{
 			Env: c.Env, Domain: c.Domain, Placeholder: c.Placeholder, Secret: c.Secret,
-			Allow: c.Allow,
-			Kind:  c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
+			Allow:   c.Allow,
+			Headers: c.Headers, Query: c.Query, Body: c.Body,
+			Kind: c.Kind, Port: c.Port, User: c.User, Database: c.Database, AnyDatabase: c.AnyDatabase, CAPEM: c.CAPEM,
 			Upstream: c.Upstream, UpstreamTLS: c.UpstreamTLS, TLSServerName: c.TLSServerName,
 			UpstreamMachine: c.UpstreamMachine, UpstreamOwner: c.UpstreamOwner,
 		})

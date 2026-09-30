@@ -1097,10 +1097,18 @@ func IsInsufficientMemory(err error) bool {
 // sesión, no una frontera: lo que acota es el GRANT del usuario. Ver
 // docs/mysql.md.
 type CredentialSpec struct {
-	Domain   string   `json:"domain"`
-	Env      string   `json:"env"`
-	Secret   string   `json:"secret"`
-	Allow    []string `json:"allow,omitempty"`
+	Domain string   `json:"domain"`
+	Env    string   `json:"env"`
+	Secret string   `json:"secret"`
+	Allow  []string `json:"allow,omitempty"`
+	// Headers, Query y Body (solo HTTP): dónde se cambia el marcador por la
+	// clave. Por defecto solo en Authorization y X-Api-Key; Headers añade
+	// cabeceras, Query la query (?key=) y Body el cuerpo. Body es inseguro
+	// frente a un proveedor que refleje lo que recibe (un LLM puede devolver
+	// la clave en base64): ver SECURITY.md.
+	Headers  []string `json:"headers,omitempty"`
+	Query    bool     `json:"query,omitempty"`
+	Body     bool     `json:"body,omitempty"`
 	Type     string   `json:"type,omitempty"`
 	Port     int      `json:"port,omitempty"`
 	User     string   `json:"user,omitempty"`
@@ -1172,6 +1180,9 @@ type CredAuditRecord struct {
 	RespBytes   int64     `json:"resp_bytes"`
 	MS          int64     `json:"ms"`
 	Dropped     uint64    `json:"dropped,omitempty"`
+	// Rotated: de Dropped, los que se cayeron de la generación más antigua
+	// al rotar el registro.
+	Rotated uint64 `json:"rotated,omitempty"`
 }
 
 // CredAuditQuery filtra GET /machines/{ref}/credaudit. Tail son las últimas N

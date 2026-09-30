@@ -671,13 +671,13 @@ func TestValidarDatabaseObligatoria(t *testing.T) {
 	if err := ValidarCredenciales([]Credential{pg(func(c *Credential) { c.AnyDatabase = true })}); err != nil {
 		t.Errorf("AnyDatabase: %v", err)
 	}
-	http := Credential{Env: "K", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "x", Secret: "k", AnyDatabase: true}
+	http := Credential{Env: "K", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "x", Secret: "k-clave-de-prueba", AnyDatabase: true}
 	if err := ValidarCredenciales([]Credential{http}); err == nil {
 		t.Error("AnyDatabase en HTTP: aceptada")
 	}
 	// Almacén antiguo: así se guardaba una credencial sin base.
 	var antigua Credential
-	if err := json.Unmarshal([]byte(`{"Env":"PGPASSWORD","Domain":"db.example.com","Placeholder":"`+pgMarca+`","Secret":"x","Kind":"postgres","User":"app"}`), &antigua); err != nil {
+	if err := json.Unmarshal([]byte(`{"Env":"PGPASSWORD","Domain":"db.example.com","Placeholder":"`+pgMarca+`","Secret":"x-clave-de-prueba","Kind":"postgres","User":"app"}`), &antigua); err != nil {
 		t.Fatal(err)
 	}
 	if !NormalizarAlmacen(antigua.Kind, antigua.Database, &antigua.AnyDatabase) || !antigua.AnyDatabase {
@@ -1043,7 +1043,7 @@ func TestPGNoSeUsaEnHTTP(t *testing.T) {
 	defer p.Close()
 	doms, err := p.SetCredentials([]Credential{
 		{Env: "PGPASSWORD", Domain: pgDominio, Placeholder: pgMarca, Secret: pgClave, Kind: KindPostgres, User: pgUser, Database: pgDB},
-		{Env: "API", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "api", Secret: "k"},
+		{Env: "API", Domain: "api.example.com", Placeholder: PlaceholderPrefix + "api", Secret: "k-clave-de-prueba"},
 	})
 	if err != nil {
 		t.Fatal(err)

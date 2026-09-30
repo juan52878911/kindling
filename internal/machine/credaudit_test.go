@@ -43,6 +43,11 @@ func TestCredAuditLeeLoQueEscribeElProxy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Dos generaciones rotadas: se leen todas, de la más vieja a la actual.
+	escribir(credproxy.Record{TS: t0.Add(-time.Minute), Kind: credproxy.KindHTTP, Method: "GET", Host: "a.com", Path: "/viejisimo", Status: 200, Dropped: 3, Rotated: 3})
+	if err := os.Rename(path, path+".2"); err != nil {
+		t.Fatal(err)
+	}
 	escribir(credproxy.Record{TS: t0, Kind: credproxy.KindHTTP, Method: "GET", Host: "a.com", Path: "/viejo", Status: 200})
 	if err := os.Rename(path, path+".1"); err != nil {
 		t.Fatal(err)
@@ -66,6 +71,10 @@ func TestCredAuditLeeLoQueEscribeElProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(todo) != 5 || todo[0].Path != "/viejisimo" || todo[0].Rotated != 3 {
+		t.Fatalf("la generación .2 no se leyó: %+v", todo)
+	}
+	todo = todo[1:]
 	if len(todo) != 4 || todo[0].Path != "/viejo" || todo[2].Creds[0] != "KEY" || todo[2].RespBytes != 20 || todo[3].Dropped != 7 {
 		t.Fatalf("todo: %+v", todo)
 	}

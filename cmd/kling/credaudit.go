@@ -147,7 +147,11 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("credential audit record: %w", err)
 	}
 	if r.Dropped > 0 {
-		fmt.Fprintf(w.errOut, "dropped %d records\n", r.Dropped)
+		if r.Rotated > 0 {
+			fmt.Fprintf(w.errOut, "dropped %d records (%d rotated out of the oldest log file)\n", r.Dropped, r.Rotated)
+		} else {
+			fmt.Fprintf(w.errOut, "dropped %d records\n", r.Dropped)
+		}
 	}
 	if w.json {
 		fmt.Fprintf(w.out, "%s\n", line)

