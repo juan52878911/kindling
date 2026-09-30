@@ -1293,9 +1293,13 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     out=$(dbsql "$hija" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
     [ "$out" = "0" ] && ok "fork: la hija no hereda los roles de kling db role" || bad "roles ro en la hija" "0" "$out"
     if [ -n "$ROPW" ]; then
+      # En la hija el rol no existe y el fork le quita su línea de pg_hba.conf:
+      # el servidor la rechaza antes de mirar la clave ("no pg_hba.conf entry"
+      # para ese usuario). También es un rechazo del servidor, no una red rota.
       out=$(dbrosql e2e_agent "$ROPW" "$hija" "SELECT 1")
-      rechazo_clave "$out" && ok "fork: la clave del rol ro del origen no entra en la hija" \
-        || bad "clave del rol ro en la hija" "password authentication failed" "$out"
+      { rechazo_clave "$out" || { contiene "$out" "no pg_hba.conf entry for host" && contiene "$out" 'user "e2e_agent"'; }; } \
+        && ok "fork: la clave del rol ro del origen no entra en la hija" \
+        || bad "clave del rol ro en la hija" "password authentication failed o no pg_hba.conf entry para e2e_agent" "$out"
     fi
     TODAS="$TODAS $(dbpw "$hija")"
     dbk rm "$hija" >/dev/null 2>&1
