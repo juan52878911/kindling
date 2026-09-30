@@ -151,27 +151,34 @@ deploy: daemon guest chispa-guest
 	@test -n "$(HOST)" || { echo "usa: make deploy HOST=ssh://usuario@maquina" >&2; exit 1; }
 	$(eval TARGET := $(patsubst ssh://%,%,$(HOST)))
 	$(eval HOST_USER := $(if $(findstring @,$(TARGET)),$(firstword $(subst @, ,$(TARGET))),))
-	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):/tmp/$(BIN)
-	scp -q kling-guest kling-chispa scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh scripts/lib-ext4-shrink.sh $(TARGET):/tmp/
-	scp -q scripts/builders/base $(TARGET):/tmp/builder-base
-	scp -q scripts/builders/llm $(TARGET):/tmp/builder-llm
-	scp -q scripts/builders/chispa $(TARGET):/tmp/builder-chispa
-	scp -q scripts/builders/android $(TARGET):/tmp/builder-android
-	scp -q packaging/$(BIN).service $(TARGET):/tmp/
-	ssh $(TARGET) 'sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
+	@# Los ficheros van a un directorio de mktemp -d (0700, del usuario de SSH) y
+	@# no a /tmp/<nombre> fijo: otro usuario del host podía dejar antes un enlace
+	@# o un fichero suyo con ese nombre, y `sudo install` lo instalaba como root.
+	@set -e; \
+	D=$$(ssh $(TARGET) 'mktemp -d'); \
+	case "$$D" in /*) ;; *) echo "mktemp -d on $(TARGET) failed: $$D" >&2; exit 1;; esac; \
+	trap 'ssh $(TARGET) "rm -rf $$D"' EXIT; \
+	scp -q $(BIN)-linux-$(GOARCH) $(TARGET):$$D/$(BIN); \
+	scp -q kling-guest kling-chispa scripts/81-base-image.sh scripts/71-build-glibc-base.sh scripts/minimal-init.sh scripts/lib-ext4-shrink.sh $(TARGET):$$D/; \
+	scp -q scripts/builders/base $(TARGET):$$D/builder-base; \
+	scp -q scripts/builders/llm $(TARGET):$$D/builder-llm; \
+	scp -q scripts/builders/chispa $(TARGET):$$D/builder-chispa; \
+	scp -q scripts/builders/android $(TARGET):$$D/builder-android; \
+	scp -q packaging/$(BIN).service $(TARGET):$$D/; \
+	ssh $(TARGET) "D=$$D; "'sudo install -m755 "$$D/$(BIN)" /usr/local/bin/$(BIN) && \
 		sudo install -d /usr/local/lib/kindling && \
-		sudo install -m755 /tmp/kling-guest /usr/local/lib/kindling/kling-guest && \
-		sudo install -m755 /tmp/kling-chispa /usr/local/lib/kindling/kling-chispa && \
+		sudo install -m755 "$$D/kling-guest" /usr/local/lib/kindling/kling-guest && \
+		sudo install -m755 "$$D/kling-chispa" /usr/local/lib/kindling/kling-chispa && \
 		sudo install -d -m755 /usr/local/lib/kindling/builders && \
-		sudo install -m755 /tmp/81-base-image.sh /usr/local/lib/kindling/81-base-image.sh && \
-		sudo install -m755 /tmp/71-build-glibc-base.sh /usr/local/lib/kindling/71-build-glibc-base.sh && \
-		sudo install -m755 /tmp/minimal-init.sh /usr/local/lib/kindling/minimal-init.sh && \
-		sudo install -m755 /tmp/lib-ext4-shrink.sh /usr/local/lib/kindling/lib-ext4-shrink.sh && \
-		sudo install -m755 /tmp/builder-base /usr/local/lib/kindling/builders/base && \
-		sudo install -m755 /tmp/builder-llm /usr/local/lib/kindling/builders/llm && \
-		sudo install -m755 /tmp/builder-chispa /usr/local/lib/kindling/builders/chispa && \
-		sudo install -m755 /tmp/builder-android /usr/local/lib/kindling/builders/android && \
-		sudo install -m644 /tmp/$(BIN).service /etc/systemd/system/ && \
+		sudo install -m755 "$$D/81-base-image.sh" /usr/local/lib/kindling/81-base-image.sh && \
+		sudo install -m755 "$$D/71-build-glibc-base.sh" /usr/local/lib/kindling/71-build-glibc-base.sh && \
+		sudo install -m755 "$$D/minimal-init.sh" /usr/local/lib/kindling/minimal-init.sh && \
+		sudo install -m755 "$$D/lib-ext4-shrink.sh" /usr/local/lib/kindling/lib-ext4-shrink.sh && \
+		sudo install -m755 "$$D/builder-base" /usr/local/lib/kindling/builders/base && \
+		sudo install -m755 "$$D/builder-llm" /usr/local/lib/kindling/builders/llm && \
+		sudo install -m755 "$$D/builder-chispa" /usr/local/lib/kindling/builders/chispa && \
+		sudo install -m755 "$$D/builder-android" /usr/local/lib/kindling/builders/android && \
+		sudo install -m644 "$$D/$(BIN).service" /etc/systemd/system/ && \
 		if [ ! -f /etc/default/kling ]; then \
 			printf "%s\n" "# Config de kling propia de este host; make deploy la crea una vez y no la vuelve a tocar." "KLING_SOCKET_USER=$(HOST_USER)" "#KLING_RUN_AS=kindling" | sudo tee /etc/default/kling >/dev/null && \
 			sudo chmod 644 /etc/default/kling; \

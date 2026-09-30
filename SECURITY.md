@@ -17,6 +17,13 @@ equivale a root en el host: puede montar discos arbitrarios y arrancar kernels a
 Exponerlo por TCP sería repetir el error que ha costado a Docker una década de servidores
 comprometidos.
 
+El socket nace en un directorio privado (`0700`) junto al de destino, con `0660` y cedido
+al usuario de `-socket-user` (o al de `sudo`) y a su grupo principal, y se renombra a su
+sitio: el `chmod` y el `chown` no siguen un enlace que alguien ponga en la ruta mientras
+el daemon arranca, y no hay un instante en que tenga los permisos del umask. Si otros
+pueden escribir en el directorio del socket (sin sticky bit), el daemon lo avisa: podrían
+cambiarlo por uno suyo.
+
 El acceso remoto es **SSH y nada más**: `ssh host kling dial-stdio`. La autenticación es la
 de SSH; kindling no inventa credenciales propias.
 
@@ -1222,6 +1229,39 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
   el upstream es público y fijo. Consecuencia: en una red que bloquee `1.1.1.1:53`
   el invitado no resuelve (tampoco en Linux), y los nombres que solo existen en el DNS
   del Mac (VPN, `.local`) no los ve, que es justo lo que se quería.
+
+### 23. Una plantilla compartida entrega lo que lleva a todos los inquilinos
+
+Con política de autorización ([docs/authz.md](docs/authz.md)), `shared_templates` deja que
+cualquier inquilino haga `run -from` (o `sandbox -from`) de un snapshot de admin. El
+inquilino no puede cambiar ni borrar la plantilla, pero **cada instancia suya recibe todo
+lo que la plantilla trae**, y compartirla es decidir dárselo a todos:
+
+- **Sus credenciales.** Las de plantilla (`PUT /snapshots/{name}/credentials`,
+  `secrets/credentials/<plantilla>.enc`) se entregan a cada máquina que nace de ella, la
+  del inquilino incluida. La clave no entra en el invitado (§7), pero el inquilino puede
+  **usarla**: cualquier petición suya a los dominios de la allowlist sale con ella, con los
+  permisos que tenga en el servicio de fuera. Las que se aten a la plantilla después de
+  compartirla valen igual para las instancias nuevas. El registro de auditoría del proxy
+  dice qué máquina usó la credencial (y su `kling.owner`), no la impide.
+- **Su memoria y su disco.** La plantilla es una foto del invitado: lo que el admin dejó
+  en su RAM o en su overlay (un token en una variable de entorno, una caché, un fichero de
+  configuración con una clave) lo lee el inquilino desde dentro de su instancia, con
+  `exec` si la plantilla se hizo con `AllowExec` o desde el propio servicio si no.
+- **Sus volúmenes.** Una plantilla de un admin que lleve volúmenes los reengancha en la
+  instancia del inquilino (la única vía por la que un inquilino llega a un volumen).
+- **Por nombre, no por contenido.** `shared_templates` lista nombres: si el admin borra
+  `python` y hace otro snapshot sin dueño con ese nombre, el nuevo queda compartido sin
+  tocar la política. (Uno con dueño no se comparte aunque esté en la lista.)
+
+Por eso: comparta solo plantillas hechas para eso, sin credenciales ni secretos en la
+memoria o el disco, o con credenciales de un servicio de fuera que den lo mismo a todos
+los inquilinos (una cuenta de solo lectura, con su propia cuota, y `-allow-request` para
+acotar las rutas). Lo que es de un inquilino va en una plantilla suya (sin compartir), o
+en credenciales de máquina que se atan a cada instancia (`POST
+/machines/{ref}/credentials`) después de crearla. Revise `kling template inspect
+<plantilla>` (dominios con credencial, volúmenes, `allow_exec`) antes de añadirla a
+`shared_templates`.
 
 ## Lo que NO está resuelto
 

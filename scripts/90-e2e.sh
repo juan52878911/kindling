@@ -43,6 +43,12 @@ contiene() { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 need() { command -v "$1" >/dev/null || { echo "falta $1" >&2; exit 1; }; }
 need "$KLING"; need curl; need python3
 
+# rechazo_clave dice si la salida de psql es un rechazo de la CLAVE (28P01, del
+# servidor o del proxy de credenciales). Las pruebas de "esta clave no entra" se
+# daban por buenas con cualquier fallo —host inalcanzable, puerto cerrado, psql
+# roto—, y así no podían fallar: ahora solo vale un rechazo de verdad.
+rechazo_clave() { contiene "$1" "password authentication failed" || contiene "$1" "refused the credential"; }
+
 cleanup() {
   [ "$KEEP" = "1" ] && { echo; echo "KEEP=1: no limpio. Restos: volumen $VOL"; return; }
   echo
@@ -999,17 +1005,49 @@ fi
 # applyIPv6Barrier se aplica en los tres.
 step "7c. IPv6 cerrado (defensa en profundidad, los tres modos)"
 SONDA_V6='
-import subprocess, sys
-# Sin dirección global ni de enlace: ipv6.disable=1 en el kernel del invitado
-# (arranque en frío) quita el módulo entero, y si algún día el invitado
-# arrancara SIN ese parámetro (un snapshot dorado congelado antes de este
-# cambio), la barrera del namespace en el host debe seguir cerrando el paso.
-addrs = subprocess.run(["ip", "-6", "addr", "show"], capture_output=True, text=True).stdout
-print("ADDRS", "vacio" if "inet6" not in addrs else "CON_IPV6:" + addrs.replace(chr(10), " "))
-ruta = subprocess.run(["ip", "-6", "route", "show", "default"], capture_output=True, text=True).stdout.strip()
-print("RUTA", "vacia" if not ruta else "CON_RUTA:" + ruta)
-r = subprocess.run(["ping", "-6", "-c", "1", "-W", "2", "2606:4700:4700::1111"], capture_output=True, text=True)
-print("PING6", "bloqueado" if r.returncode != 0 else "PASO:" + r.stdout.replace(chr(10), " "))
+import errno, os, socket
+# Todo en Python y leyendo /proc, sin ip ni ping: antes un `ip` o un `ping` que
+# fallara por cualquier otra razón (no instalado, sin permiso, otra sintaxis)
+# daba "vacío" y "bloqueado", y la prueba no podía fallar.
+#
+# Sin dirección ni ruta: ipv6.disable=1 en el kernel del invitado (arranque en
+# frío) quita el módulo entero, y entonces /proc/net/if_inet6 no existe. Si
+# algún día el invitado arrancara SIN ese parámetro (un snapshot dorado
+# congelado antes de este cambio), la barrera del namespace en el host debe
+# seguir cerrando el paso: lo dice la conexión.
+def leer(p):
+    try:
+        with open(p) as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+addrs = leer("/proc/net/if_inet6").strip()
+print("ADDRS", "vacio" if not addrs else "CON_IPV6:" + addrs.replace(chr(10), " "))
+defecto = [l for l in leer("/proc/net/ipv6_route").splitlines()
+           if l.split()[:2] == ["0" * 32, "00"] and l.split()[-1] != "lo"]
+print("RUTA", "vacia" if not defecto else "CON_RUTA:" + " | ".join(defecto))
+# Una conexión TCP de verdad a un destino público. Solo cuentan como bloqueo los
+# errores de red; cualquier otra cosa (un RST, una excepción rara) no.
+BLOQUEO = {errno.EAFNOSUPPORT, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL, errno.EACCES, errno.EPERM}
+def conectar(fam, dst):
+    try:
+        s = socket.socket(fam, socket.SOCK_STREAM)
+    except OSError as e:
+        return "bloqueado:" + errno.errorcode.get(e.errno, "?") if e.errno in BLOQUEO else "ERROR:" + repr(e)
+    s.settimeout(4)
+    try:
+        s.connect(dst)
+        return "PASO"
+    except socket.timeout:
+        return "bloqueado:timeout"
+    except OSError as e:
+        return "bloqueado:" + errno.errorcode.get(e.errno, "?") if e.errno in BLOQUEO else "ERROR:" + repr(e)
+    finally:
+        s.close()
+print("TCP6", conectar(socket.AF_INET6, ("2606:4700:4700::1111", 443)))
+# El control: la misma conexión por IPv4. Con egress=internet TIENE que pasar;
+# si no, la sonda no distingue un bloqueo de una red rota y lo anterior no vale.
+print("TCP4", conectar(socket.AF_INET, ("1.1.1.1", 443)))
 '
 for modo in none internet allowlist; do
   V6="e2e-v6-$modo-$$"
@@ -1021,8 +1059,15 @@ for modo in none internet allowlist; do
       || bad "IPv6 addrs ($modo)" "ADDRS vacio" "$out"
     contiene "$out" "RUTA vacia" && ok "egress=$modo: sin ruta v6 por defecto" \
       || bad "IPv6 ruta ($modo)" "RUTA vacia" "$out"
-    contiene "$out" "PING6 bloqueado" && ok "egress=$modo: ping6 a un destino público no sale" \
-      || bad "IPv6 ping ($modo)" "PING6 bloqueado" "$out"
+    contiene "$out" "TCP6 bloqueado" && ok "egress=$modo: una conexión IPv6 a un destino público no sale" \
+      || bad "IPv6 conexión ($modo)" "TCP6 bloqueado:<errno de red>" "$out"
+    if [ "$modo" = internet ]; then
+      contiene "$out" "TCP4 PASO" && ok "egress=internet: la misma conexión por IPv4 sí sale (la sonda distingue)" \
+        || bad "control IPv4 (internet)" "TCP4 PASO" "$out"
+    else
+      contiene "$out" "TCP4 bloqueado" && ok "egress=$modo: tampoco sale por IPv4" \
+        || bad "control IPv4 ($modo)" "TCP4 bloqueado" "$out"
+    fi
     $KLING rm -f "$V6" >/dev/null 2>&1
   else
     bad "run -egress $modo (sonda IPv6)" "una máquina" "no arrancó"
@@ -1047,6 +1092,10 @@ if [ -z "${KLING_E2E_DB_GOLDEN:-}" ]; then
 elif ! $KLING db --help >/dev/null 2>&1; then
   printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado (cd ext/db && go build -o ~/.local/share/kling/plugins/kling-db ./cmd/kling-db)\n"
 else
+  # Sin psql en el host, las pruebas de claves desde el host (las que dicen que
+  # la de la plantilla, la vieja tras rotate o la del rol ro NO entran) se
+  # saltaban y la sección salía verde sin haberlas hecho.
+  need psql
   DBG="$KLING_E2E_DB_GOLDEN"
   DBTMP=$(mktemp -d); export KLING_DB_STATE="$DBTMP/state"
   # El estado de la plantilla (su verificador) vive en el directorio real de kling db: sin
@@ -1078,17 +1127,15 @@ print(u.hostname, u.port, urllib.parse.unquote(u.username or ""), u.path.lstrip(
   PW1=$(dbpw "$DBU")
   [ -n "$PW1" ] && ok "la copia tiene su clave en el host" || bad "clave de la copia" "un fichero con la clave" "nada"
   TODAS="$PW1"
-  if ! command -v psql >/dev/null; then
-    printf "  \033[33mskip\033[0m  no hay psql en este host: sin comprobación de clave desde el host\n"
-  else
+  {
     out=$(dbhostsql "$PW1" "$DBU" "SELECT 1")
     [ "$out" = "1" ] && ok "desde el host entra con la clave de la copia" || bad "conexión del host" "1" "$out"
     if [ -n "${KLING_E2E_DB_GOLDEN_PASSWORD:-}" ]; then
       [ "$PW1" != "$KLING_E2E_DB_GOLDEN_PASSWORD" ] && ok "la clave de la copia es distinta de la de la plantilla" \
         || bad "rotación" "clave de la copia distinta de la de la plantilla" "iguales"
       out=$(dbhostsql "$KLING_E2E_DB_GOLDEN_PASSWORD" "$DBU" "SELECT 1")
-      [ "$out" = "1" ] && bad "clave de la plantilla" "rechazada" "ENTRÓ" \
-        || ok "la clave de la plantilla NO entra en la copia"
+      rechazo_clave "$out" && ok "la clave de la plantilla NO entra en la copia" \
+        || bad "clave de la plantilla" "password authentication failed" "$out"
     else
       printf "  \033[33mskip\033[0m  KLING_E2E_DB_GOLDEN_PASSWORD no está: sin la prueba de la clave de la plantilla desde el host\n"
     fi
@@ -1102,7 +1149,7 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     print("export %s=%s" % (k, shlex.quote(str(v or ""))))')"; PGCONNECT_TIMEOUT=10 psql -X -At -c "SELECT 1" 2>&1)
     [ "$out" = "1" ] && ok "connect -dsn: el DSN funciona" || bad "connect -dsn" "1" "$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
     dsn=""
-  fi
+  }
 
   # fork -n 4: cuatro claves distintas y escrituras aisladas.
   dbsql "$DBU" "CREATE TABLE e2e_marca(v text); INSERT INTO e2e_marca VALUES ('origen')" >/dev/null
@@ -1119,6 +1166,9 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     TODAS="$TODAS $pw"
     dbsql "$c" "INSERT INTO e2e_marca VALUES ('copia-$i')" >/dev/null
   done
+  # Sin copias los dos bucles no dan ni una vuelta y "distintas" y "aisladas" se
+  # quedaban en 1: el fork fallido salía como aislado. Se exigen las cuatro.
+  [ "$nc" = "4" ] || distintas=0
   [ "$distintas" = 1 ] && ok "fork: cuatro claves distintas entre sí y de la del origen" \
     || bad "claves del fork" "todas distintas y no vacías" "alguna repetida o vacía"
   aisladas=1; i=0
@@ -1127,6 +1177,7 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
     filas=$(dbsql "$c" "SELECT string_agg(v, ',' ORDER BY v) FROM e2e_marca")
     [ "$filas" = "copia-$i,origen" ] || { aisladas=0; echo "     $c ve: $filas"; }
   done
+  [ "$nc" = "4" ] || aisladas=0
   filas=$(dbsql "$DBU" "SELECT string_agg(v, ',') FROM e2e_marca")
   { [ "$aisladas" = 1 ] && [ "$filas" = "origen" ]; } && ok "cada copia ve solo sus escrituras (y el origen no ve ninguna)" \
     || bad "aislamiento del fork" "copia-N,origen en cada una; origen solo 'origen'" "origen ve: $filas"
@@ -1168,7 +1219,7 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   dbsql "$DBU" "DROP TABLE e2e_tc" >/dev/null
 
   # audit: muestra conexiones y no lleva ni la clave ni SQL.
-  command -v psql >/dev/null && dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
+  dbhostsql "$PW1" "$DBU" "SELECT 424242" >/dev/null
   out=$(dbk audit "$DBU" -since 1h)
   contiene "$out" "connect" && ok "audit muestra conexiones" || bad "audit" "eventos de conexión" "$out"
   if contiene "$out" "424242" || contiene "$out" "SELECT" || contiene "$out" "e2e_marca"; then
@@ -1203,8 +1254,6 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   [ -n "$ROPW" ] && TODAS="$TODAS $ROPW"
   if [ -z "$ROPW" ]; then
     bad "clave del rol ro" "un fichero con la clave en el host" "nada"
-  elif ! command -v psql >/dev/null; then
-    printf "  \033[33mskip\033[0m  no hay psql en este host: sin las pruebas del rol de solo lectura desde el host\n"
   else
     out=$(dbrosql e2e_agent "$ROPW" "$DBU" "SELECT count(*) FROM e2e_ro")
     [ "$out" = "2" ] && ok "el rol ro lee (SELECT)" || bad "SELECT del rol ro" "2" "$out"
@@ -1229,9 +1278,10 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   else
     out=$(dbsql "$hija" "SELECT count(*) FROM pg_roles WHERE shobj_description(oid, 'pg_authid') = 'kling-db:ro'")
     [ "$out" = "0" ] && ok "fork: la hija no hereda los roles de kling db role" || bad "roles ro en la hija" "0" "$out"
-    if [ -n "$ROPW" ] && command -v psql >/dev/null; then
+    if [ -n "$ROPW" ]; then
       out=$(dbrosql e2e_agent "$ROPW" "$hija" "SELECT 1")
-      [ "$out" = "1" ] && bad "clave del rol ro en la hija" "rechazada" "ENTRÓ" || ok "fork: la clave del rol ro del origen no entra en la hija"
+      rechazo_clave "$out" && ok "fork: la clave del rol ro del origen no entra en la hija" \
+        || bad "clave del rol ro en la hija" "password authentication failed" "$out"
     fi
     TODAS="$TODAS $(dbpw "$hija")"
     dbk rm "$hija" >/dev/null 2>&1
@@ -1241,19 +1291,18 @@ for k, v in (("PGHOST", d.hostname), ("PGPORT", d.port), ("PGUSER", u.unquote(d.
   [ "$out" = "0" ] && ok "role -rm: el rol desaparece" || bad "role -rm" "0" "$out"
 
   # rotate: la clave vieja deja de valer y la nueva entra.
-  if command -v psql >/dev/null; then
+  {
     ROT_OLD=$(dbpw "$DBU")
     out=$(dbk rotate "$DBU"); rc=$?
     ROT_NEW=$(dbpw "$DBU")
     TODAS="$TODAS $ROT_OLD $ROT_NEW"
     { [ "$rc" = 0 ] && [ -n "$ROT_NEW" ] && [ "$ROT_NEW" != "$ROT_OLD" ]; } && ok "rotate: clave nueva distinta de la vieja" || bad "rotate" "clave nueva distinta" "rc=$rc $out"
     out=$(dbhostsql "$ROT_OLD" "$DBU" "SELECT 1")
-    [ "$out" = "1" ] && bad "clave vieja tras rotate" "rechazada" "ENTRÓ" || ok "rotate: la clave vieja ya no entra"
+    rechazo_clave "$out" && ok "rotate: la clave vieja ya no entra" \
+      || bad "clave vieja tras rotate" "password authentication failed" "$out"
     out=$(dbhostsql "$ROT_NEW" "$DBU" "SELECT 1")
     [ "$out" = "1" ] && ok "rotate: la clave nueva entra" || bad "clave nueva tras rotate" "1" "$out"
-  else
-    printf "  \033[33mskip\033[0m  no hay psql en este host: sin la prueba de rotate desde el host\n"
-  fi
+  }
 
   # snapshot + undo: los datos vuelven a los del punto.
   dbsql "$DBU" "CREATE TABLE e2e_snap(v text); INSERT INTO e2e_snap VALUES ('punto')" >/dev/null
@@ -1377,9 +1426,8 @@ if [ -z "${KLING_E2E_CLONE_ADMIN_URL:-}" ]; then
   printf "  \033[33mskip\033[0m  KLING_E2E_CLONE_ADMIN_URL no está (postgres://superusuario:clave@host:puerto/base, con SCRAM): sin origen que clonar\n"
 elif ! $KLING db --help >/dev/null 2>&1; then
   printf "  \033[33mskip\033[0m  el plugin kling-db no está instalado\n"
-elif ! command -v psql >/dev/null; then
-  printf "  \033[33mskip\033[0m  no hay psql en este host: sin forma de crear la base de origen\n"
 else
+  need psql
   CLTMP=$(mktemp -d); export KLING_DB_STATE="$CLTMP/state"
   CLLOG="$CLTMP/salida.log"; : > "$CLLOG"
   CLDB="e2eclone$$"; CLRO="e2eclone_ro$$"; CLG="e2e-clone-$$"; CLC="e2e-clonecp-$$"
@@ -2139,13 +2187,18 @@ else
     out=$($KLING inspect "$AZM" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("labels", {}).get("kling.owner", ""))')
     [ "$out" = "$TA" ] && ok "run como inquilino: el daemon sella kling.owner=$TA" \
       || bad "kling.owner sellado" "$TA" "$out"
-    out=$(kb ps -a)
-    contiene "$out" "$AZM" && bad "ps de $TB" "sin la máquina de $TA" "$out" || ok "$TB no ve la máquina de $TA en ps"
+    # rc 0 además de no verla: un ps que falla tampoco la enseña, y eso no
+    # prueba nada.
+    out=$(kb ps -a) && rc=0 || rc=$?
+    { [ "$rc" = 0 ] && ! contiene "$out" "$AZM"; } && ok "$TB no ve la máquina de $TA en ps" \
+      || bad "ps de $TB" "salida 0, sin la máquina de $TA" "rc=$rc $out"
     out=$(kb inspect "$AZM") && rc=0 || rc=$?
     { [ "$rc" != 0 ] && contiene "$out" "doesn't exist"; } && ok "$TB: inspect de la máquina de $TA responde como si no existiera" \
       || bad "inspect ajeno" "doesn't exist" "rc=$rc $out"
-    kb rm -f "$AZM" >/dev/null
-    $KLING inspect "$AZM" >/dev/null 2>&1 && ok "$TB no puede borrar la máquina de $TA" || bad "rm ajeno" "la máquina sigue" "borrada"
+    out=$(kb rm -f "$AZM") && rc=0 || rc=$?
+    { [ "$rc" != 0 ] && contiene "$out" "doesn't exist" && $KLING inspect "$AZM" >/dev/null 2>&1; } \
+      && ok "$TB no puede borrar la máquina de $TA (y se le dice que no existe)" \
+      || bad "rm ajeno" "un error 'doesn't exist' y la máquina sigue" "rc=$rc $out"
     out=$(kb run -name "$AZM-b" -image min -label "kling.owner=$TA") && rc=0 || rc=$?
     { [ "$rc" != 0 ] && contiene "$out" "set by the daemon"; } && ok "$TB no puede ponerse kling.owner=$TA" \
       || bad "kling.owner ajeno" "set by the daemon" "rc=$rc $out"
@@ -2154,8 +2207,9 @@ else
     # Snapshots: el de A no lo ve B, y B no puede usar ese nombre (409, sin decir de quién es).
     out=$(ka save -force "$AZM" "$AZS") && rc=0 || rc=$?
     [ "$rc" = 0 ] && ok "save como $TA" || bad "save como $TA" "salida 0" "rc=$rc $out"
-    out=$(kb template ls)
-    contiene "$out" "$AZS" && bad "template ls de $TB" "sin la plantilla de $TA" "$out" || ok "$TB no ve la plantilla de $TA"
+    out=$(kb template ls) && rc=0 || rc=$?
+    { [ "$rc" = 0 ] && ! contiene "$out" "$AZS"; } && ok "$TB no ve la plantilla de $TA" \
+      || bad "template ls de $TB" "salida 0, sin la plantilla de $TA" "rc=$rc $out"
     out=$(kb run -name "$AZM-b" -image min -ttl 10m -on-ttl remove)
     if contiene "$out" "booted"; then
       for rep in "" -replace; do
