@@ -2058,11 +2058,20 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
+	// El PUT sustituye el almacén ENTERO, y en él están los marcadores de sus
+	// credenciales (ponerMarcadoresMMDS): sin volver a ponerlos, el invitado
+	// se quedaba sin la variable que el proxy sabe cambiar por la clave. Van
+	// en el mismo documento, no en un PATCH después: así no hay un instante
+	// en que una sesión nueva lea el almacén sin ellos.
+	vacio := almacenVacio(data)
+	doc, err := m.conMarcadores(mc.ID, data)
+	if err != nil {
+		return nil, err
+	}
 	c := fc.New(sock)
-	if err := c.PutMMDSData(ctx, data); err != nil {
+	if err := c.PutMMDSData(ctx, doc); err != nil {
 		return nil, fmt.Errorf("injecting MMDS: %w", err)
 	}
-	vacio := almacenVacio(data)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]

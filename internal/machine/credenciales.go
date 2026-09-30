@@ -419,6 +419,44 @@ func ponerMarcadoresMMDS(ctx context.Context, c *fc.Client, creds []credproxy.Cr
 	return nil
 }
 
+// conMarcadores devuelve data con los marcadores de las credenciales de la
+// máquina id en su "env", para un PUT /mmds que sustituye el almacén entero
+// (PutMMDS). Sin credenciales, data tal cual. Un marcador pisa a una variable
+// del mismo nombre que traiga data: esa variable es de la credencial, y darle
+// otro valor la rompería sin que nadie lo note.
+func (m *Manager) conMarcadores(id string, data any) (any, error) {
+	creds, err := m.cargarCredenciales(id)
+	if err != nil {
+		return nil, fmt.Errorf("reading the credentials to keep their placeholders: %w", err)
+	}
+	if len(creds) == 0 {
+		return data, nil
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return nil, fmt.Errorf("the MMDS store must be a JSON object on a machine with credentials: %w", err)
+	}
+	if doc == nil {
+		doc = map[string]any{}
+	}
+	env, _ := doc["env"].(map[string]any)
+	if doc["env"] != nil && env == nil {
+		return nil, errors.New(`"env" in the MMDS store must be an object on a machine with credentials`)
+	}
+	if env == nil {
+		env = map[string]any{}
+	}
+	for _, cr := range creds {
+		env[cr.Env] = cr.Placeholder
+	}
+	doc["env"] = env
+	return doc, nil
+}
+
 // reentregarCredenciales vuelve a registrar en el proxy y el resolver las
 // credenciales guardadas de mc, cuya red acaba de rehacerse (o cuyo daemon
 // acaba de arrancar). Con c distinto de nil repone además los marcadores en
