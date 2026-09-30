@@ -130,7 +130,9 @@ func dnsFalso(t *testing.T, tira int32, ip [4]byte, nx bool) (string, *atomic.In
 // salía con 502 a los 5000 ms.
 func TestLookupPublicIPv4ReintentaSiSePierdeLaConsulta(t *testing.T) {
 	defer func(p time.Duration) { dnsPlazoIntento = p }(dnsPlazoIntento)
-	dnsPlazoIntento = 200 * time.Millisecond
+	// En macOS el resolver de Go tarda a veces 150-500 ms en abrir el socket:
+	// con 200 ms por intento, un intento se iba sin mandar nada.
+	dnsPlazoIntento = time.Second
 
 	srv, n := dnsFalso(t, 2, [4]byte{93, 184, 216, 34}, false)
 	got := LookupPublicIPv4(context.Background(), srv, "api.example.com")
