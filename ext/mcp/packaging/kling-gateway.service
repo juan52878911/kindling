@@ -9,8 +9,13 @@ Requires=kling.service
 Type=simple
 # NO necesita root: solo habla con el daemon por su socket Unix y hace de proxy
 # HTTP. Toda la parte privilegiada vive en kling.service.
-User=juan
-Group=juan
+# Quién: el usuario al que el daemon cede su socket (KLING_SOCKET_USER en
+# /etc/default/kling, ver packaging/kling.service del núcleo). `make deploy` rellena
+# @KLING_USER@ y @KLING_GROUP@ con él; si instalas la unidad a mano (desde el tarball
+# de la release), cámbialos tú. Sin rellenar, la unidad no arranca: mejor eso que
+# correr con un usuario cualquiera que resulte existir en el host.
+User=@KLING_USER@
+Group=@KLING_GROUP@
 
 # 0.0.0.0 para que los agentes de la LAN lleguen, y por eso hay token: despertar
 # un snapshot y llamar a una de sus herramientas ES ejecutar código, así que esto

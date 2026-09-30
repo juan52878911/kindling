@@ -643,10 +643,14 @@ and RAM, and the next call brings it back in milliseconds.
 ### Surviving reboots
 
 ```sh
-sudo install -m644 packaging/kling-gateway.service /etc/systemd/system/
+U=$(. /etc/default/kling; echo "$KLING_SOCKET_USER")   # who the daemon hands its socket to
+sed -e "s/@KLING_USER@/$U/" -e "s/@KLING_GROUP@/$(id -gn "$U")/" packaging/kling-gateway.service \
+  | sudo tee /etc/systemd/system/kling-gateway.service >/dev/null
 sudo systemctl enable --now kling-gateway
 ```
 
+The unit ships with `User=@KLING_USER@` (`make deploy` fills it in the same way): it has to
+run as the user that owns the daemon socket, and left unfilled it refuses to start.
 The gateway **does not run as root**: it only talks to the daemon over its socket and
 proxies. All the privileged work stays in `kling.service`.
 

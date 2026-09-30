@@ -118,6 +118,13 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   contra el fijado en el script (`ESBUILD_TGZ` para un tarball local), lo ejecuta sin
   shell con la ruta como argumento, y la ruta tiene que ser absoluta y de caracteres
   de ruta (también en `ValidateBuild`).
+- **Las unidades de systemd de `mcp` y `sandbox` ya no llevan `User=juan`.** Las
+  publicadas (`kindling-*-host.tar.gz`) y las de `make deploy` corrían con un usuario
+  personal grabado, que en otro host podía no existir o ser otra persona. Ahora llevan
+  `User=@KLING_USER@`/`Group=@KLING_GROUP@`, que `make deploy` rellena con el
+  `KLING_SOCKET_USER` de `/etc/default/kling` (o el usuario de la conexión SSH), y sin
+  rellenar no arrancan ([releases.md](docs/releases.md)). El `make deploy` también
+  sugiere pasar el token por una tubería (`... | kling config set gateway.token -`).
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora

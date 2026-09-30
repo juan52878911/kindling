@@ -656,10 +656,14 @@ costar CPU y RAM, y la siguiente llamada la trae de vuelta en milisegundos.
 ### Que sobreviva a los reinicios
 
 ```sh
-sudo install -m644 packaging/kling-gateway.service /etc/systemd/system/
+U=$(. /etc/default/kling; echo "$KLING_SOCKET_USER")   # a quién cede el daemon su socket
+sed -e "s/@KLING_USER@/$U/" -e "s/@KLING_GROUP@/$(id -gn "$U")/" packaging/kling-gateway.service \
+  | sudo tee /etc/systemd/system/kling-gateway.service >/dev/null
 sudo systemctl enable --now kling-gateway
 ```
 
+La unidad viene con `User=@KLING_USER@` (`make deploy` lo rellena igual): tiene que correr
+con el usuario dueño del socket del daemon, y sin rellenar no arranca.
 El gateway **no corre como root**: solo habla con el daemon por su socket y proxya. Todo
 el trabajo privilegiado se queda en `kling.service`.
 
