@@ -10,6 +10,9 @@
 #   ./90-e2e.sh                      contra el contexto activo de kling
 #   KLING_HOST=ssh://lab ./90-e2e.sh
 #   KEEP=1 ./90-e2e.sh               no limpia al terminar (para inspeccionar)
+#   KLING_E2E_RESTART='cmd' ./90-e2e.sh  cómo reiniciar el daemon (un daemon privado,
+#                                    p. ej. matarlo y relanzarlo con su -root/-socket);
+#                                    sin ella, solo con ssh:// (sudo systemctl restart kling)
 #
 # Cada comprobación dice qué esperaba y qué obtuvo. Un fallo NO aborta el resto:
 # saber que fallan tres cosas relacionadas vale más que enterarse de una.
@@ -88,6 +91,22 @@ KROOT=$(printf '%s\n' "$info" | awk '$1 == "root:" {print $2; exit}')
 KROOT="${KROOT:-/var/lib/kindling}"
 HSUDO="sudo"
 [ "$HOSTFS" = 1 ] && [ "$(hostsh 'id -u' 2>/dev/null)" = 0 ] && HSUDO=""
+
+# reiniciar_daemon reinicia el daemon y espera a que responda. Sin
+# KLING_E2E_RESTART solo sabe hacerlo por ssh con systemd; con un daemon local
+# no se reinicia nada (podría ser el de tu sesión) y devuelve 1.
+reiniciar_daemon() {
+  if [ -n "${KLING_E2E_RESTART:-}" ]; then
+    sh -c "$KLING_E2E_RESTART" >/dev/null 2>&1 || return 1
+  elif [ -n "$SSHT" ]; then
+    ssh "$SSHT" 'sudo systemctl restart kling' >/dev/null 2>&1 || return 1
+  else
+    return 1
+  fi
+  local i
+  for i in $(seq 1 30); do $KLING ps >/dev/null 2>&1 && break; sleep 0.5; done
+  sleep 2
+}
 
 # ── 2. ciclo de vida: arrancar, congelar, descongelar ─────────────────────────
 step "2. Ciclo de vida de una microVM"
@@ -323,15 +342,12 @@ fi
 step "4. El daemon se reinicia sin llevarse las microVMs por delante"
 NAME="e2e-rec-$$"
 if $KLING run -name "$NAME" -image min >/dev/null 2>&1; then
-  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-    T="${KLING_HOST#ssh://}"
-    ssh "$T" 'sudo systemctl restart kling' >/dev/null 2>&1
-    sleep 4
+  if reiniciar_daemon; then
     state=$($KLING ps -a 2>/dev/null | awk -v n="$NAME" '$0 ~ n {print $4}')
     [ "$state" = "running" ] && ok "sobrevive al reinicio del daemon (sigue running)" \
       || bad "reconcile" "running" "${state:-desaparecida}"
   else
-    echo "  (daemon local: me salto el reinicio para no matar tu sesión)"
+    echo "  (daemon local sin KLING_E2E_RESTART: me salto el reinicio para no matar tu sesión)"
   fi
   $KLING rm "$NAME" >/dev/null 2>&1
 else
@@ -574,16 +590,15 @@ while True:
       && ok "rw: freeze -> thaw keeps the mount and the open file ($n1 -> $n2 lines)" \
       || failE "freeze/thaw with a live share" "the log grows, no errors" "$n1 -> $n2, $out"
 
-    if [ -n "$SSHT" ]; then
-      ssh "$SSHT" 'sudo systemctl restart kling' >/dev/null 2>&1
-      sleep 5
+    if reiniciar_daemon; then
+      sleep 1
       n1=$(hostsh "wc -l < $HD/rw/log" | tr -d ' '); sleep 2; n2=$(hostsh "wc -l < $HD/rw/log" | tr -d ' ')
       st=$($KLING inspect "$SH-rw" 2>&1 | grep '"status"' || true)
       [ "${n2:-0}" -gt "${n1:-0}" ] && contiene "$st" "attached" \
         && ok "rw: the daemon restarts and re-attaches the share" \
         || failE "re-attach after a daemon restart" "the log grows, status attached" "$n1 -> $n2, $st"
     else
-      echo "  (local daemon: skipping the restart)"
+      echo "  (local daemon without KLING_E2E_RESTART: skipping the restart)"
     fi
   else
     failE "run -share :rw" "a machine" "$out"
@@ -679,12 +694,12 @@ if $KLING run -image "$IMGVOL" -name "$CR" -egress allowlist -allow example.org 
 
   # Y a un reinicio del daemon: las credenciales viven cifradas en el disco del
   # host, no solo en su memoria.
-  if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-    ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
-    sleep 4
+  if reiniciar_daemon; then
     out=$($KLING exec -timeout 90s "$CR" -- python3 -c "$SONDA" "$PASS" corto 2>&1)
     contiene "$out" "AUTH 200" && ok "tras reiniciar el daemon la credencial sigue viva" \
       || bad "credencial tras reiniciar el daemon" "AUTH 200" "$out"
+  else
+    echo "  (daemon local sin KLING_E2E_RESTART: me salto el reinicio)"
   fi
 
   # Rotación: la misma -env con otra clave conserva el marcador (el proceso del
@@ -2352,14 +2367,12 @@ except socket.gaierror as e:
     [ "$out" = "original-despues" ] && ok "el original sigue con su db (ningún fork le llega)" || bad "original tras fork" "original-despues" "$out"
 
     # Bloque 4: el daemon se reinicia y el grafo y sus enlaces siguen.
-    if [ -n "${KLING_HOST:-}" ] && [[ "${KLING_HOST}" == ssh://* ]]; then
-      ssh "${KLING_HOST#ssh://}" 'sudo systemctl restart kling' >/dev/null 2>&1
-      sleep 4
+    if reiniciar_daemon; then
       out=$(ghttp "$G-web" http://api.graph:8081/)
       { [ "$out" = "api-ok" ] && $KLING graph inspect "$G" >/dev/null 2>&1; } \
         && ok "tras reiniciar el daemon el grafo y su enlace siguen" || bad "grafo tras reinicio" "api-ok" "$out"
     else
-      echo "  (daemon local: me salto el reinicio para no matar tu sesión)"
+      echo "  (daemon local sin KLING_E2E_RESTART: me salto el reinicio para no matar tu sesión)"
     fi
 
     for F in $GFORKS; do $KLING graph rm "$F" >/dev/null 2>&1; done
