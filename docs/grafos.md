@@ -344,6 +344,14 @@ apuntar a ese puerto (ver abajo); es la arista `mcp` del diseño, pendiente. Tam
 gateway distingue las copias de un fork: el agente de una copia no llega por él al
 navegador de su copia.
 
+**kling phone: un controlador y un teléfono.** Un nodo `from: <dorado>` de `kling phone
+golden build` con `ports: [5555, 8091]` es un teléfono, y una arista `link` al 8091 llega
+a su API. Llegar no basta: la API exige un token (#110) y un nodo del dorado nace sin
+ninguno; `kling phone adopt <grafo>-<nodo>` le da identidad y token, y el operador pasa el
+token (`kling phone token`, o uno de solo lectura con `-read`) al nodo que deba
+controlarlo. Sin él, la arista recibe `401`. Detalle y tabla medida en
+[`prototypes/android/docs/phoned.md`](../prototypes/android/docs/phoned.md#autenticación-110).
+
 **Gateway de IA (Chispa/VON): siguiente paso, sin código.** La cascada es hoy Chispa
 (una microVM pequeña que clasifica) y, si duda, VON (modelos mayores en microVMs), cada
 una despertada y congelada por `pkg/scheduler` con su pool de réplicas

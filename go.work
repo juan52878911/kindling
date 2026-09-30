@@ -6,6 +6,7 @@ use (
 	.
 	./ext/db
 	./ext/mcp
+	./ext/phone
 	./ext/sandbox
 	./vz
 )

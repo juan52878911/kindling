@@ -17,6 +17,9 @@ package main
 //	POST /v1/launch   {"package":"com.termux"}  (su actividad de LAUNCHER)
 //	GET  /v1/logs[?buffer=main|system|crash|events|all|phoned][&lines=N]
 //	GET  /v1/identity                    serie, android_id, adb, SSAID (JSON)
+//	POST /v1/verify-cache                caché de páginas contra el disco (JSON)
+//
+// Todo salvo /v1/health y el índice exige un token de portador (auth.go).
 //
 // No hay shell: todo lo de arriba se ejecuta con argumentos validados aquí.
 // Quien necesite una orden arbitraria usa `kling exec` + android-sh, que
@@ -47,6 +50,23 @@ type phoneOps interface {
 	Launch(ctx context.Context, pkg string) (string, error)
 	Logs(ctx context.Context, buffer string, lines int) ([]byte, error)
 	Identity(ctx context.Context) (identityInfo, error)
+	VerifyCache(ctx context.Context) (verifyResult, error)
+}
+
+// verifyResult es la comparación de la caché de páginas con el disco
+// (android-sh --verify-cache, en Go): cada fichero de las bibliotecas y
+// binarios de Android leído por la caché y con O_DIRECT.
+type verifyResult struct {
+	OK         bool     `json:"ok"`
+	Files      int      `json:"files"`
+	Bytes      int64    `json:"bytes"`
+	Mismatches []string `json:"mismatches,omitempty"`
+	// Details: por fichero que no casa, dónde empieza la diferencia y cuántas
+	// páginas de 4 KiB difieren (y cuántas de ellas están a ceros en la caché:
+	// la firma del fallo del Mac bajo presión de memoria).
+	Details []string `json:"details,omitempty"`
+	Errors  int      `json:"errors,omitempty"`
+	Seconds float64  `json:"seconds"`
 }
 
 type healthInfo struct {
@@ -62,7 +82,10 @@ type healthInfo struct {
 	Uidump        bool   `json:"uidump"`
 	AdbSecure     bool   `json:"adb_secure"`
 	Version       string `json:"version"`
-	Detail        string `json:"detail,omitempty"`
+	Kernel        string `json:"kernel,omitempty"`
+	// APITokens: cuántos tokens abren la API (0 = cerrada, auth.go).
+	APITokens int    `json:"api_tokens"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 type identityInfo struct {
@@ -108,11 +131,15 @@ func badRequest(format string, a ...any) error {
 	return &httpErr{http.StatusBadRequest, fmt.Sprintf(format, a...)}
 }
 
-// newAPI monta las rutas sobre ops.
-func newAPI(ops phoneOps) http.Handler {
+// newAPI monta las rutas sobre ops. Con az, protegidas por sus tokens
+// (auth.go); sin él (pruebas de las rutas), abiertas.
+func newAPI(ops phoneOps, az *authz) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		h := ops.Health(r.Context())
+		if az != nil {
+			h.APITokens = len(az.current())
+		}
 		code := http.StatusOK
 		if !h.OK {
 			code = http.StatusServiceUnavailable
@@ -222,14 +249,31 @@ func newAPI(ops phoneOps) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, id)
 	})
+	mux.HandleFunc("POST /v1/verify-cache", func(w http.ResponseWriter, r *http.Request) {
+		res, err := ops.VerifyCache(r.Context())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		code := http.StatusOK
+		if !res.OK {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, res)
+	})
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"service": "kling-phoned", "version": version,
 			"routes": []string{"GET /v1/health", "GET /v1/screen", "GET /v1/tree", "POST /v1/tap",
-				"POST /v1/swipe", "POST /v1/text", "POST /v1/key", "POST /v1/install", "POST /v1/launch", "GET /v1/logs", "GET /v1/identity"},
+				"POST /v1/swipe", "POST /v1/text", "POST /v1/key", "POST /v1/install", "POST /v1/launch", "GET /v1/logs",
+				"GET /v1/identity", "POST /v1/verify-cache"},
+			"auth": "Authorization: Bearer <token>; all but /v1/health",
 		})
 	})
-	return mux
+	if az == nil {
+		return mux
+	}
+	return az.wrap(mux)
 }
 
 func parseInput(kind string, body io.Reader) (inputReq, error) {
@@ -394,7 +438,7 @@ var errNotRunning = errors.New("android is not running")
 // apiServer es el servidor HTTP de la API, con plazos.
 func apiServer(ops phoneOps) *http.Server {
 	return &http.Server{
-		Handler:           newAPI(ops),
+		Handler:           newAPI(ops, newAuthz(tokensPath)),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Un APK de 100 MiB en base64 por el proxy tarda; nada de ReadTimeout corto.
 		ReadTimeout:  5 * time.Minute,

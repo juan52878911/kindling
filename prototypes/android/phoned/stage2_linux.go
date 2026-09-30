@@ -123,11 +123,13 @@ func stage2(cfg config, netArgs []string) error {
 		if err := copySparse(dataImgPath, ram+"/data.ext4"); err != nil {
 			return fmt.Errorf("data image: %w", err)
 		}
-		dev, err := attachLoop(ram + "/data.ext4")
+		dev, lf, err := attachLoop(ram + "/data.ext4")
 		if err != nil {
 			return err
 		}
-		if err := mount(dev, R+"/data", "ext4", syscall.MS_NOATIME, "discard"); err != nil {
+		err = mount(dev, R+"/data", "ext4", syscall.MS_NOATIME, "discard")
+		lf.Close() // tras montar: el montaje retiene el loop (autoborrado al desmontar)
+		if err != nil {
 			return err
 		}
 		_ = os.Chmod(R+"/data", 0o771)

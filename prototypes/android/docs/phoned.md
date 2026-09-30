@@ -66,7 +66,7 @@ binario limpio); sin él, binario tal cual (una arista de grafo o un reenvío).
 
 | Ruta | Qué | Cómo |
 |---|---|---|
-| `GET /v1/health` | `200`/`503` con `ok`, `state`, `boot_completed`, `system_server`, `android_pid`, `restarts`, `net`, `verity`, `uidump`, `adb_secure` | sin procesos: `/proc` y la memoria de propiedades |
+| `GET /v1/health` | `200`/`503` con `ok`, `state`, `boot_completed`, `system_server`, `android_pid`, `restarts`, `net`, `verity`, `uidump`, `adb_secure`, `kernel`, `api_tokens` (cuántos abren la API; 0 = cerrada) | sin procesos: `/proc` y la memoria de propiedades. **La única ruta sin token** |
 | `GET /v1/screen` | PNG | `screencap -p` |
 | `GET /v1/tree[?compressed=1]` | XML de la jerarquía; `X-Phoned-Source: uidump` o `uiautomator` | el servidor residente `uidump` si la imagen lo trae (lo arranca por init si no contesta), si no `uiautomator dump` |
 | `POST /v1/tap` `{"x","y"}` · `/v1/swipe` `{"x1","y1","x2","y2","ms"}` · `/v1/text` `{"text"}` · `/v1/key` `{"key": "BACK"\|4}` | `{"ok":true,"via":"uidump"\|"input"}` | uidump; si no, `input` |
@@ -74,10 +74,18 @@ binario limpio); sin él, binario tal cual (una arista de grafo o un reenvío).
 | `POST /v1/launch` `{"package"}` | abre la actividad de LAUNCHER | `cmd package resolve-activity` + `am start -W` |
 | `GET /v1/logs?buffer=main\|system\|crash\|events\|all\|phoned&lines=N` | texto | `logcat -d`; `phoned`: los últimos 256 KiB del propio agente |
 | `GET /v1/identity` | `serial`, `android_id`, `device_name`, `adb_secure`, `adb_keys` (cuántas), `ssaid_userkey_sha256` (huella), `ssaid` (paquete → SSAID) | para comprobar clones; la clave de SSAID nunca sale, solo su huella |
+| `POST /v1/verify-cache` | `200`/`409` con `ok`, `files`, `bytes`, `mismatches`, `seconds` | `android-sh --verify-cache` en Go: cada fichero de `system/{lib64,bin,framework,apex}` y `vendor/{lib64,bin}` leído por la caché de páginas y con `O_DIRECT` (del disco) tiene que dar el mismo sha256. `kling phone golden build` lo exige antes de guardar un dorado |
 
-Ejemplo por el daemon (`phone.sh api` lo envuelve):
+Todo salvo `GET /v1/health` (y el índice `GET /`) exige `Authorization: Bearer
+<token>` (abajo, "Autenticación").
+
+Ejemplo por el daemon (`kling phone api` y `phone.sh api` lo envuelven, con el
+token del teléfono):
 
 ```sh
+kling phone api 1 GET /v1/health
+kling phone api 1 GET /v1/screen > pantalla.png          # decodifica el base64 del proxy
+kling phone api 1 POST /v1/install termux.apk            # lo pasa a base64 para el proxy
 phone.sh api 1 GET /v1/health
 phone.sh api 1 GET '/v1/screen?encoding=base64' > pantalla.png
 printf '{"x":360,"y":640}' > tap.json && phone.sh api 1 POST /v1/tap tap.json
@@ -87,28 +95,102 @@ base64 < termux.apk | tr -d '\n' > apk.b64 && phone.sh api 1 POST '/v1/install?e
 **Sin shell.** No hay ruta para ejecutar órdenes: cada operación valida sus
 argumentos (coordenadas, nombres de tecla y de paquete por expresión regular,
 texto de una línea, APK con la firma ZIP) y el guion de cada una es fijo. Una
-shell en la API sería root en Android por un puerto que hoy no autentica, es
-decir, lo mismo que `allow_exec` sin su control en el daemon; quien la necesite
-usa `kling exec` + `android-sh`, que sí lo exige.
+shell en la API sería root en Android con solo un token de portador, es decir,
+lo mismo que `allow_exec` sin su control en el daemon; quien la necesite usa
+`kling exec` + `android-sh`, que sí lo exige.
 
 ## Modelo de amenazas: quién puede hablar con el 8091
 
 La API da el control del teléfono (instalar un APK es ejecutar código en él).
-No autentica, igual que el agente del 8080 (que sirve `exec` como root en la VM):
-la confianza es la de la red de la VM.
+Llegar al puerto no basta: hace falta un token (abajo). Quién llega al puerto:
 
-| Quién | ¿Llega? | Por qué |
+| Quién | ¿Llega al 8091? | ¿Con token? |
 |---|---|---|
-| El daemon (`POST /machines/{ref}/guest`) | sí, si la máquina declara el puerto en `kling.ports` | es el camino previsto; quien llama al daemon ya puede borrar, congelar o clonar la máquina |
-| Un reenvío del Mac (vz) | sí, en `127.0.0.1` del Mac, si está en `kling.ports` | como adb: cualquier proceso local del usuario del Mac. `kling.ports=5555` sin el 8091 lo cierra (el proxy del daemon deja de llegar también) |
-| El anfitrión Linux | cualquier proceso del anfitrión alcanza la IP del tap | lo mismo que para el 8080; el anfitrión es de confianza |
-| Otras microVMs | no | el FORWARD entre máquinas está cerrado; una **arista de grafo** (`link`) al 8091 sí llegaría, y es a propósito: una arista es una autorización (SECURITY.md §15), así que declararla es dar el control del teléfono a ese nodo |
+| El daemon (`POST /machines/{ref}/guest`) | sí, si la máquina declara el puerto en `kling.ports` | lo pone quien llama al daemon: `kling phone` lo lee del store del daemon (ns `phone`), que solo se lee con acceso al socket, la misma confianza que el propio proxy |
+| Un reenvío del Mac (vz) | sí, en `127.0.0.1` del Mac, si está en `kling.ports` | no lo tiene salvo que el usuario se lo dé: cualquier proceso local ve solo `/v1/health` |
+| El anfitrión Linux | cualquier proceso del anfitrión alcanza la IP del tap | igual: solo `/v1/health` |
+| Otras microVMs | no; una **arista de grafo** (`link`) al 8091 sí llega (SECURITY.md §15) | no: una arista sin token recibe `401` en todo salvo `/v1/health`. Dar el control a un nodo es darle el token (`kling phone token <tel>`, o uno de solo lectura con `-read`) |
 | Android (sus apps) | no | con `veth`, `DROP` de todo lo que entra por `kandroid0`; con `isolated`, no hay ruta; el 8091 no se reenvía a Android |
-| El gateway de kindling | no | reenvía MCP al 8080 y corta las rutas de control; no conoce el 8091 |
+| El gateway de kindling | no | reenvía MCP al 8080 y corta las rutas de control; no conoce el 8091. `kling phone mcp` sí: es un servidor MCP en el anfitrión que llama al 8091 por el proxy del daemon con el token de cada clon |
 
-Pendiente para una arista de grafo real: un token por arista (el daemon ya
-entrega credenciales por arista) o un puerto de solo lectura (health, screen,
-tree) separado del de control.
+## Autenticación (#110)
+
+**Por qué un token y no el origen.** El proxy del daemon y el proxy de enlace de
+una arista marcan los dos desde el anfitrión (Linux: la misma dirección del lado
+host del veth; macOS: el mismo reenvío de `kling-vz`), así que el invitado no
+puede distinguir una llamada del daemon de una de un nodo del grafo. Se descartó
+también un puerto de solo lectura aparte: una arista seguiría pudiendo apuntar al
+de control, y un segundo servidor duplica la superficie sin cerrar nada.
+
+**Cómo.** Toda ruta salvo `GET /v1/health` y `GET /` exige
+`Authorization: Bearer <token>`. `kling-phoned` no guarda tokens, solo sus
+sha256 con un ámbito, en la RAM de la VM (`/run/kindling-android/api-tokens.json`,
+0600, releído en cada cambio):
+
+| Ámbito | Rutas |
+|---|---|
+| `read` | `GET /v1/screen`, `GET /v1/tree` |
+| `control` | todas (tocar, escribir, instalar, `launch`, `logs`, `identity`, `verify-cache`) |
+
+Sin token válido, `401` (con `WWW-Authenticate: Bearer`); con uno de lectura en
+una ruta de control, `403`. La comparación recorre todos los hashes en tiempo
+constante. Un fichero ilegible cuenta como vacío: **cerrado, nunca abierto**.
+
+**De dónde salen.** Con la identidad del clon, por MMDS (`api_tokens`, abajo): el
+token no pasa por MMDS, solo su sha256. Un documento con `api_tokens` y sin
+`android_id` solo cambia los tokens (rotar, acuñar uno de lectura o revocar con
+`[]`) sin rehacer la identidad; la huella de "identidad ya aplicada" no los cuenta.
+Viajan con la memoria en `pause` y `freeze`. **Sin tokens la API está cerrada**:
+un dorado no tiene ninguno (`kling phone golden build` usa uno de un solo uso para
+comprobar la caché y lo revoca antes de guardar), y un clon tampoco hasta su
+gancho. Así un nodo de grafo hecho del dorado, sin identidad, no se controla por
+ninguna arista.
+
+**Quién los guarda.** `kling phone` genera el token de control de cada clon
+(`kph_` + 32 bytes al azar) y lo guarda en el store del daemon (`/store/phone/<id
+de la máquina>`), que solo se lee con acceso al socket: `kling phone api/view/mcp`
+lo añaden solos, desde cualquier máquina que hable con el daemon. Con la política
+de autorización del daemon ([`docs/authz.md`](../../../docs/authz.md)) `/store` es de
+admin; un inquilino guarda entonces sus tokens en un fichero 0600 suyo
+(`$XDG_CONFIG_HOME/kling/phone-tokens/<daemon>/<id>.json`). `phone.sh` los guarda
+en `$PHONE_ROOT/tokens/<tel>` (0600).
+
+**El proxy del daemon ya no llega sin token** a las rutas de control: es la
+decisión de #110. Mantenerlo abierto exigiría que el invitado reconociera las
+llamadas del daemon, y no puede (ver arriba). No cambia la confianza: el token
+está en el store del daemon, detrás del mismo socket que el proxy. `curl` directo
+al proxy sin la cabecera solo ve `/v1/health`.
+
+```sh
+kling phone token 1                  # el token de control (para dárselo a quien deba controlar el teléfono)
+kling phone token 1 -read            # acuña uno de solo lectura (screen, tree) y lo imprime
+kling phone token 1 -rotate          # nuevo token de control; los anteriores dejan de valer
+kling phone api 1 -no-token GET /v1/tree    # lo que ve una arista sin token: 401
+```
+
+Una arista `link` hacia el 8091 de un teléfono, probada en Linux (Firecracker, proxy de
+enlace) y en macOS (vz, broker de enlaces). El nodo del dorado nace sin identidad ni
+token; `kling phone adopt` se los da, y el operador le pasa el token a `ctl` (aquí por
+la entrada estándar de `kling exec -i`, nunca en argv):
+
+```yaml
+name: tg
+nodes:
+  ctl: {image: ctl, allow_exec: true}          # Alpine + curl (en el Mac: android13 y bash /dev/tcp)
+  tel: {from: phone-golden, ports: [5555, 8091]}
+edges:
+  - {from: ctl, to: tel, kind: link, port: 8091}
+```
+
+| Desde `ctl` por `tel.graph:8091` | Linux | macOS |
+|---|---|---|
+| `GET /v1/health` sin token | 200 | 200 |
+| `GET /v1/tree`, `POST /v1/tap` sin token, antes de `adopt` (API cerrada) | 401 | 401 |
+| tras `kling phone adopt tg-tel`: `tree` sin token / con uno falso / `install` sin token | 401 / 401 / 401 | 401 / 401 / — |
+| con el token de control: `tree`, `key HOME`, `tap` | 200 | 200 |
+| con uno de lectura (`token -read`): `screen` / `tap` | 200 / 403 | 200 / 403 |
+| tras `token -rotate`: el control viejo / el de lectura viejo / el nuevo | 401 / 401 / 200 | — |
+| el proxy del daemon sin la cabecera (`curl --unix-socket`): `tree` / `health` | 401 / 200 | 401 / 200 |
 
 ## Identidad por clon (#92)
 
@@ -118,11 +200,16 @@ lo vacía después y, como el gancho salió con 0, el daemon levanta `has_secret
 
 ```json
 {"phone": {"android_id": "<16 hex>", "name": "phone-3", "serial": "<6-20 alfanuméricos>",
-           "adb_keys": ["<línea de adbkey.pub>"], "ssaid": "regen", "ssaid_key": "<64 hex>"}}
+           "adb_keys": ["<línea de adbkey.pub>"], "ssaid": "regen", "ssaid_key": "<64 hex>",
+           "api_tokens": [{"sha256": "<64 hex>", "scope": "control"}]}}
 ```
 
 Solo `android_id` es obligatorio; sin `serial` ni `ssaid_key` se sacan del CRNG
-del kernel ya resembrado. Qué hace `kling-phoned identity`, en orden:
+del kernel ya resembrado; sin `api_tokens`, los tokens que hubiera no se tocan (y
+sin ninguno la API sigue cerrada). Qué hace `kling-phoned identity`, en orden:
+
+0. **Tokens de la API** (auth.go): los escribe primero, aparte. Un documento
+   solo con `api_tokens` termina aquí.
 
 1. **Serie.** `ro.serialno` es de solo lectura para `setprop`: init la fija al
    arrancar desde `androidboot.serialno` (kling-phoned arranca el dorado con
@@ -208,6 +295,18 @@ depuración): Android sale (`HTTP/1.1 301` de 1.1.1.1, ping a 8.8.8.8, la red de
 Android `IS_VALIDATED`) y no llega a `10.88.0.1:8080/8091`, `172.16.0.2:8080/8091`
 ni `169.254.169.254:80` (timeout: `DROP`).
 
+**#110 y ext/phone** (2026-09-29, `kling phone`, [`ext/phone/README.md`](../../../ext/phone/README.md)):
+`/data` en RAM (`ANDROID_DATA_MODE=tmpfs`) no arrancaba con `kling-phoned`: el loop con
+autoborrado se soltaba al cerrar su descriptor antes del `mount` (`input/output error`
+leyendo el superbloque en cada relanzamiento); ahora se cierra después de montar.
+`verify-cache` en Go recorre 1623 (arm64) y 1711 (amd64) ficheros en 3–10 s; comparaba
+el `st_dev` de cada fichero con el de su directorio y en overlayfs no casa nunca (los
+ficheros de la capa de abajo dan el de esa capa): 0 ficheros. En el Mac cargado,
+`verify-cache` encontró páginas de la caché a ceros en dos arranques en frío seguidos y
+en todos los clones de un dorado que había pasado la comprobación en frío (una página
+de `libart.so`): `kling phone golden build` comprueba también un clon del dorado
+guardado.
+
 Sin romper lo de antes: `test-phone.sh` PASS y `fase0.sh -clones 2` 6/6 en el Mac con
 la imagen nueva (frío 6,2 s, restaurar → dump p50 1,06 s, dump 0,024 s, screencap
 0,31 s, fork 3,9 s); `PHONED=0` sigue construyendo y arrancando (listo en 10,2 s en
@@ -218,8 +317,9 @@ Pendiente:
   SettingsProvider) y que cada clon tiene la suya; no se ha visto a una app pedir su
   `ANDROID_ID` (ninguna de la imagen lo hace y `run-as`/`su <uid> content` no sirven
   en Redroid). Hace falta un APK de prueba mínimo.
-- Una arista de grafo al 8091 funcionaría hoy, sin autenticación (ver el modelo de
-  amenazas): token por arista o puerto de solo lectura antes de usarla.
+- ~~Una arista de grafo al 8091 funcionaría hoy, sin autenticación~~: hecho en #110
+  (token de portador, arriba). Queda que el núcleo reparta el token a los dos extremos de
+  la arista (hoy lo hace el operador con `kling phone token`).
 - La base arm64 construida antes del 28-09 no trae iptables: kling-phoned cae a
   `isolated` (Android sin salida, adb sigue); una base nueva de `build-image.sh` sí.
 

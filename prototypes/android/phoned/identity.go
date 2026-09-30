@@ -13,7 +13,15 @@ package main
 //	                                       teléfono (para conservar los ANDROID_ID
 //	                                       por app de uno que se rehace); si
 //	                                       falta, una al azar
+//	   "api_tokens": [{"sha256": "<64 hex>", "scope": "read"|"control"}]
+//	                                       opcional; los tokens que abre la API
+//	                                       del 8091 (auth.go). Solo sus sha256:
+//	                                       el token no pasa por MMDS
 //	}}
+//
+// Un documento con api_tokens y SIN android_id solo cambia los tokens (rotar
+// o revocar sin rehacer la identidad): {"phone": {"api_tokens": []}} cierra la
+// API.
 //
 // y el gancho (`kling-phoned identity`) la aplica dentro de Android. Nada de
 // esto se escribe en un log ni en la línea de órdenes de un proceso: los
@@ -44,6 +52,8 @@ type phoneIdentity struct {
 	AdbKeys   []string `json:"adb_keys,omitempty"`
 	SSAID     string   `json:"ssaid,omitempty"`
 	SSAIDKey  string   `json:"ssaid_key,omitempty"`
+	// APITokens: nil = no se tocan; vacío = ninguno (API cerrada).
+	APITokens *[]apiToken `json:"api_tokens,omitempty"`
 
 	sum string // huella del documento recibido (digest)
 }
@@ -70,6 +80,14 @@ const maxAdbKeys = 8
 // validate comprueba el documento y rellena lo que falta (serie al azar,
 // ssaid=regen). Los mensajes de error nunca incluyen el valor.
 func (p *phoneIdentity) validate() error {
+	if p.APITokens != nil {
+		if err := validateTokens(*p.APITokens); err != nil {
+			return err
+		}
+	}
+	if p.authOnly() {
+		return nil
+	}
 	if !reAndroidID.MatchString(p.AndroidID) {
 		return fmt.Errorf("phone.android_id must be 16 lowercase hex digits")
 	}
@@ -114,6 +132,12 @@ func (p *phoneIdentity) validate() error {
 	// Como la escribe SettingsProvider (generateUserKeyLocked): mayúsculas.
 	p.SSAIDKey = strings.ToUpper(p.SSAIDKey)
 	return nil
+}
+
+// authOnly: el documento solo trae tokens (ni android_id ni nada más).
+func (p *phoneIdentity) authOnly() bool {
+	return p.APITokens != nil && p.AndroidID == "" && p.Name == "" && p.Serial == "" &&
+		len(p.AdbKeys) == 0 && p.SSAID == "" && p.SSAIDKey == ""
 }
 
 // ssaidXML es settings_ssaid.xml con solo la clave de usuario, en el formato
@@ -257,12 +281,15 @@ func parseSSAID(b []byte) (string, map[string]string) {
 }
 
 // digest identifica un documento de identidad sin guardarlo (marca de
-// "ya aplicada"). Tras parseMMDS es la del documento recibido.
+// "ya aplicada"). Tras parseMMDS es la del documento recibido. Los tokens no
+// cuentan: cambiarlos no rehace la identidad.
 func (p *phoneIdentity) digest() string {
 	if p.sum != "" {
 		return p.sum
 	}
-	b, _ := json.Marshal(p)
+	c := *p
+	c.APITokens = nil
+	b, _ := json.Marshal(&c)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }

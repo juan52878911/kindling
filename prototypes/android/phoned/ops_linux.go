@@ -61,7 +61,7 @@ func (o *androidOps) run(ctx context.Context, timeout time.Duration, stdin *byte
 func (o *androidOps) Health(ctx context.Context) healthInfo {
 	s := o.s
 	s.mu.Lock()
-	h := healthInfo{State: s.state, Restarts: s.restarts, Net: s.netMode, Version: version}
+	h := healthInfo{State: s.state, Restarts: s.restarts, Net: s.netMode, Version: version, Kernel: kernelRelease()}
 	pid, started := s.pid, s.started
 	s.mu.Unlock()
 	h.Verity = verityStatus()

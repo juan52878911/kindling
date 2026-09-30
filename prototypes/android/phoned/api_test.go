@@ -50,6 +50,9 @@ func (f *fakeOps) Logs(_ context.Context, b string, n int) ([]byte, error) {
 func (f *fakeOps) Identity(context.Context) (identityInfo, error) {
 	return identityInfo{Serial: "S1"}, errors.New("x")
 }
+func (f *fakeOps) VerifyCache(context.Context) (verifyResult, error) {
+	return verifyResult{OK: true, Files: 3}, nil
+}
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -61,7 +64,7 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 
 func TestAPIScreenAndEncoding(t *testing.T) {
 	f := &fakeOps{running: true}
-	h := newAPI(f)
+	h := newAPI(f, nil)
 	w := do(t, h, "GET", "/v1/screen", "")
 	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), fakePNG) || w.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("raw screen: %d %q", w.Code, w.Body.Bytes())
@@ -86,7 +89,7 @@ func TestAPIScreenAndEncoding(t *testing.T) {
 
 func TestAPIInputValidation(t *testing.T) {
 	f := &fakeOps{running: true}
-	h := newAPI(f)
+	h := newAPI(f, nil)
 	ok := []struct{ path, body string }{
 		{"/v1/tap", `{"x":10,"y":20}`},
 		{"/v1/swipe", `{"x1":1,"y1":2,"x2":3,"y2":4}`},
@@ -125,7 +128,7 @@ func TestAPIInputValidation(t *testing.T) {
 
 func TestAPIInstall(t *testing.T) {
 	f := &fakeOps{running: true}
-	h := newAPI(f)
+	h := newAPI(f, nil)
 	apk := append([]byte("PK\x03\x04"), bytes.Repeat([]byte{0, 0xff, 7}, 5000)...)
 	b64 := base64.StdEncoding.EncodeToString(apk)
 	// Con saltos de línea, como `base64` de coreutils.
@@ -155,7 +158,7 @@ func TestAPIInstall(t *testing.T) {
 }
 
 func TestAPILogsAndIndex(t *testing.T) {
-	h := newAPI(&fakeOps{running: true})
+	h := newAPI(&fakeOps{running: true}, nil)
 	if w := do(t, h, "GET", "/v1/logs?buffer=crash&lines=5", ""); w.Code != 200 || w.Body.String() != "crash\n" {
 		t.Fatalf("logs: %d %q", w.Code, w.Body)
 	}

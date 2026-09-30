@@ -68,8 +68,8 @@ jobs:
           echo "version=${VERSION}"  >> "$GITHUB_OUTPUT"
           echo "ldver=${VERSION#v}"  >> "$GITHUB_OUTPUT"
 
-      # Un solo paso con una función: los nueve binarios se compilan igual y así
-      # no hay nueve bloques que se desincronicen. `go -C` entra en el módulo de
+      # Un solo paso con una función: los binarios se compilan igual y así
+      # no hay un bloque por binario que se desincronice. `go -C` entra en el módulo de
       # cada extensión; por eso la salida va con ruta absoluta.
       - name: build
         shell: bash
@@ -92,6 +92,8 @@ jobs:
           # `kling mcp link` (también darwin).
           b ext/mcp     ./cmd/kling-bridge                       kling-bridge
           b ext/sandbox ./cmd/kling-sandbox                      kling-sandbox
+          b ext/db      ./cmd/kling-db                           kling-db
+          b ext/phone   ./cmd/kling-phone                        kling-phone
           if [ "$GOOS" = linux ]; then
             # Invitados de las microVMs y el operador, que solo corre en un clúster.
             b .           ./cmd/kling-guest                      kling-guest
@@ -183,7 +185,7 @@ jobs:
           want=()
           for os in linux darwin; do
             for arch in amd64 arm64; do
-              for n in kling kling-mcp kling-bridge kling-sandbox; do
+              for n in kling kling-mcp kling-bridge kling-sandbox kling-db kling-phone; do
                 want+=("$n-$os-$arch")
               done
             done

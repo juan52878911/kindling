@@ -215,7 +215,7 @@ vz:
 ## y el planificador reparte instancias entre peticiones concurrentes. Sin él, un build
 ## limpio no dice nada sobre lo que de verdad rompe este proyecto.
 test:
-	gofmt -l . | tee /dev/stderr | (! read)
+	gofmt -l . | tee /dev/stderr | (! read -r _)
 	go vet ./...
 	go test -race ./...
 
