@@ -28,7 +28,7 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   comprueban el sha256 fijado (el que publica cada proyecto) y paran si no coincide.
   Otra versión se pide con su hash (`FC_VERSION`/`FC_SHA256`, `ALPINE_VERSION`/
   `ALPINE_SHA256`, `NODE_VERSION`/`NODE_SHA256`). Chrome for Testing no publica hashes:
-  la base `chrome` exige `CHROME_SHA256` del zip de `CHROME_VERSION` (154.0.8037.92).
+  la base `chrome` lleva fijado el sha256 del zip de 154.0.8037.92 (tamaño y MD5 comprobados contra los de Google Cloud Storage); otra versión pide `CHROME_SHA256`.
 - **Núcleo: el socket del daemon se prepara sin seguir enlaces.** Nace `0660` y cedido
   a `-socket-user` en un directorio privado y se renombra a su sitio; antes el `chmod`
   y el `chown` iban por el nombre y seguían un enlace puesto entre medias.
