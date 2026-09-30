@@ -19,9 +19,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // Tipos de manifiesto que se aceptan.
@@ -32,7 +33,7 @@ const (
 	MediaDockerList     = "application/vnd.docker.distribution.manifest.list.v2+json"
 )
 
-var reDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var reDigest = lazyre.New(`^sha256:[0-9a-f]{64}$`)
 
 // Descriptor es una pieza referida por digest.
 type Descriptor struct {

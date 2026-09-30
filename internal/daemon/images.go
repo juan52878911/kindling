@@ -21,11 +21,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"syscall"
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // buildTimeout: instalar node y un paquete npm en un chroot va lento, y en un
@@ -34,24 +34,24 @@ const buildTimeout = 15 * time.Minute
 
 var (
 	// Nombre de imagen: es un componente de ruta y un nombre de servicio.
-	reName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	reName = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	// Paquete de apk.
-	reAPK = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
+	reAPK = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
 	// Paquete de npm, con ámbito y versión opcionales.
 	// Los nombres de PyPI admiten punto, guion y guion bajo, y el
 	// especificador de versión va con ==, >= o ~=. Nada de eso puede empezar
 	// por guion: acabaría en `pip install $PIP` sin comillas, donde un valor
 	// que empieza por guion es un flag.
-	rePIP = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*((==|>=|<=|~=|!=)[a-zA-Z0-9._*+-]+)?$`)
+	rePIP = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._-]*((==|>=|<=|~=|!=)[a-zA-Z0-9._*+-]+)?$`)
 
-	reNPM = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[a-zA-Z0-9._~+-]+)?$`)
+	reNPM = lazyre.New(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(@[a-zA-Z0-9._~+-]+)?$`)
 	// Variable de entorno horneada: KEY=value. La clave con la forma estricta
 	// de un identificador de shell; el valor, cualquier cosa MENOS saltos de
 	// línea y NUL — el script la escribe en el entrypoint con `printf %q`, así
 	// que el resto de caracteres viaja inerte, pero un salto de línea antes de
 	// llegar ahí partiría otras cosas y no hay ningún valor legítimo que lo
 	// necesite.
-	reEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
+	reEnv = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
 )
 
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {

@@ -6,11 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/juan52878911/kindling/internal/android"
 	"github.com/juan52878911/kindling/pkg/api"
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // CONSTRUCTORES DEL NÚCLEO.
@@ -38,11 +38,11 @@ type BaseSpec struct {
 }
 
 var (
-	reBuildName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	reBuildPkg  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
+	reBuildName = lazyre.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	reBuildPkg  = lazyre.New(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
 	// El valor no puede llevar saltos de línea ni NUL: se escribe una línea por
 	// variable y el script la entrecomilla para sh.
-	reBuildEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
+	reBuildEnv = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
 )
 
 func cmdBuilder(args []string) error {

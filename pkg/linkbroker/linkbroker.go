@@ -44,9 +44,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 const (
@@ -98,9 +99,9 @@ type Response struct {
 }
 
 var (
-	reNodo    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
-	reMaquina = regexp.MustCompile(`^[0-9a-f]{16,64}$`)
-	reDueño   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	reNodo    = lazyre.New(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
+	reMaquina = lazyre.New(`^[0-9a-f]{16,64}$`)
+	reDueño   = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
 // Validate comprueba la forma de la petición (no si está permitida: eso es

@@ -14,12 +14,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/juan52878911/kindling/pkg/lazyre"
 	"github.com/juan52878911/kindling/pkg/share"
 )
 
@@ -116,15 +116,15 @@ const GraphPGPort = 5432
 var (
 	// reGraphName: cabe con el nodo y la generación en un nombre de
 	// plantilla (<grafo>-<nodo>-<gen>, 64 como mucho).
-	reGraphName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,23}$`)
+	reGraphName = lazyre.New(`^[a-z0-9][a-z0-9-]{0,23}$`)
 	// reGraphNode es una etiqueta DNS: el nodo se alcanza por <nodo>.graph.
-	reGraphNode = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,22}[a-z0-9])?$`)
+	reGraphNode = lazyre.New(`^[a-z0-9]([a-z0-9-]{0,22}[a-z0-9])?$`)
 	// reGraphEnv es el nombre de la variable de una arista credential (el
 	// mismo patrón que las credenciales de máquina).
-	reGraphEnv = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+	reGraphEnv = lazyre.New(`^[A-Z_][A-Z0-9_]{0,63}$`)
 	// reGraphPGName: rol y base de una arista credential. Sin comillas ni
 	// espacios: van tal cual al arranque del protocolo.
-	reGraphPGName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,62}$`)
+	reGraphPGName = lazyre.New(`^[A-Za-z_][A-Za-z0-9_.-]{0,62}$`)
 )
 
 // Graph es un grafo: sus nodos por nombre, sus aristas y su estado.

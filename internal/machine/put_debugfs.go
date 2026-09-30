@@ -35,9 +35,10 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/juan52878911/kindling/pkg/lazyre"
 )
 
 // maxEnlacesRuta es cuántos enlaces simbólicos se siguen al resolver una ruta
@@ -86,11 +87,11 @@ func (im imagenDebugfs) leer(ctx context.Context, orden string) ([]byte, error) 
 }
 
 var (
-	reTipo   = regexp.MustCompile(`Type:\s+(\S+)`)
-	reFast   = regexp.MustCompile(`Fast link dest:\s+"(.*)"`)
-	reBloque = regexp.MustCompile(`(?m)^Block size:\s+(\d+)`)
-	reLibres = regexp.MustCompile(`(?m)^Free blocks:\s+(\d+)`)
-	reReserv = regexp.MustCompile(`(?m)^Reserved block count:\s+(\d+)`)
+	reTipo   = lazyre.New(`Type:\s+(\S+)`)
+	reFast   = lazyre.New(`Fast link dest:\s+"(.*)"`)
+	reBloque = lazyre.New(`(?m)^Block size:\s+(\d+)`)
+	reLibres = lazyre.New(`(?m)^Free blocks:\s+(\d+)`)
+	reReserv = lazyre.New(`(?m)^Reserved block count:\s+(\d+)`)
 )
 
 func (im imagenDebugfs) stat(ctx context.Context, p string) (entrada, error) {
@@ -177,8 +178,8 @@ func (im imagenDebugfs) libre(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	num := func(re *regexp.Regexp) int64 {
-		if m := re.FindSubmatch(out); m != nil {
+	num := func(re *lazyre.Regexp) int64 {
+		if m := re.Regexp().FindSubmatch(out); m != nil {
 			n, _ := strconv.ParseInt(string(m[1]), 10, 64)
 			return n
 		}
