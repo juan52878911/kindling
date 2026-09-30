@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // consolaMaxBytes es el tamaño de firecracker.log a partir del cual el
@@ -47,12 +48,47 @@ const consolaKeepBytes = 1 << 20
 // del fichero, invisible para quien lo lee después—. Con O_APPEND cada
 // escritura va siempre al final real, que tras truncar es la posición 0.
 //
-// O_TRUNC reinicia el fichero en cada arranque (Run, runFrom, Thaw todos
-// llaman a spawn/spawnJailed con un firecracker.log nuevo): mismo
-// comportamiento que el os.Create() que sustituye.
+// Cada arranque (Run, runFrom, Thaw) empieza con un firecracker.log NUEVO: se
+// borra el nombre que hubiera y se crea con O_EXCL|O_NOFOLLOW. Antes era
+// O_TRUNC sobre lo que hubiera, y el directorio de la máquina es del VMM: con
+// KLING_JAILER=0 el VMM ve el disco del host y puede dejar ahí un enlace a
+// cualquier fichero, que el daemon, como root, truncaba. unlink borra el
+// enlace, no su destino, y O_EXCL no abre nada que ya exista.
 func abrirConsola(dir string) (*os.File, error) {
-	return os.OpenFile(filepath.Join(dir, "firecracker.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0o644)
+	ruta := filepath.Join(dir, "firecracker.log")
+	for i := 0; ; i++ {
+		if err := os.Remove(ruta); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		f, err := os.OpenFile(ruta, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o644)
+		if errors.Is(err, os.ErrExist) && i < 3 {
+			continue // alguien lo volvió a poner entre medias
+		}
+		return f, err
+	}
+}
+
+// abrirConsolaExistente abre la consola de dir sin seguir un enlace (ni
+// bloquearse en un FIFO) y exige que sea la que creó abrirConsola: un fichero
+// regular del daemon con un solo enlace. Lo que el VMM haya puesto en su
+// lugar —un enlace o un hardlink a un fichero del host— no se lee, ni se
+// trunca, ni se copia.
+func abrirConsolaExistente(ruta string, flag int) (*os.File, error) {
+	f, err := os.OpenFile(ruta, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || !ok || uint64(st.Nlink) != 1 || int(st.Uid) != os.Geteuid() {
+		f.Close()
+		return nil, fmt.Errorf("%s is not the console the daemon created (a planted link?): not touching it", ruta)
+	}
+	return f, nil
 }
 
 // rotarConsolas rota, si hace falta, la consola de cada máquina conocida. La
@@ -85,7 +121,7 @@ func (m *Manager) rotarConsolas() {
 // error: simplemente no hay nada que rotar.
 func rotarConsola(dir string) error {
 	path := filepath.Join(dir, "firecracker.log")
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := abrirConsolaExistente(path, os.O_RDWR)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -113,7 +149,7 @@ func rotarConsola(dir string) error {
 	if err != nil {
 		return fmt.Errorf("reading the tail before rotating %s: %w", path, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "firecracker.log.1"), buf, 0o644); err != nil {
+	if err := escribirRotado(dir, buf); err != nil {
 		return fmt.Errorf("writing firecracker.log.1: %w", err)
 	}
 	// Truncar EN SITIO, no borrar+recrear: el mismo descriptor que tiene abierto
@@ -126,11 +162,38 @@ func rotarConsola(dir string) error {
 	return nil
 }
 
+// escribirRotado deja buf en dir/firecracker.log.1 sin escribir a través de
+// lo que haya con ese nombre: un temporal nuevo (O_EXCL) y un rename, que
+// reemplaza el nombre aunque sea un enlace plantado por el VMM, en vez de
+// seguirlo y escribir la consola del invitado en un fichero del host.
+func escribirRotado(dir string, buf []byte) error {
+	tmp, err := os.CreateTemp(dir, ".firecracker.log.1-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(buf)
+	if err == nil {
+		err = tmp.Chmod(0o644)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), filepath.Join(dir, "firecracker.log.1"))
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
+}
+
 // leerCola lee como mucho max bytes del final de path. Se usa desde Logs()
 // para no cargar en memoria del daemon más que un tail acotado, sin importar
-// cuánto haya crecido la consola entre una rotación y la siguiente.
+// cuánto haya crecido la consola entre una rotación y la siguiente. Solo si
+// es la consola que creó el daemon (abrirConsolaExistente): si no, Logs
+// devolvería a quien lo pide un fichero del host.
 func leerCola(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := abrirConsolaExistente(path, os.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}

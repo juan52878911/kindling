@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -527,21 +528,72 @@ func createVolumeImage(ctx context.Context, path string, sizeMiB int) error {
 // tan dañado que no se puede arreglar solo, seguir adelante y dejar que falle el
 // montaje dentro del invitado da un mensaje más útil que negarse a arrancar.
 func repairVolume(ctx context.Context, path string) {
-	// -p arregla solo lo que no admite ambigüedad. Sin -p, e2fsck haría
-	// preguntas a un stdin que no existe y se quedaría colgado.
-	cmd := e2fsCmd(ctx, "e2fsck", "-p", "-f", path)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	// e2fsck sale con 1 cuando ARREGLÓ algo: es un éxito, no un fallo.
-	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+	reparado, out, err := revisarExt4(ctx, path)
+	switch {
+	case err != nil:
+		log.Printf("volume %s: e2fsck could not check it (%v); mounting anyway",
+			filepath.Base(path), err)
+	case reparado:
 		log.Printf("volume %s: repaired before mounting: %s",
 			filepath.Base(path), strings.TrimSpace(string(out)))
-		return
 	}
-	log.Printf("volume %s: e2fsck could not check it (%v); mounting anyway",
-		filepath.Base(path), err)
+}
+
+// plazoE2fsck es cuánto se deja a e2fsck. Corre como root sobre imágenes y
+// volúmenes que escribe un invitado, y sin plazo un ext4 hecho a propósito
+// para que tarde (o un e2fsck que se cuelga) dejaba colgado para siempre
+// quien lo llamó: un arranque, un put, el desmontaje tras un put. -f sobre un
+// volumen sano de varios GiB son segundos; esto es para lo que no lo es.
+// Variable para los tests.
+var plazoE2fsck = 5 * time.Minute
+
+// ordenE2fsck prepara la orden; variable para que los tests pongan otra.
+// -p arregla solo lo que no admite ambigüedad. Sin -p, e2fsck haría preguntas
+// a un stdin que no existe y se quedaría colgado.
+var ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
+	return e2fsCmd(ctx, "e2fsck", "-p", "-f", path)
+}
+
+// revisarExt4 pasa e2fsck por path con plazo (plazoE2fsck) y traduce su
+// código de salida, que es una máscara de bits (e2fsck(8)): 0 sin errores, 1
+// errores corregidos, 2 corregidos y hace falta reiniciar (para un disco que
+// no es la raíz del host, lo mismo que 1). Cualquier otro bit —4 errores SIN
+// corregir, 8 error de funcionamiento, 16 uso, 32 cancelado, 128 librería— es
+// un error: el sistema de ficheros no quedó revisado. reparado dice si
+// corrigió algo; out es lo que dijo.
+func revisarExt4(ctx context.Context, path string) (reparado bool, out []byte, err error) {
+	ctx, cancel := context.WithTimeout(ctx, plazoE2fsck)
+	defer cancel()
+	cmd := ordenE2fsck(ctx, path)
+	// Si un hijo heredara la salida, CombinedOutput esperaría a que cerrase
+	// aunque e2fsck ya estuviera muerto.
+	cmd.WaitDelay = 5 * time.Second
+	out, err = cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return false, out, fmt.Errorf("e2fsck %s did not finish in %s", filepath.Base(path), plazoE2fsck)
+	}
+	if err == nil {
+		return false, out, nil
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() < 0 {
+		return false, out, err
+	}
+	codigo := ee.ExitCode()
+	if codigo&^3 == 0 {
+		return true, out, nil
+	}
+	var que []string
+	for _, b := range []struct {
+		bit int
+		que string
+	}{{4, "errors left uncorrected"}, {8, "operational error"}, {16, "usage error"}, {32, "cancelled"}, {128, "shared library error"}} {
+		if codigo&b.bit != 0 {
+			que = append(que, b.que)
+		}
+	}
+	return false, out, fmt.Errorf("e2fsck %s exited with %d (%s): %s", filepath.Base(path), codigo,
+		strings.Join(que, ", "), strings.TrimSpace(string(out)))
 }
 
 // flushVolume le pide al invitado que vacíe su caché al disco.

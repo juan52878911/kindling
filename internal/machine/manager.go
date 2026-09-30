@@ -283,6 +283,10 @@ type Manager struct {
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
 	secretos map[string]*estadoSecreto
 
+	// credPlantillaMu serializa la lectura-fusión-escritura del almacén de
+	// credenciales de las plantillas (SetSnapshotCredentials).
+	credPlantillaMu sync.Mutex
+
 	// Escritura del estado, fuera del lock. Ver persist().
 	stateMu sync.Mutex
 	pending []api.Machine // último snapshot sin escribir; el nuevo pisa al viejo
@@ -292,6 +296,12 @@ type Manager struct {
 	// sin ellos, una foto vieja escrita tarde pisaría a una nueva.
 	pendGen    uint64
 	escritoGen uint64
+	// estadoIlegible no está vacío si state.json no se pudo leer (ver load):
+	// el daemon no borra ni mata nada por no conocerlo. estadoIntocable, si
+	// además no se pudo apartar: tampoco se escribe encima. Se fijan en load,
+	// antes de que arranque nada concurrente, y después solo se leen.
+	estadoIlegible  string
+	estadoIntocable bool
 	// escrituraMu serializa las escrituras de state.json: durable.Escribir usa
 	// un temporal de nombre fijo y dos a la vez se lo pisarían.
 	escrituraMu sync.Mutex
@@ -407,6 +417,9 @@ func NewManager(root, fcBin, runAs string, bus *events.Bus) (*Manager, error) {
 	// volume_snapshot.go). Aquí y no en el vigilante: en marcha, un .tmp puede
 	// ser una copia en curso.
 	m.barrerTmpVolumenes()
+	// Un commit -replace que un daemon anterior dejó a medias: el dorado
+	// viejo sigue apartado al lado del nuevo (ver apartarAnterior).
+	m.recuperarReemplazos()
 	cerrarVolcadosExistentes(root)
 	m.load()
 	for _, mc := range m.byID {
@@ -449,21 +462,85 @@ func (m *Manager) imagePath(image string) string {
 // Los snapshots viven en disco, así que las máquinas warm deben sobrevivir a un
 // reinicio del daemon: si no, perderíamos la vista de lo que sigue congelado.
 
+// load carga state.json.
+//
+// UN ESTADO ILEGIBLE NO ES UN ESTADO VACÍO. Antes, si state.json no se podía
+// leer o no era JSON válido, load volvía sin decir nada con byID vacío, y lo
+// que venía después lo tomaba al pie de la letra: reconcile mataba todos los
+// VMM "huérfanos", el barrido mandaba a la papelera el directorio de cada
+// máquina (overlays, mem.file de las warm) y persist escribía un state.json
+// vacío encima del roto. Un fichero truncado por un disco lleno se llevaba por
+// delante todas las máquinas del host.
+//
+// Ahora el fichero ilegible se aparta a state.json.corrupt-<ns> (nunca se
+// borra ni se pisa) y el daemon arranca en modo protegido: no borra ni mata
+// nada que no conozca (ver barridoBloqueado). El modo dura mientras quede un
+// state.json.corrupt-* en la raíz: es el operador quien decide qué recuperar
+// y, al retirarlo, vuelve la recogida de basura.
 func (m *Manager) load() {
+	defer m.detectarCuarentena()
 	b, err := os.ReadFile(m.statePath())
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	var list []*api.Machine
-	if json.Unmarshal(b, &list) != nil {
+	if err == nil {
+		err = json.Unmarshal(b, &list)
+	}
+	if err != nil {
+		m.ponerEnCuarentena(err)
 		return
 	}
 	// No se toca el estado aquí: reconcile() decide comparando con la realidad
 	// del host, porque una microVM SÍ puede sobrevivir al daemon.
 	for _, mc := range list {
+		if mc == nil || mc.ID == "" {
+			continue
+		}
 		m.byID[mc.ID] = mc
 	}
 }
+
+// sufijoCuarentena es lo que lleva el nombre de un state.json apartado.
+const sufijoCuarentena = ".corrupt-"
+
+// ponerEnCuarentena aparta el state.json que no se pudo leer. Si ni siquiera
+// se puede renombrar, se bloquea además su escritura: persist lo pisaría con
+// un estado vacío, y ese fichero es lo único que queda de las máquinas.
+func (m *Manager) ponerEnCuarentena(causa error) {
+	destino := m.statePath() + sufijoCuarentena + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := os.Rename(m.statePath(), destino); err != nil {
+		m.estadoIntocable = true
+		m.estadoIlegible = fmt.Sprintf("%s is unreadable (%v) and could not be set aside (%v)",
+			m.statePath(), causa, err)
+		log.Printf("state: %s. Protected mode: nothing will be deleted or killed, and the state "+
+			"will NOT be written until the file is fixed or moved away by hand", m.estadoIlegible)
+		return
+	}
+	log.Printf("state: %s is unreadable (%v); moved to %s. Protected mode: machine directories, "+
+		"VMMs and snapshots the daemon doesn't know about will NOT be deleted or killed until "+
+		"that file is recovered or removed", m.statePath(), causa, destino)
+}
+
+// detectarCuarentena activa el modo protegido si queda algún state.json
+// apartado: en esta arrancada o en una anterior (tras apartarlo, el daemon
+// escribe un state.json nuevo con lo que cree, que es menos que la verdad).
+func (m *Manager) detectarCuarentena() {
+	if m.estadoIlegible != "" {
+		return
+	}
+	apartados, _ := filepath.Glob(m.statePath() + sufijoCuarentena + "*")
+	if len(apartados) > 0 {
+		m.estadoIlegible = fmt.Sprintf("an unreadable state was set aside at %s", apartados[0])
+		log.Printf("state: %s. Protected mode: nothing unknown to the daemon will be deleted or "+
+			"killed until it is recovered or removed", m.estadoIlegible)
+	}
+}
+
+// barridoBloqueado dice si el daemon está en modo protegido (ver load): con un
+// estado que no se pudo leer, "no lo conozco" no significa "es basura", y
+// nada que decida por ausencia en byID puede borrar ni matar.
+func (m *Manager) barridoBloqueado() bool { return m.estadoIlegible != "" }
 
 // persist encola una escritura del estado. Se llama SIEMPRE con m.mu tomado por
 // quien la invoca — los doce sitios que la usan están dentro de una operación de
@@ -572,6 +649,9 @@ func (m *Manager) writePending() {
 
 	m.escrituraMu.Lock()
 	defer m.escrituraMu.Unlock()
+	if m.estadoIntocable {
+		return // ver ponerEnCuarentena
+	}
 	if gen <= m.escritoGen {
 		return // ya se escribió una foto más nueva
 	}
@@ -1629,21 +1709,21 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if jailed {
 		// Recuperar el volcado del chroot al dir del host: es donde Thaw y
 		// reconcile lo buscan. Rename dentro del mismo filesystem.
-		root := m.jailRoot(mc.ID)
-		for _, f := range []string{"snap.file", "mem.file"} {
-			if err := os.Rename(filepath.Join(root, f), filepath.Join(dir, f)); err != nil {
-				// La máquina sigue PAUSADA: devolver el error sin más la dejaba
-				// figurando como running, sin contestar a nada, y sin que el
-				// vigilante la viera, porque el proceso existe. Mismo trato que
-				// un fallo del propio snapshot, más arriba.
-				err = fmt.Errorf("recovering %s from jail: %w", f, err)
-				if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
-					m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
-					return nil, err
-				}
-				_ = m.acquireVolumes(mc)
+		// Sin seguir enlaces, y solo si lo que hay es el fichero que escribió
+		// el VMM: un enlace o un hardlink plantado en su chroot llevaría al
+		// daemon a perforar, precargar y ceder un fichero del host (ver
+		// recuperarDelJail).
+		if err := recuperarDelJail(m.jailRoot(mc.ID), "/", dir, m.uidJail(), "snap.file", "mem.file"); err != nil {
+			// La máquina sigue PAUSADA: devolver el error sin más la dejaba
+			// figurando como running, sin contestar a nada, y sin que el
+			// vigilante la viera, porque el proceso existe. Mismo trato que
+			// un fallo del propio snapshot, más arriba.
+			if rerr := c.Resume(context.WithoutCancel(ctx)); rerr != nil {
+				m.fail(mc, fmt.Errorf("freeze failed (%v) and could not resume it either: %w", err, rerr))
 				return nil, err
 			}
+			_ = m.acquireVolumes(mc)
+			return nil, err
 		}
 		snapPath, memPath = filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
 	}
@@ -1985,11 +2065,20 @@ func (m *Manager) PutMMDS(ctx context.Context, ref string, data any) (*api.Machi
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
 
+	// El PUT sustituye el almacén ENTERO, y en él están los marcadores de sus
+	// credenciales (ponerMarcadoresMMDS): sin volver a ponerlos, el invitado
+	// se quedaba sin la variable que el proxy sabe cambiar por la clave. Van
+	// en el mismo documento, no en un PATCH después: así no hay un instante
+	// en que una sesión nueva lea el almacén sin ellos.
+	vacio := almacenVacio(data)
+	doc, err := m.conMarcadores(mc.ID, data)
+	if err != nil {
+		return nil, err
+	}
 	c := fc.New(sock)
-	if err := c.PutMMDSData(ctx, data); err != nil {
+	if err := c.PutMMDSData(ctx, doc); err != nil {
 		return nil, fmt.Errorf("injecting MMDS: %w", err)
 	}
-	vacio := almacenVacio(data)
 
 	m.mu.Lock()
 	live := m.byID[mc.ID]

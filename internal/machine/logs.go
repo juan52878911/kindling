@@ -1,7 +1,10 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -31,7 +34,7 @@ func (m *Manager) Logs(ref string, tail int) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("machine %q does not exist", ref)
 	}
-	b, err := leerCola(m.dir(mc.ID)+"/firecracker.log", logMaxBytes)
+	b, err := leerConsola(m.dir(mc.ID), logMaxBytes)
 	if err != nil {
 		return "", fmt.Errorf("no log for %s: %w", mc.Name, err)
 	}
@@ -43,4 +46,32 @@ func (m *Manager) Logs(ref string, tail int) (string, error) {
 		lines = lines[len(lines)-tail:]
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// leerConsola lee como mucho max bytes del final de la consola de dir,
+// contando lo que rotarConsola apartó en firecracker.log.1.
+//
+// Sin el .1, justo tras una rotación firecracker.log está vacío (se trunca en
+// sitio) y `kling logs` no enseñaba nada: el MiB que la rotación conserva para
+// diagnosticar lo que acaba de pasar no lo leía nadie. Lo de antes va delante,
+// como en el fichero original.
+func leerConsola(dir string, max int64) ([]byte, error) {
+	actual, err := leerCola(filepath.Join(dir, "firecracker.log"), max)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	sinActual := err != nil
+	if resto := max - int64(len(actual)); resto > 0 {
+		previo, perr := leerCola(filepath.Join(dir, "firecracker.log.1"), resto)
+		if perr == nil && len(previo) > 0 {
+			if len(actual) > 0 && previo[len(previo)-1] != '\n' {
+				previo = append(previo, '\n')
+			}
+			return append(previo, actual...), nil
+		}
+	}
+	if sinActual {
+		return nil, err
+	}
+	return actual, nil
 }

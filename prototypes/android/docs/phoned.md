@@ -66,7 +66,7 @@ binario limpio); sin él, binario tal cual (una arista de grafo o un reenvío).
 
 | Ruta | Qué | Cómo |
 |---|---|---|
-| `GET /v1/health` | `200`/`503` con `ok`, `state`, `boot_completed`, `system_server`, `android_pid`, `restarts`, `net`, `verity`, `uidump`, `adb_secure`, `kernel`, `api_tokens` (cuántos abren la API; 0 = cerrada) | sin procesos: `/proc` y la memoria de propiedades. **La única ruta sin token** |
+| `GET /v1/health` | `200`/`503` con `ok`, `state`, `boot_completed`, `system_server`, `android_pid`, `restarts`, `net`, `verity`, `uidump`, `adb_secure`, `kernel`, `api_tokens` (cuántos abren la API; 0 = cerrada) y, de la traducción ARM (traduccion-arm.md), `abis`, `native_bridge`, `arm_translation` (de `IMAGE.txt`) y `arm64_exec` (registro de binfmt_misc) | sin procesos: `/proc`, la memoria de propiedades e `IMAGE.txt`. **La única ruta sin token** |
 | `GET /v1/screen` | PNG | `screencap -p` |
 | `GET /v1/tree[?compressed=1]` | XML de la jerarquía; `X-Phoned-Source: uidump` o `uiautomator` | el servidor residente `uidump` si la imagen lo trae (lo arranca por init si no contesta), si no `uiautomator dump` |
 | `POST /v1/tap` `{"x","y"}` · `/v1/swipe` `{"x1","y1","x2","y2","ms"}` · `/v1/text` `{"text"}` · `/v1/key` `{"key": "BACK"\|4}` | `{"ok":true,"via":"uidump"\|"input"}` | uidump; si no, `input` |

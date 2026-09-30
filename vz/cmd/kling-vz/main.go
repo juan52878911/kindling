@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/pkg/credproxy"
+	"github.com/juan52878911/kindling/vz/internal/custodio"
 	"github.com/juan52878911/kindling/vz/internal/egress"
 	"github.com/juan52878911/kindling/vz/internal/footprint"
 	"github.com/juan52878911/kindling/vz/internal/grafo"
@@ -75,9 +76,16 @@ func logf(format string, args ...any) {
 // footprint/freno_darwin.go).
 const argFreno = "--cpu-brake"
 
+// argCustodio lanza este binario como custodio de snapshots (ver
+// internal/custodio), con la carpeta de snapshots y la de la máquina.
+const argCustodio = "--snapshot-keeper"
+
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == argFreno {
 		os.Exit(servirFreno())
+	}
+	if len(os.Args) == 4 && os.Args[1] == argCustodio {
+		os.Exit(servirCustodio(os.Args[2], os.Args[3]))
 	}
 	if vzvm.WindowMode() {
 		// AppKit necesita el hilo principal (vzvm lo fija en su init): el
@@ -195,7 +203,7 @@ func run() int {
 	syscall.Umask(0o077)
 
 	peers := peercred.New()
-	confine := confinamiento(*sock, logf)
+	confine, destino := confinamiento(*sock, logf)
 	srv := server.New(server.Deps{
 		Factory: &vzvm.Factory{Console: stdout, Logf: logf, OnCreate: onCreate,
 			Window: vzvm.WindowMode(), Title: "kling " + filepath.Base(filepath.Dir(*sock))},
@@ -233,6 +241,7 @@ func run() int {
 		Credentials: creds,
 		CredIP:      vnet.GatewayIP,
 		Confine:     confine,
+		Destino:     destino,
 		CPUTime:     meter.CPUTime,
 		Freeze:      freeze,
 		Graph:       grafoMaq,
@@ -334,41 +343,72 @@ func rutaBroker() string {
 }
 
 // confinamiento devuelve cómo encerrar este proceso en su sandbox, o nil si no
-// hay que hacerlo. El daemon pasa su raíz de datos en KLING_VZ_CONFINE_ROOT (una
+// hay que hacerlo, y dónde escribir los ficheros de un snapshot una vez
+// encerrado. El daemon pasa su raíz de datos en KLING_VZ_CONFINE_ROOT (una
 // variable y no un argumento: un kling-vz anterior la ignora, mientras que un
 // argumento desconocido lo haría salir). KLING_VZ_NO_SANDBOX=1 lo apaga, para
 // diagnosticar un perfil que una versión nueva de macOS rompa.
 //
+// Encerrado, este proceso solo escribe en el directorio de su máquina (y en
+// sus discos). Un snapshot que el daemon pide fuera de él (el dorado de kling
+// commit, en snapshots/<nombre>/) se vuelca a un temporal del directorio y el
+// custodio lo deja en su sitio (internal/custodio). El custodio se lanza aquí,
+// antes de encerrarse; si no arranca, esos snapshots fallan (nunca se abre
+// snapshots/ a este proceso).
+//
 // Las rutas se resuelven antes: el sandbox compara rutas reales, y en macOS
 // /tmp es /private/tmp.
-func confinamiento(sock string, logf func(string, ...any)) func(bool, bool) error {
+func confinamiento(sock string, logf func(string, ...any)) (func(server.Confinamiento) error, func(string) (string, func() error, error)) {
 	root := os.Getenv("KLING_VZ_CONFINE_ROOT")
 	if root == "" {
 		logf("not confined: KLING_VZ_CONFINE_ROOT is not set (the daemon sets it)")
-		return nil
+		return nil, nil
 	}
 	if os.Getenv("KLING_VZ_NO_SANDBOX") == "1" {
 		logf("WARNING: not confined, KLING_VZ_NO_SANDBOX=1")
-		return nil
-	}
-	real := func(p string) string {
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
-		}
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			p = r
-		}
-		return p
+		return nil, nil
 	}
 	root, mdir := real(root), real(filepath.Dir(sock))
+	snaps := filepath.Join(root, "snapshots")
 	broker := rutaBroker()
-	return func(conRed, gfx bool) error {
-		if err := confinar(root, mdir, broker, conRed, gfx); err != nil {
+	k, err := custodio.Iniciar(argCustodio, snaps, mdir)
+	if err != nil {
+		logf("warning: no snapshot keeper process, snapshots outside %s will fail: %v", mdir, err)
+	}
+	var confinado bool
+	destino := func(p string) (string, func() error, error) {
+		d := real(filepath.Dir(p))
+		if !confinado || d == mdir {
+			return p, nil, nil
+		}
+		if k == nil {
+			return "", nil, fmt.Errorf("%s is outside this machine's directory and there is no snapshot keeper", p)
+		}
+		dst := filepath.Join(d, filepath.Base(p))
+		tmp := filepath.Join(mdir, ".kling-vz-publish-"+filepath.Base(p))
+		return tmp, func() error { return k.Publicar(tmp, dst) }, nil
+	}
+	confine := func(c server.Confinamiento) error {
+		if err := confinar(root, mdir, broker, c); err != nil {
 			return err
 		}
-		logf("confined: reads under %s, writes only to %s, snapshots/ and volumes/, network out: %v", root, mdir, conRed)
+		confinado = true
+		logf("confined: reads %d and writes %d files of this VM besides %s, network out: %v, loopback: %v",
+			len(c.Lectura), len(c.Escritura), mdir, c.ConRed, c.ConRed && c.Loopback)
 		return nil
 	}
+	return confine, destino
+}
+
+// servirCustodio es el custodio de snapshots: se encierra y atiende a su
+// kling-vz por el fd 3 hasta que este muere.
+func servirCustodio(snaps, mdir string) int {
+	signal.Ignore(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	if err := confinarCustodio(snaps, mdir); err != nil {
+		fmt.Fprintf(os.Stderr, "kling-vz: snapshot keeper: %v\n", err)
+		return 1
+	}
+	return custodio.Servir(3, snaps, mdir)
 }
 
 // servirFreno es el proceso freno: se encierra y atiende a su kling-vz por el

@@ -570,8 +570,9 @@ func fijarAuditoriaPlataforma(credproxy.AuditConfig) {}
 
 // entornoVMM es lo que kling-vz recibe además del entorno del daemon: la raíz
 // de datos, con la que se encierra en su perfil de sandbox al crear la VM
-// (vz/cmd/kling-vz/kling-vz.sb): lee bajo la raíz y escribe solo en su
-// directorio, snapshots/ y volumes/.
+// (vz/cmd/kling-vz/kling-vz.sb): lee y escribe su directorio de máquina y,
+// fuera de él, solo los ficheros exactos que su VM necesita; nunca secrets/, y
+// en snapshots/ no escribe (los dorados los coloca el custodio).
 //
 // Y el socket del broker (broker_vz.go), por el que pide las conexiones de las
 // aristas y de kling db attach; su perfil solo le deja conectar a ese.

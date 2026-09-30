@@ -129,7 +129,8 @@ func (b *builder) buildLayer(ctx context.Context, dst string, files []inputFile)
 	const andr = "/android"
 	keep := func(p string, _ int64) bool {
 		p = strings.TrimPrefix(p, andr)
-		return p == "/system/build.prop" || p == "/vendor/build.prop" || p == "/system/vendor/build.prop" ||
+		// Todas las build.prop (son pequeñas): las edita arm_translation.
+		return strings.HasSuffix(p, "/build.prop") ||
 			p == "/system/bin/init" || (b.spec.Slim != nil && strings.HasSuffix(p, ".rc"))
 	}
 	var streams []ext4.Stream
@@ -172,6 +173,16 @@ func (b *builder) buildLayer(ctx context.Context, dst string, files []inputFile)
 			return nil, err
 		}
 	}
+	tr, err := b.armTranslation(ctx, android)
+	if err != nil {
+		return nil, err
+	}
+	info["arm_translation"] = tr
+	// Las ABIs y el puente, como quedan tras la traducción.
+	abis, bridge := androidABIs(android)
+	info["abilist"] = abis
+	tr["native_bridge"] = bridge
+	b.logf("ABIs after arm_translation %v: %s (native bridge %q)", tr["mode"], abis, bridge)
 
 	// Lo que genera el constructor.
 	agent, err := os.ReadFile(b.agent)
@@ -185,8 +196,11 @@ func (b *builder) buildLayer(ctx context.Context, dst string, files []inputFile)
 	b.put(upper, libDir+"/entrypoint.args", []byte(strings.Join(args, "\n")+"\n"), 0o644)
 	b.put(upper, libDir+"/android.conf", []byte(b.spec.confText()), 0o644)
 	var imgtxt strings.Builder
-	fmt.Fprintf(&imgtxt, "redroid=%s\nredroid_tag=%s\nandroid_release=%v\nabilist=%v\nkindling_builder=android\nbuilt_at=%s\n",
-		img.Ref, b.redroidTag(), info["android_release"], info["abilist"], b.t.UTC().Format("2006-01-02T15:04:05Z"))
+	fmt.Fprintf(&imgtxt, "redroid=%s\nredroid_tag=%s\nandroid_release=%v\nabilist=%v\narm_translation=%v\nnative_bridge=%v\nkindling_builder=android\nbuilt_at=%s\n",
+		img.Ref, b.redroidTag(), info["android_release"], info["abilist"], tr["mode"], bridge, b.t.UTC().Format("2006-01-02T15:04:05Z"))
+	if v, ok := tr["version"]; ok {
+		fmt.Fprintf(&imgtxt, "ndk_translation_version=%v\nndk_translation_source=%v\nndk_translation_source_sha256=%v\n", v, tr["source"], tr["source_sha256"])
+	}
 	b.put(upper, libDir+"/IMAGE.txt", []byte(imgtxt.String()), 0o644)
 	if b.spec.DataExt4MiB > 0 {
 		p, err := b.emptyExt4(b.spec.DataExt4MiB)
@@ -297,8 +311,6 @@ func (b *builder) entrypoint() string {
 	return e.String()
 }
 
-var reProp = regexp.MustCompile(`(?m)^ro\.(?:system\.|vendor\.)?product\.cpu\.abilist=(.*)$`)
-
 // checkAndroid comprueba lo mismo que build-image.sh: /init es un ELF de la
 // arquitectura, hay build.prop y es Android 13.
 func (b *builder) checkAndroid(android *ext4.Node) (map[string]any, error) {
@@ -324,16 +336,7 @@ func (b *builder) checkAndroid(android *ext4.Node) (map[string]any, error) {
 	if m := regexp.MustCompile(`(?m)^ro\.build\.version\.release=(.*)$`).FindSubmatch(sys); m != nil {
 		ver = strings.TrimSpace(string(m[1]))
 	}
-	all := append([]byte{}, sys...)
-	if v, _ := android.Resolve("/vendor/build.prop"); v != nil {
-		if d, ok := v.Data.(ext4.Bytes); ok {
-			all = append(all, d...)
-		}
-	}
-	abis := ""
-	if m := reProp.FindSubmatch(all); m != nil {
-		abis = strings.TrimSpace(string(m[1]))
-	}
+	abis, _ := androidABIs(android)
 	b.logf("Android %s, ABIs: %s", ver, abis)
 	if ver != "13" {
 		b.logf("warning: expected Android 13 and build.prop says %q", ver)
@@ -355,6 +358,53 @@ func (b *builder) checkAndroid(android *ext4.Node) (map[string]any, error) {
 	info["android_release"] = ver
 	info["abilist"] = abis
 	return info, nil
+}
+
+// androidABIs dice las ABIs que anunciará Android y su puente nativo ("" si
+// no hay o es "0"), leyendo las build.prop como init: ro.product.cpu.abilist
+// sale de la primera de product, odm, vendor y system que la tenga (con su
+// prefijo), y del puente manda la última build.prop que lo define.
+func androidABIs(android *ext4.Node) (abis, bridge string) {
+	read := func(p string) []byte {
+		if v, _ := android.Resolve(p); v != nil {
+			if d, ok := v.Data.(ext4.Bytes); ok {
+				return d
+			}
+		}
+		return nil
+	}
+	for _, part := range []struct{ name, p1, p2 string }{
+		{"product", "/product/etc/build.prop", "/system/product/etc/build.prop"},
+		{"odm", "/odm/etc/build.prop", "/vendor/odm/etc/build.prop"},
+		{"vendor", "/vendor/build.prop", "/system/vendor/build.prop"},
+		{"system", "/system/build.prop", ""},
+	} {
+		for _, p := range []string{part.p1, part.p2} {
+			if d := read(p); p != "" && d != nil && abis == "" {
+				abis = propValue(d, "ro."+part.name+".product.cpu.abilist")
+			}
+		}
+	}
+	if abis == "" {
+		abis = propValue(read("/system/build.prop"), "ro.product.cpu.abilist")
+	}
+	seen := map[*ext4.Node]bool{}
+	for _, p := range propFiles {
+		n, _ := android.Resolve(p)
+		if n == nil || seen[n] {
+			continue
+		}
+		seen[n] = true
+		if d, ok := n.Data.(ext4.Bytes); ok {
+			if v := propValue(d, "ro.dalvik.vm.native.bridge"); v != "" {
+				bridge = v
+			}
+		}
+	}
+	if bridge == "0" {
+		bridge = ""
+	}
+	return abis, bridge
 }
 
 func checkELF(b []byte, arch string) error {

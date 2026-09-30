@@ -13,6 +13,7 @@
 #   UIDUMP_DEX=/ruta/kindling-uidump.dex   (uidump/build.sh; sin él, sin uidump)
 #   ARCH=arm64|amd64  DATA_MODE=overlay|tmpfs  ANDROID_NET=veth|isolated|shared
 #   SLIM=1  VERITY=0  FEC_ROOTS=2  BASE_NAME=android13-base
+#   ARM_TRANSLATION=none|libndk|redroid   (amd64; docs/traduccion-arm.md)
 #   WIDTH HEIGHT DPI FPS EXTRA_ARGS ADB_SECURE PREP (como build-image.sh)
 #
 # Las rutas van como "src": el constructor lee los ficheros en el host del
@@ -92,6 +93,8 @@ verity=""
 [ -n "${FEC_ROOTS:-}" ] && verity+=", \"fec_roots\": $FEC_ROOTS"
 base=""
 [ -n "${BASE_NAME:-}" ] && base=", \"base_name\": $(jstr "$BASE_NAME")"
+# ARM_TRANSLATION=none|libndk|redroid (amd64; docs/traduccion-arm.md).
+[ -n "${ARM_TRANSLATION:-}" ] && base+=", \"arm_translation\": $(jstr "$ARM_TRANSLATION")"
 
 printf '{\n  "arch": "%s",\n  "service": %s,\n  "conf": {%s}%s%s%s%s,\n  "files": [\n    %s\n  ]\n}\n' \
   "$ARCH" "$(jstr "$SERVICE")" "$conf" "$data" "$slim" "$verity" "$base" \

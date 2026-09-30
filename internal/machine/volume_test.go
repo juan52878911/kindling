@@ -1,8 +1,10 @@
 package machine
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -652,5 +654,52 @@ func TestRecetaConBaseInvalidaSeRechaza(t *testing.T) {
 	_, _, err := m.imageLayer("svc")
 	if err == nil || !strings.Contains(err.Error(), "invalid base image") {
 		t.Fatalf("imageLayer con base ../ = %v, quería rechazo", err)
+	}
+}
+
+// e2fsck corre como root sobre discos que escribe un invitado: tiene plazo, y
+// su código de salida se lee como la máscara que es.
+func TestRevisarExt4PlazoYCodigos(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sin sh")
+	}
+	orden, plazo := ordenE2fsck, plazoE2fsck
+	t.Cleanup(func() { ordenE2fsck, plazoE2fsck = orden, plazo })
+	sale := func(codigo int) {
+		ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("echo salida; exit %d", codigo))
+		}
+	}
+	for _, c := range []struct {
+		codigo   int
+		reparado bool
+		falla    bool
+	}{{0, false, false}, {1, true, false}, {2, true, false}, {3, true, false},
+		{4, false, true}, {5, false, true}, {8, false, true}, {12, false, true}, {32, false, true}} {
+		sale(c.codigo)
+		reparado, _, err := revisarExt4(context.Background(), "vol.ext4")
+		if reparado != c.reparado || (err != nil) != c.falla {
+			t.Errorf("salida %d: reparado=%v err=%v, quería reparado=%v fallo=%v", c.codigo, reparado, err, c.reparado, c.falla)
+		}
+	}
+
+	// Un e2fsck que no acaba se corta al plazo.
+	ordenE2fsck = func(ctx context.Context, path string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+	plazoE2fsck = 200 * time.Millisecond
+	inicio := time.Now()
+	_, _, err := revisarExt4(context.Background(), "vol.ext4")
+	if err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("e2fsck colgado: err=%v, quería el error del plazo", err)
+	}
+	if d := time.Since(inicio); d > 10*time.Second {
+		t.Fatalf("revisarExt4 tardó %s con un plazo de %s", d, plazoE2fsck)
+	}
+	// repairVolume no se cuelga tampoco.
+	inicio = time.Now()
+	repairVolume(context.Background(), "vol.ext4")
+	if d := time.Since(inicio); d > 10*time.Second {
+		t.Fatalf("repairVolume tardó %s con un plazo de %s", d, plazoE2fsck)
 	}
 }

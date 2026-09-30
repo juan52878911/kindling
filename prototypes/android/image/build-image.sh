@@ -8,6 +8,8 @@
 #   sudo FETCH=docker prototypes/android/image/build-image.sh     # con Docker
 #   sudo PHONED=0 prototypes/android/image/build-image.sh         # lanzador de bash (comparar)
 #   sudo DATA_MODE=tmpfs prototypes/android/image/build-image.sh  # /data en RAM
+#   sudo ARCH=amd64 ARM_TRANSLATION=libndk prototypes/android/image/build-image.sh
+#                                   # x86_64 con traducción ARM (docs/traduccion-arm.md)
 #   sudo FETCH=local ROOTFS_TAR=redroid.tar ROOTFS_SHA256=<sha256> \
 #        prototypes/android/image/build-image.sh                  # un `docker export` propio
 #
@@ -119,6 +121,12 @@ BASE_PKGS="${BASE_PKGS:-util-linux procps iptables}"
 # el kernel con DM_VERITY (config-android) y veritysetup aquí.
 VERITY="${VERITY:-0}"
 [ "$VERITY" = 1 ] && BASE_PKGS="$BASE_PKGS dmsetup"
+# Traducción ARM de una imagen amd64 (image/arm-translation.sh,
+# docs/traduccion-arm.md): none (por defecto) quita el libndk_translation que
+# trae Redroid y deja las ABIs en x86_64; libndk pone el de la imagen del
+# emulador de Google (la baja y comprueba este script; licencia: ver el doc);
+# redroid deja el de Redroid. En arm64 no hay nada que traducir.
+if [ "$ARCH" = amd64 ]; then ARM_TRANSLATION="${ARM_TRANSLATION:-none}"; else ARM_TRANSLATION="${ARM_TRANSLATION:-native}"; fi
 
 log() { printf '==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -136,6 +144,12 @@ case "$ANDROID_NET" in veth|isolated|shared) ;; *) die "ANDROID_NET must be veth
 [[ "$BASE_NAME" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "invalid BASE_NAME"
 case "$PHONED" in 0|1) ;; *) die "PHONED must be 0 or 1" ;; esac
 [ "$ADB_SECURE" = 0 ] || [ "$PHONED" = 1 ] || die "ADB_SECURE=1 needs PHONED=1 (the bash hook does not install adb keys)"
+case "$ARCH:$ARM_TRANSLATION" in
+  amd64:none|amd64:libndk|amd64:redroid|arm64:native|arm64:none) ;;
+  arm64:*) die "ARM_TRANSLATION=$ARM_TRANSLATION is for amd64 images: arm64 runs ARM apps natively" ;;
+  *) die "ARM_TRANSLATION must be none, libndk or redroid" ;;
+esac
+[ "$ARM_TRANSLATION" = libndk ] && ! command -v python3 >/dev/null 2>&1 && die "ARM_TRANSLATION=libndk needs python3"
 
 PATH="$PATH:/usr/sbin:/sbin"
 falta=()
@@ -375,6 +389,17 @@ if [ "${SLIM:-0}" = 1 ]; then
 fi
 # ── fin slim ──
 
+# ── traducción ARM ──
+if [ "$ARCH" = amd64 ]; then
+  bash "$HERE/arm-translation.sh" "$ROOTFS" "$ARM_TRANSLATION" "$WORK/cache/libndk"
+  abis="$(cat "$ROOTFS/vendor/build.prop" "$PROP" 2>/dev/null \
+          | sed -nE 's/^ro\.(system\.|vendor\.)?product\.cpu\.abilist=//p' | head -1 || true)"
+  log "ABIs tras ARM_TRANSLATION=$ARM_TRANSLATION: ${abis:-?}"
+fi
+native_bridge="$(sed -n 's/^ro\.dalvik\.vm\.native\.bridge=//p' "$PROP" "$ROOTFS/vendor/build.prop" 2>/dev/null | tail -1)"
+[ "$native_bridge" = 0 ] && native_bridge=""
+# ── fin traducción ARM ──
+
 # ── 4. lo que va en la capa ──────────────────────────────────────────────────
 LIB="$TREE/usr/local/lib/kindling-android"
 install -Dm755 "$PROTO/kernel/check-android-config.sh" "$LIB/check-android-config.sh"
@@ -447,6 +472,8 @@ redroid_tag=$REDROID_TAG
 redroid_index=$REDROID_INDEX_DIGEST
 android_release=$ver
 abilist=$abis
+arm_translation=$ARM_TRANSLATION
+native_bridge=$native_bridge
 kindling_commit=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
 built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
