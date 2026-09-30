@@ -1,0 +1,5 @@
+# Binarios que deja `make` (en la raíz del módulo y junto a su main).
+/kling-phone
+/cmd/kling-phone/kling-phone
+# El muro va embebido con go:embed: el *.html de la raíz del repo no aplica aquí.
+!/cmd/kling-phone/wall.html

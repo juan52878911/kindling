@@ -20,7 +20,7 @@ install: build
 	install -m755 kling-phone $(firstword $(subst :, ,$(PLUGINS)))/kling-phone
 
 test:
-	gofmt -l . | tee /dev/stderr | (! read)
+	gofmt -l . | tee /dev/stderr | (! read -r _)
 	go vet ./...
 	go test -race ./...
 

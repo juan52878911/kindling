@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Muro de teléfonos</title>
+<style>
+:root{--bg:#f4f4f2;--card:#fff;--fg:#1b1b1b;--mut:#6b6b6b;--line:#dcdcd8;--acc:#1f6feb;--bad:#c62828}
+@media (prefers-color-scheme:dark){:root{--bg:#121212;--card:#1d1d1d;--fg:#ececec;--mut:#9a9a9a;--line:#2e2e2e;--acc:#58a6ff;--bad:#ef5350}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,sans-serif}
+header{position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--line)}
+header h1{font-size:16px;margin:0 8px 0 0}header label{color:var(--mut);display:flex;gap:6px;align-items:center}
+input,select,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+button{cursor:pointer}#stat{margin-left:auto;color:var(--mut)}
+main{display:grid;gap:12px;padding:16px;grid-template-columns:repeat(auto-fill,minmax(var(--w,200px),1fr))}
+.c{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:6px}
+.t{display:flex;justify-content:space-between;gap:6px;font-size:12px}.t b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.t span{color:var(--mut);font-variant-numeric:tabular-nums}
+.s{position:relative;aspect-ratio:9/16;background:#000;border-radius:6px;overflow:hidden;touch-action:none;user-select:none}
+.s img{width:100%;height:100%;object-fit:contain;display:block;cursor:crosshair}
+.s .e{position:absolute;inset:0;display:none;align-items:center;justify-content:center;padding:8px;text-align:center;color:#fff;background:rgba(160,20,20,.75);font-size:12px}
+.c.bad{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}.t .h{color:var(--bad);font-weight:600}
+.k{display:flex;gap:4px}.k button{flex:1;padding:2px 0}
+.empty{grid-column:1/-1;color:var(--mut);text-align:center;padding:48px 0}
+</style></head><body>
+<header><h1>Muro de teléfonos</h1>
+<label>Refresco <select id="iv"><option value="0">continuo</option><option value="500">0,5 s</option><option value="1000" selected>1 s</option><option value="3000">3 s</option><option value="-1">pausa</option></select></label>
+<label>Tamaño <input id="sz" type="range" min="140" max="420" value="200"></label>
+<label>Filtro <input id="fl" placeholder="phone-" size="10"></label>
+<span id="stat">…</span></header>
+<main id="g"></main>
+<script>
+const g=document.getElementById('g'),iv=document.getElementById('iv'),sz=document.getElementById('sz'),fl=document.getElementById('fl'),stat=document.getElementById('stat');
+const cards=new Map();
+function pref(k,d){try{return localStorage.getItem(k)??d}catch(e){return d}}
+function save(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+iv.value=pref('iv','1000');sz.value=pref('sz','200');fl.value=pref('fl','');
+const applySz=()=>g.style.setProperty('--w',sz.value+'px');applySz();
+sz.oninput=()=>{applySz();save('sz',sz.value)};iv.onchange=()=>{save('iv',iv.value);cards.forEach(c=>c.kick())};fl.oninput=()=>{save('fl',fl.value);sync()};
+// La cabecera X-Kling-Wall es la que el muro exige en los POST: una web ajena
+// no puede mandarla sin que el navegador pregunte antes (y el muro no contesta).
+async function post(u){try{await fetch(u,{method:'POST',headers:{'X-Kling-Wall':'1'}})}catch(e){}}
+function card(p){
+  const el=document.createElement('div');el.className='c';
+  el.innerHTML=`<div class="t"><b></b><span>…</span></div><div class="s"><img alt=""><div class="e"></div></div><div class="k"><button data-k="BACK">◀</button><button data-k="HOME">●</button><button data-k="RECENTS">■</button></div>`;
+  el.querySelector('b').textContent=p.name;
+  const img=el.querySelector('img'),lat=el.querySelector('.t span'),err=el.querySelector('.e');
+  let busy=false,timer=null,alive=true,url=null;
+  async function tick(){
+    if(!alive||busy)return;const w=+iv.value;if(w<0)return;busy=true;const t0=performance.now();
+    try{const r=await fetch('/shot/'+encodeURIComponent(p.name));if(!r.ok)throw new Error((await r.json()).error||r.status);
+      const b=await r.blob();const u=URL.createObjectURL(b);img.onload=()=>{if(url)URL.revokeObjectURL(url);url=u};img.src=u;
+      err.style.display='none';lat.textContent=Math.round(performance.now()-t0)+' ms';
+    }catch(e){err.textContent=String(e.message||e);err.style.display='flex';lat.textContent='error'}
+    busy=false;if(alive&&+iv.value>=0)timer=setTimeout(tick,+iv.value);
+  }
+  function kick(){clearTimeout(timer);if(!busy)tick()}
+  // tocar y deslizar: coordenadas de la imagen real (naturalWidth/Height)
+  let down=null;const pt=ev=>{const r=img.getBoundingClientRect(),nw=img.naturalWidth||720,nh=img.naturalHeight||1280,s=Math.min(r.width/nw,r.height/nh),ox=(r.width-nw*s)/2,oy=(r.height-nh*s)/2;
+    return{x:Math.round((ev.clientX-r.left-ox)/s),y:Math.round((ev.clientY-r.top-oy)/s),nw,nh}};
+  img.onpointerdown=ev=>{down={...pt(ev),t:performance.now()};ev.preventDefault()};
+  img.onpointerup=async ev=>{if(!down)return;const u=pt(ev),d=down;down=null;if(u.x<0||u.y<0||u.x>u.nw||u.y>u.nh)return;
+    const n=encodeURIComponent(p.name);
+    if(Math.hypot(u.x-d.x,u.y-d.y)<12)await post(`/tap/${n}?x=${u.x}&y=${u.y}`);
+    else await post(`/swipe/${n}?x1=${d.x}&y1=${d.y}&x2=${u.x}&y2=${u.y}&ms=${Math.round(Math.min(Math.max(performance.now()-d.t,80),1000))}`);
+    kick()};
+  el.querySelectorAll('.k button').forEach(b=>b.onclick=async()=>{await post(`/key/${encodeURIComponent(p.name)}?k=${b.dataset.k}`);kick()});
+  function health(h){const bad=h&&h.ok===false;el.classList.toggle('bad',bad);
+    let s=el.querySelector('.t .h');if(bad){if(!s){s=document.createElement('span');s.className='h';el.querySelector('.t').appendChild(s)}s.textContent='⚠ '+h.why;s.title=h.why}else if(s)s.remove()}
+  tick();return{el,kick,health,stop(){alive=false;clearTimeout(timer);if(url)URL.revokeObjectURL(url)}};
+}
+async function sync(){
+  let ps;try{ps=await (await fetch('/api/phones')).json();if(ps.error)throw new Error(ps.error)}catch(e){stat.textContent='sin conexión: '+(e.message||e);return}
+  const f=fl.value.trim();if(f)ps=ps.filter(p=>p.name.includes(f));
+  const want=new Set(ps.map(p=>p.name));
+  for(const [n,c] of cards)if(!want.has(n)){c.stop();c.el.remove();cards.delete(n)}
+  for(const p of ps)if(!cards.has(p.name)){const c=card(p);cards.set(p.name,c)}
+  for(const p of ps)cards.get(p.name).health(p.health);
+  const malos=ps.filter(p=>p.health&&p.health.ok===false).length;
+  g.replaceChildren(...ps.map(p=>cards.get(p.name).el));
+  if(!ps.length)g.innerHTML='<div class="empty">No hay teléfonos corriendo.</div>';
+  stat.textContent=ps.length+' teléfono'+(ps.length==1?'':'s')+(malos?' · '+malos+' con Android caído':'');
+}
+sync();setInterval(sync,5000);
+</script></body></html>

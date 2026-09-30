@@ -13,7 +13,7 @@ build:
 	go build -o kling-db ./cmd/kling-db
 
 test:
-	gofmt -l . | tee /dev/stderr | (! read)
+	gofmt -l . | tee /dev/stderr | (! read -r _)
 	go vet ./...
 	go test -race ./...
 
