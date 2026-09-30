@@ -10,11 +10,12 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
-- **Reiniciar el daemon ya no mata a quien escribe en una carpeta compartida en vivo.**
-  El daemon salía con las sesiones de las carpetas abiertas y el invitado recibía EIO en
-  la operación que tuviera en vuelo: un proceso escribiendo sin pausa en `-share ...:rw`
-  moría en cada `systemctl restart kling` (y el e2e fallaba de vez en cuando). Ahora el
-  apagado cierra cada sesión en orden: lo que está en vuelo contesta, y lo que llega
+- **Reiniciar el daemon o congelar la máquina ya no mata a quien escribe en una carpeta
+  compartida en vivo.** El daemon salía con las sesiones de las carpetas abiertas, y
+  congelar las cortaba a secas: el invitado recibía EIO en la operación que tuviera en
+  vuelo, y un proceso escribiendo sin pausa en `-share ...:rw` moría en cada
+  `systemctl restart kling` o `kling freeze` (y el e2e fallaba de vez en cuando). Ahora
+  los dos cierran cada sesión en orden: lo que está en vuelo contesta, y lo que llega
   después se devuelve sin ejecutar con un código nuevo (`ERetry`) que el agente repite
   con la sesión que abre el daemon siguiente. Funciona con los agentes ya desplegados
   (el valor es el que usan por dentro para "no llegó a salir" desde v0.10, la primera con

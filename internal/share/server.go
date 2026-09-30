@@ -156,7 +156,7 @@ type handle struct {
 // Plazos del cierre ordenado (ServeDrain): cuánto se espera sin tramas nuevas
 // antes de cortar, y cuánto como mucho en total.
 var (
-	drainQuiet = 200 * time.Millisecond
+	drainQuiet = 50 * time.Millisecond
 	drainMax   = 3 * time.Second
 )
 

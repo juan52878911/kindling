@@ -470,9 +470,7 @@ type shareSup struct {
 	mu   sync.Mutex
 	runs map[string]*shareRun
 	held map[string]bool
-	// drain se cierra al apagar el daemon (drainShares): las sesiones acaban
-	// con un cierre ordenado y no se vuelven a lanzar.
-	drain   chan struct{}
+	// drained: el daemon se apaga (drainShares) y no se lanza ninguna más.
 	drained bool
 }
 
@@ -484,7 +482,13 @@ type shareRun struct {
 	// de correr, o un error permanente). Una ejecución terminada se puede
 	// sustituir por otra.
 	done chan struct{}
+	// drain, al cerrarse, termina sus sesiones con un cierre ordenado
+	// (share.ServeDrain) y sus bucles no reconectan.
+	drain     chan struct{}
+	drainOnce sync.Once
 }
+
+func (r *shareRun) startDrain() { r.drainOnce.Do(func() { close(r.drain) }) }
 
 // permanent dice si alguna de sus carpetas acabó en un error que no se arregla
 // reintentando: el vigilante no la relanza sola.
@@ -533,7 +537,7 @@ func (t *shareTag) settle(err error) {
 }
 
 func newShareSup() *shareSup {
-	return &shareSup{runs: map[string]*shareRun{}, held: map[string]bool{}, drain: make(chan struct{})}
+	return &shareSup{runs: map[string]*shareRun{}, held: map[string]bool{}}
 }
 
 // sup devuelve el supervisor, creándolo la primera vez: así también lo tiene un
@@ -573,7 +577,7 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	run := &shareRun{cancel: cancel, done: make(chan struct{})}
+	run := &shareRun{cancel: cancel, done: make(chan struct{}), drain: make(chan struct{})}
 	for tag, s := range mc.Shares {
 		if !s.Live() {
 			continue
@@ -583,15 +587,39 @@ func (m *Manager) startSharesIf(id string, afterPermanent bool) {
 		run.wg.Add(1)
 		go func(s api.ShareAttachment) {
 			defer run.wg.Done()
-			m.shareLoop(ctx, id, s, t)
+			m.shareLoop(ctx, run.drain, id, s, t)
 		}(s)
 	}
 	go func() { run.wg.Wait(); close(run.done) }()
 	sup.runs[id] = run
 }
 
+// drainSharesOf cierra en orden las conexiones de id (lo que está en vuelo
+// contesta; lo nuevo, el invitado lo repite con la sesión siguiente) y espera a
+// que terminen, como mucho shareDrainWait; después corta a secas. Es lo que usa
+// congelar: el invitado sigue vivo y vuelve a conectarse al descongelar, y un
+// corte seco le daba EIO en lo que tuviera en vuelo.
+func (m *Manager) drainSharesOf(id string) {
+	sup := m.sup()
+	sup.mu.Lock()
+	run := sup.runs[id]
+	delete(sup.runs, id)
+	sup.mu.Unlock()
+	if run == nil {
+		return
+	}
+	run.startDrain()
+	select {
+	case <-run.done:
+	case <-time.After(shareDrainWait):
+		log.Printf("%s: live shares did not close in %s; cutting them", id, shareDrainWait)
+	}
+	run.cancel()
+	run.wg.Wait()
+}
+
 // stopShares corta las conexiones de id y espera a que terminen. Lo que el
-// invitado tuviera en vuelo recibe EIO.
+// invitado tuviera en vuelo recibe EIO: es para cuando la máquina muere.
 func (m *Manager) stopShares(id string) {
 	sup := m.sup()
 	sup.mu.Lock()
@@ -605,8 +633,9 @@ func (m *Manager) stopShares(id string) {
 	run.wg.Wait()
 }
 
-// shareDrainWait es lo más que espera el apagado a que las carpetas vivas
-// cierren ordenadamente (el servidor corta a los 3 s como mucho).
+// shareDrainWait es lo más que se espera a que las carpetas vivas cierren
+// ordenadamente, al apagar o al congelar (el servidor corta a los 3 s como
+// mucho).
 const shareDrainWait = 5 * time.Second
 
 // drainShares cierra ordenadamente todas las carpetas vivas y espera a que
@@ -618,12 +647,10 @@ const shareDrainWait = 5 * time.Second
 func (m *Manager) drainShares(wait time.Duration) {
 	sup := m.sup()
 	sup.mu.Lock()
-	if !sup.drained {
-		sup.drained = true
-		close(sup.drain)
-	}
+	sup.drained = true
 	runs := make([]*shareRun, 0, len(sup.runs))
 	for _, r := range sup.runs {
+		r.startDrain()
 		runs = append(runs, r)
 	}
 	sup.mu.Unlock()
@@ -750,9 +777,8 @@ type errPermanente struct{ error }
 func (e errPermanente) Unwrap() error { return e.error }
 
 // shareLoop mantiene conectada una carpeta viva mientras la máquina corra.
-func (m *Manager) shareLoop(ctx context.Context, id string, s api.ShareAttachment, t *shareTag) {
+func (m *Manager) shareLoop(ctx context.Context, drain <-chan struct{}, id string, s api.ShareAttachment, t *shareTag) {
 	backoff := 200 * time.Millisecond
-	drain := m.sup().drain
 	for ctx.Err() == nil {
 		mc, ok := m.get(id)
 		if !ok || mc.State != api.StateRunning {
