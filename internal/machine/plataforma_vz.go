@@ -601,3 +601,13 @@ func techoDelDaemon(vcpus int) int {
 	}
 	return vcpus * 100
 }
+
+// versionMacOS es la versión del sistema ("26.1"), la que se graba en cada
+// dorado: su mem.file lo escribe Virtualization.framework. "" si no se lee.
+func versionMacOS() string {
+	v, err := syscall.Sysctl("kern.osproductversion")
+	if err != nil {
+		return ""
+	}
+	return v
+}

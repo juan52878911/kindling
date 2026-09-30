@@ -17,6 +17,19 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   sobrescribe: el daemon se niega a arrancar y dice qué versión encontró. Es la primera
   pieza de [`docs/actualizar.md`](docs/actualizar.md) (`pkg/esquema`, común a los demás
   ficheros). Volver a un kling anterior con un `state.json` ya migrado: restaurar la copia.
+- **El `meta.json` de los dorados lleva versión y dice con qué se hizo.** `schema: 1`, y
+  además `vmm` (`firecracker 1.17.0`, `kling-vz 0.18.0`), `macos` y `kling_version`. Un
+  dorado hecho con otro VMM o con otra MAJOR.MINOR de Firecracker sale `stale` (con la
+  causa) en `kling template ls` (`!`) e `inspect`, y `kling run -from` responde `409` con
+  la orden para rehacerlo en vez del error crudo del VMM al cargar; un parche
+  (1.17.0 → 1.17.2) no invalida nada. Lo mismo al descongelar una máquina: el sello del
+  volcado guarda el VMM. Los dorados de antes no lo guardan y se restauran como siempre.
+  Un `meta.json` sin `schema` se lee igual y se copia a `meta.json.v0.bak` la primera vez
+  que se reescribe (una anotación); las claves que el binario no conoce se conservan al
+  reescribirlo, así que un kling más viejo ya no borra los campos de uno más nuevo. Uno
+  con un `schema` mayor no se restaura, no se anota y no se borra. **Incompatible**: un
+  kling ≤ v0.17 lee un meta v1 sin quejarse, pero al anotarlo pierde `schema` y los campos
+  nuevos (restaurar la copia `.v0.bak` para volver).
 - **Un paquete DNS perdido ya no tumba una petición del proxy de credenciales.** El proxy
   y la allowlist resolvían con un plazo total de 5 s, el mismo que el resolver de Go da a
   un solo intento: si se perdía el datagrama, no había reintento y la petición salía con

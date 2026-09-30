@@ -215,7 +215,7 @@ func TestThawNoSeNiegaPorElKernelDelSello(t *testing.T) {
 		if err := volcadoEnCurso(dir); err != nil {
 			t.Fatal(err)
 		}
-		if err := sellarVolcado(dir, kernelSHA); err != nil {
+		if err := sellarVolcado(dir, kernelSHA, ""); err != nil {
 			t.Fatal(err)
 		}
 		if got := kernelDelVolcado(dir); got != kernelSHA {

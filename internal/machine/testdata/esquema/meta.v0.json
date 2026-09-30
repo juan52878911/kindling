@@ -1,0 +1,22 @@
+{
+  "name": "svc",
+  "image": "eco",
+  "created_at": "2026-09-01T12:00:00Z",
+  "vcpus": 1,
+  "mem_mib": 256,
+  "mem_bytes": 1048576,
+  "disk_bytes": 2097152,
+  "instances": 0,
+  "egress": "allowlist",
+  "allow_domains": [
+    "api.example.com"
+  ],
+  "snap_sha256": "ab",
+  "kernel_sha256": "cd",
+  "guest_ipv6_off": true,
+  "annotations": {
+    "mcp.tools": {
+      "tools": []
+    }
+  }
+}

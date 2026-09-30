@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "name": "svc",
+  "image": "eco",
+  "created_at": "2026-12-01T12:00:00Z",
+  "vcpus": 1,
+  "mem_mib": 256,
+  "vmm": "firecracker 1.20.0",
+  "campo_del_futuro": {"lo que sea": [1, 2, 3]}
+}

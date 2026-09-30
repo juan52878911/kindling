@@ -100,6 +100,39 @@ func TestWriteSnapshot(t *testing.T) {
 	}
 }
 
+// Un dorado obsoleto (hecho con otro VMM) se marca en la tabla y en inspect
+// con la causa y la orden para rehacerlo; con qué se hizo se enseña siempre.
+func TestSnapshotObsoletoSeVe(t *testing.T) {
+	s := &api.Snapshot{Name: "tpl", Image: "toolchain", VCPUs: 1, MemMiB: 256, CreatedAt: time.Now(), GuestIPv6Off: true,
+		VMM: "firecracker 1.12.0", KlingVersion: "0.18.0",
+		Stale: "made with firecracker 1.12.0; this host runs firecracker 1.17.0"}
+	var b bytes.Buffer
+	if err := writeSnapshots(&b, []*api.Snapshot{s}, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "tpl!") || !strings.Contains(b.String(), "! stale") || strings.Contains(b.String(), "IPv6") {
+		t.Errorf("falta la marca de obsoleto:\n%s", b.String())
+	}
+	b.Reset()
+	if err := writeSnapshot(&b, s, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"made with:   firecracker 1.12.0, kling 0.18.0",
+		"stale:       made with firecracker 1.12.0; this host runs firecracker 1.17.0", "kling save -replace <machine> tpl"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("falta %q en:\n%s", want, b.String())
+		}
+	}
+	b.Reset()
+	s.Stale = ""
+	if err := writeSnapshots(&b, []*api.Snapshot{s}, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "!") {
+		t.Errorf("sin Stale no hay marca:\n%s", b.String())
+	}
+}
+
 func TestExcerpt(t *testing.T) {
 	if got := excerpt(json.RawMessage("{\n  \"a\":   1\n}"), 60); got != `{ "a": 1 }` {
 		t.Fatalf("%q", got)

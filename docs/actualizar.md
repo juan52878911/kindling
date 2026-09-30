@@ -54,12 +54,12 @@ volver atrás, que también pasa (un `make deploy` desde una rama vieja, §1 de
 
 | Qué | Dónde | Versión | Qué pasa al cambiar |
 |---|---|---|---|
-| `snapshots/<n>/meta.json` | `api.Snapshot`, `internal/machine/snapshot.go` | **ninguna**, ni la de kling ni la de Firecracker | lectura laxa (`json.Unmarshal`), `liftV04` sube campos de v0.4. **`editMeta` de un binario viejo reescribe el meta sin los campos que no conoce** |
-| `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | **no se guarda la versión de Firecracker** | un Firecracker que no acepta el formato falla con su error crudo al restaurar. Solo el TSC tiene traducción (`explainRestoreErr`) |
+| `snapshots/<n>/meta.json` | `api.Snapshot`, `internal/machine/meta.go` | **`schema: 1`** desde el PR 2, con `vmm`, `macos` y `kling_version` | sin `schema` es v0: se lee igual y se copia a `meta.json.v0.bak` en la primera reescritura. `editMeta` conserva las claves que no conoce. Uno con `schema` mayor no se restaura, no se anota y no se borra. Un kling ≤ v0.17 lo lee, y al anotarlo pierde `schema` y los campos nuevos (vuelve a ser v0; la copia ya está) |
+| `snap.file` + `mem.file` (Firecracker) | el formato es de Firecracker | `vmm` en el meta (PR 2) y en el sello de las congeladas | otro VMM u otra MAJOR.MINOR de Firecracker: el dorado sale `stale` en `kling template ls`/`inspect` y `run -from` da `409` con la orden para rehacerlo, sin llegar al VMM; una congelada no se descongela y se dice con cuál se congeló. Un parche no invalida. Los dorados sin `vmm` (v0) se intentan como siempre. El TSC sigue con su traducción (`explainRestoreErr`) |
 | kernel del dorado | `kernel_sha256` en el meta | hash, no versión | cambiarlo solo da un aviso (`avisoKernel`): el kernel del invitado vive en `mem.file` y sigue restaurando |
-| sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna | sin marcadores se acepta (máquina anterior al sello) |
+| sello de congelación | `machines/<id>/volcado.{en-curso,ok}` + `sello`, `internal/machine/volcado.go` | ninguna; lleva `vmm` desde el PR 2 (opcional) | sin marcadores se acepta (máquina anterior al sello); sin `vmm`, no se compara |
 | `snap.file` de kling-vz | `vz/internal/spec/spec.go` | **`kling_vz: 1`**; `Decode` rechaza cualquier otro | error claro en ambas direcciones. Pero `graphics` entró sin subir la versión: un kling-vz anterior lo ignora y restaura con otros dispositivos |
-| `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | no se guarda la versión de macOS | un macOS que no lo acepta falla con "restoring the machine state" |
+| `mem.file` de kling-vz | `SaveMachineStateToPath` de Apple | `macos` en el meta (PR 2) | no invalida por adelantado (no hay regla conocida); si restaurar falla y el macOS o el kling-vz no son los del dorado, el error lo dice y da la orden para rehacerlo. Un `kling_vz` que el kling-vz no entiende se traduce igual |
 | firma de dorados | `secrets/snapshot.key`, `internal/machine/firma.go` | ninguna | la firma no cubre `kernel_sha256`, IPv6 ni anotaciones, así que añadir campos no la rompe |
 
 ### Imágenes y volúmenes
@@ -191,6 +191,18 @@ versión de kling que lo hizo. Al restaurar, si el VMM no es el mismo:
   `db` saben rehacerse: `kling mcp import`, `kling db golden`); los hechos a
   mano con `kling save` quedan marcados con la orden para rehacerlos.
 
+Cómo quedó en el PR 2 (`internal/machine/meta.go`): `stale` **no se guarda**,
+se calcula al leer comparando el `vmm` del meta con el `--version` del VMM que
+usa el daemon, así que volver al Firecracker de antes lo quita solo. Cuenta
+como obsoleto otro VMM u otra MAJOR.MINOR de Firecracker (el formato del
+volcado es suyo y lo sube en versiones menores; un parche no lo cambia). La
+versión de kling-vz no se compara: su volcado lleva `kling_vz` y el propio
+kling-vz rechaza el que no entiende, error que el daemon traduce a "rehazlo".
+La de macOS tampoco, porque no hay regla conocida: solo se menciona si la
+restauración falla. Afinar Firecracker con `firecracker --snapshot-version`
+(el número de formato en vez de la versión) queda para cuando se pueda probar
+en el laboratorio.
+
 Las máquinas **congeladas** con otro VMM no tienen quién las rehaga:
 `kling upgrade` las descongela y para (o avisa y pide `--force`) **antes** de
 cambiar el binario, que es cuando todavía se puede.
@@ -316,7 +328,7 @@ su prueba para siempre.
 | Prioridad | Qué | Por qué ahora |
 |---|---|---|
 | **P0** | `schema` en `state.json` | **hecho** en este cambio: sin él no hay forma de rechazar un fichero del futuro |
-| **P0** | `schema` en `meta.json` y versión de Firecracker/kling-vz/macOS y de kling en el dorado | es lo que permite marcar obsoletos en vez de fallar al despertar; los dorados de hoy se pueden tirar |
+| **P0** | `schema` en `meta.json` y versión de Firecracker/kling-vz/macOS y de kling en el dorado | **hecho** (PR 2): es lo que permite marcar obsoletos en vez de fallar al despertar |
 | **P0** | byte de versión en `credentials.enc` | es binario: añadirlo después obliga a adivinar si un fichero lo tiene |
 | **P0** | el agente y el puente ignoran `kling.*` desconocidos | cada imagen que se construye con el agente de hoy lleva el pánico dentro para siempre |
 | **P1** | `/healthz` del agente con `version` y `caps` | mismo motivo: lo que se hornea hoy es lo que habrá que soportar |
@@ -341,7 +353,7 @@ Esfuerzo: S ≈ medio día, M ≈ uno o dos días, L ≈ una semana.
 | # | PR | Qué incluye | Esfuerzo |
 |---|---|---|---|
 | 1 | **`pkg/esquema` y `state.json` v1** | helper común, `schema` en `state.json`, copia `.v0.bak`, el daemon no arranca con uno del futuro. Tests: versión 0 migra con copia; futura se rechaza sin pisarla | S — **hecho** |
-| 2 | `meta.json` v1 y dorados obsoletos | `schema`, `vmm` (`firecracker 1.17.0` / `kling-vz 0.18.0 macOS 26.1`) y `kling_version` en el meta; `stale` con causa en `kling snapshots` y `doctor`; conservar claves desconocidas en `editMeta` | M |
+| 2 | `meta.json` v1 y dorados obsoletos | `schema`, `vmm` (`firecracker 1.17.0` / `kling-vz 0.18.0`), `macos` y `kling_version` en el meta; `stale` con causa en `kling template ls`/`inspect` (en `doctor`, pendiente); `run -from` y `thaw` se niegan con la orden; conservar claves desconocidas en `editMeta` | M — **hecho** |
 | 3 | `credentials.enc` con byte de versión | `0x01` delante del nonce; sin él es v0 y se reescribe al abrir; un byte mayor se rechaza | S |
 | 4 | agente e invitado: parámetros desconocidos y `/healthz` con versión | ignorar `kling.*` desconocidos en `kling-guest` y `kling-bridge`; `/healthz` JSON si se pide con `Accept`; versión del agente en la receta | M |
 | 5 | `api` en `/info` y `max_api` en extensiones | cliente con aviso claro; `kling plugins` marca las que no casan; `kling_vz` a 2 | S |
@@ -371,6 +383,11 @@ sudo rm /var/lib/kindling/state.json.corrupt-*   # si el viejo llegó a arrancar
 # instalar el binario anterior
 sudo systemctl start kling
 ```
+
+Los `meta.json` de los dorados (PR 2) no hace falta restaurarlos: un kling
+≤ v0.17 los lee, e ignora `schema` y los campos nuevos. Si llega a anotar uno,
+lo reescribe sin ellos y vuelve a ser v0; la copia `meta.json.v0.bak` que dejó
+la primera migración sigue ahí y no se pisa.
 
 Las máquinas creadas **después** de migrar no están en la copia; sus
 directorios siguen en `machines/` y el modo protegido los respeta hasta que se
