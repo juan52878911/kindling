@@ -98,6 +98,8 @@ var coreTree = []section{
 	{title: "INSIDE A MACHINE", cmds: []plugin.Command{
 		{Name: "exec", Summary: "runs a command inside, streaming its output", MachineArgs: []string{""}, Usage: `  exec [-i] [-e K=V] [-w DIR] [-timeout D]         runs a command inside, streaming
       <ref> [--] <cmd> [args...]                   its output; exits with its code
+      [-e K] [-env-file F]                         secrets: from this env or a file
+                                                   (K=V shows in ps)
 `},
 		{Name: "shell", Summary: "interactive terminal inside", MachineArgs: []string{""}, Usage: `  shell [-e K=V] [-w DIR] [-t TERM] <ref>          interactive terminal inside
       [--] [cmd [args...]]                         (Ctrl-C reaches the program)

@@ -102,6 +102,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `kling connect` con token ya no llama a `claude mcp add --header` ni a `code
   --add-mcp` (el token en su argv): parchea el fichero del cliente o enseña el
   fragmento, y el de Zed pasa el token por el entorno de `mcp-remote`.
+- **`kling exec` y `kling shell`: `-e KEY` y `-env-file`.** Solo aceptaban `-e
+  KEY=valor`, que deja el secreto en el argv de `kling` (`ps`, historial). `-e KEY`
+  toma el valor del entorno del CLI y `-env-file F` de un fichero `KEY=valor`
+  ([exec-sandbox.md](docs/exec-sandbox.md#kling-exec)).
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora
