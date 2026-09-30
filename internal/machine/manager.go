@@ -188,6 +188,9 @@ type Manager struct {
 	// arranque en frío de cada microVM con volúmenes o carpetas compartidas.
 	// Ver imageHasBridgeCached.
 	bridgeOK sync.Map
+	// listoDeclarado memoriza, igual, qué imágenes declaran sonda o ganchos
+	// de "listo" (ver imagenDeclaraListo).
+	listoDeclarado sync.Map
 
 	// resyncAvisado recuerda por imagen que ya se avisó de que su agente no
 	// resincroniza (ver resyncGuest): un aviso por imagen, no uno por thaw.
@@ -282,6 +285,16 @@ type Manager struct {
 	// secretos: por máquina, las inyecciones por MMDS y si unos ganchos las
 	// consumieron (ver "LEVANTAR LA MARCA DE SECRETOS"). Bajo mu.
 	secretos map[string]*estadoSecreto
+
+	// transicion es la operación de ciclo de vida en curso de cada máquina
+	// que va a sacarla de su estado (api.Transition*). Con m.mu. Solo se
+	// copia a lo que devuelven List y Get: las entradas de byID no la llevan,
+	// así que tampoco llega al estado persistido. Ver marcarTransicion.
+	transicion map[string]string
+
+	// muertes serializa killMachine por máquina (ver killMachine). Aparte del
+	// cerrojo de ciclo de vida, que quien mata ya suele tener tomado.
+	muertes cerrojos
 
 	// credPlantillaMu serializa la lectura-fusión-escritura del almacén de
 	// credenciales de las plantillas (SetSnapshotCredentials).
@@ -711,6 +724,7 @@ func (m *Manager) List() []*api.Machine {
 		// candado global cogido, así que contar bytes bloqueaba arranques y
 		// congelaciones. Lo refresca el vigilante cada pocos segundos.
 		c := *mc
+		c.Transition = m.transicion[mc.ID]
 		out = append(out, &c)
 	}
 	m.mu.RUnlock()
@@ -811,15 +825,40 @@ func (m *Manager) get(ref string) (*api.Machine, bool) {
 	defer m.mu.RUnlock()
 	if mc, ok := m.byID[ref]; ok {
 		c := *mc
+		c.Transition = m.transicion[mc.ID]
 		return &c, true
 	}
 	for _, mc := range m.byID {
 		if mc.Name == ref || (len(ref) >= 4 && len(mc.ID) >= len(ref) && mc.ID[:len(ref)] == ref) {
 			c := *mc
+			c.Transition = m.transicion[mc.ID]
 			return &c, true
 		}
 	}
 	return nil, false
+}
+
+// marcarTransicion apunta que la máquina id está en medio de que (un
+// api.Transition*) y devuelve la función que lo retira. La llama quien tiene
+// el cerrojo de ciclo de vida de id, justo cuando ya sabe que va a seguir.
+//
+// Sin esto, un freeze de segundos se veía desde fuera como una máquina
+// "running" corriente: el planificador del gateway la adoptaba y enrutaba a
+// ella sesiones que morían con el volcado.
+func (m *Manager) marcarTransicion(id, que string) func() {
+	m.mu.Lock()
+	if m.transicion == nil {
+		m.transicion = map[string]string{}
+	}
+	m.transicion[id] = que
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		if m.transicion[id] == que {
+			delete(m.transicion, id)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) Count() int {
@@ -1582,8 +1621,23 @@ func waitSocket(ctx context.Context, c *fc.Client) error {
 	return fmt.Errorf("firecracker socket did not respond within 5s")
 }
 
+// errYaNoToca es la respuesta de freezeSi y removeSi cuando, con el cerrojo
+// tomado, la máquina ya no cumple lo que justificaba la operación.
+var errYaNoToca = errors.New("the machine no longer qualifies for this operation")
+
 // Freeze pausa la microVM, la vuelca a disco y libera su RAM y su proceso.
 func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) {
+	return m.freezeSi(ctx, ref, nil)
+}
+
+// freezeSi es Freeze, pero solo si sigue valiendo sigue(máquina) con el
+// cerrojo de ciclo de vida ya tomado; si no, errYaNoToca y no se toca nada.
+// sigue nil es congelar siempre.
+//
+// Es para quien decide congelar mirando una foto (el TTL): entre la foto y el
+// cerrojo pudo llegar un renew, y congelar entonces era congelar una máquina
+// que su dueño acababa de pedir conservar.
+func (m *Manager) freezeSi(ctx context.Context, ref string, sigue func(*api.Machine) bool) (*api.Machine, error) {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return nil, fmt.Errorf("machine %q doesn't exist", ref)
@@ -1600,6 +1654,9 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	}
 	if cur.State == api.StateWarm {
 		return cur, nil
+	}
+	if sigue != nil && !sigue(cur) {
+		return nil, errYaNoToca
 	}
 	mc = cur
 	// Una pausada se reanuda antes: hay que vaciar sus volúmenes y preguntar
@@ -1637,6 +1694,7 @@ func (m *Manager) Freeze(ctx context.Context, ref string) (*api.Machine, error) 
 	if sock == "" {
 		return nil, fmt.Errorf("no socket for %s", mc.ID)
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionFreezing)()
 
 	dir := m.dir(mc.ID)
 	snapPath, memPath := filepath.Join(dir, "snap.file"), filepath.Join(dir, "mem.file")
@@ -2652,6 +2710,7 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
 	}
+	defer m.marcarTransicion(mc.ID, api.TransitionStopping)()
 	m.kill(mc.ID)
 	// Una máquina parada no necesita namespace ni cgroup: se recrean al arrancar.
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
@@ -2684,6 +2743,17 @@ func (m *Manager) Stop(ref string) (*api.Machine, error) {
 
 // Remove para la máquina y borra su directorio, snapshot incluido.
 func (m *Manager) Remove(ref string) error {
+	return m.removeSi(ref, nil)
+}
+
+// removeSi es Remove, pero solo si sigue valiendo sigue(máquina) con el
+// cerrojo de ciclo de vida ya tomado; si no, errYaNoToca y no se toca nada.
+// sigue nil es borrar siempre.
+//
+// Lo usan los que deciden borrar mirando una foto sin cerrojo: el TTL con
+// on_ttl=remove (un renew pudo llegar entre medias) y la recogida de disco
+// (la congelada que eligió pudo despertarse con sesiones dentro).
+func (m *Manager) removeSi(ref string, sigue func(*api.Machine) bool) error {
 	mc, ok := m.Get(ref)
 	if !ok {
 		return fmt.Errorf("machine %q doesn't exist", ref)
@@ -2695,7 +2765,13 @@ func (m *Manager) Remove(ref string) error {
 	// Get es de antes de montar la red (NetIndex) y de lanzar el VMM.
 	if cur, ok := m.get(mc.ID); ok {
 		mc = cur
+	} else if sigue != nil {
+		return errYaNoToca
 	}
+	if sigue != nil && !sigue(mc) {
+		return errYaNoToca
+	}
+	defer m.marcarTransicion(mc.ID, api.TransitionRemoving)()
 	m.kill(mc.ID)
 	m.desmontarRed(knet.Plan(mc.NetIndex, mc.ID), mc.ID)
 	m.releaseCPU(mc.ID)
@@ -2744,17 +2820,37 @@ func (m *Manager) killMachine(id string, flush bool) {
 	// Las carpetas vivas primero: sus sesiones con el invitado van a morir, y
 	// es mejor cerrarlas que esperar a que el keepalive lo note.
 	m.stopShares(id)
+	// Dos kill de la misma máquina a la vez (un fail sin cerrojo de ciclo de
+	// vida contra un Stop) leían los dos el mismo PID; el segundo mandaba su
+	// SIGKILL cuando el primero ya lo había visto morir, y ese PID podía ser
+	// ya de otro proceso. Se hacen de uno en uno, y el que mata deja el PID a
+	// 0 (abajo): el siguiente ya no tiene a quién matar.
+	defer m.muertes.tomar(id)()
+	// Una COPIA tomada con el candado: la entrada viva la escriben otros
+	// (anotarListo, touchTTL...) con m.mu, y leer su State o sus volúmenes
+	// sin él era una carrera.
 	m.mu.RLock()
-	mc := m.byID[id]
+	var mc *api.Machine
+	if live := m.byID[id]; live != nil {
+		mc = live.Clone()
+	}
 	m.mu.RUnlock()
 	if mc == nil || mc.PID == 0 {
 		return
 	}
+	pid := mc.PID
 	// Una pausada no contesta: pedirle que vacíe se comería el plazo entero.
 	if flush && mc.State != api.StatePaused {
 		m.flushVolume(mc)
 	}
-	_ = syscall.Kill(mc.PID, syscall.SIGKILL)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	defer func() {
+		m.mu.Lock()
+		if live := m.byID[id]; live != nil && live.PID == pid {
+			live.PID = 0
+		}
+		m.mu.Unlock()
+	}()
 
 	// Esperar a que MUERA de verdad, no solo a mandar la señal.
 	//
@@ -2768,7 +2864,7 @@ func (m *Manager) killMachine(id string, flush bool) {
 	// Con tope: un firecracker que ignorase el SIGKILL (imposible, pero) no debe
 	// colgar el daemon. El proceso lo recoge la goroutine de cmd.Wait() del
 	// arranque, así que Kill(pid, 0) devuelve ESRCH en cuanto desaparece.
-	waitGone(mc.PID, 5*time.Second)
+	waitGone(pid, 5*time.Second)
 }
 
 // waitGone espera a que un pid desaparezca de la tabla de procesos.
