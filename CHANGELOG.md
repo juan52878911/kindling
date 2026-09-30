@@ -10,6 +10,10 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 
 ## Sin publicar
 
+- **`kling image build <nombre> ... -spec -` ya no lee el nombre como fichero de spec.** Un flag
+  con valor se lleva el siguiente argumento aunque empiece por `-` (como hace `flag`), así que
+  el nombre puede ir delante o detrás de los flags también con `-spec -` (stdin); antes fallaba
+  con `open <nombre>: no such file or directory`. Afecta a todos los subcomandos que reordenan.
 - **`kling <comando de extensión>` ya no ejecuta cada extensión para leer su manifiesto.**
   La salida de `--kling-manifest` se guarda en `~/.local/state/kling/plugins/manifests.json`
   (0600), válida mientras el binario sea el mismo fichero (inodo, tamaño, mtime, ctime…) y
