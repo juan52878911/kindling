@@ -328,6 +328,63 @@ fi
 # -bundle: colapsa node_modules en UN fichero con esbuild. El cuello del arranque de
 # node en la microVM no es el cómputo (ms) sino cargar cientos de ficheros; bajo KVM
 # anidado cada open/mmap se amplifica muchísimo. Un solo fichero mata esa tormenta.
+#
+# esbuild corre como root en el chroot del host, así que NO se baja con `npx --yes`
+# (sin versión fija y ejecutando los scripts de instalación: un postinstall
+# malicioso correría como root en el host). Se baja SOLO su binario nativo, del
+# paquete de plataforma (@esbuild/linux-x64 o linux-arm64), con versión fija y
+# comprobando el sha512 del tarball contra el de aquí; ni npm ni ningún script de
+# instalación intervienen. ESBUILD_TGZ=<fichero> usa un tarball local (sin red),
+# que se comprueba igual. Para subir de versión: `npm view @esbuild/linux-x64@V
+# dist.integrity` (y lo mismo con linux-arm64).
+ESBUILD_VERSION=0.25.10
+ESBUILD_SHA512_LINUX_X64="sha512-QSX81KhFoZGwenVyPoberggdW1nrQZSvfVDAIUXr3WqLRZGZqWk/P4T8p2SP+de2Sr5HPcvjhcJzEiulKgnxtA=="
+ESBUILD_SHA512_LINUX_ARM64="sha512-5luJWN6YKBsawd5f9i4+c+geYiVEw20FVW5x0v1kEMWNq8UctFjDiMATBxLvmmHA4bf7F6hTRaJgtghFr9iziQ=="
+
+# fetch_esbuild <directorio>: deja en <directorio>/esbuild el binario comprobado.
+fetch_esbuild() {
+  local plat sri
+  case "$(uname -m)" in
+    x86_64|amd64) plat=linux-x64; sri="$ESBUILD_SHA512_LINUX_X64" ;;
+    aarch64|arm64) plat=linux-arm64; sri="$ESBUILD_SHA512_LINUX_ARM64" ;;
+    *) echo "esbuild: arquitectura $(uname -m) sin binario fijado" >&2; return 1 ;;
+  esac
+  python3 - "https://registry.npmjs.org/@esbuild/$plat/-/$plat-$ESBUILD_VERSION.tgz" "$sri" "$1" "${ESBUILD_TGZ:-}" <<'PYESBUILD'
+import base64, hashlib, io, os, sys, tarfile, urllib.request
+url, sri, dst, local = sys.argv[1:5]
+if local:
+    data = open(local, "rb").read()
+else:
+    with urllib.request.urlopen(url, timeout=120) as r:
+        data = r.read(64 << 20)
+got = "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+if got != sri:
+    sys.exit("esbuild: the tarball's sha512 is not the pinned one (%s)" % url)
+os.makedirs(dst, mode=0o700, exist_ok=True)
+with tarfile.open(fileobj=io.BytesIO(data)) as t:
+    f = t.extractfile(t.getmember("package/bin/esbuild"))
+    out = os.path.join(dst, "esbuild")
+    with open(out, "wb") as o:
+        o.write(f.read())
+    os.chmod(out, 0o755)
+PYESBUILD
+}
+
+# valid_entry <ruta>: el fichero JS que se empaqueta viene de CMD[1] o del
+# readlink del bin del paquete, es decir, de quien pide la imagen. Solo una ruta
+# absoluta con caracteres de ruta: ni comillas ni $ ni ; (se pasa como argumento
+# y no por un shell, pero por si acaso) y sin - delante (sería un flag de esbuild).
+valid_entry() {
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._@+/-]*) return 1 ;;
+  esac
+  return 0
+}
+
 if [ "$BUNDLE" = 1 ]; then
   if [ -z "$NPM" ]; then
     echo "AVISO: -bundle solo aplica a servidores node (-n); se ignora" >&2
@@ -338,14 +395,18 @@ if [ "$BUNDLE" = 1 ]; then
       node|/usr/bin/node|/usr/local/bin/node) ENTRY="${CMD[1]}"; REST=("${CMD[@]:2}") ;;
       *) ENTRY="$(chroot "$mnt" /usr/bin/readlink -f "/usr/local/bin/$(basename "${CMD[0]}")" 2>/dev/null)"; REST=("${CMD[@]:1}") ;;
     esac
+    if [ -n "$ENTRY" ] && ! valid_entry "$ENTRY"; then
+      echo "AVISO: -bundle: el entry JS no es una ruta absoluta limpia; sin empaquetar" >&2
+      ENTRY=""
+    fi
     if [ -n "$ENTRY" ] && chroot "$mnt" /usr/bin/test -f "$ENTRY"; then
-      echo "empaquetando con esbuild: $ENTRY -> /opt/$NAME.bundle.mjs"
-      cp /etc/resolv.conf "$mnt/etc/resolv.conf" 2>/dev/null || true
-      mount --bind /proc "$mnt/proc" 2>/dev/null || true
-      # esbuild se baja por npx (una vez) y corre en musl; --ignore-scripts ya se
-      # aplicó al instalar el paquete, esto solo transforma JS ya presente.
-      if chroot "$mnt" /bin/sh -c "cd /opt && npx --yes esbuild '$ENTRY' --bundle --platform=node --format=esm --outfile=/opt/$NAME.bundle.mjs"; then
-        chroot "$mnt" /bin/sh -c 'rm -rf /root/.npm' 2>/dev/null || true
+      echo "empaquetando con esbuild $ESBUILD_VERSION: $ENTRY -> /opt/$NAME.bundle.mjs"
+      EB_DIR="$mnt/tmp/kling-esbuild"
+      rm -rf "$EB_DIR"
+      # Binario estático de Go: corre igual en musl y sin /proc. Sin shell de por
+      # medio: ENTRY va como argumento y no se interpreta.
+      if fetch_esbuild "$EB_DIR" && chroot "$mnt" /tmp/kling-esbuild/esbuild "$ENTRY" --bundle --platform=node --format=esm "--outfile=/opt/$NAME.bundle.mjs"; then
+        rm -rf "$EB_DIR"
         # EL package.json VA JUNTO AL BUNDLE. Hay servidores que leen su versión del
         # package.json EN TIEMPO DE EJECUCIÓN, no al compilar: server-sequential-thinking
         # (dist/version.js) parte de import.meta.url y mira <dir>/package.json y
@@ -359,7 +420,7 @@ if [ "$BUNDLE" = 1 ]; then
         # Se copia el MISMO package.json que encontraría sin empaquetar: subiendo
         # desde el directorio del entry hasta el primero que declare "version" (un
         # dist/package.json con solo {"type":"module"} no vale, y el servidor también
-        # lo saltaría). Se copia entero y después de esbuild, para que npx no lo tome
+        # lo saltaría). Se copia entero y después de esbuild, para que esbuild no lo tome
         # por un proyecto en /opt.
         PKG_DIR="$(dirname "$ENTRY")"
         while [ "$PKG_DIR" != "/" ] && ! grep -q '"version"' "$mnt$PKG_DIR/package.json" 2>/dev/null; do
@@ -376,9 +437,9 @@ if [ "$BUNDLE" = 1 ]; then
         CMD=(node "/opt/$NAME.bundle.mjs" ${REST[@]+"${REST[@]}"})
         echo "  ✓ bundle listo; el arranque cargará 1 fichero en vez de node_modules entero"
       else
+        rm -rf "$EB_DIR"
         echo "AVISO: esbuild falló; se deja el servidor SIN empaquetar (arranca por node_modules)" >&2
       fi
-      umount "$mnt/proc" 2>/dev/null || true
     else
       echo "AVISO: -bundle no pudo resolver el entry JS de '${CMD[0]}'; sin empaquetar" >&2
     fi

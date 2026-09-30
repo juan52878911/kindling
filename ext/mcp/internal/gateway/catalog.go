@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -251,30 +250,74 @@ func (c *catalog) fetch(ctx context.Context, service string) ([]Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
-	raw, err := mcpCall(ctx, base, sid,
-		fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list"}`, nextRPCID()))
+	listed, err := listTools(ctx, base, sid)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", service, err)
 	}
-
-	var out struct {
-		Result struct {
-			Tools []struct {
-				Name        string          `json:"name"`
-				Description string          `json:"description"`
-				InputSchema json.RawMessage `json:"inputSchema"`
-			} `json:"tools"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("%s: unreadable response: %w", service, err)
-	}
-
-	tools := make([]Tool, 0, len(out.Result.Tools))
-	for _, t := range out.Result.Tools {
+	tools := make([]Tool, 0, len(listed))
+	for _, t := range listed {
 		tools = append(tools, newTool(service, t.Name, t.Description, t.InputSchema))
 	}
 	return tools, nil
+}
+
+// Topes de la paginación de tools/list: un servidor que devolviera cursores sin
+// fin no puede tener al gateway pidiendo páginas para siempre.
+const (
+	maxToolPages = 64
+	maxTools     = 4096
+)
+
+type listedTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
+}
+
+// listTools pide tools/list siguiendo nextCursor hasta la última página. Sin
+// seguirlo, un servidor que pagina solo enseñaba la primera. Pasarse de los
+// topes, o un cursor que se repite, es un error: truncar callado dejaría
+// herramientas fuera sin que nadie lo supiera.
+func listTools(ctx context.Context, base, sid string) ([]listedTool, error) {
+	var all []listedTool
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxToolPages {
+			return nil, fmt.Errorf("tools/list: more than %d pages", maxToolPages)
+		}
+		params := ""
+		if cursor != "" {
+			c, _ := json.Marshal(map[string]string{"cursor": cursor})
+			params = `,"params":` + string(c)
+		}
+		raw, err := mcpCall(ctx, base, sid,
+			fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list"%s}`, nextRPCID(), params))
+		if err != nil {
+			return nil, err
+		}
+		var out struct {
+			Result struct {
+				Tools      []listedTool `json:"tools"`
+				NextCursor string       `json:"nextCursor"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, fmt.Errorf("unreadable response: %w", err)
+		}
+		all = append(all, out.Result.Tools...)
+		if len(all) > maxTools {
+			return nil, fmt.Errorf("tools/list: more than %d tools", maxTools)
+		}
+		cursor = out.Result.NextCursor
+		if cursor == "" {
+			return all, nil
+		}
+		if seen[cursor] {
+			return nil, fmt.Errorf("tools/list: the server repeated the cursor %q", cursor)
+		}
+		seen[cursor] = true
+	}
 }
 
 // all recopila las herramientas de los servicios indicados.
@@ -401,9 +444,11 @@ func mcpCallAt(ctx context.Context, url, sid, body string) (json.RawMessage, err
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
+	// Con tope: el invitado puede estar comprometido y el gateway se comparte;
+	// una respuesta sin fin lo tumbaría por memoria. Se falla, no se trunca.
+	b, err := api.LeerCuerpo(resp.Body, maxProxyBody)
+	if err != nil {
 		return nil, err
 	}
-	return mcp.MCPPayload(buf.Bytes()), nil
+	return mcp.MCPPayload(b), nil
 }

@@ -14,7 +14,7 @@
 #   ./scripts/90-e2e.sh                          contra kling del PATH, gateway
 #                                                en http://127.0.0.1:8080
 #   GATEWAY=http://192.168.2.60:8080 ./90-e2e.sh  otro gateway
-#   KLING_HOST=ssh://juan@192.168.2.60 ./90-e2e.sh  daemon remoto (kling lo lee
+#   KLING_HOST=ssh://usuario@192.168.2.60 ./90-e2e.sh  daemon remoto (kling lo lee
 #                                                de KLING_HOST, igual que el
 #                                                resto de kling-mcp)
 #   KLING_GATEWAY_TOKEN=xxx ./90-e2e.sh          token a mano, en vez de leer

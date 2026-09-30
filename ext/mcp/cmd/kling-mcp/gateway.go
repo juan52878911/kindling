@@ -300,19 +300,33 @@ func resolveGatewayToken(cfg *config.Config, noAuth bool, addr string) (string, 
 	// Pasa con systemd, donde ProtectHome deja su configuración en solo lectura,
 	// y ahí lo grave no es el fallo sino el silencio: el token cambiaría en cada
 	// reinicio y todos los agentes ya configurados dejarían de entrar.
+	//
+	// El token NUNCA se imprime entero: bajo systemd la salida acaba en el
+	// journal, que leen más usuarios que el fichero 0600 de la configuración.
 	if err := cfg.Save(); err != nil {
-		fmt.Printf("\nWARNING: I generated a token but couldn't save it to %s (%v).\n", config.Path(), err)
-		fmt.Printf("       It WILL CHANGE on every restart. Pin it so that doesn't happen:\n")
-		fmt.Printf("         Environment=KLING_GATEWAY_TOKEN=%s\n\n", t)
+		fmt.Printf("\nWARNING: I generated a token (%s) but couldn't save it to %s (%v).\n", tokenPrefix(t), config.Path(), err)
+		fmt.Printf("       It WILL CHANGE on every restart. Pin one in a 0600 file so that doesn't happen:\n")
+		fmt.Printf("         umask 077; printf 'KLING_GATEWAY_TOKEN=%%s\\n' \"$(head -c 32 /dev/urandom | base64 | tr -d '/+=\\n')\" > /etc/kindling/gateway.env\n")
+		fmt.Printf("         EnvironmentFile=/etc/kindling/gateway.env   (in the unit)\n\n")
 		return t, nil
 	}
 
-	// La única vez que se imprime entero. A partir de aquí `config show` lo
-	// enmascara, porque esa orden se teclea con gente mirando la pantalla.
-	fmt.Printf("token generated and saved to %s\n\n", config.Path())
-	fmt.Printf("  On the machine where you use the CLI:\n")
-	fmt.Printf("    kling config set gateway.token %s\n\n", t)
+	fmt.Printf("token %s generated and saved to %s (mode 0600)\n\n", tokenPrefix(t), config.Path())
+	fmt.Printf("  On the machine where you use the CLI (through a pipe, not argv):\n")
+	fmt.Printf("    %s\n\n", tokenPipeHint)
 	return t, nil
+}
+
+// tokenPipeHint es cómo copiar el token de un host a otro sin que pase por la
+// línea de comandos de nadie (ps, historial).
+const tokenPipeHint = "ssh <gateway-host> kling config get gateway.token -reveal | kling config set gateway.token -"
+
+// tokenPrefix es lo que se enseña de un token: lo justo para reconocerlo.
+func tokenPrefix(t string) string {
+	if len(t) <= 6 {
+		return "…"
+	}
+	return t[:6] + "…"
 }
 
 // ── máquinas ──────────────────────────────────────────────────────────────────

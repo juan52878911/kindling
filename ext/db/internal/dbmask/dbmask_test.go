@@ -99,7 +99,7 @@ func catalogo() *Catalog {
 			{Schema: "public", Table: "users", Column: "email", Type: "text", Category: "S"},
 			{Schema: "public", Table: "users", Column: "full_name", Type: "character varying(80)", Category: "S"},
 			{Schema: "public", Table: "users", Column: "display", Type: "text", Category: "S", Generated: true},
-			{Schema: "public", Table: "users", Column: "notes", Type: "text", Category: "S"},
+			{Schema: "public", Table: "users", Column: "summary", Type: "text", Category: "S"},
 			{Schema: "public", Table: "users", Column: "last_ip", Type: "inet", Category: "I"},
 			{Schema: "public", Table: "orders", Column: "id", Type: "integer", Category: "N"},
 			{Schema: "public", Table: "orders", Column: "customer_email", Type: "text", Category: "S"},
@@ -137,8 +137,8 @@ func TestPlanBloqueaSospechosasSinRegla(t *testing.T) {
 			t.Errorf("%s should block; got %v", k, got)
 		}
 	}
-	// La partición la cubre su raíz; la generada se recalcula; notes no dice nada.
-	for _, k := range []string{"public.events_2026.email", "public.users.display", "public.users.notes", "public.users.email"} {
+	// La partición la cubre su raíz; la generada se recalcula; summary no dice nada.
+	for _, k := range []string{"public.events_2026.email", "public.users.display", "public.users.summary", "public.users.email"} {
 		if got[k] {
 			t.Errorf("%s should not block", k)
 		}
@@ -161,10 +161,10 @@ func TestPlanStrict(t *testing.T) {
 	}
 	_, err := NewPlan(catalogo(), rs, Options{Strict: true})
 	var ue *UnmaskedError
-	if !errors.As(err, &ue) || len(ue.Columns) != 1 || ue.Columns[0].Key() != "public.users.notes" {
-		t.Fatalf("strict should flag only users.notes: %v", err)
+	if !errors.As(err, &ue) || len(ue.Columns) != 1 || ue.Columns[0].Key() != "public.users.summary" {
+		t.Fatalf("strict should flag only users.summary: %v", err)
 	}
-	rs = mustRules(t, reglasBuenas+"users.notes: text\n")
+	rs = mustRules(t, reglasBuenas+"users.summary: text\n")
 	if _, err := NewPlan(catalogo(), rs, Options{Strict: true}); err != nil {
 		t.Fatal(err)
 	}

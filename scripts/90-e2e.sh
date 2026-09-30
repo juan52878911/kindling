@@ -1455,7 +1455,7 @@ for k, v in (("CLA_HOST", d.hostname), ("CLA_PORT", d.port or 5432), ("CLA_USER"
   # Los valores "de producción": ninguno puede aparecer en la salida ni en el golden.
   ORIG="ana.garcia@correo-real.es luis.perez@correo-real.es marta.ruiz@correo-real.es García Pérez Ruiz +34600111222 +34600333444 4111111111111111 5500000000000004"
   out=$(adm "$CLA_DB" "CREATE DATABASE $CLDB" && adm "$CLA_DB" "CREATE ROLE $CLRO LOGIN PASSWORD '$CLPW'" && adm "$CLDB" "
-    CREATE TABLE users (id int PRIMARY KEY, email text UNIQUE NOT NULL, full_name text, phone text, notes text);
+    CREATE TABLE users (id int PRIMARY KEY, email text UNIQUE NOT NULL, full_name text, phone text, tier text);
     CREATE TABLE orders (id int PRIMARY KEY, customer_email text REFERENCES users(email), card text, total numeric);
     INSERT INTO users VALUES (1, 'ana.garcia@correo-real.es', 'Ana García', '+34600111222', 'vip'),
       (2, 'luis.perez@correo-real.es', 'Luis Pérez', '+34600333444', NULL), (3, 'marta.ruiz@correo-real.es', 'Marta Ruiz', NULL, 'x');
@@ -1498,7 +1498,7 @@ for k, v in (("CLA_HOST", d.hostname), ("CLA_PORT", d.port or 5432), ("CLA_USER"
       [ "$out" = 3 ] && ok "golden: el join por correo sigue casando (determinista)" || bad "join enmascarado" 3 "$out"
       out=$(clsql "SELECT count(DISTINCT customer_email) || ' ' || count(DISTINCT card) FROM orders")
       [ "$out" = "2 2" ] && ok "golden: mismo valor, mismo enmascarado" || bad "determinismo" "2 2" "$out"
-      out=$(clsql "SELECT count(*) FILTER (WHERE phone IS NULL) || ' ' || (SELECT notes FROM users WHERE id = 1) FROM users")
+      out=$(clsql "SELECT count(*) FILTER (WHERE phone IS NULL) || ' ' || (SELECT tier FROM users WHERE id = 1) FROM users")
       [ "$out" = "1 vip" ] && ok "golden: los NULL siguen NULL y lo no sospechoso queda" || bad "NULL y columnas sin regla" "1 vip" "$out"
       todo="$(clsql "SELECT string_agg(u::text, ' ') FROM users u") $(clsql "SELECT string_agg(o::text, ' ') FROM orders o")"
       fuga=""

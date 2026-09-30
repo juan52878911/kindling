@@ -2,7 +2,7 @@
 # código a través de un frontal.
 #
 #   make install                       kling-sandbox en tu máquina
-#   make deploy HOST=ssh://juan@lab    el frontal en el host del daemon
+#   make deploy HOST=ssh://usuario@lab    el frontal en el host del daemon
 #
 # Necesita kling instalado (de la misma release): esto no hace nada por su
 # cuenta, añade `kling sbx` y habla con uno o varios daemons de kindling por su
@@ -52,7 +52,12 @@ deploy: linux
 	scp -q packaging/kling-sandbox.service $(TARGET):/tmp/
 	ssh $(TARGET) 'test -x /usr/local/bin/kling || { echo "falta kling en el host: despliega kindling primero" >&2; exit 1; } && \
 		sudo install -m755 /tmp/$(BIN) /usr/local/bin/$(BIN) && \
-		sudo install -m644 /tmp/kling-sandbox.service /etc/systemd/system/ && \
+		KU=$$( . /etc/default/kling 2>/dev/null; echo "$${KLING_SOCKET_USER:-$$(id -un)}" ) && \
+		KG=$$(id -gn "$$KU") && \
+		for u in kling-sandbox.service; do \
+		  sed -e "s/@KLING_USER@/$$KU/" -e "s/@KLING_GROUP@/$$KG/" /tmp/$$u | sudo tee /etc/systemd/system/$$u >/dev/null && \
+		  sudo chmod 644 /etc/systemd/system/$$u || exit 1; \
+		done && \
 		sudo install -d -m755 /etc/kling && \
 		( [ -s /etc/kling/sandbox.env ] || \
 		  ( sudo install -m600 /dev/null /etc/kling/sandbox.env && \
@@ -64,9 +69,8 @@ deploy: linux
 		sudo systemctl restart kling-sandbox && sleep 1 && systemctl is-active kling-sandbox'
 	@echo "frontal desplegado en $(TARGET)"
 	@echo
-	@echo "Apunta tu CLI al token:"
-	@echo "  kling config set sandbox.token \\"
-	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/sandbox.env')"
+	@echo "Apunta tu CLI al token (por una tubería, no como argumento):"
+	@echo "  ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/sandbox.env' | kling config set sandbox.token -"
 
 ## test — lo mismo que corre el CI
 test:

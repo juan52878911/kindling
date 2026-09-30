@@ -73,7 +73,9 @@ baja sus *companions* (p. ej. `kling-bridge` para `mcp`) y lo deja en el
 directorio de extensiones. Los detalles, en [`extensions.md`](extensions.md).
 
 La parte de host (unidades de systemd de `mcp` y `sandbox`) viene en los
-`kindling-*-host.tar.gz`; el operador, en `kindling-operator-deploy.tar.gz` o
+`kindling-*-host.tar.gz`, con `User=@KLING_USER@` y `Group=@KLING_GROUP@` por rellenar
+con el usuario al que el daemon cede su socket (`KLING_SOCKET_USER`; `make deploy` lo
+hace solo, y sin rellenar la unidad no arranca); el operador, en `kindling-operator-deploy.tar.gz` o
 `kubectl apply -f ext/sandbox/deploy/` desde el repo
 ([`kubernetes.md`](kubernetes.md)).
 

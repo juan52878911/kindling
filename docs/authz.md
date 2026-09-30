@@ -127,6 +127,13 @@ y **la pone el daemon**:
 Un admin sí puede poner `kling.owner` (crear algo a nombre de un inquilino, o
 reasignarlo), y su cuerpo no se toca.
 
+`kindling-sandbox` (el frontal, que habla con el daemon como admin) solo trata como
+suyo lo que **no** lleva `kling.owner`: una máquina con `kind=sandbox`, `template` o
+`tenant`, un grafo `sbxg-*` o un snapshot `sbx-<plantilla>` que un inquilino del daemon
+haya creado con esas etiquetas no se reparte a sus clientes, no se cuenta en el fondo
+ni se limpia (el snapshot se reconstruye encima). Sin política, `kling.owner` está
+vacío y no cambia nada.
+
 ### `kling db` y el proxy de credenciales
 
 `kling.db.owner` lo elige quien crea la copia (`kling db -owner`, `local` por

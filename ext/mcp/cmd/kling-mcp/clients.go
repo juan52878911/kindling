@@ -140,14 +140,18 @@ func clients() []client {
 			paths:  []string{home(".config", "zed", "settings.json")},
 			manual: "Zed doesn't speak remote MCP over HTTP yet, and its settings.json allows comments that an automatic patch would destroy",
 			snippet: func(name, url, token string) string {
-				// El rodeo es un proxy de stdio que reenvía a la URL.
+				// El rodeo es un proxy de stdio que reenvía a la URL. El token
+				// va en su entorno y mcp-remote lo expande en la cabecera: en
+				// args quedaría en el argv del proceso (ps).
 				args := []string{"-y", "mcp-remote", url}
+				env := ""
 				if token != "" {
-					args = append(args, "--header", "Authorization: Bearer "+token)
+					args = append(args, "--header", "Authorization:${KLING_AUTH_HEADER}")
+					env = fmt.Sprintf(", \"env\": %s", mustJSON(map[string]string{"KLING_AUTH_HEADER": "Bearer " + token}))
 				}
 				return fmt.Sprintf("  in ~/.config/zed/settings.json, inside \"context_servers\":\n"+
-					"    %q: {\"source\": \"custom\", \"command\": {\"path\": \"npx\", \"args\": %s}}",
-					name, mustJSON(args))
+					"    %q: {\"source\": \"custom\", \"command\": {\"path\": \"npx\", \"args\": %s%s}}",
+					name, mustJSON(args), env)
 			},
 		},
 	}
@@ -231,7 +235,9 @@ func (c client) text(name, url, token string) string {
 		return c.snippet(name, url, token)
 	}
 	var b strings.Builder
-	if c.cliArgs != nil {
+	// Con token no se sugiere la orden: lo llevaría en su argv (ps) y en el
+	// historial del shell de quien la pegue.
+	if c.cliArgs != nil && token == "" {
 		fmt.Fprintf(&b, "  %s %s\n\n", c.bin, strings.Join(quoteAll(c.cliArgs(name, url, token)), " "))
 	}
 	if p := c.configPath(); p != "" {
@@ -246,8 +252,11 @@ func (c client) text(name, url, token string) string {
 // install registra el endpoint en este cliente.
 func (c client) install(name, url, token string) error {
 	// 1. La vía oficial, si la hay: no toca el fichero del usuario y sobrevive
-	//    a que el cliente cambie su formato por debajo.
-	if c.cliArgs != nil {
+	//    a que el cliente cambie su formato por debajo. Pero solo sin token:
+	//    `claude mcp add --header` y `code --add-mcp` lo llevan en su argv, que
+	//    cualquier usuario del host lee en ps. Con token se parchea el fichero
+	//    (0600 si lo creamos) o se enseña el fragmento.
+	if c.cliArgs != nil && token == "" {
 		if _, err := exec.LookPath(c.bin); err == nil {
 			out, err := exec.Command(c.bin, c.cliArgs(name, url, token)...).CombinedOutput()
 			if err == nil {

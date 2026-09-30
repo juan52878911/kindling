@@ -10,8 +10,13 @@ Type=oneshot
 # Mismo usuario que el gateway: habla con el daemon por su socket Unix, y toda
 # la parte privilegiada (crear microVMs, congelarlas) vive al otro lado, en
 # kling.service. El vigía no necesita root para pedirlo.
-User=juan
-Group=juan
+# Quién: el usuario al que el daemon cede su socket (KLING_SOCKET_USER en
+# /etc/default/kling, ver packaging/kling.service del núcleo). `make deploy` rellena
+# @KLING_USER@ y @KLING_GROUP@ con él; si instalas la unidad a mano (desde el tarball
+# de la release), cámbialos tú. Sin rellenar, la unidad no arranca: mejor eso que
+# correr con un usuario cualquiera que resulte existir en el host.
+User=@KLING_USER@
+Group=@KLING_GROUP@
 
 # En serie y sin prisa. Reconstruir un servicio son 15-40 s y arranca una microVM
 # que reserva su memoria por adelantado: nueve en paralelo competirían justo por

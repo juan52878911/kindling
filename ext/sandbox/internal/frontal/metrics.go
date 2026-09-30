@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/juan52878911/kindling/ext/sandbox/internal/hosts"
+	"github.com/juan52878911/kindling/ext/sandbox/internal/plantilla"
 	"github.com/juan52878911/kindling/pkg/api"
 )
 
@@ -164,7 +165,7 @@ func (s *Servidor) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	precalentadas := map[string]int64{}
 	for _, ms := range porHost {
 		for _, mc := range ms {
-			if mc.Labels[api.LabelKind] != api.KindSandbox {
+			if mc.Labels[api.LabelKind] != api.KindSandbox || !plantilla.DelFrontal(mc.Labels) {
 				continue
 			}
 			tenant := mc.Labels[LabelTenant]

@@ -193,9 +193,8 @@ cron vale igual (o un `launchd` con `StartInterval`), con las mismas reglas del 
   como `opencode run --pure -m <modelo> --format json`:
   - `--pure`, sin plugins; **nunca** `--auto`.
   - En un directorio temporal nuevo y vacío (0700) que se borra al acabar.
-  - El prompt (instrucciones, esquema y pregunta) va por argumento hasta 100 KiB (lo
-    puede ver con `ps` cualquier usuario del equipo; no lleva secretos) y, si es mayor,
-    en un fichero adjunto de ese directorio.
+  - El prompt (instrucciones, esquema y pregunta) va siempre por **stdin**, sea del
+    tamaño que sea: por argumento lo vería con `ps` cualquier usuario del equipo.
   - Solo se aceptan los eventos `text` y `step_start`/`step_finish`. Si opencode intenta
     usar una herramienta, pide un permiso o falla, `ask` aborta y mata el proceso.
   - El entorno del proceso es **el tuyo**, sin filtrar: opencode necesita su configuración

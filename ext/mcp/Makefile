@@ -1,7 +1,7 @@
 # kindling-mcp — la extensión de kling que aloja servidores MCP en microVMs.
 #
 #   make install                       kling-mcp y el puente local en tu máquina
-#   make deploy HOST=ssh://juan@lab    extensión, puente, empaquetador y gateway
+#   make deploy HOST=ssh://usuario@lab    extensión, puente, empaquetador y gateway
 #                                      en el host del daemon
 #
 # Necesita kindling ya instalado: kling-mcp no hace nada por su cuenta, añade
@@ -102,8 +102,13 @@ deploy: linux bridge
 		sudo install -m755 /tmp/kling-bridge /usr/local/lib/kindling/kling-bridge && \
 		sudo install -m755 /tmp/80-mcp-image.sh /usr/local/lib/kindling/80-mcp-image.sh && \
 		sudo install -m755 /tmp/builder-mcp /usr/local/lib/kindling/builders/mcp && \
-		sudo install -m644 /tmp/kling-gateway.service /tmp/kling-heal.service \
-			/tmp/kling-heal.timer /etc/systemd/system/ && \
+		KU=$$( . /etc/default/kling 2>/dev/null; echo "$${KLING_SOCKET_USER:-$$(id -un)}" ) && \
+		KG=$$(id -gn "$$KU") && \
+		for u in kling-gateway.service kling-heal.service; do \
+		  sed -e "s/@KLING_USER@/$$KU/" -e "s/@KLING_GROUP@/$$KG/" /tmp/$$u | sudo tee /etc/systemd/system/$$u >/dev/null && \
+		  sudo chmod 644 /etc/systemd/system/$$u || exit 1; \
+		done && \
+		sudo install -m644 /tmp/kling-heal.timer /etc/systemd/system/ && \
 		sudo install -d -m755 /etc/kling && \
 		( [ -s /etc/kling/gateway.env ] || \
 		  ( sudo install -m600 /dev/null /etc/kling/gateway.env && \
@@ -124,9 +129,9 @@ deploy: linux bridge
 	@echo "El puente vive DENTRO de cada imagen. Ponlo al día en las ya construidas:"
 	@echo "  kling mcp refresh-bridge"
 	@echo
-	@echo "Apunta tu CLI al token del gateway (se generó una vez, se conserva):"
-	@echo "  kling config set gateway.token \\"
-	@echo "    \$$(ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/gateway.env')"
+	@echo "Apunta tu CLI al token del gateway (se generó una vez, se conserva; por"
+	@echo "una tubería, no como argumento):"
+	@echo "  ssh $(TARGET) 'sudo cut -d= -f2 /etc/kling/gateway.env' | kling config set gateway.token -"
 	@echo "  kling connect -all -install all"
 
 ## deploy-mac — deploy con GOARCH=arm64, para una VM Lima en un Mac Apple Silicon
