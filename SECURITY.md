@@ -1119,6 +1119,16 @@ ese proceso puede tocar y cuánto puede gastar son barreras en sí mismas.
   conexión abierta del daemon: el reenvío la aceptaba y le daba el agente del invitado
   (exec). Ahora el socket tiene que ser IPv4 y casar en las dos direcciones además de en
   los dos puertos.
+- **Lo que el invitado abre contra `kling-vz` está acotado, también en egress none**
+  (`vz/internal/vnet`, `vz/internal/egress/dns.go`). Cada flujo UDP y cada conexión TCP al
+  53 retienen goroutines hasta su plazo de inactividad, y no había tope: 3000 flujos al 53
+  dejaban ~2800 goroutines vivas, y cada consulta abría su socket hacia el upstream. Ahora,
+  por máquina: 64 flujos UDP al 53 y 64 conexiones TCP al 53 a la vez (por encima, el
+  flujo se descarta y la conexión recibe un RST), 256 flujos UDP de salida, y hacia el
+  upstream los mismos topes que el resolver de Linux: 32 consultas en vuelo y un cubo de
+  200/s con ráfagas de 400 (por encima, SERVFAIL sin tocar la red), también para las
+  búsquedas del proxy de credenciales. Una respuesta del upstream con otro id o con otra
+  pregunta no se entrega ni siembra la allowlist (como `responseMatches` en Linux).
 
 ## Lo que NO está resuelto
 

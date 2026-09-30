@@ -68,6 +68,11 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
   `bind(IP-LAN:X)` + `connect(127.0.0.1:P)` desde otra cuenta pasaba por del daemon y
   llegaba al agente del invitado. Ahora compara también direcciones y familia.
   `SECURITY.md` §22.
+- **macOS: un invitado ya no puede agotar `kling-vz` a base de DNS y flujos**, tampoco
+  en egress none. 3000 flujos UDP al 53 dejaban ~2800 goroutines; ahora hay topes por
+  máquina (64 flujos UDP y 64 conexiones TCP al 53, 256 flujos UDP de salida) y hacia el
+  upstream los de Linux (32 en vuelo, 200/s con ráfagas de 400). Y una respuesta con
+  otro id u otra pregunta ya no siembra la allowlist. `SECURITY.md` §22.
 
 ## v0.17.0 — 2026-09-29
 

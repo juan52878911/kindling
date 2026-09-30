@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,12 +26,105 @@ const DefaultUpstream = "1.1.1.1:53"
 // maxDNSMsg acota lo que se acepta de un mensaje DNS por TCP.
 const maxDNSMsg = 64 << 10
 
+// Topes hacia el upstream, los mismos que el resolver del núcleo en Linux
+// (internal/net/dnsresolver.go). Cada Resolver es de UNA máquina (uno por
+// kling-vz), así que son topes por máquina.
+//
+// MaxInFlight acota cuántas consultas esperan a la vez al upstream (un socket
+// y una goroutine cada una, hasta 5 s). Rate y Burst son el cubo de tokens:
+// ~200 consultas por segundo en régimen, ráfagas de hasta 400. Por encima de
+// cualquiera de los dos se contesta SERVFAIL en el sitio, sin tocar la red.
+// Sin ellos, un invitado que dispara consultas sin esperar respuesta hacía
+// abrir a kling-vz un socket por consulta, sin límite.
+const (
+	MaxInFlight = 32
+	Rate        = 200
+	Burst       = 400
+)
+
 // Resolver contesta las consultas DNS del invitado según la política.
 type Resolver struct {
 	Policy *Policy
 	// Exchange manda una consulta cruda al upstream y devuelve la respuesta. Es
 	// un campo para poder probar la lógica sin red.
 	Exchange func(ctx context.Context, query []byte, viaTCP bool) ([]byte, error)
+
+	topes    sync.Once
+	enVuelo  chan struct{}
+	limitado *cubo
+}
+
+// reenviar pasa la consulta al upstream si caben en los topes (MaxInFlight,
+// Rate/Burst) y solo devuelve una respuesta que lo sea de esa consulta: mismo
+// id y misma pregunta. ok=false es SERVFAIL.
+func (r *Resolver) reenviar(ctx context.Context, query []byte, viaTCP bool) ([]byte, bool) {
+	r.topes.Do(func() {
+		r.enVuelo = make(chan struct{}, MaxInFlight)
+		r.limitado = nuevoCubo(Rate, Burst)
+	})
+	if !r.limitado.permite() {
+		return nil, false
+	}
+	select {
+	case r.enVuelo <- struct{}{}:
+	default:
+		return nil, false
+	}
+	defer func() { <-r.enVuelo }()
+	resp, err := r.Exchange(ctx, query, viaTCP)
+	if err != nil || !ResponseMatches(query, resp) {
+		return nil, false
+	}
+	return resp, true
+}
+
+// ResponseMatches dice si resp es la respuesta a query: mismo id de
+// transacción y misma pregunta (nombre sin distinguir mayúsculas y tipo). Es
+// la comprobación de responseMatches del núcleo: no sustituye a DNSSEC, pero
+// impide sembrar la allowlist con una respuesta que no se pidió.
+func ResponseMatches(query, resp []byte) bool {
+	if len(query) < 12 || len(resp) < 12 {
+		return false
+	}
+	if binary.BigEndian.Uint16(query[0:2]) != binary.BigEndian.Uint16(resp[0:2]) {
+		return false
+	}
+	qn, qt, ok := ParseQuestion(query)
+	if !ok {
+		return false
+	}
+	rn, rt, ok := ParseQuestion(resp)
+	if !ok || qt != rt {
+		return false
+	}
+	norm := func(s string) string { return strings.TrimSuffix(strings.ToLower(s), ".") }
+	return norm(qn) == norm(rn)
+}
+
+// cubo es un cubo de tokens: rate por segundo, hasta burst acumulados.
+type cubo struct {
+	mu                  sync.Mutex
+	rate, burst, tokens float64
+	last                time.Time
+}
+
+func nuevoCubo(rate, burst float64) *cubo {
+	return &cubo{rate: rate, burst: burst, tokens: burst, last: time.Now()}
+}
+
+func (b *cubo) permite() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	if d := now.Sub(b.last).Seconds(); d > 0 {
+		b.tokens = min(b.burst, b.tokens+d*b.rate)
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 // NewResolver usa el primer nameserver del host (lo que el Mac tiene
@@ -101,8 +195,8 @@ func (r *Resolver) Process(ctx context.Context, query []byte, viaTCP bool) []byt
 		// intento, y no sale nada del host.
 		return RespondError(query, 5)
 	}
-	resp, err := r.Exchange(ctx, query, viaTCP)
-	if err != nil || len(resp) < 12 {
+	resp, ok := r.reenviar(ctx, query, viaTCP)
+	if !ok {
 		return RespondError(query, 2) // SERVFAIL
 	}
 	if r.Policy.Mode() == Allowlist {
@@ -130,8 +224,9 @@ func (r *Resolver) PublicIPv4(ctx context.Context, host string) []string {
 	if q == nil {
 		return nil
 	}
-	resp, err := r.Exchange(ctx, q, false)
-	if err != nil {
+	// Lo pide el proxy por cada petición del invitado: los mismos topes.
+	resp, ok := r.reenviar(ctx, q, false)
+	if !ok {
 		return nil
 	}
 	var out []string
@@ -157,7 +252,7 @@ func (r *Resolver) SeedStatic(ctx context.Context) {
 			continue
 		}
 		resp, err := r.Exchange(ctx, q, false)
-		if err != nil {
+		if err != nil || !ResponseMatches(q, resp) {
 			continue // falla CERRADO: sin IP, el dominio no se abre
 		}
 		for _, rec := range ExtractA(resp) {
