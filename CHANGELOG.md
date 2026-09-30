@@ -109,6 +109,15 @@ y [`ext/sandbox/CHANGELOG.md`](ext/sandbox/CHANGELOG.md).
 - **`kling db ask` con opencode pasa el prompt por stdin.** Esquema y pregunta iban en
   el argv de `opencode run` (visibles con `ps` para cualquier usuario del equipo) hasta
   100 KiB; ahora van siempre por stdin, también los grandes (sin fichero adjunto).
+- **`kling mcp image -bundle` ya no ejecuta esbuild sin fijar ni deja inyectar
+  órdenes como root en el host.** `80-mcp-image.sh` corría `npx --yes esbuild` en el
+  chroot del host (versión cualquiera y con sus scripts de instalación activos, justo
+  lo que el `--ignore-scripts` del resto prohíbe) y metía la ruta del entry entre
+  comillas simples en un `sh -c`: una ruta con `'` ejecutaba lo que llevara. Ahora baja
+  solo el binario nativo de `@esbuild/linux-<arch>` 0.25.10, comprueba su sha512
+  contra el fijado en el script (`ESBUILD_TGZ` para un tarball local), lo ejecuta sin
+  shell con la ruta como argumento, y la ruta tiene que ser absoluta y de caracteres
+  de ruta (también en `ValidateBuild`).
 - **El gateway MCP agregado lee con tope las respuestas del invitado.** `tools/list`,
   las llamadas a herramientas, los enlaces, las efímeras y la memoria leían el cuerpo
   entero a memoria: un servidor MCP comprometido tumbaba el gateway compartido. Ahora

@@ -115,7 +115,7 @@ func TestBuildScriptBundleCopiaPackageJSON(t *testing.T) {
 	if i == -1 {
 		t.Fatal("80-mcp-image.sh ya no escribe el bundle en /opt/$NAME.bundle.mjs; revisa este test y la copia del package.json")
 	}
-	// La copia va DESPUÉS de esbuild (para que npx no tome /opt por un proyecto) y
+	// La copia va DESPUÉS de esbuild (para que no tome /opt por un proyecto) y
 	// ANTES de que CMD pase a apuntar al bundle.
 	j := strings.Index(s[i:], `CMD=(node "/opt/$NAME.bundle.mjs"`)
 	if j == -1 {

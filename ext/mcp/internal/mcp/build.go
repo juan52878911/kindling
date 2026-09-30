@@ -69,6 +69,10 @@ var (
 	// saltos de línea y NUL: el script la escribe en el entrypoint entrecomillada,
 	// así que el resto viaja inerte, pero un salto de línea partiría otras cosas.
 	reEnv = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[^\x00\r\n]*$`)
+	// Entry JS de -bundle (el fichero que empaqueta esbuild como root en el
+	// chroot del host): ruta absoluta con caracteres de ruta. La misma lista que
+	// valid_entry en 80-mcp-image.sh.
+	reBundleEntry = regexp.MustCompile(`^/[A-Za-z0-9._@+/-]*$`)
 )
 
 // ValidateBuild comprueba la petición antes de que nada llegue a un shell.
@@ -105,6 +109,14 @@ func ValidateBuild(r BuildRequest) error {
 	for _, a := range r.Cmd {
 		if strings.ContainsAny(a, "\x00\n\r") {
 			return fmt.Errorf("the command can't contain newlines or null bytes")
+		}
+	}
+	if r.Bundle && len(r.Cmd) >= 2 {
+		switch r.Cmd[0] {
+		case "node", "/usr/bin/node", "/usr/local/bin/node":
+			if !reBundleEntry.MatchString(r.Cmd[1]) {
+				return fmt.Errorf("with bundle, the JS file after node must be an absolute path of letters, digits and ._@+/-: %q", r.Cmd[1])
+			}
 		}
 	}
 	if r.GrowMB < 0 || r.GrowMB > 8192 {
